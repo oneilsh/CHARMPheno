@@ -40,7 +40,9 @@ test:
 test-all:
 	@if [ -d spark-vi ]; then $(MAKE) -C spark-vi test-all; fi
 	@if [ -d charmpheno ]; then $(MAKE) -C charmpheno test-all; fi
-	@if [ -d tests/integration ]; then poetry run pytest tests/integration -v -m "not cluster"; fi
+	@if [ -d tests/integration ]; then \
+		cd charmpheno && JAVA_HOME=$$(if [ -d /opt/homebrew/opt/openjdk@17 ]; then echo /opt/homebrew/opt/openjdk@17; elif [ -d /usr/lib/jvm/java-17-openjdk-amd64 ]; then echo /usr/lib/jvm/java-17-openjdk-amd64; fi) poetry run pytest ../tests/integration -v -m "not cluster"; \
+	fi
 
 test-cluster:
 	@if [ -d tests/integration ]; then poetry run pytest tests/integration -v -m cluster; fi
