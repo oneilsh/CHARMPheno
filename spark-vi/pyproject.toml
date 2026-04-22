@@ -1,0 +1,35 @@
+[tool.poetry]
+name = "spark-vi"
+version = "0.1.0"
+description = "PySpark-native framework for distributed variational inference"
+authors = ["CHARMPheno contributors"]
+license = "MIT"
+readme = "README.md"
+packages = [{include = "spark_vi"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+pyspark = ">=3.5,<4.0"
+numpy = ">=1.24"
+scipy = ">=1.10"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.0"
+build = ">=1.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+markers = [
+    "slow: integration tests (simulator data, local Spark, minutes-scale)",
+    "cluster: tests that require a real Dataproc cluster (manual only)",
+]
+addopts = "-m 'not slow and not cluster'"
+filterwarnings = [
+    "ignore::ResourceWarning",
+    "ignore:distutils Version classes are deprecated:DeprecationWarning",
+]
