@@ -1,0 +1,22 @@
+repos:
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.7.1
+    hooks:
+      - id: nbstripout
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=1024']
+
+  - repo: local
+    hooks:
+      - id: no-data-files-outside-tests
+        name: Prevent data files outside tests/*/data/ or docs/
+        entry: scripts/check_no_data_files.sh
+        language: script
+        files: '\.(parquet|csv|feather|arrow|npz)$'
