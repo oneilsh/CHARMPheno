@@ -47,6 +47,7 @@ spark-warehouse/
 
 # Generated data — never in repo
 data/
+!**/tests/data/
 !tests/*/data/
 
 # Free-form exploratory notebooks
