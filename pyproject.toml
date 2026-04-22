@@ -24,3 +24,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+    "slow: integration tests with minutes-scale local Spark (run via make test-all)",
+    "cluster: tests that require a real Dataproc cluster (manual only)",
+]

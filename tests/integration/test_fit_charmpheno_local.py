@@ -17,7 +17,7 @@ sys.path.insert(0, str(REPO_ROOT / "analysis" / "local"))
 
 
 @pytest.mark.slow
-def test_fit_charmpheno_local_smoke_runs(spark, tmp_path):
+def test_fit_charmpheno_local_smoke_runs(tmp_path):
     # Arrange: generate a tiny synthetic parquet on the fly so the test is
     # hermetic (doesn't depend on an earlier `make data` invocation).
     import pandas as pd
@@ -47,4 +47,4 @@ def test_fit_charmpheno_local_smoke_runs(spark, tmp_path):
     assert result.n_iterations == 3
     assert len(result.elbo_trace) == 3
     # CountingModel's posterior counts should have moved past the prior.
-    assert float(result.global_params["alpha"]) > 1.0
+    assert float(result.global_params["alpha"]) > 2.0

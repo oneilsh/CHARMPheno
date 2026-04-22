@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
 from pathlib import Path
 
 from pyspark.sql import SparkSession
@@ -46,8 +45,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True,
                         help="Output directory for the saved VIResult")
     parser.add_argument("--max-iterations", type=int, default=5)
-    parser.add_argument("--spark", type=str, default=None,
-                        help="Optional externally-provided SparkSession (unused from CLI)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
