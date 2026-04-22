@@ -5,7 +5,7 @@ set -euo pipefail
 status=0
 for f in "$@"; do
   case "$f" in
-    tests/*/data/*|docs/*)
+    tests/*/data/*|*/tests/data/*|*/tests/*/data/*|docs/*)
       # allowed
       ;;
     *)
