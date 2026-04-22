@@ -1,0 +1,40 @@
+[tool.poetry]
+name = "charmpheno"
+version = "0.1.0"
+description = "Computational phenotyping on PySpark using Bayesian topic models"
+authors = ["CHARMPheno contributors"]
+license = "MIT"
+readme = "README.md"
+packages = [{include = "charmpheno"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+pyspark = ">=3.5,<4.0"
+numpy = ">=1.24"
+pandas = ">=2.0"
+pyarrow = ">=15.0"
+# spark-vi is path-installed editable during dev; see Makefile.
+# In a published release, this becomes: spark-vi = ">=0.1,<0.2"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.0"
+build = ">=1.0"
+
+[tool.poetry.extras]
+bigquery = ["google-cloud-bigquery"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+markers = [
+    "slow: integration tests (simulator data, local Spark, minutes-scale)",
+    "cluster: tests that require a real Dataproc cluster (manual only)",
+]
+addopts = "-m 'not slow and not cluster'"
+filterwarnings = [
+    "ignore::ResourceWarning",
+]
