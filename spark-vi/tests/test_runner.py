@@ -29,8 +29,13 @@ def test_vi_runner_fits_counting_model_end_to_end(spark):
     assert len(result.elbo_trace) == 5
 
 
-def test_vi_runner_stops_on_convergence(spark):
-    """A wide convergence tolerance should trigger early stop."""
+def test_vi_runner_early_stop_branch_triggers(spark):
+    """An absurdly wide convergence tolerance should trigger the early-stop branch.
+
+    This doesn't exercise a realistic convergence criterion; it only proves that
+    the converged-return path of VIRunner.fit is reachable and populates the
+    VIResult correctly (converged=True, n_iterations < max, elbo_trace matches).
+    """
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.counting import CountingModel
 
@@ -43,6 +48,31 @@ def test_vi_runner_stops_on_convergence(spark):
     result = runner.fit(rdd)
     assert result.converged is True
     assert result.n_iterations < 100
+    # n_iterations should equal the length of the ELBO trace recorded so far,
+    # i.e., the result is internally consistent rather than a stale leftover.
+    assert result.n_iterations == len(result.elbo_trace)
+    assert result.n_iterations >= 1
+
+
+def test_vi_runner_runs_to_max_iterations_without_convergence(spark):
+    """With a tight tolerance, the runner should exhaust max_iterations.
+
+    Exercises the other branch of the loop: no early-stop, converged=False,
+    n_iterations == max_iterations.
+    """
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.models.counting import CountingModel
+
+    rdd = spark.sparkContext.parallelize([1] * 100 + [0] * 100, numSlices=4)
+    model = CountingModel()
+    runner = VIRunner(
+        model=model,
+        config=VIConfig(max_iterations=3, convergence_tol=1e-10),
+    )
+    result = runner.fit(rdd)
+    assert result.converged is False
+    assert result.n_iterations == 3
+    assert len(result.elbo_trace) == 3
 
 
 def test_vi_runner_rejects_non_vi_model(spark):

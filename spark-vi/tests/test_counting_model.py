@@ -92,6 +92,9 @@ def test_counting_model_elbo_is_increasing_with_more_data():
                         learning_rate=1.0)
     elbo1 = m.compute_elbo(g, {"heads": np.array(30.0), "tails": np.array(10.0)})
     assert np.isfinite(elbo0) and np.isfinite(elbo1)
+    # Under CountingModel's surrogate ELBO, concentration from (1,1) -> (31,11)
+    # strictly increases the score (the (a+b) term dominates the -betaln term).
+    assert elbo1 > elbo0
 
 
 def test_counting_model_required_methods_surface_on_base():
