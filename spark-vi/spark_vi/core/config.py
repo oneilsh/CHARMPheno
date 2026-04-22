@@ -15,7 +15,11 @@ class VIConfig:
 
     Attributes:
         max_iterations: hard upper bound on training iterations.
-        learning_rate_tau0: delay parameter in rho_t = (tau0 + t)^-kappa.
+        learning_rate_tau0: delay parameter in rho_t = (tau0 + t)^-kappa, where
+            t indexes iterations from 1 per Hoffman et al. 2013. The runner
+            indexes iterations from 0 internally, so it evaluates the
+            equivalent (tau0 + t + 1)^-kappa; both forms yield the same step
+            sizes.
         learning_rate_kappa: decay exponent; must be in (0.5, 1].
         convergence_tol: relative ELBO improvement threshold for early stop.
         checkpoint_interval: if set, write checkpoint every N iterations.

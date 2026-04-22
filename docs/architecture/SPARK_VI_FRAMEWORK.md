@@ -354,11 +354,14 @@ class VIConfig:
 The default learning rate follows the Robbins-Monro schedule:
 
 $$
-\rho_t = (\tau + t)^{-\kappa}
+\rho_t = (\tau_0 + t)^{-\kappa}
 $$
 
-which satisfies $\sum_t \rho_t = \infty$ and $\sum_t \rho_t^2 < \infty$, guaranteeing
-convergence of the stochastic natural gradient (Hoffman et al., 2013).
+with $t \in \{1, 2, \ldots\}$ (Hoffman et al., 2013). The implementation indexes
+iterations from 0, so it equivalently computes $\rho_t = (\tau_0 + t + 1)^{-\kappa}$
+with $t \in \{0, 1, \ldots\}$; both forms produce the same sequence of step sizes.
+The schedule satisfies $\sum_t \rho_t = \infty$ and $\sum_t \rho_t^2 < \infty$,
+guaranteeing convergence of the stochastic natural gradient.
 
 ### VIResult and Model Export
 
