@@ -1,0 +1,107 @@
+"""VIModel: the base class model authors subclass.
+
+See docs/architecture/SPARK_VI_FRAMEWORK.md#the-vimodel-base-class for the
+contract's design rationale. The three required methods correspond to the
+three slots in the standard distributed VI iteration:
+
+    lambda_{t+1} = (1 - rho_t) * lambda_t  +  rho_t * lambda_hat(sum_p s_p)
+    ^--- update_global                        ^--- aggregated local_updates
+"""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Any, Iterable
+
+import numpy as np
+
+
+class VIModel(ABC):
+    """Base class for models fittable by VIRunner.
+
+    Subclasses implement initialize_global, local_update, and update_global.
+    Optional hooks — combine_stats, compute_elbo, has_converged — have
+    sensible defaults.
+    """
+
+    @abstractmethod
+    def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
+        """Return starting values of the global variational parameters.
+
+        data_summary: optional model-defined summary produced by the framework
+            in a pre-pass (e.g., vocabulary size). Models that need nothing
+            can ignore this argument.
+        """
+
+    @abstractmethod
+    def local_update(
+        self,
+        rows: Iterable[Any],
+        global_params: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """E-step on one data partition.
+
+        rows: iterable over the partition's local rows.
+        global_params: current global variational parameters.
+        returns: dict of additive sufficient statistics (or gradient contributions).
+        """
+
+    @abstractmethod
+    def update_global(
+        self,
+        global_params: dict[str, np.ndarray],
+        aggregated_stats: dict[str, np.ndarray],
+        learning_rate: float,
+    ) -> dict[str, np.ndarray]:
+        """M-step: apply the natural-gradient update with stepsize rho_t."""
+
+    # Optional overrides ----------------------------------------------------
+
+    def combine_stats(
+        self,
+        a: dict[str, np.ndarray],
+        b: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """Elementwise-sum two sufficient-statistic dicts.
+
+        Default implementation is correct for models whose statistics live
+        in dense NumPy arrays (most exponential-family VI models). Override
+        for sparse or structured statistics (see RISKS_AND_MITIGATIONS.md).
+        """
+        keys = set(a) | set(b)
+        out: dict[str, np.ndarray] = {}
+        for k in keys:
+            if k in a and k in b:
+                out[k] = np.asarray(a[k]) + np.asarray(b[k])
+            elif k in a:
+                out[k] = np.asarray(a[k])
+            else:
+                out[k] = np.asarray(b[k])
+        return out
+
+    def compute_elbo(
+        self,
+        global_params: dict[str, np.ndarray],
+        aggregated_stats: dict[str, np.ndarray],
+    ) -> float:
+        """ELBO surrogate for diagnostics; override for a real bound.
+
+        Default returns NaN, which callers treat as 'ELBO not available'.
+        """
+        return float("nan")
+
+    def has_converged(
+        self,
+        elbo_trace: list[float],
+        convergence_tol: float,
+    ) -> bool:
+        """Default: converged when the relative ELBO improvement falls below tol.
+
+        Returns False until at least two finite ELBO values are present.
+        """
+        if len(elbo_trace) < 2:
+            return False
+        prev, curr = elbo_trace[-2], elbo_trace[-1]
+        if not (np.isfinite(prev) and np.isfinite(curr)):
+            return False
+        denom = max(abs(prev), 1e-12)
+        return abs(curr - prev) / denom < convergence_tol
