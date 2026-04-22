@@ -34,8 +34,18 @@ class VIRunner:
         self.model = model
         self.config = config if config is not None else VIConfig()
 
-    def fit(self, data_rdd: RDD, data_summary: Any | None = None) -> VIResult:
-        """Run the distributed VI loop until convergence or max_iterations."""
+    def fit(
+        self,
+        data_rdd: RDD,
+        data_summary: Any | None = None,
+        start_iteration: int = 0,
+    ) -> VIResult:
+        """Run the distributed VI loop until convergence or max_iterations.
+
+        start_iteration offsets the Robbins-Monro step counter for resumed
+        runs: after a checkpoint at iteration k, pass start_iteration=k so
+        the first post-resume rho matches what a continuous run would use.
+        """
         model = self.model
         cfg = self.config
 
@@ -45,7 +55,8 @@ class VIRunner:
         prior_bcast = None
         converged = False
 
-        for t in range(cfg.max_iterations):
+        for step in range(cfg.max_iterations):
+            t = start_iteration + step
             # 1. Broadcast current global params.
             bcast = sc.broadcast(global_params)
 
@@ -77,14 +88,14 @@ class VIRunner:
 
             if model.has_converged(elbo_trace, cfg.convergence_tol):
                 converged = True
-                log.info("Converged at iteration %d (ELBO=%.6f)", t + 1, elbo)
+                log.info("Converged at iteration %d (ELBO=%.6f)", step + 1, elbo)
                 # One-more unpersist for the final broadcast.
                 prior_bcast.unpersist(blocking=False)
                 prior_bcast = None
                 return VIResult(
                     global_params=global_params,
                     elbo_trace=elbo_trace,
-                    n_iterations=t + 1,
+                    n_iterations=step + 1,
                     converged=True,
                     metadata={"model_class": type(model).__name__},
                 )
