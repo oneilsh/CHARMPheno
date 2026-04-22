@@ -3,10 +3,10 @@
 Every loader in `charmpheno.omop` returns a Spark DataFrame with at least
 these four columns:
 
-    person_id:           int   — deidentified patient identifier
-    visit_occurrence_id: int   — identifier for one clinical encounter
-    concept_id:          int   — OMOP vocabulary concept id
-    concept_name:        str   — human-readable concept label
+    person_id:           int (Spark IntegerType or LongType) — deidentified patient identifier
+    visit_occurrence_id: int (Spark IntegerType or LongType) — identifier for one clinical encounter
+    concept_id:          int (Spark IntegerType or LongType) — OMOP vocabulary concept id
+    concept_name:        str — human-readable concept label
 
 Additional columns (e.g. visit_date) may be present and are passed through
 unchanged. See docs/decisions/0003-explicit-omop-io.md for rationale.
@@ -23,11 +23,11 @@ CANONICAL_COLUMNS: tuple[str, ...] = (
     "concept_name",
 )
 
-_EXPECTED_TYPES: dict[str, type] = {
-    "person_id": T.IntegerType,
-    "visit_occurrence_id": T.IntegerType,
-    "concept_id": T.IntegerType,
-    "concept_name": T.StringType,
+_EXPECTED_TYPES: dict[str, tuple[type, ...]] = {
+    "person_id":           (T.IntegerType, T.LongType),
+    "visit_occurrence_id": (T.IntegerType, T.LongType),
+    "concept_id":          (T.IntegerType, T.LongType),
+    "concept_name":        (T.StringType,),
 }
 
 
@@ -40,10 +40,11 @@ def validate(df: DataFrame) -> None:
     missing = [c for c in CANONICAL_COLUMNS if c not in schema]
     if missing:
         raise ValueError(f"OMOP DataFrame is missing required column(s): {missing}")
-    for col, expected in _EXPECTED_TYPES.items():
+    for col, expected_types in _EXPECTED_TYPES.items():
         actual = schema[col]
-        if not issubclass(actual, expected):
+        if not issubclass(actual, expected_types):
+            allowed = " or ".join(t.__name__ for t in expected_types)
             raise ValueError(
                 f"OMOP column {col!r} has wrong type: "
-                f"expected {expected.__name__}, got {actual.__name__}"
+                f"expected {allowed}, got {actual.__name__}"
             )

@@ -38,8 +38,19 @@ def test_validate_rejects_wrong_type(spark):
         [("not-an-int", 100, 5, "diabetes")],
         schema="person_id STRING, visit_occurrence_id INT, concept_id INT, concept_name STRING",
     )
-    with pytest.raises(ValueError, match="person_id.*STRING|person_id.*type"):
+    with pytest.raises(ValueError, match=r"person_id.*wrong type.*StringType"):
         validate(df)
+
+
+def test_validate_accepts_long_int_columns(spark):
+    """BigQuery/pandas-default int columns arrive as LongType — must validate."""
+    from charmpheno.omop.schema import validate
+
+    df = spark.createDataFrame(
+        [(1, 100, 5, "diabetes"), (2, 101, 6, "asthma")],
+        schema="person_id LONG, visit_occurrence_id LONG, concept_id LONG, concept_name STRING",
+    )
+    validate(df)  # must not raise
 
 
 def test_validate_allows_extra_columns_by_default(spark):
