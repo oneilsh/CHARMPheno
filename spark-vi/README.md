@@ -33,3 +33,5 @@ make zip           # dist/spark_vi.zip (flat, pure-Python; for --py-files)
 Requires Java 17 for local Spark. The Makefile autodetects Homebrew
 (`/opt/homebrew/opt/openjdk@17`) and common Linux paths; override with
 `JAVA_HOME=... make test` if needed.
+
+--------
