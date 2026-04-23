@@ -3,8 +3,8 @@
 default: help
 
 JAVA_HOME_MACOS := /opt/homebrew/opt/openjdk@17
-JAVA_HOME_LINUX := /usr/lib/jvm/java-17-openjdk-amd64
-JAVA_HOME ?= $(shell if [ -d "$(JAVA_HOME_MACOS)" ]; then echo "$(JAVA_HOME_MACOS)"; elif [ -d "$(JAVA_HOME_LINUX)" ]; then echo "$(JAVA_HOME_LINUX)"; fi)
+JAVA_HOME_LINUX_CANDIDATES := /usr/lib/jvm/temurin-17-jdk-amd64 /usr/lib/jvm/java-17-openjdk-amd64
+JAVA_HOME := $(shell if [ -d "$(JAVA_HOME_MACOS)" ]; then echo "$(JAVA_HOME_MACOS)"; else for d in $(JAVA_HOME_LINUX_CANDIDATES); do if [ -d "$$d" ]; then echo "$$d"; break; fi; done; fi)
 
 help:
 	@echo "spark-vi common targets:"
