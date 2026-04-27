@@ -1131,6 +1131,30 @@ would combine the HDP variational E-step with an OU-coupled prior over the topic
 proportions. This is a substantial research contribution in its own right and should
 only be attempted after validating the two-stage pipeline on real data.
 
+A discrete-time stepping stone within the existing framework is **patient-as-partition
+with explicit between-window coupling**. Rather than treating each visit as an
+independent document, the data is partitioned by patient and each patient is treated as
+a sequence of windowed bags of codes (e.g., pre- vs. post-event, or fixed time bins).
+For two windows, the simplest coupling is a conditional Dirichlet prior on the
+post-window mix given the pre-window mix:
+
+$$\theta_p^{\text{after}} \mid \theta_p^{\text{before}} \sim \text{Dirichlet}\!\left(\alpha + \kappa \cdot \theta_p^{\text{before}}\right)$$
+
+with coupling strength $\kappa$ either fixed or itself a learned global parameter. The
+local update operates on the patient as a unit, and — to capture the prior's coupling
+in the posterior — the variational $q$ over a patient's $\theta$ trajectory should
+retain joint structure rather than fully factorizing into independent per-window
+factors (a structured-$q$-within-a-partition pattern that the spark-vi
+`local_update` contract already supports). Sufficient statistics for the global
+$\beta$ continue to aggregate by summation across patients; only the within-patient
+inference becomes more elaborate. This construction does not constitute the full joint
+HDP+OU contribution, but it would surface whether dynamics-coupled topic estimation
+produces materially different phenotype recovery from the two-stage decoupled
+approach. Whether to invest in it ahead of (or instead of) the full continuous-time
+joint depends on whether discrete pre/post coupling is the dominant temporal signal
+in the target cohort or whether the multi-window continuous-time structure that OU
+naturally captures is essential.
+
 ### Compositional Outcome Association for High-Dimensional Phenotype Profiles
 
 A natural downstream use of per-patient phenotype profiles is outcome association:
@@ -1239,6 +1263,21 @@ at the cost of a larger and more heterogeneous feature space for the HDP.
   P. C., & Jaakkimainen, L. (2022). Comparison of Methods for Estimating Temporal
   Topic Models From Primary Care Clinical Text Data. *JMIR Medical Informatics*.
   [doi](https://doi.org/10.2196/40102)
+
+- **EHR topic modeling systematic review.** Mehmood, I., Zahra, Z., Iqbal, S.,
+  Qahmash, A., & Hussain, I. (2026). A Systematic Review of Topic Modeling
+  Techniques for Electronic Health Records. *Healthcare*, 14(2), 282. Reviews 79
+  publications (2015–2025) with a taxonomy spanning probabilistic, matrix
+  factorization, neural, transfer-learning, and temporal-extension methods.
+  [doi](https://doi.org/10.3390/healthcare14020282)
+
+- **Healthcare topic modeling review.** Kumari, P., Kadian, S., Vora, M., Vemuri, P.,
+  Kumar, S., Verma, O. P., & Narayan, R. J. (2026). Recent Advancements in Topic
+  Modeling Techniques for Healthcare, Bioinformatics, and Other Potential
+  Applications. *Advanced Intelligent Systems*. Surveys NMF, LDA, LSA, pLSA,
+  Top2Vec, and BERTopic, including extensions via sentence-level embeddings and
+  fuzzy logic for redundancy/sparsity mitigation.
+  [doi](https://doi.org/10.1002/aisy.202400528)
 
 ### Individual Clinical Trajectory Modeling
 
