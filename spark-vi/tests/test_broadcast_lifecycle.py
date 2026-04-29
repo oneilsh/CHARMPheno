@@ -1,6 +1,12 @@
 """Ensure VIRunner unpersists prior broadcasts (prevents OOM in long runs).
 
-See docs/architecture/RISKS_AND_MITIGATIONS.md §Broadcast lifecycle.
+Strategy: wrap each broadcast in a transparent proxy that records its own
+unpersist() calls. The runner sees and uses real Spark broadcasts; the wrapper
+only adds an observation side-channel. We then assert the exact unpersist
+count for each terminal branch (max-iterations vs convergence) of fit().
+
+See docs/architecture/RISKS_AND_MITIGATIONS.md §Broadcast lifecycle for the
+failure mode this guards against.
 """
 from unittest.mock import patch
 
@@ -14,15 +20,26 @@ def _run_with_broadcast_tracking(spark, cfg):
     model = CountingModel()
     runner = VIRunner(model=model, config=cfg)
 
+    # Capture the real broadcast method *before* patching, so the wrapper can
+    # delegate to the original. Without this, _wrapping_broadcast would call
+    # the patched method recursively.
     real_broadcast = spark.sparkContext.broadcast
     unpersist_calls = []
 
     class _WrappedBcast:
+        """Transparent proxy: forwards .value to the real broadcast and only
+        adds an observation hook to unpersist(). The runner cannot tell it
+        apart from a real Broadcast object — important so we exercise the
+        real broadcast lifecycle, not a mock substitute.
+        """
+
         def __init__(self, inner):
             self._inner = inner
+
         @property
         def value(self):
             return self._inner.value
+
         def unpersist(self, blocking=False):
             unpersist_calls.append(self._inner)
             return self._inner.unpersist(blocking=blocking)
@@ -31,6 +48,7 @@ def _run_with_broadcast_tracking(spark, cfg):
         inner = real_broadcast(value)
         return _WrappedBcast(inner)
 
+    # Scoped patch: reverted on context exit even if the test fails.
     with patch.object(spark.sparkContext, "broadcast", side_effect=_wrapping_broadcast):
         result = runner.fit(rdd)
 
@@ -40,9 +58,15 @@ def _run_with_broadcast_tracking(spark, cfg):
 def test_vi_runner_unpersists_prior_broadcasts_max_iterations_path(spark):
     """Full-loop path: max_iterations=4 with tight tol produces exactly 4 unpersist calls.
 
-    Semantics per runner.py: each iteration after the first unpersists the
-    previous iteration's broadcast (3 swaps across 4 iterations), and the
-    final return-site cleanup unpersists the last broadcast (+1). Total = 4.
+    Counting math: each iteration creates one broadcast (4 total). The runner's
+    "unpersist the *previous* one at the start of cleanup" pattern produces 3
+    mid-loop unpersists across 4 iterations (iter 2 frees iter 1's, iter 3
+    frees iter 2's, iter 4 frees iter 3's). The max-iter terminal branch in
+    runner.py then frees the final broadcast (+1). Total = 4.
+
+    If a future change removes either the mid-loop unpersist or the terminal
+    one, this count will break — surfacing the leak before it manifests as
+    OOM in production runs of 100+ iterations.
     """
     from spark_vi.core import VIConfig
 
@@ -60,8 +84,13 @@ def test_vi_runner_unpersists_prior_broadcasts_max_iterations_path(spark):
 def test_vi_runner_unpersists_prior_broadcasts_convergence_path(spark):
     """Early-stop path: wide tol converges on iteration 2 with exactly 2 unpersist calls.
 
-    The convergence-return branch must also clean up: 1 mid-loop swap from
-    iteration 2 + 1 final cleanup before the converged return = 2.
+    Counterpart to the max-iterations test above: the convergence-return
+    branch is a *separate* return site in runner.fit() and must independently
+    perform the terminal unpersist. Loose tol forces convergence after iter 2:
+    1 mid-loop unpersist (iter 2 frees iter 1's) + 1 terminal cleanup before
+    the converged-return = 2.
+
+    Together, the two tests pin down that *both* terminal branches clean up.
     """
     from spark_vi.core import VIConfig
 
