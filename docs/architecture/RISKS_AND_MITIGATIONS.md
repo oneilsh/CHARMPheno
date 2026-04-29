@@ -55,6 +55,26 @@ statistics and fits the contract naturally.
 **Mitigation:** Either override `combine_stats` for sparse models, or use scipy sparse
 matrices that support addition. A minor contract clarification, not a redesign.
 
+### Partition-stats aggregation
+
+**Risk:** Naively pulling all per-partition outputs to the driver via `RDD.collect()`
+puts driver memory under pressure proportional to `N_partitions × per_partition_size`.
+For an HDP-scale `(K, V)` matrix at ~84 MB across 10 partitions, that is ~840 MB on
+the driver — marginal at typical Spark driver sizes (1 GB) and infeasible on smaller
+drivers.
+
+**Impact:** OOM on the driver during long runs at production scale; silent slowness
+even when memory does not run out (the driver-side fold is single-threaded Python
+arithmetic over potentially many partition outputs).
+
+**Mitigation:** `VIRunner` uses `RDD.treeReduce(model.combine_stats)` rather than
+`collect()` + driver-side fold. Driver memory is bounded by a single merged stats
+dict rather than the sum of all partition outputs; the reduction itself happens
+cluster-side in `O(log N_partitions)` rounds. This matches MLlib `OnlineLDAOptimizer`'s
+`treeAggregate` pattern. Custom `combine_stats` implementations must remain
+associative and commutative — the existing contract requirement for additive
+sufficient statistics.
+
 ### Broadcast lifecycle
 
 **Risk:** Each iteration creates a new Spark broadcast variable (~84MB for HDP at

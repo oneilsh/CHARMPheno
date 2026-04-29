@@ -5,14 +5,16 @@ Each iteration executes the canonical distributed-VI step:
     1. Optionally sample a mini-batch from the input RDD (with replacement).
     2. Broadcast current global params to all partitions.
     3. mapPartitions: each worker runs model.local_update and emits stats.
-    4. treeAggregate: sum stats across partitions (via model.combine_stats).
+    4. treeReduce: tree-shaped sum of stats across partitions
+       (via model.combine_stats), keeping driver memory bounded to a single
+       per-partition stats dict rather than the sum of all of them.
     5. Driver: pre-scale the aggregated stats to a corpus-equivalent target
        (corpus_size / batch_size) when in mini-batch mode, then call
        model.update_global with Robbins-Monro learning rate.
     6. Record ELBO (raw, not pre-scaled); test convergence.
 
-The MLlib `OnlineLDAOptimizer` uses an identical pattern; see
-docs/architecture/SPARK_VI_FRAMEWORK.md and
+The MLlib `OnlineLDAOptimizer` uses an equivalent pattern (with
+treeAggregate); see docs/architecture/SPARK_VI_FRAMEWORK.md and
 docs/decisions/0005-mini-batch-sampling.md for references.
 """
 from __future__ import annotations
@@ -102,10 +104,11 @@ class VIRunner:
             def _local(rows, _bcast=bcast, _model=model):
                 return [_model.local_update(rows, _bcast.value)]
 
-            stats_seq = batch_rdd.mapPartitions(_local).collect()
-            aggregated = stats_seq[0]
-            for more in stats_seq[1:]:
-                aggregated = model.combine_stats(aggregated, more)
+            # treeReduce is the tree-shaped tree-aggregate; driver memory holds
+            # one merged stats dict, not the per-partition list. Requires
+            # combine_stats to be associative + commutative (already required
+            # by the VIModel contract for additive sufficient statistics).
+            aggregated = batch_rdd.mapPartitions(_local).treeReduce(model.combine_stats)
 
             # 5. Pre-scale aggregated stats to form the natural-gradient target.
             # In mini-batch mode this multiplies each ndarray by corpus / batch

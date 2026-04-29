@@ -340,7 +340,9 @@ result = runner.fit(df, **data_kwargs)
 2. Broadcast `global_params` to all workers
 3. `mapPartitions` $\rightarrow$ `model.local_update` $\rightarrow$ collect
    sufficient stats
-4. `treeAggregate` with `model.combine_stats` (default: elementwise sum)
+4. `treeAggregate` with `model.combine_stats` (default: elementwise sum). Implemented
+   in PySpark via `RDD.treeReduce(model.combine_stats)` — equivalent to `treeAggregate`
+   for our associative + commutative combiner, with a slightly simpler API.
 5. Pre-scale aggregated stats by `stats_scale` to form `target_stats`; the raw
    aggregated stats are also retained for ELBO computation.
 6. `model.update_global(global_params, target_stats, learning_rate)` on driver
