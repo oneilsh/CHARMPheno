@@ -2,21 +2,26 @@
 
 Each iteration executes the canonical distributed-VI step:
 
-    1. Broadcast current global params to all partitions.
-    2. mapPartitions: each worker runs model.local_update and emits stats.
-    3. treeAggregate: sum stats across partitions (via model.combine_stats).
-    4. Driver: model.update_global with Robbins-Monro learning rate.
-    5. Record ELBO; test convergence.
+    1. Optionally sample a mini-batch from the input RDD (with replacement).
+    2. Broadcast current global params to all partitions.
+    3. mapPartitions: each worker runs model.local_update and emits stats.
+    4. treeAggregate: sum stats across partitions (via model.combine_stats).
+    5. Driver: pre-scale the aggregated stats to a corpus-equivalent target
+       (corpus_size / batch_size) when in mini-batch mode, then call
+       model.update_global with Robbins-Monro learning rate.
+    6. Record ELBO (raw, not pre-scaled); test convergence.
 
 The MLlib `OnlineLDAOptimizer` uses an identical pattern; see
-docs/architecture/SPARK_VI_FRAMEWORK.md for references.
+docs/architecture/SPARK_VI_FRAMEWORK.md and
+docs/decisions/0005-mini-batch-sampling.md for references.
 """
 from __future__ import annotations
 
 import logging
+import random
 from typing import Any
 
-from pyspark import RDD
+from pyspark import RDD, StorageLevel
 
 from spark_vi.core.config import VIConfig
 from spark_vi.core.model import VIModel
@@ -55,28 +60,73 @@ class VIRunner:
         prior_bcast = None
         converged = False
 
+        # If mini-batching is enabled, count the corpus once and seed the RNG
+        # used to derive per-iteration sample seeds. corpus_size matches the
+        # MLlib OnlineLDAOptimizer convention of using corpus_size / batch_size
+        # as the natural-gradient scale.
+        if cfg.mini_batch_fraction is not None:
+            corpus_size = data_rdd.count()
+            rng = random.Random(cfg.random_seed)
+        else:
+            corpus_size = None
+            rng = None
+
         for step in range(cfg.max_iterations):
             t = start_iteration + step
-            # 1. Broadcast current global params.
+
+            # 1. Sample a mini-batch (or use the full RDD).
+            if cfg.mini_batch_fraction is not None:
+                batch_rdd = data_rdd.sample(
+                    withReplacement=cfg.sample_with_replacement,
+                    fraction=cfg.mini_batch_fraction,
+                    seed=rng.randint(0, 2 ** 31 - 1),
+                )
+                # Cache the sampled RDD so count() and mapPartitions don't each
+                # recompute the sample lineage. Without persistence, sampling
+                # would be triggered twice per iteration.
+                batch_rdd = batch_rdd.persist(StorageLevel.MEMORY_AND_DISK)
+                batch_size = batch_rdd.count()
+                if batch_size == 0:
+                    batch_rdd.unpersist(blocking=False)
+                    log.info("Iteration %d skipped: empty mini-batch", step + 1)
+                    continue
+                stats_scale = float(corpus_size) / float(batch_size)
+            else:
+                batch_rdd = data_rdd
+                stats_scale = 1.0
+
+            # 2. Broadcast current global params.
             bcast = sc.broadcast(global_params)
 
-            # 2 & 3. Distributed E-step + aggregate.
+            # 3 & 4. Distributed E-step + aggregate.
             def _local(rows, _bcast=bcast, _model=model):
                 return [_model.local_update(rows, _bcast.value)]
 
-            stats_seq = data_rdd.mapPartitions(_local).collect()
+            stats_seq = batch_rdd.mapPartitions(_local).collect()
             aggregated = stats_seq[0]
             for more in stats_seq[1:]:
                 aggregated = model.combine_stats(aggregated, more)
 
-            # 4. M-step (Robbins-Monro step size).
+            # 5. Pre-scale aggregated stats to form the natural-gradient target.
+            # In mini-batch mode this multiplies each ndarray by corpus / batch
+            # so the model's update_global sees an unbiased corpus-equivalent.
+            # In full-batch mode (stats_scale == 1.0) the dict is passed through
+            # unchanged.
+            if stats_scale != 1.0:
+                target_stats = {k: v * stats_scale for k, v in aggregated.items()}
+            else:
+                target_stats = aggregated
+
+            # M-step (Robbins-Monro step size).
             # Hoffman et al. 2013 index t from 1 so the first rho is (tau0+1)^-kappa
             # rather than (tau0)^-kappa — the latter can collapse to 1.0 and
             # force a full jump on the first step (see SVI paper §3).
             rho_t = (cfg.learning_rate_tau0 + t + 1) ** -cfg.learning_rate_kappa
-            global_params = model.update_global(global_params, aggregated, learning_rate=rho_t)
+            global_params = model.update_global(global_params, target_stats, learning_rate=rho_t)
 
-            # 5. ELBO + convergence.
+            # 6. ELBO + convergence. Pass the *raw* aggregated stats (not the
+            # pre-scaled target_stats) so ELBO terms representing observed
+            # data evidence stay correct.
             elbo = model.compute_elbo(global_params, aggregated)
             elbo_trace.append(float(elbo))
 
@@ -85,6 +135,10 @@ class VIRunner:
             if prior_bcast is not None:
                 prior_bcast.unpersist(blocking=False)
             prior_bcast = bcast
+
+            # Free the cached batch RDD before the next iteration's sample.
+            if cfg.mini_batch_fraction is not None:
+                batch_rdd.unpersist(blocking=False)
 
             if model.has_converged(elbo_trace, cfg.convergence_tol):
                 converged = True

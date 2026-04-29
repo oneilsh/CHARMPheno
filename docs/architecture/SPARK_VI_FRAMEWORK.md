@@ -213,15 +213,24 @@ Model authors subclass `VIModel` and implement:
   Whatever happens inside — one pass, iterative loop, local optimization — is the model
   author's business.
 
-- **`global_update(aggregated_stats, global_params, iteration, learning_rate) -> dict[str, np.ndarray]`** —
-  Called on the driver after aggregation. Receives the summed sufficient statistics,
-  current global parameters, and scheduling info. Returns updated global parameters.
+- **`update_global(global_params, target_stats, learning_rate) -> dict[str, np.ndarray]`** —
+  Called on the driver after aggregation. Receives the current global parameters, the
+  pre-scaled target sufficient statistics, and the Robbins-Monro learning rate.
+  Returns updated global parameters. The `target_stats` dict is the natural-gradient
+  target — a model should compute `lambda_hat = prior_natural_params + target_stats`
+  and interpolate against `global_params` via `learning_rate`. When the runner is in
+  mini-batch mode it has multiplied the raw aggregated stats by `corpus_size /
+  batch_size` so this same arithmetic produces an unbiased corpus-equivalent estimate;
+  in full-batch mode `target_stats` equals the raw aggregated stats. Models do not
+  need to know which mode is active.
 
 **Optional methods:**
 
-- **`compute_elbo_contribution(partition_data, global_params) -> float`** — If provided,
-  the framework uses this for ELBO-based convergence monitoring. If absent, convergence
-  is tracked by parameter change magnitude.
+- **`compute_elbo(global_params, aggregated_stats) -> float`** — If overridden, the
+  framework records this each iteration for ELBO-based convergence monitoring. The
+  `aggregated_stats` here are the *raw* aggregated sufficient statistics (not pre-scaled
+  to a corpus-level target), suitable for ELBO terms representing observed evidence.
+  Default returns NaN, which callers treat as "ELBO not available."
 
 - **`combine_stats(stats_a, stats_b) -> dict[str, np.ndarray]`** — Override if
   sufficient statistics don't aggregate by elementwise addition. Default: sum all
@@ -262,8 +271,8 @@ class OnlineHDP(VIModel):
         # Returns word-topic counts, stick counts, doc count
         ...
 
-    def global_update(self, aggregated_stats, global_params, iteration, learning_rate):
-        # Natural gradient update with learning rate
+    def update_global(self, global_params, target_stats, learning_rate):
+        # lambda_hat = prior + target_stats; interpolate against global_params.
         ...
 
     def print_topics(self, n_words=10, vocabulary=None):
@@ -323,14 +332,22 @@ result = runner.fit(df, **data_kwargs)
 
 **What `fit` does each iteration:**
 
-1. Broadcast `global_params` to all workers
-2. `mapPartitions` $\rightarrow$ `model.local_update` $\rightarrow$ collect
+1. If `mini_batch_fraction` is set, sample a fresh mini-batch from the input RDD
+   (with replacement by default; per-iteration seed derived from `random_seed`).
+   Cache the batch and call `count()` to obtain `batch_size`. If empty, skip to
+   the next iteration. Otherwise compute `stats_scale = corpus_size / batch_size`.
+   Otherwise (full-batch mode) `batch = full_rdd` and `stats_scale = 1.0`.
+2. Broadcast `global_params` to all workers
+3. `mapPartitions` $\rightarrow$ `model.local_update` $\rightarrow$ collect
    sufficient stats
-3. `treeAggregate` with `model.combine_stats` (default: elementwise sum)
-4. `model.global_update` on driver
-5. Log metrics (parameter deltas, ELBO if available, wall time)
-6. Push metrics to notebook display (or logger in batch mode)
-7. Check convergence, stop early if threshold met
+4. `treeAggregate` with `model.combine_stats` (default: elementwise sum)
+5. Pre-scale aggregated stats by `stats_scale` to form `target_stats`; the raw
+   aggregated stats are also retained for ELBO computation.
+6. `model.update_global(global_params, target_stats, learning_rate)` on driver
+7. `model.compute_elbo(global_params, aggregated_stats)` for diagnostics; log
+   metrics (parameter deltas, ELBO if available, wall time)
+8. Push metrics to notebook display (or logger in batch mode)
+9. Check convergence, stop early if threshold met
 
 **Output modes:**
 
@@ -344,12 +361,29 @@ result = runner.fit(df, **data_kwargs)
 Minimal training hyperparameters with sensible defaults:
 
 ```python
-@dataclass
+@dataclass(frozen=True)
 class VIConfig:
-    n_iterations: int = 100
-    learning_rate_schedule: Callable[[int], float] = robbins_monro(tau=1, kappa=0.7)
-    convergence_threshold: float = 1e-4
+    max_iterations: int = 100
+    learning_rate_tau0: float = 1.0
+    learning_rate_kappa: float = 0.7
+    convergence_tol: float = 1e-4
+    checkpoint_interval: int | None = None
+    mini_batch_fraction: float | None = None     # None → full-batch
+    sample_with_replacement: bool = True
+    random_seed: int | None = None
 ```
+
+**Mini-batch fields** (`mini_batch_fraction`, `sample_with_replacement`, `random_seed`)
+adopt the MLlib `OnlineLDAOptimizer` `subsamplingRate` pattern. With
+`mini_batch_fraction=f`, each iteration samples `RDD.sample(withReplacement=…,
+fraction=f, seed=…)` from the input. The runner discovers `corpus_size` once
+via `data_rdd.count()` at fit start; per-iteration `batch_size` comes from
+`batch.count()` (the batch RDD is cached between count and `mapPartitions` to
+avoid recomputing the sample). The natural-gradient target seen by
+`update_global` is pre-scaled by `corpus_size / batch_size`, matching MLlib's
+exact convention. With `mini_batch_fraction=None` (the default), the runner
+processes the full RDD every iteration and `stats_scale = 1.0`. See
+`docs/decisions/0005-mini-batch-sampling.md` for the design rationale.
 
 The default learning rate follows the Robbins-Monro schedule:
 
@@ -677,9 +711,13 @@ Framework recognizes mixins and adjusts orchestration accordingly.
 
 ### Stochastic Variational Inference
 
-`batch_fraction` parameter in `VIConfig` to subsample data each iteration. Enables
-stochastic VI (Hoffman et al., 2013) for datasets too large for full-pass iterations.
-Requires careful interaction with learning rate scheduling.
+**Implemented as of ADR 0005.** `VIConfig.mini_batch_fraction` subsamples the input
+RDD each iteration, with the runner pre-scaling aggregated stats by
+`corpus_size / batch_size` to form an unbiased natural-gradient target. Enables
+stochastic VI (Hoffman et al., 2013) for datasets too large for full-pass
+iterations. The Robbins-Monro decay schedule is principled in this regime; for
+full-batch models (`mini_batch_fraction=None`), step sizes still decay and
+eventually stall — see RISKS_AND_MITIGATIONS.md for the mitigation.
 
 ### ELBO Evaluation Scheduling and Checkpointing
 

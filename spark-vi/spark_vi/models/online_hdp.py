@@ -54,7 +54,7 @@ class OnlineHDP(VIModel):
     def update_global(
         self,
         global_params: dict[str, np.ndarray],
-        aggregated_stats: dict[str, np.ndarray],
+        target_stats: dict[str, np.ndarray],
         learning_rate: float,
     ) -> dict[str, np.ndarray]:
         raise NotImplementedError("OnlineHDP is stubbed during bootstrap.")

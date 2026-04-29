@@ -49,10 +49,20 @@ class VIModel(ABC):
     def update_global(
         self,
         global_params: dict[str, np.ndarray],
-        aggregated_stats: dict[str, np.ndarray],
+        target_stats: dict[str, np.ndarray],
         learning_rate: float,
     ) -> dict[str, np.ndarray]:
-        """M-step: apply the natural-gradient update with stepsize rho_t."""
+        """M-step: apply the natural-gradient update with stepsize rho_t.
+
+        target_stats are aggregated sufficient statistics already pre-scaled
+        to form the natural-gradient target. A model should compute
+        lambda_hat = prior_natural_params + target_stats and interpolate
+        against the current global_params via learning_rate. In mini-batch
+        mode the runner has multiplied by corpus_size / batch_size so the
+        same arithmetic produces an unbiased estimate of the full-corpus
+        target; in full-batch mode the values equal the raw aggregated stats.
+        Models do not need to know which mode is active.
+        """
 
     # Optional overrides ----------------------------------------------------
 
@@ -84,6 +94,11 @@ class VIModel(ABC):
         aggregated_stats: dict[str, np.ndarray],
     ) -> float:
         """ELBO surrogate for diagnostics; override for a real bound.
+
+        aggregated_stats here are the raw aggregated sufficient statistics
+        over the current iteration's data — not pre-scaled to a corpus-level
+        target. Use them for ELBO terms that represent observed data evidence.
+        Note this differs from the target_stats passed to update_global.
 
         Default returns NaN, which callers treat as 'ELBO not available'.
         """

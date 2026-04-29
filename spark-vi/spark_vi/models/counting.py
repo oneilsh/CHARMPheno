@@ -55,12 +55,12 @@ class CountingModel(VIModel):
     def update_global(
         self,
         global_params: dict[str, np.ndarray],
-        aggregated_stats: dict[str, np.ndarray],
+        target_stats: dict[str, np.ndarray],
         learning_rate: float,
     ) -> dict[str, np.ndarray]:
-        # lambda_hat = prior + aggregated counts.
-        target_alpha = self.prior_alpha + aggregated_stats["heads"]
-        target_beta = self.prior_beta + aggregated_stats["tails"]
+        # lambda_hat = prior + (pre-scaled) aggregated counts.
+        target_alpha = self.prior_alpha + target_stats["heads"]
+        target_beta = self.prior_beta + target_stats["tails"]
         # Robbins-Monro interpolation.
         new_alpha = (1.0 - learning_rate) * global_params["alpha"] + learning_rate * target_alpha
         new_beta = (1.0 - learning_rate) * global_params["beta"] + learning_rate * target_beta

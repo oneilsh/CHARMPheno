@@ -73,11 +73,43 @@ broadcast. Standard PySpark practice — just needs to be in the framework code.
 data every iteration (full-batch) will see the step size decay toward zero, stalling
 before convergence.
 
-**Impact:** Affects the OU model (full-batch over all patients) but not the HDP (which
-processes mini-batches).
+**Impact:** Affects models run with `mini_batch_fraction=None` (e.g., the OU model
+over all patients). HDP and other stochastic-VI models opt in to mini-batching via
+`VIConfig.mini_batch_fraction`, which puts them in the regime the Robbins-Monro
+schedule was designed for; see ADR 0005.
 
-**Mitigation:** Allow models to specify or override the learning rate schedule. A fixed
-or adaptive step size is appropriate for full-batch models.
+**Mitigation:** Two paths. (1) Set `VIConfig.mini_batch_fraction` to a non-None
+value to make iterations stochastic, validating the schedule's assumptions. (2) For
+full-batch models, override `kappa` toward 1.0 to slow the decay, or eventually
+extend the framework to support model-specified learning-rate schedules.
+
+### Mini-batch sampling: variance, reproducibility, and overhead
+
+**Risk 1 (semantics):** With `sample_with_replacement=True` (default, matching
+MLlib `OnlineLDAOptimizer`), a single document can appear multiple times in one
+batch. This is mathematically correct for SGD on i.i.d. samples but can surprise
+readers used to dataset traversal semantics.
+
+**Risk 2 (reproducibility):** Per-iteration sampling makes runs non-reproducible
+unless `VIConfig.random_seed` is set. Even with a seed, Spark partition ordering
+and floating-point summation order can introduce small numerical variance across
+runs on different cluster shapes — reproducibility is best-effort, not bit-exact.
+
+**Risk 3 (compute and memory):** Each mini-batch iteration calls `batch.count()`
+(one extra Spark action) and persists the sampled batch RDD with
+`StorageLevel.MEMORY_AND_DISK` so that `count()` and the subsequent
+`mapPartitions` reuse the same partitions. Without persistence the sample
+lineage would recompute twice per iteration. The cache cost is bounded by the
+size of one batch; for very large batches Spark may spill to disk, which is
+slower than memory-only but does not fail.
+
+**Impact:** Low for HDP at planned scale. Mini-batches of ~5% of a multi-million
+visit corpus fit comfortably in worker memory; the extra `count()` action is
+small relative to the `mapPartitions` work that follows.
+
+**Mitigation:** Set `random_seed` whenever reproducibility matters during
+development. For production runs, accept the slight per-iteration variance —
+it is the same regime MLlib has run in production for years.
 
 ### `data_summary` for `initialize_global` is underspecified
 

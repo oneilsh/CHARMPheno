@@ -27,6 +27,20 @@ class VIConfig:
             to converge.
         convergence_tol: relative ELBO improvement threshold for early stop.
         checkpoint_interval: if set, write checkpoint every N iterations.
+        mini_batch_fraction: if set, the runner samples this fraction of the
+            input RDD per iteration (with replacement by default), matching
+            the OnlineLDAOptimizer subsamplingRate convention. Must lie in
+            (0, 1]. None means "use the full RDD every iteration" (legacy
+            full-batch behavior). Without sampling, the Robbins-Monro decaying
+            step size will eventually stall full-batch updates before
+            convergence; mini-batching is what makes the schedule appropriate.
+        sample_with_replacement: passed through to RDD.sample. Default True
+            matches MLlib OnlineLDAOptimizer and the standard SVI assumption
+            that each iteration draws an i.i.d. batch.
+        random_seed: optional root seed for the per-iteration sample seeds.
+            If None, sampling is non-reproducible across runs. Even when set,
+            Spark partition ordering may introduce small floating-point
+            variation; reproducibility is best-effort, not bit-exact.
 
     Why these defaults: tau0=1.0, kappa=0.7 is Hoffman et al. 2013's common
     choice for stochastic VI on text corpora; it biases toward faster initial
@@ -38,6 +52,9 @@ class VIConfig:
     learning_rate_kappa: float = 0.7
     convergence_tol: float = 1e-4
     checkpoint_interval: int | None = None
+    mini_batch_fraction: float | None = None
+    sample_with_replacement: bool = True
+    random_seed: int | None = None
 
     def __post_init__(self) -> None:
         if self.max_iterations < 1:
@@ -53,4 +70,15 @@ class VIConfig:
         if self.checkpoint_interval is not None and self.checkpoint_interval < 1:
             raise ValueError(
                 f"checkpoint_interval must be None or >= 1, got {self.checkpoint_interval}"
+            )
+        if self.mini_batch_fraction is not None and not (
+            0.0 < self.mini_batch_fraction <= 1.0
+        ):
+            raise ValueError(
+                f"mini_batch_fraction must be None or in (0, 1], "
+                f"got {self.mini_batch_fraction}"
+            )
+        if self.random_seed is not None and not isinstance(self.random_seed, int):
+            raise ValueError(
+                f"random_seed must be None or int, got {type(self.random_seed).__name__}"
             )
