@@ -20,7 +20,11 @@ class VIConfig:
             indexes iterations from 0 internally, so it evaluates the
             equivalent (tau0 + t + 1)^-kappa; both forms yield the same step
             sizes.
-        learning_rate_kappa: decay exponent; must be in (0.5, 1].
+        learning_rate_kappa: decay exponent. Validation accepts (0, 1]; the
+            Robbins-Monro convergence guarantee (sum rho_t = inf and
+            sum rho_t^2 < inf) holds only for kappa in (0.5, 1]. Values in
+            (0, 0.5] are permitted for experimentation but are not guaranteed
+            to converge.
         convergence_tol: relative ELBO improvement threshold for early stop.
         checkpoint_interval: if set, write checkpoint every N iterations.
 
