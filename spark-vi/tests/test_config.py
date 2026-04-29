@@ -72,3 +72,35 @@ def test_vi_config_rejects_non_int_random_seed():
         VIConfig(random_seed="42")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         VIConfig(random_seed=3.14)  # type: ignore[arg-type]
+
+
+def test_vi_config_rejects_checkpoint_interval_without_dir():
+    """Coupled-fields invariant: interval without a destination is meaningless."""
+    from spark_vi.core import VIConfig
+
+    with pytest.raises(ValueError, match="checkpoint_interval and checkpoint_dir"):
+        VIConfig(checkpoint_interval=5)
+
+
+def test_vi_config_rejects_checkpoint_dir_without_interval(tmp_path):
+    """Coupled-fields invariant: a destination without an interval is meaningless."""
+    from spark_vi.core import VIConfig
+
+    with pytest.raises(ValueError, match="checkpoint_interval and checkpoint_dir"):
+        VIConfig(checkpoint_dir=tmp_path)
+
+
+def test_vi_config_accepts_paired_checkpoint_fields(tmp_path):
+    from spark_vi.core import VIConfig
+
+    cfg = VIConfig(checkpoint_interval=5, checkpoint_dir=tmp_path)
+    assert cfg.checkpoint_interval == 5
+    assert cfg.checkpoint_dir == tmp_path
+
+
+def test_vi_config_accepts_both_checkpoint_fields_unset():
+    from spark_vi.core import VIConfig
+
+    cfg = VIConfig()
+    assert cfg.checkpoint_interval is None
+    assert cfg.checkpoint_dir is None

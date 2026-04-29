@@ -318,16 +318,20 @@ application-level state.
 **Impact:** High for long training runs. A multi-hour training run that fails at
 iteration 90 of 100 loses all progress.
 
-**Mitigation:** Add to the framework:
-- A `checkpoint_interval` parameter in `VIConfig` that writes global params to a
-  directory every N iterations, and a `resume_from` capability to restart from a
-  checkpoint.
-- The checkpoint logic should be platform-agnostic — just `np.save`/`np.load` to a
-  filesystem path. On Truveta, the path would be under
-  `study.get_artifacts_path(fs=True)`, which presents study-level persistent storage as
-  a regular filesystem path. On other platforms, any local or mounted path works.
-- This is straightforward — the existing JSON + `.npy` export format already serializes
-  global params; checkpointing reuses this at regular intervals.
+**Status: Resolved as of ADR 0006.**
+
+- `VIConfig.checkpoint_interval` paired with `VIConfig.checkpoint_dir` triggers
+  `VIRunner.fit` to auto-save a `VIResult` every N iterations during the run. The
+  two fields are coupled — `__post_init__` raises if exactly one is set.
+- `VIRunner.fit(rdd, resume_from=path)` loads a saved `VIResult` (whether written
+  by an explicit `save_result` call or by the auto-checkpoint mechanism) and
+  continues training with the Robbins-Monro counter preserved, so the resumed run
+  produces the same final state as a continuous run of equal total length.
+- The on-disk format is platform-agnostic — `manifest.json + params/*.npy` to any
+  filesystem path. On Truveta, this path can be under
+  `study.get_artifacts_path(fs=True)`, which presents study-level persistent
+  storage as a regular filesystem path. On other platforms, any local or mounted
+  path works.
 
 ### Truveta resource pool constraints
 

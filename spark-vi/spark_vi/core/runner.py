@@ -11,16 +11,20 @@ Each iteration executes the canonical distributed-VI step:
     5. Driver: pre-scale the aggregated stats to a corpus-equivalent target
        (corpus_size / batch_size) when in mini-batch mode, then call
        model.update_global with Robbins-Monro learning rate.
-    6. Record ELBO (raw, not pre-scaled); test convergence.
+    6. Record ELBO (raw, not pre-scaled); auto-checkpoint if configured;
+       test convergence.
 
 The MLlib `OnlineLDAOptimizer` uses an equivalent pattern (with
 treeAggregate); see docs/architecture/SPARK_VI_FRAMEWORK.md and
-docs/decisions/0005-mini-batch-sampling.md for references.
+docs/decisions/0005-mini-batch-sampling.md for references. Auto-checkpoint
+and resume_from semantics are described in
+docs/decisions/0006-unified-persistence-format.md.
 """
 from __future__ import annotations
 
 import logging
 import random
+from pathlib import Path
 from typing import Any
 
 from pyspark import RDD, StorageLevel
@@ -28,6 +32,7 @@ from pyspark import RDD, StorageLevel
 from spark_vi.core.config import VIConfig
 from spark_vi.core.model import VIModel
 from spark_vi.core.result import VIResult
+from spark_vi.io.export import load_result, save_result
 
 log = logging.getLogger(__name__)
 
@@ -46,18 +51,40 @@ class VIRunner:
         data_rdd: RDD,
         data_summary: Any | None = None,
         start_iteration: int = 0,
+        resume_from: Path | str | None = None,
     ) -> VIResult:
         """Run the distributed VI loop until convergence or max_iterations.
 
-        start_iteration offsets the Robbins-Monro step counter for resumed
-        runs: after a checkpoint at iteration k, pass start_iteration=k so
-        the first post-resume rho matches what a continuous run would use.
+        Parameters:
+            data_rdd: input RDD to train on.
+            data_summary: optional pre-pass metadata for model.initialize_global.
+            start_iteration: offsets the Robbins-Monro step counter. Internal —
+                callers wanting to resume a checkpointed run should prefer
+                resume_from, which sets this automatically.
+            resume_from: if set, load a previously-saved VIResult from this
+                path (written by save_result or by the runner's own
+                auto-checkpoint mechanism) and continue training. The loaded
+                global_params replace what model.initialize_global would have
+                returned; the loaded elbo_trace seeds this run's trace; and
+                start_iteration is set to the loaded result's n_iterations so
+                the Robbins-Monro schedule matches a continuous run.
         """
         model = self.model
         cfg = self.config
 
-        global_params = model.initialize_global(data_summary)
-        elbo_trace: list[float] = []
+        if resume_from is not None:
+            loaded = load_result(resume_from)
+            global_params = loaded.global_params
+            elbo_trace: list[float] = list(loaded.elbo_trace)
+            start_iteration = loaded.n_iterations
+            log.info(
+                "Resuming from %s (n_iterations=%d, converged=%s)",
+                resume_from, loaded.n_iterations, loaded.converged,
+            )
+        else:
+            global_params = model.initialize_global(data_summary)
+            elbo_trace = []
+
         sc = data_rdd.context
         prior_bcast = None
         converged = False
@@ -133,6 +160,26 @@ class VIRunner:
             elbo = model.compute_elbo(global_params, aggregated)
             elbo_trace.append(float(elbo))
 
+            # 7. Auto-checkpoint (if configured). Writes a VIResult to
+            # cfg.checkpoint_dir every checkpoint_interval iterations,
+            # overwriting the previous checkpoint. Done after the global-params
+            # update so the on-disk checkpoint reflects the current loop state.
+            if (
+                cfg.checkpoint_interval is not None
+                and (step + 1) % cfg.checkpoint_interval == 0
+            ):
+                interim = VIResult(
+                    global_params=global_params,
+                    elbo_trace=list(elbo_trace),
+                    n_iterations=t + 1,
+                    converged=False,
+                    metadata={
+                        "model_class": type(model).__name__,
+                        "checkpoint": True,
+                    },
+                )
+                save_result(interim, cfg.checkpoint_dir)
+
             # Unpersist the *previous* broadcast so we don't leak them.
             # See RISKS_AND_MITIGATIONS.md §Broadcast lifecycle.
             if prior_bcast is not None:
@@ -152,7 +199,7 @@ class VIRunner:
                 return VIResult(
                     global_params=global_params,
                     elbo_trace=elbo_trace,
-                    n_iterations=step + 1,
+                    n_iterations=t + 1,
                     converged=True,
                     metadata={"model_class": type(model).__name__},
                 )
@@ -163,7 +210,7 @@ class VIRunner:
         return VIResult(
             global_params=global_params,
             elbo_trace=elbo_trace,
-            n_iterations=cfg.max_iterations,
+            n_iterations=start_iteration + cfg.max_iterations,
             converged=False,
             metadata={"model_class": type(model).__name__},
         )

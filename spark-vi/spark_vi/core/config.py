@@ -7,6 +7,7 @@ the tau0 / kappa conventions for the Robbins-Monro step size schedule.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,14 @@ class VIConfig:
             (0, 0.5] are permitted for experimentation but are not guaranteed
             to converge.
         convergence_tol: relative ELBO improvement threshold for early stop.
-        checkpoint_interval: if set, write checkpoint every N iterations.
+        checkpoint_interval: if set, the runner writes a VIResult to
+            checkpoint_dir every N iterations during fit() (overwriting the
+            previous checkpoint — last one is the only one needed for resume).
+            Must be set together with checkpoint_dir or not at all.
+        checkpoint_dir: target directory for auto-checkpoints. The runner
+            writes via spark_vi.io.export.save_result, producing the same
+            human-inspectable manifest.json + params/*.npy layout used for
+            final-result exports. Must be set together with checkpoint_interval.
         mini_batch_fraction: if set, the runner samples this fraction of the
             input RDD per iteration (with replacement by default), matching
             the OnlineLDAOptimizer subsamplingRate convention. Must lie in
@@ -52,6 +60,7 @@ class VIConfig:
     learning_rate_kappa: float = 0.7
     convergence_tol: float = 1e-4
     checkpoint_interval: int | None = None
+    checkpoint_dir: Path | str | None = None
     mini_batch_fraction: float | None = None
     sample_with_replacement: bool = True
     random_seed: int | None = None
@@ -70,6 +79,12 @@ class VIConfig:
         if self.checkpoint_interval is not None and self.checkpoint_interval < 1:
             raise ValueError(
                 f"checkpoint_interval must be None or >= 1, got {self.checkpoint_interval}"
+            )
+        if (self.checkpoint_interval is None) != (self.checkpoint_dir is None):
+            raise ValueError(
+                "checkpoint_interval and checkpoint_dir must both be set or both "
+                f"be None; got interval={self.checkpoint_interval!r}, "
+                f"dir={self.checkpoint_dir!r}"
             )
         if self.mini_batch_fraction is not None and not (
             0.0 < self.mini_batch_fraction <= 1.0

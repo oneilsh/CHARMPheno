@@ -370,10 +370,20 @@ class VIConfig:
     learning_rate_kappa: float = 0.7
     convergence_tol: float = 1e-4
     checkpoint_interval: int | None = None
+    checkpoint_dir: Path | str | None = None
     mini_batch_fraction: float | None = None     # None → full-batch
     sample_with_replacement: bool = True
     random_seed: int | None = None
 ```
+
+**Auto-checkpoint fields** (`checkpoint_interval`, `checkpoint_dir`) trigger
+`VIRunner.fit` to save a `VIResult` to `checkpoint_dir` every
+`checkpoint_interval` iterations, overwriting the previous checkpoint (last
+one is the only one needed for resume). The two fields are coupled: setting
+one without the other raises `ValueError` at construction. The on-disk format
+is the same `manifest.json + params/*.npy` layout used for `save_result`, so
+auto-checkpoints can be loaded directly via `load_result` or fed into
+`VIRunner.fit(rdd, resume_from=path)` to continue training. See ADR 0006.
 
 **Mini-batch fields** (`mini_batch_fraction`, `sample_with_replacement`, `random_seed`)
 adopt the MLlib `OnlineLDAOptimizer` `subsamplingRate` pattern. With
@@ -407,28 +417,40 @@ are not guaranteed to converge.
 `fit` returns a `VIResult`:
 
 ```python
-@dataclass
+@dataclass(frozen=True)
 class VIResult:
-    model: VIModel           # fitted model with learned global_params
-    global_params: dict      # final parameters (dict of np.ndarray)
-    history: list[dict]      # per-iteration metrics
+    global_params: dict[str, np.ndarray]  # fitted variational parameters
+    elbo_trace: list[float]               # per-iteration ELBO values
+    n_iterations: int                     # iterations completed (incl. resume)
+    converged: bool                       # True iff convergence criterion met
+    metadata: dict[str, Any]              # model class, timestamps, git sha, ...
 ```
+
+`VIResult` is the canonical record of training-run state — the same dataclass round-trips
+for both completed runs and in-progress checkpoints written during a fit. `converged=True`
+indicates a finished, converged run; `converged=False` covers both runs that exhausted
+`max_iterations` without converging and interim checkpoints. See ADR 0006 for the
+unification rationale.
 
 **Export format:** A directory containing:
-- `config.json` — model class name, constructor arguments, training config
-- `params/*.npy` — one file per global parameter array
+- `manifest.json` — `format_version`, `elbo_trace`, `n_iterations`, `converged`,
+  `metadata`, `param_names`
+- `params/*.npy` — one file per entry in `global_params`
 
 Human-inspectable, no pickle. No patient data — only population-level distributional
-parameters.
+parameters. The `format_version` field provides a migration handle: `load_result` raises
+`ValueError` for unknown versions.
 
 ```python
-result.save("path/to/model")
-loaded_model = OnlineHDP.load("path/to/model")
-loaded_model.print_topics(n_words=10)
+from spark_vi.io.export import save_result, load_result
+
+save_result(result, "path/to/model")
+loaded = load_result("path/to/model")  # returns a VIResult
 ```
 
-Loaded models can be used for `transform`, `simulate`, etc. without Spark — they
-operate on NumPy arrays directly.
+Loaded `VIResult`s can be passed straight to `VIRunner.fit(rdd, resume_from=path)`
+to continue training, or consumed downstream by analysis code that operates on
+NumPy arrays directly without Spark.
 
 ---
 
@@ -723,9 +745,17 @@ eventually stall — see RISKS_AND_MITIGATIONS.md for the mitigation.
 
 ### ELBO Evaluation Scheduling and Checkpointing
 
+**Checkpointing implemented as of ADR 0006.** `VIConfig.checkpoint_interval` paired
+with `VIConfig.checkpoint_dir` causes `VIRunner.fit` to auto-save a `VIResult` every
+N iterations to a directory, overwriting the previous checkpoint.
+`VIRunner.fit(rdd, resume_from=path)` loads a saved checkpoint and continues training
+with the Robbins-Monro counter preserved across the boundary. The format is the same
+`manifest.json + params/*.npy` layout used for `save_result`.
+
 Configurable `elbo_eval_interval` (ELBO computation may be expensive and needn't run
-every iteration) and `checkpoint_interval` for snapshotting global parameters to
-HDFS/S3 during long training runs. Resume from checkpoint on failure.
+every iteration) is still future work — currently every iteration computes ELBO. For
+models where ELBO is expensive, return NaN from `compute_elbo` to skip the cost while
+still hitting the convergence-check call site.
 
 ### Differential Privacy
 
