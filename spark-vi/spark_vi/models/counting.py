@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 import numpy as np
-from scipy.special import betaln
+from scipy.special import betaln, digamma
 
 from spark_vi.core.model import VIModel
 
@@ -71,15 +71,40 @@ class CountingModel(VIModel):
         global_params: dict[str, np.ndarray],
         aggregated_stats: dict[str, np.ndarray],
     ) -> float:
-        """Surrogate ELBO: log marginal likelihood under current posterior pseudocounts.
+        """Exact Beta-Bernoulli ELBO for q(p) = Beta(alpha, beta).
 
-        Using log B(alpha, beta) - log B(prior_alpha, prior_beta) + log P(data | counts).
-        Good enough to be monotonic-ish and finite for the tests.
+        For prior Beta(a0, b0) and observed counts (h, t):
+
+            ELBO(q) = E_q[log p(x | p)] - KL(q || prior)
+
+        with:
+            E_q[log p(x | p)] = h * (psi(a) - psi(a+b))
+                              + t * (psi(b) - psi(a+b))
+
+            KL(Beta(a,b) || Beta(a0,b0))
+                = (a - a0) * (psi(a) - psi(a+b))
+                + (b - b0) * (psi(b) - psi(a+b))
+                + betaln(a0, b0) - betaln(a, b)
+
+        At the exact posterior (a = a0 + h, b = b0 + t) the ELBO equals the
+        log marginal likelihood log p(x) = betaln(a0+h, b0+t) - betaln(a0, b0).
         """
         a = float(global_params["alpha"])
         b = float(global_params["beta"])
         h = float(aggregated_stats.get("heads", 0.0))
         t = float(aggregated_stats.get("tails", 0.0))
-        # Log posterior predictive factor + log prior normalizer ratio.
-        return -betaln(a, b) + betaln(self.prior_alpha, self.prior_beta) + h * 0.0 + t * 0.0 \
-            + float(a + b)  # placeholder monotone-in-data-weight term for tests
+        a0 = self.prior_alpha
+        b0 = self.prior_beta
+
+        psi_ab = digamma(a + b)
+        e_log_p = digamma(a) - psi_ab          # E_q[log p]
+        e_log_1mp = digamma(b) - psi_ab        # E_q[log(1 - p)]
+
+        expected_log_likelihood = h * e_log_p + t * e_log_1mp
+        kl_q_prior = (
+            (a - a0) * e_log_p
+            + (b - b0) * e_log_1mp
+            + betaln(a0, b0)
+            - betaln(a, b)
+        )
+        return float(expected_log_likelihood - kl_q_prior)

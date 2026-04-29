@@ -76,25 +76,69 @@ def test_counting_model_update_global_interpolates_partial_step():
     np.testing.assert_allclose(new["beta"], 1.5)
 
 
-def test_counting_model_elbo_is_increasing_with_more_data():
-    """Crude sanity: posterior concentration should monotonically raise the
-    (surrogate) ELBO along a sequence of updates with consistent evidence.
+def test_counting_model_elbo_at_exact_posterior_equals_log_marginal_likelihood():
+    """ELBO is tight at the exact posterior.
 
-    This is a smoke check of the ELBO method returning a finite number, not
-    a correctness proof of the log-marginal likelihood itself.
+    For Beta-Bernoulli, the log marginal likelihood has a closed form:
+        log p(x) = betaln(a0 + h, b0 + t) - betaln(a0, b0)
+    The ELBO is a lower bound on log p(x), and the bound is tight (equality)
+    precisely when q == true posterior. This is the strongest analytic
+    correctness check available for an ELBO implementation.
+    """
+    from scipy.special import betaln
+
+    from spark_vi.models.counting import CountingModel
+
+    a0, b0 = 2.0, 3.0
+    h, t = 30.0, 10.0
+    m = CountingModel(prior_alpha=a0, prior_beta=b0)
+
+    # Exact posterior: Beta(a0 + h, b0 + t)
+    posterior = {"alpha": np.array(a0 + h), "beta": np.array(b0 + t)}
+    stats = {"heads": np.array(h), "tails": np.array(t)}
+    elbo_at_posterior = m.compute_elbo(posterior, stats)
+
+    log_marginal = betaln(a0 + h, b0 + t) - betaln(a0, b0)
+    np.testing.assert_allclose(elbo_at_posterior, log_marginal, rtol=1e-10)
+
+
+def test_counting_model_elbo_is_below_log_marginal_when_q_is_off():
+    """ELBO is a strict lower bound: any q != posterior gives ELBO < log p(x)."""
+    from scipy.special import betaln
+
+    from spark_vi.models.counting import CountingModel
+
+    a0, b0 = 1.0, 1.0
+    h, t = 30.0, 10.0
+    m = CountingModel(prior_alpha=a0, prior_beta=b0)
+
+    log_marginal = betaln(a0 + h, b0 + t) - betaln(a0, b0)
+    stats = {"heads": np.array(h), "tails": np.array(t)}
+
+    # An off-posterior q that puts most mass near p = 1, contradicting 30/40 data.
+    off_q = {"alpha": np.array(100.0), "beta": np.array(1.0)}
+    elbo_off = m.compute_elbo(off_q, stats)
+    assert np.isfinite(elbo_off)
+    assert elbo_off < log_marginal
+
+
+def test_counting_model_elbo_increases_along_a_run_toward_posterior():
+    """Within a single run, ELBO is monotonically non-decreasing as q
+    converges to the true posterior under repeated full-batch updates with
+    learning_rate=1.0 (which is the CAVI fixed-point jump).
     """
     from spark_vi.models.counting import CountingModel
 
     m = CountingModel(prior_alpha=1.0, prior_beta=1.0)
     g = m.initialize_global(data_summary=None)
-    elbo0 = m.compute_elbo(g, {"heads": np.array(0.0), "tails": np.array(0.0)})
-    g = m.update_global(g, {"heads": np.array(30.0), "tails": np.array(10.0)},
-                        learning_rate=1.0)
-    elbo1 = m.compute_elbo(g, {"heads": np.array(30.0), "tails": np.array(10.0)})
+    stats = {"heads": np.array(30.0), "tails": np.array(10.0)}
+
+    elbo0 = m.compute_elbo(g, stats)
+    g = m.update_global(g, stats, learning_rate=1.0)  # jumps to exact posterior
+    elbo1 = m.compute_elbo(g, stats)
+
     assert np.isfinite(elbo0) and np.isfinite(elbo1)
-    # Under CountingModel's surrogate ELBO, concentration from (1,1) -> (31,11)
-    # strictly increases the score (the (a+b) term dominates the -betaln term).
-    assert elbo1 > elbo0
+    assert elbo1 >= elbo0  # tight at posterior; should be strictly greater here
 
 
 def test_counting_model_required_methods_surface_on_base():
