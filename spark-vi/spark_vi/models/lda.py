@@ -276,3 +276,30 @@ class VanillaLDA(VIModel):
             - float(aggregated_stats["doc_theta_kl_sum"])
             - global_kl
         )
+
+    def infer_local(self, row: BOWDocument, global_params: dict[str, np.ndarray]):
+        """Single-document E-step under fixed global params.
+
+        Pure function of (row, global_params) — must not read self for
+        post-fit state. Returns:
+          gamma: (K,) variational Dirichlet parameter for theta_d.
+          theta: (K,) normalized E[theta_d] = gamma / gamma.sum().
+        """
+        lam = global_params["lambda"]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        gamma_init = np.random.gamma(
+            shape=self.gamma_shape,
+            scale=1.0 / self.gamma_shape,
+            size=self.K,
+        )
+        gamma, _, _, _ = _cavi_doc_inference(
+            indices=row.indices,
+            counts=row.counts,
+            expElogbeta=expElogbeta,
+            alpha=self.alpha,
+            gamma_init=gamma_init,
+            max_iter=self.cavi_max_iter,
+            tol=self.cavi_tol,
+        )
+        theta = gamma / gamma.sum()
+        return {"gamma": gamma, "theta": theta}

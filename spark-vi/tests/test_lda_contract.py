@@ -178,3 +178,43 @@ def test_vanilla_lda_combine_stats_is_associative():
     right = m.combine_stats(m.combine_stats(a, b), c)
     for k in left:
         np.testing.assert_allclose(left[k], right[k])
+
+
+def test_vanilla_lda_infer_local_returns_gamma_and_theta():
+    """infer_local returns dict with K-vector gamma and normalized theta."""
+    import numpy as np
+    from spark_vi.core import BOWDocument
+    from spark_vi.models.lda import VanillaLDA
+
+    np.random.seed(0)
+    m = VanillaLDA(K=4, vocab_size=10)
+    g = m.initialize_global(None)
+    doc = BOWDocument(indices=np.array([2, 5], dtype=np.int32),
+                      counts=np.array([1.0, 1.0]), length=2)
+
+    out = m.infer_local(doc, g)
+    assert set(out.keys()) == {"gamma", "theta"}
+    assert out["gamma"].shape == (4,)
+    assert out["theta"].shape == (4,)
+    np.testing.assert_allclose(out["theta"].sum(), 1.0, atol=1e-12)
+    np.testing.assert_allclose(out["theta"], out["gamma"] / out["gamma"].sum())
+
+
+def test_vanilla_lda_infer_local_is_pure_function_of_inputs():
+    """Same row + same global_params + same RNG state => identical output."""
+    import numpy as np
+    from spark_vi.core import BOWDocument
+    from spark_vi.models.lda import VanillaLDA
+
+    np.random.seed(7)
+    m = VanillaLDA(K=3, vocab_size=8)
+    g = m.initialize_global(None)
+    doc = BOWDocument(indices=np.array([0, 4, 7], dtype=np.int32),
+                      counts=np.array([2.0, 1.0, 1.0]), length=4)
+
+    np.random.seed(123)
+    out_a = m.infer_local(doc, g)
+    np.random.seed(123)
+    out_b = m.infer_local(doc, g)
+    np.testing.assert_array_equal(out_a["gamma"], out_b["gamma"])
+    np.testing.assert_array_equal(out_a["theta"], out_b["theta"])
