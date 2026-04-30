@@ -240,6 +240,12 @@ Model authors subclass `VIModel` and implement:
   user-friendly long-format DataFrame into the internal format. Custom model authors
   can skip this and provide data in internal format directly.
 
+- `infer_local(row, global_params)` (optional) — per-row variational
+  posterior under fixed global params. Models with local latent variables
+  (LDA, HDP) override this; models without (CountingModel) leave it
+  unimplemented. Default raises `NotImplementedError`. Must be a pure
+  function of `(row, global_params)`. See [ADR 0007](../decisions/0007-vimodel-inference-capability.md).
+
 **Example — Online HDP implementation sketch:**
 
 ```python
@@ -350,6 +356,12 @@ result = runner.fit(df, **data_kwargs)
    metrics (parameter deltas, ELBO if available, wall time)
 8. Push metrics to notebook display (or logger in batch mode)
 9. Check convergence, stop early if threshold met
+
+Beyond `fit`, `VIRunner` also exposes `transform(rdd, global_params)` —
+a one-pass per-row inference orchestrator. It broadcasts the trained
+global params, maps `model.infer_local` over the RDD, and unpersists
+the broadcast on completion. Models that don't implement `infer_local`
+produce a clear NotImplementedError when the resulting RDD is collected.
 
 **Output modes:**
 
@@ -548,6 +560,18 @@ transparently, and results are mapped back to the simplex for interpretation.
 **Clinical use case:** Model causal dynamics between phenotypes discovered by the HDP.
 The sparse $A$ matrix reveals which phenotypes drive or inhibit other phenotypes,
 with timescales from eigenanalysis.
+
+### `VanillaLDA`
+
+Hoffman 2010 Online LDA with the Lee/Seung 2001 implicit-phi trick. Mini-
+batch SVI, default hyperparameters aligned with `pyspark.ml.clustering.LDA`
+for fair head-to-head comparison. See [ADR 0008](../decisions/0008-vanilla-lda-design.md)
+for design choices and the [LDA design spec](../superpowers/specs/2026-04-30-vanilla-lda-design.md)
+for the full algorithmic detail.
+
+Consumes `RDD[BOWDocument]`. Provides `infer_local` for per-document theta
+inference; combinable with `VIRunner.transform` to score new documents
+under trained global params.
 
 ### Third Model (TBD)
 
