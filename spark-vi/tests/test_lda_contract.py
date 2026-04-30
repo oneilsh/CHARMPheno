@@ -149,15 +149,55 @@ def test_vanilla_lda_update_global_at_lr_zero_is_identity():
 
 
 def test_vanilla_lda_update_global_at_lr_one_jumps_to_target():
-    """At rho=1.0, lambda becomes (eta + lambda_stats)."""
+    """At rho=1.0, lambda becomes (eta + expElogbeta * lambda_stats).
+
+    The expElogbeta factor is the per-topic-per-vocab term factored out of
+    local_update's per-doc accumulation. update_global multiplies it back in
+    at the driver, matching MLlib's "statsSum *:* expElogbeta.t".
+    """
     import numpy as np
+    from scipy.special import digamma
     from spark_vi.models.lda import VanillaLDA
     np.random.seed(0)
     m = VanillaLDA(K=2, vocab_size=4, eta=0.05)
     g = m.initialize_global(None)
     target = {"lambda_stats": np.full((2, 4), 7.0)}
     new_g = m.update_global(g, target_stats=target, learning_rate=1.0)
-    np.testing.assert_allclose(new_g["lambda"], 0.05 + 7.0)
+
+    lam = g["lambda"]
+    expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+    np.testing.assert_allclose(new_g["lambda"], 0.05 + expElogbeta * 7.0)
+
+
+def test_vanilla_lda_update_global_applies_expElogbeta_factor():
+    """Regression test for the MLlib-equivalent expElogbeta multiplication.
+
+    A non-uniform target_stats fed to update_global must produce a result
+    that reflects expElogbeta multiplication. Computing the buggy formula
+    (eta + target_stats, no expElogbeta factor) would give a different
+    answer; this test pins the corrected behavior.
+    """
+    import numpy as np
+    from scipy.special import digamma
+    from spark_vi.models.lda import VanillaLDA
+
+    K, V = 2, 3
+    eta = 0.1
+    m = VanillaLDA(K=K, vocab_size=V, eta=eta)
+    # Hand-chosen lam: row 0 peaks on column 0, row 1 peaks on column 2.
+    lam = np.array([[10.0, 1.0, 1.0], [1.0, 1.0, 10.0]])
+    target_stats = {"lambda_stats": np.array([[3.0, 3.0, 3.0], [3.0, 3.0, 3.0]])}
+
+    new_g = m.update_global({"lambda": lam}, target_stats=target_stats,
+                             learning_rate=1.0)
+
+    expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+    expected = eta + expElogbeta * 3.0
+    np.testing.assert_allclose(new_g["lambda"], expected)
+    # Sanity: the buggy formula would have given eta + 3.0 = 3.1 uniformly,
+    # which is materially different from the corrected result on row 0.
+    buggy = np.full((K, V), eta + 3.0)
+    assert not np.allclose(new_g["lambda"], buggy, atol=0.5)
 
 
 def test_vanilla_lda_combine_stats_is_associative():

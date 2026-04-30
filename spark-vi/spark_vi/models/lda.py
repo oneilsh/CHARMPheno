@@ -238,13 +238,25 @@ class VanillaLDA(VIModel):
     ) -> dict[str, np.ndarray]:
         """SVI natural-gradient step:
 
-            lambda_new = (1 - rho) * lambda + rho * (eta + target_stats["lambda_stats"])
+            lambda_new = (1 - rho) * lambda
+                       + rho * (eta + expElogbeta * target_stats["lambda_stats"])
+
+        The expElogbeta multiplication recovers the per-token-per-topic factor
+        omitted from local_update's per-doc accumulation: phi_dnk depends on
+        both expElogthetad (per-doc, included per-doc) and expElogbeta (per-
+        topic-per-vocab, the same across all docs). Factoring expElogbeta out
+        of the per-doc sum and applying it once here at the driver matches
+        Spark MLlib's OnlineLDAOptimizer ("statsSum *:* expElogbeta.t" before
+        updateLambda) and is what makes the natural-gradient direction correct.
 
         target_stats["lambda_stats"] is already pre-scaled by corpus_size /
-        batch_size in mini-batch mode (per ADR 0005).
+        batch_size in mini-batch mode (per ADR 0005). expElogbeta is computed
+        from the same lambda local_update saw, so the reference frame is
+        consistent.
         """
         lam = global_params["lambda"]
-        target_lam = self.eta + target_stats["lambda_stats"]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        target_lam = self.eta + expElogbeta * target_stats["lambda_stats"]
         new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
         return {"lambda": new_lam}
 

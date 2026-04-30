@@ -265,7 +265,11 @@ Per-partition E-step:
 Element-wise sum of `lambda_stats`; sum of scalar `doc_loglik_sum` and `n_docs`. Default ndarray combine works once we declare these field shapes.
 
 **`update_global(global_params, target_stats, learning_rate) → dict`**
-λ_new = (1 − ρ_t) · λ + ρ_t · (η + `target_stats["lambda_stats"]`). `target_stats` is already pre-scaled by `corpus_size / batch_size` upstream in `VIRunner` (per ADR 0005). Standard SVI natural-gradient step.
+λ_new = (1 − ρ_t) · λ + ρ_t · (η + expElogbeta · `target_stats["lambda_stats"]`).
+
+The `expElogbeta` (= `exp(digamma(λ) − digamma(λ.sum(axis=1, keepdims=True)))`) multiplication is the per-topic-per-vocab factor of `φ_dnk` that was deliberately *not* included in `local_update`'s per-doc accumulation. `φ_dnk = expElogthetad_k · expElogbeta_{k, w_dn} / phi_norm` — only `expElogthetad` is per-doc; `expElogbeta` is the same across all docs in a mini-batch, so factoring it out of the per-doc sum and applying it once at the driver after aggregation is correct and matches MLlib's `OnlineLDAOptimizer` exactly (`statsSum *:* expElogbeta.t` before `updateLambda`).
+
+`target_stats` is already pre-scaled by `corpus_size / batch_size` upstream in `VIRunner` (per ADR 0005). `expElogbeta` is computed from the same λ that `local_update` saw, so the reference frame is consistent.
 
 **`compute_elbo(global_params, aggregated_stats) → float`**
 Real ELBO, not a surrogate (matches the post-Detour-2 standard from `CountingModel`). Three terms:
