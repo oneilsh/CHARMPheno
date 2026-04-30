@@ -12,6 +12,79 @@ elsewhere.
 
 ---
 
+## 2026-04-30 — Vanilla LDA implementation
+
+A real multi-parameter VIModel ships, exercising the framework end-to-end
+against synthetic data with known ground truth and a head-to-head
+comparison against Spark MLlib's reference implementation.
+
+### Components shipped
+
+- **`spark_vi/models/lda.py`** — Hoffman 2010 Online LDA + Lee/Seung 2001
+  implicit-phi trick. Symmetric alpha. Hyperparameters default-matched to
+  MLlib's `pyspark.ml.clustering.LDA` for fair comparison.
+- **`spark_vi/core/types.py`** — `BOWDocument` canonical bag-of-words row
+  type for topic-style models.
+- **`spark_vi/core/model.py`** + **`runner.py`** — optional `infer_local`
+  capability + `VIRunner.transform` orchestrator. See ADR 0007.
+- **`charmpheno/omop/topic_prep.py`** — `to_bow_dataframe` (OMOP -> BOW
+  via `pyspark.ml.feature.CountVectorizer`).
+- **`charmpheno/evaluate/topic_alignment.py`** — JS divergence,
+  prevalence ordering, biplot data, `ground_truth_from_oracle`.
+- **`charmpheno/evaluate/lda_compare.py`** — `run_ours` / `run_mllib`
+  head-to-head harness.
+- **`analysis/local/fit_lda_local.py`** + **`compare_lda_local.py`** —
+  drivers; comparison driver renders three-panel JS biplot.
+
+### New ADRs
+
+- [0007 — VIModel inference capability](decisions/0007-vimodel-inference-capability.md)
+- [0008 — Vanilla LDA design choices](decisions/0008-vanilla-lda-design.md)
+
+### Doc updates
+
+- `SPARK_VI_FRAMEWORK.md` — `VanillaLDA` entry, `infer_local` documented,
+  `VIRunner.transform` paragraph.
+- `RISKS_AND_MITIGATIONS.md` — "MLlib parity expectations" entry plus
+  "Small-corpus topic collapse in SVI" entry.
+
+### What broke and how we caught it
+
+Initial integration testing surfaced what looked like generic small-
+corpus seed-fragility: `lambda.sum(axis=1)` an order of magnitude too
+high, several seeds producing 0-2 collapsed topics, best-permutation JS
+divergence ~0.25 nats. Pulled out of auto mode for diagnosis.
+
+Root cause was a missing factor in `update_global`: the CAVI implicit-
+phi parameterization is `phi_dnk ∝ expElogthetad[k] * expElogbeta[k, w_dn]`,
+and our per-doc accumulation in `local_update` captured only the first
+factor. The aggregated sufficient statistic must be re-multiplied by
+`expElogbeta` (computed from the *current* lambda) before the Robbins-
+Monro step. MLlib does this with a single post-aggregation
+`*:* expElogbeta.t` in `OnlineLDAOptimizer.submitMiniBatch`; we now match.
+
+Lesson: small-synthetic-corpus topic collapse is real but is also exactly
+the failure mode a math regression mimics. The MLlib parity test (Task 15)
+is the rigorous gate that distinguishes the two: with matched hyperparameters
+and `optimizeDocConcentration=False`, our diagonal mean JS vs MLlib runs
+~0.01 nats. The fragility-prone synthetic-recovery test originally proposed
+in Task 12 was dropped in favor of an ELBO-trend smoke test plus the parity
+gate.
+
+Captured in [ADR 0008](decisions/0008-vanilla-lda-design.md) and
+[`RISKS_AND_MITIGATIONS.md`](architecture/RISKS_AND_MITIGATIONS.md).
+
+### Open threads parked
+
+- Asymmetric alpha + `optimizeDocConcentration` Newton-Raphson update.
+- Per-iteration ELBO trace from MLlib.
+- LDA notebook tutorial.
+- Several Type-hint / test-hygiene minor items captured in the Task 22
+  / final cleanup notes of the implementation plan; non-blocking.
+- The real `OnlineHDP` (this was the warm-up).
+
+---
+
 ## 2026-04-22 to 2026-04-29 — Bootstrap walkthrough and refactor sessions
 
 A bottom-up walkthrough of the post-bootstrap codebase, accompanied by four
