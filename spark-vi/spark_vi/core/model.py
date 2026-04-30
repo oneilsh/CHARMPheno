@@ -120,3 +120,23 @@ class VIModel(ABC):
             return False
         denom = max(abs(prev), 1e-12)
         return abs(curr - prev) / denom < convergence_tol
+
+    def infer_local(self, row, global_params: dict[str, np.ndarray]):
+        """Optional capability: per-row variational posterior under fixed global params.
+
+        Models with local latent variables (LDA, HDP) override this to enable
+        VIRunner.transform. Models without (e.g. CountingModel) leave it
+        unimplemented.
+
+        MUST be a pure function of (row, global_params). No dependence on
+        instance state from training. This invariant keeps a future MLlib
+        Estimator/Transformer compatibility shim mechanical.
+
+        Default raises NotImplementedError naming the concrete subclass.
+        Silent fallback would mask a real user error.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement local inference. "
+            f"Models without per-row latent variables cannot be used with "
+            f"VIRunner.transform()."
+        )
