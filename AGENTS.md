@@ -15,6 +15,12 @@ relevant section in the same commit, or write an ADR in
 [`docs/decisions/`](docs/decisions/) recording the departure. Never silently
 diverge.
 
+[`docs/REVIEW_LOG.md`](docs/REVIEW_LOG.md) is a complementary living document: a
+running log of code-walkthrough and refactor sessions. After a substantive
+review or refactor session, append a new dated entry at the top noting which
+areas were reviewed, what shipped, what pre-existing issues were caught, and
+any open threads parked. Keep entries impersonal and project-scoped.
+
 ## Understanding is a first-class deliverable
 
 **Codebase organization** and math-heavy code are both expected to be legible.
