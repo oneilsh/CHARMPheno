@@ -182,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
 
         log.info("Wrote biplots.png, perf_table.csv, artifacts.npz to %s",
                  args.output)
+        rdd.unpersist()
+        bow_df.unpersist()
         return 0
     finally:
         spark.stop()
