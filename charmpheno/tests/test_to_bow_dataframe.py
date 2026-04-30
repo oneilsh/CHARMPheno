@@ -38,18 +38,14 @@ def test_to_bow_dataframe_returns_sparse_features_per_patient(spark):
     assert rows[0]["person_id"] == 1
     assert rows[1]["person_id"] == 2
 
+    idx_to_concept = {v: k for k, v in vocab_map.items()}
+
     sv1 = rows[0]["features"]
-    counts_by_concept_1 = {
-        list(vocab_map.keys())[list(vocab_map.values()).index(idx)]: int(c)
-        for idx, c in zip(sv1.indices, sv1.values)
-    }
+    counts_by_concept_1 = {idx_to_concept[idx]: int(c) for idx, c in zip(sv1.indices, sv1.values)}
     assert counts_by_concept_1 == {4567: 2, 8910: 1}
 
     sv2 = rows[1]["features"]
-    counts_by_concept_2 = {
-        list(vocab_map.keys())[list(vocab_map.values()).index(idx)]: int(c)
-        for idx, c in zip(sv2.indices, sv2.values)
-    }
+    counts_by_concept_2 = {idx_to_concept[idx]: int(c) for idx, c in zip(sv2.indices, sv2.values)}
     assert counts_by_concept_2 == {4567: 1, 1234: 1}
 
 
@@ -63,9 +59,17 @@ def test_to_bow_dataframe_vocab_map_is_complete_and_contiguous(spark):
     assert indices == [0, 1, 2]
 
 
-def test_to_bow_dataframe_is_deterministic(spark):
+def test_to_bow_dataframe_vocab_order_is_stable_across_calls(spark):
+    """Repeated fits on the same input produce the same vocab map.
+
+    Guards against accidental nondeterminism if the implementation is
+    later swapped for something with hash-based bucketing.
+    """
     from charmpheno.omop import to_bow_dataframe
     df = _tiny_omop_df(spark)
     _, v1 = to_bow_dataframe(df)
     _, v2 = to_bow_dataframe(df)
     assert v1 == v2
+    # The most-frequent concept (4567 appears 3 times) must be index 0;
+    # CountVectorizer orders by descending frequency.
+    assert v1[4567] == 0
