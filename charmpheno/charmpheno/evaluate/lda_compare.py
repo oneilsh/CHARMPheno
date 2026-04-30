@@ -76,8 +76,14 @@ def run_mllib(
     seed: int = 0,
     optimizer: str = "online",
     subsampling_rate: float = 0.05,
+    optimize_doc_concentration: bool = True,
 ) -> LDARunArtifacts:
-    """Fit pyspark.ml.clustering.LDA on the BOW DataFrame; collect artifacts."""
+    """Fit pyspark.ml.clustering.LDA on the BOW DataFrame; collect artifacts.
+
+    optimize_doc_concentration: if True (MLlib default), alpha is adapted
+    during training. Set to False for a head-to-head parity test against
+    VanillaLDA, which holds alpha fixed.
+    """
     lda = (
         MLlibLDA()
         .setK(K)
@@ -85,6 +91,7 @@ def run_mllib(
         .setOptimizer(optimizer)
         .setSeed(seed)
         .setSubsamplingRate(subsampling_rate)
+        .setOptimizeDocConcentration(optimize_doc_concentration)
         .setFeaturesCol("features")
     )
 

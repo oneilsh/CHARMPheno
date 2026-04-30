@@ -5,6 +5,8 @@ and downstream visual inspection of biplots). Pins shape and that the API
 runs end-to-end on a tiny fixture.
 """
 import numpy as np
+import pytest
+from itertools import permutations
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType
 
 
@@ -62,3 +64,90 @@ def test_run_mllib_produces_artifacts_of_expected_shape(spark):
     assert art.topic_prevalence.shape == (2,)
     assert art.elbo_trace is None
     assert art.final_log_likelihood is not None
+
+
+@pytest.mark.slow
+def test_vanilla_lda_matches_mllib_on_well_separated_corpus(spark):
+    """Rigorous correctness gate: VanillaLDA and MLlib LDA recover comparable topics.
+
+    Same synthetic corpus is fed to both implementations with matched
+    hyperparameters (alpha, eta, tau0, kappa, mini-batch rate, gamma_shape, seed).
+    Best-permutation diagonal mean JS divergence between the two topic-word
+    distributions must be < 0.20 nats. Any math regression on our side
+    (sign flip, wrong-direction update, missing factor) will diverge from
+    the reference and fail this test.
+
+    Replaces the synthetic recovery test originally proposed in Task 12.
+    """
+    import numpy as np
+    from pyspark.ml.linalg import SparseVector, VectorUDT
+    from pyspark.sql.types import StructType, StructField, IntegerType
+    from charmpheno.evaluate.lda_compare import run_ours, run_mllib
+    from charmpheno.evaluate.topic_alignment import js_divergence_matrix
+    from spark_vi.core import BOWDocument, VIConfig
+
+    K, V, D = 3, 60, 500
+    rng = np.random.default_rng(42)
+    true_beta = rng.dirichlet(np.full(V, 0.05), size=K)
+
+    # Build per-doc BOWs directly (skip OMOP -> to_bow_dataframe; we construct
+    # the SparseVector column ourselves so both paths see byte-identical input).
+    docs_data = []
+    for d in range(D):
+        theta_d = rng.dirichlet(np.full(K, 0.3))
+        N_d = max(1, int(rng.poisson(50)))
+        zs = rng.choice(K, size=N_d, p=theta_d)
+        ws = np.array([rng.choice(V, p=true_beta[z]) for z in zs])
+        unique, counts = np.unique(ws, return_counts=True)
+        docs_data.append((d, unique.astype(int).tolist(), counts.astype(float).tolist()))
+
+    # DataFrame with SparseVector "features" column for run_mllib.
+    schema = StructType([
+        StructField("person_id", IntegerType(), False),
+        StructField("features", VectorUDT(), False),
+    ])
+    df_rows = [
+        (d, SparseVector(V, indices, values))
+        for (d, indices, values) in docs_data
+    ]
+    bow_df = spark.createDataFrame(df_rows, schema=schema)
+
+    # RDD of BOWDocument for run_ours (same data, different shape).
+    bow_docs = [
+        BOWDocument(
+            indices=np.asarray(indices, dtype=np.int32),
+            counts=np.asarray(values, dtype=np.float64),
+            length=int(sum(values)),
+        )
+        for (_, indices, values) in docs_data
+    ]
+    rdd = spark.sparkContext.parallelize(bow_docs, numSlices=2)
+
+    cfg = VIConfig(
+        max_iterations=80,
+        mini_batch_fraction=0.05,
+        random_seed=0,
+        convergence_tol=1e-9,
+        learning_rate_tau0=1024.0,
+        learning_rate_kappa=0.51,
+    )
+    ours = run_ours(rdd=rdd, vocab_size=V, K=K, config=cfg)
+    mllib = run_mllib(
+        df=bow_df, vocab_size=V, K=K,
+        max_iter=80, seed=0, subsampling_rate=0.05,
+        optimize_doc_concentration=False,
+    )
+
+    # Best-permutation diagonal mean JS divergence.
+    M = js_divergence_matrix(ours.topics_matrix, mllib.topics_matrix)
+    best_diag = min(
+        float(np.mean([M[i, perm[i]] for i in range(K)]))
+        for perm in permutations(range(K))
+    )
+    print(f"\nbest-permutation diagonal mean JS = {best_diag:.4f} nats")
+    assert best_diag < 0.20, (
+        f"VanillaLDA and MLlib LDA diverge beyond expected: "
+        f"best-permutation diagonal mean JS = {best_diag:.4f} nats. "
+        f"This usually indicates a math regression (sign error, wrong-direction "
+        f"update, missing expElogbeta-style factor) on our side."
+    )
