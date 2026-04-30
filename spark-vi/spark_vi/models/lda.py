@@ -188,6 +188,9 @@ class VanillaLDA(VIModel):
         alpha_vec = np.full(self.K, self.alpha, dtype=np.float64)
         # gamma_init draws Gamma(gamma_shape, 1/gamma_shape) per doc — same as MLlib.
         for doc in rows:
+            # TODO: per-doc reproducibility for MLlib comparisons — derive seed
+            # from a per-doc deterministic key (e.g., hash of doc.indices +
+            # cfg.random_seed) instead of numpy's global RNG.
             gamma_init = np.random.gamma(
                 shape=self.gamma_shape,
                 scale=1.0 / self.gamma_shape,
@@ -206,9 +209,14 @@ class VanillaLDA(VIModel):
             # Suff-stat row update:
             # outer(expElogthetad, counts/phi_norm) gives (K, n_unique); add to seen cols.
             sstats_row = np.outer(expElogthetad, doc.counts / phi_norm)
+            # Safe: BOWDocument guarantees unique indices (no fancy-index aliasing).
             lambda_stats[:, doc.indices] += sstats_row
 
             # Data-likelihood term: sum_n c_n * log(phi_norm_n).
+            # phi_norm has a +1e-100 floor inside _cavi_doc_inference; if the
+            # floor triggers (only possible under near-degenerate lambda),
+            # log(phi_norm) silently corrupts doc_loglik_sum. Unreachable for
+            # typical lambda concentrations; flagging for ELBO debugging.
             doc_loglik_sum += float(np.sum(doc.counts * np.log(phi_norm)))
 
             # Per-doc Dirichlet KL: KL(q(theta_d) || p(theta_d)).
