@@ -36,7 +36,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 import numpy as np
-from scipy.special import digamma
+from scipy.special import digamma, gammaln
 
 from spark_vi.core.model import VIModel
 from spark_vi.core.types import BOWDocument
@@ -88,6 +88,20 @@ def _cavi_doc_inference(
             break
 
     return gamma, expElogthetad, phi_norm, n_iter
+
+
+def _dirichlet_kl(q_alpha: np.ndarray, p_alpha: np.ndarray) -> float:
+    """KL(Dirichlet(q_alpha) || Dirichlet(p_alpha)).
+
+    Closed form via gammaln + digamma; both arrays must be K-vectors.
+    """
+    qsum = q_alpha.sum()
+    psum = p_alpha.sum()
+    return float(
+        gammaln(qsum) - gammaln(psum)
+        - (gammaln(q_alpha) - gammaln(p_alpha)).sum()
+        + ((q_alpha - p_alpha) * (digamma(q_alpha) - digamma(qsum))).sum()
+    )
 
 
 class VanillaLDA(VIModel):
@@ -155,7 +169,58 @@ class VanillaLDA(VIModel):
         rows: Iterable[BOWDocument],
         global_params: dict[str, np.ndarray],
     ) -> dict[str, np.ndarray]:
-        raise NotImplementedError("Implemented in Task 8")
+        """E-step on one Spark partition.
+
+        For each BOWDocument:
+          1. Run _cavi_doc_inference to get gamma_d, expElogthetad, phi_norm.
+          2. Add the suff-stat row update to lambda_stats[:, indices].
+          3. Accumulate the data-likelihood and per-doc Dirichlet-KL terms.
+        """
+        lam = global_params["lambda"]                                 # (K, V)
+        # Precompute expElogbeta once per partition (shared across docs).
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+        lambda_stats = np.zeros_like(lam)
+        doc_loglik_sum = 0.0
+        doc_theta_kl_sum = 0.0
+        n_docs = 0
+
+        alpha_vec = np.full(self.K, self.alpha, dtype=np.float64)
+        # gamma_init draws Gamma(gamma_shape, 1/gamma_shape) per doc — same as MLlib.
+        for doc in rows:
+            gamma_init = np.random.gamma(
+                shape=self.gamma_shape,
+                scale=1.0 / self.gamma_shape,
+                size=self.K,
+            )
+            gamma, expElogthetad, phi_norm, _ = _cavi_doc_inference(
+                indices=doc.indices,
+                counts=doc.counts,
+                expElogbeta=expElogbeta,
+                alpha=self.alpha,
+                gamma_init=gamma_init,
+                max_iter=self.cavi_max_iter,
+                tol=self.cavi_tol,
+            )
+
+            # Suff-stat row update:
+            # outer(expElogthetad, counts/phi_norm) gives (K, n_unique); add to seen cols.
+            sstats_row = np.outer(expElogthetad, doc.counts / phi_norm)
+            lambda_stats[:, doc.indices] += sstats_row
+
+            # Data-likelihood term: sum_n c_n * log(phi_norm_n).
+            doc_loglik_sum += float(np.sum(doc.counts * np.log(phi_norm)))
+
+            # Per-doc Dirichlet KL: KL(q(theta_d) || p(theta_d)).
+            doc_theta_kl_sum += _dirichlet_kl(gamma, alpha_vec)
+            n_docs += 1
+
+        return {
+            "lambda_stats": lambda_stats,
+            "doc_loglik_sum": np.array(doc_loglik_sum),
+            "doc_theta_kl_sum": np.array(doc_theta_kl_sum),
+            "n_docs": np.array(float(n_docs)),
+        }
 
     def update_global(
         self,
