@@ -144,6 +144,64 @@ models define a `compute_data_summary` method.
 
 ---
 
+## MLlib parity expectations
+
+**Risk:** Head-to-head comparisons of `VanillaLDA` against
+`pyspark.ml.clustering.LDA` may produce numerically different topic-word
+matrices and document-topic distributions even when the math is
+implemented correctly. Treating numerical equality as a correctness gate
+would generate false alarms.
+
+**Sources of legitimate divergence:**
+
+- Different RNG state and seeding semantics (Mersenne Twister vs.
+  numpy default; different per-partition seed derivations).
+- Different mini-batch sampling implementations (Spark's `RDD.sample`
+  vs. our wrapper).
+- Different CAVI per-document iteration counts when `cavi_tol` is hit at
+  slightly different rates.
+- Different float precision in places (Breeze BLAS vs. NumPy BLAS).
+- Asymmetric alpha optimization is on by default in some MLlib paths;
+  ours always uses symmetric alpha.
+
+**Mitigation:** The agreement gate is prevalence-aligned topic similarity:
+rank topics in each implementation by their corpus-level total mass
+(sum of theta over docs), align by descending prevalence, and compute
+the mean Jensen-Shannon divergence on the diagonal of the K_ours x K_mllib
+matrix. Diagonal-dominance after this ordering = topic agreement; the
+threshold for "comparable" is a domain decision (current rule of thumb:
+< 0.15 nats on the synthetic recovery test). Off-diagonal smear localizes
+split/merge differences and is informative, not pass/fail.
+
+**See also:** [ADR 0008](../decisions/0008-vanilla-lda-design.md),
+`charmpheno/charmpheno/evaluate/topic_alignment.py`.
+
+## Small-corpus topic collapse in SVI
+
+**Risk:** Stochastic Variational Inference for LDA (and HDP) is prone to
+empirical topic collapse on small synthetic corpora — entire topics whose
+lambda barely moves from the prior, while one or two topics absorb most of
+the corpus mass. This is a known SVI characteristic, not a math bug:
+Hoffman 2010 §4 evaluates on corpora of 100K-352K documents for a reason.
+
+**Symptoms:** several `lambda.sum(axis=1)` rows near `eta * V` (the prior),
+with one or two rows much larger; mean diagonal JS divergence > 0.20 nats
+on a synthetic recovery test that should comfortably pass.
+
+**Mitigation:** Do NOT use synthetic recovery on a tiny fixture as the
+correctness gate; small-corpus collapse is seed-fragile and produces false
+alarms. The MLlib parity test in `charmpheno/tests/test_lda_compare.py` is
+the rigorous gate — running both implementations on the same input under
+matched hyperparameters localizes any regression to our side. For real
+analysis, use corpora of D >= 1000 patients per topic and a hot init
+(set `gamma_shape >> K`) if collapse is observed.
+
+**See also:** [ADR 0008](../decisions/0008-vanilla-lda-design.md);
+`spark-vi/tests/test_lda_integration.py` for the design choice that
+dropped the synthetic-recovery test in favor of an ELBO-trend smoke test.
+
+---
+
 ## HDP Risks
 
 ### Per-document θ estimates are noisy with short documents
