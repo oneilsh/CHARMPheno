@@ -103,3 +103,54 @@ def test_vi_runner_unpersists_prior_broadcasts_convergence_path(spark):
         "Expected 1 mid-loop swap + 1 final cleanup = 2 unpersists on the "
         f"convergence path; got {len(unpersist_calls)}"
     )
+
+
+def test_vi_runner_transform_unpersists_its_broadcast(spark):
+    """transform() creates exactly one broadcast and unpersists it once.
+
+    Same transparent-proxy pattern as the fit() lifecycle tests. Pins down
+    that the inference path doesn't leak even though it has no iterative
+    loop.
+    """
+    from unittest.mock import patch
+    from spark_vi.core import VIRunner
+    from spark_vi.core.model import VIModel
+    import numpy as np
+
+    class _ToyModel(VIModel):
+        def initialize_global(self, data_summary=None):
+            return {"k": np.array(1.0)}
+        def local_update(self, rows, global_params):
+            return {"x": np.array(0.0)}
+        def update_global(self, global_params, target_stats, learning_rate):
+            return global_params
+        def infer_local(self, row, global_params):
+            return float(row)
+
+    rdd = spark.sparkContext.parallelize([1.0, 2.0], numSlices=2)
+    runner = VIRunner(_ToyModel())
+
+    real_broadcast = spark.sparkContext.broadcast
+    unpersist_calls = []
+
+    class _WrappedBcast:
+        def __init__(self, inner):
+            self._inner = inner
+        @property
+        def value(self):
+            return self._inner.value
+        def unpersist(self, blocking=False):
+            unpersist_calls.append(self._inner)
+            return self._inner.unpersist(blocking=blocking)
+
+    def _wrapping_broadcast(value):
+        return _WrappedBcast(real_broadcast(value))
+
+    with patch.object(spark.sparkContext, "broadcast", side_effect=_wrapping_broadcast):
+        out = runner.transform(rdd, global_params={"k": np.array(1.0)})
+        out.collect()  # force execution
+
+    assert len(unpersist_calls) == 1, (
+        f"Expected exactly 1 unpersist for transform's single broadcast, "
+        f"got {len(unpersist_calls)}"
+    )
