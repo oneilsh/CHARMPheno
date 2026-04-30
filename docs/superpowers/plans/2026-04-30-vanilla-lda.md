@@ -2945,3 +2945,36 @@ After writing this plan, the spec was checked end-to-end:
 - **Type consistency:** `BOWDocument` defined in Task 1; used by name in Tasks 7, 8, 11, 13, 15, 16, 17. `_cavi_doc_inference` defined in Task 7; called in Tasks 8, 11. `_dirichlet_kl` defined in Task 8; called in Tasks 8, 10. `LDARunArtifacts` fields used consistently in Tasks 15, 17. `to_bow_dataframe` returns `(DataFrame, dict[int, int])` in Task 13; consumers in Tasks 15-17 unpack accordingly.
 - **No placeholders:** all code blocks contain runnable code; all commands name concrete files; all expected outputs are concrete.
 - **One small intentional softness:** Task 12's recovery threshold is "tighten on first observed flake" rather than pinned in advance — calibration cost is paid in the first green run, with a hard upper bound (0.25 nats) so it can't drift to meaninglessness.
+
+---
+
+## Deferred minor items from per-task reviews
+
+Captured during per-task code-quality review for Task 22 / final cleanup. None
+are blocking; the implementations are spec-compliant and tests pass.
+
+**Type hints / signatures:**
+- `VIModel.infer_local`: missing `row: Any` annotation and return-type hint. Other methods on the ABC are fully annotated; this one isn't (Task 2). The signature gets used in Task 11 by `VanillaLDA.infer_local` which has its own better-typed override.
+- `VIRunner.transform`: typed `global_params: dict[str, Any]` instead of `dict[str, np.ndarray]` (matching the rest of the codebase). The plan specified `Any`; consider tightening (Task 3).
+
+**Test hygiene:**
+- Several new tests do `import numpy as np` / `import pytest` inside function bodies even though both are imported at module level. Cleanup pass when convenient (Tasks 3, 5, 6, 8, 9, 10, 11).
+- Test file `test_lda_contract.py` started its life testing only the VIModel default `infer_local` (Task 2); a top-of-file note explaining that LDA contract tests accumulate here would aid navigation. Now mostly LDA, so the oddness has resolved itself.
+
+**Test coverage gaps:**
+- No test pins `phi_norm` value directly against an explicit-phi reference. The Task 7 equivalence test pins `gamma`; `phi_norm` and `expElogthetad` are determined by `gamma` so implicitly tested, but a regression that returned a stale `phi_norm` (e.g., from before the final gamma update) would only surface in `doc_loglik_sum` via ELBO trend. Cheap test to add later.
+- No `compute_elbo` responsiveness test (does ELBO change when lambda is perturbed away from the prior?). Suggested by the Task 10 reviewer; would catch a sign error on the global KL term that the closed-form-zero test doesn't probe.
+
+**Code organization:**
+- The Python K-loop in `compute_elbo` is fine for K up to a few hundred; vectorize if K grows beyond that. One-line breadcrumb comment when convenient.
+- Redundant outer `float(...)` wrap in `compute_elbo`'s return statement (the inner expression is already a Python float).
+- `compute_elbo` docstring prose says "+ doc-level KL + global KL" which clashes with the formula immediately below ("- doc_theta_kl_sum - global_kl"). Tiny readability nit.
+
+**Algorithmic enhancements (deferred to v2):**
+- Per-doc `np.random.gamma` for `gamma_init` uses numpy's global RNG, not a per-doc deterministic key. Comment-only TODO already in `local_update`. Will matter for byte-reproducible MLlib comparisons.
+- The `expElogbeta` gotcha (the bug fixed in commit `c42145b`) belongs in ADR 0008 as a "subtleties" or "non-obvious correctness detail" section. Already in the spec's `update_global` paragraph but the ADR is the durable home.
+
+**Carryover from broader brainstorm:**
+- Asymmetric α + `optimizeDocConcentration`. Still future work per the spec.
+- `elbo_eval_interval` config field. Still parked.
+- Combined mini-batch + auto-checkpoint integration test. Still parked.
