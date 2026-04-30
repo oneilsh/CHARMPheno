@@ -1378,7 +1378,20 @@ git commit -m "VanillaLDA.infer_local: per-doc inference + export from models"
 
 ---
 
-### Task 12: VanillaLDA integration test (Spark-local recovery)
+### Task 12: VanillaLDA integration test (Spark-local ELBO trend + smoke)
+
+**Note (2026-04-30 revision):** This task originally included a recovery
+test (mean diagonal JS divergence after prevalence-sorting < threshold).
+That test was dropped after empirical investigation showed topic-collapse
+at small synthetic-corpus scales (D=200, K=5) is a real SVI characteristic
+(MLlib has the same behavior, see Hoffman 2010 §4 which uses corpora of
+100K-352K docs). Recovery quality is now verified by the **MLlib parity
+test** in Task 15 — running both `VanillaLDA` and `pyspark.ml.clustering.LDA`
+on the same data and asserting they reach comparable solutions is the
+right rigorous gate, since any math regression on our side will diverge
+from the reference. This task keeps a deterministic ELBO-trend test as
+a sanity check that fitting actually drives the bound up over iterations
+(catching regressions in the `VIRunner` ↔ `VanillaLDA` integration).
 
 **Files:**
 - Create: `spark-vi/tests/test_lda_integration.py`
