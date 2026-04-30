@@ -28,7 +28,11 @@ def js_divergence_matrix(A: np.ndarray, B: np.ndarray) -> np.ndarray:
 
 
 def _kl_safe(p: np.ndarray, q: np.ndarray) -> float:
-    """KL(p || q) computed only over the support of p (avoids 0 * log 0)."""
+    """KL(p || q) computed only over the support of p (avoids 0 * log 0).
+
+    The 1e-300 floor on q is defensive; in JS usage q is always the mixture
+    0.5*(p+q_orig), so q >= 0.5*p > 0 wherever p > 0 and the floor never fires.
+    """
     mask = p > 0
     return float(np.sum(p[mask] * (np.log(p[mask]) - np.log(q[mask] + 1e-300))))
 

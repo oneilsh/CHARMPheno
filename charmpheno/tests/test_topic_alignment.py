@@ -68,6 +68,8 @@ def test_ground_truth_from_oracle_normalizes_per_topic(spark):
         (1, 1, 200, "b", 1),
         (2, 1, 100, "a", 1),
         (2, 1, 300, "c", 1),
+        (3, 1, 999, "x", 0),   # concept 999 not in vocab_map — skip
+        (3, 2, 100, "a", 5),   # true_topic_id=5 >= K_true=2 — skip
     ]
     df = spark.createDataFrame(rows, schema=schema)
     vocab_map = {100: 0, 200: 1, 300: 2}
