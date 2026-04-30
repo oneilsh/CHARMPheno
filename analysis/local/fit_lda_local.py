@@ -27,7 +27,7 @@ from pathlib import Path
 from pyspark.sql import SparkSession
 
 from charmpheno.omop import load_omop_parquet, to_bow_dataframe
-from spark_vi.core import BOWDocument, VIConfig, VIRunner
+from spark_vi.core import BOWDocument, VIConfig, VIResult, VIRunner
 from spark_vi.io import save_result
 from spark_vi.models.lda import VanillaLDA
 
@@ -42,6 +42,8 @@ def _build_spark() -> SparkSession:
         .config("spark.sql.shuffle.partitions", "4")
         .config("spark.driver.memory", "2g")
         .config("spark.ui.enabled", "false")
+        .config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow")
+        .config("spark.executor.extraJavaOptions", "-Djava.security.manager=allow")
         .getOrCreate()
     )
 
@@ -87,7 +89,6 @@ def main(argv: list[str] | None = None) -> int:
         vocab_list = [None] * len(vocab_map)
         for cid, idx in vocab_map.items():
             vocab_list[idx] = cid
-        from spark_vi.core import VIResult
         result_with_vocab = VIResult(
             global_params=result.global_params,
             elbo_trace=result.elbo_trace,
@@ -99,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         log.info("Wrote %s (K=%d, V=%d, n_iterations=%d, converged=%s)",
                  args.output, args.K, len(vocab_map),
                  result.n_iterations, result.converged)
+        rdd.unpersist()
         return 0
     finally:
         spark.stop()
