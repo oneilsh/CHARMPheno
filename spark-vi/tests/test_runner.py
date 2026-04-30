@@ -208,3 +208,42 @@ def test_vi_runner_full_batch_path_unchanged_when_fraction_none(spark):
     assert 0.55 < mean < 0.85
     assert result.n_iterations == 5
     assert len(result.elbo_trace) == 5
+
+
+def test_runner_transform_calls_infer_local_on_each_row(spark):
+    """VIRunner.transform applies infer_local across the RDD, returning per-row results."""
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.core.model import VIModel
+    import numpy as np
+
+    class _ToyModel(VIModel):
+        def initialize_global(self, data_summary=None):
+            return {"scale": np.array(2.0)}
+        def local_update(self, rows, global_params):
+            return {"x": np.array(0.0)}
+        def update_global(self, global_params, target_stats, learning_rate):
+            return global_params
+        def infer_local(self, row, global_params):
+            return {"y": float(row) * float(global_params["scale"])}
+
+    rdd = spark.sparkContext.parallelize([1, 2, 3, 4], numSlices=2)
+    runner = VIRunner(_ToyModel(), config=VIConfig())
+    out = runner.transform(rdd, global_params={"scale": np.array(2.0)})
+    collected = sorted([r["y"] for r in out.collect()])
+    assert collected == [2.0, 4.0, 6.0, 8.0]
+
+
+def test_runner_transform_propagates_not_implemented(spark):
+    """Calling transform on a model without infer_local raises NotImplementedError."""
+    import pytest
+    from spark_vi.core import VIRunner
+    from spark_vi.models.counting import CountingModel
+    import numpy as np
+
+    rdd = spark.sparkContext.parallelize([0, 1], numSlices=1)
+    runner = VIRunner(CountingModel())
+    out = runner.transform(rdd, global_params={"alpha": np.array(1.0), "beta": np.array(1.0)})
+    with pytest.raises(Exception) as exc:
+        out.collect()
+    # The Spark task wraps the original error; the message survives.
+    assert "CountingModel" in str(exc.value)

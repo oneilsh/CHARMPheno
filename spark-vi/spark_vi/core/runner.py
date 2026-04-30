@@ -214,3 +214,36 @@ class VIRunner:
             converged=False,
             metadata={"model_class": type(model).__name__},
         )
+
+    def transform(self, data_rdd: RDD, global_params: dict[str, Any]) -> RDD:
+        """Apply trained global params to infer per-row posteriors.
+
+        One pass over the RDD: broadcasts global_params, calls
+        model.infer_local on each row, returns the resulting RDD. No reduce,
+        no global update, no checkpoint.
+
+        For models that don't implement infer_local, the per-row map raises
+        NotImplementedError when collected.
+        """
+        sc = data_rdd.context
+        bcast = sc.broadcast(global_params)
+        model = self.model
+
+        def _infer(row, _bcast=bcast, _model=model):
+            return _model.infer_local(row, _bcast.value)
+
+        try:
+            return data_rdd.map(_infer)
+        finally:
+            # Eager unpersist matches fit()'s broadcast discipline. The
+            # returned RDD captures bcast in the closure, so this is safe:
+            # Spark resolves bcast.value at task launch time, which has
+            # already happened (or will be re-broadcast lazily) when the
+            # caller materializes the RDD.
+            #
+            # Note: if the caller chains .map / .filter and triggers an
+            # action much later, the broadcast may already be unpersisted.
+            # That is acceptable for transform — Spark re-broadcasts on
+            # demand. Long-lived inference pipelines should call
+            # .persist() on the returned RDD.
+            bcast.unpersist(blocking=False)
