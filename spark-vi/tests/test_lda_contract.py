@@ -135,3 +135,46 @@ def test_vanilla_lda_local_update_handles_empty_partition():
     assert int(stats["n_docs"]) == 0
     assert float(stats["doc_loglik_sum"]) == 0.0
     assert float(stats["doc_theta_kl_sum"]) == 0.0
+
+
+def test_vanilla_lda_update_global_at_lr_zero_is_identity():
+    import numpy as np
+    from spark_vi.models.lda import VanillaLDA
+    np.random.seed(0)
+    m = VanillaLDA(K=2, vocab_size=4)
+    g = m.initialize_global(None)
+    target = {"lambda_stats": np.ones((2, 4)) * 5.0}
+    new_g = m.update_global(g, target_stats=target, learning_rate=0.0)
+    np.testing.assert_array_equal(new_g["lambda"], g["lambda"])
+
+
+def test_vanilla_lda_update_global_at_lr_one_jumps_to_target():
+    """At rho=1.0, lambda becomes (eta + lambda_stats)."""
+    import numpy as np
+    from spark_vi.models.lda import VanillaLDA
+    np.random.seed(0)
+    m = VanillaLDA(K=2, vocab_size=4, eta=0.05)
+    g = m.initialize_global(None)
+    target = {"lambda_stats": np.full((2, 4), 7.0)}
+    new_g = m.update_global(g, target_stats=target, learning_rate=1.0)
+    np.testing.assert_allclose(new_g["lambda"], 0.05 + 7.0)
+
+
+def test_vanilla_lda_combine_stats_is_associative():
+    """treeReduce relies on associativity: combine(a, combine(b, c)) == combine(combine(a, b), c)."""
+    import numpy as np
+    from spark_vi.models.lda import VanillaLDA
+    rng = np.random.default_rng(0)
+    m = VanillaLDA(K=2, vocab_size=3)
+    def _stats():
+        return {
+            "lambda_stats": rng.normal(size=(2, 3)),
+            "doc_loglik_sum": np.array(rng.normal()),
+            "doc_theta_kl_sum": np.array(rng.normal()),
+            "n_docs": np.array(float(rng.integers(0, 100))),
+        }
+    a, b, c = _stats(), _stats(), _stats()
+    left = m.combine_stats(a, m.combine_stats(b, c))
+    right = m.combine_stats(m.combine_stats(a, b), c)
+    for k in left:
+        np.testing.assert_allclose(left[k], right[k])

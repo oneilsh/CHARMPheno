@@ -236,4 +236,14 @@ class VanillaLDA(VIModel):
         target_stats: dict[str, np.ndarray],
         learning_rate: float,
     ) -> dict[str, np.ndarray]:
-        raise NotImplementedError("Implemented in Task 10")
+        """SVI natural-gradient step:
+
+            lambda_new = (1 - rho) * lambda + rho * (eta + target_stats["lambda_stats"])
+
+        target_stats["lambda_stats"] is already pre-scaled by corpus_size /
+        batch_size in mini-batch mode (per ADR 0005).
+        """
+        lam = global_params["lambda"]
+        target_lam = self.eta + target_stats["lambda_stats"]
+        new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
+        return {"lambda": new_lam}
