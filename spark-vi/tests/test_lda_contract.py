@@ -51,3 +51,31 @@ def test_vanilla_lda_rejects_invalid_hyperparams():
         VanillaLDA(K=2, vocab_size=10, cavi_max_iter=0)
     with pytest.raises(ValueError):
         VanillaLDA(K=2, vocab_size=10, cavi_tol=0.0)
+
+
+def test_vanilla_lda_initialize_global_returns_lambda_of_correct_shape():
+    import numpy as np
+    from spark_vi.models.lda import VanillaLDA
+
+    m = VanillaLDA(K=5, vocab_size=20, gamma_shape=100.0)
+    g = m.initialize_global(data_summary=None)
+    assert "lambda" in g
+    assert g["lambda"].shape == (5, 20)
+    # Gamma(100, 1/100) draws are positive with mean ~1; sanity-check positivity.
+    assert (g["lambda"] > 0).all()
+
+
+def test_vanilla_lda_initialize_global_is_seedable_via_numpy():
+    """Seeding numpy.random produces reproducible lambda init.
+
+    The model's lambda init draws from numpy's default Gamma RNG; tests can
+    pin reproducibility by seeding np.random before construction.
+    """
+    import numpy as np
+    from spark_vi.models.lda import VanillaLDA
+
+    np.random.seed(42)
+    g1 = VanillaLDA(K=3, vocab_size=10).initialize_global(None)
+    np.random.seed(42)
+    g2 = VanillaLDA(K=3, vocab_size=10).initialize_global(None)
+    np.testing.assert_array_equal(g1["lambda"], g2["lambda"])

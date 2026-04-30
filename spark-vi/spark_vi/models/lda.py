@@ -88,7 +88,18 @@ class VanillaLDA(VIModel):
     # Contract methods (filled in over subsequent tasks).
 
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
-        raise NotImplementedError("Implemented in Task 6")
+        """Random Gamma(gamma_shape, 1/gamma_shape) init for lambda (K, V).
+
+        gamma_shape=100 (MLlib default) gives draws tightly concentrated near 1;
+        this is the variational analog of an "uninformative" topic-word prior
+        with a small amount of symmetry-breaking noise.
+        """
+        lam = np.random.gamma(
+            shape=self.gamma_shape,
+            scale=1.0 / self.gamma_shape,
+            size=(self.K, self.V),
+        )
+        return {"lambda": lam}
 
     def local_update(
         self,
