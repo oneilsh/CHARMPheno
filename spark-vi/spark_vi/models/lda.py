@@ -36,9 +36,58 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 import numpy as np
+from scipy.special import digamma
 
 from spark_vi.core.model import VIModel
 from spark_vi.core.types import BOWDocument
+
+
+def _cavi_doc_inference(
+    indices: np.ndarray,
+    counts: np.ndarray,
+    expElogbeta: np.ndarray,
+    alpha: float,
+    gamma_init: np.ndarray,
+    max_iter: int,
+    tol: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Inner CAVI loop for a single document under fixed q(beta).
+
+    Lee/Seung 2001 trick: never materialize the full (K, n_unique) phi
+    matrix. Instead carry only gamma_d (K-vector) and phi_norm (n_unique-
+    vector). Memory is O(K + n_unique) rather than O(K * n_unique).
+
+    Recurrence (equivalent to explicit phi normalized per token):
+        expElogthetad = exp(digamma(gamma) - digamma(gamma.sum()))
+        eb_d          = expElogbeta[:, indices]           # (K, n_unique)
+        phi_norm      = eb_d.T @ expElogthetad + 1e-100  # (n_unique,)
+        gamma_new     = alpha + expElogthetad * (eb_d @ (counts / phi_norm))
+
+    Returns:
+        gamma:         (K,) converged variational Dirichlet parameter for theta_d.
+        expElogthetad: (K,) exp(E[log theta_d]) at the converged gamma.
+        phi_norm:      (n_unique,) implicit phi-normalizer at convergence.
+                       Needed for the data-likelihood ELBO term.
+        n_iter:        iterations consumed (1..max_iter).
+    """
+    eb_d = expElogbeta[:, indices]  # (K, n_unique)
+    gamma = gamma_init.astype(np.float64, copy=True)
+
+    expElogthetad = np.exp(digamma(gamma) - digamma(gamma.sum()))
+    phi_norm = eb_d.T @ expElogthetad + 1e-100
+
+    n_iter = 0
+    for it in range(1, max_iter + 1):
+        n_iter = it
+        prev = gamma.copy()
+        # (K, n_unique) @ (n_unique,) -> (K,); elementwise mul with K-vec
+        gamma = alpha + expElogthetad * (eb_d @ (counts / phi_norm))
+        expElogthetad = np.exp(digamma(gamma) - digamma(gamma.sum()))
+        phi_norm = eb_d.T @ expElogthetad + 1e-100
+        if np.mean(np.abs(gamma - prev)) < tol:
+            break
+
+    return gamma, expElogthetad, phi_norm, n_iter
 
 
 class VanillaLDA(VIModel):
