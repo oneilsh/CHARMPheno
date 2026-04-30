@@ -77,6 +77,11 @@ def test_vanilla_lda_matches_mllib_on_well_separated_corpus(spark):
     (sign flip, wrong-direction update, missing factor) will diverge from
     the reference and fail this test.
 
+    Threshold is set to 0.20 nats — well above the typical observed value
+    (~0.01 with matched hyperparameters and seed=0) — to tolerate ordering
+    and seed variability across Spark versions and CI environments. A
+    regression that flips the assertion's verdict will be unambiguous.
+
     Replaces the synthetic recovery test originally proposed in Task 12.
     """
     import numpy as np
@@ -144,7 +149,6 @@ def test_vanilla_lda_matches_mllib_on_well_separated_corpus(spark):
         float(np.mean([M[i, perm[i]] for i in range(K)]))
         for perm in permutations(range(K))
     )
-    print(f"\nbest-permutation diagonal mean JS = {best_diag:.4f} nats")
     assert best_diag < 0.20, (
         f"VanillaLDA and MLlib LDA diverge beyond expected: "
         f"best-permutation diagonal mean JS = {best_diag:.4f} nats. "

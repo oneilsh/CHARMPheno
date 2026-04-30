@@ -24,6 +24,9 @@ class LDARunArtifacts:
 
     Asymmetric on ELBO-trace availability: ours records every iter; MLlib
     only exposes a final log-likelihood. See spec for details.
+
+    per_iter_seconds is approximated as wall_time / n_iter for both
+    implementations; true per-iteration timing is not instrumented.
     """
     topics_matrix: np.ndarray
     topic_prevalence: np.ndarray
@@ -42,8 +45,9 @@ def run_ours(
     """Fit VanillaLDA via VIRunner; collect artifacts."""
     model = VanillaLDA(K=K, vocab_size=vocab_size)
 
+    runner = VIRunner(model, config=config)
     t0 = time.perf_counter()
-    result = VIRunner(model, config=config).fit(rdd)
+    result = runner.fit(rdd)
     t1 = time.perf_counter()
     wall = t1 - t0
     n_iter = max(1, result.n_iterations)
@@ -52,7 +56,6 @@ def run_ours(
     lam = result.global_params["lambda"]
     topics_matrix = lam / lam.sum(axis=1, keepdims=True)
 
-    runner = VIRunner(model, config=config)
     inferred = runner.transform(rdd, global_params=result.global_params).collect()
     prev = np.zeros(K)
     for d in inferred:
