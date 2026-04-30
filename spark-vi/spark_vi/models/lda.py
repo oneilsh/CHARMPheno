@@ -247,3 +247,32 @@ class VanillaLDA(VIModel):
         target_lam = self.eta + target_stats["lambda_stats"]
         new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
         return {"lambda": new_lam}
+
+    def compute_elbo(
+        self,
+        global_params: dict[str, np.ndarray],
+        aggregated_stats: dict[str, np.ndarray],
+    ) -> float:
+        """ELBO = doc-data-likelihood + doc-level KL + global KL.
+
+        With our sign conventions (KLs subtracted):
+            ELBO = doc_loglik_sum
+                 - doc_theta_kl_sum
+                 - sum_k KL( q(beta_k) || p(beta_k) )
+
+        doc_loglik_sum and doc_theta_kl_sum are aggregated across the
+        partition by local_update; the global beta KL is computed here on
+        the driver from lambda alone.
+        """
+        lam = global_params["lambda"]
+        K, V = lam.shape
+        eta_vec = np.full(V, self.eta, dtype=np.float64)
+        global_kl = 0.0
+        for k in range(K):
+            global_kl += _dirichlet_kl(lam[k], eta_vec)
+
+        return float(
+            float(aggregated_stats["doc_loglik_sum"])
+            - float(aggregated_stats["doc_theta_kl_sum"])
+            - global_kl
+        )

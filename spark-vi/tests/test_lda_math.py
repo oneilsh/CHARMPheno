@@ -103,3 +103,42 @@ def test_cavi_doc_inference_matches_explicit_phi_implementation():
             break
 
     np.testing.assert_allclose(gamma_impl, gamma_exp, atol=1e-6)
+
+
+def test_compute_elbo_returns_finite_float_on_realistic_inputs():
+    import numpy as np
+    from spark_vi.models.lda import VanillaLDA
+    np.random.seed(0)
+    m = VanillaLDA(K=3, vocab_size=5)
+    g = m.initialize_global(None)
+    agg = {
+        "lambda_stats": np.ones((3, 5)),
+        "doc_loglik_sum": np.array(-12.0),
+        "doc_theta_kl_sum": np.array(0.4),
+        "n_docs": np.array(7.0),
+    }
+    val = m.compute_elbo(g, agg)
+    assert isinstance(val, float)
+    assert np.isfinite(val)
+
+
+def test_compute_elbo_lambda_kl_zero_when_lambda_equals_eta():
+    """When lambda equals the prior eta·1, the global Dirichlet KL term is 0,
+    so the ELBO equals just the data-likelihood + (-doc-theta-KL).
+    """
+    import numpy as np
+    from spark_vi.models.lda import VanillaLDA
+    K, V = 2, 3
+    eta = 0.1
+    m = VanillaLDA(K=K, vocab_size=V, eta=eta)
+    g = {"lambda": np.full((K, V), eta)}
+    agg = {
+        "lambda_stats": np.zeros((K, V)),  # not used directly in ELBO, but realistic
+        "doc_loglik_sum": np.array(-3.0),
+        "doc_theta_kl_sum": np.array(0.5),
+        "n_docs": np.array(2.0),
+    }
+    val = m.compute_elbo(g, agg)
+    # ELBO = doc_loglik_sum - doc_theta_kl_sum - global_kl
+    # global_kl = 0 (lambda == eta * 1_V row-wise per topic)
+    np.testing.assert_allclose(val, -3.0 - 0.5)
