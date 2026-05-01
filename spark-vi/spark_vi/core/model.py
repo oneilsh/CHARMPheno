@@ -101,6 +101,27 @@ class VIModel(ABC):
         Note this differs from the target_stats passed to update_global.
 
         Default returns NaN, which callers treat as 'ELBO not available'.
+
+        ELBO term placement pattern
+        ---------------------------
+        When an ELBO term depends on per-record local state — γ_d, per-doc
+        auxiliary normalizers, sample-level expectations, etc. — that is
+        already in scope inside local_update, accumulate that term *there*
+        as a scalar entry in the returned suff-stats dict. The runner sums
+        it across partitions via combine_stats; compute_elbo just reads the
+        scalar back out.
+
+        Trying to recover such a term inside compute_elbo is a trap: you'd
+        have to either re-run local_update from scratch, or stash per-record
+        state into a corpus-sized array (memory blowup on large corpora).
+
+        compute_elbo is the right home for ELBO terms that depend only on
+        global_params — typically global Dirichlet/Gaussian KL terms — which
+        are cheap to evaluate once on the driver.
+
+        See VanillaLDA for a worked example: doc_loglik_sum and
+        doc_theta_kl_sum are accumulated in local_update; the global
+        Dirichlet KL on β is the only term computed in compute_elbo.
         """
         return float("nan")
 

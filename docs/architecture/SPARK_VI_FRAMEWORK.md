@@ -232,6 +232,16 @@ Model authors subclass `VIModel` and implement:
   to a corpus-level target), suitable for ELBO terms representing observed evidence.
   Default returns NaN, which callers treat as "ELBO not available."
 
+  **ELBO-term placement pattern.** When an ELBO term depends on per-record local
+  state (γ_d, per-doc normalizers, sample-level expectations) that is already in scope
+  inside `local_update`, accumulate the term *there* as a scalar entry in the returned
+  suff-stats dict; the runner sums it across partitions via `combine_stats` and
+  `compute_elbo` just reads the scalar back out. Re-deriving such a term inside
+  `compute_elbo` would force you to either re-run the local E-step or stash per-record
+  state into a corpus-sized array. `compute_elbo` is the right home only for terms that
+  depend on `global_params` alone (typically global Dirichlet/Gaussian KL terms), which
+  are cheap to evaluate once on the driver. See `VanillaLDA` for a worked example.
+
 - **`combine_stats(stats_a, stats_b) -> dict[str, np.ndarray]`** — Override if
   sufficient statistics don't aggregate by elementwise addition. Default: sum all
   arrays in the dict.

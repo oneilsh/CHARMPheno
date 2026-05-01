@@ -200,6 +200,60 @@ def test_vanilla_lda_update_global_applies_expElogbeta_factor():
     assert not np.allclose(new_g["lambda"], buggy, atol=0.5)
 
 
+def test_vanilla_lda_update_global_uses_input_lambda_for_expElogbeta():
+    """update_global must compute expElogbeta from the *input* lambda — the
+    one local_update saw at the start of the iteration — not from any
+    intermediate or post-update lambda candidate.
+
+    This invariant matters because local_update's per-doc accumulator
+    deliberately omits the expElogbeta factor (Lee/Seung implicit-phi
+    deferred multiplication); update_global must put it back using the
+    *same* lambda local_update used, otherwise the natural-gradient
+    direction is computed in a mixed reference frame.
+
+    Tested at lr=0.5 with non-uniform lam: the convex combination
+    (1-rho)*lam + rho*lambda_hat exposes the dependence of the result on
+    which lambda generated expElogbeta; computing expElogbeta from a
+    different lambda would shift the answer in a hand-checkable way.
+    """
+    import numpy as np
+    from scipy.special import digamma
+    from spark_vi.models.lda import VanillaLDA
+
+    K, V = 2, 3
+    eta = 0.05
+    m = VanillaLDA(K=K, vocab_size=V, eta=eta)
+    # Non-uniform lam: row 0 peaked on col 0, row 1 peaked on col 2.
+    lam_in = np.array([[5.0, 0.5, 0.5], [0.5, 0.5, 5.0]])
+    lambda_stats = np.array([[2.0, 1.0, 0.5], [0.5, 1.0, 2.0]])
+    target_stats = {"lambda_stats": lambda_stats}
+
+    rho = 0.5
+    new_lam = m.update_global(
+        {"lambda": lam_in}, target_stats=target_stats, learning_rate=rho,
+    )["lambda"]
+
+    # The contract: expElogbeta computed from lam_in.
+    expElogbeta_in = np.exp(digamma(lam_in) - digamma(lam_in.sum(axis=1, keepdims=True)))
+    lambda_hat = eta + expElogbeta_in * lambda_stats
+    expected = (1 - rho) * lam_in + rho * lambda_hat
+    np.testing.assert_allclose(new_lam, expected)
+
+    # Counter-case: if expElogbeta were computed from the prior (eta * 1)
+    # instead of lam_in, the result would differ noticeably. Pinning this
+    # rules out a class of refactoring bugs where the reference lambda
+    # silently drifts away from the input.
+    eta_lam = np.full_like(lam_in, eta)
+    expElogbeta_wrong = np.exp(
+        digamma(eta_lam) - digamma(eta_lam.sum(axis=1, keepdims=True))
+    )
+    wrong = (1 - rho) * lam_in + rho * (eta + expElogbeta_wrong * lambda_stats)
+    assert not np.allclose(new_lam, wrong, atol=0.05), (
+        "update_global appears to use a lambda other than the input for "
+        "expElogbeta — natural-gradient reference frame would be inconsistent."
+    )
+
+
 def test_vanilla_lda_combine_stats_is_associative():
     """treeReduce relies on associativity: combine(a, combine(b, c)) == combine(combine(a, b), c)."""
     import numpy as np

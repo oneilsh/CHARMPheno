@@ -128,6 +128,16 @@ class VIRunner:
             bcast = sc.broadcast(global_params)
 
             # 3 & 4. Distributed E-step + aggregate.
+            # Default-arg closure capture (`_bcast=bcast, _model=model`) is the
+            # Spark-safe convention for shipping closures to executors. Python
+            # would otherwise capture `bcast` and `model` as free variables via
+            # `__closure__`, which leaves them subject to two failure modes:
+            # (1) if the enclosing scope mutates the name between definition
+            # and pickling, the closure picks up the mutated value; (2)
+            # cloudpickle's handling of deeply-nested lexical scopes has been
+            # historically inconsistent. Default args are bound at function-
+            # definition time and stored in `__defaults__`, which is pinned-by-
+            # value and pickles cleanly. Same idiom used in transform() below.
             def _local(rows, _bcast=bcast, _model=model):
                 return [_model.local_update(rows, _bcast.value)]
 
@@ -229,6 +239,7 @@ class VIRunner:
         bcast = sc.broadcast(global_params)
         model = self.model
 
+        # Default-arg closure-capture pattern; see explanation in fit().
         def _infer(row, _bcast=bcast, _model=model):
             return _model.infer_local(row, _bcast.value)
 

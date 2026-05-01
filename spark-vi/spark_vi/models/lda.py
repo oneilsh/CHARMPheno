@@ -153,9 +153,18 @@ class VanillaLDA(VIModel):
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
         """Random Gamma(gamma_shape, 1/gamma_shape) init for lambda (K, V).
 
-        gamma_shape=100 (MLlib default) gives draws tightly concentrated near 1;
-        this is the variational analog of an "uninformative" topic-word prior
-        with a small amount of symmetry-breaking noise.
+        gamma_shape=100 gives draws with mean 1.0 and variance 0.01 —
+        tightly concentrated near 1, with a small amount of symmetry-
+        breaking noise. The variational analog of an "uninformative"
+        topic-word prior. Without the noise, λ stays at all-ones forever
+        because every topic looks identical to every gradient step.
+
+        The choice of 100 traces directly to Hoffman 2010's reference
+        Python implementation `onlineldavb.py` line 126
+        (https://github.com/blei-lab/onlineldavb), which has
+        `n.random.gamma(100., 1./100., (self._K, self._W))`. MLlib's
+        `OnlineLDAOptimizer.scala` adopted the same value as a private
+        constant; we follow them. The number is empirical, not derived.
         """
         lam = np.random.gamma(
             shape=self.gamma_shape,
