@@ -43,9 +43,50 @@ def order_by_prevalence(
     """Sort topic rows of `topics` (K, V) by `prevalence` descending.
 
     Returns (sorted_topics, perm). topics[perm] == sorted_topics.
+
+    Caveat: prevalence-rank sorting only produces a meaningful biplot
+    diagonal when true prevalences span a clearly resolvable range. With
+    a symmetric Dirichlet prior on θ (uniform expected prevalence), the
+    rank is noise-dominated even under perfect topic recovery. Use
+    `optimal_match_reorder` in that regime instead.
     """
     perm = np.argsort(-np.asarray(prevalence))
     return topics[perm], perm
+
+
+def optimal_match_reorder(
+    js_matrix: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Hungarian-match rows to columns; reorder rows so matches are on the diagonal.
+
+    Given an (K_a, K_b) divergence matrix (typically from
+    `js_divergence_matrix`), find the permutation of rows that minimizes
+    the sum of diagonal entries — equivalently, the optimal one-to-one
+    pairing between A's topics and B's topics under the matrix's metric.
+
+    Returns:
+        reordered: (K_a, K_b) the input matrix with rows permuted so
+                   the optimal matches lie on the main diagonal.
+        row_perm:  (min(K_a, K_b),) the permutation applied to rows.
+                   reordered[i] == js_matrix[row_perm[i]].
+
+    Use this when prevalence-rank sorting is uninformative — i.e.,
+    when the true topic prevalences span a narrow range and a
+    permuted-but-correct recovery would otherwise look like a failure
+    on the prevalence-sorted biplot. See `order_by_prevalence` caveat.
+
+    Currently unused by the framework's drivers; kept for the parked
+    `--biplot-mode hungarian` switch on `compare_lda_local.py`. Lazy-
+    imports `scipy.optimize.linear_sum_assignment` so importing this
+    module never pays the scipy startup cost.
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    rows, cols = linear_sum_assignment(js_matrix)
+    perm = np.empty(js_matrix.shape[0], dtype=int)
+    for r, c in zip(rows, cols):
+        perm[c] = r
+    return js_matrix[perm, :], perm
 
 
 def alignment_biplot_data(
