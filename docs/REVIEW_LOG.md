@@ -12,6 +12,197 @@ elsewhere.
 
 ---
 
+## 2026-05-01 — Vanilla LDA branch walkthrough
+
+A bottom-up walkthrough of the `vanilla-lda` branch after its initial
+implementation entry, focused on framing the design choices for future
+maintainers and surfacing methodology lessons from the head-to-head with
+Spark MLlib. Five lessons; several small refactor detours shipped during
+review; one substantive simulator extension (asymmetric-prior generation
+from upstream U-fractions).
+
+### Areas reviewed
+
+**Lesson 1 — `VanillaLDA` math.**
+[`spark_vi/models/lda.py`](../spark-vi/spark_vi/models/lda.py) walked end-
+to-end. CAVI implicit-φ recurrence (`gamma_d`, `expElogthetad`, `phi_norm`
+of length n_unique rather than n_tokens — the Lee/Seung 2001 trick).
+Sufficient-statistic accumulation pattern in `local_update`: `expElogbeta`
+precomputed once per partition, sparse `lambda_stats[:, doc.indices] +=`
+write, three-term ELBO accumulation inline. The post-aggregation
+`expElogbeta * target_stats` multiplication in `update_global` as the
+deferred second factor of the implicit-φ — MLlib's `*:* expElogbeta.t`
+in `OnlineLDAOptimizer.submitMiniBatch` does the same thing structurally.
+ELBO three-term decomposition (per-doc data likelihood, per-doc Dirichlet
+KL, global Dirichlet KL) and the placement convention (per-record terms
+in `local_update`, global-only terms in `compute_elbo`).
+
+**Lesson 2 — Runner contract and capability hooks.**
+[`spark_vi/core/model.py`](../spark-vi/spark_vi/core/model.py) /
+[`runner.py`](../spark-vi/spark_vi/core/runner.py) optional-capability
+pattern: `infer_local(self, row, global_params)` defaults to raise
+NotImplementedError with class name; `VIRunner.transform` orchestrates
+broadcast → `mapPartitions` → unpersist for any model that supports it.
+Pure-function contract (`self` may be read for hyperparameters but never
+post-fit state) and why model-vs-result split is what makes
+checkpoint/export/resume work cleanly.
+
+**Lesson 3 — Broadcast lifecycle and serialization.**
+[`tests/test_broadcast_lifecycle.py`](../spark-vi/tests/test_broadcast_lifecycle.py)
+transparent-proxy approach (delegate `.value` to inner real broadcast,
+intercept `.unpersist` for counting) with exact-count assertions on the
+three runner paths (max-iter fit, convergence-early-exit fit, transform).
+Default-arg closure-capture as the Spark-safe convention for
+`mapPartitions` closures, with both failure modes named in code (free-var
+mutation between def and pickling, cloudpickle nested-scope quirks).
+
+**Lesson 4 — Topic prep + alignment evaluation.**
+[`charmpheno/omop/topic_prep.py`](../charmpheno/charmpheno/omop/topic_prep.py)
+wrapping `pyspark.ml.feature.CountVectorizer` (string cast, alphabetical-
+by-frequency vocab order, dual return for downstream concept-id
+reattachment — the `bow_df` + `vocab_map` shape consumed by both
+implementations). [`evaluate/topic_alignment.py`](../charmpheno/charmpheno/evaluate/topic_alignment.py)
+JS divergence as symmetric-KL, prevalence ordering for the biplot,
+`ground_truth_from_oracle` empirical-β pivot from the simulator's
+`true_topic_id` column with OOV / out-of-range guards.
+
+**Lesson 5 — MLlib head-to-head and configuration blindness.**
+[`charmpheno/evaluate/lda_compare.py`](../charmpheno/charmpheno/evaluate/lda_compare.py)
+parity harness; the slow `test_vanilla_lda_matches_mllib_on_well_separated_corpus`
+test as the rigorous math-regression gate (~0.01 nats observed, 0.20
+threshold). [`analysis/local/compare_lda_local.py`](../analysis/local/compare_lda_local.py)
+as iteration driver, not benchmark — three-panel JS biplot (ours vs truth,
+mllib vs truth, ours vs mllib) as diagnostic decomposition. The
+methodology lesson — math identity → hyperparameter identity → RNG/float
+effects, in that order — and the τ₀/κ schedule discovery that fell out of
+applying it.
+
+### Refactor detours that shipped
+
+**Detour 1 — Asymmetric-prior simulator (049c084 + e1988b4).**
+The HF `lda_pasc` topic_name string `T-<rank> (U <usage>%, H <uniformity>,
+C <coherence>)` carries per-topic upstream metadata that the original
+`fetch_lda_beta.py` discarded. Extended `fetch_lda_beta.py` with
+`parse_topic_metadata` + sidecar `data/cache/lda_topic_metadata.parquet`,
+and `simulate_lda_omop.py` with optional `--topic-metadata` flag that
+switches θ's prior from symmetric `α_k = θ_α` to asymmetric `α_k = K · θ_α
+· Ũ_k` (Ũ = upstream usage renormalized over topics present in β). Total
+concentration `α_0 = K · θ_α` invariant preserved so `theta_alpha` keeps
+its per-topic meaning. Initial ship had the U/H/C field semantics wrong
+(`coherence_h`, `baseline_delta_c`); follow-up commit corrected to
+`uniformity_h`, `coherence_c` per upstream methods documentation. Wallach,
+Mimno, McCallum 2009 ("Rethinking LDA: Why Priors Matter") cited as the
+canonical motivation in [ADR 0008](decisions/0008-vanilla-lda-design.md)
+and [TOPIC_STATE_MODELING.md](architecture/TOPIC_STATE_MODELING.md), with
+the mechanism difference noted (they learn α via empirical Bayes; we feed
+in an external fixed base measure).
+
+**Detour 2 — Match MLlib's learning-rate schedule (ec8e538).**
+On long-tailed asymmetric-prior corpora, our default `tau0=1.0, kappa=0.7`
+(Hoffman 2013 general SVI) recovered noticeably more rare topics than
+MLlib's `tau0=1024, kappa=0.51` (Hoffman 2010 LDA-tuned). Initial
+interpretation was an implementation-quality difference. Reading
+`OnlineLDAOptimizer.scala` line-by-line confirmed the math is identical;
+the divergence was entirely the schedule. Pinned τ₀=1024, κ=0.51 in
+`compare_lda_local.py` and the slow parity test for apples-to-apples.
+Inline comments in the driver document the empirical regime where the
+schedules diverge and the prescription to "tune τ₀/κ per workload at the
+call site if you need it."
+
+**Detour 3 — Hungarian re-render for biplots (0325e32).**
+On nearly-uniform-prevalence runs (symmetric Dirichlet(0.1·1_K) prior),
+the prevalence-ordered biplot's diagonal looks spurious because prevalence
+ordering is noise-dominated. Added `optimal_match_reorder(js_matrix)`
+using `scipy.optimize.linear_sum_assignment` for post-hoc Hungarian
+matching when the prevalence signal is flat. Lazy import of scipy keeps
+the base evaluate path scipy-free. Two tests: known-permutation recovery,
+and brute-force-over-all-perms minimization check.
+
+**Detour 4 — Doc + test clarifications across spark-vi (ad86d7b).**
+Inline comments on default-arg closure-capture in
+[`runner.py`](../spark-vi/spark_vi/core/runner.py#L131); ELBO-term
+placement pattern paragraph in
+[`SPARK_VI_FRAMEWORK.md`](architecture/SPARK_VI_FRAMEWORK.md) and
+[`core/model.py`](../spark-vi/spark_vi/core/model.py); attribution of
+`gamma_shape=100` to Hoffman 2010's `onlineldavb.py` (and MLlib's adoption
+of the same value as a private constant) in
+[`lda.py:initialize_global`](../spark-vi/spark_vi/models/lda.py); and a
+new test `test_vanilla_lda_update_global_uses_input_lambda_for_expElogbeta`
+in [`test_lda_contract.py`](../spark-vi/tests/test_lda_contract.py) that
+breaks the lr=1 special case with non-uniform input λ to isolate the
+reference frame of the `expElogβ` factor (the ADR-0008 bug regression
+guard, sharper than the earlier surrogate test).
+
+### Methodology lessons surfaced
+
+**Configuration blindness in head-to-head comparisons.** The single
+biggest takeaway: when comparing two reference implementations of the
+same algorithm, hyperparameters left at *default* on each side are
+silent confounders. For SVI-LDA the relevant invisible knobs are the
+learning-rate schedule (τ₀, κ), `optimizeDocConcentration`,
+`optimizeTopicConcentration`, `gammaShape`, and the RNG seed. Each is
+defensible as a default in isolation; defaults from different libraries
+combined produce different objectives without a single line of code that
+looks wrong. Procedural fix: walk the full reference parameter API once,
+classify each knob as matched-explicitly / left-default-on-purpose / not-
+applicable, before reading the comparison output.
+
+**Math identity → config identity → numerics, in that order.** When
+implementations disagree, reading the reference's source code (here,
+`OnlineLDAOptimizer.scala`) to settle "is the math the same?" is a five-
+minute exercise that prevents hours of speculation about implementation-
+quality differences. Skipping straight to "the implementations differ in
+some deep way" is a seductive failure mode because the hypothesis is
+*interesting*; it's almost never the right answer. Math identity is
+cheap to check and decisive.
+
+**Aggressive early SVI steps can beat warmup on long-tailed corpora.**
+Counter-intuitive but observed and now documented: on asymmetric-prior
+data, a τ₀=1 schedule (which fully replaces λ on iteration 0) gives rare
+topics more chance to differentiate before the loss surface settles, vs.
+τ₀=1024 (which lets dominant topics consume rare topics' evidence during
+the gentle warmup). The parity test pins MLlib's schedule because the
+contract is apples-to-apples; recovery-quality runs in
+`compare_lda_local.py` should pick the schedule per workload.
+
+### Doc updates
+
+- [ADR 0008 — Vanilla LDA design](decisions/0008-vanilla-lda-design.md):
+  Wallach 2009 reference added to the asymmetric-α deferral section, with
+  the empirical-Bayes-vs-fixed-base-measure mechanism distinction
+  explicit.
+- [TOPIC_STATE_MODELING.md](architecture/TOPIC_STATE_MODELING.md):
+  Wallach 2009 in References → Topic Models alongside Blei 2003 and
+  Hoffman 2010.
+- [SPARK_VI_FRAMEWORK.md](architecture/SPARK_VI_FRAMEWORK.md): ELBO-term
+  placement pattern paragraph under `compute_elbo`.
+
+### Open threads parked
+
+- **MLlib Estimator/Transformer compatibility shim** — slated as the next
+  major work item, before OnlineHDP. The shim should let users pass a
+  DataFrame with a `features` column and receive a `Pipeline`-shaped
+  fitted model, exposing MLlib-named hyperparameters (`docConcentration`,
+  `topicConcentration`, `learningOffset`, `learningDecay`,
+  `subsamplingRate`, etc.) as pass-through. Nothing inside `VIModel` or
+  `VIRunner` needs to change; the shim is a wrapper layer.
+- **Empirical Bayes on α** (still per ADR 0008). The Newton step on the
+  Dirichlet-concentration log-likelihood has a diagonal-plus-rank-1
+  Hessian (Minka 2000), so the K-dimensional update is O(K) per step
+  with Sherman-Morrison. Cheap enough to interleave with each SVI batch
+  if we choose to ship it — but adding it requires the framework's
+  `update_global` to accommodate non-conjugate gradient updates
+  alongside the existing closed-form-conjugate ones, which is a
+  meaningful contract change.
+- **Concentration parameters as variational random variables** in
+  OnlineHDP — γ and α are model-complexity-controlling and can't
+  reasonably be left fixed in a non-parametric model, so OnlineHDP will
+  fold q(γ), q(α) into the SVI ELBO via Gamma-hyperprior + non-conjugate
+  natural-gradient steps (Wang, Paisley & Blei 2011). The framework
+  extension for non-conjugate updates flagged above is a prerequisite.
+
+---
+
 ## 2026-04-30 — Vanilla LDA implementation
 
 A real multi-parameter VIModel ships, exercising the framework end-to-end
