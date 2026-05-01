@@ -1,10 +1,28 @@
 """Fetch the prior-LDA topic-concept β from the Hugging Face dataset
 `oneilsh/lda_pasc`, filter to the top-K highest-weight concepts per topic,
 renormalize each topic row to sum to 1.0, and write a compact parquet.
+Also write a per-topic metadata sidecar parsed from the topic_name string.
 
-Output columns: topic_id:int, concept_id:int, concept_name:str, weight:float.
+Outputs:
+    data/cache/lda_beta_topk.parquet
+        topic_id:int, concept_id:int, concept_name:str, weight:float
+    data/cache/lda_topic_metadata.parquet  (one row per topic)
+        topic_id:int, usage_pct:float, coherence_h:float,
+        baseline_delta_c:float
 
-Default output: data/cache/lda_beta_topk.parquet
+Topic name format
+-----------------
+Upstream topic_name strings look like `T-58 (U 0.5%, H 0.91, C -0.5)`:
+    rank             — 1-indexed by overall corpus usage in the source
+                       LDA fit (rank 1 = most prevalent). Surfaced as
+                       `topic_id`.
+    usage_pct        — relative topic usage (% of corpus mass).
+    coherence_h      — coherence H-score.
+    baseline_delta_c — baseline-delta C-score.
+
+`topic_id` is duplicated millions of times in the main beta, so the
+U/H/C metadata lives in the sidecar (one row per topic) rather than
+inflating the main file.
 """
 from __future__ import annotations
 
@@ -20,19 +38,56 @@ log = logging.getLogger(__name__)
 HF_DATASET = "oneilsh/lda_pasc"
 DEFAULT_TOP_K = 1000
 DEFAULT_OUTPUT = Path("data/cache/lda_beta_topk.parquet")
+DEFAULT_METADATA_OUTPUT = Path("data/cache/lda_topic_metadata.parquet")
+
+_TOPIC_NAME_RE = re.compile(
+    r"T-(?P<rank>\d+)\s*"
+    r"\(\s*U\s*(?P<u>-?\d+(?:\.\d+)?)\s*%\s*,"
+    r"\s*H\s*(?P<h>-?\d+(?:\.\d+)?)\s*,"
+    r"\s*C\s*(?P<c>-?\d+(?:\.\d+)?)\s*\)"
+)
 
 
 def parse_topic_id(topic_name: str) -> int:
-    """Parse numeric id out of a topic_name string like 'T-148 (U 0.2%, H 0.93, ...)'.
+    """Parse the rank-encoded topic id from a name like 'T-148 (U 0.2%, H 0.93, C -0.5)'.
 
-    Why: the source file encodes the topic id inside a descriptive string; we
-    need a stable integer key. The 'T-<digits>' prefix is invariant in the
-    upstream artifact.
+    Why: the upstream artifact encodes topic identity *and* metadata inside
+    a single descriptive string. The 'T-<rank>' prefix is invariant; the
+    integer rank is a 1-indexed ordering by overall topic usage in the
+    source LDA fit (rank 1 = most-used). See module docstring for the full
+    semantics of U/H/C and how they end up in the metadata sidecar.
     """
     m = re.match(r"T-(\d+)", topic_name)
     if not m:
         raise ValueError(f"Could not parse topic id from {topic_name!r}")
     return int(m.group(1))
+
+
+def parse_topic_metadata(topic_name: str) -> dict:
+    """Parse rank+U+H+C from a name like 'T-58 (U 0.5%, H 0.91, C -0.5)'.
+
+    Returns a dict with keys topic_id, usage_pct, coherence_h, baseline_delta_c.
+    Raises ValueError if the full pattern doesn't match — the upstream
+    artifact has a consistent format, so a missing field is a real error
+    rather than a "best effort, fall back" situation.
+    """
+    m = _TOPIC_NAME_RE.match(topic_name)
+    if not m:
+        raise ValueError(f"Could not parse topic metadata from {topic_name!r}")
+    return {
+        "topic_id": int(m.group("rank")),
+        "usage_pct": float(m.group("u")),
+        "coherence_h": float(m.group("h")),
+        "baseline_delta_c": float(m.group("c")),
+    }
+
+
+def topic_metadata_from_names(topic_names: pd.Series) -> pd.DataFrame:
+    """Build the per-topic metadata frame from the unique topic_name values."""
+    unique_names = topic_names.drop_duplicates()
+    rows = [parse_topic_metadata(n) for n in unique_names]
+    out = pd.DataFrame(rows).sort_values("topic_id").reset_index(drop=True)
+    return out
 
 
 def top_k_per_topic_and_renormalize(df: pd.DataFrame, top_k: int) -> pd.DataFrame:
@@ -62,10 +117,13 @@ def top_k_per_topic_and_renormalize(df: pd.DataFrame, top_k: int) -> pd.DataFram
     return out.reset_index(drop=True)
 
 
-def fetch_and_write(top_k: int, output: Path) -> None:
-    """Stream the HF dataset, build a DataFrame, filter top-K, write parquet.
+def fetch_and_write(top_k: int, output: Path, metadata_output: Path) -> None:
+    """Stream the HF dataset, build a DataFrame, filter top-K, write parquets.
 
-    Streaming avoids materializing the full 1.7 GB file in memory.
+    Writes the filtered β to `output` and the per-topic metadata sidecar
+    (topic_id, usage_pct, coherence_h, baseline_delta_c) to
+    `metadata_output`. Streaming avoids materializing the full 1.7 GB
+    file in memory.
     """
     # Deferred import so unit tests of the pure filter don't require datasets.
     from datasets import load_dataset
@@ -74,11 +132,13 @@ def fetch_and_write(top_k: int, output: Path) -> None:
     ds = load_dataset(HF_DATASET, split="train", streaming=True)
 
     # The upstream CSV has columns: term_weight, relevance, concept_id,
-    # concept_name, topic_name. We only need four of the five.
+    # concept_name, topic_name. We keep topic_name through the load so we
+    # can build the per-topic metadata sidecar from its unique values.
     records: list[dict] = []
     for row in ds:
         records.append({
             "topic_id": parse_topic_id(row["topic_name"]),
+            "topic_name": str(row["topic_name"]),
             "concept_id": int(row["concept_id"]),
             "concept_name": str(row["concept_name"]),
             "term_weight": float(row["term_weight"]),
@@ -87,7 +147,12 @@ def fetch_and_write(top_k: int, output: Path) -> None:
     log.info("Loaded %d rows across %d topics",
              len(df), df["topic_id"].nunique())
 
-    filtered = top_k_per_topic_and_renormalize(df, top_k=top_k)
+    metadata = topic_metadata_from_names(df["topic_name"])
+    log.info("Parsed metadata for %d topics", len(metadata))
+
+    filtered = top_k_per_topic_and_renormalize(
+        df.drop(columns=["topic_name"]), top_k=top_k,
+    )
     log.info("After top-%d filter: %d rows", top_k, len(filtered))
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -96,17 +161,25 @@ def fetch_and_write(top_k: int, output: Path) -> None:
     )
     log.info("Wrote %s", output)
 
+    metadata_output.parent.mkdir(parents=True, exist_ok=True)
+    metadata.to_parquet(metadata_output, index=False)
+    log.info("Wrote %s", metadata_output)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
                         help=f"Keep top-K concepts per topic (default {DEFAULT_TOP_K})")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
-                        help=f"Output parquet path (default {DEFAULT_OUTPUT})")
+                        help=f"Output beta parquet path (default {DEFAULT_OUTPUT})")
+    parser.add_argument("--metadata-output", type=Path,
+                        default=DEFAULT_METADATA_OUTPUT,
+                        help=f"Output topic-metadata parquet (default {DEFAULT_METADATA_OUTPUT})")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    fetch_and_write(top_k=args.top_k, output=args.output)
+    fetch_and_write(top_k=args.top_k, output=args.output,
+                    metadata_output=args.metadata_output)
     return 0
 
 
