@@ -1222,6 +1222,17 @@ at the cost of a larger and more heterogeneous feature space for the HDP.
   Systems* 23 (NeurIPS). NeurIPS Test of Time Award, 2021.
   [paper](https://proceedings.neurips.cc/paper/2010/hash/71f6278d140af599e06ad9bf1ba03cb0-Abstract.html)
 
+- **Asymmetric LDA priors.** Wallach, H. M., Mimno, D., & McCallum, A. (2009).
+  Rethinking LDA: Why Priors Matter. *Advances in Neural Information Processing
+  Systems* 22 (NeurIPS). Argues that an asymmetric Dirichlet prior over
+  document-topic distributions θ paired with a *symmetric* prior over topic-word
+  distributions β substantially improves held-out likelihood and topic quality
+  versus both-symmetric. Asymmetric β-priors offer no real benefit. They learn α
+  via empirical Bayes; we currently use symmetric defaults but the simulator
+  (`scripts/simulate_lda_omop.py`) accepts a fixed asymmetric base measure from
+  the upstream LDA fit's metadata for generating realistic long-tailed corpora.
+  [paper](https://mimno.infosci.cornell.edu/papers/NIPS2009_0929.pdf)
+
 - **Online HDP.** Wang, C., Paisley, J., & Blei, D. M. (2011). Online Variational
   Inference for the Hierarchical Dirichlet Process. *Proceedings of the 14th
   International Conference on Artificial Intelligence and Statistics (AISTATS)*,

@@ -19,7 +19,12 @@ Two prior shapes for α
   usage fraction renormalized over the topics actually present in β.
   Mean E[θ_k] = Ũ_k, total concentration α_0 = K * theta_alpha — the
   same total concentration as the symmetric case, so theta_alpha keeps
-  its old "per-topic" interpretation (Wallach et al. 2009 §2).
+  its old "per-topic" interpretation. The choice of an asymmetric prior
+  on θ (paired with a symmetric prior on β) is broadly motivated by
+  Wallach, Mimno, McCallum 2009, "Rethinking LDA: Why Priors Matter";
+  note that paper learns α from data via empirical Bayes, while we feed
+  in U from external metadata as a fixed base measure — different
+  mechanism, same family of asymmetry.
 
 Output columns:
     person_id:int, visit_occurrence_id:int, concept_id:int,

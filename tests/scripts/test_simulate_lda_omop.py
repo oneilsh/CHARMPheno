@@ -113,8 +113,8 @@ def _tiny_topic_metadata() -> pd.DataFrame:
     return pd.DataFrame({
         "topic_id": [0, 1, 2],
         "usage_pct": [0.1, 1.0, 0.1],
-        "coherence_h": [0.5, 0.6, 0.7],
-        "baseline_delta_c": [0.0, 0.1, 0.2],
+        "uniformity_h": [0.5, 0.6, 0.7],
+        "coherence_c": [0.0, 0.1, 0.2],
     })
 
 
@@ -158,8 +158,8 @@ def test_asymmetric_alpha_rejects_missing_topic_id():
     bad_metadata = pd.DataFrame({
         "topic_id": [0, 1],  # missing topic 2
         "usage_pct": [0.1, 0.5],
-        "coherence_h": [0.5, 0.6],
-        "baseline_delta_c": [0.0, 0.1],
+        "uniformity_h": [0.5, 0.6],
+        "coherence_c": [0.0, 0.1],
     })
     with pytest.raises(ValueError, match="missing usage_pct"):
         _asymmetric_alpha(

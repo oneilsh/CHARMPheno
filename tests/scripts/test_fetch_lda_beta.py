@@ -11,8 +11,8 @@ def test_parse_topic_metadata_extracts_rank_u_h_c():
     assert out == {
         "topic_id": 58,
         "usage_pct": 0.5,
-        "coherence_h": 0.91,
-        "baseline_delta_c": -0.5,
+        "uniformity_h": 0.91,
+        "coherence_c": -0.5,
     }
 
 
@@ -22,8 +22,8 @@ def test_parse_topic_metadata_handles_negative_h_and_extra_whitespace():
     out = parse_topic_metadata("T-1  ( U 1.23%,  H -0.07,  C 2.5 )")
     assert out["topic_id"] == 1
     assert out["usage_pct"] == 1.23
-    assert out["coherence_h"] == -0.07
-    assert out["baseline_delta_c"] == 2.5
+    assert out["uniformity_h"] == -0.07
+    assert out["coherence_c"] == 2.5
 
 
 def test_parse_topic_metadata_rejects_malformed_string():
@@ -45,8 +45,8 @@ def test_topic_metadata_from_names_dedupes_and_sorts():
     out = topic_metadata_from_names(names)
     assert list(out["topic_id"]) == [1, 2, 3]
     np.testing.assert_allclose(out["usage_pct"], [0.9, 0.4, 0.1])
-    np.testing.assert_allclose(out["coherence_h"], [0.7, 0.6, 0.5])
-    np.testing.assert_allclose(out["baseline_delta_c"], [0.2, 0.1, 0.0])
+    np.testing.assert_allclose(out["uniformity_h"], [0.7, 0.6, 0.5])
+    np.testing.assert_allclose(out["coherence_c"], [0.2, 0.1, 0.0])
 
 
 def test_top_k_filter_keeps_top_weights_per_topic():

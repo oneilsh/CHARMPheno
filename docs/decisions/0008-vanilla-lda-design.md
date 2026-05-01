@@ -39,6 +39,18 @@ adding them would introduce a second-order optimization step that's a
 meaningful complication for a v1 whose purpose is framework validation.
 Listed as future work.
 
+The case for *eventually* supporting asymmetric α on θ (paired with a
+symmetric prior on β) is made canonically in Wallach, Mimno, McCallum
+(NIPS 2009), ["Rethinking LDA: Why Priors
+Matter"](https://mimno.infosci.cornell.edu/papers/NIPS2009_0929.pdf):
+asymmetric θ-prior plus symmetric β-prior beats both-symmetric on
+held-out perplexity and topic quality, while asymmetric β-prior offers
+no real benefit. They learn α from data via empirical Bayes; the
+simulator now supports a related but distinct path — feeding in a
+fixed asymmetric base measure from external metadata (the upstream
+HF-dataset's per-topic usage values) — for generating realistic
+long-tailed synthetic corpora. See `scripts/simulate_lda_omop.py`.
+
 ### `BOWDocument` as canonical row type
 
 A small frozen dataclass at `spark_vi.core.types.BOWDocument` carrying

@@ -7,18 +7,21 @@ Outputs:
     data/cache/lda_beta_topk.parquet
         topic_id:int, concept_id:int, concept_name:str, weight:float
     data/cache/lda_topic_metadata.parquet  (one row per topic)
-        topic_id:int, usage_pct:float, coherence_h:float,
-        baseline_delta_c:float
+        topic_id:int, usage_pct:float, uniformity_h:float,
+        coherence_c:float
 
 Topic name format
 -----------------
-Upstream topic_name strings look like `T-58 (U 0.5%, H 0.91, C -0.5)`:
-    rank             — 1-indexed by overall corpus usage in the source
-                       LDA fit (rank 1 = most prevalent). Surfaced as
-                       `topic_id`.
-    usage_pct        — relative topic usage (% of corpus mass).
-    coherence_h      — coherence H-score.
-    baseline_delta_c — baseline-delta C-score.
+Upstream topic_name strings look like `T-58 (U 0.5%, H 0.91, C -0.5)`.
+Per the upstream methods documentation:
+    rank          — 1-indexed by overall corpus usage in the source LDA
+                    fit (rank 1 = most prevalent). Surfaced as `topic_id`.
+    usage_pct (U) — usage of the topic across sites, rounded to 0.1%.
+    uniformity_h (H) — topic uniformity across sites, 0..1, higher is
+                    more uniform. Computed as a normalized information
+                    entropy of the per-site topic-usage distribution.
+    coherence_c (C) — relative topic quality as a normalized coherence
+                    score (z-score, higher is more coherent).
 
 `topic_id` is duplicated millions of times in the main beta, so the
 U/H/C metadata lives in the sidecar (one row per topic) rather than
@@ -66,7 +69,8 @@ def parse_topic_id(topic_name: str) -> int:
 def parse_topic_metadata(topic_name: str) -> dict:
     """Parse rank+U+H+C from a name like 'T-58 (U 0.5%, H 0.91, C -0.5)'.
 
-    Returns a dict with keys topic_id, usage_pct, coherence_h, baseline_delta_c.
+    Returns a dict with keys topic_id, usage_pct, uniformity_h, coherence_c.
+    See the module docstring for the semantic meaning of each field.
     Raises ValueError if the full pattern doesn't match — the upstream
     artifact has a consistent format, so a missing field is a real error
     rather than a "best effort, fall back" situation.
@@ -77,8 +81,8 @@ def parse_topic_metadata(topic_name: str) -> dict:
     return {
         "topic_id": int(m.group("rank")),
         "usage_pct": float(m.group("u")),
-        "coherence_h": float(m.group("h")),
-        "baseline_delta_c": float(m.group("c")),
+        "uniformity_h": float(m.group("h")),
+        "coherence_c": float(m.group("c")),
     }
 
 
