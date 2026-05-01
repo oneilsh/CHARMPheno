@@ -138,6 +138,21 @@ def main(argv: list[str] | None = None) -> int:
             mini_batch_fraction=args.mini_batch_fraction,
             random_seed=args.seed,
             convergence_tol=1e-6,
+            # Match MLlib's pyspark.ml.clustering.LDA defaults so the head-
+            # to-head is apples-to-apples on the learning-rate schedule.
+            # Our framework default (tau0=1.0, kappa=0.7) follows Hoffman
+            # 2013's general SVI recommendation; MLlib uses Hoffman 2010's
+            # LDA-tuned settings (tau0=1024, kappa=0.51) which are gentler
+            # in the early iterations.
+            #
+            # Empirical note: on long-tailed asymmetric-prior corpora the
+            # tau0=1024 schedule recovers fewer rare topics than tau0=1.0
+            # — the gentle warmup lets dominant topics consume the rare
+            # ones' evidence before they differentiate. The fair-comparison
+            # contract here trumps the recovery-quality knob; tune tau0/
+            # kappa per workload at the call site if you need it.
+            learning_rate_tau0=1024.0,
+            learning_rate_kappa=0.51,
         )
         log.info("Running VanillaLDA...")
         ours = run_ours(rdd, vocab_size=len(vocab_map), K=args.K, config=cfg)
@@ -145,7 +160,8 @@ def main(argv: list[str] | None = None) -> int:
         mllib = run_mllib(df=bow_df, vocab_size=len(vocab_map), K=args.K,
                           max_iter=args.max_iterations,
                           subsampling_rate=args.mini_batch_fraction,
-                          seed=args.seed)
+                          seed=args.seed,
+                          optimize_doc_concentration=False)
         log.info("Recovering ground truth from oracle...")
         true_beta, true_prev = ground_truth_from_oracle(
             df_raw, vocab_map, K_true=args.K_true,
