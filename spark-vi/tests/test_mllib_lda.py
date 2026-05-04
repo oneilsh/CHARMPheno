@@ -68,3 +68,45 @@ def test_vector_to_bow_document_handles_dense_vector_with_zeros():
     np.testing.assert_array_equal(doc.indices, [1, 3])
     np.testing.assert_array_equal(doc.counts, [2.0, 5.0])
     assert doc.length == 7
+
+
+def test_param_translation_to_model_and_config():
+    from spark_vi.core.config import VIConfig
+    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.mllib.lda import VanillaLDAEstimator, _build_model_and_config
+
+    e = VanillaLDAEstimator(
+        k=7, maxIter=42, seed=2026,
+        learningOffset=512.0, learningDecay=0.6,
+        subsamplingRate=0.1,
+        docConcentration=[0.05], topicConcentration=0.02,
+        gammaShape=50.0, caviMaxIter=200, caviTol=1e-4,
+    )
+    model, config = _build_model_and_config(e, vocab_size=100)
+
+    assert isinstance(model, VanillaLDA)
+    assert model.K == 7
+    assert model.V == 100
+    assert model.alpha == pytest.approx(0.05)
+    assert model.eta == pytest.approx(0.02)
+    assert model.gamma_shape == pytest.approx(50.0)
+    assert model.cavi_max_iter == 200
+    assert model.cavi_tol == pytest.approx(1e-4)
+
+    assert isinstance(config, VIConfig)
+    assert config.max_iterations == 42
+    assert config.learning_rate_tau0 == pytest.approx(512.0)
+    assert config.learning_rate_kappa == pytest.approx(0.6)
+    assert config.mini_batch_fraction == pytest.approx(0.1)
+    assert config.random_seed == 2026
+
+
+def test_param_translation_resolves_none_concentrations_to_one_over_k():
+    """Per ADR 0008: alpha = eta = 1/K when caller passes None (the default)."""
+    from spark_vi.mllib.lda import VanillaLDAEstimator, _build_model_and_config
+
+    e = VanillaLDAEstimator(k=4)
+    model, _ = _build_model_and_config(e, vocab_size=10)
+
+    assert model.alpha == pytest.approx(0.25)
+    assert model.eta == pytest.approx(0.25)

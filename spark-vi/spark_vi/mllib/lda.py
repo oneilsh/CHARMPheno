@@ -14,7 +14,9 @@ from pyspark.ml.linalg import DenseVector, SparseVector, Vector
 from pyspark.ml.param import Param, Params, TypeConverters
 from pyspark.ml.param.shared import HasFeaturesCol, HasMaxIter, HasSeed
 
+from spark_vi.core.config import VIConfig
 from spark_vi.core.types import BOWDocument
+from spark_vi.models.lda import VanillaLDA
 
 
 def _vector_to_bow_document(v: Vector) -> BOWDocument:
@@ -38,6 +40,49 @@ def _vector_to_bow_document(v: Vector) -> BOWDocument:
             f"_vector_to_bow_document expected Sparse/DenseVector, got {type(v).__name__}"
         )
     return BOWDocument(indices=indices, counts=counts, length=int(counts.sum()))
+
+
+def _build_model_and_config(
+    estimator: "VanillaLDAEstimator",
+    vocab_size: int,
+) -> tuple[VanillaLDA, VIConfig]:
+    """Translate Estimator Params into (VanillaLDA, VIConfig).
+
+    Symmetric-alpha-only: docConcentration may be None or a length-1 list
+    (the latter is what TypeConverters.toListFloat produces for a scalar
+    input). Vector docConcentration is rejected by _validate_unsupported_params,
+    not here.
+    """
+    k = estimator.getOrDefault("k")
+
+    doc_conc = estimator.getOrDefault("docConcentration") if estimator.isSet("docConcentration") else None
+    if doc_conc is None:
+        alpha = 1.0 / k
+    else:
+        alpha = float(doc_conc[0])
+
+    topic_conc = estimator.getOrDefault("topicConcentration") if estimator.isSet("topicConcentration") else None
+    eta = 1.0 / k if topic_conc is None else float(topic_conc)
+
+    model = VanillaLDA(
+        K=k,
+        vocab_size=vocab_size,
+        alpha=alpha,
+        eta=eta,
+        gamma_shape=estimator.getOrDefault("gammaShape"),
+        cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
+        cavi_tol=estimator.getOrDefault("caviTol"),
+    )
+
+    seed = estimator.getOrDefault("seed") if estimator.isSet("seed") else None
+    config = VIConfig(
+        max_iterations=estimator.getOrDefault("maxIter"),
+        learning_rate_tau0=estimator.getOrDefault("learningOffset"),
+        learning_rate_kappa=estimator.getOrDefault("learningDecay"),
+        mini_batch_fraction=estimator.getOrDefault("subsamplingRate"),
+        random_seed=seed,
+    )
+    return model, config
 
 
 class VanillaLDAEstimator(Estimator, HasFeaturesCol, HasMaxIter, HasSeed):
