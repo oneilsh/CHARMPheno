@@ -225,9 +225,72 @@ class VanillaLDAEstimator(Estimator, HasFeaturesCol, HasMaxIter, HasSeed):
         """Standard MLlib pattern: set any subset of params after construction."""
         return self._set(**kwargs)
 
-    def _fit(self, dataset):
+    def _fit(self, dataset) -> "VanillaLDAModel":
+        from spark_vi.core.runner import VIRunner
+
+        _validate_unsupported_params(self)
+
+        first_features = dataset.select(self.getOrDefault("featuresCol")).head(1)
+        if not first_features:
+            raise ValueError("Cannot fit on an empty DataFrame.")
+        vocab_size = first_features[0][0].size
+
+        model_obj, config = _build_model_and_config(self, vocab_size=vocab_size)
+
+        features_col = self.getOrDefault("featuresCol")
+        bow_rdd = (
+            dataset.select(features_col).rdd
+            .map(lambda row: _vector_to_bow_document(row[0]))
+        )
+
+        runner = VIRunner(model_obj, config=config)
+        result = runner.fit(bow_rdd)
+
+        out_model = VanillaLDAModel(result)
+        # Copy every Param value the Estimator has set or has a default for, so
+        # the Model's getters reflect the configuration that produced it.
+        for param in self.params:
+            if self.isSet(param):
+                out_model._set(**{param.name: self.getOrDefault(param)})
+            elif self.hasDefault(param):
+                out_model._setDefault(**{param.name: self.getOrDefault(param)})
+        return out_model
+
+
+class VanillaLDAModel(Model, HasFeaturesCol, HasMaxIter, HasSeed):
+    """MLlib-shaped Model wrapping a trained spark_vi VIResult.
+
+    Carries the trained global parameters plus a copy of every Param from
+    the Estimator that produced it, so post-fit getters (model.getK(), ...)
+    return the configuration that was actually used.
+    """
+
+    # Same Params as the Estimator, declared again so they live on this class.
+    k = VanillaLDAEstimator.k
+    topicDistributionCol = VanillaLDAEstimator.topicDistributionCol
+    optimizer = VanillaLDAEstimator.optimizer
+    learningOffset = VanillaLDAEstimator.learningOffset
+    learningDecay = VanillaLDAEstimator.learningDecay
+    subsamplingRate = VanillaLDAEstimator.subsamplingRate
+    docConcentration = VanillaLDAEstimator.docConcentration
+    topicConcentration = VanillaLDAEstimator.topicConcentration
+    optimizeDocConcentration = VanillaLDAEstimator.optimizeDocConcentration
+    gammaShape = VanillaLDAEstimator.gammaShape
+    caviMaxIter = VanillaLDAEstimator.caviMaxIter
+    caviTol = VanillaLDAEstimator.caviTol
+
+    def __init__(self, result) -> None:  # result: VIResult
+        super().__init__()
+        self._result = result
+
+    @property
+    def result(self):
+        """The trained VIResult (global_params, elbo_trace, n_iterations, ...)."""
+        return self._result
+
+    def vocabSize(self) -> int:
+        """V dimension of the trained lambda."""
+        return int(self._result.global_params["lambda"].shape[1])
+
+    def _transform(self, dataset):
         raise NotImplementedError("Implemented in a later task.")
-
-
-class VanillaLDAModel(Model):
-    """Stub — state and methods added in subsequent tasks."""

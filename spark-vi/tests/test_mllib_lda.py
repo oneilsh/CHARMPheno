@@ -142,3 +142,40 @@ def test_scalar_doc_concentration_is_accepted():
 
     e = VanillaLDAEstimator(docConcentration=[0.1])
     _validate_unsupported_params(e)  # should not raise
+
+
+@pytest.fixture(scope="module")
+def tiny_corpus_df(spark):
+    """3-topic well-separated corpus, ~30 docs, vocab size 9.
+
+    Topic 0 favors words 0,1,2; topic 1 favors 3,4,5; topic 2 favors 6,7,8.
+    Each doc is a near-mixture of one topic.
+    """
+    from pyspark.ml.linalg import Vectors
+
+    rng = np.random.default_rng(0)
+    rows = []
+    favored = {0: [0, 1, 2], 1: [3, 4, 5], 2: [6, 7, 8]}
+    for doc_id in range(30):
+        topic = doc_id % 3
+        counts = np.zeros(9, dtype=np.float64)
+        for w in rng.choice(favored[topic], size=20, replace=True):
+            counts[w] += 1.0
+        # add a little noise to other vocab so vectors aren't identical
+        for w in rng.choice(9, size=2, replace=True):
+            counts[w] += 1.0
+        rows.append((Vectors.dense(counts.tolist()),))
+    return spark.createDataFrame(rows, schema=["features"])
+
+
+def test_fit_returns_model_with_correct_shape(tiny_corpus_df):
+    from spark_vi.mllib.lda import VanillaLDAEstimator, VanillaLDAModel
+
+    estimator = VanillaLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
+    model = estimator.fit(tiny_corpus_df)
+
+    assert isinstance(model, VanillaLDAModel)
+    assert model.vocabSize() == 9
+    # Param round-trip: model exposes the same configuration the Estimator had.
+    assert model.getOrDefault("k") == 3
+    assert model.getOrDefault("maxIter") == 5
