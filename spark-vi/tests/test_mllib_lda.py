@@ -1,6 +1,7 @@
 """Tests for spark_vi.mllib.lda — fast unit tests for the MLlib shim."""
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 
@@ -42,3 +43,28 @@ def test_optimize_doc_concentration_defaults_false_diverging_from_mllib():
 
     assert VanillaLDAEstimator().getOrDefault("optimizeDocConcentration") is False
     assert MLlibLDA().getOrDefault("optimizeDocConcentration") is True
+
+
+def test_vector_to_bow_document_handles_sparse_vector():
+    from pyspark.ml.linalg import Vectors
+    from spark_vi.mllib.lda import _vector_to_bow_document
+
+    sv = Vectors.sparse(5, [0, 2, 4], [1.0, 3.0, 2.0])
+    doc = _vector_to_bow_document(sv)
+
+    np.testing.assert_array_equal(doc.indices, [0, 2, 4])
+    np.testing.assert_array_equal(doc.counts, [1.0, 3.0, 2.0])
+    assert doc.length == 6
+
+
+def test_vector_to_bow_document_handles_dense_vector_with_zeros():
+    """DenseVectors with embedded zeros should round-trip to a sparse BOWDocument."""
+    from pyspark.ml.linalg import Vectors
+    from spark_vi.mllib.lda import _vector_to_bow_document
+
+    dv = Vectors.dense([0.0, 2.0, 0.0, 5.0, 0.0])
+    doc = _vector_to_bow_document(dv)
+
+    np.testing.assert_array_equal(doc.indices, [1, 3])
+    np.testing.assert_array_equal(doc.counts, [2.0, 5.0])
+    assert doc.length == 7
