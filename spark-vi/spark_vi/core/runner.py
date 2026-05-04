@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +103,7 @@ class VIRunner:
 
         for step in range(cfg.max_iterations):
             t = start_iteration + step
+            t_iter_start = time.perf_counter()
 
             # 1. Sample a mini-batch (or use the full RDD).
             if cfg.mini_batch_fraction is not None:
@@ -169,6 +171,16 @@ class VIRunner:
             # data evidence stay correct.
             elbo = model.compute_elbo(global_params, aggregated)
             elbo_trace.append(float(elbo))
+
+            # Per-iteration progress line. INFO level so it can be surfaced
+            # by configuring `spark_vi` to INFO without firehosing root.
+            iter_dt = time.perf_counter() - t_iter_start
+            batch_str = (f"batch={batch_size}" if cfg.mini_batch_fraction
+                         else "full-batch")
+            log.info(
+                "iter %d/%d: ELBO=%.4f, %s, rho=%.4f, %.1fs",
+                step + 1, cfg.max_iterations, elbo, batch_str, rho_t, iter_dt,
+            )
 
             # 7. Auto-checkpoint (if configured). Writes a VIResult to
             # cfg.checkpoint_dir every checkpoint_interval iterations,

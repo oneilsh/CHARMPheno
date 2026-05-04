@@ -17,6 +17,7 @@ Submit (from this directory on a Dataproc master node):
 """
 from __future__ import annotations
 
+import logging
 import sys
 
 import numpy as np
@@ -55,6 +56,12 @@ def main() -> int:
     from spark_vi.mllib.lda import VanillaLDAEstimator
     print(f"[driver] spark_vi.mllib.lda loaded from {VanillaLDAEstimator.__module__}",
           flush=True)
+
+    # Surface spark_vi.core.runner per-iter INFO lines as [driver] output.
+    logging.basicConfig(level=logging.WARNING,
+                         format="[driver]   %(message)s",
+                         stream=sys.stdout, force=True)
+    logging.getLogger("spark_vi").setLevel(logging.INFO)
 
     spark = SparkSession.builder.appName("smoke_lda_cloud").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")  # silence GCS connector chatter

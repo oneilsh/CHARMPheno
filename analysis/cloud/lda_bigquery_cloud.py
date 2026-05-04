@@ -17,6 +17,7 @@ Submit (from this directory on the Dataproc master):
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import time
@@ -24,6 +25,22 @@ from contextlib import contextmanager
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+
+
+def _configure_logging() -> None:
+    """Surface spark_vi.core.runner per-iter INFO lines with [driver] prefix.
+
+    Root stays at WARNING so PySpark / numpy / etc don't spam. spark_vi is
+    bumped to INFO so the runner's iteration progress lines come through.
+    `force=True` overrides any handler PySpark may have installed.
+    """
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="[driver]   %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+    logging.getLogger("spark_vi").setLevel(logging.INFO)
 
 
 @contextmanager
@@ -88,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     # Driver-side imports proven first — fail fast if --py-files is misshapen.
     from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
     from spark_vi.mllib.lda import VanillaLDAEstimator
+
+    _configure_logging()
 
     print(f"[driver] cdr={cdr}, billing_project={billing}, "
           f"K={args.K}, max_iter={args.max_iter}, "
