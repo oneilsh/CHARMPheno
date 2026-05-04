@@ -26,7 +26,7 @@ import logging
 import random
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pyspark import RDD, StorageLevel
 
@@ -53,6 +53,7 @@ class VIRunner:
         data_summary: Any | None = None,
         start_iteration: int = 0,
         resume_from: Path | str | None = None,
+        on_iteration: Callable[[int, dict, list[float]], None] | None = None,
     ) -> VIResult:
         """Run the distributed VI loop until convergence or max_iterations.
 
@@ -69,6 +70,11 @@ class VIRunner:
                 returned; the loaded elbo_trace seeds this run's trace; and
                 start_iteration is set to the loaded result's n_iterations so
                 the Robbins-Monro schedule matches a continuous run.
+            on_iteration: optional diagnostic callback invoked after each
+                iteration as `fn(iter_num, global_params, elbo_trace)`. The
+                callback runs on the driver in the fit's hot path; keep it
+                cheap or throttle with a modulo. Exceptions are caught and
+                logged so a buggy diagnostic doesn't kill the fit.
         """
         model = self.model
         cfg = self.config
@@ -181,6 +187,17 @@ class VIRunner:
                 "iter %d/%d: ELBO=%.4f, %s, rho=%.4f, %.1fs",
                 step + 1, cfg.max_iterations, elbo, batch_str, rho_t, iter_dt,
             )
+
+            # Diagnostic callback (model-agnostic; whatever the caller wants
+            # to do with global_params). Catch + log so a buggy callback
+            # doesn't kill the fit — the model itself is the load-bearing
+            # work, the diagnostic is incidental.
+            if on_iteration is not None:
+                try:
+                    on_iteration(step + 1, global_params, elbo_trace)
+                except Exception as exc:
+                    log.warning("on_iteration callback raised %r — continuing fit",
+                                exc)
 
             # 7. Auto-checkpoint (if configured). Writes a VIResult to
             # cfg.checkpoint_dir every checkpoint_interval iterations,

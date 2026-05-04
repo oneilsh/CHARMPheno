@@ -59,6 +59,35 @@ def _phase(name: str):
               flush=True)
 
 
+def _make_topic_evolution_logger(K, top_n, every_n, idx_to_cid, name_by_id):
+    """Build an on_iteration callback that prints top-N tokens per topic.
+
+    VanillaLDA's global_params has key "lambda" with shape (K, V) — each
+    row is the unnormalized Dirichlet variational parameter for one topic
+    over the full vocabulary. Row-normalizing gives the topic-word
+    distribution; argsort + slice gives the top tokens. Compact one-line
+    summary per topic so a K=10, every-N=10, 100-iter run produces 100
+    lines of evolution output total.
+    """
+    def _on_iter(iter_num: int, global_params: dict, *_) -> None:
+        # *_: swallows trailing positional args from the runner contract
+        # (currently elbo_trace; the topic view doesn't need it).
+        if every_n <= 0 or iter_num % every_n != 0:
+            return
+        lam = global_params["lambda"]                         # (K, V)
+        topics = lam / lam.sum(axis=1, keepdims=True)         # row-stochastic
+        print(f"[driver]   --- topics @ iter {iter_num} ---", flush=True)
+        for k in range(K):
+            top = topics[k].argsort()[::-1][:top_n]
+            terms = ", ".join(
+                f"{name_by_id.get(idx_to_cid[int(j)], '?')[:24]}"
+                f"({topics[k, int(j)]:.3f})"
+                for j in top
+            )
+            print(f"[driver]    topic {k}: {terms}", flush=True)
+    return _on_iter
+
+
 def _log_persist(df, name: str) -> None:
     """Confirm a DataFrame's persist hint stuck in cache.
 
@@ -96,6 +125,9 @@ def main(argv: list[str] | None = None) -> int:
                          help="mini-batch fraction; use 1.0 for full-batch "
                               "(recommended on small corpora where Spark "
                               "coordination dominates per-iter time)")
+    parser.add_argument("--print-topics-every", type=int, default=10,
+                         help="emit top-3 tokens per topic every N iterations "
+                              "(0 disables; cheap, runs on driver)")
     args = parser.parse_args(argv)
 
     cdr = os.environ.get("WORKSPACE_CDR")
@@ -169,10 +201,16 @@ def main(argv: list[str] | None = None) -> int:
 
     with _phase(f"fit (K={args.K}, maxIter={args.max_iter}, "
                  f"subsamplingRate={args.subsampling_rate})"):
-        model = VanillaLDAEstimator(
+        estimator = VanillaLDAEstimator(
             k=args.K, maxIter=args.max_iter, seed=args.seed,
             subsamplingRate=args.subsampling_rate,
-        ).fit(bow_df)
+        )
+        if args.print_topics_every > 0:
+            estimator.setOnIteration(_make_topic_evolution_logger(
+                K=args.K, top_n=3, every_n=args.print_topics_every,
+                idx_to_cid=idx_to_cid, name_by_id=name_by_id,
+            ))
+        model = estimator.fit(bow_df)
         print(f"[driver]   elbo trace tail: {model.result.elbo_trace[-3:]}",
               flush=True)
 

@@ -226,6 +226,10 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
             optimizeDocConcentration=False,
             gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
         )
+        # Diagnostic-only iteration callback. Stored as an instance attribute
+        # rather than a Param because callables aren't MLlib-serializable
+        # (Pipeline.save persistence is deferred per ADR 0009 anyway).
+        self._on_iteration = None
         kwargs = self._input_kwargs
         self.setParams(**kwargs)
 
@@ -233,6 +237,17 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
     def setParams(self, **kwargs) -> "VanillaLDAEstimator":
         """Standard MLlib pattern: set any subset of params after construction."""
         return self._set(**kwargs)
+
+    def setOnIteration(self, fn) -> "VanillaLDAEstimator":
+        """Register a per-iteration diagnostic callback for the next fit.
+
+        Signature: fn(iter_num: int, global_params: dict, elbo_trace: list).
+        Runs on the driver in the fit's hot path; throttle it with a modulo
+        if the work is non-trivial. Not persisted by Pipeline.save (callables
+        aren't MLlib-serializable; persistence is deferred per ADR 0009).
+        """
+        self._on_iteration = fn
+        return self
 
     def _fit(self, dataset) -> "VanillaLDAModel":
         from spark_vi.core.runner import VIRunner
@@ -253,7 +268,7 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
         )
 
         runner = VIRunner(model_obj, config=config)
-        result = runner.fit(bow_rdd)
+        result = runner.fit(bow_rdd, on_iteration=self._on_iteration)
 
         out_model = VanillaLDAModel(result)
         # Copy every Param value the Estimator has set or has a default for, so
