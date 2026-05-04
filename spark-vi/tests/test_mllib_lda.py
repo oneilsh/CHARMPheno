@@ -110,3 +110,35 @@ def test_param_translation_resolves_none_concentrations_to_one_over_k():
 
     assert model.alpha == pytest.approx(0.25)
     assert model.eta == pytest.approx(0.25)
+
+
+def test_unsupported_optimizer_em_raises():
+    from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
+
+    e = VanillaLDAEstimator(optimizer="em")
+    with pytest.raises(ValueError, match="optimizer"):
+        _validate_unsupported_params(e)
+
+
+def test_optimize_doc_concentration_true_raises():
+    from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
+
+    e = VanillaLDAEstimator(optimizeDocConcentration=True)
+    with pytest.raises(ValueError, match="optimizeDocConcentration"):
+        _validate_unsupported_params(e)
+
+
+def test_vector_doc_concentration_raises():
+    from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
+
+    e = VanillaLDAEstimator(k=3, docConcentration=[0.1, 0.1, 0.1])
+    with pytest.raises(ValueError, match="docConcentration"):
+        _validate_unsupported_params(e)
+
+
+def test_scalar_doc_concentration_is_accepted():
+    """A length-1 list (what toListFloat does to a scalar) must not raise."""
+    from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
+
+    e = VanillaLDAEstimator(docConcentration=[0.1])
+    _validate_unsupported_params(e)  # should not raise

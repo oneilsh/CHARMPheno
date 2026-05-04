@@ -42,6 +42,41 @@ def _vector_to_bow_document(v: Vector) -> BOWDocument:
     return BOWDocument(indices=indices, counts=counts, length=int(counts.sum()))
 
 
+def _validate_unsupported_params(estimator: "VanillaLDAEstimator") -> None:
+    """Raise ValueError for any configuration the shim cannot honor.
+
+    Three cases (per ADR 0008 / ADR 0009):
+      * optimizer != "online" — we are SVI-only.
+      * optimizeDocConcentration=True — symmetric-alpha-only.
+      * vector docConcentration (length > 1) — symmetric-alpha-only.
+
+    Silent fallback would mislead users about what they are getting.
+    """
+    optimizer = estimator.getOrDefault("optimizer")
+    if optimizer != "online":
+        raise ValueError(
+            f"VanillaLDAEstimator only supports optimizer='online', got {optimizer!r}. "
+            f"The 'em' optimizer is not implemented in this shim."
+        )
+
+    if estimator.getOrDefault("optimizeDocConcentration"):
+        raise ValueError(
+            "VanillaLDAEstimator does not support optimizeDocConcentration=True. "
+            "Empirical-Bayes alpha optimization is deferred per ADR 0008 'Future work'. "
+            "Set optimizeDocConcentration=False (the default) and pass a fixed alpha "
+            "via docConcentration."
+        )
+
+    if estimator.isSet("docConcentration"):
+        doc_conc = estimator.getOrDefault("docConcentration")
+        if doc_conc is not None and len(doc_conc) > 1:
+            raise ValueError(
+                f"VanillaLDAEstimator only supports symmetric (scalar) docConcentration, "
+                f"got vector of length {len(doc_conc)}. Asymmetric alpha is deferred per "
+                f"ADR 0008 'Future work'."
+            )
+
+
 def _build_model_and_config(
     estimator: "VanillaLDAEstimator",
     vocab_size: int,
