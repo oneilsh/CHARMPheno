@@ -14,8 +14,7 @@ from pyspark.ml.clustering import LDA as MLlibLDA
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-from spark_vi.core import VIConfig, VIRunner, BOWDocument
-from spark_vi.models.lda import VanillaLDA
+from spark_vi.core import VIConfig
 
 
 @dataclass
@@ -42,29 +41,60 @@ def run_ours(
     K: int,
     config: VIConfig,
 ) -> LDARunArtifacts:
-    """Fit VanillaLDA via VIRunner; collect artifacts."""
-    model = VanillaLDA(K=K, vocab_size=vocab_size)
+    """Fit VanillaLDA via the MLlib-shaped shim; collect artifacts.
 
-    runner = VIRunner(model, config=config)
+    Wraps the input RDD[BOWDocument] back into a DataFrame[Vector] so the
+    shim's DataFrame-shaped API accepts it. Net effect: this function is
+    now structurally symmetric with run_mllib (both fit MLlib-shaped
+    Estimators on a DataFrame), tightening the head-to-head comparison.
+    """
+    from pyspark.ml.linalg import Vectors, VectorUDT
+    from pyspark.sql.types import StructField, StructType
+    from pyspark.sql import SparkSession
+
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+
+    spark = SparkSession.builder.getOrCreate()
+
+    def _bow_to_row(doc):
+        return (Vectors.sparse(
+            vocab_size,
+            [int(i) for i in doc.indices],
+            [float(c) for c in doc.counts],
+        ),)
+
+    schema = StructType([StructField("features", VectorUDT(), False)])
+    df = spark.createDataFrame(rdd.map(_bow_to_row), schema=schema)
+
+    estimator = VanillaLDAEstimator(
+        k=K,
+        maxIter=config.max_iterations,
+        seed=config.random_seed,
+        learningOffset=config.learning_rate_tau0,
+        learningDecay=config.learning_rate_kappa,
+        subsamplingRate=config.mini_batch_fraction or 1.0,
+    )
+
     t0 = time.perf_counter()
-    result = runner.fit(rdd)
+    model = estimator.fit(df)
     t1 = time.perf_counter()
     wall = t1 - t0
-    n_iter = max(1, result.n_iterations)
+
+    n_iter = max(1, model.result.n_iterations)
     per_iter = [wall / n_iter] * n_iter
 
-    lam = result.global_params["lambda"]
-    topics_matrix = lam / lam.sum(axis=1, keepdims=True)
+    tm = model.topicsMatrix().toArray().T  # (K, V), row-stochastic
+    tm = tm / tm.sum(axis=1, keepdims=True)
 
-    inferred = runner.transform(rdd, global_params=result.global_params).collect()
+    transformed = model.transform(df).select("topicDistribution").collect()
     prev = np.zeros(K)
-    for d in inferred:
-        prev += np.asarray(d["theta"])
+    for r in transformed:
+        prev += np.asarray(r["topicDistribution"].toArray())
 
     return LDARunArtifacts(
-        topics_matrix=topics_matrix,
+        topics_matrix=tm,
         topic_prevalence=prev,
-        elbo_trace=list(result.elbo_trace),
+        elbo_trace=list(model.result.elbo_trace),
         per_iter_seconds=per_iter,
         wall_time_seconds=wall,
         final_log_likelihood=None,
