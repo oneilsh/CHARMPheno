@@ -84,20 +84,37 @@ def _fmt_ms(ms: float) -> str:
 
 
 def find_app_id(spark_base: str, explicit: str | None) -> str | None:
+    """Pick the *newest* in-progress app, or fall back to newest completed.
+
+    The History Server can accumulate zombie 'in-progress' entries from
+    OOM-killed or hard-crashed runs (no clean shutdown -> no completion
+    event ever flushed). Picking the first one we iterate is wrong;
+    sorting by startTime picks the user's current run.
+    """
     if explicit:
         return explicit
     try:
         apps = _get(f"{spark_base}/applications")
-    except (HTTPError, URLError, ConnectionError):
+    except (HTTPError, URLError, ConnectionError, TimeoutError, OSError):
         return None
     if not apps:
         return None
-    # Prefer an in-progress app (matters for History Server which lists all).
-    for a in apps:
-        attempts = a.get("attempts") or [{}]
-        if not attempts[0].get("completed", True):
-            return a["id"]
-    return apps[0]["id"]
+
+    def _start(a):
+        return (a.get("attempts") or [{}])[0].get("startTimeEpoch", 0)
+
+    in_progress = [
+        a for a in apps
+        if not (a.get("attempts") or [{}])[0].get("completed", True)
+    ]
+    if in_progress:
+        in_progress.sort(key=_start, reverse=True)
+        if len(in_progress) > 1:
+            stale = [a["id"] for a in in_progress[1:]]
+            print(f"NOTE: {len(in_progress)} in-progress apps; picking newest. "
+                  f"Stale (likely zombie OOM-kills): {stale}", file=sys.stderr)
+        return in_progress[0]["id"]
+    return sorted(apps, key=_start, reverse=True)[0]["id"]
 
 
 def render_executors(execs: list) -> None:
