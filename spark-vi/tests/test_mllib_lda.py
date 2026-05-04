@@ -245,3 +245,15 @@ def test_transform_respects_custom_topic_distribution_col(tiny_corpus_df):
     out = model.transform(tiny_corpus_df)
     assert "theta" in out.columns
     assert "topicDistribution" not in out.columns
+
+
+def test_log_likelihood_and_log_perplexity_raise_not_implemented(tiny_corpus_df):
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+
+    estimator = VanillaLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
+    model = estimator.fit(tiny_corpus_df)
+
+    with pytest.raises(NotImplementedError, match="ELBO"):
+        model.logLikelihood(tiny_corpus_df)
+    with pytest.raises(NotImplementedError, match="ELBO"):
+        model.logPerplexity(tiny_corpus_df)

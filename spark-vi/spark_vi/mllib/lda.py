@@ -394,3 +394,17 @@ class VanillaLDAModel(_VanillaLDAParams, Model):
             return dataset.withColumn(out_col, infer_udf(F.col(features_col)))
         finally:
             bcast.unpersist(blocking=False)
+
+    def logLikelihood(self, dataset):
+        raise NotImplementedError(
+            "logLikelihood is not implemented in this v1 shim. The training-time "
+            "ELBO trace is available on the underlying VIResult via "
+            "VanillaLDAModel.result.elbo_trace."
+        )
+
+    def logPerplexity(self, dataset):
+        raise NotImplementedError(
+            "logPerplexity is not implemented in this v1 shim. The training-time "
+            "ELBO trace is available on the underlying VIResult via "
+            "VanillaLDAModel.result.elbo_trace."
+        )
