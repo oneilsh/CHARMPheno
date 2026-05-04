@@ -19,6 +19,7 @@ import json
 import socket
 import sys
 import time
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
@@ -141,18 +142,45 @@ def find_app_id(spark_base: str, explicit: str | None) -> str | None:
     return None
 
 
+def _sustained_cpu_pct(e: dict) -> float:
+    """Fraction of wallclock that this executor's cores spent running tasks.
+
+    `totalDuration` is the sum across all tasks ever assigned. Dividing by
+    (lifetime * cores) gives the sustained utilization since `addTime` —
+    the cleanest "is this CPU-bound" signal Spark exposes. Near 1.0 means
+    the executor was busy ~always; <0.5 means the bottleneck is elsewhere
+    (driver-side compute, shuffle wait, scheduling gaps).
+    """
+    cores = e.get("totalCores", 0) or 0
+    total_dur_ms = e.get("totalDuration", 0) or 0
+    add_str = e.get("addTime", "")
+    if not (cores and add_str):
+        return 0.0
+    try:
+        # Spark formats as "2026-05-04T18:55:30.123GMT"; isoformat needs an offset.
+        add_dt = datetime.fromisoformat(add_str.replace("GMT", "+00:00"))
+        wall_ms = time.time() * 1000 - add_dt.timestamp() * 1000
+    except (ValueError, TypeError):
+        return 0.0
+    if wall_ms <= 0:
+        return 0.0
+    return total_dur_ms / (wall_ms * cores)
+
+
 def render_executors(execs: list) -> None:
-    print("Executors  (active/cores = current utilization, GC% from totalGCTime/totalDuration)")
+    print("Executors  (cpu% sustained since addTime; util% = right now)")
     for e in execs:
         cores = e.get("totalCores", 0) or 0
         active = e.get("activeTasks", 0) or 0
         util = (active / cores) if cores else 0.0
+        cpu = _sustained_cpu_pct(e)
         gc_pct = (
             100 * e["totalGCTime"] / e["totalDuration"]
             if e.get("totalDuration") else 0.0
         )
         print(f"  {e['id']:<8}  cores={cores:>2}  active={active:>2}/{cores:<2}"
-              f"  util={util:>4.0%}  done={e.get('completedTasks',0):>5}"
+              f"  util={util:>4.0%}  cpu={cpu:>4.0%}"
+              f"  done={e.get('completedTasks',0):>5}"
               f"  failed={e.get('failedTasks',0):>3}"
               f"  GC={gc_pct:>4.1f}%"
               f"  mem={_fmt_bytes(e.get('memoryUsed',0))}")
