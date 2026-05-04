@@ -57,6 +57,7 @@ def main() -> int:
           flush=True)
 
     spark = SparkSession.builder.appName("smoke_lda_cloud").getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")  # silence GCS connector chatter
     sc = spark.sparkContext
     print(f"[driver] Spark {sc.version}, master={sc.master}, "
           f"defaultParallelism={sc.defaultParallelism}", flush=True)

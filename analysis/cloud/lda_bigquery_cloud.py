@@ -20,9 +20,49 @@ import argparse
 import os
 import sys
 import time
+from contextlib import contextmanager
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+
+
+@contextmanager
+def _phase(name: str):
+    """Bracket a driver phase with start/end markers and elapsed wall time.
+
+    Lets us tell where wall time goes (BQ read vs vectorize vs fit vs
+    transform) when comparing slow runs against fast ones.
+    """
+    print(f"[driver] >>> {name}", flush=True)
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        print(f"[driver] <<< {name}: {time.perf_counter() - t0:.1f}s",
+              flush=True)
+
+
+def _log_persist(df, name: str) -> None:
+    """Confirm a DataFrame's persist hint stuck in cache.
+
+    storageLevel reflects the requested-and-honored cache shape. A NONE
+    here after .persist() + an action means caching silently failed —
+    the prime suspect when re-execution shows up as per-iteration slowdown.
+    """
+    sl = df.storageLevel
+    if sl.useMemory or sl.useDisk:
+        bits = []
+        if sl.useMemory:
+            bits.append("MEM")
+        if sl.useDisk:
+            bits.append("DISK")
+        if sl.deserialized:
+            bits.append("DESER")
+        print(f"[driver]   persist({name}) -> {'+'.join(bits)} x{sl.replication}",
+              flush=True)
+    else:
+        print(f"[driver]   *** persist({name}) NOT IN CACHE: {sl}",
+              flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -54,57 +94,62 @@ def main(argv: list[str] | None = None) -> int:
           f"person_mod={args.person_mod}", flush=True)
 
     spark = SparkSession.builder.appName("lda_bigquery_cloud").getOrCreate()
+    # Silence the GCS connector chatter (RequestTracker / hflush rate-limit
+    # noise from event-log writes). Our [driver] prints are stdout, not
+    # log4j, so they survive. Set BEFORE any actions.
+    spark.sparkContext.setLogLevel("WARN")
     sc = spark.sparkContext
     print(f"[driver] Spark {sc.version}, master={sc.master}, "
           f"defaultParallelism={sc.defaultParallelism}", flush=True)
 
-    print("[driver] reading OMOP from BigQuery...", flush=True)
-    omop = load_omop_bigquery(
-        spark=spark,
-        cdr_dataset=cdr,
-        billing_project=billing,
-        person_sample_mod=args.person_mod,
-    ).persist()
-    # One agg pass instead of two — distinct-counting person_id is cheap
-    # piggybacked on the row count that has to scan everything anyway.
-    summary = omop.agg(
-        F.count(F.lit(1)).alias("rows"),
-        F.countDistinct("person_id").alias("persons"),
-    ).collect()[0]
-    print(f"[driver] OMOP: {summary['rows']} rows, "
-          f"{summary['persons']} distinct persons", flush=True)
+    with _phase("BQ load + summary"):
+        omop = load_omop_bigquery(
+            spark=spark,
+            cdr_dataset=cdr,
+            billing_project=billing,
+            person_sample_mod=args.person_mod,
+        ).persist()
+        # One agg pass instead of two — distinct-counting person_id is cheap
+        # piggybacked on the row count that has to scan everything anyway.
+        # This action also forces the persist to materialize.
+        summary = omop.agg(
+            F.count(F.lit(1)).alias("rows"),
+            F.countDistinct("person_id").alias("persons"),
+        ).collect()[0]
+        _log_persist(omop, "omop")
+        print(f"[driver]   OMOP: {summary['rows']} rows, "
+              f"{summary['persons']} distinct persons", flush=True)
 
-    print("[driver] vectorizing into bag-of-words documents...", flush=True)
-    bow_df, vocab_map = to_bow_dataframe(
-        omop, vocab_size=args.vocab_size, min_df=args.min_df,
-    )
-    bow_df = bow_df.persist()
-    idx_to_cid = {idx: cid for cid, idx in vocab_map.items()}
-    print(f"[driver] vocab size: {len(vocab_map)} (cap {args.vocab_size}, "
-          f"minDF {args.min_df})", flush=True)
-    print(f"[driver] documents: {bow_df.count()}", flush=True)
+    with _phase("vectorize (CountVectorizer)"):
+        bow_df, vocab_map = to_bow_dataframe(
+            omop, vocab_size=args.vocab_size, min_df=args.min_df,
+        )
+        bow_df = bow_df.persist()
+        n_docs = bow_df.count()  # forces materialization
+        _log_persist(bow_df, "bow_df")
+        idx_to_cid = {idx: cid for cid, idx in vocab_map.items()}
+        print(f"[driver]   vocab size: {len(vocab_map)} (cap {args.vocab_size}, "
+              f"minDF {args.min_df}), documents: {n_docs}", flush=True)
 
-    # Vocabulary-only concept-name lookup; small enough for the driver.
-    # dropDuplicates because OMOP occasionally has multiple name variants
-    # for one concept_id.
-    print("[driver] resolving concept names for vocabulary...", flush=True)
-    name_rows = (
-        omop.where(F.col("concept_id").isin(list(vocab_map.keys())))
-            .select("concept_id", "concept_name")
-            .dropDuplicates(["concept_id"])
-            .collect()
-    )
-    name_by_id = {int(r["concept_id"]): r["concept_name"] for r in name_rows}
+    with _phase("concept-name lookup"):
+        # Vocabulary-only lookup; small enough for the driver. dropDuplicates
+        # because OMOP occasionally has multiple name variants per concept_id.
+        name_rows = (
+            omop.where(F.col("concept_id").isin(list(vocab_map.keys())))
+                .select("concept_id", "concept_name")
+                .dropDuplicates(["concept_id"])
+                .collect()
+        )
+        name_by_id = {int(r["concept_id"]): r["concept_name"] for r in name_rows}
+        print(f"[driver]   resolved {len(name_by_id)} concept names",
+              flush=True)
 
-    print(f"[driver] fitting VanillaLDAEstimator (K={args.K}, maxIter={args.max_iter})...",
-          flush=True)
-    t0 = time.perf_counter()
-    model = VanillaLDAEstimator(
-        k=args.K, maxIter=args.max_iter, seed=args.seed,
-    ).fit(bow_df)
-    t_fit = time.perf_counter() - t0
-    print(f"[driver] fit wall time: {t_fit:.1f}s", flush=True)
-    print(f"[driver] elbo trace tail: {model.result.elbo_trace[-3:]}", flush=True)
+    with _phase(f"fit (K={args.K}, maxIter={args.max_iter})"):
+        model = VanillaLDAEstimator(
+            k=args.K, maxIter=args.max_iter, seed=args.seed,
+        ).fit(bow_df)
+        print(f"[driver]   elbo trace tail: {model.result.elbo_trace[-3:]}",
+              flush=True)
 
     # topicsMatrix is (V, K); columns are topics. Print top-N tokens per topic.
     tm = model.topicsMatrix().toArray()
@@ -119,8 +164,17 @@ def main(argv: list[str] | None = None) -> int:
             name = name_by_id.get(cid, "<unknown>")
             print(f"    {cid:>10}  {name[:60]:<60}  {col[j]:.4f}", flush=True)
 
-    print("\n[driver] transform sample (executor UDF):", flush=True)
-    model.transform(bow_df).select("person_id", "topicDistribution").show(3, truncate=False)
+    with _phase("transform sample"):
+        # Hash person_id before display: row-level output ends up in the
+        # Spark History Server's GCS event log, where raw IDs shouldn't
+        # accumulate. Topic distributions are aggregate and fine raw.
+        (model.transform(bow_df)
+              .withColumn("person_hash",
+                          F.substring(
+                              F.sha2(F.col("person_id").cast("string"), 256),
+                              1, 12))
+              .select("person_hash", "topicDistribution")
+              .show(3, truncate=False))
 
     omop.unpersist()
     bow_df.unpersist()

@@ -41,6 +41,7 @@ def main() -> int:
           f"billing project={billing_project}", flush=True)
 
     spark = SparkSession.builder.appName("bq_smoke_cloud").getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")  # silence GCS connector chatter
     sc = spark.sparkContext
     print(f"[driver] Spark {sc.version}, master={sc.master}, "
           f"defaultParallelism={sc.defaultParallelism}", flush=True)

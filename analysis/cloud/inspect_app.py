@@ -26,7 +26,10 @@ YARN_BASE = "http://localhost:8088/ws/v1/cluster"
 CLEAR = "\x1b[2J\x1b[H"
 
 
-def _get(url: str, timeout: float = 3.0):
+_POLL_TIMEOUT = 15.0  # generous: History Server reads from GCS event logs
+
+
+def _get(url: str, timeout: float = _POLL_TIMEOUT):
     with urlopen(url, timeout=timeout) as r:
         return json.loads(r.read())
 
@@ -151,20 +154,14 @@ def render_recent_complete(stages: list, n: int = 3) -> None:
 
 def render_recent_sql(spark_base: str, app_id: str, n: int = 3) -> None:
     """Hit the SQL endpoint and flag broadcast vs sort-merge joins."""
-    try:
-        sqls = _get(f"{spark_base}/applications/{app_id}/sql?length=10")
-    except (HTTPError, URLError):
-        return
+    sqls = _safe_get(f"{spark_base}/applications/{app_id}/sql?length=10")
     if not sqls:
         return
     print(f"\nRecent SQL queries (last {n}):")
     for q in sqls[-n:]:
         # Only ask for the full plan on the few we actually print.
-        try:
-            full = _get(f"{spark_base}/applications/{app_id}/sql/{q['id']}")
-            plan = full.get("planDescription", "")
-        except (HTTPError, URLError):
-            plan = ""
+        full = _safe_get(f"{spark_base}/applications/{app_id}/sql/{q['id']}")
+        plan = (full or {}).get("planDescription", "")
         flags = []
         if "BroadcastHashJoin" in plan or "BroadcastExchange" in plan:
             flags.append("BROADCAST")
@@ -179,11 +176,8 @@ def render_recent_sql(spark_base: str, app_id: str, n: int = 3) -> None:
 
 
 def render_yarn_nodes() -> None:
-    try:
-        payload = _get(f"{YARN_BASE}/nodes")
-        nodes = payload.get("nodes", {}).get("node", [])
-    except (HTTPError, URLError, KeyError, ConnectionError):
-        return
+    payload = _safe_get(f"{YARN_BASE}/nodes")
+    nodes = (payload or {}).get("nodes", {}).get("node", [])
     if not nodes:
         return
     print("\nYARN nodes  (containers/vcores/memory in use vs total available on each)")
@@ -199,21 +193,36 @@ def render_yarn_nodes() -> None:
               f"  mem={used_m}/{used_m + avail_m}MB")
 
 
+# Errors that should NOT take down the loop — slow GCS-backed History
+# Server responses can timeout transiently while the cluster is busy.
+_NETWORK_ERRORS = (HTTPError, URLError, ConnectionError, TimeoutError, OSError)
+
+
+def _safe_get(url: str):
+    """Single request; on transient failure, return None instead of raising."""
+    try:
+        return _get(url)
+    except _NETWORK_ERRORS:
+        return None
+
+
 def render_once(spark_base: str, app_id: str, started: float) -> None:
     print(CLEAR, end="")
     print(f"=== {app_id}   {time.strftime('%H:%M:%S')}   "
           f"{time.time() - started:6.1f}s polled   ({spark_base}) ===\n")
-    try:
-        execs = _get(f"{spark_base}/applications/{app_id}/executors")
-        active = _get(f"{spark_base}/applications/{app_id}/stages?status=ACTIVE")
-        all_stages = _get(f"{spark_base}/applications/{app_id}/stages?length=20")
-    except (HTTPError, URLError, ConnectionError) as e:
-        print(f"(spark UI unreachable at {spark_base}: {e})")
+    execs = _safe_get(f"{spark_base}/applications/{app_id}/executors")
+    active = _safe_get(f"{spark_base}/applications/{app_id}/stages?status=ACTIVE")
+    all_stages = _safe_get(f"{spark_base}/applications/{app_id}/stages?length=20")
+    if execs is None and active is None and all_stages is None:
+        print(f"(all spark UI requests timed out — cluster busy, will retry)")
         return
 
-    render_executors(execs)
-    render_active_stages(active)
-    render_recent_complete(all_stages)
+    if execs is not None:
+        render_executors(execs)
+    if active is not None:
+        render_active_stages(active)
+    if all_stages is not None:
+        render_recent_complete(all_stages)
     render_recent_sql(spark_base, app_id)
     render_yarn_nodes()
 
