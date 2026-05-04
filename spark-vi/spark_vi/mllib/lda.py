@@ -120,11 +120,12 @@ def _build_model_and_config(
     return model, config
 
 
-class VanillaLDAEstimator(Estimator, HasFeaturesCol, HasMaxIter, HasSeed):
-    """MLlib-shaped Estimator wrapping spark_vi.models.lda.VanillaLDA.
+class _VanillaLDAParams(HasFeaturesCol, HasMaxIter, HasSeed):
+    """Shared Param surface for VanillaLDAEstimator and VanillaLDAModel.
 
-    Param defaults mirror pyspark.ml.clustering.LDA for the shared subset
-    and ADR 0008 for our extras (gammaShape, caviMaxIter, caviTol).
+    Mirrors MLlib's `_LDAParams` mixin pattern: declare each Param once,
+    inherit from both the Estimator and Model so they expose identical
+    surfaces with no aliasing.
     """
 
     k = Param(
@@ -169,7 +170,7 @@ class VanillaLDAEstimator(Estimator, HasFeaturesCol, HasMaxIter, HasSeed):
     )
     optimizeDocConcentration = Param(
         Params._dummy(), "optimizeDocConcentration",
-        "whether to optimize alpha; MLlib default is True, but this shim rejects True (see ADR 0008)",
+        "whether to optimize alpha; True is rejected (see ADR 0008)",
         typeConverter=TypeConverters.toBoolean,
     )
     gammaShape = Param(
@@ -187,6 +188,14 @@ class VanillaLDAEstimator(Estimator, HasFeaturesCol, HasMaxIter, HasSeed):
         "relative tolerance on gamma for CAVI early stop",
         typeConverter=TypeConverters.toFloat,
     )
+
+
+class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
+    """MLlib-shaped Estimator wrapping spark_vi.models.lda.VanillaLDA.
+
+    Param defaults mirror pyspark.ml.clustering.LDA for the shared subset
+    and ADR 0008 for our extras (gammaShape, caviMaxIter, caviTol).
+    """
 
     @keyword_only
     def __init__(
@@ -257,27 +266,13 @@ class VanillaLDAEstimator(Estimator, HasFeaturesCol, HasMaxIter, HasSeed):
         return out_model
 
 
-class VanillaLDAModel(Model, HasFeaturesCol, HasMaxIter, HasSeed):
+class VanillaLDAModel(_VanillaLDAParams, Model):
     """MLlib-shaped Model wrapping a trained spark_vi VIResult.
 
     Carries the trained global parameters plus a copy of every Param from
     the Estimator that produced it, so post-fit getters (model.getK(), ...)
     return the configuration that was actually used.
     """
-
-    # Same Params as the Estimator, declared again so they live on this class.
-    k = VanillaLDAEstimator.k
-    topicDistributionCol = VanillaLDAEstimator.topicDistributionCol
-    optimizer = VanillaLDAEstimator.optimizer
-    learningOffset = VanillaLDAEstimator.learningOffset
-    learningDecay = VanillaLDAEstimator.learningDecay
-    subsamplingRate = VanillaLDAEstimator.subsamplingRate
-    docConcentration = VanillaLDAEstimator.docConcentration
-    topicConcentration = VanillaLDAEstimator.topicConcentration
-    optimizeDocConcentration = VanillaLDAEstimator.optimizeDocConcentration
-    gammaShape = VanillaLDAEstimator.gammaShape
-    caviMaxIter = VanillaLDAEstimator.caviMaxIter
-    caviTol = VanillaLDAEstimator.caviTol
 
     def __init__(self, result) -> None:  # result: VIResult
         super().__init__()
