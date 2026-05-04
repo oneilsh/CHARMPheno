@@ -92,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-df", type=int, default=5)
     parser.add_argument("--top-n-tokens", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--subsampling-rate", type=float, default=0.05,
+                         help="mini-batch fraction; use 1.0 for full-batch "
+                              "(recommended on small corpora where Spark "
+                              "coordination dominates per-iter time)")
     args = parser.parse_args(argv)
 
     cdr = os.environ.get("WORKSPACE_CDR")
@@ -163,9 +167,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[driver]   resolved {len(name_by_id)} concept names",
               flush=True)
 
-    with _phase(f"fit (K={args.K}, maxIter={args.max_iter})"):
+    with _phase(f"fit (K={args.K}, maxIter={args.max_iter}, "
+                 f"subsamplingRate={args.subsampling_rate})"):
         model = VanillaLDAEstimator(
             k=args.K, maxIter=args.max_iter, seed=args.seed,
+            subsamplingRate=args.subsampling_rate,
         ).fit(bow_df)
         print(f"[driver]   elbo trace tail: {model.result.elbo_trace[-3:]}",
               flush=True)
