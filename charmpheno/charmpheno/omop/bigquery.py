@@ -1,9 +1,9 @@
 """BigQuery OMOP loader via the spark-bigquery-connector.
 
-Reads OMOP fact tables from a CDM-shaped BigQuery dataset, broadcast-joins
-to the `concept` table for human-readable names, and projects to the
-canonical (person_id, visit_occurrence_id, concept_id, concept_name) shape
-defined in `charmpheno.omop.schema`. Returns a Spark DataFrame; nothing is
+Reads OMOP fact tables from a CDM-shaped BigQuery dataset, joins to the
+`concept` table for human-readable names, and projects to the canonical
+(person_id, visit_occurrence_id, concept_id, concept_name) shape defined
+in `charmpheno.omop.schema`. Returns a Spark DataFrame; nothing is
 collected to the driver.
 
 v1 supports `concept_types=("condition",)` only. drug_exposure and
@@ -90,9 +90,10 @@ def load_omop_bigquery(
 
     concept = _read("concept").select("concept_id", "concept_name")
 
-    # Concept is ~7M rows × 2 narrow cols = small; broadcast hint avoids a
-    # shuffle-join when one side dwarfs the other.
-    omop = cond.join(F.broadcast(concept), on="concept_id", how="left")
+    # No broadcast hint: full OMOP `concept` (~8M rows, name strings) is too
+    # big to materialize on the driver in client mode — Spark's AQE will
+    # pick a sort-merge or shuffle-hash join based on runtime sizes.
+    omop = cond.join(concept, on="concept_id", how="left")
     # Reorder to the canonical shape so downstream `validate()` sees a clean
     # schema position-by-position.
     omop = omop.select(*CANONICAL_COLUMNS, "condition_start_date")

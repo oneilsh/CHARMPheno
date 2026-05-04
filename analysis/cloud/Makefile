@@ -58,6 +58,7 @@ lda-bq-smoke: zip
 	spark-submit \
 	    --master yarn \
 	    --deploy-mode client \
+	    --driver-memory 4g \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(LDA_BQ_SCRIPT) $(LDA_BQ_ARGS)
 

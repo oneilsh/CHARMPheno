@@ -65,9 +65,14 @@ def main(argv: list[str] | None = None) -> int:
         billing_project=billing,
         person_sample_mod=args.person_mod,
     ).persist()
-    n_rows = omop.count()
-    n_persons = omop.select("person_id").distinct().count()
-    print(f"[driver] OMOP: {n_rows} rows, {n_persons} distinct persons", flush=True)
+    # One agg pass instead of two — distinct-counting person_id is cheap
+    # piggybacked on the row count that has to scan everything anyway.
+    summary = omop.agg(
+        F.count(F.lit(1)).alias("rows"),
+        F.countDistinct("person_id").alias("persons"),
+    ).collect()[0]
+    print(f"[driver] OMOP: {summary['rows']} rows, "
+          f"{summary['persons']} distinct persons", flush=True)
 
     print("[driver] vectorizing into bag-of-words documents...", flush=True)
     bow_df, vocab_map = to_bow_dataframe(
