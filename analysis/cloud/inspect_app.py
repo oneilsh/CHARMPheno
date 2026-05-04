@@ -275,17 +275,67 @@ def _safe_get(url: str):
         return None
 
 
-def render_once(spark_base: str, app_id: str, started: float) -> None:
+def render_progress(yarn_app: dict | None,
+                     execs: list | None,
+                     all_stages: list | None,
+                     state: dict) -> None:
+    """One-line progress summary: app state, elapsed, throughput deltas.
+
+    `state` carries previous-poll values across calls so we can compute
+    tasks/sec and stage-rate deltas without keeping a separate timeseries.
+    """
+    bits = []
+    if yarn_app:
+        app_state = yarn_app.get("state", "?")
+        elapsed_ms = yarn_app.get("elapsedTime", 0)
+        progress_pct = yarn_app.get("progress", 0.0)
+        bits.append(f"yarn={app_state}")
+        bits.append(f"elapsed={_fmt_ms(elapsed_ms)}")
+        # YARN's progress for Spark client-mode apps often sits at 10% for the
+        # whole run (the AM is a placeholder), so flag it as a hint, not truth.
+        bits.append(f"yarn-progress={progress_pct:.0f}%*")
+
+    now = time.time()
+    if execs is not None:
+        completed = sum(e.get("completedTasks", 0) for e in execs)
+        prev_completed = state.get("completed_tasks")
+        prev_t = state.get("t")
+        if prev_completed is not None and prev_t is not None and now > prev_t:
+            rate = (completed - prev_completed) / (now - prev_t)
+            bits.append(f"tasks=+{rate:.1f}/s")
+        bits.append(f"total_tasks={completed}")
+        state["completed_tasks"] = completed
+        state["t"] = now
+
+    if all_stages:
+        max_stage = max((s.get("stageId", 0) for s in all_stages), default=0)
+        prev_stage = state.get("max_stage")
+        if prev_stage is not None:
+            delta = max_stage - prev_stage
+            bits.append(f"stage={max_stage} (+{delta})")
+        else:
+            bits.append(f"stage={max_stage}")
+        state["max_stage"] = max_stage
+
+    if bits:
+        print("Progress  " + "  ".join(bits) + "\n")
+
+
+def render_once(spark_base: str, app_id: str, started: float,
+                 state: dict) -> None:
     print(CLEAR, end="")
     print(f"=== {app_id}   {time.strftime('%H:%M:%S')}   "
           f"{time.time() - started:6.1f}s polled   ({spark_base}) ===\n")
     execs = _safe_get(f"{spark_base}/applications/{app_id}/executors")
     active = _safe_get(f"{spark_base}/applications/{app_id}/stages?status=ACTIVE")
     all_stages = _safe_get(f"{spark_base}/applications/{app_id}/stages?length=20")
+    yarn_app = _safe_get(f"{YARN_BASE}/apps/{app_id}")
+    yarn_app = (yarn_app or {}).get("app")  # unwrap {"app": {...}}
     if execs is None and active is None and all_stages is None:
         print(f"(all spark UI requests timed out — cluster busy, will retry)")
         return
 
+    render_progress(yarn_app, execs, all_stages, state)
     if execs is not None:
         render_executors(execs)
     if active is not None:
@@ -339,6 +389,9 @@ def main() -> int:
         # *after* inspect was launched). Without re-detection we'd latch
         # onto a stale zombie forever.
         last_app_id = app_id
+        # Per-app cross-poll state for delta metrics (tasks/sec, stage rate).
+        # Reset whenever the target app changes so deltas don't span jobs.
+        state: dict = {}
         while True:
             current = (args.app_id
                        if args.app_id
@@ -347,7 +400,8 @@ def main() -> int:
                 print(f"\n*** switching: {last_app_id} -> {current} ***\n",
                       flush=True)
                 last_app_id = current
-            render_once(spark_base, current, started)
+                state = {}
+            render_once(spark_base, current, started, state)
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nDone.")
