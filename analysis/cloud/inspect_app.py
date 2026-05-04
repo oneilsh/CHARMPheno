@@ -31,25 +31,36 @@ def _get(url: str, timeout: float = 3.0):
         return json.loads(r.read())
 
 
-def discover_spark_base(host: str | None, port: int | None) -> str | None:
-    """Probe a small grid of host/port combos for a live Spark UI.
+def discover_spark_base(host: str | None,
+                         port: int | None) -> tuple[str | None, str]:
+    """Probe live driver UIs first, then fall back to the History Server.
 
-    Spark binds to spark.driver.host (typically the master's hostname on
-    Dataproc, not localhost) and falls forward through 4040, 4041, ...
-    if the default port is in use. We probe both axes and return the
-    first base URL that answers /api/v1/applications.
+    Returns (base_url, mode) where mode is "live" (driver UI on 4040+)
+    or "history" (Spark History Server on 18080). The History Server
+    serves the same REST shape but its data is event-log-flush delayed
+    (~5s on Dataproc due to GCS hflush rate limits).
     """
     hosts = [host] if host else ["localhost", "127.0.0.1", socket.gethostname()]
-    ports = [port] if port else list(range(4040, 4046))
+    live_ports = [port] if port else list(range(4040, 4046))
     for h in hosts:
-        for p in ports:
+        for p in live_ports:
             url = f"http://{h}:{p}/api/v1"
             try:
                 _get(f"{url}/applications", timeout=1.5)
-                return url
+                return url, "live"
             except (HTTPError, URLError, ConnectionError, OSError):
                 continue
-    return None
+    # History Server fallback. Skip if the user pinned a specific port that
+    # isn't 18080 — they're probably trying to hit a specific live driver.
+    if port is None or port == 18080:
+        for h in (hosts if host else ["localhost"]):
+            url = f"http://{h}:18080/api/v1"
+            try:
+                _get(f"{url}/applications", timeout=1.5)
+                return url, "history"
+            except (HTTPError, URLError, ConnectionError, OSError):
+                continue
+    return None, "unknown"
 
 
 def _fmt_bytes(b: float) -> str:
@@ -76,7 +87,14 @@ def find_app_id(spark_base: str, explicit: str | None) -> str | None:
         apps = _get(f"{spark_base}/applications")
     except (HTTPError, URLError, ConnectionError):
         return None
-    return apps[0]["id"] if apps else None
+    if not apps:
+        return None
+    # Prefer an in-progress app (matters for History Server which lists all).
+    for a in apps:
+        attempts = a.get("attempts") or [{}]
+        if not attempts[0].get("completed", True):
+            return a["id"]
+    return apps[0]["id"]
 
 
 def render_executors(execs: list) -> None:
@@ -213,18 +231,18 @@ def main() -> int:
                     help="Spark UI port (default: probe 4040..4045)")
     args = p.parse_args()
 
-    spark_base = discover_spark_base(args.host, args.port)
+    spark_base, mode = discover_spark_base(args.host, args.port)
     if not spark_base:
-        print("No Spark UI found. Probed:", file=sys.stderr)
+        print("No Spark UI or History Server found. Probed:", file=sys.stderr)
         hosts = [args.host] if args.host else ["localhost", "127.0.0.1", socket.gethostname()]
-        ports = [args.port] if args.port else list(range(4040, 4046))
+        ports = [args.port] if args.port else list(range(4040, 4046)) + [18080]
         for h in hosts:
             for pn in ports:
                 print(f"  http://{h}:{pn}/", file=sys.stderr)
-        print("\nIs a job running? Find the actual port with:",
+        print("\nFind the actual port with:    ss -tlnp | grep -E ':4|:18080'",
               file=sys.stderr)
-        print("    ss -tlnp | grep -E ':404[0-9]'", file=sys.stderr)
-        print("Then re-run with: --host <h> --port <p>", file=sys.stderr)
+        print("Then re-run with:             --host <h> --port <p>",
+              file=sys.stderr)
         return 1
 
     app_id = find_app_id(spark_base, args.app_id)
@@ -233,7 +251,9 @@ def main() -> int:
               file=sys.stderr)
         return 1
     started = time.time()
-    print(f"Polling {app_id} on {spark_base} every {args.interval}s — Ctrl-C to quit.")
+    note = "  (event-log lag ~5s)" if mode == "history" else ""
+    print(f"Polling {app_id} on {spark_base} [{mode}{note}] "
+          f"every {args.interval}s — Ctrl-C to quit.")
     time.sleep(0.5)
     try:
         while True:
