@@ -337,4 +337,60 @@ class VanillaLDAModel(_VanillaLDAParams, Model):
         return SparkSession.builder.getOrCreate().createDataFrame(rows, schema=schema)
 
     def _transform(self, dataset):
-        raise NotImplementedError("Implemented in a later task.")
+        from pyspark.ml.linalg import DenseVector, VectorUDT
+        from pyspark.sql import functions as F
+        from scipy.special import digamma
+
+        from spark_vi.models.lda import _cavi_doc_inference
+
+        lam = self._result.global_params["lambda"]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+        # docConcentration may be unset (None default) → resolve to 1/k.
+        if self.isSet("docConcentration") and self.getOrDefault("docConcentration") is not None:
+            alpha = float(self.getOrDefault("docConcentration")[0])
+        else:
+            alpha = 1.0 / self.getOrDefault("k")
+        gamma_shape = float(self.getOrDefault("gammaShape"))
+        cavi_max_iter = int(self.getOrDefault("caviMaxIter"))
+        cavi_tol = float(self.getOrDefault("caviTol"))
+        K = expElogbeta.shape[0]
+
+        sc = dataset.sparkSession.sparkContext
+        bcast = sc.broadcast({
+            "expElogbeta": expElogbeta,
+            "alpha": alpha,
+            "gamma_shape": gamma_shape,
+            "cavi_max_iter": cavi_max_iter,
+            "cavi_tol": cavi_tol,
+            "K": K,
+        })
+
+        def _infer(features):
+            params = bcast.value
+            doc = _vector_to_bow_document(features)
+            rng = np.random.default_rng()
+            gamma_init = rng.gamma(
+                shape=params["gamma_shape"],
+                scale=1.0 / params["gamma_shape"],
+                size=params["K"],
+            )
+            gamma, _, _, _ = _cavi_doc_inference(
+                indices=doc.indices,
+                counts=doc.counts,
+                expElogbeta=params["expElogbeta"],
+                alpha=params["alpha"],
+                gamma_init=gamma_init,
+                max_iter=params["cavi_max_iter"],
+                tol=params["cavi_tol"],
+            )
+            return DenseVector(gamma / gamma.sum())
+
+        infer_udf = F.udf(_infer, returnType=VectorUDT())
+
+        try:
+            out_col = self.getOrDefault("topicDistributionCol")
+            features_col = self.getOrDefault("featuresCol")
+            return dataset.withColumn(out_col, infer_udf(F.col(features_col)))
+        finally:
+            bcast.unpersist(blocking=False)

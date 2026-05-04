@@ -213,3 +213,35 @@ def test_describe_topics_returns_top_k_per_topic(tiny_corpus_df):
         # Weights must be descending.
         weights = list(r["termWeights"])
         assert weights == sorted(weights, reverse=True)
+
+
+def test_transform_adds_topic_distribution_column(tiny_corpus_df):
+    from pyspark.ml.linalg import Vector
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+
+    estimator = VanillaLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
+    model = estimator.fit(tiny_corpus_df)
+
+    out = model.transform(tiny_corpus_df)
+    assert "topicDistribution" in out.columns
+
+    rows = out.select("topicDistribution").collect()
+    for r in rows:
+        td = r["topicDistribution"]
+        assert isinstance(td, Vector)
+        arr = np.asarray(td.toArray())
+        assert arr.shape == (3,)
+        np.testing.assert_allclose(arr.sum(), 1.0, atol=1e-6)
+
+
+def test_transform_respects_custom_topic_distribution_col(tiny_corpus_df):
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+
+    estimator = VanillaLDAEstimator(
+        k=3, maxIter=5, seed=0, subsamplingRate=1.0,
+        topicDistributionCol="theta",
+    )
+    model = estimator.fit(tiny_corpus_df)
+    out = model.transform(tiny_corpus_df)
+    assert "theta" in out.columns
+    assert "topicDistribution" not in out.columns
