@@ -1,8 +1,9 @@
-.PHONY: help zip smoke smoke-dataproc
+.PHONY: help zip smoke bq-smoke smoke-dataproc
 
 REPO_ROOT    := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
 SCRIPT       := smoke_lda_cloud.py
+BQ_SCRIPT    := bq_smoke_cloud.py
 
 # gcloud-submit fallback only — `smoke` doesn't need any of these.
 PROJECT ?= $(GOOGLE_CLOUD_PROJECT)
@@ -15,7 +16,8 @@ default: help
 help:
 	@echo "Cluster smoke targets (run from this dir on the Dataproc master):"
 	@echo ""
-	@echo "  make smoke           - spark-submit via YARN (client mode), reads local paths"
+	@echo "  make smoke           - LDA shim smoke: spark-submit via YARN (client mode)"
+	@echo "  make bq-smoke        - BigQuery read smoke (no spark_vi imports)"
 	@echo "  make smoke-dataproc  - alternate: stage to GCS, gcloud dataproc jobs submit pyspark"
 	@echo "  make zip             - (re)build $(SPARK_VI_ZIP)"
 	@echo ""
@@ -37,6 +39,12 @@ smoke: zip
 	    --deploy-mode client \
 	    --py-files $(SPARK_VI_ZIP) \
 	    $(SCRIPT)
+
+bq-smoke:
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    $(BQ_SCRIPT)
 
 smoke-dataproc: zip
 	@test -n "$(CLUSTER)" || { echo "ERROR: set CLUSTER=<name>"; exit 1; }
