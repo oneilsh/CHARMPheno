@@ -96,7 +96,7 @@ class VanillaLDAEstimator(Estimator, HasFeaturesCol, HasMaxIter, HasSeed):
         subsamplingRate: float = 0.05,
         docConcentration: list[float] | None = None,
         topicConcentration: float | None = None,
-        optimizeDocConcentration: bool = True,
+        optimizeDocConcentration: bool = False,
         gammaShape: float = 100.0,
         caviMaxIter: int = 100,
         caviTol: float = 1e-3,
@@ -107,7 +107,7 @@ class VanillaLDAEstimator(Estimator, HasFeaturesCol, HasMaxIter, HasSeed):
             featuresCol="features", topicDistributionCol="topicDistribution",
             optimizer="online",
             learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05,
-            optimizeDocConcentration=True,
+            optimizeDocConcentration=False,
             gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
         )
         kwargs = self._input_kwargs
