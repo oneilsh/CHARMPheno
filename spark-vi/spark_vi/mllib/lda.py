@@ -302,5 +302,39 @@ class VanillaLDAModel(_VanillaLDAParams, Model):
         # DenseMatrix expects column-major flattened values.
         return DenseMatrix(numRows=V, numCols=K, values=beta.T.flatten("F").tolist())
 
+    def describeTopics(self, maxTermsPerTopic: int = 10):
+        """DataFrame of (topic, termIndices, termWeights) — top terms per topic.
+
+        Schema and orientation match pyspark.ml.clustering.LDAModel.describeTopics.
+        """
+        from pyspark.sql import SparkSession
+        from pyspark.sql.types import (
+            ArrayType, DoubleType, IntegerType, StructField, StructType,
+        )
+
+        if maxTermsPerTopic < 1:
+            raise ValueError(f"maxTermsPerTopic must be >= 1, got {maxTermsPerTopic}")
+
+        lam = self._result.global_params["lambda"]
+        beta = lam / lam.sum(axis=1, keepdims=True)  # (K, V), row-stochastic
+        K, V = beta.shape
+        m = min(maxTermsPerTopic, V)
+
+        rows = []
+        for k in range(K):
+            order = np.argsort(beta[k])[::-1][:m]
+            rows.append((
+                int(k),
+                [int(i) for i in order],
+                [float(beta[k, i]) for i in order],
+            ))
+
+        schema = StructType([
+            StructField("topic", IntegerType(), False),
+            StructField("termIndices", ArrayType(IntegerType(), False), False),
+            StructField("termWeights", ArrayType(DoubleType(), False), False),
+        ])
+        return SparkSession.builder.getOrCreate().createDataFrame(rows, schema=schema)
+
     def _transform(self, dataset):
         raise NotImplementedError("Implemented in a later task.")

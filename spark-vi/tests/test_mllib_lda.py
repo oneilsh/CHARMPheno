@@ -195,3 +195,21 @@ def test_topics_matrix_shape_and_normalization(tiny_corpus_df):
     # Each column (a topic) sums to 1 (row-stochastic over vocab in MLlib's orientation).
     arr = tm.toArray()
     np.testing.assert_allclose(arr.sum(axis=0), 1.0, atol=1e-9)
+
+
+def test_describe_topics_returns_top_k_per_topic(tiny_corpus_df):
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+
+    estimator = VanillaLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
+    model = estimator.fit(tiny_corpus_df)
+
+    df = model.describeTopics(maxTermsPerTopic=4)
+    rows = df.orderBy("topic").collect()
+
+    assert [r["topic"] for r in rows] == [0, 1, 2]
+    for r in rows:
+        assert len(r["termIndices"]) == 4
+        assert len(r["termWeights"]) == 4
+        # Weights must be descending.
+        weights = list(r["termWeights"])
+        assert weights == sorted(weights, reverse=True)
