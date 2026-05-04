@@ -179,3 +179,19 @@ def test_fit_returns_model_with_correct_shape(tiny_corpus_df):
     # Param round-trip: model exposes the same configuration the Estimator had.
     assert model.getOrDefault("k") == 3
     assert model.getOrDefault("maxIter") == 5
+
+
+def test_topics_matrix_shape_and_normalization(tiny_corpus_df):
+    from pyspark.ml.linalg import DenseMatrix
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+
+    estimator = VanillaLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
+    model = estimator.fit(tiny_corpus_df)
+
+    tm = model.topicsMatrix()
+    assert isinstance(tm, DenseMatrix)
+    assert tm.numRows == 9   # vocab size V
+    assert tm.numCols == 3   # K
+    # Each column (a topic) sums to 1 (row-stochastic over vocab in MLlib's orientation).
+    arr = tm.toArray()
+    np.testing.assert_allclose(arr.sum(axis=0), 1.0, atol=1e-9)

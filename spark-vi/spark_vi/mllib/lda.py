@@ -287,5 +287,20 @@ class VanillaLDAModel(_VanillaLDAParams, Model):
         """V dimension of the trained lambda."""
         return int(self._result.global_params["lambda"].shape[1])
 
+    def topicsMatrix(self):
+        """Topic-word distribution as an MLlib DenseMatrix of shape (V, K).
+
+        Internally we keep lambda as (K, V); the transpose-and-normalize
+        here matches MLlib's convention where `topicsMatrix` is indexed
+        by (vocab term, topic).
+        """
+        from pyspark.ml.linalg import DenseMatrix
+
+        lam = self._result.global_params["lambda"]
+        beta = lam / lam.sum(axis=1, keepdims=True)  # (K, V), row-stochastic
+        K, V = beta.shape
+        # DenseMatrix expects column-major flattened values.
+        return DenseMatrix(numRows=V, numCols=K, values=beta.T.flatten("F").tolist())
+
     def _transform(self, dataset):
         raise NotImplementedError("Implemented in a later task.")
