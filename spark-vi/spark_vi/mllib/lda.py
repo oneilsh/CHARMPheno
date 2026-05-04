@@ -7,6 +7,8 @@ docs/superpowers/specs/2026-05-04-mllib-shim-design.md and ADR 0009.
 """
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 from pyspark import keyword_only
 from pyspark.ml.base import Estimator, Model
@@ -238,13 +240,17 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
         """Standard MLlib pattern: set any subset of params after construction."""
         return self._set(**kwargs)
 
-    def setOnIteration(self, fn) -> "VanillaLDAEstimator":
+    def setOnIteration(
+        self,
+        fn: Callable[[int, dict, list[float]], None] | None,
+    ) -> "VanillaLDAEstimator":
         """Register a per-iteration diagnostic callback for the next fit.
 
-        Signature: fn(iter_num: int, global_params: dict, elbo_trace: list).
-        Runs on the driver in the fit's hot path; throttle it with a modulo
-        if the work is non-trivial. Not persisted by Pipeline.save (callables
-        aren't MLlib-serializable; persistence is deferred per ADR 0009).
+        Signature: fn(iter_num, global_params, elbo_trace). Runs on the driver
+        in the fit's hot path; throttle with a modulo if non-trivial. The
+        callback must not mutate global_params — the same dict feeds the next
+        iteration's broadcast. Not persisted by Pipeline.save (callables
+        aren't MLlib-serializable; persistence deferred per ADR 0009).
         """
         self._on_iteration = fn
         return self

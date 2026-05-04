@@ -73,8 +73,10 @@ class VIRunner:
             on_iteration: optional diagnostic callback invoked after each
                 iteration as `fn(iter_num, global_params, elbo_trace)`. The
                 callback runs on the driver in the fit's hot path; keep it
-                cheap or throttle with a modulo. Exceptions are caught and
-                logged so a buggy diagnostic doesn't kill the fit.
+                cheap or throttle with a modulo. Must not mutate
+                global_params — the same dict feeds the next iteration's
+                broadcast. Exceptions are caught and logged so a buggy
+                diagnostic doesn't kill the fit.
         """
         model = self.model
         cfg = self.config

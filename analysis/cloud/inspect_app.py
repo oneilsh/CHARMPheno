@@ -87,6 +87,10 @@ def _fmt_ms(ms: float) -> str:
 _ZOMBIE_STALE_MS = 120_000  # 2 min: lastUpdated older than this and still
                              # "in progress" => OOM-killed orphan, not real
 
+# Errors that should NOT take down the loop — slow GCS-backed History
+# Server responses can timeout transiently while the cluster is busy.
+_NETWORK_ERRORS = (HTTPError, URLError, ConnectionError, TimeoutError, OSError)
+
 
 def find_app_id(spark_base: str, explicit: str | None) -> str | None:
     """Pick the *newest live* in-progress app, ignoring stale zombies.
@@ -101,7 +105,7 @@ def find_app_id(spark_base: str, explicit: str | None) -> str | None:
         return explicit
     try:
         apps = _get(f"{spark_base}/applications")
-    except (HTTPError, URLError, ConnectionError, TimeoutError, OSError):
+    except _NETWORK_ERRORS:
         return None
     if not apps:
         return None
@@ -260,11 +264,6 @@ def render_yarn_nodes() -> None:
               f"  containers={n.get('numContainers',0):>2}"
               f"  vcores={used_v}/{used_v + avail_v}"
               f"  mem={used_m}/{used_m + avail_m}MB")
-
-
-# Errors that should NOT take down the loop — slow GCS-backed History
-# Server responses can timeout transiently while the cluster is busy.
-_NETWORK_ERRORS = (HTTPError, URLError, ConnectionError, TimeoutError, OSError)
 
 
 def _safe_get(url: str):

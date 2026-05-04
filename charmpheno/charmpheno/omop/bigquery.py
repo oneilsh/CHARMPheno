@@ -83,16 +83,18 @@ def load_omop_bigquery(
         "condition_start_date",
     )
     if person_sample_mod is not None:
-        # Pushed down to BQ as a predicate — full-patient sampling is the
-        # right shape for LDA (per-person token bags stay intact).
+        # Full-patient sampling is the right shape for LDA — per-person token
+        # bags stay intact rather than getting truncated by row-level sampling.
+        # Whether MOD pushes down to BQ depends on the connector version.
         cond = cond.where((F.col("person_id") % person_sample_mod) == 0)
     cond = cond.where(F.col("concept_id") != 0)
 
     concept = _read("concept").select("concept_id", "concept_name")
 
-    # No broadcast hint: full OMOP `concept` (~8M rows, name strings) is too
-    # big to materialize on the driver in client mode — Spark's AQE will
-    # pick a sort-merge or shuffle-hash join based on runtime sizes.
+    # No broadcast hint: full OMOP `concept` (~8M rows, name strings) exceeds
+    # autoBroadcastJoinThreshold, so AQE will pick shuffle-hash or sort-merge
+    # at runtime. An explicit F.broadcast() here OOM'd the driver in client
+    # mode — keep it implicit and let the planner choose.
     omop = cond.join(concept, on="concept_id", how="left")
     # Reorder to the canonical shape so downstream `validate()` sees a clean
     # schema position-by-position.

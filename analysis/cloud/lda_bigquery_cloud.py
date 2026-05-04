@@ -69,9 +69,8 @@ def _make_topic_evolution_logger(K, top_n, every_n, idx_to_cid, name_by_id):
     summary per topic so a K=10, every-N=10, 100-iter run produces 100
     lines of evolution output total.
     """
-    def _on_iter(iter_num: int, global_params: dict, *_) -> None:
-        # *_: swallows trailing positional args from the runner contract
-        # (currently elbo_trace; the topic view doesn't need it).
+    def _on_iter(iter_num: int, global_params: dict,
+                 _: list[float]) -> None:
         if every_n <= 0 or iter_num % every_n != 0:
             return
         lam = global_params["lambda"]                         # (K, V)
@@ -228,9 +227,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {cid:>10}  {name[:60]:<60}  {col[j]:.4f}", flush=True)
 
     with _phase("transform sample"):
-        # Hash person_id before display: row-level output ends up in the
-        # Spark History Server's GCS event log, where raw IDs shouldn't
-        # accumulate. Topic distributions are aggregate and fine raw.
         (model.transform(bow_df)
               .withColumn("person_hash",
                           F.substring(
