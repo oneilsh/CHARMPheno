@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import sys
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-SPARK_BASE = "http://localhost:4040/api/v1"
 YARN_BASE = "http://localhost:8088/ws/v1/cluster"
 CLEAR = "\x1b[2J\x1b[H"
 
@@ -29,6 +29,27 @@ CLEAR = "\x1b[2J\x1b[H"
 def _get(url: str, timeout: float = 3.0):
     with urlopen(url, timeout=timeout) as r:
         return json.loads(r.read())
+
+
+def discover_spark_base(host: str | None, port: int | None) -> str | None:
+    """Probe a small grid of host/port combos for a live Spark UI.
+
+    Spark binds to spark.driver.host (typically the master's hostname on
+    Dataproc, not localhost) and falls forward through 4040, 4041, ...
+    if the default port is in use. We probe both axes and return the
+    first base URL that answers /api/v1/applications.
+    """
+    hosts = [host] if host else ["localhost", "127.0.0.1", socket.gethostname()]
+    ports = [port] if port else list(range(4040, 4046))
+    for h in hosts:
+        for p in ports:
+            url = f"http://{h}:{p}/api/v1"
+            try:
+                _get(f"{url}/applications", timeout=1.5)
+                return url
+            except (HTTPError, URLError, ConnectionError, OSError):
+                continue
+    return None
 
 
 def _fmt_bytes(b: float) -> str:
@@ -48,11 +69,11 @@ def _fmt_ms(ms: float) -> str:
     return f"{s/60:>5.1f}m"
 
 
-def find_app_id(explicit: str | None) -> str | None:
+def find_app_id(spark_base: str, explicit: str | None) -> str | None:
     if explicit:
         return explicit
     try:
-        apps = _get(f"{SPARK_BASE}/applications")
+        apps = _get(f"{spark_base}/applications")
     except (HTTPError, URLError, ConnectionError):
         return None
     return apps[0]["id"] if apps else None
@@ -110,10 +131,10 @@ def render_recent_complete(stages: list, n: int = 3) -> None:
               f"  shR={_fmt_bytes(shR)}  shW={_fmt_bytes(shW)}  ~{_fmt_bytes(thr)}/s")
 
 
-def render_recent_sql(app_id: str, n: int = 3) -> None:
+def render_recent_sql(spark_base: str, app_id: str, n: int = 3) -> None:
     """Hit the SQL endpoint and flag broadcast vs sort-merge joins."""
     try:
-        sqls = _get(f"{SPARK_BASE}/applications/{app_id}/sql?length=10")
+        sqls = _get(f"{spark_base}/applications/{app_id}/sql?length=10")
     except (HTTPError, URLError):
         return
     if not sqls:
@@ -122,7 +143,7 @@ def render_recent_sql(app_id: str, n: int = 3) -> None:
     for q in sqls[-n:]:
         # Only ask for the full plan on the few we actually print.
         try:
-            full = _get(f"{SPARK_BASE}/applications/{app_id}/sql/{q['id']}")
+            full = _get(f"{spark_base}/applications/{app_id}/sql/{q['id']}")
             plan = full.get("planDescription", "")
         except (HTTPError, URLError):
             plan = ""
@@ -160,22 +181,22 @@ def render_yarn_nodes() -> None:
               f"  mem={used_m}/{used_m + avail_m}MB")
 
 
-def render_once(app_id: str, started: float) -> None:
+def render_once(spark_base: str, app_id: str, started: float) -> None:
     print(CLEAR, end="")
     print(f"=== {app_id}   {time.strftime('%H:%M:%S')}   "
-          f"{time.time() - started:6.1f}s polled ===\n")
+          f"{time.time() - started:6.1f}s polled   ({spark_base}) ===\n")
     try:
-        execs = _get(f"{SPARK_BASE}/applications/{app_id}/executors")
-        active = _get(f"{SPARK_BASE}/applications/{app_id}/stages?status=ACTIVE")
-        all_stages = _get(f"{SPARK_BASE}/applications/{app_id}/stages?length=20")
+        execs = _get(f"{spark_base}/applications/{app_id}/executors")
+        active = _get(f"{spark_base}/applications/{app_id}/stages?status=ACTIVE")
+        all_stages = _get(f"{spark_base}/applications/{app_id}/stages?length=20")
     except (HTTPError, URLError, ConnectionError) as e:
-        print(f"(spark UI unreachable on localhost:4040: {e})")
+        print(f"(spark UI unreachable at {spark_base}: {e})")
         return
 
     render_executors(execs)
     render_active_stages(active)
     render_recent_complete(all_stages)
-    render_recent_sql(app_id)
+    render_recent_sql(spark_base, app_id)
     render_yarn_nodes()
 
 
@@ -185,20 +206,38 @@ def main() -> int:
     p.add_argument("--interval", type=float, default=5.0,
                     help="seconds between refreshes (default: 5)")
     p.add_argument("--app-id", default=None,
-                    help="explicit app id (default: first app on localhost:4040)")
+                    help="explicit app id (default: first app on the Spark UI)")
+    p.add_argument("--host", default=None,
+                    help="Spark UI host (default: probe localhost, 127.0.0.1, $HOSTNAME)")
+    p.add_argument("--port", type=int, default=None,
+                    help="Spark UI port (default: probe 4040..4045)")
     args = p.parse_args()
 
-    app_id = find_app_id(args.app_id)
+    spark_base = discover_spark_base(args.host, args.port)
+    if not spark_base:
+        print("No Spark UI found. Probed:", file=sys.stderr)
+        hosts = [args.host] if args.host else ["localhost", "127.0.0.1", socket.gethostname()]
+        ports = [args.port] if args.port else list(range(4040, 4046))
+        for h in hosts:
+            for pn in ports:
+                print(f"  http://{h}:{pn}/", file=sys.stderr)
+        print("\nIs a job running? Find the actual port with:",
+              file=sys.stderr)
+        print("    ss -tlnp | grep -E ':404[0-9]'", file=sys.stderr)
+        print("Then re-run with: --host <h> --port <p>", file=sys.stderr)
+        return 1
+
+    app_id = find_app_id(spark_base, args.app_id)
     if not app_id:
-        print("No running app found on localhost:4040. Is the driver running?",
+        print(f"Spark UI reachable at {spark_base} but no apps listed.",
               file=sys.stderr)
         return 1
     started = time.time()
-    print(f"Polling {app_id} every {args.interval}s — Ctrl-C to quit.")
+    print(f"Polling {app_id} on {spark_base} every {args.interval}s — Ctrl-C to quit.")
     time.sleep(0.5)
     try:
         while True:
-            render_once(app_id, started)
+            render_once(spark_base, app_id, started)
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nDone.")
