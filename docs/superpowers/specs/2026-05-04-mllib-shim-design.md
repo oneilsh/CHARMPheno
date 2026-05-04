@@ -66,19 +66,19 @@ fit:
     → VanillaLDAModel (carrying the VIResult and a copy of all Params)
 
 transform:
-  DataFrame[<featuresCol>: Vector]
-    → mapPartitions(SparseVector | DenseVector → BOWDocument)
-    → RDD[BOWDocument]
-    → VIRunner(reconstructed_VanillaLDA).transform(
-          rdd, {"lambda": result.global_params["lambda"]}
-      )
-    → RDD[(gamma, expElogthetad, phi_norm, n_iter)]   # VanillaLDA.infer_local return
-    → mapPartitions(gamma → DenseVector(gamma / gamma.sum()))
-    → DataFrame[<featuresCol>, <topicDistributionCol>: Vector]
+  DataFrame[<featuresCol>: Vector, ...other columns...]
+    → withColumn(<topicDistributionCol>, udf_infer(features))
+        # UDF body, per row:
+        #   indices, counts = unpack Vector
+        #   gamma = _cavi_doc_inference(indices, counts, expElogbeta_bcast, ...)
+        #   return DenseVector(gamma / gamma.sum())
+    → DataFrame[<featuresCol>, ...other columns..., <topicDistributionCol>: Vector]
 ```
 
-`VIRunner.transform` already handles the broadcast lifecycle for the global
-params; the shim does not reimplement broadcast/unpersist logic.
+The UDF strategy mirrors MLlib's own `LDAModel.transform`. We do not route
+through `VIRunner.transform` because reattaching its `RDD[dict]` output to
+the original DataFrame's other columns is awkward; the UDF preserves all
+columns trivially.
 
 ## Module layout
 
@@ -173,20 +173,27 @@ A `VanillaLDAModel` carries:
 ### `_transform(dataset: DataFrame) -> DataFrame`
 
 Returns the input DataFrame with one new column `<topicDistributionCol>` of
-type Vector (DenseVector, length K).
+type Vector (DenseVector, length K), preserving every other column.
 
-Implementation:
-1. Convert `dataset.select(featuresCol)` → `RDD[BOWDocument]` (same helper
-   as `_fit`).
-2. Reconstruct a `VanillaLDA` instance from stored Param values (same
-   `_build_model_and_config` helper, discarding the `VIConfig`).
-3. Build `runner = VIRunner(model)` and call
-   `runner.transform(rdd, {"lambda": self.result.global_params["lambda"]})`.
-4. Map the resulting RDD's per-row tuple `(gamma, ..., ...)` to
-   `DenseVector(gamma / gamma.sum())`.
-5. Reattach the topic-distribution column to the original DataFrame. The
-   simplest correct implementation is `mapInPandas` — converts back through
-   a typed schema and preserves all original columns.
+Implementation: a Python UDF over the Vector column. This mirrors MLlib's
+own `LDAModel.transform` strategy and avoids the round-trip through `RDD[dict]`
+that `VIRunner.transform` would impose, which makes column reattachment
+awkward.
+
+1. Compute `expElogbeta` once on the driver from
+   `self.result.global_params["lambda"]`.
+2. Broadcast a small dict containing `expElogbeta` plus the scalar params
+   the UDF needs (`alpha`, `gammaShape`, `caviMaxIter`, `caviTol`).
+3. Define a UDF returning `VectorUDT()`. In the UDF body: extract indices
+   and values from the Vector arg (handling both SparseVector and
+   DenseVector), draw a `gamma_init` from
+   `Gamma(gammaShape, 1/gammaShape)`, run the same `_cavi_doc_inference`
+   that `VanillaLDA.infer_local` uses, normalize γ to θ, return
+   `DenseVector(theta)`.
+4. Apply the UDF via `dataset.withColumn(topicDistributionCol, _infer(features))`.
+5. Unpersist the broadcast in a `try/finally` (Spark resolves broadcast
+   values at task launch, so unpersisting after `withColumn` returns is
+   safe — the same pattern `VIRunner.fit` uses).
 
 ### `topicsMatrix() -> pyspark.ml.linalg.Matrix`
 
