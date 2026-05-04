@@ -83,13 +83,18 @@ def _fmt_ms(ms: float) -> str:
     return f"{s/60:>5.1f}m"
 
 
-def find_app_id(spark_base: str, explicit: str | None) -> str | None:
-    """Pick the *newest* in-progress app, or fall back to newest completed.
+_ZOMBIE_STALE_MS = 120_000  # 2 min: lastUpdated older than this and still
+                             # "in progress" => OOM-killed orphan, not real
 
-    The History Server can accumulate zombie 'in-progress' entries from
-    OOM-killed or hard-crashed runs (no clean shutdown -> no completion
-    event ever flushed). Picking the first one we iterate is wrong;
-    sorting by startTime picks the user's current run.
+
+def find_app_id(spark_base: str, explicit: str | None) -> str | None:
+    """Pick the *newest live* in-progress app, ignoring stale zombies.
+
+    A History Server entry stays `completed: false` forever if the driver
+    died too abruptly to flush its completion event (OOM, kill -9, hard
+    crash). Such zombies stop generating new event-log writes, so their
+    `lastUpdatedEpoch` falls behind wall time. Filtering by recency
+    distinguishes a live job from a corpse.
     """
     if explicit:
         return explicit
@@ -103,18 +108,37 @@ def find_app_id(spark_base: str, explicit: str | None) -> str | None:
     def _start(a):
         return (a.get("attempts") or [{}])[0].get("startTimeEpoch", 0)
 
-    in_progress = [
+    def _last_update(a):
+        return (a.get("attempts") or [{}])[0].get("lastUpdatedEpoch", 0)
+
+    now_ms = time.time() * 1000
+    live_in_progress = [
         a for a in apps
-        if not (a.get("attempts") or [{}])[0].get("completed", True)
+        if (not (a.get("attempts") or [{}])[0].get("completed", True)
+            and now_ms - _last_update(a) < _ZOMBIE_STALE_MS)
     ]
-    if in_progress:
-        in_progress.sort(key=_start, reverse=True)
-        if len(in_progress) > 1:
-            stale = [a["id"] for a in in_progress[1:]]
-            print(f"NOTE: {len(in_progress)} in-progress apps; picking newest. "
-                  f"Stale (likely zombie OOM-kills): {stale}", file=sys.stderr)
-        return in_progress[0]["id"]
-    return sorted(apps, key=_start, reverse=True)[0]["id"]
+    zombies = [
+        a["id"] for a in apps
+        if (not (a.get("attempts") or [{}])[0].get("completed", True)
+            and now_ms - _last_update(a) >= _ZOMBIE_STALE_MS)
+    ]
+    if live_in_progress:
+        live_in_progress.sort(key=_start, reverse=True)
+        if zombies:
+            print(f"NOTE: ignoring {len(zombies)} zombie in-progress entries "
+                  f"(no event-log activity for >{_ZOMBIE_STALE_MS//1000}s): "
+                  f"{zombies}", file=sys.stderr)
+        return live_in_progress[0]["id"]
+    # No live in-progress app; fall back to newest completed (or, if there
+    # are zombies but no live apps, the user probably wants the newest
+    # completed run anyway).
+    completed = [
+        a for a in apps
+        if (a.get("attempts") or [{}])[0].get("completed", True)
+    ]
+    if completed:
+        return sorted(completed, key=_start, reverse=True)[0]["id"]
+    return None
 
 
 def render_executors(execs: list) -> None:
