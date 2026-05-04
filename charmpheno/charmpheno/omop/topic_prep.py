@@ -17,6 +17,8 @@ def to_bow_dataframe(
     df: DataFrame,
     doc_col: str = "person_id",
     token_col: str = "concept_id",
+    vocab_size: int | None = None,
+    min_df: int | float = 1,
 ) -> tuple[DataFrame, dict[int, int]]:
     """Group rows into bag-of-words documents and build a contiguous vocab map.
 
@@ -24,6 +26,13 @@ def to_bow_dataframe(
         df: OMOP-shaped DataFrame, must contain doc_col and token_col.
         doc_col: column to group on (one row per document).
         token_col: column whose values are tokens (concept_ids).
+        vocab_size: cap on vocabulary; the top-N tokens by document
+            frequency are kept. None leaves CountVectorizer's default
+            (262144) in place — fine for the simulator, often too large
+            for real OMOP.
+        min_df: drop tokens that appear in fewer than this many documents.
+            int = absolute count; float in (0,1) = fraction of corpus.
+            Default 1 keeps every token (matches CountVectorizer default).
 
     Returns:
         bow_df: DataFrame[doc_col, features: SparseVector]. One row per document.
@@ -38,7 +47,10 @@ def to_bow_dataframe(
           .agg(F.collect_list(token_col).alias("tokens"))
     )
 
-    cv = CountVectorizer(inputCol="tokens", outputCol="features")
+    cv = CountVectorizer(inputCol="tokens", outputCol="features",
+                         minDF=float(min_df))
+    if vocab_size is not None:
+        cv = cv.setVocabSize(vocab_size)
     cv_model = cv.fit(grouped)
     bow_df = cv_model.transform(grouped).select(doc_col, "features")
 
