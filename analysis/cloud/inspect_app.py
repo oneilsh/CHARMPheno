@@ -282,8 +282,20 @@ def main() -> int:
           f"every {args.interval}s — Ctrl-C to quit.")
     time.sleep(0.5)
     try:
+        # Re-detect each tick when --app-id wasn't pinned: the newest
+        # in-progress app can change between iterations (a job may start
+        # *after* inspect was launched). Without re-detection we'd latch
+        # onto a stale zombie forever.
+        last_app_id = app_id
         while True:
-            render_once(spark_base, app_id, started)
+            current = (args.app_id
+                       if args.app_id
+                       else find_app_id(spark_base, None) or last_app_id)
+            if current != last_app_id:
+                print(f"\n*** switching: {last_app_id} -> {current} ***\n",
+                      flush=True)
+                last_app_id = current
+            render_once(spark_base, current, started)
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nDone.")
