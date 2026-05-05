@@ -16,7 +16,7 @@ def test_default_params_match_mllib_lda(spark):
     for name in [
         "k", "maxIter", "featuresCol", "topicDistributionCol",
         "optimizer", "learningOffset", "learningDecay",
-        "subsamplingRate",
+        "subsamplingRate", "optimizeDocConcentration",
     ]:
         assert ours.getOrDefault(name) == theirs.getOrDefault(name), (
             f"Param {name!r} default mismatch: ours={ours.getOrDefault(name)!r} "
@@ -47,15 +47,12 @@ def test_optimize_topic_concentration_param_can_be_set():
     assert e.getOrDefault("optimizeTopicConcentration") is True
 
 
-def test_optimize_doc_concentration_defaults_false_diverging_from_mllib():
-    """We default to False so the v1 shim's no-arg fit doesn't trip the
-    validator that rejects True (Task 5). MLlib defaults to True; this is
-    a deliberate divergence documented in ADR 0009 / the spec.
-    """
+def test_optimize_doc_concentration_default_matches_mllib():
+    """ADR 0010 flipped this default to match pyspark.ml.clustering.LDA."""
     from pyspark.ml.clustering import LDA as MLlibLDA
     from spark_vi.mllib.lda import VanillaLDAEstimator
 
-    assert VanillaLDAEstimator().getOrDefault("optimizeDocConcentration") is False
+    assert VanillaLDAEstimator().getOrDefault("optimizeDocConcentration") is True
     assert MLlibLDA().getOrDefault("optimizeDocConcentration") is True
 
 

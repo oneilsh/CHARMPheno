@@ -216,7 +216,7 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
         subsamplingRate: float = 0.05,
         docConcentration: list[float] | None = None,
         topicConcentration: float | None = None,
-        optimizeDocConcentration: bool = False,
+        optimizeDocConcentration: bool = True,
         optimizeTopicConcentration: bool = False,
         gammaShape: float = 100.0,
         caviMaxIter: int = 100,
@@ -228,7 +228,7 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
             featuresCol="features", topicDistributionCol="topicDistribution",
             optimizer="online",
             learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05,
-            optimizeDocConcentration=False,
+            optimizeDocConcentration=True,
             optimizeTopicConcentration=False,
             gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
         )
