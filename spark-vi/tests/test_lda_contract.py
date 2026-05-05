@@ -335,3 +335,19 @@ def test_vanilla_lda_infer_local_is_pure_function_of_inputs():
     out_b = m.infer_local(doc, g)
     np.testing.assert_array_equal(out_a["gamma"], out_b["gamma"])
     np.testing.assert_array_equal(out_a["theta"], out_b["theta"])
+
+
+def test_vanilla_lda_optimize_flags_default_false():
+    from spark_vi.models.lda import VanillaLDA
+
+    m = VanillaLDA(K=3, vocab_size=10)
+    assert m.optimize_alpha is False
+    assert m.optimize_eta is False
+
+
+def test_vanilla_lda_optimize_flags_can_be_set():
+    from spark_vi.models.lda import VanillaLDA
+
+    m = VanillaLDA(K=3, vocab_size=10, optimize_alpha=True, optimize_eta=True)
+    assert m.optimize_alpha is True
+    assert m.optimize_eta is True

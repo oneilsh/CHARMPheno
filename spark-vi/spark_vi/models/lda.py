@@ -185,6 +185,8 @@ class VanillaLDA(VIModel):
         vocab_size: int,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
+        optimize_alpha: bool = False,
+        optimize_eta: bool = False,
         gamma_shape: float = 100.0,
         cavi_max_iter: int = 100,
         cavi_tol: float = 1e-3,
@@ -227,6 +229,8 @@ class VanillaLDA(VIModel):
         self.gamma_shape = float(gamma_shape)
         self.cavi_max_iter = int(cavi_max_iter)
         self.cavi_tol = float(cavi_tol)
+        self.optimize_alpha = bool(optimize_alpha)
+        self.optimize_eta = bool(optimize_eta)
 
     # Contract methods (filled in over subsequent tasks).
 
