@@ -169,3 +169,28 @@ def test_alpha_newton_step_recovers_known_alpha_on_synthetic():
         alpha = np.maximum(alpha, 1e-3)
 
     np.testing.assert_allclose(alpha, true_alpha, atol=0.05)
+
+
+def test_eta_newton_step_recovers_known_eta_on_synthetic():
+    """Newton iterations on _eta_newton_step recover the true η from
+    samples of Dir(η · 1_V). Symmetric scalar version of the α test.
+    """
+    from spark_vi.models.lda import _eta_newton_step
+
+    rng = np.random.default_rng(7)
+    true_eta = 0.5
+    K = 50
+    V = 100
+
+    # Sample K topics φ_t ~ Dir(η · 1_V); compute Σ_t Σ_v log φ_tv.
+    # As in the α test, this is the asymptotic E[log φ] under a sharply
+    # concentrated variational q(φ_t) = δ(φ_t − true_φ_t).
+    phis = rng.dirichlet(np.full(V, true_eta), size=K)
+    e_log_phi_sum = float(np.log(phis).sum())
+
+    eta = 0.1
+    for _ in range(50):
+        delta = _eta_newton_step(eta, e_log_phi_sum, K=K, V=V)
+        eta = max(eta + delta, 1e-3)
+
+    assert abs(eta - true_eta) < 0.05, f"got {eta}, expected ~{true_eta}"

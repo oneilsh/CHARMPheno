@@ -147,6 +147,31 @@ def _alpha_newton_step(
     return (g - b) / d
 
 
+def _eta_newton_step(
+    eta: float,
+    e_log_phi_sum: float,
+    K: int,
+    V: int,
+) -> float:
+    """One Newton step for symmetric scalar Dirichlet η.
+
+    Per Hoffman, Blei, Bach 2010 §3.4. The ELBO part depending on η is
+        L(η) = K · log Γ(V·η) − K·V · log Γ(η)
+             + (η − 1) · Σ_t Σ_v E[log φ_tv]
+    with scalar gradient and Hessian
+        g(η) = K·V · [ψ(V·η) − ψ(η)] + Σ_t Σ_v E[log φ_tv]
+        H(η) = K·V² · ψ′(V·η) − K·V · ψ′(η)
+    Newton step Δη = −g/H.
+
+    Caller computes e_log_phi_sum from current λ (typically:
+        (digamma(lam) − digamma(lam.sum(axis=1, keepdims=True))).sum()).
+    Caller also applies ρ_t damping and the post-step floor.
+    """
+    g = K * V * (digamma(V * eta) - digamma(eta)) + e_log_phi_sum
+    h = K * V * V * polygamma(1, V * eta) - K * V * polygamma(1, eta)
+    return -g / h
+
+
 class VanillaLDA(VIModel):
     """Vanilla LDA fittable by VIRunner with mini-batch SVI.
 
