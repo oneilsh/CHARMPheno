@@ -36,7 +36,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 import numpy as np
-from scipy.special import digamma, gammaln
+from scipy.special import digamma, gammaln, polygamma
 
 from spark_vi.core.model import VIModel
 from spark_vi.core.types import BOWDocument
@@ -102,6 +102,49 @@ def _dirichlet_kl(q_alpha: np.ndarray, p_alpha: np.ndarray) -> float:
         - (gammaln(q_alpha) - gammaln(p_alpha)).sum()
         + ((q_alpha - p_alpha) * (digamma(q_alpha) - digamma(qsum))).sum()
     )
+
+
+def _alpha_newton_step(
+    alpha: np.ndarray,
+    e_log_theta_sum_scaled: np.ndarray,
+    D: float,
+) -> np.ndarray:
+    """One Newton step for asymmetric Dirichlet α.
+
+    Per Blei, Ng, Jordan 2003 §5.4. The ELBO part depending on α is
+        L(α) = D · [log Γ(Σ_k α_k) − Σ_k log Γ(α_k)]
+             + Σ_d Σ_k (α_k − 1) E[log θ_dk]
+    with gradient
+        g_k = D · [ψ(Σ_j α_j) − ψ(α_k)] + Σ_d E[log θ_dk]
+    and Hessian (diagonal-plus-rank-1)
+        H = c · 1·1ᵀ − diag(d_k)
+    where c = D · ψ′(Σα), d_k = D · ψ′(α_k).
+
+    Sherman-Morrison gives the Newton step Δα = −H⁻¹·g in closed-form O(K):
+        Δα_k = (g_k − b) / d_k
+        b    = Σ_j(g_j/d_j) / (Σ_j 1/d_j − 1/c)
+
+    Inputs:
+      alpha:                    (K,) current α vector.
+      e_log_theta_sum_scaled:   (K,) corpus-scaled Σ_d E[log θ_dk]
+                                (i.e. batch sum × D / |batch|).
+      D:                        corpus size (used in g, c, d_k).
+
+    Returns:
+      Δα: (K,) raw Newton step. Caller does the ρ_t damping and the
+        post-step floor — keeping this function pure makes it trivial
+        to unit-test against synthetic data.
+    """
+    alpha_sum = alpha.sum()
+    g = D * (digamma(alpha_sum) - digamma(alpha)) + e_log_theta_sum_scaled
+    c = D * polygamma(1, alpha_sum)
+    d = D * polygamma(1, alpha)
+
+    sum_g_over_d = (g / d).sum()
+    sum_1_over_d = (1.0 / d).sum()
+    b = sum_g_over_d / (sum_1_over_d - 1.0 / c)
+
+    return (g - b) / d
 
 
 class VanillaLDA(VIModel):

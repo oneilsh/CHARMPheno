@@ -142,3 +142,30 @@ def test_compute_elbo_lambda_kl_zero_when_lambda_equals_eta():
     # ELBO = doc_loglik_sum - doc_theta_kl_sum - global_kl
     # global_kl = 0 (lambda == eta * 1_V row-wise per topic)
     np.testing.assert_allclose(val, -3.0 - 0.5)
+
+
+def test_alpha_newton_step_recovers_known_alpha_on_synthetic():
+    """Newton iterations on _alpha_newton_step recover the true α from
+    samples of Dir(α). Sanity check on the closed-form Sherman-Morrison step.
+    """
+    from spark_vi.models.lda import _alpha_newton_step
+
+    rng = np.random.default_rng(42)
+    true_alpha = np.array([0.1, 0.5, 0.9])
+    K = 3
+    D = 10000
+
+    # Sample θ_d ~ Dir(true_alpha), gather Σ_d log θ_dk. Under a perfectly
+    # concentrated variational posterior q(θ_d) = δ(θ_d - true_θ_d), this is
+    # exactly the corpus-scaled e_log_theta_sum the helper expects.
+    thetas = rng.dirichlet(true_alpha, size=D)
+    e_log_theta_sum = np.log(thetas).sum(axis=0)  # shape (K,)
+
+    # Initialize from the symmetric prior 1/K, iterate full Newton steps.
+    alpha = np.full(K, 1.0 / K, dtype=np.float64)
+    for _ in range(50):
+        delta = _alpha_newton_step(alpha, e_log_theta_sum, D=float(D))
+        alpha = alpha + delta
+        alpha = np.maximum(alpha, 1e-3)
+
+    np.testing.assert_allclose(alpha, true_alpha, atol=0.05)
