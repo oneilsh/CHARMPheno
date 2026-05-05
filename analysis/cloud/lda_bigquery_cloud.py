@@ -115,23 +115,64 @@ def _log_persist(df, name: str) -> None:
               flush=True)
 
 
+class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
+                     argparse.RawDescriptionHelpFormatter):
+    """Show defaults automatically, and preserve the docstring's paragraph layout."""
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--K", type=int, default=20)
-    parser.add_argument("--max-iter", type=int, default=50)
-    parser.add_argument("--person-mod", type=int, default=1000,
-                         help="MOD(person_id, M) == 0 sampling factor")
-    parser.add_argument("--vocab-size", type=int, default=2000)
-    parser.add_argument("--min-df", type=int, default=5)
-    parser.add_argument("--top-n-tokens", type=int, default=10)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--subsampling-rate", type=float, default=0.05,
-                         help="mini-batch fraction; use 1.0 for full-batch "
-                              "(recommended on small corpora where Spark "
-                              "coordination dominates per-iter time)")
-    parser.add_argument("--print-topics-every", type=int, default=10,
-                         help="emit top-3 tokens per topic every N iterations "
-                              "(0 disables; cheap, runs on driver)")
+    parser = argparse.ArgumentParser(description=__doc__,
+                                      formatter_class=_HelpFormatter)
+    parser.add_argument(
+        "--K", type=int, default=20,
+        help="number of topics to fit",
+    )
+    parser.add_argument(
+        "--max-iter", type=int, default=50,
+        help="maximum SVI iterations on the global parameters",
+    )
+    parser.add_argument(
+        "--person-mod", type=int, default=1000,
+        help=("whole-patient sampling: keep rows where MOD(person_id, M) == 0. "
+              "Larger M => smaller cohort. Whole-patient (vs row-level) "
+              "sampling preserves each retained patient's full condition list, "
+              "which matters for LDA's per-document token bag. Set to 1 for "
+              "the full corpus."),
+    )
+    parser.add_argument(
+        "--vocab-size", type=int, default=2000,
+        help=("CountVectorizer vocabulary cap; concepts beyond this rank "
+              "(by document frequency) are dropped before fit"),
+    )
+    parser.add_argument(
+        "--min-df", type=int, default=5,
+        help=("minimum document frequency for a concept to enter the "
+              "vocabulary; filters singletons / typos before the vocab-size "
+              "cap is applied"),
+    )
+    parser.add_argument(
+        "--top-n-tokens", type=int, default=10,
+        help="tokens shown per topic in the post-fit summary table",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0,
+        help=("RNG seed for reproducibility (lambda initialization + "
+              "mini-batch sampling)"),
+    )
+    parser.add_argument(
+        "--subsampling-rate", type=float, default=0.05,
+        help=("mini-batch fraction per SVI iteration. 1.0 = full-batch, "
+              "recommended on small corpora where Spark coordination "
+              "dominates per-iter time. Tiny rates (<0.1) on small corpora "
+              "yield tiny batches whose per-iter overhead exceeds the actual "
+              "work"),
+    )
+    parser.add_argument(
+        "--print-topics-every", type=int, default=10,
+        help=("during fit, emit a topic summary (top tokens per topic with "
+              "weights) every N iterations. 0 disables. Cheap — runs on the "
+              "driver, reads from the broadcast lambda"),
+    )
     args = parser.parse_args(argv)
 
     cdr = os.environ.get("WORKSPACE_CDR")
