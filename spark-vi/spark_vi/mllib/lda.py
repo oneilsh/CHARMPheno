@@ -81,18 +81,22 @@ def _build_model_and_config(
 ) -> tuple[VanillaLDA, VIConfig]:
     """Translate Estimator Params into (VanillaLDA, VIConfig).
 
-    Symmetric-alpha-only: docConcentration may be None or a length-1 list
-    (the latter is what TypeConverters.toListFloat produces for a scalar
-    input). Vector docConcentration is rejected by _validate_unsupported_params,
-    not here.
+    Per ADR 0010, docConcentration may be:
+      * unset / None → broadcast 1/k (symmetric).
+      * length-1 list → scalar (broadcast to length-k symmetric).
+      * length-k list → asymmetric vector α.
+    Wrong-length vectors are rejected upstream by _validate_unsupported_params.
     """
     k = estimator.getOrDefault("k")
 
     doc_conc = estimator.getOrDefault("docConcentration") if estimator.isSet("docConcentration") else None
     if doc_conc is None:
         alpha = 1.0 / k
-    else:
+    elif len(doc_conc) == 1:
         alpha = float(doc_conc[0])
+    else:
+        # Length-k vector (validated by _validate_unsupported_params).
+        alpha = np.asarray(doc_conc, dtype=np.float64)
 
     topic_conc = estimator.getOrDefault("topicConcentration") if estimator.isSet("topicConcentration") else None
     eta = 1.0 / k if topic_conc is None else float(topic_conc)
@@ -102,6 +106,8 @@ def _build_model_and_config(
         vocab_size=vocab_size,
         alpha=alpha,
         eta=eta,
+        optimize_alpha=estimator.getOrDefault("optimizeDocConcentration"),
+        optimize_eta=estimator.getOrDefault("optimizeTopicConcentration"),
         gamma_shape=estimator.getOrDefault("gammaShape"),
         cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
         cavi_tol=estimator.getOrDefault("caviTol"),

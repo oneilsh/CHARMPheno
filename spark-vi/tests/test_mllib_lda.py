@@ -277,3 +277,23 @@ def test_log_likelihood_and_log_perplexity_raise_not_implemented(tiny_corpus_df)
         model.logLikelihood(tiny_corpus_df)
     with pytest.raises(NotImplementedError, match="ELBO"):
         model.logPerplexity(tiny_corpus_df)
+
+
+def test_param_translation_passes_optimize_flags_to_model():
+    from spark_vi.mllib.lda import VanillaLDAEstimator, _build_model_and_config
+
+    e = VanillaLDAEstimator(
+        k=3, optimizeDocConcentration=True, optimizeTopicConcentration=True,
+    )
+    model, _ = _build_model_and_config(e, vocab_size=10)
+    assert model.optimize_alpha is True
+    assert model.optimize_eta is True
+
+
+def test_param_translation_accepts_vector_doc_concentration():
+    from spark_vi.mllib.lda import VanillaLDAEstimator, _build_model_and_config
+    import numpy as np
+
+    e = VanillaLDAEstimator(k=3, docConcentration=[0.1, 0.5, 0.9])
+    model, _ = _build_model_and_config(e, vocab_size=10)
+    np.testing.assert_allclose(model.alpha, [0.1, 0.5, 0.9])
