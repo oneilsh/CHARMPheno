@@ -175,6 +175,12 @@ class _VanillaLDAParams(HasFeaturesCol, HasMaxIter, HasSeed):
         "whether to optimize alpha; True is rejected (see ADR 0008)",
         typeConverter=TypeConverters.toBoolean,
     )
+    optimizeTopicConcentration = Param(
+        Params._dummy(), "optimizeTopicConcentration",
+        "whether to optimize η (symmetric scalar) via Newton-Raphson; "
+        "see ADR 0010",
+        typeConverter=TypeConverters.toBoolean,
+    )
     gammaShape = Param(
         Params._dummy(), "gammaShape",
         "shape parameter for Gamma init of variational gamma; ADR 0008 default 100.0",
@@ -215,6 +221,7 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
         docConcentration: list[float] | None = None,
         topicConcentration: float | None = None,
         optimizeDocConcentration: bool = False,
+        optimizeTopicConcentration: bool = False,
         gammaShape: float = 100.0,
         caviMaxIter: int = 100,
         caviTol: float = 1e-3,
@@ -226,6 +233,7 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
             optimizer="online",
             learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05,
             optimizeDocConcentration=False,
+            optimizeTopicConcentration=False,
             gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
         )
         # Diagnostic-only iteration callback. Stored as an instance attribute

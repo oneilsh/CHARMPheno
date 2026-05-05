@@ -33,6 +33,20 @@ def test_our_extras_have_adr_0008_defaults():
     assert e.getOrDefault("caviTol") == 1e-3
 
 
+def test_optimize_topic_concentration_param_default_false():
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+
+    e = VanillaLDAEstimator()
+    assert e.getOrDefault("optimizeTopicConcentration") is False
+
+
+def test_optimize_topic_concentration_param_can_be_set():
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+
+    e = VanillaLDAEstimator(optimizeTopicConcentration=True)
+    assert e.getOrDefault("optimizeTopicConcentration") is True
+
+
 def test_optimize_doc_concentration_defaults_false_diverging_from_mllib():
     """We default to False so the v1 shim's no-arg fit doesn't trip the
     validator that rejects True (Task 5). MLlib defaults to True; this is
