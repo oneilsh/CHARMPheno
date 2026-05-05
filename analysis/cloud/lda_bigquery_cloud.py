@@ -62,6 +62,11 @@ def _phase(name: str):
 def _make_topic_evolution_logger(K, top_n, every_n, idx_to_cid, name_by_id):
     """Build an on_iteration callback that prints top-N tokens per topic.
 
+    Factory rather than a bare def: the framework's on_iteration contract
+    is `(iter_num, global_params, elbo_trace)`, so domain context (vocab
+    map, concept names, throttle cadence) rides in via closure capture
+    instead of widening the framework signature.
+
     VanillaLDA's global_params has key "lambda" with shape (K, V) — each
     row is the unnormalized Dirichlet variational parameter for one topic
     over the full vocabulary. Row-normalizing gives the topic-word

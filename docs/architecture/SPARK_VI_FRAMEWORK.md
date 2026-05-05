@@ -22,6 +22,7 @@
   - [Online HDP (Topic Model)](#online-hdp-topic-model)
   - [Sparse OU Estimator (Continuous-Time Dynamics)](#sparse-ou-estimator-continuous-time-dynamics)
   - [Third Model (TBD)](#third-model-tbd)
+- [Data Sources: BigQuery](#data-sources-bigquery)
 - [Project Structure](#project-structure)
 - [Tooling and Development](#tooling-and-development)
 - [Design Decisions](#design-decisions)
@@ -841,6 +842,141 @@ communication overhead (how many rounds of stat exchange are needed), but for mo
 like the HDP with large per-site datasets, even a few rounds should suffice.
 Federated nonparametric topic modeling for multi-site clinical data would be a
 meaningful research contribution in its own right.
+
+## Data Sources: BigQuery
+
+OMOP-shaped clinical data often lives in BigQuery, and several restricted-data
+environments expose CDR datasets as read-only BQ projects. The
+[spark-bigquery-connector](https://github.com/GoogleCloudDataproc/spark-bigquery-connector)
+(pre-installed on Dataproc) exposes BQ tables as Spark DataFrames with
+properties that fit the framework's distributed pattern well. This section
+documents the affordances that matter for `spark-vi` workloads; the connector
+itself has broader capabilities (the Query API path, BQ-side aggregations,
+materialized views) that we don't currently exercise but could.
+
+### The Storage Read API path
+
+When you call `spark.read.format("bigquery").option("table", ...).load()`, the
+connector talks to BigQuery's **Storage Read API** — a separate gRPC service
+designed for high-throughput parallel reads. Unlike running a SQL query and
+reading the result, the Storage Read path bypasses the BQ query engine
+entirely and streams table data directly.
+
+The connector requests a read session; BigQuery returns N parallel "streams,"
+each a cursor over a disjoint shard of the table. The connector creates one
+Spark partition per stream, so executors read in parallel without any driver
+involvement after session creation. **Spark's natural partitioning of a BQ
+read is decided by BigQuery, not by Spark configuration** — partition count
+reflects the table's storage layout, which is usually the right choice.
+
+For VI workloads this means: a BQ-sourced DataFrame already has good
+parallelism by the time it lands in Spark. No `repartition()` needed before
+`mapPartitions`-style work.
+
+### Read-side billing routing (`parentProject`)
+
+A common pattern in restricted-data environments separates **where the data
+lives** (a data project the user has read access to) from **who pays for the
+read** (a billing project the user owns). The connector supports this via two
+options:
+
+- `option("table", "<dataset>.<table>")` — points at the data. Read access
+  required on the data project.
+- `option("parentProject", "<billing-project>")` — the project that owns the
+  read job. `bigquery.jobs.create` permission required here; this is where
+  the read costs are billed.
+
+Without `parentProject`, the connector tries to create the job in the data
+project, which typically fails with a permissions error in restricted-data
+setups. With it set, job creation moves to a project the caller controls.
+
+### Predicate pushdown
+
+When you apply `.where(...)` to a BQ-backed DataFrame, the connector tries
+to fold the predicate into the Storage Read session so BigQuery never streams
+filtered-out rows. **Pushdown coverage is a subset of Spark expressions** and
+varies across connector versions. Reliably supported:
+
+- Equality / inequality vs. literals (`col = 0`, `col != 0`, `col < 100`)
+- `IS NULL` / `IS NOT NULL`
+- `IN (...)` for small literal lists
+- `AND` of supported predicates
+
+Often *not* pushed down (older versions especially):
+
+- Arithmetic / function calls (`MOD(col, k) == 0`, `LENGTH(col)`)
+- Comparisons between two columns
+- Complex nested expressions
+
+This affects sampler design. A `MOD(person_id, M) == 0` whole-patient sampler
+may or may not push down depending on the connector version — when it
+doesn't, BQ streams every row and Spark drops them post-read. Functionally
+correct, but the I/O savings of "sample at the source" are lost. For
+critical paths, prefer predicates the connector definitely pushes (e.g., a
+hashed `STRING` column with an `IN (...)` allowlist) when the cost of
+streaming-then-dropping is high.
+
+**Verifying pushdown.** The connector logs the filter string it sends to the
+Storage Read API at INFO level when creating the read session. If the
+log4j level on `com.google.cloud.spark.bigquery` is set to INFO, those lines
+surface at session creation. Worth doing once when a sampling run feels
+slower than expected.
+
+### Partitioning and clustering awareness
+
+BigQuery tables can be **time-partitioned** (one physical partition per day
+or per integer range) and **clustered** (rows within a partition sorted by
+up to four columns). Both are properties of the table, set by the data
+provider; the connector and Storage Read API honor them automatically.
+
+For OMOP-shaped data this matters because:
+
+- `condition_occurrence` and other event tables are commonly partitioned by
+  the relevant date column (`condition_start_date`, etc.). Filters on the
+  partitioning column prune entire partitions before any rows are read.
+- Clustering on `person_id` (when present) means whole-patient access
+  patterns are I/O-cheap — adjacent rows in storage belong to the same
+  patient.
+
+Two practical implications for sampler design:
+
+1. A date-range filter is essentially free relative to a full-table scan if
+   the partition column is the date you're filtering on. Time-windowed
+   training cohorts cost what they actually use.
+2. Whole-patient samplers benefit from clustered storage — even though
+   `MOD(person_id, M)` may not push down as a filter, the resulting reads
+   on a person-clustered table are still I/O-coherent because retained
+   patients' rows sit together.
+
+Inspecting partitioning/clustering for a given table:
+```sql
+SELECT * FROM <dataset>.INFORMATION_SCHEMA.TABLES
+ WHERE table_name = '<table>'
+```
+returns the partitioning expression and clustering columns. Worth checking
+when designing a new loader or sampling strategy.
+
+### What we don't currently use
+
+The connector and BQ together also support patterns we haven't pulled into
+`spark-vi` yet but that may be worth considering for future loaders:
+
+- **BQ-side aggregations as pre-compute.** Reducing 10⁹ event rows to 10⁷
+  per-(person, concept) counts via a SQL pre-aggregation, then reading the
+  smaller table into Spark, can be cheaper than reading raw events and
+  aggregating Spark-side. Trade-off: BQ slot consumption vs. Spark cluster
+  time.
+- **Materialized views** for stable derived tables (vocabulary lookups,
+  concept hierarchies) — the connector reads them like ordinary tables but
+  BQ keeps them refreshed. Useful when the same join is needed across many
+  jobs.
+- **`INFORMATION_SCHEMA.JOBS`** as a metadata source. Past jobs' billed
+  bytes, slot-ms, and duration are queryable; potentially useful for cost
+  attribution if `spark-vi` ever needs to surface per-fit BQ cost back to
+  the user.
+
+These are flagged as "worth knowing about" rather than load-bearing for the
+current loader.
 
 ## Macrovisit pre-processing
 

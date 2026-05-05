@@ -71,12 +71,18 @@ class VIRunner:
                 start_iteration is set to the loaded result's n_iterations so
                 the Robbins-Monro schedule matches a continuous run.
             on_iteration: optional diagnostic callback invoked after each
-                iteration as `fn(iter_num, global_params, elbo_trace)`. The
-                callback runs on the driver in the fit's hot path; keep it
-                cheap or throttle with a modulo. Must not mutate
+                iteration as `fn(iter_num, global_params, elbo_trace)`.
+                Kwarg-on-fit rather than a method on VIModel because the
+                callback is per-invocation observation, not model state —
+                models stay diagnostic-free; each fit can opt in differently.
+                The callback runs on the driver in the fit's hot path; keep
+                it cheap or throttle with a modulo. Must not mutate
                 global_params — the same dict feeds the next iteration's
-                broadcast. Exceptions are caught and logged so a buggy
-                diagnostic doesn't kill the fit.
+                broadcast. The runner does not defensive-copy (deep-copy of
+                a (K, V) lambda every iter is too expensive for a diagnostic
+                path); document-the-contract is the chosen tradeoff.
+                Exceptions are caught and logged so a buggy diagnostic
+                doesn't kill the fit.
         """
         model = self.model
         cfg = self.config

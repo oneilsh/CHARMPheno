@@ -27,7 +27,7 @@ YARN_BASE = "http://localhost:8088/ws/v1/cluster"
 CLEAR = "\x1b[2J\x1b[H"
 
 
-_POLL_TIMEOUT = 15.0  # generous: History Server reads from GCS event logs
+_POLL_TIMEOUT = 15.0  # generous: live driver can be slow when locked in a long stage
 
 
 def _get(url: str, timeout: float = _POLL_TIMEOUT):
@@ -36,13 +36,13 @@ def _get(url: str, timeout: float = _POLL_TIMEOUT):
 
 
 def discover_spark_base(host: str | None,
-                         port: int | None) -> tuple[str | None, str]:
-    """Probe live driver UIs first, then fall back to the History Server.
+                         port: int | None) -> str | None:
+    """Probe the live driver UI for a Spark REST API base URL.
 
-    Returns (base_url, mode) where mode is "live" (driver UI on 4040+)
-    or "history" (Spark History Server on 18080). The History Server
-    serves the same REST shape but its data is event-log-flush delayed
-    (~5s on Dataproc due to GCS hflush rate limits).
+    Spark binds the driver UI to whichever host `spark.driver.host`
+    resolves to (often the FQDN, not localhost) on the first free port
+    starting at 4040. We shotgun across the usual host aliases × the
+    standard port range and return the first that responds.
     """
     hosts = [host] if host else ["localhost", "127.0.0.1", socket.gethostname()]
     live_ports = [port] if port else list(range(4040, 4046))
@@ -51,20 +51,10 @@ def discover_spark_base(host: str | None,
             url = f"http://{h}:{p}/api/v1"
             try:
                 _get(f"{url}/applications", timeout=1.5)
-                return url, "live"
+                return url
             except (HTTPError, URLError, ConnectionError, OSError):
                 continue
-    # History Server fallback. Skip if the user pinned a specific port that
-    # isn't 18080 — they're probably trying to hit a specific live driver.
-    if port is None or port == 18080:
-        for h in (hosts if host else ["localhost"]):
-            url = f"http://{h}:18080/api/v1"
-            try:
-                _get(f"{url}/applications", timeout=1.5)
-                return url, "history"
-            except (HTTPError, URLError, ConnectionError, OSError):
-                continue
-    return None, "unknown"
+    return None
 
 
 def _fmt_bytes(b: float) -> str:
@@ -84,22 +74,18 @@ def _fmt_ms(ms: float) -> str:
     return f"{s/60:>5.1f}m"
 
 
-_ZOMBIE_STALE_MS = 120_000  # 2 min: lastUpdated older than this and still
-                             # "in progress" => OOM-killed orphan, not real
-
-# Errors that should NOT take down the loop — slow GCS-backed History
-# Server responses can timeout transiently while the cluster is busy.
+# Errors that should NOT take down the loop — the live driver REST endpoint
+# can stall transiently when the driver thread is busy (long stages, GC).
 _NETWORK_ERRORS = (HTTPError, URLError, ConnectionError, TimeoutError, OSError)
 
 
 def find_app_id(spark_base: str, explicit: str | None) -> str | None:
-    """Pick the *newest live* in-progress app, ignoring stale zombies.
+    """Pick the newest in-progress app on the live driver UI.
 
-    A History Server entry stays `completed: false` forever if the driver
-    died too abruptly to flush its completion event (OOM, kill -9, hard
-    crash). Such zombies stop generating new event-log writes, so their
-    `lastUpdatedEpoch` falls behind wall time. Filtering by recency
-    distinguishes a live job from a corpse.
+    Returns None if no in-progress app is listed. The live driver UI
+    only exists for the duration of an actual driver process, so any
+    listed app is by definition still running — no zombie filtering
+    needed.
     """
     if explicit:
         return explicit
@@ -113,37 +99,14 @@ def find_app_id(spark_base: str, explicit: str | None) -> str | None:
     def _start(a):
         return (a.get("attempts") or [{}])[0].get("startTimeEpoch", 0)
 
-    def _last_update(a):
-        return (a.get("attempts") or [{}])[0].get("lastUpdatedEpoch", 0)
-
-    now_ms = time.time() * 1000
-    live_in_progress = [
+    in_progress = [
         a for a in apps
-        if (not (a.get("attempts") or [{}])[0].get("completed", True)
-            and now_ms - _last_update(a) < _ZOMBIE_STALE_MS)
+        if not (a.get("attempts") or [{}])[0].get("completed", True)
     ]
-    zombies = [
-        a["id"] for a in apps
-        if (not (a.get("attempts") or [{}])[0].get("completed", True)
-            and now_ms - _last_update(a) >= _ZOMBIE_STALE_MS)
-    ]
-    if live_in_progress:
-        live_in_progress.sort(key=_start, reverse=True)
-        if zombies:
-            print(f"NOTE: ignoring {len(zombies)} zombie in-progress entries "
-                  f"(no event-log activity for >{_ZOMBIE_STALE_MS//1000}s): "
-                  f"{zombies}", file=sys.stderr)
-        return live_in_progress[0]["id"]
-    # No live in-progress app; fall back to newest completed (or, if there
-    # are zombies but no live apps, the user probably wants the newest
-    # completed run anyway).
-    completed = [
-        a for a in apps
-        if (a.get("attempts") or [{}])[0].get("completed", True)
-    ]
-    if completed:
-        return sorted(completed, key=_start, reverse=True)[0]["id"]
-    return None
+    if not in_progress:
+        return None
+    in_progress.sort(key=_start, reverse=True)
+    return in_progress[0]["id"]
 
 
 def _sustained_cpu_pct(e: dict) -> float:
@@ -358,15 +321,15 @@ def main() -> int:
                     help="Spark UI port (default: probe 4040..4045)")
     args = p.parse_args()
 
-    spark_base, mode = discover_spark_base(args.host, args.port)
+    spark_base = discover_spark_base(args.host, args.port)
     if not spark_base:
-        print("No Spark UI or History Server found. Probed:", file=sys.stderr)
+        print("No live Spark driver UI found. Probed:", file=sys.stderr)
         hosts = [args.host] if args.host else ["localhost", "127.0.0.1", socket.gethostname()]
-        ports = [args.port] if args.port else list(range(4040, 4046)) + [18080]
+        ports = [args.port] if args.port else list(range(4040, 4046))
         for h in hosts:
             for pn in ports:
                 print(f"  http://{h}:{pn}/", file=sys.stderr)
-        print("\nFind the actual port with:    ss -tlnp | grep -E ':4|:18080'",
+        print("\nFind the actual port with:    ss -tlnp | grep ':40'",
               file=sys.stderr)
         print("Then re-run with:             --host <h> --port <p>",
               file=sys.stderr)
@@ -378,15 +341,14 @@ def main() -> int:
               file=sys.stderr)
         return 1
     started = time.time()
-    note = "  (event-log lag ~5s)" if mode == "history" else ""
-    print(f"Polling {app_id} on {spark_base} [{mode}{note}] "
-          f"every {args.interval}s — Ctrl-C to quit.")
+    print(f"Polling {app_id} on {spark_base} every {args.interval}s — "
+          f"Ctrl-C to quit.")
     time.sleep(0.5)
     try:
         # Re-detect each tick when --app-id wasn't pinned: the newest
-        # in-progress app can change between iterations (a job may start
-        # *after* inspect was launched). Without re-detection we'd latch
-        # onto a stale zombie forever.
+        # in-progress app can change between iterations (a new job may
+        # be submitted after inspect was launched). Without re-detection
+        # we'd stick on the previous app and never pick up the new one.
         last_app_id = app_id
         # Per-app cross-poll state for delta metrics (tasks/sec, stage rate).
         # Reset whenever the target app changes so deltas don't span jobs.

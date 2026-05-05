@@ -12,6 +12,233 @@ elsewhere.
 
 ---
 
+## 2026-05-04 to 2026-05-05 — Dataproc/BigQuery cluster bring-up walkthrough
+
+A six-lesson walkthrough of the cluster bring-up workstream that landed
+between the prior log entry and this one — the MLlib Estimator/Transformer
+shim, the BigQuery OMOP loader, the cloud diagnostics tooling, and the
+per-iteration callback hook. Outside-in framing (cluster reality first,
+framework contract last) chosen because the user had just exercised the
+pipeline live and the lessons could anchor on observed behavior. Several
+small fix-ups shipped from a code review that ran at the start of the
+session; one new architecture-doc section added.
+
+### Areas reviewed
+
+**Lesson 1 — Cluster bring-up + diagnostics.**
+The `--py-files` deployment shape and the driver/executor split that makes
+it load-bearing (executor closures fail to import local packages without
+the zip ship); why `transform`/UDF is the louder smoke than `fit`/aggregate.
+The `spark-submit` invocation flags walked one by one (`--master yarn`,
+`--deploy-mode client` and why client mode is required for live UI / port
+4040 access, `--driver-memory 4g` motivated by the `concept` join OOM,
+`--py-files` zip vs `.py` accepted forms, `bq-smoke` deliberately *not*
+using `--py-files` to isolate connector-vs-deployment failures). The two
+REST APIs the inspector consumes (Spark `/api/v1/...` on driver port 4040+
+or History Server 18080; YARN ResourceManager 8088), the zombie-app
+problem (OOM-killed drivers leave `completed: false` event logs forever
+since they never write the completion event), the History Server's
+GCS-flush ~5 s lag relative to the live driver UI. The polling loop's
+three layers (discover → identify → render-on-loop), per-tick app-id
+re-detection so the inspector follows new submissions automatically,
+`state = {}` reset on app-id change so delta metrics don't span jobs,
+`_safe_get` fail-soft pattern catching only `_NETWORK_ERRORS` not
+`Exception`. **Side discussion** — `SparkSession.builder.getOrCreate()`
+as the universal idiom that works in raw spark-submit and managed
+notebooks alike, and the YARN-vs-K8s split where YARN is one of several
+Spark cluster managers and the cluster outlives any individual session.
+
+**Lesson 2 — Spark mechanics in production.**
+Persist mechanics: lazy evaluation + actions, the
+`MEMORY/DISK/DESERIALIZED/replication` storage-level taxonomy, default
+`MEMORY_AND_DISK` for DataFrames vs `MEMORY_ONLY` for raw RDDs,
+[`_log_persist`](../analysis/cloud/lda_bigquery_cloud.py#L90-L110) as a
+truthing pattern. Caveat surfaced — `df.storageLevel` reports the
+*requested* level, not actual block materialization; the truer check goes
+through `getRDDStorageInfo().numCachedPartitions()`. Broadcast lifecycle
+in production: what a broadcast actually is (driver `BroadcastManager` +
+per-executor block-manager copies), the leak class (~32 MB/iter for
+K=20, V=2000 on each executor; scales superlinearly), why it doesn't
+crash with OOM (block manager has its own budget; spills silently to
+disk), the `prior_bcast` ratchet, the convergence-path explicit
+unpersist, `unpersist(blocking=False)` semantics. Tree-reduce vs
+collect: three aggregation shapes (collect+fold, reduce, treeReduce) and
+their driver-memory profiles, why associativity *and* commutativity are
+required for tree-shape, why `mapPartitions` returns `[stats]`
+(one-element list) not bare dict.
+
+**Lesson 3 — The BigQuery connector.**
+Connector mechanics: Storage Read API gRPC path vs the Query API path,
+partition-per-stream where BQ chooses parallelism rather than Spark,
+predicate pushdown gotchas (esp. `MOD` not reliably pushing down in
+older connector versions, `concept_id != 0` reliably does), `parentProject`
+for the data-vs-billing-project split common in restricted-data
+environments. Join shape: three strategies (broadcast hash, shuffle hash,
+sort-merge), `autoBroadcastJoinThreshold` (10 MB default), why explicit
+`F.broadcast(concept)` OOM'd the driver (forces collect-to-driver before
+broadcast), `F.broadcast` as "I know better than the planner" hint that
+should be used only when measured. Boundary discipline:
+`select(*CANONICAL_COLUMNS, ...)` + `validate()` as the loader's final
+act, schema-drift firewall pattern.
+
+**Lesson 4 — MLlib Estimator/Model contract.**
+Why MLlib splits Estimator/Model: pipelines, persistence, type safety;
+for our shim only pipelines load-bear in v1 (persistence deferred per
+ADR 0009). Param system: class-level descriptors with type converters,
+why MLlib uses them (introspection, cross-language consistency,
+persistence), `HasFeaturesCol/HasMaxIter/HasSeed` mixin pattern, shared
+`_VanillaLDAParams` between Estimator and Model so getters match.
+DataFrame ↔ RDD bridge:
+[`dataset.select.rdd.map(_vector_to_bow_document)`](../spark-vi/spark_vi/mllib/lda.py#L268-L274),
+the UDF-on-executors story for `_transform` (and why `--py-files` is
+load-bearing here too). `setOnIteration` as instance attribute not
+Param: callables aren't pickleable; the design rule "Param for identity,
+instance attr for incidentals (diagnostics, hooks)"; never copied to
+the Model in `_fit`. **Clarification** — the deferral in ADR 0009 is
+*MLlib-style* `Pipeline.save` / `MLWritable` / `MLReadable`, not
+framework persistence; the framework's `save_result` / `load_result`
+(ADR 0006) ships and works.
+
+**Lesson 5 — Callback as contract extension.**
+The three layers (driver factory → shim instance attr → runner kwarg)
+walked as a case study. Contract shape `(iter_num, global_params,
+elbo_trace)` framework-level only — domain richness rides via closure
+capture. Kwarg-on-fit beats method-on-`VIModel` because the callback is
+per-invocation observation, not model state — keeps math
+diagnostic-free, allows different fits to opt in differently. Mutation
+hazard + why no defensive copy (deep-copy of (K, V) lambda each iter is
+too expensive for a diagnostic path; document-the-contract is the
+chosen tradeoff). The factory pattern in
+[`_make_topic_evolution_logger`](../analysis/cloud/lda_bigquery_cloud.py#L62-L92)
+captures domain context (vocab map, concept names, throttle cadence) by
+closure rather than widening the framework signature.
+
+**Lesson 6 — The driver as orchestration.**
+The driver as the gluing layer (composes spark-vi + charmpheno + Spark +
+BQ + MLlib; originates almost no logic). The
+[`_phase`](../analysis/cloud/lda_bigquery_cloud.py#L46-L59) context
+manager for wall-time attribution as a debugging primitive — 12 lines
+that pay for themselves the first time a run is unexpectedly slow. How
+the vocab/concept-name dicts thread driver-side through closure capture
+into the topic-evolution logger (three small dicts, framework never
+sees them, interpretation reconstructed at the boundary only where
+humans look). The driver as the implicit end-to-end integration test —
+the last reasonable point at which a regression in any layer below can
+hide before the user notices.
+
+### Refactor detours that shipped
+
+**Detour 1 — Code-review fix-ups across the bring-up workstream.**
+Independent review pass on the diff between the prior log entry and the
+walkthrough start surfaced six should-fix items, all small. Type
+annotation added to
+[`VanillaLDAEstimator.setOnIteration`](../spark-vi/spark_vi/mllib/lda.py#L243-L256)
+to match the runner's `Callable[[int, dict, list[float]], None] | None`.
+Mutation-safety caveat added to both
+[`runner.fit`](../spark-vi/spark_vi/core/runner.py#L73-L85) and the
+shim's `setOnIteration` docstring (callback must not mutate
+`global_params` since the same dict feeds the next iteration's
+broadcast). The driver's `_on_iter` swallow tightened from `*_` to
+explicit `_: list[float]` so a contract change would break loudly
+rather than silently. AQE-vs-broadcast comment in
+[`bigquery.py`](../charmpheno/charmpheno/omop/bigquery.py#L94-L97)
+corrected to mention shuffle-hash as a possibility and to anchor on the
+explicit-broadcast OOM as the *why*. BQ predicate-pushdown comment
+softened from "pushed down" to "depends on connector version" since we
+hadn't verified. `_NETWORK_ERRORS` tuple in
+[`inspect_app.py`](../analysis/cloud/inspect_app.py#L92) hoisted above
+`find_app_id` and reused in place of the inline catch tuple.
+
+**Detour 2 — Closure-capture / kwarg-on-fit pattern documented inline.**
+Triggered by the user request after Lesson 5: capture the contract
+extension pattern in code so future readers don't have to reverse-
+engineer it. Added a short paragraph to
+[`_make_topic_evolution_logger`](../analysis/cloud/lda_bigquery_cloud.py#L62-L72)
+explaining factory-vs-bare-def as closure capture for narrow framework
+contracts. Extended the `on_iteration` parameter doc in
+[`runner.fit`](../spark-vi/spark_vi/core/runner.py#L73-L85) with the
+kwarg-on-fit-rather-than-`VIModel`-method rationale and the deliberate
+no-defensive-copy choice. Both edits are docstring-only, no behavior
+changes.
+
+**Detour 3 — `Data Sources: BigQuery` section in framework doc.**
+Triggered during Lesson 3. Added a five-subsection block to
+[`SPARK_VI_FRAMEWORK.md`](architecture/SPARK_VI_FRAMEWORK.md):
+Storage Read API path; read-side billing routing via `parentProject`;
+predicate pushdown coverage (what does and doesn't reliably push down,
+verification via connector INFO logs); partitioning and clustering
+awareness for OMOP-shaped event tables and what that implies for sampler
+design; a short "what we don't currently use" pointer (BQ-side
+pre-aggregation, materialized views, `INFORMATION_SCHEMA.JOBS` for cost
+attribution). Framing kept generic — restricted-data-environment
+patterns rather than naming any specific provider.
+
+### Pre-existing issues caught and noted
+
+- The shim's earlier `setOnIteration` signature was effectively untyped;
+  static checkers and IDE tooltips would silently accept any object.
+  Now annotated.
+- `bigquery.py` claimed predicate pushdown without verification; corrected
+  to a softer claim, with a recipe for verifying via connector INFO logs.
+- `bigquery.py` AQE comment overstated the broadcast lockout; broadcast
+  is still possible at runtime via post-shuffle stats, just not via the
+  explicit hint. Comment now reads correctly.
+
+### Open threads parked
+
+These are not regressions or known bugs — they are deferred opportunities
+noted during this session.
+
+- **Drop the History Server fallback from `inspect_app.py`.** The user
+  decided live-driver-only is the right surface for the inspector;
+  filtering zombies via the `_ZOMBIE_STALE_MS` recency check patches a
+  symptom of consulting the History Server at all. Removing the fallback
+  collapses `discover_spark_base`, deletes `_ZOMBIE_STALE_MS` and the
+  staleness-filter logic, and simplifies `find_app_id`. Deferred until
+  the cluster is back up to test against.
+- **Promote `_log_persist` to a strict precondition.** The current diagnostic
+  reports the *requested* persist level, not whether blocks materialized;
+  a `.persist()` followed by no action passes the check while leaving the
+  cache empty. For a loop-heavy training workload, silent persist failure
+  causes the upstream lineage (including BigQuery reads) to re-run every
+  iteration. Replace with a check on `getRDDStorageInfo().numCachedPartitions()`
+  that raises before fit begins. Placement decision pending: probably
+  belongs in `spark-vi` as a new `diagnostics/persist.py` so the runner can
+  enforce on its own inputs, with the driver script calling it for
+  upstream DataFrames as well. Caveat: catches "forgot the action" but
+  not mid-fit eviction (executor death, memory-pressure block-manager
+  eviction); a re-check between iterations would close that gap but is
+  more invasive.
+- **MLlib-style persistence (`MLWritable` / `MLReadable` / `Pipeline.save`).**
+  Deferred per [ADR 0009](decisions/0009-mllib-shim.md). Implementation
+  is mostly translation — walk every `Param`, serialize to MLlib's JSON
+  layout, write the trained `VIResult` alongside (or point at a
+  `save_result` artifact), implement the matching `_load`. Not blocking
+  any current workflow; pick up when someone needs `Pipeline.save` to
+  succeed on a pipeline containing `VanillaLDAEstimator`. The diagnostic
+  callback's instance-attr-not-Param design keeps it cleanly outside the
+  persistable surface either way.
+
+### Doc updates
+
+- [`SPARK_VI_FRAMEWORK.md`](architecture/SPARK_VI_FRAMEWORK.md): new
+  "Data Sources: BigQuery" section with five subsections (Storage Read
+  API, `parentProject`, predicate pushdown, partitioning/clustering
+  awareness, what we don't currently use). TOC updated.
+- [`runner.py`](../spark-vi/spark_vi/core/runner.py#L73-L85):
+  `on_iteration` parameter doc extended with kwarg-on-fit rationale and
+  no-defensive-copy explanation; mutation-must-not-happen rule already
+  present, reinforced.
+- [`mllib/lda.py`](../spark-vi/spark_vi/mllib/lda.py#L243-L256):
+  `setOnIteration` typed; mutation rule noted in docstring.
+- [`lda_bigquery_cloud.py`](../analysis/cloud/lda_bigquery_cloud.py#L62-L72):
+  `_make_topic_evolution_logger` docstring extended with closure-capture
+  pattern paragraph.
+- [`bigquery.py`](../charmpheno/charmpheno/omop/bigquery.py#L85-L97):
+  predicate-pushdown and AQE-broadcast comments corrected per review.
+
+---
+
 ## 2026-05-01 — Vanilla LDA branch walkthrough
 
 A bottom-up walkthrough of the `vanilla-lda` branch after its initial
