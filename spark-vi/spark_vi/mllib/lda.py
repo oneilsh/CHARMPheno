@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Callable
 
 import numpy as np
-from pyspark import keyword_only
+from pyspark import StorageLevel, keyword_only
 from pyspark.ml.base import Estimator, Model
 from pyspark.ml.linalg import DenseVector, SparseVector, Vector
 from pyspark.ml.param import Param, Params, TypeConverters
@@ -272,9 +272,19 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
             dataset.select(features_col).rdd
             .map(lambda row: _vector_to_bow_document(row[0]))
         )
+        # `dataset.rdd.map(...)` builds a fresh, uncached RDD even when
+        # `dataset` is DataFrame-cached upstream. The runner's strict
+        # assert_persisted precondition requires *this* RDD to be in cache,
+        # so persist + an action here. The action also pays the BoWDocument
+        # conversion cost once instead of every iteration.
+        bow_rdd = bow_rdd.persist(StorageLevel.MEMORY_AND_DISK)
+        bow_rdd.count()
 
         runner = VIRunner(model_obj, config=config)
-        result = runner.fit(bow_rdd, on_iteration=self._on_iteration)
+        try:
+            result = runner.fit(bow_rdd, on_iteration=self._on_iteration)
+        finally:
+            bow_rdd.unpersist(blocking=False)
 
         out_model = VanillaLDAModel(result)
         # Copy every Param value the Estimator has set or has a default for, so

@@ -50,7 +50,8 @@ def test_vanilla_lda_fit_produces_well_formed_result(spark):
     K, V, D = 3, 30, 100
     np.random.seed(0)
     _, docs = _generate_synthetic_corpus(D=D, V=V, K=K, docs_avg_len=40, seed=0)
-    rdd = spark.sparkContext.parallelize(docs, numSlices=2)
+    rdd = spark.sparkContext.parallelize(docs, numSlices=2).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
 
     cfg = VIConfig(
         max_iterations=20,
@@ -81,7 +82,8 @@ def test_vanilla_lda_elbo_smoothed_trend_is_non_decreasing(spark):
 
     np.random.seed(1)
     _, docs = _generate_synthetic_corpus(D=100, V=30, K=3, docs_avg_len=40, seed=7)
-    rdd = spark.sparkContext.parallelize(docs, numSlices=2)
+    rdd = spark.sparkContext.parallelize(docs, numSlices=2).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
     cfg = VIConfig(max_iterations=40, mini_batch_fraction=0.3,
                     random_seed=7, convergence_tol=1e-9)
     result = VIRunner(VanillaLDA(K=3, vocab_size=30), config=cfg).fit(rdd)

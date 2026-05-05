@@ -16,7 +16,8 @@ def _run_with_broadcast_tracking(spark, cfg):
     from spark_vi.core import VIRunner
     from spark_vi.models.counting import CountingModel
 
-    rdd = spark.sparkContext.parallelize([1, 0, 1, 0], numSlices=2)
+    rdd = spark.sparkContext.parallelize([1, 0, 1, 0], numSlices=2).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
     model = CountingModel()
     runner = VIRunner(model=model, config=cfg)
 

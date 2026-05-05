@@ -33,6 +33,7 @@ from pyspark import RDD, StorageLevel
 from spark_vi.core.config import VIConfig
 from spark_vi.core.model import VIModel
 from spark_vi.core.result import VIResult
+from spark_vi.diagnostics.persist import assert_persisted
 from spark_vi.io.export import load_result, save_result
 
 log = logging.getLogger(__name__)
@@ -99,6 +100,12 @@ class VIRunner:
         else:
             global_params = model.initialize_global(data_summary)
             elbo_trace = []
+
+        # Strict precondition: data_rdd must be cached. Loop-heavy training
+        # otherwise re-executes the upstream lineage (e.g. a BigQuery scan)
+        # every iteration. See spark_vi.diagnostics.persist for the rationale
+        # behind raising vs. logging here.
+        assert_persisted(data_rdd, name="VIRunner.data_rdd")
 
         sc = data_rdd.context
         prior_bcast = None

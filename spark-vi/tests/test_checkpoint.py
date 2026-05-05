@@ -18,7 +18,8 @@ def test_checkpoint_then_resume_matches_continuous_run(spark, tmp_path):
     from spark_vi.io.export import save_result
     from spark_vi.models.counting import CountingModel
 
-    rdd = spark.sparkContext.parallelize([1] * 60 + [0] * 40, numSlices=4)
+    rdd = spark.sparkContext.parallelize([1] * 60 + [0] * 40, numSlices=4).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
 
     cfg6 = VIConfig(max_iterations=6, convergence_tol=1e-12)
     continuous = VIRunner(CountingModel(), cfg6).fit(rdd)
@@ -47,7 +48,8 @@ def test_auto_checkpoint_writes_per_interval(spark, tmp_path):
     from spark_vi.io.export import load_result
     from spark_vi.models.counting import CountingModel
 
-    rdd = spark.sparkContext.parallelize([1, 0, 1, 0], numSlices=2)
+    rdd = spark.sparkContext.parallelize([1, 0, 1, 0], numSlices=2).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
     ckpt = tmp_path / "auto_ckpt"
     cfg = VIConfig(
         max_iterations=4,
@@ -76,7 +78,8 @@ def test_auto_checkpoint_then_resume_via_kwarg(spark, tmp_path):
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.counting import CountingModel
 
-    rdd = spark.sparkContext.parallelize([1] * 60 + [0] * 40, numSlices=2)
+    rdd = spark.sparkContext.parallelize([1] * 60 + [0] * 40, numSlices=2).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
     ckpt = tmp_path / "ckpt"
 
     cfg6 = VIConfig(max_iterations=6, convergence_tol=1e-12)

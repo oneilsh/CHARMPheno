@@ -92,29 +92,6 @@ def _make_topic_evolution_logger(K, top_n, every_n, idx_to_cid, name_by_id):
     return _on_iter
 
 
-def _log_persist(df, name: str) -> None:
-    """Confirm a DataFrame's persist hint stuck in cache.
-
-    storageLevel reflects the requested-and-honored cache shape. A NONE
-    here after .persist() + an action means caching silently failed —
-    the prime suspect when re-execution shows up as per-iteration slowdown.
-    """
-    sl = df.storageLevel
-    if sl.useMemory or sl.useDisk:
-        bits = []
-        if sl.useMemory:
-            bits.append("MEM")
-        if sl.useDisk:
-            bits.append("DISK")
-        if sl.deserialized:
-            bits.append("DESER")
-        print(f"[driver]   persist({name}) -> {'+'.join(bits)} x{sl.replication}",
-              flush=True)
-    else:
-        print(f"[driver]   *** persist({name}) NOT IN CACHE: {sl}",
-              flush=True)
-
-
 class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
                      argparse.RawDescriptionHelpFormatter):
     """Show defaults automatically, and preserve the docstring's paragraph layout."""
@@ -185,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Driver-side imports proven first — fail fast if --py-files is misshapen.
     from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
+    from spark_vi.diagnostics.persist import assert_persisted
     from spark_vi.mllib.lda import VanillaLDAEstimator
 
     _configure_logging()
@@ -216,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
             F.count(F.lit(1)).alias("rows"),
             F.countDistinct("person_id").alias("persons"),
         ).collect()[0]
-        _log_persist(omop, "omop")
+        assert_persisted(omop, name="omop")
         print(f"[driver]   OMOP: {summary['rows']} rows, "
               f"{summary['persons']} distinct persons", flush=True)
 
@@ -226,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         bow_df = bow_df.persist()
         n_docs = bow_df.count()  # forces materialization
-        _log_persist(bow_df, "bow_df")
+        assert_persisted(bow_df, name="bow_df")
         idx_to_cid = {idx: cid for cid, idx in vocab_map.items()}
         print(f"[driver]   vocab size: {len(vocab_map)} (cap {args.vocab_size}, "
               f"minDF {args.min_df}), documents: {n_docs}", flush=True)

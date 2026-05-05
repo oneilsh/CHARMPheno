@@ -9,7 +9,8 @@ def test_vi_runner_fits_counting_model_end_to_end(spark):
 
     # 100 rows: 70 heads, 30 tails.
     data = [1] * 70 + [0] * 30
-    rdd = spark.sparkContext.parallelize(data, numSlices=4)
+    rdd = spark.sparkContext.parallelize(data, numSlices=4).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
 
     model = CountingModel(prior_alpha=1.0, prior_beta=1.0)
     runner = VIRunner(
@@ -39,7 +40,8 @@ def test_vi_runner_early_stop_branch_triggers(spark):
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.counting import CountingModel
 
-    rdd = spark.sparkContext.parallelize([1] * 100 + [0] * 100, numSlices=4)
+    rdd = spark.sparkContext.parallelize([1] * 100 + [0] * 100, numSlices=4).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
     model = CountingModel()
     runner = VIRunner(
         model=model,
@@ -63,7 +65,8 @@ def test_vi_runner_runs_to_max_iterations_without_convergence(spark):
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.counting import CountingModel
 
-    rdd = spark.sparkContext.parallelize([1] * 100 + [0] * 100, numSlices=4)
+    rdd = spark.sparkContext.parallelize([1] * 100 + [0] * 100, numSlices=4).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
     model = CountingModel()
     runner = VIRunner(
         model=model,
@@ -100,7 +103,8 @@ def test_vi_runner_uses_mini_batch_when_fraction_set(spark):
     from spark_vi.models.counting import CountingModel
 
     data = [1] * 70 + [0] * 30
-    rdd = spark.sparkContext.parallelize(data, numSlices=4)
+    rdd = spark.sparkContext.parallelize(data, numSlices=4).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
 
     model = CountingModel(prior_alpha=1.0, prior_beta=1.0)
     runner = VIRunner(
@@ -131,7 +135,8 @@ def test_vi_runner_mini_batch_is_reproducible_with_seed(spark):
     from spark_vi.models.counting import CountingModel
 
     data = [1] * 60 + [0] * 40
-    rdd = spark.sparkContext.parallelize(data, numSlices=2)
+    rdd = spark.sparkContext.parallelize(data, numSlices=2).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
 
     cfg = VIConfig(
         max_iterations=8,
@@ -161,7 +166,8 @@ def test_vi_runner_mini_batch_empty_batch_path_does_not_crash(spark):
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.counting import CountingModel
 
-    rdd = spark.sparkContext.parallelize([1, 0, 1], numSlices=1)
+    rdd = spark.sparkContext.parallelize([1, 0, 1], numSlices=1).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
 
     runner = VIRunner(
         model=CountingModel(),
@@ -194,7 +200,8 @@ def test_vi_runner_full_batch_path_unchanged_when_fraction_none(spark):
     from spark_vi.models.counting import CountingModel
 
     data = [1] * 70 + [0] * 30
-    rdd = spark.sparkContext.parallelize(data, numSlices=4)
+    rdd = spark.sparkContext.parallelize(data, numSlices=4).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
 
     runner = VIRunner(
         model=CountingModel(prior_alpha=1.0, prior_beta=1.0),

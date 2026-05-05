@@ -12,6 +12,125 @@ elsewhere.
 
 ---
 
+## 2026-05-05 — Strict persist precondition for VIRunner
+
+A parking-lot item from the prior session, picked up after a successful
+live LDA fit on the cluster confirmed the surrounding pipeline was
+healthy. The work promotes the soft `_log_persist` diagnostic in the
+driver script to a hard precondition inside `VIRunner.fit`, with a
+small companion module `spark_vi.diagnostics.persist` housing the check.
+Outcome: the framework now refuses to enter its iteration loop on
+uncached input rather than silently re-executing the upstream lineage
+(BigQuery scan + CountVectorizer) every iter — a multi-minute regression
+class that was previously only catchable by reading per-iter wall-time
+trends.
+
+### What shipped
+
+- [`spark_vi/diagnostics/persist.py`](../spark-vi/spark_vi/diagnostics/persist.py)
+  with a polymorphic `assert_persisted(target, name)`. RDD path queries
+  `getRDDStorageInfo()` keyed by `rdd.id()` and requires
+  `numCachedPartitions > 0` — the rigorous block-manager truth check.
+  DataFrame path checks `df.storageLevel != NONE` on the public surface.
+- [`VIRunner.fit`](../spark-vi/spark_vi/core/runner.py#L103-L108) now
+  strict-asserts on `data_rdd` after the resume/init block and before
+  the loop. Failure raises `RuntimeError` with an actionable message
+  pointing at the missing `.persist()` or `.count()` step.
+- [`VanillaLDAEstimator._fit`](../spark-vi/spark_vi/mllib/lda.py#L271-L291)
+  persists + counts the derived `bow_rdd` before constructing the
+  runner, with a `try/finally` unpersist after the fit returns. Needed
+  because `dataset.select(...).rdd.map(...)` always yields a fresh
+  uncached RDD even when `dataset` is DataFrame-cached upstream — the
+  shim is the only place that can satisfy the runner's precondition on
+  the actual RDD it sees.
+- Driver script: [`_log_persist`](../analysis/cloud/lda_bigquery_cloud.py)
+  helper deleted; the two call sites (`omop`, `bow_df`) now use
+  `assert_persisted`.
+- Test surface: ~10 existing `runner.fit(rdd)` call sites in
+  [`test_runner.py`](../spark-vi/tests/test_runner.py),
+  [`test_checkpoint.py`](../spark-vi/tests/test_checkpoint.py),
+  [`test_lda_integration.py`](../spark-vi/tests/test_lda_integration.py),
+  and [`test_broadcast_lifecycle.py`](../spark-vi/tests/test_broadcast_lifecycle.py)
+  updated to pre-persist+count their input RDDs. The pattern is
+  intentionally inline rather than fixture-wrapped so the contract is
+  visible at every call site. New
+  [`test_persist_check.py`](../spark-vi/tests/test_persist_check.py)
+  pins the six failure modes (cached vs forgotten-action vs
+  never-persisted, for both RDD and DataFrame; plus type rejection).
+- All 95 spark-vi tests + 27 charmpheno tests pass.
+
+### Pre-existing issues caught (mid-walkthrough)
+
+A short post-implementation walkthrough surfaced one finding worth
+acting on: the original `_assert_df_persisted` had two checks
+(`df.storageLevel != NONE` followed by a JVM cache-manager probe via
+`spark._jsparkSession.sharedState().cacheManager()`). Tracing
+PySpark's `Dataset.storageLevel` to its Scala source showed it is
+*itself* implemented via that same cache manager — so the second probe
+was strictly redundant with the first, and reaching through `private[sql]`
+internals to obtain the same answer was net-negative. Simplified
+[`_assert_df_persisted`](../spark-vi/spark_vi/diagnostics/persist.py#L88-L101)
+to use only `df.storageLevel`; comment at lines 89-94 records the
+redundancy reasoning so a future reader doesn't re-introduce the probe.
+
+### Design rationale captured in code
+
+- **Spot-cluster tolerance.** The check is `numCachedPartitions > 0`,
+  not `== numPartitions`, so partial preemption loss between persist
+  and fit-entry doesn't false-positive — Spark transparently recomputes
+  lost partitions on next access. A stricter check would routinely raise
+  on healthy spot clusters. Documented in the module docstring at
+  [lines 15-20](../spark-vi/spark_vi/diagnostics/persist.py#L15-L20).
+- **Private-bridge access in the RDD path.** `sc._jsc.sc().getRDDStorageInfo()`
+  reaches through PySpark's private Java handle to call a public Scala
+  method that has no Python equivalent. The risk note at
+  [lines 67-74](../spark-vi/spark_vi/diagnostics/persist.py#L67-L74)
+  documents that a Spark major-version rename would break loudly
+  (AttributeError at fit entry) rather than silently — failure mode is
+  itself a signal.
+- **DataFrame check is intentionally weaker.** PySpark exposes no public
+  way to verify materialized blocks for DataFrames; the simpler check
+  catches "forgot persist" and "accidentally unpersisted" but not
+  "registered but no blocks materialized." Adequate because the
+  shim's downstream `bow_rdd` persist+count materializes upstream
+  caches via lineage anyway. Documented in the function's leading
+  comment.
+- **One-shot precondition, not a continuous guarantee.** Mid-fit
+  eviction is intentionally not detected. Re-checking inside the loop
+  would be invasive and the value would be observability rather than
+  correctness — Spark's recompute-and-recache already handles eviction
+  correctly. Documented in the module docstring at line 19.
+
+### Threads parked
+
+- **MLlib-style persistence (Pipeline.save / MLWritable / MLReadable)**
+  per ADR 0009 — still open from the prior session; not advanced here.
+  The ADR called out the deferral ("v1 ships without persistence") and
+  that remains the standing decision.
+- **OMOP concept-hierarchy rollup** to collapse near-duplicate concepts
+  like the two "Type 2 diabetes mellitus" entries observed in topic 6
+  during the live fit. User explicitly deferred ("after we do HDP or
+  other fancy models") — the rollup is a data-prep change touching the
+  vocab path, and the framework-side investment is more valuable while
+  the model surface is still expanding.
+
+### Memory cleanup
+
+Two completed parking-lot memories removed: the strict-persist promotion
+landed in this session, and the inspect_app history-server drop landed
+in the previous session. `MEMORY.md` index pruned to match.
+
+### Out of scope
+
+- Any change to the Makefile, `setup_workspace.py`, or the cluster-side
+  inspect dashboard.
+- Mid-iteration cache integrity checks; intentionally deferred (see
+  rationale above).
+- Touching `VanillaLDAEstimator`'s instance-attr `_on_iteration` design
+  — it's still outside the Param surface for the same ADR 0009 reason.
+
+---
+
 ## 2026-05-04 to 2026-05-05 — Dataproc/BigQuery cluster bring-up walkthrough
 
 A six-lesson walkthrough of the cluster bring-up workstream that landed
