@@ -1642,6 +1642,8 @@ or off — they reflect what the model used to fit, period."
 
 ## Task 13: Spark integration test — α drifts toward known truth
 
+> **Implementation note:** the test as originally specified (assertion "L1 distance from truth must drop by ≥30%") was empirically shown to be unattainable at the planned synthetic-corpus scale during implementation. The actually-shipped test is `test_alpha_optimization_runs_end_to_end_without_regression`, a smoke gate over wiring / finiteness / floor / no-blow-up / movement-from-init. See ADR 0010 "Consequences" for the rationale and the spec for details. The original task text below is preserved for historical reference.
+
 **Files:**
 - Modify: `spark-vi/tests/test_lda_integration.py`
 

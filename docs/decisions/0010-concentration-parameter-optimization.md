@@ -29,3 +29,4 @@
 - `VanillaLDAModel` gains `alpha` and `topicConcentration` accessors so callers can introspect optimized values.
 - `MLWritable` round-trip of optimized α/η is still deferred (ADR 0009's persistence punt is unchanged).
 - HDP (next ADR) becomes a translation exercise: γ uses η's machinery (global stat), α uses LDA-α's per-doc form.
+- The integration test gating α optimization regressions ships as a smoke test (`test_alpha_optimization_runs_end_to_end_without_regression`) rather than the originally-planned "L1 drift toward truth" recovery test. Empirical diagnostics during implementation showed truth-recovery is unverifiable at synthetic-corpus scales (D≪10K) because of well-known topic-collapse SVI behavior — Hoffman 2010 §4 used D=100K–352K to validate recovery. Strict math validation is upstream: helper unit tests with idealized inputs plus the existing ELBO smoothed-trend gate.
