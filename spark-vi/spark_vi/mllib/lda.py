@@ -47,10 +47,13 @@ def _vector_to_bow_document(v: Vector) -> BOWDocument:
 def _validate_unsupported_params(estimator: "VanillaLDAEstimator") -> None:
     """Raise ValueError for any configuration the shim cannot honor.
 
-    Three cases (per ADR 0008 / ADR 0009):
+    Per ADR 0010 the v0 rejections of `optimizeDocConcentration=True` and
+    vector `docConcentration` are gone — both are now first-class. The
+    only remaining rejections are the genuinely unsupported ones:
+
       * optimizer != "online" — we are SVI-only.
-      * optimizeDocConcentration=True — symmetric-alpha-only.
-      * vector docConcentration (length > 1) — symmetric-alpha-only.
+      * vector docConcentration with length != k — the model demands a
+        length-k vector when asymmetric.
 
     Silent fallback would mislead users about what they are getting.
     """
@@ -61,22 +64,15 @@ def _validate_unsupported_params(estimator: "VanillaLDAEstimator") -> None:
             f"The 'em' optimizer is not implemented in this shim."
         )
 
-    if estimator.getOrDefault("optimizeDocConcentration"):
-        raise ValueError(
-            "VanillaLDAEstimator does not support optimizeDocConcentration=True. "
-            "Empirical-Bayes alpha optimization is deferred per ADR 0008 'Future work'. "
-            "Set optimizeDocConcentration=False (the default) and pass a fixed alpha "
-            "via docConcentration."
-        )
-
     if estimator.isSet("docConcentration"):
         doc_conc = estimator.getOrDefault("docConcentration")
         if doc_conc is not None and len(doc_conc) > 1:
-            raise ValueError(
-                f"VanillaLDAEstimator only supports symmetric (scalar) docConcentration, "
-                f"got vector of length {len(doc_conc)}. Asymmetric alpha is deferred per "
-                f"ADR 0008 'Future work'."
-            )
+            k = estimator.getOrDefault("k")
+            if len(doc_conc) != k:
+                raise ValueError(
+                    f"docConcentration vector must have length k={k}, "
+                    f"got length {len(doc_conc)}."
+                )
 
 
 def _build_model_and_config(

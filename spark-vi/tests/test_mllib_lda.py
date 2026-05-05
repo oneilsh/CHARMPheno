@@ -134,19 +134,28 @@ def test_unsupported_optimizer_em_raises():
         _validate_unsupported_params(e)
 
 
-def test_optimize_doc_concentration_true_raises():
+def test_optimize_doc_concentration_true_is_legal():
+    """v0 rejected this; ADR 0010 makes it the default behavior."""
     from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
 
     e = VanillaLDAEstimator(optimizeDocConcentration=True)
-    with pytest.raises(ValueError, match="optimizeDocConcentration"):
-        _validate_unsupported_params(e)
+    _validate_unsupported_params(e)  # should not raise
 
 
-def test_vector_doc_concentration_raises():
+def test_vector_doc_concentration_is_legal():
+    """v0 rejected this; ADR 0010 supports asymmetric α (length K)."""
     from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
 
     e = VanillaLDAEstimator(k=3, docConcentration=[0.1, 0.1, 0.1])
-    with pytest.raises(ValueError, match="docConcentration"):
+    _validate_unsupported_params(e)  # should not raise
+
+
+def test_vector_doc_concentration_wrong_length_raises():
+    """Vector α with length != k is still rejected."""
+    from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
+
+    e = VanillaLDAEstimator(k=4, docConcentration=[0.1, 0.1, 0.1])
+    with pytest.raises(ValueError, match="length"):
         _validate_unsupported_params(e)
 
 
