@@ -163,9 +163,18 @@ def _eta_newton_step(
         H(η) = K·V² · ψ′(V·η) − K·V · ψ′(η)
     Newton step Δη = −g/H.
 
-    Caller computes e_log_phi_sum from current λ (typically:
-        (digamma(lam) − digamma(lam.sum(axis=1, keepdims=True))).sum()).
-    Caller also applies ρ_t damping and the post-step floor.
+    Inputs:
+      eta:           current η scalar.
+      e_log_phi_sum: Σ_t Σ_v E[log φ_tv] from current λ (typically
+                     (digamma(lam) − digamma(lam.sum(axis=1, keepdims=True))).sum()).
+                     NOTE: K, V are the topic / vocab dimensions of the model,
+                     NOT scale factors — η does not depend on corpus size D.
+      K:             number of topics.
+      V:             vocabulary size.
+
+    Returns:
+      Δη: raw Newton step (float). Caller applies ρ_t damping and the
+        post-step floor (parallel to _alpha_newton_step's caller contract).
     """
     g = K * V * (digamma(V * eta) - digamma(eta)) + e_log_phi_sum
     h = K * V * V * polygamma(1, V * eta) - K * V * polygamma(1, eta)
@@ -410,6 +419,9 @@ class VanillaLDA(VIModel):
             delta_eta = _eta_newton_step(
                 eta=float(eta), e_log_phi_sum=e_log_phi_sum, K=K, V=V,
             )
+            # 0-d wrap matches initialize_global's `np.array(self.eta)` shape
+            # so combine_stats and downstream consumers see the same type
+            # regardless of whether η was optimized this iteration.
             new_eta = np.array(max(float(eta) + learning_rate * delta_eta, 1e-3))
         else:
             new_eta = eta

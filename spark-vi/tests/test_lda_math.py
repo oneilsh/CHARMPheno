@@ -187,8 +187,10 @@ def test_eta_newton_step_recovers_known_eta_on_synthetic():
     V = 100
 
     # Sample K topics φ_t ~ Dir(η · 1_V); compute Σ_t Σ_v log φ_tv.
-    # As in the α test, this is the asymptotic E[log φ] under a sharply
-    # concentrated variational q(φ_t) = δ(φ_t − true_φ_t).
+    # This isolates the η-update math: under the variational mode
+    # q(φ_t) = δ(φ_t − true_φ_t), E[log φ_tv] = log φ_tv exactly.
+    # The SVI runtime substitutes E_q[log φ] from a non-degenerate
+    # Dirichlet, but the Newton machinery being tested here is identical.
     phis = rng.dirichlet(np.full(V, true_eta), size=K)
     e_log_phi_sum = float(np.log(phis).sum())
 

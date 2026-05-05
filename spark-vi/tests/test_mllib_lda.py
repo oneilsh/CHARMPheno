@@ -99,6 +99,7 @@ def test_param_translation_to_model_and_config():
     assert model.K == 7
     assert model.V == 100
     assert model.alpha == pytest.approx(0.05)
+    assert model.alpha.shape == (model.K,)
     assert model.eta == pytest.approx(0.02)
     assert model.gamma_shape == pytest.approx(50.0)
     assert model.cavi_max_iter == 200
@@ -120,6 +121,7 @@ def test_param_translation_resolves_none_concentrations_to_one_over_k():
     model, _ = _build_model_and_config(e, vocab_size=10)
 
     assert model.alpha == pytest.approx(0.25)
+    assert model.alpha.shape == (model.K,)
     assert model.eta == pytest.approx(0.25)
 
 
