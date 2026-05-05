@@ -326,3 +326,32 @@ def test_param_translation_accepts_vector_doc_concentration():
     e = VanillaLDAEstimator(k=3, docConcentration=[0.1, 0.5, 0.9])
     model, _ = _build_model_and_config(e, vocab_size=10)
     np.testing.assert_allclose(model.alpha, [0.1, 0.5, 0.9])
+
+
+def test_model_alpha_accessor_returns_trained_vector(tiny_corpus_df):
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+    import numpy as np
+
+    estimator = VanillaLDAEstimator(
+        k=3, maxIter=5, seed=0, subsamplingRate=1.0,
+        optimizeDocConcentration=True,
+    )
+    model = estimator.fit(tiny_corpus_df)
+
+    alpha = model.alpha
+    assert alpha.shape == (3,)
+    np.testing.assert_allclose(alpha, model.result.global_params["alpha"])
+
+
+def test_model_topic_concentration_accessor_returns_trained_eta(tiny_corpus_df):
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+
+    estimator = VanillaLDAEstimator(
+        k=3, maxIter=5, seed=0, subsamplingRate=1.0,
+        optimizeTopicConcentration=True,
+    )
+    model = estimator.fit(tiny_corpus_df)
+
+    eta = model.topicConcentration
+    assert isinstance(eta, float)
+    assert eta == float(model.result.global_params["eta"])

@@ -324,6 +324,27 @@ class VanillaLDAModel(_VanillaLDAParams, Model):
         """The trained VIResult (global_params, elbo_trace, n_iterations, ...)."""
         return self._result
 
+    @property
+    def alpha(self) -> np.ndarray:
+        """Trained α vector (length K).
+
+        For models trained with optimizeDocConcentration=True, this is the
+        result of empirical-Bayes optimization. For static-α models, it's
+        the initial α (broadcast to length K) — which equals the
+        constructor input either way (no surprise).
+        """
+        return self._result.global_params["alpha"]
+
+    @property
+    def topicConcentration(self) -> float:
+        """Trained η scalar.
+
+        For models trained with optimizeTopicConcentration=True, this is
+        the result of empirical-Bayes optimization. Otherwise it's the
+        initial η.
+        """
+        return float(self._result.global_params["eta"])
+
     def vocabSize(self) -> int:
         """V dimension of the trained lambda."""
         return int(self._result.global_params["lambda"].shape[1])
