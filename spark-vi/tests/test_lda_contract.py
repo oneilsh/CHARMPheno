@@ -1,4 +1,5 @@
 """VIModel contract tests for the optional infer_local capability."""
+import numpy as np
 import pytest
 
 
@@ -23,18 +24,38 @@ def test_vanilla_lda_is_a_vimodel():
 
 
 def test_vanilla_lda_default_alpha_eta_match_one_over_k():
-    """Default symmetric alpha and eta both default to 1/K, matching MLlib."""
+    """Default symmetric α and η both default to 1/K, matching MLlib.
+
+    α is stored on self as a length-K vector (constructor broadcasts a
+    scalar). η is scalar.
+    """
     from spark_vi.models.lda import VanillaLDA
-    m = VanillaLDA(K=4, vocab_size=100)
-    assert m.alpha == pytest.approx(0.25)
+
+    m = VanillaLDA(K=4, vocab_size=10)
+    np.testing.assert_allclose(m.alpha, 0.25)
+    assert m.alpha.shape == (4,)
     assert m.eta == pytest.approx(0.25)
 
 
 def test_vanilla_lda_explicit_alpha_eta_respected():
     from spark_vi.models.lda import VanillaLDA
+
     m = VanillaLDA(K=10, vocab_size=100, alpha=0.1, eta=0.2)
-    assert m.alpha == pytest.approx(0.1)
+    np.testing.assert_allclose(m.alpha, 0.1)
+    assert m.alpha.shape == (10,)
     assert m.eta == pytest.approx(0.2)
+
+
+def test_vanilla_lda_accepts_vector_alpha():
+    """A length-K alpha is accepted and stored verbatim (no broadcast)."""
+    from spark_vi.models.lda import VanillaLDA
+
+    m = VanillaLDA(K=3, vocab_size=10, alpha=np.array([0.1, 0.5, 0.9]))
+    np.testing.assert_allclose(m.alpha, [0.1, 0.5, 0.9])
+
+    # Wrong shape rejected.
+    with pytest.raises(ValueError, match="length-3 1-D array"):
+        VanillaLDA(K=3, vocab_size=10, alpha=np.array([0.1, 0.5]))
 
 
 def test_vanilla_lda_rejects_invalid_hyperparams():
@@ -188,7 +209,8 @@ def test_vanilla_lda_update_global_applies_expElogbeta_factor():
     lam = np.array([[10.0, 1.0, 1.0], [1.0, 1.0, 10.0]])
     target_stats = {"lambda_stats": np.array([[3.0, 3.0, 3.0], [3.0, 3.0, 3.0]])}
 
-    new_g = m.update_global({"lambda": lam}, target_stats=target_stats,
+    g = {"lambda": lam, "alpha": m.alpha.copy(), "eta": np.array(m.eta)}
+    new_g = m.update_global(g, target_stats=target_stats,
                              learning_rate=1.0)
 
     expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
@@ -229,8 +251,9 @@ def test_vanilla_lda_update_global_uses_input_lambda_for_expElogbeta():
     target_stats = {"lambda_stats": lambda_stats}
 
     rho = 0.5
+    g_in = {"lambda": lam_in, "alpha": m.alpha.copy(), "eta": np.array(m.eta)}
     new_lam = m.update_global(
-        {"lambda": lam_in}, target_stats=target_stats, learning_rate=rho,
+        g_in, target_stats=target_stats, learning_rate=rho,
     )["lambda"]
 
     # The contract: expElogbeta computed from lam_in.

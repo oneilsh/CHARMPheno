@@ -131,7 +131,11 @@ def test_compute_elbo_lambda_kl_zero_when_lambda_equals_eta():
     K, V = 2, 3
     eta = 0.1
     m = VanillaLDA(K=K, vocab_size=V, eta=eta)
-    g = {"lambda": np.full((K, V), eta)}
+    g = {
+        "lambda": np.full((K, V), eta),
+        "alpha": np.full(K, 1.0 / K),
+        "eta": np.array(eta),
+    }
     agg = {
         "lambda_stats": np.zeros((K, V)),  # not used directly in ELBO, but realistic
         "doc_loglik_sum": np.array(-3.0),

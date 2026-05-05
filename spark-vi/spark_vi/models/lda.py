@@ -46,7 +46,7 @@ def _cavi_doc_inference(
     indices: np.ndarray,
     counts: np.ndarray,
     expElogbeta: np.ndarray,
-    alpha: float,
+    alpha: float | np.ndarray,
     gamma_init: np.ndarray,
     max_iter: int,
     tol: float,
@@ -183,7 +183,7 @@ class VanillaLDA(VIModel):
         self,
         K: int,
         vocab_size: int,
-        alpha: float | None = None,
+        alpha: float | np.ndarray | None = None,
         eta: float | None = None,
         gamma_shape: float = 100.0,
         cavi_max_iter: int = 100,
@@ -197,8 +197,20 @@ class VanillaLDA(VIModel):
             alpha = 1.0 / K
         if eta is None:
             eta = 1.0 / K
-        if alpha <= 0:
-            raise ValueError(f"alpha must be > 0, got {alpha}")
+
+        # alpha may be a scalar (broadcast to length-K symmetric vector) or
+        # a length-K array (asymmetric). Always stored on self as a length-K
+        # float64 array so downstream code treats both inputs uniformly.
+        alpha_arr = np.asarray(alpha, dtype=np.float64)
+        if alpha_arr.ndim == 0:
+            alpha_arr = np.full(K, float(alpha_arr), dtype=np.float64)
+        elif alpha_arr.ndim != 1 or alpha_arr.shape[0] != K:
+            raise ValueError(
+                f"alpha must be a scalar or a length-{K} 1-D array, "
+                f"got shape {alpha_arr.shape}"
+            )
+        if (alpha_arr <= 0).any():
+            raise ValueError(f"all alpha components must be > 0, got {alpha_arr}")
         if eta <= 0:
             raise ValueError(f"eta must be > 0, got {eta}")
         if gamma_shape <= 0:
@@ -210,8 +222,8 @@ class VanillaLDA(VIModel):
 
         self.K = int(K)
         self.V = int(vocab_size)
-        self.alpha = float(alpha)
-        self.eta = float(eta)
+        self.alpha = alpha_arr             # length-K initial α (driver-side starting point)
+        self.eta = float(eta)              # scalar initial η
         self.gamma_shape = float(gamma_shape)
         self.cavi_max_iter = int(cavi_max_iter)
         self.cavi_tol = float(cavi_tol)
@@ -219,27 +231,26 @@ class VanillaLDA(VIModel):
     # Contract methods (filled in over subsequent tasks).
 
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
-        """Random Gamma(gamma_shape, 1/gamma_shape) init for lambda (K, V).
+        """Random Gamma(gamma_shape, 1/gamma_shape) init for lambda (K, V),
+        plus the initial α (K-vector) and η (scalar) seeded from constructor.
 
-        gamma_shape=100 gives draws with mean 1.0 and variance 0.01 —
-        tightly concentrated near 1, with a small amount of symmetry-
-        breaking noise. The variational analog of an "uninformative"
-        topic-word prior. Without the noise, λ stays at all-ones forever
-        because every topic looks identical to every gradient step.
+        See VanillaLDA.__init__ for why α is always a length-K array internally.
+        Putting α / η in global_params (rather than relying on self) means the
+        runner broadcasts and round-trips them like λ; update_global can mutate
+        them when concentration optimization is enabled (Tasks 5 and 6).
 
-        The choice of 100 traces directly to Hoffman 2010's reference
-        Python implementation `onlineldavb.py` line 126
-        (https://github.com/blei-lab/onlineldavb), which has
-        `n.random.gamma(100., 1./100., (self._K, self._W))`. MLlib's
-        `OnlineLDAOptimizer.scala` adopted the same value as a private
-        constant; we follow them. The number is empirical, not derived.
+        gamma_shape=100 trace: see Hoffman 2010's onlineldavb.py line 126.
         """
         lam = np.random.gamma(
             shape=self.gamma_shape,
             scale=1.0 / self.gamma_shape,
             size=(self.K, self.V),
         )
-        return {"lambda": lam}
+        return {
+            "lambda": lam,
+            "alpha": self.alpha.copy(),         # defensive copy — runner mutates
+            "eta": np.array(self.eta),          # 0-d ndarray for combine_stats type-uniformity
+        }
 
     def local_update(
         self,
@@ -248,12 +259,17 @@ class VanillaLDA(VIModel):
     ) -> dict[str, np.ndarray]:
         """E-step on one Spark partition.
 
+        Reads α from global_params (Task 3 refactor) so that mid-fit α
+        updates from update_global propagate to the next iteration's CAVI
+        without needing to re-broadcast self.alpha.
+
         For each BOWDocument:
           1. Run _cavi_doc_inference to get gamma_d, expElogthetad, phi_norm.
           2. Add the suff-stat row update to lambda_stats[:, indices].
           3. Accumulate the data-likelihood and per-doc Dirichlet-KL terms.
         """
         lam = global_params["lambda"]                                 # (K, V)
+        alpha = global_params["alpha"]                                # (K,)
         # Precompute expElogbeta once per partition (shared across docs).
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
 
@@ -262,7 +278,6 @@ class VanillaLDA(VIModel):
         doc_theta_kl_sum = 0.0
         n_docs = 0
 
-        alpha_vec = np.full(self.K, self.alpha, dtype=np.float64)
         # gamma_init draws Gamma(gamma_shape, 1/gamma_shape) per doc — same as MLlib.
         for doc in rows:
             # TODO: per-doc reproducibility for MLlib comparisons — derive seed
@@ -277,7 +292,7 @@ class VanillaLDA(VIModel):
                 indices=doc.indices,
                 counts=doc.counts,
                 expElogbeta=expElogbeta,
-                alpha=self.alpha,
+                alpha=alpha,
                 gamma_init=gamma_init,
                 max_iter=self.cavi_max_iter,
                 tol=self.cavi_tol,
@@ -297,7 +312,7 @@ class VanillaLDA(VIModel):
             doc_loglik_sum += float(np.sum(doc.counts * np.log(phi_norm)))
 
             # Per-doc Dirichlet KL: KL(q(theta_d) || p(theta_d)).
-            doc_theta_kl_sum += _dirichlet_kl(gamma, alpha_vec)
+            doc_theta_kl_sum += _dirichlet_kl(gamma, alpha)
             n_docs += 1
 
         return {
@@ -313,7 +328,10 @@ class VanillaLDA(VIModel):
         target_stats: dict[str, np.ndarray],
         learning_rate: float,
     ) -> dict[str, np.ndarray]:
-        """SVI natural-gradient step:
+        """SVI natural-gradient step on λ; α and η pass through unchanged.
+
+        Tasks 5 and 6 will layer Newton-step updates on α and η here, gated
+        on optimize_alpha / optimize_eta flags.
 
             lambda_new = (1 - rho) * lambda
                        + rho * (eta + expElogbeta * target_stats["lambda_stats"])
@@ -332,10 +350,18 @@ class VanillaLDA(VIModel):
         consistent.
         """
         lam = global_params["lambda"]
+        alpha = global_params["alpha"]
+        eta = global_params["eta"]
+
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
-        target_lam = self.eta + expElogbeta * target_stats["lambda_stats"]
+        target_lam = eta + expElogbeta * target_stats["lambda_stats"]
         new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
-        return {"lambda": new_lam}
+
+        return {
+            "lambda": new_lam,
+            "alpha": alpha,
+            "eta": eta,
+        }
 
     def compute_elbo(
         self,
@@ -352,10 +378,16 @@ class VanillaLDA(VIModel):
         doc_loglik_sum and doc_theta_kl_sum are aggregated across the
         partition by local_update; the global beta KL is computed here on
         the driver from lambda alone.
+
+        η is read from global_params (Task 3 refactor) so an η-optimization
+        update mid-fit (Task 6) feeds back into the global KL prior on the
+        next ELBO computation.
         """
         lam = global_params["lambda"]
+        eta = float(global_params["eta"])
+
         K, V = lam.shape
-        eta_vec = np.full(V, self.eta, dtype=np.float64)
+        eta_vec = np.full(V, eta, dtype=np.float64)
         global_kl = 0.0
         for k in range(K):
             global_kl += _dirichlet_kl(lam[k], eta_vec)
@@ -369,12 +401,13 @@ class VanillaLDA(VIModel):
     def infer_local(self, row: BOWDocument, global_params: dict[str, np.ndarray]):
         """Single-document E-step under fixed global params.
 
-        Pure function of (row, global_params) — must not read self for
-        post-fit state. Returns:
-          gamma: (K,) variational Dirichlet parameter for theta_d.
-          theta: (K,) normalized E[theta_d] = gamma / gamma.sum().
+        Pure function of (row, global_params). Reads α from global_params so
+        a model trained with optimize_alpha=True transforms with the *trained*
+        α rather than the constructor's initial value.
         """
         lam = global_params["lambda"]
+        alpha = global_params["alpha"]
+
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
         gamma_init = np.random.gamma(
             shape=self.gamma_shape,
@@ -385,7 +418,7 @@ class VanillaLDA(VIModel):
             indices=row.indices,
             counts=row.counts,
             expElogbeta=expElogbeta,
-            alpha=self.alpha,
+            alpha=alpha,
             gamma_init=gamma_init,
             max_iter=self.cavi_max_iter,
             tol=self.cavi_tol,
