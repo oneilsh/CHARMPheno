@@ -8,21 +8,19 @@ JAVA_HOME := $(shell if [ -d "$(JAVA_HOME_MACOS)" ]; then echo "$(JAVA_HOME_MACO
 
 help:
 	@echo "spark-vi common targets:"
-	@echo "  install      - poetry install"
-	@echo "  dev          - install + dev build tooling"
+	@echo "  install      - poetry install (runtime + dev deps)"
+	@echo "  dev          - alias for install"
 	@echo "  test         - unit tests only (fast)"
 	@echo "  test-all     - unit + @slow tests"
 	@echo "  test-cluster - only @cluster tests (manual)"
-	@echo "  build        - wheel + sdist into dist/"
+	@echo "  build        - wheel + sdist into dist/ (auto-installs `build` if missing)"
 	@echo "  zip          - flat dist/spark_vi.zip for --py-files"
 	@echo "  clean        - remove dist/, build/, caches"
 
 install:
-	poetry install
+	poetry install --with dev
 
-dev:
-	poetry install
-	poetry run pip install build
+dev: install
 
 clean:
 	rm -rf dist/ build/ *.egg-info
@@ -38,6 +36,7 @@ test-cluster:
 	JAVA_HOME=$(JAVA_HOME) poetry run pytest tests/ -v -m cluster
 
 build:
+	@poetry run python -c "import build" 2>/dev/null || poetry run pip install build
 	poetry run python -m build
 
 zip: clean build
