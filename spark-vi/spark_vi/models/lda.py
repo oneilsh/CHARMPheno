@@ -357,7 +357,15 @@ class VanillaLDA(VIModel):
         so target_stats["e_log_theta_sum"] is the corpus-equivalent
         Σ_d E[log θ_dk] and target_stats["n_docs"] is the corpus-equivalent D.
 
-        η pass-through here; Newton update for η lands in the next commit.
+        η update (only when self.optimize_eta):
+            e_log_phi_sum = Σ_t Σ_v E[log φ_tv] from current λ
+                          (NOT from target_stats — this is a global stat).
+            Δη   = _eta_newton_step(η, e_log_phi_sum, K, V)
+            η_new = clip(η + rho * Δη, min=1e-3)
+
+        Note the asymmetry vs α: η's stat is computable from current global
+        state (λ), so no extra return value from local_update. HDP will reuse
+        this same pattern for its corpus-stick γ update.
 
         The expElogbeta multiplication recovers the per-token-per-topic factor
         omitted from local_update's per-doc accumulation: phi_dnk depends on
@@ -390,11 +398,26 @@ class VanillaLDA(VIModel):
         else:
             new_alpha = alpha
 
-        # η updates land in the next commit (Task 6).
+        if self.optimize_eta:
+            # The η stat (Σ_t Σ_v E[log φ_tv]) is computable directly from the
+            # *just-updated* λ — unlike α's per-doc stat, no `local_update`
+            # contribution is needed. This is the global-stat optimization
+            # pattern HDP will reuse for its γ update.
+            K, V = new_lam.shape
+            e_log_phi_sum = float(
+                (digamma(new_lam) - digamma(new_lam.sum(axis=1, keepdims=True))).sum()
+            )
+            delta_eta = _eta_newton_step(
+                eta=float(eta), e_log_phi_sum=e_log_phi_sum, K=K, V=V,
+            )
+            new_eta = np.array(max(float(eta) + learning_rate * delta_eta, 1e-3))
+        else:
+            new_eta = eta
+
         return {
             "lambda": new_lam,
             "alpha": new_alpha,
-            "eta": eta,
+            "eta": new_eta,
         }
 
     def compute_elbo(

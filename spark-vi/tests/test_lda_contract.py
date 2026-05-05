@@ -433,3 +433,79 @@ def test_local_update_emits_e_log_theta_sum_when_optimize_alpha():
     stats_on = m_on.local_update(rows=iter(docs), global_params=g)
     assert "e_log_theta_sum" in stats_on
     assert stats_on["e_log_theta_sum"].shape == (K,)
+
+
+def test_update_global_with_optimize_eta_runs_newton_and_floors():
+    """ρ=1.0 + optimize_eta=True: η moves toward the value that fits the
+    *post-λ-update* topic-word distribution, plus the post-step floor.
+
+    Setup note: the η Newton step uses `new_lam` (after the λ update), not the
+    input `lam`. To exercise meaningful η movement we therefore need
+    `new_lam` (not the input `lam`) to encode a Dir(true_eta=0.5)-like state.
+    With `learning_rate=1.0`, `new_lam = eta + expElogbeta(lam_in) * lambda_stats`
+    so we choose a uniform `lam_in = ones((K,V))` (giving constant
+    `expElogbeta`) and pick `lambda_stats` that lands `new_lam` exactly on a
+    pre-computed `phis * 1e6` from Dir(0.5).
+    """
+    from scipy.special import digamma
+
+    from spark_vi.models.lda import VanillaLDA, _eta_newton_step
+
+    rng = np.random.default_rng(11)
+    K, V = 50, 100
+    true_eta = 0.5
+    eta_in = 0.1
+
+    phis = rng.dirichlet(np.full(V, true_eta), size=K)
+    target_new_lam = phis * 1.0e6  # heavy concentration so digamma ≈ log
+
+    # Pick `lam_in` such that expElogbeta is uniform constant — keeps
+    # lambda_stats algebra clean.
+    lam_in = np.ones((K, V), dtype=np.float64)
+    expElogbeta = np.exp(
+        digamma(lam_in) - digamma(lam_in.sum(axis=1, keepdims=True))
+    )
+    # learning_rate=1.0 ⇒ new_lam = eta_in + expElogbeta * lambda_stats
+    lambda_stats = (target_new_lam - eta_in) / expElogbeta
+
+    m = VanillaLDA(K=K, vocab_size=V, eta=eta_in, optimize_eta=True)
+    g = {
+        "lambda": lam_in,
+        "alpha": np.full(K, 1.0 / K),
+        "eta": np.array(eta_in),
+    }
+    target_stats = {
+        "lambda_stats": lambda_stats,
+        "doc_loglik_sum": np.array(0.0),
+        "doc_theta_kl_sum": np.array(0.0),
+        "n_docs": np.array(1.0),
+    }
+    new_g = m.update_global(g, target_stats, learning_rate=1.0)
+
+    # Sanity: the λ branch reproduced our intended new_lam (otherwise the η
+    # wiring assertion below wouldn't be testing what we think it is).
+    np.testing.assert_allclose(new_g["lambda"], target_new_lam, rtol=1e-10)
+
+    new_eta = float(new_g["eta"])
+    # Newton step from η=0.1 toward Dir(0.5)'s e_log_phi_sum should move
+    # measurably upward; exact convergence covered by the helper recovery
+    # test in test_lda_math.
+    assert new_eta > 0.14
+    assert new_eta >= 1e-3  # floor
+
+    # Wiring tightness: result must match a direct _eta_newton_step call
+    # with the same post-λ-update state (catches wiring bugs the numeric
+    # range check above would miss).
+    e_log_phi_sum = float(
+        (
+            digamma(target_new_lam)
+            - digamma(target_new_lam.sum(axis=1, keepdims=True))
+        ).sum()
+    )
+    direct_delta_eta = _eta_newton_step(
+        eta=eta_in, e_log_phi_sum=e_log_phi_sum, K=K, V=V,
+    )
+    expected_eta = max(eta_in + 1.0 * direct_delta_eta, 1e-3)
+    assert abs(new_eta - expected_eta) < 1e-9, (
+        f"wiring drift: got {new_eta}, expected {expected_eta}"
+    )
