@@ -1,14 +1,17 @@
 """Live polling dashboard for a running Spark app on a Dataproc cluster.
 
-Polls the driver's Spark REST API (localhost:4040) and the YARN
-ResourceManager REST API (localhost:8088) and renders a compact refreshing
-view: executor utilization + GC health, active stage throughput, recent
-completed stages, and per-worker YARN container/vcore/memory usage.
+Discovers the live Spark UI via the YARN ResourceManager's `trackingUrl`
+field (Dataproc defaults `spark.ui.port=0` — a random ephemeral port —
+so fixed-port probing isn't viable; YARN always knows where the UI is).
+Polls Spark's REST API and the YARN nodes endpoint and renders a compact
+refreshing view: executor utilization + GC health, active stage
+throughput, recent completed stages, and per-worker YARN container /
+vcore / memory usage.
 
 Use from a JupyterLab terminal on the Dataproc master while a smoke
 target is running in a sibling terminal. No install — stdlib only.
 
-    python inspect_app.py                  # auto-detect the running app
+    python inspect_app.py                  # newest RUNNING Spark app
     python inspect_app.py --interval 3
     python inspect_app.py --app-id application_..._0004
 """
@@ -16,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import socket
 import sys
 import time
 from datetime import datetime, timezone
@@ -35,26 +37,48 @@ def _get(url: str, timeout: float = _POLL_TIMEOUT):
         return json.loads(r.read())
 
 
-def discover_spark_base(host: str | None,
-                         port: int | None) -> str | None:
-    """Probe the live driver UI for a Spark REST API base URL.
+def _yarn_running_spark_apps() -> list[dict]:
+    """Return YARN's list of currently-RUNNING Spark applications."""
+    url = f"{YARN_BASE}/apps?states=RUNNING&applicationTypes=SPARK"
+    try:
+        payload = _get(url, timeout=2.0)
+    except (HTTPError, URLError, ConnectionError, TimeoutError, OSError):
+        return []
+    return ((payload or {}).get("apps") or {}).get("app") or []
 
-    Spark binds the driver UI to whichever host `spark.driver.host`
-    resolves to (often the FQDN, not localhost) on the first free port
-    starting at 4040. We shotgun across the usual host aliases × the
-    standard port range and return the first that responds.
+
+def discover_spark_base(explicit_app_id: str | None) -> tuple[str, str] | None:
+    """Find a live Spark app's UI base URL and id via YARN.
+
+    Dataproc sets `spark.ui.port=0` (random ephemeral), so probing fixed
+    ports doesn't work. YARN's `trackingUrl` always points at the live
+    UI — typically a YARN-proxy URL of the form
+    `http://<rm-fqdn>:8088/proxy/<app_id>/`. Since the proxy is the same
+    RM we're already polling at localhost:8088, we rewrite the host to
+    localhost (avoids DNS for the internal-only FQDN; same destination).
+
+    Returns (spark_base, app_id) for the matching app, or None if YARN
+    has no RUNNING Spark apps (or the explicit app id isn't running).
     """
-    hosts = [host] if host else ["localhost", "127.0.0.1", socket.gethostname()]
-    live_ports = [port] if port else list(range(4040, 4046))
-    for h in hosts:
-        for p in live_ports:
-            url = f"http://{h}:{p}/api/v1"
-            try:
-                _get(f"{url}/applications", timeout=1.5)
-                return url
-            except (HTTPError, URLError, ConnectionError, OSError):
-                continue
-    return None
+    apps = _yarn_running_spark_apps()
+    if not apps:
+        return None
+    if explicit_app_id:
+        chosen = next((a for a in apps if a["id"] == explicit_app_id), None)
+        if chosen is None:
+            return None
+    else:
+        chosen = max(apps, key=lambda a: a.get("startedTime", 0))
+    tracking = chosen.get("trackingUrl", "").rstrip("/")
+    if not tracking:
+        return None
+    idx = tracking.find("/proxy/")
+    if idx >= 0:
+        base = f"http://localhost:8088{tracking[idx:]}/api/v1"
+    else:
+        # Non-proxy YARN configuration: keep the direct driver URL.
+        base = f"{tracking}/api/v1"
+    return base, chosen["id"]
 
 
 def _fmt_bytes(b: float) -> str:
@@ -77,36 +101,6 @@ def _fmt_ms(ms: float) -> str:
 # Errors that should NOT take down the loop — the live driver REST endpoint
 # can stall transiently when the driver thread is busy (long stages, GC).
 _NETWORK_ERRORS = (HTTPError, URLError, ConnectionError, TimeoutError, OSError)
-
-
-def find_app_id(spark_base: str, explicit: str | None) -> str | None:
-    """Pick the newest in-progress app on the live driver UI.
-
-    Returns None if no in-progress app is listed. The live driver UI
-    only exists for the duration of an actual driver process, so any
-    listed app is by definition still running — no zombie filtering
-    needed.
-    """
-    if explicit:
-        return explicit
-    try:
-        apps = _get(f"{spark_base}/applications")
-    except _NETWORK_ERRORS:
-        return None
-    if not apps:
-        return None
-
-    def _start(a):
-        return (a.get("attempts") or [{}])[0].get("startTimeEpoch", 0)
-
-    in_progress = [
-        a for a in apps
-        if not (a.get("attempts") or [{}])[0].get("completed", True)
-    ]
-    if not in_progress:
-        return None
-    in_progress.sort(key=_start, reverse=True)
-    return in_progress[0]["id"]
 
 
 def _sustained_cpu_pct(e: dict) -> float:
@@ -314,55 +308,42 @@ def main() -> int:
     p.add_argument("--interval", type=float, default=5.0,
                     help="seconds between refreshes (default: 5)")
     p.add_argument("--app-id", default=None,
-                    help="explicit app id (default: first app on the Spark UI)")
-    p.add_argument("--host", default=None,
-                    help="Spark UI host (default: probe localhost, 127.0.0.1, $HOSTNAME)")
-    p.add_argument("--port", type=int, default=None,
-                    help="Spark UI port (default: probe 4040..4045)")
+                    help="explicit app id (default: newest RUNNING Spark app per YARN)")
     args = p.parse_args()
 
-    spark_base = discover_spark_base(args.host, args.port)
-    if not spark_base:
-        print("No live Spark driver UI found. Probed:", file=sys.stderr)
-        hosts = [args.host] if args.host else ["localhost", "127.0.0.1", socket.gethostname()]
-        ports = [args.port] if args.port else list(range(4040, 4046))
-        for h in hosts:
-            for pn in ports:
-                print(f"  http://{h}:{pn}/", file=sys.stderr)
-        print("\nFind the actual port with:    ss -tlnp | grep ':40'",
+    discovered = discover_spark_base(args.app_id)
+    if not discovered:
+        print("No live Spark app found via YARN at localhost:8088.",
               file=sys.stderr)
-        print("Then re-run with:             --host <h> --port <p>",
-              file=sys.stderr)
+        if args.app_id:
+            print(f"  --app-id {args.app_id} is not in YARN's RUNNING list.",
+                  file=sys.stderr)
+        else:
+            print("  Is your spark-submit actually running on this cluster?",
+                  file=sys.stderr)
         return 1
-
-    app_id = find_app_id(spark_base, args.app_id)
-    if not app_id:
-        print(f"Spark UI reachable at {spark_base} but no apps listed.",
-              file=sys.stderr)
-        return 1
+    spark_base, app_id = discovered
     started = time.time()
     print(f"Polling {app_id} on {spark_base} every {args.interval}s — "
           f"Ctrl-C to quit.")
     time.sleep(0.5)
     try:
-        # Re-detect each tick when --app-id wasn't pinned: the newest
-        # in-progress app can change between iterations (a new job may
-        # be submitted after inspect was launched). Without re-detection
-        # we'd stick on the previous app and never pick up the new one.
-        last_app_id = app_id
-        # Per-app cross-poll state for delta metrics (tasks/sec, stage rate).
-        # Reset whenever the target app changes so deltas don't span jobs.
+        # Re-detect each tick: a new job may be submitted after inspect was
+        # launched, in which case YARN's trackingUrl points at the new app.
+        # Per-app cross-poll state (tasks/sec, stage rate) resets on switch
+        # so deltas don't span jobs.
+        last_base, last_app_id = spark_base, app_id
         state: dict = {}
         while True:
-            current = (args.app_id
-                       if args.app_id
-                       else find_app_id(spark_base, None) or last_app_id)
-            if current != last_app_id:
-                print(f"\n*** switching: {last_app_id} -> {current} ***\n",
-                      flush=True)
-                last_app_id = current
-                state = {}
-            render_once(spark_base, current, started, state)
+            redisc = discover_spark_base(args.app_id)
+            if redisc is not None:
+                new_base, new_app = redisc
+                if new_app != last_app_id:
+                    print(f"\n*** switching: {last_app_id} -> {new_app} ***\n",
+                          flush=True)
+                    last_base, last_app_id = new_base, new_app
+                    state = {}
+            render_once(last_base, last_app_id, started, state)
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nDone.")
