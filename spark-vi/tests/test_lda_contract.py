@@ -118,6 +118,7 @@ def test_vanilla_lda_local_update_returns_expected_keys():
                     counts=np.array([3.0, 1.0]), length=4),
     ]
     stats = m.local_update(rows=iter(docs), global_params=g)
+    # When optimize_alpha=False (the default), e_log_theta_sum is NOT emitted.
     assert set(stats.keys()) == {"lambda_stats", "doc_loglik_sum", "doc_theta_kl_sum", "n_docs"}
     assert stats["lambda_stats"].shape == (3, 5)
     assert isinstance(float(stats["doc_loglik_sum"]), float)
@@ -351,3 +352,84 @@ def test_vanilla_lda_optimize_flags_can_be_set():
     m = VanillaLDA(K=3, vocab_size=10, optimize_alpha=True, optimize_eta=True)
     assert m.optimize_alpha is True
     assert m.optimize_eta is True
+
+
+def test_update_global_with_optimize_alpha_runs_newton_and_floors():
+    """At ρ=1.0, optimize_alpha=True applies a full Newton step plus floor.
+
+    The verification is structural: with synthetic e_log_theta_sum drawn from
+    Dir([0.1, 0.5, 0.9]), one full Newton step from 1/K starting α moves
+    α measurably toward the truth. Convergence (closed-form) is covered by
+    test_alpha_newton_step_recovers_known_alpha_on_synthetic; this test
+    confirms wiring.
+    """
+    from spark_vi.models.lda import VanillaLDA
+    import numpy as np
+
+    K, V = 3, 5
+    rng = np.random.default_rng(0)
+    true_alpha = np.array([0.1, 0.5, 0.9])
+    thetas = rng.dirichlet(true_alpha, size=10000)
+    e_log_theta_sum = np.log(thetas).sum(axis=0)
+
+    m = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+    g = {
+        "lambda": np.ones((K, V)),
+        "alpha": np.full(K, 1.0 / K),
+        "eta": np.array(0.1),
+    }
+    target_stats = {
+        "lambda_stats": np.zeros((K, V)),
+        "e_log_theta_sum": e_log_theta_sum,  # already corpus-scaled (D=10000)
+        "doc_loglik_sum": np.array(0.0),
+        "doc_theta_kl_sum": np.array(0.0),
+        "n_docs": np.array(10000.0),
+    }
+    new_g = m.update_global(g, target_stats, learning_rate=1.0)
+
+    # α moved toward truth.
+    assert np.argmax(new_g["alpha"]) == 2  # largest component is index 2 (0.9)
+    assert np.argmin(new_g["alpha"]) == 0  # smallest is index 0 (0.1)
+    # Floor respected.
+    assert (new_g["alpha"] >= 1e-3).all()
+
+    # Wiring tightness: the result must match what _alpha_newton_step + floor
+    # produces directly (catches any wiring bug that the argmax/argmin sign
+    # check above would miss).
+    from spark_vi.models.lda import _alpha_newton_step
+    direct_delta = _alpha_newton_step(
+        alpha=g["alpha"],
+        e_log_theta_sum_scaled=e_log_theta_sum,
+        D=10000.0,
+    )
+    expected_alpha = np.maximum(g["alpha"] + 1.0 * direct_delta, 1e-3)
+    np.testing.assert_allclose(new_g["alpha"], expected_alpha, rtol=1e-12)
+
+
+def test_local_update_emits_e_log_theta_sum_when_optimize_alpha():
+    """The new stat key is present iff optimize_alpha=True (avoids paying
+    the digamma cost when off)."""
+    import numpy as np
+    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.lda import VanillaLDA
+
+    K, V = 3, 5
+    docs = [BOWDocument(
+        indices=np.array([0, 2], dtype=np.int32),
+        counts=np.array([1.0, 2.0]),
+        length=3,
+    )]
+    g = {
+        "lambda": np.ones((K, V)),
+        "alpha": np.full(K, 1.0 / K),
+        "eta": np.array(0.1),
+    }
+
+    m_off = VanillaLDA(K=K, vocab_size=V, optimize_alpha=False)
+    stats_off = m_off.local_update(rows=iter(docs), global_params=g)
+    assert "e_log_theta_sum" not in stats_off
+
+    m_on = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+    stats_on = m_on.local_update(rows=iter(docs), global_params=g)
+    assert "e_log_theta_sum" in stats_on
+    assert stats_on["e_log_theta_sum"].shape == (K,)

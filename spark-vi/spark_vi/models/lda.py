@@ -281,6 +281,7 @@ class VanillaLDA(VIModel):
         doc_loglik_sum = 0.0
         doc_theta_kl_sum = 0.0
         n_docs = 0
+        e_log_theta_sum = np.zeros(self.K, dtype=np.float64) if self.optimize_alpha else None
 
         # gamma_init draws Gamma(gamma_shape, 1/gamma_shape) per doc — same as MLlib.
         for doc in rows:
@@ -319,12 +320,22 @@ class VanillaLDA(VIModel):
             doc_theta_kl_sum += _dirichlet_kl(gamma, alpha)
             n_docs += 1
 
-        return {
+            if self.optimize_alpha:
+                # E[log θ_dk] = ψ(γ_dk) − ψ(Σ_j γ_dj) ≡ log(expElogthetad),
+                # since _cavi_doc_inference returns expElogthetad = exp of that
+                # exact expression at convergence. One log/doc beats two
+                # digammas/doc on the Spark hot path.
+                e_log_theta_sum += np.log(expElogthetad)
+
+        out: dict[str, np.ndarray] = {
             "lambda_stats": lambda_stats,
             "doc_loglik_sum": np.array(doc_loglik_sum),
             "doc_theta_kl_sum": np.array(doc_theta_kl_sum),
             "n_docs": np.array(float(n_docs)),
         }
+        if e_log_theta_sum is not None:
+            out["e_log_theta_sum"] = e_log_theta_sum
+        return out
 
     def update_global(
         self,
@@ -332,13 +343,21 @@ class VanillaLDA(VIModel):
         target_stats: dict[str, np.ndarray],
         learning_rate: float,
     ) -> dict[str, np.ndarray]:
-        """SVI natural-gradient step on λ; α and η pass through unchanged.
+        """SVI natural-gradient step on λ; optional Newton step on α.
 
-        Tasks 5 and 6 will layer Newton-step updates on α and η here, gated
-        on optimize_alpha / optimize_eta flags.
-
+        λ update (always):
             lambda_new = (1 - rho) * lambda
                        + rho * (eta + expElogbeta * target_stats["lambda_stats"])
+
+        α update (only when self.optimize_alpha):
+            Δα   = _alpha_newton_step(α, target_stats["e_log_theta_sum"], D=n_docs_scaled)
+            α_new = clip(α + rho * Δα, min=1e-3)
+
+        target_stats[*] is already corpus-scaled by the runner per ADR 0005,
+        so target_stats["e_log_theta_sum"] is the corpus-equivalent
+        Σ_d E[log θ_dk] and target_stats["n_docs"] is the corpus-equivalent D.
+
+        η pass-through here; Newton update for η lands in the next commit.
 
         The expElogbeta multiplication recovers the per-token-per-topic factor
         omitted from local_update's per-doc accumulation: phi_dnk depends on
@@ -347,11 +366,6 @@ class VanillaLDA(VIModel):
         of the per-doc sum and applying it once here at the driver matches
         Spark MLlib's OnlineLDAOptimizer ("statsSum *:* expElogbeta.t" before
         updateLambda) and is what makes the natural-gradient direction correct.
-
-        target_stats["lambda_stats"] is already pre-scaled by corpus_size /
-        batch_size in mini-batch mode (per ADR 0005). expElogbeta is computed
-        from the same lambda local_update saw, so the reference frame is
-        consistent.
         """
         lam = global_params["lambda"]
         alpha = global_params["alpha"]
@@ -361,9 +375,25 @@ class VanillaLDA(VIModel):
         target_lam = eta + expElogbeta * target_stats["lambda_stats"]
         new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
 
+        if self.optimize_alpha:
+            # `_alpha_newton_step`'s closed-form Sherman-Morrison step has a
+            # theoretical degeneracy at c == Σ_k 1/d_k (denominator of `b`).
+            # Measure-zero in practice; the post-step floor below + ρ-damping
+            # keep d_k = D·ψ′(α_k) bounded so the equality is unreachable.
+            D = float(target_stats["n_docs"])
+            delta_alpha = _alpha_newton_step(
+                alpha=alpha,
+                e_log_theta_sum_scaled=target_stats["e_log_theta_sum"],
+                D=D,
+            )
+            new_alpha = np.maximum(alpha + learning_rate * delta_alpha, 1e-3)
+        else:
+            new_alpha = alpha
+
+        # η updates land in the next commit (Task 6).
         return {
             "lambda": new_lam,
-            "alpha": alpha,
+            "alpha": new_alpha,
             "eta": eta,
         }
 
