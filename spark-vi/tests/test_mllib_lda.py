@@ -267,6 +267,35 @@ def test_transform_respects_custom_topic_distribution_col(tiny_corpus_df):
     assert "topicDistribution" not in out.columns
 
 
+def test_transform_uses_trained_alpha_from_result(tiny_corpus_df):
+    """When optimize_alpha=True, transform must read α from
+    result.global_params['alpha'], not from the Estimator's
+    docConcentration Param (which was the v0 path).
+    """
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+    import numpy as np
+
+    estimator = VanillaLDAEstimator(
+        k=3, maxIter=5, seed=0, subsamplingRate=1.0,
+        optimizeDocConcentration=True,
+    )
+    model = estimator.fit(tiny_corpus_df)
+
+    # The trained α is on result.global_params, not on the docConcentration Param.
+    trained_alpha = model.result.global_params["alpha"]
+    assert trained_alpha.shape == (3,)
+    # Should have moved at least somewhere from the 1/3 init under 5 iters.
+    assert not np.allclose(trained_alpha, 1.0 / 3, atol=1e-6)
+
+    # Transform should not raise and should produce a valid distribution.
+    out = model.transform(tiny_corpus_df)
+    rows = out.select("topicDistribution").collect()
+    for r in rows:
+        arr = np.asarray(r["topicDistribution"].toArray())
+        assert arr.shape == (3,)
+        np.testing.assert_allclose(arr.sum(), 1.0, atol=1e-6)
+
+
 def test_log_likelihood_and_log_perplexity_raise_not_implemented(tiny_corpus_df):
     from spark_vi.mllib.lda import VanillaLDAEstimator
 

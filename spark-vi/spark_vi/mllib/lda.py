@@ -387,11 +387,9 @@ class VanillaLDAModel(_VanillaLDAParams, Model):
         lam = self._result.global_params["lambda"]
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
 
-        # docConcentration may be unset (None default) → resolve to 1/k.
-        if self.isSet("docConcentration") and self.getOrDefault("docConcentration") is not None:
-            alpha = float(self.getOrDefault("docConcentration")[0])
-        else:
-            alpha = 1.0 / self.getOrDefault("k")
+        # Use the trained α from VIResult — covers both static-α and
+        # optimize_alpha paths uniformly. Always a length-K ndarray now.
+        alpha = self._result.global_params["alpha"]
         gamma_shape = float(self.getOrDefault("gammaShape"))
         cavi_max_iter = int(self.getOrDefault("caviMaxIter"))
         cavi_tol = float(self.getOrDefault("caviTol"))
