@@ -174,7 +174,7 @@ class _VanillaLDAParams(HasFeaturesCol, HasMaxIter, HasSeed):
     )
     optimizeDocConcentration = Param(
         Params._dummy(), "optimizeDocConcentration",
-        "whether to optimize alpha; True is rejected (see ADR 0008)",
+        "whether to optimize α via Newton-Raphson (Blei 2003 §5.4); see ADR 0010",
         typeConverter=TypeConverters.toBoolean,
     )
     optimizeTopicConcentration = Param(

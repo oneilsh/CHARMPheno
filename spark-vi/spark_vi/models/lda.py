@@ -249,8 +249,8 @@ class VanillaLDA(VIModel):
 
         See VanillaLDA.__init__ for why α is always a length-K array internally.
         Putting α / η in global_params (rather than relying on self) means the
-        runner broadcasts and round-trips them like λ; update_global can mutate
-        them when concentration optimization is enabled (Tasks 5 and 6).
+        runner broadcasts and round-trips them like λ; update_global mutates
+        them when the optimize_alpha / optimize_eta flags are on.
 
         gamma_shape=100 trace: see Hoffman 2010's onlineldavb.py line 126.
         """
@@ -272,9 +272,9 @@ class VanillaLDA(VIModel):
     ) -> dict[str, np.ndarray]:
         """E-step on one Spark partition.
 
-        Reads α from global_params (Task 3 refactor) so that mid-fit α
-        updates from update_global propagate to the next iteration's CAVI
-        without needing to re-broadcast self.alpha.
+        Reads α from global_params so that mid-fit α updates from
+        update_global propagate to the next iteration's CAVI without
+        needing to re-broadcast self.alpha.
 
         For each BOWDocument:
           1. Run _cavi_doc_inference to get gamma_d, expElogthetad, phi_norm.
@@ -448,9 +448,8 @@ class VanillaLDA(VIModel):
         partition by local_update; the global beta KL is computed here on
         the driver from lambda alone.
 
-        η is read from global_params (Task 3 refactor) so an η-optimization
-        update mid-fit (Task 6) feeds back into the global KL prior on the
-        next ELBO computation.
+        η is read from global_params so an η-optimization update mid-fit
+        feeds back into the global KL prior on the next ELBO computation.
         """
         lam = global_params["lambda"]
         eta = float(global_params["eta"])
