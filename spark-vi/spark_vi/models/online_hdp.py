@@ -539,3 +539,35 @@ class OnlineHDP(VIModel):
             "var_phi": r["var_phi"],
             "theta": theta,
         }
+
+    def iteration_summary(self, global_params: dict[str, np.ndarray]) -> str:
+        """Short live-training diagnostic.
+
+        Reports:
+          - Effective active-topic count: #{k : E[β_k] > 1/(2T)}.
+            Threshold 1/(2T) is "carries half-uniform mass" — a cheap
+            proxy for "this corpus topic is being used".
+          - Top-3 corpus stick weights, descending.
+          - Spread of λ row sums (max / min).
+        """
+        u = global_params["u"]
+        v = global_params["v"]
+        lam = global_params["lambda"]
+
+        # E[β_k] from u, v via stick-breaking mean.
+        E_W = u / (u + v)                                       # length T-1
+        E_1mW = v / (u + v)                                     # length T-1
+        E_beta = np.zeros(self.T, dtype=np.float64)
+        E_beta[: self.T - 1] = E_W * np.concatenate([[1.0], np.cumprod(E_1mW)[:-1]])
+        E_beta[self.T - 1] = 1.0 - E_beta[: self.T - 1].sum()
+
+        n_active = int(np.sum(E_beta > 1.0 / (2.0 * self.T)))
+        top3 = np.sort(E_beta)[::-1][:3]
+        lam_sum = lam.sum(axis=1)
+        spread = float(lam_sum.max() / max(lam_sum.min(), 1e-12))
+
+        return (
+            f"active topics={n_active}/{self.T}, "
+            f"top-3 E[β]={top3[0]:.3f},{top3[1]:.3f},{top3[2]:.3f}, "
+            f"λ-row-sum spread={spread:.2f}"
+        )

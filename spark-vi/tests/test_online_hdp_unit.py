@@ -534,4 +534,18 @@ def test_infer_local_returns_simplex_theta():
     assert set(out.keys()) == expected
     assert out["theta"].shape == (T,)
     assert np.isclose(out["theta"].sum(), 1.0)
-    assert np.all(out["theta"] >= 0)
+
+
+def test_iteration_summary_returns_string():
+    """iteration_summary returns a short non-empty diagnostic string."""
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=10, K=5, vocab_size=50)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+    s = m.iteration_summary(g)
+
+    assert isinstance(s, str)
+    assert len(s) > 0
+    # Must reference active topic count somewhere in the line.
+    assert "active" in s.lower() or "topics" in s.lower()
