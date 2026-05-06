@@ -10,7 +10,7 @@
 
 ## Decision
 
-- **Asymmetric α** (length K) via Blei et al 2003 §5.4 closed-form Newton (diagonal+rank-1 Hessian via Sherman-Morrison). Mini-batch scaling per [ADR 0005](0005-mini-batch-sampling.md); ρ_t damping reused from λ.
+- **Asymmetric α** (length K) via Blei et al 2003 Appendix A.4.2 closed-form Newton, using the linear-time structured-Hessian inversion from Appendix A.2 (diagonal-plus-rank-1 Hessian → matrix-inversion-lemma closed form). Mini-batch scaling per [ADR 0005](0005-mini-batch-sampling.md); ρ_t damping reused from λ.
 - **Symmetric scalar η** via Hoffman 2010 §3.4 scalar Newton. Cheaper than α: the η stat is computable from current global λ, so `local_update` returns nothing new for η.
 - Flip `optimizeDocConcentration` default to `True` (MLlib parity, drops our v0 divergence). Add `optimizeTopicConcentration`, default `False`.
 - Numerical floor: clip α and η to `[1e-3, ∞)` after each Newton step.

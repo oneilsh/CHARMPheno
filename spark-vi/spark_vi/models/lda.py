@@ -111,7 +111,8 @@ def _alpha_newton_step(
 ) -> np.ndarray:
     """One Newton step for asymmetric Dirichlet α.
 
-    Per Blei, Ng, Jordan 2003 §5.4. The ELBO part depending on α is
+    Per Blei, Ng, Jordan 2003 Appendix A.4.2 (which applies the linear-time
+    structured-Hessian Newton from Appendix A.2). The ELBO part depending on α is
         L(α) = D · [log Γ(Σ_k α_k) − Σ_k log Γ(α_k)]
              + Σ_d Σ_k (α_k − 1) E[log θ_dk]
     with gradient
@@ -120,9 +121,13 @@ def _alpha_newton_step(
         H = c · 1·1ᵀ − diag(d_k)
     where c = D · ψ′(Σα), d_k = D · ψ′(α_k).
 
-    Sherman-Morrison gives the Newton step Δα = −H⁻¹·g in closed-form O(K):
+    The matrix-inversion lemma applied to this structured Hessian (Blei A.2,
+    eq. 10) gives Δα = −H⁻¹·g in closed-form O(K):
         Δα_k = (g_k − b) / d_k
         b    = Σ_j(g_j/d_j) / (Σ_j 1/d_j − 1/c)
+    (Note: the Hessian formula in Blei A.4.2's printed text has a transcription
+    sign error — the corrected derivation gives the negative-definite H above,
+    and matches MLlib's OnlineLDAOptimizer.updateAlpha.)
 
     Inputs:
       alpha:                    (K,) current α vector.

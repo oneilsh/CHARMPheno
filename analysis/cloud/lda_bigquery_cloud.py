@@ -154,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         "--optimize-doc-concentration",
         action=argparse.BooleanOptionalAction, default=True,
         help=("learn an asymmetric α (length K) via Newton-Raphson empirical "
-              "Bayes during fit (Blei 2003 §5.4). After training the fitted "
+              "Bayes during fit (Blei 2003 App. A.4.2). After training the fitted "
               "α is on model.alpha — a global prior over per-doc topic "
               "distributions, biased toward whatever topics are corpus-"
               "popular. Wallach 2009 found this is the high-value asymmetry. "

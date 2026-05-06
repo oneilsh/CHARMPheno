@@ -99,7 +99,8 @@ def _alpha_newton_step(
 ) -> np.ndarray:
     """One Newton step for asymmetric Dirichlet α.
 
-    Per Blei, Ng, Jordan 2003 §5.4. The ELBO part depending on α is
+    Per Blei, Ng, Jordan 2003 Appendix A.4.2 (using the linear-time
+    structured-Hessian Newton from Appendix A.2). The ELBO part depending on α is
         L(α) = D · [log Γ(Σ_k α_k) − Σ_k log Γ(α_k)]
              + Σ_d Σ_k (α_k − 1) E[log θ_dk]
     with gradient
@@ -149,7 +150,7 @@ Expected: PASS.
 git add spark-vi/spark_vi/models/lda.py spark-vi/tests/test_lda_math.py
 git commit -m "feat(lda): add _alpha_newton_step closed-form Newton helper
 
-Blei 2003 §5.4 Sherman-Morrison step for asymmetric Dirichlet α.
+Blei 2003 App. A.4.2 closed-form Newton (linear-time inversion via App. A.2) for asymmetric Dirichlet α.
 Pure function; caller handles ρ-damping and the post-step floor.
 Recovery test confirms convergence to true α on Dirichlet samples."
 ```
@@ -1751,7 +1752,7 @@ in the Newton step that wouldn't show up in the helper unit tests."
 ## Self-Review
 
 **Spec coverage:** Each "In v1" item maps to a task:
-- Asymmetric α (Blei 2003 §5.4 Newton, Sherman-Morrison): Tasks 1, 5.
+- Asymmetric α (Blei 2003 App. A.4.2 Newton; linear-time inversion via App. A.2): Tasks 1, 5.
 - Symmetric scalar η (Hoffman 2010 §3.4): Tasks 2, 6.
 - Damping (reuse λ's ρ_t): Tasks 5, 6 (same `learning_rate` arg).
 - Default flips (`optimizeDocConcentration=True`, `optimizeTopicConcentration=False`): Tasks 7, 9.

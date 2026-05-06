@@ -16,7 +16,7 @@ We are revisiting now because the next model on the roadmap is **online HDP** (W
 
 ### In v1
 
-- **Asymmetric α optimization** (vector, length K) via Blei et al 2003 §5.4 Newton-Raphson. Hessian has a diagonal-plus-rank-1 structure that admits a closed-form Sherman-Morrison Newton step in O(K). Inputs to the Estimator may now be either scalar (broadcast to symmetric vector) or length-K vector.
+- **Asymmetric α optimization** (vector, length K) via Blei et al 2003 Appendix A.4.2 Newton-Raphson. The Hessian is diagonal-plus-rank-1, and Appendix A.2 derives the matrix-inversion-lemma closed-form Newton step in O(K). Inputs to the Estimator may now be either scalar (broadcast to symmetric vector) or length-K vector.
 - **Symmetric scalar η optimization** via the analogous scalar Newton update (Hoffman et al 2010 §3.4).
 - **Damping**: both updates reuse the existing Robbins-Monro `ρ_t = (τ₀ + t + 1)^-κ` already controlling λ. Hoffman 2010 §3.3 derives this from the natural-gradient view (α and λ are both global parameters with the same step). No new learning-rate Params.
 - **Default flips**: `optimizeDocConcentration=True` (MLlib parity, drops our v0 divergence); `optimizeTopicConcentration=False` (conservative; MLlib has no equivalent so there is no parity target).
@@ -56,7 +56,7 @@ The off-diagonal entries are `c`; the diagonal entries are `c − d_k`. Since `�
 Δα_k = (g_k − b) / d_k
 where  b = Σ_j (g_j / d_j) / (Σ_j 1/d_j − 1/c)
 ```
-This matches Blei et al 2003 §5.4 and MLlib's `OnlineLDAOptimizer.updateAlpha`. We will bit-match the MLlib Scala source during implementation as a sanity check.
+This matches Blei et al 2003 Appendix A.2 (the structured-Hessian Newton) applied to the LDA α update in Appendix A.4.2, and MLlib's `OnlineLDAOptimizer.updateAlpha`. We bit-match the MLlib Scala source during implementation as a sanity check. (Note: the Hessian formula in Blei A.4.2's printed text has a transcription sign error; both terms should carry the document-count factor M, which yields the negative-definite Hessian we expect for a concave maximum.)
 
 **Mini-batch scaling**: the per-doc sum `Σ_d E[log θ_dk]` is taken over the batch and scaled by `D / |batch|` (corpus / batch size), matching the same factor we apply to λ stats per [ADR 0005](../../decisions/0005-mini-batch-sampling.md).
 
@@ -151,7 +151,7 @@ Existing test that must continue to pass without changes:
 
 For the implementation phase. Math walkthroughs ("teach the math while implementing") happen in code comments and the implementation conversation, not in this spec.
 
-- **Blei, Ng, Jordan (2003), "Latent Dirichlet Allocation," §5.4** — Newton-Raphson formulation for asymmetric Dirichlet MLE; the diagonal-plus-rank-1 Hessian and Sherman-Morrison closed-form. Primary reference for the α update.
+- **Blei, Ng, Jordan (2003), "Latent Dirichlet Allocation," Appendix A.4.2** — variational EM α-update via Newton-Raphson. Uses the linear-time structured-Hessian inversion (matrix-inversion lemma applied to `H = diag(h) + 1·z·1ᵀ`) derived in **Appendix A.2**. Primary reference for the α update. The final paragraph of A.4.2 explicitly notes the same algorithm yields the η empirical-Bayes estimate. (§5.4 of the paper is titled "Smoothing" and is about the η-on-β prior, not the Newton step — earlier drafts of this document erroneously cited §5.4.)
 - **Hoffman, Blei, Bach (2010), "Online Learning for Latent Dirichlet Allocation," NIPS, §3.3-3.4** — mini-batch scaling and ρ-damping for online α and η updates. Primary reference for the online integration.
 - **Wallach, Mimno, McCallum (2009), "Rethinking LDA: Why Priors Matter"** — empirical case for asymmetric α / symmetric η (the asymmetry pattern we are adopting).
 - **Minka (2003), "Estimating a Dirichlet distribution"** — alternative fixed-point iteration; we go with Blei's Newton, but cite for completeness.
