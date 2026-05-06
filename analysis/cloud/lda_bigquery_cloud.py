@@ -150,6 +150,25 @@ def main(argv: list[str] | None = None) -> int:
               "weights) every N iterations. 0 disables. Cheap — runs on the "
               "driver, reads from the broadcast lambda"),
     )
+    parser.add_argument(
+        "--optimize-doc-concentration",
+        action=argparse.BooleanOptionalAction, default=True,
+        help=("learn an asymmetric α (length K) via Newton-Raphson empirical "
+              "Bayes during fit (Blei 2003 §5.4). After training the fitted "
+              "α is on model.alpha — a global prior over per-doc topic "
+              "distributions, biased toward whatever topics are corpus-"
+              "popular. Wallach 2009 found this is the high-value asymmetry. "
+              "Negate with --no-optimize-doc-concentration to keep α static."),
+    )
+    parser.add_argument(
+        "--optimize-topic-concentration",
+        action=argparse.BooleanOptionalAction, default=False,
+        help=("learn a symmetric scalar η via Newton-Raphson during fit "
+              "(Hoffman 2010 §3.4). Off by default — η optimization is the "
+              "less stable of the two on small corpora; Wallach 2009 also "
+              "argued symmetric η over vocabulary is the right default. "
+              "Enable with --optimize-topic-concentration if you want it."),
+    )
     args = parser.parse_args(argv)
 
     cdr = os.environ.get("WORKSPACE_CDR")
@@ -223,10 +242,14 @@ def main(argv: list[str] | None = None) -> int:
               flush=True)
 
     with _phase(f"fit (K={args.K}, maxIter={args.max_iter}, "
-                 f"subsamplingRate={args.subsampling_rate})"):
+                 f"subsamplingRate={args.subsampling_rate}, "
+                 f"optimizeDocConc={args.optimize_doc_concentration}, "
+                 f"optimizeTopicConc={args.optimize_topic_concentration})"):
         estimator = VanillaLDAEstimator(
             k=args.K, maxIter=args.max_iter, seed=args.seed,
             subsamplingRate=args.subsampling_rate,
+            optimizeDocConcentration=args.optimize_doc_concentration,
+            optimizeTopicConcentration=args.optimize_topic_concentration,
         )
         if args.print_topics_every > 0:
             estimator.setOnIteration(_make_topic_evolution_logger(
