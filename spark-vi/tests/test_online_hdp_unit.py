@@ -343,3 +343,74 @@ def test_initialize_global_shapes_and_validity():
     # Paper-following init: u = 1, v = gamma.
     assert np.allclose(g["u"], 1.0)
     assert np.allclose(g["v"], 1.5)
+
+
+def test_local_update_returns_expected_keys_and_shapes():
+    """Run a tiny partition through local_update; check stats dict shape."""
+    from spark_vi.core import BOWDocument
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=10, K=5, vocab_size=50, gamma_shape=100.0)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    rows = [
+        BOWDocument(
+            indices=np.array([0, 1, 2], dtype=np.int32),
+            counts=np.array([2.0, 1.0, 3.0], dtype=np.float64),
+            length=6,
+        ),
+        BOWDocument(
+            indices=np.array([10, 11], dtype=np.int32),
+            counts=np.array([1.0, 1.0], dtype=np.float64),
+            length=2,
+        ),
+    ]
+
+    stats = m.local_update(rows, g)
+
+    expected_keys = {
+        "lambda_stats", "var_phi_sum_stats",
+        "doc_loglik_sum", "doc_z_term_sum", "doc_c_term_sum",
+        "doc_stick_kl_sum", "n_docs",
+    }
+    assert set(stats.keys()) == expected_keys
+    assert stats["lambda_stats"].shape == (10, 50)
+    assert stats["var_phi_sum_stats"].shape == (10,)
+    assert float(stats["n_docs"]) == 2.0
+    # All scalar accumulators must be finite.
+    for k in ("doc_loglik_sum", "doc_z_term_sum",
+              "doc_c_term_sum", "doc_stick_kl_sum"):
+        assert np.isfinite(stats[k])
+    # Suff-stat columns we touched should be non-zero; columns we didn't
+    # touch should be exactly zero.
+    touched = np.array([0, 1, 2, 10, 11])
+    untouched = np.setdiff1d(np.arange(50), touched)
+    assert np.any(stats["lambda_stats"][:, touched] > 0)
+    assert np.allclose(stats["lambda_stats"][:, untouched], 0.0)
+
+
+def test_local_update_combine_stats_is_elementwise_sum():
+    """Default VIModel.combine_stats should sum HDP suff-stats correctly."""
+    from spark_vi.core import BOWDocument
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=10, K=5, vocab_size=50)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    docs = [
+        BOWDocument(indices=np.array([0, 1], dtype=np.int32),
+                    counts=np.array([1.0, 1.0]), length=2),
+        BOWDocument(indices=np.array([2, 3], dtype=np.int32),
+                    counts=np.array([1.0, 1.0]), length=2),
+    ]
+    a_stats = m.local_update(docs[:1], g)
+    b_stats = m.local_update(docs[1:], g)
+    combined = m.combine_stats(a_stats, b_stats)
+
+    assert np.allclose(combined["lambda_stats"],
+                       a_stats["lambda_stats"] + b_stats["lambda_stats"])
+    assert np.allclose(combined["var_phi_sum_stats"],
+                       a_stats["var_phi_sum_stats"] + b_stats["var_phi_sum_stats"])
+    assert float(combined["n_docs"]) == 2.0

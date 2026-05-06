@@ -323,7 +323,76 @@ class OnlineHDP(VIModel):
         rows: Iterable[Any],
         global_params: dict[str, np.ndarray],
     ) -> dict[str, np.ndarray]:
-        raise NotImplementedError("OnlineHDP is being built; see Task 8.")
+        """E-step on one Spark partition.
+
+        For each doc in the partition: run _doc_e_step, scatter the per-doc
+        suff-stat into the partition-level (T, V) accumulator on the
+        relevant columns, accumulate scalar ELBO contributions.
+
+        See spec docs/superpowers/specs/2026-05-06-online-hdp-design.md
+        for the suff-stat key contract.
+        """
+        lam = global_params["lambda"]              # (T, V)
+        u = global_params["u"]                     # (T-1,)
+        v = global_params["v"]                     # (T-1,)
+
+        # Precompute Elogbeta and Elog_sticks_corpus once per partition;
+        # both are shared across all docs in the partition.
+        Elogbeta = (
+            digamma(self.eta + lam)
+            - digamma(self.V * self.eta + lam.sum(axis=1, keepdims=True))
+        )
+        Elog_sticks_corpus = _expect_log_sticks(u, v)
+
+        lambda_stats = np.zeros((self.T, self.V), dtype=np.float64)
+        var_phi_sum_stats = np.zeros(self.T, dtype=np.float64)
+        doc_loglik_sum = 0.0
+        doc_z_term_sum = 0.0
+        doc_c_term_sum = 0.0
+        doc_stick_kl_sum = 0.0
+        n_docs = 0
+
+        for doc in rows:
+            indices = np.asarray(doc.indices)
+            counts = np.asarray(doc.counts, dtype=np.float64)
+
+            r = _doc_e_step(
+                indices=indices, counts=counts,
+                Elogbeta_doc=Elogbeta[:, indices],
+                Elog_sticks_corpus=Elog_sticks_corpus,
+                alpha=self.alpha,
+                K=self.K,
+                max_iter=self.cavi_max_iter,
+                tol=self.cavi_tol,
+                warmup=3,
+            )
+
+            # Scatter λ suff-stat into the touched columns — paper Eq 21.
+            # var_phi (K, T) maps doc-atom k to corpus-atom t.
+            # phi (Wt, K) maps unique-word w to doc-atom k.
+            # phi_w (Wt, K) = phi * counts[:, None] = per-token phi.
+            # contrib (T, Wt) = var_phi.T @ phi_w.T
+            phi_w = r["phi"] * counts[:, None]
+            contrib = r["var_phi"].T @ phi_w.T            # (T, Wt)
+            # Safe: BOWDocument indices are unique (no fancy-index aliasing).
+            lambda_stats[:, indices] += contrib
+
+            var_phi_sum_stats += r["var_phi"].sum(axis=0)
+            doc_loglik_sum += r["doc_loglik"]
+            doc_z_term_sum += r["doc_z_term"]
+            doc_c_term_sum += r["doc_c_term"]
+            doc_stick_kl_sum += r["doc_stick_kl"]
+            n_docs += 1
+
+        return {
+            "lambda_stats": lambda_stats,
+            "var_phi_sum_stats": var_phi_sum_stats,
+            "doc_loglik_sum": np.array(doc_loglik_sum),
+            "doc_z_term_sum": np.array(doc_z_term_sum),
+            "doc_c_term_sum": np.array(doc_c_term_sum),
+            "doc_stick_kl_sum": np.array(doc_stick_kl_sum),
+            "n_docs": np.array(float(n_docs)),
+        }
 
     def update_global(
         self,
