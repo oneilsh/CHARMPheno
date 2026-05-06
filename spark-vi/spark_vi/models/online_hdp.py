@@ -429,3 +429,53 @@ class OnlineHDP(VIModel):
         new_v = (1.0 - rho) * v + rho * (self.gamma + s_tail)
 
         return {"lambda": new_lambda, "u": new_u, "v": new_v}
+
+    def compute_elbo(
+        self,
+        global_params: dict[str, np.ndarray],
+        aggregated_stats: dict[str, np.ndarray],
+    ) -> float:
+        """Full ELBO from paper Eq 14.
+
+        Per-doc terms come from aggregated_stats (already summed by
+        local_update across docs and combine_stats across partitions).
+        Corpus-level KL terms are computed driver-side from current
+        global params:
+          KL[q(β') ‖ p(β')]  : Beta(u_k, v_k) ‖ Beta(1, γ), summed k.
+          KL[q(φ) ‖ p(φ)]    : Dirichlet(λ_t) ‖ Dirichlet(η · 1_V), summed t.
+
+        In minibatch mode, the per-doc piece is the *minibatch* sum, not
+        corpus-rescaled. The reported ELBO is therefore a noisy unbiased
+        estimator of the corpus-scale bound; the ELBO trend test uses
+        smoothed-endpoint comparison to absorb the variance.
+        """
+        per_doc = (
+            float(aggregated_stats["doc_loglik_sum"])
+            + float(aggregated_stats["doc_z_term_sum"])
+            + float(aggregated_stats["doc_c_term_sum"])
+            - float(aggregated_stats["doc_stick_kl_sum"])
+        )
+
+        # Corpus stick KL — summed over k = 0..T-2.
+        corpus_stick_kl = float(_beta_kl(
+            global_params["u"], global_params["v"],
+            prior_a=1.0, prior_b=self.gamma,
+        ).sum())
+
+        # Topic Dirichlet KL — Dirichlet(λ_t) ‖ Dirichlet(η · 1_V), summed t.
+        # KL[Dir(λ) ‖ Dir(η)] = lgamma(sum(λ)) - sum(lgamma(λ))
+        #                     - lgamma(V·η)   + V·lgamma(η)
+        #                     + sum((λ - η) · (digamma(λ) - digamma(sum(λ))))
+        lam = global_params["lambda"]
+        lam_sum = lam.sum(axis=1)                                   # (T,)
+        topic_kl = float(np.sum(
+            gammaln(lam_sum) - gammaln(lam).sum(axis=1)
+            - gammaln(self.V * self.eta) + self.V * gammaln(self.eta)
+            + np.sum(
+                (lam - self.eta)
+                * (digamma(lam) - digamma(lam_sum)[:, None]),
+                axis=1,
+            )
+        ))
+
+        return per_doc - corpus_stick_kl - topic_kl

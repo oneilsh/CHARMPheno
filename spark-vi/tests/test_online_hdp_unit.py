@@ -461,3 +461,53 @@ def test_update_global_rho_one_replaces_with_target():
     # s_tail[3] =                      s[4]
     expected_tail = np.cumsum(s[1:][::-1])[::-1]
     assert np.allclose(new_g["v"], 2.0 + expected_tail)
+
+
+def test_compute_elbo_finite_on_initial_state():
+    """ELBO is finite when called on init globals + zero stats (no docs)."""
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=10, K=5, vocab_size=50, gamma=1.0)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    zero_stats = {
+        "lambda_stats": np.zeros((10, 50)),
+        "var_phi_sum_stats": np.zeros(10),
+        "doc_loglik_sum": np.array(0.0),
+        "doc_z_term_sum": np.array(0.0),
+        "doc_c_term_sum": np.array(0.0),
+        "doc_stick_kl_sum": np.array(0.0),
+        "n_docs": np.array(0.0),
+    }
+    elbo = m.compute_elbo(g, zero_stats)
+    assert np.isfinite(elbo)
+
+
+def test_compute_elbo_corpus_kl_zero_at_prior():
+    """When (u, v) == (1, gamma) and lambda is set to the eta prior, the
+    corpus-level KL terms are exactly zero. Per-doc terms are zero with no
+    docs. Therefore ELBO == 0 in that case."""
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    T, V = 5, 8
+    eta = 0.01
+    gamma = 1.0
+    m = OnlineHDP(T=T, K=3, vocab_size=V, eta=eta, gamma=gamma)
+
+    g = {
+        "lambda": np.full((T, V), eta, dtype=np.float64),  # equals prior
+        "u": np.ones(T - 1),
+        "v": np.full(T - 1, gamma),
+    }
+    zero_stats = {
+        "lambda_stats": np.zeros((T, V)),
+        "var_phi_sum_stats": np.zeros(T),
+        "doc_loglik_sum": np.array(0.0),
+        "doc_z_term_sum": np.array(0.0),
+        "doc_c_term_sum": np.array(0.0),
+        "doc_stick_kl_sum": np.array(0.0),
+        "n_docs": np.array(0.0),
+    }
+    elbo = m.compute_elbo(g, zero_stats)
+    assert np.isclose(elbo, 0.0, atol=1e-9)
