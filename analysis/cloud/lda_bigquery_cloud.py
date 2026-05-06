@@ -253,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.print_topics_every > 0:
             estimator.setOnIteration(_make_topic_evolution_logger(
-                K=args.K, top_n=8, every_n=args.print_topics_every,
+                K=args.K, top_n=6, every_n=args.print_topics_every,
                 idx_to_cid=idx_to_cid, name_by_id=name_by_id,
             ))
         model = estimator.fit(bow_df)
