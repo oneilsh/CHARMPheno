@@ -297,7 +297,26 @@ class OnlineHDP(VIModel):
 
     # Stub methods filled in by Tasks 7-12.
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
-        raise NotImplementedError("OnlineHDP is being built; see Task 7.")
+        """Random Gamma(gamma_shape, 1/gamma_shape) init for λ (T, V).
+
+        Departs from Wang's reference (which uses Gamma(1, 1) · D · 100 /
+        (T·V) − η) — that scale-then-cancel-η is undocumented and not
+        derived. Match-LDA is the validated choice; gamma_shape=100
+        traces back to Hoffman 2010 onlineldavb.py line 126.
+
+        Corpus sticks (u, v) start at the prior Beta(1, γ): u = 1, v = γ.
+        Paper-following init. Wang's reference uses v = [T-1, T-2, ..., 1]
+        ("make a uniform at beginning") which is an undocumented bias
+        toward low topic indices; we don't reproduce it.
+        """
+        lam = np.random.gamma(
+            shape=self.gamma_shape,
+            scale=1.0 / self.gamma_shape,
+            size=(self.T, self.V),
+        )
+        u = np.ones(self.T - 1, dtype=np.float64)
+        v = np.full(self.T - 1, self.gamma, dtype=np.float64)
+        return {"lambda": lam, "u": u, "v": v}
 
     def local_update(
         self,

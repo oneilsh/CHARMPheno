@@ -325,3 +325,21 @@ def test_online_hdp_init_accepts_all_optional_args():
     assert m.gamma_shape == 50.0
     assert m.cavi_max_iter == 50
     assert m.cavi_tol == 1e-3
+
+
+def test_initialize_global_shapes_and_validity():
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=10, K=5, vocab_size=50, gamma=1.5, gamma_shape=100.0)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    assert set(g.keys()) == {"lambda", "u", "v"}
+    assert g["lambda"].shape == (10, 50)
+    assert g["u"].shape == (9,)
+    assert g["v"].shape == (9,)
+    # Match VanillaLDA: positive Gamma init for lambda.
+    assert np.all(g["lambda"] > 0)
+    # Paper-following init: u = 1, v = gamma.
+    assert np.allclose(g["u"], 1.0)
+    assert np.allclose(g["v"], 1.5)
