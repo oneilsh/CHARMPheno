@@ -4,6 +4,7 @@ No Spark — these test the math in isolation. Single document, hand-checked
 shapes and values where possible.
 """
 import numpy as np
+import pytest
 from scipy.special import digamma
 
 
@@ -277,3 +278,50 @@ def test_doc_e_step_per_iter_elbo_nondecreasing():
     assert np.all(np.isfinite(elbo_trace[: warmup])), (
         f"warmup-phase ELBO non-finite: {elbo_trace[: warmup]}"
     )
+
+
+def test_online_hdp_init_validates_inputs():
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    # Valid construction.
+    m = OnlineHDP(T=20, K=5, vocab_size=100)
+    assert m.T == 20
+    assert m.K == 5
+    assert m.V == 100
+    assert m.alpha == 1.0
+    assert m.gamma == 1.0
+    assert m.eta == 0.01
+
+    # T must be at least 2 (we need T-1 sticks at corpus level).
+    with pytest.raises(ValueError, match="T"):
+        OnlineHDP(T=1, K=5, vocab_size=100)
+
+    # K must be at least 2 (we need K-1 sticks at doc level).
+    with pytest.raises(ValueError, match="K"):
+        OnlineHDP(T=20, K=1, vocab_size=100)
+
+    # vocab_size must be >= 1.
+    with pytest.raises(ValueError, match="vocab_size"):
+        OnlineHDP(T=20, K=5, vocab_size=0)
+
+    # Concentrations must be > 0.
+    with pytest.raises(ValueError, match="alpha"):
+        OnlineHDP(T=20, K=5, vocab_size=100, alpha=0.0)
+    with pytest.raises(ValueError, match="gamma"):
+        OnlineHDP(T=20, K=5, vocab_size=100, gamma=-1.0)
+    with pytest.raises(ValueError, match="eta"):
+        OnlineHDP(T=20, K=5, vocab_size=100, eta=0.0)
+
+
+def test_online_hdp_init_accepts_all_optional_args():
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(
+        T=30, K=10, vocab_size=500,
+        alpha=2.0, gamma=1.5, eta=0.05,
+        gamma_shape=50.0,
+        cavi_max_iter=50, cavi_tol=1e-3,
+    )
+    assert m.gamma_shape == 50.0
+    assert m.cavi_max_iter == 50
+    assert m.cavi_tol == 1e-3

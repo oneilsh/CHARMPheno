@@ -226,27 +226,76 @@ def _doc_e_step(
     }
 
 
-# Stub OnlineHDP class — methods filled in by later tasks.
 class OnlineHDP(VIModel):
-    """Stub during incremental implementation; see Task 6 onwards."""
+    """Online Hierarchical Dirichlet Process topic model.
+
+    Implements Wang/Paisley/Blei 2011 stochastic VI for the HDP via the
+    spark_vi VIModel contract: per-doc CAVI on workers (`local_update`),
+    natural-gradient SVI step on the driver (`update_global`).
+
+    Args:
+      T: corpus-level truncation. Upper bound on the number of topics
+        the model can discover; effective topic count is typically much
+        smaller (the inactive corpus sticks shrink toward 0).
+      K: doc-level truncation. Upper bound on topics per document.
+        Should be much smaller than T — clinical visits typically span
+        a handful of phenotypes, not hundreds.
+      vocab_size: V, number of distinct word IDs the model handles.
+      alpha: doc-level stick concentration (paper's α0). Higher → more
+        topics per doc.
+      gamma: corpus-level stick concentration. Higher → more discovered
+        topics overall.
+      eta: symmetric Dirichlet concentration for the topic-word prior.
+      gamma_shape: shape parameter for the Gamma init of λ. Default 100
+        matches VanillaLDA (Hoffman 2010 onlineldavb.py).
+      cavi_max_iter: hard cap on doc-CAVI iterations per doc.
+      cavi_tol: relative ELBO convergence threshold for doc-CAVI early
+        termination.
+    """
 
     def __init__(
         self,
-        *,
+        T: int,
+        K: int,
         vocab_size: int,
-        max_topics: int = 150,
-        eta: float = 0.01,
+        *,
         alpha: float = 1.0,
-        omega: float = 1.0,
+        gamma: float = 1.0,
+        eta: float = 0.01,
+        gamma_shape: float = 100.0,
+        cavi_max_iter: int = 100,
+        cavi_tol: float = 1e-4,
     ) -> None:
+        if T < 2:
+            raise ValueError(f"T must be >= 2 (need T-1 sticks), got {T}")
+        if K < 2:
+            raise ValueError(f"K must be >= 2 (need K-1 sticks), got {K}")
         if vocab_size < 1:
-            raise ValueError("vocab_size must be >= 1")
-        self.vocab_size = int(vocab_size)
-        self.max_topics = int(max_topics)
-        self.eta = float(eta)
-        self.alpha = float(alpha)
-        self.omega = float(omega)
+            raise ValueError(f"vocab_size must be >= 1, got {vocab_size}")
+        if alpha <= 0:
+            raise ValueError(f"alpha must be > 0, got {alpha}")
+        if gamma <= 0:
+            raise ValueError(f"gamma must be > 0, got {gamma}")
+        if eta <= 0:
+            raise ValueError(f"eta must be > 0, got {eta}")
+        if gamma_shape <= 0:
+            raise ValueError(f"gamma_shape must be > 0, got {gamma_shape}")
+        if cavi_max_iter < 1:
+            raise ValueError(f"cavi_max_iter must be >= 1, got {cavi_max_iter}")
+        if cavi_tol <= 0:
+            raise ValueError(f"cavi_tol must be > 0, got {cavi_tol}")
 
+        self.T = int(T)
+        self.K = int(K)
+        self.V = int(vocab_size)
+        self.alpha = float(alpha)
+        self.gamma = float(gamma)
+        self.eta = float(eta)
+        self.gamma_shape = float(gamma_shape)
+        self.cavi_max_iter = int(cavi_max_iter)
+        self.cavi_tol = float(cavi_tol)
+
+    # Stub methods filled in by Tasks 7-12.
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
         raise NotImplementedError("OnlineHDP is being built; see Task 7.")
 
