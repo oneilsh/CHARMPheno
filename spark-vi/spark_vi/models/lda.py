@@ -507,6 +507,10 @@ class VanillaLDA(VIModel):
         η is a scalar. λ row sums (Σ_v λ_kv) span tells you whether topics
         are diverging in mass — useful when chasing topic-collapse vs healthy
         differentiation.
+
+        Per-topic α_k / Σλ_k / peak values are surfaced via the topic-evolution
+        logger in analysis/cloud/lda_bigquery_cloud.py, which already iterates
+        over k to print top tokens and can prefix the same per-topic stats.
         """
         alpha = np.asarray(global_params["alpha"])
         eta = float(global_params["eta"])

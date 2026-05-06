@@ -198,12 +198,17 @@ class VIRunner:
             iter_dt = time.perf_counter() - t_iter_start
             batch_str = (f"batch={batch_size}" if cfg.mini_batch_fraction
                          else "full-batch")
-            model_str = model.iteration_summary(global_params)
-            tail = f", {model_str}" if model_str else ""
             log.info(
-                "iter %d/%d: ELBO=%.4f, %s, rho=%.4f, %.1fs%s",
-                step + 1, cfg.max_iterations, elbo, batch_str, rho_t, iter_dt, tail,
+                "iter %d/%d: ELBO=%.4f, %s, rho=%.4f, %.1fs",
+                step + 1, cfg.max_iterations, elbo, batch_str, rho_t, iter_dt,
             )
+            # Model-defined summary, emitted as one log.info per line so any
+            # configured log formatter prefix (e.g. "[driver]   ") gets reapplied
+            # to each line. Empty / missing => skipped.
+            model_str = model.iteration_summary(global_params)
+            for line in model_str.splitlines():
+                if line:
+                    log.info(line)
 
             # Diagnostic callback (model-agnostic; whatever the caller wants
             # to do with global_params). Catch + log so a buggy callback

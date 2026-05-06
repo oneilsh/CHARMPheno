@@ -23,6 +23,7 @@ import sys
 import time
 from contextlib import contextmanager
 
+import numpy as np
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
@@ -70,16 +71,27 @@ def _make_topic_evolution_logger(K, top_n, every_n, idx_to_cid, name_by_id):
     VanillaLDA's global_params has key "lambda" with shape (K, V) — each
     row is the unnormalized Dirichlet variational parameter for one topic
     over the full vocabulary. Row-normalizing gives the topic-word
-    distribution; argsort + slice gives the top tokens. Compact one-line
-    summary per topic so a K=10, every-N=10, 100-iter run produces 100
-    lines of evolution output total.
+    distribution; argsort + slice gives the top tokens. Each topic line
+    is prefixed with per-topic stats:
+        α_k    — current empirical-Bayes prior on θ_·k (length-K vector
+                 in global_params["alpha"]). Diverges from 1/K under
+                 optimize_alpha; corpus-popular topics get larger α_k.
+        Σλ_k   — total topic mass over the vocabulary. Proxy for how much
+                 corpus evidence has accreted to topic k.
+        peak   — max_v(λ_kv) / Σλ_k. Peakedness of the topic-word
+                 posterior. ~1/V means uniform / undifferentiated; rising
+                 toward 1.0 means the topic specialized (or, at small K,
+                 collapsed onto a single term).
     """
     def _on_iter(iter_num: int, global_params: dict,
                  _: list[float]) -> None:
         if every_n <= 0 or iter_num % every_n != 0:
             return
         lam = global_params["lambda"]                         # (K, V)
-        topics = lam / lam.sum(axis=1, keepdims=True)         # row-stochastic
+        alpha = global_params["alpha"]                        # (K,)
+        lam_row_sums = lam.sum(axis=1)                        # (K,)
+        peak = lam.max(axis=1) / np.maximum(lam_row_sums, 1e-12)
+        topics = lam / lam_row_sums[:, None]                  # row-stochastic
         print(f"[driver]   --- topics @ iter {iter_num} ---", flush=True)
         for k in range(K):
             top = topics[k].argsort()[::-1][:top_n]
@@ -88,7 +100,12 @@ def _make_topic_evolution_logger(K, top_n, every_n, idx_to_cid, name_by_id):
                 f"({topics[k, int(j)]:.3f})"
                 for j in top
             )
-            print(f"[driver]    topic {k}: {terms}", flush=True)
+            print(
+                f"[driver]    topic {k:>2}  "
+                f"α={alpha[k]:.4g}  Σλ={lam_row_sums[k]:.3g}  "
+                f"peak={peak[k]:.3f}  | {terms}",
+                flush=True,
+            )
     return _on_iter
 
 
