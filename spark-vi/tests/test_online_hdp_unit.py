@@ -414,3 +414,50 @@ def test_local_update_combine_stats_is_elementwise_sum():
     assert np.allclose(combined["var_phi_sum_stats"],
                        a_stats["var_phi_sum_stats"] + b_stats["var_phi_sum_stats"])
     assert float(combined["n_docs"]) == 2.0
+
+
+def test_update_global_rho_zero_is_identity():
+    """rho=0 ⇒ globals unchanged."""
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=10, K=5, vocab_size=50, gamma=1.0)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    fake_stats = {
+        "lambda_stats": np.full((10, 50), 7.0),
+        "var_phi_sum_stats": np.full(10, 3.0),
+    }
+    new_g = m.update_global(g, fake_stats, learning_rate=0.0)
+
+    assert np.allclose(new_g["lambda"], g["lambda"])
+    assert np.allclose(new_g["u"], g["u"])
+    assert np.allclose(new_g["v"], g["v"])
+
+
+def test_update_global_rho_one_replaces_with_target():
+    """rho=1 ⇒ globals become eta + target / (1 + s) / (gamma + s_tail)."""
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    T, K, V = 5, 3, 10
+    m = OnlineHDP(T=T, K=K, vocab_size=V, eta=0.01, gamma=2.0)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    s = np.array([10.0, 5.0, 2.0, 1.0, 0.5])
+    fake_stats = {
+        "lambda_stats": np.full((T, V), 4.0),
+        "var_phi_sum_stats": s,
+    }
+    new_g = m.update_global(g, fake_stats, learning_rate=1.0)
+
+    assert np.allclose(new_g["lambda"], 0.01 + 4.0)
+    # u_k = 1 + s[k] for k = 0..T-2.
+    assert np.allclose(new_g["u"], 1.0 + s[:T - 1])
+    # v_k = gamma + cumsum(s[1:].reverse).reverse:
+    # s_tail[0] = s[1] + s[2] + s[3] + s[4]
+    # s_tail[1] =        s[2] + s[3] + s[4]
+    # s_tail[2] =               s[3] + s[4]
+    # s_tail[3] =                      s[4]
+    expected_tail = np.cumsum(s[1:][::-1])[::-1]
+    assert np.allclose(new_g["v"], 2.0 + expected_tail)

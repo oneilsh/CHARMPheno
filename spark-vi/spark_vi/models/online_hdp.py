@@ -400,4 +400,32 @@ class OnlineHDP(VIModel):
         target_stats: dict[str, np.ndarray],
         learning_rate: float,
     ) -> dict[str, np.ndarray]:
-        raise NotImplementedError("OnlineHDP is being built; see Task 9.")
+        """SVI natural-gradient step on (λ, u, v). Paper Eqs 22-27.
+
+        target_stats arrive already corpus-scaled by the runner — i.e.
+        lambda_stats here is D × (sum over batch) / batch_size, same for
+        var_phi_sum_stats. The full natural-gradient update on each
+        global collapses to a convex combination:
+
+          λ_new   = (1 - ρ) · λ + ρ · (η + target_lambda_stats)
+          u_new   = (1 - ρ) · u + ρ · (1 + s_head)
+          v_new   = (1 - ρ) · v + ρ · (γ + s_tail)
+
+        where s = target_var_phi_sum_stats (length T),
+              s_head = s[:T-1],
+              s_tail[t] = sum_{l>t} s[l]   for t = 0..T-2.
+        """
+        rho = float(learning_rate)
+        lam = global_params["lambda"]
+        u = global_params["u"]
+        v = global_params["v"]
+
+        s = target_stats["var_phi_sum_stats"]
+        s_head = s[: self.T - 1]
+        s_tail = np.cumsum(s[1:][::-1])[::-1]  # length T-1
+
+        new_lambda = (1.0 - rho) * lam + rho * (self.eta + target_stats["lambda_stats"])
+        new_u = (1.0 - rho) * u + rho * (1.0 + s_head)
+        new_v = (1.0 - rho) * v + rho * (self.gamma + s_tail)
+
+        return {"lambda": new_lambda, "u": new_u, "v": new_v}
