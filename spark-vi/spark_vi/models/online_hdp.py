@@ -193,11 +193,15 @@ def _doc_e_step(
         # 4) Compute doc ELBO and check convergence.
         # Term naming follows paper Eq 14 decomposition:
         #   doc_c_term = E[log p(c | β')] + H(q(c))    = Σ (Elog_sticks_corpus - log_var_phi) · var_phi
-        #   doc_z_term = E[log p(z | π)]  + H(q(z))    = Σ (Elog_sticks_doc - log_phi) · phi
+        #   doc_z_term = E[log p(z | π)]  + H(q(z))    = Σ_n count_n · Σ_k (Elog_sticks_doc - log_phi) · phi
         #   doc_loglik = E[log p(w | z, c, φ)]         = Σ phi.T · (var_phi @ (Elogbeta_doc * counts))
         #   doc_stick_kl = KL[q(π') ‖ p(π')]           — subtracted
+        #
+        # Note: doc_c_term sums over K doc-atoms (no count weighting — one c per atom).
+        # doc_z_term sums over N word tokens; phi[n,k] is per-unique-type, so it must
+        # be multiplied by counts_col to recover the per-token contribution.
         doc_c_term = float(np.sum((Elog_sticks_corpus[None, :] - log_var_phi) * var_phi))
-        doc_z_term = float(np.sum((Elog_sticks_doc[None, :] - log_phi) * phi))
+        doc_z_term = float(np.sum((Elog_sticks_doc[None, :] - log_phi) * phi * counts_col))
         data_part = var_phi @ weighted_Elogbeta  # (K, Wt)
         doc_loglik = float(np.sum(phi.T * data_part))
         doc_stick_kl = float(_beta_kl(a, b, prior_a=1.0, prior_b=alpha).sum())

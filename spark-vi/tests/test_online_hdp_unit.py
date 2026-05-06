@@ -217,3 +217,63 @@ def test_doc_e_step_returns_doc_elbo_terms():
         assert key in result, f"missing {key}"
         assert np.isfinite(result[key]), f"{key} is not finite"
     assert result["doc_stick_kl"] >= 0  # KL divergence is non-negative
+
+
+def test_doc_e_step_per_iter_elbo_nondecreasing():
+    """Coordinate ascent must monotonically increase the doc ELBO.
+
+    Patch _doc_e_step to record the per-iter ELBO trace and assert no drop
+    larger than numerical noise. This is the regression gate for any change
+    to the var_phi / phi / (a, b) update logic.
+    """
+    from spark_vi.models import online_hdp as hdp
+
+    T, K, V = 10, 5, 20
+    Elogbeta = _peaked_elogbeta(T, V)
+    u = np.ones(T - 1)
+    v = np.full(T - 1, 1.0)
+    Elog_sticks_corpus = hdp._expect_log_sticks(u, v)
+
+    indices = np.array([0, 1, 2, 3, 4], dtype=np.int32)
+    counts = np.array([5.0, 3.0, 2.0, 4.0, 1.0], dtype=np.float64)
+    Elogbeta_doc = Elogbeta[:, indices]
+
+    # Track per-iter ELBO by re-running the inner update with max_iter=i for
+    # increasing i, capturing the ELBO at each completed iter count. This
+    # avoids modifying _doc_e_step itself with debug instrumentation.
+    elbo_trace = []
+    for n_iters in range(1, 25):
+        result = hdp._doc_e_step(
+            indices=indices, counts=counts,
+            Elogbeta_doc=Elogbeta_doc,
+            Elog_sticks_corpus=Elog_sticks_corpus,
+            alpha=1.0, K=K,
+            max_iter=n_iters, tol=0.0,  # tol=0 => never early-break
+            warmup=3,
+        )
+        elbo = (
+            result["doc_loglik"] + result["doc_z_term"]
+            + result["doc_c_term"] - result["doc_stick_kl"]
+        )
+        elbo_trace.append(elbo)
+
+    # Coordinate ascent guarantees monotone ELBO increase per iter — but ONLY
+    # post-warmup. During warmup the var_phi/phi updates maximize a reduced
+    # objective (no prior corrections in the updates) while the ELBO eval
+    # always includes the priors, so the warmup→post-warmup transition is not
+    # a CA step. Test only the post-warmup tail.
+    warmup = 3
+    post_warmup = elbo_trace[warmup:]   # entries from max_iter=warmup+1 onward
+    diffs = np.diff(post_warmup)
+    assert np.all(diffs > -1e-9), (
+        f"doc ELBO decreased mid-trace (post-warmup): {post_warmup}\n"
+        f"diffs: {diffs}\n"
+        f"first violation at step {int(np.argmin(diffs)) + warmup + 1} "
+        f"(diff={float(diffs.min()):.3e})\n"
+        f"This indicates a coordinate-ascent regression."
+    )
+
+    # Sanity: warmup-phase trace should at least be finite.
+    assert np.all(np.isfinite(elbo_trace[: warmup])), (
+        f"warmup-phase ELBO non-finite: {elbo_trace[: warmup]}"
+    )
