@@ -259,49 +259,38 @@ Model authors subclass `VIModel` and implement:
 
 **Example — Online HDP implementation sketch:**
 
+Live signature lives in [`spark-vi/spark_vi/models/online_hdp.py`](../../spark-vi/spark_vi/models/online_hdp.py); refer there for the actual ctor and full method signatures.
+
 ```python
 class OnlineHDP(VIModel):
-    def __init__(self, T=150, K=15, alpha=1.0, gamma=1.0, eta=0.01):
-        self.T = T  # truncation level
-        self.alpha = alpha
-        self.gamma = gamma
-        self.eta = eta
-
-    def data_schema(self):
-        return {"word_ids": "array<int>", "word_counts": "array<float>"}
-
-    def prepare_data(self, df, doc_col, word_col, timestamp_col=None):
-        # Group long-format (doc_id, word) rows into per-document arrays
-        # Returns DataFrame matching data_schema
+    def __init__(
+        self,
+        T: int,                  # corpus-level truncation (paper's K)
+        K: int,                  # doc-level truncation (paper's T)
+        vocab_size: int,
+        *,
+        alpha: float = 1.0,      # doc-stick concentration (paper's α0)
+        gamma: float = 1.0,      # corpus-stick concentration
+        eta: float = 0.01,       # topic-Dirichlet concentration
+        # plus init / CAVI knobs — see the live signature.
+    ):
         ...
 
     def initialize_global(self, data_summary):
-        V = data_summary["vocab_size"]
-        return {
-            "lambda": np.random.gamma(100., 1./100., (self.T, V)),
-            "stick_a": np.ones(self.T),
-            "stick_b": np.full(self.T, self.gamma),
-        }
+        # Returns {"lambda": (T,V), "u": (T-1,), "v": (T-1,)}.
+        ...
 
     def local_update(self, partition_data, global_params):
-        # Run doc-level variational E-step over all docs in partition
-        # Returns word-topic counts, stick counts, doc count
+        # Per-doc CAVI: phi (Wt,K), var_phi (K,T), a/b (K-1,)
+        # Returns lambda_stats, var_phi_sum_stats, doc-ELBO scalars.
         ...
 
     def update_global(self, global_params, target_stats, learning_rate):
-        # lambda_hat = prior + target_stats; interpolate against global_params.
+        # Natural-gradient SVI on (λ, u, v).
         ...
 
-    def print_topics(self, n_words=10, vocabulary=None):
-        # Display top words per discovered topic
-        ...
-
-    def transform(self, df, **kwargs):
-        # Infer per-document topic proportions on new data
-        ...
-
-    def simulate(self, n_docs, avg_length=20):
-        # Generate synthetic documents from learned topics
+    def infer_local(self, row, global_params):
+        # Frozen-globals doc-CAVI; returns θ for downstream Stage-2.
         ...
 ```
 

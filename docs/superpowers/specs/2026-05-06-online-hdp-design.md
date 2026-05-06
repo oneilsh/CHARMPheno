@@ -230,11 +230,13 @@ ablate via a `warmup_iters=0` experiment.
 lambda_stats[:, doc.indices] += var_phi.T @ (phi * counts[:, None]).T   # (T, Wt)
 var_phi_sum_stats           += var_phi.sum(axis=0)                      # (T,)
 doc_loglik_sum    += sum(phi.T * (var_phi @ (Elogbeta_doc * counts[None, :])))
-doc_z_term_sum    += sum((Elog_sticks_doc[None, :] - log_phi) * phi)
+doc_z_term_sum    += sum((Elog_sticks_doc[None, :] - log_phi) * phi * counts[:, None])
 doc_c_term_sum    += sum((Elog_sticks_corpus[None, :] - log_var_phi) * var_phi)
 doc_stick_kl_sum  += beta_kl(a, b, prior_a=1.0, prior_b=alpha)
 n_docs            += 1
 ```
+
+Note: `doc_z_term` requires count-weighting because `phi[w, k]` is per-unique-word, while the underlying latent z is per-token. Wang's reference Python implementation has the same imbalance (no count-weighting on this term) — we deliberately deviate. The per-iter monotonicity regression test in `test_online_hdp_unit.py` would fail without this fix; see also the doc_z_term comment in `_doc_e_step`.
 
 ### Helper: `expect_log_sticks(a, b)`
 

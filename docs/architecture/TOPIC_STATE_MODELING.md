@@ -296,6 +296,13 @@ sequenceDiagram
 | Document concentration | $\alpha$ | Controls how many topics each visit uses |
 | Learning rate | $\kappa, \tau$ | Controls stochastic gradient step size: $\rho_t = (t + \tau)^{-\kappa}$ |
 
+**Notation: paper vs code.** This document and the implementation use
+`T = corpus-level truncation`, `K = doc-level truncation`. Wang/Paisley/Blei
+2011 uses these letters in the *opposite* direction (paper's `K` is the
+corpus level, paper's `T` is the doc level). Wang's reference Python
+implementation, the intel-spark Scala port, and our code all use the
+convention adopted here. When porting equations from the paper, swap T ↔ K.
+
 **Output:** For each visit $d$, a sparse topic proportion vector
 $\theta_d \in \mathbb{R}^T$ where most entries are near zero (a visit with 5-10
 diagnosis codes typically loads on 3-8 phenotypes).
