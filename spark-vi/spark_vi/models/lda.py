@@ -498,3 +498,22 @@ class VanillaLDA(VIModel):
         )
         theta = gamma / gamma.sum()
         return {"gamma": gamma, "theta": theta}
+
+    def iteration_summary(self, global_params: dict[str, np.ndarray]) -> str:
+        """Compact per-iter view of α, η, and λ row-mass spread.
+
+        α as min/max/mean: when symmetric all three coincide; when optimized
+        the spread shows the asymmetry the empirical-Bayes update has put in.
+        η is a scalar. λ row sums (Σ_v λ_kv) span tells you whether topics
+        are diverging in mass — useful when chasing topic-collapse vs healthy
+        differentiation.
+        """
+        alpha = np.asarray(global_params["alpha"])
+        eta = float(global_params["eta"])
+        lam = global_params["lambda"]
+        lam_row_sums = lam.sum(axis=1)
+        return (
+            f"α[min={alpha.min():.4g} max={alpha.max():.4g} mean={alpha.mean():.4g}], "
+            f"η={eta:.4g}, "
+            f"Σλ_k[min={lam_row_sums.min():.3g} max={lam_row_sums.max():.3g}]"
+        )

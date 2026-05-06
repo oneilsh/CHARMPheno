@@ -142,6 +142,16 @@ class VIModel(ABC):
         denom = max(abs(prev), 1e-12)
         return abs(curr - prev) / denom < convergence_tol
 
+    def iteration_summary(self, global_params: dict[str, np.ndarray]) -> str:
+        """Optional model-defined string appended to the runner's per-iter log line.
+
+        Returning "" (the default) leaves the log line untouched. Models with
+        small global scalars/vectors worth surfacing every iteration — concentration
+        parameters, mixing weights, etc. — override this. Keep it short and on
+        one line; the runner already prints ELBO, batch, ρ_t, and wall time.
+        """
+        return ""
+
     def infer_local(self, row, global_params: dict[str, np.ndarray]):
         """Optional capability: per-row variational posterior under fixed global params.
 
