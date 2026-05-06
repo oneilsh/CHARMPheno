@@ -12,6 +12,318 @@ elsewhere.
 
 ---
 
+## 2026-05-05 to 2026-05-06 — LDA concentration optimization + post-implementation walkthrough
+
+Empirical-Bayes Newton-Raphson optimization for the Dirichlet
+concentration parameters lands on the `lda-concentration-opt` branch:
+asymmetric vector α via Blei 2003 Appendix A.4.2 (closed-form
+Sherman-Morrison Newton on the diagonal-plus-rank-1 Hessian, O(K) per
+step); symmetric scalar η via Hoffman 2010 §3.4 scalar Newton. Defaults
+flip to match MLlib parity (`optimizeDocConcentration=True`,
+`optimizeTopicConcentration=False`); the v0 divergence recorded in
+ADR 0009 is gone. A six-lesson post-implementation walkthrough and a
+D=10k empirical α-recovery probe followed; the probe surfaced one
+substantive numerical bug (a digamma-underflow cascade in the α
+sufficient-statistic accumulator that catastrophically collapsed every
+α component to the floor on certain random inits) which got fixed in
+the same arc.
+
+### What shipped
+
+- [`_alpha_newton_step`](../spark-vi/spark_vi/models/lda.py#L107-L152)
+  — pure-function closed-form Newton step using the matrix-inversion
+  lemma applied to `H = c·1·1ᵀ − diag(d)`. Caller does ρ_t damping and
+  the post-step floor; helper does the math.
+- [`_eta_newton_step`](../spark-vi/spark_vi/models/lda.py#L155-L186) —
+  scalar Newton helper. Mirrors α's separation-of-concerns.
+- [`VanillaLDA.local_update`](../spark-vi/spark_vi/models/lda.py#L273-L352)
+  conditionally accumulates `e_log_theta_sum` (length-K, per-doc Dirichlet
+  expected log) when `optimize_alpha=True`. Stat key is absent from the
+  return dict when off, so `optimize_alpha=False` pays zero overhead and
+  the framework's `combine_stats` reducer transparently ignores the
+  missing key.
+- [`VanillaLDA.update_global`](../spark-vi/spark_vi/models/lda.py#L354-L438)
+  optionally fires `_alpha_newton_step` on the corpus-rescaled
+  `target_stats["e_log_theta_sum"]` and `_eta_newton_step` on a stat
+  computed inline from the just-updated λ. Both apply the shared ρ_t
+  schedule from λ (Hoffman 2010 §3.3) and clip at 1e-3.
+- [`VanillaLDAEstimator`](../spark-vi/spark_vi/mllib/lda.py) — the
+  ADR 0009 validator's two rejections (`optimizeDocConcentration=True`,
+  vector `docConcentration`) removed; new `optimizeTopicConcentration`
+  Param mirrors `optimizeDocConcentration`'s shape and help text.
+  `_build_model_and_config` plumbs both flags through to the model.
+  `VanillaLDAModel` gains `alpha` / `topicConcentration` accessors that
+  read from the fitted `VIResult` rather than the constructor Param —
+  important because `transform` must use the *trained* α.
+- [`VIModel.iteration_summary`](../spark-vi/spark_vi/core/model.py)
+  optional hook returning a model-defined string appended to the
+  runner's per-iteration log line. Default `""`. VanillaLDA returns a
+  compact `α[min/max/mean], η, Σλ_k[min/max]` summary.
+- Per-topic α / Σλ / peak prefix on the existing topic-evolution
+  callback in
+  [`analysis/cloud/lda_bigquery_cloud.py`](../analysis/cloud/lda_bigquery_cloud.py),
+  sorted by Σλ descending so the heaviest topics are read first.
+
+### Walkthrough lessons
+
+**Lesson 1 — ELBO architecture.** The `L = L_α(α; γ) + L_η(η; λ) +
+L_other(γ, λ, φ)` decomposition. Holding the variational posteriors
+`q(θ_d)=Dir(γ_d)` and `q(φ_k)=Dir(λ_k)` fixed, `L_α` and `L_η` are
+classical Dirichlet MLE-from-pseudocounts objectives — the same shape
+as Blei 2003's offline α-estimator, just with the pseudocounts coming
+from variational expectations rather than EM-style soft assignments.
+
+**Lesson 2 — α Newton step.** The gradient `g_k = D[ψ(Σα) − ψ(α_k)] + Σ_d
+E[log θ_dk]` and Hessian `H = c·1·1ᵀ − diag(d)` with `c = D·ψ'(Σα)`,
+`d_k = D·ψ'(α_k)`. The diagonal-plus-rank-1 structure admits a
+matrix-inversion-lemma closed-form (Blei A.2): `Δα_k = (g_k − b)/d_k`
+where `b = Σ(g_j/d_j) / (Σ 1/d_j − 1/c)` — the rank-1 "everyone moves
+together" coupling. Walked line-by-line against
+[`_alpha_newton_step`](../spark-vi/spark_vi/models/lda.py#L107-L152).
+Discovered en route: Blei 2003 Appendix A.4.2's *printed* Hessian has a
+transcription sign/factor error (missing `M` on the second term); a
+re-derivation gives the negative-definite `H` above and matches MLlib's
+`OnlineLDAOptimizer.updateAlpha`. Documented at
+[lda.py:128-130](../spark-vi/spark_vi/models/lda.py#L128-L130).
+
+**Lesson 3 — η Newton step.** Scalar collapse of α's machinery: gradient
+and Hessian become 1-D, no inversion lemma needed. Walked
+[`_eta_newton_step`](../spark-vi/spark_vi/models/lda.py#L155-L186) in
+three lines. The interesting structural point: η's sufficient statistic
+`Σ_t Σ_v E[log φ_tv]` depends only on λ (a global parameter on the
+driver), not on per-doc state. So the entire η update lives inside
+`update_global` with no contribution from `local_update` and no
+mini-batch corpus rescale. This is the asymmetry that templates HDP's
+two concentration updates: γ on the corpus stick reuses η's global-stat
+shape; α on the doc stick reuses LDA-α's per-doc shape.
+
+**Lesson 4 — Wiring α through the SVI loop.** Five-stop pipeline:
+per-doc accumulation inside the partition loop → conditional return
+from `local_update` → cross-partition `treeReduce` via `combine_stats`
+→ runner's `D / |batch|` rescale to corpus-equivalent → driver-side
+Newton step + ρ_t damping + floor. The transparent stat-key pattern
+(model adds a key, runner doesn't change) is how this lands without a
+framework change.
+
+**Lesson 5 — Wiring η through the SVI loop.** Stops 1-4 of α's
+pipeline collapse to nothing because η's stat is computable from λ.
+Driver-only update; no `local_update` involvement. Computed against
+the `new_lam` (just-updated) rather than the `lam` (entry value), to
+keep η and λ co-current — small choice with a clean justification.
+
+**Lesson 6 — Test design.** Three-tier pyramid: helper unit tests with
+idealized inputs (
+[`test_alpha_newton_step_recovers_known_alpha_on_synthetic`](../spark-vi/tests/test_lda_math.py),
+[`test_eta_newton_step_recovers_known_eta_on_synthetic`](../spark-vi/tests/test_lda_math.py));
+ELBO-trend integration gate (existing
+[`test_vanilla_lda_elbo_smoothed_endpoints_show_overall_improvement`](../spark-vi/tests/test_lda_integration.py));
+end-to-end smoke gate
+([`test_alpha_optimization_runs_end_to_end_without_regression`](../spark-vi/tests/test_lda_integration.py)).
+Each tier closes a regression class the others can't see. The
+originally-planned "α drifts toward truth" test was cut at D=200
+because of topic-collapse pinning components to floor independent of
+optimization quality; this lesson contextualized the cut, and a
+follow-up D=10k probe walked it back (see below).
+
+### Refactor detours that shipped
+
+**Detour 1 — Citation correction (396f32c).** During Lesson 2, fetched
+the Blei 2003 JMLR PDF to confirm the §5.4 reference cited in 10 sites
+across the spec, plan, ADR 0010, and code comments. §5.4 is titled
+"Smoothing" and is about the prior on β, not about α optimization. The
+Newton derivation actually lives in **Appendix A.4.2** (LDA-specific
+specialization) layered on **Appendix A.2** (general structured-Hessian
+Newton via matrix-inversion lemma). Corrected all 10 sites; documented
+A.4.2's printed-Hessian transcription error in the helper docstring so
+a future reader doesn't try to "fix" the negative-definite version.
+
+**Detour 2 — ELBO test rename (7399cd3).** Empirical probe across
+multiple window sizes and iteration counts showed the smoothed ELBO
+trace has ~50% positive consecutive differences even on healthy fits —
+i.e., the trace is *not* monotonic under any window. The original test
+name `test_vanilla_lda_elbo_smoothed_trend_is_non_decreasing` implied
+monotonicity it never asserted. What the test actually checks is the
+endpoint trend: `smoothed[-1] > smoothed[0]`. Renamed to
+`test_vanilla_lda_elbo_smoothed_endpoints_show_overall_improvement`
+and rewrote its docstring to make explicit what survives (gross
+sign-flips that drag the bound down overall) and what doesn't (subtler
+mid-trace regressions that preserve the endpoints). Spec / plan / ADR
+0010 cross-references updated.
+
+**Detour 3 — Per-iteration logging hook (9bee128 + dc9aa2e).** Added
+optional `VIModel.iteration_summary(global_params) -> str` returning a
+short string the runner appends to its per-iter log line. Default is
+empty. VanillaLDA returns scalar globals (η, Σα, Σλ row range) on the
+inline runner line; the cloud script's existing topic-evolution
+callback picks up per-topic α / Σλ / peak as a prefix on each topic
+row, sorted by Σλ descending. Native topic index is preserved as the
+label so a topic moving in the ranking is itself a signal.
+
+### Pre-existing issues caught (digamma-underflow cascade)
+
+A D=10k synthetic α-drift probe surfaced a numerical bug that wasn't
+visible in the unit suite. The sequence:
+
+1. With asymmetric `true_α=[0.1, 0.5, 0.9]` and random λ init, some
+   seeds produce a fitted-topic mass distribution where one topic is
+   starved (Σλ_k ≈ 600 vs ~200K-400K for siblings). Standard SVI
+   topic-collapse driven by the asymmetric truth.
+2. Iter 1's α-Newton step correctly drives the starved topic's α
+   toward zero — clipping at the 1e-3 floor.
+3. Iter 2 CAVI initializes γ_d for the orphan topic component near
+   `α[k]` = 1e-3. ψ(1e-3) ≈ -1000, and `exp(ψ(γ_dk) − ψ(Σγ))`
+   underflows to zero.
+4. The α-suff-stat accumulator at
+   [models/lda.py](../spark-vi/spark_vi/models/lda.py) was computing
+   `e_log_theta_sum += np.log(expElogthetad)` — `log(0) = -inf`
+   silently propagated.
+5. -inf reached `_alpha_newton_step` and corrupted *every* component
+   of Δα via the rank-1 Hessian coupling
+   `b = Σ(g/d) / (Σ 1/d − 1/c)`. All α components clipped to floor on
+   iter 2.
+
+Pre-fix sweep over five seeds at D=10k: 3/5 catastrophically collapsed.
+β recovery in those runs was unaffected (cosine ≥ 0.99 across seeds);
+only α died. Post-fix: 0/5 collapse, drift to truth +43.6% to +62.5%.
+
+The fix replaces `log(exp(...))` with the equivalent
+`digamma(γ) − digamma(γ.sum())` directly. Costs one extra digamma
+call per CAVI exit (length-K vector, sub-microsecond at K=20).
+The original code's TODO comment at lda.py:338-341 chose the
+`log(exp(...))` form for "one log/doc beats two digammas/doc on the
+Spark hot path" — sound when expElogthetad isn't near zero, which is
+the regime *until* α hits the floor. Neither the original
+implementation review nor the post-implementation review caught this;
+it surfaced only when the long-running probe stress-tested seeds the
+default unit-test scale couldn't reach. Diagnostic methodology
+captured at
+[`probes/diagnose_collapse_in_spark.py`](../spark-vi/probes/diagnose_collapse_in_spark.py).
+
+### Tests
+
+- **New unit tests:**
+  [`test_alpha_newton_step_recovers_known_alpha_on_synthetic`](../spark-vi/tests/test_lda_math.py)
+  and
+  [`test_eta_newton_step_recovers_known_eta_on_synthetic`](../spark-vi/tests/test_lda_math.py)
+  — synthetic recovery against idealized variational inputs (delta
+  posteriors at the truth) for the closed-form helpers.
+  [`test_alpha_newton_step_floors_at_1e-3`](../spark-vi/tests/test_lda_math.py)
+  — pathological gradient direct test of the floor logic.
+- **New contract tests** in
+  [`test_lda_contract.py`](../spark-vi/tests/test_lda_contract.py): the
+  optimize-flag plumbing, `local_update` conditionally emitting
+  `e_log_theta_sum`, `update_global` Newton-step wiring (both α and
+  η), and — added in the cascade-fix detour —
+  `test_local_update_alpha_stat_finite_when_alpha_at_floor` which
+  constructs the pathological state by hand and asserts the suff-stat
+  stays finite. Verified to fail on the reverted code (returns
+  `[-inf, -0.69, -0.69]`).
+- **New slow integration test:**
+  [`test_alpha_optimization_runs_end_to_end_without_regression`](../spark-vi/tests/test_lda_integration.py)
+  — D=200 smoke gate (wiring fires, no NaN, floor honored, no
+  blow-up). Originally drafted with an "α drifts toward truth"
+  assertion at this scale; reframed during implementation when
+  topic-collapse made truth-recovery untestable at D=200 (Hoffman 2010
+  §4 used D=100K-352K to validate recovery). The reframe is documented
+  in the test docstring and ADR 0010.
+- **New slow recovery test (post-cascade-fix):**
+  [`test_alpha_optimization_drifts_toward_corpus_truth_at_D10k`](../spark-vi/tests/test_lda_integration.py)
+  — fits at D=10k for 300 iters, Hungarian-aligns fitted topics to
+  true topics by β cosine similarity (`scipy.optimize.linear_sum_assignment`
+  on negated cosine), asserts ≥30% L1 reduction toward
+  `true_α=[0.1, 0.5, 0.9]`. Empirical sweep across five seeds showed
+  +43.6% to +62.5% drift; 30% leaves margin for cross-platform
+  numerical drift. Runtime ~43 s. This resurrects the recovery
+  ambition the original test design was forced to abandon at smaller
+  scales.
+- **One-off probes** kept in tree under
+  [`spark-vi/probes/`](../spark-vi/probes/) as empirical justification
+  for the recovery threshold and the cascade fix:
+  `alpha_drift_probe.py` (D=10k seed sweep + 2000-iter long fit),
+  `diagnose_collapse.py` (offline numpy reproducer — eliminated the
+  obvious causes), `diagnose_collapse_in_spark.py` (in-Spark per-iter
+  dump — identified the actual mechanism). Not test code; not
+  invoked from the test suite.
+
+Final unit suite: 67 passing (up from 65 on initial implementation).
+Slow integration suite: 4 passing.
+
+### Methodology lessons surfaced
+
+**Stage-1 vs stage-2 failure-mode separation.** The post-fix sweep
+shows topic starvation (stage 1 — random init orphans a fitted topic)
+still happens at D=10k for some seeds, but the consequence is now
+mild: one α component pinned at floor, others healthy. The cascade
+(stage 2 — numerical contagion through the rank-1 Hessian) was the
+load-bearing failure mode; the orphan-topic mode is a tolerable SVI
+characteristic. Naming the two stages separately during the diagnosis
+is what made the one-line fix obvious — without that decomposition
+the bug looks like "LDA collapses sometimes," which is
+under-actionable.
+
+**Hidden RNG state defeats reproducibility.** [models/lda.py:262
+and :305](../spark-vi/spark_vi/models/lda.py#L262) use `np.random.gamma`
+against the global numpy RNG state, not seeded by `cfg.random_seed`.
+The first probe runs got drift +60% then -55% at the same `cfg.random_seed`
+because the global RNG state differed run-to-run. The recovery test
+seeds the global RNG explicitly as a workaround; the real fix is the
+TODO at
+[lda.py:302-304](../spark-vi/spark_vi/models/lda.py#L302-L304) (derive
+per-doc seed from `(cfg.random_seed, doc_key)` deterministically),
+parked.
+
+**Test design vs corpus scale.** Recovery testing has a corpus-scale
+floor below which the test is uninformative regardless of optimizer
+quality. The original "α drifts to truth at D=200" test was empirically
+unattainable; "α drifts to truth at D=10k" is. The threshold question
+is corpus-scale, not implementation-quality — the literature reference
+(Hoffman 2010 §4) was telling us this all along; we didn't internalize
+it until the empirical probe forced the issue.
+
+### Doc updates
+
+- [ADR 0010 — Concentration parameter optimization](decisions/0010-concentration-parameter-optimization.md):
+  ships the decision, including the asymmetric-α / symmetric-η pattern
+  per Wallach 2009, the shared ρ_t damping (Hoffman 2010 §3.3), the
+  1e-3 floor, the test reframe, and the corrected Blei 2003 citation.
+- [Spec: 2026-05-05-lda-concentration-optimization-design](superpowers/specs/2026-05-05-lda-concentration-optimization-design.md):
+  the design walkthrough; updated mid-arc with the citation
+  correction, the test reframe, and the renamed ELBO endpoint test.
+- [Plan: 2026-05-05-lda-concentration-optimization](superpowers/plans/2026-05-05-lda-concentration-optimization.md):
+  the 13-task TDD plan executed via subagent-driven development; final
+  verification block updated to reference the renamed ELBO test.
+
+### Open threads parked
+
+- **Per-doc deterministic RNG.** TODO at
+  [`lda.py:302-304`](../spark-vi/spark_vi/models/lda.py#L302-L304):
+  derive each doc's `gamma_init` seed from `(cfg.random_seed,
+  doc_key)` so SVI fits are reproducible end-to-end without relying
+  on the global numpy RNG state. The recovery test currently seeds
+  `np.random` as a workaround.
+- **Asymmetric η** (per-vocabulary). MLlib doesn't do this, mini-batch
+  SVI is least stable on η, and Wallach 2009 argued symmetric η is
+  the right default. Parking-lot per ADR 0010.
+- **Concentration-specific learning rate.** Empirical observation:
+  ρ_t is calibrated for λ stability (high-dimensional, mini-batch
+  noisy) and is overkill for α (low-dimensional, scalar Newton for η).
+  At D=10k, 300 iters reaches +62% drift; 2000 iters reaches +90% with
+  Σα still climbing. A faster α/η-specific schedule would close the
+  gap, at the cost of breaking the unified-schedule contract MLlib
+  follows. Park unless empirical demand appears.
+- **MLWritable round-trip of optimized α/η.** Persistence of the
+  fitted concentrations remains an ADR 0009 v1 punt; once the shim
+  implements `MLWritable`, both `model.alpha` and
+  `model.topicConcentration` need to round-trip.
+- **Online HDP** is the next major work item. The two HDP
+  concentration parameters (γ on the corpus stick, α on the doc
+  stick) reuse this branch's machinery directly: γ ≅ η (global stat,
+  scalar Newton, lives in `update_global`), α (HDP) ≅ α (LDA)
+  (per-doc stat, structured-Hessian Newton, lives in `local_update` +
+  rescale). Building both flavors here was the de-risking step.
+
+---
+
 ## 2026-05-05 — Strict persist precondition for VIRunner
 
 A parking-lot item from the prior session, picked up after a successful
