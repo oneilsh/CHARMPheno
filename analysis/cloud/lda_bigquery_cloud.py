@@ -60,7 +60,7 @@ def _phase(name: str):
               flush=True)
 
 
-def _make_topic_evolution_logger(K, top_n, every_n, idx_to_cid, name_by_id):
+def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id):
     """Build an on_iteration callback that prints top-N tokens per topic.
 
     Factory rather than a bare def: the framework's on_iteration contract
@@ -92,8 +92,13 @@ def _make_topic_evolution_logger(K, top_n, every_n, idx_to_cid, name_by_id):
         lam_row_sums = lam.sum(axis=1)                        # (K,)
         peak = lam.max(axis=1) / np.maximum(lam_row_sums, 1e-12)
         topics = lam / lam_row_sums[:, None]                  # row-stochastic
+        # Sort topics by Σλ_k descending so the heaviest topics are listed
+        # first. The k label printed on each line is the topic's native
+        # index (stable across iterations), so a topic moving up or down
+        # the ranking is a meaningful signal.
+        order = np.argsort(lam_row_sums)[::-1]
         print(f"[driver]   --- topics @ iter {iter_num} ---", flush=True)
-        for k in range(K):
+        for k in order:
             top = topics[k].argsort()[::-1][:top_n]
             terms = ", ".join(
                 f"{name_by_id.get(idx_to_cid[int(j)], '?')[:24]}"
@@ -270,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.print_topics_every > 0:
             estimator.setOnIteration(_make_topic_evolution_logger(
-                K=args.K, top_n=6, every_n=args.print_topics_every,
+                top_n=6, every_n=args.print_topics_every,
                 idx_to_cid=idx_to_cid, name_by_id=name_by_id,
             ))
         model = estimator.fit(bow_df)
