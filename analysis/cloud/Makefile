@@ -88,8 +88,8 @@ lda-bq-smoke: zip $(WORKSPACE_ENV)
 	    --master yarn \
 	    --deploy-mode client \
 	    --driver-memory 4g \
-    	--conf spark.executor.memoryOverhead=2g \
-    	--conf spark.python.worker.memory=2g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(LDA_BQ_SCRIPT) $(LDA_BQ_ARGS)
 
