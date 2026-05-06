@@ -47,6 +47,29 @@ def _log_normalize_rows(M: np.ndarray) -> np.ndarray:
     return shifted - log_norm
 
 
+def _expect_log_sticks(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Sethuraman-style E[log stick] expectation.
+
+    Inputs `a, b` are length (T-1,) for the corpus stick or (K-1,) for a
+    doc stick. Returns a length-(len(a)+1) vector — the trailing entry
+    handles the truncation: q(stick_last = 1) = 1, so E[log W_last] = 0
+    and only the cumulative E[log(1 - W_<last)] contributes.
+
+    For β'_k ~ Beta(a_k, b_k):
+      E[log W_k]      = digamma(a_k) - digamma(a_k + b_k)
+      E[log(1 - W_k)] = digamma(b_k) - digamma(a_k + b_k)
+      E[log β_k]      = E[log W_k] + sum_{l<k} E[log(1 - W_l)]
+    """
+    dig_sum = digamma(a + b)
+    Elog_W = digamma(a) - dig_sum         # length (T-1,)
+    Elog_1mW = digamma(b) - dig_sum       # length (T-1,)
+
+    out = np.zeros(len(a) + 1, dtype=np.float64)
+    out[:-1] = Elog_W
+    out[1:] += np.cumsum(Elog_1mW)
+    return out
+
+
 # Stub OnlineHDP class — methods filled in by later tasks.
 class OnlineHDP(VIModel):
     """Stub during incremental implementation; see Task 6 onwards."""
