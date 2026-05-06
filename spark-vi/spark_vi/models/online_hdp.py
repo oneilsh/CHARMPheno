@@ -566,8 +566,9 @@ class OnlineHDP(VIModel):
         lam_sum = lam.sum(axis=1)
         spread = float(lam_sum.max() / max(lam_sum.min(), 1e-12))
 
+        top_vals_str = ",".join(f"{x:.3f}" for x in top3)
         return (
             f"active topics={n_active}/{self.T}, "
-            f"top-3 E[β]={top3[0]:.3f},{top3[1]:.3f},{top3[2]:.3f}, "
+            f"top E[β]={top_vals_str}, "
             f"λ-row-sum spread={spread:.2f}"
         )

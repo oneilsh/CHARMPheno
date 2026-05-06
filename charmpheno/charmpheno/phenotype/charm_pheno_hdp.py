@@ -87,9 +87,10 @@ class CharmPhenoHDP:
         (input_row, theta) pairs where theta is the length-T topic
         proportion vector for that doc.
 
-        Stub during bootstrap; fully wired once VIRunner.transform lands
-        for HDP. Until then, this method runs infer_local in driver-side
-        Python — adequate for small held-out sets but not for production.
+        The broadcast is unpersisted after the RDD is constructed (same
+        discipline as VIRunner.transform). Spark re-broadcasts lazily if
+        the returned RDD is materialized after the unpersist; callers that
+        chain many transforms should .persist() the result.
         """
         if not hasattr(self, "_fitted_globals"):
             raise RuntimeError(
@@ -105,4 +106,7 @@ class CharmPhenoHDP:
                 out = model.infer_local(row, g)
                 yield (row, out["theta"])
 
-        return data_rdd.mapPartitions(_per_partition)
+        try:
+            return data_rdd.mapPartitions(_per_partition)
+        finally:
+            globals_bcast.unpersist(blocking=False)

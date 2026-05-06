@@ -565,3 +565,15 @@ def test_iteration_summary_returns_string():
     assert len(s) > 0
     # Must reference active topic count somewhere in the line.
     assert "active" in s.lower() or "topics" in s.lower()
+
+
+def test_iteration_summary_handles_small_T():
+    """T=2 should not crash even though 'top-3' would only have 2 values."""
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=2, K=2, vocab_size=10)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+    s = m.iteration_summary(g)
+    assert isinstance(s, str)
+    assert len(s) > 0
