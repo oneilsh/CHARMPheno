@@ -10,6 +10,30 @@ The architectural vision lives in [`docs/architecture/`](docs/architecture/):
 - `SPARK_VI_FRAMEWORK.md` — framework design (VIRunner, VIModel contract).
 - `RISKS_AND_MITIGATIONS.md` — known risks, constraints, deployment notes.
 
+External references for the Online HDP port:
+- Wang, Paisley & Blei 2011, "Online Variational Inference for the
+  Hierarchical Dirichlet Process" (AISTATS) — primary algorithmic reference.
+- Teh, Jordan, Beal & Blei 2006, "Hierarchical Dirichlet Processes" (JASA) —
+  the underlying nonparametric model.
+- Hoffman, Blei, Wang & Paisley 2013, "Stochastic Variational Inference"
+  (JMLR) — general SVI framework these models live in.
+- Spark MLlib `OnlineLDAOptimizer` — the distribute-the-E-step pattern to
+  emulate.
+- intel-spark TopicModeling, https://github.com/intel-spark/TopicModeling —
+  existing Scala port of Wang/Paisley/Blei 2011 to Spark; consult for layout
+  and reference outputs, but its `chunk.collect()` driver-side E-step is the
+  anti-pattern we explicitly diverge from.
+
+## Rendering: agent chat output is plain text
+
+Agent responses render as plain text in this user's IDE. **LaTeX does not
+render** — do not write `$\lambda$`, `$\sum_k$`, `\begin{equation}`, etc. in
+chat. Use plain Greek letters (λ, γ, α, θ, β) and ASCII math (`E[log β]`,
+`sum_k`, `phi_dnk`) instead. Markdown, code fences, and clickable
+`[text](path)` links DO render and should be used. (LaTeX inside
+`docs/architecture/*.md` files is fine — it renders when those files are
+viewed in a Markdown previewer.)
+
 These are **living** documents. If a change contradicts them, either update the
 relevant section in the same commit, or write an ADR in
 [`docs/decisions/`](docs/decisions/) recording the departure. Never silently

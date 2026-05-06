@@ -491,9 +491,9 @@ LDA/HDP implementation exposes (Gensim's `HdpModel.inference()`, Wang's original
 
 - **Held-out evaluation** during training (per-document perplexity / ELBO on a
   held-out split with frozen globals).
-- **The FHIR-compatible inference workflow** targeted by the 48-month deliverable
-  ([MILESTONES.md](MILESTONES.md)) — predicting on a new patient at serving time
-  *is* frozen-globals inference.
+- **Predictive modeling and on-device serving** as eventual goals — predicting
+  on a new patient at serving time *is* frozen-globals inference, whether the
+  prediction runs in a cluster pipeline or a deployed runtime.
 - **Any Stage-1 enhancement that decouples the training document granularity from
   the inference document granularity** (see next paragraph).
 

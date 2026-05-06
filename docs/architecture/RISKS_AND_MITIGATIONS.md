@@ -478,7 +478,7 @@ package layout, no compiled extensions, no build-time code generation).
 | 36mo | Apply to clinical data | **Medium** | θ noise issue becomes visible here; outcome characterization needs at least supervised methods on θ features |
 | 39mo | Integration architecture design | **Low** | Model export format is well-designed |
 | 42mo | Model hosting integration | **Low** | Standard deployment engineering |
-| 45mo | Outcome prediction + FHIR + on-device | **Medium** | FHIR mapping and on-device runtime are underspecified |
+| 45mo | Outcome prediction + on-device serving | **Medium** | On-device runtime is underspecified |
 | 48mo | Hardened platform | **Low** | Depends on scope decisions made at 45mo |
 
 **Overall:** The critical path runs through the framework and HDP, both of which are
