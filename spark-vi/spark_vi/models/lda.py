@@ -335,11 +335,16 @@ class VanillaLDA(VIModel):
             n_docs += 1
 
             if self.optimize_alpha:
-                # E[log θ_dk] = ψ(γ_dk) − ψ(Σ_j γ_dj) ≡ log(expElogthetad),
-                # since _cavi_doc_inference returns expElogthetad = exp of that
-                # exact expression at convergence. One log/doc beats two
-                # digammas/doc on the Spark hot path.
-                e_log_theta_sum += np.log(expElogthetad)
+                # E[log θ_dk] = ψ(γ_dk) − ψ(Σ_j γ_dj). Compute directly from γ
+                # rather than via log(expElogthetad): the exp(...)-then-log(...)
+                # round-trip underflows when any γ_dk is small enough to make
+                # ψ(γ_dk) ≲ -700 (e.g., when α has hit the 1e-3 floor and CAVI
+                # initializes γ_dk ≈ 1e-3, giving ψ(γ_dk) ≈ -1000 and exp ≈ 0).
+                # Underflow ⇒ log(0) = -inf in the suff-stat ⇒ the rank-1 Hessian
+                # coupling in `_alpha_newton_step` propagates -inf into every
+                # component of Δα, collapsing all topics to the floor in a
+                # single iteration.
+                e_log_theta_sum += digamma(gamma) - digamma(gamma.sum())
 
         out: dict[str, np.ndarray] = {
             "lambda_stats": lambda_stats,

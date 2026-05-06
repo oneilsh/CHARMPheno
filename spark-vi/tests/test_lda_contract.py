@@ -508,3 +508,71 @@ def test_update_global_with_optimize_eta_runs_newton_and_floors():
     assert abs(new_eta - expected_eta) < 1e-9, (
         f"wiring drift: got {new_eta}, expected {expected_eta}"
     )
+
+
+def test_local_update_alpha_stat_finite_when_alpha_at_floor():
+    """Regression for the digamma-underflow cascade observed during the
+    α-drift probe at D=10k.
+
+    Failure mode (pre-fix): when α has a component at the 1e-3 floor
+    (e.g., after a Newton step that hit the floor), CAVI initializes
+    γ_d = α + ... and a doc whose data does not support that topic
+    leaves γ_d for that component at ≈α = 1e-3. Then
+        ψ(1e-3) ≈ −1000.6
+        exp(ψ(γ_dk) − ψ(Σγ)) underflows to 0
+        log(0) = −inf in e_log_theta_sum
+    The −inf propagates through `_alpha_newton_step`'s rank-1 Hessian
+    coupling — `b = Σ(g/d) / (Σ 1/d − 1/c)` with one `g` component
+    being −inf yields −inf for *all* Δα, collapsing every topic to
+    the floor on the next iteration.
+
+    Fix (models/lda.py: e_log_theta_sum accumulator): compute the
+    stat directly as `digamma(γ) − digamma(γ.sum())` rather than via
+    `log(exp(...))`. The component at the floor still contributes a
+    very negative value (~−1000), but the value is finite, so the
+    Newton step responds proportionally rather than catastrophically.
+
+    This test constructs that pathological state by hand (α with one
+    floor component, λ engineered so the doc's tokens carry no signal
+    for the orphan topic) and asserts the suff-stat is finite.
+    """
+    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.lda import VanillaLDA
+
+    K, V = 3, 50
+    # λ engineered so topic 0 explains essentially nothing in the doc's
+    # vocabulary range; topics 1 and 2 split the doc.
+    lam = np.full((K, V), 1e-3)
+    lam[1, : V // 2] = 5.0
+    lam[2, V // 2 :] = 5.0
+    alpha = np.array([1e-3, 0.5, 0.5])  # one component at the floor
+    global_params = {
+        "lambda": lam,
+        "alpha": alpha,
+        "eta": np.array(0.5),
+    }
+
+    docs = [BOWDocument(
+        indices=np.arange(V, dtype=np.int32),
+        counts=np.full(V, 5.0, dtype=np.float64),
+        length=5 * V,
+    )]
+
+    np.random.seed(0)
+    model = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+    stats = model.local_update(rows=iter(docs), global_params=global_params)
+
+    assert "e_log_theta_sum" in stats
+    assert np.isfinite(stats["e_log_theta_sum"]).all(), (
+        f"α suff-stat went non-finite — the underflow cascade fixed in this "
+        f"branch has regressed. e_log_theta_sum = {stats['e_log_theta_sum']}"
+    )
+    # The orphan-topic stat should be strongly negative (digamma at the
+    # floor is ≈ -1000) — sanity-check that we're actually exercising the
+    # pathological state, not just running a benign doc.
+    assert stats["e_log_theta_sum"][0] < -100, (
+        f"orphan-topic suff-stat should be strongly negative when γ_d0 ≈ α[0] "
+        f"= 1e-3; got {stats['e_log_theta_sum'][0]}. Either the test setup is "
+        f"no longer producing the pathological γ, or the digamma identity is "
+        f"miscomputed."
+    )
