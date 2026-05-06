@@ -70,6 +70,39 @@ def _expect_log_sticks(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return out
 
 
+def _beta_kl(
+    a: np.ndarray,
+    b: np.ndarray,
+    *,
+    prior_a: float | np.ndarray,
+    prior_b: float | np.ndarray,
+) -> np.ndarray:
+    """KL[Beta(a, b) ‖ Beta(prior_a, prior_b)], elementwise.
+
+    Closed form:
+      KL = log B(α0, β0) - log B(α, β)
+         + (α - α0) * (ψ(α) - ψ(α + β))
+         + (β - β0) * (ψ(β) - ψ(α + β))
+    where B is the Beta function (B(x, y) = Γ(x)Γ(y)/Γ(x+y)).
+
+    Returns a length-len(a) vector; broadcast `prior_a` / `prior_b` from a
+    scalar if needed (used for corpus prior Beta(1, gamma) where prior_a is
+    scalar and prior_b is scalar gamma).
+    """
+    pa = np.broadcast_to(np.asarray(prior_a, dtype=np.float64), a.shape)
+    pb = np.broadcast_to(np.asarray(prior_b, dtype=np.float64), a.shape)
+
+    log_B_prior = gammaln(pa) + gammaln(pb) - gammaln(pa + pb)
+    log_B_post = gammaln(a) + gammaln(b) - gammaln(a + b)
+
+    dig_sum = digamma(a + b)
+    return (
+        log_B_prior - log_B_post
+        + (a - pa) * (digamma(a) - dig_sum)
+        + (b - pb) * (digamma(b) - dig_sum)
+    )
+
+
 # Stub OnlineHDP class — methods filled in by later tasks.
 class OnlineHDP(VIModel):
     """Stub during incremental implementation; see Task 6 onwards."""

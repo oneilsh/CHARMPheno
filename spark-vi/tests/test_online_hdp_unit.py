@@ -81,3 +81,53 @@ def test_expect_log_sticks_truncation_handles_last_atom():
         (digamma(b[0]) - dig_sum[0]) + (digamma(b[1]) - dig_sum[1])
     )
     assert np.isclose(out[2], expected_2)
+
+
+def test_beta_kl_zero_when_posterior_matches_prior():
+    """KL(Beta(a, b) ‖ Beta(a, b)) = 0 element-wise."""
+    from spark_vi.models.online_hdp import _beta_kl
+
+    a = np.array([1.0, 2.0, 3.0])
+    b = np.array([1.0, 2.0, 5.0])
+    kl = _beta_kl(a, b, prior_a=np.array([1.0, 2.0, 3.0]),
+                  prior_b=np.array([1.0, 2.0, 5.0]))
+
+    assert np.allclose(kl, 0.0, atol=1e-12)
+
+
+def test_beta_kl_zero_for_matched_corpus_prior():
+    """For corpus sticks the prior is Beta(1, gamma); when (u, v) = (1, gamma)
+    KL is zero."""
+    from spark_vi.models.online_hdp import _beta_kl
+
+    gamma = 1.5
+    T_minus_1 = 4
+    u = np.ones(T_minus_1)
+    v = np.full(T_minus_1, gamma)
+    kl = _beta_kl(u, v, prior_a=1.0, prior_b=gamma)
+
+    assert np.allclose(kl, 0.0, atol=1e-12)
+
+
+def test_beta_kl_positive_when_posterior_differs():
+    """Concentrate the variational posterior away from the prior; KL > 0."""
+    from spark_vi.models.online_hdp import _beta_kl
+
+    u = np.array([10.0, 10.0])
+    v = np.array([1.0, 1.0])
+    kl = _beta_kl(u, v, prior_a=1.0, prior_b=1.0)
+
+    assert np.all(kl > 0)
+
+
+def test_beta_kl_positive_when_prior_more_concentrated():
+    """KL[Beta(1,1) ‖ Beta(5,1)] > 0 — also catches a sign-flip on term 3."""
+    from spark_vi.models.online_hdp import _beta_kl
+
+    kl = _beta_kl(
+        np.array([1.0, 1.0]),
+        np.array([1.0, 1.0]),
+        prior_a=5.0,
+        prior_b=1.0,
+    )
+    assert np.all(kl > 0)
