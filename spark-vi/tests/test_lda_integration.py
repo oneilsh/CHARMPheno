@@ -68,14 +68,36 @@ def test_vanilla_lda_fit_produces_well_formed_result(spark):
 
 
 @pytest.mark.slow
-def test_vanilla_lda_elbo_smoothed_trend_is_non_decreasing(spark):
-    """A 10-iter moving average of the ELBO trace improves over training.
+def test_vanilla_lda_elbo_smoothed_endpoints_show_overall_improvement(spark):
+    """Endpoint check on a 10-iter moving average: smoothed[-1] > smoothed[0].
 
-    Hard monotonicity is too strict for stochastic VI; trend is the right
-    gate. This catches regressions where the math is wrong in a direction
-    that drives the bound the wrong way (e.g., a sign error on the global
-    KL term in compute_elbo, or update_global pushing away from the
-    natural gradient).
+    NOT a monotonicity check, despite what the surface intuition might
+    suggest. Empirically, even with a healthy fit, the 10-window smoothed
+    trace has ~50% positive consecutive differences — within-trace local
+    drops of 100+ ELBO units are normal for stochastic VI on this corpus
+    size. Hard monotonicity is too strict; smoothed monotonicity is also
+    too strict. What survives is the *endpoint trend*: the very early
+    iterations climb hard from a random init, and tail noise can't undo
+    those gains in any healthy run.
+
+    What this catches:
+      * gross sign-flip regressions in any ELBO-driven update
+        (a Newton step pushing α away from the optimum, or a global-KL
+        term added with wrong sign in compute_elbo) — the trace ends
+        below where it started.
+      * runaway divergence — `smooth[-1] > smooth[0]` fails when a fit
+        actually moves backward from random init.
+
+    What this DOES NOT catch:
+      * a regression that hurts the bound *after* the easy early gains,
+        as long as smooth[-1] is still above smooth[0]. A bug that drags
+        the bound down by 50 ELBO units per iteration in mid-trace would
+        pass this test if the early gain is large enough.
+
+    For a stronger gate (mid-run trend + largest-local-drop bound), see
+    the follow-up notes on the lda-concentration-opt branch. As of this
+    writing the endpoint check is the only gate; it remains the load-
+    bearing regression test for the SVI machinery, modulo that gap.
     """
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.lda import VanillaLDA
@@ -93,8 +115,9 @@ def test_vanilla_lda_elbo_smoothed_trend_is_non_decreasing(spark):
     assert len(trace) >= window, f"need at least {window} iterations for smoothing"
     smooth = np.convolve(trace, np.ones(window) / window, mode="valid")
     assert smooth[-1] > smooth[0], (
-        f"Smoothed ELBO did not improve: start={smooth[0]:.3f}, end={smooth[-1]:.3f}. "
-        f"This usually indicates a sign error or wrong-direction update upstream."
+        f"Smoothed ELBO endpoints went backward: start={smooth[0]:.3f}, "
+        f"end={smooth[-1]:.3f}. This indicates a sign error or wrong-direction "
+        f"update large enough to overwhelm the early random-init gains."
     )
 
 
@@ -121,7 +144,7 @@ def test_alpha_optimization_runs_end_to_end_without_regression(spark):
       * test_alpha_newton_step_recovers_known_alpha_on_synthetic
         (in tests/test_lda_math.py) verifies the closed-form Newton step
         against an idealized (asymptotically concentrated) E[log θ_d] sum.
-      * test_vanilla_lda_elbo_smoothed_trend_is_non_decreasing
+      * test_vanilla_lda_elbo_smoothed_endpoints_show_overall_improvement
         (this file) catches sign or wrong-direction regressions in any
         ELBO-driven update by gating on the smoothed trace trend.
 

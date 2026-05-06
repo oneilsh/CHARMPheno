@@ -1725,7 +1725,7 @@ pytest spark-vi/tests/test_lda_integration.py -v -m slow
 ```
 
 Expected: PASS — including the existing
-`test_vanilla_lda_elbo_smoothed_trend_is_non_decreasing`.
+`test_vanilla_lda_elbo_smoothed_endpoints_show_overall_improvement`.
 
 - [ ] **Step 4: Run the full unit suite**
 
