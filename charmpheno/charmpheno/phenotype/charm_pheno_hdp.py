@@ -73,9 +73,36 @@ class CharmPhenoHDP:
         config: VIConfig | None = None,
         data_summary: Any | None = None,
     ) -> VIResult:
-        """Fit the underlying OnlineHDP on an RDD of documents.
-
-        Raises NotImplementedError until Tasks 7-9 land.
-        """
+        """Fit the underlying OnlineHDP on an RDD of documents."""
         runner = VIRunner(self.model, config=config)
-        return runner.fit(data_rdd, data_summary=data_summary)
+        result = runner.fit(data_rdd, data_summary=data_summary)
+        self._fitted_globals = result.global_params
+        return result
+
+    def transform(self, data_rdd: RDD) -> RDD:
+        """Per-doc frozen-globals inference.
+
+        Requires `.fit()` to have populated `self._fitted_globals`.
+        Maps each input row through `OnlineHDP.infer_local` and yields
+        (input_row, theta) pairs where theta is the length-T topic
+        proportion vector for that doc.
+
+        Stub during bootstrap; fully wired once VIRunner.transform lands
+        for HDP. Until then, this method runs infer_local in driver-side
+        Python — adequate for small held-out sets but not for production.
+        """
+        if not hasattr(self, "_fitted_globals"):
+            raise RuntimeError(
+                "CharmPhenoHDP.transform requires fit() first; "
+                "_fitted_globals is unset."
+            )
+        globals_bcast = data_rdd.context.broadcast(self._fitted_globals)
+        model = self.model
+
+        def _per_partition(rows):
+            g = globals_bcast.value
+            for row in rows:
+                out = model.infer_local(row, g)
+                yield (row, out["theta"])
+
+        return data_rdd.mapPartitions(_per_partition)
