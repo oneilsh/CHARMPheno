@@ -511,3 +511,27 @@ def test_compute_elbo_corpus_kl_zero_at_prior():
     }
     elbo = m.compute_elbo(g, zero_stats)
     assert np.isclose(elbo, 0.0, atol=1e-9)
+
+
+def test_infer_local_returns_simplex_theta():
+    """infer_local returns the doc variational posterior + a θ derived from it."""
+    from spark_vi.core import BOWDocument
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    T, K, V = 10, 5, 50
+    m = OnlineHDP(T=T, K=K, vocab_size=V)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    doc = BOWDocument(
+        indices=np.array([0, 1, 2], dtype=np.int32),
+        counts=np.array([2.0, 1.0, 3.0], dtype=np.float64),
+        length=6,
+    )
+    out = m.infer_local(doc, g)
+
+    expected = {"a", "b", "phi", "var_phi", "theta"}
+    assert set(out.keys()) == expected
+    assert out["theta"].shape == (T,)
+    assert np.isclose(out["theta"].sum(), 1.0)
+    assert np.all(out["theta"] >= 0)

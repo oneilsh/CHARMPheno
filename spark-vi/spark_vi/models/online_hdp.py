@@ -479,3 +479,63 @@ class OnlineHDP(VIModel):
         ))
 
         return per_doc - corpus_stick_kl - topic_kl
+
+    def infer_local(
+        self,
+        row: Any,
+        global_params: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """Single-doc frozen-globals doc-CAVI.
+
+        Runs `_doc_e_step` on one BOWDocument with the broadcast Elogβ and
+        Elog_sticks_corpus held fixed (no global update). Returns the
+        variational posterior plus the derived per-doc θ — the
+        topic-proportion vector that downstream Stage-2 OU consumes.
+
+        Per-doc θ derivation: θ_t = Σ_k π_k(a, b) · var_phi[k, t], where
+        π_k(a, b) is the doc stick-breaking mean
+        (E[π_k] = a_k / (a_k + b_k) · prod_{l<k}(b_l / (a_l + b_l)))
+        for k = 0..K-2, with the last atom absorbing the remainder.
+        """
+        lam = global_params["lambda"]
+        u = global_params["u"]
+        v = global_params["v"]
+
+        Elogbeta = (
+            digamma(self.eta + lam)
+            - digamma(self.V * self.eta + lam.sum(axis=1, keepdims=True))
+        )
+        Elog_sticks_corpus = _expect_log_sticks(u, v)
+
+        indices = np.asarray(row.indices)
+        counts = np.asarray(row.counts, dtype=np.float64)
+
+        r = _doc_e_step(
+            indices=indices, counts=counts,
+            Elogbeta_doc=Elogbeta[:, indices],
+            Elog_sticks_corpus=Elog_sticks_corpus,
+            alpha=self.alpha,
+            K=self.K,
+            max_iter=self.cavi_max_iter,
+            tol=self.cavi_tol,
+            warmup=3,
+        )
+
+        # Doc stick mean: pi_k = E[π_k] under Beta(a, b) factors.
+        a, b = r["a"], r["b"]
+        E_W = a / (a + b)                              # length K-1
+        E_1mW = b / (a + b)                            # length K-1
+        pi_doc = np.zeros(self.K, dtype=np.float64)
+        pi_doc[: self.K - 1] = E_W * np.concatenate([[1.0], np.cumprod(E_1mW)[:-1]])
+        pi_doc[self.K - 1] = 1.0 - pi_doc[: self.K - 1].sum()
+
+        # θ = pi_doc @ var_phi  → shape (T,)
+        theta = pi_doc @ r["var_phi"]
+
+        return {
+            "a": a,
+            "b": b,
+            "phi": r["phi"],
+            "var_phi": r["var_phi"],
+            "theta": theta,
+        }
