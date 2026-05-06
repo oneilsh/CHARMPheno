@@ -147,3 +147,49 @@ def test_online_hdp_synthetic_recovery_top_topics(spark):
         f"Mean matched cosine similarity {matched_sims.mean():.3f} < 0.7. "
         f"Per-topic sims: {matched_sims}"
     )
+
+
+@pytest.mark.slow
+def test_online_hdp_infer_local_round_trip(spark):
+    """Fit on training corpus, run infer_local on a held-out doc.
+
+    Asserts the doc-CAVI converges, returns simplex-valid θ, and
+    concentrates mass on a small subset of corpus topics (effective
+    sparsity expected from a sparse synthetic generator).
+    """
+    from spark_vi.core import BOWDocument, VIConfig, VIRunner
+    from spark_vi.models import OnlineHDP
+
+    _, docs = _generate_synthetic_corpus(
+        D=200, V=50, K=5, docs_avg_len=15, seed=11)
+    rdd = spark.sparkContext.parallelize(docs, numSlices=2).persist()
+    rdd.count()
+
+    np.random.seed(11)
+    model = OnlineHDP(T=10, K=5, vocab_size=50)
+    runner = VIRunner(model, config=VIConfig(max_iterations=20))
+    result = runner.fit(rdd)
+
+    # Held-out doc with a different seed — words fall in the same vocab
+    # but the doc is genuinely new.
+    rng = np.random.default_rng(999)
+    held_idx = np.sort(rng.choice(50, size=8, replace=False).astype(np.int32))
+    held_counts = rng.gamma(2.0, 1.0, 8).astype(np.float64)
+    held_out = BOWDocument(
+        indices=held_idx,
+        counts=held_counts,
+        length=int(held_counts.sum()),
+    )
+
+    out = model.infer_local(held_out, result.global_params)
+    theta = out["theta"]
+
+    assert theta.shape == (10,)
+    assert np.isclose(theta.sum(), 1.0, atol=1e-6)
+    assert np.all(theta >= 0)
+    # Effective sparsity: > 80% of mass on at most half the topics.
+    sorted_theta = np.sort(theta)[::-1]
+    half = max(1, len(sorted_theta) // 2)
+    assert sorted_theta[:half].sum() > 0.8, (
+        f"θ not concentrated; top-{half}: {sorted_theta[:half].sum():.3f}"
+    )
