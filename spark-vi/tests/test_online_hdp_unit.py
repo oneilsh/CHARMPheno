@@ -3,6 +3,22 @@
 No Spark — these test the math in isolation. Single document, hand-checked
 shapes and values where possible.
 """
+
+# NOTE: Task 16 (Wang reference cross-check fixture) was deferred — see
+# docs/superpowers/plans/2026-05-06-online-hdp.md, "Task 16" section
+# allowing this. Wang's reference Python is Python 2 with pinned legacy
+# dependencies; generating a JSON fixture requires either a P2 sandbox or
+# a vendored 2-to-3 port of his `doc_e_step` function. The math correctness
+# story for v1 is already covered by stronger gates than bit-matching:
+#   - test_doc_e_step_per_iter_elbo_nondecreasing — caught a real bug
+#     (doc_z_term needed count-weighting; Wang's reference has the same
+#     bug). Bit-matching would have produced a false positive here.
+#   - test_online_hdp_synthetic_recovery_top_topics (slow tier) — verifies
+#     end-to-end recovery on D=2000 LDA-generated data.
+#   - test_compute_elbo_corpus_kl_zero_at_prior — algebraic identity.
+# Revisit the cross-check fixture if a future bug suggests we need
+# closer-than-correctness-tests verification of Wang-equivalent paths.
+
 import numpy as np
 import pytest
 from scipy.special import digamma
