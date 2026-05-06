@@ -131,3 +131,89 @@ def test_beta_kl_positive_when_prior_more_concentrated():
         prior_b=1.0,
     )
     assert np.all(kl > 0)
+
+
+def _peaked_elogbeta(T: int, V: int, sharpness: float = 5.0) -> np.ndarray:
+    """Stylized E[log beta] where each topic peaks on a single word.
+
+    Topic t peaks on word t (mod V). Used to make doc-CAVI tests
+    deterministic and visually inspectable. Returns shape (T, V).
+    """
+    eb = np.full((T, V), -sharpness, dtype=np.float64)
+    for t in range(T):
+        eb[t, t % V] = 0.0
+    return eb
+
+
+def test_doc_e_step_shape_and_simplex_contract():
+    """Run one doc through CAVI; output arrays have right shapes and are valid."""
+    from spark_vi.models.online_hdp import _doc_e_step, _expect_log_sticks
+
+    T, K, V = 10, 5, 20
+    Elogbeta = _peaked_elogbeta(T, V)
+    u = np.ones(T - 1)
+    v = np.full(T - 1, 1.0)  # gamma=1.0
+    Elog_sticks_corpus = _expect_log_sticks(u, v)
+
+    indices = np.array([0, 1, 2, 3], dtype=np.int32)
+    counts = np.array([3.0, 2.0, 1.0, 4.0], dtype=np.float64)
+    Elogbeta_doc = Elogbeta[:, indices]
+
+    result = _doc_e_step(
+        indices=indices,
+        counts=counts,
+        Elogbeta_doc=Elogbeta_doc,
+        Elog_sticks_corpus=Elog_sticks_corpus,
+        alpha=1.0,
+        K=K,
+        max_iter=20,
+        tol=1e-4,
+        warmup=3,
+    )
+
+    a = result["a"]
+    b = result["b"]
+    phi = result["phi"]
+    var_phi = result["var_phi"]
+
+    assert a.shape == (K - 1,)
+    assert b.shape == (K - 1,)
+    assert phi.shape == (len(indices), K)
+    assert var_phi.shape == (K, T)
+
+    assert np.all(a > 0)
+    assert np.all(b > 0)
+    assert np.all(np.isfinite(phi))
+    assert np.all(np.isfinite(var_phi))
+
+    # Simplex contracts.
+    assert np.allclose(phi.sum(axis=1), 1.0)
+    assert np.allclose(var_phi.sum(axis=1), 1.0)
+
+
+def test_doc_e_step_returns_doc_elbo_terms():
+    """The returned dict must include the four ELBO contributions used by
+    local_update for sufficient-stat aggregation."""
+    from spark_vi.models.online_hdp import _doc_e_step, _expect_log_sticks
+
+    T, K, V = 10, 5, 20
+    Elogbeta = _peaked_elogbeta(T, V)
+    u = np.ones(T - 1)
+    v = np.full(T - 1, 1.0)
+    Elog_sticks_corpus = _expect_log_sticks(u, v)
+
+    indices = np.array([0, 1, 2], dtype=np.int32)
+    counts = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+    Elogbeta_doc = Elogbeta[:, indices]
+
+    result = _doc_e_step(
+        indices=indices, counts=counts,
+        Elogbeta_doc=Elogbeta_doc,
+        Elog_sticks_corpus=Elog_sticks_corpus,
+        alpha=1.0, K=K, max_iter=20, tol=1e-4, warmup=3,
+    )
+
+    for key in ("doc_loglik", "doc_z_term", "doc_c_term", "doc_stick_kl"):
+        assert key in result, f"missing {key}"
+        assert np.isfinite(result[key]), f"{key} is not finite"
+    assert result["doc_stick_kl"] >= 0  # KL divergence is non-negative

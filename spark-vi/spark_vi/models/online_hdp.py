@@ -103,6 +103,125 @@ def _beta_kl(
     )
 
 
+def _doc_e_step(
+    *,
+    indices: np.ndarray,
+    counts: np.ndarray,
+    Elogbeta_doc: np.ndarray,
+    Elog_sticks_corpus: np.ndarray,
+    alpha: float,
+    K: int,
+    max_iter: int = 100,
+    tol: float = 1e-4,
+    warmup: int = 3,
+) -> dict[str, np.ndarray | float]:
+    """Per-document coordinate ascent for HDP variational posterior.
+
+    Implements paper Eqs 15-18 (Wang/Paisley/Blei 2011). The inner loop
+    rotates through four blocks:
+      var_phi   (K, T)   — q(c_jk = t):  doc-atom k → corpus-atom t
+      phi       (Wt, K)  — q(z_jn = k):  word n → doc-atom k
+      a, b      (K-1,)   — q(π'_jt) = Beta(a, b)  (doc stick params)
+    until the per-doc ELBO converges within `tol` (relative).
+
+    Args:
+      indices: vocab IDs for the unique words in this document, length Wt.
+      counts: integer counts per unique word, length Wt.
+      Elogbeta_doc: precomputed E[log φ_t,w] for the words in this doc,
+        shape (T, Wt). Caller supplies this from the broadcast Elogbeta.
+      Elog_sticks_corpus: E[log β] under the corpus stick variational
+        posterior, length T.
+      alpha: doc-level stick concentration (paper's α0).
+      K: doc-level truncation level.
+      max_iter: hard cap on coordinate-ascent iterations.
+      tol: relative ELBO convergence threshold.
+      warmup: skip the prior-correction terms in var_phi / phi updates for
+        this many iterations. Wang's empirical stability trick.
+
+    Returns:
+      Dict with keys: a, b, phi, var_phi, log_phi, log_var_phi, plus the
+      four ELBO scalars: doc_loglik, doc_z_term, doc_c_term, doc_stick_kl.
+    """
+    Wt = len(indices)
+    T = Elogbeta_doc.shape[0]
+    counts_col = counts[:, None]
+
+    # Initialize per-doc state.
+    a = np.ones(K - 1, dtype=np.float64)
+    b = alpha * np.ones(K - 1, dtype=np.float64)
+    phi = np.full((Wt, K), 1.0 / K, dtype=np.float64)
+    Elog_sticks_doc = _expect_log_sticks(a, b)  # (K,)
+
+    # log_phi / log_var_phi populated inside the loop; declared here so the
+    # final returned dict can reference them after the loop ends.
+    log_phi = np.log(phi)
+    log_var_phi = np.zeros((K, T), dtype=np.float64)
+    var_phi = np.zeros((K, T), dtype=np.float64)
+
+    # Invariant across the CAVI iters; cached to avoid recomputing per-iter.
+    weighted_Elogbeta = Elogbeta_doc * counts_col.T  # (T, Wt)
+
+    prev_elbo = -np.inf
+    doc_loglik = doc_z_term = doc_c_term = 0.0
+    doc_stick_kl = 0.0
+
+    for it in range(max_iter):
+        # 1) var_phi update — paper Eq 17. Shape (K, T).
+        # E[log p(c_jk | β')] = Elog_sticks_corpus[t]
+        # E[log p(w_jn | φ_k)] · counts contributes via phi.T @ (Elogbeta_doc * counts).T
+        log_var_phi = phi.T @ weighted_Elogbeta.T  # (K, T)
+        if it >= warmup:
+            log_var_phi = log_var_phi + Elog_sticks_corpus[None, :]
+        log_var_phi = _log_normalize_rows(log_var_phi)
+        var_phi = np.exp(log_var_phi)
+
+        # 2) phi update — paper Eq 18. Shape (Wt, K).
+        log_phi = (var_phi @ Elogbeta_doc).T  # (Wt, K)
+        if it >= warmup:
+            log_phi = log_phi + Elog_sticks_doc[None, :]
+        log_phi = _log_normalize_rows(log_phi)
+        phi = np.exp(log_phi)
+
+        # 3) a, b update — paper Eqs 15-16.
+        phi_w = phi * counts_col  # (Wt, K)
+        phi_sum = phi_w.sum(axis=0)  # (K,)
+        a = 1.0 + phi_sum[: K - 1]
+        # b[t] = α + Σ_{s>t} phi_sum[s]
+        b = alpha + np.cumsum(phi_sum[1:][::-1])[::-1]
+        Elog_sticks_doc = _expect_log_sticks(a, b)
+
+        # 4) Compute doc ELBO and check convergence.
+        # Term naming follows paper Eq 14 decomposition:
+        #   doc_c_term = E[log p(c | β')] + H(q(c))    = Σ (Elog_sticks_corpus - log_var_phi) · var_phi
+        #   doc_z_term = E[log p(z | π)]  + H(q(z))    = Σ (Elog_sticks_doc - log_phi) · phi
+        #   doc_loglik = E[log p(w | z, c, φ)]         = Σ phi.T · (var_phi @ (Elogbeta_doc * counts))
+        #   doc_stick_kl = KL[q(π') ‖ p(π')]           — subtracted
+        doc_c_term = float(np.sum((Elog_sticks_corpus[None, :] - log_var_phi) * var_phi))
+        doc_z_term = float(np.sum((Elog_sticks_doc[None, :] - log_phi) * phi))
+        data_part = var_phi @ weighted_Elogbeta  # (K, Wt)
+        doc_loglik = float(np.sum(phi.T * data_part))
+        doc_stick_kl = float(_beta_kl(a, b, prior_a=1.0, prior_b=alpha).sum())
+
+        elbo = doc_loglik + doc_z_term + doc_c_term - doc_stick_kl
+
+        # Don't allow early-exit before warmup completes — the iter < warmup branch
+        # omits the prior-correction terms, so we need at least one full post-warmup
+        # iter (it == warmup) before the relative-ELBO test is meaningful.
+        if it > warmup and abs(elbo - prev_elbo) / max(abs(prev_elbo), 1.0) < tol:
+            break
+        prev_elbo = elbo
+
+    return {
+        "a": a, "b": b,
+        "phi": phi, "var_phi": var_phi,
+        "log_phi": log_phi, "log_var_phi": log_var_phi,
+        "doc_loglik": doc_loglik,
+        "doc_z_term": doc_z_term,
+        "doc_c_term": doc_c_term,
+        "doc_stick_kl": doc_stick_kl,
+    }
+
+
 # Stub OnlineHDP class — methods filled in by later tasks.
 class OnlineHDP(VIModel):
     """Stub during incremental implementation; see Task 6 onwards."""
