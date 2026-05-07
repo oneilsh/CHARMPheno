@@ -58,7 +58,7 @@ def test_optimize_doc_concentration_default_matches_mllib():
 
 def test_vector_to_bow_document_handles_sparse_vector():
     from pyspark.ml.linalg import Vectors
-    from spark_vi.mllib.lda import _vector_to_bow_document
+    from spark_vi.mllib._common import _vector_to_bow_document
 
     sv = Vectors.sparse(5, [0, 2, 4], [1.0, 3.0, 2.0])
     doc = _vector_to_bow_document(sv)
@@ -71,7 +71,7 @@ def test_vector_to_bow_document_handles_sparse_vector():
 def test_vector_to_bow_document_handles_dense_vector_with_zeros():
     """DenseVectors with embedded zeros should round-trip to a sparse BOWDocument."""
     from pyspark.ml.linalg import Vectors
-    from spark_vi.mllib.lda import _vector_to_bow_document
+    from spark_vi.mllib._common import _vector_to_bow_document
 
     dv = Vectors.dense([0.0, 2.0, 0.0, 5.0, 0.0])
     doc = _vector_to_bow_document(dv)
