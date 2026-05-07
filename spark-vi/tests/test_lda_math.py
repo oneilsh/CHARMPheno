@@ -149,10 +149,10 @@ def test_compute_elbo_lambda_kl_zero_when_lambda_equals_eta():
 
 
 def test_alpha_newton_step_recovers_known_alpha_on_synthetic():
-    """Newton iterations on _alpha_newton_step recover the true α from
+    """Newton iterations on alpha_newton_step recover the true α from
     samples of Dir(α). Sanity check on the closed-form Sherman-Morrison step.
     """
-    from spark_vi.models.lda import _alpha_newton_step
+    from spark_vi.inference.concentration_optimization import alpha_newton_step
 
     rng = np.random.default_rng(42)
     true_alpha = np.array([0.1, 0.5, 0.9])
@@ -168,7 +168,7 @@ def test_alpha_newton_step_recovers_known_alpha_on_synthetic():
     # Initialize from the symmetric prior 1/K, iterate full Newton steps.
     alpha = np.full(K, 1.0 / K, dtype=np.float64)
     for _ in range(50):
-        delta = _alpha_newton_step(alpha, e_log_theta_sum, D=float(D))
+        delta = alpha_newton_step(alpha, e_log_theta_sum, D=float(D))
         alpha = alpha + delta
         alpha = np.maximum(alpha, 1e-3)
 
@@ -176,10 +176,10 @@ def test_alpha_newton_step_recovers_known_alpha_on_synthetic():
 
 
 def test_eta_newton_step_recovers_known_eta_on_synthetic():
-    """Newton iterations on _eta_newton_step recover the true η from
+    """Newton iterations on eta_newton_step recover the true η from
     samples of Dir(η · 1_V). Symmetric scalar version of the α test.
     """
-    from spark_vi.models.lda import _eta_newton_step
+    from spark_vi.inference.concentration_optimization import eta_newton_step
 
     rng = np.random.default_rng(7)
     true_eta = 0.5
@@ -196,7 +196,7 @@ def test_eta_newton_step_recovers_known_eta_on_synthetic():
 
     eta = 0.1
     for _ in range(50):
-        delta = _eta_newton_step(eta, e_log_phi_sum, K=K, V=V)
+        delta = eta_newton_step(eta, e_log_phi_sum, K=K, V=V)
         eta = max(eta + delta, 1e-3)
 
     assert abs(eta - true_eta) < 0.05, f"got {eta}, expected ~{true_eta}"

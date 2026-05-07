@@ -159,8 +159,8 @@ def main():
             scaled = stats['e_log_theta_sum'] * scale
             print(f"  scaled to D={D}: {scaled}")
             # Newton step
-            from spark_vi.models.lda import _alpha_newton_step
-            delta = _alpha_newton_step(gp["alpha"], scaled, D=float(D))
+            from spark_vi.inference.concentration_optimization import alpha_newton_step
+            delta = alpha_newton_step(gp["alpha"], scaled, D=float(D))
             print(f"  Δα (raw Newton step) = {delta}")
             # rho_t for iter 1
             rho_1 = (1024 + 1 + 1) ** -0.7
