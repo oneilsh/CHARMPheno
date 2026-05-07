@@ -3,7 +3,7 @@
 Wraps spark_vi.models.lda.VanillaLDA + spark_vi.core.runner.VIRunner so the
 model behaves like a pyspark.ml.clustering.LDA-shaped Estimator/Model pair.
 The shim is a translation layer; all SVI logic lives in VanillaLDA. See
-docs/superpowers/specs/2026-05-04-mllib-shim-design.md and ADR 0009.
+ADR 0009 (docs/decisions/0009-mllib-shim.md) for the design rationale.
 """
 from __future__ import annotations
 

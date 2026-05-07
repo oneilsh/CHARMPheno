@@ -2,7 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-05-04
-**Context:** [docs/superpowers/specs/2026-05-04-mllib-shim-design.md](../superpowers/specs/2026-05-04-mllib-shim-design.md)
 
 ## Context
 

@@ -2,7 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-05-05
-**Context:** [docs/superpowers/specs/2026-05-05-lda-concentration-optimization-design.md](../superpowers/specs/2026-05-05-lda-concentration-optimization-design.md)
 
 ## Context
 
