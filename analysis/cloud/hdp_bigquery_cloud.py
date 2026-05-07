@@ -52,9 +52,9 @@ def _phase(name: str):
 
 
 def _expected_corpus_betas(u: np.ndarray, v: np.ndarray, T: int) -> np.ndarray:
-    """Plug-in E[β_t] (length T). Local copy of mllib.hdp._expected_corpus_betas
-    so this driver can render mid-fit topic snapshots without importing a
-    private from the shim."""
+    """E[β_t] (length T) under mean-field q. Local copy of
+    mllib.hdp._expected_corpus_betas so this driver can render mid-fit
+    topic snapshots without importing a private from the shim."""
     E_W = u / (u + v)
     E_1mW = v / (u + v)
     out = np.zeros(T, dtype=np.float64)
@@ -63,7 +63,9 @@ def _expected_corpus_betas(u: np.ndarray, v: np.ndarray, T: int) -> np.ndarray:
     return out
 
 
-def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id, T):
+def _make_topic_evolution_logger(
+    top_n, every_n, idx_to_cid, name_by_id, T, mass_threshold,
+):
     """Build an on_iteration callback that prints top-N tokens per *active*
     HDP topic.
 
@@ -71,8 +73,9 @@ def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id, T):
     but:
       * Sorts topics by E[β_t] (corpus stick mean), not λ row-sum, to get
         the HDP-native usage ranking.
-      * Filters to active topics (E[β_t] > 1/(2T)) so the output isn't
-        flooded by hundreds of inactive truncation topics.
+      * Filters to the smallest set of topics whose E[β_t] sum to ≥
+        mass_threshold (truncation-independent; matches the shim's
+        OnlineHDPModel.activeTopicCount and the model's iteration_summary).
       * Per-topic prefix is the corpus stick weight E[β_t] plus Σλ and
         peakedness, mirroring the LDA driver's diagnostic shape.
 
@@ -88,14 +91,14 @@ def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id, T):
         u = global_params["u"]                                # (T-1,)
         v = global_params["v"]                                # (T-1,)
         E_beta = _expected_corpus_betas(u, v, T=T)
-        active_mask = E_beta > 1.0 / (2.0 * T)
+        order_full = np.argsort(E_beta)[::-1]
+        cumsum = np.cumsum(E_beta[order_full])
+        above = cumsum >= mass_threshold
+        n_active = int(np.argmax(above)) + 1 if above.any() else T
+        order = [int(t) for t in order_full[:n_active]]
         lam_row_sums = lam.sum(axis=1)
         peak = lam.max(axis=1) / np.maximum(lam_row_sums, 1e-12)
         topics = lam / np.maximum(lam_row_sums[:, None], 1e-12)
-
-        order = np.argsort(E_beta)[::-1]
-        order = [int(t) for t in order if active_mask[int(t)]]
-        n_active = len(order)
         print(
             f"[driver]   --- topics @ iter {iter_num} "
             f"({n_active}/{T} active) ---",
@@ -186,6 +189,13 @@ def main(argv: list[str] | None = None) -> int:
         help=("during fit, emit a topic summary (top tokens per active topic) "
               "every N iterations. 0 disables."),
     )
+    parser.add_argument(
+        "--active-mass-threshold", type=float, default=0.95,
+        help=("cumulative-mass threshold for the 'active' filter — count and "
+              "show the smallest set of topics whose top-ranked E[β_t] sum "
+              "to ≥ this value. Default 0.95 (PCA's explained-variance "
+              "analog). Used by mid-fit snapshots and the post-fit summary."),
+    )
     args = parser.parse_args(argv)
 
     cdr = os.environ.get("WORKSPACE_CDR")
@@ -264,18 +274,29 @@ def main(argv: list[str] | None = None) -> int:
             estimator.setOnIteration(_make_topic_evolution_logger(
                 top_n=6, every_n=args.print_topics_every,
                 idx_to_cid=idx_to_cid, name_by_id=name_by_id, T=args.T,
+                mass_threshold=args.active_mass_threshold,
             ))
         model = estimator.fit(bow_df)
         print(f"[driver]   elbo trace tail: {model.result.elbo_trace[-3:]}",
               flush=True)
-        print(f"[driver]   active topics: {model.activeTopicCount()}/{args.T}",
-              flush=True)
+        n_active = model.activeTopicCount(
+            mass_threshold=args.active_mass_threshold,
+        )
+        print(
+            f"[driver]   active topics: {n_active}/{args.T} "
+            f"(covering ≥{args.active_mass_threshold:.0%} of corpus mass)",
+            flush=True,
+        )
 
-    # topicsMatrix is (V, T); pick the active topics by E[β_t] descending.
+    # topicsMatrix is (V, T); pick the active topics by E[β_t] descending,
+    # cumulative-mass threshold (matches the shim's activeTopicCount).
     tm = model.topicsMatrix().toArray()
     E_beta = model.corpusStickWeights()
-    active_t = [int(t) for t in np.argsort(E_beta)[::-1]
-                if E_beta[int(t)] > 1.0 / (2.0 * args.T)]
+    order_full = np.argsort(E_beta)[::-1]
+    cumsum = np.cumsum(E_beta[order_full])
+    above = cumsum >= args.active_mass_threshold
+    n_active_t = int(np.argmax(above)) + 1 if above.any() else args.T
+    active_t = [int(t) for t in order_full[:n_active_t]]
     print(f"\n[driver] top-{args.top_n_tokens} tokens per active topic "
           f"(concept_id  concept_name  weight), ordered by E[β]:",
           flush=True)

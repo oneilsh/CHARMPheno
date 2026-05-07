@@ -270,7 +270,77 @@ def test_active_topic_count_is_int_in_range(tiny_hdp_corpus_df):
 
     n = model.activeTopicCount()
     assert isinstance(n, int)
-    assert 0 <= n <= T
+    assert 1 <= n <= T
+
+
+def test_active_topic_count_monotone_in_mass_threshold(tiny_hdp_corpus_df):
+    """Higher mass_threshold ⇒ at least as many active topics."""
+    from spark_vi.mllib.hdp import OnlineHDPEstimator
+
+    T = 8
+    estimator = OnlineHDPEstimator(
+        k=T, docTruncation=4, maxIter=5, seed=0, subsamplingRate=1.0,
+    )
+    model = estimator.fit(tiny_hdp_corpus_df)
+
+    n_50 = model.activeTopicCount(mass_threshold=0.5)
+    n_95 = model.activeTopicCount(mass_threshold=0.95)
+    n_100 = model.activeTopicCount(mass_threshold=1.0)
+    assert n_50 <= n_95 <= n_100 <= T
+
+
+def test_active_topic_count_rejects_invalid_threshold(tiny_hdp_corpus_df):
+    from spark_vi.mllib.hdp import OnlineHDPEstimator
+
+    T = 8
+    estimator = OnlineHDPEstimator(
+        k=T, docTruncation=4, maxIter=5, seed=0, subsamplingRate=1.0,
+    )
+    model = estimator.fit(tiny_hdp_corpus_df)
+
+    with pytest.raises(ValueError, match="mass_threshold"):
+        model.activeTopicCount(mass_threshold=0.0)
+    with pytest.raises(ValueError, match="mass_threshold"):
+        model.activeTopicCount(mass_threshold=1.5)
+
+
+def test_active_topic_count_truncation_invariant():
+    """Same E[β_t] mass distribution → same active count, regardless of T."""
+    import numpy as np
+    from spark_vi.mllib.hdp import _expected_corpus_betas
+
+    # Construct two synthetic (u, v) configurations that produce the same
+    # leading mass profile but pad with extra near-zero topics at higher T.
+    # Verify activeTopicCount is invariant to the padding.
+    def _count_active(E_beta, mass_threshold):
+        sorted_desc = np.sort(E_beta)[::-1]
+        cumsum = np.cumsum(sorted_desc)
+        above = cumsum >= mass_threshold
+        return int(np.argmax(above)) + 1 if above.any() else len(E_beta)
+
+    # T=10: roughly geometric β with most mass on first 3
+    rng = np.random.default_rng(0)
+    T_small = 10
+    u_small = rng.uniform(0.5, 5.0, size=T_small - 1)
+    v_small = rng.uniform(0.5, 5.0, size=T_small - 1)
+    E_small = _expected_corpus_betas(u_small, v_small, T=T_small)
+
+    # T=20: same first 9 sticks, plus 10 extra "near-zero" sticks via
+    # large v (so E[W]≈0, β≈0). This concentrates on the first 9.
+    T_big = 20
+    u_big = np.concatenate([u_small, np.full(T_big - T_small, 1.0)])
+    v_big = np.concatenate([v_small, np.full(T_big - T_small, 100.0)])
+    E_big = _expected_corpus_betas(u_big, v_big, T=T_big)
+
+    # Both should agree on the active count for any mass_threshold below the
+    # tail-mass boundary. (The "extra" sticks in the T=20 case carry
+    # essentially zero mass.)
+    for thresh in [0.5, 0.8, 0.95]:
+        assert _count_active(E_small, thresh) == _count_active(E_big, thresh), (
+            f"truncation-dependence at mass_threshold={thresh}: "
+            f"T=10 → {_count_active(E_small, thresh)}, "
+            f"T=20 → {_count_active(E_big, thresh)}"
+        )
 
 
 def test_transform_adds_topic_distribution_column(tiny_hdp_corpus_df):

@@ -22,11 +22,19 @@ from spark_vi.models.online_hdp import OnlineHDP
 
 
 def _expected_corpus_betas(u: np.ndarray, v: np.ndarray, T: int) -> np.ndarray:
-    """Plug-in E[β_t] (length T) from corpus stick Beta(u_t, v_t) means.
+    """E[β_t] (length T) under the mean-field variational posterior.
 
-    Same stick-breaking-mean formula used by OnlineHDP.iteration_summary;
-    factored here so the Model can surface it via corpusStickWeights().
-    Jensen biased low — the plug-in is exact only when q is degenerate.
+    Stick-breaking mean: β_t = W_t · ∏_{l<t}(1 − W_l). With independent
+    Beta factors q(W_l) = Beta(u_l, v_l) under the mean-field
+    factorization, expectation distributes through the product:
+    E_q[β_t] = E[W_t] · ∏_{l<t} E[1 − W_l]. So the formula below is
+    *exact* for the variational posterior mean, not an approximation —
+    no Jensen bias at the level of the mean. (Higher moments would
+    require the joint, but we only consume the mean here.)
+
+    The variational mean still underestimates uncertainty about β_t
+    relative to the true model posterior; that's the standard
+    mean-field VI bias, not anything specific to this formula.
     """
     E_W = u / (u + v)                                          # (T-1,)
     E_1mW = v / (u + v)                                        # (T-1,)
@@ -385,25 +393,37 @@ class OnlineHDPModel(_OnlineHDPParams, Model):
         return int(self._result.global_params["lambda"].shape[1])
 
     def corpusStickWeights(self) -> np.ndarray:
-        """Plug-in E[β_t] vector (length T) from the variational corpus sticks.
+        """E[β_t] vector (length T) under the mean-field variational posterior.
 
         Surfaces the effective topic prior so callers can rank/filter active
-        topics. Jensen biased low (the plug-in is exact only when q is
-        degenerate), but the rank order is what matters for usage filtering.
+        topics. Exact mean under the mean-field q (see _expected_corpus_betas),
+        not an approximation.
         """
         u = self._result.global_params["u"]
         v = self._result.global_params["v"]
         return _expected_corpus_betas(u, v, T=self._T)
 
-    def activeTopicCount(self) -> int:
-        """Count of corpus topics with E[β_t] > 1/(2T).
+    def activeTopicCount(self, mass_threshold: float = 0.95) -> int:
+        """Smallest count of topics whose top-ranked E[β_t] sum to ≥ mass_threshold.
 
-        "Carries half-uniform mass" cheap proxy — same threshold OnlineHDP
-        uses internally for its iteration_summary. Use with corpusStickWeights()
-        to filter the (V, T) topicsMatrix to active columns.
+        Truncation-independent: as long as T is ≥ the true effective topic
+        count, the answer doesn't change with T. More robust than a fixed
+        threshold like 1/(2T), which scales with the truncation knob.
+
+        Default 0.95 is the "explained-variance" analog from PCA — count of
+        topics needed to cover 95% of corpus-level prior probability.
         """
+        if not 0.0 < mass_threshold <= 1.0:
+            raise ValueError(
+                f"mass_threshold must be in (0, 1], got {mass_threshold}"
+            )
         E_beta = self.corpusStickWeights()
-        return int(np.sum(E_beta > 1.0 / (2.0 * self._T)))
+        sorted_desc = np.sort(E_beta)[::-1]
+        cumsum = np.cumsum(sorted_desc)
+        above = cumsum >= mass_threshold
+        if not above.any():                  # fp slop on a perfectly-summing simplex
+            return len(E_beta)
+        return int(np.argmax(above)) + 1
 
     def topicsMatrix(self):
         """Topic-word distribution as an MLlib DenseMatrix of shape (V, T).
