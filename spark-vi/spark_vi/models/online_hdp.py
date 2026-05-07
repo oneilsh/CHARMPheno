@@ -34,6 +34,31 @@ from spark_vi.core.model import VIModel
 # ---------------------------------------------------------------------------
 
 
+def expected_corpus_betas(
+    u: np.ndarray, v: np.ndarray, T: int,
+) -> np.ndarray:
+    """E[β_t] (length T) under the mean-field variational posterior.
+
+    Stick-breaking mean: β_t = W_t · ∏_{l<t}(1 − W_l). With independent
+    Beta factors q(W_l) = Beta(u_l, v_l) under the mean-field
+    factorization, expectation distributes through the product:
+    E_q[β_t] = E[W_t] · ∏_{l<t} E[1 − W_l]. So the formula below is
+    *exact* for the variational posterior mean — no Jensen bias at the
+    mean (higher moments would require the joint).
+
+    Public because it's consumed across package boundaries: the MLlib
+    shim's `corpusStickWeights()`, this module's own `iteration_summary`,
+    and any downstream driver that wants HDP-native topic-prevalence
+    diagnostics. Single source of truth lives here, with the model.
+    """
+    E_W = u / (u + v)                                          # (T-1,)
+    E_1mW = v / (u + v)                                        # (T-1,)
+    E_beta = np.zeros(T, dtype=np.float64)
+    E_beta[: T - 1] = E_W * np.concatenate([[1.0], np.cumprod(E_1mW)[:-1]])
+    E_beta[T - 1] = 1.0 - E_beta[: T - 1].sum()
+    return E_beta
+
+
 def _log_normalize_rows(M: np.ndarray) -> np.ndarray:
     """Numerically stable row-wise log-normalize.
 
@@ -568,13 +593,7 @@ class OnlineHDP(VIModel):
         v = global_params["v"]
         lam = global_params["lambda"]
 
-        # E[β_k] from u, v via stick-breaking mean (exact under mean-field q).
-        E_W = u / (u + v)                                       # length T-1
-        E_1mW = v / (u + v)                                     # length T-1
-        E_beta = np.zeros(self.T, dtype=np.float64)
-        E_beta[: self.T - 1] = E_W * np.concatenate([[1.0], np.cumprod(E_1mW)[:-1]])
-        E_beta[self.T - 1] = 1.0 - E_beta[: self.T - 1].sum()
-
+        E_beta = expected_corpus_betas(u, v, T=self.T)
         sorted_desc = np.sort(E_beta)[::-1]
         cumsum = np.cumsum(sorted_desc)
         above = cumsum >= mass_threshold

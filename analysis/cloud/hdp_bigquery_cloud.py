@@ -51,18 +51,6 @@ def _phase(name: str):
               flush=True)
 
 
-def _expected_corpus_betas(u: np.ndarray, v: np.ndarray, T: int) -> np.ndarray:
-    """E[β_t] (length T) under mean-field q. Local copy of
-    mllib.hdp._expected_corpus_betas so this driver can render mid-fit
-    topic snapshots without importing a private from the shim."""
-    E_W = u / (u + v)
-    E_1mW = v / (u + v)
-    out = np.zeros(T, dtype=np.float64)
-    out[: T - 1] = E_W * np.concatenate([[1.0], np.cumprod(E_1mW)[:-1]])
-    out[T - 1] = 1.0 - out[: T - 1].sum()
-    return out
-
-
 def _make_topic_evolution_logger(
     top_n, every_n, idx_to_cid, name_by_id, T, mass_threshold,
 ):
@@ -83,6 +71,10 @@ def _make_topic_evolution_logger(
     "v" (T-1,). Stick means feed E[β_t]; row-normalized λ is the
     topic-word distribution.
     """
+    # Import deferred to factory body — same fail-fast-on-misshapen-py-files
+    # discipline as the spark_vi imports inside main().
+    from spark_vi.models.online_hdp import expected_corpus_betas
+
     def _on_iter(iter_num: int, global_params: dict,
                  _: list[float]) -> None:
         if every_n <= 0 or iter_num % every_n != 0:
@@ -90,7 +82,7 @@ def _make_topic_evolution_logger(
         lam = global_params["lambda"]                         # (T, V)
         u = global_params["u"]                                # (T-1,)
         v = global_params["v"]                                # (T-1,)
-        E_beta = _expected_corpus_betas(u, v, T=T)
+        E_beta = expected_corpus_betas(u, v, T=T)
         order_full = np.argsort(E_beta)[::-1]
         cumsum = np.cumsum(E_beta[order_full])
         above = cumsum >= mass_threshold

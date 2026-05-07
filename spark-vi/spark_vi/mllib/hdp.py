@@ -18,30 +18,7 @@ from pyspark.ml.param.shared import HasFeaturesCol, HasMaxIter, HasSeed
 
 from spark_vi.core.config import VIConfig
 from spark_vi.mllib._common import _vector_to_bow_document
-from spark_vi.models.online_hdp import OnlineHDP
-
-
-def _expected_corpus_betas(u: np.ndarray, v: np.ndarray, T: int) -> np.ndarray:
-    """E[β_t] (length T) under the mean-field variational posterior.
-
-    Stick-breaking mean: β_t = W_t · ∏_{l<t}(1 − W_l). With independent
-    Beta factors q(W_l) = Beta(u_l, v_l) under the mean-field
-    factorization, expectation distributes through the product:
-    E_q[β_t] = E[W_t] · ∏_{l<t} E[1 − W_l]. So the formula below is
-    *exact* for the variational posterior mean, not an approximation —
-    no Jensen bias at the level of the mean. (Higher moments would
-    require the joint, but we only consume the mean here.)
-
-    The variational mean still underestimates uncertainty about β_t
-    relative to the true model posterior; that's the standard
-    mean-field VI bias, not anything specific to this formula.
-    """
-    E_W = u / (u + v)                                          # (T-1,)
-    E_1mW = v / (u + v)                                        # (T-1,)
-    E_beta = np.zeros(T, dtype=np.float64)
-    E_beta[: T - 1] = E_W * np.concatenate([[1.0], np.cumprod(E_1mW)[:-1]])
-    E_beta[T - 1] = 1.0 - E_beta[: T - 1].sum()
-    return E_beta
+from spark_vi.models.online_hdp import OnlineHDP, expected_corpus_betas
 
 
 def _validate_unsupported_params(estimator: "OnlineHDPEstimator") -> None:
@@ -401,7 +378,7 @@ class OnlineHDPModel(_OnlineHDPParams, Model):
         """
         u = self._result.global_params["u"]
         v = self._result.global_params["v"]
-        return _expected_corpus_betas(u, v, T=self._T)
+        return expected_corpus_betas(u, v, T=self._T)
 
     def activeTopicCount(self, mass_threshold: float = 0.95) -> int:
         """Smallest count of topics whose top-ranked E[β_t] sum to ≥ mass_threshold.
