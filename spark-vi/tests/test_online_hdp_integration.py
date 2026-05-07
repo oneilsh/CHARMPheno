@@ -96,6 +96,87 @@ def test_online_hdp_elbo_smoothed_endpoints_show_overall_improvement(spark):
 
 
 @pytest.mark.slow
+def test_online_hdp_gamma_alpha_optimization_moves_values(spark):
+    """When optimize_gamma=True and optimize_alpha=True (the defaults), the
+    trained γ and α differ from their initial values after a 30-iter fit.
+
+    Soft assertion ("moves") rather than "lands closer to true K" because
+    at D=200 / synthetic-K=5 the topic-collapse phenomenon documented in
+    ADR 0010 makes recovery-toward-truth flaky on small corpora. The
+    cloud-driver smoke check is the harder claim's gate.
+    """
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.models import OnlineHDP
+
+    _, docs = _generate_synthetic_corpus(D=200, V=50, K=5,
+                                         docs_avg_len=15, seed=2026)
+    rdd = spark.sparkContext.parallelize(docs, numSlices=2).persist()
+    rdd.count()
+
+    np.random.seed(2026)
+    init_gamma = 1.0
+    init_alpha = 1.0
+    model = OnlineHDP(
+        T=10, K=5, vocab_size=50,
+        gamma=init_gamma, alpha=init_alpha,
+        optimize_gamma=True, optimize_alpha=True, optimize_eta=False,
+    )
+    runner = VIRunner(model, config=VIConfig(max_iterations=30))
+    result = runner.fit(rdd)
+
+    trained_gamma = float(result.global_params["gamma"])
+    trained_alpha = float(result.global_params["alpha"])
+    trained_eta = float(result.global_params["eta"])
+
+    # γ and α should both have moved meaningfully (more than 1% drift).
+    assert abs(trained_gamma - init_gamma) > 0.01 * init_gamma, (
+        f"γ did not move: init={init_gamma}, trained={trained_gamma}"
+    )
+    assert abs(trained_alpha - init_alpha) > 0.01 * init_alpha, (
+        f"α did not move: init={init_alpha}, trained={trained_alpha}"
+    )
+    # η was NOT optimized this run — must be exactly the initial value.
+    assert trained_eta == 0.01
+
+    # All three within healthy ranges (above floor, finite).
+    for name, val in (("γ", trained_gamma), ("α", trained_alpha)):
+        assert val >= 1e-3, f"{name} fell below 1e-3 floor: {val}"
+        assert np.isfinite(val), f"{name} non-finite: {val}"
+
+
+@pytest.mark.slow
+def test_online_hdp_optimize_eta_smoke(spark):
+    """Smoke check that η optimization runs end-to-end without blowing up.
+
+    η is the least-stable concentration in SVI per Hoffman 2010 §3.4 —
+    this gate ensures the wiring (Newton on just-updated λ, ρ_t damping,
+    1e-3 floor) survives a 30-iter fit without NaNs or floor-pinning.
+    """
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.models import OnlineHDP
+
+    _, docs = _generate_synthetic_corpus(D=200, V=50, K=5,
+                                         docs_avg_len=15, seed=2027)
+    rdd = spark.sparkContext.parallelize(docs, numSlices=2).persist()
+    rdd.count()
+
+    np.random.seed(2027)
+    model = OnlineHDP(
+        T=10, K=5, vocab_size=50,
+        optimize_gamma=True, optimize_alpha=True, optimize_eta=True,
+    )
+    runner = VIRunner(model, config=VIConfig(max_iterations=30))
+    result = runner.fit(rdd)
+
+    trace = np.asarray(result.elbo_trace)
+    assert all(np.isfinite(v) for v in trace)
+    eta = float(result.global_params["eta"])
+    assert np.isfinite(eta) and eta >= 1e-3
+    # Should have moved off the initial 0.01 default.
+    assert eta != 0.01
+
+
+@pytest.mark.slow
 def test_online_hdp_synthetic_recovery_top_topics(spark):
     """Top-K_true topics by usage recover true word distributions.
 

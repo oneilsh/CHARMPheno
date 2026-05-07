@@ -27,6 +27,10 @@ import numpy as np
 from scipy.special import digamma, gammaln
 
 from spark_vi.core.model import VIModel
+from spark_vi.inference.concentration_optimization import (
+    beta_concentration_closed_form,
+    eta_newton_step,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +313,19 @@ class OnlineHDP(VIModel):
       cavi_max_iter: hard cap on doc-CAVI iterations per doc.
       cavi_tol: relative ELBO convergence threshold for doc-CAVI early
         termination.
+      optimize_gamma: if True, run a closed-form M-step on the corpus-stick
+        concentration γ each iteration. Default True — γ optimization is
+        the headline appeal of HDP (auto-discovers effective topic count).
+        Closed form because Beta(1, γ) admits an exact ELBO maximizer
+        (β* = -N/S); ρ_t damping applied at the call site. See ADR 0013.
+      optimize_alpha: if True, run a closed-form M-step on the doc-stick
+        concentration α each iteration. Default True (matches LDA's
+        optimize_alpha default after ADR 0010). Same Beta(1, α) closed
+        form as γ; sufficient stat accumulated per-doc in local_update.
+      optimize_eta: if True, run a scalar Newton step on the symmetric
+        Dirichlet topic-word concentration η each iteration. Default
+        False (matches LDA — η is the least-stable concentration in SVI
+        per Hoffman 2010 §3.4). Reuses LDA's eta_newton_step helper.
     """
 
     def __init__(
@@ -323,6 +340,9 @@ class OnlineHDP(VIModel):
         gamma_shape: float = 100.0,
         cavi_max_iter: int = 100,
         cavi_tol: float = 1e-4,
+        optimize_gamma: bool = True,
+        optimize_alpha: bool = True,
+        optimize_eta: bool = False,
     ) -> None:
         if T < 2:
             raise ValueError(f"T must be >= 2 (need T-1 sticks), got {T}")
@@ -346,12 +366,18 @@ class OnlineHDP(VIModel):
         self.T = int(T)
         self.K = int(K)
         self.V = int(vocab_size)
+        # Initial values used by initialize_global to seed global_params.
+        # Past init, γ/α/η live in global_params (broadcast each iter,
+        # mutated by update_global when the optimize_* flags are on).
         self.alpha = float(alpha)
         self.gamma = float(gamma)
         self.eta = float(eta)
         self.gamma_shape = float(gamma_shape)
         self.cavi_max_iter = int(cavi_max_iter)
         self.cavi_tol = float(cavi_tol)
+        self.optimize_gamma = bool(optimize_gamma)
+        self.optimize_alpha = bool(optimize_alpha)
+        self.optimize_eta = bool(optimize_eta)
 
     # Stub methods filled in by Tasks 7-12.
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
@@ -374,7 +400,16 @@ class OnlineHDP(VIModel):
         )
         u = np.ones(self.T - 1, dtype=np.float64)
         v = np.full(self.T - 1, self.gamma, dtype=np.float64)
-        return {"lambda": lam, "u": u, "v": v}
+        # γ/α/η wrapped as 0-d ndarrays so combine_stats and broadcast
+        # round-trips see uniform types regardless of optimization state.
+        return {
+            "lambda": lam,
+            "u": u,
+            "v": v,
+            "gamma": np.array(self.gamma),
+            "alpha": np.array(self.alpha),
+            "eta": np.array(self.eta),
+        }
 
     def local_update(
         self,
@@ -394,12 +429,17 @@ class OnlineHDP(VIModel):
         lam = global_params["lambda"]              # (T, V)
         u = global_params["u"]                     # (T-1,)
         v = global_params["v"]                     # (T-1,)
+        # α/η now live in global_params — read each iter so optimize_*
+        # updates from the previous update_global propagate without
+        # needing a fresh broadcast of self.
+        alpha = float(global_params["alpha"])
+        eta = float(global_params["eta"])
 
         # Precompute Elogbeta and Elog_sticks_corpus once per partition;
         # both are shared across all docs in the partition.
         Elogbeta = (
-            digamma(self.eta + lam)
-            - digamma(self.V * self.eta + lam.sum(axis=1, keepdims=True))
+            digamma(eta + lam)
+            - digamma(self.V * eta + lam.sum(axis=1, keepdims=True))
         )
         Elog_sticks_corpus = _expect_log_sticks(u, v)
 
@@ -410,6 +450,11 @@ class OnlineHDP(VIModel):
         doc_c_term_sum = 0.0
         doc_stick_kl_sum = 0.0
         n_docs = 0
+        # Sufficient statistic for α closed-form: Σ_d Σ_k E[log(1 - V_jk)]
+        # = Σ_d Σ_k [ψ(b_jk) − ψ(a_jk + b_jk)] from per-doc Beta(a, b)
+        # posteriors. Accumulated only when the flag is on so the
+        # no-optimize path keeps its current shape.
+        s_alpha = 0.0 if self.optimize_alpha else None
 
         for doc in rows:
             indices = np.asarray(doc.indices)
@@ -419,7 +464,7 @@ class OnlineHDP(VIModel):
                 indices=indices, counts=counts,
                 Elogbeta_doc=Elogbeta[:, indices],
                 Elog_sticks_corpus=Elog_sticks_corpus,
-                alpha=self.alpha,
+                alpha=alpha,
                 K=self.K,
                 max_iter=self.cavi_max_iter,
                 tol=self.cavi_tol,
@@ -443,7 +488,11 @@ class OnlineHDP(VIModel):
             doc_stick_kl_sum += r["doc_stick_kl"]
             n_docs += 1
 
-        return {
+            if s_alpha is not None:
+                a_doc, b_doc = r["a"], r["b"]
+                s_alpha += float((digamma(b_doc) - digamma(a_doc + b_doc)).sum())
+
+        out: dict[str, np.ndarray] = {
             "lambda_stats": lambda_stats,
             "var_phi_sum_stats": var_phi_sum_stats,
             "doc_loglik_sum": np.array(doc_loglik_sum),
@@ -452,6 +501,9 @@ class OnlineHDP(VIModel):
             "doc_stick_kl_sum": np.array(doc_stick_kl_sum),
             "n_docs": np.array(float(n_docs)),
         }
+        if s_alpha is not None:
+            out["s_alpha"] = np.array(s_alpha)
+        return out
 
     def update_global(
         self,
@@ -459,12 +511,15 @@ class OnlineHDP(VIModel):
         target_stats: dict[str, np.ndarray],
         learning_rate: float,
     ) -> dict[str, np.ndarray]:
-        """SVI natural-gradient step on (λ, u, v). Paper Eqs 22-27.
+        """SVI natural-gradient step on (λ, u, v) plus optional M-steps on
+        the concentration hyperparameters γ, α, η. Paper Eqs 22-27 cover
+        the (λ, u, v) updates; the concentration M-steps are a v3 follow-on
+        documented in ADR 0013.
 
         target_stats arrive already corpus-scaled by the runner — i.e.
         lambda_stats here is D × (sum over batch) / batch_size, same for
-        var_phi_sum_stats. The full natural-gradient update on each
-        global collapses to a convex combination:
+        var_phi_sum_stats and s_alpha. The natural-gradient updates on
+        each global collapse to a convex combination:
 
           λ_new   = (1 - ρ) · λ + ρ · (η + target_lambda_stats)
           u_new   = (1 - ρ) · u + ρ · (1 + s_head)
@@ -473,21 +528,97 @@ class OnlineHDP(VIModel):
         where s = target_var_phi_sum_stats (length T),
               s_head = s[:T-1],
               s_tail[t] = sum_{l>t} s[l]   for t = 0..T-2.
+
+        Concentration M-steps then run on the JUST-UPDATED (u, v, λ),
+        matching LDA's "η Newton from updated λ" pattern (lda.py
+        update_global). Each is gated on its optimize_* flag, ρ_t-damped,
+        and floored at 1e-3:
+
+          γ closed form (Beta(1, γ) prior over corpus sticks):
+            S_γ      = Σ_t [ψ(v_t) − ψ(u_t + v_t)]   (length T-1)
+            γ*       = -(T - 1) / S_γ
+            γ_new    = clip((1 - ρ) · γ + ρ · γ*, 1e-3)
+
+          α closed form (Beta(1, α) prior over per-doc sticks):
+            S_α      = corpus-scaled Σ_d Σ_k [ψ(b_jk) − ψ(a_jk + b_jk)]
+            α*       = -D · (K - 1) / S_α
+            α_new    = clip((1 - ρ) · α + ρ · α*, 1e-3)
+
+          η scalar Newton (Hoffman 2010 §3.4, computed from updated λ):
+            S_η      = Σ_t Σ_v E[log φ_tv]   from new_lambda
+            Δη       = eta_newton_step(η, S_η, T, V)
+            η_new    = clip(η + ρ · Δη, 1e-3)
+
+        γ and α use closed form (no Newton) because Beta(1, β)'s ELBO
+        contribution is N · log β + (β − 1) · S, whose derivative
+        N/β + S has a single root at β* = -N/S — exact, in one step. η
+        on a Dirichlet has no such closed form (gammaln of a sum), so
+        Newton is the cheapest exact iterate. See ADR 0013 for the full
+        derivation.
         """
         rho = float(learning_rate)
         lam = global_params["lambda"]
         u = global_params["u"]
         v = global_params["v"]
+        gamma = float(global_params["gamma"])
+        alpha = float(global_params["alpha"])
+        eta = float(global_params["eta"])
 
         s = target_stats["var_phi_sum_stats"]
         s_head = s[: self.T - 1]
         s_tail = np.cumsum(s[1:][::-1])[::-1]  # length T-1
 
-        new_lambda = (1.0 - rho) * lam + rho * (self.eta + target_stats["lambda_stats"])
+        # 1. λ, u, v natural-gradient updates use the OLD γ, η — these are
+        #    SVI steps at this ρ_t, not Newton steps. Concentration M-steps
+        #    below run on the just-updated (u, v, λ).
+        new_lambda = (1.0 - rho) * lam + rho * (eta + target_stats["lambda_stats"])
         new_u = (1.0 - rho) * u + rho * (1.0 + s_head)
-        new_v = (1.0 - rho) * v + rho * (self.gamma + s_tail)
+        new_v = (1.0 - rho) * v + rho * (gamma + s_tail)
 
-        return {"lambda": new_lambda, "u": new_u, "v": new_v}
+        # 2. γ closed form on the updated (u, v).
+        new_gamma = gamma
+        if self.optimize_gamma:
+            s_gamma = float((digamma(new_v) - digamma(new_u + new_v)).sum())
+            gamma_star = beta_concentration_closed_form(
+                n=self.T - 1, s_log_one_minus=s_gamma,
+            )
+            new_gamma = max((1.0 - rho) * gamma + rho * gamma_star, 1e-3)
+
+        # 3. α closed form using local_update's accumulated s_alpha.
+        #    Skip if the stat isn't present — local_update only emits it
+        #    when self.optimize_alpha is True, so this guard also makes
+        #    the unit tests' synthetic-stat dicts work without the key.
+        new_alpha = alpha
+        if self.optimize_alpha and "s_alpha" in target_stats:
+            D = float(target_stats["n_docs"])
+            s_alpha = float(target_stats["s_alpha"])
+            alpha_star = beta_concentration_closed_form(
+                n=D * (self.K - 1), s_log_one_minus=s_alpha,
+            )
+            new_alpha = max((1.0 - rho) * alpha + rho * alpha_star, 1e-3)
+
+        # 4. η scalar Newton on the updated λ. Same shape as LDA's η
+        #    update — global stat from current λ alone, no local
+        #    contribution. T plays K's role (number of topics in HDP).
+        new_eta = eta
+        if self.optimize_eta:
+            e_log_phi_sum = float(
+                (digamma(new_lambda)
+                 - digamma(new_lambda.sum(axis=1, keepdims=True))).sum()
+            )
+            delta_eta = eta_newton_step(
+                eta=eta, e_log_phi_sum=e_log_phi_sum, K=self.T, V=self.V,
+            )
+            new_eta = max(eta + rho * delta_eta, 1e-3)
+
+        return {
+            "lambda": new_lambda,
+            "u": new_u,
+            "v": new_v,
+            "gamma": np.array(new_gamma),
+            "alpha": np.array(new_alpha),
+            "eta": np.array(new_eta),
+        }
 
     def compute_elbo(
         self,
@@ -515,10 +646,15 @@ class OnlineHDP(VIModel):
             - float(aggregated_stats["doc_stick_kl_sum"])
         )
 
+        # γ / η read from global_params so optimize_* updates from the
+        # previous update_global feed back into the prior KL terms here.
+        gamma = float(global_params["gamma"])
+        eta = float(global_params["eta"])
+
         # Corpus stick KL — summed over k = 0..T-2.
         corpus_stick_kl = float(_beta_kl(
             global_params["u"], global_params["v"],
-            prior_a=1.0, prior_b=self.gamma,
+            prior_a=1.0, prior_b=gamma,
         ).sum())
 
         # Topic Dirichlet KL — Dirichlet(λ_t) ‖ Dirichlet(η · 1_V), summed t.
@@ -529,9 +665,9 @@ class OnlineHDP(VIModel):
         lam_sum = lam.sum(axis=1)                                   # (T,)
         topic_kl = float(np.sum(
             gammaln(lam_sum) - gammaln(lam).sum(axis=1)
-            - gammaln(self.V * self.eta) + self.V * gammaln(self.eta)
+            - gammaln(self.V * eta) + self.V * gammaln(eta)
             + np.sum(
-                (lam - self.eta)
+                (lam - eta)
                 * (digamma(lam) - digamma(lam_sum)[:, None]),
                 axis=1,
             )
@@ -559,10 +695,12 @@ class OnlineHDP(VIModel):
         lam = global_params["lambda"]
         u = global_params["u"]
         v = global_params["v"]
+        alpha = float(global_params["alpha"])
+        eta = float(global_params["eta"])
 
         Elogbeta = (
-            digamma(self.eta + lam)
-            - digamma(self.V * self.eta + lam.sum(axis=1, keepdims=True))
+            digamma(eta + lam)
+            - digamma(self.V * eta + lam.sum(axis=1, keepdims=True))
         )
         Elog_sticks_corpus = _expect_log_sticks(u, v)
 
@@ -573,7 +711,7 @@ class OnlineHDP(VIModel):
             indices=indices, counts=counts,
             Elogbeta_doc=Elogbeta[:, indices],
             Elog_sticks_corpus=Elog_sticks_corpus,
-            alpha=self.alpha,
+            alpha=alpha,
             K=self.K,
             max_iter=self.cavi_max_iter,
             tol=self.cavi_tol,
@@ -618,6 +756,9 @@ class OnlineHDP(VIModel):
         u = global_params["u"]
         v = global_params["v"]
         lam = global_params["lambda"]
+        gamma = float(global_params["gamma"])
+        alpha = float(global_params["alpha"])
+        eta = float(global_params["eta"])
 
         E_beta = expected_corpus_betas(u, v, T=self.T)
         n_active = topic_count_at_mass(E_beta, mass_threshold)
@@ -629,5 +770,6 @@ class OnlineHDP(VIModel):
         return (
             f"active topics={n_active}/{self.T}, "
             f"top E[β]={top_vals_str}, "
-            f"λ-row-sum spread={spread:.2f}"
+            f"λ-row-sum spread={spread:.2f}, "
+            f"γ={gamma:.3f}, α={alpha:.3f}, η={eta:.4f}"
         )

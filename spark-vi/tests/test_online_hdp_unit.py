@@ -346,11 +346,14 @@ def test_online_hdp_init_accepts_all_optional_args():
 def test_initialize_global_shapes_and_validity():
     from spark_vi.models.online_hdp import OnlineHDP
 
-    m = OnlineHDP(T=10, K=5, vocab_size=50, gamma=1.5, gamma_shape=100.0)
+    m = OnlineHDP(
+        T=10, K=5, vocab_size=50, alpha=0.7, gamma=1.5, eta=0.05,
+        gamma_shape=100.0,
+    )
     np.random.seed(0)
     g = m.initialize_global(data_summary=None)
 
-    assert set(g.keys()) == {"lambda", "u", "v"}
+    assert set(g.keys()) == {"lambda", "u", "v", "gamma", "alpha", "eta"}
     assert g["lambda"].shape == (10, 50)
     assert g["u"].shape == (9,)
     assert g["v"].shape == (9,)
@@ -359,6 +362,10 @@ def test_initialize_global_shapes_and_validity():
     # Paper-following init: u = 1, v = gamma.
     assert np.allclose(g["u"], 1.0)
     assert np.allclose(g["v"], 1.5)
+    # Concentration hyperparameters seeded from constructor values.
+    assert float(g["gamma"]) == 1.5
+    assert float(g["alpha"]) == 0.7
+    assert float(g["eta"]) == 0.05
 
 
 def test_local_update_returns_expected_keys_and_shapes():
@@ -389,6 +396,8 @@ def test_local_update_returns_expected_keys_and_shapes():
         "lambda_stats", "var_phi_sum_stats",
         "doc_loglik_sum", "doc_z_term_sum", "doc_c_term_sum",
         "doc_stick_kl_sum", "n_docs",
+        # s_alpha emitted because optimize_alpha defaults to True.
+        "s_alpha",
     }
     assert set(stats.keys()) == expected_keys
     assert stats["lambda_stats"].shape == (10, 50)
@@ -515,6 +524,9 @@ def test_compute_elbo_corpus_kl_zero_at_prior():
         "lambda": np.full((T, V), eta, dtype=np.float64),  # equals prior
         "u": np.ones(T - 1),
         "v": np.full(T - 1, gamma),
+        "gamma": np.array(gamma),
+        "alpha": np.array(1.0),
+        "eta": np.array(eta),
     }
     zero_stats = {
         "lambda_stats": np.zeros((T, V)),
@@ -577,3 +589,236 @@ def test_iteration_summary_handles_small_T():
     s = m.iteration_summary(g)
     assert isinstance(s, str)
     assert len(s) > 0
+
+
+# ---------------------------------------------------------------------------
+# Concentration-hyperparameter optimization tests (ADR 0013).
+# ---------------------------------------------------------------------------
+
+
+def test_local_update_emits_s_alpha_when_optimize_alpha():
+    """When optimize_alpha=True (default), local_update accumulates and
+    returns the s_alpha sufficient statistic for the closed-form M-step.
+    """
+    from spark_vi.core import BOWDocument
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=10, K=5, vocab_size=50, optimize_alpha=True)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    rows = [
+        BOWDocument(
+            indices=np.array([0, 1, 2], dtype=np.int32),
+            counts=np.array([2.0, 1.0, 3.0], dtype=np.float64),
+            length=6,
+        ),
+    ]
+    stats = m.local_update(rows, g)
+    assert "s_alpha" in stats
+    # s_alpha = Σ [ψ(b_jk) − ψ(a_jk + b_jk)] is always negative
+    # (digamma is increasing; b ≤ a + b).
+    assert float(stats["s_alpha"]) < 0
+
+
+def test_local_update_omits_s_alpha_when_optimize_alpha_false():
+    """When optimize_alpha=False, the no-stat path keeps its current shape."""
+    from spark_vi.core import BOWDocument
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=10, K=5, vocab_size=50, optimize_alpha=False)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    rows = [
+        BOWDocument(
+            indices=np.array([0, 1, 2], dtype=np.int32),
+            counts=np.array([2.0, 1.0, 3.0], dtype=np.float64),
+            length=6,
+        ),
+    ]
+    stats = m.local_update(rows, g)
+    assert "s_alpha" not in stats
+
+
+def test_update_global_advances_gamma_when_optimize_gamma():
+    """With optimize_gamma=True and ρ=1, new_gamma equals the closed-form
+    maximizer γ* = -(T-1)/Σ_t [ψ(v_t) − ψ(u_t + v_t)] computed on the
+    just-updated (u, v) — verify against a hand-computed expected value.
+    """
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    T, K, V = 5, 3, 10
+    m = OnlineHDP(
+        T=T, K=K, vocab_size=V, gamma=2.0,
+        optimize_gamma=True, optimize_alpha=False, optimize_eta=False,
+    )
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    s = np.array([10.0, 5.0, 2.0, 1.0, 0.5])
+    fake_stats = {
+        "lambda_stats": np.full((T, V), 4.0),
+        "var_phi_sum_stats": s,
+        "n_docs": np.array(5.0),
+    }
+    new_g = m.update_global(g, fake_stats, learning_rate=1.0)
+
+    # Expected γ* on the updated (u, v): γ_new = (1-1)·γ_old + 1·γ*.
+    new_u = new_g["u"]
+    new_v = new_g["v"]
+    expected_s_gamma = float((digamma(new_v) - digamma(new_u + new_v)).sum())
+    expected_gamma_star = -(T - 1) / expected_s_gamma
+    assert np.isclose(float(new_g["gamma"]), expected_gamma_star, rtol=1e-12)
+
+
+def test_update_global_advances_alpha_when_optimize_alpha():
+    """With optimize_alpha=True, ρ=1, and synthetic s_alpha, new_alpha
+    equals α* = -D·(K-1) / s_alpha.
+    """
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    T, K, V = 5, 3, 10
+    m = OnlineHDP(
+        T=T, K=K, vocab_size=V, alpha=1.5,
+        optimize_gamma=False, optimize_alpha=True, optimize_eta=False,
+    )
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    s = np.array([10.0, 5.0, 2.0, 1.0, 0.5])
+    D = 100.0
+    s_alpha = -50.0
+    fake_stats = {
+        "lambda_stats": np.full((T, V), 4.0),
+        "var_phi_sum_stats": s,
+        "n_docs": np.array(D),
+        "s_alpha": np.array(s_alpha),
+    }
+    new_g = m.update_global(g, fake_stats, learning_rate=1.0)
+
+    expected_alpha_star = -D * (K - 1) / s_alpha
+    assert np.isclose(float(new_g["alpha"]), expected_alpha_star, rtol=1e-12)
+
+
+def test_update_global_advances_eta_when_optimize_eta():
+    """With optimize_eta=True, η is updated by a Newton step from the
+    just-updated λ. Verify that η actually moves (not the exact value —
+    that's the Newton math tested in test_concentration_optimization).
+    """
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    T, K, V = 5, 3, 10
+    m = OnlineHDP(
+        T=T, K=K, vocab_size=V, eta=0.05,
+        optimize_gamma=False, optimize_alpha=False, optimize_eta=True,
+    )
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    s = np.array([10.0, 5.0, 2.0, 1.0, 0.5])
+    fake_stats = {
+        "lambda_stats": np.full((T, V), 4.0),
+        "var_phi_sum_stats": s,
+        "n_docs": np.array(5.0),
+    }
+    new_g = m.update_global(g, fake_stats, learning_rate=1.0)
+
+    assert float(new_g["eta"]) != 0.05
+    assert float(new_g["eta"]) >= 1e-3   # floor honored
+
+
+def test_update_global_floors_gamma_at_1e_minus_3():
+    """If the closed-form γ* lands below 1e-3 (degenerate stats), the
+    output γ is clamped to the floor.
+    """
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    T, K, V = 5, 3, 10
+    m = OnlineHDP(
+        T=T, K=K, vocab_size=V, gamma=2.0,
+        optimize_gamma=True, optimize_alpha=False, optimize_eta=False,
+    )
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    # Construct fake_stats that drive u very large and v small so
+    # ψ(v) − ψ(u + v) is hugely negative ⇒ γ* = -(T-1)/S is tiny.
+    s = np.array([1e6, 0.0, 0.0, 0.0, 0.0])  # only s_head[0] nonzero
+    fake_stats = {
+        "lambda_stats": np.full((T, V), 0.0),
+        "var_phi_sum_stats": s,
+        "n_docs": np.array(5.0),
+    }
+    new_g = m.update_global(g, fake_stats, learning_rate=1.0)
+    assert float(new_g["gamma"]) >= 1e-3
+
+
+def test_update_global_keeps_gamma_alpha_eta_when_flags_off():
+    """All three optimize_* flags False ⇒ γ, α, η round-trip unchanged
+    through update_global."""
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    T, K, V = 5, 3, 10
+    m = OnlineHDP(
+        T=T, K=K, vocab_size=V, alpha=0.7, gamma=2.0, eta=0.05,
+        optimize_gamma=False, optimize_alpha=False, optimize_eta=False,
+    )
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+
+    fake_stats = {
+        "lambda_stats": np.full((T, V), 4.0),
+        "var_phi_sum_stats": np.array([10.0, 5.0, 2.0, 1.0, 0.5]),
+    }
+    new_g = m.update_global(g, fake_stats, learning_rate=1.0)
+    assert float(new_g["gamma"]) == 2.0
+    assert float(new_g["alpha"]) == 0.7
+    assert float(new_g["eta"]) == 0.05
+
+
+def test_compute_elbo_uses_gamma_eta_from_global_params():
+    """Mid-fit γ/η updates feed into the prior KL terms via global_params,
+    not self. Same model instance, two different global_params → two
+    different ELBOs.
+    """
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    T, V = 5, 8
+    m = OnlineHDP(T=T, K=3, vocab_size=V, eta=0.01, gamma=1.0)
+
+    base_lam = np.full((T, V), 0.5, dtype=np.float64)
+    base_u = np.ones(T - 1)
+    base_v = np.full(T - 1, 1.0)
+    zero_stats = {
+        "lambda_stats": np.zeros((T, V)),
+        "var_phi_sum_stats": np.zeros(T),
+        "doc_loglik_sum": np.array(0.0),
+        "doc_z_term_sum": np.array(0.0),
+        "doc_c_term_sum": np.array(0.0),
+        "doc_stick_kl_sum": np.array(0.0),
+        "n_docs": np.array(0.0),
+    }
+    g_a = {
+        "lambda": base_lam.copy(), "u": base_u.copy(), "v": base_v.copy(),
+        "gamma": np.array(1.0), "alpha": np.array(1.0), "eta": np.array(0.01),
+    }
+    g_b = {
+        "lambda": base_lam.copy(), "u": base_u.copy(), "v": base_v.copy(),
+        # Same except γ and η — the KL prior terms must shift.
+        "gamma": np.array(5.0), "alpha": np.array(1.0), "eta": np.array(0.5),
+    }
+    elbo_a = m.compute_elbo(g_a, zero_stats)
+    elbo_b = m.compute_elbo(g_b, zero_stats)
+    assert elbo_a != elbo_b
+
+
+def test_iteration_summary_includes_gamma_alpha_eta():
+    """Live diagnostic surfaces current concentration values."""
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=10, K=5, vocab_size=50, alpha=0.7, gamma=1.5, eta=0.05)
+    np.random.seed(0)
+    g = m.initialize_global(data_summary=None)
+    s = m.iteration_summary(g)
+    assert "γ" in s and "α" in s and "η" in s
