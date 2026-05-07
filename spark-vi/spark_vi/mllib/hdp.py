@@ -18,7 +18,11 @@ from pyspark.ml.param.shared import HasFeaturesCol, HasMaxIter, HasSeed
 
 from spark_vi.core.config import VIConfig
 from spark_vi.mllib._common import _vector_to_bow_document
-from spark_vi.models.online_hdp import OnlineHDP, expected_corpus_betas
+from spark_vi.models.online_hdp import (
+    OnlineHDP,
+    expected_corpus_betas,
+    topic_count_at_mass,
+)
 
 
 def _validate_unsupported_params(estimator: "OnlineHDPEstimator") -> None:
@@ -390,17 +394,7 @@ class OnlineHDPModel(_OnlineHDPParams, Model):
         Default 0.95 is the "explained-variance" analog from PCA — count of
         topics needed to cover 95% of corpus-level prior probability.
         """
-        if not 0.0 < mass_threshold <= 1.0:
-            raise ValueError(
-                f"mass_threshold must be in (0, 1], got {mass_threshold}"
-            )
-        E_beta = self.corpusStickWeights()
-        sorted_desc = np.sort(E_beta)[::-1]
-        cumsum = np.cumsum(sorted_desc)
-        above = cumsum >= mass_threshold
-        if not above.any():                  # fp slop on a perfectly-summing simplex
-            return len(E_beta)
-        return int(np.argmax(above)) + 1
+        return topic_count_at_mass(self.corpusStickWeights(), mass_threshold)
 
     def topicsMatrix(self):
         """Topic-word distribution as an MLlib DenseMatrix of shape (V, T).
