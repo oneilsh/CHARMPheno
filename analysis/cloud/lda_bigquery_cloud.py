@@ -173,6 +173,21 @@ def main(argv: list[str] | None = None) -> int:
               "driver, reads from the broadcast lambda"),
     )
     parser.add_argument(
+        "--tau0", type=float, default=1024.0,
+        help=("Robbins-Monro learning offset τ₀ in ρ_t = (τ₀ + t + 1)^(-κ). "
+              "Larger τ₀ ⇒ smaller initial step (slower start). Default "
+              "1024.0 mirrors MLlib's onlineLDAOptimizer; on smaller "
+              "corpora try ~10-64 to make α/η optimization actually move "
+              "(default ρ_0 ≈ 0.029 is glacial)."),
+    )
+    parser.add_argument(
+        "--kappa", type=float, default=0.51,
+        help=("Robbins-Monro learning decay κ in ρ_t = (τ₀ + t + 1)^(-κ). "
+              "Must be in (0.5, 1.0] for SVI convergence guarantees "
+              "(Hoffman 2013 §2.3). Larger κ ⇒ faster decay. Default 0.51 "
+              "matches MLlib."),
+    )
+    parser.add_argument(
         "--optimize-doc-concentration",
         action=argparse.BooleanOptionalAction, default=True,
         help=("learn an asymmetric α (length K) via Newton-Raphson empirical "
@@ -265,11 +280,14 @@ def main(argv: list[str] | None = None) -> int:
 
     with _phase(f"fit (K={args.K}, maxIter={args.max_iter}, "
                  f"subsamplingRate={args.subsampling_rate}, "
+                 f"τ₀={args.tau0}, κ={args.kappa}, "
                  f"optimizeDocConc={args.optimize_doc_concentration}, "
                  f"optimizeTopicConc={args.optimize_topic_concentration})"):
         estimator = VanillaLDAEstimator(
             k=args.K, maxIter=args.max_iter, seed=args.seed,
             subsamplingRate=args.subsampling_rate,
+            learningOffset=args.tau0,
+            learningDecay=args.kappa,
             optimizeDocConcentration=args.optimize_doc_concentration,
             optimizeTopicConcentration=args.optimize_topic_concentration,
         )
