@@ -330,7 +330,7 @@ def test_param_translation_accepts_vector_doc_concentration():
     np.testing.assert_allclose(model.alpha, [0.1, 0.5, 0.9])
 
 
-def test_model_alpha_accessor_returns_trained_vector(tiny_corpus_df):
+def test_model_trained_alpha_accessor_returns_trained_vector(tiny_corpus_df):
     from spark_vi.mllib.lda import VanillaLDAEstimator
     import numpy as np
 
@@ -340,12 +340,12 @@ def test_model_alpha_accessor_returns_trained_vector(tiny_corpus_df):
     )
     model = estimator.fit(tiny_corpus_df)
 
-    alpha = model.alpha
+    alpha = model.trainedAlpha()
     assert alpha.shape == (3,)
     np.testing.assert_allclose(alpha, model.result.global_params["alpha"])
 
 
-def test_model_topic_concentration_accessor_returns_trained_eta(tiny_corpus_df):
+def test_model_trained_topic_concentration_accessor_returns_trained_eta(tiny_corpus_df):
     from spark_vi.mllib.lda import VanillaLDAEstimator
 
     estimator = VanillaLDAEstimator(
@@ -354,6 +354,24 @@ def test_model_topic_concentration_accessor_returns_trained_eta(tiny_corpus_df):
     )
     model = estimator.fit(tiny_corpus_df)
 
-    eta = model.topicConcentration
+    eta = model.trainedTopicConcentration()
     assert isinstance(eta, float)
     assert eta == float(model.result.global_params["eta"])
+
+
+def test_explicit_topic_concentration_through_fit_path(tiny_corpus_df):
+    """Regression: explicitly setting topicConcentration on the Estimator
+    must survive the param-copy loop in _fit. The previous @property
+    accessor on the Model shadowed the Param descriptor, causing _set
+    inside the param-copy loop to crash with AttributeError when
+    isSet(topicConcentration) was True. Methods don't shadow.
+    """
+    from spark_vi.mllib.lda import VanillaLDAEstimator
+
+    estimator = VanillaLDAEstimator(
+        k=3, maxIter=3, seed=0, subsamplingRate=1.0,
+        topicConcentration=0.05,
+    )
+    model = estimator.fit(tiny_corpus_df)  # must not raise
+
+    assert model.trainedTopicConcentration() == pytest.approx(0.05)
