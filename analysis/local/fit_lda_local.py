@@ -1,8 +1,14 @@
-"""End-to-end local: simulator parquet -> VanillaLDA -> saved VIResult.
+"""End-to-end local: simulator parquet -> VanillaLDA via shim -> saved VIResult.
 
-Sibling of fit_charmpheno_local.py. Builds a SparkSession in local mode,
-loads the OMOP parquet, builds the bag-of-words DataFrame, fits VanillaLDA
-via VIRunner, and saves the result + vocab sidecar.
+Sibling of fit_hdp_local.py. Builds a SparkSession in local mode, loads
+the OMOP parquet, builds the bag-of-words DataFrame, fits VanillaLDA
+through the MLlib shim (`VanillaLDAEstimator`), and saves the result +
+vocab sidecar.
+
+Going through the shim (rather than VIRunner directly) is deliberate:
+this is the local proxy for what analysis/cloud/lda_bigquery_cloud.py
+runs on Dataproc. Catching shim issues on a 10-doc parquet is cheaper
+than catching them on a billed cloud submit.
 
 The vocab map is recorded under VIResult.metadata["vocab"] as a list[int]
 ordered by index, so a downstream load_result + lambda inspection can
@@ -27,9 +33,9 @@ from pathlib import Path
 from pyspark.sql import SparkSession
 
 from charmpheno.omop import load_omop_parquet, to_bow_dataframe
-from spark_vi.core import BOWDocument, VIConfig, VIResult, VIRunner
+from spark_vi.core import VIResult
 from spark_vi.io import save_result
-from spark_vi.models.lda import VanillaLDA
+from spark_vi.mllib.lda import VanillaLDAEstimator
 
 log = logging.getLogger(__name__)
 
@@ -58,10 +64,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-iterations", type=int, default=200)
     parser.add_argument("--mini-batch-fraction", type=float, default=0.1)
     parser.add_argument("--tau0", type=float, default=1024.0)
-    parser.add_argument("--kappa", type=float, default=0.7)
+    parser.add_argument("--kappa", type=float, default=0.51)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--checkpoint-dir", type=Path, default=None)
-    parser.add_argument("--checkpoint-interval", type=int, default=None)
+    parser.add_argument(
+        "--optimize-doc-concentration",
+        action=argparse.BooleanOptionalAction, default=True,
+        help="empirical-Bayes Newton-Raphson on asymmetric α (Blei 2003 App. A.4.2)",
+    )
+    parser.add_argument(
+        "--optimize-topic-concentration",
+        action=argparse.BooleanOptionalAction, default=False,
+        help="empirical-Bayes Newton-Raphson on symmetric scalar η (Hoffman 2010 §3.4)",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO,
                          format="%(asctime)s %(levelname)s %(message)s")
@@ -70,37 +84,43 @@ def main(argv: list[str] | None = None) -> int:
     try:
         df = load_omop_parquet(str(args.input), spark=spark)
         bow_df, vocab_map = to_bow_dataframe(df)
-        rdd = bow_df.rdd.map(BOWDocument.from_spark_row)
-        rdd.persist()
+        bow_df = bow_df.persist()
+        n_docs = bow_df.count()
+        log.info("vocab=%d docs=%d", len(vocab_map), n_docs)
 
-        cfg = VIConfig(
-            max_iterations=args.max_iterations,
-            learning_rate_tau0=args.tau0,
-            learning_rate_kappa=args.kappa,
-            mini_batch_fraction=args.mini_batch_fraction,
-            random_seed=args.seed,
-            checkpoint_dir=args.checkpoint_dir,
-            checkpoint_interval=args.checkpoint_interval,
-            convergence_tol=1e-6,
+        estimator = VanillaLDAEstimator(
+            k=args.K,
+            maxIter=args.max_iterations,
+            seed=args.seed,
+            subsamplingRate=args.mini_batch_fraction,
+            learningOffset=args.tau0,
+            learningDecay=args.kappa,
+            optimizeDocConcentration=args.optimize_doc_concentration,
+            optimizeTopicConcentration=args.optimize_topic_concentration,
         )
-        model = VanillaLDA(K=args.K, vocab_size=len(vocab_map))
-        result = VIRunner(model, config=cfg).fit(rdd)
+        model = estimator.fit(bow_df)
 
         vocab_list = [None] * len(vocab_map)
         for cid, idx in vocab_map.items():
             vocab_list[idx] = cid
         result_with_vocab = VIResult(
-            global_params=result.global_params,
-            elbo_trace=result.elbo_trace,
-            n_iterations=result.n_iterations,
-            converged=result.converged,
-            metadata={**result.metadata, "vocab": vocab_list},
+            global_params=model.result.global_params,
+            elbo_trace=model.result.elbo_trace,
+            n_iterations=model.result.n_iterations,
+            converged=model.result.converged,
+            metadata={
+                **model.result.metadata,
+                "vocab": vocab_list,
+                "K": args.K,
+            },
         )
         save_result(result_with_vocab, args.output)
-        log.info("Wrote %s (K=%d, V=%d, n_iterations=%d, converged=%s)",
-                 args.output, args.K, len(vocab_map),
-                 result.n_iterations, result.converged)
-        rdd.unpersist()
+        log.info(
+            "wrote %s (K=%d, V=%d, n_iterations=%d, converged=%s)",
+            args.output, args.K, len(vocab_map),
+            model.result.n_iterations, model.result.converged,
+        )
+        bow_df.unpersist()
         return 0
     finally:
         spark.stop()

@@ -1,13 +1,13 @@
 """End-to-end local: simulator parquet -> OnlineHDP via shim -> saved VIResult.
 
-Sibling of fit_lda_local.py. Builds a SparkSession in local mode, loads the
-OMOP parquet, builds the bag-of-words DataFrame, fits OnlineHDP through the
-MLlib shim (`OnlineHDPEstimator`), and saves the result + vocab sidecar.
-
-Going through the shim (rather than VIRunner directly the way
-fit_lda_local.py does) is deliberate: this is the local proxy for what
-analysis/cloud/hdp_bigquery_cloud.py runs on Dataproc. Catching shim issues
+Sibling of fit_lda_local.py — both go through their respective MLlib
+shims (`VanillaLDAEstimator` / `OnlineHDPEstimator`) so the local driver
+exercises the same code path as the cloud driver. Catching shim issues
 on a 10-doc parquet is cheaper than catching them on a billed cloud submit.
+
+Builds a SparkSession in local mode, loads the OMOP parquet, builds the
+bag-of-words DataFrame, fits OnlineHDP through the shim, and saves the
+result + vocab sidecar.
 
 Usage:
     poetry run python analysis/local/fit_hdp_local.py \\
