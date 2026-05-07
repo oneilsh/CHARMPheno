@@ -41,15 +41,32 @@ def test_hdp_specific_defaults():
     assert e.getOrDefault("caviTol") == 1e-4
 
 
-def test_no_optimize_flags_exposed():
-    """ADR 0012: γ/α optimization deferred from v1, so no optimize* flags."""
+def test_optimize_flags_exposed_with_adr_0013_defaults():
+    """ADR 0013: γ/α/η are now first-class Params. γ and α default True
+    (closed-form is cheap and the headline appeal); η defaults False
+    (matches LDA — least stable in SVI)."""
     from spark_vi.mllib.hdp import OnlineHDPEstimator
 
     e = OnlineHDPEstimator()
-    param_names = {p.name for p in e.params}
-    assert "optimizeDocConcentration" not in param_names
-    assert "optimizeTopicConcentration" not in param_names
-    assert "optimizeCorpusConcentration" not in param_names
+    assert e.getOrDefault("optimizeDocConcentration") is True
+    assert e.getOrDefault("optimizeCorpusConcentration") is True
+    assert e.getOrDefault("optimizeTopicConcentration") is False
+
+
+def test_optimize_flags_translate_to_model_kwargs():
+    """The three optimize* Params flow into OnlineHDP's optimize_* ctor kwargs."""
+    from spark_vi.mllib.hdp import OnlineHDPEstimator, _build_model_and_config
+
+    e = OnlineHDPEstimator(
+        k=10, docTruncation=4,
+        optimizeDocConcentration=False,
+        optimizeCorpusConcentration=False,
+        optimizeTopicConcentration=True,
+    )
+    model, _ = _build_model_and_config(e, vocab_size=20)
+    assert model.optimize_alpha is False
+    assert model.optimize_gamma is False
+    assert model.optimize_eta is True
 
 
 def test_param_translation_to_model_and_config():
@@ -415,16 +432,50 @@ def test_log_likelihood_and_log_perplexity_raise_not_implemented(tiny_hdp_corpus
         model.logPerplexity(tiny_hdp_corpus_df)
 
 
-def test_concentration_accessors_round_trip_inputs(tiny_hdp_corpus_df):
-    """Trained α, γ, η equal the constructor inputs in v1 (no optimization)."""
+def test_concentration_accessors_round_trip_inputs_when_optimization_off(
+    tiny_hdp_corpus_df,
+):
+    """With all optimize_* flags off, trained α, γ, η equal the constructor
+    inputs (the global_params dict carries them through unchanged)."""
     from spark_vi.mllib.hdp import OnlineHDPEstimator
 
     estimator = OnlineHDPEstimator(
         k=8, docTruncation=4, maxIter=3, seed=0, subsamplingRate=1.0,
         docConcentration=[0.7], corpusConcentration=1.5, topicConcentration=0.05,
+        optimizeDocConcentration=False,
+        optimizeCorpusConcentration=False,
+        optimizeTopicConcentration=False,
     )
     model = estimator.fit(tiny_hdp_corpus_df)
 
     assert model.trainedAlpha() == pytest.approx(0.7)
     assert model.trainedCorpusConcentration() == pytest.approx(1.5)
     assert model.trainedTopicConcentration() == pytest.approx(0.05)
+
+
+def test_concentration_accessors_reflect_optimization_when_on(
+    tiny_hdp_corpus_df,
+):
+    """With γ/α optimization on (the default), trained values move away
+    from the constructor inputs. η stays put because optimize_eta defaults
+    to False."""
+    from spark_vi.mllib.hdp import OnlineHDPEstimator
+
+    init_alpha, init_gamma, init_eta = 0.7, 1.5, 0.05
+    estimator = OnlineHDPEstimator(
+        k=8, docTruncation=4, maxIter=10, seed=0, subsamplingRate=1.0,
+        docConcentration=[init_alpha],
+        corpusConcentration=init_gamma,
+        topicConcentration=init_eta,
+    )
+    model = estimator.fit(tiny_hdp_corpus_df)
+
+    # γ and α should have moved (closed-form M-step on every iter, ρ_t damped).
+    assert model.trainedAlpha() != pytest.approx(init_alpha)
+    assert model.trainedCorpusConcentration() != pytest.approx(init_gamma)
+    # η is untouched by default.
+    assert model.trainedTopicConcentration() == pytest.approx(init_eta)
+    # All values are sane.
+    for v in (model.trainedAlpha(), model.trainedCorpusConcentration(),
+              model.trainedTopicConcentration()):
+        assert v >= 1e-3 and np.isfinite(v)

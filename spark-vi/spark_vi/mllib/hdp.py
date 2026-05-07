@@ -28,13 +28,13 @@ from spark_vi.models.online_hdp import (
 def _validate_unsupported_params(estimator: "OnlineHDPEstimator") -> None:
     """Raise ValueError for any configuration the shim cannot honor.
 
-    Per ADR 0011, γ/α optimization is deferred — there are no optimize*
-    flags on this shim, so the only rejections are genuinely-unsupported
-    values:
+    Per ADR 0013, γ/α/η optimization flags are now first-class. Remaining
+    rejections are genuinely-unsupported values:
 
       * optimizer != "online" — we are SVI-only.
       * vector docConcentration — HDP α is scalar (paper Eq 9, doc-stick
-        concentration). Vector α has no derivation in v1.
+        concentration). The closed-form M-step in ADR 0013 produces a
+        single scalar; vector α has no derivation in HDP.
       * vector topicConcentration — HDP η is scalar symmetric Dirichlet
         on the topic-word prior.
 
@@ -71,12 +71,15 @@ def _build_model_and_config(
 ) -> tuple[OnlineHDP, VIConfig]:
     """Translate Estimator Params into (OnlineHDP, VIConfig).
 
-    Param mapping (see ADR 0012):
-      k                       → T (corpus truncation)
-      docTruncation           → K (doc truncation)
-      docConcentration[0]     → α (scalar; default 1.0 if unset)
-      corpusConcentration     → γ (scalar; default 1.0 if unset)
-      topicConcentration      → η (scalar; default 0.01 if unset)
+    Param mapping (see ADRs 0012, 0013):
+      k                            → T (corpus truncation)
+      docTruncation                → K (doc truncation)
+      docConcentration[0]          → α (scalar; default 1.0 if unset)
+      corpusConcentration          → γ (scalar; default 1.0 if unset)
+      topicConcentration           → η (scalar; default 0.01 if unset)
+      optimizeDocConcentration     → optimize_alpha   (bool; default True)
+      optimizeCorpusConcentration  → optimize_gamma   (bool; default True)
+      optimizeTopicConcentration   → optimize_eta     (bool; default False)
     """
     T = estimator.getOrDefault("k")
     K = estimator.getOrDefault("docTruncation")
@@ -109,6 +112,9 @@ def _build_model_and_config(
         gamma_shape=estimator.getOrDefault("gammaShape"),
         cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
         cavi_tol=estimator.getOrDefault("caviTol"),
+        optimize_gamma=bool(estimator.getOrDefault("optimizeCorpusConcentration")),
+        optimize_alpha=bool(estimator.getOrDefault("optimizeDocConcentration")),
+        optimize_eta=bool(estimator.getOrDefault("optimizeTopicConcentration")),
     )
 
     seed = estimator.getOrDefault("seed") if estimator.isSet("seed") else None
@@ -195,6 +201,26 @@ class _OnlineHDPParams(HasFeaturesCol, HasMaxIter, HasSeed):
         "relative tolerance on per-iter ELBO for doc-CAVI early stop",
         typeConverter=TypeConverters.toFloat,
     )
+    optimizeDocConcentration = Param(
+        Params._dummy(), "optimizeDocConcentration",
+        "if True, run a closed-form M-step on doc-stick concentration α each "
+        "iteration; default True. See ADR 0013.",
+        typeConverter=TypeConverters.toBoolean,
+    )
+    optimizeCorpusConcentration = Param(
+        Params._dummy(), "optimizeCorpusConcentration",
+        "if True, run a closed-form M-step on corpus-stick concentration γ each "
+        "iteration; default True. HDP-specific extra (no MLlib LDA analog). "
+        "See ADR 0013.",
+        typeConverter=TypeConverters.toBoolean,
+    )
+    optimizeTopicConcentration = Param(
+        Params._dummy(), "optimizeTopicConcentration",
+        "if True, run a scalar Newton step on topic-word concentration η each "
+        "iteration; default False (matches LDA — least stable in SVI per "
+        "Hoffman 2010 §3.4). See ADR 0013.",
+        typeConverter=TypeConverters.toBoolean,
+    )
 
 
 class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
@@ -228,6 +254,9 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
         gammaShape: float = 100.0,
         caviMaxIter: int = 100,
         caviTol: float = 1e-4,
+        optimizeDocConcentration: bool = True,
+        optimizeCorpusConcentration: bool = True,
+        optimizeTopicConcentration: bool = False,
     ) -> None:
         super().__init__()
         self._setDefault(
@@ -236,6 +265,9 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
             optimizer="online",
             learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05,
             gammaShape=100.0, caviMaxIter=100, caviTol=1e-4,
+            optimizeDocConcentration=True,
+            optimizeCorpusConcentration=True,
+            optimizeTopicConcentration=False,
         )
         # Diagnostic-only iteration callback. Stored as an instance attribute
         # rather than a Param because callables aren't MLlib-serializable
@@ -298,9 +330,6 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
         out_model = OnlineHDPModel(
             result,
             T=model_obj.T, K=model_obj.K,
-            alpha=model_obj.alpha,
-            gamma=model_obj.gamma,
-            eta=model_obj.eta,
         )
         # Copy every Param value the Estimator has set or has a default for, so
         # the Model's getters reflect the configuration that produced it.
@@ -327,23 +356,11 @@ class OnlineHDPModel(_OnlineHDPParams, Model):
         *,
         T: int,
         K: int,
-        alpha: float,
-        gamma: float,
-        eta: float,
     ) -> None:
         super().__init__()
         self._result = result
         self._T = int(T)
         self._K = int(K)
-        # Stash trained scalars as private attrs so the same-named
-        # @property accessors below don't have to round-trip through the
-        # MLlib Param machinery (which would recurse: property body calls
-        # isSet → _resolveParam → getParam → getattr → property body...).
-        # In v1 these equal the constructor inputs (no γ/α/η optimization
-        # per ADR 0011); v3 will surface optimized values here.
-        self._alpha = float(alpha)
-        self._gamma = float(gamma)
-        self._eta = float(eta)
 
     @property
     def result(self):
@@ -354,20 +371,23 @@ class OnlineHDPModel(_OnlineHDPParams, Model):
     # don't collide with the underlying Param descriptors (which would
     # break MLlib's `_set`/`_setDefault` resolution by name). This also
     # matches pyspark.ml.clustering.LDAModel which exposes
-    # docConcentration() / topicConcentration() as methods. v1 returns the
-    # constructor inputs unchanged (no optimization per ADR 0011).
+    # docConcentration() / topicConcentration() as methods. Values are
+    # read from the trained global_params dict so optimize_* flags
+    # surface their post-fit values (ADR 0013); when optimization is off,
+    # global_params still carries the original constructor inputs because
+    # initialize_global seeds them there.
     def trainedAlpha(self) -> float:
         """Trained α scalar (doc-stick concentration)."""
-        return self._alpha
+        return float(self._result.global_params["alpha"])
 
     def trainedCorpusConcentration(self) -> float:
         """Trained γ scalar (corpus-stick concentration). HDP-specific —
         no LDA analog."""
-        return self._gamma
+        return float(self._result.global_params["gamma"])
 
     def trainedTopicConcentration(self) -> float:
         """Trained η scalar (topic-word Dirichlet concentration)."""
-        return self._eta
+        return float(self._result.global_params["eta"])
 
     def vocabSize(self) -> int:
         """V dimension of the trained lambda."""
