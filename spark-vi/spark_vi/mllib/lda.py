@@ -300,24 +300,30 @@ class VanillaLDAModel(_VanillaLDAParams, Model):
         """The trained VIResult (global_params, elbo_trace, n_iterations, ...)."""
         return self._result
 
-    @property
-    def alpha(self) -> np.ndarray:
+    def trainedAlpha(self) -> np.ndarray:
         """Trained α vector (length K).
 
         For models trained with optimizeDocConcentration=True, this is the
         result of empirical-Bayes optimization. For static-α models, it's
         the initial α (broadcast to length K) — which equals the
-        constructor input either way (no surprise).
+        constructor input either way.
+
+        Method (not @property) to match the HDP shim's pattern; see
+        ADR 0012 §"Trained-scalar accessors" for the methods-vs-properties
+        rationale (the latent collision in this shim was discovered while
+        writing the HDP sibling).
         """
         return self._result.global_params["alpha"]
 
-    @property
-    def topicConcentration(self) -> float:
+    def trainedTopicConcentration(self) -> float:
         """Trained η scalar.
 
         For models trained with optimizeTopicConcentration=True, this is
         the result of empirical-Bayes optimization. Otherwise it's the
         initial η.
+
+        Method (not @property) to avoid colliding with the same-named Param
+        descriptor — see ADR 0012 §"Trained-scalar accessors".
         """
         return float(self._result.global_params["eta"])
 
