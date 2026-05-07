@@ -73,7 +73,10 @@ def _make_topic_evolution_logger(
     """
     # Import deferred to factory body — same fail-fast-on-misshapen-py-files
     # discipline as the spark_vi imports inside main().
-    from spark_vi.models.online_hdp import expected_corpus_betas
+    from spark_vi.models.online_hdp import (
+        expected_corpus_betas,
+        topic_count_at_mass,
+    )
 
     def _on_iter(iter_num: int, global_params: dict,
                  _: list[float]) -> None:
@@ -83,11 +86,8 @@ def _make_topic_evolution_logger(
         u = global_params["u"]                                # (T-1,)
         v = global_params["v"]                                # (T-1,)
         E_beta = expected_corpus_betas(u, v, T=T)
-        order_full = np.argsort(E_beta)[::-1]
-        cumsum = np.cumsum(E_beta[order_full])
-        above = cumsum >= mass_threshold
-        n_active = int(np.argmax(above)) + 1 if above.any() else T
-        order = [int(t) for t in order_full[:n_active]]
+        n_active = topic_count_at_mass(E_beta, mass_threshold)
+        order = [int(t) for t in np.argsort(E_beta)[::-1][:n_active]]
         lam_row_sums = lam.sum(axis=1)
         peak = lam.max(axis=1) / np.maximum(lam_row_sums, 1e-12)
         topics = lam / np.maximum(lam_row_sums[:, None], 1e-12)
@@ -284,11 +284,8 @@ def main(argv: list[str] | None = None) -> int:
     # cumulative-mass threshold (matches the shim's activeTopicCount).
     tm = model.topicsMatrix().toArray()
     E_beta = model.corpusStickWeights()
-    order_full = np.argsort(E_beta)[::-1]
-    cumsum = np.cumsum(E_beta[order_full])
-    above = cumsum >= args.active_mass_threshold
-    n_active_t = int(np.argmax(above)) + 1 if above.any() else args.T
-    active_t = [int(t) for t in order_full[:n_active_t]]
+    n_active_t = model.activeTopicCount(mass_threshold=args.active_mass_threshold)
+    active_t = [int(t) for t in np.argsort(E_beta)[::-1][:n_active_t]]
     print(f"\n[driver] top-{args.top_n_tokens} tokens per active topic "
           f"(concept_id  concept_name  weight), ordered by E[β]:",
           flush=True)

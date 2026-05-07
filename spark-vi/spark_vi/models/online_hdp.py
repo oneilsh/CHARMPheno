@@ -59,6 +59,32 @@ def expected_corpus_betas(
     return E_beta
 
 
+def topic_count_at_mass(
+    topic_weights: np.ndarray, mass_threshold: float = 0.95,
+) -> int:
+    """Smallest count of topics whose top-ranked weights sum to ≥ mass_threshold.
+
+    Generic over any "topic weight" vector — HDP's E[β_t] is the v1
+    use-case; an LDA equivalent (e.g., row-normalized λ row-sums) would
+    consume the same primitive. Caller provides the weights; this
+    function does the ranking + cumulative-sum + threshold lookup.
+    Truncation-independent: padding the input with arbitrarily many
+    near-zero weights doesn't change the answer.
+
+    Default 0.95 — PCA's "explained-variance" analog.
+    """
+    if not 0.0 < mass_threshold <= 1.0:
+        raise ValueError(
+            f"mass_threshold must be in (0, 1], got {mass_threshold}"
+        )
+    sorted_desc = np.sort(topic_weights)[::-1]
+    cumsum = np.cumsum(sorted_desc)
+    above = cumsum >= mass_threshold
+    if not above.any():                  # fp slop on a perfectly-summing simplex
+        return len(topic_weights)
+    return int(np.argmax(above)) + 1
+
+
 def _log_normalize_rows(M: np.ndarray) -> np.ndarray:
     """Numerically stable row-wise log-normalize.
 
@@ -594,11 +620,8 @@ class OnlineHDP(VIModel):
         lam = global_params["lambda"]
 
         E_beta = expected_corpus_betas(u, v, T=self.T)
-        sorted_desc = np.sort(E_beta)[::-1]
-        cumsum = np.cumsum(sorted_desc)
-        above = cumsum >= mass_threshold
-        n_active = int(np.argmax(above)) + 1 if above.any() else self.T
-        top3 = sorted_desc[:3]
+        n_active = topic_count_at_mass(E_beta, mass_threshold)
+        top3 = np.sort(E_beta)[::-1][:3]
         lam_sum = lam.sum(axis=1)
         spread = float(lam_sum.max() / max(lam_sum.min(), 1e-12))
 

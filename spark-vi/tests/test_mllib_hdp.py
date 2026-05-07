@@ -304,6 +304,28 @@ def test_active_topic_count_rejects_invalid_threshold(tiny_hdp_corpus_df):
         model.activeTopicCount(mass_threshold=1.5)
 
 
+def test_topic_count_at_mass_handles_edge_cases():
+    """Direct unit test of the lifted helper."""
+    import numpy as np
+    from spark_vi.models.online_hdp import topic_count_at_mass
+
+    # Perfectly-summing simplex; threshold near 1.0 fp-slop case.
+    weights = np.array([0.5, 0.3, 0.2])
+    assert topic_count_at_mass(weights, 1.0) == 3
+    assert topic_count_at_mass(weights, 0.5) == 1
+    assert topic_count_at_mass(weights, 0.81) == 3   # 0.5+0.3=0.8 < 0.81
+
+    # Single topic carries all mass.
+    weights = np.array([1.0, 0.0, 0.0])
+    assert topic_count_at_mass(weights, 0.95) == 1
+
+    # Validation rejects out-of-range thresholds.
+    with pytest.raises(ValueError, match="mass_threshold"):
+        topic_count_at_mass(weights, 0.0)
+    with pytest.raises(ValueError, match="mass_threshold"):
+        topic_count_at_mass(weights, 1.1)
+
+
 def test_active_topic_count_truncation_invariant():
     """Same E[β_t] mass distribution → same active count, regardless of T."""
     import numpy as np
