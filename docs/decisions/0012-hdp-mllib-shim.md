@@ -85,12 +85,19 @@ DataFrame schema `(topic, termIndices, termWeights)`.
 
 HDP-specific accessors that have no LDA analog:
 
-- `corpusStickWeights() → np.ndarray (T,)`: the plug-in `E[β_t]`
-  vector derived from the variational `(u, v)` posterior. Surfaces the
-  effective topic prior so callers can rank/filter active topics.
-- `activeTopicCount() → int`: count of t with `E[β_t] > 1/(2T)`. Same
-  threshold used by `OnlineHDP.iteration_summary`; a "carries half-uniform
-  mass" cheap proxy for "this corpus topic is being used".
+- `corpusStickWeights() → np.ndarray (T,)`: the `E[β_t]` vector under
+  the mean-field variational posterior, derived from the `(u, v)`
+  Beta factors. Exact for the variational mean (independent factors
+  let expectation distribute through the stick-breaking product).
+  Surfaces the effective topic prior so callers can rank/filter active
+  topics.
+- `activeTopicCount(mass_threshold=0.95) → int`: smallest count of
+  topics whose top-ranked `E[β_t]` sum to ≥ `mass_threshold`. Default
+  0.95 — PCA's "explained-variance" analog. Truncation-independent
+  (same answer for any T ≥ effective topic count), in contrast to a
+  fixed threshold like `1/(2T)` which scales with the truncation knob.
+  `OnlineHDP.iteration_summary` uses the same parameterized definition,
+  so live-training and post-fit "active" reports agree.
 
 Trained-scalar accessors are exposed as **methods** (`trainedAlpha()`,
 `trainedCorpusConcentration()`, `trainedTopicConcentration()`) rather

@@ -548,13 +548,19 @@ class OnlineHDP(VIModel):
             "theta": theta,
         }
 
-    def iteration_summary(self, global_params: dict[str, np.ndarray]) -> str:
+    def iteration_summary(
+        self,
+        global_params: dict[str, np.ndarray],
+        *,
+        mass_threshold: float = 0.95,
+    ) -> str:
         """Short live-training diagnostic.
 
         Reports:
-          - Effective active-topic count: #{k : E[β_k] > 1/(2T)}.
-            Threshold 1/(2T) is "carries half-uniform mass" — a cheap
-            proxy for "this corpus topic is being used".
+          - Effective active-topic count: smallest k such that the top-k
+            E[β_t] sum to ≥ mass_threshold. Default 0.95 → "topics
+            covering 95% of corpus prior probability." Truncation-
+            independent (any T ≥ effective count gives the same number).
           - Top-3 corpus stick weights, descending.
           - Spread of λ row sums (max / min).
         """
@@ -562,15 +568,18 @@ class OnlineHDP(VIModel):
         v = global_params["v"]
         lam = global_params["lambda"]
 
-        # E[β_k] from u, v via stick-breaking mean.
+        # E[β_k] from u, v via stick-breaking mean (exact under mean-field q).
         E_W = u / (u + v)                                       # length T-1
         E_1mW = v / (u + v)                                     # length T-1
         E_beta = np.zeros(self.T, dtype=np.float64)
         E_beta[: self.T - 1] = E_W * np.concatenate([[1.0], np.cumprod(E_1mW)[:-1]])
         E_beta[self.T - 1] = 1.0 - E_beta[: self.T - 1].sum()
 
-        n_active = int(np.sum(E_beta > 1.0 / (2.0 * self.T)))
-        top3 = np.sort(E_beta)[::-1][:3]
+        sorted_desc = np.sort(E_beta)[::-1]
+        cumsum = np.cumsum(sorted_desc)
+        above = cumsum >= mass_threshold
+        n_active = int(np.argmax(above)) + 1 if above.any() else self.T
+        top3 = sorted_desc[:3]
         lam_sum = lam.sum(axis=1)
         spread = float(lam_sum.max() / max(lam_sum.min(), 1e-12))
 
