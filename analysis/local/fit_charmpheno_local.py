@@ -1,15 +1,13 @@
 """End-to-end local smoke: simulator parquet → VIRunner → saved artifact.
 
-Bootstrap scope: uses CountingModel (coin-flip posterior) to exercise the
-plumbing because the real OnlineHDP is still stubbed. When the real HDP
-lands, this script gets an option to select between CountingModel and
-CharmPhenoHDP — or is split into two entrypoints.
+Bootstrap-era plumbing exercise: runs CountingModel (coin-flip posterior)
+on the parquet to prove the data → framework → export path. Real topic
+modeling lives in fit_lda_local.py (LDA) and fit_hdp_local.py (HDP).
 
 Expected input schema (OMOP-shaped parquet):
     person_id, visit_occurrence_id, concept_id, concept_name[, true_topic_id]
 
-For the smoke: rows are treated as 0/1 based on concept_id parity. Real
-topic modeling lives in the follow-on HDP spec.
+For the smoke: rows are treated as 0/1 based on concept_id parity.
 """
 from __future__ import annotations
 
