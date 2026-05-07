@@ -8,10 +8,9 @@
 
 ADR 0011 deferred the `OnlineHDP` MLlib shim and cloud driver scripts to
 v2 ("Following the LDA precedent (ADR 0009 added the shim *after* the
-model was built and validated)"). The model has now landed on `main`
-and exercised end-to-end via `CharmPhenoHDP.fit / .transform`. We want
-the same MLlib-shaped Estimator/Model surface for HDP that ADR 0009
-gave us for LDA so that:
+model was built and validated)"). The model has now landed on `main`.
+We want the same MLlib-shaped Estimator/Model surface for HDP that
+ADR 0009 gave us for LDA so that:
 
 - Pipelines can compose CountVectorizer → OnlineHDPEstimator the same
   way they compose CountVectorizer → VanillaLDAEstimator.
@@ -119,7 +118,7 @@ length T (corpus topics). This matches the LDA shim's "topic distribution
 column is length-K" contract: the user-facing dimension is T because
 the doc-level K is a latent-factor truncation that doesn't survive
 projection to corpus topics. Broadcast unpersist in `finally`, same
-discipline as LDA shim and CharmPhenoHDP.transform.
+discipline as the LDA shim's `_transform`.
 
 ### Persistence (`MLReadable` / `MLWritable`) deferred — same as ADR 0009
 
