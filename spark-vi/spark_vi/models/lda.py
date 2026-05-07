@@ -41,8 +41,8 @@ from scipy.special import digamma, gammaln
 from spark_vi.core.model import VIModel
 from spark_vi.core.types import BOWDocument
 from spark_vi.inference.concentration_optimization import (
-    alpha_newton_step as _alpha_newton_step,
-    eta_newton_step as _eta_newton_step,
+    alpha_newton_step,
+    eta_newton_step,
 )
 
 
@@ -263,7 +263,7 @@ class VanillaLDA(VIModel):
                 # ψ(γ_dk) ≲ -700 (e.g., when α has hit the 1e-3 floor and CAVI
                 # initializes γ_dk ≈ 1e-3, giving ψ(γ_dk) ≈ -1000 and exp ≈ 0).
                 # Underflow ⇒ log(0) = -inf in the suff-stat ⇒ the rank-1 Hessian
-                # coupling in `_alpha_newton_step` propagates -inf into every
+                # coupling in `alpha_newton_step` propagates -inf into every
                 # component of Δα, collapsing all topics to the floor in a
                 # single iteration.
                 e_log_theta_sum += digamma(gamma) - digamma(gamma.sum())
@@ -291,7 +291,7 @@ class VanillaLDA(VIModel):
                        + rho * (eta + expElogbeta * target_stats["lambda_stats"])
 
         α update (only when self.optimize_alpha):
-            Δα   = _alpha_newton_step(α, target_stats["e_log_theta_sum"], D=n_docs_scaled)
+            Δα   = alpha_newton_step(α, target_stats["e_log_theta_sum"], D=n_docs_scaled)
             α_new = clip(α + rho * Δα, min=1e-3)
 
         target_stats[*] is already corpus-scaled by the runner per ADR 0005,
@@ -301,7 +301,7 @@ class VanillaLDA(VIModel):
         η update (only when self.optimize_eta):
             e_log_phi_sum = Σ_t Σ_v E[log φ_tv] from current λ
                           (NOT from target_stats — this is a global stat).
-            Δη   = _eta_newton_step(η, e_log_phi_sum, K, V)
+            Δη   = eta_newton_step(η, e_log_phi_sum, K, V)
             η_new = clip(η + rho * Δη, min=1e-3)
 
         Note the asymmetry vs α: η's stat is computable from current global
@@ -325,12 +325,12 @@ class VanillaLDA(VIModel):
         new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
 
         if self.optimize_alpha:
-            # `_alpha_newton_step`'s closed-form Sherman-Morrison step has a
+            # `alpha_newton_step`'s closed-form Sherman-Morrison step has a
             # theoretical degeneracy at c == Σ_k 1/d_k (denominator of `b`).
             # Measure-zero in practice; the post-step floor below + ρ-damping
             # keep d_k = D·ψ′(α_k) bounded so the equality is unreachable.
             D = float(target_stats["n_docs"])
-            delta_alpha = _alpha_newton_step(
+            delta_alpha = alpha_newton_step(
                 alpha=alpha,
                 e_log_theta_sum_scaled=target_stats["e_log_theta_sum"],
                 D=D,
@@ -348,7 +348,7 @@ class VanillaLDA(VIModel):
             e_log_phi_sum = float(
                 (digamma(new_lam) - digamma(new_lam.sum(axis=1, keepdims=True))).sum()
             )
-            delta_eta = _eta_newton_step(
+            delta_eta = eta_newton_step(
                 eta=float(eta), e_log_phi_sum=e_log_phi_sum, K=K, V=V,
             )
             # 0-d wrap matches initialize_global's `np.array(self.eta)` shape

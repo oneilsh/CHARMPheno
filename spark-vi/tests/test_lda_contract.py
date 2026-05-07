@@ -393,11 +393,11 @@ def test_update_global_with_optimize_alpha_runs_newton_and_floors():
     # Floor respected.
     assert (new_g["alpha"] >= 1e-3).all()
 
-    # Wiring tightness: the result must match what _alpha_newton_step + floor
+    # Wiring tightness: the result must match what alpha_newton_step + floor
     # produces directly (catches any wiring bug that the argmax/argmin sign
     # check above would miss).
-    from spark_vi.models.lda import _alpha_newton_step
-    direct_delta = _alpha_newton_step(
+    from spark_vi.inference.concentration_optimization import alpha_newton_step
+    direct_delta = alpha_newton_step(
         alpha=g["alpha"],
         e_log_theta_sum_scaled=e_log_theta_sum,
         D=10000.0,
@@ -449,7 +449,8 @@ def test_update_global_with_optimize_eta_runs_newton_and_floors():
     """
     from scipy.special import digamma
 
-    from spark_vi.models.lda import VanillaLDA, _eta_newton_step
+    from spark_vi.inference.concentration_optimization import eta_newton_step
+    from spark_vi.models.lda import VanillaLDA
 
     rng = np.random.default_rng(11)
     K, V = 50, 100
@@ -492,7 +493,7 @@ def test_update_global_with_optimize_eta_runs_newton_and_floors():
     # test in test_lda_math.
     assert new_eta >= 1e-3  # floor
 
-    # Wiring tightness: result must match a direct _eta_newton_step call
+    # Wiring tightness: result must match a direct eta_newton_step call
     # with the same post-λ-update state (catches wiring bugs the numeric
     # range check above would miss).
     e_log_phi_sum = float(
@@ -501,7 +502,7 @@ def test_update_global_with_optimize_eta_runs_newton_and_floors():
             - digamma(target_new_lam.sum(axis=1, keepdims=True))
         ).sum()
     )
-    direct_delta_eta = _eta_newton_step(
+    direct_delta_eta = eta_newton_step(
         eta=eta_in, e_log_phi_sum=e_log_phi_sum, K=K, V=V,
     )
     expected_eta = max(eta_in + 1.0 * direct_delta_eta, 1e-3)
@@ -521,7 +522,7 @@ def test_local_update_alpha_stat_finite_when_alpha_at_floor():
         ψ(1e-3) ≈ −1000.6
         exp(ψ(γ_dk) − ψ(Σγ)) underflows to 0
         log(0) = −inf in e_log_theta_sum
-    The −inf propagates through `_alpha_newton_step`'s rank-1 Hessian
+    The −inf propagates through `alpha_newton_step`'s rank-1 Hessian
     coupling — `b = Σ(g/d) / (Σ 1/d − 1/c)` with one `g` component
     being −inf yields −inf for *all* Δα, collapsing every topic to
     the floor on the next iteration.
