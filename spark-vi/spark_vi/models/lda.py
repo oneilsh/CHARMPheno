@@ -36,10 +36,14 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 import numpy as np
-from scipy.special import digamma, gammaln, polygamma
+from scipy.special import digamma, gammaln
 
 from spark_vi.core.model import VIModel
 from spark_vi.core.types import BOWDocument
+from spark_vi.inference.concentration_optimization import (
+    alpha_newton_step as _alpha_newton_step,
+    eta_newton_step as _eta_newton_step,
+)
 
 
 def _cavi_doc_inference(
@@ -102,88 +106,6 @@ def _dirichlet_kl(q_alpha: np.ndarray, p_alpha: np.ndarray) -> float:
         - (gammaln(q_alpha) - gammaln(p_alpha)).sum()
         + ((q_alpha - p_alpha) * (digamma(q_alpha) - digamma(qsum))).sum()
     )
-
-
-def _alpha_newton_step(
-    alpha: np.ndarray,
-    e_log_theta_sum_scaled: np.ndarray,
-    D: float,
-) -> np.ndarray:
-    """One Newton step for asymmetric Dirichlet α.
-
-    Per Blei, Ng, Jordan 2003 Appendix A.4.2 (which applies the linear-time
-    structured-Hessian Newton from Appendix A.2). The ELBO part depending on α is
-        L(α) = D · [log Γ(Σ_k α_k) − Σ_k log Γ(α_k)]
-             + Σ_d Σ_k (α_k − 1) E[log θ_dk]
-    with gradient
-        g_k = D · [ψ(Σ_j α_j) − ψ(α_k)] + Σ_d E[log θ_dk]
-    and Hessian (diagonal-plus-rank-1)
-        H = c · 1·1ᵀ − diag(d_k)
-    where c = D · ψ′(Σα), d_k = D · ψ′(α_k).
-
-    The matrix-inversion lemma applied to this structured Hessian (Blei A.2,
-    eq. 10) gives Δα = −H⁻¹·g in closed-form O(K):
-        Δα_k = (g_k − b) / d_k
-        b    = Σ_j(g_j/d_j) / (Σ_j 1/d_j − 1/c)
-    (Note: the Hessian formula in Blei A.4.2's printed text has a transcription
-    sign error — the corrected derivation gives the negative-definite H above,
-    and matches MLlib's OnlineLDAOptimizer.updateAlpha.)
-
-    Inputs:
-      alpha:                    (K,) current α vector.
-      e_log_theta_sum_scaled:   (K,) corpus-scaled Σ_d E[log θ_dk]
-                                (i.e. batch sum × D / |batch|).
-      D:                        corpus size (used in g, c, d_k).
-
-    Returns:
-      Δα: (K,) raw Newton step. Caller does the ρ_t damping and the
-        post-step floor — keeping this function pure makes it trivial
-        to unit-test against synthetic data.
-    """
-    alpha_sum = alpha.sum()
-    g = D * (digamma(alpha_sum) - digamma(alpha)) + e_log_theta_sum_scaled
-    c = D * polygamma(1, alpha_sum)
-    d = D * polygamma(1, alpha)
-
-    sum_g_over_d = (g / d).sum()
-    sum_1_over_d = (1.0 / d).sum()
-    b = sum_g_over_d / (sum_1_over_d - 1.0 / c)
-
-    return (g - b) / d
-
-
-def _eta_newton_step(
-    eta: float,
-    e_log_phi_sum: float,
-    K: int,
-    V: int,
-) -> float:
-    """One Newton step for symmetric scalar Dirichlet η.
-
-    Per Hoffman, Blei, Bach 2010 §3.4. The ELBO part depending on η is
-        L(η) = K · log Γ(V·η) − K·V · log Γ(η)
-             + (η − 1) · Σ_t Σ_v E[log φ_tv]
-    with scalar gradient and Hessian
-        g(η) = K·V · [ψ(V·η) − ψ(η)] + Σ_t Σ_v E[log φ_tv]
-        H(η) = K·V² · ψ′(V·η) − K·V · ψ′(η)
-    Newton step Δη = −g/H.
-
-    Inputs:
-      eta:           current η scalar.
-      e_log_phi_sum: Σ_t Σ_v E[log φ_tv] from current λ (typically
-                     (digamma(lam) − digamma(lam.sum(axis=1, keepdims=True))).sum()).
-                     NOTE: K, V are the topic / vocab dimensions of the model,
-                     NOT scale factors — η does not depend on corpus size D.
-      K:             number of topics.
-      V:             vocabulary size.
-
-    Returns:
-      Δη: raw Newton step (float). Caller applies ρ_t damping and the
-        post-step floor (parallel to _alpha_newton_step's caller contract).
-    """
-    g = K * V * (digamma(V * eta) - digamma(eta)) + e_log_phi_sum
-    h = K * V * V * polygamma(1, V * eta) - K * V * polygamma(1, eta)
-    return -g / h
 
 
 class VanillaLDA(VIModel):
