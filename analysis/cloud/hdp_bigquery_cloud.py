@@ -165,16 +165,60 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--alpha", type=float, default=1.0,
-        help="doc-stick concentration α",
+        help=("doc-stick concentration α (initial value; closed-form "
+              "M-step updates it during fit unless --no-optimize-doc-"
+              "concentration is set). Per ADR 0013."),
     )
     parser.add_argument(
         "--gamma", type=float, default=1.0,
-        help=("corpus-stick concentration γ. Higher → more topics get "
-              "discovered. ADR 0011 keeps this fixed in v1."),
+        help=("corpus-stick concentration γ (initial value; closed-form "
+              "M-step updates it during fit unless --no-optimize-corpus-"
+              "concentration is set). Higher initial γ → more topics in "
+              "the early iterations. Per ADR 0013."),
     )
     parser.add_argument(
         "--eta", type=float, default=0.01,
-        help="topic-word Dirichlet concentration η",
+        help=("topic-word Dirichlet concentration η (initial value; only "
+              "updated during fit if --optimize-topic-concentration)."),
+    )
+    parser.add_argument(
+        "--tau0", type=float, default=1024.0,
+        help=("Robbins-Monro learning offset τ₀ in ρ_t = (τ₀ + t + 1)^(-κ). "
+              "Larger τ₀ ⇒ smaller initial step (slower start). Default "
+              "1024.0 mirrors MLlib; on smaller corpora try ~10-64 to "
+              "make γ/α optimization actually move (default ρ_0 ≈ 0.029 "
+              "is glacial — γ/α inch toward their fixed points)."),
+    )
+    parser.add_argument(
+        "--kappa", type=float, default=0.51,
+        help=("Robbins-Monro learning decay κ in ρ_t = (τ₀ + t + 1)^(-κ). "
+              "Must be in (0.5, 1.0] for SVI convergence guarantees "
+              "(Hoffman 2013 §2.3). Larger κ ⇒ faster decay."),
+    )
+    parser.add_argument(
+        "--optimize-corpus-concentration",
+        action=argparse.BooleanOptionalAction, default=True,
+        help=("learn γ via the closed-form M-step β* = -(T-1)/Σ_t E[log(1-W_t)] "
+              "during fit (Beta(1, γ) ELBO maximizer; ADR 0013). γ "
+              "optimization is HDP's headline appeal — it auto-discovers "
+              "the effective topic count. Negate with "
+              "--no-optimize-corpus-concentration to keep γ static at "
+              "the --gamma value."),
+    )
+    parser.add_argument(
+        "--optimize-doc-concentration",
+        action=argparse.BooleanOptionalAction, default=True,
+        help=("learn α via the closed-form M-step β* = -D(K-1)/Σ_d Σ_k E[log(1-V_jk)] "
+              "during fit (ADR 0013). On by default. Negate with "
+              "--no-optimize-doc-concentration to keep α static at "
+              "the --alpha value."),
+    )
+    parser.add_argument(
+        "--optimize-topic-concentration",
+        action=argparse.BooleanOptionalAction, default=False,
+        help=("learn η via Newton-Raphson during fit (Hoffman 2010 §3.4). "
+              "Off by default — η is the least-stable concentration in "
+              "SVI per Hoffman; enable explicitly if you want it."),
     )
     parser.add_argument(
         "--print-topics-every", type=int, default=10,
@@ -254,13 +298,22 @@ def main(argv: list[str] | None = None) -> int:
 
     with _phase(f"fit (T={args.T}, K={args.K}, maxIter={args.max_iter}, "
                  f"subsamplingRate={args.subsampling_rate}, "
-                 f"α={args.alpha}, γ={args.gamma}, η={args.eta})"):
+                 f"α={args.alpha}, γ={args.gamma}, η={args.eta}, "
+                 f"τ₀={args.tau0}, κ={args.kappa}, "
+                 f"optimizeCorpusConc={args.optimize_corpus_concentration}, "
+                 f"optimizeDocConc={args.optimize_doc_concentration}, "
+                 f"optimizeTopicConc={args.optimize_topic_concentration})"):
         estimator = OnlineHDPEstimator(
             k=args.T, docTruncation=args.K, maxIter=args.max_iter,
             seed=args.seed, subsamplingRate=args.subsampling_rate,
             docConcentration=[args.alpha],
             corpusConcentration=args.gamma,
             topicConcentration=args.eta,
+            learningOffset=args.tau0,
+            learningDecay=args.kappa,
+            optimizeCorpusConcentration=args.optimize_corpus_concentration,
+            optimizeDocConcentration=args.optimize_doc_concentration,
+            optimizeTopicConcentration=args.optimize_topic_concentration,
         )
         if args.print_topics_every > 0:
             estimator.setOnIteration(_make_topic_evolution_logger(
