@@ -2,9 +2,19 @@
 
 default: help
 
-JAVA_HOME_MACOS := /opt/homebrew/opt/openjdk@17
-JAVA_HOME_LINUX_CANDIDATES := /usr/lib/jvm/temurin-17-jdk-amd64 /usr/lib/jvm/java-17-openjdk-amd64
-JAVA_HOME := $(shell if [ -d "$(JAVA_HOME_MACOS)" ]; then echo "$(JAVA_HOME_MACOS)"; else for d in $(JAVA_HOME_LINUX_CANDIDATES); do if [ -d "$$d" ]; then echo "$$d"; break; fi; done; fi)
+# PySpark 3.5+ passes `-Djava.security.manager=allow` unconditionally, which
+# is Java 12+ syntax — Java 11 trips on it with "Could not create
+# SecurityManager". Pick the first installed Java >=17 candidate and only
+# export JAVA_HOME if we found one; otherwise leave it unset so the PATH
+# default (which on most machines is something modern) takes over rather
+# than running with JAVA_HOME="" (which can pin a stale Java).
+JAVA_HOME_CANDIDATES := \
+    /opt/homebrew/opt/openjdk@17 \
+    /opt/homebrew/opt/openjdk \
+    /usr/lib/jvm/temurin-17-jdk-amd64 \
+    /usr/lib/jvm/java-17-openjdk-amd64
+JAVA_HOME := $(shell for d in $(JAVA_HOME_CANDIDATES); do if [ -d "$$d" ]; then echo "$$d"; break; fi; done)
+JAVA_PREFIX := $(if $(JAVA_HOME),JAVA_HOME=$(JAVA_HOME) ,)
 
 help:
 	@echo "spark-vi common targets:"
@@ -27,13 +37,13 @@ clean:
 	rm -rf .pytest_cache
 
 test:
-	JAVA_HOME=$(JAVA_HOME) poetry run pytest tests/ -v
+	$(JAVA_PREFIX)poetry run pytest tests/ -v
 
 test-all:
-	JAVA_HOME=$(JAVA_HOME) poetry run pytest tests/ -v -m "not cluster"
+	$(JAVA_PREFIX)poetry run pytest tests/ -v -m "not cluster"
 
 test-cluster:
-	JAVA_HOME=$(JAVA_HOME) poetry run pytest tests/ -v -m cluster
+	$(JAVA_PREFIX)poetry run pytest tests/ -v -m cluster
 
 build:
 	@poetry run python -c "import build" 2>/dev/null || poetry run pip install build

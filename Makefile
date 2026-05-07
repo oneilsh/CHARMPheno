@@ -37,11 +37,22 @@ test:
 	@if [ -d charmpheno ]; then $(MAKE) -C charmpheno test; fi
 	@if [ -d tests/scripts ]; then poetry run pytest tests/scripts -v; fi
 
+# See spark-vi/Makefile and charmpheno/Makefile for the JAVA_HOME selection
+# rationale (PySpark 3.5+ requires Java >=17). Same logic inlined here for
+# the integration-suite branch; only export JAVA_HOME if a candidate exists.
+JAVA_HOME_CANDIDATES := \
+    /opt/homebrew/opt/openjdk@17 \
+    /opt/homebrew/opt/openjdk \
+    /usr/lib/jvm/temurin-17-jdk-amd64 \
+    /usr/lib/jvm/java-17-openjdk-amd64
+JAVA_HOME := $(shell for d in $(JAVA_HOME_CANDIDATES); do if [ -d "$$d" ]; then echo "$$d"; break; fi; done)
+JAVA_PREFIX := $(if $(JAVA_HOME),JAVA_HOME=$(JAVA_HOME) ,)
+
 test-all:
 	@if [ -d spark-vi ]; then $(MAKE) -C spark-vi test-all; fi
 	@if [ -d charmpheno ]; then $(MAKE) -C charmpheno test-all; fi
 	@if [ -d tests/integration ]; then \
-		cd charmpheno && JAVA_HOME=$$(if [ -d /opt/homebrew/opt/openjdk@17 ]; then echo /opt/homebrew/opt/openjdk@17; elif [ -d /usr/lib/jvm/java-17-openjdk-amd64 ]; then echo /usr/lib/jvm/java-17-openjdk-amd64; fi) poetry run pytest ../tests/integration -v -m "not cluster"; \
+		cd charmpheno && $(JAVA_PREFIX)poetry run pytest ../tests/integration -v -m "not cluster"; \
 	fi
 
 test-cluster:
