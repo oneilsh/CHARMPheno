@@ -12,6 +12,209 @@ elsewhere.
 
 ---
 
+## 2026-05-06 to 2026-05-07 — Online HDP v1 walkthrough and merge
+
+The `feat/online-hdp-v1` branch lands on `main` after a five-lesson
+bottom-up walkthrough of the Online HDP implementation (Wang/Paisley/Blei
+2011). The walkthrough surfaced three substantive fixes — an
+`iteration_summary` truncation guard, a count-weighting deviation in the
+doc-Z ELBO term, and a `CharmPhenoHDP.transform` delegation gap — all of
+which shipped before the merge. The math (HDP as two-level
+stick-breaking with doc-stick → corpus-topic pointer table) was covered
+in a dedicated detour up front, including the deliberate vocabulary shift
+from "atom" to topic / slot to disentangle global vs. doc-level usage.
+
+### What shipped
+
+- [`OnlineHDP.iteration_summary`](../spark-vi/spark_vi/models/online_hdp.py#L551-L595)
+  — three-line live-training diagnostic: active-topic count
+  `#{t : E[β_t] > 1/(2T)}`, top-3 corpus stick weights descending,
+  λ row-sum spread (max/min). The pre-merge fix
+  ([b0c85e1](b0c85e1)) added a `T < 3` guard so the
+  "top-3" slice doesn't index past the truncation; relevant for the
+  smallest unit-test fixtures.
+- [`CharmPhenoHDP.transform`](../charmpheno/charmpheno/phenotype/charm_pheno_hdp.py#L82-L112)
+  — wrapper-level frozen-globals inference. The pre-merge fix
+  ([b0c85e1](b0c85e1)) wired the wrapper's
+  `transform` to delegate through the underlying `OnlineHDP.infer_local`
+  with a managed broadcast (same lifecycle discipline as
+  `VIRunner.transform`); previously the wrapper had a stub that wasn't
+  paired with a real implementation.
+- [`_doc_e_step` doc_z_term ELBO block](../spark-vi/spark_vi/models/online_hdp.py#L200-L216)
+  — count-weighted token-token ELBO contribution, with an inline
+  DEVIATION FROM REFERENCE comment block now anchoring the choice. The
+  count weighting is a deviation from Wang's reference Python *and* the
+  intel-spark Scala port (both omit it, matching the AISTATS paper as
+  printed); without it the (a, b) update maximizes a different objective
+  than the reported per-iter ELBO. Caught originally during Task 5
+  implementation by `test_doc_e_step_per_iter_elbo_nondecreasing`; this
+  walkthrough turned the inline justification into an ADR-anchored note.
+
+### Walkthrough lessons
+
+**Detour up front — Stick-breaking foundations.** Re-derived
+`GEM(γ)` via Sethuraman: `β_k = W_k · ∏_{l<k}(1−W_l)` with
+`W_k ∼ Beta(1, γ)`. Concrete numerical example with the "first stick gets
+half on average; second stick takes half of what's left" intuition. Then
+the two-level structure: corpus stick `β` over discoverable topics;
+per-doc stick `π` over **slots**; doc slots point into corpus topics via
+the variational table `var_phi` (K, T). Truncation in the variational
+posterior: `q(W_T = 1) = 1` (degenerate at the last position), so the
+last topic / last slot absorbs whatever residual mass the truncation
+leaves. The lesson replaced the "atom" jargon from Wang's paper with
+**topic** (corpus level, T) / **slot** (doc level, K) throughout the
+walkthrough, on user request — disentangles two different things the
+paper conflates.
+
+**Lesson 1 — Helpers and module shape.** Walked the three helpers as
+the building blocks for everything downstream:
+[`_log_normalize_rows`](../spark-vi/spark_vi/models/online_hdp.py#L37-L48)
+(stable per-row log-softmax),
+[`_expect_log_sticks`](../spark-vi/spark_vi/models/online_hdp.py#L50-L70)
+(Sethuraman's `E[log W] + Σ E[log(1−W_l)]` for the variational Beta
+factors), and
+[`_beta_kl`](../spark-vi/spark_vi/models/online_hdp.py#L73-L103)
+(closed-form `KL(Beta(a, b) ‖ Beta(a₀, b₀))` via digamma / lgamma).
+Module shape note: `OnlineHDP.local_update` does the partition E-step,
+`update_global` the SVI step, `compute_elbo` the ELBO assembly,
+`infer_local` the held-out doc inference — same VIModel surface as
+VanillaLDA, with the addition of `(u, v)` corpus-stick globals alongside
+λ.
+
+**Lesson 2 — Doc-level CAVI.** Walked
+[`_doc_e_step`](../spark-vi/spark_vi/models/online_hdp.py#L106-L233)
+end-to-end. The three updates:
+`var_phi` (K, T) — slot-to-topic responsibility, softmax over corpus
+topics for each slot;
+`phi` (W_unique, K) — token-to-slot responsibility, softmax over slots
+for each unique vocabulary type in the doc;
+`(a, b)` (K-1) — variational doc-stick Beta parameters.
+Two structural points anchored: (1) per-unique-type `phi` storage with
+`* counts[:, None]` count-weighting at every consumption site (the
+deviation captured in the doc_z_term comment block); (2) the
+"`iter < 3`" warmup trick — drop prior-correction terms in
+`var_phi`/`phi` updates for the first three iterations of each doc's
+CAVI. Undocumented in the AISTATS paper but preserved in both Wang's
+Python and intel-spark's Scala port; ADR 0011 records the choice and
+parks an ablation for v2.
+
+**Lesson 3 — SVI wiring.** Walked
+[`local_update`](../spark-vi/spark_vi/models/online_hdp.py#L328-L403)
+and
+[`update_global`](../spark-vi/spark_vi/models/online_hdp.py#L405-L439).
+Per-partition E-step structure: precompute `Elogβ` and
+`Elog_sticks_corpus` once per partition, scatter per-doc sufficient
+stats into a partition-level (T, V) `lambda_stats` accumulator, sum
+ELBO scalar contributions. The natural-gradient SVI step on the driver:
+λ̂ = η + (corpus-rescaled) `lambda_stats`, mixed via
+`λ ← (1−ρ_t)·λ + ρ_t·λ̂`; the (u, v) sticks update via the Wang Eq 22-23
+form using `Σ_t var_phi[k, t]` and the suffix sum thereof. Only
+λ persists as a "topic-word" object across iterations; per-doc state
+(var_phi, phi, a, b) is rebuilt every minibatch by design.
+
+**Lesson 4 — ELBO and held-out inference.**
+[`compute_elbo`](../spark-vi/spark_vi/models/online_hdp.py#L441-L489)
+assembles the bound from per-doc aggregates (`doc_loglik_sum`,
+`doc_z_term_sum`, `doc_c_term_sum`, `doc_stick_kl_sum`) plus two
+driver-side KL terms: corpus stick KL (Beta(u_t, v_t) ‖ Beta(1, γ),
+summed t) and topic Dirichlet KL (Dir(λ_t) ‖ Dir(η · 1_V), summed t).
+In minibatch mode the per-doc piece is the minibatch sum (not
+corpus-rescaled), so the reported ELBO is a noisy unbiased estimator;
+the integration test gate uses smoothed-endpoint comparison to absorb
+the variance. [`infer_local`](../spark-vi/spark_vi/models/online_hdp.py#L491-L549)
+is the real frozen-globals HDP doc-CAVI for `transform()` —
+deliberately not Wang's `infer_only` which collapses HDP into LDA-shape
+for prediction. ADR 0011 §"Real frozen-globals HDP doc-CAVI" records the
+three reasons (held-out evaluation accuracy, future patient-train /
+visit-infer split, predictive modeling).
+
+**Lesson 5 — Wrapper, integration tests, active-topic count.**
+[`CharmPhenoHDP`](../charmpheno/charmpheno/phenotype/charm_pheno_hdp.py)
+as thin clinical wrapper: clinical-user-facing names (`max_topics` → T,
+`max_doc_topics` → K) translate to the inner OnlineHDP truncation
+parameters; vocab handling stays in the wrapper. Three integration
+gates: ELBO-finite + smoothed-endpoint ELBO trend
+([`test_online_hdp_integration.py`](../spark-vi/tests/test_online_hdp_integration.py))
+and synthetic recovery on D=2000 with Hungarian matching
+(scipy's `linear_sum_assignment`) for label-switching invariance — the
+HDP-rectangular variant where unmatched fitted topics are themselves a
+signal (model discovered topics the synthetic generator didn't seed).
+Active-topic count `#{t : E[β_t] > 1/(2T)}` introduced as the cheap
+"this corpus topic carries half-uniform mass" proxy reused in
+`iteration_summary` and (subsequently) on the MLlib shim.
+
+### Pre-existing issues caught
+
+- **`iteration_summary` T<3 indexing** ([b0c85e1](b0c85e1))
+  — the `top3 = np.sort(E_beta)[::-1][:3]` slice silently produced a
+  shorter array when T < 3, then the format string broke at runtime
+  rather than at construction. Smallest unit-test fixtures with T=2 hit
+  the path; production-sized T=150 never would. Guard added.
+- **`CharmPhenoHDP.transform` delegation** ([b0c85e1](b0c85e1))
+  — the wrapper had been exposing a stub `transform` that didn't actually
+  drive frozen-globals inference. Wired through `OnlineHDP.infer_local`
+  with a managed broadcast (mirrors `VIRunner.transform`'s lifecycle
+  discipline). Smoke test added.
+- **doc_z_term count-weighting** (deviation from Wang reference, fixed
+  pre-walkthrough; documented during walkthrough) — Wang's reference
+  Python and intel-spark Scala port both omit the `* counts[:, None]`
+  factor when summing the per-token ELBO entropy + cross-entropy over
+  the per-unique-word `phi` storage. Without the factor the (a, b)
+  update (which uses count-weighted `phi_sum`) maximizes a different
+  objective than the reported ELBO, causing post-convergence drift.
+  Caught by `test_doc_e_step_per_iter_elbo_nondecreasing` during Task 5.
+  Walkthrough added the inline DEVIATION FROM REFERENCE comment block
+  and the matching ADR 0011 entry.
+
+### Doc updates
+
+- [ADR 0011 — Online HDP v1 design decisions](decisions/0011-online-hdp-design.md)
+  ([a265fd8](a265fd8)) records six load-bearing scope/design choices:
+  skip lazy-lambda sparse-vocab update in v1, hold γ and α fixed, no
+  in-loop `optimal_ordering`, real frozen-globals HDP doc-CAVI for
+  `transform()` (not LDA-collapse), keep the iter<3 warmup trick, and
+  match-LDA Gamma init for λ. The doc_z_term deviation from Wang gets
+  its own §; v2 work (MLlib shim + drivers) is explicitly deferred.
+- [`docs/architecture/TOPIC_STATE_MODELING.md`](architecture/TOPIC_STATE_MODELING.md)
+  ([ee84bc0](ee84bc0)) — clarified the T (corpus) / K (doc) naming
+  convention up front and corrected the doc_z_term spec to match the
+  count-weighted implementation.
+- **Scratch-space cleanup** ([1517d4e](1517d4e)) — removed
+  `docs/superpowers/` references from durable code (3 files) and ADRs
+  (5 files: 0007-0011), per the project rule that committed artifacts
+  should not link into per-session scratch space. Replaced with
+  self-contained explanations or pointers to canonical ADR / spec
+  locations.
+
+### Open threads parked
+
+- **MLlib Estimator/Transformer shim for OnlineHDP and cloud driver
+  scripts** — explicitly deferred to v2 in ADR 0011, following the
+  ADR 0009 precedent (LDA shim added *after* the model was built and
+  validated). The "second data point" question ADR 0009 raised about
+  whether to write a generic `VIModel → MLlib` adapter gets resolved
+  when this work lands.
+- **γ and α concentration optimization** — deferred to a follow-on
+  ADR + spec pair after v1. The Newton machinery from ADR 0010 templates
+  to HDP (γ uses η's global-stat shape; α uses LDA-α's per-doc shape).
+- **`warmup_iters=0` ablation** — ADR 0011 keeps the iter<3 warmup as
+  default; v2 will run an ablation to check whether it earns its keep,
+  since neither Wang's paper nor the reference port documents the
+  rationale.
+- **Wang-reference parity fixture** ([eba0b58](eba0b58)) — Task 16
+  recorded the deferral of a bit-match test against Wang's reference
+  Python (would require running blei-lab/online-hdp on a fixed seed and
+  capturing intermediates). Useful future regression gate; not gated on
+  v1.
+- **Held-out perplexity track** for both LDA and HDP — discussed at the
+  merge boundary as a likely v3 branch alongside coherence metrics
+  (UMass / NPMI / C_v) and topic diversity. Topic-modeling literature
+  (Chang et al. 2009 "Reading Tea Leaves") finds perplexity negatively
+  correlates with human-judged coherence, so coherence + diversity are
+  the more useful evaluation signal beyond ELBO.
+
+---
+
 ## 2026-05-05 to 2026-05-06 — LDA concentration optimization + post-implementation walkthrough
 
 Empirical-Bayes Newton-Raphson optimization for the Dirichlet
