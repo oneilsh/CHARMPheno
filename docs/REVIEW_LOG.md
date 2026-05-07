@@ -12,6 +12,304 @@ elsewhere.
 
 ---
 
+## 2026-05-07 — HDP concentration-parameter optimization (ADR 0013)
+
+The γ/α/η optimization deferred from ADR 0011 (and again from ADR 0012's
+`optimize*`-flag punt) lands as ADR 0013. The math turned out simpler
+than ADR 0010's LDA-α templates implied: HDP's γ and α are scalar
+concentrations on Beta(1, β) priors, not Dirichlet vectors, and the
+ELBO contribution `N · log β + (β − 1) · S` admits a closed-form
+maximizer `β* = -N/S` — exact in one step, no Hessian, no iteration.
+η stays as scalar Newton (Hoffman 2010 §3.4, reused from LDA). All
+three are gated by opt-in flags; γ and α default on (γ optimization
+*is* the headline appeal of HDP), η defaults off (matches LDA — least
+stable in SVI per Hoffman). A small follow-on arc surfaced
+`--tau0`/`--kappa` through both cloud drivers because the MLlib
+defaults (τ₀=1024, κ=0.51 → ρ_0 ≈ 0.029) are designed for
+D≫100k corpora and make γ/α optimization crawl on smaller datasets.
+Mid-walkthrough we caught and fixed an honesty problem in the
+helper-lift commit (back-compat aliases hiding the real public surface).
+Three `--no-ff` merge bubbles total.
+
+### What shipped
+
+- [ADR 0013](decisions/0013-hdp-concentration-optimization.md), new.
+  Records the math derivation (why Beta(1, β) closes when LDA's α
+  doesn't), the closed-form-vs-Newton-vs-self-consistency choice, the
+  γ-on/α-on/η-off default flag rationale, the `global_params`-vs-`self`
+  decision, and the new `spark_vi.inference` package home.
+- [`spark_vi.inference`](../spark-vi/spark_vi/inference/) package, new.
+  First module is
+  [`concentration_optimization.py`](../spark-vi/spark_vi/inference/concentration_optimization.py)
+  with three pure helpers: `alpha_newton_step` (asymmetric Dirichlet
+  Sherman-Morrison Newton), `eta_newton_step` (scalar Dirichlet
+  Newton), `beta_concentration_closed_form` (exact M-step for Beta(1, β)
+  concentrations). All three return raw steps / closed-form maximizers;
+  the caller applies ρ_t damping and the 1e-3 floor. Intended as the
+  long-term home for shared variational primitives — first concrete
+  consumer is HDP, but LDA already imports the Newton helpers from
+  here too.
+- [`OnlineHDP`](../spark-vi/spark_vi/models/online_hdp.py) gains
+  `optimize_gamma`, `optimize_alpha`, `optimize_eta` constructor flags
+  (defaults `True, True, False`). γ, α, η move from `self` instance
+  attributes into `global_params` so they round-trip through broadcast
+  and persistence the same way λ, u, v already do. `local_update`
+  accumulates `s_alpha = Σ_d Σ_k [ψ(b_jk) − ψ(a_jk + b_jk)]` per-doc
+  when `optimize_alpha` is on. `update_global` runs the four-step
+  sequence: λ/u/v natural-gradient updates (using *old* γ, η), then γ
+  closed-form on the *just-updated* (u, v), then α closed-form using
+  the corpus-scaled `s_alpha`, then η Newton on the *just-updated* λ.
+  `compute_elbo`, `infer_local`, `iteration_summary` all read γ/α/η
+  from `global_params`; `iteration_summary`'s diagnostic line gains
+  current γ/α/η values for live-fit visibility.
+- [`OnlineHDPEstimator`](../spark-vi/spark_vi/mllib/hdp.py) gains three
+  Params: `optimizeDocConcentration` (default True),
+  `optimizeCorpusConcentration` (default True),
+  `optimizeTopicConcentration` (default False). The validator's
+  ADR-0012 "no optimize* flags" assertion is dropped. Trained
+  accessors (`trainedAlpha()`, `trainedCorpusConcentration()`,
+  `trainedTopicConcentration()`) now read from
+  `result.global_params` instead of fit-time scalars, so post-fit
+  introspection reflects optimization. `OnlineHDPModel.__init__` no
+  longer takes alpha/gamma/eta kwargs — they live in the trained
+  globals dict.
+- Cloud drivers gain `--tau0`/`--kappa` and (HDP only — LDA already
+  had two of three) `--[no-]optimize-{corpus,doc,topic}-concentration`
+  argparse flags. Both
+  [`hdp_bigquery_cloud.py`](../analysis/cloud/hdp_bigquery_cloud.py)
+  and [`lda_bigquery_cloud.py`](../analysis/cloud/lda_bigquery_cloud.py)
+  now plumb the SVI step parameters through to
+  `learningOffset`/`learningDecay` on the Estimator.
+  [`analysis/cloud/Makefile`](../analysis/cloud/Makefile) help text
+  documents the override pattern (`HDP_BQ_ARGS='--tau0 16 --kappa 0.7'`)
+  and the rationale (default ρ_0 ≈ 0.029 is glacial on small corpora).
+- 18 new tests (176 total, was 158): 6 in
+  [`test_concentration_optimization.py`](../spark-vi/tests/test_concentration_optimization.py)
+  (closed-form recovery on synthetic Beta draws, validation rejections,
+  helper-import smoke checks); 9 in
+  [`test_online_hdp_unit.py`](../spark-vi/tests/test_online_hdp_unit.py)
+  (s_alpha emission/omission, γ/α/η movement under each optimize_*
+  flag, floor enforcement, compute_elbo reading γ/η from global_params,
+  iteration_summary surfacing); 2 in
+  [`test_online_hdp_integration.py`](../spark-vi/tests/test_online_hdp_integration.py)
+  (γ/α-moves and η-on smoke against synthetic D=200 corpora); 4
+  shim-side covering Param defaults, translation, and trained-accessor
+  behavior under both optimize-on and optimize-off paths.
+
+### Walkthrough lessons
+
+**Lesson 1 — The math.** Why Beta(1, β) gets a closed form when LDA's
+α can't. The β-dependent ELBO contribution of N independent Beta(1, β)
+factors is `L(β) = N·log β + (β − 1)·S` where `S = Σ E_q[log(1−W)]` is
+the sufficient statistic from `q(W) = Beta(u, v)`. Derivative `N/β + S`
+has a
+single root at `β* = -N/S`; second derivative `-N/β² < 0` confirms it's
+a maximum. The contrast with LDA: LDA's α prior is Dirichlet, whose
+log-partition `log Γ(Σ α_k)` couples all components through the sum,
+forcing Newton with a structured Hessian. HDP's β concentration is a
+single scalar on a Beta whose normalizer collapses to `1/β` (because
+Γ(1) = 1), leaving only `log β` and `(β−1)·S` — quadratic enough that
+the root is exact. The SVI wrapper `β_new = (1−ρ)·β_old + ρ·β*` does
+double duty: noise damping AND optimal step direction in the
+natural-gradient sense (Hoffman 2013 — same form as the conjugate
+exponential-family natural-gradient update used for λ, u, v).
+
+**Lesson 1 detour — γ's stochasticity is sneakier than α's.** α's
+sufficient statistic is summed over docs in the *minibatch* (then
+corpus-scaled), so it's classic-shape minibatch noise. γ's sufficient
+statistic is computed from the current *global* (u, v), no minibatch
+dependence — given (u, v), S_γ is deterministic. Yet γ still gets ρ_t
+damping. Reason: (u, v) themselves only just moved by ρ_t; if γ jumped
+to the closed-form fixed point of those partially-updated globals, it'd
+be conditioning on a state that's still mid-flight. ρ_t on γ keeps it
+at the same "completion fraction" as the (u, v) it's responding to —
+everything moves together at the same SVI cadence.
+
+**Lesson 2 — Helper-lift refactor.** Three options for sharing the
+Newton helpers: cross-import between sibling models, duplicate, or
+hoist to a new module. Picked option 3. The package didn't have a
+home for "math primitives shared across models" — created
+`spark_vi.inference/` for variational-inference primitives, intended
+as the future home for natural-gradient updates and ELBO computations
+shared across models too. The leading-underscore-as-`as`-alias trick
+used in the initial commit was caught mid-walkthrough as an honesty
+problem (see Detour 1).
+
+**Lesson 3 — HDP model wiring.** The two sequencing decisions in
+`update_global`: (1) λ/u/v use *old* γ and η — block coordinate
+ascent rule, when updating block A freeze block B at its current
+value; (2) γ uses *just-updated* (u, v), η uses *just-updated* λ —
+when updating concentration X, condition on the most-recent state
+of what X is a prior over. The two rules look opposite but are
+consistent under "condition on the most recent state of what the
+operation depends on." LDA's η-on-just-updated-λ is the same pattern.
+α's per-doc sufficient stat is genuinely different from γ and η: it's
+the only concentration whose M-step needs per-doc data, so the
+accumulation lives in `local_update` alongside the other per-doc
+suff-stats. None-sentinel pattern (`s_alpha = 0.0 if optimize_alpha
+else None`) keeps the no-optimize path free of the digamma cost and
+gives `update_global` a clean `if "s_alpha" in target_stats` guard.
+
+**Lesson 4 + 5 — Shim Params and trained accessors.** Three new Params
+named for MLlib parity (`optimizeDocConcentration`,
+`optimizeTopicConcentration` match LDA verbatim;
+`optimizeCorpusConcentration` is HDP-specific, parallels the existing
+`corpusConcentration` value-Param). Default flag values: γ on (HDP's
+headline appeal — auto-discovers effective topic count), α on (matches
+LDA), η off (Hoffman 2010 §3.4 — least stable in SVI). The
+`global_params` migration done in Lesson 3 is what made the trained
+accessors work cleanly: methods read from
+`self._result.global_params["alpha"]` etc. so post-optimization values
+are surfaced; the Model is reconstructible from `(VIResult, T, K)`
+alone (closer to persistence-ready than before, which still defers).
+The `trained` prefix on accessor names is the ADR 0012 collision-fix
+preserved unchanged. **Default-behavior change flagged**: pre-ADR-0013
+`OnlineHDPEstimator()` produced γ/α equal to constructor inputs;
+post-ADR-0013 produces γ/α that reflect the data. Acceptable for a v1
+model with no published artifacts to compare against.
+
+**Lesson 6 — Cloud-driver `--tau0`/`--kappa` and ρ_t intuition.** The
+Robbins-Monro schedule `ρ_t = (τ₀ + t + 1)^(-κ)` and what each knob
+does: bigger τ₀ → smaller ρ throughout (especially early), bigger κ →
+faster decay. Concrete numbers: MLlib's defaults (τ₀=1024, κ=0.51)
+give ρ_0 ≈ 0.029, designed for D ≫ 100k. On D ~ 1k–10k corpora the
+γ/α optimization crawls — the user reported "starts at ρ ≈ 0.0291"
+which is exactly `1025^(-0.51)`. After 30 iterations at MLlib defaults,
+γ has covered about 58.7% of the distance to its closed-form target.
+Smaller-corpus-friendly settings: τ₀ ~ 10–64, κ = 0.7. Convergence
+condition: κ ∈ (0.5, 1] for the Robbins-Monro guarantees Σρ_t = ∞ and
+Σρ_t² < ∞ to both hold. Default κ = 0.51 is *just* inside the bound;
+0.7 is a safer choice on small corpora with marginal step-size loss.
+
+### Refactor detours that shipped
+
+**Detour 1 — Drop the back-compat aliases.** During Lesson 2 the user
+flagged that the helper-lift's `from spark_vi.inference.concentration_optimization
+import alpha_newton_step as _alpha_newton_step` trick in
+[lda.py](../spark-vi/spark_vi/models/lda.py) was avoiding a
+6-import-site refactor. The aliases-as-rename pattern made the names
+falsely look "module-private LDA helpers" when the function actually
+lived in the public `spark_vi.inference` module — two paths to the
+same function, leading-underscore signal contradicting reality, and
+test files reading as "LDA-internal-detail tests" when they were
+testing shared helpers. Dropped the aliases; updated 6 import sites
+(5 in tests, 1 in probes). Lda.py's import line now reads honestly:
+`from spark_vi.inference.concentration_optimization import
+alpha_newton_step, eta_newton_step`. Single canonical import path
+everywhere.
+
+### Pre-existing issues caught
+
+- **Back-compat aliases hiding the real public surface** — caught
+  mid-walkthrough by the user pushing on whether the underscore aliases
+  in [lda.py](../spark-vi/spark_vi/models/lda.py) were actually
+  necessary or just dodging a small refactor. They were dodging. Honest
+  assessment: the leading underscore signaled "module-private LDA
+  helper" to readers but the function genuinely lived in a public
+  shared module. Three resulting problems — duplicate API paths,
+  misleading underscore convention, and test files reading as
+  LDA-internal when they were testing the shared module — none of
+  which were caught by the test suite (everything still passed).
+  General principle reinforced: when a "small refactor" feels like
+  it's avoiding a pattern violation, the honest thing is usually to
+  do the refactor.
+- **MLlib's defaults bite small corpora** — surfaced when the user
+  reported ρ ≈ 0.0291 and asked whether that was expected. MLlib's
+  τ₀=1024, κ=0.51 are tuned for the canonical Hoffman 2010 D ≈ 100k+
+  setting; on D ~ 1k–10k corpora the schedule is glacial. The
+  `--tau0`/`--kappa` surfacing fixes the symptom (caller can
+  override); the underlying default is unchanged because we still
+  want MLlib parity for callers running on cluster-scale data.
+
+### Doc updates
+
+- [ADR 0013](decisions/0013-hdp-concentration-optimization.md), new.
+  Full math derivation, the closed-form-vs-Newton choice rationale,
+  and the alternative-rejected list (Newton instead of closed form,
+  per-stick adaptive ρ_t, asymmetric per-vocab η, keeping γ/α/η on
+  `self`, skipping the closed-form derivation for code uniformity).
+  Includes the Wang AISTATS 2011 deviation note: that paper holds γ/α
+  fixed in experiments and doesn't derive an optimization rule; the
+  closed-form M-step here comes from the variational-EM stick-breaking
+  literature (Blei & Jordan 2006 for DP mixtures, naturally extending
+  to HDP's two-stick structure).
+- [ADR 0011](decisions/0011-online-hdp-design.md) and
+  [ADR 0012](decisions/0012-hdp-mllib-shim.md) are unchanged. Their
+  γ/α/η-deferral text is now superseded by ADR 0013 for the
+  optimization story but the ADRs themselves are append-only; ADR
+  0013's Context section names the deferrals it resolves.
+
+### Empirical run
+
+User triggered a 25-iter cloud fit on AoU OMOP at T=100, K=20,
+person-mod 50, subsamplingRate=0.1, **τ₀=16, κ=0.7** with γ/α
+optimization on. Observations:
+
+- **ρ schedule honored:** iter 1 ρ=0.1376 (matches `17^(-0.7) = 0.1376`
+  to four decimals); iter 25 ρ=0.0743. ~5× larger steps than MLlib
+  defaults would have given.
+- **γ optimization moving steadily upward:** 1.0 → 1.92 over 25 iters,
+  monotone increase. Direction means the closed-form maximizer γ* keeps
+  landing above the current value — the data wants more topics than
+  initial γ=1.0 implied. Linear extrapolation suggests γ → ~2.5+ before
+  the natural-gradient fixed point.
+- **α optimization moving up too:** 1.0 → 1.43. Per-doc topic
+  concentration rising; reasonable for clinical data where multimorbid
+  patients hit several phenotype clusters.
+- **5–6 active topics out of T=100** (active-mass threshold 0.95). HDP
+  doing what it's supposed to: truncation gives headroom but only
+  meaningful atoms grow. Topic IDs are stable (truncation indices); the
+  display filters to top-5-by-`E\[β\]`, so atoms shuffle in/out of the
+  display as their ranking changes (e.g., topic 4's renal-transplant
+  cluster dropped below topic 5's substance-use cluster at iter 12).
+- **Topic content is clinically coherent:** topic 0 is the
+  metabolic-syndrome / general-chronic-disease background (HTN+T2DM+HLD,
+  `E\[β\]`≈0.55–0.63); topic 1 is cardiovascular (atherosclerosis+AFib);
+  topic 2 is mental health + chronic pain; topic 3 is pregnancy + PTSD
+  (mixed because both populations get complex charts); topic 4 is renal
+  transplant; topic 5 is substance use disorders. All recognizable
+  phenotype clusters.
+- **Topic 0 background dominance** (`E\[β\]`≈0.6) is the same "stopword
+  phenomenon" flagged in the previous review log entry — clinical
+  data's most-frequent concept_ids (HTN, T2DM, HLD) form a giant
+  absorbing topic. Mitigation options: accept; pre-filter top-N
+  most-common concepts; tf-idf-style weighting in CountVectorizer.
+  Parked thread (see below).
+- **ELBO trace noisy but improving:** -2.48M → -1.67M (low at iter 19)
+  → bouncing in -1.7M to -1.9M range. Smoothed-endpoint trend clearly
+  upward; minibatch noise expected at subsamplingRate=0.1.
+- **λ row-sum spread climbing:** 111 → 6415. Active topics accumulating
+  evidence; inactive ones near the η floor. Healthy "rich get richer."
+
+### Open threads parked
+
+- **Topic 0 stopword mitigation** — well-known clinical-data issue;
+  three concrete options identified (accept; pre-filter top-N most
+  frequent concept_ids before vectorizing; tf-idf-style weighting).
+  Cheapest experiment is option (b) — add a `--drop-top-n` flag to
+  the vocab builder. Probably its own small spec.
+- **Wang reference cross-check fixture** — still deferred from ADR
+  0011 ("considered and deferred"). The closed-form γ/α optimization
+  is a deliberate deviation from Wang anyway (he holds them fixed),
+  so a bit-match cross-check would have to be against the no-optimize
+  path. Less urgent than it was for v1.
+- **MLWritable / Pipeline.save persistence** — still deferred per
+  ADR 0009 / 0012. The `global_params` migration moved the model
+  closer to persistable (no fit-time-only attrs to handle), so when
+  persistence lands it'll be straightforward.
+- **Lazy-λ sparse-vocabulary update** — ADR 0011 v2 punt unchanged.
+  Only matters if profiling shows full-V digamma is the bottleneck.
+- **`on_iteration` callback shape** — same friction as flagged in the
+  previous review log entry; the iteration_summary surfacing of γ/α/η
+  in this arc partially mitigates by giving cloud-driver loggers
+  visibility into the trained values without needing to reconstruct
+  a model. Fuller refactor still parked.
+- **Per-stick adaptive ρ_t for the M-steps** — ADR 0013 alternative
+  rejected for v3 (no evidence we need separate damping). Revisit if
+  γ optimization shows oscillation on production runs.
+
+---
+
 ## 2026-05-07 — HDP MLlib shim arc and post-shim cleanups
 
 The HDP shim deferred from ADR 0011 lands as `OnlineHDPEstimator` /
