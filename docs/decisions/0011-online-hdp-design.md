@@ -2,7 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-05-06
-**Context:** [docs/superpowers/specs/2026-05-06-online-hdp-design.md](../superpowers/specs/2026-05-06-online-hdp-design.md)
 **Related:** ADR 0007 (VIModel inference capability), ADR 0008 (Vanilla LDA),
 ADR 0009 (MLlib shim), ADR 0010 (concentration-parameter optimization).
 
@@ -114,6 +113,5 @@ time.
 
 ## References
 
-- [`docs/superpowers/specs/2026-05-06-online-hdp-design.md`](../superpowers/specs/2026-05-06-online-hdp-design.md) — implementation spec.
 - Wang, Paisley, Blei (2011), "Online Variational Inference for the
   Hierarchical Dirichlet Process," AISTATS.

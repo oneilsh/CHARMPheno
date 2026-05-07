@@ -200,6 +200,13 @@ def _doc_e_step(
         # Note: doc_c_term sums over K doc-atoms (no count weighting — one c per atom).
         # doc_z_term sums over N word tokens; phi[n,k] is per-unique-type, so it must
         # be multiplied by counts_col to recover the per-token contribution.
+        #
+        # DEVIATION FROM REFERENCE: Wang/Paisley/Blei 2011 Eq 14 sums z-term over
+        # tokens, but Wang's reference Python (blei-lab/online-hdp onlinehdp.py)
+        # and the intel-spark Scala port both omit the count weighting and sum
+        # per-unique-type. Without `* counts_col` the per-iter doc-ELBO trace is
+        # not monotonic non-decreasing on docs with peaky counts (regression
+        # caught by test_doc_e_step_per_iter_elbo_nondecreasing). See ADR 0011.
         doc_c_term = float(np.sum((Elog_sticks_corpus[None, :] - log_var_phi) * var_phi))
         doc_z_term = float(np.sum((Elog_sticks_doc[None, :] - log_phi) * phi * counts_col))
         data_part = var_phi @ weighted_Elogbeta  # (K, Wt)
@@ -329,8 +336,9 @@ class OnlineHDP(VIModel):
         suff-stat into the partition-level (T, V) accumulator on the
         relevant columns, accumulate scalar ELBO contributions.
 
-        See spec docs/superpowers/specs/2026-05-06-online-hdp-design.md
-        for the suff-stat key contract.
+        Returned dict keys are reduced elementwise across partitions by the
+        runner's default combine_stats; see the return statement below for
+        the full key list.
         """
         lam = global_params["lambda"]              # (T, V)
         u = global_params["u"]                     # (T-1,)

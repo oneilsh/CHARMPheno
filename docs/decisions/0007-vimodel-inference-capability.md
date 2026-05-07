@@ -2,7 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-04-30
-**Context:** [docs/superpowers/specs/2026-04-30-vanilla-lda-design.md](../superpowers/specs/2026-04-30-vanilla-lda-design.md)
 
 ## Context
 
