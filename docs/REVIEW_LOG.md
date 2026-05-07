@@ -12,6 +12,311 @@ elsewhere.
 
 ---
 
+## 2026-05-07 — HDP MLlib shim arc and post-shim cleanups
+
+The HDP shim deferred from ADR 0011 lands as `OnlineHDPEstimator` /
+`OnlineHDPModel`, paralleling `VanillaLDAEstimator`. The first walkthrough
+detour exposed a latent property/Param-name collision in the LDA shim
+that the LDA test suite happened never to exercise; backported the fix.
+Subsequent walkthrough chunks surfaced four more "funny smells" — a
+deletable wrapper layer, a fixed-truncation threshold, duplicated
+multi-step math, and inconsistent local-driver API styles — each
+addressed in its own focused arc. Six `--no-ff` merge bubbles in one
+day; the inner model from v1 is unchanged.
+
+### What shipped
+
+- [`spark_vi.mllib.hdp.OnlineHDPEstimator` / `OnlineHDPModel`](../spark-vi/spark_vi/mllib/hdp.py)
+  — the MLlib-shaped Estimator/Model pair. Param surface mirrors
+  `VanillaLDAEstimator` for the shared subset (`k`, `maxIter`,
+  `featuresCol`, `learningOffset`/`learningDecay`, `subsamplingRate`,
+  `topicConcentration`); HDP-specific extras are `docTruncation` (K),
+  `corpusConcentration` (γ), `gammaShape`, `caviMaxIter`, `caviTol`.
+  Reject-list at fit time: `optimizer != "online"`, vector
+  `docConcentration`, vector `topicConcentration`. No `optimize*` flags
+  surfaced — γ/α/η optimization deferred per ADR 0011 §"Hold γ and α
+  fixed at user-set values," and adding `False`-only flags would
+  mislead.
+- HDP-specific Model accessors: `corpusStickWeights()` returns the E[β_t]
+  vector under mean-field q (exact for the variational mean — see
+  "Pre-existing issues caught" below for the docstring correction);
+  `activeTopicCount(mass_threshold=0.95)` returns the count of topics
+  whose top-ranked weights cover the threshold's worth of corpus mass
+  (truncation-independent).
+- [`spark_vi.mllib._common._vector_to_bow_document`](../spark-vi/spark_vi/mllib/_common.py)
+  — hoisted out of [lda.py](../spark-vi/spark_vi/mllib/lda.py) so the
+  HDP shim doesn't import privates from the LDA sibling.
+- Local + cloud driver pair:
+  [`analysis/local/fit_hdp_local.py`](../analysis/local/fit_hdp_local.py)
+  goes through the shim (catches shim regressions on a 10-doc parquet
+  before paying for cloud submits);
+  [`analysis/cloud/hdp_bigquery_cloud.py`](../analysis/cloud/hdp_bigquery_cloud.py)
+  parallels `lda_bigquery_cloud.py` with HDP-native diagnostics
+  (E[β_t]-ranked snapshots, active-topic filtering by cumulative mass).
+- [`analysis/cloud/Makefile`](../analysis/cloud/Makefile) gains
+  `hdp-bq-smoke` target with `HDP_BQ_ARGS` override; ran on AoU
+  Dataproc with T=100, K=20, person-mod 50, subsamplingRate 0.1 — see
+  "Empirical run" below.
+- Makefile JAVA_HOME selection robustified across
+  [root](../Makefile), [spark-vi/](../spark-vi/Makefile), and
+  [charmpheno/](../charmpheno/Makefile): candidate list now includes
+  `/opt/homebrew/opt/openjdk` (any Java≥17, not just `openjdk@17`),
+  and `JAVA_HOME` only exports when a candidate is found — empty
+  `JAVA_HOME=""` is worse than unset because tooling sees a nominally-set
+  value and skips PATH-default discovery, which on developer machines
+  was pinning Java 11 and tripping PySpark 3.5+'s unconditional
+  `-Djava.security.manager=allow` flag.
+
+### Walkthrough lessons
+
+**Lesson 1 — ADR 0012 + the refactor.** Why the helper hoist (`_common.py`
+hosts shared shim helpers; siblings don't import privates from each
+other). The `k=T` Param-naming decision: MLlib's `k` is "exact topic
+count" but HDP's T is a truncation upper bound — the docstring carries
+the semantic correction, and `docTruncation` covers K. The
+`optimize*`-flag deferral cascade: ADR 0011's v1 scope call propagates
+to the shim's Param surface; adding `False`-only flags would mislead
+about model capability. The "siblings, not generic adapter" call
+answering ADR 0009's open question — the audit of shared code (~130
+lines) vs. divergent shape (Param schemas, validators, translation,
+trained accessors, model-specific methods) showed an adapter would
+delegate to user-provided callables for every meaningful component;
+that's not abstraction, it's plumbing-as-API.
+
+**Lesson 2 — Param surface + validators.** `_OnlineHDPParams` mixin
+declares 13 Params once, inherited by both Estimator and Model
+(mirrors MLlib's `_LDAParams`). `docConcentration` is typed
+`toListFloat` despite being scalar-only because MLlib's
+`docConcentration` accepts vectors; we keep the type identical for
+Pipeline composability and reject the vector case at validate time
+instead of at type-conversion time. `corpusConcentration` is a
+brand-new Param outside MLlib's vocabulary — first one we've added,
+sets the convention for future shims. Validator's three rejections
+(non-online optimizer, vector `docConcentration`, list/tuple
+`topicConcentration`) — defensive against the typed-as-float-but-be-safe
+case for `topicConcentration`. Notably *not* validated by the shim:
+`docTruncation >= 2`, `corpusConcentration > 0`, `k >= 2` — those
+constraints live on `OnlineHDP.__init__`, single source of truth.
+
+**Lesson 2 detour — Wallach 2009 analogue for HDP.** Wallach's
+empirical finding ("asymmetric α, symmetric η") carries over
+asymmetrically to HDP. **Symmetric η** carries directly — same role,
+same recommendation. **Asymmetric α** does *not* carry as vector α —
+HDP's α is scalar in Wang/Paisley/Blei 2011 and the canonical
+references; the variational `q(W) = Beta(1, α)` is a single-scalar
+distribution. The asymmetric-topic-prior structure is encoded in HDP's
+**corpus stick β**, asymmetric *by construction* via stick-breaking.
+Optimizing γ (the Beta concentration on β) is the v3 analogue of
+Wallach's asymmetric-α finding — it lets the model learn the shape of
+the asymmetric corpus prior. ADR 0010's η-Newton machinery directly
+templates the future γ-Newton (both are global scalars whose
+sufficient statistics are computable from a global parameter — η from
+λ, γ from u/v).
+
+**Lesson 3 — `_fit` path.** Five-line tour of [hdp.py:296-315](../spark-vi/spark_vi/mllib/hdp.py):
+vocab size discovered from data (DataFrame-side `head(1).size`, MLlib
+parity), persist precondition load-bearing because `dataset.rdd.map(...)`
+builds an uncached RDD even when the upstream DataFrame is cached
+(VIRunner's `assert_persisted` is strict; we persist + `count()` to
+materialize and pay the BOWDocument-conversion cost once),
+try/finally for unpersist (crash-safe broadcast cleanup),
+`on_iteration` callback as instance attr not Param (callables aren't
+MLlib-serializable, would break `Pipeline.save`), param-copy loop
+two-branch dance preserves the `isSet`/`hasDefault` semantic on the
+Model.
+
+**Lesson 4 — methods-vs-properties bug.** The most instructive piece
+of the arc, because it caught a latent LDA-shim bug. First draft of
+the HDP shim used the LDA pattern verbatim (`@property
+topicConcentration`, `@property alpha`). Three tests crashed with
+`RecursionError`: the property body called `self.isSet(...)`, which
+internally does `getattr(self, name)` → property body → recursion.
+LDA dodged this because *its* property body reads
+`self._result.global_params["eta"]` directly without touching the
+Params API. Fixed the recursion by stashing scalars in `__init__`,
+which then revealed bug 2: MLlib's `_set` does
+`p = getattr(self, name); p.typeConverter(value)`. The property
+returns a float, not a Param descriptor, so `typeConverter` raises
+`AttributeError`. LDA dodged this one too — but only because no LDA
+test path explicitly sets the colliding Params on the Estimator. Fix:
+rename the trained-scalar accessors to methods with `trained` prefix
+(`trainedAlpha()`, `trainedTopicConcentration()`,
+`trainedCorpusConcentration()`) — no shadowing, matches MLlib's
+actual `pyspark.ml.clustering.LDAModel.topicConcentration()` method
+idiom. The LDA-shim backport (separate arc) brings the LDA shim into
+pattern-consistency and locks in a regression test
+(`test_explicit_topic_concentration_through_fit_path`).
+
+**Lesson 5 — Model surface.** `topicsMatrix()` returns full T topics
+(not active-only — filtering is the caller's call), Fortran-flatten
+for MLlib's `DenseMatrix(numRows, numCols, values)` constructor.
+`describeTopics(maxTermsPerTopic)` schema matches MLlib's LDA. The
+HDP-specific accessors are where the math meets the API:
+`corpusStickWeights()` thin-wraps the stick-breaking-mean function;
+`activeTopicCount(mass_threshold)` thin-wraps the cumulative-mass
+function. `_transform()` UDF reconstructs the OnlineHDP instance on
+each executor from Params + globals — the Model carries no reference
+to its training-time Python instance, so it's reconstructible from
+VIResult alone. Returns θ length T (corpus topics), not the doc-stick
+π length K — the conversion happens inside `infer_local` via
+`theta = pi_doc @ var_phi`.
+
+**Lesson 6 — drivers + Makefile + JAVA_HOME.** Local driver goes
+through the shim (validates the same code path the cloud driver runs).
+Cloud driver's HDP-native diagnostics differ from LDA's: E[β_t] sort
+key (vs λ row-sum), active-topic filtering in mid-fit snapshots
+(unfiltered would print 100 nearly-empty rows), three lenses per
+topic (`E[β]`, `Σλ`, `peak`) instead of one. Defensive duplication of
+`expected_corpus_betas` in the cloud driver was later eliminated
+(post-walkthrough cleanup). The JAVA_HOME fix details: `JAVA_HOME=""`
+is *worse* than unset because tooling sees a nominally-set empty value
+and skips fallback discovery. The conditional-prefix pattern
+(`$(if $(JAVA_HOME),JAVA_HOME=$(JAVA_HOME) ,)`) is the reliable way
+to express "set this only if we have a value."
+
+### Refactor detours that shipped
+
+**Detour 1 — Drop `CharmPhenoHDP` wrapper.** During Lesson 1's
+`k=T`-naming discussion, surfaced that `CharmPhenoHDP` introduced a
+*third* name-translation layer between `OnlineHDP` and the shim
+(`max_topics`/`max_doc_topics` renames atop the shim's
+`k`/`docTruncation` renames). LDA has no equivalent wrapper. The
+wrapper's only concrete value-add was the rename + RDD-shaped
+fit/transform; future hooks (phenotype labelers, export hooks) were
+aspirational, never implemented. Deleted in
+[`chore(charmpheno): drop CharmPhenoHDP wrapper`](d50c324). Removes
+~200 lines (model + tests). Clinical concerns now live in driver
+scripts and `charmpheno.evaluate` / `charmpheno.omop`.
+
+**Detour 2 — LDA-shim trained-accessor backport.**
+`fix(mllib): apply trained* accessor pattern to LDA shim`
+([ee3de4d](ee3de4d)). The latent bug discovered in Lesson 4: LDA's
+`@property alpha` and `@property topicConcentration` had the same
+shape of bug as the HDP first-draft. No LDA test exercised the
+explicit-set path, so the bug was dormant. Backport renames to
+`trainedAlpha()` / `trainedTopicConcentration()` methods, adds
+[`test_explicit_topic_concentration_through_fit_path`](../spark-vi/tests/test_mllib_lda.py)
+to lock in the regression. Pattern-consistency between sibling shims
+restored.
+
+**Detour 3 — Cumulative-mass active-topic-count.**
+`feat(hdp): cumulative-mass active-topic-count + correct E[β] docstring`
+([a9435d2](a9435d2)). Replaces the truncation-dependent `1/(2T)`
+threshold with parameterized `mass_threshold=0.95` (PCA's
+"explained-variance" analog). Truncation-independent — same answer for
+any T ≥ effective topic count. Plumbed through
+`OnlineHDPModel.activeTopicCount`,
+`OnlineHDP.iteration_summary`, and the cloud driver's
+`--active-mass-threshold` argparse arg. Three new unit tests cover
+the parameterization, monotonicity, and truncation invariance.
+
+**Detour 4 — Consolidate `expected_corpus_betas`.**
+`refactor(hdp): consolidate expected_corpus_betas in online_hdp.py`
+([8dc708f](8dc708f)). The same E[β_t] math lived inline in three
+places (model `iteration_summary`, shim `mllib/hdp.py`,
+cloud driver). Lifted to a public function on `online_hdp.py`. Single
+source of truth lives with the model module; shim and cloud driver
+import.
+
+**Detour 5 — Backport `fit_lda_local.py` to the LDA shim.**
+`refactor(analysis): backport fit_lda_local.py to VanillaLDAEstimator`
+([107c19e](107c19e)). The HDP local driver was written through the
+shim; the LDA local driver was older and used `VanillaLDA + VIRunner`
+directly. Brought into parity — both local drivers now exercise the
+same code path their cloud counterparts use. Drops checkpoint args
+(shim doesn't surface them; matches `fit_hdp_local.py`); aligns
+default `--kappa` to 0.51.
+
+**Detour 6 — Lift `topic_count_at_mass`.**
+`refactor(hdp): lift topic_count_at_mass to module-level on online_hdp.py`
+([72f903d](72f903d)). The cumulative-mass logic (sort + cumsum +
+threshold + fp-slop guard) was duplicated in three places — same
+shape as Detour 4 but for a different function. Lifted to a public
+function on `online_hdp.py` with a generic parameter name
+(`topic_weights`, not `E_beta`) so the primitive is reusable beyond
+HDP. Cloud driver's post-fit summary now uses
+`model.activeTopicCount(...)` directly instead of recomputing — the
+shim's accessor is the right level of abstraction for that caller.
+
+### Pre-existing issues caught
+
+- **Latent property/Param-name collision in LDA shim** —
+  caught by writing the HDP sibling and copying the pattern, then
+  having an HDP test that explicitly set `topicConcentration` on the
+  Estimator (the codepath no LDA test exercised). Generalizable
+  methodology: when copying a pattern from a sibling, the parts you
+  don't have a test for in the original are exactly where latent bugs
+  hide.
+- **`_expected_corpus_betas` "Jensen biased low" docstring** — wrong
+  reasoning. The plug-in formula `E[W] · ∏ E[1-W]` is *exact* for the
+  variational E[β_t] under the mean-field q (independent Beta
+  factors let expectation distribute through the product). Jensen
+  bias would apply if we were computing a non-linear functional of β
+  via the means, but here we're computing E[β] itself. Docstring
+  corrected; the right caveat is the standard mean-field
+  underestimated-uncertainty issue, not Jensen.
+- **Cumulative-mass logic duplicated three places** — only partially
+  addressed at first lift (`expected_corpus_betas`); the cumulative-mass
+  block (`np.argsort` → `np.cumsum` → threshold → fp-slop) was still
+  inline in three places. Caught when the user noted "low-level math
+  shouldn't live in usage scripts." Resolved with the second lift
+  (Detour 6).
+- **`CharmPhenoHDP` wrapper as deletable layer** — caught while
+  discussing the `k=T` naming decision; the wrapper's renames
+  introduced a third translation step with no offsetting value-add.
+
+### Doc updates
+
+- [ADR 0012 — HDP MLlib shim](decisions/0012-hdp-mllib-shim.md), new.
+  Records the design choices: `k=T`, `docTruncation`=K, new
+  `corpusConcentration` for γ, no `optimize*` flags (deferral cascade
+  from ADR 0011), siblings-not-adapter answer to ADR 0009's open
+  question, methods-vs-properties decision (with the latent-LDA-bug
+  context). Edited in place twice during the day's arcs (drop-CharmPhenoHDP
+  refs after Detour 1; cumulative-mass + exact-mean docstring after
+  Detour 3) — both edits authorized by the user as cleanliness
+  exceptions because the ADR was hours old, not yet historicized. The
+  append-only convention re-applies for any future edits.
+
+### Open threads parked
+
+- **HDP γ/α/η optimization** — picked up next session. ADR 0010's
+  Newton machinery templates: γ uses η's global-stat shape (computable
+  from u/v), α uses LDA-α's per-doc shape, optional η reuses LDA's
+  symmetric Newton directly. Cloud-test feedback (active=8/100 with
+  γ=1.0 fixed, dominant background topic 0 carrying ~47% mass)
+  motivates the work — γ is HDP's high-value tunable analogous to
+  Wallach 2009's asymmetric α.
+- **`on_iteration` callback shape** — currently
+  `(iter_num, global_params, elbo_trace)`. Friction surfaced when
+  cloud-driver loggers had to import stateless math from the model
+  module instead of calling `model.method(global_params)`. Refactor
+  would touch the runner contract and the LDA shim too; deferred as
+  not-worth-the-blast-radius. Alternative posed: a "training state"
+  abstraction that exposes diagnostic methods. Deferred.
+- **LDA `iteration_summary` / cloud-driver dedup** — same shape as
+  the HDP cumulative-mass duplications, but LDA's "math" is one-line
+  numpy primitives (`lam.sum(axis=1)`, peak ratios). Wrapping
+  primitives in named functions doesn't add abstraction; deferred as
+  not-worth-the-payoff.
+- **MLWritable / Pipeline.save persistence** — still deferred per
+  ADR 0009 / 0012. Lands when a concrete user materializes; today
+  callers persist via `VIResult.export_zip` and reconstruct.
+- **Empirical cloud run** — first cloud HDP fit on AoU OMOP at
+  T=100, K=20, person-mod 50 surfaced healthy training behavior:
+  active topic count grew 6→7→8 over the 12-iter window, λ row-sum
+  spread grew 266→855 (topics differentiating), top-3 sticks
+  cumulatively held ~87% of mass (geometric-decay shape). Topic 0
+  was the classic "general adult comorbidities" diffuse background
+  (47% mass, peak=0.022) — expected on clinical data, mitigatable
+  via per-visit documents or larger η. Topic 6 had questionable
+  coherence (alcohol/cocaine + macular degeneration) — flagged as
+  one to watch. ELBO noise (~30% range iter-to-iter) was expected
+  from 10% subsamplingRate; the smoothed corpus-scale trend should
+  be readable through it but the unsmoothed log isn't.
+
+---
+
 ## 2026-05-06 to 2026-05-07 — Online HDP v1 walkthrough and merge
 
 The `feat/online-hdp-v1` branch lands on `main` after a five-lesson
