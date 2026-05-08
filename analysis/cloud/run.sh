@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 make hdp-bq-smoke HDP_BQ_ARGS='\
-  -T 100 \
-  -K 20 \
+  --T 100 \
+  --K 20 \
   --save-dir ./hdp_run \
   --save-interval 1 \
   --max-iter 4 \
