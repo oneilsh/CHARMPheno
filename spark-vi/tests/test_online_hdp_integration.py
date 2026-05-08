@@ -274,3 +274,122 @@ def test_online_hdp_infer_local_round_trip(spark):
     assert sorted_theta[:half].sum() > 0.8, (
         f"θ not concentrated; top-{half}: {sorted_theta[:half].sum():.3f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# End-to-end integration: save/load round-trip + diagnostic_traces accumulation
+#
+# Sibling to the LDA shim integration tests in test_lda_integration.py.
+# These exercise the full stack — MLlib shim → VIRunner → OnlineHDP →
+# save_result/load_result — on a real Spark-local fit.
+# ---------------------------------------------------------------------------
+
+
+def _build_persistence_hdp_df(spark, V=9, D=15, n_clusters=3, seed=0):
+    """Small but well-clustered DataFrame for shim-level HDP fits.
+
+    Mirrors test_lda_integration._build_persistence_lda_df.
+    """
+    from pyspark.ml.linalg import Vectors
+
+    rng = np.random.default_rng(seed)
+    block = V // n_clusters
+    rows = []
+    for doc_id in range(D):
+        cluster = doc_id % n_clusters
+        favored = list(range(cluster * block, (cluster + 1) * block))
+        counts = np.zeros(V, dtype=np.float64)
+        for w in rng.choice(favored, size=15, replace=True):
+            counts[w] += 1.0
+        rows.append((Vectors.dense(counts.tolist()),))
+    return spark.createDataFrame(rows, schema=["features"])
+
+
+@pytest.mark.slow
+def test_hdp_fit_with_optimization_populates_gamma_alpha_eta_traces(spark):
+    """A shim fit with γ/α/η optimization on must accumulate per-iter
+    γ, α, η scalar traces of length n_iterations.
+
+    Bonus: at least one of γ/α/η must change value somewhere along the
+    trace — proves optimization actually moved things, not just shape.
+    """
+    from spark_vi.mllib.hdp import OnlineHDPEstimator
+
+    T, K, V, max_iter = 6, 3, 9, 4
+    df = _build_persistence_hdp_df(spark, V=V, n_clusters=3, seed=0)
+
+    estimator = OnlineHDPEstimator(
+        k=T, docTruncation=K, maxIter=max_iter, seed=0, subsamplingRate=1.0,
+        optimizeDocConcentration=True,
+        optimizeCorpusConcentration=True,
+        optimizeTopicConcentration=True,
+    )
+    model = estimator.fit(df)
+    traces = model.result.diagnostic_traces
+
+    # All three scalar keys present, length matches n_iterations.
+    assert set(traces.keys()) == {"gamma", "alpha", "eta"}
+    assert model.result.n_iterations == max_iter
+    for name in ("gamma", "alpha", "eta"):
+        assert len(traces[name]) == max_iter, (
+            f"{name} trace length {len(traces[name])} != n_iterations {max_iter}"
+        )
+        for v in traces[name]:
+            v_f = float(v)
+            assert np.isfinite(v_f)
+
+    # Bonus: at least one of γ/α/η actually changed across the run.
+    moved = False
+    for name in ("gamma", "alpha", "eta"):
+        vals = [float(v) for v in traces[name]]
+        if any(v != vals[0] for v in vals):
+            moved = True
+            break
+    assert moved, (
+        f"no concentration moved across {max_iter} iters with all optimize "
+        f"flags on — wiring may be broken. traces={traces}"
+    )
+
+
+@pytest.mark.slow
+def test_hdp_save_load_round_trip_via_shim_preserves_T_K_V_metadata_and_traces(
+    spark, tmp_path,
+):
+    """End-to-end round-trip: HDP shim fit with optimization → save → load.
+
+    Verifies both the shape metadata (T/K/V via _T, _K, vocabSize()) and
+    the diagnostic_traces survive the round-trip element-wise.
+    """
+    from spark_vi.mllib.hdp import OnlineHDPEstimator, OnlineHDPModel
+
+    T, K, V, max_iter = 6, 3, 9, 4
+    df = _build_persistence_hdp_df(spark, V=V, n_clusters=3, seed=1)
+
+    estimator = OnlineHDPEstimator(
+        k=T, docTruncation=K, maxIter=max_iter, seed=1, subsamplingRate=1.0,
+        optimizeDocConcentration=True,
+        optimizeCorpusConcentration=True,
+        optimizeTopicConcentration=True,
+    )
+    model = estimator.fit(df)
+
+    save_path = tmp_path / "hdp_traces_roundtrip"
+    model.save(str(save_path))
+    loaded = OnlineHDPModel.load(str(save_path))
+
+    # Shape metadata round-trips.
+    assert loaded._T == T
+    assert loaded._K == K
+    assert loaded.vocabSize() == V
+
+    # Diagnostic traces round-trip element-wise (all scalars).
+    orig = model.result.diagnostic_traces
+    out = loaded.result.diagnostic_traces
+    assert set(out.keys()) == set(orig.keys())
+    for name in orig:
+        assert len(out[name]) == len(orig[name])
+        for orig_v, loaded_v in zip(orig[name], out[name]):
+            assert float(loaded_v) == float(orig_v), (
+                f"{name} trace value drift on round-trip: "
+                f"orig={orig_v}, loaded={loaded_v}"
+            )
