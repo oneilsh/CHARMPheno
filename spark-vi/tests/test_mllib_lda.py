@@ -8,9 +8,9 @@ import pytest
 def test_default_params_match_mllib_lda(spark):
     """Each shared Param defaults to the same value pyspark.ml.clustering.LDA uses."""
     from pyspark.ml.clustering import LDA as MLlibLDA
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    ours = VanillaLDAEstimator()
+    ours = OnlineLDAEstimator()
     theirs = MLlibLDA()
 
     for name in [
@@ -25,34 +25,34 @@ def test_default_params_match_mllib_lda(spark):
 
 
 def test_our_extras_have_adr_0008_defaults():
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    e = VanillaLDAEstimator()
+    e = OnlineLDAEstimator()
     assert e.getOrDefault("gammaShape") == 100.0
     assert e.getOrDefault("caviMaxIter") == 100
     assert e.getOrDefault("caviTol") == 1e-3
 
 
 def test_optimize_topic_concentration_param_default_false():
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    e = VanillaLDAEstimator()
+    e = OnlineLDAEstimator()
     assert e.getOrDefault("optimizeTopicConcentration") is False
 
 
 def test_optimize_topic_concentration_param_can_be_set():
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    e = VanillaLDAEstimator(optimizeTopicConcentration=True)
+    e = OnlineLDAEstimator(optimizeTopicConcentration=True)
     assert e.getOrDefault("optimizeTopicConcentration") is True
 
 
 def test_optimize_doc_concentration_default_matches_mllib():
     """ADR 0010 flipped this default to match pyspark.ml.clustering.LDA."""
     from pyspark.ml.clustering import LDA as MLlibLDA
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    assert VanillaLDAEstimator().getOrDefault("optimizeDocConcentration") is True
+    assert OnlineLDAEstimator().getOrDefault("optimizeDocConcentration") is True
     assert MLlibLDA().getOrDefault("optimizeDocConcentration") is True
 
 
@@ -83,10 +83,10 @@ def test_vector_to_bow_document_handles_dense_vector_with_zeros():
 
 def test_param_translation_to_model_and_config():
     from spark_vi.core.config import VIConfig
-    from spark_vi.models.lda import VanillaLDA
-    from spark_vi.mllib.lda import VanillaLDAEstimator, _build_model_and_config
+    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.mllib.lda import OnlineLDAEstimator, _build_model_and_config
 
-    e = VanillaLDAEstimator(
+    e = OnlineLDAEstimator(
         k=7, maxIter=42, seed=2026,
         learningOffset=512.0, learningDecay=0.6,
         subsamplingRate=0.1,
@@ -95,7 +95,7 @@ def test_param_translation_to_model_and_config():
     )
     model, config = _build_model_and_config(e, vocab_size=100)
 
-    assert isinstance(model, VanillaLDA)
+    assert isinstance(model, OnlineLDA)
     assert model.K == 7
     assert model.V == 100
     assert model.alpha == pytest.approx(0.05)
@@ -115,9 +115,9 @@ def test_param_translation_to_model_and_config():
 
 def test_param_translation_resolves_none_concentrations_to_one_over_k():
     """Per ADR 0008: alpha = eta = 1/K when caller passes None (the default)."""
-    from spark_vi.mllib.lda import VanillaLDAEstimator, _build_model_and_config
+    from spark_vi.mllib.lda import OnlineLDAEstimator, _build_model_and_config
 
-    e = VanillaLDAEstimator(k=4)
+    e = OnlineLDAEstimator(k=4)
     model, _ = _build_model_and_config(e, vocab_size=10)
 
     assert model.alpha == pytest.approx(0.25)
@@ -126,43 +126,43 @@ def test_param_translation_resolves_none_concentrations_to_one_over_k():
 
 
 def test_unsupported_optimizer_em_raises():
-    from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
+    from spark_vi.mllib.lda import OnlineLDAEstimator, _validate_unsupported_params
 
-    e = VanillaLDAEstimator(optimizer="em")
+    e = OnlineLDAEstimator(optimizer="em")
     with pytest.raises(ValueError, match="optimizer"):
         _validate_unsupported_params(e)
 
 
 def test_optimize_doc_concentration_true_is_legal():
     """v0 rejected this; ADR 0010 makes it the default behavior."""
-    from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
+    from spark_vi.mllib.lda import OnlineLDAEstimator, _validate_unsupported_params
 
-    e = VanillaLDAEstimator(optimizeDocConcentration=True)
+    e = OnlineLDAEstimator(optimizeDocConcentration=True)
     _validate_unsupported_params(e)  # should not raise
 
 
 def test_vector_doc_concentration_is_legal():
     """v0 rejected this; ADR 0010 supports asymmetric α (length K)."""
-    from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
+    from spark_vi.mllib.lda import OnlineLDAEstimator, _validate_unsupported_params
 
-    e = VanillaLDAEstimator(k=3, docConcentration=[0.1, 0.1, 0.1])
+    e = OnlineLDAEstimator(k=3, docConcentration=[0.1, 0.1, 0.1])
     _validate_unsupported_params(e)  # should not raise
 
 
 def test_vector_doc_concentration_wrong_length_raises():
     """Vector α with length != k is still rejected."""
-    from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
+    from spark_vi.mllib.lda import OnlineLDAEstimator, _validate_unsupported_params
 
-    e = VanillaLDAEstimator(k=4, docConcentration=[0.1, 0.1, 0.1])
+    e = OnlineLDAEstimator(k=4, docConcentration=[0.1, 0.1, 0.1])
     with pytest.raises(ValueError, match="length"):
         _validate_unsupported_params(e)
 
 
 def test_scalar_doc_concentration_is_accepted():
     """A length-1 list (what toListFloat does to a scalar) must not raise."""
-    from spark_vi.mllib.lda import VanillaLDAEstimator, _validate_unsupported_params
+    from spark_vi.mllib.lda import OnlineLDAEstimator, _validate_unsupported_params
 
-    e = VanillaLDAEstimator(docConcentration=[0.1])
+    e = OnlineLDAEstimator(docConcentration=[0.1])
     _validate_unsupported_params(e)  # should not raise
 
 
@@ -191,12 +191,12 @@ def tiny_corpus_df(spark):
 
 
 def test_fit_returns_model_with_correct_shape(tiny_corpus_df):
-    from spark_vi.mllib.lda import VanillaLDAEstimator, VanillaLDAModel
+    from spark_vi.mllib.lda import OnlineLDAEstimator, OnlineLDAModel
 
-    estimator = VanillaLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
+    estimator = OnlineLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
     model = estimator.fit(tiny_corpus_df)
 
-    assert isinstance(model, VanillaLDAModel)
+    assert isinstance(model, OnlineLDAModel)
     assert model.vocabSize() == 9
     # Param round-trip: model exposes the same configuration the Estimator had.
     assert model.getOrDefault("k") == 3
@@ -205,9 +205,9 @@ def test_fit_returns_model_with_correct_shape(tiny_corpus_df):
 
 def test_topics_matrix_shape_and_normalization(tiny_corpus_df):
     from pyspark.ml.linalg import DenseMatrix
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    estimator = VanillaLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
+    estimator = OnlineLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
     model = estimator.fit(tiny_corpus_df)
 
     tm = model.topicsMatrix()
@@ -220,9 +220,9 @@ def test_topics_matrix_shape_and_normalization(tiny_corpus_df):
 
 
 def test_describe_topics_returns_top_k_per_topic(tiny_corpus_df):
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    estimator = VanillaLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
+    estimator = OnlineLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
     model = estimator.fit(tiny_corpus_df)
 
     df = model.describeTopics(maxTermsPerTopic=4)
@@ -239,9 +239,9 @@ def test_describe_topics_returns_top_k_per_topic(tiny_corpus_df):
 
 def test_transform_adds_topic_distribution_column(tiny_corpus_df):
     from pyspark.ml.linalg import Vector
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    estimator = VanillaLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
+    estimator = OnlineLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
     model = estimator.fit(tiny_corpus_df)
 
     out = model.transform(tiny_corpus_df)
@@ -257,9 +257,9 @@ def test_transform_adds_topic_distribution_column(tiny_corpus_df):
 
 
 def test_transform_respects_custom_topic_distribution_col(tiny_corpus_df):
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    estimator = VanillaLDAEstimator(
+    estimator = OnlineLDAEstimator(
         k=3, maxIter=5, seed=0, subsamplingRate=1.0,
         topicDistributionCol="theta",
     )
@@ -274,10 +274,10 @@ def test_transform_uses_trained_alpha_from_result(tiny_corpus_df):
     result.global_params['alpha'], not from the Estimator's
     docConcentration Param (which was the v0 path).
     """
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
     import numpy as np
 
-    estimator = VanillaLDAEstimator(
+    estimator = OnlineLDAEstimator(
         k=3, maxIter=5, seed=0, subsamplingRate=1.0,
         optimizeDocConcentration=True,
     )
@@ -299,9 +299,9 @@ def test_transform_uses_trained_alpha_from_result(tiny_corpus_df):
 
 
 def test_log_likelihood_and_log_perplexity_raise_not_implemented(tiny_corpus_df):
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    estimator = VanillaLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
+    estimator = OnlineLDAEstimator(k=3, maxIter=5, seed=0, subsamplingRate=1.0)
     model = estimator.fit(tiny_corpus_df)
 
     with pytest.raises(NotImplementedError, match="ELBO"):
@@ -311,9 +311,9 @@ def test_log_likelihood_and_log_perplexity_raise_not_implemented(tiny_corpus_df)
 
 
 def test_param_translation_passes_optimize_flags_to_model():
-    from spark_vi.mllib.lda import VanillaLDAEstimator, _build_model_and_config
+    from spark_vi.mllib.lda import OnlineLDAEstimator, _build_model_and_config
 
-    e = VanillaLDAEstimator(
+    e = OnlineLDAEstimator(
         k=3, optimizeDocConcentration=True, optimizeTopicConcentration=True,
     )
     model, _ = _build_model_and_config(e, vocab_size=10)
@@ -322,19 +322,19 @@ def test_param_translation_passes_optimize_flags_to_model():
 
 
 def test_param_translation_accepts_vector_doc_concentration():
-    from spark_vi.mllib.lda import VanillaLDAEstimator, _build_model_and_config
+    from spark_vi.mllib.lda import OnlineLDAEstimator, _build_model_and_config
     import numpy as np
 
-    e = VanillaLDAEstimator(k=3, docConcentration=[0.1, 0.5, 0.9])
+    e = OnlineLDAEstimator(k=3, docConcentration=[0.1, 0.5, 0.9])
     model, _ = _build_model_and_config(e, vocab_size=10)
     np.testing.assert_allclose(model.alpha, [0.1, 0.5, 0.9])
 
 
 def test_model_trained_alpha_accessor_returns_trained_vector(tiny_corpus_df):
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
     import numpy as np
 
-    estimator = VanillaLDAEstimator(
+    estimator = OnlineLDAEstimator(
         k=3, maxIter=5, seed=0, subsamplingRate=1.0,
         optimizeDocConcentration=True,
     )
@@ -346,9 +346,9 @@ def test_model_trained_alpha_accessor_returns_trained_vector(tiny_corpus_df):
 
 
 def test_model_trained_topic_concentration_accessor_returns_trained_eta(tiny_corpus_df):
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    estimator = VanillaLDAEstimator(
+    estimator = OnlineLDAEstimator(
         k=3, maxIter=5, seed=0, subsamplingRate=1.0,
         optimizeTopicConcentration=True,
     )
@@ -366,9 +366,9 @@ def test_explicit_topic_concentration_through_fit_path(tiny_corpus_df):
     inside the param-copy loop to crash with AttributeError when
     isSet(topicConcentration) was True. Methods don't shadow.
     """
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
-    estimator = VanillaLDAEstimator(
+    estimator = OnlineLDAEstimator(
         k=3, maxIter=3, seed=0, subsamplingRate=1.0,
         topicConcentration=0.05,
     )

@@ -2,7 +2,7 @@
 
 Reads condition_occurrence from the workspace CDR (full-patient sampled),
 joins to concept for human-readable names, vectorizes via CountVectorizer,
-fits VanillaLDAEstimator (the MLlib-shaped shim around our SVI), and
+fits OnlineLDAEstimator (the MLlib-shaped shim around our SVI), and
 prints top concept names per topic. Print-only; no artifact persistence
 in v1.
 
@@ -68,7 +68,7 @@ def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id):
     map, concept names, throttle cadence) rides in via closure capture
     instead of widening the framework signature.
 
-    VanillaLDA's global_params has key "lambda" with shape (K, V) — each
+    OnlineLDA's global_params has key "lambda" with shape (K, V) — each
     row is the unnormalized Dirichlet variational parameter for one topic
     over the full vocabulary. Row-normalizing gives the topic-word
     distribution; argsort + slice gives the top tokens. Each topic line
@@ -219,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     # Driver-side imports proven first — fail fast if --py-files is misshapen.
     from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
     from spark_vi.diagnostics.persist import assert_persisted
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
     _configure_logging()
 
@@ -283,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
                  f"τ₀={args.tau0}, κ={args.kappa}, "
                  f"optimizeDocConc={args.optimize_doc_concentration}, "
                  f"optimizeTopicConc={args.optimize_topic_concentration})"):
-        estimator = VanillaLDAEstimator(
+        estimator = OnlineLDAEstimator(
             k=args.K, maxIter=args.max_iter, seed=args.seed,
             subsamplingRate=args.subsampling_rate,
             learningOffset=args.tau0,

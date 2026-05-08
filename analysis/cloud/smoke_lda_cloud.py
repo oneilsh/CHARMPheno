@@ -1,8 +1,8 @@
-"""Cluster smoke test for the VanillaLDA MLlib shim.
+"""Cluster smoke test for the OnlineLDA MLlib shim.
 
 Exercises the minimal end-to-end path on a real Spark cluster:
   1. driver-side import of spark_vi from the --py-files zip,
-  2. fit VanillaLDAEstimator (broadcast/aggregate across executors),
+  2. fit OnlineLDAEstimator (broadcast/aggregate across executors),
   3. transform via the executor-side UDF (the load-bearing
      --py-files test — UDF closure must rehydrate spark_vi on workers),
   4. fit pyspark.ml.clustering.LDA on the same input as a baseline
@@ -53,8 +53,8 @@ def _synthetic_bow(n_docs: int = 300, vocab_size: int = 30,
 
 
 def main() -> int:
-    from spark_vi.mllib.lda import VanillaLDAEstimator
-    print(f"[driver] spark_vi.mllib.lda loaded from {VanillaLDAEstimator.__module__}",
+    from spark_vi.mllib.lda import OnlineLDAEstimator
+    print(f"[driver] spark_vi.mllib.lda loaded from {OnlineLDAEstimator.__module__}",
           flush=True)
 
     # Surface spark_vi.core.runner per-iter INFO lines as [driver] output.
@@ -76,8 +76,8 @@ def main() -> int:
     print(f"[driver] corpus: {df.count()} docs, {df.rdd.getNumPartitions()} partitions",
           flush=True)
 
-    print("[driver] fitting VanillaLDAEstimator...", flush=True)
-    ours = VanillaLDAEstimator(k=k_fit, maxIter=20, seed=0).fit(df)
+    print("[driver] fitting OnlineLDAEstimator...", flush=True)
+    ours = OnlineLDAEstimator(k=k_fit, maxIter=20, seed=0).fit(df)
     print(f"[driver] ours.topicsMatrix shape: {ours.topicsMatrix().toArray().shape}",
           flush=True)
     print(f"[driver] ours.elbo_trace tail: {ours.result.elbo_trace[-3:]}",

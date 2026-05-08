@@ -1,7 +1,7 @@
 """OMOP -> bag-of-words DataFrame conversion for topic-style models.
 
 Sibling of `local.py`: a loader-family function that takes an OMOP-shaped
-DataFrame and returns the BOW representation that VanillaLDA (and MLlib's
+DataFrame and returns the BOW representation that OnlineLDA (and MLlib's
 LDA) consume. Uses pyspark.ml.feature.CountVectorizer for battle-tested
 vocab construction and SparseVector emission.
 """
@@ -39,7 +39,7 @@ def to_bow_dataframe(
         vocab_map: dict[concept_id (int), idx (int)] where idx in [0, V).
 
     Both paths in lda_compare consume the same SparseVector column, so
-    MLlib's LDA and our VanillaLDA see byte-identical input.
+    MLlib's LDA and our OnlineLDA see byte-identical input.
     """
     grouped = (
         df.withColumn(token_col, F.col(token_col).cast(StringType()))

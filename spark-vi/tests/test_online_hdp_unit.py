@@ -357,7 +357,7 @@ def test_initialize_global_shapes_and_validity():
     assert g["lambda"].shape == (10, 50)
     assert g["u"].shape == (9,)
     assert g["v"].shape == (9,)
-    # Match VanillaLDA: positive Gamma init for lambda.
+    # Match OnlineLDA: positive Gamma init for lambda.
     assert np.all(g["lambda"] > 0)
     # Paper-following init: u = 1, v = gamma.
     assert np.allclose(g["u"], 1.0)

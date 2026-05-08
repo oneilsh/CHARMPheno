@@ -1,4 +1,4 @@
-"""Head-to-head orchestration: VanillaLDA vs Spark MLlib LDA on the same input.
+"""Head-to-head orchestration: OnlineLDA vs Spark MLlib LDA on the same input.
 
 Pure functions; no plotting, no driver concerns. Drivers in analysis/local/
 compose these with topic_alignment.alignment_biplot_data to produce figures.
@@ -41,7 +41,7 @@ def run_ours(
     K: int,
     config: VIConfig,
 ) -> LDARunArtifacts:
-    """Fit VanillaLDA via the MLlib-shaped shim; collect artifacts.
+    """Fit OnlineLDA via the MLlib-shaped shim; collect artifacts.
 
     Wraps the input RDD[BOWDocument] back into a DataFrame[Vector] so the
     shim's DataFrame-shaped API accepts it. Net effect: this function is
@@ -52,7 +52,7 @@ def run_ours(
     from pyspark.sql.types import StructField, StructType
     from pyspark.sql import SparkSession
 
-    from spark_vi.mllib.lda import VanillaLDAEstimator
+    from spark_vi.mllib.lda import OnlineLDAEstimator
 
     spark = SparkSession.builder.getOrCreate()
 
@@ -66,7 +66,7 @@ def run_ours(
     schema = StructType([StructField("features", VectorUDT(), False)])
     df = spark.createDataFrame(rdd.map(_bow_to_row), schema=schema)
 
-    estimator = VanillaLDAEstimator(
+    estimator = OnlineLDAEstimator(
         k=K,
         maxIter=config.max_iterations,
         seed=config.random_seed,
@@ -115,7 +115,7 @@ def run_mllib(
 
     optimize_doc_concentration: if True (MLlib default), alpha is adapted
     during training. Set to False for a head-to-head parity test against
-    VanillaLDA, which holds alpha fixed.
+    OnlineLDA, which holds alpha fixed.
     """
     lda = (
         MLlibLDA()

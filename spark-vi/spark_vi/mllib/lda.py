@@ -1,8 +1,8 @@
-"""MLlib Estimator/Transformer shim for VanillaLDA.
+"""MLlib Estimator/Transformer shim for OnlineLDA.
 
-Wraps spark_vi.models.lda.VanillaLDA + spark_vi.core.runner.VIRunner so the
+Wraps spark_vi.models.lda.OnlineLDA + spark_vi.core.runner.VIRunner so the
 model behaves like a pyspark.ml.clustering.LDA-shaped Estimator/Model pair.
-The shim is a translation layer; all SVI logic lives in VanillaLDA. See
+The shim is a translation layer; all SVI logic lives in OnlineLDA. See
 ADR 0009 (docs/decisions/0009-mllib-shim.md) for the design rationale.
 """
 from __future__ import annotations
@@ -17,10 +17,10 @@ from pyspark.ml.param.shared import HasFeaturesCol, HasMaxIter, HasSeed
 
 from spark_vi.core.config import VIConfig
 from spark_vi.mllib._common import _vector_to_bow_document
-from spark_vi.models.lda import VanillaLDA
+from spark_vi.models.lda import OnlineLDA
 
 
-def _validate_unsupported_params(estimator: "VanillaLDAEstimator") -> None:
+def _validate_unsupported_params(estimator: "OnlineLDAEstimator") -> None:
     """Raise ValueError for any configuration the shim cannot honor.
 
     Per ADR 0010 the v0 rejections of `optimizeDocConcentration=True` and
@@ -36,7 +36,7 @@ def _validate_unsupported_params(estimator: "VanillaLDAEstimator") -> None:
     optimizer = estimator.getOrDefault("optimizer")
     if optimizer != "online":
         raise ValueError(
-            f"VanillaLDAEstimator only supports optimizer='online', got {optimizer!r}. "
+            f"OnlineLDAEstimator only supports optimizer='online', got {optimizer!r}. "
             f"The 'em' optimizer is not implemented in this shim."
         )
 
@@ -52,10 +52,10 @@ def _validate_unsupported_params(estimator: "VanillaLDAEstimator") -> None:
 
 
 def _build_model_and_config(
-    estimator: "VanillaLDAEstimator",
+    estimator: "OnlineLDAEstimator",
     vocab_size: int,
-) -> tuple[VanillaLDA, VIConfig]:
-    """Translate Estimator Params into (VanillaLDA, VIConfig).
+) -> tuple[OnlineLDA, VIConfig]:
+    """Translate Estimator Params into (OnlineLDA, VIConfig).
 
     Per ADR 0010, docConcentration may be:
       * unset / None → broadcast 1/k (symmetric).
@@ -77,7 +77,7 @@ def _build_model_and_config(
     topic_conc = estimator.getOrDefault("topicConcentration") if estimator.isSet("topicConcentration") else None
     eta = 1.0 / k if topic_conc is None else float(topic_conc)
 
-    model = VanillaLDA(
+    model = OnlineLDA(
         K=k,
         vocab_size=vocab_size,
         alpha=alpha,
@@ -100,8 +100,8 @@ def _build_model_and_config(
     return model, config
 
 
-class _VanillaLDAParams(HasFeaturesCol, HasMaxIter, HasSeed):
-    """Shared Param surface for VanillaLDAEstimator and VanillaLDAModel.
+class _OnlineLDAParams(HasFeaturesCol, HasMaxIter, HasSeed):
+    """Shared Param surface for OnlineLDAEstimator and OnlineLDAModel.
 
     Mirrors MLlib's `_LDAParams` mixin pattern: declare each Param once,
     inherit from both the Estimator and Model so they expose identical
@@ -176,8 +176,8 @@ class _VanillaLDAParams(HasFeaturesCol, HasMaxIter, HasSeed):
     )
 
 
-class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
-    """MLlib-shaped Estimator wrapping spark_vi.models.lda.VanillaLDA.
+class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
+    """MLlib-shaped Estimator wrapping spark_vi.models.lda.OnlineLDA.
 
     Param defaults mirror pyspark.ml.clustering.LDA for the shared subset
     and ADR 0008 for our extras (gammaShape, caviMaxIter, caviTol).
@@ -222,14 +222,14 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
         self.setParams(**kwargs)
 
     @keyword_only
-    def setParams(self, **kwargs) -> "VanillaLDAEstimator":
+    def setParams(self, **kwargs) -> "OnlineLDAEstimator":
         """Standard MLlib pattern: set any subset of params after construction."""
         return self._set(**kwargs)
 
     def setOnIteration(
         self,
         fn: Callable[[int, dict, list[float]], None] | None,
-    ) -> "VanillaLDAEstimator":
+    ) -> "OnlineLDAEstimator":
         """Register a per-iteration diagnostic callback for the next fit.
 
         Signature: fn(iter_num, global_params, elbo_trace). Runs on the driver
@@ -241,7 +241,7 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
         self._on_iteration = fn
         return self
 
-    def _fit(self, dataset) -> "VanillaLDAModel":
+    def _fit(self, dataset) -> "OnlineLDAModel":
         from spark_vi.core.runner import VIRunner
 
         _validate_unsupported_params(self)
@@ -272,7 +272,7 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
         finally:
             bow_rdd.unpersist(blocking=False)
 
-        out_model = VanillaLDAModel(result)
+        out_model = OnlineLDAModel(result)
         # Copy every Param value the Estimator has set or has a default for, so
         # the Model's getters reflect the configuration that produced it.
         for param in self.params:
@@ -283,7 +283,7 @@ class VanillaLDAEstimator(_VanillaLDAParams, Estimator):
         return out_model
 
 
-class VanillaLDAModel(_VanillaLDAParams, Model):
+class OnlineLDAModel(_OnlineLDAParams, Model):
     """MLlib-shaped Model wrapping a trained spark_vi VIResult.
 
     Carries the trained global parameters plus a copy of every Param from
@@ -441,12 +441,12 @@ class VanillaLDAModel(_VanillaLDAParams, Model):
         raise NotImplementedError(
             "logLikelihood is not implemented in this v1 shim. The training-time "
             "ELBO trace is available on the underlying VIResult via "
-            "VanillaLDAModel.result.elbo_trace."
+            "OnlineLDAModel.result.elbo_trace."
         )
 
     def logPerplexity(self, dataset):
         raise NotImplementedError(
             "logPerplexity is not implemented in this v1 shim. The training-time "
             "ELBO trace is available on the underlying VIResult via "
-            "VanillaLDAModel.result.elbo_trace."
+            "OnlineLDAModel.result.elbo_trace."
         )

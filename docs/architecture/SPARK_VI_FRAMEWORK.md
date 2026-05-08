@@ -241,7 +241,7 @@ Model authors subclass `VIModel` and implement:
   `compute_elbo` would force you to either re-run the local E-step or stash per-record
   state into a corpus-sized array. `compute_elbo` is the right home only for terms that
   depend on `global_params` alone (typically global Dirichlet/Gaussian KL terms), which
-  are cheap to evaluate once on the driver. See `VanillaLDA` for a worked example.
+  are cheap to evaluate once on the driver. See `OnlineLDA` for a worked example.
 
 - **`combine_stats(stats_a, stats_b) -> dict[str, np.ndarray]`** — Override if
   sufficient statistics don't aggregate by elementwise addition. Default: sum all
@@ -561,7 +561,7 @@ transparently, and results are mapped back to the simplex for interpretation.
 The sparse $A$ matrix reveals which phenotypes drive or inhibit other phenotypes,
 with timescales from eigenanalysis.
 
-### `VanillaLDA`
+### `OnlineLDA`
 
 Hoffman 2010 Online LDA with the Lee/Seung 2001 implicit-phi trick. Mini-
 batch SVI, default hyperparameters aligned with `pyspark.ml.clustering.LDA`

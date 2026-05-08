@@ -64,7 +64,7 @@ def test_online_hdp_short_fit_returns_finite_elbo_trace(spark):
 def test_online_hdp_elbo_smoothed_endpoints_show_overall_improvement(spark):
     """Smoothed-endpoint ELBO trend must improve over a 30+iter fit.
 
-    Mirrors test_lda_integration.py:test_vanilla_lda_elbo_smoothed_*.
+    Mirrors test_lda_integration.py:test_online_lda_elbo_smoothed_*.
     NOT a monotonicity check — SVI noise produces 100+ ELBO-unit drops
     mid-trace even on healthy fits. Endpoint trend on the smoothed
     series catches sign errors and runaway divergence.

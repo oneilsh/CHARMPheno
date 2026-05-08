@@ -1,8 +1,8 @@
-"""End-to-end local: simulator parquet -> VanillaLDA via shim -> saved VIResult.
+"""End-to-end local: simulator parquet -> OnlineLDA via shim -> saved VIResult.
 
 Sibling of fit_hdp_local.py. Builds a SparkSession in local mode, loads
-the OMOP parquet, builds the bag-of-words DataFrame, fits VanillaLDA
-through the MLlib shim (`VanillaLDAEstimator`), and saves the result +
+the OMOP parquet, builds the bag-of-words DataFrame, fits OnlineLDA
+through the MLlib shim (`OnlineLDAEstimator`), and saves the result +
 vocab sidecar.
 
 Going through the shim (rather than VIRunner directly) is deliberate:
@@ -35,7 +35,7 @@ from pyspark.sql import SparkSession
 from charmpheno.omop import load_omop_parquet, to_bow_dataframe
 from spark_vi.core import VIResult
 from spark_vi.io import save_result
-from spark_vi.mllib.lda import VanillaLDAEstimator
+from spark_vi.mllib.lda import OnlineLDAEstimator
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         n_docs = bow_df.count()
         log.info("vocab=%d docs=%d", len(vocab_map), n_docs)
 
-        estimator = VanillaLDAEstimator(
+        estimator = OnlineLDAEstimator(
             k=args.K,
             maxIter=args.max_iterations,
             seed=args.seed,

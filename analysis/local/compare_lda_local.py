@@ -1,6 +1,6 @@
 """Head-to-head LDA comparison driver.
 
-Runs VanillaLDA and pyspark.ml.clustering.LDA on the same OMOP parquet,
+Runs OnlineLDA and pyspark.ml.clustering.LDA on the same OMOP parquet,
 recovers ground truth from the simulator's true_topic_id oracle, and
 produces a three-panel JS-similarity biplot:
 
@@ -154,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             learning_rate_tau0=1024.0,
             learning_rate_kappa=0.51,
         )
-        log.info("Running VanillaLDA...")
+        log.info("Running OnlineLDA...")
         ours = run_ours(rdd, vocab_size=len(vocab_map), K=args.K, config=cfg)
         log.info("Running MLlib LDA...")
         mllib = run_mllib(df=bow_df, vocab_size=len(vocab_map), K=args.K,

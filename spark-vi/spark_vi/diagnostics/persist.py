@@ -38,7 +38,7 @@ def assert_persisted(target: RDD | DataFrame, name: str = "input") -> None:
       "forgot persist" and "accidentally unpersisted" but not "registered
       but no blocks materialized." Adequate in practice — the missing-
       persist case is the common failure, and downstream (e.g. the
-      VanillaLDAEstimator shim's bow_rdd persist+count) typically
+      OnlineLDAEstimator shim's bow_rdd persist+count) typically
       materializes the upstream cache via lineage anyway.
 
     `name` is included in the error message for actionable diagnostics

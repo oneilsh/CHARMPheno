@@ -18,7 +18,7 @@ Spark local. Run as:
 What the probe does:
   1. Generate a synthetic LDA corpus with known asymmetric true_α
      and known true_β.
-  2. Fit VanillaLDA with optimize_alpha=True for many iterations.
+  2. Fit OnlineLDA with optimize_alpha=True for many iterations.
   3. Match fitted topics to true topics via Hungarian assignment on β
      cosine similarity (LDA topics have arbitrary ordering — without
      this matching, "α distance to truth" is meaningless).
@@ -43,7 +43,7 @@ from pyspark.sql import SparkSession
 from scipy.optimize import linear_sum_assignment
 
 from spark_vi.core import BOWDocument, VIConfig, VIRunner
-from spark_vi.models.lda import VanillaLDA
+from spark_vi.models.lda import OnlineLDA
 
 
 def generate_synthetic_corpus(D, V, K, docs_avg_len, true_alpha, true_beta,
@@ -92,7 +92,7 @@ def fit_and_score(spark, docs, true_beta, true_alpha, K, V, max_iter,
         random_seed=vi_seed,
         convergence_tol=1e-9,
     )
-    model = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+    model = OnlineLDA(K=K, vocab_size=V, optimize_alpha=True)
     history = []
     def _on_iter(it, gp, _):
         history.append(np.array(gp["alpha"]))
