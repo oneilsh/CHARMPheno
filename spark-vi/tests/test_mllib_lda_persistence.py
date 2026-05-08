@@ -37,6 +37,26 @@ def test_estimator_setters_round_trip(tmp_path):
     assert e.getResumeFrom() == str(tmp_path / "resume")
 
 
+def test_estimator_kwargs_round_trip(tmp_path):
+    """Constructor kwargs must reach the new persistence Params.
+
+    The cloud driver constructs the Estimator with kwargs (matching the
+    style used for `learningOffset` etc.); a missing kwarg in the
+    explicit @keyword_only signature would crash with TypeError. This
+    test pins the contract.
+    """
+    from spark_vi.mllib.lda import OnlineLDAEstimator
+
+    e = OnlineLDAEstimator(
+        saveInterval=10,
+        saveDir=str(tmp_path / "saves"),
+        resumeFrom=str(tmp_path / "resume"),
+    )
+    assert e.getSaveInterval() == 10
+    assert e.getSaveDir() == str(tmp_path / "saves")
+    assert e.getResumeFrom() == str(tmp_path / "resume")
+
+
 # ---------------------------------------------------------------------------
 # Estimator: fit-time validation
 # ---------------------------------------------------------------------------

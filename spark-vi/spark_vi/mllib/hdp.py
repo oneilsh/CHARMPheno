@@ -263,6 +263,9 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
         optimizeDocConcentration: bool = True,
         optimizeCorpusConcentration: bool = True,
         optimizeTopicConcentration: bool = False,
+        saveInterval: int = -1,
+        saveDir: str = "",
+        resumeFrom: str = "",
     ) -> None:
         super().__init__()
         self._setDefault(

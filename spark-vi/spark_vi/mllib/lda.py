@@ -209,6 +209,9 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
         gammaShape: float = 100.0,
         caviMaxIter: int = 100,
         caviTol: float = 1e-3,
+        saveInterval: int = -1,
+        saveDir: str = "",
+        resumeFrom: str = "",
     ) -> None:
         super().__init__()
         self._setDefault(

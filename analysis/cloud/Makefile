@@ -22,6 +22,8 @@ INSPECT_ARGS    ?=
 # RESUME_FROM points at a previously-written save dir; empty = fresh start.
 # Empty strings are passed through as `--save-dir ""` etc. and treated by
 # argparse identically to omitting the flag (matches the driver defaults).
+# Emitted before LDA_BQ_ARGS / HDP_BQ_ARGS so a user-supplied --save-dir
+# in those overrides wins on conflict (argparse takes the last occurrence).
 SAVE_DIR        ?=
 SAVE_INTERVAL   ?= -1
 RESUME_FROM     ?=
@@ -125,10 +127,11 @@ lda-bq-smoke: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
-	    $(LDA_BQ_SCRIPT) $(LDA_BQ_ARGS) \
+	    $(LDA_BQ_SCRIPT) \
 	    --save-dir "$(SAVE_DIR)" \
 	    --save-interval $(SAVE_INTERVAL) \
-	    --resume-from "$(RESUME_FROM)"
+	    --resume-from "$(RESUME_FROM)" \
+	    $(LDA_BQ_ARGS)
 
 hdp-bq-smoke: zip $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
@@ -139,10 +142,11 @@ hdp-bq-smoke: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
-	    $(HDP_BQ_SCRIPT) $(HDP_BQ_ARGS) \
+	    $(HDP_BQ_SCRIPT) \
 	    --save-dir "$(SAVE_DIR)" \
 	    --save-interval $(SAVE_INTERVAL) \
-	    --resume-from "$(RESUME_FROM)"
+	    --resume-from "$(RESUME_FROM)" \
+	    $(HDP_BQ_ARGS)
 
 inspect:
 	python $(INSPECT_SCRIPT) $(INSPECT_ARGS)
