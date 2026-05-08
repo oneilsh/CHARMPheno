@@ -448,3 +448,20 @@ class OnlineLDA(VIModel):
             f"η={eta:.4g}, "
             f"Σλ_k[min={lam_row_sums.min():.3g} max={lam_row_sums.max():.3g}]"
         )
+
+    def get_metadata(self) -> dict[str, Any]:
+        """Shape constants for VIResult round-trip — K topics, V vocab size."""
+        return {"K": self.K, "V": self.V}
+
+    def iteration_diagnostics(
+        self, global_params: dict[str, np.ndarray],
+    ) -> dict[str, float | np.ndarray]:
+        """Per-iter trajectories of optimized concentrations.
+
+        α is a K-vector (asymmetric Dirichlet support); η is a scalar.
+        λ is intentionally omitted — (K, V) is too heavy for per-iter trace.
+        """
+        return {
+            "alpha": np.asarray(global_params["alpha"]),
+            "eta": float(global_params["eta"]),
+        }

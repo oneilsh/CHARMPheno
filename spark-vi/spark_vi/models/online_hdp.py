@@ -773,3 +773,23 @@ class OnlineHDP(VIModel):
             f"λ-row-sum spread={spread:.2f}, "
             f"γ={gamma:.3f}, α={alpha:.3f}, η={eta:.4f}"
         )
+
+    def get_metadata(self) -> dict[str, Any]:
+        """Shape constants for VIResult round-trip — T corpus-stick truncation,
+        K doc-stick truncation, V vocab size.
+        """
+        return {"T": self.T, "K": self.K, "V": self.V}
+
+    def iteration_diagnostics(
+        self, global_params: dict[str, np.ndarray],
+    ) -> dict[str, float | np.ndarray]:
+        """Per-iter trajectories of optimized concentrations.
+
+        γ, α, η are all scalars. λ and the corpus sticks (u, v) are
+        intentionally omitted — (T, V) and length-(T-1) traces are too heavy.
+        """
+        return {
+            "gamma": float(global_params["gamma"]),
+            "alpha": float(global_params["alpha"]),
+            "eta":   float(global_params["eta"]),
+        }
