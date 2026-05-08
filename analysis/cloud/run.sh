@@ -8,5 +8,4 @@ make hdp-bq-smoke HDP_BQ_ARGS='\
   --max-iter 4 \
   --person-mod 500 \
   --subsampling-rate 0.2 \
-  --print-topics-every 1 \
-  '
+  --print-topics-every 1'
