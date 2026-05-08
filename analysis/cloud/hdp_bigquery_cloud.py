@@ -137,6 +137,23 @@ def main(argv: list[str] | None = None) -> int:
         help="maximum SVI iterations on the global parameters",
     )
     parser.add_argument(
+        "--save-dir", default="",
+        help=("directory for auto-saves and final result; empty (default) = "
+              "no save (the directory becomes the authoritative post-fit "
+              "artifact, loadable via OnlineHDPModel.load)"),
+    )
+    parser.add_argument(
+        "--save-interval", type=int, default=-1,
+        help=("save every N iters during fit; -1 (default) = save only at "
+              "end-of-fit if --save-dir is set"),
+    )
+    parser.add_argument(
+        "--resume-from", default="",
+        help=("path to a previously-written save dir; empty (default) = "
+              "fresh start (when set, fit loads the saved VIResult and "
+              "continues from that iteration count)"),
+    )
+    parser.add_argument(
         "--person-mod", type=int, default=1000,
         help=("whole-patient sampling: keep rows where MOD(person_id, M) == 0. "
               "Larger M => smaller cohort. Set to 1 for the full corpus."),
@@ -314,6 +331,9 @@ def main(argv: list[str] | None = None) -> int:
             optimizeCorpusConcentration=args.optimize_corpus_concentration,
             optimizeDocConcentration=args.optimize_doc_concentration,
             optimizeTopicConcentration=args.optimize_topic_concentration,
+            saveDir=args.save_dir,
+            saveInterval=args.save_interval,
+            resumeFrom=args.resume_from,
         )
         if args.print_topics_every > 0:
             estimator.setOnIteration(_make_topic_evolution_logger(

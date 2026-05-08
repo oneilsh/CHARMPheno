@@ -16,6 +16,16 @@ LDA_BQ_ARGS     ?=
 HDP_BQ_ARGS     ?=
 INSPECT_ARGS    ?=
 
+# Checkpoint / resume knobs for long-running fits (override on command line).
+# SAVE_DIR is the authoritative post-fit artifact when set; empty = no save.
+# SAVE_INTERVAL = -1 means only the end-of-fit save fires (requires SAVE_DIR).
+# RESUME_FROM points at a previously-written save dir; empty = fresh start.
+# Empty strings are passed through as `--save-dir ""` etc. and treated by
+# argparse identically to omitting the flag (matches the driver defaults).
+SAVE_DIR        ?=
+SAVE_INTERVAL   ?= -1
+RESUME_FROM     ?=
+
 # Optional manual override for the CDR (passed through to setup_workspace.py).
 # Use when `wb resource list` doesn't surface the CDR (external read-only
 # data project, common case for AoU). Persists in .workspace_env afterwards.
@@ -44,10 +54,14 @@ help:
 	@echo "                         Override args via LDA_BQ_ARGS='--K 10 --person-mod 5000'"
 	@echo "                         Tune SVI step: LDA_BQ_ARGS='--tau0 64 --kappa 0.7'"
 	@echo "                         (defaults τ₀=1024 κ=0.51 give ρ_0 ≈ 0.029 — slow on small corpora)"
+	@echo "                         Checkpoint/resume: SAVE_DIR=/mnt/gcs/\$$BUCKET/runs/<id>/"
+	@echo "                                            SAVE_INTERVAL=10  RESUME_FROM=<prev-save-dir>"
 	@echo "  make hdp-bq-smoke    - End-to-end: BQ -> CountVectorizer -> OnlineHDP shim"
 	@echo "                         Override args via HDP_BQ_ARGS='--T 100 --K 10 --person-mod 5000'"
 	@echo "                         Tune SVI step: HDP_BQ_ARGS='--tau0 64 --kappa 0.7'"
 	@echo "                         Disable γ opt: HDP_BQ_ARGS='--no-optimize-corpus-concentration'"
+	@echo "                         Checkpoint/resume: SAVE_DIR=/mnt/gcs/\$$BUCKET/runs/<id>/"
+	@echo "                                            SAVE_INTERVAL=10  RESUME_FROM=<prev-save-dir>"
 	@echo "  make inspect         - Live polling dashboard (run in a sibling terminal)"
 	@echo "                         Override args via INSPECT_ARGS='--interval 3'"
 	@echo "  make smoke-dataproc  - alternate: stage to GCS, gcloud dataproc jobs submit pyspark"
@@ -59,8 +73,20 @@ help:
 	@echo "  REGION  = $(REGION)"
 	@echo "  BUCKET  = $(BUCKET)        (no gs:// prefix)"
 	@echo ""
+	@echo "Checkpoint/resume vars (used by lda-bq-smoke / hdp-bq-smoke):"
+	@echo "  SAVE_DIR      = $(SAVE_DIR)"
+	@echo "                  authoritative post-fit artifact (loadable via OnlineXModel.load)"
+	@echo "                  empty = no save"
+	@echo "  SAVE_INTERVAL = $(SAVE_INTERVAL)"
+	@echo "                  save every N iters during fit; -1 = end-of-fit only"
+	@echo "                  (requires SAVE_DIR set)"
+	@echo "  RESUME_FROM   = $(RESUME_FROM)"
+	@echo "                  path to a previously-written save dir; empty = fresh start"
+	@echo ""
 	@echo "Example:"
 	@echo "  make smoke-dataproc CLUSTER=my-cluster REGION=us-central1 BUCKET=my-bucket"
+	@echo "  make lda-bq-smoke SAVE_DIR=/mnt/gcs/my-bucket/runs/lda-001/ SAVE_INTERVAL=10"
+	@echo "  make lda-bq-smoke RESUME_FROM=/mnt/gcs/my-bucket/runs/lda-001/"
 
 zip:
 	$(MAKE) -C $(REPO_ROOT)/spark-vi zip
@@ -99,7 +125,10 @@ lda-bq-smoke: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
-	    $(LDA_BQ_SCRIPT) $(LDA_BQ_ARGS)
+	    $(LDA_BQ_SCRIPT) $(LDA_BQ_ARGS) \
+	    --save-dir "$(SAVE_DIR)" \
+	    --save-interval $(SAVE_INTERVAL) \
+	    --resume-from "$(RESUME_FROM)"
 
 hdp-bq-smoke: zip $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
@@ -110,7 +139,10 @@ hdp-bq-smoke: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
-	    $(HDP_BQ_SCRIPT) $(HDP_BQ_ARGS)
+	    $(HDP_BQ_SCRIPT) $(HDP_BQ_ARGS) \
+	    --save-dir "$(SAVE_DIR)" \
+	    --save-interval $(SAVE_INTERVAL) \
+	    --resume-from "$(RESUME_FROM)"
 
 inspect:
 	python $(INSPECT_SCRIPT) $(INSPECT_ARGS)
