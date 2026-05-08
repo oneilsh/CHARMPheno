@@ -7,6 +7,8 @@ ADR 0009 (docs/decisions/0009-mllib-shim.md) for the design rationale.
 """
 from __future__ import annotations
 
+import dataclasses
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -174,6 +176,30 @@ class _OnlineLDAParams(HasFeaturesCol, HasMaxIter, HasSeed):
         "relative tolerance on gamma for CAVI early stop",
         typeConverter=TypeConverters.toFloat,
     )
+    saveInterval = Param(
+        Params._dummy(), "saveInterval",
+        "Save every N iters during fit. -1 (default) = off. When > 0 and "
+        "saveDir is set, the runner writes a VIResult checkpoint every N "
+        "iterations. The directory is also written once at end-of-fit "
+        "regardless of where the iteration count falls.",
+        typeConverter=TypeConverters.toInt,
+    )
+    saveDir = Param(
+        Params._dummy(), "saveDir",
+        "Directory for auto-saves. Empty (default) = no auto-save. When "
+        "set, fit writes a VIResult on completion (and at every "
+        "saveInterval iters if that is also set). The directory is the "
+        "authoritative post-fit artifact — load via OnlineLDAModel.load(...).",
+        typeConverter=TypeConverters.toString,
+    )
+    resumeFrom = Param(
+        Params._dummy(), "resumeFrom",
+        "Path to a previously-written save dir. Empty (default) = fresh "
+        "start. When set, fit loads the saved VIResult and continues from "
+        "that iteration count, preserving Robbins-Monro continuity and "
+        "ELBO trace.",
+        typeConverter=TypeConverters.toString,
+    )
 
 
 class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
@@ -213,6 +239,7 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
             optimizeDocConcentration=True,
             optimizeTopicConcentration=False,
             gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
+            saveInterval=-1, saveDir="", resumeFrom="",
         )
         # Diagnostic-only iteration callback. Stored as an instance attribute
         # rather than a Param because callables aren't MLlib-serializable
@@ -241,10 +268,48 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
         self._on_iteration = fn
         return self
 
+    def setSaveInterval(self, value: int) -> "OnlineLDAEstimator":
+        """Set saveInterval (iterations between auto-saves; -1 disables)."""
+        return self._set(saveInterval=value)
+
+    def getSaveInterval(self) -> int:
+        return int(self.getOrDefault("saveInterval"))
+
+    def setSaveDir(self, value: str) -> "OnlineLDAEstimator":
+        """Set saveDir (auto-save directory; empty disables)."""
+        return self._set(saveDir=value)
+
+    def getSaveDir(self) -> str:
+        return str(self.getOrDefault("saveDir"))
+
+    def setResumeFrom(self, value: str) -> "OnlineLDAEstimator":
+        """Set resumeFrom (path to a previously-written save dir; empty = fresh start)."""
+        return self._set(resumeFrom=value)
+
+    def getResumeFrom(self) -> str:
+        return str(self.getOrDefault("resumeFrom"))
+
     def _fit(self, dataset) -> "OnlineLDAModel":
         from spark_vi.core.runner import VIRunner
 
         _validate_unsupported_params(self)
+
+        # Read & validate the persistence Params before any expensive setup.
+        save_interval = int(self.getOrDefault("saveInterval"))
+        save_dir = str(self.getOrDefault("saveDir"))
+        resume_from = str(self.getOrDefault("resumeFrom"))
+        if save_interval == 0:
+            raise ValueError(
+                "saveInterval=0 is not meaningful; use -1 to disable saves"
+            )
+        if save_interval > 0 and save_dir == "":
+            raise ValueError(
+                "saveInterval > 0 requires saveDir to be set"
+            )
+        if resume_from != "" and not (Path(resume_from) / "manifest.json").exists():
+            raise FileNotFoundError(
+                f"No manifest.json at resumeFrom path: {resume_from}"
+            )
 
         first_features = dataset.select(self.getOrDefault("featuresCol")).head(1)
         if not first_features:
@@ -252,6 +317,21 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
         vocab_size = first_features[0][0].size
 
         model_obj, config = _build_model_and_config(self, vocab_size=vocab_size)
+
+        # Splice the save Params into VIConfig. VIConfig requires
+        # checkpoint_dir and checkpoint_interval to be both-set or both-unset
+        # (validation in core/config.py). When the caller wants saveDir
+        # without a periodic interval (saveInterval=-1), we set
+        # checkpoint_interval to max_iterations + 1 — the in-loop modulo
+        # `(step+1) % interval == 0` then never fires while the runner's
+        # final-save guarantee still writes the directory at end-of-fit.
+        if save_dir != "":
+            interval = save_interval if save_interval > 0 else config.max_iterations + 1
+            config = dataclasses.replace(
+                config,
+                checkpoint_dir=Path(save_dir),
+                checkpoint_interval=interval,
+            )
 
         features_col = self.getOrDefault("featuresCol")
         bow_rdd = (
@@ -268,7 +348,11 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
 
         runner = VIRunner(model_obj, config=config)
         try:
-            result = runner.fit(bow_rdd, on_iteration=self._on_iteration)
+            result = runner.fit(
+                bow_rdd,
+                resume_from=Path(resume_from) if resume_from else None,
+                on_iteration=self._on_iteration,
+            )
         finally:
             bow_rdd.unpersist(blocking=False)
 
@@ -291,9 +375,66 @@ class OnlineLDAModel(_OnlineLDAParams, Model):
     return the configuration that was actually used.
     """
 
+    # Stamped into result.metadata by VIRunner as `model_class` (the runner
+    # uses type(model).__name__ on the underlying VIModel). Used by
+    # OnlineLDAModel.load to reject checkpoints from other model classes.
+    _expected_model_class = "OnlineLDA"
+
     def __init__(self, result) -> None:  # result: VIResult
         super().__init__()
         self._result = result
+        # Seed default Param values on the Model so a freshly-constructed
+        # Model (e.g. via OnlineLDAModel.load) has the values _transform
+        # reads. The Estimator's _fit also runs a param-copy loop after
+        # construction; that overwrites these with the Estimator's actual
+        # configuration. Loaded Models keep these defaults.
+        self._setDefault(
+            k=10, maxIter=20,
+            featuresCol="features", topicDistributionCol="topicDistribution",
+            optimizer="online",
+            learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05,
+            optimizeDocConcentration=True,
+            optimizeTopicConcentration=False,
+            gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
+            saveInterval=-1, saveDir="", resumeFrom="",
+        )
+
+    def save(self, path: str) -> None:
+        """Persist this trained model to `path`.
+
+        Wraps spark_vi.io.export.save_result. The directory contents
+        round-trip through OnlineLDAModel.load(path).
+        """
+        from spark_vi.io.export import save_result
+        save_result(self._result, path)
+
+    @classmethod
+    def load(cls, path: str) -> "OnlineLDAModel":
+        """Load a previously-saved OnlineLDAModel from `path`.
+
+        Validates that the saved metadata identifies an OnlineLDA fit;
+        raises ValueError on type mismatch (e.g. trying to load an
+        OnlineHDP checkpoint here).
+        """
+        from spark_vi.io.export import load_result
+        result = load_result(path)
+        saved_class = result.metadata.get("model_class")
+        if saved_class is None:
+            raise ValueError(
+                f"Checkpoint at {path} has no 'model_class' in its metadata; "
+                f"cannot determine model type. Was this saved by a recent "
+                f"version of spark_vi?"
+            )
+        if saved_class != cls._expected_model_class:
+            raise ValueError(
+                f"Expected '{cls._expected_model_class}' checkpoint at "
+                f"{path}, got {saved_class!r}. Did you mean a different "
+                f"Model class (e.g. OnlineHDPModel.load)?"
+            )
+        # Reconstruct from VIResult; shape info comes from metadata.
+        # (No Param round-trip — Pipeline.save persistence is deferred per
+        # ADR 0009.)
+        return cls(result)
 
     @property
     def result(self):
