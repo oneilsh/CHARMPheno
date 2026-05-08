@@ -1,6 +1,6 @@
 # ADR 0008 — Vanilla LDA design choices
 
-**Status:** Accepted
+**Status:** Accepted (class subsequently renamed — see ADR 0014)
 **Date:** 2026-04-30
 
 ## Context
