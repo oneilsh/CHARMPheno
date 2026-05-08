@@ -34,12 +34,17 @@ class VIResult:
             "ran out of iterations" and "this is an interim checkpoint."
         metadata: free-form dict (model class name, timestamps, git sha, ...).
             Auto-checkpoints stamp metadata["checkpoint"] = True.
+        diagnostic_traces: per-iteration trajectories of optional model-supplied
+            scalar/array diagnostics (e.g. hyperparameter evolution). Keyed by
+            diagnostic name; values are lists of floats or small numpy arrays
+            accumulated over the fit, each with length n_iterations.
     """
     global_params: dict[str, np.ndarray]
     elbo_trace: list[float]
     n_iterations: int
     converged: bool
     metadata: dict[str, Any] = field(default_factory=dict)
+    diagnostic_traces: dict[str, list[float | np.ndarray]] = field(default_factory=dict)
 
     @property
     def final_elbo(self) -> float | None:

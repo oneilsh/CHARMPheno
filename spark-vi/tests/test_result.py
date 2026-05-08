@@ -33,3 +33,26 @@ def test_vi_result_empty_trace_has_none_final_elbo():
     r = VIResult(global_params={}, elbo_trace=[], n_iterations=0,
                  converged=False, metadata={})
     assert r.final_elbo is None
+
+
+def test_vi_result_diagnostic_traces_default_empty():
+    from spark_vi.core import VIResult
+
+    r = VIResult(global_params={}, elbo_trace=[-1.0], n_iterations=1,
+                 converged=False, metadata={})
+    assert r.diagnostic_traces == {}
+
+
+def test_vi_result_diagnostic_traces_round_trip_constructor():
+    from spark_vi.core import VIResult
+
+    traces = {"alpha": [0.1, 0.2, 0.3], "eta": [1.0, 1.1, 1.2]}
+    r = VIResult(
+        global_params={},
+        elbo_trace=[-3.0, -2.5, -2.1],
+        n_iterations=3,
+        converged=True,
+        metadata={},
+        diagnostic_traces=traces,
+    )
+    assert r.diagnostic_traces == {"alpha": [0.1, 0.2, 0.3], "eta": [1.0, 1.1, 1.2]}

@@ -152,6 +152,29 @@ class VIModel(ABC):
         """
         return ""
 
+    def get_metadata(self) -> dict[str, Any]:
+        """Return shape/config info to bake into VIResult.metadata.
+
+        Used at save time for any state needed to reconstruct the model
+        that isn't recoverable from global_params alone (e.g. HDP's K
+        doc-truncation, which only appears in per-doc transient state).
+        Default returns {}. Override to stamp shape constants.
+        """
+        return {}
+
+    def iteration_diagnostics(
+        self, global_params: dict[str, np.ndarray]
+    ) -> dict[str, float | np.ndarray]:
+        """Return scalar / small-array values to persist per iteration.
+
+        Returned dict keys accumulate into VIResult.diagnostic_traces over
+        the fit. Default is empty. Override to expose hyperparameters or
+        other small diagnostic scalars whose trajectories are worth
+        keeping for post-fit inspection. Stays scalar / small-array;
+        heavy state has no business in a per-iteration trace.
+        """
+        return {}
+
     def infer_local(self, row, global_params: dict[str, np.ndarray]):
         """Optional capability: per-row variational posterior under fixed global params.
 
