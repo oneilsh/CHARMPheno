@@ -88,8 +88,11 @@ but the dir already had something in it" failure mode.
 
 When `cfg.checkpoint_dir` is set, [`VIRunner.fit`](../../spark-vi/spark_vi/core/runner.py)
 writes a final `save_result` to that dir before every return path
-(converged, max-iter exhausted, exception teardown), regardless of
-where the iteration count falls relative to `checkpoint_interval`.
+(convergence and max-iter exhausted), regardless of where the
+iteration count falls relative to `checkpoint_interval`. (The runner
+has no `try/finally` around the fit loop today, so an exception still
+terminates without a final save — an explicit save on exception
+teardown is a possible future enhancement.)
 Before this work the dir reflected only the last interim-save iteration
 — not what callers reasonably expect. The fix lives at the runner so
 all `VIRunner.fit` callers benefit, not just the shim.
@@ -101,11 +104,16 @@ Neither is `@abstractmethod`; existing models that override neither
 keep working unchanged.
 
 - **`get_metadata() -> dict`** — returns shape constants needed for
-  reconstruction. Concrete override on `OnlineHDP` returns
-  `{"K": doc_truncation, "model_class": "OnlineHDP"}`; on `OnlineLDA`
-  returns `{"model_class": "OnlineLDA"}`. The runner merges this into
-  `VIResult.metadata` at every save site so a loaded `VIResult` carries
-  what `Model.load` needs to reconstruct.
+  reconstruction. Concrete override on `OnlineLDA` returns
+  `{"K": self.K, "V": self.V}`; on `OnlineHDP` returns
+  `{"T": self.T, "K": self.K, "V": self.V}`. Note the layering:
+  models contribute shape constants only. The runner's
+  `_runner_metadata` helper merges in `model_class` (and the
+  `checkpoint` flag for interim saves) on top of whatever the model
+  returns, with runner-set keys winning on conflict. So a loaded
+  `VIResult.metadata` carries both the shape constants the model
+  supplied and the `model_class` the runner stamped — together that
+  is what `Model.load` needs to reconstruct.
 - **`iteration_diagnostics(global_params) -> dict`** — returns a flat
   dict of scalars and small 1-D arrays computed once per iteration. The
   runner accumulates these into `VIResult.diagnostic_traces` and emits
@@ -203,23 +211,20 @@ Param and K from the OnlineHDP instance. Now the constructor takes
   the cloud Makefile gained matching `SAVE_DIR` / `SAVE_INTERVAL` /
   `RESUME_FROM` overrides. Long-running fits can now survive
   driver-process death.
-- Test count: 198 → 217 (Tasks 1–6 added 19 new tests on top of the
-  existing core/io updates). `cd spark-vi && make test` still green.
+- Test count: ~194 (pre-branch) → 215 passing default + 2 default-skipped
+  (zip tests, depend on a built wheel) + 15 `@slow` = 232 total
+  collected. `cd spark-vi && make test` still green.
 
 ## Implementation
 
-Six commits on `feat/shim-checkpoint-export-import`
-(HEAD `793a11c`):
-
-1. `23683fa` — core: `get_metadata` + `iteration_diagnostics` on
-   `VIModel`; `diagnostic_traces` on `VIResult`.
-2. `0ae03bc` — io: persist `diagnostic_traces` in `save_result` /
-   `load_result`.
-3. `0c6ce9c` — runner: metadata merge, per-iter diagnostic accumulation,
-   final-save guarantee.
-4. `fb43d5a` — models: `get_metadata` + `iteration_diagnostics`
-   overrides on `OnlineLDA` and `OnlineHDP`.
-5. `ec1df37` — mllib: `saveInterval` / `saveDir` / `resumeFrom` Params
-   + `Model.save` / `Model.load` on both shims.
-6. `793a11c` — cloud: `--save-dir` / `--save-interval` / `--resume-from`
-   CLI flags on both BigQuery drivers + Makefile overrides.
+Landed on `feat/shim-checkpoint-export-import` as a series of focused
+commits across the layers touched: core (`VIModel` /
+`VIResult` contract additions), io (`save_result` /
+`load_result` round-trip of `diagnostic_traces`), runner (metadata
+merge, per-iter diagnostic accumulation, final-save guarantee),
+models (`get_metadata` / `iteration_diagnostics` overrides on
+`OnlineLDA` and `OnlineHDP`), mllib (shim Params +
+`Model.save` / `Model.load`), cloud (BigQuery driver CLI flags +
+Makefile overrides), tests (integration coverage for save/load
+round-trip + diagnostic traces), and docs (this ADR). See
+`git log main..HEAD` on the branch for the canonical commit list.
