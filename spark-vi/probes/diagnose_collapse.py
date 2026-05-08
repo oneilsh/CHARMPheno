@@ -26,7 +26,7 @@ import numpy as np
 from scipy.special import digamma
 
 from spark_vi.core import BOWDocument
-from spark_vi.models.lda import VanillaLDA, _cavi_doc_inference
+from spark_vi.models.lda import OnlineLDA, _cavi_doc_inference
 
 # Match probe's setup
 K, V, D = 3, 100, 10_000
@@ -63,7 +63,7 @@ def main():
     # Replicate the probe's seeding before model init (this is when
     # initialize_global runs `np.random.gamma` for λ).
     np.random.seed(SEED)
-    model = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+    model = OnlineLDA(K=K, vocab_size=V, optimize_alpha=True)
     global_params = model.initialize_global(None)
 
     lam = global_params["lambda"]
@@ -149,7 +149,7 @@ def main():
             print()
             print("Computing the actual α Newton step at iter 1 ...")
             np.random.seed(SEED)  # reset for reproducible λ init
-            model2 = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+            model2 = OnlineLDA(K=K, vocab_size=V, optimize_alpha=True)
             gp = model2.initialize_global(None)
             stats = model2.local_update(docs[:500], gp)
             print(f"  e_log_theta_sum (batch sum, 500 docs) = {stats['e_log_theta_sum']}")

@@ -17,68 +17,68 @@ def test_vimodel_default_infer_local_raises_clear_error():
     assert "transform" in msg.lower() or "inference" in msg.lower()
 
 
-def test_vanilla_lda_is_a_vimodel():
+def test_online_lda_is_a_vimodel():
     from spark_vi.core import VIModel
-    from spark_vi.models.lda import VanillaLDA
-    assert issubclass(VanillaLDA, VIModel)
+    from spark_vi.models.lda import OnlineLDA
+    assert issubclass(OnlineLDA, VIModel)
 
 
-def test_vanilla_lda_default_alpha_eta_match_one_over_k():
+def test_online_lda_default_alpha_eta_match_one_over_k():
     """Default symmetric α and η both default to 1/K, matching MLlib.
 
     α is stored on self as a length-K vector (constructor broadcasts a
     scalar). η is scalar.
     """
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
-    m = VanillaLDA(K=4, vocab_size=10)
+    m = OnlineLDA(K=4, vocab_size=10)
     np.testing.assert_allclose(m.alpha, 0.25)
     assert m.alpha.shape == (4,)
     assert m.eta == pytest.approx(0.25)
 
 
-def test_vanilla_lda_explicit_alpha_eta_respected():
-    from spark_vi.models.lda import VanillaLDA
+def test_online_lda_explicit_alpha_eta_respected():
+    from spark_vi.models.lda import OnlineLDA
 
-    m = VanillaLDA(K=10, vocab_size=100, alpha=0.1, eta=0.2)
+    m = OnlineLDA(K=10, vocab_size=100, alpha=0.1, eta=0.2)
     np.testing.assert_allclose(m.alpha, 0.1)
     assert m.alpha.shape == (10,)
     assert m.eta == pytest.approx(0.2)
 
 
-def test_vanilla_lda_accepts_vector_alpha():
+def test_online_lda_accepts_vector_alpha():
     """A length-K alpha is accepted and stored verbatim (no broadcast)."""
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
-    m = VanillaLDA(K=3, vocab_size=10, alpha=np.array([0.1, 0.5, 0.9]))
+    m = OnlineLDA(K=3, vocab_size=10, alpha=np.array([0.1, 0.5, 0.9]))
     np.testing.assert_allclose(m.alpha, [0.1, 0.5, 0.9])
 
     # Wrong shape rejected.
     with pytest.raises(ValueError, match="length-3 1-D array"):
-        VanillaLDA(K=3, vocab_size=10, alpha=np.array([0.1, 0.5]))
+        OnlineLDA(K=3, vocab_size=10, alpha=np.array([0.1, 0.5]))
 
 
-def test_vanilla_lda_rejects_invalid_hyperparams():
-    from spark_vi.models.lda import VanillaLDA
+def test_online_lda_rejects_invalid_hyperparams():
+    from spark_vi.models.lda import OnlineLDA
     with pytest.raises(ValueError):
-        VanillaLDA(K=0, vocab_size=10)
+        OnlineLDA(K=0, vocab_size=10)
     with pytest.raises(ValueError):
-        VanillaLDA(K=2, vocab_size=0)
+        OnlineLDA(K=2, vocab_size=0)
     with pytest.raises(ValueError):
-        VanillaLDA(K=2, vocab_size=10, alpha=-1.0)
+        OnlineLDA(K=2, vocab_size=10, alpha=-1.0)
     with pytest.raises(ValueError):
-        VanillaLDA(K=2, vocab_size=10, eta=0.0)
+        OnlineLDA(K=2, vocab_size=10, eta=0.0)
     with pytest.raises(ValueError):
-        VanillaLDA(K=2, vocab_size=10, cavi_max_iter=0)
+        OnlineLDA(K=2, vocab_size=10, cavi_max_iter=0)
     with pytest.raises(ValueError):
-        VanillaLDA(K=2, vocab_size=10, cavi_tol=0.0)
+        OnlineLDA(K=2, vocab_size=10, cavi_tol=0.0)
 
 
-def test_vanilla_lda_initialize_global_returns_lambda_of_correct_shape():
+def test_online_lda_initialize_global_returns_lambda_of_correct_shape():
     import numpy as np
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
-    m = VanillaLDA(K=5, vocab_size=20, gamma_shape=100.0)
+    m = OnlineLDA(K=5, vocab_size=20, gamma_shape=100.0)
     g = m.initialize_global(data_summary=None)
     assert "lambda" in g
     assert g["lambda"].shape == (5, 20)
@@ -86,30 +86,30 @@ def test_vanilla_lda_initialize_global_returns_lambda_of_correct_shape():
     assert (g["lambda"] > 0).all()
 
 
-def test_vanilla_lda_initialize_global_is_seedable_via_numpy():
+def test_online_lda_initialize_global_is_seedable_via_numpy():
     """Seeding numpy.random produces reproducible lambda init.
 
     The model's lambda init draws from numpy's default Gamma RNG; tests can
     pin reproducibility by seeding np.random before construction.
     """
     import numpy as np
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     np.random.seed(42)
-    g1 = VanillaLDA(K=3, vocab_size=10).initialize_global(None)
+    g1 = OnlineLDA(K=3, vocab_size=10).initialize_global(None)
     np.random.seed(42)
-    g2 = VanillaLDA(K=3, vocab_size=10).initialize_global(None)
+    g2 = OnlineLDA(K=3, vocab_size=10).initialize_global(None)
     np.testing.assert_array_equal(g1["lambda"], g2["lambda"])
 
 
-def test_vanilla_lda_local_update_returns_expected_keys():
+def test_online_lda_local_update_returns_expected_keys():
     """local_update returns the four keys the runner + ELBO need."""
     import numpy as np
     from spark_vi.core import BOWDocument
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     np.random.seed(0)
-    m = VanillaLDA(K=3, vocab_size=5)
+    m = OnlineLDA(K=3, vocab_size=5)
     g = m.initialize_global(None)
     docs = [
         BOWDocument(indices=np.array([0, 2], dtype=np.int32),
@@ -126,14 +126,14 @@ def test_vanilla_lda_local_update_returns_expected_keys():
     assert int(stats["n_docs"]) == 2
 
 
-def test_vanilla_lda_local_update_lambda_stats_is_nonzero_only_on_seen_columns():
+def test_online_lda_local_update_lambda_stats_is_nonzero_only_on_seen_columns():
     """Lambda stats accumulate only on columns whose token indices appeared."""
     import numpy as np
     from spark_vi.core import BOWDocument
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     np.random.seed(0)
-    m = VanillaLDA(K=2, vocab_size=6)
+    m = OnlineLDA(K=2, vocab_size=6)
     g = m.initialize_global(None)
     # Only indices 1 and 3 ever appear.
     docs = [BOWDocument(indices=np.array([1, 3], dtype=np.int32),
@@ -145,12 +145,12 @@ def test_vanilla_lda_local_update_lambda_stats_is_nonzero_only_on_seen_columns()
     assert (stats["lambda_stats"][:, [1, 3]] > 0).any()
 
 
-def test_vanilla_lda_local_update_handles_empty_partition():
+def test_online_lda_local_update_handles_empty_partition():
     """Empty rows iterator returns zero stats and n_docs=0."""
     import numpy as np
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
-    m = VanillaLDA(K=2, vocab_size=4)
+    m = OnlineLDA(K=2, vocab_size=4)
     g = m.initialize_global(None)
     stats = m.local_update(rows=iter([]), global_params=g)
     np.testing.assert_array_equal(stats["lambda_stats"], np.zeros((2, 4)))
@@ -159,18 +159,18 @@ def test_vanilla_lda_local_update_handles_empty_partition():
     assert float(stats["doc_theta_kl_sum"]) == 0.0
 
 
-def test_vanilla_lda_update_global_at_lr_zero_is_identity():
+def test_online_lda_update_global_at_lr_zero_is_identity():
     import numpy as np
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
     np.random.seed(0)
-    m = VanillaLDA(K=2, vocab_size=4)
+    m = OnlineLDA(K=2, vocab_size=4)
     g = m.initialize_global(None)
     target = {"lambda_stats": np.ones((2, 4)) * 5.0}
     new_g = m.update_global(g, target_stats=target, learning_rate=0.0)
     np.testing.assert_array_equal(new_g["lambda"], g["lambda"])
 
 
-def test_vanilla_lda_update_global_at_lr_one_jumps_to_target():
+def test_online_lda_update_global_at_lr_one_jumps_to_target():
     """At rho=1.0, lambda becomes (eta + expElogbeta * lambda_stats).
 
     The expElogbeta factor is the per-topic-per-vocab term factored out of
@@ -179,9 +179,9 @@ def test_vanilla_lda_update_global_at_lr_one_jumps_to_target():
     """
     import numpy as np
     from scipy.special import digamma
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
     np.random.seed(0)
-    m = VanillaLDA(K=2, vocab_size=4, eta=0.05)
+    m = OnlineLDA(K=2, vocab_size=4, eta=0.05)
     g = m.initialize_global(None)
     target = {"lambda_stats": np.full((2, 4), 7.0)}
     new_g = m.update_global(g, target_stats=target, learning_rate=1.0)
@@ -191,7 +191,7 @@ def test_vanilla_lda_update_global_at_lr_one_jumps_to_target():
     np.testing.assert_allclose(new_g["lambda"], 0.05 + expElogbeta * 7.0)
 
 
-def test_vanilla_lda_update_global_applies_expElogbeta_factor():
+def test_online_lda_update_global_applies_expElogbeta_factor():
     """Regression test for the MLlib-equivalent expElogbeta multiplication.
 
     A non-uniform target_stats fed to update_global must produce a result
@@ -201,11 +201,11 @@ def test_vanilla_lda_update_global_applies_expElogbeta_factor():
     """
     import numpy as np
     from scipy.special import digamma
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     K, V = 2, 3
     eta = 0.1
-    m = VanillaLDA(K=K, vocab_size=V, eta=eta)
+    m = OnlineLDA(K=K, vocab_size=V, eta=eta)
     # Hand-chosen lam: row 0 peaks on column 0, row 1 peaks on column 2.
     lam = np.array([[10.0, 1.0, 1.0], [1.0, 1.0, 10.0]])
     target_stats = {"lambda_stats": np.array([[3.0, 3.0, 3.0], [3.0, 3.0, 3.0]])}
@@ -223,7 +223,7 @@ def test_vanilla_lda_update_global_applies_expElogbeta_factor():
     assert not np.allclose(new_g["lambda"], buggy, atol=0.5)
 
 
-def test_vanilla_lda_update_global_uses_input_lambda_for_expElogbeta():
+def test_online_lda_update_global_uses_input_lambda_for_expElogbeta():
     """update_global must compute expElogbeta from the *input* lambda — the
     one local_update saw at the start of the iteration — not from any
     intermediate or post-update lambda candidate.
@@ -241,11 +241,11 @@ def test_vanilla_lda_update_global_uses_input_lambda_for_expElogbeta():
     """
     import numpy as np
     from scipy.special import digamma
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     K, V = 2, 3
     eta = 0.05
-    m = VanillaLDA(K=K, vocab_size=V, eta=eta)
+    m = OnlineLDA(K=K, vocab_size=V, eta=eta)
     # Non-uniform lam: row 0 peaked on col 0, row 1 peaked on col 2.
     lam_in = np.array([[5.0, 0.5, 0.5], [0.5, 0.5, 5.0]])
     lambda_stats = np.array([[2.0, 1.0, 0.5], [0.5, 1.0, 2.0]])
@@ -278,12 +278,12 @@ def test_vanilla_lda_update_global_uses_input_lambda_for_expElogbeta():
     )
 
 
-def test_vanilla_lda_combine_stats_is_associative():
+def test_online_lda_combine_stats_is_associative():
     """treeReduce relies on associativity: combine(a, combine(b, c)) == combine(combine(a, b), c)."""
     import numpy as np
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
     rng = np.random.default_rng(0)
-    m = VanillaLDA(K=2, vocab_size=3)
+    m = OnlineLDA(K=2, vocab_size=3)
     def _stats():
         return {
             "lambda_stats": rng.normal(size=(2, 3)),
@@ -298,14 +298,14 @@ def test_vanilla_lda_combine_stats_is_associative():
         np.testing.assert_allclose(left[k], right[k])
 
 
-def test_vanilla_lda_infer_local_returns_gamma_and_theta():
+def test_online_lda_infer_local_returns_gamma_and_theta():
     """infer_local returns dict with K-vector gamma and normalized theta."""
     import numpy as np
     from spark_vi.core import BOWDocument
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     np.random.seed(0)
-    m = VanillaLDA(K=4, vocab_size=10)
+    m = OnlineLDA(K=4, vocab_size=10)
     g = m.initialize_global(None)
     doc = BOWDocument(indices=np.array([2, 5], dtype=np.int32),
                       counts=np.array([1.0, 1.0]), length=2)
@@ -318,14 +318,14 @@ def test_vanilla_lda_infer_local_returns_gamma_and_theta():
     np.testing.assert_allclose(out["theta"], out["gamma"] / out["gamma"].sum())
 
 
-def test_vanilla_lda_infer_local_is_pure_function_of_inputs():
+def test_online_lda_infer_local_is_pure_function_of_inputs():
     """Same row + same global_params + same RNG state => identical output."""
     import numpy as np
     from spark_vi.core import BOWDocument
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     np.random.seed(7)
-    m = VanillaLDA(K=3, vocab_size=8)
+    m = OnlineLDA(K=3, vocab_size=8)
     g = m.initialize_global(None)
     doc = BOWDocument(indices=np.array([0, 4, 7], dtype=np.int32),
                       counts=np.array([2.0, 1.0, 1.0]), length=4)
@@ -338,18 +338,18 @@ def test_vanilla_lda_infer_local_is_pure_function_of_inputs():
     np.testing.assert_array_equal(out_a["theta"], out_b["theta"])
 
 
-def test_vanilla_lda_optimize_flags_default_false():
-    from spark_vi.models.lda import VanillaLDA
+def test_online_lda_optimize_flags_default_false():
+    from spark_vi.models.lda import OnlineLDA
 
-    m = VanillaLDA(K=3, vocab_size=10)
+    m = OnlineLDA(K=3, vocab_size=10)
     assert m.optimize_alpha is False
     assert m.optimize_eta is False
 
 
-def test_vanilla_lda_optimize_flags_can_be_set():
-    from spark_vi.models.lda import VanillaLDA
+def test_online_lda_optimize_flags_can_be_set():
+    from spark_vi.models.lda import OnlineLDA
 
-    m = VanillaLDA(K=3, vocab_size=10, optimize_alpha=True, optimize_eta=True)
+    m = OnlineLDA(K=3, vocab_size=10, optimize_alpha=True, optimize_eta=True)
     assert m.optimize_alpha is True
     assert m.optimize_eta is True
 
@@ -363,7 +363,7 @@ def test_update_global_with_optimize_alpha_runs_newton_and_floors():
     test_alpha_newton_step_recovers_known_alpha_on_synthetic; this test
     confirms wiring.
     """
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
     import numpy as np
 
     K, V = 3, 5
@@ -372,7 +372,7 @@ def test_update_global_with_optimize_alpha_runs_newton_and_floors():
     thetas = rng.dirichlet(true_alpha, size=10000)
     e_log_theta_sum = np.log(thetas).sum(axis=0)
 
-    m = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+    m = OnlineLDA(K=K, vocab_size=V, optimize_alpha=True)
     g = {
         "lambda": np.ones((K, V)),
         "alpha": np.full(K, 1.0 / K),
@@ -411,7 +411,7 @@ def test_local_update_emits_e_log_theta_sum_when_optimize_alpha():
     the digamma cost when off)."""
     import numpy as np
     from spark_vi.core.types import BOWDocument
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     K, V = 3, 5
     docs = [BOWDocument(
@@ -425,11 +425,11 @@ def test_local_update_emits_e_log_theta_sum_when_optimize_alpha():
         "eta": np.array(0.1),
     }
 
-    m_off = VanillaLDA(K=K, vocab_size=V, optimize_alpha=False)
+    m_off = OnlineLDA(K=K, vocab_size=V, optimize_alpha=False)
     stats_off = m_off.local_update(rows=iter(docs), global_params=g)
     assert "e_log_theta_sum" not in stats_off
 
-    m_on = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+    m_on = OnlineLDA(K=K, vocab_size=V, optimize_alpha=True)
     stats_on = m_on.local_update(rows=iter(docs), global_params=g)
     assert "e_log_theta_sum" in stats_on
     assert stats_on["e_log_theta_sum"].shape == (K,)
@@ -450,7 +450,7 @@ def test_update_global_with_optimize_eta_runs_newton_and_floors():
     from scipy.special import digamma
 
     from spark_vi.inference.concentration_optimization import eta_newton_step
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     rng = np.random.default_rng(11)
     K, V = 50, 100
@@ -469,7 +469,7 @@ def test_update_global_with_optimize_eta_runs_newton_and_floors():
     # learning_rate=1.0 ⇒ new_lam = eta_in + expElogbeta * lambda_stats
     lambda_stats = (target_new_lam - eta_in) / expElogbeta
 
-    m = VanillaLDA(K=K, vocab_size=V, eta=eta_in, optimize_eta=True)
+    m = OnlineLDA(K=K, vocab_size=V, eta=eta_in, optimize_eta=True)
     g = {
         "lambda": lam_in,
         "alpha": np.full(K, 1.0 / K),
@@ -538,7 +538,7 @@ def test_local_update_alpha_stat_finite_when_alpha_at_floor():
     for the orphan topic) and asserts the suff-stat is finite.
     """
     from spark_vi.core.types import BOWDocument
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     K, V = 3, 50
     # λ engineered so topic 0 explains essentially nothing in the doc's
@@ -560,7 +560,7 @@ def test_local_update_alpha_stat_finite_when_alpha_at_floor():
     )]
 
     np.random.seed(0)
-    model = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+    model = OnlineLDA(K=K, vocab_size=V, optimize_alpha=True)
     stats = model.local_update(rows=iter(docs), global_params=global_params)
 
     assert "e_log_theta_sum" in stats

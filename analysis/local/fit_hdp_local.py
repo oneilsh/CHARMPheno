@@ -1,7 +1,7 @@
 """End-to-end local: simulator parquet -> OnlineHDP via shim -> saved VIResult.
 
 Sibling of fit_lda_local.py — both go through their respective MLlib
-shims (`VanillaLDAEstimator` / `OnlineHDPEstimator`) so the local driver
+shims (`OnlineLDAEstimator` / `OnlineHDPEstimator`) so the local driver
 exercises the same code path as the cloud driver. Catching shim issues
 on a 10-doc parquet is cheaper than catching them on a billed cloud submit.
 

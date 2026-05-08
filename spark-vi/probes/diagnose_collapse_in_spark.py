@@ -14,7 +14,7 @@ sys.path.insert(0, ROOT)
 import numpy as np
 from pyspark.sql import SparkSession
 from spark_vi.core import BOWDocument, VIConfig, VIRunner
-from spark_vi.models.lda import VanillaLDA
+from spark_vi.models.lda import OnlineLDA
 
 K, V, D = 3, 100, 10_000
 docs_avg_len = 100
@@ -67,7 +67,7 @@ def main():
         random_seed=SEED,
         convergence_tol=1e-9,
     )
-    model = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+    model = OnlineLDA(K=K, vocab_size=V, optimize_alpha=True)
 
     # Force warnings to be raised so we can catch them with stack info.
     captured = []

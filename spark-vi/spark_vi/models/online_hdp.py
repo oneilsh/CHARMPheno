@@ -309,7 +309,7 @@ class OnlineHDP(VIModel):
         topics overall.
       eta: symmetric Dirichlet concentration for the topic-word prior.
       gamma_shape: shape parameter for the Gamma init of λ. Default 100
-        matches VanillaLDA (Hoffman 2010 onlineldavb.py).
+        matches OnlineLDA (Hoffman 2010 onlineldavb.py).
       cavi_max_iter: hard cap on doc-CAVI iterations per doc.
       cavi_tol: relative ELBO convergence threshold for doc-CAVI early
         termination.

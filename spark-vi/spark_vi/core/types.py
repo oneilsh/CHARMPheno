@@ -1,7 +1,7 @@
 """Canonical row types shared across spark_vi models.
 
 BOWDocument is the bag-of-words representation consumed by topic-style
-models (VanillaLDA, future OnlineHDP). Sparse-vector content; the type
+models (OnlineLDA, future OnlineHDP). Sparse-vector content; the type
 exists to make the contract self-documenting and to anchor a future MLlib
 Estimator/Transformer compatibility shim.
 """

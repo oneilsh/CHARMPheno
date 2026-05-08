@@ -1,4 +1,4 @@
-"""VanillaLDA: Hoffman 2010 Online LDA as a VIModel.
+"""OnlineLDA: Hoffman 2010 Online LDA as a VIModel.
 
 Generative model for each document d (= one row in the RDD):
     theta_d ~ Dirichlet(alpha · 1_K)
@@ -108,8 +108,8 @@ def _dirichlet_kl(q_alpha: np.ndarray, p_alpha: np.ndarray) -> float:
     )
 
 
-class VanillaLDA(VIModel):
-    """Vanilla LDA fittable by VIRunner with mini-batch SVI.
+class OnlineLDA(VIModel):
+    """Online LDA fittable by VIRunner with mini-batch SVI.
 
     Hyperparameters match Spark MLlib's pyspark.ml.clustering.LDA defaults
     so head-to-head comparisons are apples-to-apples.
@@ -174,7 +174,7 @@ class VanillaLDA(VIModel):
         """Random Gamma(gamma_shape, 1/gamma_shape) init for lambda (K, V),
         plus the initial α (K-vector) and η (scalar) seeded from constructor.
 
-        See VanillaLDA.__init__ for why α is always a length-K array internally.
+        See OnlineLDA.__init__ for why α is always a length-K array internally.
         Putting α / η in global_params (rather than relying on self) means the
         runner broadcasts and round-trips them like λ; update_global mutates
         them when the optimize_alpha / optimize_eta flags are on.

@@ -67,8 +67,8 @@ def test_run_mllib_produces_artifacts_of_expected_shape(spark):
 
 
 @pytest.mark.slow
-def test_vanilla_lda_matches_mllib_on_well_separated_corpus(spark):
-    """Rigorous correctness gate: VanillaLDA and MLlib LDA recover comparable topics.
+def test_online_lda_matches_mllib_on_well_separated_corpus(spark):
+    """Rigorous correctness gate: OnlineLDA and MLlib LDA recover comparable topics.
 
     Same synthetic corpus is fed to both implementations with matched
     hyperparameters (alpha, eta, tau0, kappa, mini-batch rate, gamma_shape, seed).
@@ -150,7 +150,7 @@ def test_vanilla_lda_matches_mllib_on_well_separated_corpus(spark):
         for perm in permutations(range(K))
     )
     assert best_diag < 0.20, (
-        f"VanillaLDA and MLlib LDA diverge beyond expected: "
+        f"OnlineLDA and MLlib LDA diverge beyond expected: "
         f"best-permutation diagonal mean JS = {best_diag:.4f} nats. "
         f"This usually indicates a math regression (sign error, wrong-direction "
         f"update, missing expElogbeta-style factor) on our side."

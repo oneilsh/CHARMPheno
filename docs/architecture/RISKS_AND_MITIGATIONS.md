@@ -146,7 +146,7 @@ models define a `compute_data_summary` method.
 
 ## MLlib parity expectations
 
-**Risk:** Head-to-head comparisons of `VanillaLDA` against
+**Risk:** Head-to-head comparisons of `OnlineLDA` against
 `pyspark.ml.clustering.LDA` may produce numerically different topic-word
 matrices and document-topic distributions even when the math is
 implemented correctly. Treating numerical equality as a correctness gate

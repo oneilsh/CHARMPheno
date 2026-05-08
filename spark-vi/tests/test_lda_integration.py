@@ -1,9 +1,9 @@
-"""End-to-end Spark-local integration tests for VanillaLDA.
+"""End-to-end Spark-local integration tests for OnlineLDA.
 
 Hermetic by construction: each test builds its own synthetic LDA dataset
 inside the test, no dependency on simulate_lda_omop.py.
 
-Scope: these tests verify that the VIRunner <-> VanillaLDA integration
+Scope: these tests verify that the VIRunner <-> OnlineLDA integration
 ends up in a sensible place — fitting actually drives the ELBO up over
 iterations, and a fit run produces a well-formed VIResult. Recovery
 quality (does the fitted beta match the synthetic ground truth?) is
@@ -11,7 +11,7 @@ intentionally NOT tested here; topic collapse at small synthetic-corpus
 scales is a known SVI characteristic (MLlib has the same behavior;
 Hoffman 2010 §4 uses corpora of 100K-352K documents). Recovery is
 verified by the MLlib parity test in charmpheno/tests/test_lda_compare.py
-which runs both VanillaLDA and pyspark.ml.clustering.LDA on the same
+which runs both OnlineLDA and pyspark.ml.clustering.LDA on the same
 data and asserts the two implementations agree — any math regression on
 our side will diverge from the reference.
 """
@@ -42,10 +42,10 @@ def _generate_synthetic_corpus(D: int, V: int, K: int,
 
 
 @pytest.mark.slow
-def test_vanilla_lda_fit_produces_well_formed_result(spark):
+def test_online_lda_fit_produces_well_formed_result(spark):
     """A short Spark-local fit returns a VIResult with positive lambda and a finite ELBO trace."""
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     K, V, D = 3, 30, 100
     np.random.seed(0)
@@ -59,7 +59,7 @@ def test_vanilla_lda_fit_produces_well_formed_result(spark):
         random_seed=0,
         convergence_tol=1e-9,
     )
-    result = VIRunner(VanillaLDA(K=K, vocab_size=V), config=cfg).fit(rdd)
+    result = VIRunner(OnlineLDA(K=K, vocab_size=V), config=cfg).fit(rdd)
 
     assert result.global_params["lambda"].shape == (K, V)
     assert (result.global_params["lambda"] > 0).all()
@@ -68,7 +68,7 @@ def test_vanilla_lda_fit_produces_well_formed_result(spark):
 
 
 @pytest.mark.slow
-def test_vanilla_lda_elbo_smoothed_endpoints_show_overall_improvement(spark):
+def test_online_lda_elbo_smoothed_endpoints_show_overall_improvement(spark):
     """Endpoint check on a 10-iter moving average: smoothed[-1] > smoothed[0].
 
     NOT a monotonicity check, despite what the surface intuition might
@@ -100,7 +100,7 @@ def test_vanilla_lda_elbo_smoothed_endpoints_show_overall_improvement(spark):
     bearing regression test for the SVI machinery, modulo that gap.
     """
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     np.random.seed(1)
     _, docs = _generate_synthetic_corpus(D=100, V=30, K=3, docs_avg_len=40, seed=7)
@@ -108,7 +108,7 @@ def test_vanilla_lda_elbo_smoothed_endpoints_show_overall_improvement(spark):
     rdd.count()  # materialize for VIRunner's strict cache precondition
     cfg = VIConfig(max_iterations=40, mini_batch_fraction=0.3,
                     random_seed=7, convergence_tol=1e-9)
-    result = VIRunner(VanillaLDA(K=3, vocab_size=30), config=cfg).fit(rdd)
+    result = VIRunner(OnlineLDA(K=3, vocab_size=30), config=cfg).fit(rdd)
 
     trace = np.asarray(result.elbo_trace)
     window = 10
@@ -144,7 +144,7 @@ def test_alpha_optimization_runs_end_to_end_without_regression(spark):
       * test_alpha_newton_step_recovers_known_alpha_on_synthetic
         (in tests/test_lda_math.py) verifies the closed-form Newton step
         against an idealized (asymptotically concentrated) E[log θ_d] sum.
-      * test_vanilla_lda_elbo_smoothed_endpoints_show_overall_improvement
+      * test_online_lda_elbo_smoothed_endpoints_show_overall_improvement
         (this file) catches sign or wrong-direction regressions in any
         ELBO-driven update by gating on the smoothed trace trend.
 
@@ -156,7 +156,7 @@ def test_alpha_optimization_runs_end_to_end_without_regression(spark):
     """
     import numpy as np
     from spark_vi.core import VIConfig, VIRunner, BOWDocument
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     K, V, D = 3, 30, 200
     rng = np.random.default_rng(2)
@@ -180,7 +180,7 @@ def test_alpha_optimization_runs_end_to_end_without_regression(spark):
 
     cfg = VIConfig(max_iterations=40, mini_batch_fraction=0.3,
                    random_seed=2, convergence_tol=1e-9)
-    model = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+    model = OnlineLDA(K=K, vocab_size=V, optimize_alpha=True)
     result = VIRunner(model, config=cfg).fit(rdd)
 
     final_alpha = result.global_params["alpha"]
@@ -233,7 +233,7 @@ def test_alpha_optimization_drifts_toward_corpus_truth_at_D10k(spark):
     from scipy.optimize import linear_sum_assignment
 
     from spark_vi.core import BOWDocument, VIConfig, VIRunner
-    from spark_vi.models.lda import VanillaLDA
+    from spark_vi.models.lda import OnlineLDA
 
     K, V, D = 3, 100, 10_000
     docs_avg_len = 100
@@ -271,7 +271,7 @@ def test_alpha_optimization_drifts_toward_corpus_truth_at_D10k(spark):
         random_seed=7,
         convergence_tol=1e-9,
     )
-    model = VanillaLDA(K=K, vocab_size=V, optimize_alpha=True)
+    model = OnlineLDA(K=K, vocab_size=V, optimize_alpha=True)
     result = VIRunner(model, config=cfg).fit(rdd)
 
     fitted_alpha = result.global_params["alpha"]

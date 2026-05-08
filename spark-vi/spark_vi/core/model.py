@@ -119,7 +119,7 @@ class VIModel(ABC):
         global_params — typically global Dirichlet/Gaussian KL terms — which
         are cheap to evaluate once on the driver.
 
-        See VanillaLDA for a worked example: doc_loglik_sum and
+        See OnlineLDA for a worked example: doc_loglik_sum and
         doc_theta_kl_sum are accumulated in local_update; the global
         Dirichlet KL on β is the only term computed in compute_elbo.
         """
