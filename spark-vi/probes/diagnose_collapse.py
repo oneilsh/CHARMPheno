@@ -4,7 +4,7 @@ Reproduces the failing seed (23) without Spark — we drive `local_update`
 directly so we can dump γ, expElogthetad, and the per-doc statistic.
 
 Hypothesis to test: the `RuntimeWarning: divide by zero in log` at
-spark_vi/models/lda.py:342 indicates `expElogthetad` underflowed to 0
+spark_vi/models/topic/lda.py:342 indicates `expElogthetad` underflowed to 0
 for some doc. Two candidate root causes:
 
   (a) γ converged near zero in some component (would mean CAVI is

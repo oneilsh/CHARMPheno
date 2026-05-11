@@ -218,7 +218,7 @@ def test_alpha_optimization_drifts_toward_corpus_truth_at_D10k(spark):
     components meaningfully — empirical sweep over five seeds at this
     configuration showed +43.6% to +62.5% L1 reduction toward truth
     after 300 iterations, with no all-floor collapses (post the
-    `e_log_theta_sum` digamma-underflow fix at models/lda.py).
+    `e_log_theta_sum` digamma-underflow fix at models/topic/lda.py).
 
     Threshold: ≥30% L1 reduction. Worst seed empirically observed +43.6%,
     so 30% leaves margin for cross-platform numerical drift.
@@ -257,7 +257,7 @@ def test_alpha_optimization_drifts_toward_corpus_truth_at_D10k(spark):
         ))
 
     # The model uses np.random globally for λ and γ initialization (see the
-    # TODO at models/lda.py near gamma_init). Until that's plumbed through
+    # TODO at models/topic/lda.py near gamma_init). Until that's plumbed through
     # cfg.random_seed, we seed the global RNG explicitly so the test is
     # reproducible. Empirical sweep showed +43.6%–+62.5% drift across five
     # seeds; 7 is a representative healthy seed (+62.5% in the sweep).

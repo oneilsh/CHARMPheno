@@ -259,7 +259,7 @@ Model authors subclass `VIModel` and implement:
 
 **Example — Online HDP implementation sketch:**
 
-Live signature lives in [`spark-vi/spark_vi/models/online_hdp.py`](../../spark-vi/spark_vi/models/online_hdp.py); refer there for the actual ctor and full method signatures.
+Live signature lives in [`spark-vi/spark_vi/models/topic/online_hdp.py`](../../spark-vi/spark_vi/models/topic/online_hdp.py); refer there for the actual ctor and full method signatures.
 
 ```python
 class OnlineHDP(VIModel):

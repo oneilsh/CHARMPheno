@@ -527,7 +527,7 @@ def test_local_update_alpha_stat_finite_when_alpha_at_floor():
     being −inf yields −inf for *all* Δα, collapsing every topic to
     the floor on the next iteration.
 
-    Fix (models/lda.py: e_log_theta_sum accumulator): compute the
+    Fix (models/topic/lda.py: e_log_theta_sum accumulator): compute the
     stat directly as `digamma(γ) − digamma(γ.sum())` rather than via
     `log(exp(...))`. The component at the floor still contributes a
     very negative value (~−1000), but the value is finite, so the
