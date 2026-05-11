@@ -11,8 +11,14 @@ from __future__ import annotations
 
 import math
 from itertools import combinations
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from pyspark import RDD
+
+    from spark_vi.core.types import BOWDocument
 
 
 def _npmi_pair(p_i: float, p_j: float, p_ij: float) -> float:
@@ -87,3 +93,51 @@ def _aggregate_topic_coherence(
             total += _npmi_pair(p_i=p_i, p_j=p_j, p_ij=p_ij)
         out[k] = total / n_pairs
     return out
+
+
+def _compute_doc_freqs(
+    bow_rdd: "RDD[BOWDocument]",
+    interest_set: set[int],
+) -> dict[int, int]:
+    """Per-term doc-frequency over the held-out corpus, restricted to interest_set.
+
+    Returns {term_index: # docs containing it}, only for terms in interest_set.
+    """
+    interest_b = bow_rdd.context.broadcast(interest_set)
+
+    def _emit_terms(doc):
+        s = interest_b.value
+        seen = set()
+        for w in doc.indices:
+            iw = int(w)
+            if iw in s and iw not in seen:
+                seen.add(iw)
+                yield (iw, 1)
+
+    counts = bow_rdd.flatMap(_emit_terms).reduceByKey(lambda a, b: a + b).collectAsMap()
+    interest_b.unpersist(blocking=False)
+    return dict(counts)
+
+
+def _compute_pair_freqs(
+    bow_rdd: "RDD[BOWDocument]",
+    interest_set: set[int],
+) -> dict[tuple[int, int], int]:
+    """Pairwise co-occurrence over the held-out corpus, restricted to interest_set.
+
+    Returns {(min_idx, max_idx): # docs containing both}, only for pairs where
+    both indices are in interest_set and at least one doc co-occurrence exists.
+    Keys are normalized to ``(min, max)`` order — sorting the per-doc interest
+    terms before :func:`itertools.combinations` produces this naturally.
+    """
+    interest_b = bow_rdd.context.broadcast(interest_set)
+
+    def _emit_pairs(doc):
+        s = interest_b.value
+        terms = sorted({int(w) for w in doc.indices if int(w) in s})
+        for a, b in combinations(terms, 2):
+            yield ((a, b), 1)
+
+    counts = bow_rdd.flatMap(_emit_pairs).reduceByKey(lambda a, b: a + b).collectAsMap()
+    interest_b.unpersist(blocking=False)
+    return {tuple(k): v for k, v in counts.items()}

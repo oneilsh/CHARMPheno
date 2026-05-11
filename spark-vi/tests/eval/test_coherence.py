@@ -150,3 +150,55 @@ def test_aggregate_topic_coherence_averages_over_pairs():
         n_docs=5,
     )
     assert out[0] == pytest.approx(1.0)
+
+
+def test_compute_doc_freqs_counts_distinct_doc_membership(sc):
+    """Each term gets the number of distinct held-out docs it appears in.
+
+    Counts are doc-level (binary): a doc with term 0 appearing 5 times still
+    contributes 1 to doc_freqs[0].
+    """
+    from spark_vi.core.types import BOWDocument
+    from spark_vi.eval.topic.coherence import _compute_doc_freqs
+
+    docs = [
+        BOWDocument(indices=np.array([0, 1], dtype=np.int32), counts=np.array([5.0, 2.0]), length=7),
+        BOWDocument(indices=np.array([0, 2], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+        BOWDocument(indices=np.array([1], dtype=np.int32), counts=np.array([3.0]), length=3),
+    ]
+    rdd = sc.parallelize(docs, numSlices=2)
+    interest = {0, 1, 2}
+
+    out = _compute_doc_freqs(rdd, interest)
+    assert out == {0: 2, 1: 2, 2: 1}
+
+
+def test_compute_doc_freqs_ignores_terms_outside_interest_set(sc):
+    from spark_vi.core.types import BOWDocument
+    from spark_vi.eval.topic.coherence import _compute_doc_freqs
+
+    docs = [
+        BOWDocument(indices=np.array([0, 99], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+    ]
+    rdd = sc.parallelize(docs)
+    interest = {0}
+    out = _compute_doc_freqs(rdd, interest)
+    assert out == {0: 1}  # 99 absent
+
+
+def test_compute_pair_freqs_emits_only_interest_set_pairs(sc):
+    """Pair (i, j) with both i < j and both in interest set."""
+    from spark_vi.core.types import BOWDocument
+    from spark_vi.eval.topic.coherence import _compute_pair_freqs
+
+    docs = [
+        BOWDocument(indices=np.array([0, 1, 2], dtype=np.int32), counts=np.array([1.0, 1.0, 1.0]), length=3),
+        BOWDocument(indices=np.array([0, 2], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+        BOWDocument(indices=np.array([1, 99], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+    ]
+    rdd = sc.parallelize(docs, numSlices=2)
+    interest = {0, 1, 2}
+
+    out = _compute_pair_freqs(rdd, interest)
+    # Doc 0: pairs (0,1), (0,2), (1,2). Doc 1: pair (0,2). Doc 2: no interest pairs.
+    assert out == {(0, 1): 1, (0, 2): 2, (1, 2): 1}
