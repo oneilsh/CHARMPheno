@@ -27,6 +27,7 @@ _VAR_ORDER = (
     "WORKSPACE_CDR",
     "WORKSPACE_BUCKET",
     "WORKSPACE_TEMP_BUCKET",
+    "BUCKET",
 )
 
 
@@ -96,6 +97,14 @@ def main(argv: list[str] | None = None) -> int:
     discovered = discover()
     if args.cdr:
         discovered["WORKSPACE_CDR"] = args.cdr
+
+    # Bare bucket name (no gs:// prefix), used by GCS-FUSE paths like
+    # /mnt/gcs/$BUCKET/runs/<id>. The Makefile's fit-eval targets reference
+    # $BUCKET directly so they can build a /mnt/gcs path the eval driver can
+    # read back without an extra gs-strip step.
+    ws_bucket = discovered.get("WORKSPACE_BUCKET", "")
+    if ws_bucket.startswith("gs://"):
+        discovered["BUCKET"] = ws_bucket[len("gs://"):]
 
     if not discovered.get("WORKSPACE_CDR"):
         print("ERROR: WORKSPACE_CDR not auto-discovered (no BQ_DATASET found "
