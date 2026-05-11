@@ -1,4 +1,4 @@
-.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke inspect smoke-dataproc setup
+.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence inspect smoke-dataproc setup
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -7,14 +7,21 @@ SCRIPT          := smoke_lda_cloud.py
 BQ_SCRIPT       := bq_smoke_cloud.py
 LDA_BQ_SCRIPT   := lda_bigquery_cloud.py
 HDP_BQ_SCRIPT   := hdp_bigquery_cloud.py
+EVAL_SCRIPT     := eval_coherence_cloud.py
 INSPECT_SCRIPT  := inspect_app.py
 SETUP_SCRIPT    := setup_workspace.py
 WORKSPACE_ENV   := .workspace_env
 
-# Args forwarded to lda-bq-smoke / hdp-bq-smoke / inspect (override on command line).
+# Args forwarded to lda-bq-smoke / hdp-bq-smoke / eval-bq-coherence / inspect
+# (override on command line).
 LDA_BQ_ARGS     ?=
 HDP_BQ_ARGS     ?=
+EVAL_ARGS       ?=
 INSPECT_ARGS    ?=
+
+# Required for eval-bq-coherence: path to the augmented VIResult dir written
+# by lda_bigquery_cloud.py (local or GCS-mounted, e.g. /mnt/gcs/<bucket>/runs/<id>).
+CHECKPOINT      ?=
 
 # Checkpoint / resume knobs for long-running fits (override on command line).
 # SAVE_DIR is the authoritative post-fit artifact when set; empty = no save.
@@ -64,6 +71,9 @@ help:
 	@echo "                         Disable γ opt: HDP_BQ_ARGS='--no-optimize-corpus-concentration'"
 	@echo "                         Checkpoint/resume: SAVE_DIR=/mnt/gcs/\$$BUCKET/runs/<id>/"
 	@echo "                                            SAVE_INTERVAL=10  RESUME_FROM=<prev-save-dir>"
+	@echo "  make eval-bq-coherence - Held-out NPMI coherence on an augmented VIResult"
+	@echo "                         CHECKPOINT=/mnt/gcs/\$$BUCKET/runs/<id>  (required)"
+	@echo "                         Override args via EVAL_ARGS='--top-n 10'"
 	@echo "  make inspect         - Live polling dashboard (run in a sibling terminal)"
 	@echo "                         Override args via INSPECT_ARGS='--interval 3'"
 	@echo "  make smoke-dataproc  - alternate: stage to GCS, gcloud dataproc jobs submit pyspark"
@@ -147,6 +157,20 @@ hdp-bq-smoke: zip $(WORKSPACE_ENV)
 	    --save-interval $(SAVE_INTERVAL) \
 	    --resume-from "$(RESUME_FROM)" \
 	    $(HDP_BQ_ARGS)
+
+eval-bq-coherence: zip $(WORKSPACE_ENV)
+	@test -n "$(CHECKPOINT)" || { echo "ERROR: set CHECKPOINT=<dir>"; exit 1; }
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
+	    $(EVAL_SCRIPT) \
+	    --checkpoint "$(CHECKPOINT)" \
+	    $(EVAL_ARGS)
 
 inspect:
 	python $(INSPECT_SCRIPT) $(INSPECT_ARGS)
