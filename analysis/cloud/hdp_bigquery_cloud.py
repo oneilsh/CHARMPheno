@@ -73,7 +73,7 @@ def _make_topic_evolution_logger(
     """
     # Import deferred to factory body — same fail-fast-on-misshapen-py-files
     # discipline as the spark_vi imports inside main().
-    from spark_vi.models.online_hdp import (
+    from spark_vi.models.topic.online_hdp import (
         expected_corpus_betas,
         topic_count_at_mass,
     )

@@ -108,7 +108,7 @@ Implications:
 ### Helper home: `spark_vi.inference.concentration_optimization`
 
 LDA's `_alpha_newton_step` and `_eta_newton_step` previously lived in
-`spark_vi.models.lda` as private helpers. With HDP needing the η helper
+`spark_vi.models.topic.lda` as private helpers. With HDP needing the η helper
 verbatim and a new `beta_concentration_closed_form` for γ/α, those are
 hoisted into a new shared module `spark_vi.inference.concentration_optimization`.
 LDA keeps back-compat aliases (`from … import alpha_newton_step as
