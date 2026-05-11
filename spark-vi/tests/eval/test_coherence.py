@@ -80,3 +80,78 @@ def test_top_n_terms_per_topic_top_n_must_not_exceed_vocab():
     topic_term = np.array([[0.5, 0.5]])
     with pytest.raises(ValueError, match="top_n"):
         _top_n_terms_per_topic(topic_term, top_n=3)
+
+
+def test_aggregate_topic_coherence_tiny_example():
+    """Hand-computed: 2 topics, 4 terms, 5 docs."""
+    from spark_vi.eval.topic.coherence import _aggregate_topic_coherence
+
+    # Top-N terms per topic:
+    #   topic 0: terms [0, 1]
+    #   topic 1: terms [2, 3]
+    top_n_indices = np.array([[0, 1], [2, 3]])
+
+    # Doc frequencies (out of 5 docs):
+    #   term 0: 4 docs; term 1: 3 docs; term 2: 5 docs; term 3: 1 doc
+    doc_freqs = {0: 4, 1: 3, 2: 5, 3: 1}
+
+    # Pairwise co-occurrence:
+    #   (0,1): 2 docs
+    #   (2,3): 1 doc  (term 3 appears only in docs that also have term 2)
+    pair_freqs = {(0, 1): 2, (2, 3): 1}
+
+    n_docs = 5
+    out = _aggregate_topic_coherence(
+        top_n_indices=top_n_indices,
+        doc_freqs=doc_freqs,
+        pair_freqs=pair_freqs,
+        n_docs=n_docs,
+    )
+    assert out.shape == (2,)
+
+    # Topic 0: NPMI((0, 1)) with p_0=4/5, p_1=3/5, p_01=2/5
+    p_0, p_1, p_01 = 4/5, 3/5, 2/5
+    expected_t0 = math.log(p_01 / (p_0 * p_1)) / -math.log(p_01)
+    assert out[0] == pytest.approx(expected_t0)
+
+    # Topic 1: NPMI((2, 3)) with p_2=5/5=1.0, p_3=1/5, p_23=1/5
+    # PMI = log(0.2 / (1.0 * 0.2)) = log(1) = 0; NPMI = 0 / -log(0.2) = 0.
+    assert out[1] == pytest.approx(0.0)
+
+
+def test_aggregate_topic_coherence_missing_pair_returns_minus_one():
+    """A pair with no co-occurrence in the held-out corpus contributes NPMI = -1."""
+    from spark_vi.eval.topic.coherence import _aggregate_topic_coherence
+
+    top_n_indices = np.array([[0, 1]])
+    doc_freqs = {0: 3, 1: 3}
+    pair_freqs: dict[tuple[int, int], int] = {}  # never co-occurred
+    out = _aggregate_topic_coherence(
+        top_n_indices=top_n_indices,
+        doc_freqs=doc_freqs,
+        pair_freqs=pair_freqs,
+        n_docs=10,
+    )
+    assert out[0] == pytest.approx(-1.0)
+
+
+def test_aggregate_topic_coherence_averages_over_pairs():
+    """Topic with top-N=3 averages over 3 pairs."""
+    from spark_vi.eval.topic.coherence import _aggregate_topic_coherence
+
+    top_n_indices = np.array([[0, 1, 2]])
+    # All three pairs perfectly co-occur: NPMI = 1 for each.
+    doc_freqs = {0: 5, 1: 5, 2: 5}
+    pair_freqs = {(0, 1): 5, (0, 2): 5, (1, 2): 5}
+    out = _aggregate_topic_coherence(
+        top_n_indices=top_n_indices,
+        doc_freqs=doc_freqs,
+        pair_freqs=pair_freqs,
+        n_docs=5,
+    )
+    # Each pair: log(1/1) / -log(1)  -> 0/0 indeterminate at p_ij = 1
+    # Convention: handle p_ij == 1 by returning 1.0 (perfect co-occurrence).
+    # See _npmi_pair: when p_ij = 1, -log(1) = 0, denominator is 0 -- the
+    # function should handle this edge case too. Verify both _npmi_pair and
+    # _aggregate handle it. Expected: all pairs return 1.0, mean = 1.0.
+    assert out[0] == pytest.approx(1.0)
