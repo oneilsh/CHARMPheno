@@ -65,7 +65,7 @@ def run_eval(
 ) -> CoherenceReport:
     """Run the eval and return the report. Importable for tests."""
     result = load_result(checkpoint)
-    lambda_ = result.global_params["lambda_"]
+    lambda_ = result.global_params["lambda"]
     topic_term = lambda_ / lambda_.sum(axis=1, keepdims=True)
 
     if model_class == "hdp":
