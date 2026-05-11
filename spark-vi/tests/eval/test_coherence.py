@@ -239,3 +239,46 @@ def test_compute_npmi_coherence_lda_path(sc):
     # All values bounded in [-1, 1]
     assert (report.per_topic_npmi >= -1.0).all()
     assert (report.per_topic_npmi <= 1.0).all()
+
+
+def test_compute_npmi_coherence_hdp_mask_path(sc):
+    """HDP-style: T=4 topics in topic_term, mask selects 2 of them."""
+    from spark_vi.core.types import BOWDocument
+    from spark_vi.eval.topic.coherence import compute_npmi_coherence
+
+    # 4 topics, 4 terms. Topics 0 and 2 are "useful" (mass on 0,1 and 2,3).
+    # Topics 1 and 3 are flat (should not be scored).
+    topic_term = np.array([
+        [0.45, 0.45, 0.05, 0.05],
+        [0.25, 0.25, 0.25, 0.25],
+        [0.05, 0.05, 0.45, 0.45],
+        [0.25, 0.25, 0.25, 0.25],
+    ])
+    mask = np.array([True, False, True, False])
+
+    docs = [
+        BOWDocument(indices=np.array([0, 1], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+        BOWDocument(indices=np.array([0, 1], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+        BOWDocument(indices=np.array([2, 3], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+        BOWDocument(indices=np.array([2, 3], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+    ]
+    rdd = sc.parallelize(docs, numSlices=2)
+
+    report = compute_npmi_coherence(topic_term, rdd, top_n=2, hdp_topic_mask=mask)
+    assert report.per_topic_npmi.shape == (2,)
+    assert list(report.topic_indices) == [0, 2]
+    assert report.per_topic_npmi[0] == pytest.approx(1.0)
+    assert report.per_topic_npmi[1] == pytest.approx(1.0)
+
+
+def test_compute_npmi_coherence_empty_mask_raises(sc):
+    from spark_vi.core.types import BOWDocument
+    from spark_vi.eval.topic.coherence import compute_npmi_coherence
+
+    topic_term = np.array([[0.5, 0.5]])
+    mask = np.array([False])
+    rdd = sc.parallelize(
+        [BOWDocument(indices=np.array([0, 1], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2)]
+    )
+    with pytest.raises(ValueError, match="zero topics"):
+        compute_npmi_coherence(topic_term, rdd, top_n=2, hdp_topic_mask=mask)
