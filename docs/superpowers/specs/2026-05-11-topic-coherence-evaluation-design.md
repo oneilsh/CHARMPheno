@@ -21,7 +21,7 @@ The "sliding window" of textbook NPMI is a token-ordering construct over running
 1. **Ship a generic NPMI coherence metric** in `spark_vi.eval.topic` that takes a topic-term matrix and a held-out BOW RDD, returns per-topic scores plus a summary, and works identically for OnlineLDA and OnlineHDP.
 2. **Provide a deterministic, reproducible BOW split helper** in `charmpheno/omop/` so analysis drivers can produce held-out partitions without depending on Spark's `randomSplit` partition sensitivity. Splits at the application layer, not inside any estimator.
 3. **Wire an end-to-end coherence driver** at `analysis/local/eval_coherence.py` that loads a saved `VIResult`, splits a BOW, computes NPMI, and prints a ranked-topic report with concept names. Cloud variant deferred to v2.
-4. **Land ADR 0016** documenting the metric choice (NPMI over modified-UCI), the layering decision (generic in spark-vi, split in charmpheno, driver in analysis), and the v1/v2 split.
+4. **Land ADR 0017** documenting the metric choice (NPMI over modified-UCI), the layering decision (generic in spark-vi, split in charmpheno, driver in analysis), and the v1/v2 split.
 5. **Prerequisite: refactor models into `spark_vi.models.topic.*`** so the eval namespace's `eval.topic.*` mirrors a `models.topic.*` on the model side. Separate branch, separate PR, no scope creep.
 
 ## Scope
@@ -53,7 +53,7 @@ The "sliding window" of textbook NPMI is a token-ordering construct over running
   - Computes `E[β]` from `lambda_`, runs `compute_npmi_coherence`, prints ranked topic table with concept names.
 - Unit tests on the metric math (tiny synthetic corpora with known co-occurrences), the split helper (determinism + no overlap), and the HDP topic-mask filter.
 - Integration test using a saved small-corpus checkpoint to verify end-to-end wiring.
-- ADR 0016 documenting metric choice, layering, scope.
+- ADR 0017 documenting metric choice, layering, scope.
 
 ### Not in v1 (explicit)
 
@@ -198,7 +198,7 @@ train_df, holdout_df = split_bow_by_person(bow_df, holdout_fraction=0.1, seed=42
 # (note: train_df is unused here; we assume the saved checkpoint was trained on the
 #  same split with the same seed. The eval driver and the training driver must agree
 #  on holdout_fraction + seed. We will document this as a contract in the driver header
-#  and ADR 0016, and consider stamping it into VIResult.metadata as a v2 hardening.)
+#  and ADR 0017, and consider stamping it into VIResult.metadata as a v2 hardening.)
 
 holdout_bow = holdout_df.rdd.map(_to_bow_row)
 
@@ -235,7 +235,7 @@ Open contract issue: the eval driver assumes the checkpoint was trained on the m
 
 ## ADR
 
-ADR 0016 lands with this branch and records:
+ADR 0017 lands with this branch and records:
 
 - Choice of NPMI over modified-UCI (bounded, established, no smoothing constant).
 - Whole-document co-occurrence over sliding-window (justified by patient-bag semantics).
