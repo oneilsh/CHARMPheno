@@ -24,3 +24,22 @@ def _npmi_pair(p_i: float, p_j: float, p_ij: float) -> float:
         return -1.0
     pmi = math.log(p_ij / (p_i * p_j))
     return pmi / -math.log(p_ij)
+
+
+import numpy as np
+
+
+def _top_n_terms_per_topic(topic_term: np.ndarray, top_n: int) -> np.ndarray:
+    """Return the indices of the top-N terms for each topic, sorted descending.
+
+    Ties broken by ascending index (lexicographic argsort over (-value, index)).
+    Output shape: (K, top_n) with dtype int64.
+    """
+    K, V = topic_term.shape
+    if top_n > V:
+        raise ValueError(f"top_n={top_n} exceeds vocabulary size V={V}")
+    # Stable sort on negated values gives descending order with tie-broken by
+    # ascending original index — exactly what argsort on (-value) does when
+    # stable.
+    sorted_idx = np.argsort(-topic_term, axis=1, kind="stable")
+    return sorted_idx[:, :top_n].astype(np.int64)

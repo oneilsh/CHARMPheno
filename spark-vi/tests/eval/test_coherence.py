@@ -46,3 +46,37 @@ def test_npmi_pair_handles_small_probabilities():
     # Anti-correlated; bounded above by 1 and below by -1; not NaN.
     assert math.isfinite(result)
     assert -1.0 <= result <= 1.0
+
+
+import numpy as np
+
+
+def test_top_n_terms_per_topic_picks_argmax_n():
+    """For each topic row, return the indices of the N largest entries, sorted descending."""
+    from spark_vi.eval.topic.coherence import _top_n_terms_per_topic
+    topic_term = np.array([
+        [0.1, 0.4, 0.2, 0.3],  # topic 0: top-2 by value -> indices [1, 3]
+        [0.5, 0.05, 0.4, 0.05],  # topic 1: top-2 -> indices [0, 2]
+    ])
+    out = _top_n_terms_per_topic(topic_term, top_n=2)
+    assert out.shape == (2, 2)
+    assert list(out[0]) == [1, 3]
+    assert list(out[1]) == [0, 2]
+
+
+def test_top_n_terms_per_topic_breaks_ties_by_index():
+    """Ties broken by ascending index, deterministic across runs."""
+    from spark_vi.eval.topic.coherence import _top_n_terms_per_topic
+    topic_term = np.array([
+        [0.25, 0.25, 0.25, 0.25],  # all tied
+    ])
+    out = _top_n_terms_per_topic(topic_term, top_n=3)
+    # With all ties, smaller indices win.
+    assert list(out[0]) == [0, 1, 2]
+
+
+def test_top_n_terms_per_topic_top_n_must_not_exceed_vocab():
+    from spark_vi.eval.topic.coherence import _top_n_terms_per_topic
+    topic_term = np.array([[0.5, 0.5]])
+    with pytest.raises(ValueError, match="top_n"):
+        _top_n_terms_per_topic(topic_term, top_n=3)
