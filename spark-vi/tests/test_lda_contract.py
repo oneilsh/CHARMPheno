@@ -7,7 +7,7 @@ def test_vimodel_default_infer_local_raises_clear_error():
     """A VIModel that doesn't override infer_local must raise NotImplementedError
     with a message naming the concrete class — no silent fallback to None/NaN.
     """
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     m = CountingModel()
     with pytest.raises(NotImplementedError) as exc:
@@ -19,7 +19,7 @@ def test_vimodel_default_infer_local_raises_clear_error():
 
 def test_online_lda_is_a_vimodel():
     from spark_vi.core import VIModel
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
     assert issubclass(OnlineLDA, VIModel)
 
 
@@ -29,7 +29,7 @@ def test_online_lda_default_alpha_eta_match_one_over_k():
     α is stored on self as a length-K vector (constructor broadcasts a
     scalar). η is scalar.
     """
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     m = OnlineLDA(K=4, vocab_size=10)
     np.testing.assert_allclose(m.alpha, 0.25)
@@ -38,7 +38,7 @@ def test_online_lda_default_alpha_eta_match_one_over_k():
 
 
 def test_online_lda_explicit_alpha_eta_respected():
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     m = OnlineLDA(K=10, vocab_size=100, alpha=0.1, eta=0.2)
     np.testing.assert_allclose(m.alpha, 0.1)
@@ -48,7 +48,7 @@ def test_online_lda_explicit_alpha_eta_respected():
 
 def test_online_lda_accepts_vector_alpha():
     """A length-K alpha is accepted and stored verbatim (no broadcast)."""
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     m = OnlineLDA(K=3, vocab_size=10, alpha=np.array([0.1, 0.5, 0.9]))
     np.testing.assert_allclose(m.alpha, [0.1, 0.5, 0.9])
@@ -59,7 +59,7 @@ def test_online_lda_accepts_vector_alpha():
 
 
 def test_online_lda_rejects_invalid_hyperparams():
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
     with pytest.raises(ValueError):
         OnlineLDA(K=0, vocab_size=10)
     with pytest.raises(ValueError):
@@ -76,7 +76,7 @@ def test_online_lda_rejects_invalid_hyperparams():
 
 def test_online_lda_initialize_global_returns_lambda_of_correct_shape():
     import numpy as np
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     m = OnlineLDA(K=5, vocab_size=20, gamma_shape=100.0)
     g = m.initialize_global(data_summary=None)
@@ -93,7 +93,7 @@ def test_online_lda_initialize_global_is_seedable_via_numpy():
     pin reproducibility by seeding np.random before construction.
     """
     import numpy as np
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     np.random.seed(42)
     g1 = OnlineLDA(K=3, vocab_size=10).initialize_global(None)
@@ -106,7 +106,7 @@ def test_online_lda_local_update_returns_expected_keys():
     """local_update returns the four keys the runner + ELBO need."""
     import numpy as np
     from spark_vi.core import BOWDocument
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     np.random.seed(0)
     m = OnlineLDA(K=3, vocab_size=5)
@@ -130,7 +130,7 @@ def test_online_lda_local_update_lambda_stats_is_nonzero_only_on_seen_columns():
     """Lambda stats accumulate only on columns whose token indices appeared."""
     import numpy as np
     from spark_vi.core import BOWDocument
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     np.random.seed(0)
     m = OnlineLDA(K=2, vocab_size=6)
@@ -148,7 +148,7 @@ def test_online_lda_local_update_lambda_stats_is_nonzero_only_on_seen_columns():
 def test_online_lda_local_update_handles_empty_partition():
     """Empty rows iterator returns zero stats and n_docs=0."""
     import numpy as np
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     m = OnlineLDA(K=2, vocab_size=4)
     g = m.initialize_global(None)
@@ -161,7 +161,7 @@ def test_online_lda_local_update_handles_empty_partition():
 
 def test_online_lda_update_global_at_lr_zero_is_identity():
     import numpy as np
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
     np.random.seed(0)
     m = OnlineLDA(K=2, vocab_size=4)
     g = m.initialize_global(None)
@@ -179,7 +179,7 @@ def test_online_lda_update_global_at_lr_one_jumps_to_target():
     """
     import numpy as np
     from scipy.special import digamma
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
     np.random.seed(0)
     m = OnlineLDA(K=2, vocab_size=4, eta=0.05)
     g = m.initialize_global(None)
@@ -201,7 +201,7 @@ def test_online_lda_update_global_applies_expElogbeta_factor():
     """
     import numpy as np
     from scipy.special import digamma
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     K, V = 2, 3
     eta = 0.1
@@ -241,7 +241,7 @@ def test_online_lda_update_global_uses_input_lambda_for_expElogbeta():
     """
     import numpy as np
     from scipy.special import digamma
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     K, V = 2, 3
     eta = 0.05
@@ -281,7 +281,7 @@ def test_online_lda_update_global_uses_input_lambda_for_expElogbeta():
 def test_online_lda_combine_stats_is_associative():
     """treeReduce relies on associativity: combine(a, combine(b, c)) == combine(combine(a, b), c)."""
     import numpy as np
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
     rng = np.random.default_rng(0)
     m = OnlineLDA(K=2, vocab_size=3)
     def _stats():
@@ -302,7 +302,7 @@ def test_online_lda_infer_local_returns_gamma_and_theta():
     """infer_local returns dict with K-vector gamma and normalized theta."""
     import numpy as np
     from spark_vi.core import BOWDocument
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     np.random.seed(0)
     m = OnlineLDA(K=4, vocab_size=10)
@@ -322,7 +322,7 @@ def test_online_lda_infer_local_is_pure_function_of_inputs():
     """Same row + same global_params + same RNG state => identical output."""
     import numpy as np
     from spark_vi.core import BOWDocument
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     np.random.seed(7)
     m = OnlineLDA(K=3, vocab_size=8)
@@ -339,7 +339,7 @@ def test_online_lda_infer_local_is_pure_function_of_inputs():
 
 
 def test_online_lda_optimize_flags_default_false():
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     m = OnlineLDA(K=3, vocab_size=10)
     assert m.optimize_alpha is False
@@ -347,7 +347,7 @@ def test_online_lda_optimize_flags_default_false():
 
 
 def test_online_lda_optimize_flags_can_be_set():
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     m = OnlineLDA(K=3, vocab_size=10, optimize_alpha=True, optimize_eta=True)
     assert m.optimize_alpha is True
@@ -363,7 +363,7 @@ def test_update_global_with_optimize_alpha_runs_newton_and_floors():
     test_alpha_newton_step_recovers_known_alpha_on_synthetic; this test
     confirms wiring.
     """
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
     import numpy as np
 
     K, V = 3, 5
@@ -411,7 +411,7 @@ def test_local_update_emits_e_log_theta_sum_when_optimize_alpha():
     the digamma cost when off)."""
     import numpy as np
     from spark_vi.core.types import BOWDocument
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     K, V = 3, 5
     docs = [BOWDocument(
@@ -450,7 +450,7 @@ def test_update_global_with_optimize_eta_runs_newton_and_floors():
     from scipy.special import digamma
 
     from spark_vi.inference.concentration_optimization import eta_newton_step
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     rng = np.random.default_rng(11)
     K, V = 50, 100
@@ -527,7 +527,7 @@ def test_local_update_alpha_stat_finite_when_alpha_at_floor():
     being −inf yields −inf for *all* Δα, collapsing every topic to
     the floor on the next iteration.
 
-    Fix (models/lda.py: e_log_theta_sum accumulator): compute the
+    Fix (models/topic/lda.py: e_log_theta_sum accumulator): compute the
     stat directly as `digamma(γ) − digamma(γ.sum())` rather than via
     `log(exp(...))`. The component at the floor still contributes a
     very negative value (~−1000), but the value is finite, so the
@@ -538,7 +538,7 @@ def test_local_update_alpha_stat_finite_when_alpha_at_floor():
     for the orphan topic) and asserts the suff-stat is finite.
     """
     from spark_vi.core.types import BOWDocument
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     K, V = 3, 50
     # λ engineered so topic 0 explains essentially nothing in the doc's
@@ -581,7 +581,7 @@ def test_local_update_alpha_stat_finite_when_alpha_at_floor():
 
 def test_online_lda_get_metadata_returns_K_and_V():
     """get_metadata exposes the shape constants needed for VIResult round-trip."""
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     m = OnlineLDA(K=4, vocab_size=10)
     md = m.get_metadata()
@@ -592,7 +592,7 @@ def test_online_lda_iteration_diagnostics_returns_alpha_and_eta():
     """iteration_diagnostics returns the per-iter optimized concentrations:
     α as a K-vector (asymmetric Dirichlet support) and η as a Python float.
     """
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     m = OnlineLDA(K=4, vocab_size=10)
     alpha_in = np.array([0.1, 0.2, 0.3, 0.4])

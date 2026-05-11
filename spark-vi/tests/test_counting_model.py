@@ -10,13 +10,13 @@ import pytest
 
 def test_counting_model_is_a_vimodel():
     from spark_vi.core import VIModel
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     assert issubclass(CountingModel, VIModel)
 
 
 def test_counting_model_initialize_global_returns_prior_counts():
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     m = CountingModel(prior_alpha=1.0, prior_beta=1.0)
     g = m.initialize_global(data_summary=None)
@@ -25,7 +25,7 @@ def test_counting_model_initialize_global_returns_prior_counts():
 
 
 def test_counting_model_local_update_returns_sufficient_stats():
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     m = CountingModel(prior_alpha=1.0, prior_beta=1.0)
     g = m.initialize_global(data_summary=None)
@@ -37,7 +37,7 @@ def test_counting_model_local_update_returns_sufficient_stats():
 
 
 def test_counting_model_combine_stats_sums_elementwise():
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     m = CountingModel(prior_alpha=1.0, prior_beta=1.0)
     combined = m.combine_stats(
@@ -53,7 +53,7 @@ def test_counting_model_update_global_applies_natural_gradient():
 
     With rho=1.0 the update jumps directly to (prior + stats).
     """
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     m = CountingModel(prior_alpha=1.0, prior_beta=1.0)
     old = m.initialize_global(data_summary=None)
@@ -65,7 +65,7 @@ def test_counting_model_update_global_applies_natural_gradient():
 
 
 def test_counting_model_update_global_interpolates_partial_step():
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     m = CountingModel(prior_alpha=1.0, prior_beta=1.0)
     old = {"alpha": np.array(2.0), "beta": np.array(2.0)}
@@ -87,7 +87,7 @@ def test_counting_model_elbo_at_exact_posterior_equals_log_marginal_likelihood()
     """
     from scipy.special import betaln
 
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     a0, b0 = 2.0, 3.0
     h, t = 30.0, 10.0
@@ -106,7 +106,7 @@ def test_counting_model_elbo_is_below_log_marginal_when_q_is_off():
     """ELBO is a strict lower bound: any q != posterior gives ELBO < log p(x)."""
     from scipy.special import betaln
 
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     a0, b0 = 1.0, 1.0
     h, t = 30.0, 10.0
@@ -127,7 +127,7 @@ def test_counting_model_elbo_increases_along_a_run_toward_posterior():
     converges to the true posterior under repeated full-batch updates with
     learning_rate=1.0 (which is the CAVI fixed-point jump).
     """
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     m = CountingModel(prior_alpha=1.0, prior_beta=1.0)
     g = m.initialize_global(data_summary=None)

@@ -26,7 +26,7 @@ from scipy.special import digamma
 
 def test_log_normalize_rows_simplex_invariant():
     """exp(out) rows sum to 1; out and input differ by a constant per row."""
-    from spark_vi.models.online_hdp import _log_normalize_rows
+    from spark_vi.models.topic.online_hdp import _log_normalize_rows
 
     rng = np.random.default_rng(0)
     M = rng.normal(size=(5, 7))
@@ -42,7 +42,7 @@ def test_log_normalize_rows_simplex_invariant():
 
 def test_log_normalize_rows_handles_large_magnitudes():
     """Numerical stability under large positive entries (no inf/nan)."""
-    from spark_vi.models.online_hdp import _log_normalize_rows
+    from spark_vi.models.topic.online_hdp import _log_normalize_rows
 
     M = np.array([[1000.0, 1001.0, 999.0],
                   [-1000.0, -1001.0, -999.0]])
@@ -64,7 +64,7 @@ def test_expect_log_sticks_uniform_prior_known_values():
       out[1] = Elog_W[1] + Elog_1mW[0]                  = -2.0
       out[2] =             Elog_1mW[0] + Elog_1mW[1]    = -2.0
     """
-    from spark_vi.models.online_hdp import _expect_log_sticks
+    from spark_vi.models.topic.online_hdp import _expect_log_sticks
 
     a = np.array([1.0, 1.0])
     b = np.array([1.0, 1.0])
@@ -77,7 +77,7 @@ def test_expect_log_sticks_uniform_prior_known_values():
 def test_expect_log_sticks_truncation_handles_last_atom():
     """For T atoms with (T-1) sticks, the trailing entry receives only the
     cumulative E[log(1-W)] sum (q(W_T = 1) = 1 ⇒ E[log W_T] = 0)."""
-    from spark_vi.models.online_hdp import _expect_log_sticks
+    from spark_vi.models.topic.online_hdp import _expect_log_sticks
 
     rng = np.random.default_rng(42)
     T_minus_1 = 5
@@ -102,7 +102,7 @@ def test_expect_log_sticks_truncation_handles_last_atom():
 
 def test_beta_kl_zero_when_posterior_matches_prior():
     """KL(Beta(a, b) ‖ Beta(a, b)) = 0 element-wise."""
-    from spark_vi.models.online_hdp import _beta_kl
+    from spark_vi.models.topic.online_hdp import _beta_kl
 
     a = np.array([1.0, 2.0, 3.0])
     b = np.array([1.0, 2.0, 5.0])
@@ -115,7 +115,7 @@ def test_beta_kl_zero_when_posterior_matches_prior():
 def test_beta_kl_zero_for_matched_corpus_prior():
     """For corpus sticks the prior is Beta(1, gamma); when (u, v) = (1, gamma)
     KL is zero."""
-    from spark_vi.models.online_hdp import _beta_kl
+    from spark_vi.models.topic.online_hdp import _beta_kl
 
     gamma = 1.5
     T_minus_1 = 4
@@ -128,7 +128,7 @@ def test_beta_kl_zero_for_matched_corpus_prior():
 
 def test_beta_kl_positive_when_posterior_differs():
     """Concentrate the variational posterior away from the prior; KL > 0."""
-    from spark_vi.models.online_hdp import _beta_kl
+    from spark_vi.models.topic.online_hdp import _beta_kl
 
     u = np.array([10.0, 10.0])
     v = np.array([1.0, 1.0])
@@ -139,7 +139,7 @@ def test_beta_kl_positive_when_posterior_differs():
 
 def test_beta_kl_positive_when_prior_more_concentrated():
     """KL[Beta(1,1) ‖ Beta(5,1)] > 0 — also catches a sign-flip on term 3."""
-    from spark_vi.models.online_hdp import _beta_kl
+    from spark_vi.models.topic.online_hdp import _beta_kl
 
     kl = _beta_kl(
         np.array([1.0, 1.0]),
@@ -164,7 +164,7 @@ def _peaked_elogbeta(T: int, V: int, sharpness: float = 5.0) -> np.ndarray:
 
 def test_doc_e_step_shape_and_simplex_contract():
     """Run one doc through CAVI; output arrays have right shapes and are valid."""
-    from spark_vi.models.online_hdp import _doc_e_step, _expect_log_sticks
+    from spark_vi.models.topic.online_hdp import _doc_e_step, _expect_log_sticks
 
     T, K, V = 10, 5, 20
     Elogbeta = _peaked_elogbeta(T, V)
@@ -211,7 +211,7 @@ def test_doc_e_step_shape_and_simplex_contract():
 def test_doc_e_step_returns_doc_elbo_terms():
     """The returned dict must include the four ELBO contributions used by
     local_update for sufficient-stat aggregation."""
-    from spark_vi.models.online_hdp import _doc_e_step, _expect_log_sticks
+    from spark_vi.models.topic.online_hdp import _doc_e_step, _expect_log_sticks
 
     T, K, V = 10, 5, 20
     Elogbeta = _peaked_elogbeta(T, V)
@@ -243,7 +243,7 @@ def test_doc_e_step_per_iter_elbo_nondecreasing():
     larger than numerical noise. This is the regression gate for any change
     to the var_phi / phi / (a, b) update logic.
     """
-    from spark_vi.models import online_hdp as hdp
+    from spark_vi.models.topic import online_hdp as hdp
 
     T, K, V = 10, 5, 20
     Elogbeta = _peaked_elogbeta(T, V)
@@ -297,7 +297,7 @@ def test_doc_e_step_per_iter_elbo_nondecreasing():
 
 
 def test_online_hdp_init_validates_inputs():
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     # Valid construction.
     m = OnlineHDP(T=20, K=5, vocab_size=100)
@@ -330,7 +330,7 @@ def test_online_hdp_init_validates_inputs():
 
 
 def test_online_hdp_init_accepts_all_optional_args():
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(
         T=30, K=10, vocab_size=500,
@@ -344,7 +344,7 @@ def test_online_hdp_init_accepts_all_optional_args():
 
 
 def test_initialize_global_shapes_and_validity():
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(
         T=10, K=5, vocab_size=50, alpha=0.7, gamma=1.5, eta=0.05,
@@ -371,7 +371,7 @@ def test_initialize_global_shapes_and_validity():
 def test_local_update_returns_expected_keys_and_shapes():
     """Run a tiny partition through local_update; check stats dict shape."""
     from spark_vi.core import BOWDocument
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50, gamma_shape=100.0)
     np.random.seed(0)
@@ -418,7 +418,7 @@ def test_local_update_returns_expected_keys_and_shapes():
 def test_local_update_combine_stats_is_elementwise_sum():
     """Default VIModel.combine_stats should sum HDP suff-stats correctly."""
     from spark_vi.core import BOWDocument
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50)
     np.random.seed(0)
@@ -443,7 +443,7 @@ def test_local_update_combine_stats_is_elementwise_sum():
 
 def test_update_global_rho_zero_is_identity():
     """rho=0 ⇒ globals unchanged."""
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50, gamma=1.0)
     np.random.seed(0)
@@ -462,7 +462,7 @@ def test_update_global_rho_zero_is_identity():
 
 def test_update_global_rho_one_replaces_with_target():
     """rho=1 ⇒ globals become eta + target / (1 + s) / (gamma + s_tail)."""
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     T, K, V = 5, 3, 10
     m = OnlineHDP(T=T, K=K, vocab_size=V, eta=0.01, gamma=2.0)
@@ -490,7 +490,7 @@ def test_update_global_rho_one_replaces_with_target():
 
 def test_compute_elbo_finite_on_initial_state():
     """ELBO is finite when called on init globals + zero stats (no docs)."""
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50, gamma=1.0)
     np.random.seed(0)
@@ -513,7 +513,7 @@ def test_compute_elbo_corpus_kl_zero_at_prior():
     """When (u, v) == (1, gamma) and lambda is set to the eta prior, the
     corpus-level KL terms are exactly zero. Per-doc terms are zero with no
     docs. Therefore ELBO == 0 in that case."""
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     T, V = 5, 8
     eta = 0.01
@@ -544,7 +544,7 @@ def test_compute_elbo_corpus_kl_zero_at_prior():
 def test_infer_local_returns_simplex_theta():
     """infer_local returns the doc variational posterior + a θ derived from it."""
     from spark_vi.core import BOWDocument
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     T, K, V = 10, 5, 50
     m = OnlineHDP(T=T, K=K, vocab_size=V)
@@ -566,7 +566,7 @@ def test_infer_local_returns_simplex_theta():
 
 def test_iteration_summary_returns_string():
     """iteration_summary returns a short non-empty diagnostic string."""
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50)
     np.random.seed(0)
@@ -581,7 +581,7 @@ def test_iteration_summary_returns_string():
 
 def test_iteration_summary_handles_small_T():
     """T=2 should not crash even though 'top-3' would only have 2 values."""
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=2, K=2, vocab_size=10)
     np.random.seed(0)
@@ -601,7 +601,7 @@ def test_local_update_emits_s_alpha_when_optimize_alpha():
     returns the s_alpha sufficient statistic for the closed-form M-step.
     """
     from spark_vi.core import BOWDocument
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50, optimize_alpha=True)
     np.random.seed(0)
@@ -624,7 +624,7 @@ def test_local_update_emits_s_alpha_when_optimize_alpha():
 def test_local_update_omits_s_alpha_when_optimize_alpha_false():
     """When optimize_alpha=False, the no-stat path keeps its current shape."""
     from spark_vi.core import BOWDocument
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50, optimize_alpha=False)
     np.random.seed(0)
@@ -646,7 +646,7 @@ def test_update_global_advances_gamma_when_optimize_gamma():
     maximizer γ* = -(T-1)/Σ_t [ψ(v_t) − ψ(u_t + v_t)] computed on the
     just-updated (u, v) — verify against a hand-computed expected value.
     """
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     T, K, V = 5, 3, 10
     m = OnlineHDP(
@@ -676,7 +676,7 @@ def test_update_global_advances_alpha_when_optimize_alpha():
     """With optimize_alpha=True, ρ=1, and synthetic s_alpha, new_alpha
     equals α* = -D·(K-1) / s_alpha.
     """
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     T, K, V = 5, 3, 10
     m = OnlineHDP(
@@ -706,7 +706,7 @@ def test_update_global_advances_eta_when_optimize_eta():
     just-updated λ. Verify that η actually moves (not the exact value —
     that's the Newton math tested in test_concentration_optimization).
     """
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     T, K, V = 5, 3, 10
     m = OnlineHDP(
@@ -732,7 +732,7 @@ def test_update_global_floors_gamma_at_1e_minus_3():
     """If the closed-form γ* lands below 1e-3 (degenerate stats), the
     output γ is clamped to the floor.
     """
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     T, K, V = 5, 3, 10
     m = OnlineHDP(
@@ -757,7 +757,7 @@ def test_update_global_floors_gamma_at_1e_minus_3():
 def test_update_global_keeps_gamma_alpha_eta_when_flags_off():
     """All three optimize_* flags False ⇒ γ, α, η round-trip unchanged
     through update_global."""
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     T, K, V = 5, 3, 10
     m = OnlineHDP(
@@ -782,7 +782,7 @@ def test_compute_elbo_uses_gamma_eta_from_global_params():
     not self. Same model instance, two different global_params → two
     different ELBOs.
     """
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     T, V = 5, 8
     m = OnlineHDP(T=T, K=3, vocab_size=V, eta=0.01, gamma=1.0)
@@ -815,7 +815,7 @@ def test_compute_elbo_uses_gamma_eta_from_global_params():
 
 def test_iteration_summary_includes_gamma_alpha_eta():
     """Live diagnostic surfaces current concentration values."""
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50, alpha=0.7, gamma=1.5, eta=0.05)
     np.random.seed(0)
@@ -826,7 +826,7 @@ def test_iteration_summary_includes_gamma_alpha_eta():
 
 def test_online_hdp_get_metadata_returns_T_K_V():
     """get_metadata exposes the shape constants needed for VIResult round-trip."""
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=20, K=5, vocab_size=100)
     md = m.get_metadata()
@@ -835,7 +835,7 @@ def test_online_hdp_get_metadata_returns_T_K_V():
 
 def test_online_hdp_iteration_diagnostics_returns_gamma_alpha_eta():
     """iteration_diagnostics returns scalar γ, α, η as Python floats per iter."""
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50)
     global_params = {

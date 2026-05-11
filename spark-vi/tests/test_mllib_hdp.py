@@ -72,7 +72,7 @@ def test_optimize_flags_translate_to_model_kwargs():
 def test_param_translation_to_model_and_config():
     from spark_vi.core.config import VIConfig
     from spark_vi.mllib.hdp import OnlineHDPEstimator, _build_model_and_config
-    from spark_vi.models.online_hdp import OnlineHDP
+    from spark_vi.models.topic.online_hdp import OnlineHDP
 
     e = OnlineHDPEstimator(
         k=50, docTruncation=10, maxIter=42, seed=2026,
@@ -148,7 +148,7 @@ def test_scalar_doc_concentration_is_accepted():
 
 def test_expected_corpus_betas_normalize_to_one():
     """Plug-in E[β_t] is a length-T simplex vector."""
-    from spark_vi.models.online_hdp import expected_corpus_betas
+    from spark_vi.models.topic.online_hdp import expected_corpus_betas
 
     rng = np.random.default_rng(0)
     T = 10
@@ -166,7 +166,7 @@ def test_expected_corpus_betas_prior_mean_uniform_under_gamma_one():
     """When u = 1, v = γ = 1 (Beta(1,1) = uniform), E[β_t] is a power-of-1/2
     geometric — last atom absorbs everything not consumed by earlier sticks.
     Specifically E[β_k] = 0.5 * 0.5^k for k=0..T-2; last atom = 0.5^(T-1)."""
-    from spark_vi.models.online_hdp import expected_corpus_betas
+    from spark_vi.models.topic.online_hdp import expected_corpus_betas
 
     T = 5
     u = np.ones(T - 1)
@@ -324,7 +324,7 @@ def test_active_topic_count_rejects_invalid_threshold(tiny_hdp_corpus_df):
 def test_topic_count_at_mass_handles_edge_cases():
     """Direct unit test of the lifted helper."""
     import numpy as np
-    from spark_vi.models.online_hdp import topic_count_at_mass
+    from spark_vi.models.topic.online_hdp import topic_count_at_mass
 
     # Perfectly-summing simplex; threshold near 1.0 fp-slop case.
     weights = np.array([0.5, 0.3, 0.2])
@@ -346,7 +346,7 @@ def test_topic_count_at_mass_handles_edge_cases():
 def test_active_topic_count_truncation_invariant():
     """Same E[β_t] mass distribution → same active count, regardless of T."""
     import numpy as np
-    from spark_vi.models.online_hdp import expected_corpus_betas
+    from spark_vi.models.topic.online_hdp import expected_corpus_betas
 
     # Construct two synthetic (u, v) configurations that produce the same
     # leading mass profile but pad with extra near-zero topics at higher T.

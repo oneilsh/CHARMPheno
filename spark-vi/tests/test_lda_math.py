@@ -21,7 +21,7 @@ def _peaked_expElogbeta(K: int, V: int, sharpness: float = 5.0) -> np.ndarray:
 
 def test_cavi_doc_inference_converges_to_dominant_topic():
     """A document whose tokens are all word-0 should drive gamma toward topic 0."""
-    from spark_vi.models.lda import _cavi_doc_inference
+    from spark_vi.models.topic.lda import _cavi_doc_inference
 
     K, V = 3, 5
     expElogbeta = _peaked_expElogbeta(K, V)  # topic 0 peaks on word 0
@@ -49,7 +49,7 @@ def test_cavi_doc_inference_converges_to_dominant_topic():
 
 def test_cavi_doc_inference_respects_max_iter():
     """If tol is impossibly tight, max_iter is the hard ceiling."""
-    from spark_vi.models.lda import _cavi_doc_inference
+    from spark_vi.models.topic.lda import _cavi_doc_inference
 
     K, V = 2, 3
     expElogbeta = _peaked_expElogbeta(K, V)
@@ -70,7 +70,7 @@ def test_cavi_doc_inference_matches_explicit_phi_implementation():
     the implicit form for memory efficiency; this test pins them to the
     same answer.
     """
-    from spark_vi.models.lda import _cavi_doc_inference
+    from spark_vi.models.topic.lda import _cavi_doc_inference
 
     K, V = 3, 6
     rng = np.random.default_rng(0)
@@ -107,7 +107,7 @@ def test_cavi_doc_inference_matches_explicit_phi_implementation():
 
 def test_compute_elbo_returns_finite_float_on_realistic_inputs():
     import numpy as np
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
     np.random.seed(0)
     m = OnlineLDA(K=3, vocab_size=5)
     g = m.initialize_global(None)
@@ -127,7 +127,7 @@ def test_compute_elbo_lambda_kl_zero_when_lambda_equals_eta():
     so the ELBO equals just the data-likelihood + (-doc-theta-KL).
     """
     import numpy as np
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
     K, V = 2, 3
     eta = 0.1
     m = OnlineLDA(K=K, vocab_size=V, eta=eta)

@@ -5,7 +5,7 @@ import pytest
 
 def test_vi_runner_fits_counting_model_end_to_end(spark):
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     # 100 rows: 70 heads, 30 tails.
     data = [1] * 70 + [0] * 30
@@ -38,7 +38,7 @@ def test_vi_runner_early_stop_branch_triggers(spark):
     VIResult correctly (converged=True, n_iterations < max, elbo_trace matches).
     """
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     rdd = spark.sparkContext.parallelize([1] * 100 + [0] * 100, numSlices=4).persist()
     rdd.count()  # materialize for VIRunner's strict cache precondition
@@ -63,7 +63,7 @@ def test_vi_runner_runs_to_max_iterations_without_convergence(spark):
     n_iterations == max_iterations.
     """
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     rdd = spark.sparkContext.parallelize([1] * 100 + [0] * 100, numSlices=4).persist()
     rdd.count()  # materialize for VIRunner's strict cache precondition
@@ -100,7 +100,7 @@ def test_vi_runner_uses_mini_batch_when_fraction_set(spark):
     just that the posterior mean ends up in the right ballpark for 70/30 data.
     """
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     data = [1] * 70 + [0] * 30
     rdd = spark.sparkContext.parallelize(data, numSlices=4).persist()
@@ -132,7 +132,7 @@ def test_vi_runner_uses_mini_batch_when_fraction_set(spark):
 def test_vi_runner_mini_batch_is_reproducible_with_seed(spark):
     """Two runs with the same random_seed must produce identical global params."""
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     data = [1] * 60 + [0] * 40
     rdd = spark.sparkContext.parallelize(data, numSlices=2).persist()
@@ -164,7 +164,7 @@ def test_vi_runner_mini_batch_empty_batch_path_does_not_crash(spark):
     result is well-formed.
     """
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     rdd = spark.sparkContext.parallelize([1, 0, 1], numSlices=1).persist()
     rdd.count()  # materialize for VIRunner's strict cache precondition
@@ -197,7 +197,7 @@ def test_vi_runner_full_batch_path_unchanged_when_fraction_none(spark):
     drift, both tests should be updated together.
     """
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     data = [1] * 70 + [0] * 30
     rdd = spark.sparkContext.parallelize(data, numSlices=4).persist()
@@ -425,7 +425,7 @@ def test_runner_transform_propagates_not_implemented(spark):
     """Calling transform on a model without infer_local raises NotImplementedError."""
     import pytest
     from spark_vi.core import VIRunner
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
     import numpy as np
 
     rdd = spark.sparkContext.parallelize([0, 1], numSlices=1)

@@ -14,7 +14,7 @@ from unittest.mock import patch
 def _run_with_broadcast_tracking(spark, cfg):
     """Run VIRunner.fit with the cfg, returning (result, unpersist_calls)."""
     from spark_vi.core import VIRunner
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     rdd = spark.sparkContext.parallelize([1, 0, 1, 0], numSlices=2).persist()
     rdd.count()  # materialize for VIRunner's strict cache precondition

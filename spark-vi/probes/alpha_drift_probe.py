@@ -43,7 +43,7 @@ from pyspark.sql import SparkSession
 from scipy.optimize import linear_sum_assignment
 
 from spark_vi.core import BOWDocument, VIConfig, VIRunner
-from spark_vi.models.lda import OnlineLDA
+from spark_vi.models.topic.lda import OnlineLDA
 
 
 def generate_synthetic_corpus(D, V, K, docs_avg_len, true_alpha, true_beta,

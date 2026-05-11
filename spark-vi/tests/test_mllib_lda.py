@@ -83,7 +83,7 @@ def test_vector_to_bow_document_handles_dense_vector_with_zeros():
 
 def test_param_translation_to_model_and_config():
     from spark_vi.core.config import VIConfig
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
     from spark_vi.mllib.lda import OnlineLDAEstimator, _build_model_and_config
 
     e = OnlineLDAEstimator(

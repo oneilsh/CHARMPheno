@@ -45,7 +45,7 @@ def _generate_synthetic_corpus(D: int, V: int, K: int,
 def test_online_lda_fit_produces_well_formed_result(spark):
     """A short Spark-local fit returns a VIResult with positive lambda and a finite ELBO trace."""
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     K, V, D = 3, 30, 100
     np.random.seed(0)
@@ -100,7 +100,7 @@ def test_online_lda_elbo_smoothed_endpoints_show_overall_improvement(spark):
     bearing regression test for the SVI machinery, modulo that gap.
     """
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     np.random.seed(1)
     _, docs = _generate_synthetic_corpus(D=100, V=30, K=3, docs_avg_len=40, seed=7)
@@ -156,7 +156,7 @@ def test_alpha_optimization_runs_end_to_end_without_regression(spark):
     """
     import numpy as np
     from spark_vi.core import VIConfig, VIRunner, BOWDocument
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     K, V, D = 3, 30, 200
     rng = np.random.default_rng(2)
@@ -218,7 +218,7 @@ def test_alpha_optimization_drifts_toward_corpus_truth_at_D10k(spark):
     components meaningfully — empirical sweep over five seeds at this
     configuration showed +43.6% to +62.5% L1 reduction toward truth
     after 300 iterations, with no all-floor collapses (post the
-    `e_log_theta_sum` digamma-underflow fix at models/lda.py).
+    `e_log_theta_sum` digamma-underflow fix at models/topic/lda.py).
 
     Threshold: ≥30% L1 reduction. Worst seed empirically observed +43.6%,
     so 30% leaves margin for cross-platform numerical drift.
@@ -233,7 +233,7 @@ def test_alpha_optimization_drifts_toward_corpus_truth_at_D10k(spark):
     from scipy.optimize import linear_sum_assignment
 
     from spark_vi.core import BOWDocument, VIConfig, VIRunner
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     K, V, D = 3, 100, 10_000
     docs_avg_len = 100
@@ -257,7 +257,7 @@ def test_alpha_optimization_drifts_toward_corpus_truth_at_D10k(spark):
         ))
 
     # The model uses np.random globally for λ and γ initialization (see the
-    # TODO at models/lda.py near gamma_init). Until that's plumbed through
+    # TODO at models/topic/lda.py near gamma_init). Until that's plumbed through
     # cfg.random_seed, we seed the global RNG explicitly so the test is
     # reproducible. Empirical sweep showed +43.6%–+62.5% drift across five
     # seeds; 7 is a representative healthy seed (+62.5% in the sweep).

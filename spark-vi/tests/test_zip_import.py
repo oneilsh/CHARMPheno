@@ -27,12 +27,14 @@ EXPECTED_CONTENTS = {
     "spark_vi/core/result.py",
     "spark_vi/core/runner.py",
     "spark_vi/models/__init__.py",
-    "spark_vi/models/counting.py",
-    "spark_vi/models/online_hdp.py",
+    "spark_vi/models/topic/__init__.py",
+    "spark_vi/models/topic/counting.py",
+    "spark_vi/models/topic/lda.py",
+    "spark_vi/models/topic/online_hdp.py",
     "spark_vi/io/__init__.py",
     "spark_vi/io/export.py",
     "spark_vi/diagnostics/__init__.py",
-    "spark_vi/diagnostics/checkpoint.py",
+    "spark_vi/diagnostics/persist.py",
 }
 
 
