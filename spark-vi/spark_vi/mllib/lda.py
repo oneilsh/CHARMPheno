@@ -16,7 +16,12 @@ from pyspark.ml.param import Param, Params, TypeConverters
 from pyspark.ml.param.shared import HasFeaturesCol, HasMaxIter, HasSeed
 
 from spark_vi.core.config import VIConfig
-from spark_vi.mllib._common import _vector_to_bow_document
+from spark_vi.mllib._common import (
+    _PersistableModel,
+    _PersistenceParams,
+    _vector_to_bow_document,
+    apply_persistence_params,
+)
 from spark_vi.models.lda import OnlineLDA
 
 
@@ -100,12 +105,13 @@ def _build_model_and_config(
     return model, config
 
 
-class _OnlineLDAParams(HasFeaturesCol, HasMaxIter, HasSeed):
+class _OnlineLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
     """Shared Param surface for OnlineLDAEstimator and OnlineLDAModel.
 
     Mirrors MLlib's `_LDAParams` mixin pattern: declare each Param once,
     inherit from both the Estimator and Model so they expose identical
-    surfaces with no aliasing.
+    surfaces with no aliasing. Persistence Params (saveInterval, saveDir,
+    resumeFrom) come from `_PersistenceParams` (shared with the HDP shim).
     """
 
     k = Param(
@@ -203,6 +209,9 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
         gammaShape: float = 100.0,
         caviMaxIter: int = 100,
         caviTol: float = 1e-3,
+        saveInterval: int = -1,
+        saveDir: str = "",
+        resumeFrom: str = "",
     ) -> None:
         super().__init__()
         self._setDefault(
@@ -214,6 +223,7 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
             optimizeTopicConcentration=False,
             gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
         )
+        self._set_persistence_defaults()
         # Diagnostic-only iteration callback. Stored as an instance attribute
         # rather than a Param because callables aren't MLlib-serializable
         # (Pipeline.save persistence is deferred per ADR 0009 anyway).
@@ -253,6 +263,11 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
 
         model_obj, config = _build_model_and_config(self, vocab_size=vocab_size)
 
+        # Validate persistence Params and splice checkpoint_dir/interval into
+        # VIConfig. Returns (config, resume_path) where resume_path is a Path
+        # or None. See _common.apply_persistence_params for the error rules.
+        config, resume_path = apply_persistence_params(self, config)
+
         features_col = self.getOrDefault("featuresCol")
         bow_rdd = (
             dataset.select(features_col).rdd
@@ -268,7 +283,11 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
 
         runner = VIRunner(model_obj, config=config)
         try:
-            result = runner.fit(bow_rdd, on_iteration=self._on_iteration)
+            result = runner.fit(
+                bow_rdd,
+                resume_from=resume_path,
+                on_iteration=self._on_iteration,
+            )
         finally:
             bow_rdd.unpersist(blocking=False)
 
@@ -283,7 +302,7 @@ class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
         return out_model
 
 
-class OnlineLDAModel(_OnlineLDAParams, Model):
+class OnlineLDAModel(_OnlineLDAParams, _PersistableModel, Model):
     """MLlib-shaped Model wrapping a trained spark_vi VIResult.
 
     Carries the trained global parameters plus a copy of every Param from
@@ -291,9 +310,29 @@ class OnlineLDAModel(_OnlineLDAParams, Model):
     return the configuration that was actually used.
     """
 
+    # Stamped into result.metadata by VIRunner as `model_class` (the runner
+    # uses type(model).__name__ on the underlying VIModel). Used by
+    # _PersistableModel.load to reject checkpoints from other model classes.
+    _expected_model_class = "OnlineLDA"
+
     def __init__(self, result) -> None:  # result: VIResult
         super().__init__()
         self._result = result
+        # Seed default Param values on the Model so a freshly-constructed
+        # Model (e.g. via OnlineLDAModel.load) has the values _transform
+        # reads. The Estimator's _fit also runs a param-copy loop after
+        # construction; that overwrites these with the Estimator's actual
+        # configuration. Loaded Models keep these defaults.
+        self._setDefault(
+            k=10, maxIter=20,
+            featuresCol="features", topicDistributionCol="topicDistribution",
+            optimizer="online",
+            learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05,
+            optimizeDocConcentration=True,
+            optimizeTopicConcentration=False,
+            gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
+        )
+        self._set_persistence_defaults()
 
     @property
     def result(self):

@@ -11,8 +11,12 @@ Each iteration executes the canonical distributed-VI step:
     5. Driver: pre-scale the aggregated stats to a corpus-equivalent target
        (corpus_size / batch_size) when in mini-batch mode, then call
        model.update_global with Robbins-Monro learning rate.
-    6. Record ELBO (raw, not pre-scaled); auto-checkpoint if configured;
-       test convergence.
+    6. Record ELBO (raw, not pre-scaled); auto-checkpoint at the configured
+       interval; test convergence. When `cfg.checkpoint_dir` is set, the
+       runner additionally performs a single final save before returning
+       (on either convergence or max-iterations) so the directory is
+       authoritative as the post-fit artifact regardless of where the
+       iteration count falls relative to `checkpoint_interval`.
 
 The MLlib `OnlineLDAOptimizer` uses an equivalent pattern (with
 treeAggregate); see docs/architecture/SPARK_VI_FRAMEWORK.md and
@@ -28,6 +32,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 from pyspark import RDD, StorageLevel
 
 from spark_vi.core.config import VIConfig
@@ -37,6 +42,39 @@ from spark_vi.diagnostics.persist import assert_persisted
 from spark_vi.io.export import load_result, save_result
 
 log = logging.getLogger(__name__)
+
+
+def _runner_metadata(model, **extra):
+    """Merge model.get_metadata() with runner-set keys.
+
+    Runner-set keys (passed as kwargs) win over model-supplied keys.
+    Used at all three VIResult-construction sites so the precedence
+    rule lives in one place and downstream code can rely on
+    `metadata['model_class']` being the actual class name even if a
+    misconfigured model returns a conflicting key.
+    """
+    return {**model.get_metadata(), "model_class": type(model).__name__, **extra}
+
+
+def _fmt_diagnostic(value: object) -> str:
+    """Compact formatter for one iteration_diagnostics value.
+
+    Scalars (Python or NumPy) format to ~4 sig figs. 0-d ndarrays are treated
+    as scalars. 1-D arrays show up to 6 elements with 4 sig figs each;
+    higher-dim arrays are flattened then truncated (no shape prefix). Longer
+    arrays get an ellipsis. Anything else falls back to repr — diagnostic log
+    lines are best-effort and shouldn't crash the fit.
+    """
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return f"{float(value):.4g}"
+        flat = value.ravel()
+        head = ", ".join(f"{float(x):.4g}" for x in flat[:6])
+        suffix = ", ..." if flat.size > 6 else ""
+        return f"[{head}{suffix}]"
+    if isinstance(value, (int, float, np.floating, np.integer)):
+        return f"{float(value):.4g}"
+    return repr(value)
 
 
 class VIRunner:
@@ -57,6 +95,23 @@ class VIRunner:
         on_iteration: Callable[[int, dict, list[float]], None] | None = None,
     ) -> VIResult:
         """Run the distributed VI loop until convergence or max_iterations.
+
+        The returned VIResult's `metadata` is the merge of
+        `model.get_metadata()` with runner-set keys (`model_class`, and
+        `checkpoint` for interim saves); runner-set keys win on conflict so
+        downstream code can trust the canonical names.
+
+        Per-iteration values from `model.iteration_diagnostics(global_params)`
+        accumulate into `VIResult.diagnostic_traces` (one list per key) and
+        are also logged each iter as a compact key=value line.
+
+        Final-save guarantee: when `cfg.checkpoint_dir` is set, the runner
+        calls `save_result` once before each return path (convergence and
+        max-iterations) so the directory is the authoritative post-fit
+        artifact regardless of where the iteration count lands relative to
+        `checkpoint_interval`. The interim-save loop continues to fire on
+        the interval; both interim and final saves write to the same
+        directory and overwrite the previous contents.
 
         Parameters:
             data_rdd: input RDD to train on.
@@ -110,6 +165,11 @@ class VIRunner:
         sc = data_rdd.context
         prior_bcast = None
         converged = False
+
+        # Per-iteration trajectories of model-supplied scalars/small-arrays.
+        # Populated below from model.iteration_diagnostics(); empty if the
+        # model doesn't override the default.
+        diagnostic_traces: dict[str, list[float | np.ndarray]] = {}
 
         # If mini-batching is enabled, count the corpus once and seed the RNG
         # used to derive per-iteration sample seeds. corpus_size matches the
@@ -210,6 +270,18 @@ class VIRunner:
                 if line:
                     log.info(line)
 
+            # Per-iteration diagnostics: accumulate into traces and emit a
+            # compact key=value log line. Default impl returns {}, so models
+            # that don't opt in pay nothing here.
+            diagnostics = model.iteration_diagnostics(global_params)
+            if diagnostics:
+                # We don't .copy() the values — models must return fresh objects per
+                # call (don't mutate-and-return the same array across iterations).
+                for key, value in diagnostics.items():
+                    diagnostic_traces.setdefault(key, []).append(value)
+                parts = [f"{k}={_fmt_diagnostic(v)}" for k, v in diagnostics.items()]
+                log.info("  diagnostics: " + ", ".join(parts))
+
             # Diagnostic callback (model-agnostic; whatever the caller wants
             # to do with global_params). Catch + log so a buggy callback
             # doesn't kill the fit — the model itself is the load-bearing
@@ -234,10 +306,8 @@ class VIRunner:
                     elbo_trace=list(elbo_trace),
                     n_iterations=t + 1,
                     converged=False,
-                    metadata={
-                        "model_class": type(model).__name__,
-                        "checkpoint": True,
-                    },
+                    metadata=_runner_metadata(model, checkpoint=True),
+                    diagnostic_traces={k: list(v) for k, v in diagnostic_traces.items()},
                 )
                 save_result(interim, cfg.checkpoint_dir)
 
@@ -257,24 +327,35 @@ class VIRunner:
                 # One-more unpersist for the final broadcast.
                 prior_bcast.unpersist(blocking=False)
                 prior_bcast = None
-                return VIResult(
+                result = VIResult(
                     global_params=global_params,
                     elbo_trace=elbo_trace,
                     n_iterations=t + 1,
                     converged=True,
-                    metadata={"model_class": type(model).__name__},
+                    metadata=_runner_metadata(model),
+                    diagnostic_traces=diagnostic_traces,
                 )
+                # Final-save guarantee: when checkpoint_dir is set, the
+                # post-fit directory is authoritative regardless of where
+                # the interval boundary falls.
+                if cfg.checkpoint_dir is not None:
+                    save_result(result, cfg.checkpoint_dir)
+                return result
 
         # Hit max_iterations without convergence.
         if prior_bcast is not None:
             prior_bcast.unpersist(blocking=False)
-        return VIResult(
+        result = VIResult(
             global_params=global_params,
             elbo_trace=elbo_trace,
             n_iterations=start_iteration + cfg.max_iterations,
             converged=False,
-            metadata={"model_class": type(model).__name__},
+            metadata=_runner_metadata(model),
+            diagnostic_traces=diagnostic_traces,
         )
+        if cfg.checkpoint_dir is not None:
+            save_result(result, cfg.checkpoint_dir)
+        return result
 
     def transform(self, data_rdd: RDD, global_params: dict[str, Any]) -> RDD:
         """Apply trained global params to infer per-row posteriors.

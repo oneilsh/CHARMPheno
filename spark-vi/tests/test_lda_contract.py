@@ -577,3 +577,32 @@ def test_local_update_alpha_stat_finite_when_alpha_at_floor():
         f"no longer producing the pathological γ, or the digamma identity is "
         f"miscomputed."
     )
+
+
+def test_online_lda_get_metadata_returns_K_and_V():
+    """get_metadata exposes the shape constants needed for VIResult round-trip."""
+    from spark_vi.models.lda import OnlineLDA
+
+    m = OnlineLDA(K=4, vocab_size=10)
+    md = m.get_metadata()
+    assert md == {"K": 4, "V": 10}
+
+
+def test_online_lda_iteration_diagnostics_returns_alpha_and_eta():
+    """iteration_diagnostics returns the per-iter optimized concentrations:
+    α as a K-vector (asymmetric Dirichlet support) and η as a Python float.
+    """
+    from spark_vi.models.lda import OnlineLDA
+
+    m = OnlineLDA(K=4, vocab_size=10)
+    alpha_in = np.array([0.1, 0.2, 0.3, 0.4])
+    global_params = {
+        "lambda": np.ones((4, 10)),
+        "alpha": alpha_in,
+        "eta": np.array(0.5),
+    }
+    diag = m.iteration_diagnostics(global_params)
+    assert set(diag.keys()) == {"alpha", "eta"}
+    np.testing.assert_array_equal(np.asarray(diag["alpha"]), alpha_in)
+    assert diag["eta"] == 0.5
+    assert isinstance(diag["eta"], float)

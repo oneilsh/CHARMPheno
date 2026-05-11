@@ -299,3 +299,170 @@ def test_alpha_optimization_drifts_toward_corpus_truth_at_D10k(spark):
         f"L1(init→truth) = {l1_init:.4f}, L1(fitted→truth) = {l1_fit:.4f}, "
         f"β cosines = {cosine[fitted_idx, true_idx]}."
     )
+
+
+# ---------------------------------------------------------------------------
+# End-to-end integration: save/load round-trip + diagnostic_traces accumulation
+#
+# These tests exercise the full stack — MLlib shim → VIRunner → OnlineLDA →
+# save_result/load_result — on a real Spark-local fit. They close the gap
+# between the unit-level Param tests in test_mllib_lda_persistence.py (which
+# don't drive iteration_diagnostics on the hot path) and the per-method
+# tests in test_runner.py / test_export.py (which use stub models, not
+# OnlineLDA).
+# ---------------------------------------------------------------------------
+
+
+def _build_persistence_lda_df(spark, K=3, V=9, D=15, seed=0):
+    """Small, well-clustered DataFrame for shim-level fits.
+
+    Each doc favors a contiguous V/K-sized vocab block, giving the optimizer
+    enough signal to move α and η in 3-5 iterations without paying for a
+    300-doc synthetic corpus on every test.
+    """
+    from pyspark.ml.linalg import Vectors
+
+    rng = np.random.default_rng(seed)
+    block = V // K
+    rows = []
+    for doc_id in range(D):
+        topic = doc_id % K
+        favored = list(range(topic * block, (topic + 1) * block))
+        counts = np.zeros(V, dtype=np.float64)
+        for w in rng.choice(favored, size=15, replace=True):
+            counts[w] += 1.0
+        rows.append((Vectors.dense(counts.tolist()),))
+    return spark.createDataFrame(rows, schema=["features"])
+
+
+@pytest.mark.slow
+def test_lda_fit_with_optimization_populates_alpha_and_eta_traces(spark):
+    """A shim fit with both α and η optimization on must accumulate per-iter
+    α (length-K vector) and η (scalar) traces of length n_iterations.
+
+    Closes the gap left by test_mllib_lda_persistence.py: those tests verify
+    Estimator Params and Model save/load round-trip global_params, but never
+    run iteration_diagnostics through the runner's accumulation path.
+    """
+    from spark_vi.mllib.lda import OnlineLDAEstimator
+
+    K, V, max_iter = 3, 9, 4
+    df = _build_persistence_lda_df(spark, K=K, V=V, seed=0)
+
+    estimator = OnlineLDAEstimator(
+        k=K, maxIter=max_iter, seed=0, subsamplingRate=1.0,
+        optimizeDocConcentration=True, optimizeTopicConcentration=True,
+    )
+    model = estimator.fit(df)
+    traces = model.result.diagnostic_traces
+
+    # Both keys present, both with length n_iterations.
+    assert set(traces.keys()) == {"alpha", "eta"}
+    assert model.result.n_iterations == max_iter
+    assert len(traces["alpha"]) == max_iter
+    assert len(traces["eta"]) == max_iter
+
+    # Per-iter α is a K-vector; per-iter η is a scalar.
+    for entry in traces["alpha"]:
+        arr = np.asarray(entry)
+        assert arr.shape == (K,), f"expected α shape ({K},), got {arr.shape}"
+        assert np.isfinite(arr).all()
+    for entry in traces["eta"]:
+        assert np.isscalar(entry) or np.ndim(entry) == 0
+        assert np.isfinite(float(entry))
+
+
+@pytest.mark.slow
+def test_lda_save_load_round_trip_via_shim_preserves_alpha_eta_traces(
+    spark, tmp_path,
+):
+    """End-to-end round-trip: shim fit with optimization → save → load.
+
+    The loaded Model's diagnostic_traces must match the pre-save values
+    element-wise — α arrays via assert_array_equal, η scalars via ==.
+    """
+    from spark_vi.mllib.lda import OnlineLDAEstimator, OnlineLDAModel
+
+    K, V, max_iter = 3, 9, 4
+    df = _build_persistence_lda_df(spark, K=K, V=V, seed=1)
+
+    estimator = OnlineLDAEstimator(
+        k=K, maxIter=max_iter, seed=1, subsamplingRate=1.0,
+        optimizeDocConcentration=True, optimizeTopicConcentration=True,
+    )
+    model = estimator.fit(df)
+
+    save_path = tmp_path / "lda_traces_roundtrip"
+    model.save(str(save_path))
+    loaded = OnlineLDAModel.load(str(save_path))
+
+    orig = model.result.diagnostic_traces
+    out = loaded.result.diagnostic_traces
+
+    assert set(out.keys()) == set(orig.keys())
+    assert len(out["alpha"]) == len(orig["alpha"])
+    assert len(out["eta"]) == len(orig["eta"])
+
+    for orig_alpha, loaded_alpha in zip(orig["alpha"], out["alpha"]):
+        np.testing.assert_array_equal(np.asarray(loaded_alpha),
+                                      np.asarray(orig_alpha))
+    for orig_eta, loaded_eta in zip(orig["eta"], out["eta"]):
+        assert float(loaded_eta) == float(orig_eta)
+
+
+@pytest.mark.slow
+def test_lda_resume_from_continues_iteration_count_and_elbo_trace(
+    spark, tmp_path,
+):
+    """Resume from a saved fit: iteration counter and ELBO trace continue
+    from where the prior run left off, not restart at zero.
+
+    Step 1: fit for 3 iters with saveDir set → run1 directory.
+    Step 2: fit a fresh Estimator for 3 more iters with saveDir + resumeFrom
+            both pointing at run1.
+
+    Asserts:
+      * run1 has n_iterations == 3, len(elbo_trace) == 3.
+      * run2 has n_iterations == 6 (counter continues, not restarts).
+      * run2.elbo_trace has length 6 and its first 3 elements match run1's
+        elbo_trace exactly (history is preserved on resume).
+    """
+    from spark_vi.mllib.lda import OnlineLDAEstimator
+
+    K, V = 3, 9
+    df = _build_persistence_lda_df(spark, K=K, V=V, seed=2)
+
+    save_dir = tmp_path / "run1"
+
+    estimator_a = OnlineLDAEstimator(
+        k=K, maxIter=3, seed=2, subsamplingRate=1.0,
+        optimizeDocConcentration=True, optimizeTopicConcentration=False,
+    )
+    estimator_a.setSaveDir(str(save_dir))
+    model_a = estimator_a.fit(df)
+    result_a = model_a.result
+
+    assert result_a.n_iterations == 3
+    assert len(result_a.elbo_trace) == 3
+
+    estimator_b = OnlineLDAEstimator(
+        k=K, maxIter=3, seed=2, subsamplingRate=1.0,
+        optimizeDocConcentration=True, optimizeTopicConcentration=False,
+    )
+    estimator_b.setSaveDir(str(save_dir))
+    estimator_b.setResumeFrom(str(save_dir))
+    model_b = estimator_b.fit(df)
+    result_b = model_b.result
+
+    assert result_b.n_iterations == 6, (
+        f"resume should continue iteration counter; got {result_b.n_iterations}"
+    )
+    assert len(result_b.elbo_trace) == 6, (
+        f"resumed elbo_trace should be length 6; got {len(result_b.elbo_trace)}"
+    )
+    # First 3 entries match the pre-resume trace exactly (resume preserves
+    # history).
+    for i, (a, b) in enumerate(zip(result_a.elbo_trace, result_b.elbo_trace[:3])):
+        assert a == b, (
+            f"resume mutated history at index {i}: pre={a}, post={b}"
+        )

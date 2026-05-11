@@ -822,3 +822,35 @@ def test_iteration_summary_includes_gamma_alpha_eta():
     g = m.initialize_global(data_summary=None)
     s = m.iteration_summary(g)
     assert "γ" in s and "α" in s and "η" in s
+
+
+def test_online_hdp_get_metadata_returns_T_K_V():
+    """get_metadata exposes the shape constants needed for VIResult round-trip."""
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=20, K=5, vocab_size=100)
+    md = m.get_metadata()
+    assert md == {"T": 20, "K": 5, "V": 100}
+
+
+def test_online_hdp_iteration_diagnostics_returns_gamma_alpha_eta():
+    """iteration_diagnostics returns scalar γ, α, η as Python floats per iter."""
+    from spark_vi.models.online_hdp import OnlineHDP
+
+    m = OnlineHDP(T=10, K=5, vocab_size=50)
+    global_params = {
+        "lambda": np.ones((10, 50)),
+        "u": np.ones(9),
+        "v": np.ones(9),
+        "gamma": np.array(1.5),
+        "alpha": np.array(0.5),
+        "eta": np.array(0.1),
+    }
+    diag = m.iteration_diagnostics(global_params)
+    assert set(diag.keys()) == {"gamma", "alpha", "eta"}
+    assert diag["gamma"] == 1.5
+    assert diag["alpha"] == 0.5
+    assert diag["eta"] == 0.1
+    assert isinstance(diag["gamma"], float)
+    assert isinstance(diag["alpha"], float)
+    assert isinstance(diag["eta"], float)

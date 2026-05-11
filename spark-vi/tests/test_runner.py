@@ -240,6 +240,187 @@ def test_runner_transform_calls_infer_local_on_each_row(spark):
     assert collected == [2.0, 4.0, 6.0, 8.0]
 
 
+# Metadata merge / diagnostics / final-save tests --------------------------
+
+
+def _make_stub(get_metadata=None, iteration_diagnostics=None):
+    """Construct a deterministic VIModel suitable for fit() integration tests.
+
+    Single-key float global param; local_update is a no-op stat so update_global
+    is a pure-rho mix. ELBO is a strictly-decreasing finite sequence so
+    has_converged with the default relative tolerance only fires once values
+    plateau — by default we keep ELBO changing each step so fits run to
+    max_iterations.
+    """
+    from spark_vi.core.model import VIModel
+    import numpy as np
+
+    class _Stub(VIModel):
+        def initialize_global(self, data_summary=None):
+            return {"theta": np.array(0.0)}
+
+        def local_update(self, rows, global_params):
+            return {"x": np.array(0.0)}
+
+        def update_global(self, global_params, target_stats, learning_rate):
+            return {"theta": global_params["theta"] + np.array(1.0)}
+
+        def compute_elbo(self, global_params, aggregated_stats):
+            # Strictly-changing finite ELBO so default has_converged stays False
+            # at any reasonable tol — the global step counter we encode into
+            # theta is the cleanest source of monotone change.
+            return float(global_params["theta"])
+
+        def has_converged(self, elbo_trace, convergence_tol):
+            return False
+
+    if get_metadata is not None:
+        _Stub.get_metadata = lambda self, _gm=get_metadata: _gm()
+    if iteration_diagnostics is not None:
+        _Stub.iteration_diagnostics = (
+            lambda self, gp, _fn=iteration_diagnostics: _fn(gp)
+        )
+    return _Stub()
+
+
+def test_runner_merges_get_metadata_into_result_metadata(spark):
+    from spark_vi.core import VIConfig, VIRunner
+
+    rdd = spark.sparkContext.parallelize([0, 1], numSlices=2).persist()
+    rdd.count()
+
+    model = _make_stub(get_metadata=lambda: {"K": 5, "V": 100})
+    result = VIRunner(model, VIConfig(max_iterations=3, convergence_tol=1e-12)).fit(rdd)
+
+    assert result.metadata["K"] == 5
+    assert result.metadata["V"] == 100
+    assert result.metadata["model_class"] == type(model).__name__
+
+
+def test_runner_get_metadata_does_not_override_model_class(spark):
+    from spark_vi.core import VIConfig, VIRunner
+
+    rdd = spark.sparkContext.parallelize([0, 1], numSlices=2).persist()
+    rdd.count()
+
+    model = _make_stub(get_metadata=lambda: {"model_class": "Imposter"})
+    result = VIRunner(model, VIConfig(max_iterations=2, convergence_tol=1e-12)).fit(rdd)
+
+    assert result.metadata["model_class"] == type(model).__name__
+    assert result.metadata["model_class"] != "Imposter"
+
+
+def test_runner_accumulates_iteration_diagnostics(spark):
+    from spark_vi.core import VIConfig, VIRunner
+    import numpy as np
+
+    rdd = spark.sparkContext.parallelize([0, 1], numSlices=2).persist()
+    rdd.count()
+
+    # iteration_diagnostics is called *after* update_global, so the stub
+    # observes theta = step + 1 (initial 0.0 + step+1 increments). We encode
+    # alpha = theta - 1 to get the predictable 0,1,2,... sequence. eta tracks
+    # 2*alpha as np.float64 to exercise the numpy-scalar path through the
+    # save/load round-trip for diagnostic_traces.
+    def _diag(gp):
+        alpha = float(gp["theta"]) - 1.0
+        return {"alpha": alpha, "eta": np.float64(alpha * 2.0)}
+
+    model = _make_stub(iteration_diagnostics=_diag)
+    result = VIRunner(model, VIConfig(max_iterations=5, convergence_tol=1e-12)).fit(rdd)
+
+    assert result.diagnostic_traces["alpha"] == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert [float(x) for x in result.diagnostic_traces["eta"]] == [0.0, 2.0, 4.0, 6.0, 8.0]
+
+
+def test_runner_default_iteration_diagnostics_yields_no_traces(spark):
+    from spark_vi.core import VIConfig, VIRunner
+
+    rdd = spark.sparkContext.parallelize([0, 1], numSlices=2).persist()
+    rdd.count()
+
+    model = _make_stub()  # no iteration_diagnostics override
+    result = VIRunner(model, VIConfig(max_iterations=3, convergence_tol=1e-12)).fit(rdd)
+
+    assert result.diagnostic_traces == {}
+
+
+def test_runner_final_save_writes_to_checkpoint_dir_on_convergence(spark, tmp_path):
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.core.model import VIModel
+    from spark_vi.io.export import load_result
+    import numpy as np
+
+    class _ConvergesAtIter2(VIModel):
+        def initialize_global(self, data_summary=None):
+            return {"theta": np.array(0.0)}
+        def local_update(self, rows, global_params):
+            return {"x": np.array(0.0)}
+        def update_global(self, global_params, target_stats, learning_rate):
+            return {"theta": global_params["theta"] + np.array(1.0)}
+        def has_converged(self, elbo_trace, convergence_tol):
+            # Trip on iter 2 (i.e., once we have >=2 elbo entries).
+            return len(elbo_trace) >= 2
+
+    rdd = spark.sparkContext.parallelize([0, 1], numSlices=2).persist()
+    rdd.count()
+
+    ckpt = tmp_path / "ckpt_conv"
+    cfg = VIConfig(
+        max_iterations=10,
+        convergence_tol=1e-12,
+        # Set checkpoint_interval high enough that no interim save fires before
+        # convergence at iter 2 — this isolates the final-save guarantee path.
+        checkpoint_interval=99,
+        checkpoint_dir=ckpt,
+    )
+    result = VIRunner(_ConvergesAtIter2(), cfg).fit(rdd)
+    assert result.converged is True
+
+    assert ckpt.exists()
+    loaded = load_result(ckpt)
+    assert loaded.converged is True
+    assert loaded.n_iterations == result.n_iterations
+
+
+def test_runner_final_save_writes_to_checkpoint_dir_on_max_iter(spark, tmp_path):
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.io.export import load_result
+
+    rdd = spark.sparkContext.parallelize([0, 1], numSlices=2).persist()
+    rdd.count()
+
+    ckpt = tmp_path / "ckpt_max"
+    cfg = VIConfig(
+        max_iterations=3,
+        convergence_tol=1e-12,
+        checkpoint_interval=99,  # no interim save in 3 iters → only final-save runs
+        checkpoint_dir=ckpt,
+    )
+    model = _make_stub()
+    result = VIRunner(model, cfg).fit(rdd)
+    assert result.converged is False
+    assert result.n_iterations == 3
+
+    assert ckpt.exists()
+    loaded = load_result(ckpt)
+    assert loaded.converged is False
+    assert loaded.n_iterations == 3
+
+
+def test_runner_no_save_when_checkpoint_dir_unset(spark, tmp_path):
+    from spark_vi.core import VIConfig, VIRunner
+
+    rdd = spark.sparkContext.parallelize([0, 1], numSlices=2).persist()
+    rdd.count()
+
+    # tmp_path is empty before the run; assert it remains empty after.
+    assert list(tmp_path.iterdir()) == []
+    model = _make_stub()
+    VIRunner(model, VIConfig(max_iterations=3, convergence_tol=1e-12)).fit(rdd)
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_runner_transform_propagates_not_implemented(spark):
     """Calling transform on a model without infer_local raises NotImplementedError."""
     import pytest

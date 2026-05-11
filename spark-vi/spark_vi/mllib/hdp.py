@@ -17,7 +17,12 @@ from pyspark.ml.param import Param, Params, TypeConverters
 from pyspark.ml.param.shared import HasFeaturesCol, HasMaxIter, HasSeed
 
 from spark_vi.core.config import VIConfig
-from spark_vi.mllib._common import _vector_to_bow_document
+from spark_vi.mllib._common import (
+    _PersistableModel,
+    _PersistenceParams,
+    _vector_to_bow_document,
+    apply_persistence_params,
+)
 from spark_vi.models.online_hdp import (
     OnlineHDP,
     expected_corpus_betas,
@@ -128,12 +133,13 @@ def _build_model_and_config(
     return model, config
 
 
-class _OnlineHDPParams(HasFeaturesCol, HasMaxIter, HasSeed):
+class _OnlineHDPParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
     """Shared Param surface for OnlineHDPEstimator and OnlineHDPModel.
 
     Mirrors MLlib's `_LDAParams` mixin pattern: declare each Param once,
     inherit from both the Estimator and Model so they expose identical
-    surfaces with no aliasing.
+    surfaces with no aliasing. Persistence Params (saveInterval, saveDir,
+    resumeFrom) come from `_PersistenceParams` (shared with the LDA shim).
     """
 
     k = Param(
@@ -257,6 +263,9 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
         optimizeDocConcentration: bool = True,
         optimizeCorpusConcentration: bool = True,
         optimizeTopicConcentration: bool = False,
+        saveInterval: int = -1,
+        saveDir: str = "",
+        resumeFrom: str = "",
     ) -> None:
         super().__init__()
         self._setDefault(
@@ -269,6 +278,7 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
             optimizeCorpusConcentration=True,
             optimizeTopicConcentration=False,
         )
+        self._set_persistence_defaults()
         # Diagnostic-only iteration callback. Stored as an instance attribute
         # rather than a Param because callables aren't MLlib-serializable
         # (Pipeline.save persistence is deferred per ADR 0012 anyway).
@@ -308,6 +318,11 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
 
         model_obj, config = _build_model_and_config(self, vocab_size=vocab_size)
 
+        # Validate persistence Params and splice checkpoint_dir/interval into
+        # VIConfig. Returns (config, resume_path) where resume_path is a Path
+        # or None. See _common.apply_persistence_params for the error rules.
+        config, resume_path = apply_persistence_params(self, config)
+
         features_col = self.getOrDefault("featuresCol")
         bow_rdd = (
             dataset.select(features_col).rdd
@@ -323,14 +338,17 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
 
         runner = VIRunner(model_obj, config=config)
         try:
-            result = runner.fit(bow_rdd, on_iteration=self._on_iteration)
+            result = runner.fit(
+                bow_rdd,
+                resume_from=resume_path,
+                on_iteration=self._on_iteration,
+            )
         finally:
             bow_rdd.unpersist(blocking=False)
 
-        out_model = OnlineHDPModel(
-            result,
-            T=model_obj.T, K=model_obj.K,
-        )
+        # T and K ride along in result.metadata via OnlineHDP.get_metadata,
+        # so the Model constructor only needs the result.
+        out_model = OnlineHDPModel(result)
         # Copy every Param value the Estimator has set or has a default for, so
         # the Model's getters reflect the configuration that produced it.
         for param in self.params:
@@ -341,7 +359,7 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
         return out_model
 
 
-class OnlineHDPModel(_OnlineHDPParams, Model):
+class OnlineHDPModel(_OnlineHDPParams, _PersistableModel, Model):
     """MLlib-shaped Model wrapping a trained spark_vi VIResult.
 
     Carries the trained global parameters (λ, u, v) plus a copy of every
@@ -350,17 +368,35 @@ class OnlineHDPModel(_OnlineHDPParams, Model):
     that was actually used.
     """
 
-    def __init__(
-        self,
-        result,                              # VIResult
-        *,
-        T: int,
-        K: int,
-    ) -> None:
+    # Stamped into result.metadata by VIRunner as `model_class` (the runner
+    # uses type(model).__name__ on the underlying VIModel). Used by
+    # _PersistableModel.load to reject checkpoints from other model classes.
+    _expected_model_class = "OnlineHDP"
+
+    def __init__(self, result) -> None:  # result: VIResult
         super().__init__()
         self._result = result
-        self._T = int(T)
-        self._K = int(K)
+        # Shape constants come from result.metadata (populated by
+        # OnlineHDP.get_metadata + VIRunner). This makes the Model
+        # reconstructible from a VIResult alone — necessary for load(path).
+        self._T = int(result.metadata["T"])
+        self._K = int(result.metadata["K"])
+        # Seed default Param values on the Model so a freshly-constructed
+        # Model (e.g. via OnlineHDPModel.load) has the values _transform
+        # reads. The Estimator's _fit also runs a param-copy loop after
+        # construction; that overwrites these with the Estimator's actual
+        # configuration. Loaded Models keep these defaults.
+        self._setDefault(
+            k=150, docTruncation=15, maxIter=20,
+            featuresCol="features", topicDistributionCol="topicDistribution",
+            optimizer="online",
+            learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05,
+            gammaShape=100.0, caviMaxIter=100, caviTol=1e-4,
+            optimizeDocConcentration=True,
+            optimizeCorpusConcentration=True,
+            optimizeTopicConcentration=False,
+        )
+        self._set_persistence_defaults()
 
     @property
     def result(self):

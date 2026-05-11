@@ -43,6 +43,14 @@ def test_auto_checkpoint_writes_per_interval(spark, tmp_path):
 
     The checkpoint reflects the most recent loop state and matches the runner's
     own returned result (identical global_params).
+
+    Note: when the run finishes, VIRunner now overwrites the directory with
+    a final post-loop save. That final save reflects the returned VIResult
+    rather than the interim VIResult, so metadata["checkpoint"] is absent on
+    the final on-disk artifact even when an interim save happened to land on
+    the same iteration. The interim path is exercised by inspecting the dir
+    mid-run; here we focus on the post-fit invariant the directory is
+    authoritative for.
     """
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.io.export import load_result
@@ -60,11 +68,11 @@ def test_auto_checkpoint_writes_per_interval(spark, tmp_path):
     runner = VIRunner(CountingModel(), cfg)
     result = runner.fit(rdd)
 
-    # Last on-disk checkpoint reflects the final loop state (iter 4; 4 % 2 == 0).
+    # Last on-disk write reflects the final loop state (iter 4); after the
+    # post-loop final-save guarantee this matches the returned VIResult.
     loaded = load_result(ckpt)
     assert loaded.n_iterations == 4
     assert loaded.converged is False
-    assert loaded.metadata.get("checkpoint") is True
     np.testing.assert_array_equal(
         loaded.global_params["alpha"], result.global_params["alpha"],
     )
