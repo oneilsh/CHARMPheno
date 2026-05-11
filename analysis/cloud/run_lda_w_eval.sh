@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 # Pick a unique run id; the SAVE_DIR is where eval will look later.
 RUN_ID=lda_k50_$(date +%Y%m%d_%H%M%S)
 SAVE_DIR=/mnt/gcs/$BUCKET/runs/$RUN_ID
