@@ -1,4 +1,4 @@
-.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence inspect smoke-dataproc setup
+.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -74,6 +74,16 @@ help:
 	@echo "  make eval-bq-coherence - Held-out NPMI coherence on an augmented VIResult"
 	@echo "                         CHECKPOINT=/mnt/gcs/\$$BUCKET/runs/<id>  (required)"
 	@echo "                         Override args via EVAL_ARGS='--top-n 10'"
+	@echo "                         HDP: EVAL_ARGS='--model-class hdp --hdp-k 50'"
+	@echo "  make lda-bq-fit-eval - End-to-end fit + eval; auto-generates timestamped"
+	@echo "                         SAVE_DIR under /mnt/gcs/\$$BUCKET/runs/<id>. Pass"
+	@echo "                         --holdout-fraction > 0 in LDA_BQ_ARGS for the eval"
+	@echo "                         to find a held-out partition."
+	@echo "                         LDA_BQ_ARGS='--K 50 --max-iter 200 --holdout-fraction 0.1 --holdout-seed 42 ...'"
+	@echo "                         EVAL_ARGS='--top-n 20'  SAVE_INTERVAL=10"
+	@echo "  make hdp-bq-fit-eval - End-to-end HDP fit + eval; same shape as lda-bq-fit-eval."
+	@echo "                         HDP_BQ_ARGS='--T 150 --K 15 --holdout-fraction 0.1 --holdout-seed 42 ...'"
+	@echo "                         EVAL_ARGS='--model-class hdp --hdp-k 50'"
 	@echo "  make inspect         - Live polling dashboard (run in a sibling terminal)"
 	@echo "                         Override args via INSPECT_ARGS='--interval 3'"
 	@echo "  make smoke-dataproc  - alternate: stage to GCS, gcloud dataproc jobs submit pyspark"
@@ -171,6 +181,31 @@ eval-bq-coherence: zip $(WORKSPACE_ENV)
 	    $(EVAL_SCRIPT) \
 	    --checkpoint "$(CHECKPOINT)" \
 	    $(EVAL_ARGS)
+
+# Combined fit + eval. Generates a fresh timestamped SAVE_DIR under the
+# workspace bucket, runs the model-specific fit (overriding SAVE_DIR), then
+# runs eval against that exact SAVE_DIR. LDA_BQ_ARGS / HDP_BQ_ARGS must
+# include --holdout-fraction > 0 for eval to find a held-out partition;
+# otherwise the eval driver aborts with a missing-split error.
+lda-bq-fit-eval: zip $(WORKSPACE_ENV)
+	@. ./$(WORKSPACE_ENV) && \
+	test -n "$$BUCKET" || { echo "ERROR: BUCKET not set in $(WORKSPACE_ENV)"; exit 1; } && \
+	RUN_ID=lda_$$(date +%Y%m%d_%H%M%S) && \
+	RUN_SAVE_DIR=/mnt/gcs/$$BUCKET/runs/$$RUN_ID && \
+	echo "[fit-eval] RUN_ID=$$RUN_ID" && \
+	echo "[fit-eval] SAVE_DIR=$$RUN_SAVE_DIR" && \
+	$(MAKE) lda-bq-smoke SAVE_DIR=$$RUN_SAVE_DIR SAVE_INTERVAL=$(SAVE_INTERVAL) LDA_BQ_ARGS="$(LDA_BQ_ARGS)" && \
+	$(MAKE) eval-bq-coherence CHECKPOINT=$$RUN_SAVE_DIR EVAL_ARGS="$(EVAL_ARGS)"
+
+hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
+	@. ./$(WORKSPACE_ENV) && \
+	test -n "$$BUCKET" || { echo "ERROR: BUCKET not set in $(WORKSPACE_ENV)"; exit 1; } && \
+	RUN_ID=hdp_$$(date +%Y%m%d_%H%M%S) && \
+	RUN_SAVE_DIR=/mnt/gcs/$$BUCKET/runs/$$RUN_ID && \
+	echo "[fit-eval] RUN_ID=$$RUN_ID" && \
+	echo "[fit-eval] SAVE_DIR=$$RUN_SAVE_DIR" && \
+	$(MAKE) hdp-bq-smoke SAVE_DIR=$$RUN_SAVE_DIR SAVE_INTERVAL=$(SAVE_INTERVAL) HDP_BQ_ARGS="$(HDP_BQ_ARGS)" && \
+	$(MAKE) eval-bq-coherence CHECKPOINT=$$RUN_SAVE_DIR EVAL_ARGS="--model-class hdp $(EVAL_ARGS)"
 
 inspect:
 	python $(INSPECT_SCRIPT) $(INSPECT_ARGS)

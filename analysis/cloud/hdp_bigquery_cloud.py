@@ -249,7 +249,29 @@ def main(argv: list[str] | None = None) -> int:
               "to ≥ this value. Default 0.95 (PCA's explained-variance "
               "analog). Used by mid-fit snapshots and the post-fit summary."),
     )
+    parser.add_argument(
+        "--holdout-fraction", type=float, default=0.0,
+        help=("If >0, deterministically hold out this fraction of patients "
+              "before fitting (eval-driver companion). 0 means fit on full "
+              "corpus. Split provenance is stamped under "
+              "VIResult.metadata['split'] so eval_coherence_cloud.py can "
+              "reproduce the holdout."),
+    )
+    parser.add_argument(
+        "--holdout-seed", type=int, default=None,
+        help="Seed for the holdout hash. Defaults to --seed.",
+    )
     args = parser.parse_args(argv)
+
+    holdout_seed = (
+        args.holdout_seed if args.holdout_seed is not None else args.seed
+    )
+    holdout_fraction = float(args.holdout_fraction)
+    apply_split = holdout_fraction > 0.0
+    if not (0.0 <= holdout_fraction < 1.0):
+        print(f"ERROR: --holdout-fraction must be in [0, 1), got "
+              f"{holdout_fraction}", file=sys.stderr)
+        return 1
 
     cdr = os.environ.get("WORKSPACE_CDR")
     billing = os.environ.get("GOOGLE_CLOUD_PROJECT")
@@ -261,7 +283,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Driver-side imports proven first — fail fast if --py-files is misshapen.
     from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
+    from charmpheno.omop.split import split_bow_by_person
+    from spark_vi.core import VIResult
     from spark_vi.diagnostics.persist import assert_persisted
+    from spark_vi.io import save_result
     from spark_vi.mllib.hdp import OnlineHDPEstimator
 
     _configure_logging()
@@ -302,6 +327,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[driver]   vocab size: {len(vocab_map)} (cap {args.vocab_size}, "
               f"minDF {args.min_df}), documents: {n_docs}", flush=True)
 
+    if apply_split:
+        with _phase(f"person-keyed split "
+                     f"(holdout_fraction={holdout_fraction}, "
+                     f"holdout_seed={holdout_seed})"):
+            train_df, holdout_df = split_bow_by_person(
+                bow_df,
+                holdout_fraction=holdout_fraction,
+                seed=holdout_seed,
+            )
+            train_df = train_df.persist()
+            n_train = train_df.count()
+            n_holdout = holdout_df.count()
+            assert_persisted(train_df, name="train_df")
+            print(f"[driver]   train: {n_train} docs, holdout: {n_holdout} docs "
+                  f"(train fraction ~{n_train / max(n_train + n_holdout, 1):.3f})",
+                  flush=True)
+        fit_df = train_df
+    else:
+        fit_df = bow_df
+
     with _phase("concept-name lookup"):
         name_rows = (
             omop.where(F.col("concept_id").isin(list(vocab_map.keys())))
@@ -341,7 +386,7 @@ def main(argv: list[str] | None = None) -> int:
                 idx_to_cid=idx_to_cid, name_by_id=name_by_id, T=args.T,
                 mass_threshold=args.active_mass_threshold,
             ))
-        model = estimator.fit(bow_df)
+        model = estimator.fit(fit_df)
         print(f"[driver]   elbo trace tail: {model.result.elbo_trace[-3:]}",
               flush=True)
         n_active = model.activeTopicCount(
@@ -352,6 +397,47 @@ def main(argv: list[str] | None = None) -> int:
             f"(covering ≥{args.active_mass_threshold:.0%} of corpus mass)",
             flush=True,
         )
+
+    # Augmented re-save: bundle vocab + split provenance + corpus_manifest into
+    # VIResult.metadata and overwrite the shim's final auto-save. Mirrors the
+    # LDA cloud driver so eval_coherence_cloud.py can reproduce the exact BOW +
+    # holdout from the checkpoint alone.
+    if args.save_dir:
+        vocab_list: list = [None] * len(vocab_map)
+        for cid, idx in vocab_map.items():
+            vocab_list[idx] = cid
+        split_metadata: dict = {"applied": apply_split}
+        if apply_split:
+            split_metadata.update(
+                holdout_fraction=holdout_fraction,
+                holdout_seed=holdout_seed,
+                person_id_col="person_id",
+                splitter="charmpheno.omop.split.split_bow_by_person",
+            )
+        augmented = VIResult(
+            global_params=model.result.global_params,
+            elbo_trace=model.result.elbo_trace,
+            n_iterations=model.result.n_iterations,
+            converged=model.result.converged,
+            diagnostic_traces=model.result.diagnostic_traces,
+            metadata={
+                **model.result.metadata,
+                "vocab": vocab_list,
+                "T": args.T,
+                "K": args.K,
+                "split": split_metadata,
+                "corpus_manifest": {
+                    "source": "bigquery",
+                    "cdr": cdr,
+                    "person_mod": args.person_mod,
+                    "vocab_size": args.vocab_size,
+                    "min_df": args.min_df,
+                },
+            },
+        )
+        save_result(augmented, args.save_dir)
+        print(f"[driver] re-saved augmented VIResult to {args.save_dir}",
+              flush=True)
 
     # topicsMatrix is (V, T); pick the active topics by E[β_t] descending,
     # cumulative-mass threshold (matches the shim's activeTopicCount).
@@ -372,6 +458,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {cid:>10}  {name[:60]:<60}  {col[j]:.4f}", flush=True)
 
     with _phase("transform sample"):
+        # Transform against the un-split bow_df so the sample shows topic
+        # distributions for some patients regardless of holdout assignment.
         (model.transform(bow_df)
               .withColumn("person_hash",
                           F.substring(
@@ -382,6 +470,8 @@ def main(argv: list[str] | None = None) -> int:
 
     omop.unpersist()
     bow_df.unpersist()
+    if apply_split:
+        fit_df.unpersist()
     print("[driver] HDP BQ SMOKE TEST PASSED", flush=True)
     spark.stop()
     return 0

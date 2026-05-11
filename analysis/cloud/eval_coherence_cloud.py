@@ -1,14 +1,15 @@
-"""Cloud-side held-out NPMI coherence for a saved OnlineLDA checkpoint.
+"""Cloud-side held-out NPMI coherence for a saved OnlineLDA / OnlineHDP checkpoint.
 
 Mirrors `analysis/local/eval_coherence.py` but rebuilds the corpus from
 BigQuery using parameters stamped at fit time. Loads the augmented
-VIResult written by `lda_bigquery_cloud.py`, reproduces the BQ -> BOW
-pipeline from `metadata['corpus_manifest']`, applies the matching
-person-keyed split from `metadata['split']`, and computes per-topic NPMI
-on the holdout.
+VIResult written by `lda_bigquery_cloud.py` / `hdp_bigquery_cloud.py`,
+reproduces the BQ -> BOW pipeline from `metadata['corpus_manifest']`,
+applies the matching person-keyed split from `metadata['split']`, and
+computes per-topic NPMI on the holdout.
 
-LDA-only in v1; HDP eval is a follow-on. Reject `--model-class hdp` so
-the gap is explicit.
+For HDP, only the top-K topics by E[β_t] are scored (the corpus stick
+shrinks unused topics toward 0; scoring them would add noise rather than
+signal). K is set by `--hdp-k`.
 
 Two environment variables must be set (the same ones the fit driver
 reads):
@@ -17,6 +18,7 @@ reads):
 
 Submit (from analysis/cloud on the Dataproc master):
     make eval-bq-coherence CHECKPOINT=/mnt/gcs/$BUCKET/runs/<id>
+    make eval-bq-coherence CHECKPOINT=... EVAL_ARGS='--model-class hdp --hdp-k 50'
 """
 from __future__ import annotations
 
@@ -97,16 +99,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--model-class", choices=["lda", "hdp"], default="lda",
-        help=("v1 supports lda only; --model-class hdp raises "
-              "NotImplementedError (cloud HDP eval is a follow-on)"),
+        help="lda scores all K rows of lambda; hdp scores the top-K topics "
+             "by E[beta_t] (see --hdp-k).",
+    )
+    parser.add_argument(
+        "--hdp-k", type=int, default=50,
+        help="Top-K HDP topics by E[beta_t] to score (ignored for LDA).",
     )
     args = parser.parse_args(argv)
-
-    if args.model_class == "hdp":
-        raise NotImplementedError(
-            "cloud HDP coherence eval is a follow-on; v1 supports "
-            "--model-class lda only."
-        )
 
     cdr_env = os.environ.get("WORKSPACE_CDR")
     billing = os.environ.get("GOOGLE_CLOUD_PROJECT")
@@ -120,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
     from charmpheno.omop.split import split_bow_by_person
     from spark_vi.core.types import BOWDocument
-    from spark_vi.eval.topic import compute_npmi_coherence
+    from spark_vi.eval.topic import compute_npmi_coherence, top_k_used_topics
     from spark_vi.io import load_result
 
     # The shared verify_split_contract lives under the top-level `analysis`
@@ -252,9 +252,19 @@ def main(argv: list[str] | None = None) -> int:
         with _phase(f"NPMI coherence (top_n={args.top_n})"):
             lambda_ = result.global_params["lambda"]
             topic_term = lambda_ / lambda_.sum(axis=1, keepdims=True)
+            if args.model_class == "hdp":
+                u = result.global_params["u"]
+                v = result.global_params["v"]
+                mask = top_k_used_topics(u=u, v=v, k=args.hdp_k)
+                print(f"[driver]   HDP top-K mask: scoring "
+                      f"{int(mask.sum())}/{len(mask)} topics by E[β_t]",
+                      flush=True)
+            else:
+                mask = None
             holdout_rdd = holdout_df.rdd.map(BOWDocument.from_spark_row)
             report = compute_npmi_coherence(
                 topic_term, holdout_rdd, top_n=args.top_n,
+                hdp_topic_mask=mask,
             )
 
         # Property checks — match the local driver's assertions.
