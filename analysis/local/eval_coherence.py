@@ -20,11 +20,20 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
 from pyspark.sql import SparkSession
 
+# Make the repo root importable so `analysis._eval_common` resolves when this
+# script is invoked as `poetry run python analysis/local/eval_coherence.py`
+# (which puts analysis/local/ on sys.path, not the repo root).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from analysis._eval_common import verify_split_contract  # noqa: E402
 from charmpheno.omop import load_omop_parquet, to_bow_dataframe
 from charmpheno.omop.split import split_bow_by_person
 from spark_vi.core.types import BOWDocument
@@ -52,36 +61,6 @@ def _build_spark() -> SparkSession:
     )
 
 
-def _verify_split_contract(result, *, holdout_fraction: float, seed: int) -> None:
-    """Verify the eval CLI args match the split provenance stamped at fit time.
-
-    The fit driver (fit_lda_local.py / fit_hdp_local.py) stamps split parameters
-    under VIResult.metadata['split']. If absent, the model was fit on the full
-    corpus and the eval is optimistically biased (the held-out patients were
-    seen during training); we warn loudly. If present but mismatched, we abort.
-    """
-    split_meta = result.metadata.get("split")
-    if split_meta is None or not split_meta.get("applied", False):
-        log.warning(
-            "checkpoint has no split provenance; the fit driver was likely run "
-            "without --holdout-fraction. NPMI on the hashed holdout will be "
-            "OPTIMISTICALLY BIASED because the model saw those patients during "
-            "fitting. Re-fit with matching --holdout-fraction and --holdout-seed "
-            "for an honest benchmark."
-        )
-        return
-    fit_frac = float(split_meta.get("holdout_fraction", -1.0))
-    fit_seed = int(split_meta.get("holdout_seed", -1))
-    if (abs(fit_frac - holdout_fraction) > 1e-9) or (fit_seed != seed):
-        raise SystemExit(
-            "split mismatch: checkpoint was fit with "
-            f"holdout_fraction={fit_frac}, seed={fit_seed} but eval was invoked "
-            f"with holdout_fraction={holdout_fraction}, seed={seed}. "
-            "Re-run with matching values (the eval holdout must be the held-out "
-            "portion the model did NOT see)."
-        )
-
-
 def run_eval(
     *,
     checkpoint: Path,
@@ -95,7 +74,7 @@ def run_eval(
 ) -> CoherenceReport:
     """Run the eval and return the report. Importable for tests."""
     result = load_result(checkpoint)
-    _verify_split_contract(result, holdout_fraction=holdout_fraction, seed=seed)
+    verify_split_contract(result, holdout_fraction=holdout_fraction, seed=seed)
     lambda_ = result.global_params["lambda"]
     topic_term = lambda_ / lambda_.sum(axis=1, keepdims=True)
 
