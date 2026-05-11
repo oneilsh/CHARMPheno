@@ -94,7 +94,11 @@ def run_eval(
     return report
 
 
-def _print_ranked_report(report: CoherenceReport, vocab: list, concept_names: dict | None = None) -> None:
+def _print_ranked_report(
+    report: CoherenceReport,
+    vocab: list[int],
+    concept_names: dict[int, str] | None = None,
+) -> None:
     rows = sorted(
         zip(report.topic_indices, report.per_topic_npmi, report.top_term_indices),
         key=lambda r: -r[1],

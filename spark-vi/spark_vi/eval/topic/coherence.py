@@ -142,7 +142,7 @@ def _compute_pair_freqs(
 
     counts = bow_rdd.flatMap(_emit_pairs).reduceByKey(lambda a, b: a + b).collectAsMap()
     interest_b.unpersist(blocking=False)
-    return {tuple(k): v for k, v in counts.items()}
+    return dict(counts)
 
 
 def compute_npmi_coherence(
@@ -160,6 +160,13 @@ def compute_npmi_coherence(
             For OnlineHDP same, with shape (T, V).
         holdout_bow: RDD of BOWDocument. Counts are ignored; only the set of
             indices per doc is used (binary co-occurrence).
+
+            Callers should pass an already-cached RDD (or one derived from a
+            cached DataFrame). The orchestrator runs three actions over this
+            RDD (``count()``, the doc-freqs map-reduce, and the pair-freqs
+            map-reduce) and re-derivation cost will multiply otherwise. At
+            local-test scale this is invisible; at cloud scale it is a
+            measurable cost.
         top_n: number of top terms per topic. Default 20. Must be <= V.
         hdp_topic_mask: optional boolean array of length K (or T for HDP). When
             provided, only mask==True rows of topic_term are scored. None means

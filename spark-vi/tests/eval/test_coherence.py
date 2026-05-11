@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 
 
@@ -46,9 +47,6 @@ def test_npmi_pair_handles_small_probabilities():
     # Anti-correlated; bounded above by 1 and below by -1; not NaN.
     assert math.isfinite(result)
     assert -1.0 <= result <= 1.0
-
-
-import numpy as np
 
 
 def test_top_n_terms_per_topic_picks_argmax_n():
@@ -192,7 +190,9 @@ def test_compute_pair_freqs_emits_only_interest_set_pairs(sc):
     from spark_vi.eval.topic.coherence import _compute_pair_freqs
 
     docs = [
-        BOWDocument(indices=np.array([0, 1, 2], dtype=np.int32), counts=np.array([1.0, 1.0, 1.0]), length=3),
+        # Intentionally feed an unsorted indices array to exercise the
+        # canonical-ordering contract: keys must come back as (min, max).
+        BOWDocument(indices=np.array([2, 0, 1], dtype=np.int32), counts=np.array([1.0, 1.0, 1.0]), length=3),
         BOWDocument(indices=np.array([0, 2], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
         BOWDocument(indices=np.array([1, 99], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
     ]
@@ -202,6 +202,10 @@ def test_compute_pair_freqs_emits_only_interest_set_pairs(sc):
     out = _compute_pair_freqs(rdd, interest)
     # Doc 0: pairs (0,1), (0,2), (1,2). Doc 1: pair (0,2). Doc 2: no interest pairs.
     assert out == {(0, 1): 1, (0, 2): 2, (1, 2): 1}
+    # Lock the canonical (min, max) ordering contract documented on
+    # _aggregate_topic_coherence's pair_freqs arg.
+    for (a, b) in out.keys():
+        assert a < b, f"pair key ({a}, {b}) is not in (min, max) order"
 
 
 def test_compute_npmi_coherence_lda_path(sc):
