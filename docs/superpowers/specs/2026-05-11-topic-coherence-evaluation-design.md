@@ -12,9 +12,9 @@ A small prerequisite refactor lands first in its own branch: `spark_vi.models.{l
 
 The framework now has two working topic models (`OnlineLDA`, `OnlineHDP`), MLlib-style estimator/model shims for both, persistence (ADR 0006), and checkpoint/save/load on the shim side (ADR 0015). What's missing is any *quantitative* assessment of topic quality. K-selection for LDA, T-selection for HDP, η/α/γ hyperparameter comparisons, model-class comparisons — none of these are decidable from ELBO alone (ELBO doesn't compare across K, and only weakly tracks interpretability). The standard answer is held-out coherence, computed from word-pair co-occurrence statistics on documents the model didn't see during training.
 
-The prior screenshot from the user's earlier project used a custom modified-UCI form: `Σ log₂((1 + p(t_i, t_j)) / (p(t_i)·p(t_j)))` summed over the top-N term pairs per topic, then z-scored across topics. That works, but the brainstorming session settled on NPMI as the established alternative — bounded in `[-1, 1]`, no smoothing constant to tune, no z-score required to interpret (though one can still be reported alongside), and directly comparable across runs.
+The prior screenshot from the user's earlier project used a custom modified-UCI form: `Σ log₂((1 + p(t_i, t_j)) / (p(t_i)·p(t_j)))` summed over the top-N term pairs per topic, then z-scored across topics. That works, but the brainstorming session settled on NPMI as the established alternative — bounded in `[-1, 1]`, no smoothing constant to tune, no normalization required to interpret, and directly comparable across runs.
 
-The "sliding window" of textbook NPMI collapses naturally to whole-document for patient-bag data: there's no word order in OMOP records, so a patient's full bag is the natural co-occurrence window. That makes the held-out coherence story cleaner here than in classical NLP.
+The "sliding window" of textbook NPMI is a token-ordering construct over running text. OMOP records *are* temporally ordered (every event has a timestamp), but for v1 we treat each patient bag as unordered for co-occurrence purposes. The reason isn't that order doesn't matter — it's that choosing the right window for clinical timelines is itself a non-trivial question (1-year rolling window? episode-bounded? observation-period-relative?), and patient timelines have variable density, gaps, and episode structures that don't map cleanly onto NPMI's sliding-window formulation. We leave temporal-window coherence variants to a follow-on and treat the whole-bag formulation as the principled v1 baseline.
 
 ## Goals
 
@@ -41,7 +41,7 @@ The "sliding window" of textbook NPMI collapses naturally to whole-document for 
 - `spark_vi/eval/topic/coherence.py` — NPMI computation:
   - `compute_npmi_coherence(topic_term: np.ndarray, holdout_bow: RDD, top_n: int = 20, hdp_topic_mask: np.ndarray | None = None) -> CoherenceReport`
   - Returns a frozen `CoherenceReport` dataclass.
-- `spark_vi/eval/topic/types.py` — `CoherenceReport` dataclass (per-topic NPMI, top-N term indices per topic, summary stats, optional z-score view).
+- `spark_vi/eval/topic/types.py` — `CoherenceReport` dataclass (per-topic NPMI, top-N term indices per topic, descriptive summary stats).
 - `charmpheno/charmpheno/omop/split.py` — `split_bow_by_person(bow_df, fraction, seed)`:
   - Deterministic SHA-256 hash of `person_id`, modulo a fixed bucket count, threshold defines holdout.
   - Returns `(train_bow_df, holdout_bow_df)`.
@@ -63,7 +63,7 @@ The "sliding window" of textbook NPMI collapses naturally to whole-document for 
 - **Gensim adapter (`spark_vi/eval/gensim_adapter.py`).** Reserved for if/when we want UMass/c_v/c_uci/c_npmi via gensim. Hand-rolled NPMI is enough for v1.
 - **OCTIS integration.** Reserved for the systematic multi-metric / multi-model comparison phase. Coherence is a prerequisite, not a substitute.
 - **Simulation / synthetic recovery testing.** Generate ground-truth θ/β, fit, measure Hellinger on best-matched topics. Useful as an inference sanity check; separate spec.
-- **Z-score normalization as the primary report statistic.** NPMI values are interpretable in absolute terms (Röder et al. 2015 report good topics in ~0.1–0.3 range on held-out). We expose a `z_scores` field on `CoherenceReport` for convenience but lead with raw NPMI.
+- **Z-score normalization.** NPMI is already bounded and interpretable in absolute terms (Röder et al. 2015 report good topics in ~0.1–0.3 range on held-out), so we don't normalize. Drivers that want a "relative to this run's mean" view can compute it themselves from the per-topic array; not worth a built-in.
 - **Topic-level confidence intervals via bootstrap.** Plausible follow-on; out of scope for v1.
 
 ### Never (dropped from scope)
@@ -86,11 +86,11 @@ NPMI(w_i, w_j) = -1   when p(w_i, w_j) == 0   (Röder et al. 2015 convention)
 Coherence(t) = mean over all unordered pairs (w_i, w_j) in T_t with i < j of NPMI(w_i, w_j)
 ```
 
-Summary statistics over topics: mean, median, stdev, min, max. Optional z-score view: `(Coherence(t) - mean) / stdev`.
+Summary statistics over topics: mean, median, stdev, min, max — descriptive only, not used to normalize the per-topic scores.
 
 Notes on the formulation:
 
-- **Whole-document (bag) co-occurrence**, not sliding window. Justified by patient bags having no meaningful word order.
+- **Whole-document (bag) co-occurrence**, not sliding window. Patient events are temporally ordered, but choosing the right window for medical timelines (1-year rolling? episode-bounded? observation-period-relative?) is its own research question; v1 treats each patient bag as unordered for co-occurrence purposes. A temporal-window variant is a plausible v2 follow-on if topic-quality assessment turns out to be sensitive to it.
 - **Binary doc-presence**, not count-weighted. A patient who has condition A 10 times and condition B once is the same co-occurrence signal as a patient with one of each. This matches the screenshot's "any record at any time."
 - **N = 20 default** (matches the screenshot and the Röder et al. reproducibility convention). Configurable.
 - **Mean over pairs**, not sum. The pair count is `N*(N-1)/2 = 190` for N=20; this is implicit in the formula either way, but using *mean* keeps the score in a comparable scale across choices of N. The screenshot's modified-UCI used a sum; we deviate here intentionally because NPMI is already pre-normalized per-pair, so mean is the natural aggregator.
@@ -127,11 +127,6 @@ class CoherenceReport:
     stdev: float
     min: float
     max: float
-
-    @property
-    def z_scores(self) -> np.ndarray:
-        """Per-topic NPMI z-scored across topics. NaN if stdev == 0."""
-        ...
 
 # spark_vi/eval/topic/coherence.py
 def compute_npmi_coherence(
@@ -226,20 +221,11 @@ Open contract issue: the eval driver assumes the checkpoint was trained on the m
 - **Zero co-occurrence convention.** Pair that never co-occurs returns NPMI = -1, not NaN/Inf.
 - **`top_k_used_topics`.** Synthetic (u, v) with hand-computed expected `E[β]` ordering.
 - **Top-N selection.** Topic-term row with known argpartition output; verify ties broken deterministically.
-- **Z-score property.** Mean zero, unit variance (modulo stdev clamping for degenerate inputs).
 - **Split determinism.** Same seed → identical buckets. Different seeds → different buckets. Train ∩ holdout = ∅. Union covers the input.
 
 ### Integration (slow tier)
 
-- **End-to-end on a small saved checkpoint.** Fit OnlineLDA on a 20-topic synthetic LDA dataset, save, split a held-out portion, run `compute_npmi_coherence`, verify NPMI scores are within an expected range and that ordering tracks ground-truth topic quality (the topics with most-distinguishable term distributions score highest).
-- **HDP variant.** Same shape but with `OnlineHDP` and an HDP-generated synthetic. Verify the mask filters correctly and only used-topic rows appear in the report.
-- **Driver smoke.** `analysis/local/eval_coherence.py` runs to completion on a fixture checkpoint and emits a non-empty ranked table.
-
-### Property checks (built into the integration tests)
-
-- All NPMI values in `[-1, 1]`.
-- `per_topic_npmi` length matches mask sum (HDP) or K (LDA).
-- Summary stats match `numpy` equivalents computed directly from `per_topic_npmi`.
+- **Driver smoke.** `analysis/local/eval_coherence.py` runs to completion on a fixture checkpoint and emits a non-empty ranked table. Also serves as the property-check vehicle: asserts all NPMI values in `[-1, 1]`, `per_topic_npmi` length matches mask sum (HDP) or K (LDA), and summary stats match `numpy` equivalents computed directly from `per_topic_npmi`.
 
 ## Migration / Compatibility
 
