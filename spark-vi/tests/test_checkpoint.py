@@ -16,7 +16,7 @@ def test_checkpoint_then_resume_matches_continuous_run(spark, tmp_path):
     across the checkpoint boundary."""
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.io.export import save_result
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     rdd = spark.sparkContext.parallelize([1] * 60 + [0] * 40, numSlices=4).persist()
     rdd.count()  # materialize for VIRunner's strict cache precondition
@@ -54,7 +54,7 @@ def test_auto_checkpoint_writes_per_interval(spark, tmp_path):
     """
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.io.export import load_result
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     rdd = spark.sparkContext.parallelize([1, 0, 1, 0], numSlices=2).persist()
     rdd.count()  # materialize for VIRunner's strict cache precondition
@@ -84,7 +84,7 @@ def test_auto_checkpoint_then_resume_via_kwarg(spark, tmp_path):
     run. No monkey-patching anywhere — the API is the user-facing contract.
     """
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.counting import CountingModel
+    from spark_vi.models.topic.counting import CountingModel
 
     rdd = spark.sparkContext.parallelize([1] * 60 + [0] * 40, numSlices=2).persist()
     rdd.count()  # materialize for VIRunner's strict cache precondition

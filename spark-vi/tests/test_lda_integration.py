@@ -45,7 +45,7 @@ def _generate_synthetic_corpus(D: int, V: int, K: int,
 def test_online_lda_fit_produces_well_formed_result(spark):
     """A short Spark-local fit returns a VIResult with positive lambda and a finite ELBO trace."""
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     K, V, D = 3, 30, 100
     np.random.seed(0)
@@ -100,7 +100,7 @@ def test_online_lda_elbo_smoothed_endpoints_show_overall_improvement(spark):
     bearing regression test for the SVI machinery, modulo that gap.
     """
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     np.random.seed(1)
     _, docs = _generate_synthetic_corpus(D=100, V=30, K=3, docs_avg_len=40, seed=7)
@@ -156,7 +156,7 @@ def test_alpha_optimization_runs_end_to_end_without_regression(spark):
     """
     import numpy as np
     from spark_vi.core import VIConfig, VIRunner, BOWDocument
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     K, V, D = 3, 30, 200
     rng = np.random.default_rng(2)
@@ -233,7 +233,7 @@ def test_alpha_optimization_drifts_toward_corpus_truth_at_D10k(spark):
     from scipy.optimize import linear_sum_assignment
 
     from spark_vi.core import BOWDocument, VIConfig, VIRunner
-    from spark_vi.models.lda import OnlineLDA
+    from spark_vi.models.topic.lda import OnlineLDA
 
     K, V, D = 3, 100, 10_000
     docs_avg_len = 100
