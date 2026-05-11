@@ -76,7 +76,7 @@ help:
 	@echo "                         Override args via EVAL_ARGS='--top-n 10'"
 	@echo "                         HDP: EVAL_ARGS='--model-class hdp --hdp-k 50'"
 	@echo "  make lda-bq-fit-eval - End-to-end fit + eval; auto-generates timestamped"
-	@echo "                         SAVE_DIR under /mnt/gcs/\$$BUCKET/runs/<id>. Pass"
+	@echo "                         SAVE_DIR under \$$(REPO_ROOT)/data/runs/<id>. Pass"
 	@echo "                         --holdout-fraction > 0 in LDA_BQ_ARGS for the eval"
 	@echo "                         to find a held-out partition."
 	@echo "                         LDA_BQ_ARGS='--K 50 --max-iter 200 --holdout-fraction 0.1 --holdout-seed 42 ...'"
@@ -182,26 +182,31 @@ eval-bq-coherence: zip $(WORKSPACE_ENV)
 	    --checkpoint "$(CHECKPOINT)" \
 	    $(EVAL_ARGS)
 
-# Combined fit + eval. Generates a fresh timestamped SAVE_DIR under the
-# workspace bucket, runs the model-specific fit (overriding SAVE_DIR), then
-# runs eval against that exact SAVE_DIR. LDA_BQ_ARGS / HDP_BQ_ARGS must
+# Combined fit + eval. Generates a fresh timestamped SAVE_DIR under
+# $(REPO_ROOT)/data/runs/, runs the model-specific fit (overriding SAVE_DIR),
+# then runs eval against that exact SAVE_DIR. LDA_BQ_ARGS / HDP_BQ_ARGS must
 # include --holdout-fraction > 0 for eval to find a held-out partition;
 # otherwise the eval driver aborts with a missing-split error.
+#
+# data/runs/ is the project's repo-local artifact dir (gitignored). It's a
+# Dataproc-master path, not a GCS-FUSE mount — artifacts don't survive a
+# cluster teardown unless you rsync them off. For long-lived runs, override
+# SAVE_DIR explicitly to a /mnt/gcs/<bucket>/... path.
+RUNS_DIR := $(REPO_ROOT)/data/runs
+
 lda-bq-fit-eval: zip $(WORKSPACE_ENV)
-	@. ./$(WORKSPACE_ENV) && \
-	test -n "$$BUCKET" || { echo "ERROR: BUCKET not set in $(WORKSPACE_ENV)"; exit 1; } && \
+	@mkdir -p $(RUNS_DIR) && \
 	RUN_ID=lda_$$(date +%Y%m%d_%H%M%S) && \
-	RUN_SAVE_DIR=/mnt/gcs/$$BUCKET/runs/$$RUN_ID && \
+	RUN_SAVE_DIR=$(RUNS_DIR)/$$RUN_ID && \
 	echo "[fit-eval] RUN_ID=$$RUN_ID" && \
 	echo "[fit-eval] SAVE_DIR=$$RUN_SAVE_DIR" && \
 	$(MAKE) lda-bq-smoke SAVE_DIR=$$RUN_SAVE_DIR SAVE_INTERVAL=$(SAVE_INTERVAL) LDA_BQ_ARGS="$(LDA_BQ_ARGS)" && \
 	$(MAKE) eval-bq-coherence CHECKPOINT=$$RUN_SAVE_DIR EVAL_ARGS="$(EVAL_ARGS)"
 
 hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
-	@. ./$(WORKSPACE_ENV) && \
-	test -n "$$BUCKET" || { echo "ERROR: BUCKET not set in $(WORKSPACE_ENV)"; exit 1; } && \
+	@mkdir -p $(RUNS_DIR) && \
 	RUN_ID=hdp_$$(date +%Y%m%d_%H%M%S) && \
-	RUN_SAVE_DIR=/mnt/gcs/$$BUCKET/runs/$$RUN_ID && \
+	RUN_SAVE_DIR=$(RUNS_DIR)/$$RUN_ID && \
 	echo "[fit-eval] RUN_ID=$$RUN_ID" && \
 	echo "[fit-eval] SAVE_DIR=$$RUN_SAVE_DIR" && \
 	$(MAKE) hdp-bq-smoke SAVE_DIR=$$RUN_SAVE_DIR SAVE_INTERVAL=$(SAVE_INTERVAL) HDP_BQ_ARGS="$(HDP_BQ_ARGS)" && \
