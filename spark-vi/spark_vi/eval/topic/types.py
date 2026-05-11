@@ -28,6 +28,10 @@ class CoherenceReport:
         top_n: top-N parameter the report was computed with.
         mean, median, stdev, min, max: descriptive summary over
             per_topic_npmi. Not used to normalize.
+
+    Array fields are conceptually immutable — ``frozen=True`` prevents
+    attribute reassignment but does not deep-freeze; callers should not
+    mutate the contained arrays.
     """
     per_topic_npmi: np.ndarray
     top_term_indices: np.ndarray

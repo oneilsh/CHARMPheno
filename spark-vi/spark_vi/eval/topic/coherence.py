@@ -10,6 +10,9 @@ docs/superpowers/specs/2026-05-11-topic-coherence-evaluation-design.md.
 from __future__ import annotations
 
 import math
+from itertools import combinations
+
+import numpy as np
 
 
 def _npmi_pair(p_i: float, p_j: float, p_ij: float) -> float:
@@ -20,6 +23,10 @@ def _npmi_pair(p_i: float, p_j: float, p_ij: float) -> float:
     Edge cases:
       p_ij == 0:  return -1.0   (Roder et al. 2015 convention; pair never co-occurs)
       p_ij == 1:  return  1.0   (denominator -log(1) = 0; pair always co-occurs)
+
+    These sentinel returns keep the per-pair value bounded in [-1, 1] with
+    no NaN/Inf contamination, so the topic-level mean over pairs remains
+    numerically well-defined.
     """
     if p_ij <= 0.0:
         return -1.0
@@ -27,9 +34,6 @@ def _npmi_pair(p_i: float, p_j: float, p_ij: float) -> float:
         return 1.0
     pmi = math.log(p_ij / (p_i * p_j))
     return pmi / -math.log(p_ij)
-
-
-import numpy as np
 
 
 def _top_n_terms_per_topic(topic_term: np.ndarray, top_n: int) -> np.ndarray:
@@ -48,9 +52,6 @@ def _top_n_terms_per_topic(topic_term: np.ndarray, top_n: int) -> np.ndarray:
     return sorted_idx[:, :top_n].astype(np.int64)
 
 
-from itertools import combinations
-
-
 def _aggregate_topic_coherence(
     *,
     top_n_indices: np.ndarray,
@@ -65,6 +66,8 @@ def _aggregate_topic_coherence(
         doc_freqs: term_index -> # held-out docs containing that term.
         pair_freqs: (min_idx, max_idx) -> # held-out docs containing both.
             Pairs with zero co-occurrence may be absent from this dict.
+            Keys must be normalized as ``(min(w_i, w_j), max(w_i, w_j))`` —
+            the canonical form this function looks up.
         n_docs: total # held-out docs (the normalizer).
 
     Returns:

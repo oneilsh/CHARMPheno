@@ -136,7 +136,7 @@ def test_aggregate_topic_coherence_missing_pair_returns_minus_one():
 
 
 def test_aggregate_topic_coherence_averages_over_pairs():
-    """Topic with top-N=3 averages over 3 pairs."""
+    """Topic with top-N=3 averages over its 3 pairs of perfectly-co-occurring terms (NPMI = 1.0 each, mean = 1.0)."""
     from spark_vi.eval.topic.coherence import _aggregate_topic_coherence
 
     top_n_indices = np.array([[0, 1, 2]])
@@ -149,9 +149,4 @@ def test_aggregate_topic_coherence_averages_over_pairs():
         pair_freqs=pair_freqs,
         n_docs=5,
     )
-    # Each pair: log(1/1) / -log(1)  -> 0/0 indeterminate at p_ij = 1
-    # Convention: handle p_ij == 1 by returning 1.0 (perfect co-occurrence).
-    # See _npmi_pair: when p_ij = 1, -log(1) = 0, denominator is 0 -- the
-    # function should handle this edge case too. Verify both _npmi_pair and
-    # _aggregate handle it. Expected: all pairs return 1.0, mean = 1.0.
     assert out[0] == pytest.approx(1.0)
