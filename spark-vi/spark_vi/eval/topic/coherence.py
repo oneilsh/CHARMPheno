@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from spark_vi.eval.topic.types import CoherenceReport
+
 if TYPE_CHECKING:
     from pyspark import RDD
 
@@ -141,3 +143,72 @@ def _compute_pair_freqs(
     counts = bow_rdd.flatMap(_emit_pairs).reduceByKey(lambda a, b: a + b).collectAsMap()
     interest_b.unpersist(blocking=False)
     return {tuple(k): v for k, v in counts.items()}
+
+
+def compute_npmi_coherence(
+    topic_term: np.ndarray,
+    holdout_bow: "RDD[BOWDocument]",
+    *,
+    top_n: int = 20,
+    hdp_topic_mask: np.ndarray | None = None,
+) -> CoherenceReport:
+    """NPMI coherence on held-out data, mean over top-N pairs per topic.
+
+    Args:
+        topic_term: shape (K, V) row-stochastic; topic-term distributions
+            E[beta]. For OnlineLDA pass lambda_ / lambda_.sum(axis=1, keepdims=True).
+            For OnlineHDP same, with shape (T, V).
+        holdout_bow: RDD of BOWDocument. Counts are ignored; only the set of
+            indices per doc is used (binary co-occurrence).
+        top_n: number of top terms per topic. Default 20. Must be <= V.
+        hdp_topic_mask: optional boolean array of length K (or T for HDP). When
+            provided, only mask==True rows of topic_term are scored. None means
+            score all rows (the LDA path).
+
+    Returns:
+        CoherenceReport with per-topic NPMI and descriptive summary stats.
+    """
+    K_full, V = topic_term.shape
+    if hdp_topic_mask is None:
+        scored_rows = np.arange(K_full, dtype=np.int64)
+    else:
+        if hdp_topic_mask.shape != (K_full,):
+            raise ValueError(
+                f"hdp_topic_mask shape {hdp_topic_mask.shape} does not match topic_term K={K_full}"
+            )
+        scored_rows = np.flatnonzero(hdp_topic_mask).astype(np.int64)
+
+    if scored_rows.size == 0:
+        raise ValueError("hdp_topic_mask selected zero topics; nothing to score")
+
+    filtered_topic_term = topic_term[scored_rows]
+    top_n_indices = _top_n_terms_per_topic(filtered_topic_term, top_n=top_n)
+
+    interest_set: set[int] = {int(w) for w in np.unique(top_n_indices)}
+
+    n_docs = holdout_bow.count()
+    if n_docs == 0:
+        raise ValueError("holdout_bow is empty; cannot compute coherence")
+
+    doc_freqs = _compute_doc_freqs(holdout_bow, interest_set)
+    pair_freqs = _compute_pair_freqs(holdout_bow, interest_set)
+
+    per_topic = _aggregate_topic_coherence(
+        top_n_indices=top_n_indices,
+        doc_freqs=doc_freqs,
+        pair_freqs=pair_freqs,
+        n_docs=n_docs,
+    )
+
+    return CoherenceReport(
+        per_topic_npmi=per_topic,
+        top_term_indices=top_n_indices,
+        topic_indices=scored_rows,
+        n_holdout_docs=n_docs,
+        top_n=top_n,
+        mean=float(per_topic.mean()),
+        median=float(np.median(per_topic)),
+        stdev=float(per_topic.std(ddof=0)),
+        min=float(per_topic.min()),
+        max=float(per_topic.max()),
+    )

@@ -202,3 +202,40 @@ def test_compute_pair_freqs_emits_only_interest_set_pairs(sc):
     out = _compute_pair_freqs(rdd, interest)
     # Doc 0: pairs (0,1), (0,2), (1,2). Doc 1: pair (0,2). Doc 2: no interest pairs.
     assert out == {(0, 1): 1, (0, 2): 2, (1, 2): 1}
+
+
+def test_compute_npmi_coherence_lda_path(sc):
+    """End-to-end on a tiny synthetic corpus, no HDP mask."""
+    from spark_vi.core.types import BOWDocument
+    from spark_vi.eval.topic.coherence import compute_npmi_coherence
+    from spark_vi.eval.topic.types import CoherenceReport
+
+    # 2 topics over 4 terms. Topic 0 places mass on terms 0 and 1; topic 1 on 2 and 3.
+    topic_term = np.array([
+        [0.45, 0.45, 0.05, 0.05],
+        [0.05, 0.05, 0.45, 0.45],
+    ])
+    docs = [
+        BOWDocument(indices=np.array([0, 1], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+        BOWDocument(indices=np.array([0, 1], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+        BOWDocument(indices=np.array([2, 3], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+        BOWDocument(indices=np.array([2, 3], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2),
+    ]
+    rdd = sc.parallelize(docs, numSlices=2)
+
+    report = compute_npmi_coherence(topic_term, rdd, top_n=2)
+    assert isinstance(report, CoherenceReport)
+    assert report.per_topic_npmi.shape == (2,)
+    assert report.top_term_indices.shape == (2, 2)
+    assert list(report.topic_indices) == [0, 1]
+    assert report.n_holdout_docs == 4
+    assert report.top_n == 2
+    # Each topic's top-N pair always co-occurs => NPMI = 1.0 per pair => mean = 1.0.
+    assert report.per_topic_npmi[0] == pytest.approx(1.0)
+    assert report.per_topic_npmi[1] == pytest.approx(1.0)
+    assert report.mean == pytest.approx(1.0)
+    assert report.min == pytest.approx(1.0)
+    assert report.max == pytest.approx(1.0)
+    # All values bounded in [-1, 1]
+    assert (report.per_topic_npmi >= -1.0).all()
+    assert (report.per_topic_npmi <= 1.0).all()

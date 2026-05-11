@@ -3,6 +3,7 @@
 Public API lands incrementally as plan tasks complete. See
 docs/superpowers/specs/2026-05-11-topic-coherence-evaluation-design.md.
 """
+from spark_vi.eval.topic.coherence import compute_npmi_coherence
 from spark_vi.eval.topic.types import CoherenceReport
 
-__all__ = ["CoherenceReport"]
+__all__ = ["CoherenceReport", "compute_npmi_coherence"]
