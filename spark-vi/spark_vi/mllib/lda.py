@@ -1,6 +1,6 @@
 """MLlib Estimator/Transformer shim for OnlineLDA.
 
-Wraps spark_vi.models.lda.OnlineLDA + spark_vi.core.runner.VIRunner so the
+Wraps spark_vi.models.topic.lda.OnlineLDA + spark_vi.core.runner.VIRunner so the
 model behaves like a pyspark.ml.clustering.LDA-shaped Estimator/Model pair.
 The shim is a translation layer; all SVI logic lives in OnlineLDA. See
 ADR 0009 (docs/decisions/0009-mllib-shim.md) for the design rationale.
@@ -22,7 +22,7 @@ from spark_vi.mllib._common import (
     _vector_to_bow_document,
     apply_persistence_params,
 )
-from spark_vi.models.lda import OnlineLDA
+from spark_vi.models.topic.lda import OnlineLDA
 
 
 def _validate_unsupported_params(estimator: "OnlineLDAEstimator") -> None:
@@ -183,7 +183,7 @@ class _OnlineLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
 
 
 class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
-    """MLlib-shaped Estimator wrapping spark_vi.models.lda.OnlineLDA.
+    """MLlib-shaped Estimator wrapping spark_vi.models.topic.lda.OnlineLDA.
 
     Param defaults mirror pyspark.ml.clustering.LDA for the shared subset
     and ADR 0008 for our extras (gammaShape, caviMaxIter, caviTol).
@@ -424,7 +424,7 @@ class OnlineLDAModel(_OnlineLDAParams, _PersistableModel, Model):
         from pyspark.sql import functions as F
         from scipy.special import digamma
 
-        from spark_vi.models.lda import _cavi_doc_inference
+        from spark_vi.models.topic.lda import _cavi_doc_inference
 
         lam = self._result.global_params["lambda"]
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))

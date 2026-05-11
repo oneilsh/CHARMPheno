@@ -26,7 +26,7 @@ import numpy as np
 from scipy.special import digamma
 
 from spark_vi.core import BOWDocument
-from spark_vi.models.lda import OnlineLDA, _cavi_doc_inference
+from spark_vi.models.topic.lda import OnlineLDA, _cavi_doc_inference
 
 # Match probe's setup
 K, V, D = 3, 100, 10_000

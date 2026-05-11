@@ -14,7 +14,7 @@ sys.path.insert(0, ROOT)
 import numpy as np
 from pyspark.sql import SparkSession
 from spark_vi.core import BOWDocument, VIConfig, VIRunner
-from spark_vi.models.lda import OnlineLDA
+from spark_vi.models.topic.lda import OnlineLDA
 
 K, V, D = 3, 100, 10_000
 docs_avg_len = 100

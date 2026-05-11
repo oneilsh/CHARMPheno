@@ -1,6 +1,6 @@
 """MLlib Estimator/Transformer shim for OnlineHDP.
 
-Wraps spark_vi.models.online_hdp.OnlineHDP + spark_vi.core.runner.VIRunner so
+Wraps spark_vi.models.topic.online_hdp.OnlineHDP + spark_vi.core.runner.VIRunner so
 the model behaves like a pyspark.ml.clustering.LDA-shaped Estimator/Model
 pair. The shim is a translation layer; all SVI/CAVI logic lives in
 OnlineHDP. See ADR 0012 (docs/decisions/0012-hdp-mllib-shim.md) for the
@@ -23,7 +23,7 @@ from spark_vi.mllib._common import (
     _vector_to_bow_document,
     apply_persistence_params,
 )
-from spark_vi.models.online_hdp import (
+from spark_vi.models.topic.online_hdp import (
     OnlineHDP,
     expected_corpus_betas,
     topic_count_at_mass,
@@ -230,7 +230,7 @@ class _OnlineHDPParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
 
 
 class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
-    """MLlib-shaped Estimator wrapping spark_vi.models.online_hdp.OnlineHDP.
+    """MLlib-shaped Estimator wrapping spark_vi.models.topic.online_hdp.OnlineHDP.
 
     Param defaults mirror pyspark.ml.clustering.LDA for the shared subset
     and ADR 0011 for HDP-specific extras (corpusConcentration, docTruncation,
