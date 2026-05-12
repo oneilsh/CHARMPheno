@@ -78,6 +78,12 @@ def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id):
                  optimize_alpha; corpus-popular topics get larger α_k.
         Σλ_k   — total topic mass over the vocabulary. Proxy for how much
                  corpus evidence has accreted to topic k.
+        E[β_k] — Σλ_k / Σ_j Σλ_j. Fraction of corpus mass assigned to
+                 topic k (the LDA analogue of HDP's corpus-level stick
+                 weight; distinct from α_k, which is the prior on per-doc
+                 topic distributions, not the empirical topic prevalence).
+                 ~1/K means evenly used; values >> 1/K mark catch-alls,
+                 << 1/K mark sparsely-used / vestigial slots.
         peak   — max_v(λ_kv) / Σλ_k. Peakedness of the topic-word
                  posterior. ~1/V means uniform / undifferentiated; rising
                  toward 1.0 means the topic specialized (or, at small K,
@@ -90,6 +96,7 @@ def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id):
         lam = global_params["lambda"]                         # (K, V)
         alpha = global_params["alpha"]                        # (K,)
         lam_row_sums = lam.sum(axis=1)                        # (K,)
+        E_beta = lam_row_sums / max(lam_row_sums.sum(), 1e-12)  # (K,)
         peak = lam.max(axis=1) / np.maximum(lam_row_sums, 1e-12)
         topics = lam / lam_row_sums[:, None]                  # row-stochastic
         # Sort topics by Σλ_k descending so the heaviest topics are listed
@@ -107,8 +114,8 @@ def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id):
             )
             print(
                 f"[driver]    topic {k:>2}  "
-                f"α={alpha[k]:.4g}  Σλ={lam_row_sums[k]:.3g}  "
-                f"peak={peak[k]:.3f}  | {terms}",
+                f"α={alpha[k]:.4g}  E[β]={E_beta[k]:.4f}  "
+                f"Σλ={lam_row_sums[k]:.3g}  peak={peak[k]:.3f}  | {terms}",
                 flush=True,
             )
     return _on_iter
