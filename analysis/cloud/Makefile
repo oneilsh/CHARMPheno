@@ -255,7 +255,7 @@ lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    --corpus-cache-uri "$(CORPUS_CACHE_URI)" \
 	    --source-table condition_era \
 	    --doc-unit patient_year \
-	    --doc-min-length 30 \
+	    --doc-min-length 20 \
 	    --K 80 \
 	    --subsampling-rate 0.2 \
 	    --max-iter 20 \
