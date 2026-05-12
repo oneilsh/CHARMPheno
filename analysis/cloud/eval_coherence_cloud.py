@@ -117,7 +117,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Driver-side imports proven first.
-    from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
+    from charmpheno.omop import (
+        DocSpec, load_omop_bigquery, to_bow_dataframe,
+    )
     from charmpheno.omop.split import split_bow_by_person
     from spark_vi.core.types import BOWDocument
     from spark_vi.eval.topic import compute_npmi_coherence, top_k_used_topics
@@ -164,12 +166,21 @@ def main(argv: list[str] | None = None) -> int:
             )
         holdout_fraction = float(split["holdout_fraction"])
         holdout_seed = int(split["holdout_seed"])
+        # Reconstruct the fit-time DocSpec from the manifest. Pre-ADR-0018
+        # checkpoints lack the doc_spec field; default to PatientDocSpec to
+        # match their actual fit behavior. source_table is similarly defaulted
+        # to condition_occurrence for back-compat.
+        doc_spec_manifest = corpus.get("doc_spec", {"name": "patient"})
+        doc_spec = DocSpec.from_manifest(doc_spec_manifest)
+        source_table = corpus.get("source_table", "condition_occurrence")
         print(f"[driver]   split: holdout_fraction={holdout_fraction}, "
               f"holdout_seed={holdout_seed}", flush=True)
         print(f"[driver]   corpus_manifest: cdr={corpus['cdr']}, "
+              f"source_table={source_table}, "
               f"person_mod={corpus['person_mod']}, "
               f"vocab_size={corpus['vocab_size']}, "
               f"min_df={corpus['min_df']}", flush=True)
+        print(f"[driver]   doc_spec: {doc_spec_manifest}", flush=True)
 
         # Exercise the shared contract check. The fit-stamped values are
         # tautologically equal to the ones we just read out of metadata, so
@@ -205,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
                 cdr_dataset=corpus["cdr"],
                 billing_project=billing,
                 person_sample_mod=corpus["person_mod"],
+                source_table=source_table,
             ).persist()
             summary = omop.agg(
                 F.count(F.lit(1)).alias("rows"),
@@ -213,9 +225,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[driver]   OMOP: {summary['rows']} rows, "
                   f"{summary['persons']} distinct persons", flush=True)
 
-        with _phase("vectorize (CountVectorizer)"):
+        with _phase(f"vectorize (CountVectorizer, doc_spec={doc_spec.name})"):
             bow_df, vocab_map = to_bow_dataframe(
                 omop,
+                doc_spec=doc_spec,
                 vocab_size=corpus["vocab_size"],
                 min_df=corpus["min_df"],
             )

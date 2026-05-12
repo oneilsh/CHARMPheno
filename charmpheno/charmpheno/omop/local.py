@@ -14,8 +14,10 @@ from charmpheno.omop.schema import validate
 def load_omop_parquet(path: str, *, spark: SparkSession) -> DataFrame:
     """Read an OMOP-shaped parquet file into a Spark DataFrame.
 
-    The file must contain at least the canonical columns:
-    person_id, visit_occurrence_id, concept_id, concept_name.
+    The file must contain at least the required canonical columns
+    (person_id, concept_id, concept_name); visit_occurrence_id is
+    optional but type-checked when present. See ADR 0018 for the
+    visit_occurrence_id relaxation rationale.
     """
     df = spark.read.parquet(path)
     validate(df)

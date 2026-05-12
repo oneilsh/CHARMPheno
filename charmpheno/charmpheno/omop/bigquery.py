@@ -2,9 +2,21 @@
 
 Reads OMOP fact tables from a CDM-shaped BigQuery dataset, joins to the
 `concept` table for human-readable names, and projects to the canonical
-(person_id, visit_occurrence_id, concept_id, concept_name) shape defined
-in `charmpheno.omop.schema`. Returns a Spark DataFrame; nothing is
-collected to the driver.
+shape defined in `charmpheno.omop.schema`. Returns a Spark DataFrame;
+nothing is collected to the driver.
+
+Two source-table modes supported via `source_table`:
+
+- `"condition_occurrence"` (default): emits one row per condition
+  occurrence with `condition_start_date` and `visit_occurrence_id`. The
+  original CharmPheno loader shape.
+- `"condition_era"` (added 2026-05-12, ADR 0018): emits one row per
+  OMOP condition era with `condition_era_start_date` and
+  `condition_era_end_date`. Eras collapse repeated condition_occurrence
+  rows for the same (person, concept) under OMOP's 30-day sliding window,
+  so they're the right shape for "active condition span" semantics
+  (PatientYearDocSpec with era replication). Eras do not carry
+  `visit_occurrence_id`.
 
 v1 supports `concept_types=("condition",)` only. drug_exposure and
 procedure_occurrence will land in a follow-on once condition-only behavior
@@ -17,9 +29,10 @@ from __future__ import annotations
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-from charmpheno.omop.schema import CANONICAL_COLUMNS, validate
+from charmpheno.omop.schema import validate
 
 _SUPPORTED_CONCEPT_TYPES: tuple[str, ...] = ("condition",)
+_SUPPORTED_SOURCE_TABLES: tuple[str, ...] = ("condition_occurrence", "condition_era")
 
 
 def load_omop_bigquery(
@@ -29,6 +42,7 @@ def load_omop_bigquery(
     billing_project: str,
     concept_types: tuple[str, ...] = ("condition",),
     person_sample_mod: int | None = None,
+    source_table: str = "condition_occurrence",
 ) -> DataFrame:
     """Load OMOP-shaped data from a BigQuery CDR dataset.
 
@@ -43,15 +57,23 @@ def load_omop_bigquery(
         person_sample_mod: if set, keep rows where MOD(person_id, M) == 0.
             Whole-patient deterministic sampling — preserves each retained
             person's complete condition list, which matters for LDA.
+        source_table: which condition fact table to read. "condition_occurrence"
+            emits one row per occurrence with `condition_start_date` +
+            `visit_occurrence_id`; "condition_era" emits one row per condition
+            era with `condition_era_start_date` + `condition_era_end_date`
+            and no visit_occurrence_id (eras span visits).
 
     Returns:
-        DataFrame with the canonical OMOP columns plus `condition_start_date`.
-        Rows where concept_id == 0 (OMOP "no matching concept") are dropped.
+        DataFrame with the canonical required OMOP columns
+        (person_id, concept_id, concept_name) plus source-table-specific
+        date columns. Rows where concept_id == 0 (OMOP "no matching
+        concept") are dropped.
 
     Raises:
         NotImplementedError: if concept_types contains anything other than
             "condition".
-        ValueError: if cdr_dataset is malformed or person_sample_mod < 1.
+        ValueError: if cdr_dataset is malformed, person_sample_mod < 1, or
+            source_table is unrecognized.
     """
     if not isinstance(cdr_dataset, str) or cdr_dataset.count(".") != 1:
         raise ValueError(
@@ -67,6 +89,11 @@ def load_omop_bigquery(
         raise ValueError(
             f"person_sample_mod must be >= 1 or None, got {person_sample_mod}"
         )
+    if source_table not in _SUPPORTED_SOURCE_TABLES:
+        raise ValueError(
+            f"source_table {source_table!r} not supported "
+            f"(supported: {_SUPPORTED_SOURCE_TABLES})"
+        )
 
     def _read(table: str) -> DataFrame:
         return (
@@ -76,12 +103,23 @@ def load_omop_bigquery(
             .load()
         )
 
-    cond = _read("condition_occurrence").select(
-        "person_id",
-        "visit_occurrence_id",
-        F.col("condition_concept_id").alias("concept_id"),
-        "condition_start_date",
-    )
+    if source_table == "condition_occurrence":
+        cond = _read("condition_occurrence").select(
+            "person_id",
+            "visit_occurrence_id",
+            F.col("condition_concept_id").alias("concept_id"),
+            "condition_start_date",
+        )
+        extra_cols = ("visit_occurrence_id", "condition_start_date")
+    else:  # condition_era
+        cond = _read("condition_era").select(
+            "person_id",
+            F.col("condition_concept_id").alias("concept_id"),
+            "condition_era_start_date",
+            "condition_era_end_date",
+        )
+        extra_cols = ("condition_era_start_date", "condition_era_end_date")
+
     if person_sample_mod is not None:
         # Full-patient sampling is the right shape for LDA — per-person token
         # bags stay intact rather than getting truncated by row-level sampling.
@@ -96,9 +134,8 @@ def load_omop_bigquery(
     # at runtime. An explicit F.broadcast() here OOM'd the driver in client
     # mode — keep it implicit and let the planner choose.
     omop = cond.join(concept, on="concept_id", how="left")
-    # Reorder to the canonical shape so downstream `validate()` sees a clean
-    # schema position-by-position.
-    omop = omop.select(*CANONICAL_COLUMNS, "condition_start_date")
+    # Reorder so canonical required columns come first, then source-specific.
+    omop = omop.select("person_id", "concept_id", "concept_name", *extra_cols)
 
     validate(omop)
     return omop

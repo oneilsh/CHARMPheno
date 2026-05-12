@@ -27,7 +27,11 @@ from pathlib import Path
 
 from pyspark.sql import SparkSession
 
-from charmpheno.omop import load_omop_parquet, to_bow_dataframe
+from charmpheno.omop import (
+    doc_spec_from_cli,
+    load_omop_parquet,
+    to_bow_dataframe,
+)
 from charmpheno.omop.split import split_bow_by_person
 from spark_vi.core import VIResult
 from spark_vi.io import save_result
@@ -80,7 +84,19 @@ def main(argv: list[str] | None = None) -> int:
         "--holdout-seed", type=int, default=None,
         help="Seed for the holdout hash. Defaults to --seed.",
     )
+    parser.add_argument(
+        "--doc-unit", choices=["patient", "patient_year"], default="patient",
+        help=("How OMOP event rows become documents (ADR 0018). "
+              "patient_year requires the parquet to carry "
+              "condition_era_start_date / condition_era_end_date columns."),
+    )
+    parser.add_argument(
+        "--doc-min-length", type=int, default=None,
+        help="Minimum tokens per doc before it enters the BOW.",
+    )
     args = parser.parse_args(argv)
+
+    doc_spec = doc_spec_from_cli(args.doc_unit, min_doc_length=args.doc_min_length)
 
     holdout_seed = args.holdout_seed if args.holdout_seed is not None else args.seed
     holdout_fraction = float(args.holdout_fraction)
@@ -95,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     spark = _build_spark()
     try:
         df = load_omop_parquet(str(args.input), spark=spark)
-        bow_df, vocab_map = to_bow_dataframe(df)
+        bow_df, vocab_map = to_bow_dataframe(df, doc_spec=doc_spec)
 
         if apply_split:
             train_df, _holdout_df = split_bow_by_person(
@@ -150,6 +166,11 @@ def main(argv: list[str] | None = None) -> int:
                 "T": args.T,
                 "K": args.K,
                 "split": split_metadata,
+                "corpus_manifest": {
+                    "source": "parquet",
+                    "input_path": str(args.input),
+                    "doc_spec": doc_spec.manifest(),
+                },
             },
         )
         save_result(result_with_vocab, args.output)

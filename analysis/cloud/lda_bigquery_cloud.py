@@ -235,6 +235,25 @@ def main(argv: list[str] | None = None) -> int:
         "--holdout-seed", type=int, default=None,
         help="Seed for the holdout hash. Defaults to --seed.",
     )
+    parser.add_argument(
+        "--doc-unit", choices=["patient", "patient_year"], default="patient",
+        help=("How OMOP event rows become documents (see ADR 0018). "
+              "'patient' = one doc per person over full history (legacy "
+              "default). 'patient_year' = one doc per (person, year-active), "
+              "requires --source-table condition_era for era replication."),
+    )
+    parser.add_argument(
+        "--doc-min-length", type=int, default=None,
+        help=("Minimum token count per doc before it enters the BOW; shorter "
+              "docs are dropped. None uses the DocSpec's own default "
+              "(0 for patient, 30 for patient_year)."),
+    )
+    parser.add_argument(
+        "--source-table", choices=["condition_occurrence", "condition_era"],
+        default="condition_occurrence",
+        help=("Which OMOP fact table to read. condition_era is required for "
+              "PatientYearDocSpec's era-replication semantics."),
+    )
     args = parser.parse_args(argv)
 
     holdout_seed = (
@@ -256,12 +275,23 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Driver-side imports proven first — fail fast if --py-files is misshapen.
-    from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
+    from charmpheno.omop import (
+        doc_spec_from_cli,
+        load_omop_bigquery,
+        to_bow_dataframe,
+    )
     from charmpheno.omop.split import split_bow_by_person
     from spark_vi.core import VIResult
     from spark_vi.diagnostics.persist import assert_persisted
     from spark_vi.io import save_result
     from spark_vi.mllib.lda import OnlineLDAEstimator
+
+    doc_spec = doc_spec_from_cli(args.doc_unit, min_doc_length=args.doc_min_length)
+    # Sanity check: patient_year semantics need condition_era for era spans.
+    if args.doc_unit == "patient_year" and args.source_table != "condition_era":
+        print("ERROR: --doc-unit patient_year requires --source-table "
+              "condition_era for era replication semantics.", file=sys.stderr)
+        return 1
 
     _configure_logging()
 
@@ -289,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             cdr_dataset=cdr,
             billing_project=billing,
             person_sample_mod=args.person_mod,
+            source_table=args.source_table,
         ).persist()
         # One agg pass instead of two — distinct-counting person_id is cheap
         # piggybacked on the row count that has to scan everything anyway.
@@ -301,9 +332,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[driver]   OMOP: {summary['rows']} rows, "
               f"{summary['persons']} distinct persons", flush=True)
 
-    with _phase("vectorize (CountVectorizer)"):
+    with _phase(f"vectorize (CountVectorizer, doc_spec={doc_spec.name}, "
+                 f"min_doc_length={doc_spec.min_doc_length})"):
         bow_df, vocab_map = to_bow_dataframe(
-            omop, vocab_size=args.vocab_size, min_df=args.min_df,
+            omop, doc_spec=doc_spec,
+            vocab_size=args.vocab_size, min_df=args.min_df,
         )
         bow_df = bow_df.persist()
         n_docs = bow_df.count()  # forces materialization
@@ -401,10 +434,12 @@ def main(argv: list[str] | None = None) -> int:
                 "split": split_metadata,
                 "corpus_manifest": {
                     "source": "bigquery",
+                    "source_table": args.source_table,
                     "cdr": cdr,
                     "person_mod": args.person_mod,
                     "vocab_size": args.vocab_size,
                     "min_df": args.min_df,
+                    "doc_spec": doc_spec.manifest(),
                 },
             },
         )

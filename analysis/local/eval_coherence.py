@@ -34,7 +34,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from analysis._eval_common import verify_split_contract  # noqa: E402
-from charmpheno.omop import load_omop_parquet, to_bow_dataframe
+from charmpheno.omop import DocSpec, load_omop_parquet, to_bow_dataframe
 from charmpheno.omop.split import split_bow_by_person
 from spark_vi.core.types import BOWDocument
 from spark_vi.eval.topic import (
@@ -85,8 +85,16 @@ def run_eval(
     else:
         mask = None
 
+    # Reconstruct the fit-time DocSpec from corpus_manifest so eval BOWs
+    # match the fit BOWs exactly. Pre-ADR-0018 checkpoints lack the field;
+    # default to PatientDocSpec, which matches their actual behavior.
+    corpus = result.metadata.get("corpus_manifest", {})
+    doc_spec_manifest = corpus.get("doc_spec", {"name": "patient"})
+    doc_spec = DocSpec.from_manifest(doc_spec_manifest)
+    log.info("doc_spec from checkpoint manifest: %s", doc_spec_manifest)
+
     df = load_omop_parquet(str(input_parquet), spark=spark)
-    bow_df, _vocab_map = to_bow_dataframe(df)
+    bow_df, _vocab_map = to_bow_dataframe(df, doc_spec=doc_spec)
     _train, holdout_df = split_bow_by_person(
         bow_df, holdout_fraction=holdout_fraction, seed=seed
     )
