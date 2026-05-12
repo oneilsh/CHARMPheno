@@ -228,6 +228,9 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	  HDP_BQ_ARGS="$(HDP_BQ_ARGS) \
         --conf spark.executor.cores=4 \
         --conf spark.executor.memory=6g \
+		--source-table condition_era \
+        --doc-unit patient_year \
+		--doc-min-length 30 \
 	    --K 25 \
 		--T 150 \
 		--gamma 50 \
