@@ -271,7 +271,7 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	  HDP_BQ_ARGS="$(HDP_BQ_ARGS) \
 		--source-table condition_era \
         --doc-unit patient_year \
-		--doc-min-length 30 \
+		--doc-min-length 20 \
 	    --K 10 \
 		--T 80 \
 		--gamma 50 \
