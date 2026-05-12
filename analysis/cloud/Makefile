@@ -238,25 +238,48 @@ lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	  echo "[fit-eval] FRESH:    RUN_ID=$$RUN_ID_  SAVE_DIR=$$RUN_SAVE_DIR"; \
 	  RESUME_=""; \
 	fi; \
-	$(MAKE) lda-bq-smoke SAVE_DIR=$$RUN_SAVE_DIR \
-	  RESUME_FROM="$$RESUME_" \
-	  SAVE_INTERVAL=$(SAVE_INTERVAL) \
-	  LDA_BQ_ARGS="$(HDP_BQ_ARGS) \
-		--source-table condition_era \
-        --doc-unit patient_year \
-		--doc-min-length 30 \
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
+	    $(LDA_BQ_SCRIPT) \
+	    --save-dir "$$RUN_SAVE_DIR" \
+	    --resume-from "$$RESUME_" \
+	    --save-interval $(SAVE_INTERVAL) \
+	    --corpus-cache-uri "$(CORPUS_CACHE_URI)" \
+	    --source-table condition_era \
+	    --doc-unit patient_year \
+	    --doc-min-length 30 \
 	    --K 25 \
-		--subsampling-rate 0.1 \
-		--max-iter 20 \
-		--person-mod 10 \
-		--vocab-size 10000 \
-		--min-df 10 \
-		--holdout-fraction 0.2 \
-		--holdout-seed 42 \
-		--tau0 64 \
-		--kappa 0.7 \
-		--print-topics-every 1" && \
-	$(MAKE) eval-bq-coherence CHECKPOINT=$$RUN_SAVE_DIR EVAL_ARGS="$(EVAL_ARGS)"
+	    --subsampling-rate 0.1 \
+	    --max-iter 20 \
+	    --person-mod 10 \
+	    --vocab-size 10000 \
+	    --min-df 10 \
+	    --holdout-fraction 0.2 \
+	    --holdout-seed 42 \
+	    --tau0 64 \
+	    --kappa 0.7 \
+	    --print-topics-every 1 \
+	    $(LDA_BQ_ARGS) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
+	    $(EVAL_SCRIPT) \
+	    --checkpoint "$$RUN_SAVE_DIR" \
+	    $(EVAL_ARGS)
 
 hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	@mkdir -p $(RUNS_DIR) && \
@@ -273,29 +296,52 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	  echo "[fit-eval] FRESH:    RUN_ID=$$RUN_ID_  SAVE_DIR=$$RUN_SAVE_DIR"; \
 	  RESUME_=""; \
 	fi; \
-	$(MAKE) hdp-bq-smoke \
-	  SAVE_DIR=$$RUN_SAVE_DIR \
-	  RESUME_FROM="$$RESUME_" \
-	  SAVE_INTERVAL=$(SAVE_INTERVAL) \
-	  HDP_BQ_ARGS="$(HDP_BQ_ARGS) \
-		--source-table condition_era \
-        --doc-unit patient_year \
-		--doc-min-length 20 \
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
+	    $(HDP_BQ_SCRIPT) \
+	    --save-dir "$$RUN_SAVE_DIR" \
+	    --resume-from "$$RESUME_" \
+	    --save-interval $(SAVE_INTERVAL) \
+	    --corpus-cache-uri "$(CORPUS_CACHE_URI)" \
+	    --source-table condition_era \
+	    --doc-unit patient_year \
+	    --doc-min-length 20 \
 	    --K 10 \
-		--T 80 \
-		--gamma 50 \
-		--subsampling-rate 0.2 \
-		--max-iter 20 \
-		--person-mod 10 \
-		--vocab-size 10000 \
-		--min-df 10 \
-		--holdout-fraction 0.2 \
-		--holdout-seed 42 \
-		--tau0 64 \
-		--kappa 0.7 \
-		--print-topics-every 1" && \
-	$(MAKE) eval-bq-coherence \
-	  CHECKPOINT=$$RUN_SAVE_DIR EVAL_ARGS="--model-class hdp $(EVAL_ARGS)"
+	    --T 80 \
+		--no-optimize-corpus-concentration \
+	    --gamma 25 \
+	    --subsampling-rate 0.2 \
+	    --max-iter 20 \
+	    --person-mod 10 \
+	    --vocab-size 10000 \
+	    --min-df 10 \
+	    --holdout-fraction 0.2 \
+	    --holdout-seed 42 \
+	    --tau0 64 \
+	    --kappa 0.7 \
+	    --print-topics-every 1 \
+	    $(HDP_BQ_ARGS) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
+	    $(EVAL_SCRIPT) \
+	    --checkpoint "$$RUN_SAVE_DIR" \
+	    --model-class hdp \
+	    $(EVAL_ARGS)
 
 inspect:
 	python $(INSPECT_SCRIPT) $(INSPECT_ARGS)
