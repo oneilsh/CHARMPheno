@@ -274,6 +274,11 @@ def main(argv: list[str] | None = None) -> int:
     # noise from event-log writes). Our [driver] prints are stdout, not
     # log4j, so they survive. Set BEFORE any actions.
     spark.sparkContext.setLogLevel("WARN")
+    # Additionally silence the spot-reclamation flood (BlockManager cascades,
+    # FetchFailed stack traces from TaskSetManager, etc.) without losing
+    # other WARN messages.
+    from _log_utils import quiet_spot_reclamation
+    quiet_spot_reclamation(spark)
     sc = spark.sparkContext
     print(f"[driver] Spark {sc.version}, master={sc.master}, "
           f"defaultParallelism={sc.defaultParallelism}", flush=True)

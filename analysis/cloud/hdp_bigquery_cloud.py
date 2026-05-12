@@ -300,6 +300,10 @@ def main(argv: list[str] | None = None) -> int:
 
     spark = SparkSession.builder.appName("hdp_bigquery_cloud").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
+    # Silence the spot-reclamation flood (BlockManager cascades, FetchFailed
+    # stack traces from TaskSetManager, etc.) without losing other WARN.
+    from _log_utils import quiet_spot_reclamation
+    quiet_spot_reclamation(spark)
     sc = spark.sparkContext
     print(f"[driver] Spark {sc.version}, master={sc.master}, "
           f"defaultParallelism={sc.defaultParallelism}", flush=True)
