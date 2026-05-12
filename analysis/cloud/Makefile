@@ -256,8 +256,8 @@ lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    --source-table condition_era \
 	    --doc-unit patient_year \
 	    --doc-min-length 30 \
-	    --K 25 \
-	    --subsampling-rate 0.1 \
+	    --K 80 \
+	    --subsampling-rate 0.2 \
 	    --max-iter 20 \
 	    --person-mod 10 \
 	    --vocab-size 10000 \

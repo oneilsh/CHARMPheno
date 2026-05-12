@@ -57,6 +57,7 @@ and when is itself useful.
 
 (Append entries here as new insights are written, newest at top.)
 
+- [0018](0018-full-corpus-plus-threshold-yields-unimodal-positive-npmi.md) — Full-corpus reference + min-pair-count threshold yields unimodal positive NPMI distribution (npmi, diagnostics, hdp)
 - [0017](0017-hdp-gamma-sensitivity-is-prior-dominance.md) — HDP γ-sensitivity reveals prior-dominated outcomes (hdp, diagnostics)
 - [0016](0016-condition-era-vs-occurrence-not-comparable.md) — condition_era and condition_occurrence runs are not directly comparable (doc-units, npmi, diagnostics)
 - [0015](0015-crisp-topics-can-regress-when-k-undersized.md) — Crisp topics can regress in late iters when K is undersized (lda, diagnostics)

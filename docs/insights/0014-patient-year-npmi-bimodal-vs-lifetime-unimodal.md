@@ -1,7 +1,48 @@
-# 0014 — Patient-year LDA NPMI is bimodal; patient-lifetime is unimodal
-**Date:** 2026-05-12
+# 0014 — Patient-year LDA NPMI was bimodal under the OLD metric (artifact); doc-unit-difference findings survive
+**Date:** 2026-05-12 (revised same day after re-eval)
 **Topic:** lda | doc-units | npmi | diagnostics
-**Status:** Observed
+**Status:** Partially refuted — bimodal-distribution framing was metric-artifactual; the doc-unit-specific phenotype-recovery finding survives
+**Refuted-by-data:** Same checkpoint re-evaluated under [ADR 0017 revision](../decisions/0017-topic-coherence-evaluation.md#revisions) gives a unimodal positive distribution; see [0018](0018-full-corpus-plus-threshold-yields-unimodal-positive-npmi.md)
+
+> **Re-eval result (2026-05-12, same patient-year LDA K=25 checkpoint):**
+>
+> | stat   | OLD metric (holdout, floor=−1) | NEW metric (full, min_pair=3) |
+> |--------|-------------------------------|-------------------------------|
+> | mean   | −0.036                        | +0.138                         |
+> | median | −0.037                        | +0.087                         |
+> | stdev  | 0.265                         | 0.113                          |
+> | min    | −0.549                        | +0.023                         |
+> | max    | +0.509                        | +0.477                         |
+>
+> The "bimodal patient-year vs unimodal patient-lifetime" framing was
+> the metric talking. Under the new metric, patient-year is also
+> unimodal positive — and its stdev (0.113) is actually *lower* than
+> the pre-revision patient-lifetime stdev (0.133), the opposite
+> direction of the "2× spread" claim below. **Specifically refuted
+> sub-claims:**
+>
+> - "bimodal distribution shape" — was the rare-phenotype floor; gone now.
+> - "stdev 2× patient-lifetime's" — direction reverses with corrected metric.
+> - "real-but-rare phenotypes get NPMI-penalty negative scores" — gone
+>   now. SLE went from −0.53 to +0.087 (cov=50%); sarcoidosis from
+>   −0.06 to +0.075 (cov=91%); kidney transplant from −0.14 to +0.10
+>   (cov=84%); pregnancy from −0.09 (contaminated) to +0.24 (clean, cov=74%).
+>
+> **Surviving findings:**
+>
+> - Patient-year surfaces transient phenotypes (pregnancy, acute-event
+>   signatures) that patient-lifetime *structurally cannot* produce as
+>   distinct topics. Confirmed by their presence as high-NPMI topics
+>   under both metrics (the metric change shifts their scores but
+>   doesn't make them appear or disappear).
+> - The K=25 patient-year LDA recovers more distinct rare phenotype
+>   classes than patient-lifetime LDA at the same K, because rare-
+>   phenotype topics get their own slot rather than being absorbed
+>   into broader catch-alls.
+> - The bottom-portion topic readouts in the old data weren't all
+>   "junk drawers" — many were rare-phenotype topics being scored
+>   negative by metric artifact. See e.g. topic 23 (SLE), now
+>   recognizable as a clean phenotype under the corrected metric.
 
 Side-by-side K=25 LDA NPMI evaluations on the same OMOP condition-era
 corpus, varying only the doc unit:
