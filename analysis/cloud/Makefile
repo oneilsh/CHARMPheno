@@ -233,6 +233,9 @@ lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	  RESUME_FROM="$$RESUME_" \
 	  SAVE_INTERVAL=$(SAVE_INTERVAL) \
 	  LDA_BQ_ARGS="$(HDP_BQ_ARGS) \
+		--source-table condition_era \
+        --doc-unit patient_year \
+		--doc-min-length 30 \
 	    --K 50 \
 		--subsampling-rate 0.1 \
 		--max-iter 20 \
