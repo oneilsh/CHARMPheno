@@ -66,35 +66,59 @@ def _aggregate_topic_coherence(
     doc_freqs: dict[int, int],
     pair_freqs: dict[tuple[int, int], int],
     n_docs: int,
-) -> np.ndarray:
-    """Per-topic mean NPMI over the unordered pairs of its top-N terms.
+    min_pair_count: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-topic mean NPMI over the *scored* unordered pairs of top-N terms.
+
+    A pair is "scored" iff its joint co-occurrence count in the reference
+    corpus is >= ``min_pair_count``. Pairs below threshold contribute
+    nothing to the topic mean — neither a -1 floor (as the Roder
+    convention would) nor a 0. This is the C_NPMI handling per Aletras &
+    Stevenson 2013 / Roder et al. 2015: rare pairs are unreliable
+    co-occurrence estimates, so we honestly skip them and report
+    coverage alongside NPMI.
 
     Args:
         top_n_indices: shape (K_scored, N). Term indices per topic.
-        doc_freqs: term_index -> # held-out docs containing that term.
-        pair_freqs: (min_idx, max_idx) -> # held-out docs containing both.
+        doc_freqs: term_index -> # reference docs containing that term.
+        pair_freqs: (min_idx, max_idx) -> # reference docs containing both.
             Pairs with zero co-occurrence may be absent from this dict.
             Keys must be normalized as ``(min(w_i, w_j), max(w_i, w_j))`` —
             the canonical form this function looks up.
-        n_docs: total # held-out docs (the normalizer).
+        n_docs: total # reference docs (the normalizer).
+        min_pair_count: skip pairs whose joint count is < this value.
+            Default 1 preserves the historical "only skip true zeros"
+            behavior. Production drivers use 3 (so pairs with counts
+            {0, 1, 2} are skipped).
 
     Returns:
-        shape (K_scored,) float64 array of mean NPMI per topic.
+        (per_topic_npmi, per_topic_scored_pairs):
+        - per_topic_npmi: shape (K_scored,) float64. Mean NPMI over the
+          scored pairs of each topic. ``NaN`` for topics where every
+          pair was below threshold (zero coverage).
+        - per_topic_scored_pairs: shape (K_scored,) int64. How many
+          pairs cleared the threshold per topic.
     """
     K_scored, N = top_n_indices.shape
     out = np.empty(K_scored, dtype=np.float64)
-    n_pairs = N * (N - 1) // 2
+    scored_counts = np.empty(K_scored, dtype=np.int64)
     for k in range(K_scored):
         terms = top_n_indices[k]
         total = 0.0
+        n_scored = 0
         for w_i, w_j in combinations(terms, 2):
             a, b = (int(w_i), int(w_j)) if w_i < w_j else (int(w_j), int(w_i))
+            joint = pair_freqs.get((a, b), 0)
+            if joint < min_pair_count:
+                continue
             p_i = doc_freqs.get(a, 0) / n_docs
             p_j = doc_freqs.get(b, 0) / n_docs
-            p_ij = pair_freqs.get((a, b), 0) / n_docs
+            p_ij = joint / n_docs
             total += _npmi_pair(p_i=p_i, p_j=p_j, p_ij=p_ij)
-        out[k] = total / n_pairs
-    return out
+            n_scored += 1
+        scored_counts[k] = n_scored
+        out[k] = (total / n_scored) if n_scored > 0 else float("nan")
+    return out, scored_counts
 
 
 def _compute_doc_freqs(
@@ -147,19 +171,23 @@ def _compute_pair_freqs(
 
 def compute_npmi_coherence(
     topic_term: np.ndarray,
-    holdout_bow: "RDD[BOWDocument]",
+    reference_bow: "RDD[BOWDocument]",
     *,
     top_n: int = 20,
     hdp_topic_mask: np.ndarray | None = None,
+    min_pair_count: int = 3,
 ) -> CoherenceReport:
-    """NPMI coherence on held-out data, mean over top-N pairs per topic.
+    """NPMI coherence, mean over scored top-N pairs per topic.
 
     Args:
         topic_term: shape (K, V) row-stochastic; topic-term distributions
             E[beta]. For OnlineLDA pass lambda_ / lambda_.sum(axis=1, keepdims=True).
             For OnlineHDP same, with shape (T, V).
-        holdout_bow: RDD of BOWDocument. Counts are ignored; only the set of
-            indices per doc is used (binary co-occurrence).
+        reference_bow: RDD of BOWDocument used as the co-occurrence
+            reference. Counts are ignored; only the set of indices per
+            doc is used (binary co-occurrence). The driver chooses whether
+            this is the holdout split alone or the full corpus
+            (train ∪ holdout); see ADR 0017 revisions.
 
             Callers should pass an already-cached RDD (or one derived from a
             cached DataFrame). The orchestrator runs three actions over this
@@ -171,9 +199,16 @@ def compute_npmi_coherence(
         hdp_topic_mask: optional boolean array of length K (or T for HDP). When
             provided, only mask==True rows of topic_term are scored. None means
             score all rows (the LDA path).
+        min_pair_count: skip pairs with joint count below this threshold
+            in the reference corpus. Default 3 — pairs with counts in
+            {0, 1, 2} contribute nothing to their topic mean (vs the
+            pre-2026-05-12 behavior of flooring missing-pair NPMI at -1,
+            which biased rare-phenotype topics toward maximally
+            incoherent scores; see docs/insights/0007).
 
     Returns:
-        CoherenceReport with per-topic NPMI and descriptive summary stats.
+        CoherenceReport with per-topic NPMI, per-topic coverage counts,
+        and nan-aware summary stats over the rated topics.
     """
     K_full, V = topic_term.shape
     if hdp_topic_mask is None:
@@ -193,29 +228,49 @@ def compute_npmi_coherence(
 
     interest_set: set[int] = {int(w) for w in np.unique(top_n_indices)}
 
-    n_docs = holdout_bow.count()
+    n_docs = reference_bow.count()
     if n_docs == 0:
-        raise ValueError("holdout_bow is empty; cannot compute coherence")
+        raise ValueError("reference_bow is empty; cannot compute coherence")
 
-    doc_freqs = _compute_doc_freqs(holdout_bow, interest_set)
-    pair_freqs = _compute_pair_freqs(holdout_bow, interest_set)
+    doc_freqs = _compute_doc_freqs(reference_bow, interest_set)
+    pair_freqs = _compute_pair_freqs(reference_bow, interest_set)
 
-    per_topic = _aggregate_topic_coherence(
+    per_topic, per_topic_scored = _aggregate_topic_coherence(
         top_n_indices=top_n_indices,
         doc_freqs=doc_freqs,
         pair_freqs=pair_freqs,
         n_docs=n_docs,
+        min_pair_count=min_pair_count,
     )
+
+    rated_mask = ~np.isnan(per_topic)
+    if rated_mask.any():
+        rated = per_topic[rated_mask]
+        mean = float(rated.mean())
+        median = float(np.median(rated))
+        stdev = float(rated.std(ddof=0))
+        vmin = float(rated.min())
+        vmax = float(rated.max())
+    else:
+        # No topic met the threshold for any pair. Surface that via NaN
+        # summary rather than computing over an empty slice; the driver
+        # banner will flag the unrated count.
+        mean = median = stdev = vmin = vmax = float("nan")
 
     return CoherenceReport(
         per_topic_npmi=per_topic,
+        per_topic_scored_pairs=per_topic_scored,
         top_term_indices=top_n_indices,
         topic_indices=scored_rows,
+        reference_size=n_docs,
         n_holdout_docs=n_docs,
+        per_topic_total_pairs=top_n * (top_n - 1) // 2,
         top_n=top_n,
-        mean=float(per_topic.mean()),
-        median=float(np.median(per_topic)),
-        stdev=float(per_topic.std(ddof=0)),
-        min=float(per_topic.min()),
-        max=float(per_topic.max()),
+        min_pair_count=min_pair_count,
+        n_topics_unrated=int((~rated_mask).sum()),
+        mean=mean,
+        median=median,
+        stdev=stdev,
+        min=vmin,
+        max=vmax,
     )

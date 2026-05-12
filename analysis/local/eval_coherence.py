@@ -70,6 +70,8 @@ def run_eval(
     top_n: int,
     model_class: str,
     hdp_k: int,
+    npmi_reference: str,
+    npmi_min_pair_count: int,
     spark: SparkSession,
 ) -> CoherenceReport:
     """Run the eval and return the report. Importable for tests."""
@@ -95,20 +97,29 @@ def run_eval(
 
     df = load_omop_parquet(str(input_parquet), spark=spark)
     bow_df, _vocab_map = to_bow_dataframe(df, doc_spec=doc_spec)
-    _train, holdout_df = split_bow_by_person(
-        bow_df, holdout_fraction=holdout_fraction, seed=seed
-    )
-    holdout_df = holdout_df.persist()
-    n_holdout = holdout_df.count()
-    log.info("holdout: %d docs", n_holdout)
+    if npmi_reference == "full":
+        # NPMI doesn't have a predictive-overfitting concern (topic-word
+        # distributions are fixed post-fit). Using train ∪ holdout as the
+        # co-occurrence reference gives 5× more statistical evidence per
+        # pair, dramatically reducing rare-pair sparsity. See ADR 0017
+        # revisions (2026-05-12).
+        reference_df = bow_df.persist()
+    else:
+        _train, reference_df = split_bow_by_person(
+            bow_df, holdout_fraction=holdout_fraction, seed=seed
+        )
+        reference_df = reference_df.persist()
+    n_ref = reference_df.count()
+    log.info("npmi reference (%s): %d docs", npmi_reference, n_ref)
 
-    holdout_rdd = holdout_df.rdd.map(BOWDocument.from_spark_row)
+    reference_rdd = reference_df.rdd.map(BOWDocument.from_spark_row)
 
     report = compute_npmi_coherence(
-        topic_term, holdout_rdd, top_n=top_n, hdp_topic_mask=mask
+        topic_term, reference_rdd, top_n=top_n, hdp_topic_mask=mask,
+        min_pair_count=npmi_min_pair_count,
     )
 
-    holdout_df.unpersist()
+    reference_df.unpersist()
     return report
 
 
@@ -116,19 +127,35 @@ def _print_ranked_report(
     report: CoherenceReport,
     vocab: list[int],
     concept_names: dict[int, str] | None = None,
+    *,
+    npmi_reference: str = "full",
 ) -> None:
-    rows = sorted(
-        zip(report.topic_indices, report.per_topic_npmi, report.top_term_indices),
-        key=lambda r: -r[1],
-    )
-    print(f"\n  per-topic NPMI (n_holdout_docs={report.n_holdout_docs}, top_n={report.top_n}):")
-    print(f"  mean={report.mean:+.4f}  median={report.median:+.4f}  stdev={report.stdev:.4f}  "
-          f"min={report.min:+.4f}  max={report.max:+.4f}\n")
-    for topic_idx, npmi, term_idx in rows:
+    # Sort rated topics first (descending NPMI), then unrated topics
+    # at the bottom — NaN doesn't have a useful sort order. np.isnan
+    # check lets us partition cleanly.
+    rows = list(zip(
+        report.topic_indices,
+        report.per_topic_npmi,
+        report.per_topic_scored_pairs,
+        report.top_term_indices,
+    ))
+    rows.sort(key=lambda r: (np.isnan(r[1]), -r[1] if not np.isnan(r[1]) else 0.0))
+    total_pairs = report.per_topic_total_pairs
+    print(f"\n  per-topic NPMI (reference={npmi_reference}, "
+          f"reference_size={report.reference_size}, top_n={report.top_n}, "
+          f"min_pair_count={report.min_pair_count}, "
+          f"unrated={report.n_topics_unrated}/{len(report.per_topic_npmi)}):")
+    print(f"  mean={report.mean:+.4f}  median={report.median:+.4f}  "
+          f"stdev={report.stdev:.4f}  min={report.min:+.4f}  "
+          f"max={report.max:+.4f}\n")
+    for topic_idx, npmi, scored_pairs, term_idx in rows:
         terms = [vocab[i] if i < len(vocab) else f"#{i}" for i in term_idx]
         if concept_names:
             terms = [f"{t} ({concept_names.get(t, '?')})" for t in terms]
-        print(f"  topic {int(topic_idx):3d}  NPMI={npmi:+.4f}  top: {', '.join(map(str, terms[:8]))}")
+        cov_pct = int(round(100 * scored_pairs / total_pairs)) if total_pairs else 0
+        npmi_str = "  NaN   " if np.isnan(npmi) else f"{npmi:+.4f}"
+        print(f"  topic {int(topic_idx):3d}  NPMI={npmi_str}  "
+              f"cov={cov_pct:>3d}%  top: {', '.join(map(str, terms[:8]))}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -141,6 +168,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model-class", choices=["lda", "hdp"], required=True)
     parser.add_argument("--hdp-k", type=int, default=50,
                         help="Top-K HDP topics by E[beta] to score (ignored for LDA)")
+    parser.add_argument(
+        "--npmi-reference", choices=["holdout", "full"], default="full",
+        help=("Which docs serve as the co-occurrence reference for NPMI. "
+              "`full` (default) uses train ∪ holdout — 5× the data, "
+              "fewer rare-pair zeros; methodologically sound because "
+              "topic-word distributions are fixed post-fit (no "
+              "overfitting concern). `holdout` reproduces pre-2026-05-12 "
+              "behavior."),
+    )
+    parser.add_argument(
+        "--npmi-min-pair-count", type=int, default=3,
+        help=("Skip pairs with joint count below this threshold in the "
+              "reference corpus. Default 3 — pairs in {0, 1, 2} contribute "
+              "nothing to their topic mean (vs. the pre-2026-05-12 -1 "
+              "floor that biased rare-phenotype topics toward maximally "
+              "incoherent scores). Set to 1 to reproduce the historical "
+              "behavior (only skip true zeros)."),
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -154,16 +199,21 @@ def main(argv: list[str] | None = None) -> int:
             top_n=args.top_n,
             model_class=args.model_class,
             hdp_k=args.hdp_k,
+            npmi_reference=args.npmi_reference,
+            npmi_min_pair_count=args.npmi_min_pair_count,
             spark=spark,
         )
 
-        # Property checks (the spec calls for these to be assertion-style in the driver).
-        assert (report.per_topic_npmi >= -1.0).all(), "NPMI < -1 found"
-        assert (report.per_topic_npmi <= 1.0).all(), "NPMI > 1 found"
+        # Property checks (the spec calls for these to be assertion-style
+        # in the driver). NaN entries (unrated topics) bypass the bound
+        # check intentionally — they aren't NPMI values, they're sentinels.
+        rated = ~np.isnan(report.per_topic_npmi)
+        assert (report.per_topic_npmi[rated] >= -1.0).all(), "NPMI < -1 found"
+        assert (report.per_topic_npmi[rated] <= 1.0).all(), "NPMI > 1 found"
 
         result = load_result(args.checkpoint)
         vocab = result.metadata.get("vocab", [])
-        _print_ranked_report(report, vocab)
+        _print_ranked_report(report, vocab, npmi_reference=args.npmi_reference)
         return 0
     finally:
         spark.stop()

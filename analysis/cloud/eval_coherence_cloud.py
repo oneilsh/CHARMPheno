@@ -55,7 +55,8 @@ def _phase(name: str):
               flush=True)
 
 
-def _print_ranked_report(report, name_by_idx) -> None:
+def _print_ranked_report(report, name_by_idx, *,
+                         npmi_reference: str = "full") -> None:
     """Print per-topic NPMI ranked from best to worst.
 
     `name_by_idx[term_idx]` maps a vocab index to a "concept_id (name)"
@@ -63,21 +64,30 @@ def _print_ranked_report(report, name_by_idx) -> None:
     than a (vocab_list, concept_names) pair the local driver uses, because
     the cloud-side concept-name lookup is its own BQ query rather than a
     metadata sidecar.
+
+    Coverage (cov=NN%) is the fraction of top-N pairs that cleared the
+    min_pair_count threshold. Topics with cov=0% are shown last with
+    NPMI=NaN.
     """
-    rows = sorted(
-        zip(report.topic_indices, report.per_topic_npmi,
-            report.top_term_indices),
-        key=lambda r: -r[1],
-    )
-    print(f"\n  per-topic NPMI (n_holdout_docs={report.n_holdout_docs}, "
-          f"top_n={report.top_n}):")
+    rows = list(zip(
+        report.topic_indices, report.per_topic_npmi,
+        report.per_topic_scored_pairs, report.top_term_indices,
+    ))
+    rows.sort(key=lambda r: (np.isnan(r[1]), -r[1] if not np.isnan(r[1]) else 0.0))
+    total_pairs = report.per_topic_total_pairs
+    print(f"\n  per-topic NPMI (reference={npmi_reference}, "
+          f"reference_size={report.reference_size}, "
+          f"top_n={report.top_n}, min_pair_count={report.min_pair_count}, "
+          f"unrated={report.n_topics_unrated}/{len(report.per_topic_npmi)}):")
     print(f"  mean={report.mean:+.4f}  median={report.median:+.4f}  "
           f"stdev={report.stdev:.4f}  min={report.min:+.4f}  "
           f"max={report.max:+.4f}\n")
-    for topic_idx, npmi, term_idx in rows:
+    for topic_idx, npmi, scored_pairs, term_idx in rows:
         labels = [name_by_idx.get(int(i), f"#{int(i)}") for i in term_idx]
-        print(f"  topic {int(topic_idx):3d}  NPMI={npmi:+.4f}  "
-              f"top: {', '.join(labels[:8])}")
+        cov_pct = int(round(100 * scored_pairs / total_pairs)) if total_pairs else 0
+        npmi_str = "  NaN   " if np.isnan(npmi) else f"{npmi:+.4f}"
+        print(f"  topic {int(topic_idx):3d}  NPMI={npmi_str}  "
+              f"cov={cov_pct:>3d}%  top: {', '.join(labels[:8])}")
 
 
 class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
@@ -105,6 +115,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--hdp-k", type=int, default=50,
         help="Top-K HDP topics by E[beta_t] to score (ignored for LDA).",
+    )
+    parser.add_argument(
+        "--npmi-reference", choices=["holdout", "full"], default="full",
+        help=("Which docs serve as the co-occurrence reference for NPMI. "
+              "'full' (default) uses train ∪ holdout — 5× the data, "
+              "fewer rare-pair zeros; methodologically sound because "
+              "topic-word distributions are fixed post-fit (no "
+              "overfitting concern). 'holdout' reproduces pre-2026-05-12 "
+              "behavior."),
+    )
+    parser.add_argument(
+        "--npmi-min-pair-count", type=int, default=3,
+        help=("Skip pairs with joint count below this threshold in the "
+              "reference corpus. Default 3 — pairs in {0, 1, 2} contribute "
+              "nothing to their topic mean (vs. the pre-2026-05-12 -1 "
+              "floor that biased rare-phenotype topics toward maximally "
+              "incoherent scores). Set to 1 to reproduce the historical "
+              "behavior."),
     )
     args = parser.parse_args(argv)
 
@@ -234,17 +262,30 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"[driver]   vocab size: {len(vocab_map)}", flush=True)
 
-        with _phase(f"person-keyed split "
-                     f"(holdout_fraction={holdout_fraction}, "
-                     f"holdout_seed={holdout_seed})"):
-            _train_df, holdout_df = split_bow_by_person(
-                bow_df,
-                holdout_fraction=holdout_fraction,
-                seed=holdout_seed,
-            )
-            holdout_df = holdout_df.persist()
-            n_holdout = holdout_df.count()
-            print(f"[driver]   holdout: {n_holdout} docs", flush=True)
+        if args.npmi_reference == "full":
+            # NPMI doesn't have a predictive-overfitting concern (topic-
+            # word distributions are fixed post-fit). Using train ∪
+            # holdout as the co-occurrence reference gives 5× more
+            # statistical evidence per pair, dramatically reducing
+            # rare-pair sparsity. See ADR 0017 revisions (2026-05-12).
+            with _phase("npmi reference = full corpus"):
+                reference_df = bow_df.persist()
+                n_ref = reference_df.count()
+                print(f"[driver]   reference: {n_ref} docs (train + holdout)",
+                      flush=True)
+        else:
+            with _phase(f"npmi reference = holdout split "
+                         f"(holdout_fraction={holdout_fraction}, "
+                         f"holdout_seed={holdout_seed})"):
+                _train_df, reference_df = split_bow_by_person(
+                    bow_df,
+                    holdout_fraction=holdout_fraction,
+                    seed=holdout_seed,
+                )
+                reference_df = reference_df.persist()
+                n_ref = reference_df.count()
+                print(f"[driver]   reference: {n_ref} docs (holdout)",
+                      flush=True)
 
         with _phase("concept-name lookup"):
             name_rows = (
@@ -266,7 +307,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[driver]   resolved {len(name_by_id)} concept names",
                   flush=True)
 
-        with _phase(f"NPMI coherence (top_n={args.top_n})"):
+        with _phase(f"NPMI coherence (top_n={args.top_n}, "
+                     f"min_pair_count={args.npmi_min_pair_count})"):
             lambda_ = result.global_params["lambda"]
             topic_term = lambda_ / lambda_.sum(axis=1, keepdims=True)
             if args.model_class == "hdp":
@@ -278,19 +320,23 @@ def main(argv: list[str] | None = None) -> int:
                       flush=True)
             else:
                 mask = None
-            holdout_rdd = holdout_df.rdd.map(BOWDocument.from_spark_row)
+            reference_rdd = reference_df.rdd.map(BOWDocument.from_spark_row)
             report = compute_npmi_coherence(
-                topic_term, holdout_rdd, top_n=args.top_n,
+                topic_term, reference_rdd, top_n=args.top_n,
                 hdp_topic_mask=mask,
+                min_pair_count=args.npmi_min_pair_count,
             )
 
-        # Property checks — match the local driver's assertions.
-        assert (report.per_topic_npmi >= -1.0).all(), "NPMI < -1 found"
-        assert (report.per_topic_npmi <= 1.0).all(), "NPMI > 1 found"
+        # Property checks — NaN entries (unrated topics) bypass the
+        # bound check intentionally; they're sentinels, not NPMI values.
+        rated = ~np.isnan(report.per_topic_npmi)
+        assert (report.per_topic_npmi[rated] >= -1.0).all(), "NPMI < -1 found"
+        assert (report.per_topic_npmi[rated] <= 1.0).all(), "NPMI > 1 found"
 
-        _print_ranked_report(report, name_by_idx)
+        _print_ranked_report(report, name_by_idx,
+                             npmi_reference=args.npmi_reference)
 
-        holdout_df.unpersist()
+        reference_df.unpersist()
         omop.unpersist()
         print("[driver] EVAL COHERENCE CLOUD PASSED", flush=True)
         return 0

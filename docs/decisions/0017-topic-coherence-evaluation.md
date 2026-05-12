@@ -98,3 +98,58 @@ mask computed from the corpus-level (u, v); k defaults to 50.
 - `charmpheno.omop.split` is new but additive.
 - ADR 0016's `spark_vi.models.topic` namespace is now mirrored by
   `spark_vi.eval.topic`.
+
+## Revisions
+
+### 2026-05-12 — full-corpus reference + min-pair-count threshold
+
+Empirical observation on the patient-year condition-era corpus (see
+`docs/insights/0007-npmi-zero-pair-floor-penalizes-rare-phenotypes.md`):
+the original holdout-only reference + Roder zero-pair floor combined
+to bias the metric against real-but-rare phenotype topics. SLE +
+antiphospholipid + chemo-pancytopenia scored −0.53 not because the
+cluster was incoherent (it's a recognizable immunosuppression
+phenotype) but because most top-N pairs had zero joint counts in the
+20% holdout and were floored at −1 each. Same mechanism penalized
+sarcoidosis-adjacent and Factor VIII deficiency topics.
+
+Two changes adopted, both well-precedented in the topic-coherence
+literature:
+
+1. **Default reference corpus = full BOW (train ∪ holdout)** rather
+   than holdout-only. Methodologically sound: NPMI is a coherence
+   metric over a fixed (post-fit) topic-word distribution; there is
+   no predictive-overfitting concern that requires hold-out. Using
+   train ∪ holdout gives ~5× more documents per pair and dramatically
+   reduces how many genuine pairs round to zero. Holdout-only remains
+   available via `--npmi-reference holdout` for reproducing the prior
+   metric.
+
+2. **Min-pair-count threshold with coverage reporting** ("C_NPMI"
+   handling per Aletras & Stevenson 2013; Röder et al. 2015). Pairs
+   with joint count below `--npmi-min-pair-count` (default 3) are
+   *skipped*, not floored at −1. Each topic now reports both its mean
+   NPMI (over scored pairs only) and its coverage =
+   scored_pairs / total_pairs. A rare-phenotype topic now reads as
+   "NPMI=+0.4, cov=55%" instead of being dragged negative for
+   sparsity. A topic where every top-N pair falls below threshold
+   reports NPMI=NaN (unrated) and is excluded from summary
+   statistics.
+
+   The original Roder zero-pair convention (NPMI=−1 when p(w_i,w_j)=0)
+   still lives in `_npmi_pair`, but is unreachable in the default
+   path because pairs with count 0 fail the threshold first. Setting
+   `--npmi-min-pair-count 1` recovers the historical behavior for
+   missing pairs (skipped instead of floored — a deliberate
+   asymmetry; the −1 floor was always a workaround for an
+   undefined limit).
+
+These changes are CLI-level (no checkpoint format change) and the
+fit drivers are untouched. Old checkpoints evaluate fine; the
+historical metric is reproducible with explicit flags.
+
+References:
+- Aletras, N. & Stevenson, M. (2013). "Evaluating Topic Coherence
+  Using Distributional Semantics." IWCS.
+- Röder, M., Both, A. & Hinneburg, A. (2015). "Exploring the Space
+  of Topic Coherence Measures." WSDM.
