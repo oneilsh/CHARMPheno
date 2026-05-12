@@ -108,6 +108,23 @@ any open threads parked. Keep entries impersonal and project-scoped.
 new architectural call, check whether it refines, supersedes, or conflicts
 with an existing ADR, and record accordingly.
 
+## Insights log
+
+[`docs/insights/`](docs/insights/) records *learned things about the modeling
+regime or the data* — empirical observations from runs, failure modes,
+diagnostic interpretation, hypotheses that did or didn't survive contact with
+reality. Insights complement ADRs: ADRs are forward-looking *decisions*,
+insights are backward-looking *observations*.
+
+When a run surfaces a non-obvious modeling phenomenon, failure mode, or
+counterintuitive result, add an insight under `docs/insights/NNNN-<slug>.md`.
+Each insight should name the **setting context** that produced it — model,
+doc unit, key hyperparameters that differ from recent defaults — at a level
+like "trying with very large K values revealed X; other settings as in other
+recent patient-year runs." Detail level is to let a future reader judge
+whether the observation likely generalizes or was regime-specific. See
+[`docs/insights/README.md`](docs/insights/README.md) for the format.
+
 ## Testing expectations
 
 - Default `make test` runs unit tests only and must finish in under ~10s.
