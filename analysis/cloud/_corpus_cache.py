@@ -13,7 +13,7 @@ cached parquet instead of rebuilding.
 
 Cache layout (under {cache_uri}/{key}/):
     bow.parquet/    Spark-readable parquet of (person_id, doc_id, features)
-    vocab.parquet/  Spark-readable parquet of (concept_id, idx)
+    vocab.parquet/  Spark-readable parquet of (concept_id, idx, concept_name)
 
 Cache backends are anything Spark + Hadoop FS can read/write:
     hdfs:///user/...   session-only, fast, cleaned with the cluster
@@ -52,7 +52,7 @@ def compute_cache_key(
         "vocab_size": vocab_size,
         "min_df": float(min_df),
         "doc_spec": doc_spec_manifest,
-        "v": 1,
+        "v": 2,
     }
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
@@ -62,11 +62,13 @@ def try_load(
     spark: "SparkSession",
     cache_uri: str,
     key: str,
-) -> Optional[tuple["DataFrame", dict[int, int]]]:
-    """Look up the cache entry; return (bow_df, vocab_map) on hit, None on miss.
+) -> Optional[tuple["DataFrame", dict[int, int], dict[int, str]]]:
+    """Return (bow_df, vocab_map, name_by_id) on hit, None on miss.
 
     Any read failure (path doesn't exist, schema mismatch, permission issue)
     is treated as a miss — we'd rather rebuild than crash a long-running fit.
+    Schema-mismatched entries written under an older cache version are
+    invalidated by `compute_cache_key`'s version field rather than here.
     """
     base = f"{cache_uri.rstrip('/')}/{key}"
     try:
@@ -75,17 +77,19 @@ def try_load(
     except Exception:
         return None
     vocab_map = {int(r["concept_id"]): int(r["idx"]) for r in vocab_rows}
-    return bow_df, vocab_map
+    name_by_id = {int(r["concept_id"]): r["concept_name"] for r in vocab_rows}
+    return bow_df, vocab_map, name_by_id
 
 
 def save(
     spark: "SparkSession",
     bow_df: "DataFrame",
     vocab_map: dict[int, int],
+    name_by_id: dict[int, str],
     cache_uri: str,
     key: str,
 ) -> None:
-    """Persist (bow_df, vocab_map) under {cache_uri}/{key}/.
+    """Persist (bow_df, vocab_map, name_by_id) under {cache_uri}/{key}/.
 
     `overwrite` mode so a stale partial write (e.g. job killed mid-save)
     doesn't poison the cache; the next successful run replaces it.
@@ -93,7 +97,8 @@ def save(
     base = f"{cache_uri.rstrip('/')}/{key}"
     bow_df.write.mode("overwrite").parquet(f"{base}/bow.parquet")
     vocab_df = spark.createDataFrame(
-        [(int(cid), int(idx)) for cid, idx in vocab_map.items()],
-        schema="concept_id INT, idx INT",
+        [(int(cid), int(idx), name_by_id.get(int(cid), ""))
+         for cid, idx in vocab_map.items()],
+        schema="concept_id INT, idx INT, concept_name STRING",
     )
     vocab_df.write.mode("overwrite").parquet(f"{base}/vocab.parquet")

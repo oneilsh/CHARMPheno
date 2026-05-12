@@ -118,11 +118,16 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
 
 
 def _load_or_build_corpus(spark, args, doc_spec, cdr, billing):
-    """Return (bow_df, vocab_map) with optional cache-or-build short-circuit.
+    """Return (bow_df, vocab_map, name_by_id) with optional cache short-circuit.
 
     On a cache hit, skips BQ load + CountVectorizer fit entirely. On a miss
     (or when --corpus-cache-uri is unset), runs the original BQ+vectorize
-    pipeline and writes through to the cache for the next run.
+    pipeline, resolves concept names for the vocab, and writes through to
+    the cache for the next run.
+
+    Concept-name resolution lives here (not in main) so the cached entry
+    is self-sufficient — eval drivers and downstream printing don't need
+    a live omop DataFrame on the hit path.
     """
     from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
     from spark_vi.diagnostics.persist import assert_persisted
@@ -165,11 +170,25 @@ def _load_or_build_corpus(spark, args, doc_spec, cdr, billing):
             vocab_size=args.vocab_size, min_df=args.min_df,
         )
 
+    with _phase("concept-name lookup"):
+        # Vocabulary-only lookup; small enough for the driver. dropDuplicates
+        # because OMOP occasionally has multiple name variants per concept_id.
+        name_rows = (
+            omop.where(F.col("concept_id").isin(list(vocab_map.keys())))
+                .select("concept_id", "concept_name")
+                .dropDuplicates(["concept_id"])
+                .collect()
+        )
+        name_by_id = {int(r["concept_id"]): r["concept_name"] for r in name_rows}
+        print(f"[driver]   resolved {len(name_by_id)} concept names", flush=True)
+
+    omop.unpersist()
+
     if cache_uri:
         with _phase(f"corpus-cache write ({cache_uri}/{cache_key})"):
-            save(spark, bow_df, vocab_map, cache_uri, cache_key)
+            save(spark, bow_df, vocab_map, name_by_id, cache_uri, cache_key)
 
-    return bow_df, vocab_map
+    return bow_df, vocab_map, name_by_id
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -399,7 +418,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[driver] Spark {sc.version}, master={sc.master}, "
           f"defaultParallelism={sc.defaultParallelism}", flush=True)
 
-    bow_df, vocab_map = _load_or_build_corpus(spark, args, doc_spec, cdr, billing)
+    bow_df, vocab_map, name_by_id = _load_or_build_corpus(
+        spark, args, doc_spec, cdr, billing,
+    )
     bow_df = bow_df.persist()
     n_docs = bow_df.count()
     assert_persisted(bow_df, name="bow_df")
@@ -426,17 +447,6 @@ def main(argv: list[str] | None = None) -> int:
         fit_df = train_df
     else:
         fit_df = bow_df
-
-    with _phase("concept-name lookup"):
-        name_rows = (
-            omop.where(F.col("concept_id").isin(list(vocab_map.keys())))
-                .select("concept_id", "concept_name")
-                .dropDuplicates(["concept_id"])
-                .collect()
-        )
-        name_by_id = {int(r["concept_id"]): r["concept_name"] for r in name_rows}
-        print(f"[driver]   resolved {len(name_by_id)} concept names",
-              flush=True)
 
     with _phase(f"fit (T={args.T}, K={args.K}, maxIter={args.max_iter}, "
                  f"subsamplingRate={args.subsampling_rate}, "
@@ -550,7 +560,6 @@ def main(argv: list[str] | None = None) -> int:
               .select("person_hash", "topicDistribution")
               .show(3, truncate=False))
 
-    omop.unpersist()
     bow_df.unpersist()
     if apply_split:
         fit_df.unpersist()
