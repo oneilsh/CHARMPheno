@@ -57,6 +57,7 @@ and when is itself useful.
 
 (Append entries here as new insights are written, newest at top.)
 
+- [0016](0016-condition-era-vs-occurrence-not-comparable.md) — condition_era and condition_occurrence runs are not directly comparable (doc-units, npmi, diagnostics)
 - [0015](0015-crisp-topics-can-regress-when-k-undersized.md) — Crisp topics can regress in late iters when K is undersized (lda, diagnostics)
 - [0014](0014-patient-year-npmi-bimodal-vs-lifetime-unimodal.md) — Patient-year LDA NPMI is bimodal; patient-lifetime is unimodal (lda, doc-units, npmi)
 - [0013](0013-spark-scaling-driver-bottleneck.md) — Spark executor count past ~20 doesn't reduce iter time (ops, svi)

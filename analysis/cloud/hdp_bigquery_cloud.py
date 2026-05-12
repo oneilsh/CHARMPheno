@@ -117,6 +117,61 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
     """Show defaults automatically, and preserve the docstring's paragraph layout."""
 
 
+def _load_or_build_corpus(spark, args, doc_spec, cdr, billing):
+    """Return (bow_df, vocab_map) with optional cache-or-build short-circuit.
+
+    On a cache hit, skips BQ load + CountVectorizer fit entirely. On a miss
+    (or when --corpus-cache-uri is unset), runs the original BQ+vectorize
+    pipeline and writes through to the cache for the next run.
+    """
+    from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
+    from spark_vi.diagnostics.persist import assert_persisted
+    from _corpus_cache import compute_cache_key, save, try_load
+
+    cache_uri = args.corpus_cache_uri
+    cache_key = None
+    if cache_uri:
+        cache_key = compute_cache_key(
+            source_table=args.source_table,
+            person_mod=args.person_mod,
+            vocab_size=args.vocab_size,
+            min_df=args.min_df,
+            doc_spec_manifest=doc_spec.manifest(),
+        )
+        with _phase(f"corpus-cache lookup ({cache_uri}/{cache_key})"):
+            cached = try_load(spark, cache_uri, cache_key)
+        if cached is not None:
+            print(f"[driver]   corpus-cache HIT", flush=True)
+            return cached
+        print(f"[driver]   corpus-cache MISS, building...", flush=True)
+
+    with _phase("BQ load + summary"):
+        omop = load_omop_bigquery(
+            spark=spark, cdr_dataset=cdr, billing_project=billing,
+            person_sample_mod=args.person_mod, source_table=args.source_table,
+        ).persist()
+        summary = omop.agg(
+            F.count(F.lit(1)).alias("rows"),
+            F.countDistinct("person_id").alias("persons"),
+        ).collect()[0]
+        assert_persisted(omop, name="omop")
+        print(f"[driver]   OMOP: {summary['rows']} rows, "
+              f"{summary['persons']} distinct persons", flush=True)
+
+    with _phase(f"vectorize (CountVectorizer, doc_spec={doc_spec.name}, "
+                f"min_doc_length={doc_spec.min_doc_length})"):
+        bow_df, vocab_map = to_bow_dataframe(
+            omop, doc_spec=doc_spec,
+            vocab_size=args.vocab_size, min_df=args.min_df,
+        )
+
+    if cache_uri:
+        with _phase(f"corpus-cache write ({cache_uri}/{cache_key})"):
+            save(spark, bow_df, vocab_map, cache_uri, cache_key)
+
+    return bow_df, vocab_map
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=_HelpFormatter)
@@ -280,6 +335,16 @@ def main(argv: list[str] | None = None) -> int:
         default="condition_occurrence",
         help="Which OMOP fact table to read.",
     )
+    parser.add_argument(
+        "--corpus-cache-uri", type=str, default=None,
+        help=("Optional cache root for the (BQ load + BOW build) prep step. "
+              "When set, the prep result is keyed by a hash of "
+              "(source_table, person_mod, vocab_size, min_df, doc_spec) and "
+              "loaded from {uri}/{key}/ on a hit, built+saved on a miss. "
+              "Typical values: hdfs:///user/dataproc/charm/corpus_cache "
+              "(session-only, fast); gs://<bucket>/charm/corpus_cache "
+              "(persistent). Omit to disable caching."),
+    )
     args = parser.parse_args(argv)
 
     holdout_seed = (
@@ -334,34 +399,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[driver] Spark {sc.version}, master={sc.master}, "
           f"defaultParallelism={sc.defaultParallelism}", flush=True)
 
-    with _phase("BQ load + summary"):
-        omop = load_omop_bigquery(
-            spark=spark,
-            cdr_dataset=cdr,
-            billing_project=billing,
-            person_sample_mod=args.person_mod,
-            source_table=args.source_table,
-        ).persist()
-        summary = omop.agg(
-            F.count(F.lit(1)).alias("rows"),
-            F.countDistinct("person_id").alias("persons"),
-        ).collect()[0]
-        assert_persisted(omop, name="omop")
-        print(f"[driver]   OMOP: {summary['rows']} rows, "
-              f"{summary['persons']} distinct persons", flush=True)
-
-    with _phase(f"vectorize (CountVectorizer, doc_spec={doc_spec.name}, "
-                 f"min_doc_length={doc_spec.min_doc_length})"):
-        bow_df, vocab_map = to_bow_dataframe(
-            omop, doc_spec=doc_spec,
-            vocab_size=args.vocab_size, min_df=args.min_df,
-        )
-        bow_df = bow_df.persist()
-        n_docs = bow_df.count()
-        assert_persisted(bow_df, name="bow_df")
-        idx_to_cid = {idx: cid for cid, idx in vocab_map.items()}
-        print(f"[driver]   vocab size: {len(vocab_map)} (cap {args.vocab_size}, "
-              f"minDF {args.min_df}), documents: {n_docs}", flush=True)
+    bow_df, vocab_map = _load_or_build_corpus(spark, args, doc_spec, cdr, billing)
+    bow_df = bow_df.persist()
+    n_docs = bow_df.count()
+    assert_persisted(bow_df, name="bow_df")
+    idx_to_cid = {idx: cid for cid, idx in vocab_map.items()}
+    print(f"[driver]   vocab size: {len(vocab_map)} (cap {args.vocab_size}, "
+          f"minDF {args.min_df}), documents: {n_docs}", flush=True)
 
     if apply_split:
         with _phase(f"person-keyed split "

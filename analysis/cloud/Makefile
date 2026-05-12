@@ -35,6 +35,13 @@ SAVE_DIR        ?=
 SAVE_INTERVAL   ?= -1
 RESUME_FROM     ?=
 
+# Optional HDFS/GCS cache for the (BQ load + BOW build) prep phase. Keyed by
+# (source_table, person_mod, vocab_size, min_df, doc_spec); a matching prior
+# run reloads in seconds instead of re-extracting from BQ + re-fitting
+# CountVectorizer. HDFS default = session-only (lost when cluster shuts down);
+# set CORPUS_CACHE_URI= (empty) to disable. Use gs://... for persistence.
+CORPUS_CACHE_URI ?= hdfs:///user/dataproc/charm/corpus_cache
+
 # Optional manual override for the CDR (passed through to setup_workspace.py).
 # Use when `wb resource list` doesn't surface the CDR (external read-only
 # data project, common case for AoU). Persists in .workspace_env afterwards.
@@ -156,6 +163,7 @@ lda-bq-smoke: zip $(WORKSPACE_ENV)
 	    --save-dir "$(SAVE_DIR)" \
 	    --save-interval $(SAVE_INTERVAL) \
 	    --resume-from "$(RESUME_FROM)" \
+	    --corpus-cache-uri "$(CORPUS_CACHE_URI)" \
 	    $(LDA_BQ_ARGS)
 
 hdp-bq-smoke: zip $(WORKSPACE_ENV)
@@ -173,6 +181,7 @@ hdp-bq-smoke: zip $(WORKSPACE_ENV)
 	    --save-dir "$(SAVE_DIR)" \
 	    --save-interval $(SAVE_INTERVAL) \
 	    --resume-from "$(RESUME_FROM)" \
+	    --corpus-cache-uri "$(CORPUS_CACHE_URI)" \
 	    $(HDP_BQ_ARGS)
 
 eval-bq-coherence: zip $(WORKSPACE_ENV)
@@ -275,7 +284,7 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    --K 10 \
 		--T 80 \
 		--gamma 50 \
-		--subsampling-rate 0.1 \
+		--subsampling-rate 0.2 \
 		--max-iter 20 \
 		--person-mod 10 \
 		--vocab-size 10000 \
