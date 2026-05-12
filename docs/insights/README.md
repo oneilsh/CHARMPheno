@@ -57,6 +57,7 @@ and when is itself useful.
 
 (Append entries here as new insights are written, newest at top.)
 
+- [0019](0019-lda-large-k-with-full-convergence-gracefully-unused-slots.md) — LDA at large K with full convergence gracefully under-uses excess capacity, no micro-cluster artifacts (lda, doc-units, diagnostics, hdp)
 - [0018](0018-full-corpus-plus-threshold-yields-unimodal-positive-npmi.md) — Full-corpus reference + min-pair-count threshold yields unimodal positive NPMI distribution (npmi, diagnostics, hdp)
 - [0017](0017-hdp-gamma-sensitivity-is-prior-dominance.md) — HDP γ-sensitivity reveals prior-dominated outcomes (hdp, diagnostics)
 - [0016](0016-condition-era-vs-occurrence-not-comparable.md) — condition_era and condition_occurrence runs are not directly comparable (doc-units, npmi, diagnostics)

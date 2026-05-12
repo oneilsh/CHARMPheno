@@ -55,39 +55,9 @@ def _phase(name: str):
               flush=True)
 
 
-def _print_ranked_report(report, name_by_idx, *,
-                         npmi_reference: str = "full") -> None:
-    """Print per-topic NPMI ranked from best to worst.
-
-    `name_by_idx[term_idx]` maps a vocab index to a "concept_id (name)"
-    label. We accept a dict (or list) keyed by integer vocab index rather
-    than a (vocab_list, concept_names) pair the local driver uses, because
-    the cloud-side concept-name lookup is its own BQ query rather than a
-    metadata sidecar.
-
-    Coverage (cov=NN%) is the fraction of top-N pairs that cleared the
-    min_pair_count threshold. Topics with cov=0% are shown last with
-    NPMI=NaN.
-    """
-    rows = list(zip(
-        report.topic_indices, report.per_topic_npmi,
-        report.per_topic_scored_pairs, report.top_term_indices,
-    ))
-    rows.sort(key=lambda r: (np.isnan(r[1]), -r[1] if not np.isnan(r[1]) else 0.0))
-    total_pairs = report.per_topic_total_pairs
-    print(f"\n  per-topic NPMI (reference={npmi_reference}, "
-          f"reference_size={report.reference_size}, "
-          f"top_n={report.top_n}, min_pair_count={report.min_pair_count}, "
-          f"unrated={report.n_topics_unrated}/{len(report.per_topic_npmi)}):")
-    print(f"  mean={report.mean:+.4f}  median={report.median:+.4f}  "
-          f"stdev={report.stdev:.4f}  min={report.min:+.4f}  "
-          f"max={report.max:+.4f}\n")
-    for topic_idx, npmi, scored_pairs, term_idx in rows:
-        labels = [name_by_idx.get(int(i), f"#{int(i)}") for i in term_idx]
-        cov_pct = int(round(100 * scored_pairs / total_pairs)) if total_pairs else 0
-        npmi_str = "  NaN   " if np.isnan(npmi) else f"{npmi:+.4f}"
-        print(f"  topic {int(topic_idx):3d}  NPMI={npmi_str}  "
-              f"cov={cov_pct:>3d}%  top: {', '.join(labels[:8])}")
+# Ranked-report printing lives in analysis._eval_common.print_ranked_report —
+# imported lazily inside main() so the spark-submit path-munging there
+# (adding the repo root to sys.path) runs first.
 
 
 class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
@@ -134,6 +104,11 @@ def main(argv: list[str] | None = None) -> int:
               "incoherent scores). Set to 1 to reproduce the historical "
               "behavior."),
     )
+    parser.add_argument(
+        "--color", choices=["auto", "always", "never"], default="auto",
+        help=("ANSI dimming of unused (NaN-NPMI) topics in the per-topic "
+              "printout. 'auto' enables when stdout is a TTY."),
+    )
     args = parser.parse_args(argv)
 
     cdr_env = os.environ.get("WORKSPACE_CDR")
@@ -161,7 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[2]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
-    from analysis._eval_common import verify_split_contract  # noqa: E402
+    from analysis._eval_common import (  # noqa: E402
+        print_ranked_report,
+        verify_split_contract,
+    )
 
     _configure_logging()
 
@@ -333,8 +311,16 @@ def main(argv: list[str] | None = None) -> int:
         assert (report.per_topic_npmi[rated] >= -1.0).all(), "NPMI < -1 found"
         assert (report.per_topic_npmi[rated] <= 1.0).all(), "NPMI > 1 found"
 
-        _print_ranked_report(report, name_by_idx,
-                             npmi_reference=args.npmi_reference)
+        alpha_param = (
+            result.global_params.get("alpha")
+            if args.model_class == "lda" else None
+        )
+        print_ranked_report(
+            report, name_by_idx, lambda_,
+            alpha=alpha_param,
+            npmi_reference=args.npmi_reference,
+            color=args.color,
+        )
 
         reference_df.unpersist()
         omop.unpersist()

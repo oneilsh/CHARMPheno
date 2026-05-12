@@ -33,7 +33,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from analysis._eval_common import verify_split_contract  # noqa: E402
+from analysis._eval_common import (  # noqa: E402
+    print_ranked_report,
+    verify_split_contract,
+)
 from charmpheno.omop import DocSpec, load_omop_parquet, to_bow_dataframe
 from charmpheno.omop.split import split_bow_by_person
 from spark_vi.core.types import BOWDocument
@@ -123,39 +126,24 @@ def run_eval(
     return report
 
 
-def _print_ranked_report(
-    report: CoherenceReport,
+def _build_name_by_idx(
     vocab: list[int],
     concept_names: dict[int, str] | None = None,
-    *,
-    npmi_reference: str = "full",
-) -> None:
-    # Sort rated topics first (descending NPMI), then unrated topics
-    # at the bottom — NaN doesn't have a useful sort order. np.isnan
-    # check lets us partition cleanly.
-    rows = list(zip(
-        report.topic_indices,
-        report.per_topic_npmi,
-        report.per_topic_scored_pairs,
-        report.top_term_indices,
-    ))
-    rows.sort(key=lambda r: (np.isnan(r[1]), -r[1] if not np.isnan(r[1]) else 0.0))
-    total_pairs = report.per_topic_total_pairs
-    print(f"\n  per-topic NPMI (reference={npmi_reference}, "
-          f"reference_size={report.reference_size}, top_n={report.top_n}, "
-          f"min_pair_count={report.min_pair_count}, "
-          f"unrated={report.n_topics_unrated}/{len(report.per_topic_npmi)}):")
-    print(f"  mean={report.mean:+.4f}  median={report.median:+.4f}  "
-          f"stdev={report.stdev:.4f}  min={report.min:+.4f}  "
-          f"max={report.max:+.4f}\n")
-    for topic_idx, npmi, scored_pairs, term_idx in rows:
-        terms = [vocab[i] if i < len(vocab) else f"#{i}" for i in term_idx]
-        if concept_names:
-            terms = [f"{t} ({concept_names.get(t, '?')})" for t in terms]
-        cov_pct = int(round(100 * scored_pairs / total_pairs)) if total_pairs else 0
-        npmi_str = "  NaN   " if np.isnan(npmi) else f"{npmi:+.4f}"
-        print(f"  topic {int(topic_idx):3d}  NPMI={npmi_str}  "
-              f"cov={cov_pct:>3d}%  top: {', '.join(map(str, terms[:8]))}")
+) -> dict[int, str]:
+    """Adapter from (vocab list, optional concept_names) -> idx -> label.
+
+    The local checkpoint exposes vocab as a positional list of concept_ids
+    (vocab[idx] = cid); the shared printer wants a dict keyed by vocab idx.
+    When `concept_names` is provided we append the name in parentheses,
+    matching the pre-refactor format.
+    """
+    out: dict[int, str] = {}
+    for idx, cid in enumerate(vocab):
+        if concept_names and cid in concept_names:
+            out[idx] = f"{cid} ({concept_names[cid]})"
+        else:
+            out[idx] = str(cid)
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -186,6 +174,11 @@ def main(argv: list[str] | None = None) -> int:
               "incoherent scores). Set to 1 to reproduce the historical "
               "behavior (only skip true zeros)."),
     )
+    parser.add_argument(
+        "--color", choices=["auto", "always", "never"], default="auto",
+        help=("ANSI dimming of unused (NaN-NPMI) topics in the per-topic "
+              "printout. 'auto' enables when stdout is a TTY."),
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -213,7 +206,20 @@ def main(argv: list[str] | None = None) -> int:
 
         result = load_result(args.checkpoint)
         vocab = result.metadata.get("vocab", [])
-        _print_ranked_report(report, vocab, npmi_reference=args.npmi_reference)
+        concept_names = result.metadata.get("concept_names")
+        lambda_ = result.global_params["lambda"]
+        alpha = (
+            result.global_params.get("alpha")
+            if args.model_class == "lda" else None
+        )
+        print_ranked_report(
+            report,
+            _build_name_by_idx(vocab, concept_names),
+            lambda_,
+            alpha=alpha,
+            npmi_reference=args.npmi_reference,
+            color=args.color,
+        )
         return 0
     finally:
         spark.stop()
