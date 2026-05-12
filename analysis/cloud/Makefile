@@ -147,6 +147,8 @@ lda-bq-smoke: zip $(WORKSPACE_ENV)
 	    --master yarn \
 	    --deploy-mode client \
 	    --driver-memory 4g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
@@ -162,6 +164,8 @@ hdp-bq-smoke: zip $(WORKSPACE_ENV)
 	    --master yarn \
 	    --deploy-mode client \
 	    --driver-memory 4g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
@@ -178,6 +182,8 @@ eval-bq-coherence: zip $(WORKSPACE_ENV)
 	    --master yarn \
 	    --deploy-mode client \
 	    --driver-memory 4g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
@@ -260,8 +266,6 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	  RESUME_FROM="$$RESUME_" \
 	  SAVE_INTERVAL=$(SAVE_INTERVAL) \
 	  HDP_BQ_ARGS="$(HDP_BQ_ARGS) \
-        --conf spark.executor.cores=4 \
-        --conf spark.executor.memory=6g \
 		--source-table condition_era \
         --doc-unit patient_year \
 		--doc-min-length 30 \
