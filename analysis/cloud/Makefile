@@ -226,6 +226,8 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	  SAVE_DIR=$$RUN_SAVE_DIR \
 	  SAVE_INTERVAL=$(SAVE_INTERVAL) \
 	  HDP_BQ_ARGS="$(HDP_BQ_ARGS) \
+        --conf spark.executor.cores=4 \
+        --conf spark.executor.memory=6g \
 	    --K 25 \
 		--T 150 \
 		--gamma 50 \
