@@ -110,25 +110,30 @@ def print_ranked_report(
         f"max={report.max:+.4f}\n"
     )
 
+    # Two-char leading marker so the unused tail is visible even without
+    # color support (some terminals strip or invert dim). '·' = unrated
+    # (cov=0%, NPMI NaN); ' ' = scored.
     for i in order:
         topic_idx = int(topic_indices[i])
         npmi_v = float(npmi_arr[i])
         scored_pairs = int(scored[i])
         labels = [name_by_idx.get(int(t), f"#{int(t)}") for t in top_terms[i]]
         cov_pct = int(round(100 * scored_pairs / total_pairs)) if total_pairs else 0
-        npmi_str = "  NaN  " if np.isnan(npmi_v) else f"{npmi_v:+.4f}"
+        is_unused = np.isnan(npmi_v)
+        marker = "·" if is_unused else " "
+        npmi_str = "  NaN  " if is_unused else f"{npmi_v:+.4f}"
         alpha_str = (
             f"  α={float(alpha_per_topic[i]):.3g}"
             if alpha_per_topic is not None else ""
         )
         line = (
-            f"  topic {topic_idx:3d}  "
+            f" {marker} topic {topic_idx:3d}  "
             f"NPMI={npmi_str}  cov={cov_pct:>3d}%  "
             f"E[β]={float(E_beta[i]):.4f}  Σλ={float(lam_row_sums[i]):.3g}  "
             f"peak={float(peak[i]):.3f}{alpha_str}  "
             f"top: {', '.join(labels[:8])}"
         )
-        if np.isnan(npmi_v):
+        if is_unused:
             line = f"{DIM}{line}{RESET}"
         print(line)
 
