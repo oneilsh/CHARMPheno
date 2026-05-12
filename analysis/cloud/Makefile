@@ -200,7 +200,20 @@ lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	RUN_SAVE_DIR=$(RUNS_DIR)/$$RUN_ID && \
 	echo "[fit-eval] RUN_ID=$$RUN_ID" && \
 	echo "[fit-eval] SAVE_DIR=$$RUN_SAVE_DIR" && \
-	$(MAKE) lda-bq-smoke SAVE_DIR=$$RUN_SAVE_DIR SAVE_INTERVAL=$(SAVE_INTERVAL) LDA_BQ_ARGS="$(LDA_BQ_ARGS)" && \
+	$(MAKE) lda-bq-smoke SAVE_DIR=$$RUN_SAVE_DIR \
+	  SAVE_INTERVAL=$(SAVE_INTERVAL) \
+	  LDA_BQ_ARGS="$(HDP_BQ_ARGS) \
+	    --K 50 \
+		--subsampling-rate 0.1 \
+		--max-iter 20 \
+		--person-mod 10 \
+		--vocab-size 10000 \
+		--min-df 10 \
+		--holdout-fraction 0.2 \
+		--holdout-seed 42 \
+		--tau0 64 \
+		--kappa 0.7 \
+		--print-topics-every 1" && \
 	$(MAKE) eval-bq-coherence CHECKPOINT=$$RUN_SAVE_DIR EVAL_ARGS="$(EVAL_ARGS)"
 
 hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
@@ -214,6 +227,8 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	  SAVE_INTERVAL=$(SAVE_INTERVAL) \
 	  HDP_BQ_ARGS="$(HDP_BQ_ARGS) \
 	    --K 25 \
+		--T 150 \
+		--subsampling-rate 0.1 \
 		--max-iter 20 \
 		--person-mod 10 \
 		--vocab-size 10000 \
