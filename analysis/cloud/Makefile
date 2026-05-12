@@ -316,8 +316,7 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    --doc-min-length 20 \
 	    --K 10 \
 	    --T 80 \
-		--no-optimize-corpus-concentration \
-	    --gamma 25 \
+	    --gamma 5 \
 	    --subsampling-rate 0.2 \
 	    --max-iter 20 \
 	    --person-mod 10 \
@@ -342,6 +341,9 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    --checkpoint "$$RUN_SAVE_DIR" \
 	    --model-class hdp \
 	    $(EVAL_ARGS)
+
+#		--no-optimize-corpus-concentration \
+
 
 inspect:
 	python $(INSPECT_SCRIPT) $(INSPECT_ARGS)
