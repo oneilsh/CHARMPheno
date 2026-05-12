@@ -15,7 +15,8 @@ help:
 	@echo "  build            - Build wheels + sdists for both packages"
 	@echo "  zip              - Build flat zips for both packages"
 	@echo "  clean            - Remove dist/, build/, egg-info, pytest caches"
-	@echo "  precommit-install - Install the pre-commit hooks into .git/hooks/"
+	@echo "  precommit-install - Install pre-commit hooks AND the nbstripout"
+	@echo "                      git clean filter for .ipynb (one-time per clone)"
 	@echo "  lint             - Run pre-commit against all tracked files"
 
 install:
@@ -73,6 +74,13 @@ clean:
 
 precommit-install:
 	poetry run pre-commit install
+	# Wire nbstripout as a git clean filter so .ipynb outputs are stripped
+	# at `git add` time, not after the fact at commit time. Without this,
+	# the pre-commit nbstripout hook still works but rejects the first
+	# commit, requiring a second add+commit. The .gitattributes file
+	# (committed) declares the filter; this step adds the local
+	# .git/config entry that maps it to a runnable command.
+	poetry run nbstripout --install
 
 lint:
 	poetry run pre-commit run --all-files

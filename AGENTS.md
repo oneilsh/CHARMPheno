@@ -96,7 +96,9 @@ any open threads parked. Keep entries impersonal and project-scoped.
   `tests/*/data/` and is capped at ~50 rows per file.
 - `.pre-commit-config.yaml` enforces: nbstripout, max-file-size (1 MB),
   no `.parquet` / `.csv` / `.feather` / `.arrow` / `.npz` files outside
-  `tests/*/data/` or `docs/`.
+  `tests/*/data/` or `docs/`. Run `make precommit-install` once per clone
+  to install the hooks and the nbstripout git clean filter (so notebook
+  outputs strip at `git add` time, not at commit time).
 - Work with clinical data only in its approved environment; do not check
   patient-level data into the working tree under any circumstances.
 

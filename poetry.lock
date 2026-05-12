@@ -1232,6 +1232,22 @@ docs = ["myst-parser", "pydata-sphinx-theme", "sphinx", "sphinxcontrib-github-al
 test = ["pep440", "pre-commit", "pytest", "testpath"]
 
 [[package]]
+name = "nbstripout"
+version = "0.9.1"
+description = "Strips outputs from Jupyter and IPython notebooks"
+optional = false
+python-versions = ">=3.10"
+groups = ["dev"]
+markers = "python_version <= \"3.11\" or python_version >= \"3.12\""
+files = [
+    {file = "nbstripout-0.9.1-py3-none-any.whl", hash = "sha256:ca027ee45742ee77e4f8e9080254f9a707f1161ba11367b82fdf4a29892c759e"},
+    {file = "nbstripout-0.9.1.tar.gz", hash = "sha256:313bbb4217c8e38998567e5d790b6bd6c3a17a8c39073b205b84dadfc5d756dc"},
+]
+
+[package.dependencies]
+nbformat = "*"
+
+[[package]]
 name = "nodeenv"
 version = "1.10.0"
 description = "Node.js virtual environment builder"
@@ -2536,4 +2552,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "d654926873013450aaacf82db7edf7be60682d5ac93761f73924a9ce63f206bf"
+content-hash = "a4bf7cf5b655f529d84c576da535a01eb328c622b8b86c386a43c0db14ad40c4"
