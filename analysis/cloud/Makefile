@@ -228,6 +228,7 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	  HDP_BQ_ARGS="$(HDP_BQ_ARGS) \
 	    --K 25 \
 		--T 150 \
+		--gamma 50 \
 		--subsampling-rate 0.1 \
 		--max-iter 20 \
 		--person-mod 10 \
