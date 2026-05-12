@@ -81,9 +81,12 @@ help:
 	@echo "                         to find a held-out partition."
 	@echo "                         LDA_BQ_ARGS='--K 50 --max-iter 200 --holdout-fraction 0.1 --holdout-seed 42 ...'"
 	@echo "                         EVAL_ARGS='--top-n 20'  SAVE_INTERVAL=10"
+	@echo "                         To RESUME a prior run with more iterations:"
+	@echo "                           make lda-bq-fit-eval RUN_ID=<existing-id> LDA_BQ_ARGS='--max-iter <new total>'"
 	@echo "  make hdp-bq-fit-eval - End-to-end HDP fit + eval; same shape as lda-bq-fit-eval."
 	@echo "                         HDP_BQ_ARGS='--T 150 --K 15 --holdout-fraction 0.1 --holdout-seed 42 ...'"
 	@echo "                         EVAL_ARGS='--model-class hdp --hdp-k 50'"
+	@echo "                         RESUME: make hdp-bq-fit-eval RUN_ID=<existing-id> HDP_BQ_ARGS='--max-iter <new total>'"
 	@echo "  make inspect         - Live polling dashboard (run in a sibling terminal)"
 	@echo "                         Override args via INSPECT_ARGS='--interval 3'"
 	@echo "  make smoke-dataproc  - alternate: stage to GCS, gcloud dataproc jobs submit pyspark"
@@ -182,11 +185,18 @@ eval-bq-coherence: zip $(WORKSPACE_ENV)
 	    --checkpoint "$(CHECKPOINT)" \
 	    $(EVAL_ARGS)
 
-# Combined fit + eval. Generates a fresh timestamped SAVE_DIR under
-# $(REPO_ROOT)/data/runs/, runs the model-specific fit (overriding SAVE_DIR),
-# then runs eval against that exact SAVE_DIR. LDA_BQ_ARGS / HDP_BQ_ARGS must
-# include --holdout-fraction > 0 for eval to find a held-out partition;
-# otherwise the eval driver aborts with a missing-split error.
+# Combined fit + eval. Auto-generates a fresh timestamped SAVE_DIR under
+# $(REPO_ROOT)/data/runs/, runs the model-specific fit, then runs eval
+# against that exact SAVE_DIR. LDA_BQ_ARGS / HDP_BQ_ARGS must include
+# --holdout-fraction > 0 for eval to find a held-out partition; otherwise
+# the eval driver aborts with a missing-split error.
+#
+# Resume: pass RUN_ID=<existing-run-id> to continue a prior run with more
+# iterations. If the dir exists, RESUME_FROM is auto-set and fit continues
+# from the saved iteration count. Bump --max-iter in *_BQ_ARGS to the new
+# total target. Hyperparameters affecting the BOW (vocab-size, min-df,
+# person-mod, source-table, doc-unit, doc-min-length) MUST match the
+# original run — they're not yet auto-validated.
 #
 # data/runs/ is the project's repo-local artifact dir (gitignored). It's a
 # Dataproc-master path, not a GCS-FUSE mount — artifacts don't survive a
@@ -194,13 +204,27 @@ eval-bq-coherence: zip $(WORKSPACE_ENV)
 # SAVE_DIR explicitly to a /mnt/gcs/<bucket>/... path.
 RUNS_DIR := $(REPO_ROOT)/data/runs
 
+# RUN_ID is the artifact directory name under $(RUNS_DIR). Empty (default)
+# means auto-generate <model>_<timestamp>. Override to resume a prior run.
+RUN_ID          ?=
+
 lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	@mkdir -p $(RUNS_DIR) && \
-	RUN_ID=lda_$$(date +%Y%m%d_%H%M%S) && \
-	RUN_SAVE_DIR=$(RUNS_DIR)/$$RUN_ID && \
-	echo "[fit-eval] RUN_ID=$$RUN_ID" && \
-	echo "[fit-eval] SAVE_DIR=$$RUN_SAVE_DIR" && \
+	if [ -n "$(RUN_ID)" ]; then \
+	  RUN_ID_=$(RUN_ID); \
+	else \
+	  RUN_ID_=lda_$$(date +%Y%m%d_%H%M%S); \
+	fi; \
+	RUN_SAVE_DIR=$(RUNS_DIR)/$$RUN_ID_; \
+	if [ -d "$$RUN_SAVE_DIR" ]; then \
+	  echo "[fit-eval] RESUMING: RUN_ID=$$RUN_ID_  SAVE_DIR=$$RUN_SAVE_DIR"; \
+	  RESUME_=$$RUN_SAVE_DIR; \
+	else \
+	  echo "[fit-eval] FRESH:    RUN_ID=$$RUN_ID_  SAVE_DIR=$$RUN_SAVE_DIR"; \
+	  RESUME_=""; \
+	fi; \
 	$(MAKE) lda-bq-smoke SAVE_DIR=$$RUN_SAVE_DIR \
+	  RESUME_FROM="$$RESUME_" \
 	  SAVE_INTERVAL=$(SAVE_INTERVAL) \
 	  LDA_BQ_ARGS="$(HDP_BQ_ARGS) \
 	    --K 50 \
@@ -218,12 +242,22 @@ lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 
 hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	@mkdir -p $(RUNS_DIR) && \
-	RUN_ID=hdp_$$(date +%Y%m%d_%H%M%S) && \
-	RUN_SAVE_DIR=$(RUNS_DIR)/$$RUN_ID && \
-	echo "[fit-eval] RUN_ID=$$RUN_ID" && \
-	echo "[fit-eval] SAVE_DIR=$$RUN_SAVE_DIR" && \
+	if [ -n "$(RUN_ID)" ]; then \
+	  RUN_ID_=$(RUN_ID); \
+	else \
+	  RUN_ID_=hdp_$$(date +%Y%m%d_%H%M%S); \
+	fi; \
+	RUN_SAVE_DIR=$(RUNS_DIR)/$$RUN_ID_; \
+	if [ -d "$$RUN_SAVE_DIR" ]; then \
+	  echo "[fit-eval] RESUMING: RUN_ID=$$RUN_ID_  SAVE_DIR=$$RUN_SAVE_DIR"; \
+	  RESUME_=$$RUN_SAVE_DIR; \
+	else \
+	  echo "[fit-eval] FRESH:    RUN_ID=$$RUN_ID_  SAVE_DIR=$$RUN_SAVE_DIR"; \
+	  RESUME_=""; \
+	fi; \
 	$(MAKE) hdp-bq-smoke \
 	  SAVE_DIR=$$RUN_SAVE_DIR \
+	  RESUME_FROM="$$RESUME_" \
 	  SAVE_INTERVAL=$(SAVE_INTERVAL) \
 	  HDP_BQ_ARGS="$(HDP_BQ_ARGS) \
         --conf spark.executor.cores=4 \
