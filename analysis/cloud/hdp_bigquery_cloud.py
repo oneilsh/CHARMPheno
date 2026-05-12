@@ -243,11 +243,14 @@ def main(argv: list[str] | None = None) -> int:
               "every N iterations. 0 disables."),
     )
     parser.add_argument(
-        "--active-mass-threshold", type=float, default=0.95,
+        "--active-mass-threshold", type=float, default=0.99,
         help=("cumulative-mass threshold for the 'active' filter — count and "
               "show the smallest set of topics whose top-ranked E[β_t] sum "
-              "to ≥ this value. Default 0.95 (PCA's explained-variance "
-              "analog). Used by mid-fit snapshots and the post-fit summary."),
+              "to ≥ this value. Default 0.99 exposes the long tail in the "
+              "mid-fit topic-evolution snapshots; bump to 0.999 for even "
+              "more, or drop to 0.95 (PCA's explained-variance analog) for "
+              "just the dominant set. Used by mid-fit snapshots and the "
+              "post-fit summary."),
     )
     parser.add_argument(
         "--holdout-fraction", type=float, default=0.0,

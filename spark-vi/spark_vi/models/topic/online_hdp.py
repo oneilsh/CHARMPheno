@@ -740,17 +740,21 @@ class OnlineHDP(VIModel):
     def iteration_summary(
         self,
         global_params: dict[str, np.ndarray],
-        *,
-        mass_threshold: float = 0.95,
     ) -> str:
         """Short live-training diagnostic.
 
         Reports:
-          - Effective active-topic count: smallest k such that the top-k
-            E[β_t] sum to ≥ mass_threshold. Default 0.95 → "topics
-            covering 95% of corpus prior probability." Truncation-
-            independent (any T ≥ effective count gives the same number).
-          - Top-3 corpus stick weights, descending.
+          - Active-topic counts at three mass thresholds (0.5 / 0.9 / 0.99)
+            — smallest k such that the top-k E[β_t] sum to ≥ threshold.
+            Three thresholds rather than one because the head (0.5) tends
+            to be a handful of dominant topics while the tail (0.99)
+            reveals how much of the corpus prior is spread over the
+            longer tail. Truncation-independent for any T past the count.
+          - Perplexity-effective topic count exp(H(E[β])) — a continuous
+            "effective N" that's not pinned to a single threshold. Equal
+            to the number of topics when E[β] is uniform, drops toward 1
+            as mass concentrates on one topic.
+          - Top-5 corpus stick weights, descending.
           - Spread of λ row sums (max / min).
         """
         u = global_params["u"]
@@ -761,14 +765,21 @@ class OnlineHDP(VIModel):
         eta = float(global_params["eta"])
 
         E_beta = expected_corpus_betas(u, v, T=self.T)
-        n_active = topic_count_at_mass(E_beta, mass_threshold)
-        top3 = np.sort(E_beta)[::-1][:3]
+        thresholds = (0.5, 0.9, 0.99)
+        n_active = [topic_count_at_mass(E_beta, t) for t in thresholds]
+        nonzero = E_beta > 0
+        entropy = -float(np.sum(E_beta[nonzero] * np.log(E_beta[nonzero])))
+        eff = float(np.exp(entropy))
+        top5 = np.sort(E_beta)[::-1][:5]
         lam_sum = lam.sum(axis=1)
         spread = float(lam_sum.max() / max(lam_sum.min(), 1e-12))
 
-        top_vals_str = ",".join(f"{x:.3f}" for x in top3)
+        active_str = "/".join(str(n) for n in n_active)
+        thresh_str = ",".join(f"{t:g}" for t in thresholds)
+        top_vals_str = ",".join(f"{x:.3f}" for x in top5)
         return (
-            f"active topics={n_active}/{self.T}, "
+            f"active topics @({thresh_str})={active_str} of T={self.T}, "
+            f"eff={eff:.2f}, "
             f"top E[β]={top_vals_str}, "
             f"λ-row-sum spread={spread:.2f}, "
             f"γ={gamma:.3f}, α={alpha:.3f}, η={eta:.4f}"
