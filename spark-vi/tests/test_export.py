@@ -282,6 +282,85 @@ def test_save_result_rejects_high_rank_arrays(tmp_path):
         save_result(r, out)
 
 
+def test_save_result_round_trips_json_diagnostic_traces(tmp_path):
+    """Non-numeric traces (e.g. per-iter top-N term labels) round-trip
+    inline in manifest.json under a {"json": [...]} marker, distinct from
+    bare-list scalar traces."""
+    import json
+
+    from spark_vi.core import VIResult
+    from spark_vi.io.export import load_result, save_result
+
+    top_terms = [
+        ["pain", "fatigue", "nausea"],
+        ["pain", "fatigue", "headache"],
+        ["pain", "headache", "fatigue"],
+    ]
+    notes = [{"phase": "warmup"}, {"phase": "mid"}, {"phase": "late"}]
+
+    r = VIResult(
+        global_params={"alpha": np.array(1.0)},
+        elbo_trace=[-10.0, -5.0, -1.0],
+        n_iterations=3,
+        converged=True,
+        metadata={},
+        diagnostic_traces={"top_terms": top_terms, "phase": notes},
+    )
+    out = tmp_path / "json_trace"
+    save_result(r, out)
+    loaded = load_result(out)
+
+    assert loaded.diagnostic_traces["top_terms"] == top_terms
+    assert loaded.diagnostic_traces["phase"] == notes
+    assert not (out / "traces").exists()
+
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["diagnostic_traces"]["top_terms"] == {"json": top_terms}
+
+
+def test_save_result_rejects_mixed_kind_traces(tmp_path):
+    """A trace mixing scalar with json or with vector elements is rejected
+    at save — homogeneity is a contract, not a coercion target."""
+    import pytest as _pytest
+
+    from spark_vi.core import VIResult
+    from spark_vi.io.export import save_result
+
+    r = VIResult(
+        global_params={"alpha": np.array(1.0)},
+        elbo_trace=[-1.0, -0.5],
+        n_iterations=2,
+        converged=True,
+        metadata={},
+        diagnostic_traces={"mixed": [1.0, "two"]},
+    )
+    with _pytest.raises(ValueError, match="mixed value kinds"):
+        save_result(r, tmp_path / "mixed")
+
+
+def test_save_result_rejects_non_json_serializable_trace(tmp_path):
+    """Json-kind traces are validated at save with a clear error pointing
+    at the offending trace, not at the eventual json.dumps call."""
+    import pytest as _pytest
+
+    from spark_vi.core import VIResult
+    from spark_vi.io.export import save_result
+
+    class _Opaque:
+        pass
+
+    r = VIResult(
+        global_params={"alpha": np.array(1.0)},
+        elbo_trace=[-1.0],
+        n_iterations=1,
+        converged=True,
+        metadata={},
+        diagnostic_traces={"opaque": [_Opaque()]},
+    )
+    with _pytest.raises(ValueError, match="not JSON-serializable"):
+        save_result(r, tmp_path / "opaque")
+
+
 def test_save_result_round_trips_empty_diagnostic_trace(tmp_path):
     """An empty trace list round-trips as an empty list (no sidecar file)."""
     from spark_vi.core import VIResult

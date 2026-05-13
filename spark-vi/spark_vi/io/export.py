@@ -32,13 +32,19 @@ from spark_vi.core.result import VIResult
 _FORMAT_VERSION = 1
 
 
-def _classify_trace(name: str, trace: list[float | np.ndarray]) -> str:
+def _classify_trace(name: str, trace: list) -> str:
     """Decide on-disk strategy for a single diagnostic_traces entry.
 
-    Returns "empty", "scalar", or "vector". Raises ValueError if a trace
-    mixes scalar and array values (we don't silently coerce), or if any
-    per-iteration array has rank > 1 (only scalar or 1-D-array values are
-    supported).
+    Returns "empty", "scalar", "vector", or "json". Raises ValueError if a
+    trace mixes kinds (we don't silently coerce), or if any per-iteration
+    array has rank > 1 (only scalar or 1-D-array values are supported).
+
+    Storage strategy by kind:
+        scalar  — inline list of floats in manifest.json.
+        vector  — sidecar traces/<name>.npy of shape (n_iter, dim).
+        json    — wrapped object {"json": [...]} in manifest.json, values
+                  stored as-is (must be JSON-serializable).
+        empty   — bare empty list in manifest.json.
     """
     if len(trace) == 0:
         return "empty"
@@ -49,15 +55,19 @@ def _classify_trace(name: str, trace: list[float | np.ndarray]) -> str:
         # a 1-D array whose rows are not arrays at all).
         if isinstance(x, np.ndarray) and x.ndim == 0:
             return "scalar"
+        # bool is a subclass of int — keep it in scalar bucket; bool fidelity
+        # through float() cast is preserved (0.0/1.0 round-trip exactly).
         if isinstance(x, (int, float, np.floating, np.integer)):
             return "scalar"
-        return "vector"
+        if isinstance(x, np.ndarray):
+            return "vector"
+        return "json"
 
     kinds = {_kind(x) for x in trace}
     if len(kinds) > 1:
         raise ValueError(
-            f"trace {name!r} has mixed scalar/array values; each trace must "
-            f"be homogeneous (all floats or all np.ndarray)."
+            f"trace {name!r} has mixed value kinds {sorted(kinds)}; each "
+            f"trace must be homogeneous across iterations."
         )
     kind = kinds.pop()
     if kind == "vector":
@@ -73,7 +83,7 @@ def _classify_trace(name: str, trace: list[float | np.ndarray]) -> str:
 def save_result(result: VIResult, out_dir: Path | str) -> None:
     """Write `result` to `out_dir`. Creates the dir if needed.
 
-    `diagnostic_traces` is split by value type:
+    `diagnostic_traces` is split by value kind:
       * scalar-valued traces (lists of floats) are stored inline in
         manifest.json under the top-level "diagnostic_traces" key as plain
         JSON lists.
@@ -83,6 +93,11 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
         ``{"file": "traces/<name>.npy"}`` for that key — explicit and self-
         documenting compared to a sentinel string. Per-iter arrays with
         ndim > 1 are rejected at save time (YAGNI).
+      * json-valued traces (anything else JSON-serializable: strings,
+        lists, dicts) are stored inline in manifest.json as a wrapped
+        marker dict ``{"json": [...]}`` to distinguish them from scalar
+        traces (which appear as bare JSON lists). Values are written
+        as-is and round-trip via the same JSON path.
 
     An empty trace list round-trips inline as ``[]``; an empty
     diagnostic_traces dict produces no traces/ directory.
@@ -105,6 +120,18 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
             diagnostic_traces_manifest[name] = [float(x) for x in trace]
         elif kind == "empty":
             diagnostic_traces_manifest[name] = []
+        elif kind == "json":
+            # Validate JSON-serializability eagerly so the failure points at
+            # the offending trace, not at the final manifest.json write.
+            try:
+                json.dumps(trace)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"trace {name!r} is not JSON-serializable: {exc}. Only "
+                    f"plain JSON types (str, list, dict, bool, int/float, "
+                    f"None) are supported for non-numeric diagnostics."
+                ) from exc
+            diagnostic_traces_manifest[name] = {"json": list(trace)}
         else:  # vector
             if traces_dir is None:
                 traces_dir = out / "traces"
@@ -132,7 +159,8 @@ def load_result(in_dir: Path | str) -> VIResult:
     a list value in the manifest is a scalar trace (returned as
     ``[float(x), ...]``); a dict value with a "file" key points to a
     sidecar traces/<name>.npy that is loaded and split row-wise back into
-    a list of np.ndarray.
+    a list of np.ndarray; a dict value with a "json" key holds an inline
+    list of arbitrary JSON-serializable values (returned as-is).
 
     Manifests written before the diagnostic_traces field existed simply
     omit the key; those load with ``diagnostic_traces={}`` for forward-
@@ -164,6 +192,10 @@ def load_result(in_dir: Path | str) -> VIResult:
             # one row can't silently corrupt the others through the shared
             # backing buffer.
             diagnostic_traces[name] = [arr[i].copy() for i in range(arr.shape[0])]
+        elif isinstance(entry, dict) and "json" in entry:
+            # Inline json-mode trace: arbitrary JSON-serializable values
+            # round-tripped as-is (strings, lists, dicts, ...).
+            diagnostic_traces[name] = list(entry["json"])
         else:
             # Inline scalar trace (possibly empty).
             diagnostic_traces[name] = [float(x) for x in entry]

@@ -164,14 +164,27 @@ class VIModel(ABC):
 
     def iteration_diagnostics(
         self, global_params: dict[str, np.ndarray]
-    ) -> dict[str, float | np.ndarray]:
-        """Return scalar / small-array values to persist per iteration.
+    ) -> dict[str, Any]:
+        """Return small per-iteration values to persist into VIResult.diagnostic_traces.
 
         Returned dict keys accumulate into VIResult.diagnostic_traces over
-        the fit. Default is empty. Override to expose hyperparameters or
-        other small diagnostic scalars whose trajectories are worth
-        keeping for post-fit inspection. Stays scalar / small-array;
-        heavy state has no business in a per-iteration trace.
+        the fit. Default is empty. Override to expose hyperparameters,
+        top-N labels, active-topic counts, or other small diagnostics
+        whose per-iter trajectories are worth keeping.
+
+        Permitted value kinds (each trace key must stay homogeneous across
+        iterations — don't mix scalar with array with list):
+
+          * numeric scalar (`int`, `float`, NumPy scalar, 0-d ndarray)
+            — round-trips inline in `manifest.json` as a JSON list.
+          * 1-D `np.ndarray` — round-trips as a sidecar
+            `traces/<name>.npy` of shape `(n_iter, dim)`.
+          * any other JSON-serializable value (`list`, `dict`, `str`,
+            ...) — round-trips inline in `manifest.json` as-is. Useful
+            for top-N term labels, named-region markers, etc.
+
+        Keep values small. Heavy per-iter state has no business here;
+        a (K, V) topic-word matrix per iter is not a diagnostic.
         """
         return {}
 
