@@ -37,13 +37,18 @@ def test_estimator_setters_round_trip(tmp_path):
     assert e.getResumeFrom() == str(tmp_path / "resume")
 
 
-def test_estimator_kwargs_round_trip(tmp_path):
-    """Constructor kwargs must reach the new persistence Params.
+def test_constructor_accepts_persistence_kwargs(tmp_path):
+    """Constructor kwargs must reach saveInterval / saveDir / resumeFrom.
 
     The cloud driver constructs the Estimator with kwargs (matching the
     style used for `learningOffset` etc.); a missing kwarg in the
     explicit @keyword_only signature would crash with TypeError. This
     test pins the contract.
+
+    If this test fails, you almost certainly added a Param on
+    `_PersistenceParams` without enumerating it in
+    `OnlineLDAEstimator.__init__`'s signature. See the
+    `_PersistenceParams` docstring for the rule.
     """
     from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 

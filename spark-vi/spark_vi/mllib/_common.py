@@ -21,6 +21,23 @@ class _PersistenceParams(Params):
     declared once. Defaults are seeded via :meth:`_set_persistence_defaults`
     which the concrete Estimator/Model ``__init__`` must call (Spark's
     ``_setDefault`` is per-instance, not per-class).
+
+    Two coupled invariants that a future maintainer adding a Param here must
+    preserve — neither is enforced by the type system, both have regression
+    tests that will fail if forgotten:
+
+    1. **Enumerate the new Param in the concrete ``__init__`` signature.**
+       MLlib's ``@keyword_only``-style kwarg construction
+       (``OnlineLDAEstimator(saveInterval=10, ...)``) requires the kwarg to
+       appear *literally* in the ``__init__`` signature; declaring it on
+       this mixin makes it reachable via ``setX`` but not via the
+       constructor. The cloud drivers construct via kwargs, so the
+       mismatch crashes at startup with a ``TypeError``. See
+       ``test_*_persistence.py::test_*_constructor_accepts_persistence_kwargs``.
+    2. **Seed the default in ``_set_persistence_defaults``** to match the
+       default in the ``__init__`` signature. Two sources of truth for the
+       same number is a known wart; until MLlib gives us a per-class
+       default mechanism, sync them by hand.
     """
 
     saveInterval = Param(

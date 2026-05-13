@@ -263,6 +263,10 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
         optimizeDocConcentration: bool = True,
         optimizeCorpusConcentration: bool = True,
         optimizeTopicConcentration: bool = False,
+        # _PersistenceParams kwargs — see that mixin's docstring; these
+        # MUST appear here explicitly (not just on the mixin) for kwarg-
+        # style construction. test_constructor_accepts_persistence_kwargs
+        # pins this.
         saveInterval: int = -1,
         saveDir: str = "",
         resumeFrom: str = "",
