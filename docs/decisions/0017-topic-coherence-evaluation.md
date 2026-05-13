@@ -153,3 +153,43 @@ References:
   Using Distributional Semantics." IWCS.
 - Röder, M., Both, A. & Hinneburg, A. (2015). "Exploring the Space
   of Topic Coherence Measures." WSDM.
+
+## 2026-05-13 Revision — train/holdout split removed; eval is vocab-frozen
+
+The held-out evaluation surface became methodologically vestigial after
+the 2026-05-12 revision: with the full-corpus reference as the default
+(no predictive-overfitting concern for NPMI), the train/holdout split
+no longer earned its share of the driver complexity (CLI flags,
+metadata stamping, contract checking). It is removed in full.
+
+What this changes:
+
+- Fit drivers no longer accept `--holdout-fraction` / `--holdout-seed`.
+  The full corpus is the fit corpus. `metadata["split"]` is no longer
+  stamped.
+- Eval drivers no longer accept `--holdout-fraction` / `--seed` /
+  `--npmi-reference`. The reference is always the full BOW the caller
+  supplies.
+- The `verify_split_contract` checker in `analysis/_eval_common.py`
+  and the `split_bow_by_person` helper in
+  `charmpheno/charmpheno/omop/split.py` are deleted. Old checkpoints
+  with `metadata["split"]` still load — the field is simply ignored.
+
+Companion change — vocab freezing at eval time:
+
+- `to_bow_dataframe` gains an optional `vocab` parameter. When
+  supplied, it skips the `CountVectorizer.fit` step and constructs a
+  `CountVectorizerModel.from_vocabulary(...)` directly.
+- Eval drivers read `metadata["vocab"]` from the checkpoint and pass
+  it to `to_bow_dataframe(vocab=...)`. Tokens absent from the
+  checkpoint's vocab are dropped from the eval reference; tokens in
+  the vocab not present in the supplied parquet just contribute zero
+  doc-frequency.
+- Net effect: the eval is decoupled from the fit-time input. The eval
+  signature is now `(checkpoint, any OMOP parquet) → CoherenceReport`.
+
+If held-out evaluation matters in the future, the right place to
+restore it is at data-prep time (partition the OMOP parquet into
+train/holdout artifacts, fit consumes train, eval consumes whichever
+artifact the user wants) rather than inside the fit/eval drivers. The
+function itself was ~60 LOC; reimplementing if needed is cheap.

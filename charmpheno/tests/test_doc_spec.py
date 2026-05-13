@@ -2,8 +2,9 @@
 
 Each spec is exercised on a small in-memory OMOP-like DataFrame; the
 key assertions are (a) the doc_id column is shaped correctly, (b)
-person_id is preserved on every output row (so split_bow_by_person
-keeps working downstream), and (c) the manifest round-trips through
+person_id is preserved on every output row (so downstream consumers
+needing patient-level identity can still recover it from the BOW
+DataFrame), and (c) the manifest round-trips through
 DocSpec.from_manifest.
 """
 from __future__ import annotations

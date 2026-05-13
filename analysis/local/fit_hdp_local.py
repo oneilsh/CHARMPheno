@@ -32,7 +32,6 @@ from charmpheno.omop import (
     load_omop_parquet,
     to_bow_dataframe,
 )
-from charmpheno.omop.split import split_bow_by_person
 from spark_vi.core import VIResult
 from spark_vi.io import save_result
 from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
@@ -76,15 +75,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="topic-word Dirichlet concentration")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
-        "--holdout-fraction", type=float, default=0.0,
-        help="If >0, deterministically hold out this fraction of patients before "
-             "fitting (eval-driver companion). 0 means fit on full corpus.",
-    )
-    parser.add_argument(
-        "--holdout-seed", type=int, default=None,
-        help="Seed for the holdout hash. Defaults to --seed.",
-    )
-    parser.add_argument(
         "--doc-unit", choices=["patient", "patient_year"], default="patient",
         help=("How OMOP event rows become documents (ADR 0018). "
               "patient_year requires the parquet to carry "
@@ -98,13 +88,6 @@ def main(argv: list[str] | None = None) -> int:
 
     doc_spec = doc_spec_from_cli(args.doc_unit, min_doc_length=args.doc_min_length)
 
-    holdout_seed = args.holdout_seed if args.holdout_seed is not None else args.seed
-    holdout_fraction = float(args.holdout_fraction)
-    apply_split = holdout_fraction > 0.0
-    if not (0.0 <= holdout_fraction < 1.0):
-        raise SystemExit(
-            f"--holdout-fraction must be in [0, 1), got {holdout_fraction}"
-        )
     logging.basicConfig(level=logging.INFO,
                          format="%(asctime)s %(levelname)s %(message)s")
 
@@ -112,23 +95,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         df = load_omop_parquet(str(args.input), spark=spark)
         bow_df, vocab_map = to_bow_dataframe(df, doc_spec=doc_spec)
-
-        if apply_split:
-            train_df, _holdout_df = split_bow_by_person(
-                bow_df,
-                holdout_fraction=holdout_fraction,
-                seed=holdout_seed,
-            )
-            train_df = train_df.persist()
-            fit_df = train_df
-            n_docs = fit_df.count()
-            log.info("train split: %d docs (holdout_fraction=%.3f, seed=%d)",
-                     n_docs, holdout_fraction, holdout_seed)
-        else:
-            bow_df = bow_df.persist()
-            fit_df = bow_df
-            n_docs = fit_df.count()
-            log.info("no holdout split applied")
+        bow_df = bow_df.persist()
+        fit_df = bow_df
+        n_docs = fit_df.count()
         log.info("vocab=%d docs=%d", len(vocab_map), n_docs)
 
         estimator = OnlineHDPEstimator(
@@ -147,14 +116,6 @@ def main(argv: list[str] | None = None) -> int:
         vocab_list = [None] * len(vocab_map)
         for cid, idx in vocab_map.items():
             vocab_list[idx] = cid
-        split_metadata: dict = {"applied": apply_split}
-        if apply_split:
-            split_metadata.update(
-                holdout_fraction=holdout_fraction,
-                holdout_seed=holdout_seed,
-                person_id_col="person_id",
-                splitter="charmpheno.omop.split.split_bow_by_person",
-            )
         result_with_vocab = VIResult(
             global_params=model.result.global_params,
             elbo_trace=model.result.elbo_trace,
@@ -165,7 +126,6 @@ def main(argv: list[str] | None = None) -> int:
                 "vocab": vocab_list,
                 "T": args.T,
                 "K": args.K,
-                "split": split_metadata,
                 "corpus_manifest": {
                     "source": "parquet",
                     "input_path": str(args.input),

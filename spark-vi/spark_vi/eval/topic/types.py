@@ -29,9 +29,10 @@ class CoherenceReport:
             input topic-term matrix. Identity for LDA; mask-filtered subset
             for HDP.
         reference_size: number of documents in the reference corpus used
-            for the co-occurrence statistics. May be the holdout split
-            alone, or the full BOW (train ∪ holdout), depending on the
-            driver's --npmi-reference choice.
+            for the co-occurrence statistics. The eval drivers currently
+            pass the full BOW reproduced from the checkpoint's frozen
+            vocab; in principle any RDD[BOWDocument] the caller hands to
+            compute_npmi_coherence is fair game.
         n_holdout_docs: legacy alias for `reference_size` (older callers
             may read this; new code should prefer `reference_size`).
         per_topic_total_pairs: total number of unordered top-N pairs per

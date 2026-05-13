@@ -78,20 +78,18 @@ help:
 	@echo "                         Disable γ opt: HDP_BQ_ARGS='--no-optimize-corpus-concentration'"
 	@echo "                         Checkpoint/resume: SAVE_DIR=/mnt/gcs/\$$BUCKET/runs/<id>/"
 	@echo "                                            SAVE_INTERVAL=10  RESUME_FROM=<prev-save-dir>"
-	@echo "  make eval-bq-coherence - Held-out NPMI coherence on an augmented VIResult"
+	@echo "  make eval-bq-coherence - Full-corpus NPMI coherence on an augmented VIResult"
 	@echo "                         CHECKPOINT=/mnt/gcs/\$$BUCKET/runs/<id>  (required)"
 	@echo "                         Override args via EVAL_ARGS='--top-n 10'"
 	@echo "                         HDP: EVAL_ARGS='--model-class hdp --hdp-k 50'"
 	@echo "  make lda-bq-fit-eval - End-to-end fit + eval; auto-generates timestamped"
-	@echo "                         SAVE_DIR under \$$(REPO_ROOT)/data/runs/<id>. Pass"
-	@echo "                         --holdout-fraction > 0 in LDA_BQ_ARGS for the eval"
-	@echo "                         to find a held-out partition."
-	@echo "                         LDA_BQ_ARGS='--K 50 --max-iter 200 --holdout-fraction 0.1 --holdout-seed 42 ...'"
+	@echo "                         SAVE_DIR under \$$(REPO_ROOT)/data/runs/<id>."
+	@echo "                         LDA_BQ_ARGS='--K 50 --max-iter 200 ...'"
 	@echo "                         EVAL_ARGS='--top-n 20'  SAVE_INTERVAL=10"
 	@echo "                         To RESUME a prior run with more iterations:"
 	@echo "                           make lda-bq-fit-eval RUN_ID=<existing-id> LDA_BQ_ARGS='--max-iter <new total>'"
 	@echo "  make hdp-bq-fit-eval - End-to-end HDP fit + eval; same shape as lda-bq-fit-eval."
-	@echo "                         HDP_BQ_ARGS='--T 150 --K 15 --holdout-fraction 0.1 --holdout-seed 42 ...'"
+	@echo "                         HDP_BQ_ARGS='--T 150 --K 15 ...'"
 	@echo "                         EVAL_ARGS='--model-class hdp --hdp-k 50'"
 	@echo "                         RESUME: make hdp-bq-fit-eval RUN_ID=<existing-id> HDP_BQ_ARGS='--max-iter <new total>'"
 	@echo "  make inspect         - Live polling dashboard (run in a sibling terminal)"
@@ -202,9 +200,8 @@ eval-bq-coherence: zip $(WORKSPACE_ENV)
 
 # Combined fit + eval. Auto-generates a fresh timestamped SAVE_DIR under
 # $(REPO_ROOT)/data/runs/, runs the model-specific fit, then runs eval
-# against that exact SAVE_DIR. LDA_BQ_ARGS / HDP_BQ_ARGS must include
-# --holdout-fraction > 0 for eval to find a held-out partition; otherwise
-# the eval driver aborts with a missing-split error.
+# against that exact SAVE_DIR. Eval consumes the full BOW reproduced from
+# the checkpoint's frozen vocab (no train/holdout split, no contract).
 #
 # Resume: pass RUN_ID=<existing-run-id> to continue a prior run with more
 # iterations. If the dir exists, RESUME_FROM is auto-set and fit continues
@@ -262,8 +259,6 @@ lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    --person-mod 10 \
 	    --vocab-size 10000 \
 	    --min-df 10 \
-	    --holdout-fraction 0.2 \
-	    --holdout-seed 42 \
 	    --tau0 64 \
 	    --kappa 0.7 \
 	    --print-topics-every 1 \
@@ -322,8 +317,6 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    --person-mod 10 \
 	    --vocab-size 10000 \
 	    --min-df 10 \
-	    --holdout-fraction 0.2 \
-	    --holdout-seed 42 \
 	    --tau0 64 \
 	    --kappa 0.7 \
 	    --print-topics-every 1 \

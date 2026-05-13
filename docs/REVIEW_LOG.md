@@ -12,6 +12,65 @@ elsewhere.
 
 ---
 
+## 2026-05-13 — split removed; eval vocab-frozen (ADR 0017 revision)
+
+The train/holdout split machinery became methodologically vestigial after
+the 2026-05-12 NPMI revision (full-corpus reference as default). This
+session removes it in full and decouples the eval from any specific
+fit-time input by reading the saved vocab from `metadata["vocab"]` and
+freezing the BOW build through it.
+
+### What shipped
+
+- ADR 0017 gains a 2026-05-13 revision section describing the removal
+  and the vocab-freezing companion change.
+- `charmpheno/charmpheno/omop/split.py` deleted (and its test file
+  `charmpheno/tests/test_split.py`).
+- `verify_split_contract` deleted from `analysis/_eval_common.py`; the
+  module is now just `print_ranked_report` + `_resolve_use_color`.
+- Fit drivers (`fit_lda_local.py`, `fit_hdp_local.py`,
+  `lda_bigquery_cloud.py`, `hdp_bigquery_cloud.py`) lose
+  `--holdout-fraction` and `--holdout-seed` CLI flags, the
+  `split_bow_by_person` call site, and the `metadata["split"]` stamp.
+- Eval drivers (`eval_coherence.py`, `eval_coherence_cloud.py`) lose
+  `--holdout-fraction`, `--seed`/`--holdout-seed`, and
+  `--npmi-reference` CLI flags. The reference is always the full BOW.
+  Both drivers now read `metadata["vocab"]` and pass it to
+  `to_bow_dataframe(vocab=...)` to freeze indices.
+- `to_bow_dataframe` (in `charmpheno/charmpheno/omop/topic_prep.py`)
+  gains an optional `vocab: list[int] | None` parameter. When
+  supplied, the CountVectorizer fit step is replaced by
+  `CountVectorizerModel.from_vocabulary(...)`; tokens not in the vocab
+  are silently dropped from the SparseVector output.
+- New tests in `charmpheno/tests/test_to_bow_dataframe.py` cover the
+  frozen-vocab round-trip, the rejection of vocab + vocab_size /
+  min_df combinations, and the rejection of None-bearing vocab lists.
+- `analysis/cloud/Makefile` loses any `--holdout-fraction` /
+  `--npmi-reference` references.
+
+### Why
+
+The split was load-bearing when "held-out NPMI" was the canonical
+methodology. Once the full-corpus reference became the default (no
+overfitting concern for NPMI — topic-word distributions are fixed
+post-fit), the split kept the same CLI surface and metadata schema
+without any of its benefit. The eval driver was also implicitly tied
+to the fit-time input parquet because it rebuilt the vocab fresh;
+swapping in a different parquet silently produced misaligned column
+indices. Freezing the vocab via `metadata["vocab"]` decouples the eval
+entirely — `(checkpoint, any OMOP parquet) → CoherenceReport` is the
+new shape.
+
+If held-out evaluation matters again later, the natural place to
+restore it is data-prep time: partition the OMOP parquet into named
+artifacts (`train.parquet`, `holdout.parquet`) and let the user choose
+which one to feed each driver. The fit/eval drivers would not need to
+know.
+
+### Threads parked
+
+- None. The change is self-contained.
+
 ## 2026-05-07 — HDP concentration-parameter optimization (ADR 0013)
 
 The γ/α/η optimization deferred from ADR 0011 (and again from ADR 0012's

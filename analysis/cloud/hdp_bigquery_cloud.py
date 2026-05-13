@@ -327,18 +327,6 @@ def main(argv: list[str] | None = None) -> int:
               "post-fit summary."),
     )
     parser.add_argument(
-        "--holdout-fraction", type=float, default=0.0,
-        help=("If >0, deterministically hold out this fraction of patients "
-              "before fitting (eval-driver companion). 0 means fit on full "
-              "corpus. Split provenance is stamped under "
-              "VIResult.metadata['split'] so eval_coherence_cloud.py can "
-              "reproduce the holdout."),
-    )
-    parser.add_argument(
-        "--holdout-seed", type=int, default=None,
-        help="Seed for the holdout hash. Defaults to --seed.",
-    )
-    parser.add_argument(
         "--doc-unit", choices=["patient", "patient_year"], default="patient",
         help=("How OMOP event rows become documents (see ADR 0018). "
               "'patient' = one doc per person. 'patient_year' = one doc per "
@@ -366,16 +354,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    holdout_seed = (
-        args.holdout_seed if args.holdout_seed is not None else args.seed
-    )
-    holdout_fraction = float(args.holdout_fraction)
-    apply_split = holdout_fraction > 0.0
-    if not (0.0 <= holdout_fraction < 1.0):
-        print(f"ERROR: --holdout-fraction must be in [0, 1), got "
-              f"{holdout_fraction}", file=sys.stderr)
-        return 1
-
     cdr = os.environ.get("WORKSPACE_CDR")
     billing = os.environ.get("GOOGLE_CLOUD_PROJECT")
     if not (cdr and billing):
@@ -390,7 +368,6 @@ def main(argv: list[str] | None = None) -> int:
         load_omop_bigquery,
         to_bow_dataframe,
     )
-    from charmpheno.omop.split import split_bow_by_person
     from spark_vi.core import VIResult
     from spark_vi.diagnostics.persist import assert_persisted
     from spark_vi.io import save_result
@@ -428,25 +405,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[driver]   vocab size: {len(vocab_map)} (cap {args.vocab_size}, "
           f"minDF {args.min_df}), documents: {n_docs}", flush=True)
 
-    if apply_split:
-        with _phase(f"person-keyed split "
-                     f"(holdout_fraction={holdout_fraction}, "
-                     f"holdout_seed={holdout_seed})"):
-            train_df, holdout_df = split_bow_by_person(
-                bow_df,
-                holdout_fraction=holdout_fraction,
-                seed=holdout_seed,
-            )
-            train_df = train_df.persist()
-            n_train = train_df.count()
-            n_holdout = holdout_df.count()
-            assert_persisted(train_df, name="train_df")
-            print(f"[driver]   train: {n_train} docs, holdout: {n_holdout} docs "
-                  f"(train fraction ~{n_train / max(n_train + n_holdout, 1):.3f})",
-                  flush=True)
-        fit_df = train_df
-    else:
-        fit_df = bow_df
+    fit_df = bow_df
 
     with _phase(f"fit (T={args.T}, K={args.K}, maxIter={args.max_iter}, "
                  f"subsamplingRate={args.subsampling_rate}, "
@@ -488,22 +447,14 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
-    # Augmented re-save: bundle vocab + split provenance + corpus_manifest into
+    # Augmented re-save: bundle vocab + corpus_manifest into
     # VIResult.metadata and overwrite the shim's final auto-save. Mirrors the
-    # LDA cloud driver so eval_coherence_cloud.py can reproduce the exact BOW +
-    # holdout from the checkpoint alone.
+    # LDA cloud driver so eval_coherence_cloud.py can freeze the BOW vocab
+    # and reproduce the OMOP fetch from the checkpoint alone.
     if args.save_dir:
         vocab_list: list = [None] * len(vocab_map)
         for cid, idx in vocab_map.items():
             vocab_list[idx] = cid
-        split_metadata: dict = {"applied": apply_split}
-        if apply_split:
-            split_metadata.update(
-                holdout_fraction=holdout_fraction,
-                holdout_seed=holdout_seed,
-                person_id_col="person_id",
-                splitter="charmpheno.omop.split.split_bow_by_person",
-            )
         augmented = VIResult(
             global_params=model.result.global_params,
             elbo_trace=model.result.elbo_trace,
@@ -515,7 +466,6 @@ def main(argv: list[str] | None = None) -> int:
                 "vocab": vocab_list,
                 "T": args.T,
                 "K": args.K,
-                "split": split_metadata,
                 "corpus_manifest": {
                     "source": "bigquery",
                     "source_table": args.source_table,
@@ -561,8 +511,6 @@ def main(argv: list[str] | None = None) -> int:
               .show(3, truncate=False))
 
     bow_df.unpersist()
-    if apply_split:
-        fit_df.unpersist()
     print("[driver] HDP BQ SMOKE TEST PASSED", flush=True)
     spark.stop()
     return 0

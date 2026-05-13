@@ -1,11 +1,10 @@
-"""Cloud-side held-out NPMI coherence for a saved OnlineLDA / OnlineHDP checkpoint.
+"""Cloud-side NPMI coherence for a saved OnlineLDA / OnlineHDP checkpoint.
 
-Mirrors `analysis/local/eval_coherence.py` but rebuilds the corpus from
-BigQuery using parameters stamped at fit time. Loads the augmented
-VIResult written by `lda_bigquery_cloud.py` / `hdp_bigquery_cloud.py`,
-reproduces the BQ -> BOW pipeline from `metadata['corpus_manifest']`,
-applies the matching person-keyed split from `metadata['split']`, and
-computes per-topic NPMI on the holdout.
+Mirrors `analysis/local/eval_coherence.py` for the BigQuery-sourced cloud
+setting. Loads the augmented VIResult written by `lda_bigquery_cloud.py`
+/ `hdp_bigquery_cloud.py`, reproduces the BQ -> BOW pipeline from
+`metadata['corpus_manifest']` with the *frozen* vocab from
+`metadata['vocab']`, and computes per-topic NPMI over the full corpus.
 
 For HDP, only the top-K topics by E[β_t] are scored (the corpus stick
 shrinks unused topics toward 0; scoring them would add noise rather than
@@ -87,15 +86,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Top-K HDP topics by E[beta_t] to score (ignored for LDA).",
     )
     parser.add_argument(
-        "--npmi-reference", choices=["holdout", "full"], default="full",
-        help=("Which docs serve as the co-occurrence reference for NPMI. "
-              "'full' (default) uses train ∪ holdout — 5× the data, "
-              "fewer rare-pair zeros; methodologically sound because "
-              "topic-word distributions are fixed post-fit (no "
-              "overfitting concern). 'holdout' reproduces pre-2026-05-12 "
-              "behavior."),
-    )
-    parser.add_argument(
         "--npmi-min-pair-count", type=int, default=3,
         help=("Skip pairs with joint count below this threshold in the "
               "reference corpus. Default 3 — pairs in {0, 1, 2} contribute "
@@ -123,12 +113,11 @@ def main(argv: list[str] | None = None) -> int:
     from charmpheno.omop import (
         DocSpec, load_omop_bigquery, to_bow_dataframe,
     )
-    from charmpheno.omop.split import split_bow_by_person
     from spark_vi.models.topic.types import BOWDocument
     from spark_vi.eval.topic import compute_npmi_coherence, top_k_used_topics
     from spark_vi.io import load_result
 
-    # The shared verify_split_contract lives under the top-level `analysis`
+    # The shared print_ranked_report lives under the top-level `analysis`
     # package. spark-submit runs this file with cwd=analysis/cloud (after
     # `cd` in the Makefile), so add the repo root (two levels up) to sys.path
     # so `from analysis._eval_common import ...` resolves.
@@ -136,10 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[2]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
-    from analysis._eval_common import (  # noqa: E402
-        print_ranked_report,
-        verify_split_contract,
-    )
+    from analysis._eval_common import print_ranked_report  # noqa: E402
 
     _configure_logging()
 
@@ -148,30 +134,21 @@ def main(argv: list[str] | None = None) -> int:
 
     with _phase("load checkpoint"):
         result = load_result(args.checkpoint)
-        split = result.metadata.get("split")
         corpus = result.metadata.get("corpus_manifest")
-        if split is None:
-            raise SystemExit(
-                "checkpoint metadata is missing 'split'. The cloud eval driver "
-                "requires the augmented VIResult shape written by the post-"
-                "split-contract lda_bigquery_cloud.py. Re-run the fit driver "
-                "to regenerate the checkpoint with augmented metadata."
-            )
         if corpus is None:
             raise SystemExit(
                 "checkpoint metadata is missing 'corpus_manifest'. The cloud "
-                "eval driver needs the (cdr, person_mod, vocab_size, min_df) "
-                "to reproduce the exact BOW. Re-run the fit driver to "
-                "regenerate the checkpoint."
+                "eval driver needs the (cdr, person_mod) to reproduce the "
+                "OMOP fetch. Re-run the fit driver to regenerate the "
+                "checkpoint."
             )
-        if not split.get("applied", False):
+        vocab_list = result.metadata.get("vocab")
+        if not vocab_list:
             raise SystemExit(
-                "checkpoint records split.applied=False — the fit driver was "
-                "run without --holdout-fraction. There is no held-out partition "
-                "to evaluate against. Re-fit with --holdout-fraction > 0."
+                "checkpoint metadata has no 'vocab'; cannot freeze BOW build. "
+                "This checkpoint predates the vocab-in-metadata convention; "
+                "re-fit to use this eval driver."
             )
-        holdout_fraction = float(split["holdout_fraction"])
-        holdout_seed = int(split["holdout_seed"])
         # Reconstruct the fit-time DocSpec from the manifest. Pre-ADR-0018
         # checkpoints lack the doc_spec field; default to PatientDocSpec to
         # match their actual fit behavior. source_table is similarly defaulted
@@ -179,23 +156,11 @@ def main(argv: list[str] | None = None) -> int:
         doc_spec_manifest = corpus.get("doc_spec", {"name": "patient"})
         doc_spec = DocSpec.from_manifest(doc_spec_manifest)
         source_table = corpus.get("source_table", "condition_occurrence")
-        print(f"[driver]   split: holdout_fraction={holdout_fraction}, "
-              f"holdout_seed={holdout_seed}", flush=True)
         print(f"[driver]   corpus_manifest: cdr={corpus['cdr']}, "
               f"source_table={source_table}, "
-              f"person_mod={corpus['person_mod']}, "
-              f"vocab_size={corpus['vocab_size']}, "
-              f"min_df={corpus['min_df']}", flush=True)
+              f"person_mod={corpus['person_mod']}", flush=True)
         print(f"[driver]   doc_spec: {doc_spec_manifest}", flush=True)
-
-        # Exercise the shared contract check. The fit-stamped values are
-        # tautologically equal to the ones we just read out of metadata, so
-        # this matches silently — but it keeps the cloud driver on the same
-        # validation code path as the local one (future failure modes,
-        # e.g. checkpoint corruption, surface identically).
-        verify_split_contract(
-            result, holdout_fraction=holdout_fraction, seed=holdout_seed,
-        )
+        print(f"[driver]   frozen vocab: {len(vocab_list)} terms", flush=True)
 
         if corpus["cdr"] != cdr_env:
             log = logging.getLogger(__name__)
@@ -231,39 +196,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[driver]   OMOP: {summary['rows']} rows, "
                   f"{summary['persons']} distinct persons", flush=True)
 
-        with _phase(f"vectorize (CountVectorizer, doc_spec={doc_spec.name})"):
+        with _phase(f"vectorize (frozen vocab, doc_spec={doc_spec.name})"):
             bow_df, vocab_map = to_bow_dataframe(
                 omop,
                 doc_spec=doc_spec,
-                vocab_size=corpus["vocab_size"],
-                min_df=corpus["min_df"],
+                vocab=vocab_list,
             )
             print(f"[driver]   vocab size: {len(vocab_map)}", flush=True)
 
-        if args.npmi_reference == "full":
-            # NPMI doesn't have a predictive-overfitting concern (topic-
-            # word distributions are fixed post-fit). Using train ∪
-            # holdout as the co-occurrence reference gives 5× more
-            # statistical evidence per pair, dramatically reducing
-            # rare-pair sparsity. See ADR 0017 revisions (2026-05-12).
-            with _phase("npmi reference = full corpus"):
-                reference_df = bow_df.persist()
-                n_ref = reference_df.count()
-                print(f"[driver]   reference: {n_ref} docs (train + holdout)",
-                      flush=True)
-        else:
-            with _phase(f"npmi reference = holdout split "
-                         f"(holdout_fraction={holdout_fraction}, "
-                         f"holdout_seed={holdout_seed})"):
-                _train_df, reference_df = split_bow_by_person(
-                    bow_df,
-                    holdout_fraction=holdout_fraction,
-                    seed=holdout_seed,
-                )
-                reference_df = reference_df.persist()
-                n_ref = reference_df.count()
-                print(f"[driver]   reference: {n_ref} docs (holdout)",
-                      flush=True)
+        with _phase("npmi reference (full corpus)"):
+            reference_df = bow_df.persist()
+            n_ref = reference_df.count()
+            print(f"[driver]   reference: {n_ref} docs", flush=True)
 
         with _phase("concept-name lookup"):
             name_rows = (
@@ -318,7 +262,6 @@ def main(argv: list[str] | None = None) -> int:
         print_ranked_report(
             report, name_by_idx, lambda_,
             alpha=alpha_param,
-            npmi_reference=args.npmi_reference,
             color=args.color,
         )
 

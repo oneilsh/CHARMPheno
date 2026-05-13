@@ -1,18 +1,20 @@
-"""Local driver: held-out NPMI coherence for a saved OnlineLDA or OnlineHDP checkpoint.
+"""Local driver: NPMI topic coherence for a saved OnlineLDA or OnlineHDP checkpoint.
 
-Loads a VIResult, rebuilds the BOW from the same OMOP parquet, applies the same
-deterministic person-keyed split, and computes per-topic NPMI on the holdout
-partition. Prints a ranked report.
+Loads a VIResult, freezes the BOW vocab from the checkpoint's saved
+``metadata["vocab"]``, builds the BOW from the supplied OMOP parquet, and
+computes per-topic NPMI over that full reference corpus. Prints a ranked
+report.
 
-The fit driver (analysis/local/fit_lda_local.py / fit_hdp_local.py) and this
-eval driver must agree on (holdout_fraction, seed). v1 documents this as a
-human contract; v2 may stamp it into VIResult.metadata for verification.
+The eval is decoupled from any particular fit-time input: any OMOP-shaped
+parquet can be passed as ``--input`` and will be scored against the
+checkpoint's fixed topic-term distributions. Tokens absent from the
+checkpoint's vocab are dropped from the reference; this shows up as a lower
+``cov%`` per topic if the supplied corpus lacks the topic's top-N terms.
 
 Usage:
     poetry run python analysis/local/eval_coherence.py \\
         --checkpoint data/runs/lda_<timestamp> \\
         --input data/simulated/omop_N1000_seed42.parquet \\
-        --holdout-fraction 0.1 --seed 42 --top-n 20 \\
         --model-class lda
 """
 from __future__ import annotations
@@ -33,12 +35,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from analysis._eval_common import (  # noqa: E402
-    print_ranked_report,
-    verify_split_contract,
-)
+from analysis._eval_common import print_ranked_report  # noqa: E402
 from charmpheno.omop import DocSpec, load_omop_parquet, to_bow_dataframe
-from charmpheno.omop.split import split_bow_by_person
 from spark_vi.models.topic.types import BOWDocument
 from spark_vi.eval.topic import (
     CoherenceReport,
@@ -68,18 +66,14 @@ def run_eval(
     *,
     checkpoint: Path,
     input_parquet: Path,
-    holdout_fraction: float,
-    seed: int,
     top_n: int,
     model_class: str,
     hdp_k: int,
-    npmi_reference: str,
     npmi_min_pair_count: int,
     spark: SparkSession,
 ) -> CoherenceReport:
     """Run the eval and return the report. Importable for tests."""
     result = load_result(checkpoint)
-    verify_split_contract(result, holdout_fraction=holdout_fraction, seed=seed)
     lambda_ = result.global_params["lambda"]
     topic_term = lambda_ / lambda_.sum(axis=1, keepdims=True)
 
@@ -90,6 +84,14 @@ def run_eval(
     else:
         mask = None
 
+    vocab_list = result.metadata.get("vocab")
+    if not vocab_list:
+        raise SystemExit(
+            "checkpoint metadata has no 'vocab'; cannot freeze BOW build. "
+            "This checkpoint predates the vocab-in-metadata convention; "
+            "re-fit to use this eval driver."
+        )
+
     # Reconstruct the fit-time DocSpec from corpus_manifest so eval BOWs
     # match the fit BOWs exactly. Pre-ADR-0018 checkpoints lack the field;
     # default to PatientDocSpec, which matches their actual behavior.
@@ -99,21 +101,15 @@ def run_eval(
     log.info("doc_spec from checkpoint manifest: %s", doc_spec_manifest)
 
     df = load_omop_parquet(str(input_parquet), spark=spark)
-    bow_df, _vocab_map = to_bow_dataframe(df, doc_spec=doc_spec)
-    if npmi_reference == "full":
-        # NPMI doesn't have a predictive-overfitting concern (topic-word
-        # distributions are fixed post-fit). Using train ∪ holdout as the
-        # co-occurrence reference gives 5× more statistical evidence per
-        # pair, dramatically reducing rare-pair sparsity. See ADR 0017
-        # revisions (2026-05-12).
-        reference_df = bow_df.persist()
-    else:
-        _train, reference_df = split_bow_by_person(
-            bow_df, holdout_fraction=holdout_fraction, seed=seed
-        )
-        reference_df = reference_df.persist()
+    # Freeze the BOW vocab to what the model saw at fit time. Tokens in
+    # the input parquet that aren't in the checkpoint's vocab are dropped;
+    # tokens in the vocab that don't appear in the input parquet just
+    # contribute zero doc-frequency (which shows up as low coverage if
+    # those tokens land in some topic's top-N).
+    bow_df, _vocab_map = to_bow_dataframe(df, doc_spec=doc_spec, vocab=vocab_list)
+    reference_df = bow_df.persist()
     n_ref = reference_df.count()
-    log.info("npmi reference (%s): %d docs", npmi_reference, n_ref)
+    log.info("npmi reference: %d docs", n_ref)
 
     reference_rdd = reference_df.rdd.map(BOWDocument.from_spark_row)
 
@@ -150,21 +146,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--holdout-fraction", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--top-n", type=int, default=20)
     parser.add_argument("--model-class", choices=["lda", "hdp"], required=True)
     parser.add_argument("--hdp-k", type=int, default=50,
                         help="Top-K HDP topics by E[beta] to score (ignored for LDA)")
-    parser.add_argument(
-        "--npmi-reference", choices=["holdout", "full"], default="full",
-        help=("Which docs serve as the co-occurrence reference for NPMI. "
-              "`full` (default) uses train ∪ holdout — 5× the data, "
-              "fewer rare-pair zeros; methodologically sound because "
-              "topic-word distributions are fixed post-fit (no "
-              "overfitting concern). `holdout` reproduces pre-2026-05-12 "
-              "behavior."),
-    )
     parser.add_argument(
         "--npmi-min-pair-count", type=int, default=3,
         help=("Skip pairs with joint count below this threshold in the "
@@ -187,12 +172,9 @@ def main(argv: list[str] | None = None) -> int:
         report = run_eval(
             checkpoint=args.checkpoint,
             input_parquet=args.input,
-            holdout_fraction=args.holdout_fraction,
-            seed=args.seed,
             top_n=args.top_n,
             model_class=args.model_class,
             hdp_k=args.hdp_k,
-            npmi_reference=args.npmi_reference,
             npmi_min_pair_count=args.npmi_min_pair_count,
             spark=spark,
         )
@@ -217,7 +199,6 @@ def main(argv: list[str] | None = None) -> int:
             _build_name_by_idx(vocab, concept_names),
             lambda_,
             alpha=alpha,
-            npmi_reference=args.npmi_reference,
             color=args.color,
         )
         return 0
