@@ -1,9 +1,15 @@
-"""Canonical row types shared across spark_vi models.
+"""Row types for topic models.
 
-BOWDocument is the bag-of-words representation consumed by topic-style
-models (OnlineLDA, future OnlineHDP). Sparse-vector content; the type
-exists to make the contract self-documenting and to anchor a future MLlib
-Estimator/Transformer compatibility shim.
+BOWDocument is the bag-of-words representation consumed by OnlineLDA and
+OnlineHDP. Sparse-vector content; the type exists to make the
+VIModel-contract input self-documenting and anchors the MLlib shim's
+DataFrame→RDD conversion (spark_vi.mllib.topic._common._vector_to_bow_document).
+
+Lives under spark_vi.models.topic.types rather than spark_vi.core.types
+because BOWDocument is topic-specific — non-topic models (e.g. a future
+factor-analysis VIModel) won't consume it. Generic framework primitives
+live in spark_vi.core; topic-specific types live alongside the topic
+models that consume them.
 """
 from __future__ import annotations
 

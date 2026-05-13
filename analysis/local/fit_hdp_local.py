@@ -35,7 +35,7 @@ from charmpheno.omop import (
 from charmpheno.omop.split import split_bow_by_person
 from spark_vi.core import VIResult
 from spark_vi.io import save_result
-from spark_vi.mllib.hdp import OnlineHDPEstimator
+from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
 log = logging.getLogger(__name__)
 

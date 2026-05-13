@@ -124,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         DocSpec, load_omop_bigquery, to_bow_dataframe,
     )
     from charmpheno.omop.split import split_bow_by_person
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
     from spark_vi.eval.topic import compute_npmi_coherence, top_k_used_topics
     from spark_vi.io import load_result
 

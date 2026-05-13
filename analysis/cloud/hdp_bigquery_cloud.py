@@ -394,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
     from spark_vi.core import VIResult
     from spark_vi.diagnostics.persist import assert_persisted
     from spark_vi.io import save_result
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     doc_spec = doc_spec_from_cli(args.doc_unit, min_doc_length=args.doc_min_length)
     if args.doc_unit == "patient_year" and args.source_table != "condition_era":

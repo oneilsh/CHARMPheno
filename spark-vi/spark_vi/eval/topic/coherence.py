@@ -20,7 +20,7 @@ from spark_vi.eval.topic.types import CoherenceReport
 if TYPE_CHECKING:
     from pyspark import RDD
 
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
 
 
 def _npmi_pair(p_i: float, p_j: float, p_ij: float) -> float:

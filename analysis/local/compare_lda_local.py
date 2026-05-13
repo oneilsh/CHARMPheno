@@ -37,7 +37,8 @@ from charmpheno.evaluate.topic_alignment import (
     ground_truth_from_oracle,
 )
 from charmpheno.omop import load_omop_parquet, to_bow_dataframe
-from spark_vi.core import BOWDocument, VIConfig
+from spark_vi.core import VIConfig
+from spark_vi.models.topic import BOWDocument
 
 log = logging.getLogger(__name__)
 

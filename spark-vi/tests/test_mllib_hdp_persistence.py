@@ -18,7 +18,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def test_estimator_default_params_for_save_interval_dir_resume_from():
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     e = OnlineHDPEstimator()
     assert e.getOrDefault("saveInterval") == -1
@@ -27,7 +27,7 @@ def test_estimator_default_params_for_save_interval_dir_resume_from():
 
 
 def test_estimator_setters_round_trip(tmp_path):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     e = OnlineHDPEstimator()
     e.setSaveInterval(7)
@@ -47,7 +47,7 @@ def test_estimator_kwargs_round_trip(tmp_path):
     explicit @keyword_only signature would crash with TypeError. This
     test pins the contract.
     """
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     e = OnlineHDPEstimator(
         saveInterval=10,
@@ -72,7 +72,7 @@ def _tiny_hdp_df(spark):
 
 
 def test_estimator_rejects_save_interval_zero(_tiny_hdp_df):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     e = OnlineHDPEstimator(k=4, docTruncation=2, maxIter=1, subsamplingRate=1.0)
     e.setSaveInterval(0)
@@ -81,7 +81,7 @@ def test_estimator_rejects_save_interval_zero(_tiny_hdp_df):
 
 
 def test_estimator_rejects_save_interval_positive_without_dir(_tiny_hdp_df):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     e = OnlineHDPEstimator(k=4, docTruncation=2, maxIter=1, subsamplingRate=1.0)
     e.setSaveInterval(5)
@@ -92,7 +92,7 @@ def test_estimator_rejects_save_interval_positive_without_dir(_tiny_hdp_df):
 def test_estimator_rejects_resume_from_when_path_has_no_manifest(
     tmp_path, _tiny_hdp_df,
 ):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     e = OnlineHDPEstimator(k=4, docTruncation=2, maxIter=1, subsamplingRate=1.0)
     empty = tmp_path / "no_manifest_here"
@@ -126,7 +126,7 @@ def _persistence_hdp_corpus_df(spark):
 def test_model_save_then_load_round_trips_global_params(
     tmp_path, _persistence_hdp_corpus_df,
 ):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, OnlineHDPModel
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, OnlineHDPModel
 
     estimator = OnlineHDPEstimator(
         k=8, docTruncation=4, maxIter=3, seed=0, subsamplingRate=1.0,
@@ -144,7 +144,7 @@ def test_model_save_then_load_round_trips_global_params(
 
 def test_model_load_rejects_wrong_model_class(tmp_path):
     """Loading an LDA-stamped manifest with OnlineHDPModel.load must raise."""
-    from spark_vi.mllib.hdp import OnlineHDPModel
+    from spark_vi.mllib.topic.hdp import OnlineHDPModel
 
     save_dir = tmp_path / "lda_marked"
     save_dir.mkdir()
@@ -168,7 +168,7 @@ def test_model_load_rejects_wrong_model_class(tmp_path):
 def test_model_save_load_then_transform_works(
     tmp_path, _persistence_hdp_corpus_df,
 ):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, OnlineHDPModel
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, OnlineHDPModel
 
     estimator = OnlineHDPEstimator(
         k=8, docTruncation=4, maxIter=3, seed=0, subsamplingRate=1.0,
@@ -195,7 +195,7 @@ def test_model_save_load_round_trips_T_K_V_via_metadata(
     from result.metadata. Verify the loaded model's _T / _K / vocabSize match
     the values the Estimator was configured with.
     """
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, OnlineHDPModel
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, OnlineHDPModel
 
     T_set, K_set = 8, 4
     estimator = OnlineHDPEstimator(
@@ -219,7 +219,7 @@ def test_estimator_fit_with_savedir_only_writes_final(
     tmp_path, _persistence_hdp_corpus_df,
 ):
     """saveDir set, saveInterval=-1 → exactly one save (the end-of-fit one)."""
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, OnlineHDPModel
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, OnlineHDPModel
 
     save_dir = tmp_path / "auto_save_final_only_hdp"
     estimator = OnlineHDPEstimator(

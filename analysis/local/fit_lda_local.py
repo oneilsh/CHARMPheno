@@ -40,7 +40,7 @@ from charmpheno.omop import (
 from charmpheno.omop.split import split_bow_by_person
 from spark_vi.core import VIResult
 from spark_vi.io import save_result
-from spark_vi.mllib.lda import OnlineLDAEstimator
+from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 
 log = logging.getLogger(__name__)
 

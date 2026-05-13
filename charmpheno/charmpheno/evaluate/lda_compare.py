@@ -52,7 +52,7 @@ def run_ours(
     from pyspark.sql.types import StructField, StructType
     from pyspark.sql import SparkSession
 
-    from spark_vi.mllib.lda import OnlineLDAEstimator
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 
     spark = SparkSession.builder.getOrCreate()
 

@@ -370,7 +370,7 @@ def test_initialize_global_shapes_and_validity():
 
 def test_local_update_returns_expected_keys_and_shapes():
     """Run a tiny partition through local_update; check stats dict shape."""
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50, gamma_shape=100.0)
@@ -417,7 +417,7 @@ def test_local_update_returns_expected_keys_and_shapes():
 
 def test_local_update_combine_stats_is_elementwise_sum():
     """Default VIModel.combine_stats should sum HDP suff-stats correctly."""
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50)
@@ -543,7 +543,7 @@ def test_compute_elbo_corpus_kl_zero_at_prior():
 
 def test_infer_local_returns_simplex_theta():
     """infer_local returns the doc variational posterior + a θ derived from it."""
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models.topic.online_hdp import OnlineHDP
 
     T, K, V = 10, 5, 50
@@ -600,7 +600,7 @@ def test_local_update_emits_s_alpha_when_optimize_alpha():
     """When optimize_alpha=True (default), local_update accumulates and
     returns the s_alpha sufficient statistic for the closed-form M-step.
     """
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50, optimize_alpha=True)
@@ -623,7 +623,7 @@ def test_local_update_emits_s_alpha_when_optimize_alpha():
 
 def test_local_update_omits_s_alpha_when_optimize_alpha_false():
     """When optimize_alpha=False, the no-stat path keeps its current shape."""
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models.topic.online_hdp import OnlineHDP
 
     m = OnlineHDP(T=10, K=5, vocab_size=50, optimize_alpha=False)

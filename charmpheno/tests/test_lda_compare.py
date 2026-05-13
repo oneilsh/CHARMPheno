@@ -31,7 +31,8 @@ def _tiny_omop_df_with_topics(spark):
 def test_run_ours_produces_artifacts_of_expected_shape(spark):
     from charmpheno.evaluate.lda_compare import run_ours
     from charmpheno.omop import to_bow_dataframe
-    from spark_vi.core import BOWDocument, VIConfig
+    from spark_vi.core import VIConfig
+    from spark_vi.models.topic import BOWDocument
 
     df_raw = _tiny_omop_df_with_topics(spark)
     bow_df, vocab_map = to_bow_dataframe(df_raw)
@@ -89,7 +90,8 @@ def test_online_lda_matches_mllib_on_well_separated_corpus(spark):
     from pyspark.sql.types import StructType, StructField, IntegerType
     from charmpheno.evaluate.lda_compare import run_ours, run_mllib
     from charmpheno.evaluate.topic_alignment import js_divergence_matrix
-    from spark_vi.core import BOWDocument, VIConfig
+    from spark_vi.core import VIConfig
+    from spark_vi.models.topic import BOWDocument
 
     K, V, D = 3, 60, 500
     rng = np.random.default_rng(42)

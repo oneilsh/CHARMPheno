@@ -53,8 +53,8 @@ def _synthetic_bow(n_docs: int = 300, vocab_size: int = 30,
 
 
 def main() -> int:
-    from spark_vi.mllib.lda import OnlineLDAEstimator
-    print(f"[driver] spark_vi.mllib.lda loaded from {OnlineLDAEstimator.__module__}",
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator
+    print(f"[driver] spark_vi.mllib.topic.lda loaded from {OnlineLDAEstimator.__module__}",
           flush=True)
 
     # Surface spark_vi.core.runner per-iter INFO lines as [driver] output.

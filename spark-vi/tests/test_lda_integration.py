@@ -22,7 +22,7 @@ import pytest
 def _generate_synthetic_corpus(D: int, V: int, K: int,
                                docs_avg_len: int, seed: int):
     """Generate (true_beta, docs_as_BOWDocuments) under standard LDA."""
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     rng = np.random.default_rng(seed)
 
     true_beta = rng.dirichlet(np.full(V, 0.05), size=K)
@@ -155,7 +155,8 @@ def test_alpha_optimization_runs_end_to_end_without_regression(spark):
       * gross scale errors: α blows up to runaway values → fails range check.
     """
     import numpy as np
-    from spark_vi.core import VIConfig, VIRunner, BOWDocument
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models.topic.lda import OnlineLDA
 
     K, V, D = 3, 30, 200
@@ -232,7 +233,8 @@ def test_alpha_optimization_drifts_toward_corpus_truth_at_D10k(spark):
     """
     from scipy.optimize import linear_sum_assignment
 
-    from spark_vi.core import BOWDocument, VIConfig, VIRunner
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models.topic.lda import OnlineLDA
 
     K, V, D = 3, 100, 10_000
@@ -344,7 +346,7 @@ def test_lda_fit_with_optimization_populates_alpha_and_eta_traces(spark):
     Estimator Params and Model save/load round-trip global_params, but never
     run iteration_diagnostics through the runner's accumulation path.
     """
-    from spark_vi.mllib.lda import OnlineLDAEstimator
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 
     K, V, max_iter = 3, 9, 4
     df = _build_persistence_lda_df(spark, K=K, V=V, seed=0)
@@ -381,7 +383,7 @@ def test_lda_save_load_round_trip_via_shim_preserves_alpha_eta_traces(
     The loaded Model's diagnostic_traces must match the pre-save values
     element-wise — α arrays via assert_array_equal, η scalars via ==.
     """
-    from spark_vi.mllib.lda import OnlineLDAEstimator, OnlineLDAModel
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator, OnlineLDAModel
 
     K, V, max_iter = 3, 9, 4
     df = _build_persistence_lda_df(spark, K=K, V=V, seed=1)
@@ -427,7 +429,7 @@ def test_lda_resume_from_continues_iteration_count_and_elbo_trace(
       * run2.elbo_trace has length 6 and its first 3 elements match run1's
         elbo_trace exactly (history is preserved on resume).
     """
-    from spark_vi.mllib.lda import OnlineLDAEstimator
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 
     K, V = 3, 9
     df = _build_persistence_lda_df(spark, K=K, V=V, seed=2)

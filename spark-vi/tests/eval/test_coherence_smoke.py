@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from spark_vi.core.types import BOWDocument
+from spark_vi.models.topic.types import BOWDocument
 
 
 pytestmark = pytest.mark.slow

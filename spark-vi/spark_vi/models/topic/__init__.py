@@ -10,5 +10,6 @@ CountingModel: trivial coin-flip-posterior reference model used to exercise
 from spark_vi.models.topic.counting import CountingModel
 from spark_vi.models.topic.lda import OnlineLDA
 from spark_vi.models.topic.online_hdp import OnlineHDP
+from spark_vi.models.topic.types import BOWDocument
 
-__all__ = ["CountingModel", "OnlineHDP", "OnlineLDA"]
+__all__ = ["BOWDocument", "CountingModel", "OnlineHDP", "OnlineLDA"]

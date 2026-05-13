@@ -375,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     from spark_vi.core import VIResult
     from spark_vi.diagnostics.persist import assert_persisted
     from spark_vi.io import save_result
-    from spark_vi.mllib.lda import OnlineLDAEstimator
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 
     doc_spec = doc_spec_from_cli(args.doc_unit, min_doc_length=args.doc_min_length)
     # Sanity check: patient_year semantics need condition_era for era spans.

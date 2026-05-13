@@ -241,7 +241,7 @@ def test_compute_doc_freqs_counts_distinct_doc_membership(sc):
     Counts are doc-level (binary): a doc with term 0 appearing 5 times still
     contributes 1 to doc_freqs[0].
     """
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
     from spark_vi.eval.topic.coherence import _compute_doc_freqs
 
     docs = [
@@ -257,7 +257,7 @@ def test_compute_doc_freqs_counts_distinct_doc_membership(sc):
 
 
 def test_compute_doc_freqs_ignores_terms_outside_interest_set(sc):
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
     from spark_vi.eval.topic.coherence import _compute_doc_freqs
 
     docs = [
@@ -271,7 +271,7 @@ def test_compute_doc_freqs_ignores_terms_outside_interest_set(sc):
 
 def test_compute_pair_freqs_emits_only_interest_set_pairs(sc):
     """Pair (i, j) with both i < j and both in interest set."""
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
     from spark_vi.eval.topic.coherence import _compute_pair_freqs
 
     docs = [
@@ -295,7 +295,7 @@ def test_compute_pair_freqs_emits_only_interest_set_pairs(sc):
 
 def test_compute_npmi_coherence_lda_path(sc):
     """End-to-end on a tiny synthetic corpus, no HDP mask."""
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
     from spark_vi.eval.topic.coherence import compute_npmi_coherence
     from spark_vi.eval.topic.types import CoherenceReport
 
@@ -340,7 +340,7 @@ def test_compute_npmi_coherence_lda_path(sc):
 
 def test_compute_npmi_coherence_hdp_mask_path(sc):
     """HDP-style: T=4 topics in topic_term, mask selects 2 of them."""
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
     from spark_vi.eval.topic.coherence import compute_npmi_coherence
 
     # 4 topics, 4 terms. Topics 0 and 2 are "useful" (mass on 0,1 and 2,3).
@@ -371,7 +371,7 @@ def test_compute_npmi_coherence_hdp_mask_path(sc):
 
 
 def test_compute_npmi_coherence_empty_mask_raises(sc):
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
     from spark_vi.eval.topic.coherence import compute_npmi_coherence
 
     topic_term = np.array([[0.5, 0.5]])
@@ -386,7 +386,7 @@ def test_compute_npmi_coherence_empty_mask_raises(sc):
 def test_compute_npmi_coherence_threshold_produces_unrated_topic(sc):
     """A topic whose top-N pairs all fall below the threshold reports
     NaN NPMI, scored_pairs=0, and lifts n_topics_unrated by one."""
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
     from spark_vi.eval.topic.coherence import compute_npmi_coherence
 
     # Two topics. Topic 0 has top-2 (0, 1) — co-occurs in 5 docs (above any
@@ -420,7 +420,7 @@ def test_compute_npmi_coherence_threshold_produces_unrated_topic(sc):
 def test_compute_npmi_coherence_all_topics_unrated_yields_nan_summary(sc):
     """If no topic clears the threshold, summary stats are NaN, not
     raised, so the driver can surface the situation in its banner."""
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
     from spark_vi.eval.topic.coherence import compute_npmi_coherence
 
     topic_term = np.array([

@@ -39,7 +39,7 @@ from analysis._eval_common import (  # noqa: E402
 )
 from charmpheno.omop import DocSpec, load_omop_parquet, to_bow_dataframe
 from charmpheno.omop.split import split_bow_by_person
-from spark_vi.core.types import BOWDocument
+from spark_vi.models.topic.types import BOWDocument
 from spark_vi.eval.topic import (
     CoherenceReport,
     compute_npmi_coherence,

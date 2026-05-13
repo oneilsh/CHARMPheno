@@ -1,4 +1,4 @@
-"""Tests for spark_vi.mllib.hdp — fast unit tests for the HDP MLlib shim."""
+"""Tests for spark_vi.mllib.topic.hdp — fast unit tests for the HDP MLlib shim."""
 from __future__ import annotations
 
 import numpy as np
@@ -15,7 +15,7 @@ def test_shared_param_defaults_match_mllib_lda():
     and the optimize* flags (HDP defers γ/α optimization per ADR 0011).
     """
     from pyspark.ml.clustering import LDA as MLlibLDA
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     ours = OnlineHDPEstimator()
     theirs = MLlibLDA()
@@ -31,7 +31,7 @@ def test_shared_param_defaults_match_mllib_lda():
 
 
 def test_hdp_specific_defaults():
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     e = OnlineHDPEstimator()
     assert e.getOrDefault("k") == 150          # T, corpus truncation
@@ -45,7 +45,7 @@ def test_optimize_flags_exposed_with_adr_0013_defaults():
     """ADR 0013: γ/α/η are now first-class Params. γ and α default True
     (closed-form is cheap and the headline appeal); η defaults False
     (matches LDA — least stable in SVI)."""
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     e = OnlineHDPEstimator()
     assert e.getOrDefault("optimizeDocConcentration") is True
@@ -55,7 +55,7 @@ def test_optimize_flags_exposed_with_adr_0013_defaults():
 
 def test_optimize_flags_translate_to_model_kwargs():
     """The three optimize* Params flow into OnlineHDP's optimize_* ctor kwargs."""
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, _build_model_and_config
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, _build_model_and_config
 
     e = OnlineHDPEstimator(
         k=10, docTruncation=4,
@@ -71,7 +71,7 @@ def test_optimize_flags_translate_to_model_kwargs():
 
 def test_param_translation_to_model_and_config():
     from spark_vi.core.config import VIConfig
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, _build_model_and_config
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, _build_model_and_config
     from spark_vi.models.topic.online_hdp import OnlineHDP
 
     e = OnlineHDPEstimator(
@@ -104,7 +104,7 @@ def test_param_translation_to_model_and_config():
 def test_param_translation_resolves_unset_concentrations_to_model_defaults():
     """When caller passes None / leaves unset, fall back to OnlineHDP's defaults
     (α=1.0, γ=1.0, η=0.01) — same constants as the model class."""
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, _build_model_and_config
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, _build_model_and_config
 
     e = OnlineHDPEstimator(k=10, docTruncation=4)
     model, _ = _build_model_and_config(e, vocab_size=20)
@@ -119,7 +119,7 @@ def test_param_translation_resolves_unset_concentrations_to_model_defaults():
 # ---------------------------------------------------------------------------
 
 def test_unsupported_optimizer_em_raises():
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, _validate_unsupported_params
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, _validate_unsupported_params
 
     e = OnlineHDPEstimator(optimizer="em")
     with pytest.raises(ValueError, match="optimizer"):
@@ -128,7 +128,7 @@ def test_unsupported_optimizer_em_raises():
 
 def test_vector_doc_concentration_raises():
     """HDP α is scalar in v1 (ADR 0011 defers α optimization)."""
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, _validate_unsupported_params
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, _validate_unsupported_params
 
     e = OnlineHDPEstimator(docConcentration=[0.1, 0.1, 0.1])
     with pytest.raises(ValueError, match="scalar docConcentration"):
@@ -136,7 +136,7 @@ def test_vector_doc_concentration_raises():
 
 
 def test_scalar_doc_concentration_is_accepted():
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, _validate_unsupported_params
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, _validate_unsupported_params
 
     e = OnlineHDPEstimator(docConcentration=[0.5])
     _validate_unsupported_params(e)  # should not raise
@@ -207,7 +207,7 @@ def tiny_hdp_corpus_df(spark):
 
 
 def test_fit_returns_model_with_correct_shape(tiny_hdp_corpus_df):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, OnlineHDPModel
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, OnlineHDPModel
 
     estimator = OnlineHDPEstimator(
         k=8, docTruncation=4, maxIter=5, seed=0, subsamplingRate=1.0,
@@ -224,7 +224,7 @@ def test_fit_returns_model_with_correct_shape(tiny_hdp_corpus_df):
 
 def test_topics_matrix_shape_and_normalization(tiny_hdp_corpus_df):
     from pyspark.ml.linalg import DenseMatrix
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     T = 8
     estimator = OnlineHDPEstimator(
@@ -242,7 +242,7 @@ def test_topics_matrix_shape_and_normalization(tiny_hdp_corpus_df):
 
 
 def test_describe_topics_returns_top_k_per_topic(tiny_hdp_corpus_df):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     T = 8
     estimator = OnlineHDPEstimator(
@@ -262,7 +262,7 @@ def test_describe_topics_returns_top_k_per_topic(tiny_hdp_corpus_df):
 
 
 def test_corpus_stick_weights_simplex(tiny_hdp_corpus_df):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     T = 8
     estimator = OnlineHDPEstimator(
@@ -277,7 +277,7 @@ def test_corpus_stick_weights_simplex(tiny_hdp_corpus_df):
 
 
 def test_active_topic_count_is_int_in_range(tiny_hdp_corpus_df):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     T = 8
     estimator = OnlineHDPEstimator(
@@ -292,7 +292,7 @@ def test_active_topic_count_is_int_in_range(tiny_hdp_corpus_df):
 
 def test_active_topic_count_monotone_in_mass_threshold(tiny_hdp_corpus_df):
     """Higher mass_threshold ⇒ at least as many active topics."""
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     T = 8
     estimator = OnlineHDPEstimator(
@@ -307,7 +307,7 @@ def test_active_topic_count_monotone_in_mass_threshold(tiny_hdp_corpus_df):
 
 
 def test_active_topic_count_rejects_invalid_threshold(tiny_hdp_corpus_df):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     T = 8
     estimator = OnlineHDPEstimator(
@@ -384,7 +384,7 @@ def test_active_topic_count_truncation_invariant():
 
 def test_transform_adds_topic_distribution_column(tiny_hdp_corpus_df):
     from pyspark.ml.linalg import Vector
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     T = 8
     estimator = OnlineHDPEstimator(
@@ -406,7 +406,7 @@ def test_transform_adds_topic_distribution_column(tiny_hdp_corpus_df):
 
 
 def test_transform_respects_custom_topic_distribution_col(tiny_hdp_corpus_df):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     estimator = OnlineHDPEstimator(
         k=8, docTruncation=4, maxIter=5, seed=0, subsamplingRate=1.0,
@@ -419,7 +419,7 @@ def test_transform_respects_custom_topic_distribution_col(tiny_hdp_corpus_df):
 
 
 def test_log_likelihood_and_log_perplexity_raise_not_implemented(tiny_hdp_corpus_df):
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     estimator = OnlineHDPEstimator(
         k=8, docTruncation=4, maxIter=5, seed=0, subsamplingRate=1.0,
@@ -437,7 +437,7 @@ def test_concentration_accessors_round_trip_inputs_when_optimization_off(
 ):
     """With all optimize_* flags off, trained α, γ, η equal the constructor
     inputs (the global_params dict carries them through unchanged)."""
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     estimator = OnlineHDPEstimator(
         k=8, docTruncation=4, maxIter=3, seed=0, subsamplingRate=1.0,
@@ -459,7 +459,7 @@ def test_concentration_accessors_reflect_optimization_when_on(
     """With γ/α optimization on (the default), trained values move away
     from the constructor inputs. η stays put because optimize_eta defaults
     to False."""
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     init_alpha, init_gamma, init_eta = 0.7, 1.5, 0.05
     estimator = OnlineHDPEstimator(

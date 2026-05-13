@@ -16,7 +16,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def test_estimator_default_params_for_save_interval_dir_resume_from():
-    from spark_vi.mllib.lda import OnlineLDAEstimator
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 
     e = OnlineLDAEstimator()
     assert e.getOrDefault("saveInterval") == -1
@@ -25,7 +25,7 @@ def test_estimator_default_params_for_save_interval_dir_resume_from():
 
 
 def test_estimator_setters_round_trip(tmp_path):
-    from spark_vi.mllib.lda import OnlineLDAEstimator
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 
     e = OnlineLDAEstimator()
     e.setSaveInterval(5)
@@ -45,7 +45,7 @@ def test_estimator_kwargs_round_trip(tmp_path):
     explicit @keyword_only signature would crash with TypeError. This
     test pins the contract.
     """
-    from spark_vi.mllib.lda import OnlineLDAEstimator
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 
     e = OnlineLDAEstimator(
         saveInterval=10,
@@ -70,7 +70,7 @@ def _tiny_df(spark):
 
 
 def test_estimator_rejects_save_interval_zero(_tiny_df):
-    from spark_vi.mllib.lda import OnlineLDAEstimator
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 
     e = OnlineLDAEstimator(k=2, maxIter=1, subsamplingRate=1.0)
     e.setSaveInterval(0)
@@ -79,7 +79,7 @@ def test_estimator_rejects_save_interval_zero(_tiny_df):
 
 
 def test_estimator_rejects_save_interval_positive_without_dir(_tiny_df):
-    from spark_vi.mllib.lda import OnlineLDAEstimator
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 
     e = OnlineLDAEstimator(k=2, maxIter=1, subsamplingRate=1.0)
     e.setSaveInterval(5)  # saveDir stays ""
@@ -90,7 +90,7 @@ def test_estimator_rejects_save_interval_positive_without_dir(_tiny_df):
 def test_estimator_rejects_resume_from_when_path_has_no_manifest(
     tmp_path, _tiny_df,
 ):
-    from spark_vi.mllib.lda import OnlineLDAEstimator
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator
 
     e = OnlineLDAEstimator(k=2, maxIter=1, subsamplingRate=1.0)
     empty = tmp_path / "no_manifest_here"
@@ -124,7 +124,7 @@ def _persistence_corpus_df(spark):
 def test_model_save_then_load_round_trips_global_params(
     tmp_path, _persistence_corpus_df,
 ):
-    from spark_vi.mllib.lda import OnlineLDAEstimator, OnlineLDAModel
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator, OnlineLDAModel
 
     estimator = OnlineLDAEstimator(k=3, maxIter=3, seed=0, subsamplingRate=1.0)
     model = estimator.fit(_persistence_corpus_df)
@@ -141,7 +141,7 @@ def test_model_save_then_load_round_trips_global_params(
 
 def test_model_load_rejects_wrong_model_class(tmp_path):
     """Loading an HDP-stamped manifest with OnlineLDAModel.load must raise."""
-    from spark_vi.mllib.lda import OnlineLDAModel
+    from spark_vi.mllib.topic.lda import OnlineLDAModel
 
     # Hand-craft a minimal valid VIResult save dir with model_class=OnlineHDP.
     save_dir = tmp_path / "hdp_marked"
@@ -167,7 +167,7 @@ def test_model_load_rejects_wrong_model_class(tmp_path):
 def test_model_save_load_then_transform_works(
     tmp_path, _persistence_corpus_df,
 ):
-    from spark_vi.mllib.lda import OnlineLDAEstimator, OnlineLDAModel
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator, OnlineLDAModel
 
     estimator = OnlineLDAEstimator(k=3, maxIter=3, seed=0, subsamplingRate=1.0)
     model = estimator.fit(_persistence_corpus_df)
@@ -189,7 +189,7 @@ def test_estimator_fit_with_savedir_only_writes_final(
     tmp_path, _persistence_corpus_df,
 ):
     """saveDir set, saveInterval=-1 → exactly one save (the end-of-fit one)."""
-    from spark_vi.mllib.lda import OnlineLDAEstimator, OnlineLDAModel
+    from spark_vi.mllib.topic.lda import OnlineLDAEstimator, OnlineLDAModel
 
     save_dir = tmp_path / "auto_save_final_only"
     estimator = OnlineLDAEstimator(

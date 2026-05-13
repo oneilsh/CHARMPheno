@@ -5,7 +5,7 @@ from pyspark.ml.linalg import SparseVector
 
 
 def test_bow_document_holds_indices_counts_length():
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
 
     doc = BOWDocument(
         indices=np.array([0, 3, 7], dtype=np.int32),
@@ -18,7 +18,7 @@ def test_bow_document_holds_indices_counts_length():
 
 
 def test_bow_document_is_frozen():
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     doc = BOWDocument(indices=np.array([0], dtype=np.int32),
                       counts=np.array([1.0]), length=1)
     with pytest.raises((AttributeError, TypeError)):
@@ -26,7 +26,7 @@ def test_bow_document_is_frozen():
 
 
 def test_bow_document_from_spark_row_unpacks_sparse_vector():
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
 
     sv = SparseVector(10, [0, 3, 7], [2.0, 1.0, 4.0])
     # A "row" here is anything that supports row[features_col] subscript.

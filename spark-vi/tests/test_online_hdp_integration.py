@@ -18,7 +18,7 @@ def _generate_synthetic_corpus(D, V, K, docs_avg_len, seed):
     learn that K topics are active and the rest of the truncation is
     unused. Same generator pattern as test_lda_integration.py.
     """
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     rng = np.random.default_rng(seed)
 
     true_beta = rng.dirichlet(np.full(V, 0.05), size=K)
@@ -238,7 +238,8 @@ def test_online_hdp_infer_local_round_trip(spark):
     concentrates mass on a small subset of corpus topics (effective
     sparsity expected from a sparse synthetic generator).
     """
-    from spark_vi.core import BOWDocument, VIConfig, VIRunner
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models import OnlineHDP
 
     _, docs = _generate_synthetic_corpus(
@@ -313,7 +314,7 @@ def test_hdp_fit_with_optimization_populates_gamma_alpha_eta_traces(spark):
     Bonus: at least one of γ/α/η must change value somewhere along the
     trace — proves optimization actually moved things, not just shape.
     """
-    from spark_vi.mllib.hdp import OnlineHDPEstimator
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator
 
     T, K, V, max_iter = 6, 3, 9, 4
     df = _build_persistence_hdp_df(spark, V=V, n_clusters=3, seed=0)
@@ -360,7 +361,7 @@ def test_hdp_save_load_round_trip_via_shim_preserves_T_K_V_metadata_and_traces(
     Verifies both the shape metadata (T/K/V via _T, _K, vocabSize()) and
     the diagnostic_traces survive the round-trip element-wise.
     """
-    from spark_vi.mllib.hdp import OnlineHDPEstimator, OnlineHDPModel
+    from spark_vi.mllib.topic.hdp import OnlineHDPEstimator, OnlineHDPModel
 
     T, K, V, max_iter = 6, 3, 9, 4
     df = _build_persistence_hdp_df(spark, V=V, n_clusters=3, seed=1)

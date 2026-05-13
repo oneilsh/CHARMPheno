@@ -105,7 +105,7 @@ def test_online_lda_initialize_global_is_seedable_via_numpy():
 def test_online_lda_local_update_returns_expected_keys():
     """local_update returns the four keys the runner + ELBO need."""
     import numpy as np
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models.topic.lda import OnlineLDA
 
     np.random.seed(0)
@@ -129,7 +129,7 @@ def test_online_lda_local_update_returns_expected_keys():
 def test_online_lda_local_update_lambda_stats_is_nonzero_only_on_seen_columns():
     """Lambda stats accumulate only on columns whose token indices appeared."""
     import numpy as np
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models.topic.lda import OnlineLDA
 
     np.random.seed(0)
@@ -301,7 +301,7 @@ def test_online_lda_combine_stats_is_associative():
 def test_online_lda_infer_local_returns_gamma_and_theta():
     """infer_local returns dict with K-vector gamma and normalized theta."""
     import numpy as np
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models.topic.lda import OnlineLDA
 
     np.random.seed(0)
@@ -321,7 +321,7 @@ def test_online_lda_infer_local_returns_gamma_and_theta():
 def test_online_lda_infer_local_is_pure_function_of_inputs():
     """Same row + same global_params + same RNG state => identical output."""
     import numpy as np
-    from spark_vi.core import BOWDocument
+    from spark_vi.models.topic import BOWDocument
     from spark_vi.models.topic.lda import OnlineLDA
 
     np.random.seed(7)
@@ -410,7 +410,7 @@ def test_local_update_emits_e_log_theta_sum_when_optimize_alpha():
     """The new stat key is present iff optimize_alpha=True (avoids paying
     the digamma cost when off)."""
     import numpy as np
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
     from spark_vi.models.topic.lda import OnlineLDA
 
     K, V = 3, 5
@@ -537,7 +537,7 @@ def test_local_update_alpha_stat_finite_when_alpha_at_floor():
     floor component, λ engineered so the doc's tokens carry no signal
     for the orphan topic) and asserts the suff-stat is finite.
     """
-    from spark_vi.core.types import BOWDocument
+    from spark_vi.models.topic.types import BOWDocument
     from spark_vi.models.topic.lda import OnlineLDA
 
     K, V = 3, 50

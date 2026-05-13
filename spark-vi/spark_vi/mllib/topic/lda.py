@@ -1,10 +1,9 @@
-"""MLlib Estimator/Transformer shim for OnlineHDP.
+"""MLlib Estimator/Transformer shim for OnlineLDA.
 
-Wraps spark_vi.models.topic.online_hdp.OnlineHDP + spark_vi.core.runner.VIRunner so
-the model behaves like a pyspark.ml.clustering.LDA-shaped Estimator/Model
-pair. The shim is a translation layer; all SVI/CAVI logic lives in
-OnlineHDP. See ADR 0012 (docs/decisions/0012-hdp-mllib-shim.md) for the
-design rationale; ADR 0011 covers the underlying model.
+Wraps spark_vi.models.topic.lda.OnlineLDA + spark_vi.core.runner.VIRunner so the
+model behaves like a pyspark.ml.clustering.LDA-shaped Estimator/Model pair.
+The shim is a translation layer; all SVI logic lives in OnlineLDA. See
+ADR 0009 (docs/decisions/0009-mllib-shim.md) for the design rationale.
 """
 from __future__ import annotations
 
@@ -20,106 +19,79 @@ from spark_vi.core.config import VIConfig
 from spark_vi.mllib._common import (
     _PersistableModel,
     _PersistenceParams,
-    _vector_to_bow_document,
     apply_persistence_params,
 )
-from spark_vi.models.topic.online_hdp import (
-    OnlineHDP,
-    expected_corpus_betas,
-    topic_count_at_mass,
-)
+from spark_vi.mllib.topic._common import _vector_to_bow_document
+from spark_vi.models.topic.lda import OnlineLDA
 
 
-def _validate_unsupported_params(estimator: "OnlineHDPEstimator") -> None:
+def _validate_unsupported_params(estimator: "OnlineLDAEstimator") -> None:
     """Raise ValueError for any configuration the shim cannot honor.
 
-    Per ADR 0013, γ/α/η optimization flags are now first-class. Remaining
-    rejections are genuinely-unsupported values:
+    Per ADR 0010 the v0 rejections of `optimizeDocConcentration=True` and
+    vector `docConcentration` are gone — both are now first-class. The
+    only remaining rejections are the genuinely unsupported ones:
 
       * optimizer != "online" — we are SVI-only.
-      * vector docConcentration — HDP α is scalar (paper Eq 9, doc-stick
-        concentration). The closed-form M-step in ADR 0013 produces a
-        single scalar; vector α has no derivation in HDP.
-      * vector topicConcentration — HDP η is scalar symmetric Dirichlet
-        on the topic-word prior.
+      * vector docConcentration with length != k — the model demands a
+        length-k vector when asymmetric.
 
     Silent fallback would mislead users about what they are getting.
     """
     optimizer = estimator.getOrDefault("optimizer")
     if optimizer != "online":
         raise ValueError(
-            f"OnlineHDPEstimator only supports optimizer='online', got {optimizer!r}. "
+            f"OnlineLDAEstimator only supports optimizer='online', got {optimizer!r}. "
             f"The 'em' optimizer is not implemented in this shim."
         )
 
     if estimator.isSet("docConcentration"):
         doc_conc = estimator.getOrDefault("docConcentration")
         if doc_conc is not None and len(doc_conc) > 1:
-            raise ValueError(
-                "OnlineHDPEstimator only supports scalar docConcentration "
-                f"(α); got vector of length {len(doc_conc)}. ADR 0011 keeps α "
-                "scalar in v1 (γ/α optimization deferred)."
-            )
-
-    if estimator.isSet("topicConcentration"):
-        topic_conc = estimator.getOrDefault("topicConcentration")
-        # topicConcentration is typed as float, not list — but be defensive.
-        if topic_conc is not None and isinstance(topic_conc, (list, tuple)):
-            raise ValueError(
-                "OnlineHDPEstimator only supports scalar topicConcentration (η)."
-            )
+            k = estimator.getOrDefault("k")
+            if len(doc_conc) != k:
+                raise ValueError(
+                    f"docConcentration vector must have length k={k}, "
+                    f"got length {len(doc_conc)}."
+                )
 
 
 def _build_model_and_config(
-    estimator: "OnlineHDPEstimator",
+    estimator: "OnlineLDAEstimator",
     vocab_size: int,
-) -> tuple[OnlineHDP, VIConfig]:
-    """Translate Estimator Params into (OnlineHDP, VIConfig).
+) -> tuple[OnlineLDA, VIConfig]:
+    """Translate Estimator Params into (OnlineLDA, VIConfig).
 
-    Param mapping (see ADRs 0012, 0013):
-      k                            → T (corpus truncation)
-      docTruncation                → K (doc truncation)
-      docConcentration[0]          → α (scalar; default 1.0 if unset)
-      corpusConcentration          → γ (scalar; default 1.0 if unset)
-      topicConcentration           → η (scalar; default 0.01 if unset)
-      optimizeDocConcentration     → optimize_alpha   (bool; default True)
-      optimizeCorpusConcentration  → optimize_gamma   (bool; default True)
-      optimizeTopicConcentration   → optimize_eta     (bool; default False)
+    Per ADR 0010, docConcentration may be:
+      * unset / None → broadcast 1/k (symmetric).
+      * length-1 list → scalar (broadcast to length-k symmetric).
+      * length-k list → asymmetric vector α.
+    Wrong-length vectors are rejected upstream by _validate_unsupported_params.
     """
-    T = estimator.getOrDefault("k")
-    K = estimator.getOrDefault("docTruncation")
+    k = estimator.getOrDefault("k")
 
     doc_conc = estimator.getOrDefault("docConcentration") if estimator.isSet("docConcentration") else None
     if doc_conc is None:
-        alpha = 1.0
-    else:
-        # Length-1 list (validated by _validate_unsupported_params).
+        alpha = 1.0 / k
+    elif len(doc_conc) == 1:
         alpha = float(doc_conc[0])
+    else:
+        # Length-k vector (validated by _validate_unsupported_params).
+        alpha = np.asarray(doc_conc, dtype=np.float64)
 
-    gamma = (
-        float(estimator.getOrDefault("corpusConcentration"))
-        if estimator.isSet("corpusConcentration")
-        else 1.0
-    )
-    eta = (
-        float(estimator.getOrDefault("topicConcentration"))
-        if estimator.isSet("topicConcentration")
-        else 0.01
-    )
+    topic_conc = estimator.getOrDefault("topicConcentration") if estimator.isSet("topicConcentration") else None
+    eta = 1.0 / k if topic_conc is None else float(topic_conc)
 
-    model = OnlineHDP(
-        T=T,
-        K=K,
+    model = OnlineLDA(
+        K=k,
         vocab_size=vocab_size,
         alpha=alpha,
-        gamma=gamma,
         eta=eta,
+        optimize_alpha=estimator.getOrDefault("optimizeDocConcentration"),
+        optimize_eta=estimator.getOrDefault("optimizeTopicConcentration"),
         gamma_shape=estimator.getOrDefault("gammaShape"),
         cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
         cavi_tol=estimator.getOrDefault("caviTol"),
-        optimize_gamma=bool(estimator.getOrDefault("optimizeCorpusConcentration")),
-        optimize_alpha=bool(estimator.getOrDefault("optimizeDocConcentration")),
-        optimize_eta=bool(estimator.getOrDefault("optimizeTopicConcentration")),
     )
 
     seed = estimator.getOrDefault("seed") if estimator.isSet("seed") else None
@@ -133,23 +105,18 @@ def _build_model_and_config(
     return model, config
 
 
-class _OnlineHDPParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
-    """Shared Param surface for OnlineHDPEstimator and OnlineHDPModel.
+class _OnlineLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
+    """Shared Param surface for OnlineLDAEstimator and OnlineLDAModel.
 
     Mirrors MLlib's `_LDAParams` mixin pattern: declare each Param once,
     inherit from both the Estimator and Model so they expose identical
     surfaces with no aliasing. Persistence Params (saveInterval, saveDir,
-    resumeFrom) come from `_PersistenceParams` (shared with the LDA shim).
+    resumeFrom) come from `_PersistenceParams` (shared with the HDP shim).
     """
 
     k = Param(
         Params._dummy(), "k",
-        "corpus-level truncation T (upper bound on discoverable topics); >= 2",
-        typeConverter=TypeConverters.toInt,
-    )
-    docTruncation = Param(
-        Params._dummy(), "docTruncation",
-        "doc-level truncation K (upper bound on topics per document); >= 2",
+        "number of topics (clusters) to infer; must be >= 1",
         typeConverter=TypeConverters.toInt,
     )
     topicDistributionCol = Param(
@@ -179,22 +146,28 @@ class _OnlineHDPParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
     )
     docConcentration = Param(
         Params._dummy(), "docConcentration",
-        "doc-stick concentration α (scalar only); see ADR 0011 / 0012",
+        "Dirichlet concentration alpha on theta; scalar (symmetric) only — vector raises",
         typeConverter=TypeConverters.toListFloat,
-    )
-    corpusConcentration = Param(
-        Params._dummy(), "corpusConcentration",
-        "corpus-stick concentration γ (scalar); HDP-specific extra (no LDA analog)",
-        typeConverter=TypeConverters.toFloat,
     )
     topicConcentration = Param(
         Params._dummy(), "topicConcentration",
-        "Dirichlet concentration η on topic-word; scalar (symmetric) only",
+        "Dirichlet concentration eta on beta; scalar (symmetric) only",
         typeConverter=TypeConverters.toFloat,
+    )
+    optimizeDocConcentration = Param(
+        Params._dummy(), "optimizeDocConcentration",
+        "whether to optimize α via Newton-Raphson (Blei 2003 App. A.4.2); see ADR 0010",
+        typeConverter=TypeConverters.toBoolean,
+    )
+    optimizeTopicConcentration = Param(
+        Params._dummy(), "optimizeTopicConcentration",
+        "whether to optimize η (symmetric scalar) via Newton-Raphson; "
+        "see ADR 0010",
+        typeConverter=TypeConverters.toBoolean,
     )
     gammaShape = Param(
         Params._dummy(), "gammaShape",
-        "shape parameter for Gamma init of variational λ; ADR 0011 default 100.0",
+        "shape parameter for Gamma init of variational gamma; ADR 0008 default 100.0",
         typeConverter=TypeConverters.toFloat,
     )
     caviMaxIter = Param(
@@ -204,48 +177,23 @@ class _OnlineHDPParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
     )
     caviTol = Param(
         Params._dummy(), "caviTol",
-        "relative tolerance on per-iter ELBO for doc-CAVI early stop",
+        "relative tolerance on gamma for CAVI early stop",
         typeConverter=TypeConverters.toFloat,
     )
-    optimizeDocConcentration = Param(
-        Params._dummy(), "optimizeDocConcentration",
-        "if True, run a closed-form M-step on doc-stick concentration α each "
-        "iteration; default True. See ADR 0013.",
-        typeConverter=TypeConverters.toBoolean,
-    )
-    optimizeCorpusConcentration = Param(
-        Params._dummy(), "optimizeCorpusConcentration",
-        "if True, run a closed-form M-step on corpus-stick concentration γ each "
-        "iteration; default True. HDP-specific extra (no MLlib LDA analog). "
-        "See ADR 0013.",
-        typeConverter=TypeConverters.toBoolean,
-    )
-    optimizeTopicConcentration = Param(
-        Params._dummy(), "optimizeTopicConcentration",
-        "if True, run a scalar Newton step on topic-word concentration η each "
-        "iteration; default False (matches LDA — least stable in SVI per "
-        "Hoffman 2010 §3.4). See ADR 0013.",
-        typeConverter=TypeConverters.toBoolean,
-    )
 
 
-class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
-    """MLlib-shaped Estimator wrapping spark_vi.models.topic.online_hdp.OnlineHDP.
+class OnlineLDAEstimator(_OnlineLDAParams, Estimator):
+    """MLlib-shaped Estimator wrapping spark_vi.models.topic.lda.OnlineLDA.
 
     Param defaults mirror pyspark.ml.clustering.LDA for the shared subset
-    and ADR 0011 for HDP-specific extras (corpusConcentration, docTruncation,
-    topicConcentration, gammaShape, caviMaxIter, caviTol).
-
-    `k` here is the corpus truncation T (upper bound on discoverable topics);
-    `docTruncation` is the doc truncation K (typically much smaller than T).
+    and ADR 0008 for our extras (gammaShape, caviMaxIter, caviTol).
     """
 
     @keyword_only
     def __init__(
         self,
         *,
-        k: int = 150,
-        docTruncation: int = 15,
+        k: int = 10,
         maxIter: int = 20,
         seed: int | None = None,
         featuresCol: str = "features",
@@ -255,58 +203,55 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
         learningDecay: float = 0.51,
         subsamplingRate: float = 0.05,
         docConcentration: list[float] | None = None,
-        corpusConcentration: float | None = None,
         topicConcentration: float | None = None,
+        optimizeDocConcentration: bool = True,
+        optimizeTopicConcentration: bool = False,
         gammaShape: float = 100.0,
         caviMaxIter: int = 100,
-        caviTol: float = 1e-4,
-        optimizeDocConcentration: bool = True,
-        optimizeCorpusConcentration: bool = True,
-        optimizeTopicConcentration: bool = False,
+        caviTol: float = 1e-3,
         saveInterval: int = -1,
         saveDir: str = "",
         resumeFrom: str = "",
     ) -> None:
         super().__init__()
         self._setDefault(
-            k=150, docTruncation=15, maxIter=20,
+            k=10, maxIter=20,
             featuresCol="features", topicDistributionCol="topicDistribution",
             optimizer="online",
             learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05,
-            gammaShape=100.0, caviMaxIter=100, caviTol=1e-4,
             optimizeDocConcentration=True,
-            optimizeCorpusConcentration=True,
             optimizeTopicConcentration=False,
+            gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
         )
         self._set_persistence_defaults()
         # Diagnostic-only iteration callback. Stored as an instance attribute
         # rather than a Param because callables aren't MLlib-serializable
-        # (Pipeline.save persistence is deferred per ADR 0012 anyway).
+        # (Pipeline.save persistence is deferred per ADR 0009 anyway).
         self._on_iteration = None
         kwargs = self._input_kwargs
         self.setParams(**kwargs)
 
     @keyword_only
-    def setParams(self, **kwargs) -> "OnlineHDPEstimator":
+    def setParams(self, **kwargs) -> "OnlineLDAEstimator":
         """Standard MLlib pattern: set any subset of params after construction."""
         return self._set(**kwargs)
 
     def setOnIteration(
         self,
         fn: Callable[[int, dict, list[float]], None] | None,
-    ) -> "OnlineHDPEstimator":
+    ) -> "OnlineLDAEstimator":
         """Register a per-iteration diagnostic callback for the next fit.
 
         Signature: fn(iter_num, global_params, elbo_trace). Runs on the driver
         in the fit's hot path; throttle with a modulo if non-trivial. The
         callback must not mutate global_params — the same dict feeds the next
         iteration's broadcast. Not persisted by Pipeline.save (callables
-        aren't MLlib-serializable; persistence deferred per ADR 0012).
+        aren't MLlib-serializable; persistence deferred per ADR 0009).
         """
         self._on_iteration = fn
         return self
 
-    def _fit(self, dataset) -> "OnlineHDPModel":
+    def _fit(self, dataset) -> "OnlineLDAModel":
         from spark_vi.core.runner import VIRunner
 
         _validate_unsupported_params(self)
@@ -346,9 +291,7 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
         finally:
             bow_rdd.unpersist(blocking=False)
 
-        # T and K ride along in result.metadata via OnlineHDP.get_metadata,
-        # so the Model constructor only needs the result.
-        out_model = OnlineHDPModel(result)
+        out_model = OnlineLDAModel(result)
         # Copy every Param value the Estimator has set or has a default for, so
         # the Model's getters reflect the configuration that produced it.
         for param in self.params:
@@ -359,42 +302,35 @@ class OnlineHDPEstimator(_OnlineHDPParams, Estimator):
         return out_model
 
 
-class OnlineHDPModel(_OnlineHDPParams, _PersistableModel, Model):
+class OnlineLDAModel(_OnlineLDAParams, _PersistableModel, Model):
     """MLlib-shaped Model wrapping a trained spark_vi VIResult.
 
-    Carries the trained global parameters (λ, u, v) plus a copy of every
-    Param from the Estimator that produced it, so post-fit getters
-    (model.getK(), model.getDocTruncation(), ...) return the configuration
-    that was actually used.
+    Carries the trained global parameters plus a copy of every Param from
+    the Estimator that produced it, so post-fit getters (model.getK(), ...)
+    return the configuration that was actually used.
     """
 
     # Stamped into result.metadata by VIRunner as `model_class` (the runner
     # uses type(model).__name__ on the underlying VIModel). Used by
     # _PersistableModel.load to reject checkpoints from other model classes.
-    _expected_model_class = "OnlineHDP"
+    _expected_model_class = "OnlineLDA"
 
     def __init__(self, result) -> None:  # result: VIResult
         super().__init__()
         self._result = result
-        # Shape constants come from result.metadata (populated by
-        # OnlineHDP.get_metadata + VIRunner). This makes the Model
-        # reconstructible from a VIResult alone — necessary for load(path).
-        self._T = int(result.metadata["T"])
-        self._K = int(result.metadata["K"])
         # Seed default Param values on the Model so a freshly-constructed
-        # Model (e.g. via OnlineHDPModel.load) has the values _transform
+        # Model (e.g. via OnlineLDAModel.load) has the values _transform
         # reads. The Estimator's _fit also runs a param-copy loop after
         # construction; that overwrites these with the Estimator's actual
         # configuration. Loaded Models keep these defaults.
         self._setDefault(
-            k=150, docTruncation=15, maxIter=20,
+            k=10, maxIter=20,
             featuresCol="features", topicDistributionCol="topicDistribution",
             optimizer="online",
             learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05,
-            gammaShape=100.0, caviMaxIter=100, caviTol=1e-4,
             optimizeDocConcentration=True,
-            optimizeCorpusConcentration=True,
             optimizeTopicConcentration=False,
+            gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
         )
         self._set_persistence_defaults()
 
@@ -403,77 +339,56 @@ class OnlineHDPModel(_OnlineHDPParams, _PersistableModel, Model):
         """The trained VIResult (global_params, elbo_trace, n_iterations, ...)."""
         return self._result
 
-    # Trained-scalar accessors. Methods rather than @property so the names
-    # don't collide with the underlying Param descriptors (which would
-    # break MLlib's `_set`/`_setDefault` resolution by name). This also
-    # matches pyspark.ml.clustering.LDAModel which exposes
-    # docConcentration() / topicConcentration() as methods. Values are
-    # read from the trained global_params dict so optimize_* flags
-    # surface their post-fit values (ADR 0013); when optimization is off,
-    # global_params still carries the original constructor inputs because
-    # initialize_global seeds them there.
-    def trainedAlpha(self) -> float:
-        """Trained α scalar (doc-stick concentration)."""
-        return float(self._result.global_params["alpha"])
+    def trainedAlpha(self) -> np.ndarray:
+        """Trained α vector (length K).
 
-    def trainedCorpusConcentration(self) -> float:
-        """Trained γ scalar (corpus-stick concentration). HDP-specific —
-        no LDA analog."""
-        return float(self._result.global_params["gamma"])
+        For models trained with optimizeDocConcentration=True, this is the
+        result of empirical-Bayes optimization. For static-α models, it's
+        the initial α (broadcast to length K) — which equals the
+        constructor input either way.
+
+        Method (not @property) to match the HDP shim's pattern; see
+        ADR 0012 §"Trained-scalar accessors" for the methods-vs-properties
+        rationale (the latent collision in this shim was discovered while
+        writing the HDP sibling).
+        """
+        return self._result.global_params["alpha"]
 
     def trainedTopicConcentration(self) -> float:
-        """Trained η scalar (topic-word Dirichlet concentration)."""
+        """Trained η scalar.
+
+        For models trained with optimizeTopicConcentration=True, this is
+        the result of empirical-Bayes optimization. Otherwise it's the
+        initial η.
+
+        Method (not @property) to avoid colliding with the same-named Param
+        descriptor — see ADR 0012 §"Trained-scalar accessors".
+        """
         return float(self._result.global_params["eta"])
 
     def vocabSize(self) -> int:
         """V dimension of the trained lambda."""
         return int(self._result.global_params["lambda"].shape[1])
 
-    def corpusStickWeights(self) -> np.ndarray:
-        """E[β_t] vector (length T) under the mean-field variational posterior.
-
-        Surfaces the effective topic prior so callers can rank/filter active
-        topics. Exact mean under the mean-field q (see _expected_corpus_betas),
-        not an approximation.
-        """
-        u = self._result.global_params["u"]
-        v = self._result.global_params["v"]
-        return expected_corpus_betas(u, v, T=self._T)
-
-    def activeTopicCount(self, mass_threshold: float = 0.95) -> int:
-        """Smallest count of topics whose top-ranked E[β_t] sum to ≥ mass_threshold.
-
-        Truncation-independent: as long as T is ≥ the true effective topic
-        count, the answer doesn't change with T. More robust than a fixed
-        threshold like 1/(2T), which scales with the truncation knob.
-
-        Default 0.95 is the "explained-variance" analog from PCA — count of
-        topics needed to cover 95% of corpus-level prior probability.
-        """
-        return topic_count_at_mass(self.corpusStickWeights(), mass_threshold)
-
     def topicsMatrix(self):
-        """Topic-word distribution as an MLlib DenseMatrix of shape (V, T).
+        """Topic-word distribution as an MLlib DenseMatrix of shape (V, K).
 
-        Internally we keep λ as (T, V); the transpose-and-normalize here
-        matches MLlib's convention where `topicsMatrix` is indexed by
-        (vocab term, topic). Returns the *full* T topics — filtering inactive
-        ones via activeTopicCount() / corpusStickWeights() is a caller decision.
+        Internally we keep lambda as (K, V); the transpose-and-normalize
+        here matches MLlib's convention where `topicsMatrix` is indexed
+        by (vocab term, topic).
         """
         from pyspark.ml.linalg import DenseMatrix
 
         lam = self._result.global_params["lambda"]
-        beta = lam / lam.sum(axis=1, keepdims=True)            # (T, V)
-        T, V = beta.shape
+        beta = lam / lam.sum(axis=1, keepdims=True)  # (K, V), row-stochastic
+        K, V = beta.shape
         # DenseMatrix expects column-major flattened values.
-        return DenseMatrix(numRows=V, numCols=T, values=beta.T.flatten("F").tolist())
+        return DenseMatrix(numRows=V, numCols=K, values=beta.T.flatten("F").tolist())
 
     def describeTopics(self, maxTermsPerTopic: int = 10):
         """DataFrame of (topic, termIndices, termWeights) — top terms per topic.
 
         Schema and orientation match pyspark.ml.clustering.LDAModel.describeTopics.
-        Reports all T topics; pair with corpusStickWeights() if the caller
-        wants to filter to active topics only.
         """
         from pyspark.sql import SparkSession
         from pyspark.sql.types import (
@@ -484,17 +399,17 @@ class OnlineHDPModel(_OnlineHDPParams, _PersistableModel, Model):
             raise ValueError(f"maxTermsPerTopic must be >= 1, got {maxTermsPerTopic}")
 
         lam = self._result.global_params["lambda"]
-        beta = lam / lam.sum(axis=1, keepdims=True)            # (T, V)
-        T, V = beta.shape
+        beta = lam / lam.sum(axis=1, keepdims=True)  # (K, V), row-stochastic
+        K, V = beta.shape
         m = min(maxTermsPerTopic, V)
 
         rows = []
-        for t in range(T):
-            order = np.argsort(beta[t])[::-1][:m]
+        for k in range(K):
+            order = np.argsort(beta[k])[::-1][:m]
             rows.append((
-                int(t),
+                int(k),
                 [int(i) for i in order],
-                [float(beta[t, i]) for i in order],
+                [float(beta[k, i]) for i in order],
             ))
 
         schema = StructType([
@@ -507,48 +422,50 @@ class OnlineHDPModel(_OnlineHDPParams, _PersistableModel, Model):
     def _transform(self, dataset):
         from pyspark.ml.linalg import DenseVector, VectorUDT
         from pyspark.sql import functions as F
+        from scipy.special import digamma
 
-        # Reconstruct the OnlineHDP instance for infer_local. We rebuild it
-        # from the model's Params + trained globals rather than carrying the
-        # original Python object across the fit boundary so the Model is
-        # reconstructible from VIResult alone (matching the LDA shim's
-        # transform-from-globals pattern).
-        T = self._T
-        K = self._K
-        V = self.vocabSize()
-        alpha = self.trainedAlpha()
-        eta = self.trainedTopicConcentration()
-        gamma = self.trainedCorpusConcentration()
+        from spark_vi.models.topic.lda import _cavi_doc_inference
+
+        lam = self._result.global_params["lambda"]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+        # Use the trained α from VIResult — covers both static-α and
+        # optimize_alpha paths uniformly. Always a length-K ndarray now.
+        alpha = self._result.global_params["alpha"]
         gamma_shape = float(self.getOrDefault("gammaShape"))
         cavi_max_iter = int(self.getOrDefault("caviMaxIter"))
         cavi_tol = float(self.getOrDefault("caviTol"))
-
-        global_params = self._result.global_params
+        K = expElogbeta.shape[0]
 
         sc = dataset.sparkSession.sparkContext
         bcast = sc.broadcast({
-            "global_params": global_params,
-            "T": T, "K": K, "V": V,
-            "alpha": alpha, "eta": eta, "gamma": gamma,
+            "expElogbeta": expElogbeta,
+            "alpha": alpha,
             "gamma_shape": gamma_shape,
             "cavi_max_iter": cavi_max_iter,
             "cavi_tol": cavi_tol,
+            "K": K,
         })
 
         def _infer(features):
             params = bcast.value
             doc = _vector_to_bow_document(features)
-            # Rebuild the model on the executor; cheap (just stores scalars
-            # and references to the broadcast globals through closure).
-            model = OnlineHDP(
-                T=params["T"], K=params["K"], vocab_size=params["V"],
-                alpha=params["alpha"], gamma=params["gamma"], eta=params["eta"],
-                gamma_shape=params["gamma_shape"],
-                cavi_max_iter=params["cavi_max_iter"],
-                cavi_tol=params["cavi_tol"],
+            rng = np.random.default_rng()
+            gamma_init = rng.gamma(
+                shape=params["gamma_shape"],
+                scale=1.0 / params["gamma_shape"],
+                size=params["K"],
             )
-            out = model.infer_local(doc, params["global_params"])
-            return DenseVector(out["theta"])
+            gamma, _, _, _ = _cavi_doc_inference(
+                indices=doc.indices,
+                counts=doc.counts,
+                expElogbeta=params["expElogbeta"],
+                alpha=params["alpha"],
+                gamma_init=gamma_init,
+                max_iter=params["cavi_max_iter"],
+                tol=params["cavi_tol"],
+            )
+            return DenseVector(gamma / gamma.sum())
 
         infer_udf = F.udf(_infer, returnType=VectorUDT())
 
@@ -563,12 +480,12 @@ class OnlineHDPModel(_OnlineHDPParams, _PersistableModel, Model):
         raise NotImplementedError(
             "logLikelihood is not implemented in this v1 shim. The training-time "
             "ELBO trace is available on the underlying VIResult via "
-            "OnlineHDPModel.result.elbo_trace."
+            "OnlineLDAModel.result.elbo_trace."
         )
 
     def logPerplexity(self, dataset):
         raise NotImplementedError(
             "logPerplexity is not implemented in this v1 shim. The training-time "
             "ELBO trace is available on the underlying VIResult via "
-            "OnlineHDPModel.result.elbo_trace."
+            "OnlineLDAModel.result.elbo_trace."
         )

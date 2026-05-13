@@ -39,7 +39,7 @@ import numpy as np
 from scipy.special import digamma, gammaln
 
 from spark_vi.core.model import VIModel
-from spark_vi.core.types import BOWDocument
+from spark_vi.models.topic.types import BOWDocument
 from spark_vi.inference.concentration_optimization import (
     alpha_newton_step,
     eta_newton_step,
