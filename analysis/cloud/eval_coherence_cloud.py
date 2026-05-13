@@ -301,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
             reference_rdd = reference_df.rdd.map(BOWDocument.from_spark_row)
             report = compute_npmi_coherence(
                 topic_term, reference_rdd, top_n=args.top_n,
-                hdp_topic_mask=mask,
+                topic_mask=mask,
                 min_pair_count=args.npmi_min_pair_count,
             )
 

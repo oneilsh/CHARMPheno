@@ -174,7 +174,7 @@ def compute_npmi_coherence(
     reference_bow: "RDD[BOWDocument]",
     *,
     top_n: int = 20,
-    hdp_topic_mask: np.ndarray | None = None,
+    topic_mask: np.ndarray | None = None,
     min_pair_count: int = 3,
 ) -> CoherenceReport:
     """NPMI coherence, mean over scored top-N pairs per topic.
@@ -196,9 +196,12 @@ def compute_npmi_coherence(
             local-test scale this is invisible; at cloud scale it is a
             measurable cost.
         top_n: number of top terms per topic. Default 20. Must be <= V.
-        hdp_topic_mask: optional boolean array of length K (or T for HDP). When
-            provided, only mask==True rows of topic_term are scored. None means
-            score all rows (the LDA path).
+        topic_mask: optional boolean array of length K matching topic_term's
+            first axis. When provided, only mask==True rows are scored.
+            None (default) scores all rows. Use cases include selecting the
+            top-K-used HDP topics via top_k_used_topics(u, v, k), filtering
+            out LDA's gracefully-unused tail (insight 0019), or restricting
+            evaluation to a user-specified subset of topics.
         min_pair_count: skip pairs with joint count below this threshold
             in the reference corpus. Default 3 — pairs with counts in
             {0, 1, 2} contribute nothing to their topic mean (vs the
@@ -211,17 +214,17 @@ def compute_npmi_coherence(
         and nan-aware summary stats over the rated topics.
     """
     K_full, V = topic_term.shape
-    if hdp_topic_mask is None:
+    if topic_mask is None:
         scored_rows = np.arange(K_full, dtype=np.int64)
     else:
-        if hdp_topic_mask.shape != (K_full,):
+        if topic_mask.shape != (K_full,):
             raise ValueError(
-                f"hdp_topic_mask shape {hdp_topic_mask.shape} does not match topic_term K={K_full}"
+                f"topic_mask shape {topic_mask.shape} does not match topic_term K={K_full}"
             )
-        scored_rows = np.flatnonzero(hdp_topic_mask).astype(np.int64)
+        scored_rows = np.flatnonzero(topic_mask).astype(np.int64)
 
     if scored_rows.size == 0:
-        raise ValueError("hdp_topic_mask selected zero topics; nothing to score")
+        raise ValueError("topic_mask selected zero topics; nothing to score")
 
     filtered_topic_term = topic_term[scored_rows]
     top_n_indices = _top_n_terms_per_topic(filtered_topic_term, top_n=top_n)

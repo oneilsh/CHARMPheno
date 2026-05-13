@@ -34,7 +34,7 @@ def _expected_corpus_betas(u: np.ndarray, v: np.ndarray) -> np.ndarray:
 def top_k_used_topics(*, u: np.ndarray, v: np.ndarray, k: int) -> np.ndarray:
     """Boolean mask of length T selecting the top-K topics by E[beta_t].
 
-    Use as the `hdp_topic_mask` argument to compute_npmi_coherence.
+    Use as the `topic_mask` argument to compute_npmi_coherence.
     """
     if u.shape != v.shape:
         raise ValueError(f"u and v must have the same length; got {u.shape} and {v.shape}")

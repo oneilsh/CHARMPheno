@@ -118,7 +118,7 @@ def run_eval(
     reference_rdd = reference_df.rdd.map(BOWDocument.from_spark_row)
 
     report = compute_npmi_coherence(
-        topic_term, reference_rdd, top_n=top_n, hdp_topic_mask=mask,
+        topic_term, reference_rdd, top_n=top_n, topic_mask=mask,
         min_pair_count=npmi_min_pair_count,
     )
 

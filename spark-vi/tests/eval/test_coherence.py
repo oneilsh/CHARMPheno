@@ -362,7 +362,7 @@ def test_compute_npmi_coherence_hdp_mask_path(sc):
     rdd = sc.parallelize(docs, numSlices=2)
 
     report = compute_npmi_coherence(
-        topic_term, rdd, top_n=2, hdp_topic_mask=mask, min_pair_count=1,
+        topic_term, rdd, top_n=2, topic_mask=mask, min_pair_count=1,
     )
     assert report.per_topic_npmi.shape == (2,)
     assert list(report.topic_indices) == [0, 2]
@@ -380,7 +380,7 @@ def test_compute_npmi_coherence_empty_mask_raises(sc):
         [BOWDocument(indices=np.array([0, 1], dtype=np.int32), counts=np.array([1.0, 1.0]), length=2)]
     )
     with pytest.raises(ValueError, match="zero topics"):
-        compute_npmi_coherence(topic_term, rdd, top_n=2, hdp_topic_mask=mask)
+        compute_npmi_coherence(topic_term, rdd, top_n=2, topic_mask=mask)
 
 
 def test_compute_npmi_coherence_threshold_produces_unrated_topic(sc):
