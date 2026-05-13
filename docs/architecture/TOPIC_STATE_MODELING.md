@@ -124,11 +124,38 @@ hyperlipidemia, long-term insulin use) would load heavily on a "metabolic syndro
 management" phenotype. The model discovers these phenotypes unsupervised from
 co-occurrence patterns across millions of visits.
 
-**Why visits are the right document unit.** A clinical visit is a natural,
+**Choice of document unit.** A clinical visit is a natural,
 semantically coherent bundle of diagnoses — it captures what is going on with a
 patient at a point in time. Alternative slicing strategies (per-day, per-week,
 per-patient) either produce documents too sparse to infer topics from, or collapse
 temporal structure that we want to preserve for the dynamics stage.
+
+In practice doc-unit choice is a *load-bearing experimental knob* (see
+[`docs/insights/0008`](../insights/0008-patient-year-docs-surface-transient-phenotypes.md),
+[`0010`](../insights/0010-npmi-not-comparable-across-doc-units.md),
+[`0014`](../insights/0014-patient-year-npmi-bimodal-vs-lifetime-unimodal.md)),
+not a one-time decision. We make it pluggable via the `DocSpec` strategy
+in `charmpheno.omop.doc_spec` ([ADR 0018](../decisions/0018-document-unit-abstraction.md));
+each subclass declares how event rows become documents, validates its column
+requirements, and round-trips through `VIResult.metadata["corpus_manifest"]["doc_spec"]`
+so eval drivers can reproduce fit-time docs from the checkpoint alone. The
+v1 specs are `PatientDocSpec` (one doc per patient lifetime, the pre-ADR
+default) and `PatientYearDocSpec` (one doc per patient-year-active, with
+era replication). Candidate future specs that fit the abstraction cleanly:
+
+- `VisitDocSpec` — `doc_id = visit_occurrence_id`. Within-visit
+  co-occurrence; the visit-level granularity discussed above.
+- `EpisodeDocSpec` — one doc per clinically-defined care episode (a
+  cluster of conditions over days–weeks). Sits between patient-year
+  and visit; requires an upstream episode-detection pass.
+- `WindowedDocSpec` — sliding N-day windows centered on a reference
+  event. Useful for onset/prodrome studies.
+- `AgeBandDocSpec` — `doc_id = "{person_id}:{age_band}"`. Different
+  temporal axis than year-active — by life stage rather than calendar
+  year.
+
+Each is one class + manifest round-trip; the BOW build, fit drivers, and
+eval drivers don't change.
 
 ### Why Existing Dynamic Topic Models Don't Fit
 

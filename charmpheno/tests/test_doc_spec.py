@@ -176,3 +176,67 @@ def test_clips_future_end_dates(spark):
         f"future-dated end should clip to current year, got {len(out)} rows "
         f"(expected {expected_count})"
     )
+
+
+def test_patient_year_null_end_date_emits_single_year(spark):
+    """NULL end_date with a valid start_date should coalesce to a single-
+    year span at the start year — not silently expand into a multi-year
+    span via F.least's null-skipping semantics (the pre-fix behavior).
+    """
+    df = spark.createDataFrame(
+        [
+            (1, 100, "htn", dt.date(2015, 3, 1), None),
+            (1, 200, "t2dm", dt.date(2017, 1, 1), dt.date(2017, 12, 31)),
+        ],
+        schema=(
+            "person_id INT, concept_id INT, concept_name STRING, "
+            "condition_era_start_date DATE, condition_era_end_date DATE"
+        ),
+    )
+    spec = PatientYearDocSpec(min_doc_length=0)
+    out = spec.derive_docs(df).collect()
+    # HTN era with NULL end → single year at 2015 (not 2015..today).
+    # T2DM era with full year span → also single year at 2017.
+    doc_ids = sorted(row["doc_id"] for row in out)
+    assert doc_ids == ["1:2015", "1:2017"]
+
+
+def test_patient_year_null_start_date_drops_row(spark):
+    """A row with NULL start_date has no anchor year and should be dropped
+    explicitly (rather than falling out of F.explode silently)."""
+    df = spark.createDataFrame(
+        [
+            (1, 100, "htn", dt.date(2015, 3, 1), dt.date(2015, 12, 31)),
+            (1, 200, "t2dm", None, dt.date(2017, 12, 31)),
+            (1, 300, "mystery", None, None),
+        ],
+        schema=(
+            "person_id INT, concept_id INT, concept_name STRING, "
+            "condition_era_start_date DATE, condition_era_end_date DATE"
+        ),
+    )
+    spec = PatientYearDocSpec(min_doc_length=0)
+    out = spec.derive_docs(df).collect()
+    # Only the HTN row survives; both NULL-start rows are dropped.
+    assert len(out) == 1
+    assert out[0]["doc_id"] == "1:2015"
+
+
+def test_patient_year_null_start_date_drops_row_no_replication(spark):
+    """The NULL-start-date drop applies equally under replicate_eras=False
+    — otherwise the row would survive with a NULL year_active and produce
+    doc_id='person_id:null'."""
+    df = spark.createDataFrame(
+        [
+            (1, 100, "htn", dt.date(2015, 3, 1), dt.date(2015, 12, 31)),
+            (1, 200, "t2dm", None, dt.date(2017, 12, 31)),
+        ],
+        schema=(
+            "person_id INT, concept_id INT, concept_name STRING, "
+            "condition_era_start_date DATE, condition_era_end_date DATE"
+        ),
+    )
+    spec = PatientYearDocSpec(min_doc_length=0, replicate_eras=False)
+    out = spec.derive_docs(df).collect()
+    assert len(out) == 1
+    assert out[0]["doc_id"] == "1:2015"

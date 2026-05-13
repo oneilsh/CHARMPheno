@@ -133,6 +133,19 @@ class PatientYearDocSpec(DocSpec):
     occurrence-style data that lacks an end date — set `date_start_col`
     accordingly.
 
+    NULL-handling (both paths):
+      - Rows where ``date_start_col`` is NULL are dropped. Without a
+        start year there is no anchor to assign the event to a doc, so
+        the row carries no signal here.
+      - With ``replicate_eras=True`` and a NULL ``date_end_col``, the
+        end year coalesces to the start year — a missing end is treated
+        as "we observed the event in year Y; we don't know its
+        persistence beyond that." The alternative ("chronic until
+        today") would silently inflate every undated row into a
+        multi-decade span, which is rarely the right default for OMOP
+        data. If a chronic-until-today reading is wanted, prefer
+        explicit imputation upstream of this spec.
+
     Default `min_doc_length=30` per the cutoff curve in
     analysis/cloud/doc_size_evals.ipynb: drops noise-floor patient-years
     (chronic-era padding in low-activity calendar years) before fit.
@@ -160,16 +173,27 @@ class PatientYearDocSpec(DocSpec):
                 f"{sorted(needed)}, missing: {missing}. "
                 f"Available columns: {sorted(cols)}"
             )
+
+        # Drop rows lacking a start date — no anchor year, no doc. See the
+        # class docstring for the rationale on both NULL-handling rules.
+        events_df = events_df.where(F.col(self.date_start_col).isNotNull())
+
         if self.replicate_eras:
             # F.sequence(start_year, end_year) is inclusive on both ends.
             # F.explode turns each event into N rows (one per year_active);
             # F.least clips future-dated end years to the current year so a
             # pathological 9999-12-31 end date doesn't blow up the array.
+            # F.coalesce makes a NULL end_year fall back to start_year so
+            # the row emits a single-year span rather than being silently
+            # treated as "active until today" (the prior implicit behavior,
+            # which fell out of F.least's null-skipping semantics).
             current_year = F.year(F.current_date())
-            years_active = F.sequence(
-                F.year(F.col(self.date_start_col)),
-                F.least(F.year(F.col(self.date_end_col)), current_year),
+            start_year = F.year(F.col(self.date_start_col))
+            end_year = F.coalesce(
+                F.year(F.col(self.date_end_col)),
+                start_year,
             )
+            years_active = F.sequence(start_year, F.least(end_year, current_year))
             exploded = events_df.withColumn(
                 "year_active", F.explode(years_active),
             )
