@@ -169,7 +169,7 @@ class VIRunner:
         # Per-iteration trajectories of model-supplied scalars/small-arrays.
         # Populated below from model.iteration_diagnostics(); empty if the
         # model doesn't override the default.
-        diagnostic_traces: dict[str, list[float | np.ndarray]] = {}
+        diagnostic_traces: dict[str, list[Any]] = {}
 
         # If mini-batching is enabled, count the corpus once and seed the RNG
         # used to derive per-iteration sample seeds. corpus_size matches the
