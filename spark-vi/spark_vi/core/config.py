@@ -15,7 +15,11 @@ class VIConfig:
     """Immutable configuration for the VI training loop.
 
     Attributes:
-        max_iterations: hard upper bound on training iterations.
+        max_iterations: hard upper bound on training iterations *per fit
+            invocation*. On a resume (VIRunner.fit(..., resume_from=path)
+            or shim resumeFrom), this is the number of *additional* iters
+            to run, not a target total — i.e. resuming a 50-iter
+            checkpoint with max_iterations=30 yields 80 total iters.
         learning_rate_tau0: delay parameter in rho_t = (tau0 + t)^-kappa, where
             t indexes iterations from 1 per Hoffman et al. 2013. The runner
             indexes iterations from 0 internally, so it evaluates the

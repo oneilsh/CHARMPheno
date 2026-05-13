@@ -87,11 +87,12 @@ help:
 	@echo "                         LDA_BQ_ARGS='--K 50 --max-iter 200 ...'"
 	@echo "                         EVAL_ARGS='--top-n 20'  SAVE_INTERVAL=10"
 	@echo "                         To RESUME a prior run with more iterations:"
-	@echo "                           make lda-bq-fit-eval RUN_ID=<existing-id> LDA_BQ_ARGS='--max-iter <new total>'"
+	@echo "                           make lda-bq-fit-eval RUN_ID=<existing-id> LDA_BQ_ARGS='--max-iter <N more>'"
+	@echo "                         --max-iter on resume is ADDITIONAL iters (not a target total)."
 	@echo "  make hdp-bq-fit-eval - End-to-end HDP fit + eval; same shape as lda-bq-fit-eval."
 	@echo "                         HDP_BQ_ARGS='--T 150 --K 15 ...'"
 	@echo "                         EVAL_ARGS='--model-class hdp --hdp-k 50'"
-	@echo "                         RESUME: make hdp-bq-fit-eval RUN_ID=<existing-id> HDP_BQ_ARGS='--max-iter <new total>'"
+	@echo "                         RESUME: make hdp-bq-fit-eval RUN_ID=<existing-id> HDP_BQ_ARGS='--max-iter <N more>'"
 	@echo "  make inspect         - Live polling dashboard (run in a sibling terminal)"
 	@echo "                         Override args via INSPECT_ARGS='--interval 3'"
 	@echo "  make smoke-dataproc  - alternate: stage to GCS, gcloud dataproc jobs submit pyspark"
@@ -205,8 +206,11 @@ eval-bq-coherence: zip $(WORKSPACE_ENV)
 #
 # Resume: pass RUN_ID=<existing-run-id> to continue a prior run with more
 # iterations. If the dir exists, RESUME_FROM is auto-set and fit continues
-# from the saved iteration count. Bump --max-iter in *_BQ_ARGS to the new
-# total target. Hyperparameters affecting the BOW (vocab-size, min-df,
+# from the saved iteration count. --max-iter in *_BQ_ARGS is the number of
+# ADDITIONAL iters to run, not a target total: resuming a 50-iter
+# checkpoint with --max-iter 30 yields 80 total iters. The Robbins-Monro
+# counter is preserved across the boundary so step sizes match a
+# continuous run. Hyperparameters affecting the BOW (vocab-size, min-df,
 # person-mod, source-table, doc-unit, doc-min-length) MUST match the
 # original run — they're not yet auto-validated.
 #
