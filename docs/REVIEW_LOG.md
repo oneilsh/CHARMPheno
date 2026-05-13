@@ -12,64 +12,106 @@ elsewhere.
 
 ---
 
-## 2026-05-13 — split removed; eval vocab-frozen (ADR 0017 revision)
+## 2026-05-13 — Post-cloud-bring-up walkthrough (ADR 0014–0019 retrospective + refactors)
 
-The train/holdout split machinery became methodologically vestigial after
-the 2026-05-12 NPMI revision (full-corpus reference as default). This
-session removes it in full and decouples the eval from any specific
-fit-time input by reading the saved vocab from `metadata["vocab"]` and
-freezing the BOW build through it.
+End-to-end walkthrough of the work since the 2026-05-07 HDP-concentration
+session: ~117 commits, five new ADRs (0014–0018), a sixth ADR shipped
+during the walkthrough (0019), and a third revision to ADR 0017. Seven
+lessons covered the layered architecture (rename + diagnostic surface;
+shim checkpointing; models namespace; topic-coherence math; eval-driver
+orchestration; DocSpec abstraction; insights-as-doc-genre convention).
+Several in-session refactors shipped where the walkthrough surfaced a
+mismatch between current code and clearer architecture.
 
-### What shipped
+### What shipped during the walkthrough
 
-- ADR 0017 gains a 2026-05-13 revision section describing the removal
-  and the vocab-freezing companion change.
-- `charmpheno/charmpheno/omop/split.py` deleted (and its test file
-  `charmpheno/tests/test_split.py`).
-- `verify_split_contract` deleted from `analysis/_eval_common.py`; the
-  module is now just `print_ranked_report` + `_resolve_use_color`.
-- Fit drivers (`fit_lda_local.py`, `fit_hdp_local.py`,
-  `lda_bigquery_cloud.py`, `hdp_bigquery_cloud.py`) lose
-  `--holdout-fraction` and `--holdout-seed` CLI flags, the
-  `split_bow_by_person` call site, and the `metadata["split"]` stamp.
-- Eval drivers (`eval_coherence.py`, `eval_coherence_cloud.py`) lose
-  `--holdout-fraction`, `--seed`/`--holdout-seed`, and
-  `--npmi-reference` CLI flags. The reference is always the full BOW.
-  Both drivers now read `metadata["vocab"]` and pass it to
-  `to_bow_dataframe(vocab=...)` to freeze indices.
-- `to_bow_dataframe` (in `charmpheno/charmpheno/omop/topic_prep.py`)
-  gains an optional `vocab: list[int] | None` parameter. When
-  supplied, the CountVectorizer fit step is replaced by
-  `CountVectorizerModel.from_vocabulary(...)`; tokens not in the vocab
-  are silently dropped from the SparseVector output.
-- New tests in `charmpheno/tests/test_to_bow_dataframe.py` cover the
-  frozen-vocab round-trip, the rejection of vocab + vocab_size /
-  min_df combinations, and the rejection of None-bearing vocab lists.
-- `analysis/cloud/Makefile` loses any `--holdout-fraction` /
-  `--npmi-reference` references.
+- **ADR 0019** (new) — moved `mllib/{lda,hdp}.py` → `mllib/topic/` and
+  `core/types.py` (BOWDocument) → `models/topic/types.py`, completing
+  the ADR 0016 namespacing convention. `mllib/_common.py` split along
+  the same seam (generic shim infra stays; topic-specific
+  `_vector_to_bow_document` moves to `mllib/topic/_common.py`).
+  Public top-level surface preserved via `__init__.py` re-exports;
+  all in-tree deep imports updated.
+- **ADR 0017 third revision (2026-05-13)** — train/holdout split
+  removed in full. `charmpheno/charmpheno/omop/split.py` and
+  `verify_split_contract` deleted; `--holdout-fraction` /
+  `--holdout-seed` / `--npmi-reference` CLI flags removed from all
+  drivers; `metadata["split"]` no longer stamped. Eval drivers now
+  read `metadata["vocab"]` and freeze the BOW build via a new
+  `vocab` parameter on `to_bow_dataframe` (uses
+  `CountVectorizerModel.from_vocabulary`), decoupling the eval from
+  any specific fit-time input parquet.
+- **`iteration_diagnostics` broadened** (detour from Lesson 1) — the
+  trace value type widened from `float | np.ndarray` to
+  `dict[str, Any]` with JSON-serializability validated eagerly at save
+  time. `io/export.py` gains a `"json"`-kind classifier so per-iter
+  top-N labels, named markers, etc. round-trip cleanly. Storage stays
+  inspectable; tests cover the round-trip, mixed-kind rejection, and
+  non-serializable rejection.
+- **`hdp_topic_mask` → `topic_mask` on `compute_npmi_coherence`** —
+  the parameter name leaked HDP framing into the topic-coherence
+  orchestrator, which is model-family-agnostic. Renamed; docstring
+  rewritten to surface non-HDP use cases (e.g. filtering LDA's
+  gracefully-unused tail per insight 0019).
+- **PatientYearDocSpec NULL handling** — explicit rules replacing
+  Spark's implicit behaviors. NULL `date_start_col` rows are dropped
+  (was: silently dropped via `F.explode(NULL)` on replicate path,
+  silently retained with `year_active=NULL` on no-replicate path —
+  inconsistent). NULL `date_end_col` with `replicate_eras=True`
+  coalesces to start year, yielding a single-year span (was: silently
+  treated as "active until today" via `F.least`'s null-skipping).
+  Three new tests pin the behavior.
+- **`_PersistenceParams` kwarg-enumeration documentation** — the
+  shim's `@keyword_only` constructor pattern requires Params declared
+  on the mixin to also appear literally in the concrete `__init__`
+  signature. The trap caught the cloud driver once (commit `6475429`);
+  this session documents the rule on the mixin docstring, in the
+  concrete shim signatures, and via a renamed regression test
+  (`test_constructor_accepts_persistence_kwargs`).
+- **`--max-iter` on resume documentation fix** — three docstrings/
+  comments said "new total target" but the runner has always treated
+  `cfg.max_iterations` as additional iters per fit invocation. Updated
+  VIConfig docstring, Makefile help text, and recipe-body comment to
+  match actual behavior.
+- **Architecture-doc expansion on DocSpec** — `TOPIC_STATE_MODELING.md`
+  gains a short paragraph + bulleted candidate-future-spec list under
+  the "Choice of document unit" section (renamed from "Why visits are
+  the right document unit"). Cross-links insights 0008/0010/0014 and
+  ADR 0018. Captures VisitDocSpec, EpisodeDocSpec, WindowedDocSpec,
+  AgeBandDocSpec as future-spec ideas that fit the abstraction
+  cleanly.
+- **Lesson 7 / insights-log convention review (no code change)** —
+  walked through the `decisions/` vs `insights/` doc-genre split, the
+  Observed/Confirmed/Tentative/Refuted-by-NNNN status lifecycle, the
+  "refute, don't delete" discipline, and the cross-link pattern
+  between insights and ADRs (canonical example: insight 0007 → ADR
+  0017 revisions → insight 0018). The convention is what makes the
+  ADR-0017-revision arc work cleanly; worth naming explicitly as
+  load-bearing project infrastructure.
 
-### Why
+### Pre-existing issues caught
 
-The split was load-bearing when "held-out NPMI" was the canonical
-methodology. Once the full-corpus reference became the default (no
-overfitting concern for NPMI — topic-word distributions are fixed
-post-fit), the split kept the same CLI surface and metadata schema
-without any of its benefit. The eval driver was also implicitly tied
-to the fit-time input parquet because it rebuilt the vocab fresh;
-swapping in a different parquet silently produced misaligned column
-indices. Freezing the vocab via `metadata["vocab"]` decouples the eval
-entirely — `(checkpoint, any OMOP parquet) → CoherenceReport` is the
-new shape.
-
-If held-out evaluation matters again later, the natural place to
-restore it is data-prep time: partition the OMOP parquet into named
-artifacts (`train.parquet`, `holdout.parquet`) and let the user choose
-which one to feed each driver. The fit/eval drivers would not need to
-know.
+- `fit_charmpheno_local.py` is missing `-Djava.security.manager=allow`
+  in its Spark config (the LDA and HDP local drivers have it). The
+  bootstrap-era integration test fails under JDK 17 for this reason.
+  Pre-existing; not fixed in this walkthrough but flagged.
+- `analysis/cloud/Makefile` recipe boilerplate for `lda-bq-fit-eval`
+  and `hdp-bq-fit-eval` is genuine copy-paste — the two spark-submit
+  blocks differ only in the model script and a few flags. Worth a
+  Makefile `define` template eventually; premature now.
 
 ### Threads parked
 
-- None. The change is self-contained.
+- Driver + Makefile complexity is on a watch list — the cloud LDA
+  driver is ~500 LOC doing argparse, Spark session, BQ wiring,
+  Estimator construction, callback factories, post-fit augmentation.
+  Refactor at next pain point (candidate extractions: a shared
+  `analysis/_cloud_common.py`, the `_phase` helper, the on-iteration
+  callback factory; Makefile template for the spark-submit body).
+- `fit_charmpheno_local.py` JDK 17 security-manager fix above.
+- Future DocSpec candidates documented in
+  `docs/architecture/TOPIC_STATE_MODELING.md`; revisit when a specific
+  analysis calls for one.
 
 ## 2026-05-07 — HDP concentration-parameter optimization (ADR 0013)
 
