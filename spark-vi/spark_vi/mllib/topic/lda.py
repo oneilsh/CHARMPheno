@@ -82,6 +82,8 @@ def _build_model_and_config(
     topic_conc = estimator.getOrDefault("topicConcentration") if estimator.isSet("topicConcentration") else None
     eta = 1.0 / k if topic_conc is None else float(topic_conc)
 
+    seed = estimator.getOrDefault("seed") if estimator.isSet("seed") else None
+
     model = OnlineLDA(
         K=k,
         vocab_size=vocab_size,
@@ -92,9 +94,9 @@ def _build_model_and_config(
         gamma_shape=estimator.getOrDefault("gammaShape"),
         cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
         cavi_tol=estimator.getOrDefault("caviTol"),
+        random_seed=seed,
     )
 
-    seed = estimator.getOrDefault("seed") if estimator.isSet("seed") else None
     config = VIConfig(
         max_iterations=estimator.getOrDefault("maxIter"),
         learning_rate_tau0=estimator.getOrDefault("learningOffset"),

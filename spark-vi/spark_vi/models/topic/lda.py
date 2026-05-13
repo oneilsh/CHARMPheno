@@ -33,6 +33,7 @@ References:
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Iterable
 
 import numpy as np
@@ -113,6 +114,13 @@ class OnlineLDA(VIModel):
 
     Hyperparameters match Spark MLlib's pyspark.ml.clustering.LDA defaults
     so head-to-head comparisons are apples-to-apples.
+
+    random_seed (optional) controls the lambda initialization and the per-doc
+    gamma_init draw. When set, the per-doc draw is content-deterministic (seed
+    derived from a hash of doc.indices + doc.counts + random_seed) so the same
+    doc gets the same init regardless of executor / partition / iteration
+    order. When None, both draws fall back to numpy's global RNG (legacy
+    behavior, non-deterministic across runs).
     """
 
     def __init__(
@@ -126,6 +134,7 @@ class OnlineLDA(VIModel):
         gamma_shape: float = 100.0,
         cavi_max_iter: int = 100,
         cavi_tol: float = 1e-3,
+        random_seed: int | None = None,
     ) -> None:
         if K < 1:
             raise ValueError(f"K must be >= 1, got {K}")
@@ -167,6 +176,7 @@ class OnlineLDA(VIModel):
         self.cavi_tol = float(cavi_tol)
         self.optimize_alpha = bool(optimize_alpha)
         self.optimize_eta = bool(optimize_eta)
+        self.random_seed = None if random_seed is None else int(random_seed)
 
     # Contract methods (filled in over subsequent tasks).
 
@@ -181,11 +191,19 @@ class OnlineLDA(VIModel):
 
         gamma_shape=100 trace: see Hoffman 2010's onlineldavb.py line 126.
         """
-        lam = np.random.gamma(
-            shape=self.gamma_shape,
-            scale=1.0 / self.gamma_shape,
-            size=(self.K, self.V),
-        )
+        if self.random_seed is None:
+            lam = np.random.gamma(
+                shape=self.gamma_shape,
+                scale=1.0 / self.gamma_shape,
+                size=(self.K, self.V),
+            )
+        else:
+            rng = np.random.default_rng(self.random_seed)
+            lam = rng.gamma(
+                shape=self.gamma_shape,
+                scale=1.0 / self.gamma_shape,
+                size=(self.K, self.V),
+            )
         return {
             "lambda": lam,
             "alpha": self.alpha.copy(),         # defensive copy — runner mutates
@@ -220,15 +238,29 @@ class OnlineLDA(VIModel):
         e_log_theta_sum = np.zeros(self.K, dtype=np.float64) if self.optimize_alpha else None
 
         # gamma_init draws Gamma(gamma_shape, 1/gamma_shape) per doc — same as MLlib.
+        # When random_seed is set, derive a per-doc seed from a stable hash of
+        # the doc's content so the draw is content-deterministic regardless of
+        # executor / partition / iteration order. When None, fall back to the
+        # global RNG (legacy behavior).
         for doc in rows:
-            # TODO: per-doc reproducibility for MLlib comparisons — derive seed
-            # from a per-doc deterministic key (e.g., hash of doc.indices +
-            # cfg.random_seed) instead of numpy's global RNG.
-            gamma_init = np.random.gamma(
-                shape=self.gamma_shape,
-                scale=1.0 / self.gamma_shape,
-                size=self.K,
-            )
+            if self.random_seed is None:
+                gamma_init = np.random.gamma(
+                    shape=self.gamma_shape,
+                    scale=1.0 / self.gamma_shape,
+                    size=self.K,
+                )
+            else:
+                h = hashlib.blake2b(digest_size=8)
+                h.update(str(self.random_seed).encode("utf-8"))
+                h.update(np.ascontiguousarray(doc.indices, dtype=np.int32).tobytes())
+                h.update(np.ascontiguousarray(doc.counts, dtype=np.float64).tobytes())
+                doc_seed = int.from_bytes(h.digest(), "little")
+                doc_rng = np.random.default_rng(doc_seed)
+                gamma_init = doc_rng.gamma(
+                    shape=self.gamma_shape,
+                    scale=1.0 / self.gamma_shape,
+                    size=self.K,
+                )
             gamma, expElogthetad, phi_norm, _ = _cavi_doc_inference(
                 indices=doc.indices,
                 counts=doc.counts,
