@@ -32,6 +32,8 @@ def _build_spark() -> SparkSession:
         .config("spark.sql.shuffle.partitions", "4")
         .config("spark.driver.memory", "2g")
         .config("spark.ui.enabled", "false")
+        .config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow")
+        .config("spark.executor.extraJavaOptions", "-Djava.security.manager=allow")
         .getOrCreate()
     )
 
@@ -56,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
         # odd → 0. This is nonsensical for clinical data but exercises the
         # end-to-end pipeline with real Spark distribution.
         rdd = df.select("concept_id").rdd.map(lambda row: 1 if row["concept_id"] % 2 == 0 else 0)
+        rdd.persist()
+        rdd.count()
 
         runner = VIRunner(
             CountingModel(prior_alpha=1.0, prior_beta=1.0),
