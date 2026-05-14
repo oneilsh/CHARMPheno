@@ -30,16 +30,20 @@
     <header class="head">
       <span class="eyebrow">Phenotype detail</span>
       <h2 class="title">{pheno.label || `Phenotype ${pheno.id}`}</h2>
+      {#if pheno.description}
+        <p class="desc-text">{pheno.description}</p>
+      {/if}
       <div class="stats" data-numeric>
         <span class="stat"><span class="stat-k">Prev</span> <span class="stat-v">{(pheno.corpus_prevalence * 100).toFixed(1)}%</span></span>
         {#if $advancedView}
           <span class="stat"><span class="stat-k">NPMI</span> <span class="stat-v">{pheno.npmi.toFixed(3)}</span></span>
+          <span class="stat"><span class="stat-k">Pair cov</span> <span class="stat-v">{(pheno.pair_coverage * 100).toFixed(0)}%</span></span>
           {#if pheno.original_topic_id !== pheno.id}
             <span class="stat"><span class="stat-k">Topic</span> <span class="stat-v">#{pheno.original_topic_id}</span></span>
           {/if}
-        {/if}
-        {#if pheno.junk_flag}
-          <span class="stat junk"><span class="stat-k">Coherence</span> <span class="stat-v">low</span></span>
+          {#if pheno.quality}
+            <span class="stat quality q-{pheno.quality}"><span class="stat-k">Quality</span> <span class="stat-v">{pheno.quality}</span></span>
+          {/if}
         {/if}
       </div>
     </header>
@@ -142,7 +146,21 @@
     color: var(--ink);
     font-weight: 500;
   }
-  .stat.junk .stat-v { color: var(--danger); }
+  .desc-text {
+    margin: 0.1rem 0 0.15rem;
+    font-size: var(--fs-small);
+    color: var(--ink-muted);
+    line-height: 1.5;
+    max-width: 60ch;
+  }
+  .stat.quality .stat-v {
+    text-transform: capitalize;
+    font-weight: 600;
+  }
+  .stat.q-dead .stat-v { color: var(--danger); }
+  .stat.q-mixed .stat-v { color: #b45309; }
+  .stat.q-anchor .stat-v { color: var(--accent); }
+  .stat.q-background .stat-v { color: var(--ink-muted); }
 
   /* Slider row */
   .slider-row {

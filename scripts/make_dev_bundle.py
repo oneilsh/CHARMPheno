@@ -62,23 +62,32 @@ def main() -> int:
         })
     (args.out_dir / "vocab.json").write_text(json.dumps({"codes": codes}))
 
-    # phenotypes.json (NPMI is fake; spread around 0 with one junk-flagged)
+    # phenotypes.json — fake NPMI / pair_coverage / quality so the
+    # dashboard's simple/advanced modes both have something to render.
     npmi = rng.normal(0.15, 0.08, size=args.k)
-    npmi[-1] = -0.1  # one junk for the badge UI
+    pair_cov = rng.uniform(0.4, 1.0, size=args.k)
     corpus_prev = rng.dirichlet(alpha=np.full(args.k, 2.0))
+    qualities = ["phenotype"] * args.k
+    if args.k >= 1:
+        qualities[-1] = "dead"  # one dead so the simple-mode filter has work
+    if args.k >= 2:
+        qualities[-2] = "mixed"
+    if args.k >= 3:
+        qualities[0] = "background"
     (args.out_dir / "phenotypes.json").write_text(json.dumps({
         "phenotypes": [
             {
                 "id": k,
                 "label": "",
+                "description": "",
+                "quality": qualities[k],
                 "npmi": float(npmi[k]),
+                "pair_coverage": float(pair_cov[k]),
                 "corpus_prevalence": float(corpus_prev[k]),
-                "junk_flag": bool(npmi[k] < 0),
                 "original_topic_id": k,
             }
             for k in range(args.k)
         ],
-        "npmi_threshold": 0.0,
     }))
 
     # corpus_stats.json

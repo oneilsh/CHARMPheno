@@ -1,9 +1,16 @@
 export interface Model { K: number; V: number; alpha: number[]; beta: number[][] }
+// `quality` and `description` come from the post-fit labeling step
+// (scripts/label_phenotypes.py). Missing/null on freshly-exported
+// bundles — the dashboard treats null as "unlabeled / show everything".
+export type PhenotypeQuality =
+  'phenotype' | 'background' | 'anchor' | 'mixed' | 'dead'
 export interface Phenotype {
-  id: number; label: string; npmi: number; corpus_prevalence: number;
-  junk_flag: boolean; original_topic_id: number
+  id: number; label: string; description: string;
+  quality: PhenotypeQuality | null;
+  npmi: number; pair_coverage: number; corpus_prevalence: number;
+  original_topic_id: number
 }
-export interface PhenotypesBundle { phenotypes: Phenotype[]; npmi_threshold: number }
+export interface PhenotypesBundle { phenotypes: Phenotype[] }
 export interface VocabCode {
   id: number; code: string; description: string; domain: string; corpus_freq: number
 }

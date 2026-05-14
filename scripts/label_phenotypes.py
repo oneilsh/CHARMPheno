@@ -1,42 +1,52 @@
 """Generate concise human-readable labels for phenotypes in a dashboard bundle.
 
 For each phenotype, picks the top-N codes by Sievert-Shirley lambda-relevance
-(matches the dashboard's λ=0.6 default), sends them to a Claude model, and
-writes the returned label back into phenotypes.json's `label` field.
+(matches the dashboard's lambda=0.6 default), sends them to an LLM via
+pydantic-ai, and writes the returned label back into phenotypes.json's `label`
+field.
 
-By design, the script does NOT use the standard ANTHROPIC_API_KEY env var.
-Instead it reads CHARMPHENO_LABEL_KEY (rename via --api-key-env), or a key
-file path (--api-key-file). This keeps the labeling key isolated from other
-Anthropic SDK callers (notably Claude Code) that might be active in the
-same shell.
+The provider is auto-selected from the first per-provider env var that is
+set, in this priority order:
+
+    CHARMPHENO_LABEL_KEY_ANTHROPIC  -> anthropic:claude-haiku-4-5
+    CHARMPHENO_LABEL_KEY_OPENAI     -> openai:gpt-4o-mini
+    CHARMPHENO_LABEL_KEY_GOOGLE     -> google-gla:gemini-2.5-flash
+
+You can put all three in your .env and the script will pick the first
+available; delete a key from .env to fall through to the next provider.
+Override the model explicitly with `--model <prefix>:<name>` — the script
+will use the env var matching that prefix.
+
+The script intentionally does NOT read provider-specific env vars like
+ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY — that keeps the
+labeling keys in their own namespace so they can't accidentally cross-bill
+with another SDK caller running in the same shell (notably Claude Code,
+which auto-picks up ANTHROPIC_API_KEY).
 
 Sources of the key, in order:
-  1. --api-key-file <path>            (file contents)
-  2. --api-key-env <NAME>             (process env, default CHARMPHENO_LABEL_KEY)
+  1. --api-key-file <path>            (file contents; requires --model too)
+  2. CHARMPHENO_LABEL_KEY_* env vars  (process env)
   3. .env file (auto-loaded)          (only populates THIS process's env,
                                        does not export to the parent shell)
-
-Even if your .env happens to also contain ANTHROPIC_API_KEY, this script
-ignores it — and the SDK client is constructed with api_key= explicitly,
-so the SDK's own env-var fallback is never triggered.
 
 Usage:
     # one-time install of the labeling deps
     poetry install --with labeling
 
-    # option A: .env in the repo root
-    echo 'CHARMPHENO_LABEL_KEY=sk-ant-...' >> .env
+    # .env in the repo root with any of:
+    #   CHARMPHENO_LABEL_KEY_ANTHROPIC=sk-ant-...
+    #   CHARMPHENO_LABEL_KEY_OPENAI=sk-...
+    #   CHARMPHENO_LABEL_KEY_GOOGLE=...
     poetry run python scripts/label_phenotypes.py \\
         --bundle-dir dashboard/public/data
 
-    # option B: env var
-    export CHARMPHENO_LABEL_KEY=sk-ant-...
+    # force a specific provider:
     poetry run python scripts/label_phenotypes.py \\
-        --bundle-dir dashboard/public/data
+        --model openai:gpt-4o-mini
 
-    # option C: key file (never enters env at all)
+    # key from a file (never enters env at all):
     poetry run python scripts/label_phenotypes.py \\
-        --bundle-dir dashboard/public/data \\
+        --model anthropic:claude-haiku-4-5 \\
         --api-key-file ~/.charmpheno-label-key
 
 The script is idempotent: phenotypes that already have a non-empty `label`
@@ -52,57 +62,147 @@ import sys
 import tempfile
 from pathlib import Path
 
+from typing import Literal
 
-DEFAULT_API_KEY_ENV = "CHARMPHENO_LABEL_KEY"
-DEFAULT_MODEL = "claude-haiku-4-5"
+from pydantic import BaseModel, Field
+
+
 DEFAULT_TOP_N = 15
 DEFAULT_LAMBDA = 0.6
 DEFAULT_MAX_WORDS = 6
 
-# System prompt is stable across all phenotypes -> cache it once and reread
-# on every subsequent request. The breakpoint goes on the system block so
-# any per-phenotype variation in the user message doesn't invalidate it.
-SYSTEM_PROMPT = """\
-You are a clinical informatics expert summarizing learned phenotypes from \
-an LDA topic model trained over OMOP healthcare records.
+# Provider priority order. The first entry whose env var is set wins when
+# `--model` is not provided. When `--model` IS provided, its prefix selects
+# which env var to read (and the entry's default name is ignored).
+#   (model_prefix, env_var, default_model_name)
+PROVIDER_CHAIN: list[tuple[str, str, str]] = [
+    ("anthropic", "CHARMPHENO_LABEL_KEY_ANTHROPIC", "claude-haiku-4-5"),
+    ("openai", "CHARMPHENO_LABEL_KEY_OPENAI", "gpt-4o-mini"),
+    ("google-gla", "CHARMPHENO_LABEL_KEY_GOOGLE", "gemini-2.5-flash"),
+]
 
-You will be given a phenotype's top weighted codes (concept descriptions \
-ranked by Sievert-Shirley relevance — a mix of frequency within the topic \
-and lift over the corpus). Each code is one of: condition, drug, procedure, \
-measurement, or observation.
+QualityCategory = Literal["phenotype", "background", "anchor", "mixed", "dead"]
 
-Your task: produce a single concise label that captures the clinical theme \
-shared by these codes.
 
-Guidelines:
-- Use clinical terminology a clinician would recognize ("Type 2 diabetes \
-care", "Postoperative orthopedic recovery"), not lay phrasing.
-- Be specific. "Cardiovascular" alone is too vague; "Heart failure & \
+def _build_system_prompt(max_words: int) -> str:
+    # The {MAX_WORDS} substitution is done at build time so the resulting
+    # string is byte-identical across all topics in a run (enabling prompt
+    # caching where the provider supports it).
+    return f"""\
+You are a clinical informatics expert interpreting learned topics from \
+an LDA topic model trained over patient records. Each topic is a \
+distribution over clinical concepts; you will be given a topic's top \
+concepts ranked by Sievert-Shirley relevance, plus three topic-level \
+statistics.
+
+The current model is trained over patient conditions only (no drugs, \
+procedures, measurements, or labs); your interpretations should reflect \
+that — describe conditions and their clinical relationships, not \
+treatments or workups.
+
+## Topic-level statistics
+
+- **NPMI** (normalized pointwise mutual information): a scalar in \
+[-1, 1] summarizing how strongly the topic's top-N concepts co-occur \
+in the reference corpus, relative to chance. Higher = more coherent \
+top-N. NPMI alone is not enough — common conditions always co-occur, \
+so a topic dominated by common comorbidities can score moderate-to- \
+high NPMI without representing a real cluster.
+- **pair_coverage**: fraction of the topic's top-N concept pairs that \
+contributed to the NPMI calculation (cleared the minimum-joint-count \
+threshold in the reference corpus). Low pair_coverage means most of \
+the top-N pairs are too rare to score; NPMI is then averaged over \
+only a few pairs and is less reliable.
+- **usage**: total mass this topic carries across the corpus. Near- \
+floor usage means the topic is essentially unused regardless of how \
+its top-N looks.
+
+## Quality categories
+
+Classify each topic into exactly one of:
+
+- **phenotype**: a recognizable disease/condition cluster with a \
+coherent clinical theme. Moderate-to-high usage; top concepts share \
+a clinical story. The common case for clinically useful topics.
+
+- **background**: a large catch-all carrying a substantial slice of \
+corpus mass (high usage). Typical flavors include chronic-comorbidity \
+(e.g. HTN/HLD/T2DM/GERD/anxiety), acute-presentation (e.g. pain/ \
+chest pain/nausea/SoB/vomiting), or metabolic-syndrome. Coherent but \
+not a discrete phenotype; useful for cohort exclusion, not selection.
+
+- **anchor**: dominated by a single specific concept (one term carries \
+most of the within-topic weight). Narrow but interpretable.
+
+- **mixed**: top concepts span unrelated clinical themes; no shared \
+theme survives a clinician's reading. Often a sign of insufficient \
+model capacity rather than a real cluster.
+
+- **dead**: an essentially unused topic sitting at the prior-smoothing \
+floor (near-floor usage). Two sub-flavors that look different but \
+are equally unusable:
+  (a) top concepts are rare or weird and the topic never accumulated \
+      meaningful data — NPMI is typically low and pair_coverage low \
+      because the rare top-N pairs don't clear the threshold;
+  (b) top concepts are common comorbidities and NPMI is moderate-to- \
+      high with high pair_coverage, but usage is near-floor. The top-N \
+      reflects baseline corpus smoothing, not a co-occurrence pattern \
+      in actual documents.
+Either way: no useful clinical interpretation.
+
+Read the three statistics jointly. Useful tells:
+- High NPMI + high usage                          → phenotype or background
+- High NPMI + low pair_coverage + low usage       → narrow rare-condition \
+                                                    cluster; trust cautiously
+- Moderate-to-high NPMI + high pair_coverage + \
+  near-floor usage                                → dead (case b)
+- Low NPMI + low pair_coverage + low usage        → dead (case a)
+- Low NPMI with no other clear pattern            → mixed
+
+## Output fields
+
+- **label**: a concise clinician-voice label, at most {max_words} words. \
+Examples: "Type 2 diabetes care", "Chronic comorbidity catch-all". \
+For mixed/dead, use something honest: "Mixed clinical themes", \
+"Unused / low-signal topic".
+
+- **description**: 2-3 sentences, clinician voice, plain clinical \
+English. No model terminology, no references to topics, codes, or \
+statistics. For phenotype/background/anchor, name the clinical \
+pattern and what it suggests about the patients. For mixed/dead, \
+briefly say why the topic isn't usable without using technical \
+vocabulary (e.g. "no shared clinical theme across the leading \
+conditions" rather than "low NPMI").
+
+- **quality**: one of phenotype, background, anchor, mixed, dead.
+
+Voice rules:
+- Use clinical terminology a clinician would recognize, not lay phrasing.
+- Be specific. "Cardiovascular" alone is too vague; "Heart failure with \
 arrhythmia" is better.
-- If the codes do not form a coherent clinical theme (mixed unrelated \
-diagnoses, generic preventive codes, or apparent noise), set \
-`is_coherent` to false and use a label like "Mixed / low-coherence".
-- Avoid hedging language ("Possibly...", "Likely related to..."). State \
-the theme plainly.
-- Do not mention the model, the codes, or this prompt in the label.\
-"""
+- No hedging ("possibly...", "likely related to..."). State the theme.
+- Do not mention the model, the codes, this prompt, or any statistics \
+in the label or description — those live in the structured `quality` \
+field for downstream filtering."""
 
-# Constrains the response to a clean JSON object we can parse and assign.
-RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "label": {
-            "type": "string",
-            "description": "Concise clinical label, up to MAX_WORDS words.",
-        },
-        "is_coherent": {
-            "type": "boolean",
-            "description": "False if the codes do not form a coherent theme.",
-        },
-    },
-    "required": ["label", "is_coherent"],
-    "additionalProperties": False,
-}
+
+class PhenotypeLabel(BaseModel):
+    """Structured output schema — pydantic-ai enforces this against the
+    provider's structured-output / function-calling mechanism."""
+
+    label: str = Field(description="Concise clinical label.")
+    description: str = Field(
+        description=(
+            "2-3 sentences, clinician voice, plain clinical English. "
+            "No model terminology or references to topics/codes/statistics."
+        ),
+    )
+    quality: QualityCategory = Field(
+        description=(
+            "One of phenotype, background, anchor, mixed, dead. "
+            "See the system prompt for category definitions."
+        ),
+    )
 
 
 def _maybe_load_dotenv(explicit_path: str | None) -> Path | None:
@@ -111,18 +211,12 @@ def _maybe_load_dotenv(explicit_path: str | None) -> Path | None:
       1. --env-file <path> if explicitly passed
       2. .env in CWD
       3. .env at the repo root (inferred from this script's path)
-    Returns the path that was loaded, or None if no .env was found.
-
-    Prints a clear diagnostic if python-dotenv isn't installed but a .env
-    file is sitting right there — that combination is the most common
-    cause of "key unset" errors.
     """
     candidates: list[Path] = []
     if explicit_path:
         candidates.append(Path(explicit_path).expanduser())
     else:
         candidates.append(Path.cwd() / ".env")
-        # scripts/label_phenotypes.py -> repo root
         candidates.append(Path(__file__).resolve().parent.parent / ".env")
 
     existing = [c for c in candidates if c.is_file()]
@@ -142,49 +236,134 @@ def _maybe_load_dotenv(explicit_path: str | None) -> Path | None:
         return None
 
     for c in existing:
-        # override=False so a real env var still wins over the file —
-        # matters if the user wants to temporarily override .env for
-        # one invocation without editing the file.
+        # override=False so a real env var still wins over the file.
         load_dotenv(c, override=False)
         return c
     return None
 
 
-def _resolve_api_key(args: argparse.Namespace) -> str:
-    """Get the API key from --api-key-file or the configured env var.
+def _read_key_file(path: str) -> str:
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise SystemExit(f"--api-key-file not found: {p}")
+    key = p.read_text().strip()
+    if not key:
+        raise SystemExit(f"--api-key-file is empty: {p}")
+    return key
 
-    Explicitly does NOT fall back to ANTHROPIC_API_KEY — keeping the
-    labeling key in its own namespace avoids accidental cross-billing
-    with other Anthropic SDK callers running in the same shell.
+
+def _resolve_provider_and_key(args: argparse.Namespace) -> tuple[str, str]:
+    """Decide which provider+model to use and return (model_string, api_key).
+
+    Resolution:
+      1. If --api-key-file is set: require --model so we know which provider
+         to talk to; use that file's contents as the key.
+      2. Else if --model is set: look up its prefix in PROVIDER_CHAIN and
+         read the corresponding env var.
+      3. Else: walk PROVIDER_CHAIN in priority order, use the first entry
+         whose env var is set (with its default model name).
+
+    Never reads provider-specific env vars like ANTHROPIC_API_KEY etc. —
+    keys must be in the CHARMPHENO_LABEL_KEY_* namespace.
     """
     if args.api_key_file:
-        p = Path(args.api_key_file).expanduser()
-        if not p.is_file():
-            raise SystemExit(f"--api-key-file not found: {p}")
-        key = p.read_text().strip()
+        if not args.model:
+            raise SystemExit(
+                "--api-key-file requires --model so the provider is "
+                "unambiguous (e.g. --model anthropic:claude-haiku-4-5)."
+            )
+        return args.model, _read_key_file(args.api_key_file)
+
+    if args.model:
+        if ":" not in args.model:
+            raise SystemExit(
+                f"--model must be prefixed, e.g. 'anthropic:claude-haiku-4-5'. "
+                f"Got: {args.model!r}"
+            )
+        prefix = args.model.split(":", 1)[0]
+        match = next((e for e in PROVIDER_CHAIN if e[0] == prefix), None)
+        if match is None:
+            supported = ", ".join(p for p, _, _ in PROVIDER_CHAIN)
+            raise SystemExit(
+                f"unsupported model prefix {prefix!r}. "
+                f"Supported: {supported}."
+            )
+        _, env_var, _ = match
+        key = os.environ.get(env_var)
         if not key:
-            raise SystemExit(f"--api-key-file is empty: {p}")
-        return key
-    key = os.environ.get(args.api_key_env)
-    if not key:
-        # Diagnostic: surface what's actually in os.environ (just the key
-        # names, not the values) so the user can spot a typo.
-        candidates = sorted(
-            k for k in os.environ
-            if "ANTHROPIC" in k.upper()
-            or "CHARMPHENO" in k.upper()
-            or "LABEL" in k.upper()
-            or k == args.api_key_env
-        )
-        cands_str = ", ".join(candidates) if candidates else "(none)"
+            raise SystemExit(
+                f"--model selected provider {prefix!r}, but env var "
+                f"{env_var} is not set (and no --api-key-file given).\n"
+                f"  Set {env_var}=... in your shell or .env."
+            )
+        return args.model, key
+
+    # Auto-pick: first env var set wins.
+    for prefix, env_var, default_name in PROVIDER_CHAIN:
+        key = os.environ.get(env_var)
+        if key:
+            return f"{prefix}:{default_name}", key
+
+    seen = sorted(
+        k for k in os.environ
+        if "CHARMPHENO" in k.upper() or "LABEL" in k.upper()
+    )
+    seen_str = ", ".join(seen) if seen else "(none)"
+    expected = "\n    ".join(v for _, v, _ in PROVIDER_CHAIN)
+    raise SystemExit(
+        f"No API key found.\n"
+        f"  Set one of these env vars (or put them in .env):\n"
+        f"    {expected}\n"
+        f"  Related env vars in this process: {seen_str}\n"
+        f"  (This script intentionally does not read provider-specific env "
+        f"vars like ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY.)"
+    )
+
+
+def _build_agent(model_str: str, api_key: str, max_words: int):
+    """Build a pydantic-ai Agent for the given model string with the API
+    key passed in explicitly (not via env), structured output, and the
+    shared system prompt.
+
+    The provider prefix (`openai:`, `anthropic:`, `google-gla:`, ...)
+    controls which provider class is instantiated. We pass api_key=
+    directly so pydantic-ai never consults env vars under any provider.
+    """
+    from pydantic_ai import Agent
+
+    if ":" not in model_str:
         raise SystemExit(
-            f"No API key found.\n"
-            f"  Looked for: env var {args.api_key_env!r}, --api-key-file, "
-            f"or a .env file with {args.api_key_env}=...\n"
-            f"  Related env vars in this process: {cands_str}\n"
-            f"  (This script intentionally does not read ANTHROPIC_API_KEY.)"
+            f"--model must be prefixed, e.g. 'google-gla:gemini-2.5-flash', "
+            f"'openai:gpt-4o-mini', 'anthropic:claude-haiku-4-5'. "
+            f"Got: {model_str!r}"
         )
-    return key
+    prefix, name = model_str.split(":", 1)
+
+    if prefix == "google-gla":
+        from pydantic_ai.models.google import GoogleModel
+        from pydantic_ai.providers.google import GoogleProvider
+        model = GoogleModel(name, provider=GoogleProvider(api_key=api_key))
+    elif prefix == "openai":
+        from pydantic_ai.models.openai import OpenAIModel
+        from pydantic_ai.providers.openai import OpenAIProvider
+        model = OpenAIModel(name, provider=OpenAIProvider(api_key=api_key))
+    elif prefix == "anthropic":
+        from pydantic_ai.models.anthropic import AnthropicModel
+        from pydantic_ai.providers.anthropic import AnthropicProvider
+        model = AnthropicModel(
+            name, provider=AnthropicProvider(api_key=api_key),
+        )
+    else:
+        raise SystemExit(
+            f"unsupported model prefix {prefix!r}. "
+            f"Supported: google-gla, openai, anthropic."
+        )
+
+    return Agent(
+        model,
+        system_prompt=_build_system_prompt(max_words),
+        output_type=PhenotypeLabel,
+    )
 
 
 def _lambda_relevance(pwk: float, pw: float, lam: float) -> float:
@@ -197,8 +376,6 @@ def _lambda_relevance(pwk: float, pw: float, lam: float) -> float:
         return -math.inf
     log_pwk = math.log(pwk)
     if pw <= 0:
-        # Code never appears in the corpus; lift is infinite. Saturate to a
-        # large finite value rather than -inf so sorting still works.
         return lam * log_pwk + (1.0 - lam) * 1e6
     return lam * log_pwk + (1.0 - lam) * math.log(pwk / pw)
 
@@ -210,8 +387,10 @@ def _top_codes_for_phenotype(
     lam: float,
     n: int,
 ) -> list[dict]:
-    """Pick top-N codes for a phenotype by relevance. vocab is the
-    full vocab.json `codes` array (index-aligned with beta columns)."""
+    """Pick top-N concepts by Sievert-Shirley relevance. Each entry
+    carries description, within-topic weight (%), and lift = p(w|k)/p(w)
+    over the corpus. Domain is dropped — the current model is conditions-
+    only, so it would be a constant column."""
     pw = [c.get("corpus_freq", 0.0) for c in vocab]
     scored = [
         (i, _lambda_relevance(beta_row[i], pw[i], lam))
@@ -221,77 +400,74 @@ def _top_codes_for_phenotype(
     out: list[dict] = []
     for idx, _score in scored[:n]:
         c = vocab[idx]
+        pwk = beta_row[idx]
+        pw_i = pw[idx]
+        lift = (pwk / pw_i) if pw_i > 0 else float("inf")
         out.append({
-            "code": c.get("code"),
             "description": c.get("description") or c.get("code"),
-            "domain": c.get("domain", "unknown"),
-            "weight_pct": round(beta_row[idx] * 100.0, 3),
+            "weight_pct": round(pwk * 100.0, 3),
+            "lift": lift,
         })
     return out
 
 
-def _build_user_message(*, phenotype_id: int, top_codes: list[dict],
-                        max_words: int) -> str:
-    """Per-phenotype user prompt. Everything that changes per phenotype
-    lives here; the cached system prompt above stays byte-identical."""
+def _build_user_message(
+    *,
+    phenotype_id: int,
+    top_codes: list[dict],
+    npmi: float,
+    pair_coverage: float,
+    usage_frac: float,
+    max_words: int,
+) -> str:
     lines = [
-        f"Phenotype id: {phenotype_id}",
+        f"Topic id: {phenotype_id}",
         f"Label budget: at most {max_words} words.",
         "",
-        "Top codes (description · domain · within-topic weight):",
+        "Topic statistics:",
+        f"  NPMI:           {npmi:.3f}",
+        f"  pair_coverage:  {pair_coverage:.0%} of top-N pairs scored",
+        f"  usage:          {usage_frac * 100:.2f}% of total corpus mass",
+        "",
+        "Top conditions (description · within-topic weight · lift over corpus):",
     ]
     for r, c in enumerate(top_codes, start=1):
+        lift_str = "×∞" if c["lift"] == float("inf") else f"×{c['lift']:.1f}"
         lines.append(
-            f"  {r:>2}. {c['description']}  ·  {c['domain']}  "
-            f"·  {c['weight_pct']:.2f}%"
+            f"  {r:>2}. {c['description']}  ·  {c['weight_pct']:.2f}%  "
+            f"·  {lift_str}"
         )
     return "\n".join(lines)
 
 
 def _label_one(
     *,
-    client,
-    model: str,
+    agent,
     phenotype_id: int,
     top_codes: list[dict],
+    npmi: float,
+    pair_coverage: float,
+    usage_frac: float,
     max_words: int,
-) -> tuple[str, bool, dict]:
-    """Make one Messages API call. Returns (label, is_coherent, usage_dict)."""
+) -> tuple[PhenotypeLabel, dict]:
+    """One labeling call. Returns (output, usage_dict)."""
     user_text = _build_user_message(
-        phenotype_id=phenotype_id, top_codes=top_codes, max_words=max_words,
+        phenotype_id=phenotype_id, top_codes=top_codes,
+        npmi=npmi, pair_coverage=pair_coverage, usage_frac=usage_frac,
+        max_words=max_words,
     )
-    resp = client.messages.create(
-        model=model,
-        max_tokens=128,
-        system=[
-            {
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[{"role": "user", "content": user_text}],
-        output_config={
-            "format": {
-                "type": "json_schema",
-                "schema": RESPONSE_SCHEMA,
-            }
-        },
-    )
-    text = next(b.text for b in resp.content if b.type == "text")
-    parsed = json.loads(text)
+    result = agent.run_sync(user_text)
+    out: PhenotypeLabel = result.output
+    # pydantic-ai usage shape is provider-agnostic; tolerate missing fields.
+    u = result.usage()
     usage = {
-        "input": resp.usage.input_tokens,
-        "output": resp.usage.output_tokens,
-        "cache_read": resp.usage.cache_read_input_tokens,
-        "cache_write": resp.usage.cache_creation_input_tokens,
+        "input": getattr(u, "request_tokens", None) or getattr(u, "input_tokens", 0) or 0,
+        "output": getattr(u, "response_tokens", None) or getattr(u, "output_tokens", 0) or 0,
     }
-    return parsed["label"].strip(), bool(parsed["is_coherent"]), usage
+    return out, usage
 
 
 def _write_atomic(path: Path, data: dict) -> None:
-    """Write JSON via temp-file + rename so a crash mid-write can't truncate
-    the bundle the dashboard is reading."""
     tmp = tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8",
         dir=str(path.parent), prefix=path.name + ".",
@@ -321,8 +497,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Dir containing model.json, vocab.json, phenotypes.json",
     )
     parser.add_argument(
-        "--model", default=DEFAULT_MODEL,
-        help="Anthropic model id for labeling",
+        "--model", default=None,
+        help="pydantic-ai model string, e.g. 'anthropic:claude-haiku-4-5', "
+             "'openai:gpt-4o-mini', 'google-gla:gemini-2.5-flash'. "
+             "If omitted, auto-selects based on which CHARMPHENO_LABEL_KEY_* "
+             "env var is set (anthropic > openai > google).",
     )
     parser.add_argument(
         "--top-n", type=int, default=DEFAULT_TOP_N,
@@ -337,13 +516,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Label length budget in words",
     )
     parser.add_argument(
-        "--api-key-env", default=DEFAULT_API_KEY_ENV,
-        help="Env var to read the API key from. Default is a non-standard "
-             "name so it never collides with ANTHROPIC_API_KEY.",
-    )
-    parser.add_argument(
         "--api-key-file", type=str, default=None,
-        help="Path to a file containing the API key (alternative to env var).",
+        help="Path to a file containing the API key (alternative to env var). "
+             "Requires --model so the provider is unambiguous.",
     )
     parser.add_argument(
         "--env-file", type=str, default=None,
@@ -364,8 +539,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Pull .env into this process's environ before reading any *_KEY var.
-    # No-op (silent) if python-dotenv isn't installed or no .env exists.
     loaded = _maybe_load_dotenv(args.env_file)
     if loaded:
         print(f"[label] loaded env from {loaded}", flush=True)
@@ -398,7 +571,6 @@ def main(argv: list[str] | None = None) -> int:
             f"size); is this a pre-trim bundle?",
         )
 
-    # Plan the work — skip phenotypes that already have a label unless --force.
     todo: list[int] = []
     for i, p in enumerate(phenotypes):
         existing = (p.get("label") or "").strip()
@@ -414,15 +586,37 @@ def main(argv: list[str] | None = None) -> int:
         print("[label] nothing to do", flush=True)
         return 0
 
+    # Required stats fed to the model. Missing stats are a bundle bug; we
+    # error explicitly rather than substituting defaults so a stale bundle
+    # can't silently produce labels with no statistical grounding.
+    for i, p in enumerate(phenotypes):
+        for key in ("npmi", "pair_coverage", "corpus_prevalence"):
+            if key not in p:
+                raise SystemExit(
+                    f"phenotype {i} missing {key!r} — re-export the bundle "
+                    f"with a current write_phenotypes_bundle."
+                )
+
+    def _stats_for(i: int) -> tuple[float, float, float]:
+        p = phenotypes[i]
+        return (
+            float(p["npmi"]),
+            float(p["pair_coverage"]),
+            float(p["corpus_prevalence"]),
+        )
+
     if args.dry_run:
         for i in todo[:3]:
             top = _top_codes_for_phenotype(
                 beta_row=beta[i], vocab=vocab_codes,
                 lam=args.lam, n=args.top_n,
             )
+            npmi, pcov, usage_frac = _stats_for(i)
             print(f"\n--- phenotype {i} (dry-run preview) ---", flush=True)
             print(_build_user_message(
-                phenotype_id=i, top_codes=top, max_words=args.max_words,
+                phenotype_id=i, top_codes=top,
+                npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
+                max_words=args.max_words,
             ), flush=True)
         if len(todo) > 3:
             print(f"\n... and {len(todo) - 3} more "
@@ -430,57 +624,54 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n[label] dry-run only; no API calls made", flush=True)
         return 0
 
-    # Resolve the key only when we actually need to make calls.
     try:
-        import anthropic  # noqa: WPS433
+        import pydantic_ai  # noqa: F401, WPS433
     except ImportError:
         raise SystemExit(
-            "anthropic SDK not installed. Run: poetry install --with labeling"
+            "pydantic-ai not installed. Run: poetry install --with labeling"
         )
 
-    api_key = _resolve_api_key(args)
-    client = anthropic.Anthropic(api_key=api_key)
+    model_str, api_key = _resolve_provider_and_key(args)
+    agent = _build_agent(model_str, api_key, max_words=args.max_words)
+    print(f"[label] using model {model_str}", flush=True)
 
-    total = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+    total = {"input": 0, "output": 0}
     for n, i in enumerate(todo, start=1):
         top = _top_codes_for_phenotype(
             beta_row=beta[i], vocab=vocab_codes,
             lam=args.lam, n=args.top_n,
         )
+        npmi, pcov, usage_frac = _stats_for(i)
         try:
-            label, coherent, usage = _label_one(
-                client=client, model=args.model,
-                phenotype_id=i, top_codes=top, max_words=args.max_words,
+            out, usage = _label_one(
+                agent=agent,
+                phenotype_id=i, top_codes=top,
+                npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
+                max_words=args.max_words,
             )
-        except anthropic.APIError as e:
-            print(f"[label] phenotype {i}: API error: {e}", flush=True)
-            # Persist what we've labeled so far before re-raising.
+        except Exception as e:
+            print(f"[label] phenotype {i}: error: {e}", flush=True)
             _write_atomic(phens_p, phens_b)
             raise
 
         for k in total:
             total[k] += usage[k]
 
-        phenotypes[i]["label"] = label
-        # If the model judged the cluster incoherent, prefer that signal over
-        # whatever junk_flag was set by NPMI alone.
-        if not coherent:
-            phenotypes[i]["junk_flag"] = True
+        phenotypes[i]["label"] = out.label.strip()
+        phenotypes[i]["description"] = out.description.strip()
+        phenotypes[i]["quality"] = out.quality
 
-        cache_hit = "HIT " if usage["cache_read"] else "miss"
         print(
-            f"[label] {n:>3}/{len(todo)}  k={i:<3}  "
-            f"[{cache_hit}]  {label}",
+            f"[label] {n:>3}/{len(todo)}  k={i:<3}  [{out.quality:<10}]  "
+            f"{out.label}",
             flush=True,
         )
 
-    # One final atomic write at the end.
     _write_atomic(phens_p, phens_b)
 
     print(
         f"\n[label] wrote {len(todo)} labels to {phens_p}\n"
-        f"[label] tokens — input {total['input']}, output {total['output']}, "
-        f"cache_read {total['cache_read']}, cache_write {total['cache_write']}",
+        f"[label] tokens — input {total['input']}, output {total['output']}",
         flush=True,
     )
     return 0

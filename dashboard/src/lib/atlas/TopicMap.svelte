@@ -1,8 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import * as d3 from 'd3'
-  import { bundle, selectedPhenotypeId, colorMode, hoveredCodeIdx } from '../store'
+  import { bundle, selectedPhenotypeId, colorMode, hoveredCodeIdx, advancedView } from '../store'
   import { computeJsdMds } from '../mds'
+
+  // Simple mode hides `dead` and `mixed` topics. `null` (unlabeled bundle)
+  // and the other three categories all show. Advanced mode shows everything.
+  function isHiddenInSimpleMode(p: { quality: string | null }): boolean {
+    return p.quality === 'dead' || p.quality === 'mixed'
+  }
 
   function phenotypesWithCode(idx: number | null, n = 20): Set<number> {
     if (!$bundle || idx === null) return new Set()
@@ -40,16 +46,24 @@
 
   function render() {
     if (!$bundle || !svgEl || coords.length === 0) return
-    const phenotypes = $bundle.phenotypes.phenotypes
+    // Mode-aware filter: simple hides dead+mixed; advanced shows all.
+    // x/y/r scales are computed against the FULL set so the layout is
+    // stable across mode toggles (we don't want bubbles jumping around).
+    const allPhenotypes = $bundle.phenotypes.phenotypes
+    const phenotypes = $advancedView
+      ? allPhenotypes
+      : allPhenotypes.filter((p) => !isHiddenInSimpleMode(p))
     const xExt = d3.extent(coords, (c) => c[0]) as [number, number]
     const yExt = d3.extent(coords, (c) => c[1]) as [number, number]
     const x = d3.scaleLinear().domain(xExt).range([MARGIN, W - MARGIN])
     const y = d3.scaleLinear().domain(yExt).range([H - MARGIN, MARGIN])
+    // Use the FULL phenotype set for the prevalence scale domain so bubble
+    // size doesn't rescale between simple and advanced modes.
     const r = d3.scaleSqrt()
-      .domain(d3.extent(phenotypes, (p) => p.corpus_prevalence) as [number, number])
+      .domain(d3.extent(allPhenotypes, (p) => p.corpus_prevalence) as [number, number])
       .range([5, 26])
 
-    const prevExt = d3.extent(phenotypes, (p) => p.corpus_prevalence) as [number, number]
+    const prevExt = d3.extent(allPhenotypes, (p) => p.corpus_prevalence) as [number, number]
     prevRamp.domain(prevExt)
     const colorFn = (p: typeof phenotypes[0]) =>
       $colorMode === 'prevalence' ? prevRamp(p.corpus_prevalence) : npmiRamp(p.npmi)
@@ -94,17 +108,25 @@
       .attr('stroke-dasharray', '3,2')
       .attr('stroke-width', (p) => (highlighted.has(p.id) ? 1.25 : 0))
 
-    // Junk indicator — small dot on the bubble's edge
-    g.selectAll('circle.junk')
-      .data(phenotypes.filter((p) => p.junk_flag))
-      .join('circle')
-      .attr('class', 'junk')
-      .attr('cx', (p) => x(coords[p.id][0]) + r(p.corpus_prevalence) * 0.7)
-      .attr('cy', (p) => y(coords[p.id][1]) - r(p.corpus_prevalence) * 0.7)
-      .attr('r', 2.5)
-      .attr('fill', '#ef4444')
-      .attr('stroke', '#fff')
-      .attr('stroke-width', 1)
+    // Quality indicator (advanced mode only) — small colored dot on the
+    // bubble's edge for dead/mixed topics. Simple mode hides these
+    // topics entirely so no marker is needed there.
+    const qualityMarkColor: Record<string, string> = {
+      dead: '#ef4444',   // red
+      mixed: '#f59e0b',  // amber
+    }
+    if ($advancedView) {
+      g.selectAll('circle.quality-mark')
+        .data(phenotypes.filter((p) => p.quality && qualityMarkColor[p.quality]))
+        .join('circle')
+        .attr('class', 'quality-mark')
+        .attr('cx', (p) => x(coords[p.id][0]) + r(p.corpus_prevalence) * 0.7)
+        .attr('cy', (p) => y(coords[p.id][1]) - r(p.corpus_prevalence) * 0.7)
+        .attr('r', 2.5)
+        .attr('fill', (p) => qualityMarkColor[p.quality!])
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 1)
+    }
 
     // Label for the selected phenotype above its bubble
     if ($selectedPhenotypeId !== null) {
@@ -138,7 +160,7 @@
       .text((p) => `${p.label || `Phenotype ${p.id}`}\nNPMI ${p.npmi.toFixed(3)} · prev ${(p.corpus_prevalence * 100).toFixed(1)}%`)
   }
 
-  $: $colorMode, $selectedPhenotypeId, $hoveredCodeIdx, $bundle && svgEl && coords.length && render()
+  $: $colorMode, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $bundle && svgEl && coords.length && render()
   onMount(render)
 </script>
 

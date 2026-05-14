@@ -21,15 +21,15 @@ nbstripout = ">=0.7"
 
 # Optional: deps for the post-fit phenotype-labeling script.
 # Install with `poetry install --with labeling`. Kept out of the default
-# group so cluster/CI installs don't pull the Anthropic SDK (and so a stray
-# ANTHROPIC_API_KEY in the shell can't be accidentally picked up by other
-# tooling — the script reads CHARMPHENO_LABEL_KEY by default, not the SDK's
-# default env var).
+# group so cluster/CI installs don't pull these. The script is provider-
+# agnostic via pydantic-ai and reads CHARMPHENO_LABEL_KEY by default — never
+# provider-specific env vars (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.) — so
+# a stray key in the shell can't accidentally cross-bill another SDK caller.
 [tool.poetry.group.labeling]
 optional = true
 
 [tool.poetry.group.labeling.dependencies]
-anthropic = ">=0.40"
+pydantic-ai-slim = {version = ">=1.0", extras = ["google", "openai", "anthropic"]}
 python-dotenv = ">=1.0"
 
 [build-system]

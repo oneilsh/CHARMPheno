@@ -78,7 +78,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vocab-top-n", type=int, default=5000,
                         help="trim vocab to top-N codes by corpus_freq")
     parser.add_argument("--top-n-codes-for-npmi", type=int, default=20)
-    parser.add_argument("--junk-threshold", type=float, default=0.0)
     args = parser.parse_args(argv)
 
     cdr_env = os.environ.get("WORKSPACE_CDR")
@@ -233,6 +232,12 @@ def main(argv: list[str] | None = None) -> int:
             rated = ~np.isnan(report.per_topic_npmi)
             assert (report.per_topic_npmi[rated] >= -1.0).all(), "NPMI < -1"
             assert (report.per_topic_npmi[rated] <= 1.0).all(), "NPMI > 1"
+            # Fraction of top-N pairs that contributed to each topic's mean
+            # NPMI. Zero means "unrated" — no pairs cleared min_pair_count.
+            pair_coverage = (
+                report.per_topic_scored_pairs.astype(float)
+                / float(report.per_topic_total_pairs)
+            ).tolist()
 
         bow_df_kept.unpersist()
         bow_df_stats.unpersist()
@@ -253,10 +258,10 @@ def main(argv: list[str] | None = None) -> int:
             write_phenotypes_bundle(
                 out_dir / "phenotypes.json",
                 npmi=npmi,
+                pair_coverage=pair_coverage,
                 corpus_prevalence=export.corpus_prevalence.tolist(),
                 topic_indices=export.topic_indices.tolist(),
                 labels=None,
-                junk_threshold=args.junk_threshold,
             )
             write_corpus_stats_sidecar(
                 stats, out_dir / "corpus_stats.json", v_displayed=v_disp,

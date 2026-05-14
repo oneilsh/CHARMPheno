@@ -70,22 +70,26 @@ def test_write_phenotypes_bundle(tmp_path: Path):
     write_phenotypes_bundle(
         out,
         npmi=[0.18, 0.05, -0.10],
+        pair_coverage=[0.90, 0.50, 0.0],
         corpus_prevalence=[0.30, 0.40, 0.30],
         labels=["Cardiac", "", ""],
         topic_indices=[0, 1, 2],
-        junk_threshold=0.0,
     )
     payload = json.loads(out.read_text())
-    assert payload["npmi_threshold"] == 0.0
+    assert "npmi_threshold" not in payload
     assert payload["phenotypes"][0] == {
         "id": 0,
         "label": "Cardiac",
+        "description": "",
+        "quality": None,
         "npmi": pytest.approx(0.18),
+        "pair_coverage": pytest.approx(0.90),
         "corpus_prevalence": pytest.approx(0.30),
-        "junk_flag": False,
         "original_topic_id": 0,
     }
-    assert payload["phenotypes"][2]["junk_flag"] is True
+    # pair_coverage=0 means "unrated" — no pairs cleared the joint-count
+    # threshold for this topic.
+    assert payload["phenotypes"][2]["pair_coverage"] == 0.0
 
 
 def test_write_phenotypes_bundle_preserves_hdp_original_indices(tmp_path: Path):
@@ -96,11 +100,23 @@ def test_write_phenotypes_bundle_preserves_hdp_original_indices(tmp_path: Path):
     write_phenotypes_bundle(
         out,
         npmi=[0.2, 0.15],
+        pair_coverage=[0.8, 0.7],
         corpus_prevalence=[0.4, 0.3],
         labels=None,
         topic_indices=[42, 7],
-        junk_threshold=0.0,
     )
     payload = json.loads(out.read_text())
     assert [p["id"] for p in payload["phenotypes"]] == [0, 1]
     assert [p["original_topic_id"] for p in payload["phenotypes"]] == [42, 7]
+
+
+def test_write_phenotypes_bundle_length_mismatch_raises(tmp_path: Path):
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+    out = tmp_path / "phenotypes.json"
+    with pytest.raises(ValueError, match="pair_coverage length"):
+        write_phenotypes_bundle(
+            out,
+            npmi=[0.1, 0.2],
+            pair_coverage=[0.9],  # wrong length
+            corpus_prevalence=[0.5, 0.5],
+        )

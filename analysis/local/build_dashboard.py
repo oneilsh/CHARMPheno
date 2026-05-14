@@ -77,7 +77,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hdp-top-k", type=int, default=50,
                         help="Top-K used HDP topics (ignored for LDA)")
     parser.add_argument("--top-n-codes-for-npmi", type=int, default=20)
-    parser.add_argument("--junk-threshold", type=float, default=0.0)
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -127,6 +126,12 @@ def main(argv: list[str] | None = None) -> int:
     holdout_bow = bow_df.rdd.map(BOWDocument.from_spark_row)
     report = compute_npmi_coherence(export.beta, holdout_bow, top_n=top_n_npmi)
     npmi = report.per_topic_npmi.tolist()
+    # Fraction of top-N pairs that contributed to each topic's mean NPMI.
+    # Zero means "unrated" — no pairs cleared min_pair_count.
+    pair_coverage = (
+        report.per_topic_scored_pairs.astype(float)
+        / float(report.per_topic_total_pairs)
+    ).tolist()
     bow_df.unpersist()
     bow_df_stats.unpersist()
     spark.stop()
@@ -145,10 +150,10 @@ def main(argv: list[str] | None = None) -> int:
     write_phenotypes_bundle(
         args.out_dir / "phenotypes.json",
         npmi=npmi,
+        pair_coverage=pair_coverage,
         corpus_prevalence=export.corpus_prevalence.tolist(),
         topic_indices=export.topic_indices.tolist(),
         labels=None,
-        junk_threshold=args.junk_threshold,
     )
     write_corpus_stats_sidecar(stats, args.out_dir / "corpus_stats.json", v_displayed=v_disp)
 

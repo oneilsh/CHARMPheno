@@ -6,7 +6,7 @@ describe('loadBundle', () => {
     global.fetch = vi.fn((url: string) => {
       const stubs: Record<string, unknown> = {
         'data/model.json':         { K: 2, V: 3, alpha: [0.1, 0.1], beta: [[0.5, 0.3, 0.2], [0.1, 0.6, 0.3]] },
-        'data/phenotypes.json':    { phenotypes: [], npmi_threshold: 0 },
+        'data/phenotypes.json':    { phenotypes: [] },
         'data/vocab.json':         { codes: [] },
         'data/corpus_stats.json':  { corpus_size_docs: 10, mean_codes_per_doc: 5, k: 2, v: 3, v_full: 3 },
       }

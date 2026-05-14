@@ -7,7 +7,7 @@ help:
 	@echo "Top-level orchestrator. Common targets:"
 	@echo "  install          - Install root venv (scripts + dev tools)"
 	@echo "  install-dev      - Install both package venvs (spark-vi, charmpheno) editable"
-	@echo "  install-labeling - Install optional deps for the labeling script (anthropic SDK)"
+	@echo "  install-labeling - Install optional deps for the labeling script (pydantic-ai)"
 	@echo "  data             - Fetch LDA beta and simulate synthetic OMOP data"
 	@echo "  data-clean       - Delete the data/ cache and simulated outputs"
 	@echo "  test             - Run unit tests in both packages (default loop, <10s)"
@@ -26,7 +26,7 @@ help:
 	@echo "  label-phenotypes - LLM-label the phenotypes in dashboard/public/data/."
 	@echo "                     Requires CHARMPHENO_LABEL_KEY env var (or LABEL_KEY_FILE)"
 	@echo "                     and \`make install-labeling\` to have run once."
-	@echo "                     Override args via LABEL_ARGS='--model claude-haiku-4-5 --top-n 20'"
+	@echo "                     Override args via LABEL_ARGS='--model google-gla:gemini-2.5-flash --top-n 20'"
 
 install:
 	poetry install

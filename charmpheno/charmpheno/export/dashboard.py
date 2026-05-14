@@ -76,19 +76,34 @@ def write_phenotypes_bundle(
     out_path: Path,
     *,
     npmi: list[float],
+    pair_coverage: list[float],
     corpus_prevalence: list[float],
     topic_indices: list[int] | None = None,
     labels: list[str] | None = None,
-    junk_threshold: float = 0.0,
 ) -> None:
     """Write phenotypes.json.
+
+    pair_coverage[k] is the fraction of top-N pairs that contributed to
+    the NPMI calculation for topic k (cleared the joint-count threshold
+    in the reference corpus). NaN-valued NPMI topics — those with zero
+    scored pairs — should be passed in as NaN and pair_coverage as 0.0;
+    downstream readers can use the pair_coverage=0 case to distinguish
+    "unrated" from "rated and incoherent".
 
     topic_indices[k] is the original model-side topic id for displayed
     phenotype k. For LDA the adapter passes 0..K-1; for HDP it passes
     the mask-filtered truncation indices so the advanced view can
     surface them.
+
+    Per-phenotype `label`, `description`, and `quality` start empty and
+    are populated by the post-fit labeling step
+    (scripts/label_phenotypes.py).
     """
     K = len(npmi)
+    if len(pair_coverage) != K:
+        raise ValueError(
+            f"pair_coverage length {len(pair_coverage)} != npmi length {K}",
+        )
     labels = labels or [""] * K
     if topic_indices is None:
         topic_indices = list(range(K))
@@ -96,14 +111,13 @@ def write_phenotypes_bundle(
         {
             "id": k,
             "label": labels[k],
+            "description": "",
+            "quality": None,
             "npmi": float(npmi[k]),
+            "pair_coverage": float(pair_coverage[k]),
             "corpus_prevalence": float(corpus_prevalence[k]),
-            "junk_flag": bool(npmi[k] < junk_threshold),
             "original_topic_id": int(topic_indices[k]),
         }
         for k in range(K)
     ]
-    out_path.write_text(json.dumps({
-        "phenotypes": phenotypes,
-        "npmi_threshold": float(junk_threshold),
-    }))
+    out_path.write_text(json.dumps({"phenotypes": phenotypes}))
