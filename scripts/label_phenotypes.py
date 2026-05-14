@@ -67,8 +67,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-DEFAULT_TOP_N = 15
-DEFAULT_LAMBDA = 0.6
+DEFAULT_TOP_N = 20
 DEFAULT_MAX_WORDS = 6
 
 # Provider priority order. The first entry whose env var is set wins when
@@ -91,14 +90,41 @@ def _build_system_prompt(max_words: int) -> str:
     return f"""\
 You are a clinical informatics expert interpreting learned topics from \
 an LDA topic model trained over patient records. Each topic is a \
-distribution over clinical concepts; you will be given a topic's top \
-concepts ranked by Sievert-Shirley relevance, plus three topic-level \
+distribution over clinical concepts; you will be given each topic's \
+top concepts under two different rankings, plus three topic-level \
 statistics.
 
 The current model is trained over patient conditions only (no drugs, \
 procedures, measurements, or labs); your interpretations should reflect \
 that — describe conditions and their clinical relationships, not \
 treatments or workups.
+
+## Two rankings
+
+For each topic you will see the top concepts ranked two ways:
+
+- **by within-topic frequency**: the concepts that carry the most of \
+this topic's mass (highest p(w|k)). These are what the topic IS made of.
+- **by lift over the corpus**: the concepts most concentrated in this \
+topic relative to the corpus baseline (highest p(w|k)/p(w)). These are \
+what the topic SINGLES OUT relative to other topics.
+
+The relationship between the two lists is itself diagnostic:
+
+- **Strong overlap (the same concepts dominate both lists)** → real \
+phenotype. The diagnostic codes are simultaneously frequent in this \
+topic and distinctive vs the corpus.
+- **Frequency list = common comorbidities (HTN/HLD/T2DM/GERD/anxiety), \
+lift list = unrelated outliers with tiny weight** → background catch-all \
+OR (if usage is near-floor) the "common-words pseudo-coherent" dead \
+case. Use usage to disambiguate.
+- **Both lists span unrelated clinical themes with no shared story** \
+→ mixed.
+- **A single concept dominates the frequency list AND tops the lift \
+list** → anchor.
+
+Read the two rankings TOGETHER. A coherent phenotype rarely has a \
+clean frequency list and an incoherent lift list, or vice versa.
 
 ## Topic-level statistics
 
@@ -366,39 +392,41 @@ def _build_agent(model_str: str, api_key: str, max_words: int):
     )
 
 
-def _lambda_relevance(pwk: float, pw: float, lam: float) -> float:
-    """Sievert-Shirley relevance: lam * log p(w|k) + (1 - lam) * log(p(w|k)/p(w)).
-
-    Matches dashboard/src/lib/inference.ts. Returns -inf if pwk <= 0 (the
-    code does not appear in the topic).
-    """
-    if pwk <= 0:
-        return -math.inf
-    log_pwk = math.log(pwk)
-    if pw <= 0:
-        return lam * log_pwk + (1.0 - lam) * 1e6
-    return lam * log_pwk + (1.0 - lam) * math.log(pwk / pw)
-
-
-def _top_codes_for_phenotype(
+def _top_codes_by_metric(
     *,
     beta_row: list[float],
     vocab: list[dict],
-    lam: float,
     n: int,
+    metric: str,
 ) -> list[dict]:
-    """Pick top-N concepts by Sievert-Shirley relevance. Each entry
-    carries description, within-topic weight (%), and lift = p(w|k)/p(w)
-    over the corpus. Domain is dropped — the current model is conditions-
-    only, so it would be a constant column."""
+    """Pick top-N concepts ranked by ``metric``:
+
+      - ``"frequency"``: by within-topic mass p(w|k).
+      - ``"lift"``: by lift p(w|k)/p(w) over the corpus.
+
+    Each entry carries description, within-topic weight (%), and lift.
+    Domain is dropped — conditions-only model means it'd be a constant
+    column.
+    """
     pw = [c.get("corpus_freq", 0.0) for c in vocab]
-    scored = [
-        (i, _lambda_relevance(beta_row[i], pw[i], lam))
-        for i in range(len(beta_row))
-    ]
-    scored.sort(key=lambda x: x[1], reverse=True)
+
+    def _score(i: int) -> float:
+        pwk = beta_row[i]
+        if pwk <= 0:
+            return -math.inf
+        if metric == "frequency":
+            return pwk
+        if metric == "lift":
+            if pw[i] <= 0:
+                # Code never appears in corpus; lift infinite. Saturate so
+                # the comparison still orders rather than ties at inf.
+                return 1e12 * pwk
+            return pwk / pw[i]
+        raise ValueError(f"unknown metric: {metric!r}")
+
+    scored = sorted(range(len(beta_row)), key=_score, reverse=True)
     out: list[dict] = []
-    for idx, _score in scored[:n]:
+    for idx in scored[:n]:
         c = vocab[idx]
         pwk = beta_row[idx]
         pw_i = pw[idx]
@@ -411,10 +439,22 @@ def _top_codes_for_phenotype(
     return out
 
 
+def _format_code_list(codes: list[dict]) -> list[str]:
+    lines = []
+    for r, c in enumerate(codes, start=1):
+        lift_str = "×∞" if c["lift"] == float("inf") else f"×{c['lift']:.1f}"
+        lines.append(
+            f"  {r:>2}. {c['description']}  ·  {c['weight_pct']:.2f}%  "
+            f"·  {lift_str}"
+        )
+    return lines
+
+
 def _build_user_message(
     *,
     phenotype_id: int,
-    top_codes: list[dict],
+    top_by_freq: list[dict],
+    top_by_lift: list[dict],
     npmi: float,
     pair_coverage: float,
     usage_frac: float,
@@ -429,14 +469,16 @@ def _build_user_message(
         f"  pair_coverage:  {pair_coverage:.0%} of top-N pairs scored",
         f"  usage:          {usage_frac * 100:.2f}% of total corpus mass",
         "",
-        "Top conditions (description · within-topic weight · lift over corpus):",
+        "Top conditions by within-topic frequency "
+        "(description · weight · lift):",
     ]
-    for r, c in enumerate(top_codes, start=1):
-        lift_str = "×∞" if c["lift"] == float("inf") else f"×{c['lift']:.1f}"
-        lines.append(
-            f"  {r:>2}. {c['description']}  ·  {c['weight_pct']:.2f}%  "
-            f"·  {lift_str}"
-        )
+    lines.extend(_format_code_list(top_by_freq))
+    lines.append("")
+    lines.append(
+        "Top conditions by lift over the corpus "
+        "(description · weight · lift):"
+    )
+    lines.extend(_format_code_list(top_by_lift))
     return "\n".join(lines)
 
 
@@ -444,7 +486,8 @@ def _label_one(
     *,
     agent,
     phenotype_id: int,
-    top_codes: list[dict],
+    top_by_freq: list[dict],
+    top_by_lift: list[dict],
     npmi: float,
     pair_coverage: float,
     usage_frac: float,
@@ -452,7 +495,8 @@ def _label_one(
 ) -> tuple[PhenotypeLabel, dict]:
     """One labeling call. Returns (output, usage_dict)."""
     user_text = _build_user_message(
-        phenotype_id=phenotype_id, top_codes=top_codes,
+        phenotype_id=phenotype_id,
+        top_by_freq=top_by_freq, top_by_lift=top_by_lift,
         npmi=npmi, pair_coverage=pair_coverage, usage_frac=usage_frac,
         max_words=max_words,
     )
@@ -504,11 +548,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--top-n", type=int, default=DEFAULT_TOP_N,
-        help="Top-N codes by relevance to send per phenotype",
-    )
-    parser.add_argument(
-        "--lambda", dest="lam", type=float, default=DEFAULT_LAMBDA,
-        help="Sievert-Shirley lambda for code ranking",
+        help="Top-N codes per ranking (two rankings: by frequency and by "
+             "lift) sent per topic.",
     )
     parser.add_argument(
         "--max-words", type=int, default=DEFAULT_MAX_WORDS,
@@ -604,16 +645,25 @@ def main(argv: list[str] | None = None) -> int:
             float(p["corpus_prevalence"]),
         )
 
+    def _two_rankings(i: int) -> tuple[list[dict], list[dict]]:
+        top_freq = _top_codes_by_metric(
+            beta_row=beta[i], vocab=vocab_codes,
+            n=args.top_n, metric="frequency",
+        )
+        top_lift = _top_codes_by_metric(
+            beta_row=beta[i], vocab=vocab_codes,
+            n=args.top_n, metric="lift",
+        )
+        return top_freq, top_lift
+
     if args.dry_run:
         for i in todo[:3]:
-            top = _top_codes_for_phenotype(
-                beta_row=beta[i], vocab=vocab_codes,
-                lam=args.lam, n=args.top_n,
-            )
+            top_freq, top_lift = _two_rankings(i)
             npmi, pcov, usage_frac = _stats_for(i)
             print(f"\n--- phenotype {i} (dry-run preview) ---", flush=True)
             print(_build_user_message(
-                phenotype_id=i, top_codes=top,
+                phenotype_id=i,
+                top_by_freq=top_freq, top_by_lift=top_lift,
                 npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
                 max_words=args.max_words,
             ), flush=True)
@@ -636,15 +686,13 @@ def main(argv: list[str] | None = None) -> int:
 
     total = {"input": 0, "output": 0}
     for n, i in enumerate(todo, start=1):
-        top = _top_codes_for_phenotype(
-            beta_row=beta[i], vocab=vocab_codes,
-            lam=args.lam, n=args.top_n,
-        )
+        top_freq, top_lift = _two_rankings(i)
         npmi, pcov, usage_frac = _stats_for(i)
         try:
             out, usage = _label_one(
                 agent=agent,
-                phenotype_id=i, top_codes=top,
+                phenotype_id=i,
+                top_by_freq=top_freq, top_by_lift=top_lift,
                 npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
                 max_words=args.max_words,
             )
