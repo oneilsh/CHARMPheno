@@ -89,6 +89,11 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
+    # spark_vi.core.result must be loaded before spark_vi.io to avoid a
+    # circular import: spark_vi.io.__init__ -> io.export -> core.__init__
+    # -> core.runner -> io.export (which is still initializing).
+    import spark_vi.core.result as _spark_vi_core_result  # noqa: F401
+
     # Driver-side imports proven first.
     from charmpheno.omop import DocSpec, load_omop_bigquery, to_bow_dataframe
     from charmpheno.export.corpus_stats import (
