@@ -458,11 +458,10 @@ def _label_one(
     )
     result = agent.run_sync(user_text)
     out: PhenotypeLabel = result.output
-    # pydantic-ai usage shape is provider-agnostic; tolerate missing fields.
     u = result.usage()
     usage = {
-        "input": getattr(u, "request_tokens", None) or getattr(u, "input_tokens", 0) or 0,
-        "output": getattr(u, "response_tokens", None) or getattr(u, "output_tokens", 0) or 0,
+        "input": getattr(u, "input_tokens", 0) or 0,
+        "output": getattr(u, "output_tokens", 0) or 0,
     }
     return out, usage
 
