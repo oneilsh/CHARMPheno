@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from pyspark.sql import DataFrame
+
 
 @dataclass(frozen=True)
 class CorpusStats:
@@ -60,8 +62,9 @@ def write_corpus_stats_sidecar(stats: CorpusStats, out_path: Path, *, v_displaye
     }))
 
 
-def compute_corpus_stats_from_bow_df(bow_df, *, vocab_size: int, k: int) -> CorpusStats:
-    """PySpark wrapper. Streams rows to the driver via toLocalIterator."""
+def compute_corpus_stats_from_bow_df(bow_df: DataFrame, *, vocab_size: int, k: int) -> CorpusStats:
+    """PySpark wrapper. Input bow_df must have 'indices' and 'counts' columns (array<int>).
+    Streams rows to the driver via toLocalIterator."""
     rows = bow_df.select("indices", "counts").toLocalIterator()
     return compute_corpus_stats(
         docs=({"indices": list(r.indices), "counts": list(r.counts)} for r in rows),
