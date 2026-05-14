@@ -10,16 +10,31 @@ file path (--api-key-file). This keeps the labeling key isolated from other
 Anthropic SDK callers (notably Claude Code) that might be active in the
 same shell.
 
+Sources of the key, in order:
+  1. --api-key-file <path>            (file contents)
+  2. --api-key-env <NAME>             (process env, default CHARMPHENO_LABEL_KEY)
+  3. .env file (auto-loaded)          (only populates THIS process's env,
+                                       does not export to the parent shell)
+
+Even if your .env happens to also contain ANTHROPIC_API_KEY, this script
+ignores it — and the SDK client is constructed with api_key= explicitly,
+so the SDK's own env-var fallback is never triggered.
+
 Usage:
     # one-time install of the labeling deps
     poetry install --with labeling
 
-    # then, with the key set:
+    # option A: .env in the repo root
+    echo 'CHARMPHENO_LABEL_KEY=sk-ant-...' >> .env
+    poetry run python scripts/label_phenotypes.py \\
+        --bundle-dir dashboard/public/data
+
+    # option B: env var
     export CHARMPHENO_LABEL_KEY=sk-ant-...
     poetry run python scripts/label_phenotypes.py \\
         --bundle-dir dashboard/public/data
 
-    # or via a key file (key never leaves disk):
+    # option C: key file (never enters env at all)
     poetry run python scripts/label_phenotypes.py \\
         --bundle-dir dashboard/public/data \\
         --api-key-file ~/.charmpheno-label-key
@@ -90,6 +105,41 @@ RESPONSE_SCHEMA = {
 }
 
 
+def _maybe_load_dotenv(explicit_path: str | None) -> Path | None:
+    """Load a .env file into THIS process's os.environ. Does not export to
+    the parent shell. Searches, in order:
+      1. --env-file <path> if explicitly passed
+      2. .env in CWD
+      3. .env at the repo root (inferred from this script's path)
+    Returns the path that was loaded, or None if no .env was found / no
+    dotenv lib is installed.
+
+    Silent on import failure — dotenv is an optional convenience, the
+    script still works fine if it's not installed.
+    """
+    try:
+        from dotenv import load_dotenv  # type: ignore
+    except ImportError:
+        return None
+
+    candidates: list[Path] = []
+    if explicit_path:
+        candidates.append(Path(explicit_path).expanduser())
+    else:
+        candidates.append(Path.cwd() / ".env")
+        # scripts/label_phenotypes.py -> repo root
+        candidates.append(Path(__file__).resolve().parent.parent / ".env")
+
+    for c in candidates:
+        if c.is_file():
+            # override=False so a real env var still wins over the file —
+            # matters if the user wants to temporarily override .env for
+            # one invocation without editing the file.
+            load_dotenv(c, override=False)
+            return c
+    return None
+
+
 def _resolve_api_key(args: argparse.Namespace) -> str:
     """Get the API key from --api-key-file or the configured env var.
 
@@ -109,7 +159,8 @@ def _resolve_api_key(args: argparse.Namespace) -> str:
     if not key:
         raise SystemExit(
             f"No API key found.\n"
-            f"  Set the {args.api_key_env} env var, or pass --api-key-file.\n"
+            f"  Looked for: {args.api_key_env} env var, --api-key-file, "
+            f"or a .env file with {args.api_key_env}=...\n"
             f"  (This script intentionally does not read ANTHROPIC_API_KEY.)"
         )
     return key
@@ -274,6 +325,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to a file containing the API key (alternative to env var).",
     )
     parser.add_argument(
+        "--env-file", type=str, default=None,
+        help="Path to a .env file to load (only into this process). "
+             "If omitted, looks for .env in CWD then at the repo root.",
+    )
+    parser.add_argument(
         "--force", action="store_true",
         help="Re-label phenotypes that already have a label.",
     )
@@ -286,6 +342,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Print what would be sent but don't call the API.",
     )
     args = parser.parse_args(argv)
+
+    # Pull .env into this process's environ before reading any *_KEY var.
+    # No-op (silent) if python-dotenv isn't installed or no .env exists.
+    loaded = _maybe_load_dotenv(args.env_file)
+    if loaded:
+        print(f"[label] loaded env from {loaded}", flush=True)
 
     bundle_dir: Path = args.bundle_dir
     model_p = bundle_dir / "model.json"
