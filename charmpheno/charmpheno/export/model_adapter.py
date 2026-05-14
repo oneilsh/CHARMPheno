@@ -6,7 +6,6 @@ builder and the dashboard contract are model-class-agnostic.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
 
