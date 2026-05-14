@@ -1,8 +1,22 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import * as d3 from 'd3'
-  import { bundle, selectedPhenotypeId, colorMode } from '../store'
+  import { bundle, selectedPhenotypeId, colorMode, hoveredCodeIdx } from '../store'
   import { computeJsdMds } from '../mds'
+
+  function phenotypesWithCode(idx: number | null, n = 20): Set<number> {
+    if (!$bundle || idx === null) return new Set()
+    const out = new Set<number>()
+    const K = $bundle.model.K
+    for (let k = 0; k < K; k++) {
+      const row = $bundle.model.beta[k]
+      const top = row.map((p, i) => ({ p, i })).sort((a, b) => b.p - a.p).slice(0, n)
+      if (top.some((s) => s.i === idx)) out.add(k)
+    }
+    return out
+  }
+
+  $: highlighted = phenotypesWithCode($hoveredCodeIdx)
 
   let svgEl: SVGSVGElement
   const W = 560, H = 480, MARGIN = 24
@@ -39,8 +53,8 @@
       .attr('cy', (p) => y(coords[p.id][1]))
       .attr('r', (p) => r(p.corpus_prevalence))
       .attr('fill', (p) => ($colorMode === 'prevalence' ? colorFn(p.corpus_prevalence) : colorFn(p.npmi)) as string)
-      .attr('stroke', (p) => ($selectedPhenotypeId === p.id ? '#000' : '#444'))
-      .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 2.5 : 0.5))
+      .attr('stroke', (p) => (highlighted.has(p.id) ? '#1e88e5' : ($selectedPhenotypeId === p.id ? '#000' : '#444')))
+      .attr('stroke-width', (p) => (highlighted.has(p.id) ? 3 : ($selectedPhenotypeId === p.id ? 2.5 : 0.5)))
       .style('cursor', 'pointer')
       .on('click', (_, p) => selectedPhenotypeId.set(p.id))
       .append('title')
@@ -57,7 +71,7 @@
       .text('!')
   }
 
-  $: $colorMode, $selectedPhenotypeId, $bundle && svgEl && coords.length && render()
+  $: $colorMode, $selectedPhenotypeId, $hoveredCodeIdx, $bundle && svgEl && coords.length && render()
   onMount(render)
 </script>
 
