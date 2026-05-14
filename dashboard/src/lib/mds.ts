@@ -14,7 +14,12 @@ function jacobiEig(A: number[][], maxSweeps = 60, tol = 1e-10): { values: number
       const apq = a[p][q]
       if (Math.abs(apq) < 1e-14) continue
       const theta = (a[q][q] - a[p][p]) / (2 * apq)
-      const t = Math.sign(theta) / (Math.abs(theta) + Math.sqrt(theta * theta + 1))
+      // When diagonals are equal theta=0; Math.sign(0)===0 would skip the
+      // rotation and leave degenerate eigenvalues unresolved (e.g. unit square).
+      // Set t=1 (rotation by π/4) in that case.
+      const t = theta === 0
+        ? 1
+        : Math.sign(theta) / (Math.abs(theta) + Math.sqrt(theta * theta + 1))
       const c = 1 / Math.sqrt(t * t + 1)
       const s = t * c
       const app = a[p][p], aqq = a[q][q]

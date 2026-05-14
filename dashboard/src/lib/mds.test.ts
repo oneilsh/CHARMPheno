@@ -2,16 +2,15 @@ import { describe, it, expect } from 'vitest'
 import { classicalMds, computeJsdMds } from './mds'
 
 describe('classicalMds', () => {
-  it('recovers relative distances for simple points', () => {
-    // Triangle: points at (0,0), (1,0), (0,1)
-    const pts = [[0, 0], [1, 0], [0, 1]]
+  it('recovers a known 2D embedding up to rotation/reflection', () => {
+    // Four corners of a unit square.
+    const pts = [[0, 0], [1, 0], [0, 1], [1, 1]]
     const D: number[][] = pts.map((a) => pts.map((b) => Math.hypot(a[0] - b[0], a[1] - b[1])))
-    const coords = classicalMds(D, 3)
-    // Check that distance ratios are preserved
-    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+    const coords = classicalMds(D, 2)
+    // pairwise distances must match the input D within tolerance
+    for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
       const d = Math.hypot(coords[i][0] - coords[j][0], coords[i][1] - coords[j][1])
-      // Allow for scaling and rounding
-      if (D[i][j] > 0.01) expect(d).toBeCloseTo(D[i][j], 1)
+      expect(d).toBeCloseTo(D[i][j], 4)
     }
   })
 })
