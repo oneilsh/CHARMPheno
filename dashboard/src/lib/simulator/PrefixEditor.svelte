@@ -90,7 +90,7 @@
 <style>
   .editor {
     padding: 1.25rem;
-    background: var(--paper-elevated);
+    background: var(--surface);
     border: 1px solid var(--rule);
     border-radius: var(--radius-sm);
     display: flex;
@@ -101,16 +101,14 @@
   header {
     display: flex;
     flex-direction: column;
-    gap: 0.1rem;
-    padding-bottom: 0.5rem;
+    gap: 0.2rem;
+    padding-bottom: 0.6rem;
     border-bottom: 1px solid var(--rule);
   }
   header h3 {
-    font-family: var(--font-display);
-    font-style: italic;
-    font-weight: 500;
-    font-size: 1.4rem;
-    letter-spacing: -0.005em;
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: var(--tracking-tight);
   }
 
   .actions {
@@ -156,8 +154,8 @@
     transition: background 0.12s ease;
   }
   .match-btn:last-child { border-bottom: 0; }
-  .match-btn:hover { background: var(--paper); }
-  .plus { color: var(--terracotta); font-weight: 600; }
+  .match-btn:hover { background: var(--surface-recessed); }
+  .plus { color: var(--accent); font-weight: 600; }
   .match-code {
     color: var(--ink-faint);
     font-size: var(--fs-micro);
@@ -178,15 +176,13 @@
     cursor: pointer;
     font-size: var(--fs-small);
     color: var(--ink-muted);
-    font-style: italic;
     list-style-position: inside;
   }
-  summary:hover { color: var(--terracotta); }
+  summary:hover { color: var(--accent); }
   .hint {
     margin: 0.4rem 0 0.25rem;
     font-size: var(--fs-micro);
     color: var(--ink-faint);
-    font-style: italic;
   }
   .force-btn {
     width: 100%;
@@ -200,7 +196,7 @@
     color: var(--ink-muted);
     transition: color 0.12s ease, background 0.12s ease;
   }
-  .force-btn:hover { color: var(--terracotta); background: var(--paper); }
+  .force-btn:hover { color: var(--accent); background: var(--surface-recessed); }
 
   .prefix-head {
     display: flex;
@@ -222,7 +218,6 @@
   .prefix li:last-child { border-bottom: 0; }
   .prefix .empty {
     color: var(--ink-faint);
-    font-style: italic;
     grid-template-columns: 1fr;
     padding: 0.6rem 0;
   }
@@ -246,7 +241,7 @@
     transition: color 0.12s ease, background 0.12s ease;
   }
   .remove:hover {
-    color: var(--brick);
-    background: var(--paper-recessed);
+    color: var(--danger);
+    background: var(--surface-recessed);
   }
 </style>

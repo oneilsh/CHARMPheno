@@ -32,8 +32,10 @@
 
 <section class="contrib">
   <header class="head">
-    <span class="eyebrow">Section</span>
-    <h3>Top contributing codes{#if selectedLabel} <span class="for">for</span> <em>{selectedLabel}</em>{/if}</h3>
+    <span class="eyebrow">Top contributing codes</span>
+    {#if selectedLabel}
+      <h3>{selectedLabel}</h3>
+    {/if}
   </header>
 
   {#if $selectedPhenotypeId === null}
@@ -59,37 +61,31 @@
 
 <style>
   .contrib {
-    margin-top: 2.5rem;
+    margin-top: 2rem;
+    padding: 1.25rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-sm);
   }
   .head {
     display: flex;
-    align-items: baseline;
-    gap: 0.85rem;
+    flex-direction: column;
+    gap: 0.2rem;
     margin-bottom: 0.85rem;
+    padding-bottom: 0.65rem;
+    border-bottom: 1px solid var(--rule);
   }
   .head h3 {
     font-size: 1.05rem;
-    font-weight: 500;
-  }
-  .head .for {
-    color: var(--ink-faint);
-    font-weight: 400;
-    font-family: var(--font-display);
-    font-style: italic;
-  }
-  .head h3 em {
-    font-family: var(--font-display);
-    font-style: italic;
-    font-weight: 500;
-    color: var(--terracotta);
+    font-weight: 600;
+    letter-spacing: var(--tracking-tight);
   }
 
   .hint {
     color: var(--ink-muted);
-    font-style: italic;
     font-size: var(--fs-small);
+    margin: 0;
     padding: 0.5rem 0;
-    border-top: 1px solid var(--rule-faint);
   }
 
   .codes {
@@ -99,7 +95,7 @@
   }
   .codes li {
     display: grid;
-    grid-template-columns: 5rem 1fr 4rem 2rem;
+    grid-template-columns: 5rem 1fr 4rem 2.5rem;
     align-items: center;
     gap: 0.85rem;
     padding: 0.45rem 0;
@@ -115,20 +111,19 @@
   }
   .spark {
     display: block;
-    height: 4px;
-    background: var(--paper-recessed);
-    border-radius: 1px;
+    height: 3px;
+    background: var(--surface-recessed);
+    border-radius: 1.5px;
     overflow: hidden;
   }
   .spark-bar {
     display: block;
     height: 100%;
-    background: var(--terracotta);
+    background: var(--accent);
     transition: width 0.2s ease;
   }
   .count {
     text-align: right;
     color: var(--ink-muted);
-    font-size: var(--fs-small);
   }
 </style>

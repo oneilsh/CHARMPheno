@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import * as d3 from 'd3'
-  import { bundle, selectedPhenotypeId, colorMode, hoveredCodeIdx, phenotypesById } from '../store'
+  import { bundle, selectedPhenotypeId, colorMode, hoveredCodeIdx } from '../store'
   import { computeJsdMds } from '../mds'
 
   function phenotypesWithCode(idx: number | null, n = 20): Set<number> {
@@ -19,23 +19,23 @@
   $: highlighted = phenotypesWithCode($hoveredCodeIdx)
 
   let svgEl: SVGSVGElement
-  const W = 720, H = 560, MARGIN = 40
+  const W = 720, H = 560, MARGIN = 24
 
   let coords: number[][] = []
   $: if ($bundle && coords.length !== $bundle.model.K) {
     coords = computeJsdMds($bundle.model.beta)
   }
 
-  // Custom diverging NPMI ramp (brick → bone → moss). Hand-tuned so the
-  // mid-range reads as neutral paper, not the default RdYlGn jaundice.
+  // Diverging NPMI ramp: red (low) → neutral gray → cyan (high).
+  // Aligns with the global accent and avoids the rainbow look.
   const npmiRamp = d3.scaleLinear<string>()
     .domain([-0.2, 0, 0.2, 0.4])
-    .range(['#8c3b2e', '#cfb88a', '#9ba87d', '#5b6e3d'])
+    .range(['#ef4444', '#d4d4d8', '#67e8f9', '#06b6d4'])
     .clamp(true)
 
-  // Sequential indigo ramp for prevalence (warm-paper-compatible).
+  // Sequential prevalence ramp: pale sky → deep cyan.
   const prevRamp = d3.scaleSequential<string>(
-    (t) => d3.interpolateRgb('#e8e0d0', '#3d4f6e')(t),
+    (t) => d3.interpolateRgb('#f0fdfa', '#0e7490')(t),
   )
 
   function render() {
@@ -47,7 +47,7 @@
     const y = d3.scaleLinear().domain(yExt).range([H - MARGIN, MARGIN])
     const r = d3.scaleSqrt()
       .domain(d3.extent(phenotypes, (p) => p.corpus_prevalence) as [number, number])
-      .range([6, 28])
+      .range([5, 26])
 
     const prevExt = d3.extent(phenotypes, (p) => p.corpus_prevalence) as [number, number]
     prevRamp.domain(prevExt)
@@ -58,50 +58,10 @@
     svg.selectAll('*').remove()
     svg.attr('viewBox', `0 0 ${W} ${H}`)
 
-    // Defs: dotted-grid pattern for the map background
-    const defs = svg.append('defs')
-    const pat = defs.append('pattern')
-      .attr('id', 'atlas-grid')
-      .attr('width', 18)
-      .attr('height', 18)
-      .attr('patternUnits', 'userSpaceOnUse')
-    pat.append('circle').attr('cx', 9).attr('cy', 9).attr('r', 0.6).attr('fill', '#d8ccb8')
-
-    // Frame + grid
-    svg.append('rect')
-      .attr('width', W).attr('height', H)
-      .attr('fill', 'url(#atlas-grid)')
-      .attr('stroke', '#d8ccb8')
-      .attr('stroke-width', 1)
-
-    // Corner crosshair ornaments — small atlas-style ticks
-    const corner = (cx: number, cy: number, dx: number, dy: number) => {
-      svg.append('line').attr('x1', cx).attr('y1', cy).attr('x2', cx + dx).attr('y2', cy)
-        .attr('stroke', '#1f1b16').attr('stroke-width', 1)
-      svg.append('line').attr('x1', cx).attr('y1', cy).attr('x2', cx).attr('y2', cy + dy)
-        .attr('stroke', '#1f1b16').attr('stroke-width', 1)
-    }
-    corner(0.5, 0.5, 12, 12); corner(W - 0.5, 0.5, -12, 12)
-    corner(0.5, H - 0.5, 12, -12); corner(W - 0.5, H - 0.5, -12, -12)
-
-    // Axis labels (subtle, italic — feels cartographic)
-    svg.append('text').attr('x', W / 2).attr('y', H - 8)
-      .attr('text-anchor', 'middle')
-      .attr('font-family', 'Newsreader, serif')
-      .attr('font-style', 'italic').attr('font-size', 10)
-      .attr('fill', '#9c8e7a')
-      .text('JSD–MDS  ·  dimension 1')
-    svg.append('text').attr('x', 12).attr('y', H / 2)
-      .attr('text-anchor', 'middle')
-      .attr('font-family', 'Newsreader, serif')
-      .attr('font-style', 'italic').attr('font-size', 10)
-      .attr('fill', '#9c8e7a')
-      .attr('transform', `rotate(-90 12 ${H / 2})`)
-      .text('JSD–MDS  ·  dimension 2')
-
     const g = svg.append('g')
 
-    // Bubbles — concentric ring + small fill core (atlas-like)
+    // Solid-fill bubbles with thin border. Cleaner than the previous
+    // ring-style; the encoding is in the fill, not the ring.
     const nodes = g.selectAll('g.node')
       .data(phenotypes)
       .join('g')
@@ -110,60 +70,67 @@
       .style('cursor', 'pointer')
       .on('click', (_, p) => selectedPhenotypeId.set(p.id))
 
+    // Main bubble — filled with the encoded color, thin ink-tinted border
     nodes.append('circle')
       .attr('r', (p) => r(p.corpus_prevalence))
       .attr('fill', (p) => colorFn(p))
-      .attr('fill-opacity', 0.18)
-      .attr('stroke', (p) => colorFn(p))
-      .attr('stroke-width', (p) => (highlighted.has(p.id) ? 2.5 : 1.25))
+      .attr('fill-opacity', 0.85)
+      .attr('stroke', '#18181b')
+      .attr('stroke-opacity', 0.25)
+      .attr('stroke-width', 0.75)
 
-    // Inner solid core — opacity scales with corpus_prevalence so dense
-    // phenotypes feel weighty, rare ones feel thready
+    // Selection ring — cyan accent
     nodes.append('circle')
-      .attr('r', (p) => Math.max(1.5, r(p.corpus_prevalence) * 0.35))
-      .attr('fill', (p) => colorFn(p))
-
-    // Selection ring
-    nodes.append('circle')
-      .attr('r', (p) => r(p.corpus_prevalence) + 4)
+      .attr('r', (p) => r(p.corpus_prevalence) + 3)
       .attr('fill', 'none')
-      .attr('stroke', '#1f1b16')
-      .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 1 : 0))
-      .attr('stroke-dasharray', '2,2')
+      .attr('stroke', '#06b6d4')
+      .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 2 : 0))
 
-    // Hover-highlight ring (when a code is hovered in the right panel)
+    // Hover-highlight ring — same color, dashed, when a code is hovered
     nodes.append('circle')
-      .attr('r', (p) => r(p.corpus_prevalence) + 7)
+      .attr('r', (p) => r(p.corpus_prevalence) + 5)
       .attr('fill', 'none')
-      .attr('stroke', '#b25b2c')
-      .attr('stroke-width', (p) => (highlighted.has(p.id) ? 1.5 : 0))
+      .attr('stroke', '#06b6d4')
+      .attr('stroke-dasharray', '3,2')
+      .attr('stroke-width', (p) => (highlighted.has(p.id) ? 1.25 : 0))
 
-    // Junk indicator — small italic mark in brick
-    g.selectAll('text.junk')
+    // Junk indicator — small dot on the bubble's edge
+    g.selectAll('circle.junk')
       .data(phenotypes.filter((p) => p.junk_flag))
-      .join('text')
+      .join('circle')
       .attr('class', 'junk')
-      .attr('x', (p) => x(coords[p.id][0]) + r(p.corpus_prevalence) + 3)
-      .attr('y', (p) => y(coords[p.id][1]) - r(p.corpus_prevalence) + 4)
-      .attr('font-family', 'Newsreader, serif')
-      .attr('font-style', 'italic')
-      .attr('font-size', 11)
-      .attr('fill', '#8c3b2e')
-      .text('†')
+      .attr('cx', (p) => x(coords[p.id][0]) + r(p.corpus_prevalence) * 0.7)
+      .attr('cy', (p) => y(coords[p.id][1]) - r(p.corpus_prevalence) * 0.7)
+      .attr('r', 2.5)
+      .attr('fill', '#ef4444')
+      .attr('stroke', '#fff')
+      .attr('stroke-width', 1)
 
-    // Label for the selected phenotype, ink color, anchored above its bubble
+    // Label for the selected phenotype above its bubble
     if ($selectedPhenotypeId !== null) {
       const sel = phenotypes[$selectedPhenotypeId]
       if (sel) {
+        const cx = x(coords[sel.id][0])
+        const cy = y(coords[sel.id][1])
+        const rr = r(sel.corpus_prevalence)
+        const labelText = sel.label || `Phenotype ${sel.id}`
+        const labelW = Math.max(8 * labelText.length, 60)
+        // Pill background
+        g.append('rect')
+          .attr('x', cx - labelW / 2)
+          .attr('y', cy - rr - 26)
+          .attr('rx', 3).attr('ry', 3)
+          .attr('width', labelW)
+          .attr('height', 18)
+          .attr('fill', '#0a0a0a')
         g.append('text')
-          .attr('x', x(coords[sel.id][0]))
-          .attr('y', y(coords[sel.id][1]) - r(sel.corpus_prevalence) - 10)
+          .attr('x', cx).attr('y', cy - rr - 13)
           .attr('text-anchor', 'middle')
-          .attr('font-family', 'Newsreader, serif')
-          .attr('font-style', 'italic')
-          .attr('font-size', 12)
-          .attr('fill', '#1f1b16')
-          .text(sel.label || `Phenotype ${sel.id}`)
+          .attr('font-family', 'Geist, sans-serif')
+          .attr('font-size', 11)
+          .attr('font-weight', 500)
+          .attr('fill', '#fff')
+          .text(labelText)
       }
     }
 
@@ -179,23 +146,22 @@
   <svg bind:this={svgEl} role="img" aria-label="Phenotype topic map" preserveAspectRatio="xMidYMid meet"></svg>
   <figcaption class="legend">
     {#if $bundle}
-      {#if $colorMode === 'prevalence'}
-        <span class="eyebrow">color</span>
-        <span class="grad grad-prev" aria-hidden="true"></span>
-        <span class="lend" data-numeric>rare</span>
-        <span class="rend" data-numeric>common</span>
-      {:else}
-        <span class="eyebrow">npmi</span>
-        <span class="grad grad-npmi" aria-hidden="true"></span>
-        <span class="lend" data-numeric>−0.2</span>
-        <span class="rend" data-numeric>+0.4</span>
-      {/if}
-      <span class="sep"></span>
-      <span class="eyebrow">size</span>
-      <span class="size-marks" aria-hidden="true">
-        <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
-      </span>
-      <span class="lend">prevalence</span>
+      <div class="legend-group">
+        {#if $colorMode === 'prevalence'}
+          <span class="eyebrow">Color · prevalence</span>
+          <span class="grad grad-prev" aria-hidden="true"></span>
+        {:else}
+          <span class="eyebrow">Color · NPMI</span>
+          <span class="grad grad-npmi" aria-hidden="true"></span>
+          <span class="ticks" data-numeric><span>−0.2</span><span>0</span><span>+0.4</span></span>
+        {/if}
+      </div>
+      <div class="legend-group">
+        <span class="eyebrow">Size · prevalence</span>
+        <span class="size-marks" aria-hidden="true">
+          <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
+        </span>
+      </div>
     {/if}
   </figcaption>
 </figure>
@@ -211,49 +177,50 @@
     width: 100%;
     height: auto;
     display: block;
-    background: var(--paper-elevated);
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-sm);
   }
   .legend {
     display: flex;
+    gap: 1.5rem;
     align-items: center;
-    gap: 0.6rem;
-    padding: 0.4rem 0.55rem;
+    padding: 0.25rem 0.25rem;
     font-size: var(--fs-micro);
-    color: var(--ink-muted);
+    color: var(--ink-faint);
     flex-wrap: wrap;
   }
-  .legend .grad {
+  .legend-group {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+  }
+  .grad {
     display: inline-block;
-    width: 100px;
+    width: 96px;
     height: 6px;
     border-radius: 3px;
   }
   .grad-prev {
-    background: linear-gradient(to right, #e8e0d0, #3d4f6e);
+    background: linear-gradient(to right, #f0fdfa, #0e7490);
   }
   .grad-npmi {
-    background: linear-gradient(to right, #8c3b2e, #cfb88a, #5b6e3d);
+    background: linear-gradient(to right, #ef4444, #d4d4d8, #06b6d4);
   }
-  .legend .lend,
-  .legend .rend {
+  .ticks {
+    display: inline-flex;
+    gap: 0.4rem;
     font-size: var(--fs-micro);
     color: var(--ink-faint);
   }
-  .sep {
-    width: 1px;
-    height: 14px;
-    background: var(--rule);
-    margin: 0 0.3rem;
-  }
   .size-marks {
     display: inline-flex;
-    align-items: baseline;
+    align-items: center;
     gap: 4px;
   }
   .size-marks .dot {
     border-radius: 50%;
-    border: 1px solid var(--ink-muted);
-    background: transparent;
+    background: var(--rule-strong);
   }
   .size-marks .s1 { width: 5px; height: 5px; }
   .size-marks .s2 { width: 9px; height: 9px; }

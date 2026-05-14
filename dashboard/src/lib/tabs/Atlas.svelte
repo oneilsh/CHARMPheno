@@ -7,7 +7,7 @@
 <section class="atlas">
   <header class="section-head">
     <div class="title-block">
-      <span class="eyebrow">Section I</span>
+      <span class="eyebrow">01 · Atlas</span>
       <h1>Phenotype Atlas</h1>
       <p class="kicker">Each marker is a learned phenotype. Distance is Jensen–Shannon divergence between code distributions; size encodes corpus prevalence.</p>
     </div>
@@ -30,7 +30,7 @@
 
 <style>
   .atlas {
-    padding: 0.5rem 0 3rem;
+    padding: 0.25rem 0 3rem;
   }
 
   .section-head {
@@ -45,14 +45,15 @@
   .title-block {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: 0.45rem;
   }
-  .title-block h1 { margin: 0; }
+  .title-block h1 { margin: 0.1rem 0 0; }
   .kicker {
-    margin: 0.15rem 0 0;
+    margin: 0.25rem 0 0;
     font-size: var(--fs-small);
     color: var(--ink-muted);
     max-width: 62ch;
+    line-height: 1.55;
   }
 
   .controls {
@@ -63,9 +64,7 @@
   .control {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
-    font-family: var(--font-mono);
-    font-size: var(--fs-small);
+    gap: 0.35rem;
   }
 
   .grid {

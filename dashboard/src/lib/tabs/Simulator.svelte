@@ -29,13 +29,13 @@
 <section class="sim">
   <header class="section-head">
     <div class="title-block">
-      <span class="eyebrow">Section III</span>
+      <span class="eyebrow">03 · Simulator</span>
       <h1>Simulator</h1>
-      <p class="kicker">Given a partial code bag, draw <em>N</em> samples from the model's posterior predictive. Each sample is one complete year-of-life bag.</p>
+      <p class="kicker">Given a partial code bag, draw <span data-numeric>N</span> samples from the model's posterior predictive. Each sample is one complete year-of-life bag.</p>
     </div>
     <div class="controls">
       <label class="control n-control">
-        <span class="eyebrow">N samples <span class="ctl-v" data-numeric>{nSamples}</span></span>
+        <span class="ctl-head"><span class="eyebrow">N samples</span> <span class="ctl-v" data-numeric>{nSamples}</span></span>
         <input type="range" min="10" max="2000" step="10" bind:value={nSamples} />
       </label>
       <label class="control">
@@ -51,8 +51,8 @@
         <span class="eyebrow">Seed</span>
         <input type="number" bind:value={seed} />
       </label>
-      <button class="btn run-btn" on:click={runSim} disabled={running}>
-        {running ? '… sampling' : '→ run sampler'}
+      <button class="btn btn-primary run-btn" on:click={runSim} disabled={running}>
+        {running ? 'sampling…' : 'run sampler →'}
       </button>
     </div>
   </header>
@@ -66,23 +66,22 @@
       {:else}
         <div class="empty">
           <span class="eyebrow">Awaiting input</span>
-          <p class="empty-msg">Compose a prefix on the left, then run the sampler to see the posterior.</p>
+          <p class="empty-msg">Compose a prefix on the left, then run the sampler to see the posterior over phenotypes and expected codes.</p>
         </div>
       {/if}
     </div>
   </div>
 
   <p class="footnote">
-    <em>Note.</em> Year-of-life scope; code ordering and timing are not modeled. Each sample is one complete bag.
-    N = <span data-numeric>{nSamples}</span>, K = <span data-numeric>{$bundle?.model.K ?? '?'}</span>,
-    prefix length = <span data-numeric>{$simulatorPrefix.length}</span>.
+    <strong>Scope.</strong> Year-of-life; code ordering and timing are not modeled. Each sample is one complete bag.
+    <span data-numeric>N = {nSamples}</span>,
+    <span data-numeric>K = {$bundle?.model.K ?? '?'}</span>,
+    <span data-numeric>prefix = {$simulatorPrefix.length}</span>.
   </p>
 </section>
 
 <style>
-  .sim {
-    padding: 0.5rem 0 3rem;
-  }
+  .sim { padding: 0.25rem 0 3rem; }
 
   .section-head {
     display: grid;
@@ -93,92 +92,72 @@
     margin-bottom: 1.5rem;
     border-bottom: 1px solid var(--rule);
   }
-  .title-block { display: flex; flex-direction: column; gap: 0.4rem; }
-  .title-block h1 { margin: 0; }
-  .title-block h1 em {
-    font-style: italic;
-    color: var(--terracotta);
-  }
+  .title-block { display: flex; flex-direction: column; gap: 0.45rem; }
+  .title-block h1 { margin: 0.1rem 0 0; }
   .kicker {
-    margin: 0.15rem 0 0;
+    margin: 0.25rem 0 0;
     font-size: var(--fs-small);
     color: var(--ink-muted);
     max-width: 62ch;
-  }
-  .kicker em {
-    font-family: var(--font-display);
-    font-style: italic;
-    color: var(--ink);
+    line-height: 1.55;
   }
 
   .controls {
     display: flex;
     align-items: end;
-    gap: 1.5rem;
+    gap: 1rem;
   }
   .control {
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
-    font-family: var(--font-mono);
-    font-size: var(--fs-small);
+    gap: 0.35rem;
   }
-  .n-control {
-    min-width: 180px;
-  }
-  .n-control input[type="range"] {
-    width: 180px;
+  .ctl-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
   }
   .ctl-v {
-    color: var(--terracotta);
-    margin-left: 0.25rem;
-  }
-  .seed-control input {
-    width: 5rem;
-  }
-  .run-btn {
-    font-family: var(--font-body);
     font-size: var(--fs-small);
-    padding: 0.5rem 0.9rem;
-    background: var(--ink);
-    color: var(--paper);
-    border-color: var(--ink);
+    color: var(--accent);
+    font-weight: 500;
   }
-  .run-btn:hover:not(:disabled) {
-    background: var(--terracotta);
-    border-color: var(--terracotta);
-    color: var(--paper);
+  .n-control { min-width: 180px; }
+  .n-control input[type="range"] { width: 180px; }
+  .seed-control input { width: 5rem; }
+  .run-btn {
+    font-size: var(--fs-small);
+    padding: 0.5rem 1rem;
   }
 
   .grid {
     display: grid;
     grid-template-columns: 340px 1fr;
-    gap: 1.5rem;
+    gap: 1.25rem;
   }
   .main {
     display: grid;
-    gap: 1.25rem;
+    gap: 1rem;
     align-content: start;
   }
 
   .empty {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    align-items: center;
+    gap: 0.65rem;
     padding: 3rem 1rem;
-    background: var(--paper-elevated);
-    border: 1px solid var(--rule);
-    border-style: dashed;
+    background: var(--surface);
+    border: 1px dashed var(--rule-strong);
     border-radius: var(--radius-sm);
     text-align: center;
   }
   .empty-msg {
     margin: 0 auto;
-    font-family: var(--font-display);
-    font-style: italic;
-    font-size: 1.05rem;
+    font-size: var(--fs-small);
     color: var(--ink-muted);
-    max-width: 36ch;
+    max-width: 42ch;
+    line-height: 1.6;
   }
 
   .footnote {
@@ -187,10 +166,9 @@
     border-top: 1px solid var(--rule-faint);
     font-size: var(--fs-micro);
     color: var(--ink-faint);
-    font-style: italic;
   }
-  .footnote em {
-    font-family: var(--font-display);
+  .footnote strong {
     color: var(--ink-muted);
+    font-weight: 600;
   }
 </style>

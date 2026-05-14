@@ -30,9 +30,7 @@
 
 <style>
   .ribbon {
-    margin-top: 2.5rem;
-    padding-top: 1.5rem;
-    border-top: 1px solid var(--rule);
+    margin-top: 2rem;
   }
   .head {
     display: flex;
@@ -42,35 +40,32 @@
   }
   .head h3 {
     font-size: 1.05rem;
-    font-weight: 500;
+    font-weight: 600;
+    letter-spacing: var(--tracking-tight);
   }
 
   .strip {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 0.6rem;
+    gap: 0.65rem;
   }
 
   .card {
     display: flex;
     flex-direction: column;
     gap: 0.55rem;
-    padding: 0.65rem 0.75rem;
-    background: var(--paper-elevated);
+    padding: 0.7rem 0.85rem;
+    background: var(--surface);
     border: 1px solid var(--rule);
     border-radius: var(--radius-sm);
     cursor: pointer;
     text-align: left;
-    transition: border-color 0.15s ease, transform 0.15s ease, background 0.15s ease;
+    transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
   }
   .card:hover {
-    border-color: var(--terracotta);
-    background: var(--paper);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.12);
     transform: translateY(-1px);
-  }
-  .card:focus-visible {
-    outline: 2px solid var(--terracotta);
-    outline-offset: 2px;
   }
 
   .card-head {
@@ -86,12 +81,13 @@
     flex-shrink: 0;
   }
   .card:hover .dot {
-    background: var(--terracotta);
+    background: var(--accent);
   }
   .id {
+    font-family: var(--font-mono);
     font-size: var(--fs-small);
     color: var(--ink-muted);
-    letter-spacing: 0.02em;
+    letter-spacing: -0.01em;
   }
 
   /* Compact inline bar; no labels/percents inside neighbor cards. */

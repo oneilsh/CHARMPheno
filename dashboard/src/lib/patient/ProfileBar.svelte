@@ -6,17 +6,18 @@
   export let onSelect: ((id: number) => void) | null = null
   export let otherThreshold = 0.05
 
-  // Curated 8-color earth-tone palette, indexed by topic-id mod 8 so
-  // the same phenotype always gets the same hue across patients.
+  // Curated 8-color palette, indexed by topic-id mod 8 so the same
+  // phenotype is always the same color across patients. Modern data-viz
+  // hues, well-spaced for distinguishability.
   const PALETTE = [
-    '#3d4f6e', // indigo
-    '#b25b2c', // terracotta
-    '#5b6e3d', // moss
-    '#b98a2e', // ochre
-    '#6e3d5b', // plum
-    '#386b6e', // teal
-    '#8c3b2e', // brick
-    '#4a5566', // slate
+    '#06b6d4', // cyan
+    '#8b5cf6', // violet
+    '#10b981', // emerald
+    '#f59e0b', // amber
+    '#ec4899', // pink
+    '#3b82f6', // blue
+    '#ef4444', // red
+    '#64748b', // slate
   ]
   function hue(k: number): string { return PALETTE[k % PALETTE.length] }
 
@@ -112,9 +113,9 @@
     display: flex;
     width: 100%;
     height: var(--bar-h);
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     overflow: hidden;
-    background: var(--paper-recessed);
+    background: var(--surface-recessed);
     gap: 1px;
   }
   .band {
@@ -128,17 +129,17 @@
     filter: brightness(1.08);
   }
   .band:focus-visible {
-    outline: 2px solid var(--terracotta);
+    outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
   .other-band {
-    background: var(--paper-deep);
+    background: var(--surface-deep);
     background-image: repeating-linear-gradient(
       45deg,
       transparent,
       transparent 3px,
-      rgba(108, 95, 80, 0.18) 3px,
-      rgba(108, 95, 80, 0.18) 4px
+      rgba(82, 82, 91, 0.14) 3px,
+      rgba(82, 82, 91, 0.14) 4px
     );
   }
 

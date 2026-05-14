@@ -71,21 +71,23 @@
     {#each ticks as t}
       <line
         x1={xScale(t)} y1={26} x2={xScale(t)} y2={H - 8}
-        stroke="#e8e0d0" stroke-width="0.5" stroke-dasharray="2,3"
+        stroke="#e4e4e7" stroke-width="0.5" stroke-dasharray="2,3"
       />
-      <text x={xScale(t)} y={18} font-size="9" text-anchor="middle" fill="#9c8e7a" font-family="IBM Plex Mono, monospace">
+      <text x={xScale(t)} y={18} font-size="9" text-anchor="middle" fill="#a1a1aa" font-family="JetBrains Mono, monospace">
         {(t * 100).toFixed(0)}%
       </text>
     {/each}
 
     <!-- axis labels -->
-    <text x={X_MARGIN - 8} y={18} font-size="9" text-anchor="end" fill="#9c8e7a"
-          font-family="Newsreader, serif" font-style="italic">
-      Phenotype
+    <text x={X_MARGIN - 8} y={18} font-size="9" text-anchor="end" fill="#a1a1aa"
+          font-family="JetBrains Mono, monospace"
+          letter-spacing="0.08em" text-transform="uppercase">
+      PHENOTYPE
     </text>
-    <text x={W - 22} y={18} font-size="9" text-anchor="end" fill="#9c8e7a"
-          font-family="Newsreader, serif" font-style="italic">
-      posterior θ
+    <text x={W - 22} y={18} font-size="9" text-anchor="end" fill="#a1a1aa"
+          font-family="JetBrains Mono, monospace"
+          letter-spacing="0.08em" text-transform="uppercase">
+      POSTERIOR θ
     </text>
 
     {#each rows as r, i}
@@ -99,42 +101,42 @@
          on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && (expandedK = expandedK === r.k ? null : r.k)}>
         <!-- row highlight -->
         <rect x="0" y={cy - ROW_H / 2} width={W} height={ROW_H}
-              fill={selected ? '#ece6d9' : 'transparent'} />
+              fill={selected ? '#ecfeff' : 'transparent'} />
 
         <!-- label -->
         <text x={X_MARGIN - 8} y={cy + 3} font-size="10" text-anchor="end"
-              fill={selected ? '#1f1b16' : '#6b5f50'}
-              font-family="IBM Plex Sans, sans-serif"
-              font-weight={selected ? 500 : 400}>
+              fill={selected ? '#0a0a0a' : '#52525b'}
+              font-family="Geist, sans-serif"
+              font-weight={selected ? 600 : 400}>
           {$phenotypesById.get(r.k)?.label || `Phenotype ${r.k}`}
         </text>
 
         {#if overflow}
           <!-- Overflow chevron at the right edge of the plot area -->
-          <text x={W - 22} y={cy + 3} font-size="11" fill="#b25b2c" text-anchor="end"
-                font-family="Newsreader, serif">›</text>
+          <text x={W - 22} y={cy + 3} font-size="11" fill="#06b6d4" text-anchor="end"
+                font-family="Geist, sans-serif" font-weight="600">›</text>
           <line x1={xScale(Math.min(r.p10, xMax))} y1={cy} x2={W - 26} y2={cy}
-                stroke="#b25b2c" stroke-width="1" />
+                stroke="#06b6d4" stroke-width="1" />
           <rect x={xScale(Math.min(r.p25, xMax))} y={cy - 4}
                 width={Math.max(1, (W - 26) - xScale(Math.min(r.p25, xMax)))} height="8"
-                fill="#b25b2c" opacity="0.5" />
+                fill="#06b6d4" opacity="0.5" />
         {:else}
           <!-- P10–P90 line -->
           <line x1={xScale(r.p10)} y1={cy} x2={xScale(r.p90)} y2={cy}
-                stroke="#b8a988" stroke-width="1" />
+                stroke="#d4d4d8" stroke-width="1" />
           <!-- P25–P75 box -->
           <rect x={xScale(r.p25)} y={cy - 4}
                 width={Math.max(1, xScale(r.p75) - xScale(r.p25))} height="8"
-                fill="#3d4f6e" opacity="0.78" />
+                fill="#06b6d4" opacity="0.75" />
           <!-- median tick -->
           <line x1={xScale(r.p50)} y1={cy - 5} x2={xScale(r.p50)} y2={cy + 5}
-                stroke="#1f1b16" stroke-width="1.5" />
+                stroke="#0a0a0a" stroke-width="1.5" />
         {/if}
 
         <!-- numeric % -->
         <text x={W - 4} y={cy + 3} font-size="9" text-anchor="end"
-              fill={overflow ? '#b25b2c' : '#6b5f50'}
-              font-family="IBM Plex Mono, monospace">
+              fill={overflow ? '#06b6d4' : '#52525b'}
+              font-family="JetBrains Mono, monospace">
           {(r.p50 * 100).toFixed(1)}%
         </text>
       </g>
@@ -145,7 +147,7 @@
     <aside class="drill">
       <header>
         <span class="eyebrow">Drill-down</span>
-        <h4>Top codes driving <em>{$phenotypesById.get(expandedK)?.label || `Phenotype ${expandedK}`}</em></h4>
+        <h4>{$phenotypesById.get(expandedK)?.label || `Phenotype ${expandedK}`}</h4>
       </header>
       {#if drill.length === 0}
         <p class="hint">No completion codes scored above zero for this phenotype.</p>
@@ -171,7 +173,7 @@
 
 <style>
   .carpet-wrap {
-    background: var(--paper-elevated);
+    background: var(--surface);
     border: 1px solid var(--rule);
     border-radius: var(--radius-sm);
     padding: 0.5rem 0.5rem 0.25rem;
@@ -182,32 +184,25 @@
   .drill {
     margin: 0.5rem 0.25rem 0.25rem;
     padding: 0.85rem 1rem;
-    background: var(--paper);
-    border: 1px solid var(--rule);
-    border-left: 3px solid var(--terracotta);
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-soft);
+    border-left: 3px solid var(--accent);
     border-radius: var(--radius-sm);
   }
   .drill header {
     display: flex;
     flex-direction: column;
-    gap: 0.15rem;
+    gap: 0.2rem;
     margin-bottom: 0.65rem;
   }
   .drill h4 {
     margin: 0;
     font-size: 0.95rem;
-    font-weight: 500;
-    font-family: var(--font-body);
-  }
-  .drill h4 em {
-    font-family: var(--font-display);
-    font-style: italic;
-    color: var(--terracotta);
-    font-weight: 500;
+    font-weight: 600;
+    color: var(--ink);
   }
   .hint {
     color: var(--ink-muted);
-    font-style: italic;
     font-size: var(--fs-small);
     margin: 0;
   }
@@ -223,7 +218,7 @@
     align-items: center;
     gap: 0.7rem;
     padding: 0.35rem 0;
-    border-bottom: 1px solid var(--rule-faint);
+    border-bottom: 1px solid rgba(6, 182, 212, 0.15);
   }
   ol li:last-child { border-bottom: 0; }
   .desc {
@@ -234,15 +229,15 @@
   }
   .spark {
     display: block;
-    height: 4px;
-    background: var(--paper-recessed);
-    border-radius: 1px;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 1.5px;
     overflow: hidden;
   }
   .spark-bar {
     display: block;
     height: 100%;
-    background: var(--terracotta);
+    background: var(--accent);
   }
   .score {
     text-align: right;

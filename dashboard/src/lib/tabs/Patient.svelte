@@ -17,9 +17,9 @@
 <section class="patient">
   <header class="section-head">
     <div class="title-block">
-      <span class="eyebrow">Section II</span>
+      <span class="eyebrow">02 · Patient</span>
       <h1>Patient Explorer</h1>
-      <p class="kicker">Synthetic patient drawn from the model; click a band to inspect which codes drove the assignment.</p>
+      <p class="kicker">Synthetic patient drawn from the model. Click a phenotype band to inspect which codes from this patient's bag drove the assignment.</p>
     </div>
     <div class="picker">
       <label class="picker-label">
@@ -46,11 +46,8 @@
 </section>
 
 <style>
-  .patient {
-    padding: 0.5rem 0 3rem;
-  }
+  .patient { padding: 0.25rem 0 3rem; }
 
-  /* Section heading — editorial title block */
   .section-head {
     display: grid;
     grid-template-columns: 1fr auto;
@@ -60,44 +57,41 @@
     margin-bottom: 2rem;
     border-bottom: 1px solid var(--rule);
   }
-  .title-block { display: flex; flex-direction: column; gap: 0.4rem; }
-  .title-block h1 { margin: 0; }
+  .title-block { display: flex; flex-direction: column; gap: 0.45rem; }
+  .title-block h1 { margin: 0.1rem 0 0; }
   .kicker {
-    margin: 0.15rem 0 0;
+    margin: 0.25rem 0 0;
     font-size: var(--fs-small);
     color: var(--ink-muted);
     max-width: 60ch;
+    line-height: 1.55;
   }
 
   .picker {
     display: flex;
     align-items: end;
-    gap: 1.25rem;
+    gap: 1rem;
   }
   .picker-label {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
-    font-family: var(--font-mono);
-    font-size: var(--fs-small);
+    gap: 0.35rem;
   }
-  .picker-label select {
-    min-width: 9rem;
-  }
-  .shuffle {
-    font-family: var(--font-body);
-    font-size: var(--fs-small);
-  }
+  .picker-label select { min-width: 9rem; }
+  .shuffle { font-family: var(--font-body); font-size: var(--fs-small); }
+  .shuffle:hover { color: var(--accent); }
 
-  /* Profile block */
   .profile-block {
-    margin-bottom: 1rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-sm);
+    padding: 1.25rem 1.25rem 1rem;
   }
   .profile-head {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    margin-bottom: 0.65rem;
+    margin-bottom: 0.85rem;
   }
   .profile-id {
     font-size: var(--fs-small);

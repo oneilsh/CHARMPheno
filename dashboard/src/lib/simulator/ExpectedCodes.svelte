@@ -26,7 +26,7 @@
   <header>
     <span class="eyebrow">Posterior predictive</span>
     <h3>Top expected codes</h3>
-    <p class="kicker">Per-sample completion counts at the 10th / 50th / 90th percentile.</p>
+    <p class="kicker">Per-sample completion counts. Range shows P10 → P90, tick marks the median.</p>
   </header>
 
   <table>
@@ -54,7 +54,7 @@
 <style>
   .expected {
     padding: 1.25rem;
-    background: var(--paper-elevated);
+    background: var(--surface);
     border: 1px solid var(--rule);
     border-radius: var(--radius-sm);
   }
@@ -62,23 +62,21 @@
   header {
     display: flex;
     flex-direction: column;
-    gap: 0.15rem;
+    gap: 0.2rem;
     margin-bottom: 0.85rem;
     padding-bottom: 0.65rem;
     border-bottom: 1px solid var(--rule);
   }
   header h3 {
-    font-family: var(--font-display);
-    font-style: italic;
-    font-weight: 500;
-    font-size: 1.4rem;
-    letter-spacing: -0.005em;
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: var(--tracking-tight);
   }
   .kicker {
-    margin: 0.05rem 0 0;
-    font-size: var(--fs-micro);
-    color: var(--ink-faint);
-    font-style: italic;
+    margin: 0.1rem 0 0;
+    font-size: var(--fs-small);
+    color: var(--ink-muted);
+    line-height: 1.5;
   }
 
   table {
@@ -111,8 +109,8 @@
     position: absolute;
     top: 0.6rem;
     height: 3px;
-    background: var(--terracotta-soft);
-    opacity: 0.55;
+    background: var(--accent);
+    opacity: 0.35;
     border-radius: 1.5px;
   }
   td.bar .med {
@@ -120,7 +118,7 @@
     top: 0.35rem;
     width: 2px;
     height: 11px;
-    background: var(--terracotta);
+    background: var(--accent);
   }
   td.num {
     width: 3.5rem;
@@ -130,7 +128,6 @@
 
   .hint {
     color: var(--ink-faint);
-    font-style: italic;
     font-size: var(--fs-small);
     padding: 0.5rem 0 0;
   }

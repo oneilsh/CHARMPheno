@@ -47,40 +47,36 @@
 <main>
   <header class="masthead">
     <div class="brand">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
-        <circle cx="16" cy="16" r="11" fill="none" stroke="#1f1b16" stroke-width="1.25" />
-        <circle cx="16" cy="16" r="4.5" fill="#b25b2c" />
-        <line x1="16" y1="2" x2="16" y2="6" stroke="#1f1b16" stroke-width="1" />
-        <line x1="16" y1="26" x2="16" y2="30" stroke="#1f1b16" stroke-width="1" />
-        <line x1="2" y1="16" x2="6" y2="16" stroke="#1f1b16" stroke-width="1" />
-        <line x1="26" y1="16" x2="30" y2="16" stroke="#1f1b16" stroke-width="1" />
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+        <!-- Abstract mark: two circles, one ink-stroked, one cyan-filled, offset.
+             Reads as "a data point in a coordinate system" without literalism. -->
+        <circle cx="9" cy="9" r="5" fill="none" stroke="#0a0a0a" stroke-width="1.5" />
+        <circle cx="16" cy="16" r="2.5" fill="#06b6d4" />
       </svg>
       <div class="lockup">
-        <span class="serif title">CharmPheno</span>
-        <span class="eyebrow subtitle">Phenotype Atlas · synthetic demonstration</span>
+        <span class="title">CharmPheno</span>
+        <span class="subtitle">phenotype atlas</span>
       </div>
     </div>
 
     {#if $bundle}
       <dl class="metadata" data-numeric>
         <div><dt>K</dt><dd>{$bundle.model.K}</dd></div>
-        <div><dt>V</dt><dd>{$bundle.model.V.toLocaleString()}<span class="of"> / {$bundle.corpusStats.v_full.toLocaleString()}</span></dd></div>
-        <div><dt>Corpus</dt><dd>{($bundle.corpusStats.corpus_size_docs / 1000).toFixed(0)}<span class="of">k docs</span></dd></div>
+        <div><dt>V</dt><dd>{$bundle.model.V.toLocaleString()}<span class="of">/{$bundle.corpusStats.v_full.toLocaleString()}</span></dd></div>
+        <div><dt>n</dt><dd>{($bundle.corpusStats.corpus_size_docs / 1000).toFixed(0)}<span class="of">k</span></dd></div>
       </dl>
     {/if}
 
     <div class="controls">
       {#if $bundle && $advancedView}
-        <button class="btn btn-ghost regen" on:click={regenCohort} title="Re-roll synthetic cohort with a new seed">
+        <button class="btn-ghost regen" on:click={regenCohort} title="Re-roll synthetic cohort with a new seed">
           ↻ regenerate cohort
         </button>
       {/if}
-      <label class="view-toggle">
-        <input type="checkbox" bind:checked={$advancedView} />
-        <span class="view-label" class:active={!$advancedView}>simple</span>
-        <span class="view-sep">/</span>
-        <span class="view-label" class:active={$advancedView}>advanced</span>
-      </label>
+      <div class="seg" role="group" aria-label="View density">
+        <button class="seg-btn" class:active={!$advancedView} on:click={() => advancedView.set(false)}>simple</button>
+        <button class="seg-btn" class:active={$advancedView} on:click={() => advancedView.set(true)}>advanced</button>
+      </div>
     </div>
   </header>
 
@@ -89,7 +85,7 @@
   {#if error}
     <p class="error">Failed to load bundle: {error}</p>
   {:else if !$bundle}
-    <p class="loading"><span class="loading-dot"></span> Loading model bundle…</p>
+    <p class="loading"><span class="loading-dot"></span> loading model bundle</p>
   {:else}
     <Tabs />
     {#if $route === 'atlas'}<Atlas />{:else if $route === 'patient'}<Patient />{:else}<Simulator />{/if}
@@ -108,63 +104,68 @@
     grid-template-columns: auto 1fr auto;
     align-items: center;
     gap: 2rem;
-    padding: 1.75rem 0 1.5rem;
+    padding: 1.5rem 0 1.25rem;
   }
 
   .brand {
     display: flex;
     align-items: center;
-    gap: 0.85rem;
+    gap: 0.7rem;
   }
   .mark {
-    width: 30px;
-    height: 30px;
+    width: 26px;
+    height: 26px;
     flex-shrink: 0;
   }
   .lockup {
     display: flex;
     flex-direction: column;
-    line-height: 1;
+    line-height: 1.1;
   }
   .title {
-    font-size: 1.55rem;
-    font-weight: 500;
-    font-style: italic;
-    letter-spacing: var(--tracking-tight);
+    font-family: var(--font-body);
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
     color: var(--ink);
   }
   .subtitle {
-    margin-top: 0.35rem;
-    font-size: 0.65rem;
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-faint);
+    margin-top: 0.15rem;
   }
 
+  /* Metadata strip — instrument-readout */
   .metadata {
     display: flex;
-    gap: 1.5rem;
+    gap: 1.25rem;
     margin: 0;
     justify-self: center;
-    padding: 0.5rem 1.2rem;
-    background: var(--paper-elevated);
+    padding: 0.45rem 0.95rem;
+    background: var(--surface);
     border: 1px solid var(--rule);
     border-radius: var(--radius-sm);
   }
   .metadata div {
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0.05rem;
+    align-items: baseline;
+    gap: 0.4rem;
   }
   .metadata dt {
-    font-family: var(--font-body);
+    font-family: var(--font-mono);
     font-size: var(--fs-micro);
-    letter-spacing: var(--tracking-eyebrow);
     text-transform: uppercase;
+    letter-spacing: 0.08em;
     color: var(--ink-faint);
     margin: 0;
+    font-weight: 500;
   }
   .metadata dd {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: 0.92rem;
     font-weight: 500;
     color: var(--ink);
   }
@@ -172,62 +173,70 @@
     color: var(--ink-faint);
     font-weight: 400;
     font-size: 0.78rem;
+    margin-left: 1px;
   }
 
   .controls {
     display: flex;
     align-items: center;
-    gap: 1.5rem;
+    gap: 1rem;
   }
   .regen {
     font-family: var(--font-body);
     font-size: var(--fs-small);
-    letter-spacing: 0.01em;
   }
-  .view-toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
+  .regen:hover { color: var(--accent); }
+
+  /* Segmented control */
+  .seg {
+    display: inline-flex;
+    background: var(--surface);
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-sm);
+    padding: 2px;
+    gap: 1px;
+  }
+  .seg-btn {
+    border: 0;
+    background: transparent;
+    padding: 0.28rem 0.7rem;
+    font-family: var(--font-body);
     font-size: var(--fs-small);
-    color: var(--ink-faint);
+    font-weight: 500;
+    color: var(--ink-muted);
     cursor: pointer;
-    user-select: none;
-    position: relative;
+    border-radius: 3px;
+    letter-spacing: -0.005em;
+    transition: all 0.12s ease;
   }
-  .view-toggle input {
-    position: absolute;
-    opacity: 0;
-    pointer-events: none;
-  }
-  .view-label {
-    transition: color 0.15s ease;
-    padding-bottom: 1px;
-    border-bottom: 1px solid transparent;
-  }
-  .view-label.active {
-    color: var(--ink);
-    border-bottom-color: var(--terracotta);
-  }
-  .view-sep {
-    color: var(--ink-faint);
+  .seg-btn:hover { color: var(--ink); }
+  .seg-btn.active {
+    background: var(--ink);
+    color: var(--surface);
   }
 
-  .loading,
-  .error {
+  /* Loading / error */
+  .loading, .error {
     padding: 3rem 0;
     color: var(--ink-muted);
-    font-style: italic;
+    font-size: var(--fs-small);
   }
-  .error {
-    color: var(--brick);
+  .error { color: var(--danger); }
+  .loading {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-family: var(--font-mono);
+    font-size: var(--fs-small);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
   .loading-dot {
     display: inline-block;
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--terracotta);
-    margin-right: 0.5rem;
+    background: var(--accent);
     animation: pulse 1.4s ease-in-out infinite;
   }
   @keyframes pulse {
