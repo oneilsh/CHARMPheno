@@ -86,13 +86,17 @@ QualityCategory = Literal["phenotype", "background", "anchor", "mixed", "dead"]
 def _build_system_prompt(
     *,
     max_words: int,
+    alpha_histogram_str: str,
+    kl_histogram_str: str,
     alpha_min: float,
     alpha_median: float,
     alpha_max: float,
-    alpha_floor_threshold: float,
     kl_min: float,
     kl_median: float,
     kl_max: float,
+    kl_dead_threshold: float,
+    kl_dead_threshold_explanation: str,
+    alpha_separates_well: bool,
 ) -> str:
     # All substitutions happen once per run so the resulting string is
     # byte-identical across topics (enabling prompt caching).
@@ -131,36 +135,43 @@ list** → anchor.
 
 ## Topic-level statistics
 
-Two distinctiveness signals govern classification. They reflect what \
-the model itself "thinks" of each topic and how far it sits from the \
-corpus baseline:
+**KL(β ‖ corpus) is the PRIMARY classifier.** It measures how far the \
+topic's word distribution sits from the corpus marginal (in nats). \
+Topics near zero are essentially the corpus baseline; topics with high \
+KL are doing real work decomposing the corpus.
 
-- **alpha (α)** — the per-topic asymmetric Dirichlet prior weight. \
-The fitter ran asymmetric-α optimization, which actively pushes α down \
-for slots that aren't carrying real data and keeps it up for slots that \
-are. α at the floor means the model itself has zeroed out that slot. \
-Distribution across this fit:
-    min     = {alpha_min:.4f}    ← floor (asymmetric-α optimizer's lower bound)
-    median  = {alpha_median:.4f}
-    max     = {alpha_max:.4f}
-A data-driven floor threshold has been computed from this fit's α \
-distribution (the natural gap between the floor cluster and the \
-elevated cluster of used topics). α ≤ {alpha_floor_threshold:.4f} \
-indicates the slot is at floor. ALWAYS classify such topics as **dead** \
-regardless of how the top-N reads — the optimizer has already declared \
-them unused.
+KL distribution across this fit (K topics):
+{kl_histogram_str}
+  min = {kl_min:.3f}, median = {kl_median:.3f}, max = {kl_max:.3f}
 
-- **KL(β ‖ corpus)** — KL divergence between the topic's word \
-distribution and the corpus marginal, in nats. Quantifies whether the \
-topic is distinguishable from the corpus baseline:
-    near 0       → β ≈ corpus marginal; the top-N is just baseline \
-                  smoothing of common comorbidities, not a learned pattern.
-    moderate     → β amplifies a subset of concepts ~2-3× over their \
-                  corpus rates (typical of catch-all background flavors).
-    high         → β sharply concentrates on concepts that are rare or \
-                  much-overweighted in the corpus (real phenotype).
-Distribution across this fit:
-    min = {kl_min:.3f}, median = {kl_median:.3f}, max = {kl_max:.3f}.
+A data-driven dead-baseline threshold has been computed by finding the \
+natural gap between the corpus-baseline cluster (low KL) and the \
+learned-topic cluster (higher KL):
+  **KL ≤ {kl_dead_threshold:.3f} → dead (case b: corpus pseudo-coherent baseline)**
+  ({kl_dead_threshold_explanation})
+
+Topics with KL above this threshold may still be `dead` (case a — \
+unused slot with random rare top-N) but only if the top-N is genuinely \
+incoherent. Topics with KL well above the threshold and a coherent \
+top-N are real, regardless of α.
+
+**alpha (α) — supporting signal only on this fit.** α is the per-topic \
+asymmetric-Dirichlet prior weight; in theory the optimizer pushes α \
+down for unused slots and up for used ones. In practice on this fit \
+the α distribution is heavily compressed (most topics sit in a tight \
+band near the minimum), so α alone CANNOT reliably distinguish dead \
+from used.
+
+α distribution across this fit:
+{alpha_histogram_str}
+  min = {alpha_min:.4f}, median = {alpha_median:.4f}, max = {alpha_max:.4f}
+
+**Do NOT classify a topic as `dead` based on α alone.** Many real \
+rare-condition phenotypes on this fit have α near the floor but KL in \
+the top quartile (highly distinct from corpus). KL is the trustworthy \
+signal. Use α only as a soft cross-check: α well above the median \
+combined with high KL strengthens the case for a real topic, but α \
+near floor is meaningless on its own.
 
 Two more contextual stats:
 
@@ -179,19 +190,19 @@ well above floor and high KL is still a real phenotype.
 
 Classify each topic into exactly one of:
 
-- **phenotype** — α well above floor AND KL above the median (relative \
-to this fit). Top concepts share a coherent clinical theme. The common \
-case for clinically useful topics; usage can range from <1% (rare \
-condition) to several percent (common condition) — usage does NOT \
-disqualify a topic from being a phenotype as long as α and KL show it \
-is distinct from prior and from baseline.
+- **phenotype** — KL above the dead-baseline threshold AND top concepts \
+share a coherent clinical theme. The common case for clinically useful \
+topics; usage can range from <1% (rare condition) to several percent \
+(common condition) — usage does NOT disqualify a topic from being a \
+phenotype, and neither does α near floor on its own. KL is what \
+matters.
 
-- **background** — α above floor AND KL moderate (near the median) AND \
-top concepts are common comorbidities or generic acute symptoms (e.g. \
-HTN/HLD/T2DM/GERD/anxiety; or pain/chest pain/nausea/SoB/vomiting). \
-Typically high usage (several % to tens of % of corpus mass). The \
-topic carries real data but the pattern is the corpus's chronic or \
-acute baseline, useful for cohort *exclusion*, not selection.
+- **background** — KL is moderate (above the dead threshold, well \
+below the fit's max) AND top concepts are common comorbidities or \
+generic acute symptoms (e.g. HTN/HLD/T2DM/GERD/anxiety; or pain/chest \
+pain/nausea/SoB/vomiting). Typically high usage. The topic carries \
+real data but the pattern is the corpus's chronic or acute baseline, \
+useful for cohort *exclusion*, not selection.
 
 - **anchor** — one concept dominates both rankings; the topic \
 essentially names that concept.
@@ -229,12 +240,14 @@ two halves require unrelated mechanisms or just happen to land in the \
 same topic, it is `mixed`.
 
 - **dead** — either:
-  (a) α at floor (within ≈10% of the minimum across this fit); OR
-  (b) α above floor BUT KL near 0 (close to the minimum across this \
-      fit). The slot carries some data but the data is the corpus \
-      baseline — top-N is HTN/HLD/T2DM-style common comorbidities not \
-      because the topic learned them but because η-smoothing landed \
-      there.
+  (a) KL ≤ {kl_dead_threshold:.3f} → the topic's word distribution is \
+      essentially the corpus marginal (dead-case-b, common-words \
+      pseudo-coherent baseline). Always dead, regardless of α.
+  (b) KL above the threshold BUT the top-N is genuinely incoherent — \
+      rare scattered concepts with no shared theme and no clinical \
+      story (dead-case-a, unused slot whose top-N is η-smoothing \
+      noise). Rarer than (a). α near floor + low NPMI strengthens this \
+      case but is not required.
 Either way: no useful clinical interpretation.
 
 ## Decision order
@@ -242,24 +255,29 @@ Either way: no useful clinical interpretation.
 To avoid rationalizing a label first and then picking a quality, \
 classify in this order:
 
-1. Check α. At floor (α ≤ {alpha_floor_threshold:.4f}) → `dead`, stop.
-2. Check KL. Near the fit minimum → `dead` (case b), stop.
-3. Check whether one concept dominates both rankings → `anchor`.
-4. **Check for background BEFORE checking for mixed.** If usage is \
-high (top concepts are HTN/HLD/T2DM/GERD/anxiety/obesity for chronic \
-catch-all, or pain/chest pain/nausea/SoB/vomiting for acute catch-all, \
-or a similar generic-comorbidity blend) AND KL is moderate (well below \
-the fit's max), classify as `background`, even if the top-N spans \
-"multiple" categories (chronic comorbidity catch-alls naturally span \
-metabolic + cardiovascular + GI etc. — that is what makes them \
-catch-alls, not mixed). Stop.
-5. **Check for topic-merging.** Draft the shortest honest label \
+1. **Check KL against the dead threshold.** KL ≤ {kl_dead_threshold:.3f} → \
+`dead` (case b), stop. The topic is the corpus baseline regardless of \
+how the top-N reads.
+2. Check whether one concept dominates both rankings → `anchor`.
+3. **Check for background BEFORE checking for mixed.** If top \
+concepts are HTN/HLD/T2DM/GERD/anxiety/obesity for chronic catch-all, \
+or pain/chest pain/nausea/SoB/vomiting for acute catch-all, or a \
+similar generic-comorbidity blend, classify as `background` — even if \
+the top-N spans multiple body systems (chronic comorbidity catch-alls \
+naturally do). Stop.
+4. **Check for topic-merging.** Draft the shortest honest label \
 connecting the leading concepts. If that label is a conjunction of \
 CLINICALLY UNRELATED halves (per the rubric above — disjoint body \
-systems or unrelated mechanisms), the topic is `mixed`, NOT \
-`phenotype`. But a conjunction within a single coherent clinical \
-story (disease + complications, related conditions in one pathway, \
-anatomical continuity) is still a `phenotype`.
+systems or unrelated mechanisms), the topic is `mixed`. A conjunction \
+within a single coherent clinical story (disease + complications, \
+related conditions in one pathway, anatomical continuity) is still a \
+`phenotype`.
+5. **Final dead check (case a).** If KL is above the threshold but \
+the top-N spans rare scattered concepts with no clinical story AND \
+no plausible clinical mechanism connects them, this is `dead` \
+(case a — unused slot with η-smoothing noise in the top-N). Be \
+careful: a coherent narrow phenotype is NOT dead; case (a) is for \
+truly random-looking top-N.
 6. Otherwise it is `phenotype`. Single-theme conjunctions are fine.
 
 ## Output fields
@@ -437,9 +455,11 @@ def _build_agent(
     api_key: str,
     *,
     max_words: int,
-    alpha_dist: tuple[float, float, float],
-    kl_dist: tuple[float, float, float],
-    alpha_floor_threshold: float,
+    alpha_arr: list[float],
+    kl_arr: list[float],
+    kl_dead_threshold: float,
+    kl_dead_threshold_explanation: str,
+    alpha_separates_well: bool,
 ):
     """Build a pydantic-ai Agent for the given model string with the API
     key passed in explicitly (not via env), structured output, and the
@@ -479,18 +499,30 @@ def _build_agent(
             f"Supported: google-gla, openai, anthropic."
         )
 
-    a_min, a_med, a_max = alpha_dist
-    k_min, k_med, k_max = kl_dist
-    # alpha_floor_threshold is computed upstream from the data (see
-    # _alpha_floor_threshold) — gap-based when the α distribution is
-    # cleanly bimodal, fallback min*1.20 otherwise.
+    sorted_a = sorted(alpha_arr)
+    sorted_k = sorted(kl_arr)
+    K = len(alpha_arr)
+    a_min, a_max = sorted_a[0], sorted_a[-1]
+    k_min, k_max = sorted_k[0], sorted_k[-1]
+    a_med = sorted_a[K // 2]
+    k_med = sorted_k[K // 2]
+    alpha_hist = _format_histogram(
+        _histogram(alpha_arr, n_bins=10), fmt=".4f",
+    )
+    kl_hist = _format_histogram(
+        _histogram(kl_arr, n_bins=12), fmt=".2f",
+    )
     return Agent(
         model,
         system_prompt=_build_system_prompt(
             max_words=max_words,
+            alpha_histogram_str=alpha_hist,
+            kl_histogram_str=kl_hist,
             alpha_min=a_min, alpha_median=a_med, alpha_max=a_max,
-            alpha_floor_threshold=alpha_floor_threshold,
             kl_min=k_min, kl_median=k_med, kl_max=k_max,
+            kl_dead_threshold=kl_dead_threshold,
+            kl_dead_threshold_explanation=kl_dead_threshold_explanation,
+            alpha_separates_well=alpha_separates_well,
         ),
         output_type=PhenotypeLabel,
     )
@@ -563,6 +595,108 @@ def _alpha_floor_threshold(alpha_arr: list[float]) -> tuple[float, str]:
         f"(rank {max_gap_idx + 1}/{K}) and α={a_above:.4f} (rank "
         f"{max_gap_idx + 2}/{K}); threshold = √(those) = {threshold:.4f}",
     )
+
+
+def _kl_recommended_threshold(kl_arr: list[float]) -> tuple[float, str]:
+    """Recommend a dead/used boundary on the KL distribution via the
+    largest linear gap between adjacent sorted KL values in the lower
+    half of the distribution.
+
+    Why linear rather than log: KL is already on an information-theoretic
+    scale where unit differences are interpretable (a KL of 2 vs 3 is a
+    meaningful "this topic adds 1 more nat over the corpus baseline").
+    Log gaps over-weight relative differences at very low KL (where the
+    dead cluster's internal structure produces the largest log-ratios).
+    Linear gaps capture the visible histogram valley between the
+    dead-baseline cluster and the learned-topic cluster.
+
+    Returns (threshold, explanation_string). Falls back to KL = 25th
+    percentile if no clean gap stands out.
+    """
+    sorted_kl = sorted(kl_arr)
+    K = len(sorted_kl)
+    fallback_thr = sorted_kl[max(0, K // 4)]
+    if K < 6:
+        return (fallback_thr, f"fallback: 25th-percentile KL = {fallback_thr:.3f}")
+    # Search the lower 50% for the boundary — the dead cluster is
+    # expected to fall in the lower half.
+    cutoff = max(3, int(K * 0.50))
+    gaps: list[tuple[float, int]] = []
+    for i in range(min(cutoff, K - 1)):
+        gaps.append((sorted_kl[i + 1] - sorted_kl[i], i))
+    if not gaps:
+        return (fallback_thr, f"fallback: 25th-percentile KL = {fallback_thr:.3f}")
+    max_gap_size, max_gap_idx = max(gaps, key=lambda x: x[0])
+    # Require the largest gap to be clearly larger than the median gap
+    # in the search range (1.5×); otherwise the distribution is
+    # effectively unimodal in this region.
+    gap_sizes = sorted(g for g, _ in gaps)
+    median_gap = gap_sizes[len(gap_sizes) // 2]
+    if max_gap_size < 1.5 * median_gap:
+        return (
+            fallback_thr,
+            f"fallback: 25th-percentile KL = {fallback_thr:.3f} "
+            f"(no clean valley: max_gap={max_gap_size:.3f} vs "
+            f"median {median_gap:.3f})",
+        )
+    kl_below = sorted_kl[max_gap_idx]
+    kl_above = sorted_kl[max_gap_idx + 1]
+    threshold = 0.5 * (kl_below + kl_above)
+    return (
+        threshold,
+        f"gap-based: largest linear gap between KL={kl_below:.3f} "
+        f"(rank {max_gap_idx + 1}/{K}) and KL={kl_above:.3f} "
+        f"(rank {max_gap_idx + 2}/{K}); threshold = midpoint = {threshold:.3f}",
+    )
+
+
+def _histogram(values: list[float], n_bins: int = 10) -> list[tuple[float, float, int]]:
+    """Return n_bins linear histogram buckets (lo, hi, count) covering
+    [min, max] of ``values``. Inclusive on lo, exclusive on hi, except
+    the last bucket which is inclusive on both ends so max() lands in it.
+    """
+    if not values:
+        return []
+    lo, hi = min(values), max(values)
+    if hi == lo:
+        return [(lo, hi, len(values))]
+    width = (hi - lo) / n_bins
+    edges = [lo + i * width for i in range(n_bins + 1)]
+    counts = [0] * n_bins
+    for v in values:
+        # Last edge is inclusive; everything else is [edge_i, edge_{i+1})
+        if v >= edges[-1]:
+            counts[-1] += 1
+            continue
+        idx = min(int((v - lo) / width), n_bins - 1)
+        counts[idx] += 1
+    return [(edges[i], edges[i + 1], counts[i]) for i in range(n_bins)]
+
+
+def _format_histogram(
+    buckets: list[tuple[float, float, int]],
+    *,
+    fmt: str = ".2f",
+    bar_unit: int = 1,
+    bar_max_width: int = 40,
+) -> str:
+    """Render a histogram as ASCII for embedding in a prompt.
+    bar_unit = how many counts each '#' represents (auto-scales if max
+    count exceeds bar_max_width).
+    """
+    if not buckets:
+        return "(empty)"
+    max_count = max(c for _, _, c in buckets)
+    if max_count > bar_max_width:
+        bar_unit = math.ceil(max_count / bar_max_width)
+    lines = []
+    for lo, hi, c in buckets:
+        bar_len = c // bar_unit
+        bar = "#" * bar_len
+        lines.append(f"  [{lo:{fmt}}, {hi:{fmt}})  {c:3d}  {bar}")
+    if bar_unit > 1:
+        lines.append(f"  (each '#' = {bar_unit} topics)")
+    return "\n".join(lines)
 
 
 def _kl_div_topic_vs_corpus(
@@ -720,7 +854,8 @@ def _label_one(
     )
     result = agent.run_sync(user_text)
     out: PhenotypeLabel = result.output
-    u = result.usage()
+    # pydantic-ai 1.96+: `usage` is a property, not a method.
+    u = result.usage
     usage = {
         "input": getattr(u, "input_tokens", 0) or 0,
         "output": getattr(u, "output_tokens", 0) or 0,
@@ -858,23 +993,33 @@ def main(argv: list[str] | None = None) -> int:
             return xs[mid]
         return 0.5 * (xs[mid - 1] + xs[mid])
 
-    alpha_dist = (alpha_sorted[0], _median(alpha_sorted), alpha_sorted[-1])
-    kl_dist = (kl_sorted[0], _median(kl_sorted), kl_sorted[-1])
-    alpha_floor_threshold, threshold_method = _alpha_floor_threshold(alpha_arr)
-    n_below_threshold = sum(1 for a in alpha_arr if a <= alpha_floor_threshold)
+    a_min, a_med, a_max = alpha_sorted[0], _median(alpha_sorted), alpha_sorted[-1]
+    k_min, k_med, k_max = kl_sorted[0], _median(kl_sorted), kl_sorted[-1]
+
+    # KL is the primary classifier on this fit (α's range is typically
+    # too compressed for α-near-floor to be a reliable dead signal).
+    # Compute the data-driven KL dead threshold from the natural valley
+    # in the lower half of the KL distribution.
+    kl_dead_threshold, kl_threshold_explanation = _kl_recommended_threshold(kl_arr)
+    n_kl_below = sum(1 for v in kl_arr if v <= kl_dead_threshold)
+    # α "separates well" when the elevated cluster is clearly above
+    # the floor cluster — a heuristic, currently not used to gate
+    # behavior (the prompt always demotes α to supporting), but logged.
+    alpha_separates_well = (a_max / max(a_min, 1e-9)) >= 2.5
+
     print(
-        f"[label] alpha[K={K}] min={alpha_dist[0]:.4f} "
-        f"median={alpha_dist[1]:.4f} max={alpha_dist[2]:.4f}",
+        f"[label] alpha[K={K}] min={a_min:.4f} median={a_med:.4f} "
+        f"max={a_max:.4f} (separates_well={alpha_separates_well})",
         flush=True,
     )
     print(
-        f"[label] alpha-floor threshold = {alpha_floor_threshold:.4f} "
-        f"({threshold_method}); {n_below_threshold}/{K} topics at-or-below",
+        f"[label] KL(beta||corpus)[K={K}] min={k_min:.3f} median={k_med:.3f} "
+        f"max={k_max:.3f}",
         flush=True,
     )
     print(
-        f"[label] KL(beta||corpus)[K={K}] min={kl_dist[0]:.3f} "
-        f"median={kl_dist[1]:.3f} max={kl_dist[2]:.3f}",
+        f"[label] KL dead-baseline threshold = {kl_dead_threshold:.3f} "
+        f"({kl_threshold_explanation}); {n_kl_below}/{K} topics at-or-below",
         flush=True,
     )
 
@@ -952,8 +1097,10 @@ def main(argv: list[str] | None = None) -> int:
     agent = _build_agent(
         model_str, api_key,
         max_words=args.max_words,
-        alpha_dist=alpha_dist, kl_dist=kl_dist,
-        alpha_floor_threshold=alpha_floor_threshold,
+        alpha_arr=alpha_arr, kl_arr=kl_arr,
+        kl_dead_threshold=kl_dead_threshold,
+        kl_dead_threshold_explanation=kl_threshold_explanation,
+        alpha_separates_well=alpha_separates_well,
     )
     print(f"[label] using model {model_str}", flush=True)
 
