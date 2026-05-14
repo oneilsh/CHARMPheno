@@ -1,17 +1,32 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { bundle, advancedView } from './lib/store'
+  import { bundle, advancedView, cohort } from './lib/store'
   import { loadBundle } from './lib/bundle'
   import { route } from './lib/router'
+  import { generateCohort } from './lib/cohort'
   import Tabs from './lib/Tabs.svelte'
   import Atlas from './lib/tabs/Atlas.svelte'
   import Patient from './lib/tabs/Patient.svelte'
   import Simulator from './lib/tabs/Simulator.svelte'
 
+  const DEFAULT_COHORT_N = 1000
+  const DEFAULT_COHORT_SEED = 42
+  const DEFAULT_NEIGHBORS = 8
+
   let error: string | null = null
   onMount(async () => {
-    try { bundle.set(await loadBundle(import.meta.env.BASE_URL)) }
-    catch (e) { error = (e as Error).message }
+    try {
+      const b = await loadBundle(import.meta.env.BASE_URL)
+      bundle.set(b)
+      const c = generateCohort({
+        model: b.model,
+        meanCodesPerDoc: b.corpusStats.mean_codes_per_doc,
+        n: DEFAULT_COHORT_N,
+        seed: DEFAULT_COHORT_SEED,
+        nNeighbors: DEFAULT_NEIGHBORS,
+      })
+      cohort.set(c)
+    } catch (e) { error = (e as Error).message }
   })
 </script>
 
