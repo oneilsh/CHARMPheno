@@ -14,6 +14,18 @@
   const DEFAULT_NEIGHBORS = 8
 
   let error: string | null = null
+  let cohortSeed = 42
+  function regenCohort() {
+    if (!$bundle) return
+    cohortSeed += 1
+    cohort.set(generateCohort({
+      model: $bundle.model,
+      meanCodesPerDoc: $bundle.corpusStats.mean_codes_per_doc,
+      n: DEFAULT_COHORT_N,
+      seed: cohortSeed,
+      nNeighbors: DEFAULT_NEIGHBORS,
+    }))
+  }
   onMount(async () => {
     try {
       const b = await loadBundle(import.meta.env.BASE_URL)
@@ -37,6 +49,9 @@
     {#if $bundle}
       <span class="meta">K = {$bundle.model.K} · V = {$bundle.model.V} (of {$bundle.corpusStats.v_full}) · corpus ≈ {($bundle.corpusStats.corpus_size_docs / 1000).toFixed(0)}k docs</span>
     {/if}
+    {#if $bundle && $advancedView}
+      <button class="regen" on:click={regenCohort}>Regenerate cohort</button>
+    {/if}
     <span class="spacer"></span>
     <label class="toggle"><input type="checkbox" bind:checked={$advancedView} /> Advanced view</label>
   </header>
@@ -58,4 +73,5 @@
   .spacer { flex: 1; }
   .toggle { font-size: 0.85rem; display: flex; align-items: center; gap: 0.25rem; }
   .error { color: #b00020; padding: 1rem; }
+  .regen { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
 </style>
