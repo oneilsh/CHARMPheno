@@ -143,7 +143,9 @@ Distribution across this fit:
     min     = {alpha_min:.4f}    ← floor (asymmetric-α optimizer's lower bound)
     median  = {alpha_median:.4f}
     max     = {alpha_max:.4f}
-α within ≈30% of the min (i.e. α ≤ {alpha_floor_threshold:.4f}) \
+A data-driven floor threshold has been computed from this fit's α \
+distribution (the natural gap between the floor cluster and the \
+elevated cluster of used topics). α ≤ {alpha_floor_threshold:.4f} \
 indicates the slot is at floor. ALWAYS classify such topics as **dead** \
 regardless of how the top-N reads — the optimizer has already declared \
 them unused.
@@ -437,6 +439,7 @@ def _build_agent(
     max_words: int,
     alpha_dist: tuple[float, float, float],
     kl_dist: tuple[float, float, float],
+    alpha_floor_threshold: float,
 ):
     """Build a pydantic-ai Agent for the given model string with the API
     key passed in explicitly (not via env), structured output, and the
@@ -478,14 +481,9 @@ def _build_agent(
 
     a_min, a_med, a_max = alpha_dist
     k_min, k_med, k_max = kl_dist
-    # "At floor" = within ~30% of the minimum. The asymmetric-α optimizer
-    # can leave slots slightly above the exact floor while still
-    # effectively zeroed; 10% was too tight (run 3 only flagged 11/80
-    # dead vs the ~25 expected per insight 0019). 30% catches more
-    # genuinely-unused slots without sweeping in legitimately low-α
-    # rare-condition phenotypes (which would also have high KL — the
-    # rubric requires α near floor AND KL low to call dead-case-b).
-    alpha_floor_threshold = a_min * 1.30
+    # alpha_floor_threshold is computed upstream from the data (see
+    # _alpha_floor_threshold) — gap-based when the α distribution is
+    # cleanly bimodal, fallback min*1.20 otherwise.
     return Agent(
         model,
         system_prompt=_build_system_prompt(
@@ -495,6 +493,75 @@ def _build_agent(
             kl_min=k_min, kl_median=k_med, kl_max=k_max,
         ),
         output_type=PhenotypeLabel,
+    )
+
+
+def _alpha_floor_threshold(alpha_arr: list[float]) -> tuple[float, str]:
+    """Find a data-driven α-floor threshold via the largest log-ratio gap.
+
+    The asymmetric-α optimizer typically produces a near-bimodal α
+    distribution: a cluster of unused topics piled at the floor, and a
+    spread of higher α values for used topics. The largest log-ratio
+    gap in the lower portion of the sorted α distribution corresponds
+    to the boundary between these two clusters. We set the threshold
+    at the geometric mean (midpoint on a log scale) of the two α values
+    that bracket that gap, so any topic at-or-below it is below the
+    natural floor boundary.
+
+    Fallback (no clean bimodal gap): min * 1.20. This is the case for
+    fits where the optimizer hasn't converged yet, K is too small, or
+    the data really does have a unimodal α distribution.
+
+    Returns (threshold, explanation_string) so the chosen value is
+    legible in the run log.
+    """
+    sorted_alpha = sorted(alpha_arr)
+    K = len(sorted_alpha)
+    a_min = sorted_alpha[0]
+    fallback = (a_min * 1.20, f"fallback min*1.20 = {a_min * 1.20:.4f}")
+    if K < 6:
+        return fallback
+    log_alpha = [math.log(a) for a in sorted_alpha]
+    gaps_lower_half: list[tuple[float, int]] = []
+    # Restrict to the lower 60% of the distribution — gaps higher up
+    # are differences among real topics, not the floor/elevated boundary.
+    cutoff = max(3, int(K * 0.60))
+    for i in range(min(cutoff, K - 1)):
+        gaps_lower_half.append((log_alpha[i + 1] - log_alpha[i], i))
+    if not gaps_lower_half:
+        return fallback
+    max_gap_size, max_gap_idx = max(gaps_lower_half, key=lambda x: x[0])
+    # Degenerate case: α is effectively uniform (symmetric prior, or
+    # asymmetric optimizer hasn't separated yet). No meaningful floor
+    # boundary — disable the α-floor rule entirely.
+    if max_gap_size < 1e-6:
+        return (
+            0.0,
+            "α distribution is uniform (no floor/elevated separation); "
+            "α-floor rule disabled — classification will rely on KL only",
+        )
+    # Require the largest gap to be clearly larger than the median gap
+    # in the lower portion; otherwise the distribution is effectively
+    # unimodal and the fallback is safer.
+    gap_sizes = sorted(g for g, _ in gaps_lower_half)
+    median_gap = gap_sizes[len(gap_sizes) // 2]
+    if max_gap_size < 1.5 * median_gap:
+        return (
+            fallback[0],
+            f"fallback min*1.20 = {fallback[0]:.4f} "
+            f"(no clean bimodal gap: max_log_gap={max_gap_size:.3f} "
+            f"vs median {median_gap:.3f})",
+        )
+    a_below = sorted_alpha[max_gap_idx]
+    a_above = sorted_alpha[max_gap_idx + 1]
+    threshold = math.sqrt(a_below * a_above)
+    # Clamp so a single-outlier gap can't make the threshold absurd.
+    threshold = max(a_min * 1.05, min(threshold, a_min * 2.5))
+    return (
+        threshold,
+        f"gap-based: largest log-gap between α={a_below:.4f} "
+        f"(rank {max_gap_idx + 1}/{K}) and α={a_above:.4f} (rank "
+        f"{max_gap_idx + 2}/{K}); threshold = √(those) = {threshold:.4f}",
     )
 
 
@@ -793,9 +860,16 @@ def main(argv: list[str] | None = None) -> int:
 
     alpha_dist = (alpha_sorted[0], _median(alpha_sorted), alpha_sorted[-1])
     kl_dist = (kl_sorted[0], _median(kl_sorted), kl_sorted[-1])
+    alpha_floor_threshold, threshold_method = _alpha_floor_threshold(alpha_arr)
+    n_below_threshold = sum(1 for a in alpha_arr if a <= alpha_floor_threshold)
     print(
         f"[label] alpha[K={K}] min={alpha_dist[0]:.4f} "
         f"median={alpha_dist[1]:.4f} max={alpha_dist[2]:.4f}",
+        flush=True,
+    )
+    print(
+        f"[label] alpha-floor threshold = {alpha_floor_threshold:.4f} "
+        f"({threshold_method}); {n_below_threshold}/{K} topics at-or-below",
         flush=True,
     )
     print(
@@ -879,6 +953,7 @@ def main(argv: list[str] | None = None) -> int:
         model_str, api_key,
         max_words=args.max_words,
         alpha_dist=alpha_dist, kl_dist=kl_dist,
+        alpha_floor_threshold=alpha_floor_threshold,
     )
     print(f"[label] using model {model_str}", flush=True)
 
