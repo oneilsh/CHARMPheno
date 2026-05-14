@@ -2,6 +2,7 @@
   import { cohort, patientsById, selectedPatientId, selectedPhenotypeId } from '../store'
   import ProfileBar from '../patient/ProfileBar.svelte'
   import ContributingCodes from '../patient/ContributingCodes.svelte'
+  import NeighborRibbon from '../patient/NeighborRibbon.svelte'
 
   $: patients = $cohort?.patients ?? []
   $: current = $selectedPatientId ? $patientsById.get($selectedPatientId) : (patients[0] ?? null)
@@ -30,6 +31,7 @@
       <ProfileBar theta={current.theta} height={40} onSelect={(k) => selectedPhenotypeId.set(k)} />
     </div>
     <ContributingCodes theta={current.theta} codeBag={current.code_bag} />
+    <NeighborRibbon neighbors={current.neighbors} />
   {/if}
 </section>
 
