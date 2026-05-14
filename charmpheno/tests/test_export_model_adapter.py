@@ -75,6 +75,32 @@ def test_adapt_dispatches_on_model_class():
     assert adapt(hdp, hdp_top_k=2).beta.shape[0] == 2
 
 
+def test_adapt_accepts_runner_stamped_class_names():
+    # VIRunner stamps metadata['model_class'] with type(model).__name__,
+    # e.g. 'OnlineLDA' / 'OnlineHDP' from the MLlib shim. The adapter
+    # lowercases and aliases these onto the canonical 'lda' / 'hdp' branches.
+    from spark_vi.core.result import VIResult
+    lda_like = _lda_result(K=3)
+    lda_like = VIResult(
+        global_params=lda_like.global_params,
+        elbo_trace=lda_like.elbo_trace,
+        n_iterations=lda_like.n_iterations,
+        converged=lda_like.converged,
+        metadata={**lda_like.metadata, "model_class": "OnlineLDA"},
+    )
+    assert adapt(lda_like).beta.shape[0] == 3
+
+    hdp_like = _hdp_result(T=8)
+    hdp_like = VIResult(
+        global_params=hdp_like.global_params,
+        elbo_trace=hdp_like.elbo_trace,
+        n_iterations=hdp_like.n_iterations,
+        converged=hdp_like.converged,
+        metadata={**hdp_like.metadata, "model_class": "OnlineHDP"},
+    )
+    assert adapt(hdp_like, hdp_top_k=2).beta.shape[0] == 2
+
+
 def test_adapt_unknown_class_raises():
     from spark_vi.core.result import VIResult
     bad = VIResult(

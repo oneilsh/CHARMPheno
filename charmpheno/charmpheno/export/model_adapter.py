@@ -79,10 +79,14 @@ def adapt_hdp(result, *, top_k: int = 50) -> DashboardExport:
     )
 
 
+_LDA_ALIASES = {"lda", "onlinelda", "onlineldamodel", "onlineldaestimator"}
+_HDP_ALIASES = {"hdp", "onlinehdp", "onlinehdpmodel", "onlinehdpestimator"}
+
+
 def adapt(result, *, hdp_top_k: int = 50) -> DashboardExport:
     mc = _model_class(result)
-    if mc == "lda":
+    if mc in _LDA_ALIASES:
         return adapt_lda(result)
-    if mc == "hdp":
+    if mc in _HDP_ALIASES:
         return adapt_hdp(result, top_k=hdp_top_k)
     raise ValueError(f"unsupported model class: {mc}")
