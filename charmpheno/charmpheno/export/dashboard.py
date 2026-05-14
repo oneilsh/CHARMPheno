@@ -23,6 +23,37 @@ def select_top_n_indices(code_marginals: list[float], top_n: int) -> list[int]:
     return list(idx[np.argsort(-marg[idx])])
 
 
+def select_top_n_with_min_cell(
+    code_marginals: list[float],
+    *,
+    top_n: int,
+    corpus_size_docs: int,
+    min_doc_count: int,
+) -> list[int]:
+    """Top-N selection with a group-size guard.
+
+    Drops codes whose empirical doc count (marginal * corpus_size_docs) is
+    below ``min_doc_count`` BEFORE the top-N cut. Codes with doc count
+    exactly zero are not displayed by construction (their marginal is 0
+    and they would never rank). Codes with 1..min_doc_count-1 docs are
+    suppressed to prevent small-cell disclosure of which OMOP concepts
+    appear in a tiny number of patients/documents.
+
+    Returned in descending marginal order, length up to ``top_n``.
+    """
+    marginals = np.asarray(code_marginals, dtype=np.float64)
+    eligible = marginals * corpus_size_docs >= min_doc_count
+    eligible_idx = np.where(eligible)[0]
+    if len(eligible_idx) == 0:
+        raise ValueError(
+            f"no codes have >= {min_doc_count} documents "
+            f"(corpus_size_docs={corpus_size_docs}); "
+            f"cannot satisfy minimum cell-size guard",
+        )
+    order = np.argsort(-marginals[eligible_idx])
+    return eligible_idx[order][:top_n].tolist()
+
+
 def write_model_and_vocab_bundles(
     *,
     out_dir: Path,
@@ -32,16 +63,40 @@ def write_model_and_vocab_bundles(
     descriptions: dict[int, str],
     domains: dict[int, str],
     code_marginals: list[float],
+    corpus_size_docs: int,
     top_n: int,
+    min_doc_count: int = 20,
 ) -> int:
     """Write model.json and vocab.json. Returns the displayed-vocab width.
 
-    Trims β columns and vocab metadata to the top-N codes by corpus frequency.
-    β rows are renormalized so each row sums to 1 over the trimmed columns.
+    Trims β columns and vocab metadata to the top-N codes by corpus
+    frequency, with a small-cell guard: codes whose empirical doc count
+    (corpus_freq * corpus_size_docs) is below ``min_doc_count`` are
+    dropped before the top-N cut. Default 20 matches AoU-style group-size
+    suppression. Zero-count codes are implicitly excluded; the guard
+    targets the 1..min_doc_count-1 range. β rows are renormalized so each
+    row sums to 1 over the trimmed columns.
     """
     K, V_full = lambda_.shape
-    keep = select_top_n_indices(code_marginals, top_n)
+    n_before = int((np.asarray(code_marginals) > 0).sum())
+    keep = select_top_n_with_min_cell(
+        code_marginals,
+        top_n=top_n,
+        corpus_size_docs=corpus_size_docs,
+        min_doc_count=min_doc_count,
+    )
     V_disp = len(keep)
+    n_eligible = int(
+        (np.asarray(code_marginals) * corpus_size_docs >= min_doc_count).sum(),
+    )
+    n_suppressed = n_before - n_eligible
+    if n_suppressed > 0:
+        print(
+            f"[export] suppressed {n_suppressed} codes with < {min_doc_count} "
+            f"documents (small-cell guard); displaying top {V_disp} of "
+            f"{n_eligible} eligible codes.",
+            flush=True,
+        )
     beta_full = lambda_ / lambda_.sum(axis=1, keepdims=True)
     beta = beta_full[:, keep]
     # renormalize

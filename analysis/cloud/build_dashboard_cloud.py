@@ -77,6 +77,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="top-K used HDP topics (ignored for LDA)")
     parser.add_argument("--vocab-top-n", type=int, default=5000,
                         help="trim vocab to top-N codes by corpus_freq")
+    # AoU-style small-cell guard: codes appearing in fewer than this many
+    # docs are dropped from the displayed vocab (and so from the bundle and
+    # the labeling LLM prompt). 0 disables the guard. Default 20.
+    parser.add_argument("--min-doc-count", type=int, default=20,
+                        help="suppress codes with empirical doc-count below "
+                             "this threshold (AoU group-size guard)")
     parser.add_argument("--top-n-codes-for-npmi", type=int, default=20)
     args = parser.parse_args(argv)
 
@@ -253,7 +259,9 @@ def main(argv: list[str] | None = None) -> int:
                 vocab_ids=vocab_list,
                 descriptions=descriptions, domains=domains,
                 code_marginals=stats.code_marginals,
+                corpus_size_docs=stats.corpus_size_docs,
                 top_n=args.vocab_top_n,
+                min_doc_count=args.min_doc_count,
             )
             write_phenotypes_bundle(
                 out_dir / "phenotypes.json",

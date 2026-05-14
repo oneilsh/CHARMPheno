@@ -39,6 +39,9 @@ def test_build_dashboard_smoke(tmp_path: Path):
         "--input", str(parquet),
         "--out-dir", str(out),
         "--vocab-top-n", "8",
+        # Tiny synthetic vocab can have per-code doc-counts below the
+        # production AoU-style guard; disable it for this smoke test.
+        "--min-doc-count", "0",
     ])
     assert {p.name for p in out.iterdir()} == {
         "model.json", "vocab.json", "phenotypes.json", "corpus_stats.json"

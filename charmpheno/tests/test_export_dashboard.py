@@ -25,7 +25,8 @@ def test_top_n_trim_reorders_and_renormalizes(tmp_path: Path):
         out_dir=tmp_path,
         lambda_=lambda_, alpha=alpha,
         vocab_ids=vocab_ids, descriptions=descriptions, domains=domains,
-        code_marginals=marginals, top_n=2,
+        code_marginals=marginals,
+        corpus_size_docs=1000, top_n=2, min_doc_count=0,
     )
 
     model = json.loads((tmp_path / "model.json").read_text())
@@ -59,9 +60,65 @@ def test_returns_v_displayed(tmp_path: Path):
         out_dir=tmp_path,
         lambda_=lambda_, alpha=alpha,
         vocab_ids=vocab_ids, descriptions={}, domains={},
-        code_marginals=marginals, top_n=10,  # > V, should cap to V
+        code_marginals=marginals,
+        corpus_size_docs=1000, top_n=10, min_doc_count=0,
     )
     assert v_disp == V
+
+
+def test_min_doc_count_suppresses_small_cell_codes(tmp_path: Path):
+    """Codes with empirical doc-count in [1, min_doc_count) are dropped
+    from the displayed vocab (AoU-style group-size guard). Codes with
+    zero doc-count are excluded by construction (marginal=0)."""
+    K = 1
+    lambda_ = np.ones((K, 5))
+    alpha = np.array([0.1])
+    # corpus_size_docs=1000, threshold=20: a code is eligible iff
+    # marginal*1000 >= 20, i.e. marginal >= 0.020.
+    marginals = [0.40, 0.30, 0.001, 0.015, 0.05]  # idx 2 (1 doc) and idx 3 (15 docs) suppressed
+    vocab_ids = [10, 20, 30, 40, 50]
+    v_disp = write_model_and_vocab_bundles(
+        out_dir=tmp_path,
+        lambda_=lambda_, alpha=alpha,
+        vocab_ids=vocab_ids, descriptions={}, domains={},
+        code_marginals=marginals,
+        corpus_size_docs=1000, top_n=10, min_doc_count=20,
+    )
+    vocab = json.loads((tmp_path / "vocab.json").read_text())
+    kept_codes = [c["code"] for c in vocab["codes"]]
+    # 10/20/50 are above threshold; 30 (1 doc) and 40 (15 docs) are dropped.
+    assert kept_codes == ["10", "20", "50"]
+    assert v_disp == 3
+
+
+def test_min_doc_count_zero_disables_guard(tmp_path: Path):
+    K = 1
+    lambda_ = np.ones((K, 3))
+    alpha = np.array([0.1])
+    marginals = [0.5, 0.001, 0.001]  # latter two are sub-threshold at any nonzero guard
+    v_disp = write_model_and_vocab_bundles(
+        out_dir=tmp_path,
+        lambda_=lambda_, alpha=alpha,
+        vocab_ids=[1, 2, 3], descriptions={}, domains={},
+        code_marginals=marginals,
+        corpus_size_docs=1000, top_n=10, min_doc_count=0,
+    )
+    assert v_disp == 3
+
+
+def test_min_doc_count_no_eligible_raises(tmp_path: Path):
+    K = 1
+    lambda_ = np.ones((K, 2))
+    alpha = np.array([0.1])
+    marginals = [0.005, 0.005]  # 5 docs each at N=1000; below 20
+    with pytest.raises(ValueError, match="no codes have"):
+        write_model_and_vocab_bundles(
+            out_dir=tmp_path,
+            lambda_=lambda_, alpha=alpha,
+            vocab_ids=[1, 2], descriptions={}, domains={},
+            code_marginals=marginals,
+            corpus_size_docs=1000, top_n=10, min_doc_count=20,
+        )
 
 
 def test_write_phenotypes_bundle(tmp_path: Path):
