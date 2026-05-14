@@ -1,4 +1,4 @@
-.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup
+.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -8,6 +8,7 @@ BQ_SCRIPT       := bq_smoke_cloud.py
 LDA_BQ_SCRIPT   := lda_bigquery_cloud.py
 HDP_BQ_SCRIPT   := hdp_bigquery_cloud.py
 EVAL_SCRIPT     := eval_coherence_cloud.py
+BUNDLE_SCRIPT   := build_dashboard_cloud.py
 INSPECT_SCRIPT  := inspect_app.py
 SETUP_SCRIPT    := setup_workspace.py
 WORKSPACE_ENV   := .workspace_env
@@ -17,6 +18,7 @@ WORKSPACE_ENV   := .workspace_env
 LDA_BQ_ARGS     ?=
 HDP_BQ_ARGS     ?=
 EVAL_ARGS       ?=
+BUNDLE_ARGS     ?=
 INSPECT_ARGS    ?=
 
 # Required for eval-bq-coherence: path to the augmented VIResult dir written
@@ -82,6 +84,11 @@ help:
 	@echo "                         CHECKPOINT=/mnt/gcs/\$$BUCKET/runs/<id>  (required)"
 	@echo "                         Override args via EVAL_ARGS='--top-n 10'"
 	@echo "                         HDP: EVAL_ARGS='--model-class hdp --hdp-k 50'"
+	@echo "  make build-dashboard-bundle - 4-file dashboard bundle (+ .zip) from a checkpoint"
+	@echo "                         CHECKPOINT=/mnt/gcs/\$$BUCKET/runs/<id>  (required)"
+	@echo "                         Writes <checkpoint>/dashboard_bundle/ + dashboard_bundle.zip"
+	@echo "                         Override via BUNDLE_ARGS='--vocab-top-n 3000 --top-n-codes-for-npmi 30'"
+	@echo "                         HDP: BUNDLE_ARGS='--model-class hdp --hdp-top-k 50'"
 	@echo "  make lda-bq-fit-eval - End-to-end fit + eval; auto-generates timestamped"
 	@echo "                         SAVE_DIR under \$$(REPO_ROOT)/data/runs/<id>."
 	@echo "                         LDA_BQ_ARGS='--K 50 --max-iter 200 ...'"
@@ -198,6 +205,22 @@ eval-bq-coherence: zip $(WORKSPACE_ENV)
 	    $(EVAL_SCRIPT) \
 	    --checkpoint "$(CHECKPOINT)" \
 	    $(EVAL_ARGS)
+
+build-dashboard-bundle: zip $(WORKSPACE_ENV)
+	@test -n "$(CHECKPOINT)" || { echo "ERROR: set CHECKPOINT=<dir>"; exit 1; }
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
+	    $(BUNDLE_SCRIPT) \
+	    --checkpoint "$(CHECKPOINT)" \
+	    $(BUNDLE_ARGS)
 
 # Combined fit + eval. Auto-generates a fresh timestamped SAVE_DIR under
 # $(REPO_ROOT)/data/runs/, runs the model-specific fit, then runs eval
