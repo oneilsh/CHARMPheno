@@ -19,6 +19,18 @@ pytest = ">=7.0"
 nbformat = "^5.10.4"
 nbstripout = ">=0.7"
 
+# Optional: deps for the post-fit phenotype-labeling script.
+# Install with `poetry install --with labeling`. Kept out of the default
+# group so cluster/CI installs don't pull the Anthropic SDK (and so a stray
+# ANTHROPIC_API_KEY in the shell can't be accidentally picked up by other
+# tooling — the script reads CHARMPHENO_LABEL_KEY by default, not the SDK's
+# default env var).
+[tool.poetry.group.labeling]
+optional = true
+
+[tool.poetry.group.labeling.dependencies]
+anthropic = ">=0.40"
+
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"

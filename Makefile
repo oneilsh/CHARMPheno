@@ -1,5 +1,5 @@
-.PHONY: help install install-dev data data-clean test test-all test-cluster \
-        build zip clean precommit-install lint
+.PHONY: help install install-dev install-labeling data data-clean test test-all test-cluster \
+        build zip clean precommit-install lint ingest-bundle label-phenotypes
 
 default: help
 
@@ -7,6 +7,7 @@ help:
 	@echo "Top-level orchestrator. Common targets:"
 	@echo "  install          - Install root venv (scripts + dev tools)"
 	@echo "  install-dev      - Install both package venvs (spark-vi, charmpheno) editable"
+	@echo "  install-labeling - Install optional deps for the labeling script (anthropic SDK)"
 	@echo "  data             - Fetch LDA beta and simulate synthetic OMOP data"
 	@echo "  data-clean       - Delete the data/ cache and simulated outputs"
 	@echo "  test             - Run unit tests in both packages (default loop, <10s)"
@@ -18,6 +19,14 @@ help:
 	@echo "  precommit-install - Install pre-commit hooks AND the nbstripout"
 	@echo "                      git clean filter for .ipynb (one-time per clone)"
 	@echo "  lint             - Run pre-commit against all tracked files"
+	@echo ""
+	@echo "Dashboard bundle pipeline (post-fit):"
+	@echo "  ingest-bundle    - Unpack a dashboard bundle zip into dashboard/public/data/"
+	@echo "                     ZIP=<path>  (e.g. /tmp/dashboard_bundle.zip)"
+	@echo "  label-phenotypes - LLM-label the phenotypes in dashboard/public/data/."
+	@echo "                     Requires CHARMPHENO_LABEL_KEY env var (or LABEL_KEY_FILE)"
+	@echo "                     and \`make install-labeling\` to have run once."
+	@echo "                     Override args via LABEL_ARGS='--model claude-haiku-4-5 --top-n 20'"
 
 install:
 	poetry install
@@ -25,6 +34,37 @@ install:
 install-dev: install
 	@if [ -d spark-vi ]; then $(MAKE) -C spark-vi install; fi
 	@if [ -d charmpheno ]; then $(MAKE) -C charmpheno install; fi
+
+# Optional: install the anthropic SDK for the post-fit labeling script.
+# Kept in a separate poetry group so the cluster install path doesn't pull it.
+install-labeling:
+	poetry install --with labeling
+
+# Unpack a bundle zip downloaded from the cloud into the dashboard's data dir.
+# After this you typically run `make label-phenotypes`.
+BUNDLE_OUT ?= dashboard/public/data
+ingest-bundle:
+	@test -n "$(ZIP)" || { echo "ERROR: set ZIP=<path/to/dashboard_bundle.zip>"; exit 1; }
+	@test -f "$(ZIP)" || { echo "ERROR: not found: $(ZIP)"; exit 1; }
+	mkdir -p $(BUNDLE_OUT)
+	unzip -o "$(ZIP)" -d $(BUNDLE_OUT)
+	@echo "[ingest] unpacked $(ZIP) -> $(BUNDLE_OUT)"
+
+# Label phenotypes in an unpacked bundle. Read the API key from
+# CHARMPHENO_LABEL_KEY (NOT ANTHROPIC_API_KEY — see scripts/label_phenotypes.py
+# docstring for the rationale), or pass LABEL_KEY_FILE=<path> to read from disk.
+# Override LABEL_ARGS to pass extra args (--top-n, --force, --limit, etc.).
+LABEL_KEY_FILE ?=
+LABEL_ARGS ?=
+label-phenotypes:
+	@if [ -z "$(LABEL_KEY_FILE)" ] && [ -z "$$CHARMPHENO_LABEL_KEY" ]; then \
+		echo "ERROR: set CHARMPHENO_LABEL_KEY=sk-ant-... or LABEL_KEY_FILE=<path>"; \
+		exit 1; \
+	fi
+	poetry run python scripts/label_phenotypes.py \
+		--bundle-dir $(BUNDLE_OUT) \
+		$(if $(LABEL_KEY_FILE),--api-key-file $(LABEL_KEY_FILE),) \
+		$(LABEL_ARGS)
 
 data:
 	poetry run python scripts/fetch_lda_beta.py
