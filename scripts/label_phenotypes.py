@@ -83,16 +83,25 @@ PROVIDER_CHAIN: list[tuple[str, str, str]] = [
 QualityCategory = Literal["phenotype", "background", "anchor", "mixed", "dead"]
 
 
-def _build_system_prompt(max_words: int) -> str:
-    # The {MAX_WORDS} substitution is done at build time so the resulting
-    # string is byte-identical across all topics in a run (enabling prompt
-    # caching where the provider supports it).
+def _build_system_prompt(
+    *,
+    max_words: int,
+    alpha_min: float,
+    alpha_median: float,
+    alpha_max: float,
+    alpha_floor_threshold: float,
+    kl_min: float,
+    kl_median: float,
+    kl_max: float,
+) -> str:
+    # All substitutions happen once per run so the resulting string is
+    # byte-identical across topics (enabling prompt caching).
     return f"""\
 You are a clinical informatics expert interpreting learned topics from \
 an LDA topic model trained over patient records. Each topic is a \
 distribution over clinical concepts; you will be given each topic's \
-top concepts under two different rankings, plus three topic-level \
-statistics.
+top concepts under two different rankings, plus Bayesian and \
+information-theoretic statistics about the topic's distinctiveness.
 
 The current model is trained over patient conditions only (no drugs, \
 procedures, measurements, or labs); your interpretations should reflect \
@@ -112,80 +121,109 @@ what the topic SINGLES OUT relative to other topics.
 The relationship between the two lists is itself diagnostic:
 
 - **Strong overlap (the same concepts dominate both lists)** → real \
-phenotype. The diagnostic codes are simultaneously frequent in this \
-topic and distinctive vs the corpus.
+phenotype, IF the distinctiveness stats below confirm.
 - **Frequency list = common comorbidities (HTN/HLD/T2DM/GERD/anxiety), \
 lift list = unrelated outliers with tiny weight** → background catch-all \
-OR (if usage is near-floor) the "common-words pseudo-coherent" dead \
-case. Use usage to disambiguate.
-- **Both lists span unrelated clinical themes with no shared story** \
-→ mixed.
+OR dead-baseline (case b below). The distinctiveness stats disambiguate.
+- **Both lists span unrelated clinical themes** → mixed.
 - **A single concept dominates the frequency list AND tops the lift \
 list** → anchor.
 
-Read the two rankings TOGETHER. A coherent phenotype rarely has a \
-clean frequency list and an incoherent lift list, or vice versa.
-
 ## Topic-level statistics
 
-- **NPMI** (normalized pointwise mutual information): a scalar in \
-[-1, 1] summarizing how strongly the topic's top-N concepts co-occur \
-in the reference corpus, relative to chance. Higher = more coherent \
-top-N. NPMI alone is not enough — common conditions always co-occur, \
-so a topic dominated by common comorbidities can score moderate-to- \
-high NPMI without representing a real cluster.
-- **pair_coverage**: fraction of the topic's top-N concept pairs that \
-contributed to the NPMI calculation (cleared the minimum-joint-count \
-threshold in the reference corpus). Low pair_coverage means most of \
-the top-N pairs are too rare to score; NPMI is then averaged over \
-only a few pairs and is less reliable.
-- **usage**: total mass this topic carries across the corpus. Near- \
-floor usage means the topic is essentially unused regardless of how \
-its top-N looks.
+Two distinctiveness signals govern classification. They reflect what \
+the model itself "thinks" of each topic and how far it sits from the \
+corpus baseline:
+
+- **alpha (α)** — the per-topic asymmetric Dirichlet prior weight. \
+The fitter ran asymmetric-α optimization, which actively pushes α down \
+for slots that aren't carrying real data and keeps it up for slots that \
+are. α at the floor means the model itself has zeroed out that slot. \
+Distribution across this fit:
+    min     = {alpha_min:.4f}    ← floor (asymmetric-α optimizer's lower bound)
+    median  = {alpha_median:.4f}
+    max     = {alpha_max:.4f}
+α within ≈10% of the min (i.e. α ≤ {alpha_floor_threshold:.4f}) \
+indicates the slot is at floor. ALWAYS classify such topics as **dead** \
+regardless of how the top-N reads — the optimizer has already declared \
+them unused.
+
+- **KL(β ‖ corpus)** — KL divergence between the topic's word \
+distribution and the corpus marginal, in nats. Quantifies whether the \
+topic is distinguishable from the corpus baseline:
+    near 0       → β ≈ corpus marginal; the top-N is just baseline \
+                  smoothing of common comorbidities, not a learned pattern.
+    moderate     → β amplifies a subset of concepts ~2-3× over their \
+                  corpus rates (typical of catch-all background flavors).
+    high         → β sharply concentrates on concepts that are rare or \
+                  much-overweighted in the corpus (real phenotype).
+Distribution across this fit:
+    min = {kl_min:.3f}, median = {kl_median:.3f}, max = {kl_max:.3f}.
+
+Two more contextual stats:
+
+- **NPMI** ([-1, 1]): co-occurrence coherence of the top-N concepts in \
+the corpus. Helpful but not decisive — common comorbidities always \
+co-occur, so moderate NPMI is achievable without a real cluster.
+- **pair_coverage** (0..100%): fraction of top-N concept pairs that \
+cleared the joint-count threshold. Low coverage = NPMI averaged over \
+few pairs and less reliable.
+- **usage** (% of corpus mass): how much of the corpus this topic \
+carries. Useful for distinguishing real catch-alls (high usage) from \
+narrow phenotypes (lower usage), but a low-usage topic with α \
+well above floor and high KL is still a real phenotype.
 
 ## Quality categories
 
 Classify each topic into exactly one of:
 
-- **phenotype**: a recognizable disease/condition cluster with a \
-coherent clinical theme. Moderate-to-high usage; top concepts share \
-a clinical story. The common case for clinically useful topics.
+- **phenotype** — α well above floor AND KL above the median (relative \
+to this fit). Top concepts share a coherent clinical theme. The common \
+case for clinically useful topics; usage can range from <1% (rare \
+condition) to several percent (common condition) — usage does NOT \
+disqualify a topic from being a phenotype as long as α and KL show it \
+is distinct from prior and from baseline.
 
-- **background**: a large catch-all carrying a substantial slice of \
-corpus mass (high usage). Typical flavors include chronic-comorbidity \
-(e.g. HTN/HLD/T2DM/GERD/anxiety), acute-presentation (e.g. pain/ \
-chest pain/nausea/SoB/vomiting), or metabolic-syndrome. Coherent but \
-not a discrete phenotype; useful for cohort exclusion, not selection.
+- **background** — α above floor AND KL moderate (near the median) AND \
+top concepts are common comorbidities or generic acute symptoms (e.g. \
+HTN/HLD/T2DM/GERD/anxiety; or pain/chest pain/nausea/SoB/vomiting). \
+Typically high usage (several % to tens of % of corpus mass). The \
+topic carries real data but the pattern is the corpus's chronic or \
+acute baseline, useful for cohort *exclusion*, not selection.
 
-- **anchor**: dominated by a single specific concept (one term carries \
-most of the within-topic weight). Narrow but interpretable.
+- **anchor** — one concept dominates both rankings; the topic \
+essentially names that concept.
 
-- **mixed**: top concepts span unrelated clinical themes; no shared \
-theme survives a clinician's reading. Often a sign of insufficient \
-model capacity rather than a real cluster.
+- **mixed** — α above floor BUT the two rankings together span \
+unrelated clinical themes with no story a clinician would write down. \
+Often a sign of insufficient model capacity.
 
-- **dead**: an essentially unused topic sitting at the prior-smoothing \
-floor (near-floor usage). Two sub-flavors that look different but \
-are equally unusable:
-  (a) top concepts are rare or weird and the topic never accumulated \
-      meaningful data — NPMI is typically low and pair_coverage low \
-      because the rare top-N pairs don't clear the threshold;
-  (b) top concepts are common comorbidities and NPMI is moderate-to- \
-      high with high pair_coverage, but usage is near-floor. The top-N \
-      reflects baseline corpus smoothing, not a co-occurrence pattern \
-      in actual documents.
+- **dead** — either:
+  (a) α at floor (within ≈10% of the minimum across this fit); OR
+  (b) α above floor BUT KL near 0 (close to the minimum across this \
+      fit). The slot carries some data but the data is the corpus \
+      baseline — top-N is HTN/HLD/T2DM-style common comorbidities not \
+      because the topic learned them but because η-smoothing landed \
+      there.
 Either way: no useful clinical interpretation.
 
-Read the three statistics jointly. Useful tells:
-- High NPMI + high usage                          → phenotype or background
-- High NPMI + low pair_coverage + low usage       → narrow rare-condition \
-                                                    cluster; trust cautiously
-- Moderate-to-high NPMI + high pair_coverage + \
-  near-floor usage                                → dead (case b)
-- Low NPMI + low pair_coverage + low usage        → dead (case a)
-- Low NPMI with no other clear pattern            → mixed
+## Decision order
+
+To avoid rationalizing a label first and then picking a quality, \
+classify in this order:
+
+1. Check α. At floor → `dead`, stop.
+2. Check KL. Near the minimum across the fit → `dead`, stop.
+3. Check whether one concept dominates both rankings → `anchor`.
+4. Check whether the rankings span unrelated themes → `mixed`.
+5. Otherwise it is `phenotype` or `background`. Phenotype if KL is \
+above the median; background if KL is moderate AND top concepts are \
+generic comorbidities/symptoms.
 
 ## Output fields
+
+- **quality**: one of phenotype, background, anchor, mixed, dead. \
+Decide this FIRST using the rule above.
 
 - **label**: a concise clinician-voice label, at most {max_words} words. \
 Examples: "Type 2 diabetes care", "Chronic comorbidity catch-all". \
@@ -198,9 +236,7 @@ statistics. For phenotype/background/anchor, name the clinical \
 pattern and what it suggests about the patients. For mixed/dead, \
 briefly say why the topic isn't usable without using technical \
 vocabulary (e.g. "no shared clinical theme across the leading \
-conditions" rather than "low NPMI").
-
-- **quality**: one of phenotype, background, anchor, mixed, dead.
+conditions" rather than "low KL").
 
 Voice rules:
 - Use clinical terminology a clinician would recognize, not lay phrasing.
@@ -214,21 +250,29 @@ field for downstream filtering."""
 
 class PhenotypeLabel(BaseModel):
     """Structured output schema — pydantic-ai enforces this against the
-    provider's structured-output / function-calling mechanism."""
+    provider's structured-output / function-calling mechanism.
 
-    label: str = Field(description="Concise clinical label.")
+    Field order is deliberate: `quality` first so the model commits to
+    the classification (using α and KL per the system prompt's decision
+    rule) BEFORE crafting prose. Reversing the order encourages the
+    model to write a plausible label first and rationalize the quality
+    label to match it.
+    """
+
+    quality: QualityCategory = Field(
+        description=(
+            "One of phenotype, background, anchor, mixed, dead. Decide "
+            "this FIRST using the alpha + KL decision rule in the "
+            "system prompt — before writing the label and description."
+        ),
+    )
     description: str = Field(
         description=(
             "2-3 sentences, clinician voice, plain clinical English. "
             "No model terminology or references to topics/codes/statistics."
         ),
     )
-    quality: QualityCategory = Field(
-        description=(
-            "One of phenotype, background, anchor, mixed, dead. "
-            "See the system prompt for category definitions."
-        ),
-    )
+    label: str = Field(description="Concise clinical label.")
 
 
 def _maybe_load_dotenv(explicit_path: str | None) -> Path | None:
@@ -346,7 +390,14 @@ def _resolve_provider_and_key(args: argparse.Namespace) -> tuple[str, str]:
     )
 
 
-def _build_agent(model_str: str, api_key: str, max_words: int):
+def _build_agent(
+    model_str: str,
+    api_key: str,
+    *,
+    max_words: int,
+    alpha_dist: tuple[float, float, float],
+    kl_dist: tuple[float, float, float],
+):
     """Build a pydantic-ai Agent for the given model string with the API
     key passed in explicitly (not via env), structured output, and the
     shared system prompt.
@@ -370,9 +421,9 @@ def _build_agent(model_str: str, api_key: str, max_words: int):
         from pydantic_ai.providers.google import GoogleProvider
         model = GoogleModel(name, provider=GoogleProvider(api_key=api_key))
     elif prefix == "openai":
-        from pydantic_ai.models.openai import OpenAIModel
+        from pydantic_ai.models.openai import OpenAIChatModel
         from pydantic_ai.providers.openai import OpenAIProvider
-        model = OpenAIModel(name, provider=OpenAIProvider(api_key=api_key))
+        model = OpenAIChatModel(name, provider=OpenAIProvider(api_key=api_key))
     elif prefix == "anthropic":
         from pydantic_ai.models.anthropic import AnthropicModel
         from pydantic_ai.providers.anthropic import AnthropicProvider
@@ -385,11 +436,54 @@ def _build_agent(model_str: str, api_key: str, max_words: int):
             f"Supported: google-gla, openai, anthropic."
         )
 
+    a_min, a_med, a_max = alpha_dist
+    k_min, k_med, k_max = kl_dist
+    # "At floor" = within ~10% of the minimum. For asymmetric-α fits with
+    # a hard lower bound, the min IS the floor and a 10% margin avoids
+    # FP from numerical jitter.
+    alpha_floor_threshold = a_min * 1.10
     return Agent(
         model,
-        system_prompt=_build_system_prompt(max_words),
+        system_prompt=_build_system_prompt(
+            max_words=max_words,
+            alpha_min=a_min, alpha_median=a_med, alpha_max=a_max,
+            alpha_floor_threshold=alpha_floor_threshold,
+            kl_min=k_min, kl_median=k_med, kl_max=k_max,
+        ),
         output_type=PhenotypeLabel,
     )
+
+
+def _kl_div_topic_vs_corpus(
+    beta_row: list[float], corpus_freq: list[float],
+) -> float:
+    """KL(β[k] ‖ p(w)) over the displayed vocab, in nats.
+
+    β[k] is the topic-term distribution restricted to the displayed
+    vocab (already row-stochastic per the export normalization). p(w)
+    is the corpus marginal restricted to the same vocab; we renormalize
+    it to a proper probability distribution over the displayed support
+    before computing KL so both sides live on the same simplex.
+
+    Terms with β[k][i] = 0 contribute 0 to the sum (since β log β → 0).
+    Terms with p(w)[i] = 0 would make the divergence infinite; the
+    export's small-cell guard ensures the displayed vocab has no zeros
+    in practice, but we guard defensively by skipping such terms with
+    a tiny epsilon.
+    """
+    total_pw = sum(corpus_freq)
+    if total_pw <= 0:
+        return 0.0
+    eps = 1e-12
+    kl = 0.0
+    for b_i, p_i in zip(beta_row, corpus_freq):
+        if b_i <= 0:
+            continue
+        p_norm = p_i / total_pw
+        if p_norm <= eps:
+            p_norm = eps
+        kl += b_i * math.log(b_i / p_norm)
+    return kl
 
 
 def _top_codes_by_metric(
@@ -455,19 +549,29 @@ def _build_user_message(
     phenotype_id: int,
     top_by_freq: list[dict],
     top_by_lift: list[dict],
+    alpha: float,
+    kl: float,
     npmi: float,
     pair_coverage: float,
     usage_frac: float,
     max_words: int,
 ) -> str:
+    # Stats are listed in decision order (alpha and KL first — the
+    # primary classifiers — then the supporting contextual stats).
     lines = [
         f"Topic id: {phenotype_id}",
         f"Label budget: at most {max_words} words.",
         "",
-        "Topic statistics:",
-        f"  NPMI:           {npmi:.3f}",
-        f"  pair_coverage:  {pair_coverage:.0%} of top-N pairs scored",
-        f"  usage:          {usage_frac * 100:.2f}% of total corpus mass",
+        "Distinctiveness statistics (primary classifiers):",
+        f"  alpha:           {alpha:.4f}    "
+        f"(check against the fit's min/floor in the system prompt)",
+        f"  KL(beta||corpus): {kl:.3f}    "
+        f"(check against the fit's min/median/max in the system prompt)",
+        "",
+        "Contextual statistics:",
+        f"  NPMI:            {npmi:.3f}",
+        f"  pair_coverage:   {pair_coverage:.0%} of top-N pairs scored",
+        f"  usage:           {usage_frac * 100:.2f}% of total corpus mass",
         "",
         "Top conditions by within-topic frequency "
         "(description · weight · lift):",
@@ -488,6 +592,8 @@ def _label_one(
     phenotype_id: int,
     top_by_freq: list[dict],
     top_by_lift: list[dict],
+    alpha: float,
+    kl: float,
     npmi: float,
     pair_coverage: float,
     usage_frac: float,
@@ -497,6 +603,7 @@ def _label_one(
     user_text = _build_user_message(
         phenotype_id=phenotype_id,
         top_by_freq=top_by_freq, top_by_lift=top_by_lift,
+        alpha=alpha, kl=kl,
         npmi=npmi, pair_coverage=pair_coverage, usage_frac=usage_frac,
         max_words=max_words,
     )
@@ -596,6 +703,7 @@ def main(argv: list[str] | None = None) -> int:
     phens_b = json.loads(phens_p.read_text())
 
     beta = model_b["beta"]
+    alpha_arr = model_b.get("alpha")
     vocab_codes = vocab_b["codes"]
     phenotypes = phens_b["phenotypes"]
 
@@ -610,6 +718,47 @@ def main(argv: list[str] | None = None) -> int:
             f"beta rows are not all width {V_disp} (the displayed vocab "
             f"size); is this a pre-trim bundle?",
         )
+    if not alpha_arr or len(alpha_arr) != K:
+        raise SystemExit(
+            f"model.json missing 'alpha' array of length {K}; the labeling "
+            f"rubric needs the per-topic Dirichlet prior weights to detect "
+            f"floor-α (dead) topics.",
+        )
+
+    # Per-topic distinctiveness signals.
+    #   alpha[k] reflects the asymmetric-α optimizer's verdict on topic k.
+    #   KL(β[k]||p(w)) reflects how far the topic departs from the corpus
+    #     marginal — low KL = baseline pseudo-coherent (dead case b).
+    corpus_freq_disp = [c.get("corpus_freq", 0.0) for c in vocab_codes]
+    kl_arr = [
+        _kl_div_topic_vs_corpus(beta[k], corpus_freq_disp)
+        for k in range(K)
+    ]
+    alpha_arr = [float(a) for a in alpha_arr]
+    alpha_sorted = sorted(alpha_arr)
+    kl_sorted = sorted(kl_arr)
+
+    def _median(xs: list[float]) -> float:
+        n = len(xs)
+        if n == 0:
+            return 0.0
+        mid = n // 2
+        if n % 2 == 1:
+            return xs[mid]
+        return 0.5 * (xs[mid - 1] + xs[mid])
+
+    alpha_dist = (alpha_sorted[0], _median(alpha_sorted), alpha_sorted[-1])
+    kl_dist = (kl_sorted[0], _median(kl_sorted), kl_sorted[-1])
+    print(
+        f"[label] alpha[K={K}] min={alpha_dist[0]:.4f} "
+        f"median={alpha_dist[1]:.4f} max={alpha_dist[2]:.4f}",
+        flush=True,
+    )
+    print(
+        f"[label] KL(beta||corpus)[K={K}] min={kl_dist[0]:.3f} "
+        f"median={kl_dist[1]:.3f} max={kl_dist[2]:.3f}",
+        flush=True,
+    )
 
     todo: list[int] = []
     for i, p in enumerate(phenotypes):
@@ -664,6 +813,7 @@ def main(argv: list[str] | None = None) -> int:
             print(_build_user_message(
                 phenotype_id=i,
                 top_by_freq=top_freq, top_by_lift=top_lift,
+                alpha=alpha_arr[i], kl=kl_arr[i],
                 npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
                 max_words=args.max_words,
             ), flush=True)
@@ -681,7 +831,11 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     model_str, api_key = _resolve_provider_and_key(args)
-    agent = _build_agent(model_str, api_key, max_words=args.max_words)
+    agent = _build_agent(
+        model_str, api_key,
+        max_words=args.max_words,
+        alpha_dist=alpha_dist, kl_dist=kl_dist,
+    )
     print(f"[label] using model {model_str}", flush=True)
 
     total = {"input": 0, "output": 0}
@@ -693,6 +847,7 @@ def main(argv: list[str] | None = None) -> int:
                 agent=agent,
                 phenotype_id=i,
                 top_by_freq=top_freq, top_by_lift=top_lift,
+                alpha=alpha_arr[i], kl=kl_arr[i],
                 npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
                 max_words=args.max_words,
             )
