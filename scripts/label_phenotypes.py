@@ -143,7 +143,7 @@ Distribution across this fit:
     min     = {alpha_min:.4f}    ← floor (asymmetric-α optimizer's lower bound)
     median  = {alpha_median:.4f}
     max     = {alpha_max:.4f}
-α within ≈10% of the min (i.e. α ≤ {alpha_floor_threshold:.4f}) \
+α within ≈30% of the min (i.e. α ≤ {alpha_floor_threshold:.4f}) \
 indicates the slot is at floor. ALWAYS classify such topics as **dead** \
 regardless of how the top-N reads — the optimizer has already declared \
 them unused.
@@ -195,8 +195,19 @@ acute baseline, useful for cohort *exclusion*, not selection.
 essentially names that concept.
 
 - **mixed** — α above floor BUT the two rankings together span \
-unrelated clinical themes with no story a clinician would write down. \
-Often a sign of insufficient model capacity.
+unrelated clinical themes with no single clinical story. Includes the \
+**topic-merging** case: two coherent themes share one slot due to \
+insufficient model capacity (e.g. an "immune disorders" cluster and an \
+"endocrine disorders" cluster end up in the same topic). Tell: the \
+only honest label is a conjunction of unrelated halves — \
+"X and Y", "X with Y" — where both halves carry real concepts (not \
+generic comorbidities). If both halves have real top-N concepts and α \
+is above floor, this is `mixed` (topic-merging), NOT `phenotype`. \
+Examples of merging labels to avoid producing as `phenotype`: \
+"Immune and endocrine disorders", "Sexual and ocular health \
+conditions", "Nail and mobility disorders", "Voice and swallowing \
+disorders" if the voice and swallowing concepts come from unrelated \
+underlying conditions.
 
 - **dead** — either:
   (a) α at floor (within ≈10% of the minimum across this fit); OR
@@ -212,13 +223,20 @@ Either way: no useful clinical interpretation.
 To avoid rationalizing a label first and then picking a quality, \
 classify in this order:
 
-1. Check α. At floor → `dead`, stop.
-2. Check KL. Near the minimum across the fit → `dead`, stop.
+1. Check α. At floor (α ≤ {alpha_floor_threshold:.4f}) → `dead`, stop.
+2. Check KL. Near the fit minimum → `dead` (case b), stop.
 3. Check whether one concept dominates both rankings → `anchor`.
-4. Check whether the rankings span unrelated themes → `mixed`.
+4. **Check for topic-merging.** Before committing to `phenotype`, draft \
+the shortest honest label connecting the leading concepts. If that \
+label is a conjunction of clinically unrelated halves ("X and Y", "X \
+with Y" where X and Y don't share a coherent clinical story), the \
+topic is `mixed` (two themes merged into one slot), NOT a phenotype — \
+even if α and KL are well above floor. Real phenotypes can be named \
+with a single clinical theme.
 5. Otherwise it is `phenotype` or `background`. Phenotype if KL is \
 above the median; background if KL is moderate AND top concepts are \
-generic comorbidities/symptoms.
+generic comorbidities/symptoms (HTN/HLD/T2DM/GERD/anxiety or pain/ \
+chest pain/nausea/SoB/vomiting).
 
 ## Output fields
 
@@ -438,10 +456,14 @@ def _build_agent(
 
     a_min, a_med, a_max = alpha_dist
     k_min, k_med, k_max = kl_dist
-    # "At floor" = within ~10% of the minimum. For asymmetric-α fits with
-    # a hard lower bound, the min IS the floor and a 10% margin avoids
-    # FP from numerical jitter.
-    alpha_floor_threshold = a_min * 1.10
+    # "At floor" = within ~30% of the minimum. The asymmetric-α optimizer
+    # can leave slots slightly above the exact floor while still
+    # effectively zeroed; 10% was too tight (run 3 only flagged 11/80
+    # dead vs the ~25 expected per insight 0019). 30% catches more
+    # genuinely-unused slots without sweeping in legitimately low-α
+    # rare-condition phenotypes (which would also have high KL — the
+    # rubric requires α near floor AND KL low to call dead-case-b).
+    alpha_floor_threshold = a_min * 1.30
     return Agent(
         model,
         system_prompt=_build_system_prompt(
