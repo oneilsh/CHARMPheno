@@ -1,6 +1,7 @@
 <script lang="ts">
   import { cohort, patientsById, selectedPatientId, selectedPhenotypeId } from '../store'
   import ProfileBar from '../patient/ProfileBar.svelte'
+  import ContributingCodes from '../patient/ContributingCodes.svelte'
 
   $: patients = $cohort?.patients ?? []
   $: current = $selectedPatientId ? $patientsById.get($selectedPatientId) : (patients[0] ?? null)
@@ -28,6 +29,7 @@
       <h3>Profile</h3>
       <ProfileBar theta={current.theta} height={40} onSelect={(k) => selectedPhenotypeId.set(k)} />
     </div>
+    <ContributingCodes theta={current.theta} codeBag={current.code_bag} />
   {/if}
 </section>
 
