@@ -25,6 +25,7 @@
 <section class="expected">
   <h3>Top expected codes</h3>
   <table>
+    <tbody>
     {#each top as r}
       {@const c = $bundle!.vocab.codes[r.w]}
       <tr>
@@ -36,6 +37,7 @@
         <td class="num">{r.p50.toFixed(1)}</td>
       </tr>
     {/each}
+    </tbody>
   </table>
 </section>
 
