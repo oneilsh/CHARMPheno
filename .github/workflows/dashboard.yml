@@ -1,7 +1,10 @@
 name: Dashboard deploy
 on:
   push:
-    branches: [main]
+    # Both branches deploy to the same gh-pages target; last push wins.
+    # If branch-specific preview URLs are needed later, switch to a
+    # destination_dir scheme per branch.
+    branches: [main, dashboarding]
     paths: ['dashboard/**', '.github/workflows/dashboard.yml']
   workflow_dispatch: {}
 permissions: { contents: write }
