@@ -195,19 +195,36 @@ acute baseline, useful for cohort *exclusion*, not selection.
 essentially names that concept.
 
 - **mixed** — α above floor BUT the two rankings together span \
-unrelated clinical themes with no single clinical story. Includes the \
-**topic-merging** case: two coherent themes share one slot due to \
-insufficient model capacity (e.g. an "immune disorders" cluster and an \
-"endocrine disorders" cluster end up in the same topic). Tell: the \
-only honest label is a conjunction of unrelated halves — \
-"X and Y", "X with Y" — where both halves carry real concepts (not \
-generic comorbidities). If both halves have real top-N concepts and α \
-is above floor, this is `mixed` (topic-merging), NOT `phenotype`. \
-Examples of merging labels to avoid producing as `phenotype`: \
-"Immune and endocrine disorders", "Sexual and ocular health \
-conditions", "Nail and mobility disorders", "Voice and swallowing \
-disorders" if the voice and swallowing concepts come from unrelated \
-underlying conditions.
+**clinically unrelated** themes with no single clinical story. \
+Includes the **topic-merging** case: two distinct themes share one \
+slot due to insufficient model capacity.
+
+**Conjunctions that are phenotypes, NOT mixed** (single clinical theme \
+expressed in multiple concepts — keep these as phenotype):
+  - Disease + its known complications: "RA and complications", \
+    "Diabetes with retinopathy", "CKD with anemia"
+  - Co-occurring conditions in one pathway or with a shared mechanism: \
+    "Mood disorders and anxiety" (anxiety is a mood-spectrum condition), \
+    "HIV and herpesvirus infections" (known co-infection), \
+    "Asthma and allergic rhinitis" (shared atopy)
+  - Anatomical or organ-system continuity: "Aneurysm and cardiovascular \
+    risk", "Glaucoma and cataract" (both ocular), "Mitral and aortic \
+    valve disorders" (both valvular)
+
+**Conjunctions that ARE topic-merging mixed** (two clinically \
+unrelated halves — these are the real mixed cases):
+  - Disjoint body systems: "Immune and endocrine disorders", \
+    "Sexual and ocular health conditions"
+  - Unrelated condition + unrelated condition: "Nail and mobility \
+    disorders", "Lung and skin malignancies" (lung Ca and skin Ca are \
+    different cancers), "Voice and swallowing disorders" if the voice \
+    and swallowing concepts come from unrelated underlying conditions
+
+Test for the distinction: if a clinician could draft a single-sentence \
+mechanism sentence that ties the two halves together ("RA patients \
+develop these complications because..."), it is `phenotype`. If the \
+two halves require unrelated mechanisms or just happen to land in the \
+same topic, it is `mixed`.
 
 - **dead** — either:
   (a) α at floor (within ≈10% of the minimum across this fit); OR
@@ -226,17 +243,22 @@ classify in this order:
 1. Check α. At floor (α ≤ {alpha_floor_threshold:.4f}) → `dead`, stop.
 2. Check KL. Near the fit minimum → `dead` (case b), stop.
 3. Check whether one concept dominates both rankings → `anchor`.
-4. **Check for topic-merging.** Before committing to `phenotype`, draft \
-the shortest honest label connecting the leading concepts. If that \
-label is a conjunction of clinically unrelated halves ("X and Y", "X \
-with Y" where X and Y don't share a coherent clinical story), the \
-topic is `mixed` (two themes merged into one slot), NOT a phenotype — \
-even if α and KL are well above floor. Real phenotypes can be named \
-with a single clinical theme.
-5. Otherwise it is `phenotype` or `background`. Phenotype if KL is \
-above the median; background if KL is moderate AND top concepts are \
-generic comorbidities/symptoms (HTN/HLD/T2DM/GERD/anxiety or pain/ \
-chest pain/nausea/SoB/vomiting).
+4. **Check for background BEFORE checking for mixed.** If usage is \
+high (top concepts are HTN/HLD/T2DM/GERD/anxiety/obesity for chronic \
+catch-all, or pain/chest pain/nausea/SoB/vomiting for acute catch-all, \
+or a similar generic-comorbidity blend) AND KL is moderate (well below \
+the fit's max), classify as `background`, even if the top-N spans \
+"multiple" categories (chronic comorbidity catch-alls naturally span \
+metabolic + cardiovascular + GI etc. — that is what makes them \
+catch-alls, not mixed). Stop.
+5. **Check for topic-merging.** Draft the shortest honest label \
+connecting the leading concepts. If that label is a conjunction of \
+CLINICALLY UNRELATED halves (per the rubric above — disjoint body \
+systems or unrelated mechanisms), the topic is `mixed`, NOT \
+`phenotype`. But a conjunction within a single coherent clinical \
+story (disease + complications, related conditions in one pathway, \
+anatomical continuity) is still a `phenotype`.
+6. Otherwise it is `phenotype`. Single-theme conjunctions are fine.
 
 ## Output fields
 
