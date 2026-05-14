@@ -50,7 +50,6 @@ from spark_vi.io import load_result
 from spark_vi.models.topic.types import BOWDocument
 from spark_vi.eval.topic import compute_npmi_coherence
 from pyspark.sql import functions as F
-from pyspark.ml.linalg import SparseVector as SparkSparseVector
 
 log = logging.getLogger(__name__)
 
