@@ -1,0 +1,33 @@
+name: Dashboard deploy
+on:
+  push:
+    branches: [main]
+    paths: ['dashboard/**', '.github/workflows/dashboard.yml']
+  workflow_dispatch: {}
+permissions: { contents: write }
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Install
+        working-directory: dashboard
+        run: npm ci
+      - name: Test
+        working-directory: dashboard
+        run: npx vitest run
+      - name: Build
+        working-directory: dashboard
+        env: { VITE_BASE: /CHARMPheno/ }
+        run: npm run build
+      - name: Deploy
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: dashboard/dist
+          publish_branch: gh-pages
