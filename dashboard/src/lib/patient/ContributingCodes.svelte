@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { bundle, selectedPhenotypeId } from '../store'
+  import { bundle, selectedPhenotypeId, phenotypesById } from '../store'
   export let theta: number[]
   export let codeBag: number[]
 
@@ -23,20 +23,34 @@
     }
     return scored.sort((a, b) => b.score - a.score).slice(0, 12)
   })()
+
+  $: maxScore = top.length ? Math.max(...top.map((t) => t.score)) : 1
+  $: selectedLabel = $selectedPhenotypeId !== null
+    ? ($phenotypesById.get($selectedPhenotypeId)?.label || `Phenotype ${$selectedPhenotypeId}`)
+    : null
 </script>
 
 <section class="contrib">
-  <h3>Top contributing codes</h3>
-  {#if $selectedPhenotypeId === null}<p class="hint">Click a phenotype band above.</p>
-  {:else if top.length === 0}<p>No codes from this patient's bag contribute to phenotype {$selectedPhenotypeId}.</p>
+  <header class="head">
+    <span class="eyebrow">Section</span>
+    <h3>Top contributing codes{#if selectedLabel} <span class="for">for</span> <em>{selectedLabel}</em>{/if}</h3>
+  </header>
+
+  {#if $selectedPhenotypeId === null}
+    <p class="hint">Click a phenotype band above to see which codes from this patient's bag drove the assignment.</p>
+  {:else if top.length === 0}
+    <p class="hint">No codes from this patient's bag contribute to {selectedLabel}.</p>
   {:else}
-    <ol>
+    <ol class="codes">
       {#each top as t}
         {@const c = $bundle!.vocab.codes[t.w]}
         <li>
-          <span class="dom dom-{c.domain}">{c.domain.slice(0, 3)}</span>
+          <span class="domain-mark dom-{c.domain}">{c.domain.slice(0, 3)}</span>
           <span class="desc">{c.description || c.code}</span>
-          <span class="count">×{t.c}</span>
+          <span class="spark" aria-hidden="true">
+            <span class="spark-bar" style="width: {(t.score / maxScore) * 100}%"></span>
+          </span>
+          <span class="count" data-numeric>×{t.c}</span>
         </li>
       {/each}
     </ol>
@@ -44,15 +58,77 @@
 </section>
 
 <style>
-  .contrib { margin-top: 1rem; }
-  .hint { color: #555; font-size: 0.85rem; }
-  ol { list-style: none; padding: 0; }
-  li { display: grid; grid-template-columns: 3rem 1fr 3rem; gap: 0.5rem; padding: 0.2rem 0; font-size: 0.85rem; border-bottom: 1px solid #f4f4f4; }
-  .dom { font-size: 0.7rem; padding: 0.05rem 0.3rem; border-radius: 3px; text-align: center; }
-  .dom-condition { background: #ffe4e1; }
-  .dom-drug { background: #e0f2fe; }
-  .dom-procedure { background: #ecfccb; }
-  .dom-measurement { background: #fef3c7; }
-  .dom-observation { background: #f5f5f5; }
-  .count { text-align: right; font-variant-numeric: tabular-nums; color: #444; }
+  .contrib {
+    margin-top: 2.5rem;
+  }
+  .head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.85rem;
+    margin-bottom: 0.85rem;
+  }
+  .head h3 {
+    font-size: 1.05rem;
+    font-weight: 500;
+  }
+  .head .for {
+    color: var(--ink-faint);
+    font-weight: 400;
+    font-family: var(--font-display);
+    font-style: italic;
+  }
+  .head h3 em {
+    font-family: var(--font-display);
+    font-style: italic;
+    font-weight: 500;
+    color: var(--terracotta);
+  }
+
+  .hint {
+    color: var(--ink-muted);
+    font-style: italic;
+    font-size: var(--fs-small);
+    padding: 0.5rem 0;
+    border-top: 1px solid var(--rule-faint);
+  }
+
+  .codes {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .codes li {
+    display: grid;
+    grid-template-columns: 5rem 1fr 4rem 2rem;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid var(--rule-faint);
+    font-size: var(--fs-small);
+  }
+  .codes li:last-child { border-bottom: 0; }
+  .codes .desc {
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .spark {
+    display: block;
+    height: 4px;
+    background: var(--paper-recessed);
+    border-radius: 1px;
+    overflow: hidden;
+  }
+  .spark-bar {
+    display: block;
+    height: 100%;
+    background: var(--terracotta);
+    transition: width 0.2s ease;
+  }
+  .count {
+    text-align: right;
+    color: var(--ink-muted);
+    font-size: var(--fs-small);
+  }
 </style>

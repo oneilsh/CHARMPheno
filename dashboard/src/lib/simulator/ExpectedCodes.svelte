@@ -23,32 +23,115 @@
 </script>
 
 <section class="expected">
-  <h3>Top expected codes</h3>
+  <header>
+    <span class="eyebrow">Posterior predictive</span>
+    <h3>Top expected codes</h3>
+    <p class="kicker">Per-sample completion counts at the 10th / 50th / 90th percentile.</p>
+  </header>
+
   <table>
     <tbody>
     {#each top as r}
       {@const c = $bundle!.vocab.codes[r.w]}
       <tr>
+        <td class="dom-cell"><span class="domain-mark dom-{c.domain}">{c.domain.slice(0, 3)}</span></td>
         <td class="desc">{c.description || c.code}</td>
         <td class="bar">
-          <span class="rng" style="left: {(r.p10 / maxP90) * 100}%; width: {((r.p90 - r.p10) / maxP90) * 100}%"></span>
+          <span class="rng" style="left: {(r.p10 / maxP90) * 100}%; width: {Math.max(1, ((r.p90 - r.p10) / maxP90) * 100)}%"></span>
           <span class="med" style="left: {(r.p50 / maxP90) * 100}%"></span>
         </td>
-        <td class="num">{r.p50.toFixed(1)}</td>
+        <td class="num" data-numeric>{r.p50.toFixed(1)}</td>
       </tr>
     {/each}
     </tbody>
   </table>
+
+  {#if top.length === 0}
+    <p class="hint">No expected codes yet. Run a sample first.</p>
+  {/if}
 </section>
 
 <style>
-  .expected { padding: 1rem; border: 1px solid #ddd; }
-  h3 { margin: 0 0 0.5rem; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-  td { padding: 0.15rem 0.25rem; border-bottom: 1px solid #f4f4f4; }
-  td.desc { width: 50%; }
-  td.bar { width: 40%; position: relative; height: 1.2rem; }
-  td.bar .rng { position: absolute; top: 0.45rem; height: 0.25rem; background: #cfe2ff; }
-  td.bar .med { position: absolute; top: 0.2rem; width: 2px; height: 0.7rem; background: #1e88e5; }
-  td.num { width: 4rem; text-align: right; font-variant-numeric: tabular-nums; }
+  .expected {
+    padding: 1.25rem;
+    background: var(--paper-elevated);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-sm);
+  }
+
+  header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    margin-bottom: 0.85rem;
+    padding-bottom: 0.65rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  header h3 {
+    font-family: var(--font-display);
+    font-style: italic;
+    font-weight: 500;
+    font-size: 1.4rem;
+    letter-spacing: -0.005em;
+  }
+  .kicker {
+    margin: 0.05rem 0 0;
+    font-size: var(--fs-micro);
+    color: var(--ink-faint);
+    font-style: italic;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--fs-small);
+  }
+  td {
+    padding: 0.38rem 0.25rem;
+    border-bottom: 1px solid var(--rule-faint);
+    vertical-align: middle;
+  }
+  tr:last-child td { border-bottom: 0; }
+
+  td.dom-cell { width: 4rem; }
+  td.desc {
+    width: 45%;
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 0;
+  }
+  td.bar {
+    width: 40%;
+    position: relative;
+    height: 1.4rem;
+  }
+  td.bar .rng {
+    position: absolute;
+    top: 0.6rem;
+    height: 3px;
+    background: var(--terracotta-soft);
+    opacity: 0.55;
+    border-radius: 1.5px;
+  }
+  td.bar .med {
+    position: absolute;
+    top: 0.35rem;
+    width: 2px;
+    height: 11px;
+    background: var(--terracotta);
+  }
+  td.num {
+    width: 3.5rem;
+    text-align: right;
+    color: var(--ink-muted);
+  }
+
+  .hint {
+    color: var(--ink-faint);
+    font-style: italic;
+    font-size: var(--fs-small);
+    padding: 0.5rem 0 0;
+  }
 </style>

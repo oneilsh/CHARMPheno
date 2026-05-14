@@ -10,7 +10,7 @@
   let expandedK: number | null = null
 
   $: K = $bundle?.model.K ?? 0
-  $: H = ROW_H * K + 20
+  $: H = ROW_H * K + 36
 
   $: rows = (() => {
     if (thetaSamples.length === 0 || K === 0) return []
@@ -29,8 +29,19 @@
     return out
   })()
 
-  $: xMax = rows.length > 0 ? Math.max(0.01, d3.max(rows, (r) => r.p90) ?? 0.01) : 0.01
-  $: xScale = d3.scaleLinear().domain([0, xMax]).range([X_MARGIN, W - 20])
+  // Adaptive x-scale: clip to the 95th-percentile of p90s with 15% headroom.
+  // Rows whose p50 exceeds the scale overflow visually and get a chevron.
+  // Floor at 0.1 (10%) so the scale never shrinks past readability, ceiling
+  // at 1.0 since the simplex never goes higher. This fixes the "one dominant
+  // phenotype pins the scale and everything else looks like zero" pathology.
+  $: xMax = (() => {
+    if (rows.length === 0) return 0.1
+    const sorted = rows.map((r) => r.p90).slice().sort((a, b) => a - b)
+    const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 0.1
+    return Math.max(0.1, Math.min(1.0, p95 * 1.15))
+  })()
+  $: xScale = d3.scaleLinear().domain([0, xMax]).range([X_MARGIN, W - 28])
+  $: ticks = xScale.ticks(5)
 
   $: drill = (() => {
     if (expandedK === null || !$bundle) return [] as { w: number; score: number }[]
@@ -54,36 +65,187 @@
   })()
 </script>
 
-<svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img">
-  {#each rows as r, i}
-    {@const cy = 10 + i * ROW_H + ROW_H / 2}
-    <g style="cursor: pointer;" on:click={() => expandedK = expandedK === r.k ? null : r.k}>
-      <rect x="0" y={cy - ROW_H / 2} width={W} height={ROW_H} fill={expandedK === r.k ? '#f4f8ff' : 'transparent'} />
-      <text x={X_MARGIN - 8} y={cy + 3} font-size="10" text-anchor="end">
-        {$phenotypesById.get(r.k)?.label || `Phenotype ${r.k}`}
+<div class="carpet-wrap">
+  <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label="Phenotype posterior carpet">
+    <!-- gridlines + tick labels -->
+    {#each ticks as t}
+      <line
+        x1={xScale(t)} y1={26} x2={xScale(t)} y2={H - 8}
+        stroke="#e8e0d0" stroke-width="0.5" stroke-dasharray="2,3"
+      />
+      <text x={xScale(t)} y={18} font-size="9" text-anchor="middle" fill="#9c8e7a" font-family="IBM Plex Mono, monospace">
+        {(t * 100).toFixed(0)}%
       </text>
-      <line x1={xScale(r.p10)} y1={cy} x2={xScale(r.p90)} y2={cy} stroke="#999" stroke-width="1" />
-      <rect x={xScale(r.p25)} y={cy - 4} width={Math.max(1, xScale(r.p75) - xScale(r.p25))} height="8" fill="#1e88e5" opacity="0.7" />
-      <line x1={xScale(r.p50)} y1={cy - 5} x2={xScale(r.p50)} y2={cy + 5} stroke="#000" stroke-width="1.5" />
-      <text x={W - 18} y={cy + 3} font-size="9" text-anchor="end" fill="#555">{(r.p50 * 100).toFixed(1)}%</text>
-    </g>
-  {/each}
-</svg>
+    {/each}
 
-{#if expandedK !== null}
-  <aside class="drill">
-    <h4>Top codes driving {$phenotypesById.get(expandedK)?.label || `Phenotype ${expandedK}`}</h4>
-    {#if drill.length === 0}<p>No completion codes scored above zero.</p>
-    {:else}
-      <ol>{#each drill as d}{@const c = $bundle!.vocab.codes[d.w]}<li><span>{c.description || c.code}</span><span class="score">{d.score.toFixed(2)}</span></li>{/each}</ol>
-    {/if}
-  </aside>
-{/if}
+    <!-- axis labels -->
+    <text x={X_MARGIN - 8} y={18} font-size="9" text-anchor="end" fill="#9c8e7a"
+          font-family="Newsreader, serif" font-style="italic">
+      Phenotype
+    </text>
+    <text x={W - 22} y={18} font-size="9" text-anchor="end" fill="#9c8e7a"
+          font-family="Newsreader, serif" font-style="italic">
+      posterior θ
+    </text>
+
+    {#each rows as r, i}
+      {@const cy = 30 + i * ROW_H + ROW_H / 2}
+      {@const overflow = r.p50 > xMax}
+      {@const selected = expandedK === r.k}
+      <g style="cursor: pointer;"
+         role="button" tabindex="0"
+         aria-label={`Toggle drill-down for ${$phenotypesById.get(r.k)?.label || `Phenotype ${r.k}`}`}
+         on:click={() => expandedK = expandedK === r.k ? null : r.k}
+         on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && (expandedK = expandedK === r.k ? null : r.k)}>
+        <!-- row highlight -->
+        <rect x="0" y={cy - ROW_H / 2} width={W} height={ROW_H}
+              fill={selected ? '#ece6d9' : 'transparent'} />
+
+        <!-- label -->
+        <text x={X_MARGIN - 8} y={cy + 3} font-size="10" text-anchor="end"
+              fill={selected ? '#1f1b16' : '#6b5f50'}
+              font-family="IBM Plex Sans, sans-serif"
+              font-weight={selected ? 500 : 400}>
+          {$phenotypesById.get(r.k)?.label || `Phenotype ${r.k}`}
+        </text>
+
+        {#if overflow}
+          <!-- Overflow chevron at the right edge of the plot area -->
+          <text x={W - 22} y={cy + 3} font-size="11" fill="#b25b2c" text-anchor="end"
+                font-family="Newsreader, serif">›</text>
+          <line x1={xScale(Math.min(r.p10, xMax))} y1={cy} x2={W - 26} y2={cy}
+                stroke="#b25b2c" stroke-width="1" />
+          <rect x={xScale(Math.min(r.p25, xMax))} y={cy - 4}
+                width={Math.max(1, (W - 26) - xScale(Math.min(r.p25, xMax)))} height="8"
+                fill="#b25b2c" opacity="0.5" />
+        {:else}
+          <!-- P10–P90 line -->
+          <line x1={xScale(r.p10)} y1={cy} x2={xScale(r.p90)} y2={cy}
+                stroke="#b8a988" stroke-width="1" />
+          <!-- P25–P75 box -->
+          <rect x={xScale(r.p25)} y={cy - 4}
+                width={Math.max(1, xScale(r.p75) - xScale(r.p25))} height="8"
+                fill="#3d4f6e" opacity="0.78" />
+          <!-- median tick -->
+          <line x1={xScale(r.p50)} y1={cy - 5} x2={xScale(r.p50)} y2={cy + 5}
+                stroke="#1f1b16" stroke-width="1.5" />
+        {/if}
+
+        <!-- numeric % -->
+        <text x={W - 4} y={cy + 3} font-size="9" text-anchor="end"
+              fill={overflow ? '#b25b2c' : '#6b5f50'}
+              font-family="IBM Plex Mono, monospace">
+          {(r.p50 * 100).toFixed(1)}%
+        </text>
+      </g>
+    {/each}
+  </svg>
+
+  {#if expandedK !== null}
+    <aside class="drill">
+      <header>
+        <span class="eyebrow">Drill-down</span>
+        <h4>Top codes driving <em>{$phenotypesById.get(expandedK)?.label || `Phenotype ${expandedK}`}</em></h4>
+      </header>
+      {#if drill.length === 0}
+        <p class="hint">No completion codes scored above zero for this phenotype.</p>
+      {:else}
+        {@const dMax = Math.max(...drill.map((x) => x.score))}
+        <ol>
+          {#each drill as d}
+            {@const c = $bundle!.vocab.codes[d.w]}
+            <li>
+              <span class="domain-mark dom-{c.domain}">{c.domain.slice(0, 3)}</span>
+              <span class="desc">{c.description || c.code}</span>
+              <span class="spark" aria-hidden="true">
+                <span class="spark-bar" style="width: {(d.score / dMax) * 100}%"></span>
+              </span>
+              <span class="score" data-numeric>{d.score.toFixed(2)}</span>
+            </li>
+          {/each}
+        </ol>
+      {/if}
+    </aside>
+  {/if}
+</div>
 
 <style>
-  .drill { margin-top: 0.5rem; padding: 0.75rem; background: #f4f8ff; border: 1px solid #cfe2ff; }
-  .drill h4 { margin: 0 0 0.5rem; font-size: 0.9rem; }
-  ol { list-style: none; padding: 0; margin: 0; font-size: 0.85rem; }
-  ol li { display: grid; grid-template-columns: 1fr 4rem; gap: 0.5rem; padding: 0.15rem 0; border-bottom: 1px solid #e0e0e0; }
-  .score { text-align: right; font-variant-numeric: tabular-nums; }
+  .carpet-wrap {
+    background: var(--paper-elevated);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.5rem 0.25rem;
+  }
+
+  svg { display: block; }
+
+  .drill {
+    margin: 0.5rem 0.25rem 0.25rem;
+    padding: 0.85rem 1rem;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--terracotta);
+    border-radius: var(--radius-sm);
+  }
+  .drill header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    margin-bottom: 0.65rem;
+  }
+  .drill h4 {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 500;
+    font-family: var(--font-body);
+  }
+  .drill h4 em {
+    font-family: var(--font-display);
+    font-style: italic;
+    color: var(--terracotta);
+    font-weight: 500;
+  }
+  .hint {
+    color: var(--ink-muted);
+    font-style: italic;
+    font-size: var(--fs-small);
+    margin: 0;
+  }
+  ol {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    font-size: var(--fs-small);
+  }
+  ol li {
+    display: grid;
+    grid-template-columns: 4.5rem 1fr 56px 3.5rem;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.35rem 0;
+    border-bottom: 1px solid var(--rule-faint);
+  }
+  ol li:last-child { border-bottom: 0; }
+  .desc {
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .spark {
+    display: block;
+    height: 4px;
+    background: var(--paper-recessed);
+    border-radius: 1px;
+    overflow: hidden;
+  }
+  .spark-bar {
+    display: block;
+    height: 100%;
+    background: var(--terracotta);
+  }
+  .score {
+    text-align: right;
+    color: var(--ink-muted);
+  }
 </style>

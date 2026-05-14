@@ -1,0 +1,367 @@
+/* ============================================================
+   CharmPheno — Editorial Data Atlas
+   Design tokens, baseline typography, custom controls.
+   ============================================================ */
+
+:root {
+  /* Typography ----------------------------------------------- */
+  --font-display: "Newsreader", "EB Garamond", Georgia, serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+
+  --fs-display: clamp(2rem, 3.4vw, 3rem);
+  --fs-h1: clamp(1.625rem, 2.4vw, 2.1rem);
+  --fs-h2: 1.125rem;
+  --fs-h3: 0.95rem;
+  --fs-body: 0.9rem;
+  --fs-small: 0.78rem;
+  --fs-micro: 0.68rem;
+
+  --tracking-eyebrow: 0.18em;
+  --tracking-tight: -0.012em;
+
+  /* Color palette — warm paper / earth tones ----------------- */
+  --paper: #f4efe6;
+  --paper-elevated: #fbf8f2;
+  --paper-recessed: #ece6d9;
+  --paper-deep: #e4dccb;
+
+  --ink: #1f1b16;
+  --ink-muted: #6b5f50;
+  --ink-faint: #9c8e7a;
+
+  --rule: #d8ccb8;
+  --rule-strong: #b8a988;
+  --rule-faint: #e8e0d0;
+
+  /* Accents — atlas earth tones */
+  --indigo: #3d4f6e;
+  --indigo-soft: #5c6e8c;
+  --indigo-faint: #c5cdda;
+  --terracotta: #b25b2c;
+  --terracotta-soft: #c9805a;
+  --moss: #5b6e3d;
+  --ochre: #b98a2e;
+  --brick: #8c3b2e;
+  --plum: #6e3d5b;
+  --slate: #4a5566;
+  --teal: #386b6e;
+
+  /* OMOP-domain semantic colors (sepia-compatible) */
+  --dom-condition: #8c3b2e;
+  --dom-drug: #3d4f6e;
+  --dom-procedure: #5b6e3d;
+  --dom-measurement: #b98a2e;
+  --dom-observation: #6b5f50;
+  --dom-unknown: #9c8e7a;
+
+  /* Phenotype color cycle (8 hues, used mod-8 by topic id) */
+  --pheno-0: #3d4f6e;
+  --pheno-1: #b25b2c;
+  --pheno-2: #5b6e3d;
+  --pheno-3: #b98a2e;
+  --pheno-4: #6e3d5b;
+  --pheno-5: #386b6e;
+  --pheno-6: #8c3b2e;
+  --pheno-7: #4a5566;
+
+  /* Geometry */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+}
+
+/* Globals ---------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  line-height: 1.5;
+  font-feature-settings: "ss01", "cv01", "cv02";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* Subtle paper grain — a very faint two-stop radial gradient
+     diffuses the flat background just enough to feel like paper. */
+  background-image:
+    radial-gradient(at 20% 10%, rgba(178, 91, 44, 0.04) 0px, transparent 50%),
+    radial-gradient(at 80% 90%, rgba(61, 79, 110, 0.04) 0px, transparent 50%);
+  background-attachment: fixed;
+  min-height: 100vh;
+}
+
+/* Reusable type primitives ---------------------------------- */
+.eyebrow {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  font-weight: 500;
+}
+
+.numeric,
+[data-numeric] {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "zero" on;
+}
+
+.serif {
+  font-family: var(--font-display);
+}
+
+.rule {
+  display: block;
+  width: 100%;
+  height: 1px;
+  background: var(--rule);
+  border: 0;
+  margin: 0;
+}
+
+/* Heading defaults — Newsreader, with optical-size hint */
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: var(--tracking-tight);
+  color: var(--ink);
+  margin: 0;
+}
+h1 {
+  font-size: var(--fs-h1);
+  font-style: italic;
+  line-height: 1.05;
+}
+h2 {
+  font-size: var(--fs-h2);
+  font-weight: 600;
+  letter-spacing: 0;
+  font-family: var(--font-body);
+}
+h3 {
+  font-size: var(--fs-h3);
+  font-weight: 600;
+  letter-spacing: 0;
+  font-family: var(--font-body);
+}
+
+/* Custom form controls -------------------------------------- */
+
+/* Range slider — thin warm-gray track, terracotta thumb */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px;
+  background: var(--rule);
+  border-radius: 1px;
+}
+input[type="range"]::-moz-range-track {
+  height: 2px;
+  background: var(--rule);
+  border-radius: 1px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: var(--terracotta);
+  border: 1.5px solid var(--paper);
+  border-radius: 50%;
+  margin-top: -6px;
+  box-shadow: 0 0 0 1px var(--terracotta);
+  transition: transform 0.12s ease;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: var(--terracotta);
+  border: 1.5px solid var(--paper);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--terracotta);
+}
+input[type="range"]:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+input[type="range"]:focus {
+  outline: none;
+}
+input[type="range"]:focus::-webkit-slider-thumb {
+  box-shadow: 0 0 0 1px var(--terracotta), 0 0 0 4px rgba(178, 91, 44, 0.18);
+}
+
+/* Select — strip browser chrome */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--rule-strong);
+  border-radius: 0;
+  padding: 0.15rem 1.25rem 0.15rem 0.1rem;
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  color: var(--ink);
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M2 4l3 3 3-3' stroke='%236b5f50' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 0.1rem center;
+  background-size: 10px;
+}
+select:hover {
+  border-bottom-color: var(--terracotta);
+}
+select:focus {
+  outline: none;
+  border-bottom-color: var(--terracotta);
+}
+
+/* Text input — paper-like with thin rule */
+input[type="text"],
+input[type="number"],
+input[type="search"] {
+  background: var(--paper-elevated);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.55rem;
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  color: var(--ink);
+  transition: border-color 0.12s ease;
+}
+input[type="text"]:focus,
+input[type="number"]:focus,
+input[type="search"]:focus {
+  outline: none;
+  border-color: var(--terracotta);
+  background: var(--paper-elevated);
+}
+input[type="text"]::placeholder,
+input[type="search"]::placeholder {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+/* Buttons --------------------------------------------------- */
+.btn,
+button.btn {
+  font-family: var(--font-body);
+  font-size: var(--fs-small);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  background: var(--paper-elevated);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.btn:hover {
+  background: var(--paper);
+  border-color: var(--terracotta);
+  color: var(--terracotta);
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn-ghost {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  padding: 0.25rem 0.1rem;
+  color: var(--ink-muted);
+}
+.btn-ghost:hover {
+  color: var(--terracotta);
+  border-bottom-color: var(--terracotta);
+}
+
+/* Editorial table styling ----------------------------------- */
+.editorial-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.editorial-list > li {
+  display: grid;
+  align-items: baseline;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--rule-faint);
+  font-size: var(--fs-small);
+}
+.editorial-list > li:last-child {
+  border-bottom: 0;
+}
+
+/* OMOP-domain label (replaces the pink pill) */
+.domain-mark {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+.domain-mark::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dom-unknown);
+  vertical-align: 0.05em;
+  margin-right: 0.4rem;
+}
+.domain-mark.dom-condition::before { background: var(--dom-condition); }
+.domain-mark.dom-drug::before { background: var(--dom-drug); }
+.domain-mark.dom-procedure::before { background: var(--dom-procedure); }
+.domain-mark.dom-measurement::before { background: var(--dom-measurement); }
+.domain-mark.dom-observation::before { background: var(--dom-observation); }
+
+/* Scrollbar (webkit) — warm and subtle */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border-radius: 5px;
+  border: 2px solid var(--paper);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--rule-strong);
+}
+
+/* Selection */
+::selection {
+  background: rgba(178, 91, 44, 0.22);
+  color: var(--ink);
+}

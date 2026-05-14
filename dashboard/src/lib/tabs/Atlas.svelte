@@ -5,15 +5,23 @@
 </script>
 
 <section class="atlas">
-  <header>
-    <h2>Phenotype Atlas</h2>
-    <label>Color
-      <select bind:value={$colorMode}>
-        <option value="npmi">NPMI</option>
-        <option value="prevalence">Prevalence</option>
-      </select>
-    </label>
+  <header class="section-head">
+    <div class="title-block">
+      <span class="eyebrow">Section I</span>
+      <h1>Phenotype Atlas</h1>
+      <p class="kicker">Each marker is a learned phenotype. Distance is Jensen–Shannon divergence between code distributions; size encodes corpus prevalence.</p>
+    </div>
+    <div class="controls">
+      <label class="control">
+        <span class="eyebrow">Color by</span>
+        <select bind:value={$colorMode}>
+          <option value="npmi">NPMI</option>
+          <option value="prevalence">Prevalence</option>
+        </select>
+      </label>
+    </div>
   </header>
+
   <div class="grid">
     <TopicMap />
     <CodePanel />
@@ -21,7 +29,48 @@
 </section>
 
 <style>
-  .atlas { padding: 1rem; }
-  header { display: flex; align-items: baseline; gap: 1rem; margin-bottom: 1rem; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .atlas {
+    padding: 0.5rem 0 3rem;
+  }
+
+  .section-head {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: end;
+    gap: 2rem;
+    padding-bottom: 1.5rem;
+    margin-bottom: 1.5rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .title-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .title-block h1 { margin: 0; }
+  .kicker {
+    margin: 0.15rem 0 0;
+    font-size: var(--fs-small);
+    color: var(--ink-muted);
+    max-width: 62ch;
+  }
+
+  .controls {
+    display: flex;
+    align-items: end;
+    gap: 1.25rem;
+  }
+  .control {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-family: var(--font-mono);
+    font-size: var(--fs-small);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr;
+    gap: 1.5rem;
+  }
 </style>
