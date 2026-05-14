@@ -111,17 +111,12 @@ def _maybe_load_dotenv(explicit_path: str | None) -> Path | None:
       1. --env-file <path> if explicitly passed
       2. .env in CWD
       3. .env at the repo root (inferred from this script's path)
-    Returns the path that was loaded, or None if no .env was found / no
-    dotenv lib is installed.
+    Returns the path that was loaded, or None if no .env was found.
 
-    Silent on import failure — dotenv is an optional convenience, the
-    script still works fine if it's not installed.
+    Prints a clear diagnostic if python-dotenv isn't installed but a .env
+    file is sitting right there — that combination is the most common
+    cause of "key unset" errors.
     """
-    try:
-        from dotenv import load_dotenv  # type: ignore
-    except ImportError:
-        return None
-
     candidates: list[Path] = []
     if explicit_path:
         candidates.append(Path(explicit_path).expanduser())
@@ -130,13 +125,28 @@ def _maybe_load_dotenv(explicit_path: str | None) -> Path | None:
         # scripts/label_phenotypes.py -> repo root
         candidates.append(Path(__file__).resolve().parent.parent / ".env")
 
-    for c in candidates:
-        if c.is_file():
-            # override=False so a real env var still wins over the file —
-            # matters if the user wants to temporarily override .env for
-            # one invocation without editing the file.
-            load_dotenv(c, override=False)
-            return c
+    existing = [c for c in candidates if c.is_file()]
+
+    try:
+        from dotenv import load_dotenv  # type: ignore
+    except ImportError:
+        if existing:
+            print(
+                f"[label] WARNING: found .env at {existing[0]} but "
+                f"python-dotenv is not installed.\n"
+                f"  Run `make install-labeling` (or "
+                f"`poetry install --with labeling`) to enable .env support.",
+                file=sys.stderr,
+                flush=True,
+            )
+        return None
+
+    for c in existing:
+        # override=False so a real env var still wins over the file —
+        # matters if the user wants to temporarily override .env for
+        # one invocation without editing the file.
+        load_dotenv(c, override=False)
+        return c
     return None
 
 
@@ -157,10 +167,21 @@ def _resolve_api_key(args: argparse.Namespace) -> str:
         return key
     key = os.environ.get(args.api_key_env)
     if not key:
+        # Diagnostic: surface what's actually in os.environ (just the key
+        # names, not the values) so the user can spot a typo.
+        candidates = sorted(
+            k for k in os.environ
+            if "ANTHROPIC" in k.upper()
+            or "CHARMPHENO" in k.upper()
+            or "LABEL" in k.upper()
+            or k == args.api_key_env
+        )
+        cands_str = ", ".join(candidates) if candidates else "(none)"
         raise SystemExit(
             f"No API key found.\n"
-            f"  Looked for: {args.api_key_env} env var, --api-key-file, "
+            f"  Looked for: env var {args.api_key_env!r}, --api-key-file, "
             f"or a .env file with {args.api_key_env}=...\n"
+            f"  Related env vars in this process: {cands_str}\n"
             f"  (This script intentionally does not read ANTHROPIC_API_KEY.)"
         )
     return key

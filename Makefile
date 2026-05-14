@@ -50,17 +50,14 @@ ingest-bundle:
 	unzip -o "$(ZIP)" -d $(BUNDLE_OUT)
 	@echo "[ingest] unpacked $(ZIP) -> $(BUNDLE_OUT)"
 
-# Label phenotypes in an unpacked bundle. Read the API key from
-# CHARMPHENO_LABEL_KEY (NOT ANTHROPIC_API_KEY — see scripts/label_phenotypes.py
-# docstring for the rationale), or pass LABEL_KEY_FILE=<path> to read from disk.
+# Label phenotypes in an unpacked bundle. The script reads the API key
+# from (in order): --api-key-file, CHARMPHENO_LABEL_KEY env var, or a
+# .env file in CWD / the repo root. It intentionally does NOT fall back
+# to ANTHROPIC_API_KEY — see scripts/label_phenotypes.py docstring.
 # Override LABEL_ARGS to pass extra args (--top-n, --force, --limit, etc.).
 LABEL_KEY_FILE ?=
 LABEL_ARGS ?=
 label-phenotypes:
-	@if [ -z "$(LABEL_KEY_FILE)" ] && [ -z "$$CHARMPHENO_LABEL_KEY" ]; then \
-		echo "ERROR: set CHARMPHENO_LABEL_KEY=sk-ant-... or LABEL_KEY_FILE=<path>"; \
-		exit 1; \
-	fi
 	poetry run python scripts/label_phenotypes.py \
 		--bundle-dir $(BUNDLE_OUT) \
 		$(if $(LABEL_KEY_FILE),--api-key-file $(LABEL_KEY_FILE),) \
