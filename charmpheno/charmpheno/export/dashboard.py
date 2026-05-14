@@ -70,3 +70,40 @@ def write_model_and_vocab_bundles(
     (out_dir / "vocab.json").write_text(json.dumps({"codes": codes}))
 
     return V_disp
+
+
+def write_phenotypes_bundle(
+    out_path: Path,
+    *,
+    npmi: list[float],
+    corpus_prevalence: list[float],
+    topic_indices: list[int] | None = None,
+    labels: list[str] | None = None,
+    junk_threshold: float = 0.0,
+) -> None:
+    """Write phenotypes.json.
+
+    topic_indices[k] is the original model-side topic id for displayed
+    phenotype k. For LDA the adapter passes 0..K-1; for HDP it passes
+    the mask-filtered truncation indices so the advanced view can
+    surface them.
+    """
+    K = len(npmi)
+    labels = labels or [""] * K
+    if topic_indices is None:
+        topic_indices = list(range(K))
+    phenotypes = [
+        {
+            "id": k,
+            "label": labels[k],
+            "npmi": float(npmi[k]),
+            "corpus_prevalence": float(corpus_prevalence[k]),
+            "junk_flag": bool(npmi[k] < junk_threshold),
+            "original_topic_id": int(topic_indices[k]),
+        }
+        for k in range(K)
+    ]
+    out_path.write_text(json.dumps({
+        "phenotypes": phenotypes,
+        "npmi_threshold": float(junk_threshold),
+    }))

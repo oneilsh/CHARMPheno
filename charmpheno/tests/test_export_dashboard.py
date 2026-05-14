@@ -62,3 +62,45 @@ def test_returns_v_displayed(tmp_path: Path):
         code_marginals=marginals, top_n=10,  # > V, should cap to V
     )
     assert v_disp == V
+
+
+def test_write_phenotypes_bundle(tmp_path: Path):
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+    out = tmp_path / "phenotypes.json"
+    write_phenotypes_bundle(
+        out,
+        npmi=[0.18, 0.05, -0.10],
+        corpus_prevalence=[0.30, 0.40, 0.30],
+        labels=["Cardiac", "", ""],
+        topic_indices=[0, 1, 2],
+        junk_threshold=0.0,
+    )
+    payload = json.loads(out.read_text())
+    assert payload["npmi_threshold"] == 0.0
+    assert payload["phenotypes"][0] == {
+        "id": 0,
+        "label": "Cardiac",
+        "npmi": pytest.approx(0.18),
+        "corpus_prevalence": pytest.approx(0.30),
+        "junk_flag": False,
+        "original_topic_id": 0,
+    }
+    assert payload["phenotypes"][2]["junk_flag"] is True
+
+
+def test_write_phenotypes_bundle_preserves_hdp_original_indices(tmp_path: Path):
+    """For HDP, the displayed phenotype ids are 0..K_display-1 but
+    original_topic_id carries the source truncation index."""
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+    out = tmp_path / "phenotypes.json"
+    write_phenotypes_bundle(
+        out,
+        npmi=[0.2, 0.15],
+        corpus_prevalence=[0.4, 0.3],
+        labels=None,
+        topic_indices=[42, 7],
+        junk_threshold=0.0,
+    )
+    payload = json.loads(out.read_text())
+    assert [p["id"] for p in payload["phenotypes"]] == [0, 1]
+    assert [p["original_topic_id"] for p in payload["phenotypes"]] == [42, 7]
