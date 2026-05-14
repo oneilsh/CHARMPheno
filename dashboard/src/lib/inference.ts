@@ -71,3 +71,10 @@ export function topRelevantCodes(input: TopCodesInput): RankedCode[] {
   scored.sort((a, b) => b.relevance - a.relevance)
   return scored.slice(0, n)
 }
+
+export function jsd(p: number[], q: number[]): number {
+  const m = p.map((pi, i) => 0.5 * (pi + q[i]))
+  const kl = (a: number[], b: number[]) =>
+    a.reduce((acc, ai, i) => (ai > 0 && b[i] > 0 ? acc + ai * (Math.log(ai) - Math.log(b[i])) : acc), 0)
+  return 0.5 * (kl(p, m) + kl(q, m))
+}

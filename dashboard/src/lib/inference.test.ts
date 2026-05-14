@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { digamma, variationalEStep, relevance, topRelevantCodes } from './inference'
+import { digamma, variationalEStep, relevance, topRelevantCodes, jsd } from './inference'
 
 describe('digamma', () => {
   it('digamma(1) ≈ -0.5772 (Euler-Mascheroni)', () => {
@@ -51,5 +51,16 @@ describe('topRelevantCodes', () => {
     const pw  = [0.5, 0.4, 0.05]
     expect(topRelevantCodes({ pwk, pw, lambda: 1.0, n: 3 }).map((r) => r.index)).toEqual([0, 1, 2])
     expect(topRelevantCodes({ pwk, pw, lambda: 0.0, n: 3 })[0].index).toBe(2)
+  })
+})
+
+describe('jsd', () => {
+  it('zero on identical', () => { expect(jsd([0.5, 0.5], [0.5, 0.5])).toBeCloseTo(0, 9) })
+  it('symmetric', () => {
+    const p = [0.7, 0.2, 0.1], q = [0.1, 0.2, 0.7]
+    expect(jsd(p, q)).toBeCloseTo(jsd(q, p), 9)
+  })
+  it('bounded by log 2', () => {
+    expect(jsd([1, 0], [0, 1])).toBeLessThanOrEqual(Math.log(2) + 1e-9)
   })
 })
