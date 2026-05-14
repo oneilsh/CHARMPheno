@@ -52,6 +52,7 @@ spark-warehouse/
 data/
 !**/tests/data/
 !tests/*/data/
+!dashboard/public/data/
 
 # Free-form exploratory notebooks
 notebooks/exploratory/
