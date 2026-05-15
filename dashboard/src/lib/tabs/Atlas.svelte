@@ -43,7 +43,7 @@
       <label class="control">
         <span class="eyebrow">Color by</span>
         <select bind:value={$colorMode}>
-          <option value="npmi">NPMI</option>
+          <option value="npmi" title="How reliably the leading conditions co-occur in the corpus (NPMI).">Coherence</option>
           <option value="prevalence">Prevalence</option>
         </select>
       </label>

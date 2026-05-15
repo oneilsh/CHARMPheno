@@ -157,7 +157,7 @@
     }
 
     nodes.append('title')
-      .text((p) => `${p.label || `Phenotype ${p.id}`}\nNPMI ${p.npmi.toFixed(3)} · prev ${(p.corpus_prevalence * 100).toFixed(1)}%`)
+      .text((p) => `${p.label || `Phenotype ${p.id}`}\nCoherence ${p.npmi.toFixed(3)} · prev ${(p.corpus_prevalence * 100).toFixed(1)}%`)
   }
 
   $: $colorMode, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $bundle && svgEl && coords.length && render()
@@ -173,7 +173,7 @@
           <span class="eyebrow">Color · prevalence</span>
           <span class="grad grad-prev" aria-hidden="true"></span>
         {:else}
-          <span class="eyebrow">Color · NPMI</span>
+          <span class="eyebrow" title="How reliably the leading conditions co-occur in the corpus (NPMI: normalized pointwise mutual information; higher is more coherent).">Color · Coherence</span>
           <span class="grad grad-npmi" aria-hidden="true"></span>
           <span class="ticks" data-numeric><span>−0.2</span><span>0</span><span>+0.4</span></span>
         {/if}

@@ -36,7 +36,10 @@
       <div class="stats" data-numeric>
         <span class="stat"><span class="stat-k">Prev</span> <span class="stat-v">{(pheno.corpus_prevalence * 100).toFixed(1)}%</span></span>
         {#if $advancedView}
-          <span class="stat"><span class="stat-k">NPMI</span> <span class="stat-v">{pheno.npmi.toFixed(3)}</span></span>
+          <span class="stat" title="How reliably the leading conditions co-occur in the corpus (NPMI: normalized pointwise mutual information; higher is more coherent).">
+            <span class="stat-k">Coherence</span>
+            <span class="stat-v">{pheno.npmi.toFixed(3)}</span>
+          </span>
           <span class="stat"><span class="stat-k">Pair cov</span> <span class="stat-v">{(pheno.pair_coverage * 100).toFixed(0)}%</span></span>
           {#if pheno.original_topic_id !== pheno.id}
             <span class="stat"><span class="stat-k">Source #</span> <span class="stat-v">{pheno.original_topic_id}</span></span>

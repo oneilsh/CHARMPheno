@@ -43,7 +43,7 @@
         <select bind:value={sortMode}>
           <option value="median">Median θ</option>
           <option value="spread">Spread (P90–P10)</option>
-          <option value="npmi">NPMI</option>
+          <option value="npmi" title="How reliably the leading conditions co-occur in the corpus (NPMI).">Coherence</option>
           <option value="id">Phenotype id</option>
         </select>
       </label>
