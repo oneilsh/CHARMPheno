@@ -37,7 +37,7 @@ function getTipText(target: Element | null): TipHit | null {
       node.removeAttribute('title')
       return { el: node, text: t }
     }
-    // SVG tooltip — a child <title> element. Promote it to data-tip on the
+    // SVG tooltip . a child <title> element. Promote it to data-tip on the
     // owning element so the browser-native tooltip also stops firing.
     if (node.namespaceURI === 'http://www.w3.org/2000/svg') {
       const childTitle = Array.from(node.children).find(

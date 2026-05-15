@@ -133,7 +133,7 @@
                 {#if p.quality}
                   <span class="qchip {qualityClass[p.quality] ?? ''}">{p.quality}</span>
                 {:else}
-                  <span class="qchip qchip-empty">—</span>
+                  <span class="qchip qchip-empty">·</span>
                 {/if}
               </td>
               <td class="col-coh" data-numeric>{p.npmi.toFixed(3)}</td>

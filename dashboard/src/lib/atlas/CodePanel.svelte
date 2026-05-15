@@ -25,11 +25,11 @@
   // Lay-readable rubric explanations for the quality chip.
   function qualityTooltip(q: string): string {
     switch (q) {
-      case 'phenotype': return 'Quality: phenotype — a clinically coherent pattern of conditions; the cluster names a recognisable disease or related family.'
-      case 'background': return 'Quality: background — broad, non-specific health-care activity (general checkups, common comorbidities). Real signal but not disease-specific.'
-      case 'anchor': return 'Quality: anchor — dominated by one or two very common conditions; useful as a reference point but lower information content than a fuller phenotype.'
-      case 'mixed': return 'Quality: mixed — the leading conditions span multiple unrelated clinical areas; the topic merged what should probably be separate phenotypes.'
-      case 'dead': return 'Quality: dead — minimal usage by the model and very small divergence from the corpus-average distribution; this topic slot was effectively unused. (Hidden in simple mode.)'
+      case 'phenotype': return 'Quality: phenotype. A clinically coherent pattern of conditions; the cluster names a recognisable disease or related family.'
+      case 'background': return 'Quality: background. Broad, non-specific health-care activity (general checkups, common comorbidities). Real signal but not disease-specific.'
+      case 'anchor': return 'Quality: anchor. Dominated by one or two very common conditions; useful as a reference point but lower information content than a fuller phenotype.'
+      case 'mixed': return 'Quality: mixed. The leading conditions span multiple unrelated clinical areas; the topic merged what should probably be separate phenotypes.'
+      case 'dead': return 'Quality: dead. Minimal usage by the model and very small divergence from the dataset average; this topic slot was effectively unused. (Hidden in basic mode.)'
       default: return ''
     }
   }
@@ -54,21 +54,21 @@
         <p class="desc-text">{pheno.description}</p>
       {/if}
       <div class="stats" data-numeric>
-        <span class="stat" title="Prevalence — fraction of patient-year documents that draw meaningfully from this phenotype.">
+        <span class="stat" title="Prevalence: roughly how many patients show this phenotype in their records.">
           <span class="stat-k">Prevalence</span>
           <span class="stat-v">{(pheno.corpus_prevalence * 100).toFixed(1)}%</span>
         </span>
         {#if $advancedView}
-          <span class="stat" title="Coherence — how reliably this phenotype's leading conditions co-occur in real patients (NPMI: normalized pointwise mutual information). Higher means the conditions really do show up together.">
+          <span class="stat" title="Coherence: how reliably this phenotype's leading conditions co-occur in real patients (NPMI: normalized pointwise mutual information). Higher means the conditions really do show up together.">
             <span class="stat-k">Coherence</span>
             <span class="stat-v">{pheno.npmi.toFixed(3)}</span>
           </span>
-          <span class="stat" title="Pair coverage — fraction of the leading-condition pairs that had enough joint observations to actually contribute to the coherence number. Low coverage means the coherence value was computed on only a few pairs and is less trustworthy.">
+          <span class="stat" title="Pair coverage: fraction of the leading-condition pairs that had enough joint observations to actually contribute to the coherence number. Low coverage means the coherence value was computed on only a few pairs and is less trustworthy.">
             <span class="stat-k">Pair cov</span>
             <span class="stat-v">{(pheno.pair_coverage * 100).toFixed(0)}%</span>
           </span>
           {#if pheno.original_topic_id !== pheno.id}
-            <span class="stat" title="Source # — the raw topic index from the LDA fit before sorting. Useful for cross-referencing the underlying model.">
+            <span class="stat" title="Source #: the raw topic index from the LDA fit before sorting. Useful for cross-referencing the underlying model.">
               <span class="stat-k">Source #</span>
               <span class="stat-v">{pheno.original_topic_id}</span>
             </span>
@@ -83,27 +83,28 @@
       </div>
     </header>
 
-    <!-- The leading-conditions table.
+    <!--
+      The leading-conditions table.
 
-         Simple mode shows a single sortable column header "Relevance" with a
-         lay-readable tooltip. Advanced mode exposes the underlying
-         lift/frequency weighting via a slider so the user can re-rank by
-         pure lift (rare-but-concentrated conditions) versus pure frequency
-         (raw probability under the topic). λ=0.6 is the default — Sievert &
-         Shirley's recommended compromise. -->
+      Basic mode shows a single column header "Relevance" with a lay-readable
+      tooltip. Advanced mode exposes the underlying lift/frequency weighting
+      via a slider so the user can re-rank by pure lift (rare-but-concentrated
+      conditions) versus pure frequency (raw probability under the topic).
+      λ=0.6 is the default (Sievert & Shirley's recommended compromise).
+    -->
     {#if $advancedView}
       <div class="slider-row">
         <label class="slider">
           <span class="slider-head">
-            <span class="slider-k" title="Relevance term weighting — the slider blends two views of 'top conditions': raw frequency (how much of the phenotype's mass falls on this condition) and lift (how much more this condition shows up here than in the overall corpus). Slide left for surprise/lift, right for sheer frequency.">
+            <span class="slider-k" title="Relevance term weighting. The slider blends two views of 'top conditions': raw frequency (how much of the phenotype's mass falls on this condition) and lift (how much more this condition shows up here than in the overall dataset). Slide left for surprise/lift, right for sheer frequency.">
               <span class="eyebrow">Relevance term weighting</span>
             </span>
             <span class="slider-v" data-numeric>λ {lambda.toFixed(2)}</span>
           </span>
           <input type="range" min="0" max="1" step="0.05" bind:value={lambda} />
           <span class="slider-ends">
-            <span title="Lift — how much more this condition appears in this phenotype than in the corpus overall. Surface rare-but-concentrated conditions.">lift</span>
-            <span title="Frequency — the condition's raw probability under this phenotype.">frequency</span>
+            <span title="Lift: how much more this condition appears in this phenotype than across all patients overall. Surfaces rare-but-concentrated conditions.">lift</span>
+            <span title="Frequency: the condition's raw probability under this phenotype.">frequency</span>
           </span>
         </label>
       </div>
@@ -116,8 +117,8 @@
         class="ch-rel"
         title={
           $advancedView
-            ? 'Relevance — λ·log p(w|k) + (1−λ)·log lift. The slider tunes how much frequency vs lift the ranking favors. Bar shows raw frequency p(w|k); number is its percentage.'
-            : "Relevance — the leading conditions for this phenotype, ranked by a balance of how often they appear here AND how distinctive they are to this phenotype. The bar shows the condition's share of the phenotype's probability mass."
+            ? 'Relevance: λ·log p(w|k) + (1−λ)·log lift. The slider tunes how much frequency vs lift the ranking favors. Bar shows raw frequency p(w|k); number is its percentage.'
+            : "Relevance: the leading conditions for this phenotype, ranked by a balance of how often they appear here AND how distinctive they are to this phenotype. The bar shows the condition's share of this phenotype."
         }
       >Relevance ▾</span>
     </div>

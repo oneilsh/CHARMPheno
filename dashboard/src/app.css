@@ -1,5 +1,5 @@
 /* ============================================================
-   CharmPheno — Contemporary Scientific Instrument
+   CharmPheno : Contemporary Scientific Instrument
    Cool grays + cyan accent. Geist + JetBrains Mono. No serifs.
    ============================================================ */
 
@@ -19,7 +19,7 @@
   --tracking-tight: -0.018em;
   --tracking-display: -0.024em;
 
-  /* Color — cool neutrals + single cyan accent ---------------- */
+  /* Color : cool neutrals + single cyan accent ---------------- */
   --bg: #f7f7f7;
   --surface: #ffffff;
   --surface-recessed: #f3f3f3;
@@ -34,26 +34,26 @@
   --rule-strong: #d4d4d8;
   --rule-faint: #efefef;
 
-  /* The accent — saturated cyan-teal; the single bright color */
+  /* The accent : saturated cyan-teal; the single bright color */
   --accent: #06b6d4;
   --accent-hover: #0891b2;
   --accent-soft: #cffafe;
   --accent-faint: #ecfeff;
   --accent-ink: #0e7490;
 
-  /* Search-highlight accent — fuchsia, distinct from the cyan selection
+  /* Search-highlight accent : fuchsia, distinct from the cyan selection
      accent so the eye can separate "selected" from "search-matched". */
   --accent-search: #d946ef;
   --accent-search-soft: #fae8ff;
   --accent-search-ink: #a21caf;
 
   /* Status / data-encoding hues */
-  --pos: #10b981;       /* emerald — used for high-coherence */
-  --neg: #ef4444;       /* red — used for low-coherence */
+  --pos: #10b981;       /* emerald : used for high-coherence */
+  --neg: #ef4444;       /* red : used for low-coherence */
   --warn: #f59e0b;
   --danger: #b91c1c;
 
-  /* OMOP domain semantics — modern data viz hues */
+  /* OMOP domain semantics : modern data viz hues */
   --dom-condition: #ef4444;
   --dom-drug: #3b82f6;
   --dom-procedure: #10b981;
@@ -61,7 +61,7 @@
   --dom-observation: #8b5cf6;
   --dom-unknown: #a1a1aa;
 
-  /* Phenotype cycle — 8 modern, distinguishable hues */
+  /* Phenotype cycle : 8 modern, distinguishable hues */
   --pheno-0: #06b6d4;
   --pheno-1: #8b5cf6;
   --pheno-2: #10b981;
@@ -75,13 +75,13 @@
   --radius-sm: 4px;
   --radius-md: 6px;
 
-  /* Shadows — very subtle, cool-tinted */
+  /* Shadows : very subtle, cool-tinted */
   --shadow-sm: 0 1px 0 var(--rule);
   --shadow-md: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
 }
 
 /* Zero-delay tooltip overlay (see lib/tooltip.ts). Shown only when the
-   global handler adds the .visible class — no fade-in delay, just a
+   global handler adds the .visible class : no fade-in delay, just a
    crossfade that hides the layout jitter on first paint. */
 .app-tip {
   position: fixed;
@@ -174,7 +174,7 @@ h3 {
 
 /* Custom form controls -------------------------------------- */
 
-/* Range slider — hairline track, cyan thumb */
+/* Range slider : hairline track, cyan thumb */
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
@@ -219,7 +219,7 @@ input[type="range"]:focus::-webkit-slider-thumb {
   box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px rgba(6, 182, 212, 0.18);
 }
 
-/* Select — strip browser chrome */
+/* Select : strip browser chrome */
 select {
   appearance: none;
   -webkit-appearance: none;
@@ -354,7 +354,7 @@ button.btn {
 .domain-mark.dom-measurement::before { background: var(--dom-measurement); }
 .domain-mark.dom-observation::before { background: var(--dom-observation); }
 
-/* Scrollbar — clean and cool */
+/* Scrollbar : clean and cool */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {

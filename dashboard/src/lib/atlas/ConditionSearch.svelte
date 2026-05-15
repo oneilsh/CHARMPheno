@@ -28,7 +28,7 @@
   $: matches = (() => {
     const q = query.trim().toLowerCase()
     if (!q || q.length < 2 || !$bundle) return []
-    // Pass 1 — cheap substring filter, sorted by frequency so we exhaust
+    // Pass 1. cheap substring filter, sorted by frequency so we exhaust
     // the most-likely-wanted candidates first.
     const candidates: { idx: number; description: string; corpus_freq: number }[] = []
     for (let i = 0; i < vocab.length; i++) {
@@ -42,7 +42,7 @@
       }
     }
     candidates.sort((a, b) => b.corpus_freq - a.corpus_freq)
-    // Pass 2 — keep only conditions that actually feature prominently in
+    // Pass 2. keep only conditions that actually feature prominently in
     // at least one phenotype that's currently drawn on the atlas. Stops
     // early once MAX_RESULTS are accumulated so we don't pay the cost on
     // candidates the user will never see.

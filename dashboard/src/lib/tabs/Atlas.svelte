@@ -16,8 +16,8 @@
           <div class="what-is-body popover">
             <p>
               A <em>phenotype</em> here is a recurring pattern of clinical
-              conditions that tends to appear together across patients —
-              for example, "Type 2 diabetes care" concentrates on diabetes,
+              conditions that tends to appear together across patients.
+              For example, "Type 2 diabetes care" concentrates on diabetes,
               retinopathy, neuropathy, and related conditions.
             </p>
             <p>
@@ -29,7 +29,7 @@
             </p>
             <p>
               A patient is a mix of phenotypes, not a single one. A phenotype
-              is not a diagnosis — it's a pattern. Some patterns name a single
+              is not a diagnosis; it's a pattern. Some patterns name a single
               disease, others name a family of related conditions, and some
               describe broad health backgrounds (e.g. chronic comorbidity
               follow-up).
@@ -38,8 +38,9 @@
         </details>
       </div>
       <p class="kicker">
-        Each marker is a learned phenotype. Distance is Jensen–Shannon divergence
-        between code distributions; size encodes corpus prevalence.
+        Each marker is a learned phenotype. Bubbles that sit closer together
+        share more of their leading conditions; bubble size shows how widely
+        the phenotype shows up across patients.
       </p>
     </div>
     <div class="controls">
@@ -91,7 +92,7 @@
     line-height: 1.55;
   }
 
-  /* "What's a phenotype?" disclosure — body floats as a popover so it
+  /* "What's a phenotype?" disclosure. Body floats as a popover so it
      doesn't shove the kicker and the rest of the page down when opened. */
   .what-is {
     position: relative;
@@ -124,7 +125,7 @@
     border-left: 3px solid var(--accent);
     border-radius: var(--radius-sm);
   }
-  /* Popover variant — anchored under the inline summary, floats over the
+  /* Popover variant: anchored under the inline summary, floats over the
      content below so the masthead doesn't grow when expanded. */
   .what-is-body.popover {
     position: absolute;

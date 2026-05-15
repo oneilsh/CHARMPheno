@@ -18,10 +18,10 @@
   let cohortSeed = DEFAULT_COHORT_SEED
 
   // Pick a phenotype to highlight on first load so the detail panel and
-  // bubble selection ring are populated immediately — first-paint emptiness
-  // is a worse onboarding than an arbitrary-but-relevant default. Prefer the
-  // highest-prevalence "real" phenotype (quality in {phenotype, anchor} or
-  // unknown null); fall back to id 0 if nothing qualifies.
+  // bubble selection ring are populated immediately. First-paint emptiness
+  // is a worse onboarding than an arbitrary-but-relevant default. Prefer
+  // the highest-prevalence "real" phenotype (quality in {phenotype, anchor}
+  // or unknown null); fall back to id 0 if nothing qualifies.
   function pickDefaultPhenotype(b: typeof $bundle): number | null {
     if (!b) return null
     const ps = b.phenotypes.phenotypes
@@ -79,13 +79,13 @@
 
     {#if $bundle && $advancedView}
       <dl class="metadata" data-numeric>
-        <div title="K — the number of phenotypes (topics) the model was asked to learn from the corpus.">
+        <div title="K: the number of phenotypes (topics) the model was asked to learn from the dataset.">
           <dt>K</dt><dd>{$bundle.model.K}</dd>
         </div>
-        <div title="V — distinct conditions displayed in the dashboard / total distinct conditions in the source corpus. Low-count conditions are suppressed for patient privacy.">
+        <div title="V: distinct conditions displayed in the dashboard, over total distinct conditions in the source dataset. Low-count conditions are suppressed for patient privacy.">
           <dt>V</dt><dd>{$bundle.model.V.toLocaleString()}<span class="of">/{$bundle.corpusStats.v_full.toLocaleString()}</span></dd>
         </div>
-        <div title="n — number of patient-year documents the model was fit on.">
+        <div title="n: number of patient records the model was fit on (in thousands).">
           <dt>n</dt><dd>{($bundle.corpusStats.corpus_size_docs / 1000).toFixed(0)}<span class="of">k</span></dd>
         </div>
       </dl>
@@ -98,7 +98,7 @@
         </button>
       {/if}
       <div class="seg" role="group" aria-label="View density">
-        <button class="seg-btn" class:active={!$advancedView} on:click={() => advancedView.set(false)}>simple</button>
+        <button class="seg-btn" class:active={!$advancedView} on:click={() => advancedView.set(false)}>basic</button>
         <button class="seg-btn" class:active={$advancedView} on:click={() => advancedView.set(true)}>advanced</button>
       </div>
     </div>
@@ -162,7 +162,7 @@
     margin-top: 0.15rem;
   }
 
-  /* Metadata strip — instrument-readout */
+  /* Metadata strip (instrument-readout) */
   .metadata {
     display: flex;
     gap: 1.25rem;

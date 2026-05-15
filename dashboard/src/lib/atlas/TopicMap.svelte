@@ -97,7 +97,7 @@
       .style('cursor', 'pointer')
       .on('click', (_, p) => selectedPhenotypeId.set(p.id))
 
-    // Main bubble — filled with the encoded color, thin ink-tinted border
+    // Main bubble . filled with the encoded color, thin ink-tinted border
     nodes.append('circle')
       .attr('r', (p) => r(p.corpus_prevalence))
       .attr('fill', (p) => colorFn(p))
@@ -106,7 +106,7 @@
       .attr('stroke-opacity', 0.25)
       .attr('stroke-width', 0.75)
 
-    // Selection: thicker double-ring in the cyan accent — a faint outer halo
+    // Selection: thicker double-ring in the cyan accent . a faint outer halo
     // plus a crisp inner band so the picked phenotype reads at a glance even
     // when it sits inside a crowded cluster. The cyan matches the colored
     // bullet in the CodePanel header so "this bubble = this detail" is
@@ -123,7 +123,7 @@
       .attr('stroke', '#06b6d4')
       .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 2.25 : 0))
 
-    // Condition-highlight ring — fuchsia, distinct from the cyan selection
+    // Condition-highlight ring . fuchsia, distinct from the cyan selection
     // accent so the eye can separate "selected" from "matched the searched
     // condition". Dashed for transient hover (from CodePanel mouseover);
     // solid + thicker for a pinned search.
@@ -136,7 +136,7 @@
         highlighted.has(p.id) ? (highlightStyle === 'pinned' ? 2.25 : 1.5) : 0
       )
 
-    // Quality indicator (advanced mode only) — small colored dot on the
+    // Quality indicator (advanced mode only) . small colored dot on the
     // bubble's edge for dead/mixed topics. Simple mode hides these
     // topics entirely so no marker is needed there.
     const qualityMarkColor: Record<string, string> = {
@@ -156,17 +156,15 @@
         .attr('stroke-width', 1)
     }
 
-    // Always-on labels for the N most prevalent bubbles, so the map has
-    // some textual anchors a user can scan without clicking. Smaller, lower
-    // contrast than the selected-phenotype label so they don't fight for
-    // attention. Skip the selected one here (it gets its own bold label
-    // below). Truncate long labels.
+    // Always-on labels for the N most prevalent bubbles (including the
+    // currently selected one, if it's in the top N), so the map has some
+    // textual anchors a user can scan without clicking. Truncate long
+    // labels.
     const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
     const topPrevalent = phenotypes
       .slice()
       .sort((a, b) => b.corpus_prevalence - a.corpus_prevalence)
       .slice(0, ALWAYS_LABEL_N)
-      .filter((p) => p.id !== $selectedPhenotypeId)
 
     g.selectAll('text.minor-label')
       .data(topPrevalent)
@@ -185,7 +183,7 @@
       .attr('stroke-linejoin', 'round')
       .text((p) => truncate(p.label || `Phenotype ${p.id}`, 22))
 
-    // Custom tooltip — `data-tip` is picked up by the global tooltip
+    // Custom tooltip . `data-tip` is picked up by the global tooltip
     // overlay (lib/tooltip.ts) so it appears with no hover delay. Avoiding
     // SVG `<title>` here means the browser-native delayed tooltip doesn't
     // also fire.
@@ -203,12 +201,12 @@
   <figcaption class="legend">
     {#if $bundle}
       <div class="legend-group">
-        <span class="eyebrow" title="Coherence — how reliably the phenotype's leading conditions actually co-occur in the same patient records. Higher = the conditions really do show up together; lower = the pattern is weaker or more diffuse. (Bubble color encodes this.)">Coherence</span>
+        <span class="eyebrow" title="Coherence: how reliably the phenotype's leading conditions actually co-occur in the same patients. Higher means the conditions really do show up together; lower means the pattern is weaker or more diffuse. (Bubble color encodes this.)">Coherence</span>
         <span class="grad grad-npmi" aria-hidden="true"></span>
         <span class="ticks" data-numeric><span>low</span><span>high</span></span>
       </div>
       <div class="legend-group">
-        <span class="eyebrow" title="Prevalence — fraction of patient-year documents that draw meaningfully from this phenotype. Bigger bubble = more patients show this pattern.">Prevalence</span>
+        <span class="eyebrow" title="Prevalence: roughly how many patients show this phenotype in their records. Bigger bubble means more patients show this pattern.">Prevalence</span>
         <span class="size-marks" aria-hidden="true">
           <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
         </span>

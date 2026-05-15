@@ -1,7 +1,7 @@
 export interface Model { K: number; V: number; alpha: number[]; beta: number[][] }
 // `quality` and `description` come from the post-fit labeling step
 // (scripts/label_phenotypes.py). Missing/null on freshly-exported
-// bundles — the dashboard treats null as "unlabeled / show everything".
+// bundles . the dashboard treats null as "unlabeled / show everything".
 export type PhenotypeQuality =
   'phenotype' | 'background' | 'anchor' | 'mixed' | 'dead'
 export interface Phenotype {
