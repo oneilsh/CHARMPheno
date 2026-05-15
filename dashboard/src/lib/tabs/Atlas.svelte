@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { bundle, colorMode } from '../store'
+  import { bundle } from '../store'
   import TopicMap from '../atlas/TopicMap.svelte'
   import CodePanel from '../atlas/CodePanel.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
@@ -9,7 +9,6 @@
 <section class="atlas">
   <header class="section-head">
     <div class="title-block">
-      <span class="eyebrow">01 · Atlas</span>
       <h1>Phenotype Atlas</h1>
       <p class="kicker">
         Each marker is a learned phenotype. Distance is Jensen–Shannon divergence
@@ -43,22 +42,16 @@
     </div>
     <div class="controls">
       <ConditionSearch />
-      <label class="control">
-        <span class="eyebrow">Color by</span>
-        <select bind:value={$colorMode}>
-          <option value="npmi" title="How reliably the leading conditions co-occur in the corpus (NPMI).">Coherence</option>
-          <option value="prevalence">Prevalence</option>
-        </select>
-      </label>
     </div>
   </header>
 
   <div class="grid">
-    <TopicMap />
+    <div class="left-col">
+      <TopicMap />
+      <PhenotypeBrowser />
+    </div>
     <CodePanel />
   </div>
-
-  <PhenotypeBrowser />
 </section>
 
 <style>
@@ -138,15 +131,17 @@
     align-items: end;
     gap: 1.25rem;
   }
-  .control {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-  }
 
   .grid {
     display: grid;
     grid-template-columns: 1.1fr 1fr;
     gap: 1.5rem;
+    align-items: start;
+  }
+  .left-col {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
   }
 </style>

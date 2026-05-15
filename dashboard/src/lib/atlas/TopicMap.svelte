@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import * as d3 from 'd3'
   import {
-    bundle, selectedPhenotypeId, colorMode, hoveredCodeIdx, advancedView,
+    bundle, selectedPhenotypeId, hoveredCodeIdx, advancedView,
     searchedConditionIdx,
   } from '../store'
   import { computeJsdMds } from '../mds'
@@ -41,7 +41,12 @@
   $: highlightStyle = $searchedConditionIdx !== null ? 'pinned' : 'hover'
 
   let svgEl: SVGSVGElement
-  const W = 720, H = 560, MARGIN = 24
+  // Wider margin gives the largest bubbles + their selection/highlight rings
+  // room to breathe; the previous 24 sat right at the SVG edge for prevalent
+  // phenotypes near the layout boundary.
+  const W = 720, H = 560, MARGIN = 60
+  // How many of the most prevalent bubbles get always-on labels.
+  const ALWAYS_LABEL_N = 8
 
   let coords: number[][] = []
   $: if ($bundle && coords.length !== $bundle.model.K) {
@@ -54,11 +59,6 @@
     .domain([-0.2, 0, 0.2, 0.4])
     .range(['#ef4444', '#d4d4d8', '#67e8f9', '#06b6d4'])
     .clamp(true)
-
-  // Sequential prevalence ramp: pale sky → deep cyan.
-  const prevRamp = d3.scaleSequential<string>(
-    (t) => d3.interpolateRgb('#f0fdfa', '#0e7490')(t),
-  )
 
   function render() {
     if (!$bundle || !svgEl || coords.length === 0) return
@@ -79,10 +79,7 @@
       .domain(d3.extent(allPhenotypes, (p) => p.corpus_prevalence) as [number, number])
       .range([5, 26])
 
-    const prevExt = d3.extent(allPhenotypes, (p) => p.corpus_prevalence) as [number, number]
-    prevRamp.domain(prevExt)
-    const colorFn = (p: typeof phenotypes[0]) =>
-      $colorMode === 'prevalence' ? prevRamp(p.corpus_prevalence) : npmiRamp(p.npmi)
+    const colorFn = (p: typeof phenotypes[0]) => npmiRamp(p.npmi)
 
     const svg = d3.select(svgEl)
     svg.selectAll('*').remove()
@@ -109,23 +106,34 @@
       .attr('stroke-opacity', 0.25)
       .attr('stroke-width', 0.75)
 
-    // Selection ring — cyan accent
+    // Selection: thicker double-ring in the cyan accent — a faint outer halo
+    // plus a crisp inner band so the picked phenotype reads at a glance even
+    // when it sits inside a crowded cluster. The cyan matches the colored
+    // bullet in the CodePanel header so "this bubble = this detail" is
+    // unambiguous.
+    nodes.append('circle')
+      .attr('r', (p) => r(p.corpus_prevalence) + 6)
+      .attr('fill', 'none')
+      .attr('stroke', '#06b6d4')
+      .attr('stroke-opacity', 0.25)
+      .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 6 : 0))
     nodes.append('circle')
       .attr('r', (p) => r(p.corpus_prevalence) + 3)
       .attr('fill', 'none')
       .attr('stroke', '#06b6d4')
-      .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 2 : 0))
+      .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 2.25 : 0))
 
-    // Condition-highlight ring — dashed for transient hover, solid for a
-    // pinned searched condition. Same accent color so the visual language
-    // stays consistent.
+    // Condition-highlight ring — fuchsia, distinct from the cyan selection
+    // accent so the eye can separate "selected" from "matched the searched
+    // condition". Dashed for transient hover (from CodePanel mouseover);
+    // solid + thicker for a pinned search.
     nodes.append('circle')
       .attr('r', (p) => r(p.corpus_prevalence) + 5)
       .attr('fill', 'none')
-      .attr('stroke', '#06b6d4')
+      .attr('stroke', '#d946ef')
       .attr('stroke-dasharray', highlightStyle === 'pinned' ? '0' : '3,2')
       .attr('stroke-width', (p) =>
-        highlighted.has(p.id) ? (highlightStyle === 'pinned' ? 1.75 : 1.25) : 0
+        highlighted.has(p.id) ? (highlightStyle === 'pinned' ? 2.25 : 1.5) : 0
       )
 
     // Quality indicator (advanced mode only) — small colored dot on the
@@ -148,25 +156,58 @@
         .attr('stroke-width', 1)
     }
 
-    // Label for the selected phenotype above its bubble
+    // Always-on labels for the N most prevalent bubbles, so the map has
+    // some textual anchors a user can scan without clicking. Smaller, lower
+    // contrast than the selected-phenotype label so they don't fight for
+    // attention. Skip the selected one here (it gets its own bold label
+    // below). Truncate long labels.
+    const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
+    const topPrevalent = phenotypes
+      .slice()
+      .sort((a, b) => b.corpus_prevalence - a.corpus_prevalence)
+      .slice(0, ALWAYS_LABEL_N)
+      .filter((p) => p.id !== $selectedPhenotypeId)
+
+    g.selectAll('text.minor-label')
+      .data(topPrevalent)
+      .join('text')
+      .attr('class', 'minor-label')
+      .attr('x', (p) => x(coords[p.id][0]))
+      .attr('y', (p) => y(coords[p.id][1]) - r(p.corpus_prevalence) - 5)
+      .attr('text-anchor', 'middle')
+      .attr('font-family', 'Geist, sans-serif')
+      .attr('font-size', 10)
+      .attr('font-weight', 400)
+      .attr('fill', '#52525b')
+      .attr('paint-order', 'stroke')
+      .attr('stroke', '#ffffff')
+      .attr('stroke-width', 3)
+      .attr('stroke-linejoin', 'round')
+      .text((p) => truncate(p.label || `Phenotype ${p.id}`, 22))
+
+    // Bold label for the selected phenotype above its bubble.
+    // BUGFIX: the previous version indexed the filtered `phenotypes` array
+    // by phenotype-id (`phenotypes[$selectedPhenotypeId]`), which meant the
+    // label was anchored to a different bubble whenever simple-mode filtered
+    // out earlier phenotypes — looking like a mirror of the real position.
+    // Now we look up by id explicitly.
     if ($selectedPhenotypeId !== null) {
-      const sel = phenotypes[$selectedPhenotypeId]
+      const sel = phenotypes.find((p) => p.id === $selectedPhenotypeId)
       if (sel) {
         const cx = x(coords[sel.id][0])
         const cy = y(coords[sel.id][1])
         const rr = r(sel.corpus_prevalence)
         const labelText = sel.label || `Phenotype ${sel.id}`
         const labelW = Math.max(8 * labelText.length, 60)
-        // Pill background
         g.append('rect')
           .attr('x', cx - labelW / 2)
-          .attr('y', cy - rr - 26)
+          .attr('y', cy - rr - 28)
           .attr('rx', 3).attr('ry', 3)
           .attr('width', labelW)
           .attr('height', 18)
           .attr('fill', '#0a0a0a')
         g.append('text')
-          .attr('x', cx).attr('y', cy - rr - 13)
+          .attr('x', cx).attr('y', cy - rr - 15)
           .attr('text-anchor', 'middle')
           .attr('font-family', 'Geist, sans-serif')
           .attr('font-size', 11)
@@ -180,7 +221,7 @@
       .text((p) => `${p.label || `Phenotype ${p.id}`}\nCoherence ${p.npmi.toFixed(3)} · prev ${(p.corpus_prevalence * 100).toFixed(1)}%`)
   }
 
-  $: $colorMode, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()
+  $: $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()
   onMount(render)
 </script>
 
@@ -189,17 +230,12 @@
   <figcaption class="legend">
     {#if $bundle}
       <div class="legend-group">
-        {#if $colorMode === 'prevalence'}
-          <span class="eyebrow">Color · prevalence</span>
-          <span class="grad grad-prev" aria-hidden="true"></span>
-        {:else}
-          <span class="eyebrow" title="How reliably the leading conditions co-occur in the corpus (NPMI: normalized pointwise mutual information; higher is more coherent).">Color · Coherence</span>
-          <span class="grad grad-npmi" aria-hidden="true"></span>
-          <span class="ticks" data-numeric><span>−0.2</span><span>0</span><span>+0.4</span></span>
-        {/if}
+        <span class="eyebrow" title="Coherence — how reliably the phenotype's leading conditions actually co-occur in the same patient records. Higher = the conditions really do show up together; lower = the pattern is weaker or more diffuse. (Bubble color encodes this.)">Coherence</span>
+        <span class="grad grad-npmi" aria-hidden="true"></span>
+        <span class="ticks" data-numeric><span>low</span><span>high</span></span>
       </div>
       <div class="legend-group">
-        <span class="eyebrow">Size · prevalence</span>
+        <span class="eyebrow" title="Prevalence — fraction of patient-year documents that draw meaningfully from this phenotype. Bigger bubble = more patients show this pattern.">Prevalence</span>
         <span class="size-marks" aria-hidden="true">
           <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
         </span>
@@ -242,9 +278,6 @@
     width: 96px;
     height: 6px;
     border-radius: 3px;
-  }
-  .grad-prev {
-    background: linear-gradient(to right, #f0fdfa, #0e7490);
   }
   .grad-npmi {
     background: linear-gradient(to right, #ef4444, #d4d4d8, #06b6d4);

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { bundle, advancedView, cohort } from './lib/store'
+  import { bundle, advancedView, cohort, selectedPhenotypeId } from './lib/store'
   import { loadBundle } from './lib/bundle'
   import { route } from './lib/router'
   import { generateCohort } from './lib/cohort'
@@ -16,10 +16,26 @@
   let error: string | null = null
   let cohortSeed = DEFAULT_COHORT_SEED
 
+  // Pick a phenotype to highlight on first load so the detail panel and
+  // bubble selection ring are populated immediately — first-paint emptiness
+  // is a worse onboarding than an arbitrary-but-relevant default. Prefer the
+  // highest-prevalence "real" phenotype (quality in {phenotype, anchor} or
+  // unknown null); fall back to id 0 if nothing qualifies.
+  function pickDefaultPhenotype(b: typeof $bundle): number | null {
+    if (!b) return null
+    const ps = b.phenotypes.phenotypes
+    const good = ps.filter((p) => p.quality === 'phenotype' || p.quality === 'anchor' || p.quality == null)
+    const pool = good.length ? good : ps
+    let best = pool[0]
+    for (const p of pool) if (p.corpus_prevalence > best.corpus_prevalence) best = p
+    return best ? best.id : null
+  }
+
   onMount(async () => {
     try {
       const b = await loadBundle(import.meta.env.BASE_URL)
       bundle.set(b)
+      selectedPhenotypeId.set(pickDefaultPhenotype(b))
       const c = generateCohort({
         model: b.model,
         meanCodesPerDoc: b.corpusStats.mean_codes_per_doc,
@@ -54,21 +70,27 @@
         <circle cx="16" cy="16" r="2.5" fill="#06b6d4" />
       </svg>
       <div class="lockup">
-        <span class="title">CharmPheno</span>
-        <span class="subtitle">phenotype atlas</span>
+        <span class="title">CHARMPheno</span>
+        <span class="subtitle">exploring latent phenotypes</span>
       </div>
     </div>
 
-    {#if $bundle}
+    {#if $bundle && $advancedView}
       <dl class="metadata" data-numeric>
-        <div><dt>K</dt><dd>{$bundle.model.K}</dd></div>
-        <div><dt>V</dt><dd>{$bundle.model.V.toLocaleString()}<span class="of">/{$bundle.corpusStats.v_full.toLocaleString()}</span></dd></div>
-        <div><dt>n</dt><dd>{($bundle.corpusStats.corpus_size_docs / 1000).toFixed(0)}<span class="of">k</span></dd></div>
+        <div title="K — the number of phenotypes (topics) the model was asked to learn from the corpus.">
+          <dt>K</dt><dd>{$bundle.model.K}</dd>
+        </div>
+        <div title="V — distinct conditions displayed in the dashboard / total distinct conditions in the source corpus. Low-count conditions are suppressed for patient privacy.">
+          <dt>V</dt><dd>{$bundle.model.V.toLocaleString()}<span class="of">/{$bundle.corpusStats.v_full.toLocaleString()}</span></dd>
+        </div>
+        <div title="n — number of patient-year documents the model was fit on.">
+          <dt>n</dt><dd>{($bundle.corpusStats.corpus_size_docs / 1000).toFixed(0)}<span class="of">k</span></dd>
+        </div>
       </dl>
     {/if}
 
     <div class="controls">
-      {#if $bundle && $advancedView}
+      {#if $bundle && $advancedView && $route !== 'atlas'}
         <button class="btn-ghost regen" on:click={regenCohort} title="Re-roll synthetic cohort with a new seed">
           ↻ regenerate cohort
         </button>

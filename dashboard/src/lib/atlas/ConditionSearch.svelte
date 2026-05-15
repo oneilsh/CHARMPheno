@@ -202,20 +202,23 @@
     align-items: center;
     gap: 0.4rem;
     padding: 0.25rem 0.55rem;
-    background: var(--surface-recessed);
+    background: var(--accent-search-soft);
     border-radius: var(--radius-sm);
     font-size: var(--fs-micro);
-    color: var(--ink-muted);
+    color: var(--accent-search-ink);
     max-width: 280px;
+    box-shadow: inset 3px 0 0 var(--accent-search);
   }
   .chip-label {
     font-family: var(--font-mono);
     text-transform: uppercase;
     letter-spacing: 0.06em;
+    color: var(--accent-search-ink);
+    opacity: 0.85;
   }
   .chip-val {
-    color: var(--accent);
-    font-weight: 500;
+    color: var(--accent-search-ink);
+    font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

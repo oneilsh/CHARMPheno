@@ -63,10 +63,10 @@
     : 1
 </script>
 
-<details class="browser" open={false}>
+<details class="browser" open>
   <summary>
     <span class="summary-text">
-      Browse all phenotypes ({phenotypes.length})
+      Browse all phenotypes ({filtered.length}/{phenotypes.length})
     </span>
     <span class="caret" aria-hidden="true">▾</span>
   </summary>
@@ -89,7 +89,7 @@
       </select>
     </div>
     {#if containingSet}
-      <span class="filter-chip" title="Filtered to phenotypes containing the searched condition">
+      <span class="filter-chip filter-chip-search" title="Filtered to phenotypes containing the searched condition">
         contains searched condition · {filtered.length} match{filtered.length === 1 ? '' : 'es'}
       </span>
     {:else if $phenotypeFilter}
@@ -151,7 +151,6 @@
 
 <style>
   .browser {
-    margin-top: 1.5rem;
     border: 1px solid var(--rule);
     border-radius: var(--radius-sm);
     background: var(--surface);
@@ -215,6 +214,10 @@
     padding: 0.2rem 0.55rem;
     background: var(--surface-recessed);
     border-radius: var(--radius-sm);
+  }
+  .filter-chip-search {
+    color: var(--accent-search-ink);
+    background: var(--accent-search-soft);
   }
 
   .table-wrap {

@@ -41,6 +41,12 @@
   --accent-faint: #ecfeff;
   --accent-ink: #0e7490;
 
+  /* Search-highlight accent — fuchsia, distinct from the cyan selection
+     accent so the eye can separate "selected" from "search-matched". */
+  --accent-search: #d946ef;
+  --accent-search-soft: #fae8ff;
+  --accent-search-ink: #a21caf;
+
   /* Status / data-encoding hues */
   --pos: #10b981;       /* emerald — used for high-coherence */
   --neg: #ef4444;       /* red — used for low-coherence */
