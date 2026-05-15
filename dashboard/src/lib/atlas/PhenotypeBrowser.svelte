@@ -72,12 +72,22 @@
   </summary>
 
   <div class="controls">
-    <input
-      type="search"
-      placeholder="Filter by label or description…"
-      bind:value={$phenotypeFilter}
-      class="filter-input"
-    />
+    <div class="filter-wrap">
+      <input
+        type="search"
+        placeholder="Filter by label or description…"
+        bind:value={$phenotypeFilter}
+        class="filter-input"
+      />
+      {#if $phenotypeFilter}
+        <button
+          class="filter-clear"
+          type="button"
+          on:click={() => phenotypeFilter.set('')}
+          title="Clear the filter"
+        >×</button>
+      {/if}
+    </div>
     <div class="sort">
       <span class="eyebrow">Sort by</span>
       <select bind:value={$phenotypeSortBy}>
@@ -185,10 +195,16 @@
     border-top: 1px solid var(--rule);
     flex-wrap: wrap;
   }
-  .filter-input {
+  .filter-wrap {
+    position: relative;
     flex: 1;
     min-width: 220px;
-    padding: 0.4rem 0.6rem;
+    display: flex;
+    align-items: center;
+  }
+  .filter-input {
+    width: 100%;
+    padding: 0.4rem 1.7rem 0.4rem 0.6rem;
     border: 1px solid var(--rule-strong);
     border-radius: var(--radius-sm);
     background: var(--surface);
@@ -200,6 +216,20 @@
     outline: none;
     border-color: var(--accent);
   }
+  .filter-clear {
+    position: absolute;
+    right: 0.4rem;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 0;
+    background: transparent;
+    color: var(--ink-faint);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0 0.2rem;
+  }
+  .filter-clear:hover { color: var(--ink); }
   .sort {
     display: flex;
     align-items: center;

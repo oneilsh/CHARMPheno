@@ -8,6 +8,7 @@
   import Atlas from './lib/tabs/Atlas.svelte'
   import Patient from './lib/tabs/Patient.svelte'
   import Simulator from './lib/tabs/Simulator.svelte'
+  import { installTooltips } from './lib/tooltip'
 
   const DEFAULT_COHORT_N = 1000
   const DEFAULT_COHORT_SEED = 42
@@ -32,6 +33,7 @@
   }
 
   onMount(async () => {
+    installTooltips()
     try {
       const b = await loadBundle(import.meta.env.BASE_URL)
       bundle.set(b)
@@ -202,6 +204,10 @@
     display: flex;
     align-items: center;
     gap: 1rem;
+    /* Pin to the third grid column explicitly so toggling between simple
+       and advanced (which hides/shows the metadata block in column 2)
+       doesn't shift the segmented control across the masthead. */
+    grid-column: 3;
   }
   .regen {
     font-family: var(--font-body);

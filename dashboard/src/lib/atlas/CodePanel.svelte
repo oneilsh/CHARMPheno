@@ -55,7 +55,7 @@
       {/if}
       <div class="stats" data-numeric>
         <span class="stat" title="Prevalence — fraction of patient-year documents that draw meaningfully from this phenotype.">
-          <span class="stat-k">Prev</span>
+          <span class="stat-k">Prevalence</span>
           <span class="stat-v">{(pheno.corpus_prevalence * 100).toFixed(1)}%</span>
         </span>
         {#if $advancedView}

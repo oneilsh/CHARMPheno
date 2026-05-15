@@ -1,33 +1,65 @@
 <script lang="ts">
-  import { bundle, searchedConditionIdx } from '../store'
+  import { bundle, searchedConditionIdx, advancedView } from '../store'
+  import { phenotypesContainingCode } from '../inference'
 
   let query = ''
   let inputEl: HTMLInputElement
   let showResults = false
 
-  // Top N matches by substring. Ordered by corpus_freq descending so common
-  // conditions surface first — usually what a user actually wants when they
-  // type "diabetes" rather than getting a rare specific subtype.
+  // Top N matches by substring, ordered by corpus_freq descending so common
+  // conditions surface first.
   const MAX_RESULTS = 8
 
   $: vocab = $bundle?.vocab.codes ?? []
 
+  // Which phenotype ids will actually be drawn under the current mode.
+  // Used to drop autocomplete suggestions that wouldn't highlight anything
+  // (e.g. a condition that only appears prominently in dead/mixed topics
+  // while we're in simple mode).
+  $: visiblePhenoIds = (() => {
+    const phen = $bundle?.phenotypes.phenotypes ?? []
+    return new Set(
+      phen
+        .filter((p) => $advancedView || (p.quality !== 'dead' && p.quality !== 'mixed'))
+        .map((p) => p.id),
+    )
+  })()
+
   $: matches = (() => {
     const q = query.trim().toLowerCase()
-    if (!q || q.length < 2) return []
-    const out: { idx: number; description: string; corpus_freq: number }[] = []
+    if (!q || q.length < 2 || !$bundle) return []
+    // Pass 1 — cheap substring filter, sorted by frequency so we exhaust
+    // the most-likely-wanted candidates first.
+    const candidates: { idx: number; description: string; corpus_freq: number }[] = []
     for (let i = 0; i < vocab.length; i++) {
       const desc = (vocab[i].description || vocab[i].code).toLowerCase()
       if (desc.includes(q)) {
-        out.push({
+        candidates.push({
           idx: i,
           description: vocab[i].description || vocab[i].code,
           corpus_freq: vocab[i].corpus_freq,
         })
       }
     }
-    out.sort((a, b) => b.corpus_freq - a.corpus_freq)
-    return out.slice(0, MAX_RESULTS)
+    candidates.sort((a, b) => b.corpus_freq - a.corpus_freq)
+    // Pass 2 — keep only conditions that actually feature prominently in
+    // at least one phenotype that's currently drawn on the atlas. Stops
+    // early once MAX_RESULTS are accumulated so we don't pay the cost on
+    // candidates the user will never see.
+    const corpusFreq = $bundle.vocab.codes.map((c) => c.corpus_freq)
+    const out: typeof candidates = []
+    for (const c of candidates) {
+      if (out.length >= MAX_RESULTS) break
+      const containing = phenotypesContainingCode({
+        beta: $bundle.model.beta, corpusFreq, codeIdx: c.idx,
+      })
+      let any = false
+      for (const k of containing) {
+        if (visiblePhenoIds.has(k)) { any = true; break }
+      }
+      if (any) out.push(c)
+    }
+    return out
   })()
 
   $: selectedCondition = $searchedConditionIdx !== null

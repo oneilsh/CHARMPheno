@@ -185,40 +185,13 @@
       .attr('stroke-linejoin', 'round')
       .text((p) => truncate(p.label || `Phenotype ${p.id}`, 22))
 
-    // Bold label for the selected phenotype above its bubble.
-    // BUGFIX: the previous version indexed the filtered `phenotypes` array
-    // by phenotype-id (`phenotypes[$selectedPhenotypeId]`), which meant the
-    // label was anchored to a different bubble whenever simple-mode filtered
-    // out earlier phenotypes — looking like a mirror of the real position.
-    // Now we look up by id explicitly.
-    if ($selectedPhenotypeId !== null) {
-      const sel = phenotypes.find((p) => p.id === $selectedPhenotypeId)
-      if (sel) {
-        const cx = x(coords[sel.id][0])
-        const cy = y(coords[sel.id][1])
-        const rr = r(sel.corpus_prevalence)
-        const labelText = sel.label || `Phenotype ${sel.id}`
-        const labelW = Math.max(8 * labelText.length, 60)
-        g.append('rect')
-          .attr('x', cx - labelW / 2)
-          .attr('y', cy - rr - 28)
-          .attr('rx', 3).attr('ry', 3)
-          .attr('width', labelW)
-          .attr('height', 18)
-          .attr('fill', '#0a0a0a')
-        g.append('text')
-          .attr('x', cx).attr('y', cy - rr - 15)
-          .attr('text-anchor', 'middle')
-          .attr('font-family', 'Geist, sans-serif')
-          .attr('font-size', 11)
-          .attr('font-weight', 500)
-          .attr('fill', '#fff')
-          .text(labelText)
-      }
-    }
-
-    nodes.append('title')
-      .text((p) => `${p.label || `Phenotype ${p.id}`}\nCoherence ${p.npmi.toFixed(3)} · prev ${(p.corpus_prevalence * 100).toFixed(1)}%`)
+    // Custom tooltip — `data-tip` is picked up by the global tooltip
+    // overlay (lib/tooltip.ts) so it appears with no hover delay. Avoiding
+    // SVG `<title>` here means the browser-native delayed tooltip doesn't
+    // also fire.
+    nodes.attr('data-tip', (p) =>
+      `${p.label || `Phenotype ${p.id}`}\nCoherence ${p.npmi.toFixed(3)} · prev ${(p.corpus_prevalence * 100).toFixed(1)}%`,
+    )
   }
 
   $: $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()

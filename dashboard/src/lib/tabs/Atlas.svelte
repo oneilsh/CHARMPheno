@@ -9,36 +9,38 @@
 <section class="atlas">
   <header class="section-head">
     <div class="title-block">
-      <h1>Phenotype Atlas</h1>
+      <div class="title-row">
+        <h1>Phenotype Atlas</h1>
+        <details class="what-is">
+          <summary>What's a phenotype?</summary>
+          <div class="what-is-body popover">
+            <p>
+              A <em>phenotype</em> here is a recurring pattern of clinical
+              conditions that tends to appear together across patients —
+              for example, "Type 2 diabetes care" concentrates on diabetes,
+              retinopathy, neuropathy, and related conditions.
+            </p>
+            <p>
+              These phenotypes were learned automatically from de-identified
+              patient records using a topic model (Latent Dirichlet Allocation).
+              The model didn't know about diseases ahead of time; it just looked
+              for groups of conditions that tend to co-occur, and produced
+              {$bundle?.model.K ?? '~80'} phenotypes.
+            </p>
+            <p>
+              A patient is a mix of phenotypes, not a single one. A phenotype
+              is not a diagnosis — it's a pattern. Some patterns name a single
+              disease, others name a family of related conditions, and some
+              describe broad health backgrounds (e.g. chronic comorbidity
+              follow-up).
+            </p>
+          </div>
+        </details>
+      </div>
       <p class="kicker">
         Each marker is a learned phenotype. Distance is Jensen–Shannon divergence
         between code distributions; size encodes corpus prevalence.
       </p>
-      <details class="what-is">
-        <summary>What's a phenotype?</summary>
-        <div class="what-is-body">
-          <p>
-            A <em>phenotype</em> here is a recurring pattern of clinical
-            conditions that tends to appear together across patients —
-            for example, "Type 2 diabetes care" concentrates on diabetes,
-            retinopathy, neuropathy, and related conditions.
-          </p>
-          <p>
-            These phenotypes were learned automatically from de-identified
-            patient records using a topic model (Latent Dirichlet Allocation).
-            The model didn't know about diseases ahead of time; it just looked
-            for groups of conditions that tend to co-occur, and produced
-            {$bundle?.model.K ?? '~80'} phenotypes.
-          </p>
-          <p>
-            A patient is a mix of phenotypes, not a single one. A phenotype
-            is not a diagnosis — it's a pattern. Some patterns name a single
-            disease, others name a family of related conditions, and some
-            describe broad health backgrounds (e.g. chronic comorbidity
-            follow-up).
-          </p>
-        </div>
-      </details>
     </div>
     <div class="controls">
       <ConditionSearch />
@@ -74,6 +76,13 @@
     gap: 0.45rem;
   }
   .title-block h1 { margin: 0.1rem 0 0; }
+  .title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    flex-wrap: wrap;
+    position: relative;
+  }
   .kicker {
     margin: 0.25rem 0 0;
     font-size: var(--fs-small);
@@ -82,9 +91,10 @@
     line-height: 1.55;
   }
 
-  /* "What's a phenotype?" disclosure */
+  /* "What's a phenotype?" disclosure — body floats as a popover so it
+     doesn't shove the kicker and the rest of the page down when opened. */
   .what-is {
-    margin-top: 0.4rem;
+    position: relative;
   }
   .what-is summary {
     cursor: pointer;
@@ -113,6 +123,17 @@
     border: 1px solid var(--rule);
     border-left: 3px solid var(--accent);
     border-radius: var(--radius-sm);
+  }
+  /* Popover variant — anchored under the inline summary, floats over the
+     content below so the masthead doesn't grow when expanded. */
+  .what-is-body.popover {
+    position: absolute;
+    top: 1.6rem;
+    left: 0;
+    z-index: 5;
+    width: 62ch;
+    max-width: min(62ch, calc(100vw - 4rem));
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
   }
   .what-is-body p {
     margin: 0 0 0.55rem;
