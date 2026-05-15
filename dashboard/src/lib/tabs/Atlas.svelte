@@ -4,14 +4,25 @@
   import CodePanel from '../atlas/CodePanel.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
   import PhenotypeBrowser from '../atlas/PhenotypeBrowser.svelte'
+
+  // Background-click closes the disclosure popover so the user doesn't
+  // have to find and click the same link again to dismiss it.
+  let whatIsEl: HTMLDetailsElement
+  let whatIsOpen = false
 </script>
+
+<svelte:window on:click={(e) => {
+  if (whatIsOpen && whatIsEl && !whatIsEl.contains(e.target as Node)) {
+    whatIsOpen = false
+  }
+}} />
 
 <section class="atlas">
   <header class="section-head">
     <div class="title-block">
       <div class="title-row">
         <h1>Phenotype Atlas</h1>
-        <details class="what-is">
+        <details class="what-is" bind:this={whatIsEl} bind:open={whatIsOpen}>
           <summary>What's a phenotype?</summary>
           <div class="what-is-body popover">
             <p>

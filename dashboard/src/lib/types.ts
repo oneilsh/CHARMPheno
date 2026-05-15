@@ -25,6 +25,10 @@ export interface DashboardBundle {
 // In-memory only; not part of the bundle:
 export interface SyntheticPatient {
   id: string; theta: number[]; code_bag: number[]; neighbors: string[]
+  // True when the patient's dominant phenotype is NOT classified as dead
+  // or mixed. Basic mode hides patients with isClean=false; advanced
+  // mode shows them. Always true when no quality labels are available.
+  isClean: boolean
 }
 export interface SyntheticCohort {
   patients: SyntheticPatient[]; seed: number

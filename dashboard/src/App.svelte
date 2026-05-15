@@ -10,12 +10,15 @@
   import Simulator from './lib/tabs/Simulator.svelte'
   import { installTooltips } from './lib/tooltip'
 
-  const DEFAULT_COHORT_N = 1000
+  // Initial batch size. Adaptive sizing in cohort.ts may push the final
+  // count higher (rounded to multiples of 100) until at least one of the
+  // clean / messy buckets reaches 1000. Final counts depend on the
+  // model's clean/messy phenotype mix.
+  const DEFAULT_COHORT_N = 1500
   const DEFAULT_COHORT_SEED = 42
   const DEFAULT_NEIGHBORS = 8
 
   let error: string | null = null
-  let cohortSeed = DEFAULT_COHORT_SEED
 
   // Pick a phenotype to highlight on first load so the detail panel and
   // bubble selection ring are populated immediately. First-paint emptiness
@@ -44,22 +47,13 @@
         n: DEFAULT_COHORT_N,
         seed: DEFAULT_COHORT_SEED,
         nNeighbors: DEFAULT_NEIGHBORS,
+        // Adaptive sizing: oversample until one bucket hits 1000, then
+        // truncate both to round-100 counts. See cohort.ts.
+        qualityByPhenotype: b.phenotypes.phenotypes.map((p) => p.quality),
       })
       cohort.set(c)
     } catch (e) { error = (e as Error).message }
   })
-
-  function regenCohort() {
-    if (!$bundle) return
-    cohortSeed += 1
-    cohort.set(generateCohort({
-      model: $bundle.model,
-      meanCodesPerDoc: $bundle.corpusStats.mean_codes_per_doc,
-      n: DEFAULT_COHORT_N,
-      seed: cohortSeed,
-      nNeighbors: DEFAULT_NEIGHBORS,
-    }))
-  }
 </script>
 
 <main>
@@ -77,25 +71,19 @@
       </div>
     </div>
 
-    {#if $bundle && $advancedView}
-      <dl class="metadata" data-numeric>
-        <div title="K: the number of phenotypes (topics) the model was asked to learn from the dataset.">
-          <dt>K</dt><dd>{$bundle.model.K}</dd>
-        </div>
-        <div title="V: distinct conditions displayed in the dashboard, over total distinct conditions in the source dataset. Low-count conditions are suppressed for patient privacy.">
-          <dt>V</dt><dd>{$bundle.model.V.toLocaleString()}<span class="of">/{$bundle.corpusStats.v_full.toLocaleString()}</span></dd>
-        </div>
-        <div title="n: number of patient records the model was fit on (in thousands).">
-          <dt>n</dt><dd>{($bundle.corpusStats.corpus_size_docs / 1000).toFixed(0)}<span class="of">k</span></dd>
-        </div>
-      </dl>
-    {/if}
-
     <div class="controls">
-      {#if $bundle && $advancedView && $route !== 'atlas'}
-        <button class="btn-ghost regen" on:click={regenCohort} title="Re-roll synthetic cohort with a new seed">
-          ↻ regenerate cohort
-        </button>
+      {#if $bundle && $advancedView}
+        <dl class="metadata" data-numeric>
+          <div title="K: the number of phenotypes (topics) the model was asked to learn from the dataset.">
+            <dt>K</dt><dd>{$bundle.model.K}</dd>
+          </div>
+          <div title="V: distinct conditions displayed in the dashboard, over total distinct conditions in the source dataset. Low-count conditions are suppressed for patient privacy.">
+            <dt>V</dt><dd>{$bundle.model.V.toLocaleString()}<span class="of">/{$bundle.corpusStats.v_full.toLocaleString()}</span></dd>
+          </div>
+          <div title="n: number of patient records the model was fit on (in thousands).">
+            <dt>n</dt><dd>{($bundle.corpusStats.corpus_size_docs / 1000).toFixed(0)}<span class="of">k</span></dd>
+          </div>
+        </dl>
       {/if}
       <div class="seg" role="group" aria-label="View density">
         <button class="seg-btn" class:active={!$advancedView} on:click={() => advancedView.set(false)}>basic</button>
@@ -162,13 +150,14 @@
     margin-top: 0.15rem;
   }
 
-  /* Metadata strip (instrument-readout) */
+  /* Metadata strip (instrument-readout). Sized to match the segmented
+     control next to it so toggling advanced mode doesn't bump the
+     masthead height. */
   .metadata {
     display: flex;
-    gap: 1.25rem;
+    gap: 0.85rem;
     margin: 0;
-    justify-self: center;
-    padding: 0.45rem 0.95rem;
+    padding: 0.2rem 0.65rem;
     background: var(--surface);
     border: 1px solid var(--rule);
     border-radius: var(--radius-sm);
@@ -176,7 +165,7 @@
   .metadata div {
     display: flex;
     align-items: baseline;
-    gap: 0.4rem;
+    gap: 0.35rem;
   }
   .metadata dt {
     font-family: var(--font-mono);
@@ -189,32 +178,26 @@
   }
   .metadata dd {
     margin: 0;
-    font-size: 0.92rem;
+    font-size: var(--fs-small);
     font-weight: 500;
     color: var(--ink);
   }
   .metadata .of {
     color: var(--ink-faint);
     font-weight: 400;
-    font-size: 0.78rem;
+    font-size: var(--fs-micro);
     margin-left: 1px;
   }
 
   .controls {
     display: flex;
     align-items: center;
-    gap: 1rem;
-    /* Pin to the third grid column explicitly so toggling between simple
-       and advanced (which hides/shows the metadata block in column 2)
-       doesn't shift the segmented control across the masthead. */
+    gap: 1.25rem;
+    /* Pin to the third grid column explicitly so the segmented control
+       stays right-justified. Metadata sits inside .controls to the left
+       of the seg in advanced mode. */
     grid-column: 3;
   }
-  .regen {
-    font-family: var(--font-body);
-    font-size: var(--fs-small);
-  }
-  .regen:hover { color: var(--accent); }
-
   /* Segmented control */
   .seg {
     display: inline-flex;

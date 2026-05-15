@@ -33,7 +33,7 @@ describe('generateCohort', () => {
 
   it('zero-pads patient ids', () => {
     const c = generateCohort({ model, meanCodesPerDoc: 5, n: 5, seed: 1, nNeighbors: 2 })
-    expect(c.patients[0].id).toBe('synth_0000')
-    expect(c.patients[4].id).toBe('synth_0004')
+    expect(c.patients[0].id).toBe('S0000')
+    expect(c.patients[4].id).toBe('S0004')
   })
 })

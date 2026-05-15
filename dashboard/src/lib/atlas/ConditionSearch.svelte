@@ -2,6 +2,14 @@
   import { bundle, searchedConditionIdx, advancedView } from '../store'
   import { phenotypesContainingCode } from '../inference'
 
+  // Label used in the active-chip ("Highlighting <entityLabel> with ...").
+  // The same store-backed searchedConditionIdx drives highlighting on both
+  // the phenotype atlas (highlights phenotypes containing the condition)
+  // and the patient atlas (highlights patients whose record contains the
+  // condition), but the chip text reads more naturally when it names the
+  // entity that's currently being highlighted.
+  export let entityLabel: string = 'phenotypes'
+
   let query = ''
   let inputEl: HTMLInputElement
   let showResults = false
@@ -121,8 +129,8 @@
   {/if}
 
   {#if selectedCondition}
-    <div class="active-chip" title="Phenotypes containing this condition are highlighted on the atlas">
-      <span class="chip-label">Highlighting phenotypes with</span>
+    <div class="active-chip" title="{entityLabel.charAt(0).toUpperCase() + entityLabel.slice(1)} containing this condition are highlighted">
+      <span class="chip-label">Highlighting {entityLabel} with</span>
       <span class="chip-val">{selectedCondition.description || selectedCondition.code}</span>
     </div>
   {/if}

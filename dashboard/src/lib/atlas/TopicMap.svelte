@@ -3,9 +3,8 @@
   import * as d3 from 'd3'
   import {
     bundle, selectedPhenotypeId, hoveredCodeIdx, advancedView,
-    searchedConditionIdx,
+    searchedConditionIdx, phenotypeCoords,
   } from '../store'
-  import { computeJsdMds } from '../mds'
   import { phenotypesContainingCode } from '../inference'
 
   // Simple mode hides `dead` and `mixed` topics. `null` (unlabeled bundle)
@@ -48,10 +47,7 @@
   // How many of the most prevalent bubbles get always-on labels.
   const ALWAYS_LABEL_N = 8
 
-  let coords: number[][] = []
-  $: if ($bundle && coords.length !== $bundle.model.K) {
-    coords = computeJsdMds($bundle.model.beta)
-  }
+  $: coords = $phenotypeCoords
 
   // Diverging NPMI ramp: red (low) → neutral gray → cyan (high).
   // Aligns with the global accent and avoids the rainbow look.

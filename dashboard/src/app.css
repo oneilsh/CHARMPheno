@@ -47,6 +47,15 @@
   --accent-search-soft: #fae8ff;
   --accent-search-ink: #a21caf;
 
+  /* Phenotype-find-in-patients accent : amber, distinct from both the
+     cyan selection accent and the fuchsia condition-match accent. Used
+     by the patient atlas when the user has pinned "Find patients with
+     this phenotype" from the atlas tab. A single patient can carry both
+     rings (condition match + phenotype match). */
+  --accent-find: #d97706;
+  --accent-find-soft: #fef3c7;
+  --accent-find-ink: #92400e;
+
   /* Status / data-encoding hues */
   --pos: #10b981;       /* emerald : used for high-coherence */
   --neg: #ef4444;       /* red : used for low-coherence */

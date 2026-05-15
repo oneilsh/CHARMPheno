@@ -2,7 +2,7 @@
   import { route, go } from './router'
   const tabs: { id: 'atlas' | 'patient' | 'simulator'; label: string }[] = [
     { id: 'atlas',     label: 'Phenotype Atlas' },
-    { id: 'patient',   label: 'Patient Explorer' },
+    { id: 'patient',   label: 'Patient Atlas' },
     { id: 'simulator', label: 'Simulator' },
   ]
 </script>

@@ -1,7 +1,15 @@
 <script lang="ts">
-  import { selectedPatientId, patientsById } from '../store'
+  import { selectedPatientId, patientsById, advancedView } from '../store'
   import ProfileBar from './ProfileBar.svelte'
   export let neighbors: string[]
+
+  // In basic mode, drop neighbors whose dominant is dead/mixed so the
+  // "similar patients" cards never surface messy patients by name. The
+  // ranking itself is still cosine over the full cohort; we just hide
+  // the ones the rest of the basic-mode UI hides too.
+  $: visibleNeighbors = neighbors
+    .map((nid) => $patientsById.get(nid))
+    .filter((n) => n && ($advancedView || n.isClean))
 </script>
 
 <section class="ribbon">
@@ -11,16 +19,15 @@
   </header>
 
   <div class="strip">
-    {#each neighbors as nid}
-      {@const n = $patientsById.get(nid)}
+    {#each visibleNeighbors as n}
       {#if n}
-        <button class="card" on:click={() => selectedPatientId.set(nid)} aria-label={`Open ${n.id}`}>
+        <button class="card" on:click={() => selectedPatientId.set(n.id)} aria-label={`Open ${n.id}`}>
           <div class="card-head">
             <span class="dot"></span>
             <span class="id" data-numeric>{n.id}</span>
           </div>
           <div class="card-bar">
-            <ProfileBar theta={n.theta} height={10} labels={false} />
+            <ProfileBar theta={n.theta} codeBag={n.code_bag} height={10} labels={false} />
           </div>
         </button>
       {/if}

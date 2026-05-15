@@ -1,6 +1,6 @@
 import { jsd } from './inference'
 
-function jacobiEig(A: number[][], maxSweeps = 60, tol = 1e-10): { values: number[]; vectors: number[][] } {
+export function jacobiEig(A: number[][], maxSweeps = 60, tol = 1e-10): { values: number[]; vectors: number[][] } {
   const n = A.length
   const a = A.map((r) => r.slice())
   const v: number[][] = Array.from({ length: n }, (_, i) =>
@@ -66,6 +66,73 @@ export function classicalMds(distance: number[][], d = 2): number[][] {
     for (let i = 0; i < n; i++) coords[i][k] = vectors[i][k] * s
   }
   return coords
+}
+
+// 2D PCA of a (n x d) data matrix. Returns the top-2 PCs and projected
+// coords (n x 2). Used to project synthetic patient theta vectors into a
+// de-novo 2D space that captures the directions of greatest variance in
+// patient phenotype mixes . richer cluster structure than constraining
+// patients to the phenotype atlas convex hull.
+//
+// Implementation: compute K x K covariance, Jacobi-eigendecompose, take
+// the top-2 eigenvectors as the PC basis, project each row onto them.
+// O(n*K^2) for covariance + O(K^3) for the eig. Cheap at our scale
+// (n=500, K=80) compared to O(n^3) classical MDS on patient pairs.
+export function pca2d(data: number[][]): { coords: number[][]; basis: number[][]; mean: number[] } {
+  const n = data.length
+  if (n === 0) return { coords: [], basis: [[], []], mean: [] }
+  const d = data[0].length
+  const mean = new Array<number>(d).fill(0)
+  for (const row of data) for (let j = 0; j < d; j++) mean[j] += row[j]
+  for (let j = 0; j < d; j++) mean[j] /= n
+  // Covariance (1 / (n - 1)) * sum (x - mean)(x - mean)^T
+  const cov: number[][] = Array.from({ length: d }, () => new Array(d).fill(0))
+  const denom = Math.max(1, n - 1)
+  for (const row of data) {
+    for (let i = 0; i < d; i++) {
+      const di = row[i] - mean[i]
+      for (let j = i; j < d; j++) {
+        const dj = row[j] - mean[j]
+        cov[i][j] += di * dj
+      }
+    }
+  }
+  for (let i = 0; i < d; i++) for (let j = i; j < d; j++) {
+    cov[i][j] /= denom
+    if (i !== j) cov[j][i] = cov[i][j]
+  }
+  const { vectors } = jacobiEig(cov)
+  const pc1 = vectors.map((row) => row[0])
+  const pc2 = vectors.map((row) => row[1])
+  const basis = [pc1, pc2]
+  const coords: number[][] = data.map((row) => {
+    let a = 0, b = 0
+    for (let j = 0; j < d; j++) {
+      const c = row[j] - mean[j]
+      a += c * pc1[j]
+      b += c * pc2[j]
+    }
+    return [a, b]
+  })
+  return { coords, basis, mean }
+}
+
+// Project external points (rows of `data`) into a PCA basis that was fit on
+// a different dataset. Useful for placing reference points (e.g. the one-hot
+// phenotype basis vectors) into the patient-space PCA so they appear at the
+// positions a pure-on-that-phenotype patient would land.
+export function projectPca(data: number[][], basis: number[][], mean: number[]): number[][] {
+  const [pc1, pc2] = basis
+  const d = mean.length
+  return data.map((row) => {
+    let a = 0, b = 0
+    for (let j = 0; j < d; j++) {
+      const c = row[j] - mean[j]
+      a += c * pc1[j]
+      b += c * pc2[j]
+    }
+    return [a, b]
+  })
 }
 
 export function computeJsdMds(beta: number[][]): number[][] {

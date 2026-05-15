@@ -1,9 +1,16 @@
 <script lang="ts">
   import {
     bundle, selectedPhenotypeId, advancedView, hoveredCodeIdx,
-    searchedConditionIdx,
+    searchedConditionIdx, searchedPhenotypeForPatients,
   } from '../store'
   import { topRelevantCodes } from '../inference'
+  import { go } from '../router'
+
+  function findInPatients() {
+    if ($selectedPhenotypeId === null) return
+    searchedPhenotypeForPatients.set($selectedPhenotypeId)
+    go('patient')
+  }
 
   let lambda = 0.6
   const topN = 20
@@ -48,6 +55,14 @@
              so the eye links "this detail" with "that selected bubble". -->
         <span class="sel-dot" aria-hidden="true"></span>
         <span class="eyebrow">Phenotype detail</span>
+        <button
+          class="find-in-patients"
+          type="button"
+          on:click={findInPatients}
+          title="Switch to the Patient Atlas with patients carrying this phenotype highlighted"
+        >
+          find in patients →
+        </button>
       </div>
       <h2 class="title">{pheno.label || `Phenotype ${pheno.id}`}</h2>
       {#if pheno.description}
@@ -181,6 +196,25 @@
     display: flex;
     align-items: center;
     gap: 0.45rem;
+  }
+  .find-in-patients {
+    margin-left: auto;
+    border: 1px solid var(--rule-strong);
+    background: var(--surface);
+    color: var(--ink-muted);
+    padding: 0.25rem 0.6rem;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color 0.12s ease, border-color 0.12s ease;
+  }
+  .find-in-patients:hover {
+    color: var(--accent-find);
+    border-color: var(--accent-find);
   }
   .sel-dot {
     display: inline-block;

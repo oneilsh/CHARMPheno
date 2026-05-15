@@ -29,7 +29,6 @@
 <section class="sim">
   <header class="section-head">
     <div class="title-block">
-      <span class="eyebrow">03 · Simulator</span>
       <h1>Simulator</h1>
       <p class="kicker">Given a partial code bag, draw <span data-numeric>N</span> samples from the model's posterior predictive. Each sample is one complete year-of-life bag.</p>
     </div>
