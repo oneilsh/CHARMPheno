@@ -72,6 +72,28 @@ export function topRelevantCodes(input: TopCodesInput): RankedCode[] {
   return scored.slice(0, n)
 }
 
+// Set of phenotype ids whose top-N relevance ranking contains a given code
+// index. Matches the CodePanel's relevance-ranked ordering (λ=0.6, top-20
+// by default) so the bubble-highlight rule and the code-list view agree:
+// hovering a code in the panel highlights the phenotypes that surface that
+// code in their displayed top-N.
+export function phenotypesContainingCode(input: {
+  beta: number[][]
+  corpusFreq: number[]
+  codeIdx: number
+  n?: number
+  lambda?: number
+}): Set<number> {
+  const { beta, corpusFreq, codeIdx, n = 20, lambda = 0.6 } = input
+  const out = new Set<number>()
+  if (codeIdx == null || codeIdx < 0) return out
+  for (let k = 0; k < beta.length; k++) {
+    const top = topRelevantCodes({ pwk: beta[k], pw: corpusFreq, lambda, n })
+    if (top.some((r) => r.index === codeIdx)) out.add(k)
+  }
+  return out
+}
+
 export function jsd(p: number[], q: number[]): number {
   const m = p.map((pi, i) => 0.5 * (pi + q[i]))
   const kl = (a: number[], b: number[]) =>

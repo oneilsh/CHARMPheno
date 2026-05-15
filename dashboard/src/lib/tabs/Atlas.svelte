@@ -2,6 +2,8 @@
   import { bundle, colorMode } from '../store'
   import TopicMap from '../atlas/TopicMap.svelte'
   import CodePanel from '../atlas/CodePanel.svelte'
+  import ConditionSearch from '../atlas/ConditionSearch.svelte'
+  import PhenotypeBrowser from '../atlas/PhenotypeBrowser.svelte'
 </script>
 
 <section class="atlas">
@@ -40,6 +42,7 @@
       </details>
     </div>
     <div class="controls">
+      <ConditionSearch />
       <label class="control">
         <span class="eyebrow">Color by</span>
         <select bind:value={$colorMode}>
@@ -54,6 +57,8 @@
     <TopicMap />
     <CodePanel />
   </div>
+
+  <PhenotypeBrowser />
 </section>
 
 <style>

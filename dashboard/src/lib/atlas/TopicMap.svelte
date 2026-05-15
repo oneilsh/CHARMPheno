@@ -1,8 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import * as d3 from 'd3'
-  import { bundle, selectedPhenotypeId, colorMode, hoveredCodeIdx, advancedView } from '../store'
+  import {
+    bundle, selectedPhenotypeId, colorMode, hoveredCodeIdx, advancedView,
+    searchedConditionIdx,
+  } from '../store'
   import { computeJsdMds } from '../mds'
+  import { phenotypesContainingCode } from '../inference'
 
   // Simple mode hides `dead` and `mixed` topics. `null` (unlabeled bundle)
   // and the other three categories all show. Advanced mode shows everything.
@@ -10,19 +14,31 @@
     return p.quality === 'dead' || p.quality === 'mixed'
   }
 
-  function phenotypesWithCode(idx: number | null, n = 20): Set<number> {
+  // Phenotype-containment for highlight: switched from raw-β top-N to
+  // relevance-ranked top-N (λ=0.6), matching the CodePanel's displayed
+  // ordering. The two views now agree on "which phenotypes feature this
+  // condition prominently."
+  function containingSet(idx: number | null): Set<number> {
     if (!$bundle || idx === null) return new Set()
-    const out = new Set<number>()
-    const K = $bundle.model.K
-    for (let k = 0; k < K; k++) {
-      const row = $bundle.model.beta[k]
-      const top = row.map((p, i) => ({ p, i })).sort((a, b) => b.p - a.p).slice(0, n)
-      if (top.some((s) => s.i === idx)) out.add(k)
-    }
-    return out
+    return phenotypesContainingCode({
+      beta: $bundle.model.beta,
+      corpusFreq: $bundle.vocab.codes.map((c) => c.corpus_freq),
+      codeIdx: idx,
+    })
   }
 
-  $: highlighted = phenotypesWithCode($hoveredCodeIdx)
+  // Two sources of highlight:
+  //   - hoveredCodeIdx: transient, set by CodePanel mouseover
+  //   - searchedConditionIdx: persistent, set by ConditionSearch
+  // The searched condition takes precedence when both are present (a user
+  // pinned that condition; the mouseover shouldn't override the pin).
+  $: highlighted = $searchedConditionIdx !== null
+    ? containingSet($searchedConditionIdx)
+    : containingSet($hoveredCodeIdx)
+
+  // When the searched condition is active we also draw a stronger,
+  // solid-line ring rather than the dashed hover ring.
+  $: highlightStyle = $searchedConditionIdx !== null ? 'pinned' : 'hover'
 
   let svgEl: SVGSVGElement
   const W = 720, H = 560, MARGIN = 24
@@ -100,13 +116,17 @@
       .attr('stroke', '#06b6d4')
       .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 2 : 0))
 
-    // Hover-highlight ring — same color, dashed, when a code is hovered
+    // Condition-highlight ring — dashed for transient hover, solid for a
+    // pinned searched condition. Same accent color so the visual language
+    // stays consistent.
     nodes.append('circle')
       .attr('r', (p) => r(p.corpus_prevalence) + 5)
       .attr('fill', 'none')
       .attr('stroke', '#06b6d4')
-      .attr('stroke-dasharray', '3,2')
-      .attr('stroke-width', (p) => (highlighted.has(p.id) ? 1.25 : 0))
+      .attr('stroke-dasharray', highlightStyle === 'pinned' ? '0' : '3,2')
+      .attr('stroke-width', (p) =>
+        highlighted.has(p.id) ? (highlightStyle === 'pinned' ? 1.75 : 1.25) : 0
+      )
 
     // Quality indicator (advanced mode only) — small colored dot on the
     // bubble's edge for dead/mixed topics. Simple mode hides these
@@ -160,7 +180,7 @@
       .text((p) => `${p.label || `Phenotype ${p.id}`}\nCoherence ${p.npmi.toFixed(3)} · prev ${(p.corpus_prevalence * 100).toFixed(1)}%`)
   }
 
-  $: $colorMode, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $bundle && svgEl && coords.length && render()
+  $: $colorMode, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()
   onMount(render)
 </script>
 

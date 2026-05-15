@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { digamma, variationalEStep, relevance, topRelevantCodes, jsd } from './inference'
+import {
+  digamma, variationalEStep, relevance, topRelevantCodes, jsd,
+  phenotypesContainingCode,
+} from './inference'
 
 describe('digamma', () => {
   it('digamma(1) ≈ -0.5772 (Euler-Mascheroni)', () => {
@@ -51,6 +54,40 @@ describe('topRelevantCodes', () => {
     const pw  = [0.5, 0.4, 0.05]
     expect(topRelevantCodes({ pwk, pw, lambda: 1.0, n: 3 }).map((r) => r.index)).toEqual([0, 1, 2])
     expect(topRelevantCodes({ pwk, pw, lambda: 0.0, n: 3 })[0].index).toBe(2)
+  })
+})
+
+describe('phenotypesContainingCode', () => {
+  // K=3 topics, V=4 codes. Code 3 is rare in the corpus but concentrated in
+  // topic 2. With λ=0.6 (the default) it still ranks high in topic 2 but
+  // very low in topic 0 where it has tiny weight.
+  const beta = [
+    [0.6, 0.3, 0.05, 0.05],  // topic 0: dominated by codes 0,1; touches 2,3
+    [0.4, 0.4, 0.1, 0.1],    // topic 1: codes 0,1 dominant; some 2,3
+    [0.2, 0.2, 0.2, 0.4],    // topic 2: code 3 leads
+  ]
+  const corpusFreq = [0.4, 0.4, 0.15, 0.05]
+
+  it('includes a topic when the code is in its top-N relevance', () => {
+    const containing = phenotypesContainingCode({
+      beta, corpusFreq, codeIdx: 3, n: 2, lambda: 0.6,
+    })
+    // Topic 2's top-2 must include code 3 (highest weight).
+    expect(containing.has(2)).toBe(true)
+  })
+
+  it('excludes a topic where the code falls outside the top-N', () => {
+    // For topic 0 at top-N=2, the top-2 by relevance should be codes 0 and 1.
+    const containing = phenotypesContainingCode({
+      beta, corpusFreq, codeIdx: 3, n: 2, lambda: 0.6,
+    })
+    expect(containing.has(0)).toBe(false)
+  })
+
+  it('returns an empty set for null code index', () => {
+    expect(
+      phenotypesContainingCode({ beta, corpusFreq, codeIdx: -1, n: 5, lambda: 0.6 }).size,
+    ).toBe(0)
   })
 })
 
