@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { colorMode } from '../store'
+  import { bundle, colorMode } from '../store'
   import TopicMap from '../atlas/TopicMap.svelte'
   import CodePanel from '../atlas/CodePanel.svelte'
 </script>
@@ -9,7 +9,35 @@
     <div class="title-block">
       <span class="eyebrow">01 · Atlas</span>
       <h1>Phenotype Atlas</h1>
-      <p class="kicker">Each marker is a learned phenotype. Distance is Jensen–Shannon divergence between code distributions; size encodes corpus prevalence.</p>
+      <p class="kicker">
+        Each marker is a learned phenotype. Distance is Jensen–Shannon divergence
+        between code distributions; size encodes corpus prevalence.
+      </p>
+      <details class="what-is">
+        <summary>What's a phenotype?</summary>
+        <div class="what-is-body">
+          <p>
+            A <em>phenotype</em> here is a recurring pattern of clinical
+            conditions that tends to appear together across patients —
+            for example, "Type 2 diabetes care" concentrates on diabetes,
+            retinopathy, neuropathy, and related conditions.
+          </p>
+          <p>
+            These phenotypes were learned automatically from de-identified
+            patient records using a topic model (Latent Dirichlet Allocation).
+            The model didn't know about diseases ahead of time; it just looked
+            for groups of conditions that tend to co-occur, and produced
+            {$bundle?.model.K ?? '~80'} phenotypes.
+          </p>
+          <p>
+            A patient is a mix of phenotypes, not a single one. A phenotype
+            is not a diagnosis — it's a pattern. Some patterns name a single
+            disease, others name a family of related conditions, and some
+            describe broad health backgrounds (e.g. chronic comorbidity
+            follow-up).
+          </p>
+        </div>
+      </details>
     </div>
     <div class="controls">
       <label class="control">
@@ -54,6 +82,50 @@
     color: var(--ink-muted);
     max-width: 62ch;
     line-height: 1.55;
+  }
+
+  /* "What's a phenotype?" disclosure */
+  .what-is {
+    margin-top: 0.4rem;
+  }
+  .what-is summary {
+    cursor: pointer;
+    color: var(--accent);
+    font-size: var(--fs-small);
+    list-style: none;
+    display: inline-block;
+    border-bottom: 1px dotted var(--accent);
+    text-underline-offset: 2px;
+  }
+  .what-is summary::-webkit-details-marker { display: none; }
+  .what-is summary::marker { display: none; }
+  .what-is summary:hover {
+    color: var(--ink);
+    border-bottom-color: var(--ink);
+  }
+  .what-is[open] summary {
+    color: var(--ink);
+    border-bottom-color: transparent;
+  }
+  .what-is-body {
+    margin-top: 0.6rem;
+    max-width: 62ch;
+    padding: 0.85rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-sm);
+  }
+  .what-is-body p {
+    margin: 0 0 0.55rem;
+    font-size: var(--fs-small);
+    color: var(--ink-muted);
+    line-height: 1.6;
+  }
+  .what-is-body p:last-child { margin-bottom: 0; }
+  .what-is-body em {
+    font-style: italic;
+    color: var(--ink);
   }
 
   .controls {

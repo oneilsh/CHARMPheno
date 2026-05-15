@@ -39,7 +39,7 @@
           <span class="stat"><span class="stat-k">NPMI</span> <span class="stat-v">{pheno.npmi.toFixed(3)}</span></span>
           <span class="stat"><span class="stat-k">Pair cov</span> <span class="stat-v">{(pheno.pair_coverage * 100).toFixed(0)}%</span></span>
           {#if pheno.original_topic_id !== pheno.id}
-            <span class="stat"><span class="stat-k">Topic</span> <span class="stat-v">#{pheno.original_topic_id}</span></span>
+            <span class="stat"><span class="stat-k">Source #</span> <span class="stat-v">{pheno.original_topic_id}</span></span>
           {/if}
           {#if pheno.quality}
             <span class="stat quality q-{pheno.quality}"><span class="stat-k">Quality</span> <span class="stat-v">{pheno.quality}</span></span>

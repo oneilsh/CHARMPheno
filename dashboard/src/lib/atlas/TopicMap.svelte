@@ -165,7 +165,7 @@
 </script>
 
 <figure class="map">
-  <svg bind:this={svgEl} role="img" aria-label="Phenotype topic map" preserveAspectRatio="xMidYMid meet"></svg>
+  <svg bind:this={svgEl} role="img" aria-label="Phenotype atlas" preserveAspectRatio="xMidYMid meet"></svg>
   <figcaption class="legend">
     {#if $bundle}
       <div class="legend-group">
