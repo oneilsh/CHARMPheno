@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { bundle, advancedView, cohort, selectedPhenotypeId } from './lib/store'
+  import {
+    bundle, advancedView, cohort, selectedPhenotypeId, simulatorPrefix,
+  } from './lib/store'
   import { loadBundle } from './lib/bundle'
   import { route } from './lib/router'
   import { generateCohort } from './lib/cohort'
@@ -35,12 +37,30 @@
     return best ? best.id : null
   }
 
+  // Seed the simulator with three related inflammatory conditions
+  // (atopic-airway + skin) so the default Simulate run has something
+  // interesting to chew on instead of drawing from the bare prior.
+  // Looked up by exact description so we keep working if vocab ids
+  // shift between bundles. Falls back silently if any of these aren't
+  // in the vocab.
+  const SIMULATOR_SEED_CONDITIONS = ['Asthma', 'Psoriasis', 'Atopic dermatitis']
+  function pickSimulatorSeedPrefix(b: typeof $bundle): number[] {
+    if (!b) return []
+    const out: number[] = []
+    for (const desc of SIMULATOR_SEED_CONDITIONS) {
+      const c = b.vocab.codes.find((x) => x.description === desc)
+      if (c) out.push(c.id)
+    }
+    return out
+  }
+
   onMount(async () => {
     installTooltips()
     try {
       const b = await loadBundle(import.meta.env.BASE_URL)
       bundle.set(b)
       selectedPhenotypeId.set(pickDefaultPhenotype(b))
+      simulatorPrefix.set(pickSimulatorSeedPrefix(b))
       const c = generateCohort({
         model: b.model,
         meanCodesPerDoc: b.corpusStats.mean_codes_per_doc,
