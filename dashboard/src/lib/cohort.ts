@@ -64,7 +64,12 @@ export function generateCohort(input: CohortInput): SyntheticCohort {
   let isCleanFlags: boolean[] = []
 
   // Sample one (theta, bag, isClean) without storing it yet, so the
-  // rejection-style path can choose whether to accept.
+  // rejection-style path can choose whether to accept. Patient theta is
+  // the Dirichlet-prior draw used to generate the bag (the "true" mix),
+  // not a posterior re-inference - keeps the Patient atlas's coloring
+  // diverse. The Simulator's E-step on the same bag will produce a
+  // different (typically broader) theta; that disagreement is an LDA
+  // property of broad topics rather than something we can patch out.
   const drawOne = () => {
     const theta = sampleDirichlet(model.alpha, rng)
     const nCodes = Math.max(1, samplePoisson(meanCodesPerDoc, rng))

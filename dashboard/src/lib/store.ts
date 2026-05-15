@@ -1,4 +1,5 @@
 import { writable, derived } from 'svelte/store'
+import type { UMAP } from 'umap-js'
 import type { DashboardBundle, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
@@ -10,10 +11,18 @@ export const cohort = writable<SyntheticCohort | null>(null)
 // PatientMap-local state) so navigating away from the Patient tab and
 // back does not retrigger UMAP fitting on a cohort that hasn't changed.
 // PatientMap invalidates this whenever `seed` differs from $cohort.seed.
+// We also keep the fitted UMAP instance so the Simulator can call
+// `.transform()` on new theta samples and plot them on the same atlas.
 export const patientProjection = writable<{
   patientCoords: number[][]
   seed: number
+  umap: UMAP
 } | null>(null)
+
+// True while a UMAP fit is in flight. Promoted to a store so both
+// PatientMap and the Simulator's mini-atlas can read it without
+// racing each other into a duplicate fit.
+export const patientProjectionFitting = writable<boolean>(false)
 
 // Reset the cached projection whenever the cohort itself is regenerated.
 // A new cohort has a new seed by construction, so the seed-equality check

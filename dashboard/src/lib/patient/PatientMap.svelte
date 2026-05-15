@@ -1,15 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import * as d3 from 'd3'
-  import { UMAP, cosine } from 'umap-js'
   import {
     bundle, cohort, selectedPatientId, selectedPhenotypeId,
     searchedConditionIdx, searchedPhenotypeForPatients, advancedView,
-    patientProjection,
+    patientProjection, patientProjectionFitting,
   } from '../store'
-  import { createRng } from '../sampling'
   import { phenotypeHue } from '../palette'
   import { displayedDominant } from '../dominant'
+  import { ensurePatientProjection } from './projection'
   import type { Phenotype, SyntheticPatient } from '../types'
 
   // Patient atlas is a de-novo 2D UMAP of the patient theta vectors using
@@ -24,33 +23,12 @@
   // the cluster shape is the read, not individual dots.
   const DOT_R = 3.2
 
-  // Projection is cached in a store keyed by cohort.seed. Storing it
-  // outside this component means navigating away from the Patient tab
-  // (which unmounts PatientMap) and back doesn't retrigger UMAP fitting
-  // on an unchanged cohort. `projecting` is local because it's transient
-  // UI state - the overlay only matters while this component is mounted.
-  let projecting = false
-
-  // We tried exposing n_neighbors as a user slider and it didn't surface
-  // useful tunability for our cohort - patients come out near-mono-
-  // phenotype (the trained Dirichlet alpha is concentrated), so there
-  // isn't much higher-order similarity for larger n_neighbors to surface.
-  // 50 sits a notch above umap-js's default (15) for a marginally less
-  // shattered layout without paying a fit-time penalty.
-  const UMAP_N_NEIGHBORS = 50
-
-  function computeProjection(patients: SyntheticPatient[], seed: number) {
-    const thetas = patients.map((p) => p.theta)
-    const umap = new UMAP({
-      nComponents: 2,
-      nNeighbors: Math.min(UMAP_N_NEIGHBORS, Math.max(2, patients.length - 1)),
-      minDist: 0.15,
-      distanceFn: cosine,
-      random: createRng(seed),
-    })
-    const patientCoords = umap.fit(thetas)
-    return { patientCoords, seed }
-  }
+  // Projection is cached in a store keyed by cohort.seed (see
+  // ./projection.ts). Storing it outside this component means navigating
+  // away from the Patient tab (which unmounts PatientMap) and back
+  // doesn't retrigger UMAP fitting on an unchanged cohort. The "fitting"
+  // flag also lives in the store so the simulator's mini-atlas doesn't
+  // race us into a duplicate fit.
 
 
   // Per-patient deterministic jitter prevents perfect overlap on the rare
@@ -188,23 +166,10 @@
   }
 
   // Refit UMAP only when the cohort identity (seed) changes. Selection
-  // changes re-render but reuse the cached projection. We defer the fit
-  // with setTimeout(0) so the "Computing layout..." overlay paints before
-  // UMAP blocks the main thread. The projection lives in a store keyed
-  // by seed, so unmount/remount (tab navigation) doesn't trigger a refit.
-  $: if ($bundle && $cohort && !projecting
-        && (!$patientProjection || $patientProjection.seed !== $cohort.seed)) {
-    projecting = true
-    const c = $cohort
-    setTimeout(() => {
-      try {
-        patientProjection.set(computeProjection(c.patients, c.seed))
-      } finally {
-        projecting = false
-        render()
-      }
-    }, 0)
-  }
+  // changes re-render but reuse the cached projection. The shared helper
+  // defers the fit with setTimeout(0) so the "Computing layout..." overlay
+  // paints before UMAP blocks the main thread.
+  $: $cohort, ensurePatientProjection()
   $: $selectedPatientId, $phenotypeHue, $searchedConditionIdx, $searchedPhenotypeForPatients, $advancedView, $patientProjection && svgEl && render()
 
   // For the legend caption: count of patients currently visible on the
@@ -218,7 +183,7 @@
 <figure class="map">
   <div class="canvas">
     <svg bind:this={svgEl} role="img" aria-label="Patient atlas" preserveAspectRatio="xMidYMid meet"></svg>
-    {#if projecting || !$patientProjection}
+    {#if $patientProjectionFitting || !$patientProjection}
       <div class="overlay">
         <span class="loading-dot"></span>
         <span>computing layout</span>

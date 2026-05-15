@@ -23,7 +23,21 @@ export function variationalEStep(input: EStepInput): EStepResult {
   const K = alpha.length
   const entries = Array.from(codeCounts.entries())
 
-  let gamma = alpha.slice()
+  // Initialize gamma symmetrically (alpha + N/K) rather than gamma=alpha.
+  // With sparse Dirichlet priors (alpha << 1) and an asymmetric alpha
+  // vector, gamma=alpha makes the largest-alpha topic dominate from
+  // iteration zero via the digamma blowup: psi(alpha_k) for tiny alpha
+  // is hugely negative (e.g. psi(0.011) approx -91, psi(0.033) approx
+  // -31), and once one topic has a 60-nat head start in E[log theta]
+  // it captures every code's responsibility regardless of beta. Adding
+  // N/K to each gamma_k flattens the initial expected log-theta so the
+  // data (beta * count) determines the converged posterior. This is the
+  // same trick the smoothing initialization in Blei's reference impl
+  // uses and is required for asymmetric, sparse alpha vectors.
+  let totalCount = 0
+  for (const [, c] of codeCounts) totalCount += c
+  const init = totalCount / K
+  let gamma = alpha.map((a) => a + init)
   if (entries.length === 0) {
     const sum = gamma.reduce((a, b) => a + b, 0) || 1
     return { theta: gamma.map((g) => g / sum), gamma, iterations: 0 }
