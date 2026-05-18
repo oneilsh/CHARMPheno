@@ -418,7 +418,7 @@ lda-bq-fit-eval-cancer: zip $(WORKSPACE_ENV)
 	    --source-table condition_era \
 	    --doc-unit patient \
 	    --doc-min-length 20 \
-	    --K 80 \
+	    --K 40 \
 	    --subsampling-rate 0.2 \
 	    --max-iter 20 \
 	    --person-mod 1 \
