@@ -37,7 +37,6 @@ export const selectedPhenotypeId = writable<number | null>(null)
 export const selectedPatientId = writable<string | null>(null)
 export const simulatorPrefix = writable<number[]>([])     // vocab indices (trimmed)
 export const advancedView = writable<boolean>(false)
-export const colorMode = writable<'npmi' | 'prevalence'>('npmi')
 export const hoveredCodeIdx = writable<number | null>(null)
 
 // Condition search: vocab index of a condition the user has pinned via the

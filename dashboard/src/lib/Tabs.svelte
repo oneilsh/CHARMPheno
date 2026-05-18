@@ -1,14 +1,9 @@
 <script lang="ts">
-  import { route, go } from './router'
-  const tabs: { id: 'atlas' | 'patient' | 'simulator'; label: string }[] = [
-    { id: 'atlas',     label: 'Phenotype Atlas' },
-    { id: 'patient',   label: 'Patient Atlas' },
-    { id: 'simulator', label: 'Simulator' },
-  ]
+  import { route, go, TABS } from './router'
 </script>
 
 <nav class="tabs" aria-label="Sections">
-  {#each tabs as t}
+  {#each TABS as t}
     <button
       class="tab"
       class:active={$route === t.id}

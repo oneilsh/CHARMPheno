@@ -50,10 +50,11 @@
   }
 
   // Clear the result whenever the prefix changes so the output never
-  // reflects a stale set of starting conditions. Subscribing to the
-  // prefix store rather than reading it directly so this fires on every
-  // edit (add, remove, draw-from-phenotype).
-  simulatorPrefix.subscribe(() => { result = null })
+  // reflects a stale set of starting conditions. Using Svelte's reactive
+  // syntax (rather than a bare .subscribe()) so the dependency is auto-
+  // unsubscribed when this component unmounts - a raw .subscribe() leaks
+  // a handler every time the Simulator tab is left and re-entered.
+  $: $simulatorPrefix, (result = null)
 
   // Mean theta across samples for the profile bar. Aggregating to mean
   // is the right move here - taking per-component medians would not sum

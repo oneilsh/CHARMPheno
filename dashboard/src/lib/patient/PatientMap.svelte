@@ -170,7 +170,11 @@
   // defers the fit with setTimeout(0) so the "Computing layout..." overlay
   // paints before UMAP blocks the main thread.
   $: $cohort, ensurePatientProjection()
-  $: $selectedPatientId, $phenotypeHue, $searchedConditionIdx, $searchedPhenotypeForPatients, $advancedView, $patientProjection && svgEl && render()
+  // phenotypeHue is intentionally NOT in this dep list: it only changes
+  // when the bundle (and thus phenotypeOrder) does, and render() reads
+  // the current value when it runs - including it just forces a redraw
+  // on bundle load that the $patientProjection dependency already covers.
+  $: $selectedPatientId, $searchedConditionIdx, $searchedPhenotypeForPatients, $advancedView, $patientProjection && svgEl && render()
 
   // For the legend caption: count of patients currently visible on the
   // atlas. Basic = clean only; advanced = full cohort.

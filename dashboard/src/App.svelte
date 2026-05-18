@@ -4,13 +4,22 @@
     bundle, advancedView, cohort, selectedPhenotypeId, simulatorPrefix,
   } from './lib/store'
   import { loadBundle } from './lib/bundle'
-  import { route } from './lib/router'
+  import { route, type Route } from './lib/router'
   import { generateCohort } from './lib/cohort'
   import Tabs from './lib/Tabs.svelte'
   import Atlas from './lib/tabs/Atlas.svelte'
   import Patient from './lib/tabs/Patient.svelte'
   import Simulator from './lib/tabs/Simulator.svelte'
   import { installTooltips } from './lib/tooltip'
+
+  // Mapping from route id to its top-level tab component. Paired with
+  // router.ts's TABS list, adding a new tab is then a two-line change:
+  // append to TABS, add an entry here.
+  const TAB_COMPONENTS: Record<Route, ConstructorOfATypedSvelteComponent> = {
+    atlas: Atlas,
+    patient: Patient,
+    simulator: Simulator,
+  }
 
   // Initial batch size. Adaptive sizing in cohort.ts may push the final
   // count higher (rounded to multiples of 100) until at least one of the
@@ -120,7 +129,7 @@
     <p class="loading"><span class="loading-dot"></span> loading model bundle</p>
   {:else}
     <Tabs />
-    {#if $route === 'atlas'}<Atlas />{:else if $route === 'patient'}<Patient />{:else}<Simulator />{/if}
+    <svelte:component this={TAB_COMPONENTS[$route]} />
   {/if}
 </main>
 
