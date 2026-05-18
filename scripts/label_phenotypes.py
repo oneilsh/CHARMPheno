@@ -245,12 +245,21 @@ topics; usage can range from <1% (rare condition) to several percent \
 phenotype, and neither does α near floor on its own. KL is what \
 matters.
 
-- **background** — KL is moderate (above the dead threshold, well \
-below the fit's max) AND top concepts are common comorbidities or \
-generic acute symptoms (e.g. HTN/HLD/T2DM/GERD/anxiety; or pain/chest \
-pain/nausea/SoB/vomiting). Typically high usage. The topic carries \
-real data but the pattern is the corpus's chronic or acute baseline, \
-useful for cohort *exclusion*, not selection.
+- **background** — Two recognized patterns:
+  (i) KL is moderate (above the dead threshold, well below the fit's \
+max) AND top concepts are common comorbidities or generic acute \
+symptoms (e.g. HTN/HLD/T2DM/GERD/anxiety; or pain/chest pain/nausea/ \
+SoB/vomiting).
+  (ii) **KL is at or below the dead threshold BUT α is well above \
+median (typically 3× median or higher, often the fit's α-max).** This \
+is the universal-symptom or chronic-comorbidity catch-all topic that \
+absorbs every patient's baseline coding load. Its top-N looks like \
+corpus marginal (low KL) precisely because every doc loads heavily on \
+it (high α) — that's the topic's job. Calling such a topic `dead` \
+would mis-label something carrying 10–70% of total corpus mass.
+Either pattern: the topic carries real data but the pattern is the \
+corpus's chronic or acute baseline, useful for cohort *exclusion*, \
+not selection.
 
 - **anchor** — one concept dominates both rankings; the topic \
 essentially names that concept.
@@ -288,24 +297,38 @@ two halves require unrelated mechanisms or just happen to land in the \
 same topic, it is `mixed`.
 
 - **dead** — either:
-  (a) KL ≤ {kl_dead_threshold:.3f} → the topic's word distribution is \
-      essentially the corpus marginal (dead-case-b, common-words \
-      pseudo-coherent baseline). Always dead, regardless of α.
+  (a) KL ≤ {kl_dead_threshold:.3f} AND α near floor → the topic's word \
+      distribution is essentially the corpus marginal AND the topic \
+      carries little doc mass (unused slot whose top-N is η-smoothing \
+      noise approximating common-word baseline). This is the \
+      low-KL-low-α case. **If α is well above median (3×+ median), \
+      see `background` instead — the topic absorbs real mass and \
+      should not be called dead just because its top-N matches the \
+      corpus marginal.**
   (b) KL above the threshold BUT the top-N is genuinely incoherent — \
       rare scattered concepts with no shared theme and no clinical \
-      story (dead-case-a, unused slot whose top-N is η-smoothing \
-      noise). Rarer than (a). α near floor + low NPMI strengthens this \
-      case but is not required.
-Either way: no useful clinical interpretation.
+      story (case a from the prior framing, unused slot whose top-N \
+      is η-smoothing noise of rare concepts). Rarer than (a). α near \
+      floor + low NPMI strengthens this case but is not required.
+Either way: no useful clinical interpretation AND no significant mass.
 
 ## Decision order
 
 To avoid rationalizing a label first and then picking a quality, \
 classify in this order:
 
-1. **Check KL against the dead threshold.** KL ≤ {kl_dead_threshold:.3f} → \
-`dead` (case b), stop. The topic is the corpus baseline regardless of \
-how the top-N reads.
+1. **Check KL against the dead threshold.** If KL ≤ \
+{kl_dead_threshold:.3f}, the topic's word distribution is the corpus \
+marginal — now check α to disambiguate:
+   - **α well above median (3×+ median, often the fit's α-max)** → \
+`background`. This is the universal-symptom or chronic-comorbidity \
+catch-all that absorbs real corpus mass (every doc loads on it). \
+Stop.
+   - **α at or near floor** → `dead` (case a — low-KL-low-α, unused \
+slot whose top-N is η-smoothing noise). Stop.
+The disambiguator is purely α-magnitude. KL ≤ threshold + high α = \
+real mass-bearing baseline (background); KL ≤ threshold + floor α = \
+no mass and no signal (dead).
 2. Check whether one concept dominates both rankings → `anchor`.
 3. **Check for background BEFORE checking for mixed.** If top \
 concepts are HTN/HLD/T2DM/GERD/anxiety/obesity for chronic catch-all, \
