@@ -14,10 +14,11 @@ Currently implemented:
   to the 365 days starting at that first dx. Requires >= 365 days of
   observation_period coverage both before (to make "first" meaningful)
   and after (to make the doc window fully observed) the index date.
-- ``first_pregnancy_year``: patients with a first pregnancy-related
-  condition in their record, windowed to the 365 days starting at that
-  first occurrence (covers gestation ~280d + ~85d postpartum). Same
-  observation-period bracketing as the cancer cohort.
+- ``first_dementia_year``: patients with a first all-cause dementia
+  diagnosis (Alzheimer's, vascular, Lewy body, FTD, dementia NOS — i.e.
+  descendants of SNOMED "Dementia"), windowed to the 365 days starting
+  at that first dx. Same observation-period bracketing as the cancer
+  cohort.
 """
 from __future__ import annotations
 
@@ -49,30 +50,37 @@ _WINDOW_DAYS = 365
 
 
 # Top-level SNOMED concept whose descendants define the inclusion set for
-# pregnancy. concept_ancestor(4128331) should return pregnancy states,
-# trimester findings, gestational complications, delivery outcomes, etc.
+# all-cause dementia. concept_ancestor(4182210) should return AD,
+# vascular dementia, DLB, FTD, dementia NOS, mixed dementia, etc.
 #
-# VERIFY ON FIRST RUN: if your CDR's vocab maps pregnancy differently,
-# a quick sanity check is to count descendants:
+# VERIFY ON FIRST RUN: a quick sanity check is to count descendants:
 #   SELECT COUNT(*) FROM concept_ancestor
-#   WHERE ancestor_concept_id = 4128331;
-# Expect hundreds-to-thousands of descendants. If you see 0, swap for
-# the correct OMOP concept_id for the SNOMED "Pregnancy" hierarchy in
-# your vocab version.
-_PREGNANCY_ANCESTOR = 4128331
+#   WHERE ancestor_concept_id = 4182210;
+# Expect dozens-to-hundreds of descendants. If you see 0, swap for the
+# correct OMOP concept_id for the SNOMED "Dementia" hierarchy in your
+# vocab version.
+#
+# Choice rationale: we deliberately go broad (all-cause) rather than
+# AD-only because EHR coding is notoriously mushy between AD vs
+# "dementia NOS" vs vascular — a pure-AD cohort would silently exclude
+# real-AD patients whose providers happened to code them differently.
+# The post-onset phenotype cascade is also similar across dementia
+# subtypes (delirium, falls, polypharmacy, behavioral disturbance,
+# aspiration pneumonia, end-of-life care), so the breadth helps without
+# diluting the signal.
+_DEMENTIA_ANCESTOR = 4182210
 
-# No exclusions for v1: pregnancy losses, ectopic pregnancies, and
-# complicated gestations are all part of the trajectory we want to
-# capture. Easy to add later if a specific subgroup needs to be carved
-# out (e.g. exclude termination-only encounters).
-_PREGNANCY_EXCLUSION_ANCESTORS: tuple[int, ...] = ()
+# No exclusions for v1: capturing the full dementia-syndrome trajectory
+# is the goal. Kept as a constant (not inlined) so adding exclusions
+# later is a one-liner.
+_DEMENTIA_EXCLUSION_ANCESTORS: tuple[int, ...] = ()
 
 
 # Names accepted by the CLI/loader. Add a new key here when adding a new
 # cohort function so the registry stays the single source of truth.
 SUPPORTED_COHORTS: tuple[str, ...] = (
     "first_cancer_year",
-    "first_pregnancy_year",
+    "first_dementia_year",
 )
 
 
@@ -107,19 +115,20 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "and the follow-up window is fully observed."
         ),
     },
-    "first_pregnancy_year": {
-        "id": "first_pregnancy_year",
-        "label": "Pregnancy (1 year windows post-onset)",
+    "first_dementia_year": {
+        "id": "first_dementia_year",
+        "label": "Dementia (1 year windows post-diagnosis)",
         "description": (
-            "Patients with a first pregnancy-related condition in their "
-            "record (SNOMED 4128331 and descendants — pregnancy states, "
-            "trimester findings, gestational complications, delivery "
-            "outcomes). The document window is the 365 days starting at "
-            "that first occurrence, covering full gestation (~280 days) "
-            "plus the early postpartum period. Patients must have at "
-            "least 365 days of observation_period coverage both before "
-            "and after the index date, so 'first' is meaningful and the "
-            "follow-up window is fully observed."
+            "Patients with a first all-cause dementia diagnosis (SNOMED "
+            "4182210 and descendants — Alzheimer's, vascular dementia, "
+            "Lewy body dementia, frontotemporal dementia, dementia NOS, "
+            "mixed dementia). The document window is the 365 days "
+            "starting at that first diagnosis, capturing the early-stage "
+            "comorbidity cascade (delirium, falls, polypharmacy, "
+            "behavioral disturbance, aspiration pneumonia). Patients "
+            "must have at least 365 days of observation_period coverage "
+            "both before and after the index date, so 'first' is "
+            "meaningful and the follow-up window is fully observed."
         ),
     },
 }
@@ -156,8 +165,8 @@ def apply_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
         )
-    if cohort == "first_pregnancy_year":
-        return apply_first_pregnancy_year_cohort(
+    if cohort == "first_dementia_year":
+        return apply_first_dementia_year_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
         )
@@ -260,7 +269,7 @@ def apply_first_cancer_year_cohort(
     )
 
 
-def apply_first_pregnancy_year_cohort(
+def apply_first_dementia_year_cohort(
     cond_df: DataFrame,
     *,
     spark: SparkSession,
@@ -268,13 +277,11 @@ def apply_first_pregnancy_year_cohort(
     billing_project: str,
     date_col: str,
 ) -> DataFrame:
-    """Filter to patients with a first pregnancy + 1-year follow-up window.
+    """Filter to patients with a first dementia dx + 1-year follow-up.
 
     Mirrors :func:`apply_first_cancer_year_cohort` but anchored on the
-    SNOMED "Pregnancy" hierarchy with no ancestor exclusions. The 365-day
-    window covers full gestation (~280 days) plus early postpartum
-    (~85 days), which is when the bulk of pregnancy-specific coding
-    activity happens.
+    SNOMED "Dementia" hierarchy with no ancestor exclusions — all-cause
+    dementia is intentional (see module-level comment on _DEMENTIA_ANCESTOR).
 
     Args:
         cond_df: events DataFrame from load_omop_bigquery (must have
@@ -283,13 +290,13 @@ def apply_first_pregnancy_year_cohort(
             load_omop_bigquery — needed to read concept_ancestor +
             observation_period from the same CDR.
         date_col: name of the calendar-date column on ``cond_df`` used
-            both to find the first pregnancy event and to bound the doc
+            both to find the first dementia event and to bound the doc
             window. ``condition_start_date`` for condition_occurrence,
             ``condition_era_start_date`` for condition_era.
 
     Returns:
         A DataFrame with the same schema as ``cond_df``, filtered to
-        rows where the person had a qualifying first pregnancy event and
+        rows where the person had a qualifying first dementia dx and
         the row's date lies in [index_date, index_date + 365d).
     """
     def _read(table: str) -> DataFrame:
@@ -303,25 +310,25 @@ def apply_first_pregnancy_year_cohort(
     ca = _read("concept_ancestor").select(
         "ancestor_concept_id", "descendant_concept_id",
     )
-    pregnancy_concepts = (
-        ca.where(F.col("ancestor_concept_id") == _PREGNANCY_ANCESTOR)
+    dementia_concepts = (
+        ca.where(F.col("ancestor_concept_id") == _DEMENTIA_ANCESTOR)
           .select(F.col("descendant_concept_id").alias("concept_id"))
           .distinct()
     )
     # Exclusion subtract is a no-op for v1 (empty tuple) but kept here
     # symmetric with the cancer cohort so adding exclusions later is a
     # one-line change.
-    if _PREGNANCY_EXCLUSION_ANCESTORS:
+    if _DEMENTIA_EXCLUSION_ANCESTORS:
         excluded = (
             ca.where(F.col("ancestor_concept_id").isin(
-                list(_PREGNANCY_EXCLUSION_ANCESTORS),
+                list(_DEMENTIA_EXCLUSION_ANCESTORS),
             ))
             .select(F.col("descendant_concept_id").alias("concept_id"))
         )
-        pregnancy_concepts = pregnancy_concepts.subtract(excluded).distinct()
+        dementia_concepts = dementia_concepts.subtract(excluded).distinct()
 
     first_event = (
-        cond_df.join(F.broadcast(pregnancy_concepts), on="concept_id", how="inner")
+        cond_df.join(F.broadcast(dementia_concepts), on="concept_id", how="inner")
                .groupBy("person_id")
                .agg(F.min(date_col).alias("index_date"))
     )

@@ -15,8 +15,8 @@ def test_supported_cohorts_includes_first_cancer_year():
     assert "first_cancer_year" in SUPPORTED_COHORTS
 
 
-def test_supported_cohorts_includes_first_pregnancy_year():
-    assert "first_pregnancy_year" in SUPPORTED_COHORTS
+def test_supported_cohorts_includes_first_dementia_year():
+    assert "first_dementia_year" in SUPPORTED_COHORTS
 
 
 def test_apply_cohort_rejects_unknown_name():

@@ -327,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--cohort",
-        choices=["none", "first_cancer_year", "first_pregnancy_year"],
+        choices=["none", "first_cancer_year", "first_dementia_year"],
         default="none",
         help=("Optional cohort filter applied after the base BQ load. "
               "'none' (default) keeps the full sampled corpus. "
@@ -335,10 +335,10 @@ def main(argv: list[str] | None = None) -> int:
               "malignant-cancer dx (descendants of SNOMED 443392, minus "
               "NMSC and carcinoma in situ) and windows their events to "
               "the 365 days starting at that first dx. "
-              "'first_pregnancy_year' restricts to patients with a first "
-              "pregnancy-related condition (descendants of SNOMED 4128331) "
-              "and windows their events to the 365 days starting at that "
-              "first occurrence (covers gestation + early postpartum). "
+              "'first_dementia_year' restricts to patients with a first "
+              "all-cause dementia dx (descendants of SNOMED 4182210 — "
+              "AD, vascular, Lewy body, FTD, NOS) and windows their "
+              "events to the 365 days starting at that first dx. "
               "All cohort options require 365 days of observation_period "
               "coverage on each side of the index date. "
               "Requires --source-table condition_era."),

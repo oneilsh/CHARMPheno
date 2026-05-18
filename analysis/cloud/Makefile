@@ -107,12 +107,12 @@ help:
 	@echo "                         at that first dx. doc-unit=patient (one doc per patient's"
 	@echo "                         post-dx year)."
 	@echo "                         LDA_BQ_ARGS='--K 50 --max-iter 200 --person-mod 1 ...'"
-	@echo "  make lda-bq-fit-eval-pregnancy - LDA fit + eval on the first-pregnancy-year cohort."
-	@echo "                         Restricts to patients with a first pregnancy-related"
-	@echo "                         condition (descendants of SNOMED 4128331) and windows"
-	@echo "                         their events to the 365 days starting at that first"
-	@echo "                         occurrence (gestation + early postpartum). doc-unit=patient."
-	@echo "                         LDA_BQ_ARGS='--K 30 --max-iter 200 --person-mod 1 ...'"
+	@echo "  make lda-bq-fit-eval-dementia - LDA fit + eval on the first-dementia-year cohort."
+	@echo "                         Restricts to patients with a first all-cause dementia dx"
+	@echo "                         (descendants of SNOMED 4182210 -- AD, vascular, Lewy body,"
+	@echo "                         FTD, NOS) and windows their events to the 365 days starting"
+	@echo "                         at that first dx. doc-unit=patient."
+	@echo "                         LDA_BQ_ARGS='--K 40 --max-iter 200 --person-mod 1 ...'"
 	@echo "                         RESUME: make lda-bq-fit-eval-cancer RUN_ID=<existing-id> LDA_BQ_ARGS='--max-iter <N more>'"
 	@echo "  make inspect         - Live polling dashboard (run in a sibling terminal)"
 	@echo "                         Override args via INSPECT_ARGS='--interval 3'"
@@ -448,24 +448,24 @@ lda-bq-fit-eval-cancer: zip $(WORKSPACE_ENV)
 	    $(EVAL_ARGS)
 
 
-# LDA fit + eval on the first-pregnancy-year cohort. Mirrors the cancer
-# target above (auto RUN_ID, resume support, K=30 default since pregnancy
-# is a more narrowly scoped phenotype space than cancer) but pins:
-#   --cohort first_pregnancy_year  (descendants of SNOMED 4128331)
+# LDA fit + eval on the first-dementia-year cohort. Mirrors the cancer
+# target above (auto RUN_ID, resume support, K=40 default) but pins:
+#   --cohort first_dementia_year   (descendants of SNOMED 4182210)
 #   --source-table condition_era   (cohort window uses era_start dates)
-#   --doc-unit patient             (one doc per patient's post-onset year)
+#   --doc-unit patient             (one doc per patient's post-dx year)
 #   --doc-min-length 20            (per project convention)
-# RUN_ID prefix is `pregnancy_lda_` so artifacts are easy to identify.
+# RUN_ID prefix is `dementia_lda_` so artifacts are easy to identify.
 #
-# Pregnancy cohort note: AoU is adults 18+, so this captures adult
-# pregnancies only. On first run, sanity-check person count vs
-# expectation (~few percent of female participants per year).
-lda-bq-fit-eval-pregnancy: zip $(WORKSPACE_ENV)
+# Dementia cohort note: all-cause (AD + vascular + DLB + FTD + NOS). On
+# first run, sanity-check person count vs expectation (dementia is much
+# rarer in incidence than cancer; expect thousands rather than tens of
+# thousands of qualifying persons in AoU full-cohort).
+lda-bq-fit-eval-dementia: zip $(WORKSPACE_ENV)
 	@mkdir -p $(RUNS_DIR) && \
 	if [ -n "$(RUN_ID)" ]; then \
 	  RUN_ID_=$(RUN_ID); \
 	else \
-	  RUN_ID_=pregnancy_lda_$$(date +%Y%m%d_%H%M%S); \
+	  RUN_ID_=dementia_lda_$$(date +%Y%m%d_%H%M%S); \
 	fi; \
 	RUN_SAVE_DIR=$(RUNS_DIR)/$$RUN_ID_; \
 	if [ -d "$$RUN_SAVE_DIR" ]; then \
@@ -490,11 +490,11 @@ lda-bq-fit-eval-pregnancy: zip $(WORKSPACE_ENV)
 	    --resume-from "$$RESUME_" \
 	    --save-interval $(SAVE_INTERVAL) \
 	    --corpus-cache-uri "$(CORPUS_CACHE_URI)" \
-	    --cohort first_pregnancy_year \
+	    --cohort first_dementia_year \
 	    --source-table condition_era \
 	    --doc-unit patient \
 	    --doc-min-length 20 \
-	    --K 30 \
+	    --K 40 \
 	    --subsampling-rate 0.2 \
 	    --max-iter 20 \
 	    --person-mod 1 \

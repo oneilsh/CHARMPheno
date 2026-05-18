@@ -5,7 +5,7 @@ from charmpheno.omop.cohorts import (
     SUPPORTED_COHORTS,
     apply_cohort,
     apply_first_cancer_year_cohort,
-    apply_first_pregnancy_year_cohort,
+    apply_first_dementia_year_cohort,
     cohort_metadata,
 )
 from charmpheno.omop.doc_spec import (
@@ -27,7 +27,7 @@ __all__ = [
     "SUPPORTED_COHORTS",
     "apply_cohort",
     "apply_first_cancer_year_cohort",
-    "apply_first_pregnancy_year_cohort",
+    "apply_first_dementia_year_cohort",
     "cohort_metadata",
     "doc_spec_from_cli",
     "load_omop_bigquery",
