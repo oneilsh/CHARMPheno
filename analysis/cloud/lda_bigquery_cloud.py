@@ -151,6 +151,7 @@ def _load_or_build_corpus(spark, args, doc_spec, cdr, billing):
             vocab_size=args.vocab_size,
             min_df=args.min_df,
             doc_spec_manifest=doc_spec.manifest(),
+            cohort=args.cohort,
         )
         with _phase(f"corpus-cache lookup ({cache_uri}/{cache_key})"):
             cached = try_load(spark, cache_uri, cache_key)
@@ -163,6 +164,7 @@ def _load_or_build_corpus(spark, args, doc_spec, cdr, billing):
         omop = load_omop_bigquery(
             spark=spark, cdr_dataset=cdr, billing_project=billing,
             person_sample_mod=args.person_mod, source_table=args.source_table,
+            cohort=args.cohort,
         ).persist()
         summary = omop.agg(
             F.count(F.lit(1)).alias("rows"),
@@ -324,6 +326,17 @@ def main(argv: list[str] | None = None) -> int:
               "PatientYearDocSpec's era-replication semantics."),
     )
     parser.add_argument(
+        "--cohort", choices=["none", "first_cancer_year"], default="none",
+        help=("Optional cohort filter applied after the base BQ load. "
+              "'none' (default) keeps the full sampled corpus. "
+              "'first_cancer_year' restricts to patients with a first "
+              "malignant-cancer dx (descendants of SNOMED 443392, minus "
+              "NMSC and carcinoma in situ) and windows their events to "
+              "the 365 days starting at that first dx, requiring 365 days "
+              "of observation_period coverage on each side. "
+              "Requires --source-table condition_era."),
+    )
+    parser.add_argument(
         "--corpus-cache-uri", type=str, default=None,
         help=("Optional cache root for the (BQ load + BOW build) prep step. "
               "When set, the prep result is keyed by a hash of "
@@ -334,6 +347,11 @@ def main(argv: list[str] | None = None) -> int:
               "(persistent). Omit to disable caching."),
     )
     args = parser.parse_args(argv)
+
+    # Normalize "none" sentinel to actual None so downstream code can
+    # use a uniform "cohort is None means full corpus" idiom.
+    if args.cohort == "none":
+        args.cohort = None
 
     cdr = os.environ.get("WORKSPACE_CDR")
     billing = os.environ.get("GOOGLE_CLOUD_PROJECT")
@@ -359,6 +377,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.doc_unit == "patient_year" and args.source_table != "condition_era":
         print("ERROR: --doc-unit patient_year requires --source-table "
               "condition_era for era replication semantics.", file=sys.stderr)
+        return 1
+    # Cohort semantics rely on era_start as the index/window anchor.
+    if args.cohort is not None and args.source_table != "condition_era":
+        print(f"ERROR: --cohort {args.cohort} requires --source-table "
+              "condition_era for era-start window semantics.", file=sys.stderr)
         return 1
 
     _configure_logging()
@@ -446,6 +469,7 @@ def main(argv: list[str] | None = None) -> int:
                     "vocab_size": args.vocab_size,
                     "min_df": args.min_df,
                     "doc_spec": doc_spec.manifest(),
+                    "cohort": args.cohort,
                 },
             },
         )

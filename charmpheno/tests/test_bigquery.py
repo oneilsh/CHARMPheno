@@ -40,6 +40,16 @@ def test_rejects_zero_or_negative_sample_mod(spark):
         )
 
 
+def test_rejects_unknown_cohort(spark):
+    with pytest.raises(ValueError, match="cohort"):
+        load_omop_bigquery(
+            spark=spark,
+            cdr_dataset="proj.ds",
+            billing_project="some-project",
+            cohort="not_a_real_cohort",
+        )
+
+
 @pytest.mark.cluster
 def test_smoke_against_real_cdr(spark):
     """Reads a tiny slice from the workspace CDR; requires env + connector."""

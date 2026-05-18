@@ -100,6 +100,14 @@ help:
 	@echo "                         HDP_BQ_ARGS='--T 150 --K 15 ...'"
 	@echo "                         EVAL_ARGS='--model-class hdp --hdp-k 50'"
 	@echo "                         RESUME: make hdp-bq-fit-eval RUN_ID=<existing-id> HDP_BQ_ARGS='--max-iter <N more>'"
+	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
+	@echo "                         Restricts to patients with a first malignant-cancer dx"
+	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
+	@echo "                         in situ) and windows their events to the 365 days starting"
+	@echo "                         at that first dx. doc-unit=patient (one doc per patient's"
+	@echo "                         post-dx year)."
+	@echo "                         LDA_BQ_ARGS='--K 50 --max-iter 200 --person-mod 1 ...'"
+	@echo "                         RESUME: make lda-bq-fit-eval-cancer RUN_ID=<existing-id> LDA_BQ_ARGS='--max-iter <N more>'"
 	@echo "  make inspect         - Live polling dashboard (run in a sibling terminal)"
 	@echo "                         Override args via INSPECT_ARGS='--interval 3'"
 	@echo "  make smoke-dataproc  - alternate: stage to GCS, gcloud dataproc jobs submit pyspark"
@@ -363,6 +371,75 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    $(EVAL_ARGS)
 
 #		--no-optimize-corpus-concentration \
+
+# LDA fit + eval on the first-cancer-year cohort. Same scaffolding as
+# lda-bq-fit-eval (auto-generates a timestamped RUN_ID, resumes if the
+# dir exists, writes under $(RUNS_DIR)) but pins the cohort/doc-unit
+# combination required for the post-dx-year semantics:
+#   --cohort first_cancer_year   (descendants of SNOMED 443392 minus NMSC + in-situ)
+#   --source-table condition_era (cohort window uses era_start dates)
+#   --doc-unit patient           (one doc per patient's post-dx year;
+#                                 NOT patient_year, which would split a
+#                                 patient's year across calendar boundaries)
+#   --doc-min-length 20          (per project convention)
+# RUN_ID prefix is `cancer_lda_` so artifacts are easy to find vs the
+# baseline LDA runs.
+lda-bq-fit-eval-cancer: zip $(WORKSPACE_ENV)
+	@mkdir -p $(RUNS_DIR) && \
+	if [ -n "$(RUN_ID)" ]; then \
+	  RUN_ID_=$(RUN_ID); \
+	else \
+	  RUN_ID_=cancer_lda_$$(date +%Y%m%d_%H%M%S); \
+	fi; \
+	RUN_SAVE_DIR=$(RUNS_DIR)/$$RUN_ID_; \
+	if [ -d "$$RUN_SAVE_DIR" ]; then \
+	  echo "[fit-eval] RESUMING: RUN_ID=$$RUN_ID_  SAVE_DIR=$$RUN_SAVE_DIR"; \
+	  RESUME_=$$RUN_SAVE_DIR; \
+	else \
+	  echo "[fit-eval] FRESH:    RUN_ID=$$RUN_ID_  SAVE_DIR=$$RUN_SAVE_DIR"; \
+	  RESUME_=""; \
+	fi; \
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
+	    $(LDA_BQ_SCRIPT) \
+	    --save-dir "$$RUN_SAVE_DIR" \
+	    --resume-from "$$RESUME_" \
+	    --save-interval $(SAVE_INTERVAL) \
+	    --corpus-cache-uri "$(CORPUS_CACHE_URI)" \
+	    --cohort first_cancer_year \
+	    --source-table condition_era \
+	    --doc-unit patient \
+	    --doc-min-length 20 \
+	    --K 80 \
+	    --subsampling-rate 0.2 \
+	    --max-iter 20 \
+	    --person-mod 1 \
+	    --vocab-size 10000 \
+	    --min-df 10 \
+	    --tau0 64 \
+	    --kappa 0.7 \
+	    --print-topics-every 1 \
+	    $(LDA_BQ_ARGS) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
+	    $(EVAL_SCRIPT) \
+	    --checkpoint "$$RUN_SAVE_DIR" \
+	    $(EVAL_ARGS)
 
 
 inspect:

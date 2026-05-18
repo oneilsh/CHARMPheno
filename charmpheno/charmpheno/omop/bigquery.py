@@ -29,6 +29,7 @@ from __future__ import annotations
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
+from charmpheno.omop.cohorts import SUPPORTED_COHORTS, apply_cohort
 from charmpheno.omop.schema import validate
 
 _SUPPORTED_CONCEPT_TYPES: tuple[str, ...] = ("condition",)
@@ -43,6 +44,7 @@ def load_omop_bigquery(
     concept_types: tuple[str, ...] = ("condition",),
     person_sample_mod: int | None = None,
     source_table: str = "condition_occurrence",
+    cohort: str | None = None,
 ) -> DataFrame:
     """Load OMOP-shaped data from a BigQuery CDR dataset.
 
@@ -62,6 +64,10 @@ def load_omop_bigquery(
             `visit_occurrence_id`; "condition_era" emits one row per condition
             era with `condition_era_start_date` + `condition_era_end_date`
             and no visit_occurrence_id (eras span visits).
+        cohort: optional cohort filter applied after the base load. None
+            (default) keeps the full sampled corpus. See
+            ``charmpheno.omop.cohorts.SUPPORTED_COHORTS`` for accepted names
+            (e.g. "first_cancer_year").
 
     Returns:
         DataFrame with the canonical required OMOP columns
@@ -72,8 +78,9 @@ def load_omop_bigquery(
     Raises:
         NotImplementedError: if concept_types contains anything other than
             "condition".
-        ValueError: if cdr_dataset is malformed, person_sample_mod < 1, or
-            source_table is unrecognized.
+        ValueError: if cdr_dataset is malformed, person_sample_mod < 1,
+            source_table is unrecognized, or cohort is set to an unknown
+            name.
     """
     if not isinstance(cdr_dataset, str) or cdr_dataset.count(".") != 1:
         raise ValueError(
@@ -93,6 +100,11 @@ def load_omop_bigquery(
         raise ValueError(
             f"source_table {source_table!r} not supported "
             f"(supported: {_SUPPORTED_SOURCE_TABLES})"
+        )
+    if cohort is not None and cohort not in SUPPORTED_COHORTS:
+        raise ValueError(
+            f"cohort {cohort!r} not supported "
+            f"(supported: {SUPPORTED_COHORTS})"
         )
 
     def _read(table: str) -> DataFrame:
@@ -136,6 +148,21 @@ def load_omop_bigquery(
     omop = cond.join(concept, on="concept_id", how="left")
     # Reorder so canonical required columns come first, then source-specific.
     omop = omop.select("person_id", "concept_id", "concept_name", *extra_cols)
+
+    if cohort is not None:
+        # The cohort filter applies AFTER concept-name join so callers see
+        # the same canonical schema regardless of cohort. The date column
+        # used by the cohort logic differs across source_table modes.
+        date_col = (
+            "condition_start_date" if source_table == "condition_occurrence"
+            else "condition_era_start_date"
+        )
+        omop = apply_cohort(
+            omop, cohort,
+            spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project,
+            date_col=date_col,
+        )
 
     validate(omop)
     return omop

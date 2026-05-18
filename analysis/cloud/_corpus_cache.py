@@ -39,12 +39,15 @@ def compute_cache_key(
     vocab_size: int | None,
     min_df: int | float,
     doc_spec_manifest: dict,
+    cohort: str | None = None,
 ) -> str:
     """Stable 16-hex-char hash of the inputs that determine the cached corpus.
 
     Schema version `v` is bumped if the cached file layout or any upstream
     transformation changes shape in a non-back-compat way; old cache entries
-    silently miss and rebuild rather than load wrong data.
+    silently miss and rebuild rather than load wrong data. v=3 added the
+    cohort key so cohort-filtered corpora can't collide with their full-
+    corpus equivalents.
     """
     payload = {
         "source_table": source_table,
@@ -52,7 +55,8 @@ def compute_cache_key(
         "vocab_size": vocab_size,
         "min_df": float(min_df),
         "doc_spec": doc_spec_manifest,
-        "v": 2,
+        "cohort": cohort,
+        "v": 3,
     }
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
