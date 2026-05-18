@@ -74,13 +74,58 @@ DEFAULT_MAX_WORDS = 6
 # `--model` is not provided. When `--model` IS provided, its prefix selects
 # which env var to read (and the entry's default name is ignored).
 #   (model_prefix, env_var, default_model_name)
+#
+# Defaults pick the current frontier-large model in each family. The
+# labeling rubric leans on multi-step reasoning (KL gap-based classifier
+# selection, conjunction vs topic-merging discrimination, cohort-context
+# disambiguation) — small/cheap models like haiku-4-5 and gpt-4o-mini
+# under-classify mixed topics and produce vaguer labels here. Costs for
+# a typical K=80 bundle are still in the low single-dollar range with
+# the frontier large models; cheaper models are available via --model.
 PROVIDER_CHAIN: list[tuple[str, str, str]] = [
-    ("anthropic", "CHARMPHENO_LABEL_KEY_ANTHROPIC", "claude-haiku-4-5"),
-    ("openai", "CHARMPHENO_LABEL_KEY_OPENAI", "gpt-4o-mini"),
-    ("google-gla", "CHARMPHENO_LABEL_KEY_GOOGLE", "gemini-2.5-flash"),
+    ("anthropic", "CHARMPHENO_LABEL_KEY_ANTHROPIC", "claude-opus-4-7"),
+    ("openai", "CHARMPHENO_LABEL_KEY_OPENAI", "gpt-5"),
+    ("google-gla", "CHARMPHENO_LABEL_KEY_GOOGLE", "gemini-2.5-pro"),
 ]
 
 QualityCategory = Literal["phenotype", "background", "anchor", "mixed", "dead"]
+
+
+def _build_cohort_context_block(cohort: dict[str, str] | None) -> str:
+    """Render the cohort-context section, or empty string if no cohort meta.
+
+    Cohort context is a *background condition* of the dataset (which
+    patients were included, what document window was used) — not a hint
+    about any specific topic. Giving it to the model improves
+    disambiguation (a topic of joint pain + fatigue in an oncology
+    cohort is more plausibly chemotherapy fallout than primary RA), but
+    we explicitly warn against forcing every topic into the cohort's
+    frame: real comorbidity-baseline topics still exist in filtered
+    cohorts and should still be labeled as such.
+    """
+    if not cohort:
+        return ""
+    label = cohort.get("label", "")
+    description = cohort.get("description", "")
+    return f"""\
+
+## Cohort context
+
+The model was fit on the following patient cohort. This is background \
+context — a boundary condition of the dataset, not a hint about what \
+any individual topic should look like:
+
+  - **{label}** — {description}
+
+Use this to disambiguate ambiguous topic content (a pattern that's \
+plausible in this cohort is more likely than one that isn't). DO NOT \
+force every topic into a cohort-specific frame: real chronic-comorbidity \
+catch-alls, acute-symptom baselines, and unrelated themes still appear \
+in filtered cohorts, and they should still be labeled honestly \
+(background / mixed / dead per the rubric below). The cohort filter \
+selects which patients were included; it does not guarantee every \
+learned topic is about the filter condition.
+"""
 
 
 def _build_system_prompt(
@@ -97,9 +142,11 @@ def _build_system_prompt(
     kl_dead_threshold: float,
     kl_dead_threshold_explanation: str,
     alpha_separates_well: bool,
+    cohort: dict[str, str] | None = None,
 ) -> str:
     # All substitutions happen once per run so the resulting string is
     # byte-identical across topics (enabling prompt caching).
+    cohort_block = _build_cohort_context_block(cohort)
     return f"""\
 You are a clinical informatics expert interpreting learned topics from \
 an LDA topic model trained over patient records. Each topic is a \
@@ -111,6 +158,7 @@ The current model is trained over patient conditions only (no drugs, \
 procedures, measurements, or labs); your interpretations should reflect \
 that — describe conditions and their clinical relationships, not \
 treatments or workups.
+{cohort_block}
 
 ## Two rankings
 
@@ -460,6 +508,7 @@ def _build_agent(
     kl_dead_threshold: float,
     kl_dead_threshold_explanation: str,
     alpha_separates_well: bool,
+    cohort: dict[str, str] | None = None,
 ):
     """Build a pydantic-ai Agent for the given model string with the API
     key passed in explicitly (not via env), structured output, and the
@@ -523,6 +572,7 @@ def _build_agent(
             kl_dead_threshold=kl_dead_threshold,
             kl_dead_threshold_explanation=kl_dead_threshold_explanation,
             alpha_separates_well=alpha_separates_well,
+            cohort=cohort,
         ),
         output_type=PhenotypeLabel,
     )
@@ -940,6 +990,7 @@ def main(argv: list[str] | None = None) -> int:
     model_p = bundle_dir / "model.json"
     vocab_p = bundle_dir / "vocab.json"
     phens_p = bundle_dir / "phenotypes.json"
+    stats_p = bundle_dir / "corpus_stats.json"
     for p in (model_p, vocab_p, phens_p):
         if not p.is_file():
             raise SystemExit(f"missing bundle file: {p}")
@@ -947,6 +998,14 @@ def main(argv: list[str] | None = None) -> int:
     model_b = json.loads(model_p.read_text())
     vocab_b = json.loads(vocab_p.read_text())
     phens_b = json.loads(phens_p.read_text())
+    # corpus_stats.json optional for back-compat (older bundles predate
+    # the sidecar). The only field we read here is `cohort`, which is
+    # itself optional within the sidecar; missing means "no cohort
+    # context — treat as general population".
+    cohort_meta: dict[str, str] | None = None
+    if stats_p.is_file():
+        stats_b = json.loads(stats_p.read_text())
+        cohort_meta = stats_b.get("cohort") or None
 
     beta = model_b["beta"]
     alpha_arr = model_b.get("alpha")
@@ -1101,8 +1160,15 @@ def main(argv: list[str] | None = None) -> int:
         kl_dead_threshold=kl_dead_threshold,
         kl_dead_threshold_explanation=kl_threshold_explanation,
         alpha_separates_well=alpha_separates_well,
+        cohort=cohort_meta,
     )
     print(f"[label] using model {model_str}", flush=True)
+    if cohort_meta:
+        print(f"[label] cohort context: {cohort_meta.get('id')!r} — "
+              f"{cohort_meta.get('label', '')}", flush=True)
+    else:
+        print("[label] cohort context: none "
+              "(no corpus_stats.cohort in bundle)", flush=True)
 
     total = {"input": 0, "output": 0}
     for n, i in enumerate(todo, start=1):

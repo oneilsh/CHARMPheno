@@ -1,11 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import {
-    bundle, advancedView, cohort, selectedPhenotypeId, simulatorPrefix,
+    bundle, advancedView, cohort, manifest, patientProjection,
+    searchedConditionIdx, searchedPhenotypeForPatients,
+    selectedCohort, selectedPatientId, selectedPhenotypeId,
+    simulatorPrefix,
   } from './lib/store'
-  import { loadBundle } from './lib/bundle'
+  import { loadBundle, loadManifest } from './lib/bundle'
   import { route, type Route } from './lib/router'
   import { generateCohort } from './lib/cohort'
+  import CohortSelector from './lib/CohortSelector.svelte'
   import Tabs from './lib/Tabs.svelte'
   import Atlas from './lib/tabs/Atlas.svelte'
   import Patient from './lib/tabs/Patient.svelte'
@@ -63,10 +67,28 @@
     return out
   }
 
-  onMount(async () => {
-    installTooltips()
+  // Token guarding against stale loads: if the user changes cohorts twice
+  // in quick succession, the first fetch may resolve after the second.
+  // We bump `loadToken` on each load and bail out of any in-flight load
+  // whose token doesn't match the current one.
+  let loadToken = 0
+
+  async function loadCohortBundle(cohortId: string) {
+    const token = ++loadToken
+    // Hard reset: clear bundle + everything derived from it so the UI
+    // shows the "loading" state and stale views (selected phenotype IDs
+    // from the old K, the cohort's UMAP, etc.) don't briefly render
+    // against the new model's data.
+    bundle.set(null)
+    cohort.set(null)
+    patientProjection.set(null)
+    selectedPhenotypeId.set(null)
+    selectedPatientId.set(null)
+    searchedConditionIdx.set(null)
+    searchedPhenotypeForPatients.set(null)
     try {
-      const b = await loadBundle(import.meta.env.BASE_URL)
+      const b = await loadBundle(import.meta.env.BASE_URL, cohortId)
+      if (token !== loadToken) return  // a newer load has started; abandon
       bundle.set(b)
       selectedPhenotypeId.set(pickDefaultPhenotype(b))
       simulatorPrefix.set(pickSimulatorSeedPrefix(b))
@@ -80,9 +102,39 @@
         // truncate both to round-100 counts. See cohort.ts.
         qualityByPhenotype: b.phenotypes.phenotypes.map((p) => p.quality),
       })
+      if (token !== loadToken) return
       cohort.set(c)
+    } catch (e) {
+      if (token !== loadToken) return
+      error = (e as Error).message
+    }
+  }
+
+  onMount(async () => {
+    installTooltips()
+    try {
+      const m = await loadManifest(import.meta.env.BASE_URL)
+      manifest.set(m)
+      // Resolve which cohort to load: prior session's pick (from
+      // localStorage) if it still exists in the manifest, else the
+      // manifest's `default`. Bad/orphaned ids in localStorage are
+      // silently ignored — better than a broken first paint.
+      const persisted = ($selectedCohort && m.cohorts.some((c) => c.id === $selectedCohort))
+        ? $selectedCohort
+        : m.default
+      selectedCohort.set(persisted)
+      await loadCohortBundle(persisted)
     } catch (e) { error = (e as Error).message }
   })
+
+  // React to user-driven cohort changes (CohortSelector writes to the
+  // store). Skipped while the manifest hasn't loaded yet, and skipped
+  // for the initial selection because onMount handles that explicitly
+  // (preventing a double-load race on first paint).
+  let firstSelection = true
+  $: if ($manifest && $selectedCohort) {
+    if (firstSelection) { firstSelection = false } else { loadCohortBundle($selectedCohort) }
+  }
 </script>
 
 <main>
@@ -98,6 +150,10 @@
         <span class="title">CHARMPheno</span>
         <span class="subtitle">exploring latent phenotypes</span>
       </div>
+    </div>
+
+    <div class="cohort-slot">
+      <CohortSelector />
     </div>
 
     <div class="controls">
@@ -142,7 +198,7 @@
 
   .masthead {
     display: grid;
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto auto 1fr auto;
     align-items: center;
     gap: 2rem;
     padding: 1.5rem 0 1.25rem;
@@ -222,10 +278,19 @@
     display: flex;
     align-items: center;
     gap: 1.25rem;
-    /* Pin to the third grid column explicitly so the segmented control
+    /* Pin to the fourth grid column explicitly so the segmented control
        stays right-justified. Metadata sits inside .controls to the left
        of the seg in advanced mode. */
-    grid-column: 3;
+    grid-column: 4;
+  }
+
+  /* Cohort selector slot: middle column of the masthead grid so the
+     dropdown sits between the brand and the basic/advanced toggle.
+     Lets the selector be the visual anchor users grab to swap models. */
+  .cohort-slot {
+    grid-column: 2;
+    display: flex;
+    justify-content: flex-start;
   }
   /* Segmented control */
   .seg {

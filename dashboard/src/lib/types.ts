@@ -15,11 +15,32 @@ export interface VocabCode {
   id: number; code: string; description: string; domain: string; corpus_freq: number
 }
 export interface VocabBundle { codes: VocabCode[] }
+// Inline cohort metadata embedded in corpus_stats.json by the bundle
+// builder (see charmpheno.omop.cohorts.cohort_metadata). Optional —
+// older bundles exported before multi-cohort support shipped won't
+// carry it, and the UI falls back to the top-level manifest entry.
+export interface CohortMeta {
+  id: string; label: string; description: string
+}
 export interface CorpusStats {
   corpus_size_docs: number; mean_codes_per_doc: number; k: number; v: number; v_full: number
+  cohort?: CohortMeta
 }
 export interface DashboardBundle {
   model: Model; phenotypes: PhenotypesBundle; vocab: VocabBundle; corpusStats: CorpusStats
+}
+
+// Top-level data/manifest.json: lists which per-cohort bundles are
+// available and which one to load by default. The selector in the
+// masthead pulls its options from `cohorts`; `default` is used the
+// first time a user lands on the dashboard (subsequent visits restore
+// the last-selected cohort from localStorage).
+export interface CohortManifestEntry {
+  id: string; label: string; description: string
+}
+export interface CohortManifest {
+  default: string
+  cohorts: CohortManifestEntry[]
 }
 
 // In-memory only; not part of the bundle:

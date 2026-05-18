@@ -1,9 +1,12 @@
 """OMOP-shaped I/O and schema utilities."""
 from charmpheno.omop.bigquery import load_omop_bigquery
 from charmpheno.omop.cohorts import (
+    COHORT_METADATA,
     SUPPORTED_COHORTS,
     apply_cohort,
     apply_first_cancer_year_cohort,
+    apply_first_pregnancy_year_cohort,
+    cohort_metadata,
 )
 from charmpheno.omop.doc_spec import (
     DocSpec,
@@ -17,12 +20,15 @@ from charmpheno.omop.topic_prep import to_bow_dataframe
 
 __all__ = [
     "CANONICAL_COLUMNS",
+    "COHORT_METADATA",
     "DocSpec",
     "PatientDocSpec",
     "PatientYearDocSpec",
     "SUPPORTED_COHORTS",
     "apply_cohort",
     "apply_first_cancer_year_cohort",
+    "apply_first_pregnancy_year_cohort",
+    "cohort_metadata",
     "doc_spec_from_cli",
     "load_omop_bigquery",
     "load_omop_parquet",

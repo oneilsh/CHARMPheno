@@ -1,11 +1,31 @@
 import { writable, derived } from 'svelte/store'
 import type { UMAP } from 'umap-js'
-import type { DashboardBundle, SyntheticCohort } from './types'
+import type { CohortManifest, DashboardBundle, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
 
 export const bundle = writable<DashboardBundle | null>(null)
 export const cohort = writable<SyntheticCohort | null>(null)
+
+// The top-level cohort manifest — populated once on app boot from
+// data/manifest.json. Null while loading; thereafter immutable for the
+// session. Drives the masthead selector's options.
+export const manifest = writable<CohortManifest | null>(null)
+
+// Which cohort's bundle is currently loaded (matches the `id` of one of
+// the entries in `manifest.cohorts`). Persisted across sessions in
+// localStorage so reloading the page restores the user's last choice.
+// Set to null while the initial manifest is still being fetched.
+const COHORT_STORAGE_KEY = 'charmpheno.selectedCohort'
+const initialSelectedCohort: string | null = (() => {
+  try { return localStorage.getItem(COHORT_STORAGE_KEY) } catch { return null }
+})()
+export const selectedCohort = writable<string | null>(initialSelectedCohort)
+selectedCohort.subscribe((id) => {
+  try {
+    if (id) localStorage.setItem(COHORT_STORAGE_KEY, id)
+  } catch { /* private mode / disabled storage: best-effort persistence */ }
+})
 
 // Cached 2D UMAP projection of the current cohort. Held in a store (not
 // PatientMap-local state) so navigating away from the Patient tab and

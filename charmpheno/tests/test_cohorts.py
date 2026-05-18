@@ -15,6 +15,10 @@ def test_supported_cohorts_includes_first_cancer_year():
     assert "first_cancer_year" in SUPPORTED_COHORTS
 
 
+def test_supported_cohorts_includes_first_pregnancy_year():
+    assert "first_pregnancy_year" in SUPPORTED_COHORTS
+
+
 def test_apply_cohort_rejects_unknown_name():
     with pytest.raises(ValueError, match="not supported"):
         apply_cohort(

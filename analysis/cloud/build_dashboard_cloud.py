@@ -100,7 +100,9 @@ def main(argv: list[str] | None = None) -> int:
     import spark_vi.core.result as _spark_vi_core_result  # noqa: F401
 
     # Driver-side imports proven first.
-    from charmpheno.omop import DocSpec, load_omop_bigquery, to_bow_dataframe
+    from charmpheno.omop import (
+        DocSpec, cohort_metadata, load_omop_bigquery, to_bow_dataframe,
+    )
     from charmpheno.export.corpus_stats import (
         compute_corpus_stats_from_bow_df,
         write_corpus_stats_sidecar,
@@ -139,9 +141,11 @@ def main(argv: list[str] | None = None) -> int:
         doc_spec_manifest = corpus.get("doc_spec", {"name": "patient"})
         doc_spec = DocSpec.from_manifest(doc_spec_manifest)
         source_table = corpus.get("source_table", "condition_occurrence")
+        cohort_name = corpus.get("cohort")
         print(f"[driver]   corpus_manifest: cdr={corpus['cdr']}, "
               f"source_table={source_table}, "
-              f"person_mod={corpus['person_mod']}", flush=True)
+              f"person_mod={corpus['person_mod']}, "
+              f"cohort={cohort_name!r}", flush=True)
         print(f"[driver]   doc_spec: {doc_spec_manifest}", flush=True)
         print(f"[driver]   frozen vocab: {len(vocab_list)} terms", flush=True)
 
@@ -168,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
                 billing_project=billing,
                 person_sample_mod=corpus["person_mod"],
                 source_table=source_table,
+                cohort=cohort_name,
             ).persist()
             n_rows = omop.count()
             print(f"[driver]   OMOP: {n_rows} rows", flush=True)
@@ -273,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             write_corpus_stats_sidecar(
                 stats, out_dir / "corpus_stats.json", v_displayed=v_disp,
+                cohort=cohort_metadata(cohort_name),
             )
             print(f"[driver]   wrote 4 files to {out_dir} "
                   f"(V_disp={v_disp} K_disp={K_disp})", flush=True)

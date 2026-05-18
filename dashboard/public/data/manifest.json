@@ -1,0 +1,15 @@
+{
+  "default": "general",
+  "cohorts": [
+    {
+      "id": "general",
+      "label": "General Population (1 year windows)",
+      "description": "Unfiltered 1-year windows on 10% of AllOfUs condition data, no clinical inclusion or window constraint applied."
+    },
+    {
+      "id": "cancer",
+      "label": "Cancer (1 year windows post-diagnosis)",
+      "description": "Patients with a first malignant-cancer diagnosis (SNOMED 443392 and descendants), excluding non-melanoma skin cancer (BCC/SCC) and carcinoma in situ. The document window is the 365 days starting at that first diagnosis. Patients must have at least 365 days of observation_period coverage both before and after the index date, so 'first' is meaningful and the follow-up window is fully observed."
+    }
+  ]
+}

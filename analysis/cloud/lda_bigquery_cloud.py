@@ -326,14 +326,21 @@ def main(argv: list[str] | None = None) -> int:
               "PatientYearDocSpec's era-replication semantics."),
     )
     parser.add_argument(
-        "--cohort", choices=["none", "first_cancer_year"], default="none",
+        "--cohort",
+        choices=["none", "first_cancer_year", "first_pregnancy_year"],
+        default="none",
         help=("Optional cohort filter applied after the base BQ load. "
               "'none' (default) keeps the full sampled corpus. "
               "'first_cancer_year' restricts to patients with a first "
               "malignant-cancer dx (descendants of SNOMED 443392, minus "
               "NMSC and carcinoma in situ) and windows their events to "
-              "the 365 days starting at that first dx, requiring 365 days "
-              "of observation_period coverage on each side. "
+              "the 365 days starting at that first dx. "
+              "'first_pregnancy_year' restricts to patients with a first "
+              "pregnancy-related condition (descendants of SNOMED 4128331) "
+              "and windows their events to the 365 days starting at that "
+              "first occurrence (covers gestation + early postpartum). "
+              "All cohort options require 365 days of observation_period "
+              "coverage on each side of the index date. "
               "Requires --source-table condition_era."),
     )
     parser.add_argument(

@@ -51,15 +51,31 @@ def compute_corpus_stats(*, docs: Iterator[dict], vocab_size: int, k: int) -> Co
     )
 
 
-def write_corpus_stats_sidecar(stats: CorpusStats, out_path: Path, *, v_displayed: int) -> None:
-    """Write the small-scalars sidecar. v_displayed is the trimmed-vocab width."""
-    out_path.write_text(json.dumps({
+def write_corpus_stats_sidecar(
+    stats: CorpusStats,
+    out_path: Path,
+    *,
+    v_displayed: int,
+    cohort: dict[str, str] | None = None,
+) -> None:
+    """Write the small-scalars sidecar. v_displayed is the trimmed-vocab width.
+
+    ``cohort`` is an optional ``{id, label, description}`` dict (from
+    ``charmpheno.omop.cohorts.cohort_metadata``) describing which cohort
+    filter the corpus was fit on. Embedded in the sidecar so the dashboard
+    bundle is self-describing — the UI's cohort selector can use these
+    inline values without re-fetching every bundle's metadata.
+    """
+    payload: dict[str, object] = {
         "corpus_size_docs": stats.corpus_size_docs,
         "mean_codes_per_doc": stats.mean_codes_per_doc,
         "k": stats.k,
         "v": int(v_displayed),
         "v_full": stats.v_full,
-    }))
+    }
+    if cohort is not None:
+        payload["cohort"] = cohort
+    out_path.write_text(json.dumps(payload))
 
 
 def compute_corpus_stats_from_bow_df(bow_df: DataFrame, *, vocab_size: int, k: int) -> CorpusStats:

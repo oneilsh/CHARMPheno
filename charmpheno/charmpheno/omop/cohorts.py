@@ -14,6 +14,10 @@ Currently implemented:
   to the 365 days starting at that first dx. Requires >= 365 days of
   observation_period coverage both before (to make "first" meaningful)
   and after (to make the doc window fully observed) the index date.
+- ``first_pregnancy_year``: patients with a first pregnancy-related
+  condition in their record, windowed to the 365 days starting at that
+  first occurrence (covers gestation ~280d + ~85d postpartum). Same
+  observation-period bracketing as the cancer cohort.
 """
 from __future__ import annotations
 
@@ -44,9 +48,92 @@ _CANCER_EXCLUSION_ANCESTORS: tuple[int, ...] = (
 _WINDOW_DAYS = 365
 
 
+# Top-level SNOMED concept whose descendants define the inclusion set for
+# pregnancy. concept_ancestor(4128331) should return pregnancy states,
+# trimester findings, gestational complications, delivery outcomes, etc.
+#
+# VERIFY ON FIRST RUN: if your CDR's vocab maps pregnancy differently,
+# a quick sanity check is to count descendants:
+#   SELECT COUNT(*) FROM concept_ancestor
+#   WHERE ancestor_concept_id = 4128331;
+# Expect hundreds-to-thousands of descendants. If you see 0, swap for
+# the correct OMOP concept_id for the SNOMED "Pregnancy" hierarchy in
+# your vocab version.
+_PREGNANCY_ANCESTOR = 4128331
+
+# No exclusions for v1: pregnancy losses, ectopic pregnancies, and
+# complicated gestations are all part of the trajectory we want to
+# capture. Easy to add later if a specific subgroup needs to be carved
+# out (e.g. exclude termination-only encounters).
+_PREGNANCY_EXCLUSION_ANCESTORS: tuple[int, ...] = ()
+
+
 # Names accepted by the CLI/loader. Add a new key here when adding a new
 # cohort function so the registry stays the single source of truth.
-SUPPORTED_COHORTS: tuple[str, ...] = ("first_cancer_year",)
+SUPPORTED_COHORTS: tuple[str, ...] = (
+    "first_cancer_year",
+    "first_pregnancy_year",
+)
+
+
+# User-facing metadata for each cohort. Consumed by the dashboard bundle
+# builder (write into corpus_stats.json) so the UI's cohort selector has a
+# label + description without having to duplicate this text in the
+# frontend. Keep `label` short (fits in a dropdown); `description` is a
+# one-paragraph blurb shown when the cohort is selected.
+#
+# The "full" entry is the unfiltered general-population corpus (i.e. the
+# loader was called with cohort=None) and lets us treat the no-cohort
+# case identically to the filtered ones for selector + metadata purposes.
+COHORT_METADATA: dict[str, dict[str, str]] = {
+    "full": {
+        "id": "full",
+        "label": "General Population (1 year windows)",
+        "description": (
+            "Unfiltered 1-year windows on 10% of AllOfUs condition data, "
+            "no clinical inclusion or window constraint applied."
+        ),
+    },
+    "first_cancer_year": {
+        "id": "first_cancer_year",
+        "label": "Cancer (1 year windows post-diagnosis)",
+        "description": (
+            "Patients with a first malignant-cancer diagnosis (SNOMED "
+            "443392 and descendants), excluding non-melanoma skin cancer "
+            "(BCC/SCC) and carcinoma in situ. The document window is the "
+            "365 days starting at that first diagnosis. Patients must "
+            "have at least 365 days of observation_period coverage both "
+            "before and after the index date, so 'first' is meaningful "
+            "and the follow-up window is fully observed."
+        ),
+    },
+    "first_pregnancy_year": {
+        "id": "first_pregnancy_year",
+        "label": "Pregnancy (1 year windows post-onset)",
+        "description": (
+            "Patients with a first pregnancy-related condition in their "
+            "record (SNOMED 4128331 and descendants — pregnancy states, "
+            "trimester findings, gestational complications, delivery "
+            "outcomes). The document window is the 365 days starting at "
+            "that first occurrence, covering full gestation (~280 days) "
+            "plus the early postpartum period. Patients must have at "
+            "least 365 days of observation_period coverage both before "
+            "and after the index date, so 'first' is meaningful and the "
+            "follow-up window is fully observed."
+        ),
+    },
+}
+
+
+def cohort_metadata(cohort: str | None) -> dict[str, str]:
+    """Return the user-facing metadata dict for a cohort name.
+
+    ``cohort=None`` is treated as the ``"full"`` (unfiltered) cohort. An
+    unknown name raises KeyError — callers should validate against
+    ``SUPPORTED_COHORTS`` before calling this.
+    """
+    key = cohort if cohort is not None else "full"
+    return COHORT_METADATA[key]
 
 
 def apply_cohort(
@@ -66,6 +153,11 @@ def apply_cohort(
     """
     if cohort == "first_cancer_year":
         return apply_first_cancer_year_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+        )
+    if cohort == "first_pregnancy_year":
+        return apply_first_pregnancy_year_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
         )
@@ -158,6 +250,97 @@ def apply_first_cancer_year_cohort(
     # broadcasting cohort_df: at AoU scale a cancer cohort can run into
     # the hundreds of thousands of persons and the planner is in a
     # better position than we are to pick the join strategy.
+    return (
+        cond_df.join(cohort_df, on="person_id", how="inner")
+               .where(F.col(date_col) >= F.col("index_date"))
+               .where(F.col(date_col) < F.date_add(
+                   F.col("index_date"), _WINDOW_DAYS,
+               ))
+               .drop("index_date")
+    )
+
+
+def apply_first_pregnancy_year_cohort(
+    cond_df: DataFrame,
+    *,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+) -> DataFrame:
+    """Filter to patients with a first pregnancy + 1-year follow-up window.
+
+    Mirrors :func:`apply_first_cancer_year_cohort` but anchored on the
+    SNOMED "Pregnancy" hierarchy with no ancestor exclusions. The 365-day
+    window covers full gestation (~280 days) plus early postpartum
+    (~85 days), which is when the bulk of pregnancy-specific coding
+    activity happens.
+
+    Args:
+        cond_df: events DataFrame from load_omop_bigquery (must have
+            ``person_id``, ``concept_id``, and ``date_col``).
+        spark, cdr_dataset, billing_project: same shape as
+            load_omop_bigquery — needed to read concept_ancestor +
+            observation_period from the same CDR.
+        date_col: name of the calendar-date column on ``cond_df`` used
+            both to find the first pregnancy event and to bound the doc
+            window. ``condition_start_date`` for condition_occurrence,
+            ``condition_era_start_date`` for condition_era.
+
+    Returns:
+        A DataFrame with the same schema as ``cond_df``, filtered to
+        rows where the person had a qualifying first pregnancy event and
+        the row's date lies in [index_date, index_date + 365d).
+    """
+    def _read(table: str) -> DataFrame:
+        return (
+            spark.read.format("bigquery")
+            .option("table", f"{cdr_dataset}.{table}")
+            .option("parentProject", billing_project)
+            .load()
+        )
+
+    ca = _read("concept_ancestor").select(
+        "ancestor_concept_id", "descendant_concept_id",
+    )
+    pregnancy_concepts = (
+        ca.where(F.col("ancestor_concept_id") == _PREGNANCY_ANCESTOR)
+          .select(F.col("descendant_concept_id").alias("concept_id"))
+          .distinct()
+    )
+    # Exclusion subtract is a no-op for v1 (empty tuple) but kept here
+    # symmetric with the cancer cohort so adding exclusions later is a
+    # one-line change.
+    if _PREGNANCY_EXCLUSION_ANCESTORS:
+        excluded = (
+            ca.where(F.col("ancestor_concept_id").isin(
+                list(_PREGNANCY_EXCLUSION_ANCESTORS),
+            ))
+            .select(F.col("descendant_concept_id").alias("concept_id"))
+        )
+        pregnancy_concepts = pregnancy_concepts.subtract(excluded).distinct()
+
+    first_event = (
+        cond_df.join(F.broadcast(pregnancy_concepts), on="concept_id", how="inner")
+               .groupBy("person_id")
+               .agg(F.min(date_col).alias("index_date"))
+    )
+
+    op = _read("observation_period").select(
+        "person_id",
+        "observation_period_start_date",
+        "observation_period_end_date",
+    )
+    cohort_df = (
+        first_event.join(op, on="person_id", how="inner")
+                   .where(F.col("index_date") >= F.date_add(
+                       F.col("observation_period_start_date"), _WINDOW_DAYS,
+                   ))
+                   .where(F.date_add(F.col("index_date"), _WINDOW_DAYS)
+                          <= F.col("observation_period_end_date"))
+                   .select("person_id", "index_date")
+    )
+
     return (
         cond_df.join(cohort_df, on="person_id", how="inner")
                .where(F.col(date_col) >= F.col("index_date"))
