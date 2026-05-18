@@ -17,6 +17,7 @@ def test_top_n_trim_reorders_and_renormalizes(tmp_path: Path):
     ], dtype=float)
     alpha = np.array([0.1, 0.1])
     marginals = [0.10, 0.30, 0.01, 0.01, 0.58]   # col 4, then col 1 are top-2
+    doc_counts = [500, 500, 500, 500, 500]       # all comfortably above 0
     vocab_ids = [101, 202, 303, 404, 505]
     descriptions = {101: "A", 202: "B", 505: "E"}
     domains = {101: "condition", 202: "drug", 505: "procedure"}
@@ -25,8 +26,8 @@ def test_top_n_trim_reorders_and_renormalizes(tmp_path: Path):
         out_dir=tmp_path,
         lambda_=lambda_, alpha=alpha,
         vocab_ids=vocab_ids, descriptions=descriptions, domains=domains,
-        code_marginals=marginals,
-        corpus_size_docs=1000, top_n=2, min_doc_count=0,
+        code_marginals=marginals, code_doc_counts=doc_counts,
+        top_n=2, min_doc_count=0,
     )
 
     model = json.loads((tmp_path / "model.json").read_text())
@@ -55,53 +56,83 @@ def test_returns_v_displayed(tmp_path: Path):
     lambda_ = np.ones((K, V))
     alpha = np.array([0.1, 0.1])
     marginals = [0.4, 0.3, 0.2, 0.1]
+    doc_counts = [400, 300, 200, 100]
     vocab_ids = [10, 20, 30, 40]
     v_disp = write_model_and_vocab_bundles(
         out_dir=tmp_path,
         lambda_=lambda_, alpha=alpha,
         vocab_ids=vocab_ids, descriptions={}, domains={},
-        code_marginals=marginals,
-        corpus_size_docs=1000, top_n=10, min_doc_count=0,
+        code_marginals=marginals, code_doc_counts=doc_counts,
+        top_n=10, min_doc_count=0,
     )
     assert v_disp == V
 
 
 def test_min_doc_count_suppresses_small_cell_codes(tmp_path: Path):
-    """Codes with empirical doc-count in [1, min_doc_count) are dropped
-    from the displayed vocab (AoU-style group-size guard). Codes with
-    zero doc-count are excluded by construction (marginal=0)."""
+    """Codes appearing in fewer than min_doc_count distinct docs are
+    dropped from the displayed vocab (AoU-style group-size guard).
+    Filter is on real doc count — independent of token frequency,
+    corpus size, or mean_codes_per_doc."""
     K = 1
     lambda_ = np.ones((K, 5))
     alpha = np.array([0.1])
-    # corpus_size_docs=1000, threshold=20: a code is eligible iff
-    # marginal*1000 >= 20, i.e. marginal >= 0.020.
-    marginals = [0.40, 0.30, 0.001, 0.015, 0.05]  # idx 2 (1 doc) and idx 3 (15 docs) suppressed
+    marginals  = [0.40, 0.30, 0.001, 0.015, 0.05]
+    doc_counts = [ 800,  600,     1,    15,   100]  # idx 2 and 3 below threshold
     vocab_ids = [10, 20, 30, 40, 50]
     v_disp = write_model_and_vocab_bundles(
         out_dir=tmp_path,
         lambda_=lambda_, alpha=alpha,
         vocab_ids=vocab_ids, descriptions={}, domains={},
-        code_marginals=marginals,
-        corpus_size_docs=1000, top_n=10, min_doc_count=20,
+        code_marginals=marginals, code_doc_counts=doc_counts,
+        top_n=10, min_doc_count=20,
     )
     vocab = json.loads((tmp_path / "vocab.json").read_text())
     kept_codes = [c["code"] for c in vocab["codes"]]
-    # 10/20/50 are above threshold; 30 (1 doc) and 40 (15 docs) are dropped.
+    # 10/20/50 above threshold; 30 (1 doc) and 40 (15 docs) dropped.
+    # Ranking among survivors is by marginal: 10 (0.40), 20 (0.30), 50 (0.05).
     assert kept_codes == ["10", "20", "50"]
     assert v_disp == 3
+
+
+def test_min_doc_count_filter_independent_of_token_freq(tmp_path: Path):
+    """Regression: a code that's heavily token-frequent in one doc must
+    still be suppressed if doc count < threshold. Pre-fix, this case
+    silently passed because (token_marginal × corpus_size_docs) ≥ 20
+    accidentally cleared the broken filter even though the code was in
+    a single document."""
+    K = 1
+    lambda_ = np.ones((K, 2))
+    alpha = np.array([0.1])
+    # idx 0: appears 5000 times in ONE doc (very high token-frequency, 1 patient)
+    # idx 1: appears once each in 50 docs (low token-frequency, 50 patients)
+    # AoU-style privacy: idx 0 must be suppressed (1 patient); idx 1 keeps.
+    marginals  = [5000 / 5050, 50 / 5050]
+    doc_counts = [1, 50]
+    vocab_ids = [99, 200]
+    v_disp = write_model_and_vocab_bundles(
+        out_dir=tmp_path,
+        lambda_=lambda_, alpha=alpha,
+        vocab_ids=vocab_ids, descriptions={}, domains={},
+        code_marginals=marginals, code_doc_counts=doc_counts,
+        top_n=10, min_doc_count=20,
+    )
+    vocab = json.loads((tmp_path / "vocab.json").read_text())
+    assert [c["code"] for c in vocab["codes"]] == ["200"]
+    assert v_disp == 1
 
 
 def test_min_doc_count_zero_disables_guard(tmp_path: Path):
     K = 1
     lambda_ = np.ones((K, 3))
     alpha = np.array([0.1])
-    marginals = [0.5, 0.001, 0.001]  # latter two are sub-threshold at any nonzero guard
+    marginals = [0.5, 0.001, 0.001]
+    doc_counts = [500, 1, 1]  # latter two would be suppressed at any nonzero guard
     v_disp = write_model_and_vocab_bundles(
         out_dir=tmp_path,
         lambda_=lambda_, alpha=alpha,
         vocab_ids=[1, 2, 3], descriptions={}, domains={},
-        code_marginals=marginals,
-        corpus_size_docs=1000, top_n=10, min_doc_count=0,
+        code_marginals=marginals, code_doc_counts=doc_counts,
+        top_n=10, min_doc_count=0,
     )
     assert v_disp == 3
 
@@ -110,14 +141,15 @@ def test_min_doc_count_no_eligible_raises(tmp_path: Path):
     K = 1
     lambda_ = np.ones((K, 2))
     alpha = np.array([0.1])
-    marginals = [0.005, 0.005]  # 5 docs each at N=1000; below 20
+    marginals = [0.5, 0.5]
+    doc_counts = [5, 5]  # below threshold of 20
     with pytest.raises(ValueError, match="no codes have"):
         write_model_and_vocab_bundles(
             out_dir=tmp_path,
             lambda_=lambda_, alpha=alpha,
             vocab_ids=[1, 2], descriptions={}, domains={},
-            code_marginals=marginals,
-            corpus_size_docs=1000, top_n=10, min_doc_count=20,
+            code_marginals=marginals, code_doc_counts=doc_counts,
+            top_n=10, min_doc_count=20,
         )
 
 

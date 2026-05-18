@@ -57,6 +57,10 @@ and when is itself useful.
 
 (Append entries here as new insights are written, newest at top.)
 
+- [0023](0023-producer-consumer-unit-mismatches-invisible-until-small-scale.md) — Dimensional unit mismatches in producer/consumer pairs are invisible at large input scale; small cohorts expose them (ops, diagnostics)
+- [0022](0022-phenotype-vocabulary-refines-past-elbo-plateau.md) — Topic-word concentration on small-α tail topics continues refining well past mass-distribution convergence (lda, svi, diagnostics)
+- [0021](0021-cohort-corpora-two-anchor-mass-concentration.md) — Cohort-filtered corpora concentrate 90%+ of mass into two universal-anchor topics regardless of K (lda, doc-units, diagnostics)
+- [0020](0020-small-cohort-worker-count-reversal.md) — Below ~1k docs/worker/epoch, fewer Spark workers wins on wall time (ops, svi)
 - [0019](0019-lda-large-k-with-full-convergence-gracefully-unused-slots.md) — LDA at large K with full convergence gracefully under-uses excess capacity, no micro-cluster artifacts (lda, doc-units, diagnostics, hdp)
 - [0018](0018-full-corpus-plus-threshold-yields-unimodal-positive-npmi.md) — Full-corpus reference + min-pair-count threshold yields unimodal positive NPMI distribution (npmi, diagnostics, hdp)
 - [0017](0017-hdp-gamma-sensitivity-is-prior-dominance.md) — HDP γ-sensitivity reveals prior-dominated outcomes (hdp, diagnostics)

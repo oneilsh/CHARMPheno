@@ -1,10 +1,30 @@
 """Aggregate corpus statistics for the dashboard bundle.
 
 The driver computes these once from a held-out (or full) BOW and uses them
-in two ways: (1) the small scalars get written to corpus_stats.json;
-(2) code_marginals drive the top-N vocab trim in the vocab.json writer.
-Marginals are NOT exported to the bundle on their own — vocab.json carries
-the surviving codes' corpus_freq per row.
+in three ways: (1) the small scalars get written to corpus_stats.json;
+(2) code_marginals drive the top-N vocab ranking in the vocab.json writer;
+(3) code_doc_counts drive the small-cell suppression guard before that
+ranking. Marginals are NOT exported on their own — vocab.json carries the
+surviving codes' corpus_freq (token-frequency) per row.
+
+Two distinct per-code measurements are tracked because they answer
+different questions:
+
+- ``code_marginals[i]`` = P(any token in corpus is code i) = TOKEN
+  frequency. Used for ranking codes by display importance, since the
+  dashboard cares about how heavily codes appear in topic-word
+  distributions.
+- ``code_doc_counts[i]`` = number of distinct documents containing code
+  i (≥1 occurrence). Used for the AoU-style small-cell guard which is a
+  patient-count privacy threshold (suppress codes appearing in fewer
+  than N distinct patients/documents).
+
+Mixing the two — e.g. using token frequency to back-compute a doc count —
+is unsafe because it scales with ``mean_codes_per_doc`` rather than with
+patient count. The bug that motivated splitting the two: a small cohort
+with mean_codes_per_doc=130 made the implicit per-token-rate-based
+threshold ~6× harsher than intended, suppressing nearly all phenotype-
+specific codes from the displayed vocab.
 """
 from __future__ import annotations
 
@@ -22,17 +42,23 @@ class CorpusStats:
     mean_codes_per_doc: float
     k: int
     v_full: int
-    code_marginals: list[float]  # length V_full
+    code_marginals: list[float]   # length V_full — token frequency
+    code_doc_counts: list[int]    # length V_full — distinct-doc count
 
 
 def compute_corpus_stats(*, docs: Iterator[dict], vocab_size: int, k: int) -> CorpusStats:
     """Compute CorpusStats from an iterator of BOW dict rows.
 
     Each row must have keys 'indices' (list[int]) and 'counts' (list[int]).
+    The BOW convention is that each index in ``indices`` is a distinct
+    code present in the document (CountVectorizer output dedups by
+    construction), so per-code doc count is incremented once per row per
+    distinct index.
     """
     n_docs = 0
     n_codes_sum = 0
     code_total = [0] * vocab_size
+    code_doc_count = [0] * vocab_size
     total_tokens = 0
     for row in docs:
         n_docs += 1
@@ -40,6 +66,7 @@ def compute_corpus_stats(*, docs: Iterator[dict], vocab_size: int, k: int) -> Co
         for idx, cnt in zip(row["indices"], row["counts"]):
             code_total[idx] += cnt
             total_tokens += cnt
+            code_doc_count[idx] += 1
     mean_codes = n_codes_sum / max(n_docs, 1)
     marginals = [c / max(total_tokens, 1) for c in code_total]
     return CorpusStats(
@@ -48,6 +75,7 @@ def compute_corpus_stats(*, docs: Iterator[dict], vocab_size: int, k: int) -> Co
         k=k,
         v_full=vocab_size,
         code_marginals=marginals,
+        code_doc_counts=code_doc_count,
     )
 
 

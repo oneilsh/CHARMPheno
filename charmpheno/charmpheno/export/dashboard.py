@@ -26,28 +26,38 @@ def select_top_n_indices(code_marginals: list[float], top_n: int) -> list[int]:
 def select_top_n_with_min_cell(
     code_marginals: list[float],
     *,
+    code_doc_counts: list[int],
     top_n: int,
-    corpus_size_docs: int,
     min_doc_count: int,
 ) -> list[int]:
     """Top-N selection with a group-size guard.
 
-    Drops codes whose empirical doc count (marginal * corpus_size_docs) is
-    below ``min_doc_count`` BEFORE the top-N cut. Codes with doc count
-    exactly zero are not displayed by construction (their marginal is 0
-    and they would never rank). Codes with 1..min_doc_count-1 docs are
-    suppressed to prevent small-cell disclosure of which OMOP concepts
-    appear in a tiny number of patients/documents.
+    Drops codes whose distinct-document count (``code_doc_counts[i]``) is
+    below ``min_doc_count`` BEFORE the top-N cut. Codes appearing in
+    1..min_doc_count-1 docs are suppressed to prevent small-cell
+    disclosure of which OMOP concepts appear in a tiny number of
+    patients/documents. Codes with zero doc count are implicitly excluded
+    (no document contains them).
+
+    Filtering on real doc counts is independent of cohort size and
+    mean_codes_per_doc; ranking by ``code_marginals`` (token frequency)
+    keeps the displayed vocab focused on codes with heavy weight in
+    topic-word distributions.
 
     Returned in descending marginal order, length up to ``top_n``.
     """
     marginals = np.asarray(code_marginals, dtype=np.float64)
-    eligible = marginals * corpus_size_docs >= min_doc_count
+    doc_counts = np.asarray(code_doc_counts, dtype=np.int64)
+    if doc_counts.shape != marginals.shape:
+        raise ValueError(
+            f"code_doc_counts length {doc_counts.shape[0]} != "
+            f"code_marginals length {marginals.shape[0]}",
+        )
+    eligible = doc_counts >= min_doc_count
     eligible_idx = np.where(eligible)[0]
     if len(eligible_idx) == 0:
         raise ValueError(
-            f"no codes have >= {min_doc_count} documents "
-            f"(corpus_size_docs={corpus_size_docs}); "
+            f"no codes have >= {min_doc_count} documents; "
             f"cannot satisfy minimum cell-size guard",
         )
     order = np.argsort(-marginals[eligible_idx])
@@ -63,32 +73,38 @@ def write_model_and_vocab_bundles(
     descriptions: dict[int, str],
     domains: dict[int, str],
     code_marginals: list[float],
-    corpus_size_docs: int,
+    code_doc_counts: list[int],
     top_n: int,
     min_doc_count: int = 20,
 ) -> int:
     """Write model.json and vocab.json. Returns the displayed-vocab width.
 
-    Trims β columns and vocab metadata to the top-N codes by corpus
-    frequency, with a small-cell guard: codes whose empirical doc count
-    (corpus_freq * corpus_size_docs) is below ``min_doc_count`` are
+    Trims β columns and vocab metadata to the top-N codes ranked by
+    corpus frequency (token), with a small-cell guard on distinct doc
+    count: codes appearing in fewer than ``min_doc_count`` documents are
     dropped before the top-N cut. Default 20 matches AoU-style group-size
-    suppression. Zero-count codes are implicitly excluded; the guard
-    targets the 1..min_doc_count-1 range. β rows are renormalized so each
-    row sums to 1 over the trimmed columns.
+    suppression. β rows are renormalized so each row sums to 1 over the
+    trimmed columns.
+
+    Ranking by ``code_marginals`` (token frequency) prioritizes codes
+    with heavy weight in topic-word distributions; filtering by
+    ``code_doc_counts`` (distinct doc count) enforces the patient-count
+    privacy threshold. These are two different per-code measurements and
+    must not be substituted for one another: a code can have low
+    token-frequency but high doc count (appears once in many docs), or
+    high token-frequency but low doc count (appears many times in few
+    docs).
     """
     K, V_full = lambda_.shape
-    n_before = int((np.asarray(code_marginals) > 0).sum())
+    n_before = int((np.asarray(code_doc_counts) > 0).sum())
     keep = select_top_n_with_min_cell(
         code_marginals,
+        code_doc_counts=code_doc_counts,
         top_n=top_n,
-        corpus_size_docs=corpus_size_docs,
         min_doc_count=min_doc_count,
     )
     V_disp = len(keep)
-    n_eligible = int(
-        (np.asarray(code_marginals) * corpus_size_docs >= min_doc_count).sum(),
-    )
+    n_eligible = int((np.asarray(code_doc_counts) >= min_doc_count).sum())
     n_suppressed = n_before - n_eligible
     if n_suppressed > 0:
         print(

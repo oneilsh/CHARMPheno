@@ -150,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         lambda_=pseudo_lambda, alpha=export.alpha,
         vocab_ids=vocab_ids, descriptions=descriptions, domains=domains,
         code_marginals=stats.code_marginals,
-        corpus_size_docs=stats.corpus_size_docs,
+        code_doc_counts=stats.code_doc_counts,
         top_n=args.vocab_top_n,
         min_doc_count=args.min_doc_count,
     )
