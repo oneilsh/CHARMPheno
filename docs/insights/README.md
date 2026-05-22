@@ -57,6 +57,7 @@ and when is itself useful.
 
 (Append entries here as new insights are written, newest at top.)
 
+- [0024](0024-labeler-classifier-rules-have-regime-dependent-blind-spots.md) — LLM-classifier rubrics have regime-dependent blind spots: rules that look robust on the development corpus can mis-fire when the feature distribution shifts (ops, diagnostics, labeling)
 - [0023](0023-producer-consumer-unit-mismatches-invisible-until-small-scale.md) — Dimensional unit mismatches in producer/consumer pairs are invisible at large input scale; small cohorts expose them (ops, diagnostics)
 - [0022](0022-phenotype-vocabulary-refines-past-elbo-plateau.md) — Topic-word concentration on small-α tail topics continues refining well past mass-distribution convergence (lda, svi, diagnostics)
 - [0021](0021-cohort-corpora-two-anchor-mass-concentration.md) — Cohort-filtered corpora concentrate 90%+ of mass into two universal-anchor topics regardless of K (lda, doc-units, diagnostics)
