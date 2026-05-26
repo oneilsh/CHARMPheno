@@ -459,8 +459,11 @@ def main(argv: list[str] | None = None) -> int:
         vocab_list: list = [None] * len(vocab_map)
         for cid, idx in vocab_map.items():
             vocab_list[idx] = cid
-        assert "gamma" in model.result.global_params, \
-            "LDA fit driver expected gamma in global_params"
+        if "gamma" not in model.result.global_params:
+            raise RuntimeError(
+                "LDA fit driver expected gamma in global_params after fit; "
+                f"got keys: {list(model.result.global_params)}"
+            )
         gamma = model.result.global_params["gamma"]
         aggregates = compute_theta_aggregates(gamma)
         gp_no_gamma = {k: v for k, v in model.result.global_params.items()
