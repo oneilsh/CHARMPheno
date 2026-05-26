@@ -92,11 +92,11 @@
           {/if}
           <span class="stat" title="Coherence: how reliably this phenotype's leading conditions co-occur in real patients (NPMI: normalized pointwise mutual information). Higher means the conditions really do show up together.">
             <span class="stat-k">Coherence</span>
-            <span class="stat-v">{pheno.npmi.toFixed(3)}</span>
+            <span class="stat-v">{pheno.npmi == null ? '—' : pheno.npmi.toFixed(3)}</span>
           </span>
           <span class="stat" title="Pair coverage: fraction of the leading-condition pairs that had enough joint observations to actually contribute to the coherence number. Low coverage means the coherence value was computed on only a few pairs and is less trustworthy.">
             <span class="stat-k">Pair cov</span>
-            <span class="stat-v">{(pheno.pair_coverage * 100).toFixed(0)}%</span>
+            <span class="stat-v">{pheno.pair_coverage == null ? '—' : (pheno.pair_coverage * 100).toFixed(0) + '%'}</span>
           </span>
           {#if pheno.original_topic_id !== pheno.id}
             <span class="stat" title="Source #: the raw topic index from the LDA fit before sorting. Useful for cross-referencing the underlying model.">

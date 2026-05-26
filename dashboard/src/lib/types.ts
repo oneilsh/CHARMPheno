@@ -14,7 +14,7 @@ export interface ThetaPercentiles {
 export interface Phenotype {
   id: number; label: string; description: string;
   quality: PhenotypeQuality | null;
-  npmi: number; pair_coverage: number; corpus_prevalence: number;
+  npmi: number | null; pair_coverage: number | null; corpus_prevalence: number;
   theta_histogram?: (number | null)[]
   theta_percentiles?: ThetaPercentiles
   original_topic_id: number

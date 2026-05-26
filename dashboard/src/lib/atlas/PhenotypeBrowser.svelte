@@ -43,8 +43,12 @@
           const lb = b.label || `Phenotype ${b.id}`
           return la.localeCompare(lb)
         }
-        case 'coherence':
+        case 'coherence': {
+          if (a.npmi == null && b.npmi == null) return 0
+          if (a.npmi == null) return 1
+          if (b.npmi == null) return -1
           return b.npmi - a.npmi
+        }
         case 'topic_mass':
           return b.corpus_prevalence - a.corpus_prevalence
         case 'prevalence':
@@ -155,7 +159,7 @@
                   <span class="qchip qchip-empty">·</span>
                 {/if}
               </td>
-              <td class="col-coh" data-numeric>{p.npmi.toFixed(3)}</td>
+              <td class="col-coh" data-numeric>{p.npmi == null ? '—' : p.npmi.toFixed(3)}</td>
               <td class="col-mass" data-numeric>
                 <span class="prev-row">
                   <span class="prev-bar">

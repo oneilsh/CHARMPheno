@@ -78,7 +78,8 @@
       .domain([0, Math.max(...allPhenotypes.map(r_of), 1e-9)])
       .range([5, 26])
 
-    const colorFn = (p: typeof phenotypes[0]) => npmiRamp(p.npmi)
+    // null = unrated (no scored pairs); render as neutral.
+    const colorFn = (p: typeof phenotypes[0]) => npmiRamp(p.npmi ?? 0)
 
     const svg = d3.select(svgEl)
     svg.selectAll('*').remove()
@@ -188,7 +189,7 @@
     // also fire.
     nodes.attr('data-tip', (p) => {
       const pat = (r_of(p) * 100).toFixed(1)
-      const npmi = p.npmi.toFixed(3)
+      const npmi = p.npmi == null ? '—' : p.npmi.toFixed(3)
       const tauStr = $tauThreshold.toFixed(2)
       const label = p.label || `Phenotype ${p.id}`
       if ($advancedView) {
