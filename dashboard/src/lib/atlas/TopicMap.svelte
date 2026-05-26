@@ -4,6 +4,7 @@
   import {
     bundle, selectedPhenotypeId, hoveredCodeIdx, advancedView,
     searchedConditionIdx, phenotypeCoords,
+    prevalenceReader, tauThreshold,
   } from '../store'
   import { phenotypesContainingCode } from '../inference'
 
@@ -48,6 +49,7 @@
   const ALWAYS_LABEL_N = 8
 
   $: coords = $phenotypeCoords
+  $: reader = $prevalenceReader
 
   // Diverging NPMI ramp: red (low) → neutral gray → cyan (high).
   // Aligns with the global accent and avoids the rainbow look.
@@ -71,8 +73,9 @@
     const y = d3.scaleLinear().domain(yExt).range([H - MARGIN, MARGIN])
     // Use the FULL phenotype set for the prevalence scale domain so bubble
     // size doesn't rescale between simple and advanced modes.
+    const r_of = reader
     const r = d3.scaleSqrt()
-      .domain(d3.extent(allPhenotypes, (p) => p.corpus_prevalence) as [number, number])
+      .domain([0, Math.max(...allPhenotypes.map(r_of), 1e-9)])
       .range([5, 26])
 
     const colorFn = (p: typeof phenotypes[0]) => npmiRamp(p.npmi)
@@ -95,7 +98,7 @@
 
     // Main bubble . filled with the encoded color, thin ink-tinted border
     nodes.append('circle')
-      .attr('r', (p) => r(p.corpus_prevalence))
+      .attr('r', (p) => r(r_of(p)))
       .attr('fill', (p) => colorFn(p))
       .attr('fill-opacity', 0.85)
       .attr('stroke', '#18181b')
@@ -108,13 +111,13 @@
     // bullet in the CodePanel header so "this bubble = this detail" is
     // unambiguous.
     nodes.append('circle')
-      .attr('r', (p) => r(p.corpus_prevalence) + 6)
+      .attr('r', (p) => r(r_of(p)) + 6)
       .attr('fill', 'none')
       .attr('stroke', '#06b6d4')
       .attr('stroke-opacity', 0.25)
       .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 6 : 0))
     nodes.append('circle')
-      .attr('r', (p) => r(p.corpus_prevalence) + 3)
+      .attr('r', (p) => r(r_of(p)) + 3)
       .attr('fill', 'none')
       .attr('stroke', '#06b6d4')
       .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 2.25 : 0))
@@ -124,7 +127,7 @@
     // condition". Dashed for transient hover (from CodePanel mouseover);
     // solid + thicker for a pinned search.
     nodes.append('circle')
-      .attr('r', (p) => r(p.corpus_prevalence) + 5)
+      .attr('r', (p) => r(r_of(p)) + 5)
       .attr('fill', 'none')
       .attr('stroke', '#d946ef')
       .attr('stroke-dasharray', highlightStyle === 'pinned' ? '0' : '3,2')
@@ -144,8 +147,8 @@
         .data(phenotypes.filter((p) => p.quality && qualityMarkColor[p.quality]))
         .join('circle')
         .attr('class', 'quality-mark')
-        .attr('cx', (p) => x(coords[p.id][0]) + r(p.corpus_prevalence) * 0.7)
-        .attr('cy', (p) => y(coords[p.id][1]) - r(p.corpus_prevalence) * 0.7)
+        .attr('cx', (p) => x(coords[p.id][0]) + r(r_of(p)) * 0.7)
+        .attr('cy', (p) => y(coords[p.id][1]) - r(r_of(p)) * 0.7)
         .attr('r', 2.5)
         .attr('fill', (p) => qualityMarkColor[p.quality!])
         .attr('stroke', '#fff')
@@ -159,7 +162,7 @@
     const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
     const topPrevalent = phenotypes
       .slice()
-      .sort((a, b) => b.corpus_prevalence - a.corpus_prevalence)
+      .sort((a, b) => r_of(b) - r_of(a))
       .slice(0, ALWAYS_LABEL_N)
 
     g.selectAll('text.minor-label')
@@ -167,7 +170,7 @@
       .join('text')
       .attr('class', 'minor-label')
       .attr('x', (p) => x(coords[p.id][0]))
-      .attr('y', (p) => y(coords[p.id][1]) - r(p.corpus_prevalence) - 5)
+      .attr('y', (p) => y(coords[p.id][1]) - r(r_of(p)) - 5)
       .attr('text-anchor', 'middle')
       .attr('font-family', 'Geist, sans-serif')
       .attr('font-size', 10)
@@ -183,12 +186,20 @@
     // overlay (lib/tooltip.ts) so it appears with no hover delay. Avoiding
     // SVG `<title>` here means the browser-native delayed tooltip doesn't
     // also fire.
-    nodes.attr('data-tip', (p) =>
-      `${p.label || `Phenotype ${p.id}`}\nCoherence ${p.npmi.toFixed(3)} · prev ${(p.corpus_prevalence * 100).toFixed(1)}%`,
-    )
+    nodes.attr('data-tip', (p) => {
+      const pat = (r_of(p) * 100).toFixed(1)
+      const npmi = p.npmi.toFixed(3)
+      const tauStr = $tauThreshold.toFixed(2)
+      const label = p.label || `Phenotype ${p.id}`
+      if ($advancedView) {
+        const mass = (p.corpus_prevalence * 100).toFixed(1)
+        return `${label}\nCoherence ${npmi} · prev ${pat}% (patients, θ > ${tauStr}) · topic mass ${mass}%`
+      }
+      return `${label}\nCoherence ${npmi} · prev ${pat}% (θ > ${tauStr})`
+    })
   }
 
-  $: $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()
+  $: $tauThreshold, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()
   onMount(render)
 </script>
 
@@ -202,11 +213,16 @@
         <span class="ticks" data-numeric><span>low</span><span>high</span></span>
       </div>
       <div class="legend-group">
-        <span class="eyebrow" title="Prevalence: roughly how many patients show this phenotype in their records. Bigger bubble means more patients show this pattern.">Prevalence</span>
+        <span class="eyebrow" title="Prevalence: estimated share of patients whose mixture weight on this phenotype exceeds the current threshold (τ slider). Bubble size scales with this share.">Prevalence</span>
         <span class="size-marks" aria-hidden="true">
           <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
         </span>
       </div>
+      {#if $advancedView}
+        <div class="legend-group">
+          <span class="eyebrow" title="Topic mass: mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.">Topic mass</span>
+        </div>
+      {/if}
     {/if}
   </figcaption>
 </figure>
