@@ -455,6 +455,13 @@ def main(argv: list[str] | None = None) -> int:
         vocab_list: list = [None] * len(vocab_map)
         for cid, idx in vocab_map.items():
             vocab_list[idx] = cid
+        # Compute corpus_prevalence from GEM stick masses (full T-length;
+        # top-K slicing happens at display time in adapt_hdp).
+        _u = np.asarray(model.result.global_params["u"], dtype=np.float64)
+        _v = np.asarray(model.result.global_params["v"], dtype=np.float64)
+        _stick_means = _u / (_u + _v)
+        _remainder = np.cumprod(np.concatenate([[1.0], 1 - _stick_means[:-1]]))
+        _e_beta = _stick_means * _remainder  # length T
         augmented = VIResult(
             global_params=model.result.global_params,
             elbo_trace=model.result.elbo_trace,
@@ -475,8 +482,11 @@ def main(argv: list[str] | None = None) -> int:
                     "min_df": args.min_df,
                     "doc_spec": doc_spec.manifest(),
                 },
+                "corpus_prevalence": _e_beta.tolist(),
             },
         )
+        print("[driver]   wrote corpus_prevalence (stick masses) to metadata for HDP.",
+              flush=True)
         save_result(augmented, args.save_dir)
         print(f"[driver] re-saved augmented VIResult to {args.save_dir}",
               flush=True)

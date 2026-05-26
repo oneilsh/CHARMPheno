@@ -32,6 +32,7 @@ from pathlib import Path
 
 from pyspark.sql import SparkSession
 
+from charmpheno.export.theta_aggregates import compute_theta_aggregates
 from charmpheno.omop import (
     doc_spec_from_cli,
     load_omop_parquet,
@@ -120,8 +121,14 @@ def main(argv: list[str] | None = None) -> int:
         vocab_list = [None] * len(vocab_map)
         for cid, idx in vocab_map.items():
             vocab_list[idx] = cid
+        assert "gamma" in model.result.global_params, \
+            "LDA fit driver expected gamma in global_params"
+        gamma = model.result.global_params["gamma"]
+        aggregates = compute_theta_aggregates(gamma)
+        gp_no_gamma = {k: v for k, v in model.result.global_params.items()
+                       if k != "gamma"}
         result_with_vocab = VIResult(
-            global_params=model.result.global_params,
+            global_params=gp_no_gamma,
             elbo_trace=model.result.elbo_trace,
             n_iterations=model.result.n_iterations,
             converged=model.result.converged,
@@ -134,7 +141,15 @@ def main(argv: list[str] | None = None) -> int:
                     "input_path": str(args.input),
                     "doc_spec": doc_spec.manifest(),
                 },
+                "theta_histogram": aggregates["theta_histogram"],
+                "theta_percentiles": aggregates["theta_percentiles"],
+                "corpus_prevalence": aggregates["corpus_prevalence"],
+                "n_patients": aggregates["n_patients"],
             },
+        )
+        log.info(
+            "wrote theta aggregates to metadata; dropped gamma (%d patients, K=%d topics).",
+            aggregates["n_patients"], args.K,
         )
         save_result(result_with_vocab, args.output)
         log.info(

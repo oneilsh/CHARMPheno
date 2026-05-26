@@ -374,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
         load_omop_bigquery,
         to_bow_dataframe,
     )
+    from charmpheno.export.theta_aggregates import compute_theta_aggregates
     from spark_vi.core import VIResult
     from spark_vi.diagnostics.persist import assert_persisted
     from spark_vi.io import save_result
@@ -458,8 +459,14 @@ def main(argv: list[str] | None = None) -> int:
         vocab_list: list = [None] * len(vocab_map)
         for cid, idx in vocab_map.items():
             vocab_list[idx] = cid
+        assert "gamma" in model.result.global_params, \
+            "LDA fit driver expected gamma in global_params"
+        gamma = model.result.global_params["gamma"]
+        aggregates = compute_theta_aggregates(gamma)
+        gp_no_gamma = {k: v for k, v in model.result.global_params.items()
+                       if k != "gamma"}
         augmented = VIResult(
-            global_params=model.result.global_params,
+            global_params=gp_no_gamma,
             elbo_trace=model.result.elbo_trace,
             n_iterations=model.result.n_iterations,
             converged=model.result.converged,
@@ -478,7 +485,16 @@ def main(argv: list[str] | None = None) -> int:
                     "doc_spec": doc_spec.manifest(),
                     "cohort": args.cohort,
                 },
+                "theta_histogram": aggregates["theta_histogram"],
+                "theta_percentiles": aggregates["theta_percentiles"],
+                "corpus_prevalence": aggregates["corpus_prevalence"],
+                "n_patients": aggregates["n_patients"],
             },
+        )
+        print(
+            f"[driver]   wrote theta aggregates to metadata; dropped gamma "
+            f"({aggregates['n_patients']} patients, K={args.K} topics).",
+            flush=True,
         )
         save_result(augmented, args.save_dir)
         print(f"[driver] re-saved augmented VIResult to {args.save_dir}",
