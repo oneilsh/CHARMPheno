@@ -1,15 +1,19 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { get } from 'svelte/store'
   import {
     bundle, advancedView, cohort, manifest, patientProjection,
+    prevalenceReader,
     searchedConditionIdx, searchedPhenotypeForPatients,
     selectedCohort, selectedPatientId, selectedPhenotypeId,
     simulatorPrefix,
   } from './lib/store'
+  import type { DashboardBundle } from './lib/types'
   import { loadBundle, loadManifest } from './lib/bundle'
   import { route, type Route } from './lib/router'
   import { generateCohort } from './lib/cohort'
   import CohortSelector from './lib/CohortSelector.svelte'
+  import ThresholdSlider from './lib/ThresholdSlider.svelte'
   import Tabs from './lib/Tabs.svelte'
   import Atlas from './lib/tabs/Atlas.svelte'
   import Patient from './lib/tabs/Patient.svelte'
@@ -40,13 +44,19 @@
   // is a worse onboarding than an arbitrary-but-relevant default. Prefer
   // the highest-prevalence "real" phenotype (quality in {phenotype, anchor}
   // or unknown null); fall back to id 0 if nothing qualifies.
-  function pickDefaultPhenotype(b: typeof $bundle): number | null {
+  function pickDefaultPhenotype(b: DashboardBundle | null): number | null {
     if (!b) return null
+    const reader = get(prevalenceReader)
     const ps = b.phenotypes.phenotypes
     const good = ps.filter((p) => p.quality === 'phenotype' || p.quality === 'anchor' || p.quality == null)
     const pool = good.length ? good : ps
     let best = pool[0]
-    for (const p of pool) if (p.corpus_prevalence > best.corpus_prevalence) best = p
+    // Tiebreak by corpus_prevalence desc so phenotypes tied at 0 (e.g. when τ
+    // is set high enough that no patient clears it) still get a stable choice.
+    for (const p of pool) {
+      const a = reader(p), b_ = reader(best)
+      if (a > b_ || (a === b_ && p.corpus_prevalence > best.corpus_prevalence)) best = p
+    }
     return best ? best.id : null
   }
 
@@ -170,6 +180,7 @@
           </div>
         </dl>
       {/if}
+      <ThresholdSlider />
       <div class="seg" role="group" aria-label="View density">
         <button class="seg-btn" class:active={!$advancedView} on:click={() => advancedView.set(false)}>basic</button>
         <button class="seg-btn" class:active={$advancedView} on:click={() => advancedView.set(true)}>advanced</button>
