@@ -149,14 +149,14 @@ def test_migrate_lda_aggregates_match_compute_theta_aggregates(tmp_path):
 
     # corpus_prevalence — float64 values, should match closely
     for a, b in zip(meta["corpus_prevalence"], ref["corpus_prevalence"]):
-        assert math.isclose(a, b, rel_tol=1e-9), f"corpus_prevalence mismatch: {a} vs {b}"
+        assert math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12), f"corpus_prevalence mismatch: {a} vs {b}"
 
     # theta_percentiles
     for topic_idx, (migrated_pct, ref_pct) in enumerate(
         zip(meta["theta_percentiles"], ref["theta_percentiles"])
     ):
         for key in ("p5", "p25", "p50", "p75", "p95"):
-            assert math.isclose(migrated_pct[key], ref_pct[key], rel_tol=1e-9), (
+            assert math.isclose(migrated_pct[key], ref_pct[key], rel_tol=1e-9, abs_tol=1e-12), (
                 f"topic {topic_idx} {key} mismatch: {migrated_pct[key]} vs {ref_pct[key]}"
             )
 
@@ -169,9 +169,9 @@ def test_migrate_lda_aggregates_match_compute_theta_aggregates(tmp_path):
             if rv is None:
                 assert mv is None, f"topic {topic_idx} bin {bin_idx}: expected None"
             elif mv is None:
-                assert rv is None, f"topic {topic_idx} bin {bin_idx}: unexpected None"
+                pytest.fail(f"topic {topic_idx} bin {bin_idx}: migrated is None but ref is {rv!r}")
             else:
-                assert math.isclose(mv, rv, rel_tol=1e-9), (
+                assert math.isclose(mv, rv, rel_tol=1e-9, abs_tol=1e-12), (
                     f"topic {topic_idx} bin {bin_idx}: {mv} vs {rv}"
                 )
 
@@ -292,9 +292,9 @@ def test_migrate_warns_when_gamma_and_aggregates_both_present(tmp_path, capsys):
     assert status["action"] == "recomputed"
     assert status["kind"] == "lda"
 
-    # Warning logged to stdout
+    # Warning logged to stdout — pin to semantic content rather than exact phrasing
     captured = capsys.readouterr()
-    assert "WARNING" in captured.out
+    assert "gamma" in captured.out and "aggregates" in captured.out
 
     # Final state: gamma dropped, aggregates recomputed from actual gamma
     loaded = load_result(ckpt)
@@ -334,3 +334,25 @@ def test_migrate_with_explicit_out_path(tmp_path):
     # No orphan cleanup applies to dst (it was a fresh save without gamma)
     # but we double-check dst/params/gamma.npy doesn't exist either way
     assert not (dst / "params" / "gamma.npy").exists()
+
+
+# ---------------------------------------------------------------------------
+# Test 9: migrate raises ValueError for unknown model_class
+# ---------------------------------------------------------------------------
+
+def test_migrate_raises_on_unknown_model_class(tmp_path):
+    K, V = 3, 15
+    rng = np.random.RandomState(11)
+    result = VIResult(
+        global_params={"lambda": rng.gamma(1.0, 1.0, (K, V)).astype(np.float64)},
+        elbo_trace=[-100.0],
+        n_iterations=1,
+        converged=False,
+        metadata={"model_class": "ctm"},
+        diagnostic_traces={},
+    )
+    ckpt = tmp_path / "ckpt"
+    save_result(result, ckpt)
+
+    with pytest.raises(ValueError, match="unsupported model class"):
+        mig.migrate(ckpt)

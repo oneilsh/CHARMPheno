@@ -34,13 +34,6 @@ from pathlib import Path
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Alias sets
-# ---------------------------------------------------------------------------
-
-# Matches the alias set in charmpheno.export.model_adapter
-HDP_ALIASES = {"hdp", "onlinehdp", "onlinehdpmodel", "onlinehdpestimator"}
-LDA_ALIASES = {"lda", "onlinelda", "onlineldamodel", "onlineldaestimator"}
 
 
 def _hdp_corpus_prevalence(u: np.ndarray, v: np.ndarray) -> list[float]:
@@ -93,6 +86,8 @@ def migrate(
     from spark_vi.core.result import VIResult
     from spark_vi.io import load_result, save_result
     from charmpheno.export.theta_aggregates import compute_theta_aggregates
+    # Use the canonical alias sets from model_adapter to avoid drift.
+    from charmpheno.export.model_adapter import _HDP_ALIASES as HDP_ALIASES, _LDA_ALIASES as LDA_ALIASES
 
     src = Path(checkpoint_path)
     in_place = out_path is None
@@ -139,8 +134,10 @@ def migrate(
         return {"kind": "hdp", "action": "migrated", "n_patients": None}
 
     # ------------------------------------------------------------------
-    # LDA branch (default if model_class not in HDP_ALIASES)
+    # LDA branch
     # ------------------------------------------------------------------
+    if model_class not in LDA_ALIASES:
+        raise ValueError(f"unsupported model class: {model_class}")
     print(f"[migrate] detected LDA checkpoint (model_class={model_class!r})", flush=True)
     gp = result.global_params
     has_gamma = "gamma" in gp
