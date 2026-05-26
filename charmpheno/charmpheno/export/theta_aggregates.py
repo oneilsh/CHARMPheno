@@ -23,6 +23,8 @@ def compute_theta_aggregates(
     gamma : np.ndarray, shape (N, K)
         LDA's per-document Dirichlet parameters. Rows are normalized
         internally to obtain θ = γ / γ.sum(axis=1, keepdims=True).
+        All rows must have positive sum; rows with ``gamma[i].sum() == 0``
+        produce NaN that this function does not guard against.
     n_bins : int, default 50
         Number of equal-width histogram bins on [0, 1].
     min_count : int, default 20
@@ -61,8 +63,9 @@ def compute_theta_aggregates(
     for topic_idx in range(k):
         col = theta[:, topic_idx]
 
-        # Clip values to [0, 1-ε) so that θ = 1.0 lands in the last bin rather
-        # than being lost to right-edge overflow in np.histogram's half-open bins.
+        # Clip values to [0, 1-ε). numpy's last bin is right-inclusive, so exact
+        # 1.0 is fine; this defensively guards against floating-point values
+        # marginally above 1.0 due to normalization noise.
         col_clipped = np.clip(col, 0.0, 1.0 - 1e-12)
         counts, _ = np.histogram(col_clipped, bins=bin_edges)
 

@@ -34,12 +34,17 @@ def test_compute_theta_aggregates_shapes():
 
 
 def test_compute_theta_aggregates_small_cell_suppression():
-    """Bins with count in [1, min_count) → None; count 0 → 0.0; count ≥ min_count → float."""
+    """Bins with count in [1, min_count) → None; count 0 → 0.0; count ≥ min_count → float.
+
+    Also exercises the exact boundary (count == min_count == 20) to guard against an
+    off-by-one where `c <= min_count` would mistakenly suppress a bin at the threshold.
+    """
     # Build γ with N=100 patients, K=3 topics.
     # We control θ_0 (topic index 0) explicitly:
     #   19 patients → θ_0 = 0.35  (bin index 17 with n_bins=50: [0.34, 0.36))
+    #   20 patients → θ_0 = 0.65  (bin index 32: [0.64, 0.66))  ← exact boundary
     #   25 patients → θ_0 = 0.85  (bin index 42: [0.84, 0.86))
-    #   56 patients → θ_0 = 0.01  (bin index 0: [0.0, 0.02))
+    #   36 patients → θ_0 = 0.01  (bin index 0: [0.0, 0.02))
     # For other topics the exact distribution doesn't matter.
     #
     # We construct γ so that γ / γ.sum(axis=1, keepdims=True) gives the exact θ_0
@@ -49,9 +54,10 @@ def test_compute_theta_aggregates_small_cell_suppression():
     k = 3
     gamma = np.zeros((n, k))
     theta_0_target = np.empty(n)
-    theta_0_target[:19] = 0.35   # 19 patients → suppressed bin
-    theta_0_target[19:44] = 0.85  # 25 patients → non-suppressed bin
-    theta_0_target[44:] = 0.01   # 56 patients → non-suppressed (bin 0)
+    theta_0_target[:19] = 0.35    # 19 patients → suppressed bin
+    theta_0_target[19:39] = 0.65  # 20 patients → at-threshold bin (not suppressed)
+    theta_0_target[39:64] = 0.85  # 25 patients → non-suppressed bin
+    theta_0_target[64:] = 0.01   # 36 patients → non-suppressed (bin 0)
 
     gamma[:, 0] = theta_0_target
     gamma[:, 1] = (1 - theta_0_target) / 2
@@ -63,27 +69,35 @@ def test_compute_theta_aggregates_small_cell_suppression():
     # Determine which bin indices our target values land in.
     # n_bins=50 → bin width = 0.02; bin_index = floor(θ / 0.02)
     # 0.35 / 0.02 = 17.5 → bin 17
+    # 0.65 / 0.02 = 32.5 → bin 32
     # 0.85 / 0.02 = 42.5 → bin 42
     # 0.01 / 0.02 = 0.5  → bin 0
     bin_width = 1.0 / 50
     bin_19 = int(0.35 / bin_width)   # 17
+    bin_20 = int(0.65 / bin_width)   # 32
     bin_25 = int(0.85 / bin_width)   # 42
-    bin_56 = int(0.01 / bin_width)   # 0
+    bin_36 = int(0.01 / bin_width)   # 0
 
     # 19 patients in bin_19 → suppressed (None)
     assert hist_0[bin_19] is None, f"Expected None for bin {bin_19}, got {hist_0[bin_19]}"
+
+    # 20 patients in bin_20 → exactly at threshold → NOT suppressed (fraction 20/100 = 0.20)
+    assert isinstance(hist_0[bin_20], float), (
+        f"Expected float for bin {bin_20} (count == min_count), got {hist_0[bin_20]!r}"
+    )
+    assert hist_0[bin_20] == pytest.approx(20 / 100)
 
     # 25 patients in bin_25 → fraction 25/100 = 0.25
     assert isinstance(hist_0[bin_25], float)
     assert hist_0[bin_25] == pytest.approx(25 / 100)
 
-    # 56 patients in bin_56 → fraction 56/100 = 0.56
-    assert isinstance(hist_0[bin_56], float)
-    assert hist_0[bin_56] == pytest.approx(56 / 100)
+    # 36 patients in bin_36 → fraction 36/100 = 0.36
+    assert isinstance(hist_0[bin_36], float)
+    assert hist_0[bin_36] == pytest.approx(36 / 100)
 
-    # All bins that are not bin_19, bin_25, bin_56 should be 0.0
+    # All bins that are not bin_19, bin_20, bin_25, bin_36 should be 0.0
     for i, val in enumerate(hist_0):
-        if i not in {bin_19, bin_25, bin_56}:
+        if i not in {bin_19, bin_20, bin_25, bin_36}:
             assert val == 0.0, f"Expected 0.0 for empty bin {i}, got {val}"
 
 
