@@ -4,13 +4,26 @@ export interface Model { K: number; V: number; alpha: number[]; beta: number[][]
 // bundles . the dashboard treats null as "unlabeled / show everything".
 export type PhenotypeQuality =
   'phenotype' | 'background' | 'anchor' | 'mixed' | 'dead'
+export interface ThetaPercentiles {
+  p5: number
+  p25: number
+  p50: number
+  p75: number
+  p95: number
+}
 export interface Phenotype {
   id: number; label: string; description: string;
   quality: PhenotypeQuality | null;
   npmi: number; pair_coverage: number; corpus_prevalence: number;
+  theta_histogram?: (number | null)[]
+  theta_percentiles?: ThetaPercentiles
   original_topic_id: number
 }
-export interface PhenotypesBundle { phenotypes: Phenotype[] }
+export interface PhenotypesBundle {
+  phenotypes: Phenotype[]
+  theta_histogram_bin_edges?: number[]
+  theta_histogram_min_count?: number
+}
 export interface VocabCode {
   id: number; code: string; description: string; domain: string; corpus_freq: number
 }
