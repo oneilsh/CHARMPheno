@@ -6,11 +6,13 @@
   export let percentiles: ThetaPercentiles
   export let tau: number
   export let width: number = 360
-  export let height: number = 80
+  export let height: number = 100
 
-  const PAD_TOP = 8          // room for τ label and percentile tick marks
-  const PAD_BOTTOM = 2
-  const chartH = height - PAD_TOP - PAD_BOTTOM
+  const PAD_TOP    = 18   // room for overflow labels above bars + τ label
+  const PAD_BOTTOM = 14   // room for x-axis tick labels
+  const PAD_LEFT   = 22   // room for y-axis tick labels
+  $: chartW = width - PAD_LEFT
+  $: chartH = height - PAD_TOP - PAD_BOTTOM
 
   // Hover state — track which bar is hovered for fill-opacity toggle
   let hoveredBin: number | null = null
@@ -22,8 +24,8 @@
   $: xMax = Math.min(1.0, Math.max(0.20, percentiles.p95 + Math.max(percentiles.p95 * 0.15, 0.02)))
   $: xMin = 0
 
-  // Map a value in [xMin, xMax] to SVG x coordinate
-  $: xScale = (v: number) => ((v - xMin) / (xMax - xMin)) * width
+  // Map a value in [xMin, xMax] to SVG x coordinate (offset by PAD_LEFT)
+  $: xScale = (v: number) => PAD_LEFT + ((v - xMin) / (xMax - xMin)) * chartW
 
   // ── Visible bins ──────────────────────────────────────────────────────────
   // A bin is "visible" when its midpoint falls within [xMin, xMax].
@@ -82,6 +84,35 @@
     .map((k) => ({ k, v: percentiles[k] }))
     .filter(({ v }) => v >= xMin && v <= xMax)
     .map(({ k, v }) => ({ k, x: xScale(v) }))
+
+  // ── X-axis ticks ──────────────────────────────────────────────────────────
+  // 5 evenly-spaced ticks at 0, 1/4, 1/2, 3/4, 1 of xMax.
+  $: xTickValues = [0, xMax / 4, xMax / 2, (xMax * 3) / 4, xMax]
+  $: xTicks = (() => {
+    const seen = new Set<string>()
+    return xTickValues.map((v) => {
+      const label = Math.round(v * 100) + '%'
+      const show = !seen.has(label)
+      seen.add(label)
+      return { x: xScale(v), label, show }
+    })
+  })()
+
+  // ── Y-axis ticks ──────────────────────────────────────────────────────────
+  // 3 ticks at 0, yMax/2, yMax.
+  $: yTickValues = [0, yMax / 2, yMax]
+  $: yTicks = (() => {
+    const seen = new Set<string>()
+    // yMax is a fraction of patients; render as percent
+    return yTickValues.map((v) => {
+      const label = Math.round(v * 100) + '%'
+      const show = !seen.has(label)
+      seen.add(label)
+      // y=0 fraction → bottom of chart; y=yMax → top of chart
+      const svgY = PAD_TOP + chartH - (v / yMax) * chartH
+      return { y: svgY, label, show }
+    })
+  })()
 </script>
 
 <svg
@@ -91,6 +122,56 @@
   aria-label="Prevalence distribution histogram"
   role="img"
 >
+  <!-- Y-axis ticks and labels (left margin) -->
+  {#each yTicks as { y, label, show }}
+    <!-- Short horizontal tick projecting left from the chart area -->
+    <line
+      x1={PAD_LEFT - 3} y1={y}
+      x2={PAD_LEFT}     y2={y}
+      stroke="var(--ink-faint)"
+      stroke-width="0.75"
+    />
+    {#if show}
+      <text
+        x={PAD_LEFT - 5} y={y}
+        font-family="var(--font-mono)"
+        font-size="8"
+        fill="var(--ink-faint)"
+        text-anchor="end"
+        dominant-baseline="middle"
+      >{label}</text>
+    {/if}
+  {/each}
+
+  <!-- X-axis baseline -->
+  <line
+    x1={PAD_LEFT} y1={PAD_TOP + chartH}
+    x2={PAD_LEFT + chartW} y2={PAD_TOP + chartH}
+    stroke="var(--ink-faint)"
+    stroke-width="0.5"
+  />
+
+  <!-- X-axis ticks and labels (below baseline) -->
+  {#each xTicks as { x, label, show }}
+    <!-- Short vertical tick dropping below the baseline -->
+    <line
+      x1={x} y1={PAD_TOP + chartH}
+      x2={x} y2={PAD_TOP + chartH + 3}
+      stroke="var(--ink-faint)"
+      stroke-width="0.75"
+    />
+    {#if show}
+      <text
+        x={x} y={PAD_TOP + chartH + 5}
+        font-family="var(--font-mono)"
+        font-size="8"
+        fill="var(--ink-faint)"
+        text-anchor="middle"
+        dominant-baseline="hanging"
+      >{label}</text>
+    {/if}
+  {/each}
+
   <!-- Bars -->
   {#each visibleBins as { i, val, lo, hi, inRange }}
     {#if inRange}
@@ -98,6 +179,7 @@
       {@const bh = barHeight(val)}
       {@const by = PAD_TOP + chartH - bh}
       {@const isHovered = hoveredBin === i}
+      {@const barW = Math.max(binPixW - 0.5, 1)}
 
       <!-- Null bins still get a full-height transparent hit-target so the
            tooltip is reachable; non-null bins get the visible colored bar. -->
@@ -105,7 +187,7 @@
         <!-- Transparent hit area — hover-invisible, tooltip fires on hover -->
         <rect
           x={bx} y={PAD_TOP}
-          width={Math.max(binPixW - 0.5, 1)} height={chartH}
+          width={barW} height={chartH}
           fill="var(--accent)"
           fill-opacity="0"
           on:mouseenter={() => (hoveredBin = i)}
@@ -117,23 +199,39 @@
         {@const clipped = isClipped(val)}
         <rect
           x={bx} y={by}
-          width={Math.max(binPixW - 0.5, 1)} height={Math.max(bh, 0)}
+          width={barW} height={Math.max(bh, 0)}
           fill="var(--accent)"
           fill-opacity={isHovered ? 1 : 0.7}
           on:mouseenter={() => (hoveredBin = i)}
           on:mouseleave={() => (hoveredBin = null)}
         >
-          <title>{'Patients with θ in [' + lo.toFixed(3) + ', ' + hi.toFixed(3) + '): ' + (val * 100).toFixed(1) + '%' + (clipped ? ' (bar clipped, scale set by tail)' : '')}</title>
+          <title>{'Patients with phenotype prominence [' + lo.toFixed(3) + ', ' + hi.toFixed(3) + '): ' + (val * 100).toFixed(1) + '%' + (clipped ? ' (bar clipped — y-scale set by the tail so other bins are visible)' : '')}</title>
         </rect>
-        <!-- Overflow triangle: rendered above the chart area when the leading
-             bin exceeds the tail-focused y-scale. -->
+
+        <!-- Broken-axis zigzag + overflow label for clipped bars -->
         {#if clipped}
-          {@const cx = bx + Math.max(binPixW - 0.5, 1) / 2}
-          <polygon
-            points="{cx - 3},{PAD_TOP - 1} {cx + 3},{PAD_TOP - 1} {cx},{PAD_TOP - 5}"
-            fill="var(--accent)"
-            fill-opacity="0.6"
+          {@const zx0 = bx}
+          {@const zx1 = bx + barW}
+          {@const zy  = PAD_TOP}           // top of chart area
+          {@const amp = 2}                  // zigzag amplitude
+          {@const seg = Math.max(barW / 4, 2)}
+          <!-- 4-point zigzag across the top of the clipped bar -->
+          <polyline
+            points="{zx0},{zy}  {zx0 + seg},{zy - amp}  {zx0 + seg * 2},{zy + amp}  {zx0 + seg * 3},{zy - amp}  {zx1},{zy}"
+            fill="none"
+            stroke="var(--accent)"
+            stroke-width="1.5"
+            stroke-opacity="0.9"
           />
+          <!-- Numeric overflow label above the zigzag -->
+          <text
+            x={bx + barW / 2} y={zy - 7}
+            font-family="var(--font-mono)"
+            font-size="10"
+            fill="var(--ink-muted)"
+            text-anchor="middle"
+            dominant-baseline="auto"
+          >{Math.round(val * 100) + '%'}</text>
         {/if}
       {/if}
     {/if}
