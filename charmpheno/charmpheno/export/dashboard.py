@@ -14,15 +14,6 @@ def _round_floats(arr: np.ndarray, *, decimals: int = 6) -> list:
     return np.round(arr.astype(np.float64), decimals=decimals).tolist()
 
 
-def select_top_n_indices(code_marginals: list[float], top_n: int) -> list[int]:
-    """Return original-vocab indices for the top-N codes by marginal, sorted descending."""
-    marg = np.asarray(code_marginals, dtype=np.float64)
-    if top_n >= len(marg):
-        return list(np.argsort(-marg))
-    idx = np.argpartition(-marg, kth=top_n - 1)[:top_n]
-    return list(idx[np.argsort(-marg[idx])])
-
-
 def select_top_n_with_min_cell(
     code_marginals: list[float],
     *,

@@ -12,22 +12,14 @@ All patient-shaped artifacts are synthetic and generated in the browser; no real
 
 ## Data bundle
 
-The dashboard reads four JSON files from `public/data/`:
-`model.json`, `vocab.json`, `phenotypes.json`, `corpus_stats.json`.
+The dashboard reads four JSON files per cohort from `public/data/<cohort>/`:
+`model.json`, `vocab.json`, `phenotypes.json`, `corpus_stats.json`. The set of
+available cohorts is listed in `public/data/manifest.json`.
 
-Regenerate from a checkpoint:
-
-    poetry run python ../analysis/local/build_dashboard.py \
-        --checkpoint ../data/runs/<checkpoint> \
-        --input ../data/simulated/omop_N10000_seed42.parquet \
-        --out-dir public/data \
-        --vocab-top-n 5000
-
-Or for a synthetic fixture bundle (no Spark needed):
-
-    poetry run python ../scripts/make_dev_bundle.py --out-dir public/data --k 10 --v 200 --seed 0
-
-See `docs/superpowers/specs/2026-05-13-dashboard-design.md` for the bundle schema.
+Bundles checked into the repo are sufficient for frontend development; no
+regeneration is needed for UI work. To regenerate from a checkpoint on the
+cloud side, see `analysis/cloud/build_dashboard_cloud.py`; for a local
+checkpoint against a synthetic parquet, see `analysis/local/build_dashboard.py`.
 
 ## Deploy
 

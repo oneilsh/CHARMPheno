@@ -8,14 +8,17 @@ field.
 The provider is auto-selected from the first per-provider env var that is
 set, in this priority order:
 
-    CHARMPHENO_LABEL_KEY_ANTHROPIC  -> anthropic:claude-haiku-4-5
-    CHARMPHENO_LABEL_KEY_OPENAI     -> openai:gpt-4o-mini
-    CHARMPHENO_LABEL_KEY_GOOGLE     -> google-gla:gemini-2.5-flash
+    CHARMPHENO_LABEL_KEY_ANTHROPIC  -> anthropic:claude-opus-4-7
+    CHARMPHENO_LABEL_KEY_OPENAI     -> openai:gpt-5
+    CHARMPHENO_LABEL_KEY_GOOGLE     -> google-gla:gemini-2.5-pro
 
 You can put all three in your .env and the script will pick the first
 available; delete a key from .env to fall through to the next provider.
 Override the model explicitly with `--model <prefix>:<name>` — the script
-will use the env var matching that prefix.
+will use the env var matching that prefix. Smaller/cheaper models in each
+family (e.g. claude-haiku-4-5, gpt-4o-mini, gemini-2.5-flash) work but
+under-classify mixed topics and produce vaguer labels on this rubric;
+use the frontier defaults unless cost is the binding constraint.
 
 The script intentionally does NOT read provider-specific env vars like
 ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY — that keeps the
@@ -42,11 +45,11 @@ Usage:
 
     # force a specific provider:
     poetry run python scripts/label_phenotypes.py \\
-        --model openai:gpt-4o-mini
+        --model openai:gpt-5
 
     # key from a file (never enters env at all):
     poetry run python scripts/label_phenotypes.py \\
-        --model anthropic:claude-haiku-4-5 \\
+        --model anthropic:claude-opus-4-7 \\
         --api-key-file ~/.charmpheno-label-key
 
 The script is idempotent: phenotypes that already have a non-empty `label`
@@ -471,14 +474,14 @@ def _resolve_provider_and_key(args: argparse.Namespace) -> tuple[str, str]:
         if not args.model:
             raise SystemExit(
                 "--api-key-file requires --model so the provider is "
-                "unambiguous (e.g. --model anthropic:claude-haiku-4-5)."
+                "unambiguous (e.g. --model anthropic:claude-opus-4-7)."
             )
         return args.model, _read_key_file(args.api_key_file)
 
     if args.model:
         if ":" not in args.model:
             raise SystemExit(
-                f"--model must be prefixed, e.g. 'anthropic:claude-haiku-4-5'. "
+                f"--model must be prefixed, e.g. 'anthropic:claude-opus-4-7'. "
                 f"Got: {args.model!r}"
             )
         prefix = args.model.split(":", 1)[0]
@@ -545,8 +548,8 @@ def _build_agent(
 
     if ":" not in model_str:
         raise SystemExit(
-            f"--model must be prefixed, e.g. 'google-gla:gemini-2.5-flash', "
-            f"'openai:gpt-4o-mini', 'anthropic:claude-haiku-4-5'. "
+            f"--model must be prefixed, e.g. 'google-gla:gemini-2.5-pro', "
+            f"'openai:gpt-5', 'anthropic:claude-opus-4-7'. "
             f"Got: {model_str!r}"
         )
     prefix, name = model_str.split(":", 1)
@@ -967,8 +970,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--model", default=None,
-        help="pydantic-ai model string, e.g. 'anthropic:claude-haiku-4-5', "
-             "'openai:gpt-4o-mini', 'google-gla:gemini-2.5-flash'. "
+        help="pydantic-ai model string, e.g. 'anthropic:claude-opus-4-7', "
+             "'openai:gpt-5', 'google-gla:gemini-2.5-pro'. "
              "If omitted, auto-selects based on which CHARMPHENO_LABEL_KEY_* "
              "env var is set (anthropic > openai > google).",
     )
