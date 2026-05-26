@@ -140,6 +140,10 @@ def write_phenotypes_bundle(
     npmi: list[float],
     pair_coverage: list[float],
     corpus_prevalence: list[float],
+    theta_histogram: list[list[float | None]] | None = None,
+    theta_percentiles: list[dict[str, float]] | None = None,
+    n_bins: int = 50,
+    min_count: int = 20,
     topic_indices: list[int] | None = None,
     labels: list[str] | None = None,
 ) -> None:
@@ -160,17 +164,49 @@ def write_phenotypes_bundle(
     Per-phenotype `label`, `description`, and `quality` start empty and
     are populated by the post-fit labeling step
     (scripts/label_phenotypes.py).
+
+    theta_histogram[k] is the empirical θ histogram for topic k: a list
+    of length n_bins where each entry is either a float (bin count) or
+    None (bin suppressed due to small-cell, i.e., fewer than min_count
+    documents). theta_percentiles[k] is a dict with keys p5, p25, p50,
+    p75, p95 giving the corresponding θ percentiles for topic k. When
+    theta_histogram is provided, the top-level payload includes
+    theta_histogram_bin_edges (n_bins+1 evenly-spaced values from 0.0
+    to 1.0) and theta_histogram_min_count (the suppression threshold
+    used during histogram construction). None entries in histogram rows
+    serialize to JSON null and round-trip cleanly.
     """
     K = len(npmi)
     if len(pair_coverage) != K:
         raise ValueError(
             f"pair_coverage length {len(pair_coverage)} != npmi length {K}",
         )
+    if theta_histogram is not None:
+        if len(theta_histogram) != K:
+            raise ValueError(
+                f"theta_histogram length {len(theta_histogram)} != npmi length {K}",
+            )
+        for row_idx, row in enumerate(theta_histogram):
+            if len(row) != n_bins:
+                raise ValueError(
+                    f"theta_histogram row {row_idx} length {len(row)} != n_bins {n_bins}",
+                )
+            for entry in row:
+                if entry is not None and not isinstance(entry, float):
+                    raise ValueError(
+                        f"theta_histogram row {row_idx} contains non-float, non-None entry: {entry!r}",
+                    )
+    if theta_percentiles is not None:
+        if len(theta_percentiles) != K:
+            raise ValueError(
+                f"theta_percentiles length {len(theta_percentiles)} != npmi length {K}",
+            )
     labels = labels or [""] * K
     if topic_indices is None:
         topic_indices = list(range(K))
-    phenotypes = [
-        {
+    phenotypes = []
+    for k in range(K):
+        entry: dict = {
             "id": k,
             "label": labels[k],
             "description": "",
@@ -180,6 +216,13 @@ def write_phenotypes_bundle(
             "corpus_prevalence": float(corpus_prevalence[k]),
             "original_topic_id": int(topic_indices[k]),
         }
-        for k in range(K)
-    ]
-    out_path.write_text(json.dumps({"phenotypes": phenotypes}))
+        if theta_histogram is not None:
+            entry["theta_histogram"] = theta_histogram[k]
+        if theta_percentiles is not None:
+            entry["theta_percentiles"] = theta_percentiles[k]
+        phenotypes.append(entry)
+    payload: dict = {"phenotypes": phenotypes}
+    if theta_histogram is not None:
+        payload["theta_histogram_bin_edges"] = np.linspace(0, 1, n_bins + 1).tolist()
+        payload["theta_histogram_min_count"] = int(min_count)
+    out_path.write_text(json.dumps(payload))

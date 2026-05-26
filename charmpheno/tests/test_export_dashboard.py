@@ -156,6 +156,17 @@ def test_min_doc_count_no_eligible_raises(tmp_path: Path):
 def test_write_phenotypes_bundle(tmp_path: Path):
     from charmpheno.export.dashboard import write_phenotypes_bundle
     out = tmp_path / "phenotypes.json"
+    K = 3
+    n_bins = 50
+    # Build K × 50 histograms; include some None entries to exercise null round-trip.
+    theta_hist = [[float(i) for i in range(n_bins)] for _ in range(K)]
+    theta_hist[0][5] = None   # explicit null in row 0
+    theta_hist[1][0] = None   # explicit null in row 1
+    theta_pcts = [
+        {"p5": 0.01, "p25": 0.05, "p50": 0.10, "p75": 0.20, "p95": 0.40},
+        {"p5": 0.02, "p25": 0.06, "p50": 0.12, "p75": 0.22, "p95": 0.42},
+        {"p5": 0.03, "p25": 0.07, "p50": 0.14, "p75": 0.24, "p95": 0.44},
+    ]
     write_phenotypes_bundle(
         out,
         npmi=[0.18, 0.05, -0.10],
@@ -163,22 +174,36 @@ def test_write_phenotypes_bundle(tmp_path: Path):
         corpus_prevalence=[0.30, 0.40, 0.30],
         labels=["Cardiac", "", ""],
         topic_indices=[0, 1, 2],
+        theta_histogram=theta_hist,
+        theta_percentiles=theta_pcts,
+        n_bins=n_bins,
+        min_count=20,
     )
     payload = json.loads(out.read_text())
     assert "npmi_threshold" not in payload
-    assert payload["phenotypes"][0] == {
-        "id": 0,
-        "label": "Cardiac",
-        "description": "",
-        "quality": None,
-        "npmi": pytest.approx(0.18),
-        "pair_coverage": pytest.approx(0.90),
-        "corpus_prevalence": pytest.approx(0.30),
-        "original_topic_id": 0,
-    }
-    # pair_coverage=0 means "unrated" — no pairs cleared the joint-count
-    # threshold for this topic.
+    # Core per-phenotype fields still present.
+    assert payload["phenotypes"][0]["id"] == 0
+    assert payload["phenotypes"][0]["label"] == "Cardiac"
+    assert payload["phenotypes"][0]["description"] == ""
+    assert payload["phenotypes"][0]["quality"] is None
+    assert payload["phenotypes"][0]["npmi"] == pytest.approx(0.18)
+    assert payload["phenotypes"][0]["pair_coverage"] == pytest.approx(0.90)
+    assert payload["phenotypes"][0]["corpus_prevalence"] == pytest.approx(0.30)
+    assert payload["phenotypes"][0]["original_topic_id"] == 0
+    # New per-phenotype theta fields present.
+    assert payload["phenotypes"][0]["theta_histogram"] == theta_hist[0]
+    assert payload["phenotypes"][0]["theta_percentiles"] == theta_pcts[0]
+    assert payload["phenotypes"][1]["theta_histogram"] == theta_hist[1]
+    assert payload["phenotypes"][2]["theta_histogram"] == theta_hist[2]
+    # pair_coverage=0 means "unrated".
     assert payload["phenotypes"][2]["pair_coverage"] == 0.0
+    # Top-level histogram metadata.
+    bin_edges = payload["theta_histogram_bin_edges"]
+    assert isinstance(bin_edges, list)
+    assert len(bin_edges) == n_bins + 1
+    assert bin_edges[0] == pytest.approx(0.0)
+    assert bin_edges[-1] == pytest.approx(1.0)
+    assert payload["theta_histogram_min_count"] == 20
 
 
 def test_write_phenotypes_bundle_preserves_hdp_original_indices(tmp_path: Path):
@@ -208,4 +233,95 @@ def test_write_phenotypes_bundle_length_mismatch_raises(tmp_path: Path):
             npmi=[0.1, 0.2],
             pair_coverage=[0.9],  # wrong length
             corpus_prevalence=[0.5, 0.5],
+        )
+
+
+def test_write_phenotypes_bundle_omits_distribution_when_none(tmp_path: Path):
+    """When theta_histogram and theta_percentiles are both None, the output
+    must not include any histogram-related top-level keys or per-phenotype
+    theta fields."""
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+    out = tmp_path / "phenotypes.json"
+    write_phenotypes_bundle(
+        out,
+        npmi=[0.1, 0.2],
+        pair_coverage=[0.9, 0.8],
+        corpus_prevalence=[0.5, 0.5],
+    )
+    payload = json.loads(out.read_text())
+    assert "theta_histogram_bin_edges" not in payload
+    assert "theta_histogram_min_count" not in payload
+    for p in payload["phenotypes"]:
+        assert "theta_histogram" not in p
+        assert "theta_percentiles" not in p
+
+
+def test_write_phenotypes_bundle_preserves_null_in_histogram(tmp_path: Path):
+    """None entries in histogram rows must survive the JSON round-trip as None."""
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+    out = tmp_path / "phenotypes.json"
+    n_bins = 50
+    row = [float(i) for i in range(n_bins)]
+    row[3] = None
+    row[49] = None
+    write_phenotypes_bundle(
+        out,
+        npmi=[0.1],
+        pair_coverage=[0.9],
+        corpus_prevalence=[0.5],
+        theta_histogram=[row],
+        n_bins=n_bins,
+    )
+    payload = json.loads(out.read_text())
+    loaded_row = payload["phenotypes"][0]["theta_histogram"]
+    assert loaded_row[3] is None
+    assert loaded_row[49] is None
+    # Non-None entries are preserved.
+    assert loaded_row[0] == pytest.approx(0.0)
+    assert loaded_row[10] == pytest.approx(10.0)
+
+
+def test_write_phenotypes_bundle_length_mismatch_histogram(tmp_path: Path):
+    """theta_histogram of wrong outer length raises ValueError."""
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+    out = tmp_path / "phenotypes.json"
+    with pytest.raises(ValueError, match="theta_histogram length"):
+        write_phenotypes_bundle(
+            out,
+            npmi=[0.1, 0.2],
+            pair_coverage=[0.9, 0.8],
+            corpus_prevalence=[0.5, 0.5],
+            theta_histogram=[[0.0] * 50],  # length 1, K=2
+        )
+
+
+def test_write_phenotypes_bundle_length_mismatch_percentiles(tmp_path: Path):
+    """theta_percentiles of wrong length raises ValueError."""
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+    out = tmp_path / "phenotypes.json"
+    with pytest.raises(ValueError, match="theta_percentiles length"):
+        write_phenotypes_bundle(
+            out,
+            npmi=[0.1, 0.2],
+            pair_coverage=[0.9, 0.8],
+            corpus_prevalence=[0.5, 0.5],
+            theta_percentiles=[{"p5": 0.01, "p25": 0.05, "p50": 0.10, "p75": 0.20, "p95": 0.40}],  # length 1, K=2
+        )
+
+
+def test_write_phenotypes_bundle_wrong_n_bins(tmp_path: Path):
+    """Histogram row with wrong length raises ValueError naming the row index."""
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+    out = tmp_path / "phenotypes.json"
+    with pytest.raises(ValueError, match="row 1"):
+        write_phenotypes_bundle(
+            out,
+            npmi=[0.1, 0.2],
+            pair_coverage=[0.9, 0.8],
+            corpus_prevalence=[0.5, 0.5],
+            theta_histogram=[
+                [0.0] * 50,   # row 0 correct
+                [0.0] * 49,   # row 1 wrong (49 instead of 50)
+            ],
+            n_bins=50,
         )
