@@ -2,9 +2,11 @@
   import {
     bundle, selectedPhenotypeId, advancedView, hoveredCodeIdx,
     searchedConditionIdx, searchedPhenotypeForPatients,
+    prevalenceReader, tauThreshold,
   } from '../store'
   import { topRelevantCodes } from '../inference'
   import { go } from '../router'
+  import PrevalenceHistogram from '../PrevalenceHistogram.svelte'
 
   function findInPatients() {
     if ($selectedPhenotypeId === null) return
@@ -28,6 +30,9 @@
     : []
 
   $: maxPwk = top.length ? Math.max(...top.map((r) => r.pwk)) : 1
+
+  $: reader = $prevalenceReader
+  $: hasHistogram = !!(pheno?.theta_histogram && $bundle?.phenotypes.theta_histogram_bin_edges)
 
   // Lay-readable rubric explanations for the quality chip.
   function qualityTooltip(q: string): string {
@@ -69,11 +74,22 @@
         <p class="desc-text">{pheno.description}</p>
       {/if}
       <div class="stats" data-numeric>
-        <span class="stat" title="Prevalence: roughly how many patients show this phenotype in their records.">
-          <span class="stat-k">Prevalence</span>
-          <span class="stat-v">{(pheno.corpus_prevalence * 100).toFixed(1)}%</span>
+        <span class="stat" title={hasHistogram
+          ? ($advancedView
+            ? `Fraction of patients with θ > τ = ${$tauThreshold.toFixed(2)}. A threshold-based approximation of clinical prevalence in the cohort.`
+            : 'Fraction of patients with mixture weight above τ. Slide the τ control in the masthead to see how this changes at different cutoffs.')
+          : 'Topic mass (no patient distribution available for this bundle).'
+        }>
+          <span class="stat-k">{hasHistogram && $advancedView ? 'Prevalence (patients)' : 'Prevalence'}</span>
+          <span class="stat-v">{(reader(pheno) * 100).toFixed(1)}%</span>
         </span>
         {#if $advancedView}
+          {#if hasHistogram}
+            <span class="stat" title="Mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.">
+              <span class="stat-k">Topic mass</span>
+              <span class="stat-v">{(pheno.corpus_prevalence * 100).toFixed(1)}%</span>
+            </span>
+          {/if}
           <span class="stat" title="Coherence: how reliably this phenotype's leading conditions co-occur in real patients (NPMI: normalized pointwise mutual information). Higher means the conditions really do show up together.">
             <span class="stat-k">Coherence</span>
             <span class="stat-v">{pheno.npmi.toFixed(3)}</span>
@@ -97,6 +113,27 @@
         {/if}
       </div>
     </header>
+
+    {#if pheno.theta_histogram && pheno.theta_percentiles && $bundle?.phenotypes.theta_histogram_bin_edges}
+      <div class="hist-wrap">
+        <span class="hist-head">
+          <span class="eyebrow" title="Distribution of this phenotype's per-patient θ across the cohort. Bars = fraction of patients in each θ bin. Dashed fuchsia line = current τ threshold. Faint vertical = median (p50); ticks at top = p5, p25, p75, p95. Bins with fewer than 20 patients are suppressed for privacy.">θ distribution</span>
+          <span class="hist-percentiles" data-numeric>
+            median {(pheno.theta_percentiles.p50 * 100).toFixed(1)}% · p95 {(pheno.theta_percentiles.p95 * 100).toFixed(1)}%
+          </span>
+        </span>
+        <PrevalenceHistogram
+          histogram={pheno.theta_histogram}
+          binEdges={$bundle.phenotypes.theta_histogram_bin_edges}
+          percentiles={pheno.theta_percentiles}
+          tau={$tauThreshold}
+          width={360}
+          height={70}
+        />
+      </div>
+    {:else}
+      <!-- HDP / legacy bundles: gracefully skip the histogram. -->
+    {/if}
 
     <!--
       The leading-conditions table.
@@ -397,5 +434,24 @@
     color: var(--ink-faint);
     font-weight: 400;
     margin-left: 1px;
+  }
+
+  .hist-wrap {
+    padding: 0.55rem 0 0.85rem;
+    margin-bottom: 0.5rem;
+    border-bottom: 1px solid var(--rule-faint);
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .hist-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .hist-percentiles {
+    font-size: var(--fs-micro);
+    font-family: var(--font-mono);
+    color: var(--ink-faint);
   }
 </style>
