@@ -17,9 +17,9 @@
 
   // ── Adaptive x-range ──────────────────────────────────────────────────────
   // Clip to [0, p95 + some breathing room] so rare phenotypes don't squish
-  // all mass against the left edge.  When p95 ≈ 0 (truly empty topic) use a
-  // fallback minimum so the chart isn't degenerate.
-  $: xMax = Math.min(1, Math.max(0.05, percentiles.p95 + Math.max(percentiles.p95 * 0.1, 0.02)))
+  // all mass against the left edge.  Floor at 0.20 so we always show at least
+  // ~10 of the 50 bins — enough shape detail for concentrated topics.
+  $: xMax = Math.min(1.0, Math.max(0.20, percentiles.p95 + Math.max(percentiles.p95 * 0.15, 0.02)))
   $: xMin = 0
 
   // Map a value in [xMin, xMax] to SVG x coordinate
@@ -35,10 +35,21 @@
     return { i, val, lo, hi, inRange }
   })
 
-  $: maxVisible = Math.max(
-    ...visibleBins.filter((b) => b.inRange && b.val !== null).map((b) => b.val as number),
-    1e-9,  // prevent divide-by-zero when all visible bins are null
-  )
+  // ── Tail-focused y-scale ──────────────────────────────────────────────────
+  // The leading (leftmost visible) bin is the "patients without the phenotype"
+  // spike and should not drive the y-axis scale.  Compute yMax from the tail
+  // bins only, so the clinically interesting shape is visible.
+  $: visibleIndices = visibleBins.filter((b) => b.inRange).map((b) => b.i)
+  $: tailIndices = visibleIndices.slice(1)   // drop the leading bin
+  $: tailValues = tailIndices
+    .map((i) => histogram[i])
+    .filter((v): v is number => v != null && v > 0)
+  $: tailMax = tailValues.length ? Math.max(...tailValues) : 0
+  // Guard: if the tail is truly empty, fall back to 5% of the leading bin's
+  // value (so the spike renders as 20× the next-bin height, not literally
+  // infinite), with a small absolute floor to prevent divide-by-zero.
+  $: leadingVal = (visibleIndices.length > 0 ? histogram[visibleIndices[0]] : null) ?? 0
+  $: yMax = Math.max(tailMax, leadingVal * 0.05, 1e-4)
 
   // ── Bar geometry ──────────────────────────────────────────────────────────
   // Bar pixel width = width of one bin in the display domain.
@@ -49,7 +60,13 @@
 
   function barHeight(val: number | null): number {
     if (val === null || val <= 0) return 0
-    return (val / maxVisible) * chartH
+    // Clamp to chart height — leading bin may overflow the tail-focused scale
+    return Math.min(val / yMax, 1) * chartH
+  }
+
+  function isClipped(val: number | null): boolean {
+    if (val === null || val <= 0) return false
+    return val / yMax > 1
   }
 
   // ── τ in range? ───────────────────────────────────────────────────────────
@@ -97,6 +114,7 @@
           <title>{'< 20 patients (suppressed for privacy)'}</title>
         </rect>
       {:else}
+        {@const clipped = isClipped(val)}
         <rect
           x={bx} y={by}
           width={Math.max(binPixW - 0.5, 1)} height={Math.max(bh, 0)}
@@ -105,8 +123,18 @@
           on:mouseenter={() => (hoveredBin = i)}
           on:mouseleave={() => (hoveredBin = null)}
         >
-          <title>{'Patients with θ in [' + lo.toFixed(3) + ', ' + hi.toFixed(3) + '): ' + (val * 100).toFixed(1) + '%'}</title>
+          <title>{'Patients with θ in [' + lo.toFixed(3) + ', ' + hi.toFixed(3) + '): ' + (val * 100).toFixed(1) + '%' + (clipped ? ' (bar clipped, scale set by tail)' : '')}</title>
         </rect>
+        <!-- Overflow triangle: rendered above the chart area when the leading
+             bin exceeds the tail-focused y-scale. -->
+        {#if clipped}
+          {@const cx = bx + Math.max(binPixW - 0.5, 1) / 2}
+          <polygon
+            points="{cx - 3},{PAD_TOP - 1} {cx + 3},{PAD_TOP - 1} {cx},{PAD_TOP - 5}"
+            fill="var(--accent)"
+            fill-opacity="0.6"
+          />
+        {/if}
       {/if}
     {/if}
   {/each}
