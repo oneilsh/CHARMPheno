@@ -123,7 +123,7 @@ def test_adapt_lda_reads_aggregates_from_metadata():
     """adapt_lda reads corpus_prevalence, theta_histogram, theta_percentiles
     from metadata; None entries in histogram become np.nan."""
     from spark_vi.core.result import VIResult
-    K, V, N, n_bins = 3, 5, 100, 50
+    K, V, n_bins = 3, 5, 50
     rng = np.random.RandomState(42)
     lambda_ = rng.rand(K, V) + 0.5
     alpha = np.full(K, 0.1)

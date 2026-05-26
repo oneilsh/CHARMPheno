@@ -17,10 +17,8 @@ class DashboardExport:
     alpha: np.ndarray             # K_display
     corpus_prevalence: np.ndarray # K_display
     topic_indices: np.ndarray     # K_display (original model-side topic ids)
-    theta_histogram: np.ndarray | None = field(default=None)
-    # K_display × n_bins; np.nan = suppressed bin; None for HDP/legacy
-    theta_percentiles: np.ndarray | None = field(default=None)
-    # K_display × 5 in [p5, p25, p50, p75, p95] column order; None for HDP/legacy
+    theta_histogram: np.ndarray | None = field(default=None)   # K_display × n_bins; np.nan = suppressed (use np.nansum to aggregate); None for HDP/legacy
+    theta_percentiles: np.ndarray | None = field(default=None)  # K_display × 5 in [p5, p25, p50, p75, p95] column order; None for HDP/legacy
 
 
 def _global_params(result) -> dict[str, np.ndarray]:
@@ -31,7 +29,7 @@ def _model_class(result) -> str:
     return str(result.metadata.get("model_class", "lda")).lower()
 
 
-def _parse_theta_histogram(raw: list[list[float | None]], K: int, n_bins: int) -> np.ndarray:
+def _parse_theta_histogram(raw: list[list[float | None]]) -> np.ndarray:
     """Convert list-of-lists (with None for suppressed) to (K, n_bins) ndarray.
 
     None entries are mapped to np.nan explicitly before constructing the array.
@@ -42,7 +40,7 @@ def _parse_theta_histogram(raw: list[list[float | None]], K: int, n_bins: int) -
     return np.asarray(rows, dtype=np.float64)
 
 
-def _parse_theta_percentiles(raw: list[dict[str, float]], K: int) -> np.ndarray:
+def _parse_theta_percentiles(raw: list[dict[str, float]]) -> np.ndarray:
     """Convert list of dicts to (K, 5) ndarray with column order [p5, p25, p50, p75, p95]."""
     cols = ["p5", "p25", "p50", "p75", "p95"]
     rows = [[d[c] for c in cols] for d in raw]
@@ -78,7 +76,7 @@ def adapt_lda(result) -> DashboardExport:
     raw_hist = meta.get("theta_histogram")
     theta_histogram: np.ndarray | None
     if raw_hist is not None:
-        theta_histogram = _parse_theta_histogram(raw_hist, K, len(raw_hist[0]))
+        theta_histogram = _parse_theta_histogram(raw_hist)
     else:
         theta_histogram = None
 
@@ -86,7 +84,7 @@ def adapt_lda(result) -> DashboardExport:
     raw_pct = meta.get("theta_percentiles")
     theta_percentiles: np.ndarray | None
     if raw_pct is not None:
-        theta_percentiles = _parse_theta_percentiles(raw_pct, K)
+        theta_percentiles = _parse_theta_percentiles(raw_pct)
     else:
         theta_percentiles = None
 
@@ -124,7 +122,7 @@ def adapt_hdp(result, *, top_k: int = 50) -> DashboardExport:
 
     # corpus_prevalence: prefer metadata slice (after top-K selection) if present;
     # fall back to stick-derived alpha_eff for checkpoints without metadata aggregates.
-    raw_cp = meta.get("corpus_prevalence") if meta else None
+    raw_cp = meta.get("corpus_prevalence")
     if raw_cp is not None:
         full_cp = np.asarray(raw_cp, dtype=np.float64)
         corpus_prev = full_cp[order]
