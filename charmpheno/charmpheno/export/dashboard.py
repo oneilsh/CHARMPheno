@@ -5,9 +5,17 @@ docs/superpowers/specs/2026-05-13-dashboard-design.md.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
+
+
+def _none_if_nan(x: float) -> float | None:
+    """Convert NaN to None for JSON serialization (json.dumps emits
+    'NaN' literally otherwise, which fails JSON.parse)."""
+    x = float(x)
+    return None if math.isnan(x) else x
 
 
 def _round_floats(arr: np.ndarray, *, decimals: int = 6) -> list:
@@ -117,7 +125,7 @@ def write_model_and_vocab_bundles(
         "alpha": _round_floats(np.asarray(alpha)),
         "beta": _round_floats(beta),
     }
-    (out_dir / "model.json").write_text(json.dumps(model_payload))
+    (out_dir / "model.json").write_text(json.dumps(model_payload, allow_nan=False))
 
     codes = []
     for new_idx, orig_idx in enumerate(keep):
@@ -129,7 +137,7 @@ def write_model_and_vocab_bundles(
             "domain": domains.get(cid, "unknown"),
             "corpus_freq": float(code_marginals[orig_idx]),
         })
-    (out_dir / "vocab.json").write_text(json.dumps({"codes": codes}))
+    (out_dir / "vocab.json").write_text(json.dumps({"codes": codes}, allow_nan=False))
 
     return V_disp
 
@@ -219,8 +227,8 @@ def write_phenotypes_bundle(
             "label": labels[k],
             "description": "",
             "quality": None,
-            "npmi": float(npmi[k]),
-            "pair_coverage": float(pair_coverage[k]),
+            "npmi": _none_if_nan(npmi[k]),
+            "pair_coverage": _none_if_nan(pair_coverage[k]),
             "corpus_prevalence": float(corpus_prevalence[k]),
             "original_topic_id": int(topic_indices[k]),
         }
@@ -233,4 +241,4 @@ def write_phenotypes_bundle(
     if theta_histogram is not None:
         payload["theta_histogram_bin_edges"] = np.linspace(0, 1, n_bins + 1).tolist()
         payload["theta_histogram_min_count"] = int(min_count)
-    out_path.write_text(json.dumps(payload))
+    out_path.write_text(json.dumps(payload, allow_nan=False))

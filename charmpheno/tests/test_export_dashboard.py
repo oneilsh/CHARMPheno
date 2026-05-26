@@ -211,6 +211,26 @@ def test_write_phenotypes_bundle(tmp_path: Path):
     }
 
 
+def test_write_phenotypes_bundle_nan_npmi_serializes_as_null(tmp_path: Path):
+    """NaN npmi/pair_coverage must serialize as JSON null, not the literal NaN."""
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+    out = tmp_path / "phenotypes.json"
+    write_phenotypes_bundle(
+        out,
+        npmi=[float("nan"), 0.5],
+        pair_coverage=[0.0, 0.5],
+        corpus_prevalence=[0.0, 0.4],
+    )
+    # File must contain no literal NaN token.
+    assert "NaN" not in out.read_text()
+    # Must parse as strict JSON (json.loads rejects literal NaN).
+    payload = json.loads(out.read_text())
+    assert payload["phenotypes"][0]["npmi"] is None
+    assert payload["phenotypes"][0]["pair_coverage"] == pytest.approx(0.0)
+    assert payload["phenotypes"][1]["npmi"] == pytest.approx(0.5)
+    assert payload["phenotypes"][1]["pair_coverage"] == pytest.approx(0.5)
+
+
 def test_write_phenotypes_bundle_preserves_hdp_original_indices(tmp_path: Path):
     """For HDP, the displayed phenotype ids are 0..K_display-1 but
     original_topic_id carries the source truncation index."""
