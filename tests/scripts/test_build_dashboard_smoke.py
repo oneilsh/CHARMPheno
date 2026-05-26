@@ -14,10 +14,17 @@ def test_build_dashboard_smoke(tmp_path: Path):
     from spark_vi.core.result import VIResult
     from spark_vi.io import save_result
 
+    from charmpheno.export.theta_aggregates import compute_theta_aggregates
+
     K, V = 4, 12
     lambda_ = np.random.RandomState(0).rand(K, V) + 0.5
     alpha = np.full(K, 0.1)
     vocab = [1000 + i for i in range(V)]
+    # Aggregates landed in metadata at fit time (ADR / patient-prevalence
+    # work). Adapter hard-errors without them, so the smoke fixture mirrors
+    # the production training-end shape.
+    gamma = np.random.RandomState(1).gamma(shape=0.1, scale=1.0, size=(50, K)) + 0.01
+    aggregates = compute_theta_aggregates(gamma)
     result = VIResult(
         global_params={"lambda": lambda_, "alpha": alpha},
         elbo_trace=[1.0, 2.0, 3.0], n_iterations=3, converged=True,
@@ -26,6 +33,10 @@ def test_build_dashboard_smoke(tmp_path: Path):
             "concept_names": {1000: "Atrial fibrillation"},
             "concept_domains": {1000: "condition"},
             "corpus_manifest": {"doc_spec": {"name": "patient"}},
+            "theta_histogram": aggregates["theta_histogram"],
+            "theta_percentiles": aggregates["theta_percentiles"],
+            "corpus_prevalence": aggregates["corpus_prevalence"],
+            "n_patients": aggregates["n_patients"],
         },
     )
     ckpt = tmp_path / "ckpt"
