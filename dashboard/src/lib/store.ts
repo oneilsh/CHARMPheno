@@ -1,6 +1,6 @@
 import { writable, derived } from 'svelte/store'
 import type { UMAP } from 'umap-js'
-import type { CohortManifest, DashboardBundle, SyntheticCohort } from './types'
+import type { CohortManifest, DashboardBundle, Phenotype, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
 
@@ -57,6 +57,25 @@ export const selectedPhenotypeId = writable<number | null>(null)
 export const selectedPatientId = writable<string | null>(null)
 export const simulatorPrefix = writable<number[]>([])     // vocab indices (trimmed)
 export const advancedView = writable<boolean>(false)
+
+// Patient-prevalence threshold τ for the histogram-derived "fraction
+// above τ" prevalence reader. Persisted across sessions so a user's
+// preferred cutoff sticks. Defaults to 0.05 (5% of a patient's coded
+// activity attributed to the topic → "patient has phenotype").
+const TAU_STORAGE_KEY = 'charmpheno.tauThreshold'
+const initialTau: number = (() => {
+  try {
+    const raw = localStorage.getItem(TAU_STORAGE_KEY)
+    if (raw == null) return 0.05
+    const n = Number(raw)
+    return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.05
+  } catch { return 0.05 }
+})()
+export const tauThreshold = writable<number>(initialTau)
+tauThreshold.subscribe((t) => {
+  try { localStorage.setItem(TAU_STORAGE_KEY, String(t)) } catch { /* private mode */ }
+})
+
 export const hoveredCodeIdx = writable<number | null>(null)
 
 // Condition search: vocab index of a condition the user has pinned via the
@@ -95,6 +114,40 @@ export const phenotypeSortBy = writable<'label' | 'prevalence' | 'coherence'>(
   'prevalence',
 )
 
+
+// Fraction of patients with theta_k > tau, derived from the histogram.
+// Sum bin fractions where the bin's lower edge >= tau. Suppressed bins
+// (null) contribute 0 (round-to-zero rule, matches the privacy model).
+// HDP / legacy bundles without a histogram fall back to corpus_prevalence
+// so existing components continue to work without conditionals.
+export function fractionAboveTau(
+  p: Phenotype,
+  edges: number[] | undefined,
+  tau: number,
+): number {
+  if (!p.theta_histogram || !edges) return p.corpus_prevalence
+  let s = 0
+  for (let i = 0; i < p.theta_histogram.length; i++) {
+    if (edges[i] >= tau) {
+      const v = p.theta_histogram[i]
+      if (v != null) s += v
+    }
+  }
+  return s
+}
+
+// Convenience derived store: a (Phenotype) -> number reader bound to the
+// current bundle's bin_edges + the current tau slider. Components that
+// display prevalence-as-fraction-above-tau subscribe to this rather than
+// calling fractionAboveTau directly, so the value updates reactively as
+// the slider moves.
+export const prevalenceReader = derived(
+  [bundle, tauThreshold],
+  ([$b, $tau]) => {
+    const edges = $b?.phenotypes.theta_histogram_bin_edges
+    return (p: Phenotype) => fractionAboveTau(p, edges, $tau)
+  }
+)
 
 export const phenotypesById = derived(bundle, ($b) =>
   $b ? new Map($b.phenotypes.phenotypes.map((p) => [p.id, p])) : new Map()
