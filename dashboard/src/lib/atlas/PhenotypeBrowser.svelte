@@ -2,9 +2,13 @@
   import {
     bundle, selectedPhenotypeId, advancedView,
     phenotypeFilter, phenotypeSortBy, searchedConditionIdx,
+    prevalenceReader, tauThreshold,
   } from '../store'
   import { phenotypesContainingCode } from '../inference'
   import type { Phenotype } from '../types'
+
+  // Reactively bind the τ-aware reader so all call sites stay in sync.
+  $: reader = $prevalenceReader
 
   // Filter+sort phenotype list. Sort key state lives in the global store so
   // it's preserved across tab switches. Simple-mode hides dead+mixed (matches
@@ -41,9 +45,13 @@
         }
         case 'coherence':
           return b.npmi - a.npmi
-        case 'prevalence':
-        default:
+        case 'topic_mass':
           return b.corpus_prevalence - a.corpus_prevalence
+        case 'prevalence':
+        default: {
+          const diff = reader(b) - reader(a)
+          return diff !== 0 ? diff : (b.corpus_prevalence - a.corpus_prevalence)
+        }
       }
     })
 
@@ -57,10 +65,16 @@
   }
 
   // For the prevalence sparkline domain we want the max across the FULL set
-  // so the bar widths stay stable as the filter narrows.
+  // so the bar widths stay stable as the filter narrows. The 1e-9 guard
+  // prevents zero-domain bar collapse when τ is very high.
   $: maxPrev = phenotypes.length
-    ? Math.max(...phenotypes.map((p) => p.corpus_prevalence))
-    : 1
+    ? Math.max(...phenotypes.map(reader), 1e-9)
+    : 1e-9
+
+  // Topic mass domain: based on raw corpus_prevalence (doc-mean θ).
+  $: maxMass = phenotypes.length
+    ? Math.max(...phenotypes.map((p) => p.corpus_prevalence), 1e-9)
+    : 1e-9
 </script>
 
 <details class="browser" open>
@@ -91,10 +105,11 @@
     <div class="sort">
       <span class="eyebrow">Sort by</span>
       <select bind:value={$phenotypeSortBy}>
-        <option value="prevalence">Prevalence</option>
+        <option value="prevalence">{$advancedView ? 'Prevalence (patients)' : 'Prevalence'}</option>
         <option value="label">Label (A–Z)</option>
         {#if $advancedView}
           <option value="coherence">Coherence</option>
+          <option value="topic_mass">Topic mass</option>
         {/if}
       </select>
     </div>
@@ -116,8 +131,12 @@
           {#if $advancedView}
             <th class="col-quality">Quality</th>
             <th class="col-coh" data-numeric>Coherence</th>
+            <th class="col-mass" data-numeric title="Mean topic mixture share (doc-mean of θ). Sums to 100% across phenotypes.">Topic mass</th>
           {/if}
-          <th class="col-prev" data-numeric>Prevalence</th>
+          <th class="col-prev" data-numeric title={$advancedView
+            ? `Fraction of patients with mixture weight above τ (currently ${$tauThreshold.toFixed(2)}).`
+            : 'Fraction of patients with mixture weight above τ. Slide the τ control in the masthead to see how this changes at different cutoffs.'
+          }>{$advancedView ? 'Prevalence (patients)' : 'Prevalence'}</th>
         </tr>
       </thead>
       <tbody>
@@ -137,22 +156,30 @@
                 {/if}
               </td>
               <td class="col-coh" data-numeric>{p.npmi.toFixed(3)}</td>
+              <td class="col-mass" data-numeric>
+                <span class="prev-row">
+                  <span class="prev-bar">
+                    <span class="prev-fill mass-fill" style="width: {(p.corpus_prevalence / maxMass) * 100}%"></span>
+                  </span>
+                  <span class="prev-num">{(p.corpus_prevalence * 100).toFixed(1)}%</span>
+                </span>
+              </td>
             {/if}
             <td class="col-prev" data-numeric>
               <span class="prev-row">
                 <span class="prev-bar">
                   <span
                     class="prev-fill"
-                    style="width: {(p.corpus_prevalence / maxPrev) * 100}%"
+                    style="width: {(reader(p) / maxPrev) * 100}%"
                   ></span>
                 </span>
-                <span class="prev-num">{(p.corpus_prevalence * 100).toFixed(1)}%</span>
+                <span class="prev-num">{(reader(p) * 100).toFixed(1)}%</span>
               </span>
             </td>
           </tr>
         {/each}
         {#if filtered.length === 0}
-          <tr><td colspan={$advancedView ? 5 : 3} class="empty">No phenotypes match.</td></tr>
+          <tr><td colspan={$advancedView ? 6 : 3} class="empty">No phenotypes match.</td></tr>
         {/if}
       </tbody>
     </table>
@@ -293,7 +320,8 @@
   .col-label { color: var(--ink); }
   .col-quality { width: 7.5rem; }
   .col-coh { width: 5.5rem; text-align: right; }
-  .col-prev { width: 11rem; text-align: right; }
+  .col-mass { width: 8rem; text-align: right; }
+  .col-prev { width: 9.5rem; text-align: right; }
 
   .prev-row {
     display: inline-flex;
@@ -314,6 +342,7 @@
     height: 100%;
     background: var(--accent);
   }
+  .mass-fill { background: var(--ink-faint); opacity: 0.85; }
   .prev-num {
     color: var(--ink);
     min-width: 3rem;
