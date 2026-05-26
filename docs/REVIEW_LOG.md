@@ -12,6 +12,126 @@ elsewhere.
 
 ---
 
+## 2026-05-26 — Dashboard-module walkthrough (scoped retrospective + cleanups)
+
+Five-lesson scoped walkthrough of the dashboard data flow end-to-end: Python
+export + bundle build + LLM labeler + Svelte frontend. The walkthrough was
+partly retrospective — the V=60 bug (insight 0023) and the
+labeler-rubric blind-spot (insight 0024) both arose in the days leading
+into the session and served as worked examples of the cross-file
+producer/consumer assumption surface this module hides.
+
+### What shipped during the walkthrough
+
+- **Dead code removed** — `select_top_n_indices` in
+  `charmpheno/charmpheno/export/dashboard.py` (the pre-cell-guard ranking
+  function; unused since the small-cell guard refactor that produced
+  `select_top_n_with_min_cell`).
+- **Dev-bundle script retired** — `scripts/make_dev_bundle.py` and
+  `tests/scripts/test_make_dev_bundle.py` deleted. The script bypassed the
+  production writers (schema-drift risk) and predated the multi-cohort
+  layout (writes flat into `data/`, but real bundles now live in
+  `data/<cohort>/` with a manifest). Three checked-in real bundles cover
+  the "no-AoU-access contributor" use case it was intended for.
+  `dashboard/README.md` rewrote the Data Bundle section to point at the
+  cloud/local drivers and the checked-in real bundles.
+- **Labeler docstring + help-text refresh** — `scripts/label_phenotypes.py`
+  docstring, argparse help, and error messages updated to reflect the
+  actual `PROVIDER_CHAIN` defaults (claude-opus-4-7 / gpt-5 /
+  gemini-2.5-pro) rather than the smaller models the file shipped with.
+  One-line note added that smaller models in each family work but
+  under-classify mixed topics on this rubric.
+
+### Pre-existing issues caught and parked
+
+The walkthrough surfaced four architecture follow-ups, all captured in
+the post-tomorrow section of `~/.claude/plans/golden-wondering-cocoa.md`
+(the active `patient_prevalence` plan) for sequencing after that work
+lands:
+
+1. **Move small-cell guard upstream** into the CountVectorizer's
+   `minDF=20`. Privacy guarantee becomes structural: codes with <20
+   distinct patients don't exist in λ, γ, BOW, or any downstream
+   artifact. Requires re-fit of all cohorts. ADR-worthy. Modeling
+   impact likely neutral or positive — rare codes are mostly noise or
+   spurious anchors (relates to insight 0011).
+2. **ADR documenting the producer-side vocab trim**. The display top-N
+   trim stays on the producer side not for layering reasons but because
+   of an operational constraint: automated egress detection at the
+   dataproc perimeter. Current bundles at ~500 KB zipped sit
+   comfortably under the threshold; shipping the full eligible vocab
+   would 3–5× the bundle. Should be documented so the next reader
+   doesn't refactor it away thinking it's architectural debt.
+3. **Generate `manifest.json` from bundles**. Hand-maintained
+   `dashboard/public/data/manifest.json` has already drifted from
+   `COHORT_METADATA` in `charmpheno/charmpheno/omop/cohorts.py` on
+   2 of 3 cohorts (cancer + dementia carry "1 year post-diagnosis" in
+   the manifest but "1 year windows post-diagnosis" in `cohorts.py`).
+   A `scripts/build_dashboard_manifest.py` that aggregates per-cohort
+   `corpus_stats.json` files into the manifest would close the drift
+   surface. Bonus: store the frontend-facing ID in `COHORT_METADATA`
+   itself rather than relying on directory-naming convention.
+4. **`write_model_and_vocab_bundles` should accept β directly**. Both
+   the cloud and local build drivers currently do
+   `pseudo_lambda = export.beta * 1.0e6` to fake out the writer's
+   internal `lambda_ / lambda_.sum(...)` normalize. The writer's API
+   claims to take λ but works for any row-stochastic-after-normalize
+   matrix; the magic scalar exists only to round-trip β through. Small
+   focused refactor; drops a code smell and the duplicated trick from
+   both call sites.
+
+A fifth, minor: the `dead || mixed` mode-filter predicate is duplicated
+across three Atlas components (TopicMap, PhenotypeBrowser,
+ConditionSearch). A shared `isVisibleInCurrentMode` helper would dedup.
+
+### Insights shipped just before the walkthrough
+
+- [Insight 0023](insights/0023-producer-consumer-unit-mismatches-invisible-until-small-scale.md)
+  — dimensional unit mismatches in producer/consumer pairs are invisible
+  at large input scale; the dementia (~9k docs) cohort exposed a
+  token-frequency × corpus-size-docs back-computation that gen-pop and
+  cancer cohorts had been silently masking. The two-field split in
+  `compute_corpus_stats` (`code_marginals` for token frequency,
+  `code_doc_counts` for distinct-doc count) is the structural fix.
+- [Insight 0024](insights/0024-labeler-classifier-rules-have-regime-dependent-blind-spots.md)
+  — LLM-classifier rubrics carry implicit assumptions about feature
+  distributions even when they appear distribution-free. A "low KL →
+  dead, regardless of α" rule worked on the full-corpus regime where
+  α-asymmetry was modest; on cohort-filtered regimes with α 10–20× the
+  median, it misclassified two universal-symptom catch-alls carrying
+  88% of corpus mass as `dead`. Fix added an α-magnitude disambiguator
+  at decision step 1.
+
+### Active plan parked for next session
+
+`~/.claude/plans/golden-wondering-cocoa.md` — the `patient_prevalence`
++ γ-drop work. Two intertwined changes:
+
+- **Prevalence semantics fix.** Current "Prevalence" UI label is backed
+  by `corpus_prevalence` (token-mass: doc-mean of θ), but the tooltips
+  promise patient counts. Concrete consequence on the dementia bundle:
+  Lewy body dementia reads as 0.05–0.1% prevalence (looks like rounding
+  error) when threshold-based patient prevalence is closer to 5–15%
+  (clinically meaningful). Plan adds a `patient_prevalence` metric
+  computed as the fraction of patients whose θ on each topic exceeds
+  the threshold τ (default 0.05). Basic-mode "Prevalence" becomes
+  patient-share; advanced mode shows both with distinct labels.
+- **γ-drop from checkpoint.** The same plan moves aggregate computation
+  upstream into the training/checkpoint pipeline and drops γ from the
+  persisted checkpoint. γ is the largest per-patient artifact in the
+  system (shape (N_docs, K)), is not required to resume training, and
+  keeping it in checkpoints leaves per-patient data sitting in an
+  artifact that may travel. After this change, checkpoints carry
+  K-length aggregates only; adapter reads from metadata, never from γ.
+  No backward compatibility — existing checkpoints get a one-shot
+  migration script.
+
+The two changes share enough surface (signature of `adapt_lda`, what's
+written to checkpoint metadata, what the export builder reads) that
+bundling them was preferred over sequencing.
+
+---
+
 ## 2026-05-13 — Post-cloud-bring-up walkthrough (ADR 0014–0019 retrospective + refactors)
 
 End-to-end walkthrough of the work since the 2026-05-07 HDP-concentration
