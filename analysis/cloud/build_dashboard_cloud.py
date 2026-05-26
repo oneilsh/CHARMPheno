@@ -268,11 +268,32 @@ def main(argv: list[str] | None = None) -> int:
                 top_n=args.vocab_top_n,
                 min_doc_count=args.min_doc_count,
             )
+            if export.theta_histogram is not None:
+                # NaN-suppressed bins → None for JSON serialization
+                hist = [
+                    [None if np.isnan(v) else float(v) for v in row]
+                    for row in export.theta_histogram.tolist()
+                ]
+            else:
+                hist = None
+
+            if export.theta_percentiles is not None:
+                # Columns are in [p5, p25, p50, p75, p95] order per DashboardExport
+                pct = [
+                    {"p5": float(row[0]), "p25": float(row[1]),
+                     "p50": float(row[2]), "p75": float(row[3]), "p95": float(row[4])}
+                    for row in export.theta_percentiles
+                ]
+            else:
+                pct = None
+
             write_phenotypes_bundle(
                 out_dir / "phenotypes.json",
                 npmi=npmi,
                 pair_coverage=pair_coverage,
                 corpus_prevalence=export.corpus_prevalence.tolist(),
+                theta_histogram=hist,
+                theta_percentiles=pct,
                 topic_indices=export.topic_indices.tolist(),
                 labels=None,
             )
