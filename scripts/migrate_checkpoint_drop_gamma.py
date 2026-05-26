@@ -1,30 +1,34 @@
-"""One-shot checkpoint migration: compute θ aggregates, drop γ.
+"""One-shot checkpoint migration: backfill θ aggregates / corpus_prevalence.
 
-For an LDA checkpoint with γ in global_params:
-  - Compute theta_histogram (K × n_bins, fractions, suppressed at count<min_count),
-    theta_percentiles (K × 5 dicts), corpus_prevalence (K floats), n_patients (int)
-    via charmpheno.export.theta_aggregates.compute_theta_aggregates(gamma).
-  - Write all four into result.metadata.
-  - Drop "gamma" from result.global_params.
-  - Re-save the checkpoint and remove the orphan params/gamma.npy file when
-    migrating in-place.
+Background
+----------
+OnlineLDA's shim (spark_vi.mllib.topic.lda) does NOT persist γ (the per-doc
+Dirichlet posterior) in global_params — it only stores lambda, alpha, eta.
+γ is computed on-demand via CAVI inside _transform().  As a result, θ
+aggregates (theta_histogram, theta_percentiles, corpus_prevalence, n_patients)
+are computed at fit time by calling model.transform(fit_df) inside the fit
+drivers, not by inspecting global_params.  No γ is ever written to disk.
 
+LDA branch
+----------
+Because γ is never persisted, this script's LDA branch is minimal:
+
+  - If the checkpoint already has theta_histogram in metadata AND no γ in
+    global_params: no-op (idempotent — aggregates were already computed at
+    fit time by the driver).
+  - If neither γ nor aggregates are present: raises ValueError — re-fit is
+    required (there is no way to reconstruct θ aggregates post-hoc without
+    γ or the original documents + model).
+
+The "γ present" branches from older designs are dead code; they are omitted.
+
+HDP branch
+----------
 For an HDP checkpoint (no γ):
-  - If corpus_prevalence is missing from metadata, write it from the
-    GEM stick masses (u, v).
+  - If corpus_prevalence is missing from metadata, compute and write it from
+    the GEM stick masses (u, v).
   - No histogram, no percentiles (HDP has no per-doc θ).
-
-Idempotency:
-  - If the LDA checkpoint already has theta_histogram in metadata AND no γ
-    in global_params, the script is a no-op and exits cleanly.
-  - If γ AND aggregates are both present (unusual — possibly a re-fit
-    collision), the script warns, recomputes aggregates from γ, and drops γ.
-  - If neither γ nor aggregates are present, the script raises ValueError
-    (cannot migrate; re-fit needed).
-
-After γ is dropped, the empirical θ distribution is gone. The histogram
-cannot be re-computed without re-running the fit. Bin edges and small-cell
-threshold are baked into the migrated metadata at this step.
+  - If corpus_prevalence is already present: no-op.
 """
 from __future__ import annotations
 
@@ -139,69 +143,19 @@ def migrate(
     if model_class not in LDA_ALIASES:
         raise ValueError(f"unsupported model class: {model_class}")
     print(f"[migrate] detected LDA checkpoint (model_class={model_class!r})", flush=True)
-    gp = result.global_params
-    has_gamma = "gamma" in gp
     has_aggregates = "theta_histogram" in result.metadata
 
-    # --- idempotent no-op ---
-    if not has_gamma and has_aggregates:
-        print("[migrate] lda: already migrated (no gamma, aggregates present) — noop", flush=True)
+    # --- idempotent no-op: aggregates already present (written at fit time) ---
+    if has_aggregates:
+        print("[migrate] lda: aggregates already present — noop", flush=True)
         return {"kind": "lda", "action": "noop", "n_patients": result.metadata.get("n_patients")}
 
-    # --- cannot migrate: re-fit needed ---
-    if not has_gamma and not has_aggregates:
-        raise ValueError(
-            "LDA checkpoint has neither 'gamma' in global_params nor "
-            "'theta_histogram' in metadata. Cannot compute theta aggregates "
-            "without gamma. re-fit the model to produce a migratable checkpoint."
-        )
-
-    # --- recompute if both gamma and aggregates are present (warn) ---
-    if has_gamma and has_aggregates:
-        print(
-            "[migrate] lda: WARNING — gamma AND aggregates both present "
-            "(possible re-fit collision). Recomputing aggregates from gamma and dropping gamma.",
-            flush=True,
-        )
-        action = "recomputed"
-    else:
-        # Normal path: gamma present, no aggregates
-        action = "migrated"
-
-    gamma = np.asarray(gp["gamma"], dtype=np.float64)
-    print(f"[migrate] lda: computing theta aggregates (N={gamma.shape[0]}, K={gamma.shape[1]}, n_bins={n_bins}, min_count={min_count})", flush=True)
-    aggregates = compute_theta_aggregates(gamma, n_bins=n_bins, min_count=min_count)
-
-    new_metadata = dict(result.metadata)
-    new_metadata.update(aggregates)
-
-    new_global_params = {k: v for k, v in gp.items() if k != "gamma"}
-
-    new_result = VIResult(
-        global_params=new_global_params,
-        elbo_trace=result.elbo_trace,
-        n_iterations=result.n_iterations,
-        converged=result.converged,
-        metadata=new_metadata,
-        diagnostic_traces=result.diagnostic_traces,
+    # --- cannot migrate: γ was never persisted by OnlineLDA; re-fit needed ---
+    raise ValueError(
+        "LDA checkpoint has no 'theta_histogram' in metadata, and γ is never "
+        "persisted by OnlineLDA's shim — post-hoc migration is not possible. "
+        "Re-fit the model to produce a checkpoint with theta aggregates."
     )
-
-    print(f"[migrate] lda: saving migrated checkpoint to {dst}", flush=True)
-    save_result(new_result, dst)
-
-    # Orphan cleanup: save_result only writes the params it's given.
-    # If migrating in-place, the old params/gamma.npy may still exist
-    # because save_result does not delete files it is not writing.
-    # We only clean up AFTER a successful save.
-    if in_place:
-        orphan = dst / "params" / "gamma.npy"
-        if orphan.exists():
-            orphan.unlink()
-            print(f"[migrate] lda: removed orphan {orphan}", flush=True)
-
-    n_patients = aggregates["n_patients"]
-    print(f"[migrate] lda: {action} (N={n_patients}, K={gamma.shape[1]})", flush=True)
-    return {"kind": "lda", "action": action, "n_patients": n_patients}
 
 
 def main(argv=None) -> int:

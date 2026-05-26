@@ -459,17 +459,20 @@ def main(argv: list[str] | None = None) -> int:
         vocab_list: list = [None] * len(vocab_map)
         for cid, idx in vocab_map.items():
             vocab_list[idx] = cid
-        if "gamma" not in model.result.global_params:
-            raise RuntimeError(
-                "LDA fit driver expected gamma in global_params after fit; "
-                f"got keys: {list(model.result.global_params)}"
-            )
-        gamma = model.result.global_params["gamma"]
-        aggregates = compute_theta_aggregates(gamma)
-        gp_no_gamma = {k: v for k, v in model.result.global_params.items()
-                       if k != "gamma"}
+        # γ is not persisted by OnlineLDA's shim (it's a per-doc CAVI artifact).
+        # Re-derive θ via model.transform — runs CAVI once per doc — and collect
+        # to driver for histogramming. Cost: one Spark pass over fit_df + N×K
+        # floats on the driver. Cheap relative to fitting itself.
+        print("[driver] computing theta aggregates via model.transform(fit_df)...", flush=True)
+        transformed = model.transform(fit_df)
+        topic_dist_col = "topicDistribution"  # the shim's default output col name
+        theta_rows = transformed.select(topic_dist_col).rdd.map(
+            lambda row: row[0].toArray()
+        ).collect()
+        theta_arr = np.asarray(theta_rows, dtype=np.float64)
+        aggregates = compute_theta_aggregates(theta_arr)
         augmented = VIResult(
-            global_params=gp_no_gamma,
+            global_params=model.result.global_params,   # unchanged — no γ to drop
             elbo_trace=model.result.elbo_trace,
             n_iterations=model.result.n_iterations,
             converged=model.result.converged,
@@ -495,8 +498,8 @@ def main(argv: list[str] | None = None) -> int:
             },
         )
         print(
-            f"[driver]   wrote theta aggregates to metadata; dropped gamma "
-            f"({aggregates['n_patients']} patients, K={args.K} topics).",
+            f"[driver]   wrote theta aggregates to metadata "
+            f"({aggregates['n_patients']} patients, K={len(aggregates['corpus_prevalence'])}).",
             flush=True,
         )
         save_result(augmented, args.save_dir)

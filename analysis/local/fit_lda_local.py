@@ -30,6 +30,7 @@ import logging
 import os
 from pathlib import Path
 
+import numpy as np
 from pyspark.sql import SparkSession
 
 from charmpheno.export.theta_aggregates import compute_theta_aggregates
@@ -121,17 +122,19 @@ def main(argv: list[str] | None = None) -> int:
         vocab_list = [None] * len(vocab_map)
         for cid, idx in vocab_map.items():
             vocab_list[idx] = cid
-        if "gamma" not in model.result.global_params:
-            raise RuntimeError(
-                "LDA fit driver expected gamma in global_params after fit; "
-                f"got keys: {list(model.result.global_params)}"
-            )
-        gamma = model.result.global_params["gamma"]
-        aggregates = compute_theta_aggregates(gamma)
-        gp_no_gamma = {k: v for k, v in model.result.global_params.items()
-                       if k != "gamma"}
+        # γ is not persisted by OnlineLDA's shim (it's a per-doc CAVI artifact).
+        # Re-derive θ via model.transform — runs CAVI once per doc — and collect
+        # to driver for histogramming. Cost: one Spark pass over fit_df + N×K
+        # floats on the driver. Cheap relative to fitting itself.
+        log.info("computing theta aggregates via model.transform(fit_df)...")
+        transformed = model.transform(fit_df)
+        theta_rows = transformed.select("topicDistribution").rdd.map(
+            lambda row: row[0].toArray()
+        ).collect()
+        theta_arr = np.asarray(theta_rows, dtype=np.float64)
+        aggregates = compute_theta_aggregates(theta_arr)
         result_with_vocab = VIResult(
-            global_params=gp_no_gamma,
+            global_params=model.result.global_params,
             elbo_trace=model.result.elbo_trace,
             n_iterations=model.result.n_iterations,
             converged=model.result.converged,
@@ -151,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             },
         )
         log.info(
-            "wrote theta aggregates to metadata; dropped gamma (%d patients, K=%d topics).",
+            "wrote theta aggregates to metadata; no gamma to drop (%d patients, K=%d topics).",
             aggregates["n_patients"], args.K,
         )
         save_result(result_with_vocab, args.output)
