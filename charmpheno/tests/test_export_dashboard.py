@@ -204,6 +204,11 @@ def test_write_phenotypes_bundle(tmp_path: Path):
     assert bin_edges[0] == pytest.approx(0.0)
     assert bin_edges[-1] == pytest.approx(1.0)
     assert payload["theta_histogram_min_count"] == 20
+    assert set(payload["phenotypes"][0].keys()) == {
+        "id", "label", "description", "quality",
+        "npmi", "pair_coverage", "corpus_prevalence",
+        "original_topic_id", "theta_histogram", "theta_percentiles",
+    }
 
 
 def test_write_phenotypes_bundle_preserves_hdp_original_indices(tmp_path: Path):
@@ -305,6 +310,7 @@ def test_write_phenotypes_bundle_length_mismatch_percentiles(tmp_path: Path):
             npmi=[0.1, 0.2],
             pair_coverage=[0.9, 0.8],
             corpus_prevalence=[0.5, 0.5],
+            theta_histogram=[[0.0] * 50, [0.0] * 50],  # valid K=2 histogram required
             theta_percentiles=[{"p5": 0.01, "p25": 0.05, "p50": 0.10, "p75": 0.20, "p95": 0.40}],  # length 1, K=2
         )
 
@@ -324,4 +330,35 @@ def test_write_phenotypes_bundle_wrong_n_bins(tmp_path: Path):
                 [0.0] * 49,   # row 1 wrong (49 instead of 50)
             ],
             n_bins=50,
+        )
+
+
+def test_write_phenotypes_bundle_length_mismatch_corpus_prevalence(tmp_path: Path):
+    """corpus_prevalence of wrong length raises ValueError."""
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+    out = tmp_path / "phenotypes.json"
+    with pytest.raises(ValueError, match="corpus_prevalence length"):
+        write_phenotypes_bundle(
+            out,
+            npmi=[0.1, 0.2],
+            pair_coverage=[0.9, 0.8],
+            corpus_prevalence=[0.5],  # length 1, K=2
+        )
+
+
+def test_write_phenotypes_bundle_percentiles_without_histogram_errors(tmp_path: Path):
+    """theta_percentiles without theta_histogram raises ValueError."""
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+    out = tmp_path / "phenotypes.json"
+    with pytest.raises(ValueError, match="theta_percentiles requires theta_histogram"):
+        write_phenotypes_bundle(
+            out,
+            npmi=[0.1, 0.2],
+            pair_coverage=[0.9, 0.8],
+            corpus_prevalence=[0.5, 0.5],
+            theta_percentiles=[
+                {"p5": 0.01, "p25": 0.05, "p50": 0.10, "p75": 0.20, "p95": 0.40},
+                {"p5": 0.02, "p25": 0.06, "p50": 0.12, "p75": 0.22, "p95": 0.42},
+            ],
+            theta_histogram=None,
         )

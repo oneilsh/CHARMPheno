@@ -177,9 +177,17 @@ def write_phenotypes_bundle(
     serialize to JSON null and round-trip cleanly.
     """
     K = len(npmi)
+    if theta_percentiles is not None and theta_histogram is None:
+        raise ValueError(
+            "theta_percentiles requires theta_histogram to be provided",
+        )
     if len(pair_coverage) != K:
         raise ValueError(
             f"pair_coverage length {len(pair_coverage)} != npmi length {K}",
+        )
+    if len(corpus_prevalence) != K:
+        raise ValueError(
+            f"corpus_prevalence length {len(corpus_prevalence)} != npmi length {K}",
         )
     if theta_histogram is not None:
         if len(theta_histogram) != K:
