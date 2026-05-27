@@ -256,7 +256,7 @@ build-dashboard-bundle: zip $(WORKSPACE_ENV)
 # cluster teardown unless you rsync them off. For long-lived runs, override
 # SAVE_DIR explicitly to a /mnt/gcs/<bucket>/... path.
 #RUNS_DIR := $(REPO_ROOT)/data/runs
-RUNS_DIR := /home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/data/runs
+RUNS_DIR := /home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs
 
 # RUN_ID is the artifact directory name under $(RUNS_DIR). Empty (default)
 # means auto-generate <model>_<timestamp>. Override to resume a prior run.
