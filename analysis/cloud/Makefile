@@ -255,7 +255,8 @@ build-dashboard-bundle: zip $(WORKSPACE_ENV)
 # Dataproc-master path, not a GCS-FUSE mount — artifacts don't survive a
 # cluster teardown unless you rsync them off. For long-lived runs, override
 # SAVE_DIR explicitly to a /mnt/gcs/<bucket>/... path.
-RUNS_DIR := $(REPO_ROOT)/data/runs
+#RUNS_DIR := $(REPO_ROOT)/data/runs
+RUNS_DIR := /home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/data/runs
 
 # RUN_ID is the artifact directory name under $(RUNS_DIR). Empty (default)
 # means auto-generate <model>_<timestamp>. Override to resume a prior run.
@@ -426,7 +427,7 @@ lda-bq-fit-eval-cancer: zip $(WORKSPACE_ENV)
 	    --doc-min-length 20 \
 	    --K 40 \
 	    --subsampling-rate 0.2 \
-	    --max-iter 20 \
+	    --max-iter 150 \
 	    --person-mod 1 \
 	    --vocab-size 10000 \
 	    --min-df 10 \
@@ -496,7 +497,7 @@ lda-bq-fit-eval-dementia: zip $(WORKSPACE_ENV)
 	    --doc-min-length 20 \
 	    --K 40 \
 	    --subsampling-rate 0.2 \
-	    --max-iter 20 \
+	    --max-iter 150 \
 	    --person-mod 1 \
 	    --vocab-size 10000 \
 	    --min-df 10 \
