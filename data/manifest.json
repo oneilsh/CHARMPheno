@@ -1,6 +1,11 @@
 {
-  "default": "general",
+  "default": "local-test",
   "cohorts": [
+    {
+      "id": "local-test",
+      "label": "Local dev (K=10, N=10k, synthetic)",
+      "description": "Local-only dev bundle from a 50-iter synthetic-parquet fit. Carries the histogram + percentile fields; not for production use."
+    },
     {
       "id": "general",
       "label": "General Population (1 year windows)",
