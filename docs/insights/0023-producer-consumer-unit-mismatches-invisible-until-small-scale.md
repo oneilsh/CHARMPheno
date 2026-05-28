@@ -96,22 +96,29 @@ factors made this particular bug invisible:
   be impossible to miss. Add to the build-dashboard summary print
   and treat it as a metric to watch across runs.
 - **Producer-consumer pairs deserve a paired test.** A unit test
-  feeding `compute_corpus_stats` output directly into
-  `select_top_n_with_min_cell` with realistic corpus dimensions
-  would have caught the unit mismatch the first time it was added.
+  feeding `compute_corpus_stats` output directly into the
+  display-time ranker with realistic corpus dimensions would have
+  caught the unit mismatch the first time it was added.
 
 ## The fix
 
 [`compute_corpus_stats`](../../charmpheno/charmpheno/export/corpus_stats.py)
 now tracks per-code distinct-document counts as a separate field
-alongside token-frequency marginals.
-[`select_top_n_with_min_cell`](../../charmpheno/charmpheno/export/dashboard.py)
-filters on doc counts and ranks on marginals — preserving both
-semantics explicitly. The two quantities are now distinct in the
-public API so substituting one for the other is a type-checked
-mistake rather than a silent one. A regression test
-(`test_min_doc_count_filter_independent_of_token_freq`) pins the
-fix against the specific failure mode that hid the bug.
+alongside token-frequency marginals. The two quantities are distinct
+in the public API so substituting one for the other is a type-checked
+mistake rather than a silent one.
+
+At the time this insight was logged, the consumer-side ranker
+(`select_top_n_with_min_cell`) filtered on doc counts and ranked on
+marginals — preserving both semantics at display time. **Subsequently
+moved upstream**: the small-cell guard now lives in
+`CountVectorizer.minDF` + `min_patient_count` at vocab-build time
+(see ADR 0021 and insight 0025), and the ranking function — renamed
+[`select_top_n_by_marginal`](../../charmpheno/charmpheno/export/dashboard.py) —
+is pure top-N. The unit-mismatch failure mode this insight describes
+is no longer reachable: `code_doc_counts` is informational only, and
+the bundle vocab is structurally bounded by the upstream privacy
+thresholds.
 
 **Setting context:** Dashboard export pipeline, caught during the
 dementia cohort bundle build (~9k docs, K=40). Bug originated in

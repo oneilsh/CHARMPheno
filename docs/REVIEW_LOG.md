@@ -12,6 +12,200 @@ elsewhere.
 
 ---
 
+## 2026-05-28 — patient_prevalence, β-writer, min_patient_count, driver extraction (scoped retrospective + cleanups)
+
+Five-lesson scoped walkthrough of three interlocking plans plus an
+operational-cleanup arc. The plans landed in the order dependencies
+allowed: `patient_prevalence + γ-drop` first (moved aggregate
+computation upstream and changed the checkpoint contract), then
+`β-writer + minDF upstream` (touched the same writer), then
+`min_patient_count` (refining the minDF privacy story the previous
+plan just landed). A cleanup arc (ADR 0021, manifest generator, driver
+extractions) followed once the contracts stabilized. The walkthrough
+was retrospective by design — each plan authored before
+implementation — with emphasis on artifacts and design seams rather
+than re-deriving motivation.
+
+### What shipped — patient_prevalence + γ-drop
+
+- **Producer-side aggregate computation.** New
+  [theta_aggregates.py](../charmpheno/charmpheno/export/theta_aggregates.py)
+  computes per-topic θ histograms (20 bins on the unit interval) and
+  percentiles `[p5, p25, p50, p75, p95]` at fit time. Small-cell
+  suppression applies at the histogram-bin level: bins with `count == 0`
+  emit `0.0`, bins with `1 ≤ count < 20` emit `null` (round-trips to
+  `np.nan` in the adapter; consumers use `np.nansum` for safe
+  aggregation), bins with `count ≥ 20` emit `count / N`.
+- **Checkpoint contract changed.** Fit drivers (LDA cloud + local + HDP
+  cloud) compute aggregates via `model.transform` and write them to
+  `result.metadata`. γ is no longer persisted by the OnlineLDA shim — it
+  was the largest per-patient artifact in the checkpoint and isn't
+  needed to resume training. `adapt_lda` reads from metadata; the γ
+  path is gone. The HDP cloud driver also writes `corpus_prevalence`
+  to metadata, with the adapter slicing it to top-K topics
+  post-selection.
+- **Writer extension.** `write_phenotypes_bundle` gained optional
+  `theta_histogram` and `theta_percentiles` kwargs and emits them
+  per-phenotype + at top level (`theta_histogram_bin_edges` and
+  `theta_histogram_min_count` shipped once at top level, not per
+  topic). `allow_nan=False` on `json.dumps` enforces no NaN literals
+  on the wire — forced `_none_if_nan` upstream for `npmi` and
+  `pair_coverage` (commits `ea35dce`, `7c27d0e`).
+- **Frontend τ slider + Phenotype Prominence.**
+  [ThresholdSlider.svelte](../dashboard/src/lib/ThresholdSlider.svelte)
+  and
+  [PrevalenceHistogram.svelte](../dashboard/src/lib/PrevalenceHistogram.svelte)
+  added. `tauThreshold` writable (localStorage-persisted) drives a
+  `prevalenceReader` derived store — a reader function `(topicId) →
+  fraction` computed at display time from `theta_histogram`. TopicMap
+  bubble sizing, PhenotypeBrowser sort/columns, and CodePanel stat all
+  consume the reader. The histogram component uses a tail-focused
+  y-scale with an axis-break overflow indicator so the rightmost
+  mass-bin doesn't dominate visually. UI label "Prevalence" is now
+  patient-share by default; the old token-mass metric appears as
+  "Topic mass" in advanced mode.
+
+### What shipped — β-writer + upstream minDF
+
+- **Writer takes β directly.** `write_model_and_vocab_bundles`
+  signature changed from `lambda_` to `beta: np.ndarray` with an
+  input-boundary check (`np.allclose(row_sums, 1.0, atol=1e-6)` or
+  raise). Both build drivers stopped doing `pseudo_lambda = export.beta
+  * 1.0e6` to fake out the writer's internal normalize.
+- **Privacy threshold structural.** `--min-df` default bumped 5 → 20
+  to match the small-cell suppression threshold. Codes with fewer than
+  20 documents no longer enter the trained model at all — they don't
+  exist in λ, BOW, or any downstream artifact. `--min-doc-count` CLI
+  flag dropped.
+- **Ranking function simplified.** `select_top_n_with_min_cell` →
+  renamed `select_top_n_by_marginal` and reduced to two lines
+  (`argsort` + slice). `code_doc_counts` no longer threaded through
+  the writer; `corpus_stats.py` still emits the field as
+  informational.
+
+### What shipped — min_patient_count vocab filter
+
+- **Manual vocab aggregation.** `_build_count_vectorizer_model` in
+  [topic_prep.py](../charmpheno/charmpheno/omop/topic_prep.py) replaces
+  `CountVectorizer.fit()`. A single explode-group-agg over `tokens`
+  produces per-token `term_count` / `doc_count` / `patient_count`,
+  filters by AND-composed `min_df` and `min_patient_count`, and builds
+  a `CountVectorizerModel.from_vocabulary` so the downstream API is
+  unchanged.
+- **AND-composition rationale.** `min_df` answers "is this code stable
+  enough to model?" (modeling concern); `min_patient_count` answers
+  "do enough distinct patients carry this code that releasing it
+  doesn't identify anyone?" (privacy concern). They target different
+  denominators — in `PatientYearDocSpec` mode a code with 5 patients ×
+  4 years passes doc-frequency 20 but fails patient-count 20 — so
+  neither subsumes the other.
+- **Driver wiring.** Both LDA and HDP cloud drivers grew
+  `--min-patient-count` (default 20). The `corpus_manifest` field in
+  checkpoint metadata records both thresholds.
+
+### What shipped — operational cleanup arc
+
+- **[ADR 0021](decisions/0021-producer-side-vocab-trim-egress-budget.md)** —
+  producer-side vocab trim is load-bearing for the AoU Researcher
+  Workbench egress budget, not architectural debt. Current bundles
+  ~500 KB zipped; full vocab would 3–5× them, moving every re-export
+  into a size regime where automated egress review is more likely to
+  fire. ADR explicitly tells future reviewers not to refactor the
+  trim downstream without checking this rationale.
+- **[scripts/build_dashboard_manifest.py](../scripts/build_dashboard_manifest.py)** —
+  walks `dashboard/public/data/*/corpus_stats.json` and writes
+  `manifest.json` from `cohort.{label, description}` blocks the
+  producer already emits. Three-tier `default` resolution
+  (explicit flag → preserve existing if still valid → alphabetical
+  first). Tolerant of missing/malformed inputs so dev bundles ship
+  alongside real cohorts. 8 unit tests in `scripts/tests/`. Not yet
+  wired into the build flow.
+- **[analysis/cloud/_driver_common.py](../analysis/cloud/_driver_common.py)** —
+  `_phase`, `configure_logging(extra_loggers=None)`,
+  `make_spark_session(app_name)` extracted from both fit drivers and
+  the eval/build drivers. Net -54 LOC. The `extra_loggers` mapping is
+  the only non-trivial design choice — LDA bumps `charmpheno` to INFO,
+  HDP doesn't.
+- **[analysis/cloud/_corpus_load.py](../analysis/cloud/_corpus_load.py)** —
+  `load_or_build_corpus(spark, *, doc_spec, cdr, billing,
+  source_table, person_mod, vocab_size, min_df, min_patient_count,
+  cache_uri=None, cohort=None)` extracted from both fit drivers.
+  `cohort=None` is the LDA-vs-HDP asymmetry handle (LDA threads
+  `--cohort`; HDP doesn't take one). The cache contract — hit path
+  returns a self-sufficient triple, no live `omop` DataFrame
+  required — is documented once instead of duplicated as comments
+  across two drivers. Net +1 LOC.
+
+### Insights + ADRs shipped
+
+- **[Insight 0025](insights/0025-min-patient-count-vs-min-df.md)** —
+  doc-count vs patient-count distinction and the pre-fit AND-composition choice.
+- **ADR 0021** (above).
+
+### Pre-existing issues caught and addressed
+
+- **`pseudo_lambda = export.beta * 1.0e6` at both build drivers** —
+  magic-scalar idiom existed only to round-trip a row-stochastic β
+  through a writer whose internal normalize would otherwise be a
+  no-op. Both call sites deleted.
+- **`--min-df` help-text overclaim** — original wording suggested the
+  threshold answered the "enough distinct patients" question. Fixed
+  in `674e803`; per-patient guarantee delivered by `min_patient_count`
+  a few commits later.
+- **`select_top_n_with_min_cell` name no longer matched function** —
+  the min-cell guard moved upstream; the function became pure top-N.
+  Renamed to `select_top_n_by_marginal`.
+- **`dead || mixed` predicate duplicated across three Atlas
+  components** — unified as `isVisibleInCurrentMode` derived store
+  (commit `5eab9a1`).
+- **`CodePanel.hasHistogram` asymmetric guard** — `hasHistogram` only
+  checked `theta_histogram`; the inline render block also gated on
+  `theta_percentiles`. Symmetrized so the inline guard collapses to
+  `{#if hasHistogram}` (commit `f77d7b1`).
+- **JSON `NaN` literals invalid on the wire** —
+  bundle previously serialized NaN-valued `npmi` and `pair_coverage`
+  as literal `NaN`, which browser `JSON.parse` rejects. Now emits
+  `null` upstream; `allow_nan=False` on `json.dumps` enforces it
+  (commits `ea35dce`, `7c27d0e`).
+- **Manifest drift caught at 2026-05-26 review** — closed by the
+  generator script; producer's `corpus_stats.json` becomes the single
+  source of truth.
+
+### Threads parked
+
+- **Experiment-tracking system** — the next major arc. The current
+  ad-hoc setup has the pieces but not the links: `corpus_manifest` in
+  checkpoint metadata is rich enough to anchor a per-experiment record,
+  but there's no bidirectional connection to `docs/insights/`,
+  `docs/decisions/`, or `REVIEW_LOG.md`. Cohort-specific Makefile
+  targets, RUN_ID auto-gen recipe duplication, the
+  `run_lda_w_eval.sh` / `run.sh` deletions, and wiring `make manifest`
+  into the post-export flow all fold into this arc.
+- **STM as next major model arc.** Confirmed fits the spark-vi
+  framework cleanly. The DashboardExport adapter pattern,
+  `prevalenceReader` slot, and ThresholdSlider scaffolding are
+  integration points already in place; `_corpus_load.py` and
+  `_driver_common.py` are the scaffolding the STM driver will inherit.
+- **Shared argparse factory between LDA / HDP drivers.** 14 identical
+  args + 6 near-duplicates. Defer until STM lands so the third
+  driver informs the factoring.
+- **Topic evolution logger extraction.** Same rationale — defer until
+  STM is the third data point.
+- **HDP export/dashboard infrastructure removal.** User noted HDP
+  didn't pan out for this project; the multi-model adapter pattern
+  may still earn its keep when STM lands, so removal not actioned now.
+- **`code_doc_counts` field removal from `corpus_stats.json`** —
+  informational only after this arc; defer until a consumer cares.
+- **Migration tooling not built** — fresh fits are cheap enough
+  (~1hr each) that `migrate_checkpoint_drop_gamma.py` was deleted
+  mid-arc (commit `c851310`). `adapt_lda`'s error message points
+  readers at "re-fit with the current LDA driver."
+- **Internal-cohort-name → frontend-id mapping is implicit in
+  `--out-dir`** — flagged by the manifest generator's module
+  docstring; tighten when a concrete need arises.
+
+---
+
 ## 2026-05-26 — Dashboard-module walkthrough (scoped retrospective + cleanups)
 
 Five-lesson scoped walkthrough of the dashboard data flow end-to-end: Python
