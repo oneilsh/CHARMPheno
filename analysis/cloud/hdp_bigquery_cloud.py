@@ -238,9 +238,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--min-df", type=int, default=20,
-        help=("Minimum document frequency for vocab inclusion. "
-              "Default 20 matches the small-cell suppression threshold "
-              "so that sub-threshold codes never enter the trained model."),
+        help=("Minimum document frequency for vocab inclusion (PySpark CountVectorizer minDF). "
+              "Default 20. Counts documents, not distinct patients — in patient-year doc mode "
+              "one patient can contribute multiple documents."),
     )
     parser.add_argument(
         "--top-n-tokens", type=int, default=10,
