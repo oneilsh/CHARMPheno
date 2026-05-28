@@ -100,6 +100,9 @@ help:
 	@echo "                         HDP_BQ_ARGS='--T 150 --K 15 ...'"
 	@echo "                         EVAL_ARGS='--model-class hdp --hdp-k 50'"
 	@echo "                         RESUME: make hdp-bq-fit-eval RUN_ID=<existing-id> HDP_BQ_ARGS='--max-iter <N more>'"
+	@echo "  next-exp                Pick lowest-NNNN pending experiment; fit + eval."
+	@echo "  exp ID=N                Run/resume experiment N; fit + eval."
+	@echo "  summary ID=N            Print summary.md for experiment N."
 	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
 	@echo "                         Restricts to patients with a first malignant-cancer dx"
 	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
@@ -261,6 +264,28 @@ RUNS_DIR := /home/dataproc/workspace/dataproc-staging-getting-started-with-regis
 # RUN_ID is the artifact directory name under $(RUNS_DIR). Empty (default)
 # means auto-generate <model>_<timestamp>. Override to resume a prior run.
 RUN_ID          ?=
+
+# ─── Experiment-tracking targets (Increment 1) ──────────────────────────────
+# See docs/superpowers/specs/2026-05-28-experiment-tracking-design.md.
+#
+# Author experiments locally in docs/experiments/NNNN-slug.md with YAML
+# frontmatter; run them on the cluster via these targets.
+
+# Pick lowest-NNNN with status: pending; fit + eval; write summary.md
+next-exp: zip $(WORKSPACE_ENV)
+	. ./$(WORKSPACE_ENV) && \
+	python $(REPO_ROOT)/scripts/run_experiment.py --next --runs-dir $(RUNS_DIR)
+
+# Same pipeline pinned to specific id (auto-resumes if RUN_ID dir exists)
+exp: zip $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	. ./$(WORKSPACE_ENV) && \
+	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR)
+
+# Print summary.md for an experiment (copy/paste back to chat)
+summary:
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	@cat $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*/summary.md
 
 lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	@mkdir -p $(RUNS_DIR) && \
