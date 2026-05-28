@@ -1,25 +1,20 @@
 {
-  "default": "local-test",
+  "default": "cancer",
   "cohorts": [
     {
-      "id": "local-test",
-      "label": "Local dev (K=10, N=10k, synthetic)",
-      "description": "Local-only dev bundle from a 50-iter synthetic-parquet fit. Carries the histogram + percentile fields; not for production use."
-    },
-    {
-      "id": "general",
-      "label": "General Population (1 year windows)",
-      "description": "Unfiltered 1-year windows on 10% of AllOfUs condition data, no clinical inclusion or window constraint applied."
-    },
-    {
       "id": "cancer",
-      "label": "Cancer (1 year post-diagnosis)",
+      "label": "Cancer (1 year windows post-diagnosis)",
       "description": "Patients with a first malignant-cancer diagnosis (SNOMED 443392 and descendants), excluding non-melanoma skin cancer (BCC/SCC) and carcinoma in situ. The document window is the 365 days starting at that first diagnosis. Patients must have at least 365 days of observation_period coverage both before and after the index date, so 'first' is meaningful and the follow-up window is fully observed."
     },
     {
       "id": "dementia",
-      "label": "Dementia (1 year post-diagnosis)",
-      "description": "Patients with a first all-cause dementia diagnosis (SNOMED 4182210 and descendants — Alzheimer's, vascular dementia, Lewy body dementia, frontotemporal dementia, dementia NOS, mixed dementia). The document window is the 365 days starting at that first diagnosis, capturing the early-stage comorbidity cascade (delirium, falls, polypharmacy, behavioral disturbance, aspiration pneumonia). Patients must have at least 365 days of observation_period coverage both before and after the index date, so 'first' is meaningful and the follow-up window is fully observed."
+      "label": "Dementia (1 year windows post-diagnosis)",
+      "description": "Patients with a first all-cause dementia diagnosis (SNOMED 4182210 and descendants \u2014 Alzheimer's, vascular dementia, Lewy body dementia, frontotemporal dementia, dementia NOS, mixed dementia). The document window is the 365 days starting at that first diagnosis, capturing the early-stage comorbidity cascade (delirium, falls, polypharmacy, behavioral disturbance, aspiration pneumonia). Patients must have at least 365 days of observation_period coverage both before and after the index date, so 'first' is meaningful and the follow-up window is fully observed."
+    },
+    {
+      "id": "local-test",
+      "label": "local-test",
+      "description": ""
     }
   ]
 }
