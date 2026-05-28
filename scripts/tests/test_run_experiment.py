@@ -67,3 +67,59 @@ def test_load_defaults_missing_base_raises(tmp_path):
     (tmp_path / "dementia.yaml").write_text("cohort: dementia\n")
     with pytest.raises(FileNotFoundError, match="_base.yaml"):
         rx.load_defaults("dementia", tmp_path)
+
+
+def _write_experiment(dir_path: Path, *, id: int, slug: str, status: str) -> Path:
+    """Test helper: writes a minimal experiment record file."""
+    path = dir_path / f"{id:04d}-{slug}.md"
+    path.write_text(
+        f"---\n"
+        f"id: {id}\n"
+        f"slug: {slug}\n"
+        f"status: {status}\n"
+        f"model_class: lda\n"
+        f"cohort: dementia\n"
+        f"---\n\n# {slug}\n"
+    )
+    return path
+
+
+def test_find_next_pending_picks_lowest_id(tmp_path):
+    _write_experiment(tmp_path, id=3, slug="c", status="pending")
+    _write_experiment(tmp_path, id=1, slug="a", status="done")
+    _write_experiment(tmp_path, id=2, slug="b", status="pending")
+    result = rx.find_next_pending(tmp_path)
+    assert result is not None
+    assert result.name == "0002-b.md"
+
+
+def test_find_next_pending_returns_none_when_no_pending(tmp_path):
+    _write_experiment(tmp_path, id=1, slug="a", status="done")
+    _write_experiment(tmp_path, id=2, slug="b", status="archived")
+    assert rx.find_next_pending(tmp_path) is None
+
+
+def test_find_next_pending_empty_dir_returns_none(tmp_path):
+    assert rx.find_next_pending(tmp_path) is None
+
+
+def test_find_next_pending_ignores_non_md_files(tmp_path):
+    _write_experiment(tmp_path, id=1, slug="a", status="pending")
+    (tmp_path / "notes.txt").write_text("ignore me")
+    (tmp_path / "0099-draft.md.bak").write_text("ignore me too")
+    result = rx.find_next_pending(tmp_path)
+    assert result is not None
+    assert result.name == "0001-a.md"
+
+
+def test_find_by_id_returns_matching_path(tmp_path):
+    _write_experiment(tmp_path, id=42, slug="try-k60", status="pending")
+    _write_experiment(tmp_path, id=43, slug="other", status="pending")
+    result = rx.find_by_id(tmp_path, 42)
+    assert result.name == "0042-try-k60.md"
+
+
+def test_find_by_id_raises_when_missing(tmp_path):
+    _write_experiment(tmp_path, id=1, slug="a", status="pending")
+    with pytest.raises(FileNotFoundError, match="0042"):
+        rx.find_by_id(tmp_path, 42)

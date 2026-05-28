@@ -54,3 +54,35 @@ def load_defaults(cohort: str, defaults_dir: Path) -> dict:
     base = yaml.safe_load(base_path.read_text()) or {}
     cohort_overrides = yaml.safe_load(cohort_path.read_text()) or {}
     return merge_config(base, cohort_overrides)
+
+
+def _list_experiment_files(experiments_dir: Path) -> list[Path]:
+    """All files matching NNNN-*.md in experiments_dir, sorted by id."""
+    pattern = re.compile(r"^(\d{4})-.+\.md$")
+    out = []
+    for p in experiments_dir.iterdir():
+        if pattern.match(p.name):
+            out.append(p)
+    out.sort(key=lambda p: p.name)
+    return out
+
+
+def find_next_pending(experiments_dir: Path) -> Path | None:
+    """Return the lowest-id experiment file with status: pending, or None."""
+    for p in _list_experiment_files(experiments_dir):
+        try:
+            fm = read_frontmatter(p)
+        except ValueError:
+            continue
+        if fm.get("status") == "pending":
+            return p
+    return None
+
+
+def find_by_id(experiments_dir: Path, exp_id: int) -> Path:
+    """Return the experiment file with the given id. Raises FileNotFoundError if absent."""
+    prefix = f"{exp_id:04d}-"
+    for p in _list_experiment_files(experiments_dir):
+        if p.name.startswith(prefix):
+            return p
+    raise FileNotFoundError(f"no experiment with id {exp_id:04d} in {experiments_dir}")
