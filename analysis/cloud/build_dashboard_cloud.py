@@ -255,12 +255,9 @@ def main(argv: list[str] | None = None) -> int:
         omop.unpersist()
 
         with _phase("write bundle"):
-            # The writer normalizes lambda by row sum; the adapter's beta is
-            # already row-stochastic, so any positive scalar cancels.
-            pseudo_lambda = export.beta * 1.0e6
             v_disp = write_model_and_vocab_bundles(
                 out_dir=out_dir,
-                lambda_=pseudo_lambda, alpha=export.alpha,
+                beta=export.beta, alpha=export.alpha,
                 vocab_ids=vocab_list,
                 descriptions=descriptions, domains=domains,
                 code_marginals=stats.code_marginals,

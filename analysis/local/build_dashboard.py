@@ -140,14 +140,9 @@ def main(argv: list[str] | None = None) -> int:
     bow_df_stats.unpersist()
     spark.stop()
 
-    # write_model_and_vocab_bundles expects (lambda_, alpha) pre-trim.
-    # The adapter's β is already row-stochastic; reconstruct a faux-lambda
-    # that produces the same beta after the normalize step inside the writer.
-    # (Simplest: multiply by a big scalar so renormalize is identity.)
-    pseudo_lambda = export.beta * 1.0e6  # any positive scalar; row-norm is identity
     v_disp = write_model_and_vocab_bundles(
         out_dir=args.out_dir,
-        lambda_=pseudo_lambda, alpha=export.alpha,
+        beta=export.beta, alpha=export.alpha,
         vocab_ids=vocab_ids, descriptions=descriptions, domains=domains,
         code_marginals=stats.code_marginals,
         code_doc_counts=stats.code_doc_counts,
