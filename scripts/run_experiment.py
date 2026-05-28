@@ -252,3 +252,15 @@ def run_subprocess_tee_sanitize(
                 fout.write(clean)
                 fout.flush()
     return proc.wait()
+
+
+def append_eval_section(summary_path: Path, eval_stdout: str) -> None:
+    """Append a sanitized '## Eval (NPMI)' section to summary_path."""
+    with summary_path.open("a") as f:
+        f.write("\n## Eval (NPMI)\n")
+        for line in eval_stdout.splitlines(keepends=True):
+            clean = sanitize_line(line, PATIENT_PATTERNS)
+            if clean is not None:
+                f.write(clean)
+        if not eval_stdout.endswith("\n"):
+            f.write("\n")

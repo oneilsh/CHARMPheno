@@ -331,3 +331,30 @@ def test_run_subprocess_tee_sanitize_propagates_exit_code(tmp_path):
     assert exit_code == 7
     # Partial output captured
     assert "starting" in summary_path.read_text()
+
+
+def test_append_eval_section_marker_and_body(tmp_path):
+    summary_path = tmp_path / "summary.md"
+    summary_path.write_text("# header\n\n## Fit session 1\n... fit output ...\n")
+    eval_stdout = "mean NPMI: 0.224  median: 0.198\n  topic 0: 0.31\n"
+    rx.append_eval_section(summary_path, eval_stdout)
+    text = summary_path.read_text()
+    assert "## Eval (NPMI)" in text
+    assert "mean NPMI: 0.224" in text
+    # Original content preserved
+    assert "## Fit session 1" in text
+
+
+def test_append_eval_section_sanitizes_body(tmp_path):
+    summary_path = tmp_path / "summary.md"
+    summary_path.write_text("# header\n")
+    eval_stdout = (
+        "mean NPMI: 0.2\n"
+        "|person_hash|topicDistribution|\n"   # should be dropped
+        "  topic 0: 0.31\n"
+    )
+    rx.append_eval_section(summary_path, eval_stdout)
+    text = summary_path.read_text()
+    assert "mean NPMI: 0.2" in text
+    assert "topic 0: 0.31" in text
+    assert "person_hash" not in text
