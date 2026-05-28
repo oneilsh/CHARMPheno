@@ -6,6 +6,7 @@ See docs/superpowers/specs/2026-05-28-experiment-tracking-design.md.
 """
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -264,3 +265,98 @@ def append_eval_section(summary_path: Path, eval_stdout: str) -> None:
                 f.write(clean)
         if not eval_stdout.endswith("\n"):
             f.write("\n")
+
+
+# RUNS_DIR mirrors the existing Makefile constant. Override via --runs-dir CLI
+# for local testing. On the cluster, the GCS-mounted path is the canonical home.
+DEFAULT_RUNS_DIR = "/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    selector = parser.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--next", action="store_true",
+                          help="Pick the lowest-id experiment with status: pending.")
+    selector.add_argument("--id", type=int, default=None,
+                          help="Run the experiment with the given numeric id.")
+    parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR,
+                        help="Base directory for run output. Default: %(default)s")
+    parser.add_argument("--experiments-dir", type=Path, default=EXPERIMENTS_DIR,
+                        help="Where docs/experiments/NNNN-*.md files live.")
+    parser.add_argument("--defaults-dir", type=Path, default=DEFAULTS_DIR,
+                        help="Where experiments/defaults/*.yaml files live.")
+    args = parser.parse_args(argv)
+
+    # 1. Select experiment file
+    if args.next:
+        exp_path = find_next_pending(args.experiments_dir)
+        if exp_path is None:
+            print("[run-exp] no pending experiments found", flush=True)
+            return 1
+    else:
+        exp_path = find_by_id(args.experiments_dir, args.id)
+    print(f"[run-exp] experiment: {exp_path}", flush=True)
+
+    # 2. Read frontmatter + merge defaults
+    fm = read_frontmatter(exp_path)
+    required = ["id", "slug", "cohort", "model_class"]
+    for k in required:
+        if k not in fm:
+            print(f"[run-exp] ERROR: frontmatter missing required field {k!r}", flush=True)
+            return 2
+    if fm["model_class"] != "lda":
+        print(f"[run-exp] ERROR: only model_class: lda supported in Increment 1 "
+              f"(got {fm['model_class']!r})", flush=True)
+        return 2
+    defaults = load_defaults(fm["cohort"], args.defaults_dir)
+    effective = merge_config(defaults, fm)
+
+    # 3. Resolve save_dir, detect resume
+    runs_dir = Path(args.runs_dir)
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    save_dir = runs_dir / f"{fm['id']:04d}-{fm['slug']}"
+    resume_from: Path | None = save_dir if save_dir.exists() else None
+    print(f"[run-exp] save_dir: {save_dir}  resume: {resume_from is not None}",
+          flush=True)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # 4. Write summary header (new file or append session marker)
+    summary_path = save_dir / "summary.md"
+    write_summary_header(
+        summary_path, exp_id=fm["id"], slug=fm["slug"], effective=effective,
+    )
+
+    # 5. Dispatch fit
+    lda_script = REPO_ROOT / "analysis" / "cloud" / "lda_bigquery_cloud.py"
+    lda_args = build_lda_args(effective, save_dir, resume_from)
+    fit_cmd = build_spark_submit_cmd(str(lda_script), lda_args, REPO_ROOT)
+    print(f"[run-exp] spark-submit: {' '.join(fit_cmd)}", flush=True)
+    fit_rc = run_subprocess_tee_sanitize(fit_cmd, summary_path, PATIENT_PATTERNS)
+    if fit_rc != 0:
+        print(f"[run-exp] fit exited non-zero ({fit_rc}); skipping eval", flush=True)
+        with summary_path.open("a") as f:
+            f.write(f"\n### Session ended with exit code {fit_rc}\n")
+        return fit_rc
+    with summary_path.open("a") as f:
+        f.write("\n### Session complete (exit 0)\n")
+
+    # 6. Dispatch eval (capture stdout into a string for sanitized append)
+    eval_script = REPO_ROOT / "analysis" / "cloud" / "eval_coherence_cloud.py"
+    eval_args = build_eval_args(save_dir, effective)
+    eval_cmd = build_spark_submit_cmd(str(eval_script), eval_args, REPO_ROOT)
+    print(f"[run-exp] eval spark-submit: {' '.join(eval_cmd)}", flush=True)
+    eval_proc = subprocess.run(
+        eval_cmd, capture_output=True, text=True, check=False,
+    )
+    sys.stdout.write(eval_proc.stdout)
+    sys.stdout.flush()
+    if eval_proc.returncode != 0:
+        print(f"[run-exp] eval exited non-zero ({eval_proc.returncode}); "
+              "appending captured output anyway", flush=True)
+    append_eval_section(summary_path, eval_proc.stdout)
+    print(f"[run-exp] DONE. summary at: {summary_path}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
