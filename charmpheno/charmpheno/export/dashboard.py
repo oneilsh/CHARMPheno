@@ -25,42 +25,20 @@ def _round_floats(arr: np.ndarray, *, decimals: int = 6) -> list:
 def select_top_n_with_min_cell(
     code_marginals: list[float],
     *,
-    code_doc_counts: list[int],
     top_n: int,
-    min_doc_count: int,
 ) -> list[int]:
-    """Top-N selection with a group-size guard.
+    """Pick the top-N codes by marginal token frequency.
 
-    Drops codes whose distinct-document count (``code_doc_counts[i]``) is
-    below ``min_doc_count`` BEFORE the top-N cut. Codes appearing in
-    1..min_doc_count-1 docs are suppressed to prevent small-cell
-    disclosure of which OMOP concepts appear in a tiny number of
-    patients/documents. Codes with zero doc count are implicitly excluded
-    (no document contains them).
-
-    Filtering on real doc counts is independent of cohort size and
-    mean_codes_per_doc; ranking by ``code_marginals`` (token frequency)
-    keeps the displayed vocab focused on codes with heavy weight in
-    topic-word distributions.
-
-    Returned in descending marginal order, length up to ``top_n``.
+    Small-cell suppression is enforced upstream via CountVectorizer.minDF
+    at vocab-build time, so the codes reaching this function have already
+    cleared the privacy threshold structurally. This function is therefore
+    a pure ranking step: sort by marginal descending, take the first top_n.
     """
-    marginals = np.asarray(code_marginals, dtype=np.float64)
-    doc_counts = np.asarray(code_doc_counts, dtype=np.int64)
-    if doc_counts.shape != marginals.shape:
-        raise ValueError(
-            f"code_doc_counts length {doc_counts.shape[0]} != "
-            f"code_marginals length {marginals.shape[0]}",
-        )
-    eligible = doc_counts >= min_doc_count
-    eligible_idx = np.where(eligible)[0]
-    if len(eligible_idx) == 0:
-        raise ValueError(
-            f"no codes have >= {min_doc_count} documents; "
-            f"cannot satisfy minimum cell-size guard",
-        )
-    order = np.argsort(-marginals[eligible_idx])
-    return eligible_idx[order][:top_n].tolist()
+    if top_n <= 0:
+        return []
+    marginals = np.asarray(code_marginals, dtype=float)
+    order = np.argsort(-marginals)
+    return order[:top_n].tolist()
 
 
 def write_model_and_vocab_bundles(
@@ -72,9 +50,7 @@ def write_model_and_vocab_bundles(
     descriptions: dict[int, str],
     domains: dict[int, str],
     code_marginals: list[float],
-    code_doc_counts: list[int],
     top_n: int,
-    min_doc_count: int = 20,
 ) -> int:
     """Write model.json and vocab.json. Returns the displayed-vocab width.
 
@@ -83,21 +59,12 @@ def write_model_and_vocab_bundles(
     if any row sum deviates from 1.0 by more than 1e-6.
 
     Trims β columns and vocab metadata to the top-N codes ranked by
-    corpus frequency (token), with a small-cell guard on distinct doc
-    count: codes appearing in fewer than ``min_doc_count`` documents are
-    dropped before the top-N cut. Default 20 matches AoU-style group-size
-    suppression. After column trimming (which breaks row-stochasticity),
-    β rows are renormalized so each row sums to 1 over the surviving
-    trimmed columns.
+    corpus frequency (token marginal). After column trimming (which breaks
+    row-stochasticity), β rows are renormalized so each row sums to 1 over
+    the surviving trimmed columns.
 
-    Ranking by ``code_marginals`` (token frequency) prioritizes codes
-    with heavy weight in topic-word distributions; filtering by
-    ``code_doc_counts`` (distinct doc count) enforces the patient-count
-    privacy threshold. These are two different per-code measurements and
-    must not be substituted for one another: a code can have low
-    token-frequency but high doc count (appears once in many docs), or
-    high token-frequency but low doc count (appears many times in few
-    docs).
+    Small-cell suppression is enforced upstream via CountVectorizer.minDF
+    at vocab-build time; this function applies only top-N ranking.
     """
     beta = np.asarray(beta, dtype=float)
     row_sums = beta.sum(axis=1)
@@ -108,23 +75,11 @@ def write_model_and_vocab_bundles(
         )
 
     K, V_full = beta.shape
-    n_before = int((np.asarray(code_doc_counts) > 0).sum())
     keep = select_top_n_with_min_cell(
         code_marginals,
-        code_doc_counts=code_doc_counts,
         top_n=top_n,
-        min_doc_count=min_doc_count,
     )
     V_disp = len(keep)
-    n_eligible = int((np.asarray(code_doc_counts) >= min_doc_count).sum())
-    n_suppressed = n_before - n_eligible
-    if n_suppressed > 0:
-        print(
-            f"[export] suppressed {n_suppressed} codes with < {min_doc_count} "
-            f"documents (small-cell guard); displaying top {V_disp} of "
-            f"{n_eligible} eligible codes.",
-            flush=True,
-        )
     beta_trimmed = beta[:, keep]
     # Column trim breaks row-stochasticity; renormalize the surviving columns.
     row_sums = beta_trimmed.sum(axis=1, keepdims=True)
