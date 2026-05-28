@@ -7,14 +7,13 @@ See docs/superpowers/specs/2026-05-28-experiment-tracking-design.md.
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 import yaml
-
-import datetime as _dt
-import subprocess
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPERIMENTS_DIR = REPO_ROOT / "docs" / "experiments"
@@ -294,11 +293,19 @@ def main(argv: list[str] | None = None) -> int:
             print("[run-exp] no pending experiments found", flush=True)
             return 1
     else:
-        exp_path = find_by_id(args.experiments_dir, args.id)
+        try:
+            exp_path = find_by_id(args.experiments_dir, args.id)
+        except FileNotFoundError as e:
+            print(f"[run-exp] ERROR: {e}", flush=True)
+            return 2
     print(f"[run-exp] experiment: {exp_path}", flush=True)
 
     # 2. Read frontmatter + merge defaults
-    fm = read_frontmatter(exp_path)
+    try:
+        fm = read_frontmatter(exp_path)
+    except ValueError as e:
+        print(f"[run-exp] ERROR: {e}", flush=True)
+        return 2
     required = ["id", "slug", "cohort", "model_class"]
     for k in required:
         if k not in fm:
@@ -308,7 +315,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[run-exp] ERROR: only model_class: lda supported in Increment 1 "
               f"(got {fm['model_class']!r})", flush=True)
         return 2
-    defaults = load_defaults(fm["cohort"], args.defaults_dir)
+    try:
+        defaults = load_defaults(fm["cohort"], args.defaults_dir)
+    except FileNotFoundError as e:
+        print(f"[run-exp] ERROR: {e}", flush=True)
+        return 2
     effective = merge_config(defaults, fm)
 
     # 3. Resolve save_dir, detect resume
@@ -330,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     lda_script = REPO_ROOT / "analysis" / "cloud" / "lda_bigquery_cloud.py"
     lda_args = build_lda_args(effective, save_dir, resume_from)
     fit_cmd = build_spark_submit_cmd(str(lda_script), lda_args, REPO_ROOT)
+    # Display-only join; cmd is passed as list to Popen/run, not via shell.
     print(f"[run-exp] spark-submit: {' '.join(fit_cmd)}", flush=True)
     fit_rc = run_subprocess_tee_sanitize(fit_cmd, summary_path, PATIENT_PATTERNS)
     if fit_rc != 0:
@@ -344,12 +356,15 @@ def main(argv: list[str] | None = None) -> int:
     eval_script = REPO_ROOT / "analysis" / "cloud" / "eval_coherence_cloud.py"
     eval_args = build_eval_args(save_dir, effective)
     eval_cmd = build_spark_submit_cmd(str(eval_script), eval_args, REPO_ROOT)
+    # Display-only join; cmd is passed as list to Popen/run, not via shell.
     print(f"[run-exp] eval spark-submit: {' '.join(eval_cmd)}", flush=True)
     eval_proc = subprocess.run(
         eval_cmd, capture_output=True, text=True, check=False,
     )
     sys.stdout.write(eval_proc.stdout)
     sys.stdout.flush()
+    sys.stderr.write(eval_proc.stderr)
+    sys.stderr.flush()
     if eval_proc.returncode != 0:
         print(f"[run-exp] eval exited non-zero ({eval_proc.returncode}); "
               "appending captured output anyway", flush=True)
