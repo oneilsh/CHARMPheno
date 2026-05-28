@@ -66,7 +66,7 @@ def select_top_n_with_min_cell(
 def write_model_and_vocab_bundles(
     *,
     out_dir: Path,
-    lambda_: np.ndarray,        # K × V_full
+    beta: np.ndarray,           # K × V_full (row-stochastic)
     alpha: np.ndarray,          # length K
     vocab_ids: list[int],       # length V_full; vocab_ids[i] = concept_id at index i
     descriptions: dict[int, str],
@@ -78,11 +78,16 @@ def write_model_and_vocab_bundles(
 ) -> int:
     """Write model.json and vocab.json. Returns the displayed-vocab width.
 
+    Accepts a row-stochastic β matrix (K × V_full) where each row sums to 1.
+    Callers must normalize before passing; this function raises ValueError
+    if any row sum deviates from 1.0 by more than 1e-6.
+
     Trims β columns and vocab metadata to the top-N codes ranked by
     corpus frequency (token), with a small-cell guard on distinct doc
     count: codes appearing in fewer than ``min_doc_count`` documents are
     dropped before the top-N cut. Default 20 matches AoU-style group-size
-    suppression. β rows are renormalized so each row sums to 1 over the
+    suppression. After column trimming (which breaks row-stochasticity),
+    β rows are renormalized so each row sums to 1 over the surviving
     trimmed columns.
 
     Ranking by ``code_marginals`` (token frequency) prioritizes codes
@@ -94,7 +99,15 @@ def write_model_and_vocab_bundles(
     high token-frequency but low doc count (appears many times in few
     docs).
     """
-    K, V_full = lambda_.shape
+    beta = np.asarray(beta, dtype=float)
+    row_sums = beta.sum(axis=1)
+    if not np.allclose(row_sums, 1.0, atol=1e-6):
+        raise ValueError(
+            f"write_model_and_vocab_bundles: beta must be row-stochastic; "
+            f"got row sums in [{row_sums.min():.6f}, {row_sums.max():.6f}]"
+        )
+
+    K, V_full = beta.shape
     n_before = int((np.asarray(code_doc_counts) > 0).sum())
     keep = select_top_n_with_min_cell(
         code_marginals,
@@ -112,18 +125,17 @@ def write_model_and_vocab_bundles(
             f"{n_eligible} eligible codes.",
             flush=True,
         )
-    beta_full = lambda_ / lambda_.sum(axis=1, keepdims=True)
-    beta = beta_full[:, keep]
-    # renormalize
-    row_sums = beta.sum(axis=1, keepdims=True)
+    beta_trimmed = beta[:, keep]
+    # Column trim breaks row-stochasticity; renormalize the surviving columns.
+    row_sums = beta_trimmed.sum(axis=1, keepdims=True)
     row_sums[row_sums == 0] = 1.0
-    beta = beta / row_sums
+    beta_trimmed = beta_trimmed / row_sums
 
     model_payload = {
         "K": int(K),
         "V": int(V_disp),
         "alpha": _round_floats(np.asarray(alpha)),
-        "beta": _round_floats(beta),
+        "beta": _round_floats(beta_trimmed),
     }
     (out_dir / "model.json").write_text(json.dumps(model_payload, allow_nan=False))
 
