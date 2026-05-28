@@ -325,10 +325,16 @@ def main(argv: list[str] | None = None) -> int:
     effective = merge_config(defaults, fm)
 
     # 3. Resolve save_dir, detect resume
+    # Resume only when there's an actual checkpoint (manifest.json) inside the
+    # save_dir, not merely when the directory exists. A prior failed attempt
+    # may have created the directory + summary.md without ever writing a
+    # checkpoint; treating that as a resume causes the driver to fail looking
+    # for manifest.json.
     runs_dir = Path(args.runs_dir)
     runs_dir.mkdir(parents=True, exist_ok=True)
     save_dir = runs_dir / f"{fm['id']:04d}-{fm['slug']}"
-    resume_from: Path | None = save_dir if save_dir.exists() else None
+    has_checkpoint = (save_dir / "manifest.json").exists()
+    resume_from: Path | None = save_dir if has_checkpoint else None
     print(f"[run-exp] save_dir: {save_dir}  resume: {resume_from is not None}",
           flush=True)
     save_dir.mkdir(parents=True, exist_ok=True)
