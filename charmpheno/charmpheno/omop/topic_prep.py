@@ -14,6 +14,8 @@ See ADR 0018 for the abstraction rationale.
 """
 from __future__ import annotations
 
+import math
+
 from pyspark.ml.feature import CountVectorizerModel
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
@@ -29,20 +31,22 @@ def _build_count_vectorizer_model(
     min_patient_count: int,
     vocab_size: int | None,
 ) -> CountVectorizerModel:
-    """Build a CountVectorizerModel via manual per-token aggregation.
+    """Construct a CountVectorizerModel from a manual vocab aggregation.
 
-    Replaces CountVectorizer.fit() so we can apply both a document-frequency
-    threshold (min_df) and a patient-count threshold (min_patient_count) in a
-    single Spark pass.
+    Replaces ``CountVectorizer.fit()`` so we can jointly enforce per-document
+    (``min_df``) and per-patient (``min_patient_count``) thresholds in one
+    ``groupBy/agg`` over the exploded token rows. (A fractional ``min_df``
+    triggers an additional ``grouped.count()`` pre-pass to resolve the
+    threshold against corpus size, matching PySpark's CountVectorizer
+    convention.) Vocab ordering matches CountVectorizer's convention (total
+    token occurrence count descending, alphabetical tiebreak) so downstream
+    consumers see the same vocab indexing they would have under the fit
+    path when ``min_patient_count == 1``.
 
     The `grouped` DataFrame must have columns:
         doc_id      – document key (string)
         person_id   – patient key (any type)
         tokens      – collect_list of string tokens
-
-    Vocab ordering matches CountVectorizer's convention:
-        primary:   term_count descending  (total occurrences across all docs)
-        secondary: token ascending        (alphabetical, for stable tiebreak)
 
     Parameters
     ----------
@@ -65,7 +69,9 @@ def _build_count_vectorizer_model(
     # Resolve min_df from fraction to absolute count if needed.
     if isinstance(min_df, float) and 0.0 < min_df < 1.0:
         total_docs = grouped.count()
-        min_df_int = max(1, int(min_df * total_docs))
+        # Match PySpark CountVectorizer's behavior, which ceils fractional minDF:
+        # https://spark.apache.org/docs/latest/api/python/reference/api/pyspark.ml.feature.CountVectorizer.html
+        min_df_int = max(1, math.ceil(min_df * total_docs))
     else:
         min_df_int = int(min_df)
 
@@ -78,7 +84,7 @@ def _build_count_vectorizer_model(
     )
 
     token_stats = exploded.groupBy("token").agg(
-        F.count("token").alias("term_count"),
+        F.count("*").alias("term_count"),
         F.countDistinct("doc_id").alias("doc_count"),
         F.countDistinct("person_id").alias("patient_count"),
     )
