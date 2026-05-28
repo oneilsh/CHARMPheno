@@ -224,3 +224,31 @@ def write_summary_header(
         n = _count_existing_fit_sessions(existing) + 1
         with summary_path.open("a") as f:
             f.write(f"\n## Fit session {n}\nStarted: {started}\n\n")
+
+
+def run_subprocess_tee_sanitize(
+    cmd: list[str], summary_path: Path, patterns: list[re.Pattern],
+) -> int:
+    """Run `cmd` as a subprocess; stream stdout line-by-line.
+
+    Each line is printed to this process's stdout (live debugging) AND, if
+    `sanitize_line` returns non-None, appended to `summary_path`.
+
+    Returns the subprocess exit code.
+    """
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        bufsize=1, text=True,
+    )
+    assert proc.stdout is not None
+    with summary_path.open("a") as fout:
+        for line in proc.stdout:
+            # Live debugging: always print to terminal
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            # Committed record: sanitized only
+            clean = sanitize_line(line, patterns)
+            if clean is not None:
+                fout.write(clean)
+                fout.flush()
+    return proc.wait()

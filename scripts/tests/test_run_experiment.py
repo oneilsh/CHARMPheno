@@ -298,3 +298,36 @@ def test_write_summary_header_appends_session_marker(tmp_path):
     assert "(old)" in text
     # New session marker appended
     assert "## Fit session 2" in text
+
+
+def test_run_subprocess_tee_sanitize_writes_filtered_output(tmp_path, capsys):
+    summary_path = tmp_path / "summary.md"
+    summary_path.write_text("# header\n")  # pre-existing
+    # Use a tiny shell command that prints 3 lines, two of which should drop
+    cmd = [
+        "sh", "-c",
+        "echo '[iter 1] ELBO=-1.23'; echo '|person_hash|topicDistribution|'; echo '[driver] done'",
+    ]
+    exit_code = rx.run_subprocess_tee_sanitize(cmd, summary_path, rx.PATIENT_PATTERNS)
+    assert exit_code == 0
+    summary_text = summary_path.read_text()
+    # Sanitized lines NOT in summary
+    assert "person_hash" not in summary_text
+    # Clean lines in summary
+    assert "[iter 1] ELBO=-1.23" in summary_text
+    assert "[driver] done" in summary_text
+    # Pre-existing header preserved
+    assert "# header" in summary_text
+    # All three lines (including dropped) appear on stdout for live debugging
+    captured = capsys.readouterr()
+    assert "person_hash" in captured.out
+    assert "[iter 1]" in captured.out
+
+
+def test_run_subprocess_tee_sanitize_propagates_exit_code(tmp_path):
+    summary_path = tmp_path / "summary.md"
+    cmd = ["sh", "-c", "echo 'starting'; exit 7"]
+    exit_code = rx.run_subprocess_tee_sanitize(cmd, summary_path, rx.PATIENT_PATTERNS)
+    assert exit_code == 7
+    # Partial output captured
+    assert "starting" in summary_path.read_text()
