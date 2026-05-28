@@ -1,0 +1,4 @@
+model_class: lda
+K: 40
+max_iter: 20
+vocab_size: 10000

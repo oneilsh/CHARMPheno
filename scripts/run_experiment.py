@@ -31,3 +31,26 @@ def read_frontmatter(path: Path) -> dict:
         raise ValueError(f"{path}: unterminated frontmatter block (no trailing '---')")
     yaml_text = text[4:end]
     return yaml.safe_load(yaml_text) or {}
+
+
+def merge_config(base: dict, override: dict) -> dict:
+    """Shallow merge: returns a new dict with override taking precedence over base."""
+    out = dict(base)
+    out.update(override)
+    return out
+
+
+def load_defaults(cohort: str, defaults_dir: Path) -> dict:
+    """Load _base.yaml then <cohort>.yaml and merge.
+
+    Raises FileNotFoundError if either file is missing.
+    """
+    base_path = defaults_dir / "_base.yaml"
+    cohort_path = defaults_dir / f"{cohort}.yaml"
+    if not base_path.exists():
+        raise FileNotFoundError(f"missing defaults file: {base_path}")
+    if not cohort_path.exists():
+        raise FileNotFoundError(f"missing defaults file: {cohort_path}")
+    base = yaml.safe_load(base_path.read_text()) or {}
+    cohort_overrides = yaml.safe_load(cohort_path.read_text()) or {}
+    return merge_config(base, cohort_overrides)
