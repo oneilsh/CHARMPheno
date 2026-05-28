@@ -1,0 +1,23 @@
+# Cross-cohort defaults for experiment-tracking system.
+# Layered as: _base.yaml -> <cohort>.yaml -> per-experiment frontmatter overrides.
+# The cluster writes the effective (merged) config into summary.md at fit time
+# so changes here do not retroactively affect already-run experiments.
+model_class: lda
+source_table: condition_era
+doc_unit: patient_year
+doc_min_length: 20
+K: 40
+max_iter: 20
+vocab_size: 10000
+min_df: 20
+min_patient_count: 20
+subsampling_rate: 0.2
+tau0: 64
+kappa: 0.7
+save_interval: 5
+print_topics_every: 1
+person_mod: 10
+top_n_tokens: 6
+seed: 42
+optimize_doc_concentration: true
+optimize_topic_concentration: false
