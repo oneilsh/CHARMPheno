@@ -123,3 +123,42 @@ def test_find_by_id_raises_when_missing(tmp_path):
     _write_experiment(tmp_path, id=1, slug="a", status="pending")
     with pytest.raises(FileNotFoundError, match="0042"):
         rx.find_by_id(tmp_path, 42)
+
+
+def test_sanitize_line_passes_normal_lines():
+    line = "[iter 5] ELBO=-1.234e9  time=180s\n"
+    assert rx.sanitize_line(line, rx.PATIENT_PATTERNS) == line
+
+
+def test_sanitize_line_drops_person_hash_show_output():
+    # PySpark .show() output format
+    line = "|a1b2c3d4e5f6  |(60,[0,1],[0.5,0.5])  |\n"
+    # The first column is 12 hex chars; without context this is fine, but the
+    # surrounding .show()-header makes it identifiable as the transform-sample.
+    # Hard to safely match by hash alone -- match by header context instead.
+    assert rx.sanitize_line("|person_hash|topicDistribution|\n", rx.PATIENT_PATTERNS) is None
+
+
+def test_sanitize_line_drops_lines_with_person_id_equals():
+    line = "[debug] person_id=12345 has 17 tokens\n"
+    assert rx.sanitize_line(line, rx.PATIENT_PATTERNS) is None
+
+
+def test_sanitize_line_drops_lines_with_explicit_hash_prefix():
+    line = "    hash:a1b2c3d4e5f6 -> topic 3\n"
+    assert rx.sanitize_line(line, rx.PATIENT_PATTERNS) is None
+
+
+def test_sanitize_line_drops_transform_sample_phase_marker():
+    line = "[driver] >>> transform sample\n"
+    assert rx.sanitize_line(line, rx.PATIENT_PATTERNS) is None
+
+
+def test_sanitize_line_keeps_aggregate_person_count():
+    line = "[driver]   OMOP: 1234567 rows, 89012 distinct persons\n"
+    assert rx.sanitize_line(line, rx.PATIENT_PATTERNS) == line
+
+
+def test_sanitize_line_keeps_iter_topic_prints():
+    line = "  Topic 5:    192671  Type 2 diabetes mellitus  0.0234\n"
+    assert rx.sanitize_line(line, rx.PATIENT_PATTERNS) == line

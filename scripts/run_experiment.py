@@ -86,3 +86,26 @@ def find_by_id(experiments_dir: Path, exp_id: int) -> Path:
         if p.name.startswith(prefix):
             return p
     raise FileNotFoundError(f"no experiment with id {exp_id:04d} in {experiments_dir}")
+
+
+# Patterns that indicate per-patient row-level info. Belt-and-suspenders for
+# driver-side stripping; if a new driver path re-introduces patient prints,
+# these catch them at the wrapper boundary before they reach summary.md.
+PATIENT_PATTERNS: list[re.Pattern] = [
+    re.compile(r"person_hash", re.IGNORECASE),
+    re.compile(r"person_id\s*=\s*\S+"),
+    re.compile(r"\bhash:[0-9a-f]{6,}", re.IGNORECASE),
+    re.compile(r"transform sample", re.IGNORECASE),  # the phase marker bracketing it
+]
+
+
+def sanitize_line(line: str, patterns: list[re.Pattern]) -> str | None:
+    """Return the line if safe to commit, or None to drop.
+
+    Drops any line matching any patient-info pattern. Aggregate counts and
+    topic-level prints (no per-patient identifiers) pass through.
+    """
+    for pat in patterns:
+        if pat.search(line):
+            return None
+    return line
