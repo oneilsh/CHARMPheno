@@ -167,7 +167,9 @@ def _load_or_build_corpus(spark, args, doc_spec, cdr, billing):
                 f"min_doc_length={doc_spec.min_doc_length})"):
         bow_df, vocab_map = to_bow_dataframe(
             omop, doc_spec=doc_spec,
-            vocab_size=args.vocab_size, min_df=args.min_df,
+            vocab_size=args.vocab_size,
+            min_df=args.min_df,
+            min_patient_count=args.min_patient_count,
         )
 
     with _phase("concept-name lookup"):
@@ -240,7 +242,15 @@ def main(argv: list[str] | None = None) -> int:
         "--min-df", type=int, default=20,
         help=("Minimum document frequency for vocab inclusion (PySpark CountVectorizer minDF). "
               "Default 20. Counts documents, not distinct patients — in patient-year doc mode "
-              "one patient can contribute multiple documents."),
+              "one patient can contribute multiple documents. Combine with --min-patient-count "
+              "for a true per-patient threshold."),
+    )
+    parser.add_argument(
+        "--min-patient-count", type=int, default=20,
+        help=("Minimum distinct-patient count for vocab inclusion. "
+              "Default 20. Counts distinct person_ids per token, regardless of "
+              "doc_spec — under PatientYearDocSpec this is the load-bearing "
+              "privacy guard (min_df counts year-docs, not patients)."),
     )
     parser.add_argument(
         "--top-n-tokens", type=int, default=10,
@@ -482,6 +492,7 @@ def main(argv: list[str] | None = None) -> int:
                     "person_mod": args.person_mod,
                     "vocab_size": args.vocab_size,
                     "min_df": args.min_df,
+                    "min_patient_count": args.min_patient_count,
                     "doc_spec": doc_spec.manifest(),
                 },
                 "corpus_prevalence": _e_beta.tolist(),
