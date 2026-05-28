@@ -141,7 +141,9 @@ def build_lda_args(
         "--person-mod", str(effective["person_mod"]),
         "--top-n-tokens", str(effective["top_n_tokens"]),
         "--seed", str(effective["seed"]),
-        "--cohort", str(effective["cohort"]),
+        # `cohort_def` is the driver-side argparse value (e.g. first_dementia_year);
+        # `cohort` is the display id used for record-keeping and defaults lookup.
+        "--cohort", str(effective["cohort_def"]),
     ]
     # BooleanOptionalAction in the driver: --optimize-doc-concentration / --no-...
     if effective.get("optimize_doc_concentration", True):

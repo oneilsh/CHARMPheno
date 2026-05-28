@@ -1,2 +1,6 @@
 # General-population cohort. Inherits all of _base.yaml.
-cohort: none
+# `cohort` is the display/lookup id (matches filename, used as frontmatter
+# cohort key); `cohort_def` is the value passed to the LDA driver's --cohort
+# argparse choice. "general" maps to driver value "none" (no cohort filter).
+cohort: general
+cohort_def: none

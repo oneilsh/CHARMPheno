@@ -186,6 +186,7 @@ def test_build_lda_args_required_fields(tmp_path):
         "optimize_doc_concentration": True,
         "optimize_topic_concentration": False,
         "cohort": "dementia",
+        "cohort_def": "first_dementia_year",
     }
     save_dir = tmp_path / "0042-try-k60-dementia"
     args = rx.build_lda_args(effective, save_dir, resume_from=None)
@@ -197,7 +198,9 @@ def test_build_lda_args_required_fields(tmp_path):
     assert "--source-table" in args
     assert "condition_era" in args
     assert "--cohort" in args
-    assert "dementia" in args
+    # --cohort takes the cohort_def driver value, not the display id
+    assert "first_dementia_year" in args
+    assert "dementia" not in args  # the display id is NOT passed to --cohort
     # Resume not set when None
     assert "--resume-from" not in args
 
@@ -214,6 +217,7 @@ def test_build_lda_args_threads_resume_from(tmp_path):
         "optimize_doc_concentration": True,
         "optimize_topic_concentration": False,
         "cohort": "dementia",
+        "cohort_def": "first_dementia_year",
     }
     save_dir = tmp_path / "0042-try-k60"
     resume = tmp_path / "0042-try-k60"
@@ -223,7 +227,8 @@ def test_build_lda_args_threads_resume_from(tmp_path):
     assert args[idx + 1] == str(resume)
 
 
-def test_build_lda_args_omits_cohort_when_none():
+def test_build_lda_args_general_cohort_maps_to_none():
+    """General-population cohort: cohort=general, cohort_def=none."""
     effective = {
         "model_class": "lda", "source_table": "condition_era",
         "doc_unit": "patient", "doc_min_length": 20,
@@ -234,7 +239,8 @@ def test_build_lda_args_omits_cohort_when_none():
         "person_mod": 10, "top_n_tokens": 6, "seed": 42,
         "optimize_doc_concentration": True,
         "optimize_topic_concentration": False,
-        "cohort": "none",
+        "cohort": "general",
+        "cohort_def": "none",
     }
     args = rx.build_lda_args(effective, Path("/tmp/foo"), resume_from=None)
     assert "--cohort" in args

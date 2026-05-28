@@ -1,2 +1,5 @@
 # Cancer-cohort overrides on top of _base.yaml.
+# `cohort` is the display/lookup id (matches filename); `cohort_def` is the
+# value passed to the LDA driver's --cohort argparse choice.
 cohort: cancer
+cohort_def: first_cancer_year
