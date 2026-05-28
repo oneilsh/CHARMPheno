@@ -2,7 +2,7 @@
   import {
     bundle, selectedPhenotypeId, advancedView,
     phenotypeFilter, phenotypeSortBy, searchedConditionIdx,
-    prevalenceReader, tauThreshold,
+    prevalenceReader, tauThreshold, isVisibleInCurrentMode,
   } from '../store'
   import { phenotypesContainingCode } from '../inference'
   import type { Phenotype } from '../types'
@@ -28,7 +28,7 @@
 
   $: filtered = phenotypes
     .filter((p) => {
-      if (!$advancedView && (p.quality === 'dead' || p.quality === 'mixed')) return false
+      if (!$isVisibleInCurrentMode(p)) return false
       if (containingSet && !containingSet.has(p.id)) return false
       const q = $phenotypeFilter.trim().toLowerCase()
       if (!q) return true

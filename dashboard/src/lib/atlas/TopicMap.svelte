@@ -4,15 +4,9 @@
   import {
     bundle, selectedPhenotypeId, hoveredCodeIdx, advancedView,
     searchedConditionIdx, phenotypeCoords,
-    prevalenceReader, tauThreshold,
+    prevalenceReader, tauThreshold, isVisibleInCurrentMode,
   } from '../store'
   import { phenotypesContainingCode } from '../inference'
-
-  // Simple mode hides `dead` and `mixed` topics. `null` (unlabeled bundle)
-  // and the other three categories all show. Advanced mode shows everything.
-  function isHiddenInSimpleMode(p: { quality: string | null }): boolean {
-    return p.quality === 'dead' || p.quality === 'mixed'
-  }
 
   // Phenotype-containment for highlight: switched from raw-β top-N to
   // relevance-ranked top-N (λ=0.6), matching the CodePanel's displayed
@@ -64,9 +58,7 @@
     // x/y/r scales are computed against the FULL set so the layout is
     // stable across mode toggles (we don't want bubbles jumping around).
     const allPhenotypes = $bundle.phenotypes.phenotypes
-    const phenotypes = $advancedView
-      ? allPhenotypes
-      : allPhenotypes.filter((p) => !isHiddenInSimpleMode(p))
+    const phenotypes = allPhenotypes.filter($isVisibleInCurrentMode)
     const xExt = d3.extent(coords, (c) => c[0]) as [number, number]
     const yExt = d3.extent(coords, (c) => c[1]) as [number, number]
     const x = d3.scaleLinear().domain(xExt).range([MARGIN, W - MARGIN])

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { bundle, searchedConditionIdx, advancedView } from '../store'
+  import { bundle, searchedConditionIdx, isVisibleInCurrentMode } from '../store'
   import { phenotypesContainingCode } from '../inference'
 
   // Label used in the active-chip ("Highlighting <entityLabel> with ...").
@@ -28,7 +28,7 @@
     const phen = $bundle?.phenotypes.phenotypes ?? []
     return new Set(
       phen
-        .filter((p) => $advancedView || (p.quality !== 'dead' && p.quality !== 'mixed'))
+        .filter($isVisibleInCurrentMode)
         .map((p) => p.id),
     )
   })()

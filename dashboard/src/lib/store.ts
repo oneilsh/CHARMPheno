@@ -1,6 +1,6 @@
 import { writable, derived } from 'svelte/store'
 import type { UMAP } from 'umap-js'
-import type { CohortManifest, DashboardBundle, Phenotype, SyntheticCohort } from './types'
+import type { CohortManifest, DashboardBundle, Phenotype, PhenotypeQuality, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
 
@@ -147,6 +147,15 @@ export const prevalenceReader = derived(
     const edges = $b?.phenotypes.theta_histogram_bin_edges
     return (p: Phenotype) => fractionAboveTau(p, edges, $tau)
   }
+)
+
+// Returns a predicate (p) -> boolean for whether a phenotype should be shown
+// in the current view mode. Simple mode hides `dead` and `mixed` topics;
+// advanced mode shows everything. Follows the prevalenceReader pattern —
+// consumers use `.filter($isVisibleInCurrentMode)` directly.
+export const isVisibleInCurrentMode = derived(advancedView, ($adv) =>
+  (p: { quality: PhenotypeQuality | null }) =>
+    $adv || (p.quality !== 'dead' && p.quality !== 'mixed')
 )
 
 export const phenotypesById = derived(bundle, ($b) =>
