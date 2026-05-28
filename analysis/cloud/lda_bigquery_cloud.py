@@ -417,19 +417,8 @@ def main(argv: list[str] | None = None) -> int:
             name = name_by_id.get(cid, "<unknown>")
             print(f"    {cid:>10}  {name[:60]:<60}  {col[j]:.4f}", flush=True)
 
-    with _phase("transform sample"):
-        # Transform against the un-split bow_df so the sample shows topic
-        # distributions for some patients regardless of holdout assignment.
-        (model.transform(bow_df)
-              .withColumn("person_hash",
-                          F.substring(
-                              F.sha2(F.col("person_id").cast("string"), 256),
-                              1, 12))
-              .select("person_hash", "topicDistribution")
-              .show(3, truncate=False))
-
     bow_df.unpersist()
-    print("[driver] LDA BQ SMOKE TEST PASSED", flush=True)
+    print("[driver] fit complete", flush=True)
     spark.stop()
     return 0
 
