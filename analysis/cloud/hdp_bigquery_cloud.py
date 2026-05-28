@@ -24,6 +24,7 @@ import numpy as np
 from pyspark.sql import functions as F
 
 from _driver_common import _phase, configure_logging, make_spark_session
+from _corpus_load import load_or_build_corpus
 
 
 def _make_topic_evolution_logger(
@@ -90,82 +91,6 @@ def _make_topic_evolution_logger(
 class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
                      argparse.RawDescriptionHelpFormatter):
     """Show defaults automatically, and preserve the docstring's paragraph layout."""
-
-
-def _load_or_build_corpus(spark, args, doc_spec, cdr, billing):
-    """Return (bow_df, vocab_map, name_by_id) with optional cache short-circuit.
-
-    On a cache hit, skips BQ load + CountVectorizer fit entirely. On a miss
-    (or when --corpus-cache-uri is unset), runs the original BQ+vectorize
-    pipeline, resolves concept names for the vocab, and writes through to
-    the cache for the next run.
-
-    Concept-name resolution lives here (not in main) so the cached entry
-    is self-sufficient — eval drivers and downstream printing don't need
-    a live omop DataFrame on the hit path.
-    """
-    from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
-    from spark_vi.diagnostics.persist import assert_persisted
-    from _corpus_cache import compute_cache_key, save, try_load
-
-    cache_uri = args.corpus_cache_uri
-    cache_key = None
-    if cache_uri:
-        cache_key = compute_cache_key(
-            source_table=args.source_table,
-            person_mod=args.person_mod,
-            vocab_size=args.vocab_size,
-            min_df=args.min_df,
-            doc_spec_manifest=doc_spec.manifest(),
-        )
-        with _phase(f"corpus-cache lookup ({cache_uri}/{cache_key})"):
-            cached = try_load(spark, cache_uri, cache_key)
-        if cached is not None:
-            print(f"[driver]   corpus-cache HIT", flush=True)
-            return cached
-        print(f"[driver]   corpus-cache MISS, building...", flush=True)
-
-    with _phase("BQ load + summary"):
-        omop = load_omop_bigquery(
-            spark=spark, cdr_dataset=cdr, billing_project=billing,
-            person_sample_mod=args.person_mod, source_table=args.source_table,
-        ).persist()
-        summary = omop.agg(
-            F.count(F.lit(1)).alias("rows"),
-            F.countDistinct("person_id").alias("persons"),
-        ).collect()[0]
-        assert_persisted(omop, name="omop")
-        print(f"[driver]   OMOP: {summary['rows']} rows, "
-              f"{summary['persons']} distinct persons", flush=True)
-
-    with _phase(f"vectorize (CountVectorizer, doc_spec={doc_spec.name}, "
-                f"min_doc_length={doc_spec.min_doc_length})"):
-        bow_df, vocab_map = to_bow_dataframe(
-            omop, doc_spec=doc_spec,
-            vocab_size=args.vocab_size,
-            min_df=args.min_df,
-            min_patient_count=args.min_patient_count,
-        )
-
-    with _phase("concept-name lookup"):
-        # Vocabulary-only lookup; small enough for the driver. dropDuplicates
-        # because OMOP occasionally has multiple name variants per concept_id.
-        name_rows = (
-            omop.where(F.col("concept_id").isin(list(vocab_map.keys())))
-                .select("concept_id", "concept_name")
-                .dropDuplicates(["concept_id"])
-                .collect()
-        )
-        name_by_id = {int(r["concept_id"]): r["concept_name"] for r in name_rows}
-        print(f"[driver]   resolved {len(name_by_id)} concept names", flush=True)
-
-    omop.unpersist()
-
-    if cache_uri:
-        with _phase(f"corpus-cache write ({cache_uri}/{cache_key})"):
-            save(spark, bow_df, vocab_map, name_by_id, cache_uri, cache_key)
-
-    return bow_df, vocab_map, name_by_id
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -374,8 +299,17 @@ def main(argv: list[str] | None = None) -> int:
 
     spark = make_spark_session("hdp_bigquery_cloud")
 
-    bow_df, vocab_map, name_by_id = _load_or_build_corpus(
-        spark, args, doc_spec, cdr, billing,
+    bow_df, vocab_map, name_by_id = load_or_build_corpus(
+        spark,
+        doc_spec=doc_spec,
+        cdr=cdr,
+        billing=billing,
+        source_table=args.source_table,
+        person_mod=args.person_mod,
+        vocab_size=args.vocab_size,
+        min_df=args.min_df,
+        min_patient_count=args.min_patient_count,
+        cache_uri=args.corpus_cache_uri or None,
     )
     bow_df = bow_df.persist()
     n_docs = bow_df.count()
