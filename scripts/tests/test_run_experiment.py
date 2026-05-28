@@ -249,3 +249,52 @@ def test_build_eval_args_minimum(tmp_path):
     assert str(checkpoint) in args
     assert "--model-class" in args
     assert "lda" in args
+
+
+def test_build_spark_submit_cmd_structure(tmp_path):
+    script = "/repo/analysis/cloud/lda_bigquery_cloud.py"
+    script_args = ["--K", "60", "--save-dir", "/tmp/foo"]
+    repo_root = tmp_path
+    (repo_root / "spark-vi" / "dist").mkdir(parents=True)
+    (repo_root / "spark-vi" / "dist" / "spark_vi.zip").touch()
+    (repo_root / "charmpheno" / "dist").mkdir(parents=True)
+    (repo_root / "charmpheno" / "dist" / "charmpheno.zip").touch()
+
+    cmd = rx.build_spark_submit_cmd(script, script_args, repo_root)
+    assert cmd[0] == "spark-submit"
+    assert "--master" in cmd and "yarn" in cmd
+    assert "--deploy-mode" in cmd and "client" in cmd
+    assert "--py-files" in cmd
+    # py-files value contains both zips comma-joined
+    py_files_idx = cmd.index("--py-files")
+    py_files_val = cmd[py_files_idx + 1]
+    assert "spark_vi.zip" in py_files_val
+    assert "charmpheno.zip" in py_files_val
+    # Script + script args at the end, in order
+    assert cmd[-len(script_args) - 1] == script
+    assert cmd[-len(script_args):] == script_args
+
+
+def test_write_summary_header_creates_file(tmp_path):
+    summary_path = tmp_path / "summary.md"
+    effective = {"model_class": "lda", "cohort": "dementia", "K": 60}
+    rx.write_summary_header(summary_path, exp_id=42, slug="try-k60", effective=effective)
+    text = summary_path.read_text()
+    assert "# Experiment 0042" in text
+    assert "try-k60" in text
+    assert "## Effective config" in text
+    assert "K: 60" in text
+    assert "cohort: dementia" in text
+    assert "model_class: lda" in text
+
+
+def test_write_summary_header_appends_session_marker(tmp_path):
+    summary_path = tmp_path / "summary.md"
+    summary_path.write_text("# Existing summary\n\n## Fit session 1\n... (old) ...\n")
+    effective = {"model_class": "lda", "cohort": "dementia", "K": 60}
+    rx.write_summary_header(summary_path, exp_id=42, slug="try-k60", effective=effective)
+    text = summary_path.read_text()
+    # Old content preserved
+    assert "(old)" in text
+    # New session marker appended
+    assert "## Fit session 2" in text

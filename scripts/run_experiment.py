@@ -12,6 +12,9 @@ from pathlib import Path
 
 import yaml
 
+import datetime as _dt
+import subprocess
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPERIMENTS_DIR = REPO_ROOT / "docs" / "experiments"
 DEFAULTS_DIR = REPO_ROOT / "experiments" / "defaults"
@@ -160,3 +163,64 @@ def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:
         "--checkpoint", str(checkpoint_dir),
         "--model-class", str(effective.get("model_class", "lda")),
     ]
+
+
+# Spark configuration constants. Match the existing per-cohort Makefile targets.
+# If these need to vary per-experiment, lift them into _base.yaml in a future
+# increment.
+SPARK_SUBMIT_FLAGS = [
+    "--master", "yarn",
+    "--deploy-mode", "client",
+    "--driver-memory", "4g",
+    "--conf", "spark.executor.cores=4",
+    "--conf", "spark.executor.memory=6g",
+    "--conf", "spark.executor.memoryOverhead=2g",
+    "--conf", "spark.python.worker.memory=2g",
+]
+
+
+def build_spark_submit_cmd(
+    script: str, script_args: list[str], repo_root: Path,
+) -> list[str]:
+    """Build the full spark-submit command line."""
+    spark_vi_zip = repo_root / "spark-vi" / "dist" / "spark_vi.zip"
+    charmpheno_zip = repo_root / "charmpheno" / "dist" / "charmpheno.zip"
+    py_files_val = f"{spark_vi_zip},{charmpheno_zip}"
+    return (
+        ["spark-submit"]
+        + SPARK_SUBMIT_FLAGS
+        + ["--py-files", py_files_val, script]
+        + script_args
+    )
+
+
+def _count_existing_fit_sessions(summary_text: str) -> int:
+    """Count occurrences of '## Fit session N' headers in existing summary."""
+    return len(re.findall(r"^## Fit session \d+", summary_text, re.MULTILINE))
+
+
+def write_summary_header(
+    summary_path: Path, *, exp_id: int, slug: str, effective: dict,
+) -> None:
+    """Write or append the per-session header to summary.md.
+
+    If the file doesn't exist: writes the experiment-level header (title + effective
+    config block) plus '## Fit session 1' header.
+    If the file exists: appends '## Fit session N' header where N is (count+1).
+    """
+    started = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    if not summary_path.exists():
+        lines = [
+            f"# Experiment {exp_id:04d} — {slug}",
+            "",
+            "## Effective config",
+        ]
+        for k in sorted(effective.keys()):
+            lines.append(f"{k}: {effective[k]}")
+        lines += ["", "## Fit session 1", f"Started: {started}", ""]
+        summary_path.write_text("\n".join(lines) + "\n")
+    else:
+        existing = summary_path.read_text()
+        n = _count_existing_fit_sessions(existing) + 1
+        with summary_path.open("a") as f:
+            f.write(f"\n## Fit session {n}\nStarted: {started}\n\n")
