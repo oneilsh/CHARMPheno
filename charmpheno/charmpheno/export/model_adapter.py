@@ -50,7 +50,7 @@ def _parse_theta_percentiles(raw: list[dict[str, float]]) -> np.ndarray:
 def adapt_lda(result) -> DashboardExport:
     """LDA → DashboardExport. Reads corpus_prevalence, theta_histogram, and
     theta_percentiles from checkpoint metadata. Raises ValueError if
-    corpus_prevalence is absent (migration script required)."""
+    corpus_prevalence is absent."""
     gp = _global_params(result)
     meta = result.metadata
 
@@ -66,9 +66,8 @@ def adapt_lda(result) -> DashboardExport:
     if "corpus_prevalence" not in meta:
         raise ValueError(
             "checkpoint metadata missing 'corpus_prevalence' (LDA aggregates "
-            "were not computed at fit time). Run "
-            "scripts/migrate_checkpoint_drop_gamma.py against this checkpoint "
-            "to compute aggregates and drop gamma."
+            "were not computed at fit time). This checkpoint predates the "
+            "in-driver aggregates change; re-fit with the current LDA driver."
         )
     corpus_prev = np.asarray(meta["corpus_prevalence"], dtype=np.float64)
 

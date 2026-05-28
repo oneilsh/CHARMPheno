@@ -168,15 +168,15 @@ def test_adapt_lda_reads_aggregates_from_metadata():
 
 
 def test_adapt_lda_errors_when_metadata_missing_corpus_prevalence():
-    """adapt_lda raises ValueError naming the migration script when
-    corpus_prevalence is absent from metadata."""
+    """adapt_lda raises ValueError when corpus_prevalence is absent — points
+    callers at re-fitting with the current driver."""
     from spark_vi.core.result import VIResult
     result = VIResult(
         global_params={"lambda": np.ones((2, 4)), "alpha": np.array([0.5, 0.5])},
         elbo_trace=[], n_iterations=0, converged=False,
         metadata={"model_class": "lda"},
     )
-    with pytest.raises(ValueError, match="scripts/migrate_checkpoint_drop_gamma.py"):
+    with pytest.raises(ValueError, match="re-fit with the current LDA driver"):
         adapt_lda(result)
 
 
