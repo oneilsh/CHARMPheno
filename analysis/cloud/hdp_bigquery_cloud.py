@@ -237,8 +237,10 @@ def main(argv: list[str] | None = None) -> int:
         help="CountVectorizer vocabulary cap",
     )
     parser.add_argument(
-        "--min-df", type=int, default=5,
-        help="minimum document frequency for a concept to enter the vocabulary",
+        "--min-df", type=int, default=20,
+        help=("Minimum document frequency for vocab inclusion. "
+              "Default 20 matches the small-cell suppression threshold "
+              "so that sub-threshold codes never enter the trained model."),
     )
     parser.add_argument(
         "--top-n-tokens", type=int, default=10,
