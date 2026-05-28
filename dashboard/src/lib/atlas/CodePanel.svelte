@@ -32,7 +32,7 @@
   $: maxPwk = top.length ? Math.max(...top.map((r) => r.pwk)) : 1
 
   $: reader = $prevalenceReader
-  $: hasHistogram = !!(pheno?.theta_histogram && $bundle?.phenotypes.theta_histogram_bin_edges)
+  $: hasHistogram = !!(pheno?.theta_histogram && pheno?.theta_percentiles && $bundle?.phenotypes.theta_histogram_bin_edges)
 
   // Lay-readable rubric explanations for the quality chip.
   function qualityTooltip(q: string): string {
@@ -114,18 +114,21 @@
       </div>
     </header>
 
-    {#if pheno.theta_histogram && pheno.theta_percentiles && $bundle?.phenotypes.theta_histogram_bin_edges}
+    {#if hasHistogram}
+      {@const edges = $bundle!.phenotypes.theta_histogram_bin_edges!}
+      {@const hist = pheno.theta_histogram!}
+      {@const pcts = pheno.theta_percentiles!}
       <div class="hist-wrap">
         <span class="hist-head">
           <span class="eyebrow" title="How prominently this phenotype features in each patient's mixture, across the cohort. The x-axis is the share of a patient's coded activity attributed to this phenotype; the y-axis is the share of patients at each level. Dashed fuchsia line = current τ threshold. Faint vertical = median (p50); ticks at top = p5, p25, p75, p95. Bins with fewer than 20 patients are suppressed for privacy.">Phenotype Prominence</span>
           <span class="hist-percentiles" data-numeric>
-            median {(pheno.theta_percentiles.p50 * 100).toFixed(1)}% · p95 {(pheno.theta_percentiles.p95 * 100).toFixed(1)}%
+            median {(pcts.p50 * 100).toFixed(1)}% · p95 {(pcts.p95 * 100).toFixed(1)}%
           </span>
         </span>
         <PrevalenceHistogram
-          histogram={pheno.theta_histogram}
-          binEdges={$bundle.phenotypes.theta_histogram_bin_edges}
-          percentiles={pheno.theta_percentiles}
+          histogram={hist}
+          binEdges={edges}
+          percentiles={pcts}
           tau={$tauThreshold}
           width={360}
           height={100}
