@@ -74,10 +74,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--vocab-top-n", type=int, default=5000)
-    # AoU-style small-cell guard: codes appearing in fewer than this many
-    # docs are dropped from the displayed vocab (and so from the bundle and
-    # the labeling LLM prompt). 0 disables the guard. Default 20.
-    parser.add_argument("--min-doc-count", type=int, default=20)
     parser.add_argument("--hdp-top-k", type=int, default=50,
                         help="Top-K used HDP topics (ignored for LDA)")
     parser.add_argument("--top-n-codes-for-npmi", type=int, default=20)
@@ -145,9 +141,7 @@ def main(argv: list[str] | None = None) -> int:
         beta=export.beta, alpha=export.alpha,
         vocab_ids=vocab_ids, descriptions=descriptions, domains=domains,
         code_marginals=stats.code_marginals,
-        code_doc_counts=stats.code_doc_counts,
         top_n=args.vocab_top_n,
-        min_doc_count=args.min_doc_count,
     )
     if export.theta_histogram is not None:
         # NaN-suppressed bins → None for JSON serialization
