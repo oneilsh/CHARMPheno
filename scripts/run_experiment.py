@@ -109,3 +109,54 @@ def sanitize_line(line: str, patterns: list[re.Pattern]) -> str | None:
         if pat.search(line):
             return None
     return line
+
+
+def build_lda_args(
+    effective: dict, save_dir: Path, resume_from: Path | None,
+) -> list[str]:
+    """Build the CLI arg list for lda_bigquery_cloud.py from an effective config.
+
+    The driver's argparse defaults handle anything not set here; we explicitly
+    pass everything in `effective` to keep the cluster's behavior reproducible
+    from the config alone.
+    """
+    args: list[str] = [
+        "--save-dir", str(save_dir),
+        "--save-interval", str(effective["save_interval"]),
+        "--source-table", str(effective["source_table"]),
+        "--doc-unit", str(effective["doc_unit"]),
+        "--doc-min-length", str(effective["doc_min_length"]),
+        "--K", str(effective["K"]),
+        "--max-iter", str(effective["max_iter"]),
+        "--vocab-size", str(effective["vocab_size"]),
+        "--min-df", str(effective["min_df"]),
+        "--min-patient-count", str(effective["min_patient_count"]),
+        "--subsampling-rate", str(effective["subsampling_rate"]),
+        "--tau0", str(effective["tau0"]),
+        "--kappa", str(effective["kappa"]),
+        "--print-topics-every", str(effective["print_topics_every"]),
+        "--person-mod", str(effective["person_mod"]),
+        "--top-n-tokens", str(effective["top_n_tokens"]),
+        "--seed", str(effective["seed"]),
+        "--cohort", str(effective["cohort"]),
+    ]
+    # BooleanOptionalAction in the driver: --optimize-doc-concentration / --no-...
+    if effective.get("optimize_doc_concentration", True):
+        args.append("--optimize-doc-concentration")
+    else:
+        args.append("--no-optimize-doc-concentration")
+    if effective.get("optimize_topic_concentration", False):
+        args.append("--optimize-topic-concentration")
+    else:
+        args.append("--no-optimize-topic-concentration")
+    if resume_from is not None:
+        args += ["--resume-from", str(resume_from)]
+    return args
+
+
+def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:
+    """Build the CLI arg list for eval_coherence_cloud.py."""
+    return [
+        "--checkpoint", str(checkpoint_dir),
+        "--model-class", str(effective.get("model_class", "lda")),
+    ]

@@ -162,3 +162,90 @@ def test_sanitize_line_keeps_aggregate_person_count():
 def test_sanitize_line_keeps_iter_topic_prints():
     line = "  Topic 5:    192671  Type 2 diabetes mellitus  0.0234\n"
     assert rx.sanitize_line(line, rx.PATIENT_PATTERNS) == line
+
+
+def test_build_lda_args_required_fields(tmp_path):
+    effective = {
+        "model_class": "lda",
+        "source_table": "condition_era",
+        "doc_unit": "patient_year",
+        "doc_min_length": 20,
+        "K": 60,
+        "max_iter": 20,
+        "vocab_size": 10000,
+        "min_df": 20,
+        "min_patient_count": 20,
+        "subsampling_rate": 0.2,
+        "tau0": 64,
+        "kappa": 0.7,
+        "save_interval": 5,
+        "print_topics_every": 1,
+        "person_mod": 10,
+        "top_n_tokens": 6,
+        "seed": 42,
+        "optimize_doc_concentration": True,
+        "optimize_topic_concentration": False,
+        "cohort": "dementia",
+    }
+    save_dir = tmp_path / "0042-try-k60-dementia"
+    args = rx.build_lda_args(effective, save_dir, resume_from=None)
+    # Required overrides
+    assert "--save-dir" in args
+    assert str(save_dir) in args
+    assert "--K" in args
+    assert "60" in args
+    assert "--source-table" in args
+    assert "condition_era" in args
+    assert "--cohort" in args
+    assert "dementia" in args
+    # Resume not set when None
+    assert "--resume-from" not in args
+
+
+def test_build_lda_args_threads_resume_from(tmp_path):
+    effective = {
+        "model_class": "lda", "source_table": "condition_era",
+        "doc_unit": "patient_year", "doc_min_length": 20,
+        "K": 60, "max_iter": 20, "vocab_size": 10000,
+        "min_df": 20, "min_patient_count": 20,
+        "subsampling_rate": 0.2, "tau0": 64, "kappa": 0.7,
+        "save_interval": 5, "print_topics_every": 1,
+        "person_mod": 10, "top_n_tokens": 6, "seed": 42,
+        "optimize_doc_concentration": True,
+        "optimize_topic_concentration": False,
+        "cohort": "dementia",
+    }
+    save_dir = tmp_path / "0042-try-k60"
+    resume = tmp_path / "0042-try-k60"
+    args = rx.build_lda_args(effective, save_dir, resume_from=resume)
+    assert "--resume-from" in args
+    idx = args.index("--resume-from")
+    assert args[idx + 1] == str(resume)
+
+
+def test_build_lda_args_omits_cohort_when_none():
+    effective = {
+        "model_class": "lda", "source_table": "condition_era",
+        "doc_unit": "patient", "doc_min_length": 20,
+        "K": 40, "max_iter": 20, "vocab_size": 10000,
+        "min_df": 20, "min_patient_count": 20,
+        "subsampling_rate": 0.2, "tau0": 64, "kappa": 0.7,
+        "save_interval": 5, "print_topics_every": 1,
+        "person_mod": 10, "top_n_tokens": 6, "seed": 42,
+        "optimize_doc_concentration": True,
+        "optimize_topic_concentration": False,
+        "cohort": "none",
+    }
+    args = rx.build_lda_args(effective, Path("/tmp/foo"), resume_from=None)
+    assert "--cohort" in args
+    idx = args.index("--cohort")
+    assert args[idx + 1] == "none"
+
+
+def test_build_eval_args_minimum(tmp_path):
+    checkpoint = tmp_path / "0042-try-k60"
+    args = rx.build_eval_args(checkpoint, {"model_class": "lda"})
+    assert "--checkpoint" in args
+    assert str(checkpoint) in args
+    assert "--model-class" in args
+    assert "lda" in args
