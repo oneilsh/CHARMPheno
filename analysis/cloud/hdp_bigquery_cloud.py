@@ -17,38 +17,13 @@ Submit (from this directory on the Dataproc master):
 from __future__ import annotations
 
 import argparse
-import logging
 import os
 import sys
-import time
-from contextlib import contextmanager
 
 import numpy as np
-from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-
-def _configure_logging() -> None:
-    """Surface spark_vi.core.runner per-iter INFO lines with [driver] prefix."""
-    logging.basicConfig(
-        level=logging.WARNING,
-        format="[driver]   %(message)s",
-        stream=sys.stdout,
-        force=True,
-    )
-    logging.getLogger("spark_vi").setLevel(logging.INFO)
-
-
-@contextmanager
-def _phase(name: str):
-    """Bracket a driver phase with start/end markers and elapsed wall time."""
-    print(f"[driver] >>> {name}", flush=True)
-    t0 = time.perf_counter()
-    try:
-        yield
-    finally:
-        print(f"[driver] <<< {name}: {time.perf_counter() - t0:.1f}s",
-              flush=True)
+from _driver_common import _phase, configure_logging, make_spark_session
 
 
 def _make_topic_evolution_logger(
@@ -391,21 +366,13 @@ def main(argv: list[str] | None = None) -> int:
               "condition_era for era replication semantics.", file=sys.stderr)
         return 1
 
-    _configure_logging()
+    configure_logging()
 
     print(f"[driver] cdr={cdr}, billing_project={billing}, "
           f"T={args.T}, K={args.K}, max_iter={args.max_iter}, "
           f"person_mod={args.person_mod}", flush=True)
 
-    spark = SparkSession.builder.appName("hdp_bigquery_cloud").getOrCreate()
-    spark.sparkContext.setLogLevel("WARN")
-    # Silence the spot-reclamation flood (BlockManager cascades, FetchFailed
-    # stack traces from TaskSetManager, etc.) without losing other WARN.
-    from _log_utils import quiet_spot_reclamation
-    quiet_spot_reclamation(spark)
-    sc = spark.sparkContext
-    print(f"[driver] Spark {sc.version}, master={sc.master}, "
-          f"defaultParallelism={sc.defaultParallelism}", flush=True)
+    spark = make_spark_session("hdp_bigquery_cloud")
 
     bow_df, vocab_map, name_by_id = _load_or_build_corpus(
         spark, args, doc_spec, cdr, billing,

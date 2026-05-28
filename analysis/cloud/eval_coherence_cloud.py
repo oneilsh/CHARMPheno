@@ -25,33 +25,11 @@ import argparse
 import logging
 import os
 import sys
-import time
-from contextlib import contextmanager
 
 import numpy as np
-from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-
-def _configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.WARNING,
-        format="[driver]   %(message)s",
-        stream=sys.stdout,
-        force=True,
-    )
-    logging.getLogger("spark_vi").setLevel(logging.INFO)
-
-
-@contextmanager
-def _phase(name: str):
-    print(f"[driver] >>> {name}", flush=True)
-    t0 = time.perf_counter()
-    try:
-        yield
-    finally:
-        print(f"[driver] <<< {name}: {time.perf_counter() - t0:.1f}s",
-              flush=True)
+from _driver_common import _phase, configure_logging, make_spark_session
 
 
 # Ranked-report printing lives in analysis._eval_common.print_ranked_report —
@@ -127,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.path.insert(0, str(repo_root))
     from analysis._eval_common import print_ranked_report  # noqa: E402
 
-    _configure_logging()
+    configure_logging()
 
     print(f"[driver] checkpoint={args.checkpoint}, top_n={args.top_n}, "
           f"model_class={args.model_class}", flush=True)
@@ -170,15 +148,7 @@ def main(argv: list[str] | None = None) -> int:
                 cdr_env, corpus["cdr"],
             )
 
-    spark = SparkSession.builder.appName("eval_coherence_cloud").getOrCreate()
-    spark.sparkContext.setLogLevel("WARN")
-    # Silence the spot-reclamation flood (BlockManager cascades, FetchFailed
-    # stack traces from TaskSetManager, etc.) without losing other WARN.
-    from _log_utils import quiet_spot_reclamation
-    quiet_spot_reclamation(spark)
-    sc = spark.sparkContext
-    print(f"[driver] Spark {sc.version}, master={sc.master}, "
-          f"defaultParallelism={sc.defaultParallelism}", flush=True)
+    spark = make_spark_session("eval_coherence_cloud")
 
     try:
         with _phase("BQ load + summary"):

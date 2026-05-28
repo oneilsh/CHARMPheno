@@ -27,36 +27,13 @@ import argparse
 import logging
 import os
 import sys
-import time
 import zipfile
-from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
-from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-
-def _configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.WARNING,
-        format="[driver]   %(message)s",
-        stream=sys.stdout,
-        force=True,
-    )
-    logging.getLogger("spark_vi").setLevel(logging.INFO)
-    logging.getLogger("charmpheno").setLevel(logging.INFO)
-
-
-@contextmanager
-def _phase(name: str):
-    print(f"[driver] >>> {name}", flush=True)
-    t0 = time.perf_counter()
-    try:
-        yield
-    finally:
-        print(f"[driver] <<< {name}: {time.perf_counter() - t0:.1f}s",
-              flush=True)
+from _driver_common import _phase, configure_logging, make_spark_session
 
 
 class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
@@ -110,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     from spark_vi.models.topic.types import BOWDocument
     from spark_vi.eval.topic import compute_npmi_coherence
 
-    _configure_logging()
+    configure_logging(extra_loggers={"charmpheno": logging.INFO})
     log = logging.getLogger(__name__)
 
     out_dir = Path(args.out_dir) if args.out_dir else Path(args.checkpoint) / "dashboard_bundle"
@@ -150,13 +127,7 @@ def main(argv: list[str] | None = None) -> int:
                 cdr_env, corpus["cdr"],
             )
 
-    spark = SparkSession.builder.appName("build_dashboard_cloud").getOrCreate()
-    spark.sparkContext.setLogLevel("WARN")
-    from _log_utils import quiet_spot_reclamation
-    quiet_spot_reclamation(spark)
-    sc = spark.sparkContext
-    print(f"[driver] Spark {sc.version}, master={sc.master}, "
-          f"defaultParallelism={sc.defaultParallelism}", flush=True)
+    spark = make_spark_session("build_dashboard_cloud")
 
     try:
         with _phase("BQ load (OMOP)"):
