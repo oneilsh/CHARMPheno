@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from charmpheno.export.dashboard import (
-    select_top_n_with_min_cell,
+    select_top_n_by_marginal,
     write_model_and_vocab_bundles,
 )
 
@@ -76,17 +76,17 @@ def test_returns_v_displayed(tmp_path: Path):
 
 
 def test_select_top_n_pure_marginal_ranking():
-    """select_top_n_with_min_cell returns top-N by marginal, no doc-count filter."""
+    """select_top_n_by_marginal returns top-N by marginal, no doc-count filter."""
     code_marginals = [0.05, 0.30, 0.10, 0.40, 0.15]
-    selected = select_top_n_with_min_cell(code_marginals, top_n=3)
+    selected = select_top_n_by_marginal(code_marginals, top_n=3)
     # Expect descending marginal: idx 3 (0.40), idx 1 (0.30), idx 4 (0.15)
     assert selected == [3, 1, 4]
 
 
 def test_select_top_n_respects_top_n_cap():
     code_marginals = [0.5, 0.3, 0.2]
-    assert select_top_n_with_min_cell(code_marginals, top_n=2) == [0, 1]
-    assert select_top_n_with_min_cell(code_marginals, top_n=10) == [0, 1, 2]
+    assert select_top_n_by_marginal(code_marginals, top_n=2) == [0, 1]
+    assert select_top_n_by_marginal(code_marginals, top_n=10) == [0, 1, 2]
 
 
 def test_write_phenotypes_bundle(tmp_path: Path):

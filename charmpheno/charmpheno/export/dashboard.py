@@ -22,12 +22,12 @@ def _round_floats(arr: np.ndarray, *, decimals: int = 6) -> list:
     return np.round(arr.astype(np.float64), decimals=decimals).tolist()
 
 
-def select_top_n_with_min_cell(
+def select_top_n_by_marginal(
     code_marginals: list[float],
     *,
     top_n: int,
 ) -> list[int]:
-    """Pick the top-N codes by marginal token frequency.
+    """Return indices of the top-N codes by marginal token frequency.
 
     Small-cell suppression is enforced upstream via CountVectorizer.minDF
     at vocab-build time, so the codes reaching this function have already
@@ -75,7 +75,7 @@ def write_model_and_vocab_bundles(
         )
 
     K, V_full = beta.shape
-    keep = select_top_n_with_min_cell(
+    keep = select_top_n_by_marginal(
         code_marginals,
         top_n=top_n,
     )
