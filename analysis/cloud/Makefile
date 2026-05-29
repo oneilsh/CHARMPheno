@@ -103,6 +103,7 @@ help:
 	@echo "  next-exp                Pick lowest-NNNN pending experiment; fit + eval."
 	@echo "  exp ID=N                Run/resume experiment N; fit + eval."
 	@echo "  summary ID=N            Print summary.md for experiment N."
+	@echo "  eval-exp ID=N           Re-run eval against existing checkpoint; appends ## Eval section."
 	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
 	@echo "                         Restricts to patients with a first malignant-cancer dx"
 	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
@@ -286,6 +287,13 @@ exp: zip $(WORKSPACE_ENV)
 summary:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	@cat $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*/summary.md
+
+# Re-run eval only against an existing experiment's checkpoint; appends a
+# timestamped ## Eval (NPMI) section to summary.md.
+eval-exp: zip $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	. ./$(WORKSPACE_ENV) && \
+	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --eval-only --runs-dir $(RUNS_DIR)
 
 lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	@mkdir -p $(RUNS_DIR) && \
