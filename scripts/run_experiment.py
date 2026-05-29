@@ -92,6 +92,36 @@ def find_by_id(experiments_dir: Path, exp_id: int) -> Path:
     raise FileNotFoundError(f"no experiment with id {exp_id:04d} in {experiments_dir}")
 
 
+_RUN_DIR_PATTERN = re.compile(r"^(\d{4})-")
+
+
+def find_most_recent_fit(runs_dir: Path) -> int | None:
+    """Return the experiment id of the most-recently-checkpointed fit.
+
+    Walks `runs_dir/<NNNN-slug>/manifest.json`, picks the one with the latest
+    mtime, parses the leading NNNN from the directory name. Returns None if
+    no checkpoint exists (empty / nonexistent runs_dir, or no manifest.json
+    files in any subdirectory).
+
+    The dir-naming convention `NNNN-slug` is enforced by `main()` when it
+    creates save_dir; this function trusts that convention and skips any
+    directory whose name doesn't start with four digits + hyphen.
+    """
+    if not runs_dir.is_dir():
+        return None
+    best_mtime = -1.0
+    best_id: int | None = None
+    for manifest in runs_dir.glob("*/manifest.json"):
+        m = _RUN_DIR_PATTERN.match(manifest.parent.name)
+        if m is None:
+            continue
+        mtime = manifest.stat().st_mtime
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best_id = int(m.group(1))
+    return best_id
+
+
 # Patterns that indicate per-patient row-level info. Belt-and-suspenders for
 # driver-side stripping; if a new driver path re-introduces patient prints,
 # these catch them at the wrapper boundary before they reach summary.md.

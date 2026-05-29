@@ -499,3 +499,53 @@ def test_append_eval_section_timestamp_in_header(tmp_path):
     # Match `## Eval (NPMI) — YYYY-MM-DD HH:MM:SS UTC`
     assert re.search(r"## Eval \(NPMI\) — \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC", text), \
         f"missing timestamped eval header in: {text!r}"
+
+
+def test_find_most_recent_fit_returns_none_for_empty_dir(tmp_path):
+    assert rx.find_most_recent_fit(tmp_path) is None
+
+
+def test_find_most_recent_fit_picks_latest_mtime(tmp_path):
+    """Three experiment dirs, only the second has the most recent manifest mtime."""
+    # 0010-old/manifest.json — oldest
+    (tmp_path / "0010-old").mkdir()
+    older = tmp_path / "0010-old" / "manifest.json"
+    older.write_text("{}")
+    import os
+    os.utime(older, (1_700_000_000, 1_700_000_000))
+
+    # 0042-target/manifest.json — newest
+    (tmp_path / "0042-target").mkdir()
+    target = tmp_path / "0042-target" / "manifest.json"
+    target.write_text("{}")
+    os.utime(target, (1_700_000_200, 1_700_000_200))
+
+    # 0050-middle/manifest.json — between
+    (tmp_path / "0050-middle").mkdir()
+    middle = tmp_path / "0050-middle" / "manifest.json"
+    middle.write_text("{}")
+    os.utime(middle, (1_700_000_100, 1_700_000_100))
+
+    assert rx.find_most_recent_fit(tmp_path) == 42
+
+
+def test_find_most_recent_fit_ignores_dirs_without_manifest(tmp_path):
+    """A save_dir without manifest.json is in-progress / failed, not eligible."""
+    (tmp_path / "0001-pending").mkdir()  # no manifest.json — ignored
+    (tmp_path / "0002-done").mkdir()
+    (tmp_path / "0002-done" / "manifest.json").write_text("{}")
+    assert rx.find_most_recent_fit(tmp_path) == 2
+
+
+def test_find_most_recent_fit_skips_malformed_dir_names(tmp_path):
+    """Dirs not matching NNNN-* are ignored even if they have a manifest."""
+    (tmp_path / "scratch").mkdir()
+    (tmp_path / "scratch" / "manifest.json").write_text("{}")
+    (tmp_path / "0007-real").mkdir()
+    (tmp_path / "0007-real" / "manifest.json").write_text("{}")
+    assert rx.find_most_recent_fit(tmp_path) == 7
+
+
+def test_find_most_recent_fit_missing_runs_dir_returns_none(tmp_path):
+    """Nonexistent runs_dir is treated as empty."""
+    assert rx.find_most_recent_fit(tmp_path / "does-not-exist") is None
