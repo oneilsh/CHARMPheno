@@ -1,4 +1,4 @@
-.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp
+.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -107,6 +107,8 @@ help:
 	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
 	@echo "  build-dashboard-exp     - build dashboard bundle (auto-picks freshest fit needing build)"
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
+	@echo "  build-covariates EXP=N  - rebuild STM covariate cache for experiment N without re-running fit."
+	@echo "                         Useful when iterating on covariate_formula. FORCE=1 invalidates cache."
 	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
 	@echo "                         Restricts to patients with a first malignant-cancer dx"
 	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
@@ -311,6 +313,23 @@ eval-exp: zip $(WORKSPACE_ENV)
 build-dashboard-exp: zip $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py $(if $(ID),--id $(ID)) --build-only --runs-dir $(RUNS_DIR)
+
+# Rebuild only the STM covariate cache for an experiment, without re-running
+# the fit. Useful when iterating on covariate_formula: change the formula in
+# the experiment frontmatter, then run this target to refresh the cache before
+# the next `make exp EXP=N`.
+#
+# Usage:
+#   make build-covariates EXP=NNNN
+#   make build-covariates EXP=NNNN FORCE=1   # invalidate cache, force rebuild
+build-covariates: zip $(WORKSPACE_ENV)
+ifndef EXP
+	$(error EXP=NNNN required, e.g. make build-covariates EXP=0002)
+endif
+	. ./$(WORKSPACE_ENV) && \
+	python $(REPO_ROOT)/scripts/run_experiment.py \
+		--id $(EXP) --build-covariates-only --runs-dir $(RUNS_DIR) \
+		$(if $(FORCE),--force-covariates)
 
 lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	@mkdir -p $(RUNS_DIR) && \

@@ -793,3 +793,149 @@ class TestBuildOnlyMain:
         out_lower = capsys.readouterr().out.lower()
         assert "no fits need building" in out_lower \
                or "nothing to build" in out_lower
+
+
+class TestBuildCovariatesOnly:
+    """--build-covariates-only flag: arg parsing, validation, mutual exclusion."""
+
+    def _write_stm_experiment(self, dir_path: Path, *, id: int, slug: str) -> Path:
+        path = dir_path / f"{id:04d}-{slug}.md"
+        path.write_text(
+            f"---\n"
+            f"id: {id}\n"
+            f"slug: {slug}\n"
+            f"status: pending\n"
+            f"model_class: stm\n"
+            f"cohort: dementia\n"
+            f"covariate_formula: \"~ C(sex) + age\"\n"
+            f"categorical_cols: [sex]\n"
+            f"continuous_cols: [age]\n"
+            f"---\n\n# {slug}\n"
+        )
+        return path
+
+    def test_flag_is_parseable(self, tmp_path, capsys):
+        """--build-covariates-only is accepted by the parser (not an unknown arg)."""
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        # Without --id this should fail cleanly (not with an argparse error).
+        rc = rx.main([
+            "--build-covariates-only",
+            "--runs-dir", str(runs),
+        ])
+        assert rc == 2
+        out = capsys.readouterr().out
+        assert "build-covariates-only" in out
+
+    def test_requires_id(self, tmp_path, capsys):
+        """--build-covariates-only without --id exits 2 with a clear message."""
+        rc = rx.main([
+            "--build-covariates-only",
+            "--runs-dir", str(tmp_path / "runs"),
+        ])
+        assert rc == 2
+        assert "id" in capsys.readouterr().out.lower()
+
+    def test_mutually_exclusive_with_eval_only(self, tmp_path, capsys):
+        rc = rx.main([
+            "--build-covariates-only", "--eval-only",
+            "--id", "1",
+            "--runs-dir", str(tmp_path),
+        ])
+        assert rc == 2
+        assert "contradictory" in capsys.readouterr().out.lower()
+
+    def test_mutually_exclusive_with_no_eval(self, tmp_path, capsys):
+        rc = rx.main([
+            "--build-covariates-only", "--no-eval",
+            "--id", "1",
+            "--runs-dir", str(tmp_path),
+        ])
+        assert rc == 2
+
+    def test_mutually_exclusive_with_build_only(self, tmp_path, capsys):
+        rc = rx.main([
+            "--build-covariates-only", "--build-only",
+            "--id", "1",
+            "--runs-dir", str(tmp_path),
+        ])
+        assert rc == 2
+
+    def test_force_covariates_requires_build_covariates_only(self, tmp_path, capsys):
+        """--force-covariates without --build-covariates-only exits 2."""
+        rc = rx.main([
+            "--force-covariates", "--id", "1",
+            "--runs-dir", str(tmp_path),
+        ])
+        assert rc == 2
+        assert "force-covariates" in capsys.readouterr().out.lower()
+
+    def test_rejects_non_stm_model_class(self, tmp_path, capsys):
+        """--build-covariates-only on an LDA experiment exits 2."""
+        exp_dir = tmp_path / "exp"
+        exp_dir.mkdir()
+        defaults_dir = tmp_path / "defaults"
+        defaults_dir.mkdir()
+        (defaults_dir / "_base.yaml").write_text(
+            "source_table: condition_era\nperson_mod: 10\n"
+            "cache_uri: gs://fake/cache\n"
+        )
+        (defaults_dir / "dementia.yaml").write_text("cohort: dementia\n")
+        p = exp_dir / "0042-lda-test.md"
+        p.write_text(
+            "---\n"
+            "id: 42\nslug: lda-test\ncohort: dementia\nmodel_class: lda\n"
+            "status: pending\n"
+            "---\n"
+        )
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        rc = rx.main([
+            "--id", "42",
+            "--build-covariates-only",
+            "--runs-dir", str(runs),
+            "--experiments-dir", str(exp_dir),
+            "--defaults-dir", str(defaults_dir),
+        ])
+        assert rc == 2
+        out = capsys.readouterr().out.lower()
+        assert "model_class" in out or "stm" in out
+
+    def test_build_covariates_args_minimal(self):
+        """build_covariates_args produces expected CLI flags from effective config."""
+        effective = {
+            "cdr": "my_cdr",
+            "billing": "my_billing",
+            "source_table": "condition_era",
+            "person_mod": 10,
+            "cache_uri": "gs://bucket/cache",
+            "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"],
+            "continuous_cols": ["age"],
+            "cohort": "dementia",
+            "cohort_def": "first_dementia_year",
+        }
+        args = rx.build_covariates_args(effective)
+        assert "--cdr" in args and "my_cdr" in args
+        assert "--billing" in args and "my_billing" in args
+        assert "--cache-uri" in args and "gs://bucket/cache" in args
+        assert "--covariate-formula" in args
+        assert "--categorical-cols" in args
+        assert "--continuous-cols" in args
+        assert "--cohort" in args and "first_dementia_year" in args
+
+    def test_build_covariates_args_no_cohort_def(self):
+        """When cohort_def is 'none', --cohort is omitted."""
+        effective = {
+            "cdr": "c", "billing": "b",
+            "source_table": "condition_era",
+            "person_mod": 10,
+            "cache_uri": "gs://bucket/cache",
+            "covariate_formula": "~ age",
+            "categorical_cols": [],
+            "continuous_cols": ["age"],
+            "cohort": "general",
+            "cohort_def": "none",
+        }
+        args = rx.build_covariates_args(effective)
+        assert "--cohort" not in args

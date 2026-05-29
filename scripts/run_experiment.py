@@ -299,6 +299,24 @@ def build_fit_args(effective: dict, out_dir: str) -> list[str]:
     raise ValueError(f"unknown model_class: {model_class!r}")
 
 
+def build_covariates_args(effective: dict) -> list[str]:
+    """Build argv for analysis/cloud/build_stm_covariates.py from an effective config."""
+    args = [
+        "--cdr", str(effective["cdr"]),
+        "--billing", str(effective["billing"]),
+        "--source-table", str(effective["source_table"]),
+        "--person-mod", str(effective["person_mod"]),
+        "--cache-uri", str(effective["cache_uri"]),
+        "--covariate-formula", str(effective["covariate_formula"]),
+        "--categorical-cols", ",".join(effective.get("categorical_cols", [])),
+        "--continuous-cols", ",".join(effective.get("continuous_cols", [])),
+    ]
+    cohort_def = effective.get("cohort_def", effective.get("cohort", ""))
+    if cohort_def and cohort_def != "none":
+        args += ["--cohort", str(cohort_def)]
+    return args
+
+
 def build_stm_args(effective: dict, out_dir: str) -> list[str]:
     """Build argv for analysis/cloud/stm_bigquery_cloud.py."""
     common = [
@@ -561,6 +579,14 @@ def main(argv: list[str] | None = None) -> int:
                              "If --id is omitted, auto-selects the most recent "
                              "fit whose dashboard_bundle/corpus_stats.json is "
                              "missing or older than manifest.json.")
+    parser.add_argument("--build-covariates-only", action="store_true",
+                        help="Rebuild the STM covariate cache for the given experiment "
+                             "without re-running the fit. Requires --id N and "
+                             "model_class=stm.")
+    parser.add_argument("--force-covariates", action="store_true",
+                        help="With --build-covariates-only: delete the existing "
+                             "covariate cache dir before rebuilding so the formula "
+                             "change is picked up.")
     parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR,
                         help="Base directory for run output. Default: %(default)s")
     parser.add_argument("--experiments-dir", type=Path, default=EXPERIMENTS_DIR,
@@ -576,6 +602,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only and (args.eval_only or args.no_eval):
         print("[run-exp] ERROR: --build-only is contradictory with --eval-only "
               "and --no-eval", flush=True)
+        return 2
+
+    if args.build_covariates_only and (args.eval_only or args.no_eval or args.build_only):
+        print("[run-exp] ERROR: --build-covariates-only is contradictory with "
+              "--eval-only, --no-eval, and --build-only", flush=True)
+        return 2
+
+    if args.force_covariates and not args.build_covariates_only:
+        print("[run-exp] ERROR: --force-covariates requires --build-covariates-only",
+              flush=True)
         return 2
 
     # 1. Select experiment file
@@ -621,9 +657,13 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError as e:
             print(f"[run-exp] ERROR: {e}", flush=True)
             return 2
+    elif args.build_covariates_only:
+        # --build-covariates-only without --id has no auto-discovery path.
+        print("[run-exp] ERROR: --build-covariates-only requires --id N", flush=True)
+        return 2
     else:
         print("[run-exp] ERROR: provide --next, --id N, --eval-only, "
-              "or --build-only (the last two auto-discover when --id is omitted)",
+              "--build-only, or --build-covariates-only",
               flush=True)
         return 2
     print(f"[run-exp] experiment: {exp_path}", flush=True)
@@ -641,6 +681,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[run-exp] ERROR: {e}", flush=True)
         return 2
     effective = merge_config(defaults, fm)
+
+    # 2b. --build-covariates-only: dispatch to standalone script and return.
+    if args.build_covariates_only:
+        if effective.get("model_class") != "stm":
+            print(f"[run-exp] ERROR: --build-covariates-only requires model_class=stm, "
+                  f"got {effective.get('model_class')!r}", flush=True)
+            return 2
+        if not effective.get("cache_uri"):
+            print("[run-exp] ERROR: --build-covariates-only requires cache_uri in "
+                  "effective config", flush=True)
+            return 2
+        cov_script = REPO_ROOT / "analysis" / "cloud" / "build_stm_covariates.py"
+        cov_args = build_covariates_args(effective)
+        if args.force_covariates:
+            cov_args.append("--force")
+        cov_cmd = build_spark_submit_cmd(str(cov_script), cov_args, REPO_ROOT)
+        print(f"[run-exp] build-covariates spark-submit: {' '.join(cov_cmd)}", flush=True)
+        import subprocess as _sp
+        result = _sp.run(cov_cmd, check=False)
+        if result.returncode != 0:
+            print(f"[run-exp] build-covariates exited non-zero ({result.returncode})",
+                  flush=True)
+        return result.returncode
 
     # 3. Resolve save_dir, detect resume
     # Resume only when there's an actual checkpoint (manifest.json) inside the
