@@ -80,6 +80,112 @@ class StreamingSTM:
         self.lbfgs_tol = lbfgs_tol
         self.random_seed = random_seed
 
+    def fit(
+        self,
+        dataset,
+        *,
+        max_iter: int = 20,
+        subsampling_rate: float = 0.2,
+        tau0: float = 64.0,
+        kappa: float = 0.7,
+        save_interval: int | None = None,
+        checkpoint_dir: str | None = None,
+        on_iteration=None,
+    ) -> "STMModel":
+        """Fit OnlineSTM via VIRunner on a DataFrame with features + covariates columns.
+
+        The input DataFrame must have the configured `features_col` (SparseVector)
+        and `covariates_col` (DenseVector). Vocab size is discovered from the
+        first features row.
+
+        Parameters:
+            dataset: Spark DataFrame with `features_col` and `covariates_col`.
+            max_iter: maximum number of SVI iterations.
+            subsampling_rate: fraction of documents per mini-batch (maps to
+                VIConfig.mini_batch_fraction).
+            tau0: Robbins-Monro delay parameter (maps to
+                VIConfig.learning_rate_tau0).
+            kappa: Robbins-Monro decay exponent (maps to
+                VIConfig.learning_rate_kappa).
+            save_interval: if set, checkpoint every N iterations
+                (requires checkpoint_dir).
+            checkpoint_dir: directory for periodic checkpoints.
+            on_iteration: optional per-iteration callback
+                fn(iter_num, global_params, elbo_trace).
+        """
+        from pyspark import StorageLevel
+
+        from spark_vi.core.config import VIConfig
+        from spark_vi.core.runner import VIRunner
+        from spark_vi.mllib.topic._common import _vector_to_stm_document
+        from spark_vi.models.topic.stm import OnlineSTM
+
+        if self.covariate_names is None:
+            raise ValueError(
+                "StreamingSTM.fit requires covariate_names to be set. For Path A "
+                "supply covariate_names at construction; for Path B call "
+                "_resolve_model_spec_from_pandas first."
+            )
+
+        first = dataset.select(self.features_col).head(1)
+        if not first:
+            raise ValueError("Cannot fit on an empty DataFrame.")
+        vocab_size = first[0][0].size
+
+        model = OnlineSTM(
+            K=self.K,
+            vocab_size=vocab_size,
+            P=self.P,
+            sigma_init=self.sigma_init,
+            sigma_ridge=self.sigma_ridge,
+            lbfgs_max_iter=self.lbfgs_max_iter,
+            lbfgs_tol=self.lbfgs_tol,
+            random_seed=self.random_seed,
+        )
+
+        # VIConfig uses learning_rate_tau0/kappa and mini_batch_fraction;
+        # checkpoint_interval + checkpoint_dir must be both set or both None.
+        checkpoint_kwargs: dict = {}
+        if save_interval is not None and checkpoint_dir is not None:
+            checkpoint_kwargs = {
+                "checkpoint_interval": save_interval,
+                "checkpoint_dir": checkpoint_dir,
+            }
+
+        config = VIConfig(
+            max_iterations=max_iter,
+            learning_rate_tau0=tau0,
+            learning_rate_kappa=kappa,
+            mini_batch_fraction=subsampling_rate if subsampling_rate < 1.0 else None,
+            **checkpoint_kwargs,
+        )
+
+        features_col = self.features_col
+        covariates_col = self.covariates_col
+        rdd = (
+            dataset.select(features_col, covariates_col).rdd
+            .map(lambda row: _vector_to_stm_document(
+                {features_col: row[0], covariates_col: row[1]},
+                features_col=features_col,
+                covariates_col=covariates_col,
+            ))
+        )
+        rdd = rdd.persist(StorageLevel.MEMORY_AND_DISK)
+        rdd.count()
+
+        runner = VIRunner(model, config=config)
+        try:
+            result = runner.fit(rdd, on_iteration=on_iteration)
+        finally:
+            rdd.unpersist(blocking=False)
+
+        return STMModel(
+            global_params=result.global_params,
+            metadata=dict(result.metadata),
+            model_spec=getattr(self, "model_spec", None),
+            covariate_names=list(self.covariate_names),
+        )
+
     def _resolve_model_spec_from_pandas(self, covariate_pdf):
         """Resolve P and covariate_names from a pre-collected pandas covariate DataFrame.
 

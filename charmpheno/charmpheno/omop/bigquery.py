@@ -166,3 +166,73 @@ def load_omop_bigquery(
 
     validate(omop)
     return omop
+
+
+def load_person_table(
+    *,
+    spark,
+    cdr_dataset: str,
+    billing_project: str,
+    person_sample_mod: int | None = None,
+    cohort: str | None = None,
+) -> "DataFrame":
+    """Load a per-person covariate source table from BigQuery.
+
+    Reads the OMOP `person` table and projects it to the minimal columns
+    needed for STM covariate materialization: `person_id`, `age`
+    (year-of-birth based, approximate), and `sex` (M/F string).
+
+    Callers should pass the resulting DataFrame to
+    `charmpheno.omop.covariates.build_patient_covariate_df`, which
+    evaluates the formula against this projection.  If the formula
+    references columns not present here (e.g. race, ethnicity), the
+    BQ query in this function must be extended.
+
+    Args:
+        spark: active SparkSession with the spark-bigquery-connector.
+        cdr_dataset: fully-qualified BQ dataset "<project>.<dataset>".
+        billing_project: GCP project for billing.
+        person_sample_mod: if set, keep rows where MOD(person_id, M) == 0.
+            Should match the corpus person_sample_mod so the broadcast join
+            in the driver covers the same person population.
+        cohort: ignored at person-table level — the corpus load already
+            restricted the person population; kept for API consistency.
+            Pass None unless you want an informational cohort label column
+            (which is a literal column, not a filter).
+
+    Returns:
+        Spark DataFrame with columns: person_id (long), year_of_birth
+        (int), gender_concept_id (int), age (double), sex (string M/F).
+        One row per person_id in the sampled population.
+    """
+    from pyspark.sql import functions as F
+
+    if not isinstance(cdr_dataset, str) or cdr_dataset.count(".") != 1:
+        raise ValueError(
+            f"cdr_dataset must be '<project>.<dataset>', got {cdr_dataset!r}"
+        )
+    if person_sample_mod is not None and person_sample_mod < 1:
+        raise ValueError(
+            f"person_sample_mod must be >= 1 or None, got {person_sample_mod}"
+        )
+
+    df = (
+        spark.read.format("bigquery")
+        .option("table", f"{cdr_dataset}.person")
+        .option("parentProject", billing_project)
+        .load()
+        .select("person_id", "year_of_birth", "gender_concept_id")
+    )
+
+    if person_sample_mod is not None:
+        df = df.where((F.col("person_id") % person_sample_mod) == 0)
+
+    # Approximate age from year_of_birth; 2025 is a fixed reference year
+    # matching the nominal AoU CDR snapshot used at time of writing.
+    df = df.withColumn("age", (F.lit(2025) - F.col("year_of_birth")).cast("double"))
+    # OMOP gender_concept_id: 8507 = Male, 8532 = Female.
+    df = df.withColumn(
+        "sex",
+        F.when(F.col("gender_concept_id") == 8507, "M").otherwise("F"),
+    )
+    return df

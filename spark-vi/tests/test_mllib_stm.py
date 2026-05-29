@@ -61,3 +61,32 @@ class TestStreamingSTMPathA:
         from spark_vi.mllib.topic.stm import StreamingSTM
         with pytest.raises(ValueError, match="covariate_formula|covariate_names"):
             StreamingSTM(K=5, features_col="features")
+
+    def test_fit_returns_STMModel_on_small_joined_df(self, spark):
+        """Smoke: StreamingSTM.fit consumes a (features, covariates) DataFrame and
+        returns a fitted STMModel with the right metadata."""
+        from spark_vi.mllib.topic.stm import STMModel, StreamingSTM
+
+        # Toy corpus: 6 docs, V=8, P=2.
+        rows = [
+            (SparseVector(8, [0, 2], [3.0, 1.0]), DenseVector([1.0, 0.0])),
+            (SparseVector(8, [1, 3], [2.0, 2.0]), DenseVector([0.0, 1.0])),
+            (SparseVector(8, [0, 4], [1.0, 2.0]), DenseVector([1.0, 0.5])),
+            (SparseVector(8, [5, 6], [1.0, 1.0]), DenseVector([0.0, 1.0])),
+            (SparseVector(8, [2, 7], [2.0, 1.0]), DenseVector([1.0, 0.0])),
+            (SparseVector(8, [3, 4], [1.0, 3.0]), DenseVector([0.5, 0.5])),
+        ]
+        df = spark.createDataFrame(rows, ["features", "covariates"])
+        est = StreamingSTM(
+            K=2,
+            features_col="features",
+            covariates_col="covariates",
+            covariate_names=["x1", "x2"],
+            random_seed=0,
+        )
+        model = est.fit(df, max_iter=2, subsampling_rate=1.0, tau0=1.0, kappa=0.5)
+        assert isinstance(model, STMModel)
+        assert model.metadata["K"] == 2
+        assert model.metadata["V"] == 8
+        assert model.metadata["P"] == 2
+        assert model.covariate_names == ["x1", "x2"]
