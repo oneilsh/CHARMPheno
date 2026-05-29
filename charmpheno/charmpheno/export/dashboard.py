@@ -209,3 +209,37 @@ def write_phenotypes_bundle(
         payload["theta_histogram_bin_edges"] = np.linspace(0, 1, n_bins + 1).tolist()
         payload["theta_histogram_min_count"] = int(min_count)
     out_path.write_text(json.dumps(payload, allow_nan=False))
+
+
+def adapt_stm(
+    *,
+    out_dir: Path,
+    Gamma: np.ndarray,
+    covariate_names: list[str],
+    K: int,
+    P: int,
+) -> None:
+    """Write STM-specific bundle artifact: per-covariate effect matrix Γ̂.
+
+    Schema for covariate_effects.json:
+        [{"covariate": "<name>", "per_topic": [γ_0, γ_1, ..., γ_{K-1}]}, ...]
+
+    One row per covariate (length P); each row carries K topic-effect values.
+    Companion bundle artifacts (vocab, β, α-equivalent) come from the existing
+    write_model_and_vocab_bundles path; this function only adds the Γ piece.
+    """
+    if Gamma.shape != (P, K):
+        raise ValueError(
+            f"adapt_stm: Gamma shape mismatch — got {Gamma.shape}, expected ({P}, {K})"
+        )
+    if len(covariate_names) != P:
+        raise ValueError(
+            f"adapt_stm: covariate_names length {len(covariate_names)} != P={P}"
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    payload = [
+        {"covariate": name, "per_topic": Gamma[p].tolist()}
+        for p, name in enumerate(covariate_names)
+    ]
+    (out_dir / "covariate_effects.json").write_text(json.dumps(payload, indent=2))
