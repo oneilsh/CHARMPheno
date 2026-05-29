@@ -270,6 +270,17 @@ def build_dashboard_args(
     `zip_name` is the basename (not full path) written as a sibling of the
     bundle directory inside the checkpoint dir. Callers should pass
     `f"{exp_id:04d}-{slug}-dashboard.zip"`.
+
+    Signature note: parameter order is `(effective, checkpoint_dir, zip_name)`
+    rather than `build_eval_args`'s `(checkpoint_dir, effective)` because
+    `zip_name` is naturally last (it's caller-supplied per-experiment), and
+    putting `effective` first keeps the config-derived args grouped together.
+
+    Dict-access asymmetry: `model_class` uses `.get(..., "lda")` to match the
+    `build_eval_args` convention (the wrapper always sets model_class anyway,
+    but a fallback is harmless). `vocab_top_n` and `top_n_codes_for_npmi` use
+    direct `[...]` access because they live in `_base.yaml` — if they're
+    missing, a KeyError is the right failure mode (the YAML chain is broken).
     """
     return [
         "--checkpoint", str(checkpoint_dir),

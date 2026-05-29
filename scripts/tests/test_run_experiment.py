@@ -687,3 +687,13 @@ class TestBuildDashboardArgs:
         effective = {"model_class": "lda", "top_n_codes_for_npmi": 20}
         with pytest.raises(KeyError):
             rx.build_dashboard_args(effective, tmp_path / "ck", "z.zip")
+
+    def test_missing_top_n_codes_for_npmi_raises(self, tmp_path):
+        """Symmetric to test_missing_required_keys_raises — both required
+        keys must trigger KeyError when absent, not just vocab_top_n.
+        """
+        import pytest
+        # Missing top_n_codes_for_npmi
+        effective = {"model_class": "lda", "vocab_top_n": 5000}
+        with pytest.raises(KeyError):
+            rx.build_dashboard_args(effective, tmp_path / "ck", "z.zip")
