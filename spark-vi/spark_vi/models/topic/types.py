@@ -44,3 +44,22 @@ class BOWDocument:
             counts=np.asarray(sv.values, dtype=np.float64),
             length=int(sv.values.sum()),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class STMDocument:
+    """Structural Topic Model document.
+
+    Extends BOWDocument with a per-document covariate vector x.
+    The engine never learns what x means — only its shape and dtype.
+
+    Invariants (callers' responsibility — not enforced at construction):
+      indices: sorted int32 array of token indices, all in [0, vocab_size).
+      counts:  float64 array with len(counts) == len(indices), all > 0.
+      length:  int total tokens (sum of counts).
+      x:       float64 array of shape (P,) — the doc's covariate vector.
+    """
+    indices: np.ndarray
+    counts: np.ndarray
+    length: int
+    x: np.ndarray
