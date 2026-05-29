@@ -160,6 +160,8 @@ def adapt_stm(result) -> DashboardExport:
         alpha_eq = np.full(K, 1.0 / K)
     # v1: corpus_prevalence stand-in equals α_eq. v1.x would compute
     # (1/D) Σ_d softmax(Γ x_d) over the actual corpus covariate distribution.
+    # Follow-up: track in docs/insights/ when the empirical version ships;
+    # affects only the dashboard "default topic proportion" display.
     corpus_prev = alpha_eq.copy()
     # theta_histogram / theta_percentiles: optional pass-through if metadata has them.
     raw_hist = meta.get("theta_histogram")

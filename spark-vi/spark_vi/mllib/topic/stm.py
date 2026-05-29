@@ -191,7 +191,7 @@ class StreamingSTM:
 
         Used by tests and by the in-memory Path-B construction. Production
         .fit() invocations against Spark DataFrames will use the
-        schema-frame Spark discovery path instead (Task 13).
+        schema-frame Spark discovery path instead (see _formula.fit_model_spec_from_spark and ADR 0024).
         """
         from spark_vi.mllib.topic._formula import fit_model_spec
         spec, names = fit_model_spec(self.covariate_formula, covariate_pdf)

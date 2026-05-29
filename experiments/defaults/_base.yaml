@@ -31,6 +31,9 @@ top_n_codes_for_npmi: 20
 # model_class: stm in the experiment frontmatter triggers the STM path.
 # covariate_formula, categorical_cols, continuous_cols are REQUIRED in
 # frontmatter when model_class: stm; no sensible default exists.
+# STM uses random_seed (not 'seed'); null = nondeterministic, set in
+# experiment frontmatter for reproducibility.
+random_seed: null
 sigma_init: 1.0
 sigma_ridge: 1.0e-6
 lbfgs_max_iter: 50

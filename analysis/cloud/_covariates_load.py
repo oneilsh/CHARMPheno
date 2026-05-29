@@ -8,6 +8,9 @@ the source person_df, optionally writes through the cache.
 
 The cache key derives from (formula, person_mod, cdr, source_table, cohort)
 so a cache hit is safe: same inputs => same outputs.
+
+Decision context: docs/decisions/0024-formulaic-in-mllib-shim-with-schema-frame-discovery.md
+                  docs/decisions/0025-charmpheno-covariate-sidecar-parquet.md
 """
 from __future__ import annotations
 
