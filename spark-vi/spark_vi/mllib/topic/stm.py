@@ -75,3 +75,16 @@ class StreamingSTM:
         self.lbfgs_max_iter = lbfgs_max_iter
         self.lbfgs_tol = lbfgs_tol
         self.random_seed = random_seed
+
+    def _resolve_model_spec_from_pandas(self, covariate_pdf):
+        """Resolve P and covariate_names from a pre-collected pandas covariate DataFrame.
+
+        Used by tests and by the in-memory Path-B construction. Production
+        .fit() invocations against Spark DataFrames will use the
+        schema-frame Spark discovery path instead (Task 13).
+        """
+        from spark_vi.mllib.topic._formula import fit_model_spec
+        spec, names = fit_model_spec(self.covariate_formula, covariate_pdf)
+        self.model_spec = spec
+        self.covariate_names = names
+        self.P = len(names)
