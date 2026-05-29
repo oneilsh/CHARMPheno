@@ -328,16 +328,26 @@ def run_subprocess_tee_sanitize(
         signal.signal(signal.SIGINT, prev_int)
 
 
-def append_eval_section(summary_path: Path, eval_stdout: str) -> None:
-    """Append a sanitized '## Eval (NPMI)' section to summary_path."""
+def append_eval_section(
+    summary_path: Path, eval_stdout: str, *, exit_code: int = 0,
+) -> None:
+    """Append a sanitized, timestamped '## Eval (NPMI)' section to summary_path.
+
+    Header includes a UTC timestamp so multiple eval runs against the same
+    experiment (e.g. `make eval-exp ID=N` re-runs) are distinguishable in
+    the same summary file. A `### Eval complete (exit N)` marker is appended
+    at the end for consistency with the fit `### Session complete` pattern.
+    """
+    started = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     with summary_path.open("a") as f:
-        f.write("\n## Eval (NPMI)\n")
+        f.write(f"\n## Eval (NPMI) — {started}\n")
         for line in eval_stdout.splitlines(keepends=True):
             clean = sanitize_line(line, DROP_PATTERNS)
             if clean is not None:
                 f.write(clean)
         if not eval_stdout.endswith("\n"):
             f.write("\n")
+        f.write(f"\n### Eval complete (exit {exit_code})\n")
 
 
 # RUNS_DIR mirrors the existing Makefile constant. Override via --runs-dir CLI
@@ -448,7 +458,7 @@ def main(argv: list[str] | None = None) -> int:
     if eval_proc.returncode != 0:
         print(f"[run-exp] eval exited non-zero ({eval_proc.returncode}); "
               "appending captured output anyway", flush=True)
-    append_eval_section(summary_path, eval_proc.stdout)
+    append_eval_section(summary_path, eval_proc.stdout, exit_code=eval_proc.returncode)
     print(f"[run-exp] DONE. summary at: {summary_path}", flush=True)
     return 0
 

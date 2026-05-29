@@ -343,12 +343,16 @@ def test_append_eval_section_marker_and_body(tmp_path):
     summary_path = tmp_path / "summary.md"
     summary_path.write_text("# header\n\n## Fit session 1\n... fit output ...\n")
     eval_stdout = "mean NPMI: 0.224  median: 0.198\n  topic 0: 0.31\n"
-    rx.append_eval_section(summary_path, eval_stdout)
+    rx.append_eval_section(summary_path, eval_stdout, exit_code=0)
     text = summary_path.read_text()
+    # Header includes timestamp prefix
     assert "## Eval (NPMI)" in text
+    # Content present
     assert "mean NPMI: 0.224" in text
     # Original content preserved
     assert "## Fit session 1" in text
+    # Completion marker
+    assert "### Eval complete (exit 0)" in text
 
 
 def test_append_eval_section_sanitizes_body(tmp_path):
@@ -356,14 +360,16 @@ def test_append_eval_section_sanitizes_body(tmp_path):
     summary_path.write_text("# header\n")
     eval_stdout = (
         "mean NPMI: 0.2\n"
-        "|person_hash|topicDistribution|\n"   # should be dropped
+        "|person_hash|topicDistribution|\n"   # patient info — dropped
+        "26/05/28 20:46:09 INFO YarnClientImpl: ...\n"  # cluster noise — dropped
         "  topic 0: 0.31\n"
     )
-    rx.append_eval_section(summary_path, eval_stdout)
+    rx.append_eval_section(summary_path, eval_stdout, exit_code=0)
     text = summary_path.read_text()
     assert "mean NPMI: 0.2" in text
     assert "topic 0: 0.31" in text
     assert "person_hash" not in text
+    assert "YarnClientImpl" not in text
 
 
 def test_noise_patterns_drops_hadoop_info_log():
@@ -473,3 +479,23 @@ def test_run_subprocess_writes_killed_marker_on_sigterm(tmp_path):
     # Both iter lines tee'd to summary before kill
     assert "iter 1/10" in text
     assert "iter 2/10" in text
+
+
+def test_append_eval_section_records_nonzero_exit(tmp_path):
+    summary_path = tmp_path / "summary.md"
+    summary_path.write_text("# header\n")
+    rx.append_eval_section(summary_path, "partial output\n", exit_code=1)
+    text = summary_path.read_text()
+    assert "### Eval complete (exit 1)" in text
+
+
+def test_append_eval_section_timestamp_in_header(tmp_path):
+    """Header includes a UTC timestamp so multiple evals are distinguishable."""
+    summary_path = tmp_path / "summary.md"
+    summary_path.write_text("# header\n")
+    rx.append_eval_section(summary_path, "body\n", exit_code=0)
+    text = summary_path.read_text()
+    import re
+    # Match `## Eval (NPMI) — YYYY-MM-DD HH:MM:SS UTC`
+    assert re.search(r"## Eval \(NPMI\) — \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC", text), \
+        f"missing timestamped eval header in: {text!r}"
