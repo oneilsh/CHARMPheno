@@ -757,6 +757,28 @@ Opt-in mixin classes that add structured behavior to the flat base class:
 tree-structured aggregation, `NaturalGradientMixin` for natural parameter updates.
 Framework recognizes mixins and adjusts orchestration accordingly.
 
+### Effect-handler-style mode switching (Approach D)
+
+A reframing of Approach B inspired by Edward2 / Pyro / NumPyro. Instead of
+declaring a DAG of latent-variable groups, the model author writes a single
+`generative(...)` method that calls into typed RV primitives, and the framework
+switches execution modes via a context-manager-style tracer:
+
+- `simulate` mode: draw from the prior, return samples.
+- `infer_local` mode: condition on observations, return per-row posterior.
+- `local_update` mode (only viable with autodiff on workers): accumulate
+  gradient contributions to the variational ELBO.
+- `log_joint` mode: return a scalar for diagnostics or external samplers.
+
+The win over today's contract is that the four model-specific methods stop being
+independently written and tested, and instead derive from one canonical
+description. The cost is a meaningful framework rewrite plus a hard dependency
+on autodiff (JAX or PyTorch) for the gradient path. Worth keeping in mind as the
+modern PPL idiom — Pyro's poutine, NumPyro's effect handlers, and Edward2's
+`ed.trace` all converged on this shape for a reason — but the current
+hand-coded-update contract is the right call until the autodiff-on-workers
+direction is taken.
+
 ### Stochastic Variational Inference
 
 **Implemented as of ADR 0005.** `VIConfig.mini_batch_fraction` subsamples the input
@@ -1054,6 +1076,19 @@ partitions. For organizations where data is already in Spark (e.g., clinical dat
 warehouses on Databricks/Synapse), requiring a separate GPU pipeline is a significant
 adoption barrier.
 
+**Edward / Edward2** (Tran et al., 2016/2018) are TensorFlow-based PPLs. Edward1
+was a full framework with plug-and-play inference classes (`ed.KLqp`, `ed.HMC`,
+`ed.MAP`, `ed.GANInference`, ...) and a "q-is-also-a-model" variational family
+abstraction. Edward2 is a much thinner library — `RandomVariable` primitives plus
+`ed.trace` for effect-handler-style program transformation, with TF/JAX/NumPy
+backends; inference loops are user-written. Both diverge from spark-vi on the
+same axes as Pyro: single-host, autodiff-driven (so no natural-gradient
+exploitation on conjugate families like the HDP), and RV-graph-shaped (awkward
+for nonparametric truncations and for non-VI models like the sparse OU). The
+philosophical alignment is actually closer with Edward2 than with Edward1: both
+spark-vi and Ed2 are "bring your own algorithm" tools that punt the inference
+loop to the user, just at different points in the framework-vs-data-scale plane.
+
 **ForneyLab** (Akbayrak et al., 2022) embeds stochastic VI into an automated
 message-passing framework in Julia — more automated than spark-vi (model authors
 specify factor graphs, not update equations) but single-machine only.
@@ -1088,6 +1123,12 @@ and no existing framework — active or dormant — accommodates both.
   Distributed Computing Clusters. *International Journal of Approximate Reasoning*, 88.
 - Masegosa, A. R. & Gómez-Olmedo, M. (2025). Toward Variational Structural Learning
   of Bayesian Networks. *IEEE Access*, 13, 26130-26141.
+- Tran, D., Kucukelbir, A., Dieng, A. B., Rudolph, M., Liang, D., & Blei, D. M.
+  (2016). Edward: A library for probabilistic modeling, inference, and
+  criticism. *arXiv:1610.09787*.
+- Tran, D., Hoffman, M. D., Moore, D., Suter, C., Vasudevan, S., & Radul, A.
+  (2018). Simple, Distributed, and Accelerated Probabilistic Programming.
+  *NeurIPS*.
 - Teh, Y. W., Jordan, M. I., Beal, M. J., & Blei, D. M. (2006). Hierarchical
   Dirichlet Processes. *JASA*, 101(476).
 - Wang, C., Paisley, J., & Blei, D. M. (2011). Online Variational Inference for the
