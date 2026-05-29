@@ -26,3 +26,12 @@ optimize_topic_concentration: false
 # in frontmatter to dial bundle size or NPMI sample size.
 vocab_top_n: 5000
 top_n_codes_for_npmi: 20
+
+# --- STM (prevalence-only) defaults ---
+# model_class: stm in the experiment frontmatter triggers the STM path.
+# covariate_formula, categorical_cols, continuous_cols are REQUIRED in
+# frontmatter when model_class: stm; no sensible default exists.
+sigma_init: 1.0
+sigma_ridge: 1.0e-6
+lbfgs_max_iter: 50
+lbfgs_tol: 1.0e-4
