@@ -21,3 +21,8 @@ top_n_tokens: 6
 seed: 42
 optimize_doc_concentration: true
 optimize_topic_concentration: false
+# Dashboard-build defaults (used by --build-only / make build-dashboard-exp).
+# Match build_dashboard_cloud.py's argparse defaults; override per-experiment
+# in frontmatter to dial bundle size or NPMI sample size.
+vocab_top_n: 5000
+top_n_codes_for_npmi: 20

@@ -646,3 +646,44 @@ class TestFindMostRecentFitNeedingBuild:
         (runs / "0001-empty").mkdir(parents=True)
         # No manifest.json — not yet fit, nothing to build
         assert rx.find_most_recent_fit_needing_build(runs) is None
+
+
+class TestBuildDashboardArgs:
+    """build_dashboard_args produces the argv for build_dashboard_cloud.py."""
+
+    def test_minimal_lda(self, tmp_path):
+        effective = {
+            "model_class": "lda",
+            "vocab_top_n": 5000,
+            "top_n_codes_for_npmi": 20,
+        }
+        args = rx.build_dashboard_args(
+            effective, tmp_path / "ck", "0001-pilot-dashboard.zip",
+        )
+        assert args[:2] == ["--checkpoint", str(tmp_path / "ck")]
+        assert "--model-class" in args
+        idx = args.index("--model-class")
+        assert args[idx + 1] == "lda"
+        assert "--zip-name" in args
+        assert args[args.index("--zip-name") + 1] == "0001-pilot-dashboard.zip"
+        assert "--vocab-top-n" in args
+        assert args[args.index("--vocab-top-n") + 1] == "5000"
+        assert "--top-n-codes-for-npmi" in args
+        assert args[args.index("--top-n-codes-for-npmi") + 1] == "20"
+
+    def test_vocab_top_n_override(self, tmp_path):
+        effective = {
+            "model_class": "lda",
+            "vocab_top_n": 1000,
+            "top_n_codes_for_npmi": 10,
+        }
+        args = rx.build_dashboard_args(effective, tmp_path / "ck", "z.zip")
+        assert args[args.index("--vocab-top-n") + 1] == "1000"
+        assert args[args.index("--top-n-codes-for-npmi") + 1] == "10"
+
+    def test_missing_required_keys_raises(self, tmp_path):
+        import pytest
+        # Missing vocab_top_n
+        effective = {"model_class": "lda", "top_n_codes_for_npmi": 20}
+        with pytest.raises(KeyError):
+            rx.build_dashboard_args(effective, tmp_path / "ck", "z.zip")

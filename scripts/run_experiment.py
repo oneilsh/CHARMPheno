@@ -262,6 +262,24 @@ def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:
     ]
 
 
+def build_dashboard_args(
+    effective: dict, checkpoint_dir: Path, zip_name: str,
+) -> list[str]:
+    """Build the CLI arg list for build_dashboard_cloud.py.
+
+    `zip_name` is the basename (not full path) written as a sibling of the
+    bundle directory inside the checkpoint dir. Callers should pass
+    `f"{exp_id:04d}-{slug}-dashboard.zip"`.
+    """
+    return [
+        "--checkpoint", str(checkpoint_dir),
+        "--model-class", str(effective.get("model_class", "lda")),
+        "--zip-name", zip_name,
+        "--vocab-top-n", str(effective["vocab_top_n"]),
+        "--top-n-codes-for-npmi", str(effective["top_n_codes_for_npmi"]),
+    ]
+
+
 # Spark configuration constants. Match the existing per-cohort Makefile targets.
 # If these need to vary per-experiment, lift them into _base.yaml in a future
 # increment.
