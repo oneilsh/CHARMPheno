@@ -88,3 +88,61 @@ class StreamingSTM:
         self.model_spec = spec
         self.covariate_names = names
         self.P = len(names)
+
+
+import pickle
+from pathlib import Path
+
+
+class STMModel:
+    """Fitted MLlib-shim STM model. Wraps OnlineSTM's global params + ModelSpec.
+
+    Persistence layout under <model_dir>:
+        global_params.npz   # lambda, Gamma, Sigma, eta (numpy arrays)
+        metadata.json       # K, V, P, covariate_names
+        model_spec.pkl      # formulaic ModelSpec (pickle)
+    """
+
+    def __init__(
+        self,
+        global_params: dict[str, np.ndarray],
+        metadata: dict[str, Any],
+        model_spec: Any,
+        covariate_names: list[str],
+    ) -> None:
+        self.global_params = global_params
+        self.metadata = metadata
+        self.model_spec = model_spec
+        self.covariate_names = covariate_names
+
+    def save(self, out_dir: Path) -> None:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            out_dir / "global_params.npz",
+            **{k: np.asarray(v) for k, v in self.global_params.items()},
+        )
+        import json
+        (out_dir / "metadata.json").write_text(json.dumps({
+            **self.metadata,
+            "covariate_names": self.covariate_names,
+        }))
+        with (out_dir / "model_spec.pkl").open("wb") as f:
+            pickle.dump(self.model_spec, f)
+
+    @classmethod
+    def load(cls, in_dir: Path) -> "STMModel":
+        in_dir = Path(in_dir)
+        npz = np.load(in_dir / "global_params.npz")
+        global_params = {k: npz[k] for k in npz.files}
+        import json
+        md = json.loads((in_dir / "metadata.json").read_text())
+        covariate_names = md.pop("covariate_names", [])
+        with (in_dir / "model_spec.pkl").open("rb") as f:
+            spec = pickle.load(f)
+        return cls(
+            global_params=global_params,
+            metadata=md,
+            model_spec=spec,
+            covariate_names=covariate_names,
+        )
