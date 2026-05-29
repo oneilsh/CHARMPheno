@@ -16,7 +16,7 @@ Variational family:
 
 Per-doc inference is two-step Laplace (ADR 0023):
     Step (a): L-BFGS finds the MAP point η̂_d.
-    Step (b): Analytic Hessian at η̂_d gives ν_d = (-H)⁻¹.
+    Step (b): Analytic Hessian of the negative log joint at η̂_d gives ν_d = H⁻¹.
 
 M-step:
     β:  natural-gradient SVI on λ                          # unchanged from LDA
@@ -155,7 +155,8 @@ def _stm_doc_inference(
 
     Returns:
         eta_hat:  (K,) the MAP point.
-        nu_d:     (K, K) Laplace covariance = (-H)⁻¹ at η̂.
+        nu_d:     (K, K) Laplace covariance = H⁻¹ at η̂, where H is the Hessian
+                  of the negative log joint (positive-definite).
         n_iter:   inner L-BFGS iterations consumed.
     """
     K = expElogbeta.shape[0]
