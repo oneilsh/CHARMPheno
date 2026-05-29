@@ -100,10 +100,10 @@ help:
 	@echo "                         HDP_BQ_ARGS='--T 150 --K 15 ...'"
 	@echo "                         EVAL_ARGS='--model-class hdp --hdp-k 50'"
 	@echo "                         RESUME: make hdp-bq-fit-eval RUN_ID=<existing-id> HDP_BQ_ARGS='--max-iter <N more>'"
-	@echo "  next-exp                Pick lowest-NNNN pending experiment; fit + eval."
-	@echo "  exp ID=N                Run/resume experiment N; fit + eval."
+	@echo "  next-exp [NO_EVAL=1]    Pick lowest-NNNN pending experiment; fit (+ eval unless NO_EVAL)."
+	@echo "  exp ID=N [NO_EVAL=1]    Run/resume experiment N; fit (+ eval unless NO_EVAL)."
 	@echo "  summary ID=N            Print summary.md for experiment N."
-	@echo "  eval-exp ID=N           Re-run eval against existing checkpoint; appends ## Eval section."
+	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
 	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
 	@echo "                         Restricts to patients with a first malignant-cancer dx"
 	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
@@ -275,13 +275,13 @@ RUN_ID          ?=
 # Pick lowest-NNNN with status: pending; fit + eval; write summary.md
 next-exp: zip $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
-	python $(REPO_ROOT)/scripts/run_experiment.py --next --runs-dir $(RUNS_DIR)
+	python $(REPO_ROOT)/scripts/run_experiment.py --next --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
 
 # Same pipeline pinned to specific id (auto-resumes if RUN_ID dir exists)
 exp: zip $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
-	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR)
+	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
 
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
@@ -291,9 +291,8 @@ summary:
 # Re-run eval only against an existing experiment's checkpoint; appends a
 # timestamped ## Eval (NPMI) section to summary.md.
 eval-exp: zip $(WORKSPACE_ENV)
-	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
-	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --eval-only --runs-dir $(RUNS_DIR)
+	python $(REPO_ROOT)/scripts/run_experiment.py $(if $(ID),--id $(ID)) --eval-only --runs-dir $(RUNS_DIR)
 
 lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	@mkdir -p $(RUNS_DIR) && \
