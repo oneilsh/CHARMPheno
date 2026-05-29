@@ -166,3 +166,33 @@ class TestUpdateGlobal:
         target["residual_diag_stat"] = np.array([0.0, 0.0, 0.0])
         gp_new = m.update_global(gp, target, learning_rate=1.0)
         assert np.all(gp_new["Sigma"] > 0)
+
+
+class TestComputeELBO:
+    def test_returns_finite_float(self):
+        m = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
+        gp = m.initialize_global(None)
+        aggregated = {
+            "doc_loglik_sum": np.array(-50.0),
+            "doc_eta_kl_sum": np.array(3.0),
+            "n_docs": np.array(10.0),
+        }
+        elbo = m.compute_elbo(gp, aggregated)
+        assert np.isfinite(elbo)
+
+    def test_includes_negative_global_beta_kl(self):
+        """ELBO = doc_loglik - doc_eta_kl - global_beta_kl. Increasing the
+        beta KL should decrease the ELBO."""
+        m = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
+        gp_low_kl = m.initialize_global(None)
+        # Concentrate λ on one column → high KL vs uniform prior.
+        gp_high_kl = {**gp_low_kl, "lambda": gp_low_kl["lambda"].copy()}
+        gp_high_kl["lambda"][:, 0] *= 100.0
+        agg = {
+            "doc_loglik_sum": np.array(-50.0),
+            "doc_eta_kl_sum": np.array(3.0),
+            "n_docs": np.array(10.0),
+        }
+        elbo_low_kl = m.compute_elbo(gp_low_kl, agg)
+        elbo_high_kl = m.compute_elbo(gp_high_kl, agg)
+        assert elbo_high_kl < elbo_low_kl

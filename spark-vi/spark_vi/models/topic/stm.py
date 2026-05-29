@@ -381,3 +381,38 @@ class OnlineSTM(VIModel):
             "Gamma": new_Gamma,
             "Sigma": new_Sigma,
         }
+
+    def compute_elbo(
+        self,
+        global_params: dict[str, np.ndarray],
+        aggregated_stats: dict[str, np.ndarray],
+    ) -> float:
+        """ELBO = doc_loglik_sum - doc_eta_kl_sum - global β KL.
+
+        doc_loglik_sum and doc_eta_kl_sum are aggregated in local_update;
+        the global β KL is computed here on the driver from λ, η alone
+        (same pattern as OnlineLDA).
+        """
+        lam = global_params["lambda"]
+        eta = float(global_params["eta"])
+        K, V = lam.shape
+        eta_vec = np.full(V, eta, dtype=np.float64)
+        global_kl = 0.0
+        for k in range(K):
+            global_kl += _dirichlet_kl(lam[k], eta_vec)
+        return float(
+            float(aggregated_stats["doc_loglik_sum"])
+            - float(aggregated_stats["doc_eta_kl_sum"])
+            - global_kl
+        )
+
+
+def _dirichlet_kl(q_alpha: np.ndarray, p_alpha: np.ndarray) -> float:
+    """KL(Dirichlet(q_alpha) || Dirichlet(p_alpha)). Same as in LDA's stm.py uses."""
+    qsum = q_alpha.sum()
+    psum = p_alpha.sum()
+    return float(
+        gammaln(qsum) - gammaln(psum)
+        - (gammaln(q_alpha) - gammaln(p_alpha)).sum()
+        + ((q_alpha - p_alpha) * (digamma(q_alpha) - digamma(qsum))).sum()
+    )
