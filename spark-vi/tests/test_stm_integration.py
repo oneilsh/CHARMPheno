@@ -90,3 +90,84 @@ def test_synthetic_recovery_full_batch():
     # check at this corpus size; tighten if the implementation hits higher
     # consistently. Perfect recovery would be 100%.
     assert sign_match >= 0.75, f"Γ̂ sign pattern off: {sign_match=}"
+
+
+@pytest.mark.slow
+def test_minibatch_converges_to_neighborhood_of_full_batch():
+    """Mini-batch fit on the same synthetic corpus produces Γ̂ that:
+    (1) Sign-pattern matches full-batch Γ̂ on most entries.
+    (2) ELBO at convergence is within ~5% of full-batch.
+
+    Failure of either gate is a signal that ρ-blended stochastic-EM on
+    Γ, Σ has correctness issues — investigate before shipping STM
+    with mini-batch enabled by default (ADR 0023).
+    """
+    K, V, P, D, doc_len = 4, 30, 2, 200, 60
+    Gamma_true = np.array([
+        [+1.5, -0.5, 0.0, +0.2],
+        [-0.2, +1.0, -1.0, +0.1],
+    ])
+    Sigma_true = np.full(K, 0.5)
+
+    docs, _ = _synthetic_corpus(
+        K=K, V=V, P=P, D=D, doc_len=doc_len,
+        Gamma_true=Gamma_true, Sigma_true=Sigma_true, seed=42,
+    )
+
+    # Full-batch reference.
+    model_fb = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=42)
+    gp_fb = model_fb.initialize_global(None)
+    for _ in range(30):
+        stats = model_fb.local_update(docs, gp_fb)
+        gp_fb = model_fb.update_global(gp_fb, stats, learning_rate=1.0)
+
+    # Mini-batch run with the same seed; ρ_t = (t + 64)^{-0.7}.
+    rng = np.random.default_rng(42)
+    model_mb = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=42)
+    gp_mb = model_mb.initialize_global(None)
+    batch_size = 20
+    n_outer = 200
+    for t in range(n_outer):
+        idx = rng.choice(D, size=batch_size, replace=False)
+        batch = [docs[i] for i in idx]
+        stats = model_mb.local_update(batch, gp_mb)
+        # Corpus-scale stats by (D / batch_size) so they represent the
+        # full-corpus target, then ρ-blend.
+        scale = D / batch_size
+        scaled_stats = {
+            "lambda_stats": stats["lambda_stats"] * scale,
+            "XtX": stats["XtX"] * scale,
+            "XtMu": stats["XtMu"] * scale,
+            "residual_diag_stat": stats["residual_diag_stat"] * scale,
+            "doc_loglik_sum": stats["doc_loglik_sum"] * scale,
+            "doc_eta_kl_sum": stats["doc_eta_kl_sum"] * scale,
+            "n_docs": stats["n_docs"] * scale,
+        }
+        rho_t = (t + 64) ** -0.7
+        gp_mb = model_mb.update_global(gp_mb, scaled_stats, learning_rate=rho_t)
+
+    # Align Γ̂_mb to Γ̂_fb up to column permutation.
+    from itertools import permutations
+    best = max(
+        permutations(range(K)),
+        key=lambda perm: float(np.sum(
+            np.sign(gp_mb["Gamma"][:, list(perm)]) == np.sign(gp_fb["Gamma"])
+        )),
+    )
+    Gamma_mb_aligned = gp_mb["Gamma"][:, list(best)]
+    sign_match = float(np.mean(np.sign(Gamma_mb_aligned) == np.sign(gp_fb["Gamma"])))
+    assert sign_match >= 0.75, (
+        f"Mini-batch Γ̂ sign pattern diverges from full-batch: {sign_match=}. "
+        f"Stochastic-EM blending of Γ may have a correctness bug; see ADR 0023."
+    )
+
+    # ELBO comparison.
+    stats_fb_final = model_fb.local_update(docs, gp_fb)
+    stats_mb_final = model_mb.local_update(docs, gp_mb)
+    elbo_fb = model_fb.compute_elbo(gp_fb, stats_fb_final)
+    elbo_mb = model_mb.compute_elbo(gp_mb, stats_mb_final)
+    rel_diff = abs(elbo_mb - elbo_fb) / abs(elbo_fb)
+    assert rel_diff < 0.05, (
+        f"Mini-batch ELBO too far from full-batch: rel_diff={rel_diff:.3f}. "
+        f"See ADR 0023 mini-batch convergence-to-neighborhood discussion."
+    )
