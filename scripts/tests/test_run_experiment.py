@@ -721,3 +721,37 @@ class TestWriteBuildSectionHeader:
         rx.write_build_section_header(summary)
         text = summary.read_text()
         assert text.count("## Dashboard build —") == 2
+
+
+class TestBuildOnlyMain:
+    """--build-only branch in main(): auto-discovery, mutual-exclusion."""
+
+    def test_build_only_and_eval_only_mutually_exclusive(self, tmp_path, capsys):
+        rc = rx.main(["--eval-only", "--build-only", "--runs-dir", str(tmp_path)])
+        assert rc == 2
+        captured = capsys.readouterr()
+        out_lower = captured.out.lower()
+        assert "contradictory" in out_lower or "exclusive" in out_lower
+
+    def test_build_only_and_no_eval_mutually_exclusive(self, tmp_path, capsys):
+        rc = rx.main(["--no-eval", "--build-only", "--runs-dir", str(tmp_path)])
+        assert rc == 2
+
+    def test_build_only_auto_discover_none_found_exits_zero(
+        self, tmp_path, capsys,
+    ):
+        """When no fits need building, --build-only without --id should
+        print a friendly message and exit 0 (not error)."""
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        # No checkpoints under runs_dir -> nothing to build
+        rc = rx.main([
+            "--build-only",
+            "--runs-dir", str(runs),
+            "--experiments-dir", str(tmp_path / "exp_dir_unused"),
+            "--defaults-dir", str(tmp_path / "defaults_unused"),
+        ])
+        assert rc == 0
+        out_lower = capsys.readouterr().out.lower()
+        assert "no fits need building" in out_lower \
+               or "nothing to build" in out_lower

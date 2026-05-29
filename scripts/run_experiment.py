@@ -475,6 +475,12 @@ def main(argv: list[str] | None = None) -> int:
                              "(latest manifest.json mtime under $RUNS_DIR).")
     parser.add_argument("--no-eval", action="store_true",
                         help="Skip the eval dispatch at the end of the run. Fit only.")
+    parser.add_argument("--build-only", action="store_true",
+                        help="Skip fit and eval; only run the dashboard build "
+                             "against the existing checkpoint at $RUNS_DIR/NNNN-slug/. "
+                             "If --id is omitted, auto-selects the most recent "
+                             "fit whose dashboard_bundle/corpus_stats.json is "
+                             "missing or older than manifest.json.")
     parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR,
                         help="Base directory for run output. Default: %(default)s")
     parser.add_argument("--experiments-dir", type=Path, default=EXPERIMENTS_DIR,
@@ -485,6 +491,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.no_eval and args.eval_only:
         print("[run-exp] ERROR: --no-eval and --eval-only are contradictory", flush=True)
+        return 2
+
+    if args.build_only and (args.eval_only or args.no_eval):
+        print("[run-exp] ERROR: --build-only is contradictory with --eval-only "
+              "and --no-eval", flush=True)
         return 2
 
     # 1. Select experiment file
@@ -514,9 +525,26 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError as e:
             print(f"[run-exp] ERROR: {e}", flush=True)
             return 2
+    elif args.build_only:
+        # No --id with --build-only: auto-select the freshest fit whose
+        # bundle is missing or stale.
+        runs_dir_path = Path(args.runs_dir)
+        auto_id = find_most_recent_fit_needing_build(runs_dir_path)
+        if auto_id is None:
+            print(f"[run-exp] no fits need building under {runs_dir_path} "
+                  "(all bundles current or no checkpoints yet)", flush=True)
+            return 0
+        print(f"[run-exp] --build-only auto-selected id={auto_id} "
+              "(fit newer than dashboard bundle)", flush=True)
+        try:
+            exp_path = find_by_id(args.experiments_dir, auto_id)
+        except FileNotFoundError as e:
+            print(f"[run-exp] ERROR: {e}", flush=True)
+            return 2
     else:
-        print("[run-exp] ERROR: provide --next, --id N, or --eval-only "
-              "(auto-discovers most-recent-fit)", flush=True)
+        print("[run-exp] ERROR: provide --next, --id N, --eval-only, "
+              "or --build-only (the last two auto-discover when --id is omitted)",
+              flush=True)
         return 2
     print(f"[run-exp] experiment: {exp_path}", flush=True)
 
@@ -558,21 +586,23 @@ def main(argv: list[str] | None = None) -> int:
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # 4. Write summary header (new file or append session marker)
-    #    Skip the fit-session header when --eval-only — we only append an
-    #    eval section in that mode.
+    #    Skip when --eval-only or --build-only — those modes don't open a
+    #    new fit session; they each append their own section header later.
     summary_path = save_dir / "summary.md"
-    if not args.eval_only:
+    if not (args.eval_only or args.build_only):
         write_summary_header(
             summary_path, exp_id=fm["id"], slug=fm["slug"], effective=effective,
         )
 
-    # 5. Dispatch fit (unless --eval-only)
-    if args.eval_only:
+    # 5. Dispatch fit (unless --eval-only or --build-only)
+    if args.eval_only or args.build_only:
         if not (save_dir / "manifest.json").exists():
-            print(f"[run-exp] ERROR: --eval-only requires checkpoint at "
+            mode = "--eval-only" if args.eval_only else "--build-only"
+            print(f"[run-exp] ERROR: {mode} requires checkpoint at "
                   f"{save_dir}/manifest.json (none found)", flush=True)
             return 2
-        print(f"[run-exp] --eval-only: skipping fit dispatch", flush=True)
+        mode = "--eval-only" if args.eval_only else "--build-only"
+        print(f"[run-exp] {mode}: skipping fit dispatch", flush=True)
     else:
         lda_script = REPO_ROOT / "analysis" / "cloud" / "lda_bigquery_cloud.py"
         lda_args = build_lda_args(effective, save_dir, resume_from)
@@ -588,29 +618,50 @@ def main(argv: list[str] | None = None) -> int:
         with summary_path.open("a") as f:
             f.write("\n### Session complete (exit 0)\n")
 
-    # Skip eval dispatch when --no-eval (fit-only mode).
+    # Skip eval dispatch when --no-eval (fit-only mode) or --build-only
+    # (build is the only stage that runs).
     if args.no_eval:
         print("[run-exp] --no-eval: skipping eval dispatch", flush=True)
         print(f"[run-exp] DONE. summary at: {summary_path}", flush=True)
         return 0
+    if args.build_only:
+        print("[run-exp] --build-only: skipping eval dispatch", flush=True)
+        # Fall through to the build-dispatch block below.
+    else:
+        # 6. Dispatch eval (capture stdout into a string for sanitized append)
+        eval_script = REPO_ROOT / "analysis" / "cloud" / "eval_coherence_cloud.py"
+        eval_args = build_eval_args(save_dir, effective)
+        eval_cmd = build_spark_submit_cmd(str(eval_script), eval_args, REPO_ROOT)
+        # Display-only join; cmd is passed as list to Popen/run, not via shell.
+        print(f"[run-exp] eval spark-submit: {' '.join(eval_cmd)}", flush=True)
+        eval_proc = subprocess.run(
+            eval_cmd, capture_output=True, text=True, check=False,
+        )
+        sys.stdout.write(eval_proc.stdout)
+        sys.stdout.flush()
+        sys.stderr.write(eval_proc.stderr)
+        sys.stderr.flush()
+        if eval_proc.returncode != 0:
+            print(f"[run-exp] eval exited non-zero ({eval_proc.returncode}); "
+                  "appending captured output anyway", flush=True)
+        append_eval_section(summary_path, eval_proc.stdout, exit_code=eval_proc.returncode)
 
-    # 6. Dispatch eval (capture stdout into a string for sanitized append)
-    eval_script = REPO_ROOT / "analysis" / "cloud" / "eval_coherence_cloud.py"
-    eval_args = build_eval_args(save_dir, effective)
-    eval_cmd = build_spark_submit_cmd(str(eval_script), eval_args, REPO_ROOT)
-    # Display-only join; cmd is passed as list to Popen/run, not via shell.
-    print(f"[run-exp] eval spark-submit: {' '.join(eval_cmd)}", flush=True)
-    eval_proc = subprocess.run(
-        eval_cmd, capture_output=True, text=True, check=False,
-    )
-    sys.stdout.write(eval_proc.stdout)
-    sys.stdout.flush()
-    sys.stderr.write(eval_proc.stderr)
-    sys.stderr.flush()
-    if eval_proc.returncode != 0:
-        print(f"[run-exp] eval exited non-zero ({eval_proc.returncode}); "
-              "appending captured output anyway", flush=True)
-    append_eval_section(summary_path, eval_proc.stdout, exit_code=eval_proc.returncode)
+    # 7. Dispatch build (only when --build-only).
+    if args.build_only:
+        build_script = REPO_ROOT / "analysis" / "cloud" / "build_dashboard_cloud.py"
+        zip_name = f"{fm['id']:04d}-{fm['slug']}-dashboard.zip"
+        b_args = build_dashboard_args(effective, save_dir, zip_name)
+        build_cmd = build_spark_submit_cmd(str(build_script), b_args, REPO_ROOT)
+        # Display-only join; cmd is passed as list to Popen, not via shell.
+        print(f"[run-exp] build spark-submit: {' '.join(build_cmd)}", flush=True)
+        write_build_section_header(summary_path)
+        build_rc = run_subprocess_tee_sanitize(build_cmd, summary_path, DROP_PATTERNS)
+        with summary_path.open("a") as f:
+            f.write(f"\n### Build complete (exit {build_rc})\n")
+        if build_rc != 0:
+            print(f"[run-exp] build exited non-zero ({build_rc})", flush=True)
+            return build_rc
+
     print(f"[run-exp] DONE. summary at: {summary_path}", flush=True)
     return 0
 
