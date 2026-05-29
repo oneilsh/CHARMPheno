@@ -12,6 +12,7 @@ is data-independent at application time.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import numpy as np
@@ -123,10 +124,11 @@ def apply_model_spec(spec: Any, covariate_pdf: pd.DataFrame) -> np.ndarray:
         categories = state_dict.get("categories") if isinstance(state_dict, dict) else None
         if categories is None:
             continue
-        # Derive column name: strip 'C(...)' wrapper if present
+        # Derive column name: extract first argument from C(...) wrapper
         col = factor_key
-        if col.startswith("C(") and col.endswith(")"):
-            col = col[2:-1]
+        m = re.match(r"^C\(\s*([^,)\s]+)", col)
+        if m:
+            col = m.group(1)
         if col not in covariate_pdf.columns:
             continue
         known = set(categories)

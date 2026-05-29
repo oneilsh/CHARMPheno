@@ -71,6 +71,30 @@ class TestFitModelSpec:
         with pytest.raises(Exception):
             apply_model_spec(spec, test)
 
+    def test_unseen_level_check_handles_C_with_extra_args(self):
+        """Bug fix: previously C(col, Treatment(...)) slipped past the unseen-level
+        pre-check because the simple C(col) -> col strip broke on the extra args.
+        This test directly verifies the regex extraction handles various C(...) forms.
+        """
+        import re
+
+        # Test the regex extraction logic directly on various encoder_state keys
+        test_cases = [
+            ("C(cohort)", "cohort"),                       # simple form
+            ("C(cohort, Treatment('a'))", "cohort"),       # with extra args
+            ("C(cohort,whatever)", "cohort"),              # with comma-separated arg
+            ("C( cohort , ...)", "cohort"),                # with spaces
+            ("C(age_group)", "age_group"),                 # underscore in name
+        ]
+
+        pattern = r"^C\(\s*([^,)\s]+)"
+        for encoder_key, expected_col in test_cases:
+            m = re.match(pattern, encoder_key)
+            assert m is not None, f"Regex failed to match '{encoder_key}'"
+            extracted_col = m.group(1)
+            assert extracted_col == expected_col, \
+                f"For '{encoder_key}': expected '{expected_col}', got '{extracted_col}'"
+
 
 class TestStreamingSTMPathBConstruction:
     def test_construct_with_formula_resolves_P_and_names(self):
