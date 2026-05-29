@@ -47,6 +47,18 @@ mark `status: done` and the next real experiment starts at 0002.
   marker. NPMI mean +0.289 (vs +0.298 after 2 iters) — topic 1 lost a touch of
   coherence as it specialized further on dementia/osteopenia, topics 0 and 3
   gained.
+- 2026-05-29 15:40 UTC — **Dashboard build (Inc 3 validation)**: `make
+  build-dashboard-exp` with no argument auto-discovered id=1 via
+  `find_most_recent_fit_needing_build` (the pilot had no `dashboard_bundle/`
+  yet, so it was the freshest fit needing build). Streamed via
+  `run_subprocess_tee_sanitize` (same pattern as fit — phase markers visible
+  live in the terminal). Appended `## Dashboard build — 2026-05-29 15:40:45
+  UTC` header + `### Build complete (exit 0)` marker to summary.md. Wrote the
+  4-file bundle to `<checkpoint>/dashboard_bundle/` and the zip to
+  `<checkpoint>/0001-pilot-dashboard.zip` (Inc 3's distinct-per-experiment
+  naming via `--zip-name`). Downloaded zip verified locally: 4 files at zip
+  root, K=5/V=500 model consistent across all four JSONs, β rows sum to ~1.0,
+  cohort metadata flowed through from the checkpoint's `corpus_manifest`.
 
 ## Results
 
@@ -206,6 +218,51 @@ Session 4 transcript — the `NOISE_PATTERNS` filter shipped in Inc 2 is doing i
 job. Eval has its own `### Eval complete` marker now and a timestamp in the
 header (Inc 2.5 ergonomics).
 
+### Dashboard build (Inc 3 validation, 2026-05-29)
+
+```
+## Dashboard build — 2026-05-29 15:40:45 UTC
+[driver] checkpoint=.../runs/0001-pilot
+[driver] out_dir=.../runs/0001-pilot/dashboard_bundle
+[driver] model_class=lda
+[driver] >>> load checkpoint
+[driver]   corpus_manifest: cdr=wb-affable-acorn-7941.R2024Q3R8, source_table=condition_era, person_mod=10, cohort='first_dementia_year'
+[driver]   frozen vocab: 500 terms
+[driver] <<< load checkpoint: 0.3s
+[driver] >>> BQ load (OMOP)
+[driver]   OMOP: 135125 rows
+[driver] <<< BQ load (OMOP): 49.1s
+[driver] >>> vectorize (frozen vocab, doc_spec=patient_year)
+[driver]   vocab size: 500
+[driver] <<< vectorize: 1.9s
+[driver] >>> adapter (model-class normalize)
+[driver]   K_display=5 V_full=500
+[driver] <<< adapter: 0.0s
+[driver] >>> concept name + domain lookup
+[driver]   resolved 500 concept names, 500 domains
+[driver] <<< concept name + domain lookup: 3.4s
+[driver] >>> corpus stats
+[driver]   n_docs=1374 mean_codes=55.67
+[driver] <<< corpus stats: 112.8s
+[driver] >>> NPMI (top_n=20)
+[driver] <<< NPMI (top_n=20): 156.9s
+[driver] >>> write bundle
+[driver]   wrote 4 files to .../dashboard_bundle (V_disp=500 K_disp=5)
+[driver] <<< write bundle: 0.5s
+[driver] >>> zip bundle
+[driver]   zipped -> .../runs/0001-pilot/0001-pilot-dashboard.zip
+[driver] <<< zip bundle: 0.5s
+[driver] BUILD DASHBOARD CLOUD PASSED
+
+### Build complete (exit 0)
+```
+
+Inc 3 ergonomics confirmed: the `--zip-name` flag (`build_dashboard_cloud.py`)
+produced `0001-pilot-dashboard.zip` instead of the old `dashboard_bundle.zip`;
+the streaming-tee pattern reused from fit gives live phase markers; the
+`## Dashboard build` + `### Build complete` markers mirror the
+fit/eval section grammar exactly.
+
 ## Interpretation
 
 **Pipeline works end-to-end across Inc 1, Inc 2, and Inc 2.5.** One accumulating
@@ -229,6 +286,22 @@ point.
   address the "no marker after eval" gap noted from Session 3.
 - Resume path read `n_iterations=2, converged=False` from the prior checkpoint
   and continued from there.
+
+**Inc 3 build validation (Dashboard build section) confirms:**
+- `make build-dashboard-exp` with no argument auto-discovered id=1 via
+  `find_most_recent_fit_needing_build` (no `dashboard_bundle/corpus_stats.json`
+  yet → pilot is the freshest fit needing build).
+- `--zip-name` flag produced `0001-pilot-dashboard.zip` distinct from the
+  legacy `dashboard_bundle.zip` — downloaded zip lands in `~/Downloads/`
+  without collision against any other experiment.
+- Streaming-tee output via `run_subprocess_tee_sanitize` (same pattern as fit)
+  gives live phase markers and a clean section in `summary.md`.
+- `## Dashboard build — <UTC ts>` header + `### Build complete (exit 0)`
+  marker mirror the fit/eval section grammar.
+- Downloaded bundle structure verified: 4 JSON files at zip root with
+  consistent K=5/V=500 cross-references; β rows row-stochastic; cohort
+  metadata (`first_dementia_year`, 365-day window) flowed through from the
+  checkpoint's `corpus_manifest`.
 
 **Two bugs caught and fixed inline during the original 3-session run** (see
 Fit history). Both were structural mismatches between the wrapper's assumptions
@@ -270,8 +343,10 @@ the original write-up (Spark INFO noise; missing `Eval complete` marker) are
 both resolved as of Inc 2.
 
 ## Links
-- Spec: docs/superpowers/specs/2026-05-28-experiment-tracking-design.md
+- Specs: Inc 1/2/2.5: docs/superpowers/specs/2026-05-28-experiment-tracking-design.md;
+  Inc 3: docs/superpowers/specs/2026-05-29-experiment-tracking-increment-3-design.md
 - Plans: Inc 1: docs/superpowers/plans/2026-05-28-experiment-tracking-increment-1.md;
   Inc 2: docs/superpowers/plans/2026-05-29-experiment-tracking-increment-2.md;
-  Inc 2.5: docs/superpowers/plans/2026-05-29-experiment-tracking-increment-2-5.md
+  Inc 2.5: docs/superpowers/plans/2026-05-29-experiment-tracking-increment-2-5.md;
+  Inc 3: docs/superpowers/plans/2026-05-29-experiment-tracking-increment-3.md
 - Fixes during pilot: `3fe2eb6` (cohort_def split), `d971796` (resume manifest check)
