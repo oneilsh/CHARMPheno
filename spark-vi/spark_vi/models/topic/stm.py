@@ -173,3 +173,101 @@ def _stm_doc_inference(
     H = _stm_neg_log_joint_hessian(eta_hat, **common)
     nu_d = np.linalg.inv(H)
     return eta_hat, nu_d, int(result.nit)
+
+
+class OnlineSTM(VIModel):
+    """Online STM (prevalence-only) fittable by VIRunner.
+
+    Per-doc inference is two-step Laplace (ADR 0023): L-BFGS to find η̂_d,
+    analytic Hessian at η̂_d for ν_d. β stays Dirichlet-conjugate; Γ and Σ
+    are hyperparameters of the prior on η, learned by closed-form M-step
+    ρ-blended in mini-batch (stochastic-EM).
+
+    random_seed controls the λ initialization. Per-doc inference is
+    cold-started at η=0 deterministically regardless of seed.
+    """
+
+    def __init__(
+        self,
+        K: int,
+        vocab_size: int,
+        P: int,
+        eta: float | None = None,
+        sigma_init: float = 1.0,
+        sigma_ridge: float = 1e-6,
+        lbfgs_max_iter: int = 50,
+        lbfgs_tol: float = 1e-4,
+        gamma_shape: float = 100.0,
+        random_seed: int | None = None,
+    ) -> None:
+        if K < 1:
+            raise ValueError(f"K must be >= 1, got {K}")
+        if vocab_size < 1:
+            raise ValueError(f"vocab_size must be >= 1, got {vocab_size}")
+        if P < 1:
+            raise ValueError(f"P must be >= 1, got {P}")
+        if eta is None:
+            eta = 1.0 / K
+        if eta <= 0:
+            raise ValueError(f"eta must be > 0, got {eta}")
+        if sigma_init <= 0:
+            raise ValueError(f"sigma_init must be > 0, got {sigma_init}")
+        if sigma_ridge < 0:
+            raise ValueError(f"sigma_ridge must be >= 0, got {sigma_ridge}")
+        if lbfgs_max_iter < 1:
+            raise ValueError(f"lbfgs_max_iter must be >= 1, got {lbfgs_max_iter}")
+        if lbfgs_tol <= 0:
+            raise ValueError(f"lbfgs_tol must be > 0, got {lbfgs_tol}")
+        if gamma_shape <= 0:
+            raise ValueError(f"gamma_shape must be > 0, got {gamma_shape}")
+
+        self.K = int(K)
+        self.V = int(vocab_size)
+        self.P = int(P)
+        self.eta = float(eta)
+        self.sigma_init = float(sigma_init)
+        self.sigma_ridge = float(sigma_ridge)
+        self.lbfgs_max_iter = int(lbfgs_max_iter)
+        self.lbfgs_tol = float(lbfgs_tol)
+        self.gamma_shape = float(gamma_shape)
+        self.random_seed = None if random_seed is None else int(random_seed)
+
+    def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
+        """Random Gamma init for λ (same shape as LDA); Γ = 0; Σ = sigma_init."""
+        if self.random_seed is None:
+            lam = np.random.gamma(
+                shape=self.gamma_shape, scale=1.0 / self.gamma_shape,
+                size=(self.K, self.V),
+            )
+        else:
+            rng = np.random.default_rng(self.random_seed)
+            lam = rng.gamma(
+                shape=self.gamma_shape, scale=1.0 / self.gamma_shape,
+                size=(self.K, self.V),
+            )
+        return {
+            "lambda": lam,
+            "eta": np.array(self.eta),
+            "Gamma": np.zeros((self.P, self.K), dtype=np.float64),
+            "Sigma": np.full(self.K, self.sigma_init, dtype=np.float64),
+        }
+
+    def get_metadata(self) -> dict[str, Any]:
+        return {"K": self.K, "V": self.V, "P": self.P}
+
+    def local_update(
+        self,
+        rows: Iterable[Any],
+        global_params: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """E-step on one data partition. (Stub for Task 4.)"""
+        raise NotImplementedError("local_update implemented in Task 4")
+
+    def update_global(
+        self,
+        global_params: dict[str, np.ndarray],
+        target_stats: dict[str, np.ndarray],
+        learning_rate: float,
+    ) -> dict[str, np.ndarray]:
+        """M-step: apply the natural-gradient update with stepsize rho_t. (Stub for Task 4.)"""
+        raise NotImplementedError("update_global implemented in Task 4")
