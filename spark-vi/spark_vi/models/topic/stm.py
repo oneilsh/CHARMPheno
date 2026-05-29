@@ -335,11 +335,49 @@ class OnlineSTM(VIModel):
             "n_docs": np.array(float(n_docs)),
         }
 
+    SIGMA_FLOOR = 1e-6
+
     def update_global(
         self,
         global_params: dict[str, np.ndarray],
         target_stats: dict[str, np.ndarray],
         learning_rate: float,
     ) -> dict[str, np.ndarray]:
-        """M-step: apply the natural-gradient update with stepsize rho_t. (Stub for Task 4.)"""
-        raise NotImplementedError("update_global implemented in Task 4")
+        """SVI on λ; ρ-blended closed-form M-step on Γ, Σ (ADR 0023).
+
+        λ:  λ_new = (1-ρ)·λ + ρ·(η + lambda_stats)        # natural-gradient SVI
+        Γ:  Γ̂ = (XᵀX + ridge·I)⁻¹ XᵀMu                    # ridge OLS on aggregated stats
+            Γ_new = (1-ρ)·Γ + ρ·Γ̂                         # stochastic-EM ρ-blend
+        Σ:  σ²_k_target = residual_diag_stat_k / n_docs   # diagonal sample cov + Laplace correction
+            σ²_k_new   = max((1-ρ)·σ²_k + ρ·σ²_k_target, SIGMA_FLOOR)
+        """
+        lam = global_params["lambda"]
+        eta = float(global_params["eta"])
+        Gamma = global_params["Gamma"]
+        Sigma_diag = global_params["Sigma"]
+
+        # β: SVI natural-gradient step. Note: STM's lambda_stats already
+        # incorporates expElogbeta (via phi in local_update), so no extra
+        # expElogbeta multiplication here — differs from LDA.
+        target_lam = eta + target_stats["lambda_stats"]
+        new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
+
+        # Γ: ridge regression on aggregated cross-products.
+        XtX = target_stats["XtX"]
+        XtMu = target_stats["XtMu"]
+        ridge_eye = self.sigma_ridge * np.eye(self.P)
+        Gamma_target = np.linalg.solve(XtX + ridge_eye, XtMu)
+        new_Gamma = (1.0 - learning_rate) * Gamma + learning_rate * Gamma_target
+
+        # Σ: diagonal sample cov with Laplace correction (already folded into stat).
+        n_docs = float(target_stats["n_docs"])
+        Sigma_target = target_stats["residual_diag_stat"] / max(n_docs, 1.0)
+        new_Sigma = (1.0 - learning_rate) * Sigma_diag + learning_rate * Sigma_target
+        new_Sigma = np.maximum(new_Sigma, self.SIGMA_FLOOR)
+
+        return {
+            "lambda": new_lam,
+            "eta": global_params["eta"],
+            "Gamma": new_Gamma,
+            "Sigma": new_Sigma,
+        }

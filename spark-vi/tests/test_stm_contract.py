@@ -111,3 +111,58 @@ class TestLocalUpdate:
         np.testing.assert_array_equal(ss["lambda_stats"], np.zeros((3, 10)))
         np.testing.assert_array_equal(ss["XtX"], np.zeros((2, 2)))
         np.testing.assert_array_equal(ss["XtMu"], np.zeros((2, 3)))
+
+
+class TestUpdateGlobal:
+    def _make_state_with_stats(self):
+        m = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
+        gp = m.initialize_global(None)
+        target_stats = {
+            "lambda_stats": np.ones((3, 10)) * 0.5,
+            "XtX": np.eye(2) * 100.0,
+            "XtMu": np.array([[1.0, -1.0, 0.5], [0.5, 0.0, -0.5]]),
+            "residual_diag_stat": np.array([5.0, 3.0, 2.0]),
+            "doc_loglik_sum": np.array(-100.0),
+            "doc_eta_kl_sum": np.array(5.0),
+            "n_docs": np.array(50.0),
+        }
+        return m, gp, target_stats
+
+    def test_lambda_natural_gradient_step(self):
+        m, gp, target = self._make_state_with_stats()
+        lam_before = gp["lambda"].copy()
+        gp_new = m.update_global(gp, target, learning_rate=1.0)
+        # At ρ=1.0 the update fully replaces λ with η + lambda_stats.
+        expected = float(gp["eta"]) + target["lambda_stats"]
+        np.testing.assert_allclose(gp_new["lambda"], expected)
+
+    def test_lambda_partial_step(self):
+        m, gp, target = self._make_state_with_stats()
+        lam_before = gp["lambda"].copy()
+        gp_new = m.update_global(gp, target, learning_rate=0.3)
+        # (1-ρ)·old + ρ·target.
+        expected = 0.7 * lam_before + 0.3 * (float(gp["eta"]) + target["lambda_stats"])
+        np.testing.assert_allclose(gp_new["lambda"], expected)
+
+    def test_gamma_solves_ridge_regression(self):
+        m, gp, target = self._make_state_with_stats()
+        gp_new = m.update_global(gp, target, learning_rate=1.0)
+        # Γ̂ = (XᵀX + ridge·I)⁻¹ Xᵀμ.
+        ridge = m.sigma_ridge
+        expected_Gamma = np.linalg.solve(
+            target["XtX"] + ridge * np.eye(2), target["XtMu"]
+        )
+        np.testing.assert_allclose(gp_new["Gamma"], expected_Gamma)
+
+    def test_sigma_sample_covariance(self):
+        m, gp, target = self._make_state_with_stats()
+        gp_new = m.update_global(gp, target, learning_rate=1.0)
+        expected_Sigma = target["residual_diag_stat"] / float(target["n_docs"])
+        np.testing.assert_allclose(gp_new["Sigma"], expected_Sigma)
+
+    def test_sigma_minimum_floor(self):
+        """Σ should never go below a small floor to keep Laplace well-defined."""
+        m, gp, target = self._make_state_with_stats()
+        target["residual_diag_stat"] = np.array([0.0, 0.0, 0.0])
+        gp_new = m.update_global(gp, target, learning_rate=1.0)
+        assert np.all(gp_new["Sigma"] > 0)
