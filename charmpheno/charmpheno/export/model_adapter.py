@@ -139,8 +139,43 @@ def adapt_hdp(result, *, top_k: int = 50) -> DashboardExport:
     )
 
 
+def adapt_stm(result) -> DashboardExport:
+    """STM → DashboardExport. α-equivalent derived from softmax(Γ[intercept])."""
+    gp = _global_params(result)
+    meta = result.metadata
+    lambda_ = np.asarray(gp["lambda"], dtype=np.float64)
+    K = lambda_.shape[0]
+    beta = lambda_ / lambda_.sum(axis=1, keepdims=True)
+    Gamma = np.asarray(gp["Gamma"], dtype=np.float64)  # (P, K)
+    covariate_names = meta["covariate_manifest"]["covariate_names"]
+    intercept_idx = next(
+        (i for i, n in enumerate(covariate_names) if "intercept" in str(n).lower()),
+        None,
+    )
+    if intercept_idx is not None:
+        eta_bar = Gamma[intercept_idx]
+        alpha_eq = np.exp(eta_bar - eta_bar.max())
+        alpha_eq /= alpha_eq.sum()
+    else:
+        alpha_eq = np.full(K, 1.0 / K)
+    # v1: corpus_prevalence stand-in equals α_eq. v1.x would compute
+    # (1/D) Σ_d softmax(Γ x_d) over the actual corpus covariate distribution.
+    corpus_prev = alpha_eq.copy()
+    # theta_histogram / theta_percentiles: optional pass-through if metadata has them.
+    raw_hist = meta.get("theta_histogram")
+    theta_histogram = _parse_theta_histogram(raw_hist) if raw_hist is not None else None
+    raw_pct = meta.get("theta_percentiles")
+    theta_percentiles = _parse_theta_percentiles(raw_pct) if raw_pct is not None else None
+    return DashboardExport(
+        beta=beta, alpha=alpha_eq, corpus_prevalence=corpus_prev,
+        topic_indices=np.arange(K, dtype=np.int64),
+        theta_histogram=theta_histogram, theta_percentiles=theta_percentiles,
+    )
+
+
 _LDA_ALIASES = {"lda", "onlinelda", "onlineldamodel", "onlineldaestimator"}
 _HDP_ALIASES = {"hdp", "onlinehdp", "onlinehdpmodel", "onlinehdpestimator"}
+_STM_ALIASES = {"stm", "onlinestm"}
 
 
 def adapt(result, *, hdp_top_k: int = 50) -> DashboardExport:
@@ -149,4 +184,6 @@ def adapt(result, *, hdp_top_k: int = 50) -> DashboardExport:
         return adapt_lda(result)
     if mc in _HDP_ALIASES:
         return adapt_hdp(result, top_k=hdp_top_k)
+    if mc in _STM_ALIASES:
+        return adapt_stm(result)
     raise ValueError(f"unsupported model class: {mc}")

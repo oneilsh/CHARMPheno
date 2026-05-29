@@ -240,3 +240,74 @@ def test_adapt_hdp_falls_back_to_sticks_when_metadata_missing():
     np.testing.assert_allclose(exp.corpus_prevalence, exp.alpha, atol=1e-12)
     # Sanity: alpha sums to 1.0 (renormalized sticks)
     np.testing.assert_allclose(exp.alpha.sum(), 1.0, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# STM adapter tests
+# ---------------------------------------------------------------------------
+
+class TestAdaptSTM:
+    def test_routes_stm_to_adapt_stm(self):
+        from charmpheno.export.model_adapter import adapt
+
+        class _FakeResult:
+            metadata = {
+                "model_class": "stm",
+                "covariate_manifest": {"covariate_names": ["Intercept", "sex_M", "age"]},
+            }
+            global_params = {
+                "lambda": np.full((3, 5), 1.0),
+                "Gamma": np.array([
+                    [0.5, 0.1, -0.2],
+                    [0.2, -0.1, 0.0],
+                    [0.0, 0.1, 0.1],
+                ]),
+            }
+
+        result = _FakeResult()
+        export = adapt(result)
+        assert export.beta.shape == (3, 5)
+        np.testing.assert_allclose(export.beta.sum(axis=1), 1.0)
+        # α_eq comes from softmax(Γ[intercept_row]).
+        expected_alpha = np.exp([0.5, 0.1, -0.2])
+        expected_alpha /= expected_alpha.sum()
+        np.testing.assert_allclose(export.alpha, expected_alpha)
+        # corpus_prevalence stand-in equals α_eq in v1.
+        np.testing.assert_allclose(export.corpus_prevalence, export.alpha)
+
+    def test_adapt_stm_no_intercept_uses_uniform(self):
+        from charmpheno.export.model_adapter import adapt_stm
+
+        class _FakeResult:
+            metadata = {
+                "model_class": "stm",
+                "covariate_manifest": {"covariate_names": ["sex_M", "age"]},
+            }
+            global_params = {
+                "lambda": np.full((3, 5), 1.0),
+                "Gamma": np.array([
+                    [0.2, -0.1, 0.0],
+                    [0.0, 0.1, 0.1],
+                ]),
+            }
+
+        result = _FakeResult()
+        export = adapt_stm(result)
+        np.testing.assert_allclose(export.alpha, np.full(3, 1.0 / 3))
+
+    def test_adapt_stm_onlinestm_alias(self):
+        from charmpheno.export.model_adapter import adapt
+
+        class _FakeResult:
+            metadata = {
+                "model_class": "OnlineSTM",
+                "covariate_manifest": {"covariate_names": ["Intercept"]},
+            }
+            global_params = {
+                "lambda": np.full((2, 4), 1.0),
+                "Gamma": np.array([[0.3, -0.3]]),
+            }
+
+        result = _FakeResult()
+        export = adapt(result)
+        assert export.beta.shape == (2, 4)

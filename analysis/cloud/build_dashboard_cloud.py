@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", default=None,
                         help="output dir for the 4 JSON files "
                              "(default: <checkpoint>/dashboard_bundle)")
-    parser.add_argument("--model-class", choices=["lda", "hdp"], default="lda")
+    parser.add_argument("--model-class", choices=["lda", "hdp", "stm"], default="lda")
     parser.add_argument("--hdp-top-k", type=int, default=50,
                         help="top-K used HDP topics (ignored for LDA)")
     parser.add_argument("--vocab-top-n", type=int, default=5000,
@@ -85,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     from charmpheno.export.dashboard import (
         write_model_and_vocab_bundles,
         write_phenotypes_bundle,
+        adapt_stm as dashboard_adapt_stm,
     )
     from charmpheno.export.model_adapter import adapt
     from spark_vi.io import load_result
@@ -261,6 +262,17 @@ def main(argv: list[str] | None = None) -> int:
                 topic_indices=export.topic_indices.tolist(),
                 labels=None,
             )
+            if args.model_class == "stm" or result.metadata.get("model_class") == "stm":
+                Gamma = np.asarray(result.global_params["Gamma"], dtype=np.float64)
+                covariate_manifest = result.metadata["covariate_manifest"]
+                covariate_names = covariate_manifest["covariate_names"]
+                dashboard_adapt_stm(
+                    out_dir=out_dir, Gamma=Gamma,
+                    covariate_names=covariate_names,
+                    K=Gamma.shape[1], P=Gamma.shape[0],
+                )
+                print(f"[driver]   wrote covariate_effects.json (K={Gamma.shape[1]}, "
+                      f"P={Gamma.shape[0]})", flush=True)
             write_corpus_stats_sidecar(
                 stats, out_dir / "corpus_stats.json", v_displayed=v_disp,
                 cohort=cohort_metadata(cohort_name),
