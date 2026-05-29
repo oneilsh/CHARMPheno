@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 from pyspark.ml.linalg import DenseVector, SparseVector, Vector
 
-from spark_vi.models.topic.types import BOWDocument
+from spark_vi.models.topic.types import BOWDocument, STMDocument
 
 
 def _vector_to_bow_document(v: Vector) -> BOWDocument:
@@ -34,3 +34,24 @@ def _vector_to_bow_document(v: Vector) -> BOWDocument:
             f"_vector_to_bow_document expected Sparse/DenseVector, got {type(v).__name__}"
         )
     return BOWDocument(indices=indices, counts=counts, length=int(counts.sum()))
+
+
+def _vector_to_stm_document(
+    row,
+    features_col: str = "features",
+    covariates_col: str = "covariates",
+) -> STMDocument:
+    """Construct an STMDocument from a row with both a BOW vector and a covariate vector.
+
+    Accepts pyspark.sql.Row and dict-like objects. The covariate vector
+    must be a DenseVector (or numpy-coercible array); covariates_col
+    cannot be sparse for STM (every doc has a complete x vector).
+    """
+    sv = row[features_col]
+    cov = row[covariates_col]
+    return STMDocument(
+        indices=np.asarray(sv.indices, dtype=np.int32),
+        counts=np.asarray(sv.values, dtype=np.float64),
+        length=int(sv.values.sum()),
+        x=np.asarray(cov, dtype=np.float64),
+    )
