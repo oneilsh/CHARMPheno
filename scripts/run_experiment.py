@@ -362,6 +362,10 @@ def main(argv: list[str] | None = None) -> int:
                           help="Pick the lowest-id experiment with status: pending.")
     selector.add_argument("--id", type=int, default=None,
                           help="Run the experiment with the given numeric id.")
+    parser.add_argument("--eval-only", action="store_true",
+                        help="Skip fit dispatch; only run eval against the existing "
+                             "checkpoint at $RUNS_DIR/NNNN-slug/. Requires checkpoint "
+                             "manifest.json to exist.")
     parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR,
                         help="Base directory for run output. Default: %(default)s")
     parser.add_argument("--experiments-dir", type=Path, default=EXPERIMENTS_DIR,
@@ -422,25 +426,35 @@ def main(argv: list[str] | None = None) -> int:
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # 4. Write summary header (new file or append session marker)
+    #    Skip the fit-session header when --eval-only — we only append an
+    #    eval section in that mode.
     summary_path = save_dir / "summary.md"
-    write_summary_header(
-        summary_path, exp_id=fm["id"], slug=fm["slug"], effective=effective,
-    )
+    if not args.eval_only:
+        write_summary_header(
+            summary_path, exp_id=fm["id"], slug=fm["slug"], effective=effective,
+        )
 
-    # 5. Dispatch fit
-    lda_script = REPO_ROOT / "analysis" / "cloud" / "lda_bigquery_cloud.py"
-    lda_args = build_lda_args(effective, save_dir, resume_from)
-    fit_cmd = build_spark_submit_cmd(str(lda_script), lda_args, REPO_ROOT)
-    # Display-only join; cmd is passed as list to Popen/run, not via shell.
-    print(f"[run-exp] spark-submit: {' '.join(fit_cmd)}", flush=True)
-    fit_rc = run_subprocess_tee_sanitize(fit_cmd, summary_path, DROP_PATTERNS)
-    if fit_rc != 0:
-        print(f"[run-exp] fit exited non-zero ({fit_rc}); skipping eval", flush=True)
+    # 5. Dispatch fit (unless --eval-only)
+    if args.eval_only:
+        if not (save_dir / "manifest.json").exists():
+            print(f"[run-exp] ERROR: --eval-only requires checkpoint at "
+                  f"{save_dir}/manifest.json (none found)", flush=True)
+            return 2
+        print(f"[run-exp] --eval-only: skipping fit dispatch", flush=True)
+    else:
+        lda_script = REPO_ROOT / "analysis" / "cloud" / "lda_bigquery_cloud.py"
+        lda_args = build_lda_args(effective, save_dir, resume_from)
+        fit_cmd = build_spark_submit_cmd(str(lda_script), lda_args, REPO_ROOT)
+        # Display-only join; cmd is passed as list to Popen/run, not via shell.
+        print(f"[run-exp] spark-submit: {' '.join(fit_cmd)}", flush=True)
+        fit_rc = run_subprocess_tee_sanitize(fit_cmd, summary_path, DROP_PATTERNS)
+        if fit_rc != 0:
+            print(f"[run-exp] fit exited non-zero ({fit_rc}); skipping eval", flush=True)
+            with summary_path.open("a") as f:
+                f.write(f"\n### Session ended with exit code {fit_rc}\n")
+            return fit_rc
         with summary_path.open("a") as f:
-            f.write(f"\n### Session ended with exit code {fit_rc}\n")
-        return fit_rc
-    with summary_path.open("a") as f:
-        f.write("\n### Session complete (exit 0)\n")
+            f.write("\n### Session complete (exit 0)\n")
 
     # 6. Dispatch eval (capture stdout into a string for sanitized append)
     eval_script = REPO_ROOT / "analysis" / "cloud" / "eval_coherence_cloud.py"
