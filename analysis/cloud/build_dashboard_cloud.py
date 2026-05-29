@@ -55,6 +55,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vocab-top-n", type=int, default=5000,
                         help="trim vocab to top-N codes by corpus_freq")
     parser.add_argument("--top-n-codes-for-npmi", type=int, default=20)
+    parser.add_argument("--zip-name", default=None,
+                        help="basename for the zip artifact (written as sibling "
+                             "of --out-dir). Default: <out_dir_name>.zip "
+                             "(e.g. dashboard_bundle.zip).")
     args = parser.parse_args(argv)
 
     cdr_env = os.environ.get("WORKSPACE_CDR")
@@ -265,7 +269,10 @@ def main(argv: list[str] | None = None) -> int:
                   f"(V_disp={v_disp} K_disp={K_disp})", flush=True)
 
         with _phase("zip bundle"):
-            zip_path = out_dir.with_suffix(".zip")
+            zip_path = (
+                out_dir.parent / args.zip_name if args.zip_name
+                else out_dir.with_suffix(".zip")
+            )
             # Local path required: zipfile can't write through the GCS FUSE
             # mount layer reliably (random-access writes). Stage in /tmp.
             tmp_zip = Path("/tmp") / zip_path.name
