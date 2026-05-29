@@ -419,6 +419,114 @@ class TestModelClassDispatch:
         path = build_fit_driver_path(effective)
         assert path.endswith("stm_bigquery_cloud.py")
 
+    def test_build_stm_args_required_flags_present(self, tmp_path):
+        """build_stm_args must emit all flags required by the STM driver argparse."""
+        effective = {
+            "model_class": "stm",
+            "cdr": "myproject.mydataset",
+            "billing": "my-billing-project",
+            "source_table": "condition_era",
+            "doc_unit": "patient_year",
+            "doc_min_length": 20,
+            "K": 40,
+            "max_iter": 20,
+            "vocab_size": 10000,
+            "min_df": 20,
+            "min_patient_count": 20,
+            "subsampling_rate": 0.2,
+            "tau0": 64.0,
+            "kappa": 0.7,
+            "save_interval": 5,
+            "person_mod": 10,
+            "cohort": "dementia",
+            "cohort_def": "first_dementia_year",
+            "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"],
+            "continuous_cols": ["age"],
+        }
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        # Required driver flags must be present.
+        assert "--cdr" in args and "myproject.mydataset" in args
+        assert "--billing" in args and "my-billing-project" in args
+        assert "--out-dir" in args and str(tmp_path / "out") in args
+        assert "--covariate-formula" in args
+        # Renamed flags — old names must not appear.
+        assert "--doc-spec" in args
+        assert "--doc-unit" not in args
+        assert "--save-dir" not in args
+        assert "--seed" not in args
+
+    def test_build_stm_args_parses_against_driver_argparse(self, tmp_path):
+        """argv from build_stm_args must parse cleanly via the driver's own argparse."""
+        import argparse
+        import importlib.util
+
+        effective = {
+            "model_class": "stm",
+            "cdr": "proj.ds",
+            "billing": "proj",
+            "source_table": "condition_era",
+            "doc_unit": "patient_year",
+            "doc_min_length": 20,
+            "K": 10,
+            "max_iter": 5,
+            "vocab_size": 1000,
+            "min_df": 5,
+            "min_patient_count": 5,
+            "subsampling_rate": 0.1,
+            "tau0": 64.0,
+            "kappa": 0.7,
+            "save_interval": 2,
+            "person_mod": 10,
+            "cohort": "dementia",
+            "cohort_def": "first_dementia_year",
+            "covariate_formula": "~ C(sex)",
+            "categorical_cols": ["sex"],
+            "continuous_cols": [],
+        }
+        argv = rx.build_stm_args(effective, str(tmp_path / "out"))
+
+        # Load the driver module without executing __main__ so we can call
+        # parse_args directly with a supplied argv list.
+        # The driver does `from _driver_common import ...` so its directory
+        # must be on sys.path during import.
+        import sys
+        driver_dir = Path(__file__).parents[2] / "analysis" / "cloud"
+        driver_path = driver_dir / "stm_bigquery_cloud.py"
+        sys.path.insert(0, str(driver_dir))
+        try:
+            spec_obj = importlib.util.spec_from_file_location("stm_driver_under_test", driver_path)
+            mod = importlib.util.module_from_spec(spec_obj)
+            spec_obj.loader.exec_module(mod)
+        except ImportError:
+            pytest.skip("driver imports unavailable (PySpark/cloud deps not installed)")
+        finally:
+            sys.path.pop(0)
+
+        # Patch error() to raise ValueError instead of calling sys.exit(2),
+        # so a bad argv produces a test failure rather than a process exit.
+        _orig_error = argparse.ArgumentParser.error
+
+        def _raise(self, message):
+            raise ValueError(f"argparse error: {message}")
+
+        argparse.ArgumentParser.error = _raise
+        try:
+            # parse_args() in the driver calls p.parse_args() with no args —
+            # we monkey-patch sys.argv momentarily.
+            import sys
+            _orig_argv = sys.argv
+            sys.argv = ["stm_bigquery_cloud.py"] + argv
+            ns = mod.parse_args()
+        finally:
+            sys.argv = _orig_argv
+            argparse.ArgumentParser.error = _orig_error
+
+        assert ns.cdr == "proj.ds"
+        assert ns.billing == "proj"
+        assert ns.out_dir == str(tmp_path / "out")
+        assert ns.covariate_formula == "~ C(sex)"
+
     def test_build_fit_driver_path_lda(self):
         from run_experiment import build_fit_driver_path
         path = build_fit_driver_path({"model_class": "lda"})

@@ -320,8 +320,10 @@ def build_covariates_args(effective: dict) -> list[str]:
 def build_stm_args(effective: dict, out_dir: str) -> list[str]:
     """Build argv for analysis/cloud/stm_bigquery_cloud.py."""
     common = [
+        "--cdr", str(effective["cdr"]),
+        "--billing", str(effective["billing"]),
         "--source-table", str(effective["source_table"]),
-        "--doc-unit", str(effective.get("doc_unit", "patient_year")),
+        "--doc-spec", str(effective.get("doc_unit", "patient_year")),
         "--doc-min-length", str(effective["doc_min_length"]),
         "--K", str(effective["K"]),
         "--max-iter", str(effective["max_iter"]),
@@ -333,9 +335,8 @@ def build_stm_args(effective: dict, out_dir: str) -> list[str]:
         "--kappa", str(effective["kappa"]),
         "--save-interval", str(effective["save_interval"]),
         "--person-mod", str(effective["person_mod"]),
-        "--seed", str(effective["seed"]),
         "--cohort", str(effective.get("cohort_def", effective.get("cohort", ""))),
-        "--save-dir", str(out_dir),
+        "--out-dir", str(out_dir),
     ]
     if effective.get("cache_uri"):
         common.extend(["--cache-uri", str(effective["cache_uri"])])
