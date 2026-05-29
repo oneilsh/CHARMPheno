@@ -55,3 +55,59 @@ class TestGetMetadata:
         m = OnlineSTM(K=5, vocab_size=100, P=3)
         md = m.get_metadata()
         assert md == {"K": 5, "V": 100, "P": 3}
+
+
+class TestLocalUpdate:
+    def test_returns_expected_keys_and_shapes(self):
+        m = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
+        gp = m.initialize_global(None)
+        # Inject a non-degenerate Σ so Laplace doesn't collapse.
+        gp["Sigma"] = np.full(3, 1.0)
+        from spark_vi.models.topic.types import STMDocument
+        docs = [
+            STMDocument(
+                indices=np.array([0, 3, 7], dtype=np.int32),
+                counts=np.array([2.0, 1.0, 1.0]),
+                length=4,
+                x=np.array([1.0, 0.5]),
+            ),
+            STMDocument(
+                indices=np.array([1, 4, 8], dtype=np.int32),
+                counts=np.array([1.0, 3.0, 1.0]),
+                length=5,
+                x=np.array([-0.5, 1.0]),
+            ),
+        ]
+        ss = m.local_update(docs, gp)
+        assert ss["lambda_stats"].shape == (3, 10)
+        assert ss["XtX"].shape == (2, 2)
+        assert ss["XtMu"].shape == (2, 3)
+        assert ss["residual_diag_stat"].shape == (3,)
+        assert ss["n_docs"].shape == ()
+        assert float(ss["n_docs"]) == 2.0
+        # ELBO suff stats.
+        assert ss["doc_loglik_sum"].shape == ()
+        assert ss["doc_eta_kl_sum"].shape == ()
+
+    def test_lambda_stats_only_touches_seen_columns(self):
+        m = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
+        gp = m.initialize_global(None)
+        from spark_vi.models.topic.types import STMDocument
+        doc = STMDocument(
+            indices=np.array([2, 5], dtype=np.int32),
+            counts=np.array([1.0, 1.0]),
+            length=2,
+            x=np.array([0.0, 0.0]),
+        )
+        ss = m.local_update([doc], gp)
+        touched = set(np.flatnonzero(ss["lambda_stats"].sum(axis=0)).tolist())
+        assert touched == {2, 5}
+
+    def test_empty_partition_returns_zero_stats(self):
+        m = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
+        gp = m.initialize_global(None)
+        ss = m.local_update([], gp)
+        assert float(ss["n_docs"]) == 0.0
+        np.testing.assert_array_equal(ss["lambda_stats"], np.zeros((3, 10)))
+        np.testing.assert_array_equal(ss["XtX"], np.zeros((2, 2)))
+        np.testing.assert_array_equal(ss["XtMu"], np.zeros((2, 3)))

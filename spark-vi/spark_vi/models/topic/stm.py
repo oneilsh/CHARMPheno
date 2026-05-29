@@ -257,11 +257,83 @@ class OnlineSTM(VIModel):
 
     def local_update(
         self,
-        rows: Iterable[Any],
+        rows: Iterable[STMDocument],
         global_params: dict[str, np.ndarray],
     ) -> dict[str, np.ndarray]:
-        """E-step on one data partition. (Stub for Task 4.)"""
-        raise NotImplementedError("local_update implemented in Task 4")
+        """E-step on one Spark partition.
+
+        For each doc: run _stm_doc_inference to get (η̂_d, ν_d). Accumulate:
+        - lambda_stats: K×V suff-stats for β SVI step (same shape as LDA)
+        - XtX, XtMu: P×P and P×K cross-products for Γ ridge regression
+        - residual_diag_stat: K-vector for diagonal Σ sample covariance
+        - doc_loglik_sum: data log-lik term at MAP (for ELBO)
+        - doc_eta_kl_sum: KL(N(η̂, ν_d) || N(Γx, Σ)) (for ELBO)
+        - n_docs scalar
+        """
+        lam = global_params["lambda"]
+        Gamma = global_params["Gamma"]
+        Sigma_diag = global_params["Sigma"]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+        K, V = self.K, self.V
+        P = self.P
+
+        lambda_stats = np.zeros((K, V), dtype=np.float64)
+        XtX = np.zeros((P, P), dtype=np.float64)
+        XtMu = np.zeros((P, K), dtype=np.float64)
+        residual_diag = np.zeros(K, dtype=np.float64)
+        doc_loglik = 0.0
+        doc_eta_kl = 0.0
+        n_docs = 0
+
+        log_Sigma_diag = np.log(Sigma_diag)
+
+        for doc in rows:
+            eta_hat, nu_d, _ = _stm_doc_inference(
+                indices=doc.indices, counts=doc.counts,
+                expElogbeta=expElogbeta,
+                Gamma=Gamma, Sigma_diag=Sigma_diag, x=doc.x,
+                max_iter=self.lbfgs_max_iter, tol=self.lbfgs_tol,
+            )
+            p = _softmax(eta_hat)
+            eb_d = expElogbeta[:, doc.indices]
+            q_w = eb_d.T @ p + 1e-100
+            phi = (eb_d * p[:, None]) / q_w[None, :]   # (K, n_unique)
+
+            # λ suff-stats: phi · counts directly (phi already incorporates
+            # expElogbeta; update_global skips the expElogbeta multiplication
+            # for the STM path — see Task 5).
+            sstats_row = phi * doc.counts[None, :]
+            lambda_stats[:, doc.indices] += sstats_row
+
+            # Regression sufficient stats.
+            XtX += np.outer(doc.x, doc.x)
+            XtMu += np.outer(doc.x, eta_hat)
+            # Residual diag for Σ: (η̂ - Γx)² + diag(ν_d).
+            resid = eta_hat - Gamma.T @ doc.x
+            residual_diag += resid * resid + np.diag(nu_d)
+
+            # ELBO terms.
+            doc_loglik += float(np.sum(doc.counts * np.log(q_w)))
+            # KL(N(η̂, ν_d) || N(Γx, Σ)) closed form with K-diagonal Σ:
+            # ½(tr(Σ⁻¹ ν_d) + (η̂ - Γx)ᵀ Σ⁻¹ (η̂ - Γx) - K + log|Σ| - log|ν_d|)
+            tr_term = float(np.sum(np.diag(nu_d) / Sigma_diag))
+            quad_term = float(np.sum(resid * resid / Sigma_diag))
+            sign, logdet_nu = np.linalg.slogdet(nu_d)
+            logdet_Sigma = float(np.sum(log_Sigma_diag))
+            doc_eta_kl += 0.5 * (tr_term + quad_term - K + logdet_Sigma - logdet_nu)
+
+            n_docs += 1
+
+        return {
+            "lambda_stats": lambda_stats,
+            "XtX": XtX,
+            "XtMu": XtMu,
+            "residual_diag_stat": residual_diag,
+            "doc_loglik_sum": np.array(doc_loglik),
+            "doc_eta_kl_sum": np.array(doc_eta_kl),
+            "n_docs": np.array(float(n_docs)),
+        }
 
     def update_global(
         self,
