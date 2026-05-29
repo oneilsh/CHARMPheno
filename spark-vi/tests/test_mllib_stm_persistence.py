@@ -40,6 +40,7 @@ class TestSTMModelPersistence:
         np.testing.assert_array_equal(loaded.global_params["Gamma"], gp["Gamma"])
         np.testing.assert_array_equal(loaded.global_params["Sigma"], gp["Sigma"])
         np.testing.assert_array_equal(loaded.global_params["lambda"], gp["lambda"])
+        np.testing.assert_array_equal(loaded.global_params["eta"], gp["eta"])
         assert loaded.metadata == {"K": 3, "V": 10, "P": 2}
         # ModelSpec round-trips.
         assert loaded.model_spec.factor_levels == {"cohort": ["a", "b"]}

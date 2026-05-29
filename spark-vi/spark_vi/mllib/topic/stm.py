@@ -6,10 +6,14 @@ Two input paths:
   (B) Caller supplies a `covariate_formula` string + a covariate
       DataFrame. Requires the `formula` extra: pip install spark-vi[formula].
 
-This file implements Path A. Path B is added by Tasks 11-13.
+Path B is implemented via `covariate_formula`; see `_resolve_model_spec_from_pandas`
+and `_formula.fit_model_spec`.
 """
 from __future__ import annotations
 
+import json
+import pickle
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -20,7 +24,7 @@ class StreamingSTM:
 
     Constructor enforces that the caller supplies enough information
     to determine P (covariate dimension) — either via covariate_names
-    (Path A) or covariate_formula (Path B; see Tasks 11-13).
+    (Path A) or covariate_formula (Path B).
     """
 
     def __init__(
@@ -61,7 +65,7 @@ class StreamingSTM:
             self.P = len(self.covariate_names)
             self.covariate_formula = None
         else:
-            # Path B — wired in Tasks 11-13.
+            # Path B: uses formulaic ModelSpec for covariate resolution.
             self.covariates_col = "covariates"
             self.covariate_formula = covariate_formula
             self.covariate_df = covariate_df
@@ -88,10 +92,6 @@ class StreamingSTM:
         self.model_spec = spec
         self.covariate_names = names
         self.P = len(names)
-
-
-import pickle
-from pathlib import Path
 
 
 class STMModel:
@@ -122,7 +122,6 @@ class STMModel:
             out_dir / "global_params.npz",
             **{k: np.asarray(v) for k, v in self.global_params.items()},
         )
-        import json
         (out_dir / "metadata.json").write_text(json.dumps({
             **self.metadata,
             "covariate_names": self.covariate_names,
@@ -135,7 +134,6 @@ class STMModel:
         in_dir = Path(in_dir)
         npz = np.load(in_dir / "global_params.npz")
         global_params = {k: npz[k] for k in npz.files}
-        import json
         md = json.loads((in_dir / "metadata.json").read_text())
         covariate_names = md.pop("covariate_names", [])
         with (in_dir / "model_spec.pkl").open("rb") as f:

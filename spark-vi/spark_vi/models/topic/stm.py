@@ -42,6 +42,13 @@ from spark_vi.core.model import VIModel
 from spark_vi.models.topic.types import STMDocument
 
 
+def _softmax(eta: np.ndarray) -> np.ndarray:
+    """Numerically stable softmax."""
+    m = eta.max()
+    exp = np.exp(eta - m)
+    return exp / exp.sum()
+
+
 def _stm_neg_log_joint(
     eta: np.ndarray,
     *,
@@ -93,13 +100,6 @@ def _stm_neg_log_joint_grad(
     diff = eta - Gamma.T @ x                               # (K,)
     prior_grad = diff / Sigma_diag                         # (K,)
     return data_grad + prior_grad
-
-
-def _softmax(eta: np.ndarray) -> np.ndarray:
-    """Numerically stable softmax."""
-    m = eta.max()
-    exp = np.exp(eta - m)
-    return exp / exp.sum()
 
 
 def _stm_neg_log_joint_hessian(
