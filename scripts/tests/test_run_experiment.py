@@ -435,3 +435,41 @@ def test_parse_iter_marker_returns_none_for_non_iter_lines():
 def test_parse_iter_marker_tolerates_no_newline():
     """In case the wrapper passes a line without trailing newline."""
     assert rx.parse_iter_marker("[driver]   iter 5/10: ELBO=-1.0") == 5
+
+
+import os
+import signal as _signal
+import threading
+
+
+def test_run_subprocess_writes_killed_marker_on_sigterm(tmp_path):
+    """SIGTERM during the tee loop writes a killed marker referencing last seen iter."""
+    summary_path = tmp_path / "summary.md"
+    summary_path.write_text("# header\n")
+
+    # Subprocess prints two iter lines fast, then hangs for 60s.
+    cmd = [
+        "sh", "-c",
+        "echo '[driver]   iter 1/10: ELBO=-1.0 time=1s'; "
+        "sleep 0.2; "
+        "echo '[driver]   iter 2/10: ELBO=-2.0 time=1s'; "
+        "sleep 60",
+    ]
+
+    # From a daemon thread, SIGTERM the current process ~0.5s in.
+    def send_sigterm():
+        import time
+        time.sleep(0.5)
+        os.kill(os.getpid(), _signal.SIGTERM)
+    threading.Thread(target=send_sigterm, daemon=True).start()
+
+    exit_code = rx.run_subprocess_tee_sanitize(cmd, summary_path, rx.DROP_PATTERNS)
+
+    assert exit_code == 130, f"expected signal-exit 130, got {exit_code}"
+    text = summary_path.read_text()
+    assert "Killed at iter 2" in text, f"missing iter marker in: {text!r}"
+    # Original header preserved
+    assert "# header" in text
+    # Both iter lines tee'd to summary before kill
+    assert "iter 1/10" in text
+    assert "iter 2/10" in text

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -258,6 +259,13 @@ def write_summary_header(
             f.write(f"\n## Fit session {n}\nStarted: {started}\n\n")
 
 
+class _SignalReceived(Exception):
+    """Raised inside the tee loop when SIGTERM or SIGINT arrives."""
+    def __init__(self, signum: int):
+        super().__init__(f"signal {signum}")
+        self.signum = signum
+
+
 def run_subprocess_tee_sanitize(
     cmd: list[str], summary_path: Path, patterns: list[re.Pattern],
 ) -> int:
@@ -266,24 +274,58 @@ def run_subprocess_tee_sanitize(
     Each line is printed to this process's stdout (live debugging) AND, if
     `sanitize_line` returns non-None, appended to `summary_path`.
 
-    Returns the subprocess exit code.
+    If SIGTERM or SIGINT arrives during streaming, writes a
+    `### Killed at iter N (signal: ...)` marker to summary_path, terminates
+    the child, and returns 130 (standard signal-exit code). Otherwise returns
+    the child's exit code.
+
+    Tracks the last `[driver]   iter N/M:` line seen so the killed marker can
+    name the iter that was in flight.
     """
+    def _handler(signum, frame):  # noqa: ARG001 — frame unused
+        raise _SignalReceived(signum)
+
+    prev_term = signal.signal(signal.SIGTERM, _handler)
+    prev_int = signal.signal(signal.SIGINT, _handler)
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         bufsize=1, text=True,
     )
     assert proc.stdout is not None
-    with summary_path.open("a") as fout:
-        for line in proc.stdout:
-            # Live debugging: always print to terminal
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            # Committed record: sanitized only
-            clean = sanitize_line(line, patterns)
-            if clean is not None:
-                fout.write(clean)
-                fout.flush()
-    return proc.wait()
+    last_iter: int | None = None
+    try:
+        with summary_path.open("a") as fout:
+            for line in proc.stdout:
+                # Live debugging: always print to terminal
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                # Track iter for the killed-marker, even on lines we don't
+                # commit (so we know which iter was in flight when the signal
+                # arrived).
+                m = parse_iter_marker(line)
+                if m is not None:
+                    last_iter = m
+                # Committed record: sanitized only
+                clean = sanitize_line(line, patterns)
+                if clean is not None:
+                    fout.write(clean)
+                    fout.flush()
+        return proc.wait()
+    except _SignalReceived as sig:
+        with summary_path.open("a") as fout:
+            iter_str = f"iter {last_iter}" if last_iter is not None else "unknown iter"
+            fout.write(f"\n### Killed at {iter_str} (signal: {sig.signum})\n")
+            fout.flush()
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        return 130
+    finally:
+        signal.signal(signal.SIGTERM, prev_term)
+        signal.signal(signal.SIGINT, prev_int)
 
 
 def append_eval_section(summary_path: Path, eval_stdout: str) -> None:
