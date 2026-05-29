@@ -22,6 +22,20 @@ class TestVectorToSTMDocument:
         assert doc.length == 6
         np.testing.assert_array_equal(doc.x, [1.0, 0.5, -1.2])
 
+    def test_constructs_from_row_with_dense_features(self):
+        from spark_vi.mllib.topic._common import _vector_to_stm_document
+        row = {
+            "features": DenseVector([2.0, 0.0, 0.0, 1.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0]),
+            "covariates": DenseVector([1.0, 0.5, -1.2]),
+        }
+        doc = _vector_to_stm_document(row, features_col="features",
+                                       covariates_col="covariates")
+        # Dense → sparsified to nonzero positions {0, 3, 5}.
+        np.testing.assert_array_equal(doc.indices, [0, 3, 5])
+        np.testing.assert_array_equal(doc.counts, [2.0, 1.0, 3.0])
+        assert doc.length == 6
+        np.testing.assert_array_equal(doc.x, [1.0, 0.5, -1.2])
+
 
 class TestStreamingSTMPathA:
     def test_constructs_with_covariates_col(self):

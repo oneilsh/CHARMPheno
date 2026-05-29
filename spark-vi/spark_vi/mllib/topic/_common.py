@@ -43,15 +43,16 @@ def _vector_to_stm_document(
 ) -> STMDocument:
     """Construct an STMDocument from a row with both a BOW vector and a covariate vector.
 
-    Accepts pyspark.sql.Row and dict-like objects. The covariate vector
-    must be a DenseVector (or numpy-coercible array); covariates_col
-    cannot be sparse for STM (every doc has a complete x vector).
+    Accepts pyspark.sql.Row and dict-like objects. The features_col vector
+    may be Sparse or Dense (both are sparsified to nonzero entries). The
+    covariate vector must be a DenseVector (or numpy-coercible array);
+    covariates_col cannot be sparse for STM (every doc has a complete x vector).
     """
-    sv = row[features_col]
+    bow = _vector_to_bow_document(row[features_col])
     cov = row[covariates_col]
     return STMDocument(
-        indices=np.asarray(sv.indices, dtype=np.int32),
-        counts=np.asarray(sv.values, dtype=np.float64),
-        length=int(sv.values.sum()),
+        indices=bow.indices,
+        counts=bow.counts,
+        length=bow.length,
         x=np.asarray(cov, dtype=np.float64),
     )
