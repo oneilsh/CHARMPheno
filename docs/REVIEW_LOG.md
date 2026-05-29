@@ -12,6 +12,275 @@ elsewhere.
 
 ---
 
+## 2026-05-29 — Experiment tracking Inc 2 / 2.5 / 3 + pilot validations + summary-tail (scoped walkthrough)
+
+Five-lesson scoped walkthrough of the experiment-tracking wrapper's evolution
+since the 2026-05-28 entry. Three increments shipped behind the Inc 1 MVP that
+landed in the prior review window, plus two operational closures against
+Pilot 0001 and one ergonomic Make addition that fell out of the second
+validation. All wrapper-side; no modeling code or checkpoint contracts were
+touched, no cluster re-fits were required.
+
+The increments landed in dependency order: Inc 2 (cosmetic + ergonomic gaps
+from the original pilot run), then Inc 2.5 (a small ergonomic split that
+emerged from a question during Inc 2 design — "fit-and-eval together vs.
+separately"), then Pilot 0001 chain validation (operational closure of
+Inc 1/2/2.5 on real cluster data), then Inc 3 (the third spark-submit stage —
+dashboard build — wired into the wrapper with the same auto-discovery shape
+as Inc 2.5's `eval-exp`), then Pilot 0001 build validation (Inc 3's
+operational closure), and finally a small `summary-tail` Make target that
+emerged from the second validation's "paste back" workflow.
+
+### Increment 2 (lean) — log noise, signal trap, eval markers
+
+The original pilot's `summary.md` was technically complete but practically
+noisy: ~30 lines of `26/05/28 HH:MM:SS INFO ...` interspersed with the
+high-signal `[driver]` lines per session, no record of which iter was
+in flight if a SIGTERM hit mid-fit, and the eval block lacked a clean
+terminator. Six commits closed those gaps:
+
+- `NOISE_PATTERNS` extension to `sanitize_line` — log4j-prefix regex +
+  GCS-connector CONTEXT footer. Composed with `PATIENT_PATTERNS` into
+  `DROP_PATTERNS` at the boundary; the two-list split is documentary
+  (privacy vs readability) so a future hypothetical "keep patient info but
+  drop noise" mode has the right seam.
+- `parse_iter_marker` pure helper — extracts iter N from `[driver]   iter N/M:`
+  lines. Setup for the trap.
+- `_SignalReceived` exception class + trap in `run_subprocess_tee_sanitize`.
+  Raises from the signal handler so blocked stdout reads return via EINTR;
+  tracks `last_iter` BEFORE sanitization so iter accounting survives future
+  drop-pattern changes; restores prev handlers via `try/finally`; conventional
+  exit 130; 10s graceful `terminate()` → hard `kill()` for the child.
+- Timestamped `## Eval (NPMI) — <UTC ts>` header + `### Eval complete (exit N)`
+  marker in `append_eval_section`. The timestamp distinguishes multiple eval
+  runs against the same checkpoint (precondition for Inc 2.5); the marker
+  closes a grammar asymmetry vs the fit dispatch's existing
+  `### Session complete (exit N)`.
+- `--eval-only` flag wiring in `main()` — skip fit dispatch, only run eval.
+  Fast-fail boundary check on `manifest.json` existence at the wrapper
+  surface (avoids a confusing Spark-internal trace).
+- `make eval-exp ID=` target — UI layer on top of `--eval-only`. In Inc 2 this
+  required `ID=`; the optional form came in Inc 2.5.
+
+### Increment 2.5 (ergonomic split)
+
+Three commits. The question that drove it: "should eval be part of
+`make next-exp`, or as an explicit target only?" The answer is "both, with
+opt-out + auto-discovery."
+
+- `find_most_recent_fit` helper — scans `runs/*/manifest.json`, returns id of
+  the freshest fit (or None). Pure function. Reuses `_RUN_DIR_PATTERN` regex
+  for `NNNN-slug` directory matching. Inc 3 reuses the same constant in its
+  sibling `find_most_recent_fit_needing_build`, which is what made Inc 3 cheap
+  to write later.
+- `--no-eval` flag + `--eval-only` no-ID auto-discovery in `main()`. Mutual-
+  exclusion check (`--no-eval` ⊕ `--eval-only`) added at the top of `main()`.
+  `--eval-only` without `--id` becomes an `elif` branch in the existing
+  experiment-selection ladder, falling back to `find_most_recent_fit` +
+  `find_by_id`. The "no checkpoints found" path returns 2 because
+  `--eval-only` is a request to eval *something*.
+- `NO_EVAL=1` Make conditional via `$(if $(NO_EVAL),--no-eval)` on `next-exp`
+  and `exp`; optional `ID=` via `$(if $(ID),--id $(ID))` on `eval-exp`. The
+  conditional expands to nothing when the variable is empty — no empty-string
+  gotcha at the wrapper boundary.
+
+### Pilot 0001 chain validation (operational closure of Inc 1/2/2.5)
+
+Two commits on `docs/experiments/0001-pilot.md`. Pilot 0001 was flipped from
+`status: done` back to `pending` (and `max_iter` bumped 2→5) to exercise the
+chain on real cluster data: `make next-exp NO_EVAL=1 && make eval-exp`. After
+the cluster run succeeded, the pilot was flipped back to `done` and the new
+Session 4 + second-eval transcripts were embedded in the Results section.
+
+The pilot record is now structured to make the Inc 2 before/after visible
+side-by-side: the original Session 2/3 transcripts carry the noisy Spark
+INFO lines, while Session 4 has none (NOISE_PATTERNS working as designed);
+the original eval has no timestamp or completion marker, the second eval
+has both. The Interpretation rewrite covers what end-to-end validation
+actually proved (a table mapping each Inc 1/2/2.5 component to the specific
+piece of evidence in the transcript).
+
+### Increment 3 — dashboard-build wrapper integration
+
+Nine commits across five files. Adds the third spark-submit stage (dashboard
+bundle build) to the wrapper, with the same auto-discovery ergonomics as
+Inc 2.5's `eval-exp`. The two motivating use cases were "one command to
+build the bundle for whichever experiment needs it most" and "distinct zip
+filenames per experiment so downloads don't collide in `~/Downloads/`."
+
+- `--zip-name` flag on `build_dashboard_cloud.py`. 4-line argparse + 4-line
+  ternary replacing the existing `zip_path = out_dir.with_suffix(".zip")`.
+  When set, zip is written as a sibling of `out_dir` (`out_dir.parent / args.zip_name`);
+  when unset, original behavior preserved so the manual `make build-dashboard-bundle
+  CHECKPOINT=...` flow is untouched. Path traversal not validated — acceptable
+  risk for a local-trust script, flagged in the spec.
+- `find_most_recent_fit_needing_build` helper. Marker file is
+  `<checkpoint>/dashboard_bundle/corpus_stats.json` (the last JSON written by
+  the build script before the zip step) — NOT the zip, because the zip name
+  now varies per experiment. Staleness check is `≥` (ties go to "current");
+  multi-candidate tie-break by newest fit mtime. The `≥` choice is pinned by
+  an explicit test (`test_treats_equal_mtime_as_current`) added during review.
+- `build_dashboard_args` arg-builder. Param order
+  `(effective, checkpoint_dir, zip_name)` intentionally differs from
+  `build_eval_args`'s `(checkpoint_dir, effective)` — the docstring spells
+  out why. Dict-access asymmetry (`.get` for `model_class`, `[]` for the
+  required keys) also documented; the `[]` access is the right failure mode
+  because the keys come from `_base.yaml` and missing means the YAML chain
+  is broken.
+- YAML defaults added to `_base.yaml`: `vocab_top_n: 5000`,
+  `top_n_codes_for_npmi: 20`. Match the build script's argparse defaults; the
+  YAML comment explicitly names that as the source of truth so future drift
+  has a paper trail.
+- `write_build_section_header` helper. Writes only the `## Dashboard build —
+  <UTC ts>` header; `main()` owns the `### Build complete (exit N)` footer.
+  Build mirrors fit's header/body/footer split (streaming-tee via
+  `run_subprocess_tee_sanitize`), not eval's all-in-one capture-then-append
+  pattern. The docstring spells this out so a future reader doesn't try to
+  "fix" the asymmetry by folding the footer into the helper.
+- `--build-only` wiring in `main()` — the integration. Six edits: argparse
+  flag, mutual-exclusion check (`--build-only` ⊕ `--eval-only` ⊕ `--no-eval`),
+  auto-discovery `elif` branch, `write_summary_header` guard widened (don't
+  open a Fit session for build-only mode), fit-dispatch guard widened (skip
+  with mode-aware error), eval-dispatch guard widened with `--build-only`
+  fall-through + new build-dispatch block after. Dispatch order is
+  fit → eval → build; `--no-eval` returns early, `--build-only` falls
+  through. "No fits need building" returns 0 (steady state), not 2 (error).
+- `make build-dashboard-exp` target — mirrors `eval-exp` shape exactly,
+  same `$(if $(ID),--id $(ID))` conditional. The commit also opportunistically
+  cleaned up `.PHONY`, adding `next-exp`, `exp`, `summary`, `eval-exp` which
+  had shipped in Inc 1/2/2.5 without being declared phony.
+
+Inc 3 was executed via subagent-driven-development (six implementer tasks
+with per-task spec-compliance and code-quality review loops). The review
+loops caught the `≥` tie-semantics test gap, the `build_dashboard_args`
+docstring gaps (param order + dict-access asymmetry), and a missing
+symmetric required-key test — all fixed inline before the next task.
+Final integration review confirmed all 9 control-flow paths in `main()`
+(5 pre-existing + 4 new) remain correct.
+
+### Pilot 0001 build validation + summary-tail ergonomic
+
+Two commits. The cluster ran `git pull && make build-dashboard-exp` against
+Pilot 0001; the auto-discovery picked id=1 correctly (pilot had no bundle
+yet); the build wrote the four JSONs + zip + summary section; the
+distinct-named `0001-pilot-dashboard.zip` downloaded cleanly to `~/Downloads/`
+alongside the older manually-renamed `dashboard_bundle_*.zip` files (which
+were exactly the collision problem Inc 3 solved).
+
+Downloaded zip structure verified locally: 4 files at zip root, no nesting,
+K=5/V=500 consistent across `model.json` / `phenotypes.json` / `vocab.json` /
+`corpus_stats.json`, β rows row-stochastic (±1e-5 drift around the 6th
+decimal — expected from the post-trim renormalization), cohort metadata
+(`first_dementia_year`, 365-day window, observation-period requirements)
+flowed through from the checkpoint's `corpus_manifest`.
+
+The pilot record's Dashboard build section was embedded in `Results`, a
+new bullet in `Fit history` records the build at 2026-05-29 15:40 UTC, and
+the Interpretation gained a new bullet group covering what Inc 3
+specifically validated (auto-discovery picked the right id, `--zip-name`
+worked, streaming-tee gives live phase markers, section grammar mirrors
+fit/eval, bundle structure cross-consistent). The pilot record now
+demonstrates all four increments end-to-end in one accumulating `summary.md`:
+4 fit sessions (2 failed → 2 clean, second auto-resumed), 2 evals (one
+integrated, one separately re-run), 1 dashboard build (auto-discovered).
+
+The `summary-tail` Make target was added after the user pointed out that
+pasting the full `summary.md` back after each `make build-dashboard-exp` is
+wasteful when only the last block is new. The target is an awk one-liner:
+reset a buffer on each `^## ` (H2), accumulate every line into the buffer,
+print it at EOF. H3 markers inside the trailing section (like
+`### Build complete (exit 0)`) are preserved because the reset only fires
+on H2. Awk over Python for shell-startup latency and ubiquity. Smoke-
+verified against a synthetic fixture before commit.
+
+### Pre-existing issues caught and fixed
+
+- **The 2026-05-29 REVIEW_LOG entry that triggered this walkthrough.** A
+  premature entry had been written unilaterally on 2026-05-29 immediately
+  after Inc 2.5 + the first pilot validation shipped. The entry accurately
+  described what shipped but falsely implied user sign-off — no walkthrough
+  had happened. The entry was removed in `d77381f` before this walkthrough
+  began; this entry is the proper trace. Worth a note for future review-log
+  discipline: entries must be traces of an actual walkthrough, not summaries
+  written after the fact.
+- **`build_dashboard_args` design choices were uncommented.** The param-order
+  inversion vs `build_eval_args` and the `.get`-vs-`[]` dict-access asymmetry
+  were both intentional but undocumented at first. Code-quality review during
+  Inc 3 Task 3 flagged both; docstring paragraphs added in a small polish
+  commit (`8802df2`).
+- **`≥` tie-semantics for `find_most_recent_fit_needing_build` was unpinned.**
+  The first version of the test class only used ±100s offsets; a future
+  regression from `≥` to `>` would have silently caused pointless rebuilds.
+  Test `test_treats_equal_mtime_as_current` added in `f0b48c6` to pin the
+  boundary. (No test for the equivalent boundary in the sibling
+  `find_most_recent_fit` was added — sibling is older code and isn't part of
+  this review scope; worth a follow-up.)
+- **`.PHONY` was missing the experiment-tracking targets.** `next-exp`, `exp`,
+  `summary`, `eval-exp` had shipped in Inc 1/2/2.5 without being declared
+  phony, leaving them vulnerable to filename collisions in cwd. Cleaned up
+  opportunistically in the Inc 3 Task 6 commit (`3960f9d`).
+
+### New docs
+
+- `docs/superpowers/plans/2026-05-29-experiment-tracking-increment-2.md`
+- `docs/superpowers/plans/2026-05-29-experiment-tracking-increment-2-5.md`
+- `docs/superpowers/specs/2026-05-29-experiment-tracking-increment-3-design.md`
+- `docs/superpowers/plans/2026-05-29-experiment-tracking-increment-3.md`
+
+### Doc updates
+
+- `docs/experiments/0001-pilot.md`: pilot record now embeds Session 4 + second
+  eval (Inc 2/2.5 chain validation) AND the Dashboard build section (Inc 3
+  validation); Fit history bullets updated through 2026-05-29 15:40 UTC;
+  Interpretation rewritten to cover what each increment's validation proved;
+  Links updated to reference all four plans + the Inc 3 spec.
+
+### Open threads parked
+
+These are not regressions or known bugs — deferred opportunities noted
+during the walkthrough:
+
+- **`max_iter` cumulative-vs-iters-this-call semantics.** The driver
+  (`spark_vi.mllib.topic.lda`) treats `max_iter` as iters-to-run-this-call,
+  not cumulative across resumes. Surfaced during Pilot 0001 chain validation:
+  Session 4 resumed at `n_iterations=2` then ran `iter 1/5` … `iter 5/5`,
+  ending at `n_iterations=7` rather than the naively-expected 5. Not a
+  wrapper concern (it passes the frontmatter value through unchanged), but
+  worth an ADR if we ever want cumulative semantics. The Robbins-Monro
+  counter is preserved across the boundary so step sizes are correct
+  regardless — only the *count semantics* differ from intuition.
+- **NPMI drift interpretation as a corpus-vs-cohort coherence trade-off.**
+  Pilot's mean NPMI moved +0.30 → +0.29 between the two evals (2 iters →
+  7 iters). Topic 1 specialized toward dementia-adjacent rare-ish concepts
+  (Osteopenia, Hypothyroidism), trading corpus-level coherence for
+  cohort-level coherence. The NPMI metric we have measures the former; the
+  modeling intent is closer to the latter. Worth an insights-log entry if a
+  future fit makes this trade-off visible at a larger scale.
+- **`cohort.id` in the dashboard bundle is `cohort_def`, not the display id.**
+  The bundle inherits the cohort name from the checkpoint's `corpus_manifest`,
+  which stores `cohort_def` (the driver-side filter value, e.g.
+  `first_dementia_year`). The frontmatter display id (`dementia`) is a
+  wrapper-side concept that doesn't flow into the bundle. The display label
+  flows through cleanly via `cohort_metadata()` — workable but worth knowing
+  for dashboard rendering work.
+- **Inc 3.x menu** (all parked): structured per-iter markdown parsing
+  (`### Iter N` subsections); HDP support in the wrapper (currently LDA-only);
+  `warm_start_from` for cross-experiment lineage; `make diff-exp A=N B=M`;
+  Spark config promotion from `SPARK_SUBMIT_FLAGS` constants to YAML;
+  per-deployment `runs-dir` override; `status: archived` workflow;
+  cross-link convention enforcement; `make list-pending`; `git_sha` capture
+  in `summary.md`.
+- **Signal trap + killed-marker remain unit-test-only.** Inc 2's
+  `_SignalReceived` trap and the `### Killed at iter N` marker have not been
+  exercised on the cluster (no production-side SIGTERM-during-fit has
+  occurred yet). Worth a manual smoke someday but no urgency.
+- **DRY nit in `main()`'s `mode = "..." if args.eval_only else "..."`
+  ternary.** Computed twice in the fit-dispatch guard (lines 600 and 604).
+  Acceptable for two uses; would be worth extracting if a third skip-mode
+  joined.
+
+---
+
 ## 2026-05-28 — patient_prevalence, β-writer, min_patient_count, driver extraction (scoped retrospective + cleanups)
 
 Five-lesson scoped walkthrough of three interlocking plans plus an
