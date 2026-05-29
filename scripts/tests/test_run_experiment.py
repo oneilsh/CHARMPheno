@@ -697,3 +697,27 @@ class TestBuildDashboardArgs:
         effective = {"model_class": "lda", "vocab_top_n": 5000}
         with pytest.raises(KeyError):
             rx.build_dashboard_args(effective, tmp_path / "ck", "z.zip")
+
+
+class TestWriteBuildSectionHeader:
+    def test_appends_header_with_timestamp(self, tmp_path):
+        import re
+        summary = tmp_path / "summary.md"
+        summary.write_text("# Existing content\n\n")
+        rx.write_build_section_header(summary)
+        text = summary.read_text()
+        # Existing content preserved
+        assert "# Existing content" in text
+        # Timestamped header appended
+        assert re.search(
+            r"^## Dashboard build — \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$",
+            text, re.MULTILINE,
+        )
+
+    def test_multiple_calls_append_distinct_sections(self, tmp_path):
+        summary = tmp_path / "summary.md"
+        summary.write_text("")
+        rx.write_build_section_header(summary)
+        rx.write_build_section_header(summary)
+        text = summary.read_text()
+        assert text.count("## Dashboard build —") == 2

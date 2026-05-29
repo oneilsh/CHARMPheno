@@ -443,6 +443,19 @@ def append_eval_section(
         f.write(f"\n### Eval complete (exit {exit_code})\n")
 
 
+def write_build_section_header(summary_path: Path) -> None:
+    """Append a timestamped '## Dashboard build — <UTC ts>' header.
+
+    The build dispatch then streams its sanitized stdout via
+    `run_subprocess_tee_sanitize` (same pattern as fit). After the dispatch
+    completes, `main()` appends `### Build complete (exit N)` for symmetry
+    with the eval pattern.
+    """
+    started = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    with summary_path.open("a") as f:
+        f.write(f"\n## Dashboard build — {started}\n")
+
+
 # RUNS_DIR mirrors the existing Makefile constant. Override via --runs-dir CLI
 # for local testing. On the cluster, the GCS-mounted path is the canonical home.
 DEFAULT_RUNS_DIR = "/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs"
