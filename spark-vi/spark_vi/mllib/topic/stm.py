@@ -203,10 +203,11 @@ class StreamingSTM:
 class STMModel:
     """Fitted MLlib-shim STM model. Wraps OnlineSTM's global params + ModelSpec.
 
-    Persistence layout under <model_dir>:
-        global_params.npz   # lambda, Gamma, Sigma, eta (numpy arrays)
-        metadata.json       # K, V, P, covariate_names
-        model_spec.pkl      # formulaic ModelSpec (pickle)
+    Persistence layout under <model_dir> (VIResult-compatible):
+        manifest.json           # metadata + elbo_trace (written by save_result)
+        params/<name>.npy       # one file per global_param key
+        model_spec.pkl          # formulaic ModelSpec (pickle sidecar)
+        covariate_names.json    # list of covariate name strings (sidecar)
     """
 
     def __init__(
@@ -222,31 +223,44 @@ class STMModel:
         self.covariate_names = covariate_names
 
     def save(self, out_dir: Path) -> None:
+        from spark_vi.core.result import VIResult
+        from spark_vi.io.export import save_result
+
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            out_dir / "global_params.npz",
-            **{k: np.asarray(v) for k, v in self.global_params.items()},
+        # Wrap state as a VIResult so the canonical saver handles the
+        # standard layout (manifest.json, params/*.npy, traces/).
+        # load_result in build_dashboard_cloud.py expects this layout.
+        result = VIResult(
+            global_params=self.global_params,
+            metadata=dict(self.metadata),
+            elbo_trace=[],
+            n_iterations=0,
+            converged=False,
+            diagnostic_traces={},
         )
-        (out_dir / "metadata.json").write_text(json.dumps({
-            **self.metadata,
-            "covariate_names": self.covariate_names,
-        }))
+        save_result(result, out_dir)
+        # Sidecars: formulaic ModelSpec + covariate names list.
         with (out_dir / "model_spec.pkl").open("wb") as f:
             pickle.dump(self.model_spec, f)
+        (out_dir / "covariate_names.json").write_text(
+            json.dumps(self.covariate_names)
+        )
 
     @classmethod
     def load(cls, in_dir: Path) -> "STMModel":
+        from spark_vi.io.export import load_result
+
         in_dir = Path(in_dir)
-        npz = np.load(in_dir / "global_params.npz")
-        global_params = {k: npz[k] for k in npz.files}
-        md = json.loads((in_dir / "metadata.json").read_text())
-        covariate_names = md.pop("covariate_names", [])
+        result = load_result(in_dir)
         with (in_dir / "model_spec.pkl").open("rb") as f:
             spec = pickle.load(f)
+        covariate_names = json.loads(
+            (in_dir / "covariate_names.json").read_text()
+        )
         return cls(
-            global_params=global_params,
-            metadata=md,
+            global_params=result.global_params,
+            metadata=dict(result.metadata),
             model_spec=spec,
             covariate_names=covariate_names,
         )
