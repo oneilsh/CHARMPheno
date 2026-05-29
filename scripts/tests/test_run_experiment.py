@@ -549,3 +549,76 @@ def test_find_most_recent_fit_skips_malformed_dir_names(tmp_path):
 def test_find_most_recent_fit_missing_runs_dir_returns_none(tmp_path):
     """Nonexistent runs_dir is treated as empty."""
     assert rx.find_most_recent_fit(tmp_path / "does-not-exist") is None
+
+
+class TestFindMostRecentFitNeedingBuild:
+    """find_most_recent_fit_needing_build returns the freshest fit whose
+    dashboard bundle is missing or stale."""
+
+    def test_returns_none_when_runs_dir_missing(self, tmp_path):
+        assert rx.find_most_recent_fit_needing_build(tmp_path / "nope") is None
+
+    def test_returns_none_when_no_fits_exist(self, tmp_path):
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        assert rx.find_most_recent_fit_needing_build(runs) is None
+
+    def test_picks_never_built_fit(self, tmp_path):
+        runs = tmp_path / "runs"
+        (runs / "0001-pilot").mkdir(parents=True)
+        (runs / "0001-pilot" / "manifest.json").write_text("{}")
+        assert rx.find_most_recent_fit_needing_build(runs) == 1
+
+    def test_skips_current_bundles(self, tmp_path):
+        import os
+        runs = tmp_path / "runs"
+        d = runs / "0001-pilot"
+        d.mkdir(parents=True)
+        manifest = d / "manifest.json"
+        manifest.write_text("{}")
+        bundle = d / "dashboard_bundle"
+        bundle.mkdir()
+        marker = bundle / "corpus_stats.json"
+        marker.write_text("{}")
+        # Force marker mtime strictly after manifest mtime
+        later = manifest.stat().st_mtime + 100
+        os.utime(marker, (later, later))
+        assert rx.find_most_recent_fit_needing_build(runs) is None
+
+    def test_picks_stale_bundle(self, tmp_path):
+        import os
+        runs = tmp_path / "runs"
+        d = runs / "0001-pilot"
+        d.mkdir(parents=True)
+        manifest = d / "manifest.json"
+        manifest.write_text("{}")
+        bundle = d / "dashboard_bundle"
+        bundle.mkdir()
+        marker = bundle / "corpus_stats.json"
+        marker.write_text("{}")
+        # Force manifest mtime strictly after marker mtime
+        later = marker.stat().st_mtime + 100
+        os.utime(manifest, (later, later))
+        assert rx.find_most_recent_fit_needing_build(runs) == 1
+
+    def test_multiple_candidates_picks_newest_fit(self, tmp_path):
+        import os
+        runs = tmp_path / "runs"
+        # 0001-pilot: never-built, older fit
+        d1 = runs / "0001-pilot"
+        d1.mkdir(parents=True)
+        m1 = d1 / "manifest.json"
+        m1.write_text("{}")
+        # 0002-bigger: never-built, newer fit
+        d2 = runs / "0002-bigger"
+        d2.mkdir(parents=True)
+        m2 = d2 / "manifest.json"
+        m2.write_text("{}")
+        os.utime(m2, (m1.stat().st_mtime + 100, m1.stat().st_mtime + 100))
+        assert rx.find_most_recent_fit_needing_build(runs) == 2
+
+    def test_skips_dirs_without_manifest(self, tmp_path):
+        runs = tmp_path / "runs"
+        (runs / "0001-empty").mkdir(parents=True)
+        # No manifest.json — not yet fit, nothing to build
+        assert rx.find_most_recent_fit_needing_build(runs) is None

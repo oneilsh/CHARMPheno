@@ -122,6 +122,40 @@ def find_most_recent_fit(runs_dir: Path) -> int | None:
     return best_id
 
 
+def find_most_recent_fit_needing_build(runs_dir: Path) -> int | None:
+    """Return exp id of the most-recently-fit experiment whose dashboard
+    bundle is missing or stale.
+
+    Compares each `<NNNN-slug>/manifest.json` mtime against the same dir's
+    `dashboard_bundle/corpus_stats.json` mtime (the last JSON written by
+    build_dashboard_cloud before the zip step). If the marker is absent or
+    older than the manifest, the fit is a build candidate. Among all
+    candidates, returns the one with the latest manifest mtime — the
+    freshest fit that still wants a build. Returns None if no candidates
+    exist (all bundles current, or no fits at all).
+
+    Caller invariant: dir-naming convention `NNNN-slug` is enforced by
+    `main()` at save_dir creation; this function trusts it and skips any
+    sibling whose name doesn't match.
+    """
+    if not runs_dir.is_dir():
+        return None
+    best_mtime = -1.0
+    best_id: int | None = None
+    for manifest in runs_dir.glob("*/manifest.json"):
+        m = _RUN_DIR_PATTERN.match(manifest.parent.name)
+        if m is None:
+            continue
+        marker = manifest.parent / "dashboard_bundle" / "corpus_stats.json"
+        manifest_mtime = manifest.stat().st_mtime
+        if marker.exists() and marker.stat().st_mtime >= manifest_mtime:
+            continue
+        if manifest_mtime > best_mtime:
+            best_mtime = manifest_mtime
+            best_id = int(m.group(1))
+    return best_id
+
+
 # Patterns that indicate per-patient row-level info. Belt-and-suspenders for
 # driver-side stripping; if a new driver path re-introduces patient prints,
 # these catch them at the wrapper boundary before they reach summary.md.
