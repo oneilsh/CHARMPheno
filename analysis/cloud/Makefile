@@ -1,4 +1,4 @@
-.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary eval-exp build-dashboard-exp
+.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -103,6 +103,7 @@ help:
 	@echo "  next-exp [NO_EVAL=1]    Pick lowest-NNNN pending experiment; fit (+ eval unless NO_EVAL)."
 	@echo "  exp ID=N [NO_EVAL=1]    Run/resume experiment N; fit (+ eval unless NO_EVAL)."
 	@echo "  summary ID=N            Print summary.md for experiment N."
+	@echo "  summary-tail ID=N       Print only the most-recent ## section of summary.md."
 	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
 	@echo "  build-dashboard-exp     - build dashboard bundle (auto-picks freshest fit needing build)"
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
@@ -289,6 +290,14 @@ exp: zip $(WORKSPACE_ENV)
 summary:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	@cat $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*/summary.md
+
+# Print just the most-recent ## section of summary.md (everything from the
+# last H2 heading to EOF). Useful when older sessions are already pasted and
+# you only want the latest fit / eval / build block.
+summary-tail:
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	@awk '/^## /{buf=""} {buf=buf$$0"\n"} END{printf "%s",buf}' \
+	    $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*/summary.md
 
 # Re-run eval only against an existing experiment's checkpoint; appends a
 # timestamped ## Eval (NPMI) section to summary.md.
