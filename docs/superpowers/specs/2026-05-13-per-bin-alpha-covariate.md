@@ -1,7 +1,7 @@
 # Per-Bin Asymmetric α Covariate — Design Stub
 
 **Date:** 2026-05-13
-**Status:** Stub, parked. Captures the design idea so it can be acted on later without re-deriving the math. **Not** scheduled for implementation; the [dashboard work](2026-05-13-dashboard-design.md) ships against the current covariate-free model.
+**Status:** **Superseded by [ADR 0022](../../decisions/0022-stm-prevalence-over-per-bin-alpha.md) and the [2026-05-29 STM prevalence-only design](2026-05-29-stm-prevalence-design.md).** STM-prevalence with one-hot encoded categoricals strictly subsumes per-bin α as a special case (the one-hot bin indicator collapses Γ to per-bin Dirichlet means); we will not be implementing the per-bin α path as a standalone feature. Original stub retained below for historical context.
 **Scope:** Add a single doc-level categorical covariate (age bin, sex, condition cohort, etc.) to OnlineLDA while preserving Dirichlet conjugacy and the existing Spark-VI inference engine. Generalizes to any patient-level categorical via a `bin_id` column on the doc spec. Does **not** cover content covariates (covariate-dependent β), continuous covariates, or any structural-topic-model (STM) work.
 
 ---
