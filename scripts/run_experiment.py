@@ -387,15 +387,18 @@ DEFAULT_RUNS_DIR = "/home/dataproc/workspace/dataproc-staging-getting-started-wi
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    selector = parser.add_mutually_exclusive_group(required=True)
+    selector = parser.add_mutually_exclusive_group(required=False)
     selector.add_argument("--next", action="store_true",
                           help="Pick the lowest-id experiment with status: pending.")
     selector.add_argument("--id", type=int, default=None,
                           help="Run the experiment with the given numeric id.")
     parser.add_argument("--eval-only", action="store_true",
                         help="Skip fit dispatch; only run eval against the existing "
-                             "checkpoint at $RUNS_DIR/NNNN-slug/. Requires checkpoint "
-                             "manifest.json to exist.")
+                             "checkpoint at $RUNS_DIR/NNNN-slug/. If --id is omitted, "
+                             "auto-selects the most-recently-fit experiment "
+                             "(latest manifest.json mtime under $RUNS_DIR).")
+    parser.add_argument("--no-eval", action="store_true",
+                        help="Skip the eval dispatch at the end of the run. Fit only.")
     parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR,
                         help="Base directory for run output. Default: %(default)s")
     parser.add_argument("--experiments-dir", type=Path, default=EXPERIMENTS_DIR,
@@ -404,18 +407,41 @@ def main(argv: list[str] | None = None) -> int:
                         help="Where experiments/defaults/*.yaml files live.")
     args = parser.parse_args(argv)
 
+    if args.no_eval and args.eval_only:
+        print("[run-exp] ERROR: --no-eval and --eval-only are contradictory", flush=True)
+        return 2
+
     # 1. Select experiment file
     if args.next:
         exp_path = find_next_pending(args.experiments_dir)
         if exp_path is None:
             print("[run-exp] no pending experiments found", flush=True)
             return 1
-    else:
+    elif args.id is not None:
         try:
             exp_path = find_by_id(args.experiments_dir, args.id)
         except FileNotFoundError as e:
             print(f"[run-exp] ERROR: {e}", flush=True)
             return 2
+    elif args.eval_only:
+        # No --id with --eval-only: auto-select most-recently-fit experiment.
+        runs_dir_path = Path(args.runs_dir)
+        auto_id = find_most_recent_fit(runs_dir_path)
+        if auto_id is None:
+            print(f"[run-exp] ERROR: --eval-only without --id requires at least one "
+                  f"checkpoint under {runs_dir_path}; none found", flush=True)
+            return 2
+        print(f"[run-exp] --eval-only auto-selected most-recent-fit id={auto_id}",
+              flush=True)
+        try:
+            exp_path = find_by_id(args.experiments_dir, auto_id)
+        except FileNotFoundError as e:
+            print(f"[run-exp] ERROR: {e}", flush=True)
+            return 2
+    else:
+        print("[run-exp] ERROR: provide --next, --id N, or --eval-only "
+              "(auto-discovers most-recent-fit)", flush=True)
+        return 2
     print(f"[run-exp] experiment: {exp_path}", flush=True)
 
     # 2. Read frontmatter + merge defaults
@@ -485,6 +511,12 @@ def main(argv: list[str] | None = None) -> int:
             return fit_rc
         with summary_path.open("a") as f:
             f.write("\n### Session complete (exit 0)\n")
+
+    # Skip eval dispatch when --no-eval (fit-only mode).
+    if args.no_eval:
+        print("[run-exp] --no-eval: skipping eval dispatch", flush=True)
+        print(f"[run-exp] DONE. summary at: {summary_path}", flush=True)
+        return 0
 
     # 6. Dispatch eval (capture stdout into a string for sanitized append)
     eval_script = REPO_ROOT / "analysis" / "cloud" / "eval_coherence_cloud.py"
