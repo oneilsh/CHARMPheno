@@ -364,3 +364,47 @@ def test_append_eval_section_sanitizes_body(tmp_path):
     assert "mean NPMI: 0.2" in text
     assert "topic 0: 0.31" in text
     assert "person_hash" not in text
+
+
+def test_noise_patterns_drops_hadoop_info_log():
+    line = "26/05/28 20:46:09 INFO Configuration: resource-types.xml not found\n"
+    assert rx.sanitize_line(line, rx.DROP_PATTERNS) is None
+
+
+def test_noise_patterns_drops_yarn_log():
+    line = "26/05/28 20:46:10 INFO YarnClientImpl: Submitted application application_1779908374279_0012\n"
+    assert rx.sanitize_line(line, rx.DROP_PATTERNS) is None
+
+
+def test_noise_patterns_drops_gcs_chatter():
+    line = "26/05/28 20:46:13 INFO GoogleHadoopOutputStream: hflush(): No-op due to rate limit ...\n"
+    assert rx.sanitize_line(line, rx.DROP_PATTERNS) is None
+
+
+def test_noise_patterns_keep_driver_lines():
+    lines = [
+        "[driver] Spark 3.5.3, master=yarn, defaultParallelism=2\n",
+        "[driver]   iter 1/2: ELBO=-97881.5970, batch=245, rho=0.0538, 86.4s\n",
+        "[driver]   --- topics @ iter 1 ---\n",
+        "[driver]    topic  3  α=0.1969  E[β]=0.2405  Σλ=1.58e+03  ...\n",
+        "[driver] fit complete\n",
+    ]
+    for ln in lines:
+        assert rx.sanitize_line(ln, rx.DROP_PATTERNS) == ln, f"unexpectedly dropped: {ln!r}"
+
+
+def test_noise_patterns_keep_traceback_lines():
+    """Python tracebacks are signal, not noise — they explain failures."""
+    lines = [
+        "Traceback (most recent call last):\n",
+        '  File "/some/path.py", line 42, in main\n',
+        "FileNotFoundError: No manifest.json at resumeFrom path: ...\n",
+    ]
+    for ln in lines:
+        assert rx.sanitize_line(ln, rx.DROP_PATTERNS) == ln
+
+
+def test_drop_patterns_still_drops_patient_info():
+    """DROP_PATTERNS must be a superset of PATIENT_PATTERNS."""
+    line = "|person_hash|topicDistribution|\n"
+    assert rx.sanitize_line(line, rx.DROP_PATTERNS) is None

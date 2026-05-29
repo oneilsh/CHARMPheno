@@ -101,6 +101,23 @@ PATIENT_PATTERNS: list[re.Pattern] = [
     re.compile(r"transform sample", re.IGNORECASE),  # the phase marker bracketing it
 ]
 
+# Cluster log noise that has no signal value in the committed record.
+# These match the standard log4j-style timestamp prefix that Spark, Hadoop,
+# YARN, and the GCS connector emit. The wrapper drops them when writing to
+# summary.md but still tees them to stdout so they're visible during live
+# debugging.
+NOISE_PATTERNS: list[re.Pattern] = [
+    # log4j format: "YY/MM/DD HH:MM:SS LEVEL Logger: message"
+    re.compile(r"^\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} (INFO|WARN|DEBUG) "),
+    # Bracketed CONTEXT ratelimit_period footers from GCS connector
+    re.compile(r"\[CONTEXT ratelimit_period="),
+]
+
+# Composed: what summary.md drops. Callers pass DROP_PATTERNS at the sanitize
+# boundary; the split between PATIENT_PATTERNS (privacy) and NOISE_PATTERNS
+# (readability) is documentary.
+DROP_PATTERNS: list[re.Pattern] = PATIENT_PATTERNS + NOISE_PATTERNS
+
 
 def sanitize_line(line: str, patterns: list[re.Pattern]) -> str | None:
     """Return the line if safe to commit, or None to drop.
@@ -261,7 +278,7 @@ def append_eval_section(summary_path: Path, eval_stdout: str) -> None:
     with summary_path.open("a") as f:
         f.write("\n## Eval (NPMI)\n")
         for line in eval_stdout.splitlines(keepends=True):
-            clean = sanitize_line(line, PATIENT_PATTERNS)
+            clean = sanitize_line(line, DROP_PATTERNS)
             if clean is not None:
                 f.write(clean)
         if not eval_stdout.endswith("\n"):
@@ -351,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     fit_cmd = build_spark_submit_cmd(str(lda_script), lda_args, REPO_ROOT)
     # Display-only join; cmd is passed as list to Popen/run, not via shell.
     print(f"[run-exp] spark-submit: {' '.join(fit_cmd)}", flush=True)
-    fit_rc = run_subprocess_tee_sanitize(fit_cmd, summary_path, PATIENT_PATTERNS)
+    fit_rc = run_subprocess_tee_sanitize(fit_cmd, summary_path, DROP_PATTERNS)
     if fit_rc != 0:
         print(f"[run-exp] fit exited non-zero ({fit_rc}); skipping eval", flush=True)
         with summary_path.open("a") as f:
