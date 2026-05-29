@@ -408,3 +408,30 @@ def test_drop_patterns_still_drops_patient_info():
     """DROP_PATTERNS must be a superset of PATIENT_PATTERNS."""
     line = "|person_hash|topicDistribution|\n"
     assert rx.sanitize_line(line, rx.DROP_PATTERNS) is None
+
+
+def test_parse_iter_marker_extracts_iter_number():
+    line = "[driver]   iter 1/2: ELBO=-97881.5970, batch=245, rho=0.0538, 86.4s\n"
+    assert rx.parse_iter_marker(line) == 1
+
+
+def test_parse_iter_marker_extracts_higher_iter():
+    line = "[driver]   iter 17/40: ELBO=-1.234e9, batch=512, time=183s\n"
+    assert rx.parse_iter_marker(line) == 17
+
+
+def test_parse_iter_marker_returns_none_for_non_iter_lines():
+    lines = [
+        "[driver]   --- topics @ iter 1 ---\n",   # not an iter-start line
+        "[driver]    topic  3  α=0.1969  ...\n",
+        "[driver] fit complete\n",
+        "26/05/28 20:46:09 INFO Configuration: ...\n",
+        "\n",
+    ]
+    for ln in lines:
+        assert rx.parse_iter_marker(ln) is None, f"unexpectedly matched: {ln!r}"
+
+
+def test_parse_iter_marker_tolerates_no_newline():
+    """In case the wrapper passes a line without trailing newline."""
+    assert rx.parse_iter_marker("[driver]   iter 5/10: ELBO=-1.0") == 5

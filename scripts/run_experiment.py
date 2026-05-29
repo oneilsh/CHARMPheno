@@ -131,6 +131,19 @@ def sanitize_line(line: str, patterns: list[re.Pattern]) -> str | None:
     return line
 
 
+_ITER_MARKER = re.compile(r"^\[driver\]\s+iter\s+(\d+)/\d+:")
+
+
+def parse_iter_marker(line: str) -> int | None:
+    """Return the iter number from a `[driver]   iter N/M: ...` line, or None.
+
+    Used by the SIGTERM trap to know which iter was last in flight so the
+    killed marker can be informative.
+    """
+    m = _ITER_MARKER.match(line)
+    return int(m.group(1)) if m else None
+
+
 def build_lda_args(
     effective: dict, save_dir: Path, resume_from: Path | None,
 ) -> list[str]:
