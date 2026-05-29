@@ -585,6 +585,30 @@ class TestFindMostRecentFitNeedingBuild:
         os.utime(marker, (later, later))
         assert rx.find_most_recent_fit_needing_build(runs) is None
 
+    def test_treats_equal_mtime_as_current(self, tmp_path):
+        """Ties go to 'current' — `>=` not `>` in the staleness check.
+
+        Pins the design choice from the function's comment: when marker mtime
+        equals manifest mtime exactly, the bundle is treated as current and
+        the fit is skipped. A future regression that changed `>=` to `>` would
+        be caught here.
+        """
+        import os
+        runs = tmp_path / "runs"
+        d = runs / "0001-pilot"
+        d.mkdir(parents=True)
+        manifest = d / "manifest.json"
+        manifest.write_text("{}")
+        bundle = d / "dashboard_bundle"
+        bundle.mkdir()
+        marker = bundle / "corpus_stats.json"
+        marker.write_text("{}")
+        # Force both files to exactly the same mtime
+        t = manifest.stat().st_mtime
+        os.utime(marker, (t, t))
+        os.utime(manifest, (t, t))
+        assert rx.find_most_recent_fit_needing_build(runs) is None
+
     def test_picks_stale_bundle(self, tmp_path):
         import os
         runs = tmp_path / "runs"
