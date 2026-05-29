@@ -1,12 +1,12 @@
 ---
 id: 1
 slug: pilot
-status: done
+status: pending
 model_class: lda
 cohort: dementia
 created: 2026-05-28
 K: 5
-max_iter: 2
+max_iter: 5
 vocab_size: 500
 print_topics_every: 1
 ---
@@ -31,6 +31,12 @@ mark `status: done` and the next real experiment starts at 0002.
   Commit `d971796`.
 - 2026-05-28 20:52 UTC — **Session 3**: clean run. Fresh fit, 2 iters,
   aggregates written, eval ran, NPMI per-topic table printed.
+- 2026-05-29 — Status flipped back to `pending` (and `max_iter` bumped 2→5) to
+  validate the Increment 2 / 2.5 chain: `make next-exp NO_EVAL=1 && make eval-exp`.
+  Expected: fit auto-resumes from the existing checkpoint, runs 3 more iters,
+  writes `## Fit session 4` with `--no-eval` skipping eval; then `eval-exp`
+  auto-discovers id=1 (most-recent manifest.json) and appends a timestamped
+  `## Eval (NPMI) — <ts>` section.
 
 ## Results
 
