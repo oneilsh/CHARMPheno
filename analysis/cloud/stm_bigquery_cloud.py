@@ -167,6 +167,11 @@ def main() -> int:
 
         # --- Augment STMModel metadata with corpus_manifest + covariate_manifest ---
         with _phase("augment metadata"):
+            # Build an index-ordered vocab list (matching LDA's layout so that
+            # build_dashboard_cloud.py can read result.metadata["vocab"] uniformly).
+            vocab_list: list = [None] * len(vocab_map)
+            for cid, idx in vocab_map.items():
+                vocab_list[idx] = cid
             stm_model.metadata.setdefault("corpus_manifest", {
                 "cdr": args.cdr,
                 "source_table": args.source_table,
@@ -174,9 +179,16 @@ def main() -> int:
                 "person_mod": args.person_mod,
                 "doc_spec": doc_spec.manifest(),
                 "vocab_size": len(vocab_map),
-                "vocab": list(vocab_map.keys()),
+                # Keep nested copies for manifest self-containment (same dual
+                # storage as lda_bigquery_cloud.py).
+                "vocab": vocab_list,
                 "name_by_id": name_by_id,
             })
+            # Top-level vocab + name_by_id mirror LDA's VIResult metadata layout
+            # so build_dashboard_cloud.py can read them uniformly via
+            # result.metadata.get("vocab") without knowing the model class.
+            stm_model.metadata["vocab"] = vocab_list
+            stm_model.metadata["name_by_id"] = name_by_id
             stm_model.metadata["covariate_manifest"] = {
                 "covariate_formula": args.covariate_formula,
                 "categorical_cols": cat_cols,
