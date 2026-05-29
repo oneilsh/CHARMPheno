@@ -28,3 +28,158 @@ class TestSTMDocument:
         )
         with pytest.raises((AttributeError, TypeError)):
             doc.length = 99
+
+
+from scipy.special import softmax
+
+from spark_vi.models.topic.stm import _stm_neg_log_joint, _stm_neg_log_joint_grad
+
+
+def _make_small_doc_state(seed=0):
+    """Construct a small (K, V, P) state for gradient / Hessian tests."""
+    rng = np.random.default_rng(seed)
+    K, V, P = 3, 5, 2
+    # ExpElogbeta-style nonnegative K x V matrix, columns summing roughly to 1.
+    expElogbeta = rng.gamma(shape=2.0, scale=1.0, size=(K, V))
+    expElogbeta = expElogbeta / expElogbeta.sum(axis=0, keepdims=True)
+    Gamma = rng.normal(size=(P, K))
+    Sigma_diag = rng.gamma(shape=2.0, scale=0.5, size=K)
+    x = rng.normal(size=P)
+    indices = np.array([0, 2, 4], dtype=np.int32)
+    counts = np.array([2.0, 1.0, 3.0], dtype=np.float64)
+    return dict(
+        K=K, V=V, P=P, expElogbeta=expElogbeta, Gamma=Gamma,
+        Sigma_diag=Sigma_diag, x=x, indices=indices, counts=counts,
+    )
+
+
+class TestSTMGradient:
+    def test_gradient_matches_finite_difference(self):
+        st = _make_small_doc_state(seed=42)
+        rng = np.random.default_rng(0)
+        eta = rng.normal(size=st["K"]) * 0.3
+
+        analytic = _stm_neg_log_joint_grad(
+            eta,
+            indices=st["indices"], counts=st["counts"],
+            expElogbeta=st["expElogbeta"],
+            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+        )
+
+        eps = 1e-6
+        numeric = np.zeros_like(eta)
+        for k in range(st["K"]):
+            eta_p = eta.copy(); eta_p[k] += eps
+            eta_m = eta.copy(); eta_m[k] -= eps
+            f_p = _stm_neg_log_joint(
+                eta_p, indices=st["indices"], counts=st["counts"],
+                expElogbeta=st["expElogbeta"],
+                Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+            )
+            f_m = _stm_neg_log_joint(
+                eta_m, indices=st["indices"], counts=st["counts"],
+                expElogbeta=st["expElogbeta"],
+                Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+            )
+            numeric[k] = (f_p - f_m) / (2 * eps)
+
+        np.testing.assert_allclose(analytic, numeric, rtol=1e-4, atol=1e-6)
+
+
+from spark_vi.models.topic.stm import _stm_neg_log_joint_hessian
+
+
+class TestSTMHessian:
+    def test_hessian_matches_finite_difference_of_grad(self):
+        st = _make_small_doc_state(seed=7)
+        rng = np.random.default_rng(1)
+        eta = rng.normal(size=st["K"]) * 0.3
+
+        analytic = _stm_neg_log_joint_hessian(
+            eta, indices=st["indices"], counts=st["counts"],
+            expElogbeta=st["expElogbeta"],
+            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+        )
+
+        eps = 1e-5
+        numeric = np.zeros((st["K"], st["K"]))
+        for j in range(st["K"]):
+            eta_p = eta.copy(); eta_p[j] += eps
+            eta_m = eta.copy(); eta_m[j] -= eps
+            g_p = _stm_neg_log_joint_grad(
+                eta_p, indices=st["indices"], counts=st["counts"],
+                expElogbeta=st["expElogbeta"],
+                Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+            )
+            g_m = _stm_neg_log_joint_grad(
+                eta_m, indices=st["indices"], counts=st["counts"],
+                expElogbeta=st["expElogbeta"],
+                Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+            )
+            numeric[:, j] = (g_p - g_m) / (2 * eps)
+
+        np.testing.assert_allclose(analytic, numeric, rtol=1e-3, atol=1e-5)
+
+    def test_hessian_is_symmetric(self):
+        st = _make_small_doc_state(seed=11)
+        rng = np.random.default_rng(2)
+        eta = rng.normal(size=st["K"]) * 0.3
+        H = _stm_neg_log_joint_hessian(
+            eta, indices=st["indices"], counts=st["counts"],
+            expElogbeta=st["expElogbeta"],
+            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+        )
+        np.testing.assert_allclose(H, H.T, rtol=1e-12, atol=1e-12)
+
+    def test_hessian_positive_definite_at_typical_point(self):
+        st = _make_small_doc_state(seed=13)
+        rng = np.random.default_rng(3)
+        eta = rng.normal(size=st["K"]) * 0.3
+        H = _stm_neg_log_joint_hessian(
+            eta, indices=st["indices"], counts=st["counts"],
+            expElogbeta=st["expElogbeta"],
+            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+        )
+        # Negative log joint is convex in η for prevalence-only STM with
+        # diagonal Σ + nonnegative β; H should be PD.
+        eigs = np.linalg.eigvalsh(H)
+        assert np.all(eigs > 0), f"Hessian not PD: eigs={eigs}"
+
+
+from spark_vi.models.topic.stm import _stm_doc_inference
+
+
+class TestSTMDocInference:
+    def test_converges_to_stationary_point(self):
+        st = _make_small_doc_state(seed=99)
+        eta_hat, nu_d, n_iter = _stm_doc_inference(
+            indices=st["indices"], counts=st["counts"],
+            expElogbeta=st["expElogbeta"],
+            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+            max_iter=200, tol=1e-6,
+        )
+        # Gradient at η̂ should be ~zero.
+        g = _stm_neg_log_joint_grad(
+            eta_hat, indices=st["indices"], counts=st["counts"],
+            expElogbeta=st["expElogbeta"],
+            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+        )
+        assert np.linalg.norm(g) < 1e-4, f"|g|={np.linalg.norm(g)} not converged"
+        assert nu_d.shape == (st["K"], st["K"])
+        # ν_d is symmetric positive definite.
+        np.testing.assert_allclose(nu_d, nu_d.T, atol=1e-10)
+        eigs = np.linalg.eigvalsh(nu_d)
+        assert np.all(eigs > 0)
+
+    def test_strong_prior_pulls_eta_toward_prior_mean(self):
+        st = _make_small_doc_state(seed=1)
+        # Override Σ to be very tight: posterior should ~= prior mean Γᵀx.
+        Sigma_tight = np.full(st["K"], 1e-6)
+        prior_mean = st["Gamma"].T @ st["x"]
+        eta_hat, _, _ = _stm_doc_inference(
+            indices=st["indices"], counts=st["counts"],
+            expElogbeta=st["expElogbeta"],
+            Gamma=st["Gamma"], Sigma_diag=Sigma_tight, x=st["x"],
+            max_iter=200, tol=1e-8,
+        )
+        np.testing.assert_allclose(eta_hat, prior_mean, atol=1e-3)
