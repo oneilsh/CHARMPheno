@@ -196,3 +196,42 @@ class TestComputeELBO:
         elbo_low_kl = m.compute_elbo(gp_low_kl, agg)
         elbo_high_kl = m.compute_elbo(gp_high_kl, agg)
         assert elbo_high_kl < elbo_low_kl
+
+
+class TestInferLocal:
+    def test_returns_eta_theta_for_single_doc(self):
+        m = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
+        gp = m.initialize_global(None)
+        from spark_vi.models.topic.types import STMDocument
+        doc = STMDocument(
+            indices=np.array([0, 3], dtype=np.int32),
+            counts=np.array([2.0, 1.0]),
+            length=3,
+            x=np.array([0.5, -0.3]),
+        )
+        out = m.infer_local(doc, gp)
+        assert out["eta"].shape == (3,)
+        assert out["theta"].shape == (3,)
+        np.testing.assert_allclose(out["theta"].sum(), 1.0, atol=1e-10)
+        assert np.all(out["theta"] > 0)
+
+
+class TestIterationSummary:
+    def test_returns_compact_string(self):
+        m = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
+        gp = m.initialize_global(None)
+        s = m.iteration_summary(gp)
+        assert isinstance(s, str)
+        assert "Γ" in s or "Gamma" in s
+        assert "Σ" in s or "Sigma" in s
+
+
+class TestIterationDiagnostics:
+    def test_returns_traceable_arrays(self):
+        m = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
+        gp = m.initialize_global(None)
+        d = m.iteration_diagnostics(gp)
+        assert "Gamma" in d
+        assert "Sigma" in d
+        assert d["Gamma"].shape == (2, 3)
+        assert d["Sigma"].shape == (3,)

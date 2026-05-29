@@ -407,6 +407,48 @@ class OnlineSTM(VIModel):
         )
 
 
+    def infer_local(self, row: STMDocument, global_params: dict[str, np.ndarray]):
+        """Single-document MAP inference under fixed global params.
+
+        Pure function of (row, global_params). Uses the same cold-start
+        L-BFGS as local_update; returns eta (the MAP point) and theta
+        (softmax of eta) for downstream consumers.
+        """
+        lam = global_params["lambda"]
+        Gamma = global_params["Gamma"]
+        Sigma_diag = global_params["Sigma"]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+        eta_hat, _, _ = _stm_doc_inference(
+            indices=row.indices, counts=row.counts,
+            expElogbeta=expElogbeta,
+            Gamma=Gamma, Sigma_diag=Sigma_diag, x=row.x,
+            max_iter=self.lbfgs_max_iter, tol=self.lbfgs_tol,
+        )
+        return {"eta": eta_hat, "theta": _softmax(eta_hat)}
+
+    def iteration_summary(self, global_params: dict[str, np.ndarray]) -> str:
+        """Compact per-iter view of Γ scale, Σ scale, and λ row-mass spread."""
+        Gamma = global_params["Gamma"]
+        Sigma = global_params["Sigma"]
+        lam = global_params["lambda"]
+        lam_row_sums = lam.sum(axis=1)
+        return (
+            f"|Γ|[max={np.abs(Gamma).max():.3g} mean={np.abs(Gamma).mean():.3g}], "
+            f"Σ[min={Sigma.min():.3g} max={Sigma.max():.3g}], "
+            f"Σλ_k[min={lam_row_sums.min():.3g} max={lam_row_sums.max():.3g}]"
+        )
+
+    def iteration_diagnostics(
+        self, global_params: dict[str, np.ndarray],
+    ) -> dict[str, float | np.ndarray]:
+        """Per-iter trajectories of Γ and Σ (small; safe to persist every iter)."""
+        return {
+            "Gamma": np.asarray(global_params["Gamma"]),
+            "Sigma": np.asarray(global_params["Sigma"]),
+        }
+
+
 def _dirichlet_kl(q_alpha: np.ndarray, p_alpha: np.ndarray) -> float:
     """KL(Dirichlet(q_alpha) || Dirichlet(p_alpha)). Same as in LDA's stm.py uses."""
     qsum = q_alpha.sum()
