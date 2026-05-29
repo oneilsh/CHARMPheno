@@ -12,6 +12,79 @@ elsewhere.
 
 ---
 
+## 2026-05-29 — Experiment tracking Inc 2 / 2.5 + pilot chain validation
+
+Two follow-on increments to the experiment-tracking system shipped in Inc 1
+(2026-05-28). The first (Inc 2 "lean") added the cosmetic and ergonomic gaps
+caught when the original pilot's `summary.md` was first reviewed: Spark/Hadoop
+INFO log filtering, a `### Eval complete (exit 0)` marker, timestamped eval
+section headers, an explicit `--eval-only` flag with a `make eval-exp ID=`
+target, and SIGTERM/SIGINT trapping that writes `### Killed at iter N`. The
+second (Inc 2.5 "ergonomic split") added a `NO_EVAL=1` opt-out for
+`make next-exp` and let `make eval-exp` (no argument) auto-discover the most
+recent fit via manifest-mtime — addressing the workflow where a fit and an
+eval want to be separately rerun.
+
+Both increments shipped behind unit tests (test count grew from 32 → 49 across
+the two) and validated end-to-end on the cluster by reactivating Pilot 0001
+and running the full `git pull && make next-exp NO_EVAL=1 && make eval-exp`
+chain. The pilot's `summary.md` now demonstrates the full Inc-1-through-2.5
+contract in one accumulating record: two failed sessions with exit codes, two
+clean fit sessions (the second auto-resumed from the first's checkpoint, with
+zero Spark INFO noise), and two evals (one integrated into Session 3's fit,
+one separately re-run via the auto-discovery path with a timestamped header
+and a matching `### Eval complete` marker).
+
+### Plans shipped
+
+- **Increment 2 (lean)** — `docs/superpowers/plans/2026-05-29-experiment-tracking-increment-2.md`.
+  Six tasks: `NOISE_PATTERNS` extension to `sanitize_line`; SIGTERM/SIGINT trap
+  with `_SignalReceived` + killed-at-iter marker; timestamped eval header +
+  `### Eval complete` marker; `--eval-only` flag wiring; `make eval-exp ID=`
+  target; one batch of unit-test additions (12 new tests). Commit range
+  driven by subagent-driven-development workflow with per-task spec and
+  code-quality review loops.
+- **Increment 2.5 (ergonomic split)** — `docs/superpowers/plans/2026-05-29-experiment-tracking-increment-2-5.md`.
+  Three tasks: `NO_EVAL=1` Make conditional that forwards `--no-eval` to the
+  wrapper; `find_most_recent_fit` helper that scans `runs/` for the
+  newest-mtime `manifest.json`; `make eval-exp` (no argument) auto-discovery
+  + appropriate "no fits found" error pathway. Five new tests added.
+
+### Pilot 0001 — closed out
+
+Status flipped `done → pending` to drive the chain validation, then back to
+`done` after Session 4 + the second eval completed. The pilot record
+(`docs/experiments/0001-pilot.md`) now embeds both the original 3-session
+run and the chain-validation Session 4 + eval as side-by-side transcripts,
+with interpretation covering the iter-count semantics gotcha (driver treats
+`max_iter` as iters-to-run-this-call, not cumulative — Session 4 ran 5 fresh
+iters on top of Session 3's 2, so the final checkpoint reflects 7 total VI
+iterations) and the NPMI drift (mean +0.30 → +0.29 as Topic 1 specialized
+toward dementia-adjacent rare-ish concepts and traded coherence-vs-corpus for
+coherence-vs-cohort).
+
+### Open threads parked
+
+- **Increment 3 — structured per-iter parsing.** The current `summary.md`
+  format is bounded but verbose. A first-class `### Iter N` subsection parser
+  + an `experiments/.cache/` rollup is the natural next step. Same plan
+  document also parks: HDP support in the wrapper (currently LDA-only),
+  `warm_start_from` for cross-experiment lineage, `build-dashboard-exp` target,
+  Spark config promotion from `SPARK_SUBMIT_FLAGS` constants to YAML, and
+  per-deployment `runs-dir` override.
+- **Cumulative `max_iter` semantics.** Worth a separate ADR if we ever want
+  resume to mean "add N more" rather than "run N this call". Inherited from
+  `spark_vi.mllib.topic.lda`; the experiment-tracking wrapper has no opinion
+  on it.
+- **REVIEW_LOG.md for Inc 2 / 2.5 itself.** This entry.
+
+### New docs
+
+- `docs/superpowers/plans/2026-05-29-experiment-tracking-increment-2.md`
+- `docs/superpowers/plans/2026-05-29-experiment-tracking-increment-2-5.md`
+
+---
+
 ## 2026-05-28 — patient_prevalence, β-writer, min_patient_count, driver extraction (scoped retrospective + cleanups)
 
 Five-lesson scoped walkthrough of three interlocking plans plus an
