@@ -254,6 +254,86 @@ def build_lda_args(
     return args
 
 
+def validate_frontmatter(fm: dict) -> None:
+    """Validate experiment frontmatter; exit(2) on missing/invalid fields."""
+    required = ["id", "slug", "cohort", "model_class"]
+    for key in required:
+        if key not in fm:
+            print(f"[run-exp] ERROR: frontmatter missing required field {key!r}",
+                  flush=True)
+            sys.exit(2)
+
+    model_class = fm["model_class"]
+    if model_class not in ("lda", "stm"):
+        print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
+              f"(currently: lda, stm; hdp planned)", flush=True)
+        sys.exit(2)
+
+    if model_class == "stm":
+        stm_required = ["covariate_formula", "categorical_cols", "continuous_cols"]
+        for key in stm_required:
+            if key not in fm:
+                print(f"[run-exp] ERROR: model_class=stm requires "
+                      f"frontmatter field {key!r}", flush=True)
+                sys.exit(2)
+
+
+def build_fit_driver_path(effective: dict) -> str:
+    """Return path (relative to repo root) to the fit driver for this model_class."""
+    model_class = effective.get("model_class", "lda")
+    base = "analysis/cloud"
+    if model_class == "lda":
+        return f"{base}/lda_bigquery_cloud.py"
+    if model_class == "stm":
+        return f"{base}/stm_bigquery_cloud.py"
+    raise ValueError(f"no fit driver for model_class={model_class!r}")
+
+
+def build_fit_args(effective: dict, out_dir: str) -> list[str]:
+    """Build argv for the fit driver, dispatching on model_class."""
+    model_class = effective.get("model_class", "lda")
+    if model_class == "lda":
+        return build_lda_args(effective, Path(out_dir), None)  # delegate to existing
+    if model_class == "stm":
+        return build_stm_args(effective, out_dir)
+    raise ValueError(f"unknown model_class: {model_class!r}")
+
+
+def build_stm_args(effective: dict, out_dir: str) -> list[str]:
+    """Build argv for analysis/cloud/stm_bigquery_cloud.py."""
+    common = [
+        "--source-table", str(effective["source_table"]),
+        "--doc-unit", str(effective.get("doc_unit", "patient_year")),
+        "--doc-min-length", str(effective["doc_min_length"]),
+        "--K", str(effective["K"]),
+        "--max-iter", str(effective["max_iter"]),
+        "--vocab-size", str(effective["vocab_size"]),
+        "--min-df", str(effective["min_df"]),
+        "--min-patient-count", str(effective["min_patient_count"]),
+        "--subsampling-rate", str(effective["subsampling_rate"]),
+        "--tau0", str(effective["tau0"]),
+        "--kappa", str(effective["kappa"]),
+        "--save-interval", str(effective["save_interval"]),
+        "--person-mod", str(effective["person_mod"]),
+        "--seed", str(effective["seed"]),
+        "--cohort", str(effective.get("cohort_def", effective.get("cohort", ""))),
+        "--save-dir", str(out_dir),
+    ]
+    if effective.get("cache_uri"):
+        common.extend(["--cache-uri", str(effective["cache_uri"])])
+    if effective.get("random_seed") is not None:
+        common.extend(["--random-seed", str(effective["random_seed"])])
+    return common + [
+        "--covariate-formula", str(effective["covariate_formula"]),
+        "--categorical-cols", ",".join(effective.get("categorical_cols", [])),
+        "--continuous-cols", ",".join(effective.get("continuous_cols", [])),
+        "--sigma-init", str(effective.get("sigma_init", 1.0)),
+        "--sigma-ridge", str(effective.get("sigma_ridge", 1e-6)),
+        "--lbfgs-max-iter", str(effective.get("lbfgs_max_iter", 50)),
+        "--lbfgs-tol", str(effective.get("lbfgs_tol", 1e-4)),
+    ]
+
+
 def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:
     """Build the CLI arg list for eval_coherence_cloud.py."""
     return [
@@ -554,15 +634,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         print(f"[run-exp] ERROR: {e}", flush=True)
         return 2
-    required = ["id", "slug", "cohort", "model_class"]
-    for k in required:
-        if k not in fm:
-            print(f"[run-exp] ERROR: frontmatter missing required field {k!r}", flush=True)
-            return 2
-    if fm["model_class"] != "lda":
-        print(f"[run-exp] ERROR: only model_class: lda supported in Increment 1 "
-              f"(got {fm['model_class']!r})", flush=True)
-        return 2
+    validate_frontmatter(fm)
     try:
         defaults = load_defaults(fm["cohort"], args.defaults_dir)
     except FileNotFoundError as e:
@@ -604,9 +676,13 @@ def main(argv: list[str] | None = None) -> int:
         mode = "--eval-only" if args.eval_only else "--build-only"
         print(f"[run-exp] {mode}: skipping fit dispatch", flush=True)
     else:
-        lda_script = REPO_ROOT / "analysis" / "cloud" / "lda_bigquery_cloud.py"
-        lda_args = build_lda_args(effective, save_dir, resume_from)
-        fit_cmd = build_spark_submit_cmd(str(lda_script), lda_args, REPO_ROOT)
+        fit_script = REPO_ROOT / build_fit_driver_path(effective)
+        # LDA supports resume_from via build_lda_args; other models use build_fit_args.
+        if effective.get("model_class", "lda") == "lda":
+            fit_args = build_lda_args(effective, save_dir, resume_from)
+        else:
+            fit_args = build_fit_args(effective, str(save_dir))
+        fit_cmd = build_spark_submit_cmd(str(fit_script), fit_args, REPO_ROOT)
         # Display-only join; cmd is passed as list to Popen/run, not via shell.
         print(f"[run-exp] spark-submit: {' '.join(fit_cmd)}", flush=True)
         fit_rc = run_subprocess_tee_sanitize(fit_cmd, summary_path, DROP_PATTERNS)

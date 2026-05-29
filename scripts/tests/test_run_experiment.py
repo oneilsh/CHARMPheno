@@ -387,6 +387,44 @@ def test_noise_patterns_drops_gcs_chatter():
     assert rx.sanitize_line(line, rx.DROP_PATTERNS) is None
 
 
+class TestModelClassDispatch:
+    def test_stm_passes_validation(self):
+        fm = {
+            "id": "0099-test", "slug": "test", "cohort": "dementia",
+            "model_class": "stm", "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"], "continuous_cols": ["age"],
+        }
+        # Should not raise (LDA gate previously rejected anything != "lda").
+        from run_experiment import validate_frontmatter
+        validate_frontmatter(fm)  # idempotent — passes for stm with required keys
+
+    def test_stm_requires_covariate_formula(self):
+        fm = {
+            "id": "0099-test", "slug": "test", "cohort": "dementia",
+            "model_class": "stm",
+            # covariate_formula missing
+        }
+        from run_experiment import validate_frontmatter
+        with pytest.raises(SystemExit):
+            validate_frontmatter(fm)
+
+    def test_build_fit_args_dispatches_to_stm_driver(self):
+        fm = {
+            "id": "0099", "slug": "test", "cohort": "dementia",
+            "model_class": "stm", "covariate_formula": "~ C(sex)",
+            "categorical_cols": ["sex"], "continuous_cols": [],
+        }
+        effective = {**fm, "K": 40, "max_iter": 20}
+        from run_experiment import build_fit_driver_path
+        path = build_fit_driver_path(effective)
+        assert path.endswith("stm_bigquery_cloud.py")
+
+    def test_build_fit_driver_path_lda(self):
+        from run_experiment import build_fit_driver_path
+        path = build_fit_driver_path({"model_class": "lda"})
+        assert path.endswith("lda_bigquery_cloud.py")
+
+
 def test_noise_patterns_keep_driver_lines():
     lines = [
         "[driver] Spark 3.5.3, master=yarn, defaultParallelism=2\n",
