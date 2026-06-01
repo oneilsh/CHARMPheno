@@ -1,6 +1,11 @@
 {
-  "default": "cancer",
+  "default": "general",
   "cohorts": [
+    {
+      "id": "general",
+      "label": "General Population (1 year windows)",
+      "description": "The full study population with no clinical inclusion criteria — every patient's 1-year condition windows, with no index diagnosis or cohort filter applied. A broad baseline against which the disease-specific cohorts can be compared."
+    },
     {
       "id": "cancer",
       "label": "Cancer (1 year windows post-diagnosis)",
@@ -9,12 +14,7 @@
     {
       "id": "dementia",
       "label": "Dementia (1 year windows post-diagnosis)",
-      "description": "Patients with a first all-cause dementia diagnosis (SNOMED 4182210 and descendants \u2014 Alzheimer's, vascular dementia, Lewy body dementia, frontotemporal dementia, dementia NOS, mixed dementia). The document window is the 365 days starting at that first diagnosis, capturing the early-stage comorbidity cascade (delirium, falls, polypharmacy, behavioral disturbance, aspiration pneumonia). Patients must have at least 365 days of observation_period coverage both before and after the index date, so 'first' is meaningful and the follow-up window is fully observed."
-    },
-    {
-      "id": "local-test",
-      "label": "local-test",
-      "description": ""
+      "description": "Patients with a first all-cause dementia diagnosis (SNOMED 4182210 and descendants — Alzheimer's, vascular dementia, Lewy body dementia, frontotemporal dementia, dementia NOS, mixed dementia). The document window is the 365 days starting at that first diagnosis, capturing the early-stage comorbidity cascade (delirium, falls, polypharmacy, behavioral disturbance, aspiration pneumonia). Patients must have at least 365 days of observation_period coverage both before and after the index date, so 'first' is meaningful and the follow-up window is fully observed."
     }
   ]
 }
