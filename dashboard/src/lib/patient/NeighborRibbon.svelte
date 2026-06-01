@@ -1,6 +1,7 @@
 <script lang="ts">
   import { selectedPatientId, patientsById, advancedView } from '../store'
   import ProfileBar from './ProfileBar.svelte'
+  import { copy } from '../copy'
   export let neighbors: string[]
 
   // In basic mode, drop neighbors whose dominant is dead/mixed so the
@@ -15,7 +16,7 @@
 <section class="ribbon">
   <header class="head">
     <span class="eyebrow">Cohort</span>
-    <h3>Patients with similar profiles</h3>
+    <h3>{copy.neighborRibbon.heading}</h3>
   </header>
 
   <div class="strip">

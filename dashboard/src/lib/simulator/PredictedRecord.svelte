@@ -1,6 +1,7 @@
 <script lang="ts">
   import { bundle, simulatorPrefix } from '../store'
   import { quantiles } from './runSamples'
+  import { copy } from '../copy'
   export let codeCountsSamples: Map<number, number>[] = []
   export let topN = 12
 
@@ -40,11 +41,11 @@
   <div class="block">
     <header>
       <span class="eyebrow">Posterior predictive</span>
-      <h4>Model expects to also see</h4>
-      <p class="sub">Across {codeCountsSamples.length} simulated years, the model most often fills these in. The bar shows how often this condition shows up (P10 → P90, tick at median).</p>
+      <h4>{copy.predictedRecord.heading}</h4>
+      <p class="sub">{copy.predictedRecord.sub(codeCountsSamples.length)}</p>
     </header>
     {#if predictedRows.length === 0}
-      <p class="hint">{codeCountsSamples.length === 0 ? 'Run the simulator to see what the model predicts.' : 'The model did not predict any additional conditions in this run.'}</p>
+      <p class="hint">{codeCountsSamples.length === 0 ? copy.predictedRecord.hintEmpty : copy.predictedRecord.hintNone}</p>
     {:else}
       <table>
         <tbody>

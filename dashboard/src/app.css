@@ -384,3 +384,96 @@ button.btn {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* ──────────────────────────────────────────────────────────────────────
+   Guided tour (Shepherd) theme.
+
+   Shepherd renders its popovers and overlay into document.body, outside any
+   Svelte-scoped CSS, so the theme lives here and globally. Every step gets
+   the `charm-tour-step` class (set in tour.ts); selectors lead with
+   `.shepherd-element.charm-tour-step` so they out-specify Shepherd's base
+   stylesheet regardless of bundle order. Mirrors the "what is this?" popover
+   look — surface card, accent left-rule, ink/accent buttons.
+   ────────────────────────────────────────────────────────────────────── */
+.shepherd-element.charm-tour-step {
+  font-family: var(--font-body);
+  max-width: 360px;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  /* Drop Shepherd's 0.3s opacity fade. On a heavy tab (the Patient atlas
+     runs a synchronous UMAP fit on mount) the fade fires mid-compute and
+     stalls part-way, leaving the popover translucent. A guided tour reads
+     better appearing instantly anyway. */
+  transition: none;
+}
+.shepherd-element.charm-tour-step .shepherd-content { border-radius: var(--radius-sm); }
+
+/* Header + title: drop Shepherd's grey title bar for a flat surface card. */
+.shepherd-element.charm-tour-step.shepherd-has-title .shepherd-content .shepherd-header {
+  background: transparent;
+  padding: 0.9rem 0.9rem 0;
+}
+.shepherd-element.charm-tour-step .shepherd-title {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+  color: var(--ink);
+}
+
+/* Body copy + inline emphasis (the `body` strings are HTML). */
+.shepherd-element.charm-tour-step .shepherd-text {
+  color: var(--ink-muted);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+  padding: 0.55rem 0.9rem 0.2rem;
+}
+.shepherd-element.charm-tour-step .shepherd-text em { font-style: italic; color: var(--ink); }
+.shepherd-element.charm-tour-step .shepherd-text strong { font-weight: 600; color: var(--ink); }
+
+/* Cancel (×) */
+.shepherd-element.charm-tour-step .shepherd-cancel-icon,
+.shepherd-element.charm-tour-step.shepherd-has-title .shepherd-content .shepherd-cancel-icon {
+  color: var(--ink-faint);
+  font-size: 1.5em;
+}
+.shepherd-element.charm-tour-step .shepherd-cancel-icon:hover { color: var(--ink); }
+
+/* Footer + buttons. Primary (Next/Done) = accent; secondary (Back) = recessed. */
+.shepherd-element.charm-tour-step .shepherd-footer {
+  padding: 0.45rem 0.9rem 0.9rem;
+  gap: 0.5rem;
+}
+.shepherd-element.charm-tour-step .shepherd-button {
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: var(--fs-small);
+  font-weight: 500;
+  padding: 0.4rem 0.95rem;
+  margin-right: 0;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.shepherd-element.charm-tour-step .shepherd-button:not(:disabled):hover {
+  background: var(--accent-hover);
+  color: #fff;
+}
+.shepherd-element.charm-tour-step .shepherd-button.shepherd-button-secondary {
+  background: var(--surface-recessed);
+  color: var(--ink-muted);
+  border: 1px solid var(--rule-strong);
+}
+.shepherd-element.charm-tour-step .shepherd-button.shepherd-button-secondary:not(:disabled):hover {
+  background: var(--surface-deep);
+  color: var(--ink);
+}
+
+/* Arrow matches the card surface (Shepherd defaults it to grey on titled
+   bottom-placed popovers). */
+.shepherd-element.charm-tour-step .shepherd-arrow:before,
+.shepherd-element.charm-tour-step.shepherd-has-title[data-popper-placement^="bottom"] .shepherd-arrow:before {
+  background: var(--surface);
+}

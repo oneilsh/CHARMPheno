@@ -10,6 +10,7 @@
   import { displayedDominant } from '../dominant'
   import { ensurePatientProjection } from './projection'
   import type { Phenotype, SyntheticPatient } from '../types'
+  import { copy } from '../copy'
 
   // Patient atlas is a de-novo 2D UMAP of the patient theta vectors using
   // cosine distance (the right metric for topic mixtures). UMAP surfaces
@@ -184,7 +185,7 @@
   onMount(render)
 </script>
 
-<figure class="map">
+<figure class="map" data-tour="patient-map">
   <div class="canvas">
     <svg bind:this={svgEl} role="img" aria-label="Patient atlas" preserveAspectRatio="xMidYMid meet"></svg>
     {#if $patientProjectionFitting || !$patientProjection}
@@ -197,11 +198,9 @@
   <figcaption class="legend">
     {#if $cohort}
       <div class="legend-row">
-        <span class="eyebrow" title="Each dot is one synthetic patient. Position comes from a 2D UMAP of patient phenotype mixes using cosine distance. Patients near each other have similar phenotype profiles. Dot color matches the dominant phenotype's color in this patient's profile bar.">{visibleCount} synthetic patients · color = dominant phenotype</span>
+        <span class="eyebrow" title={copy.patientMap.legendTip}>{visibleCount} synthetic patients · color = dominant phenotype</span>
       </div>
-      <div class="legend-note">
-        Patients with mixed or unclear phenotypes are excluded in basic view, toggle advanced mode to see all patients.
-      </div>
+      <div class="legend-note">{copy.patientMap.legendNote}</div>
     {/if}
   </figcaption>
 </figure>

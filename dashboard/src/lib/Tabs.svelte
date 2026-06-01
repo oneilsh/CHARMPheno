@@ -9,6 +9,7 @@
       class:active={$route === t.id}
       on:click={() => go(t.id)}
       aria-current={$route === t.id ? 'page' : undefined}
+      data-tour="tab-{t.id}"
     >
       <span class="label">{t.label}</span>
     </button>

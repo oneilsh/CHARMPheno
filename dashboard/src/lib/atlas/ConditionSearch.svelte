@@ -1,6 +1,7 @@
 <script lang="ts">
   import { bundle, searchedConditionIdx, isVisibleInCurrentMode } from '../store'
   import { phenotypesContainingCode } from '../inference'
+  import { copy } from '../copy'
 
   // Label used in the active-chip ("Highlighting <entityLabel> with ...").
   // The same store-backed searchedConditionIdx drives highlighting on both
@@ -129,7 +130,7 @@
   {/if}
 
   {#if selectedCondition}
-    <div class="active-chip" title="{entityLabel.charAt(0).toUpperCase() + entityLabel.slice(1)} containing this condition are highlighted">
+    <div class="active-chip" title={copy.conditionSearch.activeChipTip(entityLabel)}>
       <span class="chip-label">Highlighting {entityLabel} with</span>
       <span class="chip-val">{selectedCondition.description || selectedCondition.code}</span>
     </div>

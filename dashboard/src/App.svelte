@@ -11,14 +11,16 @@
   import type { DashboardBundle } from './lib/types'
   import { loadBundle, loadManifest } from './lib/bundle'
   import { route, type Route } from './lib/router'
+  import { copy } from './lib/copy'
   import { generateCohort } from './lib/cohort'
+  import { ensurePatientProjection } from './lib/patient/projection'
   import CohortSelector from './lib/CohortSelector.svelte'
-  import ThresholdSlider from './lib/ThresholdSlider.svelte'
   import Tabs from './lib/Tabs.svelte'
   import Atlas from './lib/tabs/Atlas.svelte'
   import Patient from './lib/tabs/Patient.svelte'
   import Simulator from './lib/tabs/Simulator.svelte'
   import { installTooltips } from './lib/tooltip'
+  import { startTour } from './lib/tour'
 
   // Mapping from route id to its top-level tab component. Paired with
   // router.ts's TABS list, adding a new tab is then a two-line change:
@@ -114,6 +116,11 @@
       })
       if (token !== loadToken) return
       cohort.set(c)
+      // Start the patient-atlas UMAP fit now, on load, rather than lazily when
+      // the Patient/Simulator tab first mounts. fitAsync runs in the background
+      // without blocking the UI, so the layout is ready by the time the user
+      // (or the guided tour) reaches the Patient tab instead of freezing it.
+      ensurePatientProjection()
     } catch (e) {
       if (token !== loadToken) return
       error = (e as Error).message
@@ -158,7 +165,7 @@
       </svg>
       <div class="lockup">
         <span class="title">CHARMPheno</span>
-        <span class="subtitle">exploring latent phenotypes</span>
+        <span class="subtitle">{copy.masthead.subtitle}</span>
       </div>
     </div>
 
@@ -168,20 +175,25 @@
 
     <div class="controls">
       {#if $bundle && $advancedView}
-        <dl class="metadata" data-numeric>
-          <div title="K: the number of phenotypes (topics) the model was asked to learn from the dataset.">
+        <dl class="metadata" data-numeric data-tour="metrics">
+          <div title={copy.masthead.meta.k}>
             <dt>K</dt><dd>{$bundle.model.K}</dd>
           </div>
-          <div title="V: distinct conditions displayed in the dashboard, over total distinct conditions in the source dataset. Low-count conditions are suppressed for patient privacy.">
+          <div title={copy.masthead.meta.v}>
             <dt>V</dt><dd>{$bundle.model.V.toLocaleString()}<span class="of">/{$bundle.corpusStats.v_full.toLocaleString()}</span></dd>
           </div>
-          <div title="n: number of patient records the model was fit on (in thousands).">
+          <div title={copy.masthead.meta.n}>
             <dt>n</dt><dd>{($bundle.corpusStats.corpus_size_docs / 1000).toFixed(0)}<span class="of">k</span></dd>
           </div>
         </dl>
       {/if}
-      <ThresholdSlider />
-      <div class="seg" role="group" aria-label="View density">
+      {#if $bundle}
+        <button
+          class="tour-link"
+          on:click={() => startTour($advancedView ? 'advanced' : 'basic')}
+        >{copy.tour.startLabel}</button>
+      {/if}
+      <div class="seg" role="group" aria-label="View density" data-tour="view-toggle">
         <button class="seg-btn" class:active={!$advancedView} on:click={() => advancedView.set(false)}>basic</button>
         <button class="seg-btn" class:active={$advancedView} on:click={() => advancedView.set(true)}>advanced</button>
       </div>
@@ -303,6 +315,22 @@
     display: flex;
     justify-content: flex-start;
   }
+  /* "Take the tour" link: subtle dotted-underline link matching the
+     "what is this?" disclosures, sitting just left of the view toggle. */
+  .tour-link {
+    border: 0;
+    background: transparent;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--fs-small);
+    border-bottom: 1px dotted var(--accent);
+    text-underline-offset: 2px;
+    white-space: nowrap;
+  }
+  .tour-link:hover { color: var(--ink); border-bottom-color: var(--ink); }
+
   /* Segmented control */
   .seg {
     display: inline-flex;

@@ -4,6 +4,7 @@
     advancedView,
   } from '../store'
   import { phenotypeHue } from '../palette'
+  import { copy } from '../copy'
 
   let searchText = ''
   let phenotypeFilter = ''
@@ -70,7 +71,7 @@
   <header class="head">
     <span class="eyebrow">Starting point</span>
     <h3>Conditions</h3>
-    <p class="sub">Conditions this patient already has. The simulator fills in the rest of their year.</p>
+    <p class="sub">{copy.conditionsEditor.sub}</p>
   </header>
 
   <div class="actions">
@@ -105,7 +106,7 @@
       <span>Draw from a phenotype</span>
       <span class="caret" aria-hidden="true">▾</span>
     </summary>
-    <p class="hint">Each click draws one random condition from that phenotype's profile.</p>
+    <p class="hint">{copy.conditionsEditor.hint}</p>
     <input
       type="search"
       class="pheno-filter"

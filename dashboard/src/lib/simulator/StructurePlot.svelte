@@ -4,6 +4,7 @@
   } from '../store'
   import { phenotypeHue } from '../palette'
   import { displayedDominant } from '../dominant'
+  import { copy } from '../copy'
 
   // N theta vectors from the simulator. Each becomes one vertical column
   // in a STRUCTURE-style plot (population genetics): each column shows
@@ -131,16 +132,12 @@
 <section class="structure">
   <header>
     <span class="eyebrow">Per-sample mix</span>
-    <h4>How confident is the model?</h4>
-    <p class="sub">
-      Each column is one simulated patient. A solid color block means the
-      model agrees with itself across draws; a rainbow means the
-      starting conditions are consistent with several phenotype mixes.
-    </p>
+    <h4>{copy.structurePlot.heading}</h4>
+    <p class="sub">{copy.structurePlot.sub}</p>
   </header>
 
   {#if columns.length === 0}
-    <p class="hint">Run the simulator to see the per-sample distribution.</p>
+    <p class="hint">{copy.structurePlot.hint}</p>
   {:else}
     <svg
       viewBox={`0 0 ${W} ${H}`}

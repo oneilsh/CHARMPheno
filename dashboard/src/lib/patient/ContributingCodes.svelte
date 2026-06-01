@@ -2,6 +2,7 @@
   import { bundle, selectedPhenotypeId, phenotypesById, searchedConditionIdx } from '../store'
   import { phenotypeHue } from '../palette'
   import { go } from '../router'
+  import { copy } from '../copy'
 
   export let theta: number[]
   export let codeBag: number[]
@@ -58,20 +59,20 @@
   $: selectedLabel = $selectedPhenotypeId === null
     ? null
     : isOther
-      ? 'Other / tail phenotypes'
+      ? copy.contributingCodes.otherLabel
       : ($phenotypesById.get($selectedPhenotypeId)?.label || `Phenotype ${$selectedPhenotypeId}`)
 </script>
 
 <section class="contrib">
   <header class="head">
     <div class="top-row">
-      <span class="eyebrow">Top contributing codes</span>
+      <span class="eyebrow">{copy.contributingCodes.heading}</span>
       {#if selectedLabel && $selectedPhenotypeId !== null && !isOther}
         <button
           class="open-in-atlas"
           type="button"
           on:click={openInAtlas}
-          title="Switch to the Phenotype Atlas with this phenotype selected"
+          title={copy.contributingCodes.openInAtlasTip}
         >
           open in atlas →
         </button>
@@ -91,16 +92,16 @@
       </h3>
     {/if}
     {#if isOther}
-      <p class="sub">Codes from this patient's record that the model attributes to phenotypes outside this patient's dominant mix, ordered by tail-responsibility.</p>
+      <p class="sub">{copy.contributingCodes.subOther}</p>
     {:else}
-      <p class="sub">Codes from this patient's record that match this phenotype, ordered by occurrence count.</p>
+      <p class="sub">{copy.contributingCodes.subMatch}</p>
     {/if}
   </header>
 
   {#if $selectedPhenotypeId === null}
-    <p class="hint">Click a phenotype band above to see which codes from this patient's record drove the assignment.</p>
+    <p class="hint">{copy.contributingCodes.hintNoSelection}</p>
   {:else if top.length === 0}
-    <p class="hint">No codes from this patient's record contribute to {selectedLabel}.</p>
+    <p class="hint">{copy.contributingCodes.hintNoCodes(selectedLabel)}</p>
   {:else}
     <ol class="codes">
       {#each top as t}

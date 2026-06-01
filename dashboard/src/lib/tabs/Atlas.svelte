@@ -4,6 +4,7 @@
   import CodePanel from '../atlas/CodePanel.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
   import PhenotypeBrowser from '../atlas/PhenotypeBrowser.svelte'
+  import { copy } from '../copy'
 
   // Background-click closes the disclosure popover so the user doesn't
   // have to find and click the same link again to dismiss it.
@@ -21,38 +22,17 @@
   <header class="section-head">
     <div class="title-block">
       <div class="title-row">
-        <h1>Phenotype Atlas</h1>
+        <h1>{copy.atlas.title}</h1>
         <details class="what-is" bind:this={whatIsEl} bind:open={whatIsOpen}>
-          <summary>What's a phenotype?</summary>
+          <summary>{copy.atlas.whatIsSummary}</summary>
           <div class="what-is-body popover">
-            <p>
-              A <em>phenotype</em> here is a recurring pattern of clinical
-              conditions that tends to appear together across patients.
-              For example, "Type 2 diabetes care" concentrates on diabetes,
-              retinopathy, neuropathy, and related conditions.
-            </p>
-            <p>
-              These phenotypes were learned automatically from de-identified
-              patient records using a topic model (Latent Dirichlet Allocation).
-              The model didn't know about diseases ahead of time; it just looked
-              for groups of conditions that tend to co-occur, and produced
-              {$bundle?.model.K ?? '~80'} phenotypes.
-            </p>
-            <p>
-              A patient is a mix of phenotypes, not a single one. A phenotype
-              is not a diagnosis; it's a pattern. Some patterns name a single
-              disease, others name a family of related conditions, and some
-              describe broad health backgrounds (e.g. chronic comorbidity
-              follow-up).
-            </p>
+            {#each copy.atlas.whatIs($bundle?.model.K ?? '~80') as para}
+              <p>{@html para}</p>
+            {/each}
           </div>
         </details>
       </div>
-      <p class="kicker">
-        Each marker is a learned phenotype. Bubbles that sit closer together
-        share more of their leading conditions; bubble size shows how widely
-        the phenotype shows up across patients.
-      </p>
+      <p class="kicker">{copy.atlas.kicker}</p>
     </div>
     <div class="controls">
       <ConditionSearch />
@@ -154,7 +134,9 @@
     line-height: 1.6;
   }
   .what-is-body p:last-child { margin-bottom: 0; }
-  .what-is-body em {
+  /* :global because the popover paragraphs are injected via {@html} from
+     copy.ts, so their <em>/<strong> don't receive Svelte's scoping hash. */
+  .what-is-body :global(em) {
     font-style: italic;
     color: var(--ink);
   }

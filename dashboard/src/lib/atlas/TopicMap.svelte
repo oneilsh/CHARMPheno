@@ -7,6 +7,7 @@
     prevalenceReader, tauThreshold, isVisibleInCurrentMode,
   } from '../store'
   import { phenotypesContainingCode } from '../inference'
+  import { copy } from '../copy'
 
   // Phenotype-containment for highlight: switched from raw-β top-N to
   // relevance-ranked top-N (λ=0.6), matching the CodePanel's displayed
@@ -196,24 +197,24 @@
   onMount(render)
 </script>
 
-<figure class="map">
+<figure class="map" data-tour="atlas-map">
   <svg bind:this={svgEl} role="img" aria-label="Phenotype atlas" preserveAspectRatio="xMidYMid meet"></svg>
   <figcaption class="legend">
     {#if $bundle}
       <div class="legend-group">
-        <span class="eyebrow" title="Coherence: how reliably the phenotype's leading conditions actually co-occur in the same patients. Higher means the conditions really do show up together; lower means the pattern is weaker or more diffuse. (Bubble color encodes this.)">Coherence</span>
+        <span class="eyebrow" title={copy.atlas.legend.coherence}>Coherence</span>
         <span class="grad grad-npmi" aria-hidden="true"></span>
         <span class="ticks" data-numeric><span>low</span><span>high</span></span>
       </div>
       <div class="legend-group">
-        <span class="eyebrow" title="Prevalence: estimated share of patients whose mixture weight on this phenotype exceeds the current threshold (τ slider). Bubble size scales with this share.">Prevalence</span>
+        <span class="eyebrow" title={copy.atlas.legend.prevalence($tauThreshold)}>Prevalence</span>
         <span class="size-marks" aria-hidden="true">
           <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
         </span>
       </div>
       {#if $advancedView}
         <div class="legend-group">
-          <span class="eyebrow" title="Topic mass: mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.">Topic mass</span>
+          <span class="eyebrow" title={copy.atlas.legend.topicMass}>Topic mass</span>
         </div>
       {/if}
     {/if}

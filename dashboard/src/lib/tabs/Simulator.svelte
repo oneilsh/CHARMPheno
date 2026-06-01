@@ -8,6 +8,7 @@
   import SimMiniMap from '../simulator/SimMiniMap.svelte'
   import StructurePlot from '../simulator/StructurePlot.svelte'
   import ProfileBar from '../patient/ProfileBar.svelte'
+  import { copy } from '../copy'
 
   // Default N: enough samples for a stable median and a smooth atlas
   // cloud, low enough that even autoregressive mode (which re-fits theta
@@ -80,44 +81,25 @@
   <header class="section-head">
     <div class="title-block">
       <div class="title-row">
-        <h1>Simulator</h1>
+        <h1>{copy.simulator.title}</h1>
         <details class="what-is" bind:this={whatIsEl} bind:open={whatIsOpen}>
-          <summary>What is this?</summary>
+          <summary>{copy.simulator.whatIsSummary}</summary>
           <div class="what-is-body popover">
-            <p>
-              The simulator asks the model: <em>given these conditions,
-              what kind of patient could this be?</em> It answers by
-              drawing many possible complete year-of-life records from
-              the model's distribution.
-            </p>
-            <p>
-              Each draw is one plausible patient. The <strong>profile
-              bar</strong> shows the average phenotype mix across those
-              draws. The <strong>expected codes</strong> table shows
-              what the model thinks fills in the rest of the year. The
-              <strong>atlas</strong> shows where these patients land
-              relative to the synthetic cohort - tight cluster means
-              the conditions you gave nail one kind of patient, smeared
-              cloud means they're consistent with several.
-            </p>
-            <p>
-              Start by clicking conditions on the left, or just hit
-              Simulate to draw new patients from scratch.
-            </p>
+            {#each copy.simulator.whatIs as para}
+              <p>{@html para}</p>
+            {/each}
           </div>
         </details>
       </div>
-      <p class="kicker">
-        Pick some starting conditions and the model will tell you what kind of patient this looks like and what else would round out their year.
-      </p>
+      <p class="kicker">{copy.simulator.kicker}</p>
     </div>
-    <div class="controls">
+    <div class="controls" data-tour="sim-controls">
       {#if $advancedView}
         <label class="control n-control">
           <span class="ctl-head"><span class="eyebrow">Samples</span> <span class="ctl-v" data-numeric>{nSamples}</span></span>
           <input type="range" min="20" max="1000" step="20" bind:value={nSamples} />
         </label>
-        <label class="control toggle" title="When on, the model re-evaluates the phenotype mix after every drawn code so each token shifts the next one's distribution.">
+        <label class="control toggle" title={copy.simulator.autoregressiveTip}>
           <input type="checkbox" bind:checked={autoregressive} />
           <span class="eyebrow">Autoregressive</span>
         </label>
@@ -129,7 +111,7 @@
   </header>
 
   <div class="grid">
-    <div class="left-col">
+    <div class="left-col" data-tour="simulator-input">
       <ConditionsEditor />
     </div>
 
@@ -138,8 +120,8 @@
         <div class="profile-block">
           <header class="profile-head">
             <span class="eyebrow">Phenotype mix</span>
-            <h3>This patient is a mix of…</h3>
-            <p class="sub">Average across {result.thetaSamples.length} simulated draws.</p>
+            <h3>{copy.simulator.phenotypeMixHeading}</h3>
+            <p class="sub">{copy.simulator.phenotypeMixSub(result.thetaSamples.length)}</p>
           </header>
           <ProfileBar theta={meanTheta} height={44} />
         </div>
@@ -151,9 +133,9 @@
           <span class="eyebrow">Awaiting input</span>
           <p class="empty-msg">
             {#if $simulatorPrefix.length === 0}
-              Add some starting conditions on the left (or just hit Simulate to draw patients from scratch), then click <strong>simulate →</strong> to see what kind of patient this looks like.
+              {@html copy.simulator.emptyFromScratch}
             {:else}
-              {$simulatorPrefix.length} starting condition{$simulatorPrefix.length === 1 ? '' : 's'} ready. Click <strong>simulate →</strong> to see what kind of patient this looks like.
+              {@html copy.simulator.emptyReady($simulatorPrefix.length)}
             {/if}
           </p>
         </div>
@@ -230,8 +212,10 @@
     line-height: 1.6;
   }
   .what-is-body p:last-child { margin-bottom: 0; }
-  .what-is-body em { font-style: italic; color: var(--ink); }
-  .what-is-body strong { color: var(--ink); font-weight: 600; }
+  /* :global because the popover paragraphs are injected via {@html} from
+     copy.ts, so their <em>/<strong> don't receive Svelte's scoping hash. */
+  .what-is-body :global(em) { font-style: italic; color: var(--ink); }
+  .what-is-body :global(strong) { color: var(--ink); font-weight: 600; }
 
   .controls {
     display: flex;
@@ -327,5 +311,6 @@
     max-width: 46ch;
     line-height: 1.6;
   }
-  .empty-msg strong { color: var(--ink); font-weight: 600; }
+  /* :global: the empty-state copy is injected via {@html} from copy.ts. */
+  .empty-msg :global(strong) { color: var(--ink); font-weight: 600; }
 </style>

@@ -7,6 +7,7 @@
   import { topRelevantCodes } from '../inference'
   import { go } from '../router'
   import PrevalenceHistogram from '../PrevalenceHistogram.svelte'
+  import { copy } from '../copy'
 
   function findInPatients() {
     if ($selectedPhenotypeId === null) return
@@ -34,24 +35,32 @@
   $: reader = $prevalenceReader
   $: hasHistogram = !!(pheno?.theta_histogram && pheno?.theta_percentiles && $bundle?.phenotypes.theta_histogram_bin_edges)
 
-  // Lay-readable rubric explanations for the quality chip.
-  function qualityTooltip(q: string): string {
-    switch (q) {
-      case 'phenotype': return 'Quality: phenotype. A clinically coherent pattern of conditions; the cluster names a recognisable disease or related family.'
-      case 'background': return 'Quality: background. Broad, non-specific health-care activity (general checkups, common comorbidities). Real signal but not disease-specific.'
-      case 'anchor': return 'Quality: anchor. Dominated by one or two very common conditions; useful as a reference point but lower information content than a fuller phenotype.'
-      case 'mixed': return 'Quality: mixed. The leading conditions span multiple unrelated clinical areas; the topic merged what should probably be separate phenotypes.'
-      case 'dead': return 'Quality: dead. Minimal usage by the model and very small divergence from the dataset average; this topic slot was effectively unused. (Hidden in basic mode.)'
-      default: return ''
+  // Share of patients below τ — the mass the histogram omits because its
+  // x-axis starts at τ. Summed from bins whose upper edge is at or below τ;
+  // suppressed bins (null) contribute 0, matching the privacy round-to-zero
+  // rule used by fractionAboveTau in the store.
+  function fractionBelowTau(hist: (number | null)[], edges: number[], tau: number): number {
+    let s = 0
+    for (let i = 0; i < hist.length; i++) {
+      if (edges[i + 1] <= tau + 1e-9) {
+        const v = hist[i]
+        if (v != null) s += v
+      }
     }
+    return s
+  }
+
+  // Lay-readable rubric explanations for the quality chip; copy lives in copy.ts.
+  function qualityTooltip(q: string): string {
+    return (copy.phenotypeDetail.quality as Record<string, string>)[q] ?? ''
   }
 </script>
 
-<aside class="code-panel">
+<aside class="code-panel" data-tour="phenotype-detail">
   {#if !pheno}
     <div class="empty">
       <span class="eyebrow">Detail</span>
-      <p class="empty-msg">Select a phenotype on the map to read its top conditions.</p>
+      <p class="empty-msg">{copy.phenotypeDetail.empty}</p>
     </div>
   {:else}
     <header class="head">
@@ -64,7 +73,7 @@
           class="find-in-patients"
           type="button"
           on:click={findInPatients}
-          title="Switch to the Patient Atlas with patients carrying this phenotype highlighted"
+          title={copy.phenotypeDetail.findInPatientsTip}
         >
           find in patients →
         </button>
@@ -76,30 +85,30 @@
       <div class="stats" data-numeric>
         <span class="stat" title={hasHistogram
           ? ($advancedView
-            ? `Fraction of patients with θ > τ = ${$tauThreshold.toFixed(2)}. A threshold-based approximation of clinical prevalence in the cohort.`
-            : 'Fraction of patients with mixture weight above τ. Slide the τ control in the masthead to see how this changes at different cutoffs.')
-          : 'Topic mass (no patient distribution available for this bundle).'
+            ? copy.phenotypeDetail.prevalence.tipAdvanced($tauThreshold)
+            : copy.phenotypeDetail.prevalence.tipBasic($tauThreshold))
+          : copy.phenotypeDetail.prevalence.tipNoHistogram
         }>
-          <span class="stat-k">{hasHistogram && $advancedView ? 'Prevalence (patients)' : 'Prevalence'}</span>
+          <span class="stat-k">{hasHistogram && $advancedView ? copy.phenotypeDetail.prevalence.labelAdvanced : copy.phenotypeDetail.prevalence.labelBasic}<span class="help-mark" aria-hidden="true">?</span></span>
           <span class="stat-v">{(reader(pheno) * 100).toFixed(1)}%</span>
         </span>
         {#if $advancedView}
           {#if hasHistogram}
-            <span class="stat" title="Mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.">
+            <span class="stat" title={copy.phenotypeDetail.topicMassTip}>
               <span class="stat-k">Topic mass</span>
               <span class="stat-v">{(pheno.corpus_prevalence * 100).toFixed(1)}%</span>
             </span>
           {/if}
-          <span class="stat" title="Coherence: how reliably this phenotype's leading conditions co-occur in real patients (NPMI: normalized pointwise mutual information). Higher means the conditions really do show up together.">
+          <span class="stat" title={copy.phenotypeDetail.coherenceTip}>
             <span class="stat-k">Coherence</span>
             <span class="stat-v">{pheno.npmi == null ? '—' : pheno.npmi.toFixed(3)}</span>
           </span>
-          <span class="stat" title="Pair coverage: fraction of the leading-condition pairs that had enough joint observations to actually contribute to the coherence number. Low coverage means the coherence value was computed on only a few pairs and is less trustworthy.">
+          <span class="stat" title={copy.phenotypeDetail.pairCoverageTip}>
             <span class="stat-k">Pair cov</span>
             <span class="stat-v">{pheno.pair_coverage == null ? '—' : (pheno.pair_coverage * 100).toFixed(0) + '%'}</span>
           </span>
           {#if pheno.original_topic_id !== pheno.id}
-            <span class="stat" title="Source #: the raw topic index from the LDA fit before sorting. Useful for cross-referencing the underlying model.">
+            <span class="stat" title={copy.phenotypeDetail.sourceTip}>
               <span class="stat-k">Source #</span>
               <span class="stat-v">{pheno.original_topic_id}</span>
             </span>
@@ -114,15 +123,16 @@
       </div>
     </header>
 
-    {#if hasHistogram}
+    {#if hasHistogram && $advancedView}
       {@const edges = $bundle!.phenotypes.theta_histogram_bin_edges!}
       {@const hist = pheno.theta_histogram!}
       {@const pcts = pheno.theta_percentiles!}
-      <div class="hist-wrap">
+      {@const belowTau = fractionBelowTau(hist, edges, $tauThreshold)}
+      <div class="hist-wrap" data-tour="histogram">
         <span class="hist-head">
-          <span class="eyebrow" title="How prominently this phenotype features in each patient's mixture, across the cohort. The x-axis is the share of a patient's coded activity attributed to this phenotype; the y-axis is the share of patients at each level. Dashed fuchsia line = current τ threshold. Faint vertical = median (p50); ticks at top = p5, p25, p75, p95. Bins with fewer than 20 patients are suppressed for privacy.">Phenotype Prominence</span>
-          <span class="hist-percentiles" data-numeric>
-            median {(pcts.p50 * 100).toFixed(1)}% · p95 {(pcts.p95 * 100).toFixed(1)}%
+          <span class="eyebrow" title={copy.phenotypeDetail.histogram.tip}>{copy.phenotypeDetail.histogram.title}</span>
+          <span class="hist-below" data-numeric title={copy.phenotypeDetail.histogram.belowTauTip}>
+            {(belowTau * 100).toFixed(0)}% &lt; {($tauThreshold * 100).toFixed(0)}%
           </span>
         </span>
         <PrevalenceHistogram
@@ -131,11 +141,11 @@
           percentiles={pcts}
           tau={$tauThreshold}
           width={360}
-          height={100}
+          height={120}
         />
       </div>
     {:else}
-      <!-- HDP / legacy bundles: gracefully skip the histogram. -->
+      <!-- Basic view, and HDP / legacy bundles: skip the histogram. -->
     {/if}
 
     <!--
@@ -148,18 +158,18 @@
       λ=0.6 is the default (Sievert & Shirley's recommended compromise).
     -->
     {#if $advancedView}
-      <div class="slider-row">
+      <div class="slider-row" data-tour="relevance">
         <label class="slider">
           <span class="slider-head">
-            <span class="slider-k" title="Relevance term weighting. The slider blends two views of 'top conditions': raw frequency (how much of the phenotype's mass falls on this condition) and lift (how much more this condition shows up here than in the overall dataset). Slide left for surprise/lift, right for sheer frequency.">
+            <span class="slider-k" title={copy.phenotypeDetail.relevance.weightingTip}>
               <span class="eyebrow">Relevance term weighting</span>
             </span>
             <span class="slider-v" data-numeric>λ {lambda.toFixed(2)}</span>
           </span>
           <input type="range" min="0" max="1" step="0.05" bind:value={lambda} />
           <span class="slider-ends">
-            <span title="Lift: how much more this condition appears in this phenotype than across all patients overall. Surfaces rare-but-concentrated conditions.">lift</span>
-            <span title="Frequency: the condition's raw probability under this phenotype.">frequency</span>
+            <span title={copy.phenotypeDetail.relevance.liftEndTip}>lift</span>
+            <span title={copy.phenotypeDetail.relevance.freqEndTip}>frequency</span>
           </span>
         </label>
       </div>
@@ -172,8 +182,8 @@
         class="ch-rel"
         title={
           $advancedView
-            ? 'Relevance: λ·log p(w|k) + (1−λ)·log lift. The slider tunes how much frequency vs lift the ranking favors. Bar shows raw frequency p(w|k); number is its percentage.'
-            : "Relevance: the leading conditions for this phenotype, ranked by a balance of how often they appear here AND how distinctive they are to this phenotype. The bar shows the condition's share of this phenotype."
+            ? copy.phenotypeDetail.relevance.colTipAdvanced
+            : copy.phenotypeDetail.relevance.colTipBasic
         }
       >Relevance ▾</span>
     </div>
@@ -295,6 +305,31 @@
     font-size: var(--fs-small);
     color: var(--ink);
     font-weight: 500;
+  }
+  /* Small circled "?" cueing that the prevalence label carries a hover
+     explanation. Inherits the .stat's `cursor: help`; the tooltip itself
+     lives on the parent .stat title. */
+  .help-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 11px;
+    height: 11px;
+    margin-left: 0.3rem;
+    border: 1px solid var(--ink-faint);
+    border-radius: 50%;
+    font-family: var(--font-body);
+    font-size: 8px;
+    line-height: 1;
+    font-weight: 600;
+    letter-spacing: 0;
+    color: var(--ink-faint);
+    vertical-align: middle;
+    transition: color 0.12s ease, border-color 0.12s ease;
+  }
+  .stat:hover .help-mark {
+    color: var(--accent);
+    border-color: var(--accent);
   }
   .desc-text {
     margin: 0.1rem 0 0.15rem;
@@ -452,9 +487,10 @@
     align-items: baseline;
     justify-content: space-between;
   }
-  .hist-percentiles {
+  .hist-below {
     font-size: var(--fs-micro);
     font-family: var(--font-mono);
     color: var(--ink-faint);
+    cursor: help;
   }
 </style>

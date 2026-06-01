@@ -7,6 +7,7 @@
   import { displayedDominant } from '../dominant'
   import { ensurePatientProjection } from '../patient/projection'
   import type { Phenotype, SyntheticPatient } from '../types'
+  import { copy } from '../copy'
 
   // N theta vectors from the latest simulator run. Each is transformed
   // into the same 2D UMAP space as the cohort and drawn as a bright dot
@@ -100,7 +101,7 @@
 <figure class="map">
   <figcaption class="caption-top">
     <span class="eyebrow">Where this patient lands</span>
-    <span class="sub">Each bright dot is one simulated patient on the same atlas as the patient cohort.</span>
+    <span class="sub">{copy.simMiniMap.sub}</span>
   </figcaption>
   <div class="canvas">
     <svg bind:this={svgEl} role="img" aria-label="Simulator placement on patient atlas" preserveAspectRatio="xMidYMid meet"></svg>

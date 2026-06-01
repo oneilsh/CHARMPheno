@@ -59,22 +59,12 @@ export const simulatorPrefix = writable<number[]>([])     // vocab indices (trim
 export const advancedView = writable<boolean>(false)
 
 // Patient-prevalence threshold τ for the histogram-derived "fraction
-// above τ" prevalence reader. Persisted across sessions so a user's
-// preferred cutoff sticks. Defaults to 0.05 (5% of a patient's coded
-// activity attributed to the topic → "patient has phenotype").
-const TAU_STORAGE_KEY = 'charmpheno.tauThreshold'
-const initialTau: number = (() => {
-  try {
-    const raw = localStorage.getItem(TAU_STORAGE_KEY)
-    if (raw == null) return 0.05
-    const n = Number(raw)
-    return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.05
-  } catch { return 0.05 }
-})()
-export const tauThreshold = writable<number>(initialTau)
-tauThreshold.subscribe((t) => {
-  try { localStorage.setItem(TAU_STORAGE_KEY, String(t)) } catch { /* private mode */ }
-})
+// above τ" prevalence reader. Fixed at 0.02 — a patient is counted as
+// "having" the phenotype when at least 2% of their coded activity is
+// attributed to the topic. Exposed as a store (rather than a bare
+// constant) so the several components that read $tauThreshold continue
+// to work unchanged; there is no longer a user-facing slider.
+export const tauThreshold = writable<number>(0.02)
 
 export const hoveredCodeIdx = writable<number | null>(null)
 

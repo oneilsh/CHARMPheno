@@ -6,6 +6,7 @@
   } from '../store'
   import { phenotypesContainingCode } from '../inference'
   import type { Phenotype } from '../types'
+  import { copy } from '../copy'
 
   // Reactively bind the τ-aware reader so all call sites stay in sync.
   $: reader = $prevalenceReader
@@ -135,11 +136,11 @@
           {#if $advancedView}
             <th class="col-quality">Quality</th>
             <th class="col-coh" data-numeric>Coherence</th>
-            <th class="col-mass" data-numeric title="Mean topic mixture share (doc-mean of θ). Sums to 100% across phenotypes.">Topic mass</th>
+            <th class="col-mass" data-numeric title={copy.phenotypeBrowser.topicMassTip}>Topic mass</th>
           {/if}
           <th class="col-prev" data-numeric title={$advancedView
-            ? `Fraction of patients with mixture weight above τ (currently ${$tauThreshold.toFixed(2)}).`
-            : 'Fraction of patients with mixture weight above τ. Slide the τ control in the masthead to see how this changes at different cutoffs.'
+            ? copy.phenotypeBrowser.prevTipAdvanced($tauThreshold)
+            : copy.phenotypeBrowser.prevTipBasic($tauThreshold)
           }>{$advancedView ? 'Prevalence (patients)' : 'Prevalence'}</th>
         </tr>
       </thead>
