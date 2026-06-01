@@ -311,6 +311,29 @@ def render_progress(yarn_app: dict | None,
         print("Progress  " + "  ".join(bits) + "\n")
 
 
+def render_storage(spark_base: str, app_id: str) -> None:
+    """Persisted-RDD residency: are the .persist()'d corpus / minibatch blocks
+    actually held in memory, or evicted/recomputed?
+
+    If a stage shows `in=` (data-source) bytes every iteration while the corpus
+    is supposedly cached, the cache isn't serving the reads — each iteration is
+    re-reading the source. `cached=N/M` < 100% (or the RDD missing entirely)
+    is the tell. Matters more at scale: a corpus that won't stay resident turns
+    every mini-batch into a fresh source read.
+    """
+    rdds = _safe_get(f"{spark_base}/applications/{app_id}/storage/rdd")
+    if not rdds:
+        return
+    print("\nCached RDDs  (cached partitions + mem/disk — is the corpus staying resident?)")
+    for r in sorted(rdds, key=lambda d: -(d.get("memoryUsed", 0) + d.get("diskUsed", 0)))[:6]:
+        name = (r.get("name", "") or "")[:34]
+        ncp = r.get("numCachedPartitions", 0) or 0
+        npt = r.get("numPartitions", 0) or 0
+        frac = (ncp / npt) if npt else 0.0
+        print(f"  [{r.get('id','?'):>3}] {name:<34}  cached={ncp:>4}/{npt:<4} ({frac:>4.0%})"
+              f"  mem={_fmt_bytes(r.get('memoryUsed',0))}  disk={_fmt_bytes(r.get('diskUsed',0))}")
+
+
 def render_once(spark_base: str, app_id: str, started: float,
                  state: dict) -> None:
     print(CLEAR, end="")
@@ -332,6 +355,7 @@ def render_once(spark_base: str, app_id: str, started: float,
         render_active_stages(active)
     if all_stages is not None:
         render_recent_complete(all_stages)
+    render_storage(spark_base, app_id)
     render_recent_sql(spark_base, app_id)
     render_yarn_nodes()
 
