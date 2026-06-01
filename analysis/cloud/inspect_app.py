@@ -147,8 +147,37 @@ def render_executors(execs: list) -> None:
               f"  mem={_fmt_bytes(e.get('memoryUsed',0))}")
 
 
+def _stage_efficiency(s: dict) -> str:
+    """Where did task wall-time actually go? Computed from the stage's
+    aggregate task metrics (summed over all tasks in the stage).
+
+    `executorRunTime` is task wall-time (ms); `executorCpuTime` is the on-CPU
+    slice of it (NANOseconds). So cpu% = real compute fraction, and the
+    remainder (minus GC) is time tasks spent *not* on a core — shuffle-fetch
+    wait, disk/network I/O, memory stalls. That remainder is the "I/O-bound"
+    signal that util%/cpu% (both slot-occupancy) can't see.
+
+    `ms/task` and `KB/task` catch the other efficiency killer that also
+    depresses cpu%: over-partitioning. Thousands of tiny tasks spend their
+    time in scheduling + deserialize overhead, not compute — the cluster
+    looks busy (slots full) while throughput stays low. Tiny ms/task + tiny
+    KB/task ⇒ coalesce/repartition, not resize the cluster.
+    """
+    run_ms = s.get("executorRunTime", 0) or 0
+    if run_ms <= 0:
+        return ""
+    cpu_pct = (s.get("executorCpuTime", 0) or 0) / 1e6 / run_ms  # ns→ms / ms
+    gc_pct = (s.get("jvmGcTime", 0) or 0) / run_ms
+    io_pct = max(0.0, 1.0 - cpu_pct - gc_pct)
+    ntasks = max(s.get("numTasks", 0) or 0, 1)
+    bytes_task = ((s.get("inputBytes", 0) or 0) + (s.get("shuffleReadBytes", 0) or 0)) / ntasks
+    ms_task = run_ms / ntasks
+    return (f"cpu={cpu_pct:>4.0%} io={io_pct:>4.0%} gc={gc_pct:>3.0%}"
+            f"  ·  {ms_task:>5.0f}ms/task  {_fmt_bytes(bytes_task)}/task")
+
+
 def render_active_stages(stages: list) -> None:
-    print("\nActive stages  (throughput = (input + shuffleRead) / executorRunTime)")
+    print("\nActive stages  (cpu/io/gc = share of task run-time on CPU / waiting / GC)")
     if not stages:
         print("  (none — driver between stages, doing local work, or post-fit)")
         return
@@ -164,6 +193,9 @@ def render_active_stages(stages: list) -> None:
         print(f"  [{s['stageId']:>3}] {done:>4}/{total:<4}"
               f"  in={_fmt_bytes(in_b)}  shR={_fmt_bytes(shR)}  shW={_fmt_bytes(shW)}"
               f"  ~{_fmt_bytes(thr)}/s  {name}")
+        eff = _stage_efficiency(s)
+        if eff:
+            print(f"        {eff}")
 
 
 def render_recent_complete(stages: list, n: int = 3) -> None:
@@ -177,9 +209,11 @@ def render_recent_complete(stages: list, n: int = 3) -> None:
         shR = s.get("shuffleReadBytes", 0)
         shW = s.get("shuffleWriteBytes", 0)
         thr = (in_b + shR) * 1000 / max(run_ms, 1)
+        eff = _stage_efficiency(s)
         print(f"  [{s['stageId']:>3}] {s.get('name','')[:38]:<38}"
               f"  exec={_fmt_ms(run_ms)}  in={_fmt_bytes(in_b)}"
-              f"  shR={_fmt_bytes(shR)}  shW={_fmt_bytes(shW)}  ~{_fmt_bytes(thr)}/s")
+              f"  shR={_fmt_bytes(shR)}  shW={_fmt_bytes(shW)}  ~{_fmt_bytes(thr)}/s"
+              + (f"  ·  {eff}" if eff else ""))
 
 
 def render_recent_sql(spark_base: str, app_id: str, n: int = 3) -> None:
