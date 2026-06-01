@@ -29,6 +29,8 @@ export const copy = {
   // ── Masthead ──────────────────────────────────────────────────────────
   masthead: {
     subtitle: `exploring latent phenotypes`,
+    // Model-size readout (K/V/n), shown in the masthead beside the cohort
+    // selector in advanced mode.
     meta: {
       k: `K: the number of phenotypes (topics) the model was asked to learn from the dataset.`,
       v: `V: distinct conditions displayed in the dashboard, over total distinct conditions in the source dataset. Low-count conditions are suppressed for patient privacy.`,
@@ -160,6 +162,7 @@ export const copy = {
       `Each draw is one plausible patient. The <strong>profile bar</strong> shows the average phenotype mix across those draws. The <strong>expected codes</strong> table shows what the model thinks fills in the rest of the year. The <strong>atlas</strong> shows where these patients land relative to the synthetic cohort - tight cluster means the conditions you gave nail one kind of patient, smeared cloud means they're consistent with several.`,
       `Start by clicking conditions on the left, or just hit Simulate to draw new patients from scratch.`,
     ],
+    runSub: `Draw a batch of plausible patients from the conditions above.`,
     autoregressiveTip: `When on, the model re-evaluates the phenotype mix after every drawn code so each token shifts the next one's distribution.`,
     phenotypeMixHeading: `This patient is a mix of…`,
     phenotypeMixSub: (n: number): string => `Average across ${n} simulated draws.`,
@@ -226,13 +229,25 @@ export const copy = {
         title: `Welcome to CHARMPheno`,
         body: `This dashboard explores <em>phenotypes</em> — recurring patterns of clinical conditions a model learned from de-identified patient records. The tour takes about a minute and visits all three tabs. You can leave any time with the × or the Esc key.`,
       },
+      cohort: {
+        title: `Pick a cohort`,
+        body: `Each cohort is a separate model fit on a different slice of patients (different inclusion criteria or time window). Switch cohorts here at any time — everything below reloads for the model you choose.`,
+      },
       atlasMap: {
         title: `The phenotype atlas`,
         body: `Every bubble is one learned phenotype. Bubbles that sit close together share their leading conditions; bigger bubbles show up in more patients. Click any bubble to inspect it.`,
       },
+      findCondition: {
+        title: `Find a condition`,
+        body: `Search for a specific condition and the atlas highlights the phenotypes it features in — a quick way to ask "which patterns involve diabetes?" without hunting through bubbles.`,
+      },
       atlasDetail: {
         title: `Inside a phenotype`,
         body: `The selected phenotype's leading conditions appear here, along with how prevalent it is and how reliably its conditions co-occur. Hover any label with a dotted underline or a <strong>?</strong> for a plain-language explanation.`,
+      },
+      findInPatients: {
+        title: `Jump to the patients`,
+        body: `<strong>Find in patients</strong> carries this phenotype over to the Patient Atlas and rings every synthetic patient who carries it — connecting "what is this pattern" to "who has it."`,
       },
       patientMap: {
         title: `Synthetic patients`,
@@ -241,6 +256,10 @@ export const copy = {
       patientProfile: {
         title: `A patient is a mix`,
         body: `No patient is a single phenotype. This profile bar shows the selected patient's blend; click a band to see which of their conditions drove that part of the mix.`,
+      },
+      openInAtlas: {
+        title: `…and back again`,
+        body: `The link runs both ways: <strong>open in atlas</strong> takes whichever phenotype band you're inspecting back to the Phenotype Atlas, selected and ready. The two atlases are two views of the same model.`,
       },
       simulator: {
         title: `Ask the model "what if?"`,
@@ -259,6 +278,10 @@ export const copy = {
       metrics: {
         title: `Model at a glance`,
         body: `<strong>K</strong> is how many phenotypes the model learned, <strong>V</strong> is conditions shown over total in the source data (rare ones are suppressed for privacy), and <strong>n</strong> is how many patient records it was fit on.`,
+      },
+      detailStats: {
+        title: `Phenotype diagnostics`,
+        body: `Advanced mode adds quality diagnostics for the selected phenotype: <em>topic mass</em> (its average share across patients), <em>coherence</em> (how tightly its leading conditions co-occur), and <em>pair coverage</em> (how much evidence that coherence rests on). Hover each for detail.`,
       },
       histogram: {
         title: `Phenotype prominence`,

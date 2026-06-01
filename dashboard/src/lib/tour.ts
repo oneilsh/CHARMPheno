@@ -43,10 +43,17 @@ interface StepDef {
 // phenotypes → patients → simulate, ending on the view toggle.
 const BASIC_STEPS: StepDef[] = [
   { id: 'welcome' /* centered */ },
+  // Cohort selector lives in the masthead (present on every tab), no nav.
+  { id: 'cohort', selector: '[data-tour="cohort"]', on: 'bottom' },
   { id: 'atlasMap', tab: 'atlas', selector: '[data-tour="atlas-map"]', on: 'right' },
+  { id: 'findCondition', tab: 'atlas', selector: '[data-tour="find-condition"]', on: 'bottom' },
   { id: 'atlasDetail', tab: 'atlas', selector: '[data-tour="phenotype-detail"]', on: 'left' },
+  // The find-in-patients / open-in-atlas pair bookends the patient section,
+  // showing the two atlases are linked views of the same model.
+  { id: 'findInPatients', tab: 'atlas', selector: '[data-tour="find-in-patients"]', on: 'left' },
   { id: 'patientMap', tab: 'patient', selector: '[data-tour="patient-map"]', on: 'right' },
   { id: 'patientProfile', tab: 'patient', selector: '[data-tour="patient-profile"]', on: 'left' },
+  { id: 'openInAtlas', tab: 'patient', selector: '[data-tour="open-in-atlas"]', on: 'left' },
   { id: 'simulator', tab: 'simulator', selector: '[data-tour="simulator-input"]', on: 'right' },
   // Toggle lives in the masthead (present on every tab), so no navigation.
   { id: 'viewToggle', selector: '[data-tour="view-toggle"]', on: 'bottom' },
@@ -57,12 +64,13 @@ const BASIC_STEPS: StepDef[] = [
 const ADVANCED_STEPS: StepDef[] = [
   { id: 'welcome' /* centered */ },
   { id: 'metrics', tab: 'atlas', selector: '[data-tour="metrics"]', on: 'bottom' },
+  { id: 'detailStats', tab: 'atlas', selector: '[data-tour="detail-stats"]', on: 'left' },
   { id: 'histogram', tab: 'atlas', selector: '[data-tour="histogram"]', on: 'left' },
   { id: 'relevance', tab: 'atlas', selector: '[data-tour="relevance"]', on: 'left' },
   // Quality grades live per-bubble and aren't guaranteed on screen, so point
   // at the atlas itself (top-right) and explain the grades in the copy.
   { id: 'quality', tab: 'atlas', selector: '[data-tour="atlas-map"]', on: 'right-start' },
-  { id: 'simulator', tab: 'simulator', selector: '[data-tour="sim-controls"]', on: 'bottom' },
+  { id: 'simulator', tab: 'simulator', selector: '[data-tour="sim-controls"]', on: 'right' },
 ]
 
 // Resolve the target element after (optionally) switching tabs. Polls a few

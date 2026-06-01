@@ -98,7 +98,7 @@
   }
 </script>
 
-<div class="condition-search">
+<div class="condition-search" data-tour="find-condition">
   <label class="control">
     <span class="eyebrow">Find condition</span>
     <div class="input-wrap">

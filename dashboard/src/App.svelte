@@ -170,10 +170,9 @@
     </div>
 
     <div class="cohort-slot">
-      <CohortSelector />
-    </div>
-
-    <div class="controls">
+      <div class="cohort-wrap" data-tour="cohort">
+        <CohortSelector />
+      </div>
       {#if $bundle && $advancedView}
         <dl class="metadata" data-numeric data-tour="metrics">
           <div title={copy.masthead.meta.k}>
@@ -187,6 +186,9 @@
           </div>
         </dl>
       {/if}
+    </div>
+
+    <div class="controls">
       {#if $bundle}
         <button
           class="tour-link"
@@ -258,9 +260,31 @@
     margin-top: 0.15rem;
   }
 
-  /* Metadata strip (instrument-readout). Sized to match the segmented
-     control next to it so toggling advanced mode doesn't bump the
-     masthead height. */
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    /* Pin to the fourth grid column explicitly so the segmented control
+       stays right-justified. */
+    grid-column: 4;
+  }
+
+  /* Cohort selector slot: middle column of the masthead grid so the
+     dropdown sits between the brand and the basic/advanced toggle.
+     Lets the selector be the visual anchor users grab to swap models.
+     The model-size readout (advanced only) sits to its right. */
+  .cohort-slot {
+    grid-column: 2;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    justify-content: flex-start;
+  }
+
+  /* Model-size readout (instrument-style), advanced mode only. Sits beside
+     the cohort selector. It is shorter than the brand lockup / cohort
+     selector that fix the masthead row height, so toggling advanced on and
+     off never changes the masthead height — no vertical jump. */
   .metadata {
     display: flex;
     gap: 0.85rem;
@@ -295,25 +319,6 @@
     font-weight: 400;
     font-size: var(--fs-micro);
     margin-left: 1px;
-  }
-
-  .controls {
-    display: flex;
-    align-items: center;
-    gap: 1.25rem;
-    /* Pin to the fourth grid column explicitly so the segmented control
-       stays right-justified. Metadata sits inside .controls to the left
-       of the seg in advanced mode. */
-    grid-column: 4;
-  }
-
-  /* Cohort selector slot: middle column of the masthead grid so the
-     dropdown sits between the brand and the basic/advanced toggle.
-     Lets the selector be the visual anchor users grab to swap models. */
-  .cohort-slot {
-    grid-column: 2;
-    display: flex;
-    justify-content: flex-start;
   }
   /* "Take the tour" link: subtle dotted-underline link matching the
      "what is this?" disclosures, sitting just left of the view toggle. */

@@ -74,6 +74,7 @@
           type="button"
           on:click={findInPatients}
           title={copy.phenotypeDetail.findInPatientsTip}
+          data-tour="find-in-patients"
         >
           find in patients →
         </button>
@@ -82,7 +83,7 @@
       {#if pheno.description}
         <p class="desc-text">{pheno.description}</p>
       {/if}
-      <div class="stats" data-numeric>
+      <div class="stats" data-numeric data-tour="detail-stats">
         <span class="stat" title={hasHistogram
           ? ($advancedView
             ? copy.phenotypeDetail.prevalence.tipAdvanced($tauThreshold)
@@ -185,7 +186,7 @@
             ? copy.phenotypeDetail.relevance.colTipAdvanced
             : copy.phenotypeDetail.relevance.colTipBasic
         }
-      >Relevance ▾</span>
+      >Relevance<span class="help-mark" aria-hidden="true">?</span> ▾</span>
     </div>
 
     <ol class="codes">
@@ -400,6 +401,7 @@
   }
   .ch-rank { text-align: right; }
   .ch-rel { text-align: right; cursor: help; grid-column: 3 / span 2; }
+  .ch-rel:hover .help-mark { color: var(--accent); border-color: var(--accent); }
 
   /* Code list */
   .codes {

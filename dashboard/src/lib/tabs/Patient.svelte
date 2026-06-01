@@ -102,16 +102,18 @@
           </div>
         {/if}
       </div>
-      <button class="btn-ghost regen" on:click={regenCohort}
-        title="Re-roll the synthetic cohort with a new random seed">
-        ↻ regenerate cohort
-      </button>
     </div>
   </header>
 
   <div class="grid">
     <div class="left-col">
       <PatientMap />
+      <div class="map-actions">
+        <button class="btn-ghost regen" on:click={regenCohort}
+          title="Re-roll the synthetic cohort with a new random seed">
+          ↻ regenerate cohort
+        </button>
+      </div>
       <PatientBrowser />
     </div>
 
@@ -240,6 +242,13 @@
   }
   .regen { font-family: var(--font-body); font-size: var(--fs-small); }
   .regen:hover { color: var(--accent); }
+  /* Sits just below the patient map, right-aligned; pulled up tight against
+     the map (overrides the left-col's 1.25rem gap). */
+  .map-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: -0.75rem;
+  }
 
   .phenotype-chip {
     display: inline-flex;

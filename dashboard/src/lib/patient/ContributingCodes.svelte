@@ -73,6 +73,7 @@
           type="button"
           on:click={openInAtlas}
           title={copy.contributingCodes.openInAtlasTip}
+          data-tour="open-in-atlas"
         >
           open in atlas →
         </button>

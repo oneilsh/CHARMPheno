@@ -93,26 +93,36 @@
       </div>
       <p class="kicker">{copy.simulator.kicker}</p>
     </div>
-    <div class="controls" data-tour="sim-controls">
-      {#if $advancedView}
-        <label class="control n-control">
-          <span class="ctl-head"><span class="eyebrow">Samples</span> <span class="ctl-v" data-numeric>{nSamples}</span></span>
-          <input type="range" min="20" max="1000" step="20" bind:value={nSamples} />
-        </label>
-        <label class="control toggle" title={copy.simulator.autoregressiveTip}>
-          <input type="checkbox" bind:checked={autoregressive} />
-          <span class="eyebrow">Autoregressive</span>
-        </label>
-      {/if}
-      <button class="btn btn-primary run-btn" on:click={simulate} disabled={running || !$bundle}>
-        {running ? 'sampling…' : 'simulate →'}
-      </button>
-    </div>
   </header>
 
   <div class="grid">
     <div class="left-col" data-tour="simulator-input">
       <ConditionsEditor />
+
+      <!-- Run panel: the advanced sampling knobs (if any) and the Simulate
+           button, grouped under the conditions so the left column reads as a
+           top-to-bottom recipe — set conditions, tune the run, simulate. -->
+      <div class="run-panel" data-tour="sim-controls">
+        <div class="run-head">
+          <span class="eyebrow">Run the model</span>
+          <span class="run-sub">{copy.simulator.runSub}</span>
+        </div>
+        {#if $advancedView}
+          <div class="run-opts">
+            <label class="control n-control">
+              <span class="ctl-head"><span class="eyebrow">Samples</span> <span class="ctl-v" data-numeric>{nSamples}</span></span>
+              <input type="range" min="20" max="1000" step="20" bind:value={nSamples} />
+            </label>
+            <label class="control toggle" title={copy.simulator.autoregressiveTip}>
+              <input type="checkbox" bind:checked={autoregressive} />
+              <span class="eyebrow">Autoregressive</span>
+            </label>
+          </div>
+        {/if}
+        <button class="btn btn-primary run-btn" on:click={simulate} disabled={running || !$bundle}>
+          {running ? 'sampling…' : 'simulate →'}
+        </button>
+      </div>
     </div>
 
     <div class="right-col">
@@ -217,10 +227,34 @@
   .what-is-body :global(em) { font-style: italic; color: var(--ink); }
   .what-is-body :global(strong) { color: var(--ink); font-weight: 600; }
 
-  .controls {
+  /* Run panel: a card under the conditions editor holding the sampling
+     controls (advanced) and the Simulate button. */
+  .run-panel {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-sm);
+    padding: 1.25rem;
     display: flex;
-    align-items: end;
-    gap: 1.25rem;
+    flex-direction: column;
+    gap: 0.9rem;
+  }
+  .run-head {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding-bottom: 0.7rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .run-sub {
+    font-size: var(--fs-micro);
+    color: var(--ink-faint);
+    font-style: italic;
+    line-height: 1.5;
+  }
+  .run-opts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
   }
   .control {
     display: flex;
@@ -230,6 +264,7 @@
   .ctl-head {
     display: flex;
     align-items: baseline;
+    justify-content: space-between;
     gap: 0.4rem;
   }
   .ctl-v {
@@ -237,8 +272,8 @@
     color: var(--accent);
     font-weight: 500;
   }
-  .n-control { min-width: 180px; }
-  .n-control input[type="range"] { width: 180px; }
+  .n-control { width: 100%; }
+  .n-control input[type="range"] { width: 100%; }
   .toggle {
     flex-direction: row;
     align-items: center;
@@ -247,8 +282,9 @@
   }
   .toggle input { margin: 0; accent-color: var(--accent); }
   .run-btn {
+    width: 100%;
     font-size: var(--fs-small);
-    padding: 0.5rem 1rem;
+    padding: 0.6rem 1rem;
   }
 
   .grid {
