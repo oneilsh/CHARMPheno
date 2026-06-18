@@ -179,7 +179,7 @@
     margin: 0.25rem 0 0;
     font-size: var(--fs-small);
     color: var(--ink-muted);
-    max-width: 62ch;
+    max-width: 105ch;
     line-height: 1.55;
   }
 

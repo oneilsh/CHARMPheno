@@ -28,24 +28,24 @@ const pct = (tau: number): string => (tau * 100).toFixed(0)
 export const copy = {
   // ── Masthead ──────────────────────────────────────────────────────────
   masthead: {
-    subtitle: `exploring latent phenotypes`,
+    subtitle: `explore latent health`,
     // Model-size readout (K/V/n), shown in the masthead beside the cohort
     // selector in advanced mode.
     meta: {
-      k: `K: the number of phenotypes (topics) the model was asked to learn from the dataset.`,
-      v: `V: distinct conditions displayed in the dashboard, over total distinct conditions in the source dataset. Low-count conditions are suppressed for patient privacy.`,
-      n: `n: number of patient records the model was fit on (in thousands).`,
+      k: `K: the number of phenotypes the model was asked to learn from the dataset.`,
+      v: `V: distinct medical codes displayed in the dashboard / total distinct codes in the source dataset. Low-count observations (< 20 patients) are suppressed.`,
+      n: `n: number of 'patients' the model was trained on (in thousands). See the cohort definition in the dropdown for details.`,
     },
   },
 
   // ── Phenotype Atlas tab ───────────────────────────────────────────────
   atlas: {
     title: `Phenotype Atlas`,
-    kicker: `Each marker is a learned phenotype. Bubbles that sit closer together share more of their leading conditions; bubble size shows how widely the phenotype shows up across patients.`,
+    kicker: `Phenotypes are clusters of conditions or other events shared by patients. Phenotype bubbles that sit closer together share more top-weighted events. Bubble size estimates prevalence: the fraction of patients for whom the phenotype makes up at least 2% of their coded activity.`,
     whatIsSummary: `What's a phenotype?`,
     // kLabel: the phenotype count K (or a "~80" fallback while loading).
     whatIs: (kLabel: string | number): string[] => [
-      `A <em>phenotype</em> here is a recurring pattern of clinical conditions that tends to appear together across patients. For example, "Type 2 diabetes care" concentrates on diabetes, retinopathy, neuropathy, and related conditions.`,
+      `A <em>phenotype</em> here is a recurring pattern of clinical conditions or other medical events that tends to appear together across patients. For example, "Type 2 diabetes care" concentrates on diabetes, retinopathy, neuropathy, and related conditions.`,
       `These phenotypes were learned automatically from de-identified patient records using a topic model (Latent Dirichlet Allocation). The model didn't know about diseases ahead of time; it just looked for groups of conditions that tend to co-occur, and produced ${kLabel} phenotypes.`,
       `A patient is a mix of phenotypes, not a single one. A phenotype is not a diagnosis; it's a pattern. Some patterns name a single disease, others name a family of related conditions, and some describe broad health backgrounds (e.g. chronic comorbidity follow-up).`,
     ],

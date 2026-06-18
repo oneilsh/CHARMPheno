@@ -123,6 +123,16 @@ html, body {
   color: var(--ink);
 }
 
+/* Always reserve room for the vertical scrollbar. The app uses a classic
+   10px scrollbar (see ::-webkit-scrollbar below), which takes real layout
+   width — so when a view's content grows past the viewport (e.g. toggling
+   advanced mode adds controls), the scrollbar appears, narrows the page,
+   and the centered <main> re-centers a few px leftward. Reserving the
+   gutter up front keeps the content width constant, eliminating that jump. */
+html {
+  scrollbar-gutter: stable;
+}
+
 body {
   font-family: var(--font-body);
   font-size: var(--fs-body);
