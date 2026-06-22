@@ -41,21 +41,6 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
     pass
 
 
-def _quant_col(arr, idx: int):
-    """Return a named temp-column name for use with approxQuantile.
-
-    approxQuantile requires a column name string, not a column expression, so
-    we materialise the array element into a named column on a cached DataFrame
-    and return that name. Callers must call this on the *same* arr DataFrame
-    they pass to approxQuantile.
-    """
-    col_name = f"_q_{idx}"
-    # Re-use the column if already present (idempotent per idx).
-    if col_name not in arr.columns:
-        arr.__class__ = arr.__class__  # no-op; real add happens below
-    return col_name
-
-
 def _quant_col_df(arr, idx: int):
     """Return (df_with_col, col_name) where col_name is the element column."""
     col_name = f"_q_{idx}"
@@ -202,6 +187,9 @@ def _write_covariate_schema(spark, *, result, corpus, source_table, cohort_name,
         # Coarse percentiles for continuous columns (p5, p50, p95), rounded.
         continuous_stats = {}
         for var in continuous_cols:
+            if var not in name_idx:
+                log.warning("STM: continuous covariate %r absent from design vector; skipping its control.", var)
+                continue
             idx = name_idx[var]
             arr_with_col, col_name = _quant_col_df(arr, idx)
             q = arr_with_col.approxQuantile(col_name, [0.05, 0.5, 0.95], 0.01)
