@@ -34,6 +34,7 @@ def load_or_build_covariates(
     person_mod: int,
     cache_uri: str | None = None,
     max_levels: int = 10_000,
+    key_cols: tuple[str, ...] | list[str] = ("person_id",),
 ) -> tuple[DataFrame, Any, list[str]]:
     """Return (cov_df, model_spec, covariate_names) for the given formula."""
     from charmpheno.omop.covariates import build_patient_covariate_df
@@ -59,6 +60,7 @@ def load_or_build_covariates(
             covariate_formula=covariate_formula,
             categorical_cols=categorical_cols,
             continuous_cols=continuous_cols,
+            key_cols=key_cols,
             max_levels=max_levels,
         )
 
