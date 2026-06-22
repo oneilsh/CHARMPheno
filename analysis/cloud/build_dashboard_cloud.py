@@ -41,6 +41,190 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
     pass
 
 
+def _quant_col(arr, idx: int):
+    """Return a named temp-column name for use with approxQuantile.
+
+    approxQuantile requires a column name string, not a column expression, so
+    we materialise the array element into a named column on a cached DataFrame
+    and return that name. Callers must call this on the *same* arr DataFrame
+    they pass to approxQuantile.
+    """
+    col_name = f"_q_{idx}"
+    # Re-use the column if already present (idempotent per idx).
+    if col_name not in arr.columns:
+        arr.__class__ = arr.__class__  # no-op; real add happens below
+    return col_name
+
+
+def _quant_col_df(arr, idx: int):
+    """Return (df_with_col, col_name) where col_name is the element column."""
+    col_name = f"_q_{idx}"
+    from pyspark.sql import functions as _F
+    return arr.withColumn(col_name, _F.col("x")[idx]), col_name
+
+
+def _categorical_levels_from_spec(model_spec, covariate_names=()):
+    """Extract {var: {"levels": [...], "reference": "..."}} from a formulaic ModelSpec.
+
+    Tries model_spec.structure (formulaic >= 0.5) which exposes Factor records
+    with .levels/.reference attributes.  If that path is unavailable (different
+    formulaic version or unexpected layout), falls back to parsing C(var)[T.level]
+    strings from covariate_names and reading the reference from whatever the
+    spec exposes via .encoder_state or .factors.  If every path fails, returns
+    {} for that variable so the whole schema write degrades gracefully.
+
+    NOTE: formulaic introspection is cluster-validated — the exact attribute
+    names depend on the installed formulaic version on the cluster.
+    """
+    import re as _re
+
+    result = {}
+
+    # --- primary path: model_spec.structure (formulaic >= 0.5) ---
+    try:
+        for factor in model_spec.structure:
+            # Each factor record has .name, .levels, .reference (or similar).
+            # Try the most common attribute shapes.
+            var = getattr(factor, "name", None)
+            if var is None:
+                continue
+            levels = None
+            reference = None
+            # formulaic >= 0.5 stores these directly:
+            for levels_attr in ("levels", "categories", "codes"):
+                if hasattr(factor, levels_attr):
+                    levels = list(getattr(factor, levels_attr))
+                    break
+            for ref_attr in ("reference", "base", "reference_level", "drop_field"):
+                if hasattr(factor, ref_attr):
+                    reference = str(getattr(factor, ref_attr))
+                    break
+            if levels is not None and reference is not None:
+                result[var] = {"levels": levels, "reference": reference}
+        if result:
+            return result
+    except Exception:
+        pass  # fall through to fallback
+
+    # --- fallback: parse C(var)[T.level] strings from covariate_names ---
+    try:
+        dummy_pat = _re.compile(r"^C\((?P<var>[^)]+)\)\[T\.(?P<lvl>.+)\]$")
+        from collections import defaultdict
+        parsed: dict[str, list[str]] = defaultdict(list)
+        for name in covariate_names:
+            m = dummy_pat.match(name)
+            if m:
+                parsed[m.group("var")].append(m.group("lvl"))
+
+        if not parsed:
+            return result  # nothing to do
+
+        # Try to read references from encoder_state or factors on the spec.
+        ref_map: dict[str, str] = {}
+        try:
+            # encoder_state is a dict keyed by factor name in some formulaic versions
+            for var, enc in model_spec.encoder_state.items():
+                # enc may be a dict with "reference" or a CategorizationEncoder
+                if isinstance(enc, dict) and "reference" in enc:
+                    ref_map[var] = str(enc["reference"])
+                elif hasattr(enc, "reference"):
+                    ref_map[var] = str(enc.reference)
+        except Exception:
+            pass
+        try:
+            for factor in model_spec.factors:
+                var = getattr(factor, "name", None)
+                for ref_attr in ("reference", "base", "reference_level"):
+                    if hasattr(factor, ref_attr):
+                        ref_map[var] = str(getattr(factor, ref_attr))
+                        break
+        except Exception:
+            pass
+
+        for var, t_levels in parsed.items():
+            reference = ref_map.get(var, "")
+            all_levels = ([reference] if reference else []) + t_levels
+            result[var] = {"levels": all_levels, "reference": reference}
+        return result
+    except Exception:
+        return result  # return whatever we managed to accumulate
+
+
+def _write_covariate_schema(spark, *, result, corpus, source_table, cohort_name,
+                            cache_uri, out_dir, log):
+    """Derive + write covariate_schema.json from the covariate sidecar.
+
+    No-op (logs a warning) when the sidecar is unavailable, so the Atlas panel
+    simply hides. All stats are in-enclave aggregates (dummy-column sums,
+    coarse percentiles) — nothing single-patient leaves.
+    """
+    if not cache_uri:
+        log.warning("STM: no --cache-uri; covariate_schema.json not written.")
+        return
+    try:
+        import json
+        import math  # noqa: F401  (available for callers of helpers)
+        import re as _re
+        from pyspark.sql import functions as F
+        from pyspark.ml.functions import vector_to_array
+        from _covariates_cache import compute_cache_key, try_load
+        from charmpheno.export.covariate_schema import build_covariate_schema
+
+        cov_manifest = result.metadata["covariate_manifest"]
+        key = compute_cache_key(
+            covariate_formula=cov_manifest["covariate_formula"],
+            person_mod=corpus["person_mod"], cdr=corpus["cdr"],
+            source_table=source_table, cohort=cohort_name,
+        )
+        cached = try_load(spark, cache_uri, key)
+        if cached is None:
+            log.warning("STM: covariate-cache MISS; covariate_schema.json not written.")
+            return
+        cov_df, model_spec, covariate_names = cached
+        continuous_cols = list(cov_manifest.get("continuous_cols", []))
+        k = int(corpus.get("min_patient_count", 20))
+
+        # Project the design vector to an array column once.
+        arr = cov_df.select(vector_to_array("covariates").alias("x"))
+        name_idx = {n: i for i, n in enumerate(covariate_names)}
+
+        # Dummy-column sums (= per-level patient counts) for every C(var)[T.level].
+        dummy_names = [n for n in covariate_names
+                       if _re.match(r"^C\(.+\)\[T\..+\]$", n)]
+        if dummy_names:
+            sums = arr.agg(*[
+                F.sum(F.col("x")[name_idx[n]]).alias(n) for n in dummy_names
+            ]).collect()[0].asDict()
+            level_counts = {n: int(sums[n]) for n in dummy_names}
+        else:
+            level_counts = {}
+
+        # Coarse percentiles for continuous columns (p5, p50, p95), rounded.
+        continuous_stats = {}
+        for var in continuous_cols:
+            idx = name_idx[var]
+            arr_with_col, col_name = _quant_col_df(arr, idx)
+            q = arr_with_col.approxQuantile(col_name, [0.05, 0.5, 0.95], 0.01)
+            continuous_stats[var] = tuple(round(v) for v in q)
+
+        # Levels + reference from the fitted ModelSpec.
+        categorical_levels = _categorical_levels_from_spec(
+            model_spec, covariate_names=covariate_names,
+        )
+
+        schema = build_covariate_schema(
+            covariate_names=covariate_names, continuous_cols=continuous_cols,
+            categorical_levels=categorical_levels, level_counts=level_counts,
+            continuous_stats=continuous_stats, k=k,
+        )
+        (out_dir / "covariate_schema.json").write_text(json.dumps(schema, indent=2))
+        log.info("STM: wrote covariate_schema.json (controls=%d, unsupported=%d)",
+                 len(schema["controls"]), len(schema["unsupported"]))
+        print("[driver]   covariate_schema:", json.dumps(schema, indent=2), flush=True)
+    except Exception as exc:  # cosmetic-only; never fail the bundle build
+        log.warning("STM: covariate_schema derivation failed (%s); skipping.", exc)
+
+
 def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
                            cohort_name, cache_uri, log):
     """Faithful corpus-mean alpha-equivalent for STM, or None to fall back.
@@ -338,6 +522,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 print(f"[driver]   wrote covariate_effects.json (K={Gamma.shape[1]}, "
                       f"P={Gamma.shape[0]})", flush=True)
+                _write_covariate_schema(
+                    spark, result=result, corpus=corpus,
+                    source_table=source_table, cohort_name=cohort_name,
+                    cache_uri=args.cache_uri, out_dir=out_dir, log=log,
+                )
             write_corpus_stats_sidecar(
                 stats, out_dir / "corpus_stats.json", v_displayed=v_disp,
                 cohort=cohort_metadata(cohort_name),
