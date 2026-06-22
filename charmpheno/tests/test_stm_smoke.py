@@ -109,3 +109,55 @@ def test_end_to_end_synthetic_stm(spark, tmp_path: Path):
     # otherwise the whole feature would be a no-op.
     stand_in = adapt(model).corpus_prevalence
     assert not np.allclose(export.corpus_prevalence, stand_in)
+
+
+@pytest.mark.slow
+def test_combined_cohort_comorbid_two_documents(spark, tmp_path):
+    """A comorbid patient yields two source-labeled documents that fit and
+    join on the composite key; covariates are per-(person, cohort)."""
+    import numpy as np
+    import pandas as pd
+    from pyspark.ml.linalg import SparseVector
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+    from charmpheno.omop.topic_prep import to_bow_dataframe
+    from charmpheno.omop.covariates import build_patient_covariate_df
+    from pyspark.sql import functions as F
+
+    # Events already tagged with source_cohort (as _combine_cohorts would).
+    # person 1 is comorbid (cancer + dementia), person 2 cancer, person 3 dementia.
+    rng = np.random.default_rng(0)
+    rows = []
+    def emit(pid, cohort, codes):
+        for c in codes:
+            rows.append((pid, cohort, str(c)))
+    emit(1, "cancer", rng.integers(0, 10, 40))
+    emit(1, "dementia", rng.integers(10, 20, 40))
+    emit(2, "cancer", rng.integers(0, 10, 40))
+    emit(3, "dementia", rng.integers(10, 20, 40))
+    events = spark.createDataFrame(rows, ["person_id", "source_cohort", "concept_id"])
+
+    bow_df, vocab_map = to_bow_dataframe(
+        events, doc_spec=PatientCohortDocSpec(min_doc_length=0),
+        token_col="concept_id",
+    )
+    bow_df = bow_df.withColumn(
+        "source_cohort", F.split(F.col("doc_id"), ":").getItem(0))
+    # Comorbid person 1 -> two docs.
+    docs = {(r["person_id"], r["source_cohort"]) for r in bow_df.collect()}
+    assert (1, "cancer") in docs and (1, "dementia") in docs
+
+    person_pdf = pd.DataFrame({
+        "person_id":     [1, 1, 2, 3],
+        "source_cohort": ["cancer", "dementia", "cancer", "dementia"],
+        "sex":           ["M", "M", "F", "F"],
+        "age":           [60.0, 60.0, 70.0, 80.0],
+    })
+    cov_df, _, names = build_patient_covariate_df(
+        spark.createDataFrame(person_pdf),
+        covariate_formula="~ C(source_cohort) + C(sex) + age",
+        categorical_cols=["source_cohort", "sex"], continuous_cols=["age"],
+        key_cols=["person_id", "source_cohort"],
+    )
+    joined = bow_df.join(cov_df, on=["person_id", "source_cohort"], how="inner")
+    # Each document joins to exactly one covariate row.
+    assert joined.count() == bow_df.count()
