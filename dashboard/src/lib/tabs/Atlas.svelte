@@ -4,6 +4,7 @@
   import CodePanel from '../atlas/CodePanel.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
   import PhenotypeBrowser from '../atlas/PhenotypeBrowser.svelte'
+  import CovariatePanel from '../atlas/CovariatePanel.svelte'
   import { copy } from '../copy'
 
   // Background-click closes the disclosure popover so the user doesn't
@@ -42,6 +43,9 @@
   <div class="grid">
     <div class="left-col">
       <TopicMap />
+      {#if $bundle?.covariateSchema}
+        <CovariatePanel schema={$bundle.covariateSchema} />
+      {/if}
       <PhenotypeBrowser />
     </div>
     <CodePanel />
