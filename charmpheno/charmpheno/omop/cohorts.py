@@ -81,6 +81,7 @@ _DEMENTIA_EXCLUSION_ANCESTORS: tuple[int, ...] = ()
 SUPPORTED_COHORTS: tuple[str, ...] = (
     "first_cancer_year",
     "first_dementia_year",
+    "cancer_or_dementia",
 )
 
 
@@ -131,6 +132,17 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "meaningful and the follow-up window is fully observed."
         ),
     },
+    "cancer_or_dementia": {
+        "id": "cancer_or_dementia",
+        "label": "Cancer or Dementia (combined, source-labeled)",
+        "description": (
+            "Union of the first-cancer-year and first-dementia-year cohorts, "
+            "each document labeled by its source cohort. A patient qualifying "
+            "for both contributes two documents (one per cohort). Used as an "
+            "STM validation: a source_cohort covariate should produce strongly "
+            "separable cancer vs dementia topic structure."
+        ),
+    },
 }
 
 
@@ -167,6 +179,11 @@ def apply_cohort(
         )
     if cohort == "first_dementia_year":
         return apply_first_dementia_year_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+        )
+    if cohort == "cancer_or_dementia":
+        return apply_cancer_or_dementia_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
         )
@@ -356,3 +373,41 @@ def apply_first_dementia_year_cohort(
                ))
                .drop("index_date")
     )
+
+
+def _combine_cohorts(
+    cancer_events: DataFrame, dementia_events: DataFrame,
+) -> DataFrame:
+    """Tag each cohort's events with source_cohort and union (no dedup).
+
+    A comorbid patient's cancer-window events (tagged "cancer") and
+    dementia-window events (tagged "dementia") both survive, so they become
+    two distinct documents downstream via PatientCohortDocSpec.
+    """
+    c = cancer_events.withColumn("source_cohort", F.lit("cancer"))
+    d = dementia_events.withColumn("source_cohort", F.lit("dementia"))
+    return c.unionByName(d)
+
+
+def apply_cancer_or_dementia_cohort(
+    cond_df: DataFrame,
+    *,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+) -> DataFrame:
+    """Combined cancer-or-dementia cohort with a source_cohort label column.
+
+    Composes the two single-disease cohorts and unions their tagged events.
+    Returns cond_df's schema plus a `source_cohort` string column.
+    """
+    cancer = apply_first_cancer_year_cohort(
+        cond_df, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+    )
+    dementia = apply_first_dementia_year_cohort(
+        cond_df, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+    )
+    return _combine_cohorts(cancer, dementia)
