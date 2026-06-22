@@ -1,10 +1,17 @@
 import type {
   CohortManifest, DashboardBundle, Model, PhenotypesBundle, VocabBundle, CorpusStats,
+  CovariateSchema, CovariateEffects,
 } from './types'
 
 async function fetchJson<T>(url: string): Promise<T> {
   const r = await fetch(url)
   if (!r.ok) throw new Error(`failed to load ${url}: ${r.status}`)
+  return r.json() as Promise<T>
+}
+
+async function fetchJsonOptional<T>(url: string): Promise<T | undefined> {
+  const r = await fetch(url)
+  if (!r.ok) return undefined
   return r.json() as Promise<T>
 }
 
@@ -26,5 +33,9 @@ export async function loadBundle(baseUrl: string, cohortId: string): Promise<Das
     fetchJson<VocabBundle>(`${base}data/${cohortId}/vocab.json`),
     fetchJson<CorpusStats>(`${base}data/${cohortId}/corpus_stats.json`),
   ])
-  return { model, phenotypes, vocab, corpusStats }
+  const [covariateSchema, covariateEffects] = await Promise.all([
+    fetchJsonOptional<CovariateSchema>(`${base}data/${cohortId}/covariate_schema.json`),
+    fetchJsonOptional<CovariateEffects>(`${base}data/${cohortId}/covariate_effects.json`),
+  ])
+  return { model, phenotypes, vocab, corpusStats, covariateSchema, covariateEffects }
 }

@@ -39,8 +39,32 @@ export interface CorpusStats {
   corpus_size_docs: number; mean_codes_per_doc: number; k: number; v: number; v_full: number
   cohort?: CohortMeta
 }
+export type CovariateRecipe =
+  | { kind: 'intercept' }
+  | { kind: 'main'; var: string }
+  | { kind: 'dummy'; var: string; level: string }
+  | { kind: 'interaction'; factors: CovariateRecipe[] }
+
+export interface CovariateControl {
+  name: string
+  type: 'continuous' | 'categorical'
+  range?: [number, number]
+  default?: number
+  reference?: string
+  levels?: string[]
+}
+export interface CovariateSchema {
+  k: number
+  controls: CovariateControl[]
+  design_columns: { name: string; recipe: CovariateRecipe }[]
+  unsupported: string[]
+}
+export type CovariateEffects = { covariate: string; per_topic: number[] }[]
+
 export interface DashboardBundle {
   model: Model; phenotypes: PhenotypesBundle; vocab: VocabBundle; corpusStats: CorpusStats
+  covariateSchema?: CovariateSchema
+  covariateEffects?: CovariateEffects
 }
 
 // Top-level data/manifest.json: lists which per-cohort bundles are

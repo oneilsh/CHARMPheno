@@ -9,9 +9,16 @@ describe('loadBundle', () => {
         'data/cancer/phenotypes.json':    { phenotypes: [] },
         'data/cancer/vocab.json':         { codes: [] },
         'data/cancer/corpus_stats.json':  { corpus_size_docs: 10, mean_codes_per_doc: 5, k: 2, v: 3, v_full: 3 },
+        'data/cd/model.json':             { K: 2, V: 2, alpha: [0.5, 0.5], beta: [[0.6, 0.4], [0.3, 0.7]] },
+        'data/cd/phenotypes.json':        { phenotypes: [] },
+        'data/cd/vocab.json':             { codes: [] },
+        'data/cd/corpus_stats.json':      { corpus_size_docs: 10, mean_codes_per_doc: 5, k: 2, v: 2, v_full: 2 },
+        'data/cd/covariate_effects.json': [{ covariate: 'Intercept', per_topic: [0.1, 0.2] }],
+        'data/cd/covariate_schema.json':  { k: 20, controls: [], design_columns: [], unsupported: [] },
         'data/manifest.json':             { default: 'cancer', cohorts: [{ id: 'cancer', label: 'Cancer', description: 'desc' }] },
       }
-      const key = Object.keys(stubs).find((k) => url.endsWith(k))!
+      const key = Object.keys(stubs).find((k) => url.endsWith(k))
+      if (!key) return Promise.resolve({ ok: false, status: 404 } as Response)
       return Promise.resolve({ ok: true, json: () => Promise.resolve(stubs[key]) } as Response)
     }) as any
   })
@@ -26,5 +33,17 @@ describe('loadBundle', () => {
     const m = await loadManifest('/')
     expect(m.default).toBe('cancer')
     expect(m.cohorts[0].id).toBe('cancer')
+  })
+
+  it('loads covariate schema + effects when present', async () => {
+    const b = await loadBundle('/', 'cd')
+    expect(b.covariateSchema?.k).toBe(20)
+    expect(b.covariateEffects?.length).toBe(1)
+  })
+
+  it('leaves covariate fields undefined for non-STM bundles (404)', async () => {
+    const b = await loadBundle('/', 'cancer')
+    expect(b.covariateSchema).toBeUndefined()
+    expect(b.covariateEffects).toBeUndefined()
   })
 })
