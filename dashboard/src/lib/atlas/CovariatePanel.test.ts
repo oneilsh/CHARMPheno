@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { it, expect } from 'vitest'
 import { initialValues, canInteract } from './covariate-panel'
 
 const schema = { k: 20, unsupported: [] as string[],

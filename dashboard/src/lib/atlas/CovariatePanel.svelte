@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { bundle, covariateMode, covariateValues } from '../store'
+  import { covariateMode, covariateValues } from '../store'
   import type { CovariateSchema } from '../types'
   import { initialValues, canInteract } from './covariate-panel'
 

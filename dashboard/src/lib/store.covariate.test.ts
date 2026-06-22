@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { it, expect, beforeEach } from 'vitest'
 import { get } from 'svelte/store'
 import { bundle, covariateMode, covariateValues, prevalenceReader } from './store'
 

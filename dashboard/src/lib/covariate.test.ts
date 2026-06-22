@@ -12,7 +12,7 @@ describe('evalRecipe', () => {
   })
   it('interaction -> product', () => {
     const r = { kind: 'interaction', factors: [
-      { kind: 'main', var: 'age' }, { kind: 'dummy', var: 'sex', level: 'M' }] } as const
+      { kind: 'main', var: 'age' }, { kind: 'dummy', var: 'sex', level: 'M' }] }
     expect(evalRecipe(r, values)).toBe(70)
   })
 })
