@@ -20,6 +20,26 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, LongType
 
 
+def corpus_mean_proportions_from_covariate_df(
+    cov_df: DataFrame,
+    Gamma: np.ndarray,
+    *,
+    covariates_col: str = "covariates",
+) -> np.ndarray:
+    """Faithful dashboard α-equivalent (1/D) Σ_d softmax(Γᵀ x_d) from the sidecar.
+
+    Selects only the covariate-vector column — dropping ``person_id`` so it
+    never crosses into spark-vi — converts each DenseVector to a numpy array,
+    and delegates the distributed reduction to spark-vi's
+    ``corpus_mean_topic_proportions_rdd`` (mapPartitions+treeReduce, so only a
+    K-vector + count reach the driver). Returns a length-K probability vector.
+    """
+    from spark_vi.mllib.topic.stm import corpus_mean_topic_proportions_rdd
+
+    vec_rdd = cov_df.select(covariates_col).rdd.map(lambda row: row[0].toArray())
+    return corpus_mean_topic_proportions_rdd(vec_rdd, Gamma)
+
+
 def build_patient_covariate_df(
     person_df: DataFrame,
     *,

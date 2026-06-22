@@ -139,8 +139,16 @@ def adapt_hdp(result, *, top_k: int = 50) -> DashboardExport:
     )
 
 
-def adapt_stm(result) -> DashboardExport:
-    """STM → DashboardExport. α-equivalent derived from softmax(Γ[intercept])."""
+def adapt_stm(result, *, corpus_prevalence: np.ndarray | None = None) -> DashboardExport:
+    """STM → DashboardExport. α-equivalent derived from softmax(Γ[intercept]).
+
+    ``corpus_prevalence`` is the faithful corpus-mean topic proportion
+    ``(1/D) Σ_d softmax(Γᵀ x_d)``, computed distributively by the in-enclave
+    dashboard driver (see ``corpus_mean_topic_proportions_rdd``). When omitted
+    (cache miss, or a caller without the covariate sidecar) the v1 stand-in
+    ``softmax(Γ[intercept])`` is used instead — a reference-level approximation
+    that affects only the dashboard's "default topic proportion" widget.
+    """
     gp = _global_params(result)
     meta = result.metadata
     lambda_ = np.asarray(gp["lambda"], dtype=np.float64)
@@ -158,11 +166,13 @@ def adapt_stm(result) -> DashboardExport:
         alpha_eq /= alpha_eq.sum()
     else:
         alpha_eq = np.full(K, 1.0 / K)
-    # v1: corpus_prevalence stand-in equals α_eq. v1.x would compute
-    # (1/D) Σ_d softmax(Γ x_d) over the actual corpus covariate distribution.
-    # Follow-up: track in docs/insights/ when the empirical version ships;
+    # Faithful corpus-mean (1/D) Σ_d softmax(Γᵀ x_d) when the driver supplied
+    # it; otherwise the v1 stand-in (== α_eq at the intercept). Either way this
     # affects only the dashboard "default topic proportion" display.
-    corpus_prev = alpha_eq.copy()
+    if corpus_prevalence is not None:
+        corpus_prev = np.asarray(corpus_prevalence, dtype=np.float64)
+    else:
+        corpus_prev = alpha_eq.copy()
     # theta_histogram / theta_percentiles: optional pass-through if metadata has them.
     raw_hist = meta.get("theta_histogram")
     theta_histogram = _parse_theta_histogram(raw_hist) if raw_hist is not None else None
@@ -180,12 +190,17 @@ _HDP_ALIASES = {"hdp", "onlinehdp", "onlinehdpmodel", "onlinehdpestimator"}
 _STM_ALIASES = {"stm", "onlinestm"}
 
 
-def adapt(result, *, hdp_top_k: int = 50) -> DashboardExport:
+def adapt(
+    result,
+    *,
+    hdp_top_k: int = 50,
+    stm_corpus_prevalence: np.ndarray | None = None,
+) -> DashboardExport:
     mc = _model_class(result)
     if mc in _LDA_ALIASES:
         return adapt_lda(result)
     if mc in _HDP_ALIASES:
         return adapt_hdp(result, top_k=hdp_top_k)
     if mc in _STM_ALIASES:
-        return adapt_stm(result)
+        return adapt_stm(result, corpus_prevalence=stm_corpus_prevalence)
     raise ValueError(f"unsupported model class: {mc}")

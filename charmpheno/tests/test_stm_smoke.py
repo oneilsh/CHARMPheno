@@ -82,3 +82,30 @@ def test_end_to_end_synthetic_stm(spark, tmp_path: Path):
     cov_json = json.loads((out / "covariate_effects.json").read_text())
     assert len(cov_json) == len(names)
     assert all("per_topic" in row for row in cov_json)
+
+    # Faithful corpus-mean corpus_prevalence path (the dashboard's
+    # "default topic proportion"). Exercises the real formula-expanded cov_df
+    # and the real fitted Gamma through the distributed reduction + adapter.
+    from charmpheno.omop.covariates import (
+        corpus_mean_proportions_from_covariate_df,
+    )
+    from charmpheno.export.model_adapter import adapt
+
+    faithful = corpus_mean_proportions_from_covariate_df(
+        cov_df, np.asarray(Gamma, dtype=np.float64)
+    )
+    assert faithful.shape == (K,)
+    np.testing.assert_allclose(faithful.sum(), 1.0)
+
+    # Wire it through the generic adapter exactly as build_dashboard_cloud does
+    # (driver augments these metadata fields post-fit).
+    model.metadata["model_class"] = "stm"
+    model.metadata["covariate_manifest"] = {"covariate_names": names}
+    export = adapt(model, stm_corpus_prevalence=faithful)
+    np.testing.assert_allclose(export.corpus_prevalence, faithful)
+
+    # With non-degenerate covariates (sex, age vary across the cohort), the
+    # faithful corpus mean must differ from the intercept-only stand-in —
+    # otherwise the whole feature would be a no-op.
+    stand_in = adapt(model).corpus_prevalence
+    assert not np.allclose(export.corpus_prevalence, stand_in)

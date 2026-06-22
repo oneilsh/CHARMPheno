@@ -13,6 +13,33 @@ import pytest
 pyspark = pytest.importorskip("pyspark")
 formulaic = pytest.importorskip("formulaic")
 
+
+class TestCorpusMeanProportionsFromCovariateDF:
+    """corpus_mean_proportions_from_covariate_df: drives the dashboard's
+    faithful α-equivalent from the (person_id, covariates) sidecar, dropping
+    person_id and delegating the distributed math to spark-vi's RDD helper.
+    """
+
+    def test_matches_numpy_oracle_and_ignores_person_id(self, spark):
+        from pyspark.ml.linalg import Vectors
+        from charmpheno.omop.covariates import (
+            corpus_mean_proportions_from_covariate_df,
+        )
+        from spark_vi.models.topic.stm import corpus_mean_topic_proportions
+
+        rng = np.random.default_rng(21)
+        P, K = 3, 4
+        Gamma = rng.normal(size=(P, K))
+        X = rng.normal(size=(6, P))
+        rows = [(1000 + d, Vectors.dense(X[d].tolist())) for d in range(len(X))]
+        cov_df = spark.createDataFrame(rows, ["person_id", "covariates"])
+
+        result = corpus_mean_proportions_from_covariate_df(cov_df, Gamma)
+
+        np.testing.assert_allclose(
+            result, corpus_mean_topic_proportions(Gamma, X), rtol=1e-9
+        )
+
 class TestBuildPatientCovariateDF:
     def test_categorical_and_continuous(self, spark):
         from charmpheno.omop.covariates import build_patient_covariate_df
