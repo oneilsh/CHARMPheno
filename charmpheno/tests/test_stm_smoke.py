@@ -117,7 +117,6 @@ def test_combined_cohort_comorbid_two_documents(spark, tmp_path):
     join on the composite key; covariates are per-(person, cohort)."""
     import numpy as np
     import pandas as pd
-    from pyspark.ml.linalg import SparseVector
     from charmpheno.omop.doc_spec import PatientCohortDocSpec
     from charmpheno.omop.topic_prep import to_bow_dataframe
     from charmpheno.omop.covariates import build_patient_covariate_df

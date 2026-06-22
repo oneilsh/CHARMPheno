@@ -1,0 +1,5 @@
+# Combined cancer-or-dementia cohort defaults. The experiment frontmatter
+# supplies the STM covariate fields; this file exists so load_defaults finds
+# a <cohort>.yaml to merge over _base.yaml.
+cohort: cancer_or_dementia
+cohort_def: cancer_or_dementia

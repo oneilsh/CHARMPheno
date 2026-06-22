@@ -4,6 +4,12 @@ Useful when iterating on `covariate_formula` for an experiment: rerunning
 the full fit driver to refresh covariates is wasteful when the corpus
 hasn't changed. This script runs load_or_build_covariates against the
 configured cache and exits.
+
+For composite cohorts (those whose formula contains ``source_cohort``),
+the script loads the tagged OMOP events to derive the per-person
+source-cohort labels, expands the person table with those labels, and
+passes ``key_cols=["person_id", "source_cohort"]`` so the covariate cache
+key matches the one produced by the fit driver.
 """
 from __future__ import annotations
 
@@ -38,6 +44,9 @@ def main() -> int:
     configure_logging()
     cat_cols = [c.strip() for c in args.categorical_cols.split(",") if c.strip()]
     cont_cols = [c.strip() for c in args.continuous_cols.split(",") if c.strip()]
+
+    composite = "source_cohort" in cat_cols
+
     with make_spark_session(app_name="stm-build-covariates") as spark:
         # If --force, delete cache key dir so load_or_build_covariates rebuilds.
         if args.force:
@@ -61,13 +70,46 @@ def main() -> int:
                           flush=True)
 
         from charmpheno.omop import load_person_table
-        with _phase("person table load"):
-            person_df = load_person_table(
-                spark=spark, cdr_dataset=args.cdr,
-                billing_project=args.billing,
-                person_sample_mod=args.person_mod,
-                cohort=args.cohort,
-            )
+        from charmpheno.omop import load_omop_bigquery
+
+        if composite:
+            # For cancer_or_dementia (formula contains source_cohort), the
+            # person table alone has no source_cohort column.  Load the tagged
+            # events — load_omop_bigquery returns a source_cohort column for
+            # the combined cohort via apply_cohort — and derive the
+            # per-(person, cohort) label set from those events.  This mirrors
+            # the fit driver's composite branch so the shared cache key is
+            # identical.
+            with _phase("events load (composite cohort label derivation)"):
+                events = load_omop_bigquery(
+                    spark=spark, cdr_dataset=args.cdr,
+                    billing_project=args.billing,
+                    person_sample_mod=args.person_mod,
+                    source_table=args.source_table,
+                    cohort=args.cohort,
+                )
+                labels = events.select("person_id", "source_cohort").distinct()
+
+            with _phase("person table load"):
+                person_df = load_person_table(
+                    spark=spark, cdr_dataset=args.cdr,
+                    billing_project=args.billing,
+                    person_sample_mod=args.person_mod,
+                    cohort=args.cohort,
+                )
+                person_df = person_df.join(labels, on="person_id", how="inner")
+
+            key_cols = ["person_id", "source_cohort"]
+        else:
+            with _phase("person table load"):
+                person_df = load_person_table(
+                    spark=spark, cdr_dataset=args.cdr,
+                    billing_project=args.billing,
+                    person_sample_mod=args.person_mod,
+                    cohort=args.cohort,
+                )
+            key_cols = ["person_id"]
+
         cov_df, _, names = load_or_build_covariates(
             spark, person_df=person_df,
             covariate_formula=args.covariate_formula,
@@ -75,6 +117,7 @@ def main() -> int:
             cdr=args.cdr, source_table=args.source_table,
             cohort=args.cohort, person_mod=args.person_mod,
             cache_uri=args.cache_uri,
+            key_cols=key_cols,
         )
         n_rows = cov_df.count()
         print(
