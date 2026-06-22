@@ -41,6 +41,54 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
     pass
 
 
+def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
+                           cohort_name, cache_uri, log):
+    """Faithful corpus-mean alpha-equivalent for STM, or None to fall back.
+
+    Reloads the covariate sidecar from its cache (key recomputed from the
+    checkpoint's covariate_manifest + corpus_manifest) and reduces it with
+    corpus_mean_proportions_from_covariate_df (distributed treeReduce; only a
+    K-vector reaches the driver). Returns None — leaving adapt_stm on its
+    softmax(Gamma[intercept]) stand-in — when no cache_uri is supplied, the
+    cache misses, or anything raises. The quantity is cosmetic (the dashboard's
+    "default topic proportion" widget), so it must never abort the bundle build.
+    """
+    if not cache_uri:
+        log.warning("STM: no --cache-uri; corpus_prevalence uses the "
+                    "softmax(Gamma[intercept]) stand-in.")
+        return None
+    try:
+        from _covariates_cache import compute_cache_key, try_load
+        from charmpheno.omop.covariates import (
+            corpus_mean_proportions_from_covariate_df,
+        )
+
+        cov_manifest = result.metadata["covariate_manifest"]
+        key = compute_cache_key(
+            covariate_formula=cov_manifest["covariate_formula"],
+            person_mod=corpus["person_mod"],
+            cdr=corpus["cdr"],
+            source_table=source_table,
+            cohort=cohort_name,
+        )
+        with _phase(f"covariates-cache lookup ({cache_uri}/{key})"):
+            cached = try_load(spark, cache_uri, key)
+        if cached is None:
+            log.warning("STM: covariate-cache MISS (%s/%s); corpus_prevalence "
+                        "uses the intercept stand-in.", cache_uri, key)
+            return None
+        cov_df, _spec, _names = cached
+        Gamma = np.asarray(result.global_params["Gamma"], dtype=np.float64)
+        with _phase("corpus-mean prior proportions (treeReduce)"):
+            prev = corpus_mean_proportions_from_covariate_df(cov_df, Gamma)
+        log.info("STM: faithful corpus_prevalence computed (K=%d).", prev.shape[0])
+        return prev
+    except Exception as exc:  # cosmetic-only: never fatal to the bundle build
+        log.warning("STM: corpus_prevalence computation failed (%s); "
+                    "using the intercept stand-in.", exc)
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=_HelpFormatter)
@@ -52,6 +100,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model-class", choices=["lda", "hdp", "stm"], default="lda")
     parser.add_argument("--hdp-top-k", type=int, default=50,
                         help="top-K used HDP topics (ignored for LDA)")
+    parser.add_argument("--cache-uri", default=None,
+                        help="GCS/HDFS URI prefix for the covariate cache "
+                             "(STM only). Enables the faithful corpus-mean "
+                             "corpus_prevalence; without it the dashboard falls "
+                             "back to the softmax(Gamma[intercept]) stand-in.")
     parser.add_argument("--vocab-top-n", type=int, default=5000,
                         help="trim vocab to top-N codes by corpus_freq")
     parser.add_argument("--top-n-codes-for-npmi", type=int, default=20)
@@ -153,8 +206,20 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"[driver]   vocab size: {len(vocab_map)}", flush=True)
 
+        is_stm = (args.model_class == "stm"
+                  or result.metadata.get("model_class") == "stm")
+        stm_corpus_prev = (
+            _stm_corpus_prevalence(
+                spark, result=result, corpus=corpus,
+                source_table=source_table, cohort_name=cohort_name,
+                cache_uri=args.cache_uri, log=log,
+            )
+            if is_stm else None
+        )
+
         with _phase("adapter (model-class normalize)"):
-            export = adapt(result, hdp_top_k=args.hdp_top_k)
+            export = adapt(result, hdp_top_k=args.hdp_top_k,
+                           stm_corpus_prevalence=stm_corpus_prev)
             K_disp, V_full = export.beta.shape
             print(f"[driver]   K_display={K_disp} V_full={V_full}", flush=True)
 
@@ -262,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
                 topic_indices=export.topic_indices.tolist(),
                 labels=None,
             )
-            if args.model_class == "stm" or result.metadata.get("model_class") == "stm":
+            if is_stm:
                 Gamma = np.asarray(result.global_params["Gamma"], dtype=np.float64)
                 covariate_manifest = result.metadata["covariate_manifest"]
                 covariate_names = covariate_manifest["covariate_names"]

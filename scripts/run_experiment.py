@@ -381,13 +381,19 @@ def build_dashboard_args(
     direct `[...]` access because they live in `_base.yaml` — if they're
     missing, a KeyError is the right failure mode (the YAML chain is broken).
     """
-    return [
+    args = [
         "--checkpoint", str(checkpoint_dir),
         "--model-class", str(effective.get("model_class", "lda")),
         "--zip-name", zip_name,
         "--vocab-top-n", str(effective["vocab_top_n"]),
         "--top-n-codes-for-npmi", str(effective["top_n_codes_for_npmi"]),
     ]
+    # STM uses the covariate cache to compute the faithful corpus-mean
+    # corpus_prevalence; pass it through when configured (ignored for LDA/HDP,
+    # which need no covariate sidecar). Mirrors the build/eval arg convention.
+    if effective.get("cache_uri"):
+        args.extend(["--cache-uri", str(effective["cache_uri"])])
+    return args
 
 
 # Spark configuration constants. Match the existing per-cohort Makefile targets.

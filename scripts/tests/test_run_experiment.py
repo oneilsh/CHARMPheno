@@ -844,6 +844,28 @@ class TestBuildDashboardArgs:
         with pytest.raises(KeyError):
             rx.build_dashboard_args(effective, tmp_path / "ck", "z.zip")
 
+    def test_stm_with_cache_uri_passes_cache_uri(self, tmp_path):
+        effective = {
+            "model_class": "stm",
+            "vocab_top_n": 5000,
+            "top_n_codes_for_npmi": 20,
+            "cache_uri": "gs://bucket/cache",
+        }
+        args = rx.build_dashboard_args(effective, tmp_path / "ck", "z.zip")
+        assert "--cache-uri" in args
+        assert args[args.index("--cache-uri") + 1] == "gs://bucket/cache"
+
+    def test_no_cache_uri_omits_flag(self, tmp_path):
+        # Without cache_uri configured (e.g. LDA, or STM before the cache is
+        # built), the flag must be absent so the driver falls back cleanly.
+        effective = {
+            "model_class": "lda",
+            "vocab_top_n": 5000,
+            "top_n_codes_for_npmi": 20,
+        }
+        args = rx.build_dashboard_args(effective, tmp_path / "ck", "z.zip")
+        assert "--cache-uri" not in args
+
 
 class TestWriteBuildSectionHeader:
     def test_appends_header_with_timestamp(self, tmp_path):
