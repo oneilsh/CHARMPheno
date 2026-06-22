@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-22
 **Status:** Brainstorm-grade design, awaiting user review.
-**Scope:** Add interactive covariate controls to the dashboard's **Phenotype Atlas** tab for STM bundles. Moving a control (slider / dropdown / toggle) recomputes per-topic prevalence from the fitted Γ and resizes the topic bubbles live; bubble positions never move. Backend derives a scrubbed covariate schema in-enclave; the client is a pure renderer. Atlas only — Simulator/Patient tabs are deferred.
+**Scope:** Add interactive covariate controls to the dashboard's **Phenotype Atlas** tab for STM bundles. Moving a control (slider / dropdown / toggle) recomputes per-topic prevalence from the fitted Γ and resizes the topic bubbles live; bubble positions never move. The dashboard build derives a scrubbed covariate schema in-enclave (from the saved ModelSpec + covariate sidecar, no re-fit); the client is a pure renderer. Atlas only — Simulator/Patient tabs are deferred.
 
 ---
 
@@ -29,7 +29,7 @@ Covariates affect only the θ prior, never β. Topic semantics — and thus the 
 
 ## The covariate schema contract (`covariate_schema.json`)
 
-Derived in-enclave at fit time (raw person table + formulaic ModelSpec both available), scrubbed, stored in checkpoint metadata, and emitted by the dashboard build alongside `covariate_effects.json`.
+Derived in-enclave **at dashboard-build time** from the saved formulaic ModelSpec (`model_spec.pkl` in the covariate sidecar cache) plus the covariate sidecar itself — no re-fit needed. Scrubbed, then written to `covariate_schema.json` in the bundle alongside `covariate_effects.json`. Deriving here (rather than at fit time) means re-generating the dashboard from an existing checkpoint is enough to get the feature.
 
 ```jsonc
 {
@@ -61,15 +61,15 @@ Recipe kinds and their client evaluation against the current control values:
 
 ## Backend derivation + safety
 
-At fit time, after the ModelSpec is fit (the schema-frame distinct-level discovery already runs for categoricals):
+At **dashboard-build time**, load the covariate sidecar with the same `try_load` the faithful `corpus_prevalence` path already uses — it returns `(cov_df, model_spec, covariate_names)`. Because the formula bans standardization, a continuous design column equals its raw value and a categorical dummy is a 0/1 indicator, so both the safe ranges and the level counts are recoverable from the **encoded** sidecar — no raw person-table reload.
 
-1. **Classify variables:** from `categorical_cols` / `continuous_cols` and the ModelSpec factor structure.
-2. **Categorical levels + reference:** read levels from the spec's factor maps; the reference is the level with no `[T.…]` column. **Safety:** suppress (omit) any level with fewer than `k` patients — reuse the small-cell-suppression pattern from `code_doc_counts` ([corpus_stats.py](../../../charmpheno/charmpheno/export/corpus_stats.py)), with the same `k` (`min_patient_count`, default 20).
-3. **Continuous range + default:** compute coarsened percentiles (p5, p95, p50) over the covariate column and round to a safe granularity — reuse the `theta_percentiles` precedent. **Never** export min/max.
-4. **Recipes:** walk the ModelSpec term structure to emit one recipe per design column, index-aligned with the Γ rows. A design column that cannot be classified into a known recipe kind is added to `unsupported` instead.
-5. **Store** the scrubbed schema in checkpoint metadata (`metadata["covariate_schema"]`), so the dashboard build emits it without re-touching raw data. Optionally echo a human-readable rendering into the fit stdout so it lands in `summary.md` for review.
+1. **Classify variables:** from `categorical_cols` / `continuous_cols` (in the covariate manifest) and the ModelSpec factor structure.
+2. **Categorical levels + reference:** read levels from the ModelSpec's factor maps; the reference is the level with no `[T.…]` column. **Level counts:** sum each `C(var)[T.level]` dummy column over `cov_df` (its sum = patients at that level; reference count = N − Σ dummies for that variable). **Safety:** suppress (omit) any level with fewer than `k` patients — reuse the small-cell-suppression pattern from `code_doc_counts` ([corpus_stats.py](../../../charmpheno/charmpheno/export/corpus_stats.py)), same `k` (`min_patient_count`, default 20).
+3. **Continuous range + default:** take the design column equal to the variable (raw value, since standardization is banned) and compute coarsened percentiles (p5, p95, p50) over `cov_df`, rounded to a safe granularity — reuse the `theta_percentiles` precedent. **Never** min/max.
+4. **Recipes:** walk the ModelSpec term structure to emit one recipe per design column, index-aligned with the Γ rows (`covariate_names`). A design column that cannot be classified into a known recipe kind is added to `unsupported`.
+5. **Emit** the scrubbed schema directly to `covariate_schema.json` in the bundle, mirroring how `adapt_stm` writes `covariate_effects.json`. Echo a human-readable rendering to the build log for review.
 
-The dashboard build copies `metadata["covariate_schema"]` to `covariate_schema.json` in the bundle, mirroring how `adapt_stm` writes `covariate_effects.json`.
+If the sidecar is unavailable (no `cache_uri`, or a cache miss), no schema is written — the Atlas simply hides the panel (the same graceful path the faithful `corpus_prevalence` already falls back from).
 
 ## Client components
 
@@ -80,11 +80,11 @@ The dashboard build copies `metadata["covariate_schema"]` to `covariate_schema.j
 ## Data flow
 
 ```
-FIT (in-enclave): ModelSpec + raw person table
-   -> classify vars, read levels, compute safe percentiles, build recipes
-   -> SCRUB (suppress levels < k; percentile ranges)
-   -> metadata["covariate_schema"]
-DASHBOARD BUILD: metadata -> covariate_schema.json   (alongside covariate_effects.json / Gamma)
+DASHBOARD BUILD (in-enclave): try_load sidecar -> (cov_df, model_spec, covariate_names)
+   -> classify vars; levels+counts from dummy-column sums; safe percentiles from raw continuous columns; recipes from ModelSpec
+   -> SCRUB (suppress levels < k; percentile ranges, never min/max)
+   -> covariate_schema.json   (alongside covariate_effects.json / Gamma)
+   [no sidecar -> no schema -> panel hidden]
 CLIENT: load covariate_schema.json + covariate_effects.json
    -> render controls -> on change: recipes -> x -> softmax(Gamma^T x) -> prevalenceReader
    -> TopicMap resizes bubbles (coords fixed)
@@ -92,7 +92,7 @@ CLIENT: load covariate_schema.json + covariate_effects.json
 
 ## Testing
 
-- **Backend (pytest):** schema derivation from a synthetic ModelSpec — variable classification, categorical levels + reference, recipe kinds (intercept / main / dummy / interaction), and recipe order index-aligned with Γ. A rare categorical level (< k) is suppressed/omitted. Continuous range/default come from coarsened percentiles, asserted to differ from raw min/max. A non-expressible column lands in `unsupported`.
+- **Backend (pytest):** schema derivation from a synthetic ModelSpec + synthetic sidecar `cov_df` — variable classification, categorical levels + reference, recipe kinds (intercept / main / dummy / interaction), and recipe order index-aligned with Γ. Level counts come from dummy-column sums; a rare level (< k) is suppressed/omitted. Continuous range/default come from coarsened percentiles over the raw continuous column, asserted to differ from min/max. A non-expressible column lands in `unsupported`.
 - **Client (vitest if configured, else a small JS harness):** recipe evaluation for main / dummy / interaction; selecting the reference level zeros that variable's dummies; `softmax(Γᵀ x)` matches a hand-computed Γ on a tiny fixture; suppressed levels are absent from the rendered controls; a schema with non-empty `unsupported` disables the interactive reader (corpus_prevalence stays active).
 - **Integration:** a fixture `covariate_schema.json` + `covariate_effects.json` -> controls render -> changing a control changes the reader's per-topic values (bubbles would resize) while `coords` are untouched; a bundle with no schema hides the panel.
 
