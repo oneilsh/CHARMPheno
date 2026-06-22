@@ -54,3 +54,45 @@ def test_unparseable_design_column_goes_to_unsupported():
     inp["continuous_cols"] = ["age"]   # weird col is neither continuous nor C(...)
     s = build_covariate_schema(**inp)
     assert "weird_basis_col_3" in s["unsupported"]
+
+
+def test_interaction_parses_to_kind_interaction():
+    """A standard interaction column parses correctly and is NOT in unsupported."""
+    inp = _base_inputs()
+    inp["covariate_names"] = inp["covariate_names"] + ["age:C(sex)[T.M]"]
+    s = build_covariate_schema(**inp)
+    # find the design_column entry for the interaction
+    dc = next(d for d in s["design_columns"] if d["name"] == "age:C(sex)[T.M]")
+    assert dc["recipe"] == {
+        "kind": "interaction",
+        "factors": [
+            {"kind": "main", "var": "age"},
+            {"kind": "dummy", "var": "sex", "level": "M"},
+        ],
+    }
+    assert "age:C(sex)[T.M]" not in s["unsupported"]
+
+
+def test_interaction_with_colon_in_level():
+    """A dummy whose level contains a colon inside an interaction must parse correctly.
+
+    The naive name.split(':') incorrectly splits 'C(dx)[T.A:B]:age' into three
+    pieces; the bracket-aware split must treat the colon inside [...] as opaque.
+    """
+    inp = _base_inputs()
+    inp["covariate_names"] = inp["covariate_names"] + ["C(dx)[T.A:B]:age"]
+    # categorical_levels entry for dx so build_covariate_schema does not crash on
+    # the controls loop (dx is not referenced there unless listed, so it is safe to
+    # omit — but adding it makes the fixture self-consistent)
+    inp["categorical_levels"]["dx"] = {"levels": ["A:B", "ref"], "reference": "ref"}
+    inp["level_counts"]["C(dx)[T.A:B]"] = 500
+    s = build_covariate_schema(**inp)
+    dc = next(d for d in s["design_columns"] if d["name"] == "C(dx)[T.A:B]:age")
+    assert dc["recipe"] == {
+        "kind": "interaction",
+        "factors": [
+            {"kind": "dummy", "var": "dx", "level": "A:B"},
+            {"kind": "main", "var": "age"},
+        ],
+    }
+    assert "C(dx)[T.A:B]:age" not in s["unsupported"]

@@ -14,7 +14,28 @@ import re
 _DUMMY_RE = re.compile(r"^C\((?P<var>[^)]+)\)\[T\.(?P<level>.+)\]$")
 
 
-def _recipe_for(name: str, continuous_cols: list[str]):
+def _split_top_level(name: str, sep: str = ":") -> list[str]:
+    """Split *name* on *sep* characters that are NOT inside parentheses or brackets.
+
+    This prevents a naive split from breaking a factor like ``C(dx)[T.A:B]``
+    whose level string contains a colon inside the bracket group.
+    """
+    parts, depth, cur = [], 0, []
+    for ch in name:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == sep and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return parts
+
+
+def _recipe_for(name: str, continuous_cols: list[str]) -> dict | None:
     """Return a recipe dict for one design-column name, or None if unparseable."""
     if name == "Intercept":
         return {"kind": "intercept"}
@@ -23,8 +44,8 @@ def _recipe_for(name: str, continuous_cols: list[str]):
     m = _DUMMY_RE.match(name)
     if m:
         return {"kind": "dummy", "var": m.group("var"), "level": m.group("level")}
-    if ":" in name:
-        parts = name.split(":")
+    parts = _split_top_level(name)
+    if len(parts) > 1:
         factors = [_recipe_for(p, continuous_cols) for p in parts]
         if all(f is not None for f in factors):
             return {"kind": "interaction", "factors": factors}
@@ -40,6 +61,10 @@ def build_covariate_schema(
     continuous_stats: dict[str, tuple[float, float, float]],
     k: int,
 ) -> dict:
+    # design_columns lists only parseable columns in covariate_names order.
+    # When unsupported is empty this is exactly 1:1 with covariate_names (and
+    # with the Gamma rows), which is the only case the client evaluates recipes
+    # — the client disables the covariate reader when unsupported is non-empty.
     design_columns = []
     unsupported = []
     for name in covariate_names:
