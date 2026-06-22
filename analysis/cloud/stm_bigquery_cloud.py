@@ -105,6 +105,22 @@ def main() -> int:
                 cache_uri=args.cache_uri, cohort=args.cohort,
             )
 
+        composite = "source_cohort" in cat_cols
+
+        if composite:
+            # doc_id == "{source_cohort}:{person_id}"; recover the label.
+            bow_df = bow_df.withColumn(
+                "source_cohort",
+                F.split(F.col("doc_id"), ":").getItem(0),
+            )
+            labels = bow_df.select("person_id", "source_cohort").distinct()
+            cov_key_cols = ["person_id", "source_cohort"]
+            join_on = ["person_id", "source_cohort"]
+        else:
+            labels = None
+            cov_key_cols = ["person_id"]
+            join_on = "person_id"
+
         # --- Person table load (source of covariates) ---
         from charmpheno.omop import load_person_table
 
@@ -116,6 +132,8 @@ def main() -> int:
                 person_sample_mod=args.person_mod,
                 cohort=args.cohort,
             )
+            if composite:
+                person_df = person_df.join(labels, on="person_id", how="inner")
 
         # --- Covariates load ---
         with _phase("covariates load"):
@@ -130,11 +148,12 @@ def main() -> int:
                 cohort=args.cohort,
                 person_mod=args.person_mod,
                 cache_uri=args.cache_uri,
+                key_cols=cov_key_cols,
             )
 
         # --- Broadcast join: corpus + covariates by person_id ---
         with _phase("corpus + covariates join"):
-            joined = bow_df.join(F.broadcast(cov_df), on="person_id", how="inner")
+            joined = bow_df.join(F.broadcast(cov_df), on=join_on, how="inner")
             n_joined = joined.count()
             print(f"[driver]   joined docs = {n_joined}", flush=True)
 
