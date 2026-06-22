@@ -240,3 +240,32 @@ def test_patient_year_null_start_date_drops_row_no_replication(spark):
     out = spec.derive_docs(df).collect()
     assert len(out) == 1
     assert out[0]["doc_id"] == "1:2015"
+
+
+def test_patient_cohort_doc_id_encodes_source_cohort(spark):
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+    df = spark.createDataFrame(
+        [(1, "cancer", 100), (1, "dementia", 100), (2, "cancer", 200)],
+        ["person_id", "source_cohort", "concept_id"],
+    )
+    out = PatientCohortDocSpec().derive_docs(df)
+    ids = {r["doc_id"] for r in out.select("doc_id").collect()}
+    # Same person, two cohorts -> two distinct doc_ids (no merge).
+    assert ids == {"cancer:1", "dementia:1", "cancer:2"}
+
+
+def test_patient_cohort_manifest_roundtrips():
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec, DocSpec
+    spec = PatientCohortDocSpec(min_doc_length=5)
+    back = DocSpec.from_manifest(spec.manifest())
+    assert isinstance(back, PatientCohortDocSpec)
+    assert back.min_doc_length == 5
+    assert back.name == "patient_cohort"
+
+
+def test_patient_cohort_requires_source_cohort_column(spark):
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+    df = spark.createDataFrame([(1, 100)], ["person_id", "concept_id"])
+    import pytest
+    with pytest.raises(ValueError):
+        PatientCohortDocSpec().derive_docs(df)
