@@ -96,3 +96,38 @@ class TestBuildPatientCovariateDF:
         )
         # Spec captured both levels.
         assert any("control" in str(n) or "case" in str(n) for n in names)
+
+
+class TestCompositeKeyCovariates:
+    def test_composite_key_one_row_per_person_cohort(self, spark):
+        import pandas as pd
+        from charmpheno.omop.covariates import build_patient_covariate_df
+        # person 1 comorbid (two cohorts), person 2 cancer only.
+        pdf = pd.DataFrame({
+            "person_id":     [1, 1, 2],
+            "source_cohort": ["cancer", "dementia", "cancer"],
+            "sex":           ["M", "M", "F"],
+            "age":           [60.0, 60.0, 70.0],
+        })
+        person_df = spark.createDataFrame(pdf)
+        cov_df, spec, names = build_patient_covariate_df(
+            person_df,
+            covariate_formula="~ C(source_cohort) + C(sex) + age",
+            categorical_cols=["source_cohort", "sex"],
+            continuous_cols=["age"],
+            key_cols=["person_id", "source_cohort"],
+        )
+        assert set(cov_df.columns) == {"person_id", "source_cohort", "covariates"}
+        keys = {(r["person_id"], r["source_cohort"]) for r in cov_df.collect()}
+        assert keys == {(1, "cancer"), (1, "dementia"), (2, "cancer")}
+
+    def test_default_key_cols_unchanged(self, spark):
+        import pandas as pd
+        from charmpheno.omop.covariates import build_patient_covariate_df
+        pdf = pd.DataFrame({"person_id": [1, 2], "age": [60.0, 70.0]})
+        cov_df, _, _ = build_patient_covariate_df(
+            spark.createDataFrame(pdf),
+            covariate_formula="~ age",
+            categorical_cols=[], continuous_cols=["age"],
+        )
+        assert set(cov_df.columns) == {"person_id", "covariates"}
