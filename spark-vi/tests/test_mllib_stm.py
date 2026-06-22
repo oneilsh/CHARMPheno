@@ -90,3 +90,46 @@ class TestStreamingSTMPathA:
         assert model.metadata["V"] == 8
         assert model.metadata["P"] == 2
         assert model.covariate_names == ["x1", "x2"]
+
+
+class TestCorpusMeanProportionsRDD:
+    """Distributed corpus-mean α-equivalent over an RDD of covariate vectors.
+
+    Mirrors the engine's mapPartitions+treeReduce idiom: only a (K-vector sum,
+    count) crosses back to the driver, so it scales to any D and any covariate
+    cardinality. Verified against the numpy oracle.
+    """
+
+    def test_matches_numpy_oracle_across_partitions(self, spark):
+        from spark_vi.mllib.topic.stm import corpus_mean_topic_proportions_rdd
+        from spark_vi.models.topic.stm import corpus_mean_topic_proportions
+
+        rng = np.random.default_rng(3)
+        D, P, K = 20, 3, 4
+        Gamma = rng.normal(size=(P, K))
+        X = rng.normal(size=(D, P))
+        # numSlices > 1 forces a real multi-partition tree-combine.
+        rdd = spark.sparkContext.parallelize(
+            [X[d] for d in range(D)], numSlices=4
+        )
+
+        result = corpus_mean_topic_proportions_rdd(rdd, Gamma)
+
+        np.testing.assert_allclose(
+            result, corpus_mean_topic_proportions(Gamma, X), rtol=1e-10
+        )
+
+    def test_returns_probability_vector(self, spark):
+        from spark_vi.mllib.topic.stm import corpus_mean_topic_proportions_rdd
+
+        rng = np.random.default_rng(4)
+        Gamma = rng.normal(size=(2, 5))
+        rdd = spark.sparkContext.parallelize(
+            [rng.normal(size=2) for _ in range(8)], numSlices=3
+        )
+
+        result = corpus_mean_topic_proportions_rdd(rdd, Gamma)
+
+        assert result.shape == (5,)
+        assert np.all(result >= 0.0)
+        np.testing.assert_allclose(result.sum(), 1.0)

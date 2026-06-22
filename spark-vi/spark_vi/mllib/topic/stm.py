@@ -18,6 +18,42 @@ from typing import Any
 
 import numpy as np
 
+from spark_vi.models.topic.stm import prior_topic_proportions
+
+
+def corpus_mean_topic_proportions_rdd(cov_rdd, Gamma: np.ndarray, depth: int = 2):
+    """Distributed α-equivalent: (1/D) Σ_d softmax(Γᵀ x_d) over an RDD.
+
+    ``cov_rdd`` is an RDD of length-P covariate vectors (bare numpy arrays —
+    no person_id, honoring the spark-vi layering rule). Mirrors the engine's
+    mapPartitions+treeReduce idiom (see ``core/runner.py``): each partition
+    accumulates a (K-vector sum, count) locally and the tree-reduce combines
+    them, so only a K-vector and a scalar ever reach the driver. Scales to any
+    D and any covariate cardinality — continuous covariates included.
+
+    Γ is broadcast via the Spark-safe default-arg closure convention. Returns
+    a length-K probability vector.
+    """
+    sc = cov_rdd.context
+    bcast = sc.broadcast(Gamma)
+
+    def _local(rows, _bcast=bcast):
+        G = _bcast.value
+        acc = np.zeros(G.shape[1], dtype=np.float64)
+        n = 0
+        for x in rows:
+            acc += prior_topic_proportions(G, np.asarray(x, dtype=np.float64))
+            n += 1
+        return [(acc, n)]
+
+    def _combine(a, b):
+        return a[0] + b[0], a[1] + b[1]
+
+    sum_vec, count = cov_rdd.mapPartitions(_local).treeReduce(_combine, depth=depth)
+    if count == 0:
+        raise ValueError("corpus_mean_topic_proportions_rdd: empty covariate RDD")
+    return sum_vec / count
+
 
 class StreamingSTM:
     """Streaming-VI estimator for OnlineSTM with DataFrame input.

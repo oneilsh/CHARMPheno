@@ -49,6 +49,37 @@ def _softmax(eta: np.ndarray) -> np.ndarray:
     return exp / exp.sum()
 
 
+def prior_topic_proportions(Gamma: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """Covariate-implied (prior) topic proportions for one document: softmax(Γᵀ x).
+
+    Γᵀx is the prior mean of η_d under the logistic-normal prior
+    η_d ~ N(Γᵀ x_d, Σ); pushing it through softmax gives the topic mix the
+    document is expected to have from its covariates alone, before any token
+    evidence. Averaging this over the corpus yields the α-equivalent
+    ``(1/D) Σ_d softmax(Γᵀ x_d)`` the dashboard reports as the default topic
+    proportion.
+
+    Γ is (P, K), x is (P,); the result is a length-K probability vector.
+    """
+    return _softmax(Gamma.T @ x)
+
+
+def corpus_mean_topic_proportions(Gamma: np.ndarray, X: np.ndarray) -> np.ndarray:
+    """α-equivalent: mean over the corpus of per-doc prior proportions.
+
+    Computes ``(1/D) Σ_d softmax(Γᵀ x_d)`` for the design matrix X (D, P).
+    Because softmax is nonlinear, this is NOT softmax of the mean covariate
+    row — every document's covariates must be pushed through individually and
+    then averaged. Returns a length-K probability vector (the mean of
+    probability vectors is itself a probability vector).
+    """
+    eta = X @ Gamma                      # (D, K): row d is Γᵀ x_d
+    m = eta.max(axis=1, keepdims=True)
+    exp = np.exp(eta - m)
+    proportions = exp / exp.sum(axis=1, keepdims=True)
+    return proportions.mean(axis=0)
+
+
 def _stm_neg_log_joint(
     eta: np.ndarray,
     *,

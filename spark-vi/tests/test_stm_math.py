@@ -183,3 +183,96 @@ class TestSTMDocInference:
             max_iter=200, tol=1e-8,
         )
         np.testing.assert_allclose(eta_hat, prior_mean, atol=1e-3)
+
+
+from spark_vi.models.topic.stm import prior_topic_proportions
+
+
+class TestPriorTopicProportions:
+    """Covariate-implied (prior) topic proportions: softmax(Γᵀ x) for one doc.
+
+    This is the per-document primitive the dashboard's corpus-mean α-equivalent
+    averages over. It is the prior mean of η_d pushed through softmax — the
+    topic mix a document is expected to have from its covariates alone, before
+    any token evidence.
+    """
+
+    def test_matches_softmax_of_gamma_transpose_x(self):
+        rng = np.random.default_rng(7)
+        P, K = 2, 3
+        Gamma = rng.normal(size=(P, K))
+        x = rng.normal(size=P)
+
+        result = prior_topic_proportions(Gamma, x)
+
+        np.testing.assert_allclose(result, softmax(Gamma.T @ x))
+
+    def test_is_a_probability_vector(self):
+        rng = np.random.default_rng(8)
+        Gamma = rng.normal(size=(4, 5))
+        x = rng.normal(size=4)
+
+        result = prior_topic_proportions(Gamma, x)
+
+        assert result.shape == (5,)
+        assert np.all(result >= 0.0)
+        np.testing.assert_allclose(result.sum(), 1.0)
+
+    def test_intercept_only_row_reproduces_gamma_intercept_softmax(self):
+        # When x selects only the intercept (one-hot at the intercept row),
+        # Γᵀx is exactly the intercept row, so the proportions equal
+        # softmax(Γ[intercept]) — the v1 stand-in adapt_stm currently uses.
+        rng = np.random.default_rng(9)
+        P, K = 3, 4
+        Gamma = rng.normal(size=(P, K))
+        intercept_idx = 0
+        x = np.zeros(P)
+        x[intercept_idx] = 1.0
+
+        result = prior_topic_proportions(Gamma, x)
+
+        np.testing.assert_allclose(result, softmax(Gamma[intercept_idx]))
+
+
+from spark_vi.models.topic.stm import corpus_mean_topic_proportions
+
+
+class TestCorpusMeanTopicProportions:
+    """The α-equivalent: (1/D) Σ_d softmax(Γᵀ x_d) over the design matrix X."""
+
+    def test_equals_row_mean_of_per_row_proportions(self):
+        rng = np.random.default_rng(11)
+        D, P, K = 5, 2, 3
+        Gamma = rng.normal(size=(P, K))
+        X = rng.normal(size=(D, P))
+
+        result = corpus_mean_topic_proportions(Gamma, X)
+
+        expected = np.mean(
+            [prior_topic_proportions(Gamma, X[d]) for d in range(D)], axis=0
+        )
+        np.testing.assert_allclose(result, expected)
+
+    def test_is_a_probability_vector(self):
+        rng = np.random.default_rng(12)
+        Gamma = rng.normal(size=(3, 4))
+        X = rng.normal(size=(7, 3))
+
+        result = corpus_mean_topic_proportions(Gamma, X)
+
+        assert result.shape == (4,)
+        assert np.all(result >= 0.0)
+        np.testing.assert_allclose(result.sum(), 1.0)
+
+    def test_constant_covariates_reduce_to_single_row_softmax(self):
+        # If every document shares the same covariate row, the corpus mean is
+        # just that row's proportions — the nonlinearity has nothing to average.
+        rng = np.random.default_rng(13)
+        P, K = 3, 4
+        Gamma = rng.normal(size=(P, K))
+        x = rng.normal(size=P)
+        X = np.tile(x, (6, 1))
+
+        result = corpus_mean_topic_proportions(Gamma, X)
+
+        np.testing.assert_allclose(result, prior_topic_proportions(Gamma, x))
