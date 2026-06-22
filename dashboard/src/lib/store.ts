@@ -3,6 +3,7 @@ import type { UMAP } from 'umap-js'
 import type { CohortManifest, DashboardBundle, Phenotype, PhenotypeQuality, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
+import { buildDesignVector, covariatePrevalence } from './covariate'
 
 export const bundle = writable<DashboardBundle | null>(null)
 export const cohort = writable<SyntheticCohort | null>(null)
@@ -65,6 +66,9 @@ export const advancedView = writable<boolean>(false)
 // constant) so the several components that read $tauThreshold continue
 // to work unchanged; there is no longer a user-facing slider.
 export const tauThreshold = writable<number>(0.02)
+
+export const covariateMode = writable<boolean>(false)
+export const covariateValues = writable<Record<string, number | string>>({})
 
 export const hoveredCodeIdx = writable<number | null>(null)
 
@@ -131,9 +135,21 @@ export function fractionAboveTau(
 // display prevalence-as-fraction-above-tau subscribe to this rather than
 // calling fractionAboveTau directly, so the value updates reactively as
 // the slider moves.
+//
+// When covariateMode is true AND the bundle has schema+effects AND
+// schema.unsupported is empty, the reader returns softmax(Gamma^T x)[p.id]
+// from the current covariateValues; the tau threshold is intentionally
+// ignored in that path (no per-profile histogram is needed).
 export const prevalenceReader = derived(
-  [bundle, tauThreshold],
-  ([$b, $tau]) => {
+  [bundle, tauThreshold, covariateMode, covariateValues],
+  ([$b, $tau, $mode, $vals]) => {
+    const schema = $b?.covariateSchema
+    const effects = $b?.covariateEffects
+    if ($mode && schema && effects && schema.unsupported.length === 0) {
+      const x = buildDesignVector(schema.design_columns, $vals)
+      const prev = covariatePrevalence(effects, x)
+      return (p: Phenotype) => prev[p.id] ?? 0
+    }
     const edges = $b?.phenotypes.theta_histogram_bin_edges
     return (p: Phenotype) => fractionAboveTau(p, edges, $tau)
   }
