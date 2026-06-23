@@ -22,7 +22,7 @@ max_iter: 100
 
 # Gated STM validation: cancer/dementia cohort with background + foreground blocks
 
-Validates that the gated-STM partitioning surface a dementia-distinctive
+Validates that the gated-STM partitioning surfaces a dementia-distinctive
 phenotype that prevalence-only STM (experiment 0003) could not. In prevalence-
 only STM, the topic-word matrix beta is shared across all documents and
 estimated by pooled SVI weighted by token mass. Because cancer represents ~79%

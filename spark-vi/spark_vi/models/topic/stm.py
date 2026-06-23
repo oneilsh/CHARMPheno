@@ -282,10 +282,6 @@ class OnlineSTM(VIModel):
         from spark_vi.models.topic.partition import TopicBlockPartition
         return TopicBlockPartition(group_var="", background_k=self.K, foreground=())
 
-    def _allowed(self, doc) -> np.ndarray:
-        part = self._effective_partition()
-        return part.allowed_indices(doc.groups)
-
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
         """Random Gamma init for λ (same shape as LDA); Γ = 0; Σ = sigma_init."""
         if self.random_seed is None:
