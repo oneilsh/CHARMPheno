@@ -58,8 +58,10 @@ class STMDocument:
       counts:  float64 array with len(counts) == len(indices), all > 0.
       length:  int total tokens (sum of counts).
       x:       float64 array of shape (P,) — the doc's covariate vector.
+      groups:  frozenset[str] of group labels (empty = background only / gating off).
     """
     indices: np.ndarray
     counts: np.ndarray
     length: int
     x: np.ndarray
+    groups: frozenset = frozenset()

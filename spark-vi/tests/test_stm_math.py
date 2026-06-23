@@ -29,6 +29,34 @@ class TestSTMDocument:
         with pytest.raises((AttributeError, TypeError)):
             doc.length = 99
 
+    def test_stmdocument_groups_defaults_to_empty_frozenset(self):
+        d = STMDocument(indices=np.array([0], dtype=np.int32),
+                        counts=np.array([1.0]), length=1, x=np.array([1.0]))
+        assert d.groups == frozenset()
+
+    def test_stmdocument_carries_groups(self):
+        d = STMDocument(indices=np.array([0], dtype=np.int32),
+                        counts=np.array([1.0]), length=1, x=np.array([1.0]),
+                        groups=frozenset({"cancer"}))
+        assert d.groups == frozenset({"cancer"})
+
+    def test_vector_to_stm_document_extracts_group_from_column(self):
+        from pyspark.ml.linalg import Vectors
+        from spark_vi.mllib.topic._common import _vector_to_stm_document
+        row = {"features": Vectors.sparse(3, {0: 2.0}),
+               "covariates": Vectors.dense([1.0, 0.5]),
+               "source_cohort": "dementia"}
+        doc = _vector_to_stm_document(row, group_col="source_cohort")
+        assert doc.groups == frozenset({"dementia"})
+
+    def test_vector_to_stm_document_no_group_col_yields_empty(self):
+        from pyspark.ml.linalg import Vectors
+        from spark_vi.mllib.topic._common import _vector_to_stm_document
+        row = {"features": Vectors.sparse(3, {0: 2.0}),
+               "covariates": Vectors.dense([1.0, 0.5])}
+        doc = _vector_to_stm_document(row)
+        assert doc.groups == frozenset()
+
 
 from scipy.special import softmax
 

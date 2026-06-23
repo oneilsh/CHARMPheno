@@ -6,6 +6,13 @@ import os
 import sys
 import warnings
 
+# Python 3.12 compat: distutils was removed, but PySpark 3.5 still tries to import it
+# from pyspark.ml.image. Create a mock module before PySpark imports.
+if sys.version_info >= (3, 12):
+    from unittest.mock import MagicMock
+    sys.modules['distutils'] = MagicMock()
+    sys.modules['distutils.version'] = MagicMock()
+
 import pytest
 from pyspark.sql import SparkSession
 

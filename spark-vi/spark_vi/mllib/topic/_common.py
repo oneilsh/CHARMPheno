@@ -40,8 +40,13 @@ def _vector_to_stm_document(
     row,
     features_col: str = "features",
     covariates_col: str = "covariates",
+    group_col: str | None = None,
 ) -> STMDocument:
-    """Construct an STMDocument from a row with both a BOW vector and a covariate vector.
+    """Construct an STMDocument from a row with a BOW vector and a covariate vector.
+
+    When group_col is set, row[group_col] supplies the doc's gating group(s):
+    a scalar value becomes a singleton frozenset; a list/tuple value stores all
+    members. When None, groups is empty (background-only / gating off).
 
     Accepts pyspark.sql.Row and dict-like objects. The features_col vector
     may be Sparse or Dense (both are sparsified to nonzero entries). The
@@ -50,9 +55,17 @@ def _vector_to_stm_document(
     """
     bow = _vector_to_bow_document(row[features_col])
     cov = row[covariates_col]
+    if group_col is None:
+        groups = frozenset()
+    else:
+        val = row[group_col]
+        groups = (frozenset(str(v) for v in val)
+                  if isinstance(val, (list, tuple))
+                  else frozenset({str(val)}))
     return STMDocument(
         indices=bow.indices,
         counts=bow.counts,
         length=bow.length,
         x=np.asarray(cov, dtype=np.float64),
+        groups=groups,
     )
