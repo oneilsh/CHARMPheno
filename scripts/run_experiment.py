@@ -352,6 +352,21 @@ def _resume_corpus_mismatches(checkpoint_manifest: dict, effective: dict) -> lis
             mismatches.append(
                 f"doc_spec: checkpoint={ck_doc['name']!r} != config={want_doc!r}"
             )
+    if "topic_block_spec" in checkpoint_manifest:
+        from spark_vi.models.topic.partition import TopicBlockPartition
+        ck_spec = checkpoint_manifest["topic_block_spec"]
+        ck_part = TopicBlockPartition.from_dict(ck_spec) if ck_spec else None
+        want_part = None
+        if effective.get("background_k") is not None and effective.get("foreground"):
+            fg = tuple((lbl.strip(), int(sz)) for lbl, _, sz in
+                       (piece.partition(":") for piece in
+                        str(effective["foreground"]).split(",")))
+            want_part = TopicBlockPartition(
+                group_var=str(effective.get("group_var", "source_cohort")),
+                background_k=int(effective["background_k"]), foreground=fg)
+        if ck_part != want_part:
+            mismatches.append(
+                f"topic_block_spec: checkpoint={ck_part!r} != config={want_part!r}")
     return mismatches
 
 
@@ -444,6 +459,13 @@ def build_stm_args(
         common.extend(["--cache-uri", str(effective["cache_uri"])])
     if effective.get("random_seed") is not None:
         common.extend(["--random-seed", str(effective["random_seed"])])
+    gating: list[str] = []
+    if effective.get("background_k") is not None and effective.get("foreground"):
+        gating = [
+            "--background-k", str(effective["background_k"]),
+            "--foreground", str(effective["foreground"]),
+            "--group-var", str(effective.get("group_var", "source_cohort")),
+        ]
     return common + [
         "--covariate-formula", str(effective["covariate_formula"]),
         "--categorical-cols", ",".join(effective.get("categorical_cols", [])),
@@ -452,7 +474,7 @@ def build_stm_args(
         "--sigma-ridge", str(effective.get("sigma_ridge", 1e-6)),
         "--lbfgs-max-iter", str(effective.get("lbfgs_max_iter", 50)),
         "--lbfgs-tol", str(effective.get("lbfgs_tol", 1e-4)),
-    ] + (["--resume-from", str(resume_from)] if resume_from is not None else [])
+    ] + gating + (["--resume-from", str(resume_from)] if resume_from is not None else [])
 
 
 def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:

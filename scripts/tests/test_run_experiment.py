@@ -1241,3 +1241,51 @@ class TestBuildCovariatesOnly:
         }
         args = rx.build_covariates_args(effective)
         assert "--cohort" not in args
+
+
+def test_build_stm_args_includes_gating_flags(monkeypatch):
+    monkeypatch.setenv("WORKSPACE_CDR", "proj.ds")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    from run_experiment import build_stm_args
+    eff = {
+        "source_table": "condition_era", "doc_min_length": 20, "K": 50,
+        "max_iter": 20, "vocab_size": 10000, "min_df": 20,
+        "min_patient_count": 20, "subsampling_rate": 0.2, "tau0": 64.0,
+        "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+        "background_k": 30, "foreground": "cancer:10,dementia:10",
+        "group_var": "source_cohort",
+    }
+    argv = build_stm_args(eff, "/tmp/out")
+    assert "--background-k" in argv and "30" in argv
+    assert "--foreground" in argv and "cancer:10,dementia:10" in argv
+    assert "--group-var" in argv and "source_cohort" in argv
+
+
+def test_build_stm_args_omits_gating_when_absent(monkeypatch):
+    monkeypatch.setenv("WORKSPACE_CDR", "proj.ds")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    from run_experiment import build_stm_args
+    eff = {
+        "source_table": "condition_era", "doc_min_length": 20, "K": 40,
+        "max_iter": 20, "vocab_size": 10000, "min_df": 20,
+        "min_patient_count": 20, "subsampling_rate": 0.2, "tau0": 64.0,
+        "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+    }
+    argv = build_stm_args(eff, "/tmp/out")
+    assert "--background-k" not in argv and "--foreground" not in argv
+
+
+def test_resume_mismatch_on_changed_partition():
+    from run_experiment import _resume_corpus_mismatches
+    ck = {"person_mod": 4, "source_table": "condition_era",
+          "topic_block_spec": {"group_var": "source_cohort", "background_k": 30,
+                               "foreground": [["cancer", 10], ["dementia", 10]]}}
+    eff = {"person_mod": 4, "source_table": "condition_era",
+           "background_k": 20, "foreground": "cancer:10,dementia:10",
+           "group_var": "source_cohort", "K": 40}
+    out = _resume_corpus_mismatches(ck, eff)
+    assert any("topic_block_spec" in m for m in out)
