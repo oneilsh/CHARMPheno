@@ -171,3 +171,59 @@ def test_minibatch_converges_to_neighborhood_of_full_batch():
         f"Mini-batch ELBO too far from full-batch: rel_diff={rel_diff:.3f}. "
         f"See ADR 0023 mini-batch convergence-to-neighborhood discussion."
     )
+
+
+def test_gated_stm_recovers_planted_minority_phenotype():
+    """A planted vocabulary cluster expressed ONLY by the rare group must be
+    recovered by a foreground topic, and majority docs must not express it."""
+    import numpy as np
+    from spark_vi.models.topic.stm import OnlineSTM, _softmax
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    from spark_vi.models.topic.types import STMDocument
+
+    rng = np.random.default_rng(11)
+    V = 12
+    # Background vocab = tokens 0..7; rare-only phenotype = tokens 8..11.
+    bg_tokens = np.arange(0, 8)
+    rare_tokens = np.arange(8, 12)
+    part = TopicBlockPartition("g", background_k=3, foreground=(("rare", 2),))
+    K = part.K  # 5
+
+    def make_doc(is_rare):
+        toks = rng.choice(bg_tokens, size=3, replace=False)
+        if is_rare:
+            toks = np.concatenate([toks, rng.choice(rare_tokens, size=2, replace=False)])
+        toks = np.unique(toks)
+        return STMDocument(indices=toks.astype(np.int32),
+                           counts=np.ones(len(toks)), length=len(toks),
+                           x=np.array([1.0]),
+                           groups=frozenset({"rare"}) if is_rare else frozenset())
+
+    docs = [make_doc(i % 5 == 0) for i in range(400)]  # ~20% rare
+    model = OnlineSTM(K=K, vocab_size=V, P=1, random_seed=2, topic_blocks=part)
+    gp = model.initialize_global(None)
+    for _ in range(30):
+        stats = model.local_update(docs, gp)
+        gp = model.update_global(gp, stats, learning_rate=0.5)
+
+    lam = gp["lambda"]
+    beta = lam / lam.sum(axis=1, keepdims=True)
+    fg = part.block_indices("rare")
+    # Some foreground topic concentrates on the rare-only tokens.
+    fg_mass_on_rare = beta[fg][:, rare_tokens].sum(axis=1).max()
+    bg_mass_on_rare = beta[part.background_indices()][:, rare_tokens].sum(axis=1).max()
+    assert fg_mass_on_rare > 0.5, fg_mass_on_rare
+    # Background barely touches rare tokens (majority never expresses them).
+    assert bg_mass_on_rare < 0.1, bg_mass_on_rare
+
+
+def test_gated_diagnostics_include_block_labels():
+    import numpy as np
+    from spark_vi.models.topic.stm import OnlineSTM
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition("g", background_k=2, foreground=(("rare", 1),))
+    model = OnlineSTM(K=3, vocab_size=4, P=1, random_seed=1, topic_blocks=part)
+    gp = model.initialize_global(None)
+    diag = model.iteration_diagnostics(gp)
+    assert list(diag["topic_block_labels"]) == ["background", "background", "rare"]
+    assert "blocks[bg=" in model.iteration_summary(gp)

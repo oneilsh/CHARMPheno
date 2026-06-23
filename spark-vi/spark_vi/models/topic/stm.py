@@ -503,25 +503,46 @@ class OnlineSTM(VIModel):
         return {"eta": eta_hat, "theta": _softmax(eta_hat)}
 
     def iteration_summary(self, global_params: dict[str, np.ndarray]) -> str:
-        """Compact per-iter view of Γ scale, Σ scale, and λ row-mass spread."""
+        """Compact per-iter view of Γ scale, Σ scale, and λ row-mass spread.
+
+        When topic_blocks is set, appends per-block Σλ mass so operators can
+        watch foreground vs background vocabulary absorption separately.
+        """
         Gamma = global_params["Gamma"]
         Sigma = global_params["Sigma"]
         lam = global_params["lambda"]
         lam_row_sums = lam.sum(axis=1)
-        return (
+        base = (
             f"|Γ|[max={np.abs(Gamma).max():.3g} mean={np.abs(Gamma).mean():.3g}], "
             f"Σ[min={Sigma.min():.3g} max={Sigma.max():.3g}], "
             f"Σλ_k[min={lam_row_sums.min():.3g} max={lam_row_sums.max():.3g}]"
         )
+        if self.topic_blocks is None:
+            return base
+        part = self.topic_blocks
+        bg_mass = float(lam_row_sums[part.background_indices()].sum())
+        fg_bits = []
+        for g in part.groups:
+            fg_bits.append(f"{g}={float(lam_row_sums[part.block_indices(g)].sum()):.3g}")
+        return base + f", blocks[bg={bg_mass:.3g} " + " ".join(fg_bits) + "]"
 
     def iteration_diagnostics(
         self, global_params: dict[str, np.ndarray],
     ) -> dict[str, float | np.ndarray]:
-        """Per-iter trajectories of Γ and Σ (small; safe to persist every iter)."""
-        return {
+        """Per-iter trajectories of Γ and Σ (small; safe to persist every iter).
+
+        When topic_blocks is set, also includes topic_block_labels: a length-K
+        object array with one string label per topic ("background" or the group
+        name), in topic-index order.
+        """
+        diag = {
             "Gamma": np.asarray(global_params["Gamma"]),
             "Sigma": np.asarray(global_params["Sigma"]),
         }
+        if self.topic_blocks is not None:
+            diag["topic_block_labels"] = np.asarray(
+                self.topic_blocks.topic_labels(), dtype=object)
+        return diag
 
 
 def _dirichlet_kl(q_alpha: np.ndarray, p_alpha: np.ndarray) -> float:
