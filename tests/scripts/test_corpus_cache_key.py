@@ -22,6 +22,8 @@ _BASE = dict(
                        "replicate_eras": True,
                        "date_start_col": "condition_era_start_date",
                        "date_end_col": "condition_era_end_date"},
+    cohort="first_cancer_year",
+    prior_obs_days=365,
 )
 
 
@@ -47,6 +49,14 @@ def test_key_changes_with_vocab_size():
 
 def test_key_changes_with_min_df():
     other = dict(_BASE, min_df=5)
+    assert compute_cache_key(**_BASE) != compute_cache_key(**other)
+
+
+def test_key_changes_with_prior_obs_days():
+    """The prior-observation lookback determines cohort membership (a 0-day
+    lookback admits prevalent cases a 365-day lookback excludes), so it must
+    not alias to the same cached corpus."""
+    other = dict(_BASE, prior_obs_days=0)
     assert compute_cache_key(**_BASE) != compute_cache_key(**other)
 
 

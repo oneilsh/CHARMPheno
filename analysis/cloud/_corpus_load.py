@@ -36,6 +36,7 @@ def load_or_build_corpus(
     min_patient_count: int,
     cache_uri: str | None = None,
     cohort: str | None = None,
+    prior_obs_days: int = 365,
 ) -> tuple[DataFrame, dict[int, int], dict[int, str]]:
     """Return ``(bow_df, vocab_map, name_by_id)`` with optional cache short-circuit.
 
@@ -68,6 +69,10 @@ def load_or_build_corpus(
         Cohort id for ``charmpheno.omop.load_omop_bigquery``; None
         yields the unfiltered general-population corpus and a cache key
         with no cohort dimension.
+    prior_obs_days : int
+        Prior-observation lookback (days) for the cohort index date
+        (default 365). Keys the cache because it changes membership; 0
+        drops the lookback. Ignored when ``cohort`` is None.
     """
     from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
     from spark_vi.diagnostics.persist import assert_persisted
@@ -82,6 +87,7 @@ def load_or_build_corpus(
             min_df=min_df,
             doc_spec_manifest=doc_spec.manifest(),
             cohort=cohort,
+            prior_obs_days=prior_obs_days,
         )
         with _phase(f"corpus-cache lookup ({cache_uri}/{cache_key})"):
             cached = try_load(spark, cache_uri, cache_key)
@@ -94,7 +100,7 @@ def load_or_build_corpus(
         omop = load_omop_bigquery(
             spark=spark, cdr_dataset=cdr, billing_project=billing,
             person_sample_mod=person_mod, source_table=source_table,
-            cohort=cohort,
+            cohort=cohort, prior_obs_days=prior_obs_days,
         ).persist()
         summary = omop.agg(
             F.count(F.lit(1)).alias("rows"),

@@ -40,6 +40,7 @@ def compute_cache_key(
     min_df: int | float,
     doc_spec_manifest: dict,
     cohort: str | None = None,
+    prior_obs_days: int = 365,
 ) -> str:
     """Stable 16-hex-char hash of the inputs that determine the cached corpus.
 
@@ -47,7 +48,9 @@ def compute_cache_key(
     transformation changes shape in a non-back-compat way; old cache entries
     silently miss and rebuild rather than load wrong data. v=3 added the
     cohort key so cohort-filtered corpora can't collide with their full-
-    corpus equivalents.
+    corpus equivalents. v=4 added prior_obs_days: the cohort's prior-
+    observation lookback changes membership (a 0-day lookback admits prevalent
+    cases a 365-day lookback excludes), so the two must not alias.
     """
     payload = {
         "source_table": source_table,
@@ -56,7 +59,8 @@ def compute_cache_key(
         "min_df": float(min_df),
         "doc_spec": doc_spec_manifest,
         "cohort": cohort,
-        "v": 3,
+        "prior_obs_days": int(prior_obs_days),
+        "v": 4,
     }
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]

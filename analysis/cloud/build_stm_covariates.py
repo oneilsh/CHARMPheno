@@ -26,6 +26,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--billing", required=True)
     p.add_argument("--source-table", default="condition_era")
     p.add_argument("--cohort", default=None)
+    p.add_argument("--prior-obs-days", type=int, default=365,
+                   help="Prior-observation lookback (days) for the cohort "
+                        "index date; 0 drops the lookback. Must match the fit "
+                        "driver so the shared covariate cache key is identical.")
     p.add_argument("--person-mod", type=int, default=10)
     p.add_argument("--cache-uri", required=True,
                    help="GCS/HDFS URI hosting the covariate cache.")
@@ -55,6 +59,7 @@ def main() -> int:
                 covariate_formula=args.covariate_formula,
                 person_mod=args.person_mod, cdr=args.cdr,
                 source_table=args.source_table, cohort=args.cohort,
+                prior_obs_days=args.prior_obs_days,
             )
             base = f"{args.cache_uri.rstrip('/')}/{key}"
             with _phase(f"force-delete {base}"):
@@ -86,7 +91,7 @@ def main() -> int:
                     billing_project=args.billing,
                     person_sample_mod=args.person_mod,
                     source_table=args.source_table,
-                    cohort=args.cohort,
+                    cohort=args.cohort, prior_obs_days=args.prior_obs_days,
                 )
                 labels = events.select("person_id", "source_cohort").distinct()
 
@@ -118,6 +123,7 @@ def main() -> int:
             cohort=args.cohort, person_mod=args.person_mod,
             cache_uri=args.cache_uri,
             key_cols=key_cols,
+            prior_obs_days=args.prior_obs_days,
         )
         n_rows = cov_df.count()
         print(

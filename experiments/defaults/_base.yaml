@@ -11,6 +11,11 @@ max_iter: 20
 vocab_size: 10000
 min_df: 20
 min_patient_count: 20
+# Prior-observation lookback (days) for cohort index dates. 365 requires a
+# year of pre-index coverage (excludes prevalent cases); 0 drops the lookback.
+# No effect on the unfiltered "general" cohort. Keys the corpus + covariate
+# caches, so changing it forces a rebuild.
+prior_obs_days: 365
 subsampling_rate: 0.2
 tau0: 64
 kappa: 0.7

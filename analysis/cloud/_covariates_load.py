@@ -35,8 +35,15 @@ def load_or_build_covariates(
     cache_uri: str | None = None,
     max_levels: int = 10_000,
     key_cols: tuple[str, ...] | list[str] = ("person_id",),
+    prior_obs_days: int = 365,
 ) -> tuple[DataFrame, Any, list[str]]:
-    """Return (cov_df, model_spec, covariate_names) for the given formula."""
+    """Return (cov_df, model_spec, covariate_names) for the given formula.
+
+    prior_obs_days keys the cache: in composite mode the covariate person set
+    is the corpus's persons, so a changed cohort lookback must not reload a
+    stale covariate set. Ignored for membership (it doesn't filter person_df
+    here) -- it only participates in the cache key.
+    """
     from charmpheno.omop.covariates import build_patient_covariate_df
     from _covariates_cache import compute_cache_key, try_load, save
 
@@ -46,6 +53,7 @@ def load_or_build_covariates(
             covariate_formula=covariate_formula,
             person_mod=person_mod, cdr=cdr,
             source_table=source_table, cohort=cohort,
+            prior_obs_days=prior_obs_days,
         )
         with _phase(f"covariates-cache lookup ({cache_uri}/{key})"):
             cached = try_load(spark, cache_uri, key)

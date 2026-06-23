@@ -238,9 +238,17 @@ def main(argv: list[str] | None = None) -> int:
               "all-cause dementia dx (descendants of SNOMED 4182210 — "
               "AD, vascular, Lewy body, FTD, NOS) and windows their "
               "events to the 365 days starting at that first dx. "
-              "All cohort options require 365 days of observation_period "
-              "coverage on each side of the index date. "
+              "All cohort options require a fully-observed 365-day follow-up "
+              "and, by default, 365 days of prior observation_period coverage "
+              "(see --prior-obs-days). "
               "Requires --source-table condition_era."),
+    )
+    parser.add_argument(
+        "--prior-obs-days", type=int, default=365,
+        help=("Prior-observation lookback (days) for the cohort index date. "
+              "365 (default) requires a year of pre-index coverage; 0 drops "
+              "the lookback, admitting prevalent cases. Keys the corpus cache. "
+              "No effect when --cohort none."),
     )
     parser.add_argument(
         "--corpus-cache-uri", type=str, default=None,
@@ -311,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
         min_patient_count=args.min_patient_count,
         cache_uri=args.corpus_cache_uri or None,
         cohort=args.cohort,
+        prior_obs_days=args.prior_obs_days,
     )
     bow_df = bow_df.persist()
     n_docs = bow_df.count()  # forces materialization

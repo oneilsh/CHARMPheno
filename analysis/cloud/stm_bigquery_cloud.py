@@ -33,6 +33,11 @@ def parse_args() -> argparse.Namespace:
                    help="OMOP fact table to read (default: condition_era).")
     p.add_argument("--cohort", default=None,
                    help="Optional cohort filter name (e.g. first_cancer_year).")
+    p.add_argument("--prior-obs-days", type=int, default=365,
+                   help="Prior-observation lookback (days) for the cohort index "
+                        "date. 365 (default) requires a year of pre-index "
+                        "coverage; 0 drops the lookback, admitting prevalent "
+                        "cases. Keys the corpus + covariate caches.")
     p.add_argument("--person-mod", type=int, default=10,
                    help="Deterministic person sample: keep MOD(person_id, N)==0.")
     p.add_argument("--vocab-size", type=int, default=10_000,
@@ -103,6 +108,7 @@ def main() -> int:
                 vocab_size=args.vocab_size, min_df=args.min_df,
                 min_patient_count=args.min_patient_count,
                 cache_uri=args.cache_uri, cohort=args.cohort,
+                prior_obs_days=args.prior_obs_days,
             )
 
         composite = "source_cohort" in cat_cols
@@ -167,6 +173,7 @@ def main() -> int:
                 person_mod=args.person_mod,
                 cache_uri=args.cache_uri,
                 key_cols=cov_key_cols,
+                prior_obs_days=args.prior_obs_days,
             )
 
         # --- Broadcast join: corpus + covariates by person_id ---

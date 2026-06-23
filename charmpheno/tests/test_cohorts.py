@@ -50,3 +50,35 @@ def test_combine_cohorts_tags_and_unions_keeping_comorbid(spark):
     # person 2 is comorbid -> appears under BOTH labels (no dedup).
     assert rows == {(1, "cancer"), (2, "cancer"), (2, "dementia"), (3, "dementia")}
     assert out.count() == 4
+
+
+def test_window_observed_cohort_prior_lookback_is_configurable(spark):
+    """prior_obs_days sets the pre-index lookback; the follow-up requirement
+    (window fully observed) holds regardless. Three persons, same index, in:
+      1: 90d prior, follow-up ok    -> dropped at 365d, admitted at 0d
+      2: >365d prior, follow-up ok  -> admitted at both
+      3: prior ok, follow-up fails  -> dropped at both
+    """
+    import datetime as dt
+    from charmpheno.omop.cohorts import _window_observed_cohort
+
+    first_dx = spark.createDataFrame(
+        [(1, dt.date(2010, 6, 1)), (2, dt.date(2010, 6, 1)),
+         (3, dt.date(2011, 12, 1))],
+        ["person_id", "index_date"],
+    )
+    op = spark.createDataFrame(
+        [(1, dt.date(2010, 3, 1), dt.date(2012, 1, 1)),   # 90d prior
+         (2, dt.date(2008, 1, 1), dt.date(2012, 1, 1)),   # >365d prior
+         (3, dt.date(2008, 1, 1), dt.date(2012, 1, 1))],  # follow-up fails
+        ["person_id", "observation_period_start_date",
+         "observation_period_end_date"],
+    )
+
+    strict = {r["person_id"] for r in
+              _window_observed_cohort(first_dx, op, prior_obs_days=365).collect()}
+    assert strict == {2}
+
+    relaxed = {r["person_id"] for r in
+               _window_observed_cohort(first_dx, op, prior_obs_days=0).collect()}
+    assert relaxed == {1, 2}

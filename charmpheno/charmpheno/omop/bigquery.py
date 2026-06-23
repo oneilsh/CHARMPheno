@@ -45,6 +45,7 @@ def load_omop_bigquery(
     person_sample_mod: int | None = None,
     source_table: str = "condition_occurrence",
     cohort: str | None = None,
+    prior_obs_days: int | None = None,
 ) -> DataFrame:
     """Load OMOP-shaped data from a BigQuery CDR dataset.
 
@@ -68,6 +69,10 @@ def load_omop_bigquery(
             (default) keeps the full sampled corpus. See
             ``charmpheno.omop.cohorts.SUPPORTED_COHORTS`` for accepted names
             (e.g. "first_cancer_year").
+        prior_obs_days: prior-observation lookback (days) for the cohort's
+            index date. None (default) defers to the cohort default (365); 0
+            drops the lookback, admitting prevalent cases. Ignored when
+            ``cohort`` is None.
 
     Returns:
         DataFrame with the canonical required OMOP columns
@@ -157,11 +162,17 @@ def load_omop_bigquery(
             "condition_start_date" if source_table == "condition_occurrence"
             else "condition_era_start_date"
         )
+        # prior_obs_days=None defers to apply_cohort's default lookback, so the
+        # 365-day default lives in exactly one place (cohorts._WINDOW_DAYS).
+        lookback_kw = (
+            {} if prior_obs_days is None else {"prior_obs_days": prior_obs_days}
+        )
         omop = apply_cohort(
             omop, cohort,
             spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project,
             date_col=date_col,
+            **lookback_kw,
         )
 
     validate(omop)

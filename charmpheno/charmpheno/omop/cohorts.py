@@ -12,8 +12,10 @@ Currently implemented:
 - ``first_cancer_year``: patients with a first malignant-cancer diagnosis
   (excluding non-melanoma skin cancer and carcinoma in situ), windowed
   to the 365 days starting at that first dx. Requires >= 365 days of
-  observation_period coverage both before (to make "first" meaningful)
-  and after (to make the doc window fully observed) the index date.
+  post-index observation_period coverage (so the doc window is fully
+  observed) and, by default, >= 365 days of prior coverage (so "first" is
+  meaningful); the prior lookback is configurable via ``prior_obs_days``
+  (0 drops it, admitting prevalent cases). See ``_window_observed_cohort``.
 - ``first_dementia_year``: patients with a first all-cause dementia
   diagnosis (Alzheimer's, vascular, Lewy body, FTD, dementia NOS — i.e.
   descendants of SNOMED "Dementia"), windowed to the 365 days starting
@@ -110,10 +112,10 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "Patients with a first malignant-cancer diagnosis (SNOMED "
             "443392 and descendants), excluding non-melanoma skin cancer "
             "(BCC/SCC) and carcinoma in situ. The document window is the "
-            "365 days starting at that first diagnosis. Patients must "
-            "have at least 365 days of observation_period coverage both "
-            "before and after the index date, so 'first' is meaningful "
-            "and the follow-up window is fully observed."
+            "365 days starting at that first diagnosis. The follow-up window "
+            "must be fully observed (365 days of post-index "
+            "observation_period coverage); by default 'first' also requires "
+            "365 days of prior coverage, relaxable via prior_obs_days."
         ),
     },
     "first_dementia_year": {
@@ -126,10 +128,10 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "mixed dementia). The document window is the 365 days "
             "starting at that first diagnosis, capturing the early-stage "
             "comorbidity cascade (delirium, falls, polypharmacy, "
-            "behavioral disturbance, aspiration pneumonia). Patients "
-            "must have at least 365 days of observation_period coverage "
-            "both before and after the index date, so 'first' is "
-            "meaningful and the follow-up window is fully observed."
+            "behavioral disturbance, aspiration pneumonia). The follow-up "
+            "window must be fully observed (365 days of post-index "
+            "observation_period coverage); by default 'first' also requires "
+            "365 days of prior coverage, relaxable via prior_obs_days."
         ),
     },
     "cancer_or_dementia": {
@@ -165,30 +167,71 @@ def apply_cohort(
     cdr_dataset: str,
     billing_project: str,
     date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
 ) -> DataFrame:
     """Dispatch on cohort name. Raises ValueError on unknown names.
 
     Kept as a thin registry rather than inlined in the loader so adding
     a new cohort means adding a function below + a SUPPORTED_COHORTS
     entry, without touching the loader call site.
+
+    prior_obs_days is the per-cohort prior-observation lookback (default
+    ``_WINDOW_DAYS`` = 365); see :func:`_window_observed_cohort`.
     """
     if cohort == "first_cancer_year":
         return apply_first_cancer_year_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
         )
     if cohort == "first_dementia_year":
         return apply_first_dementia_year_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
         )
     if cohort == "cancer_or_dementia":
         return apply_cancer_or_dementia_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
         )
     raise ValueError(
         f"cohort {cohort!r} not supported (supported: {SUPPORTED_COHORTS})"
+    )
+
+
+def _window_observed_cohort(
+    first_dx: DataFrame,
+    observation_period: DataFrame,
+    *,
+    prior_obs_days: int,
+    window_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Keep the (person_id, index_date) rows that are adequately observed.
+
+    Two observation-period gates, joined against ``observation_period``:
+
+    - **Prior lookback**: ``index_date >= observation_period_start_date +
+      prior_obs_days``. At the default 365 this makes "first dx" mean "first
+      with a year of prior coverage", excluding prevalent cases whose true
+      first dx predates the record. ``prior_obs_days=0`` drops the lookback
+      (admitting those prevalent cases); the gate then only requires the
+      index to fall within an observation period at all.
+    - **Follow-up**: ``index_date + window_days <=
+      observation_period_end_date``, so the document window is fully observed
+      (absence of a code in the window is informative, not merely unobserved).
+      Independent of ``prior_obs_days``.
+
+    Returns ``(person_id, index_date)`` for the surviving rows.
+    """
+    return (
+        first_dx.join(observation_period, on="person_id", how="inner")
+        .where(F.col("index_date") >= F.date_add(
+            F.col("observation_period_start_date"), prior_obs_days))
+        .where(F.date_add(F.col("index_date"), window_days)
+               <= F.col("observation_period_end_date"))
+        .select("person_id", "index_date")
     )
 
 
@@ -199,6 +242,7 @@ def apply_first_cancer_year_cohort(
     cdr_dataset: str,
     billing_project: str,
     date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
 ) -> DataFrame:
     """Filter to patients with a first cancer dx + 1-year follow-up window.
 
@@ -253,23 +297,15 @@ def apply_first_cancer_year_cohort(
                .agg(F.min(date_col).alias("index_date"))
     )
 
-    # Observation-period filter: 365d both sides of index. "Before" makes
-    # "first" mean "first in record with adequate lookback"; "after" makes
-    # the doc window fully observed (so absence of a code in the window
-    # is informative rather than "we just couldn't see them").
+    # Observation-period gating (prior lookback + fully-observed follow-up);
+    # see _window_observed_cohort. prior_obs_days controls the lookback.
     op = _read("observation_period").select(
         "person_id",
         "observation_period_start_date",
         "observation_period_end_date",
     )
-    cohort_df = (
-        first_dx.join(op, on="person_id", how="inner")
-                .where(F.col("index_date") >= F.date_add(
-                    F.col("observation_period_start_date"), _WINDOW_DAYS,
-                ))
-                .where(F.date_add(F.col("index_date"), _WINDOW_DAYS)
-                       <= F.col("observation_period_end_date"))
-                .select("person_id", "index_date")
+    cohort_df = _window_observed_cohort(
+        first_dx, op, prior_obs_days=prior_obs_days,
     )
 
     # Filter the events: cohort members only, in the doc window. Not
@@ -293,6 +329,7 @@ def apply_first_dementia_year_cohort(
     cdr_dataset: str,
     billing_project: str,
     date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
 ) -> DataFrame:
     """Filter to patients with a first dementia dx + 1-year follow-up.
 
@@ -355,14 +392,8 @@ def apply_first_dementia_year_cohort(
         "observation_period_start_date",
         "observation_period_end_date",
     )
-    cohort_df = (
-        first_event.join(op, on="person_id", how="inner")
-                   .where(F.col("index_date") >= F.date_add(
-                       F.col("observation_period_start_date"), _WINDOW_DAYS,
-                   ))
-                   .where(F.date_add(F.col("index_date"), _WINDOW_DAYS)
-                          <= F.col("observation_period_end_date"))
-                   .select("person_id", "index_date")
+    cohort_df = _window_observed_cohort(
+        first_event, op, prior_obs_days=prior_obs_days,
     )
 
     return (
@@ -396,18 +427,22 @@ def apply_cancer_or_dementia_cohort(
     cdr_dataset: str,
     billing_project: str,
     date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
 ) -> DataFrame:
     """Combined cancer-or-dementia cohort with a source_cohort label column.
 
     Composes the two single-disease cohorts and unions their tagged events.
-    Returns cond_df's schema plus a `source_cohort` string column.
+    Returns cond_df's schema plus a `source_cohort` string column. Both arms
+    share the same ``prior_obs_days`` lookback.
     """
     cancer = apply_first_cancer_year_cohort(
         cond_df, spark=spark, cdr_dataset=cdr_dataset,
         billing_project=billing_project, date_col=date_col,
+        prior_obs_days=prior_obs_days,
     )
     dementia = apply_first_dementia_year_cohort(
         cond_df, spark=spark, cdr_dataset=cdr_dataset,
         billing_project=billing_project, date_col=date_col,
+        prior_obs_days=prior_obs_days,
     )
     return _combine_cohorts(cancer, dementia)

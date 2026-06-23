@@ -30,14 +30,23 @@ def compute_cache_key(
     cdr: str,
     source_table: str,
     cohort: str | None,
+    prior_obs_days: int = 365,
 ) -> str:
-    """Stable hex digest of the inputs that determine the covariate output."""
+    """Stable hex digest of the inputs that determine the covariate output.
+
+    prior_obs_days keys the cache because in composite (e.g. cancer_or_dementia)
+    mode the covariate person set is the corpus's persons, and the cohort's
+    prior-observation lookback sets corpus membership. Without it, a widened
+    cohort (shorter lookback) would reload the narrower covariate set and the
+    corpus+covariate inner join would silently drop the new patients.
+    """
     payload = json.dumps({
         "covariate_formula": covariate_formula,
         "person_mod": person_mod,
         "cdr": cdr,
         "source_table": source_table,
         "cohort": cohort,
+        "prior_obs_days": int(prior_obs_days),
     }, sort_keys=True).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]
 

@@ -240,6 +240,7 @@ def build_lda_args(
         # `cohort_def` is the driver-side argparse value (e.g. first_dementia_year);
         # `cohort` is the display id used for record-keeping and defaults lookup.
         "--cohort", str(effective["cohort_def"]),
+        "--prior-obs-days", str(effective.get("prior_obs_days", 365)),
     ]
     # BooleanOptionalAction in the driver: --optimize-doc-concentration / --no-...
     if effective.get("optimize_doc_concentration", True):
@@ -333,6 +334,7 @@ def build_covariates_args(effective: dict) -> list[str]:
     cohort_def = effective.get("cohort_def", effective.get("cohort", ""))
     if cohort_def and cohort_def != "none":
         args += ["--cohort", str(cohort_def)]
+    args += ["--prior-obs-days", str(effective.get("prior_obs_days", 365))]
     return args
 
 
@@ -356,6 +358,7 @@ def build_stm_args(effective: dict, out_dir: str) -> list[str]:
         "--save-interval", str(effective["save_interval"]),
         "--person-mod", str(effective["person_mod"]),
         "--cohort", str(effective.get("cohort_def", effective.get("cohort", ""))),
+        "--prior-obs-days", str(effective.get("prior_obs_days", 365)),
         "--out-dir", str(out_dir),
     ]
     if effective.get("cache_uri"):
