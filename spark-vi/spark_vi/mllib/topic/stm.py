@@ -263,15 +263,19 @@ class StreamingSTM:
         finally:
             rdd.unpersist(blocking=False)
 
+        metadata = dict(result.metadata)
+        if self.topic_blocks is not None:
+            metadata.setdefault("topic_block_spec", self.topic_blocks.to_dict())
         return STMModel(
             global_params=result.global_params,
-            metadata=dict(result.metadata),
+            metadata=metadata,
             model_spec=getattr(self, "model_spec", None),
             covariate_names=list(self.covariate_names),
             n_iterations=result.n_iterations,
             elbo_trace=list(result.elbo_trace),
             converged=result.converged,
             diagnostic_traces=dict(result.diagnostic_traces),
+            topic_blocks=self.topic_blocks,
         )
 
     def _resolve_model_spec_from_pandas(self, covariate_pdf):
@@ -308,6 +312,7 @@ class STMModel:
         elbo_trace: list[float] | None = None,
         converged: bool = False,
         diagnostic_traces: dict | None = None,
+        topic_blocks=None,
     ) -> None:
         self.global_params = global_params
         self.metadata = metadata
@@ -322,6 +327,7 @@ class STMModel:
         self.diagnostic_traces = (
             dict(diagnostic_traces) if diagnostic_traces is not None else {}
         )
+        self.topic_blocks = topic_blocks
 
     def save(self, out_dir: Path) -> None:
         from spark_vi.core.result import VIResult
@@ -355,6 +361,7 @@ class STMModel:
     @classmethod
     def load(cls, in_dir: Path) -> "STMModel":
         from spark_vi.io.export import load_result
+        from spark_vi.models.topic.partition import TopicBlockPartition
 
         in_dir = Path(in_dir)
         result = load_result(in_dir)
@@ -363,6 +370,9 @@ class STMModel:
         covariate_names = json.loads(
             (in_dir / "covariate_names.json").read_text()
         )
+        spec_dict = result.metadata.get("topic_block_spec")
+        topic_blocks = (
+            TopicBlockPartition.from_dict(spec_dict) if spec_dict else None)
         return cls(
             global_params=result.global_params,
             metadata=dict(result.metadata),
@@ -372,4 +382,5 @@ class STMModel:
             elbo_trace=list(result.elbo_trace),
             converged=result.converged,
             diagnostic_traces=dict(result.diagnostic_traces),
+            topic_blocks=topic_blocks,
         )

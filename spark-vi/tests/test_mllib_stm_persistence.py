@@ -84,3 +84,19 @@ class TestSTMModelPersistence:
         assert m.n_iterations == 0
         assert m.elbo_trace == []
         assert m.converged is False
+
+
+def test_stmmodel_roundtrips_topic_block_spec(tmp_path):
+    import numpy as np
+    from spark_vi.mllib.topic.stm import STMModel
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition("source_cohort", background_k=2, foreground=(("cancer", 1),))
+    model = STMModel(
+        global_params={"lambda": np.ones((3, 4)), "eta": np.array(0.3),
+                       "Gamma": np.zeros((2, 3)), "Sigma": np.ones(3)},
+        metadata={"topic_block_spec": part.to_dict()},
+        model_spec=None, covariate_names=["Intercept", "age"],
+        topic_blocks=part)
+    model.save(tmp_path)
+    loaded = STMModel.load(tmp_path)
+    assert loaded.topic_blocks == part
