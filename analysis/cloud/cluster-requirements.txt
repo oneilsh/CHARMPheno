@@ -1,16 +1,15 @@
 # Third-party Python runtime deps the AoU Dataproc image does NOT ship but the
 # cloud jobs import at runtime, on the driver AND on every executor.
 #
-# These are packed into a PEX built with --inherit-path=fallback (so it carries
-# only these deps and falls back to the image's numpy/pandas/scipy/pyarrow,
-# never shadowing or hand-version-matching them), and shipped to executors via
-# `spark-submit --files`. The PEX, built with the cluster's own python3, also
-# backs the client-mode driver on the master. Build/refresh with
-# `make cluster-env`; the wiring lives in build_spark_submit_cmd
-# (scripts/run_experiment.py).
+# The Makefile `cluster-overlay` target resolves this file's full dependency
+# closure with pip, PRUNES the compiled libs the image already provides
+# (numpy/pandas/scipy/pyarrow), and zips the remaining pure-Python leaves into
+# dist/formulaic_overlay.zip. That zip rides on `spark-submit --py-files`
+# alongside the source zips and runs on the image's own Python. Wiring lives in
+# build_spark_submit_cmd (scripts/run_experiment.py); rationale in CLUSTER_DEPS.md.
 #
-# Keep this MINIMAL: declare only what the image lacks. pip resolves the full
-# dependency closure, so list top-level packages, not their transitive deps.
+# Keep this MINIMAL: declare only what the image lacks (top-level packages; pip
+# resolves the closure, the prune step drops the image-provided compiled libs).
 #
 # Migration note: when spark-vi (and charmpheno) become standalone pip packages,
 # add them here and drop their spark_vi.zip / charmpheno.zip --py-files overlay —

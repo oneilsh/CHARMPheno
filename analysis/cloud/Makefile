@@ -1,12 +1,14 @@
-.PHONY: help zip cluster-env smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
 CHARMPHENO_ZIP  := $(REPO_ROOT)/charmpheno/dist/charmpheno.zip
-# PEX of third-party deps the AoU Dataproc image lacks (see
-# cluster-requirements.txt), shipped to executors via spark-submit --files.
-CLUSTER_REQS    := $(REPO_ROOT)/analysis/cloud/cluster-requirements.txt
-CLUSTER_ENV_PEX := $(REPO_ROOT)/analysis/cloud/dist/cluster_env.pex
+# Dependency-overlay zip: pure-Python deps the AoU Dataproc image lacks (see
+# cluster-requirements.txt), shipped on --py-files alongside the source zips
+# and run on the image's own Python (which provides numpy/pandas/scipy/pyarrow).
+CLUSTER_REQS        := $(REPO_ROOT)/analysis/cloud/cluster-requirements.txt
+CLUSTER_OVERLAY     := $(REPO_ROOT)/analysis/cloud/dist/formulaic_overlay.zip
+CLUSTER_OVERLAY_DIR := $(REPO_ROOT)/analysis/cloud/dist/overlay-build
 SCRIPT          := smoke_lda_cloud.py
 BQ_SCRIPT       := bq_smoke_cloud.py
 LDA_BQ_SCRIPT   := lda_bigquery_cloud.py
@@ -68,9 +70,10 @@ help:
 	@echo ""
 	@echo "  make setup           - One-time per-cluster provisioning: discover workspace env"
 	@echo "                         (project, CDR, buckets) via the 'wb' CLI -> $(WORKSPACE_ENV),"
-	@echo "                         and build the cluster PEX (deps the image lacks, e.g."
-	@echo "                         formulaic). Pass CDR=<proj>.<ds> when the CDR is an external"
-	@echo "                         read-only project not surfaced by 'wb resource list'."
+	@echo "                         and build the cluster dependency overlay (deps the image"
+	@echo "                         lacks, e.g. formulaic). Pass CDR=<proj>.<ds> when the CDR is"
+	@echo "                         an external read-only project not surfaced by 'wb resource"
+	@echo "                         list'."
 	@echo "                         Workspace discovery auto-runs if $(WORKSPACE_ENV) is missing."
 	@echo "  make smoke           - LDA shim smoke: spark-submit via YARN (client mode)"
 	@echo "  make bq-smoke        - BigQuery read smoke (no spark_vi imports)"
@@ -159,37 +162,43 @@ zip:
 	$(MAKE) -C $(REPO_ROOT)/spark-vi zip
 	$(MAKE) -C $(REPO_ROOT)/charmpheno zip
 
-# Build the cluster PEX (third-party deps the image lacks). Built with the
-# cluster's own python3 so the PEX targets that interpreter, and with
-# --inherit-path=fallback so it carries only these deps and falls back to the
-# image's numpy/pandas/scipy/pyarrow (never shadows them). Only rebuilt when
-# cluster-requirements.txt changes. build_spark_submit_cmd (run_experiment.py)
-# detects $(CLUSTER_ENV_PEX) and wires --files + the spark.pyspark.python /
-# spark.pyspark.driver.python confs automatically.
-cluster-env: $(CLUSTER_ENV_PEX)
+# Build the cluster dependency-overlay zip (pure-Python deps the image lacks).
+# Built on the master so pip resolves Linux wheels for the cluster's own
+# python3. build_spark_submit_cmd (run_experiment.py) detects
+# $(CLUSTER_OVERLAY) and appends it to --py-files; it runs on the image's
+# Python, so no interpreter override is needed. Only rebuilt when
+# cluster-requirements.txt (or this Makefile) changes.
+cluster-overlay: $(CLUSTER_OVERLAY)
 
-# Compiled libs the AoU image already ships. They MUST be excluded from the PEX:
-# --inherit-path=fallback only falls back for packages NOT in the PEX, but pip
-# resolves formulaic's closure (pandas -> numpy ...) INTO the PEX, which then
-# shadows the image's copies. A bundled numpy 2.x under the image's numpy-1.x-
-# built pyarrow crashes at import: "AttributeError: _ARRAY_API not found".
-# Excluding them leaves numpy/pandas/scipy/pyarrow to the image (the intent).
-CLUSTER_PEX_EXCLUDE := numpy pandas scipy pyarrow
+# Compiled libs the AoU image already ships. pip resolves formulaic's full
+# closure (pandas -> numpy, scipy, pyarrow ...), so we install it all to a
+# build dir and then PRUNE these four -- leaving only the pure-Python leaves
+# (formulaic, interface-meta, narwhals, wrapt, typing-extensions). This avoids
+# shadowing the image's compiled libs: a stray numpy 2.x under the image's
+# numpy-1.x-built pyarrow would crash with "AttributeError: _ARRAY_API not
+# found". With the leaves on --py-files, the image's own numpy/pandas/scipy/
+# pyarrow are used unchanged.
+CLUSTER_IMAGE_LIBS := numpy pandas scipy pyarrow
 
 # Rebuild when the requirements OR this Makefile's recipe changes.
-$(CLUSTER_ENV_PEX): $(CLUSTER_REQS) $(REPO_ROOT)/analysis/cloud/Makefile
-	mkdir -p $(dir $(CLUSTER_ENV_PEX))
-	python3 -m pip install --quiet --user --upgrade pex
-	python3 -m pex -r $(CLUSTER_REQS) --inherit-path=fallback \
-		$(foreach p,$(CLUSTER_PEX_EXCLUDE),--exclude $(p)) \
-		-o $(CLUSTER_ENV_PEX)
-	@echo "Wrote $(CLUSTER_ENV_PEX)"
+$(CLUSTER_OVERLAY): $(CLUSTER_REQS) $(REPO_ROOT)/analysis/cloud/Makefile
+	rm -rf $(CLUSTER_OVERLAY_DIR)
+	mkdir -p $(CLUSTER_OVERLAY_DIR) $(dir $(CLUSTER_OVERLAY))
+	python3 -m pip install --quiet --target $(CLUSTER_OVERLAY_DIR) -r $(CLUSTER_REQS)
+	cd $(CLUSTER_OVERLAY_DIR) && for p in $(CLUSTER_IMAGE_LIBS); do \
+		rm -rf "$$p" "$$p".libs "$$p"-*.dist-info "$$p".dist-info; \
+	done
+	rm -f $(CLUSTER_OVERLAY)
+	cd $(CLUSTER_OVERLAY_DIR) && zip -qr $(CLUSTER_OVERLAY) . \
+		-x "*.pyc" -x "*/__pycache__/*"
+	@echo "Wrote $(CLUSTER_OVERLAY)"
 
 # One-time per-cluster provisioning: re-discover and rewrite $(WORKSPACE_ENV),
-# and build the cluster PEX (third-party deps the image lacks). The PEX is a
-# file-target keyed on cluster-requirements.txt, so it only rebuilds when that
-# changes — `make setup` then `make exp ID=N` is enough on a fresh cluster.
-setup: cluster-env
+# and build the cluster dependency overlay (pure-Python deps the image lacks).
+# The overlay is a file-target keyed on cluster-requirements.txt, so it only
+# rebuilds when that changes — `make setup` then `make exp ID=N` is enough on
+# a fresh cluster.
+setup: cluster-overlay
 	$(SETUP_CMD)
 
 # Auto-run setup the first time anything needs $(WORKSPACE_ENV) on a fresh
@@ -313,12 +322,12 @@ RUN_ID          ?=
 # frontmatter; run them on the cluster via these targets.
 
 # Pick lowest-NNNN with status: pending; fit + eval; write summary.md
-next-exp: zip cluster-env $(WORKSPACE_ENV)
+next-exp: zip cluster-overlay $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py --next --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
 
 # Same pipeline pinned to specific id (auto-resumes if RUN_ID dir exists)
-exp: zip cluster-env $(WORKSPACE_ENV)
+exp: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
@@ -338,14 +347,14 @@ summary-tail:
 
 # Re-run eval only against an existing experiment's checkpoint; appends a
 # timestamped ## Eval (NPMI) section to summary.md.
-eval-exp: zip cluster-env $(WORKSPACE_ENV)
+eval-exp: zip cluster-overlay $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py $(if $(ID),--id $(ID)) --eval-only --runs-dir $(RUNS_DIR)
 
 # Build dashboard bundle for an experiment. With no ID, picks the most
 # recent fit whose bundle is missing or older than the fit checkpoint.
 # With ID=N, force-rebuilds the named experiment.
-build-dashboard-exp: zip cluster-env $(WORKSPACE_ENV)
+build-dashboard-exp: zip cluster-overlay $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py $(if $(ID),--id $(ID)) --build-only --runs-dir $(RUNS_DIR)
 
@@ -357,7 +366,7 @@ build-dashboard-exp: zip cluster-env $(WORKSPACE_ENV)
 # Usage:
 #   make build-covariates EXP=NNNN
 #   make build-covariates EXP=NNNN FORCE=1   # invalidate cache, force rebuild
-build-covariates: zip cluster-env $(WORKSPACE_ENV)
+build-covariates: zip cluster-overlay $(WORKSPACE_ENV)
 ifndef EXP
 	$(error EXP=NNNN required, e.g. make build-covariates EXP=0002)
 endif
