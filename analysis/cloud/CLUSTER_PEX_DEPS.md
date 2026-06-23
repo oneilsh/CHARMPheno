@@ -76,6 +76,26 @@ fast dev iteration; only third-party deps go in the PEX.
 
 ## Files changed
 
+### GOTCHA — the PEX must EXCLUDE image-provided compiled libs
+
+`--inherit-path=fallback` only falls back for packages **not in the PEX**. But
+`pex -r cluster-requirements.txt` resolves formulaic's full closure, which pulls
+**pandas + numpy** (and their newest versions) *into* the PEX — so they shadow
+the image's copies rather than falling back. A bundled numpy 2.x under the
+image's numpy-1.x-built `pyarrow` then fails at import:
+
+```
+A module that was compiled using NumPy 1.x cannot be run in NumPy 2.4.6 ...
+AttributeError: _ARRAY_API not found   (pyarrow/__init__.py importing pyarrow.lib)
+```
+
+(In practice this was **non-fatal** — pandas catches the pyarrow import and runs
+without Arrow — but it is wrong and noisy.) Fix: the `cluster-env` Makefile target
+passes `--exclude numpy --exclude pandas --exclude scipy --exclude pyarrow`
+(`CLUSTER_PEX_EXCLUDE`), so those are left to the image and the PEX carries only
+formulaic + its pure-Python deps. The PEX target also depends on the Makefile so
+a recipe change forces a rebuild.
+
 ### NEW — `analysis/cloud/cluster-requirements.txt`
 Declared source of truth for cluster-only deps (pip resolves the closure):
 ```

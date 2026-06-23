@@ -168,10 +168,21 @@ zip:
 # spark.pyspark.driver.python confs automatically.
 cluster-env: $(CLUSTER_ENV_PEX)
 
-$(CLUSTER_ENV_PEX): $(CLUSTER_REQS)
+# Compiled libs the AoU image already ships. They MUST be excluded from the PEX:
+# --inherit-path=fallback only falls back for packages NOT in the PEX, but pip
+# resolves formulaic's closure (pandas -> numpy ...) INTO the PEX, which then
+# shadows the image's copies. A bundled numpy 2.x under the image's numpy-1.x-
+# built pyarrow crashes at import: "AttributeError: _ARRAY_API not found".
+# Excluding them leaves numpy/pandas/scipy/pyarrow to the image (the intent).
+CLUSTER_PEX_EXCLUDE := numpy pandas scipy pyarrow
+
+# Rebuild when the requirements OR this Makefile's recipe changes.
+$(CLUSTER_ENV_PEX): $(CLUSTER_REQS) $(REPO_ROOT)/analysis/cloud/Makefile
 	mkdir -p $(dir $(CLUSTER_ENV_PEX))
 	python3 -m pip install --quiet --user --upgrade pex
-	python3 -m pex -r $(CLUSTER_REQS) --inherit-path=fallback -o $(CLUSTER_ENV_PEX)
+	python3 -m pex -r $(CLUSTER_REQS) --inherit-path=fallback \
+		$(foreach p,$(CLUSTER_PEX_EXCLUDE),--exclude $(p)) \
+		-o $(CLUSTER_ENV_PEX)
 	@echo "Wrote $(CLUSTER_ENV_PEX)"
 
 # One-time per-cluster provisioning: re-discover and rewrite $(WORKSPACE_ENV),
