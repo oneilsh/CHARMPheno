@@ -229,6 +229,7 @@ def main() -> int:
                 "cdr": args.cdr,
                 "source_table": args.source_table,
                 "cohort": args.cohort,
+                "prior_obs_days": args.prior_obs_days,
                 "person_mod": args.person_mod,
                 "doc_spec": doc_spec.manifest(),
                 "vocab_size": len(vocab_map),

@@ -397,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
                     "min_patient_count": args.min_patient_count,
                     "doc_spec": doc_spec.manifest(),
                     "cohort": args.cohort,
+                    "prior_obs_days": args.prior_obs_days,
                 },
                 "theta_histogram": aggregates["theta_histogram"],
                 "theta_percentiles": aggregates["theta_percentiles"],

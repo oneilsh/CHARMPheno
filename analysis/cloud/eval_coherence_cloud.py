@@ -3,13 +3,15 @@
 Mirrors `analysis/local/eval_coherence.py` for the BigQuery-sourced cloud
 setting. Loads the augmented VIResult written by `lda_bigquery_cloud.py`
 / `hdp_bigquery_cloud.py` / `stm_bigquery_cloud.py`, reproduces the BQ -> BOW
-pipeline from `metadata['corpus_manifest']` with the *frozen* vocab from
-`metadata['vocab']`, and computes per-topic NPMI over the full corpus.
+pipeline from `metadata['corpus_manifest']` (including the fit cohort and its
+prior_obs_days lookback) with the *frozen* vocab from `metadata['vocab']`, and
+computes per-topic NPMI over that fit corpus. The cohort is reproduced, not
+skipped: cohort-derived columns (e.g. source_cohort for the combined cohort's
+patient_cohort doc_spec) only exist once the cohort filter runs, and a
+cohort-matched reference scores coherence over the corpus the topics saw.
 
 STM is scored exactly like LDA: its topic-term β (global_params['lambda']) is
-K×V with fixed K and no Dirichlet alpha, so all K topics are scored. The NPMI
-reference corpus is cohort-agnostic (co-occurrence over the full sampled
-corpus), so the cohort lookback (prior_obs_days) does not enter here.
+K×V with fixed K and no Dirichlet alpha, so all K topics are scored.
 
 For HDP, only the top-K topics by E[β_t] are scored (the corpus stick
 shrinks unused topics toward 0; scoring them would add noise rather than
@@ -140,9 +142,20 @@ def main(argv: list[str] | None = None) -> int:
         doc_spec_manifest = corpus.get("doc_spec", {"name": "patient"})
         doc_spec = DocSpec.from_manifest(doc_spec_manifest)
         source_table = corpus.get("source_table", "condition_occurrence")
+        # Reproduce the fit COHORT, not just the base load: cohort-derived
+        # columns (e.g. source_cohort for the combined cohort's patient_cohort
+        # doc_spec) only exist once the cohort filter is applied, and a
+        # cohort-matched NPMI reference is the corpus the topics were fit on.
+        cohort = corpus.get("cohort")
+        if cohort == "none":
+            cohort = None
+        # prior_obs_days entered the manifest after the cohort feature; older
+        # checkpoints default to the historical 365-day lookback.
+        prior_obs_days = corpus.get("prior_obs_days", 365)
         print(f"[driver]   corpus_manifest: cdr={corpus['cdr']}, "
               f"source_table={source_table}, "
-              f"person_mod={corpus['person_mod']}", flush=True)
+              f"person_mod={corpus['person_mod']}, cohort={cohort}, "
+              f"prior_obs_days={prior_obs_days}", flush=True)
         print(f"[driver]   doc_spec: {doc_spec_manifest}", flush=True)
         print(f"[driver]   frozen vocab: {len(vocab_list)} terms", flush=True)
 
@@ -164,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
                 billing_project=billing,
                 person_sample_mod=corpus["person_mod"],
                 source_table=source_table,
+                cohort=cohort,
+                prior_obs_days=prior_obs_days,
             ).persist()
             summary = omop.agg(
                 F.count(F.lit(1)).alias("rows"),
