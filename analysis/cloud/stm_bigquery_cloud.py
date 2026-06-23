@@ -155,14 +155,32 @@ def main() -> int:
                 prior_obs_days=args.prior_obs_days,
             )
 
-        composite = "source_cohort" in cat_cols
+        # Build the gating partition first (None when --background-k/--foreground unset).
+        partition = build_topic_block_partition(
+            group_var=args.group_var, background_k=args.background_k,
+            foreground_arg=args.foreground, K=args.K)
+        if partition is not None and args.group_var != "source_cohort":
+            raise SystemExit(
+                f"--group-var {args.group_var!r} is not a materializable group "
+                f"column; only 'source_cohort' (from the combined-cohort "
+                f"patient_cohort doc-spec) is supported today.")
 
-        if composite:
+        # source_cohort's two independent roles, separated:
+        source_cohort_is_covariate = "source_cohort" in cat_cols   # -> per-(person,cohort) cov keying
+        need_source_cohort = source_cohort_is_covariate or (partition is not None)
+
+        if need_source_cohort:
+            if doc_spec.name != "patient_cohort":
+                raise SystemExit(
+                    "source_cohort requires the combined-cohort doc-spec "
+                    f"(patient_cohort); got {doc_spec.name!r}. Use the "
+                    "cancer_or_dementia cohort, or drop source_cohort from the "
+                    "formula and gating.")
             # doc_id == "{source_cohort}:{person_id}"; recover the label.
             bow_df = bow_df.withColumn(
-                "source_cohort",
-                F.split(F.col("doc_id"), ":").getItem(0),
-            )
+                "source_cohort", F.split(F.col("doc_id"), ":").getItem(0))
+
+        if source_cohort_is_covariate:
             labels = bow_df.select("person_id", "source_cohort").distinct()
             cov_key_cols = ["person_id", "source_cohort"]
             join_on = ["person_id", "source_cohort"]
@@ -171,28 +189,16 @@ def main() -> int:
             cov_key_cols = ["person_id"]
             join_on = "person_id"
 
-        partition = build_topic_block_partition(
-            group_var=args.group_var, background_k=args.background_k,
-            foreground_arg=args.foreground, K=args.K)
-        if partition is not None and not composite:
-            # The group column must exist on the corpus; today only the composite
-            # path materializes source_cohort. Require group_var == source_cohort
-            # until a non-composite group source is plumbed.
-            raise SystemExit(
-                "gating requires the composite (source_cohort) corpus; "
-                "build the combined cohort or omit --background-k/--foreground.")
         if partition is not None:
-            # Spec guard: a foreground block with zero documents is a config
-            # error; a thin block is a warning. source_cohort is materialized on
-            # bow_df by the composite block above.
-            present = {r["source_cohort"] for r in
-                       bow_df.select("source_cohort").distinct().collect()}
-            counts = {r["source_cohort"]: r["count"] for r in
-                      bow_df.groupBy("source_cohort").count().collect()}
+            # Zero-doc foreground block is a config error; a thin block is a warning.
+            present = {r[args.group_var] for r in
+                       bow_df.select(args.group_var).distinct().collect()}
+            counts = {r[args.group_var]: r["count"] for r in
+                      bow_df.groupBy(args.group_var).count().collect()}
             for g in partition.groups:
                 if g not in present:
                     raise SystemExit(
-                        f"gating group {g!r} has zero documents (source_cohort "
+                        f"gating group {g!r} has zero documents ({args.group_var} "
                         f"values present: {sorted(present)}). Fix --foreground "
                         f"labels to match the corpus.")
                 if counts.get(g, 0) < 100:
@@ -206,7 +212,7 @@ def main() -> int:
         with _phase("corpus doc-count diagnostics"):
             n_bow = bow_df.count()
             print(f"[driver]   corpus docs (pre-join) = {n_bow}", flush=True)
-            if composite:
+            if need_source_cohort:
                 for r in (bow_df.groupBy("source_cohort").count()
                           .orderBy("source_cohort").collect()):
                     print(f"[driver]     source_cohort={r['source_cohort']}: "
@@ -229,7 +235,7 @@ def main() -> int:
                 person_sample_mod=args.person_mod,
                 cohort=args.cohort,
             )
-            if composite:
+            if source_cohort_is_covariate:
                 person_df = person_df.join(labels, on="person_id", how="inner")
 
         # --- Covariates load ---
