@@ -44,6 +44,23 @@ from _driver_common import _phase, configure_logging, make_spark_session
 # (adding the repo root to sys.path) runs first.
 
 
+def foreground_reference_groups(topic_block_spec):
+    """Map topic index -> group label (None = background / full-corpus reference).
+
+    Foreground topics are scored against their group's sub-corpus rather than the
+    full corpus: scoring a rare phenotype against majority docs that can never
+    contain it triggers the NPMI zero-pair penalty (docs/insights/0007). Returns
+    {} when there is no gating partition (all topics scored on the full corpus).
+    """
+    if not topic_block_spec:
+        return {}
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition.from_dict(topic_block_spec)
+    labels = part.topic_labels()
+    return {k: (None if lbl == "background" else lbl)
+            for k, lbl in enumerate(labels)}
+
+
 class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
                      argparse.RawDescriptionHelpFormatter):
     """Show defaults automatically, and preserve the docstring's paragraph layout."""
@@ -152,6 +169,11 @@ def main(argv: list[str] | None = None) -> int:
         # prior_obs_days entered the manifest after the cohort feature; older
         # checkpoints default to the historical 365-day lookback.
         prior_obs_days = corpus.get("prior_obs_days", 365)
+        topic_block_spec = corpus.get("topic_block_spec")
+        fg_groups = foreground_reference_groups(topic_block_spec)
+        if fg_groups:
+            print(f"[driver]   gating: {sum(v is not None for v in fg_groups.values())} "
+                  f"foreground topics scored on group sub-corpora", flush=True)
         print(f"[driver]   corpus_manifest: cdr={corpus['cdr']}, "
               f"source_table={source_table}, "
               f"person_mod={corpus['person_mod']}, cohort={cohort}, "
@@ -234,6 +256,36 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 mask = None
             reference_rdd = reference_df.rdd.map(BOWDocument.from_spark_row)
+            if fg_groups:
+                from pyspark.sql import functions as F
+                bow_g = bow_df.withColumn(
+                    "source_cohort", F.split(F.col("doc_id"), ":").getItem(0))
+                per_topic = np.full(topic_term.shape[0], np.nan)
+                # Background topics: full-corpus reference.
+                bg_idx = [k for k, g in fg_groups.items() if g is None]
+                bg_rep = compute_npmi_coherence(
+                    topic_term[bg_idx], reference_rdd, top_n=args.top_n,
+                    min_pair_count=args.npmi_min_pair_count)
+                for j, k in enumerate(bg_idx):
+                    per_topic[k] = bg_rep.per_topic_npmi[j]
+                # Foreground topics: per-group sub-corpus reference.
+                for g in sorted({v for v in fg_groups.values() if v is not None}):
+                    g_idx = [k for k, gg in fg_groups.items() if gg == g]
+                    g_ref = (bow_g.where(F.col("source_cohort") == g)
+                             .rdd.map(BOWDocument.from_spark_row))
+                    g_rep = compute_npmi_coherence(
+                        topic_term[g_idx], g_ref, top_n=args.top_n,
+                        min_pair_count=args.npmi_min_pair_count)
+                    for j, k in enumerate(g_idx):
+                        per_topic[k] = g_rep.per_topic_npmi[j]
+                print("[driver]   per-topic NPMI (block-aware reference):", flush=True)
+                labels = foreground_reference_groups(topic_block_spec)
+                for k in range(topic_term.shape[0]):
+                    blk = "background" if labels[k] is None else labels[k]
+                    print(f"[driver]     topic {k:3d} [{blk}] NPMI={per_topic[k]:+.4f}",
+                          flush=True)
+                print("[driver] EVAL COHERENCE CLOUD PASSED", flush=True)
+                return 0
             report = compute_npmi_coherence(
                 topic_term, reference_rdd, top_n=args.top_n,
                 topic_mask=mask,
