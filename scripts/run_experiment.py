@@ -318,19 +318,23 @@ def _resume_corpus_mismatches(checkpoint_manifest: dict, effective: dict) -> lis
     """Compare a checkpoint's corpus_manifest to the current effective config.
 
     Returns a list of human-readable mismatches on the fields that determine
-    corpus membership/shape; empty list = compatible. Warm-starting onto a
-    checkpoint whose corpus differs (e.g. a different person_mod sample or
-    cohort lookback) silently trains on the wrong data, so the caller refuses
-    to resume on any mismatch. Only fields PRESENT in the checkpoint are
-    compared, so a checkpoint predating a field (e.g. prior_obs_days) is not
-    penalized.
+    corpus MEMBERSHIP; empty list = compatible. Warm-starting onto a checkpoint
+    whose corpus differs (e.g. a different person_mod sample or cohort lookback)
+    silently trains on the wrong data, so the caller refuses to resume on any
+    mismatch. Only fields PRESENT in the checkpoint are compared, so a
+    checkpoint predating a field (e.g. prior_obs_days) is not penalized.
+
+    vocab_size is deliberately NOT compared: STM stores the realized vocab
+    count (post min_df/min_patient_count pruning) while config carries the
+    CountVectorizer cap, so they legitimately differ for the same corpus. A
+    genuine vocab-dimension change fails loudly at warm-start (the K x V lambda
+    shape won't match), so it doesn't need a silent-corruption guard.
     """
     expected = {
         "person_mod": effective.get("person_mod"),
         "source_table": effective.get("source_table"),
         "cohort": _norm_cohort(effective.get("cohort_def", effective.get("cohort"))),
         "prior_obs_days": effective.get("prior_obs_days"),
-        "vocab_size": effective.get("vocab_size"),
     }
     mismatches: list[str] = []
     for key, want in expected.items():

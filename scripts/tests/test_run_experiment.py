@@ -50,6 +50,15 @@ class TestResumeCorpusMismatches:
         out = rx._resume_corpus_mismatches(self.BASE_MANIFEST, eff)
         assert any("doc_spec" in m for m in out)
 
+    def test_vocab_size_difference_is_not_flagged(self):
+        """vocab_size is NOT a guard field: STM stores the realized vocab count
+        (post-pruning) while config carries the CountVectorizer cap, so they
+        legitimately differ for the same corpus. A true vocab-dimension change
+        fails loudly at warm-start (K x V shape), not silently."""
+        manifest = dict(self.BASE_MANIFEST, vocab_size=4422)
+        eff = dict(self.BASE_EFFECTIVE, vocab_size=10000)
+        assert rx._resume_corpus_mismatches(manifest, eff) == []
+
     def test_missing_checkpoint_field_is_not_flagged(self):
         """A checkpoint predating a field (e.g. prior_obs_days) must not block
         resume — we can't verify it, so we don't penalize it."""
