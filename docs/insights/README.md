@@ -57,6 +57,8 @@ and when is itself useful.
 
 (Append entries here as new insights are written, newest at top.)
 
+- [0026](0026-stm-prevalence-gives-prevalence-not-content-fidelity.md) — Prevalence-only STM reproduces LDA's cohort concentration (prior-family-invariant) and gives rare covariate groups prevalence fidelity, not content fidelity (stm, lda, covariates, npmi, diagnostics)
+- [0025](0025-min-patient-count-vs-min-df.md) — `min_patient_count` and `min_df` answer different questions (doc-units, diagnostics)
 - [0024](0024-labeler-classifier-rules-have-regime-dependent-blind-spots.md) — LLM-classifier rubrics have regime-dependent blind spots: rules that look robust on the development corpus can mis-fire when the feature distribution shifts (ops, diagnostics, labeling)
 - [0023](0023-producer-consumer-unit-mismatches-invisible-until-small-scale.md) — Dimensional unit mismatches in producer/consumer pairs are invisible at large input scale; small cohorts expose them (ops, diagnostics)
 - [0022](0022-phenotype-vocabulary-refines-past-elbo-plateau.md) — Topic-word concentration on small-α tail topics continues refining well past mass-distribution convergence (lda, svi, diagnostics)

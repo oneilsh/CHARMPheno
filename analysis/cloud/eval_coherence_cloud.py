@@ -195,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"[driver]   vocab size: {len(vocab_map)}", flush=True)
 
-        with _phase("npmi reference (full corpus)"):
+        with _phase("npmi reference (fit corpus)"):
             reference_df = bow_df.persist()
             n_ref = reference_df.count()
             print(f"[driver]   reference: {n_ref} docs", flush=True)

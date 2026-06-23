@@ -90,7 +90,7 @@ def print_ranked_report(
 
     total_pairs = report.per_topic_total_pairs
     print(
-        f"\n  per-topic stats (reference=full corpus, "
+        f"\n  per-topic stats (reference=fit corpus, "
         f"reference_size={report.reference_size}, top_n={report.top_n}, "
         f"min_pair_count={report.min_pair_count}, "
         f"unrated={report.n_topics_unrated}/{len(npmi_arr)}, "
