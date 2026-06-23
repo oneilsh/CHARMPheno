@@ -237,6 +237,7 @@ class OnlineSTM(VIModel):
         lbfgs_tol: float = 1e-4,
         gamma_shape: float = 100.0,
         random_seed: int | None = None,
+        topic_blocks=None,
     ) -> None:
         if K < 1:
             raise ValueError(f"K must be >= 1, got {K}")
@@ -258,6 +259,9 @@ class OnlineSTM(VIModel):
             raise ValueError(f"lbfgs_tol must be > 0, got {lbfgs_tol}")
         if gamma_shape <= 0:
             raise ValueError(f"gamma_shape must be > 0, got {gamma_shape}")
+        if topic_blocks is not None and topic_blocks.K != int(K):
+            raise ValueError(
+                f"topic_blocks.K ({topic_blocks.K}) != K ({K})")
 
         self.K = int(K)
         self.V = int(vocab_size)
@@ -269,6 +273,18 @@ class OnlineSTM(VIModel):
         self.lbfgs_tol = float(lbfgs_tol)
         self.gamma_shape = float(gamma_shape)
         self.random_seed = None if random_seed is None else int(random_seed)
+        self.topic_blocks = topic_blocks
+
+    def _effective_partition(self):
+        """The real partition, or an implicit all-background one when None."""
+        if self.topic_blocks is not None:
+            return self.topic_blocks
+        from spark_vi.models.topic.partition import TopicBlockPartition
+        return TopicBlockPartition(group_var="", background_k=self.K, foreground=())
+
+    def _allowed(self, doc) -> np.ndarray:
+        part = self._effective_partition()
+        return part.allowed_indices(doc.groups)
 
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
         """Random Gamma init for λ (same shape as LDA); Γ = 0; Σ = sigma_init."""
@@ -316,10 +332,16 @@ class OnlineSTM(VIModel):
         K, V = self.K, self.V
         P = self.P
 
+        part = self._effective_partition()
+        G = len(part.foreground)
+        group_order = part.groups  # tuple of labels in block order
+
         lambda_stats = np.zeros((K, V), dtype=np.float64)
-        XtX = np.zeros((P, P), dtype=np.float64)
+        XtX = np.zeros((P, P), dtype=np.float64)            # all-doc cross-product
+        XtX_groups = np.zeros((G, P, P), dtype=np.float64)  # per-group cross-product
         XtMu = np.zeros((P, K), dtype=np.float64)
         residual_diag = np.zeros(K, dtype=np.float64)
+        n_docs_per_topic = np.zeros(K, dtype=np.float64)
         doc_loglik = 0.0
         doc_eta_kl = 0.0
         n_docs = 0
@@ -327,47 +349,53 @@ class OnlineSTM(VIModel):
         log_Sigma_diag = np.log(Sigma_diag)
 
         for doc in rows:
+            allowed = part.allowed_indices(doc.groups)
             eta_hat, nu_d, _ = _stm_doc_inference(
                 indices=doc.indices, counts=doc.counts,
                 expElogbeta=expElogbeta,
                 Gamma=Gamma, Sigma_diag=Sigma_diag, x=doc.x,
                 max_iter=self.lbfgs_max_iter, tol=self.lbfgs_tol,
+                allowed=allowed,
             )
-            p = _softmax(eta_hat)
+            p = _softmax(eta_hat)  # 0 on disallowed
             eb_d = expElogbeta[:, doc.indices]
             q_w = eb_d.T @ p + 1e-100
-            phi = (eb_d * p[:, None]) / q_w[None, :]   # (K, n_unique)
-
-            # λ suff-stats: phi · counts directly (phi already incorporates
-            # expElogbeta; update_global skips the expElogbeta multiplication
-            # for the STM path — see Task 5).
+            phi = (eb_d * p[:, None]) / q_w[None, :]   # (K, n_unique); 0 on disallowed rows
             sstats_row = phi * doc.counts[None, :]
             lambda_stats[:, doc.indices] += sstats_row
 
-            # Regression sufficient stats.
-            XtX += np.outer(doc.x, doc.x)
-            XtMu += np.outer(doc.x, eta_hat)
-            # Residual diag for Σ: (η̂ - Γx)² + diag(ν_d).
-            resid = eta_hat - Gamma.T @ doc.x
-            residual_diag += resid * resid + np.diag(nu_d)
+            xxT = np.outer(doc.x, doc.x)
+            XtX += xxT
+            for gi, g in enumerate(group_order):
+                if g in doc.groups:
+                    XtX_groups[gi] += xxT
 
-            # ELBO terms.
+            # XtMu / residual_diag / counts only over allowed topics.
+            eta_allowed = eta_hat[allowed]
+            XtMu[:, allowed] += np.outer(doc.x, eta_allowed)
+            resid = np.zeros(K, dtype=np.float64)
+            resid[allowed] = eta_allowed - (Gamma.T @ doc.x)[allowed]
+            residual_diag[allowed] += resid[allowed] ** 2 + np.diag(nu_d)[allowed]
+            n_docs_per_topic[allowed] += 1.0
+
             doc_loglik += float(np.sum(doc.counts * np.log(q_w)))
-            # KL(N(η̂, ν_d) || N(Γx, Σ)) closed form with K-diagonal Σ:
-            # ½(tr(Σ⁻¹ ν_d) + (η̂ - Γx)ᵀ Σ⁻¹ (η̂ - Γx) - K + log|Σ| - log|ν_d|)
-            tr_term = float(np.sum(np.diag(nu_d) / Sigma_diag))
-            quad_term = float(np.sum(resid * resid / Sigma_diag))
-            sign, logdet_nu = np.linalg.slogdet(nu_d)
-            logdet_Sigma = float(np.sum(log_Sigma_diag))
-            doc_eta_kl += 0.5 * (tr_term + quad_term - K + logdet_Sigma - logdet_nu)
-
+            # KL over the allowed sub-space only.
+            al = allowed
+            tr_term = float(np.sum(np.diag(nu_d)[al] / Sigma_diag[al]))
+            quad_term = float(np.sum(resid[al] ** 2 / Sigma_diag[al]))
+            sub_nu = nu_d[np.ix_(al, al)]
+            sign, logdet_nu = np.linalg.slogdet(sub_nu)
+            logdet_Sigma = float(np.sum(log_Sigma_diag[al]))
+            doc_eta_kl += 0.5 * (tr_term + quad_term - len(al) + logdet_Sigma - logdet_nu)
             n_docs += 1
 
         return {
             "lambda_stats": lambda_stats,
             "XtX": XtX,
+            "XtX_groups": XtX_groups,
             "XtMu": XtMu,
             "residual_diag_stat": residual_diag,
+            "n_docs_per_topic": n_docs_per_topic,
             "doc_loglik_sum": np.array(doc_loglik),
             "doc_eta_kl_sum": np.array(doc_eta_kl),
             "n_docs": np.array(float(n_docs)),
@@ -400,16 +428,25 @@ class OnlineSTM(VIModel):
         target_lam = eta + target_stats["lambda_stats"]
         new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
 
-        # Γ: ridge regression on aggregated cross-products.
+        # Γ: block-aware ridge regression on aggregated cross-products.
+        part = self._effective_partition()
         XtX = target_stats["XtX"]
+        XtX_groups = target_stats["XtX_groups"]
         XtMu = target_stats["XtMu"]
         ridge_eye = self.sigma_ridge * np.eye(self.P)
-        Gamma_target = np.linalg.solve(XtX + ridge_eye, XtMu)
+
+        Gamma_target = np.zeros_like(Gamma)
+        bg = part.background_indices()
+        Gamma_target[:, bg] = np.linalg.solve(XtX + ridge_eye, XtMu[:, bg])
+        for gi, g in enumerate(part.groups):
+            cols = part.block_indices(g)
+            Gamma_target[:, cols] = np.linalg.solve(
+                XtX_groups[gi] + ridge_eye, XtMu[:, cols])
         new_Gamma = (1.0 - learning_rate) * Gamma + learning_rate * Gamma_target
 
-        # Σ: diagonal sample cov with Laplace correction (already folded into stat).
-        n_docs = float(target_stats["n_docs"])
-        Sigma_target = target_stats["residual_diag_stat"] / max(n_docs, 1.0)
+        # Σ: per-topic divisor (background -> n_docs; foreground -> group docs).
+        n_per_topic = np.maximum(target_stats["n_docs_per_topic"], 1.0)
+        Sigma_target = target_stats["residual_diag_stat"] / n_per_topic
         new_Sigma = (1.0 - learning_rate) * Sigma_diag + learning_rate * Sigma_target
         new_Sigma = np.maximum(new_Sigma, self.SIGMA_FLOOR)
 

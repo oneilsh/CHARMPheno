@@ -5,6 +5,84 @@ import numpy as np
 import pytest
 
 from spark_vi.models.topic.stm import OnlineSTM
+from spark_vi.models.topic.partition import TopicBlockPartition
+from spark_vi.models.topic.types import STMDocument
+
+
+def _docs(rng, n, V, P, groups_fn):
+    out = []
+    for i in range(n):
+        nz = rng.choice(V, size=2, replace=False)
+        out.append(STMDocument(
+            indices=np.sort(nz).astype(np.int32),
+            counts=np.array([2.0, 1.0]),
+            length=3, x=rng.random(P), groups=groups_fn(i)))
+    return out
+
+
+def test_canonical_collapse_update_global_matches_original_formulas():
+    # With partition=None, update_global must use EXACTLY the pre-gating closed
+    # forms: a single XtX solve for Gamma and a scalar n_docs divisor for Sigma.
+    # (Together with Task 3's masked==unmasked inference test, this pins the full
+    # None path as byte-identical to the original engine.)
+    rng = np.random.default_rng(3)
+    V, P, K = 6, 2, 4
+    docs = _docs(rng, 8, V, P, lambda i: frozenset())
+    model = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=1, topic_blocks=None)
+    gp0 = model.initialize_global(None)
+    stats = model.local_update(list(docs), gp0)
+    out = model.update_global(gp0, stats, 0.5)
+    # Original closed forms recomputed independently from the stats.
+    ridge = model.sigma_ridge * np.eye(P)
+    Gamma_target = np.linalg.solve(stats["XtX"] + ridge, stats["XtMu"])
+    exp_Gamma = 0.5 * gp0["Gamma"] + 0.5 * Gamma_target
+    Sigma_target = stats["residual_diag_stat"] / float(stats["n_docs"])
+    exp_Sigma = np.maximum(0.5 * gp0["Sigma"] + 0.5 * Sigma_target, model.SIGMA_FLOOR)
+    target_lam = float(gp0["eta"]) + stats["lambda_stats"]
+    exp_lam = 0.5 * gp0["lambda"] + 0.5 * target_lam
+    # The None-path Sigma divisor must be uniformly n_docs (every topic allowed).
+    np.testing.assert_array_equal(stats["n_docs_per_topic"],
+                                  np.full(K, float(stats["n_docs"])))
+    np.testing.assert_allclose(out["Gamma"], exp_Gamma, atol=1e-12)
+    np.testing.assert_allclose(out["Sigma"], exp_Sigma, atol=1e-12)
+    np.testing.assert_allclose(out["lambda"], exp_lam, atol=1e-12)
+
+
+def test_zero_foreground_contribution_from_majority():
+    # Majority docs (no groups) must contribute ZERO to foreground lambda rows.
+    rng = np.random.default_rng(5)
+    V, P = 6, 2
+    part = TopicBlockPartition("g", background_k=2, foreground=(("rare", 2),))
+    K = part.K  # 4; foreground topics = [2, 3]
+    # All docs are majority (no groups) -> foreground never allowed.
+    docs = _docs(rng, 10, V, P, lambda i: frozenset())
+    model = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=1, topic_blocks=part)
+    gp = model.initialize_global(None)
+    stats = model.local_update(docs, gp)
+    assert np.all(stats["lambda_stats"][2:, :] == 0.0)
+    assert np.all(stats["n_docs_per_topic"][2:] == 0.0)
+    assert stats["n_docs_per_topic"][0] == 10.0  # background trained on all
+
+
+def test_block_aware_sigma_divisor_uses_per_topic_counts():
+    rng = np.random.default_rng(7)
+    V, P = 6, 2
+    part = TopicBlockPartition("g", background_k=2, foreground=(("rare", 1),))
+    K = part.K  # 3; foreground topic = [2]
+    # 6 majority + 4 'rare' docs.
+    docs = (_docs(rng, 6, V, P, lambda i: frozenset())
+            + _docs(rng, 4, V, P, lambda i: frozenset({"rare"})))
+    model = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=1, topic_blocks=part)
+    gp = model.initialize_global(None)
+    stats = model.local_update(docs, gp)
+    np.testing.assert_array_equal(stats["n_docs_per_topic"], [10.0, 10.0, 4.0])
+
+
+def test_topic_blocks_k_mismatch_raises():
+    part = TopicBlockPartition("g", background_k=2, foreground=(("rare", 2),))
+    import pytest
+    with pytest.raises(ValueError):
+        OnlineSTM(K=3, vocab_size=6, P=2, topic_blocks=part)  # part.K == 4
 
 
 class TestConstructor:
@@ -120,8 +198,10 @@ class TestUpdateGlobal:
         target_stats = {
             "lambda_stats": np.ones((3, 10)) * 0.5,
             "XtX": np.eye(2) * 100.0,
+            "XtX_groups": np.zeros((0, 2, 2)),          # no foreground groups
             "XtMu": np.array([[1.0, -1.0, 0.5], [0.5, 0.0, -0.5]]),
             "residual_diag_stat": np.array([5.0, 3.0, 2.0]),
+            "n_docs_per_topic": np.full(3, 50.0),        # all docs see all topics
             "doc_loglik_sum": np.array(-100.0),
             "doc_eta_kl_sum": np.array(5.0),
             "n_docs": np.array(50.0),
