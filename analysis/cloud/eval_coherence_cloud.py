@@ -1,10 +1,15 @@
-"""Cloud-side NPMI coherence for a saved OnlineLDA / OnlineHDP checkpoint.
+"""Cloud-side NPMI coherence for a saved OnlineLDA / OnlineHDP / STM checkpoint.
 
 Mirrors `analysis/local/eval_coherence.py` for the BigQuery-sourced cloud
 setting. Loads the augmented VIResult written by `lda_bigquery_cloud.py`
-/ `hdp_bigquery_cloud.py`, reproduces the BQ -> BOW pipeline from
-`metadata['corpus_manifest']` with the *frozen* vocab from
+/ `hdp_bigquery_cloud.py` / `stm_bigquery_cloud.py`, reproduces the BQ -> BOW
+pipeline from `metadata['corpus_manifest']` with the *frozen* vocab from
 `metadata['vocab']`, and computes per-topic NPMI over the full corpus.
+
+STM is scored exactly like LDA: its topic-term β (global_params['lambda']) is
+K×V with fixed K and no Dirichlet alpha, so all K topics are scored. The NPMI
+reference corpus is cohort-agnostic (co-occurrence over the full sampled
+corpus), so the cohort lookback (prior_obs_days) does not enter here.
 
 For HDP, only the top-K topics by E[β_t] are scored (the corpus stick
 shrinks unused topics toward 0; scoring them would add noise rather than
@@ -55,9 +60,10 @@ def main(argv: list[str] | None = None) -> int:
         help="number of top terms per topic used for the NPMI computation",
     )
     parser.add_argument(
-        "--model-class", choices=["lda", "hdp"], default="lda",
-        help="lda scores all K rows of lambda; hdp scores the top-K topics "
-             "by E[beta_t] (see --hdp-k).",
+        "--model-class", choices=["lda", "hdp", "stm"], default="lda",
+        help="lda/stm score all K rows of lambda (STM's topic-term beta has "
+             "the same K×V shape, fixed K, and no Dirichlet alpha); hdp scores "
+             "the top-K topics by E[beta_t] (see --hdp-k).",
     )
     parser.add_argument(
         "--hdp-k", type=int, default=50,
