@@ -21,6 +21,30 @@ from _corpus_load import load_or_build_corpus
 from _covariates_load import load_or_build_covariates
 
 
+def build_topic_block_partition(*, group_var, background_k, foreground_arg, K):
+    """Build a TopicBlockPartition from CLI args, or None when gating is off.
+
+    foreground_arg is 'label:size,label:size'. Asserts background_k + sum(sizes)
+    == K so a misconfigured partition fails before the (expensive) fit.
+    """
+    if background_k is None and foreground_arg is None:
+        return None
+    if background_k is None or foreground_arg is None:
+        raise ValueError("--background-k and --foreground must be set together.")
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    fg = []
+    for piece in foreground_arg.split(","):
+        label, _, size = piece.partition(":")
+        fg.append((label.strip(), int(size)))
+    part = TopicBlockPartition(group_var=group_var, background_k=int(background_k),
+                               foreground=tuple(fg))
+    if part.K != K:
+        raise ValueError(
+            f"gating partition K ({part.K}) != --K ({K}); "
+            f"background_k + sum(foreground sizes) must equal --K.")
+    return part
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="STM fit driver (prevalence-only)")
     # Mirror LDA driver flags for shared params.
@@ -91,6 +115,19 @@ def parse_args() -> argparse.Namespace:
                         "schedule, so --max-iter is ADDITIONAL iterations on "
                         "top of the loaded count. Resume only with the same "
                         "corpus + covariate formula (shapes must match).")
+    p.add_argument("--background-k", type=int, default=None,
+                   help="Gating: size of the shared background topic block. "
+                        "Set together with --foreground to enable background/"
+                        "foreground gating; unset = canonical STM (no gating).")
+    p.add_argument("--foreground", default=None,
+                   help="Gating: per-group foreground block sizes as "
+                        "'label:size,label:size' (e.g. 'cancer:10,dementia:10'). "
+                        "The group labels are values of the gating column "
+                        "(--group-var). background_k + sum(sizes) must equal --K.")
+    p.add_argument("--group-var", default="source_cohort",
+                   help="Gating: document column whose value selects a doc's "
+                        "foreground block (default: source_cohort). Must NOT also "
+                        "appear in --covariate-formula.")
     return p.parse_args()
 
 
@@ -133,6 +170,35 @@ def main() -> int:
             labels = None
             cov_key_cols = ["person_id"]
             join_on = "person_id"
+
+        partition = build_topic_block_partition(
+            group_var=args.group_var, background_k=args.background_k,
+            foreground_arg=args.foreground, K=args.K)
+        if partition is not None and not composite:
+            # The group column must exist on the corpus; today only the composite
+            # path materializes source_cohort. Require group_var == source_cohort
+            # until a non-composite group source is plumbed.
+            raise SystemExit(
+                "gating requires the composite (source_cohort) corpus; "
+                "build the combined cohort or omit --background-k/--foreground.")
+        if partition is not None:
+            # Spec guard: a foreground block with zero documents is a config
+            # error; a thin block is a warning. source_cohort is materialized on
+            # bow_df by the composite block above.
+            present = {r["source_cohort"] for r in
+                       bow_df.select("source_cohort").distinct().collect()}
+            counts = {r["source_cohort"]: r["count"] for r in
+                      bow_df.groupBy("source_cohort").count().collect()}
+            for g in partition.groups:
+                if g not in present:
+                    raise SystemExit(
+                        f"gating group {g!r} has zero documents (source_cohort "
+                        f"values present: {sorted(present)}). Fix --foreground "
+                        f"labels to match the corpus.")
+                if counts.get(g, 0) < 100:
+                    print(f"[driver]   WARNING: foreground group {g!r} has only "
+                          f"{counts.get(g, 0)} docs; its block may be unstable.",
+                          flush=True)
 
         # --- Diagnostics: corpus doc counts + per-cohort breakdown ---
         # Answers "is the doc count right, or is the join dropping docs?" The
@@ -212,6 +278,8 @@ def main() -> int:
                 lbfgs_max_iter=args.lbfgs_max_iter,
                 lbfgs_tol=args.lbfgs_tol,
                 random_seed=args.random_seed,
+                topic_blocks=partition,
+                doc_group_col=(args.group_var if partition is not None else None),
             )
             # StreamingSTM.fit returns an STMModel.
             # The fit method builds a VIConfig internally from the supplied
@@ -245,6 +313,7 @@ def main() -> int:
                 # storage as lda_bigquery_cloud.py).
                 "vocab": vocab_list,
                 "name_by_id": name_by_id,
+                "topic_block_spec": (partition.to_dict() if partition is not None else None),
             })
             # Top-level vocab + name_by_id mirror LDA's VIResult metadata layout
             # so build_dashboard_cloud.py can read them uniformly via
