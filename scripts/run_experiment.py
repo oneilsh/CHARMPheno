@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import os
 import re
 import signal
 import subprocess
@@ -299,11 +300,29 @@ def build_fit_args(effective: dict, out_dir: str) -> list[str]:
     raise ValueError(f"unknown model_class: {model_class!r}")
 
 
+def _require_workspace_env() -> tuple[str, str]:
+    """Read the BigQuery CDR + billing project from the workspace environment.
+
+    These are environment-specific (set by the workspace setup), never part of
+    the committed experiment config — so they are sourced here, not from
+    `effective`. The LDA driver reads the same two env vars itself; the STM
+    drivers take them as --cdr/--billing args, so we resolve them here.
+    """
+    cdr = os.environ.get("WORKSPACE_CDR")
+    billing = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not (cdr and billing):
+        print("[run-exp] ERROR: WORKSPACE_CDR and GOOGLE_CLOUD_PROJECT must be set "
+              "in env for STM runs (source the workspace env first).", flush=True)
+        sys.exit(2)
+    return cdr, billing
+
+
 def build_covariates_args(effective: dict) -> list[str]:
     """Build argv for analysis/cloud/build_stm_covariates.py from an effective config."""
+    cdr, billing = _require_workspace_env()
     args = [
-        "--cdr", str(effective["cdr"]),
-        "--billing", str(effective["billing"]),
+        "--cdr", cdr,
+        "--billing", billing,
         "--source-table", str(effective["source_table"]),
         "--person-mod", str(effective["person_mod"]),
         "--cache-uri", str(effective["cache_uri"]),
@@ -319,9 +338,10 @@ def build_covariates_args(effective: dict) -> list[str]:
 
 def build_stm_args(effective: dict, out_dir: str) -> list[str]:
     """Build argv for analysis/cloud/stm_bigquery_cloud.py."""
+    cdr, billing = _require_workspace_env()
     common = [
-        "--cdr", str(effective["cdr"]),
-        "--billing", str(effective["billing"]),
+        "--cdr", cdr,
+        "--billing", billing,
         "--source-table", str(effective["source_table"]),
         "--doc-spec", str(effective.get("doc_unit", "patient_year")),
         "--doc-min-length", str(effective["doc_min_length"]),

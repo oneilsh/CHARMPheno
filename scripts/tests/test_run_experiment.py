@@ -419,12 +419,12 @@ class TestModelClassDispatch:
         path = build_fit_driver_path(effective)
         assert path.endswith("stm_bigquery_cloud.py")
 
-    def test_build_stm_args_required_flags_present(self, tmp_path):
+    def test_build_stm_args_required_flags_present(self, tmp_path, monkeypatch):
         """build_stm_args must emit all flags required by the STM driver argparse."""
+        monkeypatch.setenv("WORKSPACE_CDR", "myproject.mydataset")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "my-billing-project")
         effective = {
             "model_class": "stm",
-            "cdr": "myproject.mydataset",
-            "billing": "my-billing-project",
             "source_table": "condition_era",
             "doc_unit": "patient_year",
             "doc_min_length": 20,
@@ -456,15 +456,51 @@ class TestModelClassDispatch:
         assert "--save-dir" not in args
         assert "--seed" not in args
 
-    def test_build_stm_args_parses_against_driver_argparse(self, tmp_path):
+    def test_build_stm_args_sources_cdr_billing_from_env(self, tmp_path, monkeypatch):
+        """Regression: cdr/billing come from the workspace env, NOT the merged
+        config (which never carries them). Previously build_stm_args read
+        effective['cdr'] and KeyError'd on the cluster."""
+        monkeypatch.setenv("WORKSPACE_CDR", "env.cdr")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "env-billing")
+        effective = {  # deliberately NO 'cdr'/'billing' keys
+            "model_class": "stm", "source_table": "condition_era",
+            "doc_min_length": 20, "K": 4, "max_iter": 2, "vocab_size": 100,
+            "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+            "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 10,
+            "cohort": "cancer_or_dementia", "cohort_def": "cancer_or_dementia",
+            "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"], "continuous_cols": ["age"],
+        }
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert args[args.index("--cdr") + 1] == "env.cdr"
+        assert args[args.index("--billing") + 1] == "env-billing"
+
+    def test_build_stm_args_missing_env_exits_cleanly(self, tmp_path, monkeypatch):
+        """No WORKSPACE_CDR/GOOGLE_CLOUD_PROJECT -> clean exit(2), not KeyError."""
+        import pytest
+        monkeypatch.delenv("WORKSPACE_CDR", raising=False)
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        effective = {
+            "model_class": "stm", "source_table": "condition_era",
+            "doc_min_length": 20, "K": 4, "max_iter": 2, "vocab_size": 100,
+            "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+            "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 10,
+            "cohort": "general", "cohort_def": "none",
+            "covariate_formula": "~ age",
+            "categorical_cols": [], "continuous_cols": ["age"],
+        }
+        with pytest.raises(SystemExit):
+            rx.build_stm_args(effective, str(tmp_path / "out"))
+
+    def test_build_stm_args_parses_against_driver_argparse(self, tmp_path, monkeypatch):
         """argv from build_stm_args must parse cleanly via the driver's own argparse."""
         import argparse
         import importlib.util
 
+        monkeypatch.setenv("WORKSPACE_CDR", "proj.ds")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
         effective = {
             "model_class": "stm",
-            "cdr": "proj.ds",
-            "billing": "proj",
             "source_table": "condition_era",
             "doc_unit": "patient_year",
             "doc_min_length": 20,
@@ -1031,11 +1067,11 @@ class TestBuildCovariatesOnly:
         out = capsys.readouterr().out.lower()
         assert "model_class" in out or "stm" in out
 
-    def test_build_covariates_args_minimal(self):
+    def test_build_covariates_args_minimal(self, monkeypatch):
         """build_covariates_args produces expected CLI flags from effective config."""
+        monkeypatch.setenv("WORKSPACE_CDR", "my_cdr")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "my_billing")
         effective = {
-            "cdr": "my_cdr",
-            "billing": "my_billing",
             "source_table": "condition_era",
             "person_mod": 10,
             "cache_uri": "gs://bucket/cache",
@@ -1054,10 +1090,11 @@ class TestBuildCovariatesOnly:
         assert "--continuous-cols" in args
         assert "--cohort" in args and "first_dementia_year" in args
 
-    def test_build_covariates_args_no_cohort_def(self):
+    def test_build_covariates_args_no_cohort_def(self, monkeypatch):
         """When cohort_def is 'none', --cohort is omitted."""
+        monkeypatch.setenv("WORKSPACE_CDR", "c")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "b")
         effective = {
-            "cdr": "c", "billing": "b",
             "source_table": "condition_era",
             "person_mod": 10,
             "cache_uri": "gs://bucket/cache",
