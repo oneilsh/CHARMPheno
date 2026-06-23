@@ -177,32 +177,39 @@ def _stm_doc_inference(
     x: np.ndarray,
     max_iter: int = 50,
     tol: float = 1e-4,
+    allowed: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
-    """Per-doc Laplace approximation: L-BFGS for MAP, analytic Hessian for ν_d.
+    """Per-doc Laplace approximation, optionally restricted to an allowed topic set.
 
-    Cold-start at η = 0 (uniform θ after softmax). Stateless across outer
-    iterations — preserves the local_update contract that mini-batch
-    sampling assumes (ADR 0023).
-
-    Returns:
-        eta_hat:  (K,) the MAP point.
-        nu_d:     (K, K) Laplace covariance = H⁻¹ at η̂, where H is the Hessian
-                  of the negative log joint (positive-definite).
-        n_iter:   inner L-BFGS iterations consumed.
+    When allowed is None, optimizes over all K topics (canonical). When allowed
+    is a sorted index array, the L-BFGS runs only on those topics (the neg-log-
+    joint sees the row/column-restricted views); disallowed topics are filled
+    with eta=-inf (theta exactly 0) and nu_d=0 in the returned full-K arrays, so
+    they contribute nothing to any downstream sufficient statistic.
     """
     K = expElogbeta.shape[0]
-    eta0 = np.zeros(K, dtype=np.float64)
+    if allowed is None:
+        allowed = np.arange(K, dtype=np.int64)
+    sub_expElogbeta = expElogbeta[allowed]
+    sub_Gamma = Gamma[:, allowed]
+    sub_Sigma = Sigma_diag[allowed]
+    eta0 = np.zeros(allowed.shape[0], dtype=np.float64)
     common = dict(
-        indices=indices, counts=counts, expElogbeta=expElogbeta,
-        Gamma=Gamma, Sigma_diag=Sigma_diag, x=x,
+        indices=indices, counts=counts, expElogbeta=sub_expElogbeta,
+        Gamma=sub_Gamma, Sigma_diag=sub_Sigma, x=x,
     )
     f = partial(_stm_neg_log_joint, **common)
     g = partial(_stm_neg_log_joint_grad, **common)
     result = minimize(f, x0=eta0, jac=g, method="L-BFGS-B",
                       options={"maxiter": max_iter, "gtol": tol})
-    eta_hat = result.x
-    H = _stm_neg_log_joint_hessian(eta_hat, **common)
-    nu_d = np.linalg.inv(H)
+    sub_eta = result.x
+    H = _stm_neg_log_joint_hessian(sub_eta, **common)
+    sub_nu = np.linalg.inv(H)
+
+    eta_hat = np.full(K, -np.inf, dtype=np.float64)
+    eta_hat[allowed] = sub_eta
+    nu_d = np.zeros((K, K), dtype=np.float64)
+    nu_d[np.ix_(allowed, allowed)] = sub_nu
     return eta_hat, nu_d, int(result.nit)
 
 

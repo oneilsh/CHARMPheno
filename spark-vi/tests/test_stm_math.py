@@ -304,3 +304,41 @@ class TestCorpusMeanTopicProportions:
         result = corpus_mean_topic_proportions(Gamma, X)
 
         np.testing.assert_allclose(result, prior_topic_proportions(Gamma, x))
+
+
+class TestMaskedDocInference:
+    def _setup(self, K=5, V=4):
+        import numpy as np
+        rng = np.random.default_rng(0)
+        expElogbeta = rng.random((K, V)) + 0.1
+        Gamma = np.zeros((2, K))
+        Sigma = np.ones(K)
+        indices = np.array([0, 2], dtype=np.int32)
+        counts = np.array([3.0, 1.0])
+        x = np.array([1.0, 0.0])
+        return expElogbeta, Gamma, Sigma, indices, counts, x
+
+    def test_disallowed_topics_get_zero_theta(self):
+        import numpy as np
+        from spark_vi.models.topic.stm import _stm_doc_inference, _softmax
+        eb, G, S, idx, cnt, x = self._setup()
+        allowed = np.array([0, 1, 2], dtype=np.int64)  # topics 3,4 disallowed
+        eta_hat, nu_d, _ = _stm_doc_inference(
+            indices=idx, counts=cnt, expElogbeta=eb, Gamma=G,
+            Sigma_diag=S, x=x, allowed=allowed)
+        theta = _softmax(eta_hat)
+        assert theta[3] == 0.0 and theta[4] == 0.0
+        assert abs(theta[:3].sum() - 1.0) < 1e-9
+        # nu_d zero on disallowed rows/cols
+        assert np.all(nu_d[3, :] == 0.0) and np.all(nu_d[:, 4] == 0.0)
+
+    def test_allowed_none_matches_full_inference(self):
+        import numpy as np
+        from spark_vi.models.topic.stm import _stm_doc_inference
+        eb, G, S, idx, cnt, x = self._setup()
+        a = _stm_doc_inference(indices=idx, counts=cnt, expElogbeta=eb,
+                               Gamma=G, Sigma_diag=S, x=x, allowed=None)
+        b = _stm_doc_inference(indices=idx, counts=cnt, expElogbeta=eb,
+                               Gamma=G, Sigma_diag=S, x=x,
+                               allowed=np.arange(eb.shape[0], dtype=np.int64))
+        np.testing.assert_allclose(a[0], b[0], atol=1e-8)
