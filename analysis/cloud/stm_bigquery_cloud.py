@@ -121,6 +121,24 @@ def main() -> int:
             cov_key_cols = ["person_id"]
             join_on = "person_id"
 
+        # --- Diagnostics: corpus doc counts + per-cohort breakdown ---
+        # Answers "is the doc count right, or is the join dropping docs?" The
+        # per-source_cohort split is the combined-cohort validation readout.
+        with _phase("corpus doc-count diagnostics"):
+            n_bow = bow_df.count()
+            print(f"[driver]   corpus docs (pre-join) = {n_bow}", flush=True)
+            if composite:
+                for r in (bow_df.groupBy("source_cohort").count()
+                          .orderBy("source_cohort").collect()):
+                    print(f"[driver]     source_cohort={r['source_cohort']}: "
+                          f"{r['count']} docs", flush=True)
+                pc = bow_df.select("person_id", "source_cohort").distinct()
+                n_persons = pc.select("person_id").distinct().count()
+                n_comorbid = (pc.groupBy("person_id").count()
+                              .where(F.col("count") > 1).count())
+                print(f"[driver]   distinct persons = {n_persons}, "
+                      f"comorbid (in both cohorts) = {n_comorbid}", flush=True)
+
         # --- Person table load (source of covariates) ---
         from charmpheno.omop import load_person_table
 
@@ -153,9 +171,18 @@ def main() -> int:
 
         # --- Broadcast join: corpus + covariates by person_id ---
         with _phase("corpus + covariates join"):
+            n_cov = cov_df.count()
             joined = bow_df.join(F.broadcast(cov_df), on=join_on, how="inner")
             n_joined = joined.count()
-            print(f"[driver]   joined docs = {n_joined}", flush=True)
+            dropped = n_bow - n_joined
+            print(f"[driver]   covariate rows = {n_cov}", flush=True)
+            if dropped > 0:
+                print(f"[driver]   joined docs = {n_joined} (dropped {dropped} of "
+                      f"{n_bow} corpus docs with no covariate match — usually a "
+                      f"null sex/age that the formula NaN-drops)", flush=True)
+            else:
+                print(f"[driver]   joined docs = {n_joined} "
+                      f"(all {n_bow} corpus docs matched)", flush=True)
 
         # --- Construct StreamingSTM (Path A) and fit ---
         from spark_vi.mllib.topic.stm import StreamingSTM
