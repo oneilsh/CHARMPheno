@@ -11,6 +11,59 @@ import run_experiment as rx
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+class TestResumeCorpusMismatches:
+    """The resume guard compares a checkpoint's corpus_manifest to the current
+    effective config and refuses to warm-start onto a different corpus."""
+
+    BASE_MANIFEST = {
+        "person_mod": 4,
+        "source_table": "condition_era",
+        "cohort": "cancer_or_dementia",
+        "prior_obs_days": 0,
+        "vocab_size": 10000,
+        "doc_spec": {"name": "patient_cohort", "min_doc_length": 20},
+    }
+    BASE_EFFECTIVE = {
+        "person_mod": 4,
+        "source_table": "condition_era",
+        "cohort_def": "cancer_or_dementia",
+        "prior_obs_days": 0,
+        "vocab_size": 10000,
+        "doc_unit": "patient_cohort",
+    }
+
+    def test_matching_config_has_no_mismatches(self):
+        assert rx._resume_corpus_mismatches(self.BASE_MANIFEST, self.BASE_EFFECTIVE) == []
+
+    def test_person_mod_change_is_flagged(self):
+        eff = dict(self.BASE_EFFECTIVE, person_mod=1)
+        out = rx._resume_corpus_mismatches(self.BASE_MANIFEST, eff)
+        assert any("person_mod" in m for m in out)
+
+    def test_prior_obs_days_change_is_flagged(self):
+        eff = dict(self.BASE_EFFECTIVE, prior_obs_days=365)
+        out = rx._resume_corpus_mismatches(self.BASE_MANIFEST, eff)
+        assert any("prior_obs_days" in m for m in out)
+
+    def test_doc_spec_name_change_is_flagged(self):
+        eff = dict(self.BASE_EFFECTIVE, doc_unit="patient_year")
+        out = rx._resume_corpus_mismatches(self.BASE_MANIFEST, eff)
+        assert any("doc_spec" in m for m in out)
+
+    def test_missing_checkpoint_field_is_not_flagged(self):
+        """A checkpoint predating a field (e.g. prior_obs_days) must not block
+        resume — we can't verify it, so we don't penalize it."""
+        manifest = {k: v for k, v in self.BASE_MANIFEST.items()
+                    if k != "prior_obs_days"}
+        eff = dict(self.BASE_EFFECTIVE, prior_obs_days=365)
+        assert rx._resume_corpus_mismatches(manifest, eff) == []
+
+    def test_cohort_none_sentinel_matches_python_none(self):
+        manifest = dict(self.BASE_MANIFEST, cohort=None)
+        eff = dict(self.BASE_EFFECTIVE, cohort_def="none")
+        assert rx._resume_corpus_mismatches(manifest, eff) == []
+
+
 def test_read_frontmatter_parses_yaml_block():
     path = FIXTURES / "sample_experiment.md"
     fm = rx.read_frontmatter(path)
@@ -503,6 +556,31 @@ class TestModelClassDispatch:
         assert "--doc-unit" not in args
         assert "--save-dir" not in args
         assert "--seed" not in args
+        # No resume by default.
+        assert "--resume-from" not in args
+
+    def test_build_stm_args_threads_resume_from(self, tmp_path, monkeypatch):
+        """resume_from -> --resume-from on the STM driver, via build_stm_args
+        and the build_fit_args dispatch (so re-runs continue a checkpoint)."""
+        monkeypatch.setenv("WORKSPACE_CDR", "p.d")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "bill")
+        effective = {
+            "model_class": "stm", "source_table": "condition_era",
+            "doc_unit": "patient_cohort", "doc_min_length": 20, "K": 40,
+            "max_iter": 20, "vocab_size": 10000, "min_df": 20,
+            "min_patient_count": 20, "subsampling_rate": 0.2, "tau0": 64.0,
+            "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+            "cohort_def": "cancer_or_dementia",
+            "covariate_formula": "~ C(source_cohort)",
+            "categorical_cols": ["source_cohort"], "continuous_cols": [],
+        }
+        ckpt = tmp_path / "ckpt"
+        direct = rx.build_stm_args(effective, str(tmp_path / "out"), ckpt)
+        assert "--resume-from" in direct
+        assert str(ckpt) in direct
+        # The dispatch threads it too.
+        viafit = rx.build_fit_args(effective, str(tmp_path / "out"), ckpt)
+        assert "--resume-from" in viafit and str(ckpt) in viafit
 
     def test_build_stm_args_sources_cdr_billing_from_env(self, tmp_path, monkeypatch):
         """Regression: cdr/billing come from the workspace env, NOT the merged

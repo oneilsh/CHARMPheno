@@ -84,6 +84,13 @@ def parse_args() -> argparse.Namespace:
                    help="Optional random seed for reproducibility (best-effort).")
     p.add_argument("--out-dir", required=True,
                    help="Output directory for the saved STMModel.")
+    p.add_argument("--resume-from", default="",
+                   help="Path to a previously-saved STMModel dir; empty "
+                        "(default) = fresh fit. When set, the fit loads its "
+                        "global_params + n_iterations and continues the SVI "
+                        "schedule, so --max-iter is ADDITIONAL iterations on "
+                        "top of the loaded count. Resume only with the same "
+                        "corpus + covariate formula (shapes must match).")
     return p.parse_args()
 
 
@@ -216,6 +223,7 @@ def main() -> int:
                 tau0=args.tau0,
                 kappa=args.kappa,
                 save_interval=args.save_interval,
+                resume_from=(args.resume_from or None),
             )
 
         # --- Augment STMModel metadata with corpus_manifest + covariate_manifest ---

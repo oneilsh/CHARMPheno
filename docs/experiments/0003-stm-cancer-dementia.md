@@ -14,7 +14,7 @@ continuous_cols: [age]
 random_seed: 42
 cache_uri: hdfs:///user/dataproc/charm/covariates_cache
 K: 40
-max_iter: 120
+max_iter: 100
 ---
 
 # STM validation: combined cancer/dementia cohort with source covariate

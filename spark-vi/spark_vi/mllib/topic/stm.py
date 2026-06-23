@@ -127,6 +127,7 @@ class StreamingSTM:
         save_interval: int | None = None,
         checkpoint_dir: str | None = None,
         on_iteration=None,
+        resume_from: str | None = None,
     ) -> "STMModel":
         """Fit OnlineSTM via VIRunner on a DataFrame with features + covariates columns.
 
@@ -148,6 +149,12 @@ class StreamingSTM:
             checkpoint_dir: directory for periodic checkpoints.
             on_iteration: optional per-iteration callback
                 fn(iter_num, global_params, elbo_trace).
+            resume_from: optional path to a previously-saved STMModel dir. When
+                set, VIRunner loads its global_params + n_iterations and
+                continues the Robbins-Monro schedule from there; max_iter is
+                then ADDITIONAL iterations on top of the loaded count. The
+                resumed corpus/covariate shapes (V, P) must match the loaded
+                params, so resume only with the same corpus + formula.
         """
         from pyspark import StorageLevel
 
@@ -211,7 +218,9 @@ class StreamingSTM:
 
         runner = VIRunner(model, config=config)
         try:
-            result = runner.fit(rdd, on_iteration=on_iteration)
+            result = runner.fit(
+                rdd, on_iteration=on_iteration, resume_from=resume_from,
+            )
         finally:
             rdd.unpersist(blocking=False)
 
@@ -220,6 +229,10 @@ class StreamingSTM:
             metadata=dict(result.metadata),
             model_spec=getattr(self, "model_spec", None),
             covariate_names=list(self.covariate_names),
+            n_iterations=result.n_iterations,
+            elbo_trace=list(result.elbo_trace),
+            converged=result.converged,
+            diagnostic_traces=dict(result.diagnostic_traces),
         )
 
     def _resolve_model_spec_from_pandas(self, covariate_pdf):
@@ -252,11 +265,24 @@ class STMModel:
         metadata: dict[str, Any],
         model_spec: Any,
         covariate_names: list[str],
+        n_iterations: int = 0,
+        elbo_trace: list[float] | None = None,
+        converged: bool = False,
+        diagnostic_traces: dict | None = None,
     ) -> None:
         self.global_params = global_params
         self.metadata = metadata
         self.model_spec = model_spec
         self.covariate_names = covariate_names
+        # Resume state: n_iterations + elbo_trace are persisted so a later
+        # fit(resume_from=...) continues the Robbins-Monro counter (rho_t
+        # depends on the loaded iteration count) instead of restarting at t=0.
+        self.n_iterations = n_iterations
+        self.elbo_trace = list(elbo_trace) if elbo_trace is not None else []
+        self.converged = converged
+        self.diagnostic_traces = (
+            dict(diagnostic_traces) if diagnostic_traces is not None else {}
+        )
 
     def save(self, out_dir: Path) -> None:
         from spark_vi.core.result import VIResult
@@ -270,9 +296,13 @@ class STMModel:
         result = VIResult(
             global_params=self.global_params,
             metadata=dict(self.metadata),
-            elbo_trace=[],
-            n_iterations=0,
-            converged=False,
+            elbo_trace=list(self.elbo_trace),
+            n_iterations=self.n_iterations,
+            converged=self.converged,
+            # Not persisted: STM's per-iteration diagnostics include 2-D Gamma
+            # snapshots that save_result rejects (it handles scalar/1-D traces
+            # only), and resume needs only global_params + n_iterations +
+            # elbo_trace. Dropping them here keeps the on-disk layout valid.
             diagnostic_traces={},
         )
         save_result(result, out_dir)
@@ -299,4 +329,8 @@ class STMModel:
             metadata=dict(result.metadata),
             model_spec=spec,
             covariate_names=covariate_names,
+            n_iterations=result.n_iterations,
+            elbo_trace=list(result.elbo_trace),
+            converged=result.converged,
+            diagnostic_traces=dict(result.diagnostic_traces),
         )

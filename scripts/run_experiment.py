@@ -291,14 +291,87 @@ def build_fit_driver_path(effective: dict) -> str:
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
-def build_fit_args(effective: dict, out_dir: str) -> list[str]:
-    """Build argv for the fit driver, dispatching on model_class."""
+def build_fit_args(
+    effective: dict, out_dir: str, resume_from: Path | None = None,
+) -> list[str]:
+    """Build argv for the fit driver, dispatching on model_class.
+
+    resume_from (when set) is threaded to whichever driver runs so a re-run
+    continues a prior checkpoint (LDA and STM both support --resume-from;
+    --max-iter is then ADDITIONAL iterations on top of the loaded count).
+    """
     model_class = effective.get("model_class", "lda")
     if model_class == "lda":
-        return build_lda_args(effective, Path(out_dir), None)  # delegate to existing
+        return build_lda_args(effective, Path(out_dir), resume_from)
     if model_class == "stm":
-        return build_stm_args(effective, out_dir)
+        return build_stm_args(effective, out_dir, resume_from)
     raise ValueError(f"unknown model_class: {model_class!r}")
+
+
+def _norm_cohort(c):
+    """Normalize the 'none' sentinel / empty string to Python None so a
+    checkpoint and config that mean 'no cohort' compare equal."""
+    return None if c in (None, "none", "") else c
+
+
+def _resume_corpus_mismatches(checkpoint_manifest: dict, effective: dict) -> list[str]:
+    """Compare a checkpoint's corpus_manifest to the current effective config.
+
+    Returns a list of human-readable mismatches on the fields that determine
+    corpus membership/shape; empty list = compatible. Warm-starting onto a
+    checkpoint whose corpus differs (e.g. a different person_mod sample or
+    cohort lookback) silently trains on the wrong data, so the caller refuses
+    to resume on any mismatch. Only fields PRESENT in the checkpoint are
+    compared, so a checkpoint predating a field (e.g. prior_obs_days) is not
+    penalized.
+    """
+    expected = {
+        "person_mod": effective.get("person_mod"),
+        "source_table": effective.get("source_table"),
+        "cohort": _norm_cohort(effective.get("cohort_def", effective.get("cohort"))),
+        "prior_obs_days": effective.get("prior_obs_days"),
+        "vocab_size": effective.get("vocab_size"),
+    }
+    mismatches: list[str] = []
+    for key, want in expected.items():
+        if key not in checkpoint_manifest:
+            continue  # checkpoint predates this field; can't verify, don't block
+        got = checkpoint_manifest[key]
+        got_cmp = _norm_cohort(got) if key == "cohort" else got
+        if got_cmp != want:
+            mismatches.append(f"{key}: checkpoint={got!r} != config={want!r}")
+    # doc_spec is stored as a manifest dict; compare just its spec name.
+    ck_doc = checkpoint_manifest.get("doc_spec")
+    if isinstance(ck_doc, dict) and "name" in ck_doc:
+        want_doc = effective.get("doc_unit", "patient_year")
+        if ck_doc["name"] != want_doc:
+            mismatches.append(
+                f"doc_spec: checkpoint={ck_doc['name']!r} != config={want_doc!r}"
+            )
+    return mismatches
+
+
+def check_resume_compat(save_dir: Path, effective: dict) -> None:
+    """Exit(2) if resuming would warm-start onto a corpus that no longer
+    matches the experiment config. No-op when the checkpoint has no readable
+    corpus_manifest (nothing to verify)."""
+    import json
+    try:
+        manifest = json.loads((save_dir / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return
+    corpus = (manifest.get("metadata") or {}).get("corpus_manifest")
+    if not corpus:
+        return
+    mismatches = _resume_corpus_mismatches(corpus, effective)
+    if mismatches:
+        print("[run-exp] ERROR: refusing to resume — the checkpoint's corpus "
+              "differs from the current experiment config:", flush=True)
+        for m in mismatches:
+            print(f"[run-exp]   - {m}", flush=True)
+        print(f"[run-exp] Revert the config to match, or clear the checkpoint "
+              f"dir to start fresh: rm -rf {save_dir}", flush=True)
+        sys.exit(2)
 
 
 def _require_workspace_env() -> tuple[str, str]:
@@ -338,7 +411,9 @@ def build_covariates_args(effective: dict) -> list[str]:
     return args
 
 
-def build_stm_args(effective: dict, out_dir: str) -> list[str]:
+def build_stm_args(
+    effective: dict, out_dir: str, resume_from: Path | None = None,
+) -> list[str]:
     """Build argv for analysis/cloud/stm_bigquery_cloud.py."""
     cdr, billing = _require_workspace_env()
     common = [
@@ -373,7 +448,7 @@ def build_stm_args(effective: dict, out_dir: str) -> list[str]:
         "--sigma-ridge", str(effective.get("sigma_ridge", 1e-6)),
         "--lbfgs-max-iter", str(effective.get("lbfgs_max_iter", 50)),
         "--lbfgs-tol", str(effective.get("lbfgs_tol", 1e-4)),
-    ]
+    ] + (["--resume-from", str(resume_from)] if resume_from is not None else [])
 
 
 def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:
@@ -778,6 +853,12 @@ def main(argv: list[str] | None = None) -> int:
     resume_from: Path | None = save_dir if has_checkpoint else None
     print(f"[run-exp] save_dir: {save_dir}  resume: {resume_from is not None}",
           flush=True)
+    # Guard: a fit resume warm-starts onto the checkpoint's params, so refuse
+    # when the checkpoint's corpus no longer matches the config (eval-only /
+    # build-only just read the checkpoint, so they don't warm-start and skip
+    # the check). Exits(2) on mismatch with remediation guidance.
+    if resume_from is not None and not (args.eval_only or args.build_only):
+        check_resume_compat(save_dir, effective)
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # 4. Write summary header (new file or append session marker)
@@ -800,11 +881,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[run-exp] {mode}: skipping fit dispatch", flush=True)
     else:
         fit_script = REPO_ROOT / build_fit_driver_path(effective)
-        # LDA supports resume_from via build_lda_args; other models use build_fit_args.
-        if effective.get("model_class", "lda") == "lda":
-            fit_args = build_lda_args(effective, save_dir, resume_from)
-        else:
-            fit_args = build_fit_args(effective, str(save_dir))
+        # Both LDA and STM support --resume-from; build_fit_args threads it.
+        fit_args = build_fit_args(effective, str(save_dir), resume_from)
         fit_cmd = build_spark_submit_cmd(str(fit_script), fit_args, REPO_ROOT)
         # Display-only join; cmd is passed as list to Popen/run, not via shell.
         print(f"[run-exp] spark-submit: {' '.join(fit_cmd)}", flush=True)

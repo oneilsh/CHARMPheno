@@ -91,6 +91,33 @@ class TestStreamingSTMPathA:
         assert model.metadata["P"] == 2
         assert model.covariate_names == ["x1", "x2"]
 
+    def test_fit_resume_accumulates_iterations(self, spark, tmp_path):
+        """fit -> save -> fit(resume_from): the iteration counter continues, so a
+        3-iter fit then a 2-iter resume yields n_iterations == 5. This is what
+        keeps rho_t = (tau0 + t + 1)^-kappa shrinking instead of resetting."""
+        from spark_vi.mllib.topic.stm import StreamingSTM
+
+        rows = [
+            (SparseVector(8, [0, 2], [3.0, 1.0]), DenseVector([1.0, 0.0])),
+            (SparseVector(8, [1, 3], [2.0, 2.0]), DenseVector([0.0, 1.0])),
+            (SparseVector(8, [0, 4], [1.0, 2.0]), DenseVector([1.0, 0.5])),
+            (SparseVector(8, [5, 6], [1.0, 1.0]), DenseVector([0.0, 1.0])),
+        ]
+        df = spark.createDataFrame(rows, ["features", "covariates"])
+        est = StreamingSTM(
+            K=2, features_col="features", covariates_col="covariates",
+            covariate_names=["x1", "x2"], random_seed=0,
+        )
+        m1 = est.fit(df, max_iter=3, subsampling_rate=1.0, tau0=1.0, kappa=0.5)
+        assert m1.n_iterations == 3
+
+        save_dir = tmp_path / "ckpt"
+        m1.save(save_dir)
+
+        m2 = est.fit(df, max_iter=2, subsampling_rate=1.0, tau0=1.0, kappa=0.5,
+                     resume_from=str(save_dir))
+        assert m2.n_iterations == 5  # 3 loaded + 2 additional
+
 
 class TestCorpusMeanProportionsRDD:
     """Distributed corpus-mean α-equivalent over an RDD of covariate vectors.
