@@ -160,3 +160,45 @@ class TestCorpusMeanProportionsRDD:
         assert result.shape == (5,)
         assert np.all(result >= 0.0)
         np.testing.assert_allclose(result.sum(), 1.0)
+
+
+def test_streaming_stm_rejects_group_var_in_formula():
+    import pytest
+    from spark_vi.mllib.topic.stm import StreamingSTM
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition("source_cohort", background_k=2, foreground=(("cancer", 1),))
+    with pytest.raises(ValueError, match="group_var"):
+        StreamingSTM(
+            K=3, covariates_col="covariates",
+            covariate_names=["Intercept", "C(source_cohort)[T.cancer]"],
+            topic_blocks=part, doc_group_col="source_cohort")
+
+
+def test_streaming_stm_requires_group_col_with_partition():
+    import pytest
+    from spark_vi.mllib.topic.stm import StreamingSTM
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition("source_cohort", background_k=2, foreground=(("cancer", 1),))
+    with pytest.raises(ValueError, match="doc_group_col"):
+        StreamingSTM(K=3, covariates_col="covariates",
+                     covariate_names=["Intercept", "age"], topic_blocks=part)
+
+
+def test_streaming_stm_gated_fit_smoke(spark):
+    from pyspark.ml.linalg import Vectors
+    from spark_vi.mllib.topic.stm import StreamingSTM
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition("grp", background_k=2, foreground=(("rare", 1),))
+    rows = []
+    for i in range(20):
+        rare = i % 4 == 0
+        rows.append((Vectors.sparse(5, {i % 5: 2.0, (i + 1) % 5: 1.0}),
+                     Vectors.dense([1.0, float(i % 2)]),
+                     "rare" if rare else "common"))
+    df = spark.createDataFrame(rows, ["features", "covariates", "grp"])
+    est = StreamingSTM(K=3, covariates_col="covariates",
+                       covariate_names=["Intercept", "age"],
+                       topic_blocks=part, doc_group_col="grp")
+    model = est.fit(df, max_iter=3, subsampling_rate=1.0)
+    assert model.global_params["lambda"].shape == (3, 5)
+    assert model.metadata  # fit produced a model

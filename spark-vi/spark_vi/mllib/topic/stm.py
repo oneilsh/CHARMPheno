@@ -21,6 +21,13 @@ import numpy as np
 from spark_vi.models.topic.stm import prior_topic_proportions
 
 
+def _formula_mentions(group_var: str, covariate_names: list[str]) -> bool:
+    """True if group_var appears as a factor in any design-column name,
+    e.g. group_var='source_cohort' matches 'C(source_cohort)[T.dementia]'."""
+    needle = f"({group_var})"
+    return any(needle in name or name == group_var for name in covariate_names)
+
+
 def corpus_mean_topic_proportions_rdd(cov_rdd, Gamma: np.ndarray, depth: int = 2):
     """Distributed α-equivalent: (1/D) Σ_d softmax(Γᵀ x_d) over an RDD.
 
@@ -78,6 +85,8 @@ class StreamingSTM:
         lbfgs_max_iter: int = 50,
         lbfgs_tol: float = 1e-4,
         random_seed: int | None = None,
+        topic_blocks=None,
+        doc_group_col: str | None = None,
     ) -> None:
         # Path A vs B validation.
         path_a = covariates_col is not None and covariate_names is not None
@@ -115,6 +124,22 @@ class StreamingSTM:
         self.lbfgs_max_iter = lbfgs_max_iter
         self.lbfgs_tol = lbfgs_tol
         self.random_seed = random_seed
+
+        self.topic_blocks = topic_blocks
+        self.doc_group_col = doc_group_col
+        if topic_blocks is not None:
+            if doc_group_col is None:
+                raise ValueError(
+                    "topic_blocks requires doc_group_col (the column naming each "
+                    "document's gating group).")
+            if self.covariate_names is not None and \
+                    _formula_mentions(topic_blocks.group_var, self.covariate_names):
+                raise ValueError(
+                    f"group_var {topic_blocks.group_var!r} must not also appear in "
+                    f"the prevalence formula (foreground regression would be "
+                    f"rank-deficient); remove it from the formula terms.")
+        elif doc_group_col is not None:
+            raise ValueError("doc_group_col set without topic_blocks.")
 
     def fit(
         self,
@@ -170,6 +195,14 @@ class StreamingSTM:
                 "_resolve_model_spec_from_pandas first."
             )
 
+        # Path B re-guard: covariate_names not known at construction time,
+        # so re-run the formula check now that they are resolved.
+        if self.topic_blocks is not None and \
+                _formula_mentions(self.topic_blocks.group_var, self.covariate_names):
+            raise ValueError(
+                f"group_var {self.topic_blocks.group_var!r} must not also appear "
+                f"in the prevalence formula.")
+
         first = dataset.select(self.features_col).head(1)
         if not first:
             raise ValueError("Cannot fit on an empty DataFrame.")
@@ -184,6 +217,7 @@ class StreamingSTM:
             lbfgs_max_iter=self.lbfgs_max_iter,
             lbfgs_tol=self.lbfgs_tol,
             random_seed=self.random_seed,
+            topic_blocks=self.topic_blocks,
         )
 
         # VIConfig uses learning_rate_tau0/kappa and mini_batch_fraction;
@@ -205,12 +239,17 @@ class StreamingSTM:
 
         features_col = self.features_col
         covariates_col = self.covariates_col
+        group_col = self.doc_group_col
+        select_cols = [features_col, covariates_col]
+        if group_col is not None:
+            select_cols.append(group_col)
         rdd = (
-            dataset.select(features_col, covariates_col).rdd
+            dataset.select(*select_cols).rdd
             .map(lambda row: _vector_to_stm_document(
-                {features_col: row[0], covariates_col: row[1]},
+                {c: row[i] for i, c in enumerate(select_cols)},
                 features_col=features_col,
                 covariates_col=covariates_col,
+                group_col=group_col,
             ))
         )
         rdd = rdd.persist(StorageLevel.MEMORY_AND_DISK)
