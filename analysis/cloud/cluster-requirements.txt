@@ -1,0 +1,21 @@
+# Third-party Python runtime deps the AoU Dataproc image does NOT ship but the
+# cloud jobs import at runtime, on the driver AND on every executor.
+#
+# These are packed into a PEX built with --inherit-path=fallback (so it carries
+# only these deps and falls back to the image's numpy/pandas/scipy/pyarrow,
+# never shadowing or hand-version-matching them), and shipped to executors via
+# `spark-submit --files`. The PEX, built with the cluster's own python3, also
+# backs the client-mode driver on the master. Build/refresh with
+# `make cluster-env`; the wiring lives in build_spark_submit_cmd
+# (scripts/run_experiment.py).
+#
+# Keep this MINIMAL: declare only what the image lacks. pip resolves the full
+# dependency closure, so list top-level packages, not their transitive deps.
+#
+# Migration note: when spark-vi (and charmpheno) become standalone pip packages,
+# add them here and drop their spark_vi.zip / charmpheno.zip --py-files overlay —
+# this file becomes the single source of truth for the cluster Python env.
+
+# STM covariate/formula path (spark_vi.mllib.topic._formula). Optional extra of
+# spark-vi (spark-vi[formula]); LDA/HDP do not need it.
+formulaic>=1.0

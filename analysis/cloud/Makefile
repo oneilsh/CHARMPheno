@@ -1,8 +1,12 @@
-.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
+.PHONY: help zip cluster-env smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
 CHARMPHENO_ZIP  := $(REPO_ROOT)/charmpheno/dist/charmpheno.zip
+# PEX of third-party deps the AoU Dataproc image lacks (see
+# cluster-requirements.txt), shipped to executors via spark-submit --files.
+CLUSTER_REQS    := $(REPO_ROOT)/analysis/cloud/cluster-requirements.txt
+CLUSTER_ENV_PEX := $(REPO_ROOT)/analysis/cloud/dist/cluster_env.pex
 SCRIPT          := smoke_lda_cloud.py
 BQ_SCRIPT       := bq_smoke_cloud.py
 LDA_BQ_SCRIPT   := lda_bigquery_cloud.py
@@ -62,10 +66,12 @@ default: help
 help:
 	@echo "Cluster smoke targets (run from this dir on the Dataproc master):"
 	@echo ""
-	@echo "  make setup           - Discover workspace env (project, CDR, buckets) via the"
-	@echo "                         'wb' CLI; write to $(WORKSPACE_ENV). Pass CDR=<proj>.<ds>"
-	@echo "                         when the CDR is an external read-only project not"
-	@echo "                         surfaced by 'wb resource list'. Auto-runs if missing."
+	@echo "  make setup           - One-time per-cluster provisioning: discover workspace env"
+	@echo "                         (project, CDR, buckets) via the 'wb' CLI -> $(WORKSPACE_ENV),"
+	@echo "                         and build the cluster PEX (deps the image lacks, e.g."
+	@echo "                         formulaic). Pass CDR=<proj>.<ds> when the CDR is an external"
+	@echo "                         read-only project not surfaced by 'wb resource list'."
+	@echo "                         Workspace discovery auto-runs if $(WORKSPACE_ENV) is missing."
 	@echo "  make smoke           - LDA shim smoke: spark-submit via YARN (client mode)"
 	@echo "  make bq-smoke        - BigQuery read smoke (no spark_vi imports)"
 	@echo "  make lda-bq-smoke    - End-to-end: BQ -> CountVectorizer -> LDA shim"
@@ -153,8 +159,26 @@ zip:
 	$(MAKE) -C $(REPO_ROOT)/spark-vi zip
 	$(MAKE) -C $(REPO_ROOT)/charmpheno zip
 
-# Always re-discover and rewrite $(WORKSPACE_ENV).
-setup:
+# Build the cluster PEX (third-party deps the image lacks). Built with the
+# cluster's own python3 so the PEX targets that interpreter, and with
+# --inherit-path=fallback so it carries only these deps and falls back to the
+# image's numpy/pandas/scipy/pyarrow (never shadows them). Only rebuilt when
+# cluster-requirements.txt changes. build_spark_submit_cmd (run_experiment.py)
+# detects $(CLUSTER_ENV_PEX) and wires --files + the spark.pyspark.python /
+# spark.pyspark.driver.python confs automatically.
+cluster-env: $(CLUSTER_ENV_PEX)
+
+$(CLUSTER_ENV_PEX): $(CLUSTER_REQS)
+	mkdir -p $(dir $(CLUSTER_ENV_PEX))
+	python3 -m pip install --quiet --user --upgrade pex
+	python3 -m pex -r $(CLUSTER_REQS) --inherit-path=fallback -o $(CLUSTER_ENV_PEX)
+	@echo "Wrote $(CLUSTER_ENV_PEX)"
+
+# One-time per-cluster provisioning: re-discover and rewrite $(WORKSPACE_ENV),
+# and build the cluster PEX (third-party deps the image lacks). The PEX is a
+# file-target keyed on cluster-requirements.txt, so it only rebuilds when that
+# changes — `make setup` then `make exp ID=N` is enough on a fresh cluster.
+setup: cluster-env
 	$(SETUP_CMD)
 
 # Auto-run setup the first time anything needs $(WORKSPACE_ENV) on a fresh
@@ -278,12 +302,12 @@ RUN_ID          ?=
 # frontmatter; run them on the cluster via these targets.
 
 # Pick lowest-NNNN with status: pending; fit + eval; write summary.md
-next-exp: zip $(WORKSPACE_ENV)
+next-exp: zip cluster-env $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py --next --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
 
 # Same pipeline pinned to specific id (auto-resumes if RUN_ID dir exists)
-exp: zip $(WORKSPACE_ENV)
+exp: zip cluster-env $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
@@ -303,14 +327,14 @@ summary-tail:
 
 # Re-run eval only against an existing experiment's checkpoint; appends a
 # timestamped ## Eval (NPMI) section to summary.md.
-eval-exp: zip $(WORKSPACE_ENV)
+eval-exp: zip cluster-env $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py $(if $(ID),--id $(ID)) --eval-only --runs-dir $(RUNS_DIR)
 
 # Build dashboard bundle for an experiment. With no ID, picks the most
 # recent fit whose bundle is missing or older than the fit checkpoint.
 # With ID=N, force-rebuilds the named experiment.
-build-dashboard-exp: zip $(WORKSPACE_ENV)
+build-dashboard-exp: zip cluster-env $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py $(if $(ID),--id $(ID)) --build-only --runs-dir $(RUNS_DIR)
 
@@ -322,7 +346,7 @@ build-dashboard-exp: zip $(WORKSPACE_ENV)
 # Usage:
 #   make build-covariates EXP=NNNN
 #   make build-covariates EXP=NNNN FORCE=1   # invalidate cache, force rebuild
-build-covariates: zip $(WORKSPACE_ENV)
+build-covariates: zip cluster-env $(WORKSPACE_ENV)
 ifndef EXP
 	$(error EXP=NNNN required, e.g. make build-covariates EXP=0002)
 endif

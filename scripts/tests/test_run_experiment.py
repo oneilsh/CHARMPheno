@@ -281,6 +281,76 @@ def test_build_spark_submit_cmd_structure(tmp_path):
     assert cmd[-len(script_args):] == script_args
 
 
+def _make_zips(repo_root):
+    (repo_root / "spark-vi" / "dist").mkdir(parents=True)
+    (repo_root / "spark-vi" / "dist" / "spark_vi.zip").touch()
+    (repo_root / "charmpheno" / "dist").mkdir(parents=True)
+    (repo_root / "charmpheno" / "dist" / "charmpheno.zip").touch()
+
+
+def test_build_spark_submit_cmd_ships_cluster_pex_when_present(tmp_path):
+    # The PEX carrying third-party deps the image lacks (formulaic & friends).
+    # See build_spark_submit_cmd / Makefile `cluster-env`.
+    repo_root = tmp_path
+    _make_zips(repo_root)
+    env_dir = repo_root / "analysis" / "cloud" / "dist"
+    env_dir.mkdir(parents=True)
+    (env_dir / "cluster_env.pex").touch()
+
+    cmd = rx.build_spark_submit_cmd(
+        "/repo/analysis/cloud/stm_bigquery_cloud.py", ["--K", "40"], repo_root
+    )
+
+    # PEX shipped to executors' cwd via --files (lands as ./cluster_env.pex).
+    assert "--files" in cmd
+    files_val = cmd[cmd.index("--files") + 1]
+    assert files_val.endswith("/cluster_env.pex")
+    # Executors run the localized, relative pex as their interpreter...
+    assert "spark.pyspark.python=./cluster_env.pex" in cmd
+    # ...the client-mode driver (on the master) uses the absolute pex path,
+    # since --files lands relative to the executor cwd, not the driver's.
+    driver_conf = [c for c in cmd if c.startswith("spark.pyspark.driver.python=")]
+    assert driver_conf and driver_conf[0].endswith("/cluster_env.pex")
+    # Writable PEX_ROOT on executors (default ~/.pex may be unwritable on YARN).
+    assert any(c.startswith("spark.executorEnv.PEX_ROOT=") for c in cmd)
+    # Own source still overlaid via --py-files for fast dev iteration.
+    assert "--py-files" in cmd
+
+
+def test_build_spark_submit_cmd_omits_cluster_pex_when_absent(tmp_path):
+    # No PEX (e.g. LDA/HDP runs that never import formulaic) => no --files /
+    # interpreter overrides; the job uses the image's python.
+    repo_root = tmp_path
+    _make_zips(repo_root)
+
+    cmd = rx.build_spark_submit_cmd(
+        "/repo/analysis/cloud/lda_bigquery_cloud.py", [], repo_root
+    )
+    assert "--files" not in cmd
+    assert not any(c.startswith("spark.pyspark.python=") for c in cmd)
+    assert not any(c.startswith("spark.pyspark.driver.python=") for c in cmd)
+
+
+def test_configure_driver_interpreter_overrides_when_pex_present(tmp_path):
+    # The client-mode driver interpreter comes from PYSPARK_DRIVER_PYTHON, and a
+    # Dataproc-provided value (plain python, no formulaic) must be OVERRIDDEN to
+    # point at the PEX -- otherwise the driver can't import formulaic.
+    repo_root = tmp_path
+    (repo_root / "analysis" / "cloud" / "dist").mkdir(parents=True)
+    (repo_root / "analysis" / "cloud" / "dist" / "cluster_env.pex").touch()
+    env = {"PYSPARK_DRIVER_PYTHON": "/opt/conda/bin/python3"}
+
+    rx.configure_driver_interpreter(repo_root, env)
+
+    assert env["PYSPARK_DRIVER_PYTHON"].endswith("/analysis/cloud/dist/cluster_env.pex")
+
+
+def test_configure_driver_interpreter_noop_when_pex_absent(tmp_path):
+    env = {}
+    rx.configure_driver_interpreter(tmp_path, env)
+    assert "PYSPARK_DRIVER_PYTHON" not in env
+
+
 def test_write_summary_header_creates_file(tmp_path):
     summary_path = tmp_path / "summary.md"
     effective = {"model_class": "lda", "cohort": "dementia", "K": 60}

@@ -430,16 +430,72 @@ SPARK_SUBMIT_FLAGS = [
 ]
 
 
+def cluster_pex_path(repo_root: Path) -> Path:
+    """Path to the cluster PEX (third-party deps the image lacks, e.g. formulaic).
+
+    Built by the Makefile `cluster-env` target from cluster-requirements.txt.
+    """
+    return repo_root / "analysis" / "cloud" / "dist" / "cluster_env.pex"
+
+
+def configure_driver_interpreter(repo_root: Path, env: dict) -> None:
+    """Point the client-mode driver at the cluster PEX via PYSPARK_DRIVER_PYTHON.
+
+    Executors pick up the PEX from the spark.pyspark.python conf (see
+    build_spark_submit_cmd), but the client-mode *driver* interpreter is chosen
+    from PYSPARK_DRIVER_PYTHON -- the spark.pyspark.driver.python conf is not
+    reliably honored, and a Dataproc-provided PYSPARK_DRIVER_PYTHON (a plain
+    python with no formulaic) would otherwise win. So override it here.
+
+    Mutates env in place; no-op when the PEX is absent (LDA/HDP runs).
+    """
+    pex = cluster_pex_path(repo_root)
+    if pex.exists():
+        env["PYSPARK_DRIVER_PYTHON"] = str(pex)
+
+
 def build_spark_submit_cmd(
     script: str, script_args: list[str], repo_root: Path,
 ) -> list[str]:
-    """Build the full spark-submit command line."""
+    """Build the full spark-submit command line.
+
+    Two distinct delivery channels, on purpose:
+
+    - Our own source packages (spark_vi, charmpheno) ride as --py-files zips,
+      so editing them only needs a fast `make zip` overlay.
+    - Third-party runtime deps the AoU Dataproc image does NOT ship (e.g.
+      `formulaic`, needed by the STM covariate/formula path) travel as a PEX
+      built on the master from cluster-requirements.txt with
+      --inherit-path=fallback: the PEX carries only those deps and falls back
+      to the image's numpy/pandas/scipy/pyarrow (never shadows them). See the
+      Makefile `cluster-env` target.
+
+    The PEX is shipped with --files, so it lands as ./cluster_env.pex in each
+    executor's working dir and is used as the executor interpreter. The
+    client-mode driver runs on the master, where --files is NOT localized into
+    cwd, so it points at the PEX by absolute path. PEX_ROOT is steered to a
+    writable dir on executors (the default ~/.pex may be unwritable on YARN).
+    When the PEX is absent (LDA/HDP runs that never import formulaic), nothing
+    is added and the image's python is used.
+    """
     spark_vi_zip = repo_root / "spark-vi" / "dist" / "spark_vi.zip"
     charmpheno_zip = repo_root / "charmpheno" / "dist" / "charmpheno.zip"
     py_files_val = f"{spark_vi_zip},{charmpheno_zip}"
+
+    cluster_pex = cluster_pex_path(repo_root)
+    env_flags: list[str] = []
+    if cluster_pex.exists():
+        env_flags += ["--files", str(cluster_pex)]
+        # Executors run the localized, relative PEX; the driver (on the master)
+        # uses the absolute path since --files lands relative to executor cwd.
+        env_flags += ["--conf", "spark.pyspark.python=./cluster_env.pex"]
+        env_flags += ["--conf", f"spark.pyspark.driver.python={cluster_pex}"]
+        env_flags += ["--conf", "spark.executorEnv.PEX_ROOT=/tmp/pex_root"]
+
     return (
         ["spark-submit"]
         + SPARK_SUBMIT_FLAGS
+        + env_flags
         + ["--py-files", py_files_val, script]
         + script_args
     )
@@ -621,6 +677,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--defaults-dir", type=Path, default=DEFAULTS_DIR,
                         help="Where experiments/defaults/*.yaml files live.")
     args = parser.parse_args(argv)
+
+    # Steer the client-mode driver to the cluster PEX (so it can import
+    # formulaic etc.) before any spark-submit; child processes inherit os.environ.
+    configure_driver_interpreter(REPO_ROOT, os.environ)
 
     if args.no_eval and args.eval_only:
         print("[run-exp] ERROR: --no-eval and --eval-only are contradictory", flush=True)
