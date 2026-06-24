@@ -342,3 +342,23 @@ class TestMaskedDocInference:
                                Gamma=G, Sigma_diag=S, x=x,
                                allowed=np.arange(eb.shape[0], dtype=np.int64))
         np.testing.assert_allclose(a[0], b[0], atol=1e-8)
+
+
+def test_corpus_mean_topic_proportions_gated_zeros_out_of_group_foreground():
+    import numpy as np
+    from spark_vi.models.topic.stm import corpus_mean_topic_proportions_gated
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition("g", background_k=2, foreground=(("rare", 1),))  # K=3
+    P = 2
+    Gamma = np.zeros((P, 3))
+    X = np.ones((4, P))
+    # 3 'common' docs (no foreground block -> background only) + 1 'rare'
+    groups = [frozenset({"common"})] * 3 + [frozenset({"rare"})]
+    prev = corpus_mean_topic_proportions_gated(Gamma, X, groups, part)
+    assert prev.shape == (3,)
+    np.testing.assert_allclose(prev.sum(), 1.0, atol=1e-9)
+    # foreground topic 2 only gets mass from the 1 rare doc (1/4 of corpus * its share)
+    assert prev[2] > 0.0 and prev[2] < 0.3
+    # with Gamma=0, each common doc is uniform over background {0,1}; rare doc
+    # uniform over {0,1,2}. mean[2] = (1/4)*(1/3).
+    np.testing.assert_allclose(prev[2], 0.25 / 3, atol=1e-9)

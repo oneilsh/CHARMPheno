@@ -80,6 +80,31 @@ def corpus_mean_topic_proportions(Gamma: np.ndarray, X: np.ndarray) -> np.ndarra
     return proportions.mean(axis=0)
 
 
+def corpus_mean_topic_proportions_gated(Gamma, X, groups_per_doc, partition):
+    """Gating-aware corpus-mean prior proportions: (1/D) Σ_d softmax_allowed(Γᵀ x_d).
+
+    For each document, the softmax is taken over that document's ALLOWED topics
+    only (background ∪ its group's foreground, per partition.allowed_indices);
+    disallowed topics are exactly 0. So a foreground topic's corpus-mean
+    prevalence reflects only its group's share. Γ is (P, K), X is (D, P),
+    groups_per_doc is a length-D sequence of frozenset[str].
+    """
+    import numpy as np
+    Gamma = np.asarray(Gamma, dtype=np.float64)
+    X = np.asarray(X, dtype=np.float64)
+    K = Gamma.shape[1]
+    eta = X @ Gamma                                   # (D, K)
+    acc = np.zeros(K, dtype=np.float64)
+    for d in range(X.shape[0]):
+        allowed = partition.allowed_indices(groups_per_doc[d])
+        e = eta[d, allowed]
+        e = e - e.max()
+        p = np.exp(e)
+        p = p / p.sum()
+        acc[allowed] += p
+    return acc / max(X.shape[0], 1)
+
+
 def _stm_neg_log_joint(
     eta: np.ndarray,
     *,
