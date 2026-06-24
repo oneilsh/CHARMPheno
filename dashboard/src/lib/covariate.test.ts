@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { evalRecipe, buildDesignVector, covariatePrevalence } from './covariate'
+import { evalRecipe, buildDesignVector, covariatePrevalence, covariatePrevalenceGated, allowedMaskForGroup } from './covariate'
 
 const values = { age: 70, sex: 'M', source_cohort: 'dementia' }
 
@@ -36,4 +36,21 @@ it('covariatePrevalence softmaxes Gamma^T x', () => {
   const p = covariatePrevalence(effects, x)
   expect(p[0]).toBeCloseTo(2 / 3, 6)
   expect(p[1]).toBeCloseTo(1 / 3, 6)
+})
+
+describe('gated prevalence', () => {
+  it('masks before softmax and zeros out-of-group foreground', () => {
+    const effects = [{ covariate: 'Intercept', per_topic: [0, 0, 0] }]
+    const x = [1]
+    const blocks = ['background', 'rare_dx', 'other']
+    const mask = allowedMaskForGroup(blocks, 'rare_dx')   // [true,true,false]
+    expect(mask).toEqual([true, true, false])
+    const prev = covariatePrevalenceGated(effects, x, mask)
+    expect(prev[2]).toBe(0)
+    expect(Math.abs(prev[0] + prev[1] - 1)).toBeLessThan(1e-9)
+  })
+  it('background-only selection zeros all foreground', () => {
+    const blocks = ['background', 'rare_dx']
+    expect(allowedMaskForGroup(blocks, null)).toEqual([true, false])
+  })
 })

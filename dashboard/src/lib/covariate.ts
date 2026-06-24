@@ -31,3 +31,26 @@ export function covariatePrevalence(effects: CovariateEffects, x: number[]): num
   const s = exp.reduce((a, b) => a + b, 0) || 1
   return exp.map((e) => e / s)
 }
+
+export function allowedMaskForGroup(
+  topicBlocks: string[], selectedGroup: string | null,
+): boolean[] {
+  return topicBlocks.map((b) => b === 'background' || b === selectedGroup)
+}
+
+export function covariatePrevalenceGated(
+  effects: CovariateEffects, x: number[], allowedMask: boolean[],
+): number[] {
+  const K = effects[0]?.per_topic.length ?? 0
+  const eta = new Array(K).fill(0)
+  for (let p = 0; p < effects.length; p++) {
+    const row = effects[p].per_topic
+    for (let k = 0; k < K; k++) eta[k] += row[k] * x[p]
+  }
+  for (let k = 0; k < K; k++) if (!allowedMask[k]) eta[k] = -Infinity
+  const finite = eta.filter((e) => e !== -Infinity)
+  const m = finite.length ? Math.max(...finite) : 0
+  const exp = eta.map((e) => (e === -Infinity ? 0 : Math.exp(e - m)))
+  const s = exp.reduce((a, b) => a + b, 0) || 1
+  return exp.map((e) => e / s)
+}
