@@ -57,6 +57,7 @@ and when is itself useful.
 
 (Append entries here as new insights are written, newest at top.)
 
+- [0028](0028-dirichlet-vs-logistic-normal-rare-phenotype-recovery-gated-lda-is-plda.md) — The prior family (Dirichlet vs logistic-normal), not gating, governs rare minority-phenotype recovery; STM collapses where LDA recovers (2x2 + repro); "gated LDA" is Partially Labeled Dirichlet Allocation (PLDA) (stm, lda, gating, priors, phenotyping, prior-art)
 - [0027](0027-gated-stm-imbalanced-arms-majority-foreground-collapses.md) — Gated STM on imbalanced arms: the majority arm's foreground collapses into the shared background; the minority arm captures its anchor but not sub-phenotypes; per-block NPMI is non-comparable (stm, gating, covariates, npmi, doc-units, diagnostics)
 - [0026](0026-stm-prevalence-gives-prevalence-not-content-fidelity.md) — Prevalence-only STM reproduces LDA's cohort concentration (prior-family-invariant) and gives rare covariate groups prevalence fidelity, not content fidelity (stm, lda, covariates, npmi, diagnostics)
 - [0025](0025-min-patient-count-vs-min-df.md) — `min_patient_count` and `min_df` answer different questions (doc-units, diagnostics)
