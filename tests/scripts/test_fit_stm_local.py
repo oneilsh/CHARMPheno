@@ -36,6 +36,8 @@ def test_fit_stm_local_writes_gated_checkpoint(tmp_path):
     assert cm["topic_block_spec"]["background_k"] == 3
     assert cm["topic_block_spec"]["foreground"] == [["rare_dx", 2]]
     assert manifest["metadata"]["model_class"] == "stm"
+    assert manifest["metadata"]["vocab"]            # top-level vocab present
+    assert "name_by_id" in manifest["metadata"]     # top-level name_by_id present
     assert (out / "covariates.parquet").exists()
     lam = np.load(out / "params" / "lambda.npy")
     assert lam.shape[0] == 5  # K rows

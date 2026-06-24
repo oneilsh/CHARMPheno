@@ -121,6 +121,8 @@ def main(argv=None) -> int:
             "min_patient_count": args.min_patient_count,
             "topic_block_spec": partition.to_dict(),
         }
+        model.metadata["vocab"] = vocab_list
+        model.metadata["name_by_id"] = name_by_id
         model.metadata["covariate_manifest"] = {
             "covariate_formula": args.covariate_formula,
             "categorical_cols": cat_cols, "continuous_cols": cont_cols,
