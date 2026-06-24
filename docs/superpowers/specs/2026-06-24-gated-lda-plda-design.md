@@ -49,18 +49,17 @@ non-gated path. `frozen=True, slots=True` allows a defaulted field.
   it into `_cavi_doc_inference`. The per-doc content-hash seed is unchanged
   (masking doesn't affect determinism).
 
-### 3. Engine subtlety — asymmetric-α optimization must go per-topic-per-allowed-docs
-This is the one non-trivial bit. With `optimize_doc_concentration` on (which we
-**default ON** for gated LDA, per Wallach 2009), α_k is updated from
-Σ_d E[log θ_dk]. But a **foreground** topic k is only *allowed* in its group's
-documents, so its α stats must aggregate over **only those docs**, with a
-per-topic document count — exactly how STM's M-step divides Σ and Γ by
-`n_docs_per_topic` rather than a global `n_docs`. Concretely:
-`e_log_theta_sum` becomes a per-topic accumulation contributed only by docs
-where topic k is allowed, and `alpha_newton_step` divides by a per-topic
-`n_docs_per_topic` vector. Background topics (allowed everywhere) recover the
-current behavior. Without this, foreground α is estimated against the full
-corpus count and is driven to the floor.
+### 3. Engine subtlety — learned asymmetric-α under masking is deferred to v2
+Originally scoped here as a simple per-topic-`D` change; implementing the plan
+showed it is **deeper than that**. The closed form in `alpha_newton_step`
+assumes one shared K-simplex (a single `D` and a single ψ(Σα)); under PLDA
+masking each doc uses only its allowed set `A_d`, so the normalizer
+ψ(Σ_{j∈A_d} α_j) **varies per document** and the single Sherman-Morrison step no
+longer applies. **v1 therefore ships with fixed α** (`optimize_alpha=True` +
+foreground blocks raises), which is correct and sufficient — α < 1 still supplies
+the document-topic sparsity that recovers rare phenotypes (0028). The v2
+per-group-simplex Newton derivation lives in the plan's Appendix
+([2026-06-24-gated-lda-plda-model.md](../plans/2026-06-24-gated-lda-plda-model.md)).
 
 ### 4. MLlib shim — `OnlineLDAEstimator`
 [mllib/topic/lda.py](../../../spark-vi/spark_vi/mllib/topic/lda.py): add
