@@ -261,11 +261,19 @@ non-cosmetic change is the dashboard's prevalence math.
 ### 3. charmpheno driver + covariates + eval
 
 - [`stm_bigquery_cloud.py`](../../../analysis/cloud/stm_bigquery_cloud.py):
-  builds the partition from YAML, selects the already-present `source_cohort` as
-  `doc_group_col` into the joined DataFrame, passes both to `StreamingSTM`, and
-  writes `topic_block_spec` into `corpus_manifest`.
-- **Covariates unchanged**: `cov_df` stays keyed `(person_id, source_cohort)`.
-  Gating governs topic allowance, not covariate values — no `doc_block_id` key.
+  builds the partition from YAML, materializes `source_cohort` from `doc_id` as
+  the `doc_group_col`, passes both to `StreamingSTM`, and writes
+  `topic_block_spec` into `corpus_manifest`. `source_cohort` is a charmpheno
+  domain label fed into the engine's domain-agnostic group slot — spark-vi and
+  the shim never name a cohort.
+- **`source_cohort`'s two roles are decoupled** (the original `composite` flag
+  conflated them): `source_cohort_is_covariate` (`in cat_cols`) drives
+  per-(person, cohort) covariate keying; `need_source_cohort` (covariate **or**
+  gating) drives materialization from `doc_id`. Under gating `source_cohort` is
+  the group label but NOT a covariate, so covariates key **per-person** — exact
+  because age (`2025 - year_of_birth`) and sex are static per person. Gating
+  requires the combined-cohort `patient_cohort` doc-spec (which encodes
+  `source_cohort` in `doc_id`); a clear error otherwise. No `doc_block_id` key.
 - Guards: `group_var` rejected if it also appears in the formula;
   `run_experiment.py`'s resume-compat check adds `topic_block_spec` (a changed
   partition is a different model, cannot resume).

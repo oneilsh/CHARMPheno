@@ -1176,31 +1176,53 @@ def build_topic_block_partition(*, group_var, background_k, foreground_arg, K):
     return part
 ```
 
-In `main`, build the partition after corpus load and before the fit, and thread it. After the `composite = "source_cohort" in cat_cols` block, add:
+In `main`, **replace** the existing `composite = "source_cohort" in cat_cols` block (the flag line plus its `if composite: ... else: ...` materialization/keying) with the decoupled version below, building the partition first. `source_cohort` is a charmpheno domain label that plays two INDEPENDENT roles — a prevalence covariate (`in cat_cols`) and the gating group label (`partition is not None`). Only the covariate role needs per-(person, cohort) covariate keying; age/sex are static per person (`age = 2025 - year_of_birth`), so when `source_cohort` is the gating label but NOT a covariate, per-person covariate keying is exact. This decoupling is what lets gating run on the combined cohort with `~ C(sex) + age` (group var excluded from the formula per the Task-6 guard). NOTE: spark-vi and the shim stay domain-agnostic ("groups"); all `source_cohort` logic is charmpheno-only, here in the driver.
 
 ```python
+        # Build the gating partition first (None when --background-k/--foreground unset).
         partition = build_topic_block_partition(
             group_var=args.group_var, background_k=args.background_k,
             foreground_arg=args.foreground, K=args.K)
-        if partition is not None and not composite:
-            # The group column must exist on the corpus; today only the composite
-            # path materializes source_cohort. Require group_var == source_cohort
-            # until a non-composite group source is plumbed.
+        if partition is not None and args.group_var != "source_cohort":
             raise SystemExit(
-                "gating requires the composite (source_cohort) corpus; "
-                "build the combined cohort or omit --background-k/--foreground.")
+                f"--group-var {args.group_var!r} is not a materializable group "
+                f"column; only 'source_cohort' (from the combined-cohort "
+                f"patient_cohort doc-spec) is supported today.")
+
+        # source_cohort's two independent roles, separated:
+        source_cohort_is_covariate = "source_cohort" in cat_cols   # -> per-(person,cohort) cov keying
+        need_source_cohort = source_cohort_is_covariate or (partition is not None)
+
+        if need_source_cohort:
+            if doc_spec.name != "patient_cohort":
+                raise SystemExit(
+                    "source_cohort requires the combined-cohort doc-spec "
+                    f"(patient_cohort); got {doc_spec.name!r}. Use the "
+                    "cancer_or_dementia cohort, or drop source_cohort from the "
+                    "formula and gating.")
+            # doc_id == "{source_cohort}:{person_id}"; recover the label.
+            bow_df = bow_df.withColumn(
+                "source_cohort", F.split(F.col("doc_id"), ":").getItem(0))
+
+        if source_cohort_is_covariate:
+            labels = bow_df.select("person_id", "source_cohort").distinct()
+            cov_key_cols = ["person_id", "source_cohort"]
+            join_on = ["person_id", "source_cohort"]
+        else:
+            labels = None
+            cov_key_cols = ["person_id"]
+            join_on = "person_id"
+
         if partition is not None:
-            # Spec guard: a foreground block with zero documents is a config
-            # error; a thin block is a warning. source_cohort is materialized on
-            # bow_df by the composite block above.
-            present = {r["source_cohort"] for r in
-                       bow_df.select("source_cohort").distinct().collect()}
-            counts = {r["source_cohort"]: r["count"] for r in
-                      bow_df.groupBy("source_cohort").count().collect()}
+            # Zero-doc foreground block is a config error; a thin block is a warning.
+            present = {r[args.group_var] for r in
+                       bow_df.select(args.group_var).distinct().collect()}
+            counts = {r[args.group_var]: r["count"] for r in
+                      bow_df.groupBy(args.group_var).count().collect()}
             for g in partition.groups:
                 if g not in present:
                     raise SystemExit(
-                        f"gating group {g!r} has zero documents (source_cohort "
+                        f"gating group {g!r} has zero documents ({args.group_var} "
                         f"values present: {sorted(present)}). Fix --foreground "
                         f"labels to match the corpus.")
                 if counts.get(g, 0) < 100:
@@ -1208,6 +1230,8 @@ In `main`, build the partition after corpus load and before the fit, and thread 
                           f"{counts.get(g, 0)} docs; its block may be unstable.",
                           flush=True)
 ```
+
+Every remaining `if composite:` in `main` must be updated to the decoupled flags — the `person_df = person_df.join(labels, ...)` step becomes `if source_cohort_is_covariate:`; the per-`source_cohort` diagnostics breakdown becomes `if need_source_cohort:`. There must be NO remaining reference to a `composite` variable after this change.
 
 In the `StreamingSTM(...)` construction, add:
 
