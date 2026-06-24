@@ -257,7 +257,6 @@ def main(argv: list[str] | None = None) -> int:
                 mask = None
             reference_rdd = reference_df.rdd.map(BOWDocument.from_spark_row)
             if fg_groups:
-                from pyspark.sql import functions as F
                 bow_g = bow_df.withColumn(
                     "source_cohort", F.split(F.col("doc_id"), ":").getItem(0))
                 per_topic = np.full(topic_term.shape[0], np.nan)
