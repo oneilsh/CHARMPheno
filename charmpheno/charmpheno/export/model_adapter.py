@@ -191,6 +191,10 @@ def adapt_stm(result, *, corpus_prevalence: np.ndarray | None = None,
     beta = beta_full[kept]
     alpha = alpha_eq[kept]
     corpus_prev = corpus_prev[kept]
+    # Non-renormalization after subsetting suppressed topics is intentional and
+    # mirrors HDP top-K behavior: corpus_prevalence is a per-topic display
+    # quantity (fraction of patients expressing topic k), not a distribution, so
+    # it deliberately does NOT re-sum to 1 after k-anon suppression.
 
     # theta_histogram / theta_percentiles: optional pass-through if metadata has them.
     # Both are K × * on axis 0 and must be subset by `kept` to stay aligned with

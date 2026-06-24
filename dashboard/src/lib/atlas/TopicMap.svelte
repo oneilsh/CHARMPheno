@@ -91,8 +91,14 @@
       .on('click', (_, p) => selectedPhenotypeId.set(p.id))
 
     // Main bubble . filled with the encoded color, thin ink-tinted border
+    // Zero-prevalence (out-of-group foreground) topics get radius 0 so they
+    // vanish entirely; positive values keep the existing [5, 26] scaleSqrt mapping.
+    const rad = (p: typeof phenotypes[0]) => {
+      const v = r_of(p)
+      return v === 0 ? 0 : r(v)
+    }
     nodes.append('circle')
-      .attr('r', (p) => r(r_of(p)))
+      .attr('r', (p) => rad(p))
       .attr('fill', (p) => colorFn(p))
       .attr('fill-opacity', 0.85)
       .attr('stroke', '#18181b')
@@ -105,13 +111,13 @@
     // bullet in the CodePanel header so "this bubble = this detail" is
     // unambiguous.
     nodes.append('circle')
-      .attr('r', (p) => r(r_of(p)) + 6)
+      .attr('r', (p) => rad(p) + 6)
       .attr('fill', 'none')
       .attr('stroke', '#06b6d4')
       .attr('stroke-opacity', 0.25)
       .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 6 : 0))
     nodes.append('circle')
-      .attr('r', (p) => r(r_of(p)) + 3)
+      .attr('r', (p) => rad(p) + 3)
       .attr('fill', 'none')
       .attr('stroke', '#06b6d4')
       .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 2.25 : 0))
@@ -121,7 +127,7 @@
     // condition". Dashed for transient hover (from CodePanel mouseover);
     // solid + thicker for a pinned search.
     nodes.append('circle')
-      .attr('r', (p) => r(r_of(p)) + 5)
+      .attr('r', (p) => rad(p) + 5)
       .attr('fill', 'none')
       .attr('stroke', '#d946ef')
       .attr('stroke-dasharray', highlightStyle === 'pinned' ? '0' : '3,2')
@@ -141,8 +147,8 @@
         .data(phenotypes.filter((p) => p.quality && qualityMarkColor[p.quality]))
         .join('circle')
         .attr('class', 'quality-mark')
-        .attr('cx', (p) => x(coords[p.id][0]) + r(r_of(p)) * 0.7)
-        .attr('cy', (p) => y(coords[p.id][1]) - r(r_of(p)) * 0.7)
+        .attr('cx', (p) => x(coords[p.id][0]) + rad(p) * 0.7)
+        .attr('cy', (p) => y(coords[p.id][1]) - rad(p) * 0.7)
         .attr('r', 2.5)
         .attr('fill', (p) => qualityMarkColor[p.quality!])
         .attr('stroke', '#fff')
@@ -164,7 +170,7 @@
       .join('text')
       .attr('class', 'minor-label')
       .attr('x', (p) => x(coords[p.id][0]))
-      .attr('y', (p) => y(coords[p.id][1]) - r(r_of(p)) - 5)
+      .attr('y', (p) => y(coords[p.id][1]) - rad(p) - 5)
       .attr('text-anchor', 'middle')
       .attr('font-family', 'Geist, sans-serif')
       .attr('font-size', 10)

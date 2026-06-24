@@ -275,7 +275,6 @@ def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
             # Assumption: cov_df for a gated combined-cohort fit is keyed
             # (person_id, source_cohort); source_cohort is always present.
             from spark_vi.models.topic.stm import corpus_mean_topic_proportions_gated
-            from pyspark.sql import functions as _F
             with _phase("covariates collect to driver (gated prevalence)"):
                 cov_pdf = (
                     cov_df.select(
