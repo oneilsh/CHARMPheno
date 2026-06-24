@@ -51,3 +51,24 @@ def test_simulate_emits_expected_columns_and_gating():
     rare_ev = events[~events.person_id.isin(common_pids)]
     assert (rare_ev.true_block == "rare_dx").any()
     assert oracle["background_k"] == 3
+
+
+def test_cli_writes_three_files(tmp_path):
+    import json
+    from simulate_gated_omop import main
+    rc = main([
+        "--n-patients", "150", "--seed", "2",
+        "--background-k", "3", "--foreground", "rare_dx:2",
+        "--group-props", "common:0.8,rare_dx:0.2",
+        "--age-means", "common:55,rare_dx:70",
+        "--n-background-concepts", "10", "--n-group-concepts", "5",
+        "--output-dir", str(tmp_path)])
+    assert rc == 0
+    ev = tmp_path / "gated_omop_N150_seed2.parquet"
+    pe = tmp_path / "gated_person_N150_seed2.parquet"
+    orc = tmp_path / "gated_oracle_N150_seed2.json"
+    assert ev.exists() and pe.exists() and orc.exists()
+    persons = pd.read_parquet(pe)
+    assert set(persons.source_cohort.unique()) <= {"common", "rare_dx"}
+    oracle = json.loads(orc.read_text())
+    assert oracle["foreground"] == [["rare_dx", 2]]

@@ -132,3 +132,64 @@ def simulate_gated(gb: GatedBeta, *, n_patients, group_props, foreground,
         "foreground": [[g, k] for g, k in foreground],
     }
     return events, persons, oracle
+
+
+def _parse_pairs(s, valtype):
+    out = []
+    for piece in s.split(","):
+        k, _, v = piece.partition(":")
+        out.append((k.strip(), valtype(v)))
+    return out
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--n-patients", type=int, default=5000)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--background-k", type=int, default=3)
+    p.add_argument("--foreground", default="rare_dx:2",
+                   help="per-group foreground sizes 'g:K,g:K'")
+    p.add_argument("--group-props", default="common:0.99,rare_dx:0.01",
+                   help="group proportions 'g:frac,g:frac' (need not sum to 1)")
+    p.add_argument("--age-means", default="common:55,rare_dx:70")
+    p.add_argument("--n-background-concepts", type=int, default=40)
+    p.add_argument("--n-group-concepts", type=int, default=12)
+    p.add_argument("--bleed", type=float, default=0.1)
+    p.add_argument("--theta-alpha", type=float, default=0.3)
+    p.add_argument("--visits-per-patient-mean", type=float, default=3.0)
+    p.add_argument("--codes-per-visit-mean", type=float, default=8.0)
+    p.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    args = p.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    foreground = tuple((g, int(k)) for g, k in _parse_pairs(args.foreground, int))
+    group_props = dict(_parse_pairs(args.group_props, float))
+    age_means = dict(_parse_pairs(args.age_means, float))
+
+    rng = np.random.default_rng(args.seed)
+    gb = build_gated_beta(
+        n_background_concepts=args.n_background_concepts,
+        n_group_concepts=args.n_group_concepts,
+        background_k=args.background_k, foreground=foreground,
+        rng=rng, bleed=args.bleed)
+    events, persons, oracle = simulate_gated(
+        gb, n_patients=args.n_patients, group_props=group_props,
+        foreground=foreground,
+        visits_per_patient_mean=args.visits_per_patient_mean,
+        codes_per_visit_mean=args.codes_per_visit_mean,
+        age_means=age_means, theta_alpha=args.theta_alpha, seed=args.seed)
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"N{args.n_patients}_seed{args.seed}"
+    events.to_parquet(args.output_dir / f"gated_omop_{stem}.parquet", index=False)
+    persons.to_parquet(args.output_dir / f"gated_person_{stem}.parquet", index=False)
+    (args.output_dir / f"gated_oracle_{stem}.json").write_text(
+        json.dumps(oracle, indent=2))
+    log.info("wrote gated sim: %d events, %d patients, groups=%s",
+             len(events), len(persons), list(group_props))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
