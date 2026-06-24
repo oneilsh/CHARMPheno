@@ -12,7 +12,15 @@ async function fetchJson<T>(url: string): Promise<T> {
 async function fetchJsonOptional<T>(url: string): Promise<T | undefined> {
   const r = await fetch(url)
   if (!r.ok) return undefined
-  return r.json() as Promise<T>
+  // A dev server (e.g. Vite) serves the SPA fallback index.html with a 200 for
+  // a missing file under public/, so an absent optional bundle file arrives as
+  // an HTML body rather than a 404. r.json() rejects on that body; treat any
+  // non-JSON response as "absent" instead of failing the whole bundle load.
+  try {
+    return await (r.json() as Promise<T>)
+  } catch {
+    return undefined
+  }
 }
 
 // Fetch the top-level cohort manifest. The manifest is the source of

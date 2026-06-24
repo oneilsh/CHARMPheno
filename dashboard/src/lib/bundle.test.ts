@@ -46,6 +46,33 @@ describe('loadBundle', () => {
     expect(b.covariateSchema).toBeUndefined()
     expect(b.covariateEffects).toBeUndefined()
   })
+
+  it('treats a SPA-fallback HTML body (ok:200, non-JSON) as an absent optional file', async () => {
+    // Vite's dev server serves index.html with status 200 for a missing file
+    // under public/, so an optional bundle file that doesn't exist arrives as
+    // HTML rather than a 404. r.json() rejects on that body; loadBundle must
+    // treat it as absent, not fail the whole bundle.
+    globalThis.fetch = vi.fn((url: string) => {
+      const required: Record<string, unknown> = {
+        'data/cancer/model.json':        { K: 1, V: 1, alpha: [1], beta: [[1]] },
+        'data/cancer/phenotypes.json':   { phenotypes: [] },
+        'data/cancer/vocab.json':        { codes: [] },
+        'data/cancer/corpus_stats.json': { corpus_size_docs: 1, mean_codes_per_doc: 1, k: 20, v: 1, v_full: 1 },
+      }
+      const key = Object.keys(required).find((k) => url.endsWith(k))
+      if (key) return Promise.resolve({ ok: true, json: () => Promise.resolve(required[key]) } as Response)
+      // Missing optional file -> SPA fallback: 200 OK with an HTML body.
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.reject(new SyntaxError("Unexpected token '<'")),
+      } as unknown as Response)
+    }) as any
+    const b = await loadBundle('/', 'cancer')
+    expect(b.model.K).toBe(1)
+    expect(b.covariateSchema).toBeUndefined()
+    expect(b.covariateEffects).toBeUndefined()
+    expect(b.gating).toBeUndefined()
+  })
 })
 
 describe('loadBundle gating', () => {

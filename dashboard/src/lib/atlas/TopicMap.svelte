@@ -199,7 +199,10 @@
     })
   }
 
-  $: $tauThreshold, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()
+  // `reader` is listed so the atlas re-renders whenever the prevalence reader
+  // changes for ANY reason - covariate mode toggling, covariate-value edits,
+  // or the gating group selector - not only on the tau/selection/mode stores.
+  $: reader, $tauThreshold, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()
   onMount(render)
 </script>
 
