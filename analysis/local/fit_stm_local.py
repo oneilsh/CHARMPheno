@@ -28,6 +28,65 @@ from spark_vi.mllib.topic.stm import StreamingSTM
 log = logging.getLogger(__name__)
 
 
+def _extract_categorical_levels(
+    model_spec,
+    categorical_cols: list[str],
+) -> dict[str, dict]:
+    """Extract {var: {"levels": [...], "reference": "..."}} from a formulaic ModelSpec.
+
+    Uses encoder_state (formulaic >= 0.5) to read the full category list and
+    derive the reference (dropped) level for treatment-coded contrasts.  With
+    TreatmentContrasts the reference is the first sorted category when the base
+    is UNSET, or the explicit base value otherwise.
+
+    Returns an empty dict for any variable whose info cannot be recovered, so
+    the caller degrades gracefully rather than raising.
+    """
+    result: dict[str, dict] = {}
+    if model_spec is None:
+        return result
+
+    encoder_state = getattr(model_spec, "encoder_state", None) or {}
+    for factor_key, state_tuple in encoder_state.items():
+        if not (isinstance(state_tuple, tuple) and len(state_tuple) == 2):
+            continue
+        kind, state_dict = state_tuple
+        # Only process categorical factors.
+        if not (hasattr(kind, "value") and kind.value == "categorical"):
+            continue
+        categories = state_dict.get("categories") if isinstance(state_dict, dict) else None
+        if not categories:
+            continue
+        categories = list(categories)
+
+        # Derive the variable name: strip the C(...) wrapper if present.
+        import re as _re
+        m = _re.match(r"^C\(\s*([^,)\s]+)", factor_key)
+        var = m.group(1) if m else factor_key
+
+        # Derive the reference (dropped) level from the contrasts state.
+        reference = ""
+        contrasts_state = state_dict.get("contrasts") if isinstance(state_dict, dict) else None
+        if contrasts_state is not None:
+            try:
+                c = contrasts_state.contrasts
+                base = getattr(c, "base", None)
+                # formulaic represents an unset base as a Sentinel with value
+                # "UNSET". When unset, treatment coding drops the first sorted
+                # category, which is categories[0].
+                if base is None or "UNSET" in str(base):
+                    reference = categories[0]
+                else:
+                    reference = str(base)
+            except Exception:
+                # Fall back to first category if introspection fails.
+                reference = categories[0] if categories else ""
+
+        result[var] = {"levels": categories, "reference": reference}
+
+    return result
+
+
 def _build_spark() -> SparkSession:
     os.environ["SPARK_LOCAL_IP"] = "127.0.0.1"
     return (
@@ -127,6 +186,9 @@ def main(argv=None) -> int:
             "covariate_formula": args.covariate_formula,
             "categorical_cols": cat_cols, "continuous_cols": cont_cols,
             "covariate_names": covariate_names,
+            "categorical_levels": _extract_categorical_levels(
+                model_spec, cat_cols,
+            ),
         }
         model.metadata["model_class"] = "stm"
         model.metadata["concept_names"] = {str(k): v for k, v in name_by_id.items()}

@@ -35,3 +35,19 @@ def test_local_dashboard_emits_gating_files(tmp_path):
     assert len(gating["topic_blocks"]) == 5
     assert (out / "covariate_effects.json").exists()
     assert (out / "covariate_schema.json").exists()
+
+    # Categorical reference level must be non-empty — this catches the bug where
+    # result.model_spec is None so _categorical_levels_from_spec returns {}.
+    schema = json.loads((out / "covariate_schema.json").read_text())
+    sex_control = next(
+        (c for c in schema["controls"] if c["name"] == "sex" and c["type"] == "categorical"),
+        None,
+    )
+    assert sex_control is not None, "covariate_schema.json has no categorical 'sex' control"
+    assert sex_control["reference"], (
+        "sex control has empty reference level — categorical_levels not persisted at fit time"
+    )
+    # The reference level must be one of the two fitted categories.
+    assert sex_control["reference"] in ("F", "M"), (
+        f"unexpected reference level: {sex_control['reference']!r}"
+    )

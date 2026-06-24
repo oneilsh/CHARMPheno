@@ -74,12 +74,12 @@ def _write_local_covariate_schema(out_dir, result, cov_pdf, X, k):
 
     Dummy-column sums (per-level patient counts) are column sums of the binary
     indicator columns in X. Continuous percentiles (p5, p50, p95) are computed
-    via numpy. Categorical levels and references come from the fitted ModelSpec
-    stored in the checkpoint via _categorical_levels_from_spec (imported from the
-    cloud builder, which has the same formulaic introspection logic).
+    via numpy. Categorical levels and references are read from
+    covariate_manifest["categorical_levels"] (persisted at fit time) when
+    available, with a fallback to formulaic model_spec introspection for older
+    or cloud checkpoints.
     """
     import re as _re
-    from build_dashboard_cloud import _categorical_levels_from_spec
     from charmpheno.export.covariate_schema import build_covariate_schema
 
     cov_manifest = result.metadata["covariate_manifest"]
@@ -108,13 +108,20 @@ def _write_local_covariate_schema(out_dir, result, cov_pdf, X, k):
         q = np.percentile(X[:, idx], [5.0, 50.0, 95.0])
         continuous_stats[var] = tuple(round(float(v)) for v in q)
 
-    # Levels + reference from the fitted ModelSpec stored in the checkpoint.
-    # The ModelSpec is serialized as result.model_spec by spark_vi.io; fall back
-    # gracefully when absent (older checkpoints or different serializers).
-    model_spec = getattr(result, "model_spec", None)
-    categorical_levels = _categorical_levels_from_spec(
-        model_spec, covariate_names=covariate_names,
-    ) if model_spec is not None else {}
+    # Categorical levels + reference: prefer the value persisted at fit time
+    # under covariate_manifest["categorical_levels"] (populated by fit_stm_local
+    # via _extract_categorical_levels). Fall back to the formulaic model_spec
+    # introspection path (cloud checkpoints) or an empty dict (older checkpoints
+    # or non-formulaic fit paths) so the schema write degrades gracefully.
+    categorical_levels = cov_manifest.get("categorical_levels")
+    if not categorical_levels:
+        from build_dashboard_cloud import _categorical_levels_from_spec
+        model_spec = getattr(result, "model_spec", None)
+        categorical_levels = (
+            _categorical_levels_from_spec(model_spec, covariate_names=covariate_names)
+            if model_spec is not None
+            else {}
+        )
 
     schema = build_covariate_schema(
         covariate_names=covariate_names, continuous_cols=continuous_cols,
