@@ -21,6 +21,60 @@ from _corpus_load import load_or_build_corpus
 from _covariates_load import load_or_build_covariates
 
 
+def _extract_categorical_levels(
+    model_spec,
+    categorical_cols: list[str],
+) -> dict[str, dict]:
+    """Extract {var: {"levels": [...], "reference": "..."}} from a formulaic ModelSpec.
+
+    Uses encoder_state (formulaic >= 0.5) to read the full category list and
+    derive the reference (dropped) level for treatment-coded contrasts.  With
+    TreatmentContrasts the reference is the first sorted category when the base
+    is UNSET, or the explicit base value otherwise.
+
+    Returns an empty dict for any variable whose info cannot be recovered, so
+    the caller degrades gracefully rather than raising.
+
+    Mirrors analysis/local/fit_stm_local._extract_categorical_levels exactly.
+    """
+    result: dict[str, dict] = {}
+    if model_spec is None:
+        return result
+
+    encoder_state = getattr(model_spec, "encoder_state", None) or {}
+    for factor_key, state_tuple in encoder_state.items():
+        if not (isinstance(state_tuple, tuple) and len(state_tuple) == 2):
+            continue
+        kind, state_dict = state_tuple
+        if not (hasattr(kind, "value") and kind.value == "categorical"):
+            continue
+        categories = state_dict.get("categories") if isinstance(state_dict, dict) else None
+        if not categories:
+            continue
+        categories = list(categories)
+
+        import re as _re
+        m = _re.match(r"^C\(\s*([^,)\s]+)", factor_key)
+        var = m.group(1) if m else factor_key
+
+        reference = ""
+        contrasts_state = state_dict.get("contrasts") if isinstance(state_dict, dict) else None
+        if contrasts_state is not None:
+            try:
+                c = contrasts_state.contrasts
+                base = getattr(c, "base", None)
+                if base is None or "UNSET" in str(base):
+                    reference = categories[0]
+                else:
+                    reference = str(base)
+            except Exception:
+                reference = categories[0] if categories else ""
+
+        result[var] = {"levels": categories, "reference": reference}
+
+    return result
+
+
 def build_topic_block_partition(*, group_var, background_k, foreground_arg, K):
     """Build a TopicBlockPartition from CLI args, or None when gating is off.
 
@@ -333,6 +387,13 @@ def main() -> int:
                 "covariate_names": covariate_names,
                 # The fitted ModelSpec is saved alongside as model_spec.pkl.
                 # Bundle consumers prefer covariate_names for display labels.
+                # categorical_levels enables build_dashboard_cloud to write
+                # accurate reference levels in covariate_schema.json without
+                # relying on formulaic model_spec introspection (which is
+                # unreliable after deserialization). Mirrors the local fitter.
+                "categorical_levels": _extract_categorical_levels(
+                    model_spec, cat_cols,
+                ),
             }
             stm_model.metadata["model_class"] = "stm"
 

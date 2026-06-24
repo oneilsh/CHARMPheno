@@ -195,10 +195,16 @@ def _write_covariate_schema(spark, *, result, corpus, source_table, cohort_name,
             q = arr_with_col.approxQuantile(col_name, [0.05, 0.5, 0.95], 0.01)
             continuous_stats[var] = tuple(round(v) for v in q)
 
-        # Levels + reference from the fitted ModelSpec.
-        categorical_levels = _categorical_levels_from_spec(
-            model_spec, covariate_names=covariate_names,
-        )
+        # Levels + reference: prefer the value persisted at fit time under
+        # covariate_manifest["categorical_levels"] (populated by the STM cloud
+        # fitter via _extract_categorical_levels). Fall back to the formulaic
+        # model_spec introspection path for older checkpoints or cache-loaded
+        # specs. Mirrors the local build_dashboard._write_local_covariate_schema.
+        categorical_levels = cov_manifest.get("categorical_levels")
+        if not categorical_levels:
+            categorical_levels = _categorical_levels_from_spec(
+                model_spec, covariate_names=covariate_names,
+            )
 
         schema = build_covariate_schema(
             covariate_names=covariate_names, continuous_cols=continuous_cols,
@@ -214,26 +220,38 @@ def _write_covariate_schema(spark, *, result, corpus, source_table, cohort_name,
 
 
 def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
-                           cohort_name, cache_uri, log):
+                           cohort_name, cache_uri, log,
+                           partition=None):
     """Faithful corpus-mean alpha-equivalent for STM, or None to fall back.
 
-    Reloads the covariate sidecar from its cache (key recomputed from the
-    checkpoint's covariate_manifest + corpus_manifest) and reduces it with
+    For NON-GATED checkpoints (partition is None):
+    Reloads the covariate sidecar from its cache and reduces it with
     corpus_mean_proportions_from_covariate_df (distributed treeReduce; only a
-    K-vector reaches the driver). Returns None — leaving adapt_stm on its
-    softmax(Gamma[intercept]) stand-in — when no cache_uri is supplied, the
-    cache misses, or anything raises. The quantity is cosmetic (the dashboard's
-    "default topic proportion" widget), so it must never abort the bundle build.
+    K-vector reaches the driver).
+
+    For GATED checkpoints (partition is not None):
+    Collects (covariates, source_cohort) rows to the driver via .toPandas()
+    and computes corpus_mean_topic_proportions_gated (masked before softmax).
+    The collect is acceptable because the covariate sidecar is bounded by the
+    corpus size (one row per doc), which is well within driver memory for the
+    cohort sizes we currently run (tens of thousands of patients).
+
+    Returns None — leaving adapt_stm on its softmax(Gamma[intercept]) stand-in
+    — when no cache_uri is supplied, the cache misses, or anything raises.
+    The quantity is cosmetic (the dashboard's "default topic proportion" widget),
+    so it must never abort the bundle build.
+
+    Also returns the per-group patient counts (gc) and loaded cov_df as a
+    2-tuple (prev, gc, cov_pdf) to avoid a second cache round-trip when the
+    caller needs them. Returns (None, None, None) on any failure path.
     """
     if not cache_uri:
         log.warning("STM: no --cache-uri; corpus_prevalence uses the "
                     "softmax(Gamma[intercept]) stand-in.")
-        return None
+        return None, None, None
     try:
         from _covariates_cache import compute_cache_key, try_load
-        from charmpheno.omop.covariates import (
-            corpus_mean_proportions_from_covariate_df,
-        )
+        from pyspark.ml.functions import vector_to_array
 
         cov_manifest = result.metadata["covariate_manifest"]
         key = compute_cache_key(
@@ -248,17 +266,53 @@ def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
         if cached is None:
             log.warning("STM: covariate-cache MISS (%s/%s); corpus_prevalence "
                         "uses the intercept stand-in.", cache_uri, key)
-            return None
+            return None, None, None
         cov_df, _spec, _names = cached
         Gamma = np.asarray(result.global_params["Gamma"], dtype=np.float64)
-        with _phase("corpus-mean prior proportions (treeReduce)"):
-            prev = corpus_mean_proportions_from_covariate_df(cov_df, Gamma)
-        log.info("STM: faithful corpus_prevalence computed (K=%d).", prev.shape[0])
-        return prev
+
+        if partition is not None:
+            # --- Gated path: collect (covariates, source_cohort) to driver ---
+            # Assumption: cov_df for a gated combined-cohort fit is keyed
+            # (person_id, source_cohort); source_cohort is always present.
+            from spark_vi.models.topic.stm import corpus_mean_topic_proportions_gated
+            from pyspark.sql import functions as _F
+            with _phase("covariates collect to driver (gated prevalence)"):
+                cov_pdf = (
+                    cov_df.select(
+                        vector_to_array("covariates").alias("covariates"),
+                        "source_cohort",
+                    )
+                    .toPandas()
+                )
+            import numpy as _np
+            X = _np.vstack(cov_pdf["covariates"].to_numpy())
+            groups_per_doc = [frozenset({g}) for g in cov_pdf["source_cohort"]]
+            with _phase("gated corpus-mean prevalence (masked before softmax)"):
+                prev = corpus_mean_topic_proportions_gated(
+                    Gamma, X, groups_per_doc, partition)
+            # Per-group patient counts for k-anon suppression.
+            gc = (
+                cov_df.groupBy("source_cohort")
+                .agg(F.countDistinct("person_id").alias("n"))
+                .collect()
+            )
+            gc = {r["source_cohort"]: int(r["n"]) for r in gc}
+            log.info("STM: gated corpus_prevalence computed (K=%d, groups=%s).",
+                     prev.shape[0], list(gc.keys()))
+            return prev, gc, cov_pdf
+        else:
+            # --- Non-gated path: distributed treeReduce ---
+            from charmpheno.omop.covariates import (
+                corpus_mean_proportions_from_covariate_df,
+            )
+            with _phase("corpus-mean prior proportions (treeReduce)"):
+                prev = corpus_mean_proportions_from_covariate_df(cov_df, Gamma)
+            log.info("STM: faithful corpus_prevalence computed (K=%d).", prev.shape[0])
+            return prev, None, None
     except Exception as exc:  # cosmetic-only: never fatal to the bundle build
         log.warning("STM: corpus_prevalence computation failed (%s); "
                     "using the intercept stand-in.", exc)
-        return None
+        return None, None, None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -380,18 +434,40 @@ def main(argv: list[str] | None = None) -> int:
 
         is_stm = (args.model_class == "stm"
                   or result.metadata.get("model_class") == "stm")
-        stm_corpus_prev = (
-            _stm_corpus_prevalence(
+
+        # Build the gating partition (None for non-gated STM and all LDA/HDP).
+        # Guarded on topic_block_spec so non-gated checkpoints are unchanged.
+        stm_partition = None
+        stm_suppressed = frozenset()
+        stm_gc = None
+        tbs = corpus.get("topic_block_spec") if is_stm else None
+        if tbs:
+            from spark_vi.models.topic.partition import TopicBlockPartition
+            stm_partition = TopicBlockPartition.from_dict(tbs)
+
+        stm_corpus_prev = None
+        if is_stm:
+            stm_corpus_prev, stm_gc, _cov_pdf_unused = _stm_corpus_prevalence(
                 spark, result=result, corpus=corpus,
                 source_table=source_table, cohort_name=cohort_name,
                 cache_uri=args.cache_uri, log=log,
+                partition=stm_partition,
             )
-            if is_stm else None
-        )
+
+        # For gated STM, compute suppression from per-group counts.
+        if tbs and stm_gc is not None:
+            from charmpheno.export.gating import suppressed_topic_ids
+            k_thresh = int(corpus.get("min_patient_count", 20))
+            stm_suppressed = suppressed_topic_ids(stm_partition, stm_gc, k_thresh)
 
         with _phase("adapter (model-class normalize)"):
-            export = adapt(result, hdp_top_k=args.hdp_top_k,
-                           stm_corpus_prevalence=stm_corpus_prev)
+            if is_stm:
+                from charmpheno.export.model_adapter import adapt_stm as _adapt_stm
+                export = _adapt_stm(result, corpus_prevalence=stm_corpus_prev,
+                                    partition=stm_partition,
+                                    suppressed=stm_suppressed)
+            else:
+                export = adapt(result, hdp_top_k=args.hdp_top_k)
             K_disp, V_full = export.beta.shape
             print(f"[driver]   K_display={K_disp} V_full={V_full}", flush=True)
 
@@ -500,15 +576,33 @@ def main(argv: list[str] | None = None) -> int:
                 labels=None,
             )
             if is_stm:
+                import json as _json
                 Gamma = np.asarray(result.global_params["Gamma"], dtype=np.float64)
                 covariate_manifest = result.metadata["covariate_manifest"]
                 covariate_names = covariate_manifest["covariate_names"]
+                kept_ids = [int(i) for i in export.topic_indices]
+
+                # --- Gating outputs (guarded on topic_block_spec) ---
+                if tbs and stm_gc is not None:
+                    from charmpheno.export.gating import build_gating_json
+                    k_thresh = int(corpus.get("min_patient_count", 20))
+                    gating = build_gating_json(
+                        stm_partition, stm_gc, k_thresh, kept_ids)
+                    (out_dir / "gating.json").write_text(
+                        _json.dumps(gating, indent=2))
+                    log.info("STM: wrote gating.json (groups=%s, kept_topics=%d)",
+                             gating["groups"], len(kept_ids))
+                    print(f"[driver]   wrote gating.json "
+                          f"(groups={gating['groups']}, "
+                          f"kept_topics={len(kept_ids)})", flush=True)
+
+                # covariate_effects.json: subset Gamma columns to kept topics.
                 dashboard_adapt_stm(
-                    out_dir=out_dir, Gamma=Gamma,
+                    out_dir=out_dir, Gamma=Gamma[:, kept_ids],
                     covariate_names=covariate_names,
-                    K=Gamma.shape[1], P=Gamma.shape[0],
+                    K=len(kept_ids), P=Gamma.shape[0],
                 )
-                print(f"[driver]   wrote covariate_effects.json (K={Gamma.shape[1]}, "
+                print(f"[driver]   wrote covariate_effects.json (K={len(kept_ids)}, "
                       f"P={Gamma.shape[0]})", flush=True)
                 _write_covariate_schema(
                     spark, result=result, corpus=corpus,
