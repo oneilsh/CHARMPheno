@@ -193,10 +193,13 @@ def adapt_stm(result, *, corpus_prevalence: np.ndarray | None = None,
     corpus_prev = corpus_prev[kept]
 
     # theta_histogram / theta_percentiles: optional pass-through if metadata has them.
+    # Both are K × * on axis 0 and must be subset by `kept` to stay aligned with
+    # topic_indices.  When partition is None, kept == list(range(K)) so the slice
+    # is an identity and output is byte-identical to the pre-gating path.
     raw_hist = meta.get("theta_histogram")
-    theta_histogram = _parse_theta_histogram(raw_hist) if raw_hist is not None else None
+    theta_histogram = _parse_theta_histogram(raw_hist)[kept] if raw_hist is not None else None
     raw_pct = meta.get("theta_percentiles")
-    theta_percentiles = _parse_theta_percentiles(raw_pct) if raw_pct is not None else None
+    theta_percentiles = _parse_theta_percentiles(raw_pct)[kept] if raw_pct is not None else None
     return DashboardExport(
         beta=beta, alpha=alpha, corpus_prevalence=corpus_prev,
         topic_indices=np.array(kept, dtype=np.int64),

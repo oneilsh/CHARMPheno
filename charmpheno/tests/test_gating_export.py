@@ -38,3 +38,52 @@ def test_adapt_stm_excludes_suppressed_topics():
     assert list(exp.topic_indices) == [0, 1, 2, 3, 4]
     assert exp.topic_blocks == ["background", "background", "background",
                                 "rare_dx", "rare_dx"]
+
+
+def test_adapt_stm_subsets_theta_arrays_to_kept():
+    """theta_histogram and theta_percentiles must be subset by `kept` so their
+    axis-0 length equals len(topic_indices), not the full K.
+
+    Regression: before the fix, both arrays were passed through at length K=6
+    while topic_indices had length 5 (one topic suppressed) — a silent
+    misalignment.
+    """
+    from charmpheno.export.model_adapter import adapt_stm
+
+    rng = np.random.default_rng(42)
+    K, n_bins = 6, 3
+
+    # theta_histogram: K × n_bins list-of-lists (as stored in metadata)
+    hist_raw = rng.random((K, n_bins)).tolist()
+    # theta_percentiles: K × 5 list-of-dicts (as _parse_theta_percentiles expects)
+    cols = ["p5", "p25", "p50", "p75", "p95"]
+    pct_raw = [{c: float(rng.random()) for c in cols} for _ in range(K)]
+
+    class R:
+        global_params = {
+            "lambda": np.abs(rng.normal(size=(K, 8))) + 0.1,
+            "Gamma": np.zeros((2, K)),
+        }
+        metadata = {
+            "covariate_manifest": {"covariate_names": ["Intercept", "age"]},
+            "theta_histogram": hist_raw,
+            "theta_percentiles": pct_raw,
+        }
+
+    part = TopicBlockPartition(
+        "source_cohort",
+        background_k=3,
+        foreground=(("rare_dx", 2), ("ultrarare", 1)),  # K=6; ultrarare → topic id 5
+    )
+    exp = adapt_stm(R(), partition=part, suppressed=frozenset({5}))
+
+    n_kept = len(exp.topic_indices)  # should be 5
+    assert n_kept == 5, f"expected 5 kept topics, got {n_kept}"
+    assert exp.theta_histogram is not None
+    assert exp.theta_histogram.shape[0] == n_kept, (
+        f"theta_histogram axis-0 length {exp.theta_histogram.shape[0]} != {n_kept}"
+    )
+    assert exp.theta_percentiles is not None
+    assert exp.theta_percentiles.shape[0] == n_kept, (
+        f"theta_percentiles axis-0 length {exp.theta_percentiles.shape[0]} != {n_kept}"
+    )
