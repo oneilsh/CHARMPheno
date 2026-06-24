@@ -4,7 +4,7 @@
   import {
     bundle, selectedPhenotypeId, hoveredCodeIdx, advancedView,
     searchedConditionIdx, phenotypeCoords,
-    prevalenceReader, tauThreshold, isVisibleInCurrentMode,
+    prevalenceReader, tauThreshold, isVisibleInCurrentMode, covariateMode,
   } from '../store'
   import { phenotypesContainingCode } from '../inference'
   import { copy } from '../copy'
@@ -67,8 +67,17 @@
     // Use the FULL phenotype set for the prevalence scale domain so bubble
     // size doesn't rescale between simple and advanced modes.
     const r_of = reader
+    // Bubble area encodes prevalence. In covariate mode the user drags the
+    // sliders and expects ABSOLUTE size changes; anchor the scale's domain to
+    // a stable per-bundle reference (the corpus-average prevalence max) rather
+    // than the live reader's max. Otherwise the most-prevalent bubble is
+    // re-pinned to the range top every frame and never appears to change as the
+    // covariates move. Outside covariate mode, keep the self-scaling domain.
+    const domainMax = $covariateMode
+      ? Math.max(...allPhenotypes.map((p) => p.corpus_prevalence), 1e-9)
+      : Math.max(...allPhenotypes.map(r_of), 1e-9)
     const r = d3.scaleSqrt()
-      .domain([0, Math.max(...allPhenotypes.map(r_of), 1e-9)])
+      .domain([0, domainMax])
       .range([5, 26])
 
     // null = unrated (no scored pairs); render as neutral.
@@ -202,7 +211,7 @@
   // `reader` is listed so the atlas re-renders whenever the prevalence reader
   // changes for ANY reason - covariate mode toggling, covariate-value edits,
   // or the gating group selector - not only on the tau/selection/mode stores.
-  $: reader, $tauThreshold, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()
+  $: reader, $covariateMode, $tauThreshold, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()
   onMount(render)
 </script>
 
