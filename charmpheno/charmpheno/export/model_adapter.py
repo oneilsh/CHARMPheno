@@ -19,6 +19,7 @@ class DashboardExport:
     topic_indices: np.ndarray     # K_display (original model-side topic ids)
     theta_histogram: np.ndarray | None = field(default=None)   # K_display × n_bins; np.nan = suppressed (use np.nansum to aggregate); None for HDP/legacy
     theta_percentiles: np.ndarray | None = field(default=None)  # K_display × 5 in [p5, p25, p50, p75, p95] column order; None for HDP/legacy
+    topic_blocks: list | None = field(default=None)             # block label per displayed topic (aligned to topic_indices); None when no partition
 
 
 def _global_params(result) -> dict[str, np.ndarray]:
@@ -139,7 +140,8 @@ def adapt_hdp(result, *, top_k: int = 50) -> DashboardExport:
     )
 
 
-def adapt_stm(result, *, corpus_prevalence: np.ndarray | None = None) -> DashboardExport:
+def adapt_stm(result, *, corpus_prevalence: np.ndarray | None = None,
+              partition=None, suppressed=frozenset()) -> DashboardExport:
     """STM → DashboardExport. α-equivalent derived from softmax(Γ[intercept]).
 
     ``corpus_prevalence`` is the faithful corpus-mean topic proportion
@@ -148,12 +150,21 @@ def adapt_stm(result, *, corpus_prevalence: np.ndarray | None = None) -> Dashboa
     (cache miss, or a caller without the covariate sidecar) the v1 stand-in
     ``softmax(Γ[intercept])`` is used instead — a reference-level approximation
     that affects only the dashboard's "default topic proportion" widget.
+
+    ``partition`` is an optional ``TopicBlockPartition`` describing the
+    background/foreground block layout. When supplied, topics whose ids are in
+    ``suppressed`` are excluded from all output arrays and ``topic_blocks`` is
+    populated with the block label for each surviving topic (aligned to
+    ``topic_indices``). When ``partition`` is None the function behaves
+    identically to the pre-gating implementation (all topics kept,
+    ``topic_blocks=None``).
     """
     gp = _global_params(result)
     meta = result.metadata
     lambda_ = np.asarray(gp["lambda"], dtype=np.float64)
     K = lambda_.shape[0]
-    beta = lambda_ / lambda_.sum(axis=1, keepdims=True)
+    kept = [i for i in range(K) if i not in suppressed]
+    beta_full = lambda_ / lambda_.sum(axis=1, keepdims=True)
     Gamma = np.asarray(gp["Gamma"], dtype=np.float64)  # (P, K)
     covariate_names = meta["covariate_manifest"]["covariate_names"]
     intercept_idx = next(
@@ -169,19 +180,28 @@ def adapt_stm(result, *, corpus_prevalence: np.ndarray | None = None) -> Dashboa
     # Faithful corpus-mean (1/D) Σ_d softmax(Γᵀ x_d) when the driver supplied
     # it; otherwise the v1 stand-in (== α_eq at the intercept). Either way this
     # affects only the dashboard "default topic proportion" display.
-    if corpus_prevalence is not None:
-        corpus_prev = np.asarray(corpus_prevalence, dtype=np.float64)
-    else:
-        corpus_prev = alpha_eq.copy()
+    corpus_prev = (np.asarray(corpus_prevalence, dtype=np.float64)
+                   if corpus_prevalence is not None else alpha_eq.copy())
+
+    topic_blocks = None
+    if partition is not None:
+        labels = partition.topic_labels()
+        topic_blocks = [labels[i] for i in kept]
+
+    beta = beta_full[kept]
+    alpha = alpha_eq[kept]
+    corpus_prev = corpus_prev[kept]
+
     # theta_histogram / theta_percentiles: optional pass-through if metadata has them.
     raw_hist = meta.get("theta_histogram")
     theta_histogram = _parse_theta_histogram(raw_hist) if raw_hist is not None else None
     raw_pct = meta.get("theta_percentiles")
     theta_percentiles = _parse_theta_percentiles(raw_pct) if raw_pct is not None else None
     return DashboardExport(
-        beta=beta, alpha=alpha_eq, corpus_prevalence=corpus_prev,
-        topic_indices=np.arange(K, dtype=np.int64),
+        beta=beta, alpha=alpha, corpus_prevalence=corpus_prev,
+        topic_indices=np.array(kept, dtype=np.int64),
         theta_histogram=theta_histogram, theta_percentiles=theta_percentiles,
+        topic_blocks=topic_blocks,
     )
 
 
