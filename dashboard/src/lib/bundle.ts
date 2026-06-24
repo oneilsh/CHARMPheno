@@ -1,6 +1,6 @@
 import type {
   CohortManifest, DashboardBundle, Model, PhenotypesBundle, VocabBundle, CorpusStats,
-  CovariateSchema, CovariateEffects,
+  CovariateSchema, CovariateEffects, GatingSpec,
 } from './types'
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -33,9 +33,10 @@ export async function loadBundle(baseUrl: string, cohortId: string): Promise<Das
     fetchJson<VocabBundle>(`${base}data/${cohortId}/vocab.json`),
     fetchJson<CorpusStats>(`${base}data/${cohortId}/corpus_stats.json`),
   ])
-  const [covariateSchema, covariateEffects] = await Promise.all([
+  const [covariateSchema, covariateEffects, gating] = await Promise.all([
     fetchJsonOptional<CovariateSchema>(`${base}data/${cohortId}/covariate_schema.json`),
     fetchJsonOptional<CovariateEffects>(`${base}data/${cohortId}/covariate_effects.json`),
+    fetchJsonOptional<GatingSpec>(`${base}data/${cohortId}/gating.json`),
   ])
-  return { model, phenotypes, vocab, corpusStats, covariateSchema, covariateEffects }
+  return { model, phenotypes, vocab, corpusStats, covariateSchema, covariateEffects, gating }
 }

@@ -61,10 +61,17 @@ export interface CovariateSchema {
 }
 export type CovariateEffects = { covariate: string; per_topic: number[] }[]
 
+export interface GatingSpec {
+  group_var: string
+  groups: string[]
+  topic_blocks: string[]
+}
+
 export interface DashboardBundle {
   model: Model; phenotypes: PhenotypesBundle; vocab: VocabBundle; corpusStats: CorpusStats
   covariateSchema?: CovariateSchema
   covariateEffects?: CovariateEffects
+  gating?: GatingSpec
 }
 
 // Top-level data/manifest.json: lists which per-cohort bundles are

@@ -47,3 +47,21 @@ describe('loadBundle', () => {
     expect(b.covariateEffects).toBeUndefined()
   })
 })
+
+describe('loadBundle gating', () => {
+  it('attaches gating when gating.json is present', async () => {
+    const files: Record<string, unknown> = {
+      'data/c/model.json': { K: 1, V: 1, alpha: [1], beta: [[1]] },
+      'data/c/phenotypes.json': { phenotypes: [] },
+      'data/c/vocab.json': { codes: [] },
+      'data/c/corpus_stats.json': { corpus_size_docs: 0, mean_codes_per_doc: 0, k: 20, v: 1, v_full: 1 },
+      'data/c/gating.json': { group_var: 'source_cohort', groups: ['rare_dx'], topic_blocks: ['background'] },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const key = Object.keys(files).find((k) => url.endsWith(k))
+      return key ? { ok: true, json: async () => files[key] } : { ok: false, status: 404 }
+    }))
+    const b = await loadBundle('', 'c')
+    expect(b.gating?.groups).toEqual(['rare_dx'])
+  })
+})
