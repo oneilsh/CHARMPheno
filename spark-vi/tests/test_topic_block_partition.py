@@ -39,9 +39,14 @@ def test_topic_labels():
         "cancer", "cancer", "dementia", "dementia"]
 
 
-def test_unknown_group_in_allowed_indices_raises():
-    with pytest.raises(KeyError):
-        _part().allowed_indices(frozenset({"nope"}))
+def test_foregroundless_group_yields_background_only():
+    p = _part()  # background_k=3, foreground cancer:2, dementia:2
+    # a group with no foreground block contributes nothing -> background only
+    np.testing.assert_array_equal(
+        p.allowed_indices(frozenset({"nope"})), [0, 1, 2])
+    # mixing a known and an unknown group -> background + the known block only
+    np.testing.assert_array_equal(
+        p.allowed_indices(frozenset({"cancer", "nope"})), [0, 1, 2, 3, 4])
 
 
 def test_rejects_nonpositive_sizes():

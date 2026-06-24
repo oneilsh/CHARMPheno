@@ -54,9 +54,14 @@ class TopicBlockPartition:
         return np.arange(start, start + size, dtype=np.int64)
 
     def allowed_indices(self, groups: frozenset[str]) -> np.ndarray:
+        # A group with no foreground block contributes nothing (background-only).
+        # This is what lets a large "common" cohort inform the background while
+        # only rare groups carry foreground topics.
+        known = set(self.groups)
         parts = [self.background_indices()]
         for g in sorted(groups):
-            parts.append(self.block_indices(g))  # raises KeyError on unknown group
+            if g in known:
+                parts.append(self.block_indices(g))
         return np.unique(np.concatenate(parts)).astype(np.int64)
 
     def topic_labels(self) -> list[str]:
