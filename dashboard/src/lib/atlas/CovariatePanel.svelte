@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { covariateMode, covariateValues } from '../store'
-  import type { CovariateSchema } from '../types'
+  import { covariateMode, covariateValues, selectedGroup } from '../store'
+  import type { CovariateSchema, GatingSpec } from '../types'
   import { initialValues, canInteract } from './covariate-panel'
 
   export let schema: CovariateSchema
+  export let gating: GatingSpec | null | undefined = undefined
 
   $: interactive = canInteract(schema)
 
@@ -106,6 +107,18 @@
       </div>
     {/each}
   </div>
+
+  {#if gating}
+    <div class="control-row">
+      <span class="control-label">{gating.group_var}</span>
+      <select bind:value={$selectedGroup} class="cat-select">
+        <option value={null}>Background only</option>
+        {#each gating.groups as g}
+          <option value={g}>{g}</option>
+        {/each}
+      </select>
+    </div>
+  {/if}
 
   {#if interactive}
     <div class="panel-foot">
