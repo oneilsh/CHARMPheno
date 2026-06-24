@@ -114,6 +114,18 @@ foreground docs still emit common codes. Per patient:
 **Args** mirror the LDA sim plus `--background-k`, `--foreground
 group:K[,group:K...]`, `--group-props`, vocab-partition sizes, visit/code means.
 
+**Demo configuration (the headline).** The default demo plants the rare-disease
+structure: a large `common` cohort that is background-only (no foreground block, so
+it informs the shared background) plus a deliberately *rare* foreground group sized
+**well above** the k-anon threshold (`k = 20`) — e.g. `common ~ 4940 patients`,
+`rare_dx ~ 60 patients` out of ~5000. Because `rare_dx` clears `k`, it survives the
+block-level k-anon and appears in the dashboard, demonstrating end-to-end that a
+genuinely rare phenotype can be isolated from the big common cohort and surfaced
+safely. The block-level suppression itself is exercised by a separate, deliberately
+sub-`k` group (e.g. ~10 patients) in the export tests — not in the headline demo,
+so the demo stays a clean "rare-but-visible" story. The simulator also supports the
+cancer/dementia both-foreground shape (mirroring experiment 0004) via config.
+
 ## Local STM fitter — `analysis/local/fit_stm_local.py`
 
 Follows `fit_lda_local.py`'s structure (local Spark `local[2]` + the MLlib shim;
@@ -248,3 +260,7 @@ behavior.
 5. In the running dashboard, selecting a group makes that group's foreground bubbles
    appear and the other group's vanish, while bubbles resize with sex/age; a
    non-gated bundle is unaffected.
+6. The demo's rare group (~60 patients, well over `k=20`) survives k-anon and is
+   visible/selectable in the dashboard, with its foreground topics carrying its
+   planted distinctive concepts — the rare-disease story shown end-to-end; a
+   separate sub-`k` group is fully suppressed in the export tests.
