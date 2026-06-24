@@ -595,6 +595,17 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"[driver]   wrote gating.json "
                           f"(groups={gating['groups']}, "
                           f"kept_topics={len(kept_ids)})", flush=True)
+                elif tbs:
+                    # Gated checkpoint but no covariate data (cache miss / no
+                    # --cache-uri): gating.json is deliberately NOT written. A
+                    # gating.json without covariate_effects would render a group
+                    # selector that cannot drive masked prevalence, so the
+                    # dashboard degrades to the ungated view instead. Warn so the
+                    # operator knows gating outputs were skipped, not lost.
+                    log.warning("STM: topic_block_spec present but no covariate "
+                                "data (cache miss); gating.json/covariate outputs "
+                                "skipped. Dashboard renders ungated. Provide "
+                                "--cache-uri to enable gating.")
 
                 # covariate_effects.json: subset Gamma columns to kept topics.
                 dashboard_adapt_stm(
