@@ -41,42 +41,95 @@ not change the model, the fit drivers, or the gating math.
   sampling is explicitly accepted as "good enough."
 - Any change to the fit drivers, gating engine, or eval.
 
+## Two orthogonal axes
+
+Prevalence covariates and group gating are independent model features and must
+be handled independently:
+
+- **Prevalence covariates** — the bundle carries `covariate_schema` +
+  `covariate_effects` (the per-covariate Gamma rows). STM fits produce them;
+  LDA does not.
+- **Group gating** — the bundle carries `gating.json` (per-topic block labels +
+  groups). A model may be gated whether or not it has covariates: gated STM has
+  both; a future gated LDA would have gating but no covariates.
+
+Four quadrants, all first-class:
+
+| | no gating | gating |
+|---|---|---|
+| **no covariates** (e.g. LDA) | corpus prevalence (today's default) | masked corpus prevalence |
+| **covariates** (STM) | covariate-predicted prevalence | masked covariate-predicted prevalence |
+
+The bottom-left and top-right quadrants must not assume the other axis exists.
+In particular, group masking is meaningful with zero covariates (select a group,
+size its foreground topics by their corpus prevalence, hide the other groups'),
+so it must NOT be gated behind covariate mode, and the masked path must not
+require `covariate_effects`.
+
 ## The shared conditioning context
 
 A single front-end store, replacing the current Atlas-local `covariateMode` /
-`covariateValues` / `selectedGroup` trio with a shared object:
+`covariateValues` / `selectedGroup` trio. The two axes are independent fields,
+not one master switch:
 
 ```
 conditioning = {
-  active: boolean,                       // master on/off (off = today's defaults)
-  values: Record<string, number|string>, // schema-driven covariate values
-  group: string | null,                  // gating group; null = "Background only"
+  covariateActive: boolean,               // covariate axis on/off (covariate bundles only)
+  values: Record<string, number|string>,  // schema-driven covariate values
+  group: string | null,                    // gating axis; null = "Background only"
 }
 ```
 
-- `values` keys and control types come from the bundle's
-  `covariate_schema.controls` (continuous slider, 2-level toggle, n-level
-  select) — there is no hardcoded age/sex anywhere.
-- `group` is present only for gated bundles (those with `gating`); its options
-  are `gating.groups` plus "Background only" (null).
-- The context persists across tab switches (it is module-level store state).
-- On cohort/bundle change the context resets (`active=false`, `values` reseeded
-  to schema defaults, `group=null`) — a new model may have a different schema.
+- `covariateActive` and `values` apply only when the bundle has
+  `covariate_schema`/`covariate_effects`. Off = corpus-average prevalence (the
+  default); on = covariate-predicted at `values`.
+- `group` applies only when the bundle has `gating`; its options are
+  `gating.groups` plus "Background only" (null). It is a live selection in its
+  own right — selecting a group masks foreground immediately, independent of
+  `covariateActive`.
+- `values` keys and control types come from `covariate_schema.controls`
+  (continuous slider, 2-level toggle, n-level select) — no hardcoded age/sex.
+- The context persists across tab switches (module-level store state).
+- On cohort/bundle change the context resets (`covariateActive=false`, `values`
+  reseeded to schema defaults, `group=null`) — a new model may differ on both
+  axes.
 
-The existing `prevalenceReader` (Phenotype Atlas) keeps working unchanged in
-spirit: it already reads covariate mode + values + group; those reads are
-repointed at the shared context.
+### Prevalence reader (composes the two axes)
+
+The Phenotype Atlas reader picks a base prevalence by the covariate axis, then
+applies the group mask by the gating axis:
+
+- base = `covariateActive` ? `covariatePrevalence(effects, x)` :
+  per-topic corpus prevalence (`phenotype.corpus_prevalence`).
+- if `gating` and a group is selected: apply the group's allowed-topic mask.
+  On the covariate base this is the existing mask-before-softmax
+  (`covariatePrevalenceGated`, renormalized over allowed). On the corpus base it
+  is a new `maskedCorpusPrevalence` that zeros hidden foreground topics (no
+  renormalization — corpus prevalence is a per-topic display quantity, not a
+  distribution; matches the existing k-anon non-renormalization rule) and needs
+  no `covariate_effects`.
+- if no `gating`: no mask; the base is used directly.
+
+This makes all four quadrants well-defined, including gating-without-covariates.
 
 ## Placement
 
 A full-width **conditioning bar** sits between the tab navigation and the tab
 content (so it persists across tabs and reads as a lens on the current view).
 
-- **Off (resting):** a single slim toggle chip ("Conditioning") — nothing else.
-  Non-intrusive.
-- **On:** the chip stays, and the strip expands in place to show, left to
-  right: the schema-driven covariate controls, the group selector (gated
-  bundles only), and the population-reference readout.
+The bar holds up to two independent sections, each shown only when its axis
+exists in the bundle:
+
+- **Group section** (iff `gating`): the group selector. Live — no separate
+  on/off; selecting a group is the action.
+- **Covariate section** (iff `covariate_schema` with renderable controls): an
+  on/off toggle (corpus average vs covariate prevalence), the schema-driven
+  sliders/selectors, and the population-reference readout.
+
+Resting state is non-intrusive: when neither section is active the bar collapses
+to a slim chip. A gating-only bundle shows just the group selector; a
+covariates-only bundle shows just the covariate toggle/controls; a both-axes
+bundle shows both, side by side.
 
 The bar is global chrome (one instance, app-level), not per-tab. Tab-specific
 controls that are *not* part of the shared context (see Patient Atlas below)
@@ -111,27 +164,34 @@ data (percentiles already present). Applies to both the local
 
 ## Per-tab application
 
-| Tab | When the context applies | Group handling |
-|-----|--------------------------|----------------|
-| Phenotype Atlas | Live (cheap softmax recompute) | single-select; masks foreground (existing `covariatePrevalenceGated`) |
-| Simulator | Live (it re-samples on change anyway) | single-select; the group whose record is simulated |
+Each axis is optional per the bundle; a tab applies only the axes its bundle
+has.
+
+| Tab | When the context applies | Notes |
+|-----|--------------------------|-------|
+| Phenotype Atlas | Live (cheap recompute) | reader composes the two axes (quadrant table above) |
+| Simulator | Live (it re-samples on change anyway) | covariate conditioning iff covariates; group = which group to simulate iff gating |
 | Patient Atlas | On explicit "Regenerate cohort" (accepts the one-time UMAP cost; never live) | own local controls (below) |
 
 ### Phenotype Atlas (Phase 1)
 
-No behavior change beyond reading the shared context: bubble size = predicted
-prevalence at `values`, foreground masked to background ∪ `group`. The absolute
-domain anchoring already shipped. The old `CovariatePanel` is unmounted from the
-Atlas tab; its control widgets are factored out for reuse by the conditioning
-bar (see file structure).
+Reads the shared context via the composed reader: base prevalence by the
+covariate axis (corpus or covariate-predicted), foreground masked by the group
+axis. A covariates-only bundle uses the covariate base with no mask; a
+gating-only bundle uses the corpus base with the group mask
+(`maskedCorpusPrevalence`); a both-axes bundle uses the masked covariate path; a
+plain bundle uses the corpus base. The absolute domain anchoring already
+shipped. The old `CovariatePanel` is unmounted from the Atlas tab; its control
+widgets are factored out for reuse by the conditioning bar (see file structure).
 
 ### Simulator (Phase 3)
 
 The Simulator already recomputes its samples on input change, so it reads the
-shared context live: each sampled record's topic prior is conditioned on
-`values` (via `covariate_effects`) and, for gated bundles, masked to background
-∪ `group`. Covariate sliders are fully usable here. The conditions-prefix
-editor composes with the context.
+shared context live. When the bundle has covariates, each sampled record's topic
+prior is conditioned on `values` (via `covariate_effects`); when it has gating,
+the prior is masked to background ∪ `group` (the group whose record is
+simulated). Either axis may be absent. The conditions-prefix editor composes
+with whatever axes apply.
 
 ### Patient Atlas (Phase 2)
 
@@ -175,12 +235,15 @@ allowed topics for gated bundles.
 
 One spec, three implementation plans, each shippable on its own:
 
-- **Phase 1 — shared context + global bar + Atlas:** introduce the shared
-  store, build the conditioning bar (toggle, schema-driven controls, group
-  selector, population readout), add the `proportions` export field, repoint the
-  Phenotype Atlas at the shared context, and remove the old stacked
-  `CovariatePanel`. This delivers the user-visible relocation and is the
-  highest-value, lowest-risk slice.
+- **Phase 1 — shared context + global bar + Atlas (both axes):** introduce the
+  shared store with independent covariate and group axes, build the conditioning
+  bar (independent group section and covariate section, each shown per bundle),
+  add the `maskedCorpusPrevalence` reader so the gating-only quadrant works
+  without `covariate_effects`, add the `proportions` export field + population
+  readout, repoint the Phenotype Atlas at the composed reader, and unmount the
+  old stacked `CovariatePanel`. This delivers the user-visible relocation, the
+  axis decoupling (so gated LDA / STM-no-gating render correctly), and is the
+  highest-value slice.
 - **Phase 2 — Patient Atlas:** marginal sampler, conditioned regenerate with
   the sample-vs-set local toggle, per-patient group assignment, color-by-group.
 - **Phase 3 — Simulator:** live conditioning of sampled records on the shared
@@ -191,11 +254,19 @@ One spec, three implementation plans, each shippable on its own:
 Phase 1 (front-end unless noted):
 
 - `dashboard/src/lib/store.ts` — replace `covariateMode`/`covariateValues`/
-  `selectedGroup` with the shared `conditioning` store (keep thin
-  backward-compatible derived exports if it reduces churn in unchanged readers).
-- `dashboard/src/lib/conditioning/ConditioningBar.svelte` (new) — the bar:
-  toggle, schema-driven controls (reuse the control widgets currently in
-  `atlas/CovariatePanel.svelte`), group selector, population readout.
+  `selectedGroup` with the shared `conditioning` store (independent
+  `covariateActive` + `values` + `group`); rewrite `prevalenceReader` to compose
+  the two axes across the four quadrants (keep thin backward-compatible derived
+  exports if it reduces churn in unchanged readers).
+- `dashboard/src/lib/covariate.ts` — add `maskedCorpusPrevalence(corpusPrev,
+  topicBlocks, group)` (zero hidden foreground, no renormalization, no
+  `covariate_effects`) for the gating-only quadrant; existing
+  `covariatePrevalence` / `covariatePrevalenceGated` / `allowedMaskForGroup`
+  unchanged.
+- `dashboard/src/lib/conditioning/ConditioningBar.svelte` (new) — the bar: the
+  independent group section and covariate section (each rendered per bundle),
+  reusing the control widgets currently in `atlas/CovariatePanel.svelte`, plus
+  the population readout.
 - `dashboard/src/lib/conditioning/population.ts` (new) — pure helpers to derive
   the readout strings from `covariate_schema`.
 - `dashboard/src/App.svelte` / layout — mount `ConditioningBar` between
@@ -218,25 +289,38 @@ helpers (`cohort.ts`, `simulator/runSamples.ts`).
 ## Data flow (Phase 1)
 
 1. `loadBundle` provides `covariate_schema` (now with categorical
-   `proportions`) and `gating`.
-2. `ConditioningBar` renders controls from `covariate_schema.controls` and the
-   group selector from `gating.groups`; writes user input into the
-   `conditioning` store.
-3. The store's `prevalenceReader` (unchanged logic, repointed inputs) feeds the
-   Phenotype Atlas's `TopicMap` exactly as today.
+   `proportions`) and `gating` — either or both may be absent.
+2. `ConditioningBar` renders the covariate section from `covariate_schema`
+   (when present) and the group section from `gating.groups` (when present);
+   writes user input into the `conditioning` store's independent axes.
+3. The store's `prevalenceReader` composes the two axes (quadrant table) and
+   feeds the Phenotype Atlas's `TopicMap`. For gating-only bundles it uses
+   `maskedCorpusPrevalence`; for plain bundles it falls through to today's
+   corpus/`fractionAboveTau` path unchanged.
 4. The population readout derives its strings from `covariate_schema` via
    `population.ts`.
 
 ## Error handling and edge cases
 
-- No covariates and no gating → the bar is hidden (nothing to condition).
-- Covariates present, no gating → controls + readout, no group selector.
-- Gated, intercept-only covariates → group selector + readout, no sliders.
+The four quadrants and their degenerate cases:
+
+- No covariates and no gating (plain LDA) → the bar is hidden; the Atlas uses
+  today's corpus/`fractionAboveTau` reader unchanged.
+- Covariates, no gating (STM) → covariate section only (toggle + sliders +
+  readout); no group section.
+- Gating, no covariates at all (gated LDA — no `covariate_schema`/
+  `covariate_effects`) → group section only; the Atlas uses
+  `maskedCorpusPrevalence`. This is the quadrant the earlier design missed.
+- Gating and covariates (gated STM) → both sections; the reader masks the
+  covariate-predicted prevalence.
+- Gated with intercept-only covariates → group section + (degenerate) covariate
+  section with no sliders; treat as gating-only for prevalence.
 - `unsupported.length > 0` (a covariate the dashboard cannot render) → the
-  covariate controls are disabled with the existing "unavailable" note; the
-  group selector still works if gated.
-- Bundle/cohort switch → reset the context (active off, defaults, group null),
-  so a stale selection never carries into a different schema.
+  covariate section is disabled with the existing "unavailable" note; the group
+  section still works if gated.
+- Bundle/cohort switch → reset the context (`covariateActive` off, `values`
+  reseeded to defaults, `group` null), so a stale selection never carries into a
+  different schema/gating shape.
 - Missing categorical `proportions` (older bundle) → the readout omits
   proportions for that covariate and the sampler falls back to uniform, logging
   the fallback; nothing throws.
@@ -246,11 +330,15 @@ helpers (`cohort.ts`, `simulator/runSamples.ts`).
 - Pure helpers (`population.ts`, the marginal sampler) are unit-tested with
   vitest: percentile/proportion formatting; sampler draws respect proportions
   and percentile support; deterministic under a seeded RNG.
-- Store behavior: covariate-mode/gated `prevalenceReader` parity after the
-  store refactor (existing `store.covariate.test.ts` continues to pass,
-  repointed at the shared store).
-- Schema-driven rendering: ConditioningBar shows the right controls for each
-  schema shape (covariates-only, gated-only, both, neither) — component or
+- Reader quadrants: `prevalenceReader` produces the right value in all four
+  quadrants — corpus (plain), covariate-predicted (covariates-only), masked
+  corpus (gating-only, asserting it never touches `covariate_effects`), and
+  masked covariate-predicted (both). `maskedCorpusPrevalence` is unit-tested
+  directly (hidden foreground -> 0, background + selected group preserved, no
+  renormalization). The existing `store.covariate.test.ts` continues to pass,
+  repointed at the shared store.
+- Schema-driven rendering: ConditioningBar shows the right sections for each
+  bundle shape (covariates-only, gating-only, both, neither) — component or
   build-level checks plus the existing FE suite + `npm run build`.
 - Export: `covariate_schema` emits k-anon-safe `proportions`; covered by the
   charmpheno export tests and the local gated integration test.
