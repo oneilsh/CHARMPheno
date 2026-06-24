@@ -259,30 +259,65 @@ def main(argv: list[str] | None = None) -> int:
             if fg_groups:
                 bow_g = bow_df.withColumn(
                     "source_cohort", F.split(F.col("doc_id"), ":").getItem(0))
-                per_topic = np.full(topic_term.shape[0], np.nan)
-                # Background topics: full-corpus reference.
-                bg_idx = [k for k, g in fg_groups.items() if g is None]
-                bg_rep = compute_npmi_coherence(
-                    topic_term[bg_idx], reference_rdd, top_n=args.top_n,
-                    min_pair_count=args.npmi_min_pair_count)
-                for j, k in enumerate(bg_idx):
-                    per_topic[k] = bg_rep.per_topic_npmi[j]
-                # Foreground topics: per-group sub-corpus reference.
+                K = topic_term.shape[0]
+                per_topic = np.full(K, np.nan)
+                # One CoherenceReport per block. Each block is scored against
+                # its OWN reference corpus (background -> full corpus; each
+                # foreground group -> its group sub-corpus), so we keep the
+                # reports separate and print one ranked section per block
+                # rather than merging into a single misleading reference_size.
+                # Passing the full topic_term + a boolean topic_mask (instead
+                # of a sliced matrix) makes each report's topic_indices/
+                # top_term_indices carry GLOBAL topic ids, which print_ranked_report
+                # needs to label topics and index lambda_ correctly.
+                block_reports = []  # (label, CoherenceReport), background first
+
+                bg_mask = np.array([fg_groups[k] is None for k in range(K)])
+                if bg_mask.any():
+                    bg_rep = compute_npmi_coherence(
+                        topic_term, reference_rdd, top_n=args.top_n,
+                        topic_mask=bg_mask,
+                        min_pair_count=args.npmi_min_pair_count)
+                    for j, k in enumerate(bg_rep.topic_indices):
+                        per_topic[int(k)] = bg_rep.per_topic_npmi[j]
+                    block_reports.append(("background", bg_rep))
+
                 for g in sorted({v for v in fg_groups.values() if v is not None}):
-                    g_idx = [k for k, gg in fg_groups.items() if gg == g]
+                    g_mask = np.array([fg_groups[k] == g for k in range(K)])
                     g_ref = (bow_g.where(F.col("source_cohort") == g)
                              .rdd.map(BOWDocument.from_spark_row))
                     g_rep = compute_npmi_coherence(
-                        topic_term[g_idx], g_ref, top_n=args.top_n,
+                        topic_term, g_ref, top_n=args.top_n,
+                        topic_mask=g_mask,
                         min_pair_count=args.npmi_min_pair_count)
-                    for j, k in enumerate(g_idx):
-                        per_topic[k] = g_rep.per_topic_npmi[j]
+                    for j, k in enumerate(g_rep.topic_indices):
+                        per_topic[int(k)] = g_rep.per_topic_npmi[j]
+                    block_reports.append((g, g_rep))
+
+                # Compact at-a-glance overview in topic-id order.
                 print("[driver]   per-topic NPMI (block-aware reference):", flush=True)
                 labels = foreground_reference_groups(topic_block_spec)
-                for k in range(topic_term.shape[0]):
+                for k in range(K):
                     blk = "background" if labels[k] is None else labels[k]
                     print(f"[driver]     topic {k:3d} [{blk}] NPMI={per_topic[k]:+.4f}",
                           flush=True)
+
+                # Per-block ranked detail with top terms (STM has no per-topic
+                # alpha, so alpha=None). Same printer the non-gated path uses.
+                for label, rep in block_reports:
+                    print(f"\n[driver]   === block '{label}' "
+                          f"(reference={rep.reference_size} docs, "
+                          f"{len(rep.topic_indices)} topics) ===", flush=True)
+                    print_ranked_report(rep, name_by_idx, lambda_,
+                                        alpha=None, color=args.color)
+
+                # Same NaN-aware bound check the non-gated path applies.
+                rated = ~np.isnan(per_topic)
+                assert (per_topic[rated] >= -1.0).all(), "NPMI < -1 found"
+                assert (per_topic[rated] <= 1.0).all(), "NPMI > 1 found"
+
+                reference_df.unpersist()
+                omop.unpersist()
                 print("[driver] EVAL COHERENCE CLOUD PASSED", flush=True)
                 return 0
             report = compute_npmi_coherence(
