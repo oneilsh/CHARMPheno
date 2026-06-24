@@ -1,7 +1,11 @@
-"""Build the dashboard data bundle from a saved VIResult (LDA or HDP).
+"""Build the dashboard data bundle from a saved VIResult (LDA, HDP, or STM).
 
 Outputs four JSON files into the target directory:
   model.json, phenotypes.json, vocab.json, corpus_stats.json
+
+For gated STM checkpoints (model_class=="stm" + topic_block_spec in
+corpus_manifest) three additional files are written:
+  gating.json, covariate_effects.json, covariate_schema.json
 
 Model-class normalization happens in charmpheno.export.model_adapter.
 Synthetic cohorts and topic-map MDS are computed client-side.
@@ -17,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -28,7 +33,8 @@ from pyspark.sql import SparkSession
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 # charmpheno package lives in charmpheno/charmpheno/ (one level below repo root)
 _CHARMPHENO_PKG = _REPO_ROOT / "charmpheno"
-for _p in [str(_CHARMPHENO_PKG), str(_REPO_ROOT)]:
+_CLOUD_DIR = _REPO_ROOT / "analysis" / "cloud"
+for _p in [str(_CHARMPHENO_PKG), str(_REPO_ROOT), str(_CLOUD_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -52,6 +58,72 @@ from spark_vi.eval.topic import compute_npmi_coherence
 from pyspark.sql import functions as F
 
 log = logging.getLogger(__name__)
+
+
+def _corpus_manifest_covariate_names(result) -> list[str]:
+    """Return the ordered covariate name list from the checkpoint metadata."""
+    return result.metadata["covariate_manifest"]["covariate_names"]
+
+
+def _write_local_covariate_schema(out_dir, result, cov_pdf, X, k):
+    """Derive and write covariate_schema.json from the local pandas covariate matrix.
+
+    Mirrors build_dashboard_cloud._write_covariate_schema but reads from the
+    already-materialized pandas DataFrame (cov_pdf) and numpy design matrix (X)
+    instead of a Spark DataFrame, so no Spark session is needed at build time.
+
+    Dummy-column sums (per-level patient counts) are column sums of the binary
+    indicator columns in X. Continuous percentiles (p5, p50, p95) are computed
+    via numpy. Categorical levels and references come from the fitted ModelSpec
+    stored in the checkpoint via _categorical_levels_from_spec (imported from the
+    cloud builder, which has the same formulaic introspection logic).
+    """
+    import re as _re
+    from build_dashboard_cloud import _categorical_levels_from_spec
+    from charmpheno.export.covariate_schema import build_covariate_schema
+
+    cov_manifest = result.metadata["covariate_manifest"]
+    covariate_names = cov_manifest["covariate_names"]
+    continuous_cols = list(cov_manifest.get("continuous_cols", []))
+    name_idx = {n: i for i, n in enumerate(covariate_names)}
+
+    # Per-dummy-column sums (= approximate per-level patient counts).
+    # Each C(var)[T.level] column is a 0/1 indicator; its sum is the
+    # number of documents (patients) with that level.
+    dummy_pat = _re.compile(r"^C\(.+\)\[T\..+\]$")
+    dummy_names = [n for n in covariate_names if dummy_pat.match(n)]
+    if dummy_names:
+        level_counts = {n: int(X[:, name_idx[n]].sum()) for n in dummy_names}
+    else:
+        level_counts = {}
+
+    # Coarse percentiles for continuous columns (p5, p50, p95), rounded.
+    continuous_stats = {}
+    for var in continuous_cols:
+        if var not in name_idx:
+            log.warning("STM: continuous covariate %r absent from design vector; "
+                        "skipping its control.", var)
+            continue
+        idx = name_idx[var]
+        q = np.percentile(X[:, idx], [5.0, 50.0, 95.0])
+        continuous_stats[var] = tuple(round(float(v)) for v in q)
+
+    # Levels + reference from the fitted ModelSpec stored in the checkpoint.
+    # The ModelSpec is serialized as result.model_spec by spark_vi.io; fall back
+    # gracefully when absent (older checkpoints or different serializers).
+    model_spec = getattr(result, "model_spec", None)
+    categorical_levels = _categorical_levels_from_spec(
+        model_spec, covariate_names=covariate_names,
+    ) if model_spec is not None else {}
+
+    schema = build_covariate_schema(
+        covariate_names=covariate_names, continuous_cols=continuous_cols,
+        categorical_levels=categorical_levels, level_counts=level_counts,
+        continuous_stats=continuous_stats, k=k,
+    )
+    (out_dir / "covariate_schema.json").write_text(json.dumps(schema, indent=2))
+    log.info("STM: wrote covariate_schema.json (controls=%d, unsupported=%d)",
+             len(schema["controls"]), len(schema["unsupported"]))
 
 
 def _build_spark() -> SparkSession:
@@ -88,6 +160,52 @@ def main(argv: list[str] | None = None) -> int:
 
     # Adapter normalizes LDA/HDP/etc. to a uniform DashboardExport
     export = adapt(result, hdp_top_k=args.hdp_top_k)
+
+    # --- STM gating: masked prevalence + covariate + gating.json (offline) ---
+    corpus = result.metadata.get("corpus_manifest", {})
+    tbs = corpus.get("topic_block_spec") if model_class == "stm" else None
+    if tbs:
+        import pandas as pd
+        from spark_vi.models.topic.partition import TopicBlockPartition
+        from spark_vi.models.topic.stm import corpus_mean_topic_proportions_gated
+        from charmpheno.export.gating import suppressed_topic_ids, build_gating_json
+        from charmpheno.export.dashboard import adapt_stm as write_cov_effects
+        from charmpheno.export.model_adapter import adapt_stm as adapt_stm_export
+
+        partition = TopicBlockPartition.from_dict(tbs)
+        cov_path = Path(args.checkpoint) / "covariates.parquet"
+        cov = pd.read_parquet(cov_path)
+        X = np.vstack(cov["covariates"].to_numpy())          # (D, P)
+        groups_per_doc = [frozenset({g}) for g in cov["source_cohort"]]
+        Gamma = np.asarray(result.global_params["Gamma"], dtype=np.float64)
+
+        # per-group patient counts (distinct person_id) for k-anon
+        gc = cov.groupby("source_cohort")["person_id"].nunique().to_dict()
+        k = int(corpus.get("min_patient_count", 20))
+        suppressed = suppressed_topic_ids(partition, gc, k)
+
+        masked_prev = corpus_mean_topic_proportions_gated(
+            Gamma, X, groups_per_doc, partition)
+
+        export = adapt_stm_export(result, corpus_prevalence=masked_prev,
+                                  partition=partition, suppressed=suppressed)
+        kept_ids = [int(i) for i in export.topic_indices]
+        gating = build_gating_json(partition, gc, k, kept_ids)
+        (args.out_dir / "gating.json").write_text(json.dumps(gating, indent=2))
+        log.info("STM: wrote gating.json (groups=%s, kept_topics=%d)",
+                 gating["groups"], len(kept_ids))
+
+        # covariate_effects.json for the KEPT topics (Gamma columns subset)
+        P = Gamma.shape[0]
+        write_cov_effects(out_dir=args.out_dir,
+                          Gamma=Gamma[:, kept_ids],
+                          covariate_names=_corpus_manifest_covariate_names(result),
+                          K=len(kept_ids), P=P)
+        log.info("STM: wrote covariate_effects.json (K=%d, P=%d)", len(kept_ids), P)
+
+        # covariate_schema.json from the local covariate matrix
+        _write_local_covariate_schema(args.out_dir, result, cov, X, k)
+
     K_disp, V_full = export.beta.shape
     log.info("K_display=%d V_full=%d (model_class=%s)", K_disp, V_full, model_class)
 
