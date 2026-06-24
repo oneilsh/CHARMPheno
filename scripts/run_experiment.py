@@ -450,6 +450,7 @@ def build_stm_args(
         "--tau0", str(effective["tau0"]),
         "--kappa", str(effective["kappa"]),
         "--save-interval", str(effective["save_interval"]),
+        "--print-topics-every", str(effective.get("print_topics_every", 10)),
         "--person-mod", str(effective["person_mod"]),
         "--cohort", str(effective.get("cohort_def", effective.get("cohort", ""))),
         "--prior-obs-days", str(effective.get("prior_obs_days", 365)),

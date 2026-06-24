@@ -14,11 +14,60 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 from pyspark.sql import functions as F
 
 from _driver_common import _phase, configure_logging, make_spark_session
 from _corpus_load import load_or_build_corpus
 from _covariates_load import load_or_build_covariates
+
+
+def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id,
+                                 topic_labels=None):
+    """Build an on_iteration callback that prints top-N tokens per topic.
+
+    STM analogue of the LDA driver's `_make_topic_evolution_logger`. STM's
+    global_params carries the same (K, V) "lambda" topic-word variational
+    parameter, so the topic-word distribution, Σλ_k, E[β_k] and peak are
+    derived identically — but STM has NO per-topic Dirichlet α (its
+    document-topic prior is logistic-normal, Γ/Σ), so the α column is dropped.
+
+    When the model is gated, `topic_labels` (the length-K block names from the
+    TopicBlockPartition) prefixes each line with its block, so background vs.
+    foreground topics are distinguishable as they evolve. The framework calls
+    this after each iteration as `(iter_num, global_params, elbo_trace)`;
+    domain context rides in via closure capture (same pattern as LDA), and the
+    runner wraps the call in try/except so a logging slip can't kill the fit.
+    """
+    def _on_iter(iter_num: int, global_params: dict, _: list[float]) -> None:
+        if every_n <= 0 or iter_num % every_n != 0:
+            return
+        lam = global_params["lambda"]                          # (K, V)
+        lam_row_sums = lam.sum(axis=1)                         # (K,)
+        E_beta = lam_row_sums / max(lam_row_sums.sum(), 1e-12)  # (K,)
+        peak = lam.max(axis=1) / np.maximum(lam_row_sums, 1e-12)
+        topics = lam / lam_row_sums[:, None]                  # row-stochastic
+        # Heaviest topics first; the printed k is the native (stable) index, so
+        # a topic moving up/down the Σλ ranking across iters is a real signal.
+        order = np.argsort(lam_row_sums)[::-1]
+        print(f"[driver]   --- topics @ iter {iter_num} ---", flush=True)
+        for k in order:
+            ki = int(k)
+            top = topics[ki].argsort()[::-1][:top_n]
+            terms = ", ".join(
+                f"{name_by_id.get(idx_to_cid[int(j)], '?')[:24]}"
+                f"({topics[ki, int(j)]:.3f})"
+                for j in top
+            )
+            blk = (f" [{topic_labels[ki]:>10.10}]"
+                   if topic_labels is not None else "")
+            print(
+                f"[driver]    topic {ki:>2}{blk}  "
+                f"E[β]={E_beta[ki]:.4f}  Σλ={lam_row_sums[ki]:.3g}  "
+                f"peak={peak[ki]:.3f}  | {terms}",
+                flush=True,
+            )
+    return _on_iter
 
 
 def _extract_categorical_levels(
@@ -137,6 +186,10 @@ def parse_args() -> argparse.Namespace:
                    help="Maximum number of SVI iterations.")
     p.add_argument("--save-interval", type=int, default=5,
                    help="Checkpoint interval in iterations (requires --cache-uri).")
+    p.add_argument("--print-topics-every", type=int, default=10,
+                   help="Print top-N tokens per topic every N SVI iterations "
+                        "(0 disables). Gated runs prefix each topic with its "
+                        "background/foreground block label.")
     p.add_argument("--covariate-formula", required=True,
                    help="R-style prevalence formula, e.g. '~ C(sex) + age'. Required.")
     p.add_argument("--categorical-cols", required=True,
@@ -341,6 +394,18 @@ def main() -> int:
                 topic_blocks=partition,
                 doc_group_col=(args.group_var if partition is not None else None),
             )
+            # Periodic top-terms logger (additive to the engine's per-iter
+            # Γ/Σ diagnostics). Gated runs get per-topic block labels.
+            on_iter = None
+            if args.print_topics_every > 0:
+                idx_to_cid = {idx: cid for cid, idx in vocab_map.items()}
+                topic_labels = (partition.topic_labels()
+                                if partition is not None else None)
+                on_iter = _make_topic_evolution_logger(
+                    top_n=8, every_n=args.print_topics_every,
+                    idx_to_cid=idx_to_cid, name_by_id=name_by_id,
+                    topic_labels=topic_labels,
+                )
             # StreamingSTM.fit returns an STMModel.
             # The fit method builds a VIConfig internally from the supplied
             # max_iter, subsampling_rate, tau0, kappa parameters.
@@ -352,6 +417,7 @@ def main() -> int:
                 kappa=args.kappa,
                 save_interval=args.save_interval,
                 resume_from=(args.resume_from or None),
+                on_iteration=on_iter,
             )
 
         # --- Augment STMModel metadata with corpus_manifest + covariate_manifest ---
