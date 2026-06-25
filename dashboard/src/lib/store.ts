@@ -3,7 +3,7 @@ import type { UMAP } from 'umap-js'
 import type { CohortManifest, DashboardBundle, Phenotype, PhenotypeQuality, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
-import { buildDesignVector, covariatePrevalence, allowedMaskForGroup, covariatePrevalenceGated } from './covariate'
+import { buildDesignVector, covariatePrevalence, allowedMaskForGroup, covariatePrevalenceGated, maskGroupPrevalence } from './covariate'
 
 export const bundle = writable<DashboardBundle | null>(null)
 export const cohort = writable<SyntheticCohort | null>(null)
@@ -67,9 +67,14 @@ export const advancedView = writable<boolean>(false)
 // to work unchanged; there is no longer a user-facing slider.
 export const tauThreshold = writable<number>(0.02)
 
-export const covariateMode = writable<boolean>(false)
-export const covariateValues = writable<Record<string, number | string>>({})
-export const selectedGroup = writable<string | null>(null)
+export interface Conditioning {
+  covariateActive: boolean
+  values: Record<string, number | string>
+  group: string | null
+}
+export const conditioning = writable<Conditioning>({
+  covariateActive: false, values: {}, group: null,
+})
 
 export const hoveredCodeIdx = writable<number | null>(null)
 
@@ -137,27 +142,42 @@ export function fractionAboveTau(
 // calling fractionAboveTau directly, so the value updates reactively as
 // the slider moves.
 //
-// When covariateMode is true AND the bundle has schema+effects AND
-// schema.unsupported is empty, the reader returns softmax(Gamma^T x)[p.id]
-// from the current covariateValues; the tau threshold is intentionally
-// ignored in that path (no per-profile histogram is needed).
+// Four-quadrant logic:
+//   1. plain (no covariate, no gating)          -> fractionAboveTau (unchanged default)
+//   2. covariate active, no gating              -> softmax(Gamma^T x) via covariatePrevalence
+//   3. covariate active + gating                -> mask-before-softmax via covariatePrevalenceGated
+//   4. gating only (no covariate)               -> fractionAboveTau base then maskGroupPrevalence
 export const prevalenceReader = derived(
-  [bundle, tauThreshold, covariateMode, covariateValues, selectedGroup],
-  ([$b, $tau, $mode, $vals, $selectedGroup]) => {
+  [bundle, tauThreshold, conditioning],
+  ([$b, $tau, $cond]) => {
     const schema = $b?.covariateSchema
     const effects = $b?.covariateEffects
-    if ($mode && schema && effects && schema.unsupported.length === 0) {
-      const x = buildDesignVector(schema.design_columns, $vals)
-      const gating = $b?.gating
+    const gating = $b?.gating
+    const edges = $b?.phenotypes.theta_histogram_bin_edges
+
+    // Covariate axis: when active and renderable, base = softmax(Gamma^T x).
+    const covariateOn =
+      $cond.covariateActive && !!schema && !!effects && schema.unsupported.length === 0
+    if (covariateOn) {
+      const x = buildDesignVector(schema!.design_columns, $cond.values)
       if (gating) {
-        const mask = allowedMaskForGroup(gating.topic_blocks, $selectedGroup)
-        const prev = covariatePrevalenceGated(effects, x, mask)
+        const mask = allowedMaskForGroup(gating.topic_blocks, $cond.group)
+        const prev = covariatePrevalenceGated(effects!, x, mask)
         return (p: Phenotype) => prev[p.id] ?? 0
       }
-      const prev = covariatePrevalence(effects, x)
+      const prev = covariatePrevalence(effects!, x)
       return (p: Phenotype) => prev[p.id] ?? 0
     }
-    const edges = $b?.phenotypes.theta_histogram_bin_edges
+
+    // Non-covariate base = fractionAboveTau; mask by group when gated.
+    if (gating) {
+      // Build the per-topic base indexed by topic id (= displayed index, the
+      // same key topic_blocks uses), then mask hidden foreground to 0.
+      const base: number[] = []
+      for (const p of $b!.phenotypes.phenotypes) base[p.id] = fractionAboveTau(p, edges, $tau)
+      const masked = maskGroupPrevalence(base, gating.topic_blocks, $cond.group)
+      return (p: Phenotype) => masked[p.id] ?? 0
+    }
     return (p: Phenotype) => fractionAboveTau(p, edges, $tau)
   }
 )

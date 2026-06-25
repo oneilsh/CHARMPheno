@@ -1,60 +1,59 @@
 import { it, expect, beforeEach } from 'vitest'
 import { get } from 'svelte/store'
-import { bundle, covariateMode, covariateValues, prevalenceReader } from './store'
+import { bundle, conditioning, prevalenceReader } from './store'
 
 beforeEach(() => {
   bundle.set(null)
-  covariateMode.set(false)
-  covariateValues.set({})
+  conditioning.set({ covariateActive: false, values: {}, group: null })
 })
 
-it('covariate mode makes prevalenceReader use softmax(Gamma^T x)', () => {
-  bundle.set({
-    // minimal bundle with two phenotypes id 0,1 + covariate schema/effects
-    phenotypes: { phenotypes: [{ id: 0 }, { id: 1 }] },
-    covariateSchema: { k: 20, unsupported: [],
-      controls: [{ name: 'age', type: 'continuous', range: [0, 100], default: 50 }],
-      design_columns: [
-        { name: 'Intercept', recipe: { kind: 'intercept' } },
-        { name: 'age', recipe: { kind: 'main', var: 'age' } },
-      ] },
-    covariateEffects: [
-      { covariate: 'Intercept', per_topic: [0, 0] },
-      { covariate: 'age', per_topic: [1, 0] },
-    ],
-  } as any)
-  covariateValues.set({ age: Math.log(2) })
-  covariateMode.set(true)
+const COV_BUNDLE = {
+  phenotypes: { phenotypes: [{ id: 0 }, { id: 1 }] },
+  covariateSchema: { k: 20, unsupported: [],
+    controls: [{ name: 'age', type: 'continuous', range: [0, 100], default: 50 }],
+    design_columns: [
+      { name: 'Intercept', recipe: { kind: 'intercept' } },
+      { name: 'age', recipe: { kind: 'main', var: 'age' } },
+    ] },
+  covariateEffects: [
+    { covariate: 'Intercept', per_topic: [0, 0] },
+    { covariate: 'age', per_topic: [1, 0] },
+  ],
+}
+
+it('covariateActive makes prevalenceReader use softmax(Gamma^T x)', () => {
+  bundle.set(COV_BUNDLE as any)
+  conditioning.set({ covariateActive: true, values: { age: Math.log(2) }, group: null })
   const reader = get(prevalenceReader)
   expect(reader({ id: 0 } as any)).toBeCloseTo(2 / 3, 6)
   expect(reader({ id: 1 } as any)).toBeCloseTo(1 / 3, 6)
 })
 
-it('covariate mode off restores fractionAboveTau behavior', () => {
+it('gating-only quadrant masks the non-covariate base without covariate_effects', () => {
+  // No covariateSchema / covariateEffects; gating present. corpus_prevalence is
+  // the base (no theta histogram), masked by group.
   bundle.set({
-    phenotypes: {
-      phenotypes: [{ id: 0, corpus_prevalence: 0.5, theta_histogram: null }],
-      theta_histogram_bin_edges: undefined,
-    },
-    covariateSchema: { k: 1, unsupported: [], controls: [], design_columns: [] },
-    covariateEffects: [{ covariate: 'Intercept', per_topic: [0] }],
+    phenotypes: { phenotypes: [
+      { id: 0, corpus_prevalence: 0.5 },
+      { id: 1, corpus_prevalence: 0.3 },
+    ] },
+    gating: { group_var: 'g', groups: ['rare_dx'],
+      topic_blocks: ['background', 'rare_dx'] },
   } as any)
-  covariateMode.set(false)
-  const reader = get(prevalenceReader)
-  // Without histogram, fractionAboveTau falls back to corpus_prevalence
-  expect(reader({ id: 0, corpus_prevalence: 0.5, theta_histogram: null } as any)).toBeCloseTo(0.5, 6)
+  // Background only (group null): foreground topic 1 hidden.
+  let reader = get(prevalenceReader)
+  expect(reader({ id: 0, corpus_prevalence: 0.5 } as any)).toBeCloseTo(0.5, 6)
+  expect(reader({ id: 1, corpus_prevalence: 0.3 } as any)).toBe(0)
+  // Select rare_dx: foreground topic 1 revealed at its base value.
+  conditioning.set({ covariateActive: false, values: {}, group: 'rare_dx' })
+  reader = get(prevalenceReader)
+  expect(reader({ id: 1, corpus_prevalence: 0.3 } as any)).toBeCloseTo(0.3, 6)
 })
 
-it('covariate mode on but schema.unsupported non-empty falls back to fractionAboveTau', () => {
+it('plain bundle uses the unchanged fractionAboveTau base', () => {
   bundle.set({
-    phenotypes: {
-      phenotypes: [{ id: 0, corpus_prevalence: 0.7, theta_histogram: null }],
-      theta_histogram_bin_edges: undefined,
-    },
-    covariateSchema: { k: 1, unsupported: ['some_feature'], controls: [], design_columns: [] },
-    covariateEffects: [{ covariate: 'Intercept', per_topic: [0] }],
+    phenotypes: { phenotypes: [{ id: 0, corpus_prevalence: 0.42 }] },
   } as any)
-  covariateMode.set(true)
   const reader = get(prevalenceReader)
-  expect(reader({ id: 0, corpus_prevalence: 0.7, theta_histogram: null } as any)).toBeCloseTo(0.7, 6)
+  expect(reader({ id: 0, corpus_prevalence: 0.42 } as any)).toBeCloseTo(0.42, 6)
 })

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { bundle, selectedGroup } from '../store'
+  import { bundle, conditioning } from '../store'
   import TopicMap from '../atlas/TopicMap.svelte'
   import CodePanel from '../atlas/CodePanel.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
@@ -7,9 +7,9 @@
   import CovariatePanel from '../atlas/CovariatePanel.svelte'
   import { copy } from '../copy'
 
-  // Reset selectedGroup whenever the bundle changes (cohort switch must not
-  // carry a stale group selection into a bundle that may have different gating).
-  $: { $bundle; selectedGroup.set(null) }
+  // Reset conditioning whenever the bundle changes (cohort switch must not
+  // carry stale covariate state into a bundle that may have different gating/schema).
+  $: { $bundle; conditioning.set({ covariateActive: false, values: {}, group: null }) }
 
   // Background-click closes the disclosure popover so the user doesn't
   // have to find and click the same link again to dismiss it.

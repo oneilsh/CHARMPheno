@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { covariateMode, covariateValues, selectedGroup } from '../store'
+  import { conditioning } from '../store'
   import type { CovariateSchema, GatingSpec } from '../types'
   import { initialValues, canInteract } from './covariate-panel'
 
@@ -13,23 +13,23 @@
   // and force covariateMode off if the schema is unsupported.
   $: {
     if (!interactive) {
-      covariateMode.set(false)
+      conditioning.update((c) => ({ ...c, covariateActive: false }))
     }
   }
 
   onMount(() => {
-    covariateValues.set(initialValues(schema))
-    if (!interactive) covariateMode.set(false)
+    conditioning.update((c) => ({ ...c, values: initialValues(schema) }))
+    if (!interactive) conditioning.update((c) => ({ ...c, covariateActive: false }))
   })
 
-  // Keep a local mirror of covariateValues so we can bind individual controls.
+  // Keep a local mirror of the covariate values so we can bind individual controls.
   // When the local mirror changes we write the whole record back to the store.
   let local: Record<string, number | string> = initialValues(schema)
 
-  $: covariateValues.set(local)
+  $: conditioning.update((c) => ({ ...c, values: local }))
 
   function reset() {
-    covariateMode.set(false)
+    conditioning.update((c) => ({ ...c, covariateActive: false }))
     local = initialValues(schema)
   }
 </script>
@@ -42,13 +42,14 @@
         <input
           type="checkbox"
           class="toggle-input"
-          bind:checked={$covariateMode}
+          checked={$conditioning.covariateActive}
+          on:change={(e) => conditioning.update((c) => ({ ...c, covariateActive: e.currentTarget.checked }))}
           disabled={!interactive}
         />
         <span class="toggle-track">
           <span class="toggle-thumb"></span>
         </span>
-        <span class="toggle-text">{$covariateMode ? 'covariate prevalence' : 'corpus average'}</span>
+        <span class="toggle-text">{$conditioning.covariateActive ? 'covariate prevalence' : 'corpus average'}</span>
       </label>
     {:else}
       <span class="unavailable-note">Covariate controls unavailable for this formula</span>
@@ -111,8 +112,12 @@
   {#if gating}
     <div class="control-row">
       <span class="control-label">{gating.group_var}</span>
-      <select bind:value={$selectedGroup} class="cat-select">
-        <option value={null}>Background only</option>
+      <select
+        value={$conditioning.group ?? ''}
+        on:change={(e) => conditioning.update((c) => ({ ...c, group: e.currentTarget.value === '' ? null : e.currentTarget.value }))}
+        class="cat-select"
+      >
+        <option value="">Background only</option>
         {#each gating.groups as g}
           <option value={g}>{g}</option>
         {/each}
