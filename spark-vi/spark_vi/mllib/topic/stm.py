@@ -62,6 +62,55 @@ def corpus_mean_topic_proportions_rdd(cov_rdd, Gamma: np.ndarray, depth: int = 2
     return sum_vec / count
 
 
+def corpus_mean_topic_proportions_gated_rdd(
+    cov_group_rdd, Gamma: np.ndarray, partition, depth: int = 2,
+):
+    """Distributed gated α-equivalent: (1/D) Σ_d softmax_allowed(Γᵀ x_d).
+
+    The gating-aware counterpart of ``corpus_mean_topic_proportions_rdd``: each
+    document's softmax is taken over its ALLOWED topic set only
+    (``partition.allowed_indices(groups)`` — background ∪ its groups' foreground
+    blocks), so a foreground topic's corpus-mean prevalence reflects only its
+    group's share and disallowed topics contribute exactly 0. Distributed via the
+    same mapPartitions+treeReduce idiom — only a K-vector + count reach the
+    driver — so it scales where the driver-side numpy
+    ``corpus_mean_topic_proportions_gated`` (which needs the full design matrix
+    collected) does not. Output is identical to that pure-numpy version.
+
+    ``cov_group_rdd`` is an RDD of ``(x, groups)`` pairs: ``x`` a length-P
+    covariate vector (bare array — no person_id, honoring the spark-vi layering
+    rule) and ``groups`` a frozenset[str] of the doc's gating-group labels. Γ and
+    the (small, frozen) partition are broadcast. Returns a length-K probability
+    vector.
+    """
+    sc = cov_group_rdd.context
+    g_bcast = sc.broadcast(np.asarray(Gamma, dtype=np.float64))
+    p_bcast = sc.broadcast(partition)
+
+    def _local(rows, _g=g_bcast, _p=p_bcast):
+        G = _g.value
+        part = _p.value
+        acc = np.zeros(G.shape[1], dtype=np.float64)
+        n = 0
+        for x, groups in rows:
+            allowed = part.allowed_indices(groups)
+            e = (np.asarray(x, dtype=np.float64) @ G)[allowed]
+            e = e - e.max()
+            p = np.exp(e)
+            p = p / p.sum()
+            acc[allowed] += p
+            n += 1
+        return [(acc, n)]
+
+    def _combine(a, b):
+        return a[0] + b[0], a[1] + b[1]
+
+    sum_vec, count = cov_group_rdd.mapPartitions(_local).treeReduce(_combine, depth=depth)
+    if count == 0:
+        raise ValueError("corpus_mean_topic_proportions_gated_rdd: empty covariate RDD")
+    return sum_vec / count
+
+
 class StreamingSTM:
     """Streaming-VI estimator for OnlineSTM with DataFrame input.
 

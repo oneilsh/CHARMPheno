@@ -232,20 +232,20 @@ def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
     K-vector reaches the driver).
 
     For GATED checkpoints (partition is not None):
-    Collects (covariates, source_cohort) rows to the driver via .toPandas()
-    and computes corpus_mean_topic_proportions_gated (masked before softmax).
-    The collect is acceptable because the covariate sidecar is bounded by the
-    corpus size (one row per doc), which is well within driver memory for the
-    cohort sizes we currently run (tens of thousands of patients).
+    Reduces the sidecar with corpus_mean_proportions_gated_from_covariate_df
+    (distributed mapPartitions+treeReduce; masked before softmax so each
+    foreground topic's prevalence reflects only its group's share). Only a
+    K-vector reaches the driver — no full-corpus collect.
 
     Returns None — leaving adapt_stm on its softmax(Gamma[intercept]) stand-in
     — when no cache_uri is supplied, the cache misses, or anything raises.
     The quantity is cosmetic (the dashboard's "default topic proportion" widget),
     so it must never abort the bundle build.
 
-    Also returns the per-group patient counts (gc) and loaded cov_df as a
-    2-tuple (prev, gc, cov_pdf) to avoid a second cache round-trip when the
-    caller needs them. Returns (None, None, None) on any failure path.
+    Returns a 3-tuple (prev, gc, _unused). gc is the per-group patient counts
+    (gated only; None otherwise) used for k-anon suppression; the third slot is
+    always None (kept for call-site arity). Returns (None, None, None) on any
+    failure path.
     """
     if not cache_uri:
         log.warning("STM: no --cache-uri; corpus_prevalence uses the "
@@ -253,7 +253,6 @@ def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
         return None, None, None
     try:
         from _covariates_cache import compute_cache_key, try_load
-        from pyspark.ml.functions import vector_to_array
 
         cov_manifest = result.metadata["covariate_manifest"]
         key = compute_cache_key(
@@ -273,24 +272,15 @@ def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
         Gamma = np.asarray(result.global_params["Gamma"], dtype=np.float64)
 
         if partition is not None:
-            # --- Gated path: collect (covariates, source_cohort) to driver ---
+            # --- Gated path: distributed, masked-before-softmax (no collect) ---
             # Assumption: cov_df for a gated combined-cohort fit is keyed
             # (person_id, source_cohort); source_cohort is always present.
-            from spark_vi.models.topic.stm import corpus_mean_topic_proportions_gated
-            with _phase("covariates collect to driver (gated prevalence)"):
-                cov_pdf = (
-                    cov_df.select(
-                        vector_to_array("covariates").alias("covariates"),
-                        "source_cohort",
-                    )
-                    .toPandas()
-                )
-            import numpy as _np
-            X = _np.vstack(cov_pdf["covariates"].to_numpy())
-            groups_per_doc = [frozenset({g}) for g in cov_pdf["source_cohort"]]
-            with _phase("gated corpus-mean prevalence (masked before softmax)"):
-                prev = corpus_mean_topic_proportions_gated(
-                    Gamma, X, groups_per_doc, partition)
+            from charmpheno.omop.covariates import (
+                corpus_mean_proportions_gated_from_covariate_df,
+            )
+            with _phase("gated corpus-mean prevalence (distributed, masked-before-softmax)"):
+                prev = corpus_mean_proportions_gated_from_covariate_df(
+                    cov_df, Gamma, partition)
             # Per-group patient counts for k-anon suppression.
             gc = (
                 cov_df.groupBy("source_cohort")
@@ -300,7 +290,7 @@ def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
             gc = {r["source_cohort"]: int(r["n"]) for r in gc}
             log.info("STM: gated corpus_prevalence computed (K=%d, groups=%s).",
                      prev.shape[0], list(gc.keys()))
-            return prev, gc, cov_pdf
+            return prev, gc, None
         else:
             # --- Non-gated path: distributed treeReduce ---
             from charmpheno.omop.covariates import (

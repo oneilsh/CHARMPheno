@@ -161,6 +161,46 @@ class TestCorpusMeanProportionsRDD:
         assert np.all(result >= 0.0)
         np.testing.assert_allclose(result.sum(), 1.0)
 
+    def test_gated_rdd_matches_pure_numpy_oracle(self, spark):
+        # Distributed gated alpha-equivalent must equal the pure-numpy
+        # corpus_mean_topic_proportions_gated on the same (x, groups) data,
+        # including a background-only doc (group with no foreground block).
+        from spark_vi.mllib.topic.stm import corpus_mean_topic_proportions_gated_rdd
+        from spark_vi.models.topic.stm import corpus_mean_topic_proportions_gated
+        from spark_vi.models.topic.partition import TopicBlockPartition
+
+        rng = np.random.default_rng(7)
+        part = TopicBlockPartition(
+            "g", background_k=2, foreground=(("cancer", 1), ("dementia", 1)))  # K=4
+        P = 3
+        Gamma = rng.normal(size=(P, part.K))
+        groups = [
+            frozenset({"cancer"}), frozenset({"dementia"}), frozenset({"cancer"}),
+            frozenset({"dementia"}), frozenset({"common"}),  # no FG block -> bg only
+            frozenset({"cancer"}), frozenset({"dementia"}),
+        ]
+        xs = [rng.normal(size=P) for _ in groups]
+        X = np.vstack(xs)
+        expected = corpus_mean_topic_proportions_gated(Gamma, X, groups, part)
+
+        rdd = spark.sparkContext.parallelize(
+            list(zip([x.tolist() for x in xs], groups)), numSlices=3)
+        result = corpus_mean_topic_proportions_gated_rdd(rdd, Gamma, part)
+
+        np.testing.assert_allclose(result, expected, rtol=1e-10, atol=1e-12)
+        # Masked: out-of-group foreground topics get zero corpus-mean mass only
+        # if no doc is in that group; here both groups present, so both > 0.
+        np.testing.assert_allclose(result.sum(), 1.0)
+
+    def test_gated_rdd_raises_on_empty(self, spark):
+        from spark_vi.mllib.topic.stm import corpus_mean_topic_proportions_gated_rdd
+        from spark_vi.models.topic.partition import TopicBlockPartition
+
+        part = TopicBlockPartition("g", background_k=2, foreground=(("cancer", 1),))
+        empty = spark.sparkContext.parallelize([], numSlices=1)
+        with pytest.raises(ValueError, match="empty"):
+            corpus_mean_topic_proportions_gated_rdd(empty, np.zeros((2, 3)), part)
+
 
 def test_streaming_stm_rejects_group_var_in_formula():
     import pytest

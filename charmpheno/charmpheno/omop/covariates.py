@@ -40,6 +40,34 @@ def corpus_mean_proportions_from_covariate_df(
     return corpus_mean_topic_proportions_rdd(vec_rdd, Gamma)
 
 
+def corpus_mean_proportions_gated_from_covariate_df(
+    cov_df: DataFrame,
+    Gamma: np.ndarray,
+    partition,
+    *,
+    covariates_col: str = "covariates",
+    group_col: str = "source_cohort",
+) -> np.ndarray:
+    """Gating-aware dashboard α-equivalent from the sidecar — distributed.
+
+    Mirrors ``corpus_mean_proportions_from_covariate_df`` but masks each
+    document's softmax to its allowed topic set (background ∪ its group's
+    foreground block). Selects only the covariate-vector + group columns —
+    dropping ``person_id`` so it never crosses into spark-vi — builds an RDD of
+    ``(x, groups)`` pairs, and delegates to spark-vi's
+    ``corpus_mean_topic_proportions_gated_rdd`` (mapPartitions+treeReduce, so
+    only a K-vector + count reach the driver; no full-corpus collect). Returns a
+    length-K probability vector.
+    """
+    from spark_vi.mllib.topic.stm import corpus_mean_topic_proportions_gated_rdd
+
+    pair_rdd = (
+        cov_df.select(covariates_col, group_col).rdd
+        .map(lambda row: (row[0].toArray(), frozenset({str(row[1])})))
+    )
+    return corpus_mean_topic_proportions_gated_rdd(pair_rdd, Gamma, partition)
+
+
 def build_patient_covariate_df(
     person_df: DataFrame,
     *,
