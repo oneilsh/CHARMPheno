@@ -168,6 +168,7 @@ def _write_covariate_schema(spark, *, result, corpus, source_table, cohort_name,
         cov_df, model_spec, covariate_names = cached
         continuous_cols = list(cov_manifest.get("continuous_cols", []))
         k = int(corpus.get("min_patient_count", 20))
+        n_total = int(cov_df.count())
 
         # Project the design vector to an array column once.
         arr = cov_df.select(vector_to_array("covariates").alias("x"))
@@ -210,6 +211,7 @@ def _write_covariate_schema(spark, *, result, corpus, source_table, cohort_name,
             covariate_names=covariate_names, continuous_cols=continuous_cols,
             categorical_levels=categorical_levels, level_counts=level_counts,
             continuous_stats=continuous_stats, k=k,
+            n_total=n_total,
         )
         (out_dir / "covariate_schema.json").write_text(json.dumps(schema, indent=2))
         log.info("STM: wrote covariate_schema.json (controls=%d, unsupported=%d)",

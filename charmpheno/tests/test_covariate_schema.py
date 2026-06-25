@@ -20,6 +20,7 @@ def _base_inputs():
         },
         continuous_stats={"age": (40.0, 65.0, 90.0)},
         k=20,
+        n_total=10000,
     )
 
 
@@ -96,3 +97,35 @@ def test_interaction_with_colon_in_level():
         ],
     }
     assert "C(dx)[T.A:B]:age" not in s["unsupported"]
+
+
+def test_categorical_control_has_kanon_safe_proportions():
+    schema = build_covariate_schema(
+        covariate_names=["Intercept", "C(sex)[T.M]", "age"],
+        continuous_cols=["age"],
+        categorical_levels={"sex": {"levels": ["F", "M"], "reference": "F"}},
+        level_counts={"C(sex)[T.M]": 48},   # 48 of 100 are M; reference F = 52
+        continuous_stats={"age": (41.0, 55.0, 68.0)},
+        k=20,
+        n_total=100,
+    )
+    sex = next(c for c in schema["controls"] if c["name"] == "sex")
+    assert sex["proportions"] == {"F": 0.52, "M": 0.48}
+    assert abs(sum(sex["proportions"].values()) - 1.0) < 1e-9
+
+
+def test_subk_level_is_dropped_from_proportions():
+    # M has 8 (< k=20) so it is suppressed from levels AND proportions;
+    # the surviving distribution renormalizes over kept levels (just F here).
+    schema = build_covariate_schema(
+        covariate_names=["Intercept", "C(sex)[T.M]", "age"],
+        continuous_cols=["age"],
+        categorical_levels={"sex": {"levels": ["F", "M"], "reference": "F"}},
+        level_counts={"C(sex)[T.M]": 8},
+        continuous_stats={"age": (41.0, 55.0, 68.0)},
+        k=20,
+        n_total=100,
+    )
+    sex = next(c for c in schema["controls"] if c["name"] == "sex")
+    assert sex["levels"] == ["F"]
+    assert sex["proportions"] == {"F": 1.0}

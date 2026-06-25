@@ -60,6 +60,7 @@ def build_covariate_schema(
     level_counts: dict[str, int],
     continuous_stats: dict[str, tuple[float, float, float]],
     k: int,
+    n_total: int,
 ) -> dict:
     # design_columns lists only parseable columns in covariate_names order.
     # When unsupported is empty this is exactly 1:1 with covariate_names (and
@@ -95,9 +96,26 @@ def build_covariate_schema(
             lvl for lvl in info["levels"]
             if lvl == ref or lvl in kept_levels.get(var, set())
         ]
+        # Per-level counts. Non-reference levels come from the dummy sums;
+        # the reference level has no dummy, so its count is n_total minus all
+        # non-reference counts for this variable (every patient has exactly
+        # one level).
+        nonref_counts = {}
+        for name, cnt in level_counts.items():
+            m = _DUMMY_RE.match(name)
+            if m and m.group("var") == var:
+                nonref_counts[m.group("level")] = int(cnt)
+        ref_count = int(n_total) - sum(nonref_counts.values())
+        kept_counts = {
+            lvl: (ref_count if lvl == ref else nonref_counts.get(lvl, 0))
+            for lvl in surviving
+        }
+        total = sum(kept_counts.values()) or 1
+        proportions = {lvl: kept_counts[lvl] / total for lvl in surviving}
         controls.append({
             "name": var, "type": "categorical",
             "reference": ref, "levels": surviving,
+            "proportions": proportions,
         })
 
     return {

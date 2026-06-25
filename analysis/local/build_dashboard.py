@@ -127,6 +127,7 @@ def _write_local_covariate_schema(out_dir, result, cov_pdf, X, k):
         covariate_names=covariate_names, continuous_cols=continuous_cols,
         categorical_levels=categorical_levels, level_counts=level_counts,
         continuous_stats=continuous_stats, k=k,
+        n_total=int(X.shape[0]),
     )
     (out_dir / "covariate_schema.json").write_text(json.dumps(schema, indent=2))
     log.info("STM: wrote covariate_schema.json (controls=%d, unsupported=%d)",
