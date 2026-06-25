@@ -211,7 +211,7 @@ def write_phenotypes_bundle(
     out_path.write_text(json.dumps(payload, allow_nan=False))
 
 
-def adapt_stm(
+def write_covariate_effects(
     *,
     out_dir: Path,
     Gamma: np.ndarray,
@@ -220,6 +220,11 @@ def adapt_stm(
     P: int,
 ) -> None:
     """Write STM-specific bundle artifact: per-covariate effect matrix Γ̂.
+
+    (Formerly named ``adapt_stm`` — renamed to end the collision with
+    ``model_adapter.adapt_stm``, which builds the uniform DashboardExport. This
+    function only writes the Γ sidecar that powers the dashboard's client-side
+    covariate conditioning, per ADR 0028.)
 
     Schema for covariate_effects.json:
         [{"covariate": "<name>", "per_topic": [γ_0, γ_1, ..., γ_{K-1}]}, ...]
@@ -230,11 +235,11 @@ def adapt_stm(
     """
     if Gamma.shape != (P, K):
         raise ValueError(
-            f"adapt_stm: Gamma shape mismatch — got {Gamma.shape}, expected ({P}, {K})"
+            f"write_covariate_effects: Gamma shape mismatch — got {Gamma.shape}, expected ({P}, {K})"
         )
     if len(covariate_names) != P:
         raise ValueError(
-            f"adapt_stm: covariate_names length {len(covariate_names)} != P={P}"
+            f"write_covariate_effects: covariate_names length {len(covariate_names)} != P={P}"
         )
 
     out_dir.mkdir(parents=True, exist_ok=True)

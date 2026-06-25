@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         from spark_vi.models.topic.partition import TopicBlockPartition
         from spark_vi.models.topic.stm import corpus_mean_topic_proportions_gated
         from charmpheno.export.gating import suppressed_topic_ids, build_gating_json
-        from charmpheno.export.dashboard import adapt_stm as write_cov_effects
+        from charmpheno.export.dashboard import write_covariate_effects
         from charmpheno.export.model_adapter import adapt_stm as adapt_stm_export
 
         partition = TopicBlockPartition.from_dict(tbs)
@@ -205,10 +205,10 @@ def main(argv: list[str] | None = None) -> int:
 
         # covariate_effects.json for the KEPT topics (Gamma columns subset)
         P = Gamma.shape[0]
-        write_cov_effects(out_dir=args.out_dir,
-                          Gamma=Gamma[:, kept_ids],
-                          covariate_names=_corpus_manifest_covariate_names(result),
-                          K=len(kept_ids), P=P)
+        write_covariate_effects(out_dir=args.out_dir,
+                                Gamma=Gamma[:, kept_ids],
+                                covariate_names=_corpus_manifest_covariate_names(result),
+                                K=len(kept_ids), P=P)
         log.info("STM: wrote covariate_effects.json (K=%d, P=%d)", len(kept_ids), P)
 
         # covariate_schema.json from the local covariate matrix

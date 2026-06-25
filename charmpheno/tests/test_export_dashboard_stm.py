@@ -1,4 +1,4 @@
-"""Tests for the STM dashboard bundle adapter (adapt_stm).
+"""Tests for the STM dashboard bundle adapter (write_covariate_effects).
 
 Surfaces Γ̂ + covariate names in the bundle so the dashboard can
 display per-topic per-covariate effects. β / α-equivalent surfacing
@@ -15,7 +15,7 @@ import pytest
 
 class TestAdaptSTM:
     def test_writes_gamma_json_with_covariate_labels(self, tmp_path: Path):
-        from charmpheno.export.dashboard import adapt_stm
+        from charmpheno.export.dashboard import write_covariate_effects
 
         K, P = 4, 3
         Gamma = np.array([
@@ -26,7 +26,7 @@ class TestAdaptSTM:
         covariate_names = ["Intercept", "sex[T.M]", "age"]
         out_dir = tmp_path / "bundle"
         out_dir.mkdir()
-        adapt_stm(
+        write_covariate_effects(
             out_dir=out_dir,
             Gamma=Gamma,
             covariate_names=covariate_names,
@@ -43,9 +43,9 @@ class TestAdaptSTM:
         np.testing.assert_allclose(gamma_json[0]["per_topic"], Gamma[0])
 
     def test_rejects_size_mismatch(self, tmp_path: Path):
-        from charmpheno.export.dashboard import adapt_stm
+        from charmpheno.export.dashboard import write_covariate_effects
         with pytest.raises(ValueError, match="covariate_names|shape"):
-            adapt_stm(
+            write_covariate_effects(
                 out_dir=tmp_path,
                 Gamma=np.zeros((3, 4)),
                 covariate_names=["a", "b"],  # wrong length: 2 vs P=3

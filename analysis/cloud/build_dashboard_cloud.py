@@ -355,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
     from charmpheno.export.dashboard import (
         write_model_and_vocab_bundles,
         write_phenotypes_bundle,
-        adapt_stm as dashboard_adapt_stm,
+        write_covariate_effects,
     )
     from charmpheno.export.model_adapter import adapt
     from spark_vi.io import load_result
@@ -599,7 +599,7 @@ def main(argv: list[str] | None = None) -> int:
                                 "--cache-uri to enable gating.")
 
                 # covariate_effects.json: subset Gamma columns to kept topics.
-                dashboard_adapt_stm(
+                write_covariate_effects(
                     out_dir=out_dir, Gamma=Gamma[:, kept_ids],
                     covariate_names=covariate_names,
                     K=len(kept_ids), P=Gamma.shape[0],

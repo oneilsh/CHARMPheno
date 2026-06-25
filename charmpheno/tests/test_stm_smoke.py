@@ -72,12 +72,12 @@ def test_end_to_end_synthetic_stm(spark, tmp_path: Path):
     model = est.fit(joined, max_iter=10, subsampling_rate=1.0,
                     tau0=64.0, kappa=0.7, save_interval=5)
 
-    # Inspect bundle via adapt_stm.
-    from charmpheno.export.dashboard import adapt_stm
+    # Inspect bundle via write_covariate_effects.
+    from charmpheno.export.dashboard import write_covariate_effects
     out = tmp_path / "bundle"
     out.mkdir()
     Gamma = model.global_params["Gamma"]
-    adapt_stm(out_dir=out, Gamma=Gamma, covariate_names=names,
+    write_covariate_effects(out_dir=out, Gamma=Gamma, covariate_names=names,
               K=Gamma.shape[1], P=Gamma.shape[0])
     cov_json = json.loads((out / "covariate_effects.json").read_text())
     assert len(cov_json) == len(names)
