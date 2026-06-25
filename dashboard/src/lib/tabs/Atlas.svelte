@@ -4,7 +4,6 @@
   import CodePanel from '../atlas/CodePanel.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
   import PhenotypeBrowser from '../atlas/PhenotypeBrowser.svelte'
-  import CovariatePanel from '../atlas/CovariatePanel.svelte'
   import { copy } from '../copy'
 
   // Reset conditioning whenever the bundle changes (cohort switch must not
@@ -47,9 +46,6 @@
   <div class="grid">
     <div class="left-col">
       <TopicMap />
-      {#if $bundle?.covariateSchema}
-        <CovariatePanel schema={$bundle.covariateSchema} gating={$bundle.gating} />
-      {/if}
       <PhenotypeBrowser />
     </div>
     <CodePanel />

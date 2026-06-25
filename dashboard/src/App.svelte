@@ -16,6 +16,7 @@
   import { ensurePatientProjection } from './lib/patient/projection'
   import CohortSelector from './lib/CohortSelector.svelte'
   import Tabs from './lib/Tabs.svelte'
+  import ConditioningBar from './lib/conditioning/ConditioningBar.svelte'
   import Atlas from './lib/tabs/Atlas.svelte'
   import Patient from './lib/tabs/Patient.svelte'
   import Simulator from './lib/tabs/Simulator.svelte'
@@ -210,6 +211,7 @@
     <p class="loading"><span class="loading-dot"></span> loading model bundle</p>
   {:else}
     <Tabs />
+    <ConditioningBar />
     <svelte:component this={TAB_COMPONENTS[$route]} />
   {/if}
 </main>
