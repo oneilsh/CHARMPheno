@@ -437,6 +437,12 @@ class OnlineSTM(VIModel):
             Γ_new = (1-ρ)·Γ + ρ·Γ̂                         # stochastic-EM ρ-blend
         Σ:  σ²_k_target = residual_diag_stat_k / n_docs   # diagonal sample cov + Laplace correction
             σ²_k_new   = max((1-ρ)·σ²_k + ρ·σ²_k_target, SIGMA_FLOOR)
+
+        Lazy block updates (ADR 0027): any block (background or a group's
+        foreground) with zero documents in this minibatch is left unchanged —
+        its Γ columns and Σ entries skip the ρ-blend. This keeps a rare group's
+        parameters from decaying toward (Γ=0, Σ=floor) in minibatches that miss
+        the group. Present blocks and the no-gating path are unaffected.
         """
         lam = global_params["lambda"]
         eta = float(global_params["eta"])
@@ -454,20 +460,36 @@ class OnlineSTM(VIModel):
         XtX = target_stats["XtX"]
         XtX_groups = target_stats["XtX_groups"]
         XtMu = target_stats["XtMu"]
+        n_docs_per_topic = target_stats["n_docs_per_topic"]
         ridge_eye = self.sigma_ridge * np.eye(self.P)
 
-        Gamma_target = np.zeros_like(Gamma)
+        # Lazy block updates (ADR 0027): a block whose group has NO documents in
+        # this minibatch carries zero information about its Γ/Σ, so it is left
+        # untouched. Defaulting each block's target to the *current* value makes
+        # the ρ-blend a no-op for absent blocks (and skips a would-be-singular
+        # solve over a zero XtX_groups). Present-block targets are
+        # self-normalizing ratios, so they are unaffected; the canonical
+        # no-gating and all-groups-present paths are numerically identical to
+        # before. This removes the rare-group decay-toward-(Γ=0, Σ=floor) bias
+        # that minibatches missing the group would otherwise inflict.
+        Gamma_target = Gamma.copy()
         bg = part.background_indices()
-        Gamma_target[:, bg] = np.linalg.solve(XtX + ridge_eye, XtMu[:, bg])
+        if n_docs_per_topic[bg].any():                # background present this batch
+            Gamma_target[:, bg] = np.linalg.solve(XtX + ridge_eye, XtMu[:, bg])
         for gi, g in enumerate(part.groups):
             cols = part.block_indices(g)
-            Gamma_target[:, cols] = np.linalg.solve(
-                XtX_groups[gi] + ridge_eye, XtMu[:, cols])
+            if n_docs_per_topic[cols].any():          # this group present this batch
+                Gamma_target[:, cols] = np.linalg.solve(
+                    XtX_groups[gi] + ridge_eye, XtMu[:, cols])
         new_Gamma = (1.0 - learning_rate) * Gamma + learning_rate * Gamma_target
 
         # Σ: per-topic divisor (background -> n_docs; foreground -> group docs).
-        n_per_topic = np.maximum(target_stats["n_docs_per_topic"], 1.0)
-        Sigma_target = target_stats["residual_diag_stat"] / n_per_topic
+        # Topics with no docs this batch keep their current variance (target
+        # defaults to current, so the ρ-blend is a no-op) — same lazy rule.
+        present = n_docs_per_topic > 0
+        Sigma_target = Sigma_diag.copy()
+        Sigma_target[present] = (
+            target_stats["residual_diag_stat"][present] / n_docs_per_topic[present])
         new_Sigma = (1.0 - learning_rate) * Sigma_diag + learning_rate * Sigma_target
         new_Sigma = np.maximum(new_Sigma, self.SIGMA_FLOOR)
 

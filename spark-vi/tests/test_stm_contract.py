@@ -78,6 +78,56 @@ def test_block_aware_sigma_divisor_uses_per_topic_counts():
     np.testing.assert_array_equal(stats["n_docs_per_topic"], [10.0, 10.0, 4.0])
 
 
+def test_absent_group_block_left_unchanged_lazy_update():
+    # ADR 0027: a minibatch with NO documents for group 'rare' carries no
+    # information about that block, so its Gamma columns and Sigma entry must be
+    # left exactly as-is rather than decaying toward (Gamma=0, Sigma=floor) via
+    # a rho-blend toward a target built from zero documents.
+    rng = np.random.default_rng(11)
+    V, P = 6, 2
+    part = TopicBlockPartition("g", background_k=2, foreground=(("rare", 1),))
+    K = part.K  # 3; foreground topic index 2
+    docs = _docs(rng, 8, V, P, lambda i: frozenset())  # all majority; 'rare' absent
+    model = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=1, topic_blocks=part)
+    gp = model.initialize_global(None)
+    # Seed distinctive, non-default values on the rare block so any decay shows.
+    gp["Gamma"][:, 2] = np.array([0.7, -0.4])
+    gp["Sigma"][2] = 0.9
+    stats = model.local_update(docs, gp)
+    assert stats["n_docs_per_topic"][2] == 0.0  # precondition: 'rare' absent
+    out = model.update_global(gp, stats, 0.5)
+    # Rare block untouched (the fix).
+    np.testing.assert_array_equal(out["Gamma"][:, 2], np.array([0.7, -0.4]))
+    assert out["Sigma"][2] == 0.9
+    # Background blocks DID update (sanity: lazy logic didn't freeze everything).
+    assert not np.allclose(out["Gamma"][:, :2], gp["Gamma"][:, :2])
+    assert not np.allclose(out["Sigma"][:2], gp["Sigma"][:2])
+
+
+def test_present_group_block_updates_via_block_formula():
+    # Regression guard: when the group IS present, its block must still update
+    # via the per-block ridge solve + rho-blend (lazy logic must not skip it).
+    rng = np.random.default_rng(13)
+    V, P = 6, 2
+    part = TopicBlockPartition("g", background_k=2, foreground=(("rare", 1),))
+    K = part.K  # 3; foreground topic index 2
+    docs = (_docs(rng, 6, V, P, lambda i: frozenset())
+            + _docs(rng, 4, V, P, lambda i: frozenset({"rare"})))
+    model = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=1, topic_blocks=part)
+    gp = model.initialize_global(None)
+    stats = model.local_update(docs, gp)
+    assert stats["n_docs_per_topic"][2] == 4.0  # precondition: 'rare' present
+    out = model.update_global(gp, stats, 0.5)
+    ridge = model.sigma_ridge * np.eye(P)
+    cols = part.block_indices("rare")  # [2]
+    Gt = np.linalg.solve(stats["XtX_groups"][0] + ridge, stats["XtMu"][:, cols])
+    exp_Gamma_col = 0.5 * gp["Gamma"][:, cols] + 0.5 * Gt
+    np.testing.assert_allclose(out["Gamma"][:, cols], exp_Gamma_col, atol=1e-12)
+    St = stats["residual_diag_stat"][2] / 4.0
+    exp_Sigma = max(0.5 * gp["Sigma"][2] + 0.5 * St, model.SIGMA_FLOOR)
+    np.testing.assert_allclose(out["Sigma"][2], exp_Sigma, atol=1e-12)
+
+
 def test_topic_blocks_k_mismatch_raises():
     part = TopicBlockPartition("g", background_k=2, foreground=(("rare", 2),))
     import pytest
