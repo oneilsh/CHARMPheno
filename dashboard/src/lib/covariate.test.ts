@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { evalRecipe, buildDesignVector, covariatePrevalence, covariatePrevalenceGated, allowedMaskForGroup } from './covariate'
+import { evalRecipe, buildDesignVector, covariatePrevalence, covariatePrevalenceGated, allowedMaskForGroup, maskGroupPrevalence } from './covariate'
 
 const values = { age: 70, sex: 'M', source_cohort: 'dementia' }
 
@@ -52,5 +52,15 @@ describe('gated prevalence', () => {
   it('background-only selection zeros all foreground', () => {
     const blocks = ['background', 'rare_dx']
     expect(allowedMaskForGroup(blocks, null)).toEqual([true, false])
+  })
+})
+
+describe('maskGroupPrevalence', () => {
+  it('zeros out-of-group foreground, preserves background + selected group, no renormalization', () => {
+    const values = [0.3, 0.3, 0.2, 0.2]              // per-topic base values
+    const blocks = ['background', 'background', 'rare_dx', 'other']
+    expect(maskGroupPrevalence(values, blocks, 'rare_dx')).toEqual([0.3, 0.3, 0.2, 0])
+    // background-only: all foreground hidden
+    expect(maskGroupPrevalence(values, blocks, null)).toEqual([0.3, 0.3, 0, 0])
   })
 })

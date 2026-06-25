@@ -54,3 +54,10 @@ export function covariatePrevalenceGated(
   const s = exp.reduce((a, b) => a + b, 0) || 1
   return exp.map((e) => e / s)
 }
+
+export function maskGroupPrevalence(
+  values: number[], topicBlocks: string[], group: string | null,
+): number[] {
+  const mask = allowedMaskForGroup(topicBlocks, group)
+  return values.map((v, k) => (mask[k] ? v : 0))
+}
