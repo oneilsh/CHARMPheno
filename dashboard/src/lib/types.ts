@@ -52,6 +52,7 @@ export interface CovariateControl {
   default?: number
   reference?: string
   levels?: string[]
+  proportions?: Record<string, number>
 }
 export interface CovariateSchema {
   k: number
