@@ -58,6 +58,5 @@ M-step on λ foreground rows.
 - Borrowing strength across rare groups (a hierarchical Γ/Σ prior) and seeded
   foreground β priors (PheCode/CCS) remain separate, larger options for the
   genuinely data-starved rare-disease regime; see insight 0028.
-- Independent of the still-open Hessian-positive-definiteness guard on the
-  per-document Laplace inverse (flagged in the same review); that is a distinct
-  concern not addressed here.
+- Independent of the Hessian-positive-definiteness guard on the per-document
+  Laplace inverse (ADR 0028), a sibling robustness fix from the same review.

@@ -168,8 +168,11 @@ class TestSTMHessian:
             expElogbeta=st["expElogbeta"],
             Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
         )
-        # Negative log joint is convex in η for prevalence-only STM with
-        # diagonal Σ + nonnegative β; H should be PD.
+        # H is PD at a typical interior point near the mode — the common case
+        # _spd_inverse's Cholesky fast path relies on. NOTE: the objective is
+        # NOT globally convex (data term = log-sum-exp minus log-sum-exp), so H
+        # can be indefinite with a weak prior or an early L-BFGS stop; that case
+        # is handled by _spd_inverse / ADR 0028, not asserted away here.
         eigs = np.linalg.eigvalsh(H)
         assert np.all(eigs > 0), f"Hessian not PD: eigs={eigs}"
 
@@ -211,6 +214,44 @@ class TestSTMDocInference:
             max_iter=200, tol=1e-8,
         )
         np.testing.assert_allclose(eta_hat, prior_mean, atol=1e-3)
+
+
+from spark_vi.models.topic.stm import _spd_inverse
+
+
+class TestSPDInverse:
+    """Guard on the per-doc Laplace covariance ν = H⁻¹.
+
+    The neg-log-joint is not globally convex (data term = log-sum-exp minus
+    log-sum-exp), so H at the L-BFGS point can be non-PD with a weak prior or an
+    early stop. The guard must keep the common PD path identical to inv(H) and
+    repair the non-PD case into an SPD inverse rather than returning negative
+    variances.
+    """
+
+    def test_matches_inv_for_pd(self):
+        rng = np.random.default_rng(0)
+        M = rng.normal(size=(4, 4))
+        H = M @ M.T + np.eye(4)  # SPD
+        np.testing.assert_allclose(_spd_inverse(H), np.linalg.inv(H), atol=1e-10)
+
+    def test_repairs_indefinite_to_spd(self):
+        # Symmetric but indefinite (a negative eigenvalue): raw inv would yield a
+        # non-SPD "covariance"; the guard must return an SPD inverse.
+        rng = np.random.default_rng(1)
+        Q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+        H = Q @ np.diag([2.0, -0.5, 1.0]) @ Q.T
+        nu = _spd_inverse(H)
+        np.testing.assert_allclose(nu, nu.T, atol=1e-12)
+        assert np.all(np.linalg.eigvalsh(nu) > 0), "repaired inverse not SPD"
+
+    def test_repairs_singular_to_finite_spd(self):
+        rng = np.random.default_rng(2)
+        Q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+        H = Q @ np.diag([1.0, 0.0, 3.0]) @ Q.T  # PSD but singular
+        nu = _spd_inverse(H)
+        assert np.all(np.isfinite(nu))
+        assert np.all(np.linalg.eigvalsh(nu) > 0)
 
 
 from spark_vi.models.topic.stm import prior_topic_proportions

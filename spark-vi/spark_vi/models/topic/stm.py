@@ -192,6 +192,40 @@ def _stm_neg_log_joint_hessian(
     return H_data_pos - H_data_neg + H_prior
 
 
+# Condition-number cap used only when a non-PD Hessian must be repaired before
+# inversion (see _spd_inverse). Caps the inverse's largest eigenvalue at
+# 1 / (cap * lambda_max), bounding variance in flat/indefinite directions.
+_HESSIAN_COND_CAP = 1e-10
+
+
+def _spd_inverse(H: np.ndarray) -> np.ndarray:
+    """Inverse of a Hessian that is *meant* to be positive-definite.
+
+    The per-doc neg-log-joint is NOT globally convex — its data term is a
+    difference of two log-sum-exp functions — so the Hessian H at the L-BFGS
+    point can fail to be positive-definite when the prior is weak (large Σ) or
+    L-BFGS stopped short of the true mode. A raw np.linalg.inv would then return
+    a non-SPD "covariance" with negative variances, silently corrupting
+    residual_diag_stat (which adds diag(ν_d)) and the Gaussian KL (whose
+    slogdet would flip sign).
+
+    Fast path: if H is PD (Cholesky succeeds) return inv(H) unchanged — the
+    overwhelmingly common case, bit-for-bit identical to the prior code.
+    Repair path: floor H's eigenvalues at a small positive value (condition-
+    number cap) and rebuild the inverse, guaranteeing an SPD result with
+    bounded variance. Mirrors the Hessian "nugget" the reference stm R package
+    adds before inversion.
+    """
+    try:
+        np.linalg.cholesky(H)
+    except np.linalg.LinAlgError:
+        w, V = np.linalg.eigh(0.5 * (H + H.T))
+        floor = max(w.max() * _HESSIAN_COND_CAP, 1e-12)
+        w = np.maximum(w, floor)
+        return (V * (1.0 / w)) @ V.T
+    return np.linalg.inv(H)
+
+
 def _stm_doc_inference(
     *,
     indices: np.ndarray,
@@ -229,7 +263,7 @@ def _stm_doc_inference(
                       options={"maxiter": max_iter, "gtol": tol})
     sub_eta = result.x
     H = _stm_neg_log_joint_hessian(sub_eta, **common)
-    sub_nu = np.linalg.inv(H)
+    sub_nu = _spd_inverse(H)
 
     eta_hat = np.full(K, -np.inf, dtype=np.float64)
     eta_hat[allowed] = sub_eta
@@ -405,7 +439,8 @@ class OnlineSTM(VIModel):
             tr_term = float(np.sum(np.diag(nu_d)[al] / Sigma_diag[al]))
             quad_term = float(np.sum(resid[al] ** 2 / Sigma_diag[al]))
             sub_nu = nu_d[np.ix_(al, al)]
-            sign, logdet_nu = np.linalg.slogdet(sub_nu)
+            # sub_nu is SPD by construction (_spd_inverse), so slogdet sign is +1.
+            _sign, logdet_nu = np.linalg.slogdet(sub_nu)
             logdet_Sigma = float(np.sum(log_Sigma_diag[al]))
             doc_eta_kl += 0.5 * (tr_term + quad_term - len(al) + logdet_Sigma - logdet_nu)
             n_docs += 1
