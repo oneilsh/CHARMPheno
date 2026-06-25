@@ -51,8 +51,16 @@ def write_model_and_vocab_bundles(
     domains: dict[int, str],
     code_marginals: list[float],
     top_n: int,
+    sigma: np.ndarray | None = None,
 ) -> int:
     """Write model.json and vocab.json. Returns the displayed-vocab width.
+
+    ``sigma`` (optional): the STM per-topic logistic-normal prior variance
+    (length K, topic-aligned with ``alpha``/``beta`` rows). When supplied it is
+    written to model.json under ``"sigma"`` for the dashboard's faithful STM
+    sampler (ADR 0028 Alternative B); the vocab top-N trim only affects V, so it
+    passes through untouched. Omitted (None) for LDA/HDP, so the key's presence
+    is the frontend's "this is an STM bundle" signal.
 
     Accepts a row-stochastic β matrix (K × V_full) where each row sums to 1.
     Callers must normalize before passing; this function raises ValueError
@@ -92,6 +100,8 @@ def write_model_and_vocab_bundles(
         "alpha": _round_floats(np.asarray(alpha)),
         "beta": _round_floats(beta_trimmed),
     }
+    if sigma is not None:
+        model_payload["sigma"] = _round_floats(np.asarray(sigma))
     (out_dir / "model.json").write_text(json.dumps(model_payload, allow_nan=False))
 
     codes = []

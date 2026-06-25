@@ -75,6 +75,37 @@ def test_returns_v_displayed(tmp_path: Path):
     assert v_disp == V
 
 
+def test_model_json_includes_sigma_when_provided(tmp_path: Path):
+    # STM exports the per-topic prior variance (diagonal Sigma) into model.json
+    # so the dashboard can sample the faithful logistic-normal prior (ADR 0028
+    # Alternative B). Length K, topic-aligned with alpha/beta rows; the vocab
+    # top-N trim (which only touches V) leaves it untouched.
+    K, V = 2, 4
+    write_model_and_vocab_bundles(
+        out_dir=tmp_path,
+        beta=_row_stochastic(np.ones((K, V))), alpha=np.array([0.1, 0.1]),
+        vocab_ids=[10, 20, 30, 40], descriptions={}, domains={},
+        code_marginals=[0.4, 0.3, 0.2, 0.1], top_n=10,
+        sigma=np.array([0.5, 0.9]),
+    )
+    model = json.loads((tmp_path / "model.json").read_text())
+    assert model["sigma"] == pytest.approx([0.5, 0.9])
+
+
+def test_model_json_omits_sigma_by_default(tmp_path: Path):
+    # Non-STM bundles (LDA/HDP) pass sigma=None; the key must be ABSENT so the
+    # frontend can treat its presence as the "use the STM sampler" signal.
+    K, V = 2, 4
+    write_model_and_vocab_bundles(
+        out_dir=tmp_path,
+        beta=_row_stochastic(np.ones((K, V))), alpha=np.array([0.1, 0.1]),
+        vocab_ids=[10, 20, 30, 40], descriptions={}, domains={},
+        code_marginals=[0.4, 0.3, 0.2, 0.1], top_n=10,
+    )
+    model = json.loads((tmp_path / "model.json").read_text())
+    assert "sigma" not in model
+
+
 def test_select_top_n_pure_marginal_ranking():
     """select_top_n_by_marginal returns top-N by marginal, no doc-count filter."""
     code_marginals = [0.05, 0.30, 0.10, 0.40, 0.15]

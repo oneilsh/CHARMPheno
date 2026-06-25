@@ -268,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         vocab_ids=vocab_ids, descriptions=descriptions, domains=domains,
         code_marginals=stats.code_marginals,
         top_n=args.vocab_top_n,
+        sigma=export.sigma,
     )
     if export.theta_histogram is not None:
         # NaN-suppressed bins → None for JSON serialization

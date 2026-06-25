@@ -339,6 +339,44 @@ class TestAdaptSTM:
         expected_alpha /= expected_alpha.sum()
         np.testing.assert_allclose(export.alpha, expected_alpha)
 
+    def test_adapt_stm_exports_sigma_subset_by_kept(self):
+        # STM exposes the per-topic prior variance for the faithful dashboard
+        # sampler (ADR 0028-B), subset to surviving topics under k-anon.
+        from charmpheno.export.model_adapter import adapt_stm
+        from spark_vi.models.topic.partition import TopicBlockPartition
+
+        class _FakeResult:
+            metadata = {
+                "model_class": "stm",
+                "covariate_manifest": {"covariate_names": ["Intercept"]},
+            }
+            global_params = {
+                "lambda": np.full((3, 4), 1.0),
+                "Gamma": np.array([[0.1, 0.2, 0.3]]),
+                "Sigma": np.array([0.5, 0.7, 0.9]),
+            }
+
+        part = TopicBlockPartition("g", background_k=2, foreground=(("rare", 1),))  # K=3
+        export = adapt_stm(_FakeResult(), partition=part, suppressed=frozenset({2}))
+        np.testing.assert_allclose(export.sigma, np.array([0.5, 0.7]))  # kept = [0, 1]
+
+    def test_adapt_stm_sigma_none_when_absent(self):
+        # Checkpoints/fixtures without Sigma (and non-STM models) -> sigma None.
+        from charmpheno.export.model_adapter import adapt_stm
+
+        class _FakeResult:
+            metadata = {
+                "model_class": "stm",
+                "covariate_manifest": {"covariate_names": ["Intercept"]},
+            }
+            global_params = {
+                "lambda": np.full((2, 4), 1.0),
+                "Gamma": np.array([[0.3, -0.3]]),
+            }
+
+        export = adapt_stm(_FakeResult())
+        assert export.sigma is None
+
     def test_adapt_stm_without_override_falls_back_to_intercept_standin(self):
         from charmpheno.export.model_adapter import adapt_stm
 
