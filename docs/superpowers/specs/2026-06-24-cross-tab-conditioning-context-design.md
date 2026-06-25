@@ -9,12 +9,13 @@ conditioning context** rendered as a full-width bar below the tab navigation,
 and defines how all three tabs (Phenotype Atlas, Patient Atlas, Simulator)
 read that context.
 
-The unifying idea: covariates (age, sex, ...) plus the gating group form the
-context the model is *viewed under*. Every tab is a view of the model under
-that context — the Phenotype Atlas shows the expected prevalence (the
-marginal), the Patient Atlas shows a sampled cohort, the Simulator shows a
-single sampled record. What differs per tab is only *when* the context is
-applied.
+The unifying idea: prevalence covariates (age, sex, ...) and the gating group
+are two independent lenses the model is *viewed under*. Every tab is a view of
+the model under whichever lenses its bundle has — the Phenotype Atlas shows the
+expected prevalence (the marginal), the Patient Atlas shows a sampled cohort,
+the Simulator shows a single sampled record. What differs per tab is only *when*
+the context is applied; the two axes are otherwise handled independently
+(see "Two orthogonal axes").
 
 This is a dashboard-front-end design plus one small export addition. It does
 not change the model, the fit drivers, or the gating math.
@@ -99,18 +100,29 @@ conditioning = {
 The Phenotype Atlas reader picks a base prevalence by the covariate axis, then
 applies the group mask by the gating axis:
 
-- base = `covariateActive` ? `covariatePrevalence(effects, x)` :
-  per-topic corpus prevalence (`phenotype.corpus_prevalence`).
-- if `gating` and a group is selected: apply the group's allowed-topic mask.
-  On the covariate base this is the existing mask-before-softmax
-  (`covariatePrevalenceGated`, renormalized over allowed). On the corpus base it
-  is a new `maskedCorpusPrevalence` that zeros hidden foreground topics (no
-  renormalization — corpus prevalence is a per-topic display quantity, not a
-  distribution; matches the existing k-anon non-renormalization rule) and needs
-  no `covariate_effects`.
-- if no `gating`: no mask; the base is used directly.
+- **base by covariate axis:** `covariateActive` → `covariatePrevalence(effects,
+  x)` (softmax of Gamma^T x); otherwise the existing non-covariate reader (the
+  per-topic `fractionAboveTau(p, edges, tau)` value, which itself falls back to
+  `corpus_prevalence` when a bundle has no theta histogram). The non-covariate
+  base is exactly today's behavior — this design does not change it.
+- **mask by gating axis:** for a gated bundle the mask is *always* applied for
+  the current `group` (`null` = "Background only" → background topics only;
+  `g` = background ∪ `g`'s foreground). It is not conditional on covariate mode.
+  - On the covariate base: the existing mask-before-softmax
+    (`covariatePrevalenceGated`, renormalized over allowed topics).
+  - On the non-covariate base: a new `maskGroupPrevalence(perTopicValues,
+    topicBlocks, group)` that zeros hidden foreground topics (no renormalization
+    — the base is a per-topic display quantity, not a distribution; matches the
+    existing k-anon non-renormalization rule) and needs no `covariate_effects`.
+- **no gating:** no mask; the base is used directly (today's behavior).
 
 This makes all four quadrants well-defined, including gating-without-covariates.
+
+The absolute-bubble-scale anchoring that shipped for covariate mode (anchor the
+radius domain to a stable per-bundle reference instead of the live max) must be
+keyed on "any conditioning active" — `covariateActive` OR a gated bundle — so
+switching groups in the gating-only and both quadrants does not re-pin the
+largest bubble.
 
 ## Placement
 
@@ -176,13 +188,14 @@ has.
 ### Phenotype Atlas (Phase 1)
 
 Reads the shared context via the composed reader: base prevalence by the
-covariate axis (corpus or covariate-predicted), foreground masked by the group
-axis. A covariates-only bundle uses the covariate base with no mask; a
-gating-only bundle uses the corpus base with the group mask
-(`maskedCorpusPrevalence`); a both-axes bundle uses the masked covariate path; a
-plain bundle uses the corpus base. The absolute domain anchoring already
-shipped. The old `CovariatePanel` is unmounted from the Atlas tab; its control
-widgets are factored out for reuse by the conditioning bar (see file structure).
+covariate axis (non-covariate `fractionAboveTau` base or covariate-predicted),
+foreground masked by the group axis. A covariates-only bundle uses the covariate
+base with no mask; a gating-only bundle uses the non-covariate base with the
+group mask (`maskGroupPrevalence`); a both-axes bundle uses the masked covariate
+path; a plain bundle uses the non-covariate base unchanged. The absolute domain
+anchoring is re-keyed to "any conditioning active" (above). The old
+`CovariatePanel` is unmounted from the Atlas tab; its control widgets are
+factored out for reuse by the conditioning bar (see file structure).
 
 ### Simulator (Phase 3)
 
@@ -205,7 +218,9 @@ button:
     synthetic patient's covariates (and group, for gated bundles) from the
     reported marginals — a realistic, representative cohort.
   - In *use-set* mode, the next regenerate builds a this-subpopulation cohort at
-    the shared context's `values` + `group`.
+    the shared context's `values` + `group`. Use-set reads those fields directly
+    regardless of `covariateActive` (which only governs the Atlas's live
+    display), and applies only the axes the bundle has.
 - **Color-by-group** toggle (gated bundles only): colors the existing cloud by
   each synthetic patient's group. Most informative on a sampled (mixed) cohort.
   Independent of the shared `group` selection.
@@ -215,21 +230,33 @@ group-aware projection are possible without recomputation beyond the regenerate.
 
 ### Marginal sampler (shared by Phase 2/3)
 
-Given a model's `covariate_schema`, sample one covariate set:
+The sampler degrades per axis — it samples only the axes the bundle has.
+
+Covariate axis (only when `covariate_schema` is present):
 
 - categorical: draw a level from `proportions`.
 - continuous: draw from a percentile-based approximation (e.g. a triangular
   distribution peaked at p50 with support [p5, p95]) — a marginal-only
   approximation, independent across covariates, explicitly accepted as good
   enough (no interactions).
+- The sampled raw values become a design vector via the existing
+  `buildDesignVector(design_columns, values)`; the conditioned topic prior reuses
+  `covariate_effects` (the same Gamma rows the Atlas uses).
 
-For gated bundles, the group is drawn from the model's group proportions
-(carried in `gating` / derivable from the per-group counts already used for
-k-anon; if not present, fall back to uniform over `gating.groups` and note it).
-The sampled raw values are turned into a design vector with the existing
-`buildDesignVector(design_columns, values)`; conditioned topic priors reuse
-`covariate_effects` (the same Gamma rows the Atlas uses), masked to the group's
-allowed topics for gated bundles.
+Gating axis (only when `gating` is present):
+
+- draw a group per patient from the model's group proportions, then mask the
+  topic prior to that group's allowed topics. **Group proportions are not in
+  `gating.json` today** (it carries only `group_var`, `groups`, `topic_blocks`);
+  Phase 2 adds a k-anon-safe `group_proportions` map to `gating.json` (computed
+  from the per-group patient counts already used for k-anon, in the same
+  builders), mirroring the categorical `proportions` addition. Until present,
+  the sampler falls back to uniform over `gating.groups` and logs it.
+
+A no-covariate gated model (gated LDA) samples only the group axis and generates
+from the base topic model masked to that group — no covariate conditioning. A
+no-gating covariate model samples only covariates. A plain model samples
+neither (today's generation).
 
 ## Phasing
 
@@ -238,14 +265,15 @@ One spec, three implementation plans, each shippable on its own:
 - **Phase 1 — shared context + global bar + Atlas (both axes):** introduce the
   shared store with independent covariate and group axes, build the conditioning
   bar (independent group section and covariate section, each shown per bundle),
-  add the `maskedCorpusPrevalence` reader so the gating-only quadrant works
+  add the `maskGroupPrevalence` reader so the gating-only quadrant works
   without `covariate_effects`, add the `proportions` export field + population
   readout, repoint the Phenotype Atlas at the composed reader, and unmount the
   old stacked `CovariatePanel`. This delivers the user-visible relocation, the
   axis decoupling (so gated LDA / STM-no-gating render correctly), and is the
   highest-value slice.
-- **Phase 2 — Patient Atlas:** marginal sampler, conditioned regenerate with
-  the sample-vs-set local toggle, per-patient group assignment, color-by-group.
+- **Phase 2 — Patient Atlas:** the `group_proportions` export addition to
+  `gating.json`, the marginal sampler, conditioned regenerate with the
+  sample-vs-set local toggle, per-patient group assignment, color-by-group.
 - **Phase 3 — Simulator:** live conditioning of sampled records on the shared
   context (covariates + group mask), composed with the conditions prefix.
 
@@ -258,11 +286,11 @@ Phase 1 (front-end unless noted):
   `covariateActive` + `values` + `group`); rewrite `prevalenceReader` to compose
   the two axes across the four quadrants (keep thin backward-compatible derived
   exports if it reduces churn in unchanged readers).
-- `dashboard/src/lib/covariate.ts` — add `maskedCorpusPrevalence(corpusPrev,
-  topicBlocks, group)` (zero hidden foreground, no renormalization, no
-  `covariate_effects`) for the gating-only quadrant; existing
-  `covariatePrevalence` / `covariatePrevalenceGated` / `allowedMaskForGroup`
-  unchanged.
+- `dashboard/src/lib/covariate.ts` — add `maskGroupPrevalence(perTopicValues,
+  topicBlocks, group)` (zero hidden foreground topics, no renormalization, no
+  `covariate_effects`) to mask the non-covariate base for the gating-only
+  quadrant; existing `covariatePrevalence` / `covariatePrevalenceGated` /
+  `allowedMaskForGroup` unchanged.
 - `dashboard/src/lib/conditioning/ConditioningBar.svelte` (new) — the bar: the
   independent group section and covariate section (each rendered per bundle),
   reusing the control widgets currently in `atlas/CovariatePanel.svelte`, plus
@@ -284,7 +312,10 @@ Phase 1 (front-end unless noted):
 
 Phase 2/3 add files under `dashboard/src/lib/conditioning/` (the marginal
 sampler) and touch `patient/` and `simulator/` components plus their generation
-helpers (`cohort.ts`, `simulator/runSamples.ts`).
+helpers (`cohort.ts`, `simulator/runSamples.ts`). Phase 2 also adds a k-anon-safe
+`group_proportions` map to `gating.json` via
+`charmpheno/charmpheno/export/gating.py` and both builders (the per-group counts
+are already computed for k-anon).
 
 ## Data flow (Phase 1)
 
@@ -295,8 +326,8 @@ helpers (`cohort.ts`, `simulator/runSamples.ts`).
    writes user input into the `conditioning` store's independent axes.
 3. The store's `prevalenceReader` composes the two axes (quadrant table) and
    feeds the Phenotype Atlas's `TopicMap`. For gating-only bundles it uses
-   `maskedCorpusPrevalence`; for plain bundles it falls through to today's
-   corpus/`fractionAboveTau` path unchanged.
+   `maskGroupPrevalence` over the `fractionAboveTau` base; for plain bundles it
+   falls through to today's `fractionAboveTau` path unchanged.
 4. The population readout derives its strings from `covariate_schema` via
    `population.ts`.
 
@@ -309,8 +340,9 @@ The four quadrants and their degenerate cases:
 - Covariates, no gating (STM) → covariate section only (toggle + sliders +
   readout); no group section.
 - Gating, no covariates at all (gated LDA — no `covariate_schema`/
-  `covariate_effects`) → group section only; the Atlas uses
-  `maskedCorpusPrevalence`. This is the quadrant the earlier design missed.
+  `covariate_effects`) → group section only; the Atlas masks the
+  `fractionAboveTau` base via `maskGroupPrevalence`. This is the quadrant the
+  earlier design missed.
 - Gating and covariates (gated STM) → both sections; the reader masks the
   covariate-predicted prevalence.
 - Gated with intercept-only covariates → group section + (degenerate) covariate
@@ -333,7 +365,7 @@ The four quadrants and their degenerate cases:
 - Reader quadrants: `prevalenceReader` produces the right value in all four
   quadrants — corpus (plain), covariate-predicted (covariates-only), masked
   corpus (gating-only, asserting it never touches `covariate_effects`), and
-  masked covariate-predicted (both). `maskedCorpusPrevalence` is unit-tested
+  masked covariate-predicted (both). `maskGroupPrevalence` is unit-tested
   directly (hidden foreground -> 0, background + selected group preserved, no
   renormalization). The existing `store.covariate.test.ts` continues to pass,
   repointed at the shared store.
