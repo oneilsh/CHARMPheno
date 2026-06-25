@@ -172,7 +172,7 @@ class TestSTMHessian:
         # _spd_inverse's Cholesky fast path relies on. NOTE: the objective is
         # NOT globally convex (data term = log-sum-exp minus log-sum-exp), so H
         # can be indefinite with a weak prior or an early L-BFGS stop; that case
-        # is handled by _spd_inverse / ADR 0028, not asserted away here.
+        # is handled by _spd_inverse / ADR 0029, not asserted away here.
         eigs = np.linalg.eigvalsh(H)
         assert np.all(eigs > 0), f"Hessian not PD: eigs={eigs}"
 

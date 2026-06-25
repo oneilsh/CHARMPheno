@@ -1,4 +1,4 @@
-# 0028 — SPD guard on the STM per-document Laplace Hessian
+# 0029 — SPD guard on the STM per-document Laplace Hessian
 
 **Status:** Accepted
 **Date:** 2026-06-25

@@ -7,8 +7,9 @@
 > Phenotype Atlas, generative sampling on the Patient Atlas and Simulator), and a
 > single global control surfaced that relationship only in hovertext. This
 > revision moves the controls to **per-panel** clusters with **per-panel state**,
-> corrects a factual error about the Patient Atlas (it is a synthetic,
-> client-regenerable cohort, not UMAP-bound), and unifies the generative panels
+> clarifies the Patient Atlas (it is a synthetic, client-regenerable cohort that
+> re-fits its UMAP projection on each regenerate — conditioning applies on
+> regenerate, where that refit already happens), and unifies the generative panels
 > on a shared conditioned prior (see ADR 0028). The internal axis/quadrant work
 > from Phase 1 (the store, the four-quadrant reader, `maskGroupPrevalence`, the
 > `proportions` export, the population readout) is kept as-is.
@@ -260,10 +261,12 @@ the Simulator explicitly recalculates, it carries the full covariate controls.
 ### Patient Atlas
 
 The Patient Atlas builds a **synthetic** cohort client-side (`generateCohort`
-samples from the prior, lays it out with MDS) and already regenerates on demand —
-it is not bound to precomputed coordinates. Conditioning applies on regenerate
-(re-rolling is the natural action; live re-rolling on every slider tick would be
-disorienting). It owns a small local control cluster next to **Regenerate
+samples from the prior; `PatientMap` fits a UMAP projection of the cohort,
+cached in `patientProjection` and reused by the Simulator's mini-atlas) and
+already regenerates on demand. Conditioning applies on regenerate — re-rolling
+the cohort and re-fitting its UMAP already happens there, so no new cost is
+added; live re-rolling on every slider tick would refit UMAP repeatedly and
+reshuffle the cloud. It owns a small local control cluster next to **Regenerate
 cohort**:
 
 - **Sample-vs-set toggle** ("sample from distribution" vs "use set

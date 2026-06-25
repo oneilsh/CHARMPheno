@@ -59,4 +59,4 @@ M-step on λ foreground rows.
   foreground β priors (PheCode/CCS) remain separate, larger options for the
   genuinely data-starved rare-disease regime; see insight 0028.
 - Independent of the Hessian-positive-definiteness guard on the per-document
-  Laplace inverse (ADR 0028), a sibling robustness fix from the same review.
+  Laplace inverse (ADR 0029), a sibling robustness fix from the same review.
