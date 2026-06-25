@@ -46,6 +46,36 @@ class TestSTMModelPersistence:
         assert loaded.model_spec.factor_levels == {"cohort": ["a", "b"]}
         assert loaded.covariate_names == ["intercept", "cohort_b"]
 
+    def test_save_load_roundtrips_gamma_sigma_diagnostic_traces(self, tmp_path: Path):
+        # STMModel.save no longer drops diagnostic_traces: the per-iter 2-D
+        # Gamma + 1-D Sigma + topic-block-label snapshots round-trip.
+        from spark_vi.mllib.topic.stm import STMModel
+        from spark_vi.models.topic.stm import OnlineSTM
+
+        model = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
+        gp = model.initialize_global(None)
+        traces = {
+            "Gamma": [np.full((2, 3), 0.1), np.full((2, 3), 0.2)],   # 2-D
+            "Sigma": [np.ones(3), np.full(3, 0.9)],                   # 1-D
+            "topic_block_labels": [["background", "background", "rare"]] * 2,
+        }
+        stm_model = STMModel(
+            global_params=gp, metadata={"K": 3, "V": 10, "P": 2},
+            model_spec=_FakeSpec(), covariate_names=["intercept", "cohort_b"],
+            diagnostic_traces=traces,
+        )
+        out_dir = tmp_path / "stm_traces"
+        stm_model.save(out_dir)
+        loaded = STMModel.load(out_dir)
+
+        lg = loaded.diagnostic_traces
+        assert set(lg) == {"Gamma", "Sigma", "topic_block_labels"}
+        for got, want in zip(lg["Gamma"], traces["Gamma"]):
+            np.testing.assert_array_equal(got, want)        # 2-D preserved
+        for got, want in zip(lg["Sigma"], traces["Sigma"]):
+            np.testing.assert_array_equal(got, want)
+        assert lg["topic_block_labels"] == traces["topic_block_labels"]
+
     def test_save_load_roundtrips_resume_state(self, tmp_path: Path):
         """n_iterations / elbo_trace / converged must survive save->load so a
         resumed fit continues the Robbins-Monro step counter (rho_t depends on

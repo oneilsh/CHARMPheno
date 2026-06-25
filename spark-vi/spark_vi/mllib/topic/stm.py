@@ -344,11 +344,11 @@ class STMModel:
             elbo_trace=list(self.elbo_trace),
             n_iterations=self.n_iterations,
             converged=self.converged,
-            # Not persisted: STM's per-iteration diagnostics include 2-D Gamma
-            # snapshots that save_result rejects (it handles scalar/1-D traces
-            # only), and resume needs only global_params + n_iterations +
-            # elbo_trace. Dropping them here keeps the on-disk layout valid.
-            diagnostic_traces={},
+            # STM's per-iter diagnostics (2-D Gamma + 1-D Sigma + topic-block
+            # labels) now round-trip: save_result persists ndarrays of any rank
+            # as traces/<name>.npy of shape (n_iter, *dims). These are small
+            # aggregate params (P*K + K floats per iter), safe to carry.
+            diagnostic_traces=dict(self.diagnostic_traces),
         )
         save_result(result, out_dir)
         # Sidecars: formulaic ModelSpec + covariate names list.

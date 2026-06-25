@@ -240,7 +240,7 @@ def test_load_result_legacy_manifest_without_diagnostic_traces(tmp_path):
 
 def test_save_result_round_trips_zero_d_ndarray_as_scalar(tmp_path):
     """0-d ndarrays are semantically scalar and must be classified as such;
-    treating them as "vector" would corrupt the round-trip via np.stack."""
+    treating them as "array" would corrupt the round-trip via np.stack."""
     from spark_vi.core import VIResult
     from spark_vi.io.export import load_result, save_result
 
@@ -261,25 +261,38 @@ def test_save_result_round_trips_zero_d_ndarray_as_scalar(tmp_path):
     assert not (out / "traces").exists()
 
 
-def test_save_result_rejects_high_rank_arrays(tmp_path):
-    """Per-iteration arrays with ndim > 1 are rejected at save time; only
-    scalar or 1-D-array values are supported."""
-    import pytest as _pytest
-
+def test_save_result_round_trips_high_rank_arrays(tmp_path):
+    """Per-iteration arrays of rank >= 2 (e.g. STM's (P, K) Gamma snapshots)
+    persist as traces/<name>.npy of shape (n_iter, *dims) and round-trip
+    element-wise. The framework persists whatever a model emits; suppressing
+    heavy per-iter state is the model's responsibility (return {} / omit key)."""
     from spark_vi.core import VIResult
-    from spark_vi.io.export import save_result
+    from spark_vi.io.export import load_result, save_result
 
+    gamma_trace = [
+        np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]),       # (2, 3)
+        np.array([[0.11, 0.21, 0.31], [0.41, 0.51, 0.61]]),
+    ]
     r = VIResult(
         global_params={"alpha": np.array(1.0)},
         elbo_trace=[-1.0, -0.5],
         n_iterations=2,
         converged=True,
         metadata={},
-        diagnostic_traces={"foo": [np.zeros((2, 3)), np.ones((2, 3))]},
+        diagnostic_traces={"Gamma": gamma_trace},
     )
     out = tmp_path / "high_rank"
-    with _pytest.raises(ValueError, match="ndim=2"):
-        save_result(r, out)
+    save_result(r, out)
+
+    sidecar = out / "traces" / "Gamma.npy"
+    assert sidecar.is_file()
+    assert np.load(sidecar).shape == (2, 2, 3)   # (n_iter, P, K)
+
+    loaded = load_result(out)
+    loaded_gamma = loaded.diagnostic_traces["Gamma"]
+    assert len(loaded_gamma) == 2
+    for got, want in zip(loaded_gamma, gamma_trace):
+        np.testing.assert_array_equal(got, want)
 
 
 def test_save_result_round_trips_json_diagnostic_traces(tmp_path):

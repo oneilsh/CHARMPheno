@@ -35,22 +35,27 @@ _FORMAT_VERSION = 1
 def _classify_trace(name: str, trace: list) -> str:
     """Decide on-disk strategy for a single diagnostic_traces entry.
 
-    Returns "empty", "scalar", "vector", or "json". Raises ValueError if a
-    trace mixes kinds (we don't silently coerce), or if any per-iteration
-    array has rank > 1 (only scalar or 1-D-array values are supported).
+    Returns "empty", "scalar", "array", or "json". Raises ValueError if a
+    trace mixes kinds (we don't silently coerce).
 
     Storage strategy by kind:
         scalar  — inline list of floats in manifest.json.
-        vector  — sidecar traces/<name>.npy of shape (n_iter, dim).
+        array   — sidecar traces/<name>.npy of shape (n_iter, *dims); any
+                  per-iteration ndarray rank is supported (1-D, 2-D, ...).
         json    — wrapped object {"json": [...]} in manifest.json, values
                   stored as-is (must be JSON-serializable).
         empty   — bare empty list in manifest.json.
+
+    No size cap is imposed: emitting a trace is an explicit opt-in (the base
+    iteration_diagnostics returns {}), so heavy per-iter state is a deliberate
+    model choice the framework persists faithfully. A model that should not
+    carry such state suppresses it by returning {} / omitting the key.
     """
     if len(trace) == 0:
         return "empty"
 
     def _kind(x: object) -> str:
-        # 0-d ndarrays are semantically scalar; treating them as "vector"
+        # 0-d ndarrays are semantically scalar; treating them as "array"
         # would corrupt the round-trip via np.stack (which would then yield
         # a 1-D array whose rows are not arrays at all).
         if isinstance(x, np.ndarray) and x.ndim == 0:
@@ -60,7 +65,7 @@ def _classify_trace(name: str, trace: list) -> str:
         if isinstance(x, (int, float, np.floating, np.integer)):
             return "scalar"
         if isinstance(x, np.ndarray):
-            return "vector"
+            return "array"
         return "json"
 
     kinds = {_kind(x) for x in trace}
@@ -69,15 +74,7 @@ def _classify_trace(name: str, trace: list) -> str:
             f"trace {name!r} has mixed value kinds {sorted(kinds)}; each "
             f"trace must be homogeneous across iterations."
         )
-    kind = kinds.pop()
-    if kind == "vector":
-        for x in trace:
-            if isinstance(x, np.ndarray) and x.ndim > 1:
-                raise ValueError(
-                    f"trace {name!r} has elements with ndim={x.ndim}; only "
-                    f"scalar or 1-D-array per-iteration values are supported."
-                )
-    return kind
+    return kinds.pop()
 
 
 def save_result(result: VIResult, out_dir: Path | str) -> None:
@@ -87,12 +84,13 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
       * scalar-valued traces (lists of floats) are stored inline in
         manifest.json under the top-level "diagnostic_traces" key as plain
         JSON lists.
-      * vector-valued traces (1-D per-iter arrays only) are persisted as a
-        2-D array of shape (n_iterations, dim) and written to
-        traces/<name>.npy. The manifest records a small marker dict
-        ``{"file": "traces/<name>.npy"}`` for that key — explicit and self-
-        documenting compared to a sentinel string. Per-iter arrays with
-        ndim > 1 are rejected at save time (YAGNI).
+      * array-valued traces (np.ndarray per iter, any rank) are stacked to
+        shape (n_iterations, *dims) and written to traces/<name>.npy. The
+        manifest records a small marker dict ``{"file": "traces/<name>.npy"}``
+        for that key — explicit and self-documenting compared to a sentinel
+        string. Higher-rank per-iter arrays (e.g. STM's (P, K) Gamma) are
+        supported; the framework persists whatever a model emits, so keeping
+        per-iter state small is the model's responsibility.
       * json-valued traces (anything else JSON-serializable: strings,
         lists, dicts) are stored inline in manifest.json as a wrapped
         marker dict ``{"json": [...]}`` to distinguish them from scalar
@@ -110,7 +108,7 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
     for name, arr in result.global_params.items():
         np.save(params_dir / f"{name}.npy", np.asarray(arr))
 
-    # Split diagnostic_traces by storage strategy. Vector traces go to
+    # Split diagnostic_traces by storage strategy. Array traces go to
     # traces/<name>.npy; scalar (and empty) traces stay inline in JSON.
     diagnostic_traces_manifest: dict = {}
     traces_dir: Path | None = None
@@ -132,7 +130,7 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
                     f"None) are supported for non-numeric diagnostics."
                 ) from exc
             diagnostic_traces_manifest[name] = {"json": list(trace)}
-        else:  # vector
+        else:  # array
             if traces_dir is None:
                 traces_dir = out / "traces"
                 traces_dir.mkdir(exist_ok=True)
