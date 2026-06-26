@@ -12,6 +12,58 @@ elsewhere.
 
 ---
 
+## 2026-06-24..26 — STM branch pre-merge review (8-lesson walkthrough + in-line detours)
+
+End-to-end pre-merge review of the unmerged `stm` branch, which had no prior
+REVIEW_LOG sign-off — the entire branch was new material. Eight-lesson teaching
+walkthrough: (1) STM math core, (2) gating partition, (3) MLlib shim, (4) OMOP
+covariates & doc-spec, (5) export → dashboard data, (6) cloud drivers, (7) local
+harness & experiment tracking, (8) dashboard frontend (brief). Several
+correctness fixes, robustness guards, and DRY refactors shipped as in-line
+detours; the gated-STM rare-phenotype collapse was re-confirmed as the
+prior-family finding (insight 0028), not a bug.
+
+### Engine correctness + robustness (STM)
+
+- **Lazy block updates in the gated M-step** ([ADR 0027](decisions/0027-lazy-block-updates-for-gated-svi-mstep.md), `970d6d5`). A minibatch with no documents for group G was ρ-blending G's foreground Γ/Σ toward a degenerate target (Γ=0 via singular-ridge solve, Σ→floor), systematically shrinking rare groups in proportion to how often minibatches miss them. Now any block with `n_docs_per_topic == 0` skips the ρ-blend. Present-block + no-gating paths byte-identical; also fixes a latent empty-minibatch no-op and a singular per-group solve at `sigma_ridge=0`. The PLDA reference (batch Gibbs/CVB0) never had this; lazy updates restore that invariant under online SVI.
+- **SPD guard on the per-doc Laplace Hessian inverse** ([ADR 0029](decisions/0029-spd-guard-on-stm-laplace-hessian.md), `86fcb5a`). The neg-log-joint is not globally convex (data term = log-sum-exp − log-sum-exp), so H at the L-BFGS point can be indefinite with a weak prior or early stop; the old `inv(H)` + unchecked `slogdet` sign silently yielded a non-SPD covariance. New `_spd_inverse`: Cholesky fast path = `inv(H)` byte-identical in the common PD case, eigenvalue-floor repair otherwise. Dirichlet-family models (LDA/HDP/PLDA) are unaffected (conjugate, no Hessian inversion).
+
+### Framework
+
+- **Diagnostic traces persist faithfully, any rank, no size cap** ([ADR 0030](decisions/0030-diagnostic-traces-persist-faithfully-no-size-cap.md), `e0ffdf0`). `_classify_trace` rejected `ndim>1` (a YAGNI punt), so `STMModel.save` dropped its 2-D Γ traces wholesale. Lifted the rejection (save/load were already shape-agnostic), renamed the internal kind `"vector"`→`"array"`, un-dropped STM's Γ/Σ/label trajectories. No size cap (emission is opt-in; suppression is the model's job); safe by construction — diagnostics receive only `global_params`, and the checkpoint is separate from the whitelisted egress bundle.
+
+### Dashboard export + build
+
+- **Distributed gated corpus-mean prevalence** (`46f04af`). The gated dashboard-prevalence path collected the full covariate design matrix to the driver (`toPandas`+`vstack`+loop) and discarded the result at the call site. New `corpus_mean_topic_proportions_gated_rdd` (mapPartitions+treeReduce, broadcast Γ+partition, per-doc masked softmax) + a charmpheno wrapper; driver gated branch swapped, output identical to the pure-numpy oracle (pinned by a distributed-vs-oracle test). Prevalence semantics confirmed stable first (ADR 0028 conditions client-side from Γ; the cross-tab spec leaves the model export untouched).
+- **STM Σ export** (`a0d10f6`) + **faithful-sampling hand-off** (`c782fd5`). `model.json` now carries `"sigma"` (per-topic diagonal Σ) iff STM, for the dashboard's future faithful logistic-normal sampler (ADR 0028 Alternative B). Server half is conflict-free; the client JS half is specced for the dashboard front-end in `docs/superpowers/specs/2026-06-25-faithful-stm-sampling-handoff.md`.
+- **Rename `dashboard.adapt_stm` → `write_covariate_effects`** (`7e4ab79`). Two functions were named `adapt_stm` (the `model_adapter` DashboardExport builder vs. the Γ-sidecar writer); both build drivers had aliased the latter on import. `model_adapter.adapt_stm` kept.
+- **Export `PatientCohortDocSpec`** (`cb0aa3c`) — the registered gating doc-spec was missing from `omop/__init__.__all__`.
+
+### Driver DRY refactor
+
+- **Topic-evolution logger extraction** (plan `87c17cc`, helper `3f67a72`, drivers `f506a5a`, cleanups `0b7effc`/`14889fa`). The λ→{row sums, peak, mass fraction, top-N indices+probs} math was triplicated across the LDA/STM/HDP cloud-driver loggers; this completes the refactor parked in the 2026-05-28 entry ("defer until STM is the third data point"), now triggered. The math moved to one tested `spark_vi.models.topic.diagnostics.topic_word_summary`; drivers keep model-specific annotation (LDA α, STM block label, HDP stick ordering) + OMOP vocab labeling + formatting (engine stays domain-agnostic). Byte-identical output; net −14 LOC. Executed via writing-plans → subagent-driven-development (parallel edit-only subagents, reviewed + committed centrally).
+
+### Pre-existing issues caught
+
+- **`UnboundLocalError: 'F'` in `eval_coherence_cloud.py`** — a redundant function-local `from pyspark.sql import functions as F` shadowed the module-level `F`. Fixed earlier in-session (single module-level import) and reviewed in Lesson 6; pinned by a `co_names`/`co_varnames` regression test guarding the whole inner-import-shadows-global class.
+- **"is convex" overclaim** in `test_stm_math.py::test_hessian_positive_definite_at_typical_point` — the objective is not globally convex; comment corrected alongside ADR 0029.
+- **`adapt_stm` name collision** and **`PatientCohortDocSpec` export gap** — both fixed (above).
+
+### Threads parked
+
+- **Continued fitting on NEW document sets** — true online learning on fresh data is a legitimate future capability, distinct from today's resume-the-same-corpus (whose guard correctly refuses corpus mismatch as silent corruption). Not relevant to the current experiment drivers; would be an explicit, separate mode (new docs, same vocab/K).
+- **Faithful STM client sampler** (ADR 0028-B) — server Σ export done; client JS half handed off (spec above).
+- **Dirichlet visualization approximation** (ADR 0028) — the dashboard's client samplers use a mean-matched Dirichlet, so STM *simulation* panels render more peaked/sparse than true STM; they are illustrative, not diagnostic — rare-phenotype recovery should be read from the fit (NPMI / peak-β). Self-resolving for the gated-LDA direction (Dirichlet is faithful there).
+- **`build_topic_block_partition` CLI parse** — could become a `TopicBlockPartition.from_foreground_spec` classmethod; deliberately NOT moved into spark-vi (CLI-format-specific).
+- **Gated LDA (PLDA) build** per `docs/superpowers/plans/2026-06-24-gated-lda-plda-model.md` — the next major arc after merge; the lazy-block-update gate ports to its λ M-step.
+
+### New ADRs / docs
+
+- ADRs 0027, 0029, 0030 (ADR 0028 is a concurrent-thread dashboard ADR; the SPD-guard ADR was authored as 0028 then renumbered to 0029 to avoid the collision).
+- `docs/superpowers/specs/2026-06-25-faithful-stm-sampling-handoff.md`; `docs/superpowers/plans/2026-06-26-topic-evolution-logger-extraction.md`.
+
+---
+
 ## 2026-05-29 — Experiment tracking Inc 2 / 2.5 / 3 + pilot validations + summary-tail (scoped walkthrough)
 
 Five-lesson scoped walkthrough of the experiment-tracking wrapper's evolution
