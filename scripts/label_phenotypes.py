@@ -134,22 +134,151 @@ learned topic is about the filter condition.
 def _build_system_prompt(
     *,
     max_words: int,
-    alpha_histogram_str: str,
     kl_histogram_str: str,
-    alpha_min: float,
-    alpha_median: float,
-    alpha_max: float,
     kl_min: float,
     kl_median: float,
     kl_max: float,
     kl_dead_threshold: float,
     kl_dead_threshold_explanation: str,
-    alpha_separates_well: bool,
+    has_alpha: bool = True,
+    alpha_histogram_str: str | None = None,
+    alpha_min: float | None = None,
+    alpha_median: float | None = None,
+    alpha_max: float | None = None,
+    alpha_separates_well: bool | None = None,
     cohort: dict[str, str] | None = None,
 ) -> str:
     # All substitutions happen once per run so the resulting string is
     # byte-identical across topics (enabling prompt caching).
+    #
+    # The mass signal that disambiguates `background` (absorbs real corpus
+    # mass) from `dead` (no mass) among low-KL topics is model-dependent:
+    #   - Dirichlet models (LDA/HDP): the per-topic asymmetric-α prior weight.
+    #   - logistic-normal (STM): no per-topic α, so we use the posterior
+    #     corpus mass share (the `usage` stat) — a more direct mass signal.
+    # KL stays the PRIMARY classifier in both regimes; only the supporting
+    # disambiguator text below swaps. See insight 0024 (rubric blind spots).
     cohort_block = _build_cohort_context_block(cohort)
+    supporting_signal_name = "α" if has_alpha else "corpus mass"
+    low_mass_phrase = "α near floor" if has_alpha else "near-zero corpus mass"
+    low_usage_real_clause = (
+        "a low-usage topic with α well above floor and high KL"
+        if has_alpha
+        else "a low-usage topic with high KL"
+    )
+    mixed_signal_clause = "α above floor" if has_alpha else "the topic carries mass"
+    if has_alpha:
+        background_ii = """\
+  (ii) **KL is at or below the dead threshold BUT α is well above \
+median (typically 3× median or higher, often the fit's α-max).** This \
+is the universal-symptom or chronic-comorbidity catch-all topic that \
+absorbs every patient's baseline coding load. Its top-N looks like \
+corpus marginal (low KL) precisely because every doc loads heavily on \
+it (high α) — that's the topic's job. Calling such a topic `dead` \
+would mis-label something carrying 10–70% of total corpus mass."""
+    else:
+        background_ii = """\
+  (ii) **KL is at or below the dead threshold BUT corpus mass is high \
+(a large share of total token mass).** This \
+is the universal-symptom or chronic-comorbidity catch-all topic that \
+absorbs every patient's baseline coding load. Its top-N looks like \
+corpus marginal (low KL) precisely because every doc loads heavily on \
+it (high corpus mass) — that's the topic's job. Calling such a topic \
+`dead` would mis-label something carrying 10–70% of total corpus mass."""
+
+    if has_alpha:
+        mass_signal_section = f"""\
+**alpha (α) — supporting signal only on this fit.** α is the per-topic \
+asymmetric-Dirichlet prior weight; in theory the optimizer pushes α \
+down for unused slots and up for used ones. In practice on this fit \
+the α distribution is heavily compressed (most topics sit in a tight \
+band near the minimum), so α alone CANNOT reliably distinguish dead \
+from used.
+
+α distribution across this fit:
+{alpha_histogram_str}
+  min = {alpha_min:.4f}, median = {alpha_median:.4f}, max = {alpha_max:.4f}
+
+**Do NOT classify a topic as `dead` based on α alone.** Many real \
+rare-condition phenotypes on this fit have α near the floor but KL in \
+the top quartile (highly distinct from corpus). KL is the trustworthy \
+signal. Use α only as a soft cross-check: α well above the median \
+combined with high KL strengthens the case for a real topic, but α \
+near floor is meaningless on its own."""
+        dead_case_a = f"""\
+  (a) KL ≤ {kl_dead_threshold:.3f} AND α near floor → the topic's word \
+      distribution is essentially the corpus marginal AND the topic \
+      carries little doc mass (unused slot whose top-N is η-smoothing \
+      noise approximating common-word baseline). This is the \
+      low-KL-low-α case. **If α is well above median (3×+ median), \
+      see `background` instead — the topic absorbs real mass and \
+      should not be called dead just because its top-N matches the \
+      corpus marginal.**"""
+        dead_case_b = """\
+  (b) KL above the threshold BUT the top-N is genuinely incoherent — \
+      rare scattered concepts with no shared theme and no clinical \
+      story (case a from the prior framing, unused slot whose top-N \
+      is η-smoothing noise of rare concepts). Rarer than (a). α near \
+      floor + low NPMI strengthens this case but is not required."""
+        step1_disambiguator = f"""\
+1. **Check KL against the dead threshold.** If KL ≤ \
+{kl_dead_threshold:.3f}, the topic's word distribution is the corpus \
+marginal — now check α to disambiguate:
+   - **α well above median (3×+ median, often the fit's α-max)** → \
+`background`. This is the universal-symptom or chronic-comorbidity \
+catch-all that absorbs real corpus mass (every doc loads on it). \
+Stop.
+   - **α at or near floor** → `dead` (case a — low-KL-low-α, unused \
+slot whose top-N is η-smoothing noise). Stop.
+The disambiguator is purely α-magnitude. KL ≤ threshold + high α = \
+real mass-bearing baseline (background); KL ≤ threshold + floor α = \
+no mass and no signal (dead)."""
+    else:
+        mass_signal_section = """\
+**Topic mass (`usage`) — supporting signal only.** This model has no \
+per-topic Dirichlet prior (α). The posterior signal for how much a \
+topic is actually used is its **corpus mass share** — the `usage` \
+stat in each topic's message (the percent of total corpus token mass \
+the topic carries). A topic that absorbs a large share of corpus mass \
+is doing real work even if its top words look generic; a topic with \
+near-zero mass is an unused slot.
+
+**Do NOT classify a topic as `dead` based on corpus mass alone.** Many \
+real rare-condition phenotypes carry little corpus mass but have KL in \
+the top quartile (highly distinct from corpus). KL is the trustworthy \
+signal. Use corpus mass only as a soft cross-check: high mass with low \
+KL points to a background catch-all, while near-zero mass with low KL \
+points to a dead slot."""
+        dead_case_a = f"""\
+  (a) KL ≤ {kl_dead_threshold:.3f} AND near-zero corpus mass → the \
+      topic's word distribution is essentially the corpus marginal AND \
+      the topic carries little mass (unused slot whose top-N is \
+      η-smoothing noise approximating common-word baseline). This is \
+      the low-KL-low-mass case. **If corpus mass is high, see \
+      `background` instead — the topic absorbs real mass and should \
+      not be called dead just because its top-N matches the corpus \
+      marginal.**"""
+        dead_case_b = """\
+  (b) KL above the threshold BUT the top-N is genuinely incoherent — \
+      rare scattered concepts with no shared theme and no clinical \
+      story (case a from the prior framing, unused slot whose top-N \
+      is η-smoothing noise of rare concepts). Rarer than (a). \
+      near-zero corpus mass + low NPMI strengthens this case but is \
+      not required."""
+        step1_disambiguator = f"""\
+1. **Check KL against the dead threshold.** If KL ≤ \
+{kl_dead_threshold:.3f}, the topic's word distribution is the corpus \
+marginal — now check corpus mass (`usage`) to disambiguate:
+   - **High corpus mass (a large share of total token mass)** → \
+`background`. This is the universal-symptom or chronic-comorbidity \
+catch-all that absorbs real corpus mass (every doc loads on it). \
+Stop.
+   - **Near-zero corpus mass** → `dead` (case a — low-KL-low-mass, \
+unused slot whose top-N is η-smoothing noise). Stop.
+The disambiguator is corpus mass share. KL ≤ threshold + high mass = \
+real mass-bearing baseline (background); KL ≤ threshold + near-zero \
+mass = no mass and no signal (dead)."""
+
     return f"""\
 You are a clinical informatics expert interpreting learned topics from \
 an LDA topic model trained over patient records. Each topic is a \
@@ -204,25 +333,9 @@ learned-topic cluster (higher KL):
 Topics with KL above this threshold may still be `dead` (case a — \
 unused slot with random rare top-N) but only if the top-N is genuinely \
 incoherent. Topics with KL well above the threshold and a coherent \
-top-N are real, regardless of α.
+top-N are real, regardless of {supporting_signal_name}.
 
-**alpha (α) — supporting signal only on this fit.** α is the per-topic \
-asymmetric-Dirichlet prior weight; in theory the optimizer pushes α \
-down for unused slots and up for used ones. In practice on this fit \
-the α distribution is heavily compressed (most topics sit in a tight \
-band near the minimum), so α alone CANNOT reliably distinguish dead \
-from used.
-
-α distribution across this fit:
-{alpha_histogram_str}
-  min = {alpha_min:.4f}, median = {alpha_median:.4f}, max = {alpha_max:.4f}
-
-**Do NOT classify a topic as `dead` based on α alone.** Many real \
-rare-condition phenotypes on this fit have α near the floor but KL in \
-the top quartile (highly distinct from corpus). KL is the trustworthy \
-signal. Use α only as a soft cross-check: α well above the median \
-combined with high KL strengthens the case for a real topic, but α \
-near floor is meaningless on its own.
+{mass_signal_section}
 
 Two more contextual stats:
 
@@ -234,8 +347,8 @@ cleared the joint-count threshold. Low coverage = NPMI averaged over \
 few pairs and less reliable.
 - **usage** (% of corpus mass): how much of the corpus this topic \
 carries. Useful for distinguishing real catch-alls (high usage) from \
-narrow phenotypes (lower usage), but a low-usage topic with α \
-well above floor and high KL is still a real phenotype.
+narrow phenotypes (lower usage), but {low_usage_real_clause} \
+is still a real phenotype.
 
 ## Quality categories
 
@@ -245,7 +358,7 @@ Classify each topic into exactly one of:
 share a coherent clinical theme. The common case for clinically useful \
 topics; usage can range from <1% (rare condition) to several percent \
 (common condition) — usage does NOT disqualify a topic from being a \
-phenotype, and neither does α near floor on its own. KL is what \
+phenotype, and neither does {low_mass_phrase} on its own. KL is what \
 matters.
 
 - **background** — Two recognized patterns:
@@ -253,13 +366,7 @@ matters.
 max) AND top concepts are common comorbidities or generic acute \
 symptoms (e.g. HTN/HLD/T2DM/GERD/anxiety; or pain/chest pain/nausea/ \
 SoB/vomiting).
-  (ii) **KL is at or below the dead threshold BUT α is well above \
-median (typically 3× median or higher, often the fit's α-max).** This \
-is the universal-symptom or chronic-comorbidity catch-all topic that \
-absorbs every patient's baseline coding load. Its top-N looks like \
-corpus marginal (low KL) precisely because every doc loads heavily on \
-it (high α) — that's the topic's job. Calling such a topic `dead` \
-would mis-label something carrying 10–70% of total corpus mass.
+{background_ii}
 Either pattern: the topic carries real data but the pattern is the \
 corpus's chronic or acute baseline, useful for cohort *exclusion*, \
 not selection.
@@ -267,7 +374,7 @@ not selection.
 - **anchor** — one concept dominates both rankings; the topic \
 essentially names that concept.
 
-- **mixed** — α above floor BUT the two rankings together span \
+- **mixed** — {mixed_signal_clause} BUT the two rankings together span \
 **clinically unrelated** themes with no single clinical story. \
 Includes the **topic-merging** case: two distinct themes share one \
 slot due to insufficient model capacity.
@@ -300,19 +407,8 @@ two halves require unrelated mechanisms or just happen to land in the \
 same topic, it is `mixed`.
 
 - **dead** — either:
-  (a) KL ≤ {kl_dead_threshold:.3f} AND α near floor → the topic's word \
-      distribution is essentially the corpus marginal AND the topic \
-      carries little doc mass (unused slot whose top-N is η-smoothing \
-      noise approximating common-word baseline). This is the \
-      low-KL-low-α case. **If α is well above median (3×+ median), \
-      see `background` instead — the topic absorbs real mass and \
-      should not be called dead just because its top-N matches the \
-      corpus marginal.**
-  (b) KL above the threshold BUT the top-N is genuinely incoherent — \
-      rare scattered concepts with no shared theme and no clinical \
-      story (case a from the prior framing, unused slot whose top-N \
-      is η-smoothing noise of rare concepts). Rarer than (a). α near \
-      floor + low NPMI strengthens this case but is not required.
+{dead_case_a}
+{dead_case_b}
 Either way: no useful clinical interpretation AND no significant mass.
 
 ## Decision order
@@ -320,18 +416,7 @@ Either way: no useful clinical interpretation AND no significant mass.
 To avoid rationalizing a label first and then picking a quality, \
 classify in this order:
 
-1. **Check KL against the dead threshold.** If KL ≤ \
-{kl_dead_threshold:.3f}, the topic's word distribution is the corpus \
-marginal — now check α to disambiguate:
-   - **α well above median (3×+ median, often the fit's α-max)** → \
-`background`. This is the universal-symptom or chronic-comorbidity \
-catch-all that absorbs real corpus mass (every doc loads on it). \
-Stop.
-   - **α at or near floor** → `dead` (case a — low-KL-low-α, unused \
-slot whose top-N is η-smoothing noise). Stop.
-The disambiguator is purely α-magnitude. KL ≤ threshold + high α = \
-real mass-bearing baseline (background); KL ≤ threshold + floor α = \
-no mass and no signal (dead).
+{step1_disambiguator}
 2. Check whether one concept dominates both rankings → `anchor`.
 3. **Check for background BEFORE checking for mixed.** If top \
 concepts are HTN/HLD/T2DM/GERD/anxiety/obesity for chronic catch-all, \
@@ -574,32 +659,41 @@ def _build_agent(
             f"Supported: google-gla, openai, anthropic."
         )
 
-    sorted_a = sorted(alpha_arr)
+    # alpha_arr is None for models with no per-topic Dirichlet prior (STM);
+    # the system prompt then uses corpus mass (`usage`) as the supporting
+    # background/dead disambiguator instead of α-magnitude.
+    has_alpha = alpha_arr is not None
     sorted_k = sorted(kl_arr)
-    K = len(alpha_arr)
-    a_min, a_max = sorted_a[0], sorted_a[-1]
+    K = len(kl_arr)
     k_min, k_max = sorted_k[0], sorted_k[-1]
-    a_med = sorted_a[K // 2]
     k_med = sorted_k[K // 2]
-    alpha_hist = _format_histogram(
-        _histogram(alpha_arr, n_bins=10), fmt=".4f",
-    )
     kl_hist = _format_histogram(
         _histogram(kl_arr, n_bins=12), fmt=".2f",
     )
+    sp_kwargs = dict(
+        max_words=max_words,
+        kl_histogram_str=kl_hist,
+        kl_min=k_min, kl_median=k_med, kl_max=k_max,
+        kl_dead_threshold=kl_dead_threshold,
+        kl_dead_threshold_explanation=kl_dead_threshold_explanation,
+        has_alpha=has_alpha,
+        cohort=cohort,
+    )
+    if has_alpha:
+        sorted_a = sorted(alpha_arr)
+        a_min, a_max = sorted_a[0], sorted_a[-1]
+        a_med = sorted_a[K // 2]
+        alpha_hist = _format_histogram(
+            _histogram(alpha_arr, n_bins=10), fmt=".4f",
+        )
+        sp_kwargs.update(
+            alpha_histogram_str=alpha_hist,
+            alpha_min=a_min, alpha_median=a_med, alpha_max=a_max,
+            alpha_separates_well=alpha_separates_well,
+        )
     return Agent(
         model,
-        system_prompt=_build_system_prompt(
-            max_words=max_words,
-            alpha_histogram_str=alpha_hist,
-            kl_histogram_str=kl_hist,
-            alpha_min=a_min, alpha_median=a_med, alpha_max=a_max,
-            kl_min=k_min, kl_median=k_med, kl_max=k_max,
-            kl_dead_threshold=kl_dead_threshold,
-            kl_dead_threshold_explanation=kl_dead_threshold_explanation,
-            alpha_separates_well=alpha_separates_well,
-            cohort=cohort,
-        ),
+        system_prompt=_build_system_prompt(**sp_kwargs),
         output_type=PhenotypeLabel,
     )
 
@@ -870,7 +964,7 @@ def _build_user_message(
     phenotype_id: int,
     top_by_freq: list[dict],
     top_by_lift: list[dict],
-    alpha: float,
+    alpha: float | None,
     kl: float,
     npmi: float,
     pair_coverage: float,
@@ -879,13 +973,21 @@ def _build_user_message(
 ) -> str:
     # Stats are listed in decision order (alpha and KL first — the
     # primary classifiers — then the supporting contextual stats).
+    # alpha is None for models with no per-topic Dirichlet prior (STM);
+    # the line is omitted and the system prompt directs the model to the
+    # corpus-mass `usage` stat instead.
     lines = [
         f"Topic id: {phenotype_id}",
         f"Label budget: at most {max_words} words.",
         "",
         "Distinctiveness statistics (primary classifiers):",
-        f"  alpha:           {alpha:.4f}    "
-        f"(check against the fit's min/floor in the system prompt)",
+    ]
+    if alpha is not None:
+        lines.append(
+            f"  alpha:           {alpha:.4f}    "
+            f"(check against the fit's min/floor in the system prompt)"
+        )
+    lines += [
         f"  KL(beta||corpus): {kl:.3f}    "
         f"(check against the fit's min/median/max in the system prompt)",
         "",
@@ -913,7 +1015,7 @@ def _label_one(
     phenotype_id: int,
     top_by_freq: list[dict],
     top_by_lift: list[dict],
-    alpha: float,
+    alpha: float | None,
     kl: float,
     npmi: float,
     pair_coverage: float,
@@ -1049,15 +1151,19 @@ def main(argv: list[str] | None = None) -> int:
             f"beta rows are not all width {V_disp} (the displayed vocab "
             f"size); is this a pre-trim bundle?",
         )
-    if not alpha_arr or len(alpha_arr) != K:
+    # alpha is OPTIONAL: only Dirichlet-family models (LDA/HDP) have a
+    # per-topic prior weight. STM (logistic-normal) has none, in which case
+    # the rubric uses corpus mass (`usage`) as the background/dead
+    # disambiguator. A present-but-wrong-length alpha is a malformed bundle.
+    has_alpha = alpha_arr is not None
+    if has_alpha and len(alpha_arr) != K:
         raise SystemExit(
-            f"model.json missing 'alpha' array of length {K}; the labeling "
-            f"rubric needs the per-topic Dirichlet prior weights to detect "
-            f"floor-α (dead) topics.",
+            f"model.json 'alpha' array has length {len(alpha_arr)}, expected "
+            f"{K} (one per topic); is this a stale or mismatched bundle?",
         )
 
     # Per-topic distinctiveness signals.
-    #   alpha[k] reflects the asymmetric-α optimizer's verdict on topic k.
+    #   alpha[k] (when present) reflects the asymmetric-α optimizer's verdict.
     #   KL(β[k]||p(w)) reflects how far the topic departs from the corpus
     #     marginal — low KL = baseline pseudo-coherent (dead case b).
     corpus_freq_disp = [c.get("corpus_freq", 0.0) for c in vocab_codes]
@@ -1065,8 +1171,6 @@ def main(argv: list[str] | None = None) -> int:
         _kl_div_topic_vs_corpus(beta[k], corpus_freq_disp)
         for k in range(K)
     ]
-    alpha_arr = [float(a) for a in alpha_arr]
-    alpha_sorted = sorted(alpha_arr)
     kl_sorted = sorted(kl_arr)
 
     def _median(xs: list[float]) -> float:
@@ -1078,25 +1182,39 @@ def main(argv: list[str] | None = None) -> int:
             return xs[mid]
         return 0.5 * (xs[mid - 1] + xs[mid])
 
-    a_min, a_med, a_max = alpha_sorted[0], _median(alpha_sorted), alpha_sorted[-1]
     k_min, k_med, k_max = kl_sorted[0], _median(kl_sorted), kl_sorted[-1]
 
-    # KL is the primary classifier on this fit (α's range is typically
-    # too compressed for α-near-floor to be a reliable dead signal).
-    # Compute the data-driven KL dead threshold from the natural valley
-    # in the lower half of the KL distribution.
+    # KL is the primary classifier (α's range is typically too compressed
+    # for α-near-floor to be a reliable dead signal, and STM has no α at
+    # all). Compute the data-driven KL dead threshold from the natural
+    # valley in the lower half of the KL distribution.
     kl_dead_threshold, kl_threshold_explanation = _kl_recommended_threshold(kl_arr)
     n_kl_below = sum(1 for v in kl_arr if v <= kl_dead_threshold)
-    # α "separates well" when the elevated cluster is clearly above
-    # the floor cluster — a heuristic, currently not used to gate
-    # behavior (the prompt always demotes α to supporting), but logged.
-    alpha_separates_well = (a_max / max(a_min, 1e-9)) >= 2.5
 
-    print(
-        f"[label] alpha[K={K}] min={a_min:.4f} median={a_med:.4f} "
-        f"max={a_max:.4f} (separates_well={alpha_separates_well})",
-        flush=True,
-    )
+    if has_alpha:
+        alpha_arr = [float(a) for a in alpha_arr]
+        alpha_sorted = sorted(alpha_arr)
+        a_min, a_med, a_max = (
+            alpha_sorted[0], _median(alpha_sorted), alpha_sorted[-1],
+        )
+        # α "separates well" when the elevated cluster is clearly above
+        # the floor cluster — a heuristic, currently not used to gate
+        # behavior (the prompt always demotes α to supporting), but logged.
+        alpha_separates_well = (a_max / max(a_min, 1e-9)) >= 2.5
+        print(
+            f"[label] alpha[K={K}] min={a_min:.4f} median={a_med:.4f} "
+            f"max={a_max:.4f} (separates_well={alpha_separates_well})",
+            flush=True,
+        )
+    else:
+        alpha_arr = None
+        alpha_separates_well = False
+        print(
+            "[label] no per-topic alpha in bundle (STM / non-Dirichlet) — "
+            "using corpus mass (usage) as the background/dead disambiguator",
+            flush=True,
+        )
+
     print(
         f"[label] KL(beta||corpus)[K={K}] min={k_min:.3f} median={k_med:.3f} "
         f"max={k_max:.3f}",
@@ -1161,7 +1279,7 @@ def main(argv: list[str] | None = None) -> int:
             print(_build_user_message(
                 phenotype_id=i,
                 top_by_freq=top_freq, top_by_lift=top_lift,
-                alpha=alpha_arr[i], kl=kl_arr[i],
+                alpha=(alpha_arr[i] if has_alpha else None), kl=kl_arr[i],
                 npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
                 max_words=args.max_words,
             ), flush=True)
@@ -1205,7 +1323,7 @@ def main(argv: list[str] | None = None) -> int:
                 agent=agent,
                 phenotype_id=i,
                 top_by_freq=top_freq, top_by_lift=top_lift,
-                alpha=alpha_arr[i], kl=kl_arr[i],
+                alpha=(alpha_arr[i] if has_alpha else None), kl=kl_arr[i],
                 npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
                 max_words=args.max_words,
             )
