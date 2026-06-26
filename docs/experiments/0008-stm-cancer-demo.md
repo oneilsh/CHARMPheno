@@ -7,7 +7,7 @@ cohort: cancer
 cohort_def: first_cancer_year
 prior_obs_days: 0
 person_mod: 4
-doc_unit: patient_cohort
+doc_unit: patient
 covariate_formula: "~ C(sex) + age"
 categorical_cols: [sex]
 continuous_cols: [age]
