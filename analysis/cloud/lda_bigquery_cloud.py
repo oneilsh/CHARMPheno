@@ -60,29 +60,23 @@ def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id):
                  _: list[float]) -> None:
         if every_n <= 0 or iter_num % every_n != 0:
             return
+        from spark_vi.models.topic.diagnostics import topic_word_summary
         lam = global_params["lambda"]                         # (K, V)
         alpha = global_params["alpha"]                        # (K,)
-        lam_row_sums = lam.sum(axis=1)                        # (K,)
-        E_beta = lam_row_sums / max(lam_row_sums.sum(), 1e-12)  # (K,)
-        peak = lam.max(axis=1) / np.maximum(lam_row_sums, 1e-12)
-        topics = lam / lam_row_sums[:, None]                  # row-stochastic
-        # Sort topics by Σλ_k descending so the heaviest topics are listed
-        # first. The k label printed on each line is the topic's native
-        # index (stable across iterations), so a topic moving up or down
-        # the ranking is a meaningful signal.
-        order = np.argsort(lam_row_sums)[::-1]
+        s = topic_word_summary(lam, top_n)
+        # Heaviest topics first; printed k is the native (stable) index, so a
+        # topic moving up/down the Σλ ranking across iters is a real signal.
+        order = np.argsort(s["row_sums"])[::-1]
         print(f"[driver]   --- topics @ iter {iter_num} ---", flush=True)
         for k in order:
-            top = topics[k].argsort()[::-1][:top_n]
             terms = ", ".join(
-                f"{name_by_id.get(idx_to_cid[int(j)], '?')[:24]}"
-                f"({topics[k, int(j)]:.3f})"
-                for j in top
+                f"{name_by_id.get(idx_to_cid[int(j)], '?')[:24]}({p:.3f})"
+                for j, p in zip(s["top_indices"][k], s["top_probs"][k])
             )
             print(
                 f"[driver]    topic {k:>2}  "
-                f"α={alpha[k]:.4g}  E[β]={E_beta[k]:.4f}  "
-                f"Σλ={lam_row_sums[k]:.3g}  peak={peak[k]:.3f}  | {terms}",
+                f"α={alpha[k]:.4g}  E[β]={s['mass_fraction'][k]:.4f}  "
+                f"Σλ={s['row_sums'][k]:.3g}  peak={s['peak'][k]:.3f}  | {terms}",
                 flush=True,
             )
     return _on_iter

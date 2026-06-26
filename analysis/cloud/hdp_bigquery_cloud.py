@@ -58,31 +58,28 @@ def _make_topic_evolution_logger(
                  _: list[float]) -> None:
         if every_n <= 0 or iter_num % every_n != 0:
             return
+        from spark_vi.models.topic.diagnostics import topic_word_summary
         lam = global_params["lambda"]                         # (T, V)
         u = global_params["u"]                                # (T-1,)
         v = global_params["v"]                                # (T-1,)
         E_beta = expected_corpus_betas(u, v, T=T)
         n_active = topic_count_at_mass(E_beta, mass_threshold)
         order = [int(t) for t in np.argsort(E_beta)[::-1][:n_active]]
-        lam_row_sums = lam.sum(axis=1)
-        peak = lam.max(axis=1) / np.maximum(lam_row_sums, 1e-12)
-        topics = lam / np.maximum(lam_row_sums[:, None], 1e-12)
+        s = topic_word_summary(lam, top_n)
         print(
             f"[driver]   --- topics @ iter {iter_num} "
             f"({n_active}/{T} active) ---",
             flush=True,
         )
         for t in order:
-            top = topics[t].argsort()[::-1][:top_n]
             terms = ", ".join(
-                f"{name_by_id.get(idx_to_cid[int(j)], '?')[:24]}"
-                f"({topics[t, int(j)]:.3f})"
-                for j in top
+                f"{name_by_id.get(idx_to_cid[int(j)], '?')[:24]}({p:.3f})"
+                for j, p in zip(s["top_indices"][t], s["top_probs"][t])
             )
             print(
                 f"[driver]    topic {t:>3}  "
-                f"E[β]={E_beta[t]:.4f}  Σλ={lam_row_sums[t]:.3g}  "
-                f"peak={peak[t]:.3f}  | {terms}",
+                f"E[β]={E_beta[t]:.4f}  Σλ={s['row_sums'][t]:.3g}  "
+                f"peak={s['peak'][t]:.3f}  | {terms}",
                 flush=True,
             )
     return _on_iter

@@ -42,29 +42,24 @@ def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id,
     def _on_iter(iter_num: int, global_params: dict, _: list[float]) -> None:
         if every_n <= 0 or iter_num % every_n != 0:
             return
+        from spark_vi.models.topic.diagnostics import topic_word_summary
         lam = global_params["lambda"]                          # (K, V)
-        lam_row_sums = lam.sum(axis=1)                         # (K,)
-        E_beta = lam_row_sums / max(lam_row_sums.sum(), 1e-12)  # (K,)
-        peak = lam.max(axis=1) / np.maximum(lam_row_sums, 1e-12)
-        topics = lam / lam_row_sums[:, None]                  # row-stochastic
-        # Heaviest topics first; the printed k is the native (stable) index, so
-        # a topic moving up/down the Σλ ranking across iters is a real signal.
-        order = np.argsort(lam_row_sums)[::-1]
+        s = topic_word_summary(lam, top_n)
+        # Heaviest topics first; printed k is the native (stable) index.
+        order = np.argsort(s["row_sums"])[::-1]
         print(f"[driver]   --- topics @ iter {iter_num} ---", flush=True)
         for k in order:
             ki = int(k)
-            top = topics[ki].argsort()[::-1][:top_n]
             terms = ", ".join(
-                f"{name_by_id.get(idx_to_cid[int(j)], '?')[:24]}"
-                f"({topics[ki, int(j)]:.3f})"
-                for j in top
+                f"{name_by_id.get(idx_to_cid[int(j)], '?')[:24]}({p:.3f})"
+                for j, p in zip(s["top_indices"][ki], s["top_probs"][ki])
             )
             blk = (f" [{topic_labels[ki]:>10.10}]"
                    if topic_labels is not None else "")
             print(
                 f"[driver]    topic {ki:>2}{blk}  "
-                f"E[β]={E_beta[ki]:.4f}  Σλ={lam_row_sums[ki]:.3g}  "
-                f"peak={peak[ki]:.3f}  | {terms}",
+                f"E[β]={s['mass_fraction'][ki]:.4f}  Σλ={s['row_sums'][ki]:.3g}  "
+                f"peak={s['peak'][ki]:.3f}  | {terms}",
                 flush=True,
             )
     return _on_iter
