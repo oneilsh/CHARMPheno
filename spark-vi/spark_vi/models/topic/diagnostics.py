@@ -1,4 +1,3 @@
-# spark-vi/spark_vi/models/topic/diagnostics.py
 """Shared per-iteration topic-word numerics for the topic models.
 
 Pure, model-agnostic derivations from the (K, V) topic-word variational
