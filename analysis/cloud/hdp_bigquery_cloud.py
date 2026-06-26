@@ -53,12 +53,12 @@ def _make_topic_evolution_logger(
         expected_corpus_betas,
         topic_count_at_mass,
     )
+    from spark_vi.models.topic.diagnostics import topic_word_summary
 
     def _on_iter(iter_num: int, global_params: dict,
                  _: list[float]) -> None:
         if every_n <= 0 or iter_num % every_n != 0:
             return
-        from spark_vi.models.topic.diagnostics import topic_word_summary
         lam = global_params["lambda"]                         # (T, V)
         u = global_params["u"]                                # (T-1,)
         v = global_params["v"]                                # (T-1,)

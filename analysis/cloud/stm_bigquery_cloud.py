@@ -39,10 +39,11 @@ def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id,
     domain context rides in via closure capture (same pattern as LDA), and the
     runner wraps the call in try/except so a logging slip can't kill the fit.
     """
+    from spark_vi.models.topic.diagnostics import topic_word_summary
+
     def _on_iter(iter_num: int, global_params: dict, _: list[float]) -> None:
         if every_n <= 0 or iter_num % every_n != 0:
             return
-        from spark_vi.models.topic.diagnostics import topic_word_summary
         lam = global_params["lambda"]                          # (K, V)
         s = topic_word_summary(lam, top_n)
         # Heaviest topics first; printed k is the native (stable) index.

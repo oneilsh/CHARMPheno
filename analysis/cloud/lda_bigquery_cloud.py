@@ -56,11 +56,12 @@ def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id):
                  toward 1.0 means the topic specialized (or, at small K,
                  collapsed onto a single term).
     """
+    from spark_vi.models.topic.diagnostics import topic_word_summary
+
     def _on_iter(iter_num: int, global_params: dict,
                  _: list[float]) -> None:
         if every_n <= 0 or iter_num % every_n != 0:
             return
-        from spark_vi.models.topic.diagnostics import topic_word_summary
         lam = global_params["lambda"]                         # (K, V)
         alpha = global_params["alpha"]                        # (K,)
         s = topic_word_summary(lam, top_n)
