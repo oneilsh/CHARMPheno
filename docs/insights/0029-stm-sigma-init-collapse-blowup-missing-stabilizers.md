@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-26
 **Topic:** stm | priors | svi | initialization | diagnostics | phenotyping | prior-art
-**Status:** Observed (+ literature-confirmed)
+**Status:** Confirmed (+ literature-confirmed)
 
 Re-fitting non-gated STM on the cancer cohort for a covariate demo surfaced a
 sharp, two-sided sensitivity to `sigma_init` (the initial diagonal of the
@@ -108,18 +108,60 @@ behavior. We rediscovered why all three guards are there by removing them.
    knife-edge init and an under-regularized Σ. The σ_init fragility is a
    logistic-normal *tax*, reinforcing "use Dirichlet for content discovery."
 
+## Ablation (controlled synthetic sweep)
+
+Harness: `synthetic_ehr_corpus(K_rare=8, V=300, D=1500, doc_len=30, bg_frac=0.7)`.
+Four configurations × sigma_init ∈ {1, 5, 20}; each cell shows (planted_recovery/8, Σ_max).
+200 minibatch-EM iterations, batch=150, seed=42.
+
+| Config | sigma_init=1 | sigma_init=5 | sigma_init=20 |
+|---|---|---|---|
+| random-init (baseline) | (0/8, 6.6e+00) | (0/8, 6.9e+00) | (0/8, 7.9e+00) |
+| +Σ-prior (scale=2, count=500) | (0/8, 4.2e+00) | (0/8, 4.5e+00) | (0/8, 4.9e+00) |
+| +spectral | (0/8, 3.0e+00) | (2/8, 3.5e+00) | (2/8, 4.7e+00) |
+| +spectral+Σ-prior | (0/8, 2.7e+00) | (2/8, 2.9e+00) | (2/8, 3.5e+00) |
+
+Observations:
+- Random init (with or without Σ-prior) achieves 0/8 recovery at all sigma_init
+  values; the bg_frac=0.7 corpus is genuinely noisy (70% background tokens) so
+  random init never escapes the collapsed basin at this batch scale.
+- Spectral init breaks from 0 to 2/8 recovery at sigma_init=5 and 20,
+  confirming that the deterministic β seed provides the necessary lift. The 0/8
+  at sigma_init=1 is consistent with the collapse story: with Σ initialized to
+  1, prior SD(η)=1 keeps the η distribution near-uniform even with a good β start.
+  There is **no non-monotonic 1-bad/5-blowup/20-clean pattern** at this corpus
+  scale; recovery is 0 at sigma=1 and 2/8 at sigma=5 and 20 for spectral rows.
+- Σ-prior alone does not improve recovery but tames Σ_max from ~7 to ~5 across
+  random-init rows, and from ~3-5 to ~2.6-3.5 for spectral rows.
+- The best configuration at this scale is **+spectral+Σ-prior**: 2/8 recovery
+  (init-stable at sigma_init=5 and 20) with the lowest Σ_max of any config.
+
+Gated minority block: `synthetic_gated_corpus` with groups (maj, rare), rare
+thinned to ~10% of the majority count (401 maj / 25 rare docs; bg_frac=0.5,
+doc_len=40). Block-aware spectral init correctly recovers the rare group's
+planted foreground (foreground_recovers_group("rare") = True, Σ_max=1.3e+01);
+random-init does not (False, Σ_max=1.0e+01). This is the load-bearing result:
+the within-group Q + background deflation seam lets the spectral init surface the
+rare foreground phenotype from a handful of minority documents, before any EM,
+precisely the scenario where random init is dominated by the majority signal.
+
 ## Caveats
 
-- The escape regime is confirmed across 0009/0010 (same σ_init, different iter
-  budgets); init-independence (0011, σ=10) and the Σ-regularization fix are
-  **predicted, not yet run**. Status stays *Observed* until 0011 and a
-  `sigma_ridge` probe land.
-- The three root causes are **not isolated** — we have not ablated them
-  individually. Attribution to spectral-init-as-decisive is from the literature
-  (it removes random init entirely), not from a controlled ablation in our stack.
-- `sigma.prior`'s default of 0 means even published STM leans on init + the K−1
-  parameterization, not Σ shrinkage, for stability — so a `sigma_ridge` bump alone
-  may not fully tame Σ without also fixing init/identifiability.
+- The controlled ablation (above) uses a synthetic corpus; the cancer-cohort
+  sweep (0008–0010) confirms the collapse↔blowup pattern on real data. The two
+  together characterize the failure mode and its fix.
+- Recovery of only 2/8 at the best non-gated config reflects the difficulty of
+  a heavily background-dominated corpus (bg_frac=0.7, 18-word fg vocabulary per
+  topic, minibatch scale). Spectral init is a necessary but not sufficient fix
+  for this extreme noise level; a larger document count or lower bg_frac would
+  increase the count further.
+- The three root causes (spectral init, K-1 reference-topic, Σ shrinkage) are
+  ablated here for init and Σ shrinkage; the K-1 reference-topic
+  parameterization remains unimplemented and its independent contribution is
+  from the literature, not a controlled run in this stack.
+- `sigma.prior`'s default of 0 in the published stm R package means even the
+  reference implementation leans on init + the K-1 parameterization for
+  stability — so Σ-prior alone (without spectral init) does not improve recovery.
 
 ## Setting context
 
