@@ -237,14 +237,24 @@ def _stm_doc_inference(
     max_iter: int = 50,
     tol: float = 1e-4,
     allowed: np.ndarray | None = None,
+    reference: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
-    """Per-doc Laplace approximation, optionally restricted to an allowed topic set.
+    """Per-doc Laplace approximation, optionally restricted to an allowed topic
+    set and optionally with one topic pinned to eta=0 (the reference).
 
-    When allowed is None, optimizes over all K topics (canonical). When allowed
-    is a sorted index array, the L-BFGS runs only on those topics (the neg-log-
-    joint sees the row/column-restricted views); disallowed topics are filled
-    with eta=-inf (theta exactly 0) and nu_d=0 in the returned full-K arrays, so
-    they contribute nothing to any downstream sufficient statistic.
+    When allowed is None, optimizes over all K topics. When allowed is a sorted
+    index array, L-BFGS runs only on those topics; disallowed topics are filled
+    with eta=-inf (theta exactly 0) and nu_d=0.
+
+    When reference is a topic id (which must be in allowed), that topic's eta is
+    held at 0 and only the other allowed topics are optimized. softmax([nu, 0])
+    removes the translation degeneracy. Fixing a coordinate to a constant makes
+    the reduced gradient/Hessian the corresponding sub-block of the full ones,
+    so we reuse the existing grad/Hessian and just delete the reference row/col.
+    The reference stays a real topic: its exp(0)=1 is in the softmax denominator
+    and it still contributes to the data term. In the returned arrays the
+    reference has eta_hat=0 (finite) and nu_d row/col exactly 0 (it is pinned, so
+    it carries no posterior variance).
     """
     K = expElogbeta.shape[0]
     if allowed is None:
@@ -252,23 +262,56 @@ def _stm_doc_inference(
     sub_expElogbeta = expElogbeta[allowed]
     sub_Gamma = Gamma[:, allowed]
     sub_Sigma = Sigma_diag[allowed]
-    eta0 = np.zeros(allowed.shape[0], dtype=np.float64)
+    n_sub = allowed.shape[0]
     common = dict(
         indices=indices, counts=counts, expElogbeta=sub_expElogbeta,
         Gamma=sub_Gamma, Sigma_diag=sub_Sigma, x=x,
     )
-    f = partial(_stm_neg_log_joint, **common)
-    g = partial(_stm_neg_log_joint_grad, **common)
-    result = minimize(f, x0=eta0, jac=g, method="L-BFGS-B",
+
+    if reference is None:
+        # Canonical path — unchanged from before.
+        eta0 = np.zeros(n_sub, dtype=np.float64)
+        f = partial(_stm_neg_log_joint, **common)
+        g = partial(_stm_neg_log_joint_grad, **common)
+        result = minimize(f, x0=eta0, jac=g, method="L-BFGS-B",
+                          options={"maxiter": max_iter, "gtol": tol})
+        sub_eta = result.x
+        H = _stm_neg_log_joint_hessian(sub_eta, **common)
+        sub_nu = _spd_inverse(H)
+        eta_hat = np.full(K, -np.inf, dtype=np.float64)
+        eta_hat[allowed] = sub_eta
+        nu_d = np.zeros((K, K), dtype=np.float64)
+        nu_d[np.ix_(allowed, allowed)] = sub_nu
+        return eta_hat, nu_d, int(result.nit)
+
+    # Reference parameterization: pin `reference` at eta=0, optimize the rest.
+    ref_pos = int(np.searchsorted(allowed, reference))
+    free = np.array([i for i in range(n_sub) if i != ref_pos], dtype=np.int64)
+
+    def _full(nu_free: np.ndarray) -> np.ndarray:
+        eta_sub = np.zeros(n_sub, dtype=np.float64)   # reference position stays 0
+        eta_sub[free] = nu_free
+        return eta_sub
+
+    def f_free(nu_free: np.ndarray) -> float:
+        return _stm_neg_log_joint(_full(nu_free), **common)
+
+    def g_free(nu_free: np.ndarray) -> np.ndarray:
+        return _stm_neg_log_joint_grad(_full(nu_free), **common)[free]
+
+    result = minimize(f_free, x0=np.zeros(free.shape[0], dtype=np.float64),
+                      jac=g_free, method="L-BFGS-B",
                       options={"maxiter": max_iter, "gtol": tol})
-    sub_eta = result.x
-    H = _stm_neg_log_joint_hessian(sub_eta, **common)
-    sub_nu = _spd_inverse(H)
+    eta_sub = _full(result.x)
+    H_full = _stm_neg_log_joint_hessian(eta_sub, **common)   # (n_sub, n_sub)
+    H_free = H_full[np.ix_(free, free)]
+    sub_nu_free = _spd_inverse(H_free)
 
     eta_hat = np.full(K, -np.inf, dtype=np.float64)
-    eta_hat[allowed] = sub_eta
+    eta_hat[allowed] = eta_sub                  # reference -> 0, free -> nu
     nu_d = np.zeros((K, K), dtype=np.float64)
-    nu_d[np.ix_(allowed, allowed)] = sub_nu
+    free_topics = allowed[free]
+    nu_d[np.ix_(free_topics, free_topics)] = sub_nu_free
     return eta_hat, nu_d, int(result.nit)
 
 
@@ -299,6 +342,7 @@ class OnlineSTM(VIModel):
         gamma_shape: float = 100.0,
         random_seed: int | None = None,
         topic_blocks=None,
+        reference_topic: bool = False,
     ) -> None:
         if K < 1:
             raise ValueError(f"K must be >= 1, got {K}")
@@ -327,6 +371,10 @@ class OnlineSTM(VIModel):
         if topic_blocks is not None and topic_blocks.K != int(K):
             raise ValueError(
                 f"topic_blocks.K ({topic_blocks.K}) != K ({K})")
+        if reference_topic and K < 2:
+            raise ValueError(
+                f"reference_topic requires K >= 2 (need a free topic besides "
+                f"the reference), got K={K}")
 
         self.K = int(K)
         self.V = int(vocab_size)
@@ -341,6 +389,7 @@ class OnlineSTM(VIModel):
         self.gamma_shape = float(gamma_shape)
         self.random_seed = None if random_seed is None else int(random_seed)
         self.topic_blocks = topic_blocks
+        self.reference_topic = bool(reference_topic)
 
     def _effective_partition(self):
         """The real partition, or an implicit all-background one when None."""
@@ -348,6 +397,19 @@ class OnlineSTM(VIModel):
             return self.topic_blocks
         from spark_vi.models.topic.partition import TopicBlockPartition
         return TopicBlockPartition(group_var="", background_k=self.K, foreground=())
+
+    def _reference_index(self) -> int | None:
+        """Global topic id held at eta=0 when reference_topic is on, else None.
+
+        Topic 0 is always the first background topic (TopicBlockPartition lays
+        background out first and enforces background_k >= 1), so it is in EVERY
+        document's allowed set — the only place a single global reference can
+        live when Gamma/Sigma are shared across docs. softmax(eta) is invariant
+        to adding a constant to all coordinates; pinning one to 0 removes that
+        translation degeneracy, which otherwise lets eta drift to the
+        softmax-saturation boundary and Sigma blow up (insight 0029).
+        """
+        return 0 if self.reference_topic else None
 
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
         """Init λ; Γ = 0; Σ = sigma_init.
