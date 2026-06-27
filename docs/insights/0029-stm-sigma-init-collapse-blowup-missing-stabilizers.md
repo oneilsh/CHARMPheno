@@ -1,8 +1,11 @@
 # 0029 — Our online STM's σ_init-selected collapse↔Σ-blowup is a missing-stabilizer artifact, not a property of STM; published STM avoids it by construction (spectral init + reference-topic identifiability + Σ shrinkage)
 
 **Date:** 2026-06-26
+**Updated:** 2026-06-27 — the K−1 reference-topic parameterization (the
+identified-but-unimplemented third stabilizer) is now implemented and ablated;
+see "Ablation 2". It closes the σ_init=1 gap that spectral-init-alone left open.
 **Topic:** stm | priors | svi | initialization | diagnostics | phenotyping | prior-art
-**Status:** Confirmed (+ literature-confirmed)
+**Status:** Confirmed (+ literature-confirmed; all three stabilizers now ablated in-stack)
 
 Re-fitting non-gated STM on the cancer cohort for a covariate demo surfaced a
 sharp, two-sided sensitivity to `sigma_init` (the initial diagonal of the
@@ -85,8 +88,11 @@ guards we lack:
    no K−1 reference, minibatch SVI), spectral init **reduces but does not
    eliminate** σ_init sensitivity — recovery still collapses to 0/8 at σ_init=1
    even with a good β seed, because a tight Σ≈1 prior keeps η near-uniform
-   regardless of where β starts. Closing that gap is what the deferred K−1
-   reference work is for. Spectral init: build the V×V word co-occurrence matrix Q, row-normalize so
+   regardless of where β starts. **Adding the K−1 reference (now implemented;
+   Ablation 2) closes that gap**: spectral+reference recovers 2/8 at σ_init=1
+   where spectral-alone gives 0/8, because pinning one topic's η removes the
+   all-ones translation freedom a tight Σ≈1 prior would otherwise use to pull η
+   back to uniform. Spectral init: build the V×V word co-occurrence matrix Q, row-normalize so
    each word's row is a convex combination of anchor-word rows, find the anchors as
    the convex-hull vertices (greedy farthest-point after an SVD/projection), then
    recover P(topic|word) via convex weights and Bayes-flip to β.
@@ -115,7 +121,7 @@ behavior. We rediscovered why all three guards are there by removing them.
    knife-edge init and an under-regularized Σ. The σ_init fragility is a
    logistic-normal *tax*, reinforcing "use Dirichlet for content discovery."
 
-## Ablation (controlled synthetic sweep)
+## Ablation 1: spectral init + Σ shrinkage (controlled synthetic sweep)
 
 Harness: `synthetic_ehr_corpus(K_rare=8, V=300, D=1500, doc_len=30, bg_frac=0.7)`.
 Four configurations × sigma_init ∈ {1, 5, 20}; each cell shows (planted_recovery/8, Σ_max).
@@ -152,6 +158,51 @@ the within-group Q + background deflation seam lets the spectral init surface th
 rare foreground phenotype from a handful of minority documents, before any EM,
 precisely the scenario where random init is dominated by the majority signal.
 
+## Ablation 2: K−1 reference-topic parameterization (the third stabilizer)
+
+The K−1 reference-topic parameterization is now implemented as an opt-in
+`reference_topic` flag on `OnlineSTM` (pin topic 0's η ≡ 0, optimize the other
+K−1 topics' η relative to it; "clamped-K" — Γ/Σ keep full shape but the
+reference is dropped from the per-doc optimizer and the prior-side M-step
+accumulators). The same non-gated harness, extended with three reference rows
+(reference runs use K = K_rare+1 so they keep K_rare *free* topics — one topic
+is spent as the always-on baseline):
+
+| Config | sigma_init=1 | sigma_init=5 | sigma_init=20 |
+|---|---|---|---|
+| +spectral (from Ablation 1) | (0/8, 3.03e+00) | (2/8, 3.54e+00) | (2/8, 4.74e+00) |
+| +reference | (0/8, 4.76e+00) | (0/8, 7.65e+00) | (0/8, 2.00e+01) |
+| +spectral+reference | **(2/8, 3.74e+00)** | (3/8, 5.00e+00) | (3/8, 2.00e+01) |
+| +spectral+reference+Σ-prior | **(3/8, 3.14e+00)** | (3/8, 5.00e+00) | (3/8, 2.00e+01) |
+
+Observations:
+- **Reference alone is necessary-not-sufficient, exactly like spectral alone**:
+  `+reference` is 0/8 at every σ_init. With a random β seed the noisy bg_frac=0.7
+  corpus still collapses; removing the translation degeneracy does not by itself
+  find the planted topics. (And note `+reference`'s Σ_max tracks σ_init up to
+  2.0e+01 at σ_init=20 — reference without a good β start does not fully tame Σ.)
+- **Spectral + reference is the combination that cracks σ_init=1**: 0/8 → **2/8**
+  at σ_init=1 (where spectral-alone was 0/8), and it lifts σ_init=5/20 from 2/8
+  to 3/8. This is the load-bearing confirmation: the reference is what lets a
+  good β seed *survive* a tight Σ≈1 prior — previously the tight prior pulled η
+  back to uniform along the all-ones direction even from a good start.
+- **All three stabilizers (spectral+reference+Σ-prior) is best and fully
+  init-stable**: 3/8 at every σ_init, with the lowest Σ_max at σ_init=1. The σ_init
+  knob is effectively gone (3/8 at 1, 5, and 20) — matching the published-stack
+  claim that with the full set of guards "the σ_init knob does not exist."
+- **Σ stays bounded**: no config reaches the real-data ~10^10 blowup; Σ_max tracks
+  σ_init (≈ its init value) rather than running away, because pinning η removes
+  the saturation-driven feedback loop.
+
+Gated rare-foreground (same `synthetic_gated_corpus`, 401 maj / 25 rare):
+`reference` alone at σ_init=1 recovers the rare arm (foreground_recovers_group
+= True, Σ_max=2.18e+01), as does `spectral+reference` (True, Σ_max=2.10e+01). In
+the gated rare-arm scenario the reference is sufficient on its own — the
+within-group signal is cleaner than the noisy non-gated bg_frac=0.7 corpus, so it
+does not also need the spectral β seed to escape collapse. (Engine on the `stm`
+branch; `reference_topic` is opt-in and not yet wired into the cluster fit path —
+see ADR 0031.)
+
 ## Caveats
 
 - The controlled ablation (above) uses a synthetic corpus; the cancer-cohort
@@ -162,10 +213,12 @@ precisely the scenario where random init is dominated by the majority signal.
   topic, minibatch scale). Spectral init is a necessary but not sufficient fix
   for this extreme noise level; a larger document count or lower bg_frac would
   increase the count further.
-- The three root causes (spectral init, K-1 reference-topic, Σ shrinkage) are
-  ablated here for init and Σ shrinkage; the K-1 reference-topic
-  parameterization remains unimplemented and its independent contribution is
-  from the literature, not a controlled run in this stack.
+- All three stabilizers (spectral init, K−1 reference-topic, Σ shrinkage) are now
+  ablated in-stack (Ablation 1 + Ablation 2). The K−1 reference-topic
+  parameterization's independent contribution is a controlled run, no longer
+  literature-only: alone it is necessary-not-sufficient (0/8 non-gated), but
+  combined with spectral init it is the piece that recovers at σ_init=1 (2/8 vs
+  0/8) and, with the Σ-prior added, removes the σ_init knob (3/8 across the sweep).
 - `sigma.prior`'s default of 0 in the published stm R package means even the
   reference implementation leans on init + the K-1 parameterization for
   stability — so Σ-prior alone (without spectral init) does not improve recovery.
