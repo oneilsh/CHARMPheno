@@ -60,10 +60,13 @@ beta0 = spectral_init_beta(docs, all_bg_partition, V)
 print("  done.")
 
 configs = [
-    ("random-init (baseline)",     dict()),
-    ("+Sigma-prior",                dict(sigma_prior_scale=2.0, sigma_prior_count=500.0)),
-    ("+spectral",                   dict(_spectral=True)),
-    ("+spectral+Sigma-prior",       dict(_spectral=True, sigma_prior_scale=2.0, sigma_prior_count=500.0)),
+    ("random-init (baseline)",          dict()),
+    ("+Sigma-prior",                     dict(sigma_prior_scale=2.0, sigma_prior_count=500.0)),
+    ("+spectral",                        dict(_spectral=True)),
+    ("+spectral+Sigma-prior",            dict(_spectral=True, sigma_prior_scale=2.0, sigma_prior_count=500.0)),
+    ("+reference",                       dict(_reference=True)),
+    ("+spectral+reference",              dict(_spectral=True, _reference=True)),
+    ("+spectral+reference+Sigma-prior",  dict(_spectral=True, _reference=True, sigma_prior_scale=2.0, sigma_prior_count=500.0)),
 ]
 
 header = (f"{'Config':<32}"
@@ -71,13 +74,23 @@ header = (f"{'Config':<32}"
 print("\n" + header)
 print("-" * len(header))
 
+# Reference runs get one extra topic (the pinned baseline) so they keep K_RARE
+# free topics; precompute a matching spectral beta0 at K_RARE+1.
+beta0_ref = spectral_init_beta(
+    docs, TopicBlockPartition(group_var="", background_k=K_RARE + 1, foreground=()), V)
+
 for config_name, kwargs in configs:
     use_spectral = kwargs.pop("_spectral", False)
+    use_reference = kwargs.pop("_reference", False)
+    k_fit = K_RARE + 1 if use_reference else K_RARE
+    b0 = beta0_ref if use_reference else beta0
     row = f"{config_name:<32}"
     for si in SIGMA_INITS:
         model_kwargs = dict(kwargs)
-        init_data = {"spectral_beta": beta0} if use_spectral else None
-        gp = fit_stm(docs, K=K_RARE, V=V, sigma_init=si,
+        if use_reference:
+            model_kwargs["reference_topic"] = True
+        init_data = {"spectral_beta": b0} if use_spectral else None
+        gp = fit_stm(docs, K=k_fit, V=V, sigma_init=si,
                      n_iter=N_ITER, batch=BATCH, seed=42,
                      init_data=init_data, **model_kwargs)
         beta_hat = gp["lambda"] / gp["lambda"].sum(axis=1, keepdims=True)
@@ -149,5 +162,22 @@ beta_spec = gp_spec["lambda"] / gp_spec["lambda"].sum(axis=1, keepdims=True)
 rec_spec = foreground_recovers_group(beta_spec, part, "rare", planted_g, thresh=0.5)
 _, smax_spec = final_sigma_range(gp_spec)
 print(f"  block-aware spectral (sigma_init=5): recovers rare = {rec_spec},  Sigma_max = {smax_spec:.2e}")
+
+gp_ref = fit_stm(docs_gated, K=part.K, V=G_V, sigma_init=1,
+                 n_iter=G_N_ITER, batch=G_BATCH, seed=42,
+                 partition=part, reference_topic=True)
+beta_ref = gp_ref["lambda"] / gp_ref["lambda"].sum(axis=1, keepdims=True)
+rec_ref = foreground_recovers_group(beta_ref, part, "rare", planted_g, thresh=0.5)
+_, smax_ref = final_sigma_range(gp_ref)
+print(f"  reference (sigma_init=1):            recovers rare = {rec_ref},  Sigma_max = {smax_ref:.2e}")
+
+gp_sr = fit_stm(docs_gated, K=part.K, V=G_V, sigma_init=1,
+                n_iter=G_N_ITER, batch=G_BATCH, seed=42,
+                partition=part, reference_topic=True,
+                init_data={"spectral_beta": beta0_gated})
+beta_sr = gp_sr["lambda"] / gp_sr["lambda"].sum(axis=1, keepdims=True)
+rec_sr = foreground_recovers_group(beta_sr, part, "rare", planted_g, thresh=0.5)
+_, smax_sr = final_sigma_range(gp_sr)
+print(f"  spectral+reference (sigma_init=1):   recovers rare = {rec_sr},  Sigma_max = {smax_sr:.2e}")
 
 print("\nDone.")

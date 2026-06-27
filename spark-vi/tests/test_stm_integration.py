@@ -227,3 +227,42 @@ def test_gated_diagnostics_include_block_labels():
     diag = model.iteration_diagnostics(gp)
     assert list(diag["topic_block_labels"]) == ["background", "background", "rare"]
     assert "blocks[bg=" in model.iteration_summary(gp)
+
+
+def test_reference_fit_pins_reference_end_to_end():
+    """A fitted reference model, gated and non-gated, keeps the reference topic
+    pinned (eta=0) through the export path and yields a valid theta. This is the
+    deterministic invariant; the *recovery* payoff is measured by the ablation
+    script, not asserted at a guessed threshold."""
+    import numpy as np
+    import sys, os
+    sys.path.insert(0, os.path.dirname(__file__))
+    from _stm_synth import synthetic_ehr_corpus, synthetic_gated_corpus, fit_stm
+    from spark_vi.models.topic.stm import OnlineSTM
+
+    # Non-gated.
+    docs, _ = synthetic_ehr_corpus(K_rare=4, V=80, D=200, doc_len=25,
+                                   bg_frac=0.6, seed=5)
+    m = OnlineSTM(K=5, vocab_size=80, P=1, sigma_init=1.0,
+                  random_seed=42, reference_topic=True)
+    gp = m.initialize_global(None)
+    for _ in range(30):
+        gp = m.update_global(gp, m.local_update(docs, gp), learning_rate=1.0)
+    out = m.infer_local(docs[0], gp)
+    assert out["eta"][0] == 0.0
+    assert abs(float(out["theta"].sum()) - 1.0) < 1e-12
+    assert np.allclose(gp["Gamma"][:, 0], 0.0)
+
+    # Gated.
+    docs_g, _, part = synthetic_gated_corpus(groups=("maj", "rare"),
+                                             fg_per_group=2, bg_k=2, V=120,
+                                             D=200, doc_len=30, bg_frac=0.5,
+                                             seed=8)
+    mg = OnlineSTM(K=part.K, vocab_size=120, P=1, sigma_init=1.0,
+                   random_seed=42, topic_blocks=part, reference_topic=True)
+    gpg = mg.initialize_global(None)
+    for _ in range(30):
+        gpg = mg.update_global(gpg, mg.local_update(docs_g, gpg), learning_rate=0.5)
+    og = mg.infer_local(docs_g[0], gpg)
+    assert og["eta"][0] == 0.0
+    assert np.allclose(gpg["Gamma"][:, 0], 0.0)
