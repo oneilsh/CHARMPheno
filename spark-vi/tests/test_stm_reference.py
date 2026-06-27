@@ -9,6 +9,8 @@ from spark_vi.models.topic.stm import (
     _stm_doc_inference,
     _softmax,
 )
+from spark_vi.models.topic.types import STMDocument
+from spark_vi.models.topic.partition import TopicBlockPartition
 
 
 # A tiny deterministic 3-topic / 6-word beta. Three "pure" topics over disjoint
@@ -84,5 +86,125 @@ def test_reference_topic_requires_k_at_least_two():
 
 
 def test_reference_index_toggles():
-    assert OnlineSTM(K=3, vocab_size=4, P=1).  _reference_index() is None
+    assert OnlineSTM(K=3, vocab_size=4, P=1)._reference_index() is None
     assert OnlineSTM(K=3, vocab_size=4, P=1, reference_topic=True)._reference_index() == 0
+
+
+def test_reference_not_in_allowed_raises():
+    """When reference is not in allowed, _stm_doc_inference must raise ValueError
+    rather than silently misplacing the pin via np.searchsorted."""
+    with pytest.raises(ValueError, match="reference"):
+        _stm_doc_inference(
+            indices=np.array([0, 1], dtype=np.int32),
+            counts=np.array([4.0, 4.0]),
+            expElogbeta=_BETA3,
+            Gamma=np.zeros((1, 3)),
+            Sigma_diag=np.full(3, 5.0),
+            x=np.array([1.0]),
+            allowed=np.array([0, 1, 2], dtype=np.int64),
+            reference=5,
+        )
+
+
+def _toy_docs(rng, *, V, D, doc_len, K_blocks):
+    """D docs over V words; each doc concentrates on one of K_blocks word
+    blocks plus light noise. Integer token ids only (domain-agnostic)."""
+    block = V // K_blocks
+    docs = []
+    for _ in range(D):
+        b = int(rng.integers(K_blocks))
+        toks = np.concatenate([
+            rng.integers(b * block, (b + 1) * block, size=doc_len - 3),
+            rng.integers(0, V, size=3),
+        ])
+        u, c = np.unique(toks, return_counts=True)
+        docs.append(STMDocument(indices=u.astype(np.int32),
+                                counts=c.astype(np.float64),
+                                length=int(c.sum()), x=np.array([1.0])))
+    return docs
+
+
+def test_reference_gamma_column_zero_and_sigma_inert():
+    """After full-batch updates with reference_topic, the reference topic's
+    Gamma column stays 0 and its Sigma entry stays at sigma_init."""
+    rng = np.random.default_rng(0)
+    V, K = 30, 4
+    docs = _toy_docs(rng, V=V, D=60, doc_len=20, K_blocks=K)
+    m = OnlineSTM(K=K, vocab_size=V, P=1, sigma_init=3.0,
+                  random_seed=1, reference_topic=True)
+    gp = m.initialize_global(None)
+    for _ in range(8):
+        gp = m.update_global(gp, m.local_update(docs, gp), learning_rate=1.0)
+    assert np.allclose(gp["Gamma"][:, 0], 0.0)
+    assert gp["Sigma"][0] == pytest.approx(3.0)
+
+
+def test_reference_topic_still_learns_content():
+    """The reference is a real topic: its lambda row carries vocabulary mass."""
+    rng = np.random.default_rng(0)
+    V, K = 30, 4
+    docs = _toy_docs(rng, V=V, D=60, doc_len=20, K_blocks=K)
+    m = OnlineSTM(K=K, vocab_size=V, P=1, random_seed=1, reference_topic=True)
+    gp = m.initialize_global(None)
+    for _ in range(8):
+        gp = m.update_global(gp, m.local_update(docs, gp), learning_rate=1.0)
+    assert gp["lambda"][0].sum() > V  # row mass above the eta=1/K prior floor
+
+
+def test_reference_elbo_finite():
+    """KL over the free subspace stays finite (the reference row/col of nu_d is
+    excluded, so the sub-covariance is non-singular)."""
+    rng = np.random.default_rng(0)
+    V, K = 30, 4
+    docs = _toy_docs(rng, V=V, D=60, doc_len=20, K_blocks=K)
+    m = OnlineSTM(K=K, vocab_size=V, P=1, random_seed=1, reference_topic=True)
+    gp = m.initialize_global(None)
+    for _ in range(5):
+        stats = m.local_update(docs, gp)
+        gp = m.update_global(gp, stats, learning_rate=1.0)
+    elbo = m.compute_elbo(gp, m.local_update(docs, gp))
+    assert np.isfinite(elbo)
+
+
+def test_reference_off_does_not_perturb_default():
+    """Passing reference_topic=False (the default) is identical to not passing
+    it — the kwarg's presence must not change the canonical fit."""
+    rng = np.random.default_rng(0)
+    V, K = 30, 4
+    docs = _toy_docs(rng, V=V, D=40, doc_len=20, K_blocks=K)
+    a = OnlineSTM(K=K, vocab_size=V, P=1, random_seed=7)
+    b = OnlineSTM(K=K, vocab_size=V, P=1, random_seed=7, reference_topic=False)
+    gpa, gpb = a.initialize_global(None), b.initialize_global(None)
+    for _ in range(5):
+        gpa = a.update_global(gpa, a.local_update(docs, gpa), learning_rate=1.0)
+        gpb = b.update_global(gpb, b.local_update(docs, gpb), learning_rate=1.0)
+    assert np.array_equal(gpa["Gamma"], gpb["Gamma"])
+    assert np.array_equal(gpa["Sigma"], gpb["Sigma"])
+    assert np.array_equal(gpa["lambda"], gpb["lambda"])
+
+
+def test_reference_gated_infer_local_pins_reference():
+    """infer_local must use the same parameterization as training, so exported
+    theta has the reference pinned to eta=0."""
+    rng = np.random.default_rng(0)
+    V = 24
+    part = TopicBlockPartition(group_var="g", background_k=2,
+                               foreground=(("rare", 2),))
+    K = part.K
+    docs = []
+    for i in range(80):
+        is_rare = (i % 4 == 0)
+        toks = rng.integers(0, V, size=12)
+        docs.append(STMDocument(indices=np.unique(toks).astype(np.int32),
+                                counts=np.ones(len(np.unique(toks))),
+                                length=len(np.unique(toks)),
+                                x=np.array([1.0]),
+                                groups=frozenset({"rare"}) if is_rare else frozenset()))
+    m = OnlineSTM(K=K, vocab_size=V, P=1, random_seed=3,
+                  topic_blocks=part, reference_topic=True)
+    gp = m.initialize_global(None)
+    for _ in range(10):
+        gp = m.update_global(gp, m.local_update(docs, gp), learning_rate=0.5)
+    out = m.infer_local(docs[0], gp)
+    assert out["eta"][0] == 0.0
+    assert abs(float(out["theta"].sum()) - 1.0) < 1e-12

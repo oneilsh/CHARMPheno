@@ -285,6 +285,11 @@ def _stm_doc_inference(
         return eta_hat, nu_d, int(result.nit)
 
     # Reference parameterization: pin `reference` at eta=0, optimize the rest.
+    if reference not in allowed:
+        raise ValueError(
+            f"reference={reference} is not in allowed={list(allowed)}; "
+            "the reference topic must be a member of the allowed set"
+        )
     ref_pos = int(np.searchsorted(allowed, reference))
     free = np.array([i for i in range(n_sub) if i != ref_pos], dtype=np.int64)
 
@@ -491,6 +496,7 @@ class OnlineSTM(VIModel):
         n_docs = 0
 
         log_Sigma_diag = np.log(Sigma_diag)
+        ref = self._reference_index()
 
         for doc in rows:
             allowed = part.allowed_indices(doc.groups)
@@ -499,7 +505,7 @@ class OnlineSTM(VIModel):
                 expElogbeta=expElogbeta,
                 Gamma=Gamma, Sigma_diag=Sigma_diag, x=doc.x,
                 max_iter=self.lbfgs_max_iter, tol=self.lbfgs_tol,
-                allowed=allowed,
+                allowed=allowed, reference=ref,
             )
             p = _softmax(eta_hat)  # 0 on disallowed
             eb_d = expElogbeta[:, doc.indices]
@@ -514,17 +520,30 @@ class OnlineSTM(VIModel):
                 if g in doc.groups:
                     XtX_groups[gi] += xxT
 
-            # XtMu / residual_diag / counts only over allowed topics.
-            eta_allowed = eta_hat[allowed]
-            XtMu[:, allowed] += np.outer(doc.x, eta_allowed)
+            # Prior-side topics for this doc. With a reference topic, exclude it:
+            # it is pinned at eta=0, carries no free Gamma column or Sigma entry,
+            # and must stay out of the Gamma-regression targets, the Sigma
+            # residual, the per-topic doc counts, and the eta KL. Dropping it
+            # from XtMu makes its Gamma solve resolve to 0; dropping it from
+            # n_docs_per_topic makes update_global's lazy rule leave Sigma[ref]
+            # at sigma_init. When ref is None this is exactly `allowed`, so the
+            # canonical path is byte-identical.
+            if ref is None:
+                allowed_free = allowed
+            else:
+                allowed_free = allowed[allowed != ref]
+
+            # XtMu / residual_diag / counts only over the free prior topics.
+            eta_allowed = eta_hat[allowed_free]
+            XtMu[:, allowed_free] += np.outer(doc.x, eta_allowed)
             resid = np.zeros(K, dtype=np.float64)
-            resid[allowed] = eta_allowed - (Gamma.T @ doc.x)[allowed]
-            residual_diag[allowed] += resid[allowed] ** 2 + np.diag(nu_d)[allowed]
-            n_docs_per_topic[allowed] += 1.0
+            resid[allowed_free] = eta_allowed - (Gamma.T @ doc.x)[allowed_free]
+            residual_diag[allowed_free] += resid[allowed_free] ** 2 + np.diag(nu_d)[allowed_free]
+            n_docs_per_topic[allowed_free] += 1.0
 
             doc_loglik += float(np.sum(doc.counts * np.log(q_w)))
-            # KL over the allowed sub-space only.
-            al = allowed
+            # KL over the free prior sub-space only.
+            al = allowed_free
             tr_term = float(np.sum(np.diag(nu_d)[al] / Sigma_diag[al]))
             quad_term = float(np.sum(resid[al] ** 2 / Sigma_diag[al]))
             sub_nu = nu_d[np.ix_(al, al)]
@@ -672,6 +691,7 @@ class OnlineSTM(VIModel):
             expElogbeta=expElogbeta,
             Gamma=Gamma, Sigma_diag=Sigma_diag, x=row.x,
             max_iter=self.lbfgs_max_iter, tol=self.lbfgs_tol,
+            reference=self._reference_index(),
         )
         return {"eta": eta_hat, "theta": _softmax(eta_hat)}
 
