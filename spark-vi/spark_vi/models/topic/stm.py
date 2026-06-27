@@ -342,7 +342,26 @@ class OnlineSTM(VIModel):
         return TopicBlockPartition(group_var="", background_k=self.K, foreground=())
 
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
-        """Random Gamma init for λ (same shape as LDA); Γ = 0; Σ = sigma_init."""
+        """Init λ; Γ = 0; Σ = sigma_init.
+
+        Default (data_summary is None): random-gamma λ exactly as LDA — left
+        byte-for-byte unchanged so the existing suite stays green.
+
+        Opt-in spectral init: when data_summary carries a "spectral_beta" KxV
+        topic-word matrix (from spark_vi.models.topic.spectral_init), seed
+        λ = spectral_beta * gamma_shape instead of random gamma. This makes the
+        β posterior start at a deterministic, data-driven anchor-word estimate,
+        curing the sigma_init-dependent collapse/blow-up of random init
+        (insight 0029). Γ and Σ are untouched (Γ = 0, Σ = sigma_init).
+        """
+        if data_summary is not None and "spectral_beta" in data_summary:
+            beta0 = np.asarray(data_summary["spectral_beta"], dtype=np.float64)
+            return {
+                "lambda": beta0 * self.gamma_shape,
+                "eta": np.array(self.eta),
+                "Gamma": np.zeros((self.P, self.K), dtype=np.float64),
+                "Sigma": np.full(self.K, self.sigma_init, dtype=np.float64),
+            }
         if self.random_seed is None:
             lam = np.random.gamma(
                 shape=self.gamma_shape, scale=1.0 / self.gamma_shape,

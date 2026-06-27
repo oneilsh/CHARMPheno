@@ -34,3 +34,22 @@ def test_baseline_random_init_is_unstable():
         beta = gp["lambda"] / gp["lambda"].sum(axis=1, keepdims=True)
         recos.append(planted_recovery(beta, planted)); smax.append(final_sigma_range(gp)[1])
     assert min(recos) >= 6 and max(smax) < 1e3
+
+
+from spark_vi.models.topic.spectral_init import spectral_init_beta
+from spark_vi.models.topic.partition import TopicBlockPartition
+
+
+@pytest.mark.slow
+def test_spectral_init_makes_fit_init_independent():
+    docs, planted = synthetic_ehr_corpus(K_rare=8, V=300, D=1500, doc_len=30,
+                                         bg_frac=0.7, seed=0)
+    part = TopicBlockPartition(group_var="", background_k=40, foreground=())
+    beta0 = spectral_init_beta(docs, part, 300)
+    recos = []
+    for si in (1.0, 5.0, 20.0):
+        gp = fit_stm(docs, K=40, V=300, sigma_init=si, n_iter=60,
+                     init_data={"spectral_beta": beta0})
+        beta = gp["lambda"] / gp["lambda"].sum(axis=1, keepdims=True)
+        recos.append(planted_recovery(beta, planted))
+    assert min(recos) >= 6   # recovery no longer depends on sigma_init
