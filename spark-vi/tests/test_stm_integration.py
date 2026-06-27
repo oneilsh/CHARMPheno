@@ -134,14 +134,14 @@ def test_minibatch_converges_to_neighborhood_of_full_batch():
         # Corpus-scale stats by (D / batch_size) so they represent the
         # full-corpus target, then ρ-blend.
         scale = D / batch_size
+        # Scale every stat to the full-corpus target. Scaling all keys
+        # generically (rather than an explicit allowlist) keeps the gating
+        # stats added by ADR 0027 — XtX_groups, n_docs_per_topic — present;
+        # an earlier hand-picked dict dropped them and update_global raised
+        # KeyError('XtX_groups').
         scaled_stats = {
-            "lambda_stats": stats["lambda_stats"] * scale,
-            "XtX": stats["XtX"] * scale,
-            "XtMu": stats["XtMu"] * scale,
-            "residual_diag_stat": stats["residual_diag_stat"] * scale,
-            "doc_loglik_sum": stats["doc_loglik_sum"] * scale,
-            "doc_eta_kl_sum": stats["doc_eta_kl_sum"] * scale,
-            "n_docs": stats["n_docs"] * scale,
+            k: (v * scale if isinstance(v, (np.ndarray, int, float)) else v)
+            for k, v in stats.items()
         }
         rho_t = (t + 64) ** -0.7
         gp_mb = model_mb.update_global(gp_mb, scaled_stats, learning_rate=rho_t)
