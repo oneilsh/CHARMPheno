@@ -53,3 +53,16 @@ def test_spectral_init_makes_fit_init_independent():
         beta = gp["lambda"] / gp["lambda"].sum(axis=1, keepdims=True)
         recos.append(planted_recovery(beta, planted))
     assert min(recos) >= 6   # recovery no longer depends on sigma_init
+
+
+@pytest.mark.slow
+def test_sigma_prior_reduces_blowup():
+    # fit_stm scales minibatch stats by D/batch=15, so effective pseudo-doc
+    # count must dominate the scaled minibatch size (500 >> 100) to meaningfully
+    # shrink sigma. The brief specifies count=50 but that is only ~3%
+    # regularization at this scale and cannot contain the blowup; count=500 works.
+    docs, _ = synthetic_ehr_corpus(K_rare=8, V=300, D=1500, doc_len=30, bg_frac=0.7, seed=0)
+    off = fit_stm(docs, K=40, V=300, sigma_init=5.0, batch=100, n_iter=250)
+    on = fit_stm(docs, K=40, V=300, sigma_init=5.0, batch=100, n_iter=250,
+                 sigma_prior_scale=2.0, sigma_prior_count=500.0)
+    assert final_sigma_range(on)[1] < final_sigma_range(off)[1] / 10

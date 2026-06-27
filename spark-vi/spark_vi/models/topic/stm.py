@@ -292,6 +292,8 @@ class OnlineSTM(VIModel):
         eta: float | None = None,
         sigma_init: float = 1.0,
         sigma_ridge: float = 1e-6,
+        sigma_prior_scale: float | None = None,
+        sigma_prior_count: float = 0.0,
         lbfgs_max_iter: int = 50,
         lbfgs_tol: float = 1e-4,
         gamma_shape: float = 100.0,
@@ -312,6 +314,10 @@ class OnlineSTM(VIModel):
             raise ValueError(f"sigma_init must be > 0, got {sigma_init}")
         if sigma_ridge < 0:
             raise ValueError(f"sigma_ridge must be >= 0, got {sigma_ridge}")
+        if sigma_prior_scale is not None and sigma_prior_scale <= 0:
+            raise ValueError(f"sigma_prior_scale must be > 0, got {sigma_prior_scale}")
+        if sigma_prior_count < 0:
+            raise ValueError(f"sigma_prior_count must be >= 0, got {sigma_prior_count}")
         if lbfgs_max_iter < 1:
             raise ValueError(f"lbfgs_max_iter must be >= 1, got {lbfgs_max_iter}")
         if lbfgs_tol <= 0:
@@ -328,6 +334,8 @@ class OnlineSTM(VIModel):
         self.eta = float(eta)
         self.sigma_init = float(sigma_init)
         self.sigma_ridge = float(sigma_ridge)
+        self.sigma_prior_scale = None if sigma_prior_scale is None else float(sigma_prior_scale)
+        self.sigma_prior_count = float(sigma_prior_count)
         self.lbfgs_max_iter = int(lbfgs_max_iter)
         self.lbfgs_tol = float(lbfgs_tol)
         self.gamma_shape = float(gamma_shape)
@@ -542,8 +550,14 @@ class OnlineSTM(VIModel):
         # defaults to current, so the ρ-blend is a no-op) — same lazy rule.
         present = n_docs_per_topic > 0
         Sigma_target = Sigma_diag.copy()
-        Sigma_target[present] = (
-            target_stats["residual_diag_stat"][present] / n_docs_per_topic[present])
+        if self.sigma_prior_scale is None:
+            Sigma_target[present] = (target_stats["residual_diag_stat"][present]
+                                     / n_docs_per_topic[present])
+        else:
+            c0, s0 = self.sigma_prior_count, self.sigma_prior_scale
+            Sigma_target[present] = (
+                (target_stats["residual_diag_stat"][present] + c0 * s0)
+                / (n_docs_per_topic[present] + c0))
         new_Sigma = (1.0 - learning_rate) * Sigma_diag + learning_rate * Sigma_target
         new_Sigma = np.maximum(new_Sigma, self.SIGMA_FLOOR)
 
