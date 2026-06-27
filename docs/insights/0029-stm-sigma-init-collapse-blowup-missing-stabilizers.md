@@ -79,7 +79,14 @@ guards we lack:
    Because the start is good, η residuals are sane from iteration 0, Σ is estimated
    at a reasonable scale, and **there is no random-init basin to fall into — so the
    σ_init knob does not exist**. (`stm` also runs batch, not stochastic minibatch,
-   EM.) Spectral init: build the V×V word co-occurrence matrix Q, row-normalize so
+   EM.) Important qualifier: this "knob does not exist" claim holds for the *full
+   published stack* (spectral init + K−1 reference + batch EM). Our controlled
+   ablation below shows that in *our partial* implementation (spectral init only,
+   no K−1 reference, minibatch SVI), spectral init **reduces but does not
+   eliminate** σ_init sensitivity — recovery still collapses to 0/8 at σ_init=1
+   even with a good β seed, because a tight Σ≈1 prior keeps η near-uniform
+   regardless of where β starts. Closing that gap is what the deferred K−1
+   reference work is for. Spectral init: build the V×V word co-occurrence matrix Q, row-normalize so
    each word's row is a convex combination of anchor-word rows, find the anchors as
    the convex-hull vertices (greedy farthest-point after an SVD/projection), then
    recover P(topic|word) via convex weights and Bayes-flip to β.
