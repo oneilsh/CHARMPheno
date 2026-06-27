@@ -3,8 +3,16 @@
 The session-scoped local Spark session is the only fixture all tests share.
 """
 import os
+import pathlib
 import sys
 import warnings
+
+# Put the tests/ directory on sys.path so that helper modules starting with _
+# (e.g. _stm_synth) can be imported with a plain `from _stm_synth import ...`
+# alongside regular `from spark_vi...` imports.
+_TESTS_DIR = str(pathlib.Path(__file__).parent)
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
 
 # Python 3.12 compat: distutils was removed, but PySpark 3.5 still tries to import it
 # from pyspark.ml.image. Create a mock module before PySpark imports.
