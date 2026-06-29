@@ -144,7 +144,7 @@ def build_topic_block_partition(*, group_var, background_k, foreground_arg, K):
     return part
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="STM fit driver (prevalence-only)")
     # Mirror LDA driver flags for shared params.
     p.add_argument("--cdr", required=True,
@@ -196,6 +196,14 @@ def parse_args() -> argparse.Namespace:
                    help="Initial diagonal Sigma for the topic-covariate prior.")
     p.add_argument("--sigma-ridge", type=float, default=1e-6,
                    help="Ridge regularisation added to Sigma diagonal.")
+    p.add_argument("--sigma-prior-scale", type=float, default=None,
+                   help="Inverse-gamma Sigma-prior scale s0 (off when unset). "
+                        "Shrinks the per-topic logistic-normal variance toward s0.")
+    p.add_argument("--sigma-prior-count", type=float, default=0.0,
+                   help="Inverse-gamma Sigma-prior pseudo-count c0 (default 0).")
+    p.add_argument("--reference-topic", action="store_true",
+                   help="Pin topic 0's η to 0 (K-1 reference parameterization, "
+                        "ADR 0031). Removes the softmax translation degeneracy.")
     p.add_argument("--lbfgs-max-iter", type=int, default=50,
                    help="Max iterations for the per-doc L-BFGS optimiser.")
     p.add_argument("--lbfgs-tol", type=float, default=1e-4,
@@ -231,7 +239,7 @@ def parse_args() -> argparse.Namespace:
                    help="Gating: document column whose value selects a doc's "
                         "foreground block (default: source_cohort). Must NOT also "
                         "appear in --covariate-formula.")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def main() -> int:
@@ -384,9 +392,12 @@ def main() -> int:
                 covariate_names=covariate_names,
                 sigma_init=args.sigma_init,
                 sigma_ridge=args.sigma_ridge,
+                sigma_prior_scale=args.sigma_prior_scale,
+                sigma_prior_count=args.sigma_prior_count,
                 lbfgs_max_iter=args.lbfgs_max_iter,
                 lbfgs_tol=args.lbfgs_tol,
                 random_seed=args.random_seed,
+                reference_topic=args.reference_topic,
                 topic_blocks=partition,
                 doc_group_col=(args.group_var if partition is not None else None),
             )
