@@ -242,3 +242,59 @@ def test_streaming_stm_gated_fit_smoke(spark):
     model = est.fit(df, max_iter=3, subsampling_rate=1.0)
     assert model.global_params["lambda"].shape == (3, 5)
     assert model.metadata  # fit produced a model
+
+
+class TestStreamingSTMHardeningThreading:
+    """The opt-in OnlineSTM hardening knobs reach the engine and the metadata."""
+
+    def _toy_df(self, spark):
+        from pyspark.ml.linalg import SparseVector, DenseVector
+        rows = [
+            (SparseVector(8, [0, 2], [3.0, 1.0]), DenseVector([1.0, 0.0])),
+            (SparseVector(8, [1, 3], [2.0, 2.0]), DenseVector([0.0, 1.0])),
+            (SparseVector(8, [0, 4], [1.0, 2.0]), DenseVector([1.0, 0.5])),
+            (SparseVector(8, [5, 6], [1.0, 1.0]), DenseVector([0.0, 1.0])),
+            (SparseVector(8, [2, 7], [2.0, 1.0]), DenseVector([1.0, 0.2])),
+            (SparseVector(8, [1, 6], [1.0, 3.0]), DenseVector([0.0, 0.8])),
+        ]
+        return spark.createDataFrame(rows, ["features", "covariates"])
+
+    def test_reference_topic_reaches_engine(self, spark):
+        """A reference fit drives the reference topic's Gamma column to 0 — the
+        end-to-end signature that reference_topic took effect through the shim."""
+        from spark_vi.mllib.topic.stm import StreamingSTM
+        est = StreamingSTM(
+            K=4, features_col="features", covariates_col="covariates",
+            covariate_names=["a", "b"], random_seed=0, reference_topic=True)
+        model = est.fit(self._toy_df(spark), max_iter=3, subsampling_rate=1.0)
+        assert np.allclose(model.global_params["Gamma"][:, 0], 0.0)
+
+    def test_hardening_knobs_persisted_in_metadata(self, spark):
+        from spark_vi.mllib.topic.stm import StreamingSTM
+        est = StreamingSTM(
+            K=4, features_col="features", covariates_col="covariates",
+            covariate_names=["a", "b"], random_seed=0,
+            reference_topic=True, sigma_prior_scale=2.0, sigma_prior_count=500.0)
+        model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
+        assert model.metadata["stm_hardening"] == {
+            "reference_topic": True,
+            "sigma_prior_scale": 2.0,
+            "sigma_prior_count": 500.0,
+        }
+
+    def test_defaults_off_and_recorded(self, spark):
+        from spark_vi.mllib.topic.stm import StreamingSTM
+        est = StreamingSTM(
+            K=4, features_col="features", covariates_col="covariates",
+            covariate_names=["a", "b"], random_seed=0)
+        assert est.reference_topic is False
+        assert est.sigma_prior_scale is None
+        assert est.sigma_prior_count == 0.0
+        model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
+        assert model.metadata["stm_hardening"] == {
+            "reference_topic": False,
+            "sigma_prior_scale": None,
+            "sigma_prior_count": 0.0,
+        }
+        # Default fit does NOT force the reference column to zero.
+        assert not np.allclose(model.global_params["Gamma"][:, 0], 0.0)

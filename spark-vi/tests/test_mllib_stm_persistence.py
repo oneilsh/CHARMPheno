@@ -115,6 +115,31 @@ class TestSTMModelPersistence:
         assert m.elbo_trace == []
         assert m.converged is False
 
+    def test_stm_hardening_metadata_roundtrips(self, tmp_path: Path):
+        from spark_vi.mllib.topic.stm import STMModel
+        from spark_vi.models.topic.stm import OnlineSTM
+
+        model = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
+        gp = model.initialize_global(None)
+        stm_model = STMModel(
+            global_params=gp,
+            metadata={"K": 3, "V": 10, "P": 2, "stm_hardening": {
+                "reference_topic": True,
+                "sigma_prior_scale": 2.0,
+                "sigma_prior_count": 500.0,
+            }},
+            model_spec=_FakeSpec(),
+            covariate_names=["intercept", "cohort_b"],
+        )
+        out_dir = tmp_path / "stm_model_hardening"
+        stm_model.save(out_dir)
+        loaded = STMModel.load(out_dir)
+        assert loaded.metadata["stm_hardening"] == {
+            "reference_topic": True,
+            "sigma_prior_scale": 2.0,
+            "sigma_prior_count": 500.0,
+        }
+
 
 def test_stmmodel_roundtrips_topic_block_spec(tmp_path):
     import numpy as np

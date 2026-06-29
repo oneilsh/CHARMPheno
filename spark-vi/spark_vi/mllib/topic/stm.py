@@ -131,9 +131,12 @@ class StreamingSTM:
         max_levels: int = 10_000,
         sigma_init: float = 1.0,
         sigma_ridge: float = 1e-6,
+        sigma_prior_scale: float | None = None,
+        sigma_prior_count: float = 0.0,
         lbfgs_max_iter: int = 50,
         lbfgs_tol: float = 1e-4,
         random_seed: int | None = None,
+        reference_topic: bool = False,
         topic_blocks=None,
         doc_group_col: str | None = None,
     ) -> None:
@@ -170,9 +173,12 @@ class StreamingSTM:
 
         self.sigma_init = sigma_init
         self.sigma_ridge = sigma_ridge
+        self.sigma_prior_scale = sigma_prior_scale
+        self.sigma_prior_count = sigma_prior_count
         self.lbfgs_max_iter = lbfgs_max_iter
         self.lbfgs_tol = lbfgs_tol
         self.random_seed = random_seed
+        self.reference_topic = bool(reference_topic)
 
         self.topic_blocks = topic_blocks
         self.doc_group_col = doc_group_col
@@ -263,10 +269,13 @@ class StreamingSTM:
             P=self.P,
             sigma_init=self.sigma_init,
             sigma_ridge=self.sigma_ridge,
+            sigma_prior_scale=self.sigma_prior_scale,
+            sigma_prior_count=self.sigma_prior_count,
             lbfgs_max_iter=self.lbfgs_max_iter,
             lbfgs_tol=self.lbfgs_tol,
             random_seed=self.random_seed,
             topic_blocks=self.topic_blocks,
+            reference_topic=self.reference_topic,
         )
 
         # VIConfig uses learning_rate_tau0/kappa and mini_batch_fraction;
@@ -315,6 +324,16 @@ class StreamingSTM:
         metadata = dict(result.metadata)
         if self.topic_blocks is not None:
             metadata.setdefault("topic_block_spec", self.topic_blocks.to_dict())
+        # Provenance: record the opt-in hardening knobs that produced this fit.
+        # Not load-bearing for the current export path (the dashboard prevalence
+        # helpers use softmax(Gamma^T x), already correct under a reference fit
+        # because Gamma[:, 0] = 0); persisted so a reloaded model's provenance is
+        # complete and a future inference path can re-pin.
+        metadata.setdefault("stm_hardening", {
+            "reference_topic": self.reference_topic,
+            "sigma_prior_scale": self.sigma_prior_scale,
+            "sigma_prior_count": self.sigma_prior_count,
+        })
         return STMModel(
             global_params=result.global_params,
             metadata=metadata,
