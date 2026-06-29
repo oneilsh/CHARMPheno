@@ -468,14 +468,16 @@ def build_stm_args(
             "--group-var", str(effective.get("group_var", "source_cohort")),
         ]
     hardening: list[str] = []
-    if effective.get("reference_topic"):
-        hardening.append("--reference-topic")
+    # reference_topic + spectral_init default to True (insight 0030). Emit the
+    # explicit boolean so the driver receives the intended value, not its own default.
+    ref = effective.get("reference_topic", True)
+    hardening.append("--reference-topic" if ref else "--no-reference-topic")
     if effective.get("sigma_prior_scale") is not None:
         hardening.extend(["--sigma-prior-scale", str(effective["sigma_prior_scale"])])
     if effective.get("sigma_prior_count"):
         hardening.extend(["--sigma-prior-count", str(effective["sigma_prior_count"])])
-    if effective.get("spectral_init"):
-        hardening.append("--spectral-init")
+    spec = effective.get("spectral_init", True)
+    hardening.append("--spectral-init" if spec else "--no-spectral-init")
     return common + [
         "--covariate-formula", str(effective["covariate_formula"]),
         "--categorical-cols", ",".join(effective.get("categorical_cols", [])),

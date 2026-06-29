@@ -130,11 +130,14 @@ def main(argv=None) -> int:
                    help="Inverse-gamma Sigma-prior scale s0 (off when unset).")
     p.add_argument("--sigma-prior-count", type=float, default=0.0,
                    help="Inverse-gamma Sigma-prior pseudo-count c0 (default 0).")
-    p.add_argument("--reference-topic", action="store_true",
-                   help="Pin topic 0's eta to 0 (K-1 reference param, ADR 0031).")
-    p.add_argument("--spectral-init", action="store_true",
-                   help="Anchor-word (spectral) beta seed vs random gamma "
-                        "(insight 0029, ADR 0031/0032). Dense driver-side path.")
+    p.add_argument("--reference-topic", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="K-1 reference parameterization (default on, insight 0030; "
+                        "--no-reference-topic to disable).")
+    p.add_argument("--spectral-init", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Anchor-word spectral beta seed (default on, insight 0030; "
+                        "--no-spectral-init to disable).")
     p.add_argument("--out-dir", type=Path, required=True)
     args = p.parse_args(argv)
 

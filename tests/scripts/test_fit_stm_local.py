@@ -82,7 +82,8 @@ def test_fit_recovers_planted_rare_foreground(tmp_path):
 
 def test_fit_stm_local_reference_topic_end_to_end(tmp_path):
     """--reference-topic threads through to the engine: the saved Gamma has its
-    reference column zeroed and the metadata records the hardening config."""
+    reference column zeroed and the metadata records the hardening config.
+    --no-spectral-init is passed explicitly to isolate the reference-topic path."""
     import json
     import numpy as np
     from fit_stm_local import main as fit_main
@@ -92,7 +93,7 @@ def test_fit_stm_local_reference_topic_end_to_end(tmp_path):
         "--omop", str(omop), "--person", str(person),
         "--K", "5", "--background-k", "3", "--foreground", "rare_dx:2",
         "--covariate-formula", "~ C(sex) + age",
-        "--reference-topic",
+        "--reference-topic", "--no-spectral-init",
         "--sigma-prior-scale", "2.0", "--sigma-prior-count", "500.0",
         "--max-iter", "8", "--out-dir", str(out)])
     assert rc == 0

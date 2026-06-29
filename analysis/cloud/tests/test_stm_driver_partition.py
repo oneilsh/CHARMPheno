@@ -37,13 +37,13 @@ _REQUIRED_ARGS = [
 ]
 
 
-def test_parse_args_hardening_flags_default_off():
+def test_parse_args_hardening_flags_default_on():
     from stm_bigquery_cloud import parse_args
     args = parse_args(_REQUIRED_ARGS)
-    assert args.reference_topic is False
+    assert args.reference_topic is True
     assert args.sigma_prior_scale is None
     assert args.sigma_prior_count == 0.0
-    assert args.spectral_init is False
+    assert args.spectral_init is True
 
 
 def test_parse_args_hardening_flags_set():
@@ -58,3 +58,13 @@ def test_parse_args_hardening_flags_set():
     assert args.sigma_prior_scale == 2.0
     assert args.sigma_prior_count == 500.0
     assert args.spectral_init is True
+
+
+def test_parse_args_hardening_flags_disabled():
+    from stm_bigquery_cloud import parse_args
+    args = parse_args(_REQUIRED_ARGS + [
+        "--no-reference-topic",
+        "--no-spectral-init",
+    ])
+    assert args.reference_topic is False
+    assert args.spectral_init is False

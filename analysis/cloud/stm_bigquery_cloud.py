@@ -201,14 +201,14 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "Shrinks the per-topic logistic-normal variance toward s0.")
     p.add_argument("--sigma-prior-count", type=float, default=0.0,
                    help="Inverse-gamma Sigma-prior pseudo-count c0 (default 0).")
-    p.add_argument("--reference-topic", action="store_true",
-                   help="Pin topic 0's η to 0 (K-1 reference parameterization, "
-                        "ADR 0031). Removes the softmax translation degeneracy.")
-    p.add_argument("--spectral-init", action="store_true",
-                   help="Seed β with the anchor-word (spectral) init instead of "
-                        "random gamma (insight 0029, ADR 0031/0032). Dense path: "
-                        "collects docs to the driver — fits the cancer-scale "
-                        "cohort, not yet the large-V scalable rewrite.")
+    p.add_argument("--reference-topic", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="K-1 reference parameterization (default on, insight 0030; "
+                        "--no-reference-topic to disable).")
+    p.add_argument("--spectral-init", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Anchor-word spectral beta seed (default on, insight 0030; "
+                        "--no-spectral-init to disable).")
     p.add_argument("--lbfgs-max-iter", type=int, default=50,
                    help="Max iterations for the per-doc L-BFGS optimiser.")
     p.add_argument("--lbfgs-tol", type=float, default=1e-4,
