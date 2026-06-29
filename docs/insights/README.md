@@ -57,6 +57,7 @@ and when is itself useful.
 
 (Append entries here as new insights are written, newest at top.)
 
+- [0030](0030-spectral-init-closes-stm-sigma-blowup-on-real-data.md) — On real cancer data, spectral init brings STM's Σ from ~10^10 to ~7.6 and resolves all K topics at the default σ_init=1; the K−1 reference alone does not — the Σ blowup defeats the reference topic itself (stm, priors, svi, initialization, diagnostics, phenotyping)
 - [0029](0029-stm-sigma-init-collapse-blowup-missing-stabilizers.md) — Our online STM's σ_init-selected collapse↔Σ-blowup (Σ→10^10) is a missing-stabilizer artifact, not a property of STM; published STM avoids it via spectral init + K−1 reference-topic identifiability + Σ shrinkage (stm, priors, svi, initialization, diagnostics, prior-art)
 - [0028](0028-dirichlet-vs-logistic-normal-rare-phenotype-recovery-gated-lda-is-plda.md) — The prior family (Dirichlet vs logistic-normal), not gating, governs rare minority-phenotype recovery; STM collapses where LDA recovers (2x2 + repro); "gated LDA" is Partially Labeled Dirichlet Allocation (PLDA) (stm, lda, gating, priors, phenotyping, prior-art)
 - [0027](0027-gated-stm-imbalanced-arms-majority-foreground-collapses.md) — Gated STM on imbalanced arms: the majority arm's foreground collapses into the shared background; the minority arm captures its anchor but not sub-phenotypes; per-block NPMI is non-comparable (stm, gating, covariates, npmi, doc-units, diagnostics)

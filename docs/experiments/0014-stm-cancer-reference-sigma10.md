@@ -1,7 +1,7 @@
 ---
 id: 14
 slug: stm-cancer-reference-sigma10
-status: pending
+status: superseded
 model_class: stm
 cohort: cancer
 cohort_def: first_cancer_year
@@ -20,6 +20,13 @@ reference_topic: true
 ---
 
 # STM cancer demo: K−1 reference at sigma_init=10 (init-robustness sweep)
+
+> **SUPERSEDED — never run.** This was the high-σ cell of the *reference-only*
+> grid. exp 0013 (reference, σ=5) already showed reference alone does not tame Σ
+> on real data (Σ→7e9, reference topic dead) — so a σ=10 reference-only cell
+> would only confirm "still blows up" and changes no decision (insight 0030,
+> Finding 1). The high-σ init-robustness question is now asked properly *with
+> spectral init* in **exp 0016** (reference + spectral, σ=20). Kept for the record.
 
 Third cell of the `reference_topic` default-decision grid (insight 0029
 Ablation 2, ADR 0031). **Identical to exp 0011 (full-K, sigma_init=10) except
