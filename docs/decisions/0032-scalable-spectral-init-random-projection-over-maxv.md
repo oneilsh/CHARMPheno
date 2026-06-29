@@ -82,10 +82,13 @@ the current mean-relative `min_marginal_frac` floor.
 - **Time is the cheaper resource than memory** for this project's scale targets,
   so the extra distributed passes random projection buys (distributed
   co-occurrence accumulation, distributed NNLS) are an acceptable trade.
-- **No current code changes.** This ADR is the design direction for the future
-  scalable spectral-init arc; the prototype in `spectral_init.py` is unchanged
-  and is not wired into any cluster driver. The `min_marginal_frac` →
-  document-frequency-floor change lands in that arc, not now.
+- **No current code changes to the algorithm.** This ADR is the design direction
+  for the future scalable spectral-init arc; the prototype in `spectral_init.py`
+  is unchanged. The `min_marginal_frac` → document-frequency-floor change lands
+  in that arc, not now. Note: the existing dense spectral init IS wired into the
+  cluster fit path (threaded through `StreamingSTM` and both drivers, default ON,
+  validated by exp 0015 / insight 0030) — only the *scalable random-projection
+  rewrite* governed by this ADR remains pending.
 - **Dirichlet-family models are unaffected** — spectral init is an STM concern.
 
 ## References

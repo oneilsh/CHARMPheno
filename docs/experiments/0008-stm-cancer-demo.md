@@ -19,6 +19,11 @@ max_iter: 100
 
 # STM demo re-fit: cancer cohort with sex + age covariates
 
+> **Defaults note:** the engine defaults have since flipped to `reference_topic=True`
+> and `spectral_init=True` (validated default stack; see insight 0030). To reproduce
+> this run exactly, pass `--no-reference-topic --no-spectral-init` (or set
+> `reference_topic: false, spectral_init: false` in the run frontmatter).
+
 Demo-grade STM prevalence fit on the **cancer-only** cohort, on the current
 post-review engine. Scoped to a single, homogeneous, majority cohort (rather
 than the combined cancer/dementia corpus) so the result is cleaner and directly

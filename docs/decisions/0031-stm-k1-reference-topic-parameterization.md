@@ -21,10 +21,11 @@ starts. The K−1 reference parameterization is the missing third stabilizer.
 
 ## Decision
 
-Add an opt-in `reference_topic: bool = False` to `OnlineSTM`. When on, pin
-**topic 0**'s η ≡ 0 (the always-on "baseline" topic) and optimize the other K−1
-topics' η relative to it; θ = softmax([0, ν]). Default-off is byte-identical to
-the prior engine.
+Add `reference_topic: bool = True` to `OnlineSTM` (default ON, validated by exp
+0015 / insight 0030). Pin **topic 0**'s η ≡ 0 (the always-on "baseline" topic)
+and optimize the other K−1 topics' η relative to it; θ = softmax([0, ν]).
+Setting `reference_topic=False` selects the legacy full-K path (byte-identical
+to the prior engine).
 
 Two design choices:
 
@@ -81,11 +82,9 @@ Two design choices:
 - **Inference consistency.** `infer_local` pins the same reference, so exported
   per-document θ matches training. (`infer_local` not applying gating `allowed`
   is a pre-existing condition, unrelated to this change.)
-- **Not yet on the cluster.** `reference_topic` is reachable through the
-  `OnlineSTM` API and the local ablation, but is not threaded through the
-  `StreamingSTM` mllib estimator, so the production Spark fit path cannot use it
-  yet — the same posture as spectral init. Wiring it (constructor param +
-  metadata persistence so a reloaded model re-pins) is a separate decision, taken
-  when promoting beyond the local ablation.
+- **Now the cluster default.** `reference_topic` is threaded through
+  `StreamingSTM` and both cloud drivers; it defaults to `True` in the full
+  production Spark fit path (same as spectral init). Metadata persistence
+  (reloaded model re-pins the reference) was wired as part of this promotion.
 - **Dirichlet-family models are unaffected.** LDA/HDP/PLDA have no logistic-normal
   prior and no translation degeneracy; this guard is intrinsic to STM (insight 0028).

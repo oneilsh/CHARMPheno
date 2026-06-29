@@ -20,6 +20,11 @@ sigma_init: 5.0
 
 # STM cancer demo: higher sigma_init (collapse probe)
 
+> **Defaults note:** the engine defaults have since flipped to `reference_topic=True`
+> and `spectral_init=True` (validated default stack; see insight 0030). To reproduce
+> this run exactly, pass `--no-reference-topic --no-spectral-init` (or set
+> `reference_topic: false, spectral_init: false` in the run frontmatter).
+
 Single-knob A/B against experiment 0008. **Only `sigma_init` changes**
 (1.0 → 5.0); cohort, covariates, K, seed, and sampling are all identical, so
 any difference in topic differentiation is attributable to the prior-variance

@@ -20,6 +20,11 @@ sigma_init: 10.0
 
 # STM cancer demo: sigma_init=10 sweep point
 
+> **Defaults note:** the engine defaults have since flipped to `reference_topic=True`
+> and `spectral_init=True` (validated default stack; see insight 0030). To reproduce
+> this run exactly, pass `--no-reference-topic --no-spectral-init` (or set
+> `reference_topic: false, spectral_init: false` in the run frontmatter).
+
 Third point on the sigma_init sweep (after 1=collapse, 5=escape). Only
 `sigma_init` changes vs 0010 (5.0 → 10.0); `max_iter: 300` so it can converge.
 

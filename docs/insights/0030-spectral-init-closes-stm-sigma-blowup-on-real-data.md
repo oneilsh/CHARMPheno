@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-29
 **Topic:** stm | priors | svi | initialization | diagnostics | phenotyping
-**Status:** Confirmed (cancer cohort, exps 0012/0013 vs 0015)
+**Status:** Confirmed and corrected (cancer cohort, exps 0012/0013 vs 0015 vs 0016)
 
 Insight [0029](0029-stm-sigma-init-collapse-blowup-missing-stabilizers.md)
 established (synthetically + by theory) that our online STM's σ_init knife-edge —
@@ -31,6 +31,7 @@ max_iter 300. All opt-in stabilizers now wired through the cluster fit path
 | 0013 | reference, σ=5 | 7.16e9 | ~28 | **0.0001 (dead)** | +0.191 | −1.32e6 |
 | 0010 | full-K, σ=5 | 2.2e10 | ~28 | n/a | +0.216 | — |
 | **0015** | **reference + spectral, σ=1** | **7.56** | **40 (no dead floor)** | **0.0076 (alive)** | +0.173 | **−1.10e6** |
+| 0016 | reference + spectral, σ=20 | ~1.8e8 (blowup) | 40 (all resolved) | 0.004 (alive) | +0.185 | −1.32e6 |
 
 ## Finding 1 — reference alone escapes collapse but NOT the Σ blowup, and the blowup then defeats the reference topic
 
@@ -63,7 +64,8 @@ exp 0015 (add spectral init to 0012's config — same σ=1) is the decisive cell
   transferring to real data, where reference-alone did not.
 - **All 40 topics resolve** — minimum Σλ 6.11e3 (not the 93.7 dead-floor of
   0013); **no marginal clones**. Spectral didn't merely match 0013's ~28 at
-  σ=5, it used the full K at the default σ=1. The σ_init knob is gone.
+  σ=5, it used the full K at the default σ=1. Topic quality is σ_init-robust
+  (see exp 0016); Σ properness requires small σ_init (see below).
 - **The reference topic revived** — topic 0: E[β] 0.0001→0.0076, peak β
   0.000→0.048, real content. With Σ moderate the free-topic η no longer saturate,
   so the pinned baseline keeps a real (if small) share. (This also de-prioritizes
@@ -93,14 +95,67 @@ individually rarer (lower per-topic NPMI) but more specific. Min NPMI +0.072,
 0/40 unrated. Read peak β / Σλ and the ELBO, not the NPMI mean, to compare these
 regimes — NPMI rewards common-word co-occurrence, which finer topics have less of.
 
+## Finding 3 — exp 0016 corrects the init-independence claim: spectral makes TOPIC quality σ_init-robust, but NOT Σ
+
+exp 0016 (reference + spectral, σ_init=20) was predicted to confirm full
+init-independence — that Σ would settle to the same ~7.56 as 0015. It did not.
+
+- **Σ blows up to ~1.8e8** (per-topic trace: improper), with inflated Γ (|Γ| max
+  12.6 vs 0015's 5.22) and a worse ELBO (−1.32e6 vs 0015's −1.10e6). σ=20 lands
+  in insight 0029's high-Σ blowup basin — the same feedback loop (larger σ_init
+  → weaker prior penalty → larger η residuals → larger Σ) is still active when
+  starting above the natural η-scale.
+- **Topic quality, however, stays crisp.** NPMI mean +0.185 (vs 0015's +0.173),
+  all 40 topics resolved with no dead floor, and the reference topic stays alive
+  (E\[β\]=0.004 — not the dead 0.0001 of 0013). Topic quality is σ_init-robust
+  once reference + spectral are on.
+
+**The corrected decoupling:** spectral init makes TOPIC QUALITY (β/θ) σ_init-robust,
+but NOT Σ. A proper, bounded Σ — and therefore the green-light to treat Σ as
+a real sample-able covariance (i.e. to un-park the logistic-normal sampler
+of [ADR 0028-B](../decisions/0028-dashboard-conditioned-dirichlet-prior.md)) —
+still requires a SMALL σ_init. The default σ_init=1.0 is load-bearing, not
+cosmetic. Narrowing the earlier claim: "the σ_init knob is gone" should read
+"topic quality is σ_init-robust; Σ-properness requires small σ_init."
+
+Connecting to 0029's two-basin picture: spectral init moved the small-σ regime
+out of collapse into a proper-Σ basin (0015) AND rescued topic quality in both
+basins (0015 and 0016); but the large-σ Σ-blowup basin still exists — 0016 is
+in it. The reference removes the translation degeneracy; the spectral seed keeps
+topic content crisp regardless of basin; only σ_init determines which basin Σ
+lands in.
+
+## σ_init Goldilocks window
+
+Σ is re-estimated UPWARD toward the data's natural η-scale (~7.6) when σ_init
+starts below it: σ=1 climbs there fine and stays bounded (0015). There are
+two-sided guardrails:
+
+- **Too large** (above the natural scale, e.g. σ=20): the M-step feedback loop
+  inflates Σ further, landing in the blowup basin (0016 at ~1.8e8). Topic quality
+  survives but Σ is not a usable covariance.
+- **Too small** (e.g. σ≈0.01): the Gaussian prior penalty (η−μ)²/Σ becomes
+  roughly 100× stiffer, re-pinning η near its mean, flattening θ toward uniform,
+  and drifting β back toward the corpus marginal — a re-collapse that undoes the
+  spectral seed.
+
+So a smaller default is NOT safer; σ_init=1 sits inside the Goldilocks window.
+The principled cross-dataset robustness lever is the Σ-prior
+(`sigma_prior_scale` / `sigma_prior_count` anchoring Σ to a target), not a tiny
+σ_init.
+
 ## Implications
 
 1. **`reference_topic` + `spectral_init` are the validated default stack** for
-   STM on this data — the σ_init knob no longer exists once both are on.
-2. **STM's Σ is usable again.** At O(1–10) it can feed a faithful logistic-normal
-   sampler; the dashboard's Dirichlet-approximation conditioning (parked
-   [ADR 0028-B](../decisions/0028-dashboard-conditioned-dirichlet-prior.md)) is no
-   longer forced by a degenerate Σ.
+   STM on this data — now the engine default (threaded through `StreamingSTM`
+   and both drivers). Topic quality is σ_init-robust under this stack;
+   Σ-properness additionally requires σ_init inside the Goldilocks window
+   (default σ_init=1.0 is the validated choice).
+2. **STM's Σ is usable again — at the default σ_init.** At O(1–10) it can feed
+   a faithful logistic-normal sampler; the dashboard's Dirichlet-approximation
+   conditioning (parked
+   [ADR 0028-B](../decisions/0028-dashboard-conditioned-dirichlet-prior.md)) is
+   no longer forced by a degenerate Σ, provided σ_init=1.0 is in effect.
 3. **K=40 may now be under-sized.** With all 40 slots crisply used (no graceful
    unused capacity, cf. insight
    [0019](0019-lda-large-k-with-full-convergence-gracefully-unused-slots.md)),
@@ -111,13 +166,12 @@ regimes — NPMI rewards common-word co-occurrence, which finer topics have less
 
 ## Open / pending
 
-- **High-σ init robustness (exp 0016, queued):** reference+spectral at σ_init=20.
-  Prediction: Σ comes *down* to the same ~O(1–10) fixed point as 0015's 7.56,
-  demonstrating the M-step is now a proper init-independent estimator on both
-  sides of the old knife-edge (the spectral analog of the now-moot exp 0014).
 - exp 0015 hit max_iter (300) rather than early-converging; Σ is stable but the
   ELBO was still slowly creeping. Not a concern at this Σ scale, but a longer run
   or convergence-tol check would confirm the fixed point.
+- The Σ-prior (`sigma_prior_scale` / `sigma_prior_count`) is the next lever for
+  robustness at non-default σ_init values; anchoring Σ to a target could widen
+  the Goldilocks window.
 
 ## Relationship to prior insights
 

@@ -20,6 +20,11 @@ sigma_init: 5.0
 
 # STM cancer demo: sigma=5 stability probe (300 iterations)
 
+> **Defaults note:** the engine defaults have since flipped to `reference_topic=True`
+> and `spectral_init=True` (validated default stack; see insight 0030). To reproduce
+> this run exactly, pass `--no-reference-topic --no-spectral-init` (or set
+> `reference_topic: false, spectral_init: false` in the run frontmatter).
+
 Stability check on experiment 0009. **Only `max_iter` changes** (100 → 300);
 cohort, covariates, K, seed, and `sigma_init: 5.0` are identical, so iterations
 0–99 reproduce 0009's trajectory exactly (deterministic, seed 42) and

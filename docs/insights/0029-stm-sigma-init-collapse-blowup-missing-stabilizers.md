@@ -200,8 +200,8 @@ Gated rare-foreground (same `synthetic_gated_corpus`, 401 maj / 25 rare):
 the gated rare-arm scenario the reference is sufficient on its own — the
 within-group signal is cleaner than the noisy non-gated bg_frac=0.7 corpus, so it
 does not also need the spectral β seed to escape collapse. (Engine on the `stm`
-branch; `reference_topic` is opt-in and not yet wired into the cluster fit path —
-see ADR 0031.)
+branch; `reference_topic` and `spectral_init` are now the engine default —
+threaded through `StreamingSTM` and both drivers — see ADR 0031.)
 
 ## Caveats
 
