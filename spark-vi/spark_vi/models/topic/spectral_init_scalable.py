@@ -118,11 +118,19 @@ class ProjectedCoocResult:
                per-group Q passes).
     p_w:       (V,) summed word marginal (true Q row sums), float64.
     df_w:      (V,) document frequency over L ≥ 2 docs, int64.
+    group_p_w: group label -> (V,) summed WITHIN-GROUP word marginal over that
+               group's docs. The gated foreground recovery needs the within-group
+               marginal (the dense path uses Q_g.sum(axis=1)); the pooled p_w is
+               the wrong normalizer there. A doc in group g adds its SAME
+               pw_contrib to both p_w and group_p_w[g].
+    group_df_w:group label -> (V,) within-group document frequency over L ≥ 2 docs.
     """
     pooled_QR: np.ndarray
     group_QR: dict
     p_w: np.ndarray
     df_w: np.ndarray
+    group_p_w: dict
+    group_df_w: dict
 
 
 def projected_cooccurrence_rdd(
@@ -156,6 +164,8 @@ def projected_cooccurrence_rdd(
         part = _p.value
         pooled = np.zeros((_V, _d), dtype=_dtype)
         group_QR = {g: np.zeros((_V, _d), dtype=_dtype) for g in _groups}
+        group_p_w = {g: np.zeros(_V, dtype=np.float64) for g in _groups}
+        group_df_w = {g: np.zeros(_V, dtype=np.int64) for g in _groups}
         p_w = np.zeros(_V, dtype=np.float64)
         df_w = np.zeros(_V, dtype=np.int64)
         known = set(_groups)
@@ -176,19 +186,30 @@ def projected_cooccurrence_rdd(
             for g in doc.groups:
                 if g in known:
                     group_QR[g][idx] += qr
+                    group_p_w[g][idx] += pw
+                    group_df_w[g][idx] += 1
             n_docs += 1
-        return [(pooled, group_QR, p_w, df_w, n_docs)]
+        return [(pooled, group_QR, p_w, df_w, group_p_w, group_df_w, n_docs)]
 
     def _combine(a, b):
         ga, gb = a[1], b[1]
         merged = {g: ga[g] + gb[g] for g in ga}
-        return (a[0] + b[0], merged, a[2] + b[2], a[3] + b[3], a[4] + b[4])
+        gpa, gpb = a[4], b[4]
+        merged_pw = {g: gpa[g] + gpb[g] for g in gpa}
+        gda, gdb = a[5], b[5]
+        merged_df = {g: gda[g] + gdb[g] for g in gda}
+        return (
+            a[0] + b[0], merged, a[2] + b[2], a[3] + b[3],
+            merged_pw, merged_df, a[6] + b[6],
+        )
 
-    pooled, group_QR, p_w, df_w, _n = rdd.mapPartitions(_local).treeReduce(
+    (pooled, group_QR, p_w, df_w,
+     group_p_w, group_df_w, _n) = rdd.mapPartitions(_local).treeReduce(
         _combine, depth=depth
     )
     return ProjectedCoocResult(
-        pooled_QR=pooled, group_QR=group_QR, p_w=p_w, df_w=df_w
+        pooled_QR=pooled, group_QR=group_QR, p_w=p_w, df_w=df_w,
+        group_p_w=group_p_w, group_df_w=group_df_w,
     )
 
 
@@ -317,4 +338,73 @@ def recover_beta_projected(QR: np.ndarray, p_w: np.ndarray, anchors,
         beta[zero] = 1.0 / V
         row_sums[zero, 0] = 1.0
     beta = beta / row_sums
+    return beta
+
+
+def scalable_spectral_init_beta(
+    rdd, partition, V: int, *, d: int | None = None, eps: float = 0.1,
+    seed: int = 0, min_doc_freq: int = 5,
+) -> np.ndarray:
+    """Block-aware K×V β seed in ``partition`` slot order — scalable analog.
+
+    Mirrors the dense ``spectral_init.spectral_init_beta`` orchestration exactly,
+    substituting the projected primitives so the whole co-occurrence pass is a
+    SINGLE distributed sketch (never a V×V matrix on the driver):
+
+    Step 1 (background): pooled projected sketch over all docs → ``background_k``
+    anchors on the pooled sketch → recover those rows into
+    ``partition.background_indices()``.
+
+    Step 2 (per group): for each group g, use that group's WITHIN-GROUP sketch
+    (``group_QR[g]`` with within-group marginal ``group_p_w[g]`` /
+    ``group_df_w[g]``) — where a rare group's phenotype is undiluted by the
+    majority. Find ``len(block_indices(g))`` foreground anchors with the background
+    anchors passed as ``seed_rows`` (deflation in selection), recover the combined
+    background+foreground anchors against the within-group sketch (deflation in
+    recovery), and keep only the trailing foreground rows into
+    ``partition.block_indices(g)``.
+
+    Non-gated partitions (background_k = K, no foreground groups) execute step 1
+    only — the dense degenerate case, one code path, no special case.
+
+    ``d`` defaults to ``default_projection_dim(partition.K, V, eps)``. Short-fill
+    guards match the dense path: if anchor-finding falls short, only the found
+    rows are placed and the rest stay zero (the hook never sees a NaN).
+    """
+    K = partition.K
+    if d is None:
+        d = default_projection_dim(K, V, eps)
+    beta = np.zeros((K, V), dtype=np.float64)
+
+    # ONE distributed pass: pooled + per-group projected sketches, marginals, df.
+    res = projected_cooccurrence_rdd(rdd, partition, V, d, seed)
+
+    # Step 1: background block on the pooled sketch.
+    bg_anchors = find_anchors_projected(
+        res.pooled_QR, res.p_w, res.df_w, partition.background_k,
+        min_doc_freq=min_doc_freq,
+    )
+    bg_beta = recover_beta_projected(res.pooled_QR, res.p_w, bg_anchors)
+    bg_idx = partition.background_indices()
+    # Short-fill guard: fill only what find_anchors_projected returned.
+    n_bg = min(len(bg_idx), bg_beta.shape[0])
+    beta[bg_idx[:n_bg]] = bg_beta[:n_bg]
+
+    # Step 2: each group's foreground on its within-group sketch, deflated vs bg.
+    for g in partition.groups:
+        fg_idx = partition.block_indices(g)
+        fg_anchors = find_anchors_projected(
+            res.group_QR[g], res.group_p_w[g], res.group_df_w[g], len(fg_idx),
+            seed_rows=bg_anchors, min_doc_freq=min_doc_freq,
+        )
+        if not fg_anchors:
+            continue
+        combined = list(bg_anchors) + list(fg_anchors)
+        combined_beta = recover_beta_projected(
+            res.group_QR[g], res.group_p_w[g], combined
+        )
+        fg_beta = combined_beta[len(bg_anchors):]      # drop the background rows
+        n_fg = min(len(fg_idx), fg_beta.shape[0])
+        beta[fg_idx[:n_fg]] = fg_beta[:n_fg]
+
     return beta

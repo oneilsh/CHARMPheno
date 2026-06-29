@@ -16,6 +16,7 @@ from spark_vi.models.topic.spectral_init import (
     recover_beta,
     word_cooccurrence,
 )
+from spark_vi.models.topic.spectral_init import spectral_init_beta
 from spark_vi.models.topic.spectral_init_scalable import (
     ProjectedCoocResult,
     _project_doc,
@@ -24,7 +25,9 @@ from spark_vi.models.topic.spectral_init_scalable import (
     find_anchors_projected,
     projected_cooccurrence_rdd,
     recover_beta_projected,
+    scalable_spectral_init_beta,
 )
+from tests._stm_synth import foreground_recovers_group
 
 
 def _projected_inputs(docs, V, seed, d, orthonormal=False):
@@ -189,6 +192,8 @@ def _numpy_reference(docs, partition, V, d, seed, dtype):
     """Single-process reference for the distributed pass."""
     pooled = np.zeros((V, d), dtype=dtype)
     group_QR = {g: np.zeros((V, d), dtype=dtype) for g in partition.groups}
+    group_p_w = {g: np.zeros(V, dtype=np.float64) for g in partition.groups}
+    group_df_w = {g: np.zeros(V, dtype=np.int64) for g in partition.groups}
     p_w = np.zeros(V, dtype=np.float64)
     df_w = np.zeros(V, dtype=np.int64)
     R_full = _r_rows(np.arange(V, dtype=np.int64), seed, d)
@@ -205,7 +210,9 @@ def _numpy_reference(docs, partition, V, d, seed, dtype):
         for g in doc.groups:
             if g in group_QR:
                 group_QR[g][idx] += qr.astype(dtype)
-    return pooled, group_QR, p_w, df_w
+                group_p_w[g][idx] += pw
+                group_df_w[g][idx] += 1
+    return pooled, group_QR, p_w, df_w, group_p_w, group_df_w
 
 
 class TestProjectedCooccurrenceRDD:
@@ -224,7 +231,8 @@ class TestProjectedCooccurrenceRDD:
         )
 
         assert isinstance(result, ProjectedCoocResult)
-        ref_pooled, ref_group, ref_pw, ref_df = _numpy_reference(
+        (ref_pooled, ref_group, ref_pw, ref_df,
+         ref_gpw, ref_gdf) = _numpy_reference(
             docs, partition, V, d, seed, np.float64
         )
         np.testing.assert_allclose(result.pooled_QR, ref_pooled, atol=1e-9, rtol=0)
@@ -232,8 +240,49 @@ class TestProjectedCooccurrenceRDD:
             np.testing.assert_allclose(
                 result.group_QR[g], ref_group[g], atol=1e-9, rtol=0
             )
+            np.testing.assert_allclose(
+                result.group_p_w[g], ref_gpw[g], atol=1e-12, rtol=0
+            )
+            np.testing.assert_array_equal(result.group_df_w[g], ref_gdf[g])
         np.testing.assert_allclose(result.p_w, ref_pw, atol=1e-12, rtol=0)
         np.testing.assert_array_equal(result.df_w, ref_df)
+
+    def test_group_marginals_match_within_group_numpy_reference(self, spark):
+        """group_p_w[g] / group_df_w[g] equal a numpy reference over group g's docs.
+
+        The gated foreground step needs the WITHIN-GROUP marginal (the dense path
+        uses Q_g.sum(axis=1)); pin it against a single-process reference that
+        restricts to the docs carrying group g.
+        """
+        from tests._stm_synth import synthetic_gated_corpus
+
+        docs, _planted, partition = synthetic_gated_corpus(
+            groups=("cancer", "dementia"), fg_per_group=1, bg_k=2,
+            V=24, D=22, doc_len=12, bg_frac=0.5, seed=11,
+        )
+        V, d, seed = 24, 10, 777
+        rdd = spark.sparkContext.parallelize(docs, numSlices=4)
+        result = projected_cooccurrence_rdd(
+            rdd, partition, V=V, d=d, seed=seed, dtype=np.float64
+        )
+
+        for g in partition.groups:
+            ref_pw = np.zeros(V, dtype=np.float64)
+            ref_df = np.zeros(V, dtype=np.int64)
+            for doc in docs:
+                if g not in doc.groups:
+                    continue
+                n = np.asarray(doc.counts, dtype=np.float64)
+                if float(n.sum()) < 2:
+                    continue
+                idx = np.asarray(doc.indices, dtype=np.int64)
+                _qr, pw = _project_doc(idx, n, _r_rows(idx, seed, d))
+                ref_pw[idx] += pw
+                ref_df[idx] += 1
+            np.testing.assert_allclose(
+                result.group_p_w[g], ref_pw, atol=1e-12, rtol=0
+            )
+            np.testing.assert_array_equal(result.group_df_w[g], ref_df)
 
     def test_float32_default_close_to_float64(self, spark):
         from tests._stm_synth import synthetic_gated_corpus
@@ -372,3 +421,105 @@ def test_recover_beta_projected_valid_and_close():
         top_proj = set(np.argsort(beta[k])[-5:])
         top_dense = set(np.argsort(dense_beta[k])[-5:])
         assert len(top_proj & top_dense) >= 4
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator: scalable_spectral_init_beta (block-aware, one distributed pass).
+# Mirrors the dense spectral_init_beta structure on the projected primitives.
+# ---------------------------------------------------------------------------
+
+
+class TestScalableSpectralInitBeta:
+    def test_non_gated_orchestrator(self, spark):
+        """All-background partition: step 1 only, valid stochastic, non-uniform.
+
+        The degenerate dense case (background_k = K, no foreground groups) runs the
+        pooled background recovery alone and must reproduce a global single-pass
+        anchor-word seed: a valid (K, V) row-stochastic β whose filled rows are NOT
+        the uniform 1/V (spectral seeding took effect).
+        """
+        from tests._stm_synth import synthetic_ehr_corpus
+
+        docs, _planted = synthetic_ehr_corpus(
+            K_rare=4, V=40, D=120, doc_len=14, bg_frac=0.5, seed=7
+        )
+        V, K, seed = 40, 4, 31337
+        partition = TopicBlockPartition(
+            group_var="", background_k=K, foreground=()
+        )
+        rdd = spark.sparkContext.parallelize(docs, numSlices=4)
+        beta = scalable_spectral_init_beta(
+            rdd, partition, V=V, seed=seed, min_doc_freq=3
+        )
+
+        assert beta.shape == (K, V)
+        assert (beta >= 0).all()
+        for k in partition.background_indices():
+            row = beta[k]
+            if row.sum() == 0:
+                continue  # short-fill left a zero row; never NaN
+            np.testing.assert_allclose(row.sum(), 1.0, atol=1e-9, rtol=0)
+            # Spectral seeding took effect: not the uniform 1/V seed.
+            assert np.abs(row - 1.0 / V).max() > 1e-6
+
+    def test_gated_orchestrator_structure_and_rare_recovery(self, spark):
+        """Gated: background rows in bg slots, foreground rows in each group's block.
+
+        Structural: each filled background row lives in background_indices() and each
+        group's foreground rows live in block_indices(g), all valid stochastic. Then
+        a foreground-recovery check analogous to the dense
+        test_block_aware_init_recovers_rare_group_foreground: the rare arm's
+        foreground topic lands its planted phenotype at init.
+        """
+        from tests._stm_synth import synthetic_gated_corpus
+
+        # Same separable corpus the dense
+        # test_block_aware_init_recovers_rare_group_foreground uses, with the rare
+        # arm thinned to a minority (keep 1 in 4 of its docs).
+        docs, planted, partition = synthetic_gated_corpus(
+            groups=("maj", "rare"), fg_per_group=2, bg_k=3, V=240, D=1200,
+            doc_len=30, bg_frac=0.6, seed=3,
+        )
+        docs = [
+            d for i, d in enumerate(docs)
+            if ("rare" not in d.groups) or (i % 4 == 0)
+        ]
+
+        V, seed = 240, 31337
+        # A raw-Gaussian sketch at the DEFAULT d (eps=0.1) only approximately
+        # preserves the anchor geometry (JL error O(1/√d)); empirically the rare-arm
+        # foreground anchor is not reliably recovered until eps≈0.04 (d≈3426 here).
+        # We raise d for THIS recovery test and document it. We do NOT orthonormalize
+        # in production code, and the rigorous scalable≈dense planted-recovery at the
+        # production default d is a separate later task — here a structural check plus
+        # a recovers-the-rare-arm check at a larger d is sufficient.
+        d = default_projection_dim(partition.K, V, eps=0.04)
+        rdd = spark.sparkContext.parallelize(docs, numSlices=4)
+        beta = scalable_spectral_init_beta(
+            rdd, partition, V=V, d=d, seed=seed, min_doc_freq=3
+        )
+
+        assert beta.shape == (partition.K, V)
+        assert (beta >= 0).all()
+        # Every filled row is a valid distribution.
+        for k in range(partition.K):
+            row = beta[k]
+            if row.sum() == 0:
+                continue
+            np.testing.assert_allclose(row.sum(), 1.0, atol=1e-9, rtol=0)
+
+        # Structural: background rows occupy the background slots; each group's
+        # foreground rows occupy that group's block (rows are placed by slot in the
+        # orchestrator, so this is a placement invariant — filled rows are nonzero).
+        bg_idx = set(partition.background_indices().tolist())
+        fg_all = set()
+        for g in partition.groups:
+            fg_all |= set(partition.block_indices(g).tolist())
+        assert bg_idx.isdisjoint(fg_all)
+        assert bg_idx | fg_all == set(range(partition.K))
+
+        # Foreground recovery: the rare arm's planted phenotype surfaces in its
+        # block (thresh matches the dense block-aware recovery test).
+        assert foreground_recovers_group(
+            beta, partition, "rare", planted, thresh=0.4
+        )
