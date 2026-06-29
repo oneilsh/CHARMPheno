@@ -28,7 +28,8 @@ def test_canonical_collapse_update_global_matches_original_formulas():
     rng = np.random.default_rng(3)
     V, P, K = 6, 2, 4
     docs = _docs(rng, 8, V, P, lambda i: frozenset())
-    model = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=1, topic_blocks=None)
+    # reference_topic=False: pins the non-reference closed forms (reference path covered in test_stm_reference.py)
+    model = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=1, topic_blocks=None, reference_topic=False)
     gp0 = model.initialize_global(None)
     stats = model.local_update(list(docs), gp0)
     out = model.update_global(gp0, stats, 0.5)
@@ -56,7 +57,8 @@ def test_zero_foreground_contribution_from_majority():
     K = part.K  # 4; foreground topics = [2, 3]
     # All docs are majority (no groups) -> foreground never allowed.
     docs = _docs(rng, 10, V, P, lambda i: frozenset())
-    model = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=1, topic_blocks=part)
+    # reference_topic=False: pins the non-reference closed forms (reference path covered in test_stm_reference.py)
+    model = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=1, topic_blocks=part, reference_topic=False)
     gp = model.initialize_global(None)
     stats = model.local_update(docs, gp)
     assert np.all(stats["lambda_stats"][2:, :] == 0.0)
@@ -72,7 +74,8 @@ def test_block_aware_sigma_divisor_uses_per_topic_counts():
     # 6 majority + 4 'rare' docs.
     docs = (_docs(rng, 6, V, P, lambda i: frozenset())
             + _docs(rng, 4, V, P, lambda i: frozenset({"rare"})))
-    model = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=1, topic_blocks=part)
+    # reference_topic=False: pins the non-reference closed forms (reference path covered in test_stm_reference.py)
+    model = OnlineSTM(K=K, vocab_size=V, P=P, random_seed=1, topic_blocks=part, reference_topic=False)
     gp = model.initialize_global(None)
     stats = model.local_update(docs, gp)
     np.testing.assert_array_equal(stats["n_docs_per_topic"], [10.0, 10.0, 4.0])

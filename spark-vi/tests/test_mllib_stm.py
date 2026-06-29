@@ -274,7 +274,8 @@ class TestStreamingSTMHardeningThreading:
         est = StreamingSTM(
             K=4, features_col="features", covariates_col="covariates",
             covariate_names=["a", "b"], random_seed=0,
-            reference_topic=True, sigma_prior_scale=2.0, sigma_prior_count=500.0)
+            reference_topic=True, sigma_prior_scale=2.0, sigma_prior_count=500.0,
+            spectral_init=False)
         model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
         assert model.metadata["stm_hardening"] == {
             "reference_topic": True,
@@ -283,23 +284,28 @@ class TestStreamingSTMHardeningThreading:
             "spectral_init": False,
         }
 
-    def test_defaults_off_and_recorded(self, spark):
+    def test_defaults_on_and_recorded(self, spark, monkeypatch):
+        import numpy as np
+        import spark_vi.models.topic.spectral_init as si_mod
         from spark_vi.mllib.topic.stm import StreamingSTM
+        # toy_df is too small for the real anchor-word init; uniform seed keeps the
+        # default-on fit robust while still exercising the spectral_init=True path.
+        monkeypatch.setattr(si_mod, "spectral_init_beta",
+                            lambda docs, partition, V: np.full((partition.K, V), 1.0 / V))
         est = StreamingSTM(
             K=4, features_col="features", covariates_col="covariates",
             covariate_names=["a", "b"], random_seed=0)
-        assert est.reference_topic is False
-        assert est.sigma_prior_scale is None
-        assert est.sigma_prior_count == 0.0
+        assert est.reference_topic is True
+        assert est.spectral_init is True
         model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
         assert model.metadata["stm_hardening"] == {
-            "reference_topic": False,
+            "reference_topic": True,
             "sigma_prior_scale": None,
             "sigma_prior_count": 0.0,
-            "spectral_init": False,
+            "spectral_init": True,
         }
-        # Default fit does NOT force the reference column to zero.
-        assert not np.allclose(model.global_params["Gamma"][:, 0], 0.0)
+        # Default fit now pins the reference column to zero.
+        assert np.allclose(model.global_params["Gamma"][:, 0], 0.0)
 
     def test_spectral_init_seed_reaches_initialize_global(self, spark, monkeypatch):
         """spectral_init=True computes a spectral_beta seed from the collected
@@ -363,7 +369,7 @@ class TestStreamingSTMHardeningThreading:
 
         est = StreamingSTM(
             K=4, features_col="features", covariates_col="covariates",
-            covariate_names=["a", "b"], random_seed=0)
+            covariate_names=["a", "b"], random_seed=0, spectral_init=False)
         assert est.spectral_init is False
         model = est.fit(self._toy_df(spark), max_iter=1, subsampling_rate=1.0)
         assert captured["data_summary"] is None

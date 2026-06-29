@@ -347,7 +347,7 @@ class OnlineSTM(VIModel):
         gamma_shape: float = 100.0,
         random_seed: int | None = None,
         topic_blocks=None,
-        reference_topic: bool = False,
+        reference_topic: bool = True,  # default-on (validated, insight 0030); pass False for the legacy full-K path
     ) -> None:
         if K < 1:
             raise ValueError(f"K must be >= 1, got {K}")

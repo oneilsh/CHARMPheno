@@ -136,8 +136,8 @@ class StreamingSTM:
         lbfgs_max_iter: int = 50,
         lbfgs_tol: float = 1e-4,
         random_seed: int | None = None,
-        reference_topic: bool = False,
-        spectral_init: bool = False,
+        reference_topic: bool = True,
+        spectral_init: bool = True,
         topic_blocks=None,
         doc_group_col: str | None = None,
     ) -> None:

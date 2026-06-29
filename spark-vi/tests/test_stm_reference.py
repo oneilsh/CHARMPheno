@@ -86,7 +86,8 @@ def test_reference_topic_requires_k_at_least_two():
 
 
 def test_reference_index_toggles():
-    assert OnlineSTM(K=3, vocab_size=4, P=1)._reference_index() is None
+    assert OnlineSTM(K=3, vocab_size=4, P=1, reference_topic=False)._reference_index() is None
+    assert OnlineSTM(K=3, vocab_size=4, P=1)._reference_index() == 0  # reference is now the default
     assert OnlineSTM(K=3, vocab_size=4, P=1, reference_topic=True)._reference_index() == 0
 
 
@@ -166,21 +167,27 @@ def test_reference_elbo_finite():
     assert np.isfinite(elbo)
 
 
-def test_reference_off_does_not_perturb_default():
-    """Passing reference_topic=False (the default) is identical to not passing
-    it — the kwarg's presence must not change the canonical fit."""
+def test_reference_on_is_the_default():
+    """reference_topic now defaults to True (validated default, insight 0030):
+    omitting the kwarg is identical to reference_topic=True, and differs from the
+    explicit-off (legacy full-K) fit."""
     rng = np.random.default_rng(0)
     V, K = 30, 4
     docs = _toy_docs(rng, V=V, D=40, doc_len=20, K_blocks=K)
-    a = OnlineSTM(K=K, vocab_size=V, P=1, random_seed=7)
-    b = OnlineSTM(K=K, vocab_size=V, P=1, random_seed=7, reference_topic=False)
-    gpa, gpb = a.initialize_global(None), b.initialize_global(None)
+    default = OnlineSTM(K=K, vocab_size=V, P=1, random_seed=7)
+    on = OnlineSTM(K=K, vocab_size=V, P=1, random_seed=7, reference_topic=True)
+    off = OnlineSTM(K=K, vocab_size=V, P=1, random_seed=7, reference_topic=False)
+    gpd, gpon, gpoff = default.initialize_global(None), on.initialize_global(None), off.initialize_global(None)
     for _ in range(5):
-        gpa = a.update_global(gpa, a.local_update(docs, gpa), learning_rate=1.0)
-        gpb = b.update_global(gpb, b.local_update(docs, gpb), learning_rate=1.0)
-    assert np.array_equal(gpa["Gamma"], gpb["Gamma"])
-    assert np.array_equal(gpa["Sigma"], gpb["Sigma"])
-    assert np.array_equal(gpa["lambda"], gpb["lambda"])
+        gpd = default.update_global(gpd, default.local_update(docs, gpd), learning_rate=1.0)
+        gpon = on.update_global(gpon, on.local_update(docs, gpon), learning_rate=1.0)
+        gpoff = off.update_global(gpoff, off.local_update(docs, gpoff), learning_rate=1.0)
+    # Default == reference-on, in every global param.
+    assert np.array_equal(gpd["Gamma"], gpon["Gamma"])
+    assert np.array_equal(gpd["Sigma"], gpon["Sigma"])
+    assert np.array_equal(gpd["lambda"], gpon["lambda"])
+    # And differs from the explicit-off full-K fit.
+    assert not np.array_equal(gpd["Gamma"], gpoff["Gamma"])
 
 
 def test_reference_gated_infer_local_pins_reference():
