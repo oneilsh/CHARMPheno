@@ -1304,9 +1304,11 @@ def test_build_stm_args_threads_hardening_flags(monkeypatch):
         "continuous_cols": ["age"],
         "reference_topic": True,
         "sigma_prior_scale": 2.0, "sigma_prior_count": 500.0,
+        "spectral_init": True,
     }
     args = run_experiment.build_stm_args(effective, out_dir="/tmp/out")
     assert "--reference-topic" in args
+    assert "--spectral-init" in args
     i = args.index("--sigma-prior-scale"); assert args[i + 1] == "2.0"
     j = args.index("--sigma-prior-count"); assert args[j + 1] == "500.0"
 
@@ -1327,3 +1329,4 @@ def test_build_stm_args_hardening_flags_omitted_by_default(monkeypatch):
     assert "--reference-topic" not in args
     assert "--sigma-prior-scale" not in args
     assert "--sigma-prior-count" not in args
+    assert "--spectral-init" not in args

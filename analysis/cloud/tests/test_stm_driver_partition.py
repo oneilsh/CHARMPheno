@@ -43,6 +43,7 @@ def test_parse_args_hardening_flags_default_off():
     assert args.reference_topic is False
     assert args.sigma_prior_scale is None
     assert args.sigma_prior_count == 0.0
+    assert args.spectral_init is False
 
 
 def test_parse_args_hardening_flags_set():
@@ -51,7 +52,9 @@ def test_parse_args_hardening_flags_set():
         "--reference-topic",
         "--sigma-prior-scale", "2.0",
         "--sigma-prior-count", "500.0",
+        "--spectral-init",
     ])
     assert args.reference_topic is True
     assert args.sigma_prior_scale == 2.0
     assert args.sigma_prior_count == 500.0
+    assert args.spectral_init is True

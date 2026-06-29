@@ -280,6 +280,7 @@ class TestStreamingSTMHardeningThreading:
             "reference_topic": True,
             "sigma_prior_scale": 2.0,
             "sigma_prior_count": 500.0,
+            "spectral_init": False,
         }
 
     def test_defaults_off_and_recorded(self, spark):
@@ -295,6 +296,75 @@ class TestStreamingSTMHardeningThreading:
             "reference_topic": False,
             "sigma_prior_scale": None,
             "sigma_prior_count": 0.0,
+            "spectral_init": False,
         }
         # Default fit does NOT force the reference column to zero.
         assert not np.allclose(model.global_params["Gamma"][:, 0], 0.0)
+
+    def test_spectral_init_seed_reaches_initialize_global(self, spark, monkeypatch):
+        """spectral_init=True computes a spectral_beta seed from the collected
+        docs and passes it to the engine as data_summary={'spectral_beta': ...}.
+
+        We spy on spectral_init_beta (uniform seed, so no zero-rows can trip the
+        digamma in the first E-step) and on OnlineSTM.initialize_global to capture
+        the data_summary the runner forwards — the end-to-end wiring seam."""
+        import spark_vi.models.topic.spectral_init as si_mod
+        from spark_vi.models.topic.stm import OnlineSTM
+        from spark_vi.mllib.topic.stm import StreamingSTM
+
+        K, V = 4, 8
+        sentinel = np.full((K, V), 1.0 / V)
+        seen = {}
+
+        def fake_spectral(docs, partition, vocab_size):
+            seen["vocab_size"] = vocab_size
+            seen["partition_K"] = partition.K
+            seen["n_docs"] = len(docs)
+            return sentinel
+
+        monkeypatch.setattr(si_mod, "spectral_init_beta", fake_spectral)
+
+        captured = {}
+        orig_init = OnlineSTM.initialize_global
+
+        def spy_init(self, data_summary):
+            captured["data_summary"] = data_summary
+            return orig_init(self, data_summary)
+
+        monkeypatch.setattr(OnlineSTM, "initialize_global", spy_init)
+
+        est = StreamingSTM(
+            K=K, features_col="features", covariates_col="covariates",
+            covariate_names=["a", "b"], random_seed=0, spectral_init=True)
+        model = est.fit(self._toy_df(spark), max_iter=1, subsampling_rate=1.0)
+
+        assert seen["vocab_size"] == V
+        assert seen["partition_K"] == K
+        assert seen["n_docs"] == 6
+        ds = captured["data_summary"]
+        assert ds is not None and "spectral_beta" in ds
+        assert np.allclose(ds["spectral_beta"], sentinel)
+        assert model.metadata["stm_hardening"]["spectral_init"] is True
+
+    def test_spectral_init_off_forwards_no_seed(self, spark, monkeypatch):
+        """Default (spectral_init off): initialize_global receives data_summary
+        None (random-gamma init path), and the metadata records it off."""
+        from spark_vi.models.topic.stm import OnlineSTM
+        from spark_vi.mllib.topic.stm import StreamingSTM
+
+        captured = {}
+        orig_init = OnlineSTM.initialize_global
+
+        def spy_init(self, data_summary):
+            captured["data_summary"] = data_summary
+            return orig_init(self, data_summary)
+
+        monkeypatch.setattr(OnlineSTM, "initialize_global", spy_init)
+
+        est = StreamingSTM(
+            K=4, features_col="features", covariates_col="covariates",
+            covariate_names=["a", "b"], random_seed=0)
+        assert est.spectral_init is False
+        model = est.fit(self._toy_df(spark), max_iter=1, subsampling_rate=1.0)
+        assert captured["data_summary"] is None
+        assert model.metadata["stm_hardening"]["spectral_init"] is False

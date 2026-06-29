@@ -101,6 +101,26 @@ def test_fit_stm_local_reference_topic_end_to_end(tmp_path):
         "reference_topic": True,
         "sigma_prior_scale": 2.0,
         "sigma_prior_count": 500.0,
+        "spectral_init": False,
     }
     Gamma = np.load(out / "params" / "Gamma.npy")
     assert np.allclose(Gamma[:, 0], 0.0)
+
+
+def test_fit_stm_local_spectral_init_end_to_end(tmp_path):
+    """--spectral-init threads through to the engine: the fit completes on the
+    gated sim corpus (exercising the block-aware anchor-word path) and the
+    metadata records the hardening config."""
+    import json
+    from fit_stm_local import main as fit_main
+    omop, person = _make_sim(tmp_path)
+    out = tmp_path / "ckpt_spectral"
+    rc = fit_main([
+        "--omop", str(omop), "--person", str(person),
+        "--K", "5", "--background-k", "3", "--foreground", "rare_dx:2",
+        "--covariate-formula", "~ C(sex) + age",
+        "--spectral-init",
+        "--max-iter", "8", "--out-dir", str(out)])
+    assert rc == 0
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["metadata"]["stm_hardening"]["spectral_init"] is True

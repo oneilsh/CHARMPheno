@@ -474,6 +474,8 @@ def build_stm_args(
         hardening.extend(["--sigma-prior-scale", str(effective["sigma_prior_scale"])])
     if effective.get("sigma_prior_count"):
         hardening.extend(["--sigma-prior-count", str(effective["sigma_prior_count"])])
+    if effective.get("spectral_init"):
+        hardening.append("--spectral-init")
     return common + [
         "--covariate-formula", str(effective["covariate_formula"]),
         "--categorical-cols", ",".join(effective.get("categorical_cols", [])),

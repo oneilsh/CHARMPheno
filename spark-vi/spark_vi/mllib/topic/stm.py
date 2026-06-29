@@ -137,6 +137,7 @@ class StreamingSTM:
         lbfgs_tol: float = 1e-4,
         random_seed: int | None = None,
         reference_topic: bool = False,
+        spectral_init: bool = False,
         topic_blocks=None,
         doc_group_col: str | None = None,
     ) -> None:
@@ -179,6 +180,7 @@ class StreamingSTM:
         self.lbfgs_tol = lbfgs_tol
         self.random_seed = random_seed
         self.reference_topic = bool(reference_topic)
+        self.spectral_init = bool(spectral_init)
 
         self.topic_blocks = topic_blocks
         self.doc_group_col = doc_group_col
@@ -313,10 +315,29 @@ class StreamingSTM:
         rdd = rdd.persist(StorageLevel.MEMORY_AND_DISK)
         rdd.count()
 
+        # Optional spectral (anchor-word) β seed (insight 0029, ADR 0031/0032).
+        # Dense path: collect the (already-materialized) docs to the driver and
+        # run the anchor-word init, handing the engine a deterministic, data-
+        # driven β via data_summary={"spectral_beta": KxV}. `initialize_global`
+        # seeds λ = β·gamma_shape from it instead of random gamma, curing the
+        # sigma_init-dependent collapse/blow-up. Skipped when resuming, where the
+        # runner restores λ from the checkpoint and never calls initialize_global.
+        # Fine at the cancer scale (V≈3691, ~11k docs → ~18s/109MB); the large-V
+        # scalable rewrite (distributed co-occurrence + random projection) is a
+        # separate arc (ADR 0032).
+        data_summary = None
+        if self.spectral_init and resume_from is None:
+            from spark_vi.models.topic.spectral_init import spectral_init_beta
+            docs = rdd.collect()
+            partition = model._effective_partition()
+            beta0 = spectral_init_beta(docs, partition, vocab_size)
+            data_summary = {"spectral_beta": beta0}
+
         runner = VIRunner(model, config=config)
         try:
             result = runner.fit(
-                rdd, on_iteration=on_iteration, resume_from=resume_from,
+                rdd, data_summary=data_summary,
+                on_iteration=on_iteration, resume_from=resume_from,
             )
         finally:
             rdd.unpersist(blocking=False)
@@ -333,6 +354,7 @@ class StreamingSTM:
             "reference_topic": self.reference_topic,
             "sigma_prior_scale": self.sigma_prior_scale,
             "sigma_prior_count": self.sigma_prior_count,
+            "spectral_init": self.spectral_init,
         })
         return STMModel(
             global_params=result.global_params,

@@ -204,6 +204,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--reference-topic", action="store_true",
                    help="Pin topic 0's η to 0 (K-1 reference parameterization, "
                         "ADR 0031). Removes the softmax translation degeneracy.")
+    p.add_argument("--spectral-init", action="store_true",
+                   help="Seed β with the anchor-word (spectral) init instead of "
+                        "random gamma (insight 0029, ADR 0031/0032). Dense path: "
+                        "collects docs to the driver — fits the cancer-scale "
+                        "cohort, not yet the large-V scalable rewrite.")
     p.add_argument("--lbfgs-max-iter", type=int, default=50,
                    help="Max iterations for the per-doc L-BFGS optimiser.")
     p.add_argument("--lbfgs-tol", type=float, default=1e-4,
@@ -398,6 +403,7 @@ def main() -> int:
                 lbfgs_tol=args.lbfgs_tol,
                 random_seed=args.random_seed,
                 reference_topic=args.reference_topic,
+                spectral_init=args.spectral_init,
                 topic_blocks=partition,
                 doc_group_col=(args.group_var if partition is not None else None),
             )

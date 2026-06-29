@@ -132,6 +132,9 @@ def main(argv=None) -> int:
                    help="Inverse-gamma Sigma-prior pseudo-count c0 (default 0).")
     p.add_argument("--reference-topic", action="store_true",
                    help="Pin topic 0's eta to 0 (K-1 reference param, ADR 0031).")
+    p.add_argument("--spectral-init", action="store_true",
+                   help="Anchor-word (spectral) beta seed vs random gamma "
+                        "(insight 0029, ADR 0031/0032). Dense driver-side path.")
     p.add_argument("--out-dir", type=Path, required=True)
     args = p.parse_args(argv)
 
@@ -168,7 +171,8 @@ def main(argv=None) -> int:
             doc_group_col="source_cohort", random_seed=args.seed,
             sigma_prior_scale=args.sigma_prior_scale,
             sigma_prior_count=args.sigma_prior_count,
-            reference_topic=args.reference_topic)
+            reference_topic=args.reference_topic,
+            spectral_init=args.spectral_init)
         model = est.fit(joined, max_iter=args.max_iter,
                         subsampling_rate=args.subsampling_rate,
                         tau0=args.tau0, kappa=args.kappa)
