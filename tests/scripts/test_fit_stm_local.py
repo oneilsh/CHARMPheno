@@ -78,3 +78,29 @@ def test_fit_recovers_planted_rare_foreground(tmp_path):
     bg_mass = beta[:3][:, rare_cols].sum(axis=1).max()
     assert fg_mass > 0.4, fg_mass
     assert bg_mass < 0.15, bg_mass
+
+
+def test_fit_stm_local_reference_topic_end_to_end(tmp_path):
+    """--reference-topic threads through to the engine: the saved Gamma has its
+    reference column zeroed and the metadata records the hardening config."""
+    import json
+    import numpy as np
+    from fit_stm_local import main as fit_main
+    omop, person = _make_sim(tmp_path)
+    out = tmp_path / "ckpt_ref"
+    rc = fit_main([
+        "--omop", str(omop), "--person", str(person),
+        "--K", "5", "--background-k", "3", "--foreground", "rare_dx:2",
+        "--covariate-formula", "~ C(sex) + age",
+        "--reference-topic",
+        "--sigma-prior-scale", "2.0", "--sigma-prior-count", "500.0",
+        "--max-iter", "8", "--out-dir", str(out)])
+    assert rc == 0
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["metadata"]["stm_hardening"] == {
+        "reference_topic": True,
+        "sigma_prior_scale": 2.0,
+        "sigma_prior_count": 500.0,
+    }
+    Gamma = np.load(out / "params" / "Gamma.npy")
+    assert np.allclose(Gamma[:, 0], 0.0)
