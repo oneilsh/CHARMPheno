@@ -184,7 +184,12 @@ def load_result(in_dir: Path | str) -> VIResult:
     diagnostic_traces: dict[str, list] = {}
     for name, entry in manifest.get("diagnostic_traces", {}).items():
         if isinstance(entry, dict) and "file" in entry:
-            arr = np.load(in_path / entry["file"])
+            # allow_pickle=True: a model may emit object-dtype array traces
+            # (e.g. STM's per-iter topic_block_labels, a length-K array of
+            # label strings), which np.save pickles. These are our own trusted
+            # checkpoint sidecars. Numeric traces load identically either way;
+            # global_params (line above) stay strict (numeric only).
+            arr = np.load(in_path / entry["file"], allow_pickle=True)
             # Split rows back into a list of arrays. arr is 2D
             # (n_iterations, dim); we copy each row so a caller mutating
             # one row can't silently corrupt the others through the shared

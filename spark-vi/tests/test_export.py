@@ -148,6 +148,34 @@ def test_save_result_round_trips_scalar_diagnostic_traces(tmp_path):
     assert not (out / "traces").exists()
 
 
+def test_save_result_round_trips_object_array_diagnostic_traces(tmp_path):
+    """Object-dtype array traces (e.g. STM's per-iter topic_block_labels — a
+    length-K array of label strings) are classified 'array', stacked, and
+    np.save-pickled. load_result must read them with allow_pickle=True; without
+    it, np.load defaults to allow_pickle=False and the gated-model round-trip
+    raises 'Object arrays cannot be loaded when allow_pickle=False'."""
+    from spark_vi.core import VIResult
+    from spark_vi.io.export import load_result, save_result
+
+    labels = np.array(["background", "background", "rare"], dtype=object)
+    r = VIResult(
+        global_params={"alpha": np.array(1.0)},
+        elbo_trace=[-1.0, -0.5],
+        n_iterations=2,
+        converged=True,
+        metadata={},
+        diagnostic_traces={"topic_block_labels": [labels.copy(), labels.copy()]},
+    )
+    out = tmp_path / "object_trace"
+    save_result(r, out)
+    loaded = load_result(out)
+
+    got = loaded.diagnostic_traces["topic_block_labels"]
+    assert len(got) == 2
+    for row in got:
+        assert list(row) == ["background", "background", "rare"]
+
+
 def test_save_result_round_trips_vector_diagnostic_traces(tmp_path):
     """Vector-valued diagnostic traces emit traces/<name>.npy as a 2D array
     and round-trip element-wise."""
