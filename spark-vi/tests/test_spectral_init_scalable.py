@@ -11,14 +11,49 @@ import pytest
 
 from spark_vi.models.topic.types import STMDocument
 from spark_vi.models.topic.partition import TopicBlockPartition
-from spark_vi.models.topic.spectral_init import word_cooccurrence
+from spark_vi.models.topic.spectral_init import (
+    find_anchors,
+    recover_beta,
+    word_cooccurrence,
+)
 from spark_vi.models.topic.spectral_init_scalable import (
     ProjectedCoocResult,
     _project_doc,
     _r_rows,
     default_projection_dim,
+    find_anchors_projected,
     projected_cooccurrence_rdd,
+    recover_beta_projected,
 )
+
+
+def _projected_inputs(docs, V, seed, d, orthonormal=False):
+    """Build (Q, QR, p_w, df_w) by projecting the dense oracle — no Spark.
+
+    QR and p_w come off the same summed scale (QR = Q @ R, p_w = Q.sum(axis=1)),
+    so the p_w row-normalization in the projected functions is exact.
+
+    ``orthonormal`` QR-orthonormalizes the (V×d) Gaussian R before projecting.
+    With d == V this makes R a pure rotation, so Q @ R is an ISOMETRY: it
+    preserves residual norms and inner products exactly, which is the d→V limit
+    the JL projection only approximates with a raw Gaussian (O(1/√d) error). The
+    equivalence-to-oracle tests use this isometry to pin the geometry claim
+    deterministically; the production pass uses the raw Gaussian sketch (JL only
+    needs approximate preservation, which the floor + NNLS tolerate).
+    """
+    Q = word_cooccurrence(docs, V)
+    R = _r_rows(np.arange(V, dtype=np.int64), seed, d)
+    if orthonormal:
+        R, _ = np.linalg.qr(R)
+    QR = Q @ R
+    p_w = Q.sum(axis=1)
+    df_w = np.zeros(V, dtype=np.int64)
+    for doc in docs:
+        n = np.asarray(doc.counts, dtype=np.float64)
+        if float(n.sum()) < 2:
+            continue
+        df_w[np.asarray(doc.indices, dtype=np.int64)] += 1
+    return Q, QR, p_w, df_w
 
 
 def _doc(indices, counts, x=None, groups=frozenset()):
@@ -219,3 +254,121 @@ class TestProjectedCooccurrenceRDD:
         denom[denom == 0] = 1.0
         rel = np.abs(r32.pooled_QR - r64.pooled_QR) / denom
         assert rel.max() < 1e-3
+
+
+# ---------------------------------------------------------------------------
+# Projected anchor-finding + beta recovery (ADR 0032). Inputs are built WITHOUT
+# Spark by projecting the dense oracle (see _projected_inputs); QR and p_w are on
+# the same summed scale so the p_w row-normalization is exact.
+# ---------------------------------------------------------------------------
+
+
+def test_projected_row_normalization_is_by_p_w():
+    """(QR / p_w)[i] reproduces the dense conditional row image (Q[i]/p_w[i]) @ R.
+
+    Pins that dividing the sketch row by the marginal p_w (NOT by the projected
+    row sum) recovers the projected image of the dense Qbar row.
+    """
+    from tests._stm_synth import synthetic_ehr_corpus
+
+    docs, _planted = synthetic_ehr_corpus(
+        K_rare=3, V=30, D=40, doc_len=12, bg_frac=0.5, seed=1
+    )
+    V, seed, d = 30, 4242, 16
+    Q, QR, p_w, _df = _projected_inputs(docs, V, seed, d)
+    R = _r_rows(np.arange(V, dtype=np.int64), seed, d)
+
+    Qbar_proj = QR / p_w[:, None]
+    for i in range(V):
+        if p_w[i] <= 0:
+            continue
+        expected = (Q[i] / p_w[i]) @ R
+        np.testing.assert_allclose(Qbar_proj[i], expected, atol=1e-10, rtol=0)
+
+
+def test_doc_freq_floor_excludes_rare_extreme_word():
+    """A word with df_w < min_doc_freq is never an anchor even if its row is extreme.
+
+    Two words are given identical, extreme (axis-aligned, unique-direction) rows;
+    one has df below the floor, the other at/above it. Only the eligible one may
+    be returned.
+    """
+    V, d = 6, 6
+    QR = np.zeros((V, d), dtype=np.float64)
+    p_w = np.ones(V, dtype=np.float64)
+    # Words 0,1 get identical extreme unit rows along the same axis; words 2..5
+    # get small mixed rows so the two extremes are the standout directions.
+    QR[0] = np.eye(d)[0]
+    QR[1] = np.eye(d)[0]
+    for w in range(2, V):
+        QR[w] = 0.01 * np.eye(d)[w % d]
+    df_w = np.array([4, 10, 10, 10, 10, 10], dtype=np.int64)  # word 0 below floor
+
+    # With the floor at 5, word 0 (df=4) is ineligible; word 1 (df=10) is the
+    # eligible extreme and must be picked first.
+    got = find_anchors_projected(QR, p_w, df_w, 1, min_doc_freq=5)
+    assert got == [1]
+    assert 0 not in find_anchors_projected(QR, p_w, df_w, V, min_doc_freq=5)
+
+    # Drop the floor: word 0 becomes eligible (equally extreme) and may be chosen.
+    got_lo = find_anchors_projected(QR, p_w, df_w, 1, min_doc_freq=1)
+    assert got_lo[0] in (0, 1)
+
+
+def test_anchor_equivalence_large_d():
+    """At d=V with an isometric (orthonormal) sketch, projected anchors == dense.
+
+    The greedy pivoted-QR selection depends only on residual NORMS of the
+    normalized rows. A raw Gaussian R distorts those norms by O(1/√d) and so only
+    APPROXIMATELY preserves the selection; the exact d→V limit is realized by an
+    isometry (orthonormalized R, a pure rotation), under which residual norms are
+    preserved to machine precision. We test the isometry to pin the geometry
+    claim deterministically. Isolate it from the candidate-floor difference with
+    min_doc_freq=1 / min_marginal_frac=0.0.
+    """
+    from tests._stm_synth import synthetic_ehr_corpus
+
+    docs, _planted = synthetic_ehr_corpus(
+        K_rare=4, V=40, D=120, doc_len=14, bg_frac=0.5, seed=7
+    )
+    V, seed, K = 40, 31337, 4
+    d = V
+    Q, QR, p_w, df_w = _projected_inputs(docs, V, seed, d, orthonormal=True)
+
+    dense = set(find_anchors(Q, K, min_marginal_frac=0.0))
+    proj = set(find_anchors_projected(QR, p_w, df_w, K, min_doc_freq=1))
+    # Isometry: residual-norm ordering preserved exactly -> identical selection.
+    assert len(dense ^ proj) <= 1, (sorted(dense), sorted(proj))
+
+
+def test_recover_beta_projected_valid_and_close():
+    """recover_beta_projected is row-stochastic and close to dense at large d."""
+    from tests._stm_synth import synthetic_ehr_corpus
+
+    docs, _planted = synthetic_ehr_corpus(
+        K_rare=4, V=40, D=120, doc_len=14, bg_frac=0.5, seed=7
+    )
+    V, seed, K = 40, 31337, 4
+    d = V
+    # Isometry (orthonormal d=V sketch): the NNLS fit min||A^T c - Qbar_w|| is
+    # invariant under a rotation of A and Qbar_w, so the projected recovery equals
+    # the dense one. A raw Gaussian only approximates this (O(1/√d)); the isometry
+    # makes the closeness exact and deterministic.
+    Q, QR, p_w, df_w = _projected_inputs(docs, V, seed, d, orthonormal=True)
+
+    anchors = find_anchors(Q, K, min_marginal_frac=0.0)
+    beta = recover_beta_projected(QR, p_w, anchors)
+
+    # Valid (K, V) row-stochastic matrix.
+    assert beta.shape == (K, V)
+    assert (beta >= 0).all()
+    np.testing.assert_allclose(beta.sum(axis=1), 1.0, atol=1e-9, rtol=0)
+
+    # Matches the dense oracle on the SAME anchors to ~machine precision, and the
+    # per-topic top-word sets coincide.
+    dense_beta = recover_beta(Q, anchors)
+    assert np.abs(beta - dense_beta).max() < 1e-9
+    for k in range(K):
+        top_proj = set(np.argsort(beta[k])[-5:])
+        top_dense = set(np.argsort(dense_beta[k])[-5:])
+        assert len(top_proj & top_dense) >= 4

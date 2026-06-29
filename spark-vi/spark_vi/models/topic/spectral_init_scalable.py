@@ -43,6 +43,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.optimize import nnls
 
 
 def default_projection_dim(K: int, V: int, eps: float = 0.1) -> int:
@@ -189,3 +190,131 @@ def projected_cooccurrence_rdd(
     return ProjectedCoocResult(
         pooled_QR=pooled, group_QR=group_QR, p_w=p_w, df_w=df_w
     )
+
+
+def _row_normalize_projected(QR: np.ndarray, p_w: np.ndarray) -> np.ndarray:
+    """Projected analog of dense ``_row_normalize``: ``QR[i] / p_w[i]``.
+
+    The dense ``spectral_init._row_normalize`` divides Q row i by its sum, which
+    is exactly the word marginal ``p_w[i]``. In the sketch the row ``QR[i]`` can
+    have negative entries and its *sum* is NOT the marginal (R has zero-mean
+    Gaussian columns), so we cannot recover the conditional row by dividing by
+    ``QR[i].sum()``. But ``QR`` and ``p_w`` come off the same pass on the same
+    summed scale, so ``QR[i] / p_w[i]`` is the exact projected image
+    ``(Q[i] / p_w[i]) @ R`` of the dense conditional row ``Qbar[i]``. A word with
+    no co-occurrence support (``p_w[i] == 0``) yields a zero row, mirroring the
+    dense zero-row convention.
+    """
+    p_safe = np.where(p_w > 0, p_w, 1.0)
+    Qbar = QR / p_safe[:, None]
+    Qbar[p_w <= 0] = 0.0
+    return Qbar
+
+
+_EPS = 1e-12
+
+
+def find_anchors_projected(QR: np.ndarray, p_w: np.ndarray, df_w: np.ndarray,
+                           n: int, *, seed_rows=None,
+                           min_doc_freq: int = 5) -> list[int]:
+    """Greedy pivoted-QR anchor selection on the p_w-row-normalized sketch.
+
+    Same geometry as dense ``spectral_init.find_anchors`` (Gram–Schmidt: keep an
+    orthonormal basis of the chosen rows' residuals; the next anchor is the
+    eligible word whose normalized row has the largest residual norm after
+    projecting out that basis), but operating on the projected conditional rows
+    ``Qbar_proj = QR / p_w[:,None]`` (see ``_row_normalize_projected``) instead of
+    the dense ``Qbar``.
+
+    Candidate floor (ADR 0032): a word may BE an anchor only if its absolute
+    document frequency ``df_w[i] >= min_doc_freq``. This replaces the dense
+    version's mean-relative ``min_marginal_frac`` floor, which over-excludes
+    rare-but-pure phenotype words (a minority arm's phenotype is below the corpus
+    mean marginal yet appears in plenty of that arm's docs). The dense
+    ``norm > EPS`` guard is kept (a degenerate all-zero row is never an anchor).
+
+    ``seed_rows`` (optional word ids) pre-seeds the basis (deflation) WITHOUT
+    being returned. Returns the ``n`` newly chosen anchor ids in selection order.
+    """
+    Qbar = _row_normalize_projected(QR, p_w)
+    V = Qbar.shape[0]
+    norms = (Qbar * Qbar).sum(axis=1)            # squared row norms
+    df = np.asarray(df_w)
+    candidate = df >= min_doc_freq               # eligible to BE an anchor
+
+    basis: list[np.ndarray] = []                  # orthonormal residual basis
+
+    def project_out(vec: np.ndarray) -> np.ndarray:
+        r = vec.copy()
+        for b in basis:
+            r = r - (r @ b) * b
+        return r
+
+    def add_to_basis(row_id: int) -> None:
+        r = project_out(Qbar[row_id])
+        nrm = np.sqrt(r @ r)
+        if nrm > _EPS:
+            basis.append(r / nrm)
+
+    if seed_rows is not None:
+        for s in seed_rows:
+            add_to_basis(int(s))
+
+    anchors: list[int] = []
+    chosen = set(int(s) for s in (seed_rows or []))
+    for _ in range(n):
+        best_id, best_res = -1, -np.inf
+        for i in range(V):
+            if i in chosen or norms[i] <= _EPS or not candidate[i]:
+                continue
+            r = project_out(Qbar[i])
+            res = r @ r
+            if res > best_res:
+                best_res, best_id = res, i
+        if best_id < 0:                           # exhausted distinct directions
+            break
+        anchors.append(best_id)
+        chosen.add(best_id)
+        add_to_basis(best_id)
+    return anchors
+
+
+def recover_beta_projected(QR: np.ndarray, p_w: np.ndarray, anchors,
+                           rows=None) -> np.ndarray:
+    """Per-word NNLS β recovery in projected space — analog of dense ``recover_beta``.
+
+    Driver-side loop (sufficient at the cancer scale V≈3691; a distributed
+    Spark-map version is a future enhancement). For each word w, solve
+    ``min_{c >= 0} || A^T c − Qbar_proj[w] ||`` where ``A = Qbar_proj[anchors]``
+    (the projected conditional anchor rows). NNLS is valid on arbitrary-sign A/b —
+    non-negativity is only on the weights c. Normalizing c to sum 1 gives
+    P(topic | word = w); a word with no support (all-zero c) is left at zero.
+    Bayes-flip with the marginal ``p_w`` and renormalize each topic row; an
+    all-zero topic row falls back to uniform ``1/V`` (mirrors the dense guard).
+    """
+    Qbar = _row_normalize_projected(QR, p_w)
+    V = Qbar.shape[0]
+    n_topics = len(anchors)
+    A = Qbar[list(anchors)]                        # (n_topics, d)
+    A_T = A.T                                       # (d, n_topics): solve A_T c = Qbar_w
+
+    if rows is None:
+        rows = range(V)
+    rows = list(rows)
+
+    topic_given_word = np.zeros((V, n_topics), dtype=np.float64)
+    for w in rows:
+        c, _ = nnls(A_T, Qbar[w])
+        s = c.sum()
+        if s > 0:
+            topic_given_word[w] = c / s
+        # else: no support -> left at zero (carries no signal).
+
+    beta = (topic_given_word * p_w[:, None]).T     # (n_topics, V)
+    row_sums = beta.sum(axis=1, keepdims=True)
+    zero = (row_sums[:, 0] <= 0)
+    if zero.any():
+        beta[zero] = 1.0 / V
+        row_sums[zero, 0] = 1.0
+    beta = beta / row_sums
+    return beta
