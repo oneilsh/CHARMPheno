@@ -1,6 +1,11 @@
 # 0032 — Scalable spectral init scales by random projection, not vocabulary capping (maxV)
 
-**Status:** Accepted (governs the not-yet-built scalable spectral-init arc; the current `spectral_init.py` is a small-V prototype)
+**Status:** Accepted + Implemented (the scalable random-projection module
+[`spectral_init_scalable.py`](../../spark-vi/spark_vi/models/topic/spectral_init_scalable.py)
+is built and synthetic-equivalence-validated, and is threaded behind the opt-in
+`spectral_method="scalable"` knob; the dense `spectral_init.py` remains the
+exact, validated default for small V. Real-data equivalence on the cancer cohort
+is pending exp 0017.)
 **Date:** 2026-06-29
 
 ## Context
@@ -67,14 +72,22 @@ the current mean-relative `min_marginal_frac` floor.
   rows broadcast; the V×K recovery input and the K×V β output are ~0.8 GB each
   and never collected whole. Nothing is ever V×V.
 - **The projection dimension default is a FIXED ~1000**, not a V-scaled eps
-  formula. Following Mimno's anchor-words reference implementation ("around 1000
-  random projections seems to be a good number") and Arora et al. 2013 (ICML),
-  d = min(V, max(K, 1000)). Rationale: the greedy farthest-point anchor search
-  needs only JL-preserved pairwise distances among the V word rows, and O(log V)
-  dimensions suffice for that — 1000 is a safe, V-independent margin. At V=3000
-  this gives d=1000 (a 3x reduction), well above the measured rare-arm cliff at
-  d=89 (33x reduction). Cap at V (projecting beyond V is pointless); floor at K
-  (need at least K dimensions for the K-simplex).
+  formula. d = min(V, max(K, 1000)). This is established practice across the
+  anchor-word literature AND every reference implementation: Arora et al. 2013
+  (ICML) projects to 4·log(V)/ε² with a footnote that "1000 works well"; Mimno's
+  anchor-words study recommends "around 1000 random projections"; and three
+  independent implementations hardcode project_dim = 1000 — ankura
+  (byu-aml-lab/jefflund), anchor-topic (forest-snow tandem-anchors), and
+  mimno/anchor (Java/MALLET, `--num-random-projections 1000`). Rationale: the
+  greedy farthest-point anchor search needs only JL-preserved pairwise distances
+  among the V word rows, and O(log V) dimensions suffice for that — a flat 1000
+  is a safe, V-independent margin even at V=100k. At V=3000 this gives d=1000 (a
+  3x reduction), well above the measured rare-arm cliff at d=89 (33x reduction).
+  Cap at V (projecting beyond V is pointless); floor at K (need at least K
+  dimensions for the K-simplex). (A future optimization could scale d with K
+  rather than V — only the K anchor vertices must be preserved, not all V rows;
+  Damle & Sun 2017 prove d=K+1 suffices w.p. 1 — but that diverges from the
+  reference convention and is deferred.)
 - **Random projection keeps ALL V words as anchor candidates** — only the
   *dimension* is compressed, not the vocabulary — so rare-but-pure phenotype
   words remain eligible to anchor. The absolute document-frequency floor excludes
@@ -90,13 +103,20 @@ the current mean-relative `min_marginal_frac` floor.
 - **Time is the cheaper resource than memory** for this project's scale targets,
   so the extra distributed passes random projection buys (distributed
   co-occurrence accumulation, distributed NNLS) are an acceptable trade.
-- **No current code changes to the algorithm.** This ADR is the design direction
-  for the future scalable spectral-init arc; the prototype in `spectral_init.py`
-  is unchanged. The `min_marginal_frac` → document-frequency-floor change lands
-  in that arc, not now. Note: the existing dense spectral init IS wired into the
-  cluster fit path (threaded through `StreamingSTM` and both drivers, default ON,
-  validated by exp 0015 / insight 0030) — only the *scalable random-projection
-  rewrite* governed by this ADR remains pending.
+- **Implemented as a separate module; the dense path is untouched.**
+  `spectral_init_scalable.py` implements this design — a single distributed
+  projected co-occurrence pass (rank-1 per-doc accumulation into a V×d sketch),
+  greedy anchor selection and per-word NNLS recovery in projected space, and the
+  block-aware orchestrator `scalable_spectral_init_beta` mirroring the dense
+  `spectral_init_beta`. The `min_marginal_frac` → absolute document-frequency
+  floor (`min_doc_freq`, default 5) lands here. The dense `spectral_init.py`
+  prototype is byte-for-byte unchanged and remains the exact small-V default;
+  the scalable path is selected by the opt-in `spectral_method="scalable"` knob
+  (threaded through `StreamingSTM` and both drivers, Task 7). The dense spectral
+  init is the validated default-ON stack (exp 0015 / insight 0030); the scalable
+  path is synthetic-equivalence-validated (planted rare-arm recovery matches
+  dense at d≈1000; survives down to d=201 at V=3000) with real-data equivalence
+  pending exp 0017.
 - **Dirichlet-family models are unaffected** — spectral init is an STM concern.
 
 ## References
@@ -111,4 +131,14 @@ the current mean-relative `min_marginal_frac` floor.
 - `stm` R package — `init.type="Spectral"` and the `maxV` parameter (CRAN
   vignette https://cran.r-project.org/web/packages/stm/vignettes/stmVignette.pdf
   ; source https://github.com/bstewart/stm/blob/master/R/spectral.R )
-- insight 0029 (the three missing stabilizers); ADR 0031 (K−1 reference).
+- Reference anchor-word implementations that hardcode project_dim = 1000:
+  ankura (https://github.com/byu-aml-lab/ankura), forest-snow tandem-anchors /
+  anchor-topic (https://github.com/forest-snow/tandem-anchor), and mimno/anchor
+  (Java/MALLET, `--num-random-projections 1000`,
+  https://github.com/mimno/anchor ).
+- Damle & Sun (2017), "A geometric approach to archetypal analysis and
+  nonnegative matrix factorization," Technometrics
+  (https://arxiv.org/abs/1405.4275) — d=K+1 preserves all K extreme points w.p. 1
+  (the deferred K-scaling future optimization).
+- insight 0029 (the three missing stabilizers); ADR 0031 (K−1 reference);
+  exp 0017 (the scalable real-data equivalence re-run).
