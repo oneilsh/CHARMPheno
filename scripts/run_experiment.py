@@ -467,6 +467,13 @@ def build_stm_args(
             "--foreground", str(effective["foreground"]),
             "--group-var", str(effective.get("group_var", "source_cohort")),
         ]
+    hardening: list[str] = []
+    if effective.get("reference_topic"):
+        hardening.append("--reference-topic")
+    if effective.get("sigma_prior_scale") is not None:
+        hardening.extend(["--sigma-prior-scale", str(effective["sigma_prior_scale"])])
+    if effective.get("sigma_prior_count"):
+        hardening.extend(["--sigma-prior-count", str(effective["sigma_prior_count"])])
     return common + [
         "--covariate-formula", str(effective["covariate_formula"]),
         "--categorical-cols", ",".join(effective.get("categorical_cols", [])),
@@ -475,7 +482,7 @@ def build_stm_args(
         "--sigma-ridge", str(effective.get("sigma_ridge", 1e-6)),
         "--lbfgs-max-iter", str(effective.get("lbfgs_max_iter", 50)),
         "--lbfgs-tol", str(effective.get("lbfgs_tol", 1e-4)),
-    ] + gating + (["--resume-from", str(resume_from)] if resume_from is not None else [])
+    ] + hardening + gating + (["--resume-from", str(resume_from)] if resume_from is not None else [])
 
 
 def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:

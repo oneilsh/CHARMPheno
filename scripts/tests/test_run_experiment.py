@@ -1289,3 +1289,41 @@ def test_resume_mismatch_on_changed_partition():
            "group_var": "source_cohort", "K": 40}
     out = _resume_corpus_mismatches(ck, eff)
     assert any("topic_block_spec" in m for m in out)
+
+
+def test_build_stm_args_threads_hardening_flags(monkeypatch):
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    effective = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 300, "vocab_size": 3000,
+        "min_df": 5, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 50, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+        "reference_topic": True,
+        "sigma_prior_scale": 2.0, "sigma_prior_count": 500.0,
+    }
+    args = run_experiment.build_stm_args(effective, out_dir="/tmp/out")
+    assert "--reference-topic" in args
+    i = args.index("--sigma-prior-scale"); assert args[i + 1] == "2.0"
+    j = args.index("--sigma-prior-count"); assert args[j + 1] == "500.0"
+
+
+def test_build_stm_args_hardening_flags_omitted_by_default(monkeypatch):
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    effective = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 300, "vocab_size": 3000,
+        "min_df": 5, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 50, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+    }
+    args = run_experiment.build_stm_args(effective, out_dir="/tmp/out")
+    assert "--reference-topic" not in args
+    assert "--sigma-prior-scale" not in args
+    assert "--sigma-prior-count" not in args
