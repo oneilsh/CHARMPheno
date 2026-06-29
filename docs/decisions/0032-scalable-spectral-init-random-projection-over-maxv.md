@@ -61,12 +61,20 @@ the current mean-relative `min_marginal_frac` floor.
 
 ## Consequences
 
-- **Memory scales as O(V·d) with d ≈ max(K, ε⁻²·log V), i.e. ≈ O(V·K)** — about
-  1–2 GB at V=100k, K=1000 (the projected rows V×d), versus 80 GB dense. The
-  recovery step (NNLS per word against the K anchor rows) is per-word independent
-  and distributes as a Spark map needing only the K anchor rows broadcast; the
-  V×K recovery input and the K×V β output are ~0.8 GB each and never collected
-  whole. Nothing is ever V×V.
+- **Memory scales as O(V·d)** — about 1–2 GB at V=100k with the default d=1000,
+  versus 80 GB dense. The recovery step (NNLS per word against the K anchor rows)
+  is per-word independent and distributes as a Spark map needing only the K anchor
+  rows broadcast; the V×K recovery input and the K×V β output are ~0.8 GB each
+  and never collected whole. Nothing is ever V×V.
+- **The projection dimension default is a FIXED ~1000**, not a V-scaled eps
+  formula. Following Mimno's anchor-words reference implementation ("around 1000
+  random projections seems to be a good number") and Arora et al. 2013 (ICML),
+  d = min(V, max(K, 1000)). Rationale: the greedy farthest-point anchor search
+  needs only JL-preserved pairwise distances among the V word rows, and O(log V)
+  dimensions suffice for that — 1000 is a safe, V-independent margin. At V=3000
+  this gives d=1000 (a 3x reduction), well above the measured rare-arm cliff at
+  d=89 (33x reduction). Cap at V (projecting beyond V is pointless); floor at K
+  (need at least K dimensions for the K-simplex).
 - **Random projection keeps ALL V words as anchor candidates** — only the
   *dimension* is compressed, not the vocabulary — so rare-but-pure phenotype
   words remain eligible to anchor. The absolute document-frequency floor excludes

@@ -75,14 +75,14 @@ def _dense_block(n, L):
 
 
 def test_default_projection_dim():
-    import math
-
-    # max(K, ceil(eps^-2 * ln(V)))
-    assert default_projection_dim(K=4, V=1000, eps=0.1) == max(
-        4, math.ceil(0.1 ** -2 * math.log(1000))
-    )
-    # K floor wins when JL dimension is tiny
-    assert default_projection_dim(K=500, V=10, eps=0.5) == 500
+    # Fixed ~1000 default: min(V, max(K, 1000))
+    assert default_projection_dim(K=4, V=3000) == 1000   # target_dim=1000 wins
+    assert default_projection_dim(K=4, V=500) == 500     # V cap wins
+    assert default_projection_dim(K=2000, V=3000) == 2000  # K floor wins
+    # Explicit target_dim override
+    assert default_projection_dim(K=4, V=3000, target_dim=200) == 200
+    assert default_projection_dim(K=4, V=100, target_dim=200) == 100  # V cap
+    assert default_projection_dim(K=500, V=3000, target_dim=200) == 500  # K floor
 
 
 def test_rank1_per_doc_identity():
@@ -486,14 +486,15 @@ class TestScalableSpectralInitBeta:
         ]
 
         V, seed = 240, 31337
-        # A raw-Gaussian sketch at the DEFAULT d (eps=0.1) only approximately
-        # preserves the anchor geometry (JL error O(1/√d)); empirically the rare-arm
-        # foreground anchor is not reliably recovered until eps≈0.04 (d≈3426 here).
-        # We raise d for THIS recovery test and document it. We do NOT orthonormalize
-        # in production code, and the rigorous scalable≈dense planted-recovery at the
-        # production default d is a separate later task — here a structural check plus
-        # a recovers-the-rare-arm check at a larger d is sufficient.
-        d = default_projection_dim(partition.K, V, eps=0.04)
+        # Use explicit d=3000 >> V=240 for the structural recovery check. At d >> V
+        # the raw Gaussian sketch is over-determined (only 240 linearly independent
+        # directions exist), making the projected geometry nearly isometric and giving
+        # reliable rare-arm recovery at this small V. The production default
+        # (min(V, max(K, 1000)) = 240 at V=240) is the V-cap case and is tested
+        # as a structural sanity in test_scalable_recovers_nongated_small_v_structural.
+        # The rigorous scalable≈dense rare-arm check at a genuine d < V reduction is
+        # in test_spectral_init_scalable_equivalence.py (V=3000, d=1000).
+        d = 3000   # explicit large d for stable structural recovery at V=240
         rdd = spark.sparkContext.parallelize(docs, numSlices=4)
         beta = scalable_spectral_init_beta(
             rdd, partition, V=V, d=d, seed=seed, min_doc_freq=3

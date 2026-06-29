@@ -9,6 +9,15 @@ marginal = true Q row sums) and df_w (document frequency). Anchor finding and
 β-recovery run on the sketch in a SEPARATE later task; this module builds only
 the projection + the distributed accumulation pass.
 
+PROJECTION DIMENSION DEFAULT: following the Arora et al. 2013 (ICML) reference
+implementation and Mimno's anchor-words code ("around 1000 random projections
+seems to be a good number"), the default target dimension is a FIXED ~1000,
+not a V-scaled formula. The greedy farthest-point anchor search needs only
+Johnson–Lindenstrauss-preserved pairwise distances among the V word rows, and
+O(log V) dimensions suffice for that — 1000 is a safe, V-independent margin. We
+cap at V (projecting beyond V is pointless) and floor at K (need ≥ K dimensions
+for the K-simplex), giving min(V, max(K, 1000)).
+
 The crux is the per-doc rank-1 structure. For a doc with support ``idx``, counts
 ``n``, and length ``L = Σ n`` (only L ≥ 2 docs contribute), the dense per-doc
 co-occurrence block is
@@ -46,16 +55,18 @@ import numpy as np
 from scipy.optimize import nnls
 
 
-def default_projection_dim(K: int, V: int, eps: float = 0.1) -> int:
-    """Johnson–Lindenstrauss target dimension ``max(K, ceil(eps^-2 · ln V))``.
+def default_projection_dim(K: int, V: int, target_dim: int = 1000) -> int:
+    """Fixed ~1000 target dimension: ``min(V, max(K, target_dim))``.
 
-    The JL lemma says a random Gaussian projection into ``ceil(eps^-2 · ln V)``
-    dimensions preserves pairwise distances among V points to within (1 ± eps),
-    which is what keeps the anchor geometry (the convex-hull vertices of the
-    co-occurrence rows) intact in the sketch. We floor at K because the recovery
-    needs at least K independent directions to place K anchors.
+    Per Arora et al. 2013 (ICML) and Mimno's anchor-words reference
+    implementation, a fixed ~1000 random projections is a good default — the
+    greedy farthest-point anchor search needs only JL-preserved pairwise
+    distances, for which O(log V) dimensions suffice, and 1000 is a safe,
+    V-independent margin. We cap at V (projecting to more than V is pointless)
+    and floor at K (need at least K dimensions to place K anchors on the
+    K-simplex).
     """
-    return max(int(K), math.ceil(eps ** -2 * math.log(V)))
+    return min(int(V), max(int(K), int(target_dim)))
 
 
 def _r_rows(indices, seed: int, d: int, cache: dict | None = None) -> np.ndarray:
@@ -342,7 +353,7 @@ def recover_beta_projected(QR: np.ndarray, p_w: np.ndarray, anchors,
 
 
 def scalable_spectral_init_beta(
-    rdd, partition, V: int, *, d: int | None = None, eps: float = 0.1,
+    rdd, partition, V: int, *, d: int | None = None,
     seed: int = 0, min_doc_freq: int = 5,
 ) -> np.ndarray:
     """Block-aware K×V β seed in ``partition`` slot order — scalable analog.
@@ -367,13 +378,15 @@ def scalable_spectral_init_beta(
     Non-gated partitions (background_k = K, no foreground groups) execute step 1
     only — the dense degenerate case, one code path, no special case.
 
-    ``d`` defaults to ``default_projection_dim(partition.K, V, eps)``. Short-fill
-    guards match the dense path: if anchor-finding falls short, only the found
-    rows are placed and the rest stay zero (the hook never sees a NaN).
+    ``d`` defaults to ``default_projection_dim(partition.K, V)`` = a fixed ~1000
+    (Mimno/Arora convention: min(V, max(K, 1000))). Pass an explicit ``d`` to
+    override. Short-fill guards match the dense path: if anchor-finding falls
+    short, only the found rows are placed and the rest stay zero (the hook never
+    sees a NaN).
     """
     K = partition.K
     if d is None:
-        d = default_projection_dim(K, V, eps)
+        d = default_projection_dim(K, V)
     beta = np.zeros((K, V), dtype=np.float64)
 
     # ONE distributed pass: pooled + per-group projected sketches, marginals, df.
