@@ -703,6 +703,58 @@ class TestModelClassDispatch:
         path = build_fit_driver_path({"model_class": "lda"})
         assert path.endswith("lda_bigquery_cloud.py")
 
+    def _base_stm_effective(self, monkeypatch):
+        """Minimal STM effective config for build_stm_args tests."""
+        monkeypatch.setenv("WORKSPACE_CDR", "p.d")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "bill")
+        return {
+            "model_class": "stm",
+            "source_table": "condition_era",
+            "doc_min_length": 20,
+            "K": 4,
+            "max_iter": 2,
+            "vocab_size": 100,
+            "min_df": 2,
+            "min_patient_count": 20,
+            "subsampling_rate": 1.0,
+            "tau0": 64.0,
+            "kappa": 0.7,
+            "save_interval": 5,
+            "person_mod": 10,
+            "cohort": "dementia",
+            "cohort_def": "first_dementia_year",
+            "covariate_formula": "~ C(sex)",
+            "categorical_cols": ["sex"],
+            "continuous_cols": [],
+        }
+
+    def test_build_stm_args_spectral_method_scalable_emitted(
+            self, tmp_path, monkeypatch):
+        """spectral_method='scalable' + spectral_d + spectral_min_doc_freq emit
+        the three flags into the arg list."""
+        effective = self._base_stm_effective(monkeypatch)
+        effective["spectral_method"] = "scalable"
+        effective["spectral_d"] = 256
+        effective["spectral_min_doc_freq"] = 3
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert "--spectral-method" in args
+        assert args[args.index("--spectral-method") + 1] == "scalable"
+        assert "--spectral-d" in args
+        assert args[args.index("--spectral-d") + 1] == "256"
+        assert "--spectral-min-doc-freq" in args
+        assert args[args.index("--spectral-min-doc-freq") + 1] == "3"
+
+    def test_build_stm_args_spectral_method_default_dense_omitted(
+            self, tmp_path, monkeypatch):
+        """An effective config with no spectral_method key emits neither
+        --spectral-method nor --spectral-d (dense default path stays clean)."""
+        effective = self._base_stm_effective(monkeypatch)
+        # Deliberately do NOT set spectral_method / spectral_d / spectral_min_doc_freq.
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert "--spectral-method" not in args
+        assert "--spectral-d" not in args
+        assert "--spectral-min-doc-freq" not in args
+
 
 def test_noise_patterns_keep_driver_lines():
     lines = [

@@ -209,6 +209,14 @@ def parse_args(argv=None) -> argparse.Namespace:
                    default=True,
                    help="Anchor-word spectral beta seed (default on, insight 0030; "
                         "--no-spectral-init to disable).")
+    p.add_argument("--spectral-method", choices=["dense", "scalable"], default="dense",
+                   help="Spectral-init co-occurrence method: 'dense' (exact V×V on the "
+                        "driver, the validated default) or 'scalable' (random-projection "
+                        "sketch for large vocabularies).")
+    p.add_argument("--spectral-d", type=int, default=None,
+                   help="Scalable projection dimension (default ~1000 per Mimno/Arora).")
+    p.add_argument("--spectral-min-doc-freq", type=int, default=5,
+                   help="Scalable absolute document-frequency floor for anchor candidates.")
     p.add_argument("--lbfgs-max-iter", type=int, default=50,
                    help="Max iterations for the per-doc L-BFGS optimiser.")
     p.add_argument("--lbfgs-tol", type=float, default=1e-4,
@@ -404,6 +412,9 @@ def main() -> int:
                 random_seed=args.random_seed,
                 reference_topic=args.reference_topic,
                 spectral_init=args.spectral_init,
+                spectral_method=args.spectral_method,
+                spectral_d=args.spectral_d,
+                spectral_min_doc_freq=args.spectral_min_doc_freq,
                 topic_blocks=partition,
                 doc_group_col=(args.group_var if partition is not None else None),
             )

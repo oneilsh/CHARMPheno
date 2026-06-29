@@ -478,6 +478,13 @@ def build_stm_args(
         hardening.extend(["--sigma-prior-count", str(effective["sigma_prior_count"])])
     spec = effective.get("spectral_init", True)
     hardening.append("--spectral-init" if spec else "--no-spectral-init")
+    method = effective.get("spectral_method", "dense")
+    if method != "dense":
+        hardening.extend(["--spectral-method", str(method)])
+    if effective.get("spectral_d") is not None:
+        hardening.extend(["--spectral-d", str(effective["spectral_d"])])
+    if effective.get("spectral_min_doc_freq") is not None:
+        hardening.extend(["--spectral-min-doc-freq", str(effective["spectral_min_doc_freq"])])
     return common + [
         "--covariate-formula", str(effective["covariate_formula"]),
         "--categorical-cols", ",".join(effective.get("categorical_cols", [])),

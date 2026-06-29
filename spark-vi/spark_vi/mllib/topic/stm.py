@@ -138,6 +138,9 @@ class StreamingSTM:
         random_seed: int | None = None,
         reference_topic: bool = True,
         spectral_init: bool = True,
+        spectral_method: str = "dense",          # "dense" | "scalable"
+        spectral_d: int | None = None,           # scalable projection dim; None => ~1000
+        spectral_min_doc_freq: int = 5,          # scalable absolute doc-frequency floor
         topic_blocks=None,
         doc_group_col: str | None = None,
     ) -> None:
@@ -181,6 +184,12 @@ class StreamingSTM:
         self.random_seed = random_seed
         self.reference_topic = bool(reference_topic)
         self.spectral_init = bool(spectral_init)
+        if spectral_method not in {"dense", "scalable"}:
+            raise ValueError(
+                f"spectral_method must be 'dense' or 'scalable', got {spectral_method!r}")
+        self.spectral_method = spectral_method
+        self.spectral_d = spectral_d
+        self.spectral_min_doc_freq = int(spectral_min_doc_freq)
 
         self.topic_blocks = topic_blocks
         self.doc_group_col = doc_group_col
@@ -316,6 +325,8 @@ class StreamingSTM:
         rdd.count()
 
         # Optional spectral (anchor-word) β seed (insight 0029, ADR 0031/0032).
+        # spectral_method selects dense (exact V×V on the driver, the validated
+        # default) vs scalable (random-projection sketch for large vocabularies).
         # Dense path: collect the (already-materialized) docs to the driver and
         # run the anchor-word init, handing the engine a deterministic, data-
         # driven β via data_summary={"spectral_beta": KxV}. `initialize_global`
@@ -327,10 +338,21 @@ class StreamingSTM:
         # separate arc (ADR 0032).
         data_summary = None
         if self.spectral_init and resume_from is None:
-            from spark_vi.models.topic.spectral_init import spectral_init_beta
-            docs = rdd.collect()
             partition = model._effective_partition()
-            beta0 = spectral_init_beta(docs, partition, vocab_size)
+            if self.spectral_method == "scalable":
+                from spark_vi.models.topic.spectral_init_scalable import (
+                    scalable_spectral_init_beta,
+                )
+                beta0 = scalable_spectral_init_beta(
+                    rdd, partition, vocab_size,
+                    d=self.spectral_d,
+                    seed=self.random_seed or 0,
+                    min_doc_freq=self.spectral_min_doc_freq,
+                )
+            else:  # "dense" — current exact path, the default
+                from spark_vi.models.topic.spectral_init import spectral_init_beta
+                docs = rdd.collect()
+                beta0 = spectral_init_beta(docs, partition, vocab_size)
             data_summary = {"spectral_beta": beta0}
 
         runner = VIRunner(model, config=config)
@@ -355,6 +377,7 @@ class StreamingSTM:
             "sigma_prior_scale": self.sigma_prior_scale,
             "sigma_prior_count": self.sigma_prior_count,
             "spectral_init": self.spectral_init,
+            "spectral_method": self.spectral_method,
         })
         return STMModel(
             global_params=result.global_params,

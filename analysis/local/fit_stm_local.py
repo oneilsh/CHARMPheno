@@ -138,6 +138,14 @@ def main(argv=None) -> int:
                    default=True,
                    help="Anchor-word spectral beta seed (default on, insight 0030; "
                         "--no-spectral-init to disable).")
+    p.add_argument("--spectral-method", choices=["dense", "scalable"], default="dense",
+                   help="Spectral-init co-occurrence method: 'dense' (exact V×V on the "
+                        "driver, the validated default) or 'scalable' (random-projection "
+                        "sketch for large vocabularies).")
+    p.add_argument("--spectral-d", type=int, default=None,
+                   help="Scalable projection dimension (default ~1000 per Mimno/Arora).")
+    p.add_argument("--spectral-min-doc-freq", type=int, default=5,
+                   help="Scalable absolute document-frequency floor for anchor candidates.")
     p.add_argument("--out-dir", type=Path, required=True)
     args = p.parse_args(argv)
 
@@ -175,7 +183,10 @@ def main(argv=None) -> int:
             sigma_prior_scale=args.sigma_prior_scale,
             sigma_prior_count=args.sigma_prior_count,
             reference_topic=args.reference_topic,
-            spectral_init=args.spectral_init)
+            spectral_init=args.spectral_init,
+            spectral_method=args.spectral_method,
+            spectral_d=args.spectral_d,
+            spectral_min_doc_freq=args.spectral_min_doc_freq)
         model = est.fit(joined, max_iter=args.max_iter,
                         subsampling_rate=args.subsampling_rate,
                         tau0=args.tau0, kappa=args.kappa)

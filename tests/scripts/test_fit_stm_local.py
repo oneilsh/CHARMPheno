@@ -103,6 +103,7 @@ def test_fit_stm_local_reference_topic_end_to_end(tmp_path):
         "sigma_prior_scale": 2.0,
         "sigma_prior_count": 500.0,
         "spectral_init": False,
+        "spectral_method": "dense",
     }
     Gamma = np.load(out / "params" / "Gamma.npy")
     assert np.allclose(Gamma[:, 0], 0.0)
@@ -125,3 +126,22 @@ def test_fit_stm_local_spectral_init_end_to_end(tmp_path):
     assert rc == 0
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["metadata"]["stm_hardening"]["spectral_init"] is True
+
+
+def test_fit_stm_local_spectral_method_dense_end_to_end(tmp_path):
+    """--spectral-method dense (the default) threads to the engine and the
+    metadata records stm_hardening['spectral_method'] == 'dense'.
+    Uses small N + few iters to stay cheap."""
+    import json
+    from fit_stm_local import main as fit_main
+    omop, person = _make_sim(tmp_path)
+    out = tmp_path / "ckpt_spectral_method_dense"
+    rc = fit_main([
+        "--omop", str(omop), "--person", str(person),
+        "--K", "5", "--background-k", "3", "--foreground", "rare_dx:2",
+        "--covariate-formula", "~ C(sex) + age",
+        "--spectral-method", "dense",
+        "--max-iter", "4", "--out-dir", str(out)])
+    assert rc == 0
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["metadata"]["stm_hardening"]["spectral_method"] == "dense"

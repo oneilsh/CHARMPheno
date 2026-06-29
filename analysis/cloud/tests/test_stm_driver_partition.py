@@ -68,3 +68,27 @@ def test_parse_args_hardening_flags_disabled():
     ])
     assert args.reference_topic is False
     assert args.spectral_init is False
+
+
+def test_parse_args_spectral_method_defaults():
+    """spectral_method defaults to 'dense'; spectral_d and spectral_min_doc_freq
+    default to None and 5 respectively."""
+    from stm_bigquery_cloud import parse_args
+    args = parse_args(_REQUIRED_ARGS)
+    assert args.spectral_method == "dense"
+    assert args.spectral_d is None
+    assert args.spectral_min_doc_freq == 5
+
+
+def test_parse_args_spectral_method_scalable_flags():
+    """--spectral-method scalable --spectral-d 256 --spectral-min-doc-freq 3 parse
+    and are forwarded to args as expected."""
+    from stm_bigquery_cloud import parse_args
+    args = parse_args(_REQUIRED_ARGS + [
+        "--spectral-method", "scalable",
+        "--spectral-d", "256",
+        "--spectral-min-doc-freq", "3",
+    ])
+    assert args.spectral_method == "scalable"
+    assert args.spectral_d == 256
+    assert args.spectral_min_doc_freq == 3

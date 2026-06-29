@@ -282,6 +282,7 @@ class TestStreamingSTMHardeningThreading:
             "sigma_prior_scale": 2.0,
             "sigma_prior_count": 500.0,
             "spectral_init": False,
+            "spectral_method": "dense",
         }
 
     def test_defaults_on_and_recorded(self, spark, monkeypatch):
@@ -303,6 +304,7 @@ class TestStreamingSTMHardeningThreading:
             "sigma_prior_scale": None,
             "sigma_prior_count": 0.0,
             "spectral_init": True,
+            "spectral_method": "dense",
         }
         # Default fit now pins the reference column to zero.
         assert np.allclose(model.global_params["Gamma"][:, 0], 0.0)
@@ -374,3 +376,90 @@ class TestStreamingSTMHardeningThreading:
         model = est.fit(self._toy_df(spark), max_iter=1, subsampling_rate=1.0)
         assert captured["data_summary"] is None
         assert model.metadata["stm_hardening"]["spectral_init"] is False
+
+    def test_spectral_method_invalid_rejected(self):
+        """spectral_method values outside {"dense", "scalable"} raise ValueError."""
+        from spark_vi.mllib.topic.stm import StreamingSTM
+        with pytest.raises(ValueError, match="spectral_method"):
+            StreamingSTM(
+                K=4, features_col="features", covariates_col="covariates",
+                covariate_names=["a", "b"], spectral_method="bogus")
+
+    def test_spectral_method_default_is_dense(self):
+        """A default-constructed StreamingSTM stores spectral_method == 'dense'."""
+        from spark_vi.mllib.topic.stm import StreamingSTM
+        est = StreamingSTM(
+            K=4, features_col="features", covariates_col="covariates",
+            covariate_names=["a", "b"])
+        assert est.spectral_method == "dense"
+
+    def test_spectral_method_scalable_routes_to_scalable_init(
+            self, spark, monkeypatch):
+        """spectral_method='scalable' calls scalable_spectral_init_beta (not the
+        dense path): the stub receives the rdd (not a collected list), and the
+        metadata records stm_hardening['spectral_method'] == 'scalable'."""
+        import spark_vi.models.topic.spectral_init_scalable as ss_mod
+        from spark_vi.models.topic.stm import OnlineSTM
+        from spark_vi.mllib.topic.stm import StreamingSTM
+
+        K, V = 4, 8
+        sentinel = np.full((K, V), 1.0 / V)
+        seen = {}
+
+        def fake_scalable(rdd, partition, vocab_size, *, d=None, seed=0,
+                          min_doc_freq=5):
+            seen["rdd"] = rdd
+            seen["vocab_size"] = vocab_size
+            seen["d"] = d
+            seen["seed"] = seed
+            seen["min_doc_freq"] = min_doc_freq
+            return sentinel
+
+        monkeypatch.setattr(ss_mod, "scalable_spectral_init_beta", fake_scalable)
+
+        # Also spy on initialize_global to confirm the seed reaches the engine.
+        captured = {}
+        orig_init = OnlineSTM.initialize_global
+
+        def spy_init(self, data_summary):
+            captured["data_summary"] = data_summary
+            return orig_init(self, data_summary)
+
+        monkeypatch.setattr(OnlineSTM, "initialize_global", spy_init)
+
+        est = StreamingSTM(
+            K=K, features_col="features", covariates_col="covariates",
+            covariate_names=["a", "b"], random_seed=7,
+            spectral_init=True, spectral_method="scalable",
+            spectral_d=256, spectral_min_doc_freq=3)
+        model = est.fit(self._toy_df(spark), max_iter=1, subsampling_rate=1.0)
+
+        # The stub received the rdd (not a Python list).
+        import pyspark
+        assert isinstance(seen["rdd"], pyspark.RDD), (
+            "scalable path must pass the rdd, not rdd.collect()")
+        assert seen["vocab_size"] == V
+        assert seen["d"] == 256
+        assert seen["seed"] == 7          # self.random_seed or 0
+        assert seen["min_doc_freq"] == 3
+
+        # The sentinel reached the engine unchanged.
+        ds = captured["data_summary"]
+        assert ds is not None and "spectral_beta" in ds
+        assert np.allclose(ds["spectral_beta"], sentinel)
+
+        # Metadata records the method.
+        assert model.metadata["stm_hardening"]["spectral_method"] == "scalable"
+
+    def test_defaults_on_and_recorded_includes_spectral_method(
+            self, spark, monkeypatch):
+        """Default path records spectral_method == 'dense' in stm_hardening."""
+        import spark_vi.models.topic.spectral_init as si_mod
+        from spark_vi.mllib.topic.stm import StreamingSTM
+        monkeypatch.setattr(si_mod, "spectral_init_beta",
+                            lambda docs, partition, V: np.full((partition.K, V), 1.0 / V))
+        est = StreamingSTM(
+            K=4, features_col="features", covariates_col="covariates",
+            covariate_names=["a", "b"], random_seed=0)
+        model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
+        assert model.metadata["stm_hardening"]["spectral_method"] == "dense"
