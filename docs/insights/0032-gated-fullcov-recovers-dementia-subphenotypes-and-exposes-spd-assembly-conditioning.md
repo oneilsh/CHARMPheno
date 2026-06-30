@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-30
 **Topic:** stm | full-covariance | gating | rare-phenotype | conditioning | diagnostics | phenotyping
-**Status:** Confirmed (cancer_or_dementia cohort, exp 0020 non-gated vs exp 0021 gated; exp 0022 — IW alone can't fix the min-eigenvalue near-singularity (Finding 4); exp 0023 — diag-shrink fixes the min end but triggers a max-eigenvalue variance runaway, so conditioning needs BOTH levers (Finding 5); exp 0024 tests the combination)
+**Status:** Sub-phenotype recovery CONFIRMED (exp 0020/0021); gated-Σ conditioning UNRESOLVED. exp 0022 — IW alone can't fix the min-eigenvalue near-singularity (Finding 4); exp 0023 — diag-shrink fixes the min end but triggers a max-eigenvalue variance runaway (Finding 5); exp 0024 — both levers FAIL, runaway worsens to 6e8 (Finding 6); the nearest-SPD eigenvalue floor (raised from 1e-6) is the proposed surgical min-end lever, tested next in exp 0025.
 
 The full-covariance Σ arc (ADR 0033) replaced STM's diagonal mean-field
 covariance with a genuine (K−1)×(K−1) matrix to model topic correlations. Two
@@ -197,19 +197,62 @@ insight [0029](0029-stm-sigma-init-collapse-blowup-missing-stabilizers.md)'s
 runaway-Σ mechanism, re-triggered. (exps 0021/0022, off-diagonals intact, had max
 Σ_var ≈ 9 — no runaway.)
 
-**The cure is the IW variance-anchor, applied every M-step.** This is precisely the
-diagonal-Σ runaway that insight
-[0031](0031-scalable-spectral-topic-quality-matches-dense-but-sigma-splits-one-runaway.md)
-tamed with `sigma_prior_count=2000`: the per-entry MAP
-Σ_ii = (S_ii + ν·scale)/(N_ii + ν) is a per-iteration contraction toward `scale`
-that prevents the variance from ever building up. So the two regularizers are not
-"one right, one wrong" — **each owns one end of the spectrum**: diag-shrink (Roberts
-`sigma.prior`, N-independent) fixes the MIN-eigenvalue / correlation near-singularity;
-the IW prior (`sigma_prior_count`, the variance anchor) caps the MAX-eigenvalue /
-variance runaway. Conditioning is the RATIO, so a well-conditioned gated Σ needs
-BOTH. exp [0024](../experiments/0024-stm-comorbid-fullcov-gated-both-levers.md)
-tests the combination (`sigma_diag_shrink=0.1` + `sigma_prior_scale=2`,
-`sigma_prior_count=2000`).
+The conjecture at this point was that the IW variance-anchor would cap the runaway
+(insight [0031](0031-scalable-spectral-topic-quality-matches-dense-but-sigma-splits-one-runaway.md)
+tamed a diagonal-Σ runaway with `sigma_prior_count=2000`), giving a two-levers,
+one-per-end fix. exp [0024](../experiments/0024-stm-comorbid-fullcov-gated-both-levers.md)
+(`sigma_diag_shrink=0.1` + `sigma_prior_scale=2`, `sigma_prior_count=2000`) tested
+it and **falsified it** — see Finding 6.
+
+## Finding 6 — the both-levers fix fails; the IW anchor cannot cap a well-supported runaway, and the right min-end lever is the nearest-SPD eigenvalue floor itself (exp 0024)
+
+exp 0024 engaged both levers and the runaway got an order of magnitude WORSE, not
+capped:
+
+| metric | 0021 (none) | 0023 (diag-shrink) | 0024 (both levers) |
+|---|---|---|---|
+| Σ_eig min | 1e-6 | 1.0 | 1.98 (IW scale floor) |
+| Σ_eig **max** | 32.8 | 2.23e7 | **6.08e8 (WORSE)** |
+| Σ_eig cond | 3.28e7 | 2.23e7 | **3.07e8** |
+| |Γ| max | 4.88 | 4.45 | **11.4** (mean also runs away) |
+| ELBO | −1.5897e6 | −2.252e6 | −1.836e6 |
+
+The IW prior at ν=2000 raised the variance FLOOR to scale=2 (min eig 1e-6 → 1.98,
+pinning the 49 stable topics) but **did not cap the one runaway topic** — it ran to
+6e8, and |Γ| (the η-mean) ran away with it (4.9 → 11.4), a full logistic-normal
+divergence of one topic in both mean and variance. Two reasons the anchor failed:
+
+- **It is N-weighted, same as at the min end (Finding 4).** The per-entry MAP
+  Σ_ii = (S_ii + ν·scale)/(N_ii + ν) only pulls toward `scale` with weight
+  ν/(N_ii+ν). If the runaway topic is well-supported (large N_ii), ν=2000 is a
+  minority weight and the exploding data term S_ii wins. Capping it would need ν so
+  large it flattens every topic's variance to `scale` — destroying the model. The IW
+  prior is N-weighted at BOTH ends and cannot fix either when the offending entry is
+  well-supported.
+- **scale=2 points the wrong way for stability.** Anchoring variances UP toward 2
+  (above the natural ~1) WEAKENS the prior precision 1/Σ_ii, loosening the η-pinning
+  — insight [0030](0030-spectral-init-closes-stm-sigma-blowup-on-real-data.md)'s
+  blowup-basin direction. The anchor meant to cap the runaway instead gave it more
+  room.
+
+**The architectural lesson (4 experiments).** The off-diagonal correlations are
+simultaneously the SOURCE of the min-eigenvalue near-singularity (when the
+SPD-assembly is inconsistent) and the STABILIZER of the variances (Finding 5).
+`sigma_diag_shrink` kills both at once (fixes min, breaks max); the IW prior is
+N-weighted and reaches neither well-supported end. Neither knob conditions the gated
+Σ. The lever that lifts the min eigenvalue WITHOUT decorrelating — preserving the
+stabilizing coupling, no N-weighting — is the **nearest-SPD eigenvalue floor
+itself** ([_linalg.nearest_spd](../../spark-vi/spark_vi/models/topic/_linalg.py),
+ADR 0033 Decision 5 layer ii), currently set to a cosmetic `SIGMA_FLOOR=1e-6`. The
+near-singular direction is floored to 1e-6 — which is exactly why cond is ~3e7 in
+0021. Raising that floor to a meaningful scale (≈ sigma_init, or a max-condition-cap
+floor = Σ_eig_max / target_cond) sets the minimum eigenvalue / maximum condition
+number SURGICALLY, perturbs only the deficient eigendirection (minimum-perturbation
+PSD completion), preserves the genuine correlations, keeps the off-diagonal coupling
+that stabilizes the variances, and never decorrelates — so it cannot trigger the
+runaway. This is the prescribed next test (exp 0025); it needs a small change to
+expose the floor as a tunable knob. **Status: gated-Σ conditioning UNRESOLVED;
+eigenvalue-floor approach proposed, not yet confirmed.**
 
 ## Implications
 
@@ -220,16 +263,19 @@ tests the combination (`sigma_diag_shrink=0.1` + `sigma_prior_scale=2`,
 2. **Gated full-Σ recovers rare sub-phenotypes** (Alzheimer's vs vascular
    dementia in a 19% arm) — the gated approach's reason for existing, now shown
    under the genuine correlated model.
-3. **Gated-Σ conditioning has TWO heads and needs BOTH levers, one per spectral
-   end.** The min-eigenvalue near-singularity (off-diagonal SPD-assembly
-   inconsistency) is fixed by `sigma_diag_shrink` (Finding 4: IW can't reach it,
-   Finding 5: diag-shrink does — min eig 1e-6 → 1.0). The max-eigenvalue variance
-   runaway (a weakly-identified topic freed by decorrelation — insight 0029's
-   mechanism) is capped by the IW prior `sigma_prior_count` (insight 0031's
-   established cure, count=2000). Neither lever alone conditions the gated Σ;
-   diag-shrink alone trades the min-end problem for a max-end one (exp 0023). exp
-   0024 tests the combination; plan the gated full-Σ default around BOTH knobs
-   once 0024 lands a well-conditioned Σ with sub-phenotypes preserved.
+3. **Gated-Σ conditioning is UNRESOLVED after 4 experiments; the post-M-step
+   regularizers (`sigma_diag_shrink`, `sigma_prior_count`) are both the wrong
+   tool.** The off-diagonal correlations are both the source of the min-eigenvalue
+   near-singularity and the stabilizer of the variances (Findings 5-6), so
+   decorrelating (diag-shrink) fixes the min end but triggers a max-end runaway, and
+   the N-weighted IW prior reaches neither well-supported end. The proposed fix is
+   the nearest-SPD eigenvalue floor (ADR 0033 Decision 5 layer ii), currently a
+   cosmetic 1e-6: raising it lifts the min eigenvalue surgically without
+   decorrelating, so it cannot trigger the runaway (exp 0025, pending a knob to
+   expose the floor). NOTE: the non-gated full-Σ (exp 0020) is well-conditioned
+   (cond 13.3) — this is specifically a gated-thin-comorbid pathology, so an
+   alternative is to source the correlation matrix from the non-gated model and use
+   gating only for sub-phenotype recovery.
 4. **The new diagnostics earn their keep** — `Σ_eig[cond]` and
    `max_abs_offdiag_corr` made an otherwise-silent near-singular assembly
    immediately visible; without them the ill-conditioning would have surfaced
