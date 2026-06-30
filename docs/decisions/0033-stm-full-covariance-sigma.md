@@ -7,18 +7,18 @@
 
 `OnlineSTM` has always stored Σ as a K-vector of per-topic variances, and every
 downstream term is elementwise-diagonal: the Gaussian prior gradient −(η−μ)/σ²,
-the prior Hessian block `diag(1/Sigma_diag)`, and the η-KL
-([`stm.py:191`](../../../spark-vi/spark_vi/models/topic/stm.py#L191),
-[`stm.py:547-553`](../../../spark-vi/spark_vi/models/topic/stm.py#L547-L553)).
+the prior Hessian block `diag(1/Sigma_diag)`, and the η-KL (in the per-doc
+neg-log-joint Hessian and the `local_update` η-KL accumulation — both replaced by
+the full-matrix forms by this ADR).
 This diagonal mean-field representation is not the CTM/STM model of Blei & Lafferty
 2007 or Roberts et al. — it forgoes the signature feature that distinguishes
 correlated topic models from LDA: modeled topic correlation. The practical consequence
 is that the reference `stm` package's `sigma.prior` (a diagonal-shrink lever ∈ `[0, 1]`)
-is a literal no-op in our implementation — there are no off-diagonals to shrink.
+is a literal no-op in OnlineSTM — there are no off-diagonals to shrink.
 
 The K-1 reference-topic parameterization (ADR 0031) placed Σ over the K−1 free topics;
 the full K×K Laplace covariance ν_d and Cholesky-based inverse are already computed
-per document ([`_spd_inverse`](../../../spark-vi/spark_vi/models/topic/stm.py#L201-L226)).
+per document ([`_spd_inverse`](../../spark-vi/spark_vi/models/topic/stm.py#L203-L228)).
 The diagonal model simply discards the off-diagonals at every M-step. The
 computational infrastructure for full-Σ inference is therefore already in place.
 
@@ -72,7 +72,7 @@ layers, all load-bearing:
 - (i) The inverse-Wishart prior (Component 3 below) fills uninformed entries with a
   coherent SPD scale instead of a raw zero or a few-patient estimate.
 - (ii) Nearest-SPD eigenvalue-floor projection (generalizing the per-doc Hessian
-  repair in [`_spd_inverse`](../../../spark-vi/spark_vi/models/topic/stm.py#L201-L226)
+  repair in [`_spd_inverse`](../../spark-vi/spark_vi/models/topic/stm.py#L203-L228)
   to the global Σ) — also the principled minimum-perturbation imputation of unobserved
   cross-group entries.
 - (iii) The `sigma_ridge`·I floor (already present).

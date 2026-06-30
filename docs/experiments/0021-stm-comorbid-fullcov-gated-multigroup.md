@@ -31,7 +31,10 @@ Validates the gated multi-group path of the full-covariance Σ arc (ADR 0033):
 cross-group covariance is estimated only from comorbid documents that co-activate
 both groups, thin cross-group cells fall back to the prior via the min_pair_support
 floor, and the assembled Σ is SPD-repaired. The cohort is cancer + dementia (two
-foreground blocks), mirroring the gated-STM setup established in exp 0004.
+foreground blocks), mirroring the gated-STM setup established in exp 0004. The
+gating variable `source_cohort` is deliberately absent from `covariate_formula` —
+including the group variable in the prevalence regression would make the foreground
+regression rank-deficient (ADR 0026; see exp 0004).
 
 ## Why
 
