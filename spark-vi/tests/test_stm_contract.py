@@ -39,10 +39,10 @@ def test_canonical_collapse_update_global_matches_original_formulas():
     Gamma_target = np.linalg.solve(stats["XtX"] + ridge, stats["XtMu"])
     exp_Gamma = 0.5 * gp0["Gamma"] + 0.5 * Gamma_target
     # Full-cov Σ M-step: per-pair MLE = scatter / support, ρ-blend, nearest_spd.
+    # No additive sigma_ridge*I — dropped in Task 4 (ADR-0027 exact-laziness).
     Sigma_target = stats["residual_outer_stat"] / stats["n_pairs_stat"]
     blended = 0.5 * gp0["Sigma"] + 0.5 * Sigma_target
-    exp_Sigma = nearest_spd(blended + model.sigma_ridge * np.eye(K),
-                            floor=model.SIGMA_FLOOR)
+    exp_Sigma = nearest_spd(blended, floor=model.SIGMA_FLOOR)
     target_lam = float(gp0["eta"]) + stats["lambda_stats"]
     exp_lam = 0.5 * gp0["lambda"] + 0.5 * target_lam
     # The None-path support must be uniformly n_docs (every topic pair allowed).
@@ -108,9 +108,9 @@ def test_absent_group_block_left_unchanged_lazy_update():
     # Rare block untouched (the fix): its variance and cross-covariances with the
     # absent block keep their current values (no support -> lazy no-op).
     np.testing.assert_array_equal(out["Gamma"][:, 2], np.array([0.7, -0.4]))
-    # Up to the sigma_ridge nugget the full-cov M-step adds to every diagonal
-    # (Σ + ridge·I before nearest_spd), the unsupported variance is unchanged.
-    assert out["Sigma"][2, 2] == pytest.approx(0.9, abs=model.sigma_ridge + 1e-12)
+    # Without the additive sigma_ridge*I (dropped in Task 4) and nearest_spd being
+    # identity on already-SPD inputs, the unsupported variance is BIT-IDENTICAL.
+    assert out["Sigma"][2, 2] == 0.9
     # Background block variances DID update (sanity: lazy logic didn't freeze all).
     assert not np.allclose(np.diag(out["Sigma"])[:2], np.diag(gp["Sigma"])[:2])
     assert not np.allclose(out["Gamma"][:, :2], gp["Gamma"][:, :2])
@@ -138,13 +138,13 @@ def test_present_group_block_updates_via_block_formula():
     np.testing.assert_allclose(out["Gamma"][:, cols], exp_Gamma_col, atol=1e-12)
     # Full-cov Σ M-step: per-pair MLE = scatter / support over present pairs,
     # ρ-blend, then nearest_spd over the assembled matrix.
+    # No additive sigma_ridge*I — dropped in Task 4 (ADR-0027 exact-laziness).
     S, N = stats["residual_outer_stat"], stats["n_pairs_stat"]
     mle = np.where(N > 0, S / np.where(N > 0, N, 1.0), gp["Sigma"])
     Sigma_target = gp["Sigma"].copy()
     Sigma_target[N > 0] = mle[N > 0]
     blended = 0.5 * gp["Sigma"] + 0.5 * Sigma_target
-    exp_Sigma = nearest_spd(blended + model.sigma_ridge * np.eye(K),
-                            floor=model.SIGMA_FLOOR)
+    exp_Sigma = nearest_spd(blended, floor=model.SIGMA_FLOOR)
     np.testing.assert_allclose(out["Sigma"], exp_Sigma, atol=1e-12)
     assert stats["n_pairs_stat"][2, 2] == 4.0  # 'rare' pair support is the group docs
 
@@ -313,11 +313,11 @@ class TestUpdateGlobal:
     def test_sigma_sample_covariance(self):
         m, gp, target = self._make_state_with_stats()
         gp_new = m.update_global(gp, target, learning_rate=1.0)
-        # Full-cov per-pair MLE = scatter / support, then nearest_spd + ridge.
+        # Full-cov per-pair MLE = scatter / support, then nearest_spd (no additive ridge).
+        # sigma_ridge dropped from SPD step in Task 4 (ADR-0027 exact-laziness).
         from spark_vi.models.topic._linalg import nearest_spd
         mle = target["residual_outer_stat"] / target["n_pairs_stat"]
-        expected_Sigma = nearest_spd(mle + m.sigma_ridge * np.eye(3),
-                                     floor=m.SIGMA_FLOOR)
+        expected_Sigma = nearest_spd(mle, floor=m.SIGMA_FLOOR)
         np.testing.assert_allclose(gp_new["Sigma"], expected_Sigma)
 
     def test_sigma_minimum_floor(self):

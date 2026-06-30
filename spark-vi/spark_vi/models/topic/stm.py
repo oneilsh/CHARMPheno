@@ -348,6 +348,7 @@ class OnlineSTM(VIModel):
         sigma_ridge: float = 1e-6,
         sigma_prior_scale: float | None = None,
         sigma_prior_count: float = 0.0,
+        sigma_diag_shrink: float = 0.0,
         lbfgs_max_iter: int = 50,
         lbfgs_tol: float = 1e-4,
         gamma_shape: float = 100.0,
@@ -373,6 +374,8 @@ class OnlineSTM(VIModel):
             raise ValueError(f"sigma_prior_scale must be > 0, got {sigma_prior_scale}")
         if sigma_prior_count < 0:
             raise ValueError(f"sigma_prior_count must be >= 0, got {sigma_prior_count}")
+        if not (0.0 <= sigma_diag_shrink <= 1.0):
+            raise ValueError(f"sigma_diag_shrink must be in [0, 1], got {sigma_diag_shrink}")
         if lbfgs_max_iter < 1:
             raise ValueError(f"lbfgs_max_iter must be >= 1, got {lbfgs_max_iter}")
         if lbfgs_tol <= 0:
@@ -395,6 +398,7 @@ class OnlineSTM(VIModel):
         self.sigma_ridge = float(sigma_ridge)
         self.sigma_prior_scale = None if sigma_prior_scale is None else float(sigma_prior_scale)
         self.sigma_prior_count = float(sigma_prior_count)
+        self.sigma_diag_shrink = float(sigma_diag_shrink)
         self.lbfgs_max_iter = int(lbfgs_max_iter)
         self.lbfgs_tol = float(lbfgs_tol)
         self.gamma_shape = float(gamma_shape)
@@ -595,15 +599,20 @@ class OnlineSTM(VIModel):
         λ:  λ_new = (1-ρ)·λ + ρ·(η + lambda_stats)        # natural-gradient SVI
         Γ:  Γ̂ = (XᵀX + ridge·I)⁻¹ XᵀMu                    # ridge OLS on aggregated stats
             Γ_new = (1-ρ)·Γ + ρ·Γ̂                         # stochastic-EM ρ-blend
-        Σ:  Σ_target[i,j] = residual_outer_stat[i,j] / n_pairs[i,j]   # full (K,K) sample cov
-            Σ_new = nearest_spd((1-ρ)·Σ + ρ·Σ_target + ridge·I, floor=SIGMA_FLOOR)
+        Σ:  Psi = nu * scale * I  (IW scale matrix; 0 if scale=None or nu=0)
+            Σ_target[i,j] = (S_ij + Psi_ij) / (N_ij + nu)  # IW MAP (reduces to MLE when nu=0)
+            Σ_new = (1-ρ)·Σ + ρ·Σ_target                   # ρ-blend
+            Σ_new = (1-w)·Σ_new + w·diag(Σ_new)            # diagonal-shrink (w=sigma_diag_shrink)
+            Σ_new = nearest_spd(Σ_new, floor=SIGMA_FLOOR)   # SPD repair (no additive ridge here)
 
-        The Σ M-step is the plain full-covariance MLE (NO regularizer this task —
-        the inverse-Wishart prior + diagonal shrink are Task 4). The per-pair MLE
-        is lazy: a pair (i,j) with zero support (no doc had both i,j free this
-        batch) keeps its current Σ value, so absent blocks never decay. After the
-        ρ-blend, nearest_spd repairs any loss of positive-definiteness from
-        stitching the scatter over inconsistent doc subsets.
+        The IW MAP prior (Blei & Lafferty 2007) defaults off (sigma_prior_scale=None,
+        sigma_prior_count=0), recovering the plain MLE. The diagonal-shrink lever
+        (Roberts et al. stm sigma.prior) defaults off (sigma_diag_shrink=0). The
+        per-pair estimate is lazy: a pair (i,j) with zero support keeps its current
+        Σ value. After the ρ-blend, nearest_spd repairs any loss of positive-
+        definiteness from stitching scatter over inconsistent doc subsets.
+        nearest_spd is identity on already-SPD matrices, so unsupported entries are
+        preserved bit-identically (ADR-0027 exact-laziness invariant).
 
         Lazy block updates (ADR 0027): any block (background or a group's
         foreground) with zero documents in this minibatch is left unchanged —
@@ -650,20 +659,45 @@ class OnlineSTM(VIModel):
                     XtX_groups[gi] + ridge_eye, XtMu[:, cols])
         new_Gamma = (1.0 - learning_rate) * Gamma + learning_rate * Gamma_target
 
-        # Σ: full-covariance per-pair MLE. Each entry Σ[i,j] is the mean over the
-        # docs where both i and j were free of (resid_i·resid_j + ν_d[i,j]). A
-        # pair with no support keeps its current value (lazy rule: target defaults
-        # to the current Σ, so the ρ-blend is a no-op there).
+        # Σ: full-covariance M-step with optional inverse-Wishart MAP prior
+        # and diagonal-shrink regularizer (both default off, reducing to MLE).
+        #
+        # Inverse-Wishart MAP (Blei & Lafferty 2007):
+        #   Psi = nu * sigma_prior_scale * I   (diagonal; off-diagonal = 0)
+        #   nu  = sigma_prior_count
+        #   Sigma_ij = (S_ij + Psi_ij) / (N_ij + nu)   for supported pairs
+        # With sigma_prior_scale=None and sigma_prior_count=0, Psi=0 and
+        # nu=0, so denom=N and this is the plain MLE (Task 3 behavior).
+        # The diagonal Psi = nu*scale*I makes the diagonal inverse-gamma
+        # (resid + count*scale)/(n + count) the Psi=psi*I special case.
+        #
+        # Diagonal-shrink (Roberts et al. stm sigma.prior lever):
+        #   Sigma <- (1 - w)*Sigma + w*diag(diag(Sigma)),  w = sigma_diag_shrink
+        # Applied after the IW MAP blend and rho-blend.
+        #
+        # SPD repair via nearest_spd only (no additive sigma_ridge*I here):
+        # The additive ridge was redundant with nearest_spd's eigenvalue floor
+        # and nudged every diagonal (including lazy/unsupported entries) up by
+        # ~sigma_ridge each step, breaking the ADR-0027 exact-laziness invariant.
+        # nearest_spd is identity on already-SPD matrices, so unsupported entries
+        # are preserved bit-identically in the common case.
         S = target_stats["residual_outer_stat"]
         N = target_stats["n_pairs_stat"]
+        nu = self.sigma_prior_count
+        Psi = np.zeros((self.K, self.K))
+        if self.sigma_prior_scale is not None:
+            np.fill_diagonal(Psi, nu * self.sigma_prior_scale)
+        denom = N + nu
         Sigma_target = Sigma.copy()
+        present = denom > 0
         with np.errstate(invalid="ignore", divide="ignore"):
-            mle = np.where(N > 0, S / np.where(N > 0, N, 1.0), Sigma)
-        present_pairs = N > 0
-        Sigma_target[present_pairs] = mle[present_pairs]
+            mapped = (S + Psi) / np.where(present, denom, 1.0)
+        Sigma_target[present] = mapped[present]
         new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
-        new_Sigma = nearest_spd(new_Sigma + self.sigma_ridge * np.eye(self.K),
-                                floor=self.SIGMA_FLOOR)
+        w = self.sigma_diag_shrink
+        if w > 0.0:
+            new_Sigma = (1.0 - w) * new_Sigma + w * np.diag(np.diag(new_Sigma))
+        new_Sigma = nearest_spd(new_Sigma, floor=self.SIGMA_FLOOR)
 
         return {
             "lambda": new_lam,

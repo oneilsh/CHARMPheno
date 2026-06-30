@@ -137,11 +137,10 @@ def test_reference_gamma_column_zero_and_sigma_inert():
     for _ in range(8):
         gp = m.update_global(gp, m.local_update(docs, gp), learning_rate=1.0)
     assert np.allclose(gp["Gamma"][:, 0], 0.0)
-    # Reference topic carries no free Σ entry, so its diagonal variance stays at
-    # sigma_init (no support -> lazy no-op). The full-cov M-step adds sigma_ridge
-    # to every diagonal (Σ + ridge·I before nearest_spd), so it drifts only by
-    # that nugget per step.
-    assert gp["Sigma"][0, 0] == pytest.approx(3.0, abs=8 * m.sigma_ridge + 1e-9)
+    # Reference topic carries no free Σ entry (no support -> lazy no-op). Without
+    # the additive sigma_ridge*I (dropped in Task 4) and nearest_spd being identity
+    # on already-SPD inputs, the reference diagonal is BIT-IDENTICAL to sigma_init.
+    assert gp["Sigma"][0, 0] == 3.0
 
 
 def test_reference_topic_still_learns_content():
