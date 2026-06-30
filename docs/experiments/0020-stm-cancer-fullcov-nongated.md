@@ -1,7 +1,7 @@
 ---
 id: 20
 slug: stm-cancer-fullcov-nongated
-status: pending
+status: done
 model_class: stm
 cohort: cancer
 cohort_def: first_cancer_year

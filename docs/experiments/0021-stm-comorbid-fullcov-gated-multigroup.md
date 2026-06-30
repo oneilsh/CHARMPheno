@@ -1,7 +1,7 @@
 ---
 id: 21
 slug: stm-comorbid-fullcov-gated-multigroup
-status: pending
+status: done
 model_class: stm
 cohort: cancer_or_dementia
 cohort_def: cancer_or_dementia
