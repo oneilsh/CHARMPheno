@@ -1,7 +1,7 @@
 ---
 id: 17
 slug: stm-cancer-reference-spectral-scalable-sigma1
-status: pending
+status: done
 model_class: stm
 cohort: cancer
 cohort_def: first_cancer_year
