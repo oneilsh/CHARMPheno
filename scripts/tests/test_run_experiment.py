@@ -1343,6 +1343,36 @@ def test_resume_mismatch_on_changed_partition():
     assert any("topic_block_spec" in m for m in out)
 
 
+def test_resume_partition_check_needs_no_spark_vi(monkeypatch):
+    """Regression: _resume_corpus_mismatches runs in the orchestration python,
+    which has NO spark_vi (it ships only inside spark-submit's py-files). The
+    topic_block_spec comparison must not import spark_vi — doing so crashed
+    `make exp ID=N` resume with ModuleNotFoundError. We reproduce the cluster
+    condition by blocking any spark_vi import, then assert match + mismatch
+    both still resolve."""
+    import builtins
+    import run_experiment as rx
+
+    real_import = builtins.__import__
+
+    def _blocked(name, *args, **kwargs):
+        if name == "spark_vi" or name.startswith("spark_vi."):
+            raise ModuleNotFoundError("No module named 'spark_vi'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _blocked)
+
+    ck = {"topic_block_spec": {"group_var": "source_cohort", "background_k": 30,
+                               "foreground": [["cancer", 10], ["dementia", 10]]}}
+    eff_match = {"background_k": 30, "foreground": "cancer:10,dementia:10",
+                 "group_var": "source_cohort"}
+    eff_diff = {"background_k": 20, "foreground": "cancer:10,dementia:10",
+                "group_var": "source_cohort"}
+    assert rx._resume_corpus_mismatches(ck, eff_match) == []
+    assert any("topic_block_spec" in m
+               for m in rx._resume_corpus_mismatches(ck, eff_diff))
+
+
 def test_build_stm_args_threads_hardening_flags(monkeypatch):
     import run_experiment
     monkeypatch.setattr(run_experiment, "_require_workspace_env",

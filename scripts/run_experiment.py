@@ -353,20 +353,39 @@ def _resume_corpus_mismatches(checkpoint_manifest: dict, effective: dict) -> lis
                 f"doc_spec: checkpoint={ck_doc['name']!r} != config={want_doc!r}"
             )
     if "topic_block_spec" in checkpoint_manifest:
-        from spark_vi.models.topic.partition import TopicBlockPartition
-        ck_spec = checkpoint_manifest["topic_block_spec"]
-        ck_part = TopicBlockPartition.from_dict(ck_spec) if ck_spec else None
-        want_part = None
+        # Compare topic-block specs as plain dicts. This function runs in the
+        # orchestration python, which has NO spark_vi (it ships only inside
+        # spark-submit's py-files), so we must NOT import TopicBlockPartition
+        # here — doing so crashed `make exp ID=N` resume with ModuleNotFoundError.
+        # Mirror TopicBlockPartition.to_dict()'s shape:
+        # {group_var, background_k, foreground: [[label, size], ...]}.
+        ck_spec = checkpoint_manifest["topic_block_spec"] or None
+        want_spec = None
         if effective.get("background_k") is not None and effective.get("foreground"):
-            fg = tuple((lbl.strip(), int(sz)) for lbl, _, sz in
-                       (piece.partition(":") for piece in
-                        str(effective["foreground"]).split(",")))
-            want_part = TopicBlockPartition(
-                group_var=str(effective.get("group_var", "source_cohort")),
-                background_k=int(effective["background_k"]), foreground=fg)
-        if ck_part != want_part:
+            fg = [[lbl.strip(), int(sz)] for lbl, _, sz in
+                  (piece.partition(":") for piece in
+                   str(effective["foreground"]).split(","))]
+            want_spec = {
+                "group_var": str(effective.get("group_var", "source_cohort")),
+                "background_k": int(effective["background_k"]),
+                "foreground": fg,
+            }
+
+        def _norm(spec):
+            # Normalize for comparison: foreground entries to lists, ints to
+            # ints, so a JSON-loaded checkpoint (lists) and a config-built spec
+            # compare structurally regardless of list/tuple provenance.
+            if not spec:
+                return None
+            return (
+                str(spec.get("group_var")),
+                int(spec.get("background_k")),
+                tuple((str(g), int(sz)) for g, sz in spec.get("foreground", [])),
+            )
+
+        if _norm(ck_spec) != _norm(want_spec):
             mismatches.append(
-                f"topic_block_spec: checkpoint={ck_part!r} != config={want_part!r}")
+                f"topic_block_spec: checkpoint={ck_spec!r} != config={want_spec!r}")
     return mismatches
 
 
