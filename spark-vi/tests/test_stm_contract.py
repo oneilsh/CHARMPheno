@@ -334,8 +334,12 @@ class TestUpdateGlobal:
         expected_Sigma = pd_complete(mle, observed)
         np.testing.assert_allclose(gp_new["Sigma"], expected_Sigma)
 
-    def test_sigma_minimum_floor(self):
-        """Σ must stay SPD (eigenvalues floored) to keep Laplace well-defined."""
+    def test_sigma_stays_spd(self):
+        """Σ must stay SPD to keep Laplace well-defined. There is no SIGMA_FLOOR knob
+        any more (removed in the PD-completion arc); strict positive-definiteness comes
+        from pd_complete — nearest_spd's internal eigenvalue floor for the per-pair
+        sample-covariance path, or the Dykstra min-Frobenius fallback for a non-PD
+        observed block. Either way the result's eigenvalues are strictly positive."""
         m, gp, target = self._make_state_with_stats()
         target["residual_outer_stat"] = np.zeros((3, 3))
         gp_new = m.update_global(gp, target, learning_rate=1.0)

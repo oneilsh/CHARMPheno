@@ -123,11 +123,27 @@ modeling parameter):
    Lauritzen 1996 closed form — so no separate chordal path is needed; the closed
    form is used only as a unit-test oracle.
 
-2. **Fallback — alternating projection onto the PSD cone and the affine
-   "match-observed" set** (Higham 2002; Dykstra's algorithm). Triggered only when the
-   observed sub-part is not PD-completable (detected by IPS non-convergence or a
-   non-positive pivot). Robust by construction: converges to the minimum-Frobenius
-   PSD compromise, perturbing the inconsistent observed entries minimally.
+2. **Fallback — Dykstra alternating projection onto the PSD cone and the affine
+   "match-observed" set** (Dykstra 1983; the construction Higham 2002 uses for the
+   nearest correlation matrix, here generalized from Higham's unit-diagonal constraint
+   to an arbitrary observed-entry pattern). Implemented as
+   [min_frobenius_psd_completion](../../../spark-vi/spark_vi/models/topic/_linalg.py).
+   Triggered when the observed sub-part is not PD-completable — detected up front by the
+   zero-on-free init being indefinite (a genuinely completable observed block has a PD
+   zero-on-free init), with the post-sweep non-PD check kept as a numerical safety net.
+   Two projections: P_obs symmetrizes and resets the observed entries to target (free
+   entries left free); P_psd eigendecomposes and clamps eigenvalues to max(λ, eps).
+   Dykstra's correction increments (not naive successive projection) make it converge to
+   the true closest point: the minimum-Frobenius PSD compromise, perturbing the
+   inconsistent observed entries minimally. The eps > 0 floor (default 1e-8, matching
+   nearest_spd) is a strict-positive-definite safeguard so the returned matrix is
+   invertible for downstream precision use — a HEURISTIC, not from the literature; Higham
+   2002 itself uses eps = 0 for the PSD cone. The routine returns its final P_psd
+   projection, so the result is always strictly PD. When the observed block IS
+   PD-completable (the fallback is reached only as a safety net) the iterate converges
+   into the intersection (observed exact AND PSD); when it is not, it settles at the
+   min-Frobenius compromise, whose observed-entry deviation is provably no worse than a
+   single nearest_spd floor and strictly smaller wherever free entries give it room.
 
 This structure was chosen over a single pure alternating-projection solver because
 the primary path keeps the trustworthy measured entries exact and infers only the
@@ -164,8 +180,8 @@ pd_complete(target: (K,K), observed_mask: (K,K) bool, *, tol, max_iter) -> (K,K)
 - **Decomposable oracle:** on a chordal observed pattern, matches the closed-form
   completion (free block = Σ_{free,sep} Σ_sep⁻¹ Σ_{sep,free}) within `tol` (a test
   oracle, Grone et al. 1984 / Lauritzen 1996).
-- **Robustness:** never raises on a non-PD observed sub-part; returns the
-  nearest-PSD compromise.
+- **Robustness:** never raises on a non-PD observed sub-part; returns the Dykstra
+  min-Frobenius strictly-PD compromise (eps-floored, eps default 1e-8).
 
 ### M-step integration
 
@@ -231,9 +247,10 @@ well-conditioned, completion is a no-op there); the per-document Laplace inferen
 ## Decisions baked in
 
 - **Algorithm: two-stage** — max-det IPS / covariance selection primary (subsumes the
-  chordal closed-form; closed-form is a test oracle only), Higham alternating-projection
-  fallback for non-PD-completable observed parts. Chosen over a single pure
-  alternating-projection solver to preserve measured entries exactly.
+  chordal closed-form; closed-form is a test oracle only), Dykstra min-Frobenius
+  alternating-projection fallback (eps-floored strictly-PD, eps default 1e-8) for
+  non-PD-completable observed parts. Chosen over a single pure alternating-projection
+  solver to preserve measured entries exactly.
 - Full replacement of the zero-pin (no fallback to it; git is the rollback).
 - Below-`min_pair_support` = free (binary), not a support-weighted blend.
 - Driver-side K×K; corpus-sized work stays distributed.
@@ -258,7 +275,13 @@ well-conditioned, completion is a no-op there); the per-document Laplace inferen
   GGM covariance MLE in closed form (the test oracle).
 - Higham, N. J. (2002). "Computing the nearest correlation matrix — a problem from
   finance." *IMA Journal of Numerical Analysis* 22(3), 329-343. — alternating
-  projections onto the PSD cone, the robustness fallback for non-PD observed input.
+  projections onto the PSD cone (Higham's nearest-correlation construction, generalized
+  here to an arbitrary observed-entry pattern); the robustness fallback for non-PD
+  observed input.
+- Dykstra, R. L. (1983). "An algorithm for restricted least squares regression."
+  *Journal of the American Statistical Association* 78(384), 837-842. — the correction-
+  increment alternating projection that converges to the true closest point of an
+  intersection of convex sets (the min-Frobenius PSD fallback).
 - [ADR 0033](../../decisions/0033-stm-full-covariance-sigma.md) — full-covariance Σ;
   this design replaces its gated cross-group handling (decisions 5/7).
 - [insight 0032](../../insights/0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md)

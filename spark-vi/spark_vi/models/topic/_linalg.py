@@ -29,6 +29,78 @@ def nearest_spd(M: np.ndarray, floor: float = 1e-8) -> np.ndarray:
     w = np.maximum(w, floor)
     return (V * w) @ V.T
 
+def min_frobenius_psd_completion(
+    target: np.ndarray,
+    observed_mask: np.ndarray,
+    *,
+    eps: float = 1e-8,
+    tol: float = 1e-10,
+    max_iter: int = 1000,
+) -> np.ndarray:
+    """Minimum-Frobenius strictly-PD matrix preserving observed entries as closely
+    as possible — the robust fallback for an observed pattern that admits no PD
+    completion.
+
+    This is Dykstra's alternating projection (Dykstra 1983, "An Algorithm for
+    Restricted Least Squares Regression", JASA 78:837-842) onto two convex sets of
+    symmetric K×K matrices, the construction Higham 2002 ("Computing the Nearest
+    Correlation Matrix — a problem from finance", IMA J. Numer. Anal. 22:329-343)
+    uses for the nearest correlation matrix, here generalized from Higham's
+    unit-diagonal constraint to an arbitrary observed-entry pattern:
+
+      - S_obs = {M symmetric : M_ij = target_ij for every observed (i,j)} — an affine
+        set. Projection P_obs(X): symmetrize, reset observed entries to target, leave
+        free entries unchanged.
+      - S_psd(eps) = {M symmetric : M >= eps·I}. Projection P_psd(X): eigendecompose
+        the symmetric X (np.linalg.eigh), clamp eigenvalues to max(lambda, eps),
+        rebuild (V * w) @ V.T.
+
+    eps > 0 is a strict-positive-definite safeguard (so the result is invertible for
+    downstream precision use) — a HEURISTIC, NOT from the literature; it matches
+    nearest_spd's existing floor default 1e-8. Higham 2002 itself uses eps = 0 for
+    the PSD cone; the eps > 0 floor is this codebase's deviation.
+
+    Dykstra (not naive POCS): each set keeps a CORRECTION increment that is added
+    back before its projection, so the iteration converges to the true closest point
+    of the intersection (when non-empty) or to the minimum-Frobenius compromise (when
+    empty), rather than cycling near the boundary. When the observed block IS
+    PD-completable the iterate enters the intersection (observed exact AND PSD); when
+    it is NOT, it settles at the min-Frobenius compromise whose observed-entry drift
+    is far below a single eigenvalue floor's.
+
+    Returns the final P_psd projection so the result is always strictly PD (and hence
+    invertible). tol / max_iter are convergence controls (heuristic stopping rule):
+    iterate until the max absolute change drops below tol.
+    """
+    mask = np.asarray(observed_mask, dtype=bool)
+    mask = mask | mask.T
+    tgt = 0.5 * (target + target.T)
+
+    def P_psd(X: np.ndarray) -> np.ndarray:
+        w, V = np.linalg.eigh(0.5 * (X + X.T))
+        w = np.maximum(w, eps)
+        return (V * w) @ V.T
+
+    def P_obs(X: np.ndarray) -> np.ndarray:
+        Y = 0.5 * (X + X.T)
+        Y[mask] = tgt[mask]
+        return Y
+
+    X = P_psd(tgt)                       # start feasible-ish (PSD)
+    dA = np.zeros_like(X)                 # Dykstra increment for S_psd
+    dB = np.zeros_like(X)                 # Dykstra increment for S_obs
+    for _ in range(max_iter):
+        Y = P_psd(X + dA)
+        dA = (X + dA) - Y
+        X_new = P_obs(Y + dB)
+        dB = (Y + dB) - X_new
+        if np.max(np.abs(X_new - X)) < tol:
+            X = X_new
+            break
+        X = X_new
+    return P_psd(X)                       # return a strictly-PD iterate
+
+
 def pd_complete(
     target: np.ndarray,
     observed_mask: np.ndarray,
@@ -56,11 +128,14 @@ def pd_complete(
     Sigma[i,j] = Sigma[i,R] inv(Sigma[R,R]) Sigma[R,j] over R = all other topics: this is
     the partial-covariance-to-zero update, and it leaves the observed entries (never
     visited) untouched. Sweeping all free entries to convergence drives every free
-    precision entry to zero while preserving the measured covariances exactly. A Higham
-    2002 PSD projection (`nearest_spd`, "Computing the Nearest Correlation Matrix",
-    IMA J. Numer. Anal. 22:329-343) is applied if a sweep loses positive-definiteness,
-    providing robustness when the observed part admits no PD completion (then the result
-    is an approximate, still SPD, completion rather than the exact max-det one).
+    precision entry to zero while preserving the measured covariances exactly. When the
+    observed part admits no PD completion (the IPS sweep loses positive-definiteness, or
+    the all-observed init is already indefinite), the routine switches to the Dykstra
+    min-Frobenius alternating-projection fallback (`min_frobenius_psd_completion`; Higham
+    2002, "Computing the Nearest Correlation Matrix", IMA J. Numer. Anal. 22:329-343;
+    Dykstra 1983, JASA 78:837-842) and returns its result: the strictly-PD matrix whose
+    observed-entry deviation from `target` is minimized — a far smaller drift than a single
+    eigenvalue floor of the indefinite assembly.
 
     On a decomposable (chordal) observed pattern this converges in one sweep to the
     closed form Sigma[A,B] = Sigma[A,S] inv(Sigma[S,S]) Sigma[S,B] over each separator S
@@ -81,10 +156,28 @@ def pd_complete(
     free_pairs = [(i, j) for i in range(n) for j in range(i + 1, n) if free[i, j]]
 
     # Init: measured values on observed entries, 0 on free off-diagonal entries, and the
-    # measured diagonal kept exact. One PSD projection so the first inv() is well posed.
+    # measured diagonal kept exact.
     Sigma = np.where(mask, target, 0.0)
     np.fill_diagonal(Sigma, np.diag(target))
-    Sigma = nearest_spd(Sigma).copy()
+
+    # Non-PD-completability detector. When the observed entries admit a PD completion,
+    # this zero-on-free init is itself PD (a sufficient seed for IPS: zeroing the free
+    # off-diagonals does not break a genuinely completable observed block). When the
+    # observed entries are mutually inconsistent (no PD matrix matches them all), the
+    # init is indefinite — IPS cannot recover the observed entries exactly, and flooring
+    # the init (the former behaviour) just returns a single nearest_spd projection that
+    # drifts the observed entries badly. Route those straight to the Dykstra
+    # min-Frobenius fallback, which preserves the observed entries as closely as a
+    # strictly-PD result allows. This covers both the all-observed inconsistent case
+    # (no free entries) and the inconsistent-clique-plus-free case.
+    try:
+        np.linalg.cholesky(Sigma)
+    except np.linalg.LinAlgError:
+        return min_frobenius_psd_completion(target, mask, tol=tol, max_iter=max_iter)
+
+    # All-observed and PD-completable: nothing to complete, return the symmetrized target.
+    if not free_pairs:
+        return 0.5 * (Sigma + Sigma.T)
 
     for _ in range(max_iter):
         Sigma_prev = Sigma.copy()
@@ -94,11 +187,14 @@ def pd_complete(
             rest = [k for k in range(n) if k != i and k != j]
             x = Sigma[i, rest] @ np.linalg.inv(Sigma[np.ix_(rest, rest)]) @ Sigma[rest, j]
             Sigma[i, j] = Sigma[j, i] = x
-        # Higham fallback if the observed part is not PD-completable.
+        # Numerical safety net: the up-front detector already routes inconsistent
+        # observed blocks to the fallback, but if a free-entry regression update should
+        # ever drive an otherwise-PD iterate indefinite, hand to the same Dykstra
+        # min-Frobenius routine rather than flooring once and continuing.
         try:
             np.linalg.cholesky(Sigma)
         except np.linalg.LinAlgError:
-            Sigma = nearest_spd(Sigma).copy()
+            return min_frobenius_psd_completion(target, mask, tol=tol, max_iter=max_iter)
         if np.max(np.abs(Sigma - Sigma_prev)) < tol:
             break
 

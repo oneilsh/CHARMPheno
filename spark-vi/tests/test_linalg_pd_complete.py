@@ -1,6 +1,9 @@
 import numpy as np
-import pytest
-from spark_vi.models.topic._linalg import pd_complete
+from spark_vi.models.topic._linalg import (
+    pd_complete,
+    nearest_spd,
+    min_frobenius_psd_completion,
+)
 
 
 def _is_pd(M):
@@ -80,3 +83,114 @@ def test_output_symmetric():
     mask[0, 4] = mask[4, 0] = False
     out = pd_complete(target, mask)
     np.testing.assert_allclose(out, out.T, atol=1e-10)
+
+
+# --- Dykstra min-Frobenius PSD fallback (non-PD-completable observed) ---
+
+# Reviewer's canonical inconsistent target: 1~2 and 1~3 both strongly positive
+# (0.99) yet 2~3 strongly negative (-0.99) — no PSD matrix matches all three, so
+# the observed block is not PD-completable.
+_INCONSISTENT = np.array([[1.0, 0.99, 0.99],
+                          [0.99, 1.0, -0.99],
+                          [0.99, -0.99, 1.0]])
+
+
+def _observed_dev(out, target, mask):
+    """Frobenius norm of the deviation on observed entries only."""
+    diff = (out - target)[mask]
+    return float(np.sqrt(np.sum(diff * diff)))
+
+
+def test_min_frobenius_optimal_on_all_observed_inconsistent():
+    # Contract #2, all-observed half: when EVERY entry is observed the affine
+    # "match-observed" set is the single point {target}, so the closest PSD matrix
+    # to it is exactly the global nearest-PSD projection nearest_spd(target) — there
+    # is no free entry to exploit, and the min-Frobenius optimum provably EQUALS the
+    # single floor here. The non-vacuous check is therefore that Dykstra reaches that
+    # optimum (does not drift PAST it, as the old in-loop floor-and-continue could) and
+    # returns a strictly-PD, symmetric result. The strict min-Frobenius IMPROVEMENT
+    # over a single floor is exercised in the free-entry test below, where the routine
+    # has degrees of freedom to use.
+    target = _INCONSISTENT
+    mask = np.ones((3, 3), bool)
+
+    dyk = min_frobenius_psd_completion(target, mask)
+    floored = nearest_spd(target)
+
+    assert _is_pd(dyk)                                   # strictly PD
+    np.testing.assert_allclose(dyk, dyk.T, atol=1e-10)   # symmetric
+    # Reaches the optimum (the single floor IS the min-Frobenius point here);
+    # never worse than it.
+    assert _observed_dev(dyk, target, mask) <= _observed_dev(floored, target, mask) + 1e-9
+    np.testing.assert_allclose(dyk, floored, atol=1e-6)
+
+
+def test_pd_complete_inconsistent_all_observed_does_not_raise_and_is_pd():
+    # pd_complete on the all-observed inconsistent target routes through the
+    # min-Frobenius fallback (the observed-only init is indefinite) and returns a
+    # strictly-PD, symmetric matrix.
+    target = _INCONSISTENT
+    mask = np.ones((3, 3), bool)
+    out = pd_complete(target, mask)
+    assert _is_pd(out)
+    np.testing.assert_allclose(out, out.T, atol=1e-10)
+
+
+def test_min_frobenius_strictly_beats_single_floor_with_free_entry():
+    # Contract #2 (the crux improvement) AND #3: an inconsistent observed clique
+    # (topics 0,1,2 all observed) PLUS a free entry (topic 3 tied to topic 0 only,
+    # with 3~1 and 3~2 free). The free degrees of freedom let the Dykstra
+    # min-Frobenius routine achieve a STRICTLY SMALLER observed-entry deviation than a
+    # single nearest_spd floor of the same target — the whole point, not merely "is
+    # PD". This is also the rare-correlated-clique path with zero prior coverage.
+    target = np.array([[1.0, 0.99, 0.99, 0.5],
+                       [0.99, 1.0, -0.99, 0.0],
+                       [0.99, -0.99, 1.0, 0.0],
+                       [0.5, 0.0, 0.0, 1.0]])
+    mask = np.array([[1, 1, 1, 1],
+                     [1, 1, 1, 0],
+                     [1, 1, 1, 0],
+                     [1, 0, 0, 1]], bool)
+    assert not mask.all()                       # there IS a free entry
+
+    dyk = min_frobenius_psd_completion(target, mask)
+    floored = nearest_spd(target)
+
+    assert _is_pd(dyk)                                   # strictly PD
+    np.testing.assert_allclose(dyk, dyk.T, atol=1e-10)   # symmetric
+    # Strictly smaller observed deviation — min-Frobenius beats the single floor.
+    assert _observed_dev(dyk, target, mask) < _observed_dev(floored, target, mask)
+
+
+def test_non_pd_completable_with_free_entry_routes_to_fallback():
+    # Contract #3: the same inconsistent-clique-plus-free pattern through the full
+    # pd_complete entry point. free_pairs is non-empty, so the fallback engages on the
+    # rare-correlated-clique path (the up-front non-completability detector routes it;
+    # the in-loop check is a further numerical safety net). Result must be strictly PD,
+    # symmetric, and not raise.
+    target = np.array([[1.0, 0.99, 0.99, 0.5],
+                       [0.99, 1.0, -0.99, 0.0],
+                       [0.99, -0.99, 1.0, 0.0],
+                       [0.5, 0.0, 0.0, 1.0]])
+    mask = np.array([[1, 1, 1, 1],
+                     [1, 1, 1, 0],
+                     [1, 1, 1, 0],
+                     [1, 0, 0, 1]], bool)
+    assert not mask.all()                       # there IS a free entry
+    out = pd_complete(target, mask)             # must not raise
+    assert _is_pd(out)                          # strictly PD
+    np.testing.assert_allclose(out, out.T, atol=1e-10)
+
+
+def test_min_frobenius_returns_observed_exactly_when_completable():
+    # When the observed block already admits a PSD completion, the fallback must
+    # converge into the intersection: observed entries reproduced (within tol) and
+    # the result PD.
+    rng = np.random.default_rng(4)
+    A = rng.standard_normal((4, 4))
+    target = A @ A.T + np.eye(4)                 # SPD -> trivially completable
+    mask = np.ones((4, 4), bool)
+    mask[0, 3] = mask[3, 0] = False
+    out = min_frobenius_psd_completion(target, mask)
+    assert _is_pd(out)
+    np.testing.assert_allclose(out[mask], target[mask], atol=1e-6)

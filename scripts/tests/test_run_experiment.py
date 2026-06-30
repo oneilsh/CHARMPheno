@@ -1456,7 +1456,10 @@ def test_build_stm_args_emits_full_sigma_knobs(monkeypatch):
 
 
 def test_build_stm_args_omits_full_sigma_knobs_when_absent(monkeypatch):
-    """Default path: no sigma_diag_shrink / min_pair_support in effective -> neither flag emitted."""
+    """Default path: no min_pair_support in effective -> the --min-pair-support flag is
+    not emitted. (sigma_diag_shrink was removed in the PD-completion arc and is no longer
+    emittable at all, so it is covered by the historical-keys regression test below, not
+    here.)"""
     import run_experiment
     monkeypatch.setattr(run_experiment, "_require_workspace_env",
                         lambda: ("proj.ds", "billing"))
