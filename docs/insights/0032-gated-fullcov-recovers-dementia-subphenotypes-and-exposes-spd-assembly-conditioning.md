@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-30
 **Topic:** stm | full-covariance | gating | rare-phenotype | conditioning | diagnostics | phenotyping
-**Status:** Confirmed (cancer_or_dementia cohort, exp 0020 non-gated vs exp 0021 gated; exp 0022 falsifies the IW prior as the conditioning lever — Finding 4; exp 0023 tests `sigma_diag_shrink`)
+**Status:** Confirmed (cancer_or_dementia cohort, exp 0020 non-gated vs exp 0021 gated; exp 0022 — IW alone can't fix the min-eigenvalue near-singularity (Finding 4); exp 0023 — diag-shrink fixes the min end but triggers a max-eigenvalue variance runaway, so conditioning needs BOTH levers (Finding 5); exp 0024 tests the combination)
 
 The full-covariance Σ arc (ADR 0033) replaced STM's diagonal mean-field
 covariance with a genuine (K−1)×(K−1) matrix to model topic correlations. Two
@@ -151,11 +151,65 @@ vᵀ[(1−w)Σ + w·diag(Σ)]v ≈ w·O(1) — even a modest w lifts that direct
 off the floor by orders of magnitude, while the diagonal variances carrying the
 foreground topic signal are untouched. exp
 [0023](../experiments/0023-stm-comorbid-fullcov-gated-diagshrink.md)
-(`sigma_diag_shrink=0.2`, IW off) tests this; the expected result is the condition
-number dropping orders of magnitude with the dementia sub-phenotypes preserved and
-the correlation matrix uniformly attenuated by ~(1−w) but interpretable. The two
-regularizers are complementary, not interchangeable: IW for variance / thin-cell
-magnitude (N-weighted), diag-shrink for correlation / conditioning (N-independent).
+(`sigma_diag_shrink=0.2`, IW off) ran and **confirmed this half of the picture
+exactly** — and exposed a second, opposite-end problem. See Finding 5.
+
+## Finding 5 — diag-shrink fixes the min-eigenvalue end but triggers a max-eigenvalue variance runaway: conditioning has TWO heads, needs BOTH levers (exp 0023)
+
+exp 0023 turned `sigma_diag_shrink=0.2` on (IW off). The near-singular end was
+fixed exactly as Finding 4 predicted — and the failure mode FLIPPED to the other
+end of the spectrum:
+
+| metric | 0021 (neither) | 0022 (IW ν=100) | 0023 (diag-shrink 0.2) |
+|---|---|---|---|
+| Σ_eig **min** | 1e-6 (floored) | 1e-6 (floored) | **1.0 (off the floor)** ✓ |
+| Σ_eig **max** | 32.8 | 30.5 | **2.23e7 (blew up)** ✗ |
+| Σ_var max | 8.86 | 8.72 | **2.19e7** |
+| max off-diag corr | 0.801 | 0.798 | **0.177** |
+| Σ_eig cond | 3.28e7 | 3.05e7 | 2.23e7 (now a MAX problem) |
+| ELBO | −1.5897e6 | −1.5907e6 | **−2.252e6** (much worse) |
+| dementia sub-phenotypes | Alz(41)+vasc(49) ✓ | ✓ | **✓ still** |
+
+Two things happened. (1) **The min-eigenvalue near-singularity is gone**: min eig
+1e-6 → 1.0 (off the floor) and max off-diagonal correlation 0.80 → 0.177. That
+0.80 was almost entirely the near-singular inflation, exactly as the root-cause
+analysis claimed — the genuine correlations in this gated cohort are small (≤ 0.18).
+Finding 4 is **confirmed**: diag-shrink owns the min-eigenvalue / correlation end,
+and the IW prior could never reach it. (2) **A single topic's η-variance ran away to
+2.2e7** (Σ_var max = 2.19e7 ≈ Σ_eig max), so the condition number stayed ~2e7 — but
+now driven entirely by the MAX eigenvalue, the opposite end. ELBO degraded badly
+(the Gaussian η-KL logdet/trace terms blow up with a 2.2e7 variance direction),
+while — per insight 0030's decoupling — topic quality and the dementia
+sub-phenotypes held (topic 41 Alzheimer's, topic 49 vascular, block NPMI
+0.187/0.190/0.154, all 50 resolved).
+
+**Why diag-shrink triggers a variance runaway it cannot itself cause.** Diag-shrink
+does NOT touch the diagonal — `(1−w)·diag + w·diag = diag`
+([stm.py:739](../../spark-vi/spark_vi/models/topic/stm.py#L739)); it only scales
+off-diagonals by (1−w). The blowup is therefore a DYNAMICAL feedback over
+iterations, not a direct effect: shrinking the off-diagonals changes the gated
+E-step's marginal precisions inv(Σ_AA), which changes η̂ and ν_d, which changes the
+residuals accumulated back into the diagonal next M-step. The off-diagonal
+correlation structure was **load-bearing for variance stability** — it regularized a
+weakly-identified topic's variance by tying it (through correlation) to
+well-estimated topics. Decorrelating freed that topic to run away, which is exactly
+insight [0029](0029-stm-sigma-init-collapse-blowup-missing-stabilizers.md)'s
+runaway-Σ mechanism, re-triggered. (exps 0021/0022, off-diagonals intact, had max
+Σ_var ≈ 9 — no runaway.)
+
+**The cure is the IW variance-anchor, applied every M-step.** This is precisely the
+diagonal-Σ runaway that insight
+[0031](0031-scalable-spectral-topic-quality-matches-dense-but-sigma-splits-one-runaway.md)
+tamed with `sigma_prior_count=2000`: the per-entry MAP
+Σ_ii = (S_ii + ν·scale)/(N_ii + ν) is a per-iteration contraction toward `scale`
+that prevents the variance from ever building up. So the two regularizers are not
+"one right, one wrong" — **each owns one end of the spectrum**: diag-shrink (Roberts
+`sigma.prior`, N-independent) fixes the MIN-eigenvalue / correlation near-singularity;
+the IW prior (`sigma_prior_count`, the variance anchor) caps the MAX-eigenvalue /
+variance runaway. Conditioning is the RATIO, so a well-conditioned gated Σ needs
+BOTH. exp [0024](../experiments/0024-stm-comorbid-fullcov-gated-both-levers.md)
+tests the combination (`sigma_diag_shrink=0.1` + `sigma_prior_scale=2`,
+`sigma_prior_count=2000`).
 
 ## Implications
 
@@ -166,15 +220,16 @@ magnitude (N-weighted), diag-shrink for correlation / conditioning (N-independen
 2. **Gated full-Σ recovers rare sub-phenotypes** (Alzheimer's vs vascular
    dementia in a 19% arm) — the gated approach's reason for existing, now shown
    under the genuine correlated model.
-3. **The SPD-assembly risk is real, anticipated, and handled — but the
-   conditioning lever is `sigma_diag_shrink`, not the IW prior.** exp 0022
-   falsified the IW prior as the fix (Finding 4): the singularity lives in the
-   well-supported background↔foreground entries, where the N-weighted prior is
-   negligible. The N-independent diagonal-shrink (`sigma_diag_shrink`) is the
-   correct conditioning lever; the IW prior (`sigma_prior_count`) remains the
-   thin-cell / variance regularizer. exp 0023 tests turning `sigma_diag_shrink`
-   ON; plan to make it the default for gated full-Σ runs once 0023 confirms the
-   conditioning fix with sub-phenotypes preserved.
+3. **Gated-Σ conditioning has TWO heads and needs BOTH levers, one per spectral
+   end.** The min-eigenvalue near-singularity (off-diagonal SPD-assembly
+   inconsistency) is fixed by `sigma_diag_shrink` (Finding 4: IW can't reach it,
+   Finding 5: diag-shrink does — min eig 1e-6 → 1.0). The max-eigenvalue variance
+   runaway (a weakly-identified topic freed by decorrelation — insight 0029's
+   mechanism) is capped by the IW prior `sigma_prior_count` (insight 0031's
+   established cure, count=2000). Neither lever alone conditions the gated Σ;
+   diag-shrink alone trades the min-end problem for a max-end one (exp 0023). exp
+   0024 tests the combination; plan the gated full-Σ default around BOTH knobs
+   once 0024 lands a well-conditioned Σ with sub-phenotypes preserved.
 4. **The new diagnostics earn their keep** — `Σ_eig[cond]` and
    `max_abs_offdiag_corr` made an otherwise-silent near-singular assembly
    immediately visible; without them the ill-conditioning would have surfaced

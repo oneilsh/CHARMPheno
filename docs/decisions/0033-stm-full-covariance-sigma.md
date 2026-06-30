@@ -94,20 +94,24 @@ Both apply after the M-step scatter:
   Σ ← (1−w)·Σ + w·diag(diag(Σ)). Shrinks off-diagonal correlations toward zero; now
   meaningful because there are off-diagonals to shrink. Default w=0 is the identity.
 
-These two regularizers have **distinct, non-interchangeable roles**, established
-empirically by exps 0022/0023 (insight
+These two regularizers have **distinct, non-interchangeable roles — one per
+spectral end** — established empirically by exps 0022/0023/0024 (insight
 [0032](../insights/0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md),
-Finding 4). The IW prior's off-diagonal action is N-WEIGHTED (Ψ is diagonal, so
-Σ_ij = S_ij/(N_ij + ν) for i≠j); it is therefore a VARIANCE / thin-cell-magnitude
-regularizer, negligible on well-supported entries no matter how large ν is made
-short of flattening everything. The diagonal-shrink is N-INDEPENDENT (a fractional
-(1−w) pull on every off-diagonal regardless of support); it is therefore the
-CORRELATION / CONDITIONING lever, and it is the operative fix when the SPD-assembly
-near-singularity lives in well-supported background↔foreground couplings (the
-common gated case — exp 0022 showed ν=100 left the condition number at 3e7;
-`sigma_diag_shrink` is exp 0023's prescribed fix). The nearest-SPD floor (Decision
-5) guarantees positive-definiteness but not good conditioning; `sigma_diag_shrink`
-is what restores conditioning.
+Findings 4-5). The diagonal-shrink is N-INDEPENDENT (a fractional (1−w) pull on
+every off-diagonal regardless of support); it owns the MIN-eigenvalue / correlation
+end — the SPD-assembly near-singularity that lives in well-supported
+background↔foreground couplings, which the N-weighted IW prior cannot reach (exp
+0022: ν=100 left cond at 3e7; exp 0023: `sigma_diag_shrink` lifted min eig 1e-6 →
+1.0). The IW prior's off-diagonal action is N-WEIGHTED (Ψ is diagonal, so
+Σ_ij = S_ij/(N_ij + ν) for i≠j), so it is a VARIANCE regularizer: its diagonal MAP
+Σ_ii = (S_ii + ν·scale)/(N_ii + ν) is a per-iteration contraction toward `scale`
+that owns the MAX-eigenvalue / variance end — capping the runaway a weakly-identified
+topic exhibits once decorrelation removes the off-diagonal coupling that had been
+stabilizing it (exp 0023: diag-shrink alone let one topic's variance run to 2.2e7;
+this is insight 0029's runaway, cured by insight 0031's `sigma_prior_count=2000`).
+The nearest-SPD floor (Decision 5) guarantees positive-definiteness but conditions
+neither end. A well-conditioned GATED Σ therefore needs BOTH levers; the non-gated
+case (exp 0020, every topic fully supported, cond 13.3) needs neither.
 
 Pipeline order: scatter + min_pair_support floor → IW blend → diagonal-shrink →
 ridge + SPD-repair. Both knobs at defaults reduce to the Component 1 MLE.
