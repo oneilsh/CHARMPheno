@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-30
 **Topic:** stm | full-covariance | gating | rare-phenotype | conditioning | diagnostics | phenotyping
-**Status:** Sub-phenotype recovery CONFIRMED (exp 0020/0021); gated-Σ conditioning UNRESOLVED. exp 0022 — IW alone can't fix the min-eigenvalue near-singularity (Finding 4); exp 0023 — diag-shrink fixes the min end but triggers a max-eigenvalue variance runaway (Finding 5); exp 0024 — both levers FAIL, runaway worsens to 6e8 (Finding 6); the nearest-SPD eigenvalue floor (raised from 1e-6) is the proposed surgical min-end lever, tested next in exp 0025.
+**Status:** Sub-phenotype recovery CONFIRMED (exp 0020/0021); gated-Σ conditioning RESOLVED-PENDING-0025. exp 0022 — IW alone can't fix the min-eigenvalue near-singularity (Finding 4); exp 0023 — diag-shrink fixes the min end but triggers a max-eigenvalue variance runaway (Finding 5); exp 0024 — both levers FAIL, runaway worsens to 6e8 (Finding 6). The four-lever failure is resolved by construction (see Resolution): the SPD assembly is reframed as covariance selection — zero the precision, not the covariance, on unobserved cross-pairs (the maximum-determinant PD completion), removing both post-M-step regularizers. Empirical confirmation pending exp 0025.
 
 The full-covariance Σ arc (ADR 0033) replaced STM's diagonal mean-field
 covariance with a genuine (K−1)×(K−1) matrix to model topic correlations. Two
@@ -254,6 +254,59 @@ runaway. This is the prescribed next test (exp 0025); it needs a small change to
 expose the floor as a tunable knob. **Status: gated-Σ conditioning UNRESOLVED;
 eigenvalue-floor approach proposed, not yet confirmed.**
 
+## Resolution — reframe the assembly as covariance selection (zero precision, not covariance)
+
+Findings 4-6 establish that NO post-M-step knob conditions the gated Σ: the
+off-diagonal correlations are simultaneously the source of the min-eigenvalue
+near-singularity and the stabilizer of the variances, so the IW prior (N-weighted,
+reaches neither well-supported end) and `sigma_diag_shrink` (fixes the min end only
+by decorrelating, which unleashes the max-end runaway) both fail. The defect is
+upstream — in what the assembly pins the unobserved cross-pairs to.
+
+The resolution is a change of model, not another lever. The zero-pin sets an
+unobserved COVARIANCE to zero — the strong, usually false claim "these two topics are
+marginally uncorrelated" — which is transitively inconsistent with the strong
+background↔cancer and background↔dementia couplings (Finding 3's mechanism) and so
+forces a near-singular assembled Σ. Instead, zero the PRECISION: Σ⁻¹_ij = 0 encodes
+conditional independence of topics i and j given all others — the minimum-assumption
+(maximum-entropy) statement for a pair with no joint data — and, unlike a zeroed
+covariance, it is consistent with arbitrary marginal correlations through shared
+neighbours (the background block). The covariance matrix that fixes the observed
+entries and zeroes the precision on the unobserved ones is the
+**maximum-determinant positive-definite completion** (Dempster 1972, covariance
+selection; Grone, Johnson, Sá & Wolkowicz 1984, existence/uniqueness), unique
+whenever the observed entries admit any PD completion and well-conditioned BY
+CONSTRUCTION — there is no conditioning knob to tune. This reframes the assembly as
+fitting a Gaussian graphical model whose edges are the well-supported topic pairs
+(Lauritzen 1996); the non-gated exp 0020 is the fully-connected special case where
+the completion is a no-op (which is exactly why it was already clean at cond 13.3).
+
+It is implemented as
+[`pd_complete`](../../spark-vi/spark_vi/models/topic/_linalg.py#L32-L105) — convergent
+coordinate-wise iterative proportional scaling (Speed & Kiiveri 1986) that drives the
+free precision entries to zero while preserving the observed covariances exactly, with
+a Higham 2002 `nearest_spd` PSD projection as the fallback when the observed part
+admits no PD completion (the thin rare-disease block regime). On a decomposable
+pattern it reaches the Grone et al. 1984 / Lauritzen 1996 closed form in one sweep.
+The M-step
+([stm.py:709-727](../../spark-vi/spark_vi/models/topic/stm.py#L709-L727)) now forms the
+observed entries as S/N over the N≥`min_pair_support` mask (diagonal forced observed;
+an absent topic's variance lazy-kept at its current Σ[k,k]) and calls `pd_complete`.
+Both post-M-step regularizers — the inverse-Wishart prior (`sigma_prior_scale`,
+`sigma_prior_count`) and `sigma_diag_shrink` — are removed entirely (parameters,
+plumbing, tests), since neither helps full-Σ conditioning and this is pre-release
+research code. The full method is specified in the
+[gated-Σ PD-completion design](../superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md).
+
+exp [0025](../experiments/0025-stm-comorbid-fullcov-gated-pdcompletion.md) tests the
+completion on this same gated comorbid cohort (= exp 0021 config, completion ON, both
+regularizers OFF). Predicted: cond O(1e1-1e3), min eigenvalue off the 1e-6 floor AND
+max eigenvalue O(1-10) (both ends controlled, no variance runaway), ELBO back near
+−1.59e6, dementia sub-phenotypes (Alzheimer's/amnestic + vascular) preserved, and a
+trustworthy cancer↔dementia R sub-block at its CI-implied values. The Findings above
+remain the empirical record of the failed-lever arc; this Resolution is the
+by-construction fix, with confirmation pending exp 0025.
+
 ## Implications
 
 1. **Full-Σ is validated as STM's covariance model** — well-conditioned on the
@@ -263,19 +316,19 @@ eigenvalue-floor approach proposed, not yet confirmed.**
 2. **Gated full-Σ recovers rare sub-phenotypes** (Alzheimer's vs vascular
    dementia in a 19% arm) — the gated approach's reason for existing, now shown
    under the genuine correlated model.
-3. **Gated-Σ conditioning is UNRESOLVED after 4 experiments; the post-M-step
-   regularizers (`sigma_diag_shrink`, `sigma_prior_count`) are both the wrong
-   tool.** The off-diagonal correlations are both the source of the min-eigenvalue
-   near-singularity and the stabilizer of the variances (Findings 5-6), so
-   decorrelating (diag-shrink) fixes the min end but triggers a max-end runaway, and
-   the N-weighted IW prior reaches neither well-supported end. The proposed fix is
-   the nearest-SPD eigenvalue floor (ADR 0033 Decision 5 layer ii), currently a
-   cosmetic 1e-6: raising it lifts the min eigenvalue surgically without
-   decorrelating, so it cannot trigger the runaway (exp 0025, pending a knob to
-   expose the floor). NOTE: the non-gated full-Σ (exp 0020) is well-conditioned
-   (cond 13.3) — this is specifically a gated-thin-comorbid pathology, so an
-   alternative is to source the correlation matrix from the non-gated model and use
-   gating only for sub-phenotype recovery.
+3. **Gated-Σ conditioning is RESOLVED BY CONSTRUCTION (pending exp 0025); the
+   post-M-step regularizers (`sigma_diag_shrink`, `sigma_prior_count`) were both the
+   wrong tool and are removed.** The off-diagonal correlations are both the source of
+   the min-eigenvalue near-singularity and the stabilizer of the variances (Findings
+   5-6), so decorrelating (diag-shrink) fixes the min end but triggers a max-end
+   runaway, and the N-weighted IW prior reaches neither well-supported end — no
+   post-hoc knob conditions the matrix. The resolution (see Resolution) is not a knob
+   but a change of model: zero the PRECISION not the COVARIANCE on unobserved
+   cross-pairs — the maximum-determinant PD completion (`pd_complete`) — which is
+   well-conditioned by construction and preserves the stabilizing off-diagonal
+   coupling exactly. NOTE: the non-gated full-Σ (exp 0020) is well-conditioned (cond
+   13.3) precisely because it is the completion's fully-connected no-op special case;
+   the same completion now applies to the gated path.
 4. **The new diagnostics earn their keep** — `Σ_eig[cond]` and
    `max_abs_offdiag_corr` made an otherwise-silent near-singular assembly
    immediately visible; without them the ill-conditioning would have surfaced

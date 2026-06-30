@@ -61,6 +61,20 @@ matrix N_ij for every active pair. A cross-group entry gains support only from
 documents that co-activate both indices.
 
 **5. SPD-assembly risk and the three-layer mitigation.**
+**SUPERSEDED for the gated cross-group case** by the
+[gated-Σ PD-completion design](../superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md)
+(2026-06-30). The three-layer zero-pin + nearest-SPD-flooring approach below was
+shown not to condition the assembled gated Σ — the four lever-tuning experiments
+0022-0024 all failed (insight
+[0032](../insights/0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md),
+Findings 4-6). The assembly is now reframed as covariance selection: zero the
+PRECISION (Σ⁻¹), not the covariance, on unobserved cross-pairs — the
+maximum-determinant PD completion (`pd_complete`,
+[_linalg.py:32-105](../../spark-vi/spark_vi/models/topic/_linalg.py#L32-L105)),
+well-conditioned by construction with no conditioning knob. `nearest_spd` remains as
+the per-doc Laplace-Hessian repair and as the completion's internal PSD fallback. The
+description below is retained as the historical decision.
+
 In the gated case, Σ entries are estimated from different document subsets and some
 cross-group cells are pinned to the prior, so the assembled matrix need not be
 positive definite — this is guaranteed to arise, not hypothetical. Background topics
@@ -82,7 +96,16 @@ of the nearest-SPD eigenvalue floor, which is the minimum perturbation that rest
 positive definiteness rather than inflating the diagonal uniformly.
 
 **6. Two opt-in regularizers (both default off).**
-Both apply after the M-step scatter:
+**REMOVED** (2026-06-30) by the
+[gated-Σ PD-completion design](../superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md):
+the inverse-Wishart prior (`sigma_prior_scale`, `sigma_prior_count`) and
+`sigma_diag_shrink` are deleted entirely — parameters, plumbing, flags, and tests.
+Neither conditions the gated full-Σ (the IW prior is N-weighted and reaches neither
+well-supported end; `sigma_diag_shrink` fixes the min eigenvalue only by
+decorrelating, which triggers a max-eigenvalue variance runaway — insight
+[0032](../insights/0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md),
+Findings 4-6). The PD completion makes both unnecessary. The description below is
+retained as the historical decision. (Both apply after the M-step scatter:
 
 - *Inverse-Wishart prior* (Blei & Lafferty 2007): scale matrix Ψ = `sigma_prior_scale`·I,
   pseudo-count ν = `sigma_prior_count`. The MAP M-step becomes
@@ -114,9 +137,19 @@ neither end. A well-conditioned GATED Σ therefore needs BOTH levers; the non-ga
 case (exp 0020, every topic fully supported, cond 13.3) needs neither.
 
 Pipeline order: scatter + min_pair_support floor → IW blend → diagonal-shrink →
-ridge + SPD-repair. Both knobs at defaults reduce to the Component 1 MLE.
+ridge + SPD-repair. Both knobs at defaults reduce to the Component 1 MLE.)
 
 **7. min_pair_support floor (robustness and small-cell privacy).**
+**Zero-pin SUPERSEDED for the gated cross-group case** (2026-06-30): the
+`min_pair_support` threshold survives unchanged, but it no longer ZEROS the scatter
+of a thin cross-pair. Under the
+[gated-Σ PD-completion design](../superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md)
+the threshold selects observed-vs-free for the completion — a cross-pair with
+N ≥ `min_pair_support` is observed (entry = S/N, fixed); a thinner one is FREE and
+filled by `pd_complete` with its zero-precision (conditional-independence-implied)
+value, not pinned to zero covariance. The robustness/small-cell rationale below is
+unchanged; only the below-floor action changes from zero-pin to free-for-completion.
+
 A covariance entry backed by fewer than `min_pair_support` co-activating documents is
 statistically unreliable and a small-cell disclosure risk. Below the floor the scatter
 contribution is zeroed (S_ij → 0) and the entry falls back to the IW prior or
@@ -187,6 +220,22 @@ correctly now; N-based provenance tracking is future work.
   structural topic models. *Journal of Statistical Software*, 91(2).
   `sigma.prior` ∈ `[0, 1]` diagonal-shrink regularizer; source
   https://github.com/bstewart/stm
+- Dempster, A. P. (1972). "Covariance Selection." *Biometrics*, 28(1), 157-175. —
+  zeroing precision entries = conditional independence; the maximum-entropy
+  completion. Basis for the gated-Σ PD-completion redesign of decisions 5/7.
+- Grone, R., Johnson, C. R., Sá, E. M., & Wolkowicz, H. (1984). "Positive definite
+  completions of partial Hermitian matrices." *Linear Algebra and its Applications*,
+  58, 109-124. — existence/uniqueness of the maximum-determinant PD completion;
+  closed form for chordal patterns.
+- Speed, T. P., & Kiiveri, H. T. (1986). "Gaussian Markov distributions over finite
+  graphs." *Annals of Statistics*, 14(1), 138-150. — iterative proportional scaling
+  for covariance selection (the `pd_complete` primary path).
+- Higham, N. J. (2002). "Computing the nearest correlation matrix — a problem from
+  finance." *IMA Journal of Numerical Analysis*, 22(3), 329-343. — alternating
+  projections onto the PSD cone; the `pd_complete` fallback for non-PD observed input.
+- [gated-Σ PD-completion design](../superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md)
+  — supersedes decisions 5/7's gated cross-group handling (zero-pin → max-det PD
+  completion) and removes decision 6's two regularizers.
 - [ADR 0027](0027-lazy-block-updates-for-gated-svi-mstep.md) — per-block lazy update,
   generalized here to per-pair for cross-group covariance.
 - [ADR 0028](0028-dashboard-conditioned-dirichlet-prior.md) — parked alternative B
