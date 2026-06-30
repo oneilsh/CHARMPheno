@@ -107,28 +107,42 @@ export, [gating.py](../../../charmpheno/charmpheno/export/gating.py); fit-time o
 warns at <100 docs), so a thin group's within-block estimate, or a clique with
 heterogeneous within-clique support, can fail to be PD.
 
-Two literature-grounded families, to be pinned by the implementer with a focused
-source check + TDD against the contract below:
+The method is a **two-stage covariance selection**, both stages literature-grounded
+and knob-free (up to a numerical convergence tolerance, which is a tolerance, not a
+modeling parameter):
 
-1. **Maximum-determinant completion via covariance selection / iterative
-   proportional scaling** (Dempster 1972; Speed & Kiiveri 1986). Coordinate ascent
+1. **Primary — maximum-determinant completion via iterative proportional scaling**
+   (Dempster 1972 covariance selection; Speed & Kiiveri 1986 IPS). Coordinate ascent
    that drives the free precision entries to zero while matching the observed
    covariance entries; converges to the unique max-det completion when the observed
-   part is PD-completable. The principled primary path (gives the exact
-   zero-precision, conditional-independence interpretation for the dashboard).
+   part is PD-completable. It **preserves the well-supported entries exactly** and
+   fills only the unmeasured cross-pairs with their conditional-independence-implied
+   values (the clean dashboard interpretation: "correlated only through shared
+   neighbours"). IPS **subsumes the chordal closed-form** — on a decomposable
+   observed pattern it converges in a single sweep to the Grone et al. 1984 /
+   Lauritzen 1996 closed form — so no separate chordal path is needed; the closed
+   form is used only as a unit-test oracle.
 
-2. **Alternating projection onto the PSD cone and the affine "match-observed" set**
-   (Higham 2002; Dykstra's algorithm). Robust by construction: matches the observed
-   entries when a PD completion exists, and converges to the minimum-Frobenius PSD
-   compromise (perturbing the inconsistent observed entries minimally) when it does
-   not. The fallback for the non-PD-observed / rare-disease degenerate case.
+2. **Fallback — alternating projection onto the PSD cone and the affine
+   "match-observed" set** (Higham 2002; Dykstra's algorithm). Triggered only when the
+   observed sub-part is not PD-completable (detected by IPS non-convergence or a
+   non-positive pivot). Robust by construction: converges to the minimum-Frobenius
+   PSD compromise, perturbing the inconsistent observed entries minimally.
 
-Recommended structure: attempt the max-det completion (1); if the observed sub-part
-is not PD-completable (detected by solver non-convergence or a non-positive pivot),
-fall back to the nearest-PSD projection (2). Both are knob-free up to a numerical
-convergence tolerance (a tolerance, not a modeling parameter). The final choice
-between a unified alternating-projection solver and the two-stage approach is a spec
-decision deferred to implementation, gated on the contract tests.
+This structure was chosen over a single pure alternating-projection solver because
+the primary path keeps the trustworthy measured entries exact and infers only the
+unmeasured ones — the right asymmetry for this problem — while the fallback supplies
+robustness only where it is actually needed.
+
+**Motivating regime (informs both stages).** The intended use includes several group
+labels for sub-types of one disease (e.g. distinct dementia sub-phenotypes), mutually
+correlated through comorbid patients and individually or collectively rare. That
+makes the inter-group graph **dense and potentially non-chordal** (correlated sub-type
+cliques with cross-edges — the case IPS must iterate on, where the chordal closed-form
+does not apply) and makes **non-PD observed blocks likely** (thin sub-types — where the
+Higham fallback earns its place). The per-entry `observed_mask` handles the full mix:
+a cross-group pair with real comorbid support (N ≥ min_pair_support) is observed and
+fixed; a thin one is free and completed.
 
 ### Contract (the completion function)
 
@@ -157,15 +171,25 @@ pd_complete(target: (K,K), observed_mask: (K,K) bool, *, tol, max_iter) -> (K,K)
 
 In `update_global`, replace the `min_pair_support` zero-pin block and the trailing
 `nearest_spd` call with: build the observed mask from `N` and `min_pair_support`,
-form the observed entries as `S/N` (with the existing IW-MAP blend retained for the
-*observed* entries only — the IW prior remains available as a per-entry variance
-regularizer on supported cells, orthogonal to the completion), ρ-blend against the
-prior Σ, then `pd_complete`. `sigma_diag_shrink` is **removed from the gated
-conditioning path** (it is the wrong lever — insight 0032 Finding 5/6); it may
-remain as a parameter for the non-gated case or be deprecated (decided in the plan).
+form the observed entries as `S/N`, ρ-blend against the prior Σ, then `pd_complete`.
+
+**Both post-M-step regularizers are removed entirely** (not deprecated — this is
+pre-release research code, so the parameters, plumbing, flags, and tests go):
+
+- The **inverse-Wishart prior** (`sigma_prior_scale`, `sigma_prior_count`) — it has
+  no demonstrated benefit in the full-Σ regime. It was the diagonal-Σ stabilizer
+  (insight 0031), but diagonal Σ is superseded (ADR 0033 decision 2); exp 0022
+  showed it does not help gated conditioning; non-gated (exp 0020) is well-conditioned
+  without it. If observed-entry variance regularization is ever needed for a very thin
+  rare-disease group, the principled, data-driven choice is a shrinkage estimator
+  (e.g. Ledoit-Wolf), added then on evidence — not the N-weighted IW prior carried
+  speculatively now.
+- **`sigma_diag_shrink`** — the wrong lever (insight 0032 Findings 5-6): it conditions
+  the min eigenvalue only by decorrelating, which triggers the variance runaway.
+
 `nearest_spd` stays in the library as the per-document Laplace-Hessian repair
 ([_spd_inverse](../../../spark-vi/spark_vi/models/topic/stm.py#L203-L228)) and as the
-completion's internal PSD projection.
+completion's internal PSD projection — it is not removed.
 
 ## Validation
 
@@ -192,8 +216,12 @@ completion's internal PSD projection.
 ## Scope
 
 **In:** the `pd_complete` function; the `update_global` integration; removal of the
-gated zero-pin and gated `sigma_diag_shrink` conditioning role; unit + integration
-tests; exp 0025; an insight + ADR 0033 amendment recording the resolution.
+zero-pin; **complete removal of the inverse-Wishart prior (`sigma_prior_scale`,
+`sigma_prior_count`) and `sigma_diag_shrink`** — parameters, shim/driver/run_experiment
+plumbing, flags, and their tests (completed experiment docs 0018/0022/0023/0024 keep
+their frontmatter as historical records; the now-unknown keys are simply not emitted);
+unit + integration tests; exp 0025; an insight + ADR 0033 amendment recording the
+resolution.
 
 **Out (unchanged / deferred):** the distributed scatter/support accumulation;
 dashboard surfacing of R and the measured-vs-imputed annotation (deferred to the
@@ -202,13 +230,18 @@ well-conditioned, completion is a no-op there); the per-document Laplace inferen
 
 ## Decisions baked in
 
-- General iterative completion, not the decomposable closed-form (multi-group
-  requirement; closed-form is a test oracle only).
+- **Algorithm: two-stage** — max-det IPS / covariance selection primary (subsumes the
+  chordal closed-form; closed-form is a test oracle only), Higham alternating-projection
+  fallback for non-PD-completable observed parts. Chosen over a single pure
+  alternating-projection solver to preserve measured entries exactly.
 - Full replacement of the zero-pin (no fallback to it; git is the rollback).
 - Below-`min_pair_support` = free (binary), not a support-weighted blend.
 - Driver-side K×K; corpus-sized work stays distributed.
 - Robust to non-PD observed blocks (rare-disease regime) via the alternating-projection
   fallback — no `SIGMA_FLOOR`-style conditioning knob.
+- **Inverse-Wishart prior and `sigma_diag_shrink` removed entirely** (parameters,
+  plumbing, flags, tests) — neither helps full-Σ conditioning (insight 0032); pre-release
+  research code, so removed not deprecated.
 
 ## References
 
