@@ -148,7 +148,7 @@ def test_stmmodel_roundtrips_topic_block_spec(tmp_path):
     part = TopicBlockPartition("source_cohort", background_k=2, foreground=(("cancer", 1),))
     model = STMModel(
         global_params={"lambda": np.ones((3, 4)), "eta": np.array(0.3),
-                       "Gamma": np.zeros((2, 3)), "Sigma": np.ones(3)},
+                       "Gamma": np.zeros((2, 3)), "Sigma": np.eye(3)},  # (K,K) full-cov
         metadata={"topic_block_spec": part.to_dict()},
         model_spec=None, covariate_names=["Intercept", "age"],
         topic_blocks=part)
