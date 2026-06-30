@@ -1385,14 +1385,15 @@ def test_build_stm_args_threads_hardening_flags(monkeypatch):
         "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
         "continuous_cols": ["age"],
         "reference_topic": True,
-        "sigma_prior_scale": 2.0, "sigma_prior_count": 500.0,
         "spectral_init": True,
     }
     args = run_experiment.build_stm_args(effective, out_dir="/tmp/out")
     assert "--reference-topic" in args
     assert "--spectral-init" in args
-    i = args.index("--sigma-prior-scale"); assert args[i + 1] == "2.0"
-    j = args.index("--sigma-prior-count"); assert args[j + 1] == "500.0"
+    # IW-prior flags (sigma_prior_scale, sigma_prior_count) were removed from the
+    # driver in the PD-completion arc — they must never appear in the arg list.
+    assert "--sigma-prior-scale" not in args
+    assert "--sigma-prior-count" not in args
 
 
 def test_build_stm_args_hardening_flags_default_on(monkeypatch):
@@ -1434,7 +1435,9 @@ def test_build_stm_args_hardening_flags_disabled(monkeypatch):
 
 
 def test_build_stm_args_emits_full_sigma_knobs(monkeypatch):
-    """sigma_diag_shrink + min_pair_support are emitted when set in effective."""
+    """min_pair_support is emitted when set in effective.
+    sigma_diag_shrink was removed from the driver in the PD-completion arc —
+    it must be silently ignored even when present in historical frontmatter."""
     import run_experiment
     monkeypatch.setattr(run_experiment, "_require_workspace_env",
                         lambda: ("proj.ds", "billing"))
@@ -1445,10 +1448,10 @@ def test_build_stm_args_emits_full_sigma_knobs(monkeypatch):
         "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 4,
         "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
         "continuous_cols": ["age"],
-        "sigma_diag_shrink": 0.25, "min_pair_support": 30,
+        "min_pair_support": 30,
     }
     args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
-    assert "--sigma-diag-shrink" in args and "0.25" in args
+    assert "--sigma-diag-shrink" not in args
     assert "--min-pair-support" in args and "30" in args
 
 
@@ -1468,3 +1471,30 @@ def test_build_stm_args_omits_full_sigma_knobs_when_absent(monkeypatch):
     args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
     assert "--sigma-diag-shrink" not in args
     assert "--min-pair-support" not in args
+
+
+def test_build_stm_args_ignores_historical_iw_prior_and_diag_shrink_keys(monkeypatch):
+    """Regression: historical frontmatter keys sigma_prior_scale, sigma_prior_count,
+    sigma_diag_shrink must NOT produce any CLI flags — these args were removed from
+    the STM driver in the PD-completion arc (Task 2). An experiment doc that still
+    carries them (e.g. exp 0022/0023/0024) must run without error and without
+    emitting the now-nonexistent flags."""
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    eff = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 2, "vocab_size": 100,
+        "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+        # Historical IW-prior + diag-shrink keys from pre-PD-completion experiments:
+        "sigma_prior_scale": 2.0,
+        "sigma_prior_count": 500.0,
+        "sigma_diag_shrink": 0.25,
+    }
+    args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
+    assert "--sigma-prior-scale" not in args
+    assert "--sigma-prior-count" not in args
+    assert "--sigma-diag-shrink" not in args
