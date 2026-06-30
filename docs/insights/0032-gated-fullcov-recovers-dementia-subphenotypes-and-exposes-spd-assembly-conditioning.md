@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-30
 **Topic:** stm | full-covariance | gating | rare-phenotype | conditioning | diagnostics | phenotyping
-**Status:** Confirmed (cancer_or_dementia cohort, exp 0020 non-gated vs exp 0021 gated)
+**Status:** Confirmed (cancer_or_dementia cohort, exp 0020 non-gated vs exp 0021 gated; exp 0022 falsifies the IW prior as the conditioning lever — Finding 4; exp 0023 tests `sigma_diag_shrink`)
 
 The full-covariance Σ arc (ADR 0033) replaced STM's diagonal mean-field
 covariance with a genuine (K−1)×(K−1) matrix to model topic correlations. Two
@@ -104,22 +104,58 @@ the inflated max_offdiag 0.80), and a near-singular Σ would also impair the
 ADR-0028-B logistic-normal sampler — but the topics and the block structure are
 sound.
 
-## Implication — the inverse-Wishart prior is the prescribed, targeted fix
+## Finding 4 — the inverse-Wishart prior is the WRONG conditioning lever; the singularity lives in the well-supported entries (exp 0022)
 
-ADR 0033 built the inverse-Wishart prior for exactly this regime. Its MAP M-step
-is PER-ENTRY — Σ_ij = (S_ij + ν·scale·δ_ij)/(N_ij + ν) — so a moderate
-pseudo-count ν regularizes each entry weighted against that entry's real support.
-With background entries at N_ij ≈ thousands and thin cross-foreground cells at
-N_ij ≈ 0, ν = 100 is negligible on the well-supported blocks (100 ≪ 13,295) but
-dominant on the thin cross-cells (100 ≫ a handful of comorbid patients) — it
-regularizes precisely where the inconsistency lives without flattening the real
-correlations the topics depend on. exp
-[0022](../experiments/0022-stm-comorbid-fullcov-gated-iwprior.md) tests this
-(`sigma_prior_scale=2.0`, `sigma_prior_count=100`); the expected result is the
-condition number dropping orders of magnitude with the dementia sub-phenotypes
-preserved. There is a conditioning-vs-correlation tradeoff (too-large ν shrinks Σ
-toward diagonal, back toward a washed minority arm), so the right ν is a sweet
-spot to find.
+The original prescription was the inverse-Wishart prior: ADR 0033 built it for the
+thin-cross-cell regime, and its MAP M-step is PER-ENTRY —
+Σ_ij = (S_ij + Ψ_ij)/(N_ij + ν), Ψ = ν·scale·I — so a pseudo-count ν was expected
+to regularize each entry weighted against that entry's real support. exp
+[0022](../experiments/0022-stm-comorbid-fullcov-gated-iwprior.md)
+(`sigma_prior_scale=2.0`, `sigma_prior_count=100`) tested it and **falsified it as
+the conditioning fix.** Head-to-head with exp 0021:
+
+| metric | exp 0021 (no prior) | exp 0022 (IW ν=100) |
+|---|---|---|
+| Σ_eig cond | 3.28e7 | **3.05e7** (unchanged) |
+| Σ_eig min | 1e-06 (floored) | **1e-06 (still floored)** |
+| max off-diag corr | 0.801 | **0.798** (unchanged) |
+| ELBO | −1.5897e6 | −1.5907e6 (a hair worse) |
+| dementia sub-phenotypes | Alz(41)+vasc(49) ✓ | preserved ✓ |
+
+The prior did exactly what it was coded to do — the first diagonal entry moved
+1.0 → 1.979, pulled toward `scale=2` — it simply doesn't touch the singular
+direction. The reason is in the parameterization: **Ψ is diagonal**, so Ψ_ij = 0
+for off-diagonals and Σ_ij = S_ij/(N_ij + ν). The prior acts on correlations ONLY
+through the denominator, a fractional shrink of N_ij/(N_ij + ν). But the
+near-singular direction is built from WELL-SUPPORTED entries — background↔cancer
+(N ≈ 10,800) and background↔dementia (N ≈ 2,500), strongly coupled while
+cancer↔dementia is structurally zeroed. Against N ≈ 10,800 a pseudo-count ν = 100
+is a <1% shrink. To bite there ν would have to be thousands, flattening every real
+correlation. The earlier reasoning ("ν = 100 ≪ 13,295 → negligible on the
+well-supported blocks") was correct about the magnitude but drew the wrong
+conclusion: being negligible on the well-supported blocks is exactly the FAILURE,
+because the singularity is IN those blocks, not in the thin cross-cells.
+
+The deeper point: **a diagonal-Ψ inverse-Wishart is a VARIANCE regularizer, not a
+CORRELATION regularizer.** It pulls variances toward `scale`; it can only shrink
+correlations weakly, via the shared denominator. The correct conditioning lever is
+the N-INDEPENDENT fractional shrink (Roberts et al. `sigma.prior`, exposed as
+`sigma_diag_shrink`):
+
+Σ ← (1−w)·Σ + w·diag(diag(Σ))
+
+This pulls EVERY off-diagonal toward zero by factor (1−w) regardless of support, so
+it reaches the well-supported couplings the IW prior cannot. For the near-singular
+direction v (with vᵀΣv ≈ 1e-6 but vᵀdiag(Σ)v ≈ O(1)), the blend gives
+vᵀ[(1−w)Σ + w·diag(Σ)]v ≈ w·O(1) — even a modest w lifts that direction's variance
+off the floor by orders of magnitude, while the diagonal variances carrying the
+foreground topic signal are untouched. exp
+[0023](../experiments/0023-stm-comorbid-fullcov-gated-diagshrink.md)
+(`sigma_diag_shrink=0.2`, IW off) tests this; the expected result is the condition
+number dropping orders of magnitude with the dementia sub-phenotypes preserved and
+the correlation matrix uniformly attenuated by ~(1−w) but interpretable. The two
+regularizers are complementary, not interchangeable: IW for variance / thin-cell
+magnitude (N-weighted), diag-shrink for correlation / conditioning (N-independent).
 
 ## Implications
 
@@ -130,11 +166,15 @@ spot to find.
 2. **Gated full-Σ recovers rare sub-phenotypes** (Alzheimer's vs vascular
    dementia in a 19% arm) — the gated approach's reason for existing, now shown
    under the genuine correlated model.
-3. **The SPD-assembly risk is real but anticipated and handled** — for gated
-   cohorts with thin cross-group comorbidity, the IW prior (`sigma_prior_count`)
-   is the conditioning lever; a mild `sigma_diag_shrink` is a second lever. Plan
-   to turn the IW prior ON by default for gated full-Σ runs once exp 0022 fixes
-   the conditioning.
+3. **The SPD-assembly risk is real, anticipated, and handled — but the
+   conditioning lever is `sigma_diag_shrink`, not the IW prior.** exp 0022
+   falsified the IW prior as the fix (Finding 4): the singularity lives in the
+   well-supported background↔foreground entries, where the N-weighted prior is
+   negligible. The N-independent diagonal-shrink (`sigma_diag_shrink`) is the
+   correct conditioning lever; the IW prior (`sigma_prior_count`) remains the
+   thin-cell / variance regularizer. exp 0023 tests turning `sigma_diag_shrink`
+   ON; plan to make it the default for gated full-Σ runs once 0023 confirms the
+   conditioning fix with sub-phenotypes preserved.
 4. **The new diagnostics earn their keep** — `Σ_eig[cond]` and
    `max_abs_offdiag_corr` made an otherwise-silent near-singular assembly
    immediately visible; without them the ill-conditioning would have surfaced

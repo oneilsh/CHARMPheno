@@ -94,6 +94,21 @@ Both apply after the M-step scatter:
   Σ ← (1−w)·Σ + w·diag(diag(Σ)). Shrinks off-diagonal correlations toward zero; now
   meaningful because there are off-diagonals to shrink. Default w=0 is the identity.
 
+These two regularizers have **distinct, non-interchangeable roles**, established
+empirically by exps 0022/0023 (insight
+[0032](../insights/0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md),
+Finding 4). The IW prior's off-diagonal action is N-WEIGHTED (Ψ is diagonal, so
+Σ_ij = S_ij/(N_ij + ν) for i≠j); it is therefore a VARIANCE / thin-cell-magnitude
+regularizer, negligible on well-supported entries no matter how large ν is made
+short of flattening everything. The diagonal-shrink is N-INDEPENDENT (a fractional
+(1−w) pull on every off-diagonal regardless of support); it is therefore the
+CORRELATION / CONDITIONING lever, and it is the operative fix when the SPD-assembly
+near-singularity lives in well-supported background↔foreground couplings (the
+common gated case — exp 0022 showed ν=100 left the condition number at 3e7;
+`sigma_diag_shrink` is exp 0023's prescribed fix). The nearest-SPD floor (Decision
+5) guarantees positive-definiteness but not good conditioning; `sigma_diag_shrink`
+is what restores conditioning.
+
 Pipeline order: scatter + min_pair_support floor → IW blend → diagonal-shrink →
 ridge + SPD-repair. Both knobs at defaults reduce to the Component 1 MLE.
 
