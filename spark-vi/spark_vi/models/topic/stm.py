@@ -112,22 +112,22 @@ def _stm_neg_log_joint(
     counts: np.ndarray,
     expElogbeta: np.ndarray,
     Gamma: np.ndarray,
-    Sigma_diag: np.ndarray,
+    Sigma_inv: np.ndarray,
     x: np.ndarray,
 ) -> float:
     """Negative log joint at η for a single doc.
 
     f(η) = -Σ_w n_dw · log(p^T expElogβ_·w) + ½(η - Γx)^T Σ⁻¹(η - Γx)
-           where p = softmax(η)
+           where p = softmax(η) and Σ⁻¹ is the full (n×n) precision matrix
     """
     # Data term — Jensen lower bound using expElogβ (matches LDA's phi_norm).
     p = _softmax(eta)
     eb_d = expElogbeta[:, indices]                         # (K, n_unique)
     q_w = eb_d.T @ p + 1e-100                              # (n_unique,)
     data_term = -float(np.sum(counts * np.log(q_w)))
-    # Prior term — Gaussian with diagonal Σ.
+    # Prior term — Gaussian with full precision matrix Σ⁻¹.
     diff = eta - Gamma.T @ x                               # (K,)
-    prior_term = 0.5 * float(np.sum(diff * diff / Sigma_diag))
+    prior_term = 0.5 * float(diff @ Sigma_inv @ diff)
     return data_term + prior_term
 
 
@@ -138,13 +138,14 @@ def _stm_neg_log_joint_grad(
     counts: np.ndarray,
     expElogbeta: np.ndarray,
     Gamma: np.ndarray,
-    Sigma_diag: np.ndarray,
+    Sigma_inv: np.ndarray,
     x: np.ndarray,
 ) -> np.ndarray:
     """Gradient of _stm_neg_log_joint at η.
 
     ∇f(η) = N_d · p - Σ_w n_dw · φ_w + Σ⁻¹(η - Γx)
-            where N_d = Σ_w n_dw  and  φ_w = (p ⊙ β_·w) / (p^T β_·w)
+            where N_d = Σ_w n_dw, φ_w = (p ⊙ β_·w) / (p^T β_·w),
+            and Σ⁻¹ is the full (n×n) precision matrix
     """
     p = _softmax(eta)
     eb_d = expElogbeta[:, indices]                         # (K, n_unique)
@@ -154,7 +155,7 @@ def _stm_neg_log_joint_grad(
     N_d = float(np.sum(counts))
     data_grad = N_d * p - phi @ counts                     # (K,)
     diff = eta - Gamma.T @ x                               # (K,)
-    prior_grad = diff / Sigma_diag                         # (K,)
+    prior_grad = Sigma_inv @ diff                          # (K,)
     return data_grad + prior_grad
 
 
@@ -165,14 +166,14 @@ def _stm_neg_log_joint_hessian(
     counts: np.ndarray,
     expElogbeta: np.ndarray,
     Gamma: np.ndarray,
-    Sigma_diag: np.ndarray,
+    Sigma_inv: np.ndarray,
     x: np.ndarray,
 ) -> np.ndarray:
     """Hessian of _stm_neg_log_joint at η.
 
     H(η) = N_d · (diag(p) - p p^T) - Σ_w n_dw · (diag(φ_w) - φ_w φ_w^T) + Σ⁻¹
+           where Σ⁻¹ is the full (n×n) precision matrix
     """
-    K = eta.shape[0]
     p = _softmax(eta)
     eb_d = expElogbeta[:, indices]                         # (K, n_unique)
     q_w = eb_d.T @ p + 1e-100                              # (n_unique,)
@@ -188,7 +189,7 @@ def _stm_neg_log_joint_hessian(
     outer_term = (phi * counts[None, :]) @ phi.T
     H_data_neg = diag_term - outer_term
 
-    H_prior = np.diag(1.0 / Sigma_diag)
+    H_prior = Sigma_inv
     return H_data_pos - H_data_neg + H_prior
 
 
@@ -265,7 +266,7 @@ def _stm_doc_inference(
     n_sub = allowed.shape[0]
     common = dict(
         indices=indices, counts=counts, expElogbeta=sub_expElogbeta,
-        Gamma=sub_Gamma, Sigma_diag=sub_Sigma, x=x,
+        Gamma=sub_Gamma, Sigma_inv=np.diag(1.0 / sub_Sigma), x=x,
     )
 
     if reference is None:
