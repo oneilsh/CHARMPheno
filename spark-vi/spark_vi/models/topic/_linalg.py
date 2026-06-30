@@ -128,14 +128,29 @@ def pd_complete(
     Sigma[i,j] = Sigma[i,R] inv(Sigma[R,R]) Sigma[R,j] over R = all other topics: this is
     the partial-covariance-to-zero update, and it leaves the observed entries (never
     visited) untouched. Sweeping all free entries to convergence drives every free
-    precision entry to zero while preserving the measured covariances exactly. When the
-    observed part admits no PD completion (the IPS sweep loses positive-definiteness, or
-    the all-observed init is already indefinite), the routine switches to the Dykstra
+    precision entry to zero while preserving the measured covariances exactly.
+
+    Seeding and re-pinning. The IPS regression update needs a PD iterate so the inner
+    inverse is well posed, but the natural zero-on-free init can be INDEFINITE even for a
+    genuinely PD-completable observed block: a strongly-correlated pattern such as the
+    gated background-coupled "block-arrow" (one background topic strongly tied to each
+    foreground group, cross-group pairs free) is PD-completable to a well-conditioned
+    matrix yet has an indefinite zero-fill. So the iterate is seeded with the nearest_spd
+    projection of that zero-fill (PD, so the regression inverse is well posed), and after
+    every sweep the observed entries are re-pinned to `target` and the diagonal restored.
+    The re-pin is what lets IPS converge to the exact maximum-determinant completion from
+    an indefinite-but-completable seed, independent of the seed projection.
+
+    Completability is decided AFTER convergence, not from the init. A GENUINELY
+    non-PD-completable observed set cannot be matched by any PD matrix, so the converged
+    iterate drifts off the observed targets (the PD floor moves them) or fails to be PD;
+    only that post-convergence observed-mismatch / non-PD check routes to the Dykstra
     min-Frobenius alternating-projection fallback (`min_frobenius_psd_completion`; Higham
     2002, "Computing the Nearest Correlation Matrix", IMA J. Numer. Anal. 22:329-343;
-    Dykstra 1983, JASA 78:837-842) and returns its result: the strictly-PD matrix whose
+    Dykstra 1983, JASA 78:837-842), which returns the strictly-PD matrix whose
     observed-entry deviation from `target` is minimized — a far smaller drift than a single
-    eigenvalue floor of the indefinite assembly.
+    eigenvalue floor of the indefinite assembly. An indefinite zero-fill init alone does
+    NOT trigger the fallback.
 
     On a decomposable (chordal) observed pattern this converges in one sweep to the
     closed form Sigma[A,B] = Sigma[A,S] inv(Sigma[S,S]) Sigma[S,B] over each separator S
@@ -155,29 +170,15 @@ def pd_complete(
     free = ~mask                              # entries to be completed (off-diagonal)
     free_pairs = [(i, j) for i in range(n) for j in range(i + 1, n) if free[i, j]]
 
-    # Init: measured values on observed entries, 0 on free off-diagonal entries, and the
-    # measured diagonal kept exact.
+    # PD seed: measured values on observed entries, 0 on free off-diagonals, measured
+    # diagonal kept exact, then nearest_spd. The zero-fill can be indefinite even for a
+    # genuinely completable observed block (e.g. the gated block-arrow); projecting it to
+    # the nearest SPD matrix makes the per-pair regression inverse below well posed
+    # regardless. The post-sweep re-pin recovers the exact max-det completion from this
+    # seed for any completable pattern.
     Sigma = np.where(mask, target, 0.0)
     np.fill_diagonal(Sigma, np.diag(target))
-
-    # Non-PD-completability detector. When the observed entries admit a PD completion,
-    # this zero-on-free init is itself PD (a sufficient seed for IPS: zeroing the free
-    # off-diagonals does not break a genuinely completable observed block). When the
-    # observed entries are mutually inconsistent (no PD matrix matches them all), the
-    # init is indefinite — IPS cannot recover the observed entries exactly, and flooring
-    # the init (the former behaviour) just returns a single nearest_spd projection that
-    # drifts the observed entries badly. Route those straight to the Dykstra
-    # min-Frobenius fallback, which preserves the observed entries as closely as a
-    # strictly-PD result allows. This covers both the all-observed inconsistent case
-    # (no free entries) and the inconsistent-clique-plus-free case.
-    try:
-        np.linalg.cholesky(Sigma)
-    except np.linalg.LinAlgError:
-        return min_frobenius_psd_completion(target, mask, tol=tol, max_iter=max_iter)
-
-    # All-observed and PD-completable: nothing to complete, return the symmetrized target.
-    if not free_pairs:
-        return 0.5 * (Sigma + Sigma.T)
+    Sigma = nearest_spd(Sigma).copy()
 
     for _ in range(max_iter):
         Sigma_prev = Sigma.copy()
@@ -187,18 +188,35 @@ def pd_complete(
             rest = [k for k in range(n) if k != i and k != j]
             x = Sigma[i, rest] @ np.linalg.inv(Sigma[np.ix_(rest, rest)]) @ Sigma[rest, j]
             Sigma[i, j] = Sigma[j, i] = x
-        # Numerical safety net: the up-front detector already routes inconsistent
-        # observed blocks to the fallback, but if a free-entry regression update should
-        # ever drive an otherwise-PD iterate indefinite, hand to the same Dykstra
-        # min-Frobenius routine rather than flooring once and continuing.
+        # Re-pin the observed entries (and diagonal) to target each sweep. From an
+        # indefinite-but-completable seed, IPS then converges to the exact max-det
+        # completion regardless of the seed projection. If a sweep loses PD, floor it so
+        # the next regression inverse stays well posed.
+        Sigma[mask] = target[mask]
+        np.fill_diagonal(Sigma, np.diag(target))
         try:
             np.linalg.cholesky(Sigma)
         except np.linalg.LinAlgError:
-            return min_frobenius_psd_completion(target, mask, tol=tol, max_iter=max_iter)
+            Sigma = nearest_spd(Sigma)
         if np.max(np.abs(Sigma - Sigma_prev)) < tol:
             break
 
-    return 0.5 * (Sigma + Sigma.T)            # symmetrize the output
+    Sigma = 0.5 * (Sigma + Sigma.T)           # symmetrize the output
+
+    # Completability check, decided AFTER convergence (not from the init). A genuinely
+    # non-PD-completable observed set cannot be matched by any PD matrix, so the converged
+    # result drifts off the observed targets (the PD floor moves them) or fails to be PD.
+    # Only then route to the Dykstra min-Frobenius fallback. An indefinite zero-fill alone
+    # does NOT land here — a completable block re-pins to its observed targets exactly.
+    observed_ok = np.max(np.abs(Sigma[mask] - target[mask])) < 1e-7
+    is_pd = True
+    try:
+        np.linalg.cholesky(Sigma)
+    except np.linalg.LinAlgError:
+        is_pd = False
+    if observed_ok and is_pd:
+        return Sigma
+    return min_frobenius_psd_completion(target, mask, tol=tol, max_iter=max_iter)
 
 
 def topic_correlation(Sigma: np.ndarray) -> np.ndarray:

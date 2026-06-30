@@ -85,6 +85,66 @@ def test_output_symmetric():
     np.testing.assert_allclose(out, out.T, atol=1e-10)
 
 
+# --- Completable patterns with an INDEFINITE zero-fill (must still hit max-det) ---
+
+# These pin the correctness regression fix: a strongly-correlated COMPLETABLE pattern
+# can have an indefinite zero-on-free init, yet a well-conditioned max-det completion.
+# The old detector misread "indefinite zero-fill" as "non-completable" and misrouted
+# such inputs to the Dykstra min-Frobenius fallback, returning a near-singular matrix.
+
+
+def test_gated_block_arrow_completable_gets_maxdet():
+    # THE regression case: the gated STM covariance structure. Topic 0 is a background
+    # topic strongly coupled (0.7) to each of four foreground topics; the two foreground
+    # groups {1,2} and {3,4} each correlate within-group (0.5) but the cross-group pairs
+    # (1,3),(1,4),(2,3),(2,4) are FREE. This "block-arrow" pattern is PD-completable to a
+    # well-conditioned matrix (cond ~21, zero free precision), but its zero-fill is
+    # indefinite. The bug routed it to Dykstra and returned cond ~3e8 / free-precision ~8e6.
+    K = 5
+    target = np.eye(K)
+    for j in range(1, 5):                  # background coupling
+        target[0, j] = target[j, 0] = 0.7
+    target[1, 2] = target[2, 1] = 0.5      # within group A
+    target[3, 4] = target[4, 3] = 0.5      # within group B
+    mask = np.ones((K, K), bool)
+    for i, j in [(1, 3), (1, 4), (2, 3), (2, 4)]:
+        mask[i, j] = mask[j, i] = False    # cross-group pairs are free
+
+    out = pd_complete(target, mask)
+
+    assert _is_pd(out)
+    cond = np.linalg.cond(out)
+    assert cond < 50, f"expected well-conditioned max-det completion, got cond={cond:.3e}"
+    # Each cross-group free entry equals the max-det value ~0.49.
+    for i, j in [(1, 3), (1, 4), (2, 3), (2, 4)]:
+        assert abs(out[i, j] - 0.49) < 1e-3, f"out[{i},{j}]={out[i, j]}"
+        assert abs(out[j, i] - 0.49) < 1e-3
+    # Zero precision on the four free pairs (conditional independence) — the bug gave ~8e6.
+    prec = np.linalg.inv(out)
+    free_prec = max(abs(prec[i, j]) for i, j in [(1, 3), (1, 4), (2, 3), (2, 4)])
+    assert free_prec < 1e-5, f"free precision should be ~0, got {free_prec:.3e}"
+    # Observed entries preserved exactly.
+    for j in range(1, 5):
+        assert abs(out[0, j] - 0.7) < 1e-7 and abs(out[j, 0] - 0.7) < 1e-7
+    assert abs(out[1, 2] - 0.5) < 1e-7 and abs(out[3, 4] - 0.5) < 1e-7
+
+
+def test_strongly_correlated_chain_gets_maxdet():
+    # A strongly-correlated 3-chain whose zero-fill is also indefinite but which is
+    # PD-completable: 0~1 and 1~2 both 0.9, (0,2) free. Max-det fills out[0,2] = 0.9*0.9.
+    target = np.array([[1.0, 0.9, 0.0],
+                       [0.9, 1.0, 0.9],
+                       [0.0, 0.9, 1.0]])
+    mask = np.array([[1, 1, 0],
+                     [1, 1, 1],
+                     [0, 1, 1]], bool)
+    out = pd_complete(target, mask)
+    assert _is_pd(out)
+    assert abs(out[0, 2] - 0.81) < 1e-4, f"out[0,2]={out[0, 2]}"
+    prec = np.linalg.inv(out)
+    assert abs(prec[0, 2]) < 1e-6, f"free precision should be ~0, got {prec[0, 2]:.3e}"
+
+
 # --- Dykstra min-Frobenius PSD fallback (non-PD-completable observed) ---
 
 # Reviewer's canonical inconsistent target: 1~2 and 1~3 both strongly positive
