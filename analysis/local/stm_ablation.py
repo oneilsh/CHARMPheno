@@ -59,14 +59,15 @@ print("\nPre-computing spectral beta0 ...")
 beta0 = spectral_init_beta(docs, all_bg_partition, V)
 print("  done.")
 
+# Note: the inverse-Wishart Sigma-prior ablation rows were removed when the IW
+# prior (sigma_prior_scale / sigma_prior_count) was dropped in favor of the
+# pd_complete covariance-selection M-step (Task 2). Sigma conditioning is now
+# controlled by the completion + min_pair_support, not an IW shrink lever.
 configs = [
     ("random-init (baseline)",          dict()),
-    ("+Sigma-prior",                     dict(sigma_prior_scale=2.0, sigma_prior_count=500.0)),
     ("+spectral",                        dict(_spectral=True)),
-    ("+spectral+Sigma-prior",            dict(_spectral=True, sigma_prior_scale=2.0, sigma_prior_count=500.0)),
     ("+reference",                       dict(_reference=True)),
     ("+spectral+reference",              dict(_spectral=True, _reference=True)),
-    ("+spectral+reference+Sigma-prior",  dict(_spectral=True, _reference=True, sigma_prior_scale=2.0, sigma_prior_count=500.0)),
 ]
 
 header = (f"{'Config':<32}"

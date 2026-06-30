@@ -131,9 +131,6 @@ class StreamingSTM:
         max_levels: int = 10_000,
         sigma_init: float = 1.0,
         sigma_ridge: float = 1e-6,
-        sigma_prior_scale: float | None = None,
-        sigma_prior_count: float = 0.0,
-        sigma_diag_shrink: float = 0.0,
         min_pair_support: int = 1,
         lbfgs_max_iter: int = 50,
         lbfgs_tol: float = 1e-4,
@@ -179,9 +176,6 @@ class StreamingSTM:
 
         self.sigma_init = sigma_init
         self.sigma_ridge = sigma_ridge
-        self.sigma_prior_scale = sigma_prior_scale
-        self.sigma_prior_count = sigma_prior_count
-        self.sigma_diag_shrink = float(sigma_diag_shrink)
         self.min_pair_support = int(min_pair_support)
         self.lbfgs_max_iter = lbfgs_max_iter
         self.lbfgs_tol = lbfgs_tol
@@ -284,9 +278,6 @@ class StreamingSTM:
             P=self.P,
             sigma_init=self.sigma_init,
             sigma_ridge=self.sigma_ridge,
-            sigma_prior_scale=self.sigma_prior_scale,
-            sigma_prior_count=self.sigma_prior_count,
-            sigma_diag_shrink=self.sigma_diag_shrink,
             min_pair_support=self.min_pair_support,
             lbfgs_max_iter=self.lbfgs_max_iter,
             lbfgs_tol=self.lbfgs_tol,
@@ -380,9 +371,6 @@ class StreamingSTM:
         # complete and a future inference path can re-pin.
         metadata.setdefault("stm_hardening", {
             "reference_topic": self.reference_topic,
-            "sigma_prior_scale": self.sigma_prior_scale,
-            "sigma_prior_count": self.sigma_prior_count,
-            "sigma_diag_shrink": self.sigma_diag_shrink,
             "min_pair_support": self.min_pair_support,
             "spectral_init": self.spectral_init,
             "spectral_method": self.spectral_method,

@@ -55,18 +55,8 @@ def test_spectral_init_makes_fit_init_independent():
     assert min(recos) >= 6   # recovery no longer depends on sigma_init
 
 
-@pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="Task 3 drops the diagonal inverse-gamma "
-                   "Sigma prior for the plain full-covariance MLE; Task 4 restores "
-                   "it as the inverse-Wishart generalization. sigma_prior_scale is a "
-                   "no-op until then, so on==off and the shrink assertion cannot hold.")
-def test_sigma_prior_reduces_blowup():
-    # fit_stm scales minibatch stats by D/batch=15, so effective pseudo-doc
-    # count must dominate the scaled minibatch size (500 >> 100) to meaningfully
-    # shrink sigma. The brief specifies count=50 but that is only ~3%
-    # regularization at this scale and cannot contain the blowup; count=500 works.
-    docs, _ = synthetic_ehr_corpus(K_rare=8, V=300, D=1500, doc_len=30, bg_frac=0.7, seed=0)
-    off = fit_stm(docs, K=40, V=300, sigma_init=5.0, batch=100, n_iter=250)
-    on = fit_stm(docs, K=40, V=300, sigma_init=5.0, batch=100, n_iter=250,
-                 sigma_prior_scale=2.0, sigma_prior_count=500.0)
-    assert final_sigma_range(on)[1] < final_sigma_range(off)[1] / 10
+# test_sigma_prior_reduces_blowup removed (Task 2): the inverse-Wishart Σ prior
+# (sigma_prior_scale / sigma_prior_count) was removed from OnlineSTM in favor of
+# the pd_complete covariance-selection M-step. Σ conditioning is now controlled
+# by the completion + min_pair_support, not an IW shrink lever.
+# Spec: docs/superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md

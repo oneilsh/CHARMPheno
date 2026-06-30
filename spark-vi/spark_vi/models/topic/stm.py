@@ -39,7 +39,7 @@ from scipy.optimize import minimize
 from scipy.special import digamma, gammaln
 
 from spark_vi.core.model import VIModel
-from spark_vi.models.topic._linalg import nearest_spd, safe_inverse
+from spark_vi.models.topic._linalg import pd_complete, safe_inverse
 from spark_vi.models.topic.types import STMDocument
 
 
@@ -350,9 +350,6 @@ class OnlineSTM(VIModel):
         eta: float | None = None,
         sigma_init: float = 1.0,
         sigma_ridge: float = 1e-6,
-        sigma_prior_scale: float | None = None,
-        sigma_prior_count: float = 0.0,
-        sigma_diag_shrink: float = 0.0,
         min_pair_support: int = 1,
         lbfgs_max_iter: int = 50,
         lbfgs_tol: float = 1e-4,
@@ -375,12 +372,6 @@ class OnlineSTM(VIModel):
             raise ValueError(f"sigma_init must be > 0, got {sigma_init}")
         if sigma_ridge < 0:
             raise ValueError(f"sigma_ridge must be >= 0, got {sigma_ridge}")
-        if sigma_prior_scale is not None and sigma_prior_scale <= 0:
-            raise ValueError(f"sigma_prior_scale must be > 0, got {sigma_prior_scale}")
-        if sigma_prior_count < 0:
-            raise ValueError(f"sigma_prior_count must be >= 0, got {sigma_prior_count}")
-        if not (0.0 <= sigma_diag_shrink <= 1.0):
-            raise ValueError(f"sigma_diag_shrink must be in [0, 1], got {sigma_diag_shrink}")
         if min_pair_support < 1:
             raise ValueError(f"min_pair_support must be >= 1, got {min_pair_support}")
         if lbfgs_max_iter < 1:
@@ -403,9 +394,6 @@ class OnlineSTM(VIModel):
         self.eta = float(eta)
         self.sigma_init = float(sigma_init)
         self.sigma_ridge = float(sigma_ridge)
-        self.sigma_prior_scale = None if sigma_prior_scale is None else float(sigma_prior_scale)
-        self.sigma_prior_count = float(sigma_prior_count)
-        self.sigma_diag_shrink = float(sigma_diag_shrink)
         self.min_pair_support = int(min_pair_support)
         self.lbfgs_max_iter = int(lbfgs_max_iter)
         self.lbfgs_tol = float(lbfgs_tol)
@@ -613,8 +601,6 @@ class OnlineSTM(VIModel):
             "n_docs": np.array(float(n_docs)),
         }
 
-    SIGMA_FLOOR = 1e-6
-
     def update_global(
         self,
         global_params: dict[str, np.ndarray],
@@ -626,20 +612,30 @@ class OnlineSTM(VIModel):
         λ:  λ_new = (1-ρ)·λ + ρ·(η + lambda_stats)        # natural-gradient SVI
         Γ:  Γ̂ = (XᵀX + ridge·I)⁻¹ XᵀMu                    # ridge OLS on aggregated stats
             Γ_new = (1-ρ)·Γ + ρ·Γ̂                         # stochastic-EM ρ-blend
-        Σ:  Psi = nu * scale * I  (IW scale matrix; 0 if scale=None or nu=0)
-            Σ_target[i,j] = (S_ij + Psi_ij) / (N_ij + nu)  # IW MAP (reduces to MLE when nu=0)
-            Σ_new = (1-ρ)·Σ + ρ·Σ_target                   # ρ-blend
-            Σ_new = (1-w)·Σ_new + w·diag(Σ_new)            # diagonal-shrink (w=sigma_diag_shrink)
-            Σ_new = nearest_spd(Σ_new, floor=SIGMA_FLOOR)   # SPD repair (no additive ridge here)
+        Σ:  observed[i,j] = N_ij >= min_pair_support       # diagonal forced observed
+            mle_ij        = S_ij / N_ij  on observed       # per-pair sample covariance
+            Σ_target[i,j] = mle_ij on observed, else Σ_ij  # free: finite placeholder
+            Σ_blended     = (1-ρ)·Σ + ρ·Σ_target           # ρ-blend on observed entries
+            Σ_new         = pd_complete(Σ_blended, observed)
 
-        The IW MAP prior (Blei & Lafferty 2007) defaults off (sigma_prior_scale=None,
-        sigma_prior_count=0), recovering the plain MLE. The diagonal-shrink lever
-        (Roberts et al. stm sigma.prior) defaults off (sigma_diag_shrink=0). The
-        per-pair estimate is lazy: a pair (i,j) with zero support keeps its current
-        Σ value. After the ρ-blend, nearest_spd repairs any loss of positive-
-        definiteness from stitching scatter over inconsistent doc subsets.
-        nearest_spd is identity on already-SPD matrices, so unsupported entries are
-        preserved bit-identically (ADR-0027 exact-laziness invariant).
+        The gated per-pair M-step stitches Σ from inconsistent document subsets, so
+        cross-group pairs with fewer than min_pair_support co-activating documents
+        are unobserved (free). pd_complete fills those free entries with the
+        maximum-determinant positive-definite completion: it preserves the observed
+        entries exactly and drives the PRECISION (Σ⁻¹) to zero on every free entry —
+        the unique completion that imposes conditional independence (no spurious
+        partial correlation) where nothing was measured (Dempster 1972 covariance
+        selection). This replaces the prior zero-COVARIANCE pin, the inverse-Wishart
+        MAP blend, the diagonal-shrink lever, and the trailing nearest_spd Σ floor.
+
+        The result is SPD and observed-preserving, so the update stays lazy for
+        unsupported blocks: a free pair carries the completed (conditionally
+        independent) value rather than decaying toward a floor (ADR-0027). The
+        fully-observed special case (no gating: every pair supported) has no free
+        entries, so pd_complete returns the ρ-blended sample covariance unchanged
+        (up to symmetrization).
+
+        Spec: docs/superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md
 
         Lazy block updates (ADR 0027): any block (background or a group's
         foreground) with zero documents in this minibatch is left unchanged —
@@ -686,58 +682,49 @@ class OnlineSTM(VIModel):
                     XtX_groups[gi] + ridge_eye, XtMu[:, cols])
         new_Gamma = (1.0 - learning_rate) * Gamma + learning_rate * Gamma_target
 
-        # Σ: full-covariance M-step with optional inverse-Wishart MAP prior
-        # and diagonal-shrink regularizer (both default off, reducing to MLE).
+        # Σ: full-covariance M-step via maximum-determinant PD completion.
         #
-        # Inverse-Wishart MAP (Blei & Lafferty 2007):
-        #   Psi = nu * sigma_prior_scale * I   (diagonal; off-diagonal = 0)
-        #   nu  = sigma_prior_count
-        #   Sigma_ij = (S_ij + Psi_ij) / (N_ij + nu)   for supported pairs
-        # With sigma_prior_scale=None and sigma_prior_count=0, Psi=0 and
-        # nu=0, so denom=N and this is the plain MLE (Task 3 behavior).
-        # The diagonal Psi = nu*scale*I makes the diagonal inverse-gamma
-        # (resid + count*scale)/(n + count) the Psi=psi*I special case.
+        # observed = pairs with N >= min_pair_support; on those entries we use the
+        # per-pair sample covariance mle = S/N and ρ-blend it with the current Σ.
+        # Off-diagonal entries below the threshold (thin/absent cross-group pairs)
+        # are FREE: pd_complete overwrites them with the unique zero-precision
+        # (conditional-independence) completion that keeps the observed entries
+        # exact and the whole matrix SPD (Dempster 1972 covariance selection; see
+        # _linalg.py and the spec cited in this method's docstring).
         #
-        # Diagonal-shrink (Roberts et al. stm sigma.prior lever):
-        #   Sigma <- (1 - w)*Sigma + w*diag(diag(Sigma)),  w = sigma_diag_shrink
-        # Applied after the IW MAP blend and rho-blend.
+        # min_pair_support is now the observed/free threshold: cross-group pairs
+        # informed by fewer than min_pair_support co-activating documents are
+        # treated as unmeasured and completed rather than fit to a thin/spurious
+        # S/N estimate (robustness + small-cell guard). Default min_pair_support=1
+        # makes every present pair (N>=1) observed.
         #
-        # SPD repair via nearest_spd only (no additive sigma_ridge*I here):
-        # The additive ridge was redundant with nearest_spd's eigenvalue floor
-        # and nudged every diagonal (including lazy/unsupported entries) up by
-        # ~sigma_ridge each step, breaking the ADR-0027 exact-laziness invariant.
-        # nearest_spd is identity on already-SPD matrices, so unsupported entries
-        # are preserved bit-identically in the common case.
+        # The diagonal is always observed (pd_complete requires a true diagonal).
+        # A topic absent from this minibatch (its own variance unsupported,
+        # N[k,k] < min_pair_support) carries its CURRENT Σ diagonal — an
+        # observed-from-prior value pd_complete preserves exactly — rather than a
+        # spurious 0/N estimate. This keeps the ADR-0027 lazy-block invariant: a
+        # rare group missed by a minibatch does not decay toward a floor; its
+        # variance is held and its cross-entries are completed (conditionally
+        # independent given the present topics).
         S = target_stats["residual_outer_stat"]
         N = target_stats["n_pairs_stat"]
-        # min_pair_support floor: cross-topic covariance cells informed by fewer
-        # than min_pair_support co-activating documents are zeroed out of the
-        # scatter (S) and support (N) so they fall back to the IW prior / lazy
-        # keep-current rule. A robustness + small-cell-privacy guard for thin
-        # cross-group cells; zeroing BOTH S and N marks them genuinely
-        # uninformed (vs. a spurious 0/N estimate). N is symmetric so the floor
-        # is symmetric and S/N stay symmetric. Default min_pair_support=1 is a
-        # no-op (every present pair with N>=1 is kept). Diagonal, background, and
-        # within-group pairs have full support and never trip the floor.
-        if self.min_pair_support > 1:
-            thin = N < self.min_pair_support
-            S = np.where(thin, 0.0, S)
-            N = np.where(thin, 0.0, N)
-        nu = self.sigma_prior_count
-        Psi = np.zeros((self.K, self.K))
-        if self.sigma_prior_scale is not None:
-            np.fill_diagonal(Psi, nu * self.sigma_prior_scale)
-        denom = N + nu
-        Sigma_target = Sigma.copy()
-        present = denom > 0
+        supported = N >= self.min_pair_support      # below threshold -> free
+        # Per-pair sample covariance only where there is real support; guard the
+        # divisor with N>0 (a forced-observed but unsupported diagonal has N=0).
         with np.errstate(invalid="ignore", divide="ignore"):
-            mapped = (S + Psi) / np.where(present, denom, 1.0)
-        Sigma_target[present] = mapped[present]
-        new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
-        w = self.sigma_diag_shrink
-        if w > 0.0:
-            new_Sigma = (1.0 - w) * new_Sigma + w * np.diag(np.diag(new_Sigma))
-        new_Sigma = nearest_spd(new_Sigma, floor=self.SIGMA_FLOOR)
+            mle = np.where(supported, S / np.where(N > 0, N, 1.0), 0.0)
+        # Observed mask = supported pairs plus a forced-true diagonal. Supported
+        # entries take the sample covariance; an absent topic's diagonal carries
+        # its current Σ diagonal (lazy-keep); free off-diagonals carry a finite
+        # placeholder pd_complete overwrites with the zero-precision completion.
+        observed = supported.copy()
+        np.fill_diagonal(observed, True)            # pd_complete needs a true diagonal
+        Sigma_target = np.where(supported, mle, Sigma)
+        diag_supported = np.diag(N) >= self.min_pair_support
+        kept_diag = np.where(diag_supported, np.diag(mle), np.diag(Sigma))
+        np.fill_diagonal(Sigma_target, kept_diag)
+        Sigma_blended = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
+        new_Sigma = pd_complete(Sigma_blended, observed)
 
         return {
             "lambda": new_lam,

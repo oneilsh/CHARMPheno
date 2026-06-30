@@ -125,8 +125,7 @@ class TestSTMModelPersistence:
             global_params=gp,
             metadata={"K": 3, "V": 10, "P": 2, "stm_hardening": {
                 "reference_topic": True,
-                "sigma_prior_scale": 2.0,
-                "sigma_prior_count": 500.0,
+                "min_pair_support": 10,
             }},
             model_spec=_FakeSpec(),
             covariate_names=["intercept", "cohort_b"],
@@ -136,8 +135,7 @@ class TestSTMModelPersistence:
         loaded = STMModel.load(out_dir)
         assert loaded.metadata["stm_hardening"] == {
             "reference_topic": True,
-            "sigma_prior_scale": 2.0,
-            "sigma_prior_count": 500.0,
+            "min_pair_support": 10,
         }
 
 

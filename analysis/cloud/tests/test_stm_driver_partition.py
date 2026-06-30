@@ -41,8 +41,6 @@ def test_parse_args_hardening_flags_default_on():
     from stm_bigquery_cloud import parse_args
     args = parse_args(_REQUIRED_ARGS)
     assert args.reference_topic is True
-    assert args.sigma_prior_scale is None
-    assert args.sigma_prior_count == 0.0
     assert args.spectral_init is True
 
 
@@ -50,13 +48,9 @@ def test_parse_args_hardening_flags_set():
     from stm_bigquery_cloud import parse_args
     args = parse_args(_REQUIRED_ARGS + [
         "--reference-topic",
-        "--sigma-prior-scale", "2.0",
-        "--sigma-prior-count", "500.0",
         "--spectral-init",
     ])
     assert args.reference_topic is True
-    assert args.sigma_prior_scale == 2.0
-    assert args.sigma_prior_count == 500.0
     assert args.spectral_init is True
 
 
@@ -95,19 +89,16 @@ def test_parse_args_spectral_method_scalable_flags():
 
 
 def test_parse_args_full_sigma_knobs_defaults():
-    """sigma_diag_shrink defaults to 0.0; min_pair_support defaults to 1."""
+    """min_pair_support defaults to 1 (the pd_complete observed/free threshold)."""
     from stm_bigquery_cloud import parse_args
     args = parse_args(_REQUIRED_ARGS)
-    assert args.sigma_diag_shrink == 0.0
     assert args.min_pair_support == 1
 
 
 def test_parse_args_full_sigma_knobs_set():
-    """--sigma-diag-shrink 0.5 --min-pair-support 20 parse and forward correctly."""
+    """--min-pair-support 20 parses and forwards correctly."""
     from stm_bigquery_cloud import parse_args
     args = parse_args(_REQUIRED_ARGS + [
-        "--sigma-diag-shrink", "0.5",
         "--min-pair-support", "20",
     ])
-    assert args.sigma_diag_shrink == 0.5
     assert args.min_pair_support == 20

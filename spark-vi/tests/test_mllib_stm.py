@@ -274,15 +274,12 @@ class TestStreamingSTMHardeningThreading:
         est = StreamingSTM(
             K=4, features_col="features", covariates_col="covariates",
             covariate_names=["a", "b"], random_seed=0,
-            reference_topic=True, sigma_prior_scale=2.0, sigma_prior_count=500.0,
+            reference_topic=True, min_pair_support=3,
             spectral_init=False)
         model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
         assert model.metadata["stm_hardening"] == {
             "reference_topic": True,
-            "sigma_prior_scale": 2.0,
-            "sigma_prior_count": 500.0,
-            "sigma_diag_shrink": 0.0,
-            "min_pair_support": 1,
+            "min_pair_support": 3,
             "spectral_init": False,
             "spectral_method": "dense",
         }
@@ -303,9 +300,6 @@ class TestStreamingSTMHardeningThreading:
         model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
         assert model.metadata["stm_hardening"] == {
             "reference_topic": True,
-            "sigma_prior_scale": None,
-            "sigma_prior_count": 0.0,
-            "sigma_diag_shrink": 0.0,
             "min_pair_support": 1,
             "spectral_init": True,
             "spectral_method": "dense",
@@ -492,9 +486,8 @@ def test_streaming_stm_full_sigma_metadata_and_shapes(spark, tiny_stm_dataset):
     from spark_vi.mllib.topic.stm import StreamingSTM
     est = StreamingSTM(K=4, features_col="features", covariates_col="covariates",
                        covariate_names=["a", "b"],
-                       sigma_diag_shrink=0.0, min_pair_support=3,
+                       min_pair_support=3,
                        reference_topic=False, spectral_init=False)
     model = est.fit(tiny_stm_dataset, max_iter=2, subsampling_rate=1.0)
     assert model.global_params["Sigma"].shape == (4, 4)
     assert model.metadata["stm_hardening"]["min_pair_support"] == 3
-    assert model.metadata["stm_hardening"]["sigma_diag_shrink"] == 0.0

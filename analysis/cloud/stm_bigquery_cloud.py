@@ -196,18 +196,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Initial diagonal Sigma for the topic-covariate prior.")
     p.add_argument("--sigma-ridge", type=float, default=1e-6,
                    help="Ridge regularisation added to Sigma diagonal.")
-    p.add_argument("--sigma-prior-scale", type=float, default=None,
-                   help="Inverse-gamma Sigma-prior scale s0 (off when unset). "
-                        "Shrinks the per-topic logistic-normal variance toward s0.")
-    p.add_argument("--sigma-prior-count", type=float, default=0.0,
-                   help="Inverse-gamma Sigma-prior pseudo-count c0 (default 0).")
-    p.add_argument("--sigma-diag-shrink", type=float, default=0.0,
-                   help="Diagonal-shrink strength in 0..1 for the full-covariance "
-                        "Sigma (stm sigma.prior lever; 0 = off).")
     p.add_argument("--min-pair-support", type=int, default=1,
                    help="Minimum co-activating documents for a cross-topic covariance "
-                        "entry to be estimated; thinner pairs fall back to the prior "
-                        "(robustness + small-cell guard).")
+                        "entry to be observed; thinner pairs are completed by the "
+                        "pd_complete max-determinant PD completion (zero precision on "
+                        "free entries; robustness + small-cell guard).")
     p.add_argument("--reference-topic", action=argparse.BooleanOptionalAction,
                    default=True,
                    help="K-1 reference parameterization (default on, insight 0030; "
@@ -412,9 +405,6 @@ def main() -> int:
                 covariate_names=covariate_names,
                 sigma_init=args.sigma_init,
                 sigma_ridge=args.sigma_ridge,
-                sigma_prior_scale=args.sigma_prior_scale,
-                sigma_prior_count=args.sigma_prior_count,
-                sigma_diag_shrink=args.sigma_diag_shrink,
                 min_pair_support=args.min_pair_support,
                 lbfgs_max_iter=args.lbfgs_max_iter,
                 lbfgs_tol=args.lbfgs_tol,
