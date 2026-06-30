@@ -92,3 +92,22 @@ def test_parse_args_spectral_method_scalable_flags():
     assert args.spectral_method == "scalable"
     assert args.spectral_d == 256
     assert args.spectral_min_doc_freq == 3
+
+
+def test_parse_args_full_sigma_knobs_defaults():
+    """sigma_diag_shrink defaults to 0.0; min_pair_support defaults to 1."""
+    from stm_bigquery_cloud import parse_args
+    args = parse_args(_REQUIRED_ARGS)
+    assert args.sigma_diag_shrink == 0.0
+    assert args.min_pair_support == 1
+
+
+def test_parse_args_full_sigma_knobs_set():
+    """--sigma-diag-shrink 0.5 --min-pair-support 20 parse and forward correctly."""
+    from stm_bigquery_cloud import parse_args
+    args = parse_args(_REQUIRED_ARGS + [
+        "--sigma-diag-shrink", "0.5",
+        "--min-pair-support", "20",
+    ])
+    assert args.sigma_diag_shrink == 0.5
+    assert args.min_pair_support == 20

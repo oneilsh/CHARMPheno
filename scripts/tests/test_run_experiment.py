@@ -1401,3 +1401,40 @@ def test_build_stm_args_hardening_flags_disabled(monkeypatch):
     args = run_experiment.build_stm_args(effective, out_dir="/tmp/out")
     assert "--no-reference-topic" in args
     assert "--no-spectral-init" in args
+
+
+def test_build_stm_args_emits_full_sigma_knobs(monkeypatch):
+    """sigma_diag_shrink + min_pair_support are emitted when set in effective."""
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    eff = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 2, "vocab_size": 100,
+        "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+        "sigma_diag_shrink": 0.25, "min_pair_support": 30,
+    }
+    args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
+    assert "--sigma-diag-shrink" in args and "0.25" in args
+    assert "--min-pair-support" in args and "30" in args
+
+
+def test_build_stm_args_omits_full_sigma_knobs_when_absent(monkeypatch):
+    """Default path: no sigma_diag_shrink / min_pair_support in effective -> neither flag emitted."""
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    eff = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 2, "vocab_size": 100,
+        "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+    }
+    args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
+    assert "--sigma-diag-shrink" not in args
+    assert "--min-pair-support" not in args

@@ -130,6 +130,13 @@ def main(argv=None) -> int:
                    help="Inverse-gamma Sigma-prior scale s0 (off when unset).")
     p.add_argument("--sigma-prior-count", type=float, default=0.0,
                    help="Inverse-gamma Sigma-prior pseudo-count c0 (default 0).")
+    p.add_argument("--sigma-diag-shrink", type=float, default=0.0,
+                   help="Diagonal-shrink strength in 0..1 for the full-covariance "
+                        "Sigma (stm sigma.prior lever; 0 = off).")
+    p.add_argument("--min-pair-support", type=int, default=1,
+                   help="Minimum co-activating documents for a cross-topic covariance "
+                        "entry to be estimated; thinner pairs fall back to the prior "
+                        "(robustness + small-cell guard).")
     p.add_argument("--reference-topic", action=argparse.BooleanOptionalAction,
                    default=True,
                    help="K-1 reference parameterization (default on, insight 0030; "
@@ -182,6 +189,8 @@ def main(argv=None) -> int:
             doc_group_col="source_cohort", random_seed=args.seed,
             sigma_prior_scale=args.sigma_prior_scale,
             sigma_prior_count=args.sigma_prior_count,
+            sigma_diag_shrink=args.sigma_diag_shrink,
+            min_pair_support=args.min_pair_support,
             reference_topic=args.reference_topic,
             spectral_init=args.spectral_init,
             spectral_method=args.spectral_method,

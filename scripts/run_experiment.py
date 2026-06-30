@@ -485,6 +485,10 @@ def build_stm_args(
         hardening.extend(["--spectral-d", str(effective["spectral_d"])])
     if effective.get("spectral_min_doc_freq") is not None:
         hardening.extend(["--spectral-min-doc-freq", str(effective["spectral_min_doc_freq"])])
+    if effective.get("sigma_diag_shrink"):
+        hardening.extend(["--sigma-diag-shrink", str(effective["sigma_diag_shrink"])])
+    if effective.get("min_pair_support") is not None:
+        hardening.extend(["--min-pair-support", str(effective["min_pair_support"])])
     return common + [
         "--covariate-formula", str(effective["covariate_formula"]),
         "--categorical-cols", ",".join(effective.get("categorical_cols", [])),

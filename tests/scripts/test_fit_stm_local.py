@@ -98,13 +98,14 @@ def test_fit_stm_local_reference_topic_end_to_end(tmp_path):
         "--max-iter", "8", "--out-dir", str(out)])
     assert rc == 0
     manifest = json.loads((out / "manifest.json").read_text())
-    assert manifest["metadata"]["stm_hardening"] == {
-        "reference_topic": True,
-        "sigma_prior_scale": 2.0,
-        "sigma_prior_count": 500.0,
-        "spectral_init": False,
-        "spectral_method": "dense",
-    }
+    hardening = manifest["metadata"]["stm_hardening"]
+    assert hardening["reference_topic"] is True
+    assert hardening["sigma_prior_scale"] == 2.0
+    assert hardening["sigma_prior_count"] == 500.0
+    assert hardening["spectral_init"] is False
+    assert hardening["spectral_method"] == "dense"
+    assert hardening["sigma_diag_shrink"] == 0.0
+    assert hardening["min_pair_support"] == 1
     Gamma = np.load(out / "params" / "Gamma.npy")
     assert np.allclose(Gamma[:, 0], 0.0)
 
