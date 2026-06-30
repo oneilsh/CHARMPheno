@@ -72,12 +72,14 @@ def _make_small_doc_state(seed=0):
     expElogbeta = expElogbeta / expElogbeta.sum(axis=0, keepdims=True)
     Gamma = rng.normal(size=(P, K))
     Sigma_diag = rng.gamma(shape=2.0, scale=0.5, size=K)
+    Sigma_inv = np.diag(1.0 / Sigma_diag)   # full (K,K) precision from the diagonal
     x = rng.normal(size=P)
     indices = np.array([0, 2, 4], dtype=np.int32)
     counts = np.array([2.0, 1.0, 3.0], dtype=np.float64)
     return dict(
         K=K, V=V, P=P, expElogbeta=expElogbeta, Gamma=Gamma,
-        Sigma_diag=Sigma_diag, x=x, indices=indices, counts=counts,
+        Sigma_diag=Sigma_diag, Sigma_inv=Sigma_inv,
+        x=x, indices=indices, counts=counts,
     )
 
 
@@ -91,7 +93,7 @@ class TestSTMGradient:
             eta,
             indices=st["indices"], counts=st["counts"],
             expElogbeta=st["expElogbeta"],
-            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+            Gamma=st["Gamma"], Sigma_inv=st["Sigma_inv"], x=st["x"],
         )
 
         eps = 1e-6
@@ -102,12 +104,12 @@ class TestSTMGradient:
             f_p = _stm_neg_log_joint(
                 eta_p, indices=st["indices"], counts=st["counts"],
                 expElogbeta=st["expElogbeta"],
-                Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+                Gamma=st["Gamma"], Sigma_inv=st["Sigma_inv"], x=st["x"],
             )
             f_m = _stm_neg_log_joint(
                 eta_m, indices=st["indices"], counts=st["counts"],
                 expElogbeta=st["expElogbeta"],
-                Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+                Gamma=st["Gamma"], Sigma_inv=st["Sigma_inv"], x=st["x"],
             )
             numeric[k] = (f_p - f_m) / (2 * eps)
 
@@ -126,7 +128,7 @@ class TestSTMHessian:
         analytic = _stm_neg_log_joint_hessian(
             eta, indices=st["indices"], counts=st["counts"],
             expElogbeta=st["expElogbeta"],
-            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+            Gamma=st["Gamma"], Sigma_inv=st["Sigma_inv"], x=st["x"],
         )
 
         eps = 1e-5
@@ -137,12 +139,12 @@ class TestSTMHessian:
             g_p = _stm_neg_log_joint_grad(
                 eta_p, indices=st["indices"], counts=st["counts"],
                 expElogbeta=st["expElogbeta"],
-                Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+                Gamma=st["Gamma"], Sigma_inv=st["Sigma_inv"], x=st["x"],
             )
             g_m = _stm_neg_log_joint_grad(
                 eta_m, indices=st["indices"], counts=st["counts"],
                 expElogbeta=st["expElogbeta"],
-                Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+                Gamma=st["Gamma"], Sigma_inv=st["Sigma_inv"], x=st["x"],
             )
             numeric[:, j] = (g_p - g_m) / (2 * eps)
 
@@ -155,7 +157,7 @@ class TestSTMHessian:
         H = _stm_neg_log_joint_hessian(
             eta, indices=st["indices"], counts=st["counts"],
             expElogbeta=st["expElogbeta"],
-            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+            Gamma=st["Gamma"], Sigma_inv=st["Sigma_inv"], x=st["x"],
         )
         np.testing.assert_allclose(H, H.T, rtol=1e-12, atol=1e-12)
 
@@ -166,7 +168,7 @@ class TestSTMHessian:
         H = _stm_neg_log_joint_hessian(
             eta, indices=st["indices"], counts=st["counts"],
             expElogbeta=st["expElogbeta"],
-            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+            Gamma=st["Gamma"], Sigma_inv=st["Sigma_inv"], x=st["x"],
         )
         # H is PD at a typical interior point near the mode — the common case
         # _spd_inverse's Cholesky fast path relies on. NOTE: the objective is
@@ -186,14 +188,14 @@ class TestSTMDocInference:
         eta_hat, nu_d, n_iter = _stm_doc_inference(
             indices=st["indices"], counts=st["counts"],
             expElogbeta=st["expElogbeta"],
-            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+            Gamma=st["Gamma"], Sigma_inv=st["Sigma_inv"], x=st["x"],
             max_iter=200, tol=1e-6,
         )
         # Gradient at η̂ should be ~zero.
         g = _stm_neg_log_joint_grad(
             eta_hat, indices=st["indices"], counts=st["counts"],
             expElogbeta=st["expElogbeta"],
-            Gamma=st["Gamma"], Sigma_diag=st["Sigma_diag"], x=st["x"],
+            Gamma=st["Gamma"], Sigma_inv=st["Sigma_inv"], x=st["x"],
         )
         assert np.linalg.norm(g) < 1e-4, f"|g|={np.linalg.norm(g)} not converged"
         assert nu_d.shape == (st["K"], st["K"])
@@ -205,12 +207,12 @@ class TestSTMDocInference:
     def test_strong_prior_pulls_eta_toward_prior_mean(self):
         st = _make_small_doc_state(seed=1)
         # Override Σ to be very tight: posterior should ~= prior mean Γᵀx.
-        Sigma_tight = np.full(st["K"], 1e-6)
+        Sigma_inv_tight = np.diag(np.full(st["K"], 1e6))   # precision = 1/1e-6
         prior_mean = st["Gamma"].T @ st["x"]
         eta_hat, _, _ = _stm_doc_inference(
             indices=st["indices"], counts=st["counts"],
             expElogbeta=st["expElogbeta"],
-            Gamma=st["Gamma"], Sigma_diag=Sigma_tight, x=st["x"],
+            Gamma=st["Gamma"], Sigma_inv=Sigma_inv_tight, x=st["x"],
             max_iter=200, tol=1e-8,
         )
         np.testing.assert_allclose(eta_hat, prior_mean, atol=1e-3)
@@ -353,11 +355,11 @@ class TestMaskedDocInference:
         rng = np.random.default_rng(0)
         expElogbeta = rng.random((K, V)) + 0.1
         Gamma = np.zeros((2, K))
-        Sigma = np.ones(K)
+        Sigma_inv = np.eye(K)   # full (K,K) precision (unit-variance prior)
         indices = np.array([0, 2], dtype=np.int32)
         counts = np.array([3.0, 1.0])
         x = np.array([1.0, 0.0])
-        return expElogbeta, Gamma, Sigma, indices, counts, x
+        return expElogbeta, Gamma, Sigma_inv, indices, counts, x
 
     def test_disallowed_topics_get_zero_theta(self):
         import numpy as np
@@ -366,7 +368,7 @@ class TestMaskedDocInference:
         allowed = np.array([0, 1, 2], dtype=np.int64)  # topics 3,4 disallowed
         eta_hat, nu_d, _ = _stm_doc_inference(
             indices=idx, counts=cnt, expElogbeta=eb, Gamma=G,
-            Sigma_diag=S, x=x, allowed=allowed)
+            Sigma_inv=S, x=x, allowed=allowed)
         theta = _softmax(eta_hat)
         assert theta[3] == 0.0 and theta[4] == 0.0
         assert abs(theta[:3].sum() - 1.0) < 1e-9
@@ -378,9 +380,9 @@ class TestMaskedDocInference:
         from spark_vi.models.topic.stm import _stm_doc_inference
         eb, G, S, idx, cnt, x = self._setup()
         a = _stm_doc_inference(indices=idx, counts=cnt, expElogbeta=eb,
-                               Gamma=G, Sigma_diag=S, x=x, allowed=None)
+                               Gamma=G, Sigma_inv=S, x=x, allowed=None)
         b = _stm_doc_inference(indices=idx, counts=cnt, expElogbeta=eb,
-                               Gamma=G, Sigma_diag=S, x=x,
+                               Gamma=G, Sigma_inv=S, x=x,
                                allowed=np.arange(eb.shape[0], dtype=np.int64))
         np.testing.assert_allclose(a[0], b[0], atol=1e-8)
 

@@ -11,7 +11,7 @@ Generative model:
 
 Variational family:
     q(β_k)  = Dirichlet(λ_k)                               # unchanged from LDA
-    q(η_d)  = N(μ_d, ν_d) with K-diagonal ν_d              # Laplace approximation
+    q(η_d)  = N(μ_d, ν_d) with full (K,K) ν_d              # Laplace approximation
     q(z_dn) = collapsed via Lee/Seung trick                # unchanged from LDA
 
 Per-doc inference is two-step Laplace (ADR 0023):
@@ -21,7 +21,7 @@ Per-doc inference is two-step Laplace (ADR 0023):
 M-step:
     β:  natural-gradient SVI on λ                          # unchanged from LDA
     Γ:  ridge regression on aggregated XᵀX, Xᵀμ; ρ-blended # stochastic-EM
-    Σ:  K-diagonal sample covariance of residuals + diag(ν_d); ρ-blended
+    Σ:  full (K,K) sample covariance of residuals + ν_d scatter; ρ-blended
 
 References:
     Roberts, Stewart, Airoldi 2016. "A Model of Text for Experimentation in the
@@ -39,6 +39,7 @@ from scipy.optimize import minimize
 from scipy.special import digamma, gammaln
 
 from spark_vi.core.model import VIModel
+from spark_vi.models.topic._linalg import nearest_spd, safe_inverse
 from spark_vi.models.topic.types import STMDocument
 
 
@@ -206,9 +207,9 @@ def _spd_inverse(H: np.ndarray) -> np.ndarray:
     difference of two log-sum-exp functions — so the Hessian H at the L-BFGS
     point can fail to be positive-definite when the prior is weak (large Σ) or
     L-BFGS stopped short of the true mode. A raw np.linalg.inv would then return
-    a non-SPD "covariance" with negative variances, silently corrupting
-    residual_diag_stat (which adds diag(ν_d)) and the Gaussian KL (whose
-    slogdet would flip sign).
+    a non-SPD "covariance" with negative variances, silently corrupting the
+    residual_outer_stat scatter (which adds the ν_d sub-block) and the Gaussian
+    KL (whose slogdet would flip sign).
 
     Fast path: if H is PD (Cholesky succeeds) return inv(H) unchanged — the
     overwhelmingly common case, bit-for-bit identical to the prior code.
@@ -233,7 +234,7 @@ def _stm_doc_inference(
     counts: np.ndarray,
     expElogbeta: np.ndarray,
     Gamma: np.ndarray,
-    Sigma_diag: np.ndarray,
+    Sigma_inv: np.ndarray,
     x: np.ndarray,
     max_iter: int = 50,
     tol: float = 1e-4,
@@ -262,11 +263,15 @@ def _stm_doc_inference(
         allowed = np.arange(K, dtype=np.int64)
     sub_expElogbeta = expElogbeta[allowed]
     sub_Gamma = Gamma[:, allowed]
-    sub_Sigma = Sigma_diag[allowed]
+    # NOTE(Task 5): replace precision-slice with marginal sub-block inv(Sigma_AA).
+    # Slicing the full precision is the *conditional* (gated) form; for non-gated
+    # `allowed` is all topics, so the slice is the full precision unchanged. The
+    # gated marginal-vs-conditional correction is Task 5.
+    sub_Sigma_inv = Sigma_inv[np.ix_(allowed, allowed)]
     n_sub = allowed.shape[0]
     common = dict(
         indices=indices, counts=counts, expElogbeta=sub_expElogbeta,
-        Gamma=sub_Gamma, Sigma_inv=np.diag(1.0 / sub_Sigma), x=x,
+        Gamma=sub_Gamma, Sigma_inv=sub_Sigma_inv, x=x,
     )
 
     if reference is None:
@@ -436,7 +441,7 @@ class OnlineSTM(VIModel):
                 "lambda": beta0 * self.gamma_shape,
                 "eta": np.array(self.eta),
                 "Gamma": np.zeros((self.P, self.K), dtype=np.float64),
-                "Sigma": np.full(self.K, self.sigma_init, dtype=np.float64),
+                "Sigma": np.eye(self.K, dtype=np.float64) * self.sigma_init,
             }
         if self.random_seed is None:
             lam = np.random.gamma(
@@ -453,7 +458,7 @@ class OnlineSTM(VIModel):
             "lambda": lam,
             "eta": np.array(self.eta),
             "Gamma": np.zeros((self.P, self.K), dtype=np.float64),
-            "Sigma": np.full(self.K, self.sigma_init, dtype=np.float64),
+            "Sigma": np.eye(self.K, dtype=np.float64) * self.sigma_init,
         }
 
     def get_metadata(self) -> dict[str, Any]:
@@ -469,14 +474,17 @@ class OnlineSTM(VIModel):
         For each doc: run _stm_doc_inference to get (η̂_d, ν_d). Accumulate:
         - lambda_stats: K×V suff-stats for β SVI step (same shape as LDA)
         - XtX, XtMu: P×P and P×K cross-products for Γ ridge regression
-        - residual_diag_stat: K-vector for diagonal Σ sample covariance
+        - residual_outer_stat: (K,K) outer-product scatter for full Σ sample cov
+        - n_pairs_stat: (K,K) per-pair support count (docs where both topics free)
+        - n_docs_per_topic: K-vector per-topic doc count (drives the Γ lazy rule)
         - doc_loglik_sum: data log-lik term at MAP (for ELBO)
         - doc_eta_kl_sum: KL(N(η̂, ν_d) || N(Γx, Σ)) (for ELBO)
         - n_docs scalar
         """
         lam = global_params["lambda"]
         Gamma = global_params["Gamma"]
-        Sigma_diag = global_params["Sigma"]
+        Sigma = global_params["Sigma"]
+        Sigma_inv = safe_inverse(Sigma)
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
 
         K, V = self.K, self.V
@@ -490,13 +498,13 @@ class OnlineSTM(VIModel):
         XtX = np.zeros((P, P), dtype=np.float64)            # all-doc cross-product
         XtX_groups = np.zeros((G, P, P), dtype=np.float64)  # per-group cross-product
         XtMu = np.zeros((P, K), dtype=np.float64)
-        residual_diag = np.zeros(K, dtype=np.float64)
+        residual_outer = np.zeros((K, K), dtype=np.float64)
+        n_pairs = np.zeros((K, K), dtype=np.float64)
         n_docs_per_topic = np.zeros(K, dtype=np.float64)
         doc_loglik = 0.0
         doc_eta_kl = 0.0
         n_docs = 0
 
-        log_Sigma_diag = np.log(Sigma_diag)
         ref = self._reference_index()
 
         for doc in rows:
@@ -504,7 +512,7 @@ class OnlineSTM(VIModel):
             eta_hat, nu_d, _ = _stm_doc_inference(
                 indices=doc.indices, counts=doc.counts,
                 expElogbeta=expElogbeta,
-                Gamma=Gamma, Sigma_diag=Sigma_diag, x=doc.x,
+                Gamma=Gamma, Sigma_inv=Sigma_inv, x=doc.x,
                 max_iter=self.lbfgs_max_iter, tol=self.lbfgs_tol,
                 allowed=allowed, reference=ref,
             )
@@ -534,24 +542,31 @@ class OnlineSTM(VIModel):
             else:
                 allowed_free = allowed[allowed != ref]
 
-            # XtMu / residual_diag / counts only over the free prior topics.
-            eta_allowed = eta_hat[allowed_free]
-            XtMu[:, allowed_free] += np.outer(doc.x, eta_allowed)
-            resid = np.zeros(K, dtype=np.float64)
-            resid[allowed_free] = eta_allowed - (Gamma.T @ doc.x)[allowed_free]
-            residual_diag[allowed_free] += resid[allowed_free] ** 2 + np.diag(nu_d)[allowed_free]
-            n_docs_per_topic[allowed_free] += 1.0
+            # XtMu / residual scatter / counts only over the free prior topics.
+            af = allowed_free
+            eta_allowed = eta_hat[af]
+            XtMu[:, af] += np.outer(doc.x, eta_allowed)
+            # resid is the dense over-`af` residual vector (length len(af)).
+            resid = eta_allowed - (Gamma.T @ doc.x)[af]
+            # Full residual outer-product scatter + the Laplace covariance ν_d
+            # sub-block, accumulated into the K×K stat over the free pairs.
+            contrib = np.outer(resid, resid) + nu_d[np.ix_(af, af)]
+            residual_outer[np.ix_(af, af)] += contrib
+            n_pairs[np.ix_(af, af)] += 1.0
+            n_docs_per_topic[af] += 1.0
 
             doc_loglik += float(np.sum(doc.counts * np.log(q_w)))
-            # KL over the free prior sub-space only.
-            al = allowed_free
-            tr_term = float(np.sum(np.diag(nu_d)[al] / Sigma_diag[al]))
-            quad_term = float(np.sum(resid[al] ** 2 / Sigma_diag[al]))
-            sub_nu = nu_d[np.ix_(al, al)]
+            # KL(N(η̂, ν_d) || N(Γx, Σ)) over the free prior sub-space only, using
+            # the marginal sub-block of Σ over `af` (full-matrix form).
+            sub_Sigma = Sigma[np.ix_(af, af)]
+            sub_Sigma_inv = safe_inverse(sub_Sigma)
+            sub_nu = nu_d[np.ix_(af, af)]
+            tr_term = float(np.trace(sub_Sigma_inv @ sub_nu))
+            quad_term = float(resid @ sub_Sigma_inv @ resid)
             # sub_nu is SPD by construction (_spd_inverse), so slogdet sign is +1.
-            _sign, logdet_nu = np.linalg.slogdet(sub_nu)
-            logdet_Sigma = float(np.sum(log_Sigma_diag[al]))
-            doc_eta_kl += 0.5 * (tr_term + quad_term - len(al) + logdet_Sigma - logdet_nu)
+            _s, logdet_nu = np.linalg.slogdet(sub_nu)
+            _s2, logdet_Sigma = np.linalg.slogdet(sub_Sigma)
+            doc_eta_kl += 0.5 * (tr_term + quad_term - len(af) + logdet_Sigma - logdet_nu)
             n_docs += 1
 
         return {
@@ -559,7 +574,8 @@ class OnlineSTM(VIModel):
             "XtX": XtX,
             "XtX_groups": XtX_groups,
             "XtMu": XtMu,
-            "residual_diag_stat": residual_diag,
+            "residual_outer_stat": residual_outer,
+            "n_pairs_stat": n_pairs,
             "n_docs_per_topic": n_docs_per_topic,
             "doc_loglik_sum": np.array(doc_loglik),
             "doc_eta_kl_sum": np.array(doc_eta_kl),
@@ -579,8 +595,15 @@ class OnlineSTM(VIModel):
         λ:  λ_new = (1-ρ)·λ + ρ·(η + lambda_stats)        # natural-gradient SVI
         Γ:  Γ̂ = (XᵀX + ridge·I)⁻¹ XᵀMu                    # ridge OLS on aggregated stats
             Γ_new = (1-ρ)·Γ + ρ·Γ̂                         # stochastic-EM ρ-blend
-        Σ:  σ²_k_target = residual_diag_stat_k / n_docs   # diagonal sample cov + Laplace correction
-            σ²_k_new   = max((1-ρ)·σ²_k + ρ·σ²_k_target, SIGMA_FLOOR)
+        Σ:  Σ_target[i,j] = residual_outer_stat[i,j] / n_pairs[i,j]   # full (K,K) sample cov
+            Σ_new = nearest_spd((1-ρ)·Σ + ρ·Σ_target + ridge·I, floor=SIGMA_FLOOR)
+
+        The Σ M-step is the plain full-covariance MLE (NO regularizer this task —
+        the inverse-Wishart prior + diagonal shrink are Task 4). The per-pair MLE
+        is lazy: a pair (i,j) with zero support (no doc had both i,j free this
+        batch) keeps its current Σ value, so absent blocks never decay. After the
+        ρ-blend, nearest_spd repairs any loss of positive-definiteness from
+        stitching the scatter over inconsistent doc subsets.
 
         Lazy block updates (ADR 0027): any block (background or a group's
         foreground) with zero documents in this minibatch is left unchanged —
@@ -591,7 +614,7 @@ class OnlineSTM(VIModel):
         lam = global_params["lambda"]
         eta = float(global_params["eta"])
         Gamma = global_params["Gamma"]
-        Sigma_diag = global_params["Sigma"]
+        Sigma = global_params["Sigma"]
 
         # β: SVI natural-gradient step. Note: STM's lambda_stats already
         # incorporates expElogbeta (via phi in local_update), so no extra
@@ -627,21 +650,20 @@ class OnlineSTM(VIModel):
                     XtX_groups[gi] + ridge_eye, XtMu[:, cols])
         new_Gamma = (1.0 - learning_rate) * Gamma + learning_rate * Gamma_target
 
-        # Σ: per-topic divisor (background -> n_docs; foreground -> group docs).
-        # Topics with no docs this batch keep their current variance (target
-        # defaults to current, so the ρ-blend is a no-op) — same lazy rule.
-        present = n_docs_per_topic > 0
-        Sigma_target = Sigma_diag.copy()
-        if self.sigma_prior_scale is None:
-            Sigma_target[present] = (target_stats["residual_diag_stat"][present]
-                                     / n_docs_per_topic[present])
-        else:
-            c0, s0 = self.sigma_prior_count, self.sigma_prior_scale
-            Sigma_target[present] = (
-                (target_stats["residual_diag_stat"][present] + c0 * s0)
-                / (n_docs_per_topic[present] + c0))
-        new_Sigma = (1.0 - learning_rate) * Sigma_diag + learning_rate * Sigma_target
-        new_Sigma = np.maximum(new_Sigma, self.SIGMA_FLOOR)
+        # Σ: full-covariance per-pair MLE. Each entry Σ[i,j] is the mean over the
+        # docs where both i and j were free of (resid_i·resid_j + ν_d[i,j]). A
+        # pair with no support keeps its current value (lazy rule: target defaults
+        # to the current Σ, so the ρ-blend is a no-op there).
+        S = target_stats["residual_outer_stat"]
+        N = target_stats["n_pairs_stat"]
+        Sigma_target = Sigma.copy()
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mle = np.where(N > 0, S / np.where(N > 0, N, 1.0), Sigma)
+        present_pairs = N > 0
+        Sigma_target[present_pairs] = mle[present_pairs]
+        new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
+        new_Sigma = nearest_spd(new_Sigma + self.sigma_ridge * np.eye(self.K),
+                                floor=self.SIGMA_FLOOR)
 
         return {
             "lambda": new_lam,
@@ -684,13 +706,13 @@ class OnlineSTM(VIModel):
         """
         lam = global_params["lambda"]
         Gamma = global_params["Gamma"]
-        Sigma_diag = global_params["Sigma"]
+        Sigma_inv = safe_inverse(global_params["Sigma"])
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
 
         eta_hat, _, _ = _stm_doc_inference(
             indices=row.indices, counts=row.counts,
             expElogbeta=expElogbeta,
-            Gamma=Gamma, Sigma_diag=Sigma_diag, x=row.x,
+            Gamma=Gamma, Sigma_inv=Sigma_inv, x=row.x,
             max_iter=self.lbfgs_max_iter, tol=self.lbfgs_tol,
             reference=self._reference_index(),
         )
@@ -704,11 +726,12 @@ class OnlineSTM(VIModel):
         """
         Gamma = global_params["Gamma"]
         Sigma = global_params["Sigma"]
+        sigma_var = np.diag(Sigma)  # per-topic variances (Σ is now (K,K))
         lam = global_params["lambda"]
         lam_row_sums = lam.sum(axis=1)
         base = (
             f"|Γ|[max={np.abs(Gamma).max():.3g} mean={np.abs(Gamma).mean():.3g}], "
-            f"Σ[min={Sigma.min():.3g} max={Sigma.max():.3g}], "
+            f"Σ[min={sigma_var.min():.3g} max={sigma_var.max():.3g}], "
             f"Σλ_k[min={lam_row_sums.min():.3g} max={lam_row_sums.max():.3g}]"
         )
         if self.topic_blocks is None:

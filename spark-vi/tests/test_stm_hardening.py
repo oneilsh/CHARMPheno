@@ -56,6 +56,10 @@ def test_spectral_init_makes_fit_init_independent():
 
 
 @pytest.mark.slow
+@pytest.mark.xfail(strict=True, reason="Task 3 drops the diagonal inverse-gamma "
+                   "Sigma prior for the plain full-covariance MLE; Task 4 restores "
+                   "it as the inverse-Wishart generalization. sigma_prior_scale is a "
+                   "no-op until then, so on==off and the shrink assertion cannot hold.")
 def test_sigma_prior_reduces_blowup():
     # fit_stm scales minibatch stats by D/batch=15, so effective pseudo-doc
     # count must dominate the scaled minibatch size (500 >> 100) to meaningfully

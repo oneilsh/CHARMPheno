@@ -34,16 +34,22 @@ def test_canonical_collapse_update_global_matches_original_formulas():
     stats = model.local_update(list(docs), gp0)
     out = model.update_global(gp0, stats, 0.5)
     # Original closed forms recomputed independently from the stats.
+    from spark_vi.models.topic._linalg import nearest_spd
     ridge = model.sigma_ridge * np.eye(P)
     Gamma_target = np.linalg.solve(stats["XtX"] + ridge, stats["XtMu"])
     exp_Gamma = 0.5 * gp0["Gamma"] + 0.5 * Gamma_target
-    Sigma_target = stats["residual_diag_stat"] / float(stats["n_docs"])
-    exp_Sigma = np.maximum(0.5 * gp0["Sigma"] + 0.5 * Sigma_target, model.SIGMA_FLOOR)
+    # Full-cov Σ M-step: per-pair MLE = scatter / support, ρ-blend, nearest_spd.
+    Sigma_target = stats["residual_outer_stat"] / stats["n_pairs_stat"]
+    blended = 0.5 * gp0["Sigma"] + 0.5 * Sigma_target
+    exp_Sigma = nearest_spd(blended + model.sigma_ridge * np.eye(K),
+                            floor=model.SIGMA_FLOOR)
     target_lam = float(gp0["eta"]) + stats["lambda_stats"]
     exp_lam = 0.5 * gp0["lambda"] + 0.5 * target_lam
-    # The None-path Sigma divisor must be uniformly n_docs (every topic allowed).
+    # The None-path support must be uniformly n_docs (every topic pair allowed).
     np.testing.assert_array_equal(stats["n_docs_per_topic"],
                                   np.full(K, float(stats["n_docs"])))
+    np.testing.assert_array_equal(stats["n_pairs_stat"],
+                                  np.full((K, K), float(stats["n_docs"])))
     np.testing.assert_allclose(out["Gamma"], exp_Gamma, atol=1e-12)
     np.testing.assert_allclose(out["Sigma"], exp_Sigma, atol=1e-12)
     np.testing.assert_allclose(out["lambda"], exp_lam, atol=1e-12)
@@ -95,16 +101,19 @@ def test_absent_group_block_left_unchanged_lazy_update():
     gp = model.initialize_global(None)
     # Seed distinctive, non-default values on the rare block so any decay shows.
     gp["Gamma"][:, 2] = np.array([0.7, -0.4])
-    gp["Sigma"][2] = 0.9
+    gp["Sigma"][2, 2] = 0.9
     stats = model.local_update(docs, gp)
     assert stats["n_docs_per_topic"][2] == 0.0  # precondition: 'rare' absent
     out = model.update_global(gp, stats, 0.5)
-    # Rare block untouched (the fix).
+    # Rare block untouched (the fix): its variance and cross-covariances with the
+    # absent block keep their current values (no support -> lazy no-op).
     np.testing.assert_array_equal(out["Gamma"][:, 2], np.array([0.7, -0.4]))
-    assert out["Sigma"][2] == 0.9
-    # Background blocks DID update (sanity: lazy logic didn't freeze everything).
+    # Up to the sigma_ridge nugget the full-cov M-step adds to every diagonal
+    # (Σ + ridge·I before nearest_spd), the unsupported variance is unchanged.
+    assert out["Sigma"][2, 2] == pytest.approx(0.9, abs=model.sigma_ridge + 1e-12)
+    # Background block variances DID update (sanity: lazy logic didn't freeze all).
+    assert not np.allclose(np.diag(out["Sigma"])[:2], np.diag(gp["Sigma"])[:2])
     assert not np.allclose(out["Gamma"][:, :2], gp["Gamma"][:, :2])
-    assert not np.allclose(out["Sigma"][:2], gp["Sigma"][:2])
 
 
 def test_present_group_block_updates_via_block_formula():
@@ -121,14 +130,23 @@ def test_present_group_block_updates_via_block_formula():
     stats = model.local_update(docs, gp)
     assert stats["n_docs_per_topic"][2] == 4.0  # precondition: 'rare' present
     out = model.update_global(gp, stats, 0.5)
+    from spark_vi.models.topic._linalg import nearest_spd
     ridge = model.sigma_ridge * np.eye(P)
     cols = part.block_indices("rare")  # [2]
     Gt = np.linalg.solve(stats["XtX_groups"][0] + ridge, stats["XtMu"][:, cols])
     exp_Gamma_col = 0.5 * gp["Gamma"][:, cols] + 0.5 * Gt
     np.testing.assert_allclose(out["Gamma"][:, cols], exp_Gamma_col, atol=1e-12)
-    St = stats["residual_diag_stat"][2] / 4.0
-    exp_Sigma = max(0.5 * gp["Sigma"][2] + 0.5 * St, model.SIGMA_FLOOR)
-    np.testing.assert_allclose(out["Sigma"][2], exp_Sigma, atol=1e-12)
+    # Full-cov Σ M-step: per-pair MLE = scatter / support over present pairs,
+    # ρ-blend, then nearest_spd over the assembled matrix.
+    S, N = stats["residual_outer_stat"], stats["n_pairs_stat"]
+    mle = np.where(N > 0, S / np.where(N > 0, N, 1.0), gp["Sigma"])
+    Sigma_target = gp["Sigma"].copy()
+    Sigma_target[N > 0] = mle[N > 0]
+    blended = 0.5 * gp["Sigma"] + 0.5 * Sigma_target
+    exp_Sigma = nearest_spd(blended + model.sigma_ridge * np.eye(K),
+                            floor=model.SIGMA_FLOOR)
+    np.testing.assert_allclose(out["Sigma"], exp_Sigma, atol=1e-12)
+    assert stats["n_pairs_stat"][2, 2] == 4.0  # 'rare' pair support is the group docs
 
 
 def test_topic_blocks_k_mismatch_raises():
@@ -169,9 +187,9 @@ class TestInitializeGlobal:
         assert gp["lambda"].shape == (4, 20)
         assert gp["eta"].shape == ()
         assert gp["Gamma"].shape == (2, 4)
-        assert gp["Sigma"].shape == (4,)
-        # Sigma starts at sigma_init.
-        np.testing.assert_allclose(gp["Sigma"], np.full(4, 1.0))
+        assert gp["Sigma"].shape == (4, 4)
+        # Sigma starts at sigma_init * I (full (K,K) covariance).
+        np.testing.assert_allclose(gp["Sigma"], np.eye(4) * 1.0)
         # Gamma starts at zeros (covariates have no effect at init).
         np.testing.assert_allclose(gp["Gamma"], np.zeros((2, 4)))
 
@@ -193,7 +211,7 @@ class TestLocalUpdate:
         m = OnlineSTM(K=3, vocab_size=10, P=2, random_seed=0)
         gp = m.initialize_global(None)
         # Inject a non-degenerate Σ so Laplace doesn't collapse.
-        gp["Sigma"] = np.full(3, 1.0)
+        gp["Sigma"] = np.eye(3)
         from spark_vi.models.topic.types import STMDocument
         docs = [
             STMDocument(
@@ -213,7 +231,8 @@ class TestLocalUpdate:
         assert ss["lambda_stats"].shape == (3, 10)
         assert ss["XtX"].shape == (2, 2)
         assert ss["XtMu"].shape == (2, 3)
-        assert ss["residual_diag_stat"].shape == (3,)
+        assert ss["residual_outer_stat"].shape == (3, 3)
+        assert ss["n_pairs_stat"].shape == (3, 3)
         assert ss["n_docs"].shape == ()
         assert float(ss["n_docs"]) == 2.0
         # ELBO suff stats.
@@ -253,7 +272,11 @@ class TestUpdateGlobal:
             "XtX": np.eye(2) * 100.0,
             "XtX_groups": np.zeros((0, 2, 2)),          # no foreground groups
             "XtMu": np.array([[1.0, -1.0, 0.5], [0.5, 0.0, -0.5]]),
-            "residual_diag_stat": np.array([5.0, 3.0, 2.0]),
+            # Full-cov residual scatter (K,K, SPD-ish) + per-pair support.
+            "residual_outer_stat": np.array([[5.0, 1.0, 0.5],
+                                             [1.0, 3.0, 0.2],
+                                             [0.5, 0.2, 2.0]]),
+            "n_pairs_stat": np.full((3, 3), 50.0),
             "n_docs_per_topic": np.full(3, 50.0),        # all docs see all topics
             "doc_loglik_sum": np.array(-100.0),
             "doc_eta_kl_sum": np.array(5.0),
@@ -290,15 +313,19 @@ class TestUpdateGlobal:
     def test_sigma_sample_covariance(self):
         m, gp, target = self._make_state_with_stats()
         gp_new = m.update_global(gp, target, learning_rate=1.0)
-        expected_Sigma = target["residual_diag_stat"] / float(target["n_docs"])
+        # Full-cov per-pair MLE = scatter / support, then nearest_spd + ridge.
+        from spark_vi.models.topic._linalg import nearest_spd
+        mle = target["residual_outer_stat"] / target["n_pairs_stat"]
+        expected_Sigma = nearest_spd(mle + m.sigma_ridge * np.eye(3),
+                                     floor=m.SIGMA_FLOOR)
         np.testing.assert_allclose(gp_new["Sigma"], expected_Sigma)
 
     def test_sigma_minimum_floor(self):
-        """Σ should never go below a small floor to keep Laplace well-defined."""
+        """Σ must stay SPD (eigenvalues floored) to keep Laplace well-defined."""
         m, gp, target = self._make_state_with_stats()
-        target["residual_diag_stat"] = np.array([0.0, 0.0, 0.0])
+        target["residual_outer_stat"] = np.zeros((3, 3))
         gp_new = m.update_global(gp, target, learning_rate=1.0)
-        assert np.all(gp_new["Sigma"] > 0)
+        assert np.all(np.linalg.eigvalsh(gp_new["Sigma"]) > 0)
 
 
 class TestComputeELBO:
@@ -367,4 +394,4 @@ class TestIterationDiagnostics:
         assert "Gamma" in d
         assert "Sigma" in d
         assert d["Gamma"].shape == (2, 3)
-        assert d["Sigma"].shape == (3,)
+        assert d["Sigma"].shape == (3, 3)

@@ -31,7 +31,7 @@ def test_reference_inference_pins_reference_to_zero():
         counts=np.array([5.0, 5.0]),
         expElogbeta=_BETA3,
         Gamma=np.zeros((1, 3)),
-        Sigma_diag=np.full(3, 5.0),
+        Sigma_inv=np.diag(np.full(3, 1.0 / 5.0)),
         x=np.array([1.0]),
         reference=0,
     )
@@ -51,7 +51,7 @@ def test_reference_inference_recovers_dominant_topic():
         counts=np.array([8.0, 8.0]),
         expElogbeta=_BETA3,
         Gamma=np.zeros((1, 3)),
-        Sigma_diag=np.full(3, 5.0),
+        Sigma_inv=np.diag(np.full(3, 1.0 / 5.0)),
         x=np.array([1.0]),
         reference=0,
     )
@@ -67,7 +67,7 @@ def test_reference_inference_respects_allowed():
         counts=np.array([4.0, 4.0]),
         expElogbeta=_BETA3,
         Gamma=np.zeros((1, 3)),
-        Sigma_diag=np.full(3, 5.0),
+        Sigma_inv=np.diag(np.full(3, 1.0 / 5.0)),
         x=np.array([1.0]),
         allowed=np.array([0, 1], dtype=np.int64),   # topic 2 disallowed
         reference=0,
@@ -100,7 +100,7 @@ def test_reference_not_in_allowed_raises():
             counts=np.array([4.0, 4.0]),
             expElogbeta=_BETA3,
             Gamma=np.zeros((1, 3)),
-            Sigma_diag=np.full(3, 5.0),
+            Sigma_inv=np.diag(np.full(3, 1.0 / 5.0)),
             x=np.array([1.0]),
             allowed=np.array([0, 1, 2], dtype=np.int64),
             reference=5,
@@ -137,7 +137,11 @@ def test_reference_gamma_column_zero_and_sigma_inert():
     for _ in range(8):
         gp = m.update_global(gp, m.local_update(docs, gp), learning_rate=1.0)
     assert np.allclose(gp["Gamma"][:, 0], 0.0)
-    assert gp["Sigma"][0] == pytest.approx(3.0)
+    # Reference topic carries no free Σ entry, so its diagonal variance stays at
+    # sigma_init (no support -> lazy no-op). The full-cov M-step adds sigma_ridge
+    # to every diagonal (Σ + ridge·I before nearest_spd), so it drifts only by
+    # that nugget per step.
+    assert gp["Sigma"][0, 0] == pytest.approx(3.0, abs=8 * m.sigma_ridge + 1e-9)
 
 
 def test_reference_topic_still_learns_content():
