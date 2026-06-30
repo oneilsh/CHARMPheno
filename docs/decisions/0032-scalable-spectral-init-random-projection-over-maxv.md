@@ -4,8 +4,13 @@
 [`spectral_init_scalable.py`](../../spark-vi/spark_vi/models/topic/spectral_init_scalable.py)
 is built and synthetic-equivalence-validated, and is threaded behind the opt-in
 `spectral_method="scalable"` knob; the dense `spectral_init.py` remains the
-exact, validated default for small V. Real-data equivalence on the cancer cohort
-is pending exp 0017.)
+exact, validated default for small V. Real-data topic-equivalence is CONFIRMED by
+exp 0017: all 40 cancer phenotypes recovered, NPMI on par with dense 0015 (+0.166
+vs +0.173). Σ-equivalence is PARTIAL — one dominant topic (hypertension/
+cholesterol) escaped to Σ~8e5 vs dense's fully-bounded 7.56, attributed to JL
+approximation pressure on the most-dominant co-occurrence geometry; see insight
+0031. The scalable path is validated for phenotype discovery; Σ stability deferred
+to the Σ-prior lever (exp 0018) or a larger projection dimension (exp 0019).)
 **Date:** 2026-06-29
 
 ## Context
@@ -115,8 +120,10 @@ the current mean-relative `min_marginal_frac` floor.
   (threaded through `StreamingSTM` and both drivers, Task 7). The dense spectral
   init is the validated default-ON stack (exp 0015 / insight 0030); the scalable
   path is synthetic-equivalence-validated (planted rare-arm recovery matches
-  dense at d≈1000; survives down to d=201 at V=3000) with real-data equivalence
-  pending exp 0017.
+  dense at d≈1000; survives down to d=201 at V=3000). Real-data topic-equivalence is
+  confirmed (exp 0017: all 40 cancer phenotypes, NPMI +0.166 vs dense’s +0.173);
+  Σ-equivalence is partial — one dominant topic escaped to Σ~8e5 (see insight 0031);
+  Σ stability follow-ups are exps 0018 (Σ-prior) and 0019 (larger d).
 - **Dirichlet-family models are unaffected** — spectral init is an STM concern.
 
 ## References
