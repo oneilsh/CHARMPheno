@@ -133,6 +133,8 @@ class StreamingSTM:
         sigma_ridge: float = 1e-6,
         sigma_prior_scale: float | None = None,
         sigma_prior_count: float = 0.0,
+        sigma_diag_shrink: float = 0.0,
+        min_pair_support: int = 1,
         lbfgs_max_iter: int = 50,
         lbfgs_tol: float = 1e-4,
         random_seed: int | None = None,
@@ -179,6 +181,8 @@ class StreamingSTM:
         self.sigma_ridge = sigma_ridge
         self.sigma_prior_scale = sigma_prior_scale
         self.sigma_prior_count = sigma_prior_count
+        self.sigma_diag_shrink = float(sigma_diag_shrink)
+        self.min_pair_support = int(min_pair_support)
         self.lbfgs_max_iter = lbfgs_max_iter
         self.lbfgs_tol = lbfgs_tol
         self.random_seed = random_seed
@@ -282,6 +286,8 @@ class StreamingSTM:
             sigma_ridge=self.sigma_ridge,
             sigma_prior_scale=self.sigma_prior_scale,
             sigma_prior_count=self.sigma_prior_count,
+            sigma_diag_shrink=self.sigma_diag_shrink,
+            min_pair_support=self.min_pair_support,
             lbfgs_max_iter=self.lbfgs_max_iter,
             lbfgs_tol=self.lbfgs_tol,
             random_seed=self.random_seed,
@@ -376,6 +382,8 @@ class StreamingSTM:
             "reference_topic": self.reference_topic,
             "sigma_prior_scale": self.sigma_prior_scale,
             "sigma_prior_count": self.sigma_prior_count,
+            "sigma_diag_shrink": self.sigma_diag_shrink,
+            "min_pair_support": self.min_pair_support,
             "spectral_init": self.spectral_init,
             "spectral_method": self.spectral_method,
         })
@@ -464,6 +472,14 @@ class STMModel:
             diagnostic_traces=dict(self.diagnostic_traces),
         )
         save_result(result, out_dir)
+        # Derived sidecar: correlation matrix R_ij = Sigma_ij / sqrt(Sigma_ii Sigma_jj).
+        # Written to params/correlation.npy alongside the engine-managed params so
+        # a reloaded model (or downstream dashboard) can read it without re-deriving.
+        from spark_vi.models.topic._linalg import topic_correlation
+        np.save(
+            out_dir / "params" / "correlation.npy",
+            topic_correlation(self.global_params["Sigma"]),
+        )
         # Sidecars: formulaic ModelSpec + covariate names list.
         with (out_dir / "model_spec.pkl").open("wb") as f:
             pickle.dump(self.model_spec, f)

@@ -281,6 +281,8 @@ class TestStreamingSTMHardeningThreading:
             "reference_topic": True,
             "sigma_prior_scale": 2.0,
             "sigma_prior_count": 500.0,
+            "sigma_diag_shrink": 0.0,
+            "min_pair_support": 1,
             "spectral_init": False,
             "spectral_method": "dense",
         }
@@ -303,6 +305,8 @@ class TestStreamingSTMHardeningThreading:
             "reference_topic": True,
             "sigma_prior_scale": None,
             "sigma_prior_count": 0.0,
+            "sigma_diag_shrink": 0.0,
+            "min_pair_support": 1,
             "spectral_init": True,
             "spectral_method": "dense",
         }
@@ -463,3 +467,34 @@ class TestStreamingSTMHardeningThreading:
             covariate_names=["a", "b"], random_seed=0)
         model = est.fit(self._toy_df(spark), max_iter=2, subsampling_rate=1.0)
         assert model.metadata["stm_hardening"]["spectral_method"] == "dense"
+
+
+# ---------------------------------------------------------------------------
+# Fixture: tiny dataset for full-Sigma / correlation tests (Path B, formula)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def tiny_stm_dataset(spark):
+    """Six-document, 8-vocab corpus with a single binary covariate 'x'."""
+    from pyspark.ml.linalg import SparseVector, DenseVector
+    rows = [
+        (SparseVector(8, [0, 2], [3.0, 1.0]), DenseVector([1.0, 0.0])),
+        (SparseVector(8, [1, 3], [2.0, 2.0]), DenseVector([0.0, 1.0])),
+        (SparseVector(8, [0, 4], [1.0, 2.0]), DenseVector([1.0, 0.5])),
+        (SparseVector(8, [5, 6], [1.0, 1.0]), DenseVector([0.0, 1.0])),
+        (SparseVector(8, [2, 7], [2.0, 1.0]), DenseVector([1.0, 0.2])),
+        (SparseVector(8, [1, 6], [1.0, 3.0]), DenseVector([0.0, 0.8])),
+    ]
+    return spark.createDataFrame(rows, ["features", "covariates"])
+
+
+def test_streaming_stm_full_sigma_metadata_and_shapes(spark, tiny_stm_dataset):
+    from spark_vi.mllib.topic.stm import StreamingSTM
+    est = StreamingSTM(K=4, features_col="features", covariates_col="covariates",
+                       covariate_names=["a", "b"],
+                       sigma_diag_shrink=0.0, min_pair_support=3,
+                       reference_topic=False, spectral_init=False)
+    model = est.fit(tiny_stm_dataset, max_iter=2, subsampling_rate=1.0)
+    assert model.global_params["Sigma"].shape == (4, 4)
+    assert model.metadata["stm_hardening"]["min_pair_support"] == 3
+    assert model.metadata["stm_hardening"]["sigma_diag_shrink"] == 0.0
