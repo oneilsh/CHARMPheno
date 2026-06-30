@@ -216,6 +216,37 @@ def test_unsupported_entry_exactly_preserved():
     assert out["Sigma"][1, 0] == Sigma0[1, 0]
 
 
+def test_gated_prior_uses_marginal_subblock_not_conditional():
+    """Gated doc uses the MARGINAL sub-block precision inv(Sigma_AA), not the
+    conditional (sub-block of the inverse). They differ whenever Sigma has
+    off-diagonal structure. This test patches the Hessian builder to capture
+    the actual precision passed in, then asserts it equals the marginal form."""
+    from spark_vi.models.topic import stm as stm_mod
+    from spark_vi.models.topic.stm import _stm_doc_inference
+    from spark_vi.models.topic._linalg import safe_inverse
+    Sigma = np.array([[2.0, 0.8, 0.5],
+                      [0.8, 1.5, 0.3],
+                      [0.5, 0.3, 1.0]])
+    allowed = np.array([0, 2], dtype=np.int64)  # drop topic 1
+    marginal = safe_inverse(Sigma[np.ix_(allowed, allowed)])
+    conditional = safe_inverse(Sigma)[np.ix_(allowed, allowed)]
+    assert not np.allclose(marginal, conditional)  # they genuinely differ
+    # capture the precision actually used by patching the hessian builder
+    seen = {}
+    orig = stm_mod._stm_neg_log_joint_hessian
+    def spy(eta, **kw): seen["Sigma_inv"] = kw["Sigma_inv"]; return orig(eta, **kw)
+    stm_mod._stm_neg_log_joint_hessian = spy
+    try:
+        _stm_doc_inference(
+            indices=np.array([0,1],dtype=np.int32), counts=np.array([1.0,1.0]),
+            expElogbeta=np.ones((3,2))*0.5, Gamma=np.zeros((1,3)),
+            Sigma_inv_allowed=marginal, x=np.array([1.0]),
+            allowed=allowed, reference=None, max_iter=5)
+    finally:
+        stm_mod._stm_neg_log_joint_hessian = orig
+    assert np.allclose(seen["Sigma_inv"], marginal)
+
+
 def test_nongated_e2e_offdiagonal_sign():
     """End-to-end (token-driven E-step + M-step), the recovered off-diagonal Σ
     has the planted POSITIVE sign for the correlated pair. The magnitude is

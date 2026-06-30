@@ -25,13 +25,18 @@ _BETA3 = np.array([
 
 def test_reference_inference_pins_reference_to_zero():
     """With reference=0, topic 0's eta is exactly 0, it has no variance, and
-    theta is still a valid distribution that gives the reference positive mass."""
+    theta is still a valid distribution that gives the reference positive mass.
+
+    allowed=None means all 3 topics; marginal precision over full set = the full
+    diagonal precision matrix."""
+    K = 3
+    full_prec = np.diag(np.full(K, 1.0 / 5.0))
     eta_hat, nu_d, _ = _stm_doc_inference(
         indices=np.array([2, 3], dtype=np.int32),
         counts=np.array([5.0, 5.0]),
         expElogbeta=_BETA3,
         Gamma=np.zeros((1, 3)),
-        Sigma_inv=np.diag(np.full(3, 1.0 / 5.0)),
+        Sigma_inv_allowed=full_prec,
         x=np.array([1.0]),
         reference=0,
     )
@@ -45,13 +50,17 @@ def test_reference_inference_pins_reference_to_zero():
 
 def test_reference_inference_recovers_dominant_topic():
     """A doc made of pure topic-1 words puts most theta mass on topic 1 even
-    though topic 0 is pinned as the reference — the free optimization works."""
+    though topic 0 is pinned as the reference — the free optimization works.
+
+    allowed=None means all 3 topics; marginal precision over full set = full_prec."""
+    K = 3
+    full_prec = np.diag(np.full(K, 1.0 / 5.0))
     eta_hat, _, _ = _stm_doc_inference(
         indices=np.array([2, 3], dtype=np.int32),   # topic-1's words
         counts=np.array([8.0, 8.0]),
         expElogbeta=_BETA3,
         Gamma=np.zeros((1, 3)),
-        Sigma_inv=np.diag(np.full(3, 1.0 / 5.0)),
+        Sigma_inv_allowed=full_prec,
         x=np.array([1.0]),
         reference=0,
     )
@@ -61,15 +70,22 @@ def test_reference_inference_recovers_dominant_topic():
 
 def test_reference_inference_respects_allowed():
     """reference must sit inside allowed; disallowed topics stay at theta=0 and
-    the reference is still pinned to 0."""
+    the reference is still pinned to 0.
+
+    allowed=[0,1] (topic 2 disallowed); marginal precision over {0,1} is the
+    2x2 sub-block of the full diagonal precision matrix."""
+    K = 3
+    full_prec = np.diag(np.full(K, 1.0 / 5.0))
+    allowed = np.array([0, 1], dtype=np.int64)
+    prec_allowed = full_prec[np.ix_(allowed, allowed)]
     eta_hat, nu_d, _ = _stm_doc_inference(
         indices=np.array([0, 1], dtype=np.int32),
         counts=np.array([4.0, 4.0]),
         expElogbeta=_BETA3,
         Gamma=np.zeros((1, 3)),
-        Sigma_inv=np.diag(np.full(3, 1.0 / 5.0)),
+        Sigma_inv_allowed=prec_allowed,
         x=np.array([1.0]),
-        allowed=np.array([0, 1], dtype=np.int64),   # topic 2 disallowed
+        allowed=allowed,   # topic 2 disallowed
         reference=0,
     )
     assert eta_hat[0] == 0.0
@@ -93,14 +109,18 @@ def test_reference_index_toggles():
 
 def test_reference_not_in_allowed_raises():
     """When reference is not in allowed, _stm_doc_inference must raise ValueError
-    rather than silently misplacing the pin via np.searchsorted."""
+    rather than silently misplacing the pin via np.searchsorted.
+
+    allowed=[0,1,2] = all 3 topics; marginal precision over full set = full_prec."""
+    K = 3
+    full_prec = np.diag(np.full(K, 1.0 / 5.0))
     with pytest.raises(ValueError, match="reference"):
         _stm_doc_inference(
             indices=np.array([0, 1], dtype=np.int32),
             counts=np.array([4.0, 4.0]),
             expElogbeta=_BETA3,
             Gamma=np.zeros((1, 3)),
-            Sigma_inv=np.diag(np.full(3, 1.0 / 5.0)),
+            Sigma_inv_allowed=full_prec,
             x=np.array([1.0]),
             allowed=np.array([0, 1, 2], dtype=np.int64),
             reference=5,

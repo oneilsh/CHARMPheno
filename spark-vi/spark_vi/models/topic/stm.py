@@ -234,7 +234,7 @@ def _stm_doc_inference(
     counts: np.ndarray,
     expElogbeta: np.ndarray,
     Gamma: np.ndarray,
-    Sigma_inv: np.ndarray,
+    Sigma_inv_allowed: np.ndarray,
     x: np.ndarray,
     max_iter: int = 50,
     tol: float = 1e-4,
@@ -243,6 +243,15 @@ def _stm_doc_inference(
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Per-doc Laplace approximation, optionally restricted to an allowed topic
     set and optionally with one topic pinned to eta=0 (the reference).
+
+    Sigma_inv_allowed is the MARGINAL precision over the allowed set: it equals
+    inv(Sigma_{A,A}), the inverse of the sub-block of Sigma restricted to the
+    allowed topics A. This is the correct prior for hard gating (inactive topics
+    integrated out under the joint Gaussian, per spec Q4). It differs from the
+    conditional precision (the sub-block of the inverse) whenever Sigma has
+    off-diagonal structure. For a non-gated doc allowed = all topics and both
+    coincide. The caller is responsible for computing Sigma_inv_allowed and
+    passing it in (see local_update's _marginal_precision cache).
 
     When allowed is None, optimizes over all K topics. When allowed is a sorted
     index array, L-BFGS runs only on those topics; disallowed topics are filled
@@ -263,15 +272,10 @@ def _stm_doc_inference(
         allowed = np.arange(K, dtype=np.int64)
     sub_expElogbeta = expElogbeta[allowed]
     sub_Gamma = Gamma[:, allowed]
-    # NOTE(Task 5): replace precision-slice with marginal sub-block inv(Sigma_AA).
-    # Slicing the full precision is the *conditional* (gated) form; for non-gated
-    # `allowed` is all topics, so the slice is the full precision unchanged. The
-    # gated marginal-vs-conditional correction is Task 5.
-    sub_Sigma_inv = Sigma_inv[np.ix_(allowed, allowed)]
     n_sub = allowed.shape[0]
     common = dict(
         indices=indices, counts=counts, expElogbeta=sub_expElogbeta,
-        Gamma=sub_Gamma, Sigma_inv=sub_Sigma_inv, x=x,
+        Gamma=sub_Gamma, Sigma_inv=Sigma_inv_allowed, x=x,
     )
 
     if reference is None:
@@ -488,7 +492,23 @@ class OnlineSTM(VIModel):
         lam = global_params["lambda"]
         Gamma = global_params["Gamma"]
         Sigma = global_params["Sigma"]
-        Sigma_inv = safe_inverse(Sigma)
+
+        # Per-allowed-set marginal precision cache.
+        # For a gated doc with allowed set A, the correct prior precision is
+        # inv(Sigma_{A,A}) — the inverse of the sub-block (MARGINAL form). This
+        # differs from slicing the full inverse Sigma^{-1} to rows/cols A
+        # (CONDITIONAL form) whenever Sigma has off-diagonal structure. Distinct
+        # allowed sets are cached by tuple key so each unique combination of
+        # active topics is inverted only once per minibatch.
+        _subprec_cache: dict[tuple, np.ndarray] = {}
+        def _marginal_precision(idx: np.ndarray) -> np.ndarray:
+            key = tuple(idx.tolist())
+            P = _subprec_cache.get(key)
+            if P is None:
+                P = safe_inverse(Sigma[np.ix_(idx, idx)])
+                _subprec_cache[key] = P
+            return P
+
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
 
         K, V = self.K, self.V
@@ -513,10 +533,11 @@ class OnlineSTM(VIModel):
 
         for doc in rows:
             allowed = part.allowed_indices(doc.groups)
+            Sigma_inv_allowed = _marginal_precision(allowed)
             eta_hat, nu_d, _ = _stm_doc_inference(
                 indices=doc.indices, counts=doc.counts,
                 expElogbeta=expElogbeta,
-                Gamma=Gamma, Sigma_inv=Sigma_inv, x=doc.x,
+                Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=doc.x,
                 max_iter=self.lbfgs_max_iter, tol=self.lbfgs_tol,
                 allowed=allowed, reference=ref,
             )
@@ -561,9 +582,11 @@ class OnlineSTM(VIModel):
 
             doc_loglik += float(np.sum(doc.counts * np.log(q_w)))
             # KL(N(η̂, ν_d) || N(Γx, Σ)) over the free prior sub-space only, using
-            # the marginal sub-block of Σ over `af` (full-matrix form).
+            # the marginal sub-block of Σ over `af` (full-matrix form). Reuse the
+            # _marginal_precision cache — af may differ from allowed when a
+            # reference topic is present, but the cache covers all idx arrays.
             sub_Sigma = Sigma[np.ix_(af, af)]
-            sub_Sigma_inv = safe_inverse(sub_Sigma)
+            sub_Sigma_inv = _marginal_precision(af)
             sub_nu = nu_d[np.ix_(af, af)]
             tr_term = float(np.trace(sub_Sigma_inv @ sub_nu))
             quad_term = float(resid @ sub_Sigma_inv @ resid)
@@ -740,15 +763,19 @@ class OnlineSTM(VIModel):
         """
         lam = global_params["lambda"]
         Gamma = global_params["Gamma"]
-        Sigma_inv = safe_inverse(global_params["Sigma"])
+        Sigma = global_params["Sigma"]
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
 
+        part = self._effective_partition()
+        allowed = part.allowed_indices(row.groups)
+        # Marginal precision over the doc's allowed set: inv(Sigma_{A,A}).
+        Sigma_inv_allowed = safe_inverse(Sigma[np.ix_(allowed, allowed)])
         eta_hat, _, _ = _stm_doc_inference(
             indices=row.indices, counts=row.counts,
             expElogbeta=expElogbeta,
-            Gamma=Gamma, Sigma_inv=Sigma_inv, x=row.x,
+            Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=row.x,
             max_iter=self.lbfgs_max_iter, tol=self.lbfgs_tol,
-            reference=self._reference_index(),
+            allowed=allowed, reference=self._reference_index(),
         )
         return {"eta": eta_hat, "theta": _softmax(eta_hat)}
 

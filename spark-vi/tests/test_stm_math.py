@@ -185,10 +185,11 @@ from spark_vi.models.topic.stm import _stm_doc_inference
 class TestSTMDocInference:
     def test_converges_to_stationary_point(self):
         st = _make_small_doc_state(seed=99)
+        # allowed=None -> all K topics; marginal precision over full set = Sigma_inv.
         eta_hat, nu_d, n_iter = _stm_doc_inference(
             indices=st["indices"], counts=st["counts"],
             expElogbeta=st["expElogbeta"],
-            Gamma=st["Gamma"], Sigma_inv=st["Sigma_inv"], x=st["x"],
+            Gamma=st["Gamma"], Sigma_inv_allowed=st["Sigma_inv"], x=st["x"],
             max_iter=200, tol=1e-6,
         )
         # Gradient at η̂ should be ~zero.
@@ -209,10 +210,11 @@ class TestSTMDocInference:
         # Override Σ to be very tight: posterior should ~= prior mean Γᵀx.
         Sigma_inv_tight = np.diag(np.full(st["K"], 1e6))   # precision = 1/1e-6
         prior_mean = st["Gamma"].T @ st["x"]
+        # allowed=None -> all K topics; marginal precision over full set = Sigma_inv_tight.
         eta_hat, _, _ = _stm_doc_inference(
             indices=st["indices"], counts=st["counts"],
             expElogbeta=st["expElogbeta"],
-            Gamma=st["Gamma"], Sigma_inv=Sigma_inv_tight, x=st["x"],
+            Gamma=st["Gamma"], Sigma_inv_allowed=Sigma_inv_tight, x=st["x"],
             max_iter=200, tol=1e-8,
         )
         np.testing.assert_allclose(eta_hat, prior_mean, atol=1e-3)
@@ -366,9 +368,11 @@ class TestMaskedDocInference:
         from spark_vi.models.topic.stm import _stm_doc_inference, _softmax
         eb, G, S, idx, cnt, x = self._setup()
         allowed = np.array([0, 1, 2], dtype=np.int64)  # topics 3,4 disallowed
+        # Marginal precision over `allowed`: inv(S_{A,A}) = sub-block of eye(K) = eye(3).
+        S_allowed = S[np.ix_(allowed, allowed)]
         eta_hat, nu_d, _ = _stm_doc_inference(
             indices=idx, counts=cnt, expElogbeta=eb, Gamma=G,
-            Sigma_inv=S, x=x, allowed=allowed)
+            Sigma_inv_allowed=S_allowed, x=x, allowed=allowed)
         theta = _softmax(eta_hat)
         assert theta[3] == 0.0 and theta[4] == 0.0
         assert abs(theta[:3].sum() - 1.0) < 1e-9
@@ -379,11 +383,14 @@ class TestMaskedDocInference:
         import numpy as np
         from spark_vi.models.topic.stm import _stm_doc_inference
         eb, G, S, idx, cnt, x = self._setup()
+        K = eb.shape[0]
+        # allowed=None: full K topics; marginal over full set = S.
         a = _stm_doc_inference(indices=idx, counts=cnt, expElogbeta=eb,
-                               Gamma=G, Sigma_inv=S, x=x, allowed=None)
+                               Gamma=G, Sigma_inv_allowed=S, x=x, allowed=None)
+        # allowed=np.arange(K): same; marginal over full set = S.
         b = _stm_doc_inference(indices=idx, counts=cnt, expElogbeta=eb,
-                               Gamma=G, Sigma_inv=S, x=x,
-                               allowed=np.arange(eb.shape[0], dtype=np.int64))
+                               Gamma=G, Sigma_inv_allowed=S, x=x,
+                               allowed=np.arange(K, dtype=np.int64))
         np.testing.assert_allclose(a[0], b[0], atol=1e-8)
 
 
