@@ -73,9 +73,12 @@ The gated multi-group full-Σ fit:
     entries are populated only where comorbid patient support exists and suppressed
     (prior-fallback) where it does not.
 (b) The min_pair_support floor correctly suppresses thin cross-foreground cells:
-    the imputed_fraction diagnostic reports the share of entries that fell below
-    the floor, and the suppressed cells carry the IW prior value rather than a noisy
-    few-patient estimate.
+    suppressed cells carry the IW prior value rather than a noisy few-patient
+    estimate. Cross-group entries for topic pairs with insufficient comorbid support
+    will be near the prior (close to diagonal, zero off-diagonal) rather than driven
+    by a handful of patients. The automated `imputed_fraction` summary (share of
+    entries below the floor) is deferred to the dashboard arc; for this run the
+    analyst inspects cross-group entries directly via the saved correlation matrix R.
 (c) The assembled Σ is SPD (condition number bounded after the SPD-repair step;
     no degenerate eigenvalues).
 (d) Topic quality per block holds at an acceptable level: cancer and dementia
@@ -90,11 +93,14 @@ The gated multi-group full-Σ fit:
   show signal; entries with low N_ij should be near the prior value (close to
   diagonal, not a raw few-patient estimate). This is the end-to-end test of the
   per-pair lazy update and min_pair_support floor.
-- **imputed_fraction diagnostic** — the share of Σ entries that fell below
-  min_pair_support=10 and were zeroed before the IW blend. Expect a non-trivial
-  fraction for the cancer↔dementia cross-foreground block (many pairs have few
-  comorbid patients); near-zero would mean every pair is well-supported and the
-  floor is not biting.
+- **Cross-group floor signal (direct inspection)** — check whether cancer↔dementia
+  cross-foreground entries in R are near zero (prior fallback, floor is biting) or
+  show non-trivial signal (comorbid support present). Specifically, read the
+  (10×10) cancer↔dementia sub-block of the saved `correlation.npy`: entries that
+  are consistently near 0 off-diagonal indicate the floor is suppressing thin cells;
+  entries with clear non-zero correlation indicate sufficient comorbid support to
+  estimate cross-group covariance. The automated `imputed_fraction` summary is
+  deferred to the dashboard arc — inspect the cross-group sub-block directly.
 - **Σ condition number (Σ_eig[cond])** — must stay bounded after the SPD-repair
   step. A condition number climbing above 1e4 indicates the repair is struggling
   and the IW prior weight should be increased.
@@ -111,10 +117,11 @@ The gated multi-group full-Σ fit:
 
 ## Decision
 
-- **Cross-foreground entries populated only where comorbid support exists + imputed
-  fraction nonzero and plausible + SPD Σ (cond bounded) + sensible per-block topics**
-  → the gated multi-group full-Σ path is validated end-to-end. ADR 0033 multi-group
-  path is confirmed. Record the imputed fraction and condition number as an insight.
+- **Cross-foreground entries show non-zero correlation where comorbid patients exist
+  + near-prior (≈ zero off-diagonal) where support is absent + SPD Σ (cond bounded)
+  + sensible per-block topics** → the gated multi-group full-Σ path is validated
+  end-to-end. ADR 0033 multi-group path is confirmed. Record the condition number
+  and a description of the cross-group correlation structure as an insight.
 - **Cross-foreground entries near identical to prior everywhere (no comorbid signal
   even where many patients exist)** → the per-pair lazy update is not scattering
   into the cross-group block; check the A_d set construction and scatter indexing.

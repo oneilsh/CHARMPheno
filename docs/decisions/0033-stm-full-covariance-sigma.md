@@ -102,9 +102,14 @@ A covariance entry backed by fewer than `min_pair_support` co-activating documen
 statistically unreliable and a small-cell disclosure risk. Below the floor the scatter
 contribution is zeroed (S_ij → 0) and the entry falls back to the IW prior or
 SPD-completion. Background and within-group cells have massive support and never
-trigger the floor; the floor bites exactly the thin cross-group cells. The support
-matrix N_ij is exported with R so each correlation is annotated as measured (N_ij ≥
-min_pair_support) vs imputed.
+trigger the floor; the floor bites exactly the thin cross-group cells.
+
+**Deferred — N persistence and imputed_fraction diagnostic:** Persisting the support
+matrix N_ij as a sidecar artifact and computing the `imputed_fraction` summary (share
+of entries below the floor) are deferred to the dashboard-surfacing arc. N matters
+only in the gated/multi-group case and is needed for dashboard annotation of each
+correlation as measured vs imputed. The full-covariance engine computes correlations
+correctly now; N-based provenance tracking is future work.
 
 ## Alternatives considered
 
@@ -135,16 +140,17 @@ min_pair_support) vs imputed.
   that blocker; dashboard wiring is a downstream arc (see
   [ADR 0028](0028-dashboard-conditioned-dirichlet-prior.md)).
 - **Σ diagnostic generalizes.** The `Σ[min…max]` trace (ADR 0030) is extended to:
-  eigenvalue range + condition number, max |off-diagonal correlation|, and imputed
-  fraction (share of entries below min_pair_support floor). See
-  [ADR 0030](0030-diagnostic-traces-persist-faithfully-no-size-cap.md).
+  eigenvalue range + condition number, and max |off-diagonal correlation|. See
+  [ADR 0030](0030-diagnostic-traces-persist-faithfully-no-size-cap.md). The
+  `imputed_fraction` diagnostic (share of entries below the min_pair_support floor)
+  is **deferred to the dashboard-surfacing arc** along with N_ij persistence.
 - **No backward compatibility.** Legacy diagonal checkpoints (K-vector `global_params["Sigma"]`)
   do not reload under the full-Σ model. Re-fit under full Σ is required. No
   promote-on-load shim.
 - **Storage shape change.** `global_params["Sigma"]` goes from a K-vector to a
-  (K−1)×(K−1) matrix. New persisted artifacts: correlation matrix R, support matrix
-  N_ij, and a free-topic → topic-id map. `.npy` handles the shape change; no format
-  migration.
+  (K−1)×(K−1) matrix. New persisted artifacts: correlation matrix R and a free-topic
+  → topic-id map. `.npy` handles the shape change; no format migration. The support
+  matrix N_ij is **deferred** — not persisted in this arc.
 - **Cost is negligible at K=40.** Σ is 39×39: one Cholesky per global iteration, one
   (K−1)×(K−1) matrix-vector product per document (already paid for the Laplace inverse).
   All V-sized work is unchanged.

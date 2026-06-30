@@ -168,9 +168,9 @@ to the Component 1/2 MLE.
 
 **Deliverable — correlation matrix.** From Σ: R_ij = Σ_ij / sqrt(Σ_ii·Σ_jj), the
 (K−1)×(K−1) topic correlation over free topics (reference topic has no entry),
-computed at export and stored with Σ. **Plus the support matrix N_ij** so a
-correlation reads as *measured* (N_ij ≥ min_pair_support) vs *imputed*
-(below the floor → SPD-completion / prior).
+computed at export and stored with Σ. The support matrix N_ij (and the per-entry
+measured-vs-imputed annotation it enables) is **deferred to the dashboard-surfacing
+arc** — not persisted in this arc.
 
 **Small-support floor (robustness + privacy).** `min_pair_support` is a hard gate:
 a covariance entry backed by fewer than `min_pair_support` co-activating documents
@@ -191,12 +191,14 @@ uses its marginal sub-block Σ_{A_d,A_d}. Mechanical but real; gets golden tests
 
 **Storage / serialization.** `global_params["Sigma"]` goes from a K-vector to a
 (K−1)×(K−1) matrix (`.npy` handles the shape change). New persisted artifacts: the
-correlation matrix R, the support matrix N_ij, and a free-topic↔topic-id map for
-labeling. No legacy migration (clean break).
+correlation matrix R and a free-topic↔topic-id map for labeling. No legacy migration
+(clean break). The support matrix N_ij is **deferred** — not persisted in this arc.
 
 **Diagnostics.** The `Σ[min…max]` trace (ADR 0030) generalizes to: eigenvalue
-range + condition number of Σ, max |off-diagonal correlation|, and the imputed
-fraction (share of entries below the support floor). New per-iter health signals.
+range + condition number of Σ, and max |off-diagonal correlation|. New per-iter
+health signals. The `imputed_fraction` diagnostic (share of entries below the
+support floor) is **deferred to the dashboard-surfacing arc** — it requires the
+persisted N_ij, which is not stored in this arc.
 
 **Downstream (noted, not built here):** a full Σ un-parks the ADR-0028-B logistic-
 normal sampler (it can sample N(μ,Σ) properly); dashboard surfacing of R is the

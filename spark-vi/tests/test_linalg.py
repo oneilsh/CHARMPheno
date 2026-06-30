@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from spark_vi.models.topic._linalg import safe_inverse, nearest_spd, topic_correlation
 
 def test_safe_inverse_matches_inv_for_spd():

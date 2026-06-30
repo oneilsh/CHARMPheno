@@ -395,3 +395,12 @@ class TestIterationDiagnostics:
         assert "Sigma" in d
         assert d["Gamma"].shape == (2, 3)
         assert d["Sigma"].shape == (3, 3)
+
+    def test_full_sigma_diagnostic_keys_present_and_finite(self):
+        """All four full-Σ health-signal keys must be present and finite."""
+        m = OnlineSTM(K=4, vocab_size=20, P=2, random_seed=1)
+        gp = m.initialize_global(None)
+        d = m.iteration_diagnostics(gp)
+        for key in ("sigma_eig_min", "sigma_eig_max", "sigma_cond", "max_abs_offdiag_corr"):
+            assert key in d, f"missing diagnostic key: {key!r}"
+            assert np.isfinite(d[key]), f"diagnostic key {key!r} is not finite: {d[key]}"

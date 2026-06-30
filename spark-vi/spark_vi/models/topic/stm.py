@@ -803,8 +803,13 @@ class OnlineSTM(VIModel):
         Σ in global_params. This is the Blei & Lafferty 2007 logistic-normal
         correlation (see eq. 4 of that paper). Delegates to _linalg.topic_correlation.
 
-        The matrix is computed over the free topics already stored in Σ (i.e. after
-        any reference-topic column/row has been excluded from the covariance).
+        Σ is stored as a K×K matrix; the reference topic's row and column are
+        INERT — its diagonal stays at sigma_init (the initial variance), and its
+        off-diagonal entries remain zero because the M-step never scatters into
+        the reference row/col (its η is pinned at 0). As a result, the reference
+        row in R is the unit-self / zero-cross identity row. The reference is NOT
+        excluded from the matrix; it is present but inert. Callers inspecting
+        cross-topic correlations should treat the reference row/col separately.
         """
         from spark_vi.models.topic._linalg import topic_correlation
         return topic_correlation(global_params["Sigma"])

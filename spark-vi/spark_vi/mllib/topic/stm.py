@@ -473,8 +473,10 @@ class STMModel:
         )
         save_result(result, out_dir)
         # Derived sidecar: correlation matrix R_ij = Sigma_ij / sqrt(Sigma_ii Sigma_jj).
-        # Written to params/correlation.npy alongside the engine-managed params so
-        # a reloaded model (or downstream dashboard) can read it without re-deriving.
+        # Written to params/correlation.npy for downstream / dashboard consumers.
+        # NOTE: STMModel.load does NOT restore this file — R is re-derivable from
+        # the round-tripped Sigma via topic_correlation(). This sidecar is for
+        # consumers that want R without re-loading and re-deriving the model.
         from spark_vi.models.topic._linalg import topic_correlation
         np.save(
             out_dir / "params" / "correlation.npy",

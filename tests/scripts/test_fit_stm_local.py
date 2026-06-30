@@ -156,7 +156,6 @@ def test_fit_stm_local_full_sigma_end_to_end(tmp_path):
     and params/correlation.npy exists (written by STMModel.save). Uses
     --no-spectral-init and --no-reference-topic to keep the path cheap and
     isolated to the full-covariance M-step arc."""
-    import json
     import numpy as np
     from fit_stm_local import main as fit_main
     omop, person = _make_sim(tmp_path)
