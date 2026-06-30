@@ -336,3 +336,15 @@ def test_min_pair_support_validation():
     from spark_vi.models.topic.stm import OnlineSTM
     with pytest.raises(ValueError):
         OnlineSTM(K=4, vocab_size=6, P=1, reference_topic=False, min_pair_support=0)
+
+
+# --- Task 7: topic_correlation_matrix method ----------------------------------
+
+def test_topic_correlation_matrix_from_sigma():
+    from spark_vi.models.topic.stm import OnlineSTM
+    m = OnlineSTM(K=3, vocab_size=8, P=1, reference_topic=False)
+    gp = m.initialize_global(None)
+    gp["Sigma"] = np.array([[4.0, 2.0, 0.0], [2.0, 9.0, 0.0], [0.0, 0.0, 1.0]])
+    R = m.topic_correlation_matrix(gp)
+    assert np.allclose(np.diag(R), 1.0)
+    assert np.isclose(R[0, 1], 2.0 / np.sqrt(36.0))

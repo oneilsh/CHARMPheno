@@ -796,20 +796,41 @@ class OnlineSTM(VIModel):
         )
         return {"eta": eta_hat, "theta": _softmax(eta_hat)}
 
+    def topic_correlation_matrix(self, global_params: dict[str, np.ndarray]) -> np.ndarray:
+        """Topic correlation R_ij = Sigma_ij / sqrt(Sigma_ii Sigma_jj); unit diagonal.
+
+        Returns the (K, K) correlation matrix derived from the current covariance
+        Σ in global_params. This is the Blei & Lafferty 2007 logistic-normal
+        correlation (see eq. 4 of that paper). Delegates to _linalg.topic_correlation.
+
+        The matrix is computed over the free topics already stored in Σ (i.e. after
+        any reference-topic column/row has been excluded from the covariance).
+        """
+        from spark_vi.models.topic._linalg import topic_correlation
+        return topic_correlation(global_params["Sigma"])
+
     def iteration_summary(self, global_params: dict[str, np.ndarray]) -> str:
         """Compact per-iter view of Γ scale, Σ scale, and λ row-mass spread.
 
         When topic_blocks is set, appends per-block Σλ mass so operators can
         watch foreground vs background vocabulary absorption separately.
         """
+        from spark_vi.models.topic._linalg import topic_correlation
         Gamma = global_params["Gamma"]
         Sigma = global_params["Sigma"]
         sigma_var = np.diag(Sigma)  # per-topic variances (Σ is now (K,K))
+        eigs = np.linalg.eigvalsh(Sigma)
+        eig_min, eig_max = float(eigs.min()), float(eigs.max())
+        cond = eig_max / eig_min if eig_min > 0 else float("inf")
+        K = Sigma.shape[0]
+        max_offdiag = float(np.max(np.abs(topic_correlation(Sigma) - np.eye(K))))
         lam = global_params["lambda"]
         lam_row_sums = lam.sum(axis=1)
         base = (
             f"|Γ|[max={np.abs(Gamma).max():.3g} mean={np.abs(Gamma).mean():.3g}], "
-            f"Σ[min={sigma_var.min():.3g} max={sigma_var.max():.3g}], "
+            f"Σ_var[min={sigma_var.min():.3g} max={sigma_var.max():.3g}] "
+            f"Σ_eig[min={eig_min:.3g} max={eig_max:.3g} cond={cond:.3g}] "
+            f"Σ_corr[max_offdiag={max_offdiag:.3g}], "
             f"Σλ_k[min={lam_row_sums.min():.3g} max={lam_row_sums.max():.3g}]"
         )
         if self.topic_blocks is None:
@@ -826,13 +847,27 @@ class OnlineSTM(VIModel):
     ) -> dict[str, float | np.ndarray]:
         """Per-iter trajectories of Γ and Σ (small; safe to persist every iter).
 
+        Includes full-matrix Σ health signals: eigenvalue range, condition number,
+        and maximum absolute off-diagonal correlation.
+
         When topic_blocks is set, also includes topic_block_labels: a length-K
         object array with one string label per topic ("background" or the group
         name), in topic-index order.
         """
+        from spark_vi.models.topic._linalg import topic_correlation
+        Sigma = np.asarray(global_params["Sigma"])
+        eigs = np.linalg.eigvalsh(Sigma)
+        eig_min, eig_max = float(eigs.min()), float(eigs.max())
+        sigma_cond = eig_max / eig_min if eig_min > 0 else float("inf")
+        K = Sigma.shape[0]
+        max_abs_offdiag_corr = float(np.max(np.abs(topic_correlation(Sigma) - np.eye(K))))
         diag = {
             "Gamma": np.asarray(global_params["Gamma"]),
-            "Sigma": np.asarray(global_params["Sigma"]),
+            "Sigma": Sigma,
+            "sigma_eig_min": eig_min,
+            "sigma_eig_max": eig_max,
+            "sigma_cond": sigma_cond,
+            "max_abs_offdiag_corr": max_abs_offdiag_corr,
         }
         if self.topic_blocks is not None:
             diag["topic_block_labels"] = np.asarray(
