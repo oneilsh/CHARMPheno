@@ -282,3 +282,57 @@ def test_nongated_e2e_offdiagonal_sign():
     assert R[0, 1] > 0.0          # correct sign of the planted positive correlation
     assert R[0, 1] > abs(R[0, 2])  # correlated pair stronger than the null pair
     assert np.min(np.linalg.eigvalsh(gp2["Sigma"])) > 0  # SPD
+
+
+# --- Task 6: min_pair_support floor + multi-group cross-covariance -----------
+
+def _gated_multigroup_docs(rng, n_comorbid):
+    """background topics {0,1}; group A foreground {2}; group B foreground {3}.
+    n_comorbid docs belong to BOTH A and B (co-activate topics 2 and 3)."""
+    from spark_vi.models.topic.types import STMDocument
+    docs = []
+    def mk(groups, idx):
+        cf = np.zeros(6)
+        for i in idx: cf[i] = 5.0
+        ix = np.nonzero(cf)[0].astype(np.int32)
+        return STMDocument(indices=ix, counts=cf[ix], length=int(cf.sum()),
+                           x=np.array([1.0]), groups=frozenset(groups))
+    for _ in range(400): docs.append(mk(["A"], [0, 1, 4]))   # vocab 4 ~ topic2 word
+    for _ in range(400): docs.append(mk(["B"], [0, 1, 5]))   # vocab 5 ~ topic3 word
+    for _ in range(n_comorbid): docs.append(mk(["A", "B"], [0, 1, 4, 5]))
+    return docs
+
+
+def _fit_block(min_pair_support, n_comorbid):
+    from spark_vi.models.topic.stm import OnlineSTM
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    rng = np.random.default_rng(7)
+    part = TopicBlockPartition(group_var="g", background_k=2,
+                               foreground=(("A", 1), ("B", 1)))  # K=4
+    m = OnlineSTM(K=4, vocab_size=6, P=1, reference_topic=False,
+                  topic_blocks=part, min_pair_support=min_pair_support)
+    gp = m.initialize_global(None); gp["Gamma"] = np.zeros((1, 4))
+    docs = _gated_multigroup_docs(rng, n_comorbid)
+    stats = m.local_update(docs, gp)
+    return m.update_global(gp, stats, 1.0)["Sigma"], part
+
+
+def test_cross_group_covariance_from_comorbid_docs():
+    Sig, part = _fit_block(min_pair_support=10, n_comorbid=300)
+    a = part.block_indices("A")[0]; b = part.block_indices("B")[0]
+    assert Sig[a, b] != 0.0                     # informed cross-group entry
+    assert np.min(np.linalg.eigvalsh(Sig)) > 0  # SPD
+
+
+def test_thin_cross_group_falls_back_to_prior():
+    Sig, part = _fit_block(min_pair_support=50, n_comorbid=5)  # below floor
+    a = part.block_indices("A")[0]; b = part.block_indices("B")[0]
+    assert Sig[a, b] == 0.0    # 5 comorbid docs < floor 50 -> not estimated
+    assert np.min(np.linalg.eigvalsh(Sig)) > 0
+
+
+def test_min_pair_support_validation():
+    import pytest
+    from spark_vi.models.topic.stm import OnlineSTM
+    with pytest.raises(ValueError):
+        OnlineSTM(K=4, vocab_size=6, P=1, reference_topic=False, min_pair_support=0)

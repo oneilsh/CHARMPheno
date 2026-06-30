@@ -353,6 +353,7 @@ class OnlineSTM(VIModel):
         sigma_prior_scale: float | None = None,
         sigma_prior_count: float = 0.0,
         sigma_diag_shrink: float = 0.0,
+        min_pair_support: int = 1,
         lbfgs_max_iter: int = 50,
         lbfgs_tol: float = 1e-4,
         gamma_shape: float = 100.0,
@@ -380,6 +381,8 @@ class OnlineSTM(VIModel):
             raise ValueError(f"sigma_prior_count must be >= 0, got {sigma_prior_count}")
         if not (0.0 <= sigma_diag_shrink <= 1.0):
             raise ValueError(f"sigma_diag_shrink must be in [0, 1], got {sigma_diag_shrink}")
+        if min_pair_support < 1:
+            raise ValueError(f"min_pair_support must be >= 1, got {min_pair_support}")
         if lbfgs_max_iter < 1:
             raise ValueError(f"lbfgs_max_iter must be >= 1, got {lbfgs_max_iter}")
         if lbfgs_tol <= 0:
@@ -403,6 +406,7 @@ class OnlineSTM(VIModel):
         self.sigma_prior_scale = None if sigma_prior_scale is None else float(sigma_prior_scale)
         self.sigma_prior_count = float(sigma_prior_count)
         self.sigma_diag_shrink = float(sigma_diag_shrink)
+        self.min_pair_support = int(min_pair_support)
         self.lbfgs_max_iter = int(lbfgs_max_iter)
         self.lbfgs_tol = float(lbfgs_tol)
         self.gamma_shape = float(gamma_shape)
@@ -706,6 +710,19 @@ class OnlineSTM(VIModel):
         # are preserved bit-identically in the common case.
         S = target_stats["residual_outer_stat"]
         N = target_stats["n_pairs_stat"]
+        # min_pair_support floor: cross-topic covariance cells informed by fewer
+        # than min_pair_support co-activating documents are zeroed out of the
+        # scatter (S) and support (N) so they fall back to the IW prior / lazy
+        # keep-current rule. A robustness + small-cell-privacy guard for thin
+        # cross-group cells; zeroing BOTH S and N marks them genuinely
+        # uninformed (vs. a spurious 0/N estimate). N is symmetric so the floor
+        # is symmetric and S/N stay symmetric. Default min_pair_support=1 is a
+        # no-op (every present pair with N>=1 is kept). Diagonal, background, and
+        # within-group pairs have full support and never trip the floor.
+        if self.min_pair_support > 1:
+            thin = N < self.min_pair_support
+            S = np.where(thin, 0.0, S)
+            N = np.where(thin, 0.0, N)
         nu = self.sigma_prior_count
         Psi = np.zeros((self.K, self.K))
         if self.sigma_prior_scale is not None:
