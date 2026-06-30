@@ -128,9 +128,17 @@ modeling parameter):
    nearest correlation matrix, here generalized from Higham's unit-diagonal constraint
    to an arbitrary observed-entry pattern). Implemented as
    [min_frobenius_psd_completion](../../../spark-vi/spark_vi/models/topic/_linalg.py).
-   Triggered when the observed sub-part is not PD-completable — detected up front by the
-   zero-on-free init being indefinite (a genuinely completable observed block has a PD
-   zero-on-free init), with the post-sweep non-PD check kept as a numerical safety net.
+   Triggered only when the observed sub-part is genuinely not PD-completable. The primary
+   path (seeded with nearest_spd of the zero-on-free init, with the observed entries
+   re-pinned to target every sweep) recovers the exact max-det completion for ANY
+   completable pattern — including strongly-correlated ones whose zero-on-free init is
+   indefinite (e.g. the gated block-arrow: a background topic coupled to each foreground
+   group with cross-group pairs free is completable yet has an indefinite zero-fill). So an
+   indefinite zero-fill does NOT by itself signal non-completability. Completability is
+   decided AFTER convergence: if the result matches the observed entries (max deviation
+   below 1e-7) and is PD, the primary completion is returned; only a genuinely
+   non-completable observed set fails that check (no PD matrix can match it) and is routed
+   here.
    Two projections: P_obs symmetrizes and resets the observed entries to target (free
    entries left free); P_psd eigendecomposes and clamps eigenvalues to max(λ, eps).
    Dykstra's correction increments (not naive successive projection) make it converge to
@@ -139,11 +147,11 @@ modeling parameter):
    nearest_spd) is a strict-positive-definite safeguard so the returned matrix is
    invertible for downstream precision use — a HEURISTIC, not from the literature; Higham
    2002 itself uses eps = 0 for the PSD cone. The routine returns its final P_psd
-   projection, so the result is always strictly PD. When the observed block IS
-   PD-completable (the fallback is reached only as a safety net) the iterate converges
-   into the intersection (observed exact AND PSD); when it is not, it settles at the
-   min-Frobenius compromise, whose observed-entry deviation is provably no worse than a
-   single nearest_spd floor and strictly smaller wherever free entries give it room.
+   projection, so the result is always strictly PD. A completable observed block never
+   reaches this fallback (the post-convergence check returns the primary max-det
+   completion); a genuinely non-completable one settles at the min-Frobenius compromise,
+   whose observed-entry deviation is provably no worse than a single nearest_spd floor and
+   strictly smaller wherever free entries give it room.
 
 This structure was chosen over a single pure alternating-projection solver because
 the primary path keeps the trustworthy measured entries exact and infers only the
