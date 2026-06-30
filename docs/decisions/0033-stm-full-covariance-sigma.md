@@ -104,8 +104,12 @@ Neither conditions the gated full-Σ (the IW prior is N-weighted and reaches nei
 well-supported end; `sigma_diag_shrink` fixes the min eigenvalue only by
 decorrelating, which triggers a max-eigenvalue variance runaway — insight
 [0032](../insights/0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md),
-Findings 4-6). The PD completion makes both unnecessary. The description below is
-retained as the historical decision. (Both apply after the M-step scatter:
+Findings 4-6). The PD completion makes both unnecessary. The original decision
+text is retained below as historical record (superseded by the PD completion).
+
+--- begin historical decision text ---
+
+Both regularizers apply after the M-step scatter:
 
 - *Inverse-Wishart prior* (Blei & Lafferty 2007): scale matrix Ψ = `sigma_prior_scale`·I,
   pseudo-count ν = `sigma_prior_count`. The MAP M-step becomes
@@ -137,7 +141,9 @@ neither end. A well-conditioned GATED Σ therefore needs BOTH levers; the non-ga
 case (exp 0020, every topic fully supported, cond 13.3) needs neither.
 
 Pipeline order: scatter + min_pair_support floor → IW blend → diagonal-shrink →
-ridge + SPD-repair. Both knobs at defaults reduce to the Component 1 MLE.)
+ridge + SPD-repair. Both knobs at defaults reduce to the Component 1 MLE.
+
+--- end historical decision text ---
 
 **7. min_pair_support floor (robustness and small-cell privacy).**
 **Zero-pin SUPERSEDED for the gated cross-group case** (2026-06-30): the
