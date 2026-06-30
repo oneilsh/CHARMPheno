@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[2]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
-    from analysis._eval_common import print_ranked_report  # noqa: E402
+    from analysis._eval_common import print_ranked_report, stm_sigma_diagnostic  # noqa: E402
 
     configure_logging()
 
@@ -180,6 +180,17 @@ def main(argv: list[str] | None = None) -> int:
               f"prior_obs_days={prior_obs_days}", flush=True)
         print(f"[driver]   doc_spec: {doc_spec_manifest}", flush=True)
         print(f"[driver]   frozen vocab: {len(vocab_list)} terms", flush=True)
+
+        # STM Σ conditioning diagnostic (insight 0032): identify the
+        # largest-η-variance topics + the eigen-spectrum from the saved model.
+        # No-op (None) for non-STM models or legacy diagonal-Σ K-vectors. This
+        # runs on eval-only too, so `make eval-exp ID=N` inspects a saved fit
+        # without a refit.
+        sigma_report = stm_sigma_diagnostic(
+            result.global_params.get("Sigma"), labels=fg_groups)
+        if sigma_report is not None:
+            for line in sigma_report.splitlines():
+                print(f"[driver]   {line}", flush=True)
 
         if corpus["cdr"] != cdr_env:
             log = logging.getLogger(__name__)
