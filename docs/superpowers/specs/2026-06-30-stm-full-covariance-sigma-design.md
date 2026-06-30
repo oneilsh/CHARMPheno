@@ -1,6 +1,6 @@
 # Full-covariance Σ for STM — design spec
 
-**Status:** Approved design (brainstorm complete); pending implementation plan
+**Status:** Implemented (this branch, SDD arc — Tasks 1-11)
 **Date:** 2026-06-30
 **Branch:** stm
 

@@ -64,7 +64,9 @@ proportions, for the Patient Atlas's realistic mixed cohort) draws a per-patient
   `runSimulator`, and the variational E-step are all built around — a large
   rework of forward-simulation code whose purpose is illustration, not fitting.
   Retained as a future option if the simulated cohorts need to match STM's
-  interior-smoothing behavior.
+  interior-smoothing behavior. **Update (2026-06-30):** the full (K−1)×(K−1) Σ
+  is now exported as part of the full-covariance Σ arc ([ADR 0033](0033-stm-full-covariance-sigma.md)),
+  removing the blocker; dashboard wiring of alternative B is a downstream arc.
 - **C — sample only over allowed topics and renormalize (hard drop).** Instead of
   flooring masked topics, restrict the simplex to allowed topics. Rejected
   because it breaks the fixed-length theta/alpha contract that the E-step and the

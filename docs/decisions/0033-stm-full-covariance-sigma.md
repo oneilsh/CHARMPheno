@@ -1,0 +1,181 @@
+# 0033 — STM replaces diagonal Σ with a full (K−1)×(K−1) covariance (CTM/STM treatment)
+
+**Status:** Accepted + Implemented (this branch, SDD arc)
+**Date:** 2026-06-30
+
+## Context
+
+`OnlineSTM` has always stored Σ as a K-vector of per-topic variances, and every
+downstream term is elementwise-diagonal: the Gaussian prior gradient −(η−μ)/σ²,
+the prior Hessian block `diag(1/Sigma_diag)`, and the η-KL
+([`stm.py:191`](../../../spark-vi/spark_vi/models/topic/stm.py#L191),
+[`stm.py:547-553`](../../../spark-vi/spark_vi/models/topic/stm.py#L547-L553)).
+This diagonal mean-field representation is not the CTM/STM model of Blei & Lafferty
+2007 or Roberts et al. — it forgoes the signature feature that distinguishes
+correlated topic models from LDA: modeled topic correlation. The practical consequence
+is that the reference `stm` package's `sigma.prior` (a diagonal-shrink lever ∈ `[0, 1]`)
+is a literal no-op in our implementation — there are no off-diagonals to shrink.
+
+The K-1 reference-topic parameterization (ADR 0031) placed Σ over the K−1 free topics;
+the full K×K Laplace covariance ν_d and Cholesky-based inverse are already computed
+per document ([`_spd_inverse`](../../../spark-vi/spark_vi/models/topic/stm.py#L201-L226)).
+The diagonal model simply discards the off-diagonals at every M-step. The
+computational infrastructure for full-Σ inference is therefore already in place.
+
+The scientific deliverable is the (K−1)×(K−1) topic correlation matrix R: which
+phenotypes co-occur. Exp 0015 and 0017 (insight 0030) established the diagonal-Σ
+result — bounded, stable Σ, 40 resolved topics — as the prior baseline. This arc
+replaces the diagonal with a full Σ and re-validates the whole stabilizer stack
+(reference, spectral, gating, Σ-prior) under the genuine model.
+
+## Decision
+
+Replace the diagonal Σ representation with a full (K−1)×(K−1) positive-definite Σ —
+the logistic-normal covariance of Blei & Lafferty 2007 — across the entire STM
+inference pipeline. Seven design decisions govern the implementation:
+
+**1. Goal and scope: topic correlations as the scientific deliverable.**
+The correlation matrix R_ij = Σ_ij / sqrt(Σ_ii·Σ_jj) over free topics is computed
+at export alongside Σ and the support matrix N_ij. Dashboard surfacing of R is a
+separate downstream arc.
+
+**2. Replace, not toggle.**
+The diagonal representation is removed. There is no `covariance_type` knob. The
+diagonal results (exp 0015/0017, insight 0030) are the prior baseline against which
+the full-Σ runs are measured; they are not preserved as a runtime option.
+
+**3. Gated-doc prior = marginal sub-block.**
+A hard-gated document's active-topic set A_d has prior η_{A_d} ~ N(μ_{A_d}, Σ_{A_d,A_d}):
+the A,A sub-block of Σ, inactive topics integrated out. This is the correct marginal
+(not the conditional on a clamped value). The inverse of this sub-block is precomputed
+once per distinct group-combination present in the minibatch and broadcast.
+
+**4. Multi-group membership and cross-group covariance.**
+Each document belongs to a set of groups; its allowed set is
+background_indices ∪ (union of its groups' foreground blocks). Cross-group covariance
+is estimated exclusively from comorbid documents that co-activate both groups. The
+M-step is a per-pair lazy update (the per-pair generalization of the per-block lazy
+rule, ADR 0027): each document scatter-adds its outer-product + Laplace covariance
+into the A_d × A_d block of the Σ accumulator and increments a parallel support
+matrix N_ij for every active pair. A cross-group entry gains support only from
+documents that co-activate both indices.
+
+**5. SPD-assembly risk and the three-layer mitigation.**
+In the gated case, Σ entries are estimated from different document subsets and some
+cross-group cells are pinned to the prior, so the assembled matrix need not be
+positive definite — this is guaranteed to arise, not hypothetical. Background topics
+appear in every allowed set, so they correlate with every foreground block; pinning
+cross-foreground entries while background-foreground correlations are freely estimated
+is exactly the inconsistency that breaks positive definiteness. The fix is three
+layers, all load-bearing:
+
+- (i) The inverse-Wishart prior (Component 3 below) fills uninformed entries with a
+  coherent SPD scale instead of a raw zero or a few-patient estimate.
+- (ii) Nearest-SPD eigenvalue-floor projection (generalizing the per-doc Hessian
+  repair in [`_spd_inverse`](../../../spark-vi/spark_vi/models/topic/stm.py#L201-L226)
+  to the global Σ) — also the principled minimum-perturbation imputation of unobserved
+  cross-group entries.
+- (iii) The `sigma_ridge`·I floor (already present).
+
+Note: a `sigma_ridge` bump was considered as a standalone fix but rejected in favour
+of the nearest-SPD eigenvalue floor, which is the minimum perturbation that restores
+positive definiteness rather than inflating the diagonal uniformly.
+
+**6. Two opt-in regularizers (both default off).**
+Both apply after the M-step scatter:
+
+- *Inverse-Wishart prior* (Blei & Lafferty 2007): scale matrix Ψ = `sigma_prior_scale`·I,
+  pseudo-count ν = `sigma_prior_count`. The MAP M-step becomes
+  Σ_ij = (S_ij + Ψ_ij) / (N_ij + ν) per entry — shrinks toward Ψ/ν and regularizes
+  thin cross-group cells. This cleanly generalizes the old diagonal inverse-gamma
+  (which was the Ψ=ψI special case); parameter names are unchanged. Default Ψ=0, ν=0
+  reduces to plain MLE.
+- *Diagonal-shrink* (`sigma_diag_shrink` ∈ `[0, 1]`, Roberts et al. `sigma.prior`):
+  Σ ← (1−w)·Σ + w·diag(diag(Σ)). Shrinks off-diagonal correlations toward zero; now
+  meaningful because there are off-diagonals to shrink. Default w=0 is the identity.
+
+Pipeline order: scatter + min_pair_support floor → IW blend → diagonal-shrink →
+ridge + SPD-repair. Both knobs at defaults reduce to the Component 1 MLE.
+
+**7. min_pair_support floor (robustness and small-cell privacy).**
+A covariance entry backed by fewer than `min_pair_support` co-activating documents is
+statistically unreliable and a small-cell disclosure risk. Below the floor the scatter
+contribution is zeroed (S_ij → 0) and the entry falls back to the IW prior or
+SPD-completion. Background and within-group cells have massive support and never
+trigger the floor; the floor bites exactly the thin cross-group cells. The support
+matrix N_ij is exported with R so each correlation is annotated as measured (N_ij ≥
+min_pair_support) vs imputed.
+
+## Alternatives considered
+
+- **Diagonal Σ (status quo).** Retained indefinitely as a toggle. Rejected: the
+  diagonal model is structurally wrong for CTM/STM — there is no off-diagonal signal
+  to recover regardless of the data. Keeping it as an option would fragment the
+  stabilizer validation and signal that the diagonal is a legitimate choice rather
+  than a limitation that has been fixed. The diagonal results (exp 0015/0017, insight
+  0030) serve as the prior baseline; the option itself is removed.
+- **Ridge-only SPD repair for gated Σ.** Rejected as a standalone fix: a scalar
+  ridge inflates the diagonal uniformly, distorting all correlations, whereas the
+  nearest-SPD eigenvalue floor is the minimum-perturbation completion. The ridge
+  remains as the final floor, applied after the eigenvalue repair.
+- **Conditional sub-block prior (conditioning on clamped inactive-topic value).**
+  Rejected: the hard-masking interpretation integrates out the inactive topics, giving
+  the marginal N(μ_A, Σ_AA). Conditioning on a clamped scalar value introduces a
+  spurious signal that depends on the arbitrary pin location.
+- **Per-block (not per-pair) lazy update for gated Σ.** Would estimate cross-block
+  Σ entries from all documents in either block, including non-comorbid ones. Rejected:
+  cross-group covariance should reflect co-occurrence, not marginal overlap. The
+  per-pair rule is the correct generalization of ADR 0027's per-block rule.
+
+## Consequences
+
+- **ADR 0028-B logistic-normal sampler is now enabled.** The parked alternative B of
+  ADR 0028 (sample η ~ N(Γᵀx, Σ), θ = softmax(η) — the faithful STM draw) was
+  rejected in that arc because Σ was not exported as a full matrix. Full Σ removes
+  that blocker; dashboard wiring is a downstream arc (see
+  [ADR 0028](0028-dashboard-conditioned-dirichlet-prior.md)).
+- **Σ diagnostic generalizes.** The `Σ[min…max]` trace (ADR 0030) is extended to:
+  eigenvalue range + condition number, max |off-diagonal correlation|, and imputed
+  fraction (share of entries below min_pair_support floor). See
+  [ADR 0030](0030-diagnostic-traces-persist-faithfully-no-size-cap.md).
+- **No backward compatibility.** Legacy diagonal checkpoints (K-vector `global_params["Sigma"]`)
+  do not reload under the full-Σ model. Re-fit under full Σ is required. No
+  promote-on-load shim.
+- **Storage shape change.** `global_params["Sigma"]` goes from a K-vector to a
+  (K−1)×(K−1) matrix. New persisted artifacts: correlation matrix R, support matrix
+  N_ij, and a free-topic → topic-id map. `.npy` handles the shape change; no format
+  migration.
+- **Cost is negligible at K=40.** Σ is 39×39: one Cholesky per global iteration, one
+  (K−1)×(K−1) matrix-vector product per document (already paid for the Laplace inverse).
+  All V-sized work is unchanged.
+- **The whole stabilizer stack re-validates under full Σ** — reference topic, spectral
+  init, gating, Σ-priors. The diagonal experiments (exp 0015/0017, insight 0030, and
+  the stability follow-ups 0018/0019) are the prior baseline. Exps 0020 (non-gated
+  full-Σ cancer) and 0021 (gated multi-group comorbid) are the validation runs.
+
+## References
+
+- Blei, D. M. & Lafferty, J. D. (2007). "A Correlated Topic Model of Science."
+  *Annals of Applied Statistics*, 1(1), 17–35. — the logistic-normal full-Σ treatment
+  and the conjugate inverse-Wishart prior on Σ.
+- Roberts, M. E., Stewart, B. M., & Tingley, D. (2019). `stm`: An R package for
+  structural topic models. *Journal of Statistical Software*, 91(2).
+  `sigma.prior` ∈ `[0, 1]` diagonal-shrink regularizer; source
+  https://github.com/bstewart/stm
+- [ADR 0027](0027-lazy-block-updates-for-gated-svi-mstep.md) — per-block lazy update,
+  generalized here to per-pair for cross-group covariance.
+- [ADR 0028](0028-dashboard-conditioned-dirichlet-prior.md) — parked alternative B
+  (logistic-normal sampler) now enabled by the full Σ.
+- [ADR 0029](0029-spd-guard-on-stm-laplace-hessian.md) — SPD guard on the per-doc
+  Laplace Hessian inverse; the nearest-SPD floor is generalized here to the global Σ.
+- [ADR 0030](0030-diagnostic-traces-persist-faithfully-no-size-cap.md) — Σ diagnostic
+  traces; the Σ[min…max] trace is extended to eigenvalue range, condition number, and
+  max off-diagonal correlation.
+- [ADR 0031](0031-stm-k1-reference-topic-parameterization.md) — K−1 reference
+  parameterization; Σ lives over the K−1 free topics.
+- [insight 0029](../insights/0029-stm-sigma-init-collapse-blowup-missing-stabilizers.md)
+  — the three missing stabilizers (reference, spectral, Σ-prior).
+- [insight 0030](../insights/0030-spectral-init-closes-stm-sigma-blowup-on-real-data.md)
+  — diagonal-Σ spectral result, the prior baseline for full-Σ validation.
+- [design spec](../superpowers/specs/2026-06-30-stm-full-covariance-sigma-design.md)
+  — the full design with component-level math and validation plan for this arc.
