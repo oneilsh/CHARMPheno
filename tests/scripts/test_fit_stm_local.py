@@ -146,3 +146,29 @@ def test_fit_stm_local_spectral_method_dense_end_to_end(tmp_path):
     assert rc == 0
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["metadata"]["stm_hardening"]["spectral_method"] == "dense"
+
+
+def test_fit_stm_local_full_sigma_end_to_end(tmp_path):
+    """Full-Sigma pipeline smoke test with --min-pair-support 2.
+
+    Runs fit_main on the existing gated sim (K=5, 8 iters) with the
+    min-pair-support guard engaged. Asserts rc==0, params/Sigma.npy is (K,K),
+    and params/correlation.npy exists (written by STMModel.save). Uses
+    --no-spectral-init and --no-reference-topic to keep the path cheap and
+    isolated to the full-covariance M-step arc."""
+    import json
+    import numpy as np
+    from fit_stm_local import main as fit_main
+    omop, person = _make_sim(tmp_path)
+    out = tmp_path / "ckpt_full_sigma"
+    rc = fit_main([
+        "--omop", str(omop), "--person", str(person),
+        "--K", "5", "--background-k", "3", "--foreground", "rare_dx:2",
+        "--covariate-formula", "~ C(sex) + age",
+        "--min-pair-support", "2",
+        "--no-spectral-init", "--no-reference-topic",
+        "--max-iter", "8", "--out-dir", str(out)])
+    assert rc == 0
+    Sigma = np.load(out / "params" / "Sigma.npy")
+    assert Sigma.shape == (5, 5)
+    assert (out / "params" / "correlation.npy").exists()

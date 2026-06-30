@@ -348,3 +348,49 @@ def test_topic_correlation_matrix_from_sigma():
     R = m.topic_correlation_matrix(gp)
     assert np.allclose(np.diag(R), 1.0)
     assert np.isclose(R[0, 1], 2.0 / np.sqrt(36.0))
+
+
+# --- Task 10: adversarial SPD-assembly + full-Sigma local end-to-end ----------
+
+def test_assembled_sigma_is_spd_when_cross_block_inconsistent():
+    """Adversarial gated-assembly: background topic 0 correlates strongly with
+    BOTH foreground 1 and 2, but no doc co-activates 1 and 2, so entry (1,2)
+    stays at the prior 0. The raw per-pair assembly is then INDEFINITE; the
+    M-step's nearest_spd repair must return a valid SPD covariance. (Design spec
+    C2 — the central numerical risk; this is a deliberate characterization test
+    of the repair, not a red-first TDD test.)"""
+    from spark_vi.models.topic.stm import OnlineSTM
+    K, D = 3, 1000
+    # Target raw assembly: strong bg<->fg1 and bg<->fg2, fg1<->fg2 pinned 0.
+    # det = 1 - 0.9^2 - 0.9^2 = -0.62 < 0  => genuinely indefinite.
+    M = np.array([[1.0, 0.9, 0.9],
+                  [0.9, 1.0, 0.0],
+                  [0.9, 0.0, 1.0]])
+    m = OnlineSTM(K=K, vocab_size=4, P=1, reference_topic=False)
+    gp = m.initialize_global(None)        # Sigma0 = eye(3); its (1,2) entry is 0
+    gp["Gamma"] = np.zeros((1, K))
+    # Plant S and N so the per-pair MLE S/N = M on supported pairs; pair (1,2)
+    # has zero support -> stays at Sigma0[1,2] = 0 (the inconsistent cross cell).
+    N = np.full((K, K), float(D))
+    N[1, 2] = N[2, 1] = 0.0
+    S = M * float(D)
+    S[1, 2] = S[2, 1] = 0.0
+    stats = {
+        "lambda_stats": np.zeros((K, 4)),
+        "XtX": np.full((1, 1), float(D)),
+        "XtX_groups": np.zeros((0, 1, 1)),
+        "XtMu": np.zeros((1, K)),
+        "residual_outer_stat": S,
+        "n_pairs_stat": N,
+        "n_docs_per_topic": np.full(K, float(D)),
+        "doc_loglik_sum": np.array(0.0),
+        "doc_eta_kl_sum": np.array(0.0),
+        "n_docs": np.array(float(D)),
+    }
+    # (a) the RAW assembly is indefinite -> the scenario truly triggers the risk
+    raw = np.where(N > 0, S / np.where(N > 0, N, 1.0), gp["Sigma"])
+    assert np.min(np.linalg.eigvalsh(raw)) < 0, "scenario must produce an indefinite raw assembly"
+    # (b) update_global's nearest_spd repair returns a valid SPD covariance
+    Sig = m.update_global(gp, stats, learning_rate=1.0)["Sigma"]
+    assert np.allclose(Sig, Sig.T)
+    assert np.min(np.linalg.eigvalsh(Sig)) > 0
