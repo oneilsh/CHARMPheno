@@ -1105,6 +1105,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Only label the first N phenotypes (for cost-bound dry runs).",
     )
     parser.add_argument(
+        "--topic-ids", type=str, default=None,
+        help="Comma-separated phenotype ids to label (e.g. '36,41,44'), for "
+             "spot-checking specific topics across blocks/kinds. Overrides "
+             "--limit. Ids index phenotypes.json (== original topic id when "
+             "the bundle preserves order). Out-of-range ids are an error.",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Print what would be sent but don't call the API.",
     )
@@ -1226,17 +1233,39 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
+    # --topic-ids: explicit set of phenotype ids to label (overrides --limit).
+    requested_ids: list[int] | None = None
+    if args.topic_ids:
+        try:
+            requested_ids = [
+                int(x) for x in args.topic_ids.split(",") if x.strip() != ""
+            ]
+        except ValueError:
+            raise SystemExit(
+                f"--topic-ids must be comma-separated integers, got "
+                f"{args.topic_ids!r}"
+            )
+        for tid in requested_ids:
+            if not (0 <= tid < K):
+                raise SystemExit(
+                    f"--topic-ids: topic {tid} is out of range [0, {K})"
+                )
+
     todo: list[int] = []
-    for i, p in enumerate(phenotypes):
-        existing = (p.get("label") or "").strip()
+    candidate = requested_ids if requested_ids is not None else range(K)
+    for i in candidate:
+        existing = (phenotypes[i].get("label") or "").strip()
         if existing and not args.force:
             continue
         todo.append(i)
-        if args.limit is not None and len(todo) >= args.limit:
+        # --limit only bounds the default (all-topics) sweep; an explicit
+        # --topic-ids list is taken in full.
+        if requested_ids is None and args.limit is not None and len(todo) >= args.limit:
             break
 
     print(f"[label] {len(todo)}/{K} phenotypes to label "
-          f"(--force={args.force}, --limit={args.limit})", flush=True)
+          f"(--force={args.force}, --limit={args.limit}, "
+          f"--topic-ids={args.topic_ids})", flush=True)
     if not todo:
         print("[label] nothing to do", flush=True)
         return 0

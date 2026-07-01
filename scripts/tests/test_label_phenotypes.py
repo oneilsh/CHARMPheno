@@ -127,3 +127,22 @@ def test_main_dry_run_succeeds_on_bundle_with_alpha(tmp_path, capsys):
     rc = lp.main(["--dry-run", "--bundle-dir", str(bundle)])
     assert rc == 0
     assert "dry-run only" in capsys.readouterr().out
+
+
+def test_main_topic_ids_selects_only_those(tmp_path, capsys):
+    """--topic-ids restricts the labeling set to exactly the given ids
+    (used for spot-checking specific topics across blocks/kinds)."""
+    bundle = _write_bundle(tmp_path, with_alpha=False)
+    rc = lp.main(["--dry-run", "--bundle-dir", str(bundle), "--topic-ids", "1"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "phenotype 1" in out
+    assert "phenotype 0" not in out
+
+
+def test_main_topic_ids_out_of_range_errors(tmp_path):
+    """An out-of-range id is a hard error, not a silent skip."""
+    import pytest
+    bundle = _write_bundle(tmp_path, with_alpha=False)
+    with pytest.raises(SystemExit):
+        lp.main(["--dry-run", "--bundle-dir", str(bundle), "--topic-ids", "99"])
