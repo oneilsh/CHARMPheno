@@ -98,13 +98,10 @@ def test_nongated_recovers_planted_correlated_sigma():
 
 
 def test_free_offdiagonal_gets_zero_precision_completion():
-    """A free off-diagonal entry (i,j) (zero support) is filled by pd_complete
-    with the zero-PRECISION completion (Task 2), NOT carried as a prior value.
-
-    The supported diagonal entries take their per-pair sample covariance and the
-    free (0,1) entry becomes the unique conditional-independence value: its entry
-    in the precision (Sigma-inverse) is ~0 and the matrix is SPD. This replaces
-    the old lazy-prior-carry / zero-pin contract for free off-diagonals.
+    """A free off-diagonal entry (i,j) (zero support) is lazy-kept at its prior
+    Σ value under the block-wise unit-diagonal M-step (no completion): with no
+    completion machinery in the fit path, a never-supported cross pair simply
+    carries forward, and every diagonal entry is pinned to 1.0 exactly.
     Spec: docs/superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md
     """
     from spark_vi.models.topic.stm import OnlineSTM
@@ -137,11 +134,10 @@ def test_free_offdiagonal_gets_zero_precision_completion():
     }
     out = m.update_global(gp, stats, learning_rate=1.0)
     Sig = out["Sigma"]
-    # SPD, and the free pair (0,1) has ~zero precision (conditional independence).
-    assert np.min(np.linalg.eigvalsh(Sig)) > 0
-    assert abs(np.linalg.inv(Sig)[0, 1]) < 1e-6
-    # Supported diagonals took the per-pair sample covariance S/N.
-    assert np.allclose(np.diag(Sig), np.diag(S) / np.diag(n_pairs))
+    # free/thin cross pair is lazy-kept (block-wise: no completion), not filled
+    assert Sig[0, 1] == gp["Sigma"][0, 1]
+    # unit-diagonal parameterization: every diagonal entry is pinned to 1.0
+    assert np.allclose(np.diag(Sig), 1.0)
 
 
 def test_gated_prior_uses_marginal_subblock_not_conditional():
@@ -246,22 +242,25 @@ def _fit_block(min_pair_support, n_comorbid):
 
 
 def test_cross_group_covariance_from_comorbid_docs():
+    # 300 comorbid docs >= floor 10 -> the A<->B cross pair is supported, so it
+    # is estimated as a standardized correlation (block-wise unit-diagonal),
+    # not a raw covariance -- it must lie in [-1, 1].
     Sig, part = _fit_block(min_pair_support=10, n_comorbid=300)
     a = part.block_indices("A")[0]; b = part.block_indices("B")[0]
     assert Sig[a, b] != 0.0                     # informed cross-group entry
+    assert abs(Sig[a, b]) <= 1.0                # standardized correlation, not raw covariance
     assert np.min(np.linalg.eigvalsh(Sig)) > 0  # SPD
 
 
 def test_thin_cross_group_completed_with_zero_precision():
-    # 5 comorbid docs < floor 50 -> the A<->B cross pair is FREE (below
-    # min_pair_support), so pd_complete fills it with the zero-precision
-    # (conditional-independence) value instead of fitting a thin S/N estimate.
-    # The completed covariance is the CI-implied value (generally != 0), and the
-    # matrix is SPD with ~zero precision on the free pair (Task 2).
+    # 5 comorbid docs < floor 50 -> the A<->B cross pair is unsupported (below
+    # min_pair_support). Block-wise: no completion, so it is lazy-kept at its
+    # prior Σ value — 0, since initialize_global's Σ0 = eye(K) is never updated
+    # for this never-supported pair — rather than fit to the thin S/N estimate.
     Sig, part = _fit_block(min_pair_support=50, n_comorbid=5)  # below floor
     a = part.block_indices("A")[0]; b = part.block_indices("B")[0]
-    assert np.min(np.linalg.eigvalsh(Sig)) > 0          # SPD
-    assert abs(np.linalg.inv(Sig)[a, b]) < 1e-6         # free pair -> zero precision
+    assert Sig[a, b] == 0.0                             # lazy-kept at init prior (never supported)
+    assert np.allclose(np.diag(Sig), 1.0)                # unit-diagonal parameterization
 
 
 def test_min_pair_support_validation():
@@ -285,26 +284,33 @@ def test_topic_correlation_matrix_from_sigma():
 
 # --- Task 10: adversarial SPD-assembly + full-Sigma local end-to-end ----------
 
-def test_assembled_sigma_is_spd_when_cross_block_inconsistent():
+def test_marginals_are_spd_block_structured_full_sigma():
     """Adversarial gated-assembly: background topic 0 correlates strongly with
-    BOTH foreground 1 and 2, but no doc co-activates 1 and 2, so entry (1,2) is
-    FREE. The raw per-pair assembly (free pair pinned to the prior 0) is then
-    INDEFINITE; the M-step's pd_complete must return a valid SPD covariance by
-    filling the free entry with the zero-precision completion. (Design spec C2 —
-    the central numerical risk; a deliberate characterization test of the
-    completion, not a red-first TDD test.)"""
+    BOTH foreground group A (topic 1) and group B (topic 2), but no doc
+    co-activates A and B, so cross-group entry (1,2) is unsupported. Under
+    block-wise (no completion) the full assembled Σ is intentionally
+    block-structured and need not be SPD as a whole — the premise that the
+    M-step must repair it to a fully SPD matrix no longer holds. What DOES hold:
+    every marginal the E-step actually inverts, Σ[bg ∪ one-group] (safe_inverse),
+    is SPD, since a document only ever activates background + its own group.
+    (Design spec C2 — the central numerical risk; a characterization test of
+    the block-wise contract.)
+    """
     from spark_vi.models.topic.stm import OnlineSTM
+    from spark_vi.models.topic.partition import TopicBlockPartition
     K, D = 3, 1000
-    # Target raw assembly: strong bg<->fg1 and bg<->fg2, fg1<->fg2 pinned 0.
-    # det = 1 - 0.9^2 - 0.9^2 = -0.62 < 0  => genuinely indefinite.
+    part = TopicBlockPartition(group_var="g", background_k=1,
+                               foreground=(("A", 1), ("B", 1)))  # bg=0, A=1, B=2
+    # Target raw assembly: strong bg<->A and bg<->B, A<->B pinned 0 (never observed).
+    # det = 1 - 0.9^2 - 0.9^2 = -0.62 < 0  => genuinely indefinite as a whole.
     M = np.array([[1.0, 0.9, 0.9],
                   [0.9, 1.0, 0.0],
                   [0.9, 0.0, 1.0]])
-    m = OnlineSTM(K=K, vocab_size=4, P=1, reference_topic=False)
+    m = OnlineSTM(K=K, vocab_size=4, P=1, reference_topic=False, topic_blocks=part)
     gp = m.initialize_global(None)        # Sigma0 = eye(3); its (1,2) entry is 0
     gp["Gamma"] = np.zeros((1, K))
     # Plant S and N so the per-pair MLE S/N = M on supported pairs; pair (1,2)
-    # has zero support -> stays at Sigma0[1,2] = 0 (the inconsistent cross cell).
+    # (cross-group A<->B) has zero support -> lazy-kept at Sigma0[1,2] = 0.
     N = np.full((K, K), float(D))
     N[1, 2] = N[2, 1] = 0.0
     S = M * float(D)
@@ -312,7 +318,7 @@ def test_assembled_sigma_is_spd_when_cross_block_inconsistent():
     stats = {
         "lambda_stats": np.zeros((K, 4)),
         "XtX": np.full((1, 1), float(D)),
-        "XtX_groups": np.zeros((0, 1, 1)),
+        "XtX_groups": [np.full((1, 1), float(D)) for _ in part.groups],
         "XtMu": np.zeros((1, K)),
         "residual_outer_stat": S,
         "n_pairs_stat": N,
@@ -321,13 +327,19 @@ def test_assembled_sigma_is_spd_when_cross_block_inconsistent():
         "doc_eta_kl_sum": np.array(0.0),
         "n_docs": np.array(float(D)),
     }
-    # (a) the RAW assembly is indefinite -> the scenario truly triggers the risk
-    raw = np.where(N > 0, S / np.where(N > 0, N, 1.0), gp["Sigma"])
-    assert np.min(np.linalg.eigvalsh(raw)) < 0, "scenario must produce an indefinite raw assembly"
-    # (b) update_global's nearest_spd repair returns a valid SPD covariance
     Sig = m.update_global(gp, stats, learning_rate=1.0)["Sigma"]
     assert np.allclose(Sig, Sig.T)
-    assert np.min(np.linalg.eigvalsh(Sig)) > 0
+    # unit-diagonal parameterization: diagonal is exactly 1.0
+    assert np.allclose(np.diag(Sig), 1.0)
+    # the full matrix is NOT required to be SPD (this scenario is genuinely
+    # indefinite as a whole under the raw block assembly)
+    assert np.linalg.eigvalsh(Sig).min() < 0
+    # but every marginal the E-step actually inverts (bg ∪ one-group) is SPD
+    bg = part.background_indices()
+    for g in part.groups:
+        allowed = np.union1d(bg, part.block_indices(g))
+        sub = Sig[np.ix_(allowed, allowed)]
+        assert np.linalg.eigvalsh(sub).min() > 0
 
 
 def test_update_global_stashes_n_pairs_support():

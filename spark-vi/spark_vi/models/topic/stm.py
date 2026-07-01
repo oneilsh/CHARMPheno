@@ -31,8 +31,6 @@ References:
 """
 from __future__ import annotations
 
-import logging
-import time
 from functools import partial
 from typing import Any, Iterable
 
@@ -41,10 +39,8 @@ from scipy.optimize import minimize
 from scipy.special import digamma, gammaln
 
 from spark_vi.core.model import VIModel
-from spark_vi.models.topic._linalg import pd_complete, safe_inverse
+from spark_vi.models.topic._linalg import safe_inverse
 from spark_vi.models.topic.types import STMDocument
-
-_log = logging.getLogger(__name__)
 
 
 def _softmax(eta: np.ndarray) -> np.ndarray:
@@ -619,28 +615,29 @@ class OnlineSTM(VIModel):
         λ:  λ_new = (1-ρ)·λ + ρ·(η + lambda_stats)        # natural-gradient SVI
         Γ:  Γ̂ = (XᵀX + ridge·I)⁻¹ XᵀMu                    # ridge OLS on aggregated stats
             Γ_new = (1-ρ)·Γ + ρ·Γ̂                         # stochastic-EM ρ-blend
-        Σ:  observed[i,j] = N_ij >= min_pair_support       # diagonal forced observed
-            mle_ij        = S_ij / N_ij  on observed       # per-pair sample covariance
-            Σ_target[i,j] = mle_ij on observed, else Σ_ij  # free: finite placeholder
-            Σ_blended     = (1-ρ)·Σ + ρ·Σ_target           # ρ-blend on observed entries
-            Σ_new         = pd_complete(Σ_blended, observed)
+        Σ:  supported[i,j] = N_ij >= min_pair_support      # diagonal forced observed
+            mle_ij          = S_ij / N_ij  on supported     # per-pair sample covariance
+            R_ij            = mle_ij / sqrt(mle_ii·mle_jj)  # standardize to correlation
+            R_target[i,j]   = R_ij on supported, else Σ_ij  # unsupported: lazy-keep
+            Σ_new           = (1-ρ)·Σ + ρ·R_target, diag pinned to 1
 
         The gated per-pair M-step stitches Σ from inconsistent document subsets, so
         cross-group pairs with fewer than min_pair_support co-activating documents
-        are unobserved (free). pd_complete fills those free entries with the
-        maximum-determinant positive-definite completion: it preserves the observed
-        entries exactly and drives the PRECISION (Σ⁻¹) to zero on every free entry —
-        the unique completion that imposes conditional independence (no spurious
-        partial correlation) where nothing was measured (Dempster 1972 covariance
-        selection). This replaces the prior zero-COVARIANCE pin, the inverse-Wishart
-        MAP blend, the diagonal-shrink lever, and the trailing nearest_spd Σ floor.
+        are unsupported. Rather than completing those entries, the block-wise
+        estimator standardizes each supported pair's sample covariance to a
+        correlation and pins Σ_ii = 1 exactly every M-step: this removes the
+        per-topic variance degree of freedom that previously drove a softmax-
+        saturation runaway (insight 0033), and retires the maximum-determinant PD
+        completion (Dempster 1972 covariance selection) from the fit path — under
+        single-label gating the E-step only ever inverts a fully-observed marginal
+        Σ[bg ∪ one-group] (safe_inverse), so the cross-group block is never
+        inverted whole and does not need completing.
 
-        The result is SPD and observed-preserving, so the update stays lazy for
-        unsupported blocks: a free pair carries the completed (conditionally
-        independent) value rather than decaying toward a floor (ADR-0027). The
-        fully-observed special case (no gating: every pair supported) has no free
-        entries, so pd_complete returns the ρ-blended sample covariance unchanged
-        (up to symmetrization).
+        Unsupported pairs (including a never-observed cross-group pair, N=0) are
+        lazy-kept at their current Σ value rather than decayed toward a floor
+        (ADR-0027). The fully-observed special case (no gating: every pair
+        supported) reduces to the ρ-blended standardized sample correlation with
+        no lazy-kept entries.
 
         Spec: docs/superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md
 
@@ -689,62 +686,28 @@ class OnlineSTM(VIModel):
                     XtX_groups[gi] + ridge_eye, XtMu[:, cols])
         new_Gamma = (1.0 - learning_rate) * Gamma + learning_rate * Gamma_target
 
-        # Σ: full-covariance M-step via maximum-determinant PD completion.
+        # Σ: block-wise unit-diagonal correlation M-step (no completion).
         #
-        # observed = pairs with N >= min_pair_support; on those entries we use the
-        # per-pair sample covariance mle = S/N and ρ-blend it with the current Σ.
-        # Off-diagonal entries below the threshold (thin/absent cross-group pairs)
-        # are FREE: pd_complete overwrites them with the unique zero-precision
-        # (conditional-independence) completion that keeps the observed entries
-        # exact and the whole matrix SPD (Dempster 1972 covariance selection; see
-        # _linalg.py and the spec cited in this method's docstring).
-        #
-        # min_pair_support is now the observed/free threshold: cross-group pairs
-        # informed by fewer than min_pair_support co-activating documents are
-        # treated as unmeasured and completed rather than fit to a thin/spurious
-        # S/N estimate (robustness + small-cell guard). Default min_pair_support=1
-        # makes every present pair (N>=1) observed.
-        #
-        # The diagonal is always observed (pd_complete requires a true diagonal).
-        # A topic absent from this minibatch (its own variance unsupported,
-        # N[k,k] < min_pair_support) carries its CURRENT Σ diagonal — an
-        # observed-from-prior value pd_complete preserves exactly — rather than a
-        # spurious 0/N estimate. This keeps the ADR-0027 lazy-block invariant: a
-        # rare group missed by a minibatch does not decay toward a floor; its
-        # variance is held and its cross-entries are completed (conditionally
-        # independent given the present topics).
+        # Standardize the observed per-pair scatter to correlations and pin the
+        # diagonal to 1. Under single-label gating every E-step inverts only a
+        # fully-observed marginal Σ[bg ∪ one-group] (safe_inverse), so nothing needs
+        # the cross-group block completed; it stays at its 0 init and is never
+        # inverted whole. Pinning Σ_ii = 1 removes the variance degree of freedom that
+        # drives the softmax-saturation runaway (insight 0033). min_pair_support is the
+        # observed/lazy threshold; unsupported pairs (incl. cross-group, N=0) are
+        # lazy-kept (ADR 0027), so an absent group's entries do not decay.
         S = target_stats["residual_outer_stat"]
         N = target_stats["n_pairs_stat"]
-        supported = N >= self.min_pair_support      # below threshold -> free
-        # Per-pair sample covariance only where there is real support; guard the
-        # divisor with N>0 (a forced-observed but unsupported diagonal has N=0).
+        supported = N >= self.min_pair_support
         with np.errstate(invalid="ignore", divide="ignore"):
             mle = np.where(supported, S / np.where(N > 0, N, 1.0), 0.0)
-        # Observed mask = supported pairs plus a forced-true diagonal. Supported
-        # entries take the sample covariance; an absent topic's diagonal carries
-        # its current Σ diagonal (lazy-keep); free off-diagonals carry a finite
-        # placeholder pd_complete overwrites with the zero-precision completion.
-        observed = supported.copy()
-        np.fill_diagonal(observed, True)            # pd_complete needs a true diagonal
-        Sigma_target = np.where(supported, mle, Sigma)
-        diag_supported = np.diag(N) >= self.min_pair_support
-        kept_diag = np.where(diag_supported, np.diag(mle), np.diag(Sigma))
-        np.fill_diagonal(Sigma_target, kept_diag)
-        Sigma_blended = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
-        _pd_info: dict = {}
-        _pd_t0 = time.perf_counter()
-        new_Sigma = pd_complete(Sigma_blended, observed, info=_pd_info)
-        # M-step diagnostic (driver-side): pd_complete is the serial covariance-selection
-        # completion; its wall-time and sweep count confirm whether it dominates the
-        # per-iteration driver work while executors idle. Surfaces to the driver log
-        # via the same logging path as the runner's per-iter line.
-        _log.info(
-            "M-step pd_complete: %.3fs sweeps=%d/%d fell_back=%s n_free=%d K=%d",
-            time.perf_counter() - _pd_t0,
-            _pd_info.get("sweeps", -1), _pd_info.get("max_iter", -1),
-            _pd_info.get("fell_back"), _pd_info.get("n_free", -1),
-            new_Sigma.shape[0],
-        )
+        # empirical std used ONLY to standardize (never stored as the prior variance)
+        diag_var = np.diag(mle).copy()
+        std = np.sqrt(np.where(diag_var > 0.0, diag_var, 1.0))
+        R = mle / np.outer(std, std)
+        R_target = np.where(supported, R, Sigma)          # lazy-keep unsupported
+        new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * R_target
+        np.fill_diagonal(new_Sigma, 1.0)                  # exact unit diagonal
 
         return {
             "lambda": new_lam,

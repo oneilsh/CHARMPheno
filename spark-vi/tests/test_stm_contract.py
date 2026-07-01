@@ -34,16 +34,18 @@ def test_canonical_collapse_update_global_matches_original_formulas():
     stats = model.local_update(list(docs), gp0)
     out = model.update_global(gp0, stats, 0.5)
     # Original closed forms recomputed independently from the stats.
-    from spark_vi.models.topic._linalg import pd_complete
     ridge = model.sigma_ridge * np.eye(P)
     Gamma_target = np.linalg.solve(stats["XtX"] + ridge, stats["XtMu"])
     exp_Gamma = 0.5 * gp0["Gamma"] + 0.5 * Gamma_target
-    # Full-cov Σ M-step: per-pair MLE = scatter / support, ρ-blend, pd_complete.
-    # No-gating path: every pair is supported (observed), so pd_complete has no
-    # free entries and returns the ρ-blended sample covariance unchanged.
-    Sigma_target = stats["residual_outer_stat"] / stats["n_pairs_stat"]
-    blended = 0.5 * gp0["Sigma"] + 0.5 * Sigma_target
-    exp_Sigma = pd_complete(blended, np.ones((K, K), dtype=bool))
+    # Block-wise unit-diagonal Σ M-step (no completion): per-pair MLE = scatter /
+    # support, standardized to a correlation, ρ-blended, diagonal pinned to 1.
+    # No-gating path: every pair is supported, so there is nothing to lazy-keep.
+    mle = stats["residual_outer_stat"] / stats["n_pairs_stat"]
+    std = np.sqrt(np.diag(mle))
+    R = mle / np.outer(std, std)
+    blended = 0.5 * gp0["Sigma"] + 0.5 * R
+    exp_Sigma = blended.copy()
+    np.fill_diagonal(exp_Sigma, 1.0)
     target_lam = float(gp0["eta"]) + stats["lambda_stats"]
     exp_lam = 0.5 * gp0["lambda"] + 0.5 * target_lam
     # The None-path support must be uniformly n_docs (every topic pair allowed).
@@ -102,21 +104,21 @@ def test_absent_group_block_left_unchanged_lazy_update():
     gp = model.initialize_global(None)
     # Seed distinctive, non-default values on the rare block so any decay shows.
     gp["Gamma"][:, 2] = np.array([0.7, -0.4])
-    gp["Sigma"][2, 2] = 0.9
+    gp["Sigma"][2, 0] = gp["Sigma"][0, 2] = 0.4  # cross-entry: lazy-keep target
     stats = model.local_update(docs, gp)
     assert stats["n_docs_per_topic"][2] == 0.0  # precondition: 'rare' absent
     out = model.update_global(gp, stats, 0.5)
-    # Rare block untouched (the fix): its variance keeps its current value
-    # (no support -> lazy no-op). Under pd_complete (Task 2) the absent topic's
-    # variance is observed-from-prior (carries the current Σ diagonal) so the
-    # completion preserves it exactly; its cross-entries are completed.
+    # Rare block untouched (the fix): its cross-entries keep their current value
+    # (no support -> lazy no-op), rather than decaying toward the ρ-blend target.
     np.testing.assert_array_equal(out["Gamma"][:, 2], np.array([0.7, -0.4]))
-    # The unsupported variance is BIT-IDENTICAL: an absent topic's diagonal carries
-    # the current Σ diagonal (ρ-blend of 0.9 with itself = 0.9) and pd_complete
-    # preserves observed entries exactly.
-    assert out["Sigma"][2, 2] == 0.9
-    # Background block variances DID update (sanity: lazy logic didn't freeze all).
-    assert not np.allclose(np.diag(out["Sigma"])[:2], np.diag(gp["Sigma"])[:2])
+    # Block-wise unit-diagonal parameterization (Task 1): the rare topic's own
+    # variance is no longer a free lazy-keep target -- the diagonal is pinned to
+    # 1.0 exactly on EVERY M-step, supported or not. The lazy-keep invariant now
+    # shows up on the rare topic's cross-entries, which stay bit-identical.
+    assert out["Sigma"][2, 2] == 1.0
+    assert out["Sigma"][2, 0] == 0.4
+    assert out["Sigma"][0, 2] == 0.4
+    # Background block DID update (sanity: lazy logic didn't freeze all).
     assert not np.allclose(out["Gamma"][:, :2], gp["Gamma"][:, :2])
 
 
@@ -134,29 +136,23 @@ def test_present_group_block_updates_via_block_formula():
     stats = model.local_update(docs, gp)
     assert stats["n_docs_per_topic"][2] == 4.0  # precondition: 'rare' present
     out = model.update_global(gp, stats, 0.5)
-    from spark_vi.models.topic._linalg import pd_complete
     ridge = model.sigma_ridge * np.eye(P)
     cols = part.block_indices("rare")  # [2]
     Gt = np.linalg.solve(stats["XtX_groups"][0] + ridge, stats["XtMu"][:, cols])
     exp_Gamma_col = 0.5 * gp["Gamma"][:, cols] + 0.5 * Gt
     np.testing.assert_allclose(out["Gamma"][:, cols], exp_Gamma_col, atol=1e-12)
-    # Full-cov Σ M-step (Task 2): per-pair sample cov on SUPPORTED pairs
-    # (N >= min_pair_support), ρ-blend, then pd_complete fills the free
-    # (unsupported) cross-pairs with the zero-precision max-determinant
-    # completion. An absent topic's diagonal (here the reference topic 0, which
-    # carries no residual scatter -> N[0,0]=0) is observed-from-prior: it carries
-    # the current Σ diagonal so the lazy-keep is exact.
+    # Block-wise unit-diagonal Σ M-step (Task 1, no completion): per-pair sample
+    # cov on SUPPORTED pairs (N >= min_pair_support), standardized to a
+    # correlation, ρ-blended, unsupported pairs lazy-kept, diagonal pinned to 1.
     S, N = stats["residual_outer_stat"], stats["n_pairs_stat"]
     supported = N >= model.min_pair_support
     mle = np.where(supported, S / np.where(N > 0, N, 1.0), 0.0)
-    observed = supported.copy()
-    np.fill_diagonal(observed, True)
-    Sigma_target = np.where(supported, mle, gp["Sigma"])
-    diag_supported = np.diag(N) >= model.min_pair_support
-    kept_diag = np.where(diag_supported, np.diag(mle), np.diag(gp["Sigma"]))
-    np.fill_diagonal(Sigma_target, kept_diag)
-    blended = 0.5 * gp["Sigma"] + 0.5 * Sigma_target
-    exp_Sigma = pd_complete(blended, observed)
+    diag_var = np.diag(mle).copy()
+    std = np.sqrt(np.where(diag_var > 0.0, diag_var, 1.0))
+    R = mle / np.outer(std, std)
+    R_target = np.where(supported, R, gp["Sigma"])
+    exp_Sigma = 0.5 * gp["Sigma"] + 0.5 * R_target
+    np.fill_diagonal(exp_Sigma, 1.0)
     np.testing.assert_allclose(out["Sigma"], exp_Sigma, atol=1e-12)
     assert stats["n_pairs_stat"][2, 2] == 4.0  # 'rare' pair support is the group docs
 
@@ -330,21 +326,22 @@ class TestUpdateGlobal:
     def test_sigma_sample_covariance(self):
         m, gp, target = self._make_state_with_stats()
         gp_new = m.update_global(gp, target, learning_rate=1.0)
-        # Full-cov per-pair MLE = scatter / support; every pair supported (N=50,
-        # min_pair_support=1) so pd_complete has no free entries and returns the
-        # MLE unchanged (the fully-observed special case of the completion).
-        from spark_vi.models.topic._linalg import pd_complete
+        # Block-wise unit-diagonal M-step (no completion): per-pair MLE =
+        # scatter / support, standardized to a correlation (every pair supported
+        # here, N=50 >= min_pair_support=1, so nothing is lazy-kept), diagonal
+        # pinned to 1 exactly.
         mle = target["residual_outer_stat"] / target["n_pairs_stat"]
-        observed = np.ones((m.K, m.K), dtype=bool)
-        expected_Sigma = pd_complete(mle, observed)
+        std = np.sqrt(np.diag(mle))
+        expected_Sigma = mle / np.outer(std, std)
+        np.fill_diagonal(expected_Sigma, 1.0)
         np.testing.assert_allclose(gp_new["Sigma"], expected_Sigma)
 
     def test_sigma_stays_spd(self):
-        """Σ must stay SPD to keep Laplace well-defined. There is no SIGMA_FLOOR knob
-        any more (removed in the PD-completion arc); strict positive-definiteness comes
-        from pd_complete — nearest_spd's internal eigenvalue floor for the per-pair
-        sample-covariance path, or the Dykstra min-Frobenius fallback for a non-PD
-        observed block. Either way the result's eigenvalues are strictly positive."""
+        """Σ must stay SPD to keep Laplace well-defined. Under the block-wise
+        unit-diagonal M-step (Task 1, no completion), zero observed scatter
+        standardizes to a zero correlation (guarded divide-by-zero) and the
+        diagonal is pinned to 1 exactly, so this degenerate case reduces to the
+        identity matrix -- trivially SPD without any completion/floor machinery."""
         m, gp, target = self._make_state_with_stats()
         target["residual_outer_stat"] = np.zeros((3, 3))
         gp_new = m.update_global(gp, target, learning_rate=1.0)
