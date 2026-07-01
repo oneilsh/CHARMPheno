@@ -74,7 +74,7 @@ engine is defined for the single-label case.
 The M-step standardizes the observed per-pair scatter to correlations and lazy-keeps
 unsupported pairs at their prior Σ value
 ([stm.py:708](../../spark-vi/spark_vi/models/topic/stm.py#L708)):
-R_ij = (S_ij/N_ij) / sqrt((S_ii/N_ii)·(S_jj/N_jj)) on supported pairs
+R_ij = clip( (S_ij/N_ij) / sqrt((S_ii/N_ii)·(S_jj/N_jj)), −1, 1 ) on supported pairs
 (N_ij ≥ min_pair_support), previous Σ_ij on unsupported ones (ADR
 [0027](0027-lazy-block-updates-for-gated-svi-mstep.md) lazy invariant — an absent
 group's entries do not decay), diagonal pinned to 1. No `pd_complete`, no Dykstra
@@ -86,6 +86,19 @@ call and its per-iteration timing/logging are removed. The full Σ is left
 block-structured (cross-group at its 0 init) and is never inverted whole, so it need
 not be PD; only the marginals the E-step actually inverts must be, and they are by
 construction.
+
+The per-cell standardization is NOT Cauchy-Schwarz-bounded to [−1,1] on its own: the
+covariance S_ij/N_ij is averaged over the N_ij co-active documents, while each variance
+S_ii/N_ii is averaged over its own (generally larger) active-doc set, so the numerator
+and denominator support counts differ and the ratio can exceed 1 (a
+background↔foreground pair is the canonical case — N_ii spans all documents, N_ij only
+the one group's). The supported off-diagonals are therefore clipped to [−1,1]
+([stm.py:707-708](../../spark-vi/spark_vi/models/topic/stm.py#L707-L708)) — the minimal
+projection onto the valid correlation range (cf. Higham 2002 nearest-correlation),
+applied per entry rather than globally. With the clip plus the pinned diagonal, Σ is a
+valid correlation matrix (all |Σ_ij| ≤ 1, Σ_ii = 1) by construction, not merely
+empirically. It need not be PD (see above); the reported correlation entries are always
+in range.
 
 **4. E-step marginal inversion unchanged.**
 The gated prior is still the marginal sub-block Σ[allowed, allowed] (ADR 0033
@@ -109,12 +122,16 @@ across the shim and drivers for no behavioral gain.
   standardization step on top. The block-wise estimate reaches the same correlation
   matrix without ever forming the completion.
 - **Reparameterize the M-step directly in correlation space (standardize the scatter
-  FIRST, then complete the correlation target).** Rejected after a local measurement:
-  standardizing per-pair scatter before completion produces off-diagonals with |r| > 1
-  on up to ~22% of observed pairs (the per-pair variances come from different document
-  subsets, so Cauchy-Schwarz does not hold across pairs), and the completion's diagonal
-  then drifts off 1 and needs re-standardizing anyway — more steps and a new |r|>1
-  hazard, not fewer.
+  FIRST, then complete the correlation target).** Rejected after a local measurement.
+  The shipped block-wise M-step shares the underlying |r| > 1 property — standardizing
+  per-pair scatter with mismatched per-cell support produces off-diagonals above 1 on up
+  to ~22% of observed pairs (the variances come from different document subsets, so
+  Cauchy-Schwarz does not hold across pairs) — but handles it with a single per-entry
+  clip to [−1,1] (Decision 3). This alternative, by ALSO feeding the standardized target
+  through the max-determinant completion, additionally drifts the completed diagonal off
+  1 and needs a re-standardization pass afterward — the completion and its Dykstra
+  fallback plus a re-standardize step, versus block-wise's one clip. More steps, same
+  |r|>1 root cause, not fewer.
 - **Inverse-Wishart variance anchor / diagonal-shrink (ADR 0033 decision 6 levers).**
   Already falsified: exps 0022-0024 (insight 0032 Findings 4-6) showed the IW prior is
   N-weighted and reaches neither spectral end, and `sigma_diag_shrink` fixes the

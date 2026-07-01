@@ -61,8 +61,8 @@ def test_spectral_init_makes_fit_init_independent():
     assert min(recos) >= 6   # recovery no longer depends on sigma_init
 
 
-# test_sigma_prior_reduces_blowup removed (Task 2): the inverse-Wishart Σ prior
-# (sigma_prior_scale / sigma_prior_count) was removed from OnlineSTM in favor of
-# the pd_complete covariance-selection M-step. Σ conditioning is now controlled
-# by the completion + min_pair_support, not an IW shrink lever.
-# Spec: docs/superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md
+# test_sigma_prior_reduces_blowup removed: the inverse-Wishart Σ prior
+# (sigma_prior_scale / sigma_prior_count) was removed from OnlineSTM. The Σ M-step
+# is now block-wise unit-diagonal (ADR 0034): pinning Σ_ii=1 removes the variance
+# degree of freedom entirely, so there is no blowup for an IW anchor to reduce.
+# Spec: docs/superpowers/specs/2026-07-01-stm-blockwise-unit-diagonal-correlation-design.md

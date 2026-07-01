@@ -615,11 +615,11 @@ class OnlineSTM(VIModel):
         λ:  λ_new = (1-ρ)·λ + ρ·(η + lambda_stats)        # natural-gradient SVI
         Γ:  Γ̂ = (XᵀX + ridge·I)⁻¹ XᵀMu                    # ridge OLS on aggregated stats
             Γ_new = (1-ρ)·Γ + ρ·Γ̂                         # stochastic-EM ρ-blend
-        Σ:  supported[i,j] = N_ij >= min_pair_support      # diagonal forced observed
+        Σ:  supported[i,j] = N_ij >= min_pair_support      # observed vs lazy-kept
             mle_ij          = S_ij / N_ij  on supported     # per-pair sample covariance
-            R_ij            = mle_ij / sqrt(mle_ii·mle_jj)  # standardize to correlation
+            R_ij            = clip(mle_ij / sqrt(mle_ii·mle_jj), -1, 1)  # -> correlation
             R_target[i,j]   = R_ij on supported, else Σ_ij  # unsupported: lazy-keep
-            Σ_new           = (1-ρ)·Σ + ρ·R_target, diag pinned to 1
+            Σ_new           = (1-ρ)·Σ + ρ·R_target, diag pinned to 1 (unconditionally)
 
         The gated per-pair M-step stitches Σ from inconsistent document subsets, so
         cross-group pairs with fewer than min_pair_support co-activating documents
@@ -639,7 +639,7 @@ class OnlineSTM(VIModel):
         supported) reduces to the ρ-blended standardized sample correlation with
         no lazy-kept entries.
 
-        Spec: docs/superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md
+        Spec: docs/superpowers/specs/2026-07-01-stm-blockwise-unit-diagonal-correlation-design.md
 
         Lazy block updates (ADR 0027): any block (background or a group's
         foreground) with zero documents in this minibatch is left unchanged —
@@ -705,6 +705,16 @@ class OnlineSTM(VIModel):
         diag_var = np.diag(mle).copy()
         std = np.sqrt(np.where(diag_var > 0.0, diag_var, 1.0))
         R = mle / np.outer(std, std)
+        # Clamp supported off-diagonals to the valid correlation range. The per-cell
+        # standardization divides mle_ij (averaged over the N_ij co-active docs) by
+        # sqrt(mle_ii·mle_jj) (each averaged over its OWN, generally larger, active-doc
+        # set), so the support counts in numerator and denominator need not match and
+        # Cauchy-Schwarz does not bound the ratio to [-1,1] across mismatched-support
+        # pairs (e.g. a background↔foreground pair: N_ii spans all docs, N_ij only the
+        # one group's). Clamping to [-1,1] is the minimal projection onto the correlation
+        # range (cf. Higham 2002 nearest-correlation), keeping Σ a valid correlation
+        # matrix by construction rather than only empirically.
+        R = np.clip(R, -1.0, 1.0)
         R_target = np.where(supported, R, Sigma)          # lazy-keep unsupported
         new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * R_target
         np.fill_diagonal(new_Sigma, 1.0)                  # exact unit diagonal
@@ -775,7 +785,8 @@ class OnlineSTM(VIModel):
         correlation (see eq. 4 of that paper). Delegates to _linalg.topic_correlation.
 
         Σ is stored as a K×K matrix; the reference topic's row and column are
-        INERT — its diagonal stays at sigma_init (the initial variance), and its
+        INERT — its diagonal is pinned to 1 every M-step (like every topic's, via
+        the block-wise unit-diagonal M-step, independent of sigma_init), and its
         off-diagonal entries remain zero because the M-step never scatters into
         the reference row/col (its η is pinned at 0). As a result, the reference
         row in R is the unit-self / zero-cross identity row. The reference is NOT

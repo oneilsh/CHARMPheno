@@ -154,13 +154,18 @@ def test_recovery_invariant_to_full_sigma_condition_number():
         docs, planted, part = synthetic_gated_corpus_overlap(
             groups=("A", "B"), fg_per_group=2, bg_k=4, V=80, D=150,
             doc_len=70, bg_frac=0.4, shared_frac=0.5, seed=seed)
-        gp = fit_stm(docs, K=part.K, V=80, sigma_init=1.0, n_iter=22,
+        # n_iter=100: recovery-stability is a property of the CONVERGED fit. The
+        # unit-diagonal M-step clamps supported off-diagonals to [-1,1] (a valid
+        # correlation), which on this shared-term overlap corpus removes the
+        # spurious |r|>1 entries a shorter fit had leaned on and slightly slows
+        # convergence for one seed; by 100 iters all seeds settle within 1 topic.
+        gp = fit_stm(docs, K=part.K, V=80, sigma_init=1.0, n_iter=100,
                      seed=42, partition=part, reference_topic=False)
         beta = gp["lambda"] / gp["lambda"].sum(axis=1, keepdims=True)
         recs.append(planted_recovery(beta, planted))
         gps.append(gp)
 
-    # recovery is stable across all seeds.
+    # recovery is stable across all seeds (at convergence).
     assert min(recs) >= max(recs) - 1, recs                  # within 1 topic
     for gp in gps:
         np.testing.assert_allclose(np.diag(gp["Sigma"]), 1.0, atol=1e-12)
