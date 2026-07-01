@@ -607,10 +607,18 @@ def main(argv: list[str] | None = None) -> int:
 
                         Sigma_corr = result.global_params["Sigma"]
                         n_pairs = result.global_params["n_pairs"]
-                        mps = int(result.metadata.get("min_pair_support", 1))
+                        # min_pair_support may be at top level (newer
+                        # get_metadata) or nested under stm_hardening (models
+                        # saved before that change); check both so the export
+                        # mask floor always matches the fit.
+                        stm_hardening = result.metadata.get("stm_hardening", {}) or {}
+                        mps = int(result.metadata.get("min_pair_support")
+                                  or stm_hardening.get("min_pair_support", 1))
+                        reference_id = 0 if stm_hardening.get("reference_topic") else None
                         R, ident = topic_correlation_identified(Sigma_corr, n_pairs, mps)
                         corr = build_correlation_json(
-                            R, ident, n_pairs, stm_partition, kept_ids)
+                            R, ident, n_pairs, stm_partition, kept_ids,
+                            reference_id=reference_id)
                         (out_dir / "correlation.json").write_text(
                             _json.dumps(corr, indent=2))
                         log.info("STM: wrote correlation.json (topics=%d, "

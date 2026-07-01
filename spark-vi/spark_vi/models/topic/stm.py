@@ -464,7 +464,8 @@ class OnlineSTM(VIModel):
         }
 
     def get_metadata(self) -> dict[str, Any]:
-        return {"K": self.K, "V": self.V, "P": self.P}
+        return {"K": self.K, "V": self.V, "P": self.P,
+                "min_pair_support": self.min_pair_support}
 
     def local_update(
         self,

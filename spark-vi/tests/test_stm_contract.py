@@ -215,7 +215,12 @@ class TestGetMetadata:
     def test_returns_K_V_P(self):
         m = OnlineSTM(K=5, vocab_size=100, P=3)
         md = m.get_metadata()
-        assert md == {"K": 5, "V": 100, "P": 3}
+        assert md == {"K": 5, "V": 100, "P": 3, "min_pair_support": 1}
+
+    def test_returns_configured_min_pair_support(self):
+        m = OnlineSTM(K=5, vocab_size=100, P=3, min_pair_support=10)
+        md = m.get_metadata()
+        assert md["min_pair_support"] == 10
 
 
 class TestLocalUpdate:

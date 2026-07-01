@@ -15,10 +15,19 @@ def _cell(x):
     return None if (x is None or (isinstance(x, float) and math.isnan(x))) else float(x)
 
 
-def build_correlation_json(R, identified, support, partition, kept_topic_ids):
-    """correlation.json over kept topics in block order; null for unidentified R."""
+def build_correlation_json(R, identified, support, partition, kept_topic_ids,
+                            reference_id=None):
+    """correlation.json over kept topics in block order; null for unidentified R.
+
+    reference_id: if given, this topic id is dropped from topic_order (and
+    every row/col it participates in). The STM reference topic is pinned at
+    eta=0 (unit-variance, ~zero off-diagonal in Sigma) so it is inert; its
+    n_pairs entries still mark it identified, which would otherwise render a
+    spurious zero-correlation band in the dashboard (Component 3,
+    docs/superpowers/specs/2026-07-01-gated-ctm-correlation-reporting-design.md).
+    """
     labels = partition.topic_labels()                 # length K, by original id
-    order = [i for i in kept_topic_ids]               # already block-ordered upstream
+    order = [i for i in kept_topic_ids if i != reference_id]  # already block-ordered upstream
     block_labels = [labels[i] for i in order]
     R_out, id_out, sup_out = [], [], []
     for i in order:
