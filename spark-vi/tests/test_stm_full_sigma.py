@@ -349,3 +349,22 @@ def test_update_global_stashes_n_pairs_support():
     a = part.block_indices("A")[0]; b = part.block_indices("B")[0]
     assert N[a, b] == 300          # cross-foreground support == comorbid docs
     assert N[0, 0] >= 800          # background seen by all docs
+
+
+def test_topic_correlation_identified_masks_thin_pairs():
+    from spark_vi.models.topic._linalg import (
+        topic_correlation, topic_correlation_identified)
+    Sigma = np.array([[4.0, 2.0, 1.2],
+                      [2.0, 9.0, 0.6],
+                      [1.2, 0.6, 1.0]])
+    N = np.array([[100, 30, 2],     # pair (0,2) thin: N=2
+                  [30, 100, 40],
+                  [2, 40, 100]], dtype=float)
+    R, ident = topic_correlation_identified(Sigma, N, min_pair_support=10)
+    R_full = topic_correlation(Sigma)
+    assert ident[0, 1] and ident[1, 2]              # supported
+    assert not ident[0, 2] and not ident[2, 0]      # thin -> unidentified
+    assert bool(ident[0, 0]) and bool(ident[1, 1])  # diagonal always identified
+    assert np.isnan(R[0, 2]) and np.isnan(R[2, 0])  # thin -> NA
+    assert np.isclose(R[0, 1], R_full[0, 1])        # supported cells == full R
+    assert np.isclose(R[0, 0], 1.0)                 # unit diagonal preserved

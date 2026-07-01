@@ -228,3 +228,30 @@ def topic_correlation(Sigma: np.ndarray) -> np.ndarray:
     R = Sigma / np.outer(d, d)
     np.fill_diagonal(R, 1.0)
     return R
+
+def topic_correlation_identified(Sigma, n_pairs, min_pair_support):
+    """Logistic-normal correlation R (topic_correlation) with an identified mask.
+
+    A cell (i,j) is identified iff n_pairs[i,j] >= min_pair_support — the same
+    document-support floor the M-step uses to decide estimated-vs-completed
+    (stm.py). Unidentified OFF-diagonal cells are set to NaN in R (no joint data
+    supports that correlation); the diagonal is always identified (unit value).
+    Domain-agnostic: topic indices only.
+
+    Identifiability by document support: pairs with fewer than min_pair_support
+    co-activations lack sufficient joint data to reliably estimate correlation
+    (Blei & Lafferty 2007 for the correlation formula; masking unidentified
+    entries is a domain-agnostic heuristic this engine applies).
+
+    Returns (R, identified): R is (K,K) float with NaN on unidentified off-diag
+    cells; identified is (K,K) bool.
+    """
+    R = topic_correlation(Sigma)
+    identified = np.asarray(n_pairs) >= float(min_pair_support)
+    identified = identified | identified.T          # symmetric support
+    np.fill_diagonal(identified, True)              # diagonal always identified
+    mask_na = ~identified
+    np.fill_diagonal(mask_na, False)                # never NaN the unit diagonal
+    R = R.copy()
+    R[mask_na] = np.nan
+    return R, identified
