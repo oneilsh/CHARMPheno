@@ -22,18 +22,24 @@ def test_gated_corpus_shapes_and_groups():
     assert foreground_recovers_group(planted, part, "a", planted, thresh=0.5)
 
 
-@pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="random-init STM is sigma_init-unstable; "
-                   "fixed by spectral init (insight 0029)")
-def test_baseline_random_init_is_unstable():
+def test_unit_diagonal_bounds_sigma_regardless_of_init():
+    """Unit-diagonal M-step structurally removes the sigma_init Sigma-blowup the
+    old xfail documented (insight 0033): the diagonal is pinned to 1 every
+    M-step regardless of sigma_init, so max Sigma entry <= 1 and min entry is a
+    valid correlation (>= -1). This is an estimator invariant (holds after any
+    M-step, not a convergence property), so a short fit suffices — the long
+    250-iter run the old blowup test needed is no longer meaningful. Init-
+    independence of topic RECOVERY is covered separately by
+    test_spectral_init_makes_fit_init_independent (this file)."""
     docs, planted = synthetic_ehr_corpus(K_rare=8, V=300, D=1500, doc_len=30,
                                          bg_frac=0.7, seed=0)
-    recos, smax = [], []
+    smax, smin = [], []
     for si in (1.0, 5.0, 20.0):
-        gp = fit_stm(docs, K=40, V=300, sigma_init=si, batch=100, n_iter=250)
-        beta = gp["lambda"] / gp["lambda"].sum(axis=1, keepdims=True)
-        recos.append(planted_recovery(beta, planted)); smax.append(final_sigma_range(gp)[1])
-    assert min(recos) >= 6 and max(smax) < 1e3
+        gp = fit_stm(docs, K=40, V=300, sigma_init=si, batch=100, n_iter=30)
+        lo, hi = final_sigma_range(gp)
+        smin.append(lo); smax.append(hi)
+    assert max(smax) <= 1.0 + 1e-9, smax    # diagonal pinned; no sigma_init blowup
+    assert min(smin) >= -1.0 - 1e-9, smin   # valid correlation entries
 
 
 from spark_vi.models.topic.spectral_init import spectral_init_beta

@@ -144,19 +144,12 @@ def test_gated_shape_naive_indefinite_pd_complete_well_conditioned():
 # --- Layer 2: end-to-end recovery invariance to full-Sigma condition --------
 
 def test_recovery_invariant_to_full_sigma_condition_number():
-    """The full-matrix Sigma condition number is a reporting artifact: topic
-    recovery holds across corpora whose assembled-Sigma cond spans orders of
-    magnitude, because the gated E-step only ever inverts within-allowed-set
-    marginal sub-blocks (safe_inverse-repaired per doc), never the full matrix.
-    Guards the Component-2 decision to drop the conditioning diagnostics."""
+    """Unit-diagonal M-step: Sigma is a correlation matrix each seed; recovery
+    is stable and the diagonal is pinned to 1 (no variance runaway to track)."""
     from _stm_synth import (synthetic_gated_corpus_overlap, fit_stm,
                             planted_recovery)
 
-    def cond(M):
-        w = np.linalg.eigvalsh(0.5 * (M + M.T))
-        return w.max() / w.min() if w.min() > 0 else float("inf")
-
-    conds, recs = [], []
+    recs, gps = [], []
     for seed in range(4):
         docs, planted, part = synthetic_gated_corpus_overlap(
             groups=("A", "B"), fg_per_group=2, bg_k=4, V=80, D=150,
@@ -164,10 +157,10 @@ def test_recovery_invariant_to_full_sigma_condition_number():
         gp = fit_stm(docs, K=part.K, V=80, sigma_init=1.0, n_iter=22,
                      seed=42, partition=part, reference_topic=False)
         beta = gp["lambda"] / gp["lambda"].sum(axis=1, keepdims=True)
-        conds.append(cond(gp["Sigma"]))
         recs.append(planted_recovery(beta, planted))
+        gps.append(gp)
 
-    # Some seeds land near-singular (cond huge), others well-conditioned...
-    assert max(conds) / max(min(conds), 1.0) >= 1e3, conds   # cond spans >=3 orders
-    # ...yet recovery is stable across all of them (does not track cond).
+    # recovery is stable across all seeds.
     assert min(recs) >= max(recs) - 1, recs                  # within 1 topic
+    for gp in gps:
+        np.testing.assert_allclose(np.diag(gp["Sigma"]), 1.0, atol=1e-12)
