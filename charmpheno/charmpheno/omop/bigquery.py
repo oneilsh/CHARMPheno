@@ -179,6 +179,26 @@ def load_omop_bigquery(
     return omop
 
 
+def decode_sex(gender_concept_id_col):
+    """Map an OMOP gender_concept_id column to a sex string M / F / Unknown.
+
+    Standard OMOP gender concepts: 8507 = Male, 8532 = Female. Every other
+    value — Unknown (8551), Other (8521), No matching concept (0), and null —
+    maps to 'Unknown', NOT to 'F'. Collapsing unknowns into Female silently
+    turns the sex covariate into a constant whenever gender data is absent or
+    non-standard, which is a data-integrity bug (observed on exp 0027, where
+    sex collapsed to a single 'F' level and dropped out of the design matrix).
+    Concept IDs per the OHDSI OMOP CDM Gender vocabulary.
+    """
+    from pyspark.sql import functions as F
+
+    return (
+        F.when(gender_concept_id_col == 8507, "M")
+        .when(gender_concept_id_col == 8532, "F")
+        .otherwise("Unknown")
+    )
+
+
 def load_person_table(
     *,
     spark,
@@ -191,7 +211,7 @@ def load_person_table(
 
     Reads the OMOP `person` table and projects it to the minimal columns
     needed for STM covariate materialization: `person_id`, `age`
-    (year-of-birth based, approximate), and `sex` (M/F string).
+    (year-of-birth based, approximate), and `sex` (M/F/Unknown string).
 
     Callers should pass the resulting DataFrame to
     `charmpheno.omop.covariates.build_patient_covariate_df`, which
@@ -213,7 +233,7 @@ def load_person_table(
 
     Returns:
         Spark DataFrame with columns: person_id (long), year_of_birth
-        (int), gender_concept_id (int), age (double), sex (string M/F).
+        (int), gender_concept_id (int), age (double), sex (string M/F/Unknown).
         One row per person_id in the sampled population.
     """
     from pyspark.sql import functions as F
@@ -241,9 +261,5 @@ def load_person_table(
     # Approximate age from year_of_birth; 2025 is a fixed reference year
     # matching the nominal AoU CDR snapshot used at time of writing.
     df = df.withColumn("age", (F.lit(2025) - F.col("year_of_birth")).cast("double"))
-    # OMOP gender_concept_id: 8507 = Male, 8532 = Female.
-    df = df.withColumn(
-        "sex",
-        F.when(F.col("gender_concept_id") == 8507, "M").otherwise("F"),
-    )
+    df = df.withColumn("sex", decode_sex(F.col("gender_concept_id")))
     return df

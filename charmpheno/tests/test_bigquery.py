@@ -11,6 +11,28 @@ import pytest
 from charmpheno.omop.bigquery import load_omop_bigquery
 
 
+def test_decode_sex_maps_standard_concepts_and_does_not_conflate_unknown(spark):
+    """gender_concept_id -> sex must map 8507->M, 8532->F, and everything else
+    (Unknown 8551, Other 8521, No-matching 0, null) to 'Unknown' — NOT silently
+    to 'F'. Conflating unknowns with Female makes the sex covariate a constant
+    when gender data is absent (the exp-0027 symptom: sex collapsed to F)."""
+    from pyspark.sql import functions as F
+    from charmpheno.omop.bigquery import decode_sex
+
+    rows = [(8507,), (8532,), (8551,), (8521,), (0,), (None,)]
+    df = spark.createDataFrame(rows, ["gender_concept_id"])
+    got = {
+        r["gender_concept_id"]: r["sex"]
+        for r in df.withColumn("sex", decode_sex(F.col("gender_concept_id"))).collect()
+    }
+    assert got[8507] == "M"
+    assert got[8532] == "F"
+    assert got[8551] == "Unknown"   # OMOP Unknown, not Female
+    assert got[8521] == "Unknown"   # OMOP Other, not Female
+    assert got[0] == "Unknown"      # No matching concept
+    assert got[None] == "Unknown"   # null gender, not Female
+
+
 def test_rejects_malformed_cdr_dataset(spark):
     with pytest.raises(ValueError, match="<project>.<dataset>"):
         load_omop_bigquery(
