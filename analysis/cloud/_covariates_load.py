@@ -20,6 +20,46 @@ from pyspark.sql import DataFrame, SparkSession
 
 from _driver_common import _phase
 
+#: The gating/label column materialized from the combined-cohort doc-spec
+#: (doc_id == "{group}:{person_id}"). It is the only group column the STM
+#: gating pipeline can materialize today (see stm_bigquery_cloud's guard).
+DEFAULT_GROUP_COL = "source_cohort"
+
+
+def validate_label_not_covariate(
+    categorical_cols, continuous_cols, *, label: str = DEFAULT_GROUP_COL,
+) -> None:
+    """Reject a gating/label key that also appears in the covariate formula.
+
+    ``label`` (e.g. source_cohort) is a per-document gating key, not a
+    covariate — it was moved out of the formula into a pure label. If it were
+    also a covariate, a person's per-(person, label) sidecar rows would carry
+    *different* covariate vectors, which would (a) make the corpus join
+    ambiguous and (b) corrupt the gated dashboard prevalence (each foreground
+    topic's masked mean would mix the two vectors). Forbid the overlap loudly.
+    """
+    if label in set(categorical_cols) or label in set(continuous_cols):
+        raise ValueError(
+            f"{label!r} is the gating/label key and must not also appear in "
+            f"the covariate formula (categorical/continuous cols); it was "
+            f"moved from the formula to a pure per-document label. Drop it "
+            f"from the formula.")
+
+
+def covariate_key_cols(
+    *, gated: bool, label: str = DEFAULT_GROUP_COL,
+) -> list[str]:
+    """Key columns for the covariate sidecar.
+
+    A gated fit keys on ``(person_id, label)`` so the sidecar carries each
+    document's group — the gated dashboard prevalence consumer groups by it,
+    and a comorbid person (in two groups) contributes one row per group. An
+    ungated fit keys on ``(person_id,)`` alone. The covariate *vector* never
+    depends on ``label`` (guarded by ``validate_label_not_covariate``), so a
+    comorbid person's two rows are identical apart from the key.
+    """
+    return ["person_id", label] if gated else ["person_id"]
+
 
 def load_or_build_covariates(
     spark: SparkSession,

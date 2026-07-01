@@ -121,6 +121,37 @@ class TestCompositeKeyCovariates:
         keys = {(r["person_id"], r["source_cohort"]) for r in cov_df.collect()}
         assert keys == {(1, "cancer"), (1, "dementia"), (2, "cancer")}
 
+    def test_label_key_absent_from_formula_is_carried(self, spark):
+        """The gated-STM case (exp 0027): source_cohort is a pure label key,
+        NOT a formula covariate (formula '~ C(sex) + age'). The sidecar must
+        still carry it as a key column so the gated dashboard prevalence can
+        group by it, a comorbid person yields one row per group, and — since
+        the covariate vector does not depend on source_cohort — those rows'
+        vectors are identical."""
+        import numpy as np
+        import pandas as pd
+        from charmpheno.omop.covariates import build_patient_covariate_df
+        # person 1 comorbid (two groups, same sex/age), person 2 cancer only.
+        pdf = pd.DataFrame({
+            "person_id":     [1, 1, 2],
+            "source_cohort": ["cancer", "dementia", "cancer"],
+            "sex":           ["M", "M", "F"],
+            "age":           [60.0, 60.0, 70.0],
+        })
+        cov_df, spec, names = build_patient_covariate_df(
+            spark.createDataFrame(pdf),
+            covariate_formula="~ C(sex) + age",   # source_cohort NOT in formula
+            categorical_cols=["sex"],
+            continuous_cols=["age"],
+            key_cols=["person_id", "source_cohort"],
+        )
+        assert set(cov_df.columns) == {"person_id", "source_cohort", "covariates"}
+        rows = {(r["person_id"], r["source_cohort"]): np.asarray(r["covariates"])
+                for r in cov_df.collect()}
+        assert set(rows) == {(1, "cancer"), (1, "dementia"), (2, "cancer")}
+        # source_cohort is not a covariate, so person 1's two rows are identical.
+        np.testing.assert_allclose(rows[(1, "cancer")], rows[(1, "dementia")])
+
     def test_default_key_cols_unchanged(self, spark):
         import pandas as pd
         from charmpheno.omop.covariates import build_patient_covariate_df

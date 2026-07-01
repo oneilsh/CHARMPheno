@@ -446,6 +446,12 @@ def build_covariates_args(effective: dict) -> list[str]:
     if cohort_def and cohort_def != "none":
         args += ["--cohort", str(cohort_def)]
     args += ["--prior-obs-days", str(effective.get("prior_obs_days", 365))]
+    # A gated experiment keys the covariate sidecar on (person_id, group) so
+    # the gated dashboard prevalence can group by the label — pass the same
+    # --group-var the fit driver uses (build_stm_args). Gating is signalled by
+    # background_k + foreground being set.
+    if effective.get("background_k") is not None and effective.get("foreground"):
+        args += ["--group-var", str(effective.get("group_var", "source_cohort"))]
     return args
 
 

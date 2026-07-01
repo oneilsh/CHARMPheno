@@ -627,6 +627,41 @@ class TestModelClassDispatch:
         with pytest.raises(SystemExit):
             rx.build_stm_args(effective, str(tmp_path / "out"))
 
+    def test_build_covariates_args_emits_group_var_when_gated(self, tmp_path, monkeypatch):
+        """A gated experiment (background_k + foreground set) must pass
+        --group-var to build_stm_covariates, so the covariate cache is keyed on
+        (person_id, group) and the gated dashboard prevalence can group by it.
+        Without this the sidecar is person-only and gating.json is dropped."""
+        monkeypatch.setenv("WORKSPACE_CDR", "proj.ds")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+        effective = {
+            "source_table": "condition_era", "person_mod": 4,
+            "cache_uri": "hdfs:///cache", "cohort": "cancer_or_dementia",
+            "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"], "continuous_cols": ["age"],
+            "prior_obs_days": 0,
+            "background_k": 30, "foreground": "[[cancer,10],[dementia,10]]",
+            "group_var": "source_cohort",
+        }
+        args = rx.build_covariates_args(effective)
+        assert "--group-var" in args
+        assert args[args.index("--group-var") + 1] == "source_cohort"
+
+    def test_build_covariates_args_omits_group_var_when_ungated(self, tmp_path, monkeypatch):
+        """An ungated experiment must NOT pass --group-var — the sidecar keys
+        on person_id alone."""
+        monkeypatch.setenv("WORKSPACE_CDR", "proj.ds")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+        effective = {
+            "source_table": "condition_era", "person_mod": 4,
+            "cache_uri": "hdfs:///cache", "cohort": "dementia",
+            "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"], "continuous_cols": ["age"],
+            "prior_obs_days": 365,
+        }
+        args = rx.build_covariates_args(effective)
+        assert "--group-var" not in args
+
     def test_build_stm_args_parses_against_driver_argparse(self, tmp_path, monkeypatch):
         """argv from build_stm_args must parse cleanly via the driver's own argparse."""
         import argparse

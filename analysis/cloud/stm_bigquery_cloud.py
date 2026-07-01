@@ -19,7 +19,11 @@ from pyspark.sql import functions as F
 
 from _driver_common import _phase, configure_logging, make_spark_session
 from _corpus_load import load_or_build_corpus
-from _covariates_load import load_or_build_covariates
+from _covariates_load import (
+    load_or_build_covariates,
+    covariate_key_cols,
+    validate_label_not_covariate,
+)
 
 
 def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id,
@@ -283,34 +287,37 @@ def main() -> int:
         partition = build_topic_block_partition(
             group_var=args.group_var, background_k=args.background_k,
             foreground_arg=args.foreground, K=args.K)
-        if partition is not None and args.group_var != "source_cohort":
+        gated = partition is not None
+        if gated and args.group_var != "source_cohort":
             raise SystemExit(
                 f"--group-var {args.group_var!r} is not a materializable group "
                 f"column; only 'source_cohort' (from the combined-cohort "
                 f"patient_cohort doc-spec) is supported today.")
 
-        # source_cohort's two independent roles, separated:
-        source_cohort_is_covariate = "source_cohort" in cat_cols   # -> per-(person,cohort) cov keying
-        need_source_cohort = source_cohort_is_covariate or (partition is not None)
+        # The gating/label key is a pure per-document label, never a covariate
+        # (moved out of the formula). Forbid the overlap so per-(person, label)
+        # sidecar rows can't carry disagreeing covariate vectors.
+        validate_label_not_covariate(cat_cols, cont_cols, label=args.group_var)
 
+        # A gated fit materializes the label from the doc-spec and keys the
+        # covariate sidecar on (person_id, group) so the gated dashboard
+        # prevalence can group by it; an ungated fit needs neither.
+        need_source_cohort = gated
         if need_source_cohort:
             if doc_spec.name != "patient_cohort":
                 raise SystemExit(
-                    "source_cohort requires the combined-cohort doc-spec "
-                    f"(patient_cohort); got {doc_spec.name!r}. Use the "
-                    "cancer_or_dementia cohort, or drop source_cohort from the "
-                    "formula and gating.")
-            # doc_id == "{source_cohort}:{person_id}"; recover the label.
+                    f"gating on {args.group_var!r} requires the combined-cohort "
+                    f"doc-spec (patient_cohort); got {doc_spec.name!r}. Use the "
+                    "cancer_or_dementia cohort, or drop gating.")
+            # doc_id == "{group}:{person_id}"; recover the label.
             bow_df = bow_df.withColumn(
-                "source_cohort", F.split(F.col("doc_id"), ":").getItem(0))
-
-        if source_cohort_is_covariate:
-            labels = bow_df.select("person_id", "source_cohort").distinct()
-            cov_key_cols = ["person_id", "source_cohort"]
-            join_on = ["person_id", "source_cohort"]
+                args.group_var, F.split(F.col("doc_id"), ":").getItem(0))
+            labels = bow_df.select("person_id", args.group_var).distinct()
+            cov_key_cols = covariate_key_cols(gated=True, label=args.group_var)
+            join_on = ["person_id", args.group_var]
         else:
             labels = None
-            cov_key_cols = ["person_id"]
+            cov_key_cols = covariate_key_cols(gated=False)
             join_on = "person_id"
 
         if partition is not None:
@@ -337,11 +344,11 @@ def main() -> int:
             n_bow = bow_df.count()
             print(f"[driver]   corpus docs (pre-join) = {n_bow}", flush=True)
             if need_source_cohort:
-                for r in (bow_df.groupBy("source_cohort").count()
-                          .orderBy("source_cohort").collect()):
-                    print(f"[driver]     source_cohort={r['source_cohort']}: "
+                for r in (bow_df.groupBy(args.group_var).count()
+                          .orderBy(args.group_var).collect()):
+                    print(f"[driver]     {args.group_var}={r[args.group_var]}: "
                           f"{r['count']} docs", flush=True)
-                pc = bow_df.select("person_id", "source_cohort").distinct()
+                pc = bow_df.select("person_id", args.group_var).distinct()
                 n_persons = pc.select("person_id").distinct().count()
                 n_comorbid = (pc.groupBy("person_id").count()
                               .where(F.col("count") > 1).count())
@@ -359,7 +366,7 @@ def main() -> int:
                 person_sample_mod=args.person_mod,
                 cohort=args.cohort,
             )
-            if source_cohort_is_covariate:
+            if need_source_cohort:
                 person_df = person_df.join(labels, on="person_id", how="inner")
 
         # --- Covariates load ---
