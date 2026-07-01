@@ -5,6 +5,7 @@ import numpy as np
 from spark_vi.models.topic.stm import OnlineSTM
 from spark_vi.models.topic.types import STMDocument
 from spark_vi.models.topic.partition import TopicBlockPartition
+from spark_vi.models.topic._linalg import pd_complete
 
 
 def _block_of(row, *, eps=1e-3):
@@ -171,6 +172,66 @@ def synthetic_gated_corpus_overlap(*, groups, fg_per_group, bg_k, V, D, doc_len,
                                 counts=c.astype(np.float64), length=int(c.sum()),
                                 x=np.array([1.0]), groups=frozenset({g})))
     return docs, planted, part
+
+
+def gated_ln_corpus(*, group_weights, fg_per_group, bg_k, V, D, doc_len, seed=0):
+    """Single-label gated logistic-normal corpus with a KNOWN unit-diagonal Sigma_true.
+
+    Each doc belongs to ONE group (sampled by group_weights, so a minority arm is
+    thin); its allowed set is background ∪ that group's foreground block. eta over the
+    allowed set ~ N(0, Sigma_true[A,A]); theta = softmax(eta); words ~ theta·beta.
+    Planted correlations (bg-bg 0.10, bg-fg 0.25, within-fg 0.30) are made PD via the
+    max-det completion of the cross-foreground free block (pd_complete used ONLY to
+    build ground truth, not in the fit). Domain-agnostic: integer token ids only."""
+    rng = np.random.default_rng(seed)
+    groups = tuple(group_weights)
+    part = TopicBlockPartition(group_var="g", background_k=bg_k,
+                              foreground=tuple((g, fg_per_group) for g in groups))
+    K = part.K
+    sig = max(1, (V // 2) // K)
+    C = max(1, min(sig, V - K * sig))
+    beta = np.full((K, V), 1e-3)
+    for k in range(K):
+        beta[k, 0:C] += rng.random(C) + 0.1
+        lo = C + k * sig
+        beta[k, lo:lo + sig] += 5.0
+    beta /= beta.sum(axis=1, keepdims=True)
+
+    bg = part.background_indices()
+    Sigma_true = np.eye(K); obs = np.eye(K, dtype=bool)
+    for a in bg:
+        for b in bg:
+            if a != b:
+                Sigma_true[a, b] = 0.10; obs[a, b] = True
+    for a in bg:
+        for g in groups:
+            for c in part.block_indices(g):
+                Sigma_true[a, c] = Sigma_true[c, a] = 0.25
+                obs[a, c] = obs[c, a] = True
+    for g in groups:
+        blk = part.block_indices(g)
+        for i in blk:
+            for j in blk:
+                if i != j:
+                    Sigma_true[i, j] = 0.30; obs[i, j] = True
+    Sigma_true = pd_complete(Sigma_true, obs)
+
+    gl = list(groups)
+    wts = np.array([group_weights[g] for g in gl], float); wts /= wts.sum()
+    docs = []
+    for _ in range(D):
+        g = gl[int(rng.choice(len(gl), p=wts))]
+        allowed = sorted(part.allowed_indices(frozenset({g})))
+        eta = rng.multivariate_normal(np.zeros(len(allowed)),
+                                      Sigma_true[np.ix_(allowed, allowed)])
+        theta = np.zeros(K)
+        theta[allowed] = np.exp(eta - eta.max()); theta /= theta.sum()
+        toks = rng.choice(V, size=doc_len, p=theta @ beta)
+        u, c = np.unique(toks, return_counts=True)
+        docs.append(STMDocument(indices=u.astype(np.int32),
+                                counts=c.astype(np.float64), length=int(c.sum()),
+                                x=np.array([1.0]), groups=frozenset({g})))
+    return docs, part, Sigma_true, beta
 
 
 def fit_stm(docs, *, K, V, sigma_init, n_iter=250, batch=None, seed=42,
