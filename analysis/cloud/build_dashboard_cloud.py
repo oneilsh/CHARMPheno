@@ -138,6 +138,30 @@ def _categorical_levels_from_spec(model_spec, covariate_names=()):
         return result  # return whatever we managed to accumulate
 
 
+def _covariate_cache_key(*, corpus, cov_manifest, source_table, cohort):
+    """Covariate-cache key for the dashboard build (single source of truth).
+
+    Both build-side lookups go through here so they cannot drift, and — the bug
+    this closes — so ``prior_obs_days`` is part of the key. The producers (the
+    fit via ``_covariates_load`` and ``build-covariates``) key on it; it is
+    load-bearing in composite cohorts (see ``_covariates_cache.compute_cache_key``).
+    Consumers that omitted it defaulted to 365 and missed the cache for every
+    experiment with a non-default lookback (e.g. exp 0027, ``prior_obs_days=0``),
+    silently dropping gating.json / covariate_schema.json and forcing the
+    intercept stand-in for corpus_prevalence. ``.get(..., 365)`` preserves the
+    old value for pre-record checkpoints that never stamped it.
+    """
+    from _covariates_cache import compute_cache_key
+    return compute_cache_key(
+        covariate_formula=cov_manifest["covariate_formula"],
+        person_mod=corpus["person_mod"],
+        cdr=corpus["cdr"],
+        source_table=source_table,
+        cohort=cohort,
+        prior_obs_days=int(corpus.get("prior_obs_days", 365)),
+    )
+
+
 def _write_covariate_schema(spark, *, result, corpus, source_table, cohort_name,
                             cache_uri, out_dir, log):
     """Derive + write covariate_schema.json from the covariate sidecar.
@@ -155,13 +179,12 @@ def _write_covariate_schema(spark, *, result, corpus, source_table, cohort_name,
         import re as _re
         from pyspark.sql import functions as F
         from pyspark.ml.functions import vector_to_array
-        from _covariates_cache import compute_cache_key, try_load
+        from _covariates_cache import try_load
         from charmpheno.export.covariate_schema import build_covariate_schema
 
         cov_manifest = result.metadata["covariate_manifest"]
-        key = compute_cache_key(
-            covariate_formula=cov_manifest["covariate_formula"],
-            person_mod=corpus["person_mod"], cdr=corpus["cdr"],
+        key = _covariate_cache_key(
+            corpus=corpus, cov_manifest=cov_manifest,
             source_table=source_table, cohort=cohort_name,
         )
         cached = try_load(spark, cache_uri, key)
@@ -255,15 +278,12 @@ def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
                     "softmax(Gamma[intercept]) stand-in.")
         return None, None, None
     try:
-        from _covariates_cache import compute_cache_key, try_load
+        from _covariates_cache import try_load
 
         cov_manifest = result.metadata["covariate_manifest"]
-        key = compute_cache_key(
-            covariate_formula=cov_manifest["covariate_formula"],
-            person_mod=corpus["person_mod"],
-            cdr=corpus["cdr"],
-            source_table=source_table,
-            cohort=cohort_name,
+        key = _covariate_cache_key(
+            corpus=corpus, cov_manifest=cov_manifest,
+            source_table=source_table, cohort=cohort_name,
         )
         with _phase(f"covariates-cache lookup ({cache_uri}/{key})"):
             cached = try_load(spark, cache_uri, key)
