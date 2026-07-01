@@ -145,9 +145,11 @@ def _toy_docs(rng, *, V, D, doc_len, K_blocks):
     return docs
 
 
-def test_reference_gamma_column_zero_and_sigma_inert():
+def test_reference_gamma_column_zero_and_sigma_diagonal_pinned():
     """After full-batch updates with reference_topic, the reference topic's
-    Gamma column stays 0 and its Sigma entry stays at sigma_init."""
+    Gamma column stays 0 and its Sigma diagonal is pinned to 1 (block-wise
+    unit-diagonal M-step pins every diagonal to 1 each step, independent of
+    sigma_init)."""
     rng = np.random.default_rng(0)
     V, K = 30, 4
     docs = _toy_docs(rng, V=V, D=60, doc_len=20, K_blocks=K)
@@ -157,10 +159,9 @@ def test_reference_gamma_column_zero_and_sigma_inert():
     for _ in range(8):
         gp = m.update_global(gp, m.local_update(docs, gp), learning_rate=1.0)
     assert np.allclose(gp["Gamma"][:, 0], 0.0)
-    # Reference topic carries no free Σ entry (no support -> lazy no-op). Without
-    # the additive sigma_ridge*I (dropped in Task 4) and nearest_spd being identity
-    # on already-SPD inputs, the reference diagonal is BIT-IDENTICAL to sigma_init.
-    assert gp["Sigma"][0, 0] == 3.0
+    # Unit-diagonal M-step pins Σ_ii = 1 for every topic (incl. the reference),
+    # so the reference diagonal is 1 regardless of sigma_init=3.0.
+    assert gp["Sigma"][0, 0] == 1.0
 
 
 def test_reference_topic_still_learns_content():

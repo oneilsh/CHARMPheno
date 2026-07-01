@@ -1,12 +1,13 @@
-"""Σ M-step PD-completion contract for OnlineSTM (Task 2).
+"""Σ M-step contract for OnlineSTM.
 
-The gated full-covariance Σ M-step assembles K×K covariance from per-pair
-scatter over inconsistent document subsets, so some cross-group pairs are
-unobserved (support N below min_pair_support). The completion fills those free
-entries with the maximum-determinant PD completion (zero PRECISION on free
-entries) rather than the old zero-COVARIANCE pin / inverse-Wishart MAP blend.
+The gated Σ M-step is block-wise unit-diagonal (ADR 0034): it standardizes the
+observed per-pair scatter to correlations, lazy-keeps unsupported pairs (support
+N below min_pair_support) at their prior Σ value, and pins the diagonal to 1 —
+no PD completion. (The earlier full-covariance-with-max-determinant-completion
+M-step was retired from the fit path; pd_complete remains a tested linalg
+utility.) The removed inverse-Wishart / diag-shrink knobs stay rejected.
 
-Spec: docs/superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md
+Spec: docs/superpowers/specs/2026-07-01-stm-blockwise-unit-diagonal-correlation-design.md
 """
 from __future__ import annotations
 
@@ -14,14 +15,6 @@ import numpy as np
 import pytest
 
 from spark_vi.models.topic.stm import OnlineSTM
-
-
-def _is_pd(M):
-    try:
-        np.linalg.cholesky(M)
-        return True
-    except np.linalg.LinAlgError:
-        return False
 
 
 def _make_target_stats(stm, S, N):
@@ -53,18 +46,20 @@ def test_removed_params_rejected():
             OnlineSTM(K=5, vocab_size=10, P=2, **{bad: 1.0})
 
 
-def test_completed_sigma_is_pd_and_preserves_observed():
-    # Build target_stats so a cross-pair (3,4) is unsupported (N=0) -> free.
+def test_mstep_unit_diagonal_and_lazy_keeps_unsupported_pair():
+    # Cross-pair (3,4) is unsupported (N=0) -> lazy-kept at its prior Σ value
+    # (0 from the identity init); no completion. Diagonal pinned to 1 (block-wise).
     K = 5
     stm = OnlineSTM(K=K, vocab_size=8, P=2, min_pair_support=2)
     rng = np.random.default_rng(0)
     eta = rng.standard_normal((40, K))
     S = eta.T @ eta
     N = np.full((K, K), 40.0)
-    N[3, 4] = N[4, 3] = 0.0                       # thin cross-pair -> free
+    N[3, 4] = N[4, 3] = 0.0                       # thin cross-pair -> unsupported
     gp = stm.initialize_global({"vocab_size": 8})
+    prior_34 = gp["Sigma"][3, 4]                  # 0 from the identity init
     out = stm.update_global(gp, _make_target_stats(stm, S, N), learning_rate=1.0)
     Sigma = out["Sigma"]
-    assert _is_pd(Sigma)
-    # observed diagonal/cross entries carried through (ρ=1 -> Σ_target on observed).
-    assert abs(np.linalg.inv(Sigma)[3, 4]) < 1e-5    # free pair -> zero precision
+    np.testing.assert_allclose(np.diag(Sigma), 1.0, atol=1e-12)   # unit diagonal
+    assert Sigma[3, 4] == prior_34                # lazy-kept, not completed
+    assert abs(Sigma[3, 4]) <= 1.0               # valid correlation entry
