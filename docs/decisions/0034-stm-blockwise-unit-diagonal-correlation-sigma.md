@@ -150,9 +150,11 @@ across the shim and drivers for no behavioral gain.
 - **The variance runaway is structurally impossible.** No fit can inflate a prior
   variance because there is no free prior variance — Σ_ii ≡ 1. Validated locally
   (block-wise fit on a gated synthetic with a known unit-diagonal Σ_true recovers 14/14
-  topics including the thin minority arm, max Σ_var = 1.0 throughout) and slated for
-  cluster confirmation in exp
-  [0027](../experiments/0027-stm-comorbid-blockwise-unit-diagonal.md).
+  topics including the thin minority arm, max Σ_var = 1.0 throughout) and CONFIRMED on
+  the real cohort by exp
+  [0027](../experiments/0027-stm-comorbid-blockwise-unit-diagonal.md) (converged iter 52,
+  ELBO −1.63e6, Σ_var pinned at 1, dementia sub-phenotypes preserved — insight
+  [0034](../insights/0034-blockwise-unit-diagonal-fixes-runaway-on-real-data-and-needs-a-correlation-clamp.md)).
 - **`pd_complete` leaves the fit path.** The per-iteration `M-step pd_complete: …s
   sweeps=…` driver log line and the `time`/`logging` plumbing are removed. The serial
   covariance-selection completion no longer runs while executors idle. The utility stays
@@ -193,5 +195,8 @@ across the shim and drivers for no behavioral gain.
 - insight [0033](../insights/0033-gated-fullcov-variance-runaway-is-an-init-identifiability-failure.md)
   — the runaway's two-ingredient diagnosis; unit-diagonal is the fix that kills
   ingredient 2 (free prior variance).
+- insight [0034](../insights/0034-blockwise-unit-diagonal-fixes-runaway-on-real-data-and-needs-a-correlation-clamp.md)
+  — exp 0027 real-cohort confirmation of this decision, and the empirical finding that
+  per-cell standardization produces |r| > 1 on mismatched-support pairs (the clamp).
 - [design spec](../superpowers/specs/2026-07-01-stm-blockwise-unit-diagonal-correlation-design.md)
   — the full design and local validation for this arc.

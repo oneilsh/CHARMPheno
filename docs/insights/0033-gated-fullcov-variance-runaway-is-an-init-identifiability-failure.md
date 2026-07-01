@@ -132,5 +132,7 @@ second by pinning Σ_ii = 1 (block-wise unit-diagonal correlation Σ), so the fe
 loop has no fixed point to run to regardless of identification quality. Because
 single-label gating never inverts a cross-group entry, the same change retires
 `pd_complete` from the fit path (kept as a utility). Validated locally (14/14 topics
-recovered incl. the thin minority arm, max Σ_var = 1.0); exp 0027 is the cluster
-confirmation.
+recovered incl. the thin minority arm, max Σ_var = 1.0) and CONFIRMED on the real cohort
+by exp [0027](../experiments/0027-stm-comorbid-blockwise-unit-diagonal.md) (converged,
+Σ_var pinned at 1 throughout, amnestic/vascular dementia sub-phenotypes preserved) — see
+insight [0034](0034-blockwise-unit-diagonal-fixes-runaway-on-real-data-and-needs-a-correlation-clamp.md).
