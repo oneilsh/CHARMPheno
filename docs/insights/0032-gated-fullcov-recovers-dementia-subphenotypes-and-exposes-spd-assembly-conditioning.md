@@ -359,6 +359,15 @@ really is the right upstream fix for the cross-pair assembly). What is supersede
 only their FRAMING of the full-matrix condition number as the thing to drive toward
 O(1e1-1e3) — that target was chasing a quantity the fit does not depend on.
 
+The MAX-eigenvalue variance runaway this Resolution left open (Finding 5's runaway,
+diagnosed in insight
+[0033](0033-gated-fullcov-variance-runaway-is-an-init-identifiability-failure.md)) is
+resolved by the block-wise unit-diagonal correlation design, ADR
+[0034](../decisions/0034-stm-blockwise-unit-diagonal-correlation-sigma.md): pinning
+Σ_ii = 1 removes the free prior variance the runaway rode on, and — since single-label
+gating never inverts a cross-group entry — retires `pd_complete` from the fit path
+(kept as a utility for a future multi-label fit).
+
 ## Implications
 
 1. **Full-Σ is validated as STM's covariance model** — well-conditioned on the

@@ -123,3 +123,14 @@ quality, and load-bearing). Amends the Resolution of insight
 (pd_complete resolved the min-eigenvalue end but not the max-eigenvalue runaway).
 Governed by ADR [0033](../decisions/0033-stm-full-covariance-sigma.md) (full-covariance Σ;
 decision 6 removed the post-M-step variance anchor).
+
+**Implication — the fix shipped as ADR
+[0034](../decisions/0034-stm-blockwise-unit-diagonal-correlation-sigma.md) / exp
+[0027](../experiments/0027-stm-comorbid-blockwise-unit-diagonal.md).** The runaway needs
+two ingredients (a weakly-identified topic + a free prior variance); ADR 0034 kills the
+second by pinning Σ_ii = 1 (block-wise unit-diagonal correlation Σ), so the feedback
+loop has no fixed point to run to regardless of identification quality. Because
+single-label gating never inverts a cross-group entry, the same change retires
+`pd_complete` from the fit path (kept as a utility). Validated locally (14/14 topics
+recovered incl. the thin minority arm, max Σ_var = 1.0); exp 0027 is the cluster
+confirmation.

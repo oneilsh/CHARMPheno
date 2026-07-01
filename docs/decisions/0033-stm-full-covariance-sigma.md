@@ -3,6 +3,20 @@
 **Status:** Accepted + Implemented (this branch, SDD arc)
 **Date:** 2026-06-30
 
+> **Amendment (2026-07-01) — the gated M-step is superseded by ADR
+> [0034](0034-stm-blockwise-unit-diagonal-correlation-sigma.md).** For the gated
+> **single-label** case, the full-covariance-with-`pd_complete` M-step below (decisions
+> 3-5, 7) is replaced by a **block-wise unit-diagonal correlation** M-step: standardize
+> the observed per-pair scatter to correlations, lazy-keep unsupported pairs, pin the
+> diagonal to 1 — no completion. This fixes the variance runaway ADR 0033 left open
+> (insight 0033: decision 6 removed the variance anchor, so a weakly-identified topic's
+> Σ_kk could run away) by removing the free prior variance entirely, and it retires
+> `pd_complete` from the fit path because single-label gating never inverts a
+> cross-group entry. `pd_complete` / `min_frobenius_psd_completion` remain as tested
+> utilities (kept for a future multi-label/comorbid fit, which still needs completion).
+> The material below stands as the full-covariance record; ADR 0034 governs the shipped
+> gated engine.
+
 ## Context
 
 `OnlineSTM` has always stored Σ as a K-vector of per-topic variances, and every
