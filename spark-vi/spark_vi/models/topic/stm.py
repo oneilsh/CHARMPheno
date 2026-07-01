@@ -442,6 +442,7 @@ class OnlineSTM(VIModel):
                 "eta": np.array(self.eta),
                 "Gamma": np.zeros((self.P, self.K), dtype=np.float64),
                 "Sigma": np.eye(self.K, dtype=np.float64) * self.sigma_init,
+                "n_pairs": np.zeros((self.K, self.K), dtype=np.float64),
             }
         if self.random_seed is None:
             lam = np.random.gamma(
@@ -459,6 +460,7 @@ class OnlineSTM(VIModel):
             "eta": np.array(self.eta),
             "Gamma": np.zeros((self.P, self.K), dtype=np.float64),
             "Sigma": np.eye(self.K, dtype=np.float64) * self.sigma_init,
+            "n_pairs": np.zeros((self.K, self.K), dtype=np.float64),
         }
 
     def get_metadata(self) -> dict[str, Any]:
@@ -731,6 +733,7 @@ class OnlineSTM(VIModel):
             "eta": global_params["eta"],
             "Gamma": new_Gamma,
             "Sigma": new_Sigma,
+            "n_pairs": np.asarray(target_stats["n_pairs_stat"], dtype=np.float64),
         }
 
     def compute_elbo(

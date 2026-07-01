@@ -153,3 +153,17 @@ def test_stmmodel_roundtrips_topic_block_spec(tmp_path):
     model.save(tmp_path)
     loaded = STMModel.load(tmp_path)
     assert loaded.topic_blocks == part
+
+
+def test_n_pairs_round_trips_through_save_load(tmp_path):
+    """params/n_pairs.npy persists and STMModel.load restores it."""
+    import numpy as np
+    from spark_vi.mllib.topic.stm import STMModel
+    gp = {"lambda": np.ones((3, 5)), "eta": np.array(0.01),
+          "Gamma": np.zeros((1, 3)), "Sigma": np.eye(3),
+          "n_pairs": np.array([[9, 4, 0], [4, 9, 2], [0, 2, 9]], dtype=float)}
+    model = STMModel(global_params=gp, metadata={}, model_spec=None,
+                     covariate_names=[], n_iterations=1)
+    model.save(tmp_path)
+    loaded = STMModel.load(tmp_path)
+    assert np.array_equal(loaded.global_params["n_pairs"], gp["n_pairs"])

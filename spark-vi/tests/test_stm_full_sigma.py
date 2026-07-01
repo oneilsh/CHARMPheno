@@ -328,3 +328,24 @@ def test_assembled_sigma_is_spd_when_cross_block_inconsistent():
     Sig = m.update_global(gp, stats, learning_rate=1.0)["Sigma"]
     assert np.allclose(Sig, Sig.T)
     assert np.min(np.linalg.eigvalsh(Sig)) > 0
+
+
+def test_update_global_stashes_n_pairs_support():
+    """global_params carries the final M-step per-pair support N so reporting
+    can build the identified mask without a re-pass."""
+    from spark_vi.models.topic.stm import OnlineSTM
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition(group_var="g", background_k=2,
+                               foreground=(("A", 1), ("B", 1)))  # K=4
+    m = OnlineSTM(K=4, vocab_size=6, P=1, reference_topic=False,
+                  topic_blocks=part, min_pair_support=10)
+    gp = m.initialize_global(None)
+    assert "n_pairs" in gp and gp["n_pairs"].shape == (4, 4)  # seeded
+    gp["Gamma"] = np.zeros((1, 4))
+    rng = np.random.default_rng(7)
+    docs = _gated_multigroup_docs(rng, n_comorbid=300)  # module-level helper in this file
+    gp = m.update_global(gp, m.local_update(docs, gp), 1.0)
+    N = gp["n_pairs"]
+    a = part.block_indices("A")[0]; b = part.block_indices("B")[0]
+    assert N[a, b] == 300          # cross-foreground support == comorbid docs
+    assert N[0, 0] >= 800          # background seen by all docs
