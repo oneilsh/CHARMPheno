@@ -126,10 +126,16 @@ def pd_complete(
     IPS / IPF algorithm of Dempster 1972), realized as coordinate ascent over the free
     off-diagonal entries. For each free entry (i,j) the unique value that zeroes the
     precision there, holding the rest fixed, is the regression closed form
-    Sigma[i,j] = Sigma[i,R] inv(Sigma[R,R]) Sigma[R,j] over R = all other topics: this is
-    the partial-covariance-to-zero update, and it leaves the observed entries (never
-    visited) untouched. Sweeping all free entries to convergence drives every free
-    precision entry to zero while preserving the measured covariances exactly.
+    Sigma[i,j] = Sigma[i,R] inv(Sigma[R,R]) Sigma[R,j] over R = all other topics: the
+    partial-covariance-to-zero update, which leaves the observed entries (never touched)
+    exact. Equivalently, with the full precision P = inv(Sigma), that value is the
+    increment Sigma[i,j] += P[i,j] / (P[i,i] P[j,j] - P[i,j]^2) (P's {i,j} block is the
+    inverse of the 2x2 Schur complement over R). So each sweep inverts Sigma ONCE and
+    updates every free pair from P, maintaining P by an exact rank-2 Woodbury update per
+    pair (Gauss-Seidel: the next pair sees the change) -- the same iterate trajectory as
+    per-pair regression at one O(K^3) inverse per sweep instead of one per free pair.
+    Sweeping to convergence drives every free precision entry to zero while preserving
+    the measured covariances exactly.
 
     Seeding and re-pinning. The IPS regression update needs a PD iterate so the inner
     inverse is well posed, but the natural zero-on-free init can be INDEFINITE even for a
@@ -193,16 +199,37 @@ def pd_complete(
     for _ in range(max_iter):
         sweeps += 1
         Sigma_prev = Sigma.copy()
-        # Coordinate ascent: set each free entry to the value that zeroes its precision
-        # (regression of i,j on the remaining topics) -> conditional independence.
+        # Coordinate ascent in PRECISION space (Gauss-Seidel). The per-pair regression
+        # Sigma[i,j] <- Sigma[i,R] inv(Sigma[R,R]) Sigma[R,j] that zeroes precision (i,j)
+        # is exactly Sigma[i,j] += P[i,j] / (P[i,i] P[j,j] - P[i,j]^2) with P = Sigma^-1
+        # (the two agree because P's {i,j} block is the inverse of the 2x2 Schur
+        # complement over R). So invert Sigma ONCE per sweep, then update each free pair
+        # from P -- and maintain P by an exact rank-2 (Woodbury push-through) update so
+        # the next pair in the sweep sees the change. This reproduces the original
+        # per-pair-inversion trajectory exactly (up to floating point) at one O(K^3)
+        # inverse per sweep instead of one per free pair (~|free_pairs|x fewer inversions).
+        P = np.linalg.inv(Sigma)
         for i, j in free_pairs:
-            rest = [k for k in range(n) if k != i and k != j]
-            x = Sigma[i, rest] @ np.linalg.inv(Sigma[np.ix_(rest, rest)]) @ Sigma[rest, j]
-            Sigma[i, j] = Sigma[j, i] = x
+            a = P[i, i]; b = P[j, j]; c = P[i, j]
+            d = c / (a * b - c * c)                # the covariance increment (== x* - Sigma[i,j])
+            if d == 0.0:
+                continue
+            Sigma[i, j] += d
+            Sigma[j, i] += d
+            # Maintain P = inv(Sigma) under the rank-2 change d(e_i e_j^T + e_j e_i^T) by the
+            # Woodbury push-through P_new = P - (P U) G (P U)^T,  U=[e_i,e_j],
+            # G = B (I + U^T P U B)^-1, B=[[0,d],[d,0]]. The 2x2 solve is closed form
+            # (det = (1+cd)^2 - ab d^2), G = (d/det)[[-b d, 1+c d],[1+c d, -a d]], expanded
+            # into rank-1 outer products of u=P[:,i], v=P[:,j].
+            det = (1.0 + c * d) ** 2 - a * b * d * d
+            u = P[:, i].copy(); v = P[:, j].copy()
+            P = P - ((-b * d * d / det) * np.outer(u, u)
+                     + (d * (1.0 + c * d) / det) * (np.outer(u, v) + np.outer(v, u))
+                     + (-a * d * d / det) * np.outer(v, v))
         # Re-pin the observed entries (and diagonal) to target each sweep. From an
         # indefinite-but-completable seed, IPS then converges to the exact max-det
         # completion regardless of the seed projection. If a sweep loses PD, floor it so
-        # the next regression inverse stays well posed.
+        # the next sweep's inverse stays well posed.
         Sigma[mask] = target[mask]
         np.fill_diagonal(Sigma, np.diag(target))
         try:

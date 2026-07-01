@@ -14,6 +14,105 @@ def _is_pd(M):
         return False
 
 
+# --- Frozen reference: the ORIGINAL per-pair-inversion IPS inner loop ----------
+#
+# This is a verbatim copy of pd_complete's coordinate-ascent body BEFORE the
+# precision-space (Gauss-Seidel-preserving) rewrite: it re-inverts an (n-2)x(n-2)
+# submatrix once per free pair per sweep. Kept here as a behavioral oracle so the
+# rewrite can be proven output-equivalent (the max-determinant completion is unique,
+# so any correct IPS variant lands on the same matrix; this also pins the Dykstra
+# fallback routing). The seeding, re-pin, PD-guard, convergence check, and
+# completability routing match the shipped code exactly at the time of the rewrite.
+def _reference_pd_complete(target, observed_mask, *, tol=1e-10, max_iter=1000):
+    mask = np.asarray(observed_mask, dtype=bool)
+    mask = mask | mask.T
+    n = mask.shape[0]
+    free = ~mask
+    free_pairs = [(i, j) for i in range(n) for j in range(i + 1, n) if free[i, j]]
+
+    Sigma = np.where(mask, target, 0.0)
+    np.fill_diagonal(Sigma, np.diag(target))
+    Sigma = nearest_spd(Sigma).copy()
+
+    for _ in range(max_iter):
+        Sigma_prev = Sigma.copy()
+        for i, j in free_pairs:
+            rest = [k for k in range(n) if k != i and k != j]
+            x = Sigma[i, rest] @ np.linalg.inv(Sigma[np.ix_(rest, rest)]) @ Sigma[rest, j]
+            Sigma[i, j] = Sigma[j, i] = x
+        Sigma[mask] = target[mask]
+        np.fill_diagonal(Sigma, np.diag(target))
+        try:
+            np.linalg.cholesky(Sigma)
+        except np.linalg.LinAlgError:
+            Sigma = nearest_spd(Sigma)
+        if np.max(np.abs(Sigma - Sigma_prev)) < tol:
+            break
+
+    Sigma = 0.5 * (Sigma + Sigma.T)
+    observed_ok = np.max(np.abs(Sigma[mask] - target[mask])) < 1e-7
+    is_pd = True
+    try:
+        np.linalg.cholesky(Sigma)
+    except np.linalg.LinAlgError:
+        is_pd = False
+    if observed_ok and is_pd:
+        return Sigma
+    return min_frobenius_psd_completion(target, mask, tol=tol, max_iter=max_iter)
+
+
+def _random_completable(n, n_free, seed):
+    """A PD `target` plus a symmetric free mask (n_free off-diagonal pairs freed).
+    Freeing entries of a genuine SPD matrix always leaves a PD-completable pattern
+    (the SPD matrix itself is a witness), so these exercise the max-det path."""
+    rng = np.random.default_rng(seed)
+    A = rng.standard_normal((n, n))
+    target = A @ A.T + n * np.eye(n)
+    mask = np.ones((n, n), bool)
+    off = [(i, j) for i in range(n) for j in range(i + 1, n)]
+    rng.shuffle(off)
+    for i, j in off[:n_free]:
+        mask[i, j] = mask[j, i] = False
+    return target, mask
+
+
+def _dense_multiclique(seed=0):
+    """The multi-membership regime: several groups whose foreground blocks are
+    internally correlated and coupled to a shared background, with MANY cross-group
+    pairs free but SOME cross-group pairs observed (comorbid docs) — a densely
+    coupled, non-chordal free set. This is the pattern the precision-space rewrite
+    must handle without the Jacobi overshoot risk."""
+    rng = np.random.default_rng(seed)
+    bg = [0, 1, 2]
+    groups = [[3, 4], [5, 6], [7, 8]]
+    K = 9
+    M = np.eye(K)
+    for a in bg:
+        for b in bg:
+            if a < b:
+                M[a, b] = M[b, a] = 0.2
+    for a in bg:
+        for blk in groups:
+            for c in blk:
+                M[a, c] = M[c, a] = 0.35
+    for blk in groups:
+        i, j = blk
+        M[i, j] = M[j, i] = 0.4
+    # ensure PD target to freeze a completable pattern
+    M = M + 0.0
+    mask = np.ones((K, K), bool)
+    # free MOST cross-group pairs, but leave a couple observed (comorbid coupling)
+    cross = [(gi[a], gj[b]) for x, gi in enumerate(groups)
+             for gj in groups[x + 1:] for a in range(2) for b in range(2)]
+    rng.shuffle(cross)
+    observed_cross = set(cross[:2])          # a couple of comorbid cross-pairs stay observed
+    for (i, j) in cross:
+        if (i, j) not in observed_cross:
+            mask[i, j] = mask[j, i] = False
+    target = nearest_spd(M)                  # guarantee a PD witness for completability
+    return target, mask
+
+
 def test_identity_when_all_observed():
     rng = np.random.default_rng(0)
     A = rng.standard_normal((5, 5))
@@ -268,3 +367,70 @@ def test_pd_complete_info_reports_sweeps_and_free_count():
     assert 1 <= info["sweeps"] <= info["max_iter"]
     assert info["fell_back"] is False        # completable block -> no Dykstra fallback
     assert np.allclose(Sig, pd_complete(M, obs))   # info is diagnostic-only
+
+
+# --- Output equivalence: precision-space rewrite == original per-pair IPS -------
+#
+# The max-determinant PD completion is UNIQUE (a strictly-concave objective over the
+# PD cone with linear observed-entry constraints), so any correct IPS variant lands on
+# the same matrix. These pin that the Gauss-Seidel-preserving precision-space rewrite
+# reproduces the original per-pair-inversion implementation's output (and its Dykstra
+# fallback routing) across completable, densely-coupled, and non-completable patterns.
+
+def _battery():
+    cases = {
+        "rand_5_2": _random_completable(5, 2, seed=10),
+        "rand_8_5": _random_completable(8, 5, seed=11),
+        "rand_12_9": _random_completable(12, 9, seed=12),
+        "dense_multiclique_0": _dense_multiclique(seed=0),
+        "dense_multiclique_1": _dense_multiclique(seed=1),
+        "inconsistent_free": (  # non-PD-completable observed clique + free entry
+            np.array([[1.0, 0.99, 0.99, 0.5],
+                      [0.99, 1.0, -0.99, 0.0],
+                      [0.99, -0.99, 1.0, 0.0],
+                      [0.5, 0.0, 0.0, 1.0]]),
+            np.array([[1, 1, 1, 1],
+                      [1, 1, 1, 0],
+                      [1, 1, 1, 0],
+                      [1, 0, 0, 1]], bool),
+        ),
+    }
+    return cases
+
+
+def test_precision_space_matches_reference_on_battery():
+    for name, (target, mask) in _battery().items():
+        ref = _reference_pd_complete(target, mask)
+        info = {}
+        got = pd_complete(target, mask, info=info)
+        # same unique completion (max-det) or same Dykstra fallback output
+        np.testing.assert_allclose(
+            got, ref, atol=1e-7,
+            err_msg=f"{name}: rewrite output diverged from reference IPS")
+        assert _is_pd(got), f"{name}: result not PD"
+        np.testing.assert_allclose(got, got.T, atol=1e-10, err_msg=f"{name}: asymmetric")
+
+
+def test_precision_space_matches_reference_fallback_routing():
+    # The completability decision (max-det vs Dykstra min-Frobenius) must not change.
+    completable = _dense_multiclique(seed=2)
+    noncompletable = _battery()["inconsistent_free"]
+    for (target, mask), expect_fell_back in [(completable, False),
+                                             (noncompletable, True)]:
+        info = {}
+        pd_complete(target, mask, info=info)
+        assert info["fell_back"] is expect_fell_back
+
+
+def test_precision_space_one_inversion_regime_is_fast_on_dense():
+    # Behavioral guard for the perf win: on the densely-coupled multi-clique pattern
+    # the completion still converges (does not silently exhaust max_iter on a
+    # completable input) and preserves observed entries exactly.
+    target, mask = _dense_multiclique(seed=3)
+    info = {}
+    out = pd_complete(target, mask, info=info)
+    assert info["fell_back"] is False
+    assert info["sweeps"] < info["max_iter"]          # converged, not capped
+    assert _is_pd(out)
+    obs_dev = np.max(np.abs((out - target)[mask]))
+    assert obs_dev < 1e-7, f"observed entries drifted by {obs_dev:.2e}"
