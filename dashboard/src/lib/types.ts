@@ -68,11 +68,20 @@ export interface GatingSpec {
   topic_blocks: string[]
 }
 
+export interface Correlation {
+  topic_order: number[]
+  block_labels: string[]
+  R: (number | null)[][]
+  identified: boolean[][]
+  support: number[][]
+}
+
 export interface DashboardBundle {
   model: Model; phenotypes: PhenotypesBundle; vocab: VocabBundle; corpusStats: CorpusStats
   covariateSchema?: CovariateSchema
   covariateEffects?: CovariateEffects
   gating?: GatingSpec
+  correlation?: Correlation
 }
 
 // Top-level data/manifest.json: lists which per-cohort bundles are

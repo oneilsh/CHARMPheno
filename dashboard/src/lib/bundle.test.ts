@@ -92,3 +92,43 @@ describe('loadBundle gating', () => {
     expect(b.gating?.groups).toEqual(['rare_dx'])
   })
 })
+
+describe('loadBundle correlation', () => {
+  it('attaches correlation when correlation.json is present', async () => {
+    const files: Record<string, unknown> = {
+      'data/c/model.json': { K: 2, V: 1, alpha: [1, 1], beta: [[1], [1]] },
+      'data/c/phenotypes.json': { phenotypes: [] },
+      'data/c/vocab.json': { codes: [] },
+      'data/c/corpus_stats.json': { corpus_size_docs: 0, mean_codes_per_doc: 0, k: 20, v: 1, v_full: 1 },
+      'data/c/correlation.json': {
+        topic_order: [0, 1],
+        block_labels: ['background', 'cancer'],
+        R: [[1, 0.5], [0.5, 1]],
+        identified: [[true, true], [true, true]],
+        support: [[10, 8], [8, 10]],
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const key = Object.keys(files).find((k) => url.endsWith(k))
+      return key ? { ok: true, json: async () => files[key] } : { ok: false, status: 404 }
+    }))
+    const b = await loadBundle('', 'c')
+    expect(b.correlation?.R).toEqual([[1, 0.5], [0.5, 1]])
+    expect(b.correlation?.identified).toEqual([[true, true], [true, true]])
+  })
+
+  it('leaves correlation undefined when correlation.json is absent', async () => {
+    const files: Record<string, unknown> = {
+      'data/c/model.json': { K: 1, V: 1, alpha: [1], beta: [[1]] },
+      'data/c/phenotypes.json': { phenotypes: [] },
+      'data/c/vocab.json': { codes: [] },
+      'data/c/corpus_stats.json': { corpus_size_docs: 0, mean_codes_per_doc: 0, k: 20, v: 1, v_full: 1 },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const key = Object.keys(files).find((k) => url.endsWith(k))
+      return key ? { ok: true, json: async () => files[key] } : { ok: false, status: 404 }
+    }))
+    const b = await loadBundle('', 'c')
+    expect(b.correlation).toBeUndefined()
+  })
+})
