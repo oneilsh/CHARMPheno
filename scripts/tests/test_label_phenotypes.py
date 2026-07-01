@@ -62,6 +62,59 @@ def _write_bundle(tmp: Path, *, with_alpha: bool) -> Path:
     return bundle
 
 
+# --- per-group block context (gated STM) -----------------------------------
+
+def test_topic_block_line_foreground_names_subgroup_and_forbids_background():
+    """A foreground topic is group-specific by construction; the line must name
+    the subgroup and steer AWAY from a corpus-wide 'background' reading (the
+    spot-check failure mode: cancer/dementia foreground symptom clusters were
+    labeled 'background')."""
+    line = lp._topic_block_line(
+        block="cancer", groups=["cancer", "dementia"], group_var="source_cohort")
+    assert "FOREGROUND" in line
+    assert "cancer" in line
+    assert "background" in line.lower()   # steers away from corpus-wide background
+    # ...but must NOT push a coherent foreground topic into 'dead' (t44 regression):
+    # it explicitly names the subgroup-burden framing and guards the dead reading.
+    assert "burden" in line.lower()
+    assert "dead" in line.lower()
+
+
+def test_topic_block_line_background_says_shared():
+    line = lp._topic_block_line(
+        block="background", groups=["cancer", "dementia"], group_var="source_cohort")
+    assert "BACKGROUND" in line
+    assert "shared" in line.lower()
+
+
+def test_topic_block_line_none_is_empty():
+    """Non-gated bundles (no gating.json) pass block=None → no block line."""
+    assert lp._topic_block_line(block=None, groups=None, group_var=None) == ""
+
+
+def test_user_message_includes_block_line_when_foreground():
+    msg = lp._build_user_message(
+        phenotype_id=3,
+        top_by_freq=[{"description": "X", "weight_pct": 50.0, "lift": 2.0}],
+        top_by_lift=[{"description": "X", "weight_pct": 50.0, "lift": 2.0}],
+        alpha=None, kl=0.7, npmi=0.1, pair_coverage=0.5, usage_frac=0.05,
+        max_words=6,
+        block="dementia", groups=["cancer", "dementia"], group_var="source_cohort",
+    )
+    assert "FOREGROUND" in msg and "dementia" in msg
+
+
+def test_user_message_omits_block_line_when_none():
+    msg = lp._build_user_message(
+        phenotype_id=0,
+        top_by_freq=[{"description": "X", "weight_pct": 50.0, "lift": 2.0}],
+        top_by_lift=[{"description": "X", "weight_pct": 50.0, "lift": 2.0}],
+        alpha=None, kl=0.7, npmi=0.1, pair_coverage=0.5, usage_frac=0.05,
+        max_words=6,
+    )
+    assert "Topic block" not in msg
+
+
 # --- _build_user_message ---------------------------------------------------
 
 def test_user_message_omits_alpha_line_when_none():

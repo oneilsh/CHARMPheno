@@ -94,6 +94,85 @@ PROVIDER_CHAIN: list[tuple[str, str, str]] = [
 QualityCategory = Literal["phenotype", "background", "anchor", "mixed", "dead"]
 
 
+def _topic_block_line(
+    *,
+    block: str | None,
+    groups: list[str] | None,
+    group_var: str | None,
+) -> str:
+    """Per-topic gating-block context for a gated/blocked STM, or "" if none.
+
+    A gated STM partitions its topics into a shared BACKGROUND block (fit on the
+    full corpus, available to every group) and one FOREGROUND block per group
+    (fit ONLY on that group's documents). ``block`` is the topic's block:
+    "background", or a group name from ``groups``. Foreground topics are
+    group-specific by construction, so the corpus-wide "background" KIND cannot
+    apply to them — without this signal the labeler mislabels a foreground
+    symptom cluster as generic background (the exp-0027 spot-check failure).
+    Empty string for non-gated bundles (block is None).
+    """
+    if not block:
+        return ""
+    others = ", ".join(groups or [])
+    if block == "background":
+        return (
+            f"Topic block: BACKGROUND (shared). Fit on the full corpus and "
+            f"available to every {group_var} group ({others}); it captures "
+            f"structure common to the whole cohort. A corpus-wide 'background' "
+            f"reading is appropriate here when the content is a generic baseline."
+        )
+    return (
+        f"Topic block: FOREGROUND for the {block!r} subgroup. Fit ONLY on "
+        f"documents from the {block!r} {group_var} group, so it is specific to "
+        f"that subgroup, not corpus-wide. Frame the label around the {block!r} "
+        f"subgroup. If the content is a generic symptom/comorbidity cluster, "
+        f"that is the subgroup's characteristic burden (e.g. \"{block} symptom "
+        f"burden\") — a real pattern for that group, NOT a corpus-wide "
+        f"'background' and NOT 'dead' (it carries this subgroup's mass; check "
+        f"the usage stat). Reserve 'dead' for near-zero-mass topics and 'mixed' "
+        f"for genuinely unrelated content — judge coherence honestly."
+    )
+
+
+def _build_gating_context_block(
+    group_var: str | None, groups: list[str] | None,
+) -> str:
+    """Render the gated-structure section for the system prompt, or "".
+
+    Explains ONCE (constant across topics, so prompt-cache-safe) that this is a
+    gated/blocked STM: topics belong either to a shared background block or to
+    one group's foreground block, and each topic's message carries a
+    'Topic block:' line the model must weigh. Without this, the model has no
+    frame for the per-topic block line.
+    """
+    if not group_var or not groups:
+        return ""
+    joined = ", ".join(repr(g) for g in groups)
+    return f"""
+
+## Gated topic structure
+
+This is a GATED (blocked) topic model over a combined cohort split by \
+`{group_var}` into the groups {joined}. Topics are partitioned into blocks:
+
+- a shared **background** block, fit on the full corpus and available to \
+every group — these can be corpus-wide baselines / catch-alls; and
+- one **foreground** block per group, fit ONLY on that group's documents — \
+these describe structure specific to that subgroup.
+
+Each topic's message includes a `Topic block:` line telling you which block \
+it is in. Weigh it: a foreground topic is group-specific BY CONSTRUCTION, so \
+frame its label around its subgroup rather than as a corpus-wide 'background' \
+baseline — even a generic-looking symptom cluster is that subgroup's \
+characteristic burden and should be labeled as such (a real pattern for that \
+group), NOT demoted to 'dead'. Reserve 'background' for background-block \
+topics. This does NOT override honesty about coherence or mass: use the usage \
+stat — a genuinely incoherent foreground topic is still 'mixed', and one with \
+near-zero mass is still 'dead'; but a coherent foreground topic that carries \
+real subgroup mass is a phenotype, not dead.
+"""
+
+
 def _build_cohort_context_block(cohort: dict[str, str] | None) -> str:
     """Render the cohort-context section, or empty string if no cohort meta.
 
@@ -147,6 +226,7 @@ def _build_system_prompt(
     alpha_max: float | None = None,
     alpha_separates_well: bool | None = None,
     cohort: dict[str, str] | None = None,
+    gating: dict | None = None,
 ) -> str:
     # All substitutions happen once per run so the resulting string is
     # byte-identical across topics (enabling prompt caching).
@@ -159,6 +239,9 @@ def _build_system_prompt(
     # KL stays the PRIMARY classifier in both regimes; only the supporting
     # disambiguator text below swaps. See insight 0024 (rubric blind spots).
     cohort_block = _build_cohort_context_block(cohort)
+    gating_block = _build_gating_context_block(
+        (gating or {}).get("group_var"), (gating or {}).get("groups"),
+    )
     supporting_signal_name = "α" if has_alpha else "corpus mass"
     low_mass_phrase = "α near floor" if has_alpha else "near-zero corpus mass"
     low_usage_real_clause = (
@@ -290,7 +373,7 @@ The current model is trained over patient conditions only (no drugs, \
 procedures, measurements, or labs); your interpretations should reflect \
 that — describe conditions and their clinical relationships, not \
 treatments or workups.
-{cohort_block}
+{cohort_block}{gating_block}
 
 ## Two rankings
 
@@ -620,6 +703,7 @@ def _build_agent(
     kl_dead_threshold_explanation: str,
     alpha_separates_well: bool,
     cohort: dict[str, str] | None = None,
+    gating: dict | None = None,
 ):
     """Build a pydantic-ai Agent for the given model string with the API
     key passed in explicitly (not via env), structured output, and the
@@ -678,6 +762,7 @@ def _build_agent(
         kl_dead_threshold_explanation=kl_dead_threshold_explanation,
         has_alpha=has_alpha,
         cohort=cohort,
+        gating=gating,
     )
     if has_alpha:
         sorted_a = sorted(alpha_arr)
@@ -970,6 +1055,9 @@ def _build_user_message(
     pair_coverage: float,
     usage_frac: float,
     max_words: int,
+    block: str | None = None,
+    groups: list[str] | None = None,
+    group_var: str | None = None,
 ) -> str:
     # Stats are listed in decision order (alpha and KL first — the
     # primary classifiers — then the supporting contextual stats).
@@ -979,6 +1067,11 @@ def _build_user_message(
     lines = [
         f"Topic id: {phenotype_id}",
         f"Label budget: at most {max_words} words.",
+    ]
+    block_line = _topic_block_line(block=block, groups=groups, group_var=group_var)
+    if block_line:
+        lines += ["", block_line]
+    lines += [
         "",
         "Distinctiveness statistics (primary classifiers):",
     ]
@@ -1021,6 +1114,9 @@ def _label_one(
     pair_coverage: float,
     usage_frac: float,
     max_words: int,
+    block: str | None = None,
+    groups: list[str] | None = None,
+    group_var: str | None = None,
 ) -> tuple[PhenotypeLabel, dict]:
     """One labeling call. Returns (output, usage_dict)."""
     user_text = _build_user_message(
@@ -1029,6 +1125,7 @@ def _label_one(
         alpha=alpha, kl=kl,
         npmi=npmi, pair_coverage=pair_coverage, usage_frac=usage_frac,
         max_words=max_words,
+        block=block, groups=groups, group_var=group_var,
     )
     result = agent.run_sync(user_text)
     out: PhenotypeLabel = result.output
@@ -1142,6 +1239,20 @@ def main(argv: list[str] | None = None) -> int:
         stats_b = json.loads(stats_p.read_text())
         cohort_meta = stats_b.get("cohort") or None
 
+    # gating.json (optional): a gated/blocked STM tags each topic with its
+    # block (background vs a group's foreground). Passing each topic's block
+    # to the model stops foreground symptom-clusters being mislabeled as
+    # corpus-wide background. Absent for non-gated bundles.
+    gating_p = bundle_dir / "gating.json"
+    topic_blocks: list[str] | None = None
+    gating_groups: list[str] | None = None
+    gating_group_var: str | None = None
+    if gating_p.is_file():
+        gating_b = json.loads(gating_p.read_text())
+        topic_blocks = gating_b.get("topic_blocks") or None
+        gating_groups = gating_b.get("groups") or None
+        gating_group_var = gating_b.get("group_var") or None
+
     beta = model_b["beta"]
     alpha_arr = model_b.get("alpha")
     # STM (logistic-normal) has NO per-topic Dirichlet prior. Its exported
@@ -1178,6 +1289,19 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             f"beta rows are not all width {V_disp} (the displayed vocab "
             f"size); is this a pre-trim bundle?",
+        )
+    if topic_blocks is not None:
+        if len(topic_blocks) != K:
+            raise SystemExit(
+                f"gating.json 'topic_blocks' has length {len(topic_blocks)}, "
+                f"expected {K} (one per topic); mismatched bundle?",
+            )
+        import collections as _collections
+        _bc = _collections.Counter(topic_blocks)
+        print(
+            f"[label] gated bundle: {gating_group_var} groups={gating_groups}; "
+            f"topic blocks {dict(_bc)}",
+            flush=True,
         )
     # alpha is OPTIONAL: only Dirichlet-family models (LDA/HDP) have a
     # per-topic prior weight. STM (logistic-normal) has none, in which case
@@ -1332,6 +1456,8 @@ def main(argv: list[str] | None = None) -> int:
                 alpha=(alpha_arr[i] if has_alpha else None), kl=kl_arr[i],
                 npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
                 max_words=args.max_words,
+                block=(topic_blocks[i] if topic_blocks else None),
+                groups=gating_groups, group_var=gating_group_var,
             ), flush=True)
         if len(todo) > 3:
             print(f"\n... and {len(todo) - 3} more "
@@ -1355,6 +1481,10 @@ def main(argv: list[str] | None = None) -> int:
         kl_dead_threshold_explanation=kl_threshold_explanation,
         alpha_separates_well=alpha_separates_well,
         cohort=cohort_meta,
+        gating=(
+            {"group_var": gating_group_var, "groups": gating_groups}
+            if topic_blocks is not None else None
+        ),
     )
     print(f"[label] using model {model_str}", flush=True)
     if cohort_meta:
@@ -1376,6 +1506,8 @@ def main(argv: list[str] | None = None) -> int:
                 alpha=(alpha_arr[i] if has_alpha else None), kl=kl_arr[i],
                 npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
                 max_words=args.max_words,
+                block=(topic_blocks[i] if topic_blocks else None),
+                groups=gating_groups, group_var=gating_group_var,
             )
         except Exception as e:
             print(f"[label] phenotype {i}: error: {e}", flush=True)
