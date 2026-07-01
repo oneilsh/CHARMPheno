@@ -98,6 +98,81 @@ def synthetic_gated_corpus(*, groups, fg_per_group, bg_k, V, D, doc_len,
     return docs, planted, part
 
 
+def topic_support_jaccard(beta, *, eps=1e-3):
+    """Mean pairwise Jaccard overlap of topic supports (concepts with prob > eps).
+
+    A separation diagnostic: 0 = every topic uses a disjoint vocabulary (the
+    artificial-separation regime of synthetic_gated_corpus); ->1 = topics share
+    all terms. The real HF lda_pasc beta measures ~0.35 here."""
+    supports = [set(np.where(beta[k] > eps)[0]) for k in range(beta.shape[0])]
+    vals = []
+    for i in range(len(supports)):
+        for j in range(i + 1, len(supports)):
+            uni = len(supports[i] | supports[j])
+            vals.append(len(supports[i] & supports[j]) / uni if uni else 0.0)
+    return float(np.mean(vals)) if vals else 0.0
+
+
+def synthetic_gated_corpus_overlap(*, groups, fg_per_group, bg_k, V, D, doc_len,
+                                   bg_frac, shared_frac=0.5, shared_pool=None,
+                                   seed=0):
+    """Gated corpus whose topics SHARE vocabulary (calibrated to the real HF
+    beta's mean pairwise Jaccard ~0.35), unlike synthetic_gated_corpus's disjoint
+    per-topic blocks.
+
+    Vocab layout: a shared common pool [0:C] that EVERY topic samples from (the
+    'hypertension shows up everywhere' effect) plus a disjoint signature block per
+    topic in [C:V]. `shared_frac` is the probability mass each topic places on the
+    shared pool; the pool SIZE defaults to one signature block so Jaccard lands
+    ~1/3 regardless of K (Jaccard = C/(C+2*sig)).
+
+    Documents co-activate a fixed SPINE background topic (slot bg[0], present in
+    every doc of BOTH groups) + one random other background topic + one of the
+    doc's own group's foreground topics. The spine drives a strong background<->A
+    and background<->B Sigma coupling while NO doc co-activates an A and a B
+    foreground topic, so the A<->B cross-pair is structurally unobserved (free) —
+    the block-arrow inconsistency the PD completion must repair."""
+    rng = np.random.default_rng(seed)
+    part = TopicBlockPartition(group_var="g", background_k=bg_k,
+                               foreground=tuple((g, fg_per_group) for g in groups))
+    K = part.K
+    sig_region = int(round(V * (1.0 - shared_frac)))
+    sig = max(1, sig_region // K)
+    C = int(shared_pool) if shared_pool is not None else sig   # pool ~ one block
+    C = min(C, V - K * sig)                                     # keep blocks in range
+    C = max(C, 1)
+    planted = np.full((K, V), 1e-4)
+    # shared common pool: every topic, per-topic random weights (not identical)
+    for k in range(K):
+        planted[k, 0:C] += rng.random(C) + 0.1
+    # disjoint signature block per topic in [C:V]
+    for k in range(K):
+        lo = C + k * sig
+        planted[k, lo:lo + sig] += 5.0
+    planted /= planted.sum(axis=1, keepdims=True)
+
+    bg_rows = part.background_indices()
+    spine = bg_rows[0]
+    docs = []
+    glist = list(groups)
+    for _ in range(D):
+        g = glist[int(rng.integers(len(glist)))]
+        other_bg = bg_rows[int(rng.integers(len(bg_rows)))]
+        fg_topics = part.block_indices(g)
+        fg = fg_topics[int(rng.integers(len(fg_topics)))]
+        n_bg = int(rng.binomial(doc_len, bg_frac))
+        n_other = n_bg // 2
+        toks = np.concatenate([
+            rng.choice(V, size=n_bg - n_other, p=planted[spine]),
+            rng.choice(V, size=n_other, p=planted[other_bg]),
+            rng.choice(V, size=doc_len - n_bg, p=planted[fg])])
+        u, c = np.unique(toks, return_counts=True)
+        docs.append(STMDocument(indices=u.astype(np.int32),
+                                counts=c.astype(np.float64), length=int(c.sum()),
+                                x=np.array([1.0]), groups=frozenset({g})))
+    return docs, planted, part
+
+
 def fit_stm(docs, *, K, V, sigma_init, n_iter=250, batch=None, seed=42,
             partition=None, init_data=None, **model_kwargs):
     m = OnlineSTM(K=K, vocab_size=V, P=1, sigma_init=sigma_init,
