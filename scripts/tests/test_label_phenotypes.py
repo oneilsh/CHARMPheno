@@ -146,3 +146,23 @@ def test_main_topic_ids_out_of_range_errors(tmp_path):
     bundle = _write_bundle(tmp_path, with_alpha=False)
     with pytest.raises(SystemExit):
         lp.main(["--dry-run", "--bundle-dir", str(bundle), "--topic-ids", "99"])
+
+
+def test_stm_bundle_ignores_alpha_equivalent(tmp_path, capsys):
+    """STM's exported `alpha` is softmax(Gamma[intercept]) — a baseline-
+    proportion alpha-EQUIVALENT, not a Dirichlet prior. When the bundle is
+    STM (detected via the STM-only `sigma` array, or an explicit model_class),
+    the labeler must DROP alpha and use the corpus-mass `usage` branch, so the
+    per-topic message shows no `alpha:` line and the run reports the no-alpha
+    path — even though an alpha array is physically present."""
+    bundle = _write_bundle(tmp_path, with_alpha=True)
+    # Make it an STM bundle: add the STM-only sigma array to model.json.
+    model_p = bundle / "model.json"
+    model = json.loads(model_p.read_text())
+    model["sigma"] = [1.0, 1.0]              # STM logistic-normal prior variance
+    model_p.write_text(json.dumps(model))
+    rc = lp.main(["--dry-run", "--bundle-dir", str(bundle)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no per-topic alpha" in out       # took the STM (no-alpha) path
+    assert "alpha:" not in out               # per-topic message dropped the line

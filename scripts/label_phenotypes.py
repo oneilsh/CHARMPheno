@@ -1144,6 +1144,27 @@ def main(argv: list[str] | None = None) -> int:
 
     beta = model_b["beta"]
     alpha_arr = model_b.get("alpha")
+    # STM (logistic-normal) has NO per-topic Dirichlet prior. Its exported
+    # `alpha` is softmax(Gamma[intercept]) — a baseline (reference-covariate)
+    # topic-proportion alpha-EQUIVALENT, not a Dirichlet weight — so routing it
+    # through the Dirichlet-alpha rubric feeds the model false premises ("the
+    # optimizer pushes alpha down", "asymmetric-Dirichlet prior weight"). Detect
+    # STM via an explicit model_class, or the STM-only `sigma` array as a
+    # fallback for bundles that predate model_class, and drop alpha so the
+    # no-alpha branch fires (corpus-mass `usage` disambiguator, correct
+    # logistic-normal language). See insight 0024 (STM rubric adaptation).
+    _model_class = str(model_b.get("model_class", "")).lower()
+    is_stm = _model_class in ("stm", "onlinestm") or (
+        not _model_class and "sigma" in model_b
+    )
+    if is_stm and alpha_arr is not None:
+        print(
+            "[label] STM bundle: dropping the exported alpha-equivalent "
+            "(softmax(Gamma intercept)) — using corpus mass (usage) as the "
+            "background/dead disambiguator per the logistic-normal rubric",
+            flush=True,
+        )
+        alpha_arr = None
     vocab_codes = vocab_b["codes"]
     phenotypes = phens_b["phenotypes"]
 
