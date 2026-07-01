@@ -103,6 +103,13 @@ export const copy = {
     suppressedTip: `< 20 patients (suppressed for privacy)`,
   },
 
+  // ── Correlation heatmap (chart-internal labels) ────────────────────────
+  correlation: {
+    ariaLabel: `Topic correlation heatmap`,
+    heading: `Topic Correlations`,
+    kicker: `Pairwise correlation between topic mixture shares, ordered by block. Grey cells lack enough joint observations to estimate a correlation.`,
+  },
+
   // ── Phenotype browser (table) ─────────────────────────────────────────
   phenotypeBrowser: {
     topicMassTip: `Mean topic mixture share (doc-mean of θ). Sums to 100% across phenotypes.`,

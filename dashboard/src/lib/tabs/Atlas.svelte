@@ -4,6 +4,7 @@
   import CodePanel from '../atlas/CodePanel.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
   import PhenotypeBrowser from '../atlas/PhenotypeBrowser.svelte'
+  import CorrelationHeatmap from '../atlas/CorrelationHeatmap.svelte'
   import { copy } from '../copy'
 
   // Reset conditioning whenever the bundle changes (cohort switch must not
@@ -47,6 +48,15 @@
     <div class="left-col">
       <TopicMap />
       <PhenotypeBrowser />
+      {#if $bundle?.correlation}
+        <section class="correlation-section">
+          <header class="subsection-head">
+            <span class="eyebrow">{copy.correlation.heading}</span>
+            <p class="kicker">{copy.correlation.kicker}</p>
+          </header>
+          <CorrelationHeatmap correlation={$bundle.correlation} />
+        </section>
+      {/if}
     </div>
     <CodePanel />
   </div>
@@ -162,5 +172,29 @@
     flex-direction: column;
     gap: 1.25rem;
     min-width: 0;
+  }
+
+  /* Correlation heatmap subsection: only present when the bundle carries
+     block-gated correlation data (see bundle.correlation in types.ts). */
+  .correlation-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .subsection-head {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+  .subsection-head .eyebrow {
+    font-family: var(--font-mono);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-faint);
+    font-weight: 500;
+  }
+  .subsection-head .kicker {
+    max-width: 52ch;
   }
 </style>
