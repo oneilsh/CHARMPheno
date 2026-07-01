@@ -18,8 +18,11 @@ Submit (from analysis/cloud on the Dataproc master):
     make build-dashboard-bundle CHECKPOINT=... \\
         BUNDLE_ARGS='--model-class hdp --hdp-top-k 50'
 
-The 4 files (model.json, vocab.json, phenotypes.json, corpus_stats.json)
-land in --out-dir and are zipped into <out-dir>.zip alongside.
+The 4 base files (model.json, vocab.json, phenotypes.json, corpus_stats.json)
+land in --out-dir and are zipped into <out-dir>.zip. Any optional gated /
+correlation outputs that were written (gating.json, covariate_schema.json,
+covariate_effects.json, correlation.json) are included in the zip too, so the
+downloadable artifact is the complete bundle.
 """
 from __future__ import annotations
 
@@ -659,9 +662,20 @@ def main(argv: list[str] | None = None) -> int:
             # mount layer reliably (random-access writes). Stage in /tmp.
             tmp_zip = Path("/tmp") / zip_path.name
             with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                # Base 4-file bundle (always written).
                 for f in ("model.json", "vocab.json",
                           "phenotypes.json", "corpus_stats.json"):
                     zf.write(out_dir / f, arcname=f)
+                # Optional gated / correlation outputs: include whichever were
+                # written so the downloadable zip is the COMPLETE bundle.
+                # gating.json + covariate_* need the covariate cache;
+                # correlation.json needs a gated fit with persisted n_pairs.
+                for f in ("gating.json", "covariate_schema.json",
+                          "covariate_effects.json", "correlation.json"):
+                    p = out_dir / f
+                    if p.exists():
+                        zf.write(p, arcname=f)
+                        print(f"[driver]   zip: +{f}", flush=True)
             # Now copy the staged zip to the final destination (which may be
             # a GCS-mounted path that accepts sequential writes).
             import shutil
