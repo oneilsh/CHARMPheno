@@ -203,6 +203,23 @@ def main(argv: list[str] | None = None) -> int:
         log.info("STM: wrote gating.json (groups=%s, kept_topics=%d)",
                  gating["groups"], len(kept_ids))
 
+        # correlation.json: logistic-normal topic correlation R + identified mask
+        if "n_pairs" in result.global_params:
+            from spark_vi.models.topic._linalg import topic_correlation_identified
+            from charmpheno.export.correlation import build_correlation_json
+
+            Sigma_corr = result.global_params["Sigma"]
+            n_pairs = result.global_params["n_pairs"]
+            mps = int(result.metadata.get("min_pair_support", 1))
+            R, ident = topic_correlation_identified(Sigma_corr, n_pairs, mps)
+            corr = build_correlation_json(R, ident, n_pairs, partition, kept_ids)
+            (args.out_dir / "correlation.json").write_text(json.dumps(corr, indent=2))
+            log.info("STM: wrote correlation.json (topics=%d, min_pair_support=%d)",
+                     len(kept_ids), mps)
+        else:
+            log.warning("STM: saved model lacks 'n_pairs' in global_params "
+                        "(pre-Task-1 checkpoint); skipping correlation.json.")
+
         # covariate_effects.json for the KEPT topics (Gamma columns subset)
         P = Gamma.shape[0]
         write_covariate_effects(out_dir=args.out_dir,

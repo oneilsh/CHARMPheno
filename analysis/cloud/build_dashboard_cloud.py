@@ -599,6 +599,29 @@ def main(argv: list[str] | None = None) -> int:
                                 "skipped. Dashboard renders ungated. Provide "
                                 "--cache-uri to enable gating.")
 
+                # correlation.json: logistic-normal topic correlation R + identified mask
+                if tbs and stm_partition is not None:
+                    if "n_pairs" in result.global_params:
+                        from spark_vi.models.topic._linalg import topic_correlation_identified
+                        from charmpheno.export.correlation import build_correlation_json
+
+                        Sigma_corr = result.global_params["Sigma"]
+                        n_pairs = result.global_params["n_pairs"]
+                        mps = int(result.metadata.get("min_pair_support", 1))
+                        R, ident = topic_correlation_identified(Sigma_corr, n_pairs, mps)
+                        corr = build_correlation_json(
+                            R, ident, n_pairs, stm_partition, kept_ids)
+                        (out_dir / "correlation.json").write_text(
+                            _json.dumps(corr, indent=2))
+                        log.info("STM: wrote correlation.json (topics=%d, "
+                                 "min_pair_support=%d)", len(kept_ids), mps)
+                        print(f"[driver]   wrote correlation.json "
+                              f"(topics={len(kept_ids)})", flush=True)
+                    else:
+                        log.warning("STM: saved model lacks 'n_pairs' in "
+                                    "global_params (pre-Task-1 checkpoint); "
+                                    "skipping correlation.json.")
+
                 # covariate_effects.json: subset Gamma columns to kept topics.
                 write_covariate_effects(
                     out_dir=out_dir, Gamma=Gamma[:, kept_ids],

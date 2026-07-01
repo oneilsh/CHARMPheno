@@ -39,3 +39,20 @@ def test_cross_foreground_all_null_under_split_representation():
     support = np.array([[300, 200, 100], [200, 200, 0], [100, 0, 100]], dtype=float)
     out = build_correlation_json(R, identified, support, part, [0, 1, 2])
     assert out["R"][1][2] is None and out["identified"][1][2] is False
+
+
+def test_build_dashboard_writes_correlation_json(tmp_path):
+    """The dashboard build emits correlation.json from a saved STM model."""
+    import json
+    from spark_vi.models.topic._linalg import topic_correlation_identified
+    # Minimal stand-in for the wiring: Sigma + n_pairs + partition -> json file.
+    part = TopicBlockPartition(group_var="g", background_k=1,
+                               foreground=(("A", 1), ("B", 1)))
+    Sigma = np.array([[4.0, 1.0, 1.0], [1.0, 4.0, 0.0], [1.0, 0.0, 4.0]])
+    N = np.array([[300, 200, 0], [200, 200, 0], [0, 0, 100]], dtype=float)
+    R, ident = topic_correlation_identified(Sigma, N, min_pair_support=10)
+    out = build_correlation_json(R, ident, N, part, [0, 1, 2])
+    (tmp_path / "correlation.json").write_text(json.dumps(out))
+    loaded = json.loads((tmp_path / "correlation.json").read_text())
+    assert loaded["R"][1][2] is None                # cross-foreground NA
+    assert loaded["block_labels"] == ["background", "A", "B"]
