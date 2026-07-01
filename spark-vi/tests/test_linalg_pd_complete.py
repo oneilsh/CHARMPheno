@@ -254,3 +254,17 @@ def test_min_frobenius_returns_observed_exactly_when_completable():
     out = min_frobenius_psd_completion(target, mask)
     assert _is_pd(out)
     np.testing.assert_allclose(out[mask], target[mask], atol=1e-6)
+
+
+def test_pd_complete_info_reports_sweeps_and_free_count():
+    """The optional `info` dict surfaces completion diagnostics (sweeps run, free
+    pairs, fallback) without changing the result — used for M-step perf logging."""
+    M = np.array([[1.0, 0.5, 0.5], [0.5, 1.0, 0.0], [0.5, 0.0, 1.0]])
+    obs = np.ones((3, 3), dtype=bool)
+    obs[1, 2] = obs[2, 1] = False            # one free off-diagonal pair (1,2)
+    info = {}
+    Sig = pd_complete(M, obs, info=info)
+    assert info["n_free"] == 1
+    assert 1 <= info["sweeps"] <= info["max_iter"]
+    assert info["fell_back"] is False        # completable block -> no Dykstra fallback
+    assert np.allclose(Sig, pd_complete(M, obs))   # info is diagnostic-only

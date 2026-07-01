@@ -31,6 +31,8 @@ References:
 """
 from __future__ import annotations
 
+import logging
+import time
 from functools import partial
 from typing import Any, Iterable
 
@@ -41,6 +43,8 @@ from scipy.special import digamma, gammaln
 from spark_vi.core.model import VIModel
 from spark_vi.models.topic._linalg import pd_complete, safe_inverse
 from spark_vi.models.topic.types import STMDocument
+
+_log = logging.getLogger(__name__)
 
 
 def _softmax(eta: np.ndarray) -> np.ndarray:
@@ -727,7 +731,20 @@ class OnlineSTM(VIModel):
         kept_diag = np.where(diag_supported, np.diag(mle), np.diag(Sigma))
         np.fill_diagonal(Sigma_target, kept_diag)
         Sigma_blended = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
-        new_Sigma = pd_complete(Sigma_blended, observed)
+        _pd_info: dict = {}
+        _pd_t0 = time.perf_counter()
+        new_Sigma = pd_complete(Sigma_blended, observed, info=_pd_info)
+        # M-step diagnostic (driver-side): pd_complete is the serial covariance-selection
+        # completion; its wall-time and sweep count confirm whether it dominates the
+        # per-iteration driver work while executors idle. Surfaces to the driver log
+        # via the same logging path as the runner's per-iter line.
+        _log.info(
+            "M-step pd_complete: %.3fs sweeps=%d/%d fell_back=%s n_free=%d K=%d",
+            time.perf_counter() - _pd_t0,
+            _pd_info.get("sweeps", -1), _pd_info.get("max_iter", -1),
+            _pd_info.get("fell_back"), _pd_info.get("n_free", -1),
+            new_Sigma.shape[0],
+        )
 
         return {
             "lambda": new_lam,

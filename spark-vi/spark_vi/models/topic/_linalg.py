@@ -107,6 +107,7 @@ def pd_complete(
     *,
     tol: float = 1e-10,
     max_iter: int = 1000,
+    info: dict | None = None,
 ) -> np.ndarray:
     """Maximum-determinant positive-definite completion (covariance selection).
 
@@ -163,6 +164,11 @@ def pd_complete(
 
     `tol` / `max_iter` are convergence controls (heuristic stopping rule, not from the
     literature): sweep until the max absolute change in Sigma drops below `tol`.
+
+    `info`, if given, is filled with diagnostic counters and does NOT affect the result:
+    `n_free` (free off-diagonal pairs completed), `sweeps` (IPS sweeps actually run,
+    <= `max_iter`), `max_iter`, and `fell_back` (True iff the Dykstra min-Frobenius
+    fallback was used because the observed block admits no PD completion).
     """
     mask = np.asarray(observed_mask, dtype=bool)
     mask = mask | mask.T                      # symmetrize defensively
@@ -179,8 +185,13 @@ def pd_complete(
     Sigma = np.where(mask, target, 0.0)
     np.fill_diagonal(Sigma, np.diag(target))
     Sigma = nearest_spd(Sigma).copy()
+    if info is not None:
+        info["n_free"] = len(free_pairs)
+        info["max_iter"] = max_iter
 
+    sweeps = 0
     for _ in range(max_iter):
+        sweeps += 1
         Sigma_prev = Sigma.copy()
         # Coordinate ascent: set each free entry to the value that zeroes its precision
         # (regression of i,j on the remaining topics) -> conditional independence.
@@ -201,6 +212,8 @@ def pd_complete(
         if np.max(np.abs(Sigma - Sigma_prev)) < tol:
             break
 
+    if info is not None:
+        info["sweeps"] = sweeps
     Sigma = 0.5 * (Sigma + Sigma.T)           # symmetrize the output
 
     # Completability check, decided AFTER convergence (not from the init). A genuinely
@@ -214,6 +227,8 @@ def pd_complete(
         np.linalg.cholesky(Sigma)
     except np.linalg.LinAlgError:
         is_pd = False
+    if info is not None:
+        info["fell_back"] = not (observed_ok and is_pd)
     if observed_ok and is_pd:
         return Sigma
     return min_frobenius_psd_completion(target, mask, tol=tol, max_iter=max_iter)
