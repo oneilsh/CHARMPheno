@@ -841,14 +841,25 @@ class OnlineSTM(VIModel):
             f"Σ_eig[min={eig_min:.3g} max={eig_max:.3g}], "
             f"Σλ_k[min={lam_row_sums.min():.3g} max={lam_row_sums.max():.3g}]"
         )
+        # Runaway attribution: name the highest-variance topic and its β coherence.
+        # A variance blowup (insight 0033) is a specific topic's; a LOW peak / HIGH
+        # effective support (β near the corpus marginal) marks it diffuse/unidentified
+        # — the init/identifiability signature — vs a coherent phenotype running away.
+        kmax = int(np.argmax(sigma_var))
+        brow = lam[kmax] / max(float(lam_row_sums[kmax]), 1e-300)
+        peak = float(brow.max())
+        ess = float(np.exp(-(brow * np.log(brow + 1e-300)).sum()))  # effective # terms
+        klabel = ("" if self.topic_blocks is None
+                  else " " + str(self.topic_blocks.topic_labels()[kmax]))
+        maxvar = f", maxvar[topic={kmax}{klabel} peak={peak:.4f} ess={ess:.0f}]"
         if self.topic_blocks is None:
-            return base
+            return base + maxvar
         part = self.topic_blocks
         bg_mass = float(lam_row_sums[part.background_indices()].sum())
         fg_bits = []
         for g in part.groups:
             fg_bits.append(f"{g}={float(lam_row_sums[part.block_indices(g)].sum()):.3g}")
-        return base + f", blocks[bg={bg_mass:.3g} " + " ".join(fg_bits) + "]"
+        return base + maxvar + f", blocks[bg={bg_mass:.3g} " + " ".join(fg_bits) + "]"
 
     def iteration_diagnostics(
         self, global_params: dict[str, np.ndarray],

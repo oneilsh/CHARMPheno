@@ -408,6 +408,26 @@ class TestIterationSummary:
         assert "Γ" in s or "Gamma" in s
         assert "Σ" in s or "Sigma" in s
 
+    def test_reports_max_variance_topic_identity_and_coherence(self):
+        """The per-iter line names the highest-variance topic (the runaway suspect)
+        plus its beta peak / effective support, so a variance blowup is attributable
+        to a specific topic and its identification quality (insight 0033)."""
+        m = OnlineSTM(K=4, vocab_size=12, P=1, random_seed=0)
+        gp = m.initialize_global(None)
+        Sig = np.eye(4)
+        Sig[2, 2] = 50.0                              # topic 2 is the runaway
+        gp["Sigma"] = Sig
+        lam = gp["lambda"].copy()
+        lam[2, :] = 1.0                               # topic 2 beta diffuse (uniform)
+        lam[0, :] = 1e-3; lam[0, 0] = 100.0           # topic 0 sharply peaked
+        gp["lambda"] = lam
+        s = m.iteration_summary(gp)
+        assert "maxvar[topic=2" in s                  # identifies the runaway topic
+        assert "peak=" in s and "ess=" in s           # reports beta coherence
+        # topic 2 is diffuse: peak ~1/12, effective support ~12 (all V terms)
+        assert "peak=0.08" in s                       # 1/12 ≈ 0.0833
+        assert "ess=12" in s
+
 
 class TestIterationDiagnostics:
     def test_returns_traceable_arrays(self):
