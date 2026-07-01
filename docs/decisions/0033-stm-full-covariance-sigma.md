@@ -75,6 +75,30 @@ well-conditioned by construction with no conditioning knob. `nearest_spd` remain
 the per-doc Laplace-Hessian repair and as the completion's internal PSD fallback. The
 description below is retained as the historical decision.
 
+**Amendment (2026-07-01) — `pd_complete` is a fit-time prior, not a conditioning
+cure; the conditioning diagnostics were a reporting artifact.** The correlation-
+reporting arc (insight 0032 Resolution) established that the four-experiment
+"conditioning pathology" this decision was written to fix was never really about
+fit health: the gated single-document E-step inverts only the marginal sub-block
+`Sigma[allowed, allowed]` via
+[`safe_inverse`](../../spark-vi/spark_vi/models/topic/stm.py#L779), so the
+cross-foreground block — the one whose completion Findings 3-6 chased — never
+enters any single-group document's inference at all. `pd_complete` is correctly
+retained (it is still what runs at the M-step, [stm.py:709-727](../../spark-vi/spark_vi/models/topic/stm.py#L709-L727)),
+but its role is properly understood as giving MULTI-GROUP (comorbid) documents a
+coherent cross-foreground prior at fit time — the Dempster (1972) zero-precision /
+conditional-independence completion of the unobserved cross-pairs — not as a device
+for lowering a full-matrix condition number that the fit does not depend on.
+Consequently the `sigma_cond` and `max_abs_offdiag_corr` full-matrix diagnostics
+(Consequences, below, and ADR 0030) were REMOVED (commit 35deb1e) as reporting
+artifacts rather than fit-health signals. Correlation reporting was changed to
+report honestly at the pair level instead: `topic_correlation_identified`
+([_linalg.py](../../spark-vi/spark_vi/models/topic/_linalg.py)) returns R with a
+support-keyed identified mask, NaN-ing any pair whose document support (`n_pairs`)
+falls below `min_pair_support` rather than summarizing the whole matrix with one
+scalar. See insight 0032's Resolution section for the full argument and the test
+that proves recovery is invariant to the full-matrix condition number.
+
 In the gated case, Σ entries are estimated from different document subsets and some
 cross-group cells are pinned to the prior, so the assembled matrix need not be
 positive definite — this is guaranteed to arise, not hypothetical. Background topics
@@ -197,11 +221,17 @@ correctly now; N-based provenance tracking is future work.
   rejected in that arc because Σ was not exported as a full matrix. Full Σ removes
   that blocker; dashboard wiring is a downstream arc (see
   [ADR 0028](0028-dashboard-conditioned-dirichlet-prior.md)).
-- **Σ diagnostic generalizes.** The `Σ[min…max]` trace (ADR 0030) is extended to:
-  eigenvalue range + condition number, and max |off-diagonal correlation|. See
-  [ADR 0030](0030-diagnostic-traces-persist-faithfully-no-size-cap.md). The
-  `imputed_fraction` diagnostic (share of entries below the min_pair_support floor)
-  is **deferred to the dashboard-surfacing arc** along with N_ij persistence.
+- **Σ diagnostic generalizes, then the full-matrix summary is removed (2026-07-01
+  amendment).** The `Σ[min…max]` trace (ADR 0030) was extended to eigenvalue range +
+  condition number and max |off-diagonal correlation|; see
+  [ADR 0030](0030-diagnostic-traces-persist-faithfully-no-size-cap.md). That
+  extension was subsequently REMOVED (commit 35deb1e) once insight 0032's
+  Resolution established it was a reporting artifact of a block the gated E-step
+  never inverts — see the decision 5 amendment above. Per-pair support (`n_pairs`)
+  IS persisted (superseding the "deferred" note previously here) and backs the
+  `topic_correlation_identified` support-keyed mask
+  ([_linalg.py](../../spark-vi/spark_vi/models/topic/_linalg.py)) used for
+  correlation reporting instead of a single scalar condition number.
 - **No backward compatibility.** Legacy diagonal checkpoints (K-vector `global_params["Sigma"]`)
   do not reload under the full-Σ model. Re-fit under full Σ is required. No
   promote-on-load shim.
@@ -242,6 +272,12 @@ correctly now; N-based provenance tracking is future work.
 - [gated-Σ PD-completion design](../superpowers/specs/2026-06-30-stm-gated-sigma-pd-completion-design.md)
   — supersedes decisions 5/7's gated cross-group handling (zero-pin → max-det PD
   completion) and removes decision 6's two regularizers.
+- [gated CTM correlation-reporting design](../superpowers/specs/2026-07-01-gated-ctm-correlation-reporting-design.md)
+  — the 2026-07-01 amendment to decision 5: reframes `pd_complete` as a fit-time
+  cross-foreground prior (not a conditioning cure), removes the full-matrix
+  `sigma_cond` / `max_abs_offdiag_corr` diagnostics as reporting artifacts, and
+  introduces the support-keyed `topic_correlation_identified` mask for honest
+  per-pair correlation reporting.
 - [ADR 0027](0027-lazy-block-updates-for-gated-svi-mstep.md) — per-block lazy update,
   generalized here to per-pair for cross-group covariance.
 - [ADR 0028](0028-dashboard-conditioned-dirichlet-prior.md) — parked alternative B

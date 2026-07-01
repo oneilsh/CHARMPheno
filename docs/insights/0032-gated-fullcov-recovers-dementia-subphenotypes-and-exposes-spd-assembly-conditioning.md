@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-30
 **Topic:** stm | full-covariance | gating | rare-phenotype | conditioning | diagnostics | phenotyping
-**Status:** Sub-phenotype recovery CONFIRMED (exp 0020/0021); gated-Σ conditioning RESOLVED-PENDING-0025. exp 0022 — IW alone can't fix the min-eigenvalue near-singularity (Finding 4); exp 0023 — diag-shrink fixes the min end but triggers a max-eigenvalue variance runaway (Finding 5); exp 0024 — both levers FAIL, runaway worsens to 6e8 (Finding 6). The four-lever failure is resolved by construction (see Resolution): the SPD assembly is reframed as covariance selection — zero the precision, not the covariance, on unobserved cross-pairs (the maximum-determinant PD completion), removing both post-M-step regularizers. Empirical confirmation pending exp 0025.
+**Status:** Sub-phenotype recovery CONFIRMED (exp 0020/0021); gated-Σ conditioning RESOLVED. exp 0022 — IW alone can't fix the min-eigenvalue near-singularity (Finding 4); exp 0023 — diag-shrink fixes the min end but triggers a max-eigenvalue variance runaway (Finding 5); exp 0024 — both levers FAIL, runaway worsens to 6e8 (Finding 6). `pd_complete` (Findings 4-6, Resolution) is the correct fit-time model for the unobserved cross-pairs, but the further Resolution below (superseding Findings 4-6's framing) establishes that the full-matrix condition number those findings chased was never a fit-health signal to begin with — it is a reporting artifact of the never-inverted cross-foreground block, and topic recovery is invariant to it (proven by test). Full-matrix conditioning diagnostics removed; correlation now reported per-pair via a support-keyed identified mask.
 
 The full-covariance Σ arc (ADR 0033) replaced STM's diagonal mean-field
 covariance with a genuine (K−1)×(K−1) matrix to model topic correlations. Two
@@ -307,6 +307,58 @@ trustworthy cancer↔dementia R sub-block at its CI-implied values. The Findings
 remain the empirical record of the failed-lever arc; this Resolution is the
 by-construction fix, with confirmation pending exp 0025.
 
+## Resolution (superseding Findings 4-6): conditioning was a reporting artifact
+
+Tasks 1-8 of the correlation-reporting arc (spec:
+[2026-07-01-gated-ctm-correlation-reporting-design.md](../superpowers/specs/2026-07-01-gated-ctm-correlation-reporting-design.md))
+close this thread with a different conclusion than the Resolution above anticipated.
+The `pd_complete` PD completion (Findings above; ADR 0033 decision 5) is the correct
+fit-time model for the unobserved cross-pairs, but the FULL-MATRIX condition number
+that Findings 3-6 chased was never a measure of fit health to begin with — it is a
+reporting artifact of computing an eigenvalue spread over the whole assembled Σ, a
+quantity the gated E-step never uses as a whole.
+
+The gated single-document E-step inverts only the MARGINAL sub-block over that
+document's own allowed topic set:
+[`Sigma_inv_allowed = safe_inverse(Sigma[np.ix_(allowed, allowed)])`](../../spark-vi/spark_vi/models/topic/stm.py#L779).
+For a document gated to the background+cancer allowed set, the dementia block (and
+the cancer↔dementia cross-foreground block) is never sliced into that inverse; for a
+background+dementia document, the reverse holds. The cross-foreground block —
+exactly the block whose completion drove the near-singular full-matrix eigenvalue in
+Finding 3 — never enters ANY single-group inference. It only exists at all so that
+comorbid (multi-group) documents get a coherent joint prior; documents that are not
+multi-group never see it.
+
+Consequently, topic recovery is invariant to the full-matrix condition number: it can
+range over orders of magnitude depending on how thin the cross-foreground support is
+without moving the recovered topics, because recovery is governed by the WITHIN-block
+marginal sub-blocks the E-step actually inverts, not by the full-matrix spectrum. This
+is proven directly by
+[test_recovery_invariant_to_full_sigma_condition_number](../../spark-vi/tests/test_stm_pd_completion_conditioning.py):
+across four seeded corpora, the assembled Σ's full-matrix condition number spans at
+least three orders of magnitude while planted-topic recovery stays within one topic of
+its best value across all of them.
+
+This does NOT mean conditioning never matters: the WITHIN-allowed-set marginal
+sub-block `Sigma[allowed, allowed]` is exactly what `safe_inverse` at the line above
+guards, and a genuinely ill-conditioned marginal (e.g. a thin within-group block with
+few documents of its own) would still degrade that document's E-step. What Findings
+3-6 mischaracterized was treating the FULL K×K matrix's condition number — which mixes
+in the never-inverted cross-foreground block — as a stand-in for that risk.
+
+The practical upshot: the `sigma_cond` / `max_abs_offdiag_corr` full-matrix
+diagnostics (Implication 4 below) were removed as a reporting artifact (commit
+35deb1e), and correlation reporting was changed to report honestly at the pair level
+instead of via a single scalar summary of the whole matrix — see ADR 0033 decision 5
+(amended) and the `topic_correlation_identified` support-keyed mask in
+[_linalg.py](../../spark-vi/spark_vi/models/topic/_linalg.py).
+
+Findings 4-6 remain the empirical record of the lever hunt (the inverse-Wishart prior
+and diagonal-shrink experiments really did behave as described, and the PD completion
+really is the right upstream fix for the cross-pair assembly). What is superseded is
+only their FRAMING of the full-matrix condition number as the thing to drive toward
+O(1e1-1e3) — that target was chasing a quantity the fit does not depend on.
+
 ## Implications
 
 1. **Full-Σ is validated as STM's covariance model** — well-conditioned on the
@@ -329,10 +381,14 @@ by-construction fix, with confirmation pending exp 0025.
    coupling exactly. NOTE: the non-gated full-Σ (exp 0020) is well-conditioned (cond
    13.3) precisely because it is the completion's fully-connected no-op special case;
    the same completion now applies to the gated path.
-4. **The new diagnostics earn their keep** — `Σ_eig[cond]` and
-   `max_abs_offdiag_corr` made an otherwise-silent near-singular assembly
-   immediately visible; without them the ill-conditioning would have surfaced
-   only as a confusing correlation readout.
+4. **SUPERSEDED, see Resolution above.** The full-matrix diagnostics
+   (`Σ_eig[cond]` and `max_abs_offdiag_corr`) did make the assembly's near-singular
+   direction visible during the lever hunt, but that direction lives in the
+   never-inverted cross-foreground block — the full-matrix condition number is a
+   reporting quantity, not a fit-health signal, and topic recovery is invariant to
+   it. The diagnostics were removed (commit 35deb1e); correlation is now reported
+   per-pair via the support-keyed identified mask instead of a single scalar
+   condition-number summary.
 
 ## Relationship to prior insights
 

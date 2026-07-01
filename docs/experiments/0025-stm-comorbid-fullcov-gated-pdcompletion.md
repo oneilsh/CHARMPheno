@@ -92,8 +92,38 @@ observed, an absent topic's variance lazy-kept at its current Σ[k,k]) and calls
 
 ## Hypothesis
 
-The gated multi-group Σ assembled by PD completion is well-conditioned at BOTH
-spectral ends, with no variance runaway and no loss of the exp 0021 science:
+**Amendment (2026-07-01, superseding the condition-number targets below):** the
+correlation-reporting arc (insight 0032 Resolution; ADR 0033 decision 5 amendment)
+established that the full-matrix condition number this experiment was designed to
+drive down is a reporting artifact — the gated E-step only ever inverts the
+WITHIN-allowed-set marginal sub-block
+([`safe_inverse(Sigma[allowed, allowed])`](../../spark-vi/spark_vi/models/topic/stm.py#L779)),
+never the full assembled matrix, so topic recovery does not depend on the
+full-matrix eigenvalue spread (proven by
+[test_recovery_invariant_to_full_sigma_condition_number](../../spark-vi/tests/test_stm_pd_completion_conditioning.py)).
+The `sigma_cond` / `max_abs_offdiag_corr` diagnostics targets (a)-(c) below were
+removed from the engine (commit 35deb1e) and are no longer meaningful success
+criteria. This experiment's success criteria are now:
+
+1. **Topic recovery holds** — dementia sub-phenotype split preserved (Alzheimer's/
+   amnestic vs vascular, per (e) below) and per-block topic quality comparable to
+   exp 0021, independent of whatever the assembled Σ's full-matrix condition number
+   turns out to be.
+2. **An honest correlation report** — `topic_correlation_identified`
+   ([_linalg.py](../../spark-vi/spark_vi/models/topic/_linalg.py)) returns the
+   within-group correlation blocks (background↔background, cancer↔cancer,
+   dementia↔dementia) as identified (sufficient document support), and the
+   cancer↔dementia cross-foreground block as NA (unidentified) under this cohort's
+   split-cohort representation, where comorbid documents contribute separate
+   per-group documents rather than one multi-membership document. Populating that
+   cross-foreground block with identified, trustworthy values requires the
+   multi-membership representation (Plan 2 of the correlation-reporting design), a
+   separate follow-on — it is explicitly out of scope for this run.
+
+The condition-number-focused hypothesis (a)-(f) below is retained as the historical
+record of what this experiment was originally designed to test; ELBO and
+per-block NPMI comparisons against exp 0021 remain useful diagnostics even though
+the condition-number targets themselves are no longer the bar for success.
 
 (a) **Condition number drops to O(1e1-1e3)** — orders of magnitude below the 3.28e7
     of exp 0021 (and the 2.23e7 / 3.07e8 of exps 0023/0024), close to the non-gated
@@ -113,12 +143,13 @@ spectral ends, with no variance runaway and no loss of the exp 0021 science:
     (exp 0021 topic 41) and topic with atherosclerosis + AFib + dementia (exp 0021
     topic 49); per-block NPMI near exp 0021 levels (background ≈ 0.19, cancer ≈ 0.18,
     dementia ≈ 0.17); all 50 topics resolved.
-(f) **Trustworthy cancer↔dementia R sub-block** — the (10×10) cancer-foreground ↔
-    dementia-foreground sub-block of the saved `correlation.npy` holds the
-    CI-implied values (correlated only through shared background comorbidity), not
-    polluted by a near-singular direction (exp 0021's inflated max_offdiag 0.80 was
-    almost entirely that pollution; the genuine couplings in this cohort are ≤ 0.18,
-    per exp 0023's decorrelated readout).
+(f) **HISTORICAL, superseded — "trustworthy cancer↔dementia R sub-block" via
+    condition number.** The original text called for the (10×10) cancer-foreground ↔
+    dementia-foreground sub-block of `correlation.npy` to hold small, CI-implied
+    values rather than a near-singular-polluted 0.80. Superseded because that
+    sub-block has no document support in the split-cohort representation this
+    experiment uses — under criterion 2 above, it is reported honestly as NA rather
+    than as a numeric value, whether well-conditioned or not.
 
 ## Method
 
@@ -151,23 +182,51 @@ for the completion.
 
 ## Decision
 
-- **cond O(1e1-1e3) + both eigenvalue ends controlled + no variance runaway + ELBO
-  ≈ −1.59e6 + dementia sub-phenotypes preserved + trustworthy cancer↔dementia R**
-  → the PD completion is validated; it resolves the four-experiment conditioning
-  failure by construction. Make the completion the gated-Σ default (it already is,
-  per the design), close the conditioning thread in insight 0032, and record the
-  resolution. The zero-pin + lever-tuning approach is retired.
-- **A topic STILL runs away (max eig blows up despite the completion)** → the runaway
-  was NOT caused by the cross-block zero-pin inconsistency. Re-examine via
-  `stm_sigma_diagnostic`: identify the runaway topic and whether its own variance
-  (Σ_ii data term) or a genuine well-supported direction is exploding, independent of
-  the completion. This would point back to the per-doc E-step / spectral-init basin
-  (insight 0029/0030), not the assembly.
-- **cond still high but driven by the MIN end (a floored eigendirection)** → the
-  observed part was not PD-completable and the Higham fallback engaged. Inspect which
-  observed block is internally inconsistent (likely a thin within-group block, not a
-  cross-block); this is the rare-disease non-PD-observed regime the fallback handles,
-  but a persistently floored min eigenvalue means the fallback compromise is large —
+**Amendment (2026-07-01):** the success criteria below are superseded by the
+Hypothesis amendment above. Full-matrix condition number is no longer the bar — the
+diagnostics it would have been read from were removed (commit 35deb1e) as reporting
+artifacts. The current success criteria are: (i) topic recovery — dementia
+sub-phenotype split and per-block topic quality hold, independent of the assembled
+Σ's full-matrix conditioning; and (ii) an honest correlation report — within-group
+blocks (background, cancer, dementia) identified via
+`topic_correlation_identified`, the cancer↔dementia cross-foreground block reported
+as NA under this experiment's split-cohort representation (populating it requires
+the multi-membership representation, Plan 2, a separate follow-on run, not this
+experiment).
+
+- **Topic recovery holds (dementia sub-phenotypes preserved, per-block topic
+  quality comparable to exp 0021) AND the correlation report is honest (within-group
+  blocks identified, cancer↔dementia NA under split-cohort)** → the PD completion
+  is validated as the fit-time cross-foreground prior; the correlation-reporting
+  amendment (support-keyed identified mask, no full-matrix condition-number gate) is
+  confirmed as the right reporting mechanism for this cohort's representation. Make
+  the completion the gated-Σ default (it already is, per the design), and treat exp
+  0025 as closing the conditioning thread in insight 0032 under the reporting-
+  artifact framing, not the original condition-number framing.
+- **Topic recovery regresses (dementia sub-phenotype split lost, or per-block topic
+  quality degrades relative to exp 0021)** → something other than the removed
+  full-matrix conditioning is at fault; re-examine the per-doc E-step / spectral-init
+  basin (insight 0029/0030) and the marginal sub-block `Sigma[allowed, allowed]`
+  actually inverted by `safe_inverse`, since that is what topic recovery depends on.
+- **The within-group correlation blocks come back unidentified (NA) despite adequate
+  document support** → an `n_pairs` / `min_pair_support` accounting bug in the
+  correlation export, not a Σ-assembly issue; inspect
+  `topic_correlation_identified`'s support mask against the per-block document
+  counts directly.
+
+The historical decision criteria this amendment supersedes (full-matrix condition
+number targets, variance-runaway checks, and a numeric cancer↔dementia R
+expectation) are retained below for the record:
+
+- cond O(1e1-1e3) + both eigenvalue ends controlled + no variance runaway + ELBO
+  ≈ −1.59e6 + dementia sub-phenotypes preserved + trustworthy cancer↔dementia R
+  → was to be read as: the PD completion resolves the four-experiment conditioning
+  failure by construction.
+- A topic STILL runs away (max eig blows up despite the completion) → was to be read
+  as: the runaway was not caused by the cross-block zero-pin inconsistency, pointing
+  back to the per-doc E-step / spectral-init basin (insight 0029/0030).
+- cond still high but driven by the MIN end (a floored eigendirection) → was to be
+  read as: the observed part was not PD-completable and the Higham fallback engaged;
   inspect the offending observed block's support.
 
 ## Run
