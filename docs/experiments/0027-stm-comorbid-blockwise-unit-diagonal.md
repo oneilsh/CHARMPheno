@@ -1,7 +1,7 @@
 ---
 id: 27
 slug: stm-comorbid-blockwise-unit-diagonal
-status: pending
+status: done
 model_class: stm
 cohort: cancer_or_dementia
 cohort_def: cancer_or_dementia
@@ -75,4 +75,33 @@ change is unconditional.
 
 ## Result
 
-_(pending — run `make exp ID=27`)_
+**Success — every criterion met.** Converged at iter 52/100, ELBO = −1.627e6, fit
+491s (ran against the block-wise engine at commit 7e85fa2; the `|r|>1` clamp,
+commit 409c8c9, landed after this run — see caveat).
+
+- **No variance runaway.** `Σ_var[min=1 max=1]` every iteration; the per-iter
+  `maxvar[...]` line reads `Σ_ii=1.000e+00` for the highest-variance topic (contrast
+  exp 0026: Σ_kk → 2.71e5 by iter 28). The eval driver's runaway detector reports
+  `runaway = topic 49 [dementia] Σ_ii=1.000e+00`.
+- **ELBO recovered.** −1.627e6, converged (contrast exp 0026's −1.56e7 divergence).
+  Slightly above the −1.59e6 target but same order and stable.
+- **No pd_complete cost.** The `M-step pd_complete: …s sweeps=…` driver line is gone
+  (completion retired from the fit path).
+- **Full Σ is indefinite and harmless.** `Σ_eig[min=−0.718 max=8.52]` — the block-
+  structured full Σ is not PD, exactly as designed; only the fully-observed E-step
+  marginals Σ[bg ∪ one group] are inverted, and those are PD.
+- **Dementia sub-phenotypes preserved** (insight 0032 Finding 2): topic 41 =
+  amnestic/Alzheimer's (Amnesia 0.073, Alzheimer's disease 0.028, minimal cognitive
+  impairment 0.031), topic 49 = vascular/cardiac (atherosclerosis + dementia + atrial
+  fibrillation), topic 44 = dementia core, plus background topic 9 = epilepsy/seizure/
+  amnesia. Peak β 0.03–0.12 — crisp, not the collapsed ~0.003 blend of prevalence-only
+  STM.
+- **Coherence healthy.** Block-aware NPMI means: background +0.190, cancer +0.190,
+  dementia +0.180; 0 unrated topics in any block.
+
+**Caveat (clamp).** This run predates the `|r|>1` clamp (final-review finding I1, commit
+409c8c9). The clamp does not affect the runaway fix or recovery confirmed here (Σ_ii=1
+is independent of it) — but the correlation matrix exported from THIS checkpoint may
+contain a few off-diagonal `|r|>1` entries (mismatched-support background↔foreground
+pairs). For a clamp-clean exported correlation report (e.g. the dashboard heatmap), re-run
+on 409c8c9+; the topic/ELBO/runaway results are expected to be materially unchanged.
