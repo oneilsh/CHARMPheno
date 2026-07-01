@@ -16,7 +16,7 @@ import numpy as np
 def stm_sigma_diagnostic(Sigma, labels=None, top_k: int = 8):
     """Per-topic eta-variance ranking + spectrum summary for an STM covariance.
 
-    Surfaces the gated-Σ conditioning state (insight 0032) at eval time, so a
+    Surfaces the largest-variance ("runaway") topics at eval time, so a
     saved model can be inspected via ``make eval-exp ID=N`` without a refit.
 
     Parameters
@@ -36,8 +36,10 @@ def stm_sigma_diagnostic(Sigma, labels=None, top_k: int = 8):
     -------
     str | None
         A multi-line report naming the largest-variance ("runaway") topics and
-        the eigen-spectrum (min/max eigenvalue, condition number, max
-        |off-diagonal correlation|), or ``None`` if Sigma is not a square matrix.
+        the eigenvalue range (min/max eigenvalue of Σ, a reporting statistic
+        only -- the fit only ever uses within-allowed-set marginal sub-blocks
+        of Σ, not the full assembled matrix), or ``None`` if Sigma is not a
+        square matrix.
     """
     if Sigma is None:
         return None
@@ -54,20 +56,15 @@ def stm_sigma_diagnostic(Sigma, labels=None, top_k: int = 8):
         lab = labels.get(k) if isinstance(labels, dict) else labels[k]
         return "background" if lab is None else str(lab)
 
-    # Symmetrized eigen-spectrum (Σ is symmetric up to fp; guard anyway).
+    # Symmetrized eigenvalue range (Σ is symmetric up to fp; guard anyway).
+    # Reporting statistic only: the full-matrix eigenvalue range spans
+    # cross-block entries that never enter the fit.
     w = np.linalg.eigvalsh(0.5 * (Sigma + Sigma.T))
     wmin, wmax = float(w[0]), float(w[-1])
-    cond = wmax / wmin if wmin > 0 else float("inf")
-    # max |off-diagonal correlation|
-    sd = np.sqrt(np.clip(diag, 1e-300, None))
-    R = Sigma / np.outer(sd, sd)
-    np.fill_diagonal(R, 0.0)
-    max_offdiag = float(np.abs(R).max()) if K > 1 else 0.0
 
     n = min(top_k, K)
     lines = [
-        f"Sigma spectrum: eig[min={wmin:.3g} max={wmax:.3g} cond={cond:.3g}] "
-        f"max|offdiag_corr|={max_offdiag:.3g}",
+        f"Sigma spectrum (reporting statistic): eig[min={wmin:.3g} max={wmax:.3g}]",
         f"top-{n} topics by eta-variance Sigma_ii:",
     ]
     for k in order[:n]:

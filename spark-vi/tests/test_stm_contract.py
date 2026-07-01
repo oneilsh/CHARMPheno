@@ -415,10 +415,20 @@ class TestIterationDiagnostics:
         assert d["Sigma"].shape == (3, 3)
 
     def test_full_sigma_diagnostic_keys_present_and_finite(self):
-        """All four full-Σ health-signal keys must be present and finite."""
+        """The genuine within-fit eigenvalue keys must be present and finite."""
         m = OnlineSTM(K=4, vocab_size=20, P=2, random_seed=1)
         gp = m.initialize_global(None)
         d = m.iteration_diagnostics(gp)
-        for key in ("sigma_eig_min", "sigma_eig_max", "sigma_cond", "max_abs_offdiag_corr"):
+        for key in ("sigma_eig_min", "sigma_eig_max"):
             assert key in d, f"missing diagnostic key: {key!r}"
             assert np.isfinite(d[key]), f"diagnostic key {key!r} is not finite: {d[key]}"
+
+    def test_iteration_diagnostics_drops_full_matrix_conditioning(self):
+        """sigma_cond and max_abs_offdiag_corr measure the FULL assembled Σ,
+        whose cross-block entries never enter the fit (only within-allowed-set
+        marginal sub-blocks do) -- a reporting artifact, not fit health."""
+        m = OnlineSTM(K=3, vocab_size=6, P=1, reference_topic=False)
+        gp = m.initialize_global(None)
+        d = m.iteration_diagnostics(gp)
+        assert "sigma_cond" not in d and "max_abs_offdiag_corr" not in d
+        assert "sigma_eig_min" in d and "sigma_eig_max" in d  # kept

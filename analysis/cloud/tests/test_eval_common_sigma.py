@@ -28,8 +28,10 @@ def test_identifies_runaway_topic_and_block():
     assert "[background]" in report
 
 
-def test_reports_spectrum_condition_and_offdiag():
-    # Strong 0<->2 correlation; known eigen-spectrum.
+def test_reports_eigen_spectrum_min_max_only():
+    # Known eigen-spectrum; the full-matrix condition number and max
+    # off-diagonal correlation are a reporting artifact (their cross-block
+    # entries never enter the fit) and are no longer surfaced here.
     Sigma = np.array([
         [4.0, 0.0, 3.0],
         [0.0, 1.0, 0.0],
@@ -37,10 +39,11 @@ def test_reports_spectrum_condition_and_offdiag():
     ])
     report = stm_sigma_diagnostic(Sigma, labels=None, top_k=3)
 
-    # max |off-diag corr| = 3 / sqrt(4*4) = 0.75
-    assert "0.75" in report
-    # eig of [[4,3],[3,4]] are 7 and 1, plus the isolated 1 -> cond = 7/1 = 7
-    assert "cond=7" in report
+    # eig of [[4,3],[3,4]] are 7 and 1, plus the isolated 1 -> min=1, max=7
+    assert "eig[min=1" in report
+    assert "max=7" in report
+    assert "cond=" not in report
+    assert "offdiag" not in report
 
 
 def test_returns_none_for_non_square_or_1d():

@@ -181,11 +181,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[driver]   doc_spec: {doc_spec_manifest}", flush=True)
         print(f"[driver]   frozen vocab: {len(vocab_list)} terms", flush=True)
 
-        # STM Σ conditioning diagnostic (insight 0032): identify the
-        # largest-η-variance topics + the eigen-spectrum from the saved model.
-        # No-op (None) for non-STM models or legacy diagonal-Σ K-vectors. This
-        # runs on eval-only too, so `make eval-exp ID=N` inspects a saved fit
-        # without a refit.
+        # STM Σ eta-variance diagnostic: identify the largest-η-variance
+        # topics from the saved model. The eigen-spectrum it also reports is a
+        # reporting statistic only (full-matrix Σ, not the within-fit
+        # marginal sub-blocks). No-op (None) for non-STM models or legacy
+        # diagonal-Σ K-vectors. This runs on eval-only too, so
+        # `make eval-exp ID=N` inspects a saved fit without a refit.
         sigma_report = stm_sigma_diagnostic(
             result.global_params.get("Sigma"), labels=fg_groups)
         if sigma_report is not None:
