@@ -84,7 +84,9 @@ def load_or_build_covariates(
     stale covariate set. Ignored for membership (it doesn't filter person_df
     here) -- it only participates in the cache key.
     """
-    from charmpheno.omop.covariates import build_patient_covariate_df
+    from charmpheno.omop.covariates import (
+        build_patient_covariate_df, log_categorical_level_counts,
+    )
     from _covariates_cache import compute_cache_key, try_load, save
 
     key: str | None = None
@@ -101,6 +103,15 @@ def load_or_build_covariates(
             print("[driver]   covariates-cache HIT", flush=True)
             return cached
         print("[driver]   covariates-cache MISS, building...", flush=True)
+
+    # Surface the raw decode source (gender_concept_id) + declared categorical
+    # levels before building, so a covariate that collapses to a single level
+    # and drops from the design matrix is loud in the log rather than silently
+    # absent (exp 0027/0028 gender_concept_id -> single sex level).
+    with _phase("covariate level diagnostics"):
+        log_categorical_level_counts(
+            person_df, ["gender_concept_id", *categorical_cols],
+        )
 
     with _phase("build patient covariates"):
         cov_df, spec, names = build_patient_covariate_df(

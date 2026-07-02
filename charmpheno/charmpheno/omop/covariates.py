@@ -68,6 +68,78 @@ def corpus_mean_proportions_gated_from_covariate_df(
     return corpus_mean_topic_proportions_gated_rdd(pair_rdd, Gamma, partition)
 
 
+def categorical_level_counts(
+    df: DataFrame,
+    cols: list[str],
+    *,
+    top_n: int = 30,
+) -> dict[str, list[tuple[Any, int]]]:
+    """Per-column value-count distribution for covariate-source diagnostics.
+
+    For each column in ``cols`` that is present in ``df``, returns a list of
+    ``(value, count)`` pairs sorted by count descending (ties broken by the
+    string form of the value, ascending) and truncated to ``top_n``. Columns
+    absent from ``df`` are silently skipped so callers can pass a superset
+    (e.g. a raw decode source that only some person tables carry).
+
+    Values are returned as-is because they are aggregate demographic levels
+    (concept ids, decoded strings), never row identifiers — the
+    hash-before-logging rule applies to document-level rows, not to grouped
+    aggregate counts.
+
+    Motivation: a declared categorical covariate that collapses to a single
+    level silently drops from the design matrix (formulaic emits zero
+    contrast columns for a constant factor). Logging both the raw
+    ``gender_concept_id`` and the decoded ``sex`` distribution makes the
+    collapse — and whether the cause is a wrong/absent source concept id —
+    visible at covariate-build time (exp 0027/0028).
+    """
+    present = [c for c in cols if c in df.columns]
+    out: dict[str, list[tuple[Any, int]]] = {}
+    for col in present:
+        pairs = [
+            (row[col], int(row["count"]))
+            for row in df.groupBy(col).count().collect()
+        ]
+        pairs.sort(key=lambda kv: (-kv[1], str(kv[0])))
+        out[col] = pairs[:top_n]
+    return out
+
+
+def single_level_categoricals(
+    counts: dict[str, list[tuple[Any, int]]],
+) -> list[str]:
+    """Names (in ``counts`` order) of columns with exactly one observed level.
+
+    A single-level categorical contributes no contrast columns to the design
+    matrix, so a declared covariate landing here has silently vanished.
+    """
+    return [col for col, pairs in counts.items() if len(pairs) == 1]
+
+
+def log_categorical_level_counts(
+    df: DataFrame,
+    cols: list[str],
+    *,
+    top_n: int = 30,
+    prefix: str = "[driver]",
+) -> dict[str, list[tuple[Any, int]]]:
+    """Print (and return) the categorical level distribution for ``cols``.
+
+    Marks any single-level column as dropped-from-design so a collapsed
+    covariate is loud in the driver log rather than silently missing.
+    """
+    counts = categorical_level_counts(df, cols, top_n=top_n)
+    print(f"{prefix}   categorical level distribution (top {top_n}):", flush=True)
+    collapsed = set(single_level_categoricals(counts))
+    for col, pairs in counts.items():
+        flag = "  <- SINGLE LEVEL, dropped from design matrix" if col in collapsed else ""
+        rendered = ", ".join(f"{val}:{cnt}" for val, cnt in pairs)
+        print(f"{prefix}     {col} ({len(pairs)} levels): {rendered}{flag}",
+              flush=True)
+    return counts
+
+
 def build_patient_covariate_df(
     person_df: DataFrame,
     *,
