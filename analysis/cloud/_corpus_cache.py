@@ -56,7 +56,10 @@ def compute_cache_key(
     cohort's documents changed, so corpora cached under the old windowing must
     miss and rebuild rather than load stale documents. (The cohort name is in
     the key but its code version is not, so a cohort-logic change is exactly the
-    case this version bump exists for.)
+    case this version bump exists for.) v=6 forces one rebuild so the new
+    pre-filter per-group doc-length diagnostic (to_bow_dataframe) runs on the
+    already-cached population_cancer corpus; the corpus content is otherwise
+    identical to v=5.
     """
     payload = {
         "source_table": source_table,
@@ -66,7 +69,7 @@ def compute_cache_key(
         "doc_spec": doc_spec_manifest,
         "cohort": cohort,
         "prior_obs_days": int(prior_obs_days),
-        "v": 5,
+        "v": 6,
     }
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]

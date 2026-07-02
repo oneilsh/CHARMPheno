@@ -115,6 +115,45 @@ def _build_count_vectorizer_model(
     )
 
 
+def doc_length_report(grouped: DataFrame, *, group_col: str) -> list[dict]:
+    """Per-group document-length distribution BEFORE the min_doc_length filter.
+
+    ``grouped`` must have a ``tokens`` array column (one row per document) and
+    ``group_col``. Returns one dict per group with the document count, token-count
+    percentiles (p10/25/50/75/90), and how many documents would survive at
+    candidate thresholds (>= 5/10/20/30 tokens) — the numbers needed to choose
+    ``min_doc_length`` from the real distribution rather than guessing, without
+    over-dropping light-coder documents.
+    """
+    thresholds = (5, 10, 20, 30)
+    dl = grouped.select(group_col, F.size("tokens").alias("n"))
+    rows = dl.groupBy(group_col).agg(
+        F.count(F.lit(1)).alias("n_docs"),
+        F.percentile_approx("n", [0.1, 0.25, 0.5, 0.75, 0.9]).alias("pct"),
+        *[F.sum((F.col("n") >= t).cast("long")).alias(f"ge{t}") for t in thresholds],
+    ).collect()
+    return [
+        {
+            "group": r[group_col],
+            "n_docs": int(r["n_docs"]),
+            "pct": [int(x) for x in (r["pct"] or [])],
+            **{f"ge{t}": int(r[f"ge{t}"]) for t in thresholds},
+        }
+        for r in rows
+    ]
+
+
+def _log_doc_length_report(report: list[dict]) -> None:
+    """Print a doc_length_report to the driver log (stdout)."""
+    for r in sorted(report, key=lambda x: str(x["group"])):
+        print(
+            f"[driver]   doc-length[{r['group']}]: n={r['n_docs']} "
+            f"pctiles(10/25/50/75/90)={r['pct']} "
+            f"kept>=5:{r['ge5']} >=10:{r['ge10']} >=20:{r['ge20']} >=30:{r['ge30']}",
+            flush=True,
+        )
+
+
 def to_bow_dataframe(
     df: DataFrame,
     *,
@@ -124,6 +163,7 @@ def to_bow_dataframe(
     min_df: int | float = 1,
     min_patient_count: int = 1,
     vocab: list[int] | None = None,
+    length_report_group_col: str | None = None,
 ) -> tuple[DataFrame, dict[int, int]]:
     """Group rows into bag-of-words documents and build a contiguous vocab map.
 
@@ -191,15 +231,33 @@ def to_bow_dataframe(
     # Group event rows into per-doc bags. We groupBy (doc_id) and pull
     # person_id along via F.first — per spec contract, person_id is constant
     # within a doc_id, so F.first is well-defined.
+    # Optionally carry a group column (e.g. source_cohort) through the group-by
+    # so we can report per-group doc-length distribution before filtering.
+    report_col = (
+        length_report_group_col
+        if length_report_group_col and length_report_group_col in events_with_doc_id.columns
+        else None
+    )
+    agg_exprs = [
+        F.first("person_id").alias("person_id"),
+        F.collect_list(token_col).alias("tokens"),
+    ]
+    if report_col:
+        agg_exprs.append(F.first(report_col).alias(report_col))
     grouped = (
         events_with_doc_id
         .withColumn(token_col, F.col(token_col).cast(StringType()))
         .groupBy("doc_id")
-        .agg(
-            F.first("person_id").alias("person_id"),
-            F.collect_list(token_col).alias("tokens"),
-        )
+        .agg(*agg_exprs)
     )
+
+    # Pre-filter per-group doc-length diagnostic: how many docs each candidate
+    # min_doc_length would keep, so the threshold can be chosen from the real
+    # distribution. Runs only on a corpus (re)build; then drop the group col so
+    # the vectorizer input is unchanged.
+    if report_col:
+        _log_doc_length_report(doc_length_report(grouped, group_col=report_col))
+        grouped = grouped.drop(report_col)
 
     # Apply min_doc_length filter on pre-vectorize token-list length. Doing
     # this before vocab construction means the vocab is built only on the

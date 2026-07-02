@@ -253,3 +253,30 @@ def test_vocab_and_min_patient_count_conflict_raises(spark):
     df = _tiny_omop_df(spark)
     with pytest.raises(ValueError, match="min_patient_count"):
         to_bow_dataframe(df, doc_spec=PatientDocSpec(), vocab=[4567, 8910], min_patient_count=20)
+
+
+def test_doc_length_report_percentiles_and_thresholds(spark):
+    """doc_length_report returns, per group, the doc count, token-count
+    percentiles, and how many docs clear each candidate min_doc_length — the
+    inputs needed to choose the threshold from the real distribution."""
+    from charmpheno.omop.topic_prep import doc_length_report
+
+    # grouped-like frame: one row per document, a `tokens` array + a group col.
+    rows = [
+        ("general", ["a"] * 3),
+        ("general", ["a"] * 8),
+        ("general", ["a"] * 25),
+        ("cancer", ["a"] * 40),
+        ("cancer", ["a"] * 50),
+    ]
+    grouped = spark.createDataFrame(rows, ["source_cohort", "tokens"])
+    rep = {r["group"]: r for r in doc_length_report(grouped, group_col="source_cohort")}
+
+    g = rep["general"]
+    assert g["n_docs"] == 3
+    assert g["pct"][2] == 8                    # median of {3, 8, 25}
+    assert (g["ge5"], g["ge10"], g["ge20"], g["ge30"]) == (2, 1, 1, 0)
+
+    c = rep["cancer"]
+    assert c["n_docs"] == 2
+    assert (c["ge20"], c["ge30"]) == (2, 2)

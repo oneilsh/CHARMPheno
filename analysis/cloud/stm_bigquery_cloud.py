@@ -281,6 +281,7 @@ def main() -> int:
                 min_patient_count=args.min_patient_count,
                 cache_uri=args.cache_uri, cohort=args.cohort,
                 prior_obs_days=args.prior_obs_days,
+                length_report_group_col=args.group_var,
             )
 
         # Build the gating partition first (None when --background-k/--foreground unset).

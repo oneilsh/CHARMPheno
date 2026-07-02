@@ -37,6 +37,7 @@ def load_or_build_corpus(
     cache_uri: str | None = None,
     cohort: str | None = None,
     prior_obs_days: int = 365,
+    length_report_group_col: str | None = None,
 ) -> tuple[DataFrame, dict[int, int], dict[int, str]]:
     """Return ``(bow_df, vocab_map, name_by_id)`` with optional cache short-circuit.
 
@@ -117,6 +118,7 @@ def load_or_build_corpus(
             vocab_size=vocab_size,
             min_df=min_df,
             min_patient_count=min_patient_count,
+            length_report_group_col=length_report_group_col,
         )
 
     with _phase("concept-name lookup"):
