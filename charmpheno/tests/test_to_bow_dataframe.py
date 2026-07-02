@@ -280,3 +280,28 @@ def test_doc_length_report_percentiles_and_thresholds(spark):
     c = rep["cancer"]
     assert c["n_docs"] == 2
     assert (c["ge20"], c["ge30"]) == (2, 2)
+
+
+def test_group_top_codes_ranks_by_document_frequency(spark):
+    """group_top_codes returns, per group, the most frequent codes by DOCUMENT
+    frequency (a code counts once per doc), so a within-doc repeat can't inflate
+    it — the content peek for 'what is each cohort's docs made of'."""
+    from charmpheno.omop.topic_prep import group_top_codes
+
+    # (doc_id, group, concept_name); doc 1 repeats "wellness" within-doc.
+    rows = [
+        ("d1", "general", "wellness"),
+        ("d1", "general", "wellness"),   # repeat in same doc -> counts once
+        ("d1", "general", "hypertension"),
+        ("d2", "general", "wellness"),
+        ("d3", "cancer", "chemotherapy"),
+        ("d3", "cancer", "nausea"),
+    ]
+    ev = spark.createDataFrame(rows, ["doc_id", "source_cohort", "concept_name"])
+    top = group_top_codes(ev, group_col="source_cohort", top_n=5)
+
+    # "wellness" appears in 2 general docs (d1, d2); "hypertension" in 1.
+    gen = dict(top["general"])
+    assert gen["wellness"] == 2 and gen["hypertension"] == 1
+    assert top["general"][0][0] == "wellness"          # ranked first
+    assert {name for name, _ in top["cancer"]} == {"chemotherapy", "nausea"}

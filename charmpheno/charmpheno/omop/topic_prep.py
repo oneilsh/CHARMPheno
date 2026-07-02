@@ -154,6 +154,47 @@ def _log_doc_length_report(report: list[dict]) -> None:
         )
 
 
+def group_top_codes(
+    events_with_doc_id: DataFrame,
+    *,
+    group_col: str,
+    name_col: str = "concept_name",
+    top_n: int = 15,
+) -> dict:
+    """Top codes per group by document frequency — a content peek at what each
+    cohort's documents are actually made of.
+
+    Answers questions like "is the light-coder 'general' arm dominated by routine
+    checkup/screening codes, or by varied real conditions?" without fitting a
+    model. Counts each code once per document (distinct doc_id) so a code that
+    repeats within a doc isn't over-weighted. Returns {group: [(name, doc_freq),
+    ... top_n]}.
+    """
+    from pyspark.sql import Window
+
+    dd = events_with_doc_id.select("doc_id", group_col, name_col).distinct()
+    counts = dd.groupBy(group_col, name_col).agg(F.count(F.lit(1)).alias("doc_freq"))
+    ranked = counts.withColumn(
+        "rn",
+        F.row_number().over(
+            Window.partitionBy(group_col).orderBy(
+                F.col("doc_freq").desc(), F.col(name_col).asc(),
+            )
+        ),
+    ).where(F.col("rn") <= top_n)
+    out: dict = {}
+    for r in ranked.collect():
+        out.setdefault(r[group_col], []).append((r[name_col], int(r["doc_freq"])))
+    return out
+
+
+def _log_group_top_codes(top: dict) -> None:
+    """Print group_top_codes to the driver log (stdout)."""
+    for g in sorted(top, key=str):
+        codes = ", ".join(f"{name}({n})" for name, n in top[g])
+        print(f"[driver]   top-codes[{g}]: {codes}", flush=True)
+
+
 def to_bow_dataframe(
     df: DataFrame,
     *,
@@ -257,6 +298,11 @@ def to_bow_dataframe(
     # the vectorizer input is unchanged.
     if report_col:
         _log_doc_length_report(doc_length_report(grouped, group_col=report_col))
+        # Content peek: top codes per group (needs concept names on the frame).
+        if "concept_name" in events_with_doc_id.columns:
+            _log_group_top_codes(
+                group_top_codes(events_with_doc_id, group_col=report_col)
+            )
         grouped = grouped.drop(report_col)
 
     # Apply min_doc_length filter on pre-vectorize token-list length. Doing
