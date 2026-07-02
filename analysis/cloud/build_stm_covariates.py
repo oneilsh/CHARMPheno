@@ -53,6 +53,10 @@ def parse_args() -> argparse.Namespace:
                         "ungated fit.")
     p.add_argument("--force", action="store_true",
                    help="Delete the cached covariate dir before building.")
+    p.add_argument("--known-sex-only", action="store_true",
+                   help="Keep only persons with a decoded binary sex M/F, "
+                        "dropping Unknown/other. Must match the fit driver so "
+                        "the shared covariate sidecar covers the same persons.")
     return p.parse_args()
 
 
@@ -128,6 +132,7 @@ def main() -> int:
                     billing_project=args.billing,
                     person_sample_mod=args.person_mod,
                     cohort=args.cohort,
+                    known_sex_only=args.known_sex_only,
                 )
                 person_df = person_df.join(labels, on="person_id", how="inner")
         else:
@@ -137,6 +142,7 @@ def main() -> int:
                     billing_project=args.billing,
                     person_sample_mod=args.person_mod,
                     cohort=args.cohort,
+                    known_sex_only=args.known_sex_only,
                 )
 
         cov_df, _, names = load_or_build_covariates(

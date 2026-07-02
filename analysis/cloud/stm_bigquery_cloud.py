@@ -256,6 +256,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Gating: document column whose value selects a doc's "
                         "foreground block (default: source_cohort). Must NOT also "
                         "appear in --covariate-formula.")
+    p.add_argument("--known-sex-only", action="store_true",
+                   help="Restrict the covariate person set (and thus the fit "
+                        "corpus, via the inner corpus⋈covariate join) to "
+                        "persons with a decoded binary sex M/F, dropping "
+                        "Unknown/other.")
     return p.parse_args(argv)
 
 
@@ -366,6 +371,7 @@ def main() -> int:
                 billing_project=args.billing,
                 person_sample_mod=args.person_mod,
                 cohort=args.cohort,
+                known_sex_only=args.known_sex_only,
             )
             if need_source_cohort:
                 person_df = person_df.join(labels, on="person_id", how="inner")

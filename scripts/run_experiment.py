@@ -452,6 +452,8 @@ def build_covariates_args(effective: dict) -> list[str]:
     # background_k + foreground being set.
     if effective.get("background_k") is not None and effective.get("foreground"):
         args += ["--group-var", str(effective.get("group_var", "source_cohort"))]
+    if effective.get("known_sex_only"):
+        args += ["--known-sex-only"]
     return args
 
 
@@ -508,6 +510,8 @@ def build_stm_args(
         hardening.extend(["--spectral-min-doc-freq", str(effective["spectral_min_doc_freq"])])
     if effective.get("min_pair_support") is not None:
         hardening.extend(["--min-pair-support", str(effective["min_pair_support"])])
+    if effective.get("known_sex_only"):
+        hardening.append("--known-sex-only")
     return common + [
         "--covariate-formula", str(effective["covariate_formula"]),
         "--categorical-cols", ",".join(effective.get("categorical_cols", [])),

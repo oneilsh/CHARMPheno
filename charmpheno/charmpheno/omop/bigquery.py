@@ -233,6 +233,19 @@ def decode_sex_from_name(gender_concept_name_col):
     )
 
 
+def filter_known_sex(person_df: "DataFrame") -> "DataFrame":
+    """Keep only rows with a decoded binary sex ('M' or 'F').
+
+    Drops persons whose sex decoded to 'Unknown' (OMOP Unknown/Other, null, or
+    a non-standard/aggregated concept) so the analysis population is restricted
+    to those with a known Male/Female sex-at-birth. Operates on the decoded
+    `sex` column produced by decode_sex_from_name.
+    """
+    from pyspark.sql import functions as F
+
+    return person_df.where(F.col("sex").isin("M", "F"))
+
+
 def load_person_table(
     *,
     spark,
@@ -240,6 +253,7 @@ def load_person_table(
     billing_project: str,
     person_sample_mod: int | None = None,
     cohort: str | None = None,
+    known_sex_only: bool = False,
 ) -> "DataFrame":
     """Load a per-person covariate source table from BigQuery.
 
@@ -264,6 +278,10 @@ def load_person_table(
             restricted the person population; kept for API consistency.
             Pass None unless you want an informational cohort label column
             (which is a literal column, not a filter).
+        known_sex_only: when True, keep only persons whose decoded sex is
+            'M' or 'F', dropping 'Unknown'/other (see filter_known_sex). The
+            fit corpus is `bow ⋈ covariates` (inner), so restricting the
+            covariate person set here restricts the fit population.
 
     Returns:
         Spark DataFrame with columns: person_id (long), year_of_birth
@@ -324,4 +342,7 @@ def load_person_table(
     # matching the nominal AoU CDR snapshot used at time of writing.
     df = df.withColumn("age", (F.lit(2025) - F.col("year_of_birth")).cast("double"))
     df = df.withColumn("sex", decode_sex_from_name(F.col("sex_concept_name")))
+
+    if known_sex_only:
+        df = filter_known_sex(df)
     return df

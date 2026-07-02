@@ -12,6 +12,7 @@ doc_min_length: 10
 covariate_formula: "~ C(sex) + age"
 categorical_cols: [sex]
 continuous_cols: [age]
+known_sex_only: true
 random_seed: 42
 cache_uri: hdfs:///user/dataproc/charm/covariates_cache
 K: 60
@@ -84,13 +85,20 @@ The slower schedule (smaller minibatches + larger `tau0` + twice the iterations)
 is a deliberately gentle fit for the larger, more heterogeneous whole-population
 corpus.
 
-## Gender covariate
+## Sex covariate
 
-Exercises the `~ C(sex)` term on a fresh covariate cache. `decode_sex`
-([bigquery.py](../../charmpheno/charmpheno/omop/bigquery.py)) maps
-8507→M / 8532→F / else→Unknown; a prior comorbid bundle showed sex collapsed to
-F-only from a stale pre-fix covariate cache, so verify the fit's covariate
-diagnostics report a realistic M/F/Unknown split (not F=100%).
+Exercises the `~ C(sex)` term. Sex is read from
+`person.sex_at_birth_concept_id` (standard OMOP 8507 Male / 8532 Female) and
+decoded by concept name via `decode_sex_from_name`
+([bigquery.py](../../charmpheno/charmpheno/omop/bigquery.py)) — NOT from
+`gender_concept_id`, which in the AoU CDR holds *gender identity* (custom
+concepts 45878463 / 45880669 / 1585841 / 2000000002 / ...), so an id-based
+decoder collapsed every person to a single 'Unknown' level and dropped C(sex)
+(the exp 0027 symptom; surfaced here by the covariate level diagnostic).
+`known_sex_only: true` restricts the fit to persons with a decoded binary
+sex M/F (dropping Unknown/other) via the inner corpus⋈covariate join. Verify
+the `covariate level diagnostics` phase reports `sex_at_birth_concept_id`
+{8507, 8532, ...} and a 2-level `sex` {M, F}.
 
 ## Success criteria
 

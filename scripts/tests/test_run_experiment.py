@@ -790,6 +790,28 @@ class TestModelClassDispatch:
         assert "--spectral-d" not in args
         assert "--spectral-min-doc-freq" not in args
 
+    def test_build_stm_args_known_sex_only_emitted_when_set(
+            self, tmp_path, monkeypatch):
+        """known_sex_only: true -> --known-sex-only; absent -> omitted."""
+        effective = self._base_stm_effective(monkeypatch)
+        effective["known_sex_only"] = True
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert "--known-sex-only" in args
+
+        effective2 = self._base_stm_effective(monkeypatch)
+        args2 = rx.build_stm_args(effective2, str(tmp_path / "out"))
+        assert "--known-sex-only" not in args2
+
+    def test_build_covariates_args_known_sex_only_emitted_when_set(
+            self, tmp_path, monkeypatch):
+        """known_sex_only flows to the covariate-cache builder too, so the
+        shared sidecar covers the same M/F person set as the fit."""
+        effective = self._base_stm_effective(monkeypatch)
+        effective["cache_uri"] = "hdfs:///cov"
+        effective["known_sex_only"] = True
+        args = rx.build_covariates_args(effective)
+        assert "--known-sex-only" in args
+
 
 def test_noise_patterns_keep_driver_lines():
     lines = [

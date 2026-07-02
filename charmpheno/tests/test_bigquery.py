@@ -71,6 +71,17 @@ def test_decode_sex_from_name_is_vocabulary_agnostic(spark):
     assert got[" female "] == "F"
 
 
+def test_filter_known_sex_keeps_only_binary_sex(spark):
+    """filter_known_sex drops rows whose decoded sex is not M/F (Unknown,
+    Other, null), leaving only the binary-sex analysis population."""
+    from charmpheno.omop.bigquery import filter_known_sex
+
+    rows = [(1, "M"), (2, "F"), (3, "Unknown"), (4, "M"), (5, None), (6, "F")]
+    df = spark.createDataFrame(rows, ["person_id", "sex"])
+    kept = {r["person_id"] for r in filter_known_sex(df).collect()}
+    assert kept == {1, 2, 4, 6}
+
+
 def test_rejects_malformed_cdr_dataset(spark):
     with pytest.raises(ValueError, match="<project>.<dataset>"):
         load_omop_bigquery(

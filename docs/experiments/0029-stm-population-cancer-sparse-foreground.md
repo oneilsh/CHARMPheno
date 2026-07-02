@@ -12,6 +12,7 @@ doc_min_length: 5
 covariate_formula: "~ C(sex) + age"
 categorical_cols: [sex]
 continuous_cols: [age]
+known_sex_only: true
 random_seed: 42
 cache_uri: hdfs:///user/dataproc/charm/covariates_cache
 K: 70
