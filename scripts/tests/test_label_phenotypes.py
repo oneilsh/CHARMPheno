@@ -154,6 +154,17 @@ def test_system_prompt_includes_alpha_section_when_present():
     assert "α distribution across this fit" in prompt
 
 
+def test_system_prompt_dead_criterion_has_coherence_override():
+    """A low-KL / flat topic whose top-N is thematically coherent (a recognizable
+    clinical syndrome) must not be condemned to `dead` on flatness alone — flatness
+    depresses KL and NPMI. Both model regimes (alpha / corpus-mass) carry the
+    override so t48-style diffuse-but-real phenotypes survive."""
+    for has_alpha in (True, False):
+        prompt = lp._build_system_prompt(**_system_prompt_kwargs(has_alpha=has_alpha))
+        assert "coherence override" in prompt.lower()
+        assert "diffuse" in prompt.lower()
+
+
 def test_system_prompt_omits_alpha_section_when_absent():
     """STM path: no alpha-distribution block, and the background-vs-dead
     disambiguation is phrased in terms of corpus mass share instead."""

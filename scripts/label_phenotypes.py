@@ -311,11 +311,20 @@ marginal — now check α to disambiguate:
 `background`. This is the universal-symptom or chronic-comorbidity \
 catch-all that absorbs real corpus mass (every doc loads on it). \
 Stop.
-   - **α at or near floor** → `dead` (case a — low-KL-low-α, unused \
-slot whose top-N is η-smoothing noise). Stop.
-The disambiguator is purely α-magnitude. KL ≤ threshold + high α = \
-real mass-bearing baseline (background); KL ≤ threshold + floor α = \
-no mass and no signal (dead)."""
+   - **α at or near floor** → likely `dead` (case a — low-KL-low-α, unused \
+slot whose top-N is η-smoothing noise), BUT apply the coherence override \
+first. Stop only if it fails.
+   - **Coherence override (before finalizing `dead`):** look at the top-N, \
+*especially by lift*. If it names a recognizable clinical syndrome — a \
+coherent theme, e.g. a specific disease with its complications — prefer a \
+diffuse `phenotype` over `dead`, even at low KL and floor α. A flat, low-peak \
+topic can still be a real but *diffuse* phenotype; flatness itself depresses \
+both KL and NPMI, so do not let low KL or low NPMI alone condemn a \
+thematically coherent topic. Reserve `dead` for low-KL topics whose top-N has \
+*no* coherent clinical theme.
+The disambiguator is α-magnitude, then coherence. KL ≤ threshold + high α = \
+background; KL ≤ threshold + floor α + incoherent top-N = dead; KL ≤ \
+threshold + coherent top-N = diffuse phenotype."""
     else:
         mass_signal_section = """\
 **Topic mass (`usage`) — supporting signal only.** This model has no \
@@ -356,11 +365,20 @@ marginal — now check corpus mass (`usage`) to disambiguate:
 `background`. This is the universal-symptom or chronic-comorbidity \
 catch-all that absorbs real corpus mass (every doc loads on it). \
 Stop.
-   - **Near-zero corpus mass** → `dead` (case a — low-KL-low-mass, \
-unused slot whose top-N is η-smoothing noise). Stop.
-The disambiguator is corpus mass share. KL ≤ threshold + high mass = \
-real mass-bearing baseline (background); KL ≤ threshold + near-zero \
-mass = no mass and no signal (dead)."""
+   - **Near-zero corpus mass** → likely `dead` (case a — low-KL-low-mass, \
+unused slot whose top-N is η-smoothing noise), BUT apply the coherence \
+override first. Stop only if it fails.
+   - **Coherence override (before finalizing `dead`):** look at the top-N, \
+*especially by lift*. If it names a recognizable clinical syndrome — a \
+coherent theme, e.g. a specific disease with its complications — prefer a \
+diffuse `phenotype` over `dead`, even at low KL and modest mass. A flat, \
+low-peak topic can still be a real but *diffuse* phenotype; flatness itself \
+depresses both KL and NPMI, so do not let low KL or low NPMI alone condemn a \
+thematically coherent topic. Reserve `dead` for low-KL topics whose top-N has \
+*no* coherent clinical theme.
+The disambiguator is corpus mass share, then coherence. KL ≤ threshold + high \
+mass = background; KL ≤ threshold + near-zero mass + incoherent top-N = dead; \
+KL ≤ threshold + coherent top-N = diffuse phenotype."""
 
     return f"""\
 You are a clinical informatics expert interpreting learned topics from \
