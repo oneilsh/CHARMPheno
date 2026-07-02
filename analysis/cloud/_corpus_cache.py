@@ -50,7 +50,13 @@ def compute_cache_key(
     cohort key so cohort-filtered corpora can't collide with their full-
     corpus equivalents. v=4 added prior_obs_days: the cohort's prior-
     observation lookback changes membership (a 0-day lookback admits prevalent
-    cases a 365-day lookback excludes), so the two must not alias.
+    cases a 365-day lookback excludes), so the two must not alias. v=5 was
+    bumped when the population_cancer general arm switched its background window
+    from a random calendar year to a random condition-era-anchored year: the
+    cohort's documents changed, so corpora cached under the old windowing must
+    miss and rebuild rather than load stale documents. (The cohort name is in
+    the key but its code version is not, so a cohort-logic change is exactly the
+    case this version bump exists for.)
     """
     payload = {
         "source_table": source_table,
@@ -60,7 +66,7 @@ def compute_cache_key(
         "doc_spec": doc_spec_manifest,
         "cohort": cohort,
         "prior_obs_days": int(prior_obs_days),
-        "v": 4,
+        "v": 5,
     }
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
