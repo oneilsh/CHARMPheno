@@ -45,3 +45,15 @@ export function samplePoisson(lambda: number, rng: () => number): number {
   do { k++; p *= rng() } while (p > L)
   return k - 1
 }
+
+// Standard-normal draw via the Marsaglia polar method (rejection form of
+// Box-Muller). Reuses the shared uniform RNG so seeded runs stay reproducible.
+export function sampleStandardNormal(rng: () => number): number {
+  let u: number, v: number, s: number
+  do {
+    u = 2 * rng() - 1
+    v = 2 * rng() - 1
+    s = u * u + v * v
+  } while (s >= 1 || s === 0)
+  return u * Math.sqrt((-2 * Math.log(s)) / s)
+}
