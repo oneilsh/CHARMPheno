@@ -230,3 +230,73 @@ def test_stm_bundle_ignores_alpha_equivalent(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "no per-topic alpha" in out       # took the STM (no-alpha) path
     assert "alpha:" not in out               # per-topic message dropped the line
+
+
+# --- covariate-effect context (prevalence insights for the annotator) -------
+
+_COV_EFFECTS = [
+    {"covariate": "Intercept", "per_topic": [0.0, -1.5, 0.3, 0.1]},
+    {"covariate": "C(sex)[T.M]", "per_topic": [0.0, 2.0, 0.0, -2.0]},
+    {"covariate": "age", "per_topic": [0.0, 0.01, 0.02, 0.03]},
+]
+_COV_SCHEMA = {
+    "controls": [
+        {"name": "age", "type": "continuous", "range": [37, 85], "default": 70},
+        {"name": "sex", "type": "categorical", "reference": "F", "levels": ["F", "M"]},
+    ],
+}
+
+
+def test_build_covariate_context_excludes_intercept_and_reference():
+    ctx = lp.build_covariate_context(_COV_EFFECTS, _COV_SCHEMA, reference_topic=0)
+    cols = [c["column"] for c in ctx["covariates"]]
+    assert "Intercept" not in cols          # baseline, not a covariate relationship
+    assert cols == ["C(sex)[T.M]", "age"]
+    sex = ctx["covariates"][0]
+    # Reference topic (0) excluded from the distribution and never annotated.
+    assert sex["percentiles"][0] is None
+    # Distribution is over the non-reference topics {2.0, 0.0, -2.0}.
+    assert sex["distribution"]["median"] == 0.0
+    assert sex["distribution"]["min"] == -2.0
+    assert sex["distribution"]["max"] == 2.0
+
+
+def test_build_covariate_context_percentiles_signed_by_position():
+    ctx = lp.build_covariate_context(_COV_EFFECTS, _COV_SCHEMA, reference_topic=0)
+    pct = ctx["covariates"][0]["percentiles"]
+    # topic 1 has the max male effect -> high percentile; topic 3 the min -> low.
+    assert pct[1] > pct[2] > pct[3]
+    assert pct[1] > 80 and pct[3] < 20
+
+
+def test_build_covariate_context_none_when_intercept_only():
+    intercept_only = [{"covariate": "Intercept", "per_topic": [0.0, 0.3, 0.1, 0.2]}]
+    assert lp.build_covariate_context(intercept_only, _COV_SCHEMA, reference_topic=0) is None
+
+
+def test_build_covariate_context_display_parsing():
+    ctx = lp.build_covariate_context(_COV_EFFECTS, _COV_SCHEMA, reference_topic=0)
+    sex, age = ctx["covariates"]
+    assert sex["kind"] == "categorical"
+    assert "sex" in sex["display"].lower() and "M" in sex["display"] and "F" in sex["display"]
+    assert age["kind"] == "continuous"
+    assert "age" in age["display"].lower()
+
+
+def test_covariate_lines_for_topic_reference_empty_nonref_populated():
+    ctx = lp.build_covariate_context(_COV_EFFECTS, _COV_SCHEMA, reference_topic=0)
+    assert lp.covariate_lines_for_topic(ctx, 0) == []      # reference topic: no lines
+    lines = lp.covariate_lines_for_topic(ctx, 1)
+    blob = "\n".join(lines)
+    assert "sex" in blob.lower()
+    assert "percentile" in blob.lower()                    # position-in-distribution shown
+    assert "median" in blob.lower()                        # distribution context shown
+    assert lp.covariate_lines_for_topic(None, 1) == []     # no context -> no lines
+
+
+def test_covariate_guidance_block_states_caveats():
+    ctx = lp.build_covariate_context(_COV_EFFECTS, _COV_SCHEMA, reference_topic=0)
+    g = lp.build_covariate_guidance_block(ctx).lower()
+    assert "logit" in g or "log-odds" in g                 # scale is named
+    assert "reference" in g                                 # reference-relative
+    assert "percentile" in g or "distribution" in g        # judge relative to spread

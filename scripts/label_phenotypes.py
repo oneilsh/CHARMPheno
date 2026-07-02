@@ -61,6 +61,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -227,6 +228,7 @@ def _build_system_prompt(
     alpha_separates_well: bool | None = None,
     cohort: dict[str, str] | None = None,
     gating: dict | None = None,
+    covariate_context: dict | None = None,
 ) -> str:
     # All substitutions happen once per run so the resulting string is
     # byte-identical across topics (enabling prompt caching).
@@ -242,6 +244,7 @@ def _build_system_prompt(
     gating_block = _build_gating_context_block(
         (gating or {}).get("group_var"), (gating or {}).get("groups"),
     )
+    covariate_block = build_covariate_guidance_block(covariate_context)
     supporting_signal_name = "α" if has_alpha else "corpus mass"
     low_mass_phrase = "α near floor" if has_alpha else "near-zero corpus mass"
     low_usage_real_clause = (
@@ -391,7 +394,7 @@ The current model is trained over patient conditions only (no drugs, \
 procedures, measurements, or labs); your interpretations should reflect \
 that — describe conditions and their clinical relationships, not \
 treatments or workups.
-{cohort_block}{gating_block}
+{cohort_block}{gating_block}{covariate_block}
 
 ## Two rankings
 
@@ -722,6 +725,7 @@ def _build_agent(
     alpha_separates_well: bool,
     cohort: dict[str, str] | None = None,
     gating: dict | None = None,
+    covariate_context: dict | None = None,
 ):
     """Build a pydantic-ai Agent for the given model string with the API
     key passed in explicitly (not via env), structured output, and the
@@ -781,6 +785,7 @@ def _build_agent(
         has_alpha=has_alpha,
         cohort=cohort,
         gating=gating,
+        covariate_context=covariate_context,
     )
     if has_alpha:
         sorted_a = sorted(alpha_arr)
@@ -1062,6 +1067,175 @@ def _format_code_list(codes: list[dict]) -> list[str]:
     return lines
 
 
+def _percentile(sorted_xs: list[float], q: float) -> float:
+    """Linear-interpolated percentile of a pre-sorted list (q in [0, 100])."""
+    n = len(sorted_xs)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return sorted_xs[0]
+    pos = (n - 1) * (q / 100.0)
+    lo = math.floor(pos)
+    hi = math.ceil(pos)
+    if lo == hi:
+        return sorted_xs[int(lo)]
+    frac = pos - lo
+    return sorted_xs[int(lo)] * (1.0 - frac) + sorted_xs[int(hi)] * frac
+
+
+def _percentile_rank(sorted_xs: list[float], x: float) -> float:
+    """Percentile rank of x within sorted_xs (midpoint method, in [0, 100]).
+
+    (#strictly-less + 0.5·#equal) / n · 100 — so the median maps near 50 and
+    the extremes near 0/100, giving the LLM a distribution-relative position
+    (a large raw effect near the median reads as typical, not notable).
+    """
+    n = len(sorted_xs)
+    if n == 0:
+        return 50.0
+    less = sum(1 for v in sorted_xs if v < x)
+    equal = sum(1 for v in sorted_xs if v == x)
+    return 100.0 * (less + 0.5 * equal) / n
+
+
+def _covariate_display(column: str, schema: dict) -> tuple[str, str]:
+    """(kind, human-readable display) for a design-matrix column name.
+
+    Parses formulaic's categorical-contrast naming `C(var)[T.level]` into a
+    'level vs. reference' phrase (reference level pulled from the schema's
+    controls), and treats a bare continuous control name as 'continuous'.
+    Falls back to the raw column name for anything unrecognized.
+    """
+    controls = {c.get("name"): c for c in (schema.get("controls") or [])}
+    m = re.match(r"^C\((?P<var>[^)]+)\)\[T\.(?P<level>.+)\]$", column)
+    if m:
+        var, level = m.group("var"), m.group("level")
+        ref = (controls.get(var) or {}).get("reference")
+        ref_str = f" vs. reference {ref!r}" if ref is not None else ""
+        return "categorical", f"{var}: {level!r}{ref_str}"
+    ctl = controls.get(column)
+    if ctl is not None and ctl.get("type") == "continuous":
+        return "continuous", f"{column} (per-unit increase)"
+    # Unknown shape — keep the raw name; guess kind from a bracketed contrast.
+    return ("categorical" if "[" in column else "continuous"), column
+
+
+def build_covariate_context(
+    covariate_effects: list[dict] | None,
+    covariate_schema: dict | None,
+    *,
+    reference_topic: int,
+) -> dict | None:
+    """Structured prevalence-covariate context for the annotator, or None.
+
+    covariate_effects: rows {"covariate": name, "per_topic": [Gamma]*K} as
+        exported to covariate_effects.json. The `Intercept` row (baseline
+        prevalence, not a covariate *relationship*) is dropped.
+    covariate_schema: covariate_schema.json (controls carry the reference
+        level for categorical contrasts and the continuous/categorical kind).
+    reference_topic: the topic whose Gamma is pinned to 0 by the STM K−1
+        parameterization — excluded from each covariate's across-topic
+        distribution and never annotated (its 0 effects are an artifact).
+
+    For each remaining covariate, computes the across-topic effect
+    distribution (over non-reference topics) plus each topic's effect and its
+    percentile rank within that distribution — so the LLM can judge notability
+    relative to the spread rather than an absolute magnitude. Returns None when
+    no covariate rows remain (e.g. an Intercept-only, pre-sex-fix bundle).
+    """
+    if not covariate_effects:
+        return None
+    schema = covariate_schema or {}
+    covs: list[dict] = []
+    for entry in covariate_effects:
+        col = entry.get("covariate")
+        if col is None or col == "Intercept":
+            continue
+        per_topic = [float(x) for x in entry.get("per_topic", [])]
+        K = len(per_topic)
+        nonref = [per_topic[k] for k in range(K) if k != reference_topic]
+        if not nonref:
+            continue
+        srt = sorted(nonref)
+        dist = {
+            "min": srt[0], "max": srt[-1], "mean": sum(srt) / len(srt),
+            "median": _percentile(srt, 50),
+            "p10": _percentile(srt, 10), "p25": _percentile(srt, 25),
+            "p75": _percentile(srt, 75), "p90": _percentile(srt, 90),
+        }
+        pct = [
+            (None if k == reference_topic else _percentile_rank(srt, per_topic[k]))
+            for k in range(K)
+        ]
+        kind, display = _covariate_display(col, schema)
+        covs.append({
+            "column": col, "display": display, "kind": kind,
+            "distribution": dist, "effects": per_topic, "percentiles": pct,
+        })
+    if not covs:
+        return None
+    return {"reference_topic": reference_topic, "covariates": covs}
+
+
+def covariate_lines_for_topic(
+    context: dict | None, topic_id: int,
+) -> list[str]:
+    """Per-topic prevalence-covariate lines for the user message, or []."""
+    if not context or topic_id == context.get("reference_topic"):
+        return []
+    lines = [
+        "Prevalence covariate effects "
+        "(Gamma, logit scale, relative to the reference topic):"
+    ]
+    for cov in context["covariates"]:
+        eff = cov["effects"][topic_id]
+        pct = cov["percentiles"][topic_id]
+        d = cov["distribution"]
+        pct_str = f"percentile {pct:.0f}" if pct is not None else "n/a"
+        lines.append(
+            f"  {cov['display']}: {eff:+.3f}   "
+            f"({pct_str} of this effect across topics; distribution "
+            f"median {d['median']:+.3f}, p10/p90 {d['p10']:+.3f}/{d['p90']:+.3f}, "
+            f"range [{d['min']:+.3f}, {d['max']:+.3f}])"
+        )
+    return lines
+
+
+def build_covariate_guidance_block(context: dict | None) -> str:
+    """Constant system-prompt guidance on reading the covariate effects, or "".
+
+    Byte-identical across topics (prompt-cache-safe). Explains the logit scale,
+    reference-relativity, distribution-relative notability, and the hard rule
+    against fabricated ratios.
+    """
+    if not context:
+        return ""
+    names = ", ".join(c["display"] for c in context["covariates"])
+    return (
+        "\n\n## Prevalence covariate effects\n"
+        f"Each topic's message may include prevalence covariate effects ({names}). "
+        "These are STM prevalence (Gamma) coefficients on the LOGIT (log-odds) "
+        "scale for the topic's expected proportion, expressed RELATIVE TO THE "
+        "REFERENCE TOPIC (whose effects are pinned to 0 by construction — that "
+        "is an artifact, never a finding). Use them ONLY as follows:\n"
+        "- The SIGN gives direction: e.g. a positive sex 'M vs. reference F' "
+        "effect means the phenotype is relatively more prevalent in males; a "
+        "positive age effect means it rises with age.\n"
+        "- MAGNITUDE is meaningful ONLY relative to the distribution shown. A "
+        "topic is notable on a covariate when its effect sits in a TAIL of that "
+        "covariate's across-topic distribution (a high or low percentile); a "
+        "large-looking number near the median is TYPICAL, not notable.\n"
+        "- NEVER state a numeric probability, ratio, or 'X% more likely' — the "
+        "logit scale does not support it. Use qualitative language "
+        "('more common in males', 'skews older').\n"
+        "- For a FOREGROUND (subgroup) topic the effect is estimated within that "
+        "subgroup's documents; frame it within the subgroup.\n"
+        "- Fold a covariate relationship into the DESCRIPTION only when it is "
+        "genuinely notable (a tail percentile); otherwise omit it. Keep it to a "
+        "brief clause and never invent a mechanism."
+    )
+
+
 def _build_user_message(
     *,
     phenotype_id: int,
@@ -1076,6 +1250,7 @@ def _build_user_message(
     block: str | None = None,
     groups: list[str] | None = None,
     group_var: str | None = None,
+    covariate_context: dict | None = None,
 ) -> str:
     # Stats are listed in decision order (alpha and KL first — the
     # primary classifiers — then the supporting contextual stats).
@@ -1106,6 +1281,11 @@ def _build_user_message(
         f"  NPMI:            {npmi:.3f}",
         f"  pair_coverage:   {pair_coverage:.0%} of top-N pairs scored",
         f"  usage:           {usage_frac * 100:.2f}% of total corpus mass",
+    ]
+    cov_lines = covariate_lines_for_topic(covariate_context, phenotype_id)
+    if cov_lines:
+        lines += ["", *cov_lines]
+    lines += [
         "",
         "Top conditions by within-topic frequency "
         "(description · weight · lift):",
@@ -1135,6 +1315,7 @@ def _label_one(
     block: str | None = None,
     groups: list[str] | None = None,
     group_var: str | None = None,
+    covariate_context: dict | None = None,
 ) -> tuple[PhenotypeLabel, dict]:
     """One labeling call. Returns (output, usage_dict)."""
     user_text = _build_user_message(
@@ -1144,6 +1325,7 @@ def _label_one(
         npmi=npmi, pair_coverage=pair_coverage, usage_frac=usage_frac,
         max_words=max_words,
         block=block, groups=groups, group_var=group_var,
+        covariate_context=covariate_context,
     )
     result = agent.run_sync(user_text)
     out: PhenotypeLabel = result.output
@@ -1332,6 +1514,46 @@ def main(argv: list[str] | None = None) -> int:
             f"{K} (one per topic); is this a stale or mismatched bundle?",
         )
 
+    # covariate_effects.json + covariate_schema.json (optional): STM prevalence
+    # (Gamma) effects per topic per covariate. When present, each topic's
+    # message carries its sex/age effect alongside that covariate's across-topic
+    # distribution, so the model can add honest, distribution-relative prevalence
+    # insights ("more common in males"). Absent for non-STM / pre-covariate
+    # (or Intercept-only, pre-sex-fix) bundles — then covariate_context is None.
+    covariate_context = None
+    cov_eff_p = bundle_dir / "covariate_effects.json"
+    cov_schema_p = bundle_dir / "covariate_schema.json"
+    corr_p = bundle_dir / "correlation.json"
+    if cov_eff_p.is_file():
+        cov_effects = json.loads(cov_eff_p.read_text())
+        # Reject a length-mismatched Gamma rather than silently mis-indexing.
+        bad = [e.get("covariate") for e in cov_effects
+               if len(e.get("per_topic", [])) != K]
+        if bad:
+            print(f"[label] WARNING: covariate_effects rows {bad} are not length "
+                  f"{K}; skipping covariate insights (stale/mismatched bundle?)",
+                  flush=True)
+        else:
+            cov_schema = (json.loads(cov_schema_p.read_text())
+                          if cov_schema_p.is_file() else {})
+            # Reference topic (Gamma pinned to 0): authoritative from
+            # correlation.json; else default 0.
+            ref_topic = 0
+            if corr_p.is_file():
+                try:
+                    ref_topic = int(json.loads(corr_p.read_text())
+                                    .get("reference_topic", 0) or 0)
+                except (ValueError, TypeError):
+                    ref_topic = 0
+            covariate_context = build_covariate_context(
+                cov_effects, cov_schema, reference_topic=ref_topic,
+            )
+    if covariate_context is not None:
+        _cov_names = ", ".join(c["display"] for c in covariate_context["covariates"])
+        print(f"[label] covariate insights: {_cov_names} "
+              f"(reference topic {covariate_context['reference_topic']})",
+              flush=True)
+
     # Per-topic distinctiveness signals.
     #   alpha[k] (when present) reflects the asymmetric-α optimizer's verdict.
     #   KL(β[k]||p(w)) reflects how far the topic departs from the corpus
@@ -1476,6 +1698,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_words=args.max_words,
                 block=(topic_blocks[i] if topic_blocks else None),
                 groups=gating_groups, group_var=gating_group_var,
+                covariate_context=covariate_context,
             ), flush=True)
         if len(todo) > 3:
             print(f"\n... and {len(todo) - 3} more "
@@ -1503,6 +1726,7 @@ def main(argv: list[str] | None = None) -> int:
             {"group_var": gating_group_var, "groups": gating_groups}
             if topic_blocks is not None else None
         ),
+        covariate_context=covariate_context,
     )
     print(f"[label] using model {model_str}", flush=True)
     if cohort_meta:
@@ -1526,6 +1750,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_words=args.max_words,
                 block=(topic_blocks[i] if topic_blocks else None),
                 groups=gating_groups, group_var=gating_group_var,
+                covariate_context=covariate_context,
             )
         except Exception as e:
             print(f"[label] phenotype {i}: error: {e}", flush=True)
