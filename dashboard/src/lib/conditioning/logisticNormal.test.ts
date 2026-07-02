@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { createRng } from '../sampling'
-import { cholesky, mvnDraw } from './logisticNormal'
+import { cholesky, mvnDraw, sampleConditionedTheta } from './logisticNormal'
+import type { Correlation, CovariateEffects } from '../types'
 
 describe('cholesky', () => {
   it('reconstructs the matrix: L Lᵀ = A', () => {
@@ -54,5 +55,71 @@ describe('mvnDraw', () => {
     const a = mvnDraw([0, 0], L, createRng(7))
     const b = mvnDraw([0, 0], L, createRng(7))
     expect(a).toEqual(b)
+  })
+})
+
+function identityCorr(K1: number, order: number[]): Correlation {
+  const R = Array.from({ length: K1 }, (_, i) =>
+    Array.from({ length: K1 }, (_, j) => (i === j ? 1 : 0)))
+  return {
+    topic_order: order,
+    block_labels: order.map(() => 'background'),
+    R,
+    identified: R.map((row) => row.map(() => true)),
+    support: R.map((row) => row.map(() => 9)),
+    reference_topic: 0,
+  }
+}
+
+describe('sampleConditionedTheta', () => {
+  it('returns a length-K distribution with reference topic drawn around eta=0', () => {
+    // K=3: reference topic 0, free topics 1..2. Effects zero -> mean eta = 0.
+    const effects: CovariateEffects = [
+      { covariate: 'Intercept', per_topic: [0, 0, 0] },
+    ]
+    const corr = identityCorr(2, [1, 2])
+    const theta = sampleConditionedTheta({
+      effects, x: [1], correlation: corr,
+      topicBlocks: null, group: null, rng: createRng(3),
+    })
+    expect(theta.length).toBe(3)
+    const sum = theta.reduce((a, b) => a + b, 0)
+    expect(sum).toBeCloseTo(1, 10)
+    for (const p of theta) expect(p).toBeGreaterThan(0)
+  })
+
+  it('gives out-of-group foreground topics exactly zero mass', () => {
+    // K=4: topic 0 reference(bg), 1 bg, 2 cancer, 3 dementia. Select cancer.
+    const effects: CovariateEffects = [
+      { covariate: 'Intercept', per_topic: [0, 0, 0, 0] },
+    ]
+    const corr = identityCorr(3, [1, 2, 3])
+    const theta = sampleConditionedTheta({
+      effects, x: [1], correlation: corr,
+      topicBlocks: ['background', 'background', 'cancer', 'dementia'],
+      group: 'cancer', rng: createRng(5),
+    })
+    expect(theta[3]).toBe(0)          // dementia foreground masked out
+    expect(theta[2]).toBeGreaterThan(0) // cancer foreground allowed
+    expect(theta.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 10)
+  })
+
+  it('shifts the mean when a covariate effect is applied', () => {
+    // Effect pushes free topic 2 up; its mean share should exceed topic 1's.
+    const effects: CovariateEffects = [
+      { covariate: 'Intercept', per_topic: [0, 0, 0] },
+      { covariate: 'age', per_topic: [0, 0, 3] },
+    ]
+    const corr = identityCorr(2, [1, 2])
+    const rng = createRng(11)
+    let s1 = 0, s2 = 0
+    for (let i = 0; i < 2000; i++) {
+      const t = sampleConditionedTheta({
+        effects, x: [1, 1], correlation: corr,
+        topicBlocks: null, group: null, rng,
+      })
+      s1 += t[1]; s2 += t[2]
+    }
+    expect(s2).toBeGreaterThan(s1)
   })
 })

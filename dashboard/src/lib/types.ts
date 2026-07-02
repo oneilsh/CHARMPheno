@@ -66,6 +66,9 @@ export interface GatingSpec {
   group_var: string
   groups: string[]
   topic_blocks: string[]
+  group_var_label?: string
+  group_labels?: Record<string, string>
+  group_proportions?: Record<string, number>
 }
 
 export interface Correlation {
@@ -74,6 +77,7 @@ export interface Correlation {
   R: (number | null)[][]
   identified: boolean[][]
   support: number[][]
+  reference_topic?: number | null
 }
 
 export interface DashboardBundle {
