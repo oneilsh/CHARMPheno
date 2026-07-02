@@ -1,10 +1,14 @@
 import { it, expect, beforeEach } from 'vitest'
 import { get } from 'svelte/store'
-import { bundle, conditioning, prevalenceReader } from './store'
+import {
+  bundle, conditioning, prevalenceReader,
+  atlasConditioning, simulatorConditioning, patientConditioning,
+  resetConditioningForCohort,
+} from './store'
 
 beforeEach(() => {
   bundle.set(null)
-  conditioning.set({ covariateActive: false, values: {}, group: null })
+  resetConditioningForCohort()   // clears all three panel stores (atlas is the `conditioning` alias)
 })
 
 const COV_BUNDLE = {
@@ -57,11 +61,6 @@ it('plain bundle uses the unchanged fractionAboveTau base', () => {
   const reader = get(prevalenceReader)
   expect(reader({ id: 0, corpus_prevalence: 0.42 } as any)).toBeCloseTo(0.42, 6)
 })
-
-import {
-  atlasConditioning, simulatorConditioning, patientConditioning,
-  resetConditioningForCohort,
-} from './store'
 
 it('panel conditioning stores are independent', () => {
   atlasConditioning.set({ covariateActive: true, values: { age: 70 }, group: 'cancer' })
