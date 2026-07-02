@@ -40,4 +40,5 @@ def build_correlation_json(R, identified, support, partition, kept_topic_ids,
         "R": R_out,
         "identified": id_out,
         "support": sup_out,
+        "reference_topic": (int(reference_id) if reference_id is not None else None),
     }

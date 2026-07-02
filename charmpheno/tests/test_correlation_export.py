@@ -105,6 +105,39 @@ def test_build_correlation_json_reference_id_none_is_unchanged():
     assert out_default["topic_order"] == [0, 1, 2, 3]
 
 
+def test_build_correlation_json_emits_reference_topic():
+    """The reference topic id (pinned eta=0, excluded from R/topic_order) must
+    be reported explicitly so the dashboard sampler can place the K-1 free
+    topics into the K-topic softmax without inferring it from a zero Gamma row."""
+    from charmpheno.export.correlation import build_correlation_json
+
+    class _P:
+        group_var = "source_cohort"
+        groups = ["cancer"]
+        def topic_labels(self):
+            return ["background", "background", "cancer"]
+    R = [[1.0, 0.2, 0.1], [0.2, 1.0, 0.0], [0.1, 0.0, 1.0]]
+    ident = [[True] * 3 for _ in range(3)]
+    sup = [[9] * 3 for _ in range(3)]
+    out = build_correlation_json(R, ident, sup, _P(), [0, 1, 2], reference_id=0)
+    assert out["reference_topic"] == 0
+    assert 0 not in out["topic_order"]        # reference excluded from R order
+
+def test_build_correlation_json_reference_topic_none_when_absent():
+    from charmpheno.export.correlation import build_correlation_json
+
+    class _P:
+        group_var = "g"
+        groups = []
+        def topic_labels(self):
+            return ["background", "background"]
+    R = [[1.0, 0.3], [0.3, 1.0]]
+    ident = [[True, True], [True, True]]
+    sup = [[9, 9], [9, 9]]
+    out = build_correlation_json(R, ident, sup, _P(), [0, 1], reference_id=None)
+    assert out["reference_topic"] is None
+
+
 def test_driver_mps_lookup_uses_nested_stm_hardening_floor():
     """The drivers read result.metadata.get("min_pair_support", 1), but
     min_pair_support is persisted nested under metadata["stm_hardening"]
