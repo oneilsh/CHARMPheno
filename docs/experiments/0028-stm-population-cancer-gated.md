@@ -50,15 +50,22 @@ document per person:
   and carcinoma in situ), windowed to the 365 days after that diagnosis. These
   documents carry the 20 cancer foreground topics.
 - **general** (`source_cohort='general'`): every other person, windowed to a
-  deterministic random fully-observed 365-day span
-  (`hash(person_id)` offset within the person's longest observation period, so
-  the assignment is reproducible across runs). `'general'` is not a foreground
-  group, so these documents resolve to background-only.
+  deterministic random 365-day span **anchored on one of their own
+  condition-eras** whose forward year is fully observed (min
+  `hash(person_id, event_date)` pick — reproducible, not `F.rand()`).
+  `'general'` is not a foreground group, so these documents resolve to
+  background-only.
 
-The general arm's window ignores `prior_obs_days` (there is no index event to be
-"first" of); the cancer arm uses it. `prior_obs_days: 0` here admits prevalent
-cancer cases (maximizing the cancer arm on the 25% sample); flip to 365 for an
-incident-only cancer definition.
+  A random *calendar* window was tried first and collapsed the general arm
+  (~12k docs) because EHR coding is bursty over long observation periods — a
+  random year usually lands in a quiet stretch, so the document falls below
+  `doc_min_length` and is dropped. Anchoring on the person's own coding
+  guarantees the window contains real activity and recovers the population.
+
+The general arm's window ignores `prior_obs_days` (there is no diagnosis index
+to be "first" of); the cancer arm uses it. `prior_obs_days: 0` here admits
+prevalent cancer cases (maximizing the cancer arm on the 25% sample); flip to
+365 for an incident-only cancer definition.
 
 ## Configuration
 

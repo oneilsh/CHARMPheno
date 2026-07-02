@@ -163,10 +163,11 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "diagnosis (SNOMED 443392 and descendants, excluding non-melanoma "
             "skin cancer and carcinoma in situ) get the 365-day post-diagnosis "
             "window and source_cohort='cancer'; every other person gets a "
-            "deterministic random fully-observed 365-day window and "
-            "source_cohort='general' (background-only, since 'general' has no "
-            "foreground block). Trains general-population background topics "
-            "against cancer-specific foreground under one gated STM."
+            "deterministic random 365-day window anchored on one of their own "
+            "condition-eras (so it captures real activity, not an empty calendar "
+            "year) and source_cohort='general' (background-only, since 'general' "
+            "has no foreground block). Trains general-population background "
+            "topics against cancer-specific foreground under one gated STM."
         ),
     },
 }
@@ -487,19 +488,17 @@ def _random_observed_year_cohort(
     date_col: str,
     window_days: int = _WINDOW_DAYS,
 ) -> DataFrame:
-    """Window each person to ONE deterministic random fully-observed year.
+    """Window each person to ONE deterministic random event-anchored year.
 
     Unlike the disease cohorts, the general population has no index event to
-    anchor on. For each person we pick their longest observation_period of at
-    least ``window_days`` and sample a window start uniformly in
-    ``[period_start, period_end - window_days]`` — so the whole 1-year window is
-    inside a single observation period (absence of a code is informative, not
-    merely unobserved). The offset is ``hash(person_id) mod (span - window + 1)``
-    with a fixed salt, so the assignment is deterministic and resume-stable
-    (Spark's ``F.rand()`` is not).
+    anchor on. Rather than a random CALENDAR window (usually empty — bursty
+    coding over long observation periods), we anchor on the person's own coding:
+    :func:`_random_event_windows` picks a random fully-observed event date and
+    windows the following ``window_days``. The choice is a deterministic,
+    resume-stable pseudo-random pick (hash-based).
 
     Returns ``cond_df``'s schema, filtered to each person's sampled window.
-    Persons with no observation period spanning ``window_days`` are dropped.
+    Persons with no event that has a fully-observed forward window are dropped.
     """
     op = (
         spark.read.format("bigquery")
@@ -512,7 +511,9 @@ def _random_observed_year_cohort(
             "observation_period_end_date",
         )
     )
-    windows = _random_observed_windows(op, window_days=window_days)
+    windows = _random_event_windows(
+        cond_df, op, date_col=date_col, window_days=window_days,
+    )
 
     return (
         cond_df.join(windows, on="person_id", how="inner")
@@ -522,50 +523,67 @@ def _random_observed_year_cohort(
     )
 
 
-def _random_observed_windows(
-    observation_period: DataFrame, *, window_days: int = _WINDOW_DAYS,
+def _random_event_windows(
+    cond_df: DataFrame,
+    observation_period: DataFrame,
+    *,
+    date_col: str,
+    window_days: int = _WINDOW_DAYS,
 ) -> DataFrame:
-    """Pick one deterministic random fully-observed window start per person.
+    """Anchor one deterministic random fully-observed window per person ON an event.
 
-    Takes an ``observation_period`` frame (``person_id``,
-    ``observation_period_start_date``, ``observation_period_end_date``) and
-    returns ``(person_id, index_date)`` where the window
-    ``[index_date, index_date + window_days)`` lies entirely within the person's
-    longest observation period. The offset is
-    ``hash(person_id, salt) mod (span - window_days + 1)`` so it is deterministic
-    and reproducible (Spark's ``F.rand()`` is not resume-stable). Persons with no
-    observation period spanning ``window_days`` are dropped.
+    A random CALENDAR window over the observation period is usually empty:
+    EHR coding is bursty (clustered around real health events) while
+    observation periods span years, so a random year misses the activity and the
+    document is dropped by doc_min_length. Instead we anchor on the coding
+    itself: for each person, consider their event dates whose forward
+    ``window_days`` is fully observed (``event_date + window_days <=
+    observation_period_end`` for some period covering the event), and pick ONE
+    deterministically (min ``hash(person_id, event_date, salt)``, so it is a
+    reproducible pseudo-random choice — Spark's ``F.rand()`` is not
+    resume-stable). The window ``[index_date, index_date + window_days)`` then
+    contains at least the anchoring event and its surrounding activity.
+
+    Args:
+        cond_df: events (``person_id`` + ``date_col``).
+        observation_period: ``person_id`` + observation_period start/end dates.
+
+    Returns ``(person_id, index_date)``; persons with no event that has a
+    fully-observed forward window are dropped.
     """
-    op = observation_period.withColumn(
-        "span",
-        F.datediff(
-            F.col("observation_period_end_date"),
-            F.col("observation_period_start_date"),
-        ),
-    ).where(F.col("span") >= window_days)
+    events = cond_df.select(
+        "person_id", F.col(date_col).alias("event_date"),
+    ).distinct()
 
-    # One observation period per person (the longest; ties broken by earliest
-    # start) so each person yields exactly one window.
-    longest = op.withColumn(
+    # Eligible anchors: an event whose forward window is inside SOME observation
+    # period of that person (event within the period, and window end <= period
+    # end). A person may have several periods; any one covering the window works.
+    eligible = (
+        events.join(observation_period, on="person_id", how="inner")
+        .where(F.col("event_date") >= F.col("observation_period_start_date"))
+        .where(
+            F.date_add(F.col("event_date"), window_days)
+            <= F.col("observation_period_end_date")
+        )
+        .select("person_id", "event_date")
+        .distinct()
+    )
+
+    # Deterministic pseudo-random pick: the eligible event with the smallest
+    # hash per person (ties broken by earliest date for stability).
+    ranked = eligible.withColumn(
+        "h", F.hash(F.col("person_id"), F.col("event_date"), F.lit(_RANDOM_WINDOW_SALT)),
+    )
+    chosen = ranked.withColumn(
         "rn",
         F.row_number().over(
             Window.partitionBy("person_id").orderBy(
-                F.col("span").desc(),
-                F.col("observation_period_start_date").asc(),
+                F.col("h").asc(), F.col("event_date").asc(),
             )
         ),
     ).where(F.col("rn") == 1)
 
-    # Deterministic pseudo-random offset in [0, span - window_days]; index_date
-    # = period_start + offset days. span - window_days + 1 is >= 1 by the span
-    # filter above, so the modulo is well-defined.
-    offset = F.abs(F.hash(F.col("person_id"), F.lit(_RANDOM_WINDOW_SALT))) % (
-        F.col("span") - F.lit(window_days) + F.lit(1)
-    )
-    return longest.withColumn(
-        "index_date",
-        F.date_add(F.col("observation_period_start_date"), offset),
-    ).select("person_id", "index_date")
+    return chosen.select("person_id", F.col("event_date").alias("index_date"))
 
 
 def apply_population_cancer_cohort(
@@ -585,9 +603,10 @@ def apply_population_cancer_cohort(
       :func:`apply_first_cancer_year_cohort`), windowed to the 365 days after
       that diagnosis. These carry the cancer foreground topics.
     - **general** — every OTHER person (no qualifying cancer dx), windowed to a
-      deterministic random fully-observed 365-day span
-      (:func:`_random_observed_year_cohort`). ``source_cohort='general'`` is not
-      a foreground group, so these documents resolve to background-only via
+      deterministic random 365-day span anchored on one of their own
+      condition-eras (:func:`_random_observed_year_cohort` →
+      :func:`_random_event_windows`). ``source_cohort='general'`` is not a
+      foreground group, so these documents resolve to background-only via
       :meth:`TopicBlockPartition.allowed_indices`.
 
     The arms are disjoint by person (the general arm is the ``left_anti`` of the
