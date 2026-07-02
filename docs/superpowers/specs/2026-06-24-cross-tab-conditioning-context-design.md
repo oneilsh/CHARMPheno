@@ -1,5 +1,23 @@
 # Cross-tab conditioning context (dashboard) — design
 
+> **Revised 2026-07-01.** The generative panels now sample from a **faithful
+> logistic-normal prior** using the block-wise unit-diagonal Σ (ADR 0034),
+> which is now exported in `correlation.json` (`R`). This supersedes the
+> Dirichlet mean-match of the 2026-06-25 revision (ADR 0028): when that revision
+> was written Σ was not exported, so a Dirichlet approximation was the only
+> option. With Σ available, sampled patients now show real topic co-occurrence
+> (correlated comorbidity blocks). Scope: **forward sampling only** (cohort +
+> record generation, where the correlation structure is visible); the
+> Simulator's condition-prefix E-step stays the existing hand-rolled step,
+> seeded from the conditioned mean (a faithful logistic-normal *posterior*
+> E-step is deferred). The numerical kernel (Cholesky + multivariate-normal
+> draw) is **hand-rolled, no new npm dependency** — matching the codebase's
+> existing hand-rolled samplers and avoiding added supply-chain surface. All
+> other decisions from the 2026-06-25 revision below stand unchanged; only the
+> "Conditioned prior" section and its downstream references are updated. A new
+> ADR records this supersession of ADR 0028. See the "Conditioned prior
+> (generation)" section for the full sampler.
+
 > **Revised 2026-06-25.** The original design placed the controls in a single
 > global full-width bar below the tab navigation (shipped as Phase 1, commits
 > `1dc025c`..`54610ca`). In use that proved unintuitive: the conditioning
@@ -31,9 +49,10 @@ Simulator shows a single sampled record. What differs per tab is *when* the
 context is applied and *what* it drives (a display reader vs a generative prior);
 the two axes are otherwise handled independently (see "Two orthogonal axes").
 
-This is a dashboard-front-end design plus two small export additions (categorical
-`proportions`; group labels and `group_proportions`). It does not change the
-model, the fit drivers, or the gating math.
+This is a dashboard-front-end design plus small export additions (categorical
+`proportions`; group labels and `group_proportions`; an explicit
+`reference_topic` id in `correlation.json`). It does not change the model, the
+fit drivers, or the gating math — Sigma itself is already exported.
 
 ## Goals
 
@@ -58,9 +77,12 @@ model, the fit drivers, or the gating math.
   color-by-group is in scope).
 - Complex covariate interactions in the marginal sampler — independent marginal
   sampling is explicitly accepted as "good enough."
-- A logistic-normal sampler faithful to STM's true prior (ADR 0028 alternative B);
-  the Dirichlet mean-match is the accepted approximation for forward
-  visualization.
+- A faithful logistic-normal *posterior* E-step for the Simulator's
+  condition-prefix mode (Laplace mode-find + Hessian in JS). The forward sampler
+  is faithful; the prefix-conditioned inference stays the existing hand-rolled
+  step seeded from the conditioned mean. (The 2026-06-25 revision deferred the
+  logistic-normal sampler entirely; the 2026-07-01 revision brings the forward
+  sampler in scope and narrows the deferral to just this posterior E-step.)
 - Any change to the fit drivers, gating engine, or eval.
 
 ## Two orthogonal axes
@@ -146,33 +168,67 @@ The absolute-bubble-scale anchoring is keyed on "any conditioning active"
 (`covariateActive` OR a gated bundle) so switching groups does not re-pin the
 largest bubble.
 
-### Conditioned prior (generation; the sampler twin) — ADR 0028
+### Conditioned prior (generation; the sampler twin) — logistic-normal
 
-The Patient Atlas and Simulator generate samples client-side from a **Dirichlet**
-document-topic prior (corpus-average `model.alpha`, then a variational E-step
-against `beta`). To condition generation, replace that prior with a
-`conditionedAlpha` whose **mean is the conditioned topic proportions** and whose
-**total concentration is the corpus prior's**:
+The Patient Atlas and Simulator generate samples client-side. STM's true
+document-topic prior is **logistic-normal**: theta = softmax(eta),
+eta ~ Normal(Gamma^T x, Sigma). With the block-wise unit-diagonal Sigma now
+exported (`correlation.json`'s `R`), the generative panels sample from it
+faithfully instead of the Dirichlet mean-match of ADR 0028. This is the
+generative twin of the display reader — the display shows softmax(Gamma^T x)
+(the prior *mean*); the sampler draws around that mean *with Sigma's
+correlations*, so sampled patients exhibit real topic co-occurrence.
 
-    alpha_cond[k] = alpha0 * p_cond[k],   alpha0 = sum_k(alpha_corpus[k])
+**The sampler (`sampleConditionedTheta`).** For covariate values `x` (design
+vector) and a selected `group`:
 
-`p_cond` is chosen by the **same four quadrants** as the display reader — the
-sampler is the generative twin of the reader:
+1. **Allowed set A** — background topics ∪ the group's foreground topics (all
+   topics when the bundle is not gated; background-only when `group` is null).
+   Derived from `gating.topic_blocks` (same key as the mask helpers).
+2. **Mean** — mu_k = Gamma^T x for each free topic k in A (from
+   `covariate_effects`); the reference topic (see below) is pinned eta = 0. When
+   the covariate axis is off, `x` is the baseline design vector, so mu is the
+   corpus baseline. *One formula spans all four quadrants* — quadrants differ
+   only in `x` (baseline vs slider) and in A (masked vs full).
+3. **Covariance** — Sigma_A = the sub-block of `R` over A's free topics, mapped
+   by `topic_order`. Because a within-group draw only ever spans background ∪ one
+   group, Sigma_A never includes a cross-group (NA / unidentified) cell and is
+   PD by construction (the block-wise design pins the diagonal to 1 and each
+   group's marginal block is fully observed).
+4. **Draw** — eta_free = mu + L·z where L = cholesky(Sigma_A), z ~ Normal(0, I);
+   set the reference topic eta = 0; masked (out-of-A) topics eta = -inf;
+   **theta = softmax(eta)** over A. Masked topics receive exactly zero mass — a
+   forward *draw* is always within one group, so no epsilon floor is needed
+   (unlike the Dirichlet, which needed a numeric floor to stay defined).
 
-| Quadrant | p_cond | mask |
-|---|---|---|
-| plain | alpha_corpus normalized (today's prior) | none |
-| STM (covariate) | softmax(Gamma^T x) = `covariatePrevalence` | none |
-| gated LDA | alpha_corpus normalized | hidden foreground floored ~1e-12 |
-| gated STM | `covariatePrevalenceGated` (mask-before-softmax) | built in |
+**Reference topic.** STM identifies K topics with a K-1 reference
+parameterization: one topic's eta is fixed at 0 and is excluded from Gamma and
+Sigma. In the export `covariate_effects` has a zero row for the reference and
+`R`/`topic_order` cover the K-1 free topics. The export makes the reference
+topic id explicit (a `reference_topic` field) rather than having the front-end
+infer it from the zero row.
 
-Masked foreground topics are floored at a tiny epsilon (mirroring the engine's
-gated-block pin) so the Dirichlet and the E-step stay numerically defined while
-those topics are effectively never drawn. The decision, the alternatives (a true
-logistic-normal sampler; hard-dropping masked topics), and the honest consequence
-(an STM bundle sampled through a Dirichlet looks more peaked than a true STM draw;
-insight 0028) are recorded in ADR 0028. `conditionedAlpha` is one shared helper,
-consumed by both generative panels and by the marginal sampler.
+**Numerical kernel.** `cholesky(Sigma)` and `mvnDraw(mean, L, rng)` are
+hand-rolled (~30 lines, standard) and unit-tested against a reference (the
+sample covariance of many draws converges to Sigma). This adds **no npm
+dependency**, matching the codebase's existing hand-rolled samplers
+(`sampleDirichlet`, the variational E-step, the seeded RNG) and avoiding new
+supply-chain surface. `sampleConditionedTheta` is one shared helper, consumed by
+both generative panels and by the marginal sampler.
+
+**Non-STM bundles** (plain or gated LDA/HDP) have no Gamma and no Sigma, so they
+keep the existing Dirichlet sampler (raw `model.alpha`, group-masked when gated
+via a floored `p_cond`). The logistic-normal path is selected iff the bundle
+carries both `covariate_effects` and `correlation`.
+
+**Simulator condition-prefix E-step (unchanged, scoped out).** The Simulator's
+"given these starting conditions, infer the rest" mode runs a variational E-step;
+a faithful logistic-normal *posterior* E-step (Laplace mode-find + Hessian) is
+deferred (it would be a larger JS numerical addition, still hand-rollable with no
+dependency). For now that E-step keeps its current form, seeded from the
+conditioned prior mean, so the prefix mode still shifts with the covariate/group
+context. The forward draws — where the correlation structure is actually visible
+— are fully faithful.
 
 ## Placement
 
@@ -239,7 +295,7 @@ has.
 | Tab | When the context applies | What it drives |
 |-----|--------------------------|----------------|
 | Phenotype Atlas | Live (cheap recompute) | the display reader (quadrant table above) |
-| Simulator | Live (it re-samples on each run anyway) | the conditioned prior (`conditionedAlpha`) for each sampled record |
+| Simulator | Live (it re-samples on each run anyway) | the conditioned prior (`sampleConditionedTheta`) for each sampled record |
 | Patient Atlas | On explicit "Regenerate cohort" (re-rolls the synthetic cohort; not live, to avoid the cloud reshuffling on every tick) | the conditioned prior for cohort generation |
 
 ### Phenotype Atlas
@@ -251,12 +307,14 @@ domain anchoring is keyed to "any conditioning active."
 
 ### Simulator
 
-The Simulator recomputes its samples on each run, so it conditions live. It builds
-`conditionedAlpha` from the panel's `values` (covariate axis) and `group` (gating
-axis) and passes it to `runSimulator` in place of `model.alpha`; the rest of the
-sampler (prefix, E-step, autoregressive option) is unchanged. Either axis may be
-absent. The conditions-prefix editor composes with whatever axes apply. Because
-the Simulator explicitly recalculates, it carries the full covariate controls.
+The Simulator recomputes its samples on each run, so it conditions live. For an
+STM bundle it builds each record's theta with `sampleConditionedTheta` from the
+panel's `values` (covariate axis) and `group` (gating axis), in place of the
+Dirichlet draw; for a non-STM bundle it falls back to the Dirichlet path. Either
+axis may be absent. The condition-prefix editor composes with whatever axes
+apply (the prefix E-step is unchanged, seeded from the conditioned mean).
+Because the Simulator explicitly recalculates, it carries the full covariate
+controls.
 
 ### Patient Atlas
 
@@ -273,12 +331,13 @@ cohort**:
   covariates/group"):
   - *Sample* mode (the default, including first generation): each synthetic
     patient draws its own covariates (and group, for gated bundles) from the
-    reported marginals via the marginal sampler, then generates from that
-    patient's `conditionedAlpha` — a realistic, representative, mixed cohort.
+    reported marginals via the marginal sampler, then generates its theta from
+    that patient's `sampleConditionedTheta` — a realistic, representative, mixed
+    cohort in which correlated comorbidity blocks co-occur.
   - *Use-set* mode: the next regenerate builds a this-subpopulation cohort at the
-    panel's `values` + `group` (one `conditionedAlpha` for all patients). Use-set
-    reads those fields directly regardless of `covariateActive`, applying only the
-    axes the bundle has.
+    panel's `values` + `group` (one conditioned draw per patient at the same
+    `x`/`group`). Use-set reads those fields directly regardless of
+    `covariateActive`, applying only the axes the bundle has.
 - **Color-by-group toggle** (gated bundles only): colors the existing cloud by
   each synthetic patient's group. Most informative on a sampled (mixed) cohort.
   Independent of the `group` selection.
@@ -299,8 +358,8 @@ Covariate axis (only when `covariate_schema` is present):
   (no interactions).
 - The sampled raw values become a design vector via the existing
   `buildDesignVector(design_columns, values)`; the conditioned prior reuses
-  `covariate_effects` through `conditionedAlpha` (the same Gamma rows the Atlas
-  uses).
+  `covariate_effects` and `correlation` through `sampleConditionedTheta` (the
+  same Gamma rows the Atlas uses for the mean, plus Sigma for the draw).
 
 Gating axis (only when `gating` is present):
 
@@ -325,9 +384,11 @@ Per-panel rework (from the shipped global bar):
 
 - `dashboard/src/lib/conditioning/` — keep `population.ts` and the
   `ConditioningBar.svelte` widget cluster; it is mounted **inside** the
-  conditioning panels rather than app-global. Add `conditionedAlpha.ts` (the
-  shared conditioned-prior helper, four quadrants) and `marginalSampler.ts` (the
-  per-patient covariate/group draw).
+  conditioning panels rather than app-global. Add `logisticNormal.ts` (the
+  hand-rolled `cholesky` + `mvnDraw` + `sampleConditionedTheta` forward sampler,
+  the shared conditioned-prior helper) and `marginalSampler.ts` (the per-patient
+  covariate/group draw). No `conditionedAlpha.ts` — the Dirichlet mean-match is
+  superseded; non-STM bundles use the existing Dirichlet path directly.
 - `dashboard/src/App.svelte` — remove the global `ConditioningBar` mount.
 - `dashboard/src/lib/store.ts` — per-panel conditioning state (independent
   module-level stores per conditioning panel) instead of one shared store; the
@@ -341,7 +402,8 @@ Per-panel rework (from the shipped global bar):
 Generative panels:
 
 - `dashboard/src/lib/simulator/runSamples.ts`, `dashboard/src/lib/tabs/Simulator.svelte`
-  — accept/pass `conditionedAlpha`; render the Simulator's conditioning cluster.
+  — accept/pass the conditioned theta from `sampleConditionedTheta` (STM) or the
+  Dirichlet draw (non-STM); render the Simulator's conditioning cluster.
 - `dashboard/src/lib/cohort.ts`, `dashboard/src/lib/tabs/Patient.svelte`,
   `dashboard/src/lib/patient/PatientMap.svelte` — conditioned `generateCohort`
   (set + marginal-sample paths), per-patient group, sample-vs-set toggle,
@@ -353,20 +415,28 @@ Export:
   (`analysis/local/build_dashboard.py`, `analysis/cloud/build_dashboard_cloud.py`)
   — `group_var_label`, `group_labels`, and k-anon-safe `group_proportions` in
   `gating.json` (per-group counts already computed for k-anon).
+- `correlation.json` (`charmpheno/charmpheno/export/correlation.py`) — add an
+  explicit `reference_topic` id so the front-end sampler places the K-1 free
+  topics into the K-topic softmax without inferring the reference from the zero
+  Gamma row. Sigma itself (`R`), `topic_order`, `block_labels`, and `identified`
+  are already exported and need no change.
 - `dashboard/src/lib/types.ts` — `GatingSpec` gains `group_var_label?`,
-  `group_labels?`, `group_proportions?`.
+  `group_labels?`, `group_proportions?`; `Correlation` gains `reference_topic?`.
+  The generative panels import the existing `Correlation` type for Sigma.
 
 ## Error handling and edge cases
 
 - Plain (no covariates, no gating) → no conditioning controls; the Atlas uses
   today's reader; the generative panels use `model.alpha` unchanged.
-- Covariates, no gating (STM) → covariate section only; conditioned prior =
-  softmax(Gamma^T x).
+- Covariates, no gating (STM) → covariate section only; the display reader shows
+  softmax(Gamma^T x); the generative draw is logistic-normal
+  eta ~ Normal(Gamma^T x, Sigma) over all topics.
 - Gating, no covariates (gated LDA) → group section only; the Atlas masks the
-  `fractionAboveTau` base via `maskGroupPrevalence`; the prior masks the corpus
-  alpha.
-- Gating and covariates (gated STM) → both sections; reader and prior both mask
-  the covariate-conditioned values.
+  `fractionAboveTau` base via `maskGroupPrevalence`; the generative prior (no
+  Sigma) is the Dirichlet path with hidden foreground floored.
+- Gating and covariates (gated STM) → both sections; the reader masks the
+  covariate-conditioned mean, and the generative draw is logistic-normal over
+  background ∪ the selected group (Sigma restricted to that sub-block).
 - Gated with intercept-only covariates, or `unsupported.length > 0` → covariate
   section disabled/absent; treat as gating-only.
 - Bundle/cohort switch → reset each panel's context (covariate off, values
@@ -374,22 +444,30 @@ Export:
 - Missing categorical `proportions` or `group_proportions` (older bundle) → the
   readout omits proportions / the sampler falls back to uniform and logs it;
   nothing throws. Missing `group_labels` → raw id shown.
-- Masked-topic floor: `conditionedAlpha` never produces a zero-length or
-  all-zero prior; out-of-group foreground carries negligible mass.
+- STM forward sampler: `sampleConditionedTheta` restricts to the allowed set, so
+  a draw is always a valid distribution over background ∪ the group (out-of-group
+  topics get exactly zero, no epsilon floor needed); the per-group Sigma
+  sub-block is always PD (never touches an NA cross-group cell). A non-STM bundle
+  (no Gamma/Sigma) uses the existing Dirichlet path unchanged.
 
 ## Testing strategy
 
-- Pure helpers — `population.ts`, `conditionedAlpha.ts`, `marginalSampler.ts` —
-  unit-tested with vitest: readout strings; `conditionedAlpha` mean matches
-  `p_cond` and total concentration matches alpha0 in each quadrant, masked topics
-  floored; sampler draws respect proportions/percentile support, deterministic
-  under a seeded RNG, degrades per missing axis.
+- Pure helpers — `population.ts`, `logisticNormal.ts`, `marginalSampler.ts` —
+  unit-tested with vitest: readout strings; `cholesky` reconstructs Sigma
+  (L·Lᵀ == Sigma) and rejects non-PD input; `mvnDraw`'s sample mean and sample
+  covariance over many seeded draws converge to (mu, Sigma); `sampleConditionedTheta`
+  places the reference topic at eta=0, restricts to the allowed set (masked
+  topics get exactly zero mass), and its per-group Sigma sub-block is NA-free/PD;
+  the marginal-sampler draws respect proportions/percentile support, are
+  deterministic under a seeded RNG, and degrade per missing axis.
 - Reader quadrants: `prevalenceReader` produces the right value in all four
   quadrants, including the covariate+gating store-level case (the Phase 1 gap);
   `maskGroupPrevalence` direct (hidden foreground -> 0, no renormalization).
-- Generative panels: `runSimulator` uses the conditioned alpha (a covariate shift
-  moves the sampled mean in the expected direction); `generateCohort` set vs
-  sample paths; per-patient group assignment present for color-by-group.
+- Generative panels: `runSimulator` uses `sampleConditionedTheta` for STM
+  bundles (a covariate shift moves the sampled mean in the expected direction;
+  sampled thetas show Sigma's correlation structure) and the Dirichlet path for
+  non-STM; `generateCohort` set vs sample paths; per-patient group assignment
+  present for color-by-group.
 - Schema-driven rendering: each panel shows the right sections for each bundle
   shape — component/build-level checks plus the FE suite + `npm run build`.
 - Export: `covariate_schema` `proportions` (already covered) and `gating.json`
@@ -402,5 +480,6 @@ Export:
 ## Out of scope
 
 Color-by arbitrary categorical covariate on the Patient Atlas; covariate
-interactions in the sampler; a logistic-normal (true STM) sampler; any
-model/fit/eval change.
+interactions in the sampler; a faithful logistic-normal *posterior* E-step for
+the Simulator's condition-prefix mode (the forward sampler is in scope, the
+prefix posterior is not); any model/fit/eval change.
