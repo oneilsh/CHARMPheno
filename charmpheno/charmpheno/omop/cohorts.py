@@ -24,7 +24,7 @@ Currently implemented:
 """
 from __future__ import annotations
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 
@@ -84,7 +84,15 @@ SUPPORTED_COHORTS: tuple[str, ...] = (
     "first_cancer_year",
     "first_dementia_year",
     "cancer_or_dementia",
+    "population_cancer",
 )
+
+# Fixed salt for the general-population random-window assignment. Hashing
+# person_id with a constant salt makes each person's sampled 1-year window
+# deterministic and reproducible across runs (Spark's F.rand() is not
+# resume-stable), while still spreading windows pseudo-uniformly across each
+# person's observation history.
+_RANDOM_WINDOW_SALT = 20260702
 
 
 # User-facing metadata for each cohort. Consumed by the dashboard bundle
@@ -145,6 +153,22 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "separable cancer vs dementia topic structure."
         ),
     },
+    "population_cancer": {
+        "id": "population_cancer",
+        "label": "Population + Cancer (gated)",
+        "description": (
+            "The whole (sampled) population as a shared background, with a "
+            "cancer subcohort carrying its own foreground topics. Disjoint, one "
+            "document per person: patients with a first malignant-cancer "
+            "diagnosis (SNOMED 443392 and descendants, excluding non-melanoma "
+            "skin cancer and carcinoma in situ) get the 365-day post-diagnosis "
+            "window and source_cohort='cancer'; every other person gets a "
+            "deterministic random fully-observed 365-day window and "
+            "source_cohort='general' (background-only, since 'general' has no "
+            "foreground block). Trains general-population background topics "
+            "against cancer-specific foreground under one gated STM."
+        ),
+    },
 }
 
 
@@ -192,6 +216,12 @@ def apply_cohort(
         )
     if cohort == "cancer_or_dementia":
         return apply_cancer_or_dementia_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_cancer":
+        return apply_population_cancer_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
             prior_obs_days=prior_obs_days,
@@ -446,3 +476,139 @@ def apply_cancer_or_dementia_cohort(
         prior_obs_days=prior_obs_days,
     )
     return _combine_cohorts(cancer, dementia)
+
+
+def _random_observed_year_cohort(
+    cond_df: DataFrame,
+    *,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    window_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Window each person to ONE deterministic random fully-observed year.
+
+    Unlike the disease cohorts, the general population has no index event to
+    anchor on. For each person we pick their longest observation_period of at
+    least ``window_days`` and sample a window start uniformly in
+    ``[period_start, period_end - window_days]`` — so the whole 1-year window is
+    inside a single observation period (absence of a code is informative, not
+    merely unobserved). The offset is ``hash(person_id) mod (span - window + 1)``
+    with a fixed salt, so the assignment is deterministic and resume-stable
+    (Spark's ``F.rand()`` is not).
+
+    Returns ``cond_df``'s schema, filtered to each person's sampled window.
+    Persons with no observation period spanning ``window_days`` are dropped.
+    """
+    op = (
+        spark.read.format("bigquery")
+        .option("table", f"{cdr_dataset}.observation_period")
+        .option("parentProject", billing_project)
+        .load()
+        .select(
+            "person_id",
+            "observation_period_start_date",
+            "observation_period_end_date",
+        )
+    )
+    windows = _random_observed_windows(op, window_days=window_days)
+
+    return (
+        cond_df.join(windows, on="person_id", how="inner")
+        .where(F.col(date_col) >= F.col("index_date"))
+        .where(F.col(date_col) < F.date_add(F.col("index_date"), window_days))
+        .drop("index_date")
+    )
+
+
+def _random_observed_windows(
+    observation_period: DataFrame, *, window_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Pick one deterministic random fully-observed window start per person.
+
+    Takes an ``observation_period`` frame (``person_id``,
+    ``observation_period_start_date``, ``observation_period_end_date``) and
+    returns ``(person_id, index_date)`` where the window
+    ``[index_date, index_date + window_days)`` lies entirely within the person's
+    longest observation period. The offset is
+    ``hash(person_id, salt) mod (span - window_days + 1)`` so it is deterministic
+    and reproducible (Spark's ``F.rand()`` is not resume-stable). Persons with no
+    observation period spanning ``window_days`` are dropped.
+    """
+    op = observation_period.withColumn(
+        "span",
+        F.datediff(
+            F.col("observation_period_end_date"),
+            F.col("observation_period_start_date"),
+        ),
+    ).where(F.col("span") >= window_days)
+
+    # One observation period per person (the longest; ties broken by earliest
+    # start) so each person yields exactly one window.
+    longest = op.withColumn(
+        "rn",
+        F.row_number().over(
+            Window.partitionBy("person_id").orderBy(
+                F.col("span").desc(),
+                F.col("observation_period_start_date").asc(),
+            )
+        ),
+    ).where(F.col("rn") == 1)
+
+    # Deterministic pseudo-random offset in [0, span - window_days]; index_date
+    # = period_start + offset days. span - window_days + 1 is >= 1 by the span
+    # filter above, so the modulo is well-defined.
+    offset = F.abs(F.hash(F.col("person_id"), F.lit(_RANDOM_WINDOW_SALT))) % (
+        F.col("span") - F.lit(window_days) + F.lit(1)
+    )
+    return longest.withColumn(
+        "index_date",
+        F.date_add(F.col("observation_period_start_date"), offset),
+    ).select("person_id", "index_date")
+
+
+def apply_population_cancer_cohort(
+    cond_df: DataFrame,
+    *,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Whole-population background + a cancer foreground subcohort, disjoint.
+
+    One document per person, tagged with a ``source_cohort`` column:
+
+    - **cancer** — patients with a qualifying first cancer dx (the existing
+      :func:`apply_first_cancer_year_cohort`), windowed to the 365 days after
+      that diagnosis. These carry the cancer foreground topics.
+    - **general** — every OTHER person (no qualifying cancer dx), windowed to a
+      deterministic random fully-observed 365-day span
+      (:func:`_random_observed_year_cohort`). ``source_cohort='general'`` is not
+      a foreground group, so these documents resolve to background-only via
+      :meth:`TopicBlockPartition.allowed_indices`.
+
+    The arms are disjoint by person (the general arm is the ``left_anti`` of the
+    cancer arm's persons), so no patient contributes two documents. Returns
+    ``cond_df``'s schema plus a ``source_cohort`` string column.
+    """
+    cancer = apply_first_cancer_year_cohort(
+        cond_df, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        prior_obs_days=prior_obs_days,
+    )
+    cancer_persons = cancer.select("person_id").distinct()
+
+    # General arm = everyone not in the cancer arm, on a random observed year.
+    non_cancer = cond_df.join(cancer_persons, on="person_id", how="left_anti")
+    general = _random_observed_year_cohort(
+        non_cancer, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+    )
+
+    return (
+        cancer.withColumn("source_cohort", F.lit("cancer"))
+        .unionByName(general.withColumn("source_cohort", F.lit("general")))
+    )

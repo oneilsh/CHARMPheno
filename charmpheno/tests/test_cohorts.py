@@ -52,6 +52,53 @@ def test_combine_cohorts_tags_and_unions_keeping_comorbid(spark):
     assert out.count() == 4
 
 
+def test_supported_cohorts_includes_population_cancer():
+    from charmpheno.omop.cohorts import SUPPORTED_COHORTS
+    assert "population_cancer" in SUPPORTED_COHORTS
+
+
+def test_cohort_metadata_has_population_cancer():
+    from charmpheno.omop.cohorts import COHORT_METADATA
+    md = COHORT_METADATA["population_cancer"]
+    assert md["id"] == "population_cancer"
+    assert md["label"] and md["description"]
+
+
+def test_random_observed_windows_are_within_period_and_deterministic(spark):
+    """Each person's sampled 1-year window lies fully inside their longest
+    observation period; persons whose longest period is < window_days are
+    dropped; and the assignment is deterministic (hash-based, not F.rand)."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import _random_observed_windows
+
+    op = spark.createDataFrame(
+        [
+            # person 1: one long period (well over a year)
+            (1, dt.date(2010, 1, 1), dt.date(2014, 1, 1)),
+            # person 2: two periods; the LONGER one must be chosen
+            (2, dt.date(2010, 1, 1), dt.date(2010, 6, 1)),   # ~150d (too short alone)
+            (2, dt.date(2011, 1, 1), dt.date(2013, 1, 1)),   # ~2y (chosen)
+            # person 3: only a short period -> dropped (no window >= 365d)
+            (3, dt.date(2010, 1, 1), dt.date(2010, 4, 1)),
+        ],
+        ["person_id", "observation_period_start_date",
+         "observation_period_end_date"],
+    )
+    win = 365
+    rows = {r["person_id"]: r["index_date"]
+            for r in _random_observed_windows(op, window_days=win).collect()}
+
+    assert set(rows) == {1, 2}                     # person 3 dropped
+    # Window fully inside the chosen period for each surviving person.
+    assert dt.date(2010, 1, 1) <= rows[1] <= dt.date(2014, 1, 1) - dt.timedelta(days=win)
+    assert dt.date(2011, 1, 1) <= rows[2] <= dt.date(2013, 1, 1) - dt.timedelta(days=win)
+
+    # Deterministic: a second call yields identical index_date values.
+    rows2 = {r["person_id"]: r["index_date"]
+             for r in _random_observed_windows(op, window_days=win).collect()}
+    assert rows == rows2
+
+
 def test_window_observed_cohort_prior_lookback_is_configurable(spark):
     """prior_obs_days sets the pre-index lookback; the follow-up requirement
     (window fully observed) holds regardless. Three persons, same index, in:

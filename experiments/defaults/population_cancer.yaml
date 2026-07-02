@@ -1,0 +1,9 @@
+# Whole-population background + cancer-foreground gated cohort. The experiment
+# frontmatter supplies the STM covariate + gating fields (K, background_k,
+# foreground, group_var, covariate_formula); this file exists so load_defaults
+# finds a <cohort>.yaml to merge over _base.yaml.
+#
+# `cohort` is the display/lookup id (matches filename, used as the frontmatter
+# cohort key); `cohort_def` is the value passed to the driver's --cohort.
+cohort: population_cancer
+cohort_def: population_cancer
