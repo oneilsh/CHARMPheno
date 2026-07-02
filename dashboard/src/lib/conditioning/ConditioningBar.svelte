@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { conditioning, bundle } from '../store'
+  import { bundle } from '../store'
   import { populationLines } from './population'
   import { initialValues, canInteract } from '../atlas/covariate-panel'
+
+  export let store: import('svelte/store').Writable<import('../store').Conditioning>
 
   $: schema = $bundle?.covariateSchema
   $: gating = $bundle?.gating
@@ -12,13 +14,13 @@
   // Seed covariate values whenever the schema changes.
   let local: Record<string, number | string> = {}
   $: if (schema) { local = initialValues(schema) }
-  $: conditioning.update((c) => ({ ...c, values: local }))
+  $: store.update((c) => ({ ...c, values: local }))
 
   $: lines = populationLines(schema)
 
   function reset() {
     if (schema) local = initialValues(schema)
-    conditioning.update((c) => ({ ...c, covariateActive: false }))
+    store.update((c) => ({ ...c, covariateActive: false }))
   }
 </script>
 
@@ -29,8 +31,8 @@
         <span class="bar-label">{gating.group_var}</span>
         <select
           class="cat-select"
-          value={$conditioning.group ?? ''}
-          on:change={(e) => conditioning.update((c) => ({ ...c, group: e.currentTarget.value === '' ? null : e.currentTarget.value }))}
+          value={$store.group ?? ''}
+          on:change={(e) => store.update((c) => ({ ...c, group: e.currentTarget.value === '' ? null : e.currentTarget.value }))}
         >
           <option value="">Background only</option>
           {#each gating.groups as g}<option value={g}>{g}</option>{/each}
@@ -44,16 +46,16 @@
           <input
             type="checkbox"
             class="toggle-input"
-            checked={$conditioning.covariateActive}
-            on:change={(e) => conditioning.update((c) => ({ ...c, covariateActive: e.currentTarget.checked }))}
+            checked={$store.covariateActive}
+            on:change={(e) => store.update((c) => ({ ...c, covariateActive: e.currentTarget.checked }))}
           />
           <span class="toggle-track">
             <span class="toggle-thumb"></span>
           </span>
-          <span class="toggle-text">{$conditioning.covariateActive ? 'covariate prevalence' : 'corpus average'}</span>
+          <span class="toggle-text">{$store.covariateActive ? 'covariate prevalence' : 'corpus average'}</span>
         </label>
 
-        {#if $conditioning.covariateActive}
+        {#if $store.covariateActive}
           <div class="controls">
             {#each schema.controls as control (control.name)}
               <div class="control-row">
@@ -152,7 +154,7 @@
     flex-shrink: 0;
   }
 
-  /* Toggle switch (lifted from CovariatePanel) */
+  /* Toggle switch (lifted from the former covariate panel) */
   .toggle-label {
     display: flex;
     align-items: center;
@@ -200,7 +202,7 @@
     letter-spacing: 0.06em;
   }
 
-  /* Controls list (lifted from CovariatePanel) */
+  /* Controls list (lifted from the former covariate panel) */
   .controls {
     display: flex;
     align-items: center;
@@ -223,7 +225,7 @@
     font-weight: 500;
   }
 
-  /* Continuous slider (lifted from CovariatePanel) */
+  /* Continuous slider (lifted from the former covariate panel) */
   .slider {
     display: flex;
     flex-direction: column;
@@ -246,7 +248,7 @@
     font-weight: 500;
   }
 
-  /* Categorical toggle 2-level (lifted from CovariatePanel) */
+  /* Categorical toggle 2-level (lifted from the former covariate panel) */
   .cat-toggle {
     display: flex;
     gap: 0.35rem;
@@ -271,7 +273,7 @@
     color: var(--accent);
   }
 
-  /* n-level select (lifted from CovariatePanel) */
+  /* n-level select (lifted from the former covariate panel) */
   .cat-select {
     font-size: var(--fs-small);
     padding: 0.2rem 0.4rem;
@@ -299,7 +301,7 @@
     font-weight: 500;
   }
 
-  /* Footer reset (lifted from CovariatePanel) */
+  /* Footer reset (lifted from the former covariate panel) */
   .reset-btn {
     border: 1px solid var(--rule-strong);
     background: var(--surface);

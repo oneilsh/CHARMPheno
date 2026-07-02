@@ -3,7 +3,7 @@
   import { get } from 'svelte/store'
   import {
     bundle, advancedView, cohort, manifest, patientProjection,
-    prevalenceReader,
+    prevalenceReader, resetConditioningForCohort,
     searchedConditionIdx, searchedPhenotypeForPatients,
     selectedCohort, selectedPatientId, selectedPhenotypeId,
     simulatorPrefix,
@@ -16,7 +16,6 @@
   import { ensurePatientProjection } from './lib/patient/projection'
   import CohortSelector from './lib/CohortSelector.svelte'
   import Tabs from './lib/Tabs.svelte'
-  import ConditioningBar from './lib/conditioning/ConditioningBar.svelte'
   import Atlas from './lib/tabs/Atlas.svelte'
   import Patient from './lib/tabs/Patient.svelte'
   import Simulator from './lib/tabs/Simulator.svelte'
@@ -93,6 +92,12 @@
     // from the old K, the cohort's UMAP, etc.) don't briefly render
     // against the new model's data.
     bundle.set(null)
+    // A new cohort may carry different gating/covariate schema than the
+    // last one, so per-panel conditioning state (group/covariate values)
+    // must not survive the switch. Reset here (cohort change), not on tab
+    // switch, so navigating between tabs never clobbers a panel's in-
+    // progress conditioning.
+    resetConditioningForCohort()
     cohort.set(null)
     patientProjection.set(null)
     selectedPhenotypeId.set(null)
@@ -211,7 +216,6 @@
     <p class="loading"><span class="loading-dot"></span> loading model bundle</p>
   {:else}
     <Tabs />
-    <ConditioningBar />
     <svelte:component this={TAB_COMPONENTS[$route]} />
   {/if}
 </main>

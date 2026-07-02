@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { bundle, conditioning } from '../store'
+  import { bundle, conditioning, atlasConditioning } from '../store'
   import TopicMap from '../atlas/TopicMap.svelte'
   import CodePanel from '../atlas/CodePanel.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
   import PhenotypeBrowser from '../atlas/PhenotypeBrowser.svelte'
   import CorrelationHeatmap from '../atlas/CorrelationHeatmap.svelte'
+  import ConditioningBar from '../conditioning/ConditioningBar.svelte'
   import { copy } from '../copy'
 
   // Reset conditioning whenever the bundle changes (cohort switch must not
@@ -43,6 +44,8 @@
       <ConditionSearch />
     </div>
   </header>
+
+  <ConditioningBar store={atlasConditioning} />
 
   <div class="grid">
     <div class="left-col">

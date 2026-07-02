@@ -13,6 +13,7 @@
   import ContributingCodes from '../patient/ContributingCodes.svelte'
   import NeighborRibbon from '../patient/NeighborRibbon.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
+  import ConditioningBar from '../conditioning/ConditioningBar.svelte'
   import { copy } from '../copy'
 
   // Initial batch size; adaptive sizing in cohort.ts may grow this.
@@ -121,6 +122,8 @@
       </div>
     </div>
   </header>
+
+  <ConditioningBar store={patientConditioning} />
 
   <div class="grid">
     <div class="left-col">

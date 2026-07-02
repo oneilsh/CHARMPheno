@@ -11,6 +11,7 @@
   import SimMiniMap from '../simulator/SimMiniMap.svelte'
   import StructurePlot from '../simulator/StructurePlot.svelte'
   import ProfileBar from '../patient/ProfileBar.svelte'
+  import ConditioningBar from '../conditioning/ConditioningBar.svelte'
   import { copy } from '../copy'
 
   // Default N: enough samples for a stable median and a smooth atlas
@@ -120,6 +121,8 @@
       <p class="kicker">{copy.simulator.kicker}</p>
     </div>
   </header>
+
+  <ConditioningBar store={simulatorConditioning} />
 
   <div class="grid">
     <div class="left-col" data-tour="simulator-input">
