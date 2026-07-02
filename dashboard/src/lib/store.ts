@@ -72,9 +72,26 @@ export interface Conditioning {
   values: Record<string, number | string>
   group: string | null
 }
-export const conditioning = writable<Conditioning>({
-  covariateActive: false, values: {}, group: null,
-})
+
+function createConditioning() {
+  return writable<Conditioning>({ covariateActive: false, values: {}, group: null })
+}
+
+// Per-panel, independent conditioning state. Each survives its own panel's
+// unmount/remount (fixing the Phase-1 tab-switch-resets bug); state is shared
+// by NO other panel. Reset only on cohort/bundle change (see below).
+export const atlasConditioning = createConditioning()
+export const simulatorConditioning = createConditioning()
+export const patientConditioning = createConditioning()
+
+export function resetConditioningForCohort(): void {
+  for (const c of [atlasConditioning, simulatorConditioning, patientConditioning])
+    c.set({ covariateActive: false, values: {}, group: null })
+}
+
+// Back-compat alias: the shipped four-quadrant prevalenceReader reads the
+// Phenotype Atlas's conditioning.
+export const conditioning = atlasConditioning
 
 export const hoveredCodeIdx = writable<number | null>(null)
 

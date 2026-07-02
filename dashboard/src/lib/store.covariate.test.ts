@@ -57,3 +57,23 @@ it('plain bundle uses the unchanged fractionAboveTau base', () => {
   const reader = get(prevalenceReader)
   expect(reader({ id: 0, corpus_prevalence: 0.42 } as any)).toBeCloseTo(0.42, 6)
 })
+
+import {
+  atlasConditioning, simulatorConditioning, patientConditioning,
+  resetConditioningForCohort,
+} from './store'
+
+it('panel conditioning stores are independent', () => {
+  atlasConditioning.set({ covariateActive: true, values: { age: 70 }, group: 'cancer' })
+  simulatorConditioning.set({ covariateActive: false, values: {}, group: null })
+  expect(get(atlasConditioning).group).toBe('cancer')
+  expect(get(simulatorConditioning).group).toBe(null)   // not shared
+})
+
+it('resetConditioningForCohort clears all panels', () => {
+  atlasConditioning.set({ covariateActive: true, values: { age: 70 }, group: 'cancer' })
+  patientConditioning.set({ covariateActive: true, values: { age: 40 }, group: 'dementia' })
+  resetConditioningForCohort()
+  expect(get(atlasConditioning)).toEqual({ covariateActive: false, values: {}, group: null })
+  expect(get(patientConditioning)).toEqual({ covariateActive: false, values: {}, group: null })
+})
