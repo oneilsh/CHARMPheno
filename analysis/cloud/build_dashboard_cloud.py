@@ -162,6 +162,70 @@ def _covariate_cache_key(*, corpus, cov_manifest, source_table, cohort):
     )
 
 
+def assert_covariate_sidecar_matches_model(*, sidecar_names, model_covariate_names):
+    """Fail loud when the loaded covariate sidecar's design != the model's.
+
+    The covariate cache key is content-BLIND (formula/person_mod/cdr/cohort/
+    prior_obs_days — see _covariate_cache_key), so a changed design that keeps
+    those fixed reuses a stale sidecar under the same key. exp 0028 hit this:
+    known_sex_only dropped the 'Unknown' sex level (P 4 -> 3), but the cached
+    sidecar was still P=4, so Gamma (P=3) @ x (P=4) crashed corpus_prevalence —
+    which was caught and degraded to the intercept stand-in, also dropping
+    gating.json. That silent degradation is exactly what we refuse here: a
+    dimension/name mismatch is a stale-cache bug, never cosmetic.
+    """
+    sidecar = list(sidecar_names)
+    model = list(model_covariate_names)
+    if sidecar != model:
+        raise SystemExit(
+            "STM covariate sidecar is STALE relative to the model: sidecar has "
+            f"P={len(sidecar)} design columns {sidecar}, but the model's Gamma "
+            f"has P={len(model)} {model}. The covariate cache key is "
+            "content-blind, so a changed design (e.g. known_sex_only dropping a "
+            "sex level) reuses a stale sidecar. Rebuild it before exporting: "
+            "`make build-covariates EXP=<id> FORCE=1`, then re-run the build."
+        )
+
+
+def _required_stm_outputs(*, gated: bool) -> list[str]:
+    """Covariate-dependent bundle files an STM export must produce."""
+    req = ["covariate_effects.json", "covariate_schema.json"]
+    if gated:
+        req = ["gating.json", *req]
+    return req
+
+
+def assert_stm_bundle_complete(out_dir, *, gated, allow_incomplete, log=None):
+    """Fail loud when a gated/STM bundle is missing its covariate outputs.
+
+    A covariate-cache MISS (or absent --cache-uri) silently skips gating.json /
+    covariate_schema.json, yielding a bundle that *looks* complete but renders
+    ungated with no covariate panel. Rather than warn-and-continue, abort so the
+    operator rebuilds the covariate cache before export. --allow-incomplete-bundle
+    downgrades to a warning when a degraded ungated bundle is genuinely intended.
+    """
+    out_dir = Path(out_dir)
+    missing = [f for f in _required_stm_outputs(gated=gated)
+               if not (out_dir / f).exists()]
+    if not missing:
+        return
+    detail = (
+        f"STM bundle is INCOMPLETE — missing {missing}. Most likely the "
+        "covariate cache missed during the build (no --cache-uri, or a stale/"
+        "unbuilt sidecar), so gating.json / covariate_schema.json were skipped "
+        "and the dashboard would render ungated with no covariate panel. Fix: "
+        "`make build-covariates EXP=<id> FORCE=1` so the export hits the cache, "
+        "then rebuild."
+    )
+    if allow_incomplete:
+        if log is not None:
+            log.warning("%s (--allow-incomplete-bundle set; continuing)", detail)
+        return
+    raise SystemExit(
+        detail + " Pass --allow-incomplete-bundle to accept the degraded bundle."
+    )
+
+
 def _write_covariate_schema(spark, *, result, corpus, source_table, cohort_name,
                             cache_uri, out_dir, log):
     """Derive + write covariate_schema.json from the covariate sidecar.
@@ -292,6 +356,14 @@ def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
                         "uses the intercept stand-in.", cache_uri, key)
             return None, None, None
         cov_df, _spec, _names = cached
+        # Fail loud on a stale sidecar (content-blind cache key) BEFORE the
+        # matmul: a P mismatch here otherwise crashes into the except below and
+        # degrades silently. SystemExit is a BaseException, so it propagates
+        # past `except Exception` and aborts the build with a rebuild hint.
+        assert_covariate_sidecar_matches_model(
+            sidecar_names=_names,
+            model_covariate_names=cov_manifest["covariate_names"],
+        )
         Gamma = np.asarray(result.global_params["Gamma"], dtype=np.float64)
 
         if partition is not None:
@@ -345,6 +417,11 @@ def main(argv: list[str] | None = None) -> int:
                              "(STM only). Enables the faithful corpus-mean "
                              "corpus_prevalence; without it the dashboard falls "
                              "back to the softmax(Gamma[intercept]) stand-in.")
+    parser.add_argument("--allow-incomplete-bundle", action="store_true",
+                        help="Downgrade the STM bundle-completeness check to a "
+                             "warning: permit exporting a gated bundle missing "
+                             "gating.json / covariate_schema.json (covariate-"
+                             "cache miss) as a degraded ungated bundle.")
     parser.add_argument("--vocab-top-n", type=int, default=5000,
                         help="trim vocab to top-N codes by corpus_freq")
     parser.add_argument("--top-n-codes-for-npmi", type=int, default=20)
@@ -665,6 +742,14 @@ def main(argv: list[str] | None = None) -> int:
                     spark, result=result, corpus=corpus,
                     source_table=source_table, cohort_name=cohort_name,
                     cache_uri=args.cache_uri, out_dir=out_dir, log=log,
+                )
+                # Fail loud if the covariate-dependent outputs weren't written
+                # (cache miss / no --cache-uri): a gated bundle without
+                # gating.json + covariate_schema.json renders ungated and is a
+                # silent degradation, not a complete bundle.
+                assert_stm_bundle_complete(
+                    out_dir, gated=bool(tbs),
+                    allow_incomplete=args.allow_incomplete_bundle, log=log,
                 )
             write_corpus_stats_sidecar(
                 stats, out_dir / "corpus_stats.json", v_displayed=v_disp,
