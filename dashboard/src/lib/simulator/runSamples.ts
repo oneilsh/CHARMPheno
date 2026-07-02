@@ -15,6 +15,11 @@ export interface SimulatorRunInput {
   // autoregressive path is more faithful to the generative story but
   // scales as O(nSamples * nNew * E-step) rather than O(nSamples * 2).
   autoregressive?: boolean
+  // STM only: a factory returning one conditioned theta draw. When present,
+  // each sample's generative theta is this logistic-normal draw instead of a
+  // Dirichlet prior draw. The prefix E-step (if a prefix exists) still refines
+  // theta against the observed codes; it is seeded from `alpha` as before.
+  conditionedTheta?: () => number[]
 }
 export interface SimulatorRunResult {
   thetaSamples: number[][]
@@ -24,7 +29,7 @@ export interface SimulatorRunResult {
 export function runSimulator(input: SimulatorRunInput): SimulatorRunResult {
   const {
     alpha, beta, meanCodesPerDoc, prefix, nSamples, seed,
-    autoregressive = false,
+    autoregressive = false, conditionedTheta,
   } = input
   const prefixCounts = new Map<number, number>()
   for (const w of prefix) prefixCounts.set(w, (prefixCounts.get(w) ?? 0) + 1)
@@ -34,15 +39,32 @@ export function runSimulator(input: SimulatorRunInput): SimulatorRunResult {
   for (let s = 0; s < nSamples; s++) {
     const nNew = Math.max(1, samplePoisson(meanCodesPerDoc, rng))
     const sampleCounts = new Map(prefixCounts)
+    // Generative theta for THIS sample: conditioned logistic-normal draw when
+    // provided (STM), else the prefix E-step's Dirichlet-based estimate.
+    let genTheta: number[]
     let est = variationalEStep({ alpha, beta, codeCounts: sampleCounts })
+    if (conditionedTheta) {
+      genTheta = conditionedTheta()
+    } else {
+      genTheta = est.theta
+    }
     for (let n = 0; n < nNew; n++) {
-      const z = sampleCategorical(est.theta, rng)
+      const z = sampleCategorical(genTheta, rng)
       const w = sampleCategorical(beta[z], rng)
       sampleCounts.set(w, (sampleCounts.get(w) ?? 0) + 1)
-      if (autoregressive) est = variationalEStep({ alpha, beta, codeCounts: sampleCounts })
+      if (autoregressive && !conditionedTheta) {
+        est = variationalEStep({ alpha, beta, codeCounts: sampleCounts })
+        genTheta = est.theta
+      }
     }
-    if (!autoregressive) est = variationalEStep({ alpha, beta, codeCounts: sampleCounts })
-    thetas.push(est.theta)
+    // Reported theta: refine against all counts (prefix + generated) unless a
+    // conditioned draw was used with no prefix, in which case report it directly.
+    if (!conditionedTheta || prefix.length > 0) {
+      est = variationalEStep({ alpha, beta, codeCounts: sampleCounts })
+      thetas.push(est.theta)
+    } else {
+      thetas.push(genTheta)
+    }
     const completion = new Map<number, number>()
     for (const [w, c] of sampleCounts) {
       const pre = prefixCounts.get(w) ?? 0

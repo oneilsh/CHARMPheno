@@ -1,8 +1,11 @@
 <script lang="ts">
   import {
-    bundle, simulatorPrefix, advancedView,
+    bundle, simulatorPrefix, advancedView, simulatorConditioning,
   } from '../store'
   import { runSimulator } from '../simulator/runSamples'
+  import { buildDesignVector } from '../covariate'
+  import { sampleConditionedTheta } from '../conditioning/logisticNormal'
+  import { createRng } from '../sampling'
   import ConditionsEditor from '../simulator/ConditionsEditor.svelte'
   import PredictedRecord from '../simulator/PredictedRecord.svelte'
   import SimMiniMap from '../simulator/SimMiniMap.svelte'
@@ -36,14 +39,37 @@
     // simulator (variational E-step in a loop) blocks the main thread.
     await new Promise((r) => setTimeout(r, 0))
     try {
+      const b = $bundle
+      // STM bundles carry per-topic covariate effects and a topic-correlation
+      // block; when both are present, condition the generative theta on the
+      // panel's covariate values/group via the logistic-normal sampler
+      // instead of drawing from the Dirichlet prior (see conditioning/
+      // logisticNormal.ts). Non-STM bundles take the unchanged Dirichlet path.
+      const isStm = !!b.covariateEffects && !!b.correlation
+      let conditionedTheta: (() => number[]) | undefined
+      if (isStm) {
+        const cond = $simulatorConditioning
+        const schema = b.covariateSchema!
+        const x = buildDesignVector(schema.design_columns, cond.values)
+        const tRng = createRng(seed ^ 0x9e3779b9)
+        conditionedTheta = () => sampleConditionedTheta({
+          effects: b.covariateEffects!,
+          x,
+          correlation: b.correlation!,
+          topicBlocks: b.gating?.topic_blocks ?? null,
+          group: cond.group,
+          rng: tRng,
+        })
+      }
       result = runSimulator({
-        alpha: $bundle.model.alpha,
-        beta: $bundle.model.beta,
-        meanCodesPerDoc: $bundle.corpusStats.mean_codes_per_doc,
+        alpha: b.model.alpha,
+        beta: b.model.beta,
+        meanCodesPerDoc: b.corpusStats.mean_codes_per_doc,
         prefix: $simulatorPrefix,
         nSamples,
         seed,
         autoregressive,
+        conditionedTheta,
       })
     } finally {
       running = false

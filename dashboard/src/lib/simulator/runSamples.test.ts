@@ -23,3 +23,28 @@ describe('quantiles', () => {
     expect(quantiles([1, 2, 3, 4, 5], [0, 0.5, 1])).toEqual([1, 3, 5])
   })
 })
+
+describe('runSimulator conditioned θ', () => {
+  it('uses the injected conditionedTheta for the no-prefix draw', () => {
+    // A conditionedTheta that always puts all mass on topic 1 -> generated
+    // codes come only from beta[1]; the reported theta concentrates on 1.
+    const beta = [[0.5, 0.5], [0.0, 1.0]]   // topic 1 emits code 1 only
+    const res = runSimulator({
+      alpha: [1, 1], beta, meanCodesPerDoc: 20, prefix: [],
+      nSamples: 5, seed: 1,
+      conditionedTheta: () => [0, 1],
+    })
+    // All sampled codes should be code index 1.
+    for (const bag of res.codeCountsSamples) {
+      for (const [w] of bag) expect(w).toBe(1)
+    }
+  })
+
+  it('without conditionedTheta behaves as before (Dirichlet path)', () => {
+    const beta = [[0.5, 0.5], [0.5, 0.5]]
+    const res = runSimulator({
+      alpha: [1, 1], beta, meanCodesPerDoc: 10, prefix: [], nSamples: 3, seed: 1,
+    })
+    expect(res.thetaSamples.length).toBe(3)
+  })
+})
