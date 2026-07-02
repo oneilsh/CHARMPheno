@@ -1,5 +1,5 @@
 import { derived } from 'svelte/store'
-import { phenotypeOrder } from './store'
+import { phenotypeOrder, bundle } from './store'
 
 // Phenotype hue assignment.
 //
@@ -36,4 +36,20 @@ export const phenotypeHue = derived(phenotypeOrder, ($order) => {
   })
   return (k: number) =>
     colors.get(k) ?? FALLBACK[((k % FALLBACK.length) + FALLBACK.length) % FALLBACK.length]
+})
+
+// Group hue assignment for the Patient atlas's color-by-group mode. Gated
+// STM bundles have only a handful of groups (background + a few foreground
+// conditions), so a direct index into the same categorical FALLBACK palette
+// used by phenotypeHue's fallback is distinctive enough without needing the
+// golden-ratio similarity ordering. Null group (background-only draw, or a
+// non-gated bundle) gets a neutral gray rather than a palette color.
+const NO_GROUP_COLOR = '#94a3b8'
+
+export const groupHue = derived(bundle, ($b) => {
+  const groups = $b?.gating?.groups ?? []
+  const colors = new Map<string, string>()
+  groups.forEach((g, i) => colors.set(g, FALLBACK[i % FALLBACK.length]))
+  return (g: string | null | undefined) =>
+    g == null ? NO_GROUP_COLOR : (colors.get(g) ?? NO_GROUP_COLOR)
 })

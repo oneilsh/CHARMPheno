@@ -2,6 +2,7 @@
   import {
     bundle, cohort, patientsById, selectedPatientId, selectedPhenotypeId,
     advancedView, searchedPhenotypeForPatients, phenotypesById,
+    patientConditioning, colorByGroup,
   } from '../store'
   import { generateCohort } from '../cohort'
   import { phenotypeHue } from '../palette'
@@ -17,6 +18,18 @@
   // Initial batch size; adaptive sizing in cohort.ts may grow this.
   const COHORT_N = 1500
   const NEIGHBORS = 8
+
+  // STM bundles carry covariate effects + a correlation structure, which
+  // together let generateCohort draw conditioned theta via
+  // sampleConditionedTheta. Non-STM bundles fall back to the plain
+  // Dirichlet-prior cohort (conditioning is not passed at all).
+  $: isStm = !!$bundle?.covariateEffects && !!$bundle?.correlation
+  $: hasGroup = !!$bundle?.gating
+
+  // 'sample': each patient draws its own marginal covariates/group (mirrors
+  // the corpus mix). 'set': every patient shares the conditioning-bar's
+  // fixed group/covariate values. Only meaningful for STM bundles.
+  let mode: 'sample' | 'set' = 'sample'
 
   // Visible-in-current-mode patients (basic = clean only, advanced = all).
   // We default the detail panel selection to one of these so basic mode
@@ -55,6 +68,7 @@
     // the regen sequence (42 → 43 → 44 ...) deterministic and walkthrough-
     // friendly even if the user navigates away and back.
     const nextSeed = $cohort.seed + 1
+    const cond = $patientConditioning
     cohort.set(generateCohort({
       model: $bundle.model,
       meanCodesPerDoc: $bundle.corpusStats.mean_codes_per_doc,
@@ -62,6 +76,9 @@
       seed: nextSeed,
       nNeighbors: NEIGHBORS,
       qualityByPhenotype: $bundle.phenotypes.phenotypes.map((p) => p.quality),
+      conditioning: isStm
+        ? { mode, values: cond.values, group: cond.group, bundle: $bundle }
+        : undefined,
     }))
     // Selection no longer points at a valid patient after regenerate;
     // let the reactive block above pick patients[0].
@@ -109,6 +126,20 @@
     <div class="left-col">
       <PatientMap />
       <div class="map-actions">
+        {#if isStm}
+          <div class="mode-toggle" role="group" title="Sample: each patient draws its own covariates/group. Set: every patient shares the conditioning bar's fixed group.">
+            <button type="button" class="mode-btn" class:active={mode === 'sample'}
+              on:click={() => { mode = 'sample' }}>sample</button>
+            <button type="button" class="mode-btn" class:active={mode === 'set'}
+              on:click={() => { mode = 'set' }}>set</button>
+          </div>
+        {/if}
+        {#if isStm && hasGroup}
+          <label class="color-toggle" title="Color patient-atlas points by each patient's gating group instead of dominant phenotype.">
+            <input type="checkbox" bind:checked={$colorByGroup} />
+            <span>color by group</span>
+          </label>
+        {/if}
         <button class="btn-ghost regen" on:click={regenCohort}
           title="Re-roll the synthetic cohort with a new random seed">
           ↻ regenerate cohort
@@ -246,8 +277,47 @@
      the map (overrides the left-col's 1.25rem gap). */
   .map-actions {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 0.85rem;
     margin-top: -0.75rem;
+  }
+
+  .mode-toggle {
+    display: inline-flex;
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  .mode-btn {
+    border: 0;
+    background: var(--surface);
+    color: var(--ink-muted);
+    padding: 0.2rem 0.55rem;
+    font-family: var(--font-mono);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    transition: color 0.12s ease, background 0.12s ease;
+  }
+  .mode-btn + .mode-btn { border-left: 1px solid var(--rule-strong); }
+  .mode-btn.active {
+    background: var(--accent-faint);
+    color: var(--accent);
+  }
+
+  .color-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-family: var(--font-mono);
+    font-size: var(--fs-micro);
+    color: var(--ink-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    user-select: none;
   }
 
   .phenotype-chip {

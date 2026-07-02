@@ -59,6 +59,13 @@ export const selectedPatientId = writable<string | null>(null)
 export const simulatorPrefix = writable<number[]>([])     // vocab indices (trimmed)
 export const advancedView = writable<boolean>(false)
 
+// Patient atlas: color points by each patient's recorded gating group
+// instead of dominant phenotype. Only meaningful for gated STM bundles
+// (SyntheticPatient.group is null otherwise); PatientMap falls back to the
+// default dominant-phenotype coloring when off or when patients carry no
+// group.
+export const colorByGroup = writable<boolean>(false)
+
 // Patient-prevalence threshold τ for the histogram-derived "fraction
 // above τ" prevalence reader. Fixed at 0.02 — a patient is counted as
 // "having" the phenotype when at least 2% of their coded activity is

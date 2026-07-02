@@ -1,9 +1,29 @@
 import type {
-  Model, SyntheticCohort, SyntheticPatient, PhenotypeQuality,
+  Model, SyntheticCohort, SyntheticPatient, PhenotypeQuality, DashboardBundle,
 } from './types'
 import {
   createRng, sampleDirichlet, sampleCategorical, samplePoisson,
 } from './sampling'
+import { sampleConditionedTheta } from './conditioning/logisticNormal'
+import { sampleMarginalCovariates, sampleMarginalGroup } from './conditioning/marginalSampler'
+import { buildDesignVector } from './covariate'
+
+// Conditioning input for the Patient atlas. When present and the bundle is
+// STM (has covariateEffects + correlation), each patient's theta is drawn
+// from the conditional logistic-normal (sampleConditionedTheta) rather than
+// the plain Dirichlet prior:
+//   - 'set': every patient shares the same design vector (from `values`)
+//     and the same fixed `group` — the cohort is "what does the group X
+//     population look like".
+//   - 'sample': each patient gets its own marginal draw of covariates and
+//     group (from the bundle's reported marginals) — the cohort mirrors
+//     the corpus's natural covariate/group mix.
+export interface CohortConditioning {
+  mode: 'sample' | 'set'
+  values: Record<string, number | string>
+  group: string | null
+  bundle: DashboardBundle
+}
 
 export interface CohortInput {
   model: Model
@@ -18,6 +38,7 @@ export interface CohortInput {
   // `n` becomes the initial batch size. Without these, all patients are
   // tagged isClean=true and exactly `n` are sampled.
   qualityByPhenotype?: (PhenotypeQuality | null)[]
+  conditioning?: CohortConditioning
 }
 
 // Adaptive-sizing knobs (used only when qualityByPhenotype is provided).
@@ -62,16 +83,49 @@ export function generateCohort(input: CohortInput): SyntheticCohort {
   let thetas: number[][] = []
   let bags: number[][] = []
   let isCleanFlags: boolean[] = []
+  let groups: (string | null)[] = []
 
-  // Sample one (theta, bag, isClean) without storing it yet, so the
-  // rejection-style path can choose whether to accept. Patient theta is
-  // the Dirichlet-prior draw used to generate the bag (the "true" mix),
-  // not a posterior re-inference - keeps the Patient atlas's coloring
-  // diverse. The Simulator's E-step on the same bag will produce a
-  // different (typically broader) theta; that disagreement is an LDA
-  // property of broad topics rather than something we can patch out.
+  const cc = input.conditioning
+  const stm = !!cc && !!cc.bundle.covariateEffects && !!cc.bundle.correlation
+  // Set mode conditions every patient on the same design vector; precompute
+  // it once rather than per-draw.
+  const setX = stm && cc!.mode === 'set'
+    ? buildDesignVector(cc!.bundle.covariateSchema!.design_columns, cc!.values)
+    : null
+
+  // Sample one (theta, bag, isClean, group) without storing it yet, so the
+  // rejection-style path can choose whether to accept. When conditioning is
+  // absent (or the bundle isn't STM), theta is the plain Dirichlet-prior
+  // draw used to generate the bag (the "true" mix), not a posterior
+  // re-inference - keeps the Patient atlas's coloring diverse. The
+  // Simulator's E-step on the same bag will produce a different (typically
+  // broader) theta; that disagreement is an LDA property of broad topics
+  // rather than something we can patch out. When conditioning is present
+  // and the bundle is STM, theta instead comes from the conditional
+  // logistic-normal (sampleConditionedTheta); see CohortConditioning.
   const drawOne = () => {
-    const theta = sampleDirichlet(model.alpha, rng)
+    let theta: number[]
+    let group: string | null = null
+    if (stm) {
+      const b = cc!.bundle
+      if (cc!.mode === 'set') {
+        group = cc!.group
+        theta = sampleConditionedTheta({
+          effects: b.covariateEffects!, x: setX!, correlation: b.correlation!,
+          topicBlocks: b.gating?.topic_blocks ?? null, group, rng,
+        })
+      } else {
+        const vals = sampleMarginalCovariates(b.covariateSchema!, rng)
+        group = b.gating ? sampleMarginalGroup(b.gating, rng) : null
+        const x = buildDesignVector(b.covariateSchema!.design_columns, vals)
+        theta = sampleConditionedTheta({
+          effects: b.covariateEffects!, x, correlation: b.correlation!,
+          topicBlocks: b.gating?.topic_blocks ?? null, group, rng,
+        })
+      }
+    } else {
+      theta = sampleDirichlet(model.alpha, rng)
+    }
     const nCodes = Math.max(1, samplePoisson(meanCodesPerDoc, rng))
     const bag: number[] = []
     for (let c = 0; c < nCodes; c++) {
@@ -84,7 +138,7 @@ export function generateCohort(input: CohortInput): SyntheticCohort {
       const q = qualityByPhenotype[dominantIdx(theta)]
       isClean = !(q === 'dead' || q === 'mixed')
     }
-    return { theta, bag, isClean }
+    return { theta, bag, isClean, group }
   }
 
   if (qualityByPhenotype) {
@@ -101,6 +155,7 @@ export function generateCohort(input: CohortInput): SyntheticCohort {
       thetas.push(d.theta)
       bags.push(d.bag)
       isCleanFlags.push(d.isClean)
+      groups.push(d.group)
       if (d.isClean) cleanCount++
       else messyCount++
     }
@@ -122,20 +177,22 @@ export function generateCohort(input: CohortInput): SyntheticCohort {
     const t2: number[][] = []
     const b2: number[][] = []
     const f2: boolean[] = []
+    const g2: (string | null)[] = []
     for (let i = 0; i < thetas.length; i++) {
       if (isCleanFlags[i] && keptClean < cleanKeep) {
-        t2.push(thetas[i]); b2.push(bags[i]); f2.push(true); keptClean++
+        t2.push(thetas[i]); b2.push(bags[i]); f2.push(true); g2.push(groups[i]); keptClean++
       } else if (!isCleanFlags[i] && keptMessy < messyKeep) {
-        t2.push(thetas[i]); b2.push(bags[i]); f2.push(false); keptMessy++
+        t2.push(thetas[i]); b2.push(bags[i]); f2.push(false); g2.push(groups[i]); keptMessy++
       }
     }
-    thetas = t2; bags = b2; isCleanFlags = f2
+    thetas = t2; bags = b2; isCleanFlags = f2; groups = g2
   } else {
     for (let i = 0; i < n; i++) {
       const d = drawOne()
       thetas.push(d.theta)
       bags.push(d.bag)
       isCleanFlags.push(d.isClean)
+      groups.push(d.group)
     }
   }
 
@@ -148,6 +205,7 @@ export function generateCohort(input: CohortInput): SyntheticCohort {
     code_bag: bags[i],
     neighbors: nbrIdx[i].map(pad),
     isClean: isCleanFlags[i],
+    group: groups[i],
   }))
   return { patients, seed }
 }

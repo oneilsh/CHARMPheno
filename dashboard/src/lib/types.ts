@@ -108,6 +108,10 @@ export interface SyntheticPatient {
   // or mixed. Basic mode hides patients with isClean=false; advanced
   // mode shows them. Always true when no quality labels are available.
   isClean: boolean
+  // Gating group this patient was drawn under (set mode: shared across the
+  // cohort; sample mode: per-patient marginal draw). Null for non-STM
+  // bundles or ungated STM bundles.
+  group?: string | null
 }
 export interface SyntheticCohort {
   patients: SyntheticPatient[]; seed: number
