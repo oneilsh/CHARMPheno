@@ -34,11 +34,22 @@ def build_correlation_json(R, identified, support, partition, kept_topic_ids,
         R_out.append([_cell(R[i][j]) for j in order])
         id_out.append([bool(identified[i][j]) for j in order])
         sup_out.append([int(support[i][j]) for j in order])
+    # topic_order / reference_topic are published in the dashboard's COMPACTED
+    # display space (position within kept_topic_ids), matching model.beta,
+    # covariate_effects per_topic, and gating.topic_blocks — all built
+    # positionally over the kept topics (model_adapter.py subsets by `kept`).
+    # The dashboard sampler indexes those compacted arrays with these values, so
+    # emitting the raw original id would mis-index whenever a k-anon-suppressed
+    # group leaves a gap in kept (the rare-disease case). R/identified/support
+    # above stay keyed by original id (Sigma lives in original K-space); their
+    # output rows are already positional, so only these two id fields remap.
+    pos = {int(tid): p for p, tid in enumerate(kept_topic_ids)}
     return {
-        "topic_order": [int(i) for i in order],
+        "topic_order": [pos[int(i)] for i in order],
         "block_labels": block_labels,
         "R": R_out,
         "identified": id_out,
         "support": sup_out,
-        "reference_topic": (int(reference_id) if reference_id is not None else None),
+        "reference_topic": (pos.get(int(reference_id))
+                            if reference_id is not None else None),
     }

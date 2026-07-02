@@ -138,6 +138,45 @@ def test_build_correlation_json_reference_topic_none_when_absent():
     assert out["reference_topic"] is None
 
 
+def test_build_correlation_json_topic_order_is_compacted_display_index():
+    """topic_order / reference_topic are published in the dashboard's COMPACTED
+    display space (position within kept_topic_ids), matching model.beta,
+    covariate_effects per_topic, and gating.topic_blocks — all built positionally
+    over the kept topics. When a k-anon-suppressed group leaves a GAP in kept
+    (e.g. topic 2 dropped -> kept=[0,1,3,4]), the emitted topic_order must be the
+    compacted positions [1,2,3], NOT the raw original ids [1,3,4]; otherwise the
+    dashboard sampler indexes per_topic/topic_blocks/eta (all compacted) with a
+    raw id and corrupts every conditioned draw for suppressed-group (rare-disease)
+    bundles. R/identified/support are still extracted by ORIGINAL id (Sigma lives
+    in original K-space), so their submatrix rows stay positional and correct."""
+    class _P:
+        group_var = "g"
+        groups = ["A"]
+        def topic_labels(self):
+            # Full original-K labels; ids 0,1 background, 2 = A (suppressed),
+            # 3,4 = B (kept). Topic 2 is absent from kept.
+            return ["background", "background", "A", "B", "B"]
+    # 5x5 in ORIGINAL topic space; only rows/cols for kept ids are read.
+    R = [[1.0, 0.3, 0.9, 0.2, 0.1],
+         [0.3, 1.0, 0.9, 0.1, 0.1],
+         [0.9, 0.9, 1.0, 0.9, 0.9],   # suppressed topic-2 row (never selected)
+         [0.2, 0.1, 0.9, 1.0, 0.4],
+         [0.1, 0.1, 0.9, 0.4, 1.0]]
+    ident = [[True] * 5 for _ in range(5)]
+    sup = [[300] * 5 for _ in range(5)]
+    kept = [0, 1, 3, 4]            # topic 2 suppressed -> GAP in kept
+    out = build_correlation_json(R, ident, sup, _P(), kept, reference_id=0)
+    # reference topic (original id 0) -> compacted position 0, excluded from order.
+    assert out["reference_topic"] == 0
+    # free kept topics are original ids 1,3,4 -> compacted positions 1,2,3
+    # (NOT the raw ids [1,3,4]).
+    assert out["topic_order"] == [1, 2, 3]
+    assert out["block_labels"] == ["background", "B", "B"]
+    # R submatrix extracted by ORIGINAL id: out[0][1] is corr(orig 1, orig 3)=0.1,
+    # NOT anything involving the suppressed topic 2.
+    assert out["R"][0][1] == 0.1
+
+
 def test_driver_mps_lookup_uses_nested_stm_hardening_floor():
     """The drivers read result.metadata.get("min_pair_support", 1), but
     min_pair_support is persisted nested under metadata["stm_hardening"]
