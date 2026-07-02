@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { bundle, conditioning, atlasConditioning } from '../store'
+  import { bundle, atlasConditioning } from '../store'
   import TopicMap from '../atlas/TopicMap.svelte'
   import CodePanel from '../atlas/CodePanel.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
@@ -8,9 +8,8 @@
   import ConditioningBar from '../conditioning/ConditioningBar.svelte'
   import { copy } from '../copy'
 
-  // Reset conditioning whenever the bundle changes (cohort switch must not
-  // carry stale covariate state into a bundle that may have different gating/schema).
-  $: { $bundle; conditioning.set({ covariateActive: false, values: {}, group: null }) }
+  // (Conditioning reset on cohort change is handled centrally in App.svelte via
+  // resetConditioningForCohort(); no per-panel reset needed here.)
 
   // Background-click closes the disclosure popover so the user doesn't
   // have to find and click the same link again to dismiss it.
@@ -45,7 +44,7 @@
     </div>
   </header>
 
-  <ConditioningBar store={atlasConditioning} />
+  <ConditioningBar store={atlasConditioning} showGroup={false} />
 
   <div class="grid">
     <div class="left-col">

@@ -33,9 +33,10 @@ it('covariateActive makes prevalenceReader use softmax(Gamma^T x)', () => {
   expect(reader({ id: 1 } as any)).toBeCloseTo(1 / 3, 6)
 })
 
-it('gating-only quadrant masks the non-covariate base without covariate_effects', () => {
-  // No covariateSchema / covariateEffects; gating present. corpus_prevalence is
-  // the base (no theta histogram), masked by group.
+it('gated bundle shows all cohorts in the display reader (no group masking)', () => {
+  // The Phenotype Atlas encodes cohort as node COLOR, not a filter, so the
+  // display reader never zeroes foreground topics by group — every cohort's
+  // topics show their base prevalence regardless of any selected group.
   bundle.set({
     phenotypes: { phenotypes: [
       { id: 0, corpus_prevalence: 0.5 },
@@ -44,13 +45,9 @@ it('gating-only quadrant masks the non-covariate base without covariate_effects'
     gating: { group_var: 'g', groups: ['rare_dx'],
       topic_blocks: ['background', 'rare_dx'] },
   } as any)
-  // Background only (group null): foreground topic 1 hidden.
-  let reader = get(prevalenceReader)
+  const reader = get(prevalenceReader)
   expect(reader({ id: 0, corpus_prevalence: 0.5 } as any)).toBeCloseTo(0.5, 6)
-  expect(reader({ id: 1, corpus_prevalence: 0.3 } as any)).toBe(0)
-  // Select rare_dx: foreground topic 1 revealed at its base value.
-  conditioning.set({ covariateActive: false, values: {}, group: 'rare_dx' })
-  reader = get(prevalenceReader)
+  // foreground topic 1 is NOT masked to 0 — it shows its base prevalence.
   expect(reader({ id: 1, corpus_prevalence: 0.3 } as any)).toBeCloseTo(0.3, 6)
 })
 

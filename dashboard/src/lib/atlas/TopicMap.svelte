@@ -6,8 +6,15 @@
     searchedConditionIdx, phenotypeCoords,
     prevalenceReader, tauThreshold, isVisibleInCurrentMode, conditioning,
   } from '../store'
+  import { groupHue } from '../palette'
   import { phenotypesContainingCode } from '../inference'
   import { copy } from '../copy'
+
+  // Cohort color + label helpers (gated bundles). Cohort now owns the node
+  // hue; groupHue gives foreground groups distinct colors and 'background'
+  // (not a group) a neutral gray.
+  $: grpColor = $groupHue
+  $: groupLabel = (g: string) => $bundle?.gating?.group_labels?.[g] ?? g
 
   // Phenotype-containment for highlight: switched from raw-β top-N to
   // relevance-ranked top-N (λ=0.6), matching the CodePanel's displayed
@@ -46,12 +53,16 @@
   $: coords = $phenotypeCoords
   $: reader = $prevalenceReader
 
-  // Diverging NPMI ramp: red (low) → neutral gray → cyan (high).
-  // Aligns with the global accent and avoids the rainbow look.
+  // Diverging NPMI ramp: red (low) → neutral gray → cyan (high). Used as the
+  // node HUE only for non-gated bundles (where cohort color doesn't apply).
   const npmiRamp = d3.scaleLinear<string>()
     .domain([-0.2, 0, 0.2, 0.4])
     .range(['#ef4444', '#d4d4d8', '#67e8f9', '#06b6d4'])
     .clamp(true)
+
+  // For gated bundles cohort owns the hue, so coherence (NPMI) is encoded as
+  // fill OPACITY instead: faded = low coherence, solid = high.
+  const cohOpacity = d3.scaleLinear().domain([0.05, 0.4]).range([0.45, 0.95]).clamp(true)
 
   function render() {
     if (!$bundle || !svgEl || coords.length === 0) return
@@ -81,8 +92,14 @@
       .domain([0, domainMax])
       .range([5, 26])
 
-    // null = unrated (no scored pairs); render as neutral.
-    const colorFn = (p: typeof phenotypes[0]) => npmiRamp(p.npmi ?? 0)
+    // Node hue: cohort (topic block) for gated bundles, else the NPMI ramp.
+    // Coherence rides on opacity in the gated case (see opacityFn).
+    const gated = !!$bundle.gating
+    const blocks = $bundle.gating?.topic_blocks
+    const colorFn = (p: typeof phenotypes[0]) =>
+      gated ? grpColor(blocks![p.id]) : npmiRamp(p.npmi ?? 0)
+    const opacityFn = (p: typeof phenotypes[0]) =>
+      gated ? cohOpacity(p.npmi ?? 0.05) : 0.85
 
     const svg = d3.select(svgEl)
     svg.selectAll('*').remove()
@@ -110,7 +127,7 @@
     nodes.append('circle')
       .attr('r', (p) => rad(p))
       .attr('fill', (p) => colorFn(p))
-      .attr('fill-opacity', 0.85)
+      .attr('fill-opacity', (p) => opacityFn(p))
       .attr('stroke', '#18181b')
       .attr('stroke-opacity', 0.25)
       .attr('stroke-width', 0.75)
@@ -145,24 +162,27 @@
         highlighted.has(p.id) ? (highlightStyle === 'pinned' ? 2.25 : 1.5) : 0
       )
 
-    // Quality indicator (advanced mode only) . small colored dot on the
-    // bubble's edge for dead/mixed topics. Simple mode hides these
-    // topics entirely so no marker is needed there.
-    const qualityMarkColor: Record<string, string> = {
-      dead: '#ef4444',   // red
-      mixed: '#f59e0b',  // amber
-    }
+    // Quality glyph (advanced mode only): ⊘ dead / ◑ mixed, drawn as a text
+    // element APPENDED TO EACH NODE GROUP so it inherits the bubble's transform
+    // and tracks it exactly (the previous separate-selection version recomputed
+    // absolute coords and drifted off bubbles whose prevalence was masked to 0).
+    // Good-quality topics get an empty string, which renders nothing.
+    const qualityGlyph: Record<string, string> = { dead: '⊘', mixed: '◑' }
+    const qualityColor: Record<string, string> = { dead: '#dc2626', mixed: '#d97706' }
     if ($advancedView) {
-      g.selectAll('circle.quality-mark')
-        .data(phenotypes.filter((p) => p.quality && qualityMarkColor[p.quality]))
-        .join('circle')
-        .attr('class', 'quality-mark')
-        .attr('cx', (p) => x(coords[p.id][0]) + rad(p) * 0.7)
-        .attr('cy', (p) => y(coords[p.id][1]) - rad(p) * 0.7)
-        .attr('r', 2.5)
-        .attr('fill', (p) => qualityMarkColor[p.quality!])
-        .attr('stroke', '#fff')
-        .attr('stroke-width', 1)
+      nodes.append('text')
+        .attr('class', 'quality-glyph')
+        .attr('x', (p) => rad(p) * 0.72 + 4)
+        .attr('y', (p) => -rad(p) * 0.72 - 4)
+        .attr('text-anchor', 'middle')
+        .attr('dominant-baseline', 'central')
+        .attr('font-size', 13)
+        .attr('paint-order', 'stroke')
+        .attr('stroke', '#ffffff')
+        .attr('stroke-width', 2.5)
+        .attr('stroke-linejoin', 'round')
+        .attr('fill', (p) => qualityColor[p.quality ?? ''] ?? 'transparent')
+        .text((p) => qualityGlyph[p.quality ?? ''] ?? '')
     }
 
     // Always-on labels for the N most prevalent bubbles (including the
@@ -220,20 +240,50 @@
   <svg bind:this={svgEl} role="img" aria-label="Phenotype atlas" preserveAspectRatio="xMidYMid meet"></svg>
   <figcaption class="legend">
     {#if $bundle}
-      <div class="legend-group">
-        <span class="eyebrow" title={copy.atlas.legend.coherence}>Coherence</span>
-        <span class="grad grad-npmi" aria-hidden="true"></span>
-        <span class="ticks" data-numeric><span>low</span><span>high</span></span>
-      </div>
-      <div class="legend-group">
-        <span class="eyebrow" title={copy.atlas.legend.prevalence($tauThreshold)}>Prevalence</span>
-        <span class="size-marks" aria-hidden="true">
-          <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
-        </span>
-      </div>
-      {#if $advancedView}
+      <!-- Top row: encodings shared by all bundles (coherence, prevalence,
+           and — in advanced mode — the quality glyphs). -->
+      <div class="legend-row">
+        {#if $bundle.gating}
+          <div class="legend-group">
+            <span class="eyebrow" title="Bubble opacity encodes topic coherence (NPMI): faded = low, solid = high.">Coherence<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="grad grad-coh" aria-hidden="true"></span>
+            <span class="ticks" data-numeric><span>low</span><span>high</span></span>
+          </div>
+        {:else}
+          <div class="legend-group">
+            <span class="eyebrow" title={copy.atlas.legend.coherence}>Coherence<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="grad grad-npmi" aria-hidden="true"></span>
+            <span class="ticks" data-numeric><span>low</span><span>high</span></span>
+          </div>
+        {/if}
         <div class="legend-group">
-          <span class="eyebrow" title={copy.atlas.legend.topicMass}>Topic mass</span>
+          <span class="eyebrow" title={copy.atlas.legend.prevalence($tauThreshold)}>Prevalence<span class="help-mark" aria-hidden="true">?</span></span>
+          <span class="size-marks" aria-hidden="true">
+            <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
+          </span>
+        </div>
+        {#if $advancedView}
+          <div class="legend-group">
+            <span class="eyebrow" title="Low-quality topics: ⊘ dead (no usable signal), ◑ mixed (blended themes).">Quality<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="quality-legend" aria-hidden="true">
+              <span class="q-glyph q-dead">⊘</span>dead
+              <span class="q-glyph q-mixed">◑</span>mixed
+            </span>
+          </div>
+        {/if}
+      </div>
+      <!-- Bottom row: cohort color key (gated bundles only). -->
+      {#if $bundle.gating}
+        <div class="legend-row">
+          <div class="legend-group">
+            <span class="eyebrow" title="Node color = the source cohort each phenotype belongs to.">Cohort<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="cohort-marks">
+              <span class="cohort-item"><span class="sw" style="background:{grpColor('background')}"></span>Background</span>
+              {#each $bundle.gating.groups as g}
+                <span class="cohort-item"><span class="sw" style="background:{grpColor(g)}"></span>{groupLabel(g)}</span>
+              {/each}
+            </span>
+          </div>
         </div>
       {/if}
     {/if}
@@ -257,17 +307,48 @@
   }
   .legend {
     display: flex;
-    gap: 1.5rem;
-    align-items: center;
+    flex-direction: column;
+    gap: 0.45rem;
+    align-items: flex-start;
     padding: 0.25rem 0.25rem;
     font-size: var(--fs-micro);
     color: var(--ink-faint);
+  }
+  .legend-row {
+    display: flex;
+    gap: 1.5rem;
+    align-items: center;
     flex-wrap: wrap;
   }
   .legend-group {
     display: flex;
     align-items: center;
     gap: 0.55rem;
+  }
+  /* Small circled "?" cueing a hover explanation on the label. Matches the
+     phenotype-detail panel's .help-mark convention (CodePanel.svelte); the
+     tooltip itself lives on the parent .eyebrow title. */
+  .eyebrow { cursor: help; }
+  .help-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 11px;
+    height: 11px;
+    margin-left: 0.3rem;
+    border: 1px solid var(--ink-faint);
+    border-radius: 50%;
+    font-family: var(--font-body);
+    font-size: 8px;
+    line-height: 1;
+    font-weight: 600;
+    color: var(--ink-faint);
+    vertical-align: middle;
+    transition: color 0.12s ease, border-color 0.12s ease;
+  }
+  .eyebrow:hover .help-mark {
+    color: var(--accent);
+    border-color: var(--accent);
   }
   .grad {
     display: inline-block;
@@ -278,6 +359,41 @@
   .grad-npmi {
     background: linear-gradient(to right, #ef4444, #d4d4d8, #06b6d4);
   }
+  /* Coherence-as-opacity ramp: a neutral swatch fading from low to high. */
+  .grad-coh {
+    background: linear-gradient(to right, rgba(100, 116, 139, 0.3), rgba(100, 116, 139, 0.95));
+  }
+  /* Cohort swatches. */
+  .cohort-marks {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.7rem;
+    flex-wrap: wrap;
+  }
+  .cohort-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .cohort-item .sw {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    border: 0.5px solid rgba(24, 24, 27, 0.25);
+  }
+  /* Quality-glyph legend. */
+  .quality-legend {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .q-glyph {
+    font-size: var(--fs-small);
+    line-height: 1;
+  }
+  .q-dead { color: #dc2626; }
+  .q-mixed { color: #d97706; }
   .ticks {
     display: inline-flex;
     gap: 0.4rem;

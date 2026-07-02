@@ -4,11 +4,16 @@
   import { initialValues, canInteract } from '../atlas/covariate-panel'
 
   export let store: import('svelte/store').Writable<import('../store').Conditioning>
+  // Whether to show the gating-group (cohort) selector. The Phenotype Atlas
+  // sets this false: it encodes cohort as node color and shows all cohorts, so
+  // a filter dropdown there would be redundant. Simulator/Patient keep it (they
+  // condition generation on a chosen group).
+  export let showGroup = true
 
   $: schema = $bundle?.covariateSchema
   $: gating = $bundle?.gating
   $: hasCovariates = !!schema && canInteract(schema)
-  $: hasGroup = !!gating
+  $: hasGroup = showGroup && !!gating
   $: visible = hasCovariates || hasGroup
 
   // Seed covariate values whenever the schema changes.
@@ -26,9 +31,9 @@
 
 {#if visible}
   <div class="conditioning-bar">
-    {#if hasGroup}
+    {#if hasGroup && gating}
       <div class="bar-section group-section">
-        <span class="bar-label">{gating.group_var}</span>
+        <span class="bar-label">{gating.group_var_label ?? gating.group_var}</span>
         <select
           class="cat-select"
           value={$store.group ?? ''}

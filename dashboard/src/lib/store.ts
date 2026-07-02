@@ -3,7 +3,7 @@ import type { UMAP } from 'umap-js'
 import type { CohortManifest, DashboardBundle, Phenotype, PhenotypeQuality, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
-import { buildDesignVector, covariatePrevalence, allowedMaskForGroup, covariatePrevalenceGated, maskGroupPrevalence } from './covariate'
+import { buildDesignVector, covariatePrevalence } from './covariate'
 
 export const bundle = writable<DashboardBundle | null>(null)
 export const cohort = writable<SyntheticCohort | null>(null)
@@ -166,41 +166,26 @@ export function fractionAboveTau(
 // calling fractionAboveTau directly, so the value updates reactively as
 // the slider moves.
 //
-// Four-quadrant logic:
-//   1. plain (no covariate, no gating)          -> fractionAboveTau (unchanged default)
-//   2. covariate active, no gating              -> softmax(Gamma^T x) via covariatePrevalence
-//   3. covariate active + gating                -> mask-before-softmax via covariatePrevalenceGated
-//   4. gating only (no covariate)               -> fractionAboveTau base then maskGroupPrevalence
+// Display prevalence reader. The Phenotype Atlas shows ALL cohorts (cohort is
+// encoded as node COLOR, not a filter — see TopicMap), so prevalence is never
+// masked by gating group. Two states remain:
+//   - covariate active  -> softmax(Gamma^T x) via covariatePrevalence (ungated)
+//   - otherwise          -> fractionAboveTau (per-topic base, all cohorts shown)
+// (Group masking now lives only in the generative sampler's allowed-set logic
+// in conditioning/logisticNormal, which is a different concern from display.)
 export const prevalenceReader = derived(
   [bundle, tauThreshold, conditioning],
   ([$b, $tau, $cond]) => {
     const schema = $b?.covariateSchema
     const effects = $b?.covariateEffects
-    const gating = $b?.gating
     const edges = $b?.phenotypes.theta_histogram_bin_edges
 
-    // Covariate axis: when active and renderable, base = softmax(Gamma^T x).
     const covariateOn =
       $cond.covariateActive && !!schema && !!effects && schema.unsupported.length === 0
     if (covariateOn) {
       const x = buildDesignVector(schema!.design_columns, $cond.values)
-      if (gating) {
-        const mask = allowedMaskForGroup(gating.topic_blocks, $cond.group)
-        const prev = covariatePrevalenceGated(effects!, x, mask)
-        return (p: Phenotype) => prev[p.id] ?? 0
-      }
       const prev = covariatePrevalence(effects!, x)
       return (p: Phenotype) => prev[p.id] ?? 0
-    }
-
-    // Non-covariate base = fractionAboveTau; mask by group when gated.
-    if (gating) {
-      // Build the per-topic base indexed by topic id (= displayed index, the
-      // same key topic_blocks uses), then mask hidden foreground to 0.
-      const base: number[] = []
-      for (const p of $b!.phenotypes.phenotypes) base[p.id] = fractionAboveTau(p, edges, $tau)
-      const masked = maskGroupPrevalence(base, gating.topic_blocks, $cond.group)
-      return (p: Phenotype) => masked[p.id] ?? 0
     }
     return (p: Phenotype) => fractionAboveTau(p, edges, $tau)
   }
