@@ -1,7 +1,7 @@
 ---
 id: 29
 slug: stm-population-cancer-sparse-foreground
-status: draft
+status: pending
 model_class: stm
 cohort: population_cancer_sparse
 cohort_def: population_cancer_sparse
@@ -30,11 +30,10 @@ spectral_method: dense
 min_pair_support: 10
 ---
 
-# Experiment 0029 (DRAFT) — Sparse-general-year foreground
+# Experiment 0029 — Sparse-general-year foreground
 
-> **STATUS: draft — NOT runnable yet.** Needs the `population_cancer_sparse`
-> cohort implemented (see "Implementation TODO"). Design captured here so it
-> survives a context compaction.
+> **STATUS: pending — runnable.** The `population_cancer_sparse` cohort is
+> implemented (cohorts.py) and registered; `make exp ID=29` will run it.
 
 ## Question
 
@@ -66,24 +65,27 @@ Persons with < 5 codes in the window are dropped (`doc_min_length: 5`). K=70 =
 40 background + 20 cancer + 10 sparse. The sparse foreground topics ARE the
 answer: their top codes + NPMI show what light-coder years are made of.
 
-## Implementation TODO (the one wrinkle)
+## Implementation (DONE)
 
 Doc length is only known after windowing, so the split is by event count in the
 window, computed inside the cohort:
 
-1. New cohort `population_cancer_sparse` in
-   [cohorts.py](../../charmpheno/charmpheno/omop/cohorts.py): cancer arm as in
-   `apply_population_cancer_cohort`; for the general (non-cancer) arm, after
-   `_random_event_windows` + windowing the events, `groupBy(person_id).count()`
-   the in-window events and tag `source_cohort` = `'sparse'` (5–19) vs
-   `'general'` (>= 20); drop < 5.
-2. Register in `SUPPORTED_COHORTS` + `COHORT_METADATA` + `apply_cohort` dispatch.
-3. Add `experiments/defaults/population_cancer_sparse.yaml` (cohort + cohort_def).
-4. Validation + windowing/bucketing tests in `test_cohorts.py`.
-5. Flip status draft → pending; `make exp ID=29`.
+1. ✅ Cohort `population_cancer_sparse` in
+   [cohorts.py](../../charmpheno/charmpheno/omop/cohorts.py)
+   (`apply_population_cancer_sparse_cohort`): cancer arm as in
+   `apply_population_cancer_cohort`; the general (non-cancer) arm is windowed
+   then split by `_bucket_general_by_density` — per-person in-window event count
+   tags `source_cohort='sparse'` (5–19) vs `'general'` (>= 20); < 5 dropped.
+2. ✅ Registered in `SUPPORTED_COHORTS` + `COHORT_METADATA` + `apply_cohort`.
+3. ✅ `experiments/defaults/population_cancer_sparse.yaml` (cohort + cohort_def).
+4. ✅ Bucketing + registration tests in `test_cohorts.py`.
+5. ✅ Status draft → pending; `make exp ID=29` is runnable.
 
-Note: the corpus-build content-peek (`group_top_codes` top-codes[sparse]) already
-gives a no-fit preview of the sparse band's codes; 0029 adds the topic structure.
+The bucketing count is the raw in-window event-row count (a proxy for doc
+length, which `to_bow_dataframe` measures on post-vocab tokens — so the split
+is approximate at the vocab-filter boundary). The corpus-build content-peek
+(`group_top_codes`, the `top-codes` line for the sparse group) also gives a
+no-fit preview of the sparse band's codes; 0029 adds the topic structure.
 
 ## Interpretation
 

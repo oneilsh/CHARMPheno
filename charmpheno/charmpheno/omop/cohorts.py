@@ -85,6 +85,7 @@ SUPPORTED_COHORTS: tuple[str, ...] = (
     "first_dementia_year",
     "cancer_or_dementia",
     "population_cancer",
+    "population_cancer_sparse",
 )
 
 # Fixed salt for the general-population random-window assignment. Hashing
@@ -170,6 +171,19 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "topics against cancer-specific foreground under one gated STM."
         ),
     },
+    "population_cancer_sparse": {
+        "id": "population_cancer_sparse",
+        "label": "Population + Cancer + Sparse (gated)",
+        "description": (
+            "As Population + Cancer, but the non-cancer arm is split by "
+            "in-window coding density: heavily-coded years (>= 20 events) stay "
+            "source_cohort='general' (background-only), while light-coder years "
+            "(5-19 events) become source_cohort='sparse' — their own foreground "
+            "block. Lets a gated STM surface whether light-coder general years "
+            "are generic-checkup content or carry real structure (exp 0029). "
+            "Three disjoint source_cohort tags: cancer, general, sparse."
+        ),
+    },
 }
 
 
@@ -223,6 +237,12 @@ def apply_cohort(
         )
     if cohort == "population_cancer":
         return apply_population_cancer_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_cancer_sparse":
+        return apply_population_cancer_sparse_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
             prior_obs_days=prior_obs_days,
@@ -630,4 +650,82 @@ def apply_population_cancer_cohort(
     return (
         cancer.withColumn("source_cohort", F.lit("cancer"))
         .unionByName(general.withColumn("source_cohort", F.lit("general")))
+    )
+
+
+def _bucket_general_by_density(
+    general_events: DataFrame,
+    *,
+    sparse_min: int = 5,
+    dense_min: int = 20,
+) -> DataFrame:
+    """Split the windowed general arm into 'sparse' and 'general' by density.
+
+    Tags each person's in-window events by their per-person event count:
+
+    - ``count >= dense_min``            -> ``source_cohort='general'`` (dense;
+      background-only, the usual heavily-coded general year).
+    - ``sparse_min <= count < dense_min`` -> ``source_cohort='sparse'`` (a
+      light-coder year, given its OWN foreground block so exp 0029 can read
+      whether such years are generic-checkup content or real signal).
+    - ``count < sparse_min``            -> dropped (they fall under
+      ``doc_min_length`` anyway).
+
+    The count is the raw in-window event-row count, a proxy for eventual
+    document length (which is measured on post-vocab tokens in
+    ``to_bow_dataframe``, so the bucketing is approximate at the vocab-filter
+    boundary). Row-preserving: every kept person's event rows survive, tagged.
+    """
+    counts = general_events.groupBy("person_id").agg(
+        F.count(F.lit(1)).alias("_n_events")
+    )
+    return (
+        general_events.join(counts, on="person_id", how="inner")
+        .withColumn(
+            "source_cohort",
+            F.when(F.col("_n_events") >= dense_min, F.lit("general"))
+            .when(F.col("_n_events") >= sparse_min, F.lit("sparse")),
+        )
+        .where(F.col("source_cohort").isNotNull())
+        .drop("_n_events")
+    )
+
+
+def apply_population_cancer_sparse_cohort(
+    cond_df: DataFrame,
+    *,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """population_cancer + a third 'sparse' foreground for light-coder years.
+
+    Identical to :func:`apply_population_cancer_cohort` except the general
+    (non-cancer) arm is split by in-window coding density
+    (:func:`_bucket_general_by_density`): heavily-coded years stay
+    ``source_cohort='general'`` (background-only), while light-coder years
+    (``sparse_min..dense_min-1`` events) become ``source_cohort='sparse'`` — a
+    dedicated foreground block. exp 0029 reads the sparse foreground topics to
+    test whether light-coder general years are generic-checkup content or carry
+    real structure. Three disjoint ``source_cohort`` tags: cancer, general,
+    sparse. Returns ``cond_df``'s schema plus ``source_cohort``.
+    """
+    cancer = apply_first_cancer_year_cohort(
+        cond_df, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        prior_obs_days=prior_obs_days,
+    )
+    cancer_persons = cancer.select("person_id").distinct()
+
+    non_cancer = cond_df.join(cancer_persons, on="person_id", how="left_anti")
+    general = _random_observed_year_cohort(
+        non_cancer, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+    )
+    general_tagged = _bucket_general_by_density(general)
+
+    return cancer.withColumn("source_cohort", F.lit("cancer")).unionByName(
+        general_tagged
     )
