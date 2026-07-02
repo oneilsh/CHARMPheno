@@ -110,7 +110,8 @@ def load_or_build_covariates(
     # absent (exp 0027/0028 gender_concept_id -> single sex level).
     with _phase("covariate level diagnostics"):
         log_categorical_level_counts(
-            person_df, ["gender_concept_id", *categorical_cols],
+            person_df,
+            ["sex_at_birth_concept_id", "sex_concept_name", *categorical_cols],
         )
 
     with _phase("build patient covariates"):

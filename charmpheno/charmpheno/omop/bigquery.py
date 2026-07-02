@@ -199,6 +199,40 @@ def decode_sex(gender_concept_id_col):
     )
 
 
+def decode_sex_from_name(gender_concept_name_col):
+    """Map an OMOP gender *concept name* to a sex string M / F / Unknown.
+
+    Decodes from the concept NAME rather than a hard-coded concept-id list so
+    the mapping is vocabulary-agnostic. The standard OMOP Gender concepts are
+    8507 'MALE' / 8532 'FEMALE', but datasets routinely carry their own
+    encoding: the All of Us Registered Tier `person.gender_concept_id` uses
+    45878463 'Female' / 45880669 'Male' plus custom 2000000000+ concepts for
+    aggregated gender-identity survey responses — none of which are 8507/8532,
+    so an id-based decoder collapses every AoU person to 'Unknown' and silently
+    drops C(sex) from the design matrix (exp 0027/0028). Reading the name
+    handles all of these through OMOP's own vocabulary.
+
+    Matching is on the lower-cased, trimmed name against the exact tokens
+    {female, woman} -> 'F' and {male, man} -> 'M'; every other value maps to
+    'Unknown', NOT to a sex. Exact-token (not substring) matching is
+    deliberate: AoU's aggregated concept name 'Not man only, not woman only,
+    prefer not to answer' contains 'man'/'woman' as substrings, so a substring
+    rule would misclassify it — and conflating unknowns with a sex turns the
+    covariate into a constant.
+
+    Standard gender concepts per the OHDSI OMOP CDM Gender vocabulary; AoU
+    gender concept ids per the All of Us CDR `person` table.
+    """
+    from pyspark.sql import functions as F
+
+    norm = F.lower(F.trim(gender_concept_name_col))
+    return (
+        F.when(norm.isin("female", "woman"), "F")
+        .when(norm.isin("male", "man"), "M")
+        .otherwise("Unknown")
+    )
+
+
 def load_person_table(
     *,
     spark,
@@ -233,8 +267,20 @@ def load_person_table(
 
     Returns:
         Spark DataFrame with columns: person_id (long), year_of_birth
-        (int), gender_concept_id (int), age (double), sex (string M/F/Unknown).
-        One row per person_id in the sampled population.
+        (int), sex_at_birth_concept_id (int), sex_concept_name (string, from
+        the concept vocabulary), age (double), sex (string M/F/Unknown decoded
+        from the concept name). One row per person_id in the sampled
+        population.
+
+    Sex source: reads ``person.sex_at_birth_concept_id`` (standard OMOP Gender
+    concepts 8507 'Male' / 8532 'Female'), NOT ``gender_concept_id``. In the
+    All of Us CDR the `person` table stores *gender identity* in
+    ``gender_concept_id`` (custom concepts 45878463 'Female' / 45880669 'Male'
+    / 1585841 'Non-Binary' / 2000000002 'Not man only, not woman only' / ...)
+    and *sex assigned at birth* in ``sex_at_birth_concept_id``. Decoding
+    ``gender_concept_id`` collapsed every AoU person to a single non-standard
+    level and dropped C(sex) from the design matrix (exp 0027/0028); sex at
+    birth is the intended prevalence covariate here.
     """
     from pyspark.sql import functions as F
 
@@ -247,19 +293,35 @@ def load_person_table(
             f"person_sample_mod must be >= 1 or None, got {person_sample_mod}"
         )
 
-    df = (
-        spark.read.format("bigquery")
-        .option("table", f"{cdr_dataset}.person")
-        .option("parentProject", billing_project)
-        .load()
-        .select("person_id", "year_of_birth", "gender_concept_id")
+    def _read(table: str) -> "DataFrame":
+        return (
+            spark.read.format("bigquery")
+            .option("table", f"{cdr_dataset}.{table}")
+            .option("parentProject", billing_project)
+            .load()
+        )
+
+    df = _read("person").select(
+        "person_id", "year_of_birth", "sex_at_birth_concept_id"
     )
 
     if person_sample_mod is not None:
         df = df.where((F.col("person_id") % person_sample_mod) == 0)
 
+    # Resolve the sex concept NAME so decoding is vocabulary-agnostic (the
+    # standard OMOP 8507/8532 concepts carry human-readable 'Male'/'Female'
+    # names). The `concept` table is large but only a handful of distinct sex
+    # concepts participate; no broadcast hint (an explicit F.broadcast on the
+    # full concept table OOM'd the driver in client mode — see
+    # load_omop_bigquery), let AQE pick the join strategy.
+    sex_concept = _read("concept").select(
+        F.col("concept_id").alias("sex_at_birth_concept_id"),
+        F.col("concept_name").alias("sex_concept_name"),
+    )
+    df = df.join(sex_concept, on="sex_at_birth_concept_id", how="left")
+
     # Approximate age from year_of_birth; 2025 is a fixed reference year
     # matching the nominal AoU CDR snapshot used at time of writing.
     df = df.withColumn("age", (F.lit(2025) - F.col("year_of_birth")).cast("double"))
-    df = df.withColumn("sex", decode_sex(F.col("gender_concept_id")))
+    df = df.withColumn("sex", decode_sex_from_name(F.col("sex_concept_name")))
     return df

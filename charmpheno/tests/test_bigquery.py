@@ -33,6 +33,44 @@ def test_decode_sex_maps_standard_concepts_and_does_not_conflate_unknown(spark):
     assert got[None] == "Unknown"   # null gender, not Female
 
 
+def test_decode_sex_from_name_is_vocabulary_agnostic(spark):
+    """Decoding sex from the gender *concept name* must cover standard OMOP
+    ('MALE'/'FEMALE') and dataset-specific vocabularies alike (AoU uses
+    45878463 'Female' / 45880669 'Male'), and must NOT be fooled by AoU's
+    aggregated PPI concept 2000000002 whose name contains 'man'/'woman' as
+    substrings ('not man only, not woman only ...') — that maps to 'Unknown'.
+    Exact-token matching, whitespace/case tolerant."""
+    from pyspark.sql import functions as F
+    from charmpheno.omop.bigquery import decode_sex_from_name
+
+    rows = [
+        ("FEMALE",), ("MALE",),          # standard OMOP 8532 / 8507 names
+        ("Female",), ("Male",),          # AoU 45878463 / 45880669 names
+        ("Woman",), ("Man",),            # PPI-style gender identity
+        ("Not man only, not woman only, prefer not to answer",),  # AoU 2000000002
+        ("No matching concept",),        # concept_id 0
+        (None,),                         # null / no concept row
+        (" female ",),                   # whitespace + case tolerance
+    ]
+    df = spark.createDataFrame(rows, ["gender_concept_name"])
+    got = {
+        (r["gender_concept_name"] or "<null>"): r["sex"]
+        for r in df.withColumn(
+            "sex", decode_sex_from_name(F.col("gender_concept_name"))
+        ).collect()
+    }
+    assert got["FEMALE"] == "F"
+    assert got["MALE"] == "M"
+    assert got["Female"] == "F"
+    assert got["Male"] == "M"
+    assert got["Woman"] == "F"
+    assert got["Man"] == "M"
+    assert got["Not man only, not woman only, prefer not to answer"] == "Unknown"
+    assert got["No matching concept"] == "Unknown"
+    assert got["<null>"] == "Unknown"
+    assert got[" female "] == "F"
+
+
 def test_rejects_malformed_cdr_dataset(spark):
     with pytest.raises(ValueError, match="<project>.<dataset>"):
         load_omop_bigquery(
