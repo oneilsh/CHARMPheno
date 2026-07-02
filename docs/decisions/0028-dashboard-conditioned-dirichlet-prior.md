@@ -1,7 +1,9 @@
 # ADR 0028: Dashboard conditions its client-side samplers via a Dirichlet mean-match
 
-**Status:** Accepted
+**Status:** Accepted (superseded for STM bundles 2026-07-01 by ADR [0035](0035-dashboard-logistic-normal-forward-sampler.md); Dirichlet mean-match retained for non-STM/LDA/HDP bundles)
 **Date:** 2026-06-25
+
+**Supersession note:** For STM bundles, ADR 0035 supersedes this decision. Σ is now exported via `correlation.json` (ADR 0034), so the generative panels sample from the faithful logistic-normal prior. The Dirichlet mean-match remains the path ONLY for non-STM bundles (LDA, HDP, and other models) which lack Σ export.
 
 ## Context
 
