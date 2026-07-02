@@ -87,3 +87,43 @@ def test_adapt_stm_subsets_theta_arrays_to_kept():
     assert exp.theta_percentiles.shape[0] == n_kept, (
         f"theta_percentiles axis-0 length {exp.theta_percentiles.shape[0]} != {n_kept}"
     )
+
+
+def test_build_gating_json_emits_labels_and_proportions():
+    """Gated bundle carries humanized group_var_label + per-group labels, and a
+    k-anon-safe group_proportions over kept groups (summing to 1) for the
+    dashboard's per-patient group draw."""
+    from charmpheno.export.gating import build_gating_json
+
+    class _P:
+        group_var = "source_cohort"
+        groups = ["cancer", "dementia"]
+        def topic_labels(self):
+            return ["background"] * 30 + ["cancer"] * 10 + ["dementia"] * 10
+        def block_indices(self, g):
+            return range(30, 40) if g == "cancer" else range(40, 50)
+    counts = {"cancer": 9000, "dementia": 2000}
+    kept = list(range(50))
+    out = build_gating_json(_P(), counts, k=20, kept_topic_ids=kept)
+    assert out["group_var_label"] == "Source cohort"     # humanized
+    assert out["group_labels"] == {"cancer": "Cancer", "dementia": "Dementia"}
+    props = out["group_proportions"]
+    assert abs(sum(props.values()) - 1.0) < 1e-9
+    assert abs(props["cancer"] - 9000 / 11000) < 1e-9
+
+
+def test_build_gating_json_label_override():
+    from charmpheno.export.gating import build_gating_json
+
+    class _P:
+        group_var = "rare_dx"
+        groups = ["rare_dx"]
+        def topic_labels(self):
+            return ["background"] * 2 + ["rare_dx"]
+        def block_indices(self, g):
+            return [2]
+    out = build_gating_json(
+        _P(), {"rare_dx": 100}, k=20, kept_topic_ids=[0, 1, 2],
+        group_label_overrides={"rare_dx": "Rare diabetes cohort"},
+    )
+    assert out["group_labels"]["rare_dx"] == "Rare diabetes cohort"
