@@ -39,6 +39,13 @@ def compute_cache_key(
     prior-observation lookback sets corpus membership. Without it, a widened
     cohort (shorter lookback) would reload the narrower covariate set and the
     corpus+covariate inner join would silently drop the new patients.
+
+    `v` is a schema/definition version. The cohort NAME is keyed but its CODE
+    version is not, so when a cohort's membership changes without a config change
+    (e.g. population_cancer's general arm switching to event-anchored windows,
+    which grew its person set), the old covariate cache would otherwise stay a
+    hit and drop the new persons at the join. Bump `v` on any such change. v=2
+    was bumped alongside corpus-cache v=5 for the population_cancer windowing fix.
     """
     payload = json.dumps({
         "covariate_formula": covariate_formula,
@@ -47,6 +54,7 @@ def compute_cache_key(
         "source_table": source_table,
         "cohort": cohort,
         "prior_obs_days": int(prior_obs_days),
+        "v": 2,
     }, sort_keys=True).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]
 
