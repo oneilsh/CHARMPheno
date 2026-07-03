@@ -24,6 +24,8 @@ Currently implemented:
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
@@ -284,6 +286,36 @@ def _window_observed_cohort(
                <= F.col("observation_period_end_date"))
         .select("person_id", "index_date")
     )
+
+
+def _concept_set_from_ancestors(
+    ca_df: DataFrame,
+    *,
+    inclusion_ancestors: Sequence[int],
+    exclusion_ancestors: Sequence[int] = (),
+) -> DataFrame:
+    """Build a concept-id set from a concept_ancestor DataFrame.
+
+    Includes-then-excludes: (⋃ descendants of ``inclusion_ancestors``) −
+    (⋃ descendants of ``exclusion_ancestors``). A concept reachable from both
+    an inclusion and an exclusion ancestor is excluded. ``ca_df`` must have
+    ``ancestor_concept_id`` and ``descendant_concept_id`` columns; returns a
+    distinct single-column ``concept_id`` DataFrame. Predicates on
+    ``ancestor_concept_id`` push down to BQ, so only the ~thousands of relevant
+    concept ids materialize, not the full concept_ancestor table.
+    """
+    included = (
+        ca_df.where(F.col("ancestor_concept_id").isin(list(inclusion_ancestors)))
+        .select(F.col("descendant_concept_id").alias("concept_id"))
+        .distinct()
+    )
+    if exclusion_ancestors:
+        excluded = (
+            ca_df.where(F.col("ancestor_concept_id").isin(list(exclusion_ancestors)))
+            .select(F.col("descendant_concept_id").alias("concept_id"))
+        )
+        included = included.subtract(excluded).distinct()
+    return included
 
 
 def apply_first_cancer_year_cohort(

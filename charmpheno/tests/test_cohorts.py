@@ -187,3 +187,30 @@ def test_bucket_general_by_density_splits_sparse_dense_and_drops_below_min(spark
     assert out.where(out.person_id == 1).count() == 0    # dropped person gone
     # no leftover count column leaks into the schema
     assert "source_cohort" in out.columns and "_n_events" not in out.columns
+
+
+def test_concept_set_from_ancestors_unions_inclusions_and_subtracts_exclusions(spark):
+    from charmpheno.omop.cohorts import _concept_set_from_ancestors
+    ca = spark.createDataFrame(
+        [
+            (100, 1), (100, 2), (100, 3),   # inclusion ancestor A -> {1,2,3}
+            (200, 3), (200, 4),             # inclusion ancestor B -> {3,4}
+            (900, 2),                       # exclusion ancestor   -> {2}
+        ],
+        ["ancestor_concept_id", "descendant_concept_id"],
+    )
+    out = _concept_set_from_ancestors(
+        ca, inclusion_ancestors=[100, 200], exclusion_ancestors=[900],
+    )
+    # union {1,2,3,4} minus {2} = {1,3,4}; 3 is in both inclusions, not excluded
+    assert {r["concept_id"] for r in out.collect()} == {1, 3, 4}
+
+
+def test_concept_set_from_ancestors_no_exclusions_dedups(spark):
+    from charmpheno.omop.cohorts import _concept_set_from_ancestors
+    ca = spark.createDataFrame(
+        [(79145, 10), (79145, 11), (79145, 11)],
+        ["ancestor_concept_id", "descendant_concept_id"],
+    )
+    out = _concept_set_from_ancestors(ca, inclusion_ancestors=[79145])
+    assert {r["concept_id"] for r in out.collect()} == {10, 11}
