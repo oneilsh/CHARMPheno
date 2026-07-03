@@ -151,13 +151,13 @@ describe('buildGenerativeSigma', () => {
       reference_topic: 0,
     }
     const freeIdx = [0, 1, 2]
-    const Sigma = buildGenerativeSigma(corr, freeIdx, 1)
+    const Sigma = buildGenerativeSigma(corr, freeIdx)
     for (let i = 0; i < 3; i++)
       for (let j = 0; j < 3; j++)
         expect(Sigma[i][j]).toBe(corr.R[i][j])
   })
 
-  it('scales off-diagonal and diagonal entries by sqrt(concentration * var) products', () => {
+  it('scales off-diagonal and diagonal entries by sqrt(var) products', () => {
     const corr: Correlation = {
       topic_order: [1, 2], block_labels: ['background', 'background'],
       R: [[1, 0.5], [0.5, 1]],
@@ -167,21 +167,22 @@ describe('buildGenerativeSigma', () => {
       eta_var: [0, 2, 8], // indexed by display topic id; ref (0) unused
     }
     const freeIdx = [0, 1]
-    const Sigma = buildGenerativeSigma(corr, freeIdx, 3)
-    // s0 = sqrt(3*2), s1 = sqrt(3*8)
-    const s0 = Math.sqrt(3 * 2)
-    const s1 = Math.sqrt(3 * 8)
+    const Sigma = buildGenerativeSigma(corr, freeIdx)
+    // s0 = sqrt(2), s1 = sqrt(8)
+    const s0 = Math.sqrt(2)
+    const s1 = Math.sqrt(8)
     expect(Sigma[0][0]).toBeCloseTo(1 * s0 * s0, 10)
     expect(Sigma[1][1]).toBeCloseTo(1 * s1 * s1, 10)
     expect(Sigma[0][1]).toBeCloseTo(0.5 * s0 * s1, 10)
   })
 })
 
-describe('sampleConditionedTheta concentration', () => {
+describe('sampleConditionedTheta eta_var', () => {
   // A K=3 fixture (reference 0, free topics 1,2 with positive correlation)
-  // where a higher concentration should visibly concentrate theta onto
-  // fewer topics: track the mean top-topic (max) mass over many draws.
-  function meanTopMass(concentration: number, seed: number): number {
+  // where a large exported eta_var should visibly concentrate theta onto
+  // fewer topics relative to eta_var absent (unit fallback): track the mean
+  // top-topic (max) mass over many draws.
+  function meanTopMass(etaVar: number[] | undefined, seed: number): number {
     const effects: CovariateEffects = [{ covariate: 'Intercept', per_topic: [0, 0, 0] }]
     const corr: Correlation = {
       topic_order: [1, 2], block_labels: ['background', 'background'],
@@ -189,7 +190,7 @@ describe('sampleConditionedTheta concentration', () => {
       identified: [[true, true], [true, true]],
       support: [[9, 9], [9, 9]],
       reference_topic: 0,
-      eta_var: [0, 1, 1],
+      eta_var: etaVar,
     }
     const rng = createRng(seed)
     const N = 3000
@@ -197,19 +198,19 @@ describe('sampleConditionedTheta concentration', () => {
     for (let i = 0; i < N; i++) {
       const theta = sampleConditionedTheta({
         effects, x: [1], correlation: corr, topicBlocks: null, group: null,
-        rng, concentration,
+        rng,
       })
       sumTop += Math.max(...theta)
     }
     return sumTop / N
   }
 
-  it('a high concentration produces more concentrated draws (higher mean top-topic mass)', () => {
-    const lowConc = meanTopMass(1, 101)
-    const highConc = meanTopMass(10, 101)
-    expect(highConc).toBeGreaterThan(lowConc)
-    // Sanity: high concentration should push the average top mass well above
-    // uniform-over-3 (1/3) towards near-deterministic per draw.
-    expect(highConc).toBeGreaterThan(0.6)
+  it('a large exported eta_var produces more concentrated draws than eta_var absent', () => {
+    const noVar = meanTopMass(undefined, 101)
+    const largeVar = meanTopMass([0, 10, 10], 101)
+    expect(largeVar).toBeGreaterThan(noVar)
+    // Sanity: the large-variance draws should push the average top mass well
+    // above uniform-over-3 (1/3) towards near-deterministic per draw.
+    expect(largeVar).toBeGreaterThan(0.6)
   })
 })

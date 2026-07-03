@@ -39,18 +39,19 @@ export function mvnDraw(mean: number[], L: number[][], rng: () => number): numbe
 
 // Generative covariance sub-block over the free rows: the exported correlation R
 // (unit-diagonal) rescaled to a covariance by the per-topic empirical eta variance
-// (correlation.eta_var), times a user concentration multiplier. Sigma[a][b] =
-// R[i][j] * s_a * s_b, s_k = sqrt(concentration * var_k), var_k = eta_var[displayId] ?? 1.
-// With eta_var absent and concentration=1 this is exactly R (byte-identical to the
-// prior behavior). Larger variance/concentration -> less diffuse draws.
+// (correlation.eta_var). Sigma[a][b] = R[i][j] * s_a * s_b, s_k = sqrt(var_k),
+// var_k = eta_var[displayId] ?? 1. With eta_var absent this is exactly R
+// (byte-identical to the prior behavior). Scaling R up by the empirical eta_var
+// raises the eta variance, and softmax of higher-variance eta yields MORE
+// peaked theta (more concentrated patients) - the exported per-topic empirical
+// between-document eta variance sets that scale.
 export function buildGenerativeSigma(
   correlation: Correlation,
   freeIdx: number[],
-  concentration: number,
 ): number[][] {
   const order = correlation.topic_order
   const ev = correlation.eta_var
-  const s = freeIdx.map((r) => Math.sqrt(concentration * (ev ? (ev[order[r]] ?? 1) : 1)))
+  const s = freeIdx.map((r) => Math.sqrt(ev ? (ev[order[r]] ?? 1) : 1))
   return freeIdx.map((ri, a) =>
     freeIdx.map((rj, b) => (correlation.R[ri][rj] as number) * s[a] * s[b]))
 }
@@ -68,9 +69,8 @@ export function sampleConditionedTheta(args: {
   topicBlocks: string[] | null
   group: string | null
   rng: () => number
-  concentration?: number
 }): number[] {
-  const { effects, x, correlation, topicBlocks, group, rng, concentration = 1 } = args
+  const { effects, x, correlation, topicBlocks, group, rng } = args
   const K = effects[0]?.per_topic.length ?? 0
   const ref = correlation.reference_topic ?? -1
   const order = correlation.topic_order        // display id per R row (free topics)
@@ -99,7 +99,7 @@ export function sampleConditionedTheta(args: {
   })
 
   // Sigma sub-block over the free rows (guaranteed non-null / PD).
-  const Sigma = buildGenerativeSigma(correlation, freeIdx, concentration)
+  const Sigma = buildGenerativeSigma(correlation, freeIdx)
 
   const etaFree = freeIdx.length
     ? mvnDraw(mean, choleskyPD(Sigma), rng)

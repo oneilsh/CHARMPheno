@@ -19,15 +19,13 @@ export function sampleRecordPosterior(args: {
   prefixCounts: Map<number, number>
   beta: number[][]
   rng: () => number
-  concentration?: number
 }): number[] {
-  const { effects, x, correlation, topicBlocks, group, prefixCounts, beta, rng, concentration = 1 } = args
+  const { effects, x, correlation, topicBlocks, group, prefixCounts, beta, rng } = args
 
   // Empty prefix: the posterior is the prior. Delegate so the draw is identical
-  // (including at any concentration — this keeps the "empty prefix == prior
-  // draw" invariant true regardless of the concentration multiplier).
+  // — this keeps the "empty prefix == prior draw" invariant true.
   if (prefixCounts.size === 0) {
-    return sampleConditionedTheta({ effects, x, correlation, topicBlocks, group, rng, concentration })
+    return sampleConditionedTheta({ effects, x, correlation, topicBlocks, group, rng })
   }
 
   const K = effects[0]?.per_topic.length ?? 0
@@ -58,7 +56,7 @@ export function sampleRecordPosterior(args: {
     effects.forEach((e, p) => { m += e.per_topic[k] * x[p] })
     return m
   })
-  const Sigma = buildGenerativeSigma(correlation, freeIdx, concentration)
+  const Sigma = buildGenerativeSigma(correlation, freeIdx)
 
   if (F === 0) {
     // Only the reference is allowed: all mass on it (or empty -> uniform-safe).
