@@ -108,7 +108,7 @@
   <header class="section-head">
     <div class="title-block">
       <div class="title-row">
-        <h1>{copy.simulator.title}</h1>
+        <p class="kicker">{copy.simulator.kicker}</p>
         <details class="what-is" bind:this={whatIsEl} bind:open={whatIsOpen}>
           <summary>{copy.simulator.whatIsSummary}</summary>
           <div class="what-is-body popover">
@@ -118,7 +118,6 @@
           </div>
         </details>
       </div>
-      <p class="kicker">{copy.simulator.kicker}</p>
     </div>
   </header>
 
@@ -196,7 +195,6 @@
     border-bottom: 1px solid var(--rule);
   }
   .title-block { display: flex; flex-direction: column; gap: 0.45rem; }
-  .title-block h1 { margin: 0.1rem 0 0; }
   .title-row {
     display: flex;
     align-items: baseline;
@@ -205,7 +203,7 @@
     position: relative;
   }
   .kicker {
-    margin: 0.25rem 0 0;
+    margin: 0;
     font-size: var(--fs-small);
     color: var(--ink-muted);
     max-width: 62ch;

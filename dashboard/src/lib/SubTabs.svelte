@@ -21,7 +21,6 @@
     display: inline-flex;
     gap: 0.25rem;
     padding: 0.25rem;
-    margin-bottom: 1.25rem;
     background: var(--surface-sunk, rgba(0, 0, 0, 0.03));
     border: 1px solid var(--rule);
     border-radius: 8px;

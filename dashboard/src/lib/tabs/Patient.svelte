@@ -2,9 +2,8 @@
   import {
     bundle, cohort, patientsById, selectedPatientId, selectedPhenotypeId,
     advancedView, searchedPhenotypeForPatients, phenotypesById,
-    patientConditioning, colorByGroup,
+    colorByGroup,
   } from '../store'
-  import { generateCohort } from '../cohort'
   import { phenotypeHue } from '../palette'
   import { displayedDominant } from '../dominant'
   import PatientMap from '../patient/PatientMap.svelte'
@@ -13,24 +12,13 @@
   import ContributingCodes from '../patient/ContributingCodes.svelte'
   import NeighborRibbon from '../patient/NeighborRibbon.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
-  import ConditioningBar from '../conditioning/ConditioningBar.svelte'
   import { copy } from '../copy'
 
-  // Initial batch size; adaptive sizing in cohort.ts may grow this.
-  const COHORT_N = 1500
-  const NEIGHBORS = 8
-
-  // STM bundles carry covariate effects + a correlation structure, which
-  // together let generateCohort draw conditioned theta via
-  // sampleConditionedTheta. Non-STM bundles fall back to the plain
-  // Dirichlet-prior cohort (conditioning is not passed at all).
-  $: isStm = !!$bundle?.covariateEffects && !!$bundle?.correlation
+  // This view only displays the current cohort ($cohort, populated on app
+  // load / on cohort switch — see App.svelte). It has no generation or
+  // conditioning controls of its own; a gated STM bundle still carries a
+  // group per patient, which the color-by-group toggle below can display.
   $: hasGroup = !!$bundle?.gating
-
-  // 'sample': each patient draws its own marginal covariates/group (mirrors
-  // the corpus mix). 'set': every patient shares the conditioning-bar's
-  // fixed group/covariate values. Only meaningful for STM bundles.
-  let mode: 'sample' | 'set' = 'sample'
 
   // Visible-in-current-mode patients (basic = clean only, advanced = all).
   // We default the detail panel selection to one of these so basic mode
@@ -61,30 +49,6 @@
   // click anywhere outside, not only by re-clicking the link.
   let whatIsEl: HTMLDetailsElement
   let whatIsOpen = false
-
-  function regenCohort() {
-    if (!$bundle || !$cohort) return
-    // Derive next seed from the current cohort, not a local counter:
-    // tab unmount resets locals but the store survives, so this keeps
-    // the regen sequence (42 → 43 → 44 ...) deterministic and walkthrough-
-    // friendly even if the user navigates away and back.
-    const nextSeed = $cohort.seed + 1
-    const cond = $patientConditioning
-    cohort.set(generateCohort({
-      model: $bundle.model,
-      meanCodesPerDoc: $bundle.corpusStats.mean_codes_per_doc,
-      n: COHORT_N,
-      seed: nextSeed,
-      nNeighbors: NEIGHBORS,
-      qualityByPhenotype: $bundle.phenotypes.phenotypes.map((p) => p.quality),
-      conditioning: isStm
-        ? { mode, values: cond.values, group: cond.group, bundle: $bundle }
-        : undefined,
-    }))
-    // Selection no longer points at a valid patient after regenerate;
-    // let the reactive block above pick patients[0].
-    selectedPatientId.set(null)
-  }
 </script>
 
 <svelte:window on:click={(e) => {
@@ -97,7 +61,7 @@
   <header class="section-head">
     <div class="title-block">
       <div class="title-row">
-        <h1>{copy.patient.title}</h1>
+        <p class="kicker">{copy.patient.kicker}</p>
         <details class="what-is" bind:this={whatIsEl} bind:open={whatIsOpen}>
           <summary>{copy.patient.whatIsSummary}</summary>
           <div class="what-is-body popover">
@@ -107,7 +71,6 @@
           </div>
         </details>
       </div>
-      <p class="kicker">{copy.patient.kicker}</p>
     </div>
     <div class="controls">
       <div class="control-stack">
@@ -123,31 +86,17 @@
     </div>
   </header>
 
-  <ConditioningBar store={patientConditioning} />
-
   <div class="grid">
     <div class="left-col">
       <PatientMap />
-      <div class="map-actions">
-        {#if isStm}
-          <div class="mode-toggle" role="group" title="Sample: each patient draws its own covariates/group. Set: every patient shares the conditioning bar's fixed group.">
-            <button type="button" class="mode-btn" class:active={mode === 'sample'}
-              on:click={() => { mode = 'sample' }}>sample</button>
-            <button type="button" class="mode-btn" class:active={mode === 'set'}
-              on:click={() => { mode = 'set' }}>set</button>
-          </div>
-        {/if}
-        {#if isStm && hasGroup}
+      {#if hasGroup}
+        <div class="map-actions">
           <label class="color-toggle" title="Color patient-atlas points by each patient's gating group instead of dominant phenotype.">
             <input type="checkbox" bind:checked={$colorByGroup} />
             <span>color by group</span>
           </label>
-        {/if}
-        <button class="btn-ghost regen" on:click={regenCohort}
-          title="Re-roll the synthetic cohort with a new random seed">
-          ↻ regenerate cohort
-        </button>
-      </div>
+        </div>
+      {/if}
       <PatientBrowser />
     </div>
 
@@ -194,7 +143,6 @@
     border-bottom: 1px solid var(--rule);
   }
   .title-block { display: flex; flex-direction: column; gap: 0.45rem; }
-  .title-block h1 { margin: 0.1rem 0 0; }
   .title-row {
     display: flex;
     align-items: baseline;
@@ -203,7 +151,7 @@
     position: relative;
   }
   .kicker {
-    margin: 0.25rem 0 0;
+    margin: 0;
     font-size: var(--fs-small);
     color: var(--ink-muted);
     max-width: 62ch;
@@ -274,8 +222,6 @@
     gap: 0.35rem;
     align-items: flex-end;
   }
-  .regen { font-family: var(--font-body); font-size: var(--fs-small); }
-  .regen:hover { color: var(--accent); }
   /* Sits just below the patient map, right-aligned; pulled up tight against
      the map (overrides the left-col's 1.25rem gap). */
   .map-actions {
@@ -284,30 +230,6 @@
     justify-content: flex-end;
     gap: 0.85rem;
     margin-top: -0.75rem;
-  }
-
-  .mode-toggle {
-    display: inline-flex;
-    border: 1px solid var(--rule-strong);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-  }
-  .mode-btn {
-    border: 0;
-    background: var(--surface);
-    color: var(--ink-muted);
-    padding: 0.2rem 0.55rem;
-    font-family: var(--font-mono);
-    font-size: var(--fs-micro);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    cursor: pointer;
-    transition: color 0.12s ease, background 0.12s ease;
-  }
-  .mode-btn + .mode-btn { border-left: 1px solid var(--rule-strong); }
-  .mode-btn.active {
-    background: var(--accent-faint);
-    color: var(--accent);
   }
 
   .color-toggle {
