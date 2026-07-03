@@ -16,9 +16,11 @@ export interface SimulatorRunInput {
   // scales as O(nSamples * nNew * E-step) rather than O(nSamples * 2).
   autoregressive?: boolean
   // STM only: a factory returning one conditioned theta draw. When present,
-  // each sample's generative theta is this logistic-normal draw instead of a
-  // Dirichlet prior draw. The prefix E-step (if a prefix exists) still refines
-  // theta against the observed codes; it is seeded from `alpha` as before.
+  // each sample's generative AND reported theta is this logistic-normal draw
+  // instead of a Dirichlet prior/E-step estimate. The draw already
+  // incorporates the prefix (see conditioning/recordPosterior.ts), so it is
+  // reported as-is rather than re-inferred via the Dirichlet E-step, which
+  // would re-diffuse it.
   conditionedTheta?: () => number[]
 }
 export interface SimulatorRunResult {
@@ -57,13 +59,15 @@ export function runSimulator(input: SimulatorRunInput): SimulatorRunResult {
         genTheta = est.theta
       }
     }
-    // Reported theta: refine against all counts (prefix + generated) unless a
-    // conditioned draw was used with no prefix, in which case report it directly.
-    if (!conditionedTheta || prefix.length > 0) {
+    // For a conditioned (STM) draw, report the conditioned/posterior theta
+    // directly — it already incorporates the prefix, and re-inferring it
+    // through the Dirichlet E-step would re-diffuse it (the rainbow bug).
+    // Only the non-conditioned (Dirichlet) path refines via the E-step.
+    if (conditionedTheta) {
+      thetas.push(genTheta)
+    } else {
       est = variationalEStep({ alpha, beta, codeCounts: sampleCounts })
       thetas.push(est.theta)
-    } else {
-      thetas.push(genTheta)
     }
     const completion = new Map<number, number>()
     for (const [w, c] of sampleCounts) {

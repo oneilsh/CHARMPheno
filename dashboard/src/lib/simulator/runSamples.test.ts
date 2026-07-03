@@ -47,4 +47,24 @@ describe('runSimulator conditioned θ', () => {
     })
     expect(res.thetaSamples.length).toBe(3)
   })
+
+  it('reports the conditioned draw directly even with a non-empty prefix (no re-diffusion)', () => {
+    // conditionedTheta already incorporates the prefix (it's the posterior
+    // draw from sampleRecordPosterior); re-inferring it via the Dirichlet
+    // E-step over prefix+generated codes would re-diffuse it toward the
+    // codes' own topic association, which is exactly the rainbow bug. With
+    // a prefix present, the reported theta for every sample must equal the
+    // fixed conditioned vector exactly.
+    const alpha = [0.1, 0.1]
+    const beta = [[0.9, 0.1], [0.1, 0.9]]
+    const fixed = [0.05, 0.95]
+    const res = runSimulator({
+      alpha, beta, meanCodesPerDoc: 5, prefix: [0, 0, 0, 0, 0],
+      nSamples: 5, seed: 3,
+      conditionedTheta: () => fixed,
+    })
+    for (const t of res.thetaSamples) {
+      expect(t).toEqual(fixed)
+    }
+  })
 })

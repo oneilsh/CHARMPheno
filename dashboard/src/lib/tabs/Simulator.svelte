@@ -4,7 +4,7 @@
   } from '../store'
   import { runSimulator } from '../simulator/runSamples'
   import { buildDesignVector } from '../covariate'
-  import { sampleConditionedTheta } from '../conditioning/logisticNormal'
+  import { sampleRecordPosterior } from '../conditioning/recordPosterior'
   import { createRng } from '../sampling'
   import ConditionsEditor from '../simulator/ConditionsEditor.svelte'
   import PredictedRecord from '../simulator/PredictedRecord.svelte'
@@ -43,9 +43,11 @@
       const b = $bundle
       // STM bundles carry per-topic covariate effects and a topic-correlation
       // block; when both are present, condition the generative theta on the
-      // panel's covariate values/group via the logistic-normal sampler
-      // instead of drawing from the Dirichlet prior (see conditioning/
-      // logisticNormal.ts). Non-STM bundles take the unchanged Dirichlet path.
+      // panel's covariate values/group AND the starting-condition prefix via
+      // the logistic-normal posterior sampler (see conditioning/
+      // recordPosterior.ts) instead of drawing from the Dirichlet prior. With
+      // an empty prefix this reduces to the covariate/group prior draw.
+      // Non-STM bundles take the unchanged Dirichlet path.
       const isStm = !!b.covariateEffects && !!b.correlation
       let conditionedTheta: (() => number[]) | undefined
       if (isStm) {
@@ -53,12 +55,16 @@
         const schema = b.covariateSchema!
         const x = buildDesignVector(schema.design_columns, cond.values)
         const tRng = createRng(seed ^ 0x9e3779b9)
-        conditionedTheta = () => sampleConditionedTheta({
+        const prefixCounts = new Map<number, number>()
+        for (const w of $simulatorPrefix) prefixCounts.set(w, (prefixCounts.get(w) ?? 0) + 1)
+        conditionedTheta = () => sampleRecordPosterior({
           effects: b.covariateEffects!,
           x,
           correlation: b.correlation!,
           topicBlocks: b.gating?.topic_blocks ?? null,
           group: cond.group,
+          prefixCounts,
+          beta: b.model.beta,
           rng: tRng,
         })
       }
