@@ -79,6 +79,12 @@ _DEMENTIA_ANCESTOR = 4182210
 # later is a one-liner.
 _DEMENTIA_EXCLUSION_ANCESTORS: tuple[int, ...] = ()
 
+# Top-level OMOP concept whose descendants define Ehlers-Danlos syndrome.
+# Provided by the domain owner (2026-07-03). No exclusions.
+# VERIFY ON FIRST RUN (as with dementia):
+#   SELECT COUNT(*) FROM concept_ancestor WHERE ancestor_concept_id = 79145;
+_EDS_ANCESTOR = 79145
+
 
 # Names accepted by the CLI/loader. Add a new key here when adding a new
 # cohort function so the registry stays the single source of truth.
@@ -316,6 +322,68 @@ def _concept_set_from_ancestors(
         )
         included = included.subtract(excluded).distinct()
     return included
+
+
+def apply_first_diagnosis_year_cohort(
+    cond_df: DataFrame,
+    *,
+    inclusion_ancestors: Sequence[int],
+    exclusion_ancestors: Sequence[int] = (),
+    window_days: int = _WINDOW_DAYS,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Filter to persons with a first qualifying dx + a ``window_days`` window.
+
+    Generalizes the per-disease first-year cohorts: the concept set is
+    (⋃ descendants of ``inclusion_ancestors``) − (⋃ descendants of
+    ``exclusion_ancestors``) via :func:`_concept_set_from_ancestors`; the
+    document window is ``[index_date, index_date + window_days)``. Same
+    observation-period bracketing as the cancer/dementia cohorts
+    (:func:`_window_observed_cohort`, ``prior_obs_days`` lookback). Returns
+    ``cond_df``'s schema, filtered.
+    """
+    def _read(table: str) -> DataFrame:
+        return (
+            spark.read.format("bigquery")
+            .option("table", f"{cdr_dataset}.{table}")
+            .option("parentProject", billing_project)
+            .load()
+        )
+
+    ca = _read("concept_ancestor").select(
+        "ancestor_concept_id", "descendant_concept_id",
+    )
+    concepts = _concept_set_from_ancestors(
+        ca,
+        inclusion_ancestors=inclusion_ancestors,
+        exclusion_ancestors=exclusion_ancestors,
+    )
+
+    first_dx = (
+        cond_df.join(F.broadcast(concepts), on="concept_id", how="inner")
+        .groupBy("person_id")
+        .agg(F.min(date_col).alias("index_date"))
+    )
+
+    op = _read("observation_period").select(
+        "person_id",
+        "observation_period_start_date",
+        "observation_period_end_date",
+    )
+    cohort_df = _window_observed_cohort(
+        first_dx, op, prior_obs_days=prior_obs_days,
+    )
+
+    return (
+        cond_df.join(cohort_df, on="person_id", how="inner")
+        .where(F.col(date_col) >= F.col("index_date"))
+        .where(F.col(date_col) < F.date_add(F.col("index_date"), window_days))
+        .drop("index_date")
+    )
 
 
 def apply_first_cancer_year_cohort(

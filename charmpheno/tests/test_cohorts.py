@@ -214,3 +214,15 @@ def test_concept_set_from_ancestors_no_exclusions_dedups(spark):
     )
     out = _concept_set_from_ancestors(ca, inclusion_ancestors=[79145])
     assert {r["concept_id"] for r in out.collect()} == {10, 11}
+
+
+def test_apply_first_diagnosis_year_cohort_is_importable_with_ancestor_params():
+    import inspect
+    from charmpheno.omop.cohorts import (
+        apply_first_diagnosis_year_cohort, _EDS_ANCESTOR,
+    )
+    assert _EDS_ANCESTOR == 79145
+    params = inspect.signature(apply_first_diagnosis_year_cohort).parameters
+    assert "inclusion_ancestors" in params
+    assert "exclusion_ancestors" in params
+    assert "window_days" in params
