@@ -135,7 +135,7 @@ export const searchedPhenotypeSet = derived(
 // Phenotype browser filter+sort state.
 export const phenotypeFilter = writable<string>('')
 export type PhenotypeSortKey =
-  | 'id' | 'label' | 'cohort' | 'prevalence' | 'coherence' | 'topic_mass'
+  | 'id' | 'label' | 'cohort' | 'prevalence' | 'coherence'
 export const phenotypeSortBy = writable<PhenotypeSortKey>('prevalence')
 export const phenotypeSortDir = writable<'asc' | 'desc'>('desc')
 

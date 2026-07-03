@@ -112,7 +112,6 @@ export const copy = {
 
   // ── Phenotype browser (table) ─────────────────────────────────────────
   phenotypeBrowser: {
-    topicMassTip: `Mean topic mixture share (doc-mean of θ). Sums to 100% across phenotypes.`,
     prevTipAdvanced: (tau: number): string =>
       `Fraction of patients with mixture weight above τ = ${tau.toFixed(2)} (at least ${pct(tau)}% of their coded activity).`,
     prevTipBasic: (tau: number): string =>

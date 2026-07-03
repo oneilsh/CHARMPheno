@@ -45,7 +45,11 @@
 
   // Ascending-sense comparator; direction is applied in the sort call. nulls
   // sort as -Infinity so they trail on descending (the default for coherence).
-  function cmp(a: Phenotype, b: Phenotype, key: PhenotypeSortKey): number {
+  // Takes `prevReader` explicitly (rather than closing over the top-level
+  // `reader` binding) so the `filtered` reactive statement that calls this
+  // sees `reader` as a real argument and re-runs whenever a conditioning
+  // change produces a new $prevalenceReader.
+  function cmp(a: Phenotype, b: Phenotype, key: PhenotypeSortKey, prevReader: (p: Phenotype) => number): number {
     switch (key) {
       case 'id':
         return a.id - b.id
@@ -55,11 +59,9 @@
         return cohortLabel(a).localeCompare(cohortLabel(b)) || a.id - b.id
       case 'coherence':
         return (a.npmi ?? -Infinity) - (b.npmi ?? -Infinity)
-      case 'topic_mass':
-        return a.corpus_prevalence - b.corpus_prevalence
       case 'prevalence':
       default: {
-        const d = reader(a) - reader(b)
+        const d = prevReader(a) - prevReader(b)
         return d !== 0 ? d : a.corpus_prevalence - b.corpus_prevalence
       }
     }
@@ -76,6 +78,13 @@
       })
     : null
 
+  // Depends explicitly on `reader` (not just $phenotypeSortBy/$phenotypeSortDir)
+  // so a conditioning change — which produces a new $prevalenceReader — is
+  // seen by Svelte's dependency tracker and re-runs this block, re-sorting
+  // the rows when the active sort column is 'prevalence'. (cmp() closes over
+  // `reader` internally, but a call inside the statement isn't enough for
+  // Svelte's static reactive-dependency analysis to pick it up — passing it
+  // as an explicit comparator argument makes the dependency visible.)
   $: filtered = phenotypes
     .filter((p) => {
       if (!$isVisibleInCurrentMode(p)) return false
@@ -86,7 +95,7 @@
       const desc = (p.description || '').toLowerCase()
       return label.includes(q) || desc.includes(q)
     })
-    .sort((a, b) => ($phenotypeSortDir === 'asc' ? 1 : -1) * cmp(a, b, $phenotypeSortBy))
+    .sort((a, b) => ($phenotypeSortDir === 'asc' ? 1 : -1) * cmp(a, b, $phenotypeSortBy, reader))
 
   // Sort indicator for a column header (active column only).
   $: arrow = (key: PhenotypeSortKey) =>
@@ -106,11 +115,6 @@
   // prevents zero-domain bar collapse when τ is very high.
   $: maxPrev = phenotypes.length
     ? Math.max(...phenotypes.map(reader), 1e-9)
-    : 1e-9
-
-  // Topic mass domain: based on raw corpus_prevalence (doc-mean θ).
-  $: maxMass = phenotypes.length
-    ? Math.max(...phenotypes.map((p) => p.corpus_prevalence), 1e-9)
     : 1e-9
 </script>
 
@@ -168,9 +172,6 @@
             <th class="col-coh" data-numeric>
               <button class="th-sort th-sort-num" class:active={$phenotypeSortBy === 'coherence'} on:click={() => sortByCol('coherence')}><span class="arrow">{arrow('coherence')}</span>Coherence</button>
             </th>
-            <th class="col-mass" data-numeric title={copy.phenotypeBrowser.topicMassTip}>
-              <button class="th-sort th-sort-num" class:active={$phenotypeSortBy === 'topic_mass'} on:click={() => sortByCol('topic_mass')}><span class="arrow">{arrow('topic_mass')}</span>Topic mass</button>
-            </th>
           {/if}
           <th class="col-prev" data-numeric title={$advancedView
             ? copy.phenotypeBrowser.prevTipAdvanced($tauThreshold)
@@ -183,6 +184,7 @@
       <tbody>
         {#each filtered as p (p.id)}
           <tr
+            data-pid={p.id}
             class:selected={$selectedPhenotypeId === p.id}
             on:click={() => selectedPhenotypeId.set(p.id)}
           >
@@ -205,14 +207,6 @@
                 {/if}
               </td>
               <td class="col-coh" data-numeric>{p.npmi == null ? '—' : p.npmi.toFixed(3)}</td>
-              <td class="col-mass" data-numeric>
-                <span class="prev-row">
-                  <span class="prev-bar">
-                    <span class="prev-fill mass-fill" style="width: {(p.corpus_prevalence / maxMass) * 100}%"></span>
-                  </span>
-                  <span class="prev-num">{(p.corpus_prevalence * 100).toFixed(1)}%</span>
-                </span>
-              </td>
             {/if}
             <td class="col-prev" data-numeric>
               <span class="prev-row">
@@ -228,7 +222,7 @@
           </tr>
         {/each}
         {#if filtered.length === 0}
-          <tr><td colspan={2 + (gated ? 1 : 0) + ($advancedView ? 3 : 0) + 1} class="empty">No phenotypes match.</td></tr>
+          <tr><td colspan={2 + (gated ? 1 : 0) + ($advancedView ? 2 : 0) + 1} class="empty">No phenotypes match.</td></tr>
         {/if}
       </tbody>
     </table>
@@ -405,7 +399,6 @@
   .col-label { color: var(--ink); }
   .col-quality { width: 7.5rem; }
   .col-coh { width: 5.5rem; text-align: right; }
-  .col-mass { width: 8rem; text-align: right; }
   .col-prev { width: 9.5rem; text-align: right; }
 
   .prev-row {
@@ -427,7 +420,6 @@
     height: 100%;
     background: var(--accent);
   }
-  .mass-fill { background: var(--ink-faint); opacity: 0.85; }
   .prev-num {
     color: var(--ink);
     min-width: 3rem;
