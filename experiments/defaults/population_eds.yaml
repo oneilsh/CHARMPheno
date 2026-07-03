@@ -1,0 +1,10 @@
+# Whole-population background + Ehlers-Danlos foreground gated cohort (exp 0030).
+# Like population_cancer, but the disease arm is EDS (OMOP 79145). The
+# experiment frontmatter supplies the STM covariate + gating fields (K,
+# background_k, foreground: eds:N, group_var, covariate_formula); this file
+# exists so load_defaults finds a <cohort>.yaml to merge over _base.yaml.
+#
+# `cohort` is the display/lookup id (matches filename); `cohort_def` is the
+# value passed to the driver's --cohort.
+cohort: population_eds
+cohort_def: population_eds
