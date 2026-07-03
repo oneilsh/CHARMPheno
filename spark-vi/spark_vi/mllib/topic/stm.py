@@ -18,7 +18,7 @@ from typing import Any
 
 import numpy as np
 
-from spark_vi.models.topic.stm import prior_topic_proportions
+from spark_vi.models.topic.stm import _stm_doc_inference, prior_topic_proportions
 
 
 def _formula_mentions(group_var: str, covariate_names: list[str]) -> bool:
@@ -109,6 +109,222 @@ def corpus_mean_topic_proportions_gated_rdd(
     if count == 0:
         raise ValueError("corpus_mean_topic_proportions_gated_rdd: empty covariate RDD")
     return sum_vec / count
+
+
+def _welford_update(n, mean, M2, eta_hat, allowed):
+    """Per-topic streaming-mean/variance update (Welford 1962, as formalized by
+    Chan, Golub & LeVeque 1979 "Updating Formulae and a Pairwise Algorithm for
+    Computing Sample Variances") for ONE new observation eta_hat, restricted to
+    the doc's allowed (gated) topic set.
+
+    n, mean, M2 are length-K arrays of per-topic running count / mean / sum of
+    squared deviations. Only the `allowed` topics are touched — a topic a doc
+    does not allow (eta_hat = -inf there) must not perturb that topic's
+    accumulator at all, not even with a zero, or a background-only doc would
+    silently pollute a foreground topic's variance.
+
+    Returns the updated (n, mean, M2) triples (new arrays; inputs untouched).
+    """
+    n = n.copy()
+    mean = mean.copy()
+    M2 = M2.copy()
+    x = eta_hat[allowed]
+    n[allowed] += 1.0
+    delta = x - mean[allowed]
+    mean[allowed] += delta / n[allowed]
+    delta2 = x - mean[allowed]
+    M2[allowed] += delta * delta2
+    return n, mean, M2
+
+
+def _welford_combine(a, b):
+    """Parallel combine of two per-topic Welford accumulators (Chan, Golub &
+    LeVeque 1979, section 1.3 "Updating Formulae and a Pairwise Algorithm for
+    Computing Sample Variances", the pairwise/parallel formula generalizing
+    Welford's 1962 online update): for each topic k independently,
+
+        n_ab   = n_a + n_b
+        delta  = mean_b - mean_a
+        mean_ab = mean_a + delta * n_b / n_ab        (n_ab > 0)
+        M2_ab   = M2_a + M2_b + delta^2 * n_a * n_b / n_ab
+
+    Elementwise over length-K arrays; topics with n_a == n_b == 0 stay at
+    n=0, mean=0, M2=0 (division guarded).
+    """
+    n_a, mean_a, M2_a = a
+    n_b, mean_b, M2_b = b
+    n_ab = n_a + n_b
+    safe_n_ab = np.where(n_ab > 0, n_ab, 1.0)
+    delta = mean_b - mean_a
+    mean_ab = mean_a + delta * (n_b / safe_n_ab)
+    M2_ab = M2_a + M2_b + delta * delta * (n_a * n_b / safe_n_ab)
+    mean_ab = np.where(n_ab > 0, mean_ab, 0.0)
+    M2_ab = np.where(n_ab > 0, M2_ab, 0.0)
+    return n_ab, mean_ab, M2_ab
+
+
+def _welford_variance(n, M2, *, reference=None):
+    """Finalize per-topic variance from Welford accumulators: M2_k/(n_k-1)
+    where n_k > 1, else 0. The reference topic (eta pinned to 0 for every
+    doc) is forced to exactly 0 for cleanliness, even though its natural
+    variance is already ~0 by construction."""
+    var = np.where(n > 1, M2 / np.maximum(n - 1.0, 1.0), 0.0)
+    if reference is not None:
+        var = var.copy()
+        var[reference] = 0.0
+    return var
+
+
+def corpus_eta_variance_gated(
+    docs, global_params, partition, *,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4, reference=None,
+):
+    """Driver-side (in-memory) empirical per-topic variance of document η
+    (the logistic-normal generative concentration scale): for each doc, runs
+    the same per-doc Laplace E-step as ``infer_local`` to get η̂ over the
+    doc's ALLOWED (gated) topic set, then accumulates a per-topic streaming
+    mean + M2 (Welford; see ``_welford_update``) over documents, skipping
+    topics the doc does not allow (η = -inf there). A topic allowed by zero
+    documents, and the reference topic (η pinned to 0), get variance 0.
+
+    Gating: a foreground topic's variance reflects only the documents in its
+    own group — background-only documents never touch a foreground topic's
+    accumulator, because their allowed set (``partition.allowed_indices``)
+    excludes it entirely.
+
+    This is the between-document η spread — how much real documents actually
+    spread out in η-space — used downstream to rescale the unit-diagonal
+    correlation matrix Σ (ADR 0034) into a generative covariance: the fitted
+    correlation captures topic co-movement direction, but its unit-diagonal
+    convention discards scale, so generated documents need this empirical
+    per-topic variance to be realistically (rather than maximally) concentrated.
+
+    ``docs`` is an in-memory list of STMDocument. ``global_params`` is the
+    dict with "lambda" (K,V), "Gamma" (P,K), "Sigma" (K,K) — exactly what
+    ``infer_local`` reads. ``partition`` is a TopicBlockPartition (or the
+    implicit all-background one). Mirrors how ``corpus_mean_topic_proportions_gated``
+    (numpy) sits beside its ``_rdd`` counterpart: useful for tests and small
+    corpora; for a live cluster corpus use ``corpus_eta_variance_gated_rdd``.
+    """
+    from spark_vi.models.topic._linalg import safe_inverse
+    from scipy.special import digamma
+
+    lam = np.asarray(global_params["lambda"], dtype=np.float64)
+    Gamma = np.asarray(global_params["Gamma"], dtype=np.float64)
+    Sigma = np.asarray(global_params["Sigma"], dtype=np.float64)
+    K = lam.shape[0]
+    expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+    n = np.zeros(K, dtype=np.float64)
+    mean = np.zeros(K, dtype=np.float64)
+    M2 = np.zeros(K, dtype=np.float64)
+    subprec_cache: dict[tuple, np.ndarray] = {}
+
+    for doc in docs:
+        allowed = partition.allowed_indices(doc.groups)
+        key = tuple(allowed.tolist())
+        Sigma_inv_allowed = subprec_cache.get(key)
+        if Sigma_inv_allowed is None:
+            Sigma_inv_allowed = safe_inverse(Sigma[np.ix_(allowed, allowed)])
+            subprec_cache[key] = Sigma_inv_allowed
+        eta_hat, _, _ = _stm_doc_inference(
+            indices=doc.indices, counts=doc.counts,
+            expElogbeta=expElogbeta,
+            Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=doc.x,
+            max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+            allowed=allowed, reference=reference,
+        )
+        n, mean, M2 = _welford_update(n, mean, M2, eta_hat, allowed)
+
+    return _welford_variance(n, M2, reference=reference)
+
+
+def corpus_eta_variance_gated_rdd(
+    doc_rdd, global_params, partition, *,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4, reference=None, depth=2,
+):
+    """Distributed empirical per-topic variance of document η (the logistic-
+    normal generative concentration scale). For each STMDocument, runs the same
+    per-doc Laplace E-step as ``infer_local`` to get η̂_d over the doc's ALLOWED
+    (gated) topic set, then accumulates a per-topic streaming mean + M2
+    (Welford) over documents, skipping topics the doc does not allow
+    (η = -inf). Returns a length-K vector of per-topic variances; a topic
+    allowed by zero documents, and the reference topic (η pinned to 0), get
+    variance 0.
+
+    Gating: a foreground topic's variance reflects only its own group's
+    documents (``partition.allowed_indices(doc.groups)``); a background-only
+    document's allowed set excludes every foreground topic, so it never
+    contributes to one.
+
+    Distributed via the same mapPartitions + treeReduce idiom as
+    ``corpus_mean_topic_proportions_gated_rdd``: each partition runs the full
+    per-doc E-step and accumulates a local (n, mean, M2) triple of length-K
+    arrays; the tree-reduce combines partitions pairwise via the parallel
+    Welford formula (Chan, Golub & LeVeque 1979) — only three K-vectors per
+    partition ever cross the network, never the documents or per-doc η̂/ν_d.
+    ``global_params`` and ``partition`` are broadcast via the Spark-safe
+    default-arg closure convention (see ``corpus_mean_topic_proportions_gated_rdd``).
+
+    This is the between-document η spread used to rescale the unit-diagonal
+    fitted correlation Σ (ADR 0034) into a generative covariance downstream: the
+    fitted correlation is unit-diagonal by construction (variance pinned to 1
+    for fitting stability), so a consumer that wants to *generate* documents
+    with realistic concentration needs this empirical per-topic variance to
+    rescale it, rather than drawing from an over-diffuse unit-variance prior.
+
+    ``doc_rdd`` is an RDD of STMDocument. Returns a length-K numpy array.
+    """
+    sc = doc_rdd.context
+    gp_bcast = sc.broadcast({
+        k: np.asarray(v, dtype=np.float64) for k, v in global_params.items()
+    })
+    p_bcast = sc.broadcast(partition)
+
+    def _local(rows, _gp=gp_bcast, _p=p_bcast):
+        from spark_vi.models.topic._linalg import safe_inverse
+        from scipy.special import digamma
+
+        gp = _gp.value
+        part = _p.value
+        lam = gp["lambda"]
+        Gamma = gp["Gamma"]
+        Sigma = gp["Sigma"]
+        K = lam.shape[0]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+        n = np.zeros(K, dtype=np.float64)
+        mean = np.zeros(K, dtype=np.float64)
+        M2 = np.zeros(K, dtype=np.float64)
+        subprec_cache: dict[tuple, np.ndarray] = {}
+        n_docs = 0
+
+        for doc in rows:
+            allowed = part.allowed_indices(doc.groups)
+            key = tuple(allowed.tolist())
+            Sigma_inv_allowed = subprec_cache.get(key)
+            if Sigma_inv_allowed is None:
+                Sigma_inv_allowed = safe_inverse(Sigma[np.ix_(allowed, allowed)])
+                subprec_cache[key] = Sigma_inv_allowed
+            eta_hat, _, _ = _stm_doc_inference(
+                indices=doc.indices, counts=doc.counts,
+                expElogbeta=expElogbeta,
+                Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=doc.x,
+                max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+                allowed=allowed, reference=reference,
+            )
+            n, mean, M2 = _welford_update(n, mean, M2, eta_hat, allowed)
+            n_docs += 1
+        return [(n, mean, M2, n_docs)]
+
+    def _combine(a, b):
+        n_ab, mean_ab, M2_ab = _welford_combine(a[:3], b[:3])
+        return n_ab, mean_ab, M2_ab, a[3] + b[3]
+
+    n, mean, M2, n_docs = doc_rdd.mapPartitions(_local).treeReduce(_combine, depth=depth)
+    if n_docs == 0:
+        raise ValueError("corpus_eta_variance_gated_rdd: empty document RDD")
+    return _welford_variance(n, M2, reference=reference)
 
 
 class StreamingSTM:
