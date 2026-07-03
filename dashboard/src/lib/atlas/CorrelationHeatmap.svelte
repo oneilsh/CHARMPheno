@@ -19,8 +19,8 @@
   // than bleeding to the border. GAP is a small break drawn between blocks in
   // place of a separator line.
   const CELL = 22
-  const MARGIN = 16
-  const GAP = 8
+  const MARGIN = 10
+  const GAP = 18
 
   $: order = correlation.topic_order
   $: n = order.length
@@ -75,12 +75,13 @@
 </script>
 
 <figure class="heatmap" data-tour="correlation-heatmap">
-  <svg
-    viewBox="0 0 {S} {S}"
-    role="img"
-    aria-label={copy.correlation.ariaLabel}
-    preserveAspectRatio="xMidYMid meet"
-  >
+  <div class="card">
+    <svg
+      viewBox="0 0 {S} {S}"
+      role="img"
+      aria-label={copy.correlation.ariaLabel}
+      preserveAspectRatio="xMidYMid meet"
+    >
     <!-- Grid cells -->
     {#each order as _rowTopic, i}
       {#each order as _colTopic, j}
@@ -115,7 +116,8 @@
       <rect class="sel-line" x={pos(selIndex)} y={MARGIN} width={CELL} height={gridSpan} />
       <rect class="sel-diag" x={pos(selIndex)} y={pos(selIndex)} width={CELL} height={CELL} />
     {/if}
-  </svg>
+    </svg>
+  </div>
 
   <figcaption class="legend">
     <div class="legend-group">
@@ -136,18 +138,25 @@
     margin: 0;
     display: flex;
     flex-direction: column;
-    align-items: center;
     gap: 0.5rem;
   }
-  svg {
+  /* Full-column-width framed card; the grid itself stays a fixed square, centered
+     inside with left/right + top/bottom breathing room. */
+  .card {
     width: 100%;
-    max-width: 600px;
-    aspect-ratio: 1 / 1;
-    height: auto;
-    display: block;
     background: var(--surface);
     border: 1px solid var(--rule);
     border-radius: var(--radius-sm);
+    padding: 1rem 0;
+    display: flex;
+    justify-content: center;
+  }
+  svg {
+    width: 100%;
+    max-width: 560px;
+    aspect-ratio: 1 / 1;
+    height: auto;
+    display: block;
   }
   .cell {
     cursor: pointer;
