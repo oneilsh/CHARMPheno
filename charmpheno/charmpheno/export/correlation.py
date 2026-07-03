@@ -16,7 +16,7 @@ def _cell(x):
 
 
 def build_correlation_json(R, identified, support, partition, kept_topic_ids,
-                            reference_id=None):
+                            reference_id=None, eta_var=None):
     """correlation.json over kept topics in block order; null for unidentified R.
 
     reference_id: if given, this topic id is dropped from topic_order (and
@@ -25,6 +25,17 @@ def build_correlation_json(R, identified, support, partition, kept_topic_ids,
     n_pairs entries still mark it identified, which would otherwise render a
     spurious zero-correlation band in the dashboard (Component 3,
     docs/superpowers/specs/2026-07-01-gated-ctm-correlation-reporting-design.md).
+
+    eta_var: if given, a length-K (ORIGINAL topic-id space) array of the
+    empirical between-document variance of the logistic-normal eta latent per
+    topic (corpus_eta_variance_gated_rdd). The fitted correlation R is unit-
+    diagonal by construction (variance pinned to 1 for fit stability, ADR 0034),
+    so the dashboard rescales it into a generative covariance
+    Sigma[i][j] = R[i][j]*sqrt(var_i*var_j) to draw realistically-concentrated
+    documents instead of an over-diffuse unit-variance prior. Emitted aligned to
+    the SAME rows/order as R (indexed by original id via order, reference row
+    excluded). When None, the "eta_var" key is omitted entirely and the
+    dashboard falls back to the unit-diagonal R.
     """
     labels = partition.topic_labels()                 # length K, by original id
     order = [i for i in kept_topic_ids if i != reference_id]  # already block-ordered upstream
@@ -44,7 +55,7 @@ def build_correlation_json(R, identified, support, partition, kept_topic_ids,
     # above stay keyed by original id (Sigma lives in original K-space); their
     # output rows are already positional, so only these two id fields remap.
     pos = {int(tid): p for p, tid in enumerate(kept_topic_ids)}
-    return {
+    out = {
         "topic_order": [pos[int(i)] for i in order],
         "block_labels": block_labels,
         "R": R_out,
@@ -53,3 +64,8 @@ def build_correlation_json(R, identified, support, partition, kept_topic_ids,
         "reference_topic": (pos.get(int(reference_id))
                             if reference_id is not None else None),
     }
+    if eta_var is not None:
+        # Indexed by ORIGINAL topic id via `order` (reference row excluded),
+        # matching R_out's row order exactly. NOT compacted display position.
+        out["eta_var"] = [float(eta_var[i]) for i in order]
+    return out

@@ -169,6 +169,20 @@ def main(argv: list[str] | None = None) -> int:
     # Adapter normalizes LDA/HDP/etc. to a uniform DashboardExport
     export = adapt(result, hdp_top_k=args.hdp_top_k)
 
+    # Load the vocab + BOW (Spark) up front: the STM correlation block below
+    # reuses bow_df for the eta_var E-step join, and corpus-stats / NPMI reuse it
+    # again later (single load, single Spark session for the whole build).
+    vocab_ids = result.metadata.get("vocab")
+    if not vocab_ids:
+        raise SystemExit("checkpoint metadata has no 'vocab'; re-fit needed.")
+    corpus_manifest = result.metadata.get("corpus_manifest", {})
+    doc_spec_manifest = corpus_manifest.get("doc_spec", {"name": "patient"})
+    doc_spec = DocSpec.from_manifest(doc_spec_manifest)
+    spark = _build_spark()
+    df = load_omop_parquet(str(args.input), spark=spark)
+    bow_df, _ = to_bow_dataframe(df, doc_spec=doc_spec, vocab=vocab_ids)
+    bow_df = bow_df.persist()
+
     # --- STM gating: masked prevalence + covariate + gating.json (offline) ---
     corpus = result.metadata.get("corpus_manifest", {})
     tbs = corpus.get("topic_block_spec") if model_class == "stm" else None
@@ -218,8 +232,59 @@ def main(argv: list[str] | None = None) -> int:
                       or stm_hardening.get("min_pair_support", 1))
             reference_id = 0 if stm_hardening.get("reference_topic") else None
             R, ident = topic_correlation_identified(Sigma_corr, n_pairs, mps)
+
+            # Empirical between-document eta variance per topic
+            # (corpus_eta_variance_gated_rdd, Task 1): recovers the generative
+            # concentration scale the unit-diagonal fitted R (ADR 0034) discards,
+            # so the dashboard can rescale R -> Sigma[i][j]=R[i][j]*sqrt(var_i*
+            # var_j). ENHANCEMENT only: any failure leaves eta_var=None and the
+            # key is omitted (dashboard falls back to unit R). Reuses the loaded
+            # bow_df (frozen fit vocab) joined with the local covariate sidecar.
+            eta_var = None
+            try:
+                from spark_vi.mllib.topic.stm import corpus_eta_variance_gated_rdd
+                from spark_vi.mllib.topic._common import _vector_to_stm_document
+                from pyspark.ml.linalg import Vectors, VectorUDT
+                from pyspark.sql.types import (
+                    StructType, StructField, LongType, StringType,
+                )
+                # Spark DataFrame from the pandas covariate sidecar
+                # (person_id, source_cohort, covariates DenseVector), joined to
+                # bow_df on person_id -> STMDocument RDD (same assembly the fit
+                # uses: features + covariates + source_cohort gating group).
+                cov_schema = StructType([
+                    StructField("person_id", LongType(), False),
+                    StructField("source_cohort", StringType(), False),
+                    StructField("covariates", VectorUDT(), False),
+                ])
+                cov_rows = [
+                    (int(pid), str(sc), Vectors.dense(np.asarray(vec, dtype=float)))
+                    for pid, sc, vec in zip(
+                        cov["person_id"], cov["source_cohort"], cov["covariates"])
+                ]
+                cov_sdf = spark.createDataFrame(cov_rows, schema=cov_schema)
+                doc_df = bow_df.select("person_id", "features").join(
+                    cov_sdf, on="person_id", how="inner")
+                doc_rdd = doc_df.rdd.map(
+                    lambda row: _vector_to_stm_document(
+                        row, features_col="features",
+                        covariates_col="covariates",
+                        group_col="source_cohort",
+                    )
+                )
+                eta_var = corpus_eta_variance_gated_rdd(
+                    doc_rdd, result.global_params, partition,
+                    reference=reference_id,
+                )
+                log.info("STM: eta_var computed (K=%d).", len(eta_var))
+            except Exception as exc:  # enhancement-only: never fatal
+                log.warning("STM: eta_var computation failed (%s); correlation.json "
+                            "omits eta_var (dashboard falls back to unit R).", exc)
+                eta_var = None
+
             corr = build_correlation_json(R, ident, n_pairs, partition, kept_ids,
-                                           reference_id=reference_id)
+                                           reference_id=reference_id,
+                                           eta_var=eta_var)
             (args.out_dir / "correlation.json").write_text(json.dumps(corr, indent=2))
             log.info("STM: wrote correlation.json (topics=%d, min_pair_support=%d)",
                      len(kept_ids), mps)
@@ -241,19 +306,10 @@ def main(argv: list[str] | None = None) -> int:
     K_disp, V_full = export.beta.shape
     log.info("K_display=%d V_full=%d (model_class=%s)", K_disp, V_full, model_class)
 
-    vocab_ids = result.metadata.get("vocab")
-    if not vocab_ids:
-        raise SystemExit("checkpoint metadata has no 'vocab'; re-fit needed.")
     descriptions = result.metadata.get("concept_names", {}) or {}
     domains = result.metadata.get("concept_domains", {}) or {}
 
-    # Stats from the input parquet
-    corpus_manifest = result.metadata.get("corpus_manifest", {})
-    doc_spec_manifest = corpus_manifest.get("doc_spec", {"name": "patient"})
-    doc_spec = DocSpec.from_manifest(doc_spec_manifest)
-    spark = _build_spark()
-    df = load_omop_parquet(str(args.input), spark=spark)
-    bow_df, _ = to_bow_dataframe(df, doc_spec=doc_spec, vocab=vocab_ids)
+    # Stats from the already-loaded bow_df (loaded once above; reused here).
     # compute_corpus_stats_from_bow_df needs 'indices' and 'counts' array columns.
     # to_bow_dataframe returns a SparseVector 'features' column; extract them.
     _sv_indices = F.udf(lambda sv: sv.indices.tolist() if sv is not None else [],
@@ -264,7 +320,6 @@ def main(argv: list[str] | None = None) -> int:
         _sv_indices(F.col("features")).alias("indices"),
         _sv_counts(F.col("features")).alias("counts"),
     )
-    bow_df = bow_df.persist()
     bow_df_stats = bow_df_stats.persist()
     stats = compute_corpus_stats_from_bow_df(bow_df_stats, vocab_size=V_full, k=K_disp)
     log.info("corpus stats: n_docs=%d mean_codes=%.2f",

@@ -177,6 +177,63 @@ def test_build_correlation_json_topic_order_is_compacted_display_index():
     assert out["R"][0][1] == 0.1
 
 
+def test_build_correlation_json_emits_eta_var_aligned_to_order():
+    """eta_var, when given, is the length-K ORIGINAL-topic-id-space per-topic
+    between-document variance (Task 1's corpus_eta_variance_gated_rdd output).
+    It must be emitted aligned to the SAME rows/order as R_out, i.e. indexed by
+    original topic id via order = [i for i in kept if i != reference_id], with
+    the reference row excluded. Uses a reference topic (id 0) AND a k-anon gap
+    in kept (topic 2 suppressed -> kept=[0,1,3,4]) so the mapping exercises
+    original-id indexing, not the identity/compacted position."""
+    class _P:
+        group_var = "g"
+        groups = ["A"]
+        def topic_labels(self):
+            return ["background", "background", "A", "B", "B"]
+    R = [[1.0, 0.3, 0.9, 0.2, 0.1],
+         [0.3, 1.0, 0.9, 0.1, 0.1],
+         [0.9, 0.9, 1.0, 0.9, 0.9],
+         [0.2, 0.1, 0.9, 1.0, 0.4],
+         [0.1, 0.1, 0.9, 0.4, 1.0]]
+    ident = [[True] * 5 for _ in range(5)]
+    sup = [[300] * 5 for _ in range(5)]
+    kept = [0, 1, 3, 4]            # topic 2 suppressed -> GAP in kept
+    # length-K (original id space); distinct values so mis-indexing is visible.
+    # id 0 (reference) -> 0.0; id 2 (suppressed, never selected) -> 99.0.
+    eta_var = [0.0, 1.5, 99.0, 3.5, 4.5]
+    out = build_correlation_json(R, ident, sup, _P(), kept,
+                                 reference_id=0, eta_var=eta_var)
+    # order excludes the reference (id 0); free kept original ids are 1,3,4.
+    # eta_var is emitted eta_var[order[k]] = [eta_var[1], eta_var[3], eta_var[4]].
+    assert out["eta_var"] == [1.5, 3.5, 4.5]
+    # same length as topic_order / number of R rows; suppressed 99.0 excluded.
+    assert len(out["eta_var"]) == len(out["topic_order"]) == len(out["R"])
+    assert all(isinstance(v, float) for v in out["eta_var"])
+    assert 99.0 not in out["eta_var"]     # suppressed topic 2 never emitted
+
+
+def test_build_correlation_json_omits_eta_var_when_none():
+    """eta_var=None (and the default, no kwarg) omits the 'eta_var' key entirely
+    (older-checkpoint / failure-path safe; the dashboard falls back to unit R)."""
+    part = TopicBlockPartition(group_var="g", background_k=2,
+                               foreground=(("A", 1), ("B", 1)))
+    R = np.array([[1.0, 0.3, 0.2, np.nan],
+                  [0.3, 1.0, 0.1, np.nan],
+                  [0.2, 0.1, 1.0, np.nan],
+                  [np.nan, np.nan, np.nan, 1.0]])
+    identified = np.array([[1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [0, 0, 0, 1]], dtype=bool)
+    support = np.full((4, 4), 300.0)
+    kept = [0, 1, 2, 3]
+    out_default = build_correlation_json(R, identified, support, part, kept)
+    out_none = build_correlation_json(R, identified, support, part, kept,
+                                      eta_var=None)
+    assert "eta_var" not in out_default
+    assert "eta_var" not in out_none
+
+
 def test_driver_mps_lookup_uses_nested_stm_hardening_floor():
     """The drivers read result.metadata.get("min_pair_support", 1), but
     min_pair_support is persisted nested under metadata["stm_hardening"]
