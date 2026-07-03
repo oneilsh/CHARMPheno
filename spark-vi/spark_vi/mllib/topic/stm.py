@@ -327,6 +327,269 @@ def corpus_eta_variance_gated_rdd(
     return _welford_variance(n, M2, reference=reference)
 
 
+def _pool_scale(n, M2, nu_sum, nu_count, *, reference):
+    """Pool the per-topic law-of-total-variance totals into ONE scalar scale c.
+
+    Law of total variance (Weiss 2005, "A Course in Probability", thm. 4.4.7):
+    for a topic k, the marginal spread of eta decomposes as
+
+        Var(eta_k) = Var_d(E[eta_k | d]) + E_d(Var[eta_k | d])
+                   = (between-doc variance of the posterior mode eta_hat_k)
+                     + (mean over docs of the Laplace posterior variance nu_d_k).
+
+    The first term is the finalized Welford variance M2_k/(n_k-1); the second is
+    nu_sum_k / nu_count_k. Their sum is topic k's total generative variance.
+
+    The single pooled scale is the MEAN of those totals over the FREE, OBSERVED
+    topics: the reference topic (eta pinned to 0, ~0 total) is excluded so its
+    near-zero does not drag the mean down, and any topic seen by fewer than 2
+    documents (n_k < 2, Welford variance undefined) is excluded so a NaN cannot
+    corrupt c. Pooling to a single number is the runaway-safe estimator: a
+    per-topic free diagonal reopened the insight-0033 variance runaway (a
+    low-ess topic's noise self-amplified), whereas a low-ess topic's noise
+    averaged against every other topic's -- with beta frozen -- cannot.
+
+    Returns (c, totals) where totals is the length-K per-topic total variance
+    (0 where a topic is excluded from the pool), for introspection/tests.
+    """
+    K = n.shape[0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        between = np.where(n > 1, M2 / np.maximum(n - 1.0, 1.0), 0.0)
+        within = np.where(nu_count > 0, nu_sum / np.maximum(nu_count, 1.0), 0.0)
+    totals = between + within
+    in_pool = n >= 2.0
+    if reference is not None:
+        in_pool = in_pool.copy()
+        in_pool[reference] = False
+    totals = np.where(in_pool, totals, 0.0)
+    n_pool = int(in_pool.sum())
+    if n_pool == 0:
+        raise ValueError(
+            "corpus_eta_scale: no free topic was observed by >= 2 documents; "
+            "cannot pool a generative-variance scale")
+    c = float(totals[in_pool].mean())
+    return c, totals
+
+
+def corpus_eta_scale_gated(
+    docs, global_params, partition, *,
+    reference=None, max_iter=15, tol=0.02,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4,
+    _return_trace=False, _return_totals=False,
+):
+    """Driver-side (in-memory) iterated pooled generative-variance scale c for
+    the STM generative covariance Sigma_gen = c*R, with beta and R FROZEN.
+
+    R = ``global_params["Sigma"]`` is the fit's unit-diagonal block-wise
+    correlation (ADR 0034). Its unit diagonal discards the generative concentration
+    scale, so a faithful generative simulator needs a single variance level c such
+    that Sigma_gen = c*R produces documents that spread in eta-space like the real
+    corpus. This estimates that ONE scalar by an iterated pooled EM: each round runs
+    the same per-doc Laplace E-step as ``infer_local`` under the prior Sigma = c*R,
+    accumulates -- per free, observed topic -- both terms of the law of total
+    variance Var(eta)=Var_d(E[eta|d])+E_d(Var[eta|d]) (the between-doc variance of
+    the posterior mode eta_hat via Welford, plus the mean per-doc Laplace posterior
+    variance nu_d), pools those per-topic totals to one scalar over the free
+    observed topics, and updates c toward the self-consistent value.
+
+    Why iterate: one E-step under the unit prior underestimates the scale
+    (posterior modes shrink toward the prior mean); re-broadcasting the prior as
+    c*R each round lets c climb to the self-consistent level. Empirically converges
+    in ~5-10 rounds and stays bounded because beta is frozen and c is a single
+    pooled number -- a low-ess topic's noise is averaged against every other
+    topic's, so it cannot self-amplify the way a per-topic free diagonal did
+    (insight 0033 variance runaway). It under-corrects modestly (Laplace
+    posterior-variance bias); that is expected and acceptable.
+
+    ``docs`` is an in-memory list of STMDocument; ``global_params`` is the dict with
+    "lambda", "Gamma", "Sigma" (= R); ``partition`` is a TopicBlockPartition (or the
+    implicit all-background one). The prior precision each round is
+    ``(1/c) * safe_inverse(R[allowed])`` -- ``safe_inverse(R[allowed])`` is
+    INDEPENDENT of c, so it is computed once per distinct allowed set (cached by
+    ``tuple(allowed)``) and merely rescaled by 1/c. Returns the converged scalar c.
+    For a live cluster corpus use ``corpus_eta_scale_gated_rdd``.
+    """
+    from spark_vi.models.topic._linalg import safe_inverse
+    from scipy.special import digamma
+
+    lam = np.asarray(global_params["lambda"], dtype=np.float64)
+    Gamma = np.asarray(global_params["Gamma"], dtype=np.float64)
+    Sigma = np.asarray(global_params["Sigma"], dtype=np.float64)   # R (unit-diag)
+    K = lam.shape[0]
+    expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+    # safe_inverse(R[allowed]) is c-independent: cache by allowed-set key, once.
+    rinv_cache: dict[tuple, np.ndarray] = {}
+    allowed_cache: dict[int, np.ndarray] = {}
+
+    c = 1.0
+    trace: list[float] = []
+    totals = np.zeros(K, dtype=np.float64)
+    for _ in range(max_iter):
+        n = np.zeros(K, dtype=np.float64)
+        mean = np.zeros(K, dtype=np.float64)
+        M2 = np.zeros(K, dtype=np.float64)
+        nu_sum = np.zeros(K, dtype=np.float64)
+        nu_count = np.zeros(K, dtype=np.float64)
+        inv_c = 1.0 / c
+        for di, doc in enumerate(docs):
+            allowed = allowed_cache.get(di)
+            if allowed is None:
+                allowed = partition.allowed_indices(doc.groups)
+                allowed_cache[di] = allowed
+            key = tuple(allowed.tolist())
+            rinv = rinv_cache.get(key)
+            if rinv is None:
+                rinv = safe_inverse(Sigma[np.ix_(allowed, allowed)])
+                rinv_cache[key] = rinv
+            eta_hat, nu_d, _ = _stm_doc_inference(
+                indices=doc.indices, counts=doc.counts,
+                expElogbeta=expElogbeta,
+                Gamma=Gamma, Sigma_inv_allowed=inv_c * rinv, x=doc.x,
+                max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+                allowed=allowed, reference=reference,
+            )
+            n, mean, M2 = _welford_update(n, mean, M2, eta_hat, allowed)
+            nu_diag = np.diag(nu_d)
+            nu_sum[allowed] += nu_diag[allowed]
+            nu_count[allowed] += 1.0
+        c_new, totals = _pool_scale(n, M2, nu_sum, nu_count, reference=reference)
+        trace.append(c_new)
+        if abs(c_new - c) <= tol * c:
+            c = c_new
+            break
+        c = c_new
+
+    if _return_trace:
+        return trace
+    if _return_totals:
+        return totals
+    return float(c)
+
+
+def corpus_eta_scale_gated_rdd(
+    doc_rdd, global_params, partition, *,
+    reference=None, max_iter=15, tol=0.02,
+    sample_fraction=None, sample_seed=0,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4, depth=2,
+):
+    """Distributed iterated pooled generative-variance scale c for the STM
+    generative covariance Sigma_gen = c*R, with beta and R FROZEN (see
+    ``corpus_eta_scale_gated`` for the full derivation; this is its Spark
+    counterpart, byte-for-byte the same math on a distributed corpus).
+
+    Each OUTER round re-broadcasts the current scale c and runs ONE distributed
+    E-step pass: each partition runs the same per-doc Laplace E-step as
+    ``infer_local`` under the prior Sigma = c*R (precision ``(1/c) *
+    safe_inverse(R[allowed])``), accumulating a local per-topic Welford triple
+    (n, mean, M2) of the posterior mode eta_hat PLUS a per-topic (nu_sum,
+    nu_count) of the Laplace posterior variance nu_d. The tree-reduce combines
+    partitions pairwise (parallel Welford, Chan/Golub/LeVeque 1979, for the
+    between-doc term; plain sums for the nu term) -- only five K-vectors per
+    partition ever cross the network, never the documents. The driver pools the
+    per-topic law-of-total-variance totals to a single scalar over the free,
+    observed topics and updates c until ``abs(c_new - c) <= tol*c``.
+
+    ``safe_inverse(R[allowed])`` is c-independent, so it is cached per distinct
+    allowed set inside each partition and only rescaled by 1/c each round.
+    Convergence is logged per round on the driver (``[eta_scale] iter ...``) so
+    the export shows the trace.
+
+    ``sample_fraction``: a single pooled scalar needs only a sample. When set,
+    the rdd is sampled (without replacement) and cached ONCE before the loop and
+    every round iterates on that sample -- keeping the iterated cost near a single
+    full pass. When None, the full rdd is cached before the loop (it is traversed
+    up to max_iter times). ``global_params`` and ``partition`` are broadcast via
+    the Spark-safe default-arg closure convention; the scalar c is re-broadcast
+    each round. Returns the converged scalar c.
+    """
+    from pyspark import StorageLevel
+
+    sc = doc_rdd.context
+    gp_bcast = sc.broadcast({
+        k: np.asarray(v, dtype=np.float64) for k, v in global_params.items()
+    })
+    p_bcast = sc.broadcast(partition)
+
+    # Sample (a scalar needs only a sample) or take the full rdd, and cache once:
+    # the loop traverses it up to max_iter times.
+    if sample_fraction is not None:
+        work_rdd = doc_rdd.sample(
+            withReplacement=False, fraction=sample_fraction, seed=sample_seed)
+    else:
+        work_rdd = doc_rdd
+    work_rdd = work_rdd.persist(StorageLevel.MEMORY_AND_DISK)
+
+    try:
+        c = 1.0
+        for it in range(max_iter):
+            c_bcast = sc.broadcast(float(c))
+
+            def _local(rows, _gp=gp_bcast, _p=p_bcast, _c=c_bcast):
+                from spark_vi.models.topic._linalg import safe_inverse
+                from scipy.special import digamma
+
+                gp = _gp.value
+                part = _p.value
+                inv_c = 1.0 / _c.value
+                lam = gp["lambda"]
+                Gamma = gp["Gamma"]
+                Sigma = gp["Sigma"]     # R (unit-diagonal correlation)
+                K = lam.shape[0]
+                expElogbeta = np.exp(
+                    digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+                n = np.zeros(K, dtype=np.float64)
+                mean = np.zeros(K, dtype=np.float64)
+                M2 = np.zeros(K, dtype=np.float64)
+                nu_sum = np.zeros(K, dtype=np.float64)
+                nu_count = np.zeros(K, dtype=np.float64)
+                rinv_cache: dict[tuple, np.ndarray] = {}
+                n_docs = 0
+
+                for doc in rows:
+                    allowed = part.allowed_indices(doc.groups)
+                    key = tuple(allowed.tolist())
+                    rinv = rinv_cache.get(key)
+                    if rinv is None:
+                        rinv = safe_inverse(Sigma[np.ix_(allowed, allowed)])
+                        rinv_cache[key] = rinv
+                    eta_hat, nu_d, _ = _stm_doc_inference(
+                        indices=doc.indices, counts=doc.counts,
+                        expElogbeta=expElogbeta,
+                        Gamma=Gamma, Sigma_inv_allowed=inv_c * rinv, x=doc.x,
+                        max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+                        allowed=allowed, reference=reference,
+                    )
+                    n, mean, M2 = _welford_update(n, mean, M2, eta_hat, allowed)
+                    nu_diag = np.diag(nu_d)
+                    nu_sum[allowed] += nu_diag[allowed]
+                    nu_count[allowed] += 1.0
+                    n_docs += 1
+                return [(n, mean, M2, nu_sum, nu_count, n_docs)]
+
+            def _combine(a, b):
+                n_ab, mean_ab, M2_ab = _welford_combine(a[:3], b[:3])
+                return (n_ab, mean_ab, M2_ab,
+                        a[3] + b[3], a[4] + b[4], a[5] + b[5])
+
+            n, mean, M2, nu_sum, nu_count, n_docs = (
+                work_rdd.mapPartitions(_local).treeReduce(_combine, depth=depth))
+            c_bcast.destroy()
+            if n_docs == 0:
+                raise ValueError("corpus_eta_scale_gated_rdd: empty document RDD")
+
+            c_new, _ = _pool_scale(n, M2, nu_sum, nu_count, reference=reference)
+            print(f"[eta_scale] iter {it}: c={c_new:.4f}")
+            if abs(c_new - c) <= tol * c:
+                c = c_new
+                break
+            c = c_new
+        return float(c)
+    finally:
+        work_rdd.unpersist(blocking=False)
+
+
 class StreamingSTM:
     """Streaming-VI estimator for OnlineSTM with DataFrame input.
 
