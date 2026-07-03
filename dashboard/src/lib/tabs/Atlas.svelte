@@ -11,6 +11,11 @@
   // (Conditioning reset on cohort change is handled centrally in App.svelte via
   // resetConditioningForCohort(); no per-panel reset needed here.)
 
+  // The main viz area shows EITHER the bubble map or the topic-correlation
+  // heatmap (correlation is a static Sigma artifact — covariate-independent — so
+  // it lives as an alternate view, not a conditioned panel).
+  let view: 'map' | 'correlation' = 'map'
+
   // Background-click closes the disclosure popover so the user doesn't
   // have to find and click the same link again to dismiss it.
   let whatIsEl: HTMLDetailsElement
@@ -46,19 +51,37 @@
 
   <div class="grid">
     <div class="left-col">
-      <TopicMap>
-        <ConditioningBar store={atlasConditioning} showGroup={false} inlineControls />
-      </TopicMap>
-      <PhenotypeBrowser />
       {#if $bundle?.correlation}
-        <section class="correlation-section">
-          <header class="subsection-head">
-            <span class="eyebrow">{copy.correlation.heading}</span>
-            <p class="kicker">{copy.correlation.kicker}</p>
-          </header>
-          <CorrelationHeatmap correlation={$bundle.correlation} />
-        </section>
+        <div class="viz-switch" role="tablist" aria-label="Atlas view">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === 'map'}
+            class:active={view === 'map'}
+            on:click={() => (view = 'map')}
+          >Bubbles</button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === 'correlation'}
+            class:active={view === 'correlation'}
+            on:click={() => (view = 'correlation')}
+          >Correlations</button>
+        </div>
       {/if}
+
+      {#if view === 'correlation' && $bundle?.correlation}
+        <div class="corr-wrap">
+          <p class="corr-kicker">{copy.correlation.kicker}</p>
+          <CorrelationHeatmap correlation={$bundle.correlation} />
+        </div>
+      {:else}
+        <TopicMap>
+          <ConditioningBar store={atlasConditioning} showGroup={false} inlineControls />
+        </TopicMap>
+      {/if}
+
+      <PhenotypeBrowser />
     </div>
     <CodePanel />
   </div>
@@ -176,27 +199,49 @@
     min-width: 0;
   }
 
-  /* Correlation heatmap subsection: only present when the bundle carries
-     block-gated correlation data (see bundle.correlation in types.ts). */
-  .correlation-section {
+  /* Segmented control: switch the main viz between the bubble map and the
+     topic-correlation heatmap (only shown when the bundle carries correlation
+     data — see bundle.correlation in types.ts). */
+  .viz-switch {
+    display: inline-flex;
+    align-self: flex-start;
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  .viz-switch button {
+    border: 0;
+    background: var(--surface);
+    color: var(--ink-muted);
+    padding: 0.3rem 0.85rem;
+    font-family: var(--font-mono);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    transition: color 0.12s ease, background 0.12s ease;
+  }
+  .viz-switch button + button {
+    border-left: 1px solid var(--rule-strong);
+  }
+  .viz-switch button:hover {
+    color: var(--ink);
+  }
+  .viz-switch button.active {
+    background: var(--accent-faint);
+    color: var(--accent);
+  }
+
+  .corr-wrap {
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
   }
-  .subsection-head {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-  }
-  .subsection-head .eyebrow {
-    font-family: var(--font-mono);
-    font-size: var(--fs-micro);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--ink-faint);
-    font-weight: 500;
-  }
-  .subsection-head .kicker {
+  .corr-kicker {
+    margin: 0;
+    font-size: var(--fs-small);
+    color: var(--ink-muted);
     max-width: 52ch;
+    line-height: 1.5;
   }
 </style>

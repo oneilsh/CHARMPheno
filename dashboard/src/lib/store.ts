@@ -134,9 +134,10 @@ export const searchedPhenotypeSet = derived(
 
 // Phenotype browser filter+sort state.
 export const phenotypeFilter = writable<string>('')
-export const phenotypeSortBy = writable<'label' | 'prevalence' | 'coherence' | 'topic_mass'>(
-  'prevalence',
-)
+export type PhenotypeSortKey =
+  | 'id' | 'label' | 'cohort' | 'prevalence' | 'coherence' | 'topic_mass'
+export const phenotypeSortBy = writable<PhenotypeSortKey>('prevalence')
+export const phenotypeSortDir = writable<'asc' | 'desc'>('desc')
 
 
 // Fraction of patients with theta_k > tau, derived from the histogram.

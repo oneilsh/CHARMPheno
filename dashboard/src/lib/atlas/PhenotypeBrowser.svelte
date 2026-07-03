@@ -1,9 +1,11 @@
 <script lang="ts">
   import {
     bundle, selectedPhenotypeId, advancedView,
-    phenotypeFilter, phenotypeSortBy, searchedConditionIdx,
+    phenotypeFilter, phenotypeSortBy, phenotypeSortDir, searchedConditionIdx,
     prevalenceReader, tauThreshold, isVisibleInCurrentMode,
+    type PhenotypeSortKey,
   } from '../store'
+  import { groupHue } from '../palette'
   import { phenotypesContainingCode } from '../inference'
   import type { Phenotype } from '../types'
   import { copy } from '../copy'
@@ -11,10 +13,57 @@
   // Reactively bind the τ-aware reader so all call sites stay in sync.
   $: reader = $prevalenceReader
 
-  // Filter+sort phenotype list. Sort key state lives in the global store so
-  // it's preserved across tab switches. Simple-mode hides dead+mixed (matches
+  // Filter+sort phenotype list. Sort key/dir live in the global store so
+  // they're preserved across tab switches. Simple-mode hides dead+mixed (matches
   // the bubble atlas filter).
   $: phenotypes = ($bundle?.phenotypes.phenotypes ?? []) as Phenotype[]
+
+  // Cohort (gated bundles): block name per phenotype, with a display label that
+  // matches the atlas ("background" -> "All") and the shared cohort hue.
+  $: gated = !!$bundle?.gating
+  $: blockOf = (p: Phenotype) => $bundle?.gating?.topic_blocks?.[p.id] ?? ''
+  $: cohortLabel = (p: Phenotype) => {
+    const b = blockOf(p)
+    if (!b) return ''
+    if (b === 'background') return 'All'
+    return $bundle?.gating?.group_labels?.[b] ?? b
+  }
+
+  // Clickable-header sort: re-clicking the active column flips direction;
+  // switching column resets to that column's natural default (text asc,
+  // numeric desc).
+  const defaultDir = (key: PhenotypeSortKey): 'asc' | 'desc' =>
+    key === 'label' || key === 'cohort' ? 'asc' : 'desc'
+  function sortByCol(key: PhenotypeSortKey) {
+    if ($phenotypeSortBy === key) {
+      phenotypeSortDir.update((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      phenotypeSortBy.set(key)
+      phenotypeSortDir.set(defaultDir(key))
+    }
+  }
+
+  // Ascending-sense comparator; direction is applied in the sort call. nulls
+  // sort as -Infinity so they trail on descending (the default for coherence).
+  function cmp(a: Phenotype, b: Phenotype, key: PhenotypeSortKey): number {
+    switch (key) {
+      case 'id':
+        return a.id - b.id
+      case 'label':
+        return (a.label || `Phenotype ${a.id}`).localeCompare(b.label || `Phenotype ${b.id}`)
+      case 'cohort':
+        return cohortLabel(a).localeCompare(cohortLabel(b)) || a.id - b.id
+      case 'coherence':
+        return (a.npmi ?? -Infinity) - (b.npmi ?? -Infinity)
+      case 'topic_mass':
+        return a.corpus_prevalence - b.corpus_prevalence
+      case 'prevalence':
+      default: {
+        const d = reader(a) - reader(b)
+        return d !== 0 ? d : a.corpus_prevalence - b.corpus_prevalence
+      }
+    }
+  }
 
   // Optional restriction: when the user has pinned a condition via the
   // search bar, restrict the table to phenotypes containing that condition
@@ -37,28 +86,11 @@
       const desc = (p.description || '').toLowerCase()
       return label.includes(q) || desc.includes(q)
     })
-    .sort((a, b) => {
-      switch ($phenotypeSortBy) {
-        case 'label': {
-          const la = a.label || `Phenotype ${a.id}`
-          const lb = b.label || `Phenotype ${b.id}`
-          return la.localeCompare(lb)
-        }
-        case 'coherence': {
-          if (a.npmi == null && b.npmi == null) return 0
-          if (a.npmi == null) return 1
-          if (b.npmi == null) return -1
-          return b.npmi - a.npmi
-        }
-        case 'topic_mass':
-          return b.corpus_prevalence - a.corpus_prevalence
-        case 'prevalence':
-        default: {
-          const diff = reader(b) - reader(a)
-          return diff !== 0 ? diff : (b.corpus_prevalence - a.corpus_prevalence)
-        }
-      }
-    })
+    .sort((a, b) => ($phenotypeSortDir === 'asc' ? 1 : -1) * cmp(a, b, $phenotypeSortBy))
+
+  // Sort indicator for a column header (active column only).
+  $: arrow = (key: PhenotypeSortKey) =>
+    $phenotypeSortBy === key ? ($phenotypeSortDir === 'asc' ? '▲' : '▼') : ''
 
   // Color-code the quality chip the same way CodePanel does
   const qualityClass: Record<string, string> = {
@@ -107,17 +139,6 @@
         >×</button>
       {/if}
     </div>
-    <div class="sort">
-      <span class="eyebrow">Sort by</span>
-      <select bind:value={$phenotypeSortBy}>
-        <option value="prevalence">{$advancedView ? 'Prevalence (patients)' : 'Prevalence'}</option>
-        <option value="label">Label (A–Z)</option>
-        {#if $advancedView}
-          <option value="coherence">Coherence</option>
-          <option value="topic_mass">Topic mass</option>
-        {/if}
-      </select>
-    </div>
     {#if containingSet}
       <span class="filter-chip filter-chip-search" title="Filtered to phenotypes containing the searched condition">
         contains searched condition · {filtered.length} match{filtered.length === 1 ? '' : 'es'}
@@ -131,17 +152,32 @@
     <table class="phenos">
       <thead>
         <tr>
-          <th class="col-id">#</th>
-          <th class="col-label">Label</th>
+          <th class="col-id">
+            <button class="th-sort" class:active={$phenotypeSortBy === 'id'} on:click={() => sortByCol('id')}>#<span class="arrow">{arrow('id')}</span></button>
+          </th>
+          <th class="col-label">
+            <button class="th-sort" class:active={$phenotypeSortBy === 'label'} on:click={() => sortByCol('label')}>Label<span class="arrow">{arrow('label')}</span></button>
+          </th>
+          {#if gated}
+            <th class="col-cohort">
+              <button class="th-sort" class:active={$phenotypeSortBy === 'cohort'} on:click={() => sortByCol('cohort')}>Cohort<span class="arrow">{arrow('cohort')}</span></button>
+            </th>
+          {/if}
           {#if $advancedView}
             <th class="col-quality">Quality</th>
-            <th class="col-coh" data-numeric>Coherence</th>
-            <th class="col-mass" data-numeric title={copy.phenotypeBrowser.topicMassTip}>Topic mass</th>
+            <th class="col-coh" data-numeric>
+              <button class="th-sort th-sort-num" class:active={$phenotypeSortBy === 'coherence'} on:click={() => sortByCol('coherence')}><span class="arrow">{arrow('coherence')}</span>Coherence</button>
+            </th>
+            <th class="col-mass" data-numeric title={copy.phenotypeBrowser.topicMassTip}>
+              <button class="th-sort th-sort-num" class:active={$phenotypeSortBy === 'topic_mass'} on:click={() => sortByCol('topic_mass')}><span class="arrow">{arrow('topic_mass')}</span>Topic mass</button>
+            </th>
           {/if}
           <th class="col-prev" data-numeric title={$advancedView
             ? copy.phenotypeBrowser.prevTipAdvanced($tauThreshold)
             : copy.phenotypeBrowser.prevTipBasic($tauThreshold)
-          }>{$advancedView ? 'Prevalence (patients)' : 'Prevalence'}</th>
+          }>
+            <button class="th-sort th-sort-num" class:active={$phenotypeSortBy === 'prevalence'} on:click={() => sortByCol('prevalence')}><span class="arrow">{arrow('prevalence')}</span>{$advancedView ? 'Prevalence (patients)' : 'Prevalence'}</button>
+          </th>
         </tr>
       </thead>
       <tbody>
@@ -152,6 +188,14 @@
           >
             <td class="col-id" data-numeric>{p.id}</td>
             <td class="col-label">{p.label || `Phenotype ${p.id}`}</td>
+            {#if gated}
+              <td class="col-cohort">
+                <span class="cohort-cell">
+                  <span class="cohort-sw" style="background:{$groupHue(blockOf(p))}"></span>
+                  {cohortLabel(p)}
+                </span>
+              </td>
+            {/if}
             {#if $advancedView}
               <td class="col-quality">
                 {#if p.quality}
@@ -184,7 +228,7 @@
           </tr>
         {/each}
         {#if filtered.length === 0}
-          <tr><td colspan={$advancedView ? 6 : 3} class="empty">No phenotypes match.</td></tr>
+          <tr><td colspan={2 + (gated ? 1 : 0) + ($advancedView ? 3 : 0) + 1} class="empty">No phenotypes match.</td></tr>
         {/if}
       </tbody>
     </table>
@@ -262,11 +306,6 @@
     padding: 0 0.2rem;
   }
   .filter-clear:hover { color: var(--ink); }
-  .sort {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-  }
   .filter-chip {
     font-family: var(--font-mono);
     font-size: var(--fs-micro);
@@ -308,6 +347,47 @@
     color: var(--ink-faint);
     border-bottom: 1px solid var(--rule);
     font-weight: 500;
+  }
+  /* Column headers double as sort buttons: click to sort, re-click to flip. */
+  .th-sort {
+    background: none;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .th-sort:hover { color: var(--ink-muted); }
+  .th-sort.active { color: var(--ink); }
+  /* Fixed-width slot so the layout doesn't shift as the arrow appears/hides. */
+  .arrow {
+    display: inline-block;
+    width: 0.85em;
+    text-align: center;
+    font-size: 0.7em;
+    color: var(--accent);
+    vertical-align: middle;
+  }
+  .th-sort-num .arrow { margin-right: 0.1rem; }
+
+  .col-cohort { width: 7rem; }
+  .cohort-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--ink-muted);
+  }
+  .cohort-sw {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+    border: 0.5px solid rgba(24, 24, 27, 0.25);
   }
   .phenos td {
     padding: 0.45rem 0.85rem;

@@ -142,9 +142,12 @@
     const domainMax = conditioningActive
       ? Math.max(...allPhenotypes.map((p) => p.corpus_prevalence), 1e-9)
       : Math.max(...allPhenotypes.map(r_of), 1e-9)
+    // scaleSqrt = area-proportional. A low floor (2, not 5) lets a 0.2%-
+    // prevalence bubble actually read as tiny next to a 4%+ one instead of being
+    // pinned near the mid-size floor; zero stays 0 (handled in rad()).
     const r = d3.scaleSqrt()
       .domain([0, domainMax])
-      .range([5, 26])
+      .range([2, 26])
 
     // Node hue: cohort (topic block) for gated bundles, else the NPMI ramp.
     // Coherence rides on opacity in the gated case (see opacityFn).

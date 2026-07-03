@@ -1,133 +1,120 @@
 <script lang="ts">
   import * as d3 from 'd3'
   import type { Correlation } from '../types'
+  import { bundle, selectedPhenotypeId } from '../store'
   import { copy } from '../copy'
 
   export let correlation: Correlation
 
-  // Diverging R ramp: red (R = -1) -> neutral gray (R = 0) -> cyan (R = +1).
-  // Mirrors the NPMI ramp used on the phenotype atlas (TopicMap.svelte) so
-  // "diverging metric" reads consistently across the dashboard.
+  // Diverging R ramp: red (R = -1) -> WHITE (R = 0) -> cyan (R = +1). A white
+  // midpoint (not gray) keeps near-zero correlations from muddying the field, so
+  // the genuinely strong pairs pop. Mirrors the atlas's red→neutral→cyan sense.
   const rRamp = d3.scaleLinear<string>()
     .domain([-1, 0, 1])
-    .range(['#ef4444', '#d4d4d8', '#06b6d4'])
+    .range(['#ef4444', '#ffffff', '#06b6d4'])
     .clamp(true)
 
+  // viewBox units (the SVG scales to fit via CSS). MARGIN pads the grid inside
+  // the card so the plot floats within its frame (like the bubble map) rather
+  // than bleeding to the border. GAP is a small break drawn between blocks in
+  // place of a separator line.
   const CELL = 22
-  const MARGIN_LEFT = 90
-  const MARGIN_TOP = 90
+  const MARGIN = 16
+  const GAP = 8
 
   $: order = correlation.topic_order
   $: n = order.length
   $: labels = correlation.block_labels
-  $: W = MARGIN_LEFT + n * CELL
-  $: H = MARGIN_TOP + n * CELL
 
-  // Block-boundary positions (in grid-index space) where a separator line
-  // should be drawn, derived from block_labels running in lockstep with
-  // topic_order. A boundary sits just before the first index whose label
-  // differs from its predecessor's.
+  // Block boundaries (grid-index space): first index of each new block.
   $: boundaries = (() => {
     const out: number[] = []
-    for (let i = 1; i < n; i++) {
-      if (labels[i] !== labels[i - 1]) out.push(i)
-    }
+    for (let i = 1; i < n; i++) if (labels[i] !== labels[i - 1]) out.push(i)
     return out
   })()
 
-  function naTitle(support: number): string {
-    return `no joint support: ${support} < min_pair_support`
-  }
+  // Cumulative gap count applied before each index (one GAP per block boundary
+  // at-or-before the index), so blocks are visually separated by whitespace.
+  $: cumGap = (() => {
+    const bset = new Set(boundaries)
+    const arr = new Array<number>(n)
+    let g = 0
+    for (let i = 0; i < n; i++) {
+      if (bset.has(i)) g++
+      arr[i] = g
+    }
+    return arr
+  })()
+  $: pos = (i: number) => MARGIN + i * CELL + (cumGap[i] ?? 0) * GAP
+  $: gridSpan = n * CELL + boundaries.length * GAP
+  $: S = MARGIN * 2 + gridSpan
+
+  // Phenotype id -> label, for the hover tooltip (row × column topic names).
+  $: labelById = new Map(
+    ($bundle?.phenotypes.phenotypes ?? []).map((p) => [p.id, p.label || `Phenotype ${p.id}`]),
+  )
+
+  // Selected phenotype's position in the matrix ordering (-1 if absent, e.g. the
+  // reference topic, which has no Sigma row/column).
+  $: selIndex = $selectedPhenotypeId == null ? -1 : order.indexOf($selectedPhenotypeId)
 
   function cellTitle(i: number, j: number): string {
     const r = correlation.R[i][j]
     const identified = correlation.identified[i][j]
     const support = correlation.support[i][j]
-    if (r === null || !identified) return naTitle(support)
-    return `R = ${r.toFixed(3)} · N = ${support}`
+    const pair = `${labelById.get(order[i]) ?? order[i]} × ${labelById.get(order[j]) ?? order[j]}`
+    if (r === null || !identified) return `${pair}\nno joint support: ${support} < min_pair_support`
+    return `${pair}\nR = ${r.toFixed(3)} · N = ${support}`
+  }
+
+  // Clicking a cell selects its COLUMN topic (order[j]); the row topic is named
+  // in the tooltip, so the pairing stays legible while the click has one target.
+  function selectCol(j: number) {
+    selectedPhenotypeId.set(order[j])
   }
 </script>
 
 <figure class="heatmap" data-tour="correlation-heatmap">
   <svg
-    viewBox="0 0 {W} {H}"
-    width={W}
-    height={H}
+    viewBox="0 0 {S} {S}"
     role="img"
     aria-label={copy.correlation.ariaLabel}
+    preserveAspectRatio="xMidYMid meet"
   >
-    <!-- Row labels (block labels, one per topic row) -->
-    {#each order as _topic, i}
-      <text
-        x={MARGIN_LEFT - 6}
-        y={MARGIN_TOP + i * CELL + CELL / 2}
-        font-family="var(--font-mono)"
-        font-size="8"
-        fill="var(--ink-faint)"
-        text-anchor="end"
-        dominant-baseline="middle"
-      >{labels[i]}</text>
-    {/each}
-
-    <!-- Column labels (rotated) -->
-    {#each order as _topic, j}
-      <text
-        x={MARGIN_LEFT + j * CELL + CELL / 2}
-        y={MARGIN_TOP - 6}
-        font-family="var(--font-mono)"
-        font-size="8"
-        fill="var(--ink-faint)"
-        text-anchor="start"
-        dominant-baseline="middle"
-        transform="rotate(-90 {MARGIN_LEFT + j * CELL + CELL / 2} {MARGIN_TOP - 6})"
-      >{labels[j]}</text>
-    {/each}
-
     <!-- Grid cells -->
     {#each order as _rowTopic, i}
       {#each order as _colTopic, j}
         {@const r = correlation.R[i][j]}
         {@const identified = correlation.identified[i][j]}
         {@const isNa = r === null || !identified}
+        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+        <!-- The grid is thousands of cells; per-cell keyboard focus would be a
+             tab-trap. The same selection is keyboard-reachable via the phenotype
+             table, so the cell click is a mouse-only enhancement. -->
         <rect
           class="cell"
           class:na={isNa}
           data-row={i}
           data-col={j}
-          x={MARGIN_LEFT + j * CELL}
-          y={MARGIN_TOP + i * CELL}
+          x={pos(j)}
+          y={pos(i)}
           width={CELL}
           height={CELL}
-          fill={isNa ? 'var(--rule-strong)' : rRamp(r as number)}
+          fill={isNa ? 'var(--rule)' : rRamp(r as number)}
           data-tip={cellTitle(i, j)}
+          on:click={() => selectCol(j)}
         ><title>{cellTitle(i, j)}</title></rect>
       {/each}
     {/each}
 
-    <!-- Block separators: heavier rule at each boundary, both row and column. -->
-    {#each boundaries as b}
-      <line
-        x1={MARGIN_LEFT} y1={MARGIN_TOP + b * CELL}
-        x2={MARGIN_LEFT + n * CELL} y2={MARGIN_TOP + b * CELL}
-        stroke="var(--ink-muted)"
-        stroke-width="1.5"
-      />
-      <line
-        x1={MARGIN_LEFT + b * CELL} y1={MARGIN_TOP}
-        x2={MARGIN_LEFT + b * CELL} y2={MARGIN_TOP + n * CELL}
-        stroke="var(--ink-muted)"
-        stroke-width="1.5"
-      />
-    {/each}
-
-    <!-- Outer frame -->
-    <rect
-      x={MARGIN_LEFT} y={MARGIN_TOP}
-      width={n * CELL} height={n * CELL}
-      fill="none"
-      stroke="var(--rule)"
-      stroke-width="1"
-    />
+    <!-- Selection: gently OUTLINE the selected topic's row + column (no fill, so
+         the underlying R values aren't visually altered), and ring its diagonal.
+         pointer-events:none so clicks still reach the cells underneath. -->
+    {#if selIndex >= 0}
+      <rect class="sel-line" x={MARGIN} y={pos(selIndex)} width={gridSpan} height={CELL} />
+      <rect class="sel-line" x={pos(selIndex)} y={MARGIN} width={CELL} height={gridSpan} />
+      <rect class="sel-diag" x={pos(selIndex)} y={pos(selIndex)} width={CELL} height={CELL} />
+    {/if}
   </svg>
 
   <figcaption class="legend">
@@ -140,6 +127,7 @@
       <span class="swatch na" aria-hidden="true"></span>
       <span class="eyebrow">no joint support</span>
     </div>
+    <span class="hint">hover a cell for the topic pair · click to select its column topic</span>
   </figcaption>
 </figure>
 
@@ -148,17 +136,39 @@
     margin: 0;
     display: flex;
     flex-direction: column;
+    align-items: center;
     gap: 0.5rem;
   }
   svg {
+    width: 100%;
+    max-width: 600px;
+    aspect-ratio: 1 / 1;
+    height: auto;
     display: block;
-    overflow: visible;
     background: var(--surface);
     border: 1px solid var(--rule);
     border-radius: var(--radius-sm);
   }
   .cell {
-    cursor: help;
+    cursor: pointer;
+  }
+  .cell:hover {
+    stroke: var(--ink);
+    stroke-width: 1.5;
+    paint-order: stroke;
+  }
+  /* Selection outline (accent cyan), no fill so R values read true. */
+  .sel-line {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 1.5;
+    pointer-events: none;
+  }
+  .sel-diag {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 2.5;
+    pointer-events: none;
   }
   .legend {
     display: flex;
@@ -168,6 +178,7 @@
     font-size: var(--fs-micro);
     color: var(--ink-faint);
     flex-wrap: wrap;
+    max-width: 600px;
   }
   .legend-group {
     display: flex;
@@ -184,9 +195,10 @@
     width: 96px;
     height: 6px;
     border-radius: 3px;
+    border: 1px solid var(--rule);
   }
   .grad-r {
-    background: linear-gradient(to right, #ef4444, #d4d4d8, #06b6d4);
+    background: linear-gradient(to right, #ef4444, #ffffff, #06b6d4);
   }
   .ticks {
     display: inline-flex;
@@ -199,6 +211,10 @@
     width: 12px;
     height: 12px;
     border-radius: 2px;
-    background: var(--rule-strong);
+    background: var(--rule);
+  }
+  .hint {
+    color: var(--ink-faint);
+    font-style: italic;
   }
 </style>
