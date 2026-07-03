@@ -1,5 +1,6 @@
 import { sampleStandardNormal } from '../sampling'
 import type { CovariateEffects, Correlation } from '../types'
+import { choleskyPD } from './linalg'
 
 // Lower-triangular Cholesky factor L with L Lᵀ = A. Throws if A is not
 // positive-definite (a non-positive pivot). Textbook Cholesky-Banachiewicz;
@@ -83,7 +84,7 @@ export function sampleConditionedTheta(args: {
     freeIdx.map((rj) => correlation.R[ri][rj] as number))
 
   const etaFree = freeIdx.length
-    ? mvnDraw(mean, cholesky(Sigma), rng)
+    ? mvnDraw(mean, choleskyPD(Sigma), rng)
     : []
 
   // Assemble eta over all K display topics: reference -> 0, free -> drawn,

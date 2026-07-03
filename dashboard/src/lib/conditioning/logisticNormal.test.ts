@@ -122,4 +122,17 @@ describe('sampleConditionedTheta', () => {
     }
     expect(s2).toBeGreaterThan(s1)
   })
+
+  it('does not throw when the Sigma sub-block is not positive-definite', () => {
+    // 2 free topics with correlation 1.1 in magnitude -> indefinite 2x2 block.
+    const corr: Correlation = {
+      topic_order: [1, 2], block_labels: ['background', 'background'],
+      R: [[1, 1.1], [1.1, 1]], identified: [[true, true], [true, true]],
+      support: [[9, 9], [9, 9]], reference_topic: 0,
+    }
+    const effects: CovariateEffects = [{ covariate: 'Intercept', per_topic: [0, 0, 0] }]
+    expect(() => sampleConditionedTheta({
+      effects, x: [1], correlation: corr, topicBlocks: null, group: null, rng: createRng(1),
+    })).not.toThrow()
+  })
 })
