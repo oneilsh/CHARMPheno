@@ -56,6 +56,11 @@ cohort.subscribe(($c) => {
 
 export const selectedPhenotypeId = writable<number | null>(null)
 export const selectedPatientId = writable<string | null>(null)
+
+// Compare subtab: the two phenotypes being contrasted in the Difference pane.
+// Set by clicking a correlation cell (a = row phenotype, b = column phenotype);
+// a === b (a diagonal click) clears it.
+export const comparePair = writable<{ a: number; b: number } | null>(null)
 export const simulatorPrefix = writable<number[]>([])     // vocab indices (trimmed)
 export const advancedView = writable<boolean>(false)
 

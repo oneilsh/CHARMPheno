@@ -2,7 +2,7 @@ import { it, expect, afterEach } from 'vitest'
 import { render, cleanup, fireEvent } from '@testing-library/svelte'
 import { get } from 'svelte/store'
 import CorrelationHeatmap from './CorrelationHeatmap.svelte'
-import { selectedPhenotypeId } from '../store'
+import { selectedPhenotypeId, comparePair } from '../store'
 import type { Correlation } from '../types'
 
 afterEach(() => cleanup())
@@ -70,4 +70,21 @@ it('a cross-block selection surfaces the unidentified NA cell', async () => {
   const na = container.querySelector('rect.cell[data-mr="0"][data-mc="3"]')
   expect(na?.classList.contains('na')).toBe(true)
   expect(na?.getAttribute('fill')).toBe('var(--rule)')
+})
+
+it('in pair-select mode, clicking a cell sets the comparePair (row=A, col=B)', async () => {
+  comparePair.set(null)
+  const { container } = render(CorrelationHeatmap, { props: { correlation, pairSelect: true } })
+  // default All × All -> background cells (matrix rows/cols {0,1})
+  const cell = container.querySelector('rect.cell[data-mr="0"][data-mc="1"]') as SVGRectElement
+  await fireEvent.click(cell)
+  expect(get(comparePair)).toEqual({ a: 0, b: 1 })   // order[0]=0, order[1]=1
+})
+
+it('diagonal click (A===B) clears the pair', async () => {
+  comparePair.set({ a: 9, b: 9 })
+  const { container } = render(CorrelationHeatmap, { props: { correlation, pairSelect: true } })
+  const cell = container.querySelector('rect.cell[data-mr="0"][data-mc="0"]') as SVGRectElement
+  await fireEvent.click(cell)
+  expect(get(comparePair)).toBeNull()
 })

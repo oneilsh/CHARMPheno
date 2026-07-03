@@ -1,11 +1,15 @@
 <script lang="ts">
   import * as d3 from 'd3'
   import type { Correlation } from '../types'
-  import { bundle, selectedPhenotypeId } from '../store'
+  import { bundle, selectedPhenotypeId, comparePair } from '../store'
   import { seriateTSPCorr, seriateRect } from './seriation'
   import { copy } from '../copy'
 
   export let correlation: Correlation
+  // When true, clicking a cell sets `comparePair` to its (row, col) phenotype
+  // pair (diagonal clicks clear it) instead of the default single-select
+  // (`selectedPhenotypeId`) behavior used by the Explore heatmap.
+  export let pairSelect = false
 
   // Diverging R ramp: red (−1) → white (0) → cyan (+1). White midpoint keeps
   // near-zero correlations from muddying the field.
@@ -121,6 +125,15 @@
   function selectCol(mc: number) {
     selectedPhenotypeId.set(order[mc])
   }
+
+  function onCellClick(mr: number, mc: number) {
+    if (pairSelect) {
+      const a = order[mr], b = order[mc]
+      comparePair.set(a === b ? null : { a, b })
+    } else {
+      selectCol(mc)
+    }
+  }
 </script>
 
 <figure class="heatmap" data-tour="correlation-heatmap">
@@ -146,6 +159,7 @@
         <rect
           class="cell"
           class:na={c.na}
+          class:selected={pairSelect && $comparePair !== null && order[c.mr] === $comparePair.a && order[c.mc] === $comparePair.b}
           data-mr={c.mr}
           data-mc={c.mc}
           width={CELL}
@@ -153,7 +167,7 @@
           fill={c.fill}
           style="transform: translate({c.x}px, {c.y}px)"
           data-tip={c.tip}
-          on:click={() => selectCol(c.mc)}
+          on:click={() => onCellClick(c.mr, c.mc)}
         />
       {/each}
 
@@ -275,6 +289,11 @@
   .cell:hover {
     stroke: var(--ink);
     stroke-width: 1.5;
+    paint-order: stroke;
+  }
+  .cell.selected {
+    stroke: var(--accent);
+    stroke-width: 2;
     paint-order: stroke;
   }
   .sel-line {
