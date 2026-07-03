@@ -61,4 +61,56 @@ describe('generateCohort', () => {
       expect(p.theta[3]).toBe(0)
     }
   })
+
+  it('set mode with a prefix conditions theta toward the prefix-implicated topic (sampleRecordPosterior)', () => {
+    // Same fixture as the group-conditioning test above, but with an
+    // uncorrelated topic block structure (identity R) so the only signal
+    // pulling mass toward topic 2 (cancer) is the prefix's observed codes,
+    // not the covariate/group prior. beta is deliberately peaked so that
+    // vocab word 0 is diagnostic of topic 2 - a prefix of word-0 codes
+    // should therefore push posterior theta mass onto topic 2 relative to
+    // the same cohort with no prefix.
+    const bundle: any = {
+      model: {
+        K: 4, V: 4, alpha: [1, 1, 1, 1],
+        beta: [
+          [0.25, 0.25, 0.25, 0.25],
+          [0.25, 0.25, 0.25, 0.25],
+          [0.85, 0.05, 0.05, 0.05],
+          [0.05, 0.05, 0.05, 0.85],
+        ],
+      },
+      covariateSchema: { k: 1, controls: [], design_columns: [{ name: 'Intercept', recipe: { kind: 'intercept' } }], unsupported: [] },
+      covariateEffects: [{ covariate: 'Intercept', per_topic: [0, 0, 0, 0] }],
+      correlation: {
+        topic_order: [1, 2, 3], block_labels: ['background', 'cancer', 'dementia'],
+        R: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        identified: [[true, true, true], [true, true, true], [true, true, true]],
+        support: [[9, 9, 9], [9, 9, 9], [9, 9, 9]], reference_topic: 0,
+      },
+      gating: { group_var: 'g', groups: ['cancer', 'dementia'], topic_blocks: ['background', 'background', 'cancer', 'dementia'], group_proportions: { cancer: 0.8, dementia: 0.2 } },
+      corpusStats: { mean_codes_per_doc: 10 },
+    }
+    const N = 400
+    // Prefix concentrated on vocab word 0, which beta makes diagnostic of
+    // topic 2 ("cancer"). Group is fixed to 'cancer' in both runs so the
+    // group mask (dementia = topic 3 zeroed) is identical; the only
+    // difference between the two cohorts is the prefix.
+    const prefixCounts = new Map<number, number>([[0, 6]])
+    const withPrefix = generateCohort({
+      model: bundle.model, meanCodesPerDoc: 10, n: N, seed: 7, nNeighbors: 3,
+      conditioning: {
+        mode: 'set', values: {}, group: 'cancer', bundle, prefixCounts, beta: bundle.model.beta,
+      },
+    })
+    const noPrefix = generateCohort({
+      model: bundle.model, meanCodesPerDoc: 10, n: N, seed: 7, nNeighbors: 3,
+      conditioning: { mode: 'set', values: {}, group: 'cancer', bundle },
+    })
+    const meanMass = (c: typeof withPrefix, k: number) =>
+      c.patients.reduce((s, p) => s + p.theta[k], 0) / c.patients.length
+    const withMean = meanMass(withPrefix, 2)
+    const noMean = meanMass(noPrefix, 2)
+    expect(withMean).toBeGreaterThan(noMean + 0.1)
+  })
 })

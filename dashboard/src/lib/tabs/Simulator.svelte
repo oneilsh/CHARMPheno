@@ -1,11 +1,13 @@
 <script lang="ts">
   import {
-    bundle, simulatorPrefix, advancedView, simulatorConditioning,
+    bundle, cohort, simulatorPrefix, advancedView, simulatorConditioning,
   } from '../store'
   import { runSimulator } from '../simulator/runSamples'
   import { buildDesignVector } from '../covariate'
   import { sampleRecordPosterior } from '../conditioning/recordPosterior'
   import { createRng } from '../sampling'
+  import { generateCohort } from '../cohort'
+  import { ensurePatientProjection } from '../patient/projection'
   import ConditionsEditor from '../simulator/ConditionsEditor.svelte'
   import PredictedRecord from '../simulator/PredictedRecord.svelte'
   import SimMiniMap from '../simulator/SimMiniMap.svelte'
@@ -18,6 +20,13 @@
   // cloud, low enough that even autoregressive mode (which re-fits theta
   // per token) feels responsive.
   const DEFAULT_N = 200
+
+  // Explore-Cohort ("$cohort") sizing for the cohort this Simulate click
+  // generates - matches App.svelte's initial-load defaults (same N/
+  // neighbors) so the shared atlas has consistent density regardless of
+  // whether it was populated on load or via Simulate Cohort.
+  const COHORT_N = 1500
+  const COHORT_NEIGHBORS = 8
   // Seed sequence starts at 42 (matches the Patient atlas's seed default)
   // and auto-bumps on each Simulate click so the user sees variation
   // without managing a seed input. The first run is therefore always
@@ -49,14 +58,14 @@
       // an empty prefix this reduces to the covariate/group prior draw.
       // Non-STM bundles take the unchanged Dirichlet path.
       const isStm = !!b.covariateEffects && !!b.correlation
+      const prefixCounts = new Map<number, number>()
+      for (const w of $simulatorPrefix) prefixCounts.set(w, (prefixCounts.get(w) ?? 0) + 1)
       let conditionedTheta: (() => number[]) | undefined
       if (isStm) {
         const cond = $simulatorConditioning
         const schema = b.covariateSchema!
         const x = buildDesignVector(schema.design_columns, cond.values)
         const tRng = createRng(seed ^ 0x9e3779b9)
-        const prefixCounts = new Map<number, number>()
-        for (const w of $simulatorPrefix) prefixCounts.set(w, (prefixCounts.get(w) ?? 0) + 1)
         conditionedTheta = () => sampleRecordPosterior({
           effects: b.covariateEffects!,
           x,
@@ -78,6 +87,32 @@
         autoregressive,
         conditionedTheta,
       })
+
+      // Simulate Cohort also (re)generates the shared cohort that Explore
+      // Cohort displays: a 'set'-mode cohort at the same covariate
+      // values/group, conditioned on the same starting-condition prefix
+      // (empty prefix -> sampleConditionedTheta's ordinary prior draw, via
+      // cohort.ts's delegation). Reusing this Simulate click as the single
+      // trigger for both panels keeps "what you configured" and "what you
+      // see in Explore Cohort" in sync without a second button.
+      const newCohort = generateCohort({
+        model: b.model,
+        meanCodesPerDoc: b.corpusStats.mean_codes_per_doc,
+        n: COHORT_N,
+        seed,
+        nNeighbors: COHORT_NEIGHBORS,
+        qualityByPhenotype: b.phenotypes.phenotypes.map((p) => p.quality),
+        conditioning: {
+          mode: 'set',
+          values: $simulatorConditioning.values,
+          group: $simulatorConditioning.group,
+          bundle: b,
+          prefixCounts,
+          beta: b.model.beta,
+        },
+      })
+      cohort.set(newCohort)
+      ensurePatientProjection()
     } finally {
       running = false
     }

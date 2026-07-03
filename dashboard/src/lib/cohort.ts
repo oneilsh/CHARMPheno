@@ -5,6 +5,7 @@ import {
   createRng, sampleDirichlet, sampleCategorical, samplePoisson,
 } from './sampling'
 import { sampleConditionedTheta } from './conditioning/logisticNormal'
+import { sampleRecordPosterior } from './conditioning/recordPosterior'
 import { sampleMarginalCovariates, sampleMarginalGroup } from './conditioning/marginalSampler'
 import { buildDesignVector } from './covariate'
 
@@ -23,6 +24,16 @@ export interface CohortConditioning {
   values: Record<string, number | string>
   group: string | null
   bundle: DashboardBundle
+  // Optional starting-condition prefix (vocab code -> count) shared across
+  // every patient in the cohort, plus the model's beta needed to evaluate
+  // the prefix likelihood. When present (and mode is 'set' - the Simulate
+  // Cohort path conditions the whole cohort on one shared prefix), theta is
+  // drawn from the faithful record-completion posterior
+  // (sampleRecordPosterior) instead of the prefix-free conditional prior
+  // (sampleConditionedTheta). An empty prefixCounts delegates internally to
+  // the same prior draw, so this is a strict generalization.
+  prefixCounts?: Map<number, number>
+  beta?: number[][]
 }
 
 export interface CohortInput {
@@ -102,7 +113,9 @@ export function generateCohort(input: CohortInput): SyntheticCohort {
   // broader) theta; that disagreement is an LDA property of broad topics
   // rather than something we can patch out. When conditioning is present
   // and the bundle is STM, theta instead comes from the conditional
-  // logistic-normal (sampleConditionedTheta); see CohortConditioning.
+  // logistic-normal (sampleConditionedTheta), or - in 'set' mode with a
+  // shared prefix - the faithful record-completion posterior
+  // (sampleRecordPosterior); see CohortConditioning.
   const drawOne = () => {
     let theta: number[]
     let group: string | null = null
@@ -110,10 +123,18 @@ export function generateCohort(input: CohortInput): SyntheticCohort {
       const b = cc!.bundle
       if (cc!.mode === 'set') {
         group = cc!.group
-        theta = sampleConditionedTheta({
-          effects: b.covariateEffects!, x: setX!, correlation: b.correlation!,
-          topicBlocks: b.gating?.topic_blocks ?? null, group, rng,
-        })
+        if (cc!.prefixCounts?.size) {
+          theta = sampleRecordPosterior({
+            effects: b.covariateEffects!, x: setX!, correlation: b.correlation!,
+            topicBlocks: b.gating?.topic_blocks ?? null, group,
+            prefixCounts: cc!.prefixCounts, beta: cc!.beta!, rng,
+          })
+        } else {
+          theta = sampleConditionedTheta({
+            effects: b.covariateEffects!, x: setX!, correlation: b.correlation!,
+            topicBlocks: b.gating?.topic_blocks ?? null, group, rng,
+          })
+        }
       } else {
         const vals = sampleMarginalCovariates(b.covariateSchema!, rng)
         group = b.gating ? sampleMarginalGroup(b.gating, rng) : null
