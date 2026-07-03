@@ -109,6 +109,7 @@ SUPPORTED_COHORTS: tuple[str, ...] = (
     "population_cancer",
     "population_cancer_sparse",
     "population_eds",
+    "population_sparse",
 )
 
 # Fixed salt for the general-population random-window assignment. Hashing
@@ -224,6 +225,21 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "prevalence covariate."
         ),
     },
+    "population_sparse": {
+        "id": "population_sparse",
+        "label": "Population + Sparse (gated)",
+        "description": (
+            "The whole population split by in-window coding density — no disease "
+            "anchor. Each person is windowed to one deterministic random "
+            "event-anchored 365-day span, then split by event count: heavily-coded "
+            "years (>= 20 events) are source_cohort='general' (background-only), "
+            "light-coder years (5-19 events) become source_cohort='sparse' — their "
+            "own foreground block. K=50 (40 background + 10 sparse). A gated "
+            "block-wise correlated STM reads the sparse foreground topics to show "
+            "what light-coder general years are made of, against a clean "
+            "whole-population background."
+        ),
+    },
 }
 
 
@@ -290,6 +306,12 @@ def apply_cohort(
     if cohort == "population_eds":
         return apply_population_disease_cohort(
             cond_df, disease="eds", spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_sparse":
+        return apply_population_sparse_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
             prior_obs_days=prior_obs_days,
         )
@@ -913,4 +935,42 @@ def apply_population_cancer_sparse_cohort(
 
     return cancer.withColumn("source_cohort", F.lit("cancer")).unionByName(
         general_tagged
+    )
+
+
+def apply_population_sparse_cohort(
+    cond_df: DataFrame,
+    *,
+    window_days: int = _WINDOW_DAYS,
+    sparse_min: int = 5,
+    dense_min: int = 20,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Whole population split by in-window coding density — no disease arm.
+
+    Every person is windowed to one deterministic random event-anchored
+    ``window_days`` span (:func:`_random_observed_year_cohort`), then split by
+    per-person in-window event count (:func:`_bucket_general_by_density`):
+    ``>= dense_min`` -> ``source_cohort='general'`` (dense background),
+    ``sparse_min..dense_min-1`` -> ``source_cohort='sparse'`` (a light-coder
+    foreground block), ``< sparse_min`` dropped. Unlike
+    :func:`apply_population_cancer_sparse_cohort`, there is NO disease foreground
+    — cancer/EDS patients simply fold into the population, giving a clean
+    whole-population reference for reading what light-coder years contain.
+
+    ``prior_obs_days`` is accepted for a uniform :func:`apply_cohort` signature
+    but unused (there is no disease index event to be "first" of). Returns
+    ``cond_df``'s schema plus a ``source_cohort`` column.
+    """
+    general = _random_observed_year_cohort(
+        cond_df, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        window_days=window_days,
+    )
+    return _bucket_general_by_density(
+        general, sparse_min=sparse_min, dense_min=dense_min,
     )

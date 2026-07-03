@@ -251,3 +251,17 @@ def test_cohort_metadata_has_population_eds():
     m = COHORT_METADATA["population_eds"]
     assert m["id"] == "population_eds"
     assert m["label"] and m["description"]
+
+
+# --- population_sparse (Task 4: whole-population density split, no disease arm) --
+
+def test_supported_cohorts_includes_population_sparse():
+    from charmpheno.omop.cohorts import SUPPORTED_COHORTS
+    assert "population_sparse" in SUPPORTED_COHORTS
+
+
+def test_cohort_metadata_has_population_sparse():
+    from charmpheno.omop.cohorts import COHORT_METADATA
+    m = COHORT_METADATA["population_sparse"]
+    assert m["id"] == "population_sparse"
+    assert m["label"] and m["description"]
