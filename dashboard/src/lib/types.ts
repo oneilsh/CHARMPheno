@@ -78,7 +78,7 @@ export interface Correlation {
   identified: boolean[][]
   support: number[][]
   reference_topic?: number | null
-  eta_var?: number[]   // per display-topic empirical eta variance (index by display topic id); absent on older bundles
+  eta_var?: number[]   // per-topic empirical eta variance, POSITIONAL — aligned to the R rows / topic_order (index by R-row position, NOT display topic id); absent on older bundles
 }
 
 export interface DashboardBundle {
