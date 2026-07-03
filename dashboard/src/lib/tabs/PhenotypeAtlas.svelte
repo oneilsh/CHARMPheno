@@ -22,11 +22,9 @@
   .top-head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 2rem;
-    padding-bottom: 1.25rem;
+    justify-content: flex-start;
+    gap: 1.25rem;
     margin-bottom: 1.5rem;
-    border-bottom: 1px solid var(--rule);
   }
   .top-head h1 {
     margin: 0;

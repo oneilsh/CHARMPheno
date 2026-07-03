@@ -5,31 +5,6 @@
       "id": "population_cancer",
       "label": "Population + Cancer (gated)",
       "description": "The whole (sampled) population as a shared background, with a cancer subcohort carrying its own foreground topics. Disjoint, one document per person: patients with a first malignant-cancer diagnosis (SNOMED 443392 and descendants, excluding non-melanoma skin cancer and carcinoma in situ) get the 365-day post-diagnosis window and source_cohort='cancer'; every other person gets a deterministic random 365-day window anchored on one of their own condition-eras (so it captures real activity, not an empty calendar year) and source_cohort='general' (background-only). K=60 (40 shared background + 20 cancer foreground), fit as a gated block-wise correlated STM with a sex-at-birth (M/F) and age prevalence covariate."
-    },
-    {
-      "id": "cancer",
-      "label": "Cancer (1 year windows post-diagnosis)",
-      "description": "Patients with a first malignant-cancer diagnosis (SNOMED 443392 and descendants), excluding non-melanoma skin cancer (BCC/SCC) and carcinoma in situ. The document window is the 365 days starting at that first diagnosis. Patients must have at least 365 days of observation_period coverage both before and after the index date, so 'first' is meaningful and the follow-up window is fully observed."
-    },
-    {
-      "id": "dementia",
-      "label": "Dementia (1 year windows post-diagnosis)",
-      "description": "Patients with a first all-cause dementia diagnosis (SNOMED 4182210 and descendants \u2014 Alzheimer's, vascular dementia, Lewy body dementia, frontotemporal dementia, dementia NOS, mixed dementia). The document window is the 365 days starting at that first diagnosis, capturing the early-stage comorbidity cascade (delirium, falls, polypharmacy, behavioral disturbance, aspiration pneumonia). Patients must have at least 365 days of observation_period coverage both before and after the index date, so 'first' is meaningful and the follow-up window is fully observed."
-    },
-    {
-      "id": "local-test",
-      "label": "local-test",
-      "description": ""
-    },
-    {
-      "id": "gated_demo",
-      "label": "Gated STM demo (background + rare_dx foreground)",
-      "description": "Local synthetic demo of the gated background/foreground STM. A shared background block (all patients) plus a rare_dx foreground block (~1% of the cohort, above the k=20 small-cell floor). In covariate mode, the Group selector switches between 'Background only' and 'rare_dx'; the rare_dx foreground topics appear only for the rare_dx group and vanish for background-only."
-    },
-    {
-      "id": "comorbid",
-      "label": "Cancer + Dementia (gated, correlated STM)",
-      "description": "Gated block-wise structural topic model over the combined cancer_or_dementia cohort (K=50: 30 shared background topics + 10 cancer + 10 dementia foreground topics). Fit with the block-wise unit-diagonal correlation Sigma (ADR 0034), which recovers the minority dementia sub-phenotypes (amnestic/Alzheimer's, vascular) that a prevalence-only model washes out, and reports a logistic-normal topic-correlation heatmap: within-block and background-to-foreground correlations are identified; cross-foreground (cancer-to-dementia) cells are unmeasured under single-label gating and shown as NA."
     }
   ]
 }
