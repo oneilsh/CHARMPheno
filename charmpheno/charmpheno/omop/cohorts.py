@@ -81,8 +81,11 @@ _DEMENTIA_EXCLUSION_ANCESTORS: tuple[int, ...] = ()
 
 # Top-level OMOP concept whose descendants define Ehlers-Danlos syndrome.
 # Provided by the domain owner (2026-07-03). No exclusions.
-# VERIFY ON FIRST RUN (as with dementia):
+# VERIFY ON FIRST RUN (as with dementia): count the descendants —
 #   SELECT COUNT(*) FROM concept_ancestor WHERE ancestor_concept_id = 79145;
+# Expect a non-zero descendant set (the EDS subtypes). If you see 0, the id is
+# wrong for this vocab version — re-confirm the OMOP concept for the SNOMED
+# "Ehlers-Danlos syndrome" hierarchy before fitting.
 _EDS_ANCESTOR = 79145
 
 # Disease registry for the generalized population+disease cohort. Each entry is
