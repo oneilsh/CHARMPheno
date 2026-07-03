@@ -3,6 +3,13 @@
 **Status:** Accepted
 **Date:** 2026-07-01
 
+> **Extended (2026-07-03) by ADR
+> [0036](0036-dashboard-stm-record-completion-and-generative-concentration.md).**
+> The prefix-posterior E-step deferred here (decision 4/D) is implemented as a
+> Laplace posterior over η given the prefix, and the generative covariance is
+> rescaled from the unit-diagonal `R` by the exported empirical per-topic
+> η-variance (`eta_var`) instead of using `R` directly.
+
 ## Context
 
 ADR [0028](0028-dashboard-conditioned-dirichlet-prior.md) chose the Dirichlet
