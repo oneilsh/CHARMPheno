@@ -209,8 +209,12 @@ correlation R is unit-diagonal by construction (Σ_ii ≡ 1 at every M-step, ADR
 [0034](0034-stm-blockwise-unit-diagonal-correlation-sigma.md)) — that
 parameterization shrinks η itself during fitting, so the empirical
 between-document variance measured against the fitted β/R afterward is
-correspondingly compressed relative to the corpus's true generative scale.
-Rescaling by `eta_var` at face value under-concentrated sampled patients.
+correspondingly compressed relative to the corpus's true generative scale —
+insight [0030](../insights/0030-spectral-init-closes-stm-sigma-blowup-on-real-data.md)
+measured that natural η-scale at ≈7.6 on comparable real data (a spectral-init
+fit that lets Σ's diagonal breathe rather than pinning it), roughly 10x the
+compressed empirical `eta_var` here. Rescaling by `eta_var` at face value
+under-concentrated sampled patients.
 
 **2. Estimating a per-topic FREE diagonal at fit time reopened the
 variance-runaway failure mode.** exp 0032 tried letting each topic's diagonal
