@@ -206,6 +206,97 @@ describe('buildGenerativeSigma', () => {
   })
 })
 
+describe('buildGenerativeSigma eta_scale', () => {
+  it('with eta_scale present, Sigma = eta_scale * R (s_k = sqrt(eta_scale) for every free row)', () => {
+    const corr: Correlation = {
+      topic_order: [1, 2], block_labels: ['background', 'background'],
+      R: [[1, 0.5], [0.5, 1]],
+      identified: [[true, true], [true, true]],
+      support: [[9, 9], [9, 9]],
+      reference_topic: 0,
+      eta_scale: 4.0,
+    }
+    const freeIdx = [0, 1]
+    const Sigma = buildGenerativeSigma(corr, freeIdx)
+    // s_k = sqrt(4.0) = 2 for every row -> Sigma[a][b] = R[a][b] * 4.0
+    expect(Sigma[0][0]).toBeCloseTo(1 * 4.0, 10)
+    expect(Sigma[1][1]).toBeCloseTo(1 * 4.0, 10)
+    expect(Sigma[0][1]).toBeCloseTo(0.5 * 4.0, 10)
+    expect(Sigma[1][0]).toBeCloseTo(0.5 * 4.0, 10)
+  })
+
+  it('eta_scale WINS over eta_var when both are present', () => {
+    const corr: Correlation = {
+      topic_order: [1, 2], block_labels: ['background', 'background'],
+      R: [[1, 0.5], [0.5, 1]],
+      identified: [[true, true], [true, true]],
+      support: [[9, 9], [9, 9]],
+      reference_topic: 0,
+      eta_var: [2, 8],   // would give s0=sqrt(2), s1=sqrt(8) if used
+      eta_scale: 9.0,    // must win: s_k = sqrt(9) = 3 for every row
+    }
+    const freeIdx = [0, 1]
+    const Sigma = buildGenerativeSigma(corr, freeIdx)
+    expect(Sigma[0][0]).toBeCloseTo(1 * 9.0, 10)
+    expect(Sigma[1][1]).toBeCloseTo(1 * 9.0, 10)
+    expect(Sigma[0][1]).toBeCloseTo(0.5 * 9.0, 10)
+  })
+
+  it('with eta_scale AND eta_var absent, Sigma is byte-identical to R', () => {
+    const corr: Correlation = {
+      topic_order: [3, 1, 2], block_labels: ['background', 'background', 'background'],
+      R: [
+        [1, 0.4, -0.2],
+        [0.4, 1, 0.15],
+        [-0.2, 0.15, 1],
+      ],
+      identified: [[true, true, true], [true, true, true], [true, true, true]],
+      support: [[9, 9, 9], [9, 9, 9], [9, 9, 9]],
+      reference_topic: 0,
+    }
+    const freeIdx = [0, 1, 2]
+    const Sigma = buildGenerativeSigma(corr, freeIdx)
+    for (let i = 0; i < 3; i++)
+      for (let j = 0; j < 3; j++)
+        expect(Sigma[i][j]).toBe(corr.R[i][j])
+  })
+})
+
+describe('sampleConditionedTheta eta_scale', () => {
+  // Mirrors the eta_var concentration test shape: a large pooled eta_scale
+  // should visibly concentrate theta onto fewer topics relative to eta_scale
+  // absent (unit fallback).
+  function meanTopMass(etaScale: number | undefined, seed: number): number {
+    const effects: CovariateEffects = [{ covariate: 'Intercept', per_topic: [0, 0, 0] }]
+    const corr: Correlation = {
+      topic_order: [1, 2], block_labels: ['background', 'background'],
+      R: [[1, 0.3], [0.3, 1]],
+      identified: [[true, true], [true, true]],
+      support: [[9, 9], [9, 9]],
+      reference_topic: 0,
+      eta_scale: etaScale,
+    }
+    const rng = createRng(seed)
+    const N = 3000
+    let sumTop = 0
+    for (let i = 0; i < N; i++) {
+      const theta = sampleConditionedTheta({
+        effects, x: [1], correlation: corr, topicBlocks: null, group: null,
+        rng,
+      })
+      sumTop += Math.max(...theta)
+    }
+    return sumTop / N
+  }
+
+  it('a large pooled eta_scale produces more concentrated draws than eta_scale absent', () => {
+    const noScale = meanTopMass(undefined, 101)
+    const largeScale = meanTopMass(10, 101)
+    expect(largeScale).toBeGreaterThan(noScale)
+    expect(largeScale).toBeGreaterThan(0.6)
+  })
+})
+
 describe('sampleConditionedTheta eta_var', () => {
   // A K=3 fixture (reference 0, free topics 1,2 with positive correlation)
   // where a large exported eta_var should visibly concentrate theta onto

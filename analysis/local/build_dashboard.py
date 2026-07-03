@@ -170,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     export = adapt(result, hdp_top_k=args.hdp_top_k)
 
     # Load the vocab + BOW (Spark) up front: the STM correlation block below
-    # reuses bow_df for the eta_var E-step join, and corpus-stats / NPMI reuse it
+    # reuses bow_df for the eta_scale E-step join, and corpus-stats / NPMI reuse it
     # again later (single load, single Spark session for the whole build).
     vocab_ids = result.metadata.get("vocab")
     if not vocab_ids:
@@ -233,16 +233,19 @@ def main(argv: list[str] | None = None) -> int:
             reference_id = 0 if stm_hardening.get("reference_topic") else None
             R, ident = topic_correlation_identified(Sigma_corr, n_pairs, mps)
 
-            # Empirical between-document eta variance per topic
-            # (corpus_eta_variance_gated_rdd, Task 1): recovers the generative
-            # concentration scale the unit-diagonal fitted R (ADR 0034) discards,
-            # so the dashboard can rescale R -> Sigma[i][j]=R[i][j]*sqrt(var_i*
-            # var_j). ENHANCEMENT only: any failure leaves eta_var=None and the
-            # key is omitted (dashboard falls back to unit R). Reuses the loaded
-            # bow_df (frozen fit vocab) joined with the local covariate sidecar.
-            eta_var = None
+            # Pooled generative variance scale c (Task 2,
+            # corpus_eta_scale_gated_rdd): recovers the single concentration
+            # scale the unit-diagonal fitted R (ADR 0034) discards, so the
+            # dashboard can rescale R -> Sigma_gen = eta_scale*R. Supersedes the
+            # per-topic eta_var (came out ~10x too compressed; a per-topic free
+            # diagonal fit at fit time reopened the insight-0033 variance
+            # runaway) -- ADR 0036 addendum. ENHANCEMENT only: any failure
+            # leaves eta_scale=None and the key is omitted (dashboard falls back
+            # to eta_var, then unit R). Reuses the loaded bow_df (frozen fit
+            # vocab) joined with the local covariate sidecar.
+            eta_scale = None
             try:
-                from spark_vi.mllib.topic.stm import corpus_eta_variance_gated_rdd
+                from spark_vi.mllib.topic.stm import corpus_eta_scale_gated_rdd
                 from spark_vi.mllib.topic._common import _vector_to_stm_document
                 from pyspark.ml.linalg import Vectors, VectorUDT
                 from pyspark.sql.types import (
@@ -272,19 +275,20 @@ def main(argv: list[str] | None = None) -> int:
                         group_col="source_cohort",
                     )
                 )
-                eta_var = corpus_eta_variance_gated_rdd(
+                eta_scale = corpus_eta_scale_gated_rdd(
                     doc_rdd, result.global_params, partition,
-                    reference=reference_id,
+                    reference=reference_id, sample_fraction=None,
                 )
-                log.info("STM: eta_var computed (K=%d).", len(eta_var))
+                log.info("STM: eta_scale computed (c=%.4f).", eta_scale)
             except Exception as exc:  # enhancement-only: never fatal
-                log.warning("STM: eta_var computation failed (%s); correlation.json "
-                            "omits eta_var (dashboard falls back to unit R).", exc)
-                eta_var = None
+                log.warning("STM: eta_scale computation failed (%s); correlation.json "
+                            "omits eta_scale (dashboard falls back to eta_var/unit R).",
+                            exc)
+                eta_scale = None
 
             corr = build_correlation_json(R, ident, n_pairs, partition, kept_ids,
                                            reference_id=reference_id,
-                                           eta_var=eta_var)
+                                           eta_scale=eta_scale)
             (args.out_dir / "correlation.json").write_text(json.dumps(corr, indent=2))
             log.info("STM: wrote correlation.json (topics=%d, min_pair_support=%d)",
                      len(kept_ids), mps)

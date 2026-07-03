@@ -16,7 +16,7 @@ def _cell(x):
 
 
 def build_correlation_json(R, identified, support, partition, kept_topic_ids,
-                            reference_id=None, eta_var=None):
+                            reference_id=None, eta_var=None, eta_scale=None):
     """correlation.json over kept topics in block order; null for unidentified R.
 
     reference_id: if given, this topic id is dropped from topic_order (and
@@ -26,16 +26,26 @@ def build_correlation_json(R, identified, support, partition, kept_topic_ids,
     spurious zero-correlation band in the dashboard (Component 3,
     docs/superpowers/specs/2026-07-01-gated-ctm-correlation-reporting-design.md).
 
-    eta_var: if given, a length-K (ORIGINAL topic-id space) array of the
+    eta_var: kept for back-compat only; no longer the generation input (see
+    eta_scale). If given, a length-K (ORIGINAL topic-id space) array of the
     empirical between-document variance of the logistic-normal eta latent per
     topic (corpus_eta_variance_gated_rdd). The fitted correlation R is unit-
     diagonal by construction (variance pinned to 1 for fit stability, ADR 0034),
-    so the dashboard rescales it into a generative covariance
-    Sigma[i][j] = R[i][j]*sqrt(var_i*var_j) to draw realistically-concentrated
-    documents instead of an over-diffuse unit-variance prior. Emitted aligned to
-    the SAME rows/order as R (indexed by original id via order, reference row
-    excluded). When None, the "eta_var" key is omitted entirely and the
-    dashboard falls back to the unit-diagonal R.
+    so a per-topic eta_var can rescale it into a generative covariance
+    Sigma[i][j] = R[i][j]*sqrt(var_i*var_j). Emitted aligned to the SAME rows/
+    order as R (indexed by original id via order, reference row excluded).
+    When None, the "eta_var" key is omitted entirely.
+
+    eta_scale: a SINGLE pooled scalar `c` (corpus_eta_scale_gated_rdd /
+    corpus_eta_scale_gated) such that the generative covariance is
+    Sigma_gen = c*R -- the current, preferred generation input. Per-topic
+    empirical eta_var came out about 10x too compressed (the unit-diagonal fit
+    shrinks eta), and a per-topic free diagonal estimated at fit time reopened
+    the variance-runaway failure mode (insight 0033); the runaway-safe,
+    data-driven answer is this one pooled scalar estimated at export with beta
+    and R frozen (ADR 0036 addendum). When not None, emitted as
+    "eta_scale": float(eta_scale); when None, the key is omitted entirely and
+    the dashboard falls back to eta_var, then to the unit-diagonal R.
     """
     labels = partition.topic_labels()                 # length K, by original id
     order = [i for i in kept_topic_ids if i != reference_id]  # already block-ordered upstream
@@ -68,4 +78,6 @@ def build_correlation_json(R, identified, support, partition, kept_topic_ids,
         # Indexed by ORIGINAL topic id via `order` (reference row excluded),
         # matching R_out's row order exactly. NOT compacted display position.
         out["eta_var"] = [float(eta_var[i]) for i in order]
+    if eta_scale is not None:
+        out["eta_scale"] = float(eta_scale)
     return out

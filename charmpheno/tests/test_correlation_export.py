@@ -283,3 +283,70 @@ def test_driver_mps_lookup_uses_nested_stm_hardening_floor():
     out_fixed = build_correlation_json(R_fixed, ident_fixed, N, part, [0, 1, 2])
     assert out_fixed["identified"][0][1] is False
     assert out_fixed["R"][0][1] is None
+
+
+def test_build_correlation_json_emits_eta_scale_as_float():
+    """eta_scale (Task 2) is a SINGLE pooled scalar `c` for Sigma_gen = c*R
+    (corpus_eta_scale_gated_rdd/corpus_eta_scale_gated), unlike the per-topic
+    eta_var array. When given, it is emitted as "eta_scale": float(c)."""
+    part = TopicBlockPartition(group_var="g", background_k=2,
+                               foreground=(("A", 1), ("B", 1)))
+    R = np.array([[1.0, 0.3, 0.2, np.nan],
+                  [0.3, 1.0, 0.1, np.nan],
+                  [0.2, 0.1, 1.0, np.nan],
+                  [np.nan, np.nan, np.nan, 1.0]])
+    identified = np.array([[1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [0, 0, 0, 1]], dtype=bool)
+    support = np.full((4, 4), 300.0)
+    kept = [0, 1, 2, 3]
+    out = build_correlation_json(R, identified, support, part, kept, eta_scale=3.4)
+    assert out["eta_scale"] == 3.4
+    assert isinstance(out["eta_scale"], float)
+
+
+def test_build_correlation_json_omits_eta_scale_when_none():
+    """eta_scale=None (and the default, no kwarg) omits the 'eta_scale' key
+    entirely (older-checkpoint / failure-path safe; the dashboard falls back
+    to eta_var or unit R)."""
+    part = TopicBlockPartition(group_var="g", background_k=2,
+                               foreground=(("A", 1), ("B", 1)))
+    R = np.array([[1.0, 0.3, 0.2, np.nan],
+                  [0.3, 1.0, 0.1, np.nan],
+                  [0.2, 0.1, 1.0, np.nan],
+                  [np.nan, np.nan, np.nan, 1.0]])
+    identified = np.array([[1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [0, 0, 0, 1]], dtype=bool)
+    support = np.full((4, 4), 300.0)
+    kept = [0, 1, 2, 3]
+    out_default = build_correlation_json(R, identified, support, part, kept)
+    out_none = build_correlation_json(R, identified, support, part, kept,
+                                      eta_scale=None)
+    assert "eta_scale" not in out_default
+    assert "eta_scale" not in out_none
+
+
+def test_build_correlation_json_eta_scale_and_eta_var_coexist():
+    """eta_scale and eta_var are independent, back-compat-preserving fields:
+    both can be emitted together (e.g. during a transition/rollback window)
+    without either clobbering the other."""
+    part = TopicBlockPartition(group_var="g", background_k=2,
+                               foreground=(("A", 1), ("B", 1)))
+    R = np.array([[1.0, 0.3, 0.2, np.nan],
+                  [0.3, 1.0, 0.1, np.nan],
+                  [0.2, 0.1, 1.0, np.nan],
+                  [np.nan, np.nan, np.nan, 1.0]])
+    identified = np.array([[1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [0, 0, 0, 1]], dtype=bool)
+    support = np.full((4, 4), 300.0)
+    kept = [0, 1, 2, 3]
+    eta_var = [0.0, 1.5, 2.5, 3.5]
+    out = build_correlation_json(R, identified, support, part, kept,
+                                 eta_var=eta_var, eta_scale=2.1)
+    assert out["eta_scale"] == 2.1
+    assert out["eta_var"] == [0.0, 1.5, 2.5, 3.5]

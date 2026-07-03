@@ -78,7 +78,8 @@ export interface Correlation {
   identified: boolean[][]
   support: number[][]
   reference_topic?: number | null
-  eta_var?: number[]   // per-topic empirical eta variance, POSITIONAL — aligned to the R rows / topic_order (index by R-row position, NOT display topic id); absent on older bundles
+  eta_var?: number[]   // per-topic empirical eta variance, POSITIONAL — aligned to the R rows / topic_order (index by R-row position, NOT display topic id); absent on older bundles; superseded by eta_scale for generation, kept for back-compat
+  eta_scale?: number   // pooled generative variance level c (scalar): Sigma_gen = eta_scale * R. Preferred over eta_var when present; absent on older bundles
 }
 
 export interface DashboardBundle {

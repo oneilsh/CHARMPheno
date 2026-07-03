@@ -336,7 +336,7 @@ def _stm_corpus_prevalence(spark, *, result, corpus, source_table,
     (gated only; None otherwise) used for k-anon suppression; cov_df is the
     loaded covariate sidecar DataFrame (person_id, source_cohort, covariates)
     when the cache hits, else None. cov_df is returned so the main flow can
-    reuse it (join with bow_df) for the eta_var E-step pass without a second
+    reuse it (join with bow_df) for the eta_scale E-step pass without a second
     cache load. Returns (None, None, None) on any failure path.
     """
     if not cache_uri:
@@ -629,7 +629,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # bow_df_stats is no longer needed. bow_df_kept (== bow_df) and omop
         # stay persisted through the write-bundle phase: the STM correlation
-        # block reuses bow_df for the eta_var E-step join (no new corpus scan).
+        # block reuses bow_df for the eta_scale E-step join (no new corpus scan).
         bow_df_stats.unpersist()
 
         with _phase("write bundle"):
@@ -721,20 +721,23 @@ def main(argv: list[str] | None = None) -> int:
                         reference_id = 0 if stm_hardening.get("reference_topic") else None
                         R, ident = topic_correlation_identified(Sigma_corr, n_pairs, mps)
 
-                        # Empirical between-document eta variance per topic
-                        # (corpus_eta_variance_gated_rdd, Task 1): recovers the
-                        # generative concentration scale that the unit-diagonal
-                        # fitted R (ADR 0034) discards, so the dashboard can
-                        # rescale R -> Sigma[i][j]=R[i][j]*sqrt(var_i*var_j).
-                        # ENHANCEMENT only: any failure (pre-Task-1 checkpoint,
-                        # cache miss -> stm_cov_df is None, E-step error) leaves
-                        # eta_var=None and the key is omitted (dashboard falls
-                        # back to unit R). Reuses the already-loaded bow_df
-                        # (frozen fit vocab) + the sidecar cov_df -> no new scan.
-                        eta_var = None
+                        # Pooled generative variance scale c (Task 2,
+                        # corpus_eta_scale_gated_rdd): recovers the single
+                        # concentration scale that the unit-diagonal fitted R
+                        # (ADR 0034) discards, so the dashboard can rescale
+                        # R -> Sigma_gen = eta_scale*R. Supersedes the per-topic
+                        # eta_var (came out ~10x too compressed; a per-topic
+                        # free diagonal fit at fit time reopened the insight-0033
+                        # variance runaway) -- ADR 0036 addendum. ENHANCEMENT
+                        # only: any failure (pre-Task-1 checkpoint, cache miss ->
+                        # stm_cov_df is None, E-step error) leaves eta_scale=None
+                        # and the key is omitted (dashboard falls back to eta_var,
+                        # then unit R). Reuses the already-loaded bow_df (frozen
+                        # fit vocab) + the sidecar cov_df -> no new scan.
+                        eta_scale = None
                         try:
                             from spark_vi.mllib.topic.stm import (
-                                corpus_eta_variance_gated_rdd,
+                                corpus_eta_scale_gated_rdd,
                             )
                             from spark_vi.mllib.topic._common import (
                                 _vector_to_stm_document,
@@ -755,21 +758,21 @@ def main(argv: list[str] | None = None) -> int:
                                     group_col="source_cohort",
                                 )
                             )
-                            with _phase("eta_var (corpus between-doc variance, E-step)"):
-                                eta_var = corpus_eta_variance_gated_rdd(
+                            with _phase("eta_scale (pooled generative-variance EM)"):
+                                eta_scale = corpus_eta_scale_gated_rdd(
                                     doc_rdd, result.global_params, stm_partition,
-                                    reference=reference_id,
+                                    reference=reference_id, sample_fraction=None,
                                 )
-                            log.info("STM: eta_var computed (K=%d).", len(eta_var))
+                            log.info("STM: eta_scale computed (c=%.4f).", eta_scale)
                         except Exception as exc:  # enhancement-only: never fatal
-                            log.warning("STM: eta_var computation failed (%s); "
-                                        "correlation.json omits eta_var (dashboard "
-                                        "falls back to unit-diagonal R).", exc)
-                            eta_var = None
+                            log.warning("STM: eta_scale computation failed (%s); "
+                                        "correlation.json omits eta_scale (dashboard "
+                                        "falls back to eta_var/unit-diagonal R).", exc)
+                            eta_scale = None
 
                         corr = build_correlation_json(
                             R, ident, n_pairs, stm_partition, kept_ids,
-                            reference_id=reference_id, eta_var=eta_var)
+                            reference_id=reference_id, eta_scale=eta_scale)
                         (out_dir / "correlation.json").write_text(
                             _json.dumps(corr, indent=2))
                         log.info("STM: wrote correlation.json (topics=%d, "
@@ -809,7 +812,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[driver]   wrote 4 files to {out_dir} "
                   f"(V_disp={v_disp} K_disp={K_disp})", flush=True)
 
-        # Deferred from before the write-bundle phase so the eta_var E-step join
+        # Deferred from before the write-bundle phase so the eta_scale E-step join
         # could reuse the persisted bow_df / omop (no second full-corpus scan).
         bow_df_kept.unpersist()
         omop.unpersist()

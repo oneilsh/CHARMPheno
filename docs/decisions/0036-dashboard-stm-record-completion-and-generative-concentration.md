@@ -196,6 +196,73 @@ scoring in decision 1) route through the same guarded factorization.
   reuse the hand-rolled linear algebra (`choleskyPD`, `solveSPD`, `invSPD`)
   already introduced for ADR 0035's forward sampler.
 
+## Addendum (2026-07-03) — generative scale is a single pooled `c`, not per-topic `eta_var`
+
+Decision 2 above rescaled the generative covariance per-topic:
+Σ[i][j] = R[i][j] · √(eta_var_i · eta_var_j), with `eta_var` the empirical
+between-document variance of each topic's posterior-mode η, estimated at
+export by `corpus_eta_variance_gated_rdd`/`corpus_eta_variance_gated`. Two
+findings after that shipped led to a pivot.
+
+**1. Per-topic `eta_var` came out about 10x too compressed.** The fitted
+correlation R is unit-diagonal by construction (Σ_ii ≡ 1 at every M-step, ADR
+[0034](0034-stm-blockwise-unit-diagonal-correlation-sigma.md)) — that
+parameterization shrinks η itself during fitting, so the empirical
+between-document variance measured against the fitted β/R afterward is
+correspondingly compressed relative to the corpus's true generative scale.
+Rescaling by `eta_var` at face value under-concentrated sampled patients.
+
+**2. Estimating a per-topic FREE diagonal at fit time reopened the
+variance-runaway failure mode.** exp 0032 tried letting each topic's diagonal
+float freely during fitting (`estimate_sigma_diagonal`) to recover the natural
+per-topic scale directly, rather than rescaling post hoc. A low-document
+("low-ess") topic's diagonal exploded during optimization — the same max-eigenvalue
+runaway insight [0033](../insights/0033-gated-fullcov-variance-runaway-is-an-init-identifiability-failure.md)
+diagnosed for the full-Σ case: an under-constrained free parameter with too
+little data support has no pooling to anchor it, so it is free to climb
+without bound. A per-topic free diagonal at fit time reintroduces exactly that
+under-constrained degree of freedom, just restricted to the diagonal instead
+of the full matrix.
+
+**Decision: the shipped generative scale is a single pooled scalar `c`,
+estimated at EXPORT time with β and R FROZEN.** `corpus_eta_scale_gated`
+(in-memory) / `corpus_eta_scale_gated_rdd` (distributed), both in
+[stm.py](../../spark-vi/spark_vi/mllib/topic/stm.py), replace the per-topic
+`eta_var` accumulation with an iterated law-of-total-variance EM: each round
+runs the same per-document Laplace E-step as inference under the prior
+Σ = c·R, accumulates — pooled over every free, observed topic — both terms of
+Var(η) = Var_d(E[η|d]) + E_d(Var[η|d]) (the between-document Welford variance
+of the posterior mode η̂, plus the mean per-document Laplace posterior
+variance), and updates c toward the self-consistent value. Re-broadcasting the
+prior as c·R each round lets c climb from an initial c=1 to the level at which
+the E-step is self-consistent; convergence is typically 5-10 rounds.
+
+This is runaway-safe by construction: β and R are frozen (no M-step, no
+re-estimation of the fitted correlation), and c is a single number pooled
+across every free observed topic, so a low-document topic's noise is averaged
+against every other topic's rather than being free to climb on its own — the
+exact degree of freedom that caused the finding-2 runaway is simply not
+present in this estimator. It remains data-driven — no magic constant, no user
+knob — because c comes from the corpus's own posterior spread, the same
+principle decision 2 established for `eta_var`.
+
+Σ_gen = c·R is emitted as `correlation.json`'s `eta_scale` field (a scalar,
+distinct from the retired-for-generation `eta_var` array) and consumed by
+`buildGenerativeSigma` ([logisticNormal.ts](../../dashboard/src/lib/conditioning/logisticNormal.ts)),
+which now prefers `eta_scale` (s_k = √eta_scale for every free row) over the
+per-topic `eta_var` fallback, over unit variance (Σ = R) when neither is
+present. `eta_var` is kept in the export and the dashboard type for back-compat
+only; it is no longer the generation input.
+
+**It under-corrects modestly.** The Laplace approximation used at each E-step
+carries the usual posterior-variance bias (the reported curvature is the
+Gauss-Newton/expected-information Hessian, not the exact one — the same caveat
+noted in decision 1's Consequences), so the converged `c` is a conservative
+(slightly low) estimate of the true generative scale rather than an exact
+match. This is the accepted, understood trade-off: a modest under-correction
+is preferable to either the finding-1 10x compression or the finding-2
+runaway.
+
 ## References
 
 - Blei, D. M. & Lafferty, J. D. (2007). "A Correlated Topic Model of Science."

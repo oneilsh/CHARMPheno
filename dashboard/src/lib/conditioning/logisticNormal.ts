@@ -38,20 +38,29 @@ export function mvnDraw(mean: number[], L: number[][], rng: () => number): numbe
 }
 
 // Generative covariance sub-block over the free rows: the exported correlation R
-// (unit-diagonal) rescaled to a covariance by the per-topic empirical eta variance
-// (correlation.eta_var). Sigma[a][b] = R[i][j] * s_a * s_b, s_k = sqrt(var_k),
-// var_k = eta_var[R-row r] ?? 1 (positional, aligned to R - NOT display id; the
-// export builds eta_var and R in the same loop pass over the same row order).
-// With eta_var absent this is exactly R (byte-identical to the prior behavior).
-// Scaling R up by the empirical eta_var raises the eta variance, and softmax of
-// higher-variance eta yields MORE peaked theta (more concentrated patients) -
-// the exported per-topic empirical between-document eta variance sets that scale.
+// (unit-diagonal) rescaled to a covariance. Precedence:
+//   1. correlation.eta_scale (scalar c): s_k = sqrt(eta_scale) for EVERY free
+//      row -> Sigma = eta_scale * R. This is the current, preferred generation
+//      input - a single pooled scale estimated at export with beta/R frozen
+//      (corpus_eta_scale_gated_rdd / corpus_eta_scale_gated; ADR 0036
+//      addendum), which supersedes the per-topic eta_var below (that per-topic
+//      empirical variance came out ~10x too compressed, and a per-topic free
+//      diagonal fit at fit time reopened the insight-0033 variance runaway).
+//   2. correlation.eta_var (per-topic array, positional / aligned to R rows -
+//      NOT display id): Sigma[a][b] = R[i][j] * s_a * s_b, s_k = sqrt(var_k),
+//      var_k = eta_var[R-row r] ?? 1. Kept for back-compat with older bundles.
+//   3. Neither present: s_k = 1 for every row -> Sigma = R exactly
+//      (byte-identical to the original, pre-rescaling behavior).
+// Scaling R up raises the eta variance, and softmax of higher-variance eta
+// yields MORE peaked theta (more concentrated patients).
 export function buildGenerativeSigma(
   correlation: Correlation,
   freeIdx: number[],
 ): number[][] {
+  const es = correlation.eta_scale
   const ev = correlation.eta_var
-  const s = freeIdx.map((r) => Math.sqrt(ev ? (ev[r] ?? 1) : 1))
+  const s = freeIdx.map((r) =>
+    es != null ? Math.sqrt(es) : Math.sqrt(ev ? (ev[r] ?? 1) : 1))
   return freeIdx.map((ri, a) =>
     freeIdx.map((rj, b) => (correlation.R[ri][rj] as number) * s[a] * s[b]))
 }
