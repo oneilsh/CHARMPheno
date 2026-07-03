@@ -85,6 +85,20 @@ _DEMENTIA_EXCLUSION_ANCESTORS: tuple[int, ...] = ()
 #   SELECT COUNT(*) FROM concept_ancestor WHERE ancestor_concept_id = 79145;
 _EDS_ANCESTOR = 79145
 
+# Disease registry for the generalized population+disease cohort. Each entry is
+# fully described by concept ancestors; adding a rare disease is a new entry
+# here + a SUPPORTED_COHORTS/COHORT_METADATA/apply_cohort line, no new function.
+_DISEASE_REGISTRY: dict[str, dict] = {
+    "cancer": {
+        "inclusion_ancestors": (_CANCER_ANCESTOR,),
+        "exclusion_ancestors": _CANCER_EXCLUSION_ANCESTORS,
+    },
+    "eds": {
+        "inclusion_ancestors": (_EDS_ANCESTOR,),
+        "exclusion_ancestors": (),
+    },
+}
+
 
 # Names accepted by the CLI/loader. Add a new key here when adding a new
 # cohort function so the registry stays the single source of truth.
@@ -94,6 +108,7 @@ SUPPORTED_COHORTS: tuple[str, ...] = (
     "cancer_or_dementia",
     "population_cancer",
     "population_cancer_sparse",
+    "population_eds",
 )
 
 # Fixed salt for the general-population random-window assignment. Hashing
@@ -192,6 +207,23 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "Three disjoint source_cohort tags: cancer, general, sparse."
         ),
     },
+    "population_eds": {
+        "id": "population_eds",
+        "label": "Population + Ehlers-Danlos (gated)",
+        "description": (
+            "The whole population as a shared background, with an "
+            "Ehlers-Danlos syndrome (EDS) subcohort carrying its own foreground "
+            "topics — a rare-disease-on-a-background-population example. Disjoint, "
+            "one document per person: persons with a first EDS diagnosis (OMOP "
+            "79145 and descendants) get the 365-day post-diagnosis window and "
+            "source_cohort='eds'; every other person gets a deterministic random "
+            "365-day window anchored on one of their own condition-eras and "
+            "source_cohort='general' (background-only). K=60 (40 shared "
+            "background + 20 EDS foreground), fit on the full population as a "
+            "gated block-wise correlated STM with a sex-at-birth (M/F) and age "
+            "prevalence covariate."
+        ),
+    },
 }
 
 
@@ -252,6 +284,12 @@ def apply_cohort(
     if cohort == "population_cancer_sparse":
         return apply_population_cancer_sparse_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_eds":
+        return apply_population_disease_cohort(
+            cond_df, disease="eds", spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
             prior_obs_days=prior_obs_days,
         )
@@ -706,6 +744,65 @@ def _random_event_windows(
     return chosen.select("person_id", F.col("event_date").alias("index_date"))
 
 
+def apply_population_disease_cohort(
+    cond_df: DataFrame,
+    *,
+    disease: str,
+    window_days: int = _WINDOW_DAYS,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Whole-population background + a single disease foreground, disjoint.
+
+    Generalizes :func:`apply_population_cancer_cohort` to any registered
+    ``disease`` (see ``_DISEASE_REGISTRY``). One document per person:
+
+    - disease arm — persons with a first qualifying dx (via
+      :func:`apply_first_diagnosis_year_cohort` on the registry's ancestors),
+      windowed to ``window_days`` post-dx, tagged ``source_cohort=<disease>``.
+    - ``general`` arm — every OTHER person, on a deterministic random
+      event-anchored ``window_days`` window (:func:`_random_observed_year_cohort`),
+      tagged ``source_cohort='general'`` (background-only).
+
+    ``window_days`` threads to BOTH arms so foreground and background windows
+    match. Arms are disjoint by person (general = ``left_anti`` of the disease
+    arm's persons). Returns ``cond_df``'s schema plus a ``source_cohort`` column.
+    """
+    try:
+        spec = _DISEASE_REGISTRY[disease]
+    except KeyError:
+        raise ValueError(
+            f"disease {disease!r} not in registry "
+            f"(known: {tuple(_DISEASE_REGISTRY)})"
+        )
+
+    diseased = apply_first_diagnosis_year_cohort(
+        cond_df,
+        inclusion_ancestors=spec["inclusion_ancestors"],
+        exclusion_ancestors=spec["exclusion_ancestors"],
+        window_days=window_days,
+        spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        prior_obs_days=prior_obs_days,
+    )
+    diseased_persons = diseased.select("person_id").distinct()
+
+    non_diseased = cond_df.join(diseased_persons, on="person_id", how="left_anti")
+    general = _random_observed_year_cohort(
+        non_diseased, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        window_days=window_days,
+    )
+
+    return (
+        diseased.withColumn("source_cohort", F.lit(disease))
+        .unionByName(general.withColumn("source_cohort", F.lit("general")))
+    )
+
+
 def apply_population_cancer_cohort(
     cond_df: DataFrame,
     *,
@@ -733,23 +830,11 @@ def apply_population_cancer_cohort(
     cancer arm's persons), so no patient contributes two documents. Returns
     ``cond_df``'s schema plus a ``source_cohort`` string column.
     """
-    cancer = apply_first_cancer_year_cohort(
-        cond_df, spark=spark, cdr_dataset=cdr_dataset,
+    return apply_population_disease_cohort(
+        cond_df, disease="cancer", window_days=_WINDOW_DAYS,
+        spark=spark, cdr_dataset=cdr_dataset,
         billing_project=billing_project, date_col=date_col,
         prior_obs_days=prior_obs_days,
-    )
-    cancer_persons = cancer.select("person_id").distinct()
-
-    # General arm = everyone not in the cancer arm, on a random observed year.
-    non_cancer = cond_df.join(cancer_persons, on="person_id", how="left_anti")
-    general = _random_observed_year_cohort(
-        non_cancer, spark=spark, cdr_dataset=cdr_dataset,
-        billing_project=billing_project, date_col=date_col,
-    )
-
-    return (
-        cancer.withColumn("source_cohort", F.lit("cancer"))
-        .unionByName(general.withColumn("source_cohort", F.lit("general")))
     )
 
 

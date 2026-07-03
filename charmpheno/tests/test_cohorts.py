@@ -226,3 +226,28 @@ def test_apply_first_diagnosis_year_cohort_is_importable_with_ancestor_params():
     assert "inclusion_ancestors" in params
     assert "exclusion_ancestors" in params
     assert "window_days" in params
+
+
+# --- disease registry + population_eds (Task 3) -------------------------------
+
+def test_disease_registry_has_cancer_and_eds_with_expected_ancestors():
+    from charmpheno.omop.cohorts import (
+        _DISEASE_REGISTRY, _CANCER_ANCESTOR, _CANCER_EXCLUSION_ANCESTORS,
+        _EDS_ANCESTOR,
+    )
+    assert _DISEASE_REGISTRY["cancer"]["inclusion_ancestors"] == (_CANCER_ANCESTOR,)
+    assert _DISEASE_REGISTRY["cancer"]["exclusion_ancestors"] == _CANCER_EXCLUSION_ANCESTORS
+    assert _DISEASE_REGISTRY["eds"]["inclusion_ancestors"] == (_EDS_ANCESTOR,)
+    assert _DISEASE_REGISTRY["eds"]["exclusion_ancestors"] == ()
+
+
+def test_supported_cohorts_includes_population_eds():
+    from charmpheno.omop.cohorts import SUPPORTED_COHORTS
+    assert "population_eds" in SUPPORTED_COHORTS
+
+
+def test_cohort_metadata_has_population_eds():
+    from charmpheno.omop.cohorts import COHORT_METADATA
+    m = COHORT_METADATA["population_eds"]
+    assert m["id"] == "population_eds"
+    assert m["label"] and m["description"]
