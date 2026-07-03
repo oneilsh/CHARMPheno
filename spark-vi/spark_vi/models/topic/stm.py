@@ -357,6 +357,8 @@ class OnlineSTM(VIModel):
         random_seed: int | None = None,
         topic_blocks=None,
         reference_topic: bool = True,  # default-on (validated, insight 0030); pass False for the legacy full-K path
+        estimate_sigma_diagonal: bool = False,
+        sigma_variance_max: float | None = None,
     ) -> None:
         if K < 1:
             raise ValueError(f"K must be >= 1, got {K}")
@@ -387,6 +389,9 @@ class OnlineSTM(VIModel):
             raise ValueError(
                 f"reference_topic requires K >= 2 (need a free topic besides "
                 f"the reference), got K={K}")
+        if sigma_variance_max is not None and sigma_variance_max <= 0:
+            raise ValueError(
+                f"sigma_variance_max must be > 0, got {sigma_variance_max}")
 
         self.K = int(K)
         self.V = int(vocab_size)
@@ -401,6 +406,10 @@ class OnlineSTM(VIModel):
         self.random_seed = None if random_seed is None else int(random_seed)
         self.topic_blocks = topic_blocks
         self.reference_topic = bool(reference_topic)
+        self.estimate_sigma_diagonal = bool(estimate_sigma_diagonal)
+        self.sigma_variance_max = (
+            None if sigma_variance_max is None else float(sigma_variance_max)
+        )
 
     def _effective_partition(self):
         """The real partition, or an implicit all-background one when None."""
@@ -715,9 +724,32 @@ class OnlineSTM(VIModel):
         # range (cf. Higham 2002 nearest-correlation), keeping Σ a valid correlation
         # matrix by construction rather than only empirically.
         R = np.clip(R, -1.0, 1.0)
-        R_target = np.where(supported, R, Sigma)          # lazy-keep unsupported
-        new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * R_target
-        np.fill_diagonal(new_Sigma, 1.0)                  # exact unit diagonal
+        if self.estimate_sigma_diagonal:
+            # Block-wise COVARIANCE: keep the estimated per-topic variance on the
+            # diagonal instead of pinning Σ_ii = 1. Off-diagonals reuse the same
+            # clipped correlation, rescaled by the per-topic std, so the estimator
+            # is a valid covariance by construction (|Σ_ij| = |R_ij|·std_i·std_j ≤
+            # std_i·std_j). Recovers the natural η-scale (insight 0030) that the
+            # unit-diagonal pin (ADR 0034) discards — needed for faithful generation.
+            # Reference topic (η≡0) has zero residual → diag_var≈0 → std=1 (guarded),
+            # so its diagonal blends toward 1, harmless (it is excluded from the
+            # correlation export and its η is pinned).
+            cov_target = R * np.outer(std, std)               # diag = diag_var on supported
+            Sigma_target = np.where(supported, cov_target, Sigma)   # lazy-keep unsupported
+            new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
+            if self.sigma_variance_max is not None:
+                # runaway circuit-breaker: clamp per-topic variance (insight 0030
+                # natural scale ~7.6; a generous ceiling catches a blowup basin).
+                d = np.diag(new_Sigma).copy()
+                over = d > self.sigma_variance_max
+                if over.any():
+                    scale = np.ones_like(d)
+                    scale[over] = np.sqrt(self.sigma_variance_max / d[over])
+                    new_Sigma = new_Sigma * np.outer(scale, scale)  # rescale rows/cols to cap variance, keep correlations
+        else:
+            R_target = np.where(supported, R, Sigma)          # lazy-keep unsupported
+            new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * R_target
+            np.fill_diagonal(new_Sigma, 1.0)                  # exact unit diagonal
 
         return {
             "lambda": new_lam,

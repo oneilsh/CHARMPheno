@@ -510,6 +510,10 @@ def build_stm_args(
         hardening.extend(["--spectral-min-doc-freq", str(effective["spectral_min_doc_freq"])])
     if effective.get("min_pair_support") is not None:
         hardening.extend(["--min-pair-support", str(effective["min_pair_support"])])
+    if effective.get("estimate_sigma_diagonal"):
+        hardening.append("--estimate-sigma-diagonal")
+        if effective.get("sigma_variance_max") is not None:
+            hardening.extend(["--sigma-variance-max", str(effective["sigma_variance_max"])])
     if effective.get("known_sex_only"):
         hardening.append("--known-sex-only")
     return common + [
