@@ -40,18 +40,18 @@ export function mvnDraw(mean: number[], L: number[][], rng: () => number): numbe
 // Generative covariance sub-block over the free rows: the exported correlation R
 // (unit-diagonal) rescaled to a covariance by the per-topic empirical eta variance
 // (correlation.eta_var). Sigma[a][b] = R[i][j] * s_a * s_b, s_k = sqrt(var_k),
-// var_k = eta_var[displayId] ?? 1. With eta_var absent this is exactly R
-// (byte-identical to the prior behavior). Scaling R up by the empirical eta_var
-// raises the eta variance, and softmax of higher-variance eta yields MORE
-// peaked theta (more concentrated patients) - the exported per-topic empirical
-// between-document eta variance sets that scale.
+// var_k = eta_var[R-row r] ?? 1 (positional, aligned to R - NOT display id; the
+// export builds eta_var and R in the same loop pass over the same row order).
+// With eta_var absent this is exactly R (byte-identical to the prior behavior).
+// Scaling R up by the empirical eta_var raises the eta variance, and softmax of
+// higher-variance eta yields MORE peaked theta (more concentrated patients) -
+// the exported per-topic empirical between-document eta variance sets that scale.
 export function buildGenerativeSigma(
   correlation: Correlation,
   freeIdx: number[],
 ): number[][] {
-  const order = correlation.topic_order
   const ev = correlation.eta_var
-  const s = freeIdx.map((r) => Math.sqrt(ev ? (ev[order[r]] ?? 1) : 1))
+  const s = freeIdx.map((r) => Math.sqrt(ev ? (ev[r] ?? 1) : 1))
   return freeIdx.map((ri, a) =>
     freeIdx.map((rj, b) => (correlation.R[ri][rj] as number) * s[a] * s[b]))
 }

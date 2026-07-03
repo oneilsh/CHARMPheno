@@ -164,7 +164,7 @@ describe('buildGenerativeSigma', () => {
       identified: [[true, true], [true, true]],
       support: [[9, 9], [9, 9]],
       reference_topic: 0,
-      eta_var: [0, 2, 8], // indexed by display topic id; ref (0) unused
+      eta_var: [2, 8], // positional, aligned to R rows (same indexing as R)
     }
     const freeIdx = [0, 1]
     const Sigma = buildGenerativeSigma(corr, freeIdx)
@@ -174,6 +174,35 @@ describe('buildGenerativeSigma', () => {
     expect(Sigma[0][0]).toBeCloseTo(1 * s0 * s0, 10)
     expect(Sigma[1][1]).toBeCloseTo(1 * s1 * s1, 10)
     expect(Sigma[0][1]).toBeCloseTo(0.5 * s0 * s1, 10)
+  })
+
+  it('indexes eta_var positionally (aligned to R rows), not by display id', () => {
+    // topic_order maps positional rows 0,1,2 -> display ids 2,3,4 (non-identity;
+    // reference topic 0 excluded). eta_var is POSITIONAL: row 0 var 100, row 1
+    // var 4, row 2 var 9.
+    const correlation = {
+      topic_order: [2, 3, 4],
+      reference_topic: 0,
+      R: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], // identity -> Sigma diagonal = eta_var exactly
+      eta_var: [100, 4, 9],
+      identified: [[true, true, true], [true, true, true], [true, true, true]],
+      support: [[9, 9, 9], [9, 9, 9], [9, 9, 9]],
+      block_labels: ['background', 'background', 'background'],
+    } as unknown as Correlation
+    const Sigma = buildGenerativeSigma(correlation, [0, 1, 2])
+    // Positional indexing REQUIRED: diagonal must equal eta_var[r] (not eta_var[topic_order[r]]).
+    expect(Sigma[0][0]).toBeCloseTo(100) // BUG yields R[0][0]*ev[topic_order[0]=2]=9
+    expect(Sigma[1][1]).toBeCloseTo(4)   // BUG yields ev[3]=undefined -> 1
+    expect(Sigma[2][2]).toBeCloseTo(9)   // BUG yields ev[4]=undefined -> 1
+
+    // Off-diagonal check with a non-identity R entry pins the sqrt(var_a*var_b)
+    // scaling to the right rows.
+    const correlationOffDiag = {
+      ...correlation,
+      R: [[1, 0.5, 0], [0.5, 1, 0], [0, 0, 1]],
+    } as unknown as Correlation
+    const SigmaOffDiag = buildGenerativeSigma(correlationOffDiag, [0, 1, 2])
+    expect(SigmaOffDiag[0][1]).toBeCloseTo(0.5 * Math.sqrt(100 * 4))
   })
 })
 
@@ -207,7 +236,7 @@ describe('sampleConditionedTheta eta_var', () => {
 
   it('a large exported eta_var produces more concentrated draws than eta_var absent', () => {
     const noVar = meanTopMass(undefined, 101)
-    const largeVar = meanTopMass([0, 10, 10], 101)
+    const largeVar = meanTopMass([10, 10], 101)
     expect(largeVar).toBeGreaterThan(noVar)
     // Sanity: the large-variance draws should push the average top mass well
     // above uniform-over-3 (1/3) towards near-deterministic per draw.
