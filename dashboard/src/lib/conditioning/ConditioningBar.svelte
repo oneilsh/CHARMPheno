@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { fly } from 'svelte/transition'
   import { bundle } from '../store'
+  import type { CovariateSchema } from '../types'
   import { populationLines } from './population'
   import { initialValues, canInteract } from '../atlas/covariate-panel'
 
@@ -9,6 +11,15 @@
   // a filter dropdown there would be redundant. Simulator/Patient keep it (they
   // condition generation on a chosen group).
   export let showGroup = true
+  // Inline mode (the Phenotype Atlas): render as a left pop-out drawer over the
+  // map rather than a page-top strip. The drawer's OPEN state IS covariate mode:
+  //   closed  -> neutral, bubbles show the empirical cohort average
+  //   open    -> "configuring a patient", bubbles show the model-predicted
+  //              prevalence for a single individual at the chosen features
+  // so the two states are visually unambiguous (no controls are shown at all in
+  // the average state). Simulator/Patient keep the default inline=false toggle
+  // bar, where covariate mode gates whether generation conditions on covariates.
+  export let inlineControls = false
 
   $: schema = $bundle?.covariateSchema
   $: gating = $bundle?.gating
@@ -16,20 +27,108 @@
   $: hasGroup = showGroup && !!gating
   $: visible = hasCovariates || hasGroup
 
-  // Seed covariate values whenever the schema changes.
+  // Seed control values from the schema whenever it changes, pushing them to the
+  // store WITHOUT activating covariate mode (neutral = corpus average).
   let local: Record<string, number | string> = {}
-  $: if (schema) { local = initialValues(schema) }
-  $: store.update((c) => ({ ...c, values: local }))
+  $: if (schema) seed(schema)
+  function seed(s: CovariateSchema) {
+    local = initialValues(s)
+    store.update((c) => ({ ...c, values: local }))
+  }
 
+  function onControl(name: string, value: number | string) {
+    local = { ...local, [name]: value }
+    store.update((c) => ({ ...c, values: local, covariateActive: true }))
+  }
+
+  // Per-control distribution summaries ("30-81 (med 60)", "F 63% / M 37%"),
+  // shown as small text under each widget so the user can judge whether a chosen
+  // value is typical or extreme.
   $: lines = populationLines(schema)
+  $: summaryFor = (name: string) => lines.find((l) => l.name === name)?.summary ?? ''
 
+  // Inline drawer: opening starts a patient at the reference values and enters
+  // model-prediction mode; "Use Cohort Averages" collapses back to the average.
+  function openDrawer() {
+    if (schema) local = initialValues(schema)
+    store.update((c) => ({ ...c, values: local, covariateActive: true }))
+  }
   function reset() {
     if (schema) local = initialValues(schema)
-    store.update((c) => ({ ...c, covariateActive: false }))
+    store.update((c) => ({ ...c, values: local, covariateActive: false }))
   }
 </script>
 
-{#if visible}
+{#if inlineControls}
+  <!-- Phenotype Atlas: left pop-out drawer. Absolutely positioned by the host
+       (TopicMap .map-canvas) so open/close never reflows the map. -->
+  {#if hasCovariates && schema}
+    <div class="cov-drawer">
+      {#if !$store.covariateActive}
+        <button type="button" class="drawer-open" on:click={openDrawer}>
+          <span class="gear" aria-hidden="true">⚙</span> Configure Patient Features
+        </button>
+      {:else}
+        <div class="drawer-panel" transition:fly={{ x: -10, duration: 140 }}>
+          <header class="drawer-head">
+            <span class="drawer-title">Patient Features</span>
+            <button type="button" class="drawer-close" on:click={reset}>Use Cohort Averages</button>
+          </header>
+          <p class="drawer-hint">
+            Bubbles show the model-predicted prevalence for a single patient with these features — not the cohort average.
+          </p>
+          <div class="drawer-controls">
+            {#each schema.controls as control (control.name)}
+              <div class="control-block">
+                {#if control.type === 'continuous'}
+                  {@const min = control.range?.[0] ?? 0}
+                  {@const max = control.range?.[1] ?? 100}
+                  <div class="control-top">
+                    <span class="control-label">{control.name}</span>
+                    <span class="control-value" data-numeric>{local[control.name]}</span>
+                  </div>
+                  <input
+                    type="range"
+                    {min}
+                    {max}
+                    step="1"
+                    value={local[control.name]}
+                    on:input={(e) => onControl(control.name, +e.currentTarget.value)}
+                  />
+                {:else}
+                  <span class="control-label">{control.name}</span>
+                  {#if control.levels && control.levels.length === 2}
+                    <div class="cat-toggle">
+                      {#each control.levels as level}
+                        <button
+                          type="button"
+                          class="cat-btn"
+                          class:active={local[control.name] === level}
+                          on:click={() => onControl(control.name, level)}
+                        >{level}</button>
+                      {/each}
+                    </div>
+                  {:else if control.levels}
+                    <select
+                      value={local[control.name]}
+                      on:change={(e) => onControl(control.name, e.currentTarget.value)}
+                      class="cat-select"
+                    >
+                      {#each control.levels as level}
+                        <option value={level}>{level}</option>
+                      {/each}
+                    </select>
+                  {/if}
+                {/if}
+                <span class="control-dist">{summaryFor(control.name)}</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
+  {/if}
+{:else if visible}
   <div class="conditioning-bar">
     {#if hasGroup && gating}
       <div class="bar-section group-section">
@@ -45,7 +144,7 @@
       </div>
     {/if}
 
-    {#if hasCovariates}
+    {#if hasCovariates && schema}
       <div class="bar-section covariate-section">
         <label class="toggle-label" title="When on, bubble sizes show model-predicted prevalence at the covariate values below rather than the corpus-average histogram estimate.">
           <input
@@ -81,25 +180,25 @@
                       {min}
                       {max}
                       step="1"
-                      bind:value={local[control.name]}
+                      value={local[control.name]}
+                      on:input={(e) => onControl(control.name, +e.currentTarget.value)}
                     />
                   </label>
                 {:else if control.levels && control.levels.length === 2}
-                  <!-- 2-level categorical: toggle between the two levels -->
                   <div class="cat-toggle">
                     {#each control.levels as level}
                       <button
                         type="button"
                         class="cat-btn"
                         class:active={local[control.name] === level}
-                        on:click={() => { local[control.name] = level }}
+                        on:click={() => onControl(control.name, level)}
                       >{level}</button>
                     {/each}
                   </div>
                 {:else if control.levels}
-                  <!-- n-level categorical: select dropdown -->
                   <select
-                    bind:value={local[control.name]}
+                    value={local[control.name]}
+                    on:change={(e) => onControl(control.name, e.currentTarget.value)}
                     class="cat-select"
                   >
                     {#each control.levels as level}
@@ -117,9 +216,7 @@
             {/each}
           </div>
 
-          <button type="button" class="reset-btn" on:click={reset}>
-            Reset
-          </button>
+          <button type="button" class="reset-btn" on:click={reset}>Reset</button>
         {/if}
       </div>
     {/if}
@@ -127,6 +224,117 @@
 {/if}
 
 <style>
+  /* ---- Inline drawer (Phenotype Atlas) ---------------------------------- */
+  .cov-drawer {
+    position: absolute;
+    top: 0.5rem;
+    left: 0.5rem;
+    z-index: 6;
+  }
+  .drawer-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    border: 1px solid var(--rule-strong);
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    color: var(--ink-muted);
+    padding: 0.28rem 0.6rem;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    transition: color 0.12s ease, border-color 0.12s ease;
+  }
+  .drawer-open:hover {
+    color: var(--ink);
+    border-color: var(--ink-muted);
+  }
+  .drawer-open .gear {
+    font-size: var(--fs-small);
+    line-height: 1;
+  }
+  .drawer-panel {
+    width: 232px;
+    max-height: 470px;
+    overflow-y: auto;
+    background: var(--surface);
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.12);
+    padding: 0.6rem 0.7rem 0.75rem;
+  }
+  .drawer-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.35rem;
+  }
+  .drawer-title {
+    font-family: var(--font-mono);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .drawer-close {
+    border: 1px solid var(--rule-strong);
+    background: var(--surface);
+    color: var(--ink-muted);
+    padding: 0.18rem 0.45rem;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    transition: color 0.12s ease, border-color 0.12s ease;
+    flex-shrink: 0;
+  }
+  .drawer-close:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .drawer-hint {
+    margin: 0 0 0.6rem;
+    font-size: var(--fs-micro);
+    line-height: 1.45;
+    color: var(--ink-faint);
+  }
+  .drawer-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+  }
+  .control-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .control-top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .control-value {
+    font-family: var(--font-mono);
+    font-size: var(--fs-small);
+    color: var(--accent);
+    font-weight: 500;
+  }
+  .control-block input[type='range'] {
+    width: 100%;
+  }
+  .control-dist {
+    font-family: var(--font-mono);
+    font-size: var(--fs-micro);
+    color: var(--ink-faint);
+  }
+
+  /* ---- Page-top bar (Simulator / Patient) ------------------------------- */
   .conditioning-bar {
     display: flex;
     align-items: center;
@@ -159,7 +367,7 @@
     flex-shrink: 0;
   }
 
-  /* Toggle switch (lifted from the former covariate panel) */
+  /* Toggle switch */
   .toggle-label {
     display: flex;
     align-items: center;
@@ -207,20 +415,18 @@
     letter-spacing: 0.06em;
   }
 
-  /* Controls list (lifted from the former covariate panel) */
+  /* Controls list */
   .controls {
     display: flex;
     align-items: center;
     gap: 1rem;
     flex-wrap: wrap;
   }
-
   .control-row {
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
   }
-
   .control-label {
     font-family: var(--font-mono);
     font-size: var(--fs-micro);
@@ -230,7 +436,7 @@
     font-weight: 500;
   }
 
-  /* Continuous slider (lifted from the former covariate panel) */
+  /* Continuous slider (page-top variant) */
   .slider {
     display: flex;
     flex-direction: column;
@@ -253,7 +459,7 @@
     font-weight: 500;
   }
 
-  /* Categorical toggle 2-level (lifted from the former covariate panel) */
+  /* Categorical toggle 2-level */
   .cat-toggle {
     display: flex;
     gap: 0.35rem;
@@ -278,7 +484,7 @@
     color: var(--accent);
   }
 
-  /* n-level select (lifted from the former covariate panel) */
+  /* n-level select */
   .cat-select {
     font-size: var(--fs-small);
     padding: 0.2rem 0.4rem;
@@ -289,7 +495,7 @@
     cursor: pointer;
   }
 
-  /* Population readout */
+  /* Population readout (page-top variant) */
   .population-readout {
     display: flex;
     align-items: center;
@@ -306,7 +512,7 @@
     font-weight: 500;
   }
 
-  /* Footer reset (lifted from the former covariate panel) */
+  /* Footer reset */
   .reset-btn {
     border: 1px solid var(--rule-strong);
     background: var(--surface);

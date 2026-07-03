@@ -42,14 +42,31 @@ export const phenotypeHue = derived(phenotypeOrder, ($order) => {
 // STM bundles have only a handful of groups (background + a few foreground
 // conditions), so a direct index into the same categorical FALLBACK palette
 // used by phenotypeHue's fallback is distinctive enough without needing the
-// golden-ratio similarity ordering. Null group (background-only draw, or a
-// non-gated bundle) gets a neutral gray rather than a palette color.
+// golden-ratio similarity ordering. Null group (a background-only draw, or a
+// non-gated bundle) gets a neutral slate rather than a palette color.
 const NO_GROUP_COLOR = '#94a3b8'
+// The shared "All" (background) block anchors the hue wheel at the project teal
+// (RGB 82,179,209 == HSL 194,58,57); the foreground cohorts then fan out around
+// the ring in evenly-spaced hues — the ggplot2 hue_pal / scale_color_hue scheme
+// (equal spacing over the wheel), but pinned so background is always the teal and
+// every cohort shares the teal's saturation/lightness. Colors span N = 1 (teal
+// background) + one per foreground group, so two cohorts land complementary,
+// three at 120°, etc. Background gets a real color (not gray): it spans the whole
+// corpus and shouldn't read as de-emphasized.
+const BACKGROUND_HUE = 194 // teal RGB 82,179,209
+const GROUP_SATURATION = 58
+const GROUP_LIGHTNESS = 57
 
 export const groupHue = derived(bundle, ($b) => {
   const groups = $b?.gating?.groups ?? []
-  const colors = new Map<string, string>()
-  groups.forEach((g, i) => colors.set(g, FALLBACK[i % FALLBACK.length]))
+  const n = groups.length + 1 // background + foreground cohorts, evenly spaced
+  const colors = new Map<string, string>([
+    ['background', hsl(BACKGROUND_HUE, GROUP_SATURATION, GROUP_LIGHTNESS)],
+  ])
+  groups.forEach((g, i) => {
+    const h = (BACKGROUND_HUE + ((i + 1) * 360) / n) % 360
+    colors.set(g, hsl(h, GROUP_SATURATION, GROUP_LIGHTNESS))
+  })
   return (g: string | null | undefined) =>
     g == null ? NO_GROUP_COLOR : (colors.get(g) ?? NO_GROUP_COLOR)
 })

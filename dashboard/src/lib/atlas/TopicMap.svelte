@@ -8,6 +8,7 @@
   } from '../store'
   import { groupHue } from '../palette'
   import { phenotypesContainingCode } from '../inference'
+  import { labelRanks } from './labels'
   import { copy } from '../copy'
 
   // Cohort color + label helpers (gated bundles). Cohort now owns the node
@@ -47,8 +48,58 @@
   // room to breathe; the previous 24 sat right at the SVG edge for prevalent
   // phenotypes near the layout boundary.
   const W = 720, H = 560, MARGIN = 60
-  // How many of the most prevalent bubbles get always-on labels.
-  const ALWAYS_LABEL_N = 8
+
+  // ---- Semantic zoom + progressive labels --------------------------------
+  // The zoom transform scales node POSITIONS (they spread apart) but each node's
+  // markers live in a counter-scaled inner group so they keep a CONSTANT on-screen
+  // size — zooming in therefore decongests overlapping bubbles instead of just
+  // magnifying the same overlap. Labels are revealed progressively: a node is
+  // labeled when its within-block prevalence rank is below a zoom-dependent
+  // cutoff, so zooming in only ADDS lower-ranked labels (stable, non-jumpy) and
+  // fixes the "no labels when zoomed in" discovery gap.
+  //
+  // How many labels per block at the overview (k=1). Ungated bundles form one
+  // implicit block so this is effectively the global overview count.
+  const BASE_LABELS_GATED = 3
+  const BASE_LABELS_UNGATED = 8
+  function labelsCut(k: number): number {
+    // grows ~linearly with zoom; never drops below the overview count
+    return Math.max(labelBaseCut, Math.round(labelBaseCut * k))
+  }
+  function labelVisible(id: number, k: number): boolean {
+    const rank = labelRankMap.get(id)
+    return rank !== undefined && rank < labelsCut(k)
+  }
+
+  // d3-zoom state. render() rebuilds the <g> every frame (selectAll('*').remove),
+  // so we keep the zoom behavior + a handle to the current <g> at module scope
+  // and re-apply the persisted transform (stored by d3 on the svg node) to each
+  // freshly-created group. gSel is read inside the zoom handler so panning/
+  // zooming always drives the live group.
+  let zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null
+  let gSel: d3.Selection<SVGGElement, unknown, null, undefined> | null = null
+  // Set each render() so the zoom handler can recompute label visibility.
+  let labelRankMap: Map<number, number> = new Map()
+  let labelBaseCut = BASE_LABELS_UNGATED
+  let currentK = 1
+
+  // Applied on every zoom/pan tick: move positions (g transform), keep markers a
+  // constant size (counter-scale the inner groups), and re-reveal labels for the
+  // new zoom level.
+  function applyZoomVisuals(t: d3.ZoomTransform) {
+    currentK = t.k
+    if (!gSel) return
+    gSel.attr('transform', t.toString())
+    gSel.selectAll<SVGGElement, unknown>('g.inner').attr('transform', `scale(${1 / t.k})`)
+    gSel.selectAll<SVGGElement, { id: number }>('g.label')
+      .attr('display', (d) => (labelVisible(d.id, t.k) ? null : 'none'))
+  }
+
+  function resetView() {
+    if (svgEl && zoomBehavior) {
+      d3.select(svgEl).transition().duration(250).call(zoomBehavior.transform, d3.zoomIdentity)
+    }
+  }
 
   $: coords = $phenotypeCoords
   $: reader = $prevalenceReader
@@ -61,7 +112,10 @@
     .clamp(true)
 
   // For gated bundles cohort owns the hue, so coherence (NPMI) is encoded as
-  // fill OPACITY instead: faded = low coherence, solid = high.
+  // fill OPACITY instead: faded = low coherence, solid = high. The DOMAIN is
+  // fitted to the bundle's actual NPMI spread each render (see render()), so the
+  // full opacity range is used across the observed coherence range rather than a
+  // fixed [0.05, 0.4] that may under-use it. Range floor 0.45 keeps a wide span.
   const cohOpacity = d3.scaleLinear().domain([0.05, 0.4]).range([0.45, 0.95]).clamp(true)
 
   function render() {
@@ -96,19 +150,60 @@
     // Coherence rides on opacity in the gated case (see opacityFn).
     const gated = !!$bundle.gating
     const blocks = $bundle.gating?.topic_blocks
+    // Fit the coherence-opacity domain to THIS bundle's NPMI spread so the full
+    // opacity range spans the observed coherence range. Guard degenerate spreads
+    // (all-equal / missing) by falling back to the fixed [0.05, 0.4].
+    const npmiVals = allPhenotypes.map((p) => p.npmi).filter((v): v is number => v != null)
+    const npmiExt = d3.extent(npmiVals) as [number, number] | [undefined, undefined]
+    if (npmiExt[0] != null && npmiExt[1] != null && npmiExt[1] - npmiExt[0] > 1e-6) {
+      cohOpacity.domain(npmiExt)
+    } else {
+      cohOpacity.domain([0.05, 0.4])
+    }
+    const npmiFloor = npmiExt[0] ?? 0.05
     const colorFn = (p: typeof phenotypes[0]) =>
       gated ? grpColor(blocks![p.id]) : npmiRamp(p.npmi ?? 0)
     const opacityFn = (p: typeof phenotypes[0]) =>
-      gated ? cohOpacity(p.npmi ?? 0.05) : 0.85
+      gated ? cohOpacity(p.npmi ?? npmiFloor) : 0.85
 
     const svg = d3.select(svgEl)
     svg.selectAll('*').remove()
     svg.attr('viewBox', `0 0 ${W} ${H}`)
 
     const g = svg.append('g')
+    gSel = g as unknown as d3.Selection<SVGGElement, unknown, null, undefined>
 
-    // Solid-fill bubbles with thin border. Cleaner than the previous
-    // ring-style; the encoding is in the fill, not the ring.
+    // Progressive-label state for this render (read by the zoom handler).
+    labelRankMap = labelRanks(allPhenotypes, {
+      blocks: gated ? blocks : undefined,
+      isVisible: $isVisibleInCurrentMode,
+    })
+    labelBaseCut = gated ? BASE_LABELS_GATED : BASE_LABELS_UNGATED
+
+    // Zoom / pan. d3 stashes the current transform on the svg node (__zoom), so
+    // it survives render()'s teardown; re-apply it to the new <g>. Attach the
+    // behavior once and reuse it (re-calling .call would re-register listeners).
+    currentK = d3.zoomTransform(svgEl).k
+    g.attr('transform', d3.zoomTransform(svgEl).toString())
+    if (!zoomBehavior) {
+      zoomBehavior = d3.zoom<SVGSVGElement, unknown>()
+        .scaleExtent([0.6, 8])
+        .on('zoom', (event) => applyZoomVisuals(event.transform))
+      svg.call(zoomBehavior)
+      // Disable dblclick-to-zoom so double-clicking a bubble doesn't also zoom;
+      // wheel + drag-pan remain. The "Reset view" button restores the default.
+      svg.on('dblclick.zoom', null)
+    }
+
+    const rad = (p: typeof phenotypes[0]) => {
+      const v = r_of(p)
+      return v === 0 ? 0 : r(v)
+    }
+
+    // Node groups carry only POSITION (translate). Under the zoom transform g is
+    // scaled by k, so these positions spread apart as you zoom in. The visual
+    // markers live in an INNER group counter-scaled by 1/k, so they keep a
+    // constant on-screen size — the net effect is decongestion, not magnification.
     const nodes = g.selectAll('g.node')
       .data(phenotypes)
       .join('g')
@@ -117,14 +212,14 @@
       .style('cursor', 'pointer')
       .on('click', (_, p) => selectedPhenotypeId.set(p.id))
 
+    const inner = nodes.append('g')
+      .attr('class', 'inner')
+      .attr('transform', `scale(${1 / currentK})`)
+
     // Main bubble . filled with the encoded color, thin ink-tinted border
     // Zero-prevalence (out-of-group foreground) topics get radius 0 so they
     // vanish entirely; positive values keep the existing [5, 26] scaleSqrt mapping.
-    const rad = (p: typeof phenotypes[0]) => {
-      const v = r_of(p)
-      return v === 0 ? 0 : r(v)
-    }
-    nodes.append('circle')
+    inner.append('circle')
       .attr('r', (p) => rad(p))
       .attr('fill', (p) => colorFn(p))
       .attr('fill-opacity', (p) => opacityFn(p))
@@ -137,13 +232,13 @@
     // when it sits inside a crowded cluster. The cyan matches the colored
     // bullet in the CodePanel header so "this bubble = this detail" is
     // unambiguous.
-    nodes.append('circle')
+    inner.append('circle')
       .attr('r', (p) => rad(p) + 6)
       .attr('fill', 'none')
       .attr('stroke', '#06b6d4')
       .attr('stroke-opacity', 0.25)
       .attr('stroke-width', (p) => ($selectedPhenotypeId === p.id ? 6 : 0))
-    nodes.append('circle')
+    inner.append('circle')
       .attr('r', (p) => rad(p) + 3)
       .attr('fill', 'none')
       .attr('stroke', '#06b6d4')
@@ -153,7 +248,7 @@
     // accent so the eye can separate "selected" from "matched the searched
     // condition". Dashed for transient hover (from CodePanel mouseover);
     // solid + thicker for a pinned search.
-    nodes.append('circle')
+    inner.append('circle')
       .attr('r', (p) => rad(p) + 5)
       .attr('fill', 'none')
       .attr('stroke', '#d946ef')
@@ -162,15 +257,12 @@
         highlighted.has(p.id) ? (highlightStyle === 'pinned' ? 2.25 : 1.5) : 0
       )
 
-    // Quality glyph (advanced mode only): ⊘ dead / ◑ mixed, drawn as a text
-    // element APPENDED TO EACH NODE GROUP so it inherits the bubble's transform
-    // and tracks it exactly (the previous separate-selection version recomputed
-    // absolute coords and drifted off bubbles whose prevalence was masked to 0).
-    // Good-quality topics get an empty string, which renders nothing.
+    // Quality glyph (advanced mode only): ⊘ dead / ◑ mixed, drawn inside the
+    // counter-scaled inner group so it tracks the bubble at any zoom.
     const qualityGlyph: Record<string, string> = { dead: '⊘', mixed: '◑' }
     const qualityColor: Record<string, string> = { dead: '#dc2626', mixed: '#d97706' }
     if ($advancedView) {
-      nodes.append('text')
+      inner.append('text')
         .attr('class', 'quality-glyph')
         .attr('x', (p) => rad(p) * 0.72 + 4)
         .attr('y', (p) => -rad(p) * 0.72 - 4)
@@ -185,22 +277,28 @@
         .text((p) => qualityGlyph[p.quality ?? ''] ?? '')
     }
 
-    // Always-on labels for the N most prevalent bubbles (including the
-    // currently selected one, if it's in the top N), so the map has some
-    // textual anchors a user can scan without clicking. Truncate long
-    // labels.
+    // Labels live in a SEPARATE layer appended after all nodes so they always sit
+    // on top of neighboring bubbles. Each label mirrors a node: translate(pos) for
+    // spread + an inner scale(1/k) so the text stays a constant size. Which labels
+    // are shown is set via the `display` attr from the progressive-reveal cutoff
+    // (see labelVisible) — the SET is keyed off stable corpus_prevalence rank, so
+    // it never reshuffles as the covariate controls move, only reveals more on zoom.
     const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
-    const topPrevalent = phenotypes
-      .slice()
-      .sort((a, b) => r_of(b) - r_of(a))
-      .slice(0, ALWAYS_LABEL_N)
-
-    g.selectAll('text.minor-label')
-      .data(topPrevalent)
-      .join('text')
+    const labelCandidates = phenotypes.filter((p) => labelRankMap.has(p.id))
+    const labelLayer = g.append('g').attr('class', 'label-layer')
+    const labelSel = labelLayer.selectAll('g.label')
+      .data(labelCandidates)
+      .join('g')
+      .attr('class', 'label')
+      .attr('transform', (p) => `translate(${x(coords[p.id][0])}, ${y(coords[p.id][1])})`)
+      .attr('display', (p) => (labelVisible(p.id, currentK) ? null : 'none'))
+    labelSel.append('g')
+      .attr('class', 'inner')
+      .attr('transform', `scale(${1 / currentK})`)
+      .append('text')
       .attr('class', 'minor-label')
-      .attr('x', (p) => x(coords[p.id][0]))
-      .attr('y', (p) => y(coords[p.id][1]) - rad(p) - 5)
+      .attr('x', 0)
+      .attr('y', (p) => -(rad(p) + 6))
       .attr('text-anchor', 'middle')
       .attr('font-family', 'Geist, sans-serif')
       .attr('font-size', 10)
@@ -237,7 +335,23 @@
 </script>
 
 <figure class="map" data-tour="atlas-map">
-  <svg bind:this={svgEl} role="img" aria-label="Phenotype atlas" preserveAspectRatio="xMidYMid meet"></svg>
+  <div class="map-canvas">
+    <svg bind:this={svgEl} role="img" aria-label="Phenotype atlas" preserveAspectRatio="xMidYMid meet"></svg>
+    <!-- Slotted covariate drawer (ConditioningBar inline mode): absolutely
+         positioned within this canvas so opening/closing never reflows the map. -->
+    <slot />
+    <button class="reset-view" type="button" on:click={resetView} title="Reset zoom and pan" aria-label="Reset zoom and pan">↺</button>
+    <!-- Cohort color key, floated into the plot (lower-right) so it reads against
+         the bubbles it explains. Semi-opaque so underlying nodes stay visible. -->
+    {#if $bundle?.gating}
+      <div class="cohort-key">
+        <span class="cohort-item"><span class="sw" style="background:{grpColor('background')}"></span>All</span>
+        {#each $bundle.gating.groups as g}
+          <span class="cohort-item"><span class="sw" style="background:{grpColor(g)}"></span>{groupLabel(g)}</span>
+        {/each}
+      </div>
+    {/if}
+  </div>
   <figcaption class="legend">
     {#if $bundle}
       <!-- Top row: encodings shared by all bundles (coherence, prevalence,
@@ -257,7 +371,7 @@
           </div>
         {/if}
         <div class="legend-group">
-          <span class="eyebrow" title={copy.atlas.legend.prevalence($tauThreshold)}>Prevalence<span class="help-mark" aria-hidden="true">?</span></span>
+          <span class="eyebrow" title={copy.atlas.legend.prevalence($tauThreshold)}>Prevalence (% Over Threshold)<span class="help-mark" aria-hidden="true">?</span></span>
           <span class="size-marks" aria-hidden="true">
             <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
           </span>
@@ -272,20 +386,6 @@
           </div>
         {/if}
       </div>
-      <!-- Bottom row: cohort color key (gated bundles only). -->
-      {#if $bundle.gating}
-        <div class="legend-row">
-          <div class="legend-group">
-            <span class="eyebrow" title="Node color = the source cohort each phenotype belongs to.">Cohort<span class="help-mark" aria-hidden="true">?</span></span>
-            <span class="cohort-marks">
-              <span class="cohort-item"><span class="sw" style="background:{grpColor('background')}"></span>Background</span>
-              {#each $bundle.gating.groups as g}
-                <span class="cohort-item"><span class="sw" style="background:{grpColor(g)}"></span>{groupLabel(g)}</span>
-              {/each}
-            </span>
-          </div>
-        </div>
-      {/if}
     {/if}
   </figcaption>
 </figure>
@@ -297,6 +397,11 @@
     flex-direction: column;
     gap: 0.5rem;
   }
+  /* Positioned wrapper so the slotted covariate drawer + the reset-view button
+     can float over the canvas without reflowing the map. */
+  .map-canvas {
+    position: relative;
+  }
   svg {
     width: 100%;
     height: auto;
@@ -304,6 +409,49 @@
     background: var(--surface);
     border: 1px solid var(--rule);
     border-radius: var(--radius-sm);
+    cursor: grab;
+    touch-action: none;
+  }
+  svg:active { cursor: grabbing; }
+  /* Compact icon button (↺). Square, so it stays out of the way of the drawer
+     button top-left and the cohort key bottom-right. */
+  .reset-view {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border: 1px solid var(--rule-strong);
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    color: var(--ink-muted);
+    border-radius: var(--radius-sm);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    transition: color 0.12s ease, border-color 0.12s ease;
+  }
+  .reset-view:hover {
+    color: var(--ink);
+    border-color: var(--ink-muted);
+  }
+  /* In-plot cohort color key, lower-right, semi-opaque so bubbles show through. */
+  .cohort-key {
+    position: absolute;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.4rem 0.55rem;
+    background: color-mix(in srgb, var(--surface) 82%, transparent);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-sm);
+    font-size: var(--fs-micro);
+    color: var(--ink-muted);
+    backdrop-filter: blur(2px);
   }
   .legend {
     display: flex;
@@ -361,15 +509,9 @@
   }
   /* Coherence-as-opacity ramp: a neutral swatch fading from low to high. */
   .grad-coh {
-    background: linear-gradient(to right, rgba(100, 116, 139, 0.3), rgba(100, 116, 139, 0.95));
+    background: linear-gradient(to right, rgba(100, 116, 139, 0.45), rgba(100, 116, 139, 0.95));
   }
-  /* Cohort swatches. */
-  .cohort-marks {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.7rem;
-    flex-wrap: wrap;
-  }
+  /* Cohort swatches (in the in-plot .cohort-key). */
   .cohort-item {
     display: inline-flex;
     align-items: center;

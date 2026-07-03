@@ -44,11 +44,11 @@
     </div>
   </header>
 
-  <ConditioningBar store={atlasConditioning} showGroup={false} />
-
   <div class="grid">
     <div class="left-col">
-      <TopicMap />
+      <TopicMap>
+        <ConditioningBar store={atlasConditioning} showGroup={false} inlineControls />
+      </TopicMap>
       <PhenotypeBrowser />
       {#if $bundle?.correlation}
         <section class="correlation-section">
