@@ -353,7 +353,6 @@ class StreamingSTM:
         random_seed: int | None = None,
         reference_topic: bool = True,
         estimate_sigma_diagonal: bool = False,
-        sigma_variance_max: float | None = None,
         spectral_init: bool = True,
         spectral_method: str = "dense",          # "dense" | "scalable"
         spectral_d: int | None = None,           # scalable projection dim; None => ~1000
@@ -400,7 +399,6 @@ class StreamingSTM:
         self.random_seed = random_seed
         self.reference_topic = bool(reference_topic)
         self.estimate_sigma_diagonal = bool(estimate_sigma_diagonal)
-        self.sigma_variance_max = sigma_variance_max
         self.spectral_init = bool(spectral_init)
         if spectral_method not in {"dense", "scalable"}:
             raise ValueError(
@@ -505,7 +503,6 @@ class StreamingSTM:
             topic_blocks=self.topic_blocks,
             reference_topic=self.reference_topic,
             estimate_sigma_diagonal=self.estimate_sigma_diagonal,
-            sigma_variance_max=self.sigma_variance_max,
         )
 
         # VIConfig uses learning_rate_tau0/kappa and mini_batch_fraction;
@@ -597,7 +594,6 @@ class StreamingSTM:
             "spectral_init": self.spectral_init,
             "spectral_method": self.spectral_method,
             "estimate_sigma_diagonal": self.estimate_sigma_diagonal,
-            "sigma_variance_max": self.sigma_variance_max,
         })
         return STMModel(
             global_params=result.global_params,

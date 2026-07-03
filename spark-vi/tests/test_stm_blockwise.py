@@ -107,30 +107,3 @@ def test_mstep_default_still_pins_unit_diagonal():
     N = np.full((2, 2), 50.0)
     Sig = _drive_mstep(m, gp, S, N)
     np.testing.assert_allclose(np.diag(Sig), 1.0, atol=1e-12)
-
-
-def test_mstep_sigma_variance_max_clamps_while_preserving_correlation():
-    # sigma_variance_max=10.0 with mle_ii=100 (S_ii=2000/N=20): the diagonal
-    # must be clamped to <= 10.0, and the resulting correlation
-    # Sig_01 / sqrt(Sig_00 * Sig_11) must equal the pre-clamp correlation
-    # (the rescale is symmetric row/col by sqrt(cap/var), which preserves
-    # correlation structure exactly).
-    m = OnlineSTM(K=2, vocab_size=8, P=1, random_seed=0,
-                  estimate_sigma_diagonal=True, sigma_variance_max=10.0)
-    gp = m.initialize_global(None)
-    S = np.array([[2000.0, 1000.0], [1000.0, 2000.0]])
-    N = np.full((2, 2), 20.0)
-    Sig = _drive_mstep(m, gp, S, N)
-    assert np.all(np.diag(Sig) <= 10.0 + 1e-9)
-    # pre-clamp mle_ii = 100, mle_01 = 50 -> corr = 50/100 = 0.5
-    pre_clamp_corr = 0.5
-    post_clamp_corr = Sig[0, 1] / np.sqrt(Sig[0, 0] * Sig[1, 1])
-    assert abs(post_clamp_corr - pre_clamp_corr) < 1e-9
-
-
-def test_sigma_variance_max_requires_positive():
-    import pytest as _pytest
-    with _pytest.raises(ValueError):
-        OnlineSTM(K=2, vocab_size=8, P=1, sigma_variance_max=0.0)
-    with _pytest.raises(ValueError):
-        OnlineSTM(K=2, vocab_size=8, P=1, sigma_variance_max=-5.0)

@@ -29,7 +29,6 @@ spectral_init: true
 spectral_method: dense
 min_pair_support: 10
 estimate_sigma_diagonal: true
-sigma_variance_max: 25.0
 ---
 
 # Experiment 0032 — Population-cancer gated STM with estimated Σ diagonal
@@ -69,7 +68,6 @@ reference topic, `min_pair_support: 10`), with one change:
 | Field | Value | Note |
 |---|---|---|
 | `estimate_sigma_diagonal` | true | keep the estimated per-topic variance on the Σ diagonal (block-wise covariance) instead of pinning to 1 |
-| `sigma_variance_max` | 25.0 | runaway circuit-breaker: caps per-topic variance, generous vs the ~7.6 natural scale (insight 0030) so it only fires on a genuine blowup, not the target scale |
 
 All other fields (K, background_k, sigma_init, reference_topic,
 spectral_init, spectral_method, min_pair_support, cohort, cache_uri,
@@ -78,9 +76,10 @@ covariate_formula, schedule) are unchanged from exp 0028.
 ## Success criteria
 
 - Fit completes without the softmax-saturation runaway (insight 0033) that
-  motivated ADR 0034 — i.e. `sigma_variance_max` clamp does not fire on most
-  topics, and Σ_ii settles near the insight-0030 natural scale (~7.6) rather
-  than the 25.0 ceiling.
+  motivated ADR 0034 — i.e. Σ_ii settles near the insight-0030 natural scale
+  (~7.6) and stays there across iterations, relying on the spectral init +
+  reference topic stabilizers rather than a hard ceiling. The logged Σ
+  min/max trace is checked per iteration for blowup visibility.
 - Correlation structure (off-diagonal Σ_ij / sqrt(Σ_ii Σ_jj)) reads
   comparably to exp 0028's block-wise unit-diagonal fit — dementia/cancer
   sub-phenotype correlations preserved, no new spurious cross-block signal.

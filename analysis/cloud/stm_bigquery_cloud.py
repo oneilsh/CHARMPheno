@@ -214,9 +214,6 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Estimate the block-wise Σ per-topic variance instead of "
                         "pinning the diagonal to 1 (recovers the natural η-scale for "
                         "generation; default off = ADR 0034 unit-diagonal).")
-    p.add_argument("--sigma-variance-max", type=float, default=None,
-                   help="Runaway circuit-breaker: cap per-topic Σ variance (only with "
-                        "--estimate-sigma-diagonal).")
     p.add_argument("--spectral-init", action=argparse.BooleanOptionalAction,
                    default=True,
                    help="Anchor-word spectral beta seed (default on, insight 0030; "
@@ -433,7 +430,6 @@ def main() -> int:
                 random_seed=args.random_seed,
                 reference_topic=args.reference_topic,
                 estimate_sigma_diagonal=args.estimate_sigma_diagonal,
-                sigma_variance_max=args.sigma_variance_max,
                 spectral_init=args.spectral_init,
                 spectral_method=args.spectral_method,
                 spectral_d=args.spectral_d,

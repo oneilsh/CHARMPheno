@@ -358,7 +358,6 @@ class OnlineSTM(VIModel):
         topic_blocks=None,
         reference_topic: bool = True,  # default-on (validated, insight 0030); pass False for the legacy full-K path
         estimate_sigma_diagonal: bool = False,
-        sigma_variance_max: float | None = None,
     ) -> None:
         if K < 1:
             raise ValueError(f"K must be >= 1, got {K}")
@@ -389,10 +388,6 @@ class OnlineSTM(VIModel):
             raise ValueError(
                 f"reference_topic requires K >= 2 (need a free topic besides "
                 f"the reference), got K={K}")
-        if sigma_variance_max is not None and sigma_variance_max <= 0:
-            raise ValueError(
-                f"sigma_variance_max must be > 0, got {sigma_variance_max}")
-
         self.K = int(K)
         self.V = int(vocab_size)
         self.P = int(P)
@@ -407,9 +402,6 @@ class OnlineSTM(VIModel):
         self.topic_blocks = topic_blocks
         self.reference_topic = bool(reference_topic)
         self.estimate_sigma_diagonal = bool(estimate_sigma_diagonal)
-        self.sigma_variance_max = (
-            None if sigma_variance_max is None else float(sigma_variance_max)
-        )
 
     def _effective_partition(self):
         """The real partition, or an implicit all-background one when None."""
@@ -737,15 +729,6 @@ class OnlineSTM(VIModel):
             cov_target = R * np.outer(std, std)               # diag = diag_var on supported
             Sigma_target = np.where(supported, cov_target, Sigma)   # lazy-keep unsupported
             new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
-            if self.sigma_variance_max is not None:
-                # runaway circuit-breaker: clamp per-topic variance (insight 0030
-                # natural scale ~7.6; a generous ceiling catches a blowup basin).
-                d = np.diag(new_Sigma).copy()
-                over = d > self.sigma_variance_max
-                if over.any():
-                    scale = np.ones_like(d)
-                    scale[over] = np.sqrt(self.sigma_variance_max / d[over])
-                    new_Sigma = new_Sigma * np.outer(scale, scale)  # rescale rows/cols to cap variance, keep correlations
         else:
             R_target = np.where(supported, R, Sigma)          # lazy-keep unsupported
             new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * R_target
