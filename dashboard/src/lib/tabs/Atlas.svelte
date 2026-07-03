@@ -40,9 +40,6 @@
         </details>
       </div>
     </div>
-    <div class="controls">
-      <ConditionSearch />
-    </div>
   </header>
 
   <div class="grid">
@@ -50,6 +47,10 @@
       <TopicMap>
         <ConditioningBar store={atlasConditioning} showGroup={false} inlineControls />
       </TopicMap>
+
+      <div class="map-actions">
+        <ConditionSearch />
+      </div>
 
       <PhenotypeBrowser />
     </div>
@@ -64,7 +65,7 @@
 
   .section-head {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr;
     align-items: end;
     gap: 2rem;
     padding-bottom: 1.5rem;
@@ -149,10 +150,14 @@
     color: var(--ink);
   }
 
-  .controls {
+  /* Sits just below the topic map, right-aligned and pulled up tight
+     against it (overrides the left-col's 1.25rem gap) — mirrors the
+     under-map control row in Patient.svelte. */
+  .map-actions {
     display: flex;
-    align-items: end;
-    gap: 1.25rem;
+    align-items: center;
+    justify-content: flex-end;
+    margin-top: -0.75rem;
   }
 
   .grid {

@@ -4,11 +4,11 @@
   import CorrelationHeatmap from './CorrelationHeatmap.svelte'
   import DifferencePane from './DifferencePane.svelte'
 
-  // Row / column block pickers live here (Compare's header control slot,
-  // mirroring Explore's ConditionSearch placement) instead of inside the
-  // heatmap card, so both cards start flush below the section rule.
-  // CorrelationHeatmap still owns the default-init (All × All) and matrix
-  // logic — these are just bound through via its bindable props.
+  // Row / column block pickers render directly below the heatmap they
+  // filter (rather than in the section header) so the header height stays
+  // consistent across subtabs. CorrelationHeatmap still owns the
+  // default-init (All × All) and matrix logic — these are just bound
+  // through via its bindable props.
   let rowBlock = ''
   let colBlock = ''
 
@@ -32,8 +32,12 @@
         <p class="kicker">{copy.correlation.kicker}</p>
       </div>
     </div>
-    {#if correlation}
-      <div class="controls">
+  </header>
+
+  <div class="grid">
+    <div class="left-col">
+      {#if correlation}
+        <CorrelationHeatmap {correlation} pairSelect showBlockPickers={false} bind:rowBlock bind:colBlock />
         <div class="picker">
           <label>Rows
             <select bind:value={rowBlock}>
@@ -47,14 +51,6 @@
             </select>
           </label>
         </div>
-      </div>
-    {/if}
-  </header>
-
-  <div class="grid">
-    <div class="left-col">
-      {#if correlation}
-        <CorrelationHeatmap {correlation} pairSelect showBlockPickers={false} bind:rowBlock bind:colBlock />
       {:else}
         <p>Correlations are not available for this bundle.</p>
       {/if}
@@ -70,7 +66,7 @@
 
   .section-head {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr;
     align-items: end;
     gap: 2rem;
     padding-bottom: 1.5rem;
@@ -96,20 +92,19 @@
     line-height: 1.55;
   }
 
-  .controls {
-    display: flex;
-    align-items: end;
-    gap: 1.25rem;
-  }
-
   /* Block-picker chevron/appearance styling, matched to the CorrelationHeatmap's
      own (now-hidden-when-embedded) picker so the controls look identical
-     whether the pickers render standalone or lifted into this header. */
+     whether the pickers render standalone or lifted here. Sits just below
+     the heatmap, right-aligned and pulled up tight against it (overrides
+     the left-col's 1.25rem gap) — mirrors the under-map control row in
+     Atlas.svelte / Patient.svelte. */
   .picker {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 0.75rem;
     flex-wrap: wrap;
+    margin-top: -0.75rem;
     font-family: var(--font-mono);
     font-size: var(--fs-micro);
     text-transform: uppercase;

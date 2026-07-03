@@ -187,7 +187,7 @@
 
   .section-head {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr;
     align-items: end;
     gap: 2rem;
     padding-bottom: 1.5rem;

@@ -72,31 +72,29 @@
         </details>
       </div>
     </div>
-    <div class="controls">
-      <div class="control-stack">
-        <ConditionSearch entityLabel="patients" />
-        {#if $searchedPhenotypeForPatients !== null}
-          <div class="phenotype-chip" title={copy.patient.findPhenotypeChipTip}>
-            <span class="chip-label">Highlighting patients with</span>
-            <span class="chip-val">{$phenotypesById.get($searchedPhenotypeForPatients)?.label || `Phenotype ${$searchedPhenotypeForPatients}`}</span>
-            <button class="chip-clear" type="button" on:click={() => searchedPhenotypeForPatients.set(null)} title="Clear">×</button>
-          </div>
-        {/if}
-      </div>
-    </div>
   </header>
 
   <div class="grid">
     <div class="left-col">
       <PatientMap />
-      {#if hasGroup}
-        <div class="map-actions">
+      <div class="map-actions">
+        <div class="control-stack">
+          <ConditionSearch entityLabel="patients" />
+          {#if $searchedPhenotypeForPatients !== null}
+            <div class="phenotype-chip" title={copy.patient.findPhenotypeChipTip}>
+              <span class="chip-label">Highlighting patients with</span>
+              <span class="chip-val">{$phenotypesById.get($searchedPhenotypeForPatients)?.label || `Phenotype ${$searchedPhenotypeForPatients}`}</span>
+              <button class="chip-clear" type="button" on:click={() => searchedPhenotypeForPatients.set(null)} title="Clear">×</button>
+            </div>
+          {/if}
+        </div>
+        {#if hasGroup}
           <label class="color-toggle" title="Color patient-atlas points by each patient's gating group instead of dominant phenotype.">
             <input type="checkbox" bind:checked={$colorByGroup} />
             <span>color by group</span>
           </label>
-        </div>
-      {/if}
+        {/if}
+      </div>
       <PatientBrowser />
     </div>
 
@@ -135,7 +133,7 @@
 
   .section-head {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr;
     align-items: end;
     gap: 2rem;
     padding-bottom: 1.5rem;
@@ -211,23 +209,20 @@
     font-weight: 600;
   }
 
-  .controls {
-    display: flex;
-    align-items: end;
-    gap: 1.25rem;
-  }
   .control-stack {
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
-    align-items: flex-end;
+    align-items: flex-start;
   }
-  /* Sits just below the patient map, right-aligned; pulled up tight against
-     the map (overrides the left-col's 1.25rem gap). */
+  /* Sits just below the patient map: the condition-search control-stack on
+     the left, the color-by-group toggle on the right, pulled up tight
+     against the map (overrides the left-col's 1.25rem gap). When there's
+     no gating group the toggle is absent and the stack just sits left. */
   .map-actions {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
+    justify-content: space-between;
     gap: 0.85rem;
     margin-top: -0.75rem;
   }
