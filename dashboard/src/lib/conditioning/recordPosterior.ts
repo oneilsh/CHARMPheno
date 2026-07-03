@@ -83,7 +83,36 @@ export function sampleRecordPosterior(args: {
     return { thetaFree: ex.map((e) => e / s), thetaRef: 0 }
   }
 
-  // Fisher scoring to the posterior mode.
+  // Log-posterior objective at z (over the free eta), used only by the line
+  // search below: L(z) = -0.5 (z-mu)' Sinv (z-mu) + sum_w n_w log(s_w), where
+  // s_w is the observation probability of code w under theta(z) (reference
+  // included, free topics at z). log(max(s_w, 1e-300)) avoids -Infinity if a
+  // trial step pushes s_w to (numerically) zero.
+  const objective = (z: number[]): number => {
+    const { thetaFree, thetaRef } = thetaFromEta(z)
+    const dm = z.map((v, i) => v - mu[i])
+    let quad = 0
+    for (let i = 0; i < F; i++) for (let j = 0; j < F; j++) quad += dm[i] * Sinv[i][j] * dm[j]
+    let ll = 0
+    for (let c = 0; c < codes.length; c++) {
+      const w = codes[c]
+      const nw = counts[c]
+      let sw = refAllowed ? thetaRef * (beta[ref]?.[w] ?? 0) : 0
+      for (let i = 0; i < F; i++) sw += thetaFree[i] * (beta[ids[i]]?.[w] ?? 0)
+      ll += nw * Math.log(Math.max(sw, 1e-300))
+    }
+    return -0.5 * quad + ll
+  }
+
+  // Fisher scoring to the posterior mode, with a backtracking (Armijo-style)
+  // line search on the step length. The bare Fisher-scoring step solveSPD(H, g)
+  // is a Newton step under the expected-information curvature; it converges
+  // fast near the mode but with a strong likelihood (a large prefix) the full
+  // step can overshoot the mode and oscillate. Halving alpha until the
+  // objective does not decrease makes every accepted step monotone
+  // non-decreasing in L, which guarantees convergence; well-behaved cases
+  // still take the full step (alpha=1) on essentially every iteration, so
+  // this leaves fast convergence and the mode itself unchanged.
   let eta = mu.slice()
   for (let iter = 0; iter < 50; iter++) {
     const { thetaFree, thetaRef } = thetaFromEta(eta)
@@ -121,9 +150,25 @@ export function sampleRecordPosterior(args: {
       for (let j = 0; j < F; j++) pg += Sinv[i][j] * dm[j]
       return g - pg
     })
-    const step = solveSPD(H, grad)
+    const delta = solveSPD(H, grad)
+
+    // Backtracking line search: accept the full Newton step (alpha=1) unless
+    // it fails to improve L, in which case halve alpha until it does (or
+    // alpha bottoms out, at which point we take the tiny/no-op step anyway).
+    const L0 = objective(eta)
+    let alpha = 1
+    let trial = eta.map((v, i) => v + alpha * delta[i])
+    while (alpha > 1e-4 && objective(trial) < L0) {
+      alpha /= 2
+      trial = eta.map((v, i) => v + alpha * delta[i])
+    }
+
     let maxAbs = 0
-    for (let i = 0; i < F; i++) { eta[i] += step[i]; maxAbs = Math.max(maxAbs, Math.abs(step[i])) }
+    for (let i = 0; i < F; i++) {
+      const stepI = alpha * delta[i]
+      eta[i] += stepI
+      maxAbs = Math.max(maxAbs, Math.abs(stepI))
+    }
     if (maxAbs < 1e-6) break
   }
 
