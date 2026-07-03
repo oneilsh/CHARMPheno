@@ -1,6 +1,6 @@
 <script lang="ts">
   import {
-    bundle, simulatorPrefix, advancedView, simulatorConditioning,
+    bundle, simulatorPrefix, advancedView, simulatorConditioning, drawConcentration,
   } from '../store'
   import { runSimulator } from '../simulator/runSamples'
   import { buildDesignVector } from '../covariate'
@@ -66,6 +66,7 @@
           prefixCounts,
           beta: b.model.beta,
           rng: tRng,
+          concentration: $drawConcentration,
         })
       }
       result = runSimulator({
@@ -141,8 +142,12 @@
           <span class="eyebrow">Run the model</span>
           <span class="run-sub">{copy.simulator.runSub}</span>
         </div>
-        {#if $advancedView}
-          <div class="run-opts">
+        <div class="run-opts">
+          <label class="control n-control" title="Higher = more concentrated / fewer phenotypes per patient; 1 uses the fitted scale.">
+            <span class="ctl-head"><span class="eyebrow">Phenotype sharpness</span> <span class="ctl-v" data-numeric>{$drawConcentration}×</span></span>
+            <input type="range" min="0.5" max="12" step="0.5" bind:value={$drawConcentration} />
+          </label>
+          {#if $advancedView}
             <label class="control n-control">
               <span class="ctl-head"><span class="eyebrow">Samples</span> <span class="ctl-v" data-numeric>{nSamples}</span></span>
               <input type="range" min="20" max="1000" step="20" bind:value={nSamples} />
@@ -151,8 +156,8 @@
               <input type="checkbox" bind:checked={autoregressive} />
               <span class="eyebrow">Autoregressive</span>
             </label>
-          </div>
-        {/if}
+          {/if}
+        </div>
         <button class="btn btn-primary run-btn" on:click={simulate} disabled={running || !$bundle}>
           {running ? 'sampling…' : 'simulate →'}
         </button>

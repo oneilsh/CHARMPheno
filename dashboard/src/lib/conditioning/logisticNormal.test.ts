@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { createRng } from '../sampling'
-import { cholesky, mvnDraw, sampleConditionedTheta } from './logisticNormal'
+import { cholesky, mvnDraw, sampleConditionedTheta, buildGenerativeSigma } from './logisticNormal'
 import type { Correlation, CovariateEffects } from '../types'
 
 describe('cholesky', () => {
@@ -134,5 +134,82 @@ describe('sampleConditionedTheta', () => {
     expect(() => sampleConditionedTheta({
       effects, x: [1], correlation: corr, topicBlocks: null, group: null, rng: createRng(1),
     })).not.toThrow()
+  })
+})
+
+describe('buildGenerativeSigma', () => {
+  it('with eta_var absent and concentration=1 returns exactly the R sub-block', () => {
+    const corr: Correlation = {
+      topic_order: [3, 1, 2], block_labels: ['background', 'background', 'background'],
+      R: [
+        [1, 0.4, -0.2],
+        [0.4, 1, 0.15],
+        [-0.2, 0.15, 1],
+      ],
+      identified: [[true, true, true], [true, true, true], [true, true, true]],
+      support: [[9, 9, 9], [9, 9, 9], [9, 9, 9]],
+      reference_topic: 0,
+    }
+    const freeIdx = [0, 1, 2]
+    const Sigma = buildGenerativeSigma(corr, freeIdx, 1)
+    for (let i = 0; i < 3; i++)
+      for (let j = 0; j < 3; j++)
+        expect(Sigma[i][j]).toBe(corr.R[i][j])
+  })
+
+  it('scales off-diagonal and diagonal entries by sqrt(concentration * var) products', () => {
+    const corr: Correlation = {
+      topic_order: [1, 2], block_labels: ['background', 'background'],
+      R: [[1, 0.5], [0.5, 1]],
+      identified: [[true, true], [true, true]],
+      support: [[9, 9], [9, 9]],
+      reference_topic: 0,
+      eta_var: [0, 2, 8], // indexed by display topic id; ref (0) unused
+    }
+    const freeIdx = [0, 1]
+    const Sigma = buildGenerativeSigma(corr, freeIdx, 3)
+    // s0 = sqrt(3*2), s1 = sqrt(3*8)
+    const s0 = Math.sqrt(3 * 2)
+    const s1 = Math.sqrt(3 * 8)
+    expect(Sigma[0][0]).toBeCloseTo(1 * s0 * s0, 10)
+    expect(Sigma[1][1]).toBeCloseTo(1 * s1 * s1, 10)
+    expect(Sigma[0][1]).toBeCloseTo(0.5 * s0 * s1, 10)
+  })
+})
+
+describe('sampleConditionedTheta concentration', () => {
+  // A K=3 fixture (reference 0, free topics 1,2 with positive correlation)
+  // where a higher concentration should visibly concentrate theta onto
+  // fewer topics: track the mean top-topic (max) mass over many draws.
+  function meanTopMass(concentration: number, seed: number): number {
+    const effects: CovariateEffects = [{ covariate: 'Intercept', per_topic: [0, 0, 0] }]
+    const corr: Correlation = {
+      topic_order: [1, 2], block_labels: ['background', 'background'],
+      R: [[1, 0.3], [0.3, 1]],
+      identified: [[true, true], [true, true]],
+      support: [[9, 9], [9, 9]],
+      reference_topic: 0,
+      eta_var: [0, 1, 1],
+    }
+    const rng = createRng(seed)
+    const N = 3000
+    let sumTop = 0
+    for (let i = 0; i < N; i++) {
+      const theta = sampleConditionedTheta({
+        effects, x: [1], correlation: corr, topicBlocks: null, group: null,
+        rng, concentration,
+      })
+      sumTop += Math.max(...theta)
+    }
+    return sumTop / N
+  }
+
+  it('a high concentration produces more concentrated draws (higher mean top-topic mass)', () => {
+    const lowConc = meanTopMass(1, 101)
+    const highConc = meanTopMass(10, 101)
+    expect(highConc).toBeGreaterThan(lowConc)
+    // Sanity: high concentration should push the average top mass well above
+    // uniform-over-3 (1/3) towards near-deterministic per draw.
+    expect(highConc).toBeGreaterThan(0.6)
   })
 })

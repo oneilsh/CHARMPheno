@@ -64,6 +64,13 @@ export const comparePair = writable<{ a: number; b: number } | null>(null)
 export const simulatorPrefix = writable<number[]>([])     // vocab indices (trimmed)
 export const advancedView = writable<boolean>(false)
 
+// Generative concentration multiplier for the logistic-normal draw (see
+// conditioning/logisticNormal.ts buildGenerativeSigma). 1 = the fitted/data
+// variance scale when eta_var is present on the bundle, or the unit
+// correlation when absent; larger values concentrate draws on fewer
+// phenotypes per patient.
+export const drawConcentration = writable<number>(1)
+
 // Patient atlas: color points by each patient's recorded gating group
 // instead of dominant phenotype. Only meaningful for gated STM bundles
 // (SyntheticPatient.group is null otherwise); PatientMap falls back to the

@@ -37,6 +37,24 @@ export function mvnDraw(mean: number[], L: number[][], rng: () => number): numbe
   return out
 }
 
+// Generative covariance sub-block over the free rows: the exported correlation R
+// (unit-diagonal) rescaled to a covariance by the per-topic empirical eta variance
+// (correlation.eta_var), times a user concentration multiplier. Sigma[a][b] =
+// R[i][j] * s_a * s_b, s_k = sqrt(concentration * var_k), var_k = eta_var[displayId] ?? 1.
+// With eta_var absent and concentration=1 this is exactly R (byte-identical to the
+// prior behavior). Larger variance/concentration -> less diffuse draws.
+export function buildGenerativeSigma(
+  correlation: Correlation,
+  freeIdx: number[],
+  concentration: number,
+): number[][] {
+  const order = correlation.topic_order
+  const ev = correlation.eta_var
+  const s = freeIdx.map((r) => Math.sqrt(concentration * (ev ? (ev[order[r]] ?? 1) : 1)))
+  return freeIdx.map((ri, a) =>
+    freeIdx.map((rj, b) => (correlation.R[ri][rj] as number) * s[a] * s[b]))
+}
+
 // Faithful STM forward draw: theta = softmax(eta), eta ~ Normal(Gamma^T x, Sigma)
 // (logistic-normal prior; Blei & Lafferty 2007). The reference topic is pinned
 // eta = 0 and excluded from Gamma's non-zero rows and from Sigma (correlation.R
@@ -50,8 +68,9 @@ export function sampleConditionedTheta(args: {
   topicBlocks: string[] | null
   group: string | null
   rng: () => number
+  concentration?: number
 }): number[] {
-  const { effects, x, correlation, topicBlocks, group, rng } = args
+  const { effects, x, correlation, topicBlocks, group, rng, concentration = 1 } = args
   const K = effects[0]?.per_topic.length ?? 0
   const ref = correlation.reference_topic ?? -1
   const order = correlation.topic_order        // display id per R row (free topics)
@@ -80,8 +99,7 @@ export function sampleConditionedTheta(args: {
   })
 
   // Sigma sub-block over the free rows (guaranteed non-null / PD).
-  const Sigma = freeIdx.map((ri) =>
-    freeIdx.map((rj) => correlation.R[ri][rj] as number))
+  const Sigma = buildGenerativeSigma(correlation, freeIdx, concentration)
 
   const etaFree = freeIdx.length
     ? mvnDraw(mean, choleskyPD(Sigma), rng)
