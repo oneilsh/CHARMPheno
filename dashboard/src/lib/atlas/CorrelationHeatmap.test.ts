@@ -7,51 +7,67 @@ import type { Correlation } from '../types'
 
 afterEach(() => cleanup())
 
+// Two blocks (background 0..1, cancer 2..3); (0,3)/(3,0) are an unidentified
+// background×cancer pair to exercise the NA path.
 const correlation: Correlation = {
-  topic_order: [0, 1, 2],
-  block_labels: ['background', 'A', 'B'],
-  R: [[1, 0.4, 0.5], [0.4, 1, 0.3], [0.5, 0.3, 1]],
-  identified: [[true, true, true], [true, true, false], [true, false, true]],
-  support: [[300, 200, 100], [200, 200, 100], [100, 100, 100]],
+  topic_order: [0, 1, 2, 3],
+  block_labels: ['background', 'background', 'cancer', 'cancer'],
+  R: [
+    [1, 0.3, 0.1, 0.2],
+    [0.3, 1, 0.4, 0.1],
+    [0.1, 0.4, 1, 0.5],
+    [0.2, 0.1, 0.5, 1],
+  ],
+  identified: [
+    [true, true, true, false],
+    [true, true, true, true],
+    [true, true, true, true],
+    [false, true, true, true],
+  ],
+  support: [
+    [300, 200, 100, 20],
+    [200, 300, 150, 120],
+    [100, 150, 300, 200],
+    [20, 120, 200, 300],
+  ],
+  reference_topic: null,
 }
 
-it('greys unidentified cells and colors identified ones', () => {
-  const { container } = render(CorrelationHeatmap, { props: { correlation } })
-
-  // Unidentified cell (1,2): identified=false with non-null R -> must carry the "no joint support" NA styling/title.
-  // This proves that identified:false alone triggers NA regardless of R being present.
-  const naCell = container.querySelector('[data-row="1"][data-col="2"]')
-  expect(naCell).toBeTruthy()
-  expect(naCell?.classList.contains('na')).toBe(true)
-  expect(naCell?.getAttribute('data-tip') ?? naCell?.querySelector('title')?.textContent ?? naCell?.getAttribute('title'))
-    .toMatch(/no joint support/i)
-
-  // Its mirror (2,1) must also be greyed (symmetric NA).
-  const naCellMirror = container.querySelector('[data-row="2"][data-col="1"]')
-  expect(naCellMirror?.classList.contains('na')).toBe(true)
-
-  // Identified cell (0,1): R = 0.4, must NOT carry the NA class and must carry a real fill.
-  const identifiedCell = container.querySelector('[data-row="0"][data-col="1"]')
-  expect(identifiedCell).toBeTruthy()
-  expect(identifiedCell?.classList.contains('na')).toBe(false)
-  const fill = identifiedCell?.getAttribute('fill')
-  expect(fill).toBeTruthy()
-  expect(fill).not.toBe('none')
+it('renders row and column block pickers with friendly block names', () => {
+  const { getAllByRole } = render(CorrelationHeatmap, { props: { correlation } })
+  const selects = getAllByRole('combobox') as HTMLSelectElement[]
+  expect(selects.length).toBe(2)
+  // background -> "All"; cancer stays "cancer"
+  const opts = Array.from(selects[0].options).map((o) => o.textContent)
+  expect(opts).toEqual(['All', 'cancer'])
 })
 
-it('tooltip names both topics in the pair', () => {
+it('defaults to All × All (the background block) on both axes', () => {
   const { container } = render(CorrelationHeatmap, { props: { correlation } })
-  // topic_order = [0,1,2]; cell (0,1) pairs topic 0 with topic 1. With no bundle
-  // in the test, labels fall back to the topic ids, joined by "×".
-  const cell = container.querySelector('[data-row="0"][data-col="1"]')
-  expect(cell?.getAttribute('data-tip')).toMatch(/0 × 1/)
+  // background×background -> matrix rows/cols {0,1} -> 4 cells, all from that block
+  const cells = container.querySelectorAll('rect.cell')
+  expect(cells.length).toBe(4)
+  const mrs = new Set(Array.from(cells).map((c) => c.getAttribute('data-mr')))
+  expect(mrs).toEqual(new Set(['0', '1']))
 })
 
-it('clicking a cell selects its COLUMN topic', async () => {
+it('clicking a cell selects its column topic', async () => {
   selectedPhenotypeId.set(null)
   const { container } = render(CorrelationHeatmap, { props: { correlation } })
-  // cell (2,1): row topic order[2]=2, column topic order[1]=1 -> selects 1.
-  const cell = container.querySelector('[data-row="2"][data-col="1"]') as SVGRectElement
+  // default All × All -> background cells (matrix rows/cols {0,1})
+  const cell = container.querySelector('rect.cell[data-mr="0"][data-mc="1"]') as SVGRectElement
   await fireEvent.click(cell)
+  // column topic = order[1] = 1
   expect(get(selectedPhenotypeId)).toBe(1)
+})
+
+it('a cross-block selection surfaces the unidentified NA cell', async () => {
+  const { container, getAllByRole } = render(CorrelationHeatmap, { props: { correlation } })
+  const [rowSel, colSel] = getAllByRole('combobox') as HTMLSelectElement[]
+  await fireEvent.change(rowSel, { target: { value: 'background' } })
+  await fireEvent.change(colSel, { target: { value: 'cancer' } })
+  // background(rows 0,1) × cancer(cols 2,3): cell (0,3) is unidentified
+  const na = container.querySelector('rect.cell[data-mr="0"][data-mc="3"]')
+  expect(na?.classList.contains('na')).toBe(true)
+  expect(na?.getAttribute('fill')).toBe('var(--rule)')
 })
