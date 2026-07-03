@@ -551,7 +551,12 @@ Decide this FIRST using the rule above.
 - **label**: a concise clinician-voice label, at most {max_words} words. \
 Examples: "Type 2 diabetes care", "Chronic comorbidity catch-all". \
 For mixed/dead, use something honest: "Mixed clinical themes", \
-"Unused / low-signal topic".
+"Unused / low-signal topic". \
+Do NOT prefix the label with the cohort or group name: write \
+"Hepatobiliary-pancreatic cancer", not "Cancer: hepatobiliary-pancreatic" \
+or "Cancer cohort: ...". The cohort is shown separately in the dashboard, so \
+repeating it in every label is redundant. (Naming the specific disease is \
+fine — "Breast cancer" is good; it's the generic cohort prefix to drop.)
 
 - **description**: 2-3 sentences, clinician voice, plain clinical \
 English. No model terminology, no references to topics, codes, or \
