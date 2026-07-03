@@ -1,6 +1,7 @@
 <script lang="ts">
   import { bundle, comparePair } from '../store'
   import { topDifferentialCodes } from './difference'
+  import { topRelevantCodes } from '../inference'
 
   // Relevance-term weighting for the delta ranking — same λ semantics as
   // CodePanel's relevance slider (Sievert & Shirley 2014), just applied to
@@ -15,9 +16,10 @@
   $: corpusFreq = $bundle ? $bundle.vocab.codes.map((c) => c.corpus_freq) : []
 
   $: pair = $comparePair
-  $: valid = !!(pair && pair.a !== pair.b && $bundle)
+  $: valid = !!(pair && $bundle)
+  $: isSelf = !!(pair && pair.a === pair.b)
 
-  $: result = valid && pair && $bundle
+  $: result = valid && pair && $bundle && !isSelf
     ? topDifferentialCodes({
         betaA: $bundle.model.beta[pair.a],
         betaB: $bundle.model.beta[pair.b],
@@ -25,6 +27,13 @@
         lambda,
         n: 15,
       })
+    : null
+
+  // Self-view (diagonal click): a single ranked list of the phenotype's own
+  // top conditions by relevance, same λ/relevance semantics as the two-sided
+  // contrast (Sievert & Shirley 2014) but scored against just that topic.
+  $: selfResult = valid && pair && $bundle && isSelf
+    ? topRelevantCodes({ pwk: $bundle.model.beta[pair.a], pw: corpusFreq, lambda, n: 15 })
     : null
 
   function describe(index: number): string {
@@ -35,12 +44,44 @@
 </script>
 
 <aside class="difference-pane" data-tour="phenotype-difference">
-  {#if !valid || !result || !pair}
+  {#if !valid || !pair}
     <div class="empty">
       <span class="eyebrow">Difference</span>
       <p class="empty-msg">Click a cell in the heatmap to compare two phenotypes.</p>
     </div>
-  {:else}
+  {:else if isSelf && selfResult}
+    <header class="head">
+      <span class="eyebrow">Phenotype detail</span>
+      <h2 class="title">Top conditions in {nameOf(pair.a)}</h2>
+    </header>
+
+    <div class="slider-row">
+      <label class="slider">
+        <span class="slider-head">
+          <span class="slider-k">
+            <span class="eyebrow">Relevance term weighting</span>
+          </span>
+          <span class="slider-v" data-numeric>λ {lambda.toFixed(2)}</span>
+        </span>
+        <input type="range" min="0" max="1" step="0.05" bind:value={lambda} />
+        <span class="slider-ends">
+          <span>Lift</span>
+          <span>Frequency</span>
+        </span>
+      </label>
+    </div>
+
+    <div class="side">
+      <ol class="rows">
+        {#each selfResult as r (r.index)}
+          <li>
+            <span class="desc" title={describe(r.index)}>{describe(r.index)}</span>
+            <span class="num" data-numeric>{(r.pwk * 100).toFixed(2)}%</span>
+          </li>
+        {/each}
+      </ol>
+    </div>
+  {:else if result}
     <header class="head">
       <span class="eyebrow">Phenotype difference</span>
       <h2 class="title">{nameOf(pair.a)} <span class="vs">vs</span> {nameOf(pair.b)}</h2>

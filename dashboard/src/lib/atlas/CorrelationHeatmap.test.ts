@@ -81,10 +81,10 @@ it('in pair-select mode, clicking a cell sets the comparePair (row=A, col=B)', a
   expect(get(comparePair)).toEqual({ a: 0, b: 1 })   // order[0]=0, order[1]=1
 })
 
-it('diagonal click (A===B) clears the pair', async () => {
+it('diagonal click (A===B) selects a self-pair (for the DifferencePane self-view)', async () => {
   comparePair.set({ a: 9, b: 9 })
   const { container } = render(CorrelationHeatmap, { props: { correlation, pairSelect: true } })
   const cell = container.querySelector('rect.cell[data-mr="0"][data-mc="0"]') as SVGRectElement
   await fireEvent.click(cell)
-  expect(get(comparePair)).toBeNull()
+  expect(get(comparePair)).toEqual({ a: 0, b: 0 })   // order[0]=0
 })

@@ -7,8 +7,9 @@
 
   export let correlation: Correlation
   // When true, clicking a cell sets `comparePair` to its (row, col) phenotype
-  // pair (diagonal clicks clear it) instead of the default single-select
-  // (`selectedPhenotypeId`) behavior used by the Explore heatmap.
+  // pair (diagonal clicks select the phenotype against itself, a "self-view")
+  // instead of the default single-select (`selectedPhenotypeId`) behavior
+  // used by the Explore heatmap.
   export let pairSelect = false
 
   // Diverging R ramp: red (−1) → white (0) → cyan (+1). White midpoint keeps
@@ -35,8 +36,13 @@
 
   // Row / column block selection. Default to All × All (the background block,
   // first in first-appearance order) — the broadest cross-phenotype view.
-  let rowBlock = ''
-  let colBlock = ''
+  // Bindable so a host (Compare.svelte) can lift the pickers into its own
+  // header while this component still drives the default-init + matrix logic.
+  export let rowBlock = ''
+  export let colBlock = ''
+  // When false, the host renders its own row/col <select>s (bound to the
+  // props above) and this component omits its internal pickers.
+  export let showBlockPickers = true
   $: if (blocks.length && !blocks.includes(rowBlock)) rowBlock = blocks[0]
   $: if (blocks.length && !blocks.includes(colBlock)) colBlock = blocks[0]
 
@@ -129,7 +135,10 @@
   function onCellClick(mr: number, mc: number) {
     if (pairSelect) {
       const a = order[mr], b = order[mc]
-      comparePair.set(a === b ? null : { a, b })
+      // Diagonal (a === b) is a real selection too — DifferencePane renders
+      // a self-view (that phenotype's own top conditions) instead of an
+      // empty state.
+      comparePair.set({ a, b })
     } else {
       selectCol(mc)
     }
@@ -137,19 +146,21 @@
 </script>
 
 <figure class="heatmap" data-tour="correlation-heatmap">
-  <div class="picker">
-    <label>Rows
-      <select bind:value={rowBlock}>
-        {#each blocks as b}<option value={b}>{blockDisplay(b)}</option>{/each}
-      </select>
-    </label>
-    <span class="times">×</span>
-    <label>Columns
-      <select bind:value={colBlock}>
-        {#each blocks as b}<option value={b}>{blockDisplay(b)}</option>{/each}
-      </select>
-    </label>
-  </div>
+  {#if showBlockPickers}
+    <div class="picker">
+      <label>Rows
+        <select bind:value={rowBlock}>
+          {#each blocks as b}<option value={b}>{blockDisplay(b)}</option>{/each}
+        </select>
+      </label>
+      <span class="times">×</span>
+      <label>Columns
+        <select bind:value={colBlock}>
+          {#each blocks as b}<option value={b}>{blockDisplay(b)}</option>{/each}
+        </select>
+      </label>
+    </div>
+  {/if}
 
   <div class="card" bind:clientWidth={cardW}>
     <svg viewBox="0 0 {W} {H}" role="img" aria-label={copy.correlation.ariaLabel} preserveAspectRatio="xMidYMid meet" style="width: {svgPxW}px">
