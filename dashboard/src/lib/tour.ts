@@ -20,7 +20,7 @@ import Shepherd from 'shepherd.js'
 import type { StepOptionsButton, Tour } from 'shepherd.js'
 import 'shepherd.js/dist/css/shepherd.css'
 import { copy } from './copy'
-import { go, type Route } from './router'
+import { go, type TopId } from './router'
 
 type Placement =
   | 'top' | 'bottom' | 'left' | 'right'
@@ -30,8 +30,14 @@ type Placement =
 interface StepDef {
   /** Step id; must match a key under copy.tour.basic / .advanced. */
   id: string
-  /** Tab to navigate to before showing this step. Omit to stay put. */
-  tab?: Route
+  /** Top-level tab to navigate to before showing this step. Omit to stay put. */
+  tab?: TopId
+  /**
+   * Subtab to select within `tab` before showing this step (e.g. the old
+   * standalone Patient/Simulator tabs are now the Simulator top tab's two
+   * subtabs). Omit to leave the subtab as-is / default.
+   */
+  sub?: string
   /** Element the popover attaches to. Omit for a centered, unattached step. */
   selector?: string
   /** Which side of the target the popover sits on. */
@@ -45,16 +51,19 @@ const BASIC_STEPS: StepDef[] = [
   { id: 'welcome' /* centered */ },
   // Cohort selector lives in the masthead (present on every tab), no nav.
   { id: 'cohort', selector: '[data-tour="cohort"]', on: 'bottom' },
-  { id: 'atlasMap', tab: 'atlas', selector: '[data-tour="atlas-map"]', on: 'right' },
-  { id: 'findCondition', tab: 'atlas', selector: '[data-tour="find-condition"]', on: 'bottom' },
-  { id: 'atlasDetail', tab: 'atlas', selector: '[data-tour="phenotype-detail"]', on: 'left' },
+  { id: 'atlasMap', tab: 'atlas', sub: 'explore', selector: '[data-tour="atlas-map"]', on: 'right' },
+  { id: 'findCondition', tab: 'atlas', sub: 'explore', selector: '[data-tour="find-condition"]', on: 'bottom' },
+  { id: 'atlasDetail', tab: 'atlas', sub: 'explore', selector: '[data-tour="phenotype-detail"]', on: 'left' },
   // The find-in-patients / open-in-atlas pair bookends the patient section,
   // showing the two atlases are linked views of the same model.
-  { id: 'findInPatients', tab: 'atlas', selector: '[data-tour="find-in-patients"]', on: 'left' },
-  { id: 'patientMap', tab: 'patient', selector: '[data-tour="patient-map"]', on: 'right' },
-  { id: 'patientProfile', tab: 'patient', selector: '[data-tour="patient-profile"]', on: 'left' },
-  { id: 'openInAtlas', tab: 'patient', selector: '[data-tour="open-in-atlas"]', on: 'left' },
-  { id: 'simulator', tab: 'simulator', selector: '[data-tour="simulator-input"]', on: 'right' },
+  { id: 'findInPatients', tab: 'atlas', sub: 'explore', selector: '[data-tour="find-in-patients"]', on: 'left' },
+  // Old standalone Patient tab is now the Simulator top tab's "Explore
+  // Cohort" subtab.
+  { id: 'patientMap', tab: 'sim', sub: 'explore', selector: '[data-tour="patient-map"]', on: 'right' },
+  { id: 'patientProfile', tab: 'sim', sub: 'explore', selector: '[data-tour="patient-profile"]', on: 'left' },
+  { id: 'openInAtlas', tab: 'sim', sub: 'explore', selector: '[data-tour="open-in-atlas"]', on: 'left' },
+  // Old standalone Simulator tab is now the "Simulate Cohort" subtab.
+  { id: 'simulator', tab: 'sim', sub: 'simulate', selector: '[data-tour="simulator-input"]', on: 'right' },
   // Toggle lives in the masthead (present on every tab), so no navigation.
   { id: 'viewToggle', selector: '[data-tour="view-toggle"]', on: 'bottom' },
 ]
@@ -63,21 +72,21 @@ const BASIC_STEPS: StepDef[] = [
 // that only exist there. Runs entirely on the Atlas tab except the last stop.
 const ADVANCED_STEPS: StepDef[] = [
   { id: 'welcome' /* centered */ },
-  { id: 'metrics', tab: 'atlas', selector: '[data-tour="metrics"]', on: 'bottom' },
-  { id: 'detailStats', tab: 'atlas', selector: '[data-tour="detail-stats"]', on: 'left' },
-  { id: 'histogram', tab: 'atlas', selector: '[data-tour="histogram"]', on: 'left' },
-  { id: 'relevance', tab: 'atlas', selector: '[data-tour="relevance"]', on: 'left' },
+  { id: 'metrics', tab: 'atlas', sub: 'explore', selector: '[data-tour="metrics"]', on: 'bottom' },
+  { id: 'detailStats', tab: 'atlas', sub: 'explore', selector: '[data-tour="detail-stats"]', on: 'left' },
+  { id: 'histogram', tab: 'atlas', sub: 'explore', selector: '[data-tour="histogram"]', on: 'left' },
+  { id: 'relevance', tab: 'atlas', sub: 'explore', selector: '[data-tour="relevance"]', on: 'left' },
   // Quality grades live per-bubble and aren't guaranteed on screen, so point
   // at the atlas itself (top-right) and explain the grades in the copy.
-  { id: 'quality', tab: 'atlas', selector: '[data-tour="atlas-map"]', on: 'right-start' },
-  { id: 'simulator', tab: 'simulator', selector: '[data-tour="sim-controls"]', on: 'right' },
+  { id: 'quality', tab: 'atlas', sub: 'explore', selector: '[data-tour="atlas-map"]', on: 'right-start' },
+  { id: 'simulator', tab: 'sim', sub: 'simulate', selector: '[data-tour="sim-controls"]', on: 'right' },
 ]
 
 // Resolve the target element after (optionally) switching tabs. Polls a few
 // frames so a freshly-mounted tab's DOM has time to appear; resolves anyway
 // after `timeout` so a missing anchor degrades to a centered popover.
 function ready(def: StepDef, timeout = 3000): Promise<void> {
-  if (def.tab) go(def.tab)
+  if (def.tab) go(def.tab, def.sub)
   return new Promise((resolve) => {
     if (!def.selector) {
       // No anchor: just wait one frame for any tab swap to paint.
@@ -122,13 +131,17 @@ function buildTour(mode: 'basic' | 'advanced'): Tour {
         : { text: copy.tour.nextLabel, action: () => tour.next() },
     )
 
-    // Does this step move to a different tab than the one before it? If so
-    // it's the step that establishes a new screen, and we scroll the page to
-    // the top instead of centering the feature — otherwise centering a tall
-    // map scrolls the nav (and its fresh tab highlight) off the top, hiding
-    // the very cue we just lit up. The tabs sit directly above the features,
-    // so scroll-to-top fits the tab, the feature, and the popover together.
-    const entersNewTab = !!def.tab && def.tab !== defs[i - 1]?.tab
+    // Does this step move to a different tab or subtab than the one before
+    // it? If so it's the step that establishes a new screen, and we scroll
+    // the page to the top instead of centering the feature — otherwise
+    // centering a tall map scrolls the nav (and its fresh tab highlight) off
+    // the top, hiding the very cue we just lit up. The tabs sit directly
+    // above the features, so scroll-to-top fits the tab, the feature, and
+    // the popover together. Subtab changes count too: the old standalone
+    // Patient/Simulator tabs are now subtabs of the same "Simulator" top
+    // tab, but switching between them is still a full screen swap.
+    const prev = defs[i - 1]
+    const entersNewTab = !!def.tab && (def.tab !== prev?.tab || def.sub !== prev?.sub)
 
     const stepCopy = (words as Record<string, { title: string; body: string }>)[def.id]
     tour.addStep({

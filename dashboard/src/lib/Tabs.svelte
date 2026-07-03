@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { route, go, TABS } from './router'
+  import { topRoute, go, TOP_TABS } from './router'
 </script>
 
 <nav class="tabs" aria-label="Sections">
-  {#each TABS as t}
+  {#each TOP_TABS as t}
     <button
       class="tab"
-      class:active={$route === t.id}
+      class:active={$topRoute === t.id}
       on:click={() => go(t.id)}
-      aria-current={$route === t.id ? 'page' : undefined}
+      aria-current={$topRoute === t.id ? 'page' : undefined}
       data-tour="tab-{t.id}"
     >
       <span class="label">{t.label}</span>

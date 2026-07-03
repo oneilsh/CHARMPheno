@@ -12,7 +12,7 @@
   function findInPatients() {
     if ($selectedPhenotypeId === null) return
     searchedPhenotypeForPatients.set($selectedPhenotypeId)
-    go('patient')
+    go('sim', 'explore')
   }
 
   let lambda = 0.6

@@ -10,25 +10,23 @@
   } from './lib/store'
   import type { DashboardBundle } from './lib/types'
   import { loadBundle, loadManifest } from './lib/bundle'
-  import { route, type Route } from './lib/router'
+  import { topRoute, type TopId } from './lib/router'
   import { copy } from './lib/copy'
   import { generateCohort } from './lib/cohort'
   import { ensurePatientProjection } from './lib/patient/projection'
   import CohortSelector from './lib/CohortSelector.svelte'
   import Tabs from './lib/Tabs.svelte'
-  import Atlas from './lib/tabs/Atlas.svelte'
-  import Patient from './lib/tabs/Patient.svelte'
-  import Simulator from './lib/tabs/Simulator.svelte'
+  import PhenotypeAtlas from './lib/tabs/PhenotypeAtlas.svelte'
+  import SimulatorGroup from './lib/tabs/SimulatorGroup.svelte'
   import { installTooltips } from './lib/tooltip'
   import { startTour } from './lib/tour'
 
-  // Mapping from route id to its top-level tab component. Paired with
-  // router.ts's TABS list, adding a new tab is then a two-line change:
-  // append to TABS, add an entry here.
-  const TAB_COMPONENTS: Record<Route, ConstructorOfATypedSvelteComponent> = {
-    atlas: Atlas,
-    patient: Patient,
-    simulator: Simulator,
+  // Mapping from top-route id to its top-level container component. Paired
+  // with router.ts's TOP_TABS list, adding a new top tab is then a two-line
+  // change: append to TOP_TABS, add an entry here.
+  const TOP_COMPONENTS: Record<TopId, ConstructorOfATypedSvelteComponent> = {
+    atlas: PhenotypeAtlas,
+    sim: SimulatorGroup,
   }
 
   // Initial batch size. Adaptive sizing in cohort.ts may push the final
@@ -216,7 +214,7 @@
     <p class="loading"><span class="loading-dot"></span> loading model bundle</p>
   {:else}
     <Tabs />
-    <svelte:component this={TAB_COMPONENTS[$route]} />
+    <svelte:component this={TOP_COMPONENTS[$topRoute]} />
   {/if}
 </main>
 
