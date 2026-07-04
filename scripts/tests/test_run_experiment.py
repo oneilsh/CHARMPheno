@@ -310,6 +310,56 @@ def test_build_lda_args_general_cohort_maps_to_none():
     assert args[idx + 1] == "none"
 
 
+def test_build_lda_args_forwards_cache_uri():
+    """cache_uri in effective forwards to --corpus-cache-uri; absent, no flag."""
+    base = {
+        "model_class": "lda", "source_table": "condition_era",
+        "doc_unit": "patient_year", "doc_min_length": 20,
+        "K": 40, "max_iter": 20, "vocab_size": 10000,
+        "min_df": 20, "min_patient_count": 20,
+        "subsampling_rate": 0.2, "tau0": 64, "kappa": 0.7,
+        "save_interval": 5, "print_topics_every": 1,
+        "person_mod": 10, "top_n_tokens": 6, "seed": 42,
+        "optimize_doc_concentration": True,
+        "optimize_topic_concentration": False,
+        "cohort": "general",
+        "cohort_def": "none",
+    }
+    with_cache = dict(base, cache_uri="hdfs:///user/dataproc/charm/corpus_cache")
+    args = rx.build_lda_args(with_cache, Path("/tmp/foo"), resume_from=None)
+    assert "--corpus-cache-uri" in args
+    idx = args.index("--corpus-cache-uri")
+    assert args[idx + 1] == "hdfs:///user/dataproc/charm/corpus_cache"
+
+    without_cache = dict(base)
+    args_no_cache = rx.build_lda_args(without_cache, Path("/tmp/foo"), resume_from=None)
+    assert "--corpus-cache-uri" not in args_no_cache
+
+
+def test_build_lda_args_population_cancer_cohort_docunit():
+    """population_cancer + patient_cohort pass through build_lda_args unchanged."""
+    effective = {
+        "model_class": "lda", "source_table": "condition_era",
+        "doc_unit": "patient_cohort", "doc_min_length": 20,
+        "K": 40, "max_iter": 20, "vocab_size": 10000,
+        "min_df": 20, "min_patient_count": 20,
+        "subsampling_rate": 0.2, "tau0": 64, "kappa": 0.7,
+        "save_interval": 5, "print_topics_every": 1,
+        "person_mod": 10, "top_n_tokens": 6, "seed": 42,
+        "optimize_doc_concentration": True,
+        "optimize_topic_concentration": False,
+        "cohort": "population_cancer",
+        "cohort_def": "population_cancer",
+    }
+    args = rx.build_lda_args(effective, Path("/tmp/foo"), resume_from=None)
+    assert "--cohort" in args
+    idx = args.index("--cohort")
+    assert args[idx + 1] == "population_cancer"
+    assert "--doc-unit" in args
+    idx = args.index("--doc-unit")
+    assert args[idx + 1] == "patient_cohort"
+
+
 def test_build_eval_args_minimum(tmp_path):
     checkpoint = tmp_path / "0042-try-k60"
     args = rx.build_eval_args(checkpoint, {"model_class": "lda"})

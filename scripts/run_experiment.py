@@ -242,6 +242,8 @@ def build_lda_args(
         "--cohort", str(effective["cohort_def"]),
         "--prior-obs-days", str(effective.get("prior_obs_days", 365)),
     ]
+    if effective.get("cache_uri"):
+        args += ["--corpus-cache-uri", str(effective["cache_uri"])]
     # BooleanOptionalAction in the driver: --optimize-doc-concentration / --no-...
     if effective.get("optimize_doc_concentration", True):
         args.append("--optimize-doc-concentration")

@@ -89,6 +89,12 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Imported here (not at module top) so the module itself stays importable
+    # without charmpheno on the path (mirrors the "driver-side imports proven
+    # first" deferral used for the other charmpheno imports below) — only
+    # needed to source the --cohort choices from the shared registry.
+    from charmpheno.omop.cohorts import SUPPORTED_COHORTS
+
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=_HelpFormatter)
     parser.add_argument(
@@ -201,11 +207,15 @@ def main(argv: list[str] | None = None) -> int:
               "Enable with --optimize-topic-concentration if you want it."),
     )
     parser.add_argument(
-        "--doc-unit", choices=["patient", "patient_year"], default="patient",
+        "--doc-unit", choices=["patient", "patient_year", "patient_cohort"],
+        default="patient",
         help=("How OMOP event rows become documents (see ADR 0018). "
               "'patient' = one doc per person over full history (legacy "
               "default). 'patient_year' = one doc per (person, year-active), "
-              "requires --source-table condition_era for era replication."),
+              "requires --source-table condition_era for era replication. "
+              "'patient_cohort' = one doc per (person, cohort index date) "
+              "windowed via --cohort (PatientCohortDocSpec); its doc_id "
+              "carries a source_cohort: prefix that LDA ignores."),
     )
     parser.add_argument(
         "--doc-min-length", type=int, default=None,
@@ -221,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--cohort",
-        choices=["none", "first_cancer_year", "first_dementia_year"],
+        choices=["none", *sorted(SUPPORTED_COHORTS)],
         default="none",
         help=("Optional cohort filter applied after the base BQ load. "
               "'none' (default) keeps the full sampled corpus. "
@@ -236,6 +246,11 @@ def main(argv: list[str] | None = None) -> int:
               "All cohort options require a fully-observed 365-day follow-up "
               "and, by default, 365 days of prior observation_period coverage "
               "(see --prior-obs-days). "
+              "Any cohort registered in charmpheno.omop.cohorts."
+              "SUPPORTED_COHORTS is accepted (e.g. population_cancer, "
+              "population_eds) — LDA fits the BOW directly and never reads "
+              "source_cohort/gating, so the cohort only selects/windows "
+              "documents, same as the two names above. "
               "Requires --source-table condition_era."),
     )
     parser.add_argument(
