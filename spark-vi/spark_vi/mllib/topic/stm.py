@@ -18,6 +18,7 @@ from typing import Any
 
 import numpy as np
 
+from spark_vi.eval.topic.concentration import ConcentrationAcc
 from spark_vi.models.topic.stm import _stm_doc_inference, prior_topic_proportions
 
 
@@ -325,6 +326,142 @@ def corpus_eta_variance_gated_rdd(
     if n_docs == 0:
         raise ValueError("corpus_eta_variance_gated_rdd: empty document RDD")
     return _welford_variance(n, M2, reference=reference)
+
+
+def _gated_mode_theta(eta_hat: np.ndarray, allowed: np.ndarray, K: int) -> np.ndarray:
+    """Doc mode topic-proportion vector theta from eta_hat, restricted to the
+    doc's allowed (gated) topic set: softmax(eta_hat[allowed]) placed at those
+    indices, zeros elsewhere. ``_stm_doc_inference`` leaves non-allowed
+    eta_hat entries meaningless (-inf by construction), so the softmax must be
+    taken over ``allowed`` only, never over the full K-length eta_hat."""
+    z = eta_hat[allowed]
+    z = z - z.max()
+    w = np.exp(z)
+    theta = np.zeros(K, dtype=np.float64)
+    theta[allowed] = w / w.sum()
+    return theta
+
+
+def corpus_concentration_stm(
+    docs, global_params, partition, *,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4, reference=None, n_bins=50,
+) -> dict:
+    """Per-document topic-concentration summary (mode-based) for a gated STM.
+
+    For each STMDocument runs the same per-doc Laplace E-step as
+    ``corpus_eta_variance_gated`` to get eta_hat_d, forms the gated mode
+    theta_d = softmax(eta_hat_d over the doc's allowed topics), and
+    accumulates (top_mass, eff_topics) into a ConcentrationAcc (see
+    ``spark_vi.eval.topic.concentration``). Returns ConcentrationAcc.summary().
+
+    ``n_bins`` sets the histogram resolution; eff_topics bins span [1, K].
+
+    NOTE: this is the posterior-MODE concentration (comparable to LDA's
+    gamma/theta point estimate); a draw-based variant (sampling
+    eta ~ N(eta_hat, nu_d)) is a future enrichment.
+    """
+    from spark_vi.models.topic._linalg import safe_inverse
+    from scipy.special import digamma
+
+    lam = np.asarray(global_params["lambda"], dtype=np.float64)
+    Gamma = np.asarray(global_params["Gamma"], dtype=np.float64)
+    Sigma = np.asarray(global_params["Sigma"], dtype=np.float64)
+    K = lam.shape[0]
+    expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+    acc = ConcentrationAcc.zeros(n_bins, eff_max=float(K))
+    subprec_cache: dict[tuple, np.ndarray] = {}
+
+    for doc in docs:
+        allowed = partition.allowed_indices(doc.groups)
+        key = tuple(allowed.tolist())
+        Sigma_inv_allowed = subprec_cache.get(key)
+        if Sigma_inv_allowed is None:
+            Sigma_inv_allowed = safe_inverse(Sigma[np.ix_(allowed, allowed)])
+            subprec_cache[key] = Sigma_inv_allowed
+        eta_hat, _, _ = _stm_doc_inference(
+            indices=doc.indices, counts=doc.counts,
+            expElogbeta=expElogbeta,
+            Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=doc.x,
+            max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+            allowed=allowed, reference=reference,
+        )
+        theta = _gated_mode_theta(eta_hat, allowed, K)
+        acc.add(theta)
+
+    return acc.summary()
+
+
+def corpus_concentration_stm_rdd(
+    doc_rdd, global_params, partition, *,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4, reference=None, n_bins=50, depth=2,
+) -> dict:
+    """Distributed per-document topic-concentration summary (mode-based) for a
+    gated STM. For each STMDocument, runs the same per-doc Laplace E-step as
+    ``corpus_eta_variance_gated_rdd`` to get eta_hat_d over the doc's ALLOWED
+    (gated) topic set, forms the gated mode theta_d = softmax(eta_hat_d over
+    allowed) via ``_gated_mode_theta``, and accumulates (top_mass, eff_topics)
+    into a ConcentrationAcc per partition.
+
+    Distributed via the same mapPartitions + treeReduce idiom as
+    ``corpus_eta_variance_gated_rdd``: each partition builds one
+    ConcentrationAcc (histograms + streaming sums, all length-n_bins arrays
+    plus scalars); the tree-reduce combines them via ``ConcentrationAcc.combine``
+    (functional, so it is a safe treeReduce combiner). Only the small
+    accumulator objects cross the network, never the documents or per-doc
+    eta_hat/nu_d. ``global_params`` and ``partition`` are broadcast via the
+    Spark-safe default-arg closure convention (see
+    ``corpus_eta_variance_gated_rdd``).
+
+    ``doc_rdd`` is an RDD of STMDocument. Returns ConcentrationAcc.summary().
+    Raises ValueError if the reduced document count is 0.
+    """
+    sc = doc_rdd.context
+    gp_bcast = sc.broadcast({
+        k: np.asarray(v, dtype=np.float64) for k, v in global_params.items()
+    })
+    p_bcast = sc.broadcast(partition)
+
+    def _local(rows, _gp=gp_bcast, _p=p_bcast):
+        from spark_vi.eval.topic.concentration import ConcentrationAcc
+        from spark_vi.models.topic._linalg import safe_inverse
+        from scipy.special import digamma
+
+        gp = _gp.value
+        part = _p.value
+        lam = gp["lambda"]
+        Gamma = gp["Gamma"]
+        Sigma = gp["Sigma"]
+        K = lam.shape[0]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+        acc = ConcentrationAcc.zeros(n_bins, eff_max=float(K))
+        subprec_cache: dict[tuple, np.ndarray] = {}
+
+        for doc in rows:
+            allowed = part.allowed_indices(doc.groups)
+            key = tuple(allowed.tolist())
+            Sigma_inv_allowed = subprec_cache.get(key)
+            if Sigma_inv_allowed is None:
+                Sigma_inv_allowed = safe_inverse(Sigma[np.ix_(allowed, allowed)])
+                subprec_cache[key] = Sigma_inv_allowed
+            eta_hat, _, _ = _stm_doc_inference(
+                indices=doc.indices, counts=doc.counts,
+                expElogbeta=expElogbeta,
+                Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=doc.x,
+                max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+                allowed=allowed, reference=reference,
+            )
+            theta = _gated_mode_theta(eta_hat, allowed, K)
+            acc.add(theta)
+        return [acc]
+
+    acc = doc_rdd.mapPartitions(_local).treeReduce(
+        lambda a, b: a.combine(b), depth=depth
+    )
+    if acc.n == 0:
+        raise ValueError("corpus_concentration_stm_rdd: empty document RDD")
+    return acc.summary()
 
 
 def _pool_scale(n, M2, nu_sum, nu_count, *, reference):
