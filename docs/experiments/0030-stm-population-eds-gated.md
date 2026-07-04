@@ -1,7 +1,7 @@
 ---
 id: 30
 slug: stm-population-eds-gated
-status: pending
+status: done
 model_class: stm
 cohort: population_eds
 cohort_def: population_eds
@@ -71,7 +71,39 @@ unit-diagonal Σ / ADR 0034), `~ C(sex) + age`, `known_sex_only`.
   `person_mod`).
 - Σ variance bounded (no runaway); honest correlation report.
 
+## Result
+
+Fit converged at iter 89/200 (ELBO −6.04e6, 2774s). Full population resolved to
+332,502 persons / 191,872 fit documents; the **EDS foreground arm = 956 docs**
+(≈0.5% of docs). Small but sufficient — at `person_mod: 4` this would have been
+~240 docs, so the full-population choice was load-bearing. Σ bounded (all Σ_ii=1,
+block-wise unit-diagonal; no runaway), `blocks[bg=7.85e6 eds=1.94e4]`. NPMI:
+background mean +0.180 (max +0.587), EDS block mean +0.156 (max +0.286,
+reference=956 docs).
+
+All four success criteria met. The 20 EDS foreground topics recovered
+clinically faithful EDS sub-phenotypes rather than collapsing into background:
+
+- **POTS / dysautonomia** — topic 53 (tachycardia, orthostatic hypotension,
+  palpitations), 41 (disorder of autonomic nervous system), 57 (hypermobile EDS
+  type 3 + POTS + autonomic failure).
+- **MCAS** — topic 45 (urticaria, anaphylaxis, systemic mast cell disease), 52
+  (mast cell activation syndrome + joint derangement + TMJ + thoracic aortic
+  ectasia).
+- **Joint instability** — topic 48 (shoulder joint instability / dislocation),
+  55 (hypermobility syndrome + connective-tissue disorder + mitral valve
+  prolapse + Raynaud's).
+- **Vascular EDS** — topic 58 (collagen disease + aortic aneurysm + migraine),
+  59 (aortic dissection + vascular complication).
+- **GI dysmotility / overlap** — topic 49 (EDS + fibromyalgia + gastroparesis +
+  POTS — the classic overlap pentad).
+
+Background 40 topics read as a clean general-population comorbidity atlas
+(HTN/T2DM/HLD, CKD, low-back/knee/neck pain, anxiety/depression, COPD/dyspnea,
+thyroid). A strong standalone demo model.
+
 ## Related
 
 Follows exp 0028 (population + cancer gated). First cohort on the generalized
-population+disease registry.
+population+disease registry. Empirical finding logged as insight
+[0035](../insights/0035-rare-disease-gated-foreground-recovers-eds-subphenotypes-on-full-population.md).
