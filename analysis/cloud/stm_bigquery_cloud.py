@@ -214,6 +214,13 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Estimate the block-wise Σ per-topic variance instead of "
                         "pinning the diagonal to 1 (recovers the natural η-scale for "
                         "generation; default off = ADR 0034 unit-diagonal).")
+    p.add_argument("--estimate-global-scale", action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help="Pooled global η-variance scale τ² (Σ=τ²·R); A1 softmax-temperature. "
+                        "Mutually exclusive with --estimate-sigma-diagonal.")
+    p.add_argument("--global-scale-step-cap", type=float, default=1.2,
+                   help="Trust-region cap on the per-iteration multiplicative change of τ² "
+                        "(heuristic damping guard against the τ-β sharpening ratchet).")
     p.add_argument("--spectral-init", action=argparse.BooleanOptionalAction,
                    default=True,
                    help="Anchor-word spectral beta seed (default on, insight 0030; "
@@ -430,6 +437,8 @@ def main() -> int:
                 random_seed=args.random_seed,
                 reference_topic=args.reference_topic,
                 estimate_sigma_diagonal=args.estimate_sigma_diagonal,
+                estimate_global_scale=args.estimate_global_scale,
+                global_scale_step_cap=args.global_scale_step_cap,
                 spectral_init=args.spectral_init,
                 spectral_method=args.spectral_method,
                 spectral_d=args.spectral_d,

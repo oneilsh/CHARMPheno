@@ -616,6 +616,8 @@ class StreamingSTM:
         random_seed: int | None = None,
         reference_topic: bool = True,
         estimate_sigma_diagonal: bool = False,
+        estimate_global_scale: bool = False,
+        global_scale_step_cap: float = 1.2,
         spectral_init: bool = True,
         spectral_method: str = "dense",          # "dense" | "scalable"
         spectral_d: int | None = None,           # scalable projection dim; None => ~1000
@@ -662,6 +664,8 @@ class StreamingSTM:
         self.random_seed = random_seed
         self.reference_topic = bool(reference_topic)
         self.estimate_sigma_diagonal = bool(estimate_sigma_diagonal)
+        self.estimate_global_scale = bool(estimate_global_scale)
+        self.global_scale_step_cap = float(global_scale_step_cap)
         self.spectral_init = bool(spectral_init)
         if spectral_method not in {"dense", "scalable"}:
             raise ValueError(
@@ -766,6 +770,8 @@ class StreamingSTM:
             topic_blocks=self.topic_blocks,
             reference_topic=self.reference_topic,
             estimate_sigma_diagonal=self.estimate_sigma_diagonal,
+            estimate_global_scale=self.estimate_global_scale,
+            global_scale_step_cap=self.global_scale_step_cap,
         )
 
         # VIConfig uses learning_rate_tau0/kappa and mini_batch_fraction;
@@ -857,6 +863,8 @@ class StreamingSTM:
             "spectral_init": self.spectral_init,
             "spectral_method": self.spectral_method,
             "estimate_sigma_diagonal": self.estimate_sigma_diagonal,
+            "estimate_global_scale": self.estimate_global_scale,
+            "global_scale_step_cap": self.global_scale_step_cap,
         })
         return STMModel(
             global_params=result.global_params,

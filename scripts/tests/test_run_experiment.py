@@ -1558,3 +1558,44 @@ def test_build_stm_args_ignores_historical_iw_prior_and_diag_shrink_keys(monkeyp
     assert "--sigma-prior-scale" not in args
     assert "--sigma-prior-count" not in args
     assert "--sigma-diag-shrink" not in args
+
+
+def test_build_stm_args_emits_global_scale_knobs(monkeypatch):
+    """estimate_global_scale + global_scale_step_cap in effective -> emitted as
+    --estimate-global-scale --global-scale-step-cap <value>, mirroring the
+    --estimate-sigma-diagonal / --min-pair-support emit pattern above."""
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    eff = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 2, "vocab_size": 100,
+        "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+        "estimate_global_scale": True,
+        "global_scale_step_cap": 1.5,
+    }
+    args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
+    assert "--estimate-global-scale" in args
+    assert "--global-scale-step-cap" in args and "1.5" in args
+
+
+def test_build_stm_args_omits_global_scale_knobs_when_absent(monkeypatch):
+    """Default path: no estimate_global_scale/global_scale_step_cap in effective ->
+    neither flag is emitted."""
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    eff = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 2, "vocab_size": 100,
+        "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+    }
+    args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
+    assert "--estimate-global-scale" not in args
+    assert "--global-scale-step-cap" not in args

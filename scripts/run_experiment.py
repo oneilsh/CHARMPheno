@@ -512,6 +512,10 @@ def build_stm_args(
         hardening.extend(["--min-pair-support", str(effective["min_pair_support"])])
     if effective.get("estimate_sigma_diagonal"):
         hardening.append("--estimate-sigma-diagonal")
+    if effective.get("estimate_global_scale"):
+        hardening.append("--estimate-global-scale")
+    if "global_scale_step_cap" in effective:
+        hardening.extend(["--global-scale-step-cap", str(effective["global_scale_step_cap"])])
     if effective.get("known_sex_only"):
         hardening.append("--known-sex-only")
     return common + [

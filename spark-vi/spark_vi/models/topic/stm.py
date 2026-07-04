@@ -358,6 +358,8 @@ class OnlineSTM(VIModel):
         topic_blocks=None,
         reference_topic: bool = True,  # default-on (validated, insight 0030); pass False for the legacy full-K path
         estimate_sigma_diagonal: bool = False,
+        estimate_global_scale: bool = False,
+        global_scale_step_cap: float = 1.2,
     ) -> None:
         if K < 1:
             raise ValueError(f"K must be >= 1, got {K}")
@@ -402,6 +404,13 @@ class OnlineSTM(VIModel):
         self.topic_blocks = topic_blocks
         self.reference_topic = bool(reference_topic)
         self.estimate_sigma_diagonal = bool(estimate_sigma_diagonal)
+        self.estimate_global_scale = bool(estimate_global_scale)
+        self.global_scale_step_cap = float(global_scale_step_cap)
+        if self.estimate_sigma_diagonal and self.estimate_global_scale:
+            raise ValueError(
+                "estimate_sigma_diagonal and estimate_global_scale are mutually "
+                "exclusive Σ parameterizations; set at most one."
+            )
 
     def _effective_partition(self):
         """The real partition, or an implicit all-background one when None."""
@@ -728,6 +737,34 @@ class OnlineSTM(VIModel):
             # correlation export and its η is pinned).
             cov_target = R * np.outer(std, std)               # diag = diag_var on supported
             Sigma_target = np.where(supported, cov_target, Sigma)   # lazy-keep unsupported
+            new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
+        elif self.estimate_global_scale:
+            # A1 — single POOLED global softmax-temperature. Σ = τ²·R_unitcorr, one
+            # scalar τ² = mean per-topic residual variance over FREE OBSERVED topics
+            # (self-supported AND non-degenerate variance, which excludes the reference
+            # topic whose η≡0 gives diag_var≈0). Pooling is runaway-safe: one
+            # document-scarce topic's inflated variance is averaged against every other
+            # topic's and cannot drag τ² — contrast estimate_sigma_diagonal, which gives
+            # each topic its own free dial and blew up on an ess≈15 topic (exp 0032,
+            # insight 0036). A damped (trust-region) update additionally caps the global
+            # τ-β sharpening ratchet (τ↑ → docs inferred peakier → β sharper → η̂ modes
+            # spread → τ↑); pooling alone does not break this loop because it is driven by
+            # the whole corpus, not one topic. The cap is a heuristic stability guard
+            # (multiplicative trust region on the pooled scale), tunable, not a fitted
+            # constant.
+            self_supported = np.diag(supported)
+            free = self_supported & (diag_var > 0.0)
+            tau2_prev = float(np.mean(np.diag(Sigma)))   # Σ≈τ²·R_unit ⇒ diag≈τ²
+            if tau2_prev <= 0.0:
+                tau2_prev = 1.0
+            tau2_raw = float(np.mean(diag_var[free])) if bool(np.any(free)) else tau2_prev
+            cap = self.global_scale_step_cap
+            tau2_target = float(np.clip(tau2_raw, tau2_prev / cap, tau2_prev * cap))
+            # Correlation part: fresh clipped R where supported, keep the prior correlation
+            # (Σ/τ²_prev) where not; force an exact unit diagonal.
+            R_unit = np.where(supported, R, Sigma / tau2_prev)
+            np.fill_diagonal(R_unit, 1.0)
+            Sigma_target = tau2_target * R_unit
             new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
         else:
             R_target = np.where(supported, R, Sigma)          # lazy-keep unsupported
