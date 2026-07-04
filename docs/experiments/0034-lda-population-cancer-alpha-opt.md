@@ -53,6 +53,18 @@ run) is what would correct it. Treat exp 0034 as "how peaked does α-optimized
 LDA claim patients are", to be read against exp 0033 (STM in-band scale) and exp
 0028 (STM unit baseline), not as the true target.
 
+Second caveat — gating-support asymmetry in eff_topics. The STM readout is the
+GATED mode θ (support = background ∪ the doc's own group, so a document's
+`eff_topics` is structurally bounded by its allowed-set size: ~40 for a
+background-only doc, ~60 for a cancer doc), while this LDA readout is NON-gated θ
+over all K=60. So the `top_mass` comparison across 0028/0033/0034 is clean (a max
+is a max regardless of support), but the raw `eff_topics` gap between gated STM
+(0033) and non-gated LDA (0034) conflates concentration with gating support and
+should NOT be read as pure concentration. The clean concentration comparison is
+0028↔0033 (both gated STM, identical allowed sets); against 0034, lead with
+`top_mass` and treat `eff_topics` qualitatively. State this explicitly when the
+result is recorded.
+
 ## Configuration
 
 Same corpus as exp 0028 / 0033 — the corpus cache key is determined by
