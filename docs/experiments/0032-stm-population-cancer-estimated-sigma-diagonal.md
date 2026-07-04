@@ -1,7 +1,7 @@
 ---
 id: 32
 slug: stm-population-cancer-estimated-sigma-diagonal
-status: pending
+status: done
 model_class: stm
 cohort: population_cancer
 cohort_def: population_cancer
@@ -86,6 +86,37 @@ covariate_formula, schedule) are unchanged from exp 0028.
 - Exported η-variance is usable directly by the record-completion generative
   simulator (no post-hoc rescaling needed) and produces concentrated,
   coherent synthetic patients (the problem this experiment exists to fix).
+
+## Result — VARIANCE RUNAWAY (hypothesis falsified)
+
+The fit **blew up**, confirming insight 0033's prediction over insight 0030's
+non-gated bound. Σ estimated cleanly for the first ~45 iterations
+(`Σ_var[min=1 max=3.76]`, `Σ_eig[min=0.373 max=6.11]`, |Γ| max 1.63 — bounded,
+PD, climbing from σ_init=1 toward the natural scale), then a low-document topic
+ran away: by iter 124 `Σ_var[min=1 max=1.82e8]`, `Σ_eig[max=1.83e8]`, |Γ| max
+7.95, ELBO degraded −1.48e6 → −2.48e6. The runaway rode on topic 2, a
+background topic with **effective sample size ≈ 15** — exactly the
+"weakly-identified, document-scarce" ingredient insight 0033 names. The fit was
+killed.
+
+**Conclusion.** The insight-0030 bound (reference + spectral keeps Σ bounded
+~7.56) holds only in the **non-gated** setting where every topic is fully
+supported. In the **gated** setting the minority arm contains rare-but-coherent,
+document-scarce topics whose free variance runs away regardless of init quality
+("no initialization adds documents to a rare phenotype", insight 0033). This
+run's hypothesis — that estimating the free diagonal in the gated setting would
+stay bounded because the stabilizers are on — is falsified. Estimating a free
+per-topic variance at **fit time** in the gated setting is not viable; ADR
+0034's unit-diagonal pin remains the shipped fitting parameterization.
+
+The generative-scale need that motivated this run (the record-completion
+simulator wants a non-unit η-scale that the unit-diagonal pin discards) is
+instead addressed by **decoupling** it from the fit: a single pooled generative
+scale c is estimated at EXPORT with β and R frozen (Σ_gen = c·R,
+`corpus_eta_scale_gated`, ADR 0036 addendum), which is runaway-safe (frozen β
+breaks the co-adaptation loop; a single pooled scalar cannot be run away by one
+document-scarce topic). See insight
+[0036](../insights/0036-gated-free-variance-runs-away-at-fit-but-not-at-export.md).
 
 ## Related
 
