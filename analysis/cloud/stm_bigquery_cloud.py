@@ -515,6 +515,25 @@ def main() -> int:
             }
             stm_model.metadata["model_class"] = "stm"
 
+        with _phase("concentration readout"):
+            if partition is not None:
+                try:
+                    from spark_vi.mllib.topic.stm import corpus_concentration_stm_rdd
+                    from spark_vi.mllib.topic._common import _vector_to_stm_document
+                    doc_rdd = joined.rdd.map(lambda row: _vector_to_stm_document(
+                        row, features_col="features", covariates_col="covariates",
+                        group_col=args.group_var))
+                    reference_id = 0 if args.reference_topic else None
+                    conc = corpus_concentration_stm_rdd(
+                        doc_rdd, stm_model.global_params, partition, reference=reference_id)
+                    stm_model.metadata["concentration_readout"] = conc
+                    print(f"[driver]   concentration readout: top_mass p50={conc['top_mass']['p50']:.3f} "
+                          f"eff_topics p50={conc['eff_topics']['p50']:.1f} (n={conc['n_docs']})", flush=True)
+                except Exception as exc:
+                    print(f"[driver]   concentration readout failed ({exc}); omitted.", flush=True)
+            else:
+                print("[driver]   concentration readout skipped (non-gated STM: no partition).", flush=True)
+
         # --- Save ---
         with _phase("save"):
             out = Path(args.out_dir)

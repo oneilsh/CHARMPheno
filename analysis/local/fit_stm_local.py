@@ -236,6 +236,24 @@ def main(argv=None) -> int:
         model.metadata["concept_names"] = {str(k): v for k, v in name_by_id.items()}
         model.metadata["concept_domains"] = {str(k): "condition" for k in name_by_id}
 
+        # Per-document concentration readout (ENHANCEMENT-ONLY, never fatal). Same doc
+        # assembly the fit used (features + covariates + source_cohort gating group);
+        # mirrors the eta_scale export pass in build_dashboard.py.
+        try:
+            from spark_vi.mllib.topic.stm import corpus_concentration_stm_rdd
+            from spark_vi.mllib.topic._common import _vector_to_stm_document
+            doc_rdd = joined.rdd.map(lambda row: _vector_to_stm_document(
+                row, features_col="features", covariates_col="covariates",
+                group_col="source_cohort"))
+            reference_id = 0 if args.reference_topic else None
+            conc = corpus_concentration_stm_rdd(
+                doc_rdd, model.global_params, partition, reference=reference_id)
+            model.metadata["concentration_readout"] = conc
+            log.info("concentration readout: top_mass p50=%.3f eff_topics p50=%.1f (n=%d)",
+                     conc["top_mass"]["p50"], conc["eff_topics"]["p50"], conc["n_docs"])
+        except Exception as exc:  # never fatal
+            log.warning("concentration readout failed (%s); metadata omits it.", exc)
+
         args.out_dir.mkdir(parents=True, exist_ok=True)
         model.save(args.out_dir)
 

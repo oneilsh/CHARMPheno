@@ -372,6 +372,19 @@ def main(argv: list[str] | None = None) -> int:
         ).collect()
         theta_arr = np.asarray(theta_rows, dtype=np.float64)
         aggregates = compute_theta_aggregates(theta_arr)
+
+        # Per-document concentration readout (ENHANCEMENT-ONLY, never fatal).
+        # Mirrors the STM path's corpus_concentration_stm_rdd metadata key so
+        # downstream reads "concentration_readout" regardless of model class.
+        conc = None
+        try:
+            from analysis._eval_common import lda_concentration_readout
+            conc = lda_concentration_readout(theta_arr)
+            print(f"[driver]   concentration readout: top_mass p50={conc['top_mass']['p50']:.3f} "
+                  f"eff_topics p50={conc['eff_topics']['p50']:.1f} (n={conc['n_docs']})", flush=True)
+        except Exception as exc:
+            print(f"[driver]   concentration readout failed ({exc}); omitted.", flush=True)
+
         augmented = VIResult(
             global_params=model.result.global_params,   # unchanged — no γ to drop
             elbo_trace=model.result.elbo_trace,
@@ -398,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
                 "theta_percentiles": aggregates["theta_percentiles"],
                 "corpus_prevalence": aggregates["corpus_prevalence"],
                 "n_patients": aggregates["n_patients"],
+                **({"concentration_readout": conc} if conc is not None else {}),
             },
         )
         print(

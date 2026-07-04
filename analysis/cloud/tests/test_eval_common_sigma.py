@@ -1,4 +1,6 @@
-"""Unit tests for stm_sigma_diagnostic (per-topic eta-variance / spectrum report).
+"""Unit tests for stm_sigma_diagnostic (per-topic eta-variance / spectrum report)
+and lda_concentration_readout (per-document topic-concentration summary for an
+in-memory theta matrix).
 
 Imports analysis._eval_common via the repo root (the package seam the cloud
 eval driver imports from). Pure-numpy helper, no Spark.
@@ -7,10 +9,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root
 
-from analysis._eval_common import stm_sigma_diagnostic
+from analysis._eval_common import lda_concentration_readout, stm_sigma_diagnostic
 
 
 def test_identifies_runaway_topic_and_block():
@@ -50,3 +53,25 @@ def test_returns_none_for_non_square_or_1d():
     assert stm_sigma_diagnostic(np.ones(5), labels=None) is None
     assert stm_sigma_diagnostic(np.ones((3, 4)), labels=None) is None
     assert stm_sigma_diagnostic(None, labels=None) is None
+
+
+def test_lda_concentration_readout_shape():
+    # Row 0: one-hot over 4 topics -> (top_mass, eff_topics) = (1.0, 1.0).
+    # Row 1: uniform over 4 topics -> (top_mass, eff_topics) = (0.25, 4.0).
+    theta_arr = np.array([
+        [1.0, 0.0, 0.0, 0.0],
+        [0.25, 0.25, 0.25, 0.25],
+    ])
+
+    summary = lda_concentration_readout(theta_arr)
+
+    assert set(summary.keys()) == {"n_docs", "top_mass", "eff_topics"}
+    assert summary["n_docs"] == theta_arr.shape[0]
+    # mean of (1.0, 0.25) and (1.0, 4.0) respectively.
+    assert summary["top_mass"]["mean"] == pytest.approx((1.0 + 0.25) / 2)
+    assert summary["eff_topics"]["mean"] == pytest.approx((1.0 + 4.0) / 2)
+
+
+def test_lda_concentration_readout_empty_raises():
+    with pytest.raises(ValueError):
+        lda_concentration_readout(np.zeros((0, 5)))
