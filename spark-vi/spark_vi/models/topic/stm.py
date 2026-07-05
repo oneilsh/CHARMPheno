@@ -360,6 +360,7 @@ class OnlineSTM(VIModel):
         estimate_sigma_diagonal: bool = False,
         estimate_global_scale: bool = False,
         global_scale_step_cap: float = 1.2,
+        sigma_diagonal_pin: float = 1.0,  # pin Sigma_ii to this constant scale c (Sigma = c*R); see below
     ) -> None:
         if K < 1:
             raise ValueError(f"K must be >= 1, got {K}")
@@ -406,10 +407,28 @@ class OnlineSTM(VIModel):
         self.estimate_sigma_diagonal = bool(estimate_sigma_diagonal)
         self.estimate_global_scale = bool(estimate_global_scale)
         self.global_scale_step_cap = float(global_scale_step_cap)
+        # Pin Sigma_ii to this constant generative scale c (Sigma = c*R, R the
+        # block-wise correlation of ADR 0034); default 1.0 = the standard
+        # unit-diagonal pin (byte-identical behavior). Set to a calibrated c* to
+        # refit at that scale (the generative variance the unit pin discards;
+        # ADR 0036). Off-diagonal standardization and clipping are unchanged --
+        # only the diagonal target changes.
+        self.sigma_diagonal_pin = float(sigma_diagonal_pin)
+        if self.sigma_diagonal_pin <= 0:
+            raise ValueError(
+                f"sigma_diagonal_pin must be > 0, got {self.sigma_diagonal_pin}")
         if self.estimate_sigma_diagonal and self.estimate_global_scale:
             raise ValueError(
                 "estimate_sigma_diagonal and estimate_global_scale are mutually "
                 "exclusive Σ parameterizations; set at most one."
+            )
+        if self.sigma_diagonal_pin != 1.0 and \
+                (self.estimate_sigma_diagonal or self.estimate_global_scale):
+            raise ValueError(
+                "sigma_diagonal_pin != 1.0 is mutually exclusive with "
+                "estimate_sigma_diagonal and estimate_global_scale; you cannot "
+                "both estimate and pin the Σ scale. (sigma_diagonal_pin == 1.0 "
+                "is the default and composes with everything.)"
             )
 
     def _effective_partition(self):
@@ -766,6 +785,23 @@ class OnlineSTM(VIModel):
             np.fill_diagonal(R_unit, 1.0)
             Sigma_target = tau2_target * R_unit
             new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
+        elif self.sigma_diagonal_pin != 1.0:
+            # Constant generative-scale pin: Σ = c·R, c = self.sigma_diagonal_pin.
+            # Same block-wise clipped correlation R as the unit pin (ADR 0034), but
+            # the diagonal target is the calibrated scale c instead of 1 (ADR 0036) --
+            # so β re-sharpens under a prior at the faithful concentration. Mirrors the
+            # estimate_global_scale (A1) branch, but c is GIVEN (no estimation, no
+            # damping), so there is no feedback loop and nothing to run away: the scale
+            # is a fixed constant this fit was told to hold. The prior Σ is c·R, so
+            # Sigma / c recovers its correlation for the lazy-kept (unsupported) cells.
+            # Reference topic (η≡0) is inert: its diagonal becomes c, harmless (excluded
+            # from the correlation export, η pinned) -- same as the unit-pin path.
+            c = self.sigma_diagonal_pin
+            R_unit = np.where(supported, R, Sigma / c)
+            np.fill_diagonal(R_unit, 1.0)
+            Sigma_target = c * R_unit
+            new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * Sigma_target
+            np.fill_diagonal(new_Sigma, c)          # exact c diagonal
         else:
             R_target = np.where(supported, R, Sigma)          # lazy-keep unsupported
             new_Sigma = (1.0 - learning_rate) * Sigma + learning_rate * R_target

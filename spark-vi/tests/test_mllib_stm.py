@@ -285,6 +285,7 @@ class TestStreamingSTMHardeningThreading:
             "estimate_sigma_diagonal": False,
             "estimate_global_scale": False,
             "global_scale_step_cap": 1.2,
+            "sigma_diagonal_pin": 1.0,
         }
 
     def test_defaults_on_and_recorded(self, spark, monkeypatch):
@@ -309,6 +310,7 @@ class TestStreamingSTMHardeningThreading:
             "estimate_sigma_diagonal": False,
             "estimate_global_scale": False,
             "global_scale_step_cap": 1.2,
+            "sigma_diagonal_pin": 1.0,
         }
         # Default fit now pins the reference column to zero.
         assert np.allclose(model.global_params["Gamma"][:, 0], 0.0)
