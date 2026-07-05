@@ -12,13 +12,17 @@ import pytest
 
 from spark_vi.eval.topic.concentration import doc_concentration
 from spark_vi.eval.topic.concentration_recovery import (
+    _predictive_loglik,
     corpus_concentration_summary,
+    heldout_split,
     lda_optimize_alpha,
     lda_recover_theta,
     make_shared_beta,
     plant_corpus,
     stm_recover_theta,
+    sweep_heldout,
 )
+from spark_vi.models.topic.types import STMDocument
 
 
 def _median_top_mass(theta_matrix: np.ndarray) -> float:
@@ -162,3 +166,133 @@ class TestCorpusConcentrationSummary:
         expected = lda_concentration_readout(theta)
         got = corpus_concentration_summary(theta)
         assert got == expected
+
+
+class TestHeldoutSplit:
+    def test_heldout_split_conserves_tokens(self):
+        doc = STMDocument(
+            indices=np.array([2, 5, 9, 20], dtype=np.int32),
+            counts=np.array([3.0, 5.0, 4.0, 8.0], dtype=np.float64),
+            length=20,
+            x=np.array([1.0]),
+            groups=frozenset(),
+        )
+        total = int(doc.counts.sum())
+
+        split = heldout_split(doc, holdout_frac=0.4, seed=123)
+        assert split is not None
+        visible_doc, held_indices, held_counts = split
+
+        visible_tokens = int(visible_doc.counts.sum())
+        held_tokens = int(held_counts.sum())
+        assert visible_tokens + held_tokens == total
+        assert held_tokens == round(0.4 * total)
+
+        assert set(visible_doc.indices.tolist()) <= set(doc.indices.tolist())
+        assert set(held_indices.tolist()) <= set(doc.indices.tolist())
+
+        # visible_doc carries over doc metadata unchanged.
+        assert visible_doc.x is doc.x or np.array_equal(visible_doc.x, doc.x)
+        assert visible_doc.groups == doc.groups
+        assert visible_doc.length == visible_tokens
+
+    def test_short_doc_returns_none(self):
+        doc = STMDocument(
+            indices=np.array([1], dtype=np.int32),
+            counts=np.array([1.0], dtype=np.float64),
+            length=1,
+            x=np.array([1.0]),
+            groups=frozenset(),
+        )
+        assert heldout_split(doc, holdout_frac=0.4, seed=0) is None
+
+        doc2 = STMDocument(
+            indices=np.array([1, 2], dtype=np.int32),
+            counts=np.array([1.0, 1.0], dtype=np.float64),
+            length=2,
+            x=np.array([1.0]),
+            groups=frozenset(),
+        )
+        # 2-token doc is fine as long as the visible half is nonempty.
+        assert heldout_split(doc2, holdout_frac=0.4, seed=0) is not None
+
+
+class TestPredictiveLoglik:
+    def test_predictive_loglik_peaks_for_correct_theta(self):
+        K, V = 3, 30
+        beta = make_shared_beta(K=K, V=V, pool_frac=0.2, shared_mass=0.1, seed=0)
+        # Topic 0's signature block carries most of its mass -- find its
+        # highest-probability terms and hold out tokens concentrated there.
+        top_terms_topic0 = np.argsort(-beta[0])[:5]
+        held_indices = top_terms_topic0.astype(np.int32)
+        held_counts = np.full(5, 4.0)
+
+        theta_peaked = np.zeros(K)
+        theta_peaked[0] = 1.0
+        theta_uniform = np.full(K, 1.0 / K)
+
+        ll_peaked = _predictive_loglik(theta_peaked, beta, held_indices, held_counts)
+        ll_uniform = _predictive_loglik(theta_uniform, beta, held_indices, held_counts)
+        assert ll_peaked > ll_uniform
+
+
+class TestSweepHeldout:
+    def test_sweep_uses_same_split_across_knobs(self, monkeypatch):
+        import spark_vi.eval.topic.concentration_recovery as cr
+
+        beta = make_shared_beta(K=4, V=100, seed=0)
+        docs, _ = plant_corpus(
+            beta, D=10, doc_len=40, mechanism="logistic_normal", level=4, seed=1,
+        )
+
+        calls = []
+        original_split = cr.heldout_split
+
+        def spy(doc, *, holdout_frac=0.3, seed):
+            result = original_split(doc, holdout_frac=holdout_frac, seed=seed)
+            held_sum = None if result is None else float(result[2].sum())
+            calls.append((seed, held_sum))
+            return result
+
+        monkeypatch.setattr(cr, "heldout_split", spy)
+
+        cr.sweep_heldout(docs, beta, method="stm", knobs=[1.0, 4.0], seed=0)
+
+        n = len(docs)
+        assert len(calls) == 2 * n
+        first_pass, second_pass = calls[:n], calls[n:]
+        assert first_pass == second_pass
+
+
+class TestHeldoutGoldStandard:
+    def test_heldout_gold_standard_recovers_planted_concentration(self):
+        beta = make_shared_beta(K=6, V=300, seed=0)
+        docs, theta_true = plant_corpus(
+            beta, D=200, doc_len=80, mechanism="logistic_normal", level=7, seed=5,
+        )
+        planted_median = _median_top_mass(theta_true)
+
+        knobs = [1, 2, 4, 7, 12]
+        result = sweep_heldout(docs, beta, method="stm", knobs=knobs, seed=0)
+        argmax_c = result["argmax_knob"]
+
+        if argmax_c == knobs[-1]:
+            # Boundary argmax is not a validated peak -- widen the grid so
+            # the maximum lands interior.
+            knobs = knobs + [20, 30]
+            result = sweep_heldout(docs, beta, method="stm", knobs=knobs, seed=0)
+            argmax_c = result["argmax_knob"]
+
+        assert argmax_c != knobs[0]  # diffuse c=1 must not win on a peaky corpus
+        assert argmax_c != knobs[-1], "argmax at grid boundary -- not a validated peak"
+
+        theta_hat_argmax = stm_recover_theta(docs, beta, c=argmax_c)
+        theta_hat_c1 = stm_recover_theta(docs, beta, c=1)
+
+        recovered_median = _median_top_mass(theta_hat_argmax)
+        smeared_median = _median_top_mass(theta_hat_c1)
+
+        err_argmax = abs(recovered_median - planted_median)
+        err_c1 = abs(smeared_median - planted_median)
+
+        assert err_argmax < err_c1

@@ -211,3 +211,147 @@ def corpus_concentration_summary(theta_matrix: np.ndarray) -> dict:
     """(top_mass, eff_topics) percentile/mean summary over a (D, K) theta
     matrix. Thin re-export of lda_concentration_readout for convenience."""
     return lda_concentration_readout(theta_matrix)
+
+
+def heldout_split(
+    doc: STMDocument, *, holdout_frac: float = 0.3, seed: int,
+) -> tuple[STMDocument, np.ndarray, np.ndarray] | None:
+    """Split ONE document's tokens into a visible half and a held-out half.
+
+    Expands (indices, counts) to a token multiset (each index repeated by its
+    count), shuffles with a seeded rng, holds out round(holdout_frac *
+    n_tokens) tokens, and re-aggregates both halves back to (indices, counts)
+    form. Returns (visible_doc, held_indices, held_counts) where visible_doc
+    is a new STMDocument (same x/groups; indices/counts/length reflect only
+    the visible half) and held_indices/held_counts are numpy arrays for the
+    held-out half.
+
+    Guards: a document with < 2 tokens, or one whose visible half would be
+    empty, returns None so the caller can skip it (there is nothing to infer
+    theta_hat from, or nothing held out to score).
+    """
+    n_tokens = int(round(float(doc.counts.sum())))
+    if n_tokens < 2:
+        return None
+
+    rng = np.random.default_rng(seed)
+    tokens = np.repeat(doc.indices, doc.counts.astype(np.int64))
+    rng.shuffle(tokens)
+
+    n_held = round(holdout_frac * n_tokens)
+    held_tokens = tokens[:n_held]
+    visible_tokens = tokens[n_held:]
+    if visible_tokens.size == 0:
+        return None
+
+    v_idx, v_counts = np.unique(visible_tokens, return_counts=True)
+    if held_tokens.size > 0:
+        h_idx, h_counts = np.unique(held_tokens, return_counts=True)
+    else:
+        h_idx = np.array([], dtype=np.int32)
+        h_counts = np.array([], dtype=np.float64)
+
+    visible_doc = STMDocument(
+        indices=v_idx.astype(np.int32),
+        counts=v_counts.astype(np.float64),
+        length=int(v_counts.sum()),
+        x=doc.x,
+        groups=doc.groups,
+    )
+    return visible_doc, h_idx.astype(np.int32), h_counts.astype(np.float64)
+
+
+def _predictive_loglik(
+    theta_hat: np.ndarray, beta: np.ndarray, held_indices: np.ndarray, held_counts: np.ndarray,
+) -> float:
+    """Held-out log-likelihood of held_indices/held_counts under the
+    predictive token distribution `theta_hat @ beta` (length V). The 1e-12
+    floor guards log(0) for a held-out term with zero predicted mass. Returns
+    the SUM over held-out tokens in this one document (the caller averages
+    per token across the whole corpus).
+    """
+    pred = theta_hat @ beta
+    return float(np.sum(held_counts * np.log(pred[held_indices] + 1e-12)))
+
+
+def stm_heldout_ll(
+    docs: list, beta: np.ndarray, *, c: float, holdout_frac: float = 0.3, seed: int = 0,
+    max_iter: int = 200, tol: float = 1e-6,
+) -> float:
+    """Mean PER-TOKEN held-out log-likelihood for STM inference at Sigma
+    scale c. For each doc: split into visible/held halves (split seed derived
+    as seed + doc index, independent of c so a sweep over c sees the
+    identical split -- see sweep_heldout), recover theta_hat from the VISIBLE
+    doc only via stm_recover_theta (beta fixed), then score
+    _predictive_loglik on the held-out half. Returns the corpus-wide total
+    held-out log-likelihood divided by the corpus-wide total held-out token
+    count (mean per token, so it is comparable across knobs and corpus
+    sizes). Docs where heldout_split returns None (too short) are skipped.
+    """
+    total_ll = 0.0
+    total_tokens = 0
+    for i, doc in enumerate(docs):
+        split = heldout_split(doc, holdout_frac=holdout_frac, seed=seed + i)
+        if split is None:
+            continue
+        visible_doc, held_indices, held_counts = split
+        if held_counts.size == 0:
+            continue
+        theta_hat = stm_recover_theta([visible_doc], beta, c=c, max_iter=max_iter, tol=tol)[0]
+        total_ll += _predictive_loglik(theta_hat, beta, held_indices, held_counts)
+        total_tokens += int(held_counts.sum())
+    return total_ll / total_tokens
+
+
+def lda_heldout_ll(
+    docs: list, beta: np.ndarray, *, alpha, holdout_frac: float = 0.3, seed: int = 0,
+    max_iter: int = 100, tol: float = 1e-3,
+) -> float:
+    """Mean PER-TOKEN held-out log-likelihood for LDA inference at Dirichlet
+    alpha. Same protocol as stm_heldout_ll, but recovers theta_hat via
+    lda_recover_theta (beta fixed) instead of stm_recover_theta.
+    """
+    total_ll = 0.0
+    total_tokens = 0
+    for i, doc in enumerate(docs):
+        split = heldout_split(doc, holdout_frac=holdout_frac, seed=seed + i)
+        if split is None:
+            continue
+        visible_doc, held_indices, held_counts = split
+        if held_counts.size == 0:
+            continue
+        theta_hat = lda_recover_theta(
+            [visible_doc], beta, alpha=alpha, max_iter=max_iter, tol=tol,
+        )[0]
+        total_ll += _predictive_loglik(theta_hat, beta, held_indices, held_counts)
+        total_tokens += int(held_counts.sum())
+    return total_ll / total_tokens
+
+
+def sweep_heldout(
+    docs: list, beta: np.ndarray, *, method: str, knobs: list, holdout_frac: float = 0.3,
+    seed: int = 0,
+) -> dict:
+    """Sweep held-out log-likelihood over a list of concentration knobs.
+
+    method == "stm": knobs are Sigma scales c, scored via stm_heldout_ll.
+    method == "lda": knobs are Dirichlet alphas, scored via lda_heldout_ll.
+
+    The SAME seed (and thus, per heldout_split's seed = seed + doc index
+    convention, the identical per-doc visible/held split) is used for every
+    knob, so the sweep is a controlled comparison in which only the
+    inference knob varies. Returns {"lls": {knob: mean_ll, ...},
+    "argmax_knob": <knob with max mean_ll>}.
+    """
+    if method == "stm":
+        def score(knob):
+            return stm_heldout_ll(docs, beta, c=knob, holdout_frac=holdout_frac, seed=seed)
+    elif method == "lda":
+        def score(knob):
+            return lda_heldout_ll(docs, beta, alpha=knob, holdout_frac=holdout_frac, seed=seed)
+    else:
+        raise ValueError(f"sweep_heldout: unknown method {method!r}")
+
+    lls = {knob: score(knob) for knob in knobs}
+    argmax_knob = max(lls, key=lls.get)
+    return {"lls": lls, "argmax_knob": argmax_knob}
