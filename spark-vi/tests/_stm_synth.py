@@ -243,6 +243,86 @@ def gated_ln_corpus(*, group_weights, fg_per_group, bg_k, V, D, doc_len,
     return docs, part, Sigma_true, beta
 
 
+def gated_ln_corpus_overlap(*, group_weights, fg_per_group, bg_k, V, D, doc_len,
+                            shared_frac=0.5, eta_scale=1.0, seed=0):
+    """Logistic-normal gated corpus with a KNOWN scale AND realistic vocabulary
+    overlap-by-MASS -- the regime real EHR data lives in.
+
+    Combines gated_ln_corpus's scaled logistic-normal draws (eta over the doc's
+    allowed set ~ N(0, eta_scale*Sigma_true), theta = softmax) with a beta that
+    places `shared_frac` of EVERY topic's probability mass on a common shared pool
+    [0:C] (the 'common codes appear in every phenotype' effect) and the rest on a
+    disjoint per-topic signature block. Unlike gated_ln_corpus (which puts ~89% of
+    mass on signatures, so beta trivially separates topics and ABSORBS the
+    per-document concentration, leaving the generative scale nothing to do -- see
+    feedback_synthetic_vocab_overlap / exp 0040), a high shared-mass fraction keeps
+    most tokens ambiguous, so beta CANNOT resolve the topic from tokens alone and
+    the prior/scale must do real work. Support-Jaccard lands ~1/3 (pool size = one
+    signature block) matching the real HF beta ~0.35; verify per-run with
+    topic_support_jaccard.
+
+    shared_frac is the MASS fraction on the shared pool (0.5 = half of every doc's
+    expected tokens are ambiguous). eta_scale scales the planted covariance for the
+    eta draws (the generative scale to recover); the returned Sigma_true is the
+    scaled covariance. Returns docs, part, Sigma_true (= eta_scale*R_true), beta."""
+    rng = np.random.default_rng(seed)
+    groups = tuple(group_weights)
+    part = TopicBlockPartition(group_var="g", background_k=bg_k,
+                               foreground=tuple((g, fg_per_group) for g in groups))
+    K = part.K
+    sig = max(1, V // (K + 1))          # pool size = one sig block -> Jaccard ~1/3
+    C = min(sig, V - K * sig)
+    C = max(C, 1)
+    # beta as probabilities: shared_frac mass spread (per-topic random) over the
+    # shared pool [0:C], (1-shared_frac) over the topic's own signature block.
+    beta = np.full((K, V), 1e-6)
+    for k in range(K):
+        w = rng.random(C) + 0.05
+        beta[k, 0:C] = shared_frac * (w / w.sum())
+        lo = C + k * sig
+        s = rng.random(sig) + 0.05
+        beta[k, lo:lo + sig] = (1.0 - shared_frac) * (s / s.sum())
+    beta /= beta.sum(axis=1, keepdims=True)
+
+    # Same planted correlation structure as gated_ln_corpus, scaled by eta_scale.
+    bg = part.background_indices()
+    R_true = np.eye(K); obs = np.eye(K, dtype=bool)
+    for a in bg:
+        for b in bg:
+            if a != b:
+                R_true[a, b] = 0.10; obs[a, b] = True
+    for a in bg:
+        for g in groups:
+            for c in part.block_indices(g):
+                R_true[a, c] = R_true[c, a] = 0.25
+                obs[a, c] = obs[c, a] = True
+    for g in groups:
+        blk = part.block_indices(g)
+        for i in blk:
+            for j in blk:
+                if i != j:
+                    R_true[i, j] = 0.30; obs[i, j] = True
+    R_true = pd_complete(R_true, obs)
+    Sigma_true = float(eta_scale) * R_true
+
+    gl = list(groups)
+    wts = np.array([group_weights[g] for g in gl], float); wts /= wts.sum()
+    docs = []
+    for _ in range(D):
+        g = gl[int(rng.choice(len(gl), p=wts))]
+        allowed = sorted(part.allowed_indices(frozenset({g})))
+        eta = rng.multivariate_normal(np.zeros(len(allowed)),
+                                      Sigma_true[np.ix_(allowed, allowed)])
+        theta = np.zeros(K)
+        theta[allowed] = np.exp(eta - eta.max()); theta /= theta.sum()
+        toks = rng.choice(V, size=doc_len, p=theta @ beta)
+        u, c = np.unique(toks, return_counts=True)
+        docs.append(STMDocument(indices=u.astype(np.int32),
+                                counts=c.astype(np.float64), length=int(c.sum()),
+                                x=np.array([1.0]), groups=frozenset({g})))
+    return docs, part, Sigma_true, beta
+
+
 def fit_stm(docs, *, K, V, sigma_init, n_iter=250, batch=None, seed=42,
             partition=None, init_data=None, **model_kwargs):
     m = OnlineSTM(K=K, vocab_size=V, P=1, sigma_init=sigma_init,

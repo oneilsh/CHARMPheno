@@ -52,12 +52,23 @@ from spark_vi.mllib.topic.stm import (
     corpus_concentration_stm,
     corpus_heldout_scale_sweep_gated,
 )
-from tests._stm_synth import fit_stm, gated_ln_corpus, planted_recovery
+from tests._stm_synth import (
+    fit_stm,
+    gated_ln_corpus_overlap,
+    planted_recovery,
+    topic_support_jaccard,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT_DIR = REPO_ROOT / "docs" / "experiments" / "0040-refit-dynamics"
 
 S_TRUE = 5.0
+# Realistic vocabulary-overlap regime (feedback_synthetic_vocab_overlap): half of
+# every topic's mass on a shared pool (support Jaccard ~1/3, matching the real HF
+# beta ~0.35), so beta CANNOT absorb the concentration and the scale must climb --
+# unlike the disjoint-vocab plant (exp 0040 v1), which converged trivially because
+# the unit fit was already at the planted concentration.
+SHARED_FRAC = 0.5
 C_GRID = [1, 2, 3, 4, 5, 6, 8, 12, 20]   # finer near 5 so the fixed point isn't grid-locked
 N_ROUNDS = 5
 GROUP_WEIGHTS = {"A": 0.7, "B": 0.3}
@@ -112,14 +123,17 @@ def approximate_planted_target(docs, beta_true, sigma_true, part) -> tuple[float
 
 
 def run(*, out_dir: Path = DEFAULT_OUT_DIR) -> dict:
-    print(f"[plant] gated_ln_corpus: groups={GROUP_WEIGHTS} fg_per_group={FG_PER_GROUP} "
-          f"bg_k={BG_K} V={V} D={D} doc_len={DOC_LEN} eta_scale(S_TRUE)={S_TRUE} seed=0")
-    docs, part, sigma_true, beta_true = gated_ln_corpus(
+    print(f"[plant] gated_ln_corpus_overlap: groups={GROUP_WEIGHTS} fg_per_group={FG_PER_GROUP} "
+          f"bg_k={BG_K} V={V} D={D} doc_len={DOC_LEN} shared_frac={SHARED_FRAC} "
+          f"eta_scale(S_TRUE)={S_TRUE} seed=0")
+    docs, part, sigma_true, beta_true = gated_ln_corpus_overlap(
         group_weights=GROUP_WEIGHTS, fg_per_group=FG_PER_GROUP, bg_k=BG_K,
-        V=V, D=D, doc_len=DOC_LEN, eta_scale=S_TRUE, seed=0,
+        V=V, D=D, doc_len=DOC_LEN, shared_frac=SHARED_FRAC, eta_scale=S_TRUE, seed=0,
     )
     K = part.K
-    print(f"[plant] K={K} (bg_k={BG_K} + 2*fg_per_group={FG_PER_GROUP})")
+    jac = topic_support_jaccard(beta_true)
+    print(f"[plant] K={K} (bg_k={BG_K} + 2*fg_per_group={FG_PER_GROUP}); "
+          f"topic-support Jaccard={jac:.3f} (realistic overlap, real HF beta ~0.35)")
 
     planted_top, planted_eff = approximate_planted_target(docs, beta_true, sigma_true, part)
     print(f"[planted target, APPROXIMATE] median top_mass={planted_top:.4f} "
@@ -134,6 +148,7 @@ def run(*, out_dir: Path = DEFAULT_OUT_DIR) -> dict:
         docs, gp, part, c_grid=C_GRID, holdout_frac=HOLDOUT_FRAC, reference=0, seed=0,
     )
     c0 = sweep["argmax_c"]
+    lls0 = {str(k): float(v) for k, v in sweep["lls"].items()}
     conc = corpus_concentration_stm(docs, gp, part, reference=0)
     top_mass0 = _median(conc, "top_mass")
     eff_topics0 = _median(conc, "eff_topics")
@@ -141,9 +156,12 @@ def run(*, out_dir: Path = DEFAULT_OUT_DIR) -> dict:
     recovery0 = planted_recovery(beta_hat, beta_true)
     print(f"[round 0] c*={c0} top_mass={top_mass0:.4f} eff_topics={eff_topics0:.4f} "
           f"planted_recovery={recovery0}/{K}")
+    print(f"[round 0] held-out LL curve: "
+          f"{ {k: round(v, 4) for k, v in lls0.items()} }")
     trajectory.append({
         "round": 0, "pin": 1.0, "c_star": c0,
         "top_mass": top_mass0, "eff_topics": eff_topics0, "recovery": recovery0,
+        "lls": lls0,
     })
 
     c_prev = c0
@@ -161,6 +179,7 @@ def run(*, out_dir: Path = DEFAULT_OUT_DIR) -> dict:
             reference=0, seed=n,   # FRESH holdout split each round (guardrail b)
         )
         c_n = sweep["argmax_c"]
+        lls_n = {str(k): float(v) for k, v in sweep["lls"].items()}
         conc = corpus_concentration_stm(docs, gp, part, reference=0)
         top_mass = _median(conc, "top_mass")
         eff_topics = _median(conc, "eff_topics")
@@ -172,9 +191,12 @@ def run(*, out_dir: Path = DEFAULT_OUT_DIR) -> dict:
         print(f"[round {n}] c*={c_n} (prev={c_prev}, |delta|={delta}, local grid step={step}) "
               f"top_mass={top_mass:.4f} eff_topics={eff_topics:.4f} "
               f"planted_recovery={recovery}/{K}")
+        print(f"[round {n}] held-out LL curve: "
+              f"{ {k: round(v, 4) for k, v in lls_n.items()} }")
         trajectory.append({
             "round": n, "pin": c_prev, "c_star": c_n,
             "top_mass": top_mass, "eff_topics": eff_topics, "recovery": recovery,
+            "lls": lls_n,
         })
 
         rises.append(c_n)
@@ -197,6 +219,7 @@ def run(*, out_dir: Path = DEFAULT_OUT_DIR) -> dict:
             "group_weights": GROUP_WEIGHTS, "fg_per_group": FG_PER_GROUP,
             "bg_k": BG_K, "K": K, "V": V, "D": D, "doc_len": DOC_LEN,
             "n_iter": N_ITER, "holdout_frac": HOLDOUT_FRAC,
+            "shared_frac": SHARED_FRAC, "topic_support_jaccard": round(jac, 4),
         },
         "planted_target_approx": {"top_mass": planted_top, "eff_topics": planted_eff},
         "trajectory": trajectory,
