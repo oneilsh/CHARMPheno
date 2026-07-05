@@ -64,17 +64,30 @@ peaky). A1's 2.36 (and the export's 3.67) leave patients too diffuse.
 ## Consequence — the faithful generative scale is not fit-recoverable; calibrate it externally
 
 Every fit-anchored estimator — unit pin (1), in-band A1 (2.36), frozen-β export (3.67) —
-inherits the MAP η-compression of the fit and lands below the faithful band. The compression
-is a property of the MAP/Laplace inference, not of any one estimator, so no amount of
-in-band-vs-export cleverness escapes it. **The generative scale that produces faithful
-patients (Σ ≈ 5–7) must be calibrated to an external target** — the plant-recover faithful
-band, the real-corpus concentration reference, or a conditional seed-panel calibration
-(generate at candidate scales, match the generated per-patient concentration to the data) —
-NOT read off the fit. For the generative simulator this argues for a scale in the 5–7 band
-(doubly grounded: diagnostic + LDA reference), gated by a seed-panel check, with the export
-c = 3.67 as a conservative floor. It does NOT reopen a fit-time free variance (still falsified,
-exps 0022/0024/0032); A1 remains valuable as the stable, runaway-safe fit-time parameterization
-and as the lower bracket on the compression.
+inherits the MAP η-compression of the fit and lands below where a faithful generative scale
+would sit. The compression is a property of the MAP/Laplace inference, not of any one
+estimator, so no amount of in-band-vs-export cleverness escapes it. **The faithful generative
+scale must be calibrated to an external target, NOT read off the fit.**
+
+What we do NOT yet have is a gold standard for the TRUE per-document concentration. The two
+pieces of evidence pointing "higher" are each limited: the plant-recover diagnostic measures
+STM inference BIAS on SYNTHETIC data with a known planted concentration (STM is unbiased at
+Σ ≈ 5–7 there) — that is an inference-self-consistency result, NOT a measurement that real
+documents sit at 5–7; and the LDA reference (top_mass 0.513) is a HOT upper bound. So the
+honest statement is a BRACKET on the real per-document top_mass — roughly [0.27 (STM,
+known-diffuse-biased at low scale), 0.51 (LDA, known-peaky-biased)] — with no measurement
+pinning the value inside it. The single non-gated fit at ~7.6 (insight 0030) is weak evidence
+and should not be treated as the target.
+
+The way to pin it (open, proposed): a prior-family-agnostic, ground-truth-free calibration —
+held-out within-document token prediction. Hold out a random subset of each document's tokens,
+infer θ from the visible subset with β fixed, score predictive likelihood on the held-out
+tokens, and sweep the concentration knob (Σ scale for STM, α for LDA); the interior maximum is
+the data's true effective concentration. Until that is run, any shipped generative scale is a
+choice within the bracket, not a calibrated answer. This does NOT reopen a fit-time free
+variance (still falsified, exps 0022/0024/0032); A1 remains valuable as the stable,
+runaway-safe fit-time parameterization and as the lower bracket on the compression. See the
+follow-up update `docs/superpowers/specs/2026-07-05-a1-results-and-concentration-gold-standard-update.md`.
 
 ## What this does NOT claim
 
