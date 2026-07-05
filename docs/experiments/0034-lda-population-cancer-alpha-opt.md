@@ -1,7 +1,7 @@
 ---
 id: 34
 slug: lda-population-cancer-alpha-opt
-status: pending
+status: done
 model_class: lda
 cohort: population_cancer
 cohort_def: population_cancer
@@ -99,6 +99,23 @@ ignores the `source_cohort` prefix and fits all documents non-gated.
   corrected — the quantity this arc exists to measure.
 - Topic quality (NPMI, top terms) is recorded for context but is not the target
   here; the target is the per-document concentration distribution.
+
+## Result — real-corpus reference: patients are peaky (top_mass p50 = 0.513)
+
+LDA fit to iter 200; α optimized DOWN to a small value (mean ≈ 0.018), i.e. the
+corpus drove the Dirichlet toward peaky documents — the hot reading Fable
+predicted for mean-field VB on short docs. Concentration readout:
+**top_mass p50 = 0.513, eff_topics p50 = 2.8** (n = 48,328), versus STM-A1's
+0.269 / 8.5 (exp 0033). Leading with top_mass (gating-independent): **LDA
+patients are ~2× more peaked than STM-A1's.** As a hot upper bound, 0.513
+over-states true concentration — but even discounted, it sits well above the
+fit-anchored STM scales (A1 2.36, export 3.67), corroborating the plant-recover
+diagnostic that the faithful generative scale is ~5–7. See insight
+[0037](../insights/0037-in-band-pooled-scale-converges-below-export-scale-faithful-scale-not-fit-recoverable.md).
+
+(First run silently omitted the readout — the helper imported from the
+non-shippable `analysis/` package, absent on the Dataproc path; fixed in 3670b49
+by relocating it into `spark_vi.eval.topic.concentration`, then re-run.)
 
 ## Related
 

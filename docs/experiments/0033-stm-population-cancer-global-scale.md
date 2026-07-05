@@ -1,7 +1,7 @@
 ---
 id: 33
 slug: stm-population-cancer-global-scale
-status: pending
+status: done
 model_class: stm
 cohort: population_cancer
 cohort_def: population_cancer
@@ -104,6 +104,26 @@ other fields are unchanged from exp 0028.
   eff_topics than exp 0028 (unit-diagonal) — i.e. patients are less "rainbow",
   more coherent — WITHOUT a post-hoc rescale. Compare the readout against exp
   0028 (unit) and, if run, the LDA arm (see the diagnostic follow-up).
+
+## Result — A1 STABLE, τ² = 2.36 (under-corrects)
+
+Fit completed to iter 200 with NO runaway: `Σ_var[min=2.36 max=2.36]` (uniform
+diagonal = τ² exactly, as designed), ELBO improved to −1.461e6,
+`maxvar[topic=0 ess=19]` bounded, 40 background + 20 cancer topics all coherent
+(cancer sub-phenotypes recovered: melanoma/skin, prostate, lymphoma, AML/CML,
+lung, pancreas/liver, kidney, myeloproliferative; NPMI background mean +0.18,
+cancer +0.20). The pooling + damping cap did their job — the primary stability
+criterion is met, in sharp contrast to exp 0032's per-topic runaway (1.8e8).
+
+τ² converged to **2.36** — bounded and data-driven, but LOWER than the frozen-β
+export estimate (c = 3.67) and well below the diagnostic's faithful band (~5–7):
+in-band, β co-adapts to the small Σ, pulling τ² to a low self-consistent fixed
+point. The concentration readout (per-doc, mode-θ) was **top_mass p50 = 0.269,
+eff_topics p50 = 8.5** (n = 47,838) — more concentrated than the unit baseline
+but ~2× more diffuse than the LDA reference (exp 0034: top_mass 0.513). A1 is
+the stable, runaway-safe fit-time parameterization but under-corrects for
+generation. See insight
+[0037](../insights/0037-in-band-pooled-scale-converges-below-export-scale-faithful-scale-not-fit-recoverable.md).
 
 ## Related
 
