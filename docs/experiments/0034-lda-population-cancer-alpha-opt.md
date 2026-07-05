@@ -117,6 +117,16 @@ diagnostic that the faithful generative scale is ~5–7. See insight
 non-shippable `analysis/` package, absent on the Dataproc path; fixed in 3670b49
 by relocating it into `spark_vi.eval.topic.concentration`, then re-run.)
 
+UPDATE (insight 0038): the "α-opt reads HOT" attribution above is REFUTED by a
+synthetic plant-and-recover experiment. With β frozen at truth, LDA's own
+α-optimization recovers AT or BELOW the true concentration (reads cool), not
+above — at both a clean and the real (K=60, 44-token) regime. So this arm's ~2×
+peakiness vs STM-A1 is NOT an α-inference artifact; it is STM's fit scale being
+too low (insight 0037) plus LDA co-fitting a sharper, more document-specific β
+(the synthetic froze β, so it cannot reproduce that). Whether 0.513 over- or
+under-states the true concentration is open; the validated held-out-LL calibration
+(insight 0038) on the real corpus is what would pin it.
+
 ## Related
 
 Comparison arm for exp 0028 (STM unit baseline) and exp 0033 (STM in-band pooled

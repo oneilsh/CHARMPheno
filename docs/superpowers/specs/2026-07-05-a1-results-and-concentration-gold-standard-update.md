@@ -54,9 +54,13 @@ LDA with document-concentration (α) optimization, on the SAME documents, non-ga
 | LDA, α-optimized (α ≈ 0.018) | 0.513 | 2.8 |
 
 Leading with top_mass (a max, so unaffected by the gating support-size difference): **LDA
-documents read ~2× more peaked than the logistic-normal's.** Per your earlier point, α-optimization
-on short documents reads HOT — mean-field VB under-estimates posterior spread, biasing α̂ down —
-so 0.513 is an upper bound, not ground truth.
+documents read ~2× more peaked than the logistic-normal's.** We initially attributed this to
+α-optimization reading HOT on short documents (mean-field VB under-dispersion). **A synthetic
+plant-and-recover experiment (§4.5) refutes that as the cause** — with β fixed, LDA
+α-optimization reads at or BELOW the true concentration, not above. So the ~2× gap is not an
+α-inference artifact; it is driven by STM's fit scale being too low (§1) and by LDA co-fitting
+a sharper, more document-specific β (which the fixed-β synthetic cannot reproduce). Whether
+0.513 over- or under-states the truth is now genuinely open.
 
 ## 3. The honest gap — we have a bracket, not a point, and no gold standard
 
@@ -84,12 +88,48 @@ effective concentration — a prior-family-agnostic, ground-truth-free calibrati
 This also directly answers "which prior fits document peakiness better": whichever attains the
 higher held-out predictive likelihood at its own optimal concentration.
 
+## 4.5. UPDATE — synthetic validation of the gold standard (done)
+
+We built the §4 method and validated it on synthetic data where the true concentration is
+KNOWN. Plant documents at a known per-document concentration over a SHARED-TERM topic matrix
+(topics share a vocabulary pool, so inference must disambiguate), two planting mechanisms so
+neither family is privileged (logistic-normal η~N(0,level·I) and Dirichlet θ~Dir(level·1)),
+four concentration levels each. Recover with the logistic-normal MAP (sweep Σ scale c) and LDA
+CAVI (sweep α), β FROZEN at truth to isolate concentration inference from topic learning. Run
+at a clean regime (K=8, V=400, doc_len=60) and the REAL regime (K=60, V=5000, doc_len=44).
+
+Three results:
+
+1. **The gold standard works — both families, both regimes.** In all 8 (mechanism × level)
+   cells, the held-out-LL argmax recovers a θ̂ whose median top_mass matches the planted median
+   within a small tolerance (worst-case absolute error 0.068 at the real regime, 0.048 at the
+   clean regime). The diffuse end never wins on a peaky corpus; the argmax is interior. So
+   held-out within-document prediction is a trustworthy, prior-agnostic, ground-truth-free
+   concentration calibration — and it holds at the real regime (K=60, 44-token documents), the
+   regime we would apply it in.
+
+2. **The logistic-normal MAP recovers concentration MORE faithfully than LDA at fixed β**
+   (real-regime mean absolute error 0.019 vs 0.033), and on BOTH generative mechanisms (no
+   "matched prior" advantage for LDA on its own Dirichlet-generated data).
+
+3. **LDA α-optimization does NOT read hot — it reads COOL.** With β fixed at truth, LDA's own
+   α-optimization recovers at or BELOW the planted concentration (real-regime mean top_mass
+   Δ = −0.014; several cells badly under-concentrated). This refutes the mean-field-VB "reads
+   hot" story as the explanation for the real-data ~2× gap. It also picks a more diffuse α than
+   the held-out-LL optimum — its internal objective is not the held-out-predictive one.
+
+Consequence: the real STM-vs-LDA gap is not an α-inference artifact. It is STM's fit scale
+being too low plus LDA co-fitting a sharper β (untestable with β frozen). The open items are
+(a) run held-out-LL on the REAL corpus to pin the scale, and (b) a synthetic run where each
+family CO-FITS β (rather than freezing it at truth) to isolate the β-learning contribution.
+
 ## 5. Questions for the reviewer
 
-1. **Is held-out within-document token prediction the right external gold standard for
-   concentration?** Or do you prefer a raw data-side statistic (your B2)? If B2, what specific
-   token-diversity observable best proxies per-document concentration WITHOUT passing through
-   either model's inference?
+1. **Held-out prediction now recovers the known concentration synthetically (§4.5) at the real
+   regime.** Do you agree that is sufficient validation to run it on the REAL corpus as the
+   calibration, or would you still want a raw data-side statistic (your B2) as an independent
+   cross-check? If B2, what specific token-diversity observable best proxies per-document
+   concentration WITHOUT passing through either model's inference?
 2. **A1 converges BELOW the frozen-β estimate, not above.** Does that change your "A1 primary,
    frozen-β estimate as backstop" ordering? A1 is the stable fit-time parameterization but the
    most conservative of the three fit-anchored scales (2.36 < 3.67 < synthetic 5–7).
@@ -103,6 +143,12 @@ higher held-out predictive likelihood at its own optimal concentration.
    concentration — the right target? This is your C1, but with held-out predictive likelihood as
    the calibration objective rather than a curated seed panel. Do you see a failure mode in
    using held-out-LL rather than a seed panel as the gate?
+5. **The real gap now looks like β-learning, not α-inference (§4.5, Finding 3).** With β frozen
+   the two families recover the same known concentration; the real ~2× gap must then come from
+   LDA co-fitting sharper topics (plus STM's low fit scale). Is a synthetic run where each family
+   CO-FITS β the right way to isolate the topic-learning contribution — and if LDA's co-fit β is
+   what makes its documents peaky, is that legitimate signal (real topics ARE that sharp) or
+   overfitting we should not calibrate the generative scale to?
 
 ## Method notes
 
