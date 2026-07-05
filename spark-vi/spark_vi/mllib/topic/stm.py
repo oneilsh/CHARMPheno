@@ -727,6 +727,228 @@ def corpus_eta_scale_gated_rdd(
         work_rdd.unpersist(blocking=False)
 
 
+def corpus_heldout_scale_sweep_gated(
+    docs, global_params, partition, *, c_grid,
+    holdout_frac=0.3, reference=None, seed=0,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4,
+) -> dict:
+    """Driver-side (in-memory) held-out predictive-LL sweep over the STM
+    generative covariance scale c, for a GATED fit.
+
+    This is the gated, distributed-ready counterpart of the LOCAL, non-gated
+    diagnostic validated by insight 0038
+    (``spark_vi.eval.topic.concentration_recovery``): held-out within-document
+    token prediction, swept over a concentration knob, recovers the true
+    generative concentration. Here the knob is the scalar scale c in
+    Sigma_gen = c*R (R the fit's diagonal-normalized correlation, ADR 0034/0036
+    -- see ``corpus_eta_scale_gated``), and inference/scoring use the GATED
+    machinery: eta_d ~ N(Gamma^T x_d, Sigma) restricted to the doc's allowed
+    (background ∪ own group) topic set.
+
+    For each doc, ONCE (reused across every c): split its tokens into a
+    visible half and a held-out half (``heldout_split``, seeded independent
+    of c so the sweep is a controlled comparison -- see that docstring for
+    the split protocol and its skip guards for short docs).
+
+    For each c, on the SAME split: infer eta_hat from the VISIBLE tokens via
+    the same per-doc Laplace E-step as ``infer_local``, under prior precision
+    ``(1/c) * safe_inverse(R[allowed])`` (R[allowed] is c-independent, so it
+    is cached once per distinct allowed set). Note the deliberate split of
+    roles: INFERENCE uses ``expElogbeta`` (exp-digamma of lambda, matching the
+    fit's own E-step data term); SCORING the held-out predictive probability
+    uses ``beta_prob`` (lambda-normalized, i.e. E[beta]) via
+    ``_predictive_loglik`` -- conflating the two would silently miscalibrate
+    the recovered scale.
+
+    Returns ``{"lls": {c: mean_per_token_ll for c in c_grid}, "argmax_c": c,
+    "n_docs": n}`` -- mean_per_token_ll is the corpus-wide held-out
+    log-likelihood total divided by the corpus-wide held-out token count (so
+    it is comparable across c and corpus size), and n_docs counts documents
+    that actually contributed (docs skipped by ``heldout_split`` -- too few
+    tokens, or an empty visible half -- do not count).
+
+    ``docs`` is an in-memory list of STMDocument; ``global_params`` is the
+    dict with "lambda" (K,V), "Gamma" (P,K), "Sigma" (K,K, the fit's
+    correlation R); ``partition`` is a TopicBlockPartition (or the implicit
+    all-background one). For a live cluster corpus use
+    ``corpus_heldout_scale_sweep_gated_rdd``.
+    """
+    from scipy.special import digamma
+
+    from spark_vi.eval.topic.concentration_recovery import (
+        _predictive_loglik, heldout_split,
+    )
+    from spark_vi.models.topic._linalg import safe_inverse
+
+    lam = np.asarray(global_params["lambda"], dtype=np.float64)
+    Gamma = np.asarray(global_params["Gamma"], dtype=np.float64)
+    Sigma = np.asarray(global_params["Sigma"], dtype=np.float64)
+    K = lam.shape[0]
+    lam_rowsum = lam.sum(axis=1, keepdims=True)
+    expElogbeta = np.exp(digamma(lam) - digamma(lam_rowsum))   # inference term
+    beta_prob = lam / lam_rowsum                               # scoring term: E[beta]
+
+    d = np.diag(Sigma)
+    R = Sigma / np.sqrt(np.outer(d, d))   # correlation; c is applied to THIS
+
+    rinv_cache: dict[tuple, np.ndarray] = {}
+    sum_ll = {c: 0.0 for c in c_grid}
+    n_tokens = {c: 0 for c in c_grid}
+    n_docs = 0
+
+    for i, doc in enumerate(docs):
+        split = heldout_split(doc, holdout_frac=holdout_frac, seed=seed + i)
+        if split is None:
+            continue
+        visible_doc, held_indices, held_counts = split
+        if held_counts.size == 0:
+            continue
+
+        allowed = partition.allowed_indices(doc.groups)
+        key = tuple(allowed.tolist())
+        Rinv_allowed = rinv_cache.get(key)
+        if Rinv_allowed is None:
+            Rinv_allowed = safe_inverse(R[np.ix_(allowed, allowed)])
+            rinv_cache[key] = Rinv_allowed
+
+        n_docs += 1
+        n_held = int(held_counts.sum())
+        for c in c_grid:
+            Sigma_inv_allowed = (1.0 / c) * Rinv_allowed
+            eta_hat, _, _ = _stm_doc_inference(
+                indices=visible_doc.indices, counts=visible_doc.counts,
+                expElogbeta=expElogbeta,
+                Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=doc.x,
+                max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+                allowed=allowed, reference=reference,
+            )
+            theta_hat = _gated_mode_theta(eta_hat, allowed, K)
+            sum_ll[c] += _predictive_loglik(theta_hat, beta_prob, held_indices, held_counts)
+            n_tokens[c] += n_held
+
+    lls = {c: sum_ll[c] / n_tokens[c] for c in c_grid}
+    argmax_c = max(lls, key=lls.get)
+    return {"lls": lls, "argmax_c": argmax_c, "n_docs": n_docs}
+
+
+def corpus_heldout_scale_sweep_gated_rdd(
+    doc_rdd, global_params, partition, *, c_grid,
+    holdout_frac=0.3, reference=None, seed=0,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4, depth=2,
+) -> dict:
+    """Distributed held-out predictive-LL sweep over the STM generative
+    covariance scale c, for a GATED fit (see ``corpus_heldout_scale_sweep_gated``
+    for the full derivation; this is its Spark counterpart, byte-for-byte the
+    same math on a distributed corpus).
+
+    ``doc_rdd.zipWithIndex()`` gives each document the SAME index it would
+    have under ``enumerate(docs)`` in the numpy path (zipWithIndex preserves
+    the RDD's element order, and ``sc.parallelize(docs, n)`` preserves the
+    input list's order across partitions), so ``heldout_split``'s per-doc seed
+    (``seed + index``) reproduces the identical visible/held split as the
+    numpy oracle -- required for numpy/RDD parity, since the split is a
+    random draw that must line up doc-for-doc, not just partition-for-partition.
+
+    Distributed via the same mapPartitions + treeReduce idiom as
+    ``corpus_eta_scale_gated_rdd``: each partition runs the full per-doc
+    split + per-c Laplace E-step + held-out scoring, accumulating a local
+    dict of per-c (sum_ll, n_held_tokens) plus a doc count; the tree-reduce
+    sums those elementwise across partitions -- only the small per-c totals
+    cross the network, never the documents or per-doc eta_hat. The driver
+    divides each c's summed LL by its summed token count (mean per token) and
+    takes the argmax. ``global_params``, ``partition``, and ``c_grid`` are
+    broadcast via the Spark-safe default-arg closure convention; helpers are
+    imported inside ``_local`` so the closure is picklable on workers.
+
+    Raises ValueError if the reduced document count is 0.
+    """
+    sc = doc_rdd.context
+    gp_bcast = sc.broadcast({
+        k: np.asarray(v, dtype=np.float64) for k, v in global_params.items()
+    })
+    p_bcast = sc.broadcast(partition)
+    c_list = list(c_grid)
+    c_bcast = sc.broadcast(c_list)
+
+    def _local(rows, _gp=gp_bcast, _p=p_bcast, _cg=c_bcast):
+        from scipy.special import digamma
+
+        from spark_vi.eval.topic.concentration_recovery import (
+            _predictive_loglik, heldout_split,
+        )
+        from spark_vi.models.topic._linalg import safe_inverse
+
+        gp = _gp.value
+        part = _p.value
+        c_grid_local = _cg.value
+        lam = gp["lambda"]
+        Gamma = gp["Gamma"]
+        Sigma = gp["Sigma"]
+        K = lam.shape[0]
+        lam_rowsum = lam.sum(axis=1, keepdims=True)
+        expElogbeta = np.exp(digamma(lam) - digamma(lam_rowsum))
+        beta_prob = lam / lam_rowsum
+
+        d = np.diag(Sigma)
+        R = Sigma / np.sqrt(np.outer(d, d))
+
+        rinv_cache: dict[tuple, np.ndarray] = {}
+        acc = {c: [0.0, 0] for c in c_grid_local}
+        n_docs = 0
+
+        for doc, idx in rows:
+            split = heldout_split(doc, holdout_frac=holdout_frac, seed=seed + idx)
+            if split is None:
+                continue
+            visible_doc, held_indices, held_counts = split
+            if held_counts.size == 0:
+                continue
+
+            allowed = part.allowed_indices(doc.groups)
+            key = tuple(allowed.tolist())
+            Rinv_allowed = rinv_cache.get(key)
+            if Rinv_allowed is None:
+                Rinv_allowed = safe_inverse(R[np.ix_(allowed, allowed)])
+                rinv_cache[key] = Rinv_allowed
+
+            n_docs += 1
+            n_held = int(held_counts.sum())
+            for c in c_grid_local:
+                Sigma_inv_allowed = (1.0 / c) * Rinv_allowed
+                eta_hat, _, _ = _stm_doc_inference(
+                    indices=visible_doc.indices, counts=visible_doc.counts,
+                    expElogbeta=expElogbeta,
+                    Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=doc.x,
+                    max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+                    allowed=allowed, reference=reference,
+                )
+                theta_hat = _gated_mode_theta(eta_hat, allowed, K)
+                acc[c][0] += _predictive_loglik(
+                    theta_hat, beta_prob, held_indices, held_counts)
+                acc[c][1] += n_held
+
+        return [(acc, n_docs)]
+
+    def _combine(a, b):
+        acc_a, n_a = a
+        acc_b, n_b = b
+        merged = {
+            c: (acc_a[c][0] + acc_b[c][0], acc_a[c][1] + acc_b[c][1])
+            for c in acc_a
+        }
+        return merged, n_a + n_b
+
+    acc, n_docs = (
+        doc_rdd.zipWithIndex().mapPartitions(_local).treeReduce(_combine, depth=depth)
+    )
+    if n_docs == 0:
+        raise ValueError("corpus_heldout_scale_sweep_gated_rdd: empty document RDD")
+
+    lls = {c: acc[c][0] / acc[c][1] for c in c_list}
+    argmax_c = max(lls, key=lls.get)
+    return {"lls": lls, "argmax_c": argmax_c, "n_docs": n_docs}
+
+
 class StreamingSTM:
     """Streaming-VI estimator for OnlineSTM with DataFrame input.
 
