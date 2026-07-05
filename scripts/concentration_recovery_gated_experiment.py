@@ -56,6 +56,7 @@ import numpy as np
 from scipy.special import digamma
 
 from spark_vi.eval.topic.concentration import doc_concentration
+from spark_vi.eval.topic.concentration_recovery import make_shared_beta
 from spark_vi.mllib.topic.stm import _gated_mode_theta, corpus_heldout_scale_sweep_gated
 from spark_vi.models.topic._linalg import safe_inverse
 from spark_vi.models.topic.partition import TopicBlockPartition
@@ -73,19 +74,45 @@ DEFAULT_OUT_DIR = REPO_ROOT / "docs" / "experiments" / "0038-concentration-recov
 
 DEFAULT_SCALES = [1.0, 2.0, 5.0, 10.0]
 DEFAULT_C_GRID = [1, 2, 3, 5, 8, 12, 20]
+BETA_MODES = ("disjoint", "shared")
 
 
-def build_structure(*, groups, fg_per_group, bg_k, V, doc_len, seed):
+def build_structure(*, groups, fg_per_group, bg_k, V, doc_len, seed, beta_mode="disjoint"):
     """Build the gated beta + TopicBlockPartition ONCE (shared across all
-    planted scales), via synthetic_gated_corpus (its own docs are discarded --
-    only its planted_beta/partition are kept; documents are RE-PLANTED per
-    scale by plant_gated_docs, below). Also builds the TRIVIAL non-gated
-    partition (background_k = K, no foreground) so the same documents can be
-    run through an all-allowed sweep for comparison."""
-    _throwaway_docs, planted_beta, gated_partition = synthetic_gated_corpus(
-        groups=groups, fg_per_group=fg_per_group, bg_k=bg_k, V=V, D=2,
-        doc_len=doc_len, bg_frac=0.5, seed=seed,
-    )
+    planted scales). Also builds the TRIVIAL non-gated partition
+    (background_k = K, no foreground) so the same documents can be run through
+    an all-allowed sweep for comparison.
+
+    beta_mode == "disjoint": beta from synthetic_gated_corpus -- each topic
+      owns a DISJOINT signature vocabulary block (its own docs are discarded;
+      only planted_beta/partition are kept, documents are RE-PLANTED per scale
+      by plant_gated_docs). With disjoint vocab, a document's tokens carry ~0
+      likelihood for any topic outside its true allowed set, so hard gating is
+      expected to matter little for concentration recovery.
+
+    beta_mode == "shared": beta from make_shared_beta -- topics SHARE a common
+      term pool (spark_vi.eval.topic.concentration_recovery), so a non-allowed
+      topic CAN steal shared-term mass during non-gated inference. The
+      TopicBlockPartition is built separately (same K topics, same background +
+      per-group foreground layout) so the ONLY thing that changes vs disjoint
+      is the vocabulary overlap. This is the realistic regime where gating
+      should actually matter.
+    """
+    if beta_mode not in BETA_MODES:
+        raise ValueError(f"build_structure: unknown beta_mode {beta_mode!r} (want one of {BETA_MODES})")
+
+    if beta_mode == "disjoint":
+        _throwaway_docs, planted_beta, gated_partition = synthetic_gated_corpus(
+            groups=groups, fg_per_group=fg_per_group, bg_k=bg_k, V=V, D=2,
+            doc_len=doc_len, bg_frac=0.5, seed=seed,
+        )
+    else:  # shared
+        gated_partition = TopicBlockPartition(
+            group_var="g", background_k=bg_k,
+            foreground=tuple((g, fg_per_group) for g in groups),
+        )
+        planted_beta = make_shared_beta(gated_partition.K, V, seed=seed)
+
     K = gated_partition.K
     nongated_partition = TopicBlockPartition(
         group_var=gated_partition.group_var, background_k=K, foreground=(),
@@ -323,22 +350,29 @@ def run_cell(
 def run(
     *,
     groups=("A", "B"), fg_per_group=1, bg_k=2, V=100, D=300, doc_len=55,
-    holdout_frac=0.3, seed=0, scales=None, c_grid=None,
+    holdout_frac=0.3, seed=0, scales=None, c_grid=None, beta_mode="disjoint",
 ) -> dict:
     """Run the full sweep (one cell per planted scale s) and return a
     self-describing results dict: {"config": {...}, "cells": [one dict per
     scale, see run_cell]}. A single shared (beta, gated_partition,
     nongated_partition) is used for every cell so the topic structure is held
     constant across the whole sweep -- only the planted scale and, within a
-    cell, the gating regime vary."""
+    cell, the gating regime vary. beta_mode selects disjoint vs shared-term
+    vocabulary (see build_structure)."""
+    from tests._stm_synth import topic_support_jaccard
+
     scales = DEFAULT_SCALES if scales is None else scales
     c_grid = DEFAULT_C_GRID if c_grid is None else c_grid
 
     planted_beta, gated_partition, nongated_partition = build_structure(
         groups=groups, fg_per_group=fg_per_group, bg_k=bg_k, V=V,
-        doc_len=doc_len, seed=seed,
+        doc_len=doc_len, seed=seed, beta_mode=beta_mode,
     )
     global_params = make_global_params(planted_beta)
+    # Mean pairwise topic-support Jaccard: 0 = fully disjoint vocab, ->1 = full
+    # overlap. Quantifies "how much do topics share terms" so the disjoint vs
+    # shared regimes are described, not just asserted.
+    beta_jaccard = topic_support_jaccard(planted_beta)
 
     cells = [
         run_cell(
@@ -350,6 +384,8 @@ def run(
     ]
     return {
         "config": {
+            "beta_mode": beta_mode,
+            "beta_support_jaccard": beta_jaccard,
             "groups": list(groups), "fg_per_group": fg_per_group, "bg_k": bg_k,
             "K": gated_partition.K, "V": V, "D": D, "doc_len": doc_len,
             "holdout_frac": holdout_frac, "seed": seed,
@@ -475,12 +511,29 @@ def build_summary(results: dict, *, recover_tol: float = 0.08) -> str:
     )
 
     return (
-        f"Under GATING, held-out predictive-LL {recover_bit} recover the planted generative "
-        f"scale across all {len(cells)} planted scales (worst-case gated abs error "
-        f"{max(gated_errs):.4f}, tolerance {recover_tol}); {argmax_bit}.{flatness_bit} Comparing "
-        f"the SAME documents run through both regimes, {gating_verdict}. Finally, {leak_bit}. "
-        f"Sigma was fixed to identity (R = I) throughout, so this isolates GATING from "
-        f"correlation-structure recovery."
+        f"[beta_mode={results['config']['beta_mode']}, mean topic-support Jaccard="
+        f"{results['config']['beta_support_jaccard']:.3f}] Under GATING, held-out predictive-LL "
+        f"{recover_bit} recover the planted generative scale across all {len(cells)} planted "
+        f"scales (worst-case gated abs error {max(gated_errs):.4f}, tolerance {recover_tol}); "
+        f"{argmax_bit}.{flatness_bit} Comparing the SAME documents run through both regimes, "
+        f"{gating_verdict}. Finally, {leak_bit}. Sigma was fixed to identity (R = I) throughout, "
+        f"so this isolates GATING from correlation-structure recovery."
+    )
+
+
+def render_markdown_doc(results: dict) -> str:
+    """Full results.md body (header + table + summary) for one beta_mode."""
+    cfg = results["config"]
+    table = render_markdown_table(results)
+    summary = build_summary(results)
+    return (
+        f"# Gated concentration-recovery experiment (CR-4) results -- {cfg['beta_mode']} vocabulary\n\n"
+        f"Seed: {cfg['seed']}. beta_mode={cfg['beta_mode']} (mean topic-support "
+        f"Jaccard={cfg['beta_support_jaccard']:.3f}; 0=disjoint vocab, ->1=full overlap). "
+        f"Config: K={cfg['K']} (bg_k={cfg['bg_k']}, groups={cfg['groups']}, "
+        f"fg_per_group={cfg['fg_per_group']}), V={cfg['V']}, D={cfg['D']}, doc_len={cfg['doc_len']}, "
+        f"holdout_frac={cfg['holdout_frac']}, Sigma={cfg['sigma']}, c_grid={cfg['c_grid']}.\n\n"
+        + table + "\n\n## Summary\n\n" + summary + "\n"
     )
 
 
@@ -488,7 +541,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="CR-4: LOCAL gated concentration-recovery experiment -- "
         "does hard topic-gating change held-out-LL's ability to recover the "
-        "planted generative scale, vs a non-gated sweep on the same documents?",
+        "planted generative scale, vs a non-gated sweep on the same documents? "
+        "Runs over disjoint and/or shared-term topic vocabularies.",
     )
     parser.add_argument("--fg-per-group", type=int, default=1)
     parser.add_argument("--bg-k", type=int, default=2)
@@ -498,34 +552,35 @@ def main() -> None:
     parser.add_argument("--holdout-frac", type=float, default=0.3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--beta", choices=(*BETA_MODES, "both"), default="disjoint",
+        help="topic-word vocabulary regime: 'disjoint' (each topic owns a "
+        "signature block; gating expected to not matter), 'shared' (topics "
+        "share a term pool; gating expected to matter), or 'both' (run each "
+        "and write a per-mode artifact). Default: disjoint.",
+    )
+    parser.add_argument(
         "--out", type=Path, default=DEFAULT_OUT_DIR,
-        help=f"output directory for results.json/results.md (default: {DEFAULT_OUT_DIR})",
+        help=f"output directory for results-{{mode}}.json/.md (default: {DEFAULT_OUT_DIR})",
     )
     args = parser.parse_args()
 
-    results = run(
-        fg_per_group=args.fg_per_group, bg_k=args.bg_k, V=args.V, D=args.D,
-        doc_len=args.doc_len, holdout_frac=args.holdout_frac, seed=args.seed,
-    )
-
-    table = render_markdown_table(results)
-    summary = build_summary(results)
-
-    print(table)
-    print()
-    print(summary)
-
+    modes = list(BETA_MODES) if args.beta == "both" else [args.beta]
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-    cfg = results["config"]
-    (args.out / "results.md").write_text(
-        "# Gated concentration-recovery experiment (CR-4) results\n\n"
-        f"Seed: {cfg['seed']}. Config: K={cfg['K']} (bg_k={cfg['bg_k']}, "
-        f"groups={cfg['groups']}, fg_per_group={cfg['fg_per_group']}), V={cfg['V']}, "
-        f"D={cfg['D']}, doc_len={cfg['doc_len']}, holdout_frac={cfg['holdout_frac']}, "
-        f"Sigma={cfg['sigma']}, c_grid={cfg['c_grid']}.\n\n"
-        + table + "\n\n## Summary\n\n" + summary + "\n"
-    )
+
+    for mode in modes:
+        results = run(
+            fg_per_group=args.fg_per_group, bg_k=args.bg_k, V=args.V, D=args.D,
+            doc_len=args.doc_len, holdout_frac=args.holdout_frac, seed=args.seed,
+            beta_mode=mode,
+        )
+        print(f"===== beta_mode={mode} =====")
+        print(render_markdown_table(results))
+        print()
+        print(build_summary(results))
+        print()
+
+        (args.out / f"results-{mode}.json").write_text(json.dumps(results, indent=2) + "\n")
+        (args.out / f"results-{mode}.md").write_text(render_markdown_doc(results))
 
 
 if __name__ == "__main__":

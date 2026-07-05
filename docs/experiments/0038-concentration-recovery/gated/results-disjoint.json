@@ -1,5 +1,7 @@
 {
   "config": {
+    "beta_mode": "disjoint",
+    "beta_support_jaccard": 0.0,
     "groups": [
       "A",
       "B"
