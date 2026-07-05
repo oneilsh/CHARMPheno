@@ -25,6 +25,35 @@ unbiased at scale ≈ 5–7. You recommended testing **A1**: a single pooled sca
 IN-BAND at fit time, Σ = τ²·R (R the unit-diagonal correlation), with a damped update to avoid
 a τ–β sharpening ratchet.
 
+## 0.1 Model architecture (the gating), in one place
+
+Since several results below turn on it, the block/gating structure spelled out:
+
+- **Topic blocks.** The K topics are partitioned into ONE shared BACKGROUND block (available to
+  every document) plus G per-group FOREGROUND blocks — one block per level of a grouping label
+  attached to each document. So the topic set is background ∪ foreground(group 1) ∪ … ∪
+  foreground(group G).
+- **Hard gate.** Each document carries a group label. The gate is a HARD mask: document d may
+  place topic mass ONLY on (background ∪ its own group's foreground block); every other group's
+  foreground topics are forced to exactly zero — they are excluded from d's "allowed set"
+  (η_dk = −∞ there, θ_dk = 0). This is topic-masking by a covariate, not a soft prior.
+- **Inference / generation over the allowed set.** η_d ~ Normal(Γᵀx_d, Σ) restricted to d's
+  allowed set; θ_d = softmax over that set. Γᵀx_d is a covariate-dependent prior MEAN
+  (prevalence covariates shift which topics are a priori likely); Σ is the topic covariance,
+  block-structured to match (a background block and per-group blocks; no cross-group
+  off-diagonal terms, since two groups' foreground topics never co-occur in one document). The
+  per-document E-step is a MAP/Laplace estimate of η over the allowed set only.
+- **Why the mask exists.** To surface structure specific to a MINORITY group that a single
+  shared model washes out: the minority's foreground topics get dedicated latent dimensions
+  that only its documents can use, so they do not have to compete with the majority group's
+  content for the same topics. The concentration/scale problem in this note is a side-effect of
+  the stabilizer that makes this gated fit converge (pinning Σ to a unit diagonal), which
+  discards the variance scale generation needs.
+
+This is why §4.6 distinguishes "gated" (inference restricted to the true allowed set) from
+"non-gated" (all K topics allowed): the mask is the model, and it turns out to be what makes
+the generative scale identifiable.
+
 ## 1. A1 results — stability CONFIRMED, with a twist
 
 **Stability: confirmed, exactly as you predicted.** A1 converged cleanly: τ² bounded, the Σ
