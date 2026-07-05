@@ -1,0 +1,54 @@
+{
+  "config": {
+    "S_TRUE": 5.0,
+    "C_GRID": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      8,
+      12,
+      20
+    ],
+    "N_ROUNDS": 5,
+    "group_weights": {
+      "A": 0.7,
+      "B": 0.3
+    },
+    "fg_per_group": 4,
+    "bg_k": 3,
+    "K": 11,
+    "V": 400,
+    "D": 2000,
+    "doc_len": 45,
+    "n_iter": 200,
+    "holdout_frac": 0.5
+  },
+  "planted_target_approx": {
+    "top_mass": 0.5492753623188407,
+    "eff_topics": 2.6
+  },
+  "trajectory": [
+    {
+      "round": 0,
+      "pin": 1.0,
+      "c_star": 2,
+      "top_mass": 0.5081012658227848,
+      "eff_topics": 2.982300884955752,
+      "recovery": 11
+    },
+    {
+      "round": 1,
+      "pin": 2,
+      "c_star": 2,
+      "top_mass": 0.5337313432835821,
+      "eff_topics": 2.734453781512605,
+      "recovery": 11
+    }
+  ],
+  "settled": true,
+  "stopped_round": 1,
+  "ratchet_suspected": false
+}

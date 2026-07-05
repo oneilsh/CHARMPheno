@@ -174,7 +174,8 @@ def synthetic_gated_corpus_overlap(*, groups, fg_per_group, bg_k, V, D, doc_len,
     return docs, planted, part
 
 
-def gated_ln_corpus(*, group_weights, fg_per_group, bg_k, V, D, doc_len, seed=0):
+def gated_ln_corpus(*, group_weights, fg_per_group, bg_k, V, D, doc_len,
+                    eta_scale: float = 1.0, seed=0):
     """Single-label gated logistic-normal corpus with a KNOWN unit-diagonal Sigma_true.
 
     Each doc belongs to ONE group (sampled by group_weights, so a minority arm is
@@ -182,7 +183,14 @@ def gated_ln_corpus(*, group_weights, fg_per_group, bg_k, V, D, doc_len, seed=0)
     allowed set ~ N(0, Sigma_true[A,A]); theta = softmax(eta); words ~ theta·beta.
     Planted correlations (bg-bg 0.10, bg-fg 0.25, within-fg 0.30) are made PD via the
     max-det completion of the cross-foreground free block (pd_complete used ONLY to
-    build ground truth, not in the fit). Domain-agnostic: integer token ids only."""
+    build ground truth, not in the fit). Domain-agnostic: integer token ids only.
+
+    ``eta_scale`` multiplies the PLANTED covariance used to draw eta (the true
+    generative variance level, e.g. for the refit-dynamics experiment where the
+    calibration target is a KNOWN scale != 1); the RETURNED Sigma_true is scaled
+    identically, so callers always see the true generative covariance the draws
+    actually came from. Default 1.0 reproduces the original unit-scale draws and
+    return value byte-for-byte."""
     rng = np.random.default_rng(seed)
     groups = tuple(group_weights)
     part = TopicBlockPartition(group_var="g", background_k=bg_k,
@@ -215,6 +223,7 @@ def gated_ln_corpus(*, group_weights, fg_per_group, bg_k, V, D, doc_len, seed=0)
                 if i != j:
                     Sigma_true[i, j] = 0.30; obs[i, j] = True
     Sigma_true = pd_complete(Sigma_true, obs)
+    Sigma_true = float(eta_scale) * Sigma_true
 
     gl = list(groups)
     wts = np.array([group_weights[g] for g in gl], float); wts /= wts.sum()
