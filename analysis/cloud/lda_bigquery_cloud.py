@@ -393,7 +393,7 @@ def main(argv: list[str] | None = None) -> int:
         # downstream reads "concentration_readout" regardless of model class.
         conc = None
         try:
-            from analysis._eval_common import lda_concentration_readout
+            from spark_vi.eval.topic.concentration import lda_concentration_readout
             conc = lda_concentration_readout(theta_arr)
             print(f"[driver]   concentration readout: top_mass p50={conc['top_mass']['p50']:.3f} "
                   f"eff_topics p50={conc['eff_topics']['p50']:.1f} (n={conc['n_docs']})", flush=True)

@@ -75,21 +75,6 @@ def stm_sigma_diagnostic(Sigma, labels=None, top_k: int = 8):
     return "\n".join(lines)
 
 
-def lda_concentration_readout(theta_arr, *, n_bins: int = 50) -> dict:
-    """Per-document topic-concentration summary for an in-memory (N, K) θ matrix
-    (LDA/HDP variational θ, one row per document). Mirrors the STM path's
-    ConcentrationAcc.summary() schema so downstream reads one metadata key
-    regardless of model class. See spark_vi.eval.topic.concentration."""
-    from spark_vi.eval.topic.concentration import ConcentrationAcc
-    theta_arr = np.asarray(theta_arr, dtype=np.float64)
-    if theta_arr.ndim != 2 or theta_arr.shape[0] == 0:
-        raise ValueError("lda_concentration_readout: expected a nonempty (N, K) array")
-    acc = ConcentrationAcc.zeros(n_bins=n_bins, eff_max=float(theta_arr.shape[1]))
-    for row in theta_arr:
-        acc.add(row)
-    return acc.summary()
-
-
 def _resolve_use_color(mode: str) -> bool:
     """Map a CLI --color {auto, always, never} value to a bool."""
     if mode == "always":

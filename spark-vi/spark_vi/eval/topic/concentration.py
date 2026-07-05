@@ -198,3 +198,25 @@ class ConcentrationAcc:
             "top_mass": _stat_block(self.top_sum, self.top_sumsq, self.top_hist, top_edges),
             "eff_topics": _stat_block(self.eff_sum, self.eff_sumsq, self.eff_hist, eff_edges),
         }
+
+
+def lda_concentration_readout(theta_arr, *, n_bins: int = 50) -> dict:
+    """Per-document topic-concentration summary for an in-memory (N, K) theta
+    matrix (LDA/HDP variational theta, one row per document). Mirrors the STM
+    path's ConcentrationAcc.summary() schema so a fit driver writes one
+    metadata key ("concentration_readout") regardless of model class.
+
+    Lives in spark_vi (not the analysis/ scripts dir) so the cloud fit drivers
+    import it the same way they import the STM readout primitives: the analysis/
+    package is NOT on the Dataproc executor/driver path, so an ``analysis.*``
+    import fails at fit time on the cluster (observed on exp 0034 -- the readout
+    was silently omitted). Keeping the pure helper in the shippable spark_vi
+    package is the fix.
+    """
+    theta_arr = np.asarray(theta_arr, dtype=np.float64)
+    if theta_arr.ndim != 2 or theta_arr.shape[0] == 0:
+        raise ValueError("lda_concentration_readout: expected a nonempty (N, K) array")
+    acc = ConcentrationAcc.zeros(n_bins=n_bins, eff_max=float(theta_arr.shape[1]))
+    for row in theta_arr:
+        acc.add(row)
+    return acc.summary()

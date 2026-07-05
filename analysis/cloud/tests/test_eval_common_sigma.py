@@ -2,8 +2,13 @@
 and lda_concentration_readout (per-document topic-concentration summary for an
 in-memory theta matrix).
 
-Imports analysis._eval_common via the repo root (the package seam the cloud
-eval driver imports from). Pure-numpy helper, no Spark.
+stm_sigma_diagnostic lives in analysis._eval_common (imported via the repo
+root, the seam the cloud eval driver uses). lda_concentration_readout lives in
+the SHIPPABLE spark_vi.eval.topic.concentration package -- NOT analysis -- so the
+cloud fit drivers can import it on Dataproc, where analysis/ is not on the
+executor path (importing it from analysis silently omitted the readout on exp
+0034). This import IS that regression guard: it fails if the helper is not in
+spark_vi. Pure-numpy helpers, no Spark.
 """
 import sys
 from pathlib import Path
@@ -13,7 +18,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root
 
-from analysis._eval_common import lda_concentration_readout, stm_sigma_diagnostic
+from analysis._eval_common import stm_sigma_diagnostic
+from spark_vi.eval.topic.concentration import lda_concentration_readout
 
 
 def test_identifies_runaway_topic_and_block():
