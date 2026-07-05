@@ -221,6 +221,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--global-scale-step-cap", type=float, default=1.2,
                    help="Trust-region cap on the per-iteration multiplicative change of τ² "
                         "(heuristic damping guard against the τ-β sharpening ratchet).")
+    p.add_argument("--sigma-diagonal-pin", type=float, default=1.0,
+                   help="Pin Sigma_ii to this constant generative scale c (Sigma = c*R); "
+                        "default 1.0 = the standard unit-diagonal pin. Set to a calibrated "
+                        "c* (ADR 0036) to (re)fit at that scale. Mutually exclusive with "
+                        "--estimate-sigma-diagonal / --estimate-global-scale (enforced by OnlineSTM).")
     p.add_argument("--spectral-init", action=argparse.BooleanOptionalAction,
                    default=True,
                    help="Anchor-word spectral beta seed (default on, insight 0030; "
@@ -439,6 +444,7 @@ def main() -> int:
                 estimate_sigma_diagonal=args.estimate_sigma_diagonal,
                 estimate_global_scale=args.estimate_global_scale,
                 global_scale_step_cap=args.global_scale_step_cap,
+                sigma_diagonal_pin=args.sigma_diagonal_pin,
                 spectral_init=args.spectral_init,
                 spectral_method=args.spectral_method,
                 spectral_d=args.spectral_d,

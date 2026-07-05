@@ -102,3 +102,20 @@ def test_parse_args_full_sigma_knobs_set():
         "--min-pair-support", "20",
     ])
     assert args.min_pair_support == 20
+
+
+def test_parse_args_sigma_diagonal_pin_default():
+    """sigma_diagonal_pin defaults to 1.0 (standard unit-diagonal pin)."""
+    from stm_bigquery_cloud import parse_args
+    args = parse_args(_REQUIRED_ARGS)
+    assert args.sigma_diagonal_pin == 1.0
+
+
+def test_parse_args_sigma_diagonal_pin_set():
+    """--sigma-diagonal-pin 5.0 parses and forwards correctly (calibrated
+    generative scale c*, ADR 0036)."""
+    from stm_bigquery_cloud import parse_args
+    args = parse_args(_REQUIRED_ARGS + [
+        "--sigma-diagonal-pin", "5.0",
+    ])
+    assert args.sigma_diagonal_pin == 5.0

@@ -862,6 +862,30 @@ class TestModelClassDispatch:
         args = rx.build_covariates_args(effective)
         assert "--known-sex-only" in args
 
+    def test_build_stm_args_sigma_diagonal_pin_emitted_when_set(
+            self, tmp_path, monkeypatch):
+        """sigma_diagonal_pin: 5.0 -> --sigma-diagonal-pin 5.0 (calibrated
+        constant generative scale c*, ADR 0036)."""
+        effective = self._base_stm_effective(monkeypatch)
+        effective["sigma_diagonal_pin"] = 5.0
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert "--sigma-diagonal-pin" in args
+        assert args[args.index("--sigma-diagonal-pin") + 1] == "5.0"
+
+    def test_build_stm_args_sigma_diagonal_pin_default_omitted(
+            self, tmp_path, monkeypatch):
+        """Absent sigma_diagonal_pin, or an explicit 1.0 (the standard
+        unit-diagonal pin), must NOT emit --sigma-diagonal-pin so default
+        runs stay byte-identical to pre-C1 argv."""
+        effective = self._base_stm_effective(monkeypatch)
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert "--sigma-diagonal-pin" not in args
+
+        effective2 = self._base_stm_effective(monkeypatch)
+        effective2["sigma_diagonal_pin"] = 1.0
+        args2 = rx.build_stm_args(effective2, str(tmp_path / "out"))
+        assert "--sigma-diagonal-pin" not in args2
+
 
 def test_noise_patterns_keep_driver_lines():
     lines = [
