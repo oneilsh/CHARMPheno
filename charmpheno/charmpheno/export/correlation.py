@@ -51,14 +51,17 @@ def build_correlation_json(R, identified, support, partition, kept_topic_ids,
     eta_scale_diagnostic: optional held-out calibration provenance for the
     shipped eta_scale -- method name, c* per holdout fraction (robustness
     across holdout_frac in {0.5, 0.8, 0.95}, probing stability as the visible
-    token set shrinks toward the small-seed regime), the c_grid searched, the
-    per-c mean held-out log-likelihoods at the shipped holdout, and the
-    superseded EM eta_scale value it replaced (corpus_heldout_scale_sweep_gated_rdd,
-    the validated unbiased estimator -- see HS-1 / insight 0038). A plain
-    JSON-serializable dict, emitted verbatim (not coerced): when not None,
-    "eta_scale_diagnostic": eta_scale_diagnostic. The dashboard itself ignores
-    this field (reads only "eta_scale"); it exists purely for transparency.
-    When None (default), the key is omitted entirely.
+    token set shrinks toward the small-seed regime), the c_grid searched, and
+    the per-c mean held-out log-likelihoods at the shipped holdout
+    (corpus_heldout_scale_sweep_gated_rdd, the validated unbiased estimator --
+    see HS-1 / insight 0038). This bounded grid sweep is the sole eta_scale
+    estimator in the export path; the iterated pooled EM
+    (corpus_eta_scale_gated_rdd) it superseded was biased and unstable and is
+    no longer used here (it remains in the library). A plain JSON-serializable
+    dict, emitted verbatim (not coerced): when not None, "eta_scale_diagnostic":
+    eta_scale_diagnostic. The dashboard itself ignores this field (reads only
+    "eta_scale"); it exists purely for transparency. When None (default), the
+    key is omitted entirely.
     """
     labels = partition.topic_labels()                 # length K, by original id
     order = [i for i in kept_topic_ids if i != reference_id]  # already block-ordered upstream

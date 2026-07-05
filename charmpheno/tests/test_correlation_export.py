@@ -355,8 +355,8 @@ def test_build_correlation_json_eta_scale_and_eta_var_coexist():
 def test_eta_scale_diagnostic_emitted():
     """eta_scale_diagnostic (Task HS-2) carries the held-out-LL calibration
     provenance for the shipped eta_scale (method, c* per holdout, grid,
-    per-c LLs, superseded EM value). Emitted verbatim, uncoerced, alongside
-    the (also emitted) eta_scale scalar."""
+    per-c LLs). Emitted verbatim, uncoerced, alongside the (also emitted)
+    eta_scale scalar."""
     part = TopicBlockPartition(group_var="g", background_k=2,
                                foreground=(("A", 1), ("B", 1)))
     R = np.array([[1.0, 0.3, 0.2, np.nan],
@@ -377,7 +377,6 @@ def test_eta_scale_diagnostic_emitted():
         "robustness_argmax_by_holdout": {"0.5": 5, "0.8": 5, "0.95": 5},
         "lls_at_shipped_holdout": {"1": -10.0, "2": -9.0},
         "argmax_at_grid_boundary": False,
-        "superseded_em_eta_scale": 3.67,
     }
     out = build_correlation_json(R, identified, support, part, kept,
                                  eta_scale=5.0, eta_scale_diagnostic=diag)
