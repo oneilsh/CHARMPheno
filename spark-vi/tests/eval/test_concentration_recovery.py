@@ -15,6 +15,7 @@ from spark_vi.eval.topic.concentration_recovery import (
     _predictive_loglik,
     corpus_concentration_summary,
     heldout_split,
+    lda_heldout_ll,
     lda_optimize_alpha,
     lda_recover_theta,
     make_shared_beta,
@@ -296,3 +297,70 @@ class TestHeldoutGoldStandard:
         err_c1 = abs(smeared_median - planted_median)
 
         assert err_argmax < err_c1
+        # The gold standard should PIN the concentration, not merely beat the
+        # c=1 baseline: recovery at the argmax c must land close to the
+        # planted median top_mass in absolute terms (observed ~0.0066 on this
+        # corpus; 0.06 leaves ample margin).
+        assert err_argmax < 0.06, (
+            f"argmax c={argmax_c} recovered median top_mass {recovered_median:.4f} "
+            f"vs planted {planted_median:.4f} (err {err_argmax:.4f})"
+        )
+
+
+class TestLDAHeldoutGoldStandard:
+    def test_lda_heldout_gold_standard_recovers_planted_concentration(self):
+        beta = make_shared_beta(K=6, V=300, seed=0)
+        docs, theta_true = plant_corpus(
+            beta, D=200, doc_len=80, mechanism="logistic_normal", level=7, seed=5,
+        )
+        planted_median = _median_top_mass(theta_true)
+
+        # LDA alpha runs the OPPOSITE direction from STM's c: SMALL alpha is
+        # peaky, LARGE alpha is diffuse.
+        knobs = [0.02, 0.1, 0.5, 1.0, 3.0]
+        result = sweep_heldout(docs, beta, method="lda", knobs=knobs, seed=0)
+        argmax_alpha = result["argmax_knob"]
+
+        if argmax_alpha == knobs[0]:
+            # Boundary argmax at the peakiest end is not a validated peak --
+            # widen the grid downward so the maximum lands interior.
+            knobs = [0.005, 0.01] + knobs
+            result = sweep_heldout(docs, beta, method="lda", knobs=knobs, seed=0)
+            argmax_alpha = result["argmax_knob"]
+
+        assert argmax_alpha != knobs[-1], "diffuse alpha=3.0 must not win on a peaky corpus"
+        assert argmax_alpha != knobs[0], "argmax at grid boundary -- not a validated peak"
+
+        theta_hat_argmax = lda_recover_theta(docs, beta, alpha=argmax_alpha)
+        theta_hat_diffuse = lda_recover_theta(docs, beta, alpha=3.0)
+
+        recovered_median = _median_top_mass(theta_hat_argmax)
+        diffuse_median = _median_top_mass(theta_hat_diffuse)
+
+        err_argmax = abs(recovered_median - planted_median)
+        err_diffuse = abs(diffuse_median - planted_median)
+
+        assert err_argmax < err_diffuse
+        assert err_argmax < 0.06, (
+            f"argmax alpha={argmax_alpha} recovered median top_mass "
+            f"{recovered_median:.4f} vs planted {planted_median:.4f} "
+            f"(err {err_argmax:.4f})"
+        )
+
+
+class TestLDAHeldoutLLSmoke:
+    def test_lda_heldout_ll_smoke(self):
+        beta = make_shared_beta(K=4, V=100, seed=0)
+        docs, _ = plant_corpus(
+            beta, D=20, doc_len=40, mechanism="logistic_normal", level=4, seed=2,
+        )
+
+        ll = lda_heldout_ll(docs, beta, alpha=0.1, seed=0)
+        assert isinstance(ll, float)
+        assert np.isfinite(ll)
+        assert ll < 0
+
+        result = sweep_heldout(docs, beta, method="lda", knobs=[0.1, 1.0], seed=0)
+        assert set(result["lls"].keys()) == {0.1, 1.0}
+        assert len(result["lls"]) == 2
+        assert result["argmax_knob"] in (0.1, 1.0)
