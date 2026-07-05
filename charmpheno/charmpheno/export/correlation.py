@@ -16,7 +16,8 @@ def _cell(x):
 
 
 def build_correlation_json(R, identified, support, partition, kept_topic_ids,
-                            reference_id=None, eta_var=None, eta_scale=None):
+                            reference_id=None, eta_var=None, eta_scale=None,
+                            eta_scale_diagnostic=None):
     """correlation.json over kept topics in block order; null for unidentified R.
 
     reference_id: if given, this topic id is dropped from topic_order (and
@@ -46,6 +47,18 @@ def build_correlation_json(R, identified, support, partition, kept_topic_ids,
     and R frozen (ADR 0036 addendum). When not None, emitted as
     "eta_scale": float(eta_scale); when None, the key is omitted entirely and
     the dashboard falls back to eta_var, then to the unit-diagonal R.
+
+    eta_scale_diagnostic: optional held-out calibration provenance for the
+    shipped eta_scale -- method name, c* per holdout fraction (robustness
+    across holdout_frac in {0.5, 0.8, 0.95}, probing stability as the visible
+    token set shrinks toward the small-seed regime), the c_grid searched, the
+    per-c mean held-out log-likelihoods at the shipped holdout, and the
+    superseded EM eta_scale value it replaced (corpus_heldout_scale_sweep_gated_rdd,
+    the validated unbiased estimator -- see HS-1 / insight 0038). A plain
+    JSON-serializable dict, emitted verbatim (not coerced): when not None,
+    "eta_scale_diagnostic": eta_scale_diagnostic. The dashboard itself ignores
+    this field (reads only "eta_scale"); it exists purely for transparency.
+    When None (default), the key is omitted entirely.
     """
     labels = partition.topic_labels()                 # length K, by original id
     order = [i for i in kept_topic_ids if i != reference_id]  # already block-ordered upstream
@@ -80,4 +93,6 @@ def build_correlation_json(R, identified, support, partition, kept_topic_ids,
         out["eta_var"] = [float(eta_var[i]) for i in order]
     if eta_scale is not None:
         out["eta_scale"] = float(eta_scale)
+    if eta_scale_diagnostic is not None:
+        out["eta_scale_diagnostic"] = eta_scale_diagnostic
     return out

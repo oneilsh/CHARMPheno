@@ -764,15 +764,87 @@ def main(argv: list[str] | None = None) -> int:
                                     reference=reference_id, sample_fraction=None,
                                 )
                             log.info("STM: eta_scale computed (c=%.4f).", eta_scale)
+
+                            # Held-out-LL calibration (Task HS-2): supersedes the
+                            # EM eta_scale above, which is a biased estimator
+                            # (converged to c~3.67; see insight 0038). The
+                            # held-out-predictive-LL sweep over the generative
+                            # scale (corpus_heldout_scale_sweep_gated_rdd,
+                            # HS-1/commit e22bcae) is validated unbiased,
+                            # including in this gated setting. We sweep 3
+                            # holdout fractions (0.5 shipped; 0.8/0.95 probe
+                            # robustness as the visible token set shrinks toward
+                            # the small-seed regime) and SHIP the holdout=0.5
+                            # argmax as eta_scale, keeping the EM value only as
+                            # "superseded_em_eta_scale" in the diagnostic + a
+                            # log line. Enhancement-only: any failure here
+                            # (import, E-step error, etc.) falls back to the EM
+                            # eta_scale computed above -- never fatal, never
+                            # aborts the build.
+                            em_value = eta_scale
+                            eta_scale_diag = None
+                            try:
+                                from spark_vi.mllib.topic.stm import (
+                                    corpus_heldout_scale_sweep_gated_rdd,
+                                )
+                                C_GRID = [1, 2, 3, 5, 8, 12, 20]
+                                HOLDOUTS = [0.5, 0.8, 0.95]
+                                robustness = {}
+                                lls_shipped = None
+                                with _phase("eta_scale (held-out-LL calibration)"):
+                                    for hf in HOLDOUTS:
+                                        sweep = corpus_heldout_scale_sweep_gated_rdd(
+                                            doc_rdd, result.global_params, stm_partition,
+                                            c_grid=C_GRID, holdout_frac=hf,
+                                            reference=reference_id, seed=0,
+                                        )
+                                        robustness[str(hf)] = sweep["argmax_c"]
+                                        if hf == 0.5:
+                                            lls_shipped = {
+                                                str(k): float(v)
+                                                for k, v in sweep["lls"].items()
+                                            }
+                                c_star = robustness["0.5"]
+                                at_boundary = c_star in (C_GRID[0], C_GRID[-1])
+                                if at_boundary:
+                                    log.warning(
+                                        "STM: held-out c*=%s at grid BOUNDARY %s "
+                                        "-- widen the grid and re-run (calibrated "
+                                        "scale is not an interior maximum).",
+                                        c_star, C_GRID)
+                                eta_scale = float(c_star)   # SHIP the held-out estimate
+                                eta_scale_diag = {
+                                    "method": "heldout_ll_gated",
+                                    "c_star": float(c_star),
+                                    "holdout_frac_shipped": 0.5,
+                                    "c_grid": C_GRID,
+                                    "robustness_argmax_by_holdout": robustness,
+                                    "lls_at_shipped_holdout": lls_shipped,
+                                    "argmax_at_grid_boundary": bool(at_boundary),
+                                    "superseded_em_eta_scale": (
+                                        float(em_value) if em_value is not None else None),
+                                }
+                                log.info(
+                                    "STM: held-out c*=%.4f (holdout 0.5); "
+                                    "robustness=%s; EM was %s.",
+                                    c_star, robustness, em_value)
+                            except Exception as exc:  # enhancement-only: fall back to EM
+                                log.warning(
+                                    "STM: held-out calibration failed (%s); "
+                                    "keeping EM eta_scale=%s.", exc, em_value)
+                                eta_scale = em_value
+                                eta_scale_diag = None
                         except Exception as exc:  # enhancement-only: never fatal
                             log.warning("STM: eta_scale computation failed (%s); "
                                         "correlation.json omits eta_scale (dashboard "
                                         "falls back to eta_var/unit-diagonal R).", exc)
                             eta_scale = None
+                            eta_scale_diag = None
 
                         corr = build_correlation_json(
                             R, ident, n_pairs, stm_partition, kept_ids,
-                            reference_id=reference_id, eta_scale=eta_scale)
+                            reference_id=reference_id, eta_scale=eta_scale,
+                            eta_scale_diagnostic=eta_scale_diag)
                         (out_dir / "correlation.json").write_text(
                             _json.dumps(corr, indent=2))
                         log.info("STM: wrote correlation.json (topics=%d, "

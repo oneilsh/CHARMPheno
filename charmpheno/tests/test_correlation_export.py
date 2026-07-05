@@ -350,3 +350,59 @@ def test_build_correlation_json_eta_scale_and_eta_var_coexist():
                                  eta_var=eta_var, eta_scale=2.1)
     assert out["eta_scale"] == 2.1
     assert out["eta_var"] == [0.0, 1.5, 2.5, 3.5]
+
+
+def test_eta_scale_diagnostic_emitted():
+    """eta_scale_diagnostic (Task HS-2) carries the held-out-LL calibration
+    provenance for the shipped eta_scale (method, c* per holdout, grid,
+    per-c LLs, superseded EM value). Emitted verbatim, uncoerced, alongside
+    the (also emitted) eta_scale scalar."""
+    part = TopicBlockPartition(group_var="g", background_k=2,
+                               foreground=(("A", 1), ("B", 1)))
+    R = np.array([[1.0, 0.3, 0.2, np.nan],
+                  [0.3, 1.0, 0.1, np.nan],
+                  [0.2, 0.1, 1.0, np.nan],
+                  [np.nan, np.nan, np.nan, 1.0]])
+    identified = np.array([[1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [0, 0, 0, 1]], dtype=bool)
+    support = np.full((4, 4), 300.0)
+    kept = [0, 1, 2, 3]
+    diag = {
+        "method": "heldout_ll_gated",
+        "c_star": 5.0,
+        "holdout_frac_shipped": 0.5,
+        "c_grid": [1, 2, 3, 5, 8, 12, 20],
+        "robustness_argmax_by_holdout": {"0.5": 5, "0.8": 5, "0.95": 5},
+        "lls_at_shipped_holdout": {"1": -10.0, "2": -9.0},
+        "argmax_at_grid_boundary": False,
+        "superseded_em_eta_scale": 3.67,
+    }
+    out = build_correlation_json(R, identified, support, part, kept,
+                                 eta_scale=5.0, eta_scale_diagnostic=diag)
+    assert out["eta_scale_diagnostic"] == diag
+    assert out["eta_scale"] == 5.0
+
+
+def test_eta_scale_diagnostic_omitted_when_none():
+    """eta_scale_diagnostic=None (and the default, no kwarg) omits the
+    'eta_scale_diagnostic' key entirely (mirrors eta_scale/eta_var omission)."""
+    part = TopicBlockPartition(group_var="g", background_k=2,
+                               foreground=(("A", 1), ("B", 1)))
+    R = np.array([[1.0, 0.3, 0.2, np.nan],
+                  [0.3, 1.0, 0.1, np.nan],
+                  [0.2, 0.1, 1.0, np.nan],
+                  [np.nan, np.nan, np.nan, 1.0]])
+    identified = np.array([[1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [1, 1, 1, 0],
+                           [0, 0, 0, 1]], dtype=bool)
+    support = np.full((4, 4), 300.0)
+    kept = [0, 1, 2, 3]
+    out_default = build_correlation_json(R, identified, support, part, kept,
+                                         eta_scale=5.0)
+    out_none = build_correlation_json(R, identified, support, part, kept,
+                                      eta_scale=5.0, eta_scale_diagnostic=None)
+    assert "eta_scale_diagnostic" not in out_default
+    assert "eta_scale_diagnostic" not in out_none
