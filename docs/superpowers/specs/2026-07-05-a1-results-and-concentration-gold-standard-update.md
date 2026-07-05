@@ -123,6 +123,38 @@ being too low plus LDA co-fitting a sharper β (untestable with β frozen). The 
 (a) run held-out-LL on the REAL corpus to pin the scale, and (b) a synthetic run where each
 family CO-FITS β (rather than freezing it at truth) to isolate the β-learning contribution.
 
+## 4.6. UPDATE — gated validation (the production model is gated)
+
+§4.5 was non-gated. The production model applies hard topic-masking: each document may express
+only a shared background block plus its own group's foreground block. Because that masking is
+exactly what discards the variance scale, we re-ran the plant-and-recover under gating: plant a
+GATED corpus at a known scalar scale (η drawn over each document's allowed set), then sweep the
+held-out-LL both GATED (allowed = the document's true block) and NON-gated (all topics allowed)
+on the SAME documents, at two vocabulary-overlap levels (disjoint per-topic vocabulary, and a
+shared-pool β with pairwise topic-support Jaccard ≈ 0.59).
+
+Two results, both robust across the overlap levels:
+
+1. **Gating makes the generative SCALE identifiable.** The GATED held-out-LL curve peaks
+   sharply at the true scale and its argmax recovers it (abs error in recovered top_mass ≤
+   0.028 across all cells). The NON-gated curve on the same documents is nearly FLAT — its
+   argmax runs off to the top of the grid (an order of magnitude past the truth) in every cell.
+   So the hard mask is what makes the scale estimable from held-out prediction; without it the
+   likelihood barely distinguishes scales. This is a point in favor of the gated design beyond
+   its original stability motivation, and it means the real-corpus calibration (which is gated)
+   is on much firmer footing than a non-gated one would be.
+
+2. **Gating barely changes the recovered CONCENTRATION.** Non-gated leakage of mass onto
+   non-allowed topics stays small even at 59% vocabulary overlap (median leaked mass 0.0015 →
+   0.0053; effective-#topics essentially unchanged), because each topic keeps a distinctive
+   signature-term block that identifies it without a hard gate. So gating is load-bearing for
+   scale IDENTIFIABILITY, not for protecting the concentration estimate. (Caveat: this used a
+   50/50 shared/signature split; forcing genuine leakage would need a larger shared-mass
+   fraction or smaller signature blocks — a knob we can push if you think it matters.)
+
+Net: the held-out-LL calibration transfers to the gated setting cleanly, and gating is what
+makes the scale well-posed — so running it on the real gated corpus is sound.
+
 ## 5. Questions for the reviewer
 
 1. **Held-out prediction now recovers the known concentration synthetically (§4.5) at the real
