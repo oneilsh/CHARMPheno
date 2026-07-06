@@ -55,6 +55,17 @@ tracks the true (planted) membership under misspecification. THAT is real robust
 because it can fail for a modeling reason, not just a bug. We'd park it as a follow-on rather than a
 demo blocker, but it's the piece of the plant worth keeping in spirit.
 
+## One hard constraint that removes a piece of your design
+
+We can only export per-topic AGGREGATES (and k-anon-safe distributions — binned, small cells
+suppressed); no per-document quantities ever leave. So the per-document presence distribution you
+suggested shipping is out. Two upshots, both in our favor: it MOOTS your per-document MC-budget point
+(the ~±0.09-at-S=32 per-document error just averages out in the corpus mean, so S≈32–64 is plenty for
+the aggregate), and the three real-corpus diagnostics above are all computed inside the pass and
+emitted as per-topic scalars (a floor, a length-correlation, a signature-match), never as rows. If we
+ever want to convey the spread of per-document presence we'd ship a k-anon-safe per-topic histogram,
+the same treatment the θ̂ distribution already gets.
+
 ## What we'd value your read on
 
 - Is the real-corpus triangle (floor on non-containing documents / length-correlation /

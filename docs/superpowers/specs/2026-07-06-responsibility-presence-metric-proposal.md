@@ -181,12 +181,15 @@ mode) is compressed at the unit fit scale, so it must be computed at the calibra
 the ADR-0034 addendum applied to the covariance. It silently regresses — pin it in code, not just the
 doc.
 
-### 7. Monte-Carlo budget
+### 7. Monte-Carlo budget — under the no-per-document-export constraint
 
-S ≈ 32–64 samples is fine for the corpus-level MEAN presence/depth. But we should also SHIP the
-per-document presence distribution (it is the input to any future per-document consumer), and the
-per-document MC error at S=32 is ~±0.09 on a probability near 0.5 — so either bump S for the shipped
-per-document values or quote the MC error alongside them.
+Hard data-safety rule: we export only per-topic AGGREGATES (and k-anon-safe distributions), NEVER
+per-document quantities. So there are no shipped per-document presence values — which MOOTS the
+per-document MC concern (the ~±0.09-at-S=32 per-document error averages out in the corpus mean). S ≈
+32–64 is therefore plenty for the corpus-level presence/depth means. If we want to convey the SPREAD
+of per-document presence, ship a k-anon-safe per-topic presence HISTOGRAM (binned over documents,
+small cells suppressed — exactly the treatment the θ̂ histogram already gets), never the raw
+per-document values.
 
 ### 8. Validation: a FACTORIAL plant
 
@@ -208,7 +211,11 @@ context), a feature a consumer should be able to see quantified.
    per token (log space), accumulate the per-sample ≥1-token probability AND the per-sample attributed
    share; average → per-document (presence, depth); accumulate per-topic corpus sums (mapPartitions +
    treeReduce). Foreground topics accumulate WITHIN their group.
-2. Export: per-topic (presence, depth) with the correct denominator labeled; optionally the
-   per-document presence distribution (with adequate S / MC error).
+2. Export: per-topic (presence, depth) AGGREGATES with the correct denominator labeled; optionally a
+   k-anon-safe per-topic presence HISTOGRAM (binned over documents, small cells suppressed — like the
+   θ̂ histogram). NO per-document export (data-safety) — aggregates and k-anon distributions only.
+   The three validation diagnostics (§8/real-corpus) are likewise computed in-pass and emitted as
+   per-topic aggregates (a floor scalar, a length-correlation scalar, a signature-match scalar),
+   never per-document rows.
 3. Validation harness: the factorial synthetic plant (§8) with the false-presence-floor readout.
 4. Frontend: the (presence, depth) plane as the readout; drop the τ threshold from the headline.
