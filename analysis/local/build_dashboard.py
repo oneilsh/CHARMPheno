@@ -168,6 +168,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Adapter normalizes LDA/HDP/etc. to a uniform DashboardExport
     export = adapt(result, hdp_top_k=args.hdp_top_k)
+    # Suppression threshold to REPORT as theta_histogram_min_count. Defaults to
+    # the LDA fit-time value (fit_lda's compute_theta_aggregates default = 20);
+    # the STM build-step below overrides it to this run's k-anon k_thresh, since
+    # that path suppresses the histogram at k_thresh here.
+    theta_hist_min_count = 20
 
     # Load the vocab + BOW (Spark) up front: the STM correlation block below
     # reuses bow_df for the eta_scale E-step join, and corpus-stats / NPMI reuse it
@@ -437,6 +442,8 @@ def main(argv: list[str] | None = None) -> int:
                 theta_percentiles=_parse_theta_percentiles(
                     agg["theta_percentiles"])[kept],
             )
+            # Report the threshold the histogram was actually suppressed at.
+            theta_hist_min_count = k_thresh
             log.info(
                 "STM: computed per-doc theta histogram (sampled_docs=%d, "
                 "kept_topics=%d).", theta_arr.shape[0], len(kept))
@@ -518,6 +525,7 @@ def main(argv: list[str] | None = None) -> int:
         theta_histogram=hist,
         theta_percentiles=pct,
         topic_indices=export.topic_indices.tolist(),
+        min_count=theta_hist_min_count,
         labels=None,
     )
     write_corpus_stats_sidecar(stats, args.out_dir / "corpus_stats.json", v_displayed=v_disp)

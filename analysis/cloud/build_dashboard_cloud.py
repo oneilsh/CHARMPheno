@@ -564,6 +564,11 @@ def main(argv: list[str] | None = None) -> int:
                 export = adapt(result, hdp_top_k=args.hdp_top_k)
             K_disp, V_full = export.beta.shape
             print(f"[driver]   K_display={K_disp} V_full={V_full}", flush=True)
+            # Suppression threshold to REPORT as theta_histogram_min_count.
+            # Defaults to the LDA fit-time value (compute_theta_aggregates
+            # default = 20); the STM theta-histogram phase below overrides it to
+            # this run's k-anon k_thresh, the threshold it suppresses at here.
+            theta_hist_min_count = 20
 
         with _phase("concept name + domain lookup"):
             vocab_ids_int = [int(c) for c in vocab_list]
@@ -690,6 +695,8 @@ def main(argv: list[str] | None = None) -> int:
                         theta_percentiles=_parse_theta_percentiles(
                             agg["theta_percentiles"])[kept],
                     )
+                    # Report the threshold the histogram was actually suppressed at.
+                    theta_hist_min_count = k_thresh
                     log.info(
                         "STM: computed per-doc theta histogram "
                         "(sampled_docs=%d, kept_topics=%d).",
@@ -740,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
                 theta_histogram=hist,
                 theta_percentiles=pct,
                 topic_indices=export.topic_indices.tolist(),
+                min_count=theta_hist_min_count,
                 labels=None,
             )
             if is_stm:
