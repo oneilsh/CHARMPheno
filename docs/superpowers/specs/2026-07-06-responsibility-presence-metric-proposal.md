@@ -1,5 +1,12 @@
 # Proposal — a threshold-free, uncertainty-aware "presence" quantity from the model itself
 
+> **SUPERSEDED (2026-07-06) by
+> `2026-07-06-predictive-gain-presence-depth-prominence-design.md`.** Fable's second review pivoted
+> the metric from a functional of the (biased) point posterior to a predictive CONTRAST
+> (leave-one-topic-out held-out predictive gain), which dissolves the floor / uncertainty / saturation
+> patches instead of adding to them. This doc is kept as the record of how we got there (and carries
+> Fable's first review); the predictive-gain doc is the design we build.
+
 Companion to update 4. Data shape as before: documents are user-day bag-of-words aggregates; a
 gated logistic-normal topic model (background block ∪ per-group foreground blocks, hard-masked);
 per-document θ = softmax(η), η ~ Normal(Γᵀx, Σ). We want to report, per topic k, "what fraction of
