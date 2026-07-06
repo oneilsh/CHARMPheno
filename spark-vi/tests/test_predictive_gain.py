@@ -645,3 +645,215 @@ class TestCorpusPredictiveGainGatedRddParity:
         empty = spark.sparkContext.parallelize([], numSlices=1)
         with pytest.raises(ValueError):
             corpus_predictive_gain_gated_rdd(empty, gp, part, c=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: the warm-start one-Newton-step DOWNDATE (fast=True) + the real-data
+# cold-solve discrepancy audit.
+#
+# The fast path re-scores each topic ablation by polishing the full mode with a
+# few warm-started Newton steps instead of a cold L-BFGS re-solve, with a
+# fallback to the exact cold solve when the warm-start Newton stalls (a dropped
+# high-mass topic pushing the objective into its non-convex region). It is an
+# APPROXIMATION validated against the COLD oracle.
+#
+# The agreement fixtures below deliberately use GENUINE-MIXTURE documents (held
+# tokens explained by several remaining topics), the regime where the cold
+# L-BFGS oracle actually reaches the mode and is therefore a trustworthy
+# reference. (On the single-planted-topic ``synthetic_gated_corpus`` docs,
+# removing the sole generating topic leaves a pathologically steep objective on
+# which cold L-BFGS-B itself terminates abnormally at a non-stationary point --
+# there the downdate can be MORE accurate than the oracle, and cold-vs-fast
+# "disagreement" is really cold being wrong. Surfacing exactly that on real
+# data is the job of ``predictive_gain_downdate_audit``.)
+# ---------------------------------------------------------------------------
+
+
+def _gated_mixture_model():
+    """A 4-topic gated model (2 background + 1 foreground per group a/b) on a
+    disjoint 12-word vocab at MODERATE concentration (lambda 50 on-signature).
+    Returns (gp, part, ia, ib) where ia/ib are the foreground topic indices for
+    groups a/b. Moderate lambda + genuine-mixture documents keep the ablated
+    per-doc objective well-conditioned, so the cold L-BFGS oracle converges to
+    the true mode and is a valid reference for the downdate."""
+    part = TopicBlockPartition(
+        group_var="g", background_k=2, foreground=(("a", 1), ("b", 1)))
+    K = part.K
+    V = 12
+    lam = np.full((K, V), 0.05)
+    lam[0, 0:3] = 50.0   # background topic 0 -> words 0,1,2
+    lam[1, 3:6] = 50.0   # background topic 1 -> words 3,4,5
+    ia = int(part.block_indices("a")[0])
+    ib = int(part.block_indices("b")[0])
+    lam[ia, 6:9] = 50.0  # group-a foreground -> words 6,7,8
+    lam[ib, 9:12] = 50.0  # group-b foreground -> words 9,10,11
+    gp = {"lambda": lam, "Gamma": np.zeros((1, K)), "Sigma": np.eye(K)}
+    return gp, part, ia, ib
+
+
+def _mix_doc(indices, counts, groups):
+    idx = np.asarray(indices, dtype=np.int32)
+    cnts = np.asarray(counts, dtype=np.float64)
+    return STMDocument(
+        indices=idx, counts=cnts, length=int(cnts.sum()),
+        x=np.array([1.0]), groups=groups)
+
+
+def _three_topic_dominant_doc():
+    """A non-gated 3-topic disjoint-sharp model and a document DOMINATED by
+    topic 0 (theta_full[0] ~ 0.71) but with real minority mass on topics 1,2.
+    Removing the dominant topic forces a large, locally non-convex softmax
+    renormalization that a SINGLE Newton step under-captures -- the fixture the
+    high-mass multi-step trigger is exercised on."""
+    K3, V3 = 3, 6
+    lam = np.full((K3, V3), 0.01)
+    lam[0, 0:2] = 1000.0
+    lam[1, 2:4] = 1000.0
+    lam[2, 4:6] = 1000.0
+    gp = {"lambda": lam, "Gamma": np.zeros((1, K3)), "Sigma": np.eye(K3)}
+    part = TopicBlockPartition(group_var="g", background_k=K3, foreground=())
+    doc = _mix_doc([0, 1, 2, 3, 4, 5], [20, 20, 3, 3, 2, 2], frozenset())
+    return gp, part, doc
+
+
+class TestFastDowndateAgreesWithCold:
+    """The GATE: fast=True (warm-start Newton downdate) must reproduce the COLD
+    oracle's per-topic Delta within tolerance -- tightly for high-mass topics
+    (where the multi-step trigger does its work)."""
+
+    def test_fast_matches_cold_sharp_two_topic_fixture(self):
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        gp = _sharp_global_params()
+        part = _non_gated_partition()
+        doc = _doc([0, 1, 2, 3])
+
+        cold = doc_predictive_gain(doc, gp, part, c=_C_WEAK_PRIOR, seed=0, fast=False)
+        fast = doc_predictive_gain(doc, gp, part, c=_C_WEAK_PRIOR, seed=0, fast=True)
+
+        assert cold is not None and fast is not None
+        np.testing.assert_allclose(fast.delta, cold.delta, atol=1e-2)
+        for p, k in enumerate(cold.allowed):
+            if cold.theta_full[k] > 0.2:
+                assert abs(fast.delta[p] - cold.delta[p]) < 3e-3
+
+    def test_fast_matches_cold_gated_mixture_all_high_mass(self):
+        """A gated group-a document that is a genuine 3-way mixture of the two
+        background topics and group a's foreground topic (each theta ~1/3, all
+        above the high-mass bound). Every ablation forces a real
+        renormalization, so this exercises the multi-step trigger on a GATED
+        doc; the downdate must still track cold to the tight high-mass
+        tolerance."""
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        gp, part, ia, ib = _gated_mixture_model()
+        # words 0,1 (bg0), 3,4 (bg1), 6,7 (fg a) -> a genuine 3-topic mixture.
+        doc = _mix_doc([0, 1, 3, 4, 6, 7], [8, 8, 6, 6, 7, 7], frozenset({"a"}))
+
+        for c in (0.5, 1.0, 3.0):
+            cold = doc_predictive_gain(doc, gp, part, c=c, seed=0, fast=False)
+            fast = doc_predictive_gain(doc, gp, part, c=c, seed=0, fast=True)
+            assert cold is not None and fast is not None
+            # gated: only background + group-a foreground are allowed.
+            assert set(cold.allowed.tolist()) == {0, 1, ia}
+            np.testing.assert_allclose(fast.delta, cold.delta, atol=1e-2)
+            # all three allowed topics carry > 0.2 mass here -> tight tolerance.
+            for p, k in enumerate(cold.allowed):
+                assert cold.theta_full[k] > 0.2
+                assert abs(fast.delta[p] - cold.delta[p]) < 3e-3
+
+
+class TestFastFalseIsUnchanged:
+    """fast=False must be byte-identical to the default (Task-1) behavior."""
+
+    def test_fast_false_byte_identical_to_default(self):
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        gp = _sharp_global_params()
+        part = _non_gated_partition()
+        doc = _doc([0, 1, 2, 3])
+
+        default = doc_predictive_gain(doc, gp, part, c=_C_WEAK_PRIOR, seed=0)
+        explicit = doc_predictive_gain(
+            doc, gp, part, c=_C_WEAK_PRIOR, seed=0, fast=False)
+
+        np.testing.assert_array_equal(default.delta, explicit.delta)
+        np.testing.assert_array_equal(default.dedup_delta, explicit.dedup_delta)
+        assert default.ll_full == explicit.ll_full
+        np.testing.assert_array_equal(default.theta_full, explicit.theta_full)
+
+
+class TestFastHighMassMultiStepIsLoadBearing:
+    """The high-mass multi-step trigger must do real work: on a document
+    dominated by one topic, ablating that topic with a SINGLE Newton step
+    leaves a materially larger cold-vs-fast discrepancy than with the default
+    3-step cap. (Vacuous only if one step already matched -- the fixture is
+    engineered so it does not.)"""
+
+    def test_three_vs_one_step_on_dominant_topic(self):
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        gp, part, doc = _three_topic_dominant_doc()
+
+        cold = doc_predictive_gain(doc, gp, part, c=1.0, seed=0, fast=False)
+        fast1 = doc_predictive_gain(
+            doc, gp, part, c=1.0, seed=0, fast=True, max_fast_steps=1)
+        fast3 = doc_predictive_gain(
+            doc, gp, part, c=1.0, seed=0, fast=True, max_fast_steps=3)
+
+        p0 = int(np.nonzero(cold.allowed == 0)[0][0])
+        assert cold.theta_full[0] > 0.2   # topic 0 is the dominant, high-mass topic
+
+        disc1 = abs(fast1.delta[p0] - cold.delta[p0])
+        disc3 = abs(fast3.delta[p0] - cold.delta[p0])
+
+        assert disc1 > 1e-5             # non-vacuous: one step is materially off
+        assert disc3 < 0.1 * disc1      # three steps close most of that gap
+
+
+class TestDowndateAudit:
+    """``predictive_gain_downdate_audit`` returns the per-topic aggregate
+    cold-vs-fast discrepancy on a small in-memory corpus."""
+
+    @staticmethod
+    def _mixture_corpus(n=12, seed=0):
+        gp, part, ia, ib = _gated_mixture_model()
+        rng = np.random.default_rng(seed)
+        docs = []
+        for _ in range(n):
+            g = "a" if rng.random() < 0.5 else "b"
+            fgw = [6, 7] if g == "a" else [9, 10]
+            idx = [0, 1, 3, 4] + fgw
+            cnts = rng.integers(4, 10, size=len(idx)).astype(float)
+            docs.append(_mix_doc(idx, cnts, frozenset({g})))
+        return docs, gp, part
+
+    def test_audit_returns_small_per_topic_discrepancy(self):
+        from spark_vi.mllib.topic.predictive_gain import predictive_gain_downdate_audit
+
+        docs, gp, part = self._mixture_corpus()
+        K = part.K
+
+        audit = predictive_gain_downdate_audit(docs, gp, part, c=1.0, seed=0)
+
+        assert audit["max_abs_discrepancy"].shape == (K,)
+        assert audit["mean_abs_discrepancy"].shape == (K,)
+        assert isinstance(audit["max_abs_overall"], float)
+        assert audit["n_docs_audited"] > 0
+        assert audit["n_docs_audited"] == len(docs)
+        # On this well-conditioned (cold-reliable) corpus the downdate tracks
+        # the oracle very tightly.
+        assert audit["max_abs_overall"] < 5e-2
+
+    def test_audit_skips_degenerate_docs(self):
+        """A 1-token document (degenerate split -> both paths return None) must
+        not be audited or crash the aggregation."""
+        from spark_vi.mllib.topic.predictive_gain import predictive_gain_downdate_audit
+
+        docs, gp, part = self._mixture_corpus(n=4)
+        tiny = STMDocument(
+            indices=np.array([0], dtype=np.int32), counts=np.array([1.0]),
+            length=1, x=np.array([1.0]), groups=frozenset({"a"}))
+        audit = predictive_gain_downdate_audit(
+            docs + [tiny], gp, part, c=1.0, seed=0)
+        assert audit["n_docs_audited"] == len(docs)  # the tiny doc is skipped

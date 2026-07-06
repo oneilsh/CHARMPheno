@@ -330,6 +330,125 @@ def _stm_doc_inference(
     return eta_hat, nu_d, int(result.nit)
 
 
+# Maximum step-halvings in the _stm_doc_newton_polish backtracking line search.
+# The Newton direction -H_free^{-1} g is a guaranteed descent direction (H_free
+# is made SPD by _spd_inverse), so a small enough step always decreases the
+# objective; 25 halvings (down to ~3e-8 of the raw step) is an ample safety
+# margin that in practice trips only for the first step off a dropped
+# high-mass topic. This is a stability guard, not a fitted constant.
+_NEWTON_POLISH_MAX_BACKTRACK = 25
+
+
+def _stm_doc_newton_polish(
+    *,
+    indices: np.ndarray,
+    counts: np.ndarray,
+    expElogbeta: np.ndarray,
+    Gamma: np.ndarray,
+    Sigma_inv_allowed: np.ndarray,
+    x: np.ndarray,
+    allowed: np.ndarray,
+    reference: int | None,
+    eta_warm: np.ndarray,
+    max_steps: int,
+    tol: float,
+) -> tuple[np.ndarray, int]:
+    """Warm-start Newton "downdate" of the per-doc MAP over a reduced allowed set.
+
+    This is the FAST, APPROXIMATE sibling of ``_stm_doc_inference``'s cold
+    L-BFGS solve, built for the leave-one-topic-out predictive-gain ablation
+    (spark_vi/mllib/topic/predictive_gain.py): given the full-allowed-set mode
+    ``eta_warm`` (already solved once, cold), it re-finds the mode over a
+    SMALLER allowed set (one topic removed) by taking a few Newton steps
+    warm-started at ``eta_warm[allowed]`` instead of re-running L-BFGS from
+    η=0. It reuses the SAME analytic primitives and the SAME reference-pinning
+    sub-space/free-index structure ``_stm_doc_inference`` documents (pin the
+    reference at η=0, delete its row/col so the reduced grad/Hessian are the
+    corresponding sub-blocks of the full ones), differing ONLY in optimizer:
+    warm-started damped Newton here vs. cold L-BFGS there.
+
+    APPROXIMATION, not oracle. Dropping a topic changes the softmax
+    normalization of θ = softmax(η) over the surviving topics; a single Newton
+    step from the full mode captures that renormalization only to first order,
+    so it is EXACT only in the limit of steps. ``_stm_doc_inference`` (the cold
+    solve) therefore remains the correctness oracle this path is validated
+    against (see tests/test_predictive_gain.py's fast-vs-cold agreement gate).
+    For a low-mass topic one step is essentially exact (removing it barely
+    moves the mode); for a high-mass topic the move is large and locally
+    non-convex, which is why the caller raises ``max_steps`` for those and why
+    the line search below is needed.
+
+    Damping (Armijo backtracking). A raw full Newton step from the full mode
+    can OVERSHOOT when the objective is locally non-convex (removing a high-θ
+    topic forces a large move). Because ``_spd_inverse`` makes ``H_free`` SPD,
+    -H_free^{-1} g is always a descent direction, so halving the step until the
+    negative-log-joint actually decreases (Armijo, same spirit as the recorded-
+    posterior line search elsewhere in this codebase) guarantees monotone
+    progress toward the mode and never diverges. If no decrease is found within
+    ``_NEWTON_POLISH_MAX_BACKTRACK`` halvings the point is treated as converged
+    (gradient ≈ 0) and the loop stops.
+
+    Returns ``(eta_hat, n_accepted)``: a length-K ``eta_hat`` with the polished
+    η on ``allowed`` and -inf off it — the SAME convention as
+    ``_stm_doc_inference`` — plus ``n_accepted``, the number of Newton steps
+    the line search actually accepted (each strictly reduced the objective).
+    ``n_accepted == 0`` is the diagnostic the caller uses to detect a STALL:
+    the warm start sits in a region where no damped Newton step descends, which
+    empirically coincides with a dropped HIGH-mass topic pushing the objective
+    into the non-convex/steep region where the cold L-BFGS oracle itself
+    terminates at a start-dependent early point (line-search abort). A warm
+    start in a DIFFERENT basin than the oracle's η=0 start cannot reproduce the
+    oracle there, so the caller falls back to the exact cold solve on a stall
+    (see ``doc_predictive_gain``); when ``n_accepted > 0`` the polish tracks the
+    cold oracle to a tight tolerance. ``eta_warm`` is a full-K vector whose
+    ``allowed`` entries (a subset of the full mode's allowed set) are finite;
+    ``reference`` (if given) MUST be in ``allowed`` (the caller guarantees it,
+    exactly as ``_stm_doc_inference`` requires).
+    """
+    K = expElogbeta.shape[0]
+    sub_expElogbeta = expElogbeta[allowed]
+    sub_Gamma = Gamma[:, allowed]
+    n_sub = allowed.shape[0]
+    common = dict(
+        indices=indices, counts=counts, expElogbeta=sub_expElogbeta,
+        Gamma=sub_Gamma, Sigma_inv=Sigma_inv_allowed, x=x,
+    )
+
+    eta_sub = np.array(eta_warm[allowed], dtype=np.float64)   # copy of the warm start
+    if reference is None:
+        free = np.arange(n_sub, dtype=np.int64)
+    else:
+        ref_pos = int(np.searchsorted(allowed, reference))
+        eta_sub[ref_pos] = 0.0                                # pin the reference at η=0
+        free = np.array([i for i in range(n_sub) if i != ref_pos], dtype=np.int64)
+
+    n_accepted = 0
+    for _ in range(max_steps):
+        g = _stm_neg_log_joint_grad(eta_sub, **common)[free]
+        H_free = _stm_neg_log_joint_hessian(eta_sub, **common)[np.ix_(free, free)]
+        step = _spd_inverse(H_free) @ g                       # descent dir = -step
+        f0 = _stm_neg_log_joint(eta_sub, **common)
+        t = 1.0
+        accepted = False
+        for _bt in range(_NEWTON_POLISH_MAX_BACKTRACK + 1):
+            eta_try = eta_sub.copy()
+            eta_try[free] = eta_sub[free] - t * step
+            if _stm_neg_log_joint(eta_try, **common) <= f0:
+                accepted = True
+                break
+            t *= 0.5
+        if not accepted:
+            break                                             # no descent: stall/converged
+        eta_sub = eta_try
+        n_accepted += 1
+        if np.linalg.norm(t * step) < tol:
+            break
+
+    eta_hat = np.full(K, -np.inf, dtype=np.float64)
+    eta_hat[allowed] = eta_sub
+    return eta_hat, n_accepted
+
+
 class OnlineSTM(VIModel):
     """Online STM (prevalence-only) fittable by VIRunner.
 

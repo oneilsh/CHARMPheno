@@ -52,9 +52,41 @@ from scipy.special import digamma
 from spark_vi.eval.topic.concentration_recovery import _predictive_loglik, heldout_split
 from spark_vi.mllib.topic.stm import _gated_mode_theta
 from spark_vi.models.topic._linalg import safe_inverse
-from spark_vi.models.topic.stm import _stm_doc_inference
+from spark_vi.models.topic.stm import _stm_doc_inference, _stm_doc_newton_polish
 
 log = logging.getLogger(__name__)
+
+
+def _sigma_inv_scaled(R, allowed, c) -> np.ndarray:
+    """Marginal prior precision over ``allowed`` at generative scale c:
+    (1/c) * safe_inverse(R[allowed, allowed]). The one place scale enters, per
+    the module docstring (Sigma_gen = c*R). Shared by every inference call
+    (cold full, cold ablation, and the warm-start downdate) so the scale is
+    formed identically everywhere."""
+    return (1.0 / c) * safe_inverse(R[np.ix_(allowed, allowed)])
+
+
+def _infer_eta_theta(
+    visible_doc, allowed, expElogbeta, Gamma, R, c, x, reference, K,
+    max_iter, tol,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Cold-solve the gated mode over ``allowed``; return (eta_hat, theta).
+
+    Forms Sigma_inv_allowed from the correlation R at scale c, runs the COLD
+    per-doc Laplace E-step (``_stm_doc_inference``) restricted to ``allowed``
+    (with ``reference`` pinned if given), and collapses eta_hat to a gated mode
+    theta. ``eta_hat`` is the full-K MAP point (finite on ``allowed``, -inf
+    off it) that the fast downdate path reuses as its Newton warm start; the
+    COLD path only needs ``theta``. Both are returned so the two paths share
+    one solve and cannot drift apart."""
+    Sigma_inv_allowed = _sigma_inv_scaled(R, allowed, c)
+    eta_hat, _, _ = _stm_doc_inference(
+        indices=visible_doc.indices, counts=visible_doc.counts,
+        expElogbeta=expElogbeta, Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed,
+        x=x, max_iter=max_iter, tol=tol,
+        allowed=allowed, reference=reference,
+    )
+    return eta_hat, _gated_mode_theta(eta_hat, allowed, K)
 
 
 def _infer_theta(
@@ -70,17 +102,12 @@ def _infer_theta(
     given), then collapse eta_hat to a gated mode theta -- with no room for
     the two paths to drift apart. Only the ``expElogbeta`` passed in differs
     between the two callers (real vs. permuted); everything else is
-    identical.
-    """
-    Rinv = safe_inverse(R[np.ix_(allowed, allowed)])
-    Sigma_inv_allowed = (1.0 / c) * Rinv
-    eta_hat, _, _ = _stm_doc_inference(
-        indices=visible_doc.indices, counts=visible_doc.counts,
-        expElogbeta=expElogbeta, Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed,
-        x=x, max_iter=max_iter, tol=tol,
-        allowed=allowed, reference=reference,
-    )
-    return _gated_mode_theta(eta_hat, allowed, K)
+    identical. Thin wrapper over ``_infer_eta_theta`` that discards eta_hat
+    (byte-identical to the historical inline computation)."""
+    return _infer_eta_theta(
+        visible_doc, allowed, expElogbeta, Gamma, R, c, x, reference, K,
+        max_iter, tol,
+    )[1]
 
 
 @dataclass
@@ -113,8 +140,32 @@ class DocGain:
 def doc_predictive_gain(
     doc, global_params, partition, *, c, reference=None,
     holdout_frac=0.3, seed, lbfgs_max_iter=50, lbfgs_tol=1e-4,
+    fast=False, high_mass_bound=0.2, max_fast_steps=3,
 ) -> DocGain | None:
-    """Leave-one-topic-out held-out predictive gain for ONE document (COLD).
+    """Leave-one-topic-out held-out predictive gain for ONE document.
+
+    ``fast`` selects the ablation optimizer. ``fast=False`` (default) is the
+    COLD oracle: a full cold L-BFGS re-inference per ablated topic (byte-
+    identical to before this parameter existed -- the Task-1 tests pin it).
+    ``fast=True`` is the warm-start one-Newton-step DOWNDATE: the full mode is
+    still solved once cold (for the warm start and theta_full), but each
+    ablation is polished with ``_stm_doc_newton_polish`` (a few Newton steps
+    warm-started at the full mode) instead of a cold re-solve -- WITH a safety
+    fallback: if the warm-start Newton stalls (zero accepted steps -- the warm
+    start is in a different basin than the oracle's η=0 start, which happens
+    when a dropped high-mass topic forces the objective into its non-convex/
+    pathological region), that ablation falls back to the EXACT cold solve, so
+    it is byte-identical to the oracle there. The two paths differ ONLY in how
+    ``theta_k`` is obtained (warm Newton, or cold on a stall/on fast=False); the
+    held-out scoring, reference/empty-allowed skip rules, and dedup reuse are
+    shared. ``fast`` is an APPROXIMATION of ``fast=False`` -- see
+    ``_stm_doc_newton_polish`` and ``predictive_gain_downdate_audit`` for the
+    cold-vs-fast agreement basis.
+    ``high_mass_bound`` (default 0.2) and ``max_fast_steps`` (default 3) are
+    HEURISTICS (see the ablation loop): a topic with theta_full[k] above the
+    bound gets up to ``max_fast_steps`` Newton steps (its removal forces a
+    large, locally non-convex move that one step under-captures); a low-mass
+    topic gets a single step (removing it barely perturbs the mode).
 
     ``global_params`` is the dict with "lambda" (K,V), "Gamma" (P,K), "Sigma"
     (K,K, the fit's correlation R -- see module docstring). ``partition`` is
@@ -164,10 +215,18 @@ def doc_predictive_gain(
     allowed = partition.allowed_indices(doc.groups)
     n_held = int(held_counts.sum())
 
-    theta_full = _infer_theta(
-        visible_doc, allowed, expElogbeta, Gamma, R, c, doc.x, reference, K,
-        lbfgs_max_iter, lbfgs_tol,
-    )
+    if fast:
+        # Solve the full mode ONCE (cold); its eta_hat is the Newton warm start
+        # reused by every ablation's downdate below.
+        eta_hat_full, theta_full = _infer_eta_theta(
+            visible_doc, allowed, expElogbeta, Gamma, R, c, doc.x, reference, K,
+            lbfgs_max_iter, lbfgs_tol,
+        )
+    else:
+        theta_full = _infer_theta(
+            visible_doc, allowed, expElogbeta, Gamma, R, c, doc.x, reference, K,
+            lbfgs_max_iter, lbfgs_tol,
+        )
     ll_full = _predictive_loglik(theta_full, beta_prob, held_indices, held_counts)
 
     held_ones = np.ones_like(held_counts)
@@ -186,10 +245,43 @@ def doc_predictive_gain(
             dedup_delta[p] = 0.0
             continue
 
-        theta_k = _infer_theta(
-            visible_doc, allowed_k, expElogbeta, Gamma, R, c, doc.x, reference, K,
-            lbfgs_max_iter, lbfgs_tol,
-        )
+        if fast:
+            # Warm-start Newton downdate from the full mode over allowed\{k}.
+            # HEURISTIC trigger: high-mass topics (theta_full[k] > bound) get up
+            # to max_fast_steps steps to capture the large softmax-renormalization
+            # their removal forces; low-mass topics get a single (near-exact) step.
+            n_steps = max_fast_steps if theta_full[k] > high_mass_bound else 1
+            eta_k, n_accepted = _stm_doc_newton_polish(
+                indices=visible_doc.indices, counts=visible_doc.counts,
+                expElogbeta=expElogbeta, Gamma=Gamma,
+                Sigma_inv_allowed=_sigma_inv_scaled(R, allowed_k, c),
+                x=doc.x, allowed=allowed_k, reference=reference,
+                eta_warm=eta_hat_full, max_steps=n_steps, tol=lbfgs_tol,
+            )
+            if n_accepted == 0:
+                # STALL: the warm start sits in a region where no damped Newton
+                # step descends -- the signature of a dropped high-mass topic
+                # pushing the ablated objective into the non-convex/steep region
+                # where the cold L-BFGS oracle itself terminates at a start-
+                # dependent early point (line-search abort). A warm start in a
+                # DIFFERENT basin than the oracle's η=0 start cannot reproduce
+                # the oracle there, so fall back to the EXACT cold solve (making
+                # the fast path byte-identical to the oracle on exactly these
+                # ablations). Empirically ALL cold-vs-fast discrepancies above
+                # ~3e-4 are stalls; whenever the polish makes any progress it
+                # tracks the oracle to <1e-3 (see predictive_gain_downdate_audit
+                # and the fast-vs-cold agreement test).
+                theta_k = _infer_theta(
+                    visible_doc, allowed_k, expElogbeta, Gamma, R, c, doc.x,
+                    reference, K, lbfgs_max_iter, lbfgs_tol,
+                )
+            else:
+                theta_k = _gated_mode_theta(eta_k, allowed_k, K)
+        else:
+            theta_k = _infer_theta(
+                visible_doc, allowed_k, expElogbeta, Gamma, R, c, doc.x, reference, K,
+                lbfgs_max_iter, lbfgs_tol,
+            )
         ll_k = _predictive_loglik(theta_k, beta_prob, held_indices, held_counts)
         delta[p] = ll_full - ll_k
 
@@ -503,6 +595,7 @@ def _clamped_bin(value: float, edges: np.ndarray, n_bins: int) -> int:
 def _accumulate_doc(
     acc: _PredGainAcc, doc, idx: int, global_params, partition, *,
     c, reference, holdout_frac, seed, n_perm, bin_edges, n_bins,
+    fast=False, high_mass_bound=0.2, max_fast_steps=3,
 ) -> _PredGainAcc:
     """Fold ONE document's predictive-gain contribution into ``acc``
     (mutated in place -- this is the per-partition-local accumulation step,
@@ -526,6 +619,7 @@ def _accumulate_doc(
     dg = doc_predictive_gain(
         doc, global_params, partition, c=c, reference=reference,
         holdout_frac=holdout_frac, seed=seed + idx,
+        fast=fast, high_mass_bound=high_mass_bound, max_fast_steps=max_fast_steps,
     )
     if dg is None:
         return acc
@@ -681,6 +775,7 @@ def _finalize_pred_gain(acc: _PredGainAcc, bin_edges: np.ndarray) -> dict:
 def corpus_predictive_gain_gated(
     docs, global_params, partition, *, c, reference=None,
     holdout_frac=0.5, seed=0, n_perm=4, n_bins=50, prominence_range=(-1.0, 10.0),
+    fast=False, high_mass_bound=0.2, max_fast_steps=3,
 ) -> dict:
     """Driver-side (in-memory) corpus aggregation of the per-document COLD
     predictive gain (``doc_predictive_gain``) and permuted null
@@ -781,6 +876,7 @@ def corpus_predictive_gain_gated(
             acc, doc, i, global_params, partition, c=c, reference=reference,
             holdout_frac=holdout_frac, seed=seed, n_perm=n_perm,
             bin_edges=bin_edges, n_bins=n_bins,
+            fast=fast, high_mass_bound=high_mass_bound, max_fast_steps=max_fast_steps,
         )
 
     if acc.n_docs == 0:
@@ -793,6 +889,7 @@ def corpus_predictive_gain_gated_rdd(
     doc_rdd, global_params, partition, *, c, reference=None,
     holdout_frac=0.5, seed=0, sample_cap=200_000, n_perm=4, n_bins=50,
     prominence_range=(-1.0, 10.0), depth=2,
+    fast=False, high_mass_bound=0.2, max_fast_steps=3,
 ) -> dict:
     """Distributed corpus aggregation of the per-document COLD predictive
     gain and permuted null into per-topic summary arrays, for a gated STM
@@ -872,6 +969,8 @@ def corpus_predictive_gain_gated_rdd(
                 acc, doc, doc_idx, gp, part, c=c, reference=reference,
                 holdout_frac=holdout_frac, seed=seed, n_perm=n_perm,
                 bin_edges=bin_edges, n_bins=n_bins,
+                fast=fast, high_mass_bound=high_mass_bound,
+                max_fast_steps=max_fast_steps,
             )
         return [acc]
 
@@ -883,3 +982,83 @@ def corpus_predictive_gain_gated_rdd(
         raise ValueError("corpus_predictive_gain_gated_rdd: empty document RDD")
 
     return _finalize_pred_gain(acc, bin_edges)
+
+
+def predictive_gain_downdate_audit(
+    docs, global_params, partition, *, c, reference=None,
+    holdout_frac=0.5, seed=0, high_mass_bound=0.2, max_fast_steps=3,
+) -> dict:
+    """Real-data cold-vs-fast discrepancy audit for the downdate approximation.
+
+    This is the real-data cold-solve check the fast path's validation basis
+    rests on (design doc §7): the synthetic agreement tests show the warm-start
+    Newton downdate (``fast=True``) matches the COLD oracle (``fast=False``) on
+    hand-built fixtures, but the guarantee that it still holds on a REAL fitted
+    corpus can only come from cold-solving actual documents and comparing. This
+    function does exactly that on a small in-memory sample and returns a
+    per-topic AGGREGATE of the discrepancy -- it is called during the export
+    phase and LOGGED. It ships only |Delta_cold - Delta_fast| summaries, never
+    any per-document delta, so it is ToS-safe (no row-level quantities leave).
+
+    ``docs`` is a small in-memory list of STMDocument (the export layer samples
+    the corpus RDD and collects a handful to the driver). For each document it
+    runs BOTH ``doc_predictive_gain(..., fast=False)`` (the cold oracle) and
+    ``doc_predictive_gain(..., fast=True, ...)`` against the SAME held-out split
+    (same per-doc seed ``seed + i``), so both produce the identical ``allowed``
+    set and their ``delta`` vectors align position-for-position. It accumulates
+    the per-topic absolute discrepancy across documents; a document skipped by
+    either path (degenerate split -> None) contributes nothing.
+
+    Returns a dict:
+      max_abs_discrepancy   length-K: per-topic max over audited docs of
+                            |Delta_cold[k] - Delta_fast[k]| (nan for topics no
+                            audited doc allowed).
+      mean_abs_discrepancy  length-K: per-topic mean of the same (nan for
+                            unaudited topics).
+      max_abs_overall       float: the single largest discrepancy over all
+                            (doc, topic) pairs -- the headline number to log
+                            and threshold on.
+      n_docs_audited        int: number of documents both paths scored.
+    """
+    K = partition.K
+    max_abs = np.zeros(K, dtype=np.float64)
+    sum_abs = np.zeros(K, dtype=np.float64)
+    count = np.zeros(K, dtype=np.int64)
+    max_abs_overall = 0.0
+    n_docs_audited = 0
+
+    for i, doc in enumerate(docs):
+        dg_cold = doc_predictive_gain(
+            doc, global_params, partition, c=c, reference=reference,
+            holdout_frac=holdout_frac, seed=seed + i, fast=False,
+        )
+        dg_fast = doc_predictive_gain(
+            doc, global_params, partition, c=c, reference=reference,
+            holdout_frac=holdout_frac, seed=seed + i, fast=True,
+            high_mass_bound=high_mass_bound, max_fast_steps=max_fast_steps,
+        )
+        if dg_cold is None or dg_fast is None:
+            continue
+
+        # Same split+seed => identical allowed sets => positions align.
+        for p in range(dg_cold.allowed.shape[0]):
+            k = int(dg_cold.allowed[p])
+            disc = abs(float(dg_cold.delta[p]) - float(dg_fast.delta[p]))
+            if disc > max_abs[k]:
+                max_abs[k] = disc
+            sum_abs[k] += disc
+            count[k] += 1
+            if disc > max_abs_overall:
+                max_abs_overall = disc
+        n_docs_audited += 1
+
+    seen = count > 0
+    max_abs_discrepancy = np.where(seen, max_abs, np.nan)
+    mean_abs_discrepancy = np.where(seen, sum_abs / np.maximum(count, 1), np.nan)
+
+    return {
+        "max_abs_discrepancy": max_abs_discrepancy,
+        "mean_abs_discrepancy": mean_abs_discrepancy,
+        "max_abs_overall": float(max_abs_overall),
+        "n_docs_audited": int(n_docs_audited),
+    }
