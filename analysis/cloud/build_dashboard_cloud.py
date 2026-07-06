@@ -760,7 +760,7 @@ def main(argv: list[str] | None = None) -> int:
                                     group_col="source_cohort",
                                 )
                             )
-                            C_GRID = [1, 2, 3, 5, 8, 12, 20]
+                            C_GRID = [1, 2, 3, 5, 8, 12, 16, 20, 28]
                             HOLDOUTS = [0.5, 0.8, 0.95]
                             robustness = {}
                             lls_shipped = None
