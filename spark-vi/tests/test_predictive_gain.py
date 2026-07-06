@@ -572,6 +572,34 @@ class TestCorpusPredictiveGainGated:
         expected = result["depth_num"][mask] / result["depth_den"][mask]
         np.testing.assert_allclose(result["depth"][mask], expected, rtol=1e-10)
 
+    def test_depth_is_nan_iff_depth_den_not_positive(self):
+        """Pins the depth_den > 0 guard (not != 0): depth is only defined as
+        a SHARE of total predictive structure when that total is positive --
+        Delta can be negative, so a `!= 0` guard would let a negative
+        depth_den through and produce a nonsensical negative/exploded
+        "share" instead of nan. This asserts the invariant directly on the
+        returned arrays against the existing corpus fixture (non-vacuous as
+        long as at least one topic has depth_den > 0, which
+        test_depth_is_summed_ratio_not_per_doc_mean already establishes for
+        this same fixture)."""
+        from spark_vi.mllib.topic.predictive_gain import corpus_predictive_gain_gated
+
+        docs, part, gp, K = self._corpus(D=60)
+        result = corpus_predictive_gain_gated(docs, gp, part, c=1.0, seed=0)
+
+        depth_den = result["depth_den"]
+        depth = result["depth"]
+        assert (depth_den > 0).any()  # non-vacuous: some k actually exercises the finite branch
+
+        for k in range(K):
+            if depth_den[k] > 0:
+                assert np.isfinite(depth[k])
+                assert depth[k] == pytest.approx(
+                    result["depth_num"][k] / depth_den[k], rel=1e-10
+                )
+            else:
+                assert np.isnan(depth[k])
+
     def test_empty_corpus_raises(self):
         from spark_vi.mllib.topic.predictive_gain import corpus_predictive_gain_gated
 

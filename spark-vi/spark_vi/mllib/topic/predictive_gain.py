@@ -407,9 +407,15 @@ class _PredGainAcc:
       presence_count[k] += 1 IFF the doc had at least one finite null sample
                        AND d_k beats that doc's OWN null max (paired test,
                        decision #1 above); a doc with NO finite null sample
-                       contributes to count_k but never to presence_count --
-                       presence[k] is silently conditioned on "documents
-                       whose null could be evaluated", not the full count_k.
+                       contributes to count_k but never to presence_count.
+                       presence[k] = presence_count[k] / count_k[k] (see
+                       _finalize_pred_gain) -- count_k is the FULL denominator
+                       (not restricted to docs whose null could be
+                       evaluated); a doc whose null band could not be
+                       evaluated (e.g. no non-reference topic to permute)
+                       stays in count_k but can never reach presence_count,
+                       so it effectively counts AGAINST presence (as if k
+                       were "not present" in that doc).
       obs_delta_min/max: running min/max of every d_k ever seen (-> the
                        returned observed_delta_range, decision #2 above).
 
@@ -612,8 +618,13 @@ def _finalize_pred_gain(acc: _PredGainAcc, bin_edges: np.ndarray) -> dict:
 
     depth_num = acc.sum_gain.copy()
     depth_den = acc.depth_den
+    # depth is a SHARE of total predictive structure, only interpretable
+    # when that total (depth_den = Sigma_d Sigma_j Delta_j) is positive;
+    # Delta can be negative, so depth_den can be <= 0, which would yield a
+    # negative or exploded "share" rather than a real fraction -- guard
+    # with `> 0` (not `!= 0`) so depth[k] is nan wherever depth_den[k] <= 0.
     depth = np.where(
-        depth_den != 0, depth_num / np.where(depth_den == 0, 1.0, depth_den), np.nan,
+        depth_den > 0, depth_num / np.where(depth_den > 0, depth_den, 1.0), np.nan,
     )
 
     presence = np.where(count_k > 0, acc.presence_count / denom, np.nan)
@@ -699,8 +710,14 @@ def corpus_predictive_gain_gated(
                         depth contribution the way a per-doc-then-averaged
                         ratio would. depth_num/depth_den are also returned
                         directly so a caller (or test) can verify the
-                        division was formed this way.
-      presence          fraction of topic k's documents whose Delta_k beats
+                        division was formed this way. depth is defined only
+                        where depth_den > 0 (the doc-pooled total predictive
+                        structure is positive); Delta can be negative, so
+                        depth_den can be zero or negative, and depth[k] is
+                        nan there rather than a negative or exploded share.
+      presence          presence[k] = presence_count[k] / count_k[k]: the
+                        fraction of topic k's documents (the FULL count_k,
+                        not a null-evaluable subset) whose Delta_k beats
                         THAT SAME document's own permuted-null maximum -- a
                         PER-DOCUMENT PAIRED permutation test (see the module-
                         level "DESIGN DECISIONS" comment above this
@@ -708,11 +725,11 @@ def corpus_predictive_gain_gated(
                         rather than testing against the pooled corpus null
                         band, is correct). Documents with no finite null
                         sample (e.g. a single-allowed-topic doc where that
-                        topic is the pinned reference) contribute to
-                        count_k but are excluded from the presence
-                        numerator AND denominator -- i.e. presence[k] is
-                        conditioned on "documents whose null could be
-                        evaluated", not the raw count_k.
+                        topic is the pinned reference) remain in the
+                        count_k denominator but can NEVER enter
+                        presence_count -- so a null-unevaluable document
+                        effectively counts AGAINST presence, as if topic k
+                        were judged "not present" in it.
       prominence_hist   (K, n_bins) histogram of per-doc Delta_k over
                         ``prominence_range`` -- the aggregate Delta
                         distribution, replacing a theta-hat histogram for
