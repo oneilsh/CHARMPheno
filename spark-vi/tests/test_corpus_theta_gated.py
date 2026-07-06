@@ -125,6 +125,45 @@ class TestSamplingCap:
         assert theta.shape[0] == len(docs)  # deterministic: no sampling
 
 
+class TestScaleParam:
+    def test_scale_one_is_identical_to_default(self, spark):
+        """scale=1.0 must be byte/np.allclose-identical to omitting the param
+        (backward compat: the pre-scale behavior is the scale=1.0 path)."""
+        from spark_vi.mllib.topic.stm import corpus_theta_gated_rdd
+
+        docs, part, gp, K = _build_fitted_gated_corpus(D=60, seed=5)
+        rdd = spark.sparkContext.parallelize(docs, numSlices=3)
+
+        theta_default = corpus_theta_gated_rdd(
+            rdd, gp, part, sample_cap=10_000, seed=0)
+        theta_scale1 = corpus_theta_gated_rdd(
+            rdd, gp, part, scale=1.0, sample_cap=10_000, seed=0)
+
+        assert theta_default.shape == theta_scale1.shape
+        np.testing.assert_allclose(theta_scale1, theta_default, atol=0.0, rtol=0.0)
+
+    def test_larger_scale_concentrates_theta(self, spark):
+        """Larger scale => weaker prior (1/scale) => more data-driven eta_hat =>
+        PEAKIER theta. Assert mean per-doc max(theta) is higher at scale=5 than
+        at scale=1 (a robust monotone concentration signal)."""
+        from spark_vi.mllib.topic.stm import corpus_theta_gated_rdd
+
+        docs, part, gp, K = _build_fitted_gated_corpus(D=60, seed=6)
+        rdd = spark.sparkContext.parallelize(docs, numSlices=3)
+
+        theta1 = corpus_theta_gated_rdd(
+            rdd, gp, part, scale=1.0, sample_cap=10_000, seed=0)
+        theta5 = corpus_theta_gated_rdd(
+            rdd, gp, part, scale=5.0, sample_cap=10_000, seed=0)
+
+        assert theta1.shape == theta5.shape
+        mean_max_1 = float(theta1.max(axis=1).mean())
+        mean_max_5 = float(theta5.max(axis=1).mean())
+        assert mean_max_5 > mean_max_1, (
+            f"scale=5 should concentrate theta (mean per-doc max) more than "
+            f"scale=1: got {mean_max_5:.4f} vs {mean_max_1:.4f}")
+
+
 class TestEmptyRddRaises:
     def test_empty_rdd_raises(self, spark):
         from spark_vi.mllib.topic.stm import corpus_theta_gated_rdd

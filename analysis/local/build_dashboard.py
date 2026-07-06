@@ -222,6 +222,12 @@ def main(argv: list[str] | None = None) -> int:
         log.info("STM: wrote gating.json (groups=%s, kept_topics=%d)",
                  gating["groups"], len(kept_ids))
 
+        # Held-out generative scale c (set by the correlation block below when
+        # calibration succeeds); the theta_histogram phase infers at this scale.
+        # Bound here so it is always defined even on the pre-Task-1 (no n_pairs)
+        # path, where the histogram falls back to scale=1.0.
+        eta_scale = None
+
         # correlation.json: logistic-normal topic correlation R + identified mask
         if "n_pairs" in result.global_params:
             from spark_vi.models.topic._linalg import topic_correlation_identified
@@ -424,11 +430,21 @@ def main(argv: list[str] | None = None) -> int:
                     group_col="source_cohort",
                 )
             )
+            # Infer the display histogram at the CALIBRATED generation scale
+            # (eta_scale = c ~ 4.6), not the over-diffuse unit fit scale: the
+            # calibrated prior concentrates each patient's theta_hat onto the
+            # topics they actually express (honest prevalence). Falls back to
+            # scale=1.0 when calibration failed / eta_scale is None.
+            hist_scale = float(eta_scale) if eta_scale else 1.0
+            log.info("STM: theta histogram inferred at scale=%.4f (%s).",
+                     hist_scale,
+                     "calibrated eta_scale" if eta_scale else "unit fallback")
             # 200k sample_cap is a heuristic driver-memory bound, not a literature
             # value; corpus_theta_gated_rdd logs the sampled N / fraction.
             theta_arr = corpus_theta_gated_rdd(
                 doc_rdd, result.global_params, partition,
-                reference=reference_id, sample_cap=200_000, seed=0)
+                reference=reference_id, scale=hist_scale,
+                sample_cap=200_000, seed=0)
             agg = compute_theta_aggregates(theta_arr, min_count=k_thresh)
             kept = export.topic_indices.tolist()
             # DashboardExport is a frozen dataclass; replace() returns a new

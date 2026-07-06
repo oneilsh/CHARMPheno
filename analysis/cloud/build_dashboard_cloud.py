@@ -633,17 +633,137 @@ def main(argv: list[str] | None = None) -> int:
             ).tolist()
 
         # bow_df_stats is no longer needed. bow_df_kept (== bow_df) and omop
-        # stay persisted through the write-bundle phase: the STM correlation
-        # block reuses bow_df for the eta_scale E-step join (no new corpus scan).
+        # stay persisted through the write-bundle phase: the eta_scale E-step and
+        # the correlation.json write both reuse bow_df (no new corpus scan).
         bow_df_stats.unpersist()
+
+        # eta_scale: held-out generative-variance scale c (calibration). HOISTED
+        # here so it runs BEFORE the theta_histogram phase (which now infers the
+        # display histogram at this calibrated scale) and before the write-bundle
+        # correlation.json write (which SHIPS eta_scale). eta_scale / eta_scale_diag
+        # are outer-scope vars (like stm_corpus_prev): the histogram phase consumes
+        # eta_scale as `scale`, and the correlation.json write consumes both
+        # precomputed vars instead of recomputing them.
+        #
+        # Held-out predictive-LL calibration (corpus_heldout_scale_sweep_gated_rdd,
+        # HS-1/commit e22bcae): recovers the single concentration scale that the
+        # unit-diagonal fitted R (ADR 0034) discards, so the dashboard can rescale
+        # R -> Sigma_gen = eta_scale*R. This bounded grid sweep SUPERSEDES the
+        # iterated pooled EM (corpus_eta_scale_gated_rdd), which is biased and
+        # unstable: it has positive feedback in the scale direction (no trust region)
+        # and ran away on the cluster (c: 3.6 -> 1116 -> 770918). The sweep scores
+        # each grid c's held-out predictive LL; the raw grid ARGMAX is a quantized,
+        # jittery point estimate (the curve is a broad, flat shelf -- LL differences
+        # ~0.001-0.01 nats across c in roughly [2,12], within resampling noise -- so
+        # argmax over a coarse grid drove a 5 -> 12 -> 8 refit wander). We SHIP a
+        # smoothed reducer instead: a local quadratic fit in log c
+        # (smooth_scale_log_quadratic) recovering a sub-grid, noise-averaged c* plus
+        # a curvature-based SE, honestly large when the shelf is flat -- see that
+        # function's docstring for the algorithm and its Numerical-Recipes/Brent +
+        # delta-method citations. The grid is GEOMETRIC (even resolution in log c,
+        # since c is a multiplicative scale). We sweep 3 holdout fractions (0.5
+        # shipped; 0.8/0.95 probe robustness as the visible token set shrinks toward
+        # the small-seed regime) and SHIP the smoothed c* at holdout=0.5. ENHANCEMENT
+        # only: any failure (pre-Task-1 checkpoint, cache miss -> stm_cov_df is None,
+        # E-step error) leaves eta_scale=None (dashboard falls back to eta_var, then
+        # unit R) and the histogram falls back to scale=1.0. Reuses the already-loaded
+        # bow_df (frozen fit vocab) + the sidecar cov_df -> no new scan.
+        eta_scale = None
+        eta_scale_diag = None
+        if (is_stm and tbs and stm_partition is not None
+                and "n_pairs" in result.global_params
+                and stm_cov_df is not None):
+            try:
+                from spark_vi.mllib.topic.stm import (
+                    corpus_heldout_scale_sweep_gated_rdd,
+                    smooth_scale_log_quadratic,
+                )
+                from spark_vi.mllib.topic._common import (
+                    _vector_to_stm_document,
+                )
+                stm_hardening = result.metadata.get("stm_hardening", {}) or {}
+                reference_id = 0 if stm_hardening.get("reference_topic") else None
+                doc_df = bow_df.select("person_id", "features").join(
+                    stm_cov_df.select(
+                        "person_id", "source_cohort", "covariates"),
+                    on="person_id", how="inner",
+                )
+                doc_rdd = doc_df.rdd.map(
+                    lambda row: _vector_to_stm_document(
+                        row, features_col="features",
+                        covariates_col="covariates",
+                        group_col="source_cohort",
+                    )
+                )
+                # Geometric (log-uniform) grid, ~13 points over [0.5, 32] --
+                # NOT literature values, a heuristic bracket wide enough to
+                # bound the c's observed on the cluster so far with even
+                # resolution in log c (c is a multiplicative scale).
+                C_GRID = [round(x, 2) for x in np.geomspace(0.5, 32.0, num=13)]
+                HOLDOUTS = [0.5, 0.8, 0.95]
+                robustness = {}
+                robustness_argmax = {}
+                lls_shipped = None
+                smoothed_shipped = None
+                with _phase("eta_scale (held-out-LL calibration)"):
+                    for hf in HOLDOUTS:
+                        sweep = corpus_heldout_scale_sweep_gated_rdd(
+                            doc_rdd, result.global_params, stm_partition,
+                            c_grid=C_GRID, holdout_frac=hf,
+                            reference=reference_id, seed=0,
+                        )
+                        smoothed_hf = smooth_scale_log_quadratic(sweep["lls"])
+                        robustness[str(hf)] = smoothed_hf["c_star"]
+                        robustness_argmax[str(hf)] = sweep["argmax_c"]
+                        if hf == 0.5:
+                            lls_shipped = {
+                                str(k): float(v)
+                                for k, v in sweep["lls"].items()
+                            }
+                            smoothed_shipped = smoothed_hf
+                c_star = smoothed_shipped["c_star"]
+                grid_argmax_c = robustness_argmax["0.5"]
+                not_interior = not smoothed_shipped["interior"]
+                if not_interior:
+                    log.warning(
+                        "STM: smoothed held-out c*=%s is NOT an interior "
+                        "maximum (grid %s) -- widen the grid and re-run "
+                        "(calibrated scale is not identified from this "
+                        "grid).", c_star, C_GRID)
+                eta_scale = float(c_star)   # SHIP the smoothed held-out estimate
+                eta_scale_diag = {
+                    "method": "heldout_ll_gated",
+                    "c_star": float(c_star),
+                    "grid_argmax_c": float(grid_argmax_c),
+                    "holdout_frac_shipped": 0.5,
+                    "c_grid": C_GRID,
+                    "robustness_argmax_by_holdout": robustness,
+                    "robustness_grid_argmax_by_holdout": robustness_argmax,
+                    "lls_at_shipped_holdout": lls_shipped,
+                    "argmax_at_grid_boundary": bool(
+                        grid_argmax_c in (C_GRID[0], C_GRID[-1])),
+                    "smoothed": smoothed_shipped,
+                }
+                log.info(
+                    "STM: smoothed held-out c*=%.4f (holdout 0.5, "
+                    "grid_argmax=%.4f); robustness=%s.",
+                    c_star, grid_argmax_c, robustness)
+            except Exception as exc:  # enhancement-only: never fatal
+                log.warning("STM: eta_scale held-out calibration failed (%s); "
+                            "correlation.json omits eta_scale (dashboard falls "
+                            "back to eta_var/unit-diagonal R) and the theta "
+                            "histogram falls back to scale=1.0.", exc)
+                eta_scale = None
+                eta_scale_diag = None
 
         # theta_histogram: per-doc gated MAP theta distribution (the dashboard's
         # "topic mass distribution" panel). Plain-LDA writes per-doc theta
         # aggregates at fit time; the STM fit does not, so we compute them here
         # from the fitted checkpoint + corpus (a BUILD-STEP, like corpus_prevalence
-        # / eta_scale). Runs BEFORE the write-bundle phase (where phenotypes.json is
-        # written) and builds its OWN doc_rdd -- a second per-doc pass, mirroring the
-        # later eta_scale block; it could be fused with that block's doc_rdd, kept
+        # / eta_scale). Runs AFTER the hoisted eta_scale phase (so it can infer at
+        # the calibrated scale) and BEFORE the write-bundle phase (where
+        # phenotypes.json is written). Builds its OWN doc_rdd -- a second per-doc
+        # pass, adjacent to the eta_scale block's doc_rdd; they could be fused, kept
         # independent for now. Guarded on STM + gating (partition + covariate
         # sidecar present); enhancement-only: any failure leaves the two fields None
         # (dashboard hides the panel). Parity with analysis/local/build_dashboard.py.
@@ -680,11 +800,23 @@ def main(argv: list[str] | None = None) -> int:
                             group_col="source_cohort",
                         )
                     )
+                    # Infer the display histogram at the CALIBRATED generation
+                    # scale (eta_scale = c ~ 4.6) computed by the hoisted phase
+                    # above, not the over-diffuse unit fit scale: the calibrated
+                    # prior concentrates each patient's theta_hat onto the topics
+                    # they actually express (honest prevalence). Falls back to
+                    # scale=1.0 when calibration failed / eta_scale is None.
+                    hist_scale = float(eta_scale) if eta_scale else 1.0
+                    log.info(
+                        "STM: theta histogram inferred at scale=%.4f (%s).",
+                        hist_scale,
+                        "calibrated eta_scale" if eta_scale else "unit fallback")
                     # 200k sample_cap is a heuristic driver-memory bound, not a
                     # literature value; corpus_theta_gated_rdd logs sampled N/frac.
                     theta_arr = corpus_theta_gated_rdd(
                         theta_doc_rdd, result.global_params, stm_partition,
-                        reference=theta_reference, sample_cap=200_000, seed=0)
+                        reference=theta_reference, scale=hist_scale,
+                        sample_cap=200_000, seed=0)
                     agg = compute_theta_aggregates(theta_arr, min_count=k_thresh)
                     kept = export.topic_indices.tolist()
                     # frozen dataclass -> replace(); do NOT touch corpus_prevalence.
@@ -800,115 +932,13 @@ def main(argv: list[str] | None = None) -> int:
                         reference_id = 0 if stm_hardening.get("reference_topic") else None
                         R, ident = topic_correlation_identified(Sigma_corr, n_pairs, mps)
 
-                        # Generative variance scale c (held-out predictive-LL calibration,
-                        # corpus_heldout_scale_sweep_gated_rdd, HS-1/commit e22bcae): recovers the single
-                        # concentration scale that the unit-diagonal fitted R (ADR 0034) discards, so the
-                        # dashboard can rescale R -> Sigma_gen = eta_scale*R. This bounded grid sweep
-                        # SUPERSEDES the iterated pooled EM (corpus_eta_scale_gated_rdd), which is biased
-                        # and unstable: it has positive feedback in the scale direction (no trust region)
-                        # and ran away on the cluster (c: 3.6 -> 1116 -> 770918). The sweep scores each
-                        # grid c's held-out predictive LL; the raw grid ARGMAX over that curve is a
-                        # quantized, jittery point estimate (the curve is a broad, flat shelf -- LL
-                        # differences ~0.001-0.01 nats across c in roughly [2,12], within resampling
-                        # noise -- so argmax over a coarse grid drove a 5 -> 12 -> 8 refit wander). We
-                        # SHIP a smoothed reducer instead: a local quadratic fit in log c
-                        # (smooth_scale_log_quadratic) that recovers a sub-grid, noise-averaged c* plus
-                        # a curvature-based SE, honestly large when the shelf is flat -- see that
-                        # function's docstring for the algorithm and its Numerical-Recipes/Brent +
-                        # delta-method citations. The grid is GEOMETRIC (even resolution in log c, since
-                        # c is a multiplicative scale). We sweep 3 holdout fractions (0.5 shipped; 0.8/
-                        # 0.95 probe robustness as the visible token set shrinks toward the small-seed
-                        # regime) and SHIP the smoothed c* at holdout=0.5. ENHANCEMENT only: any failure
-                        # (pre-Task-1 checkpoint, cache miss -> stm_cov_df is None, E-step error) leaves
-                        # eta_scale=None and the key is omitted (dashboard falls back to eta_var, then
-                        # unit R). Reuses the already-loaded bow_df (frozen fit vocab) + the sidecar
-                        # cov_df -> no new scan.
-                        eta_scale = None
-                        eta_scale_diag = None
-                        try:
-                            from spark_vi.mllib.topic.stm import (
-                                corpus_heldout_scale_sweep_gated_rdd,
-                                smooth_scale_log_quadratic,
-                            )
-                            from spark_vi.mllib.topic._common import (
-                                _vector_to_stm_document,
-                            )
-                            if stm_cov_df is None:
-                                raise ValueError(
-                                    "covariate sidecar unavailable (cache miss / "
-                                    "no --cache-uri); cannot assemble STMDocuments")
-                            doc_df = bow_df.select("person_id", "features").join(
-                                stm_cov_df.select(
-                                    "person_id", "source_cohort", "covariates"),
-                                on="person_id", how="inner",
-                            )
-                            doc_rdd = doc_df.rdd.map(
-                                lambda row: _vector_to_stm_document(
-                                    row, features_col="features",
-                                    covariates_col="covariates",
-                                    group_col="source_cohort",
-                                )
-                            )
-                            # Geometric (log-uniform) grid, ~13 points over [0.5, 32] --
-                            # NOT literature values, a heuristic bracket wide enough to
-                            # bound the c's observed on the cluster so far with even
-                            # resolution in log c (c is a multiplicative scale).
-                            C_GRID = [round(x, 2) for x in np.geomspace(0.5, 32.0, num=13)]
-                            HOLDOUTS = [0.5, 0.8, 0.95]
-                            robustness = {}
-                            robustness_argmax = {}
-                            lls_shipped = None
-                            smoothed_shipped = None
-                            with _phase("eta_scale (held-out-LL calibration)"):
-                                for hf in HOLDOUTS:
-                                    sweep = corpus_heldout_scale_sweep_gated_rdd(
-                                        doc_rdd, result.global_params, stm_partition,
-                                        c_grid=C_GRID, holdout_frac=hf,
-                                        reference=reference_id, seed=0,
-                                    )
-                                    smoothed_hf = smooth_scale_log_quadratic(sweep["lls"])
-                                    robustness[str(hf)] = smoothed_hf["c_star"]
-                                    robustness_argmax[str(hf)] = sweep["argmax_c"]
-                                    if hf == 0.5:
-                                        lls_shipped = {
-                                            str(k): float(v)
-                                            for k, v in sweep["lls"].items()
-                                        }
-                                        smoothed_shipped = smoothed_hf
-                            c_star = smoothed_shipped["c_star"]
-                            grid_argmax_c = robustness_argmax["0.5"]
-                            not_interior = not smoothed_shipped["interior"]
-                            if not_interior:
-                                log.warning(
-                                    "STM: smoothed held-out c*=%s is NOT an interior "
-                                    "maximum (grid %s) -- widen the grid and re-run "
-                                    "(calibrated scale is not identified from this "
-                                    "grid).", c_star, C_GRID)
-                            eta_scale = float(c_star)   # SHIP the smoothed held-out estimate
-                            eta_scale_diag = {
-                                "method": "heldout_ll_gated",
-                                "c_star": float(c_star),
-                                "grid_argmax_c": float(grid_argmax_c),
-                                "holdout_frac_shipped": 0.5,
-                                "c_grid": C_GRID,
-                                "robustness_argmax_by_holdout": robustness,
-                                "robustness_grid_argmax_by_holdout": robustness_argmax,
-                                "lls_at_shipped_holdout": lls_shipped,
-                                "argmax_at_grid_boundary": bool(
-                                    grid_argmax_c in (C_GRID[0], C_GRID[-1])),
-                                "smoothed": smoothed_shipped,
-                            }
-                            log.info(
-                                "STM: smoothed held-out c*=%.4f (holdout 0.5, "
-                                "grid_argmax=%.4f); robustness=%s.",
-                                c_star, grid_argmax_c, robustness)
-                        except Exception as exc:  # enhancement-only: never fatal
-                            log.warning("STM: eta_scale held-out calibration failed (%s); "
-                                        "correlation.json omits eta_scale (dashboard "
-                                        "falls back to eta_var/unit-diagonal R).", exc)
-                            eta_scale = None
-                            eta_scale_diag = None
-
+                        # eta_scale / eta_scale_diag were computed by the HOISTED
+                        # eta_scale phase (before the theta_histogram phase, so the
+                        # display histogram could infer at the calibrated scale).
+                        # We simply SHIP the precomputed values here -- no recompute.
+                        # They are None if that phase's guard failed or its
+                        # calibration raised, in which case the key is omitted and
+                        # the dashboard falls back to eta_var, then unit R.
                         corr = build_correlation_json(
                             R, ident, n_pairs, stm_partition, kept_ids,
                             reference_id=reference_id, eta_scale=eta_scale,

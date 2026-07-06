@@ -469,7 +469,7 @@ def corpus_concentration_stm_rdd(
 
 def corpus_theta_gated_rdd(
     doc_rdd, global_params, partition, *,
-    reference=None, sample_cap=200_000, seed=0,
+    reference=None, scale=1.0, sample_cap=200_000, seed=0,
     lbfgs_max_iter=50, lbfgs_tol=1e-4,
 ) -> np.ndarray:
     """Per-document gated MAP theta over the corpus, at the fitted Sigma, as an
@@ -483,13 +483,22 @@ def corpus_theta_gated_rdd(
     This is the STM analog of LDA's per-doc gamma the dashboard already
     histograms.
 
-    Inference is at the model's OWN fitted Sigma (``global_params["Sigma"]``, the
-    unit-diagonal correlation of ADR 0034) on the FULL document -- NOT the
-    held-out split or the c-rescaled Sigma_gen the generative-scale sweep
-    (``corpus_heldout_scale_sweep_gated_rdd``) uses; this is inference under the
-    fitted model, so c == 1. A foreground topic outside a doc's allowed set is
-    structurally EXACTLY 0 (the hard gating mask, via ``_gated_mode_theta``);
-    those zeros are honest and land in the histogram's lowest bin.
+    Inference is under the E-step prior eta ~ N(mu, Sigma_prior) with
+    ``Sigma_prior = scale * Sigma_fitted`` (``Sigma_fitted =
+    global_params["Sigma"]``, the unit-diagonal correlation R of ADR 0034).
+    ``scale`` is the GENERATION-SCALE multiplier on the fitted Sigma: at
+    ``scale=1.0`` (the default) the prior is the raw fit and this is inference
+    under the fitted model (c == 1) -- byte-identical to the pre-``scale``
+    behavior. At the calibrated held-out ``eta_scale`` (c ~ 4.6) the prior
+    penalty is 1/scale, so eta_hat is more data-driven and theta_hat is PEAKIER,
+    giving the honest per-doc concentration instead of the over-diffuse
+    unit-scale fit (the project's "unit-prior per-doc outputs are not
+    measurements" result). ``scale`` is a passed-in calibrated value, not a
+    heuristic constant. Inference is on the FULL document -- NOT the held-out
+    split the generative-scale sweep (``corpus_heldout_scale_sweep_gated_rdd``)
+    uses. A foreground topic outside a doc's allowed set is structurally EXACTLY
+    0 (the hard gating mask, via ``_gated_mode_theta``); those zeros are honest
+    and land in the histogram's lowest bin.
 
     The corpus is down-sampled to at most ``sample_cap`` documents (Bernoulli
     ``RDD.sample`` at ``frac = min(1, sample_cap / N)``) BEFORE collection: a
@@ -515,8 +524,9 @@ def corpus_theta_gated_rdd(
         k: np.asarray(v, dtype=np.float64) for k, v in global_params.items()
     })
     p_bcast = sc.broadcast(partition)
+    scale = float(scale)
 
-    def _local(rows, _gp=gp_bcast, _p=p_bcast):
+    def _local(rows, _gp=gp_bcast, _p=p_bcast, _scale=scale):
         from scipy.special import digamma
 
         from spark_vi.models.topic._linalg import safe_inverse
@@ -535,7 +545,11 @@ def corpus_theta_gated_rdd(
             key = tuple(allowed.tolist())
             Sigma_inv_allowed = subprec_cache.get(key)
             if Sigma_inv_allowed is None:
-                Sigma_inv_allowed = safe_inverse(Sigma[np.ix_(allowed, allowed)])
+                # Sigma_prior = scale * Sigma_fitted -> prior precision is
+                # safe_inverse(scale * Sigma[allowed]). At scale=1.0 this is
+                # byte-identical to safe_inverse(Sigma[allowed]).
+                Sigma_inv_allowed = safe_inverse(
+                    _scale * Sigma[np.ix_(allowed, allowed)])
                 subprec_cache[key] = Sigma_inv_allowed
             eta_hat, _, _ = _stm_doc_inference(
                 indices=doc.indices, counts=doc.counts,
