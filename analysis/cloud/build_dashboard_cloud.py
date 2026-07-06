@@ -755,6 +755,18 @@ def main(argv: list[str] | None = None) -> int:
                             "histogram falls back to scale=1.0.", exc)
                 eta_scale = None
                 eta_scale_diag = None
+        elif (is_stm and tbs and stm_partition is not None
+                and "n_pairs" in result.global_params):
+            # Reached only because stm_cov_df is None (covariate cache miss / no
+            # --cache-uri): eta_scale cannot be calibrated. Warn explicitly --
+            # otherwise the cause is silent (eta_scale is omitted from
+            # correlation.json and the theta histogram falls back to the unit
+            # fit scale). Restores the diagnostic the pre-hoist try/except emitted.
+            log.warning(
+                "STM: covariate sidecar unavailable (cache miss / no --cache-uri); "
+                "skipping eta_scale calibration -- correlation.json omits eta_scale "
+                "and the theta histogram uses the unit fit scale. Run "
+                "build-covariates first.")
 
         # theta_histogram: per-doc gated MAP theta distribution (the dashboard's
         # "topic mass distribution" panel). Plain-LDA writes per-doc theta
