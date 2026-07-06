@@ -40,12 +40,24 @@ def build_gating_json(partition, group_counts, k, kept_topic_ids,
     labels = partition.topic_labels()                 # length K, by original id
     topic_blocks = [labels[i] for i in kept_topic_ids]
     kept_counts = {g: int(group_counts.get(g, 0)) for g in kept_groups}
-    total = sum(kept_counts.values()) or 1
+    # Denominator is the WHOLE cohort -- every source_cohort value in
+    # group_counts, including background-only groups that carry no foreground
+    # block (e.g. a 'general' population) and any sub-k suppressed foreground
+    # groups -- NOT just the kept foreground groups. So group_proportions are
+    # true cohort shares (summing to <= 1), and the remainder,
+    # background_only_proportion, is the share the marginal sampler draws as
+    # "no foreground group" (background-only). This keeps a synthetic cohort
+    # representative of the real population instead of collapsing to the (often
+    # minority) foreground groups.
+    total = sum(int(v) for v in group_counts.values()) or 1
+    group_proportions = {g: kept_counts[g] / total for g in kept_groups}
+    background_only_proportion = max(0.0, 1.0 - sum(group_proportions.values()))
     return {
         "group_var": partition.group_var,
         "group_var_label": _humanize(partition.group_var),
         "groups": kept_groups,
         "group_labels": {g: overrides.get(g, _humanize(g)) for g in kept_groups},
-        "group_proportions": {g: kept_counts[g] / total for g in kept_groups},
+        "group_proportions": group_proportions,
+        "background_only_proportion": background_only_proportion,
         "topic_blocks": topic_blocks,
     }

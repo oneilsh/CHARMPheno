@@ -50,8 +50,29 @@ describe('sampleMarginalGroup', () => {
       group_var: 'g', groups: ['a', 'b'], topic_blocks: [],
     }
     const rng = createRng(3)
-    const seen = new Set<string>()
+    const seen = new Set<string | null>()
     for (let i = 0; i < 50; i++) seen.add(sampleMarginalGroup(gating, rng))
     expect(seen.has('a') && seen.has('b')).toBe(true)
+    expect(seen.has(null)).toBe(false)   // no background_only_proportion -> never null
+  })
+
+  it('draws background-only (null) at background_only_proportion', () => {
+    const gating: GatingSpec = {
+      group_var: 'source_cohort', groups: ['cancer'], topic_blocks: [],
+      group_proportions: { cancer: 0.15 },
+      background_only_proportion: 0.85,
+    }
+    const rng = createRng(4)
+    let nulls = 0
+    let cancer = 0
+    for (let i = 0; i < 4000; i++) {
+      const g = sampleMarginalGroup(gating, rng)
+      if (g === null) nulls++
+      else if (g === 'cancer') cancer++
+    }
+    expect(nulls / 4000).toBeGreaterThan(0.80)
+    expect(nulls / 4000).toBeLessThan(0.90)
+    expect(cancer / 4000).toBeGreaterThan(0.10)
+    expect(cancer / 4000).toBeLessThan(0.20)
   })
 })

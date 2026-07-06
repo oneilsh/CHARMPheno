@@ -127,3 +127,50 @@ def test_build_gating_json_label_override():
         group_label_overrides={"rare_dx": "Rare diabetes cohort"},
     )
     assert out["group_labels"]["rare_dx"] == "Rare diabetes cohort"
+
+
+def test_build_gating_json_background_only_proportion():
+    """A background-only group (present in group_counts but NOT a foreground
+    group, e.g. a 'general' population) is excluded from the foreground
+    group_proportions, but its cohort share surfaces as
+    background_only_proportion. Foreground shares are over the WHOLE cohort, so
+    the sampler can draw a representative mix rather than collapsing to the
+    (minority) foreground group."""
+    from charmpheno.export.gating import build_gating_json
+
+    class _P:
+        group_var = "source_cohort"
+        groups = ["cancer"]                     # only cancer is a foreground group
+        def topic_labels(self):
+            return ["background"] * 40 + ["cancer"] * 20
+        def block_indices(self, g):
+            return range(40, 60)
+    # 9000 cancer + 51000 background-only 'general' = 60000 total cohort.
+    counts = {"cancer": 9000, "general": 51000}
+    out = build_gating_json(_P(), counts, k=20, kept_topic_ids=list(range(60)))
+
+    assert out["groups"] == ["cancer"]          # 'general' is not a foreground group
+    assert abs(out["group_proportions"]["cancer"] - 9000 / 60000) < 1e-9
+    assert abs(out["background_only_proportion"] - 51000 / 60000) < 1e-9
+    # foreground shares + background-only == whole cohort
+    assert abs(sum(out["group_proportions"].values())
+               + out["background_only_proportion"] - 1.0) < 1e-9
+
+
+def test_build_gating_json_no_background_only_when_all_foreground():
+    """When every counted group is a kept foreground group,
+    background_only_proportion is 0 and group_proportions sum to 1 (the
+    prior behavior is preserved for all-foreground cohorts)."""
+    from charmpheno.export.gating import build_gating_json
+
+    class _P:
+        group_var = "source_cohort"
+        groups = ["cancer", "dementia"]
+        def topic_labels(self):
+            return ["background"] * 30 + ["cancer"] * 10 + ["dementia"] * 10
+        def block_indices(self, g):
+            return range(30, 40) if g == "cancer" else range(40, 50)
+    out = build_gating_json(_P(), {"cancer": 9000, "dementia": 2000},
+                            k=20, kept_topic_ids=list(range(50)))
+    assert out["background_only_proportion"] == 0.0
+    assert abs(sum(out["group_proportions"].values()) - 1.0) < 1e-9

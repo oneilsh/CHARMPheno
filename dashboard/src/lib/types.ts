@@ -69,6 +69,10 @@ export interface GatingSpec {
   group_var_label?: string
   group_labels?: Record<string, string>
   group_proportions?: Record<string, number>
+  // Cohort share in no foreground group (background-only). group_proportions
+  // sum to (1 - background_only_proportion); the marginal sampler draws a
+  // background-only (null-group) patient with this probability.
+  background_only_proportion?: number
 }
 
 export interface Correlation {

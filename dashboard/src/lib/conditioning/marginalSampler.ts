@@ -38,14 +38,23 @@ export function sampleMarginalCovariates(
   return values
 }
 
-// Draw a per-patient group from group_proportions; uniform fallback + warn.
-export function sampleMarginalGroup(gating: GatingSpec, rng: () => number): string {
+// Draw a per-patient group from group_proportions. Returns null for a
+// background-only patient (no foreground group) — drawn with the reported
+// background_only_proportion (the cohort share in no foreground group, e.g. a
+// 'general' population plus any k-anon-suppressed group). group_proportions
+// now sum to (1 - background_only_proportion). Older bundles that lack these
+// fields fall back to a uniform draw over the foreground groups (never null),
+// preserving prior behavior.
+export function sampleMarginalGroup(gating: GatingSpec, rng: () => number): string | null {
   const groups = gating.groups
   const props = gating.group_proportions
   if (props && groups.length) {
-    const p = groups.map((g) => props[g] ?? 0)
-    const s = p.reduce((x, y) => x + y, 0) || 1
-    return groups[sampleCategorical(p.map((x) => x / s), rng)]
+    const bgOnly = gating.background_only_proportion ?? 0
+    // Weights over [background-only (null), ...foreground groups].
+    const weights = [bgOnly, ...groups.map((g) => props[g] ?? 0)]
+    const s = weights.reduce((x, y) => x + y, 0) || 1
+    const idx = sampleCategorical(weights.map((x) => x / s), rng)
+    return idx === 0 ? null : groups[idx - 1]
   }
   console.warn('[marginalSampler] gating.group_proportions absent; sampling groups uniformly')
   return groups[Math.floor(rng() * groups.length)]
