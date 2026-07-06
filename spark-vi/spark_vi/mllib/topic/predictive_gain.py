@@ -54,6 +54,32 @@ from spark_vi.models.topic._linalg import safe_inverse
 from spark_vi.models.topic.stm import _stm_doc_inference
 
 
+def _infer_theta(
+    visible_doc, allowed, expElogbeta, Gamma, R, c, x, reference, K,
+    max_iter, tol,
+) -> np.ndarray:
+    """Infer the gated mode topic-proportion vector theta over ``allowed``.
+
+    Shared by ``doc_predictive_gain`` (the real oracle) and ``null_delta``
+    (the permuted-topic null) so both call the SAME sequence -- form
+    Sigma_inv_allowed from the correlation R at scale c, run the per-doc
+    Laplace E-step restricted to ``allowed`` (with ``reference`` pinned if
+    given), then collapse eta_hat to a gated mode theta -- with no room for
+    the two paths to drift apart. Only the ``expElogbeta`` passed in differs
+    between the two callers (real vs. permuted); everything else is
+    identical.
+    """
+    Rinv = safe_inverse(R[np.ix_(allowed, allowed)])
+    Sigma_inv_allowed = (1.0 / c) * Rinv
+    eta_hat, _, _ = _stm_doc_inference(
+        indices=visible_doc.indices, counts=visible_doc.counts,
+        expElogbeta=expElogbeta, Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed,
+        x=x, max_iter=max_iter, tol=tol,
+        allowed=allowed, reference=reference,
+    )
+    return _gated_mode_theta(eta_hat, allowed, K)
+
+
 @dataclass
 class DocGain:
     """Per-document leave-one-topic-out predictive-gain result.
@@ -135,15 +161,10 @@ def doc_predictive_gain(
     allowed = partition.allowed_indices(doc.groups)
     n_held = int(held_counts.sum())
 
-    Rinv_allowed = safe_inverse(R[np.ix_(allowed, allowed)])
-    Sigma_inv_allowed = (1.0 / c) * Rinv_allowed
-    eta_hat, _, _ = _stm_doc_inference(
-        indices=visible_doc.indices, counts=visible_doc.counts,
-        expElogbeta=expElogbeta, Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed,
-        x=doc.x, max_iter=lbfgs_max_iter, tol=lbfgs_tol,
-        allowed=allowed, reference=reference,
+    theta_full = _infer_theta(
+        visible_doc, allowed, expElogbeta, Gamma, R, c, doc.x, reference, K,
+        lbfgs_max_iter, lbfgs_tol,
     )
-    theta_full = _gated_mode_theta(eta_hat, allowed, K)
     ll_full = _predictive_loglik(theta_full, beta_prob, held_indices, held_counts)
 
     held_ones = np.ones_like(held_counts)
@@ -162,15 +183,10 @@ def doc_predictive_gain(
             dedup_delta[p] = 0.0
             continue
 
-        Rinv_k = safe_inverse(R[np.ix_(allowed_k, allowed_k)])
-        Sigma_inv_k = (1.0 / c) * Rinv_k
-        eta_k, _, _ = _stm_doc_inference(
-            indices=visible_doc.indices, counts=visible_doc.counts,
-            expElogbeta=expElogbeta, Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_k,
-            x=doc.x, max_iter=lbfgs_max_iter, tol=lbfgs_tol,
-            allowed=allowed_k, reference=reference,
+        theta_k = _infer_theta(
+            visible_doc, allowed_k, expElogbeta, Gamma, R, c, doc.x, reference, K,
+            lbfgs_max_iter, lbfgs_tol,
         )
-        theta_k = _gated_mode_theta(eta_k, allowed_k, K)
         ll_k = _predictive_loglik(theta_k, beta_prob, held_indices, held_counts)
         delta[p] = ll_full - ll_k
 
@@ -181,3 +197,134 @@ def doc_predictive_gain(
         allowed=allowed, delta=delta, ll_full=ll_full, n_held=n_held,
         theta_full=theta_full, dedup_delta=dedup_delta,
     )
+
+
+def null_delta(
+    doc, global_params, partition, *, c, reference=None,
+    holdout_frac=0.3, seed, n_perm=4, rng_seed=0, lbfgs_max_iter=50, lbfgs_tol=1e-4,
+) -> np.ndarray | None:
+    """Permuted-topic NULL BAND for ONE document: what Delta does a topic
+    that explains NOTHING produce?
+
+    There is no hard zero threshold for "topic k is present in document d".
+    Even a topic with zero true held-out support produces a small nonzero
+    Delta_k, because the Gaussian prior regularizes the MAP estimate (see
+    the module docstring's auto-floor discussion and
+    tests/test_predictive_gain.py). So presence must be judged against the
+    distribution of Delta a topic with NO real word-signature produces, not
+    against 0 -- that distribution is this null band.
+
+    For each of ``n_perm`` samples this: (1) seeded-picks a topic k_i from
+    the doc's allowed set (never the pinned ``reference`` -- ablating the
+    reference is undefined, same guard as ``doc_predictive_gain``); (2)
+    shuffles k_i's row of lambda across the vocabulary, destroying its
+    learned word identities while preserving its row-sum/normalization (a
+    pure relabeling of which word means what to that topic, not a change to
+    its concentration); (3) reruns EXACTLY the same infer-over-allowed /
+    score / ablate-k_i / infer-over-allowed-minus-k_i / score sequence
+    ``doc_predictive_gain`` uses for a real topic (via the shared
+    ``_infer_theta`` helper), against the SAME held-out split (same
+    ``seed``/``holdout_frac``) so the null samples are directly comparable
+    to the real Delta on this document; (4) records ll_full - ll_k as one
+    null sample.
+
+    Determinism is via ``rng = np.random.default_rng(rng_seed + i)`` for
+    each perm index i -- a fresh, explicitly-seeded generator per sample,
+    NOT numpy's global RNG state (``np.random.seed``/``np.random.*``) -- so
+    ``null_delta`` is reproducible regardless of what other code has done to
+    global numpy random state before or after this call.
+
+    Mirrors ``doc_predictive_gain``'s degenerate-split rule exactly: returns
+    None if ``heldout_split`` returns None, or the held half is empty.
+    Otherwise returns a length-``n_perm`` float array. A sample is:
+      - ``np.nan`` if ``allowed`` has no non-reference topic to permute
+        (undefined -- e.g. a single-topic doc where that topic IS the
+        reference); the corpus-level aggregator drops NaNs when it pools
+        per-doc samples into the null band.
+      - ``0.0`` if, after choosing k_i, ablating it leaves an empty allowed
+        set (no contrast possible -- same as the single-allowed-topic case
+        in ``doc_predictive_gain``).
+      - otherwise the permuted topic's Delta_k_i against the real allowed
+        set, which collapses toward 0 because k_i's beta row is now noise --
+        that collapse is the point: it calibrates what "nothing" looks like.
+
+    ``n_perm`` is deliberately small (default 4): each sample feeds a
+    corpus-level null band, not a per-document estimate, so this is O(1)
+    extra full ablations per document, not O(|allowed|).
+    """
+    lam = np.asarray(global_params["lambda"], dtype=np.float64)
+    Gamma = np.asarray(global_params["Gamma"], dtype=np.float64)
+    Sigma = np.asarray(global_params["Sigma"], dtype=np.float64)
+    K, V = lam.shape
+
+    d = np.diag(Sigma)
+    R = Sigma / np.sqrt(np.outer(d, d))   # correlation; c is applied to THIS
+
+    split = heldout_split(doc, holdout_frac=holdout_frac, seed=seed)
+    if split is None:
+        return None
+    visible_doc, held_indices, held_counts = split
+    if held_counts.size == 0:
+        return None
+
+    allowed = partition.allowed_indices(doc.groups)
+
+    samples = np.empty(n_perm, dtype=np.float64)
+    for i in range(n_perm):
+        # Seeded per-sample RNG: determinism comes from (rng_seed + i), not
+        # from numpy's global random state.
+        rng = np.random.default_rng(rng_seed + i)
+
+        draw_pos = int(rng.integers(allowed.size))
+        k_i = allowed[draw_pos]
+        if reference is not None and k_i == reference:
+            # A permuted reference topic is undefined (same as Task 1's
+            # ablation guard) -- deterministically advance to the next
+            # allowed, non-reference topic rather than re-drawing from rng
+            # (keeps the rng's subsequent permutation draw reproducible
+            # regardless of where the reference happened to land).
+            k_i = None
+            for step in range(1, allowed.size):
+                cand = allowed[(draw_pos + step) % allowed.size]
+                if cand != reference:
+                    k_i = cand
+                    break
+            if k_i is None:
+                # allowed has no non-reference topic to permute at all.
+                samples[i] = np.nan
+                continue
+
+        # Shuffle k_i's beta row across the vocabulary: word identities are
+        # scrambled, but the row is still a permutation of the SAME values,
+        # so its normalization (row-sum for expElogbeta's digamma terms,
+        # E[beta] for beta_prob) is preserved -- only what k_i "means" is
+        # destroyed, not its concentration.
+        perm = rng.permutation(V)
+        lam_perm = lam.copy()
+        lam_perm[k_i] = lam[k_i][perm]
+
+        lam_perm_rowsum = lam_perm.sum(axis=1, keepdims=True)
+        expElogbeta_perm = np.exp(digamma(lam_perm) - digamma(lam_perm_rowsum))
+        beta_prob_perm = lam_perm / lam_perm_rowsum
+
+        theta_full = _infer_theta(
+            visible_doc, allowed, expElogbeta_perm, Gamma, R, c, doc.x, reference, K,
+            lbfgs_max_iter, lbfgs_tol,
+        )
+        ll_full = _predictive_loglik(theta_full, beta_prob_perm, held_indices, held_counts)
+
+        pos = int(np.nonzero(allowed == k_i)[0][0])
+        allowed_k = np.delete(allowed, pos)
+        if allowed_k.size == 0:
+            # No contrast possible (k_i was the sole allowed topic).
+            samples[i] = 0.0
+            continue
+
+        theta_k = _infer_theta(
+            visible_doc, allowed_k, expElogbeta_perm, Gamma, R, c, doc.x, reference, K,
+            lbfgs_max_iter, lbfgs_tol,
+        )
+        ll_k = _predictive_loglik(theta_k, beta_prob_perm, held_indices, held_counts)
+        samples[i] = ll_full - ll_k
+
+    return samples

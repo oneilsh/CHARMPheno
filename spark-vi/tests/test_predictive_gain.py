@@ -57,6 +57,31 @@ def _sharp_global_params():
 _C_WEAK_PRIOR = 1000.0
 
 
+def _sharp_global_params_wide_vocab(V_wide=500):
+    """Same disjoint-vocab sharp fixture as ``_sharp_global_params``, but
+    padded out to a much larger vocabulary (default V=500, vs. K=2/V=8
+    above) with uniform low-lambda "filler" words everywhere past index 8.
+
+    Task 2's null tests need this widening: ``null_delta`` shuffles a
+    topic's beta row across the FULL vocabulary, and at V=8 that shuffle is
+    only an 8-way permutation of a 4-signature/4-background row, so there is
+    a non-negligible (hypergeometric) chance the shuffled row still lands
+    a couple of its big values back on the document's own 4 held-out words
+    by pure coincidence -- which does NOT collapse to a near-zero Delta (it
+    still explains some of the document), defeating the point of the null
+    ("a topic that explains nothing"). Diluting the same four signature
+    values across hundreds of filler words instead makes that coincidence
+    rare, so the permuted topic reliably lands on genuinely irrelevant words
+    and its Delta reliably collapses toward the null floor -- exactly the
+    behavior the null band is supposed to characterize."""
+    lam = np.full((K, V_wide), 0.01)
+    lam[0, 0:4] = 1000.0
+    lam[1, 4:8] = 1000.0
+    Gamma = np.zeros((1, K))
+    Sigma = np.eye(K)
+    return {"lambda": lam, "Gamma": Gamma, "Sigma": Sigma}
+
+
 def _non_gated_partition():
     # background_k == K, foreground empty: allowed_indices(frozenset()) == [0, 1]
     # for every doc regardless of doc.groups (non-gated model).
@@ -378,3 +403,90 @@ class TestColdInferenceScoringConvention:
         ll_swapped = _predictive_loglik(theta_swapped, expElogbeta, held_idx, held_cnt)
 
         assert abs(ll_swapped - ll_correct) > 1e-3
+
+
+class TestNullDeltaBand:
+    """``null_delta`` builds the permuted-topic NULL BAND: for a topic whose
+    beta row has been shuffled across the vocabulary (so it carries no real
+    word-signature, i.e. "explains nothing"), what Delta does it produce
+    against the SAME held-out split used by ``doc_predictive_gain``? Because
+    the Gaussian prior regularizes the MAP even when a topic is pure noise,
+    this null Delta is small but NOT exactly 0 -- it is the model-generated
+    presence threshold a real topic's Delta must clear, replacing any hard
+    zero cutoff."""
+
+    def test_null_mean_near_zero_and_small_relative_to_real_signature_delta(self):
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain, null_delta
+
+        gp = _sharp_global_params_wide_vocab()
+        part = _non_gated_partition()
+        doc = _doc([0, 1, 2, 3])  # all topic-0 signature words
+
+        real = doc_predictive_gain(doc, gp, part, c=_C_WEAK_PRIOR, seed=0)
+        assert real is not None
+        assert real.delta[0] > 1.0  # the real signature Delta (see auto-floor test above)
+
+        nulls = null_delta(doc, gp, part, c=_C_WEAK_PRIOR, seed=0, n_perm=8, rng_seed=0)
+
+        assert nulls is not None
+        assert nulls.shape == (8,)
+        assert np.all(np.isfinite(nulls) | np.isnan(nulls))
+
+        mean_null = np.nanmean(nulls)
+        # Much smaller than the real signature Delta...
+        assert mean_null < 0.25 * real.delta[0]
+        # ...and small in absolute terms too, but NOT exactly 0 -- the
+        # Gaussian prior regularizes the MAP even for a noise topic, so the
+        # null band has a small-but-nonzero mean by construction (this is
+        # exactly why a hard zero threshold is wrong and the null band is
+        # needed as the presence bar instead). Observed magnitude at this
+        # fixture/seed is ~1e-3 (three orders of magnitude below the real
+        # signature Delta of ~69), so 0.5 is a generous tolerance, not a
+        # tight numerical pin.
+        assert abs(mean_null) < 0.5
+
+    def test_null_delta_is_deterministic_given_rng_seed(self):
+        from spark_vi.mllib.topic.predictive_gain import null_delta
+
+        gp = _sharp_global_params_wide_vocab()
+        part = _non_gated_partition()
+        doc = _doc([0, 1, 2, 3])
+
+        nulls_a = null_delta(doc, gp, part, c=_C_WEAK_PRIOR, seed=0, n_perm=8, rng_seed=0)
+        nulls_b = null_delta(doc, gp, part, c=_C_WEAK_PRIOR, seed=0, n_perm=8, rng_seed=0)
+
+        assert nulls_a is not None and nulls_b is not None
+        np.testing.assert_array_equal(nulls_a, nulls_b)
+
+    def test_null_delta_varies_with_different_rng_seed(self):
+        """Non-vacuous determinism check: a DIFFERENT rng_seed must actually
+        change which topic gets permuted / how, not just be accepted and
+        ignored."""
+        from spark_vi.mllib.topic.predictive_gain import null_delta
+
+        gp = _sharp_global_params_wide_vocab()
+        part = _non_gated_partition()
+        doc = _doc([0, 1, 2, 3])
+
+        nulls_seed0 = null_delta(doc, gp, part, c=_C_WEAK_PRIOR, seed=0, n_perm=8, rng_seed=0)
+        nulls_seed1 = null_delta(doc, gp, part, c=_C_WEAK_PRIOR, seed=0, n_perm=8, rng_seed=1)
+
+        assert nulls_seed0 is not None and nulls_seed1 is not None
+        assert not np.array_equal(nulls_seed0, nulls_seed1)
+
+    def test_null_delta_too_short_doc_returns_none(self):
+        """Mirrors doc_predictive_gain's degenerate-split guard exactly: a
+        1-token document can't be split into a non-empty visible AND held
+        half, so null_delta must return None rather than raising."""
+        from spark_vi.mllib.topic.predictive_gain import null_delta
+
+        gp = _sharp_global_params()
+        part = _non_gated_partition()
+        doc = STMDocument(
+            indices=np.array([0], dtype=np.int32),
+            counts=np.array([1.0]),
+            length=1, x=np.array([1.0]), groups=frozenset(),
+        )
+
+        nulls = null_delta(doc, gp, part, c=1.0, seed=0, n_perm=4, rng_seed=0)
+        assert nulls is None
