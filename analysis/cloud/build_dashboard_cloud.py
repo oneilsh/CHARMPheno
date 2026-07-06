@@ -733,7 +733,23 @@ def main(argv: list[str] | None = None) -> int:
         # bow_df (frozen fit vocab) + the sidecar cov_df -> no new scan.
         eta_scale = None
         eta_scale_diag = None
-        if (is_stm and tbs and stm_partition is not None
+        # Iteration fast-path: BUILD_ETA_SCALE_OVERRIDE=<float> PINS c* and SKIPS
+        # the ~13-min held-out-LL sweep. c* is stable (~4.6) across refits, and the
+        # downstream phases (theta_histogram, predictive_gain, correlation.json)
+        # consume only its value -- so pinning is exact for them and matches the
+        # "calibrate once, then pin" pattern. Leave UNSET for a real calibration.
+        _eta_override = os.environ.get("BUILD_ETA_SCALE_OVERRIDE")
+        if _eta_override:
+            try:
+                eta_scale = float(_eta_override)
+                eta_scale_diag = {"override": True, "value": eta_scale}
+                print(f"[driver]   eta_scale: OVERRIDE={eta_scale} "
+                      "(BUILD_ETA_SCALE_OVERRIDE set; skipping the held-out sweep)",
+                      flush=True)
+            except ValueError:
+                print("[driver]   eta_scale: ignoring invalid "
+                      f"BUILD_ETA_SCALE_OVERRIDE={_eta_override!r}", flush=True)
+        if eta_scale is None and (is_stm and tbs and stm_partition is not None
                 and "n_pairs" in result.global_params
                 and stm_cov_df is not None):
             try:
@@ -818,7 +834,7 @@ def main(argv: list[str] | None = None) -> int:
                             "histogram falls back to scale=1.0.", exc)
                 eta_scale = None
                 eta_scale_diag = None
-        elif (is_stm and tbs and stm_partition is not None
+        elif (eta_scale is None and is_stm and tbs and stm_partition is not None
                 and "n_pairs" in result.global_params):
             # Reached only because stm_cov_df is None (covariate cache miss / no
             # --cache-uri): eta_scale cannot be calibrated. Warn explicitly --
