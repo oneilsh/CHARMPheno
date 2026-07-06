@@ -185,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     pg_downdate_audit = None
     pg_scale = None
     pg_n_docs = None
+    pg_smoothing = None
 
     # Load the vocab + BOW (Spark) up front: the STM correlation block below
     # reuses bow_df for the eta_scale E-step join, and corpus-stats / NPMI reuse it
@@ -604,6 +605,11 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("[driver]   predictive_gain: marginal unavailable, "
                       "unsmoothed fallback", flush=True)
+            pg_smoothing = {
+                "active": pg_marginal is not None,
+                "lambda": 1.0,
+                "marginal_floor": 0.01,
+            }
 
             pg = corpus_predictive_gain_gated_rdd(
                 pg_doc_rdd, result.global_params, partition,
@@ -667,6 +673,7 @@ def main(argv: list[str] | None = None) -> int:
             pg_downdate_audit = None
             pg_scale = None
             pg_n_docs = None
+            pg_smoothing = None
 
     log.info("K_display=%d V_full=%d (model_class=%s)", K_disp, V_full, model_class)
 
@@ -768,6 +775,7 @@ def main(argv: list[str] | None = None) -> int:
         predictive_gain_downdate_audit=pg_downdate_audit,
         predictive_gain_scale=pg_scale,
         predictive_gain_n_docs=pg_n_docs,
+        predictive_gain_smoothing=pg_smoothing,
     )
     write_corpus_stats_sidecar(stats, args.out_dir / "corpus_stats.json", v_displayed=v_disp)
 

@@ -940,6 +940,7 @@ def main(argv: list[str] | None = None) -> int:
         pg_downdate_audit = None
         pg_scale = None
         pg_n_docs = None
+        pg_smoothing = None
         if is_stm and tbs and stm_partition is not None and stm_cov_df is not None:
             with _phase("predictive_gain (presence/depth/prominence)"):
                 try:
@@ -1024,6 +1025,11 @@ def main(argv: list[str] | None = None) -> int:
                     else:
                         print("[driver]   predictive_gain: marginal unavailable, "
                               "unsmoothed fallback", flush=True)
+                    pg_smoothing = {
+                        "active": pg_marginal is not None,
+                        "lambda": 1.0,
+                        "marginal_floor": 0.01,
+                    }
 
                     pg = corpus_predictive_gain_gated_rdd(
                         pg_doc_rdd, result.global_params, stm_partition,
@@ -1091,6 +1097,7 @@ def main(argv: list[str] | None = None) -> int:
                     pg_downdate_audit = None
                     pg_scale = None
                     pg_n_docs = None
+                    pg_smoothing = None
 
         with _phase("write bundle"):
             v_disp = write_model_and_vocab_bundles(
@@ -1170,6 +1177,7 @@ def main(argv: list[str] | None = None) -> int:
                 predictive_gain_downdate_audit=pg_downdate_audit,
                 predictive_gain_scale=pg_scale,
                 predictive_gain_n_docs=pg_n_docs,
+                predictive_gain_smoothing=pg_smoothing,
             )
             if is_stm:
                 import json as _json

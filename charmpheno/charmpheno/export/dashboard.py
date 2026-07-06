@@ -156,6 +156,7 @@ def write_phenotypes_bundle(
     predictive_gain_downdate_audit: dict | None = None,
     predictive_gain_scale: float | None = None,
     predictive_gain_n_docs: int | None = None,
+    predictive_gain_smoothing: dict | None = None,
 ) -> None:
     """Write phenotypes.json.
 
@@ -315,7 +316,7 @@ def write_phenotypes_bundle(
         presence, mean_gain, depth, prominence_hist, length_corr, dedup_gain,
         prominence_bin_edges, null_band, observed_delta_range,
         predictive_gain_downdate_audit, predictive_gain_scale,
-        predictive_gain_n_docs,
+        predictive_gain_n_docs, predictive_gain_smoothing,
     )
     if any(v is not None for v in pg_supplied):
         pg: dict = {}
@@ -346,6 +347,12 @@ def write_phenotypes_bundle(
             pg["scale"] = float(predictive_gain_scale)
         if predictive_gain_n_docs is not None:
             pg["n_docs"] = int(predictive_gain_n_docs)
+        if predictive_gain_smoothing is not None:
+            # Self-describing provenance: whether the background-unigram smoother
+            # was active for THIS bundle (marginal supplied), its lambda, and the
+            # uniform backoff floor. Lets a reader confirm smoothing from the
+            # bundle alone -- no log line / mtime archaeology needed.
+            pg["smoothing"] = predictive_gain_smoothing
         payload["predictive_gain"] = pg
 
     out_path.write_text(json.dumps(payload, allow_nan=False))
