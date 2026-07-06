@@ -22,12 +22,24 @@ count_k is restricted to roughly half the corpus (its own group).
 There is no full build_dashboard harness (it needs a real checkpoint + BQ),
 so this drives the same helpers on a small in-process synthetic gated model,
 mirroring the theta-histogram e2e test.
+
+Task S2 (activating the S1 background-smoothed predictive score in the
+production build): the test also builds a real corpus-unigram ``marginal``
+(the same length-V token-frequency vector as ``stats.code_marginals`` in
+both dashboard builders, normalized to sum to 1) and threads it -- with
+``smoothing_lambda=1.0`` -- into BOTH ``corpus_predictive_gain_gated_rdd``
+and ``predictive_gain_downdate_audit``, exactly as
+analysis/cloud/build_dashboard_cloud.py and analysis/local/build_dashboard.py
+now do. This exercises the smoothed scoring path end-to-end (marginal is not
+None), not the historical unsmoothed floor fallback the marginal-less variant
+above already pins.
 """
 from __future__ import annotations
 
 import json
 
 import numpy as np
+import pytest
 
 from spark_vi.models.topic.partition import TopicBlockPartition
 from spark_vi.models.topic.types import STMDocument
@@ -163,3 +175,118 @@ def test_stm_predictive_gain_end_to_end(spark, tmp_path):
     # corpus -- the within-group denominator the module docstring promises.
     fg_a = int(part.block_indices("A")[0])
     assert 0 < pg["count_k"][fg_a] <= (len(docs) // 2) + 5
+
+
+def _corpus_unigram(docs, V) -> np.ndarray:
+    """Same computation as charmpheno.export.corpus_stats.compute_corpus_stats'
+    ``code_marginals`` (token frequency over the vocab, normalized to sum to
+    1): the corpus-unigram ``marginal`` both dashboard builders thread into
+    predictive_gain (Task S2)."""
+    code_total = np.zeros(V, dtype=np.float64)
+    for doc in docs:
+        code_total[doc.indices] += doc.counts
+    total = code_total.sum()
+    assert total > 0
+    return code_total / total
+
+
+def test_stm_predictive_gain_end_to_end_with_marginal(spark, tmp_path):
+    """Task S2: the production build threads a real corpus-unigram
+    ``marginal`` (+ ``smoothing_lambda=1.0``) into BOTH
+    ``corpus_predictive_gain_gated_rdd`` and ``predictive_gain_downdate_audit``
+    -- activating the S1 background-smoothed predictive score instead of the
+    historical unsmoothed 1e-12-floor fallback exercised by the marginal-less
+    test above. Confirms marginal flows through the whole chain (aggregation
+    -> audit -> JSON bundle) without error, and that the smoothed metric's
+    bounded-log-lift property holds on this fixture (cold-vs-fast discrepancy
+    stays small, same as the unsmoothed audit)."""
+    from spark_vi.mllib.topic.predictive_gain import (
+        corpus_predictive_gain_gated_rdd,
+        predictive_gain_downdate_audit,
+    )
+    from charmpheno.export.dashboard import write_phenotypes_bundle
+
+    docs, part, gp, K = _synthetic_gated_model(D=120, seed=0)
+    V = gp["lambda"].shape[1]
+    n_bins = 50
+
+    marginal = _corpus_unigram(docs, V)
+    assert marginal.shape == (V,)
+    assert marginal.sum() == pytest.approx(1.0)
+
+    rdd = spark.sparkContext.parallelize(docs, numSlices=3)
+    pg = corpus_predictive_gain_gated_rdd(
+        rdd, gp, part, c=1.0, reference=None, fast=True,
+        sample_cap=10_000, seed=0,
+        marginal=marginal, smoothing_lambda=1.0,
+    )
+    for key in ("mean_gain", "depth", "presence", "prominence_hist",
+                "length_corr", "dedup_mean_gain", "count_k"):
+        assert key in pg
+    assert pg["mean_gain"].shape == (K,)
+    assert pg["prominence_hist"].shape == (K, n_bins)
+    assert pg["n_docs"] > 0
+
+    # Cold-vs-fast downdate audit, SAME marginal/smoothing_lambda as the
+    # corpus aggregation above (the audit must measure the identical smoothed
+    # metric production scores against).
+    audit_docs = rdd.takeSample(False, 30, seed=0)
+    audit = predictive_gain_downdate_audit(
+        audit_docs, gp, part, c=1.0, reference=None,
+        marginal=marginal, smoothing_lambda=1.0,
+    )
+    assert audit["n_docs_audited"] > 0
+    assert np.isfinite(audit["max_abs_overall"])
+    # The smoother's whole point is a BOUNDED log-lift over the background
+    # baseline instead of a 1e-12-floor blowup; on this small, well-separated
+    # synthetic fixture the cold-vs-fast downdate discrepancy should stay
+    # small (same order as the unsmoothed audit above, not blown up by the
+    # marginal wiring).
+    assert audit["max_abs_overall"] < 1.0
+
+    def _nan_to_none(arr):
+        return [None if np.isnan(v) else float(v) for v in arr.tolist()]
+
+    presence = _nan_to_none(pg["presence"])
+    mean_gain = _nan_to_none(pg["mean_gain"])
+    depth = _nan_to_none(pg["depth"])
+    length_corr = _nan_to_none(pg["length_corr"])
+    dedup_gain = _nan_to_none(pg["dedup_mean_gain"])
+    prominence_hist = [
+        [None if np.isnan(v) else float(v) for v in row]
+        for row in pg["prominence_hist"].tolist()
+    ]
+    downdate_audit = {
+        "max_abs_overall": float(audit["max_abs_overall"]),
+        "n_docs_audited": int(audit["n_docs_audited"]),
+    }
+
+    out = tmp_path / "phenotypes_smoothed.json"
+    write_phenotypes_bundle(
+        out,
+        npmi=[0.0] * K,
+        pair_coverage=[0.0] * K,
+        corpus_prevalence=[0.25] * K,
+        topic_indices=list(range(K)),
+        labels=None,
+        presence=presence,
+        mean_gain=mean_gain,
+        depth=depth,
+        prominence_hist=prominence_hist,
+        length_corr=length_corr,
+        dedup_gain=dedup_gain,
+        prominence_bin_edges=pg["prominence_bin_edges"].tolist(),
+        null_band=pg["null_band"],
+        observed_delta_range=list(pg["observed_delta_range"]),
+        predictive_gain_downdate_audit=downdate_audit,
+        predictive_gain_scale=1.0,
+        predictive_gain_n_docs=int(pg["n_docs"]),
+    )
+    payload = json.loads(out.read_text())
+    assert "NaN" not in out.read_text()
+
+    pgj = payload["predictive_gain"]
+    assert "presence" in pgj and len(pgj["presence"]) == K
+    assert "null_band" in pgj
+    assert "downdate_audit" in pgj
+    assert pgj["downdate_audit"]["n_docs_audited"] == audit["n_docs_audited"]

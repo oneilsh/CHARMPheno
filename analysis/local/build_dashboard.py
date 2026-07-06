@@ -200,6 +200,26 @@ def main(argv: list[str] | None = None) -> int:
     bow_df, _ = to_bow_dataframe(df, doc_spec=doc_spec, vocab=vocab_ids)
     bow_df = bow_df.persist()
 
+    # Corpus stats (code_marginals) computed up front -- moved ahead of the STM
+    # gating block (Task S2) because the predictive_gain build-step below needs
+    # the corpus unigram for its background-smoothed predictive score, mirroring
+    # build_dashboard_cloud.py's earlier "corpus stats" phase. V_full/K_disp only
+    # depend on export.beta (already set by adapt() above), so this is safe to
+    # hoist ahead of the tbs block without any other reordering.
+    K_disp, V_full = export.beta.shape
+    _sv_indices = F.udf(lambda sv: sv.indices.tolist() if sv is not None else [],
+                        "array<int>")
+    _sv_counts = F.udf(lambda sv: [float(x) for x in sv.values] if sv is not None else [],
+                       "array<double>")
+    bow_df_stats = bow_df.select(
+        _sv_indices(F.col("features")).alias("indices"),
+        _sv_counts(F.col("features")).alias("counts"),
+    )
+    bow_df_stats = bow_df_stats.persist()
+    stats = compute_corpus_stats_from_bow_df(bow_df_stats, vocab_size=V_full, k=K_disp)
+    log.info("corpus stats: n_docs=%d mean_codes=%.2f",
+             stats.corpus_size_docs, stats.mean_codes_per_doc)
+
     # --- STM gating: masked prevalence + covariate + gating.json (offline) ---
     corpus = result.metadata.get("corpus_manifest", {})
     tbs = corpus.get("topic_block_spec") if model_class == "stm" else None
@@ -543,10 +563,44 @@ def main(argv: list[str] | None = None) -> int:
                       pg_scale,
                       "calibrated eta_scale" if eta_scale else "unit fallback")
 
+            # Corpus unigram (Task S2): activates predictive_gain's S1
+            # background-smoothed predictive score p_S(w) =
+            # (1-eps)*(theta@beta)(w) + eps*m_w in place of the historical
+            # unsmoothed 1e-12-floor path. stats.code_marginals (computed up
+            # front, ahead of the STM gating block) is already the length-
+            # V_full token-frequency vector -- normalize defensively (it
+            # should already sum to ~1) and length-check against the fitted
+            # beta's vocab width before trusting it.
+            pg_marginal_raw = np.asarray(stats.code_marginals, dtype=float)
+            lam_v = np.asarray(result.global_params["lambda"]).shape[1]
+            if pg_marginal_raw.shape[0] != lam_v:
+                log.warning(
+                    "predictive_gain: marginal unavailable, unsmoothed "
+                    "fallback (code_marginals length=%d != lambda V=%d).",
+                    pg_marginal_raw.shape[0], lam_v)
+                pg_marginal = None
+            else:
+                pg_marginal_sum = float(pg_marginal_raw.sum())
+                if (not np.isfinite(pg_marginal_sum) or pg_marginal_sum <= 0
+                        or np.any(np.isnan(pg_marginal_raw))):
+                    log.warning(
+                        "predictive_gain: marginal unavailable, unsmoothed "
+                        "fallback (code_marginals sum=%s is degenerate).",
+                        pg_marginal_sum)
+                    pg_marginal = None
+                else:
+                    pg_marginal = pg_marginal_raw / pg_marginal_sum
+            if pg_marginal is not None:
+                log.info("predictive_gain: smoothed score active (lambda=1.0)")
+            else:
+                log.info(
+                    "predictive_gain: marginal unavailable, unsmoothed fallback")
+
             pg = corpus_predictive_gain_gated_rdd(
                 pg_doc_rdd, result.global_params, partition,
                 c=pg_scale, reference=pg_reference, fast=True,
                 sample_cap=200_000, seed=0,
+                marginal=pg_marginal, smoothing_lambda=1.0,
             )
 
             # Cold-vs-fast downdate reliability audit on a small in-memory
@@ -557,6 +611,7 @@ def main(argv: list[str] | None = None) -> int:
                 pg_audit_raw = predictive_gain_downdate_audit(
                     pg_audit_docs, result.global_params, partition,
                     c=pg_scale, reference=pg_reference,
+                    marginal=pg_marginal, smoothing_lambda=1.0,
                 )
                 pg_downdate_audit = {
                     "max_abs_overall": float(pg_audit_raw["max_abs_overall"]),
@@ -604,27 +659,14 @@ def main(argv: list[str] | None = None) -> int:
             pg_scale = None
             pg_n_docs = None
 
-    K_disp, V_full = export.beta.shape
     log.info("K_display=%d V_full=%d (model_class=%s)", K_disp, V_full, model_class)
 
     descriptions = result.metadata.get("concept_names", {}) or {}
     domains = result.metadata.get("concept_domains", {}) or {}
 
-    # Stats from the already-loaded bow_df (loaded once above; reused here).
-    # compute_corpus_stats_from_bow_df needs 'indices' and 'counts' array columns.
-    # to_bow_dataframe returns a SparseVector 'features' column; extract them.
-    _sv_indices = F.udf(lambda sv: sv.indices.tolist() if sv is not None else [],
-                        "array<int>")
-    _sv_counts = F.udf(lambda sv: [float(x) for x in sv.values] if sv is not None else [],
-                       "array<double>")
-    bow_df_stats = bow_df.select(
-        _sv_indices(F.col("features")).alias("indices"),
-        _sv_counts(F.col("features")).alias("counts"),
-    )
-    bow_df_stats = bow_df_stats.persist()
-    stats = compute_corpus_stats_from_bow_df(bow_df_stats, vocab_size=V_full, k=K_disp)
-    log.info("corpus stats: n_docs=%d mean_codes=%.2f",
-             stats.corpus_size_docs, stats.mean_codes_per_doc)
+    # stats (code_marginals) was computed up front, ahead of the STM gating
+    # block, so the predictive_gain build-step above could thread the corpus
+    # unigram into it (Task S2); bow_df/bow_df_stats are reused here for NPMI.
 
     # NPMI on the adapter's displayed-topic β (already filtered for HDP)
     # Cap top_n to the vocab size so small-vocab smoke fixtures don't error.

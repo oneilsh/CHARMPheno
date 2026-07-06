@@ -978,10 +978,46 @@ def main(argv: list[str] | None = None) -> int:
                         pg_scale,
                         "calibrated eta_scale" if eta_scale else "unit fallback")
 
+                    # Corpus unigram (Task S2): activates predictive_gain's
+                    # S1 background-smoothed predictive score p_S(w) =
+                    # (1-eps)*(theta@beta)(w) + eps*m_w in place of the
+                    # historical unsmoothed 1e-12-floor path. stats.code_marginals
+                    # (computed above in the "corpus stats" phase) is already the
+                    # length-V_full token-frequency vector -- normalize defensively
+                    # (it should already sum to ~1) and length-check against the
+                    # fitted beta's vocab width before trusting it.
+                    pg_marginal_raw = np.asarray(stats.code_marginals, dtype=float)
+                    lam_v = np.asarray(result.global_params["lambda"]).shape[1]
+                    if pg_marginal_raw.shape[0] != lam_v:
+                        log.warning(
+                            "predictive_gain: marginal unavailable, unsmoothed "
+                            "fallback (code_marginals length=%d != lambda V=%d).",
+                            pg_marginal_raw.shape[0], lam_v)
+                        pg_marginal = None
+                    else:
+                        pg_marginal_sum = float(pg_marginal_raw.sum())
+                        if (not np.isfinite(pg_marginal_sum) or pg_marginal_sum <= 0
+                                or np.any(np.isnan(pg_marginal_raw))):
+                            log.warning(
+                                "predictive_gain: marginal unavailable, unsmoothed "
+                                "fallback (code_marginals sum=%s is degenerate).",
+                                pg_marginal_sum)
+                            pg_marginal = None
+                        else:
+                            pg_marginal = pg_marginal_raw / pg_marginal_sum
+                    if pg_marginal is not None:
+                        log.info(
+                            "predictive_gain: smoothed score active (lambda=1.0)")
+                    else:
+                        log.info(
+                            "predictive_gain: marginal unavailable, unsmoothed "
+                            "fallback")
+
                     pg = corpus_predictive_gain_gated_rdd(
                         pg_doc_rdd, result.global_params, stm_partition,
                         c=pg_scale, reference=pg_reference, fast=True,
                         sample_cap=200_000, seed=0,
+                        marginal=pg_marginal, smoothing_lambda=1.0,
                     )
 
                     # Cold-vs-fast downdate reliability audit on a small
@@ -992,6 +1028,7 @@ def main(argv: list[str] | None = None) -> int:
                         pg_audit_raw = predictive_gain_downdate_audit(
                             pg_audit_docs, result.global_params, stm_partition,
                             c=pg_scale, reference=pg_reference,
+                            marginal=pg_marginal, smoothing_lambda=1.0,
                         )
                         pg_downdate_audit = {
                             "max_abs_overall": float(pg_audit_raw["max_abs_overall"]),
