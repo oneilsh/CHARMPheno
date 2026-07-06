@@ -100,3 +100,33 @@ def test_degenerate_fewer_than_three_points():
     assert out["curvature_q"] == 0.0
     assert out["se_log_c"] is None
     assert out["se_c"] is None
+
+
+def test_shallow_concave_interior_is_sane():
+    # The real-corpus regime: a broad-but-genuine downward parabola in log c
+    # (small |curvature|) with resampling-scale noise. This is the shape the
+    # actual held-out-LL sweep produces -- a real, gently-peaked maximum, not
+    # the perfectly flat shelf of test_flat_shelf_is_honest nor the monotone
+    # boundary cases. The point estimate must stay sane here: an interior
+    # vertex with negative curvature and a finite, in-grid c_star. We pin ONLY
+    # those robust identifiability signals and deliberately do NOT assert the
+    # SE magnitude -- in this small-window, small-|curvature| regime the
+    # delta-method SE is itself a noisy, unreliable statistic (a
+    # ratio-of-Gaussians / Fieller-style instability when the curvature
+    # denominator is small and uncertain), so an SE-magnitude assertion would
+    # be flaky. The signal here (~5x the noise across the fit window) keeps the
+    # sign of the curvature robust.
+    grid = _geomspace_grid()
+    u0 = np.log(5.0)
+    rng = np.random.default_rng(0)
+    lls = {
+        c: -0.01 * (np.log(c) - u0) ** 2 + rng.normal(0.0, 1e-3)
+        for c in grid
+    }
+
+    out = smooth_scale_log_quadratic(lls)
+
+    assert out["interior"] is True
+    assert out["curvature_q"] < 0
+    assert np.isfinite(out["c_star"])
+    assert min(grid) <= out["c_star"] <= max(grid)
