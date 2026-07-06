@@ -31,13 +31,17 @@ from _log_utils import quiet_spot_reclamation
 
 @contextmanager
 def _phase(name: str) -> Iterator[None]:
-    """Bracket a driver phase with start/end markers and elapsed wall time."""
-    print(f"[driver] >>> {name}", flush=True)
+    """Bracket a driver phase with start/end markers, a wall-clock timestamp,
+    and elapsed wall time. The HH:MM:SS timestamp makes separate runs
+    distinguishable in a captured log (two runs never share it) and shows
+    real-time progress -- so a slow phase is not mistaken for a hang."""
+    print(f"[driver] [{time.strftime('%H:%M:%S')}] >>> {name}", flush=True)
     t0 = time.perf_counter()
     try:
         yield
     finally:
-        print(f"[driver] <<< {name}: {time.perf_counter() - t0:.1f}s", flush=True)
+        print(f"[driver] [{time.strftime('%H:%M:%S')}] <<< {name}: "
+              f"{time.perf_counter() - t0:.1f}s", flush=True)
 
 
 def configure_logging(extra_loggers: dict[str, int] | None = None) -> None:

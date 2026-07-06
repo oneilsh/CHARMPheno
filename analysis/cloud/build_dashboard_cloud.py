@@ -1295,7 +1295,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[driver]   zipped -> {zip_path}", flush=True)
 
         print("[driver] BUILD DASHBOARD CLOUD PASSED", flush=True)
-        return 0
+        # The bundle + zip are fully written above. Mark THIS run's output
+        # explicitly (path + mtime) so a captured log is unambiguous about which
+        # run produced the artifact, then hard-exit: SparkContext teardown on
+        # YARN can hang for minutes AFTER the bundle is done, which previously
+        # looked like a failed build and led to a stale download. Once this line
+        # prints, the zip is safe to download.
+        import os as _os
+        import time as _t
+        try:
+            _mt = _t.strftime("%Y-%m-%d %H:%M:%S",
+                              _t.localtime(_os.path.getmtime(zip_path)))
+            print(f"[driver] BUNDLE WRITTEN: {zip_path} (mtime {_mt})", flush=True)
+        except Exception:
+            pass
+        _os._exit(0)   # skip the hang-prone YARN teardown; bundle already written
     finally:
         spark.stop()
 
