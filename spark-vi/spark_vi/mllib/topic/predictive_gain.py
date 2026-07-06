@@ -535,20 +535,21 @@ def null_delta(
 # DESIGN DECISIONS (see docstrings below for the full derivation; both are
 # flagged for Phase-2 confirmation in the task report):
 #
-#   1. PRESENCE is a PER-DOCUMENT PAIRED permutation test: each document's
-#      real Delta_k is compared to THAT SAME document's own permuted-null
-#      samples (from null_delta, run against the identical held-out split),
-#      not to a pooled corpus-wide null. This controls for the document's
-#      own length/composition (a paired design), is a standard one-sided
-#      permutation-test construction (reject if the observed statistic
-#      exceeds the max of n_perm null draws -> approx level 1/(n_perm+1)),
-#      is single-pass (no second corpus traversal to first pool nulls then
-#      re-score presence), and does not depend on the provisional
-#      prominence_range bin edges at all. The POOLED corpus null_band
-#      (mean/std/histogram/p95 over every doc's finite null samples) is
-#      ALSO returned, for the frontend's noise-floor display and Phase-2
-#      inspection -- but it is descriptive, not what presence is tested
-#      against.
+#   1. PRESENCE is the fraction of a topic's documents with Delta_k > 0 --
+#      i.e. where topic k gives positive held-out predictive lift over the
+#      background-unigram baseline built into the smoothed score. With the
+#      marginal back-off (see _make_scorer), 0 is a meaningful origin: an
+#      irrelevant or shuffled topic scores Delta ~ 0 by construction, so
+#      "beats zero" is the natural presence criterion and needs no external
+#      threshold. RETAINED for validation, not as the operating threshold:
+#      presence_vs_null, the older PER-DOCUMENT PAIRED permutation test (each
+#      doc's real Delta_k vs THAT SAME doc's own permuted-null max, a
+#      one-sided test at approx level 1/(n_perm+1)), plus the POOLED corpus
+#      null_band (mean/std/histogram/p95 over every doc's finite null
+#      samples). Under the smoother the permutation null should collapse to
+#      ~0, so presence_vs_null should AGREE with presence; the two are
+#      reported side by side to confirm that on a real corpus (the
+#      permutation machinery is now a correctness check).
 #   2. prominence_range=(-1.0, 10.0) is PROVISIONAL: Delta_k's natural scale
 #      (nats of held-out per-document log-likelihood) is not yet calibrated
 #      against a real fitted corpus. observed_delta_range is returned
@@ -589,18 +590,22 @@ class _PredGainAcc:
       prominence_hist[k, bin(d_k)] += 1            (per-topic Delta_k
                        histogram; the aggregate distribution that replaces
                        a theta-hat histogram for the predictive-gain view)
-      presence_count[k] += 1 IFF the doc had at least one finite null sample
-                       AND d_k beats that doc's OWN null max (paired test,
-                       decision #1 above); a doc with NO finite null sample
-                       contributes to count_k but never to presence_count.
-                       presence[k] = presence_count[k] / count_k[k] (see
-                       _finalize_pred_gain) -- count_k is the FULL denominator
-                       (not restricted to docs whose null could be
-                       evaluated); a doc whose null band could not be
-                       evaluated (e.g. no non-reference topic to permute)
-                       stays in count_k but can never reach presence_count,
-                       so it effectively counts AGAINST presence (as if k
-                       were "not present" in that doc).
+      presence_count_pos[k] += 1 IFF d_k > 0 (topic k gives positive held-out
+                       lift over the background baseline). presence[k] =
+                       presence_count_pos[k] / count_k[k] (see
+                       _finalize_pred_gain) -- the OPERATING presence
+                       (decision #1 above).
+      presence_count[k] += 1 IFF the doc had a finite null sample AND d_k
+                       beats that doc's OWN null max (the RETAINED paired
+                       permutation test); presence_vs_null[k] =
+                       presence_count[k] / count_k[k], reported only to
+                       validate that it agrees with presence once the
+                       permutation null collapses to ~0 under the smoother.
+                       count_k is the FULL denominator for both: a doc that
+                       fails the criterion (or whose null could not be
+                       evaluated, e.g. no non-reference topic to permute)
+                       stays in count_k, so it counts AGAINST presence (as if
+                       k were "not present" in that doc).
       obs_delta_min/max: running min/max of every d_k ever seen (-> the
                        returned observed_delta_range, decision #2 above).
 
@@ -924,21 +929,23 @@ def corpus_predictive_gain_gated(
                         structure is positive); Delta can be negative, so
                         depth_den can be zero or negative, and depth[k] is
                         nan there rather than a negative or exploded share.
-      presence          presence[k] = presence_count[k] / count_k[k]: the
-                        fraction of topic k's documents (the FULL count_k,
-                        not a null-evaluable subset) whose Delta_k beats
-                        THAT SAME document's own permuted-null maximum -- a
-                        PER-DOCUMENT PAIRED permutation test (see the module-
-                        level "DESIGN DECISIONS" comment above this
-                        function for the full derivation and why this,
-                        rather than testing against the pooled corpus null
-                        band, is correct). Documents with no finite null
-                        sample (e.g. a single-allowed-topic doc where that
-                        topic is the pinned reference) remain in the
-                        count_k denominator but can NEVER enter
-                        presence_count -- so a null-unevaluable document
-                        effectively counts AGAINST presence, as if topic k
-                        were judged "not present" in it.
+      presence          presence[k] = presence_count_pos[k] / count_k[k]: the
+                        fraction of topic k's documents (the FULL count_k)
+                        with Delta_k > 0 -- i.e. where k gives positive
+                        held-out predictive lift over the background-unigram
+                        baseline in the smoothed score. This is the OPERATING
+                        presence (see the module-level "DESIGN DECISIONS"
+                        comment for why 0 is a meaningful origin under the
+                        marginal back-off). A document where Delta_k <= 0
+                        stays in count_k, so it counts AGAINST presence.
+      presence_vs_null  presence_vs_null[k] = presence_count[k] / count_k[k]:
+                        the RETAINED per-document paired permutation test
+                        (Delta_k beats that doc's own permuted-null maximum),
+                        reported only to validate that it AGREES with
+                        ``presence`` once the permutation null collapses to
+                        ~0 under the smoother. Documents with no finite null
+                        sample stay in count_k but can never enter
+                        presence_count.
       prominence_hist   (K, n_bins) histogram of per-doc Delta_k over
                         ``prominence_range`` -- the aggregate Delta
                         distribution, replacing a theta-hat histogram for
