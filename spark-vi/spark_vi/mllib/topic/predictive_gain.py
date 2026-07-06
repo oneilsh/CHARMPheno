@@ -43,6 +43,7 @@ Two conventions matter and are easy to get backwards:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -52,6 +53,8 @@ from spark_vi.eval.topic.concentration_recovery import _predictive_loglik, heldo
 from spark_vi.mllib.topic.stm import _gated_mode_theta
 from spark_vi.models.topic._linalg import safe_inverse
 from spark_vi.models.topic.stm import _stm_doc_inference
+
+log = logging.getLogger(__name__)
 
 
 def _infer_theta(
@@ -328,3 +331,538 @@ def null_delta(
         samples[i] = ll_full - ll_k
 
     return samples
+
+
+# --------------------------------------------------------------------------
+# Task 3: corpus-level aggregation (numpy + distributed twins)
+# --------------------------------------------------------------------------
+#
+# corpus_predictive_gain_gated / corpus_predictive_gain_gated_rdd fold the
+# per-document DocGain (doc_predictive_gain) and permuted null (null_delta)
+# into per-topic arrays over a whole corpus. They mirror the
+# numpy-in-memory/`_rdd`-distributed twin pattern used throughout this
+# codebase (e.g. corpus_eta_variance_gated{,_rdd},
+# corpus_heldout_scale_sweep_gated{,_rdd} in spark_vi/mllib/topic/stm.py):
+# the numpy path is the reference for small/test corpora, the `_rdd` path is
+# the mapPartitions(_local).treeReduce(_combine) distributed twin, and a
+# numpy<->RDD parity test proves they compute the identical thing.
+#
+# DESIGN DECISIONS (see docstrings below for the full derivation; both are
+# flagged for Phase-2 confirmation in the task report):
+#
+#   1. PRESENCE is a PER-DOCUMENT PAIRED permutation test: each document's
+#      real Delta_k is compared to THAT SAME document's own permuted-null
+#      samples (from null_delta, run against the identical held-out split),
+#      not to a pooled corpus-wide null. This controls for the document's
+#      own length/composition (a paired design), is a standard one-sided
+#      permutation-test construction (reject if the observed statistic
+#      exceeds the max of n_perm null draws -> approx level 1/(n_perm+1)),
+#      is single-pass (no second corpus traversal to first pool nulls then
+#      re-score presence), and does not depend on the provisional
+#      prominence_range bin edges at all. The POOLED corpus null_band
+#      (mean/std/histogram/p95 over every doc's finite null samples) is
+#      ALSO returned, for the frontend's noise-floor display and Phase-2
+#      inspection -- but it is descriptive, not what presence is tested
+#      against.
+#   2. prominence_range=(-1.0, 10.0) is PROVISIONAL: Delta_k's natural scale
+#      (nats of held-out per-document log-likelihood) is not yet calibrated
+#      against a real fitted corpus. observed_delta_range is returned
+#      precisely so a Phase-2 caller can recalibrate the histogram edges
+#      from real numbers rather than trusting this placeholder.
+
+
+@dataclass
+class _PredGainAcc:
+    """Per-topic (+ two pooled scalars) accumulator for the corpus
+    predictive-gain aggregation. Every array field is length K (indexed by
+    topic id) except ``prominence_hist`` (K x n_bins) and ``null_hist``
+    (n_bins,). Built once per partition (numpy path: once for the whole
+    corpus) and folded across partitions by ``_combine_pred_gain_acc``, which
+    is a PURE function (returns a new accumulator, mutates neither input) so
+    it is safe to use as ``RDD.treeReduce``'s combiner.
+
+    Fields, and what streams into them per document per allowed topic k
+    (``dg`` = this doc's DocGain, ``d_k`` = dg.delta at k's position, ``L`` =
+    the doc's full token length, ``sum_j`` = sum(dg.delta) over ALL of the
+    doc's allowed topics):
+
+      sum_gain[k]   += d_k                        (-> mean_gain, depth_num)
+      depth_den[k]  += sum_j                       (the doc's TOTAL held-out
+                       structure attributed to EVERY one of its allowed
+                       topics -- see corpus_predictive_gain_gated's
+                       docstring for why this, not a per-topic sum, is the
+                       correct "depth" denominator)
+      dedup_sum[k]  += dg.dedup_delta at k
+      count_k[k]    += 1                           (WITHIN-GROUP: a doc only
+                       reaches this loop for topics in ITS OWN allowed set,
+                       so a foreground topic's count_k is automatically
+                       restricted to its own group's documents -- no extra
+                       cross-group masking needed anywhere in this module)
+      Slen/SdL/SLL/Sdd[k] += L / d_k*L / L*L / d_k*d_k  (streaming sums for
+                       the length<->Delta Pearson correlation, finalized
+                       once at the end -- see _finalize_pred_gain)
+      prominence_hist[k, bin(d_k)] += 1            (per-topic Delta_k
+                       histogram; the aggregate distribution that replaces
+                       a theta-hat histogram for the predictive-gain view)
+      presence_count[k] += 1 IFF the doc had at least one finite null sample
+                       AND d_k beats that doc's OWN null max (paired test,
+                       decision #1 above); a doc with NO finite null sample
+                       contributes to count_k but never to presence_count --
+                       presence[k] is silently conditioned on "documents
+                       whose null could be evaluated", not the full count_k.
+      obs_delta_min/max: running min/max of every d_k ever seen (-> the
+                       returned observed_delta_range, decision #2 above).
+
+    Independently, the POOLED corpus null distribution accumulates every
+    FINITE null sample from EVERY document (not just one per doc) into
+    null_sum/null_sqsum/null_count (mean/std) and null_hist (its own
+    histogram over the same bin edges) -- purely descriptive (see decision
+    #1), never used to decide presence.
+    """
+    K: int
+    n_bins: int
+    sum_gain: np.ndarray
+    depth_den: np.ndarray
+    dedup_sum: np.ndarray
+    Slen: np.ndarray
+    SdL: np.ndarray
+    SLL: np.ndarray
+    Sdd: np.ndarray
+    count_k: np.ndarray
+    presence_count: np.ndarray
+    prominence_hist: np.ndarray
+    null_hist: np.ndarray
+    null_sum: float = 0.0
+    null_sqsum: float = 0.0
+    null_count: int = 0
+    n_docs: int = 0
+    obs_delta_min: float = float("inf")
+    obs_delta_max: float = float("-inf")
+
+    @staticmethod
+    def zeros(K: int, n_bins: int) -> "_PredGainAcc":
+        return _PredGainAcc(
+            K=K, n_bins=n_bins,
+            sum_gain=np.zeros(K, dtype=np.float64),
+            depth_den=np.zeros(K, dtype=np.float64),
+            dedup_sum=np.zeros(K, dtype=np.float64),
+            Slen=np.zeros(K, dtype=np.float64),
+            SdL=np.zeros(K, dtype=np.float64),
+            SLL=np.zeros(K, dtype=np.float64),
+            Sdd=np.zeros(K, dtype=np.float64),
+            count_k=np.zeros(K, dtype=np.int64),
+            presence_count=np.zeros(K, dtype=np.int64),
+            prominence_hist=np.zeros((K, n_bins), dtype=np.int64),
+            null_hist=np.zeros(n_bins, dtype=np.int64),
+        )
+
+
+def _combine_pred_gain_acc(a: _PredGainAcc, b: _PredGainAcc) -> _PredGainAcc:
+    """Functional (treeReduce-safe) merge of two accumulators: elementwise
+    sum for every array/count/scalar, min/max for the observed-Delta range.
+    Mutates neither ``a`` nor ``b``."""
+    return _PredGainAcc(
+        K=a.K, n_bins=a.n_bins,
+        sum_gain=a.sum_gain + b.sum_gain,
+        depth_den=a.depth_den + b.depth_den,
+        dedup_sum=a.dedup_sum + b.dedup_sum,
+        Slen=a.Slen + b.Slen,
+        SdL=a.SdL + b.SdL,
+        SLL=a.SLL + b.SLL,
+        Sdd=a.Sdd + b.Sdd,
+        count_k=a.count_k + b.count_k,
+        presence_count=a.presence_count + b.presence_count,
+        prominence_hist=a.prominence_hist + b.prominence_hist,
+        null_hist=a.null_hist + b.null_hist,
+        null_sum=a.null_sum + b.null_sum,
+        null_sqsum=a.null_sqsum + b.null_sqsum,
+        null_count=a.null_count + b.null_count,
+        n_docs=a.n_docs + b.n_docs,
+        obs_delta_min=min(a.obs_delta_min, b.obs_delta_min),
+        obs_delta_max=max(a.obs_delta_max, b.obs_delta_max),
+    )
+
+
+def _clamped_bin(value: float, edges: np.ndarray, n_bins: int) -> int:
+    """Bin index of ``value`` over ``edges`` (length n_bins+1), clamped into
+    [0, n_bins-1]: values at or below the lowest edge land in bin 0, values
+    at or above the highest edge land in bin n_bins-1 (``np.digitize``
+    against the INTERIOR edges already does this -- it has no notion of
+    "out of range" -- the explicit ``np.clip`` is a defensive belt-and-
+    braces guard, e.g. against a NaN slipping through)."""
+    idx = int(np.digitize(value, edges[1:-1]))
+    return int(np.clip(idx, 0, n_bins - 1))
+
+
+def _accumulate_doc(
+    acc: _PredGainAcc, doc, idx: int, global_params, partition, *,
+    c, reference, holdout_frac, seed, n_perm, bin_edges, n_bins,
+) -> _PredGainAcc:
+    """Fold ONE document's predictive-gain contribution into ``acc``
+    (mutated in place -- this is the per-partition-local accumulation step,
+    never shared across partitions/workers, so in-place mutation here is
+    safe and cheap; only ``_combine_pred_gain_acc``, which crosses the
+    treeReduce boundary, must be side-effect-free).
+
+    Shared by BOTH the numpy driver (``corpus_predictive_gain_gated``, which
+    calls this once per ``enumerate(docs)``) and the RDD ``_local`` worker
+    function (once per ``doc_rdd.zipWithIndex()`` row) so the per-document
+    logic cannot drift between the two twins -- ``idx`` is exactly
+    ``seed + idx`` fed to ``doc_predictive_gain``/``null_delta`` as their
+    per-doc seed, and MUST be the same index a document gets under
+    ``enumerate(docs)`` in the numpy path for numpy<->RDD parity (see
+    ``corpus_heldout_scale_sweep_gated_rdd``'s docstring for why
+    ``zipWithIndex`` on an un-sampled, order-preserving RDD reproduces this).
+
+    Degenerate-split documents (``doc_predictive_gain`` returns None) are
+    skipped entirely -- not counted anywhere, not even ``n_docs``.
+    """
+    dg = doc_predictive_gain(
+        doc, global_params, partition, c=c, reference=reference,
+        holdout_frac=holdout_frac, seed=seed + idx,
+    )
+    if dg is None:
+        return acc
+
+    nulls = null_delta(
+        doc, global_params, partition, c=c, reference=reference,
+        holdout_frac=holdout_frac, seed=seed + idx,
+        n_perm=n_perm, rng_seed=seed + idx,
+    )
+    if nulls is not None:
+        finite = nulls[np.isfinite(nulls)]
+    else:
+        finite = np.empty(0, dtype=np.float64)
+    null_ok = finite.size > 0
+    thr = float(np.max(finite)) if null_ok else None
+
+    L = int(doc.counts.sum())
+    sum_j = float(np.sum(dg.delta))
+
+    for p in range(dg.allowed.shape[0]):
+        k = int(dg.allowed[p])
+        d_k = float(dg.delta[p])
+
+        acc.sum_gain[k] += d_k
+        acc.depth_den[k] += sum_j
+        acc.dedup_sum[k] += float(dg.dedup_delta[p])
+        acc.count_k[k] += 1
+
+        acc.Slen[k] += L
+        acc.SdL[k] += d_k * L
+        acc.SLL[k] += L * L
+        acc.Sdd[k] += d_k * d_k
+
+        b = _clamped_bin(d_k, bin_edges, n_bins)
+        acc.prominence_hist[k, b] += 1
+
+        if null_ok and d_k > thr:
+            acc.presence_count[k] += 1
+
+        if d_k < acc.obs_delta_min:
+            acc.obs_delta_min = d_k
+        if d_k > acc.obs_delta_max:
+            acc.obs_delta_max = d_k
+
+    for v in finite:
+        vf = float(v)
+        acc.null_sum += vf
+        acc.null_sqsum += vf * vf
+        acc.null_count += 1
+        b = _clamped_bin(vf, bin_edges, n_bins)
+        acc.null_hist[b] += 1
+
+    acc.n_docs += 1
+    return acc
+
+
+def _hist_percentile(hist: np.ndarray, edges: np.ndarray, q: float) -> float:
+    """Linear-interpolated ``q``-percentile (0 < q < 1) from a binned
+    histogram (``hist`` length n_bins, ``edges`` length n_bins+1): locate the
+    bin containing the ``q``-th quantile via cumulative counts, then
+    linearly interpolate within that bin's width under a uniform-within-bin
+    density assumption. Returns NaN if the histogram is empty (total count
+    0)."""
+    hist = np.asarray(hist, dtype=np.float64)
+    total = float(hist.sum())
+    if total <= 0:
+        return float("nan")
+    target = q * total
+    cum = np.cumsum(hist)
+    bin_idx = int(np.searchsorted(cum, target, side="left"))
+    bin_idx = min(bin_idx, hist.shape[0] - 1)
+    prev_cum = float(cum[bin_idx - 1]) if bin_idx > 0 else 0.0
+    bin_count = float(hist[bin_idx])
+    lo, hi = float(edges[bin_idx]), float(edges[bin_idx + 1])
+    if bin_count <= 0:
+        return lo
+    frac = min(max((target - prev_cum) / bin_count, 0.0), 1.0)
+    return lo + frac * (hi - lo)
+
+
+def _finalize_pred_gain(acc: _PredGainAcc, bin_edges: np.ndarray) -> dict:
+    """Shared driver-side finalize for both ``corpus_predictive_gain_gated``
+    and ``corpus_predictive_gain_gated_rdd``: turns the reduced
+    ``_PredGainAcc`` totals into the returned per-topic arrays + null_band
+    summary. See those functions' docstrings for field semantics."""
+    count_k = acc.count_k
+    denom = np.maximum(count_k, 1)
+
+    mean_gain = np.where(count_k > 0, acc.sum_gain / denom, np.nan)
+
+    depth_num = acc.sum_gain.copy()
+    depth_den = acc.depth_den
+    depth = np.where(
+        depth_den != 0, depth_num / np.where(depth_den == 0, 1.0, depth_den), np.nan,
+    )
+
+    presence = np.where(count_k > 0, acc.presence_count / denom, np.nan)
+
+    # Streaming Pearson correlation of per-doc Delta_k with document length L,
+    # from sufficient statistics (never a per-doc ratio): guard n<2 and
+    # zero-variance (den<=0) to NaN.
+    n_f = count_k.astype(np.float64)
+    num = n_f * acc.SdL - acc.Slen * acc.sum_gain
+    var_len = n_f * acc.SLL - acc.Slen ** 2
+    var_d = n_f * acc.Sdd - acc.sum_gain ** 2
+    den_sq = var_len * var_d
+    den = np.sqrt(np.maximum(den_sq, 0.0))
+    valid = (count_k >= 2) & (den > 0)
+    length_corr = np.where(valid, num / np.where(den == 0, 1.0, den), np.nan)
+
+    dedup_mean_gain = np.where(count_k > 0, acc.dedup_sum / denom, np.nan)
+
+    if acc.null_count > 0:
+        null_mean = acc.null_sum / acc.null_count
+        null_var = max(0.0, acc.null_sqsum / acc.null_count - null_mean ** 2)
+        null_std = float(np.sqrt(null_var))
+        p95 = _hist_percentile(acc.null_hist, bin_edges, 0.95)
+    else:
+        null_mean = float("nan")
+        null_std = float("nan")
+        p95 = float("nan")
+
+    null_band = {
+        "mean": float(null_mean),
+        "std": float(null_std),
+        "n": int(acc.null_count),
+        "hist": acc.null_hist.tolist(),
+        "p95": float(p95),
+    }
+
+    return {
+        "mean_gain": mean_gain,
+        "depth": depth,
+        "depth_num": depth_num,
+        "depth_den": depth_den,
+        "presence": presence,
+        "prominence_hist": acc.prominence_hist,
+        "prominence_bin_edges": bin_edges,
+        "length_corr": length_corr,
+        "dedup_mean_gain": dedup_mean_gain,
+        "null_band": null_band,
+        "count_k": count_k,
+        "n_docs": acc.n_docs,
+        "observed_delta_range": (float(acc.obs_delta_min), float(acc.obs_delta_max)),
+    }
+
+
+def corpus_predictive_gain_gated(
+    docs, global_params, partition, *, c, reference=None,
+    holdout_frac=0.5, seed=0, n_perm=4, n_bins=50, prominence_range=(-1.0, 10.0),
+) -> dict:
+    """Driver-side (in-memory) corpus aggregation of the per-document COLD
+    predictive gain (``doc_predictive_gain``) and permuted null
+    (``null_delta``) into per-topic summary arrays, for a gated STM.
+
+    For each document (``enumerate(docs)``, per-doc seed ``seed + i``): runs
+    ``doc_predictive_gain`` to get Delta_k for every topic k in the doc's
+    allowed set (skipping the doc entirely -- not even counted in
+    ``n_docs`` -- if the held-out split is degenerate), and ``null_delta``
+    (SAME ``seed + i``, so it scores against the IDENTICAL held-out split)
+    to get that doc's own permuted-null sample band. See ``tests/
+    test_predictive_gain.py``'s ``TestCorpusPredictiveGainGated`` for a
+    hand-checkable gated-corpus fixture.
+
+    Returned per-topic (length K) arrays:
+      mean_gain        Sigma_d Delta_k / count_k  -- average held-out gain
+                        topic k contributes, over documents that allow it.
+      depth, depth_num, depth_den
+                        depth = depth_num/depth_den = (Sigma_d Delta_k) /
+                        (Sigma_d Sigma_j Delta_j), i.e. topic k's SHARE of
+                        the total held-out predictive structure attributed
+                        across all of k's documents' allowed topics. This is
+                        a ratio of SUMS (never an average of per-document
+                        ratios Delta_k/sum_j) -- summing first pools evidence
+                        across documents before dividing, so one document
+                        with an unusually small sum_j cannot blow up its
+                        depth contribution the way a per-doc-then-averaged
+                        ratio would. depth_num/depth_den are also returned
+                        directly so a caller (or test) can verify the
+                        division was formed this way.
+      presence          fraction of topic k's documents whose Delta_k beats
+                        THAT SAME document's own permuted-null maximum -- a
+                        PER-DOCUMENT PAIRED permutation test (see the module-
+                        level "DESIGN DECISIONS" comment above this
+                        function for the full derivation and why this,
+                        rather than testing against the pooled corpus null
+                        band, is correct). Documents with no finite null
+                        sample (e.g. a single-allowed-topic doc where that
+                        topic is the pinned reference) contribute to
+                        count_k but are excluded from the presence
+                        numerator AND denominator -- i.e. presence[k] is
+                        conditioned on "documents whose null could be
+                        evaluated", not the raw count_k.
+      prominence_hist   (K, n_bins) histogram of per-doc Delta_k over
+                        ``prominence_range`` -- the aggregate Delta
+                        distribution, replacing a theta-hat histogram for
+                        this predictive-gain view.
+      prominence_bin_edges
+                        length n_bins+1 edges shared by every topic's
+                        histogram AND the pooled null_hist.
+      length_corr       per-topic Pearson correlation of per-doc Delta_k
+                        with document token length, from streaming
+                        sufficient statistics (never a per-doc ratio); NaN
+                        if fewer than 2 documents or zero variance.
+      dedup_mean_gain   like mean_gain but using dg.dedup_delta (held-out
+                        counts capped at 1 -- see ``doc_predictive_gain``).
+      null_band         POOLED corpus null summary (mean, std, n, hist,
+                        p95) over every document's finite null samples --
+                        descriptive only (see decision #1 above); NOT what
+                        ``presence`` is tested against.
+      count_k           number of documents that allow topic k (the
+                        WITHIN-GROUP denominator: a foreground topic k of
+                        group g only appears in ``allowed`` for group-g
+                        documents, so count_k[k] is automatically restricted
+                        to group g -- no separate cross-group masking is
+                        applied or needed anywhere in this module).
+      n_docs            number of documents that actually contributed (docs
+                        skipped by a degenerate held-out split do not
+                        count).
+      observed_delta_range
+                        (min, max) Delta_k actually observed across the
+                        whole corpus -- returned because
+                        ``prominence_range`` is PROVISIONAL (Delta's natural
+                        nats scale is not yet calibrated against a real
+                        fitted corpus; see decision #2 above): a Phase-2
+                        caller recalibrates the histogram edges from these
+                        real numbers.
+
+    ``docs`` is an in-memory list of STMDocument; ``global_params`` is the
+    dict with "lambda" (K,V), "Gamma" (P,K), "Sigma" (K,K, the fit's
+    correlation R); ``partition`` is a TopicBlockPartition (or the implicit
+    all-background one). For a live cluster corpus use
+    ``corpus_predictive_gain_gated_rdd``. Raises ValueError if no document
+    contributes (``n_docs == 0``).
+    """
+    K = partition.K
+    bin_edges = np.linspace(prominence_range[0], prominence_range[1], n_bins + 1)
+    acc = _PredGainAcc.zeros(K, n_bins)
+
+    for i, doc in enumerate(docs):
+        _accumulate_doc(
+            acc, doc, i, global_params, partition, c=c, reference=reference,
+            holdout_frac=holdout_frac, seed=seed, n_perm=n_perm,
+            bin_edges=bin_edges, n_bins=n_bins,
+        )
+
+    if acc.n_docs == 0:
+        raise ValueError("corpus_predictive_gain_gated: empty document corpus")
+
+    return _finalize_pred_gain(acc, bin_edges)
+
+
+def corpus_predictive_gain_gated_rdd(
+    doc_rdd, global_params, partition, *, c, reference=None,
+    holdout_frac=0.5, seed=0, sample_cap=200_000, n_perm=4, n_bins=50,
+    prominence_range=(-1.0, 10.0), depth=2,
+) -> dict:
+    """Distributed corpus aggregation of the per-document COLD predictive
+    gain and permuted null into per-topic summary arrays, for a gated STM
+    (see ``corpus_predictive_gain_gated`` for the full field-by-field
+    derivation; this is its Spark counterpart, byte-for-byte the same math
+    on a distributed corpus when ``sample_cap=None`` -- see the numpy<->RDD
+    parity test in ``tests/test_predictive_gain.py``).
+
+    ``doc_rdd.zipWithIndex()`` gives each document the SAME index it would
+    have under ``enumerate(docs)`` in the numpy path (zipWithIndex preserves
+    the RDD's element order, and ``sc.parallelize(docs, n)`` preserves the
+    input list's order across partitions), so ``doc_predictive_gain``'s and
+    ``null_delta``'s per-doc seed (``seed + index``) reproduce the identical
+    held-out splits as the numpy oracle -- required for parity, exactly the
+    convention ``corpus_heldout_scale_sweep_gated_rdd`` uses.
+
+    Distributed via the same ``mapPartitions(_local).treeReduce(_combine)``
+    idiom as ``corpus_eta_variance_gated_rdd`` /
+    ``corpus_heldout_scale_sweep_gated_rdd``: each partition folds its rows
+    into a local ``_PredGainAcc`` (via ``_accumulate_doc``, the SAME
+    per-document logic the numpy path uses); the tree-reduce combines
+    partitions pairwise via ``_combine_pred_gain_acc`` (a pure elementwise
+    sum/min/max over small length-K / (K, n_bins) arrays -- never the
+    documents or per-doc DocGain/null samples cross the network).
+    ``global_params`` and ``partition`` are broadcast via the Spark-safe
+    default-arg closure convention; ``doc_predictive_gain``/``null_delta``/
+    ``_accumulate_doc``/``_PredGainAcc`` live in this SAME module, so
+    ``_local`` references them directly (no in-function import needed for
+    them -- only for helpers imported from OTHER modules, which
+    ``doc_predictive_gain``/``null_delta`` already do at this module's own
+    top level).
+
+    ``sample_cap`` bounds the number of documents actually processed (this
+    function is O(|allowed|) full L-BFGS solves per document, so unlike a
+    cheap collect-and-histogram pass, the SWEEP OVER DOCUMENTS itself is the
+    expensive part worth capping): if ``sample_cap`` is not None and the
+    corpus has more than ``sample_cap`` documents, it is Bernoulli-sampled
+    (``RDD.sample(False, frac)``) down to approximately ``sample_cap``
+    documents BEFORE ``zipWithIndex``/processing; N (pre-sample count),
+    the target N' (~= sample_cap), and frac are logged (project rule: no
+    silent cap). ``sample_cap=None`` disables sampling entirely -- required
+    for numpy<->RDD parity, since sampling breaks the doc-for-doc
+    correspondence the seed-parity argument above depends on.
+
+    Raises ValueError if the (possibly sampled) document count that actually
+    contributes is 0.
+    """
+    if sample_cap is not None:
+        n_total = doc_rdd.count()
+        if n_total > sample_cap:
+            frac = float(sample_cap) / float(n_total)
+            log.info(
+                "corpus_predictive_gain_gated_rdd: sampling N=%d -> N'~=%d "
+                "(frac=%.4f, cap=%d)", n_total, sample_cap, frac, sample_cap,
+            )
+            doc_rdd = doc_rdd.sample(False, frac, seed)
+        else:
+            log.info(
+                "corpus_predictive_gain_gated_rdd: N=%d <= sample_cap=%d, "
+                "no sampling", n_total, sample_cap,
+            )
+
+    sc = doc_rdd.context
+    gp_bcast = sc.broadcast({
+        k: np.asarray(v, dtype=np.float64) for k, v in global_params.items()
+    })
+    p_bcast = sc.broadcast(partition)
+    K = partition.K
+    bin_edges = np.linspace(prominence_range[0], prominence_range[1], n_bins + 1)
+
+    def _local(rows, _gp=gp_bcast, _p=p_bcast):
+        gp = _gp.value
+        part = _p.value
+        acc = _PredGainAcc.zeros(K, n_bins)
+        for doc, doc_idx in rows:
+            _accumulate_doc(
+                acc, doc, doc_idx, gp, part, c=c, reference=reference,
+                holdout_frac=holdout_frac, seed=seed, n_perm=n_perm,
+                bin_edges=bin_edges, n_bins=n_bins,
+            )
+        return [acc]
+
+    acc = (
+        doc_rdd.zipWithIndex().mapPartitions(_local)
+        .treeReduce(_combine_pred_gain_acc, depth=depth)
+    )
+    if acc.n_docs == 0:
+        raise ValueError("corpus_predictive_gain_gated_rdd: empty document RDD")
+
+    return _finalize_pred_gain(acc, bin_edges)

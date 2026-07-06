@@ -490,3 +490,130 @@ class TestNullDeltaBand:
 
         nulls = null_delta(doc, gp, part, c=1.0, seed=0, n_perm=4, rng_seed=0)
         assert nulls is None
+
+
+class TestCorpusPredictiveGainGated:
+    """Tests for ``corpus_predictive_gain_gated`` (numpy) and its distributed
+    twin ``corpus_predictive_gain_gated_rdd``: per-topic aggregation of the
+    per-document COLD gain (``doc_predictive_gain``) and permuted null
+    (``null_delta``) across a gated corpus. See
+    spark_vi/mllib/topic/predictive_gain.py for the full design (depth as
+    Sigma-num/Sigma-den, within-group denominators, the per-document paired-
+    null presence decision)."""
+
+    @staticmethod
+    def _corpus(seed=0, D=120):
+        from tests._stm_synth import synthetic_gated_corpus
+
+        docs, planted, part = synthetic_gated_corpus(
+            groups=("a", "b"), fg_per_group=1, bg_k=2, V=200, D=D,
+            doc_len=60, bg_frac=0.5, seed=seed,
+        )
+        K = part.K
+        gp = {
+            "lambda": planted * 500.0,
+            "Gamma": np.zeros((1, K)),
+            "Sigma": np.eye(K),
+        }
+        return docs, part, gp, K
+
+    def test_signature_topic_exceeds_diluted_background_and_shapes_and_within_group(self):
+        """Signature check: group a's foreground topic (used by EVERY group-a
+        doc) must show higher mean_gain than a background topic (used by only
+        ~half of group a's docs, since synthetic_gated_corpus's docs mix ONE
+        of the bg_k background topics with their group's single foreground
+        topic -- the other background topic is allowed but never the actual
+        generator, diluting its average with near-zero-Delta docs). Also
+        checks shapes and the within-group count_k denominator."""
+        from spark_vi.mllib.topic.predictive_gain import corpus_predictive_gain_gated
+
+        docs, part, gp, K = self._corpus()
+        result = corpus_predictive_gain_gated(docs, gp, part, c=1.0, reference=None, seed=0)
+
+        fg_a = int(part.block_indices("a")[0])
+        bg0 = int(part.background_indices()[0])
+
+        assert result["mean_gain"].shape == (K,)
+        assert result["depth"].shape == (K,)
+        assert result["depth_num"].shape == (K,)
+        assert result["depth_den"].shape == (K,)
+        assert result["presence"].shape == (K,)
+        assert result["prominence_hist"].shape == (K, 50)
+        assert result["length_corr"].shape == (K,)
+        assert result["dedup_mean_gain"].shape == (K,)
+        assert result["count_k"].shape == (K,)
+
+        assert result["mean_gain"][fg_a] > result["mean_gain"][bg0]
+
+        depth_den_positive = result["depth_den"] > 0
+        assert depth_den_positive.any()
+        assert np.all(np.isfinite(result["depth"][depth_den_positive]))
+
+        # Within-group denominator: fg_a's count_k must equal the number of
+        # GROUP-A documents exactly (background-only / group-b docs never
+        # touch it, since it is not in their allowed set).
+        n_group_a = sum(1 for d in docs if d.groups == frozenset({"a"}))
+        assert result["count_k"][fg_a] == n_group_a
+
+        assert result["n_docs"] == len(docs)
+
+    def test_depth_is_summed_ratio_not_per_doc_mean(self):
+        """Non-vacuous pin on the depth formula: depth[k] must equal
+        depth_num[k] / depth_den[k] computed from the RETURNED totals (proves
+        the final division uses SUMMED numerator/denominator, never an
+        average of per-doc ratios)."""
+        from spark_vi.mllib.topic.predictive_gain import corpus_predictive_gain_gated
+
+        docs, part, gp, K = self._corpus(D=60)
+        result = corpus_predictive_gain_gated(docs, gp, part, c=1.0, seed=0)
+
+        mask = result["depth_den"] > 0
+        assert mask.any()
+        expected = result["depth_num"][mask] / result["depth_den"][mask]
+        np.testing.assert_allclose(result["depth"][mask], expected, rtol=1e-10)
+
+    def test_empty_corpus_raises(self):
+        from spark_vi.mllib.topic.predictive_gain import corpus_predictive_gain_gated
+
+        _, part, gp, _ = self._corpus(D=1)
+        with pytest.raises(ValueError):
+            corpus_predictive_gain_gated([], gp, part, c=1.0)
+
+
+class TestCorpusPredictiveGainGatedRddParity:
+    def test_numpy_rdd_parity(self, spark):
+        from spark_vi.mllib.topic.predictive_gain import (
+            corpus_predictive_gain_gated, corpus_predictive_gain_gated_rdd,
+        )
+
+        docs, part, gp, K = TestCorpusPredictiveGainGated._corpus(seed=1, D=16)
+
+        expected = corpus_predictive_gain_gated(docs, gp, part, c=1.0, seed=0)
+
+        rdd = spark.sparkContext.parallelize(docs, 4)
+        result = corpus_predictive_gain_gated_rdd(
+            rdd, gp, part, c=1.0, seed=0, sample_cap=None,
+        )
+
+        assert result["n_docs"] == expected["n_docs"]
+        np.testing.assert_array_equal(result["count_k"], expected["count_k"])
+        np.testing.assert_array_equal(result["prominence_hist"], expected["prominence_hist"])
+        for field in ("mean_gain", "depth", "presence", "length_corr", "dedup_mean_gain"):
+            np.testing.assert_allclose(
+                result[field], expected[field], rtol=1e-8, equal_nan=True
+            )
+        np.testing.assert_allclose(
+            result["prominence_bin_edges"], expected["prominence_bin_edges"], rtol=1e-12,
+        )
+        assert result["null_band"]["n"] == expected["null_band"]["n"]
+        assert result["observed_delta_range"] == pytest.approx(
+            expected["observed_delta_range"]
+        )
+
+    def test_empty_rdd_raises(self, spark):
+        from spark_vi.mllib.topic.predictive_gain import corpus_predictive_gain_gated_rdd
+
+        _, part, gp, _ = TestCorpusPredictiveGainGated._corpus(D=1)
+        empty = spark.sparkContext.parallelize([], numSlices=1)
+        with pytest.raises(ValueError):
+            corpus_predictive_gain_gated_rdd(empty, gp, part, c=1.0)
