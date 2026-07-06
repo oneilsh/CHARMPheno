@@ -371,6 +371,80 @@ def main(argv: list[str] | None = None) -> int:
         # covariate_schema.json from the local covariate matrix
         _write_local_covariate_schema(args.out_dir, result, cov, X, k)
 
+        # theta_histogram: per-doc gated MAP theta distribution (the dashboard's
+        # "topic mass distribution" panel). Plain-LDA writes per-doc theta
+        # aggregates at fit time; the STM fit does not, so we compute them here
+        # from the fitted checkpoint + corpus (a BUILD-STEP, like corpus_prevalence
+        # / eta_scale). Guarded on STM + gating (partition present); a non-gated or
+        # LDA build simply never enters this branch and export.theta_histogram
+        # stays None. Enhancement-only: any failure logs and leaves the two fields
+        # None (dashboard hides the panel). Builds its OWN doc_rdd here (a second
+        # per-doc pass) mirroring the eta_scale block; it could later be fused with
+        # that block's doc_rdd -- kept independent for now.
+        try:
+            from spark_vi.mllib.topic.stm import corpus_theta_gated_rdd
+            from spark_vi.mllib.topic._common import _vector_to_stm_document
+            from charmpheno.export.theta_aggregates import compute_theta_aggregates
+            from charmpheno.export.model_adapter import (
+                _parse_theta_histogram, _parse_theta_percentiles,
+            )
+            from pyspark.ml.linalg import Vectors, VectorUDT
+            from pyspark.sql.types import (
+                StructType, StructField, LongType, StringType,
+            )
+
+            stm_hardening = result.metadata.get("stm_hardening", {}) or {}
+            reference_id = 0 if stm_hardening.get("reference_topic") else None
+            k_thresh = int(corpus.get("min_patient_count", 20))
+
+            # Self-contained STMDocument RDD (same assembly as the eta_scale
+            # block: bow features + covariate sidecar + source_cohort gating group).
+            cov_schema = StructType([
+                StructField("person_id", LongType(), False),
+                StructField("source_cohort", StringType(), False),
+                StructField("covariates", VectorUDT(), False),
+            ])
+            cov_rows = [
+                (int(pid), str(sc), Vectors.dense(np.asarray(vec, dtype=float)))
+                for pid, sc, vec in zip(
+                    cov["person_id"], cov["source_cohort"], cov["covariates"])
+            ]
+            cov_sdf = spark.createDataFrame(cov_rows, schema=cov_schema)
+            doc_df = bow_df.select("person_id", "features").join(
+                cov_sdf, on="person_id", how="inner")
+            doc_rdd = doc_df.rdd.map(
+                lambda row: _vector_to_stm_document(
+                    row, features_col="features",
+                    covariates_col="covariates",
+                    group_col="source_cohort",
+                )
+            )
+            # 200k sample_cap is a heuristic driver-memory bound, not a literature
+            # value; corpus_theta_gated_rdd logs the sampled N / fraction.
+            theta_arr = corpus_theta_gated_rdd(
+                doc_rdd, result.global_params, partition,
+                reference=reference_id, sample_cap=200_000, seed=0)
+            agg = compute_theta_aggregates(theta_arr, min_count=k_thresh)
+            kept = export.topic_indices.tolist()
+            # DashboardExport is a frozen dataclass; replace() returns a new
+            # instance with the two theta fields set (do NOT touch
+            # corpus_prevalence -- keep the faithful masked covariate-mean).
+            from dataclasses import replace as _dc_replace
+            export = _dc_replace(
+                export,
+                theta_histogram=_parse_theta_histogram(
+                    agg["theta_histogram"])[kept],
+                theta_percentiles=_parse_theta_percentiles(
+                    agg["theta_percentiles"])[kept],
+            )
+            log.info(
+                "STM: computed per-doc theta histogram (sampled_docs=%d, "
+                "kept_topics=%d).", theta_arr.shape[0], len(kept))
+        except Exception as exc:  # enhancement-only: never fatal
+            log.warning("STM: per-doc theta histogram failed (%s); phenotypes.json "
+                        "omits theta_histogram/theta_percentiles (panel hidden).",
+                        exc)
+
     K_disp, V_full = export.beta.shape
     log.info("K_display=%d V_full=%d (model_class=%s)", K_disp, V_full, model_class)
 

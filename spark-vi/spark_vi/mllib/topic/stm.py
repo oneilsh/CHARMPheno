@@ -12,11 +12,14 @@ and `_formula.fit_model_spec`.
 from __future__ import annotations
 
 import json
+import logging
 import pickle
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 from spark_vi.eval.topic.concentration import ConcentrationAcc
 from spark_vi.models.topic.stm import _stm_doc_inference, prior_topic_proportions
@@ -462,6 +465,100 @@ def corpus_concentration_stm_rdd(
     if acc.n == 0:
         raise ValueError("corpus_concentration_stm_rdd: empty document RDD")
     return acc.summary()
+
+
+def corpus_theta_gated_rdd(
+    doc_rdd, global_params, partition, *,
+    reference=None, sample_cap=200_000, seed=0,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4,
+) -> np.ndarray:
+    """Per-document gated MAP theta over the corpus, at the fitted Sigma, as an
+    (N_sampled, K) array collected to the driver for histogramming.
+
+    Runs the SAME per-doc gated Laplace E-step as ``corpus_concentration_stm_rdd``
+    (``_stm_doc_inference`` -> gated mode ``_gated_mode_theta``) but instead of
+    folding each theta into a ``ConcentrationAcc`` it COLLECTS the raw K-vectors
+    so the caller can build the dashboard's per-doc theta ("topic mass
+    distribution") histogram via ``charmpheno.export.compute_theta_aggregates``.
+    This is the STM analog of LDA's per-doc gamma the dashboard already
+    histograms.
+
+    Inference is at the model's OWN fitted Sigma (``global_params["Sigma"]``, the
+    unit-diagonal correlation of ADR 0034) on the FULL document -- NOT the
+    held-out split or the c-rescaled Sigma_gen the generative-scale sweep
+    (``corpus_heldout_scale_sweep_gated_rdd``) uses; this is inference under the
+    fitted model, so c == 1. A foreground topic outside a doc's allowed set is
+    structurally EXACTLY 0 (the hard gating mask, via ``_gated_mode_theta``);
+    those zeros are honest and land in the histogram's lowest bin.
+
+    The corpus is down-sampled to at most ``sample_cap`` documents (Bernoulli
+    ``RDD.sample`` at ``frac = min(1, sample_cap / N)``) BEFORE collection: a
+    distribution needs a large sample, not every doc, and collecting an (N, K)
+    array to the driver must be bounded. ``sample_cap=200_000`` is a heuristic
+    driver-memory bound, not a literature value. N, N_sampled and the fraction
+    are logged (project rule: no silent cap).
+
+    ``global_params`` and ``partition`` are broadcast via the Spark-safe
+    default-arg closure convention (see ``corpus_concentration_stm_rdd``).
+
+    Raises ValueError if the reduced document count is 0.
+    """
+    n_docs = doc_rdd.count()
+    if n_docs == 0:
+        raise ValueError("corpus_theta_gated_rdd: empty document RDD")
+
+    frac = min(1.0, float(sample_cap) / float(n_docs))
+    sampled = doc_rdd if frac >= 1.0 else doc_rdd.sample(False, frac, seed)
+
+    sc = doc_rdd.context
+    gp_bcast = sc.broadcast({
+        k: np.asarray(v, dtype=np.float64) for k, v in global_params.items()
+    })
+    p_bcast = sc.broadcast(partition)
+
+    def _local(rows, _gp=gp_bcast, _p=p_bcast):
+        from scipy.special import digamma
+
+        from spark_vi.models.topic._linalg import safe_inverse
+
+        gp = _gp.value
+        part = _p.value
+        lam = gp["lambda"]
+        Gamma = gp["Gamma"]
+        Sigma = gp["Sigma"]
+        K = lam.shape[0]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+        subprec_cache: dict[tuple, np.ndarray] = {}
+        for doc in rows:
+            allowed = part.allowed_indices(doc.groups)
+            key = tuple(allowed.tolist())
+            Sigma_inv_allowed = subprec_cache.get(key)
+            if Sigma_inv_allowed is None:
+                Sigma_inv_allowed = safe_inverse(Sigma[np.ix_(allowed, allowed)])
+                subprec_cache[key] = Sigma_inv_allowed
+            eta_hat, _, _ = _stm_doc_inference(
+                indices=doc.indices, counts=doc.counts,
+                expElogbeta=expElogbeta,
+                Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=doc.x,
+                max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+                allowed=allowed, reference=reference,
+            )
+            yield _gated_mode_theta(eta_hat, allowed, K)
+
+    theta_rows = sampled.mapPartitions(_local).collect()
+    n_sampled = len(theta_rows)
+    if n_sampled == 0:
+        # frac>0 but the Bernoulli draw emptied every partition (tiny corpus /
+        # tiny cap): fall back to the full corpus so we never return an empty
+        # histogram sample.
+        theta_rows = doc_rdd.mapPartitions(_local).collect()
+        n_sampled = len(theta_rows)
+    log.info(
+        "corpus_theta_gated_rdd: sampled N'=%d of N=%d docs (frac=%.4f, "
+        "cap=%d) for per-doc theta histogram.",
+        n_sampled, n_docs, frac, sample_cap)
+    return np.asarray(theta_rows, dtype=np.float64)
 
 
 def _pool_scale(n, M2, nu_sum, nu_count, *, reference):
