@@ -72,6 +72,15 @@ Then compare 0041's summary NPMI + correlation.json eta_scale/eta_scale_diagnost
 against 0028's. (If the covariate cache misses, `make build-covariates EXP=0041`
 first — but the key is identical to 0028's, so it should HIT.)
 
-## Result
+## Result — co-fit helps prediction; recalibrates UP to 12 (see 0042 for the ratchet resolution)
 
-(pending cluster run)
+Recalibrated c* = **12** (interior; robustness {0.5: 12, 0.8: 8, 0.95: 8}) -- NOT back to 5, so 5 is not
+a fixed point of the refit map. The co-fit beta predicts held-out tokens uniformly better than the unit
+fit: peak per-token LL -6.577 (at c=12) vs 0028's -6.615 (at c=5), +0.038 nats; better at every
+comparable scale (c=5: -6.601 vs -6.615). **NPMI (coherence) is flat**, though: background mean 0.1816
+-> 0.1912, foreground 0.2284 -> 0.2298 (both within noise). So co-fitting improved PREDICTION, not
+coherence -- the two axes diverged, and an NPMI-only read (a first draft) wrongly called it "no
+benefit." The 5 -> 12 move looked like a ratchet; round 2 (exp 0042, fit @12) recalibrated back to 8,
+showing a damped oscillation (5 -> 12 -> 8, fixed point ~9-10), NOT a runaway. This 0041 model (fit @5,
+generate @12) is the best predictor observed. Full writeup:
+`docs/superpowers/specs/2026-07-05-update3-seed-panel-refit-and-cofit-beta.md`.

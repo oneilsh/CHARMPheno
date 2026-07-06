@@ -75,6 +75,16 @@ make build-dashboard-exp ID=42    # export -> recalibrated c* + widened held-out
 Then send the 0042 correlation.json (eta_scale + eta_scale_diagnostic) + summary
 NPMI; compare against the 0028 -> 0041 -> 0042 trajectory.
 
-## Result
+## Result — NOT a ratchet (5 -> 12 -> 8, converging ~9-10)
 
-(pending cluster run)
+Recalibrated c* = **8** (interior; robustness {0.5: 8, 0.8: 5, 0.95: 5}; widened grid, no boundary).
+So the refit sequence is 5 (0028) -> 12 (0041) -> 8 (0042): it overshot then self-corrected -- a damped
+oscillation converging to a fixed point ~9-10, NOT a runaway (resolves Fable Q3: no ratchet).
+
+Peak held-out per-token LL: 0028 -6.615 -> 0041 -6.577 -> 0042 -6.596. Fitting at 12 OVERSHOT: 0041's
+beta (fit @5) predicts held-out tokens better than 0042's (fit @12) at every generation scale (c=8:
+-6.581 vs -6.596; c=12: -6.577 vs -6.602), and fit @12 dropped foreground NPMI (mean 0.230 -> 0.216;
+background flat 0.191 -> 0.193). Best model observed = 0041 (fit @5, generate @12), +0.038 nats over the
+unit fit. The loop is bounded but low-value; recommend NOT chasing it (fixed-point model ~9-10 lies
+between 0041 and 0042, cannot beat 0041). Ship default stays 0028 (unit fit + generation-only c=5).
+Full writeup: `docs/superpowers/specs/2026-07-05-update3-seed-panel-refit-and-cofit-beta.md`.

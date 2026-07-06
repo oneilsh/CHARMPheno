@@ -1,4 +1,4 @@
-# Update 3: the seed-panel gate, the refit-loop dynamics, and co-fit-beta on the real corpus (it helps — and the scale ratchets 5 -> 12)
+# Update 3: the seed-panel gate, the refit-loop dynamics, and co-fit-beta on the real corpus (it helps modestly; the scale oscillates 5 -> 12 -> 8, no runaway)
 
 Follows `2026-07-05-real-corpus-scale-result-and-fit-integration-update.md` (Update 2), which shipped
 the held-out-calibrated generative scale c* = 5.0 on the real corpus, retired the unstable in-band EM,
@@ -6,12 +6,15 @@ and posed the in-fit-vs-separate-step design question. This update covers your �
 your Q3 (does the refit loop ratchet?), and your Q5 (does co-fitting beta at the calibrated scale
 help?).
 
-A candor note up front: an earlier draft of this report concluded "co-fit-beta does not help, no
-ratchet, drop the refit loop." That was written on topic-coherence (NPMI) alone, before the held-out
-calibration of the co-fit model came back. The held-out numbers reversed it: co-fitting DOES improve
-held-out prediction, and the recalibrated scale moved UP 5 -> 12 -- the ratchet DIRECTION your Q3
-anticipated. Sections C and D below carry the corrected result; a round-2 fit (exp 0042, fit at
-Sigma=12*R) is running to distinguish a one-step shift to a fixed point near 12 from a genuine runaway.
+A candor note up front, because this report changed twice as data arrived: a first draft concluded
+"co-fit-beta does not help, no ratchet, drop the refit loop" -- written on topic-coherence (NPMI) alone,
+before the co-fit model's held-out calibration came back. The held-out numbers reversed it (co-fitting
+DOES improve prediction, and the recalibrated scale moved 5 -> 12, the ratchet direction). A round-2
+fit then resolved the ratchet-vs-fixed-point question: fitting at 12 recalibrates back DOWN to 8, so
+the sequence is 5 -> 12 -> 8 -- a damped oscillation converging to a fixed point near 9-10, NOT a
+runaway. Net across all three: co-fitting helps prediction modestly (best ~+0.04 nats/token), the loop
+is bounded and self-correcting, and it is low enough value that we do not recommend chasing it to
+convergence. Sections C and D carry the full trajectory.
 
 One-line setup recap: gated logistic-normal topic model, eta ~ Normal(Gamma^T x, Sigma), theta =
 softmax(eta); topics split into a shared background block plus per-group foreground blocks, each
@@ -128,61 +131,81 @@ co-fit: -6.797   -6.690   -6.642  -6.601   -6.581  -6.577*  -6.587     peak c* =
    the grid edge). So c=5 is not a fixed point of the refit map -- fitting at a higher scale makes the
    model prefer a higher scale still. That is the ratchet DIRECTION of your Q3, on the real corpus.
 
-**What one step cannot tell us:** whether 5 -> 12 is a one-step SHIFT to a new fixed point near 12
-(the refit map contracts, and 12 is the self-consistent scale) or a genuine RATCHET that keeps
-climbing. c*=12 being an interior optimum (20 scores worse) argues against an immediate runaway, but is
-not decisive. Round 2 (exp 0042: fit at Sigma=12*R, recalibrate on a grid widened to
-[1,2,3,5,8,12,16,20,28]) settles it: recalibrated c* ~ 12 => fixed point; c* > 12 or at the boundary =>
-ratchet. That fit is running; this report will be revised with its result.
+**Round 2 settles the ratchet question -- it is NOT a runaway.** A third fit (exp 0042: fit at
+Sigma=12*R, recalibrate on a grid widened to [1,2,3,5,8,12,16,20,28]) recalibrated back DOWN to c* = 8
+(interior; 28 scores worse; robustness {0.5: 8, 0.8: 5, 0.95: 5}). So the full recalibration
+trajectory is:
 
-One honest caveat: c is relative to each fit's correlation R, so "12 vs 5" is partly a change of basis
-(the recovered concentration, not just the c-value, is what transfers). But the "predicts better"
-result is basis-free -- same held-out tokens -- so that leg is solid regardless.
+```
+fit at          recalibrated c*     peak held-out per-token LL
+unit  (0028)         5                    -6.615
+Sigma=5R  (0041)    12                    -6.577   (best predictor)
+Sigma=12R (0042)     8                    -6.596
+```
+
+It OVERSHOT (5 -> 12) then SELF-CORRECTED (12 -> 8): a damped oscillation whose recalibration map
+crosses the diagonal between 5 and 12 (it sends 5 up to 12 but 12 down to 8), so the fixed point is
+near 9-10 -- bounded, converging, not a ratchet. Your "the held-out objective bounds the outer loop"
+holds; it just does so non-monotonically.
+
+**And the benefit is modest and non-monotone -- a moderate fit-scale is the sweet spot.** Comparing the
+two co-fit betas at the SAME generation scale (same held-out tokens): at c=8, 0041 (-6.581) beats 0042
+(-6.596); at c=12, 0041 (-6.577) beats 0042 (-6.602). So the beta fit at 5 predicts BETTER than the
+beta fit at 12 everywhere -- fitting at 12 overshot and HURT prediction, and it dropped foreground NPMI
+(mean 0.230 -> 0.216; background stayed flat 0.191 -> 0.193). The best model observed is 0041 (fit at 5,
+generate at 12): +0.038 nats/token over the unit fit. The loop's own fixed point (~9-10) is a model we
+did not fit, but it lies between 0041 and 0042 and so cannot beat 0041.
+
+One honest caveat throughout: c is relative to each fit's correlation R, so the c-values are partly a
+change of basis (the recovered concentration, not the raw c, is what transfers). But the head-to-head
+"which beta predicts held-out tokens better" comparisons are basis-free -- same held-out tokens -- so
+those legs are solid.
 
 ---
 
-## D. What A-C mean — the design does NOT simplify the way we hoped
+## D. What A-C mean — bounded loop, modest benefit, keep the pipeline simple
 
 The Update-2 §C tension was: calibrate the scale IN the fit (intrinsic, resume-clean, but biased by
-co-adaptation) versus as a separate EXTERNAL step (unbiased, but "a step outside the loop" that breaks
-stop-and-restart). We hoped C would dissolve it by showing co-fitting buys nothing. It does not: C shows
-co-fitting DOES improve held-out prediction and moves the scale, so the refit loop is back in play and
-the tension stands, pending the round-2 result.
+co-adaptation) versus as a separate EXTERNAL step. The full trajectory (C) lets us answer it on
+evidence rather than hope: co-fitting helps a little and the loop is bounded, but the gain is small
+enough that the simple external pipeline is the right default.
 
-Status of your priority list, corrected:
-- **Priority 3 (the refit loop): NOT droppable -- it is the live question.** Co-fitting improved
-  held-out prediction (+0.038 nats) and the recalibrated scale climbed 5 -> 12. Whether to run the loop
-  to convergence (and ship the converged co-fit model) depends entirely on round 2: a fixed point near
-  12 makes the loop a real, bounded refinement worth 1-2 rounds; a runaway makes it a trap to avoid, and
-  we keep c a generation-only knob calibrated once off the unit fit.
-- **Q3 (ratchet): OPEN, leaning "real effect."** The synthetic said no; the real corpus shows the
-  ratchet direction (5 -> 12). One step cannot separate a bounded shift from a runaway. Round 2 decides.
-- **Q5 (co-fit-beta): answered -- YES, it helps predictively** (not on coherence). c is not "merely" a
-  generation-time knob after all; fitting under the wider prior yields a beta that predicts held-out
-  tokens better.
-- **The B2/PMI raw-data cross-check:** we would now KEEP it in reserve rather than drop it. The third
-  "leg" we claimed (a stable refit fixed point) is exactly what is now in doubt; until round 2 confirms
-  the fixed point, an independent concentration observable is worth having.
+Status of your priority list, resolved:
+- **Q3 (ratchet): answered -- NO.** The scale oscillates 5 -> 12 -> 8 and converges (~9-10); it does not
+  run away. Your held-out-objective-bounds-the-loop argument holds, non-monotonically.
+- **Q5 (co-fit-beta): answered -- YES but modestly, and non-monotone.** Fitting under a wider prior does
+  yield a beta that predicts held-out tokens better, but the effect is ~+0.04 nats/token at best (at
+  fit-scale 5) and REVERSES past that (fit-scale 12 predicts worse than 5 and lowers foreground NPMI).
+  It never touched topic coherence. So c is mostly a generation-time knob; co-fitting is a small, bounded
+  refinement, not a lever.
+- **Priority 3 (the refit loop): runnable but not worth it.** It is safe (bounded) and would land at a
+  self-consistent scale ~9-10, but that fixed-point model lies between 0041 and 0042 and cannot beat the
+  best model we already have (0041, fit at 5). We recommend NOT chasing it: the ~0.04-nat ceiling does
+  not justify the extra fits or the loss of the resume-clean single-fit pipeline.
+- **The B2/PMI raw-data cross-check: droppable.** With the loop shown bounded and convergent, the third
+  independent leg (a stable refit fixed point, ~9-10) is in hand; PMI is no longer needed as a gate.
 
-Which model the demo ships is also reopened: currently the unit-fit model at c=5. If round 2 confirms a
-fixed point near 12 AND the co-fit model at that scale passes the seed-panel over-commitment check (A) at
-12 (untested -- we only cleared up to 8 on the unit-fit beta), the better-predicting co-fit model becomes
-the candidate. If it ratchets, we stay at the unit fit + generation-only c=5.
+Which model to ship, on the evidence:
+- **Default: the unit fit + generation-only c=5 (0028).** Simplest, resume-clean, and within ~0.04 nats
+  of the best. This is our recommendation for the tool.
+- **If the best predictor is wanted: 0041 (fit at 5, generate at 12), +0.038 nats.** But generating at
+  12 is peakier than anything the seed-panel (A) cleared (we only checked up to 8 on the unit beta), so
+  this needs an over-commitment recheck at 12 before it could ship.
 
-Separately, the seed regime (A) is unaffected by all of this and remains the one clearly-open problem:
-conditioned completion from a tiny rare seed is dominated by the population-mean prior and needs a
-seed-size- or conditioning-aware scale that no single global c can provide.
+Separately, the seed regime (A) is unaffected and remains the one clearly-open problem: conditioned
+completion from a tiny rare seed is dominated by the population-mean prior and needs a seed-size- or
+conditioning-aware scale that no single global c can provide.
 
 ---
 
 ## E. Open questions for you
 
-1. **Given 5 -> 12, how would you read round 2?** If exp 0042 (fit at 12) recalibrates back to ~12, we
-   read it as a bounded refit map with a fixed point at 12 and would ship the better-predicting co-fit
-   model at 12 (pending the seed-panel over-commitment recheck at that scale). If it climbs past 12 /
-   hits the grid, we read it as a runaway and keep c a generation-only knob off the unit fit. Do you
-   agree with that decision rule, or is there a diagnostic you would want BEFORE committing either way
-   (e.g. tracking whether the held-out LL peak is still rising round over round, not just the argmax)?
+1. **Do you agree with "don't chase the loop"?** It is bounded (5 -> 12 -> 8, fixed point ~9-10) and
+   its best-case gain is ~0.04 nats/token, already achieved by 0041 (fit at 5) -- the self-consistent
+   fixed-point model would sit between 0041 and 0042 and cannot beat it. Given that, we would keep the
+   simple unit-fit + generation-only-c pipeline. Is there a reason you would still run it to convergence
+   -- e.g. do you weight the self-consistency of the fixed point (fit scale == generation scale) as a
+   property worth having for its own sake, beyond predictive LL?
 2. **The conditioning-aware scale (A).** For tiny-seed conditioned generation, the prior mean Gamma^T x
    dominates and the global c can't rescue rare-topic recovery without over-committing full documents.
    Is the right move a scale that grows as the observed-token count shrinks (weaken the prior when there
@@ -195,8 +218,8 @@ seed-size- or conditioning-aware scale that no single global c can provide.
    would you want a tighter objective (e.g. a concentration-matching target rather than raw predictive
    LL) if the scale ever needed to be pinned more precisely?
 
-Net: the shipped scale (c = 5 off the unit fit) is a sound, honest default, but co-fitting at that
-scale improves held-out prediction and pushes the recalibrated scale to 12 -- so the refit loop is a
-live refinement, not a dead end, and Q3 (bounded fixed point vs runaway) is unresolved pending exp 0042.
-The seed-size/conditioning-aware scale for tiny-prefix completion remains the one independently-open
-problem. We will revise this report with the round-2 result before drawing the refit-loop conclusion.
+Net: the shipped scale (c = 5 off the unit fit) is a sound, honest default. Co-fitting at the calibrated
+scale improves held-out prediction modestly (~+0.04 nats/token, best at fit-scale 5) and the
+recalibration oscillates 5 -> 12 -> 8 to a bounded fixed point ~9-10 -- so the refit loop is safe but
+low-value, and we recommend not chasing it. Q3 (ratchet) is resolved: no runaway. The
+seed-size/conditioning-aware scale for tiny-prefix completion remains the one independently-open problem.
