@@ -226,6 +226,47 @@ def assert_stm_bundle_complete(out_dir, *, gated, allow_incomplete, log=None):
     )
 
 
+def assert_covariate_sidecar_present(
+    *, is_stm, gated, sidecar_present, allow_incomplete, exp_hint=None, log=None,
+):
+    """Fail loud EARLY when a gated STM build has no covariate sidecar.
+
+    This is the up-front counterpart of ``assert_stm_bundle_complete``. That
+    end-of-build guard checks whether the covariate output FILES exist in
+    ``out_dir`` -- which a reused ``out_dir`` silently defeats: a prior build's
+    ``gating.json`` / ``covariate_schema.json`` linger and satisfy the existence
+    check even when THIS run wrote nothing (covariate-cache MISS). This guard
+    instead checks the SIDECAR itself the moment we know it is absent (right
+    after the covariate-cache lookup, before the expensive corpus-stats / NPMI
+    phases), so a miss aborts fast and is immune to stale files.
+
+    Without the sidecar a gated build skips ALL per-document STM outputs at once
+    -- gating.json, covariate_schema.json, eta_scale, the theta histogram, and
+    predictive_gain -- yielding a bundle that renders ungated. The cache is
+    cluster-local (HDFS), so a fresh cluster needs ``make build-covariates``
+    re-run once. ``--allow-incomplete-bundle`` downgrades to a warning when a
+    degraded ungated bundle is genuinely intended.
+    """
+    if not (is_stm and gated) or sidecar_present:
+        return
+    fix = "make build-covariates EXP={}".format(exp_hint) if exp_hint else \
+        "make build-covariates EXP=<id>"
+    detail = (
+        "STM covariate sidecar MISSING for a gated build (covariate-cache MISS). "
+        "Without it gating.json, covariate_schema.json, eta_scale, the theta "
+        "histogram, and predictive_gain are ALL skipped and the dashboard renders "
+        f"ungated. Fix: `{fix}` on this cluster, then rebuild. (The covariate "
+        "cache is cluster-local HDFS, so a fresh cluster needs it rebuilt once.)"
+    )
+    if allow_incomplete:
+        if log is not None:
+            log.warning("%s (--allow-incomplete-bundle set; continuing)", detail)
+        return
+    raise SystemExit(
+        detail + " Pass --allow-incomplete-bundle to accept the degraded bundle."
+    )
+
+
 def _write_covariate_schema(spark, *, result, corpus, source_table, cohort_name,
                             cache_uri, out_dir, log):
     """Derive + write covariate_schema.json from the covariate sidecar.
@@ -469,6 +510,13 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = Path(args.out_dir) if args.out_dir else Path(args.checkpoint) / "dashboard_bundle"
     out_dir.mkdir(parents=True, exist_ok=True)
+    # A reused out_dir must not let a PRIOR build's JSONs masquerade as this run's
+    # output: a covariate-cache miss that skips gating.json / covariate_schema.json
+    # would otherwise leave the previous build's copies in place, silently defeating
+    # the completeness guard and shipping a stale/mixed bundle (observed 2026-07-06).
+    # Every build regenerates the bundle from scratch, so clear stale JSON outputs.
+    for _stale_json in out_dir.glob("*.json"):
+        _stale_json.unlink()
     print(f"[driver] checkpoint={args.checkpoint}", flush=True)
     print(f"[driver] out_dir={out_dir}", flush=True)
     print(f"[driver] model_class={args.model_class}", flush=True)
@@ -547,6 +595,21 @@ def main(argv: list[str] | None = None) -> int:
                 cache_uri=args.cache_uri, log=log,
                 partition=stm_partition,
             )
+
+        # Fail loud EARLY on a covariate-cache miss for a gated build -- before the
+        # expensive corpus-stats / NPMI phases and immune to stale out_dir files
+        # (unlike the end-of-build assert_stm_bundle_complete). A missing sidecar
+        # skips every per-doc STM output (gating / covariate_schema / eta_scale /
+        # theta_histogram / predictive_gain); aborting here prevents a silent
+        # ungated bundle. --allow-incomplete-bundle is the intentional escape.
+        assert_covariate_sidecar_present(
+            is_stm=is_stm,
+            gated=bool(tbs and stm_partition is not None),
+            sidecar_present=stm_cov_df is not None,
+            allow_incomplete=args.allow_incomplete_bundle,
+            exp_hint=Path(args.checkpoint).name.split("-")[0] or None,
+            log=log,
+        )
 
         # For gated STM, compute suppression from per-group counts.
         if tbs and stm_gc is not None:

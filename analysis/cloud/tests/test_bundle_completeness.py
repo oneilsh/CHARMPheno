@@ -83,3 +83,50 @@ def test_bundle_complete_allow_incomplete_does_not_raise(tmp_path):
     _touch(tmp_path, "covariate_effects.json")  # gating + schema missing
     # escape hatch: warn-and-continue instead of abort
     bdc.assert_stm_bundle_complete(tmp_path, gated=True, allow_incomplete=True)
+
+
+# --- Early sidecar gate: fail loud at the covariate-cache miss, before the
+#     expensive phases and immune to a reused out_dir's stale files (the
+#     failure mode that shipped a stale/mixed bundle on 2026-07-06). ---
+
+def test_sidecar_present_gated_ok():
+    # sidecar loaded -> no raise, build proceeds gated
+    bdc.assert_covariate_sidecar_present(
+        is_stm=True, gated=True, sidecar_present=True, allow_incomplete=False)
+
+
+def test_sidecar_missing_gated_raises_with_build_covariates_hint():
+    with pytest.raises(SystemExit) as ei:
+        bdc.assert_covariate_sidecar_present(
+            is_stm=True, gated=True, sidecar_present=False,
+            allow_incomplete=False, exp_hint="0028")
+    msg = str(ei.value)
+    assert "build-covariates EXP=0028" in msg     # actionable, names the exp
+    assert "predictive_gain" in msg               # names what gets skipped
+    assert "allow-incomplete-bundle" in msg       # names the escape hatch
+
+
+def test_sidecar_missing_gated_allow_incomplete_does_not_raise():
+    # escape hatch: operator explicitly wants a degraded ungated bundle
+    bdc.assert_covariate_sidecar_present(
+        is_stm=True, gated=True, sidecar_present=False, allow_incomplete=True)
+
+
+def test_sidecar_missing_nongated_does_not_raise():
+    # non-gated STM never needs the sidecar for gating; no abort
+    bdc.assert_covariate_sidecar_present(
+        is_stm=True, gated=False, sidecar_present=False, allow_incomplete=False)
+
+
+def test_sidecar_missing_non_stm_does_not_raise():
+    # LDA / HDP builds have no covariate sidecar concept
+    bdc.assert_covariate_sidecar_present(
+        is_stm=False, gated=False, sidecar_present=False, allow_incomplete=False)
+
+
+def test_sidecar_missing_hint_absent_still_actionable():
+    with pytest.raises(SystemExit) as ei:
+        bdc.assert_covariate_sidecar_present(
+            is_stm=True, gated=True, sidecar_present=False,
+            allow_incomplete=False, exp_hint=None)
+    assert "build-covariates EXP=<id>" in str(ei.value)
