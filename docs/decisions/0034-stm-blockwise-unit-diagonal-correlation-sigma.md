@@ -200,3 +200,27 @@ across the shim and drivers for no behavioral gain.
   per-cell standardization produces |r| > 1 on mismatched-support pairs (the clamp).
 - [design spec](../superpowers/specs/2026-07-01-stm-blockwise-unit-diagonal-correlation-design.md)
   — the full design and local validation for this arc.
+
+---
+
+## Addendum 2026-07-06 — corollary: per-document θ̂ from the unit fit are compressed; re-infer at the calibrated scale for any per-document use
+
+The unit-diagonal pin stabilizes β-estimation, but it has a downstream corollary that must be
+applied without exception. The per-document θ̂ produced under the unit fit prior are systematically
+OVER-DIFFUSE: on the real corpus the MEDIAN document's θ̂ on a common shared-block topic sits at ≈
+the uniform value 1/K. At the fit scale the typical document looks like it expresses every common
+topic at chance level — inference barely moves θ̂ off the diffuse prior mean. These per-document
+outputs are not measurements of concentration.
+
+**Operational rule.** ANY per-document use of θ̂ — dashboard display, a downstream feature, a
+membership/presence quantity, and the Laplace posterior COVARIANCE used for uncertainty — must
+re-infer at the calibrated generation scale c* (the held-out-LL-calibrated Σ_gen = c*·R; see ADR
+0036 and the held-out calibration), NEVER the fit scale. The fit scale regularizes β; the calibrated
+scale is the honest per-document concentration; they are different numbers and each is wrong for the
+other's job (the "two roles of Σ"). Re-inference at c* pulls each document's θ̂ onto the topics it
+supports and below uniform on the rest (median θ̂ on common topics roughly halves).
+
+This is the "other half" of the unit-diagonal decision: unit for the fit, c* for every per-document
+readout. Evidence + the vivid statement of the failure: the dashboard θ-histogram calibrated-scale
+fix (commit 384f1d0) and `docs/superpowers/specs/2026-07-06-update4-model-state-and-scale-estimator.md` §3.
+The rule applies to the COVARIANCE, not just the mode — pin it in code, since it silently regresses.

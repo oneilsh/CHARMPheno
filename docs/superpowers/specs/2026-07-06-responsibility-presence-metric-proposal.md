@@ -105,3 +105,110 @@ draw is a (K−1)-dim Gaussian; S ~ 32–64 is plenty for a mean).
 - **Does this dissolve or merely relocate the "broad topics look common" concern?** If a broad topic
   genuinely appears across most documents, a high rate is correct — but is a rate the right summary
   for a broad topic at all, or should breadth itself be reported alongside it?
+
+---
+
+## Converged design — Fable's review incorporated (2026-07-06)
+
+Fable's response reframed two things, named a confound the first draft missed, and settled the open
+questions. This section is the design we build.
+
+### 1. It is TWO coordinates, not one number: PRESENCE × DEPTH
+
+A single rate conflates "how widely" with "how much." Report both, as the two axes they are:
+
+- **Presence** (headline, "how widely") — P(document has ≥1 token attributable to topic k),
+  integrated over the θ-posterior (below). Mean over documents = the topic's presence rate.
+- **Depth** (companion, "how much") — the attributed SHARE, E[count_k]/n_d = (Σ_w n_w·resp_k(w)) / n_d,
+  i.e. the expected fraction of a document's tokens attributed to k, summarized over the documents
+  where the topic is PRESENT.
+
+A broad common topic reads high-presence / low-depth; a narrow specific topic reads
+low-presence / high-depth. This separates what the θ̂ threshold conflated, and it is the natural
+answer to the vis question — topics live in a (presence, depth) plane, not on one axis. It also
+dissolves the "≥1-event vs expected-count" open question without a choice: the probability form IS
+presence; the normalized count form IS depth. They were never competing definitions of one thing —
+they are the two coordinates. Report both.
+
+### 2. The posterior integration is the CORRECTION, not an enhancement
+
+Given θ, token attributions are independent — but θ is NOT given, and marginally the attributions
+are correlated through the shared θ uncertainty. For a rare topic the posterior is effectively "either
+this document is somewhat about k (θ_k non-trivial, several tokens attribute) or it is not (θ_k ≈ 0,
+none do)." The plug-in `1 − Π(1 − resp)` evaluated at a single compromise θ̂ gets exactly these cases
+wrong; E_θ[1 − Π(1 − resp(θ))] gets them right, because each posterior sample commits to one branch
+of the about-it-or-not split. So the S-sample integration is not a layer on a correct base metric —
+it IS the base metric; the plug-in is a biased approximation. It matters MOST for the rare foreground
+topics the gated design exists to surface. Consequence for validation: the ranking shift vs plug-in is
+not only "thin documents demoted" — rare-topic presence can move in EITHER direction; measure the
+per-topic delta (not just rank correlation).
+
+### 3. The named confound: presence saturates with document length
+
+The ≥1-token event is monotone in n and saturates: presence = 1 − (1−r)^n for mean per-token
+responsibility r; at n=44, r=0.05 → 0.90, r=0.10 → 0.99. Two consequences: (a) common topics all read
+near 1, so presence stops discriminating among them (partly recreating the θ̂-threshold pile-up); (b)
+presence covaries with user activity and with any drift in the corpus length distribution — a
+length-distribution shift moves presence rates with nothing about the topics changing. The event is
+still the right DEFINITION (intrinsic to the generative process, correct semantics for narrow topics);
+the fix is the DEPTH companion (§1), which does not saturate, plus reporting length-dependence from
+validation (§7) so future presence drift can be attributed.
+
+### 4. Numerics: log-space product + MEASURE the smoothing floor
+
+- **Log space.** Compute log(1 − presence) = Σ_w n_w · log1p(−resp_k(w)); signature tokens push resp
+  near 1 and the naive product underflows / loses precision.
+- **Smoothing floor.** resp_k(w) is never exactly 0 — β carries Dirichlet-smoothed mass on every
+  token, so a per-token floor ε (~1e-3) gives every topic a spurious ~ε·n presence baseline (~4% at
+  n=44) uniform across documents containing nothing of the topic. Do NOT assume it negligible: the
+  validation (§7) must include topics ABSENT by construction and report the false-presence rate. If
+  material, either report it as an explicit floor (consumers read rates relative to it) or compute
+  responsibilities from a lightly-truncated β.
+
+### 5. Gated denominator: WITHIN-GROUP is the only foreground headline
+
+whole-corpus rate = group-share × within-group rate, so it confounds topic prevalence with group
+size (60% of a group that is 5% of the corpus reads as 3% — a statement about group size, not the
+topic). Rules: within-group is the foreground headline; corpus-wide only as an explicitly-labeled
+composition view; NEVER rank foreground and background topics in one table on the raw rate (their
+denominators differ structurally); a unified view needs the denominator as a COLUMN, not a footnote.
+(Background topics have no restriction — their denominator is the whole corpus.)
+
+### 6. The Laplace covariance is honest only at the calibrated scale
+
+The uncertainty integration inherits the scale arc: the Laplace posterior COVARIANCE (not just the
+mode) is compressed at the unit fit scale, so it must be computed at the calibrated scale c*. This is
+the ADR-0034 addendum applied to the covariance. It silently regresses — pin it in code, not just the
+doc.
+
+### 7. Monte-Carlo budget
+
+S ≈ 32–64 samples is fine for the corpus-level MEAN presence/depth. But we should also SHIP the
+per-document presence distribution (it is the input to any future per-document consumer), and the
+per-document MC error at S=32 is ~±0.09 on a probability near 0.5 — so either bump S for the shipped
+per-document values or quote the MC error alongside them.
+
+### 8. Validation: a FACTORIAL plant
+
+Generate-then-re-infer, with the plant crossed over the axes the confounds identify:
+planted-membership × topic-breadth (narrow-signature vs broad-vocabulary β) × document-length
+(subsample the real length distribution, INCLUDING the thin tail). Success criteria:
+- recovered presence tracks planted presence across ALL cells;
+- the false-presence floor (§4) is characterized (topics absent-by-construction);
+- the length-dependence of recovered presence at a FIXED planted rate is measured, so future presence
+  drift can be attributed to length drift vs topic change.
+Add one cell: documents planted with an AMBIGUOUS token (shared between two topics) but NOT the
+topic's signature — verifies the θ-weighting in resp behaves as intended (attribution follows document
+context), a feature a consumer should be able to see quantified.
+
+### Build order
+
+1. Distributed per-document pass (reuse the calibrated-scale E-step from the θ-histogram work):
+   per document, per allowed topic — draw S η-samples from the Laplace Gaussian (at c*), compute resp
+   per token (log space), accumulate the per-sample ≥1-token probability AND the per-sample attributed
+   share; average → per-document (presence, depth); accumulate per-topic corpus sums (mapPartitions +
+   treeReduce). Foreground topics accumulate WITHIN their group.
+2. Export: per-topic (presence, depth) with the correct denominator labeled; optionally the
+   per-document presence distribution (with adequate S / MC error).
+3. Validation harness: the factorial synthetic plant (§8) with the false-presence-floor readout.
+4. Frontend: the (presence, depth) plane as the readout; drop the τ threshold from the headline.
