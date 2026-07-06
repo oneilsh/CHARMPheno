@@ -590,6 +590,12 @@ def main(argv: list[str] | None = None) -> int:
                     pg_marginal = None
                 else:
                     pg_marginal = pg_marginal_raw / pg_marginal_sum
+                    # Floor with a small uniform mass so NO vocab token has zero
+                    # backoff probability (a zero m_w defeats the smoother:
+                    # log(eps*0) hits the safety floor and Delta spikes like the
+                    # old 1e-12 problem). Cloud parity; standard backoff smoothing.
+                    _pgV = pg_marginal.shape[0]
+                    pg_marginal = 0.99 * pg_marginal + 0.01 / _pgV
             # print (not log.info) so the smoother status is ALWAYS visible
             # regardless of the driver's logger level (cloud parity).
             if pg_marginal is not None:

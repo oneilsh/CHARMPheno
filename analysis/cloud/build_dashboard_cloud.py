@@ -1005,6 +1005,15 @@ def main(argv: list[str] | None = None) -> int:
                             pg_marginal = None
                         else:
                             pg_marginal = pg_marginal_raw / pg_marginal_sum
+                            # Floor with a small uniform mass so NO vocab token has
+                            # zero backoff probability. A zero m_w defeats the
+                            # smoother: log(eps*0) hits the numeric safety floor and
+                            # Delta spikes exactly like the old 1e-12 problem. Any
+                            # frozen-vocab code absent from THIS build's doc set has
+                            # code_marginals == 0. Standard smoothing of the backoff:
+                            # barely touches common tokens, bounds the rare ones.
+                            _pgV = pg_marginal.shape[0]
+                            pg_marginal = 0.99 * pg_marginal + 0.01 / _pgV
                     # print (not log.info) so the smoother status is ALWAYS
                     # visible: the builder's own logger sits at WARNING, so a
                     # log.info here is silently dropped -- which left us unable to
