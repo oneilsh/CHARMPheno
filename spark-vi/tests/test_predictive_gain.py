@@ -16,8 +16,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.special import digamma
 
+from spark_vi.eval.topic.concentration_recovery import _predictive_loglik, heldout_split
+from spark_vi.mllib.topic.stm import _gated_mode_theta
+from spark_vi.models.topic._linalg import safe_inverse
 from spark_vi.models.topic.partition import TopicBlockPartition
+from spark_vi.models.topic.stm import _stm_doc_inference
 from spark_vi.models.topic.types import STMDocument
 
 
@@ -147,3 +152,229 @@ class TestColdDegenerateSplit:
 
         dg = doc_predictive_gain(doc, gp, part, c=1.0, seed=0)
         assert dg is None
+
+
+class TestColdRNormalizationInvariance:
+    """The module normalizes Sigma to a correlation R = Sigma / sqrt(outer(d,
+    d)) (d = diag(Sigma)) before inverting and scaling by 1/c (see module
+    docstring). R is invariant to rescaling Sigma by any positive diagonal
+    D: corr(D Sigma D) == corr(Sigma). So doc_predictive_gain must return
+    identical results for Sigma's that share a correlation, even though the
+    raw Sigma entries differ wildly. A buggy implementation that inverted
+    raw Sigma (skipping the R normalization) would NOT be invariant here."""
+
+    def test_diagonal_sigma_rescaling_gives_identical_delta(self):
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        lam = np.full((K, V), 0.01)
+        lam[0, 0:4] = 1000.0
+        lam[1, 4:8] = 1000.0
+        Gamma = np.zeros((1, K))
+        part = _non_gated_partition()
+        doc = _doc([0, 1, 2, 3])  # all topic-0 signature words
+
+        gp_identity = {"lambda": lam, "Gamma": Gamma, "Sigma": np.eye(K)}
+        # Any positive-diagonal Sigma has correlation R == I (off-diagonal
+        # terms are all 0, so dividing by sqrt(outer(d, d)) always yields
+        # exactly 1 on the diagonal and 0 off it) -- so this must give the
+        # SAME delta as gp_identity above. Under a raw-Sigma-invert bug
+        # (skipping the R = Sigma/sqrt(outer(d,d)) normalization), Sigma_inv
+        # would be (1/c)*diag(1/4, 1/9) instead of (1/c)*I, and the two
+        # results would differ.
+        gp_diag = {"lambda": lam, "Gamma": Gamma, "Sigma": np.diag([4.0, 9.0])}
+
+        dg_identity = doc_predictive_gain(doc, gp_identity, part, c=_C_WEAK_PRIOR, seed=0)
+        dg_diag = doc_predictive_gain(doc, gp_diag, part, c=_C_WEAK_PRIOR, seed=0)
+
+        assert dg_identity is not None and dg_diag is not None
+        np.testing.assert_allclose(dg_diag.delta, dg_identity.delta, atol=1e-9)
+        np.testing.assert_allclose(dg_diag.dedup_delta, dg_identity.dedup_delta, atol=1e-9)
+        assert dg_diag.ll_full == pytest.approx(dg_identity.ll_full, abs=1e-9)
+
+    def test_off_diagonal_correlation_diagonal_rescaling_invariance(self):
+        """Stronger variant: a genuinely correlated Sigma (off-diagonal !=
+        0) rescaled by a positive diagonal D must give the identical delta,
+        because corr(D Sigma D) == corr(Sigma) exactly (D cancels in
+        Sigma_ij / sqrt(Sigma_ii * Sigma_jj))."""
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        lam = np.full((K, V), 0.01)
+        lam[0, 0:4] = 1000.0
+        lam[1, 4:8] = 1000.0
+        Gamma = np.zeros((1, K))
+        part = _non_gated_partition()
+        doc = _doc([0, 1, 2, 3])
+
+        Sigma_base = np.array([[1.0, 0.3], [0.3, 1.0]])
+        D = np.diag([2.0, 3.0])
+        Sigma_scaled = D @ Sigma_base @ D  # [[4.0, 1.8], [1.8, 9.0]]
+
+        gp_base = {"lambda": lam, "Gamma": Gamma, "Sigma": Sigma_base}
+        gp_scaled = {"lambda": lam, "Gamma": Gamma, "Sigma": Sigma_scaled}
+
+        dg_base = doc_predictive_gain(doc, gp_base, part, c=_C_WEAK_PRIOR, seed=0)
+        dg_scaled = doc_predictive_gain(doc, gp_scaled, part, c=_C_WEAK_PRIOR, seed=0)
+
+        assert dg_base is not None and dg_scaled is not None
+        np.testing.assert_allclose(dg_scaled.delta, dg_base.delta, atol=1e-9)
+        np.testing.assert_allclose(dg_scaled.dedup_delta, dg_base.dedup_delta, atol=1e-9)
+        assert dg_scaled.ll_full == pytest.approx(dg_base.ll_full, abs=1e-9)
+
+
+class TestColdReferenceAndSingleAllowedTopic:
+    """Two branches doc_predictive_gain short-circuits without any extra
+    L-BFGS inference (see the `if allowed_k.size == 0 or (reference is not
+    None and k == reference)` guard): ablating the pinned reference topic
+    (undefined -- `_stm_doc_inference` raises ValueError if asked to
+    optimize with the reference removed from `allowed`) and ablating the
+    sole topic of a single-allowed-topic document (no contrast to make)."""
+
+    def test_reference_topic_ablation_is_skipped_not_raised(self):
+        """3-topic all-background model; topic 0 is pinned as reference,
+        topics 1 and 2 are sharp on disjoint vocab. A document built from
+        topic 1's words: ablating topic 0 (the reference) must be skipped
+        (delta 0, no raise) while ablating topic 2 (irrelevant) floors near
+        0 and ablating topic 1 (the generator, non-reference) costs real
+        held-out likelihood -- proving non-reference ablations still keep
+        the reference inside allowed_k rather than dropping it too."""
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        K3, V3 = 3, 6
+        lam = np.full((K3, V3), 0.01)
+        lam[0, 0:2] = 1000.0  # reference topic's signature (irrelevant to the doc)
+        lam[1, 2:4] = 1000.0  # generating topic
+        lam[2, 4:6] = 1000.0  # irrelevant, non-reference topic
+        Gamma = np.zeros((1, K3))
+        Sigma = np.eye(K3)
+        gp = {"lambda": lam, "Gamma": Gamma, "Sigma": Sigma}
+
+        part = TopicBlockPartition(group_var="g", background_k=K3, foreground=())
+        doc = _doc([2, 3])  # all topic-1 signature words
+
+        dg = doc_predictive_gain(doc, gp, part, c=_C_WEAK_PRIOR, seed=0, reference=0)
+
+        assert dg is not None
+        assert np.array_equal(dg.allowed, np.array([0, 1, 2]))
+        assert len(dg.delta) == 3
+
+        # Reference is topic 0, at position 0 in `allowed` -- ablating it is
+        # skipped by the guard and set to exactly 0.0 (not computed via
+        # inference; a missing-guard bug would instead call
+        # _stm_doc_inference with reference=0 no longer in allowed_k, which
+        # raises ValueError -- so simply reaching this assertion without an
+        # exception is itself part of what this test checks).
+        assert dg.delta[0] == 0.0
+        assert dg.dedup_delta[0] == 0.0
+
+        # The non-reference topic that actually generated the held-out
+        # tokens (topic 1, position 1) shows a clearly positive delta.
+        assert dg.delta[1] > 1.0
+
+        # The other irrelevant, non-reference topic (topic 2, position 2)
+        # floors near 0 -- and its inference call kept the reference (topic
+        # 0) inside allowed_k rather than mistakenly stripping it too.
+        assert dg.delta[2] == pytest.approx(0.0, abs=1e-2)
+
+    def test_single_allowed_topic_has_no_contrast(self):
+        """A model with exactly one (background) topic: allowed = [0] for
+        every doc, so the ablation loop's `allowed_k.size == 0` branch fires
+        immediately -- delta and dedup_delta must be exactly [0.0], with no
+        contrast possible, and the result must still be finite."""
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        K1, V1 = 1, 4
+        lam = np.full((K1, V1), 1.0)
+        Gamma = np.zeros((1, K1))
+        Sigma = np.eye(K1)
+        gp = {"lambda": lam, "Gamma": Gamma, "Sigma": Sigma}
+
+        part = TopicBlockPartition(group_var="g", background_k=K1, foreground=())
+        doc = _doc([0, 1])
+
+        dg = doc_predictive_gain(doc, gp, part, c=1.0, seed=0)
+
+        assert dg is not None
+        assert np.array_equal(dg.allowed, np.array([0]))
+        assert len(dg.delta) == 1
+        assert np.array_equal(dg.delta, np.array([0.0]))
+        assert np.array_equal(dg.dedup_delta, np.array([0.0]))
+        assert np.isfinite(dg.ll_full)
+        assert np.all(np.isfinite(dg.delta))
+
+
+class TestColdInferenceScoringConvention:
+    """Pins the inference-vs-scoring convention at MODERATE lambda (where
+    expElogbeta and beta_prob differ materially -- unlike a very sharp/very
+    flat lambda, where digamma-exp shrinkage and the raw ratio nearly
+    coincide and a swap bug would be numerically invisible). Independently
+    reconstructs ll_full using the primitives directly, then shows the
+    fully-swapped reconstruction (infer with beta_prob, score with
+    expElogbeta) differs materially -- proving a production swap would be
+    caught."""
+
+    def test_ll_full_matches_correct_convention_and_swap_would_be_caught(self):
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        c = 5.0
+        seed = 42
+        holdout_frac = 0.3
+        max_iter, tol = 50, 1e-4
+
+        lam = np.full((K, V), 0.05)
+        lam[0, 0:4] = 2.0  # on-signature, MODERATE (not 1000/0.01)
+        lam[1, 4:8] = 2.0
+        Gamma = np.zeros((1, K))
+        Sigma = np.eye(K)
+        gp = {"lambda": lam, "Gamma": Gamma, "Sigma": Sigma}
+
+        part = _non_gated_partition()
+        doc = _doc([0, 1, 2, 3])
+
+        # Independently reconstruct both beta conventions from lambda.
+        lam_rowsum = lam.sum(axis=1, keepdims=True)
+        expElogbeta = np.exp(digamma(lam) - digamma(lam_rowsum))
+        beta_prob = lam / lam_rowsum
+        # Confirm the two conventions actually differ materially at this
+        # lambda scale (otherwise the test below would have no power).
+        assert np.max(np.abs(expElogbeta - beta_prob)) > 1e-2
+
+        d = np.diag(Sigma)
+        R = Sigma / np.sqrt(np.outer(d, d))
+        allowed = part.allowed_indices(doc.groups)
+
+        split = heldout_split(doc, holdout_frac=holdout_frac, seed=seed)
+        assert split is not None
+        visible, held_idx, held_cnt = split
+        assert held_cnt.size > 0
+
+        Sigma_inv_allowed = (1.0 / c) * safe_inverse(R[np.ix_(allowed, allowed)])
+
+        # CORRECT convention: infer with expElogbeta, score with beta_prob.
+        eta, _, _ = _stm_doc_inference(
+            indices=visible.indices, counts=visible.counts,
+            expElogbeta=expElogbeta, Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed,
+            x=doc.x, max_iter=max_iter, tol=tol, allowed=allowed, reference=None,
+        )
+        theta = _gated_mode_theta(eta, allowed, K)
+        ll_correct = _predictive_loglik(theta, beta_prob, held_idx, held_cnt)
+
+        dg = doc_predictive_gain(
+            doc, gp, part, c=c, seed=seed, holdout_frac=holdout_frac,
+            lbfgs_max_iter=max_iter, lbfgs_tol=tol,
+        )
+        assert dg is not None
+        assert dg.ll_full == pytest.approx(ll_correct, abs=1e-9)
+
+        # SWAPPED convention: infer with beta_prob, score with expElogbeta.
+        # This is what a swap bug in production would actually compute --
+        # it must differ materially from ll_correct, or this test would be
+        # vacuous (unable to distinguish correct from swapped).
+        eta_swapped, _, _ = _stm_doc_inference(
+            indices=visible.indices, counts=visible.counts,
+            expElogbeta=beta_prob, Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed,
+            x=doc.x, max_iter=max_iter, tol=tol, allowed=allowed, reference=None,
+        )
+        theta_swapped = _gated_mode_theta(eta_swapped, allowed, K)
+        ll_swapped = _predictive_loglik(theta_swapped, expElogbeta, held_idx, held_cnt)
+
+        assert abs(ll_swapped - ll_correct) > 1e-3
