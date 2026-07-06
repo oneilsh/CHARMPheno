@@ -21,6 +21,20 @@ class DashboardExport:
     theta_percentiles: np.ndarray | None = field(default=None)  # K_display × 5 in [p5, p25, p50, p75, p95] column order; None for HDP/legacy
     topic_blocks: list | None = field(default=None)             # block label per displayed topic (aligned to topic_indices); None when no partition
     sigma: np.ndarray | None = field(default=None)              # K_display per-topic logistic-normal prior variance (STM only; None for LDA/HDP). For the faithful dashboard sampler — ADR 0028 Alternative B.
+    # --- Predictive-gain aggregates (PROVISIONAL schema, Phase-2 of the
+    # predictive-gain metric; see spark_vi.mllib.topic.predictive_gain). All
+    # K_display-aligned to topic_indices, same convention as theta_histogram.
+    # STM + gated only; None everywhere else (and on any enhancement-only
+    # build-phase failure). Bundle-level scalars (null_band,
+    # observed_delta_range, prominence_bin_edges, the downdate audit, the
+    # generative scale used, and n_docs) are NOT carried on this dataclass —
+    # they pass straight from the build phase to write_phenotypes_bundle.
+    presence: np.ndarray | None = field(default=None)        # K_display; fraction of a topic's documents whose Delta_k beats that doc's own permuted-null max
+    mean_gain: np.ndarray | None = field(default=None)       # K_display; mean per-doc held-out predictive gain Delta_k
+    depth: np.ndarray | None = field(default=None)           # K_display; topic k's share of total held-out predictive structure across its documents
+    prominence_hist: np.ndarray | None = field(default=None)  # K_display × n_bins; per-topic Delta_k histogram
+    length_corr: np.ndarray | None = field(default=None)     # K_display; Pearson correlation of per-doc Delta_k with document token length
+    dedup_gain: np.ndarray | None = field(default=None)      # K_display; mean_gain with held-out counts capped at 1
 
 
 def _global_params(result) -> dict[str, np.ndarray]:

@@ -174,6 +174,18 @@ def main(argv: list[str] | None = None) -> int:
     # that path suppresses the histogram at k_thresh here.
     theta_hist_min_count = 20
 
+    # Predictive-gain bundle-level diagnostics (set by the STM build-step
+    # below on success; stay None on any non-STM/non-gated build or an
+    # enhancement-only failure, in which case write_phenotypes_bundle omits
+    # the whole "predictive_gain" object). Bound here (like eta_scale) so
+    # they are always defined for the unconditional write-bundle call below.
+    pg_prominence_bin_edges = None
+    pg_null_band = None
+    pg_observed_delta_range = None
+    pg_downdate_audit = None
+    pg_scale = None
+    pg_n_docs = None
+
     # Load the vocab + BOW (Spark) up front: the STM correlation block below
     # reuses bow_df for the eta_scale E-step join, and corpus-stats / NPMI reuse it
     # again later (single load, single Spark session for the whole build).
@@ -468,6 +480,130 @@ def main(argv: list[str] | None = None) -> int:
                         "omits theta_histogram/theta_percentiles (panel hidden).",
                         exc)
 
+        # predictive_gain: per-topic presence/depth/prominence aggregates (the
+        # dashboard's predictive-gain view, spark_vi.mllib.topic.predictive_gain
+        # Phase 2). Leave-one-topic-out held-out predictive gain Delta_k
+        # answers "how much held-out predictive power does topic k actually
+        # contribute", complementing theta_histogram's "how much MASS does a
+        # patient put on topic k" view. Runs AFTER theta_histogram (same
+        # self-contained doc_rdd assembly) and BEFORE the write-bundle phase
+        # (shared, unconditional code below). Enhancement-only: any failure
+        # leaves the six new DashboardExport fields (and the pg_* diagnostic
+        # locals bound above) None (dashboard hides the panel). PROVISIONAL
+        # schema -- see write_phenotypes_bundle's docstring; Phase-2 will
+        # recalibrate prominence_range from observed_delta_range, logged here.
+        # Uses fast=True (the warm-start Newton downdate, ~2x a single
+        # inference pass) validated against the COLD oracle via a small-sample
+        # audit (predictive_gain_downdate_audit) whose max_abs_overall is the
+        # headline cold-reliability number, logged prominently below. Parity
+        # with analysis/cloud/build_dashboard_cloud.py.
+        try:
+            from spark_vi.mllib.topic.predictive_gain import (
+                corpus_predictive_gain_gated_rdd,
+                predictive_gain_downdate_audit,
+            )
+            from spark_vi.mllib.topic._common import _vector_to_stm_document
+            from pyspark.ml.linalg import Vectors, VectorUDT
+            from pyspark.sql.types import (
+                StructType, StructField, LongType, StringType,
+            )
+            from dataclasses import replace as _dc_replace
+
+            stm_hardening = result.metadata.get("stm_hardening", {}) or {}
+            pg_reference = 0 if stm_hardening.get("reference_topic") else None
+
+            # Self-contained STMDocument RDD (same assembly as the eta_scale /
+            # theta_histogram blocks: bow features + covariate sidecar +
+            # source_cohort gating group).
+            pg_cov_schema = StructType([
+                StructField("person_id", LongType(), False),
+                StructField("source_cohort", StringType(), False),
+                StructField("covariates", VectorUDT(), False),
+            ])
+            pg_cov_rows = [
+                (int(pid), str(sc), Vectors.dense(np.asarray(vec, dtype=float)))
+                for pid, sc, vec in zip(
+                    cov["person_id"], cov["source_cohort"], cov["covariates"])
+            ]
+            pg_cov_sdf = spark.createDataFrame(pg_cov_rows, schema=pg_cov_schema)
+            pg_doc_df = bow_df.select("person_id", "features").join(
+                pg_cov_sdf, on="person_id", how="inner")
+            pg_doc_rdd = pg_doc_df.rdd.map(
+                lambda row: _vector_to_stm_document(
+                    row, features_col="features",
+                    covariates_col="covariates",
+                    group_col="source_cohort",
+                )
+            )
+            # Same calibrated-scale-or-unit-fallback convention as the
+            # theta_histogram block's hist_scale: Sigma_gen = c*R uses the
+            # held-out-LL calibrated eta_scale when available.
+            pg_scale = float(eta_scale) if eta_scale else 1.0
+            log.info("STM: predictive gain computed at scale=%.4f (%s).",
+                      pg_scale,
+                      "calibrated eta_scale" if eta_scale else "unit fallback")
+
+            pg = corpus_predictive_gain_gated_rdd(
+                pg_doc_rdd, result.global_params, partition,
+                c=pg_scale, reference=pg_reference, fast=True,
+                sample_cap=200_000, seed=0,
+            )
+
+            # Cold-vs-fast downdate reliability audit on a small in-memory
+            # sample -- own try/except so an audit failure cannot drop the
+            # (already computed) main aggregates.
+            try:
+                pg_audit_docs = pg_doc_rdd.takeSample(False, 50, seed=0)
+                pg_audit_raw = predictive_gain_downdate_audit(
+                    pg_audit_docs, result.global_params, partition,
+                    c=pg_scale, reference=pg_reference,
+                )
+                pg_downdate_audit = {
+                    "max_abs_overall": float(pg_audit_raw["max_abs_overall"]),
+                    "n_docs_audited": int(pg_audit_raw["n_docs_audited"]),
+                }
+                log.info(
+                    "STM: predictive-gain downdate audit max_abs_overall=%.6f "
+                    "(n_docs_audited=%d) -- cold-vs-fast (fast=True) "
+                    "reliability gate.",
+                    pg_downdate_audit["max_abs_overall"],
+                    pg_downdate_audit["n_docs_audited"])
+            except Exception as audit_exc:
+                log.warning(
+                    "STM: predictive-gain downdate audit failed (%s); "
+                    "phenotypes.json omits the downdate_audit diagnostic "
+                    "(main aggregates unaffected).", audit_exc)
+                pg_downdate_audit = None
+
+            kept = export.topic_indices.tolist()
+            export = _dc_replace(
+                export,
+                presence=pg["presence"][kept],
+                mean_gain=pg["mean_gain"][kept],
+                depth=pg["depth"][kept],
+                prominence_hist=pg["prominence_hist"][kept],
+                length_corr=pg["length_corr"][kept],
+                dedup_gain=pg["dedup_mean_gain"][kept],
+            )
+            pg_prominence_bin_edges = pg["prominence_bin_edges"].tolist()
+            pg_null_band = pg["null_band"]
+            pg_observed_delta_range = list(pg["observed_delta_range"])
+            pg_n_docs = int(pg["n_docs"])
+            log.info(
+                "STM: computed predictive-gain aggregates (n_docs=%d, "
+                "kept_topics=%d, observed_delta_range=%s).",
+                pg_n_docs, len(kept), pg_observed_delta_range)
+        except Exception as exc:  # enhancement-only: never fatal
+            log.warning("STM: predictive-gain aggregation failed (%s); "
+                        "phenotypes.json omits the predictive_gain object "
+                        "(panel hidden).", exc)
+            pg_prominence_bin_edges = None
+            pg_null_band = None
+            pg_observed_delta_range = None
+            pg_downdate_audit = None
+            pg_scale = None
+            pg_n_docs = None
+
     K_disp, V_full = export.beta.shape
     log.info("K_display=%d V_full=%d (model_class=%s)", K_disp, V_full, model_class)
 
@@ -533,6 +669,32 @@ def main(argv: list[str] | None = None) -> int:
     else:
         pct = None
 
+    # Predictive-gain per-topic arrays (PROVISIONAL — see
+    # write_phenotypes_bundle's docstring): None when the phase above never
+    # ran or failed (export.presence etc. stay unset), in which case
+    # write_phenotypes_bundle omits the whole "predictive_gain" key
+    # (byte-unchanged bundle). NaN -> None, same convention as theta_histogram.
+    def _nan_to_none(arr):
+        return [None if np.isnan(v) else float(v) for v in arr.tolist()]
+
+    if export.presence is not None:
+        pg_presence = _nan_to_none(export.presence)
+        pg_mean_gain = _nan_to_none(export.mean_gain)
+        pg_depth = _nan_to_none(export.depth)
+        pg_length_corr = _nan_to_none(export.length_corr)
+        pg_dedup_gain = _nan_to_none(export.dedup_gain)
+        pg_prominence_hist_json = [
+            [None if np.isnan(v) else float(v) for v in row]
+            for row in export.prominence_hist.tolist()
+        ]
+    else:
+        pg_presence = None
+        pg_mean_gain = None
+        pg_depth = None
+        pg_length_corr = None
+        pg_dedup_gain = None
+        pg_prominence_hist_json = None
+
     write_phenotypes_bundle(
         args.out_dir / "phenotypes.json",
         npmi=npmi,
@@ -543,6 +705,18 @@ def main(argv: list[str] | None = None) -> int:
         topic_indices=export.topic_indices.tolist(),
         min_count=theta_hist_min_count,
         labels=None,
+        presence=pg_presence,
+        mean_gain=pg_mean_gain,
+        depth=pg_depth,
+        prominence_hist=pg_prominence_hist_json,
+        length_corr=pg_length_corr,
+        dedup_gain=pg_dedup_gain,
+        prominence_bin_edges=pg_prominence_bin_edges,
+        null_band=pg_null_band,
+        observed_delta_range=pg_observed_delta_range,
+        predictive_gain_downdate_audit=pg_downdate_audit,
+        predictive_gain_scale=pg_scale,
+        predictive_gain_n_docs=pg_n_docs,
     )
     write_corpus_stats_sidecar(stats, args.out_dir / "corpus_stats.json", v_displayed=v_disp)
 
