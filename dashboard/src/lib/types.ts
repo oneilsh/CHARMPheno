@@ -18,11 +18,42 @@ export interface Phenotype {
   theta_histogram?: (number | null)[]
   theta_percentiles?: ThetaPercentiles
   original_topic_id: number
+  // Hydrated at load time (see bundle.ts) from the bundle-level
+  // `predictive_gain` parallel arrays, indexed onto each phenotype by
+  // display position. Absent entirely on bundles without a
+  // `predictive_gain` block (backward-compatible: every reader falls back).
+  presence?: number | null
+  mean_gain?: number | null
+  depth?: number | null
+  length_corr?: number | null
+  dedup_gain?: number | null
+  prominence_hist?: (number | null)[]
 }
 export interface PhenotypesBundle {
   phenotypes: Phenotype[]
   theta_histogram_bin_edges?: number[]
   theta_histogram_min_count?: number
+  predictive_gain?: PredictiveGain
+}
+
+// Held-out predictive-gain diagnostics, written by the cluster export only
+// for gated STM bundles (Task 5 of the predictive-gain metric). Per-topic
+// arrays are length K_display and aligned BY POSITION to the `phenotypes`
+// array (same [kept] display order) — see bundle.ts for the hydration step
+// that distributes these onto each Phenotype by index.
+export interface PredictiveGain {
+  presence: (number | null)[]
+  mean_gain: (number | null)[]
+  depth: (number | null)[]
+  prominence_hist: (number | null)[][]
+  length_corr: (number | null)[]
+  dedup_gain: (number | null)[]
+  prominence_bin_edges: number[]
+  null_band: { mean: number; std: number; n: number; p95: number; hist: number[] }
+  observed_delta_range: [number, number]
+  downdate_audit: { max_abs_overall: number; n_docs_audited: number }
+  scale: number
+  n_docs: number
 }
 export interface VocabCode {
   id: number; code: string; description: string; domain: string; corpus_freq: number

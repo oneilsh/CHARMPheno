@@ -197,6 +197,41 @@ export const prevalenceReader = derived(
   }
 )
 
+// ── Predictive-gain readers (additive; Task 6a plumbing) ───────────────────
+// These consume the hydrated per-phenotype fields set by bundle.ts's
+// hydratePredictiveGain (bundle-level `predictive_gain` distributed onto each
+// Phenotype by index). Task 6a only makes the data available: the headline
+// readout and TopicMap encoding still read `prevalenceReader` unchanged —
+// see Task 6b for the value-sensitive swap once real numbers are in.
+
+// (Phenotype) -> number reader for "presence": the fraction of a topic's
+// docs clearing its own permutation null (held-out predictive signal).
+// Falls back to the existing prevalence reader's fractionAboveTau base when
+// `presence` hasn't been hydrated (older/non-gated bundles), so callers can
+// adopt this reader without a conditional at each call site.
+export const presenceReader = derived(
+  [bundle, tauThreshold],
+  ([$b, $tau]) => {
+    const edges = $b?.phenotypes.theta_histogram_bin_edges
+    return (p: Phenotype) =>
+      typeof p.presence === 'number' && Number.isFinite(p.presence)
+        ? p.presence
+        : fractionAboveTau(p, edges, $tau)
+  }
+)
+
+// (Phenotype) -> number reader for "depth": unique-contribution share.
+// null/undefined (undefined depth, or a bundle with no predictive_gain at
+// all) reads as 0 rather than throwing/NaN-ing through downstream math.
+export const depthReader = derived([bundle], () =>
+  (p: Phenotype) => p.depth ?? 0
+)
+
+// Bundle-level predictive_gain diagnostics accessor (bin edges, null_band,
+// scale, etc.) for components that need more than the per-phenotype
+// hydrated fields. Null when the bundle has no predictive_gain block.
+export const predictiveGain = derived(bundle, ($b) => $b?.phenotypes.predictive_gain ?? null)
+
 // Returns a predicate (p) -> boolean for whether a phenotype should be shown
 // in the current view mode. Simple mode hides `dead` and `mixed` topics;
 // advanced mode shows everything. Follows the prevalenceReader pattern —

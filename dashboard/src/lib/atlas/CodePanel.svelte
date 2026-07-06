@@ -7,6 +7,7 @@
   import { topRelevantCodes } from '../inference'
   import { go } from '../router'
   import PrevalenceHistogram from '../PrevalenceHistogram.svelte'
+  import ProminenceHistogram from '../ProminenceHistogram.svelte'
   import { copy } from '../copy'
 
   function findInPatients() {
@@ -34,6 +35,12 @@
 
   $: reader = $prevalenceReader
   $: hasHistogram = !!(pheno?.theta_histogram && pheno?.theta_percentiles && $bundle?.phenotypes.theta_histogram_bin_edges)
+  // Predictive-gain plumbing (additive): when the bundle carries hydrated
+  // per-phenotype prominence_hist + the shared bin edges, prefer it over the
+  // theta-mass histogram above — it's the principled replacement described
+  // in copy.ts's prominenceHistogramTip. Bundles without predictive_gain
+  // (the common case today) simply fall through to hasHistogram, unchanged.
+  $: hasProminence = !!(pheno?.prominence_hist && $bundle?.phenotypes.predictive_gain?.prominence_bin_edges)
 
   // Share of patients below τ — the mass the histogram omits because its
   // x-axis starts at τ. Summed from bins whose upper edge is at or below τ;
@@ -124,7 +131,21 @@
       </div>
     </header>
 
-    {#if hasHistogram && $advancedView}
+    {#if hasProminence && $advancedView}
+      {@const pgEdges = $bundle!.phenotypes.predictive_gain!.prominence_bin_edges}
+      {@const hist = pheno.prominence_hist!}
+      <div class="hist-wrap" data-tour="histogram">
+        <span class="hist-head">
+          <span class="eyebrow" title={copy.phenotypeDetail.prominenceHistogramTip}>{copy.phenotypeDetail.prominenceHistogramTitle}</span>
+        </span>
+        <ProminenceHistogram
+          histogram={hist}
+          binEdges={pgEdges}
+          width={360}
+          height={120}
+        />
+      </div>
+    {:else if hasHistogram && $advancedView}
       {@const edges = $bundle!.phenotypes.theta_histogram_bin_edges!}
       {@const hist = pheno.theta_histogram!}
       {@const pcts = pheno.theta_percentiles!}
