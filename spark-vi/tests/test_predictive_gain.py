@@ -857,3 +857,323 @@ class TestDowndateAudit:
         audit = predictive_gain_downdate_audit(
             docs + [tiny], gp, part, c=1.0, seed=0)
         assert audit["n_docs_audited"] == len(docs)  # the tiny doc is skipped
+
+
+# ---------------------------------------------------------------------------
+# Task S1: background-smoothed predictive score (marginal back-off).
+#
+# The old scorer floored a held-out token's predicted mass at 1e-12, so
+# ablating the ONLY topic that explained an exclusive bursty token sent its
+# per-token log-likelihood to log(1e-12) ~ -27.6 nats/token -- Delta_k blew up
+# by hundreds of nats on a single token (the pathology found on real data:
+# downdate audit ~1000 nats, per-doc Delta ~2900 nats, non-discriminating
+# presence/depth). The fix (Fable's endorsed "marginal back-off") scores every
+# held-out token against p_S(w) = (1-eps)*(theta@beta)(w) + eps*m_w, m_w the
+# corpus unigram, eps = lambda/(lambda+n_visible) a length-aware Dirichlet
+# pseudo-count weight. Removing a topic now degrades a token to a BACKGROUND
+# probability eps*m_w > 0, not a floor, so Delta_k is a bounded log-lift over
+# the background baseline and an irrelevant/permuted topic scores Delta ~= 0.
+# INFERENCE (theta_hat) is UNCHANGED -- smoothing is scoring-only.
+#
+# These tests are REPRO-FIRST: test 1 documents the floor pathology on the OLD
+# (marginal=None) path BEFORE the fix; the rest pin the smoothed behavior.
+# ---------------------------------------------------------------------------
+
+
+def _empirical_marginal(docs, V):
+    """Corpus unigram over the vocabulary: a normalized length-V probability
+    vector (sums to 1). +1e-12 where a word is unseen, then renormalized, so
+    m_w > 0 everywhere (the smoother's background component is always
+    positive)."""
+    m = np.zeros(V, dtype=np.float64)
+    for d in docs:
+        m[d.indices] += d.counts
+    m = m + 1e-12
+    m /= m.sum()
+    return m
+
+
+# A repro model: K=3 non-gated topics on V=40. Topic 0 owns a BURSTY EXCLUSIVE
+# signature word (10) whose off-topic beta is ~0 (so ablating topic 0 floors
+# its predicted mass on the OLD path). Words 30,31,32 are CONTESTED: topic 0 is
+# their primary explainer with a WEAK topic-1 fallback (lambda 2), so ablating
+# topic 0 hurts them but does NOT floor them (topic 1 offers partial mass).
+# Words 0..5 are light shared background. A document dominated by topic 0 mixes
+# the bursty exclusive word with the contested words.
+_REPRO_K, _REPRO_V = 3, 40
+_REPRO_C = 1000.0  # weak Gaussian prior so theta follows the multinomial evidence
+
+
+def _repro_gp():
+    lam = np.full((_REPRO_K, _REPRO_V), 1e-6)
+    lam[:, 0:6] = 1.0                       # light shared background
+    lam[0, 10] = 2000.0                     # bursty EXCLUSIVE topic-0 word (floors on ablation)
+    for w in (30, 31, 32):
+        lam[0, w] = 300.0                   # topic-0 primary explainer of the contested words
+        lam[1, w] = 2.0                     # weak topic-1 fallback (non-floor on ablation)
+    lam[1, 14:18] = 200.0                   # topic-1 own signature (not in the repro doc)
+    lam[2, 18:22] = 200.0                   # topic-2 own signature (not in the repro doc)
+    return {"lambda": lam, "Gamma": np.zeros((1, _REPRO_K)), "Sigma": np.eye(_REPRO_K)}
+
+
+def _repro_doc():
+    idx = np.array([0, 1, 10, 30, 31, 32], dtype=np.int32)
+    cnt = np.array([4, 4, 10, 20, 20, 20], dtype=np.float64)
+    return STMDocument(
+        indices=idx, counts=cnt, length=int(cnt.sum()),
+        x=np.array([1.0]), groups=frozenset(),
+    )
+
+
+def _repro_partition():
+    return TopicBlockPartition(group_var="g", background_k=_REPRO_K, foreground=())
+
+
+def _per_token_ablation_contrib(gp, part, doc, k_ablate, *, c, seed, holdout_frac,
+                                marginal, smoothing_lambda):
+    """Diagnostic helper: the per-held-token contributions to Delta_k for
+    ablating topic ``k_ablate``, i.e. held_cnt_w * (log p_full(w) - log
+    p_ablated(w)). Reconstructs the SAME infer/score sequence
+    ``doc_predictive_gain`` uses (via the module's ``_infer_theta``) so the
+    breakdown matches the reported Delta. Returns (held_indices, contributions,
+    eps)."""
+    from spark_vi.mllib.topic.predictive_gain import _infer_theta
+
+    lam = np.asarray(gp["lambda"], dtype=np.float64)
+    Gamma = np.asarray(gp["Gamma"], dtype=np.float64)
+    Sigma = np.asarray(gp["Sigma"], dtype=np.float64)
+    K = lam.shape[0]
+    rs = lam.sum(axis=1, keepdims=True)
+    expElogbeta = np.exp(digamma(lam) - digamma(rs))
+    beta = lam / rs
+    d = np.diag(Sigma)
+    R = Sigma / np.sqrt(np.outer(d, d))
+
+    vis, hidx, hcnt = heldout_split(doc, holdout_frac=holdout_frac, seed=seed)
+    allowed = part.allowed_indices(doc.groups)
+    theta_f = _infer_theta(vis, allowed, expElogbeta, Gamma, R, c, doc.x, None, K, 50, 1e-4)
+    allowed_k = np.delete(allowed, int(np.nonzero(allowed == k_ablate)[0][0]))
+    theta_k = _infer_theta(vis, allowed_k, expElogbeta, Gamma, R, c, doc.x, None, K, 50, 1e-4)
+
+    if marginal is None:
+        pf = theta_f @ beta
+        pk = theta_k @ beta
+        contrib = hcnt * (np.log(pf[hidx] + 1e-12) - np.log(pk[hidx] + 1e-12))
+        eps = 0.0
+    else:
+        n = float(vis.counts.sum())
+        eps = smoothing_lambda / (smoothing_lambda + n)
+        pf = (1.0 - eps) * (theta_f @ beta) + eps * marginal
+        pk = (1.0 - eps) * (theta_k @ beta) + eps * marginal
+        contrib = hcnt * (np.log(pf[hidx] + 1e-300) - np.log(pk[hidx] + 1e-300))
+    return hidx, contrib, eps
+
+
+class TestSmoothedPredictiveScore:
+    """The 8 Task-S1 tests: repro of the floor pathology, its bounded fix, and
+    the operating-definition changes (Delta>0 presence, null-collapse
+    validation, lambda-robustness)."""
+
+    # -- test 1: REPRO the floor pathology on the OLD (marginal=None) path ----
+    def test_repro_floor_pathology_old_path_blows_up(self):
+        """Documents the bug: with marginal=None (the historical 1e-12 floor),
+        ablating topic 0 -- the only topic that explains the bursty exclusive
+        word -- sends that word's predicted mass to the floor, so Delta_0 spikes
+        far past any honest per-token bound. Written BEFORE the fix, it must
+        FAIL to be bounded (this asserts the pathology is present)."""
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        gp, part, doc = _repro_gp(), _repro_partition(), _repro_doc()
+        dg = doc_predictive_gain(doc, gp, part, c=_REPRO_C, seed=0, holdout_frac=0.5)
+
+        assert dg is not None
+        # Topic 0 is the generator (dominant); its OLD Delta is an implausible
+        # floor-driven spike -- hundreds of nats, dwarfing any honest bound.
+        assert dg.theta_full[0] > 0.8
+        assert dg.delta.max() > 100.0
+
+        # And a SINGLE held token (the exclusive bursty word) carries a >100-nat
+        # contribution -- the floor cliff, concentrated on one token.
+        _, contrib_old, _ = _per_token_ablation_contrib(
+            gp, part, doc, 0, c=_REPRO_C, seed=0, holdout_frac=0.5,
+            marginal=None, smoothing_lambda=1.0)
+        assert np.max(contrib_old) > 100.0
+
+    # -- test 2: the FIX bounds Delta while preserving the signal -------------
+    def test_smoother_bounds_delta_and_preserves_signal(self):
+        """The SAME document scored with the empirical marginal yields a BOUNDED
+        Delta (much smaller than the floored one), each per-token log-ratio
+        obeys the analytic bound log(1/(eps*m_w)), yet Delta_0 for the
+        generating topic stays clearly positive (signal preserved)."""
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        gp, part, doc = _repro_gp(), _repro_partition(), _repro_doc()
+        m = _empirical_marginal([doc], _REPRO_V)
+
+        old = doc_predictive_gain(doc, gp, part, c=_REPRO_C, seed=0, holdout_frac=0.5)
+        new = doc_predictive_gain(
+            doc, gp, part, c=_REPRO_C, seed=0, holdout_frac=0.5,
+            marginal=m, smoothing_lambda=1.0)
+
+        assert old is not None and new is not None
+        # Bounded: the smoothed Delta is a small fraction of the floored spike.
+        assert np.abs(new.delta).max() < 0.6 * np.abs(old.delta).max()
+        assert np.abs(new.delta).max() < 150.0
+        # Signal preserved: the generating topic still scores clearly positive.
+        assert new.delta[0] > 5.0
+        # No longer floor-dominated: irrelevant topics 1,2 sit ~0.
+        assert abs(new.delta[1]) < 1.0
+        assert abs(new.delta[2]) < 1.0
+
+        # Rigorous per-token bound: every smoothed per-token log-ratio
+        # (contribution / count) is <= -log(eps*m_w), because p_full <= 1 and
+        # p_ablated >= eps*m_w. The floor path violates this by ~an order of
+        # magnitude on the exclusive token.
+        hidx, contrib_new, eps = _per_token_ablation_contrib(
+            gp, part, doc, 0, c=_REPRO_C, seed=0, holdout_frac=0.5,
+            marginal=m, smoothing_lambda=1.0)
+        vis, _, hcnt = heldout_split(doc, holdout_frac=0.5, seed=0)
+        per_token_ratio = contrib_new / hcnt
+        analytic_bound = -np.log(eps * m[hidx])
+        assert np.all(per_token_ratio <= analytic_bound + 1e-9)
+
+    # -- test 3: an irrelevant topic scores Delta ~= 0 under smoothing --------
+    def test_irrelevant_topic_delta_near_zero_under_smoothing(self):
+        """The auto-floor property, now realized via the marginal: a document
+        built only from topic 0's words scores Delta_1 ~= 0 for the irrelevant
+        topic 1 (removing a topic that never had mass costs nothing), while
+        topic 0 keeps a real positive Delta."""
+        from spark_vi.mllib.topic.predictive_gain import doc_predictive_gain
+
+        gp = _sharp_global_params()      # disjoint 2-topic sharp fixture
+        part = _non_gated_partition()
+        doc = _doc([0, 1, 2, 3])         # all topic-0 words
+        m = _empirical_marginal([doc], V)
+
+        dg = doc_predictive_gain(
+            doc, gp, part, c=_C_WEAK_PRIOR, seed=0, marginal=m, smoothing_lambda=1.0)
+
+        assert dg is not None
+        assert dg.delta[0] > 1.0                              # real signal
+        assert dg.delta[1] == pytest.approx(0.0, abs=1e-2)    # irrelevant ~ 0
+
+    # -- test 4: the permuted null collapses to ~0 under smoothing -----------
+    def test_shuffled_null_collapses_under_smoothing(self):
+        """Validation that the permutation null becomes redundant: a shuffled
+        (word-identity-destroyed) topic explains nothing, so under smoothing its
+        Delta collapses to ~0 within a tight band -- the null no longer needs to
+        be the presence threshold (Delta>0 is)."""
+        from spark_vi.mllib.topic.predictive_gain import null_delta
+
+        gp = _sharp_global_params_wide_vocab()   # diluted rows -> shuffle lands off-signature
+        part = _non_gated_partition()
+        doc = _doc([0, 1, 2, 3])
+        V_wide = gp["lambda"].shape[1]
+        m = _empirical_marginal([doc], V_wide)
+
+        nulls = null_delta(
+            doc, gp, part, c=_C_WEAK_PRIOR, seed=0, n_perm=8, rng_seed=0,
+            marginal=m, smoothing_lambda=1.0)
+
+        assert nulls is not None
+        assert abs(np.nanmean(nulls)) < 0.05
+        assert np.nanmax(np.abs(nulls)) < 0.5
+
+    # -- test 5: the topic ranking is robust to lambda -----------------------
+    def test_ranking_robust_to_smoothing_lambda(self):
+        """A good contrast is robust to lambda, not tuned on it (Fable's check):
+        the topic ranking by mean_gain is IDENTICAL across
+        smoothing_lambda in {0.3, 1.0, 3.0} on a synthetic gated corpus."""
+        from spark_vi.mllib.topic.predictive_gain import corpus_predictive_gain_gated
+
+        docs, part, gp, K = TestCorpusPredictiveGainGated._corpus()
+        Vc = gp["lambda"].shape[1]
+        m = _empirical_marginal(docs, Vc)
+
+        mg = {}
+        for ls in (0.3, 1.0, 3.0):
+            res = corpus_predictive_gain_gated(
+                docs, gp, part, c=1.0, seed=0, marginal=m, smoothing_lambda=ls)
+            mg[ls] = res["mean_gain"]
+
+        valid = np.isfinite(mg[0.3]) & np.isfinite(mg[1.0]) & np.isfinite(mg[3.0])
+        assert valid.sum() >= 2  # non-vacuous: a real ranking to compare
+        order_03 = np.argsort(mg[0.3][valid])
+        order_10 = np.argsort(mg[1.0][valid])
+        order_30 = np.argsort(mg[3.0][valid])
+        np.testing.assert_array_equal(order_03, order_10)
+        np.testing.assert_array_equal(order_10, order_30)
+
+    # -- test 6: presence = fraction(Delta > 0) ------------------------------
+    def test_presence_is_fraction_delta_positive(self):
+        """The operating presence definition: a planted signature (foreground)
+        topic -- used by EVERY doc in its group -- has presence ~= 1 (nearly all
+        its docs beat the background baseline), while a background topic that is
+        only the actual generator in about half its docs sits near 0.5 (noise).
+        presence is computed as fraction(Delta>0); presence_vs_null (the paired
+        permuted-null fraction) is also returned for validation."""
+        from spark_vi.mllib.topic.predictive_gain import corpus_predictive_gain_gated
+
+        docs, part, gp, K = TestCorpusPredictiveGainGated._corpus()
+        Vc = gp["lambda"].shape[1]
+        m = _empirical_marginal(docs, Vc)
+
+        res = corpus_predictive_gain_gated(
+            docs, gp, part, c=1.0, seed=0, marginal=m, smoothing_lambda=1.0)
+
+        fg_a = int(part.block_indices("a")[0])
+        bg0 = int(part.background_indices()[0])
+
+        assert res["presence"].shape == (K,)
+        assert res["presence_vs_null"].shape == (K,)
+        # Planted signature topic: nearly every doc beats the baseline.
+        assert res["presence"][fg_a] > 0.9
+        # Background topic (generator in only ~half its docs): near noise, and
+        # clearly below the signature topic.
+        assert res["presence"][bg0] < 0.75
+        assert res["presence"][fg_a] > res["presence"][bg0]
+
+    # -- test 7: the downdate audit shrinks under smoothing ------------------
+    def test_downdate_audit_shrinks_under_smoothing(self):
+        """The floor cliff is exactly what made cold and fast diverge (a steep
+        ablated objective the cold L-BFGS oracle terminates early on). Removing
+        the floor shrinks the cold-vs-fast discrepancy materially: the smoothed
+        audit's max_abs_overall is a small fraction of the unsmoothed one on the
+        repro corpus."""
+        from spark_vi.mllib.topic.predictive_gain import predictive_gain_downdate_audit
+
+        gp, part = _repro_gp(), _repro_partition()
+        corpus = [_repro_doc() for _ in range(5)]
+        m = _empirical_marginal(corpus, _REPRO_V)
+
+        unsmoothed = predictive_gain_downdate_audit(corpus, gp, part, c=_REPRO_C, seed=0)
+        smoothed = predictive_gain_downdate_audit(
+            corpus, gp, part, c=_REPRO_C, seed=0, marginal=m, smoothing_lambda=1.0)
+
+        assert unsmoothed["max_abs_overall"] > 10.0            # the floor cliff
+        assert smoothed["max_abs_overall"] < 0.5 * unsmoothed["max_abs_overall"]
+
+    # -- test 8: the metric shifts off the single bursty signature token -----
+    def test_token_domination_shifts_to_marginal_contribution(self):
+        """Fable's prediction: under smoothing the per-token contributions to
+        Delta_0 are no longer dominated by the single exclusive bursty signature
+        token -- the contested tokens (which the marginal keeps in play) take a
+        materially larger share. The max single-token share of |Delta_0| drops
+        materially vs the floored path."""
+        gp, part, doc = _repro_gp(), _repro_partition(), _repro_doc()
+        m = _empirical_marginal([doc], _REPRO_V)
+
+        _, contrib_old, _ = _per_token_ablation_contrib(
+            gp, part, doc, 0, c=_REPRO_C, seed=0, holdout_frac=0.5,
+            marginal=None, smoothing_lambda=1.0)
+        _, contrib_new, _ = _per_token_ablation_contrib(
+            gp, part, doc, 0, c=_REPRO_C, seed=0, holdout_frac=0.5,
+            marginal=m, smoothing_lambda=1.0)
+
+        share_old = np.abs(contrib_old).max() / np.abs(contrib_old).sum()
+        share_new = np.abs(contrib_new).max() / np.abs(contrib_new).sum()
+
+        # In the floored path one token carries the majority of |Delta_0|;
+        # smoothing spreads it so the top token's share drops materially.
+        assert share_old > 0.5
+        assert share_new < 0.8 * share_old

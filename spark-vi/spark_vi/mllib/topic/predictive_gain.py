@@ -57,6 +57,75 @@ from spark_vi.models.topic.stm import _stm_doc_inference, _stm_doc_newton_polish
 log = logging.getLogger(__name__)
 
 
+def _smoothed_predictive_loglik(
+    theta, beta_prob, held_idx, held_cnt, *, marginal, eps,
+) -> float:
+    """Held-out predictive log-likelihood under a background-smoothed
+    predictive distribution -- the SCORING-side fix for the 1e-12 log-floor
+    contamination (Fable's endorsed "marginal back-off").
+
+    Scores against the mixture
+
+        p_S(w) = (1 - eps) * (theta @ beta_prob)(w) + eps * m_w
+
+    where ``m_w`` (``marginal``) is the corpus unigram (a length-V token
+    probability vector, sums to 1) and ``eps`` is the length-aware mixing
+    weight. Removing the only topic that explained a held-out token no longer
+    sends its predicted mass to a hard 1e-12 floor (which made Delta_k blow up
+    by tens of nats per exclusive bursty token); instead the token falls back
+    to a background probability eps*m_w > 0, so Delta_k becomes a BOUNDED
+    log-lift of the full model over that background baseline. Each per-token
+    log-ratio is then bounded by log(p_full(w) / (eps * m_w)).
+
+    This is the standard length-aware Dirichlet-smoothed predictive: mixing a
+    fitted distribution with a background/collection unigram under a small
+    pseudo-count is the linear-interpolation / Jelinek-Mercer form of Bayesian
+    smoothing for held-out language-model scoring (Zhai & Lafferty 2004, "A
+    study of smoothing methods for language models applied to ad hoc
+    information retrieval"; MacKay & Peto 1995, "A hierarchical Dirichlet
+    language model"). The mixing weight eps = lambda / (lambda + n) is exactly
+    the Dirichlet posterior-predictive weight on the prior given n observed
+    tokens.
+
+    INFERENCE IS UNCHANGED: theta_hat is still inferred from the visible half
+    by the fit's own E-step. Smoothing enters ONLY here, where held-out tokens
+    are scored. The 1e-300 term is numeric underflow safety only (eps*m_w is
+    already strictly positive for any in-corpus held token, m_w > 0)."""
+    pred = (1.0 - eps) * (theta @ beta_prob) + eps * marginal   # length V
+    return float(np.sum(held_cnt * np.log(pred[held_idx] + 1e-300)))
+
+
+def _make_scorer(marginal, smoothing_lambda, visible_doc):
+    """Build the single held-out scorer used by EVERY scoring path in a
+    predictive-gain call (full LL, every ablation LL, dedup, and the null
+    permutations) so they all share the SAME (eps, marginal).
+
+    Returns a callable ``score(theta, beta_prob, held_idx, held_cnt) -> float``.
+
+    When ``marginal is None`` this is the historical unsmoothed
+    ``_predictive_loglik`` (1e-12 floor) -- the backward-compatible path the
+    existing tests pin. When a ``marginal`` (length-V corpus unigram) is
+    supplied, it is the background-smoothed scorer with the length-aware
+    weight eps = smoothing_lambda / (smoothing_lambda + n_visible), where
+    n_visible = the visible-token count (the amount of data theta_hat was
+    inferred from). Thin documents -> larger eps -> lean on the marginal, the
+    intended uncertainty behavior."""
+    if marginal is None:
+        def score(theta, beta_prob, held_idx, held_cnt):
+            return _predictive_loglik(theta, beta_prob, held_idx, held_cnt)
+        return score
+
+    marg = np.asarray(marginal, dtype=np.float64)
+    n_visible = float(visible_doc.counts.sum())
+    eps = float(smoothing_lambda) / (float(smoothing_lambda) + n_visible)
+
+    def score(theta, beta_prob, held_idx, held_cnt):
+        return _smoothed_predictive_loglik(
+            theta, beta_prob, held_idx, held_cnt, marginal=marg, eps=eps,
+        )
+    return score
+
+
 def _sigma_inv_scaled(R, allowed, c) -> np.ndarray:
     """Marginal prior precision over ``allowed`` at generative scale c:
     (1/c) * safe_inverse(R[allowed, allowed]). The one place scale enters, per
@@ -139,7 +208,8 @@ class DocGain:
 
 def doc_predictive_gain(
     doc, global_params, partition, *, c, reference=None,
-    holdout_frac=0.3, seed, lbfgs_max_iter=50, lbfgs_tol=1e-4,
+    holdout_frac=0.3, seed, marginal=None, smoothing_lambda=1.0,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4,
     fast=False, high_mass_bound=0.2, max_fast_steps=3,
 ) -> DocGain | None:
     """Leave-one-topic-out held-out predictive gain for ONE document.
@@ -193,6 +263,19 @@ def doc_predictive_gain(
     This is O(|allowed|) full L-BFGS inferences per document -- deliberately
     simple and exact; it is the reference a downdated fast path (Task 4) is
     validated against, not the production hot path.
+
+    SCORING: when ``marginal`` (a length-V corpus unigram probability vector)
+    is supplied, every held-out score uses the background-smoothed predictive
+    p_S(w) = (1 - eps)*(theta@beta)(w) + eps*m_w (see
+    ``_smoothed_predictive_loglik``) with the length-aware weight
+    eps = smoothing_lambda / (smoothing_lambda + n_visible). This retires the
+    1e-12 log-floor: ablating the sole topic that explained a token no longer
+    blows Delta_k up by tens of nats -- Delta_k becomes a BOUNDED log-lift over
+    the background baseline, and an irrelevant/permuted topic scores Delta ~= 0
+    by construction (a meaningful origin). When ``marginal is None`` (default)
+    the historical unsmoothed ``_predictive_loglik`` floor path is used, so the
+    Task-1..4 fixtures are byte-identical. INFERENCE (theta_hat) is UNCHANGED
+    either way -- smoothing is scoring-only.
     """
     lam = np.asarray(global_params["lambda"], dtype=np.float64)
     Gamma = np.asarray(global_params["Gamma"], dtype=np.float64)
@@ -212,6 +295,11 @@ def doc_predictive_gain(
     if held_counts.size == 0:
         return None
 
+    # ONE scorer, used for every LL below (full, each ablation, dedup): either
+    # the background-smoothed mixture (marginal supplied) or the historical
+    # floored _predictive_loglik (marginal=None).
+    score = _make_scorer(marginal, smoothing_lambda, visible_doc)
+
     allowed = partition.allowed_indices(doc.groups)
     n_held = int(held_counts.sum())
 
@@ -227,10 +315,10 @@ def doc_predictive_gain(
             visible_doc, allowed, expElogbeta, Gamma, R, c, doc.x, reference, K,
             lbfgs_max_iter, lbfgs_tol,
         )
-    ll_full = _predictive_loglik(theta_full, beta_prob, held_indices, held_counts)
+    ll_full = score(theta_full, beta_prob, held_indices, held_counts)
 
     held_ones = np.ones_like(held_counts)
-    ll_full_dedup = _predictive_loglik(theta_full, beta_prob, held_indices, held_ones)
+    ll_full_dedup = score(theta_full, beta_prob, held_indices, held_ones)
 
     n_allowed = allowed.shape[0]
     delta = np.zeros(n_allowed, dtype=np.float64)
@@ -282,10 +370,10 @@ def doc_predictive_gain(
                 visible_doc, allowed_k, expElogbeta, Gamma, R, c, doc.x, reference, K,
                 lbfgs_max_iter, lbfgs_tol,
             )
-        ll_k = _predictive_loglik(theta_k, beta_prob, held_indices, held_counts)
+        ll_k = score(theta_k, beta_prob, held_indices, held_counts)
         delta[p] = ll_full - ll_k
 
-        ll_k_dedup = _predictive_loglik(theta_k, beta_prob, held_indices, held_ones)
+        ll_k_dedup = score(theta_k, beta_prob, held_indices, held_ones)
         dedup_delta[p] = ll_full_dedup - ll_k_dedup
 
     return DocGain(
@@ -296,7 +384,8 @@ def doc_predictive_gain(
 
 def null_delta(
     doc, global_params, partition, *, c, reference=None,
-    holdout_frac=0.3, seed, n_perm=4, rng_seed=0, lbfgs_max_iter=50, lbfgs_tol=1e-4,
+    holdout_frac=0.3, seed, n_perm=4, rng_seed=0, marginal=None, smoothing_lambda=1.0,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4,
 ) -> np.ndarray | None:
     """Permuted-topic NULL BAND for ONE document: what Delta does a topic
     that explains NOTHING produce?
@@ -362,6 +451,10 @@ def null_delta(
     if held_counts.size == 0:
         return None
 
+    # SAME smoothed (or floored) scorer the real Delta uses, so the null is
+    # measured on the identical scale (see doc_predictive_gain / _make_scorer).
+    score = _make_scorer(marginal, smoothing_lambda, visible_doc)
+
     allowed = partition.allowed_indices(doc.groups)
 
     samples = np.empty(n_perm, dtype=np.float64)
@@ -406,7 +499,7 @@ def null_delta(
             visible_doc, allowed, expElogbeta_perm, Gamma, R, c, doc.x, reference, K,
             lbfgs_max_iter, lbfgs_tol,
         )
-        ll_full = _predictive_loglik(theta_full, beta_prob_perm, held_indices, held_counts)
+        ll_full = score(theta_full, beta_prob_perm, held_indices, held_counts)
 
         pos = int(np.nonzero(allowed == k_i)[0][0])
         allowed_k = np.delete(allowed, pos)
@@ -419,7 +512,7 @@ def null_delta(
             visible_doc, allowed_k, expElogbeta_perm, Gamma, R, c, doc.x, reference, K,
             lbfgs_max_iter, lbfgs_tol,
         )
-        ll_k = _predictive_loglik(theta_k, beta_prob_perm, held_indices, held_counts)
+        ll_k = score(theta_k, beta_prob_perm, held_indices, held_counts)
         samples[i] = ll_full - ll_k
 
     return samples
@@ -528,6 +621,7 @@ class _PredGainAcc:
     Sdd: np.ndarray
     count_k: np.ndarray
     presence_count: np.ndarray
+    presence_count_pos: np.ndarray
     prominence_hist: np.ndarray
     null_hist: np.ndarray
     null_sum: float = 0.0
@@ -550,6 +644,7 @@ class _PredGainAcc:
             Sdd=np.zeros(K, dtype=np.float64),
             count_k=np.zeros(K, dtype=np.int64),
             presence_count=np.zeros(K, dtype=np.int64),
+            presence_count_pos=np.zeros(K, dtype=np.int64),
             prominence_hist=np.zeros((K, n_bins), dtype=np.int64),
             null_hist=np.zeros(n_bins, dtype=np.int64),
         )
@@ -570,6 +665,7 @@ def _combine_pred_gain_acc(a: _PredGainAcc, b: _PredGainAcc) -> _PredGainAcc:
         Sdd=a.Sdd + b.Sdd,
         count_k=a.count_k + b.count_k,
         presence_count=a.presence_count + b.presence_count,
+        presence_count_pos=a.presence_count_pos + b.presence_count_pos,
         prominence_hist=a.prominence_hist + b.prominence_hist,
         null_hist=a.null_hist + b.null_hist,
         null_sum=a.null_sum + b.null_sum,
@@ -595,6 +691,7 @@ def _clamped_bin(value: float, edges: np.ndarray, n_bins: int) -> int:
 def _accumulate_doc(
     acc: _PredGainAcc, doc, idx: int, global_params, partition, *,
     c, reference, holdout_frac, seed, n_perm, bin_edges, n_bins,
+    marginal=None, smoothing_lambda=1.0,
     fast=False, high_mass_bound=0.2, max_fast_steps=3,
 ) -> _PredGainAcc:
     """Fold ONE document's predictive-gain contribution into ``acc``
@@ -619,6 +716,7 @@ def _accumulate_doc(
     dg = doc_predictive_gain(
         doc, global_params, partition, c=c, reference=reference,
         holdout_frac=holdout_frac, seed=seed + idx,
+        marginal=marginal, smoothing_lambda=smoothing_lambda,
         fast=fast, high_mass_bound=high_mass_bound, max_fast_steps=max_fast_steps,
     )
     if dg is None:
@@ -628,6 +726,7 @@ def _accumulate_doc(
         doc, global_params, partition, c=c, reference=reference,
         holdout_frac=holdout_frac, seed=seed + idx,
         n_perm=n_perm, rng_seed=seed + idx,
+        marginal=marginal, smoothing_lambda=smoothing_lambda,
     )
     if nulls is not None:
         finite = nulls[np.isfinite(nulls)]
@@ -658,6 +757,13 @@ def _accumulate_doc(
 
         if null_ok and d_k > thr:
             acc.presence_count[k] += 1
+
+        # Primary presence (smoothed metric): Delta_k > 0 == the doc's
+        # held-out tokens are better explained WITH topic k than by the
+        # background baseline alone. With the marginal back-off, 0 is a
+        # meaningful origin (an irrelevant/permuted topic scores ~0).
+        if d_k > 0.0:
+            acc.presence_count_pos[k] += 1
 
         if d_k < acc.obs_delta_min:
             acc.obs_delta_min = d_k
@@ -721,7 +827,13 @@ def _finalize_pred_gain(acc: _PredGainAcc, bin_edges: np.ndarray) -> dict:
         depth_den > 0, depth_num / np.where(depth_den > 0, depth_den, 1.0), np.nan,
     )
 
-    presence = np.where(count_k > 0, acc.presence_count / denom, np.nan)
+    # PRIMARY presence = fraction of a topic's docs with Delta_k > 0 (beats
+    # the background baseline) -- the operating definition under the smoothed
+    # score. presence_vs_null keeps the paired permuted-null fraction as a
+    # VALIDATION diagnostic: once the null collapses to ~0 (see null_band) the
+    # two should agree on real data.
+    presence = np.where(count_k > 0, acc.presence_count_pos / denom, np.nan)
+    presence_vs_null = np.where(count_k > 0, acc.presence_count / denom, np.nan)
 
     # Streaming Pearson correlation of per-doc Delta_k with document length L,
     # from sufficient statistics (never a per-doc ratio): guard n<2 and
@@ -761,6 +873,7 @@ def _finalize_pred_gain(acc: _PredGainAcc, bin_edges: np.ndarray) -> dict:
         "depth_num": depth_num,
         "depth_den": depth_den,
         "presence": presence,
+        "presence_vs_null": presence_vs_null,
         "prominence_hist": acc.prominence_hist,
         "prominence_bin_edges": bin_edges,
         "length_corr": length_corr,
@@ -775,6 +888,7 @@ def _finalize_pred_gain(acc: _PredGainAcc, bin_edges: np.ndarray) -> dict:
 def corpus_predictive_gain_gated(
     docs, global_params, partition, *, c, reference=None,
     holdout_frac=0.5, seed=0, n_perm=4, n_bins=50, prominence_range=(-1.0, 10.0),
+    marginal=None, smoothing_lambda=1.0,
     fast=False, high_mass_bound=0.2, max_fast_steps=3,
 ) -> dict:
     """Driver-side (in-memory) corpus aggregation of the per-document COLD
@@ -876,6 +990,7 @@ def corpus_predictive_gain_gated(
             acc, doc, i, global_params, partition, c=c, reference=reference,
             holdout_frac=holdout_frac, seed=seed, n_perm=n_perm,
             bin_edges=bin_edges, n_bins=n_bins,
+            marginal=marginal, smoothing_lambda=smoothing_lambda,
             fast=fast, high_mass_bound=high_mass_bound, max_fast_steps=max_fast_steps,
         )
 
@@ -889,6 +1004,7 @@ def corpus_predictive_gain_gated_rdd(
     doc_rdd, global_params, partition, *, c, reference=None,
     holdout_frac=0.5, seed=0, sample_cap=200_000, n_perm=4, n_bins=50,
     prominence_range=(-1.0, 10.0), depth=2,
+    marginal=None, smoothing_lambda=1.0,
     fast=False, high_mass_bound=0.2, max_fast_steps=3,
 ) -> dict:
     """Distributed corpus aggregation of the per-document COLD predictive
@@ -957,18 +1073,25 @@ def corpus_predictive_gain_gated_rdd(
         k: np.asarray(v, dtype=np.float64) for k, v in global_params.items()
     })
     p_bcast = sc.broadcast(partition)
+    # marginal is a length-V probability vector; broadcast it like global_params
+    # (None stays None -> the unsmoothed backward-compat path on the workers).
+    marg_bcast = sc.broadcast(
+        None if marginal is None else np.asarray(marginal, dtype=np.float64)
+    )
     K = partition.K
     bin_edges = np.linspace(prominence_range[0], prominence_range[1], n_bins + 1)
 
-    def _local(rows, _gp=gp_bcast, _p=p_bcast):
+    def _local(rows, _gp=gp_bcast, _p=p_bcast, _marg=marg_bcast):
         gp = _gp.value
         part = _p.value
+        marg = _marg.value
         acc = _PredGainAcc.zeros(K, n_bins)
         for doc, doc_idx in rows:
             _accumulate_doc(
                 acc, doc, doc_idx, gp, part, c=c, reference=reference,
                 holdout_frac=holdout_frac, seed=seed, n_perm=n_perm,
                 bin_edges=bin_edges, n_bins=n_bins,
+                marginal=marg, smoothing_lambda=smoothing_lambda,
                 fast=fast, high_mass_bound=high_mass_bound,
                 max_fast_steps=max_fast_steps,
             )
@@ -986,7 +1109,8 @@ def corpus_predictive_gain_gated_rdd(
 
 def predictive_gain_downdate_audit(
     docs, global_params, partition, *, c, reference=None,
-    holdout_frac=0.5, seed=0, high_mass_bound=0.2, max_fast_steps=3,
+    holdout_frac=0.5, seed=0, marginal=None, smoothing_lambda=1.0,
+    high_mass_bound=0.2, max_fast_steps=3,
 ) -> dict:
     """Real-data cold-vs-fast discrepancy audit for the downdate approximation.
 
@@ -1030,11 +1154,13 @@ def predictive_gain_downdate_audit(
     for i, doc in enumerate(docs):
         dg_cold = doc_predictive_gain(
             doc, global_params, partition, c=c, reference=reference,
-            holdout_frac=holdout_frac, seed=seed + i, fast=False,
+            holdout_frac=holdout_frac, seed=seed + i,
+            marginal=marginal, smoothing_lambda=smoothing_lambda, fast=False,
         )
         dg_fast = doc_predictive_gain(
             doc, global_params, partition, c=c, reference=reference,
-            holdout_frac=holdout_frac, seed=seed + i, fast=True,
+            holdout_frac=holdout_frac, seed=seed + i,
+            marginal=marginal, smoothing_lambda=smoothing_lambda, fast=True,
             high_mass_bound=high_mass_bound, max_fast_steps=max_fast_steps,
         )
         if dg_cold is None or dg_fast is None:
