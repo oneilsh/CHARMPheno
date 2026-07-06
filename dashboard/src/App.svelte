@@ -108,6 +108,17 @@
       bundle.set(b)
       selectedPhenotypeId.set(pickDefaultPhenotype(b))
       simulatorPrefix.set(pickSimulatorSeedPrefix(b))
+      // STM bundles (covariateEffects + correlation) get a faithful
+      // sample-mode cohort on load: each patient draws its own covariates
+      // and group from the bundle's marginals (sampleMarginalCovariates /
+      // sampleMarginalGroup) and its theta from the conditional logistic-
+      // normal (sampleConditionedTheta), rather than the plain Dirichlet
+      // prior. This makes the initial Patient Atlas a mixed, representative
+      // cohort — correlated comorbidity blocks and per-patient groups
+      // (so color-by-group is meaningful before the user regenerates
+      // anything). Non-STM bundles are unaffected: no `conditioning` means
+      // cohort.ts falls through to the unchanged Dirichlet draw.
+      const isStm = !!b.covariateEffects && !!b.correlation
       const c = generateCohort({
         model: b.model,
         meanCodesPerDoc: b.corpusStats.mean_codes_per_doc,
@@ -117,6 +128,9 @@
         // Adaptive sizing: oversample until one bucket hits 1000, then
         // truncate both to round-100 counts. See cohort.ts.
         qualityByPhenotype: b.phenotypes.phenotypes.map((p) => p.quality),
+        ...(isStm
+          ? { conditioning: { mode: 'sample' as const, values: {}, group: null, bundle: b } }
+          : {}),
       })
       if (token !== loadToken) return
       cohort.set(c)
