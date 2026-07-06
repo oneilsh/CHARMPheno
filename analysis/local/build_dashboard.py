@@ -590,11 +590,14 @@ def main(argv: list[str] | None = None) -> int:
                     pg_marginal = None
                 else:
                     pg_marginal = pg_marginal_raw / pg_marginal_sum
+            # print (not log.info) so the smoother status is ALWAYS visible
+            # regardless of the driver's logger level (cloud parity).
             if pg_marginal is not None:
-                log.info("predictive_gain: smoothed score active (lambda=1.0)")
+                print("[driver]   predictive_gain: smoothed score active "
+                      "(lambda=1.0)", flush=True)
             else:
-                log.info(
-                    "predictive_gain: marginal unavailable, unsmoothed fallback")
+                print("[driver]   predictive_gain: marginal unavailable, "
+                      "unsmoothed fallback", flush=True)
 
             pg = corpus_predictive_gain_gated_rdd(
                 pg_doc_rdd, result.global_params, partition,
