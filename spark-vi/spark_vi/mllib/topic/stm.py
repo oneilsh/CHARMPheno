@@ -949,6 +949,187 @@ def corpus_heldout_scale_sweep_gated_rdd(
     return {"lls": lls, "argmax_c": argmax_c, "n_docs": n_docs}
 
 
+def smooth_scale_log_quadratic(lls: dict, *, window_radius: int = 2) -> dict:
+    """Reduce a held-out-LL-vs-scale grid (``corpus_heldout_scale_sweep_gated{,_rdd}``'s
+    ``"lls"``) to a smoothed c* by local quadratic interpolation in log c.
+
+    The held-out LL curve is a broad, flat SHELF (differences ~0.001-0.01 nats
+    across c in roughly [2, 12], within resampling noise): a raw argmax over a
+    coarse grid on a curve that flat is a quantized, jittery point estimate
+    (it drove a 5 -> 12 -> 8 refit wander in practice). This function instead
+    fits a quadratic to a small WINDOW of grid points around the raw argmax,
+    in u = ln(c) (c is a multiplicative scale, so log space is where the
+    curve is locally well-approximated by a parabola and where grid spacing
+    is uniform, see ``C_GRID`` at the call sites) and reports:
+      - c_star: the smoothed vertex (sub-grid, noise-averaged), or the raw
+        argmax if the window is not concave (see below);
+      - curvature_q and a delta-method SE, so the caller can tell a sharp
+        interior peak from a flat shelf instead of silently trusting a
+        jittery grid-argmax.
+
+    ``lls`` maps scale c > 0 -> mean per-token held-out LL (as returned by the
+    sweep). Returns a dict (see below); never raises on a well-formed input.
+
+    Algorithm (parabolic/quadratic interpolation to locate an extremum from
+    sampled function values is the classic Numerical-Recipes / Brent
+    ingredient -- Press, Teukolsky, Vetterling & Flannery, *Numerical
+    Recipes*, 3rd ed., Section 10.2 (parabolic interpolation), the same
+    interpolation step used inside Brent's method (Brent, R. P., 1973,
+    *Algorithms for Minimization without Derivatives*, ch. 5). The vertex
+    standard error is the standard delta method: propagate the polyfit
+    parameter covariance through u* = -p1/(2 p2), then c = exp(u*)):
+
+    1. Sort the grid; u_i = ln(c_i), y_i = lls[c_i]. If fewer than 3 points
+       are supplied there is nothing to fit a quadratic to -- return the raw
+       argmax with interior=False, curvature_q=0.0, se_log_c=se_c=None.
+    2. i* = index of the grid's max y (the raw argmax). Take a WINDOW of grid
+       indices [i*-window_radius, i*+window_radius], clipped to the grid,
+       widening (growing the radius) if clipping left fewer than 4 points
+       (can happen when i* sits at or near a grid edge) -- 4, not the bare
+       minimum of 3, so the quadratic fit has >= 1 residual degree of
+       freedom to scale a covariance from (a 3-point window exactly
+       determines a quadratic with zero residual; ``np.polyfit(...,
+       cov=True)`` cannot scale a covariance in that case -- see step 3).
+       ``window_radius`` (default 2) and the grid bounds used by the callers
+       ([0.5, 32]) are HEURISTIC choices, not literature values: they trade
+       off "enough points to fit a stable quadratic" against "local enough
+       that a broad non-parabolic curve doesn't bias the vertex."
+    3. Fit p2*u^2 + p1*u + p0 to the window via
+       ``np.polyfit(u_win, y_win, 2, cov=True)``. A concave-down parabola
+       (a genuine interior MAX) has p2 < 0. If the window still has < 4
+       points (a total grid smaller than 4), the covariance can't be scaled;
+       fall back to the unscaled point fit and report se_log_c=se_c=None
+       (an honest "can't estimate uncertainty" rather than a fabricated SE).
+    4. If p2 < 0: u_star = -p1/(2 p2). If u_star falls within
+       [min(u_grid), max(u_grid)] it is INTERIOR (interior=True); otherwise
+       clip to the nearer grid endpoint and mark interior=False (the fitted
+       vertex extrapolated past the data -- don't ship an extrapolated
+       scale). c_star = exp(u_star); curvature_q = 2*p2 (< 0, more negative =
+       sharper peak = more identifiable).
+       SE via the delta method: with J = [d(u*)/dp1, d(u*)/dp2] =
+       [-1/(2 p2), p1/(2 p2^2)] and cov_12 the 2x2 (p1, p2) block of the
+       polyfit covariance, se_log_c = sqrt(J @ cov_12 @ J.T); se_c =
+       c_star * se_log_c (first-order propagation of c = exp(u)).
+    5. If p2 >= 0 (the window is flat or convex -- not a real max; this is
+       what a monotone-rising/falling boundary window looks like, since the
+       "peak" is only a grid edge, not a genuine interior vertex): fall back
+       to c_star = the raw grid argmax c, interior=False, curvature_q = 2*p2
+       (>= 0), se_log_c = se_c = None (no vertex to attach a SE to).
+
+    Returns
+    -------
+    dict with keys:
+      method: "log_quadratic"
+      c_star: float -- the smoothed (or fallback) point estimate
+      log_c_star: float -- ln(c_star)
+      curvature_q: float -- 2*p2 of the local quadratic fit (< 0 = concave/
+        peaked, >= 0 = flat-or-convex/not a real max, 0.0 in the degenerate
+        <3-point case)
+      se_log_c: float | None -- delta-method SE of log_c_star, None if not
+        an interior concave fit
+      se_c: float | None -- se_log_c propagated to c-scale, None likewise
+      interior: bool -- True iff the fitted vertex is concave AND falls
+        strictly within the grid's [min, max]
+      grid_argmax_c: float -- the raw grid argmax, for comparison/fallback
+      window_c: list[float] -- the c's actually used in the quadratic fit
+    """
+    items = sorted(lls.items(), key=lambda kv: kv[0])
+    cs = np.array([c for c, _ in items], dtype=np.float64)
+    ys = np.array([y for _, y in items], dtype=np.float64)
+    n = cs.size
+
+    i_star = int(np.argmax(ys))
+    grid_argmax_c = float(cs[i_star])
+
+    if n < 3:
+        return {
+            "method": "log_quadratic",
+            "c_star": grid_argmax_c,
+            "log_c_star": float(np.log(grid_argmax_c)),
+            "curvature_q": 0.0,
+            "se_log_c": None,
+            "se_c": None,
+            "interior": False,
+            "grid_argmax_c": grid_argmax_c,
+            "window_c": cs.tolist(),
+        }
+
+    us = np.log(cs)
+
+    # Window around the raw argmax, widened symmetrically until it holds
+    # >= 4 points (only needed near a grid edge, where a fixed-radius clip
+    # can otherwise leave fewer). >= 4 rather than the bare minimum of 3
+    # (3 points exactly determine a quadratic with zero residual, and
+    # np.polyfit(..., cov=True) cannot scale a covariance from a zero-dof
+    # fit) so there is at least one residual degree of freedom to estimate
+    # the SE from -- unless the whole grid is already in the window and
+    # still short of 4 (tiny grids), in which case we stop widening and
+    # fall back to an unscaled (finite-difference-only) covariance below.
+    radius = window_radius
+    while True:
+        lo = max(0, i_star - radius)
+        hi = min(n - 1, i_star + radius)
+        if hi - lo + 1 >= 4 or (lo == 0 and hi == n - 1):
+            break
+        radius += 1
+    u_win = us[lo:hi + 1]
+    y_win = ys[lo:hi + 1]
+    c_win = cs[lo:hi + 1]
+
+    try:
+        p, cov = np.polyfit(u_win, y_win, 2, cov=True)
+    except ValueError:
+        # Degenerate window (e.g. a grid with < 4 total points, so no
+        # residual d.o.f. is available to scale the covariance): still fit
+        # the point estimate, but the SE is genuinely unavailable -- report
+        # it as None rather than fabricating one.
+        p = np.polyfit(u_win, y_win, 2)
+        cov = None
+    p2, p1, _p0 = p
+
+    u_min, u_max = us[0], us[-1]
+
+    if p2 < 0:
+        u_star = -p1 / (2.0 * p2)
+        curvature_q = 2.0 * p2
+        if u_min <= u_star <= u_max:
+            interior = True
+        else:
+            interior = False
+            u_star = u_max if u_star > u_max else u_min
+        c_star = float(np.exp(u_star))
+
+        if cov is None:
+            se_log_c = None
+            se_c = None
+        else:
+            # Delta method: propagate the (p1, p2) block of the polyfit
+            # covariance through u* = -p1/(2 p2).
+            J = np.array([-1.0 / (2.0 * p2), p1 / (2.0 * p2 ** 2)])
+            cov_12 = cov[0:2, 0:2][::-1, ::-1]  # polyfit orders p as [p2,p1,p0]
+            var_log_c = float(J @ cov_12 @ J.T)
+            se_log_c = float(np.sqrt(var_log_c)) if var_log_c > 0 else 0.0
+            se_c = c_star * se_log_c
+    else:
+        interior = False
+        curvature_q = 2.0 * p2
+        c_star = grid_argmax_c
+        se_log_c = None
+        se_c = None
+
+    return {
+        "method": "log_quadratic",
+        "c_star": c_star,
+        "log_c_star": float(np.log(c_star)),
+        "curvature_q": float(curvature_q),
+        "se_log_c": se_log_c,
+        "se_c": se_c,
+        "interior": bool(interior),
+        "grid_argmax_c": grid_argmax_c,
+        "window_c": c_win.tolist(),
+    }
+
+
 class StreamingSTM:
     """Streaming-VI estimator for OnlineSTM with DataFrame input.
 

@@ -728,18 +728,28 @@ def main(argv: list[str] | None = None) -> int:
                         # SUPERSEDES the iterated pooled EM (corpus_eta_scale_gated_rdd), which is biased
                         # and unstable: it has positive feedback in the scale direction (no trust region)
                         # and ran away on the cluster (c: 3.6 -> 1116 -> 770918). The sweep scores each
-                        # grid c's held-out predictive LL and takes the argmax -- no iteration, no
-                        # feedback, cannot run away. We sweep 3 holdout fractions (0.5 shipped; 0.8/0.95
-                        # probe robustness as the visible token set shrinks toward the small-seed regime)
-                        # and SHIP the holdout=0.5 argmax. ENHANCEMENT only: any failure (pre-Task-1
-                        # checkpoint, cache miss -> stm_cov_df is None, E-step error) leaves eta_scale=None
-                        # and the key is omitted (dashboard falls back to eta_var, then unit R). Reuses the
-                        # already-loaded bow_df (frozen fit vocab) + the sidecar cov_df -> no new scan.
+                        # grid c's held-out predictive LL; the raw grid ARGMAX over that curve is a
+                        # quantized, jittery point estimate (the curve is a broad, flat shelf -- LL
+                        # differences ~0.001-0.01 nats across c in roughly [2,12], within resampling
+                        # noise -- so argmax over a coarse grid drove a 5 -> 12 -> 8 refit wander). We
+                        # SHIP a smoothed reducer instead: a local quadratic fit in log c
+                        # (smooth_scale_log_quadratic) that recovers a sub-grid, noise-averaged c* plus
+                        # a curvature-based SE, honestly large when the shelf is flat -- see that
+                        # function's docstring for the algorithm and its Numerical-Recipes/Brent +
+                        # delta-method citations. The grid is GEOMETRIC (even resolution in log c, since
+                        # c is a multiplicative scale). We sweep 3 holdout fractions (0.5 shipped; 0.8/
+                        # 0.95 probe robustness as the visible token set shrinks toward the small-seed
+                        # regime) and SHIP the smoothed c* at holdout=0.5. ENHANCEMENT only: any failure
+                        # (pre-Task-1 checkpoint, cache miss -> stm_cov_df is None, E-step error) leaves
+                        # eta_scale=None and the key is omitted (dashboard falls back to eta_var, then
+                        # unit R). Reuses the already-loaded bow_df (frozen fit vocab) + the sidecar
+                        # cov_df -> no new scan.
                         eta_scale = None
                         eta_scale_diag = None
                         try:
                             from spark_vi.mllib.topic.stm import (
                                 corpus_heldout_scale_sweep_gated_rdd,
+                                smooth_scale_log_quadratic,
                             )
                             from spark_vi.mllib.topic._common import (
                                 _vector_to_stm_document,
@@ -760,10 +770,16 @@ def main(argv: list[str] | None = None) -> int:
                                     group_col="source_cohort",
                                 )
                             )
-                            C_GRID = [1, 2, 3, 5, 8, 12, 16, 20, 28]
+                            # Geometric (log-uniform) grid, ~13 points over [0.5, 32] --
+                            # NOT literature values, a heuristic bracket wide enough to
+                            # bound the c's observed on the cluster so far with even
+                            # resolution in log c (c is a multiplicative scale).
+                            C_GRID = [round(x, 2) for x in np.geomspace(0.5, 32.0, num=13)]
                             HOLDOUTS = [0.5, 0.8, 0.95]
                             robustness = {}
+                            robustness_argmax = {}
                             lls_shipped = None
+                            smoothed_shipped = None
                             with _phase("eta_scale (held-out-LL calibration)"):
                                 for hf in HOLDOUTS:
                                     sweep = corpus_heldout_scale_sweep_gated_rdd(
@@ -771,33 +787,42 @@ def main(argv: list[str] | None = None) -> int:
                                         c_grid=C_GRID, holdout_frac=hf,
                                         reference=reference_id, seed=0,
                                     )
-                                    robustness[str(hf)] = sweep["argmax_c"]
+                                    smoothed_hf = smooth_scale_log_quadratic(sweep["lls"])
+                                    robustness[str(hf)] = smoothed_hf["c_star"]
+                                    robustness_argmax[str(hf)] = sweep["argmax_c"]
                                     if hf == 0.5:
                                         lls_shipped = {
                                             str(k): float(v)
                                             for k, v in sweep["lls"].items()
                                         }
-                            c_star = robustness["0.5"]
-                            at_boundary = c_star in (C_GRID[0], C_GRID[-1])
-                            if at_boundary:
+                                        smoothed_shipped = smoothed_hf
+                            c_star = smoothed_shipped["c_star"]
+                            grid_argmax_c = robustness_argmax["0.5"]
+                            not_interior = not smoothed_shipped["interior"]
+                            if not_interior:
                                 log.warning(
-                                    "STM: held-out c*=%s at grid BOUNDARY %s "
-                                    "-- widen the grid and re-run (calibrated "
-                                    "scale is not an interior maximum).",
-                                    c_star, C_GRID)
-                            eta_scale = float(c_star)   # SHIP the held-out estimate
+                                    "STM: smoothed held-out c*=%s is NOT an interior "
+                                    "maximum (grid %s) -- widen the grid and re-run "
+                                    "(calibrated scale is not identified from this "
+                                    "grid).", c_star, C_GRID)
+                            eta_scale = float(c_star)   # SHIP the smoothed held-out estimate
                             eta_scale_diag = {
                                 "method": "heldout_ll_gated",
                                 "c_star": float(c_star),
+                                "grid_argmax_c": float(grid_argmax_c),
                                 "holdout_frac_shipped": 0.5,
                                 "c_grid": C_GRID,
                                 "robustness_argmax_by_holdout": robustness,
+                                "robustness_grid_argmax_by_holdout": robustness_argmax,
                                 "lls_at_shipped_holdout": lls_shipped,
-                                "argmax_at_grid_boundary": bool(at_boundary),
+                                "argmax_at_grid_boundary": bool(
+                                    grid_argmax_c in (C_GRID[0], C_GRID[-1])),
+                                "smoothed": smoothed_shipped,
                             }
                             log.info(
-                                "STM: held-out c*=%.4f (holdout 0.5); robustness=%s.",
-                                c_star, robustness)
+                                "STM: smoothed held-out c*=%.4f (holdout 0.5, "
+                                "grid_argmax=%.4f); robustness=%s.",
+                                c_star, grid_argmax_c, robustness)
                         except Exception as exc:  # enhancement-only: never fatal
                             log.warning("STM: eta_scale held-out calibration failed (%s); "
                                         "correlation.json omits eta_scale (dashboard "
