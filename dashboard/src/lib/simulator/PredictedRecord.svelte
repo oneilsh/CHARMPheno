@@ -54,10 +54,12 @@
     return best
   }
 
-  // Group the predicted codes under the phenotype that generated them. In basic
-  // mode a dead/mixed generator folds into the "Other phenotypes" group (id -1)
-  // so a bad-quality phenotype name never surfaces — matching the rest of the UI.
-  $: groups = (() => {
+  // Group the predicted codes under the phenotype that generated them, keeping the
+  // FULL sorted rows per group (the per-phenotype / group caps are applied at
+  // render time so "show more" can reveal the rest). In basic mode a dead/mixed
+  // generator folds into the "Other phenotypes" group (id -1) so a bad-quality
+  // phenotype name never surfaces — matching the rest of the UI.
+  $: allGroups = (() => {
     const OTHER = -1
     const byPheno = new Map<number, typeof predictedRows>()
     for (const r of predictedRows) {
@@ -73,14 +75,27 @@
     return [...byPheno.entries()]
       .map(([k, rows]) => ({
         k,
-        // Cap codes shown per phenotype (highest-rate first).
-        rows: rows.slice().sort((a, b) => b.rate - a.rate).slice(0, perPhenotype),
+        rows: rows.slice().sort((a, b) => b.rate - a.rate),
         total: rows.reduce((s, r) => s + r.rate, 0),
       }))
       // Real phenotypes first (by total predicted mass), the Other bucket last.
       .sort((a, b) => (a.k < 0 ? 1 : 0) - (b.k < 0 ? 1 : 0) || (b.total - a.total))
-      .slice(0, maxGroups)
   })()
+
+  // Progressive disclosure: cap groups + codes-per-group by default; the buttons
+  // below reveal the rest. Expanded state is keyed by phenotype id.
+  let expandedGroups = new Set<number>()
+  let showAllGroups = false
+  // A fresh run resets the disclosure back to the capped default.
+  $: codeCountsSamples, (expandedGroups = new Set(), showAllGroups = false)
+  function toggleGroup(k: number) {
+    const s = new Set(expandedGroups)
+    s.has(k) ? s.delete(k) : s.add(k)
+    expandedGroups = s
+  }
+
+  $: visibleGroups = showAllGroups ? allGroups : allGroups.slice(0, maxGroups)
+  $: hiddenGroupCount = Math.max(0, allGroups.length - maxGroups)
 
   const groupLabel = (k: number) =>
     k < 0 ? 'Other phenotypes' : ($phenotypesById.get(k)?.label || `Phenotype ${k}`)
@@ -96,7 +111,9 @@
     {#if predictedRows.length === 0}
       <p class="hint">{codeCountsSamples.length === 0 ? copy.predictedRecord.hintEmpty : copy.predictedRecord.hintNone}</p>
     {:else}
-      {#each groups as g}
+      {#each visibleGroups as g}
+        {@const expanded = expandedGroups.has(g.k)}
+        {@const shownRows = expanded ? g.rows : g.rows.slice(0, perPhenotype)}
         <div class="pheno-group">
           <div class="pheno-head">
             <span class="pheno-dot" style="background: {g.k < 0 ? 'var(--ink-faint)' : $phenotypeHue(g.k)}"></span>
@@ -104,7 +121,7 @@
           </div>
           <table>
             <tbody>
-              {#each g.rows as r}
+              {#each shownRows as r}
                 {@const c = $bundle!.vocab.codes[r.w]}
                 <tr>
                   <td class="desc">{c.description || c.code}</td>
@@ -116,8 +133,18 @@
               {/each}
             </tbody>
           </table>
+          {#if g.rows.length > perPhenotype}
+            <button class="show-more" on:click={() => toggleGroup(g.k)}>
+              {expanded ? 'Show fewer' : `Show ${g.rows.length - perPhenotype} more`}
+            </button>
+          {/if}
         </div>
       {/each}
+      {#if hiddenGroupCount > 0 || showAllGroups}
+        <button class="show-more show-more-groups" on:click={() => (showAllGroups = !showAllGroups)}>
+          {showAllGroups ? 'Show fewer phenotypes' : `Show ${hiddenGroupCount} more phenotype${hiddenGroupCount === 1 ? '' : 's'}`}
+        </button>
+      {/if}
     {/if}
   </div>
 </section>
@@ -180,6 +207,28 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+  }
+  /* Progressive-disclosure toggles: a subtle text button under each group and a
+     wider one at the bottom for revealing more phenotype groups. */
+  .show-more {
+    margin-top: 0.3rem;
+    padding: 0.15rem 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: var(--fs-micro);
+    letter-spacing: 0.04em;
+    cursor: pointer;
+  }
+  .show-more:hover { text-decoration: underline; }
+  .show-more-groups {
+    display: block;
+    width: 100%;
+    text-align: left;
+    margin-top: 0.9rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--rule);
   }
   table {
     width: 100%;
