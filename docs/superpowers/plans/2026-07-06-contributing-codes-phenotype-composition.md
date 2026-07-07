@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Execution is BLOCKED** until the concurrent `stm`-branch thread lands — see the design doc's status. `stm` auto-pushes, so do not start until that thread is clear. The commit steps below apply at execution time.
+> **Reconciled 2026-07-07** against the recent `stm`-branch UI thread (Patient-tab slim-down, ConditioningBar move, coverage/coherence rename, copy centralization, and the search-match `codeBag` prop added to `ProfileBar`). The blocking thread has landed; the branch is at a clean slate. Deltas from the original plan are marked **RECONCILED** inline. Executing on `stm` (auto-pushes; do not `git push` unless asked).
 
 **Goal:** Turn each code in the patient panel's "top contributing codes" list into a normalized, always-on phenotype-composition bar (per-code φ attribution), with band-selection focus and a prior-vs-evidence residual overlay on the profile bar.
 
@@ -20,6 +20,8 @@
 - Per-code bars are **normalized** (each sums to 1); they do not sum to θ.
 - Interaction is **always-on + focus**: render every code without a selection; a selection sorts + emphasizes, never hides codes.
 - The residual "evidence vs. prior" split is a heuristic under STM (θ = softmax(η̂) is non-additive); label it as approximate, not an exact decomposition.
+- **RECONCILED — `ProfileBar` is a SHARED component with two call sites:** the main patient bar (`Patient.svelte:125`) and the 10px neighbor strip (`NeighborRibbon.svelte:31`). Both already pass `codeBag`. The residual overlay must be **opt-in** via a new `showResidual` prop (default `false`), enabled ONLY on the main patient bar — never on the neighbor strip.
+- **RECONCILED — all new user-facing strings live in `copy.ts`** (`copy.contributingCodes`), per the copy-centralization pass. Do not inline copy in components. `copy.contributingCodes` currently exposes `heading, openInAtlasTip, otherLabel, subOther, subMatch, hintNoSelection, hintNoCodes(label)`; the tasks below add `composition`, `emptyRecord`, and `evidenceVsPrior` and repurpose `subMatch`.
 - Test runner: `npm test` (`vitest run`) from `dashboard/`.
 
 ---
@@ -421,7 +423,7 @@ Template (replace the `{#if} … {/if}` body under `<header>`):
 
 ```svelte
 {#if !$bundle || rows.length === 0}
-  <p class="hint">{copy.contributingCodes.hintNoCodes(null)}</p>
+  <p class="hint">{copy.contributingCodes.emptyRecord}</p>
 {:else}
   <ol class="codes">
     {#each sorted as row (row.w)}
@@ -476,7 +478,25 @@ Add styles (replace `.spark`/`.spark-bar` rules):
   .seg:last-child { box-shadow: none; }
 ```
 
-Also delete the now-unused `phenotypesById` import, the `OTHER_THRESHOLD`/`isOther`/`counts`/`top`/`maxScore` computeds, and the `$selectedPhenotypeId === null` "click a band" empty state (the panel now always renders). Keep the header, `open in atlas` button, and the `link-dot`/Other-hatch styles.
+Also delete the now-unused `top`/`maxScore`/`counts` computeds and the `.spark`/`.spark-bar` styles. Keep the header, `open in atlas` button, the `link-dot`/`link-dot-other` markup + styles, and `phenotypesById` / `isOther` (still used by the header). The old `$selectedPhenotypeId === null` "click a band" empty state is replaced by the always-on caption below.
+
+**RECONCILED — header now has three states (no selection is new).** The current header renders `sub` as `{#if isOther}subOther{:else}subMatch{/if}`, which wrongly shows `subMatch` when nothing is selected. Because the panel now always renders, add the no-selection caption and make the header sub three-way. Keep `isOther` and the `selectedLabel` h3 as-is (they simply don't render when `$selectedPhenotypeId === null`). Replace the header's `sub` block with:
+
+```svelte
+{#if $selectedPhenotypeId === null}
+  <p class="sub">{copy.contributingCodes.composition}</p>
+{:else if isOther}
+  <p class="sub">{copy.contributingCodes.subOther}</p>
+{:else}
+  <p class="sub">{copy.contributingCodes.subMatch}</p>
+{/if}
+```
+
+**RECONCILED — copy keys.** In `dashboard/src/lib/copy.ts`, inside `contributingCodes`:
+- **Add** `composition: \`Each code below is split across the phenotypes the model attributes it to for this patient. Select a phenotype band above to sort and highlight by that phenotype.\``
+- **Add** `emptyRecord: \`This patient's record has no codes to attribute.\``
+- **Repurpose** `subMatch` (selection now sorts + highlights, never filters): `subMatch: \`Every code in this patient's record, sorted and highlighted by its contribution to this phenotype.\``
+- Leave `hintNoSelection` in place (now unused by this component; a later cleanup task or the final review can remove it — do not break other importers in this task).
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -489,7 +509,7 @@ Run: `cd dashboard && npm run check`
 Expected: no new errors in `ContributingCodes.svelte`.
 
 ```bash
-git add dashboard/src/lib/patient/ContributingCodes.svelte dashboard/src/lib/patient/ContributingCodes.test.ts
+git add dashboard/src/lib/patient/ContributingCodes.svelte dashboard/src/lib/patient/ContributingCodes.test.ts dashboard/src/lib/copy.ts
 git commit -m "feat(dashboard): always-on phenotype-composition bars in contributing codes"
 ```
 
@@ -502,16 +522,26 @@ git commit -m "feat(dashboard): always-on phenotype-composition bars in contribu
 - Test: `dashboard/src/lib/patient/ProfileBar.test.ts`
 
 **Interfaces:**
-- Consumes: prop `theta: number[]`; needs `codeBag: number[]` (new prop, threaded from `Patient.svelte`); `explainedVsPrior`.
-- Produces: each main band split into a solid explained portion + a hatched prior portion.
+- Consumes: existing props `theta: number[]`, `codeBag: number[] | null` (already declared); new prop `showResidual: boolean = false`; `explainedVsPrior`.
+- Produces: each main band split into a solid explained portion + a hatched prior portion, **only when `showResidual` is true**.
 
-- [ ] **Step 1: Thread the new prop from the parent**
+- [ ] **Step 1: Enable the overlay on the main patient bar only** — RECONCILED
 
-In `dashboard/src/lib/tabs/Patient.svelte:199`, pass the code bag to the profile bar (it already passes `theta`):
+`codeBag` is ALREADY a prop on `ProfileBar` (`export let codeBag: number[] | null = null`, used for search-match) and is ALREADY passed at `Patient.svelte:125` and `NeighborRibbon.svelte:31`. Do NOT re-thread it. Instead, the overlay is opt-in: add `showResidual={true}` to the main patient bar only, leaving the 10px neighbor strip untouched.
+
+In `dashboard/src/lib/tabs/Patient.svelte` (the `<ProfileBar>` at line ~125), add the flag:
 
 ```svelte
-<ProfileBar theta={current.theta} codeBag={current.code_bag} />
+<ProfileBar
+  theta={current.theta}
+  codeBag={current.code_bag}
+  showResidual={true}
+  height={44}
+  onSelect={(k) => selectedPhenotypeId.set(k)}
+/>
 ```
+
+Leave `NeighborRibbon.svelte:31` (`<ProfileBar theta={n.theta} codeBag={n.code_bag} height={10} labels={false} />`) unchanged — no `showResidual`, so its bars stay clean.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -528,9 +558,17 @@ beforeEach(() => bundle.set(makeStmBundleFixture()))
 it('renders a prior sub-segment on bands the codes do not fully explain', () => {
   const b = makeStmBundleFixture()
   const theta = b.phenotypes.phenotypes.map((_, k) => (k === 0 ? 0.6 : 0.4 / (b.model.K - 1)))
-  // codeBag speaks only to code 0 → other bands lean on the prior
-  const { container } = render(ProfileBar, { props: { theta, codeBag: [0] } })
+  // codeBag speaks only to code 0 → other bands lean on the prior. showResidual
+  // gates the overlay (it is off by default, e.g. on the neighbor strip).
+  const { container } = render(ProfileBar, { props: { theta, codeBag: [0], showResidual: true } })
   expect(container.querySelectorAll('.band .prior-fill').length).toBeGreaterThan(0)
+})
+
+it('renders NO prior sub-segment when showResidual is false (neighbor-strip default)', () => {
+  const b = makeStmBundleFixture()
+  const theta = b.phenotypes.phenotypes.map((_, k) => (k === 0 ? 0.6 : 0.4 / (b.model.K - 1)))
+  const { container } = render(ProfileBar, { props: { theta, codeBag: [0] } })
+  expect(container.querySelectorAll('.band .prior-fill').length).toBe(0)
 })
 ```
 
@@ -541,28 +579,39 @@ Expected: FAIL — no `.prior-fill` elements.
 
 - [ ] **Step 4: Implement the overlay**
 
-Add to the `<script>`:
+Add to the `<script>` — RECONCILED: `codeBag` and `bundle` are ALREADY imported/declared (`export let codeBag: number[] | null = null`; `import { ... } from '../store'` already brings in `phenotypesById` etc.). Do NOT re-declare `codeBag`. Add the store `bundle` to the existing store import if it is not already there, add the `showResidual` prop, and add the split computation gated on `showResidual`:
 
 ```svelte
-  export let codeBag: number[] = []
+  // Add `bundle` to the existing `from '../store'` import.
   import { explainedVsPrior } from './codeComposition'
 
-  $: split = $bundle
-    ? explainedVsPrior(theta, codeBag, $bundle.model.beta, $bundle.model.K)
-    : { explained: theta.map(() => 0), prior: theta.slice() }
+  // Opt-in prior-vs-evidence residual overlay. Off by default so the shared
+  // neighbor-strip usage (NeighborRibbon) stays clean; the main patient bar
+  // passes showResidual={true}.
+  export let showResidual = false
+
+  $: split = showResidual && $bundle
+    ? explainedVsPrior(theta, codeBag ?? [], $bundle.model.beta, $bundle.model.K)
+    : null
   // Fraction of each band that is prior-supported (0..1 within the band).
   function priorFrac(k: number): number {
+    if (!split) return 0
     return theta[k] > 0 ? split.prior[k] / theta[k] : 0
   }
 ```
 
-In the main-band button (`ProfileBar.svelte:70-72`), overlay a hatched fill sized to the prior fraction on top of the solid hue:
+In the main-band button (currently `ProfileBar.svelte:73-78`, the `.band` button in the `mainBands` `{#each}`), overlay a hatched fill sized to the prior fraction on top of the solid hue. The button is currently self-closing (`...></button>`); make it wrap the overlay span, rendered only when `showResidual` and the fraction is positive:
 
 ```svelte
 <button class="band"
   style="width: {(b.v * 100).toFixed(2)}%; background: {$phenotypeHue(b.k)};"
-  ...>
-  <span class="prior-fill" style="width: {(priorFrac(b.k) * 100).toFixed(2)}%"></span>
+  title={`${$phenotypesById.get(b.k)?.label || `Phenotype ${b.k}`}: ${(b.v * 100).toFixed(1)}%`}
+  on:click={() => onSelect?.(b.k)}
+  aria-label={`${$phenotypesById.get(b.k)?.label || `Phenotype ${b.k}`}, ${(b.v * 100).toFixed(1)} percent`}
+>
+  {#if showResidual && priorFrac(b.k) > 0}
+    <span class="prior-fill" style="width: {(priorFrac(b.k) * 100).toFixed(2)}%" aria-hidden="true"></span>
+  {/if}
 </button>
 ```
 
@@ -581,12 +630,26 @@ Add the hatched style (reuse the Other gradient idiom already in the file):
   }
 ```
 
-Add a caption/tooltip near the bar noting the split is an approximate "evidence vs. prior" cue (add a string to `copy.ts` `contributingCodes` and render it), per the Global Constraints heuristic-labeling rule.
+**RECONCILED — caption.** Add `evidenceVsPrior` to `copy.contributingCodes` in `copy.ts`:
+
+```ts
+evidenceVsPrior: `Hatched portions of each band are phenotype mass the model leans on the population prior for, rather than this patient's own codes — an approximate evidence-vs-prior cue, not an exact split.`,
+```
+
+Render it inside `ProfileBar.svelte` **only when `showResidual`** (so it travels with the overlay and never appears on the neighbor strip), as a small caption below the bar — e.g. after the `.band-percents` block:
+
+```svelte
+{#if showResidual}
+  <p class="residual-note">{copy.contributingCodes.evidenceVsPrior}</p>
+{/if}
+```
+
+Import `copy` into `ProfileBar.svelte` (not currently imported) and add a `.residual-note` style consistent with the file's existing `--fs-micro` / `--ink-faint` captions. This satisfies the Global Constraints heuristic-labeling rule.
 
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `cd dashboard && npx vitest run src/lib/patient/ProfileBar.test.ts`
-Expected: PASS (1 test).
+Expected: PASS (2 tests — overlay present with `showResidual`, absent without).
 
 - [ ] **Step 6: Type-check, full test, commit**
 

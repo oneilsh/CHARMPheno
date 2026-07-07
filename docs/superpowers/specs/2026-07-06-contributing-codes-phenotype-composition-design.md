@@ -1,7 +1,7 @@
 # Contributing-Codes Phenotype-Composition View — Design
 
 **Date:** 2026-07-06
-**Status:** Design (approved; not yet planned/built — implementation blocked on a concurrent `stm` thread)
+**Status:** Design approved; planned and in implementation (2026-07-07) on `stm`. The blocking thread has landed; plan reconciled against it (ProfileBar's residual overlay is opt-in via a `showResidual` prop since ProfileBar is now shared with the neighbor strip; new copy lives in the centralized `copy.ts`).
 **Scope:** Dashboard-only visualization + interaction upgrade to the Simulator → Explore Cohort / Patient "Top contributing codes" panel. No model, export, or data-format changes.
 
 ## Motivation
