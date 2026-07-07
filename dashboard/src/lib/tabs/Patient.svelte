@@ -2,11 +2,11 @@
   import {
     bundle, cohort, patientsById, selectedPatientId, selectedPhenotypeId,
     advancedView, searchedPhenotypeForPatients, phenotypesById,
-    colorByGroup, patientConditioning,
+    colorByGroup,
   } from '../store'
+  import { onMount } from 'svelte'
   import { phenotypeHue } from '../palette'
   import { displayedDominant } from '../dominant'
-  import { generateCohort } from '../cohort'
   import { ensurePatientProjection } from '../patient/projection'
   import PatientMap from '../patient/PatientMap.svelte'
   import PatientBrowser from '../patient/PatientBrowser.svelte'
@@ -14,60 +14,19 @@
   import ContributingCodes from '../patient/ContributingCodes.svelte'
   import NeighborRibbon from '../patient/NeighborRibbon.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
-  import ConditioningBar from '../conditioning/ConditioningBar.svelte'
   import { copy } from '../copy'
 
-  // Explore-Cohort ("$cohort") sizing for a Regenerate click — matches
-  // App.svelte's initial-load defaults (same N/neighbors) so the shared
-  // atlas has consistent density regardless of whether it was populated on
-  // load or via this panel's Regenerate button. Duplicated here rather than
-  // imported because App.svelte doesn't export them (see Simulator.svelte,
-  // which follows the same pattern for its own Simulate Cohort trigger).
-  const COHORT_N = 1500
-  const COHORT_NEIGHBORS = 8
-  // Bumps on every Regenerate click so each run differs from the last; starts
-  // one past App.svelte's DEFAULT_COHORT_SEED (42) so the first Regenerate
-  // is never a no-op re-draw of the load-time cohort.
-  let seedCounter = 43
+  // Explore Cohort is now a pure viewer: the cohort it shows ($cohort) is
+  // generated on app load / cohort switch (App.svelte) and re-generated from
+  // the Simulate Cohort tab (Simulator.svelte's Simulate button, which
+  // conditions on the source cohort + covariates and refits this projection).
+  // The old in-panel source-cohort / covariate / Regenerate controls moved
+  // there, so nothing here mutates the cohort. Ensure a layout exists whenever
+  // this tab mounts (the load-time fit may have been superseded/invalidated).
+  onMount(ensurePatientProjection)
 
-  // Sample-vs-set conditioning mode for Regenerate. 'sample' (default): each
-  // patient draws its own covariates/group from the bundle's marginals — a
-  // mixed, representative cohort (matches the faithful load-time default in
-  // App.svelte). 'set': every patient shares $patientConditioning's
-  // values/group — "what does this subpopulation look like". See
-  // cohort.ts's CohortConditioning for the underlying modes.
-  let conditioningMode: 'sample' | 'set' = 'sample'
-
-  $: isStm = !!$bundle?.covariateEffects && !!$bundle?.correlation
-
-  function regenerate() {
-    const b = $bundle
-    if (!b) return
-    const seed = seedCounter++
-    const newCohort = generateCohort({
-      model: b.model,
-      meanCodesPerDoc: b.corpusStats.mean_codes_per_doc,
-      n: COHORT_N,
-      seed,
-      nNeighbors: COHORT_NEIGHBORS,
-      qualityByPhenotype: b.phenotypes.phenotypes.map((p) => p.quality),
-      ...(isStm
-        ? { conditioning: {
-            mode: conditioningMode,
-            values: $patientConditioning.values,
-            group: $patientConditioning.group,
-            bundle: b,
-          } }
-        : {}),
-    })
-    cohort.set(newCohort)
-    ensurePatientProjection()
-  }
-
-  // This view displays the current cohort ($cohort, populated on app load /
-  // on cohort switch — see App.svelte) and can regenerate it via the
-  // conditioning cluster above. A gated STM bundle carries a group per
-  // patient, which the color-by-group toggle below can display.
+  // A gated STM bundle carries a group per patient, which the color-by-group
+  // toggle below can display.
   $: hasGroup = !!$bundle?.gating
 
   // Visible-in-current-mode patients (basic = clean only, advanced = all).
@@ -127,32 +86,6 @@
   <div class="grid">
     <div class="left-col">
       <PatientMap />
-
-      <ConditioningBar store={patientConditioning} showGroup={true} />
-
-      <div class="regen-panel">
-        {#if isStm}
-          <div class="mode-toggle" role="group" aria-label="Cohort conditioning mode">
-            <button
-              type="button"
-              class="mode-btn"
-              class:active={conditioningMode === 'sample'}
-              title="Each patient draws its own covariates/group from the corpus's natural mix — a representative cohort."
-              on:click={() => conditioningMode = 'sample'}
-            >sample from distribution</button>
-            <button
-              type="button"
-              class="mode-btn"
-              class:active={conditioningMode === 'set'}
-              title="Every patient shares the covariate values/group selected above — this subpopulation's cohort."
-              on:click={() => conditioningMode = 'set'}
-            >use set covariates/group</button>
-          </div>
-        {/if}
-        <button class="btn btn-primary regen-btn" on:click={regenerate} disabled={!$bundle}>
-          Regenerate cohort
-        </button>
-      </div>
 
       <div class="map-actions">
         <div class="control-stack">
@@ -284,50 +217,6 @@
   .what-is-body :global(strong) {
     color: var(--ink);
     font-weight: 600;
-  }
-
-  /* Regenerate cluster: sample-vs-set mode toggle + Regenerate button,
-     sitting between the ConditioningBar and the map-actions row. Mirrors
-     Simulator.svelte's .run-panel card so the two generative panels feel
-     like the same family of control. */
-  .regen-panel {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 0.85rem;
-    padding: 0.6rem 0;
-  }
-  .mode-toggle {
-    display: inline-flex;
-    background: var(--surface);
-    border: 1px solid var(--rule-strong);
-    border-radius: var(--radius-sm);
-    padding: 2px;
-    gap: 1px;
-  }
-  .mode-btn {
-    border: 0;
-    background: transparent;
-    padding: 0.28rem 0.7rem;
-    font-family: var(--font-mono);
-    font-size: var(--fs-micro);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--ink-muted);
-    cursor: pointer;
-    border-radius: 3px;
-    transition: all 0.12s ease;
-  }
-  .mode-btn:hover { color: var(--ink); }
-  .mode-btn.active {
-    background: var(--ink);
-    color: var(--surface);
-  }
-  .regen-btn {
-    font-size: var(--fs-small);
-    padding: 0.4rem 0.9rem;
-    flex-shrink: 0;
   }
 
   .control-stack {

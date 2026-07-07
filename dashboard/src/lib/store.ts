@@ -32,12 +32,16 @@ selectedCohort.subscribe((id) => {
 // Cached 2D UMAP projection of the current cohort. Held in a store (not
 // PatientMap-local state) so navigating away from the Patient tab and
 // back does not retrigger UMAP fitting on a cohort that hasn't changed.
-// PatientMap invalidates this whenever `seed` differs from $cohort.seed.
-// We also keep the fitted UMAP instance so the Simulator can call
-// `.transform()` on new theta samples and plot them on the same atlas.
+// Identity is the COHORT OBJECT itself, not its seed: two different cohorts
+// can share a seed (the load-time cohort and the first Simulate click both
+// used seed 42), so keying on seed left a stale layout in place after a
+// regeneration. `cohort.set` always makes a new object, so reference identity
+// is the sound "is this the layout for the current cohort?" test.
+// We also keep the fitted UMAP instance so a transformed overlay could plot
+// new theta samples on the same atlas.
 export const patientProjection = writable<{
   patientCoords: number[][]
-  seed: number
+  cohort: SyntheticCohort
   umap: UMAP
 } | null>(null)
 
@@ -47,12 +51,12 @@ export const patientProjection = writable<{
 export const patientProjectionFitting = writable<boolean>(false)
 
 // Reset the cached projection whenever the cohort itself is regenerated.
-// A new cohort has a new seed by construction, so the seed-equality check
-// in PatientMap would catch it too - this just avoids briefly rendering
-// stale coords against fresh patients.
+// Compare object identity, not seed: a fresh cohort is always a new object
+// even when it reuses a seed, so this reliably drops stale coords the moment
+// new patients arrive (ensurePatientProjection then refits for the new object).
 cohort.subscribe(($c) => {
   if (!$c) { patientProjection.set(null); return }
-  patientProjection.update((p) => (p && p.seed === $c.seed ? p : null))
+  patientProjection.update((p) => (p && p.cohort === $c ? p : null))
 })
 
 export const selectedPhenotypeId = writable<number | null>(null)

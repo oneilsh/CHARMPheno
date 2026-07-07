@@ -1,10 +1,7 @@
 import { it, expect, afterEach, beforeEach } from 'vitest'
-import { render, cleanup, fireEvent } from '@testing-library/svelte'
-import { get } from 'svelte/store'
+import { render, cleanup } from '@testing-library/svelte'
 import Patient from './Patient.svelte'
-import {
-  bundle, cohort, patientConditioning, resetConditioningForCohort,
-} from '../store'
+import { bundle, cohort, resetConditioningForCohort } from '../store'
 import { generateCohort } from '../cohort'
 import { makeStmBundleFixture } from '../test-fixtures'
 import type { DashboardBundle } from '../types'
@@ -17,9 +14,14 @@ beforeEach(() => {
   resetConditioningForCohort()
 })
 
-// STM fixture extended with a gated group/topic-block structure so
-// set-vs-sample conditioning has an observable effect (masked topic 0
-// for out-of-group patients), mirroring the fixtures in cohort.test.ts.
+// Explore Cohort is now a pure viewer: source-cohort / covariate / Regenerate
+// controls moved to the Simulate Cohort tab. These guard that the panel renders
+// the current cohort and no longer carries those moved controls. The underlying
+// set/sample group-masking behavior is tested at the generateCohort level in
+// cohort.test.ts.
+
+// STM fixture extended with a gated group/topic-block structure (as in
+// cohort.test.ts) so the gated-only affordances (color-by-group) render.
 function makeGatedBundle(): DashboardBundle {
   const base = makeStmBundleFixture()
   return {
@@ -44,18 +46,20 @@ function seedCohort(b: DashboardBundle) {
   }))
 }
 
-it('renders the conditioning bar (group selector) for a gated STM bundle', () => {
+it('renders a gated STM cohort and offers color-by-group, without the moved controls', () => {
   const b = makeGatedBundle()
   bundle.set(b)
   seedCohort(b)
-  const { getByText } = render(Patient)
-  expect(getByText('Regenerate cohort')).toBeTruthy()
-  // ConditioningBar's group section label comes from gating.group_var
-  // (no group_var_label set on this fixture).
-  expect(getByText('g')).toBeTruthy()
+  const { getByText, queryByText } = render(Patient)
+  // Gated-only affordance stays on this tab.
+  expect(getByText('color by group')).toBeTruthy()
+  // Controls that moved to Simulate Cohort are gone.
+  expect(queryByText('Regenerate cohort')).toBeNull()
+  expect(queryByText(/use set/i)).toBeNull()
+  expect(queryByText('Source cohort')).toBeNull()
 })
 
-it('does not crash and still offers Regenerate for a non-STM bundle', async () => {
+it('does not crash for a non-STM bundle and shows no Regenerate control', () => {
   const b: DashboardBundle = {
     model: { K: 2, V: 2, alpha: [1, 1], beta: [[.9, .1], [.1, .9]] },
     phenotypes: { phenotypes: [
@@ -70,50 +74,6 @@ it('does not crash and still offers Regenerate for a non-STM bundle', async () =
   }
   bundle.set(b)
   seedCohort(b)
-  const { getByText } = render(Patient)
-  const btn = getByText('Regenerate cohort')
-  expect(btn).toBeTruthy()
-  const before = get(cohort)
-  await fireEvent.click(btn)
-  const after = get(cohort)
-  expect(after).not.toBeNull()
-  expect(after!.seed).not.toBe(before!.seed)
-})
-
-it('Regenerate in "set" mode applies patientConditioning\'s group to every patient (masked out-of-group topic ~0)', async () => {
-  const b = makeGatedBundle()
-  bundle.set(b)
-  seedCohort(b)
-  patientConditioning.set({ covariateActive: false, values: {}, group: 'cancer' })
-
-  const { getByText } = render(Patient)
-  // Switch the sample-vs-set toggle to "set" mode.
-  await fireEvent.click(getByText(/use set/i))
-  await fireEvent.click(getByText('Regenerate cohort'))
-
-  const c = get(cohort)!
-  expect(c.patients.length).toBeGreaterThan(0)
-  for (const p of c.patients) {
-    expect(p.group).toBe('cancer')
-    // topic 2 is dementia-only (topic_blocks[2] === 'dementia'); masked to 0
-    // for every patient since the whole cohort is fixed to 'cancer'.
-    expect(p.theta[2]).toBe(0)
-  }
-})
-
-it('Regenerate in "sample" mode (default) draws each patient its own group', async () => {
-  const b = makeGatedBundle()
-  bundle.set(b)
-  seedCohort(b)
-  patientConditioning.set({ covariateActive: false, values: {}, group: null })
-
-  const { getByText } = render(Patient)
-  await fireEvent.click(getByText('Regenerate cohort'))
-
-  const c = get(cohort)!
-  const groupsSeen = new Set(c.patients.map((p) => p.group))
-  expect(groupsSeen.has('cancer') || groupsSeen.has('dementia')).toBe(true)
-  for (const p of c.patients) {
-    if (p.group === 'cancer') expect(p.theta[2]).toBe(0)
-  }
+  const { queryByText } = render(Patient)
+  expect(queryByText('Regenerate cohort')).toBeNull()
 })
