@@ -59,7 +59,7 @@
         return cohortLabel(a).localeCompare(cohortLabel(b)) || a.id - b.id
       case 'coherence':
         return (a.npmi ?? -Infinity) - (b.npmi ?? -Infinity)
-      case 'prevalence':
+      case 'coverage':
       default: {
         const d = prevReader(a) - prevReader(b)
         return d !== 0 ? d : a.corpus_prevalence - b.corpus_prevalence
@@ -81,7 +81,7 @@
   // Depends explicitly on `reader` (not just $phenotypeSortBy/$phenotypeSortDir)
   // so a conditioning change — which produces a new $coverageReader — is
   // seen by Svelte's dependency tracker and re-runs this block, re-sorting
-  // the rows when the active sort column is 'prevalence'. (cmp() closes over
+  // the rows when the active sort column is 'coverage'. (cmp() closes over
   // `reader` internally, but a call inside the statement isn't enough for
   // Svelte's static reactive-dependency analysis to pick it up — passing it
   // as an explicit comparator argument makes the dependency visible.)
@@ -169,15 +169,15 @@
           {/if}
           {#if $advancedView}
             <th class="col-quality">Quality</th>
-            <th class="col-coh" data-numeric>
-              <button class="th-sort th-sort-num" class:active={$phenotypeSortBy === 'coherence'} on:click={() => sortByCol('coherence')}><span class="arrow">{arrow('coherence')}</span>Coherence</button>
-            </th>
           {/if}
+          <th class="col-coh" data-numeric title={copy.phenotypeDetail.coherenceTip}>
+            <button class="th-sort th-sort-num" class:active={$phenotypeSortBy === 'coherence'} on:click={() => sortByCol('coherence')}><span class="arrow">{arrow('coherence')}</span>Coherence</button>
+          </th>
           <th class="col-prev" data-numeric title={$advancedView
-            ? copy.phenotypeBrowser.prevTipAdvanced($tauThreshold)
-            : copy.phenotypeBrowser.prevTipBasic($tauThreshold)
+            ? copy.phenotypeBrowser.coverageTipAdvanced($tauThreshold)
+            : copy.phenotypeBrowser.coverageTipBasic($tauThreshold)
           }>
-            <button class="th-sort th-sort-num" class:active={$phenotypeSortBy === 'prevalence'} on:click={() => sortByCol('prevalence')}><span class="arrow">{arrow('prevalence')}</span>{$advancedView ? 'Prevalence (patients)' : 'Prevalence'}</button>
+            <button class="th-sort th-sort-num" class:active={$phenotypeSortBy === 'coverage'} on:click={() => sortByCol('coverage')}><span class="arrow">{arrow('coverage')}</span>Coverage</button>
           </th>
         </tr>
       </thead>
@@ -206,8 +206,8 @@
                   <span class="qchip qchip-empty">·</span>
                 {/if}
               </td>
-              <td class="col-coh" data-numeric>{p.npmi == null ? '—' : p.npmi.toFixed(3)}</td>
             {/if}
+            <td class="col-coh" data-numeric>{p.npmi == null ? '—' : p.npmi.toFixed(3)}</td>
             <td class="col-prev" data-numeric>
               <span class="prev-row">
                 <span class="prev-bar">
@@ -222,7 +222,7 @@
           </tr>
         {/each}
         {#if filtered.length === 0}
-          <tr><td colspan={2 + (gated ? 1 : 0) + ($advancedView ? 2 : 0) + 1} class="empty">No phenotypes match.</td></tr>
+          <tr><td colspan={4 + (gated ? 1 : 0) + ($advancedView ? 1 : 0)} class="empty">No phenotypes match.</td></tr>
         {/if}
       </tbody>
     </table>

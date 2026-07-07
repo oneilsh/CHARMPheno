@@ -12,9 +12,9 @@ it('renders no Topic mass column', () => {
   expect(queryByText('Topic mass')).toBeNull()
 })
 
-it('re-sorts when conditioning changes the prevalence order', async () => {
+it('re-sorts when conditioning changes the coverage order', async () => {
   bundle.set(makeStmBundleFixture())
-  phenotypeSortBy.set('prevalence')
+  phenotypeSortBy.set('coverage')
   atlasConditioning.set({ covariateActive: false, values: {}, group: null })
   const { container } = render(PhenotypeBrowser)
   const firstRowId = () => container.querySelector('tbody tr')?.getAttribute('data-pid')

@@ -54,7 +54,7 @@ export const copy = {
       coherence: `Coherence: how reliably the phenotype's leading conditions actually co-occur in the same patients. Higher means the conditions really do show up together; lower means the pattern is weaker or more diffuse. (Bubble color encodes this.)`,
       coverage: (tau: number): string =>
         `Patient coverage: within a phenotype's cohort, the fraction of patients for whom it accounts for more than ${pct(tau)}% of their coded activity (θ > ${tau.toFixed(2)}). Shared phenotypes are measured across all patients; a group-specific phenotype within its own group's patients, so each cohort uses the full size range. Bubble size scales with this value; covariate sliders resample it, so bubbles grow or shrink with the population you condition on.`,
-      topicMass: `Topic mass: mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
+      topicMass: `Topic mass: mean topic mixture share across patients (patient-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
       // Legacy: predictive_gain no longer drives bubble sizing (that's always
       // `coverage` now — see Task 4); mean_gain surfaces instead as the
       // advanced-only "Distinctiveness" stat in the CodePanel detail view
@@ -75,9 +75,9 @@ export const copy = {
         `Coverage: within this phenotype's cohort, the share of patients for whom it accounts for more than ${pct(tau)}% of their coded activity (θ > ${tau.toFixed(2)}). A group-specific phenotype is measured among its own group's patients.`,
       tipAdvanced: (tau: number): string =>
         `Coverage: the fraction of a phenotype's cohort with θ > τ = ${tau.toFixed(2)} — at least ${pct(tau)}% of their coded activity is attributed to it. Shared phenotypes are scaled across all patients, a group-specific phenotype within its own group's patients. For STM bundles this is estimated from patients sampled at the current covariate profile; otherwise from the θ-histogram.`,
-      tipNoHistogram: `Coverage: the corpus-average share of activity attributed to this phenotype (no per-patient histogram available for this bundle).`,
+      tipNoHistogram: `Coverage: the cohort-average share of activity attributed to this phenotype (no per-patient histogram available for this model).`,
     },
-    topicMassTip: `Mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
+    topicMassTip: `Mean topic mixture share across patients (patient-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
     coherenceTip: `Coherence: how reliably this phenotype's leading conditions co-occur in real patients (NPMI: normalized pointwise mutual information). Higher means the conditions really do show up together.`,
     pairCoverageTip: `Pair coverage: fraction of the leading-condition pairs that had enough joint observations to actually contribute to the coherence number. Low coverage means the coherence value was computed on only a few pairs and is less trustworthy.`,
     sourceTip: `Source #: the raw topic index from the LDA fit before sorting. Useful for cross-referencing the underlying model.`,
@@ -100,7 +100,7 @@ export const copy = {
     // view resurfaces them.
     presenceTip: `Presence: how widely — the fraction of patients where this phenotype adds real predictive signal (clears the model's own noise floor), in held-out predictive nats.`,
     depthTip: `Depth: how much — this phenotype's share of the unique predictive structure in the patients who have it (a broad phenotype others overlap scores low; a niche one nothing else explains scores high).`,
-    distinctivenessTip: `Distinctiveness: this phenotype's mean unique held-out predictive gain (nats) — how specific its vocabulary is versus the corpus background (a niche phenotype scores high; a common one whose words are everywhere scores low). This is NOT how common the phenotype is (that is coverage), and it is not a per-patient count.`,
+    distinctivenessTip: `Distinctiveness: this phenotype's mean unique held-out predictive gain (nats) — how specific its conditions are versus the dataset background (a niche phenotype scores high; a common one whose conditions are everywhere scores low). This is NOT how common the phenotype is (that is coverage), and it is not a per-patient count.`,
     nullBandTip: `Noise floor: the 95th-percentile predictive gain of a randomized (null) phenotype, in nats. A distinctiveness value near or below this is inside the noise and should not be over-read.`,
     relevance: {
       weightingTip: `Relevance term weighting. The slider blends two views of 'top conditions': raw frequency (how much of the phenotype's mass falls on this condition) and lift (how much more this condition shows up here than in the overall dataset). Slide left for surprise/lift, right for sheer frequency.`,
@@ -121,16 +121,16 @@ export const copy = {
 
   // ── Correlation heatmap (chart-internal labels) ────────────────────────
   correlation: {
-    ariaLabel: `Topic correlation heatmap`,
-    heading: `Topic Correlations`,
-    kicker: `Pairwise correlation between topic mixture shares, ordered by block. Grey cells lack enough joint observations to estimate a correlation.`,
+    ariaLabel: `Phenotype correlation heatmap`,
+    heading: `Phenotype Correlations`,
+    kicker: `Pairwise correlation between phenotype mixture shares, grouped by cohort. Grey cells lack enough joint observations to estimate a correlation.`,
   },
 
   // ── Phenotype browser (table) ─────────────────────────────────────────
   phenotypeBrowser: {
-    prevTipAdvanced: (tau: number): string =>
+    coverageTipAdvanced: (tau: number): string =>
       `Fraction of patients with mixture weight above τ = ${tau.toFixed(2)} (at least ${pct(tau)}% of their coded activity).`,
-    prevTipBasic: (tau: number): string =>
+    coverageTipBasic: (tau: number): string =>
       `Fraction of patients for whom this phenotype makes up at least ${pct(tau)}% of their coded activity.`,
   },
 
@@ -185,7 +185,7 @@ export const copy = {
       `Start by clicking conditions on the left, or just hit Simulate to draw new patients from scratch.`,
     ],
     runSub: `Draw a batch of plausible patients from the conditions above.`,
-    autoregressiveTip: `When on, the model re-evaluates the phenotype mix after every drawn code so each token shifts the next one's distribution.`,
+    autoregressiveTip: `When on, the model re-evaluates the phenotype mix after every drawn code so each new code shifts the next one's distribution.`,
     emptyFromScratch: `Add some starting conditions on the left (or just hit Simulate to draw patients from scratch), then click <strong>simulate →</strong> to see what kind of patient this looks like.`,
     emptyReady: (n: number): string =>
       `${n} starting condition${n === 1 ? '' : 's'} ready. Click <strong>simulate →</strong> to see what kind of patient this looks like.`,

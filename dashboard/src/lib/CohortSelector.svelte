@@ -61,8 +61,8 @@
       aria-expanded={open}
       on:click={toggle}
     >
-      <span class="kicker">cohort</span>
-      <span class="label">{current?.label ?? 'Select cohort'}</span>
+      <span class="kicker">model</span>
+      <span class="label">{current?.label ?? 'Select model'}</span>
       <svg class="caret" viewBox="0 0 12 12" aria-hidden="true">
         <path d="M2 4.5 L6 8.5 L10 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
       </svg>

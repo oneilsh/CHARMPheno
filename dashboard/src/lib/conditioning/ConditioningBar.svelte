@@ -165,7 +165,7 @@
 
     {#if hasCovariates && schema}
       <div class="cp-cov">
-        <label class="toggle-label" title="When on, generation conditions each patient on the covariate values below instead of the corpus-average profile.">
+        <label class="toggle-label" title="When on, generation conditions each patient on the covariate values below instead of the cohort-average profile.">
           <input
             type="checkbox"
             class="toggle-input"
@@ -247,7 +247,7 @@
 
     {#if hasCovariates && schema}
       <div class="bar-section covariate-section">
-        <label class="toggle-label" title="When on, bubble sizes show model-predicted prevalence at the covariate values below rather than the corpus-average histogram estimate.">
+        <label class="toggle-label" title="When on, bubble sizes show model-predicted coverage at the covariate values below rather than the cohort-average histogram estimate.">
           <input
             type="checkbox"
             class="toggle-input"
@@ -257,7 +257,7 @@
           <span class="toggle-track">
             <span class="toggle-thumb"></span>
           </span>
-          <span class="toggle-text">{$store.covariateActive ? 'covariate prevalence' : 'corpus average'}</span>
+          <span class="toggle-text">{$store.covariateActive ? 'covariate coverage' : 'cohort average'}</span>
         </label>
 
         {#if $store.covariateActive}
