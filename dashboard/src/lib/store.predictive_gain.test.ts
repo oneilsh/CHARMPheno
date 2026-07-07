@@ -1,6 +1,6 @@
 import { it, expect, beforeEach } from 'vitest'
 import { get } from 'svelte/store'
-import { bundle, presenceReader, depthReader, predictiveGain, tauThreshold } from './store'
+import { bundle, presenceReader, depthReader, meanGainReader, predictiveGain, tauThreshold } from './store'
 import type { Phenotype, PredictiveGain } from './types'
 
 const PG: PredictiveGain = {
@@ -54,6 +54,19 @@ it('depthReader falls back to 0 when depth is null or undefined', () => {
   bundle.set({ phenotypes: { phenotypes: [] } } as any)
   const reader = get(depthReader)
   expect(reader({ depth: null } as any)).toBe(0)
+  expect(reader({} as any)).toBe(0)
+})
+
+it('meanGainReader returns the hydrated mean_gain value when present', () => {
+  bundle.set({ phenotypes: { phenotypes: [], predictive_gain: PG } } as any)
+  const reader = get(meanGainReader)
+  expect(reader({ mean_gain: 12.3 } as any)).toBe(12.3)
+})
+
+it('meanGainReader falls back to 0 when mean_gain is null or undefined', () => {
+  bundle.set({ phenotypes: { phenotypes: [] } } as any)
+  const reader = get(meanGainReader)
+  expect(reader({ mean_gain: null } as any)).toBe(0)
   expect(reader({} as any)).toBe(0)
 })
 

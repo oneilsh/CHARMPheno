@@ -42,6 +42,12 @@
   // (the common case today) simply fall through to hasHistogram, unchanged.
   $: hasProminence = !!(pheno?.prominence_hist && $bundle?.phenotypes.predictive_gain?.prominence_bin_edges)
 
+  // Task 6b: presence/mean_gain/depth scalars block. Gated on the bundle
+  // carrying predictive_gain at all (the per-phenotype fields are hydrated
+  // together from that block — see bundle.ts) so bundles without it render
+  // exactly as before with no new row.
+  $: hasPredictiveGainFields = !!$bundle?.phenotypes.predictive_gain
+
   // Share of patients below τ — the mass the histogram omits because its
   // x-axis starts at τ. Summed from bins whose upper edge is at or below τ;
   // suppressed bins (null) contribute 0, matching the privacy round-to-zero
@@ -129,6 +135,25 @@
           {/if}
         {/if}
       </div>
+      {#if hasPredictiveGainFields}
+        <!-- Held-out predictive-gain scalars (Task 6b). Mean gain leads —
+             it's the most discriminating of the three (0-27 nats across
+             topics); presence and depth are secondary context. -->
+        <div class="stats" data-numeric data-tour="predictive-gain-stats">
+          <span class="stat" title={copy.phenotypeDetail.meanGainTip}>
+            <span class="stat-k">Mean gain<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="stat-v">{pheno.mean_gain == null ? '—' : `${pheno.mean_gain.toFixed(2)} nats`}</span>
+          </span>
+          <span class="stat" title={copy.phenotypeDetail.presenceTip}>
+            <span class="stat-k">Presence<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="stat-v">{pheno.presence == null ? '—' : `${(pheno.presence * 100).toFixed(1)}%`}</span>
+          </span>
+          <span class="stat" title={copy.phenotypeDetail.depthTip}>
+            <span class="stat-k">Depth<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="stat-v">{pheno.depth == null ? '—' : `${(pheno.depth * 100).toFixed(1)}%`}</span>
+          </span>
+        </div>
+      {/if}
     </header>
 
     {#if hasProminence && $advancedView}

@@ -227,6 +227,16 @@ export const depthReader = derived([bundle], () =>
   (p: Phenotype) => p.depth ?? 0
 )
 
+// (Phenotype) -> number reader for "mean_gain": the topic's mean unique
+// held-out predictive contribution (nats). Mirrors presenceReader/depthReader
+// — null/undefined (older/non-gated bundles with no predictive_gain block)
+// reads as 0 rather than throwing/NaN-ing through downstream math. This is
+// the primary size-source for the Task 6b TopicMap bubble-size swap (see
+// meanGainReader usage in atlas/TopicMap.svelte).
+export const meanGainReader = derived([bundle], () =>
+  (p: Phenotype) => p.mean_gain ?? 0
+)
+
 // Bundle-level predictive_gain diagnostics accessor (bin edges, null_band,
 // scale, etc.) for components that need more than the per-phenotype
 // hydrated fields. Null when the bundle has no predictive_gain block.

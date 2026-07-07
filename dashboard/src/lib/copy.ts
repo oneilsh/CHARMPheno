@@ -41,7 +41,14 @@ export const copy = {
   // ── Phenotype Atlas tab ───────────────────────────────────────────────
   atlas: {
     title: `Phenotype Atlas`,
-    kicker: `Each marker is a learned phenotype. Bubbles that sit closer together share more of their leading conditions; bubble size shows how widely the phenotype shows up across patients.`,
+    // hasPredictiveGain: true once the bundle carries the held-out
+    // predictive-gain metric (Task 6b) — bubble size then encodes unique
+    // predictive contribution rather than prevalence. Bundles without it
+    // (HDP/LDA/legacy) get the original wording, unchanged.
+    kicker: (hasPredictiveGain: boolean): string =>
+      hasPredictiveGain
+        ? `Each marker is a learned phenotype. Bubbles that sit closer together share more of their leading conditions; bubble size shows how much unique predictive signal the phenotype contributes (nats of held-out predictive gain).`
+        : `Each marker is a learned phenotype. Bubbles that sit closer together share more of their leading conditions; bubble size shows how widely the phenotype shows up across patients.`,
     whatIsSummary: `What's a phenotype?`,
     // kLabel: the phenotype count K (or a "~80" fallback while loading).
     whatIs: (kLabel: string | number): string[] => [
@@ -54,6 +61,10 @@ export const copy = {
       prevalence: (tau: number): string =>
         `Prevalence: estimated share of patients for whom this phenotype makes up at least ${pct(tau)}% (τ) of their coded activity. Bubble size scales with this share.`,
       topicMass: `Topic mass: mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
+      // Task 6b: shown instead of `prevalence` once the bundle carries
+      // predictive_gain — bubble size then encodes mean_gain (nats), not
+      // prevalence.
+      meanGain: `Predictive contribution: the phenotype's mean unique held-out predictive gain (nats) — how much this phenotype, on its own, improves the model's ability to predict a held-out patient's conditions. Bubble size scales with this value.`,
     },
   },
 
@@ -86,12 +97,14 @@ export const copy = {
       tip: `How prominently this phenotype features in each patient's mixture, across the cohort. The x-axis is the share of a patient's coded activity attributed to this phenotype (shown from τ upward); the y-axis is the share of patients at each level. Patients below τ are summarised by the '< τ' figure rather than drawn. Bins with fewer than 20 patients are suppressed for privacy.`,
       belowTauTip: `Share of patients for whom this phenotype is below the τ threshold — i.e. they are not counted as having it. Not drawn on the chart (the x-axis starts at τ).`,
     },
-    // Predictive-gain plumbing (additive; the value-sensitive headline swap
-    // is a later task). presenceTip/depthTip are not yet wired into a stat
-    // row anywhere — they exist so that later task can drop them in without
-    // also having to write the copy. prominenceHistogramTip/Title back the
-    // ProminenceHistogram swap in CodePanel, which IS wired up now.
+    // Predictive-gain scalars (Task 6b), shown in the detail stats row when
+    // the bundle carries the predictive_gain block. presenceTip/depthTip were
+    // written in Task 6a; meanGainTip is new here — mean_gain is the most
+    // discriminating of the three (0-27 nats across topics) so it leads.
+    // prominenceHistogramTip/Title back the ProminenceHistogram swap in
+    // CodePanel, wired up since Task 6a.
     presenceTip: `Presence: how widely — the fraction of patients where this phenotype adds real predictive signal (clears the model's own noise floor), in held-out predictive nats.`,
+    meanGainTip: `Mean gain: this phenotype's unique predictive contribution, in nats — the average held-out predictive signal (beyond what every other phenotype already explains) that this phenotype alone adds for the patients who have it.`,
     depthTip: `Depth: how much — this phenotype's share of the unique predictive structure in the patients who have it (a broad phenotype others overlap scores low; a niche one nothing else explains scores high).`,
     prominenceHistogramTitle: `Phenotype Prominence`,
     prominenceHistogramTip: `The spread of this phenotype's per-patient predictive gain (nats), across the patients who have it — the principled replacement for the topic-mass histogram.`,
