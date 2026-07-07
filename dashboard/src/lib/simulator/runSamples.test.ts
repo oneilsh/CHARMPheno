@@ -18,6 +18,38 @@ describe('runSimulator', () => {
   })
 })
 
+describe('runSimulator codeTopicCounts (generating-topic attribution)', () => {
+  it('attributes every generated code to the topic that emitted it', () => {
+    // Disjoint emissions: topic 0 emits only code 0, topic 1 only code 1.
+    // Whatever topic generated a token, its code is that topic's code — so
+    // codeTopicCounts[code c] must have ALL its mass on topic c.
+    const beta = [[1.0, 0.0], [0.0, 1.0]]
+    const res = runSimulator({
+      alpha: [1, 1], beta, meanCodesPerDoc: 30, prefix: [], nSamples: 40, seed: 3,
+    })
+    for (const [w, topics] of res.codeTopicCounts) {
+      for (const [z] of topics) expect(z).toBe(w) // code w only ever from topic w
+    }
+    expect(res.codeTopicCounts.size).toBeGreaterThan(0)
+  })
+
+  it('dominant generating topic of a code is its argmax over the topic counts', () => {
+    // topic 0 emits code 0 (0.9) or 1 (0.1); topic 1 emits code 1 (0.9) or 0 (0.1).
+    const beta = [[0.9, 0.1], [0.1, 0.9]]
+    const res = runSimulator({
+      alpha: [1, 1], beta, meanCodesPerDoc: 40, prefix: [], nSamples: 60, seed: 5,
+    })
+    const domTopic = (w: number) => {
+      const tm = res.codeTopicCounts.get(w)!
+      let best = -1, bestC = -1
+      for (const [z, c] of tm) if (c > bestC) { bestC = c; best = z }
+      return best
+    }
+    expect(domTopic(0)).toBe(0) // code 0 mostly from topic 0
+    expect(domTopic(1)).toBe(1) // code 1 mostly from topic 1
+  })
+})
+
 describe('quantiles', () => {
   it('matches linear-interpolation', () => {
     expect(quantiles([1, 2, 3, 4, 5], [0, 0.5, 1])).toEqual([1, 3, 5])

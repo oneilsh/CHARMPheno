@@ -26,6 +26,11 @@ export interface SimulatorRunInput {
 export interface SimulatorRunResult {
   thetaSamples: number[][]
   codeCountsSamples: Map<number, number>[]
+  // code id -> (generating topic id -> total tokens of that code emitted by that
+  // topic, summed over all samples). Each generated token draws z ~ theta then
+  // w ~ beta[z], so this records which phenotype generated each predicted code —
+  // used to group the posterior-predictive codes by their generating phenotype.
+  codeTopicCounts: Map<number, Map<number, number>>
 }
 
 export function runSimulator(input: SimulatorRunInput): SimulatorRunResult {
@@ -38,6 +43,7 @@ export function runSimulator(input: SimulatorRunInput): SimulatorRunResult {
   const rng = createRng(seed)
   const thetas: number[][] = []
   const bags: Map<number, number>[] = []
+  const codeTopicCounts = new Map<number, Map<number, number>>()
   for (let s = 0; s < nSamples; s++) {
     const nNew = Math.max(1, samplePoisson(meanCodesPerDoc, rng))
     const sampleCounts = new Map(prefixCounts)
@@ -54,6 +60,10 @@ export function runSimulator(input: SimulatorRunInput): SimulatorRunResult {
       const z = sampleCategorical(genTheta, rng)
       const w = sampleCategorical(beta[z], rng)
       sampleCounts.set(w, (sampleCounts.get(w) ?? 0) + 1)
+      // Attribute this generated token to the phenotype (topic z) that emitted it.
+      let tm = codeTopicCounts.get(w)
+      if (!tm) { tm = new Map<number, number>(); codeTopicCounts.set(w, tm) }
+      tm.set(z, (tm.get(z) ?? 0) + 1)
       if (autoregressive && !conditionedTheta) {
         est = variationalEStep({ alpha, beta, codeCounts: sampleCounts })
         genTheta = est.theta
@@ -76,7 +86,7 @@ export function runSimulator(input: SimulatorRunInput): SimulatorRunResult {
     }
     bags.push(completion)
   }
-  return { thetaSamples: thetas, codeCountsSamples: bags }
+  return { thetaSamples: thetas, codeCountsSamples: bags, codeTopicCounts }
 }
 
 export function quantiles(values: number[], qs: number[]): number[] {

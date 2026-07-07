@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { bundle, simulatorPrefix } from '../store'
+  import { bundle, simulatorPrefix, phenotypesById, advancedView } from '../store'
+  import { phenotypeHue } from '../palette'
   import { quantiles } from './runSamples'
   import { copy } from '../copy'
   export let codeCountsSamples: Map<number, number>[] = []
-  export let topN = 12
+  // code id -> (generating topic id -> count). Drives the per-phenotype grouping.
+  export let codeTopicCounts: Map<number, Map<number, number>> = new Map()
+  export let topN = 16
 
   // Build a set of prefix codes so we can exclude them from the
   // "expects also" list - we only want to show NEW codes the model added.
@@ -35,6 +38,45 @@
   })()
 
   $: maxP90 = predictedRows.length > 0 ? Math.max(...predictedRows.map((r) => r.p90)) : 1
+
+  // Dominant generating phenotype for a code: the topic that emitted it most
+  // often across all draws (argmax of codeTopicCounts). -1 when unattributed.
+  function domTopic(w: number): number {
+    const tm = codeTopicCounts.get(w)
+    if (!tm) return -1
+    let best = -1, bestC = -1
+    for (const [z, c] of tm) if (c > bestC) { bestC = c; best = z }
+    return best
+  }
+
+  // Group the predicted codes under the phenotype that generated them. In basic
+  // mode a dead/mixed generator folds into the "Other phenotypes" group (id -1)
+  // so a bad-quality phenotype name never surfaces — matching the rest of the UI.
+  $: groups = (() => {
+    const OTHER = -1
+    const byPheno = new Map<number, typeof predictedRows>()
+    for (const r of predictedRows) {
+      let k = domTopic(r.w)
+      if (k >= 0 && !$advancedView) {
+        const q = $phenotypesById.get(k)?.quality
+        if (q === 'dead' || q === 'mixed') k = OTHER
+      }
+      const arr = byPheno.get(k) ?? []
+      arr.push(r)
+      byPheno.set(k, arr)
+    }
+    return [...byPheno.entries()]
+      .map(([k, rows]) => ({
+        k,
+        rows: rows.slice().sort((a, b) => (b.p50 - a.p50) || (b.p90 - a.p90)),
+        total: rows.reduce((s, r) => s + r.p50, 0),
+      }))
+      // Real phenotypes first (by total predicted mass), the Other bucket last.
+      .sort((a, b) => (a.k < 0 ? 1 : 0) - (b.k < 0 ? 1 : 0) || (b.total - a.total))
+  })()
+
+  const groupLabel = (k: number) =>
+    k < 0 ? 'Other phenotypes' : ($phenotypesById.get(k)?.label || `Phenotype ${k}`)
 </script>
 
 <section class="predicted">
@@ -47,22 +89,30 @@
     {#if predictedRows.length === 0}
       <p class="hint">{codeCountsSamples.length === 0 ? copy.predictedRecord.hintEmpty : copy.predictedRecord.hintNone}</p>
     {:else}
-      <table>
-        <tbody>
-          {#each predictedRows as r}
-            {@const c = $bundle!.vocab.codes[r.w]}
-            <tr>
-              <td class="dom-cell"><span class="domain-mark dom-{c.domain}">{c.domain.slice(0, 3)}</span></td>
-              <td class="desc">{c.description || c.code}</td>
-              <td class="bar">
-                <span class="rng" style="left: {(r.p10 / maxP90) * 100}%; width: {Math.max(1, ((r.p90 - r.p10) / maxP90) * 100)}%"></span>
-                <span class="med" style="left: {(r.p50 / maxP90) * 100}%"></span>
-              </td>
-              <td class="num" data-numeric>{r.p50.toFixed(1)}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+      {#each groups as g}
+        <div class="pheno-group">
+          <div class="pheno-head">
+            <span class="pheno-dot" style="background: {g.k < 0 ? 'var(--ink-faint)' : $phenotypeHue(g.k)}"></span>
+            <span class="pheno-name">{groupLabel(g.k)}</span>
+          </div>
+          <table>
+            <tbody>
+              {#each g.rows as r}
+                {@const c = $bundle!.vocab.codes[r.w]}
+                <tr>
+                  <td class="dom-cell"><span class="domain-mark dom-{c.domain}">{c.domain.slice(0, 3)}</span></td>
+                  <td class="desc">{c.description || c.code}</td>
+                  <td class="bar">
+                    <span class="rng" style="left: {(r.p10 / maxP90) * 100}%; width: {Math.max(1, ((r.p90 - r.p10) / maxP90) * 100)}%"></span>
+                    <span class="med" style="left: {(r.p50 / maxP90) * 100}%"></span>
+                  </td>
+                  <td class="num" data-numeric>{r.p50.toFixed(1)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/each}
     {/if}
   </div>
 </section>
@@ -99,6 +149,32 @@
     color: var(--ink-faint);
     font-style: italic;
     line-height: 1.5;
+  }
+  /* Per-generating-phenotype group: a colored header over that phenotype's
+     predicted codes. */
+  .pheno-group + .pheno-group { margin-top: 0.9rem; }
+  .pheno-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.1rem 0 0.35rem;
+    font-family: var(--font-mono);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-muted);
+  }
+  .pheno-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .pheno-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   }
   table {
     width: 100%;

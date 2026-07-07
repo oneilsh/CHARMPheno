@@ -11,10 +11,9 @@
   import { ensurePatientProjection } from '../patient/projection'
   import ConditionsEditor from '../simulator/ConditionsEditor.svelte'
   import PredictedRecord from '../simulator/PredictedRecord.svelte'
-  import SimMiniMap from '../simulator/SimMiniMap.svelte'
   import StructurePlot from '../simulator/StructurePlot.svelte'
-  import ProfileBar from '../patient/ProfileBar.svelte'
   import ConditioningBar from '../conditioning/ConditioningBar.svelte'
+  import { phenotypeHue } from '../palette'
   import { copy } from '../copy'
 
   // Default N: enough samples for a stable median and a smooth atlas
@@ -126,18 +125,32 @@
   // a handler every time the Simulator tab is left and re-entered.
   $: $simulatorPrefix, (result = null)
 
-  // Mean theta across samples for the profile bar. Aggregating to mean
-  // is the right move here - taking per-component medians would not sum
-  // to 1 across phenotypes. The atlas cloud below carries the
-  // uncertainty story; the bar shows the typical mix.
   // Dominant-phenotype vote across the draws: the fraction of simulated patients
-  // whose LEADING phenotype is each one. Replaces the mean of theta, which flattens
-  // toward an even mix as the draws disagree (averaging smooths a distribution over
-  // draws); the vote concentrates when the conditions imply a clear patient and
-  // only spreads when the draws genuinely disagree. See dominantVote.
+  // whose LEADING phenotype is each one. Used only for the one-line confidence
+  // readout above the per-sample strip (the mean-θ profile bar was dropped — it
+  // flattened toward an even mix regardless of the model; the per-sample strip is
+  // the real overview). See dominantVote.
   $: voteTheta = (result && result.thetaSamples.length > 0 && $bundle)
     ? dominantVote(result.thetaSamples, $bundle.phenotypes.phenotypes, $advancedView)
     : null
+
+  // One-line "how confident is the model" verdict from the vote: a clear leader
+  // (concentrated conditions) vs a split across profiles (ambiguous conditions).
+  $: confidence = (() => {
+    if (!voteTheta || !$bundle) return null
+    const ordered = voteTheta
+      .map((v, k) => ({ k, v }))
+      .filter((x) => x.v > 0)
+      .sort((a, b) => b.v - a.v)
+    if (ordered.length === 0) return null
+    const top = ordered[0]
+    const name = (k: number) => $bundle!.phenotypes.phenotypes[k]?.label || `Phenotype ${k}`
+    const pct = (v: number) => Math.round(v * 100)
+    if (top.v >= 0.5) return { text: `Mostly ${name(top.k)} — leads ${pct(top.v)}% of draws`, hue: $phenotypeHue(top.k) }
+    if (top.v >= 0.3) return { text: `Leans ${name(top.k)} (${pct(top.v)}% of draws), but mixed`, hue: $phenotypeHue(top.k) }
+    const names = ordered.slice(0, 3).map((x) => name(x.k)).join(', ')
+    return { text: `Split across several profiles — ${names}…`, hue: null as string | null }
+  })()
 </script>
 
 <svelte:window on:click={(e) => {
@@ -196,18 +209,12 @@
     </div>
 
     <div class="right-col">
-      {#if result && voteTheta}
-        <div class="profile-block">
-          <header class="profile-head">
-            <span class="eyebrow">Phenotype mix</span>
-            <h3>{copy.simulator.phenotypeMixHeading}</h3>
-            <p class="sub">{copy.simulator.phenotypeMixSub(result.thetaSamples.length)}</p>
-          </header>
-          <ProfileBar theta={voteTheta} height={44} otherLabel="other leads" />
-        </div>
-        <StructurePlot thetaSamples={result.thetaSamples} />
-        <PredictedRecord codeCountsSamples={result.codeCountsSamples} />
-        <SimMiniMap thetaSamples={result.thetaSamples} />
+      {#if result}
+        <StructurePlot thetaSamples={result.thetaSamples} summary={confidence} />
+        <PredictedRecord
+          codeCountsSamples={result.codeCountsSamples}
+          codeTopicCounts={result.codeTopicCounts}
+        />
       {:else}
         <div class="empty-card">
           <span class="eyebrow">Awaiting input</span>
@@ -369,35 +376,6 @@
     min-width: 0;
   }
 
-  .profile-block {
-    background: var(--surface);
-    border: 1px solid var(--rule);
-    border-radius: var(--radius-sm);
-    padding: 1.25rem;
-  }
-  .profile-head {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    margin-bottom: 1rem;
-    padding-bottom: 0.85rem;
-    border-bottom: 1px solid var(--rule);
-  }
-  .profile-head h3 {
-    margin: 0;
-    font-size: 1.4rem;
-    font-weight: 600;
-    letter-spacing: var(--tracking-display);
-    line-height: 1.15;
-    color: var(--ink);
-    font-family: var(--font-mono);
-  }
-  .profile-head .sub {
-    margin: 0.15rem 0 0;
-    font-size: var(--fs-micro);
-    color: var(--ink-faint);
-    font-style: italic;
-  }
   .empty-card {
     display: flex;
     flex-direction: column;
