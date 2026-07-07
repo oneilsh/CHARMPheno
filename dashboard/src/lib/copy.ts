@@ -194,10 +194,7 @@ export const copy = {
     composition: `Each code below is split across the phenotypes the model attributes it to for this patient. Select a phenotype band above to sort and highlight by that phenotype.`,
     subOther: `Codes from this patient's record that the model attributes to phenotypes outside this patient's dominant mix, ordered by tail-responsibility.`,
     subMatch: `Every code in this patient's record, sorted and highlighted by its contribution to this phenotype.`,
-    hintNoSelection: `Click a phenotype band above to see which codes from this patient's record drove the assignment.`,
     emptyRecord: `This patient's record has no codes to attribute.`,
-    hintNoCodes: (label: string): string =>
-      `No codes from this patient's record contribute to ${label}.`,
     evidenceVsPrior: `Hatched portions of each band are phenotype mass the model leans on the population prior for, rather than this patient's own codes — an approximate evidence-vs-prior cue, not an exact split.`,
   },
 

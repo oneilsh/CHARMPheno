@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { bundle, selectedPhenotypeId, phenotypesById, searchedConditionIdx } from '../store'
+  import { bundle, selectedPhenotypeId, phenotypesById, searchedConditionIdx, advancedView } from '../store'
   import { phenotypeHue } from '../palette'
   import { go } from '../router'
   import { copy } from '../copy'
@@ -16,13 +16,30 @@
     go('atlas')
   }
 
-  $: isOther = $selectedPhenotypeId === -1
+  $: isOther = $selectedPhenotypeId === OTHER_ID
+
+  // Mirrors ProfileBar's bandHidden() basic-mode branch: dead/mixed
+  // phenotypes fold into Other regardless of theta so the code bar's
+  // Other bucket matches what the profile bar above it shows.
+  $: hiddenPhenotypes = $bundle && !$advancedView
+    ? new Set(
+        Array.from({ length: $bundle.model.K }, (_, k) => k).filter((k) => {
+          const q = $phenotypesById.get(k)?.quality
+          return q === 'dead' || q === 'mixed'
+        }),
+      )
+    : undefined
 
   $: rows = $bundle
-    ? codeComposition(theta, codeBag, $bundle.model.beta, $bundle.model.K)
+    ? codeComposition(theta, codeBag, $bundle.model.beta, $bundle.model.K, 0.05, hiddenPhenotypes)
     : []
   $: sorted = sortRowsForSelection(rows, $selectedPhenotypeId).slice(0, MAX_ROWS)
   $: hasSelection = $selectedPhenotypeId !== null
+  // Gates the header's selection-claiming bits (h3, open-in-atlas, subMatch/
+  // subOther). With zero rows the body falls back to emptyRecord, so the
+  // header must not claim a selection either — that mismatch (Fix 2) is what
+  // this guards against.
+  $: hasRows = rows.length > 0
 
   // Focus: when a band is selected, dim every segment that is not it.
   function segActive(k: number): boolean {
@@ -43,7 +60,7 @@
   <header class="head">
     <div class="top-row">
       <span class="eyebrow">{copy.contributingCodes.heading}</span>
-      {#if selectedLabel && $selectedPhenotypeId !== null && !isOther}
+      {#if selectedLabel && $selectedPhenotypeId !== null && !isOther && hasRows}
         <button
           class="open-in-atlas"
           type="button"
@@ -55,7 +72,7 @@
         </button>
       {/if}
     </div>
-    {#if selectedLabel && $selectedPhenotypeId !== null}
+    {#if selectedLabel && $selectedPhenotypeId !== null && hasRows}
       <h3>
         <!-- Bullet matches the clicked band in the profile bar above so the
              link "I clicked that band → these are its codes" reads at a
@@ -68,7 +85,7 @@
         {selectedLabel}
       </h3>
     {/if}
-    {#if $selectedPhenotypeId === null}
+    {#if !hasRows || $selectedPhenotypeId === null}
       <p class="sub">{copy.contributingCodes.composition}</p>
     {:else if isOther}
       <p class="sub">{copy.contributingCodes.subOther}</p>

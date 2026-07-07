@@ -16,14 +16,20 @@ export interface CodeRow {
 }
 
 // Per-code posterior split phi(w,k) = theta[k]*beta[k][w] / sum_j theta[j]*beta[j][w],
-// reduced to the phenotypes the profile bar shows (theta >= threshold) plus an
-// aggregated Other bucket for the tail. Patient-conditioned: depends on theta.
+// reduced to the phenotypes the profile bar shows (theta >= threshold, and not
+// folded by the caller via hiddenPhenotypes) plus an aggregated Other bucket
+// for the tail. Patient-conditioned: depends on theta.
+//
+// hiddenPhenotypes: optional set of phenotype ids to fold into Other regardless
+// of theta, so this stays in lockstep with ProfileBar's bandHidden() basic-mode
+// dead/mixed folding without this module reading any Svelte store itself.
 export function codeComposition(
   theta: number[],
   codeBag: number[],
   beta: Model['beta'],
   K: number,
   otherThreshold = 0.05,
+  hiddenPhenotypes?: Set<number>,
 ): CodeRow[] {
   const counts = new Map<number, number>()
   for (const w of codeBag) counts.set(w, (counts.get(w) ?? 0) + 1)
@@ -38,7 +44,7 @@ export function codeComposition(
       for (let j = 0; j < K; j++) {
         const weight = (beta[j][w] * theta[j]) / z
         if (weight === 0) continue
-        if (theta[j] >= otherThreshold) segments.push({ k: j, weight })
+        if (theta[j] >= otherThreshold && !hiddenPhenotypes?.has(j)) segments.push({ k: j, weight })
         else other += weight
       }
     }

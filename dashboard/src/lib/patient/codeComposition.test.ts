@@ -37,6 +37,31 @@ describe('codeComposition', () => {
     const rows = codeComposition([0.5, 0.5], [0], zeroBeta, 2, 0.05)
     expect(rows[0].segments).toEqual([])
   })
+
+  it('folds a hidden phenotype (theta >= threshold but in hiddenPhenotypes) into OTHER_ID', () => {
+    // theta[1] = 0.4 clears the 0.05 threshold on its own, but phenotype 1 is
+    // marked hidden (e.g. dead/mixed quality in basic mode), so its weight
+    // must join the Other bucket rather than getting its own segment. z(w=1)
+    // = 0.5*0.1 + 0.4*0.8 + 0.1*0.1 = 0.38, and phenotype 1's raw share of
+    // that is 0.32, i.e. 0.32/0.38 folded into Other.
+    const theta = [0.5, 0.4, 0.1]
+    const rows = codeComposition(theta, [1], beta, 3, 0.05, new Set([1]))
+    const seg1 = rows[0].segments.find((s) => s.k === 1)
+    expect(seg1).toBeUndefined()
+    const other = rows[0].segments.find((s) => s.k === OTHER_ID)
+    expect(other).toBeDefined()
+    expect(other!.weight).toBeCloseTo(0.32 / 0.38, 10)
+    // Segments still sum to 1 — nothing is dropped, only re-bucketed.
+    const total = rows[0].segments.reduce((a, b) => a + b.weight, 0)
+    expect(total).toBeCloseTo(1, 10)
+  })
+
+  it('omitting hiddenPhenotypes leaves existing behavior unchanged', () => {
+    const theta = [0.5, 0.4, 0.1]
+    const rows = codeComposition(theta, [1], beta, 3, 0.05)
+    expect(rows[0].segments.some((s) => s.k === 1)).toBe(true)
+    expect(rows[0].segments.some((s) => s.k === OTHER_ID)).toBe(false)
+  })
 })
 
 describe('explainedVsPrior', () => {
