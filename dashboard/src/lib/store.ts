@@ -3,7 +3,7 @@ import type { UMAP } from 'umap-js'
 import type { CohortManifest, DashboardBundle, Phenotype, PhenotypeQuality, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
-import { cohortCoverage, sampleThetaCohort, withinCohortCoverage, thetaColumnDistribution } from './conditioning/coverage'
+import { cohortCoverage, sampleThetaCohort, withinCohortCoverage, thetaColumnDistribution, tauAlignedBinEdges } from './conditioning/coverage'
 
 export const bundle = writable<DashboardBundle | null>(null)
 export const cohort = writable<SyntheticCohort | null>(null)
@@ -242,12 +242,18 @@ export const baselineCoverageReader = derived(
 // and it reshapes live as the covariates change. Null for non-STM bundles or
 // when nothing is selected; CodePanel falls back to the static theta_histogram.
 export const selectedPhenotypeLiveDist = derived(
-  [bundle, atlasThetaCohort, selectedPhenotypeId],
-  ([$b, $cohort, $sel]) => {
+  [bundle, atlasThetaCohort, selectedPhenotypeId, tauThreshold],
+  ([$b, $cohort, $sel, $tau]) => {
     if (!$b || !$cohort || $sel == null) return null
-    const edges = $b.phenotypes.theta_histogram_bin_edges
-    if (!edges) return null
-    return thetaColumnDistribution($cohort, $sel, edges)
+    const exported = $b.phenotypes.theta_histogram_bin_edges
+    if (!exported || exported.length < 2) return null
+    // Bin on a τ-aligned grid (first interior edge at τ, exported bin width and
+    // range) so the [0, τ) sub-threshold mass is one bucket and the first drawn
+    // bar starts flush at τ at full width. binEdges travels with the result so
+    // the histogram + its "< τ" summary use exactly these edges.
+    const w = exported[1] - exported[0]
+    const binEdges = tauAlignedBinEdges($tau, w, exported[exported.length - 1])
+    return { ...thetaColumnDistribution($cohort, $sel, binEdges), binEdges }
   }
 )
 

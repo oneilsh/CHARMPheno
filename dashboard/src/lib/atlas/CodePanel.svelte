@@ -40,8 +40,8 @@
   // coverage bubble. Fall back to the static exported theta_histogram for
   // non-STM / legacy bundles (no live cohort).
   $: histEdges = $bundle?.phenotypes.theta_histogram_bin_edges
-  $: histSource = $selectedPhenotypeLiveDist && histEdges
-    ? { hist: $selectedPhenotypeLiveDist.histogram as (number | null)[], pcts: $selectedPhenotypeLiveDist.percentiles, edges: histEdges }
+  $: histSource = $selectedPhenotypeLiveDist
+    ? { hist: $selectedPhenotypeLiveDist.histogram as (number | null)[], pcts: $selectedPhenotypeLiveDist.percentiles, edges: $selectedPhenotypeLiveDist.binEdges }
     : (hasHistogram && pheno && histEdges
         ? { hist: pheno.theta_histogram!, pcts: pheno.theta_percentiles!, edges: histEdges }
         : null)

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { cohortCoverage, sampleThetaCohort, withinCohortCoverage, thetaColumnDistribution } from './coverage'
+import { cohortCoverage, sampleThetaCohort, withinCohortCoverage, thetaColumnDistribution, tauAlignedBinEdges } from './coverage'
 import { sampleConditionedTheta } from './logisticNormal'
 import { sampleMarginalCovariates, sampleMarginalGroup } from './marginalSampler'
 import { buildDesignVector } from '../covariate'
@@ -28,6 +28,28 @@ describe('withinCohortCoverage', () => {
   it('leaves a foreground topic unchanged when its group share is missing/zero', () => {
     expect(withinCohortCoverage([0.5, 0.3, 0.03], blocks, {})).toEqual([0.5, 0.3, 0.03])
     expect(withinCohortCoverage([0.5, 0.3, 0.03], blocks, { grp: 0 })).toEqual([0.5, 0.3, 0.03])
+  })
+})
+
+describe('tauAlignedBinEdges', () => {
+  it('pins τ as the first interior edge so [0, τ) is one bucket and bins above start flush at τ', () => {
+    // τ=0.05 does NOT sit on the 0.02 grid; the edges must still start the first
+    // drawn bin exactly at τ (full width) rather than cutting a 0.04..0.06 bin.
+    const e = tauAlignedBinEdges(0.05, 0.02, 1)
+    expect(e[0]).toBe(0)
+    expect(e[1]).toBeCloseTo(0.05, 10)
+    expect(e[2]).toBeCloseTo(0.07, 10)
+    expect(e[e.length - 1]).toBe(1)
+    // strictly increasing
+    for (let i = 1; i < e.length; i++) expect(e[i]).toBeGreaterThan(e[i - 1])
+  })
+
+  it('when τ already lands on the grid, it matches the plain uniform edges', () => {
+    expect(tauAlignedBinEdges(0.1, 0.1, 1)).toEqual([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1])
+  })
+
+  it('falls back to plain uniform bins when τ is non-positive', () => {
+    expect(tauAlignedBinEdges(0, 0.25, 1)).toEqual([0, 0.25, 0.5, 0.75, 1])
   })
 })
 

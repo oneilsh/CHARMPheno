@@ -32,7 +32,9 @@ it("the histogram's tail above τ equals the phenotype's coverage bubble (same l
   selectedPhenotypeId.set(1)
   const d = get(selectedPhenotypeLiveDist)!
   const tau = get(tauThreshold)
-  const tail = EDGES.slice(0, -1).reduce((s, lo, i) => s + (lo >= tau ? d.histogram[i] : 0), 0)
+  // Use the store's own (τ-aligned) edges, not the exported grid.
+  const edges = d.binEdges
+  const tail = edges.slice(0, -1).reduce((s, lo, i) => s + (lo >= tau ? d.histogram[i] : 0), 0)
   const cov = get(coverageReader)
   expect(tail).toBeCloseTo(cov(b.phenotypes.phenotypes[1]), 6)
 })
