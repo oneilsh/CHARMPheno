@@ -4,8 +4,10 @@ import type {
 import {
   createRng, sampleDirichlet, sampleCategorical, samplePoisson,
 } from './sampling'
-import { sampleConditionedTheta } from './conditioning/logisticNormal'
-import { sampleRecordPosterior } from './conditioning/recordPosterior'
+import { prepareConditionedGroup, drawConditionedTheta } from './conditioning/logisticNormal'
+import type { GroupPrep } from './conditioning/logisticNormal'
+import { prepareRecordPosterior, drawRecordPosterior } from './conditioning/recordPosterior'
+import type { RecordPosteriorPrep } from './conditioning/recordPosterior'
 import { sampleMarginalCovariates, sampleMarginalGroup, resolveGroup } from './conditioning/marginalSampler'
 import { buildDesignVector } from './covariate'
 
@@ -116,36 +118,52 @@ export function generateCohort(input: CohortInput): SyntheticCohort {
   // logistic-normal (sampleConditionedTheta), or - in 'set' mode with a
   // shared prefix - the faithful record-completion posterior
   // (sampleRecordPosterior); see CohortConditioning.
+  // Per-group prep caches (this generateCohort call only). The RNG-free work —
+  // the record-completion posterior's Fisher-scored mode + Laplace factor
+  // ('set'), or the group's Cholesky ('sample') — is identical for every
+  // patient sharing a group, and is O(free³), so recomputing it per patient
+  // freezes the tab at large K. Prepare once per group, draw N times. Set mode
+  // shares one x (setX), so a full RecordPosteriorPrep caches; sample mode
+  // varies x per patient, so only the group-only GroupPrep caches and
+  // drawConditionedTheta recomputes the mean per draw. (Same idea as
+  // coverage.ts's prepCache and prepareConditionedGroup.)
+  const setPrepCache = new Map<string | null, RecordPosteriorPrep>()
+  const samplePrepCache = new Map<string | null, GroupPrep>()
+  const emptyPrefix = new Map<number, number>()
+
   const drawOne = () => {
     let theta: number[]
     let group: string | null = null
     if (stm) {
       const b = cc!.bundle
+      const topicBlocks = b.gating?.topic_blocks ?? null
       if (cc!.mode === 'set') {
         // Resolve the source-cohort selection per patient: a concrete group or
         // background-only (null) is shared by all, but the "all subcohorts"
         // sentinel draws a fresh group from the population mix each draw, so a
         // set-covariate cohort still spreads realistically across subcohorts.
         group = resolveGroup(cc!.group, b.gating, rng)
-        if (cc!.prefixCounts?.size) {
-          theta = sampleRecordPosterior({
+        let prep = setPrepCache.get(group)
+        if (!prep) {
+          prep = prepareRecordPosterior({
             effects: b.covariateEffects!, x: setX!, correlation: b.correlation!,
-            topicBlocks: b.gating?.topic_blocks ?? null, group,
-            prefixCounts: cc!.prefixCounts, beta: cc!.beta!, rng,
+            topicBlocks, group,
+            prefixCounts: cc!.prefixCounts ?? emptyPrefix, beta: cc!.beta ?? b.model.beta,
           })
-        } else {
-          theta = sampleConditionedTheta({
-            effects: b.covariateEffects!, x: setX!, correlation: b.correlation!,
-            topicBlocks: b.gating?.topic_blocks ?? null, group, rng,
-          })
+          setPrepCache.set(group, prep)
         }
+        theta = drawRecordPosterior(prep, rng)
       } else {
         const vals = sampleMarginalCovariates(b.covariateSchema!, rng)
         group = b.gating ? sampleMarginalGroup(b.gating, rng) : null
         const x = buildDesignVector(b.covariateSchema!.design_columns, vals)
-        theta = sampleConditionedTheta({
-          effects: b.covariateEffects!, x, correlation: b.correlation!,
-          topicBlocks: b.gating?.topic_blocks ?? null, group, rng,
+        let gp = samplePrepCache.get(group)
+        if (!gp) {
+          gp = prepareConditionedGroup({ correlation: b.correlation!, topicBlocks, group })
+          samplePrepCache.set(group, gp)
+        }
+        theta = drawConditionedTheta(gp, {
+          effects: b.covariateEffects!, x, correlation: b.correlation!, rng,
         })
       }
     } else {

@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { createRng } from '../sampling'
 import { sampleConditionedTheta } from './logisticNormal'
-import { sampleRecordPosterior } from './recordPosterior'
+import {
+  sampleRecordPosterior, prepareRecordPosterior, drawRecordPosterior,
+} from './recordPosterior'
 import type { Correlation, CovariateEffects } from '../types'
 
 function identityCorr(order: number[]): Correlation {
@@ -14,6 +16,43 @@ function identityCorr(order: number[]): Correlation {
 const beta3 = [[0.34, 0.33, 0.33], [0.9, 0.05, 0.05], [0.05, 0.9, 0.05]]  // K=3, V=3
 
 describe('sampleRecordPosterior', () => {
+  it('cached prepareRecordPosterior + N draws is byte-identical to N full calls (memoization guarantee)', () => {
+    // The callers (Simulator, generateCohort) prepare ONCE per group and draw
+    // many patients from the cached prep; this must produce exactly the same
+    // sequence as calling sampleRecordPosterior fresh each time on the same RNG
+    // stream. Covers the empty-prefix (prior), non-empty (Laplace), and gated
+    // paths — the three shapes prepare returns.
+    const effects: CovariateEffects = [
+      { covariate: 'Intercept', per_topic: [0, 0.4, -0.3, 0.1] },
+      { covariate: 'age', per_topic: [0, -0.01, 0.02, 0.0] },
+    ]
+    const corr = identityCorr([1, 2, 3])                 // K=4 display ids, ref 0
+    const beta = [
+      [0.4, 0.3, 0.2, 0.1], [0.85, 0.05, 0.05, 0.05],
+      [0.05, 0.85, 0.05, 0.05], [0.05, 0.05, 0.85, 0.05],
+    ]
+    const gatedBlocks = ['background', 'background', 'background', 'eds']
+    const scenarios = [
+      { topicBlocks: null as string[] | null, group: null as string | null, prefixCounts: new Map<number, number>() },
+      { topicBlocks: null, group: null, prefixCounts: new Map([[0, 5], [1, 2]]) },
+      { topicBlocks: gatedBlocks, group: 'eds', prefixCounts: new Map([[2, 4]]) },
+    ]
+    for (const sc of scenarios) {
+      const base = {
+        effects, x: [1, 55], correlation: corr,
+        topicBlocks: sc.topicBlocks, group: sc.group, prefixCounts: sc.prefixCounts, beta,
+      }
+      const rngCached = createRng(123)
+      const rngFull = createRng(123)
+      const prep = prepareRecordPosterior(base)
+      for (let i = 0; i < 25; i++) {
+        expect(drawRecordPosterior(prep, rngCached)).toEqual(
+          sampleRecordPosterior({ ...base, rng: rngFull }),
+        )
+      }
+    }
+  })
+
   it('empty prefix reduces exactly to the prior draw', () => {
     const effects: CovariateEffects = [{ covariate: 'Intercept', per_topic: [0, 0.3, -0.2] }]
     const corr = identityCorr([1, 2])

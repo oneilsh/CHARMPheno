@@ -1,6 +1,25 @@
-import { sampleConditionedTheta, mvnDraw, buildGenerativeSigma } from './logisticNormal'
+import {
+  mvnDraw, buildGenerativeSigma,
+  prepareConditionedGroup, drawConditionedTheta,
+} from './logisticNormal'
+import type { GroupPrep } from './logisticNormal'
 import { choleskyPD, invSPD, solveSPD } from './linalg'
 import type { CovariateEffects, Correlation } from '../types'
+
+// A precomputed, RNG-FREE record-posterior for one (covariates x, group,
+// prefix): everything a draw needs except the random Gaussian. For an empty
+// prefix the posterior IS the prior, so we carry a GroupPrep and delegate the
+// draw to drawConditionedTheta (byte-identical to sampleConditionedTheta). For
+// a non-empty prefix we carry the Laplace approximation: the posterior mode
+// (eta*) and the Cholesky factor L of its covariance H⁻¹, plus the bookkeeping
+// (K, reference topic, and the free display-topic ids) the draw needs to
+// assemble theta. The expensive Fisher scoring + matrix inverses live entirely
+// here, so a cohort that samples many patients at the SAME x/group/prefix can
+// prepare once and draw N times — the fix for O(free³)-per-draw blowup at large
+// K (see coverage.ts / prepareConditionedGroup for the same idea on the prior).
+export type RecordPosteriorPrep =
+  | { kind: 'prior'; prep: GroupPrep; effects: CovariateEffects; x: number[]; correlation: Correlation }
+  | { kind: 'laplace'; K: number; ref: number; refAllowed: boolean; ids: number[]; mode: number[]; L: number[][] }
 
 // Faithful STM record completion. The prefix (observed starting conditions)
 // conditions theta via the posterior over eta under the covariate/group prior
@@ -10,7 +29,7 @@ import type { CovariateEffects, Correlation } from '../types'
 // covariance is Sigma -> this reduces exactly to sampleConditionedTheta (the
 // covariate/group prior draw), which is why cohort generation and record
 // completion are a single code path.
-export function sampleRecordPosterior(args: {
+export function prepareRecordPosterior(args: {
   effects: CovariateEffects
   x: number[]
   correlation: Correlation
@@ -18,14 +37,15 @@ export function sampleRecordPosterior(args: {
   group: string | null
   prefixCounts: Map<number, number>
   beta: number[][]
-  rng: () => number
-}): number[] {
-  const { effects, x, correlation, topicBlocks, group, prefixCounts, beta, rng } = args
+}): RecordPosteriorPrep {
+  const { effects, x, correlation, topicBlocks, group, prefixCounts, beta } = args
 
-  // Empty prefix: the posterior is the prior. Delegate so the draw is identical
-  // — this keeps the "empty prefix == prior draw" invariant true.
+  // Empty prefix: the posterior is the prior. Carry a GroupPrep and let the
+  // draw go through drawConditionedTheta — identical to sampleConditionedTheta,
+  // preserving the "empty prefix == prior draw" invariant.
   if (prefixCounts.size === 0) {
-    return sampleConditionedTheta({ effects, x, correlation, topicBlocks, group, rng })
+    const prep = prepareConditionedGroup({ correlation, topicBlocks, group })
+    return { kind: 'prior', prep, effects, x, correlation }
   }
 
   const K = effects[0]?.per_topic.length ?? 0
@@ -59,10 +79,9 @@ export function sampleRecordPosterior(args: {
   const Sigma = buildGenerativeSigma(correlation, freeIdx)
 
   if (F === 0) {
-    // Only the reference is allowed: all mass on it (or empty -> uniform-safe).
-    const theta = new Array<number>(K).fill(0)
-    if (refAllowed) theta[ref] = 1
-    return theta
+    // Only the reference is allowed: the draw assembles all mass on it (empty
+    // ids -> no Gaussian consumed, exactly as the prior path would).
+    return { kind: 'laplace', K, ref, refAllowed, ids: [], mode: [], L: [] }
   }
 
   const Sinv = invSPD(Sigma)
@@ -173,7 +192,7 @@ export function sampleRecordPosterior(args: {
     if (maxAbs < 1e-6) break
   }
 
-  // Laplace covariance = H⁻¹ at the mode; draw eta ~ Normal(eta*, H⁻¹).
+  // Laplace covariance = H⁻¹ at the mode; the draw samples eta ~ Normal(eta*, H⁻¹).
   const { thetaFree } = thetaFromEta(eta)
   const H = Sinv.map((row) => row.slice())
   for (let c = 0; c < codes.length; c++) {
@@ -184,9 +203,25 @@ export function sampleRecordPosterior(args: {
     }
   }
   const cov = invSPD(H)
-  const etaDraw = mvnDraw(eta, choleskyPD(cov), rng)
+  return { kind: 'laplace', K, ref, refAllowed, ids, mode: eta, L: choleskyPD(cov) }
+}
 
-  // Assemble theta over all K display topics.
+// The per-draw part: consume the RNG once (F standard-normals via mvnDraw at the
+// mode) and softmax to theta over the K display topics. For a prior prep this is
+// exactly drawConditionedTheta; for a Laplace prep it draws from the Gaussian
+// around the posterior mode. This is the ONLY RNG-consuming step, so the stream
+// is identical whether the prep was freshly computed or cached.
+export function drawRecordPosterior(prep: RecordPosteriorPrep, rng: () => number): number[] {
+  if (prep.kind === 'prior') {
+    return drawConditionedTheta(prep.prep, {
+      effects: prep.effects, x: prep.x, correlation: prep.correlation, rng,
+    })
+  }
+  const { K, ref, refAllowed, ids, mode, L } = prep
+  const etaDraw = ids.length ? mvnDraw(mode, L, rng) : []
+
+  // Assemble theta over all K display topics: reference -> 0, free -> drawn,
+  // masked -> -Infinity (exactly zero after softmax).
   const logits = new Array<number>(K).fill(-Infinity)
   if (refAllowed) logits[ref] = 0
   ids.forEach((k, i) => { logits[k] = etaDraw[i] })
@@ -195,4 +230,21 @@ export function sampleRecordPosterior(args: {
   const ex = logits.map((e) => (e === -Infinity ? 0 : Math.exp(e - mx)))
   const s = ex.reduce((a, b) => a + b, 0) || 1
   return ex.map((e) => e / s)
+}
+
+// Convenience wrapper: prepare then draw once. Cohort/simulator callers that
+// draw many patients at the SAME (x, group, prefix) should instead cache
+// prepareRecordPosterior per group and call drawRecordPosterior directly.
+export function sampleRecordPosterior(args: {
+  effects: CovariateEffects
+  x: number[]
+  correlation: Correlation
+  topicBlocks: string[] | null
+  group: string | null
+  prefixCounts: Map<number, number>
+  beta: number[][]
+  rng: () => number
+}): number[] {
+  const { rng, ...rest } = args
+  return drawRecordPosterior(prepareRecordPosterior(rest), rng)
 }

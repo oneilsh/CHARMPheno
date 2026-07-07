@@ -5,7 +5,8 @@
   import { runSimulator } from '../simulator/runSamples'
   import { buildDesignVector } from '../covariate'
   import { resolveGroup } from '../conditioning/marginalSampler'
-  import { sampleRecordPosterior } from '../conditioning/recordPosterior'
+  import { prepareRecordPosterior, drawRecordPosterior } from '../conditioning/recordPosterior'
+  import type { RecordPosteriorPrep } from '../conditioning/recordPosterior'
   import { createRng } from '../sampling'
   import { generateCohort } from '../cohort'
   import { dominantVote } from '../dominant'
@@ -70,17 +71,24 @@
         const tRng = createRng(seed ^ 0x9e3779b9)
         // Resolve the group per draw so an "all subcohorts" selection spreads
         // each sampled record across the population mix (concrete group / null
-        // pass through unchanged); see resolveGroup.
-        conditionedTheta = () => sampleRecordPosterior({
-          effects: b.covariateEffects!,
-          x,
-          correlation: b.correlation!,
-          topicBlocks: b.gating?.topic_blocks ?? null,
-          group: resolveGroup(cond.group, b.gating, tRng),
-          prefixCounts,
-          beta: b.model.beta,
-          rng: tRng,
-        })
+        // pass through unchanged); see resolveGroup. The record-posterior prep
+        // (mode + Laplace factor) is RNG-free and identical for every draw in a
+        // group, so cache it per group and only draw() per sample — recomputing
+        // the O(free³) prep per draw froze the tab at large K (e.g. K=100 EDS).
+        const topicBlocks = b.gating?.topic_blocks ?? null
+        const prepCache = new Map<string | null, RecordPosteriorPrep>()
+        conditionedTheta = () => {
+          const g = resolveGroup(cond.group, b.gating, tRng)
+          let prep = prepCache.get(g)
+          if (!prep) {
+            prep = prepareRecordPosterior({
+              effects: b.covariateEffects!, x, correlation: b.correlation!,
+              topicBlocks, group: g, prefixCounts, beta: b.model.beta,
+            })
+            prepCache.set(g, prep)
+          }
+          return drawRecordPosterior(prep, tRng)
+        }
       }
       result = runSimulator({
         alpha: b.model.alpha,
