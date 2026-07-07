@@ -97,26 +97,27 @@
         <p class="desc-text">{pheno.description}</p>
       {/if}
       <div class="stats" data-numeric data-tour="detail-stats">
-        <span class="stat" title={hasHistogram
-          ? ($advancedView
-            ? copy.phenotypeDetail.coverage.tipAdvanced($tauThreshold)
-            : copy.phenotypeDetail.coverage.tipBasic($tauThreshold))
-          : copy.phenotypeDetail.coverage.tipNoHistogram
-        }>
-          <span class="stat-k">{hasHistogram && $advancedView ? copy.phenotypeDetail.coverage.labelAdvanced : copy.phenotypeDetail.coverage.labelBasic}<span class="help-mark" aria-hidden="true">?</span></span>
-          <span class="stat-v">{(reader(pheno) * 100).toFixed(1)}%</span>
+        <!-- Basic-view headline stat = coherence: the most interpretable "is this
+             a real, tight phenotype" number for a lay reader. Coverage (subtle to
+             interpret) moves to advanced view. -->
+        <span class="stat" title={copy.phenotypeDetail.coherenceTip}>
+          <span class="stat-k">Coherence<span class="help-mark" aria-hidden="true">?</span></span>
+          <span class="stat-v">{pheno.npmi == null ? '—' : pheno.npmi.toFixed(3)}</span>
         </span>
         {#if $advancedView}
+          <span class="stat" title={hasHistogram
+            ? copy.phenotypeDetail.coverage.tipAdvanced($tauThreshold)
+            : copy.phenotypeDetail.coverage.tipNoHistogram
+          }>
+            <span class="stat-k">{copy.phenotypeDetail.coverage.labelAdvanced}<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="stat-v">{(reader(pheno) * 100).toFixed(1)}%</span>
+          </span>
           {#if hasHistogram}
             <span class="stat" title={copy.phenotypeDetail.topicMassTip}>
               <span class="stat-k">Topic mass</span>
               <span class="stat-v">{(pheno.corpus_prevalence * 100).toFixed(1)}%</span>
             </span>
           {/if}
-          <span class="stat" title={copy.phenotypeDetail.coherenceTip}>
-            <span class="stat-k">Coherence</span>
-            <span class="stat-v">{pheno.npmi == null ? '—' : pheno.npmi.toFixed(3)}</span>
-          </span>
           <span class="stat" title={copy.phenotypeDetail.pairCoverageTip}>
             <span class="stat-k">Pair cov</span>
             <span class="stat-v">{pheno.pair_coverage == null ? '—' : (pheno.pair_coverage * 100).toFixed(0) + '%'}</span>

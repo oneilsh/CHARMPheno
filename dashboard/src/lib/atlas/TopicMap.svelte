@@ -121,7 +121,7 @@
   // fitted to the bundle's actual NPMI spread each render (see render()), so the
   // full opacity range is used across the observed coherence range rather than a
   // fixed [0.05, 0.4] that may under-use it. Range floor 0.45 keeps a wide span.
-  const cohOpacity = d3.scaleLinear().domain([0.05, 0.4]).range([0.45, 0.95]).clamp(true)
+  const cohOpacity = d3.scaleLinear().domain([0.05, 0.4]).range([0.3, 1.0]).clamp(true)
 
   function render() {
     if (!$bundle || !svgEl || coords.length === 0) return
