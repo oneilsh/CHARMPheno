@@ -16,10 +16,11 @@
   import { phenotypeHue } from '../palette'
   import { copy } from '../copy'
 
-  // Default N: enough samples for a stable median and a smooth atlas
-  // cloud, low enough that even autoregressive mode (which re-fits theta
-  // per token) feels responsive.
-  const DEFAULT_N = 200
+  // Default N: enough samples for stable occurrence-rate estimates in the
+  // posterior-predictive panel and a smooth per-sample strip. The fast
+  // (non-autoregressive) path is ~2 E-steps per sample, so 500 stays snappy;
+  // autoregressive mode (re-fits theta per token) is the slow opt-in.
+  const DEFAULT_N = 500
 
   // Explore-Cohort ("$cohort") sizing for the cohort this Simulate click
   // generates - matches App.svelte's initial-load defaults (same N/

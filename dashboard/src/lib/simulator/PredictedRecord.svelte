@@ -98,7 +98,6 @@
               {#each g.rows as r}
                 {@const c = $bundle!.vocab.codes[r.w]}
                 <tr>
-                  <td class="dom-cell"><span class="domain-mark dom-{c.domain}">{c.domain.slice(0, 3)}</span></td>
                   <td class="desc">{c.description || c.code}</td>
                   <td class="bar">
                     <span class="fill" style="width: {Math.max(1, r.rate * 100)}%"></span>
@@ -184,7 +183,6 @@
     vertical-align: middle;
   }
   tr:last-child td { border-bottom: 0; }
-  td.dom-cell { width: 4rem; }
   td.desc {
     color: var(--ink);
     overflow: hidden;
