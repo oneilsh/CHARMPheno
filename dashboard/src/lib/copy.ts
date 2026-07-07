@@ -52,8 +52,6 @@ export const copy = {
     ],
     legend: {
       coherence: `Coherence: how reliably the phenotype's leading conditions actually co-occur in the same patients. Higher means the conditions really do show up together; lower means the pattern is weaker or more diffuse. (Bubble color encodes this.)`,
-      prevalence: (tau: number): string =>
-        `Prevalence: estimated share of patients for whom this phenotype makes up at least ${pct(tau)}% (τ) of their coded activity. Bubble size scales with this share.`,
       coverage: (tau: number): string =>
         `Patient coverage: the fraction of patients for whom this phenotype accounts for more than ${pct(tau)}% of their coded activity (θ > ${tau.toFixed(2)}). Bubble size scales with this value; covariate sliders resample it, so bubbles grow or shrink with the population you condition on.`,
       topicMass: `Topic mass: mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.`,

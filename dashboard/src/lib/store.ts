@@ -167,9 +167,18 @@ export function fractionAboveTau(
 const ATLAS_COHORT_N = 1500
 const ATLAS_COHORT_SEED = 20260706
 
+// Requires covariateSchema too: sampleThetaCohort (coverage.ts) force-unwraps
+// b.covariateSchema! for any bundle routed through here, so a bundle missing
+// the schema must fall back to fractionAboveTau rather than throw.
 function isStmBundle(b: DashboardBundle | null): b is DashboardBundle {
-  return !!b && !!b.covariateEffects && !!b.correlation
+  return !!b && !!b.covariateEffects && !!b.correlation && !!b.covariateSchema
 }
+
+// Note: unlike the old prevalenceReader, which disabled conditioning outright
+// when schema.unsupported was non-empty, the generative path here always
+// samples — buildDesignVector coerces any uncontrolled/missing design term to
+// 0, a benign, consistent behavior applied in both the marginal baseline and
+// the covariate-fixed cohort below.
 
 // Marginal (baseline) atlas cohort: the corpus's natural covariate/group mix.
 // Recomputed ONLY when the bundle changes (not on covariate edits), so it is a
@@ -252,9 +261,11 @@ export const depthReader = derived([bundle], () =>
 // (Phenotype) -> number reader for "mean_gain": the topic's mean unique
 // held-out predictive contribution (nats). Mirrors presenceReader/depthReader
 // — null/undefined (older/non-gated bundles with no predictive_gain block)
-// reads as 0 rather than throwing/NaN-ing through downstream math. This is
-// the primary size-source for the Task 6b TopicMap bubble-size swap (see
-// meanGainReader usage in atlas/TopicMap.svelte).
+// reads as 0 rather than throwing/NaN-ing through downstream math. The
+// Task 6b TopicMap bubble-size swap that once consumed this was removed;
+// TopicMap sizes bubbles by coverage now (see coverageReader). This reader's
+// only remaining consumer is the CodePanel "Distinctiveness" advanced-view
+// stat (phenotypeDetail.distinctivenessTip).
 export const meanGainReader = derived([bundle], () =>
   (p: Phenotype) => p.mean_gain ?? 0
 )
