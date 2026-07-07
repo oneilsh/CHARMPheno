@@ -8,6 +8,9 @@
   export let labels = true
   export let onSelect: ((id: number) => void) | null = null
   export let otherThreshold = 0.05
+  // Label for the folded-tail band. Defaults to "Other" (the comorbid-mix
+  // reading); the Simulator's dominant-vote bar passes "other leads".
+  export let otherLabel = 'Other'
   // The patient's code bag. When provided AND the user has pinned a
   // condition via the search box AND this patient actually has that
   // condition, magenta dots mark every band whose phenotype contains
@@ -59,7 +62,7 @@
       {#if otherFrac > 0}
         <span class="band-label other" style="width: {(otherFrac * 100).toFixed(2)}%">
           <span class="dot"></span>
-          <span class="lab">Other</span>
+          <span class="lab">{otherLabel}</span>
         </span>
       {/if}
     </div>

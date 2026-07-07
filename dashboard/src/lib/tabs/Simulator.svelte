@@ -7,6 +7,7 @@
   import { sampleRecordPosterior } from '../conditioning/recordPosterior'
   import { createRng } from '../sampling'
   import { generateCohort } from '../cohort'
+  import { dominantVote } from '../dominant'
   import { ensurePatientProjection } from '../patient/projection'
   import ConditionsEditor from '../simulator/ConditionsEditor.svelte'
   import PredictedRecord from '../simulator/PredictedRecord.svelte'
@@ -129,14 +130,14 @@
   // is the right move here - taking per-component medians would not sum
   // to 1 across phenotypes. The atlas cloud below carries the
   // uncertainty story; the bar shows the typical mix.
-  $: meanTheta = (() => {
-    if (!result || result.thetaSamples.length === 0) return null
-    const K = result.thetaSamples[0].length
-    const m = new Array(K).fill(0)
-    for (const t of result.thetaSamples) for (let k = 0; k < K; k++) m[k] += t[k]
-    for (let k = 0; k < K; k++) m[k] /= result.thetaSamples.length
-    return m as number[]
-  })()
+  // Dominant-phenotype vote across the draws: the fraction of simulated patients
+  // whose LEADING phenotype is each one. Replaces the mean of theta, which flattens
+  // toward an even mix as the draws disagree (averaging smooths a distribution over
+  // draws); the vote concentrates when the conditions imply a clear patient and
+  // only spreads when the draws genuinely disagree. See dominantVote.
+  $: voteTheta = (result && result.thetaSamples.length > 0 && $bundle)
+    ? dominantVote(result.thetaSamples, $bundle.phenotypes.phenotypes, $advancedView)
+    : null
 </script>
 
 <svelte:window on:click={(e) => {
@@ -195,14 +196,14 @@
     </div>
 
     <div class="right-col">
-      {#if result && meanTheta}
+      {#if result && voteTheta}
         <div class="profile-block">
           <header class="profile-head">
             <span class="eyebrow">Phenotype mix</span>
             <h3>{copy.simulator.phenotypeMixHeading}</h3>
             <p class="sub">{copy.simulator.phenotypeMixSub(result.thetaSamples.length)}</p>
           </header>
-          <ProfileBar theta={meanTheta} height={44} />
+          <ProfileBar theta={voteTheta} height={44} otherLabel="other leads" />
         </div>
         <StructurePlot thetaSamples={result.thetaSamples} />
         <PredictedRecord codeCountsSamples={result.codeCountsSamples} />

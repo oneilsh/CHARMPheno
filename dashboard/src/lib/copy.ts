@@ -186,8 +186,9 @@ export const copy = {
     ],
     runSub: `Draw a batch of plausible patients from the conditions above.`,
     autoregressiveTip: `When on, the model re-evaluates the phenotype mix after every drawn code so each token shifts the next one's distribution.`,
-    phenotypeMixHeading: `This patient is a mix of…`,
-    phenotypeMixSub: (n: number): string => `Average across ${n} simulated draws.`,
+    phenotypeMixHeading: `This patient most often looks like…`,
+    phenotypeMixSub: (n: number): string =>
+      `Share of ${n} simulated draws where each phenotype is the patient's leading one. A clear winner means the conditions point to one kind of patient; a spread means they're consistent with several.`,
     emptyFromScratch: `Add some starting conditions on the left (or just hit Simulate to draw patients from scratch), then click <strong>simulate →</strong> to see what kind of patient this looks like.`,
     emptyReady: (n: number): string =>
       `${n} starting condition${n === 1 ? '' : 's'} ready. Click <strong>simulate →</strong> to see what kind of patient this looks like.`,
