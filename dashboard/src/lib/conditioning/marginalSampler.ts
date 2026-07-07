@@ -45,6 +45,29 @@ export function sampleMarginalCovariates(
 // now sum to (1 - background_only_proportion). Older bundles that lack these
 // fields fall back to a uniform draw over the foreground groups (never null),
 // preserving prior behavior.
+// Sentinel group value meaning "sample across all subcohorts": instead of
+// pinning one foreground group (or null for background-only), each patient
+// draws its own group from the population mix (sampleMarginalGroup). Kept
+// distinct from null and from any real group name so a source-cohort picker
+// can offer three intents — one subcohort, background-only, or the whole
+// population — without overloading null.
+export const ALL_SUBCOHORTS = '__all__'
+
+// Resolve a conditioning group to the concrete group used for ONE draw. A
+// real group name (or null for background-only) passes through unchanged; the
+// ALL_SUBCOHORTS sentinel draws a fresh per-patient group from the population
+// mix, so calling this once per sample yields a realistic cohort spread across
+// subcohorts. Returns null for the sentinel when the bundle has no gating
+// (there are no subcohorts to spread across).
+export function resolveGroup(
+  group: string | null,
+  gating: GatingSpec | null | undefined,
+  rng: () => number,
+): string | null {
+  if (group === ALL_SUBCOHORTS) return gating ? sampleMarginalGroup(gating, rng) : null
+  return group
+}
+
 export function sampleMarginalGroup(gating: GatingSpec, rng: () => number): string | null {
   const groups = gating.groups
   const props = gating.group_proportions

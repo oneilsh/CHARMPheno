@@ -4,8 +4,16 @@
   import type { CovariateSchema } from '../types'
   import { populationLines } from './population'
   import { initialValues, canInteract } from '../atlas/covariate-panel'
+  import { ALL_SUBCOHORTS } from './marginalSampler'
 
   export let store: import('svelte/store').Writable<import('../store').Conditioning>
+  // Layout variant for the non-inline (page) rendering:
+  //   'bar'     — horizontal page-top strip (Patient tab). The default.
+  //   'stacked' — a self-contained card with a full-width source-cohort select
+  //               and vertically-stacked covariate controls, for embedding in a
+  //               narrow column (the Simulator's left recipe column). Only the
+  //               stacked variant offers the "all subcohorts" group option.
+  export let layout: 'bar' | 'stacked' = 'bar'
   // Whether to show the gating-group (cohort) selector. The Phenotype Atlas
   // sets this false: it encodes cohort as node color and shows all cohorts, so
   // a filter dropdown there would be redundant. Simulator/Patient keep it (they
@@ -128,6 +136,99 @@
       {/if}
     </div>
   {/if}
+{:else if layout === 'stacked' && visible}
+  <!-- Stacked card (Simulator left column): source-cohort select on top, then a
+       covariate disclosure whose controls stack vertically like the Phenotype
+       Atlas's Patient-Features drawer. -->
+  <section class="cohort-panel">
+    <header class="cp-head">
+      <span class="eyebrow">Source cohort</span>
+      <p class="cp-sub">Who to sample from — and, optionally, the covariate profile to condition on.</p>
+    </header>
+
+    {#if hasGroup && gating}
+      <label class="cp-field">
+        <span class="control-label">{gating.group_var_label ?? gating.group_var}</span>
+        <select
+          class="cat-select cp-select"
+          value={$store.group ?? ''}
+          on:change={(e) => store.update((c) => ({ ...c, group: e.currentTarget.value === '' ? null : e.currentTarget.value }))}
+        >
+          <option value={ALL_SUBCOHORTS}>All subcohorts</option>
+          {#each gating.groups as g}
+            <option value={g}>{gating.group_labels?.[g] ?? g}</option>
+          {/each}
+          <option value="">Background only</option>
+        </select>
+      </label>
+    {/if}
+
+    {#if hasCovariates && schema}
+      <div class="cp-cov">
+        <label class="toggle-label" title="When on, generation conditions each patient on the covariate values below instead of the corpus-average profile.">
+          <input
+            type="checkbox"
+            class="toggle-input"
+            checked={$store.covariateActive}
+            on:change={(e) => store.update((c) => ({ ...c, covariateActive: e.currentTarget.checked }))}
+          />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          <span class="toggle-text">{$store.covariateActive ? 'custom covariates' : 'average covariates'}</span>
+        </label>
+
+        {#if $store.covariateActive}
+          <div class="cp-controls">
+            {#each schema.controls as control (control.name)}
+              <div class="control-block">
+                {#if control.type === 'continuous'}
+                  {@const min = control.range?.[0] ?? 0}
+                  {@const max = control.range?.[1] ?? 100}
+                  <div class="control-top">
+                    <span class="control-label">{control.name}</span>
+                    <span class="control-value" data-numeric>{local[control.name]}</span>
+                  </div>
+                  <input
+                    type="range"
+                    {min}
+                    {max}
+                    step="1"
+                    value={local[control.name]}
+                    on:input={(e) => onControl(control.name, +e.currentTarget.value)}
+                  />
+                {:else}
+                  <span class="control-label">{control.name}</span>
+                  {#if control.levels && control.levels.length === 2}
+                    <div class="cat-toggle">
+                      {#each control.levels as level}
+                        <button
+                          type="button"
+                          class="cat-btn"
+                          class:active={local[control.name] === level}
+                          on:click={() => onControl(control.name, level)}
+                        >{level}</button>
+                      {/each}
+                    </div>
+                  {:else if control.levels}
+                    <select
+                      value={local[control.name]}
+                      on:change={(e) => onControl(control.name, e.currentTarget.value)}
+                      class="cat-select"
+                    >
+                      {#each control.levels as level}
+                        <option value={level}>{level}</option>
+                      {/each}
+                    </select>
+                  {/if}
+                {/if}
+                <span class="control-dist">{summaryFor(control.name)}</span>
+              </div>
+            {/each}
+          </div>
+          <button type="button" class="reset-btn cp-reset" on:click={reset}>Reset to averages</button>
+        {/if}
+      </div>
+    {/if}
+  </section>
 {:else if visible}
   <div class="conditioning-bar">
     {#if hasGroup && gating}
@@ -333,6 +434,54 @@
     font-size: var(--fs-micro);
     color: var(--ink-faint);
   }
+
+  /* ---- Stacked card (Simulator left column) ----------------------------- */
+  .cohort-panel {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-sm);
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+  }
+  .cp-head {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding-bottom: 0.7rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .cp-sub {
+    margin: 0;
+    font-size: var(--fs-micro);
+    color: var(--ink-faint);
+    font-style: italic;
+    line-height: 1.5;
+  }
+  .cp-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .cp-select {
+    width: 100%;
+    font-size: var(--fs-small);
+    padding: 0.35rem 0.4rem;
+  }
+  .cp-cov {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    padding-top: 0.2rem;
+    border-top: 1px solid var(--rule-faint);
+  }
+  .cp-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+  }
+  .cp-reset { align-self: flex-start; }
 
   /* ---- Page-top bar (Simulator / Patient) ------------------------------- */
   .conditioning-bar {

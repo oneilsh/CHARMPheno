@@ -4,6 +4,7 @@ import type { CohortManifest, DashboardBundle, Phenotype, PhenotypeQuality, Synt
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
 import { cohortCoverage, sampleThetaCohort, withinCohortCoverage, thetaColumnDistribution, tauAlignedBinEdges } from './conditioning/coverage'
+import { ALL_SUBCOHORTS } from './conditioning/marginalSampler'
 
 export const bundle = writable<DashboardBundle | null>(null)
 export const cohort = writable<SyntheticCohort | null>(null)
@@ -85,20 +86,25 @@ export interface Conditioning {
   group: string | null
 }
 
-function createConditioning() {
-  return writable<Conditioning>({ covariateActive: false, values: {}, group: null })
+function createConditioning(group: string | null = null) {
+  return writable<Conditioning>({ covariateActive: false, values: {}, group })
 }
 
 // Per-panel, independent conditioning state. Each survives its own panel's
 // unmount/remount (fixing the Phase-1 tab-switch-resets bug); state is shared
 // by NO other panel. Reset only on cohort/bundle change (see below).
+// The Simulator's source-cohort picker defaults to ALL_SUBCOHORTS so the very
+// first Simulate draws a realistic whole-population cohort rather than a bare
+// background-only one; resolveGroup collapses this to null (no-op) for
+// non-gated bundles. Atlas/Patient keep the neutral null default.
 export const atlasConditioning = createConditioning()
-export const simulatorConditioning = createConditioning()
+export const simulatorConditioning = createConditioning(ALL_SUBCOHORTS)
 export const patientConditioning = createConditioning()
 
 export function resetConditioningForCohort(): void {
-  for (const c of [atlasConditioning, simulatorConditioning, patientConditioning])
-    c.set({ covariateActive: false, values: {}, group: null })
+  atlasConditioning.set({ covariateActive: false, values: {}, group: null })
+  simulatorConditioning.set({ covariateActive: false, values: {}, group: ALL_SUBCOHORTS })
+  patientConditioning.set({ covariateActive: false, values: {}, group: null })
 }
 
 // Back-compat alias: the shipped four-quadrant coverageReader reads the

@@ -6,7 +6,7 @@ import {
 } from './sampling'
 import { sampleConditionedTheta } from './conditioning/logisticNormal'
 import { sampleRecordPosterior } from './conditioning/recordPosterior'
-import { sampleMarginalCovariates, sampleMarginalGroup } from './conditioning/marginalSampler'
+import { sampleMarginalCovariates, sampleMarginalGroup, resolveGroup } from './conditioning/marginalSampler'
 import { buildDesignVector } from './covariate'
 
 // Conditioning input for the Patient atlas. When present and the bundle is
@@ -122,7 +122,11 @@ export function generateCohort(input: CohortInput): SyntheticCohort {
     if (stm) {
       const b = cc!.bundle
       if (cc!.mode === 'set') {
-        group = cc!.group
+        // Resolve the source-cohort selection per patient: a concrete group or
+        // background-only (null) is shared by all, but the "all subcohorts"
+        // sentinel draws a fresh group from the population mix each draw, so a
+        // set-covariate cohort still spreads realistically across subcohorts.
+        group = resolveGroup(cc!.group, b.gating, rng)
         if (cc!.prefixCounts?.size) {
           theta = sampleRecordPosterior({
             effects: b.covariateEffects!, x: setX!, correlation: b.correlation!,

@@ -69,8 +69,7 @@
 
 <section class="editor">
   <header class="head">
-    <span class="eyebrow">Starting point</span>
-    <h3>Conditions</h3>
+    <span class="eyebrow">Starting conditions</span>
     <p class="sub">{copy.conditionsEditor.sub}</p>
   </header>
 
@@ -158,12 +157,6 @@
     gap: 0.25rem;
     padding-bottom: 0.7rem;
     border-bottom: 1px solid var(--rule);
-  }
-  .head h3 {
-    font-size: 1.05rem;
-    font-weight: 600;
-    letter-spacing: var(--tracking-tight);
-    margin: 0;
   }
   .sub {
     margin: 0.15rem 0 0;

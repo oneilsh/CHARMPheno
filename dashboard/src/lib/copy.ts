@@ -177,11 +177,11 @@ export const copy = {
   // ── Simulator tab ─────────────────────────────────────────────────────
   simulator: {
     title: `Simulator`,
-    kicker: `Pick some starting conditions and the model will tell you what kind of patient this looks like and what else would round out their year.`,
+    kicker: `Pick some starting conditions and the model will tell you what kind of patient this looks like and what else would round out their record.`,
     whatIsSummary: `What is this?`,
     whatIs: [
-      `The simulator asks the model: <em>given these conditions, what kind of patient could this be?</em> It answers by drawing many possible complete year-of-life records from the model's distribution.`,
-      `Each draw is one plausible patient. The <strong>profile bar</strong> shows the average phenotype mix across those draws. The <strong>expected codes</strong> table shows what the model thinks fills in the rest of the year. The <strong>atlas</strong> shows where these patients land relative to the synthetic cohort - tight cluster means the conditions you gave nail one kind of patient, smeared cloud means they're consistent with several.`,
+      `The simulator asks the model: <em>given these conditions, what kind of patient could this be?</em> It answers by drawing many possible complete records from the model's distribution.`,
+      `Each draw is one plausible patient. The <strong>profile bar</strong> shows the average phenotype mix across those draws. The <strong>expected codes</strong> table shows what the model thinks fills in the rest of the record. The <strong>atlas</strong> shows where these patients land relative to the synthetic cohort - tight cluster means the conditions you gave nail one kind of patient, smeared cloud means they're consistent with several.`,
       `Start by clicking conditions on the left, or just hit Simulate to draw new patients from scratch.`,
     ],
     runSub: `Draw a batch of plausible patients from the conditions above.`,
@@ -202,14 +202,14 @@ export const copy = {
   predictedRecord: {
     heading: `Model expects to also see`,
     sub: (n: number): string =>
-      `Across ${n} simulated years, the model most often fills these in — grouped by the phenotype that generated them. The bar and percentage show the share of those years the condition appears in.`,
+      `Across ${n} simulated records, the model most often fills these in — grouped by the phenotype that generated them. The bar and percentage show the share of those records the condition appears in.`,
     hintEmpty: `Run the simulator to see what the model predicts.`,
     hintNone: `The model did not predict any additional conditions in this run.`,
   },
 
   // ── Simulator: conditions editor ──────────────────────────────────────
   conditionsEditor: {
-    sub: `Conditions this patient already has. The simulator fills in the rest of their year.`,
+    sub: `Conditions this patient already has. The simulator fills in the rest of their record.`,
     hint: `Each click draws one random condition from that phenotype's profile.`,
   },
 
@@ -278,7 +278,7 @@ export const copy = {
       },
       simulator: {
         title: `Ask the model "what if?"`,
-        body: `Give the model some starting conditions here and hit <strong>simulate</strong>. It draws many plausible complete records and tells you what kind of patient this looks like and what else would tend to round out their year.`,
+        body: `Give the model some starting conditions here and hit <strong>simulate</strong>. It draws many plausible complete records and tells you what kind of patient this looks like and what else would tend to round out their record.`,
       },
       viewToggle: {
         title: `Want to go deeper?`,

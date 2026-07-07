@@ -4,6 +4,7 @@
   } from '../store'
   import { runSimulator } from '../simulator/runSamples'
   import { buildDesignVector } from '../covariate'
+  import { resolveGroup } from '../conditioning/marginalSampler'
   import { sampleRecordPosterior } from '../conditioning/recordPosterior'
   import { createRng } from '../sampling'
   import { generateCohort } from '../cohort'
@@ -67,12 +68,15 @@
         const schema = b.covariateSchema!
         const x = buildDesignVector(schema.design_columns, cond.values)
         const tRng = createRng(seed ^ 0x9e3779b9)
+        // Resolve the group per draw so an "all subcohorts" selection spreads
+        // each sampled record across the population mix (concrete group / null
+        // pass through unchanged); see resolveGroup.
         conditionedTheta = () => sampleRecordPosterior({
           effects: b.covariateEffects!,
           x,
           correlation: b.correlation!,
           topicBlocks: b.gating?.topic_blocks ?? null,
-          group: cond.group,
+          group: resolveGroup(cond.group, b.gating, tRng),
           prefixCounts,
           beta: b.model.beta,
           rng: tRng,
@@ -177,10 +181,9 @@
     </div>
   </header>
 
-  <ConditioningBar store={simulatorConditioning} />
-
   <div class="grid">
     <div class="left-col" data-tour="simulator-input">
+      <ConditioningBar store={simulatorConditioning} layout="stacked" />
       <ConditionsEditor />
 
       <!-- Run panel: the advanced sampling knobs (if any) and the Simulate
