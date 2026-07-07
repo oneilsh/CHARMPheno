@@ -127,7 +127,7 @@
     phenoTokens.grand > 0 ? (phenoTokens.tok.get(k) ?? 0) / phenoTokens.grand : 0
 </script>
 
-<section class="predicted">
+<section class="predicted" data-tour="posterior-predictive">
   <div class="block">
     <header>
       <span class="eyebrow">Posterior predictive</span>

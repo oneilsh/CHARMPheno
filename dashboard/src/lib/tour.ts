@@ -42,34 +42,58 @@ interface StepDef {
   selector?: string
   /** Which side of the target the popover sits on. */
   on?: Placement
+  /**
+   * Optional side-effect fired once the step's tab has mounted, before the
+   * anchor is polled — e.g. click "simulate" so the sample-mix / predicted
+   * panels exist to point at. Best-effort: failures are swallowed so a step
+   * still degrades to a centered popover.
+   */
+  before?: () => void
+}
+
+// Trigger a generation on the Simulate subtab so the post-generation panels
+// (sample-mix, posterior-predictive) are present for their tour stops. The
+// Simulate button lives in the run panel; clicking it runs the same code path
+// as a user click. No-op (and harmless) if a result already exists.
+function runSimulation(): void {
+  const btn = document.querySelector<HTMLButtonElement>('[data-tour="sim-controls"] .run-btn')
+  if (btn && !btn.disabled) btn.click()
 }
 
 // ── Anchoring tables ────────────────────────────────────────────────────
-// Each entry pairs a copy id with where it points. The conceptual arc:
-// phenotypes → patients → simulate, ending on the view toggle.
+// Each entry pairs a copy id with where it points. The conceptual arc follows
+// the app's tab order: Atlas (Explore → Compare) → Simulator (Simulate →
+// Explore), ending on the view toggle.
 const BASIC_STEPS: StepDef[] = [
   { id: 'welcome' /* centered */ },
-  // Cohort selector lives in the masthead (present on every tab), no nav.
-  { id: 'cohort', selector: '[data-tour="cohort"]', on: 'bottom' },
+  // Model selector lives in the masthead (present on every tab), no nav.
+  { id: 'model', selector: '[data-tour="cohort"]', on: 'bottom' },
+  // ── Phenotype Atlas · Explore ──
   { id: 'atlasMap', tab: 'atlas', sub: 'explore', selector: '[data-tour="atlas-map"]', on: 'right' },
+  { id: 'atlasCovariates', tab: 'atlas', sub: 'explore', selector: '[data-tour="atlas-covariates"]', on: 'right' },
+  { id: 'browse', tab: 'atlas', sub: 'explore', selector: '[data-tour="phenotype-browser"]', on: 'top' },
   { id: 'findCondition', tab: 'atlas', sub: 'explore', selector: '[data-tour="find-condition"]', on: 'bottom' },
   { id: 'atlasDetail', tab: 'atlas', sub: 'explore', selector: '[data-tour="phenotype-detail"]', on: 'left' },
-  // The find-in-patients / open-in-atlas pair bookends the patient section,
-  // showing the two atlases are linked views of the same model.
-  { id: 'findInPatients', tab: 'atlas', sub: 'explore', selector: '[data-tour="find-in-patients"]', on: 'left' },
-  // Old standalone Patient tab is now the Simulator top tab's "Explore
-  // Cohort" subtab.
+  // ── Phenotype Atlas · Compare ──
+  { id: 'compareHeatmap', tab: 'atlas', sub: 'compare', selector: '[data-tour="correlation-heatmap"]', on: 'right' },
+  { id: 'compareDiff', tab: 'atlas', sub: 'compare', selector: '[data-tour="phenotype-difference"]', on: 'left' },
+  // ── Simulator · Simulate ──
+  { id: 'simRun', tab: 'sim', sub: 'simulate', selector: '[data-tour="sim-controls"]', on: 'right' },
+  { id: 'simConditions', tab: 'sim', sub: 'simulate', selector: '[data-tour="sim-conditions"]', on: 'right' },
+  { id: 'simConditioning', tab: 'sim', sub: 'simulate', selector: '[data-tour="sim-conditioning"]', on: 'right' },
+  // Fire a generation so the post-run panels exist to point at.
+  { id: 'sampleMix', tab: 'sim', sub: 'simulate', selector: '[data-tour="sample-mix"]', on: 'left', before: runSimulation },
+  { id: 'predicted', tab: 'sim', sub: 'simulate', selector: '[data-tour="posterior-predictive"]', on: 'left' },
+  // ── Simulator · Explore ──
   { id: 'patientMap', tab: 'sim', sub: 'explore', selector: '[data-tour="patient-map"]', on: 'right' },
   { id: 'patientProfile', tab: 'sim', sub: 'explore', selector: '[data-tour="patient-profile"]', on: 'left' },
-  { id: 'openInAtlas', tab: 'sim', sub: 'explore', selector: '[data-tour="open-in-atlas"]', on: 'left' },
-  // Old standalone Simulator tab is now the "Simulate Cohort" subtab.
-  { id: 'simulator', tab: 'sim', sub: 'simulate', selector: '[data-tour="simulator-input"]', on: 'right' },
+  { id: 'contributingCodes', tab: 'sim', sub: 'explore', selector: '[data-tour="contributing-codes"]', on: 'left' },
   // Toggle lives in the masthead (present on every tab), so no navigation.
   { id: 'viewToggle', selector: '[data-tour="view-toggle"]', on: 'bottom' },
 ]
 
-// Advanced mode reveals the model internals; this tour explains the things
-// that only exist there. Runs entirely on the Atlas tab except the last stop.
+// Advanced mode reveals the model internals; this tour explains the diagnostics
+// that only exist there. Runs on the Atlas Explore tab except the last stop.
 const ADVANCED_STEPS: StepDef[] = [
   { id: 'welcome' /* centered */ },
   { id: 'metrics', tab: 'atlas', sub: 'explore', selector: '[data-tour="metrics"]', on: 'bottom' },
@@ -87,14 +111,24 @@ const ADVANCED_STEPS: StepDef[] = [
 // after `timeout` so a missing anchor degrades to a centered popover.
 function ready(def: StepDef, timeout = 3000): Promise<void> {
   if (def.tab) go(def.tab, def.sub)
+  const fireBefore = () => {
+    if (def.before) {
+      try { def.before() } catch { /* best-effort; degrade to centered popover */ }
+    }
+  }
   return new Promise((resolve) => {
     if (!def.selector) {
-      // No anchor: just wait one frame for any tab swap to paint.
-      requestAnimationFrame(() => resolve())
+      // No anchor: wait one frame for any tab swap to paint, fire, then show.
+      requestAnimationFrame(() => { fireBefore(); resolve() })
       return
     }
     const start = performance.now()
+    let fired = false
     const tick = () => {
+      // Fire the side-effect once, on the first tick — the step's tab has
+      // navigated and (for same-tab steps) already painted, so the button the
+      // side-effect clicks is present. Then poll for the anchor it produces.
+      if (!fired) { fired = true; fireBefore() }
       if (document.querySelector(def.selector!) || performance.now() - start > timeout) {
         resolve()
         return

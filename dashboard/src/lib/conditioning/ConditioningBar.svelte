@@ -30,6 +30,11 @@
   // bar, where covariate mode gates whether generation conditions on covariates.
   export let inlineControls = false
 
+  // Optional guided-tour anchor for this instance's root, since the same
+  // component serves two tour stops (the atlas covariate breakout and the
+  // simulator source-cohort box). Null → no data-tour attribute is emitted.
+  export let tourAnchor: string | null = null
+
   $: schema = $bundle?.covariateSchema
   $: gating = $bundle?.gating
   $: hasCovariates = !!schema && canInteract(schema)
@@ -72,7 +77,7 @@
   <!-- Phenotype Atlas: left pop-out drawer. Absolutely positioned by the host
        (TopicMap .map-canvas) so open/close never reflows the map. -->
   {#if hasCovariates && schema}
-    <div class="cov-drawer">
+    <div class="cov-drawer" data-tour={tourAnchor}>
       {#if !$store.covariateActive}
         <button type="button" class="drawer-open" on:click={openDrawer}>
           <span class="gear" aria-hidden="true">⚙</span> Configure Patient Features
@@ -141,7 +146,7 @@
   <!-- Stacked card (Simulator left column): source-cohort select on top, then a
        covariate disclosure whose controls stack vertically like the Phenotype
        Atlas's Patient-Features drawer. -->
-  <section class="cohort-panel">
+  <section class="cohort-panel" data-tour={tourAnchor}>
     <header class="cp-head">
       <span class="eyebrow">{copy.conditioningBar.sourceCohortLabel}</span>
       <p class="cp-sub">{copy.conditioningBar.sourceCohortSub}</p>

@@ -132,7 +132,7 @@
   function onLeave() { hoverIdx = null }
 </script>
 
-<section class="structure">
+<section class="structure" data-tour="sample-mix">
   <header>
     <span class="eyebrow">Per-sample mix</span>
     <h4>{copy.structurePlot.heading}</h4>

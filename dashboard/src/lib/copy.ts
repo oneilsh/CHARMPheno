@@ -266,15 +266,23 @@ export const copy = {
     basic: {
       welcome: {
         title: `Welcome to CHARMPheno`,
-        body: `This dashboard explores <em>phenotypes</em> — recurring patterns of clinical conditions a model learned from de-identified patient records. The tour takes about a minute and visits all three tabs. You can leave any time with the × or the Esc key.`,
+        body: `This dashboard explores <em>phenotypes</em> — recurring patterns of clinical conditions a model learned from de-identified patient records. This tour walks the whole app: the <strong>Phenotype Atlas</strong>, then the <strong>Simulator</strong>. A couple of minutes; leave any time with the × or the Esc key.`,
       },
-      cohort: {
-        title: `Pick a cohort`,
-        body: `Each cohort is a separate model fit on a different slice of patients (different inclusion criteria or time window). Switch cohorts here at any time — everything below reloads for the model you choose.`,
+      model: {
+        title: `Pick a model`,
+        body: `Each model is a separate fit on a different slice of patients — a different cohort or subgroup. Switch models here at any time; everything below reloads for the one you choose.`,
       },
       atlasMap: {
         title: `The phenotype atlas`,
-        body: `Every bubble is one learned phenotype. Bubbles that sit close together share their leading conditions; bigger bubbles show up in more patients. Click any bubble to inspect it.`,
+        body: `Every bubble is one learned phenotype. Bubbles that sit close together share their leading conditions; a bubble's <strong>size</strong> shows how much of the cohort it accounts for, and its <strong>opacity</strong> shows how tightly its conditions actually co-occur. The legend marks the foreground-cohort phenotypes. Click any bubble to inspect it.`,
+      },
+      atlasCovariates: {
+        title: `Break out by patient features`,
+        body: `Open this to condition the atlas on patient features like sex or age. The bubbles resize to show how each phenotype's prominence shifts for the group you pick — the same population you'd simulate later.`,
+      },
+      browse: {
+        title: `Browse every phenotype`,
+        body: `The full phenotype list sits below the map — sortable and searchable by name. Reach for it when you'd rather scan a table than hunt through bubbles; selecting a row lights it up on the map.`,
       },
       findCondition: {
         title: `Find a condition`,
@@ -282,31 +290,51 @@ export const copy = {
       },
       atlasDetail: {
         title: `Inside a phenotype`,
-        body: `The selected phenotype's leading conditions appear here, along with how prevalent it is and how reliably its conditions co-occur. Hover any label with a dotted underline or a <strong>?</strong> for a plain-language explanation.`,
+        body: `The selected phenotype's leading conditions appear here, under a plain-language summary the model wrote for it. <strong>Find in simulated patients</strong> jumps to the synthetic patients who carry it — we'll get to those shortly.`,
       },
-      findInPatients: {
-        title: `Jump to the patients`,
-        body: `<strong>Find in simulated patients</strong> carries this phenotype over to the Patient Atlas and rings every synthetic patient who carries it — connecting "what is this pattern" to "who has it."`,
+      compareHeatmap: {
+        title: `Compare phenotypes`,
+        body: `The Compare tab lays out how phenotypes relate: the heatmap shows which pairs tend to co-occur in the same patients. Pick the rows and columns to focus on the phenotypes you care about.`,
+      },
+      compareDiff: {
+        title: `What sets two apart`,
+        body: `Click any cell and this panel spells out the difference between those two phenotypes — the conditions most distinctive to each side. The <em>distinctiveness</em> score ranks how strongly a condition pulls toward one over the other.`,
+      },
+      simRun: {
+        title: `Simulate a cohort`,
+        body: `The Simulator generates synthetic patients from the model. Set up a starting point on the left, then hit <strong>simulate</strong> — the model draws many plausible complete records.`,
+      },
+      simConditions: {
+        title: `Starting conditions`,
+        body: `Seed the simulation with specific conditions here, or leave it empty to draw from scratch. Every generated patient is a plausible record consistent with what you set.`,
+      },
+      simConditioning: {
+        title: `Who are you simulating?`,
+        body: `Choose which subgroup to draw from and, optionally, fix patient features like sex or age. It's the same conditioning that resized the atlas bubbles — here it shapes the patients you generate.`,
+      },
+      sampleMix: {
+        title: `The cohort's phenotype mix`,
+        body: `After you simulate, this panel summarizes the phenotype makeup across the drawn patients and how confident the model is about it — a read on what kind of cohort your starting point produces.`,
+      },
+      predicted: {
+        title: `What the records look like`,
+        body: `The posterior-predictive panel: the conditions and phenotypes the model expects to round out patients like these — shown at both the phenotype and the individual-code level.`,
       },
       patientMap: {
-        title: `Synthetic patients`,
-        body: `Now the patients. <strong>These are not real people</strong> — each dot is a synthetic record the model generated. Patients near each other carry a similar mix of phenotypes, in the same 2D space as the atlas you just saw.`,
+        title: `Explore the patients`,
+        body: `The Explore tab plots the generated patients. <strong>These are not real people</strong> — each dot is a synthetic record. Patients near each other carry a similar phenotype mix, in the same space as the atlas.`,
       },
       patientProfile: {
         title: `A patient is a mix`,
-        body: `No patient is a single phenotype. This profile bar shows the selected patient's blend; click a band to see which of their conditions drove that part of the mix.`,
+        body: `No patient is a single phenotype. This profile bar shows the selected patient's blend: solid bands are backed by the patient's own conditions, hatched bands lean on the population prior. Click a band to see what drove it.`,
       },
-      openInAtlas: {
-        title: `…and back again`,
-        body: `The link runs both ways: <strong>open in atlas</strong> takes whichever phenotype band you're inspecting back to the Phenotype Atlas, selected and ready. The two atlases are two views of the same model.`,
-      },
-      simulator: {
-        title: `Ask the model "what if?"`,
-        body: `Give the model some starting conditions here and hit <strong>simulate</strong>. It draws many plausible complete records and tells you what kind of patient this looks like and what else would tend to round out their record.`,
+      contributingCodes: {
+        title: `Which codes, which phenotypes`,
+        body: `Each of the patient's conditions is split across the phenotypes it points to, for this patient — the model's per-code reasoning behind the mix above. Hover a segment to name the phenotype it belongs to.`,
       },
       viewToggle: {
         title: `Want to go deeper?`,
-        body: `That's the basics. Flip this to <strong>advanced</strong> whenever you're ready — it reveals the model's internals, and a second tour (same link) walks you through them. Explore away.`,
+        body: `That's the tour. Flip this to <strong>advanced</strong> whenever you're ready — it reveals the model's internals and diagnostics, and a second tour (same link) walks you through them. Explore away.`,
       },
     },
     advanced: {
@@ -320,11 +348,11 @@ export const copy = {
       },
       detailStats: {
         title: `Phenotype diagnostics`,
-        body: `Advanced mode adds quality diagnostics for the selected phenotype: <em>topic mass</em> (its average share across patients), <em>coherence</em> (how tightly its leading conditions co-occur), and <em>pair coverage</em> (how much evidence that coherence rests on). Hover each for detail.`,
+        body: `In advanced mode the detail panel adds numbers for the selected phenotype: <em>coherence</em> (how tightly its leading conditions co-occur — the same signal the bubble opacity carries), <em>topic mass</em> (its average share across patients), and <em>pair coverage</em> (how much evidence that coherence rests on). Hover each for detail.`,
       },
       histogram: {
-        title: `Phenotype prominence`,
-        body: `This shows how prominently the selected phenotype features across patients: the x-axis is the share of a patient's coded activity it accounts for (from the τ threshold up), the y-axis the share of patients. Low-count bins are suppressed for privacy.`,
+        title: `Prominence & coverage`,
+        body: `The detail behind a bubble's size: the x-axis is the share of a patient's coded activity this phenotype accounts for (from the τ threshold up), the y-axis the share of patients. Read off both how many patients express the phenotype and how strongly. Low-count bins are suppressed for privacy.`,
       },
       relevance: {
         title: `Re-rank the conditions`,
@@ -332,7 +360,7 @@ export const copy = {
       },
       quality: {
         title: `Every phenotype, graded`,
-        body: `Advanced mode also shows the weaker bubbles basic mode hides. Each phenotype carries a <em>quality</em> grade — from a clean disease pattern down to <em>mixed</em> (merged areas) or <em>dead</em> (effectively unused) — so you can tell signal from noise.`,
+        body: `Advanced mode also shows the weaker bubbles basic mode hides. Each phenotype carries a <em>quality</em> grade — a clean disease pattern, a broad <em>background</em> baseline, a <em>mixed</em> slot that merges unrelated themes, or a <em>dead</em> unused one — so you can tell signal from noise.`,
       },
       simulator: {
         title: `Tune the simulation`,

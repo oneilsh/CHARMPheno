@@ -45,7 +45,7 @@
   <div class="grid">
     <div class="left-col">
       <TopicMap>
-        <ConditioningBar store={atlasConditioning} showGroup={false} inlineControls />
+        <ConditioningBar store={atlasConditioning} showGroup={false} inlineControls tourAnchor="atlas-covariates" />
       </TopicMap>
 
       <div class="map-actions">

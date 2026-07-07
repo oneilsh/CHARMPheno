@@ -64,7 +64,7 @@
       : ($phenotypesById.get($selectedPhenotypeId)?.label || `Phenotype ${$selectedPhenotypeId}`)
 </script>
 
-<section class="contrib">
+<section class="contrib" data-tour="contributing-codes">
   <header class="head">
     <div class="top-row">
       <span class="eyebrow">{copy.contributingCodes.heading}</span>

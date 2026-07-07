@@ -67,7 +67,7 @@
   $: prefixList = $simulatorPrefix.map((idx, i) => ({ idx, i })).reverse()
 </script>
 
-<section class="editor">
+<section class="editor" data-tour="sim-conditions">
   <header class="head">
     <span class="eyebrow">Starting conditions</span>
     <p class="sub">{copy.conditionsEditor.sub}</p>

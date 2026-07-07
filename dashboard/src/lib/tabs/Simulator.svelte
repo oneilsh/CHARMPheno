@@ -191,7 +191,7 @@
 
   <div class="grid">
     <div class="left-col" data-tour="simulator-input">
-      <ConditioningBar store={simulatorConditioning} layout="stacked" />
+      <ConditioningBar store={simulatorConditioning} layout="stacked" tourAnchor="sim-conditioning" />
       <ConditionsEditor />
 
       <!-- Run panel: the advanced sampling knobs (if any) and the Simulate

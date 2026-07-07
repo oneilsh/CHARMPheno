@@ -127,7 +127,7 @@
     npmi == null ? 0 : Math.max(0, Math.min(npmi / maxCoh, 1)) * 100
 </script>
 
-<details class="browser" open>
+<details class="browser" open data-tour="phenotype-browser">
   <summary>
     <span class="summary-text">
       Browse all phenotypes ({filtered.length}/{phenotypes.length})
