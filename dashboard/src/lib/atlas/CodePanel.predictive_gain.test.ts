@@ -61,3 +61,28 @@ it('with predictive_gain present and hydrated, ProminenceHistogram (nats scale) 
   const rects = container.querySelectorAll('.hist-wrap svg rect')
   expect(rects.length).toBe(2)
 })
+
+it('advanced view shows a Distinctiveness stat (mean_gain) and NO Presence/Depth stats', () => {
+  const b = makeStmBundleFixture()
+  b.phenotypes.predictive_gain = PG
+  b.phenotypes.phenotypes.forEach((p, i) => {
+    (p as any).mean_gain = PG.mean_gain[i]
+    ;(p as any).presence = PG.presence[i]
+    ;(p as any).depth = PG.depth[i]
+  })
+  bundle.set(b)
+  const { queryByText } = render(CodePanel)   // advancedView is true (beforeEach)
+  expect(queryByText('Distinctiveness')).toBeTruthy()
+  expect(queryByText('Presence')).toBeNull()
+  expect(queryByText('Depth')).toBeNull()
+})
+
+it('basic view hides the Distinctiveness stat', () => {
+  advancedView.set(false)
+  const b = makeStmBundleFixture()
+  b.phenotypes.predictive_gain = PG
+  b.phenotypes.phenotypes.forEach((p, i) => { (p as any).mean_gain = PG.mean_gain[i] })
+  bundle.set(b)
+  const { queryByText } = render(CodePanel)
+  expect(queryByText('Distinctiveness')).toBeNull()
+})

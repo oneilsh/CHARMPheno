@@ -29,7 +29,7 @@
   <header class="section-head">
     <div class="title-block">
       <div class="title-row">
-        <p class="kicker">{copy.atlas.kicker(!!$bundle?.phenotypes.predictive_gain)}</p>
+        <p class="kicker">{copy.atlas.kicker()}</p>
         <details class="what-is" bind:this={whatIsEl} bind:open={whatIsOpen}>
           <summary>{copy.atlas.whatIsSummary}</summary>
           <div class="what-is-body popover">

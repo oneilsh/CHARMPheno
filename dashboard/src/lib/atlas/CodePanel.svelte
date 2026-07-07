@@ -2,7 +2,7 @@
   import {
     bundle, selectedPhenotypeId, advancedView, hoveredCodeIdx,
     searchedConditionIdx, searchedPhenotypeForPatients,
-    coverageReader, tauThreshold,
+    coverageReader, tauThreshold, predictiveGain,
   } from '../store'
   import { topRelevantCodes } from '../inference'
   import { go } from '../router'
@@ -99,11 +99,11 @@
       <div class="stats" data-numeric data-tour="detail-stats">
         <span class="stat" title={hasHistogram
           ? ($advancedView
-            ? copy.phenotypeDetail.prevalence.tipAdvanced($tauThreshold)
-            : copy.phenotypeDetail.prevalence.tipBasic($tauThreshold))
-          : copy.phenotypeDetail.prevalence.tipNoHistogram
+            ? copy.phenotypeDetail.coverage.tipAdvanced($tauThreshold)
+            : copy.phenotypeDetail.coverage.tipBasic($tauThreshold))
+          : copy.phenotypeDetail.coverage.tipNoHistogram
         }>
-          <span class="stat-k">{hasHistogram && $advancedView ? copy.phenotypeDetail.prevalence.labelAdvanced : copy.phenotypeDetail.prevalence.labelBasic}<span class="help-mark" aria-hidden="true">?</span></span>
+          <span class="stat-k">{hasHistogram && $advancedView ? copy.phenotypeDetail.coverage.labelAdvanced : copy.phenotypeDetail.coverage.labelBasic}<span class="help-mark" aria-hidden="true">?</span></span>
           <span class="stat-v">{(reader(pheno) * 100).toFixed(1)}%</span>
         </span>
         {#if $advancedView}
@@ -135,23 +135,22 @@
           {/if}
         {/if}
       </div>
-      {#if hasPredictiveGainFields}
-        <!-- Held-out predictive-gain scalars (Task 6b). Mean gain leads —
-             it's the most discriminating of the three (0-27 nats across
-             topics); presence and depth are secondary context. -->
-        <div class="stats" data-numeric data-tour="predictive-gain-stats">
-          <span class="stat" title={copy.phenotypeDetail.meanGainTip}>
-            <span class="stat-k">Mean gain<span class="help-mark" aria-hidden="true">?</span></span>
+      {#if hasPredictiveGainFields && $advancedView}
+        <!-- Distinctiveness = mean unique held-out predictive gain (nats): how
+             specific this phenotype's vocabulary is vs. the corpus background.
+             Shown with the permutation null band so a value inside the noise
+             floor is visibly untrustworthy. NOT bubble size (that is coverage). -->
+        <div class="stats" data-numeric>
+          <span class="stat" title={copy.phenotypeDetail.distinctivenessTip}>
+            <span class="stat-k">Distinctiveness<span class="help-mark" aria-hidden="true">?</span></span>
             <span class="stat-v">{pheno.mean_gain == null ? '—' : `${pheno.mean_gain.toFixed(2)} nats`}</span>
           </span>
-          <span class="stat" title={copy.phenotypeDetail.presenceTip}>
-            <span class="stat-k">Presence<span class="help-mark" aria-hidden="true">?</span></span>
-            <span class="stat-v">{pheno.presence == null ? '—' : `${(pheno.presence * 100).toFixed(1)}%`}</span>
-          </span>
-          <span class="stat" title={copy.phenotypeDetail.depthTip}>
-            <span class="stat-k">Depth<span class="help-mark" aria-hidden="true">?</span></span>
-            <span class="stat-v">{pheno.depth == null ? '—' : `${(pheno.depth * 100).toFixed(1)}%`}</span>
-          </span>
+          {#if $predictiveGain?.null_band}
+            <span class="stat" title={copy.phenotypeDetail.nullBandTip}>
+              <span class="stat-k">Noise floor</span>
+              <span class="stat-v">{$predictiveGain.null_band.p95.toFixed(2)} nats (p95)</span>
+            </span>
+          {/if}
         </div>
       {/if}
     </header>

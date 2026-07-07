@@ -41,14 +41,8 @@ export const copy = {
   // ── Phenotype Atlas tab ───────────────────────────────────────────────
   atlas: {
     title: `Phenotype Atlas`,
-    // hasPredictiveGain: true once the bundle carries the held-out
-    // predictive-gain metric (Task 6b) — bubble size then encodes unique
-    // predictive contribution rather than prevalence. Bundles without it
-    // (HDP/LDA/legacy) get the original wording, unchanged.
-    kicker: (hasPredictiveGain: boolean): string =>
-      hasPredictiveGain
-        ? `Each marker is a learned phenotype. Bubbles that sit closer together share more of their leading conditions; bubble size shows how much unique predictive signal the phenotype contributes (nats of held-out predictive gain).`
-        : `Each marker is a learned phenotype. Bubbles that sit closer together share more of their leading conditions; bubble size shows how widely the phenotype shows up across patients.`,
+    kicker: (): string =>
+      `Each marker is a learned phenotype. Bubbles that sit closer together share more of their leading conditions; bubble size shows patient coverage — how many patients express the phenotype — and resizes as you condition on covariates.`,
     whatIsSummary: `What's a phenotype?`,
     // kLabel: the phenotype count K (or a "~80" fallback while loading).
     whatIs: (kLabel: string | number): string[] => [
@@ -63,9 +57,11 @@ export const copy = {
       coverage: (tau: number): string =>
         `Patient coverage: the fraction of patients for whom this phenotype accounts for more than ${pct(tau)}% of their coded activity (θ > ${tau.toFixed(2)}). Bubble size scales with this value; covariate sliders resample it, so bubbles grow or shrink with the population you condition on.`,
       topicMass: `Topic mass: mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
-      // Task 6b: shown instead of `prevalence` once the bundle carries
-      // predictive_gain — bubble size then encodes mean_gain (nats), not
-      // prevalence.
+      // Legacy: predictive_gain no longer drives bubble sizing (that's always
+      // `coverage` now — see Task 4); mean_gain surfaces instead as the
+      // advanced-only "Distinctiveness" stat in the CodePanel detail view
+      // (phenotypeDetail.distinctivenessTip). Kept here, unreferenced, in
+      // case the atlas legend grows a distinctiveness entry later.
       meanGain: `Predictive contribution: the phenotype's mean unique held-out predictive gain (nats) — how much this phenotype, on its own, improves the model's ability to predict a held-out patient's conditions. Bubble size scales with this value.`,
     },
   },
@@ -74,14 +70,14 @@ export const copy = {
   phenotypeDetail: {
     empty: `Select a phenotype on the map to read its top conditions.`,
     findInPatientsTip: `Switch to the Patient Atlas with patients carrying this phenotype highlighted`,
-    prevalence: {
-      labelBasic: `Prevalence`,
-      labelAdvanced: `Prevalence (patients)`,
-      tipAdvanced: (tau: number): string =>
-        `Fraction of patients with θ > τ = ${tau.toFixed(2)} — at least ${pct(tau)}% of their coded activity is attributed to this phenotype. A threshold-based approximation of clinical prevalence in the cohort.`,
+    coverage: {
+      labelBasic: `Coverage`,
+      labelAdvanced: `Coverage`,
       tipBasic: (tau: number): string =>
-        `Fraction of patients for whom this phenotype makes up at least ${pct(tau)}% of their coded activity.`,
-      tipNoHistogram: `Topic mass (no patient distribution available for this bundle).`,
+        `Coverage: the share of patients for whom this phenotype accounts for more than ${pct(tau)}% of their coded activity (θ > ${tau.toFixed(2)}).`,
+      tipAdvanced: (tau: number): string =>
+        `Coverage: the fraction of patients with θ > τ = ${tau.toFixed(2)} — at least ${pct(tau)}% of their coded activity is attributed to this phenotype. For STM bundles this is estimated from patients sampled at the current covariate profile; otherwise from the θ-histogram.`,
+      tipNoHistogram: `Coverage: the corpus-average share of activity attributed to this phenotype (no per-patient histogram available for this bundle).`,
     },
     topicMassTip: `Mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
     coherenceTip: `Coherence: how reliably this phenotype's leading conditions co-occur in real patients (NPMI: normalized pointwise mutual information). Higher means the conditions really do show up together.`,
@@ -99,15 +95,16 @@ export const copy = {
       tip: `How prominently this phenotype features in each patient's mixture, across the cohort. The x-axis is the share of a patient's coded activity attributed to this phenotype (shown from τ upward); the y-axis is the share of patients at each level. Patients below τ are summarised by the '< τ' figure rather than drawn. Bins with fewer than 20 patients are suppressed for privacy.`,
       belowTauTip: `Share of patients for whom this phenotype is below the τ threshold — i.e. they are not counted as having it. Not drawn on the chart (the x-axis starts at τ).`,
     },
-    // Predictive-gain scalars (Task 6b), shown in the detail stats row when
-    // the bundle carries the predictive_gain block. presenceTip/depthTip were
-    // written in Task 6a; meanGainTip is new here — mean_gain is the most
-    // discriminating of the three (0-27 nats across topics) so it leads.
-    // prominenceHistogramTip/Title back the ProminenceHistogram swap in
-    // CodePanel, wired up since Task 6a.
+    // Predictive-gain scalars. presenceTip/depthTip date from Task 6a/6b and
+    // are no longer referenced in the UI (mean_gain, demoted to an advanced-
+    // only "Distinctiveness" stat, is now the only one shown — see
+    // distinctivenessTip/nullBandTip below); kept defined in case a future
+    // view resurfaces them. prominenceHistogramTip/Title back the
+    // ProminenceHistogram swap in CodePanel, wired up since Task 6a.
     presenceTip: `Presence: how widely — the fraction of patients where this phenotype adds real predictive signal (clears the model's own noise floor), in held-out predictive nats.`,
-    meanGainTip: `Mean gain: this phenotype's unique predictive contribution, in nats — the average held-out predictive signal (beyond what every other phenotype already explains) that this phenotype alone adds for the patients who have it.`,
     depthTip: `Depth: how much — this phenotype's share of the unique predictive structure in the patients who have it (a broad phenotype others overlap scores low; a niche one nothing else explains scores high).`,
+    distinctivenessTip: `Distinctiveness: this phenotype's mean unique held-out predictive gain (nats) — how specific its vocabulary is versus the corpus background (a niche phenotype scores high; a common one whose words are everywhere scores low). This is NOT how common the phenotype is (that is coverage), and it is not a per-patient count.`,
+    nullBandTip: `Noise floor: the 95th-percentile predictive gain of a randomized (null) phenotype, in nats. A distinctiveness value near or below this is inside the noise and should not be over-read.`,
     prominenceHistogramTitle: `Phenotype Prominence`,
     prominenceHistogramTip: `The spread of this phenotype's per-patient predictive gain (nats), across the patients who have it — the principled replacement for the topic-mass histogram.`,
     relevance: {
