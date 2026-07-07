@@ -5,6 +5,11 @@
       "id": "population_cancer",
       "label": "Population + Cancer (gated)",
       "description": "The whole (sampled) population as a shared background, with a cancer subcohort carrying its own foreground topics. Disjoint, one document per person: patients with a first malignant-cancer diagnosis (SNOMED 443392 and descendants, excluding non-melanoma skin cancer and carcinoma in situ) get the 365-day post-diagnosis window and source_cohort='cancer'; every other person gets a deterministic random 365-day window anchored on one of their own condition-eras (so it captures real activity, not an empty calendar year) and source_cohort='general' (background-only). K=60 (40 shared background + 20 cancer foreground), fit as a gated block-wise correlated STM with a sex-at-birth (M/F) and age prevalence covariate."
+    },
+    {
+      "id": "population_eds",
+      "label": "Population + Ehlers-Danlos (gated)",
+      "description": "The whole population as a shared background, with an Ehlers-Danlos syndrome (EDS) subcohort carrying its own foreground topics \u2014 a rare-disease-on-a-background-population example. Disjoint, one document per person: persons with a first EDS diagnosis (OMOP 79145 and descendants) get the 365-day post-diagnosis window and source_cohort='eds'; every other person gets a deterministic random 365-day window anchored on one of their own condition-eras and source_cohort='general' (background-only). K=100 (80 shared background + 20 EDS foreground), fit on the full population as a gated block-wise correlated STM with a sex-at-birth (M/F) and age prevalence covariate."
     }
   ]
 }
