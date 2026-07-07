@@ -8,7 +8,7 @@
   } from '../store'
   import { groupHue } from '../palette'
   import { phenotypesContainingCode } from '../inference'
-  import { labelRanks } from './labels'
+  import { selectLabels, type LabelCandidate } from './labels'
   import { copy } from '../copy'
 
   // Cohort color + label helpers (gated bundles). Cohort now owns the node
@@ -49,27 +49,23 @@
   // phenotypes near the layout boundary.
   const W = 720, H = 560, MARGIN = 60
 
-  // ---- Semantic zoom + progressive labels --------------------------------
+  // ---- Semantic zoom + viewport-sampled labels ---------------------------
   // The zoom transform scales node POSITIONS (they spread apart) but each node's
   // markers live in a counter-scaled inner group so they keep a CONSTANT on-screen
   // size — zooming in therefore decongests overlapping bubbles instead of just
-  // magnifying the same overlap. Labels are revealed progressively: a node is
-  // labeled when its within-block prevalence rank is below a zoom-dependent
-  // cutoff, so zooming in only ADDS lower-ranked labels (stable, non-jumpy) and
-  // fixes the "no labels when zoomed in" discovery gap.
+  // magnifying the same overlap. Labels are drawn for a STABLE RANDOM sample of
+  // whatever is currently in view (see selectLabels): random order de-clumps the
+  // set (prevalence-ranked labels all piled on the high-prevalence core), the
+  // viewport filter restricts labels to the region you're looking at, and the
+  // budget grows with zoom so zooming in reveals more of the sparse areas.
   //
-  // How many labels per block at the overview (k=1). Ungated bundles form one
-  // implicit block so this is effectively the global overview count.
-  const BASE_LABELS_GATED = 3
-  const BASE_LABELS_UNGATED = 8
-  function labelsCut(k: number): number {
-    // grows ~linearly with zoom; never drops below the overview count
-    return Math.max(labelBaseCut, Math.round(labelBaseCut * k))
-  }
-  function labelVisible(id: number, k: number): boolean {
-    const rank = labelRankMap.get(id)
-    return rank !== undefined && rank < labelsCut(k)
-  }
+  // Fraction of the in-view nodes labeled at the k=1 overview; the effective
+  // fraction is min(1, BASE_LABEL_FRACTION * k) (see selectLabels).
+  const BASE_LABEL_FRACTION = 0.2
+  // A node counts as in-view when its transformed center is within the viewBox
+  // padded by this many units, so a label whose bubble sits just off the edge
+  // isn't clipped away abruptly.
+  const LABEL_VIEW_MARGIN = 8
 
   // d3-zoom state. render() rebuilds the <g> every frame (selectAll('*').remove),
   // so we keep the zoom behavior + a handle to the current <g> at module scope
@@ -78,21 +74,36 @@
   // zooming always drives the live group.
   let zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null
   let gSel: d3.Selection<SVGGElement, unknown, null, undefined> | null = null
-  // Set each render() so the zoom handler can recompute label visibility.
-  let labelRankMap: Map<number, number> = new Map()
-  let labelBaseCut = BASE_LABELS_UNGATED
+  // Set each render(): the pre-zoom (cx, cy) center of every labelable node, so
+  // the zoom handler can recompute which labels are in view without touching the
+  // live coverage reader (keeps the labeled set stable under covariate changes).
+  let labelCandidates: LabelCandidate[] = []
   let currentK = 1
 
+  // Recompute which labels to show for a given transform and apply it. Called on
+  // every zoom/pan tick and once at the end of render().
+  function updateLabelDisplay(t: { k: number; x: number; y: number }) {
+    if (!gSel) return
+    const show = selectLabels(labelCandidates, {
+      transform: t,
+      width: W,
+      height: H,
+      baseFraction: BASE_LABEL_FRACTION,
+      margin: LABEL_VIEW_MARGIN,
+    })
+    gSel.selectAll<SVGGElement, { id: number }>('g.label')
+      .attr('display', (d) => (show.has(d.id) ? null : 'none'))
+  }
+
   // Applied on every zoom/pan tick: move positions (g transform), keep markers a
-  // constant size (counter-scale the inner groups), and re-reveal labels for the
-  // new zoom level.
+  // constant size (counter-scale the inner groups), and re-sample labels for the
+  // new viewport.
   function applyZoomVisuals(t: d3.ZoomTransform) {
     currentK = t.k
     if (!gSel) return
     gSel.attr('transform', t.toString())
     gSel.selectAll<SVGGElement, unknown>('g.inner').attr('transform', `scale(${1 / t.k})`)
-    gSel.selectAll<SVGGElement, { id: number }>('g.label')
-      .attr('display', (d) => (labelVisible(d.id, t.k) ? null : 'none'))
+    updateLabelDisplay(t)
   }
 
   function resetView() {
@@ -178,12 +189,15 @@
     const g = svg.append('g')
     gSel = g as unknown as d3.Selection<SVGGElement, unknown, null, undefined>
 
-    // Progressive-label state for this render (read by the zoom handler).
-    labelRankMap = labelRanks(allPhenotypes, {
-      blocks: gated ? blocks : undefined,
-      isVisible: $isVisibleInCurrentMode,
-    })
-    labelBaseCut = gated ? BASE_LABELS_GATED : BASE_LABELS_UNGATED
+    // Label-candidate positions for this render (read by the zoom handler to
+    // decide which labels are in view). Every mode-visible node is a candidate;
+    // selectLabels picks the in-view sample. Positions are in the PRE-zoom
+    // g-coordinate space (the node translate), matching applyZoomVisuals' math.
+    labelCandidates = phenotypes.map((p) => ({
+      id: p.id,
+      cx: x(coords[p.id][0]),
+      cy: y(coords[p.id][1]),
+    }))
 
     // Zoom / pan. d3 stashes the current transform on the svg node (__zoom), so
     // it survives render()'s teardown; re-apply it to the new <g>. Attach the
@@ -284,19 +298,19 @@
 
     // Labels live in a SEPARATE layer appended after all nodes so they always sit
     // on top of neighboring bubbles. Each label mirrors a node: translate(pos) for
-    // spread + an inner scale(1/k) so the text stays a constant size. Which labels
-    // are shown is set via the `display` attr from the progressive-reveal cutoff
-    // (see labelVisible) — the SET is keyed off stable corpus_prevalence rank, so
-    // it never reshuffles as the covariate controls move, only reveals more on zoom.
+    // spread + an inner scale(1/k) so the text stays a constant size. A <g.label>
+    // is created for EVERY mode-visible node; which ones are shown is decided at
+    // display time by selectLabels (viewport-restricted stable random sample), set
+    // via the `display` attr in updateLabelDisplay below. The sample is keyed off a
+    // stable id hash, so it never reshuffles as the covariate controls move.
     const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
-    const labelCandidates = phenotypes.filter((p) => labelRankMap.has(p.id))
     const labelLayer = g.append('g').attr('class', 'label-layer')
     const labelSel = labelLayer.selectAll('g.label')
-      .data(labelCandidates)
+      .data(phenotypes)
       .join('g')
       .attr('class', 'label')
       .attr('transform', (p) => `translate(${x(coords[p.id][0])}, ${y(coords[p.id][1])})`)
-      .attr('display', (p) => (labelVisible(p.id, currentK) ? null : 'none'))
+      .attr('display', 'none')
     labelSel.append('g')
       .attr('class', 'inner')
       .attr('transform', `scale(${1 / currentK})`)
@@ -335,6 +349,11 @@
       }
       return `${label}\nCoherence ${npmi} · coverage ${pat}% of ${who} patients (θ > ${tauStr})`
     })
+
+    // Seed the label sample for the current (persisted) zoom transform now that
+    // the g.label elements exist; subsequent pan/zoom ticks re-sample via
+    // applyZoomVisuals.
+    updateLabelDisplay(d3.zoomTransform(svgEl))
   }
 
   // `reader`/`baselineReader` are listed so the atlas re-renders whenever the
