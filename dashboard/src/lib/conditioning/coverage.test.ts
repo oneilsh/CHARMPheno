@@ -1,10 +1,52 @@
 import { describe, it, expect } from 'vitest'
-import { cohortCoverage, sampleThetaCohort, withinCohortCoverage, thetaColumnDistribution, tauAlignedBinEdges } from './coverage'
+import { cohortCoverage, sampleThetaCohort, sampleInGroupCohort, withinCohortCoverage, thetaColumnDistribution, tauAlignedBinEdges } from './coverage'
 import { sampleConditionedTheta } from './logisticNormal'
 import { sampleMarginalCovariates, sampleMarginalGroup } from './marginalSampler'
 import { buildDesignVector } from '../covariate'
 import { createRng } from '../sampling'
 import { makeStmBundleFixture } from '../test-fixtures'
+
+describe('sampleInGroupCohort', () => {
+  // Gated K=3 fixture: display id 0 background (reference), 1 -> group 'cancer',
+  // 2 -> group 'dementia'. An in-group 'cancer' cohort must unmask topic 1 for
+  // every patient and keep topic 2 (other group's foreground) masked to 0.
+  function gated() {
+    const b = makeStmBundleFixture()
+    return {
+      ...b,
+      gating: {
+        group_var: 'g', groups: ['cancer', 'dementia'],
+        topic_blocks: ['background', 'cancer', 'dementia'],
+        group_proportions: { cancer: 0.02, dementia: 0.01 },
+      },
+    }
+  }
+
+  it('forces every patient into the group: other-group foreground stays masked, own foreground is expressed', () => {
+    const b = gated()
+    const cohort = sampleInGroupCohort({
+      bundle: b, active: false, values: {}, n: 300, seed: 5, group: 'cancer',
+    })
+    expect(cohort.length).toBe(300)
+    // Every patient: dementia foreground (topic 2) masked to exactly 0.
+    expect(cohort.every((t) => t[2] === 0)).toBe(true)
+    // Some patients express the cancer foreground (topic 1) above 0.
+    expect(cohort.some((t) => t[1] > 0)).toBe(true)
+  })
+
+  it('gives a stable non-zero coverage for a foreground topic that a rare-group marginal cohort would miss', () => {
+    // group_proportions cancer=0.02 -> a 300-patient MARGINAL cohort has ~6
+    // cancer patients, so a cancer sub-topic can easily come out 0. The in-group
+    // cohort samples 300 cancer patients directly, so topic 1's coverage is a
+    // stable positive fraction.
+    const b = gated()
+    const inGroup = sampleInGroupCohort({
+      bundle: b, active: false, values: {}, n: 300, seed: 9, group: 'cancer',
+    })
+    const cov = cohortCoverage(inGroup, 0.05, b.model.K)
+    expect(cov[1]).toBeGreaterThan(0)
+  })
+})
 
 describe('withinCohortCoverage', () => {
   const blocks = ['background', 'background', 'grp']

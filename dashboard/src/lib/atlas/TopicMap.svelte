@@ -190,14 +190,19 @@
     gSel = g as unknown as d3.Selection<SVGGElement, unknown, null, undefined>
 
     // Label-candidate positions for this render (read by the zoom handler to
-    // decide which labels are in view). Every mode-visible node is a candidate;
-    // selectLabels picks the in-view sample. Positions are in the PRE-zoom
-    // g-coordinate space (the node translate), matching applyZoomVisuals' math.
-    labelCandidates = phenotypes.map((p) => ({
-      id: p.id,
-      cx: x(coords[p.id][0]),
-      cy: y(coords[p.id][1]),
-    }))
+    // decide which labels are in view). A node with zero coverage draws no
+    // bubble (rad() -> 0), so exclude it — a label floating over empty space
+    // (a rare foreground topic absent from the sampled cohort) is the "labels
+    // without bubbles" artifact. selectLabels picks the in-view sample from the
+    // rest. Positions are in the PRE-zoom g-coordinate space (the node
+    // translate), matching applyZoomVisuals' math.
+    labelCandidates = phenotypes
+      .filter((p) => r_of(p) > 0)
+      .map((p) => ({
+        id: p.id,
+        cx: x(coords[p.id][0]),
+        cy: y(coords[p.id][1]),
+      }))
 
     // Zoom / pan. d3 stashes the current transform on the svg node (__zoom), so
     // it survives render()'s teardown; re-apply it to the new <g>. Attach the

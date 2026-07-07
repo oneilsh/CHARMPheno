@@ -3,7 +3,7 @@ import type { UMAP } from 'umap-js'
 import type { CohortManifest, DashboardBundle, Phenotype, PhenotypeQuality, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
-import { cohortCoverage, sampleThetaCohort, withinCohortCoverage, thetaColumnDistribution, tauAlignedBinEdges } from './conditioning/coverage'
+import { cohortCoverage, sampleThetaCohort, sampleInGroupCohort, withinCohortCoverage, thetaColumnDistribution, tauAlignedBinEdges } from './conditioning/coverage'
 import { ALL_SUBCOHORTS } from './conditioning/marginalSampler'
 
 export const bundle = writable<DashboardBundle | null>(null)
@@ -212,12 +212,45 @@ export const atlasThetaCohort = derived(
   }
 )
 
+// Per-foreground-group in-group cohorts (keyed by group), one full-size cohort
+// CONDITIONED on each foreground group. A rare group's marginal representation
+// is too thin to estimate its foreground sub-topics' coverage (many come out 0
+// → vanished bubbles), so the atlas reads foreground bubble sizes from these
+// instead. Baseline uses the marginal covariate mix and recomputes on bundle
+// change only; the display variant re-fixes covariates when they are active
+// (mirrors atlasBaselineThetaCohort / atlasThetaCohort). Null for non-gated.
+function inGroupCohorts(
+  b: DashboardBundle, active: boolean, values: Record<string, number | string>,
+): Map<string, number[][]> | null {
+  if (!b.gating) return null
+  const m = new Map<string, number[][]>()
+  b.gating.groups.forEach((g, i) =>
+    m.set(g, sampleInGroupCohort({
+      bundle: b, active, values, n: ATLAS_COHORT_N, seed: ATLAS_COHORT_SEED + 1 + i, group: g,
+    })))
+  return m
+}
+
+export const atlasBaselineForegroundCohorts = derived(bundle, ($b) =>
+  isStmBundle($b) ? inGroupCohorts($b, false, {}) : null
+)
+export const atlasForegroundCohorts = derived(
+  [bundle, atlasConditioning, atlasBaselineForegroundCohorts],
+  ([$b, $cond, $baseline]) => {
+    if (!isStmBundle($b)) return null
+    if (!$cond.covariateActive) return $baseline
+    return inGroupCohorts($b, true, $cond.values)
+  }
+)
+
 // (Phenotype) -> coverage. STM bundles read the sampled cohort (fraction of
 // patients with θ > τ); non-STM bundles fall back to the empirical θ-histogram
 // fractionAboveTau, unchanged. The atlas encodes cohort as COLOR (not a filter),
 // so coverage is never masked by group.
 function coverageFrom(
-  cohort: number[][] | null, b: DashboardBundle | null, tau: number,
+  cohort: number[][] | null,
+  foregroundCohorts: Map<string, number[][]> | null,
+  b: DashboardBundle | null, tau: number,
 ): (p: Phenotype) => number {
   const edges = b?.phenotypes.theta_histogram_bin_edges
   if (cohort && b) {
@@ -228,6 +261,17 @@ function coverageFrom(
     const cov = withinCohortCoverage(
       raw, b.gating?.topic_blocks ?? null, b.gating?.group_proportions ?? null,
     )
+    // Override each foreground topic with its coverage measured on a full-size
+    // in-group cohort — the marginal estimate above is high-variance (often
+    // exactly 0) for a rare group. cohortCoverage over an all-in-group cohort is
+    // exactly P(θ_k > τ | group), no divide-by-share needed.
+    const blocks = b.gating?.topic_blocks
+    if (foregroundCohorts && blocks) {
+      for (const [g, cohortG] of foregroundCohorts) {
+        const covG = cohortCoverage(cohortG, tau, b.model.K)
+        for (let k = 0; k < blocks.length; k++) if (blocks[k] === g) cov[k] = covG[k]
+      }
+    }
     return (p: Phenotype) => cov[p.id] ?? 0
   }
   return (p: Phenotype) => fractionAboveTau(p, edges, tau)
@@ -235,15 +279,15 @@ function coverageFrom(
 
 // Display coverage reader (the atlas's current state).
 export const coverageReader = derived(
-  [bundle, atlasThetaCohort, tauThreshold],
-  ([$b, $cohort, $tau]) => coverageFrom($cohort, $b, $tau)
+  [bundle, atlasThetaCohort, atlasForegroundCohorts, tauThreshold],
+  ([$b, $cohort, $fg, $tau]) => coverageFrom($cohort, $fg, $b, $tau)
 )
 
 // Marginal (baseline) coverage reader — the stable absolute-scale anchor for
 // bubble size (see TopicMap). Equals coverageReader when covariates are off.
 export const baselineCoverageReader = derived(
-  [bundle, atlasBaselineThetaCohort, tauThreshold],
-  ([$b, $cohort, $tau]) => coverageFrom($cohort, $b, $tau)
+  [bundle, atlasBaselineThetaCohort, atlasBaselineForegroundCohorts, tauThreshold],
+  ([$b, $cohort, $fg, $tau]) => coverageFrom($cohort, $fg, $b, $tau)
 )
 
 // The selected phenotype's theta distribution across the SAME live atlas cohort
@@ -252,9 +296,16 @@ export const baselineCoverageReader = derived(
 // and it reshapes live as the covariates change. Null for non-STM bundles or
 // when nothing is selected; CodePanel falls back to the static theta_histogram.
 export const selectedPhenotypeLiveDist = derived(
-  [bundle, atlasThetaCohort, selectedPhenotypeId, tauThreshold],
-  ([$b, $cohort, $sel, $tau]) => {
-    if (!$b || !$cohort || $sel == null) return null
+  [bundle, atlasThetaCohort, atlasForegroundCohorts, selectedPhenotypeId, tauThreshold],
+  ([$b, $cohort, $fg, $sel, $tau]) => {
+    if (!$b || $sel == null) return null
+    // A gated foreground topic reads its own full-size in-group cohort (the
+    // marginal atlas cohort holds too few in-group patients for a rare group);
+    // background topics and non-gated bundles read the marginal cohort. This
+    // keeps the invariant that the bubble's coverage is this histogram's tail.
+    const block = $b.gating?.topic_blocks?.[$sel]
+    const cohort = (block && block !== 'background' && $fg?.get(block)) || $cohort
+    if (!cohort) return null
     const exported = $b.phenotypes.theta_histogram_bin_edges
     if (!exported || exported.length < 2) return null
     // Bin on a τ-aligned grid (first interior edge at τ, exported bin width and
@@ -263,7 +314,7 @@ export const selectedPhenotypeLiveDist = derived(
     // the histogram + its "< τ" summary use exactly these edges.
     const w = exported[1] - exported[0]
     const binEdges = tauAlignedBinEdges($tau, w, exported[exported.length - 1])
-    return { ...thetaColumnDistribution($cohort, $sel, binEdges), binEdges }
+    return { ...thetaColumnDistribution(cohort, $sel, binEdges), binEdges }
   }
 )
 
