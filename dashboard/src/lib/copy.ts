@@ -97,14 +97,11 @@ export const copy = {
     // are no longer referenced in the UI (mean_gain, demoted to an advanced-
     // only "Distinctiveness" stat, is now the only one shown — see
     // distinctivenessTip/nullBandTip below); kept defined in case a future
-    // view resurfaces them. prominenceHistogramTip/Title back the
-    // ProminenceHistogram swap in CodePanel, wired up since Task 6a.
+    // view resurfaces them.
     presenceTip: `Presence: how widely — the fraction of patients where this phenotype adds real predictive signal (clears the model's own noise floor), in held-out predictive nats.`,
     depthTip: `Depth: how much — this phenotype's share of the unique predictive structure in the patients who have it (a broad phenotype others overlap scores low; a niche one nothing else explains scores high).`,
     distinctivenessTip: `Distinctiveness: this phenotype's mean unique held-out predictive gain (nats) — how specific its vocabulary is versus the corpus background (a niche phenotype scores high; a common one whose words are everywhere scores low). This is NOT how common the phenotype is (that is coverage), and it is not a per-patient count.`,
     nullBandTip: `Noise floor: the 95th-percentile predictive gain of a randomized (null) phenotype, in nats. A distinctiveness value near or below this is inside the noise and should not be over-read.`,
-    prominenceHistogramTitle: `Phenotype Prominence`,
-    prominenceHistogramTip: `The spread of this phenotype's per-patient predictive gain (nats), across the patients who have it — the principled replacement for the topic-mass histogram.`,
     relevance: {
       weightingTip: `Relevance term weighting. The slider blends two views of 'top conditions': raw frequency (how much of the phenotype's mass falls on this condition) and lift (how much more this condition shows up here than in the overall dataset). Slide left for surprise/lift, right for sheer frequency.`,
       liftEndTip: `Lift: how much more this condition appears in this phenotype than across all patients overall. Surfaces rare-but-concentrated conditions.`,
@@ -118,14 +115,6 @@ export const copy = {
   histogram: {
     ariaLabel: `Phenotype prominence distribution histogram`,
     axisX: `% of a patient's coded activity`,
-    axisY: `% of patients`,
-    suppressedTip: `< 20 patients (suppressed for privacy)`,
-  },
-
-  // ── Prominence histogram (chart-internal labels; predictive-gain nats scale) ──
-  prominenceHistogram: {
-    ariaLabel: `Phenotype predictive-gain distribution histogram`,
-    axisX: `held-out predictive gain (nats)`,
     axisY: `% of patients`,
     suppressedTip: `< 20 patients (suppressed for privacy)`,
   },

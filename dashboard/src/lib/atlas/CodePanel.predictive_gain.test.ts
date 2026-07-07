@@ -44,7 +44,7 @@ it('backward-compat: without predictive_gain, the theta prominence histogram (Pr
   expect(container.querySelector('.hist-below')).toBeTruthy()
 })
 
-it('with predictive_gain present and hydrated, ProminenceHistogram (nats scale) renders instead, with no below-tau summary', () => {
+it('with predictive_gain present, the theta-coverage histogram still renders — the prominence nats plot is no longer preferred', () => {
   const b = makeStmBundleFixture()
   b.phenotypes.predictive_gain = PG
   b.phenotypes.phenotypes.forEach((p, i) => {
@@ -52,14 +52,23 @@ it('with predictive_gain present and hydrated, ProminenceHistogram (nats scale) 
     p.depth = PG.depth[i]
     p.prominence_hist = PG.prominence_hist[i]
   })
+  // The selected phenotype also carries a theta_histogram: the interpretable
+  // theta-coverage path must win even though predictive_gain (and its
+  // prominence_hist) are present — the nats prominence plot was retired.
+  b.phenotypes.phenotypes[1] = {
+    ...b.phenotypes.phenotypes[1],
+    theta_histogram: [0.3, 0.7],
+    theta_percentiles: { p5: 0.01, p25: 0.05, p50: 0.1, p75: 0.2, p95: 0.3 },
+  }
+  b.phenotypes.theta_histogram_bin_edges = [0, 0.5, 1]
   bundle.set(b)
   const { container, getByText } = render(CodePanel)
   expect(getByText('Phenotype Prominence')).toBeTruthy()
-  // Prominence path has no tau concept -> no below-tau summary chip.
-  expect(container.querySelector('.hist-below')).toBeFalsy()
-  // The chart renders bars for the 2-bin prominence_hist fixture.
+  // The below-tau summary chip exists ONLY on the theta-coverage path, so its
+  // presence proves the PrevalenceHistogram (not the prominence plot) rendered.
+  expect(container.querySelector('.hist-below')).toBeTruthy()
   const rects = container.querySelectorAll('.hist-wrap svg rect')
-  expect(rects.length).toBe(2)
+  expect(rects.length).toBeGreaterThan(0)
 })
 
 it('advanced view shows a Distinctiveness stat (mean_gain) and NO Presence/Depth stats', () => {
