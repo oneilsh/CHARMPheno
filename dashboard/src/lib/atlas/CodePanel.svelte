@@ -2,7 +2,7 @@
   import {
     bundle, selectedPhenotypeId, advancedView, hoveredCodeIdx,
     searchedConditionIdx, searchedPhenotypeForPatients,
-    coverageReader, tauThreshold, predictiveGain,
+    coverageReader, tauThreshold, predictiveGain, selectedPhenotypeLiveDist,
   } from '../store'
   import { topRelevantCodes } from '../inference'
   import { go } from '../router'
@@ -34,6 +34,17 @@
 
   $: reader = $coverageReader
   $: hasHistogram = !!(pheno?.theta_histogram && pheno?.theta_percentiles && $bundle?.phenotypes.theta_histogram_bin_edges)
+  // Phenotype-detail histogram source. Prefer the LIVE atlas cohort — the same
+  // generatively-sampled, covariate-conditioned cohort that sizes the bubbles —
+  // so the histogram reshapes as the covariates move and its tail above τ IS the
+  // coverage bubble. Fall back to the static exported theta_histogram for
+  // non-STM / legacy bundles (no live cohort).
+  $: histEdges = $bundle?.phenotypes.theta_histogram_bin_edges
+  $: histSource = $selectedPhenotypeLiveDist && histEdges
+    ? { hist: $selectedPhenotypeLiveDist.histogram as (number | null)[], pcts: $selectedPhenotypeLiveDist.percentiles, edges: histEdges }
+    : (hasHistogram && pheno && histEdges
+        ? { hist: pheno.theta_histogram!, pcts: pheno.theta_percentiles!, edges: histEdges }
+        : null)
 
   // Task 6b: presence/mean_gain/depth scalars block. Gated on the bundle
   // carrying predictive_gain at all (the per-phenotype fields are hydrated
@@ -149,11 +160,8 @@
       {/if}
     </header>
 
-    {#if hasHistogram && $advancedView}
-      {@const edges = $bundle!.phenotypes.theta_histogram_bin_edges!}
-      {@const hist = pheno.theta_histogram!}
-      {@const pcts = pheno.theta_percentiles!}
-      {@const belowTau = fractionBelowTau(hist, edges, $tauThreshold)}
+    {#if histSource && $advancedView}
+      {@const belowTau = fractionBelowTau(histSource.hist, histSource.edges, $tauThreshold)}
       <div class="hist-wrap" data-tour="histogram">
         <span class="hist-head">
           <span class="eyebrow" title={copy.phenotypeDetail.histogram.tip}>{copy.phenotypeDetail.histogram.title}</span>
@@ -162,9 +170,9 @@
           </span>
         </span>
         <PrevalenceHistogram
-          histogram={hist}
-          binEdges={edges}
-          percentiles={pcts}
+          histogram={histSource.hist}
+          binEdges={histSource.edges}
+          percentiles={histSource.pcts}
           tau={$tauThreshold}
           width={360}
           height={120}

@@ -3,7 +3,7 @@ import type { UMAP } from 'umap-js'
 import type { CohortManifest, DashboardBundle, Phenotype, PhenotypeQuality, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
-import { cohortCoverage, sampleThetaCohort, withinCohortCoverage } from './conditioning/coverage'
+import { cohortCoverage, sampleThetaCohort, withinCohortCoverage, thetaColumnDistribution } from './conditioning/coverage'
 
 export const bundle = writable<DashboardBundle | null>(null)
 export const cohort = writable<SyntheticCohort | null>(null)
@@ -234,6 +234,21 @@ export const coverageReader = derived(
 export const baselineCoverageReader = derived(
   [bundle, atlasBaselineThetaCohort, tauThreshold],
   ([$b, $cohort, $tau]) => coverageFrom($cohort, $b, $tau)
+)
+
+// The selected phenotype's theta distribution across the SAME live atlas cohort
+// that drives the bubble sizes — so the phenotype-detail histogram is the full
+// distribution whose tail above tau is exactly that phenotype's coverage bubble,
+// and it reshapes live as the covariates change. Null for non-STM bundles or
+// when nothing is selected; CodePanel falls back to the static theta_histogram.
+export const selectedPhenotypeLiveDist = derived(
+  [bundle, atlasThetaCohort, selectedPhenotypeId],
+  ([$b, $cohort, $sel]) => {
+    if (!$b || !$cohort || $sel == null) return null
+    const edges = $b.phenotypes.theta_histogram_bin_edges
+    if (!edges) return null
+    return thetaColumnDistribution($cohort, $sel, edges)
+  }
 )
 
 // ── Predictive-gain readers (additive; Task 6a plumbing) ───────────────────

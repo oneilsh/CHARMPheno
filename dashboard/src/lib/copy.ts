@@ -90,7 +90,7 @@ export const copy = {
     },
     histogram: {
       title: `Phenotype Prominence`,
-      tip: `How prominently this phenotype features in each patient's mixture, across the cohort. The x-axis is the share of a patient's coded activity attributed to this phenotype (shown from τ upward); the y-axis is the share of patients at each level. Patients below τ are summarised by the '< τ' figure rather than drawn. Bins with fewer than 20 patients are suppressed for privacy.`,
+      tip: `How prominently this phenotype features across patients. The x-axis is the share of a patient's record attributed to this phenotype (shown from τ upward); the y-axis is the share of patients at each level. This is the same model-sampled cohort that sizes the atlas bubble — the mass above τ IS the coverage bubble — so it reshapes as you change the patient features. Patients below τ are summarised by the '< τ' figure rather than drawn.`,
       belowTauTip: `Share of patients for whom this phenotype is below the τ threshold — i.e. they are not counted as having it. Not drawn on the chart (the x-axis starts at τ).`,
     },
     // Predictive-gain scalars. presenceTip/depthTip date from Task 6a/6b and

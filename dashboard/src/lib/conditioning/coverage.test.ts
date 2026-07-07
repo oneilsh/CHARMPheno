@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { cohortCoverage, sampleThetaCohort, withinCohortCoverage } from './coverage'
+import { cohortCoverage, sampleThetaCohort, withinCohortCoverage, thetaColumnDistribution } from './coverage'
 import { sampleConditionedTheta } from './logisticNormal'
 import { sampleMarginalCovariates, sampleMarginalGroup } from './marginalSampler'
 import { buildDesignVector } from '../covariate'
@@ -28,6 +28,53 @@ describe('withinCohortCoverage', () => {
   it('leaves a foreground topic unchanged when its group share is missing/zero', () => {
     expect(withinCohortCoverage([0.5, 0.3, 0.03], blocks, {})).toEqual([0.5, 0.3, 0.03])
     expect(withinCohortCoverage([0.5, 0.3, 0.03], blocks, { grp: 0 })).toEqual([0.5, 0.3, 0.03])
+  })
+})
+
+describe('thetaColumnDistribution', () => {
+  it('bins one phenotype column into fractions over the bin edges (sums to 1)', () => {
+    const cohort = [[0.1], [0.2], [0.6], [0.9]]
+    const d = thetaColumnDistribution(cohort, 0, [0, 0.5, 1])
+    expect(d.n).toBe(4)
+    expect(d.histogram).toEqual([0.5, 0.5]) // 2 in [0,0.5), 2 in [0.5,1)
+    expect(d.histogram.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 10)
+  })
+
+  it('excludes masked (theta==0) out-of-group patients from the distribution', () => {
+    // A foreground topic: two patients were masked to exactly 0 (out of group);
+    // the distribution is over the eligible (theta>0) patients only, so its own
+    // 0..1 scale — matching the within-cohort bubble.
+    const cohort = [[0], [0.2], [0.6], [0]]
+    const d = thetaColumnDistribution(cohort, 0, [0, 0.5, 1])
+    expect(d.n).toBe(2)
+    expect(d.histogram).toEqual([0.5, 0.5])
+  })
+
+  it('computes p5..p95 from the eligible values (linear interpolation)', () => {
+    const cohort = [[0.1], [0.2], [0.3], [0.4]]
+    const d = thetaColumnDistribution(cohort, 0, [0, 1])
+    expect(d.percentiles.p50).toBeCloseTo(0.25, 10) // median of 4 pts, linear interp
+    expect(d.percentiles.p95).toBeCloseTo(0.385, 10)
+  })
+
+  it('returns zeros for an empty cohort or an all-masked column', () => {
+    expect(thetaColumnDistribution([], 0, [0, 0.5, 1])).toEqual({
+      histogram: [0, 0], percentiles: { p5: 0, p25: 0, p50: 0, p75: 0, p95: 0 }, n: 0,
+    })
+    expect(thetaColumnDistribution([[0], [0]], 0, [0, 0.5, 1]).n).toBe(0)
+  })
+
+  it("the tail mass above tau equals the cohort's coverage (bubble = area above tau)", () => {
+    // No masked patients, tau exactly on a bin edge, no value on the edge: the
+    // fraction in bins at/above tau must equal cohortCoverage for that column.
+    const cohort = [[0.05], [0.15], [0.25], [0.35], [0.85]]
+    const edges = [0, 0.1, 0.2, 0.3, 0.4, 1.0]
+    const tau = 0.2
+    const d = thetaColumnDistribution(cohort, 0, edges)
+    // bins with left edge >= tau: indices 2,3,4 -> theta in {0.25,0.35,0.85} = 3/5
+    const tailIdx = edges.slice(0, -1).map((lo, i) => ({ lo, i })).filter((b) => b.lo >= tau)
+    const tailMass = tailIdx.reduce((s, b) => s + d.histogram[b.i], 0)
+    expect(tailMass).toBeCloseTo(cohortCoverage(cohort, tau, 1)[0], 10)
   })
 })
 
