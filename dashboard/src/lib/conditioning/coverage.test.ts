@@ -1,6 +1,31 @@
 import { describe, it, expect } from 'vitest'
-import { cohortCoverage, sampleThetaCohort } from './coverage'
+import { cohortCoverage, sampleThetaCohort, withinCohortCoverage } from './coverage'
 import { makeStmBundleFixture } from '../test-fixtures'
+
+describe('withinCohortCoverage', () => {
+  const blocks = ['background', 'background', 'grp']
+  const props = { grp: 0.2 }
+
+  it('is a no-op when the bundle is not gated (null blocks or proportions)', () => {
+    expect(withinCohortCoverage([0.1, 0.2, 0.05], null, props)).toEqual([0.1, 0.2, 0.05])
+    expect(withinCohortCoverage([0.1, 0.2, 0.05], blocks, null)).toEqual([0.1, 0.2, 0.05])
+  })
+
+  it('leaves background topics unchanged and divides foreground topics by their group share', () => {
+    // topic 2 is foreground in group 'grp' (share 0.2): whole-cohort 0.03 -> within-cohort 0.15.
+    expect(withinCohortCoverage([0.5, 0.3, 0.03], blocks, props)).toEqual([0.5, 0.3, 0.15])
+  })
+
+  it('clamps a rescaled foreground coverage to 1', () => {
+    // 0.25 / 0.2 = 1.25 -> clamped to 1 (a topic cannot exceed 100% within its cohort).
+    expect(withinCohortCoverage([0.5, 0.3, 0.25], blocks, props)).toEqual([0.5, 0.3, 1])
+  })
+
+  it('leaves a foreground topic unchanged when its group share is missing/zero', () => {
+    expect(withinCohortCoverage([0.5, 0.3, 0.03], blocks, {})).toEqual([0.5, 0.3, 0.03])
+    expect(withinCohortCoverage([0.5, 0.3, 0.03], blocks, { grp: 0 })).toEqual([0.5, 0.3, 0.03])
+  })
+})
 
 describe('cohortCoverage', () => {
   it('counts the fraction of patients with theta_k strictly greater than tau', () => {

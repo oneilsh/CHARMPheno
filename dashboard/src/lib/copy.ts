@@ -53,7 +53,7 @@ export const copy = {
     legend: {
       coherence: `Coherence: how reliably the phenotype's leading conditions actually co-occur in the same patients. Higher means the conditions really do show up together; lower means the pattern is weaker or more diffuse. (Bubble color encodes this.)`,
       coverage: (tau: number): string =>
-        `Patient coverage: the fraction of patients for whom this phenotype accounts for more than ${pct(tau)}% of their coded activity (θ > ${tau.toFixed(2)}). Bubble size scales with this value; covariate sliders resample it, so bubbles grow or shrink with the population you condition on.`,
+        `Patient coverage: within a phenotype's cohort, the fraction of patients for whom it accounts for more than ${pct(tau)}% of their coded activity (θ > ${tau.toFixed(2)}). Shared phenotypes are measured across all patients; a group-specific phenotype within its own group's patients, so each cohort uses the full size range. Bubble size scales with this value; covariate sliders resample it, so bubbles grow or shrink with the population you condition on.`,
       topicMass: `Topic mass: mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
       // Legacy: predictive_gain no longer drives bubble sizing (that's always
       // `coverage` now — see Task 4); mean_gain surfaces instead as the
@@ -72,9 +72,9 @@ export const copy = {
       labelBasic: `Coverage`,
       labelAdvanced: `Coverage`,
       tipBasic: (tau: number): string =>
-        `Coverage: the share of patients for whom this phenotype accounts for more than ${pct(tau)}% of their coded activity (θ > ${tau.toFixed(2)}).`,
+        `Coverage: within this phenotype's cohort, the share of patients for whom it accounts for more than ${pct(tau)}% of their coded activity (θ > ${tau.toFixed(2)}). A group-specific phenotype is measured among its own group's patients.`,
       tipAdvanced: (tau: number): string =>
-        `Coverage: the fraction of patients with θ > τ = ${tau.toFixed(2)} — at least ${pct(tau)}% of their coded activity is attributed to this phenotype. For STM bundles this is estimated from patients sampled at the current covariate profile; otherwise from the θ-histogram.`,
+        `Coverage: the fraction of a phenotype's cohort with θ > τ = ${tau.toFixed(2)} — at least ${pct(tau)}% of their coded activity is attributed to it. Shared phenotypes are scaled across all patients, a group-specific phenotype within its own group's patients. For STM bundles this is estimated from patients sampled at the current covariate profile; otherwise from the θ-histogram.`,
       tipNoHistogram: `Coverage: the corpus-average share of activity attributed to this phenotype (no per-patient histogram available for this bundle).`,
     },
     topicMassTip: `Mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.`,

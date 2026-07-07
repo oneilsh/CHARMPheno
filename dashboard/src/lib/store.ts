@@ -3,7 +3,7 @@ import type { UMAP } from 'umap-js'
 import type { CohortManifest, DashboardBundle, Phenotype, PhenotypeQuality, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
-import { cohortCoverage, sampleThetaCohort } from './conditioning/coverage'
+import { cohortCoverage, sampleThetaCohort, withinCohortCoverage } from './conditioning/coverage'
 
 export const bundle = writable<DashboardBundle | null>(null)
 export const cohort = writable<SyntheticCohort | null>(null)
@@ -209,7 +209,13 @@ function coverageFrom(
 ): (p: Phenotype) => number {
   const edges = b?.phenotypes.theta_histogram_bin_edges
   if (cohort && b) {
-    const cov = cohortCoverage(cohort, tau, b.model.K)
+    // Whole-cohort coverage, then rescaled WITHIN each gated cohort so a
+    // foreground topic (masked to 0 outside its group) is scaled to its own
+    // group's patients rather than compressed by that group's small share.
+    const raw = cohortCoverage(cohort, tau, b.model.K)
+    const cov = withinCohortCoverage(
+      raw, b.gating?.topic_blocks ?? null, b.gating?.group_proportions ?? null,
+    )
     return (p: Phenotype) => cov[p.id] ?? 0
   }
   return (p: Phenotype) => fractionAboveTau(p, edges, tau)

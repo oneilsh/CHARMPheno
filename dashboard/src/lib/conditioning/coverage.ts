@@ -46,3 +46,26 @@ export function cohortCoverage(thetas: number[][], tau: number, K: number): numb
   for (let k = 0; k < K; k++) cov[k] /= thetas.length
   return cov
 }
+
+// Rescale whole-cohort coverage to WITHIN-COHORT coverage. A foreground topic is
+// masked to 0 for every patient outside its group, so its whole-cohort coverage
+// is capped by that group's population share — every foreground bubble reads tiny
+// next to background ones, hiding within-group diversity. Dividing each topic by
+// the fraction of the population ELIGIBLE to express it — 1 for a background
+// topic (everyone can), group_proportions[g] for a foreground topic in group g
+// (only group-g patients can) — puts each cohort on its own 0..1 scale. Clamped
+// to 1 (sampling noise can nudge a ratio just past its group share). No-op when
+// the bundle is not gated (topicBlocks / groupProportions absent).
+export function withinCohortCoverage(
+  coverage: number[],
+  topicBlocks: string[] | null,
+  groupProportions: Record<string, number> | null,
+): number[] {
+  if (!topicBlocks || !groupProportions) return coverage
+  return coverage.map((c, k) => {
+    const block = topicBlocks[k]
+    if (block === 'background') return c
+    const p = groupProportions[block]
+    return p && p > 0 ? Math.min(c / p, 1) : c
+  })
+}

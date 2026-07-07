@@ -321,11 +321,16 @@
       const npmi = p.npmi == null ? '—' : p.npmi.toFixed(3)
       const tauStr = $tauThreshold.toFixed(2)
       const label = p.label || `Phenotype ${p.id}`
+      // Coverage is WITHIN-cohort: name the cohort so "X%" isn't misread as a
+      // share of the whole population. Background/shared topics -> all patients;
+      // a foreground topic -> its group's patients.
+      const block = $bundle?.gating?.topic_blocks?.[p.id]
+      const who = !block || block === 'background' ? 'all' : groupLabel(block)
       if ($advancedView) {
         const mass = (p.corpus_prevalence * 100).toFixed(1)
-        return `${label}\nCoherence ${npmi} · coverage ${pat}% of patients (θ > ${tauStr}) · topic mass ${mass}%`
+        return `${label}\nCoherence ${npmi} · coverage ${pat}% of ${who} patients (θ > ${tauStr}) · topic mass ${mass}%`
       }
-      return `${label}\nCoherence ${npmi} · coverage ${pat}% of patients (θ > ${tauStr})`
+      return `${label}\nCoherence ${npmi} · coverage ${pat}% of ${who} patients (θ > ${tauStr})`
     })
   }
 
