@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { cohortCoverage, sampleThetaCohort, withinCohortCoverage } from './coverage'
+import { sampleConditionedTheta } from './logisticNormal'
+import { sampleMarginalCovariates, sampleMarginalGroup } from './marginalSampler'
+import { buildDesignVector } from '../covariate'
+import { createRng } from '../sampling'
 import { makeStmBundleFixture } from '../test-fixtures'
 
 describe('withinCohortCoverage', () => {
@@ -65,6 +69,42 @@ describe('sampleThetaCohort', () => {
     const a = sampleThetaCohort({ bundle, active: false, ...base })
     const b = sampleThetaCohort({ bundle, active: false, ...base })
     expect(a).toEqual(b)
+  })
+
+  it('the per-group Cholesky cache does not change the output (byte-identical to a naive per-patient draw)', () => {
+    // sampleThetaCohort hoists the O(free³) factorization out of the per-patient
+    // loop by caching it per group. This must not perturb the RNG stream: the
+    // cached result has to equal a naive loop that rebuilds everything per
+    // patient in the same draw order. Verify on both a fixed-covariate (active)
+    // and a fully-marginal (inactive) cohort.
+    const bundle = makeStmBundleFixture()
+    const naive = (active: boolean, values: Record<string, number | string>): number[][] => {
+      const rng = createRng(20260706)
+      const out: number[][] = []
+      const fixedX = active
+        ? buildDesignVector(bundle.covariateSchema!.design_columns, values)
+        : null
+      for (let i = 0; i < 300; i++) {
+        const group = bundle.gating ? sampleMarginalGroup(bundle.gating, rng) : null
+        const x = fixedX ?? buildDesignVector(
+          bundle.covariateSchema!.design_columns,
+          sampleMarginalCovariates(bundle.covariateSchema!, rng),
+        )
+        out.push(sampleConditionedTheta({
+          effects: bundle.covariateEffects!,
+          x,
+          correlation: bundle.correlation!,
+          topicBlocks: bundle.gating?.topic_blocks ?? null,
+          group,
+          rng,
+        }))
+      }
+      return out
+    }
+    expect(sampleThetaCohort({ bundle, active: true, values: { age: 50 }, n: 300, seed: 20260706 }))
+      .toEqual(naive(true, { age: 50 }))
+    expect(sampleThetaCohort({ bundle, active: false, values: {}, n: 300, seed: 20260706 }))
+      .toEqual(naive(false, {}))
   })
 
   it('with active covariates fixed at high age, coverage shifts to the age-loaded topic', () => {
