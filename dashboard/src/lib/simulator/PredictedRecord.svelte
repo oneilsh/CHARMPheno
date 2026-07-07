@@ -1,7 +1,6 @@
 <script lang="ts">
   import { bundle, simulatorPrefix, phenotypesById, advancedView } from '../store'
   import { phenotypeHue } from '../palette'
-  import { quantiles } from './runSamples'
   import { copy } from '../copy'
   export let codeCountsSamples: Map<number, number>[] = []
   // code id -> (generating topic id -> count). Drives the per-phenotype grouping.
@@ -14,30 +13,29 @@
   // left, so we don't duplicate it here.
   $: prefixSet = new Set($simulatorPrefix)
 
-  // Predicted rollup: codes the simulator drew across N samples that
-  // AREN'T in the prefix. For each code, compute the P10 / median / P90
-  // of its per-sample completion count, then take the top by median.
-  // A code with median 0 but a non-zero P90 is interesting too (rarely
-  // appears but when it does it's plausible), so we keep entries with
-  // P90 > 0 even when median is 0.
+  // Predicted rollup: codes the simulator drew across N samples that AREN'T in the
+  // prefix. A simulated record is ~one year, so a given code appears 0 or 1 times
+  // in most draws — per-sample count quantiles are degenerate (median 0, range
+  // 0→1) and carry no signal. We instead report the OCCURRENCE RATE: the share of
+  // simulated years in which the code shows up at least once (its posterior
+  // predictive probability), which is interpretable across the whole long tail.
   $: predictedRows = (() => {
-    if (codeCountsSamples.length === 0 || !$bundle) return [] as { w: number; p10: number; p50: number; p90: number }[]
+    if (codeCountsSamples.length === 0 || !$bundle) return [] as { w: number; rate: number }[]
+    const N = codeCountsSamples.length
     const codes = new Set<number>()
     for (const m of codeCountsSamples) for (const w of m.keys()) {
       if (!prefixSet.has(w)) codes.add(w)
     }
-    const rows: { w: number; p10: number; p50: number; p90: number }[] = []
+    const rows: { w: number; rate: number }[] = []
     for (const w of codes) {
-      const counts = codeCountsSamples.map((m) => m.get(w) ?? 0)
-      const q = quantiles(counts, [0.1, 0.5, 0.9])
-      if (q[2] === 0) continue
-      rows.push({ w, p10: q[0], p50: q[1], p90: q[2] })
+      let occ = 0
+      for (const m of codeCountsSamples) if ((m.get(w) ?? 0) > 0) occ++
+      if (occ === 0) continue
+      rows.push({ w, rate: occ / N })
     }
-    rows.sort((a, b) => (b.p50 - a.p50) || (b.p90 - a.p90))
+    rows.sort((a, b) => b.rate - a.rate)
     return rows.slice(0, topN)
   })()
-
-  $: maxP90 = predictedRows.length > 0 ? Math.max(...predictedRows.map((r) => r.p90)) : 1
 
   // Dominant generating phenotype for a code: the topic that emitted it most
   // often across all draws (argmax of codeTopicCounts). -1 when unattributed.
@@ -68,8 +66,8 @@
     return [...byPheno.entries()]
       .map(([k, rows]) => ({
         k,
-        rows: rows.slice().sort((a, b) => (b.p50 - a.p50) || (b.p90 - a.p90)),
-        total: rows.reduce((s, r) => s + r.p50, 0),
+        rows: rows.slice().sort((a, b) => b.rate - a.rate),
+        total: rows.reduce((s, r) => s + r.rate, 0),
       }))
       // Real phenotypes first (by total predicted mass), the Other bucket last.
       .sort((a, b) => (a.k < 0 ? 1 : 0) - (b.k < 0 ? 1 : 0) || (b.total - a.total))
@@ -103,10 +101,9 @@
                   <td class="dom-cell"><span class="domain-mark dom-{c.domain}">{c.domain.slice(0, 3)}</span></td>
                   <td class="desc">{c.description || c.code}</td>
                   <td class="bar">
-                    <span class="rng" style="left: {(r.p10 / maxP90) * 100}%; width: {Math.max(1, ((r.p90 - r.p10) / maxP90) * 100)}%"></span>
-                    <span class="med" style="left: {(r.p50 / maxP90) * 100}%"></span>
+                    <span class="fill" style="width: {Math.max(1, r.rate * 100)}%"></span>
                   </td>
-                  <td class="num" data-numeric>{r.p50.toFixed(1)}</td>
+                  <td class="num" data-numeric>{(r.rate * 100).toFixed(0)}%</td>
                 </tr>
               {/each}
             </tbody>
@@ -200,20 +197,16 @@
     position: relative;
     height: 1.4rem;
   }
-  td.bar .rng {
+  /* Occurrence-rate fill: a bar from the left proportional to the share of
+     simulated years the condition appears in. */
+  td.bar .fill {
     position: absolute;
-    top: 0.6rem;
-    height: 3px;
+    top: 0.5rem;
+    left: 0;
+    height: 5px;
     background: var(--accent);
-    opacity: 0.35;
-    border-radius: 1.5px;
-  }
-  td.bar .med {
-    position: absolute;
-    top: 0.35rem;
-    width: 2px;
-    height: 11px;
-    background: var(--accent);
+    opacity: 0.55;
+    border-radius: 2.5px;
   }
   td.num {
     width: 3.5rem;

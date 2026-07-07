@@ -202,7 +202,7 @@ export const copy = {
   predictedRecord: {
     heading: `Model expects to also see`,
     sub: (n: number): string =>
-      `Across ${n} simulated years, the model most often fills these in — grouped by the phenotype that generated them. The bar shows how often the condition shows up (P10 → P90, tick at median).`,
+      `Across ${n} simulated years, the model most often fills these in — grouped by the phenotype that generated them. The bar and percentage show the share of those years the condition appears in.`,
     hintEmpty: `Run the simulator to see what the model predicts.`,
     hintNone: `The model did not predict any additional conditions in this run.`,
   },
