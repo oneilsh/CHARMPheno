@@ -111,6 +111,12 @@ def test_stm_predictive_gain_end_to_end(spark, tmp_path):
     assert audit["n_docs_audited"] > 0
     assert np.isfinite(audit["max_abs_overall"])
 
+    # Certification signal: the mean (not just worst-case max) cold-vs-fast
+    # discrepancy, mirroring the builders' mean_abs_overall computation.
+    _mad = np.asarray(audit["mean_abs_discrepancy"], dtype=float)
+    mean_abs_overall = (
+        float(np.nanmean(_mad)) if np.isfinite(_mad).any() else float("nan"))
+
     # Mirror the builder's ndarray -> JSON conversion (NaN -> None).
     def _nan_to_none(arr):
         return [None if np.isnan(v) else float(v) for v in arr.tolist()]
@@ -126,6 +132,7 @@ def test_stm_predictive_gain_end_to_end(spark, tmp_path):
     ]
     downdate_audit = {
         "max_abs_overall": float(audit["max_abs_overall"]),
+        "mean_abs_overall": mean_abs_overall,
         "n_docs_audited": int(audit["n_docs_audited"]),
     }
 
@@ -167,6 +174,11 @@ def test_stm_predictive_gain_end_to_end(spark, tmp_path):
     assert set(pgj["null_band"].keys()) == {"mean", "std", "n", "hist", "p95"}
     assert len(pgj["observed_delta_range"]) == 2
     assert pgj["downdate_audit"]["n_docs_audited"] == audit["n_docs_audited"]
+    # Certification signal (fast-downdate reliability): the mean (not just
+    # worst-case max) cold-vs-fast discrepancy over topics -- present as a
+    # float (or None if no topic was ever seen across audited docs).
+    assert "mean_abs_overall" in pgj["downdate_audit"]
+    assert isinstance(pgj["downdate_audit"]["mean_abs_overall"], (float, type(None)))
     assert pgj["scale"] == 1.0
     assert pgj["n_docs"] == int(pg["n_docs"])
 
@@ -244,6 +256,12 @@ def test_stm_predictive_gain_end_to_end_with_marginal(spark, tmp_path):
     # marginal wiring).
     assert audit["max_abs_overall"] < 1.0
 
+    # Certification signal: the mean (not just worst-case max) cold-vs-fast
+    # discrepancy, mirroring the builders' mean_abs_overall computation.
+    _mad = np.asarray(audit["mean_abs_discrepancy"], dtype=float)
+    mean_abs_overall = (
+        float(np.nanmean(_mad)) if np.isfinite(_mad).any() else float("nan"))
+
     def _nan_to_none(arr):
         return [None if np.isnan(v) else float(v) for v in arr.tolist()]
 
@@ -258,6 +276,7 @@ def test_stm_predictive_gain_end_to_end_with_marginal(spark, tmp_path):
     ]
     downdate_audit = {
         "max_abs_overall": float(audit["max_abs_overall"]),
+        "mean_abs_overall": mean_abs_overall,
         "n_docs_audited": int(audit["n_docs_audited"]),
     }
 
@@ -290,3 +309,5 @@ def test_stm_predictive_gain_end_to_end_with_marginal(spark, tmp_path):
     assert "null_band" in pgj
     assert "downdate_audit" in pgj
     assert pgj["downdate_audit"]["n_docs_audited"] == audit["n_docs_audited"]
+    assert "mean_abs_overall" in pgj["downdate_audit"]
+    assert isinstance(pgj["downdate_audit"]["mean_abs_overall"], (float, type(None)))

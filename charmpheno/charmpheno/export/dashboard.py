@@ -220,9 +220,16 @@ def write_phenotypes_bundle(
         this bundle — the real-numbers basis for recalibrating
         prominence_range/prominence_bin_edges in a later Phase-2 pass.
       downdate_audit
-        {"max_abs_overall": float, "n_docs_audited": int} — the cold-vs-
-        fast (``fast=True`` downdate) reliability check
-        (``predictive_gain_downdate_audit``), passed through unchanged.
+        {"max_abs_overall": float, "mean_abs_overall": float,
+        "n_docs_audited": int} — the cold-vs-fast (``fast=True`` downdate)
+        reliability check (``predictive_gain_downdate_audit``), passed
+        through unchanged. ``max_abs_overall`` is the single worst-case
+        per-document discrepancy; ``mean_abs_overall`` is the mean, over
+        finite per-topic entries, of the audit's mean_abs_discrepancy —
+        the certification signal for whether the fast downdate's
+        aggregates are broadly trustworthy (mean small even if max is
+        large -> only rare pathological documents disagree) or broadly
+        suspect (mean itself large).
       scale
         the scalar generative-variance scale c the aggregates were computed
         at (``predictive_gain_scale``; the calibrated eta_scale, or the

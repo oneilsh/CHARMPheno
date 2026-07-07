@@ -115,6 +115,55 @@ the `covariate level diagnostics` phase reports `sex_at_birth_concept_id`
   activity in their sampled year — a mild "sicker/more-coded" skew relative to
   the true general population. Lower `doc_min_length` to broaden it.
 
+## Certification (fast-downdate reliability)
+
+The predictive-gain panel's per-topic aggregates (presence, mean_gain, depth,
+prominence, dedup_gain) are computed with a fast one-Newton-step "downdate"
+approximation (`fast=True`), not the exact per-document cold solve. A small
+in-memory sample is checked cold-vs-fast by `predictive_gain_downdate_audit`
+([predictive_gain.py](../../spark-vi/spark_vi/mllib/topic/predictive_gain.py#L1192-L1197))
+and the audit's `max_abs_overall` and `mean_abs_overall` ship into
+`phenotypes.json`'s `predictive_gain.downdate_audit`. This is a
+re-certification of that fast path against the actual 0028 corpus — no
+re-fit, just a fresh export.
+
+Run (from `analysis/cloud` on the Dataproc master):
+
+```
+git pull && git rev-parse --short HEAD    # confirm current
+export BUILD_ETA_SCALE_OVERRIDE=4.6       # pins c*, SKIPS the ~13-min held-out
+                                           #   sweep -- only needs to be a
+                                           #   stable, reasonable scale for
+                                           #   this check, not a fresh calibration
+make build-dashboard-exp ID=28 2>&1 | tee ~/build_0028.log
+```
+
+What to confirm in the log:
+
+- `eta_scale: OVERRIDE=4.6 (BUILD_ETA_SCALE_OVERRIDE set; skipping the
+  held-out sweep)`
+- `predictive_gain: smoothed score active (lambda=1.0)`
+- `BUNDLE WRITTEN: <path> (mtime ...)` — and the shell returns immediately
+  (no teardown hang). `cp` the bundle to a uniquely-named file before
+  downloading it (repeated runs overwrite the default path).
+
+What to read in `phenotypes.json` → `predictive_gain`:
+
+- `smoothing.active` must be `true` (the marginal-backoff smoother engaged).
+- `downdate_audit.mean_abs_overall` vs `downdate_audit.max_abs_overall` — the
+  certification itself. `max_abs_overall` is a single worst-case document;
+  `mean_abs_overall` averages the audit's per-topic mean discrepancy over
+  finite entries. If `mean_abs_overall` is SMALL (much less than 1 nat) while
+  `max_abs_overall` is large, the fast downdate disagrees with the exact cold
+  solve only on a handful of pathological documents — the per-topic
+  aggregates (means over the corpus's ~48k docs) are trustworthy as-is. If
+  `mean_abs_overall` is itself large (order-nats), the fast path is broadly
+  biased and the aggregates are suspect — fall back to the exact cold solve
+  (or a hardened multi-step downdate) before trusting them.
+
+This run also exercises the smoothed predictive score, the uniform marginal
+floor, and the bundle provenance stamp — all already shipped, not new here.
+
 ## Related
 
 Builds on exp 0027 (block-wise unit-diagonal Σ, gated comorbid), insight 0030

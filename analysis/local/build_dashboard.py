@@ -628,8 +628,14 @@ def main(argv: list[str] | None = None) -> int:
                     c=pg_scale, reference=pg_reference,
                     marginal=pg_marginal, smoothing_lambda=1.0,
                 )
+                _pg_mad = np.asarray(
+                    pg_audit_raw["mean_abs_discrepancy"], dtype=float)
+                pg_mean_abs_overall = (
+                    float(np.nanmean(_pg_mad))
+                    if np.isfinite(_pg_mad).any() else float("nan"))
                 pg_downdate_audit = {
                     "max_abs_overall": float(pg_audit_raw["max_abs_overall"]),
+                    "mean_abs_overall": pg_mean_abs_overall,
                     "n_docs_audited": int(pg_audit_raw["n_docs_audited"]),
                 }
                 log.info(
