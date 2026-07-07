@@ -42,12 +42,12 @@ export const copy = {
   atlas: {
     title: `Phenotype Atlas`,
     kicker: (): string =>
-      `Each marker is a learned phenotype. Bubbles that sit closer together share more of their leading conditions; bubble size shows patient coverage — how many patients express the phenotype — and resizes as you condition on covariates.`,
+      `Each marker is a learned phenotype. Bubbles that sit closer together share more of their leading conditions; bubble size corresponds roughly to usage by cohort, and bubble opacity indicates how frequenty the top codes appear together in patient records.`,
     whatIsSummary: `What's a phenotype?`,
     // kLabel: the phenotype count K (or a "~80" fallback while loading).
     whatIs: (kLabel: string | number): string[] => [
-      `A <em>phenotype</em> here is a recurring pattern of clinical conditions that tends to appear together across patients. For example, "Type 2 diabetes care" concentrates on diabetes, retinopathy, neuropathy, and related conditions.`,
-      `These phenotypes were learned automatically from de-identified patient records using a topic model (Latent Dirichlet Allocation). The model didn't know about diseases ahead of time; it just looked for groups of conditions that tend to co-occur, and produced ${kLabel} phenotypes.`,
+      `A <em>phenotype</em> here is a recurring pattern of clinical conditions that tends to appear together across patients.`,
+      `These phenotypes were learned automatically from de-identified patient records using a Bayesian probabilistic model. The model didn't know about diseases ahead of time; it just looked for groups of conditions that tend to co-occur, and produced ${kLabel} phenotypes.`,
       `A patient is a mix of phenotypes, not a single one. A phenotype is not a diagnosis; it's a pattern. Some patterns name a single disease, others name a family of related conditions, and some describe broad health backgrounds (e.g. chronic comorbidity follow-up).`,
     ],
     legend: {
