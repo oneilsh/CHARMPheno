@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { codeComposition, OTHER_ID } from './codeComposition'
+import { codeComposition, OTHER_ID, explainedVsPrior } from './codeComposition'
 
 // K=3, V=3. Topic 0 emits code 0, topic 1 emits code 1, topic 2 emits code 2.
 const beta = [
@@ -36,5 +36,37 @@ describe('codeComposition', () => {
     const zeroBeta = [[0, 1], [0, 1]] // neither topic emits code 0
     const rows = codeComposition([0.5, 0.5], [0], zeroBeta, 2, 0.05)
     expect(rows[0].segments).toEqual([])
+  })
+})
+
+describe('explainedVsPrior', () => {
+  const beta = [
+    [0.8, 0.1, 0.1],
+    [0.1, 0.8, 0.1],
+    [0.1, 0.1, 0.8],
+  ]
+
+  it('explained + prior equals theta per phenotype', () => {
+    const theta = [0.5, 0.4, 0.1]
+    const { explained, prior } = explainedVsPrior(theta, [0, 1, 2], beta, 3)
+    for (let k = 0; k < 3; k++) {
+      expect(explained[k] + prior[k]).toBeCloseTo(theta[k], 10)
+    }
+  })
+
+  it('clamps when codes over-explain a phenotype: prior=0, explained=theta', () => {
+    // Only code 0 present → code evidence concentrates on topic 0, over-explaining it
+    // relative to theta[0], while theta[1] gets no code support.
+    const theta = [0.34, 0.33, 0.33]
+    const { explained, prior } = explainedVsPrior(theta, [0], beta, 3)
+    expect(prior[0]).toBe(0)
+    expect(explained[0]).toBeCloseTo(theta[0], 10)
+    expect(prior[1]).toBeGreaterThan(0) // no code speaks to topic 1 → prior-supported
+  })
+
+  it('returns zero explained when codeBag is empty', () => {
+    const { explained, prior } = explainedVsPrior([0.5, 0.5, 0], [], beta, 3)
+    expect(explained).toEqual([0, 0, 0])
+    expect(prior).toEqual([0.5, 0.5, 0])
   })
 })
