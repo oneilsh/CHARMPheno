@@ -139,13 +139,16 @@
     // absolute growth/shrink. scaleSqrt = area-proportional; clamp so a topic
     // whose conditioned coverage exceeds its marginal max caps at max radius.
     const r_of = sizeReader
+    // Size scale anchored at 0 so bubble AREA is honestly proportional to
+    // within-cohort coverage (a 20% phenotype covers twice the area of a 10% one).
+    // Domain top is the stable per-bundle MARGINAL coverage max, so covariate
+    // response stays absolute (a conditioned coverage above it clamps at max
+    // radius). scaleSqrt = area-proportional; range [4,20] keeps the smallest
+    // bubbles visible and caps overlap; zero stays 0 (handled in rad()).
     const domainMax = Math.max(...allPhenotypes.map(baselineReader), 1e-9)
-    // scaleSqrt = area-proportional. A low floor (2, not 5) lets a 0.2%-
-    // prevalence bubble actually read as tiny next to a 4%+ one instead of being
-    // pinned near the mid-size floor; zero stays 0 (handled in rad()).
     const r = d3.scaleSqrt()
       .domain([0, domainMax])
-      .range([2, 26])
+      .range([4, 20])
       .clamp(true)
 
     // Node hue: cohort (topic block) for gated bundles, else the NPMI ramp.
