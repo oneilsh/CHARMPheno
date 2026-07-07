@@ -99,7 +99,7 @@
   // across reorders and CSS-transitions to its new position (the "slide").
   $: cells = (() => {
     const out: {
-      key: string; mr: number; mc: number; x: number; y: number; fill: string; na: boolean; tip: string
+      key: string; mr: number; mc: number; dr: number; dc: number; x: number; y: number; fill: string; na: boolean; tip: string
     }[] = []
     for (let dr = 0; dr < nr; dr++) {
       const mr = rowIdx[rowOrder[dr]]
@@ -111,6 +111,8 @@
           key: `${mr}:${mc}`,
           mr,
           mc,
+          dr,
+          dc,
           x: AXIS + dc * CELL,
           y: PAD + dr * CELL,
           fill: na ? 'var(--rule)' : rRamp(r as number),
@@ -121,6 +123,13 @@
     }
     return out
   })()
+
+  // Hover crosshair: the display row/column under the cursor, drawn as a pair of
+  // rules that track the mouse across the matrix (distinct from the accent
+  // selection outline, which is pinned to the selected/compared phenotype).
+  // -1 = not hovering. Cleared on the svg's mouseleave.
+  let hoverRow = -1
+  let hoverCol = -1
   $: allNa = cells.length > 0 && cells.every((c) => c.na)
 
   // Selected phenotype's display row / column within the current selection.
@@ -163,7 +172,7 @@
   {/if}
 
   <div class="card" bind:clientWidth={cardW}>
-    <svg viewBox="0 0 {W} {H}" role="img" aria-label={copy.correlation.ariaLabel} preserveAspectRatio="xMidYMid meet" style="width: {svgPxW}px">
+    <svg viewBox="0 0 {W} {H}" role="img" aria-label={copy.correlation.ariaLabel} preserveAspectRatio="xMidYMid meet" style="width: {svgPxW}px" on:mouseleave={() => { hoverRow = -1; hoverCol = -1 }}>
       <!-- cells -->
       {#each cells as c (c.key)}
         <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -179,8 +188,17 @@
           style="transform: translate({c.x}px, {c.y}px)"
           data-tip={c.tip}
           on:click={() => onCellClick(c.mr, c.mc)}
+          on:mouseenter={() => { hoverRow = c.dr; hoverCol = c.dc }}
         />
       {/each}
+
+      <!-- hover crosshair: row + column rules that track the cursor -->
+      {#if hoverRow >= 0}
+        <rect class="hover-line" x={AXIS} y={PAD + hoverRow * CELL} width={gridW} height={CELL} />
+      {/if}
+      {#if hoverCol >= 0}
+        <rect class="hover-line" x={AXIS + hoverCol * CELL} y={PAD} width={CELL} height={gridH} />
+      {/if}
 
       <!-- selection outline (row + column of the selected topic) -->
       {#if selRowDisp >= 0}
@@ -313,6 +331,15 @@
     stroke-width: 1.5;
     pointer-events: none;
     transition: x 0.4s ease, y 0.4s ease;
+  }
+  /* Hover crosshair — muted so it reads as a transient guide, distinct from the
+     accent selection outline. No transition: it must track the cursor instantly. */
+  .hover-line {
+    fill: none;
+    stroke: var(--ink-muted);
+    stroke-width: 1;
+    stroke-opacity: 0.7;
+    pointer-events: none;
   }
   .axis-title {
     font-family: var(--font-mono);

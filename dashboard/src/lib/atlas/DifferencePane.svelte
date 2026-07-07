@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { bundle, comparePair } from '../store'
+  import { bundle, comparePair, advancedView } from '../store'
   import { topDifferentialCodes } from './difference'
   import { topRelevantCodes } from '../inference'
 
@@ -55,21 +55,23 @@
       <h2 class="title">Top conditions in {nameOf(pair.a)}</h2>
     </header>
 
-    <div class="slider-row">
-      <label class="slider">
-        <span class="slider-head">
-          <span class="slider-k">
-            <span class="eyebrow">Relevance term weighting</span>
+    {#if $advancedView}
+      <div class="slider-row">
+        <label class="slider">
+          <span class="slider-head">
+            <span class="slider-k">
+              <span class="eyebrow">Relevance term weighting</span>
+            </span>
+            <span class="slider-v" data-numeric>λ {lambda.toFixed(2)}</span>
           </span>
-          <span class="slider-v" data-numeric>λ {lambda.toFixed(2)}</span>
-        </span>
-        <input type="range" min="0" max="1" step="0.05" bind:value={lambda} />
-        <span class="slider-ends">
-          <span>Lift</span>
-          <span>Frequency</span>
-        </span>
-      </label>
-    </div>
+          <input type="range" min="0" max="1" step="0.05" bind:value={lambda} />
+          <span class="slider-ends">
+            <span>Lift</span>
+            <span>Frequency</span>
+          </span>
+        </label>
+      </div>
+    {/if}
 
     <div class="side">
       <ol class="rows">
@@ -87,21 +89,23 @@
       <h2 class="title">{nameOf(pair.a)} <span class="vs">vs</span> {nameOf(pair.b)}</h2>
     </header>
 
-    <div class="slider-row">
-      <label class="slider">
-        <span class="slider-head">
-          <span class="slider-k">
-            <span class="eyebrow">Relevance term weighting</span>
+    {#if $advancedView}
+      <div class="slider-row">
+        <label class="slider">
+          <span class="slider-head">
+            <span class="slider-k">
+              <span class="eyebrow">Relevance term weighting</span>
+            </span>
+            <span class="slider-v" data-numeric>λ {lambda.toFixed(2)}</span>
           </span>
-          <span class="slider-v" data-numeric>λ {lambda.toFixed(2)}</span>
-        </span>
-        <input type="range" min="0" max="1" step="0.05" bind:value={lambda} />
-        <span class="slider-ends">
-          <span>Lift</span>
-          <span>Frequency</span>
-        </span>
-      </label>
-    </div>
+          <input type="range" min="0" max="1" step="0.05" bind:value={lambda} />
+          <span class="slider-ends">
+            <span>Lift</span>
+            <span>Frequency</span>
+          </span>
+        </label>
+      </div>
+    {/if}
 
     <div class="sides">
       <div class="side">
