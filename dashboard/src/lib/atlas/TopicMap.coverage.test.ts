@@ -40,7 +40,7 @@ it('non-STM bundle: bubble size falls back to fractionAboveTau (corpus_prevalenc
 it('predictive_gain present does NOT change the size source (still coverage)', () => {
   const b = makeStmBundleFixture()
   const PG: PredictiveGain = {
-    presence: [0.4, 0.4, 0.4], mean_gain: [1, 1, 20], depth: [0.1, 0.1, 0.1],
+    presence: [0.4, 0.4, 0.4], mean_gain: [1, 20, 1], depth: [0.1, 0.1, 0.1],
     prominence_hist: [[1], [1], [1]], length_corr: [0, 0, 0], dedup_gain: [0, 0, 0],
     prominence_bin_edges: [0, 1], null_band: { mean: 0, std: 1, n: 100, p95: 1, hist: [1] },
     observed_delta_range: [-1, 1], downdate_audit: { max_abs_overall: 0.01, n_docs_audited: 100 },
@@ -51,8 +51,12 @@ it('predictive_gain present does NOT change the size source (still coverage)', (
   bundle.set(b)
   const { container } = render(TopicMap)
   const [, r1, r2] = mainBubbleRadii(container)
-  // mean_gain would make id2 huge either way; assert coverage order holds (r2 > r1)
-  // AND that id1 is not collapsed by a mean_gain=1 (i.e. size ignores mean_gain).
+  // mean_gain now orders topic1 (20) > topic2 (1) — the OPPOSITE of the
+  // coverage order (topic 2 > topic 1 at the marginal profile, per the
+  // fixture's strong positive age effect on topic 2). This makes the
+  // assertion discriminating: if size were still driven by mean_gain
+  // (reverted behavior), topic 1 would be bigger and r2 > r1 would FAIL.
+  // It only passes because size follows coverage and ignores mean_gain.
   expect(r2).toBeGreaterThan(r1)
   expect(r1).toBeGreaterThan(0)
 })
