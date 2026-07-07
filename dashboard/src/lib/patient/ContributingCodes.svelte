@@ -48,6 +48,14 @@
   function segColor(k: number): string {
     return k === OTHER_ID ? 'var(--surface-deep)' : $phenotypeHue(k)
   }
+  // Hover label for each composition segment, mirroring ProfileBar's band
+  // title ("<phenotype>: <pct>%") so a code bar reads the same way as the
+  // profile bars elsewhere on the page.
+  function segLabel(k: number): string {
+    return k === OTHER_ID
+      ? copy.contributingCodes.otherLabel
+      : $phenotypesById.get(k)?.label || `Phenotype ${k}`
+  }
 
   $: selectedLabel = $selectedPhenotypeId === null
     ? null
@@ -111,6 +119,7 @@
                 class="seg"
                 class:dim={!segActive(s.k)}
                 style="width: {(s.weight * 100).toFixed(2)}%; background: {segColor(s.k)}"
+                title={`${segLabel(s.k)}: ${(s.weight * 100).toFixed(1)}%`}
               ></span>
             {/each}
           </span>
