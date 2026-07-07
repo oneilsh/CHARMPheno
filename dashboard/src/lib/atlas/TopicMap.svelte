@@ -4,7 +4,7 @@
   import {
     bundle, selectedPhenotypeId, hoveredCodeIdx, advancedView,
     searchedConditionIdx, phenotypeCoords,
-    coverageReader, meanGainReader, tauThreshold, isVisibleInCurrentMode, conditioning,
+    coverageReader, baselineCoverageReader, tauThreshold, isVisibleInCurrentMode, conditioning,
   } from '../store'
   import { groupHue } from '../palette'
   import { phenotypesContainingCode } from '../inference'
@@ -103,16 +103,11 @@
 
   $: coords = $phenotypeCoords
   $: reader = $coverageReader
-
-  // Task 6b: bubble SIZE. Predictive-gain bundles (gated STM with the
-  // held-out predictive-gain metric computed) encode size as `mean_gain`
-  // (unique predictive contribution, nats) — the most discriminating of the
-  // new fields. Bundles without predictive_gain (HDP/LDA/legacy) fall back
-  // to the original prevalence-based sizing, UNCHANGED. This is the single
-  // swap point: to try a different size source later (e.g. presence), just
-  // change what `sizeReader` reads when `hasPredictiveGain` is true.
-  $: hasPredictiveGain = !!$bundle?.phenotypes.predictive_gain
-  $: sizeReader = hasPredictiveGain ? $meanGainReader : reader
+  // Bubble SIZE = patient coverage (fraction of sampled patients with θ > τ).
+  // The baseline (marginal) coverage anchors an ABSOLUTE scale so covariates
+  // make a phenotype genuinely grow/shrink rather than re-pinning the top bubble.
+  $: sizeReader = reader
+  $: baselineReader = $baselineCoverageReader
 
   // Diverging NPMI ramp: red (low) → neutral gray → cyan (high). Used as the
   // node HUE only for non-gated bundles (where cohort color doesn't apply).
@@ -139,30 +134,19 @@
     const yExt = d3.extent(coords, (c) => c[1]) as [number, number]
     const x = d3.scaleLinear().domain(xExt).range([MARGIN, W - MARGIN])
     const y = d3.scaleLinear().domain(yExt).range([H - MARGIN, MARGIN])
-    // Use the FULL phenotype set for the size scale domain so bubble size
-    // doesn't rescale between simple and advanced modes. `r_of` is the size
-    // source: mean_gain when predictive_gain is present, else prevalence
-    // (see `sizeReader` above).
+    // Bubble size source is coverage; anchor the size scale's domain to the
+    // stable per-bundle MARGINAL coverage max so covariate changes read as
+    // absolute growth/shrink. scaleSqrt = area-proportional; clamp so a topic
+    // whose conditioned coverage exceeds its marginal max caps at max radius.
     const r_of = sizeReader
-    // Bubble area encodes prevalence (fallback case only). In covariate mode
-    // or when gating is active the user expects ABSOLUTE size changes; anchor
-    // the scale's domain to a stable per-bundle reference (the corpus-average
-    // prevalence max) rather than the live reader's max. Otherwise the most-
-    // prevalent bubble is re-pinned to the range top every frame and never
-    // appears to change as the covariates move. Outside conditioning, keep
-    // the self-scaling domain. mean_gain is a static per-topic value (it
-    // doesn't move with covariate sliders), so the predictive-gain case
-    // always uses the plain self-scaling domain regardless of conditioning.
-    const conditioningActive = $conditioning.covariateActive || !!$bundle?.gating
-    const domainMax = !hasPredictiveGain && conditioningActive
-      ? Math.max(...allPhenotypes.map((p) => p.corpus_prevalence), 1e-9)
-      : Math.max(...allPhenotypes.map(r_of), 1e-9)
+    const domainMax = Math.max(...allPhenotypes.map(baselineReader), 1e-9)
     // scaleSqrt = area-proportional. A low floor (2, not 5) lets a 0.2%-
     // prevalence bubble actually read as tiny next to a 4%+ one instead of being
     // pinned near the mid-size floor; zero stays 0 (handled in rad()).
     const r = d3.scaleSqrt()
       .domain([0, domainMax])
       .range([2, 26])
+      .clamp(true)
 
     // Node hue: cohort (topic block) for gated bundles, else the NPMI ramp.
     // Coherence rides on opacity in the gated case (see opacityFn).
@@ -333,29 +317,23 @@
     // SVG `<title>` here means the browser-native delayed tooltip doesn't
     // also fire.
     nodes.attr('data-tip', (p) => {
-      // Prevalence text always reads off the prevalence reader (`reader`),
-      // NOT the size source (`r_of`) — the two diverge once predictive_gain
-      // is present and size encodes mean_gain (nats) instead. A gain suffix
-      // is appended only in that case so the fallback tooltip is byte-for-
-      // byte unchanged.
       const pat = (reader(p) * 100).toFixed(1)
       const npmi = p.npmi == null ? '—' : p.npmi.toFixed(3)
       const tauStr = $tauThreshold.toFixed(2)
       const label = p.label || `Phenotype ${p.id}`
-      const gainSuffix = hasPredictiveGain ? ` · gain ${r_of(p).toFixed(2)} nats` : ''
       if ($advancedView) {
         const mass = (p.corpus_prevalence * 100).toFixed(1)
-        return `${label}\nCoherence ${npmi} · prev ${pat}% (patients, θ > ${tauStr}) · topic mass ${mass}%${gainSuffix}`
+        return `${label}\nCoherence ${npmi} · coverage ${pat}% of patients (θ > ${tauStr}) · topic mass ${mass}%`
       }
-      return `${label}\nCoherence ${npmi} · prev ${pat}% (θ > ${tauStr})${gainSuffix}`
+      return `${label}\nCoherence ${npmi} · coverage ${pat}% of patients (θ > ${tauStr})`
     })
   }
 
-  // `reader`/`sizeReader` are listed so the atlas re-renders whenever the
-  // prevalence reader or the size source changes for ANY reason - covariate
+  // `reader`/`baselineReader` are listed so the atlas re-renders whenever the
+  // coverage reader or its baseline anchor changes for ANY reason - covariate
   // active toggling, covariate-value edits, or the gating group selector -
   // not only on the tau/selection/mode stores.
-  $: reader, sizeReader, $conditioning, $tauThreshold, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()
+  $: reader, baselineReader, $conditioning, $tauThreshold, $selectedPhenotypeId, $hoveredCodeIdx, $advancedView, $searchedConditionIdx, $bundle && svgEl && coords.length && render()
   onMount(render)
 </script>
 
@@ -395,21 +373,12 @@
             <span class="ticks" data-numeric><span>low</span><span>high</span></span>
           </div>
         {/if}
-        {#if hasPredictiveGain}
-          <div class="legend-group">
-            <span class="eyebrow" title={copy.atlas.legend.meanGain}>Predictive contribution (nats)<span class="help-mark" aria-hidden="true">?</span></span>
-            <span class="size-marks" aria-hidden="true">
-              <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
-            </span>
-          </div>
-        {:else}
-          <div class="legend-group">
-            <span class="eyebrow" title={copy.atlas.legend.prevalence($tauThreshold)}>Prevalence (% Over Threshold)<span class="help-mark" aria-hidden="true">?</span></span>
-            <span class="size-marks" aria-hidden="true">
-              <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
-            </span>
-          </div>
-        {/if}
+        <div class="legend-group">
+          <span class="eyebrow" title={copy.atlas.legend.coverage($tauThreshold)}>Patient coverage<span class="help-mark" aria-hidden="true">?</span></span>
+          <span class="size-marks" aria-hidden="true">
+            <span class="dot s1"></span><span class="dot s2"></span><span class="dot s3"></span>
+          </span>
+        </div>
         {#if $advancedView}
           <div class="legend-group">
             <span class="eyebrow" title="Low-quality topics: ⊘ dead (no usable signal), ◑ mixed (blended themes).">Quality<span class="help-mark" aria-hidden="true">?</span></span>
