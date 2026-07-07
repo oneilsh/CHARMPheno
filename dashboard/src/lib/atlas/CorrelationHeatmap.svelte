@@ -200,11 +200,14 @@
         <rect class="hover-line" x={AXIS + hoverCol * CELL} y={PAD} width={CELL} height={gridH} />
       {/if}
 
-      <!-- selection outline (row + column of the selected topic) -->
-      {#if selRowDisp >= 0}
+      <!-- Selection outline (row + column of the selected topic). Explore only:
+           in pairSelect (Compare) mode selection is a cell pair driven by
+           comparePair, not selectedPhenotypeId, so these accent bands would
+           strand at wherever a stale selectedPhenotypeId happens to map. -->
+      {#if selRowDisp >= 0 && !pairSelect}
         <rect class="sel-line" x={AXIS} y={PAD + selRowDisp * CELL} width={gridW} height={CELL} />
       {/if}
-      {#if selColDisp >= 0}
+      {#if selColDisp >= 0 && !pairSelect}
         <rect class="sel-line" x={AXIS + selColDisp * CELL} y={PAD} width={CELL} height={gridH} />
       {/if}
 
@@ -320,9 +323,12 @@
     stroke-width: 1.5;
     paint-order: stroke;
   }
+  /* Selected compare cell: a crisp thin ink-gray outline — same understated
+     family as the hover crosshair but darker and full-opacity so the pinned
+     selection reads clearly against a passing hover band. */
   .cell.selected {
-    stroke: var(--accent);
-    stroke-width: 2;
+    stroke: var(--ink);
+    stroke-width: 1.5;
     paint-order: stroke;
   }
   .sel-line {
