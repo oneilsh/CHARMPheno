@@ -2,7 +2,7 @@
   import {
     bundle, selectedPhenotypeId, advancedView,
     phenotypeFilter, phenotypeSortBy, phenotypeSortDir, searchedConditionIdx,
-    prevalenceReader, tauThreshold, isVisibleInCurrentMode,
+    coverageReader, tauThreshold, isVisibleInCurrentMode,
     type PhenotypeSortKey,
   } from '../store'
   import { groupHue } from '../palette'
@@ -11,7 +11,7 @@
   import { copy } from '../copy'
 
   // Reactively bind the τ-aware reader so all call sites stay in sync.
-  $: reader = $prevalenceReader
+  $: reader = $coverageReader
 
   // Filter+sort phenotype list. Sort key/dir live in the global store so
   // they're preserved across tab switches. Simple-mode hides dead+mixed (matches
@@ -48,7 +48,7 @@
   // Takes `prevReader` explicitly (rather than closing over the top-level
   // `reader` binding) so the `filtered` reactive statement that calls this
   // sees `reader` as a real argument and re-runs whenever a conditioning
-  // change produces a new $prevalenceReader.
+  // change produces a new $coverageReader.
   function cmp(a: Phenotype, b: Phenotype, key: PhenotypeSortKey, prevReader: (p: Phenotype) => number): number {
     switch (key) {
       case 'id':
@@ -79,7 +79,7 @@
     : null
 
   // Depends explicitly on `reader` (not just $phenotypeSortBy/$phenotypeSortDir)
-  // so a conditioning change — which produces a new $prevalenceReader — is
+  // so a conditioning change — which produces a new $coverageReader — is
   // seen by Svelte's dependency tracker and re-runs this block, re-sorting
   // the rows when the active sort column is 'prevalence'. (cmp() closes over
   // `reader` internally, but a call inside the statement isn't enough for

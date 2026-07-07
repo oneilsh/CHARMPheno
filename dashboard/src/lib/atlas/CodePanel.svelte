@@ -2,7 +2,7 @@
   import {
     bundle, selectedPhenotypeId, advancedView, hoveredCodeIdx,
     searchedConditionIdx, searchedPhenotypeForPatients,
-    prevalenceReader, tauThreshold,
+    coverageReader, tauThreshold,
   } from '../store'
   import { topRelevantCodes } from '../inference'
   import { go } from '../router'
@@ -33,7 +33,7 @@
 
   $: maxPwk = top.length ? Math.max(...top.map((r) => r.pwk)) : 1
 
-  $: reader = $prevalenceReader
+  $: reader = $coverageReader
   $: hasHistogram = !!(pheno?.theta_histogram && pheno?.theta_percentiles && $bundle?.phenotypes.theta_histogram_bin_edges)
   // Predictive-gain plumbing (additive): when the bundle carries hydrated
   // per-phenotype prominence_hist + the shared bin edges, prefer it over the

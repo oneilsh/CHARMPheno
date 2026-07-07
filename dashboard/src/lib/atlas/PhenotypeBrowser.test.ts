@@ -19,8 +19,8 @@ it('re-sorts when conditioning changes the prevalence order', async () => {
   const { container } = render(PhenotypeBrowser)
   const firstRowId = () => container.querySelector('tbody tr')?.getAttribute('data-pid')
   const before = firstRowId()
-  // Flip to a covariate setting that reorders prevalence for the fixture.
-  atlasConditioning.set({ covariateActive: true, values: { age: 80 }, group: null })
+  // Marginal coverage favors topic 2 (age-loaded); a young profile flips it to topic 1.
+  atlasConditioning.set({ covariateActive: true, values: { age: 0 }, group: null })
   await Promise.resolve()
   const after = firstRowId()
   expect(after).not.toBe(before)

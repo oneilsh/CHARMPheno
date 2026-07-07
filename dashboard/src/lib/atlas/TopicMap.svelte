@@ -4,7 +4,7 @@
   import {
     bundle, selectedPhenotypeId, hoveredCodeIdx, advancedView,
     searchedConditionIdx, phenotypeCoords,
-    prevalenceReader, meanGainReader, tauThreshold, isVisibleInCurrentMode, conditioning,
+    coverageReader, meanGainReader, tauThreshold, isVisibleInCurrentMode, conditioning,
   } from '../store'
   import { groupHue } from '../palette'
   import { phenotypesContainingCode } from '../inference'
@@ -102,7 +102,7 @@
   }
 
   $: coords = $phenotypeCoords
-  $: reader = $prevalenceReader
+  $: reader = $coverageReader
 
   // Task 6b: bubble SIZE. Predictive-gain bundles (gated STM with the
   // held-out predictive-gain metric computed) encode size as `mean_gain`

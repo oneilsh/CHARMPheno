@@ -3,7 +3,7 @@
   import { get } from 'svelte/store'
   import {
     bundle, advancedView, cohort, manifest, patientProjection,
-    prevalenceReader, resetConditioningForCohort,
+    coverageReader, resetConditioningForCohort,
     searchedConditionIdx, searchedPhenotypeForPatients,
     selectedCohort, selectedPatientId, selectedPhenotypeId,
     simulatorPrefix,
@@ -46,7 +46,7 @@
   // or unknown null); fall back to id 0 if nothing qualifies.
   function pickDefaultPhenotype(b: DashboardBundle | null): number | null {
     if (!b) return null
-    const reader = get(prevalenceReader)
+    const reader = get(coverageReader)
     const ps = b.phenotypes.phenotypes
     const good = ps.filter((p) => p.quality === 'phenotype' || p.quality === 'anchor' || p.quality == null)
     const pool = good.length ? good : ps

@@ -3,7 +3,7 @@ import type { UMAP } from 'umap-js'
 import type { CohortManifest, DashboardBundle, Phenotype, PhenotypeQuality, SyntheticCohort } from './types'
 import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
-import { buildDesignVector, covariatePrevalence } from './covariate'
+import { cohortCoverage, sampleThetaCohort } from './conditioning/coverage'
 
 export const bundle = writable<DashboardBundle | null>(null)
 export const cohort = writable<SyntheticCohort | null>(null)
@@ -71,13 +71,11 @@ export const advancedView = writable<boolean>(false)
 // group.
 export const colorByGroup = writable<boolean>(false)
 
-// Patient-prevalence threshold τ for the histogram-derived "fraction
-// above τ" prevalence reader. Fixed at 0.02 — a patient is counted as
-// "having" the phenotype when at least 2% of their coded activity is
-// attributed to the topic. Exposed as a store (rather than a bare
-// constant) so the several components that read $tauThreshold continue
-// to work unchanged; there is no longer a user-facing slider.
-export const tauThreshold = writable<number>(0.02)
+// Patient-coverage threshold τ. A patient is counted as "having" the phenotype
+// when at least 1% of their coded activity is attributed to the topic. Exposed
+// as a store so the components that read $tauThreshold work unchanged; there is
+// no user-facing slider.
+export const tauThreshold = writable<number>(0.01)
 
 export interface Conditioning {
   covariateActive: boolean
@@ -101,7 +99,7 @@ export function resetConditioningForCohort(): void {
     c.set({ covariateActive: false, values: {}, group: null })
 }
 
-// Back-compat alias: the shipped four-quadrant prevalenceReader reads the
+// Back-compat alias: the shipped four-quadrant coverageReader reads the
 // Phenotype Atlas's conditioning.
 export const conditioning = atlasConditioning
 
@@ -166,42 +164,66 @@ export function fractionAboveTau(
   return s
 }
 
-// Convenience derived store: a (Phenotype) -> number reader bound to the
-// current bundle's bin_edges + the current tau slider. Components that
-// display prevalence-as-fraction-above-tau subscribe to this rather than
-// calling fractionAboveTau directly, so the value updates reactively as
-// the slider moves.
-//
-// Display prevalence reader. The Phenotype Atlas shows ALL cohorts (cohort is
-// encoded as node COLOR, not a filter — see TopicMap), so prevalence is never
-// masked by gating group. Two states remain:
-//   - covariate active  -> softmax(Gamma^T x) via covariatePrevalence (ungated)
-//   - otherwise          -> fractionAboveTau (per-topic base, all cohorts shown)
-// (Group masking now lives only in the generative sampler's allowed-set logic
-// in conditioning/logisticNormal, which is a different concern from display.)
-export const prevalenceReader = derived(
-  [bundle, tauThreshold, conditioning],
-  ([$b, $tau, $cond]) => {
-    const schema = $b?.covariateSchema
-    const effects = $b?.covariateEffects
-    const edges = $b?.phenotypes.theta_histogram_bin_edges
+const ATLAS_COHORT_N = 1500
+const ATLAS_COHORT_SEED = 20260706
 
-    const covariateOn =
-      $cond.covariateActive && !!schema && !!effects && schema.unsupported.length === 0
-    if (covariateOn) {
-      const x = buildDesignVector(schema!.design_columns, $cond.values)
-      const prev = covariatePrevalence(effects!, x)
-      return (p: Phenotype) => prev[p.id] ?? 0
-    }
-    return (p: Phenotype) => fractionAboveTau(p, edges, $tau)
+function isStmBundle(b: DashboardBundle | null): b is DashboardBundle {
+  return !!b && !!b.covariateEffects && !!b.correlation
+}
+
+// Marginal (baseline) atlas cohort: the corpus's natural covariate/group mix.
+// Recomputed ONLY when the bundle changes (not on covariate edits), so it is a
+// stable per-bundle reference for absolute bubble scaling. Null for non-STM.
+export const atlasBaselineThetaCohort = derived(bundle, ($b) =>
+  isStmBundle($b)
+    ? sampleThetaCohort({ bundle: $b, active: false, values: {}, n: ATLAS_COHORT_N, seed: ATLAS_COHORT_SEED })
+    : null
+)
+
+// Display atlas cohort: the marginal baseline when covariates are off (reused —
+// no resample), or a covariate-fixed cohort (group still marginal) when on.
+export const atlasThetaCohort = derived(
+  [bundle, atlasConditioning, atlasBaselineThetaCohort],
+  ([$b, $cond, $baseline]) => {
+    if (!isStmBundle($b)) return null
+    if (!$cond.covariateActive) return $baseline
+    return sampleThetaCohort({ bundle: $b, active: true, values: $cond.values, n: ATLAS_COHORT_N, seed: ATLAS_COHORT_SEED })
   }
+)
+
+// (Phenotype) -> coverage. STM bundles read the sampled cohort (fraction of
+// patients with θ > τ); non-STM bundles fall back to the empirical θ-histogram
+// fractionAboveTau, unchanged. The atlas encodes cohort as COLOR (not a filter),
+// so coverage is never masked by group.
+function coverageFrom(
+  cohort: number[][] | null, b: DashboardBundle | null, tau: number,
+): (p: Phenotype) => number {
+  const edges = b?.phenotypes.theta_histogram_bin_edges
+  if (cohort && b) {
+    const cov = cohortCoverage(cohort, tau, b.model.K)
+    return (p: Phenotype) => cov[p.id] ?? 0
+  }
+  return (p: Phenotype) => fractionAboveTau(p, edges, tau)
+}
+
+// Display coverage reader (the atlas's current state).
+export const coverageReader = derived(
+  [bundle, atlasThetaCohort, tauThreshold],
+  ([$b, $cohort, $tau]) => coverageFrom($cohort, $b, $tau)
+)
+
+// Marginal (baseline) coverage reader — the stable absolute-scale anchor for
+// bubble size (see TopicMap). Equals coverageReader when covariates are off.
+export const baselineCoverageReader = derived(
+  [bundle, atlasBaselineThetaCohort, tauThreshold],
+  ([$b, $cohort, $tau]) => coverageFrom($cohort, $b, $tau)
 )
 
 // ── Predictive-gain readers (additive; Task 6a plumbing) ───────────────────
 // These consume the hydrated per-phenotype fields set by bundle.ts's
 // hydratePredictiveGain (bundle-level `predictive_gain` distributed onto each
 // Phenotype by index). Task 6a only makes the data available: the headline
-// readout and TopicMap encoding still read `prevalenceReader` unchanged —
+// readout and TopicMap encoding still read `coverageReader` unchanged —
 // see Task 6b for the value-sensitive swap once real numbers are in.
 
 // (Phenotype) -> number reader for "presence": the fraction of a topic's
@@ -244,7 +266,7 @@ export const predictiveGain = derived(bundle, ($b) => $b?.phenotypes.predictive_
 
 // Returns a predicate (p) -> boolean for whether a phenotype should be shown
 // in the current view mode. Simple mode hides `dead` and `mixed` topics;
-// advanced mode shows everything. Follows the prevalenceReader pattern —
+// advanced mode shows everything. Follows the coverageReader pattern —
 // consumers use `.filter($isVisibleInCurrentMode)` directly.
 export const isVisibleInCurrentMode = derived(advancedView, ($adv) =>
   (p: { quality: PhenotypeQuality | null }) =>
