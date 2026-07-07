@@ -1,7 +1,7 @@
 ---
 id: 30
 slug: stm-population-eds-gated
-status: pending
+status: done
 model_class: stm
 cohort: population_eds
 cohort_def: population_eds
@@ -15,13 +15,13 @@ continuous_cols: [age]
 known_sex_only: true
 random_seed: 42
 cache_uri: hdfs:///user/dataproc/charm/covariates_cache
-K: 100
-background_k: 80
+K: 60
+background_k: 40
 foreground: "eds:20"
 group_var: source_cohort
-max_iter: 300
+max_iter: 200
 subsampling_rate: 0.1
-tau0: 256
+tau0: 128
 kappa: 0.7
 sigma_init: 1.0
 reference_topic: true
@@ -58,16 +58,15 @@ New `population_eds` cohort (built on the generalized
 ## Configuration
 
 Full population (`person_mod: 1`) — the heaviest fit in this batch — to maximize
-the EDS foreground and give a rich background. **K=100 = 80 background + 20 EDS.**
-The background was bumped from 40 to 80 topics: the first fit (below) resolved
-191,872 background documents, far more than the 40-topic budget could resolve, so
-the extra background capacity should split the general-population comorbidity
-atlas more finely. The schedule was **slowed** (tau0 128→256, max_iter 200→300)
-because the first fit converged early (iter 89) — a gentler Robbins-Monro warm-up
-lets the larger corpus + larger K settle more gradually. Otherwise the exp 0028
-hardened stack (subsample 0.1, kappa 0.7, reference + dense spectral, sigma_init
-1, min_pair_support 10, block-wise unit-diagonal Σ / ADR 0034), `~ C(sex) + age`,
-`known_sex_only`.
+the EDS foreground and give a rich background. K=60 = 40 background + 20 EDS.
+Otherwise the exp 0028 gentle + hardened stack (subsample 0.1, tau0 128, 200
+iter, reference + dense spectral, sigma_init 1, min_pair_support 10, block-wise
+unit-diagonal Σ / ADR 0034), `~ C(sex) + age`, `known_sex_only`.
+
+**Re-fit under a new id:** exp [0043](0043-stm-population-eds-gated-refit.md)
+re-runs this cohort with a bigger background (K=100 = 80 bg + eds:20), a slower
+schedule (tau0 256, max_iter 300), and the latest model-engine updates —
+preserving this 0030 artifact unchanged.
 
 ## Success criteria
 
@@ -77,11 +76,7 @@ hardened stack (subsample 0.1, kappa 0.7, reference + dense spectral, sigma_init
   `person_mod`).
 - Σ variance bounded (no runaway); honest correlation report.
 
-## Result (fit 1 — SUPERSEDED config: K=60 = 40 bg + 20 eds, tau0 128, max_iter 200)
-
-> Refitting with K=100 (80 background) and a slower schedule (see Configuration).
-> The finding below — that the EDS foreground carves faithful sub-phenotypes — is
-> expected to hold; the background is what the larger K should sharpen.
+## Result
 
 Fit converged at iter 89/200 (ELBO −6.04e6, 2774s). Full population resolved to
 332,502 persons / 191,872 fit documents; the **EDS foreground arm = 956 docs**
