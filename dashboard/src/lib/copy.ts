@@ -67,7 +67,7 @@ export const copy = {
   // ── Phenotype detail (CodePanel) ──────────────────────────────────────
   phenotypeDetail: {
     empty: `Select a phenotype on the map to read its top conditions.`,
-    findInPatientsTip: `Switch to the Patient Atlas with patients carrying this phenotype highlighted`,
+    findInPatientsTip: `Switch to the Patient Atlas with simulated patients carrying this phenotype highlighted`,
     coverage: {
       labelBasic: `Coverage`,
       labelAdvanced: `Coverage`,
@@ -286,7 +286,7 @@ export const copy = {
       },
       findInPatients: {
         title: `Jump to the patients`,
-        body: `<strong>Find in patients</strong> carries this phenotype over to the Patient Atlas and rings every synthetic patient who carries it — connecting "what is this pattern" to "who has it."`,
+        body: `<strong>Find in simulated patients</strong> carries this phenotype over to the Patient Atlas and rings every synthetic patient who carries it — connecting "what is this pattern" to "who has it."`,
       },
       patientMap: {
         title: `Synthetic patients`,

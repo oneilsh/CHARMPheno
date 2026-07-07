@@ -93,22 +93,22 @@
           title={copy.phenotypeDetail.findInPatientsTip}
           data-tour="find-in-patients"
         >
-          find in patients →
+          find in simulated patients →
         </button>
       </div>
       <h2 class="title">{pheno.label || `Phenotype ${pheno.id}`}</h2>
       {#if pheno.description}
         <p class="desc-text">{pheno.description}</p>
       {/if}
-      <div class="stats" data-numeric data-tour="detail-stats">
-        <!-- Basic-view headline stat = coherence: the most interpretable "is this
-             a real, tight phenotype" number for a lay reader. Coverage (subtle to
-             interpret) moves to advanced view. -->
-        <span class="stat" title={copy.phenotypeDetail.coherenceTip}>
-          <span class="stat-k">Coherence<span class="help-mark" aria-hidden="true">?</span></span>
-          <span class="stat-v">{pheno.npmi == null ? '—' : pheno.npmi.toFixed(3)}</span>
-        </span>
-        {#if $advancedView}
+      {#if $advancedView}
+        <!-- Stats are advanced-only diagnostics. Coherence (NPMI) leads — how
+             tightly the phenotype's leading conditions co-occur; the map's
+             bubble opacity already encodes it, so the basic view omits it. -->
+        <div class="stats" data-numeric data-tour="detail-stats">
+          <span class="stat" title={copy.phenotypeDetail.coherenceTip}>
+            <span class="stat-k">Coherence<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="stat-v">{pheno.npmi == null ? '—' : pheno.npmi.toFixed(3)}</span>
+          </span>
           <span class="stat" title={hasHistogram
             ? copy.phenotypeDetail.coverage.tipAdvanced($tauThreshold)
             : copy.phenotypeDetail.coverage.tipNoHistogram
@@ -138,8 +138,8 @@
               <span class="stat-v">{pheno.quality}</span>
             </span>
           {/if}
-        {/if}
-      </div>
+        </div>
+      {/if}
       {#if hasPredictiveGainFields && $advancedView}
         <!-- Distinctiveness = mean unique held-out predictive gain (nats): how
              specific this phenotype's vocabulary is vs. the corpus background.
