@@ -72,10 +72,12 @@ export const advancedView = writable<boolean>(false)
 export const colorByGroup = writable<boolean>(false)
 
 // Patient-coverage threshold τ. A patient is counted as "having" the phenotype
-// when at least 1% of their coded activity is attributed to the topic. Exposed
-// as a store so the components that read $tauThreshold work unchanged; there is
-// no user-facing slider.
-export const tauThreshold = writable<number>(0.01)
+// when at least 2% of their coded activity is attributed to the topic. At 2%
+// only topics with genuinely concentrated per-patient mass clear the bar, so
+// coverage spreads across topics instead of everyone landing in a similar band
+// (which a low 1% τ produced under the moderately-spread generative θ). Exposed
+// as a store so components reading $tauThreshold work unchanged; no user slider.
+export const tauThreshold = writable<number>(0.02)
 
 export interface Conditioning {
   covariateActive: boolean
