@@ -1,0 +1,48 @@
+import type { DashboardBundle } from '../types'
+import { createRng } from '../sampling'
+import { buildDesignVector } from '../covariate'
+import { sampleConditionedTheta } from './logisticNormal'
+import { sampleMarginalCovariates, sampleMarginalGroup } from './marginalSampler'
+
+export interface ThetaCohortInput {
+  bundle: DashboardBundle
+  // true  -> covariates fixed to `values`, group still per-patient marginal.
+  // false -> covariates AND group both per-patient marginal (corpus mix).
+  active: boolean
+  values: Record<string, number | string>
+  n: number
+  seed: number
+}
+
+// Draw `n` patient theta vectors from the faithful conditional logistic-normal
+// (sampleConditionedTheta). STM bundles only — callers must check
+// covariateEffects + correlation are present before invoking. Group is ALWAYS a
+// per-patient marginal draw so gated foreground phenotypes remain represented.
+export function sampleThetaCohort(input: ThetaCohortInput): number[][] {
+  const { bundle: b, active, values, n, seed } = input
+  const effects = b.covariateEffects!
+  const correlation = b.correlation!
+  const schema = b.covariateSchema!
+  const topicBlocks = b.gating?.topic_blocks ?? null
+  const rng = createRng(seed)
+  const fixedX = active ? buildDesignVector(schema.design_columns, values) : null
+  const thetas: number[][] = []
+  for (let i = 0; i < n; i++) {
+    const group = b.gating ? sampleMarginalGroup(b.gating, rng) : null
+    const x = fixedX ?? buildDesignVector(schema.design_columns, sampleMarginalCovariates(schema, rng))
+    thetas.push(sampleConditionedTheta({ effects, x, correlation, topicBlocks, group, rng }))
+  }
+  return thetas
+}
+
+// Per-topic fraction of the cohort with theta_k > tau (strict). K is the topic
+// count; an empty cohort yields all-zero coverage.
+export function cohortCoverage(thetas: number[][], tau: number, K: number): number[] {
+  const cov = new Array<number>(K).fill(0)
+  if (thetas.length === 0) return cov
+  for (const theta of thetas)
+    for (let k = 0; k < K; k++)
+      if (theta[k] > tau) cov[k] += 1
+  for (let k = 0; k < K; k++) cov[k] /= thetas.length
+  return cov
+}
