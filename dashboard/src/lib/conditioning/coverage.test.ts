@@ -50,4 +50,90 @@ describe('sampleThetaCohort', () => {
     const cov = cohortCoverage(thetas, 0.01, 3)
     expect(cov[2]).toBeGreaterThan(cov[1])
   })
+
+  it('on a GATED bundle, keeps the foreground topic represented but bounded by its group proportion', () => {
+    // Same K=3 shape as makeStmBundleFixture(), but topic 2 is a foreground
+    // ('grp') topic instead of background. group is ALWAYS a per-patient
+    // marginal draw (see sampleThetaCohort's doc comment), so ~30% of
+    // patients (the grp proportion) get topic 2 unmasked and ~70%
+    // (background-only, group=null) get it masked to 0 via
+    // allowedMaskForGroup/sampleConditionedTheta's `allowed()` check.
+    const gated = {
+      model: {
+        K: 3,
+        V: 4,
+        alpha: [0.1, 0.1, 0.1],
+        beta: [
+          [0.7, 0.1, 0.1, 0.1],
+          [0.1, 0.7, 0.1, 0.1],
+          [0.1, 0.1, 0.1, 0.7],
+        ],
+      },
+      phenotypes: {
+        phenotypes: [
+          { id: 0, label: 'Reference', description: '', quality: 'background', npmi: null, pair_coverage: null, corpus_prevalence: 0.5, original_topic_id: 0 },
+          { id: 1, label: 'Topic A', description: '', quality: 'phenotype', npmi: 0.2, pair_coverage: 0.9, corpus_prevalence: 0.3, original_topic_id: 1 },
+          { id: 2, label: 'Topic B (foreground)', description: '', quality: 'phenotype', npmi: 0.3, pair_coverage: 0.9, corpus_prevalence: 0.2, original_topic_id: 2 },
+        ],
+      },
+      vocab: {
+        codes: [
+          { id: 0, code: 'C0', description: 'code 0', domain: 'condition', corpus_freq: 0.4 },
+          { id: 1, code: 'C1', description: 'code 1', domain: 'condition', corpus_freq: 0.3 },
+          { id: 2, code: 'C2', description: 'code 2', domain: 'condition', corpus_freq: 0.2 },
+          { id: 3, code: 'C3', description: 'code 3', domain: 'condition', corpus_freq: 0.1 },
+        ],
+      },
+      corpusStats: { corpus_size_docs: 1000, mean_codes_per_doc: 8, k: 3, v: 4, v_full: 4 },
+      covariateSchema: {
+        k: 3,
+        controls: [{ name: 'age', type: 'continuous', range: [0, 100], default: 60 }],
+        design_columns: [
+          { name: 'Intercept', recipe: { kind: 'intercept' } },
+          { name: 'age', recipe: { kind: 'main', var: 'age' } },
+        ],
+        unsupported: [],
+      },
+      covariateEffects: [
+        { covariate: 'Intercept', per_topic: [0, 1.0, 0.5] },
+        { covariate: 'age', per_topic: [0, -0.02, 0.03] },
+      ],
+      correlation: {
+        topic_order: [0, 1, 2],
+        block_labels: ['background', 'background', 'grp'],
+        R: [
+          [1, 0, 0],
+          [0, 1, 0],
+          [0, 0, 1],
+        ],
+        identified: [
+          [true, true, true],
+          [true, true, true],
+          [true, true, true],
+        ],
+        support: [
+          [100, 100, 100],
+          [100, 100, 100],
+          [100, 100, 100],
+        ],
+        reference_topic: 0,
+      },
+      gating: {
+        group_var: 'g',
+        groups: ['grp'],
+        topic_blocks: ['background', 'background', 'grp'],
+        group_proportions: { grp: 0.3 },
+        background_only_proportion: 0.7,
+      },
+    } as any
+
+    const thetas = sampleThetaCohort({ bundle: gated, active: false, values: {}, n: 2000, seed: 20260706 })
+    const cov = cohortCoverage(thetas, 0.01, 3)
+    // Some grp patients (~30% of the cohort) were sampled with topic 2
+    // unmasked, so it's not entirely suppressed...
+    expect(cov[2]).toBeGreaterThan(0)
+    // ...but it's bounded well below 1: background-only patients (~70% of
+    // the cohort, group=null) always have topic 2 masked to 0.
+    expect(cov[2]).toBeLessThan(0.4)
+  })
 })
