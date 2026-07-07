@@ -100,11 +100,13 @@ bubbles **modulate smoothly** instead of switching units:
   the atlas** (there is no group selector — out of scope), so cancer bubbles never vanish when
   you move the sliders.
 
-  Note: `generateCohort`'s `'set'` mode fixes *both* covariates and group, and `'sample'`
-  marginalizes *both*; the atlas needs fixed-covariates + marginal-group, which is neither.
-  Implement via a **minimal extension** to `CohortConditioning` (e.g. a `groupMode:
-  'fixed' | 'marginal'` under set covariates, defaulting to preserve current callers) rather
-  than an atlas-local sampling loop, so the behavior stays in the tested cohort primitive.
+  Note: `generateCohort` is the *wrong* primitive to reuse here — it also computes O(N²)
+  cosine neighbors, code bags, and quality buckets, far too heavy to recompute for N≈1500 on
+  a covariate change, and its `'set'`/`'sample'` modes fix or marginalize *both* covariates
+  and group (never the mix we need). Instead, a focused `sampleThetaCohort` reuses the same
+  tested sampler primitives directly — `sampleConditionedTheta` + `sampleMarginalCovariates`
+  + `sampleMarginalGroup` + `buildDesignVector` — drawing only θ (no bags/neighbors) and
+  controlling the fixed-covariate + per-patient-marginal-group draw in one loop.
 
 **Bubble scale is absolute** in all states (bubble area ∝ actual coverage fraction, one
 shared scale). Moving a slider makes a phenotype genuinely grow or shrink (prostate cancer
@@ -113,29 +115,28 @@ is the honest signal, not a defect.
 
 ### Components
 
-**New — `conditioning/coverage.ts` (pure, TDD):**
+**New — `conditioning/coverage.ts` (TDD):** two focused functions.
 
-    cohortCoverage(patients: {theta: number[]}[], tau: number, K: number): number[]
+    sampleThetaCohort(input: {bundle, active, values, n, seed}): number[][]
+    cohortCoverage(thetas: number[][], tau: number, K: number): number[]
 
-Returns per-topic coverage (length K). Pure, no sampling — counts θ_k > τ over a
-pre-sampled cohort. Trivial to test against hand-built cohorts and τ edge cases (τ at a
-θ value, empty cohort → zeros, all-below → zeros).
+`sampleThetaCohort` draws n patient θ from the faithful conditional logistic-normal via the
+existing sampler primitives (STM bundles only; caller guards). Group is always a per-patient
+marginal draw (foreground phenotypes stay represented); covariates are fixed to `values` when
+`active`, else drawn per-patient from the reported marginals. `cohortCoverage` is pure — it
+counts θ_k > τ over a pre-sampled cohort. Both are easily tested (determinism under a fixed
+seed; τ at a θ value, empty cohort → zeros; covariate-fixed draws shift coverage per Γ).
 
-**New — `atlasCoverageCohort` derived store (store.ts):**
+**New — `atlasThetaCohort` derived store (store.ts):**
 
-Derived from `bundle` + the global `conditioning` store. When the bundle is STM (has
-`covariateEffects` + `correlation`):
-
-- builds a `CohortConditioning` (`'sample'` when `!covariateActive`; else `'set'` with the
-  design values and `groupMode: 'marginal'` so group stays a per-patient marginal draw) and
-  calls `generateCohort` with **N ≈ 2000**, a **fixed seed** (stable bubbles across
-  re-renders — no flicker), returning the sampled patients.
-- Slider drags are **debounced** (resample on settle, not per tick).
-- Depends on the covariate profile + group only — **not** on τ (τ is applied downstream at
-  count time, so moving the τ slider recounts the cached cohort without resampling).
-
-Non-STM bundles (HDP/LDA: no Γ/R) yield `null` here → the reader falls back to the empirical
-histogram path (below).
+Derived from `bundle` + `atlasConditioning`. When the bundle is STM (has `covariateEffects` +
+`correlation`), calls `sampleThetaCohort` with **N ≈ 1500** and a **fixed seed** (stable
+bubbles — no flicker), in the covariate-active (`active: true`) or marginal (`active: false`)
+state. The derivation is **synchronous** (so consumer tests stay synchronous) and depends on
+the covariate profile only — **not** on τ, so moving τ recounts the cached cohort without
+resampling. Non-STM bundles (HDP/LDA: no Γ/R) yield `null` → the reader falls back to the
+empirical histogram path. If slider *drag* proves janky, debounce the covariate-value writes
+at the input layer (a follow-up, not a correctness concern — changes settle-commit already).
 
 **Rewire — `coverageReader` (replaces `prevalenceReader`, store.ts):**
 
