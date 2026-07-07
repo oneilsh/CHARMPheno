@@ -323,7 +323,14 @@ coherent theme, e.g. a specific disease with its complications — prefer a \
 diffuse `phenotype` over `dead`, even at low KL and floor α. A flat, low-peak \
 topic can still be a real but *diffuse* phenotype; flatness itself depresses \
 both KL and NPMI, so do not let low KL or low NPMI alone condemn a \
-thematically coherent topic. Reserve `dead` for low-KL topics whose top-N has \
+thematically coherent topic. **BUT the override does NOT apply when the \
+coherent-looking theme sits ONLY in the frequency list and the lift list is \
+scattered, clinically unrelated outliers** — that is the corpus baseline \
+showing through, not a distinct phenotype, so do not rescue it; fall back to \
+the mass signal (α well above median / high mass → `background`; floor α / \
+near-zero mass → `dead`). The override rescues genuinely diffuse *distinct* \
+phenotypes, not generic baselines wearing a coherent-looking frequency list. \
+Reserve `dead` for low-KL topics whose top-N has \
 *no* coherent clinical theme.
 The disambiguator is α-magnitude, then coherence. KL ≤ threshold + high α = \
 background; KL ≤ threshold + floor α + incoherent top-N = dead; KL ≤ \
@@ -377,7 +384,14 @@ coherent theme, e.g. a specific disease with its complications — prefer a \
 diffuse `phenotype` over `dead`, even at low KL and modest mass. A flat, \
 low-peak topic can still be a real but *diffuse* phenotype; flatness itself \
 depresses both KL and NPMI, so do not let low KL or low NPMI alone condemn a \
-thematically coherent topic. Reserve `dead` for low-KL topics whose top-N has \
+thematically coherent topic. **BUT the override does NOT apply when the \
+coherent-looking theme sits ONLY in the frequency list and the lift list is \
+scattered, clinically unrelated outliers** — that is the corpus baseline \
+showing through, not a distinct phenotype, so do not rescue it; fall back to \
+the mass signal (high corpus mass → `background`; near-zero mass → `dead`). \
+The override rescues genuinely diffuse *distinct* phenotypes, not generic \
+baselines wearing a coherent-looking frequency list. \
+Reserve `dead` for low-KL topics whose top-N has \
 *no* coherent clinical theme.
 The disambiguator is corpus mass share, then coherence. KL ≤ threshold + high \
 mass = background; KL ≤ threshold + near-zero mass + incoherent top-N = dead; \
@@ -416,6 +430,15 @@ OR dead-baseline (case b below). The distinctiveness stats disambiguate.
 - **Both lists span unrelated clinical themes** → mixed.
 - **A single concept dominates the frequency list AND tops the lift \
 list** → anchor.
+
+**The lift list is a coherence check on the frequency list.** A topic whose \
+frequency list looks like a tidy theme but whose lift list is scattered, \
+clinically UNRELATED outliers (e.g. lipoma of the neck, thrombocytosis, testicular \
+pain, hearing loss — concepts with no shared story) is NOT a distinct phenotype: \
+the apparent frequency-list theme is the corpus baseline showing through. Weigh it \
+explicitly — generic-comorbidity frequency + noise lift → `background`; no single \
+frequency theme either → `mixed`; near-zero mass on top of that → `dead`. A tidy \
+frequency list ALONE does not earn `phenotype` when the lift list contradicts it.
 
 ## Topic-level statistics
 
@@ -504,11 +527,15 @@ unrelated halves — these are the real mixed cases):
     different cancers), "Voice and swallowing disorders" if the voice \
     and swallowing concepts come from unrelated underlying conditions
 
-Test for the distinction: if a clinician could draft a single-sentence \
-mechanism sentence that ties the two halves together ("RA patients \
-develop these complications because..."), it is `phenotype`. If the \
-two halves require unrelated mechanisms or just happen to land in the \
-same topic, it is `mixed`.
+Test for the distinction: the two halves are one `phenotype` only if a \
+RECOGNIZED clinical relationship joins them — a named syndrome, a known \
+complication of the other, or a shared pathophysiology a clinician would state \
+without hedging ("RA patients develop these complications because..."). A \
+plausible-sounding but post-hoc rationalization ("both are common in sick or \
+elderly patients", "both involve inflammation") does NOT qualify — if you have \
+to reach for the mechanism, it is `mixed`. Two individually-coherent but \
+clinically SEPARATE themes sharing one slot is topic-merging `mixed`, not a \
+phenotype.
 
 - **dead** — either:
 {dead_case_a}
@@ -541,7 +568,11 @@ no plausible clinical mechanism connects them, this is `dead` \
 (case a — unused slot with η-smoothing noise in the top-N). Be \
 careful: a coherent narrow phenotype is NOT dead; case (a) is for \
 truly random-looking top-N.
-6. Otherwise it is `phenotype`. Single-theme conjunctions are fine.
+6. Otherwise it is `phenotype` — but FIRST confirm the lift list corroborates \
+the theme. If the lift list is scattered, clinically unrelated outliers (the \
+lift-list coherence check above), do not default to `phenotype`: prefer \
+`background` (generic/high-mass baseline) or `mixed` (no single theme). \
+Single-theme conjunctions with a corroborating lift list are fine.
 
 ## Output fields
 
