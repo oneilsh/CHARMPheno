@@ -82,3 +82,15 @@ export function explainedVsPrior(
   }
   return { explained, prior }
 }
+
+// Focus ordering. No selection → by occurrence count. A selected phenotype (or OTHER_ID)
+// → by that band's share of each code, so the codes that most drove the clicked band rise
+// to the top. Never filters; returns a new array (input untouched).
+export function sortRowsForSelection(rows: CodeRow[], selectedId: number | null): CodeRow[] {
+  const weightFor = (row: CodeRow, id: number) =>
+    row.segments.find((s) => s.k === id)?.weight ?? 0
+  const copy = rows.slice()
+  if (selectedId === null) copy.sort((a, b) => b.count - a.count)
+  else copy.sort((a, b) => weightFor(b, selectedId) - weightFor(a, selectedId))
+  return copy
+}

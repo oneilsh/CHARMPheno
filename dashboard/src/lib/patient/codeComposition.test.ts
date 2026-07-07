@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { codeComposition, OTHER_ID, explainedVsPrior } from './codeComposition'
+import { codeComposition, OTHER_ID, explainedVsPrior, sortRowsForSelection } from './codeComposition'
 
 // K=3, V=3. Topic 0 emits code 0, topic 1 emits code 1, topic 2 emits code 2.
 const beta = [
@@ -68,5 +68,34 @@ describe('explainedVsPrior', () => {
     const { explained, prior } = explainedVsPrior([0.5, 0.5, 0], [], beta, 3)
     expect(explained).toEqual([0, 0, 0])
     expect(prior).toEqual([0.5, 0.5, 0])
+  })
+})
+
+describe('sortRowsForSelection', () => {
+  const beta = [
+    [0.8, 0.1, 0.1],
+    [0.1, 0.8, 0.1],
+    [0.1, 0.1, 0.8],
+  ]
+
+  it('null selection sorts by occurrence count desc', () => {
+    const rows = codeComposition([0.4, 0.4, 0.2], [0, 1, 1], beta, 3, 0.05)
+    const sorted = sortRowsForSelection(rows, null)
+    expect(sorted[0].count).toBeGreaterThanOrEqual(sorted[1].count)
+    expect(sorted[0].w).toBe(1) // appears twice
+  })
+
+  it('a phenotype selection sorts by that phenotype weight desc', () => {
+    const rows = codeComposition([0.4, 0.4, 0.2], [0, 1], beta, 3, 0.05)
+    const sorted = sortRowsForSelection(rows, 1)
+    // code 1 loads mostly on topic 1, so it ranks first when topic 1 is selected
+    expect(sorted[0].w).toBe(1)
+  })
+
+  it('does not mutate the input array', () => {
+    const rows = codeComposition([0.5, 0.5, 0], [0, 1], beta, 3, 0.05)
+    const before = rows.map((r) => r.w)
+    sortRowsForSelection(rows, 0)
+    expect(rows.map((r) => r.w)).toEqual(before)
   })
 })
