@@ -3,9 +3,12 @@
   import { phenotypeHue } from '../palette'
   import { go } from '../router'
   import { copy } from '../copy'
+  import { codeComposition, sortRowsForSelection, OTHER_ID } from './codeComposition'
 
   export let theta: number[]
   export let codeBag: number[]
+
+  const MAX_ROWS = 12
 
   function openInAtlas() {
     // selectedPhenotypeId is already set to the clicked phenotype; just
@@ -13,49 +16,22 @@
     go('atlas')
   }
 
-  // Mirrors ProfileBar's default otherThreshold. Phenotypes with theta
-  // below this make up the patient's long-tail "Other" band. Clicking
-  // that band sets selectedPhenotypeId = -1 (sentinel) and we aggregate
-  // responsibility across every phenotype in the tail.
-  const OTHER_THRESHOLD = 0.05
-
   $: isOther = $selectedPhenotypeId === -1
 
-  $: counts = (() => {
-    const m = new Map<number, number>()
-    for (const w of codeBag) m.set(w, (m.get(w) ?? 0) + 1)
-    return m
-  })()
+  $: rows = $bundle
+    ? codeComposition(theta, codeBag, $bundle.model.beta, $bundle.model.K)
+    : []
+  $: sorted = sortRowsForSelection(rows, $selectedPhenotypeId).slice(0, MAX_ROWS)
+  $: hasSelection = $selectedPhenotypeId !== null
 
-  $: top = (() => {
-    if (!$bundle || $selectedPhenotypeId === null) return []
-    const beta = $bundle.model.beta
-    const K = $bundle.model.K
-    // For the "Other" view, build the set of tail phenotype ids once so
-    // the inner loop just sums their responsibilities for each code.
-    const otherIds: number[] = []
-    if (isOther) {
-      for (let j = 0; j < K; j++) if (theta[j] < OTHER_THRESHOLD) otherIds.push(j)
-    }
-    const scored: { w: number; c: number; score: number }[] = []
-    for (const [w, c] of counts) {
-      let z = 0
-      for (let j = 0; j < K; j++) z += beta[j][w] * theta[j]
-      let pzkw = 0
-      if (isOther) {
-        let num = 0
-        for (const j of otherIds) num += beta[j][w] * theta[j]
-        pzkw = z > 0 ? num / z : 0
-      } else {
-        const k = $selectedPhenotypeId!
-        pzkw = z > 0 ? (beta[k][w] * theta[k]) / z : 0
-      }
-      scored.push({ w, c, score: c * pzkw })
-    }
-    return scored.sort((a, b) => b.score - a.score).slice(0, 12)
-  })()
+  // Focus: when a band is selected, dim every segment that is not it.
+  function segActive(k: number): boolean {
+    return !hasSelection || k === $selectedPhenotypeId
+  }
+  function segColor(k: number): string {
+    return k === OTHER_ID ? 'var(--surface-deep)' : $phenotypeHue(k)
+  }
 
-  $: maxScore = top.length ? Math.max(...top.map((t) => t.score)) : 1
   $: selectedLabel = $selectedPhenotypeId === null
     ? null
     : isOther
@@ -92,30 +68,36 @@
         {selectedLabel}
       </h3>
     {/if}
-    {#if isOther}
+    {#if $selectedPhenotypeId === null}
+      <p class="sub">{copy.contributingCodes.composition}</p>
+    {:else if isOther}
       <p class="sub">{copy.contributingCodes.subOther}</p>
     {:else}
       <p class="sub">{copy.contributingCodes.subMatch}</p>
     {/if}
   </header>
 
-  {#if $selectedPhenotypeId === null}
-    <p class="hint">{copy.contributingCodes.hintNoSelection}</p>
-  {:else if top.length === 0}
-    <p class="hint">{copy.contributingCodes.hintNoCodes(selectedLabel)}</p>
+  {#if !$bundle || rows.length === 0}
+    <p class="hint">{copy.contributingCodes.emptyRecord}</p>
   {:else}
     <ol class="codes">
-      {#each top as t}
-        {@const c = $bundle!.vocab.codes[t.w]}
-        {@const matched = $searchedConditionIdx === t.w}
-        <li class:matched>
+      {#each sorted as row (row.w)}
+        {@const c = $bundle.vocab.codes[row.w]}
+        {@const matched = $searchedConditionIdx === row.w}
+        <li class="code" class:matched>
           <span class="desc">
             {#if matched}<span class="match-dot" aria-hidden="true"></span>{/if}{c.description || c.code}
           </span>
-          <span class="spark" aria-hidden="true">
-            <span class="spark-bar" style="width: {(t.score / maxScore) * 100}%"></span>
+          <span class="bar" aria-hidden="true">
+            {#each row.segments as s}
+              <span
+                class="seg"
+                class:dim={!segActive(s.k)}
+                style="width: {(s.weight * 100).toFixed(2)}%; background: {segColor(s.k)}"
+              ></span>
+            {/each}
           </span>
-          <span class="count" data-numeric>×{t.c}</span>
+          <span class="count" data-numeric>×{row.count}</span>
         </li>
       {/each}
     </ol>
@@ -201,9 +183,9 @@
     padding: 0;
     margin: 0;
   }
-  .codes li {
+  .codes li.code {
     display: grid;
-    grid-template-columns: 1fr 6rem 2.5rem;
+    grid-template-columns: 1fr 8rem 2.5rem;
     align-items: center;
     gap: 0.85rem;
     padding: 0.45rem 0;
@@ -234,19 +216,21 @@
     margin-right: 0.45rem;
     vertical-align: middle;
   }
-  .spark {
-    display: block;
-    height: 3px;
-    background: var(--surface-recessed);
-    border-radius: 1.5px;
+  .bar {
+    display: flex;
+    height: 8px;
+    border-radius: 2px;
     overflow: hidden;
+    background: var(--surface-recessed);
   }
-  .spark-bar {
-    display: block;
+  .seg {
     height: 100%;
-    background: var(--accent);
-    transition: width 0.2s ease;
+    /* 2px surface gap between fills, per dataviz mark spec */
+    box-shadow: inset -2px 0 0 var(--surface);
+    transition: opacity 0.15s ease;
   }
+  .seg.dim { opacity: 0.2; }
+  .seg:last-child { box-shadow: none; }
   .count {
     text-align: right;
     color: var(--ink-muted);
