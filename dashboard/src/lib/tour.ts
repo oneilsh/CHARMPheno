@@ -88,6 +88,7 @@ const BASIC_STEPS: StepDef[] = [
   { id: 'patientMap', tab: 'sim', sub: 'explore', selector: '[data-tour="patient-map"]', on: 'right' },
   { id: 'patientProfile', tab: 'sim', sub: 'explore', selector: '[data-tour="patient-profile"]', on: 'left' },
   { id: 'contributingCodes', tab: 'sim', sub: 'explore', selector: '[data-tour="contributing-codes"]', on: 'left' },
+  { id: 'similarPatients', tab: 'sim', sub: 'explore', selector: '[data-tour="similar-patients"]', on: 'top' },
   // Toggle lives in the masthead (present on every tab), so no navigation.
   { id: 'viewToggle', selector: '[data-tour="view-toggle"]', on: 'bottom' },
 ]
@@ -184,11 +185,15 @@ function buildTour(mode: 'basic' | 'advanced'): Tour {
       text: stepCopy.body,
       buttons,
       attachTo: def.selector ? { element: def.selector, on: def.on ?? 'bottom' } : undefined,
-      // Also light up the nav tab this step lives on, so the overlay cuts a
-      // hole around both the feature and its tab. When the tour jumps tabs
-      // the highlight visibly leaps to the new tab — making it obvious the
-      // feature lives on a different screen.
-      extraHighlights: def.tab ? [`[data-tour="tab-${def.tab}"]`] : undefined,
+      // Also light up the nav tab AND subtab this step lives on, so the
+      // overlay cuts a hole around the feature and its place in the nav. When
+      // the tour crosses a tab or subtab the highlight visibly leaps there —
+      // making the app's two-level structure legible as the tour moves.
+      extraHighlights: def.tab
+        ? (def.sub
+            ? [`[data-tour="tab-${def.tab}"]`, `[data-tour="subtab-${def.tab}-${def.sub}"]`]
+            : [`[data-tour="tab-${def.tab}"]`])
+        : undefined,
       scrollTo: { behavior: 'smooth', block: 'center' },
       // Instant (not smooth): the destination tab may run heavy synchronous
       // work on mount (the Patient atlas fits a UMAP), which stalls a

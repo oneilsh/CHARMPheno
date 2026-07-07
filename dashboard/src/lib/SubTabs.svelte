@@ -9,6 +9,7 @@
     <button
       type="button"
       role="tab"
+      data-tour="subtab-{top}-{s.id}"
       aria-selected={$subRoute === s.id}
       class:active={$subRoute === s.id}
       on:click={() => go(top, s.id)}

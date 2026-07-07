@@ -332,6 +332,10 @@ export const copy = {
         title: `Which codes, which phenotypes`,
         body: `Each of the patient's conditions is split across the phenotypes it points to, for this patient — the model's per-code reasoning behind the mix above. Hover a segment to name the phenotype it belongs to.`,
       },
+      similarPatients: {
+        title: `Similar patients`,
+        body: `Because every synthetic patient sits in the same phenotype space, the model can surface the nearest matches to whoever you're viewing. That's the basis for <strong>phenotype-based patient search and cohort matching</strong> — find people whose overall pattern looks like this one, not just those sharing a single code.`,
+      },
       viewToggle: {
         title: `Want to go deeper?`,
         body: `That's the tour. Flip this to <strong>advanced</strong> whenever you're ready — it reveals the model's internals and diagnostics, and a second tour (same link) walks you through them. Explore away.`,

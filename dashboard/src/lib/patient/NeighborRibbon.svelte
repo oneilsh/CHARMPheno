@@ -13,7 +13,7 @@
     .filter((n) => n && ($advancedView || n.isClean))
 </script>
 
-<section class="ribbon">
+<section class="ribbon" data-tour="similar-patients">
   <header class="head">
     <span class="eyebrow">Cohort</span>
     <h3>{copy.neighborRibbon.heading}</h3>
