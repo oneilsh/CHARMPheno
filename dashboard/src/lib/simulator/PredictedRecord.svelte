@@ -5,7 +5,13 @@
   export let codeCountsSamples: Map<number, number>[] = []
   // code id -> (generating topic id -> count). Drives the per-phenotype grouping.
   export let codeTopicCounts: Map<number, Map<number, number>> = new Map()
-  export let topN = 16
+  // Display limits. Because codes are GROUPED by generating phenotype, a global
+  // top-N would starve phenotypes with several moderate codes; instead we keep any
+  // code above an occurrence-rate floor and cap PER phenotype (and cap the number
+  // of phenotype groups) so the table stays full but bounded.
+  export let minRate = 0.03      // show codes appearing in ≥3% of simulated years
+  export let perPhenotype = 8    // max codes shown under each phenotype
+  export let maxGroups = 12      // max phenotype groups shown
 
   // Build a set of prefix codes so we can exclude them from the
   // "expects also" list - we only want to show NEW codes the model added.
@@ -30,11 +36,12 @@
     for (const w of codes) {
       let occ = 0
       for (const m of codeCountsSamples) if ((m.get(w) ?? 0) > 0) occ++
-      if (occ === 0) continue
-      rows.push({ w, rate: occ / N })
+      const rate = occ / N
+      if (rate < minRate) continue
+      rows.push({ w, rate })
     }
     rows.sort((a, b) => b.rate - a.rate)
-    return rows.slice(0, topN)
+    return rows
   })()
 
   // Dominant generating phenotype for a code: the topic that emitted it most
@@ -66,11 +73,13 @@
     return [...byPheno.entries()]
       .map(([k, rows]) => ({
         k,
-        rows: rows.slice().sort((a, b) => b.rate - a.rate),
+        // Cap codes shown per phenotype (highest-rate first).
+        rows: rows.slice().sort((a, b) => b.rate - a.rate).slice(0, perPhenotype),
         total: rows.reduce((s, r) => s + r.rate, 0),
       }))
       // Real phenotypes first (by total predicted mass), the Other bucket last.
       .sort((a, b) => (a.k < 0 ? 1 : 0) - (b.k < 0 ? 1 : 0) || (b.total - a.total))
+      .slice(0, maxGroups)
   })()
 
   const groupLabel = (k: number) =>
