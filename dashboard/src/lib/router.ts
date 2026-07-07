@@ -16,8 +16,8 @@ export const SUBTABS: Record<TopId, readonly { id: string; label: string }[]> = 
     { id: 'compare', label: 'Compare' },
   ],
   sim: [
-    { id: 'simulate', label: 'Simulate Cohort' },
-    { id: 'explore', label: 'Explore Cohort' },
+    { id: 'simulate', label: 'Simulate' },
+    { id: 'explore', label: 'Explore' },
   ],
 }
 

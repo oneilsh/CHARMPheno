@@ -5,6 +5,7 @@
   import { populationLines } from './population'
   import { initialValues, canInteract } from '../atlas/covariate-panel'
   import { ALL_SUBCOHORTS } from './marginalSampler'
+  import { copy } from '../copy'
 
   export let store: import('svelte/store').Writable<import('../store').Conditioning>
   // Layout variant for the non-inline (page) rendering:
@@ -142,8 +143,8 @@
        Atlas's Patient-Features drawer. -->
   <section class="cohort-panel">
     <header class="cp-head">
-      <span class="eyebrow">Source cohort</span>
-      <p class="cp-sub">Who to sample from — and, optionally, the covariate profile to condition on.</p>
+      <span class="eyebrow">{copy.conditioningBar.sourceCohortLabel}</span>
+      <p class="cp-sub">{copy.conditioningBar.sourceCohortSub}</p>
     </header>
 
     {#if hasGroup && gating}
@@ -154,18 +155,18 @@
           value={$store.group ?? ''}
           on:change={(e) => store.update((c) => ({ ...c, group: e.currentTarget.value === '' ? null : e.currentTarget.value }))}
         >
-          <option value={ALL_SUBCOHORTS}>All subcohorts</option>
+          <option value={ALL_SUBCOHORTS}>{copy.conditioningBar.allSubcohorts}</option>
           {#each gating.groups as g}
             <option value={g}>{gating.group_labels?.[g] ?? g}</option>
           {/each}
-          <option value="">Background only</option>
+          <option value="">{copy.conditioningBar.backgroundOnly}</option>
         </select>
       </label>
     {/if}
 
     {#if hasCovariates && schema}
       <div class="cp-cov">
-        <label class="toggle-label" title="When on, generation conditions each patient on the covariate values below instead of the cohort-average profile.">
+        <label class="toggle-label" title={copy.conditioningBar.covariateToggleTip}>
           <input
             type="checkbox"
             class="toggle-input"
@@ -173,7 +174,7 @@
             on:change={(e) => store.update((c) => ({ ...c, covariateActive: e.currentTarget.checked }))}
           />
           <span class="toggle-track"><span class="toggle-thumb"></span></span>
-          <span class="toggle-text">{$store.covariateActive ? 'custom covariates' : 'average covariates'}</span>
+          <span class="toggle-text">{$store.covariateActive ? copy.conditioningBar.covariatesOn : copy.conditioningBar.covariatesOff}</span>
         </label>
 
         {#if $store.covariateActive}
@@ -224,7 +225,7 @@
               </div>
             {/each}
           </div>
-          <button type="button" class="reset-btn cp-reset" on:click={reset}>Reset to averages</button>
+          <button type="button" class="reset-btn cp-reset" on:click={reset}>{copy.conditioningBar.resetCovariates}</button>
         {/if}
       </div>
     {/if}

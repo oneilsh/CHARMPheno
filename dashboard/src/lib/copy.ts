@@ -126,12 +126,36 @@ export const copy = {
     kicker: `Pairwise correlation between phenotype mixture shares, grouped by cohort. Grey cells lack enough joint observations to estimate a correlation.`,
   },
 
+  // ── Phenotype difference pane (Compare tab) ────────────────────────────
+  difference: {
+    // Two-sided A-vs-B contrast.
+    sub: `Conditions ranked by how much more they distinguish one phenotype from the other. The number is the relevance gap — higher means the condition is more specific to that side.`,
+    deltaLabel: `distinctiveness`,
+    deltaTip: `How much more strongly this condition defines this side's phenotype than the one it is compared against — the relevance gap (λ·log p(condition) + (1−λ)·log lift, this side minus the other). Higher means more specific to this side.`,
+    // Self view (diagonal click): one phenotype's own ranked conditions.
+    selfSub: `This phenotype's leading conditions, ranked by relevance.`,
+    shareLabel: `share`,
+    shareTip: `The condition's share of this phenotype's probability mass (raw frequency p(condition | phenotype)).`,
+  },
+
   // ── Phenotype browser (table) ─────────────────────────────────────────
   phenotypeBrowser: {
     coverageTipAdvanced: (tau: number): string =>
       `Fraction of patients with mixture weight above τ = ${tau.toFixed(2)} (at least ${pct(tau)}% of their coded activity).`,
     coverageTipBasic: (tau: number): string =>
       `Fraction of patients for whom this phenotype makes up at least ${pct(tau)}% of their coded activity.`,
+  },
+
+  // ── Conditioning panel (Simulate tab: source cohort + covariates) ──────
+  conditioningBar: {
+    sourceCohortLabel: `Source cohort`,
+    sourceCohortSub: `Who to sample from — and, optionally, the covariate profile to condition on.`,
+    allSubcohorts: `All subcohorts`,
+    backgroundOnly: `Background only`,
+    covariateToggleTip: `When on, generation conditions each patient on the covariate values below instead of the cohort-average profile.`,
+    covariatesOn: `custom covariates`,
+    covariatesOff: `average covariates`,
+    resetCovariates: `Reset to averages`,
   },
 
   // ── Condition search ──────────────────────────────────────────────────

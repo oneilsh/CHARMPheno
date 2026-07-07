@@ -2,6 +2,7 @@
   import { bundle, comparePair, advancedView } from '../store'
   import { topDifferentialCodes } from './difference'
   import { topRelevantCodes } from '../inference'
+  import { copy } from '../copy'
 
   // Relevance-term weighting for the delta ranking — same λ semantics as
   // CodePanel's relevance slider (Sievert & Shirley 2014), just applied to
@@ -53,6 +54,7 @@
     <header class="head">
       <span class="eyebrow">Phenotype detail</span>
       <h2 class="title">Top conditions in {nameOf(pair.a)}</h2>
+      <p class="sub">{copy.difference.selfSub}</p>
     </header>
 
     {#if $advancedView}
@@ -74,6 +76,10 @@
     {/if}
 
     <div class="side">
+      <div class="col-head">
+        <span class="col-head-desc">Condition</span>
+        <span class="col-head-num" title={copy.difference.shareTip}>{copy.difference.shareLabel}</span>
+      </div>
       <ol class="rows">
         {#each selfResult as r (r.index)}
           <li>
@@ -87,6 +93,7 @@
     <header class="head">
       <span class="eyebrow">Phenotype difference</span>
       <h2 class="title">{nameOf(pair.a)} <span class="vs">vs</span> {nameOf(pair.b)}</h2>
+      <p class="sub">{copy.difference.sub}</p>
     </header>
 
     {#if $advancedView}
@@ -110,6 +117,10 @@
     <div class="sides">
       <div class="side">
         <h3 class="side-head">More in {nameOf(pair.a)}</h3>
+        <div class="col-head">
+          <span class="col-head-desc">Condition</span>
+          <span class="col-head-num" title={copy.difference.deltaTip}>{copy.difference.deltaLabel}</span>
+        </div>
         <ol class="rows">
           {#each result.aSide as r (r.index)}
             <li>
@@ -121,6 +132,10 @@
       </div>
       <div class="side">
         <h3 class="side-head">More in {nameOf(pair.b)}</h3>
+        <div class="col-head">
+          <span class="col-head-desc">Condition</span>
+          <span class="col-head-num" title={copy.difference.deltaTip}>{copy.difference.deltaLabel}</span>
+        </div>
         <ol class="rows">
           {#each result.bSide as r (r.index)}
             <li>
@@ -187,6 +202,32 @@
     color: var(--ink-faint);
     font-weight: 400;
     font-size: 0.85em;
+  }
+  .sub {
+    margin: 0.15rem 0 0;
+    font-size: var(--fs-micro);
+    color: var(--ink-faint);
+    font-style: italic;
+    line-height: 1.5;
+  }
+
+  /* Column header above each ranked list: names the otherwise-bare number
+     column (the delta / share) with a hover description. */
+  .col-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0 0.2rem 0.35rem;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-faint);
+  }
+  .col-head-num {
+    cursor: help;
+    border-bottom: 1px dotted var(--ink-faint);
   }
 
   .slider-row {

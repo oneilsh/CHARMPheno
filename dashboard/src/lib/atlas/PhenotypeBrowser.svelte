@@ -116,6 +116,15 @@
   $: maxPrev = phenotypes.length
     ? Math.max(...phenotypes.map(reader), 1e-9)
     : 1e-9
+
+  // Coherence (NPMI) bar: normalize each value to the FULL set's max so widths
+  // stay stable as the filter narrows (same rationale as maxPrev). NPMI can be
+  // negative (anti-coherent); those clamp to an empty bar rather than reversing.
+  $: maxCoh = phenotypes.length
+    ? Math.max(...phenotypes.map((p) => p.npmi ?? 0), 1e-9)
+    : 1e-9
+  const cohWidth = (npmi: number | null): number =>
+    npmi == null ? 0 : Math.max(0, Math.min(npmi / maxCoh, 1)) * 100
 </script>
 
 <details class="browser" open>
@@ -207,7 +216,16 @@
                 {/if}
               </td>
             {/if}
-            <td class="col-coh" data-numeric>{p.npmi == null ? '—' : p.npmi.toFixed(3)}</td>
+            <td class="col-coh" data-numeric>
+              {#if p.npmi == null}
+                <span class="prev-row"><span class="prev-num">—</span></span>
+              {:else}
+                <span class="prev-row">
+                  <span class="prev-bar"><span class="prev-fill coh-fill" style="width: {cohWidth(p.npmi)}%"></span></span>
+                  <span class="prev-num prev-num-coh">{p.npmi.toFixed(3)}</span>
+                </span>
+              {/if}
+            </td>
             <td class="col-prev" data-numeric>
               <span class="prev-row">
                 <span class="prev-bar">
@@ -398,8 +416,12 @@
   .col-id { width: 3.5rem; color: var(--ink-faint); }
   .col-label { color: var(--ink); }
   .col-quality { width: 7.5rem; }
-  .col-coh { width: 5.5rem; text-align: right; }
+  .col-coh { width: 8.5rem; text-align: right; }
   .col-prev { width: 9.5rem; text-align: right; }
+  /* Coherence bar reads as a cooler tone than coverage's accent so the two
+     numeric columns are visually distinguishable at a glance. */
+  .coh-fill { background: var(--ink-muted); }
+  .prev-num-coh { min-width: 2.9rem; }
 
   .prev-row {
     display: inline-flex;
