@@ -198,6 +198,7 @@ export const copy = {
     emptyRecord: `This patient's record has no codes to attribute.`,
     hintNoCodes: (label: string): string =>
       `No codes from this patient's record contribute to ${label}.`,
+    evidenceVsPrior: `Hatched portions of each band are phenotype mass the model leans on the population prior for, rather than this patient's own codes — an approximate evidence-vs-prior cue, not an exact split.`,
   },
 
   // ── Simulator tab ─────────────────────────────────────────────────────

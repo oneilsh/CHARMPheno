@@ -125,6 +125,7 @@
           <ProfileBar
             theta={current.theta}
             codeBag={current.code_bag}
+            showResidual={true}
             height={44}
             onSelect={(k) => selectedPhenotypeId.set(k)}
           />
