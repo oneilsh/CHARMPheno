@@ -117,8 +117,12 @@ gap distribution is expected to show a co-initiation spike near 0 plus a
 sequential tail. The corpus build emits a **`|g − s|` histogram for all
 both-class users** (a no-fit diagnostic, like the sparse cohort's coding-density
 histogram) so the threshold is set from where the co-initiation cluster actually
-ends in this CDR; 90 is the starting default. `combo_max_gap_days` is a
-frontmatter knob — re-cutting it re-runs only cohort assignment, not the fit.
+ends in this CDR; 90 is the starting default. **v1 scoping:**
+`combo_max_gap_days` is a **cohort-code parameter (default 90)**, not yet a
+frontmatter field — threading it through the driver/loader/cache-key stack is a
+fast-follow, taken only if the histogram shows 90 is wrong. The diagnostic logs
+regardless of the chosen value, so the data-driven decision does not depend on
+the plumbing.
 
 Splitting tirzepatide and combo into their own arms (rather than folding into
 glp1_ra) is deliberate: merging arms post-hoc is trivial, un-merging is not, so
@@ -176,7 +180,7 @@ stack:
 | person_mod | 1 | full population — thin tirzepatide/combo arms need it |
 | prior_obs_days | 365 | incident new-user (drug arms + general) |
 | window_days | 365 | 1-year documents |
-| combo_max_gap_days | 90 | co-initiation gap for the combo arm; re-cut from the diagnostic histogram |
+| combo_max_gap_days | 90 | cohort-code default (v1: not a frontmatter field); re-cut from the diagnostic histogram |
 | doc_min_length | 10 | |
 | covariate_formula | `~ C(sex) + age` | known_sex_only |
 | schedule / hardening | subsample 0.1, tau0 256, kappa 0.7, max_iter 300, sigma_init 1, reference + dense spectral, min_pair_support 10, block-wise unit-diagonal Σ (ADR 0034) | |
