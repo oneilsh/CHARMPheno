@@ -1269,6 +1269,10 @@ def apply_population_drug_cohort(
             extra_concept_ids=spec.get("seed_concept_ids", ()),
         )
         concept_set = _expand_descendants(ca, seeds)
+        # Loud resolution: a thin/empty concept set is a mis-spec (wrong or
+        # non-standard seed id, or a name that didn't resolve), not a rare drug.
+        print(f"[cohort population_glp1] {class_key}: resolved "
+              f"{concept_set.count()} drug concept(s)", flush=True)
         return _first_drug_era_dates(drug_era, concept_set)
 
     g = _first_dates("glp1_ra")
