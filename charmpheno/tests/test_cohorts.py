@@ -432,3 +432,67 @@ def test_window_observed_cohort_dedups_multiple_observation_periods(spark):
     )
     out = _window_observed_cohort(first_dx, op, prior_obs_days=365, window_days=365)
     assert out.count() == 1  # one surviving (person_id, index_date), not two
+
+
+def test_ingredient_concept_ids_includes_explicit_extra_ids(spark):
+    """Explicit concept_ids are included even when they DON'T match the
+    name/class filter (pin a known ingredient id robust to vocab naming)."""
+    from charmpheno.omop.cohorts import _ingredient_concept_ids
+    concept = spark.createDataFrame(
+        [
+            (11, "semaglutide", "RxNorm", "Ingredient"),
+            (779705, "tirzepatide", "RxNorm", "Precise Ingredient"),  # NOT class Ingredient
+        ],
+        ["concept_id", "concept_name", "vocabulary_id", "concept_class_id"],
+    )
+    # Name-only would miss 779705 (wrong class); the explicit id rescues it.
+    out = _ingredient_concept_ids(
+        concept, ["semaglutide"], extra_concept_ids=(779705,),
+    )
+    assert {r["concept_id"] for r in out.collect()} == {11, 779705}
+
+
+def test_assign_drug_groups_long_gap_goes_to_earlier_single_arm(spark):
+    """3-regime: both-users with gap > window_days start the second drug OUTSIDE
+    the index year, so their index year is genuine monotherapy -> the earlier
+    drug's single arm (not excluded). Middle-band gaps stay excluded."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import _assign_drug_groups
+    d = dt.date
+
+    def frame(rows):
+        return spark.createDataFrame(rows, ["person_id", "index_date"])
+
+    g = frame([(10, d(2020, 1, 1)),   # g first, s ~547d later -> glp1_ra
+               (11, d(2021, 7, 1)),   # s first, g ~547d later -> sglt2i
+               (12, d(2020, 1, 1))])  # gap exactly 365 -> middle band, excluded
+    s = frame([(10, d(2021, 7, 1)),
+               (11, d(2020, 1, 1)),
+               (12, d(2020, 12, 31))])  # 2020-01-01..2020-12-31 = 365 days
+    t = spark.createDataFrame([], "person_id bigint, index_date date")
+
+    out = {r["person_id"]: (r["source_cohort"], r["index_date"])
+           for r in _assign_drug_groups(
+               g, s, t, combo_max_gap_days=90, window_days=365).collect()}
+
+    assert out[10] == ("glp1_ra", d(2020, 1, 1))   # earlier drug = GLP-1
+    assert out[11] == ("sglt2i", d(2020, 1, 1))    # earlier drug = SGLT2i
+    assert 12 not in out                            # gap 365 not > 365 -> middle excluded
+
+
+def test_expand_descendants_includes_self_and_children(spark):
+    """A drug class = descendants (incl. self) of its seed concept ids, so a
+    pinned ingredient id matches drug_era whatever level it's recorded at."""
+    from charmpheno.omop.cohorts import _expand_descendants
+    # concept_ancestor: 779705 -> {779705(self), 900, 901}; 555 -> {555, 700}
+    ca = spark.createDataFrame(
+        [
+            (779705, 779705), (779705, 900), (779705, 901),
+            (555, 555), (555, 700),
+            (999, 999),  # unrelated
+        ],
+        ["ancestor_concept_id", "descendant_concept_id"],
+    )
+    seeds = spark.createDataFrame([(779705,)], ["concept_id"])
+    out = {r["concept_id"] for r in _expand_descendants(ca, seeds).collect()}
+    assert out == {779705, 900, 901}

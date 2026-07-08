@@ -122,7 +122,14 @@ _DRUG_REGISTRY: dict[str, dict] = {
     "sglt2i": {"ingredient_names": (
         "empagliflozin", "dapagliflozin", "canagliflozin", "ertugliflozin",
     )},
-    "tirzepatide": {"ingredient_names": ("tirzepatide",)},
+    # tirzepatide (FDA 2022): pin the OMOP concept id as an explicit seed so the
+    # class set is descendants-of-779705 regardless of how this CDR's vocab
+    # names/classes the ingredient (name-only match under-counted it). VERIFY
+    # 779705 on the CDR (SELECT ... FROM concept WHERE concept_id=779705).
+    "tirzepatide": {
+        "ingredient_names": ("tirzepatide",),
+        "seed_concept_ids": (779705,),
+    },
 }
 
 
@@ -1039,24 +1046,56 @@ def apply_population_sparse_cohort(
 
 def _ingredient_concept_ids(
     concept_df: DataFrame, ingredient_names: Sequence[str],
+    *, extra_concept_ids: Sequence[int] = (),
 ) -> DataFrame:
-    """Resolve RxNorm Ingredient concept_ids by (case-insensitive) name.
+    """Resolve seed drug concept_ids by RxNorm Ingredient name + explicit pins.
 
     ``concept_df`` must have ``concept_id``, ``concept_name``, ``vocabulary_id``,
     ``concept_class_id``. Returns the distinct ``concept_id`` of standard RxNorm
-    ingredients whose name matches ``ingredient_names``. drug_era is recorded at
-    the ingredient level, so these ids join directly against
-    ``drug_era.drug_concept_id`` — no ancestor expansion needed.
+    ingredients whose name matches ``ingredient_names``, UNION any
+    ``extra_concept_ids`` pinned explicitly. The pins are included even when they
+    do not match the name/class filter — a robustness hatch for newer drugs
+    whose vocab naming/classing may not match the expected Ingredient name (e.g.
+    tirzepatide). These are SEED ids; expand them to a full class set with
+    :func:`_expand_descendants` before matching ``drug_era``.
     """
     names_lower = [n.lower() for n in ingredient_names]
-    return (
+    by_name = (
         concept_df
         .where(F.col("vocabulary_id") == "RxNorm")
         .where(F.col("concept_class_id") == "Ingredient")
         .where(F.lower(F.col("concept_name")).isin(names_lower))
         .select("concept_id")
-        .distinct()
     )
+    if extra_concept_ids:
+        extra = concept_df.sparkSession.createDataFrame(
+            [(int(c),) for c in extra_concept_ids], ["concept_id"],
+        )
+        by_name = by_name.unionByName(extra)
+    return by_name.distinct()
+
+
+def _expand_descendants(ca_df: DataFrame, seed_ids: DataFrame) -> DataFrame:
+    """All descendants (including the seeds themselves) of ``seed_ids`` via
+    ``concept_ancestor``.
+
+    ``ca_df`` has ``ancestor_concept_id``, ``descendant_concept_id``;
+    ``seed_ids`` is a single-column ``concept_id`` DataFrame. Returns the
+    distinct ``concept_id`` set = seeds ∪ their descendants. ``drug_era`` is
+    ingredient-level so the ingredient (a self-descendant) matches directly;
+    expanding to descendants also captures any clinical-drug-level rows and
+    guards against incomplete ingredient rollup for newer drugs. Self is
+    unioned back in case ``concept_ancestor`` lacks a self-row for a seed.
+    """
+    descendants = (
+        ca_df.join(
+            seed_ids,
+            ca_df.ancestor_concept_id == seed_ids.concept_id,
+            how="inner",
+        )
+        .select(ca_df.descendant_concept_id.alias("concept_id"))
+    )
+    return descendants.unionByName(seed_ids.select("concept_id")).distinct()
 
 
 def _first_drug_era_dates(
@@ -1082,22 +1121,30 @@ def _first_drug_era_dates(
 def _assign_drug_groups(
     g: DataFrame, s: DataFrame, t: DataFrame,
     *, combo_max_gap_days: int = _COMBO_MAX_GAP_DAYS,
+    window_days: int = _WINDOW_DAYS,
 ) -> DataFrame:
     """Assign each drug-exposed person to exactly one foreground group.
 
     Inputs are per-class first-era dates ``(person_id, index_date)`` for
-    glp1_ra (``g``), sglt2i (``s``), tirzepatide (``t``). Precedence:
+    glp1_ra (``g``), sglt2i (``s``), tirzepatide (``t``). Precedence, and the
+    three-regime handling of both-GLP1+SGLT2i users by their gap ``|g - s|``:
 
-    - has tirzepatide            -> ``tirzepatide``       (index = first tirzepatide)
+    - has tirzepatide                    -> ``tirzepatide``  (index = first tirzepatide)
     - has glp1_ra AND sglt2i, no tirzepatide:
-        - ``|g - s| <= combo_max_gap_days`` -> ``glp1_sglt2_combo`` (index = earlier)
-        - otherwise                          -> EXCLUDED (row dropped)
-    - has glp1_ra only           -> ``glp1_ra``           (index = g)
-    - has sglt2i only            -> ``sglt2i``            (index = s)
+        - ``|g - s| <= combo_max_gap_days`` -> ``glp1_sglt2_combo`` (co-initiation;
+          index = earlier of g, s)
+        - ``combo_max_gap_days < |g - s| <= window_days`` -> EXCLUDED (row dropped:
+          the second drug starts INSIDE the index year, so it is neither a clean
+          combo nor a clean single-drug year)
+        - ``|g - s| > window_days`` -> the EARLIER drug's single arm (the second
+          drug starts OUTSIDE the index year, so that year is genuine
+          monotherapy; index = earlier of g, s)
+    - has glp1_ra only                   -> ``glp1_ra``      (index = g)
+    - has sglt2i only                    -> ``sglt2i``       (index = s)
 
-    Non-combo both-users are dropped entirely (returned in neither a single arm
-    nor the caller's ``general`` arm), so the single-drug arms are "only ever
-    that class". Returns ``(person_id, source_cohort, index_date)``.
+    Only the contaminated middle-gap both-users are dropped; long-gap both-users
+    are recovered into whichever single arm they initiated first. Returns
+    ``(person_id, source_cohort, index_date)``.
     """
     g2 = g.select("person_id", F.col("index_date").alias("g_date"))
     s2 = s.select("person_id", F.col("index_date").alias("s_date"))
@@ -1110,19 +1157,24 @@ def _assign_drug_groups(
     has_s = F.col("s_date").isNotNull()
     has_t = F.col("t_date").isNotNull()
     gap = F.abs(F.datediff(F.col("g_date"), F.col("s_date")))
-    combo_index = F.least(F.col("g_date"), F.col("s_date"))
+    earlier_index = F.least(F.col("g_date"), F.col("s_date"))
+    # For a long-gap both-user, the arm is whichever drug was initiated first.
+    earlier_arm = F.when(F.col("g_date") <= F.col("s_date"), F.lit("glp1_ra")) \
+                   .otherwise(F.lit("sglt2i"))
 
     source = (
         F.when(has_t, F.lit("tirzepatide"))
         .when(has_g & has_s & (gap <= combo_max_gap_days), F.lit("glp1_sglt2_combo"))
-        .when(has_g & has_s, F.lit(None))          # excluded
+        .when(has_g & has_s & (gap > window_days), earlier_arm)  # clean monotherapy year
+        .when(has_g & has_s, F.lit(None))          # contaminated middle gap -> excluded
         .when(has_g, F.lit("glp1_ra"))
         .when(has_s, F.lit("sglt2i"))
         .otherwise(F.lit(None))
     )
     index_date = (
         F.when(has_t, F.col("t_date"))
-        .when(has_g & has_s & (gap <= combo_max_gap_days), combo_index)
+        .when(has_g & has_s & (gap <= combo_max_gap_days), earlier_index)
+        .when(has_g & has_s & (gap > window_days), earlier_index)
         .when(has_g & has_s, F.lit(None))
         .when(has_g, F.col("g_date"))
         .when(has_s, F.col("s_date"))
@@ -1198,6 +1250,9 @@ def apply_population_drug_cohort(
     concept = _read("concept").select(
         "concept_id", "concept_name", "vocabulary_id", "concept_class_id",
     )
+    ca = _read("concept_ancestor").select(
+        "ancestor_concept_id", "descendant_concept_id",
+    )
     drug_era = _read("drug_era").select(
         "person_id", "drug_concept_id", "drug_era_start_date",
     )
@@ -1208,10 +1263,13 @@ def apply_population_drug_cohort(
     )
 
     def _first_dates(class_key: str) -> DataFrame:
-        ids = _ingredient_concept_ids(
-            concept, _DRUG_REGISTRY[class_key]["ingredient_names"],
+        spec = _DRUG_REGISTRY[class_key]
+        seeds = _ingredient_concept_ids(
+            concept, spec["ingredient_names"],
+            extra_concept_ids=spec.get("seed_concept_ids", ()),
         )
-        return _first_drug_era_dates(drug_era, ids)
+        concept_set = _expand_descendants(ca, seeds)
+        return _first_drug_era_dates(drug_era, concept_set)
 
     g = _first_dates("glp1_ra")
     s = _first_dates("sglt2i")
@@ -1230,7 +1288,9 @@ def apply_population_drug_cohort(
         print(f"[cohort population_glp1]   {bucket}: {_gap_counts.get(bucket, 0)}",
               flush=True)
 
-    assigned = _assign_drug_groups(g, s, t, combo_max_gap_days=combo_max_gap_days)
+    assigned = _assign_drug_groups(
+        g, s, t, combo_max_gap_days=combo_max_gap_days, window_days=window_days,
+    )
 
     # New-user observation bracket on the chosen index; rejoin to recover the tag.
     bracketed = _window_observed_cohort(
