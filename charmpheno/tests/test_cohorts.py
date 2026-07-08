@@ -292,3 +292,46 @@ def test_cohort_metadata_has_population_sparse():
     m = COHORT_METADATA["population_sparse"]
     assert m["id"] == "population_sparse"
     assert m["label"] and m["description"]
+
+
+# --- ingredient resolver + first-drug-era helper + drug registry (Task 2) -----
+
+def test_ingredient_concept_ids_matches_rxnorm_ingredients_case_insensitively(spark):
+    from charmpheno.omop.cohorts import _ingredient_concept_ids
+    concept = spark.createDataFrame(
+        [
+            (11, "semaglutide", "RxNorm", "Ingredient"),
+            (12, "Empagliflozin", "RxNorm", "Ingredient"),   # case differs
+            (13, "semaglutide", "RxNorm", "Brand Name"),      # wrong class
+            (14, "metformin", "RxNorm", "Ingredient"),        # not requested
+            (15, "semaglutide", "ATC", "Ingredient"),         # wrong vocab
+        ],
+        ["concept_id", "concept_name", "vocabulary_id", "concept_class_id"],
+    )
+    out = _ingredient_concept_ids(concept, ["semaglutide", "empagliflozin"])
+    assert {r["concept_id"] for r in out.collect()} == {11, 12}
+
+
+def test_first_drug_era_dates_picks_earliest_era_per_person(spark):
+    import datetime as dt
+    from charmpheno.omop.cohorts import _first_drug_era_dates
+    drug_era = spark.createDataFrame(
+        [
+            (1, 11, dt.date(2020, 3, 1)),
+            (1, 11, dt.date(2019, 5, 1)),   # earlier -> wins for person 1
+            (2, 12, dt.date(2021, 1, 1)),
+            (3, 99, dt.date(2020, 1, 1)),   # ingredient not in set -> person 3 absent
+        ],
+        ["person_id", "drug_concept_id", "drug_era_start_date"],
+    )
+    ids = spark.createDataFrame([(11,), (12,)], ["concept_id"])
+    out = {r["person_id"]: r["index_date"] for r in _first_drug_era_dates(drug_era, ids).collect()}
+    assert out == {1: dt.date(2019, 5, 1), 2: dt.date(2021, 1, 1)}
+
+
+def test_drug_registry_shape():
+    from charmpheno.omop.cohorts import _DRUG_REGISTRY, _COMBO_MAX_GAP_DAYS
+    assert _COMBO_MAX_GAP_DAYS == 90
+    assert set(_DRUG_REGISTRY) == {"glp1_ra", "sglt2i", "tirzepatide"}
+    assert "semaglutide" in _DRUG_REGISTRY["glp1_ra"]["ingredient_names"]
+    assert _DRUG_REGISTRY["tirzepatide"]["ingredient_names"] == ("tirzepatide",)

@@ -103,6 +103,29 @@ _DISEASE_REGISTRY: dict[str, dict] = {
 }
 
 
+# Co-initiation gap (days) below which a new-user of BOTH a GLP-1 RA and an
+# SGLT2i is treated as combination therapy (glp1_sglt2_combo) rather than two
+# separate single-drug years. v1 default; re-cut from the co-initiation gap
+# histogram (_coinitiation_gap_histogram) emitted at build time. Not yet a
+# frontmatter field.
+_COMBO_MAX_GAP_DAYS = 90
+
+# Drug classes for the population_glp1 gated cohort, resolved by RxNorm
+# Ingredient NAME (not hard-coded concept_ids, so it is portable across CDR
+# vocab versions). VERIFY ON FIRST RUN that each name set resolves to a
+# non-empty ingredient set on the target CDR (see apply_population_drug_cohort's
+# build-time diagnostic).
+_DRUG_REGISTRY: dict[str, dict] = {
+    "glp1_ra": {"ingredient_names": (
+        "semaglutide", "liraglutide", "dulaglutide", "exenatide", "lixisenatide",
+    )},
+    "sglt2i": {"ingredient_names": (
+        "empagliflozin", "dapagliflozin", "canagliflozin", "ertugliflozin",
+    )},
+    "tirzepatide": {"ingredient_names": ("tirzepatide",)},
+}
+
+
 # Names accepted by the CLI/loader. Add a new key here when adding a new
 # cohort function so the registry stays the single source of truth.
 SUPPORTED_COHORTS: tuple[str, ...] = (
@@ -980,4 +1003,46 @@ def apply_population_sparse_cohort(
     )
     return _bucket_general_by_density(
         general, sparse_min=sparse_min, dense_min=dense_min,
+    )
+
+
+def _ingredient_concept_ids(
+    concept_df: DataFrame, ingredient_names: Sequence[str],
+) -> DataFrame:
+    """Resolve RxNorm Ingredient concept_ids by (case-insensitive) name.
+
+    ``concept_df`` must have ``concept_id``, ``concept_name``, ``vocabulary_id``,
+    ``concept_class_id``. Returns the distinct ``concept_id`` of standard RxNorm
+    ingredients whose name matches ``ingredient_names``. drug_era is recorded at
+    the ingredient level, so these ids join directly against
+    ``drug_era.drug_concept_id`` — no ancestor expansion needed.
+    """
+    names_lower = [n.lower() for n in ingredient_names]
+    return (
+        concept_df
+        .where(F.col("vocabulary_id") == "RxNorm")
+        .where(F.col("concept_class_id") == "Ingredient")
+        .where(F.lower(F.col("concept_name")).isin(names_lower))
+        .select("concept_id")
+        .distinct()
+    )
+
+
+def _first_drug_era_dates(
+    drug_era_df: DataFrame, ingredient_concept_ids: DataFrame,
+) -> DataFrame:
+    """Earliest drug_era start per person among the given ingredient concept_ids.
+
+    ``drug_era_df`` has ``person_id``, ``drug_concept_id``,
+    ``drug_era_start_date``. Returns ``(person_id, index_date)`` — the person's
+    first exposure to the class. Persons with no matching era are absent.
+    """
+    return (
+        drug_era_df.join(
+            F.broadcast(ingredient_concept_ids),
+            drug_era_df.drug_concept_id == ingredient_concept_ids.concept_id,
+            how="inner",
+        )
+        .groupBy("person_id")
+        .agg(F.min("drug_era_start_date").alias("index_date"))
     )
