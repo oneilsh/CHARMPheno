@@ -123,3 +123,55 @@ make exp ID=17
 Compare head-to-head with exp 0015 (dense spectral, otherwise identical). The
 delta between 0015 and 0017 IS the random-projection approximation error on real
 data — the result that finalizes ADR 0032's status and the scalable-arc go/no-go.
+
+## Result
+
+Ran on the cluster 2026-06-29. Converged at iter 88/300 (ELBO −1.165e6, 350s;
+dense 0015 was still creeping at iter 300, ELBO −1.10e6). 17,003 persons /
+10,819 fit documents, frozen vocab 3691, d=1000 (min(3691, max(40, 1000)), a
+~3.7x row compression). **The outcome is a split verdict against the Decision
+criteria, and it is the sharper, more interesting result than a clean pass would
+have been.**
+
+**Topic-equivalence — CONFIRMED (criteria b, c, d met).** All 40 topics rated,
+NPMI mean **+0.166** (median +0.141, max +0.554), statistically on par with
+dense 0015's +0.173. The JL-approximated seed lands the same crisp cancer
+sub-phenotypes: breast (14), prostate (5), thyroid (19), melanoma (24),
+kidney/CKD (36), bladder (4), colon (18), ovary/endometrium (34),
+lymphoma+myeloma (27), lung (11), head-and-neck (21), skin/actinic (31), plus
+the chemotherapy-toxicity cluster (26: fever/neutropenia/pancytopenia). Reference
+topic 0 carries β-mass 0.0079 — above the ~0.0001 dead-floor and matching dense
+0015's revived 0.0076. **ADR 0032's central bet — random projection preserves the
+anchor geometry — holds on real data.**
+
+**Σ-equivalence — PARTIAL (criterion a NOT met).** Σ ranged min=1 to
+max=**1.08e6**. The per-topic Σ diagonal runs ≈ 1, 2.7, **8.3e5**, 3.5, 17.2,
+10.8, … — one topic (index 2: essential hypertension 0.285 / pure hypercholesterolemia
+0.204 / obesity / OSA, the corpus's single most prevalent comorbidity cluster)
+escaped to Σ_kk≈8.3e5 while the other 39 stayed O(1–20). This is **neither** dense
+0015's fully-bounded 7.56 **nor** the ~1e10 global collapse of the random-init
+runs (0008/0012): a single-topic partial escape into the blowup basin, which the
+exact dense seed avoided at the identical config. Topic quality survived the
+escape (topic 2 still reads clean) — a deeper instance of insight 0030's
+decoupling of β/topic-quality from Σ-properness.
+
+Attribution is ambiguous by design, exactly as this doc's candidate-floor note
+warned: the escape could stem from JL projection error at d=1000 **or** from the
+scalable path's absolute doc-frequency floor (`min_doc_freq=5`) admitting a
+different anchor than the dense `min_marginal_frac=1.0`. Both are addressed by the
+two follow-ups already scoped.
+
+**Disposition.** The scalable path is **validated for large-V phenotype
+discovery** (its purpose); a proper, sample-able Σ needs an extra binding lever.
+Full mechanism and the no-shrinkage M-step feedback are in insight
+[0031](../insights/0031-scalable-spectral-topic-quality-matches-dense-but-sigma-splits-one-runaway.md);
+ADR [0032](../decisions/0032-scalable-spectral-init-random-projection-over-maxv.md)
+is reconciled to "Accepted + Implemented (topic-equivalence confirmed,
+Σ-equivalence partial)". Σ-stability follow-ups: exp
+[0018](0018-stm-cancer-scalable-sigma-prior.md) (engage the Σ-prior — STM's own
+published shrinkage) and exp
+[0019](0019-stm-cancer-scalable-larger-d.md) (raise d=2000 to test whether the
+escape is a d-controllable JL artifact). Note that the production default is now
+the block-wise unit-diagonal Σ (ADR 0034), under which Σ_kk is pinned to 1 by
+construction — so this free-variance escape cannot occur there; exp 0017 uses the
+free-variance Σ deliberately, for apples-to-apples parity with dense 0015.
