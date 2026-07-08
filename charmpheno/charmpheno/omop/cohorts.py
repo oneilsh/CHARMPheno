@@ -125,13 +125,6 @@ _DISEASE_REGISTRY: dict[str, dict] = {
 }
 
 
-# Co-initiation gap (days) below which a new-user of BOTH a GLP-1 RA and an
-# SGLT2i is treated as combination therapy (glp1_sglt2_combo) rather than two
-# separate single-drug years. v1 default; re-cut from the co-initiation gap
-# histogram (_coinitiation_gap_histogram) emitted at build time. Not yet a
-# frontmatter field.
-_COMBO_MAX_GAP_DAYS = 90
-
 # Drug classes for the population_glp1 gated cohort, resolved by RxNorm
 # Ingredient NAME (not hard-coded concept_ids, so it is portable across CDR
 # vocab versions). VERIFY ON FIRST RUN that each name set resolves to a
@@ -311,14 +304,15 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
         "id": "population_glp1",
         "label": "Population + GLP-1 & comparators (gated)",
         "description": (
-            "The whole population as a shared background, with four drug "
+            "The whole population as a shared background, with three drug "
             "foreground arms anchored on the first year after starting a "
             "medication (incident new-user: a year of prior coverage, a "
             "fully-observed follow-up year). Arms: glp1_ra (GLP-1 receptor "
-            "agonists), sglt2i (SGLT2 inhibitors, the active comparator), "
-            "tirzepatide (dual GIP/GLP-1 agonist), and glp1_sglt2_combo "
-            "(new-users of both a GLP-1 RA and an SGLT2i within a short "
-            "co-initiation window). Documents are the conditions in that year; "
+            "agonists), sglt2i (SGLT2 inhibitors, the active comparator), and "
+            "tirzepatide (dual GIP/GLP-1 agonist). Users of both a GLP-1 RA and "
+            "an SGLT2i are assigned to the earlier drug's arm only when that "
+            "index year is monotherapy (the other drug started > 1 year away); "
+            "in-window both-users are excluded. Documents are the conditions in that year; "
             "drugs are the anchor only. The general background carries the same "
             "1-year-prior + 1-year-follow-up observability bracket. A gated "
             "block-wise correlated STM then shows what is distinctive to each "
@@ -1153,30 +1147,28 @@ def _first_drug_era_dates(
 
 def _assign_drug_groups(
     g: DataFrame, s: DataFrame, t: DataFrame,
-    *, combo_max_gap_days: int = _COMBO_MAX_GAP_DAYS,
-    window_days: int = _WINDOW_DAYS,
+    *, window_days: int = _WINDOW_DAYS,
 ) -> DataFrame:
     """Assign each drug-exposed person to exactly one foreground group.
 
     Inputs are per-class first-era dates ``(person_id, index_date)`` for
     glp1_ra (``g``), sglt2i (``s``), tirzepatide (``t``). Precedence, and the
-    three-regime handling of both-GLP1+SGLT2i users by their gap ``|g - s|``:
+    handling of both-GLP1+SGLT2i users by their gap ``|g - s|``:
 
     - has tirzepatide                    -> ``tirzepatide``  (index = first tirzepatide)
     - has glp1_ra AND sglt2i, no tirzepatide:
-        - ``|g - s| <= combo_max_gap_days`` -> ``glp1_sglt2_combo`` (co-initiation;
-          index = earlier of g, s)
-        - ``combo_max_gap_days < |g - s| <= window_days`` -> EXCLUDED (row dropped:
-          the second drug starts INSIDE the index year, so it is neither a clean
-          combo nor a clean single-drug year)
         - ``|g - s| > window_days`` -> the EARLIER drug's single arm (the second
           drug starts OUTSIDE the index year, so that year is genuine
           monotherapy; index = earlier of g, s)
+        - ``|g - s| <= window_days`` -> EXCLUDED (row dropped: the second drug
+          starts INSIDE the index year, contaminating it). There is no separate
+          combination-therapy group — co-initiators are too few and too noisy to
+          justify one, so they are excluded like any other in-window both-user.
     - has glp1_ra only                   -> ``glp1_ra``      (index = g)
     - has sglt2i only                    -> ``sglt2i``       (index = s)
 
-    Only the contaminated middle-gap both-users are dropped; long-gap both-users
-    are recovered into whichever single arm they initiated first. Returns
+    Long-gap both-users are recovered into whichever single arm they initiated
+    first; all in-window both-users are dropped. Returns
     ``(person_id, source_cohort, index_date)``.
     """
     g2 = g.select("person_id", F.col("index_date").alias("g_date"))
@@ -1197,16 +1189,14 @@ def _assign_drug_groups(
 
     source = (
         F.when(has_t, F.lit("tirzepatide"))
-        .when(has_g & has_s & (gap <= combo_max_gap_days), F.lit("glp1_sglt2_combo"))
         .when(has_g & has_s & (gap > window_days), earlier_arm)  # clean monotherapy year
-        .when(has_g & has_s, F.lit(None))          # contaminated middle gap -> excluded
+        .when(has_g & has_s, F.lit(None))          # in-window both-user -> excluded
         .when(has_g, F.lit("glp1_ra"))
         .when(has_s, F.lit("sglt2i"))
         .otherwise(F.lit(None))
     )
     index_date = (
         F.when(has_t, F.col("t_date"))
-        .when(has_g & has_s & (gap <= combo_max_gap_days), earlier_index)
         .when(has_g & has_s & (gap > window_days), earlier_index)
         .when(has_g & has_s, F.lit(None))
         .when(has_g, F.col("g_date"))
@@ -1223,8 +1213,9 @@ def _assign_drug_groups(
 
 def _coinitiation_gap_histogram(g: DataFrame, s: DataFrame) -> DataFrame:
     """Bucketed |g - s| gap counts for persons who are new-users of BOTH
-    glp1_ra and sglt2i. A no-fit diagnostic: eyeball where the co-initiation
-    cluster ends to set ``_COMBO_MAX_GAP_DAYS``. Returns ``(bucket, n)``.
+    glp1_ra and sglt2i. A no-fit diagnostic on the both-user population: how many
+    fall > 1 year apart (recovered to a single arm) vs in-window (excluded).
+    Returns ``(bucket, n)``.
     """
     both = (
         g.select("person_id", F.col("index_date").alias("g_date"))
@@ -1252,22 +1243,21 @@ def apply_population_drug_cohort(
     *,
     window_days: int = _WINDOW_DAYS,
     prior_obs_days: int = _WINDOW_DAYS,
-    combo_max_gap_days: int = _COMBO_MAX_GAP_DAYS,
     spark: SparkSession,
     cdr_dataset: str,
     billing_project: str,
     date_col: str,
 ) -> DataFrame:
-    """Whole-population background + four drug foreground arms, disjoint.
+    """Whole-population background + three drug foreground arms, disjoint.
 
     Anchors on ``drug_era``: each per-class set is the descendants
     (:func:`_expand_descendants`) of its seed ingredients (resolved by name +
     optional pinned ids via :func:`_ingredient_concept_ids`), and the first
     matching era per person gives that class's index date. These are partitioned
-    by :func:`_assign_drug_groups` (tirzepatide → glp1_sglt2_combo →
-    single-class; a both-GLP1+SGLT2i user is combo when co-initiated within
-    ``combo_max_gap_days``, the earlier drug's single arm when the two starts are
-    > ``window_days`` apart, and excluded only in the contaminated middle band).
+    by :func:`_assign_drug_groups` (tirzepatide → single-class; a
+    both-GLP1+SGLT2i user goes to the earlier drug's single arm only when the two
+    starts are > ``window_days`` apart, else is excluded — there is no
+    combination-therapy arm).
     Chosen index dates are new-user-bracketed
     (:func:`_window_observed_cohort`: ``prior_obs_days`` prior coverage + observed
     ``window_days`` follow-up). The ``general`` arm is every person with NO
@@ -1325,12 +1315,12 @@ def apply_population_drug_cohort(
     s = _first_dates("sglt2i")
     t = _first_dates("tirzepatide")
 
-    # Build-time diagnostic: co-initiation gap distribution sets combo_max_gap_days.
-    # Print buckets in ascending gap order (not lexicographic) so the
-    # co-initiation cluster is readable at a glance.
+    # Build-time diagnostic: both-user |g-s| gap distribution. Buckets past
+    # window_days (> 365d, the "366+" bucket) are recovered into a single arm;
+    # the rest are excluded. Ascending gap order (not lexicographic).
     _gap_bucket_order = ("0-7", "8-30", "31-90", "91-180", "181-365", "366+")
-    print("[cohort population_glp1] GLP-1/SGLT2i co-initiation |g-s| gap histogram "
-          f"(combo_max_gap_days={combo_max_gap_days}):", flush=True)
+    print("[cohort population_glp1] GLP-1/SGLT2i both-user |g-s| gap histogram "
+          f"(> {window_days}d -> single arm, else excluded):", flush=True)
     _gap_counts = {
         r["bucket"]: r["n"] for r in _coinitiation_gap_histogram(g, s).collect()
     }
@@ -1338,9 +1328,7 @@ def apply_population_drug_cohort(
         print(f"[cohort population_glp1]   {bucket}: {_gap_counts.get(bucket, 0)}",
               flush=True)
 
-    assigned = _assign_drug_groups(
-        g, s, t, combo_max_gap_days=combo_max_gap_days, window_days=window_days,
-    )
+    assigned = _assign_drug_groups(g, s, t, window_days=window_days)
 
     # New-user observation bracket on the chosen index; rejoin to recover the tag.
     bracketed = _window_observed_cohort(

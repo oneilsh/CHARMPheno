@@ -330,16 +330,15 @@ def test_first_drug_era_dates_picks_earliest_era_per_person(spark):
 
 
 def test_drug_registry_shape():
-    from charmpheno.omop.cohorts import _DRUG_REGISTRY, _COMBO_MAX_GAP_DAYS
-    assert _COMBO_MAX_GAP_DAYS == 90
+    from charmpheno.omop.cohorts import _DRUG_REGISTRY
     assert set(_DRUG_REGISTRY) == {"glp1_ra", "sglt2i", "tirzepatide"}
     assert "semaglutide" in _DRUG_REGISTRY["glp1_ra"]["ingredient_names"]
     assert _DRUG_REGISTRY["tirzepatide"]["ingredient_names"] == ("tirzepatide",)
 
 
-# --- five-way partition core (Task 3) ------------------------------------
+# --- partition core: precedence + in-window-both-user exclusion ----------
 
-def test_assign_drug_groups_precedence_combo_and_exclusion(spark):
+def test_assign_drug_groups_precedence_and_in_window_exclusion(spark):
     import datetime as dt
     from charmpheno.omop.cohorts import _assign_drug_groups
     d = dt.date
@@ -347,25 +346,27 @@ def test_assign_drug_groups_precedence_combo_and_exclusion(spark):
     def frame(rows):  # rows: list[(person_id, date)]
         return spark.createDataFrame(rows, ["person_id", "index_date"])
 
-    # g = GLP-1 first era, s = SGLT2i first era, t = tirzepatide first era
+    # g = GLP-1 first era, s = SGLT2i first era, t = tirzepatide first era.
+    # With no combo group, any both-user whose second drug is within window_days
+    # (365d) is excluded; only tirzepatide precedence and single arms remain.
     g = frame([(1, d(2021, 1, 1)),                     # glp1 only
-               (4, d(2021, 1, 1)), (5, d(2021, 1, 1)), # combo / excluded
+               (4, d(2021, 1, 1)), (5, d(2021, 1, 1)), # both, in-window -> excluded
                (6, d(2021, 1, 1)), (7, d(2021, 1, 1))])# tirzepatide-precedence cases
     s = frame([(2, d(2021, 1, 1)),                     # sglt2i only
-               (4, d(2021, 2, 1)),                     # +31d from g4 -> combo (<=90)
-               (5, d(2021, 9, 1)),                     # +243d from g5 -> excluded (>90)
+               (4, d(2021, 2, 1)),                     # +31d -> excluded (<=365)
+               (5, d(2021, 9, 1)),                     # +243d -> excluded (<=365)
                (6, d(2021, 3, 1))])                    # p6 also has t -> tirzepatide
     t = frame([(3, d(2021, 1, 1)),                     # tirzepatide only
                (6, d(2021, 5, 1)), (7, d(2021, 6, 1))])# precedence over g/s
 
     out = {r["person_id"]: (r["source_cohort"], r["index_date"])
-           for r in _assign_drug_groups(g, s, t, combo_max_gap_days=90).collect()}
+           for r in _assign_drug_groups(g, s, t).collect()}
 
     assert out[1] == ("glp1_ra", d(2021, 1, 1))
     assert out[2] == ("sglt2i", d(2021, 1, 1))
     assert out[3] == ("tirzepatide", d(2021, 1, 1))
-    assert out[4] == ("glp1_sglt2_combo", d(2021, 1, 1))   # index = earlier of g,s
-    assert 5 not in out                                    # both, gap>90 -> excluded
+    assert 4 not in out                                    # both, +31d -> excluded
+    assert 5 not in out                                    # both, +243d -> excluded
     assert out[6] == ("tirzepatide", d(2021, 5, 1))        # t wins over g+s
     assert out[7] == ("tirzepatide", d(2021, 6, 1))        # t wins over g
 
@@ -408,7 +409,7 @@ def test_apply_population_drug_cohort_importable_signature():
     import inspect
     from charmpheno.omop.cohorts import apply_population_drug_cohort
     p = inspect.signature(apply_population_drug_cohort).parameters
-    assert {"window_days", "prior_obs_days", "combo_max_gap_days", "date_col"} <= set(p)
+    assert {"window_days", "prior_obs_days", "date_col"} <= set(p)
 
 
 def test_window_observed_cohort_dedups_multiple_observation_periods(spark):
@@ -472,12 +473,11 @@ def test_assign_drug_groups_long_gap_goes_to_earlier_single_arm(spark):
     t = spark.createDataFrame([], "person_id bigint, index_date date")
 
     out = {r["person_id"]: (r["source_cohort"], r["index_date"])
-           for r in _assign_drug_groups(
-               g, s, t, combo_max_gap_days=90, window_days=365).collect()}
+           for r in _assign_drug_groups(g, s, t, window_days=365).collect()}
 
     assert out[10] == ("glp1_ra", d(2020, 1, 1))   # earlier drug = GLP-1
     assert out[11] == ("sglt2i", d(2020, 1, 1))    # earlier drug = SGLT2i
-    assert 12 not in out                            # gap 365 not > 365 -> middle excluded
+    assert 12 not in out                            # gap 365 not > 365 -> excluded
 
 
 def test_expand_descendants_includes_self_and_children(spark):

@@ -15,9 +15,9 @@ continuous_cols: [age]
 known_sex_only: true
 random_seed: 42
 cache_uri: hdfs:///user/dataproc/charm/covariates_cache
-K: 140
+K: 125
 background_k: 80
-foreground: "glp1_ra:15,sglt2i:15,tirzepatide:15,glp1_sglt2_combo:15"
+foreground: "glp1_ra:15,sglt2i:15,tirzepatide:15"
 group_var: source_cohort
 max_iter: 300
 subsampling_rate: 0.1
@@ -45,25 +45,22 @@ what separates the drug foreground blocks is closer to drug-specific structure.
 
 New drug-anchored `population_glp1` cohort (`apply_population_drug_cohort`),
 one document per person, `source_cohort ∈ {glp1_ra, sglt2i, tirzepatide,
-glp1_sglt2_combo, general}`:
+general}`:
 
 - **glp1_ra / sglt2i** — incident new-users whose index year is monotherapy for
   that class (never the other, or the other started > 365d away); 365d prior
   coverage, 365d observed follow-up.
 - **tirzepatide** — new-users of tirzepatide (dual GIP/GLP-1; precedence over
   the other arms).
-- **glp1_sglt2_combo** — new-users of both a GLP-1 RA and an SGLT2i **co-initiated
-  within `combo_max_gap_days`** (code default 90; set from the build-time gap
-  histogram).
 - **general** — no tracked drug exposure; random observed year with the SAME
   1yr-prior + 1yr-follow-up bracket.
 
-Both-drug users are handled by the gap `|g − s|` between their two first eras
-(three regimes): ≤ 90d → combo; **> 365d → the earlier drug's single arm** (the
-second drug starts outside the index year, so that year is genuine monotherapy);
-the contaminated middle band (90–365d) is **excluded** from the cohort entirely.
-The 2026-07-08 build histogram showed most both-users are long-gap (366+: 3849),
-so this regime recovers them into the single arms rather than dropping them.
+A both-GLP1+SGLT2i user goes to the **earlier drug's single arm when the two
+starts are > 365d apart** (the second drug is outside the index year, so that
+year is genuine monotherapy) and is **excluded** otherwise. There is **no
+combination-therapy arm**: the 2026-07-08 build showed the in-window co-initiators
+are too few (~575 docs) and too noisy to justify one, while most both-users are
+long-gap (366+: 3848) and recovered into the single arms.
 
 Drug classes are resolved as `concept_ancestor` **descendants** of their seed
 ingredients (RxNorm Ingredient names + any pinned ids; **tirzepatide pinned to
