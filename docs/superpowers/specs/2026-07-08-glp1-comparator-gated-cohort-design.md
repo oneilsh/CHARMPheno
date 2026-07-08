@@ -71,30 +71,64 @@ prior coverage so the index is a true new-user initiation, plus a fully-observed
 ### Five-way population partition
 
 ```
-apply_population_drug_cohort(cond_df, *, window_days=365, prior_obs_days=365, ...)
+apply_population_drug_cohort(
+    cond_df, *, window_days=365, prior_obs_days=365, combo_max_gap_days=90, ...
+)
 ```
 
-Assigns each person to exactly one group (one document), by which drug classes
-they are a **new-user** of during the study span, with a fixed precedence so
-overlaps resolve deterministically:
+Each person is assigned to exactly one group (one document) from their new-user
+first-era dates `g` (glp1_ra), `s` (sglt2i), `t` (tirzepatide) — each requiring
+`prior_obs_days` prior coverage with no earlier use of that class, and a
+fully-observed `window_days` forward window from the eventual index. Groups are
+mutually exclusive and one-document-per-person:
 
 | Group | Membership rule | Index (window start) |
 |---|---|---|
-| `tirzepatide` | initiated tirzepatide | first tirzepatide era |
-| `dual` | initiated **both** glp1_ra and sglt2i, no tirzepatide | earlier of the two first-eras |
-| `glp1_ra` | glp1_ra only (no sglt2i, no tirzepatide) | first glp1_ra era |
-| `sglt2i` | sglt2i only (no glp1_ra, no tirzepatide) | first sglt2i era |
-| `general` | none of the above | event-anchored random year (below) |
+| `tirzepatide` | `t` present | first tirzepatide era |
+| `glp1_sglt2_combo` | `g` and `s` present, no `t`, and **`|g − s| ≤ combo_max_gap_days`** | earlier of `g`, `s` |
+| `glp1_ra` | `g` present, **never** `s` or `t` | `g` |
+| `sglt2i` | `s` present, **never** `g` or `t` | `s` |
+| `general` | none of `g`, `s`, `t` | event-anchored random year (below) |
+| *(excluded)* | `g` and `s` present, no `t`, but **`|g − s| > combo_max_gap_days`** | — dropped from the cohort |
 
-Precedence order checked: tirzepatide → dual → glp1_ra → sglt2i → general. This
-makes the groups mutually exclusive and one-document-per-person. The four drug
-groups are foreground blocks; `general` is background-only. `source_cohort ∈
-{tirzepatide, dual, glp1_ra, sglt2i, general}`.
+Precedence checked tirzepatide → combo → single-class → general. The two design
+rules that keep the arms clean:
 
-Splitting tirzepatide and dual into their own arms (rather than folding into
+1. **Combo = co-initiation.** `glp1_sglt2_combo` requires the two initiations
+   within `combo_max_gap_days` (default 90) so both drugs genuinely start inside
+   the observed document year — a transition-to-dual-therapy year, not "took both
+   at some point years apart."
+2. **Non-combo both-users are excluded, not reclassified.** A person who
+   initiated both but outside the combo gap is dropped entirely — NOT placed in a
+   single-drug arm (their index year would be contaminated by the second drug)
+   and NOT placed in `general` (they are treated patients and would pollute the
+   background). This makes the single-drug arms **"only ever that class"**:
+   `glp1_ra` = GLP-1 new-user who never initiated SGLT2i or tirzepatide, and
+   likewise for `sglt2i`. The result is a maximally clean contrast — pure-GLP-1
+   vs pure-SGLT2i vs co-initiated-combo vs tirzepatide vs untreated background.
+
+`source_cohort ∈ {tirzepatide, glp1_sglt2_combo, glp1_ra, sglt2i, general}`; the
+four drug groups are foreground blocks, `general` is background-only.
+
+**`combo_max_gap_days` is data-set from a diagnostic, not guessed.** GLP-1 +
+SGLT2i combination is usually reached by *sequential* intensification (start one,
+add the other weeks-to-months later), not same-day dual starts, so the `|g − s|`
+gap distribution is expected to show a co-initiation spike near 0 plus a
+sequential tail. The corpus build emits a **`|g − s|` histogram for all
+both-class users** (a no-fit diagnostic, like the sparse cohort's coding-density
+histogram) so the threshold is set from where the co-initiation cluster actually
+ends in this CDR; 90 is the starting default. `combo_max_gap_days` is a
+frontmatter knob — re-cutting it re-runs only cohort assignment, not the fit.
+
+Splitting tirzepatide and combo into their own arms (rather than folding into
 glp1_ra) is deliberate: merging arms post-hoc is trivial, un-merging is not, so
 we keep the information now and collapse thin/uninteresting arms after seeing the
 counts.
+
+*Open item:* the `tirzepatide` arm is "any tirzepatide new-user" and is NOT
+further purity-filtered for concurrent SGLT2i (tirzepatide precedence wins) —
+kept simple because it is the thinnest arm; revisit if it turns out large enough
+to split a tirzepatide-only vs tirzepatide+SGLT2i sub-contrast.
 
 ### Symmetric observability for the general arm
 
@@ -119,9 +153,12 @@ then share the 1yr-prior + 1yr-follow-up observed window.
   disease+drug into one "population + N foreground arms by anchor spec" core is
   possible but deferred (YAGNI) — build the drug track cleanly now.
 - New cohort `population_glp1` registered in `SUPPORTED_COHORTS`,
-  `COHORT_METADATA`, `apply_cohort`; `experiments/defaults/population_glp1.yaml`;
-  cohort tests (registry, precedence partition on synthetic data, prior-coverage
-  predicate).
+  `COHORT_METADATA`, `apply_cohort`; `experiments/defaults/population_glp1.yaml`.
+- Cohort tests on synthetic data: the five-way partition incl. the
+  `combo_max_gap_days` boundary (co-init → combo; over-gap both-user → excluded,
+  landing in neither a single arm nor `general`), tirzepatide precedence,
+  single-arm "only ever that class" purity, and the general-arm prior-coverage
+  predicate. Plus a test that the `|g − s|` gap-histogram diagnostic emits.
 
 ## Experiment / fit parameters
 
@@ -132,13 +169,14 @@ stack:
 |---|---|---|
 | cohort / cohort_def | `population_glp1` | new |
 | model_class | stm | |
-| K | 140 | 80 background + glp1_ra:15 + sglt2i:15 + tirzepatide:15 + dual:15 |
+| K | 140 | 80 background + glp1_ra:15 + sglt2i:15 + tirzepatide:15 + glp1_sglt2_combo:15 |
 | background_k | 80 | |
-| foreground | `glp1_ra:15,sglt2i:15,tirzepatide:15,dual:15` | |
+| foreground | `glp1_ra:15,sglt2i:15,tirzepatide:15,glp1_sglt2_combo:15` | |
 | group_var | source_cohort | |
-| person_mod | 1 | full population — thin tirzepatide/dual arms need it |
-| prior_obs_days | 365 | incident new-user (both arms + general) |
+| person_mod | 1 | full population — thin tirzepatide/combo arms need it |
+| prior_obs_days | 365 | incident new-user (drug arms + general) |
 | window_days | 365 | 1-year documents |
+| combo_max_gap_days | 90 | co-initiation gap for the combo arm; re-cut from the diagnostic histogram |
 | doc_min_length | 10 | |
 | covariate_formula | `~ C(sex) + age` | known_sex_only |
 | schedule / hardening | subsample 0.1, tau0 256, kappa 0.7, max_iter 300, sigma_init 1, reference + dense spectral, min_pair_support 10, block-wise unit-diagonal Σ (ADR 0034) | |
@@ -146,14 +184,14 @@ stack:
 ## Downstream
 
 Fit on the Dataproc master (`make build-covariates` → `make exp`), verify the
-per-arm document counts in corpus diagnostics (especially tirzepatide + dual),
+per-arm document counts in corpus diagnostics (especially tirzepatide + combo),
 then export (`make build-dashboard-exp`), annotate via `scripts/label_phenotypes.py`,
 and add `population_glp1` to `dashboard/public/data/manifest.json` as an
 additional cohort (population_cancer stays default).
 
 ## Risks / open items
 
-- **Tirzepatide (and possibly dual) thinness.** FDA-2022 drug + new-user +
+- **Tirzepatide (and possibly combo) thinness.** FDA-2022 drug + new-user +
   fully-observed follow-up year may leave a small arm. Mitigated by person_mod 1;
   if still too thin, merge tirzepatide into glp1_ra (or drop) — the split-now
   design anticipates this. Log the per-arm counts.
