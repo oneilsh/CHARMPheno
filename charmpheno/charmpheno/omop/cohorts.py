@@ -1046,3 +1046,60 @@ def _first_drug_era_dates(
         .groupBy("person_id")
         .agg(F.min("drug_era_start_date").alias("index_date"))
     )
+
+
+def _assign_drug_groups(
+    g: DataFrame, s: DataFrame, t: DataFrame,
+    *, combo_max_gap_days: int = _COMBO_MAX_GAP_DAYS,
+) -> DataFrame:
+    """Assign each drug-exposed person to exactly one foreground group.
+
+    Inputs are per-class first-era dates ``(person_id, index_date)`` for
+    glp1_ra (``g``), sglt2i (``s``), tirzepatide (``t``). Precedence:
+
+    - has tirzepatide            -> ``tirzepatide``       (index = first tirzepatide)
+    - has glp1_ra AND sglt2i, no tirzepatide:
+        - ``|g - s| <= combo_max_gap_days`` -> ``glp1_sglt2_combo`` (index = earlier)
+        - otherwise                          -> EXCLUDED (row dropped)
+    - has glp1_ra only           -> ``glp1_ra``           (index = g)
+    - has sglt2i only            -> ``sglt2i``            (index = s)
+
+    Non-combo both-users are dropped entirely (returned in neither a single arm
+    nor the caller's ``general`` arm), so the single-drug arms are "only ever
+    that class". Returns ``(person_id, source_cohort, index_date)``.
+    """
+    g2 = g.select("person_id", F.col("index_date").alias("g_date"))
+    s2 = s.select("person_id", F.col("index_date").alias("s_date"))
+    t2 = t.select("person_id", F.col("index_date").alias("t_date"))
+    joined = (
+        g2.join(s2, on="person_id", how="full_outer")
+          .join(t2, on="person_id", how="full_outer")
+    )
+    has_g = F.col("g_date").isNotNull()
+    has_s = F.col("s_date").isNotNull()
+    has_t = F.col("t_date").isNotNull()
+    gap = F.abs(F.datediff(F.col("g_date"), F.col("s_date")))
+    combo_index = F.least(F.col("g_date"), F.col("s_date"))
+
+    source = (
+        F.when(has_t, F.lit("tirzepatide"))
+        .when(has_g & has_s & (gap <= combo_max_gap_days), F.lit("glp1_sglt2_combo"))
+        .when(has_g & has_s, F.lit(None))          # excluded
+        .when(has_g, F.lit("glp1_ra"))
+        .when(has_s, F.lit("sglt2i"))
+        .otherwise(F.lit(None))
+    )
+    index_date = (
+        F.when(has_t, F.col("t_date"))
+        .when(has_g & has_s & (gap <= combo_max_gap_days), combo_index)
+        .when(has_g & has_s, F.lit(None))
+        .when(has_g, F.col("g_date"))
+        .when(has_s, F.col("s_date"))
+        .otherwise(F.lit(None))
+    )
+    return (
+        joined.withColumn("source_cohort", source)
+        .withColumn("index_date", index_date)
+        .where(F.col("source_cohort").isNotNull())
+        .select("person_id", "source_cohort", "index_date")
+    )

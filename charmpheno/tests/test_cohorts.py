@@ -335,3 +335,36 @@ def test_drug_registry_shape():
     assert set(_DRUG_REGISTRY) == {"glp1_ra", "sglt2i", "tirzepatide"}
     assert "semaglutide" in _DRUG_REGISTRY["glp1_ra"]["ingredient_names"]
     assert _DRUG_REGISTRY["tirzepatide"]["ingredient_names"] == ("tirzepatide",)
+
+
+# --- five-way partition core (Task 3) ------------------------------------
+
+def test_assign_drug_groups_precedence_combo_and_exclusion(spark):
+    import datetime as dt
+    from charmpheno.omop.cohorts import _assign_drug_groups
+    d = dt.date
+
+    def frame(rows):  # rows: list[(person_id, date)]
+        return spark.createDataFrame(rows, ["person_id", "index_date"])
+
+    # g = GLP-1 first era, s = SGLT2i first era, t = tirzepatide first era
+    g = frame([(1, d(2021, 1, 1)),                     # glp1 only
+               (4, d(2021, 1, 1)), (5, d(2021, 1, 1)), # combo / excluded
+               (6, d(2021, 1, 1)), (7, d(2021, 1, 1))])# tirzepatide-precedence cases
+    s = frame([(2, d(2021, 1, 1)),                     # sglt2i only
+               (4, d(2021, 2, 1)),                     # +31d from g4 -> combo (<=90)
+               (5, d(2021, 9, 1)),                     # +243d from g5 -> excluded (>90)
+               (6, d(2021, 3, 1))])                    # p6 also has t -> tirzepatide
+    t = frame([(3, d(2021, 1, 1)),                     # tirzepatide only
+               (6, d(2021, 5, 1)), (7, d(2021, 6, 1))])# precedence over g/s
+
+    out = {r["person_id"]: (r["source_cohort"], r["index_date"])
+           for r in _assign_drug_groups(g, s, t, combo_max_gap_days=90).collect()}
+
+    assert out[1] == ("glp1_ra", d(2021, 1, 1))
+    assert out[2] == ("sglt2i", d(2021, 1, 1))
+    assert out[3] == ("tirzepatide", d(2021, 1, 1))
+    assert out[4] == ("glp1_sglt2_combo", d(2021, 1, 1))   # index = earlier of g,s
+    assert 5 not in out                                    # both, gap>90 -> excluded
+    assert out[6] == ("tirzepatide", d(2021, 5, 1))        # t wins over g+s
+    assert out[7] == ("tirzepatide", d(2021, 6, 1))        # t wins over g
