@@ -1213,10 +1213,17 @@ def apply_population_drug_cohort(
     t = _first_dates("tirzepatide")
 
     # Build-time diagnostic: co-initiation gap distribution sets combo_max_gap_days.
+    # Print buckets in ascending gap order (not lexicographic) so the
+    # co-initiation cluster is readable at a glance.
+    _gap_bucket_order = ("0-7", "8-30", "31-90", "91-180", "181-365", "366+")
     print("[cohort population_glp1] GLP-1/SGLT2i co-initiation |g-s| gap histogram "
           f"(combo_max_gap_days={combo_max_gap_days}):", flush=True)
-    for row in _coinitiation_gap_histogram(g, s).orderBy("bucket").collect():
-        print(f"[cohort population_glp1]   {row['bucket']}: {row['n']}", flush=True)
+    _gap_counts = {
+        r["bucket"]: r["n"] for r in _coinitiation_gap_histogram(g, s).collect()
+    }
+    for bucket in _gap_bucket_order:
+        print(f"[cohort population_glp1]   {bucket}: {_gap_counts.get(bucket, 0)}",
+              flush=True)
 
     assigned = _assign_drug_groups(g, s, t, combo_max_gap_days=combo_max_gap_days)
 
