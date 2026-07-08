@@ -1227,11 +1227,15 @@ def apply_population_drug_cohort(
 ) -> DataFrame:
     """Whole-population background + four drug foreground arms, disjoint.
 
-    Anchors on ``drug_era``: each person's first new-user era of glp1_ra /
-    sglt2i / tirzepatide (ingredients resolved by name via
-    :func:`_ingredient_concept_ids`) gives per-class index dates, partitioned by
-    :func:`_assign_drug_groups` (tirzepatide → glp1_sglt2_combo → single-class,
-    non-combo both-users excluded). Chosen index dates are new-user-bracketed
+    Anchors on ``drug_era``: each per-class set is the descendants
+    (:func:`_expand_descendants`) of its seed ingredients (resolved by name +
+    optional pinned ids via :func:`_ingredient_concept_ids`), and the first
+    matching era per person gives that class's index date. These are partitioned
+    by :func:`_assign_drug_groups` (tirzepatide → glp1_sglt2_combo →
+    single-class; a both-GLP1+SGLT2i user is combo when co-initiated within
+    ``combo_max_gap_days``, the earlier drug's single arm when the two starts are
+    > ``window_days`` apart, and excluded only in the contaminated middle band).
+    Chosen index dates are new-user-bracketed
     (:func:`_window_observed_cohort`: ``prior_obs_days`` prior coverage + observed
     ``window_days`` follow-up). The ``general`` arm is every person with NO
     tracked drug exposure, windowed to a random observed year with the SAME
@@ -1268,12 +1272,21 @@ def apply_population_drug_cohort(
             concept, spec["ingredient_names"],
             extra_concept_ids=spec.get("seed_concept_ids", ()),
         )
-        concept_set = _expand_descendants(ca, seeds)
-        # Loud resolution: a thin/empty concept set is a mis-spec (wrong or
-        # non-standard seed id, or a name that didn't resolve), not a rare drug.
+        # cache: concept_set is scanned twice (count + the era join), dates is
+        # reused downstream (partition + gap histogram + general left_anti) —
+        # avoids re-scanning concept_ancestor / drug_era each time.
+        concept_set = _expand_descendants(ca, seeds).cache()
+        dates = _first_drug_era_dates(drug_era, concept_set).cache()
+        # Loud resolution: log BOTH the concept-set size AND the resulting person
+        # count. A thin/empty concept set is a mis-spec (wrong or non-standard
+        # seed id — a non-standard pin has no concept_ancestor hierarchy, so the
+        # set collapses to just itself); zero persons despite a plausible set
+        # means the seed doesn't match how drug_era tags the drug. Either is a
+        # definition bug, not a rare drug.
         print(f"[cohort population_glp1] {class_key}: resolved "
-              f"{concept_set.count()} drug concept(s)", flush=True)
-        return _first_drug_era_dates(drug_era, concept_set)
+              f"{concept_set.count()} drug concept(s), "
+              f"{dates.count()} persons with a first era", flush=True)
+        return dates
 
     g = _first_dates("glp1_ra")
     s = _first_dates("sglt2i")
