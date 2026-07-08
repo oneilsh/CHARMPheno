@@ -1103,3 +1103,29 @@ def _assign_drug_groups(
         .where(F.col("source_cohort").isNotNull())
         .select("person_id", "source_cohort", "index_date")
     )
+
+
+def _coinitiation_gap_histogram(g: DataFrame, s: DataFrame) -> DataFrame:
+    """Bucketed |g - s| gap counts for persons who are new-users of BOTH
+    glp1_ra and sglt2i. A no-fit diagnostic: eyeball where the co-initiation
+    cluster ends to set ``_COMBO_MAX_GAP_DAYS``. Returns ``(bucket, n)``.
+    """
+    both = (
+        g.select("person_id", F.col("index_date").alias("g_date"))
+        .join(s.select("person_id", F.col("index_date").alias("s_date")),
+              on="person_id", how="inner")
+    )
+    gap = F.abs(F.datediff(F.col("g_date"), F.col("s_date")))
+    bucket = (
+        F.when(gap <= 7, "0-7")
+        .when(gap <= 30, "8-30")
+        .when(gap <= 90, "31-90")
+        .when(gap <= 180, "91-180")
+        .when(gap <= 365, "181-365")
+        .otherwise("366+")
+    )
+    return (
+        both.withColumn("bucket", bucket)
+        .groupBy("bucket")
+        .agg(F.count(F.lit(1)).alias("n"))
+    )

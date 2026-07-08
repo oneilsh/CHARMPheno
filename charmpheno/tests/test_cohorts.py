@@ -368,3 +368,23 @@ def test_assign_drug_groups_precedence_combo_and_exclusion(spark):
     assert 5 not in out                                    # both, gap>90 -> excluded
     assert out[6] == ("tirzepatide", d(2021, 5, 1))        # t wins over g+s
     assert out[7] == ("tirzepatide", d(2021, 6, 1))        # t wins over g
+
+
+# --- co-initiation gap histogram (Task 4) --------------------------------
+
+def test_coinitiation_gap_histogram_buckets(spark):
+    import datetime as dt
+    from charmpheno.omop.cohorts import _coinitiation_gap_histogram
+    d = dt.date
+    g = spark.createDataFrame(
+        [(1, d(2021, 1, 1)), (2, d(2021, 1, 1)), (3, d(2021, 1, 1)),
+         (4, d(2021, 1, 1)), (9, d(2021, 1, 1))],   # p9 has no s -> excluded from hist
+        ["person_id", "index_date"])
+    s = spark.createDataFrame(
+        [(1, d(2021, 1, 4)),    # gap 3   -> 0-7
+         (2, d(2021, 1, 21)),   # gap 20  -> 8-30
+         (3, d(2021, 7, 20)),   # gap 200 -> 181-365
+         (4, d(2022, 6, 1))],   # gap 516 -> 366+
+        ["person_id", "index_date"])
+    hist = {r["bucket"]: r["n"] for r in _coinitiation_gap_histogram(g, s).collect()}
+    assert hist == {"0-7": 1, "8-30": 1, "181-365": 1, "366+": 1}
