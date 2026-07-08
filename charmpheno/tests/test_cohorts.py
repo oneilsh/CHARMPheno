@@ -347,28 +347,30 @@ def test_assign_drug_groups_precedence_and_in_window_exclusion(spark):
         return spark.createDataFrame(rows, ["person_id", "index_date"])
 
     # g = GLP-1 first era, s = SGLT2i first era, t = tirzepatide first era.
-    # With no combo group, any both-user whose second drug is within window_days
-    # (365d) is excluded; only tirzepatide precedence and single arms remain.
+    # Two arms only (glp1_ra/sglt2i); tirzepatide users are EXCLUDED (dropped),
+    # and any both-user whose second drug is within window_days (365d) is excluded.
     g = frame([(1, d(2021, 1, 1)),                     # glp1 only
                (4, d(2021, 1, 1)), (5, d(2021, 1, 1)), # both, in-window -> excluded
-               (6, d(2021, 1, 1)), (7, d(2021, 1, 1))])# tirzepatide-precedence cases
+               (6, d(2021, 1, 1)), (7, d(2021, 1, 1))])# have tirzepatide -> excluded
     s = frame([(2, d(2021, 1, 1)),                     # sglt2i only
                (4, d(2021, 2, 1)),                     # +31d -> excluded (<=365)
                (5, d(2021, 9, 1)),                     # +243d -> excluded (<=365)
-               (6, d(2021, 3, 1))])                    # p6 also has t -> tirzepatide
-    t = frame([(3, d(2021, 1, 1)),                     # tirzepatide only
-               (6, d(2021, 5, 1)), (7, d(2021, 6, 1))])# precedence over g/s
+               (6, d(2021, 3, 1))])                    # p6 also has t -> excluded
+    t = frame([(3, d(2021, 1, 1)),                     # tirzepatide only -> excluded
+               (6, d(2021, 5, 1)), (7, d(2021, 6, 1))])# t forces exclusion
 
     out = {r["person_id"]: (r["source_cohort"], r["index_date"])
            for r in _assign_drug_groups(g, s, t).collect()}
 
     assert out[1] == ("glp1_ra", d(2021, 1, 1))
     assert out[2] == ("sglt2i", d(2021, 1, 1))
-    assert out[3] == ("tirzepatide", d(2021, 1, 1))
+    assert 3 not in out                                    # tirzepatide-only -> excluded
     assert 4 not in out                                    # both, +31d -> excluded
     assert 5 not in out                                    # both, +243d -> excluded
-    assert out[6] == ("tirzepatide", d(2021, 5, 1))        # t wins over g+s
-    assert out[7] == ("tirzepatide", d(2021, 6, 1))        # t wins over g
+    assert 6 not in out                                    # has tirzepatide -> excluded
+    assert 7 not in out                                    # has tirzepatide -> excluded
+    # only the two clean single arms survive
+    assert set(out) == {1, 2}
 
 
 # --- co-initiation gap histogram (Task 4) --------------------------------

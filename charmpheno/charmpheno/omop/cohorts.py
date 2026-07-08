@@ -302,17 +302,18 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
     },
     "population_glp1": {
         "id": "population_glp1",
-        "label": "Population + GLP-1 & comparators (gated)",
+        "label": "Population + GLP-1 vs SGLT2i (gated)",
         "description": (
-            "The whole population as a shared background, with three drug "
+            "The whole population as a shared background, with two drug "
             "foreground arms anchored on the first year after starting a "
             "medication (incident new-user: a year of prior coverage, a "
-            "fully-observed follow-up year). Arms: glp1_ra (GLP-1 receptor "
-            "agonists), sglt2i (SGLT2 inhibitors, the active comparator), and "
-            "tirzepatide (dual GIP/GLP-1 agonist). Users of both a GLP-1 RA and "
-            "an SGLT2i are assigned to the earlier drug's arm only when that "
-            "index year is monotherapy (the other drug started > 1 year away); "
-            "in-window both-users are excluded. Documents are the conditions in that year; "
+            "fully-observed follow-up year): glp1_ra (GLP-1 receptor agonists) "
+            "and sglt2i (SGLT2 inhibitors, the active comparator). Users of both "
+            "are assigned to the earlier drug's arm only when that index year is "
+            "monotherapy (the other drug started > 1 year away); in-window "
+            "both-users are excluded. Tirzepatide (dual GIP/GLP-1) users are "
+            "excluded entirely (kept out of the GLP-1 arm and the background). "
+            "Documents are the conditions in that year; "
             "drugs are the anchor only. The general background carries the same "
             "1-year-prior + 1-year-follow-up observability bracket. A gated "
             "block-wise correlated STM then shows what is distinctive to each "
@@ -1152,24 +1153,23 @@ def _assign_drug_groups(
     """Assign each drug-exposed person to exactly one foreground group.
 
     Inputs are per-class first-era dates ``(person_id, index_date)`` for
-    glp1_ra (``g``), sglt2i (``s``), tirzepatide (``t``). Precedence, and the
-    handling of both-GLP1+SGLT2i users by their gap ``|g - s|``:
+    glp1_ra (``g``), sglt2i (``s``), tirzepatide (``t``). Two drug arms
+    (glp1_ra, sglt2i); tirzepatide is resolved only to EXCLUDE its users:
 
-    - has tirzepatide                    -> ``tirzepatide``  (index = first tirzepatide)
+    - has tirzepatide                    -> EXCLUDED (dropped; kept out of the
+      single arms AND, via the caller's left_anti on all tracked drug persons,
+      out of the general background: a dual GIP/GLP-1 patient is neither a pure
+      GLP-1-RA new-user nor an untreated background person)
     - has glp1_ra AND sglt2i, no tirzepatide:
         - ``|g - s| > window_days`` -> the EARLIER drug's single arm (the second
           drug starts OUTSIDE the index year, so that year is genuine
           monotherapy; index = earlier of g, s)
-        - ``|g - s| <= window_days`` -> EXCLUDED (row dropped: the second drug
-          starts INSIDE the index year, contaminating it). There is no separate
-          combination-therapy group — co-initiators are too few and too noisy to
-          justify one, so they are excluded like any other in-window both-user.
+        - ``|g - s| <= window_days`` -> EXCLUDED (the second drug starts INSIDE
+          the index year, contaminating it; no combination-therapy arm)
     - has glp1_ra only                   -> ``glp1_ra``      (index = g)
     - has sglt2i only                    -> ``sglt2i``       (index = s)
 
-    Long-gap both-users are recovered into whichever single arm they initiated
-    first; all in-window both-users are dropped. Returns
-    ``(person_id, source_cohort, index_date)``.
+    Returns ``(person_id, source_cohort, index_date)`` for the two arms only.
     """
     g2 = g.select("person_id", F.col("index_date").alias("g_date"))
     s2 = s.select("person_id", F.col("index_date").alias("s_date"))
@@ -1188,7 +1188,7 @@ def _assign_drug_groups(
                    .otherwise(F.lit("sglt2i"))
 
     source = (
-        F.when(has_t, F.lit("tirzepatide"))
+        F.when(has_t, F.lit(None))                 # tirzepatide user -> excluded
         .when(has_g & has_s & (gap > window_days), earlier_arm)  # clean monotherapy year
         .when(has_g & has_s, F.lit(None))          # in-window both-user -> excluded
         .when(has_g, F.lit("glp1_ra"))
@@ -1196,7 +1196,7 @@ def _assign_drug_groups(
         .otherwise(F.lit(None))
     )
     index_date = (
-        F.when(has_t, F.col("t_date"))
+        F.when(has_t, F.lit(None))
         .when(has_g & has_s & (gap > window_days), earlier_index)
         .when(has_g & has_s, F.lit(None))
         .when(has_g, F.col("g_date"))
@@ -1248,16 +1248,17 @@ def apply_population_drug_cohort(
     billing_project: str,
     date_col: str,
 ) -> DataFrame:
-    """Whole-population background + three drug foreground arms, disjoint.
+    """Whole-population background + two drug foreground arms, disjoint.
 
     Anchors on ``drug_era``: each per-class set is the descendants
     (:func:`_expand_descendants`) of its seed ingredients (resolved by name +
     optional pinned ids via :func:`_ingredient_concept_ids`), and the first
     matching era per person gives that class's index date. These are partitioned
-    by :func:`_assign_drug_groups` (tirzepatide → single-class; a
-    both-GLP1+SGLT2i user goes to the earlier drug's single arm only when the two
-    starts are > ``window_days`` apart, else is excluded — there is no
-    combination-therapy arm).
+    by :func:`_assign_drug_groups` into glp1_ra and sglt2i (a both-GLP1+SGLT2i
+    user goes to the earlier drug's arm only when the two starts are >
+    ``window_days`` apart, else is excluded). Tirzepatide is resolved only to
+    exclude its users (from the arms and, via the general left_anti, the
+    background); there is no tirzepatide or combination arm.
     Chosen index dates are new-user-bracketed
     (:func:`_window_observed_cohort`: ``prior_obs_days`` prior coverage + observed
     ``window_days`` follow-up). The ``general`` arm is every person with NO
