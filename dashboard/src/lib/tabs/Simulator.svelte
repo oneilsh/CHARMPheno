@@ -1,13 +1,8 @@
 <script lang="ts">
   import {
-    bundle, cohort, simulatorPrefix, advancedView, simulatorConditioning,
+    bundle, cohort, simulatorPrefix, simulatorResult, advancedView, simulatorConditioning,
   } from '../store'
-  import { runSimulator } from '../simulator/runSamples'
-  import { buildDesignVector } from '../covariate'
-  import { resolveGroup } from '../conditioning/marginalSampler'
-  import { prepareRecordPosterior, drawRecordPosterior } from '../conditioning/recordPosterior'
-  import type { RecordPosteriorPrep } from '../conditioning/recordPosterior'
-  import { createRng } from '../sampling'
+  import { computePosteriorPredictive, DEFAULT_SIM_SAMPLES } from '../simulator/computePP'
   import { generateCohort } from '../cohort'
   import { dominantVote } from '../dominant'
   import { ensurePatientProjection } from '../patient/projection'
@@ -17,12 +12,6 @@
   import ConditioningBar from '../conditioning/ConditioningBar.svelte'
   import { phenotypeHue } from '../palette'
   import { copy } from '../copy'
-
-  // Default N: enough samples for stable occurrence-rate estimates in the
-  // posterior-predictive panel and a smooth per-sample strip. The fast
-  // (non-autoregressive) path is ~2 E-steps per sample, so 500 stays snappy;
-  // autoregressive mode (re-fits theta per token) is the slow opt-in.
-  const DEFAULT_N = 500
 
   // Explore-Cohort ("$cohort") sizing for the cohort this Simulate click
   // generates - matches App.svelte's initial-load defaults (same N/
@@ -36,9 +25,8 @@
   // reproducible across reloads, which keeps walkthrough demos stable.
   let seedCounter = 42
 
-  let nSamples = DEFAULT_N
+  let nSamples = DEFAULT_SIM_SAMPLES
   let autoregressive = false
-  let result: ReturnType<typeof runSimulator> | null = null
   let running = false
 
   let whatIsEl: HTMLDetailsElement
@@ -53,61 +41,20 @@
     await new Promise((r) => setTimeout(r, 0))
     try {
       const b = $bundle
-      // STM bundles carry per-topic covariate effects and a topic-correlation
-      // block; when both are present, condition the generative theta on the
-      // panel's covariate values/group AND the starting-condition prefix via
-      // the logistic-normal posterior sampler (see conditioning/
-      // recordPosterior.ts) instead of drawing from the Dirichlet prior. With
-      // an empty prefix this reduces to the covariate/group prior draw.
-      // Non-STM bundles take the unchanged Dirichlet path.
-      const isStm = !!b.covariateEffects && !!b.correlation
+      // The posterior-predictive draw (sample-mix + predicted-record panels)
+      // is shared with the app's load-time default seeding; see computePP.ts.
+      simulatorResult.set(computePosteriorPredictive(
+        b, $simulatorPrefix, $simulatorConditioning,
+        { nSamples, seed, autoregressive },
+      ))
+
+      // Simulate also (re)generates the shared cohort that Explore Cohort
+      // displays: a 'set'-mode cohort at the same covariate values/group,
+      // conditioned on the same starting-condition prefix (empty prefix ->
+      // ordinary prior draw). Reusing this one trigger for both panels keeps
+      // "what you configured" and "what you see in Explore Cohort" in sync.
       const prefixCounts = new Map<number, number>()
       for (const w of $simulatorPrefix) prefixCounts.set(w, (prefixCounts.get(w) ?? 0) + 1)
-      let conditionedTheta: (() => number[]) | undefined
-      if (isStm) {
-        const cond = $simulatorConditioning
-        const schema = b.covariateSchema!
-        const x = buildDesignVector(schema.design_columns, cond.values)
-        const tRng = createRng(seed ^ 0x9e3779b9)
-        // Resolve the group per draw so an "all subcohorts" selection spreads
-        // each sampled record across the population mix (concrete group / null
-        // pass through unchanged); see resolveGroup. The record-posterior prep
-        // (mode + Laplace factor) is RNG-free and identical for every draw in a
-        // group, so cache it per group and only draw() per sample — recomputing
-        // the O(free³) prep per draw froze the tab at large K (e.g. K=100 EDS).
-        const topicBlocks = b.gating?.topic_blocks ?? null
-        const prepCache = new Map<string | null, RecordPosteriorPrep>()
-        conditionedTheta = () => {
-          const g = resolveGroup(cond.group, b.gating, tRng)
-          let prep = prepCache.get(g)
-          if (!prep) {
-            prep = prepareRecordPosterior({
-              effects: b.covariateEffects!, x, correlation: b.correlation!,
-              topicBlocks, group: g, prefixCounts, beta: b.model.beta,
-            })
-            prepCache.set(g, prep)
-          }
-          return drawRecordPosterior(prep, tRng)
-        }
-      }
-      result = runSimulator({
-        alpha: b.model.alpha,
-        beta: b.model.beta,
-        meanCodesPerDoc: b.corpusStats.mean_codes_per_doc,
-        prefix: $simulatorPrefix,
-        nSamples,
-        seed,
-        autoregressive,
-        conditionedTheta,
-      })
-
-      // Simulate Cohort also (re)generates the shared cohort that Explore
-      // Cohort displays: a 'set'-mode cohort at the same covariate
-      // values/group, conditioned on the same starting-condition prefix
-      // (empty prefix -> sampleConditionedTheta's ordinary prior draw, via
-      // cohort.ts's delegation). Reusing this Simulate click as the single
-      // trigger for both panels keeps "what you configured" and "what you
-      // see in Explore Cohort" in sync without a second button.
       const newCohort = generateCohort({
         model: b.model,
         meanCodesPerDoc: b.corpusStats.mean_codes_per_doc,
@@ -131,20 +78,13 @@
     }
   }
 
-  // Clear the result whenever the prefix changes so the output never
-  // reflects a stale set of starting conditions. Using Svelte's reactive
-  // syntax (rather than a bare .subscribe()) so the dependency is auto-
-  // unsubscribed when this component unmounts - a raw .subscribe() leaks
-  // a handler every time the Simulator tab is left and re-entered.
-  $: $simulatorPrefix, (result = null)
-
   // Dominant-phenotype vote across the draws: the fraction of simulated patients
   // whose LEADING phenotype is each one. Used only for the one-line confidence
   // readout above the per-sample strip (the mean-θ profile bar was dropped — it
   // flattened toward an even mix regardless of the model; the per-sample strip is
   // the real overview). See dominantVote.
-  $: voteTheta = (result && result.thetaSamples.length > 0 && $bundle)
-    ? dominantVote(result.thetaSamples, $bundle.phenotypes.phenotypes, $advancedView)
+  $: voteTheta = ($simulatorResult && $simulatorResult.thetaSamples.length > 0 && $bundle)
+    ? dominantVote($simulatorResult.thetaSamples, $bundle.phenotypes.phenotypes, $advancedView)
     : null
 
   // One-line "how confident is the model" verdict from the vote: a clear leader
@@ -191,12 +131,9 @@
 
   <div class="grid">
     <div class="left-col" data-tour="simulator-input">
-      <ConditioningBar store={simulatorConditioning} layout="stacked" tourAnchor="sim-conditioning" />
-      <ConditionsEditor />
-
-      <!-- Run panel: the advanced sampling knobs (if any) and the Simulate
-           button, grouped under the conditions so the left column reads as a
-           top-to-bottom recipe — set conditions, tune the run, simulate. -->
+      <!-- Run panel on top: a population is already present (seeded at load),
+           so "Run the model" is the prominent regenerate action; the source-
+           cohort and starting-condition inputs it draws from sit below. -->
       <div class="run-panel" data-tour="sim-controls">
         <div class="run-head">
           <span class="eyebrow">Run the model</span>
@@ -215,17 +152,20 @@
           {/if}
         </div>
         <button class="btn btn-primary run-btn" on:click={simulate} disabled={running || !$bundle}>
-          {running ? 'sampling…' : 'simulate →'}
+          {running ? 'sampling…' : 'regenerate →'}
         </button>
       </div>
+
+      <ConditioningBar store={simulatorConditioning} layout="stacked" tourAnchor="sim-conditioning" />
+      <ConditionsEditor />
     </div>
 
     <div class="right-col">
-      {#if result}
-        <StructurePlot thetaSamples={result.thetaSamples} summary={confidence} />
+      {#if $simulatorResult}
+        <StructurePlot thetaSamples={$simulatorResult.thetaSamples} summary={confidence} />
         <PredictedRecord
-          codeCountsSamples={result.codeCountsSamples}
-          codeTopicCounts={result.codeTopicCounts}
+          codeCountsSamples={$simulatorResult.codeCountsSamples}
+          codeTopicCounts={$simulatorResult.codeTopicCounts}
         />
       {:else}
         <div class="empty-card">

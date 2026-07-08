@@ -6,13 +6,15 @@
     coverageReader, resetConditioningForCohort,
     searchedConditionIdx, searchedPhenotypeForPatients,
     selectedCohort, selectedPatientId, selectedPhenotypeId,
-    simulatorPrefix,
+    simulatorPrefix, simulatorResult,
   } from './lib/store'
   import type { DashboardBundle } from './lib/types'
   import { loadBundle, loadManifest } from './lib/bundle'
   import { topRoute, type TopId } from './lib/router'
   import { copy } from './lib/copy'
   import { generateCohort } from './lib/cohort'
+  import { computePosteriorPredictive, DEFAULT_SIM_SAMPLES } from './lib/simulator/computePP'
+  import { ALL_SUBCOHORTS } from './lib/conditioning/marginalSampler'
   import { ensurePatientProjection } from './lib/patient/projection'
   import CohortSelector from './lib/CohortSelector.svelte'
   import Tabs from './lib/Tabs.svelte'
@@ -60,23 +62,6 @@
     return best ? best.id : null
   }
 
-  // Seed the simulator with three related inflammatory conditions
-  // (atopic-airway + skin) so the default Simulate run has something
-  // interesting to chew on instead of drawing from the bare prior.
-  // Looked up by exact description so we keep working if vocab ids
-  // shift between bundles. Falls back silently if any of these aren't
-  // in the vocab.
-  const SIMULATOR_SEED_CONDITIONS = ['Asthma', 'Psoriasis', 'Atopic dermatitis']
-  function pickSimulatorSeedPrefix(b: typeof $bundle): number[] {
-    if (!b) return []
-    const out: number[] = []
-    for (const desc of SIMULATOR_SEED_CONDITIONS) {
-      const c = b.vocab.codes.find((x) => x.description === desc)
-      if (c) out.push(c.id)
-    }
-    return out
-  }
-
   // Token guarding against stale loads: if the user changes cohorts twice
   // in quick succession, the first fetch may resolve after the second.
   // We bump `loadToken` on each load and bail out of any in-flight load
@@ -97,6 +82,7 @@
     // progress conditioning.
     resetConditioningForCohort()
     cohort.set(null)
+    simulatorResult.set(null)
     patientProjection.set(null)
     selectedPhenotypeId.set(null)
     selectedPatientId.set(null)
@@ -107,7 +93,10 @@
       if (token !== loadToken) return  // a newer load has started; abandon
       bundle.set(b)
       selectedPhenotypeId.set(pickDefaultPhenotype(b))
-      simulatorPrefix.set(pickSimulatorSeedPrefix(b))
+      // No pre-seeded starting conditions: the default population is a clean
+      // "from scratch" draw, seeded as a result below so the Simulate tab is
+      // populated on arrival rather than generated on the fly.
+      simulatorPrefix.set([])
       // STM bundles (covariateEffects + correlation) get a faithful
       // sample-mode cohort on load: each patient draws its own covariates
       // and group from the bundle's marginals (sampleMarginalCovariates /
@@ -134,6 +123,15 @@
       })
       if (token !== loadToken) return
       cohort.set(c)
+      // Seed a default posterior-predictive result so the Simulate tab's
+      // sample-mix + predicted-record panels are populated on arrival, never
+      // generated on the fly. Empty prefix + all-subcohorts = a representative
+      // "from scratch" population, in sync with the representative Explore
+      // cohort generated just above. The Simulate button regenerates it.
+      simulatorResult.set(computePosteriorPredictive(
+        b, [], { values: {}, group: ALL_SUBCOHORTS },
+        { nSamples: DEFAULT_SIM_SAMPLES, seed: DEFAULT_COHORT_SEED, autoregressive: false },
+      ))
       // Start the patient-atlas UMAP fit now, on load, rather than lazily when
       // the Patient/Simulator tab first mounts. fitAsync runs in the background
       // without blocking the UI, so the layout is ready by the time the user

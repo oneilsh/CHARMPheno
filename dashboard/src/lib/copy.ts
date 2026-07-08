@@ -208,7 +208,7 @@ export const copy = {
       `Each draw is one plausible patient. The <strong>profile bar</strong> shows the average phenotype mix across those draws. The <strong>expected codes</strong> table shows what the model thinks fills in the rest of the record. The <strong>atlas</strong> shows where these patients land relative to the synthetic cohort - tight cluster means the conditions you gave nail one kind of patient, smeared cloud means they're consistent with several.`,
       `Start by clicking conditions on the left, or just hit Simulate to draw new patients from scratch.`,
     ],
-    runSub: `Draw a batch of plausible patients from the conditions above.`,
+    runSub: `Draw a fresh population from the current source cohort and starting conditions.`,
     autoregressiveTip: `When on, the model re-evaluates the phenotype mix after every drawn code so each new code shifts the next one's distribution.`,
     emptyFromScratch: `Add some starting conditions on the left (or just hit Simulate to draw patients from scratch), then click <strong>simulate →</strong> to see what kind of patient this looks like.`,
     emptyReady: (n: number): string =>
@@ -302,7 +302,7 @@ export const copy = {
       },
       simRun: {
         title: `Simulate a cohort`,
-        body: `The Simulator generates synthetic patients from the model. Set up a starting point on the left, then hit <strong>simulate</strong> — the model draws many plausible complete records.`,
+        body: `A population is already generated for you — the panels on the right. This is where you regenerate it: adjust the source cohort and starting conditions below, then hit <strong>regenerate</strong> and the model draws a fresh batch of plausible records.`,
       },
       simConditions: {
         title: `Starting conditions`,
@@ -314,7 +314,7 @@ export const copy = {
       },
       sampleMix: {
         title: `The cohort's phenotype mix`,
-        body: `After you simulate, this panel summarizes the phenotype makeup across the drawn patients and how confident the model is about it — a read on what kind of cohort your starting point produces.`,
+        body: `This panel summarizes the phenotype makeup across the drawn patients and how confident the model is about it — a read on what kind of cohort your settings produce.`,
       },
       predicted: {
         title: `What the records look like`,

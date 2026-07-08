@@ -5,6 +5,7 @@ import { computeJsdMds } from './mds'
 import { jsd, phenotypesContainingCode } from './inference'
 import { cohortCoverage, sampleThetaCohort, sampleInGroupCohort, withinCohortCoverage, thetaColumnDistribution, tauAlignedBinEdges } from './conditioning/coverage'
 import { ALL_SUBCOHORTS } from './conditioning/marginalSampler'
+import type { SimulatorRunResult } from './simulator/runSamples'
 
 export const bundle = writable<DashboardBundle | null>(null)
 export const cohort = writable<SyntheticCohort | null>(null)
@@ -67,6 +68,11 @@ export const selectedPatientId = writable<string | null>(null)
 // a === b (a diagonal click) clears it.
 export const comparePair = writable<{ a: number; b: number } | null>(null)
 export const simulatorPrefix = writable<number[]>([])     // vocab indices (trimmed)
+// The Simulator's posterior-predictive result (sample-mix + predicted-record
+// panels). Lifted out of Simulator.svelte so the app can seed a default at
+// load (App.svelte) — the tab is populated on arrival, never generated on the
+// fly. Set to null to invalidate (e.g. when the starting conditions change).
+export const simulatorResult = writable<SimulatorRunResult | null>(null)
 export const advancedView = writable<boolean>(false)
 
 // Patient atlas: color points by each patient's recorded gating group
