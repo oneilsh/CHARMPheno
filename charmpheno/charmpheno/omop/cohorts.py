@@ -136,6 +136,7 @@ SUPPORTED_COHORTS: tuple[str, ...] = (
     "population_cancer_sparse",
     "population_eds",
     "population_sparse",
+    "population_glp1",
 )
 
 # Fixed salt for the general-population random-window assignment. Hashing
@@ -266,6 +267,25 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "whole-population background."
         ),
     },
+    "population_glp1": {
+        "id": "population_glp1",
+        "label": "Population + GLP-1 & comparators (gated)",
+        "description": (
+            "The whole population as a shared background, with four drug "
+            "foreground arms anchored on the first year after starting a "
+            "medication (incident new-user: a year of prior coverage, a "
+            "fully-observed follow-up year). Arms: glp1_ra (GLP-1 receptor "
+            "agonists), sglt2i (SGLT2 inhibitors, the active comparator), "
+            "tirzepatide (dual GIP/GLP-1 agonist), and glp1_sglt2_combo "
+            "(new-users of both a GLP-1 RA and an SGLT2i within a short "
+            "co-initiation window). Documents are the conditions in that year; "
+            "drugs are the anchor only. The general background carries the same "
+            "1-year-prior + 1-year-follow-up observability bracket. A gated "
+            "block-wise correlated STM then shows what is distinctive to each "
+            "arm and its (anti-)correlations with the background comorbidity "
+            "topics."
+        ),
+    },
 }
 
 
@@ -337,6 +357,12 @@ def apply_cohort(
         )
     if cohort == "population_sparse":
         return apply_population_sparse_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_glp1":
+        return apply_population_drug_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
             prior_obs_days=prior_obs_days,
@@ -1129,3 +1155,97 @@ def _coinitiation_gap_histogram(g: DataFrame, s: DataFrame) -> DataFrame:
         .groupBy("bucket")
         .agg(F.count(F.lit(1)).alias("n"))
     )
+
+
+def apply_population_drug_cohort(
+    cond_df: DataFrame,
+    *,
+    window_days: int = _WINDOW_DAYS,
+    prior_obs_days: int = _WINDOW_DAYS,
+    combo_max_gap_days: int = _COMBO_MAX_GAP_DAYS,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+) -> DataFrame:
+    """Whole-population background + four drug foreground arms, disjoint.
+
+    Anchors on ``drug_era``: each person's first new-user era of glp1_ra /
+    sglt2i / tirzepatide (ingredients resolved by name via
+    :func:`_ingredient_concept_ids`) gives per-class index dates, partitioned by
+    :func:`_assign_drug_groups` (tirzepatide → glp1_sglt2_combo → single-class,
+    non-combo both-users excluded). Chosen index dates are new-user-bracketed
+    (:func:`_window_observed_cohort`: ``prior_obs_days`` prior coverage + observed
+    ``window_days`` follow-up). The ``general`` arm is every person with NO
+    tracked drug exposure, windowed to a random observed year with the SAME
+    prior+forward bracket (:func:`_random_observed_year_cohort`). Documents are
+    the person's condition rows in ``[index_date, index_date + window_days)``.
+    Returns ``cond_df``'s schema plus a ``source_cohort`` column.
+    """
+    def _read(table: str) -> DataFrame:
+        return (
+            spark.read.format("bigquery")
+            .option("table", f"{cdr_dataset}.{table}")
+            .option("parentProject", billing_project)
+            .load()
+        )
+
+    concept = _read("concept").select(
+        "concept_id", "concept_name", "vocabulary_id", "concept_class_id",
+    )
+    drug_era = _read("drug_era").select(
+        "person_id", "drug_concept_id", "drug_era_start_date",
+    )
+    op = _read("observation_period").select(
+        "person_id",
+        "observation_period_start_date",
+        "observation_period_end_date",
+    )
+
+    def _first_dates(class_key: str) -> DataFrame:
+        ids = _ingredient_concept_ids(
+            concept, _DRUG_REGISTRY[class_key]["ingredient_names"],
+        )
+        return _first_drug_era_dates(drug_era, ids)
+
+    g = _first_dates("glp1_ra")
+    s = _first_dates("sglt2i")
+    t = _first_dates("tirzepatide")
+
+    # Build-time diagnostic: co-initiation gap distribution sets combo_max_gap_days.
+    print("[cohort population_glp1] GLP-1/SGLT2i co-initiation |g-s| gap histogram "
+          f"(combo_max_gap_days={combo_max_gap_days}):", flush=True)
+    for row in _coinitiation_gap_histogram(g, s).orderBy("bucket").collect():
+        print(f"[cohort population_glp1]   {row['bucket']}: {row['n']}", flush=True)
+
+    assigned = _assign_drug_groups(g, s, t, combo_max_gap_days=combo_max_gap_days)
+
+    # New-user observation bracket on the chosen index; rejoin to recover the tag.
+    bracketed = _window_observed_cohort(
+        assigned.select("person_id", "index_date"), op,
+        prior_obs_days=prior_obs_days, window_days=window_days,
+    )
+    drug_docs = assigned.join(bracketed, on=["person_id", "index_date"], how="inner")
+    drug_windows = (
+        cond_df.join(drug_docs, on="person_id", how="inner")
+        .where(F.col(date_col) >= F.col("index_date"))
+        .where(F.col(date_col) < F.date_add(F.col("index_date"), window_days))
+        .drop("index_date")
+    )
+
+    # general = persons with NO tracked drug exposure at all (excluded both-users
+    # and inadequately-observed initiators are NOT background).
+    drug_persons = (
+        g.select("person_id")
+        .unionByName(s.select("person_id"))
+        .unionByName(t.select("person_id"))
+        .distinct()
+    )
+    non_drug = cond_df.join(drug_persons, on="person_id", how="left_anti")
+    general = _random_observed_year_cohort(
+        non_drug, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        window_days=window_days, prior_obs_days=prior_obs_days,
+    ).withColumn("source_cohort", F.lit("general"))
+
+    return drug_windows.unionByName(general)

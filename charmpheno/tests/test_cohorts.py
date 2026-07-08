@@ -388,3 +388,24 @@ def test_coinitiation_gap_histogram_buckets(spark):
         ["person_id", "index_date"])
     hist = {r["bucket"]: r["n"] for r in _coinitiation_gap_histogram(g, s).collect()}
     assert hist == {"0-7": 1, "8-30": 1, "181-365": 1, "366+": 1}
+
+
+# --- population_glp1 orchestration + registration (Task 5) --------------
+
+def test_supported_cohorts_includes_population_glp1():
+    from charmpheno.omop.cohorts import SUPPORTED_COHORTS
+    assert "population_glp1" in SUPPORTED_COHORTS
+
+
+def test_cohort_metadata_has_population_glp1():
+    from charmpheno.omop.cohorts import COHORT_METADATA
+    m = COHORT_METADATA["population_glp1"]
+    assert m["id"] == "population_glp1"
+    assert m["label"] and m["description"]
+
+
+def test_apply_population_drug_cohort_importable_signature():
+    import inspect
+    from charmpheno.omop.cohorts import apply_population_drug_cohort
+    p = inspect.signature(apply_population_drug_cohort).parameters
+    assert {"window_days", "prior_obs_days", "combo_max_gap_days", "date_col"} <= set(p)
