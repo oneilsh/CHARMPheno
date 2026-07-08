@@ -57,6 +57,7 @@ and when is itself useful.
 
 (Append entries here as new insights are written, newest at top.)
 
+- [0040](0040-light-coder-years-are-mostly-routine-with-structured-pockets.md) — Light-coder (5–19-code) years are mostly routine/screening/acute-minor care with real MSK and metabolic pockets, justifying the doc_min_length floor without it being lossless; a foreground block's low NPMI (+0.10 vs +0.19) is the diffuse-short-doc signal, not a defect (stm, gating, cohorts, short-documents, npmi)
 - [0030](0030-spectral-init-closes-stm-sigma-blowup-on-real-data.md) — On real cancer data, spectral init brings STM's Σ from ~10^10 to ~7.6 and resolves all K topics at the default σ_init=1; the K−1 reference alone does not — the Σ blowup defeats the reference topic itself (stm, priors, svi, initialization, diagnostics, phenotyping)
 - [0029](0029-stm-sigma-init-collapse-blowup-missing-stabilizers.md) — Our online STM's σ_init-selected collapse↔Σ-blowup (Σ→10^10) is a missing-stabilizer artifact, not a property of STM; published STM avoids it via spectral init + K−1 reference-topic identifiability + Σ shrinkage (stm, priors, svi, initialization, diagnostics, prior-art)
 - [0028](0028-dirichlet-vs-logistic-normal-rare-phenotype-recovery-gated-lda-is-plda.md) — The prior family (Dirichlet vs logistic-normal), not gating, governs rare minority-phenotype recovery; STM collapses where LDA recovers (2x2 + repro); "gated LDA" is Partially Labeled Dirichlet Allocation (PLDA) (stm, lda, gating, priors, phenotyping, prior-art)

@@ -1,7 +1,7 @@
 ---
 id: 31
 slug: stm-population-sparse-gated
-status: pending
+status: done
 model_class: stm
 cohort: population_sparse
 cohort_def: population_sparse
@@ -64,6 +64,56 @@ stack, `~ C(sex) + age`, `known_sex_only`.
 - Sparse foreground topics interpretable (wellness/screening vs structured
   conditions) — the answer to the short-doc-floor question.
 - Σ variance bounded; honest correlation report.
+
+## Result
+
+Ran on the cluster 2026-07-03. Fit converged at iter 200/200 (ELBO −1.59e6,
+925s). 62,565 persons / documents at `person_mod: 4`; the density split landed
+near 50/50 — **31,269 light-coder docs in the `sparse` foreground arm** (5–19
+codes) against ~31,300 dense general docs, frozen vocab 6115. Σ bounded and
+proper (block-wise unit-diagonal, all Σ_ii=1; eig in 0.203–5.07;
+`blocks[bg=2.13e6 sparse=5.42e4]`); no runaway (the eval's
+`runaway = topic 49 Σ_ii=1.000` is an artifact of argmax over the constant
+unit diagonal, not a real blowup). Γ well-behaved (|Γ| max 3.33, mean 0.34).
+NPMI: background mean **+0.192** (median +0.175, max +0.627, all 40 rated);
+sparse block mean **+0.100** (median +0.084, min +0.022, max +0.220, all 10
+rated).
+
+**Both success criteria met, and the short-doc-floor question is answered:
+light-coder years are predominantly routine, with real structured pockets.**
+
+The 10 sparse foreground topics read mostly as wellness / screening / routine /
+acute-minor care — which justifies the `doc_min_length: 5` floor — but they are
+not empty of signal:
+
+- **Routine / screening / acute-minor** (the majority): metabolic screening
+  (topic 45 HTN + hyperlipidemia + CAD + prediabetes; 44 T2DM + HTN + lipids),
+  refraction (42 myopia / presbyopia / astigmatism), audiology (49 sensorineural
+  hearing loss / impacted cerumen / tinnitus), vitamin-D / alcohol screening
+  (40), acute URI (41 pharyngitis / sinusitis / bronchitis), obesity + snoring
+  (48), acute cardiorespiratory symptoms (47 cough / palpitations / dyspnea /
+  COVID-19).
+- **Genuinely structured pockets**: MSK (topic 46 joint pain / knee OA / carpal
+  tunnel — the single most coherent sparse topic at **NPMI +0.220**), and the
+  metabolic pair carry real comorbidity signal rather than noise.
+
+The sparse block's lower coherence (+0.100 vs the background's +0.192) **is
+itself the result, not a defect**: light-coder documents have few codes, so few
+within-doc co-occurring pairs, so intrinsically lower NPMI — and routine /
+screening content is diffuse by construction. The spread across the block traces
+the wellness-to-signal gradient directly: topic 43 (headache / abdominal pain /
+acne / dysuria, +0.022) is the diffuse floor; topic 46 (MSK, +0.220) is the
+coherent pocket.
+
+Background 40 topics are a clean whole-population comorbidity atlas — CKD/CHF,
+T2DM, allergic rhinitis/asthma, dermatology, knee OA/RA, cataract, OSA,
+breast/bone, AFib/CAD, hypothyroid, BPH/prostate, HIV/HepC, seizure/epilepsy,
+PTSD/bipolar, lupus/Sjögren — strong standalone demo material, consistent with
+exp 0028/0030's background.
+
+See insight 0040. Not exported to the dashboard: this is a methods/robustness
+result (what short docs carry), not a headline demo cohort; population_cancer +
+population_eds remain the two demo models.
 
 ## Related
 
