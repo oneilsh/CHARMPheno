@@ -47,6 +47,10 @@ def compute_cache_key(
     hit and drop the new persons at the join. Bump `v` on any such change. v=2
     was bumped alongside corpus-cache v=5 for the population_cancer windowing fix.
     """
+    # cohort_defs: content hash of charmpheno.omop.cohorts, so a cohort-logic
+    # change (which shifts the covariate person set) auto-invalidates this cache
+    # without a manual `v` bump. `v` stays as the fallback / non-cohort knob.
+    from charmpheno.omop.cohorts import cohort_defs_version
     payload = json.dumps({
         "covariate_formula": covariate_formula,
         "person_mod": person_mod,
@@ -54,7 +58,8 @@ def compute_cache_key(
         "source_table": source_table,
         "cohort": cohort,
         "prior_obs_days": int(prior_obs_days),
-        "v": 2,
+        "cohort_defs": cohort_defs_version(),
+        "v": 3,
     }, sort_keys=True).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]
 

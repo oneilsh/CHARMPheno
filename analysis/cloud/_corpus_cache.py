@@ -61,6 +61,11 @@ def compute_cache_key(
     already-cached population_cancer corpus; the corpus content is otherwise
     identical to v=5.
     """
+    # cohort_defs is a content hash of charmpheno.omop.cohorts, so a change to
+    # ANY cohort's membership/logic auto-invalidates cached corpora without a
+    # manual `v` bump. `v` remains for shape changes unrelated to cohort code
+    # (and as the fallback when the source hash is unavailable).
+    from charmpheno.omop.cohorts import cohort_defs_version
     payload = {
         "source_table": source_table,
         "person_mod": int(person_mod),
@@ -69,7 +74,8 @@ def compute_cache_key(
         "doc_spec": doc_spec_manifest,
         "cohort": cohort,
         "prior_obs_days": int(prior_obs_days),
-        "v": 6,
+        "cohort_defs": cohort_defs_version(),
+        "v": 7,
     }
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]

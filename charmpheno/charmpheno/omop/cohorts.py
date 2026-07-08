@@ -24,10 +24,32 @@ Currently implemented:
 """
 from __future__ import annotations
 
+import hashlib
+import inspect
+import sys
 from collections.abc import Sequence
 
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
+
+
+def cohort_defs_version() -> str:
+    """Content hash of this module's source, for cache-key invalidation.
+
+    Folded into the corpus + covariate cache keys so that ANY change to a cohort
+    definition or its helper logic auto-invalidates cached corpora — no manual
+    version bump to remember. Coarse by design: any edit to this module changes
+    the hash and invalidates ALL cohort caches (correctness over cache reuse).
+
+    Falls back to a constant if the source is unavailable (e.g. a byte-compiled
+    deploy with no .py in the zip), in which case invalidation relies on the
+    manual ``v`` in the cache-key payloads — so bump that too on shape changes.
+    """
+    try:
+        src = inspect.getsource(sys.modules[__name__])
+    except (OSError, TypeError):
+        return "src-unavailable"
+    return hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
 
 
 # Top-level SNOMED concept whose descendants define the inclusion set for
@@ -116,12 +138,23 @@ _COMBO_MAX_GAP_DAYS = 90
 # non-empty ingredient set on the target CDR (see apply_population_drug_cohort's
 # build-time diagnostic).
 _DRUG_REGISTRY: dict[str, dict] = {
-    "glp1_ra": {"ingredient_names": (
-        "semaglutide", "liraglutide", "dulaglutide", "exenatide", "lixisenatide",
-    )},
-    "sglt2i": {"ingredient_names": (
-        "empagliflozin", "dapagliflozin", "canagliflozin", "ertugliflozin",
-    )},
+    # Each class = descendants of its ATC-class concept (the authoritative
+    # definition), with ingredient names kept as a belt-and-suspenders fallback.
+    # ATC A10BJ = 1123618 "GLP-1 analogues"; A10BK = 1123627 "SGLT2 inhibitors".
+    # tirzepatide is NOT under A10BJ (dual GIP/GLP-1), so it stays its own arm.
+    # VERIFY the seed ids resolve to a non-trivial descendant set on the CDR.
+    "glp1_ra": {
+        "ingredient_names": (
+            "semaglutide", "liraglutide", "dulaglutide", "exenatide", "lixisenatide",
+        ),
+        "seed_concept_ids": (1123618,),
+    },
+    "sglt2i": {
+        "ingredient_names": (
+            "empagliflozin", "dapagliflozin", "canagliflozin", "ertugliflozin",
+        ),
+        "seed_concept_ids": (1123627,),
+    },
     # tirzepatide (FDA 2022): pin the OMOP concept id as an explicit seed so the
     # class set is descendants-of-779705 regardless of how this CDR's vocab
     # names/classes the ingredient (name-only match under-counted it). VERIFY

@@ -47,18 +47,33 @@ New drug-anchored `population_glp1` cohort (`apply_population_drug_cohort`),
 one document per person, `source_cohort ∈ {glp1_ra, sglt2i, tirzepatide,
 glp1_sglt2_combo, general}`:
 
-- **glp1_ra / sglt2i** — incident new-users of that class only (never the other
-  tracked classes); 365d prior coverage, 365d observed follow-up.
+- **glp1_ra / sglt2i** — incident new-users whose index year is monotherapy for
+  that class (never the other, or the other started > 365d away); 365d prior
+  coverage, 365d observed follow-up.
 - **tirzepatide** — new-users of tirzepatide (dual GIP/GLP-1; precedence over
   the other arms).
-- **glp1_sglt2_combo** — new-users of both a GLP-1 RA and an SGLT2i co-initiated
-  within `combo_max_gap_days` (code default 90; set from the build-time gap
-  histogram). Non-combo both-users are excluded from the cohort.
+- **glp1_sglt2_combo** — new-users of both a GLP-1 RA and an SGLT2i **co-initiated
+  within `combo_max_gap_days`** (code default 90; set from the build-time gap
+  histogram).
 - **general** — no tracked drug exposure; random observed year with the SAME
   1yr-prior + 1yr-follow-up bracket.
 
-Documents are the person's conditions in the post-index year; drugs are the
-anchor only.
+Both-drug users are handled by the gap `|g − s|` between their two first eras
+(three regimes): ≤ 90d → combo; **> 365d → the earlier drug's single arm** (the
+second drug starts outside the index year, so that year is genuine monotherapy);
+the contaminated middle band (90–365d) is **excluded** from the cohort entirely.
+The 2026-07-08 build histogram showed most both-users are long-gap (366+: 3849),
+so this regime recovers them into the single arms rather than dropping them.
+
+Drug classes are resolved as `concept_ancestor` **descendants** of their seed
+ingredients (RxNorm Ingredient names + any pinned ids; **tirzepatide pinned to
+779705** — name-only resolution under-counted it to 128). The build logs each
+class's resolved concept-set size + person count. Documents are the person's
+conditions in the post-index year; drugs are the anchor only.
+
+**Cache note:** the partition + concept-set logic is NOT part of the corpus cache
+key, so a rebuild after these changes must be FORCED (clear the cache entry / use
+the force flag) or the stale v1 corpus is reused.
 
 ## Configuration
 
