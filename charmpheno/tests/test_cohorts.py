@@ -114,6 +114,33 @@ def test_random_event_windows_anchor_on_eligible_events_deterministically(spark)
     assert rows == rows2
 
 
+def test_random_event_windows_enforces_prior_coverage(spark):
+    """With prior_obs_days>0 an eligible anchor needs a fully-observed year
+    BEFORE it, not just after — symmetric observability for the general arm."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import _random_event_windows
+
+    # One person, one event on 2015-06-01. Observation period 2015-01-01..2017-01-01:
+    # forward year is observed (event+365 <= end), but only ~150d of prior coverage.
+    events = spark.createDataFrame(
+        [(1, dt.date(2015, 6, 1))], ["person_id", "condition_start_date"],
+    )
+    op = spark.createDataFrame(
+        [(1, dt.date(2015, 1, 1), dt.date(2017, 1, 1))],
+        ["person_id", "observation_period_start_date", "observation_period_end_date"],
+    )
+    # prior_obs_days=0 (current behavior): the anchor is eligible.
+    kept = _random_event_windows(
+        events, op, date_col="condition_start_date", prior_obs_days=0,
+    )
+    assert kept.count() == 1
+    # prior_obs_days=365: insufficient prior coverage -> dropped.
+    dropped = _random_event_windows(
+        events, op, date_col="condition_start_date", prior_obs_days=365,
+    )
+    assert dropped.count() == 0
+
+
 def test_window_observed_cohort_prior_lookback_is_configurable(spark):
     """prior_obs_days sets the pre-index lookback; the follow-up requirement
     (window fully observed) holds regardless. Three persons, same index, in:

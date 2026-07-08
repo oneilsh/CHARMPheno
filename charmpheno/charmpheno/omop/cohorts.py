@@ -670,6 +670,7 @@ def _random_observed_year_cohort(
     billing_project: str,
     date_col: str,
     window_days: int = _WINDOW_DAYS,
+    prior_obs_days: int = 0,
 ) -> DataFrame:
     """Window each person to ONE deterministic random event-anchored year.
 
@@ -696,6 +697,7 @@ def _random_observed_year_cohort(
     )
     windows = _random_event_windows(
         cond_df, op, date_col=date_col, window_days=window_days,
+        prior_obs_days=prior_obs_days,
     )
 
     return (
@@ -712,6 +714,7 @@ def _random_event_windows(
     *,
     date_col: str,
     window_days: int = _WINDOW_DAYS,
+    prior_obs_days: int = 0,
 ) -> DataFrame:
     """Anchor one deterministic random fully-observed window per person ON an event.
 
@@ -743,7 +746,8 @@ def _random_event_windows(
     # end). A person may have several periods; any one covering the window works.
     eligible = (
         events.join(observation_period, on="person_id", how="inner")
-        .where(F.col("event_date") >= F.col("observation_period_start_date"))
+        .where(F.col("event_date") >= F.date_add(
+            F.col("observation_period_start_date"), prior_obs_days))
         .where(
             F.date_add(F.col("event_date"), window_days)
             <= F.col("observation_period_end_date")
