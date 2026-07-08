@@ -4,6 +4,17 @@
 **Status:** Design sketch (proposed; not yet planned/built)
 **Motivation:** insight [0028](../../insights/0028-dirichlet-vs-logistic-normal-rare-phenotype-recovery-gated-lda-is-plda.md)
 
+> ⚠ **Motivation revisited 2026-07-08 (see [insight 0039](../../insights/0039-revisiting-0028-stabilized-gated-stm-recovers-rare-phenotypes.md)).**
+> 0028's premise — "the Dirichlet prior, not gating, is what recovers rare
+> phenotypes, so STM cannot" — is **superseded in part**: stabilized gated full-Σ
+> STM *does* recover rare/minority sub-phenotypes ([0032](../../insights/0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md),
+> [0035](../../insights/0035-rare-disease-gated-foreground-recovers-eds-subphenotypes-on-full-population.md)).
+> Gated LDA is **still worth building** — it is cleaner, conjugate, and gives a
+> sparser per-patient θ — but the reason is now "a simpler baseline and the second
+> arm of a **head-to-head** vs stabilized gated STM," **not** "because STM fails."
+> Note STM's correlated Σ (patient-level topic co-occurrence) is an asset gated LDA
+> lacks; weigh that when choosing the engine.
+
 ## Goal
 
 Add an opt-in background/foreground topic-block gating mode to `OnlineLDA`,

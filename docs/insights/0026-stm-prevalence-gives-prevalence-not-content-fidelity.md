@@ -2,7 +2,15 @@
 
 **Date:** 2026-06-23
 **Topic:** stm | lda | covariates | doc-units | npmi | diagnostics
-**Status:** Observed
+**Status:** Observed — **"no content fidelity" is prevalence-only + un-stabilized; see [0032](0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md) / [0039](0039-revisiting-0028-stabilized-gated-stm-recovers-rare-phenotypes.md)**
+
+> ⚠ **Revisited 2026-07-08.** The "prevalence fidelity, not content fidelity"
+> finding is specific to the **prevalence-only, un-gated, un-stabilized** STM. Do
+> not generalize it to "STM cannot carve group-specific content": under the
+> stabilized *gated* full-Σ engine, rare covariate groups do get dedicated
+> sub-phenotype topics ([0032](0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md),
+> [0035](0035-rare-disease-gated-foreground-recovers-eds-subphenotypes-on-full-population.md)).
+> See [0039](0039-revisiting-0028-stabilized-gated-stm-recovers-rare-phenotypes.md).
 
 The first end-to-end prevalence-only STM fit on the combined
 `cancer_or_dementia` cohort (K=40, ~13.3k cohort docs, 79% cancer /

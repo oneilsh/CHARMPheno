@@ -2,7 +2,16 @@
 
 **Date:** 2026-06-24
 **Topic:** stm | gating | covariates | npmi | doc-units | diagnostics
-**Status:** Observed
+**Status:** Observed — **collapse later shown stabilizer-related; see [0029](0029-stm-sigma-init-collapse-blowup-missing-stabilizers.md) / [0032](0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md) / [0039](0039-revisiting-0028-stabilized-gated-stm-recovers-rare-phenotypes.md)**
+
+> ⚠ **Revisited 2026-07-08.** This run predates the STM stabilizer stack (spectral
+> init, K−1 reference topic, Σ shrinkage / block-wise unit-diagonal Σ). The
+> foreground collapse observed here was substantially a stabilizer/fit-scale
+> artifact ([0029](0029-stm-sigma-init-collapse-blowup-missing-stabilizers.md)):
+> under the stabilized gated full-Σ engine the same cohort's minority arm *does*
+> resolve sub-phenotypes ([0032](0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md)),
+> and a 0.5% foreground holds ([0035](0035-rare-disease-gated-foreground-recovers-eds-subphenotypes-on-full-population.md)).
+> Read this as a diagnostic of the *un-stabilized* engine, not a limit of gated STM.
 
 The first cluster run of gated background/foreground STM (experiment
 [0004](../experiments/0004-gated-stm-cancer-dementia.md), ADR

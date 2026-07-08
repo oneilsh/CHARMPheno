@@ -2,7 +2,23 @@
 
 **Date:** 2026-06-24
 **Topic:** stm | lda | gating | priors | npmi | phenotyping | prior-art
-**Status:** Observed (+ literature-confirmed)
+**Status:** Observed (+ literature-confirmed) — **SUPERSEDED IN PART, see [0039](0039-revisiting-0028-stabilized-gated-stm-recovers-rare-phenotypes.md) (2026-07-08)**
+
+> ⚠ **Revisited 2026-07-08.** This insight's central conclusion — that the
+> logistic-normal engine *intrinsically* collapses rare phenotypes, so Dirichlet
+> (LDA/PLDA) is required — is **superseded in part**. The collapse measured here
+> was substantially a **missing-stabilizer / fit-scale artifact**
+> ([0029](0029-stm-sigma-init-collapse-blowup-missing-stabilizers.md)): the STM arm
+> below ran without spectral init, the K−1 reference-topic parameterization, or Σ
+> shrinkage. Stabilized gated full-Σ STM later recovered the very dementia
+> sub-phenotypes this insight said it could not
+> ([0032](0032-gated-fullcov-recovers-dementia-subphenotypes-and-exposes-spd-assembly-conditioning.md)),
+> and recovered rare sub-phenotypes at a **0.5% foreground**
+> ([0035](0035-rare-disease-gated-foreground-recovers-eds-subphenotypes-on-full-population.md)).
+> The mechanism below holds only as a *tendency*, not destiny. **Do not cite this
+> insight as "STM cannot recover rare phenotypes"** or as a reason to avoid the
+> logistic-normal engine; the engine choice is open and untested head-to-head. See
+> [0039](0039-revisiting-0028-stabilized-gated-stm-recovers-rare-phenotypes.md).
 
 The 0005/0027 thread asked whether gated STM's failure to surface dementia
 sub-phenotypes was a gating defect. A controlled 2x2 plus a local reproduction
