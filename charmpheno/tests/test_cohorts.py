@@ -409,3 +409,26 @@ def test_apply_population_drug_cohort_importable_signature():
     from charmpheno.omop.cohorts import apply_population_drug_cohort
     p = inspect.signature(apply_population_drug_cohort).parameters
     assert {"window_days", "prior_obs_days", "combo_max_gap_days", "date_col"} <= set(p)
+
+
+def test_window_observed_cohort_dedups_multiple_observation_periods(spark):
+    """A person with 2+ observation_period rows that each satisfy the prior +
+    follow-up gates must NOT fan out into duplicate (person_id, index_date)
+    rows — that would duplicate the person's documents downstream and
+    over-weight multi-period patients in every cohort."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import _window_observed_cohort
+    first_dx = spark.createDataFrame(
+        [(1, dt.date(2016, 1, 1))], ["person_id", "index_date"],
+    )
+    # Two observation periods, BOTH give >=365d prior and >=365d observed
+    # follow-up around the 2016-01-01 index.
+    op = spark.createDataFrame(
+        [
+            (1, dt.date(2014, 1, 1), dt.date(2018, 1, 1)),
+            (1, dt.date(2013, 1, 1), dt.date(2019, 1, 1)),
+        ],
+        ["person_id", "observation_period_start_date", "observation_period_end_date"],
+    )
+    out = _window_observed_cohort(first_dx, op, prior_obs_days=365, window_days=365)
+    assert out.count() == 1  # one surviving (person_id, index_date), not two

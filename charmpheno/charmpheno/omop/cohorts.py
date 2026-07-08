@@ -402,7 +402,12 @@ def _window_observed_cohort(
             F.col("observation_period_start_date"), prior_obs_days))
         .where(F.date_add(F.col("index_date"), window_days)
                <= F.col("observation_period_end_date"))
+        # A person may have several observation_period rows that each satisfy
+        # the gates; distinct() collapses them so a survivor is one row, not one
+        # per qualifying period (which would fan out duplicate documents in the
+        # downstream cond_df join and over-weight multi-period patients).
         .select("person_id", "index_date")
+        .distinct()
     )
 
 
