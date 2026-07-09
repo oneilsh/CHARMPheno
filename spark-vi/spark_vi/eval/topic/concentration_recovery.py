@@ -22,6 +22,7 @@ mechanisms/levels/scales.
 from __future__ import annotations
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 from scipy.special import digamma
 
 from spark_vi.eval.topic.concentration import lda_concentration_readout
@@ -355,3 +356,247 @@ def sweep_heldout(
     lls = {knob: score(knob) for knob in knobs}
     argmax_knob = max(lls, key=lls.get)
     return {"lls": lls, "argmax_knob": argmax_knob}
+
+
+# ---------------------------------------------------------------------------
+# CO-FIT-beta extension (CR-4).
+#
+# The frozen-beta primitives above (make_shared_beta ... sweep_heldout) plant
+# over a KNOWN beta and FREEZE it at truth during recovery, so they isolate
+# concentration inference from topic learning. That leaves one question open
+# (insight 0038 "What this does NOT claim"): when each model LEARNS its own
+# beta from the documents, does LDA's Dirichlet document-sparsity pressure
+# carve a SHARPER, more document-specific beta -- raising per-document top_mass
+# (peakier patients) -- while STM's logistic-normal stays more blended? If so,
+# the real-data STM-vs-LDA peakiness gap (0038: STM 0.269 vs LDA 0.513) is a
+# beta-co-adaptation effect, not an alpha-inference artifact.
+#
+# The helpers below add full-batch (non-Spark) co-fitting of beta for both
+# families, reusing the SAME per-doc E-step primitives (_cavi_doc_inference,
+# _stm_doc_inference) the frozen path and the production models use, plus a
+# permutation-invariant beta-recovery metric and a beta-sharpness readout.
+# They are strictly additive: the frozen-beta path and its tests are untouched.
+# ---------------------------------------------------------------------------
+
+
+def stm_cofit_beta(
+    train_docs: list, K: int, V: int, *, c: float, eta: float | None = None,
+    n_em_iter: int = 60, seed: int = 0, lbfgs_max_iter: int = 50, lbfgs_tol: float = 1e-4,
+) -> np.ndarray:
+    """Co-fit the STM topic-word matrix beta by full-batch variational EM under
+    a FIXED logistic-normal prior N(0, c * I_K).
+
+    This is the co-fit analog of stm_recover_theta: same per-doc E-step
+    (_stm_doc_inference with Gamma=0, Sigma_inv = (1/c) * I_K, allowed=None,
+    reference=None -- the non-gated, non-reference contract), but instead of
+    freezing beta at truth it LEARNS beta. Each EM sweep:
+
+      E-step: for every train doc infer the MAP eta_hat, form
+              theta = softmax(eta_hat), and accumulate the LDA/STM
+              suff-stat phi * counts into lambda_stats (K, V).
+      M-step: full-batch conjugate update of the Dirichlet posterior on beta,
+              lambda = eta + lambda_stats  (the rho=1 / batch-size special case
+              of OnlineSTM.update_global's SVI step target_lam = eta +
+              lambda_stats, which -- unlike LDA -- already folds expElogbeta
+              into lambda_stats via phi in local_update; see stm.py).
+
+    Only beta (lambda) is learned here; Sigma is HELD at c * I so the swept
+    knob c is a pure concentration prior, exactly as in the frozen-beta sweep.
+    Returns the posterior-mean topic-word matrix beta_hat = lambda /
+    lambda.sum(axis=1) (K, V), a proper stochastic matrix suitable for both
+    the predictive scoring (theta @ beta_hat) and the beta-recovery metric.
+
+    eta (the symmetric Dirichlet prior on beta rows) defaults to 1/K, matching
+    OnlineSTM's default. Reference: Roberts, Stewart, Airoldi 2016 (STM);
+    Hoffman, Blei, Bach 2010 (the online-VB M-step this batch-specializes).
+    """
+    if eta is None:
+        eta = 1.0 / K
+    rng = np.random.default_rng(seed)
+    lam = rng.gamma(shape=100.0, scale=1.0 / 100.0, size=(K, V))
+    Gamma = np.zeros((1, K))
+    x = np.array([1.0])
+    Sigma_inv = (1.0 / c) * np.eye(K)
+
+    for _ in range(n_em_iter):
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        lambda_stats = np.zeros((K, V), dtype=np.float64)
+        for doc in train_docs:
+            eta_hat, _, _ = _stm_doc_inference(
+                indices=doc.indices, counts=doc.counts, expElogbeta=expElogbeta,
+                Gamma=Gamma, Sigma_inv_allowed=Sigma_inv, x=x,
+                max_iter=lbfgs_max_iter, tol=lbfgs_tol, allowed=None, reference=None,
+            )
+            p = _softmax(eta_hat)
+            eb_d = expElogbeta[:, doc.indices]
+            q_w = eb_d.T @ p + 1e-100
+            phi = (eb_d * p[:, None]) / q_w[None, :]
+            lambda_stats[:, doc.indices] += phi * doc.counts[None, :]
+        lam = eta + lambda_stats
+
+    return lam / lam.sum(axis=1, keepdims=True)
+
+
+def lda_cofit_beta(
+    train_docs: list, K: int, V: int, *, alpha, eta: float | None = None,
+    n_em_iter: int = 60, seed: int = 0, optimize_alpha: bool = False,
+    cavi_max_iter: int = 100, cavi_tol: float = 1e-3,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Co-fit the LDA topic-word matrix beta by full-batch variational EM at a
+    Dirichlet document prior alpha (scalar or length-K).
+
+    Co-fit analog of lda_recover_theta: same per-doc CAVI E-step
+    (_cavi_doc_inference) but learning beta. Each EM sweep:
+
+      E-step: per-doc CAVI -> (gamma, expElogthetad, phi_norm); accumulate
+              lambda_stats via outer(expElogthetad, counts / phi_norm)
+              (Lee/Seung 2001 collapsed-phi trick).
+      M-step: lambda = eta + expElogbeta * lambda_stats  -- the rho=1 /
+              batch special case of OnlineLDA.update_global (note LDA applies
+              expElogbeta at the M-step, unlike STM).
+
+    When optimize_alpha is True, alpha is additionally re-optimized each sweep
+    by one alpha_newton_step on the corpus-summed E[log theta] (Blei 2003
+    A.4.2 empirical-Bayes update), floored at 1e-3 -- the full-batch analog of
+    OnlineLDA(optimize_alpha=True) and of lda_optimize_alpha (frozen-beta),
+    but with beta LEARNING alongside. This is the head-to-head with real-data
+    LDA, which co-fits topics AND optimizes alpha.
+
+    Returns (beta_hat, alpha) where beta_hat = lambda / lambda.sum(axis=1)
+    (K, V) is the posterior-mean topic-word matrix and alpha is the final
+    length-K Dirichlet prior (unchanged from the input when optimize_alpha is
+    False). eta defaults to 1/K (OnlineLDA default).
+    """
+    if eta is None:
+        eta = 1.0 / K
+    alpha_arr = np.asarray(alpha, dtype=np.float64)
+    if alpha_arr.ndim == 0:
+        alpha_arr = np.full(K, float(alpha_arr))
+    rng = np.random.default_rng(seed)
+    lam = rng.gamma(shape=100.0, scale=1.0 / 100.0, size=(K, V))
+
+    for _ in range(n_em_iter):
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        lambda_stats = np.zeros((K, V), dtype=np.float64)
+        e_log_theta_sum = np.zeros(K, dtype=np.float64)
+        for doc in train_docs:
+            gamma_init = np.full(K, 100.0 / K)
+            gamma, expElogthetad, phi_norm, _ = _cavi_doc_inference(
+                doc.indices, doc.counts, expElogbeta, alpha_arr, gamma_init,
+                cavi_max_iter, cavi_tol,
+            )
+            lambda_stats[:, doc.indices] += np.outer(expElogthetad, doc.counts / phi_norm)
+            if optimize_alpha:
+                e_log_theta_sum += digamma(gamma) - digamma(gamma.sum())
+        lam = eta + expElogbeta * lambda_stats
+        if optimize_alpha:
+            delta_alpha = alpha_newton_step(
+                alpha=alpha_arr, e_log_theta_sum_scaled=e_log_theta_sum,
+                D=float(len(train_docs)),
+            )
+            alpha_arr = np.maximum(alpha_arr + delta_alpha, 1e-3)
+
+    return lam / lam.sum(axis=1, keepdims=True), alpha_arr
+
+
+def beta_recovery_error(beta_true: np.ndarray, beta_hat: np.ndarray) -> dict:
+    """Permutation-invariant topic-recovery error between a planted beta_true
+    (K, V) and a recovered beta_hat (K, V).
+
+    Topic labels are arbitrary (the model has no way to know which recovered
+    row corresponds to which planted row), so a raw row-by-row comparison is
+    meaningless. Solve the optimal one-to-one topic assignment first -- the
+    linear assignment / bipartite-matching problem, minimum-cost perfect
+    matching on the K x K cost matrix C_ij = 1 - cosine(beta_true_i,
+    beta_hat_j) -- via the Hungarian algorithm (Kuhn 1955, "The Hungarian
+    method for the assignment problem", Naval Research Logistics Quarterly
+    2(1); solved here by scipy.optimize.linear_sum_assignment, which uses the
+    Jonker-Volgenant / Crouse 2016 shortest-augmenting-path variant). Then
+    report, over the matched pairs:
+
+      mean_l1:  mean over topics of the L1 distance ||beta_true_i -
+                beta_hat_match(i)||_1 (in [0, 2]); 0 = exact recovery.
+      mean_cos_dist: mean over topics of 1 - cosine similarity (in [0, 2]);
+                the quantity the assignment minimizes.
+
+    Returns {"mean_l1": ..., "mean_cos_dist": ..., "row_ind": [...],
+    "col_ind": [...]} with the matched index arrays for reproducibility.
+    """
+    tn = beta_true / (np.linalg.norm(beta_true, axis=1, keepdims=True) + 1e-300)
+    hn = beta_hat / (np.linalg.norm(beta_hat, axis=1, keepdims=True) + 1e-300)
+    cost = 1.0 - tn @ hn.T                                  # (K, K) cosine distance
+    row_ind, col_ind = linear_sum_assignment(cost)
+    l1 = np.abs(beta_true[row_ind] - beta_hat[col_ind]).sum(axis=1)
+    cos_dist = cost[row_ind, col_ind]
+    return {
+        "mean_l1": float(l1.mean()),
+        "mean_cos_dist": float(cos_dist.mean()),
+        "row_ind": row_ind.tolist(),
+        "col_ind": col_ind.tolist(),
+    }
+
+
+def beta_sharpness(beta: np.ndarray, *, top_k: int = 10) -> dict:
+    """How PEAKED each topic's word distribution is, averaged over topics.
+
+    Two complementary readouts, both means over the K topic rows of a (K, V)
+    stochastic matrix:
+
+      top_k_mass:  mean over topics of the summed probability of each topic's
+                   top_k highest-probability terms (in [0, 1]); higher = a
+                   sharper topic that concentrates on a few words.
+      eff_vocab:   mean over topics of the inverse-Simpson index over the
+                   vocabulary, 1 / sum_v beta_kv^2 (Hill number of order 2;
+                   Hill 1973, Jost 2006 -- the same diversity number the
+                   per-document eff_topics uses, applied to the term axis).
+                   LOWER = a sharper topic (fewer effective terms).
+
+    top_k_mass and eff_vocab move in opposite directions with sharpness, so a
+    genuine LDA-vs-STM beta-sharpening effect shows up as HIGHER top_k_mass AND
+    LOWER eff_vocab for the sharper model -- reporting both guards against a
+    top_k artifact.
+    """
+    sorted_desc = np.sort(beta, axis=1)[:, ::-1]
+    top_k_mass = float(sorted_desc[:, :top_k].sum(axis=1).mean())
+    eff_vocab = float((1.0 / np.sum(beta * beta, axis=1)).mean())
+    return {"top_k_mass": top_k_mass, "eff_vocab": eff_vocab}
+
+
+def sweep_heldout_cofit(
+    train_docs: list, test_docs: list, K: int, V: int, *, method: str, knobs: list,
+    n_em_iter: int, holdout_frac: float = 0.3, seed: int = 0,
+) -> dict:
+    """Co-fit-beta analog of sweep_heldout: for each concentration knob, LEARN
+    beta on train_docs at that knob, then score document-completion held-out
+    predictive-LL on the (disjoint) test_docs under the LEARNED beta.
+
+    Training beta on train and scoring completion on unseen test documents is
+    the standard leakage-free topic-model evaluation (document completion;
+    Wallach, Murray, Salakhutdinov, Mimno 2009, "Evaluation methods for topic
+    models", ICML; Asuncion, Welling, Smyth, Teh 2009). The argmax knob is the
+    held-out-LL-calibrated concentration -- the same gold standard insight 0038
+    validated on frozen beta, now applied with beta co-fit.
+
+    method == "stm": knobs are Sigma scales c (stm_cofit_beta + stm_heldout_ll).
+    method == "lda": knobs are Dirichlet alphas (lda_cofit_beta + lda_heldout_ll).
+
+    Returns {"lls": {knob: mean_test_ll}, "argmax_knob": <best>,
+    "beta_hat": {knob: beta_hat (K, V)}} -- the per-knob learned beta is
+    returned so the caller can read sharpness / recovery at the argmax without
+    re-fitting.
+    """
+    lls: dict = {}
+    betas: dict = {}
+    for knob in knobs:
+        if method == "stm":
+            beta_hat = stm_cofit_beta(train_docs, K, V, c=knob, n_em_iter=n_em_iter, seed=seed)
+            ll = stm_heldout_ll(test_docs, beta_hat, c=knob, holdout_frac=holdout_frac, seed=seed)
+        elif method == "lda":
+            beta_hat, _ = lda_cofit_beta(train_docs, K, V, alpha=knob, n_em_iter=n_em_iter, seed=seed)
+            ll = lda_heldout_ll(test_docs, beta_hat, alpha=knob, holdout_frac=holdout_frac, seed=seed)
+        else:
+            raise ValueError(f"sweep_heldout_cofit: unknown method {method!r}")
+        lls[knob] = ll
+        betas[knob] = beta_hat
+    argmax_knob = max(lls, key=lls.get)
+    return {"lls": lls, "argmax_knob": argmax_knob, "beta_hat": betas}

@@ -364,3 +364,134 @@ class TestLDAHeldoutLLSmoke:
         assert set(result["lls"].keys()) == {0.1, 1.0}
         assert len(result["lls"]) == 2
         assert result["argmax_knob"] in (0.1, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# CO-FIT-beta extension (CR-4): learn beta rather than freeze it at truth.
+# ---------------------------------------------------------------------------
+from spark_vi.eval.topic.concentration_recovery import (  # noqa: E402
+    beta_recovery_error,
+    beta_sharpness,
+    lda_cofit_beta,
+    stm_cofit_beta,
+    sweep_heldout_cofit,
+)
+
+
+class TestBetaRecoveryError:
+    def test_identical_beta_is_zero_error(self):
+        beta = make_shared_beta(K=5, V=120, seed=1)
+        out = beta_recovery_error(beta, beta)
+        assert out["mean_l1"] == pytest.approx(0.0, abs=1e-12)
+        assert out["mean_cos_dist"] == pytest.approx(0.0, abs=1e-12)
+
+    def test_permutation_invariant(self):
+        # Shuffling the recovered topic rows must not change the matched error:
+        # the Hungarian assignment undoes the permutation.
+        beta = make_shared_beta(K=6, V=150, seed=2)
+        rng = np.random.default_rng(0)
+        perm = rng.permutation(6)
+        base = beta_recovery_error(beta, beta.copy())
+        shuffled = beta_recovery_error(beta, beta[perm])
+        assert shuffled["mean_l1"] == pytest.approx(base["mean_l1"], abs=1e-12)
+        assert shuffled["mean_cos_dist"] == pytest.approx(base["mean_cos_dist"], abs=1e-12)
+        # And the recovered assignment is the inverse permutation.
+        col = np.array(shuffled["col_ind"])
+        row = np.array(shuffled["row_ind"])
+        np.testing.assert_array_equal(perm[col], row)
+
+
+class TestBetaSharpness:
+    def test_sharper_beta_reads_sharper(self):
+        # A near-one-hot topic matrix must have higher top_k_mass and lower
+        # eff_vocab than a near-uniform one.
+        K, V = 4, 200
+        peaky = np.full((K, V), 1e-6)
+        for k in range(K):
+            peaky[k, k] = 1.0
+        peaky /= peaky.sum(axis=1, keepdims=True)
+        uniform = np.full((K, V), 1.0 / V)
+
+        sp = beta_sharpness(peaky, top_k=5)
+        su = beta_sharpness(uniform, top_k=5)
+        assert sp["top_k_mass"] > su["top_k_mass"]
+        assert sp["eff_vocab"] < su["eff_vocab"]
+        # uniform eff_vocab ~ V; peaky eff_vocab ~ 1.
+        assert su["eff_vocab"] == pytest.approx(V, rel=0.05)
+        assert sp["eff_vocab"] < 2.0
+
+
+class TestCofitBeta:
+    def test_stm_cofit_recovers_planted_beta_better_than_random(self):
+        # On an easy clean regime, co-fit STM beta should match the planted
+        # topics far better than a random stochastic matrix (permutation-
+        # invariant cosine distance).
+        K, V = 6, 200
+        beta = make_shared_beta(K, V, seed=0)
+        docs, _ = plant_corpus(
+            beta, D=250, doc_len=60, mechanism="logistic_normal", level=4, seed=1,
+        )
+        beta_hat = stm_cofit_beta(docs, K, V, c=4, n_em_iter=40, seed=0)
+        assert beta_hat.shape == (K, V)
+        np.testing.assert_allclose(beta_hat.sum(axis=1), np.ones(K), atol=1e-9)
+
+        rng = np.random.default_rng(3)
+        rand = rng.random((K, V))
+        rand /= rand.sum(axis=1, keepdims=True)
+
+        fit_err = beta_recovery_error(beta, beta_hat)["mean_cos_dist"]
+        rand_err = beta_recovery_error(beta, rand)["mean_cos_dist"]
+        assert fit_err < rand_err
+        assert fit_err < 0.3
+
+    def test_lda_cofit_alpha_opt_changes_alpha(self):
+        K, V = 6, 200
+        beta = make_shared_beta(K, V, seed=0)
+        docs, _ = plant_corpus(
+            beta, D=200, doc_len=60, mechanism="dirichlet", level=0.3, seed=1,
+        )
+        beta_hat, alpha = lda_cofit_beta(
+            docs, K, V, alpha=1.0, n_em_iter=30, seed=0, optimize_alpha=True,
+        )
+        assert beta_hat.shape == (K, V)
+        np.testing.assert_allclose(beta_hat.sum(axis=1), np.ones(K), atol=1e-9)
+        # Empirical-Bayes should move alpha away from its init on peaky data.
+        assert alpha.shape == (K,)
+        assert not np.allclose(alpha, 1.0)
+        assert (alpha >= 1e-3).all()
+
+
+class TestSweepHeldoutCofit:
+    def test_stm_cofit_sweep_smoke(self):
+        K, V = 5, 120
+        beta = make_shared_beta(K, V, seed=0)
+        train, _ = plant_corpus(
+            beta, D=120, doc_len=50, mechanism="logistic_normal", level=4, seed=1,
+        )
+        test, _ = plant_corpus(
+            beta, D=60, doc_len=50, mechanism="logistic_normal", level=4, seed=2,
+        )
+        out = sweep_heldout_cofit(
+            train, test, K, V, method="stm", knobs=[2, 5], n_em_iter=15, seed=0,
+        )
+        assert set(out["lls"].keys()) == {2, 5}
+        assert out["argmax_knob"] in (2, 5)
+        assert all(np.isfinite(v) and v < 0 for v in out["lls"].values())
+        assert set(out["beta_hat"].keys()) == {2, 5}
+        for b in out["beta_hat"].values():
+            assert b.shape == (K, V)
+
+    def test_lda_cofit_sweep_smoke(self):
+        K, V = 5, 120
+        beta = make_shared_beta(K, V, seed=0)
+        train, _ = plant_corpus(
+            beta, D=120, doc_len=50, mechanism="dirichlet", level=0.3, seed=1,
+        )
+        test, _ = plant_corpus(
+            beta, D=60, doc_len=50, mechanism="dirichlet", level=0.3, seed=2,
+        )
+        out = sweep_heldout_cofit(
+            train, test, K, V, method="lda", knobs=[0.1, 1.0], n_em_iter=15, seed=0,
+        )
+        assert out["argmax_knob"] in (0.1, 1.0)
+        assert all(np.isfinite(v) for v in out["lls"].values())
