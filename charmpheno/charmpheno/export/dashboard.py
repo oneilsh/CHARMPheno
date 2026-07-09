@@ -203,7 +203,9 @@ def write_phenotypes_bundle(
       null_band
         pooled corpus null-band summary dict (mean, std, n, hist, p95),
         passed through unchanged — descriptive only, NOT what presence is
-        tested against (presence is a per-document paired test; see
+        tested against (the exported presence is the fraction of a topic's docs
+        with Delta_k > 0; the paired permuted-null test is the separate,
+        un-exported presence_vs_null diagnostic — see
         ``corpus_predictive_gain_gated``'s docstring).
       observed_delta_range
         [min, max] Delta_k actually observed in the corpus that produced

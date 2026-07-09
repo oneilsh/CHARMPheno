@@ -28,7 +28,7 @@ class DashboardExport:
     # observed_delta_range, prominence_bin_edges, the downdate audit, the
     # generative scale used, and n_docs) are NOT carried on this dataclass —
     # they pass straight from the build phase to write_phenotypes_bundle.
-    presence: np.ndarray | None = field(default=None)        # K_display; fraction of a topic's documents whose Delta_k beats that doc's own permuted-null max
+    presence: np.ndarray | None = field(default=None)        # K_display; fraction of a topic's documents with Delta_k > 0 (positive held-out gain over the background baseline). NOT the paired permuted-null test — that is the separate, un-exported presence_vs_null diagnostic (see corpus_predictive_gain_gated)
     mean_gain: np.ndarray | None = field(default=None)       # K_display; mean per-doc held-out predictive gain Delta_k
     depth: np.ndarray | None = field(default=None)           # K_display; topic k's share of total held-out predictive structure across its documents
     prominence_hist: np.ndarray | None = field(default=None)  # K_display × n_bins; per-topic Delta_k histogram
