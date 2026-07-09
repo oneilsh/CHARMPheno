@@ -728,8 +728,8 @@ def main(argv: list[str] | None = None) -> int:
         # shipped; 0.8/0.95 probe robustness as the visible token set shrinks toward
         # the small-seed regime) and SHIP the smoothed c* at holdout=0.5. ENHANCEMENT
         # only: any failure (pre-Task-1 checkpoint, cache miss -> stm_cov_df is None,
-        # E-step error) leaves eta_scale=None (dashboard falls back to eta_var, then
-        # unit R) and the histogram falls back to scale=1.0. Reuses the already-loaded
+        # E-step error) leaves eta_scale=None (dashboard falls back to unit R) and
+        # the histogram falls back to scale=1.0. Reuses the already-loaded
         # bow_df (frozen fit vocab) + the sidecar cov_df -> no new scan.
         eta_scale = None
         eta_scale_diag = None
@@ -830,7 +830,7 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # enhancement-only: never fatal
                 log.warning("STM: eta_scale held-out calibration failed (%s); "
                             "correlation.json omits eta_scale (dashboard falls "
-                            "back to eta_var/unit-diagonal R) and the theta "
+                            "back to unit-diagonal R) and the theta "
                             "histogram falls back to scale=1.0.", exc)
                 eta_scale = None
                 eta_scale_diag = None
@@ -1129,7 +1129,6 @@ def main(argv: list[str] | None = None) -> int:
                 descriptions=descriptions, domains=domains,
                 code_marginals=stats.code_marginals,
                 top_n=args.vocab_top_n,
-                sigma=export.sigma,
             )
             if export.theta_histogram is not None:
                 # NaN-suppressed bins → None for JSON serialization
@@ -1257,7 +1256,7 @@ def main(argv: list[str] | None = None) -> int:
                         # We simply SHIP the precomputed values here -- no recompute.
                         # They are None if that phase's guard failed or its
                         # calibration raised, in which case the key is omitted and
-                        # the dashboard falls back to eta_var, then unit R.
+                        # the dashboard falls back to unit R.
                         corr = build_correlation_json(
                             R, ident, n_pairs, stm_partition, kept_ids,
                             reference_id=reference_id, eta_scale=eta_scale,

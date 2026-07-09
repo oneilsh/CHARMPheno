@@ -137,75 +137,6 @@ describe('sampleConditionedTheta', () => {
   })
 })
 
-describe('buildGenerativeSigma', () => {
-  it('with eta_var absent and concentration=1 returns exactly the R sub-block', () => {
-    const corr: Correlation = {
-      topic_order: [3, 1, 2], block_labels: ['background', 'background', 'background'],
-      R: [
-        [1, 0.4, -0.2],
-        [0.4, 1, 0.15],
-        [-0.2, 0.15, 1],
-      ],
-      identified: [[true, true, true], [true, true, true], [true, true, true]],
-      support: [[9, 9, 9], [9, 9, 9], [9, 9, 9]],
-      reference_topic: 0,
-    }
-    const freeIdx = [0, 1, 2]
-    const Sigma = buildGenerativeSigma(corr, freeIdx)
-    for (let i = 0; i < 3; i++)
-      for (let j = 0; j < 3; j++)
-        expect(Sigma[i][j]).toBe(corr.R[i][j])
-  })
-
-  it('scales off-diagonal and diagonal entries by sqrt(var) products', () => {
-    const corr: Correlation = {
-      topic_order: [1, 2], block_labels: ['background', 'background'],
-      R: [[1, 0.5], [0.5, 1]],
-      identified: [[true, true], [true, true]],
-      support: [[9, 9], [9, 9]],
-      reference_topic: 0,
-      eta_var: [2, 8], // positional, aligned to R rows (same indexing as R)
-    }
-    const freeIdx = [0, 1]
-    const Sigma = buildGenerativeSigma(corr, freeIdx)
-    // s0 = sqrt(2), s1 = sqrt(8)
-    const s0 = Math.sqrt(2)
-    const s1 = Math.sqrt(8)
-    expect(Sigma[0][0]).toBeCloseTo(1 * s0 * s0, 10)
-    expect(Sigma[1][1]).toBeCloseTo(1 * s1 * s1, 10)
-    expect(Sigma[0][1]).toBeCloseTo(0.5 * s0 * s1, 10)
-  })
-
-  it('indexes eta_var positionally (aligned to R rows), not by display id', () => {
-    // topic_order maps positional rows 0,1,2 -> display ids 2,3,4 (non-identity;
-    // reference topic 0 excluded). eta_var is POSITIONAL: row 0 var 100, row 1
-    // var 4, row 2 var 9.
-    const correlation = {
-      topic_order: [2, 3, 4],
-      reference_topic: 0,
-      R: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], // identity -> Sigma diagonal = eta_var exactly
-      eta_var: [100, 4, 9],
-      identified: [[true, true, true], [true, true, true], [true, true, true]],
-      support: [[9, 9, 9], [9, 9, 9], [9, 9, 9]],
-      block_labels: ['background', 'background', 'background'],
-    } as unknown as Correlation
-    const Sigma = buildGenerativeSigma(correlation, [0, 1, 2])
-    // Positional indexing REQUIRED: diagonal must equal eta_var[r] (not eta_var[topic_order[r]]).
-    expect(Sigma[0][0]).toBeCloseTo(100) // BUG yields R[0][0]*ev[topic_order[0]=2]=9
-    expect(Sigma[1][1]).toBeCloseTo(4)   // BUG yields ev[3]=undefined -> 1
-    expect(Sigma[2][2]).toBeCloseTo(9)   // BUG yields ev[4]=undefined -> 1
-
-    // Off-diagonal check with a non-identity R entry pins the sqrt(var_a*var_b)
-    // scaling to the right rows.
-    const correlationOffDiag = {
-      ...correlation,
-      R: [[1, 0.5, 0], [0.5, 1, 0], [0, 0, 1]],
-    } as unknown as Correlation
-    const SigmaOffDiag = buildGenerativeSigma(correlationOffDiag, [0, 1, 2])
-    expect(SigmaOffDiag[0][1]).toBeCloseTo(0.5 * Math.sqrt(100 * 4))
-  })
-})
-
 describe('buildGenerativeSigma eta_scale', () => {
   it('with eta_scale present, Sigma = eta_scale * R (s_k = sqrt(eta_scale) for every free row)', () => {
     const corr: Correlation = {
@@ -225,24 +156,7 @@ describe('buildGenerativeSigma eta_scale', () => {
     expect(Sigma[1][0]).toBeCloseTo(0.5 * 4.0, 10)
   })
 
-  it('eta_scale WINS over eta_var when both are present', () => {
-    const corr: Correlation = {
-      topic_order: [1, 2], block_labels: ['background', 'background'],
-      R: [[1, 0.5], [0.5, 1]],
-      identified: [[true, true], [true, true]],
-      support: [[9, 9], [9, 9]],
-      reference_topic: 0,
-      eta_var: [2, 8],   // would give s0=sqrt(2), s1=sqrt(8) if used
-      eta_scale: 9.0,    // must win: s_k = sqrt(9) = 3 for every row
-    }
-    const freeIdx = [0, 1]
-    const Sigma = buildGenerativeSigma(corr, freeIdx)
-    expect(Sigma[0][0]).toBeCloseTo(1 * 9.0, 10)
-    expect(Sigma[1][1]).toBeCloseTo(1 * 9.0, 10)
-    expect(Sigma[0][1]).toBeCloseTo(0.5 * 9.0, 10)
-  })
-
-  it('with eta_scale AND eta_var absent, Sigma is byte-identical to R', () => {
+  it('with eta_scale absent, Sigma is byte-identical to R (unit fallback)', () => {
     const corr: Correlation = {
       topic_order: [3, 1, 2], block_labels: ['background', 'background', 'background'],
       R: [
@@ -263,9 +177,9 @@ describe('buildGenerativeSigma eta_scale', () => {
 })
 
 describe('sampleConditionedTheta eta_scale', () => {
-  // Mirrors the eta_var concentration test shape: a large pooled eta_scale
-  // should visibly concentrate theta onto fewer topics relative to eta_scale
-  // absent (unit fallback).
+  // A K=3 fixture (reference 0, free topics 1,2 with positive correlation):
+  // a large pooled eta_scale should visibly concentrate theta onto fewer
+  // topics relative to eta_scale absent (unit fallback).
   function meanTopMass(etaScale: number | undefined, seed: number): number {
     const effects: CovariateEffects = [{ covariate: 'Intercept', per_topic: [0, 0, 0] }]
     const corr: Correlation = {
@@ -294,43 +208,5 @@ describe('sampleConditionedTheta eta_scale', () => {
     const largeScale = meanTopMass(10, 101)
     expect(largeScale).toBeGreaterThan(noScale)
     expect(largeScale).toBeGreaterThan(0.6)
-  })
-})
-
-describe('sampleConditionedTheta eta_var', () => {
-  // A K=3 fixture (reference 0, free topics 1,2 with positive correlation)
-  // where a large exported eta_var should visibly concentrate theta onto
-  // fewer topics relative to eta_var absent (unit fallback): track the mean
-  // top-topic (max) mass over many draws.
-  function meanTopMass(etaVar: number[] | undefined, seed: number): number {
-    const effects: CovariateEffects = [{ covariate: 'Intercept', per_topic: [0, 0, 0] }]
-    const corr: Correlation = {
-      topic_order: [1, 2], block_labels: ['background', 'background'],
-      R: [[1, 0.3], [0.3, 1]],
-      identified: [[true, true], [true, true]],
-      support: [[9, 9], [9, 9]],
-      reference_topic: 0,
-      eta_var: etaVar,
-    }
-    const rng = createRng(seed)
-    const N = 3000
-    let sumTop = 0
-    for (let i = 0; i < N; i++) {
-      const theta = sampleConditionedTheta({
-        effects, x: [1], correlation: corr, topicBlocks: null, group: null,
-        rng,
-      })
-      sumTop += Math.max(...theta)
-    }
-    return sumTop / N
-  }
-
-  it('a large exported eta_var produces more concentrated draws than eta_var absent', () => {
-    const noVar = meanTopMass(undefined, 101)
-    const largeVar = meanTopMass([10, 10], 101)
-    expect(largeVar).toBeGreaterThan(noVar)
-    // Sanity: the large-variance draws should push the average top mass well
-    // above uniform-over-3 (1/3) towards near-deterministic per draw.
-    expect(largeVar).toBeGreaterThan(0.6)
   })
 })

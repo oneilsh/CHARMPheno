@@ -20,7 +20,6 @@ class DashboardExport:
     theta_histogram: np.ndarray | None = field(default=None)   # K_display × n_bins; np.nan = suppressed (use np.nansum to aggregate); None for HDP/legacy
     theta_percentiles: np.ndarray | None = field(default=None)  # K_display × 5 in [p5, p25, p50, p75, p95] column order; None for HDP/legacy
     topic_blocks: list | None = field(default=None)             # block label per displayed topic (aligned to topic_indices); None when no partition
-    sigma: np.ndarray | None = field(default=None)              # K_display per-topic logistic-normal prior variance (STM only; None for LDA/HDP). For the faithful dashboard sampler — ADR 0028 Alternative B.
     # --- Predictive-gain aggregates (PROVISIONAL schema, Phase-2 of the
     # predictive-gain metric; see spark_vi.mllib.topic.predictive_gain). All
     # K_display-aligned to topic_indices, same convention as theta_histogram.
@@ -206,12 +205,6 @@ def adapt_stm(result, *, corpus_prevalence: np.ndarray | None = None,
     beta = beta_full[kept]
     alpha = alpha_eq[kept]
     corpus_prev = corpus_prev[kept]
-    # Per-topic logistic-normal prior variance (diagonal Σ), subset to kept
-    # topics, for the faithful dashboard sampler (ADR 0028-B). Optional: absent
-    # on pre-Σ checkpoints (and on LDA/HDP), in which case it stays None.
-    sigma_full = gp.get("Sigma")
-    sigma = (np.asarray(sigma_full, dtype=np.float64)[kept]
-             if sigma_full is not None else None)
     # Non-renormalization after subsetting suppressed topics is intentional and
     # mirrors HDP top-K behavior: corpus_prevalence is a per-topic display
     # quantity (fraction of patients expressing topic k), not a distribution, so
@@ -229,7 +222,7 @@ def adapt_stm(result, *, corpus_prevalence: np.ndarray | None = None,
         beta=beta, alpha=alpha, corpus_prevalence=corpus_prev,
         topic_indices=np.array(kept, dtype=np.int64),
         theta_histogram=theta_histogram, theta_percentiles=theta_percentiles,
-        topic_blocks=topic_blocks, sigma=sigma,
+        topic_blocks=topic_blocks,
     )
 
 

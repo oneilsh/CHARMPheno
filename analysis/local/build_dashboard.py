@@ -296,8 +296,8 @@ def main(argv: list[str] | None = None) -> int:
             # c is a multiplicative scale). We sweep 3 holdout fractions (0.5 shipped; 0.8/
             # 0.95 probe robustness as the visible token set shrinks toward the small-seed
             # regime) and SHIP the smoothed c* at holdout=0.5. ENHANCEMENT only: any failure
-            # leaves eta_scale=None and the key is omitted (dashboard falls back to eta_var,
-            # then unit R). Reuses the loaded bow_df (frozen fit vocab) joined with the local
+            # leaves eta_scale=None and the key is omitted (dashboard falls back to
+            # unit R). Reuses the loaded bow_df (frozen fit vocab) joined with the local
             # covariate sidecar.
             eta_scale = None
             eta_scale_diag = None
@@ -389,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # enhancement-only: never fatal
                 log.warning("STM: eta_scale held-out calibration failed (%s); "
                             "correlation.json omits eta_scale (dashboard falls "
-                            "back to eta_var/unit R).", exc)
+                            "back to unit R).", exc)
                 eta_scale = None
                 eta_scale_diag = None
 
@@ -712,7 +712,6 @@ def main(argv: list[str] | None = None) -> int:
         vocab_ids=vocab_ids, descriptions=descriptions, domains=domains,
         code_marginals=stats.code_marginals,
         top_n=args.vocab_top_n,
-        sigma=export.sigma,
     )
     if export.theta_histogram is not None:
         # NaN-suppressed bins → None for JSON serialization
