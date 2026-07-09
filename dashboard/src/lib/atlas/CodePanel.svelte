@@ -59,14 +59,15 @@
   // per-phenotype so the tip is built here rather than in copy.ts. The overlay
   // (.app-tip) is white-space: pre-wrap, so the blank-line separators render.
   function gainDetailTip(p: {
-    presence?: number | null; depth?: number | null
-    dedup_gain?: number | null; length_corr?: number | null
+    presence?: number | null; presence_beats_zero?: number | null
+    depth?: number | null; dedup_gain?: number | null; length_corr?: number | null
   }): string {
     const pct = (v?: number | null) => (v == null || Number.isNaN(v)) ? '—' : (v * 100).toFixed(0) + '%'
     const nats = (v?: number | null) => (v == null || Number.isNaN(v)) ? '—' : v.toFixed(2) + ' nats'
     const corr = (v?: number | null) => (v == null || Number.isNaN(v)) ? '—' : v.toFixed(2)
     return [
-      `Presence: ${pct(p.presence)} — the share of this phenotype's patients who gain real held-out predictive signal from it (per-patient predictive gain > 0, i.e. it beats the background baseline). "How widely it helps." Note this is a per-patient point estimate thresholded at 0, not a significance test.`,
+      `Presence: ${pct(p.presence)} — the share of this phenotype's patients for whom it adds signal that beats noise: the per-patient held-out gain exceeds that patient's own permuted-topic null (a per-patient permutation test — "statistically present," not merely a positive point estimate). "How widely it genuinely helps."`,
+      `Beats-zero: ${pct(p.presence_beats_zero)} — the looser companion: the share with any positive per-patient gain (> 0), no null test. If this sits well above Presence, many of those positive estimates are inside the noise.`,
       `Depth: ${pct(p.depth)} — this phenotype's share of the total unique predictive structure across those patients (a broad phenotype others overlap scores low; a niche one nothing else explains scores high). "How much."`,
       `Dedup gain: ${nats(p.dedup_gain)} — the mean held-out gain with repeated codes capped at 1, so a few bursty codes can't inflate it.`,
       `Length corr: ${corr(p.length_corr)} — correlation of per-patient gain with record length (a confound check: a high value means the signal mostly tracks how much data a patient has).`,

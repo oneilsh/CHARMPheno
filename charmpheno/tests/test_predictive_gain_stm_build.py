@@ -121,7 +121,10 @@ def test_stm_predictive_gain_end_to_end(spark, tmp_path):
     def _nan_to_none(arr):
         return [None if np.isnan(v) else float(v) for v in arr.tolist()]
 
-    presence = _nan_to_none(pg["presence"])
+    # Mirror the driver's export-boundary mapping: the shipped `presence` is the
+    # permuted-null test, and beats-zero ships as the presence_beats_zero diagnostic.
+    presence = _nan_to_none(pg["presence_vs_null"])
+    presence_beats_zero = _nan_to_none(pg["presence"])
     mean_gain = _nan_to_none(pg["mean_gain"])
     depth = _nan_to_none(pg["depth"])
     length_corr = _nan_to_none(pg["length_corr"])
@@ -145,6 +148,7 @@ def test_stm_predictive_gain_end_to_end(spark, tmp_path):
         topic_indices=list(range(K)),
         labels=None,
         presence=presence,
+        presence_beats_zero=presence_beats_zero,
         mean_gain=mean_gain,
         depth=depth,
         prominence_hist=prominence_hist,
@@ -162,6 +166,7 @@ def test_stm_predictive_gain_end_to_end(spark, tmp_path):
 
     pgj = payload["predictive_gain"]
     assert len(pgj["presence"]) == K
+    assert len(pgj["presence_beats_zero"]) == K
     assert len(pgj["mean_gain"]) == K
     assert len(pgj["depth"]) == K
     assert len(pgj["prominence_hist"]) == K
@@ -265,7 +270,10 @@ def test_stm_predictive_gain_end_to_end_with_marginal(spark, tmp_path):
     def _nan_to_none(arr):
         return [None if np.isnan(v) else float(v) for v in arr.tolist()]
 
-    presence = _nan_to_none(pg["presence"])
+    # Mirror the driver's export-boundary mapping: the shipped `presence` is the
+    # permuted-null test, and beats-zero ships as the presence_beats_zero diagnostic.
+    presence = _nan_to_none(pg["presence_vs_null"])
+    presence_beats_zero = _nan_to_none(pg["presence"])
     mean_gain = _nan_to_none(pg["mean_gain"])
     depth = _nan_to_none(pg["depth"])
     length_corr = _nan_to_none(pg["length_corr"])
@@ -289,6 +297,7 @@ def test_stm_predictive_gain_end_to_end_with_marginal(spark, tmp_path):
         topic_indices=list(range(K)),
         labels=None,
         presence=presence,
+        presence_beats_zero=presence_beats_zero,
         mean_gain=mean_gain,
         depth=depth,
         prominence_hist=prominence_hist,
@@ -306,6 +315,7 @@ def test_stm_predictive_gain_end_to_end_with_marginal(spark, tmp_path):
 
     pgj = payload["predictive_gain"]
     assert "presence" in pgj and len(pgj["presence"]) == K
+    assert "presence_beats_zero" in pgj and len(pgj["presence_beats_zero"]) == K
     assert "null_band" in pgj
     assert "downdate_audit" in pgj
     assert pgj["downdate_audit"]["n_docs_audited"] == audit["n_docs_audited"]

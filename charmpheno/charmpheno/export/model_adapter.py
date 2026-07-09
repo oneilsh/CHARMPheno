@@ -28,7 +28,8 @@ class DashboardExport:
     # observed_delta_range, prominence_bin_edges, the downdate audit, the
     # generative scale used, and n_docs) are NOT carried on this dataclass —
     # they pass straight from the build phase to write_phenotypes_bundle.
-    presence: np.ndarray | None = field(default=None)        # K_display; fraction of a topic's documents with Delta_k > 0 (positive held-out gain over the background baseline). NOT the paired permuted-null test — that is the separate, un-exported presence_vs_null diagnostic (see corpus_predictive_gain_gated)
+    presence: np.ndarray | None = field(default=None)        # K_display; the SHIPPED presence — fraction of a topic's documents where per-doc Delta_k beats that doc's own permuted-topic null (a per-doc permutation test, "statistically present" rather than merely >0). Sourced at the export boundary from the library's presence_vs_null (see corpus_predictive_gain_gated); presence_beats_zero is the looser companion diagnostic.
+    presence_beats_zero: np.ndarray | None = field(default=None)  # K_display; DIAGNOSTIC companion to presence — the looser fraction of a topic's docs with Delta_k > 0 (positive gain over the background baseline, no null test). Sourced from the library's `presence`. Kept so the dashboard can show both and reveal whether the permuted null actually collapsed to ~0 on the real corpus.
     mean_gain: np.ndarray | None = field(default=None)       # K_display; mean per-doc held-out predictive gain Delta_k
     depth: np.ndarray | None = field(default=None)           # K_display; topic k's share of total held-out predictive structure across its documents
     prominence_hist: np.ndarray | None = field(default=None)  # K_display × n_bins; per-topic Delta_k histogram

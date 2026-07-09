@@ -53,6 +53,8 @@ function hydratePredictiveGain(phenotypes: PhenotypesBundle): void {
     ['length_corr', pg.length_corr],
     ['dedup_gain', pg.dedup_gain],
   ]
+  // Optional on older bundles — only length-check it when present.
+  if (pg.presence_beats_zero) perTopicArrays.push(['presence_beats_zero', pg.presence_beats_zero])
   const mismatched = perTopicArrays.filter(([, arr]) => arr.length !== n)
   if (mismatched.length > 0) {
     console.warn(
@@ -63,6 +65,7 @@ function hydratePredictiveGain(phenotypes: PhenotypesBundle): void {
   }
   phenotypes.phenotypes.forEach((p, i) => {
     p.presence = pg.presence[i]
+    p.presence_beats_zero = pg.presence_beats_zero?.[i] ?? undefined
     p.mean_gain = pg.mean_gain[i]
     p.depth = pg.depth[i]
     p.prominence_hist = pg.prominence_hist[i] ?? undefined

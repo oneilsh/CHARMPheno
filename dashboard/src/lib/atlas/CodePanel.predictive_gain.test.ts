@@ -14,6 +14,7 @@ beforeEach(() => {
 
 const PG: PredictiveGain = {
   presence: [0.5, 0.6, 0.7],
+  presence_beats_zero: [0.8, 0.9, 0.95],
   mean_gain: [0.01, 0.02, 0.03],
   depth: [0.1, 0.2, 0.3],
   prominence_hist: [[0.4, 0.6], [0.3, 0.7], [0.5, 0.5]],
@@ -80,23 +81,28 @@ it('advanced view shows a Distinctiveness stat (mean_gain) and a Presence chip; 
     ;(p as any).depth = PG.depth[i]
     ;(p as any).dedup_gain = PG.dedup_gain[i]
     ;(p as any).length_corr = PG.length_corr[i]
+    ;(p as any).presence_beats_zero = PG.presence_beats_zero![i]
   })
   bundle.set(b)
   const { queryByText, container } = render(CodePanel)   // advancedView is true (beforeEach)
   expect(queryByText('Distinctiveness')).toBeTruthy()
-  // Presence is now a first-class chip (value = presence %); phenotype 1 -> 60%.
+  // Presence is now a first-class chip (value = the null-test presence %);
+  // phenotype 1 -> 60%.
   expect(queryByText('Presence')).toBeTruthy()
   expect(queryByText('60%')).toBeTruthy()
-  // Depth/dedup/length are NOT standalone visible chips — they live in the
-  // Presence chip's hover (title attribute), so no visible "Depth" text.
+  // Depth/dedup/length/beats-zero are NOT standalone visible chips — they live
+  // in the Presence chip's hover, so no visible "Depth" text.
   expect(queryByText('Depth')).toBeNull()
   // data-tip (NOT title): dynamic per-phenotype tip must bypass the title->
   // data-tip caching so it can't desync from the native tooltip on reselect.
   const presenceChip = container.querySelector('span.stat[data-tip*="Depth:"]')
   expect(presenceChip).toBeTruthy()
   expect(presenceChip!.getAttribute('title')).toBeNull()
-  expect(presenceChip!.getAttribute('data-tip')).toContain('Dedup gain:')
-  expect(presenceChip!.getAttribute('data-tip')).toContain('Length corr:')
+  const tip = presenceChip!.getAttribute('data-tip')!
+  expect(tip).toContain('Dedup gain:')
+  expect(tip).toContain('Length corr:')
+  // The looser beats-zero diagnostic is bundled in the same hover.
+  expect(tip).toContain('Beats-zero:')
 })
 
 it('basic view hides the Distinctiveness stat', () => {

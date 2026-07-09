@@ -40,6 +40,7 @@ def test_write_phenotypes_bundle_predictive_gain_well_formed(tmp_path: Path):
     K = 3
     n_bins = 5
     presence = [0.1, 0.4, float("nan")]
+    presence_beats_zero = [0.3, 0.6, float("nan")]
     mean_gain = [0.02, 0.5, -0.1]
     depth = [0.05, 0.6, float("nan")]
     prominence_hist = [
@@ -60,6 +61,7 @@ def test_write_phenotypes_bundle_predictive_gain_well_formed(tmp_path: Path):
         pair_coverage=[0.9, 0.8, 0.7],
         corpus_prevalence=[0.5, 0.3, 0.2],
         presence=presence,
+        presence_beats_zero=presence_beats_zero,
         mean_gain=mean_gain,
         depth=depth,
         prominence_hist=prominence_hist,
@@ -78,6 +80,7 @@ def test_write_phenotypes_bundle_predictive_gain_well_formed(tmp_path: Path):
 
     pg = payload["predictive_gain"]
     assert len(pg["presence"]) == K
+    assert len(pg["presence_beats_zero"]) == K
     assert len(pg["mean_gain"]) == K
     assert len(pg["depth"]) == K
     assert len(pg["prominence_hist"]) == K
@@ -87,6 +90,8 @@ def test_write_phenotypes_bundle_predictive_gain_well_formed(tmp_path: Path):
 
     # NaN -> None (json null), not the literal NaN token.
     assert pg["presence"][2] is None
+    assert pg["presence_beats_zero"][2] is None
+    assert pg["presence_beats_zero"][0] == pytest.approx(0.3)
     assert pg["depth"][2] is None
     assert pg["length_corr"][1] is None
     assert pg["prominence_hist"][2][0] is None

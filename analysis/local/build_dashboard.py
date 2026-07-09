@@ -652,9 +652,15 @@ def main(argv: list[str] | None = None) -> int:
                 pg_downdate_audit = None
 
             kept = export.topic_indices.tolist()
+            # Export-boundary headline choice: the dashboard's `presence` is the
+            # permuted-null test (library `presence_vs_null`, "statistically
+            # present"); the looser beats-zero fraction (library `presence`) is
+            # shipped as the `presence_beats_zero` diagnostic so the UI can show
+            # both and reveal whether the null actually collapsed to ~0.
             export = _dc_replace(
                 export,
-                presence=pg["presence"][kept],
+                presence=pg["presence_vs_null"][kept],
+                presence_beats_zero=pg["presence"][kept],
                 mean_gain=pg["mean_gain"][kept],
                 depth=pg["depth"][kept],
                 prominence_hist=pg["prominence_hist"][kept],
@@ -742,6 +748,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if export.presence is not None:
         pg_presence = _nan_to_none(export.presence)
+        pg_presence_beats_zero = (
+            _nan_to_none(export.presence_beats_zero)
+            if export.presence_beats_zero is not None else None)
         pg_mean_gain = _nan_to_none(export.mean_gain)
         pg_depth = _nan_to_none(export.depth)
         pg_length_corr = _nan_to_none(export.length_corr)
@@ -752,6 +761,7 @@ def main(argv: list[str] | None = None) -> int:
         ]
     else:
         pg_presence = None
+        pg_presence_beats_zero = None
         pg_mean_gain = None
         pg_depth = None
         pg_length_corr = None
@@ -769,6 +779,7 @@ def main(argv: list[str] | None = None) -> int:
         min_count=theta_hist_min_count,
         labels=None,
         presence=pg_presence,
+        presence_beats_zero=pg_presence_beats_zero,
         mean_gain=pg_mean_gain,
         depth=pg_depth,
         prominence_hist=pg_prominence_hist_json,

@@ -23,6 +23,7 @@ export interface Phenotype {
   // display position. Absent entirely on bundles without a
   // `predictive_gain` block (backward-compatible: every reader falls back).
   presence?: number | null
+  presence_beats_zero?: number | null
   mean_gain?: number | null
   depth?: number | null
   length_corr?: number | null
@@ -42,7 +43,8 @@ export interface PhenotypesBundle {
 // array (same [kept] display order) — see bundle.ts for the hydration step
 // that distributes these onto each Phenotype by index.
 export interface PredictiveGain {
-  presence: (number | null)[]
+  presence: (number | null)[]                 // the "statistically present" fraction (per-doc gain beats the doc's own permuted-topic null)
+  presence_beats_zero?: (number | null)[]     // looser diagnostic (per-doc gain > 0, no null test); absent on older bundles
   mean_gain: (number | null)[]
   depth: (number | null)[]
   prominence_hist: (number | null)[][]

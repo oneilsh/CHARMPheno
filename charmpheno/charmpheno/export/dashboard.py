@@ -135,6 +135,7 @@ def write_phenotypes_bundle(
     topic_indices: list[int] | None = None,
     labels: list[str] | None = None,
     presence: list[float] | None = None,
+    presence_beats_zero: list[float] | None = None,
     mean_gain: list[float] | None = None,
     depth: list[float] | None = None,
     prominence_hist: list[list[float | None]] | None = None,
@@ -191,9 +192,14 @@ def write_phenotypes_bundle(
     key at all, so existing bundles are byte-unchanged. Otherwise a single
     top-level ``predictive_gain`` object is written, nesting only the
     pieces actually supplied:
-      presence[k], mean_gain[k], depth[k], length_corr[k], dedup_gain[k]
+      presence[k], presence_beats_zero[k], mean_gain[k], depth[k], length_corr[k], dedup_gain[k]
         length-K per-topic floats (NaN -> JSON null), aligned with
-        ``npmi``/``corpus_prevalence`` (topic_indices order).
+        ``npmi``/``corpus_prevalence`` (topic_indices order). ``presence`` is the
+        SHIPPED "statistically present" fraction (per-doc Delta_k beats the doc's
+        own permuted-topic null); ``presence_beats_zero`` is the looser companion
+        (fraction with Delta_k > 0, no null test). The driver sources these from
+        the library's presence_vs_null and presence respectively — the export
+        chooses the permuted-null test as the dashboard headline (see the drivers).
       prominence_hist[k]
         length-n_bins per-topic histogram of Delta_k (NaN/None entries ->
         JSON null), the aggregate Delta distribution replacing a theta-hat
@@ -201,12 +207,11 @@ def write_phenotypes_bundle(
       prominence_bin_edges
         length n_bins+1 edges shared by every topic's prominence_hist.
       null_band
-        pooled corpus null-band summary dict (mean, std, n, hist, p95),
-        passed through unchanged — descriptive only, NOT what presence is
-        tested against (the exported presence is the fraction of a topic's docs
-        with Delta_k > 0; the paired permuted-null test is the separate,
-        un-exported presence_vs_null diagnostic — see
-        ``corpus_predictive_gain_gated``'s docstring).
+        pooled corpus null-band summary dict (mean, std, n, hist, p95) — the
+        descriptive corpus-wide null distribution. The shipped ``presence`` uses
+        each doc's OWN per-doc permuted-topic null (not this pooled band); the
+        two are related but distinct (see ``corpus_predictive_gain_gated``'s
+        docstring). ``presence_beats_zero`` uses no null at all.
       observed_delta_range
         [min, max] Delta_k actually observed in the corpus that produced
         this bundle — the real-numbers basis for recalibrating
@@ -312,7 +317,7 @@ def write_phenotypes_bundle(
     # or an STM build whose enhancement-only phase failed) leaves the
     # payload byte-unchanged from the pre-existing schema.
     pg_supplied = (
-        presence, mean_gain, depth, prominence_hist, length_corr, dedup_gain,
+        presence, presence_beats_zero, mean_gain, depth, prominence_hist, length_corr, dedup_gain,
         prominence_bin_edges, null_band, observed_delta_range,
         predictive_gain_downdate_audit, predictive_gain_scale,
         predictive_gain_n_docs, predictive_gain_smoothing,
@@ -321,6 +326,8 @@ def write_phenotypes_bundle(
         pg: dict = {}
         if presence is not None:
             pg["presence"] = [_none_if_nan_or_none(v) for v in presence]
+        if presence_beats_zero is not None:
+            pg["presence_beats_zero"] = [_none_if_nan_or_none(v) for v in presence_beats_zero]
         if mean_gain is not None:
             pg["mean_gain"] = [_none_if_nan_or_none(v) for v in mean_gain]
         if depth is not None:
