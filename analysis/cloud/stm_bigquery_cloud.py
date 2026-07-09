@@ -201,10 +201,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--sigma-ridge", type=float, default=1e-6,
                    help="Ridge regularisation added to Sigma diagonal.")
     p.add_argument("--min-pair-support", type=int, default=1,
-                   help="Minimum co-activating documents for a cross-topic covariance "
-                        "entry to be observed; thinner pairs are completed by the "
-                        "pd_complete max-determinant PD completion (zero precision on "
-                        "free entries; robustness + small-cell guard).")
+                   help="Minimum co-activating documents for a cross-topic correlation "
+                        "entry to be estimated; thinner (unsupported) pairs are lazy-kept "
+                        "at their current value, not completed (block-wise unit-diagonal "
+                        "correlation M-step, ADR 0027/0034).")
     p.add_argument("--reference-topic", action=argparse.BooleanOptionalAction,
                    default=True,
                    help="K-1 reference parameterization (default on, insight 0030; "

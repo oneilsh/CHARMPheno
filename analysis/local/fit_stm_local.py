@@ -127,10 +127,10 @@ def main(argv=None) -> int:
     p.add_argument("--min-patient-count", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--min-pair-support", type=int, default=1,
-                   help="Minimum co-activating documents for a cross-topic covariance "
-                        "entry to be observed; thinner pairs are completed by the "
-                        "pd_complete max-determinant PD completion (zero precision on "
-                        "free entries; robustness + small-cell guard).")
+                   help="Minimum co-activating documents for a cross-topic correlation "
+                        "entry to be estimated; thinner (unsupported) pairs are lazy-kept "
+                        "at their current value, not completed (block-wise unit-diagonal "
+                        "correlation M-step, ADR 0027/0034).")
     p.add_argument("--reference-topic", action=argparse.BooleanOptionalAction,
                    default=True,
                    help="K-1 reference parameterization (default on, insight 0030; "
