@@ -282,6 +282,7 @@ class TestStreamingSTMHardeningThreading:
             "min_pair_support": 3,
             "spectral_init": False,
             "spectral_method": "dense",
+            "spectral_method_requested": "auto",
             "estimate_sigma_diagonal": False,
             "estimate_global_scale": False,
             "global_scale_step_cap": 1.2,
@@ -307,6 +308,7 @@ class TestStreamingSTMHardeningThreading:
             "min_pair_support": 1,
             "spectral_init": True,
             "spectral_method": "dense",
+            "spectral_method_requested": "auto",
             "estimate_sigma_diagonal": False,
             "estimate_global_scale": False,
             "global_scale_step_cap": 1.2,
@@ -384,20 +386,47 @@ class TestStreamingSTMHardeningThreading:
         assert model.metadata["stm_hardening"]["spectral_init"] is False
 
     def test_spectral_method_invalid_rejected(self):
-        """spectral_method values outside {"dense", "scalable"} raise ValueError."""
+        """spectral_method values outside {"dense", "scalable", "auto"} raise."""
         from spark_vi.mllib.topic.stm import StreamingSTM
         with pytest.raises(ValueError, match="spectral_method"):
             StreamingSTM(
                 K=4, features_col="features", covariates_col="covariates",
                 covariate_names=["a", "b"], spectral_method="bogus")
 
-    def test_spectral_method_default_is_dense(self):
-        """A default-constructed StreamingSTM stores spectral_method == 'dense'."""
+    def test_spectral_method_default_is_auto(self):
+        """A default-constructed StreamingSTM stores spectral_method == 'auto'
+        (ADR 0037: auto-route dense/scalable by vocab size)."""
         from spark_vi.mllib.topic.stm import StreamingSTM
         est = StreamingSTM(
             K=4, features_col="features", covariates_col="covariates",
             covariate_names=["a", "b"])
-        assert est.spectral_method == "dense"
+        assert est.spectral_method == "auto"
+
+    def test_resolve_spectral_method_auto_below_threshold_is_dense(self):
+        """'auto' resolves to dense below the vocab threshold (ADR 0037)."""
+        from spark_vi.mllib.topic.stm import (
+            resolve_spectral_method, SPECTRAL_AUTO_VOCAB_THRESHOLD)
+        assert resolve_spectral_method("auto", SPECTRAL_AUTO_VOCAB_THRESHOLD - 1) == "dense"
+
+    def test_resolve_spectral_method_auto_at_threshold_is_scalable(self):
+        """'auto' resolves to scalable at/above the vocab threshold (ADR 0037)."""
+        from spark_vi.mllib.topic.stm import (
+            resolve_spectral_method, SPECTRAL_AUTO_VOCAB_THRESHOLD)
+        assert resolve_spectral_method("auto", SPECTRAL_AUTO_VOCAB_THRESHOLD) == "scalable"
+        assert resolve_spectral_method("auto", SPECTRAL_AUTO_VOCAB_THRESHOLD + 5000) == "scalable"
+
+    def test_resolve_spectral_method_explicit_passes_through(self):
+        """Explicit 'dense'/'scalable' ignore the threshold and pass through."""
+        from spark_vi.mllib.topic.stm import resolve_spectral_method
+        # A huge V does NOT flip an explicit 'dense'; a tiny V does NOT flip 'scalable'.
+        assert resolve_spectral_method("dense", 10_000_000) == "dense"
+        assert resolve_spectral_method("scalable", 10) == "scalable"
+
+    def test_resolve_spectral_method_custom_threshold(self):
+        """The threshold is a tunable argument, not hard-wired."""
+        from spark_vi.mllib.topic.stm import resolve_spectral_method
+        assert resolve_spectral_method("auto", 500, threshold=1000) == "dense"
+        assert resolve_spectral_method("auto", 1500, threshold=1000) == "scalable"
 
     def test_spectral_method_scalable_routes_to_scalable_init(
             self, spark, monkeypatch):

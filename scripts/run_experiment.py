@@ -503,8 +503,11 @@ def build_stm_args(
     hardening.append("--reference-topic" if ref else "--no-reference-topic")
     spec = effective.get("spectral_init", True)
     hardening.append("--spectral-init" if spec else "--no-spectral-init")
-    method = effective.get("spectral_method", "dense")
-    if method != "dense":
+    # spectral_method defaults to "auto" (ADR 0037: dense below a vocab threshold,
+    # scalable above). Emit the flag only for an explicit override; "auto" is the
+    # driver default and stays implicit.
+    method = effective.get("spectral_method", "auto")
+    if method != "auto":
         hardening.extend(["--spectral-method", str(method)])
     if effective.get("spectral_d") is not None:
         hardening.extend(["--spectral-d", str(effective["spectral_d"])])

@@ -65,11 +65,11 @@ def test_parse_args_hardening_flags_disabled():
 
 
 def test_parse_args_spectral_method_defaults():
-    """spectral_method defaults to 'dense'; spectral_d and spectral_min_doc_freq
-    default to None and 5 respectively."""
+    """spectral_method defaults to 'auto' (ADR 0037); spectral_d and
+    spectral_min_doc_freq default to None and 5 respectively."""
     from stm_bigquery_cloud import parse_args
     args = parse_args(_REQUIRED_ARGS)
-    assert args.spectral_method == "dense"
+    assert args.spectral_method == "auto"
     assert args.spectral_d is None
     assert args.spectral_min_doc_freq == 5
 

@@ -156,10 +156,12 @@ def main(argv=None) -> int:
                    default=True,
                    help="Anchor-word spectral beta seed (default on, insight 0030; "
                         "--no-spectral-init to disable).")
-    p.add_argument("--spectral-method", choices=["dense", "scalable"], default="dense",
-                   help="Spectral-init co-occurrence method: 'dense' (exact V×V on the "
-                        "driver, the validated default) or 'scalable' (random-projection "
-                        "sketch for large vocabularies).")
+    p.add_argument("--spectral-method", choices=["auto", "dense", "scalable"],
+                   default="auto",
+                   help="Spectral-init co-occurrence method (ADR 0037): 'auto' (default; "
+                        "dense below the ~10k-vocab threshold, scalable at/above it, with "
+                        "a warning on switch), 'dense' (exact V×V on the driver), or "
+                        "'scalable' (random-projection sketch for large vocabularies).")
     p.add_argument("--spectral-d", type=int, default=None,
                    help="Scalable projection dimension (default ~1000 per Mimno/Arora).")
     p.add_argument("--spectral-min-doc-freq", type=int, default=5,

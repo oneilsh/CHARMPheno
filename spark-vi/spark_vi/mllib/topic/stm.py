@@ -25,6 +25,33 @@ from spark_vi.eval.topic.concentration import ConcentrationAcc
 from spark_vi.models.topic.stm import _stm_doc_inference, prior_topic_proportions
 
 
+# Vocabulary size at/above which spectral_method="auto" routes from the dense
+# (exact V×V co-occurrence on the driver) path to the scalable random-projection
+# path. The dense matrix is V×V float64 = 8·V² bytes ≈ 0.8 GB at V=10,000; the
+# threshold sits near a ~1 GB single-matrix driver footprint (peak is a small
+# multiple with per-group matrices). Heuristic memory guard, not a correctness
+# boundary — both paths are correct (ADR 0037, superseding ADR 0032's
+# explicit-knob-only clause). Tunable.
+SPECTRAL_AUTO_VOCAB_THRESHOLD = 10_000
+
+
+def resolve_spectral_method(
+    method: str, vocab_size: int,
+    threshold: int = SPECTRAL_AUTO_VOCAB_THRESHOLD,
+) -> str:
+    """Resolve spectral_method='auto' to 'dense'/'scalable' by vocabulary size.
+
+    'auto' picks dense below `threshold` (exact, validated) and scalable at or
+    above it (random-projection, bounded driver memory; ADR 0037). Explicit
+    'dense'/'scalable' pass through unchanged — the threshold never overrides an
+    explicit choice. Pure and side-effect-free so the routing is unit-testable
+    without a Spark fit.
+    """
+    if method == "auto":
+        return "scalable" if vocab_size >= threshold else "dense"
+    return method
+
+
 def _formula_mentions(group_var: str, covariate_names: list[str]) -> bool:
     """True if group_var appears as a factor in any design-column name,
     e.g. group_var='source_cohort' matches 'C(source_cohort)[T.dementia]'."""
@@ -1271,7 +1298,7 @@ class StreamingSTM:
         global_scale_step_cap: float = 1.2,
         sigma_diagonal_pin: float = 1.0,
         spectral_init: bool = True,
-        spectral_method: str = "dense",          # "dense" | "scalable"
+        spectral_method: str = "auto",           # "auto" | "dense" | "scalable"
         spectral_d: int | None = None,           # scalable projection dim; None => ~1000
         spectral_min_doc_freq: int = 5,          # scalable absolute doc-frequency floor
         topic_blocks=None,
@@ -1324,9 +1351,10 @@ class StreamingSTM:
         # the full ADR 0034 / ADR 0036 rationale.
         self.sigma_diagonal_pin = float(sigma_diagonal_pin)
         self.spectral_init = bool(spectral_init)
-        if spectral_method not in {"dense", "scalable"}:
+        if spectral_method not in {"auto", "dense", "scalable"}:
             raise ValueError(
-                f"spectral_method must be 'dense' or 'scalable', got {spectral_method!r}")
+                "spectral_method must be 'auto', 'dense', or 'scalable', got "
+                f"{spectral_method!r}")
         self.spectral_method = spectral_method
         self.spectral_d = spectral_d
         self.spectral_min_doc_freq = int(spectral_min_doc_freq)
@@ -1479,10 +1507,24 @@ class StreamingSTM:
         # Fine at the cancer scale (V≈3691, ~11k docs → ~18s/109MB); the large-V
         # scalable rewrite (distributed co-occurrence + random projection) is a
         # separate arc (ADR 0032).
+        # Resolve spectral_method="auto" to dense/scalable by vocab size (ADR 0037);
+        # explicit dense/scalable pass through. Resolved unconditionally so metadata
+        # records what would run even when spectral_init is off.
+        resolved_spectral_method = resolve_spectral_method(
+            self.spectral_method, vocab_size)
+        if self.spectral_method == "auto" and resolved_spectral_method == "scalable":
+            log.warning(
+                "spectral_method='auto': vocab_size %d >= %d threshold; routing to "
+                "the scalable random-projection init (dense V×V co-occurrence would "
+                "be ~%.1f GB on the driver). Pass spectral_method='dense' to force "
+                "the exact path.",
+                vocab_size, SPECTRAL_AUTO_VOCAB_THRESHOLD,
+                8.0 * vocab_size * vocab_size / 1e9)
+
         data_summary = None
         if self.spectral_init and resume_from is None:
             partition = model._effective_partition()
-            if self.spectral_method == "scalable":
+            if resolved_spectral_method == "scalable":
                 from spark_vi.models.topic.spectral_init_scalable import (
                     scalable_spectral_init_beta,
                 )
@@ -1519,7 +1561,10 @@ class StreamingSTM:
             "reference_topic": self.reference_topic,
             "min_pair_support": self.min_pair_support,
             "spectral_init": self.spectral_init,
-            "spectral_method": self.spectral_method,
+            # Resolved method = what actually ran (auto -> dense/scalable);
+            # requested = what the caller asked for (ADR 0037).
+            "spectral_method": resolved_spectral_method,
+            "spectral_method_requested": self.spectral_method,
             "estimate_sigma_diagonal": self.estimate_sigma_diagonal,
             "estimate_global_scale": self.estimate_global_scale,
             "global_scale_step_cap": self.global_scale_step_cap,

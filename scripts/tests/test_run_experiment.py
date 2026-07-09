@@ -832,7 +832,8 @@ class TestModelClassDispatch:
     def test_build_stm_args_spectral_method_default_dense_omitted(
             self, tmp_path, monkeypatch):
         """An effective config with no spectral_method key emits neither
-        --spectral-method nor --spectral-d (dense default path stays clean)."""
+        --spectral-method nor --spectral-d (the 'auto' default stays implicit;
+        ADR 0037)."""
         effective = self._base_stm_effective(monkeypatch)
         # Deliberately do NOT set spectral_method / spectral_d / spectral_min_doc_freq.
         args = rx.build_stm_args(effective, str(tmp_path / "out"))
