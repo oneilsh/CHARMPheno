@@ -178,8 +178,14 @@
             </span>
           {/if}
           <!-- Secondary gain scalars (presence/depth/dedup/length-corr) buried
-               in one hover to keep the header compact; value shown is presence. -->
-          <span class="stat" title={gainDetailTip(pheno)}>
+               in one hover to keep the header compact; value shown is presence.
+               NOTE: bind data-tip, NOT title. This tip is per-phenotype (dynamic);
+               the tooltip system caches title->data-tip on first hover and removes
+               title, but Svelte then re-adds a fresh title on reselect, leaving the
+               custom overlay showing the stale cached data-tip while the browser's
+               native title tooltip shows the new value (two tooltips, different
+               values). data-tip has no native tooltip and stays reactively fresh. -->
+          <span class="stat" data-tip={gainDetailTip(pheno)}>
             <span class="stat-k">Presence<span class="help-mark" aria-hidden="true">?</span></span>
             <span class="stat-v">{pheno.presence == null ? '—' : (pheno.presence * 100).toFixed(0) + '%'}</span>
           </span>

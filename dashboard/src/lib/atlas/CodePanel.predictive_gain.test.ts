@@ -90,10 +90,13 @@ it('advanced view shows a Distinctiveness stat (mean_gain) and a Presence chip; 
   // Depth/dedup/length are NOT standalone visible chips — they live in the
   // Presence chip's hover (title attribute), so no visible "Depth" text.
   expect(queryByText('Depth')).toBeNull()
-  const presenceChip = container.querySelector('span.stat[title*="Depth:"]')
+  // data-tip (NOT title): dynamic per-phenotype tip must bypass the title->
+  // data-tip caching so it can't desync from the native tooltip on reselect.
+  const presenceChip = container.querySelector('span.stat[data-tip*="Depth:"]')
   expect(presenceChip).toBeTruthy()
-  expect(presenceChip!.getAttribute('title')).toContain('Dedup gain:')
-  expect(presenceChip!.getAttribute('title')).toContain('Length corr:')
+  expect(presenceChip!.getAttribute('title')).toBeNull()
+  expect(presenceChip!.getAttribute('data-tip')).toContain('Dedup gain:')
+  expect(presenceChip!.getAttribute('data-tip')).toContain('Length corr:')
 })
 
 it('basic view hides the Distinctiveness stat', () => {
