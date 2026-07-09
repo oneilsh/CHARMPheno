@@ -1,7 +1,7 @@
 ---
 id: 18
 slug: stm-cancer-scalable-sigma-prior
-status: pending
+status: done
 model_class: stm
 cohort: cancer
 cohort_def: first_cancer_year
@@ -122,3 +122,53 @@ no prior). The delta 0017 → 0018 IS the Σ-prior contribution; the delta 0015 
 0018 measures whether prior-stabilized scalable matches the exact dense baseline
 end-to-end. Cross-link: insight [0031](../insights/0031-scalable-spectral-topic-quality-matches-dense-but-sigma-splits-one-runaway.md),
 exp 0017, exp [0019](0019-stm-cancer-scalable-larger-d.md).
+
+## Result
+
+Ran on the cluster 2026-07-09 with the **latest code** — which changed what the run
+measures. The two things exp 0018 was built around no longer exist:
+
+1. **The Σ-prior is gone.** `sigma_prior_scale` / `sigma_prior_count` (the
+   inverse-gamma / IW anchor) were removed from the engine and from `build_stm_args`
+   — a falsified class: the IW anchor *worsened* the gated runaway (exps 0022/0024,
+   2.2e7 → 6.08e8) and free variance is unidentifiable at fit for document-scarce
+   topics (insight 0033); see `analysis/local/stm_ablation.py`. This doc's frontmatter
+   keys `sigma_prior_scale: 10.0` / `sigma_prior_count: 2000.0` are now HISTORICAL keys
+   that `build_stm_args` silently ignores (pinned by a regression test in
+   `scripts/tests/test_run_experiment.py`). No Σ-prior reached the fit.
+2. **No free variance to bind.** The run is UNIT-DIAGONAL (`Σ_var[min=1 max=1]`) — the
+   block-wise unit-diagonal correlation Σ (ADR 0034) is now the default, and exp 0018
+   set no `estimate_sigma_diagonal`. Σ_ii is pinned to 1 by construction, so exp 0017's
+   topic-2 escape to ~8.3e5 (a property of the FREE-variance parameterization) cannot
+   occur here.
+
+So exp 0018 does not (cannot) test its stated Σ-prior hypothesis. What it actually is:
+**exp 0017 re-run under the current unit-diagonal default** — a clean scalable spectral
++ unit-diagonal cancer fit.
+
+Outcome: converged 300/300 (ELBO −1.136e6, 598s). All 40 topics resolved, NPMI mean
+**+0.174** (median +0.148, max +0.556) — on par with the DENSE baseline exp 0015
+(+0.173) and slightly ABOVE the free-variance scalable exp 0017 (+0.166). Σ bounded and
+proper by construction (unit-diagonal; eig 0.0296–22.8; the eval's
+`runaway = topic 39 Σ_ii=1.000` is the argmax-over-a-constant-diagonal artifact, not a
+blowup). Reference topic 0 alive (E[β]=0.0126, chest-pain / gastritis / abdominal-pain).
+Crisp cancer sub-phenotypes throughout: breast(14), prostate(5), thyroid(19),
+melanoma(24), skin/actinic(31), lung(11), CKD/kidney(36), bladder(4), colon(18),
+pancreatic/ovarian(25,34), lymphoma/myeloma(27), head-and-neck(21), HIV/HepC/liver(33),
+chemotherapy-toxicity(26).
+
+**Verdict — the Σ-prior question is MOOT and the scalable arc's Σ concern is CLOSED.**
+None of the Decision-tree branches (a/b/c) apply — each presumes a free-variance Σ and a
+live Σ-prior. The real conclusion is stronger: unit-diagonal Σ (ADR 0034) REMOVES the
+scalable path's single-topic runaway by construction, so exp 0017's topic-2 escape cannot
+recur and no Σ-prior is needed. This resolves insight 0031's "Σ-equivalence PARTIAL"
+caveat — under the production default (unit-diagonal), scalable spectral is not merely
+topic-quality-equivalent to dense, it is fully clean (no escape), NPMI matching dense. By
+the same logic the other Σ-stability follow-up, exp
+[0019](0019-stm-cancer-scalable-larger-d.md) (larger projection dim d to shrink the JL
+escape), is also moot — there is no escape to shrink under unit-diagonal.
+
+Housekeeping: the Parameter-rationale / Hypothesis / Decision-tree sections above are
+kept as the record of the ORIGINAL (now-obsolete) intent — they describe a Σ-prior +
+free-variance regime the current code no longer supports. See insight 0031, exp 0017
+(scalable, free-variance), exp 0015 (dense baseline).
