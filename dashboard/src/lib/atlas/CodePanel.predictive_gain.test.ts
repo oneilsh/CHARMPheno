@@ -71,19 +71,29 @@ it('with predictive_gain present, the theta-coverage histogram still renders —
   expect(rects.length).toBeGreaterThan(0)
 })
 
-it('advanced view shows a Distinctiveness stat (mean_gain) and NO Presence/Depth stats', () => {
+it('advanced view shows a Distinctiveness stat (mean_gain) and a Presence chip; depth/dedup/length are bundled in the Presence hover (no standalone chips)', () => {
   const b = makeStmBundleFixture()
   b.phenotypes.predictive_gain = PG
   b.phenotypes.phenotypes.forEach((p, i) => {
     (p as any).mean_gain = PG.mean_gain[i]
     ;(p as any).presence = PG.presence[i]
     ;(p as any).depth = PG.depth[i]
+    ;(p as any).dedup_gain = PG.dedup_gain[i]
+    ;(p as any).length_corr = PG.length_corr[i]
   })
   bundle.set(b)
-  const { queryByText } = render(CodePanel)   // advancedView is true (beforeEach)
+  const { queryByText, container } = render(CodePanel)   // advancedView is true (beforeEach)
   expect(queryByText('Distinctiveness')).toBeTruthy()
-  expect(queryByText('Presence')).toBeNull()
+  // Presence is now a first-class chip (value = presence %); phenotype 1 -> 60%.
+  expect(queryByText('Presence')).toBeTruthy()
+  expect(queryByText('60%')).toBeTruthy()
+  // Depth/dedup/length are NOT standalone visible chips — they live in the
+  // Presence chip's hover (title attribute), so no visible "Depth" text.
   expect(queryByText('Depth')).toBeNull()
+  const presenceChip = container.querySelector('span.stat[title*="Depth:"]')
+  expect(presenceChip).toBeTruthy()
+  expect(presenceChip!.getAttribute('title')).toContain('Dedup gain:')
+  expect(presenceChip!.getAttribute('title')).toContain('Length corr:')
 })
 
 it('basic view hides the Distinctiveness stat', () => {

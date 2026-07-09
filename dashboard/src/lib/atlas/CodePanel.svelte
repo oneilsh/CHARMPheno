@@ -52,6 +52,27 @@
   // exactly as before with no new row.
   $: hasPredictiveGainFields = !!$bundle?.phenotypes.predictive_gain
 
+  // Advanced-mode "gain detail" hover: the secondary predictive-gain scalars
+  // (presence / depth / dedup / length-corr) bundled into ONE tooltip so the
+  // detail header stays uncluttered. Distinctiveness (mean_gain) keeps its own
+  // first-class chip; these are its finer-grained companions. Values are
+  // per-phenotype so the tip is built here rather than in copy.ts. The overlay
+  // (.app-tip) is white-space: pre-wrap, so the blank-line separators render.
+  function gainDetailTip(p: {
+    presence?: number | null; depth?: number | null
+    dedup_gain?: number | null; length_corr?: number | null
+  }): string {
+    const pct = (v?: number | null) => (v == null || Number.isNaN(v)) ? '—' : (v * 100).toFixed(0) + '%'
+    const nats = (v?: number | null) => (v == null || Number.isNaN(v)) ? '—' : v.toFixed(2) + ' nats'
+    const corr = (v?: number | null) => (v == null || Number.isNaN(v)) ? '—' : v.toFixed(2)
+    return [
+      `Presence: ${pct(p.presence)} — the share of this phenotype's patients who gain real held-out predictive signal from it (per-patient predictive gain > 0, i.e. it beats the background baseline). "How widely it helps." Note this is a per-patient point estimate thresholded at 0, not a significance test.`,
+      `Depth: ${pct(p.depth)} — this phenotype's share of the total unique predictive structure across those patients (a broad phenotype others overlap scores low; a niche one nothing else explains scores high). "How much."`,
+      `Dedup gain: ${nats(p.dedup_gain)} — the mean held-out gain with repeated codes capped at 1, so a few bursty codes can't inflate it.`,
+      `Length corr: ${corr(p.length_corr)} — correlation of per-patient gain with record length (a confound check: a high value means the signal mostly tracks how much data a patient has).`,
+    ].join('\n\n')
+  }
+
   // Share of patients below τ — the mass the histogram omits because its
   // x-axis starts at τ. Summed from bins whose upper edge is at or below τ;
   // suppressed bins (null) contribute 0, matching the privacy round-to-zero
@@ -156,6 +177,12 @@
               <span class="stat-v">{$predictiveGain.null_band.p95.toFixed(2)} nats (p95)</span>
             </span>
           {/if}
+          <!-- Secondary gain scalars (presence/depth/dedup/length-corr) buried
+               in one hover to keep the header compact; value shown is presence. -->
+          <span class="stat" title={gainDetailTip(pheno)}>
+            <span class="stat-k">Presence<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="stat-v">{pheno.presence == null ? '—' : (pheno.presence * 100).toFixed(0) + '%'}</span>
+          </span>
         </div>
       {/if}
     </header>
