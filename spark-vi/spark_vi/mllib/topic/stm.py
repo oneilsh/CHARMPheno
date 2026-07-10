@@ -1002,6 +1002,7 @@ def corpus_heldout_scale_sweep_gated_rdd(
     doc_rdd, global_params, partition, *, c_grid,
     holdout_frac=0.3, reference=None, seed=0,
     lbfgs_max_iter=50, lbfgs_tol=1e-4, depth=2,
+    marginalize=False, n_samples=64,
 ) -> dict:
     """Distributed held-out predictive-LL sweep over the STM generative
     covariance scale c, for a GATED fit (see ``corpus_heldout_scale_sweep_gated``
@@ -1027,6 +1028,17 @@ def corpus_heldout_scale_sweep_gated_rdd(
     broadcast via the Spark-safe default-arg closure convention; helpers are
     imported inside ``_local`` so the closure is picklable on workers.
 
+    ``marginalize`` (default False, existing callers unaffected) mirrors
+    ``corpus_heldout_scale_sweep_gated``'s option byte-for-byte: when True,
+    per-doc/per-c scoring routes through ``laplace_theta_samples`` +
+    ``marginalized_predictive_loglik`` instead of the MAP theta_hat plug-in
+    (see that function's docstring for the full derivation and citations).
+    The sample rng is ``np.random.default_rng(seed + idx)`` with ``idx`` the
+    SAME ``zipWithIndex`` index used for ``heldout_split`` above -- common
+    random numbers across c for a given doc, and the doc-for-doc alignment
+    with the numpy path's ``seed + i`` (``i`` = ``enumerate(docs)`` index)
+    that numpy/RDD parity depends on.
+
     Raises ValueError if the reduced document count is 0.
     """
     sc = doc_rdd.context
@@ -1037,11 +1049,13 @@ def corpus_heldout_scale_sweep_gated_rdd(
     c_list = list(c_grid)
     c_bcast = sc.broadcast(c_list)
 
-    def _local(rows, _gp=gp_bcast, _p=p_bcast, _cg=c_bcast):
+    def _local(rows, _gp=gp_bcast, _p=p_bcast, _cg=c_bcast,
+               _marginalize=marginalize, _n_samples=n_samples):
         from scipy.special import digamma
 
         from spark_vi.eval.topic.concentration_recovery import (
             _predictive_loglik, heldout_split,
+            laplace_theta_samples, marginalized_predictive_loglik,
         )
         from spark_vi.models.topic._linalg import safe_inverse
 
@@ -1082,16 +1096,24 @@ def corpus_heldout_scale_sweep_gated_rdd(
             n_held = int(held_counts.sum())
             for c in c_grid_local:
                 Sigma_inv_allowed = (1.0 / c) * Rinv_allowed
-                eta_hat, _, _ = _stm_doc_inference(
+                eta_hat, nu_d, _ = _stm_doc_inference(
                     indices=visible_doc.indices, counts=visible_doc.counts,
                     expElogbeta=expElogbeta,
                     Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=doc.x,
                     max_iter=lbfgs_max_iter, tol=lbfgs_tol,
                     allowed=allowed, reference=reference,
                 )
-                theta_hat = _gated_mode_theta(eta_hat, allowed, K)
-                acc[c][0] += _predictive_loglik(
-                    theta_hat, beta_prob, held_indices, held_counts)
+                if _marginalize:
+                    th = laplace_theta_samples(
+                        eta_hat, nu_d, allowed, K, reference=reference,
+                        n_samples=_n_samples, rng=np.random.default_rng(seed + idx),
+                    )
+                    acc[c][0] += marginalized_predictive_loglik(
+                        th, beta_prob, held_indices, held_counts)
+                else:
+                    theta_hat = _gated_mode_theta(eta_hat, allowed, K)
+                    acc[c][0] += _predictive_loglik(
+                        theta_hat, beta_prob, held_indices, held_counts)
                 acc[c][1] += n_held
 
         return [(acc, n_docs)]

@@ -97,6 +97,46 @@ class TestMarginalizeTrueRunsAndReturnsGrid:
             assert np.isfinite(result["lls"][c])
 
 
+class TestRddMarginalizedMatchesNumpy:
+    def test_rdd_marginalized_matches_numpy(self, spark):
+        """The DISTRIBUTED (RDD) sweep must mirror the numpy sweep's
+        marginalize=True scoring doc-for-doc: same laplace_theta_samples draws
+        (common random numbers keyed on seed + the doc's zipWithIndex index),
+        same marginalized_predictive_loglik reduction. This is the parity
+        that makes the RDD path a faithful production stand-in for the numpy
+        oracle on a real (distributed) corpus."""
+        from spark_vi.mllib.topic.stm import (
+            corpus_heldout_scale_sweep_gated, corpus_heldout_scale_sweep_gated_rdd,
+        )
+
+        docs, part, gp, K = _build_fitted_corpus(seed=3)
+        global_params = _global_params_from_fit(gp)
+        c_grid = [1, 2, 4, 8]
+
+        expected = corpus_heldout_scale_sweep_gated(
+            docs, global_params, part, c_grid=c_grid, seed=0,
+            marginalize=True, n_samples=16,
+        )
+
+        rdd = spark.sparkContext.parallelize(docs, numSlices=3)
+        result = corpus_heldout_scale_sweep_gated_rdd(
+            rdd, global_params, part, c_grid=c_grid, seed=0,
+            marginalize=True, n_samples=16,
+        )
+
+        assert result["n_docs"] == expected["n_docs"]
+        assert set(result["lls"].keys()) == set(expected["lls"].keys())
+        max_diff = 0.0
+        for c in c_grid:
+            diff = abs(result["lls"][c] - expected["lls"][c])
+            max_diff = max(max_diff, diff)
+            np.testing.assert_allclose(
+                result["lls"][c], expected["lls"][c], rtol=1e-9, atol=1e-9
+            )
+        assert result["argmax_c"] == expected["argmax_c"]
+        print(f"max |numpy - rdd| per-c diff (marginalize=True): {max_diff:.3e}")
+
+
 class TestGatedZeroNuApproxPlugin:
     def test_gated_zero_nu_approx_plugin(self):
         """When the visible half of every doc is LONG (data term dominates the
