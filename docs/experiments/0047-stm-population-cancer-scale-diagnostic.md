@@ -1,7 +1,7 @@
 ---
 id: 47
 slug: stm-population-cancer-scale-diagnostic
-status: pending
+status: done
 model_class: stm
 cohort: population_cancer
 cohort_def: population_cancer
@@ -115,6 +115,28 @@ the gated/covariate/cache args from this frontmatter automatically.
   2% sample should not move MAP much).
 - `cp` the bundle/zip to a uniquely-named file before downloading (repeated runs
   overwrite the default path).
+
+## Result (2026-07-10)
+
+Shipped `eta_scale` = **4.61** (MAP smoothed c\* @ holdout 0.5, unchanged). The
+`marginalized_diagnostic` (n=967-doc sample, S=64) vs the full-corpus MAP robustness:
+
+| holdout f | MAP c\* (full) | MAP c\* (sample) | marginalized c\* (sample) |
+|---|---|---|---|
+| 0.5 | 4.61 | 5.30 | 2.36 |
+| 0.8 | 3.75 | 3.90 | 2.65 |
+| 0.95 | 3.65 | 3.80 | 3.76 |
+| drift | 0.96 | 1.49 | 1.40 |
+
+**Outcome = "both drift" (the third fork).** On the real (misspecified) corpus the MAP
+drifts substantially (unlike the well-specified K=60 synthetic where it was flat), and
+marginalization does NOT remove it — the marginalized drift (1.40) ≈ the MAP drift (1.49)
+and runs in the OPPOSITE direction, the two crossing near f=0.95 (≈3.8). Marginalization
+trades one drift for an equal-and-opposite one, so it is not shipped. The residual drift is
+genuine per-document concentration heterogeneity (misspecification), the f-drift is its
+observable signature, and the real fix is a per-document scale (multivariate-t prior),
+gated on a burstiness/dedup check. Full analysis: insight 0044; domain-agnostic report
+`docs/superpowers/specs/2026-07-10-marginalized-heldout-scale-findings-report.md`.
 
 ## Related
 
