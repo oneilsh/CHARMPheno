@@ -106,6 +106,86 @@ def _summary_block(values: np.ndarray) -> dict:
     }
 
 
+def summarize_concentration_heterogeneity(
+    *,
+    top_mass_raw: np.ndarray,
+    top_mass_dedup: np.ndarray,
+    eff_topics_raw: np.ndarray,
+    eff_topics_dedup: np.ndarray,
+    repeat_fraction: np.ndarray,
+    n_skipped: int = 0,
+) -> dict:
+    """Aggregate ALREADY-COMPUTED per-doc arrays into the raw-vs-dedup
+    concentration-heterogeneity summary.
+
+    This is the aggregation half of `concentration_raw_vs_dedup`, extracted
+    so a caller that computes the five per-doc arrays some other way (e.g. a
+    distributed per-doc pass that only ships small per-doc scalars back to
+    the driver, never the documents or theta vectors themselves -- see
+    `spark_vi.mllib.topic.stm.corpus_concentration_heterogeneity_rdd`) can
+    reuse the identical aggregation instead of reimplementing it.
+
+    Inputs are the five same-length 1-D arrays `concentration_raw_vs_dedup`
+    computes per surviving (non-skipped) document: "top_mass_raw",
+    "top_mass_dedup", "eff_topics_raw", "eff_topics_dedup",
+    "repeat_fraction". `n_skipped` is the caller's own count of documents
+    skipped by its guard (see `concentration_raw_vs_dedup`'s docstring for
+    the guard definition) -- it is not recomputed here since this function
+    never sees the skipped documents.
+
+    Returns the SAME dict shape as `concentration_raw_vs_dedup` (see that
+    function's docstring for the full field list): the five per-doc arrays
+    echoed back, their "<name>_summary" blocks, "spread_ratio_top_mass",
+    "rank_corr_top_mass", "burstiness_corr_top_mass", "n_docs" (derived from
+    the input arrays' length), and "n_skipped" (passed through).
+    """
+    top_mass_raw_arr = np.asarray(top_mass_raw, dtype=np.float64)
+    top_mass_dedup_arr = np.asarray(top_mass_dedup, dtype=np.float64)
+    eff_topics_raw_arr = np.asarray(eff_topics_raw, dtype=np.float64)
+    eff_topics_dedup_arr = np.asarray(eff_topics_dedup, dtype=np.float64)
+    repeat_fraction_arr = np.asarray(repeat_fraction, dtype=np.float64)
+
+    n_docs = int(top_mass_raw_arr.shape[0])
+
+    if n_docs >= 2:
+        std_raw = float(np.std(top_mass_raw_arr))
+        spread_ratio_top_mass = (
+            float(np.std(top_mass_dedup_arr)) / std_raw if std_raw > 0.0 else float("nan")
+        )
+        rank_corr_top_mass = float(
+            spearmanr(top_mass_raw_arr, top_mass_dedup_arr).statistic
+        )
+        burstiness_corr_top_mass = float(
+            pearsonr(top_mass_raw_arr, repeat_fraction_arr).statistic
+        )
+    else:
+        spread_ratio_top_mass = float("nan")
+        rank_corr_top_mass = float("nan")
+        burstiness_corr_top_mass = float("nan")
+
+    result = {
+        "top_mass_raw": top_mass_raw_arr,
+        "top_mass_dedup": top_mass_dedup_arr,
+        "eff_topics_raw": eff_topics_raw_arr,
+        "eff_topics_dedup": eff_topics_dedup_arr,
+        "repeat_fraction": repeat_fraction_arr,
+        "spread_ratio_top_mass": spread_ratio_top_mass,
+        "rank_corr_top_mass": rank_corr_top_mass,
+        "burstiness_corr_top_mass": burstiness_corr_top_mass,
+        "n_docs": n_docs,
+        "n_skipped": int(n_skipped),
+    }
+    for name, arr in (
+        ("top_mass_raw", top_mass_raw_arr),
+        ("top_mass_dedup", top_mass_dedup_arr),
+        ("eff_topics_raw", eff_topics_raw_arr),
+        ("eff_topics_dedup", eff_topics_dedup_arr),
+        ("repeat_fraction", repeat_fraction_arr),
+    ):
+        result[f"{name}_summary"] = _summary_block(arr)
+    return result
+
+
 def concentration_raw_vs_dedup(
     docs: Sequence, infer_theta: Callable[[np.ndarray, np.ndarray], np.ndarray]
 ) -> dict:
@@ -149,6 +229,11 @@ def concentration_raw_vs_dedup(
 
     spread_ratio_top_mass and the two correlations are NaN when fewer than
     2 documents survive the guard (std/correlation are undefined).
+
+    The per-doc loop lives here (it needs the caller's `infer_theta` and the
+    actual documents); the aggregation is `summarize_concentration_heterogeneity`,
+    reused as-is so a distributed caller that computes the same five arrays
+    on workers gets byte-identical aggregation.
     """
     top_mass_raw: list[float] = []
     top_mass_dedup: list[float] = []
@@ -178,48 +263,11 @@ def concentration_raw_vs_dedup(
         eff_topics_dedup.append(eff_dedup)
         repeat_fraction.append(burst["repeat_fraction"])
 
-    top_mass_raw_arr = np.array(top_mass_raw, dtype=np.float64)
-    top_mass_dedup_arr = np.array(top_mass_dedup, dtype=np.float64)
-    eff_topics_raw_arr = np.array(eff_topics_raw, dtype=np.float64)
-    eff_topics_dedup_arr = np.array(eff_topics_dedup, dtype=np.float64)
-    repeat_fraction_arr = np.array(repeat_fraction, dtype=np.float64)
-
-    n_docs = int(top_mass_raw_arr.shape[0])
-
-    if n_docs >= 2:
-        std_raw = float(np.std(top_mass_raw_arr))
-        spread_ratio_top_mass = (
-            float(np.std(top_mass_dedup_arr)) / std_raw if std_raw > 0.0 else float("nan")
-        )
-        rank_corr_top_mass = float(
-            spearmanr(top_mass_raw_arr, top_mass_dedup_arr).statistic
-        )
-        burstiness_corr_top_mass = float(
-            pearsonr(top_mass_raw_arr, repeat_fraction_arr).statistic
-        )
-    else:
-        spread_ratio_top_mass = float("nan")
-        rank_corr_top_mass = float("nan")
-        burstiness_corr_top_mass = float("nan")
-
-    result = {
-        "top_mass_raw": top_mass_raw_arr,
-        "top_mass_dedup": top_mass_dedup_arr,
-        "eff_topics_raw": eff_topics_raw_arr,
-        "eff_topics_dedup": eff_topics_dedup_arr,
-        "repeat_fraction": repeat_fraction_arr,
-        "spread_ratio_top_mass": spread_ratio_top_mass,
-        "rank_corr_top_mass": rank_corr_top_mass,
-        "burstiness_corr_top_mass": burstiness_corr_top_mass,
-        "n_docs": n_docs,
-        "n_skipped": n_skipped,
-    }
-    for name, arr in (
-        ("top_mass_raw", top_mass_raw_arr),
-        ("top_mass_dedup", top_mass_dedup_arr),
-        ("eff_topics_raw", eff_topics_raw_arr),
-        ("eff_topics_dedup", eff_topics_dedup_arr),
-        ("repeat_fraction", repeat_fraction_arr),
-    ):
-        result[f"{name}_summary"] = _summary_block(arr)
-    return result
+    return summarize_concentration_heterogeneity(
+        top_mass_raw=np.array(top_mass_raw, dtype=np.float64),
+        top_mass_dedup=np.array(top_mass_dedup, dtype=np.float64),
+        eff_topics_raw=np.array(eff_topics_raw, dtype=np.float64),
+        eff_topics_dedup=np.array(eff_topics_dedup, dtype=np.float64),
+        repeat_fraction=np.array(repeat_fraction, dtype=np.float64),
+        n_skipped=n_skipped,
+    )

@@ -494,6 +494,266 @@ def corpus_concentration_stm_rdd(
     return acc.summary()
 
 
+def gated_infer_theta(
+    global_params, partition, *, c, reference=None,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4,
+):
+    """Build a gated `infer_theta(indices, counts, groups, x=None) -> theta`
+    closure at generative scale c, for use as the model-specific inference
+    callback the general concentration-heterogeneity diagnostic
+    (``spark_vi.eval.topic.concentration_heterogeneity``) needs.
+
+    The core diagnostic's `infer_theta(indices, counts) -> theta` signature
+    is model-agnostic and takes no notion of gating; a GATED document also
+    carries a `groups` field that determines its allowed (background ∪ own
+    group) topic set (``partition.allowed_indices``), so this adapter's
+    returned callable takes one more positional argument than the core's.
+    `x` (the doc's covariate vector, Gamma^T x is the prior mean) is
+    optional and defaults to an all-zero vector when omitted -- callers with
+    real per-doc covariates (the normal case) should pass ``doc.x``.
+
+    Runs the SAME per-doc gated Laplace E-step as
+    ``corpus_heldout_scale_sweep_gated`` at a fixed scale c: prior precision
+    ``Sigma_inv_allowed = (1/c) * safe_inverse(R[allowed])``, R the fit's
+    diagonal-normalized correlation from ``global_params["Sigma"]`` (ADR
+    0034/0036). ``R[allowed]`` is cached per distinct allowed set (a
+    corpus typically has few distinct group combinations, so this cache is
+    small and reused across every document sharing a group). The MAP
+    eta_hat is converted to the K-length display theta via
+    ``_gated_mode_theta`` (allowed topics filled, disallowed exactly 0).
+
+    ``global_params`` is the dict with "lambda" (K,V), "Gamma" (P,K), "Sigma"
+    (K,K, the fit's correlation R); ``partition`` is a TopicBlockPartition (or
+    the implicit all-background one).
+    """
+    from scipy.special import digamma
+
+    from spark_vi.models.topic._linalg import safe_inverse
+
+    lam = np.asarray(global_params["lambda"], dtype=np.float64)
+    Gamma = np.asarray(global_params["Gamma"], dtype=np.float64)
+    Sigma = np.asarray(global_params["Sigma"], dtype=np.float64)
+    K = lam.shape[0]
+    lam_rowsum = lam.sum(axis=1, keepdims=True)
+    expElogbeta = np.exp(digamma(lam) - digamma(lam_rowsum))
+
+    d = np.diag(Sigma)
+    R = Sigma / np.sqrt(np.outer(d, d))
+
+    rinv_cache: dict[tuple, np.ndarray] = {}
+
+    def infer_theta(indices, counts, groups, x=None):
+        allowed = partition.allowed_indices(groups)
+        key = tuple(allowed.tolist())
+        Rinv_allowed = rinv_cache.get(key)
+        if Rinv_allowed is None:
+            Rinv_allowed = safe_inverse(R[np.ix_(allowed, allowed)])
+            rinv_cache[key] = Rinv_allowed
+        Sigma_inv_allowed = (1.0 / c) * Rinv_allowed
+        if x is None:
+            x = np.zeros(Gamma.shape[0], dtype=np.float64)
+        eta_hat, _, _ = _stm_doc_inference(
+            indices=indices, counts=counts,
+            expElogbeta=expElogbeta,
+            Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=x,
+            max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+            allowed=allowed, reference=reference,
+        )
+        return _gated_mode_theta(eta_hat, allowed, K)
+
+    return infer_theta
+
+
+def corpus_concentration_heterogeneity_gated(
+    docs, global_params, partition, *, c, reference=None,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4,
+) -> dict:
+    """Driver-side (in-memory) gated concentration-heterogeneity diagnostic.
+
+    Numpy oracle / testing counterpart of ``corpus_concentration_heterogeneity_rdd``
+    (see that function for the distributed version and the full derivation).
+    Runs the general per-doc raw-vs-dedup burstiness diagnostic
+    (``spark_vi.eval.topic.concentration_heterogeneity``) with theta supplied
+    by the gated MAP E-step at scale c (``gated_infer_theta``), reusing the
+    SAME skip guard (total < 2 tokens or a single unique token) and the SAME
+    aggregation (``summarize_concentration_heterogeneity``) that
+    ``concentration_raw_vs_dedup`` uses -- this function does not reimplement
+    either, it only supplies the per-doc theta.
+
+    ``docs`` is an in-memory list of STMDocument. Returns
+    ``summarize_concentration_heterogeneity``'s summary dict plus
+    ``{"sample_frac": None, "c": c}`` (n_docs/n_skipped are already part of
+    that summary).
+    """
+    from spark_vi.eval.topic.concentration import doc_concentration
+    from spark_vi.eval.topic.concentration_heterogeneity import (
+        dedup_counts, doc_burstiness, summarize_concentration_heterogeneity,
+    )
+
+    infer_theta = gated_infer_theta(
+        global_params, partition, c=c, reference=reference,
+        lbfgs_max_iter=lbfgs_max_iter, lbfgs_tol=lbfgs_tol,
+    )
+
+    top_mass_raw: list[float] = []
+    top_mass_dedup: list[float] = []
+    eff_topics_raw: list[float] = []
+    eff_topics_dedup: list[float] = []
+    repeat_fraction: list[float] = []
+    n_skipped = 0
+
+    for doc in docs:
+        indices = np.asarray(doc.indices)
+        counts = np.asarray(doc.counts, dtype=np.float64)
+        burst = doc_burstiness(indices, counts)
+        if burst["total"] < 2.0 or burst["unique"] <= 1:
+            n_skipped += 1
+            continue
+
+        theta_raw = infer_theta(indices, counts, doc.groups, doc.x)
+        theta_dedup = infer_theta(indices, dedup_counts(counts), doc.groups, doc.x)
+        top_raw, eff_raw = doc_concentration(theta_raw)
+        top_dedup, eff_dedup = doc_concentration(theta_dedup)
+
+        top_mass_raw.append(top_raw)
+        top_mass_dedup.append(top_dedup)
+        eff_topics_raw.append(eff_raw)
+        eff_topics_dedup.append(eff_dedup)
+        repeat_fraction.append(burst["repeat_fraction"])
+
+    summary = summarize_concentration_heterogeneity(
+        top_mass_raw=np.array(top_mass_raw, dtype=np.float64),
+        top_mass_dedup=np.array(top_mass_dedup, dtype=np.float64),
+        eff_topics_raw=np.array(eff_topics_raw, dtype=np.float64),
+        eff_topics_dedup=np.array(eff_topics_dedup, dtype=np.float64),
+        repeat_fraction=np.array(repeat_fraction, dtype=np.float64),
+        n_skipped=n_skipped,
+    )
+    summary["sample_frac"] = None
+    summary["c"] = c
+    return summary
+
+
+def corpus_concentration_heterogeneity_rdd(
+    doc_rdd, global_params, partition, *, c, reference=None,
+    sample_frac=None, seed=0, depth=2,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4,
+) -> dict:
+    """Distributed gated concentration-heterogeneity diagnostic.
+
+    Makes the general per-doc raw-vs-dedup burstiness diagnostic
+    (``spark_vi.eval.topic.concentration_heterogeneity.concentration_raw_vs_dedup``)
+    runnable on a distributed gated-STM corpus, by running the per-doc gated
+    MAP E-step (``gated_infer_theta``, the same machinery
+    ``corpus_heldout_scale_sweep_gated_rdd`` uses) on workers and reusing the
+    core's aggregation (``summarize_concentration_heterogeneity``) on the
+    driver -- see those two functions for the diagnostic's math and the
+    gated inference derivation, respectively; nothing here reimplements
+    either.
+
+    ``sample_frac`` (optional): the diagnostic does not need the full
+    corpus, so callers may subsample first (``doc_rdd.sample(False,
+    sample_frac, seed)``) for cost control on a large corpus.
+
+    Distributed via ``mapPartitions``: each partition builds ONE
+    ``gated_infer_theta`` closure (so ``R[allowed]`` is cached once per
+    partition, not per document) and, for every document, applies the SAME
+    skip guard as the core (total token count < 2 or a single unique
+    token -- see ``concentration_raw_vs_dedup``'s docstring), computing the
+    per-doc 5-tuple (top_mass_raw, top_mass_dedup, eff_topics_raw,
+    eff_topics_dedup, repeat_fraction) for surviving documents and `None`
+    for skipped ones. Only these small per-doc scalars -- never the
+    documents, theta vectors, or per-doc eta_hat -- are collected to the
+    driver, which then calls ``summarize_concentration_heterogeneity`` on
+    the assembled arrays (identical aggregation to the driver-side/numpy
+    ``corpus_concentration_heterogeneity_gated``).
+
+    ``global_params`` and ``partition`` are broadcast via the same
+    Spark-safe default-arg-closure convention
+    ``corpus_heldout_scale_sweep_gated_rdd`` uses; helpers are imported
+    inside the closure so it is picklable on workers.
+
+    ``doc_rdd`` is an RDD of STMDocument. Returns
+    ``summarize_concentration_heterogeneity``'s summary dict plus
+    ``{"sample_frac": sample_frac, "c": c}`` (n_docs/n_skipped are already
+    part of that summary). Raises ValueError if the (possibly sampled)
+    RDD collects zero documents.
+    """
+    work_rdd = doc_rdd
+    if sample_frac is not None:
+        work_rdd = work_rdd.sample(False, sample_frac, seed)
+
+    sc = work_rdd.context
+    gp_bcast = sc.broadcast({
+        k: np.asarray(v, dtype=np.float64) for k, v in global_params.items()
+    })
+    p_bcast = sc.broadcast(partition)
+
+    def _local(rows, _gp=gp_bcast, _p=p_bcast):
+        from spark_vi.eval.topic.concentration import doc_concentration
+        from spark_vi.eval.topic.concentration_heterogeneity import (
+            dedup_counts, doc_burstiness,
+        )
+        from spark_vi.mllib.topic.stm import gated_infer_theta
+
+        gp = _gp.value
+        part = _p.value
+        infer_theta = gated_infer_theta(
+            gp, part, c=c, reference=reference,
+            lbfgs_max_iter=lbfgs_max_iter, lbfgs_tol=lbfgs_tol,
+        )
+
+        out = []
+        for doc in rows:
+            indices = np.asarray(doc.indices)
+            counts = np.asarray(doc.counts, dtype=np.float64)
+            burst = doc_burstiness(indices, counts)
+            if burst["total"] < 2.0 or burst["unique"] <= 1:
+                out.append(None)
+                continue
+            theta_raw = infer_theta(indices, counts, doc.groups, doc.x)
+            theta_dedup = infer_theta(
+                indices, dedup_counts(counts), doc.groups, doc.x
+            )
+            top_raw, eff_raw = doc_concentration(theta_raw)
+            top_dedup, eff_dedup = doc_concentration(theta_dedup)
+            out.append((top_raw, top_dedup, eff_raw, eff_dedup, burst["repeat_fraction"]))
+        return out
+
+    collected = work_rdd.mapPartitions(_local).collect()
+    if len(collected) == 0:
+        raise ValueError("corpus_concentration_heterogeneity_rdd: empty document RDD")
+
+    n_skipped = sum(1 for item in collected if item is None)
+    good = [item for item in collected if item is not None]
+
+    from spark_vi.eval.topic.concentration_heterogeneity import (
+        summarize_concentration_heterogeneity,
+    )
+
+    if good:
+        arr = np.array(good, dtype=np.float64)
+        top_mass_raw, top_mass_dedup = arr[:, 0], arr[:, 1]
+        eff_topics_raw, eff_topics_dedup = arr[:, 2], arr[:, 3]
+        repeat_fraction = arr[:, 4]
+    else:
+        top_mass_raw = top_mass_dedup = eff_topics_raw = eff_topics_dedup = (
+            repeat_fraction
+        ) = np.array([], dtype=np.float64)
+
+    summary = summarize_concentration_heterogeneity(
+        top_mass_raw=top_mass_raw,
+        top_mass_dedup=top_mass_dedup,
+        eff_topics_raw=eff_topics_raw,
+        eff_topics_dedup=eff_topics_dedup,
+        repeat_fraction=repeat_fraction,
+        n_skipped=n_skipped,
+    )
+    summary["sample_frac"] = sample_frac
+    summary["c"] = c
+    return summary
+
+
 def corpus_theta_gated_rdd(
     doc_rdd, global_params, partition, *,
     reference=None, scale=1.0, sample_cap=200_000, seed=0,
