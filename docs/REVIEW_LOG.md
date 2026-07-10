@@ -12,6 +12,62 @@ elsewhere.
 
 ---
 
+## 2026-07-08..10 — STM branch pre-merge review, part 2 (7-lesson walkthrough since the 2026-06-26 sign-off)
+
+Second pre-merge review of the unmerged `stm` branch, covering `f79d059..HEAD`
+(the ~330 commits after the 8-lesson foundation review below). Seven-lesson
+teaching walkthrough across four arcs — Σ-hardening, spectral/defaults, the
+generative variance scale, and cohorts→export→dashboard: (1) block-wise
+unit-diagonal correlation Σ, (2) anchor-word spectral init + the defaults flip,
+(3) the held-out-LL generative-scale calibration, (4) population cohorts + the
+LLM labeler, (5) the export bundle's new fields, (6) the client conditioning +
+posterior-predictive sampler, (7) UI (contributing codes, recolor, tours). The
+math arcs (1–3) were reviewed deeply; a few cleanups, one consistency audit, a
+UI addition, and one change-then-park shipped as in-line detours.
+
+### Shipped — engine / defaults
+
+- **`spectral_method="auto"`** ([ADR 0037](decisions/0037-spectral-method-auto-route-by-vocab-size.md), `a580946`). Resolves dense (V<10,000) vs scalable random-projection spectral init by vocab size at fit time, logging a warning on the switch; supersedes ADR 0032's explicit-knob-only clause. Pure `resolve_spectral_method()` unit-tested; metadata records resolved + requested; threaded through both drivers + `build_stm_args`. No current cohort changes behavior (cancer V=3691, population V=6115 stay dense).
+- **Dead-code sweep — almost nothing was dead** (`3621ab6` → reverted `f262bf0`). A premature removal of `pd_complete`/`min_frobenius_psd_completion` broke test collection: they are live test-fixture helpers (`tests/_stm_synth.py`, 13 files). Reverted; the only real fix kept was the stale `--min-pair-support` driver help ("completed by pd_complete" → "lazy-kept, ADR 0027/0034"). Standing lesson: caller surveys must include `tests/`.
+
+### Shipped — dashboard export
+
+- **Removed two vestigial export fields** (`d65532a`). `eta_var` (superseded by the pooled `eta_scale`=c; the drivers never populated it) and `model.json` `sigma` (unit-diagonal → all-ones diagonal, and never present in the frontend `Model` type). Dropped param/emit/docstring in `export/correlation.py`, `export/dashboard.py`, `model_adapter.py`, the fallback rung in `logisticNormal.ts` (Σ now collapses `eta_scale`→unit R), `types.ts`, both drivers, and the now-dead tests. Library primitive `corpus_eta_variance_gated{,_rdd}` left intact (eval/test-fixture caller). Suites green (charmpheno 179, frontend 208).
+- **Predictive-gain export consistency audit** (`68807e2`). Three-layer check (export computation ↔ docstrings ↔ dashboard copy) of presence/depth/mean_gain/dedup_gain/length_corr. depth, mean_gain ("Distinctiveness" in the UI), dedup_gain, and length_corr were consistent; the only staleness — the export-layer docstrings described `presence` as the paired permuted-null test, but the shipped value was beats-zero (Δ>0). Library code + spark-vi tests already agreed on beats-zero; corrected the two consumer-side docstrings.
+
+### Shipped — dashboard UI
+
+- **Surfaced the predictive-gain scalars in the advanced phenotype detail** (`ae2791d`). A Presence chip whose single hover bundles depth/dedup-gain/length-corr (later + beats-zero); frontend-only — all five scalars were already exported and hydrated onto each phenotype.
+- **Dynamic-tooltip desync fix** (`890b0d3`). A per-phenotype `title=` hover desynced: the tooltip system caches `title`→`data-tip` on first hover and removes `title`, but Svelte re-adds a fresh `title` on reselect, so the custom overlay showed the stale cached value while the browser-native tooltip showed the fresh one (two tooltips, different values). Fix: bind `data-tip` directly for dynamic hovers. General rule recorded.
+
+### Change-then-park — the "presence" definition
+
+- **Presence headline swap** (`53767c2`), then **diagnosed counterproductive** ([insight 0043](insights/0043-permuted-null-presence-is-better-than-random-not-significantly-positive.md), `bd368fc`), **decision parked**. The shipped `presence` was switched from beats-zero (per-doc gain > 0) to the permuted-null test (`presence_vs_null`), on the expectation it was a stricter "statistically present" bar, with beats-zero demoted to a `presence_beats_zero` diagnostic exported alongside (an export-boundary swap — library math + its tests unchanged). A re-export diff on exp 0044 (population_glp1, 110 topics) against a pre-swap snapshot REFUTED the premise: the null-test is *more* permissive (median 0.222→0.350; background +0.127), because a permuted topic HURTS held-out LL (null-band mean −0.046), so "beats the null" is a lower bar than "beats zero." The tell: the zero-gain reference topic reads 0.703 present. `presence_vs_null` is a better-than-random test, not significantly-greater-than-0. The headline-definition choice (revert to beats-zero vs build a per-doc Δ/SE t-test) is PARKED; the export machinery and both values remain for whichever path is chosen.
+
+### Experiments recorded
+
+- **exp 0018** (`e3e7bd1`) — Σ-prior MOOT, scalable-arc Σ CLOSED. Ran under current code: the inverse-Wishart Σ-prior had been removed (falsified class) and the run came back unit-diagonal (ADR 0034 default), so it is exp 0017 re-run under unit-diagonal — 40 cancer phenotypes, NPMI +0.174, bounded Σ. Moots exp 0019 (larger-d) as well.
+- **exp 0045 + insight 0042** (`fa9a3b4`, `01fad91`) — co-fitting β does NOT reproduce the real STM-vs-LDA peakiness gap (the sign even flips); with insight 0038 (α ruled out), neither inference mechanism explains the gap, which must be pinned on the real corpus. Two-axis ground-truth-recovery split: STM recovers θ-concentration, LDA recovers β-sharpness; the β-direction ordering is size-sensitive and explicitly not established.
+
+### Known approximations flagged (documented, not bugs)
+
+- **Laplace/MAP record-posterior sampler** (`conditioning/recordPosterior.ts`). Record completion draws from a Gaussian around the posterior mode (Laplace under-dispersion + MAP plug-in) — faithful and fast, but the parked marginalized-sweep arc would tighten it.
+- **Evidence-vs-prior overlay** (`patient/codeComposition.ts`). The additive `explained + prior = θ` split is exact only for LDA; under STM (softmax(η̂)) it is a principled heuristic, and the UI presents it as an approximate cue (insight 0028).
+- **Correlation heatmap drops the reference topic.** η₀ is pinned to 0 (zero between-document variance), so its η-space correlation is genuinely undefined, not discarded; a θ-space alternative is parked.
+
+### Docs / ADRs / insights
+
+- New: ADR 0037; insights 0042 and 0043; exp records 0017/0018/0045; insight index backfill (0031–0039, `8daf501`).
+- Pending quick fix: reword insight 0037 ("faithful scale not fit-recoverable" → "not recoverable from fit-anchored residual estimators"; it IS recovered by held-out-LL at export).
+
+### Threads parked
+
+- **Presence definition** — revert-to-beats-zero vs a per-doc Δ/SE significance test (insight 0043).
+- **Marginalized (Laplace-sample) held-out scale calibration + posterior-sampling completions** — the c* holdout-drift fix (log-of-average marginal likelihood), which also retires the sampler's MAP-plug-in completion bias.
+- **eta_scale c\* re-export stopgap** — ship the generation-regime (high-holdout) c\*; run the real sweep for population_cancer (currently a dev override).
+- **Nested/hierarchical backgrounds; background-anchors-on-background-docs; foreground-subtype anchor avoidance** — spectral/gating research directions.
+- **Export-side nearest-PD correlation projection** (Higham–Strabić–Šego); **θ-space correlation** view; **broader export↔docstring↔UI audit** of the non-predictive-gain exported quantities.
+
 ## 2026-06-24..26 — STM branch pre-merge review (8-lesson walkthrough + in-line detours)
 
 End-to-end pre-merge review of the unmerged `stm` branch, which had no prior
