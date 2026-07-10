@@ -950,6 +950,83 @@ def main(argv: list[str] | None = None) -> int:
                 "and the theta histogram uses the unit fit scale. Run "
                 "build-covariates first.")
 
+        # concentration_heterogeneity diagnostic (FLAGGED, off by default):
+        # runs the raw-vs-dedup concentration/burstiness gate
+        # (corpus_concentration_heterogeneity_rdd, built in 00bc3e7/5b5cd1b)
+        # on the real gated-STM corpus. This is a standalone diagnostic, NOT
+        # part of the shipped bundle -- it is intentionally its OWN top-level
+        # block (not nested inside the eta_scale try/except above) so it can
+        # still run when BUILD_ETA_SCALE_OVERRIDE is set and skips that whole
+        # section. Guarded on the same gated-STM + covariate-sidecar
+        # preconditions the eta_scale block checks. Builds its OWN doc_rdd
+        # (same assembly as the eta_scale / theta_histogram / predictive_gain
+        # blocks) since the eta_scale block's doc_rdd may not exist under an
+        # override. Never fatal: any failure only logs a warning and writes
+        # nothing -- the shipped bundle and assert_stm_bundle_complete's
+        # required-file check (which only checks for MISSING files) are
+        # unaffected by the extra concentration_heterogeneity.json file this
+        # writes when it succeeds.
+        if os.environ.get("BUILD_CONCENTRATION_HETEROGENEITY_DIAGNOSTIC") and (
+                is_stm and tbs and stm_partition is not None
+                and stm_cov_df is not None):
+            try:
+                from spark_vi.mllib.topic.stm import (
+                    corpus_concentration_heterogeneity_rdd,
+                )
+                from spark_vi.mllib.topic._common import _vector_to_stm_document
+
+                _ch_frac = float(os.environ.get(
+                    "BUILD_CONCENTRATION_HETEROGENEITY_DOC_FRAC", "0.05"))
+                # Inference scale: use the deployed/calibrated eta_scale when
+                # available (matches the scale downstream panels infer at);
+                # fall back to the unit scale (c=1.0) when calibration did not
+                # run/failed, same convention as theta_histogram's hist_scale
+                # and predictive_gain's pg_scale above -- log which was used.
+                _ch_c = float(eta_scale) if eta_scale else 1.0
+                _stm_hardening = result.metadata.get("stm_hardening", {}) or {}
+                _ch_ref = 0 if _stm_hardening.get("reference_topic") else None
+
+                # Self-contained STMDocument RDD (same assembly as the
+                # eta_scale / theta_histogram / predictive_gain blocks): the
+                # eta_scale block's doc_rdd is not guaranteed to exist here
+                # (BUILD_ETA_SCALE_OVERRIDE skips building it), so rebuild
+                # independently rather than depend on it.
+                _ch_doc_df = bow_df.select("person_id", "features").join(
+                    stm_cov_df.select(
+                        "person_id", "source_cohort", "covariates"),
+                    on="person_id", how="inner",
+                )
+                _ch_doc_rdd = _ch_doc_df.rdd.map(
+                    lambda row: _vector_to_stm_document(
+                        row, features_col="features",
+                        covariates_col="covariates",
+                        group_col="source_cohort",
+                    )
+                )
+                log.info(
+                    "STM: concentration-heterogeneity diagnostic inference "
+                    "scale c=%.4f (%s).",
+                    _ch_c, "calibrated eta_scale" if eta_scale else "unit fallback")
+                with _phase("concentration-heterogeneity diagnostic"):
+                    _ch = corpus_concentration_heterogeneity_rdd(
+                        _ch_doc_rdd, result.global_params, stm_partition,
+                        c=_ch_c, reference=_ch_ref, sample_frac=_ch_frac, seed=0,
+                    )
+                import json as _json
+                (out_dir / "concentration_heterogeneity.json").write_text(
+                    _json.dumps(_ch, indent=2))
+                log.info(
+                    "concentration-heterogeneity diagnostic (n=%d, "
+                    "skipped=%d, c=%.3f, frac=%s): spread_ratio=%.3f "
+                    "rank_corr=%.3f burstiness_corr=%.3f",
+                    _ch["n_docs"], _ch["n_skipped"], _ch_c, _ch_frac,
+                    _ch["spread_ratio_top_mass"], _ch["rank_corr_top_mass"],
+                    _ch["burstiness_corr_top_mass"])
+            except Exception as _chexc:  # diagnostic-only: never fatal
+                log.warning(
+                    "concentration-heterogeneity diagnostic failed (%s); "
+                    "bundle UNAFFECTED.", _chexc)
+
         # theta_histogram: per-doc gated MAP theta distribution (the dashboard's
         # "topic mass distribution" panel). Plain-LDA writes per-doc theta
         # aggregates at fit time; the STM fit does not, so we compute them here
