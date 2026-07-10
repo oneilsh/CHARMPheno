@@ -869,6 +869,7 @@ def corpus_heldout_scale_sweep_gated(
     docs, global_params, partition, *, c_grid,
     holdout_frac=0.3, reference=None, seed=0,
     lbfgs_max_iter=50, lbfgs_tol=1e-4,
+    marginalize=False, n_samples=64,
 ) -> dict:
     """Driver-side (in-memory) held-out predictive-LL sweep over the STM
     generative covariance scale c, for a GATED fit.
@@ -905,6 +906,25 @@ def corpus_heldout_scale_sweep_gated(
     that actually contributed (docs skipped by ``heldout_split`` -- too few
     tokens, or an empty visible half -- do not count).
 
+    ``marginalize`` (default False, so existing callers are byte-for-byte
+    unaffected): when True, per-doc/per-c scoring is routed through the
+    Laplace-sample posterior-predictive instead of the MAP theta_hat
+    plug-in. The per-doc E-step already returns a Laplace covariance nu_d
+    over the free (allowed, non-reference) topics alongside the MAP mode
+    eta_hat (Blei & Lafferty 2007); ``laplace_theta_samples`` draws
+    ``n_samples`` theta from that N(eta_hat, nu_d) restricted to the doc's
+    ``allowed`` set (with the reference fixed at 0 and disallowed topics
+    exactly 0), and ``marginalized_predictive_loglik`` scores the held-out
+    tokens by the log-of-average (not average-of-log) predictive -- the
+    ordering that removes the MAP plug-in bias (Wallach, Murray,
+    Salakhutdinov, Mimno 2009, "Evaluation methods for topic models", ICML).
+    The sample rng is created FRESH as ``np.random.default_rng(seed + i)``
+    at the sampling point inside the per-c loop (i = the doc's enumerate
+    index): every c value for a given doc reuses the same standard-normal
+    draws (common random numbers -- only c, hence nu_d, varies), matching
+    ``heldout_split``'s split-seed discipline and required for numpy/RDD
+    parity (``corpus_heldout_scale_sweep_gated_rdd``).
+
     ``docs`` is an in-memory list of STMDocument; ``global_params`` is the
     dict with "lambda" (K,V), "Gamma" (P,K), "Sigma" (K,K, the fit's
     correlation R); ``partition`` is a TopicBlockPartition (or the implicit
@@ -915,6 +935,7 @@ def corpus_heldout_scale_sweep_gated(
 
     from spark_vi.eval.topic.concentration_recovery import (
         _predictive_loglik, heldout_split,
+        laplace_theta_samples, marginalized_predictive_loglik,
     )
     from spark_vi.models.topic._linalg import safe_inverse
 
@@ -953,15 +974,23 @@ def corpus_heldout_scale_sweep_gated(
         n_held = int(held_counts.sum())
         for c in c_grid:
             Sigma_inv_allowed = (1.0 / c) * Rinv_allowed
-            eta_hat, _, _ = _stm_doc_inference(
+            eta_hat, nu_d, _ = _stm_doc_inference(
                 indices=visible_doc.indices, counts=visible_doc.counts,
                 expElogbeta=expElogbeta,
                 Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=doc.x,
                 max_iter=lbfgs_max_iter, tol=lbfgs_tol,
                 allowed=allowed, reference=reference,
             )
-            theta_hat = _gated_mode_theta(eta_hat, allowed, K)
-            sum_ll[c] += _predictive_loglik(theta_hat, beta_prob, held_indices, held_counts)
+            if marginalize:
+                th = laplace_theta_samples(
+                    eta_hat, nu_d, allowed, K, reference=reference,
+                    n_samples=n_samples, rng=np.random.default_rng(seed + i),
+                )
+                sum_ll[c] += marginalized_predictive_loglik(
+                    th, beta_prob, held_indices, held_counts)
+            else:
+                theta_hat = _gated_mode_theta(eta_hat, allowed, K)
+                sum_ll[c] += _predictive_loglik(theta_hat, beta_prob, held_indices, held_counts)
             n_tokens[c] += n_held
 
     lls = {c: sum_ll[c] / n_tokens[c] for c in c_grid}
