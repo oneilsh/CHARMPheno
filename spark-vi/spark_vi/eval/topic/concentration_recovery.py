@@ -600,3 +600,95 @@ def sweep_heldout_cofit(
         betas[knob] = beta_hat
     argmax_knob = max(lls, key=lls.get)
     return {"lls": lls, "argmax_knob": argmax_knob, "beta_hat": betas}
+
+
+# ---------------------------------------------------------------------------
+# Marginalized (Laplace-sample) posterior-predictive held-out scoring.
+#
+# stm_heldout_ll above scores the MAP theta_hat (a single plug-in point), which
+# is a biased estimate of the true posterior-predictive density -- see
+# Wallach, Murray, Salakhutdinov, Mimno 2009 ("Evaluation methods for topic
+# models", ICML) on the document-completion plug-in-bias problem. The STM
+# per-doc E-step already computes a Laplace approximation to the posterior
+# over eta (Blei & Lafferty 2007, logistic-normal + Laplace posterior): the
+# MAP mode eta_hat plus a covariance nu_d over the free (allowed, non-
+# reference) topics. The two functions below turn that Laplace approximation
+# into a proper marginalized (log-of-average, not average-of-log) predictive
+# score.
+# ---------------------------------------------------------------------------
+
+
+def laplace_theta_samples(
+    eta_hat, nu_d, allowed, K, *, reference, n_samples, rng,
+):
+    """Draw ``n_samples`` theta over the K display topics from the per-doc
+    Laplace posterior N(eta_hat, nu_d) restricted to the FREE (allowed,
+    non-reference) topics.
+
+    ``eta_hat`` (length K) is the MAP mode (finite on allowed, -inf elsewhere,
+    reference at 0); ``nu_d`` (K, K) is the Laplace covariance with a nonzero
+    sub-block only on the free topics (exactly the pair returned by
+    spark_vi.models.topic.stm._stm_doc_inference). Each returned row assembles
+    logits = 0 at the reference, drawn value at each free topic, -inf at
+    disallowed topics, then softmax -> theta on the simplex with disallowed
+    topics exactly 0. Reference: Blei & Lafferty 2007 (logistic-normal + Laplace
+    posterior).
+    """
+    allowed = np.asarray(allowed)
+    if reference is not None and reference in set(allowed.tolist()):
+        free_topics = np.array([k for k in allowed.tolist() if k != reference],
+                               dtype=np.int64)
+        ref_alive = True
+    else:
+        free_topics = allowed.astype(np.int64)
+        ref_alive = False
+
+    F = free_topics.shape[0]
+    theta = np.zeros((n_samples, K), dtype=np.float64)
+    if F == 0:
+        # only the reference is allowed -> all mass on it
+        if ref_alive:
+            theta[:, reference] = 1.0
+        return theta
+
+    mean_free = eta_hat[free_topics]
+    cov_free = nu_d[np.ix_(free_topics, free_topics)]
+    # Symmetric-eigendecomposition matrix square root rather than a Cholesky
+    # factor: cov_free is only guaranteed positive SEMI-definite (a free topic
+    # pinned hard by the data term, or the degenerate all-zero covariance,
+    # both leave it singular), and np.linalg.cholesky raises LinAlgError on a
+    # singular input. Clipping negative eigenvalues (floating-point noise
+    # around 0) to 0 gives a well-defined square root for the PSD case
+    # WITHOUT injecting arbitrary jitter noise -- in particular, an exactly
+    # zero cov_free (see test_zero_covariance_samples_reduce_to_mode_theta)
+    # yields an exactly zero square root, so every sample lands exactly at
+    # the mode instead of a Cholesky-jitter-perturbed neighbor of it.
+    eigvals, eigvecs = np.linalg.eigh(cov_free)
+    eigvals = np.clip(eigvals, 0.0, None)
+    sqrt_cov = eigvecs * np.sqrt(eigvals)[None, :]   # (F, F)
+    z = rng.standard_normal((n_samples, F))
+    eta_free = mean_free[None, :] + z @ sqrt_cov.T   # (S, F)
+
+    for s in range(n_samples):
+        logits = np.full(K, -np.inf)
+        if ref_alive:
+            logits[reference] = 0.0
+        logits[free_topics] = eta_free[s]
+        mx = np.max(logits[np.isfinite(logits)])
+        ex = np.where(np.isfinite(logits), np.exp(logits - mx), 0.0)
+        theta[s] = ex / ex.sum()
+    return theta
+
+
+def marginalized_predictive_loglik(theta_samples, beta_prob, held_indices, held_counts):
+    """Held-out log-likelihood under the MARGINALIZED per-token predictive:
+    for each held token w, average the predicted probability (theta_s @ beta)_w
+    over the S samples, THEN take the log (log-of-average, not average-of-log --
+    the ordering that removes the MAP-plug-in bias; see Wallach et al. 2009,
+    "Evaluation methods for topic models", ICML). Returns the SUM over held
+    tokens (caller normalizes by corpus held-token count). The 1e-300 floor
+    guards log(0) for a term with zero predicted mass under every sample.
+    """
+    preds = theta_samples @ beta_prob                 # (S, V)
+    avg = preds[:, held_indices].mean(axis=0)         # (n_held,)
+    return float(np.sum(held_counts * np.log(avg + 1e-300)))
