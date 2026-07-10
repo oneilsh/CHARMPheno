@@ -167,6 +167,22 @@ class TestGatedAdapterThetaValid:
         # exp(0)=1 sits in the softmax denominator, not zeroed out).
         assert theta[0] > 0.0
 
+    def test_gated_output_is_json_serializable(self):
+        # The distributed entry points' output is written to a bundle JSON, so
+        # it must contain native Python types only (no numpy arrays/scalars).
+        import json
+
+        from spark_vi.mllib.topic.stm import corpus_concentration_heterogeneity_gated
+
+        docs, part, gp, K = _build_fitted_corpus(seed=5)
+        global_params = _global_params_from_fit(gp)
+        result = corpus_concentration_heterogeneity_gated(
+            docs, global_params, part, c=4.0, reference=0,
+        )
+        s = json.dumps(result)          # must not raise
+        assert json.loads(s)["c"] == 4.0
+        assert isinstance(result["top_mass_raw"], list)
+
 
 class TestNumpyRddParity:
     def test_numpy_rdd_parity(self, spark):

@@ -587,7 +587,8 @@ def corpus_concentration_heterogeneity_gated(
     """
     from spark_vi.eval.topic.concentration import doc_concentration
     from spark_vi.eval.topic.concentration_heterogeneity import (
-        dedup_counts, doc_burstiness, summarize_concentration_heterogeneity,
+        _json_safe, dedup_counts, doc_burstiness,
+        summarize_concentration_heterogeneity,
     )
 
     infer_theta = gated_infer_theta(
@@ -631,7 +632,7 @@ def corpus_concentration_heterogeneity_gated(
     )
     summary["sample_frac"] = None
     summary["c"] = c
-    return summary
+    return _json_safe(summary)
 
 
 def corpus_concentration_heterogeneity_rdd(
@@ -728,7 +729,7 @@ def corpus_concentration_heterogeneity_rdd(
     good = [item for item in collected if item is not None]
 
     from spark_vi.eval.topic.concentration_heterogeneity import (
-        summarize_concentration_heterogeneity,
+        _json_safe, summarize_concentration_heterogeneity,
     )
 
     if good:
@@ -751,7 +752,7 @@ def corpus_concentration_heterogeneity_rdd(
     )
     summary["sample_frac"] = sample_frac
     summary["c"] = c
-    return summary
+    return _json_safe(summary)
 
 
 def corpus_theta_gated_rdd(

@@ -106,6 +106,26 @@ def _summary_block(values: np.ndarray) -> dict:
     }
 
 
+def _json_safe(obj):
+    """Recursively convert numpy arrays/scalars to native Python types so a
+    summary dict is json.dumps-able. Used by the distributed diagnostic entry
+    points (`corpus_concentration_heterogeneity_{gated,rdd}`) whose output is
+    written to a bundle JSON; the in-process `concentration_raw_vs_dedup`
+    keeps numpy arrays for programmatic use, so this is applied only at the
+    shipped boundary."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    return obj
+
+
 def summarize_concentration_heterogeneity(
     *,
     top_mass_raw: np.ndarray,
