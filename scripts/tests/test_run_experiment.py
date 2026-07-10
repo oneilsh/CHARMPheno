@@ -1677,24 +1677,37 @@ def test_build_stm_args_omits_global_scale_knobs_when_absent(monkeypatch):
 
 
 class _FakeRunBuild:
-    """Pops successive return codes off a list; counts calls."""
-    def __init__(self, codes):
+    """Pops successive return codes off a list; counts calls.
+
+    Optionally appends "build" to a shared `log` list, so a test can assert
+    call ORDER across run_build/dispatch_cov (e.g. pre-build dispatch must
+    happen before the first run_build)."""
+    def __init__(self, codes, log=None):
         self._codes = list(codes)
         self.calls = 0
+        self.log = log
 
     def __call__(self):
         self.calls += 1
+        if self.log is not None:
+            self.log.append("build")
         return self._codes.pop(0)
 
 
 class _FakeDispatchCov:
-    """Records the force arg on each call; returns a fixed rc."""
-    def __init__(self, rc=0):
+    """Records the force arg on each call; returns a fixed rc.
+
+    Optionally appends ("cov", force) to a shared `log` list — see
+    _FakeRunBuild."""
+    def __init__(self, rc=0, log=None):
         self._rc = rc
         self.calls = []
+        self.log = log
 
     def __call__(self, force):
         self.calls.append(force)
+        if self.log is not None:
+            self.log.append(("cov", force))
         return self._rc
 
 
@@ -1773,10 +1786,85 @@ class TestBuildOnlyWithAutoCovariates:
         assert dispatch_cov.calls == []
 
     def test_force_arg_threaded_to_dispatch_cov(self):
+        """force=True on a gated-STM build now ALSO triggers the forced
+        pre-build dispatch (folded in below), so a subsequent miss-retry
+        dispatch is the second call, not the only one."""
         run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT, 0])
         dispatch_cov = _FakeDispatchCov(rc=0)
         rx._build_only_with_auto_covariates(
             effective=self.STM_EFFECTIVE, auto=True, force=True,
             run_build=run_build, dispatch_cov=dispatch_cov,
         )
+        assert dispatch_cov.calls == [True, True]
+
+    # --- Fix 1: force-covariates pre-build folded into the helper ---------
+
+    def test_force_true_prebuild_dispatches_before_first_build(self):
+        """force=True + stm + cache_uri: a forced pre-build dispatch runs
+        BEFORE the first run_build call (order matters — a stale cache must
+        never be built against)."""
+        log: list = []
+        run_build = _FakeRunBuild([0], log=log)
+        dispatch_cov = _FakeDispatchCov(rc=0, log=log)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert log == [("cov", True), "build"]
+        assert run_build.calls == 1
         assert dispatch_cov.calls == [True]
+
+    def test_force_true_prebuild_failure_skips_build_entirely(self):
+        """A failing forced pre-build aborts immediately — the (possibly
+        stale) build must never run."""
+        run_build = _FakeRunBuild([0])
+        dispatch_cov = _FakeDispatchCov(rc=5)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 5
+        assert run_build.calls == 0
+        assert dispatch_cov.calls == [True]
+
+    def test_force_true_prebuild_then_miss_retry_rebuilds_again(self):
+        """force=True + the build STILL misses on the first try (unexpected
+        but possible): dispatch_cov fires twice (forced pre-build, then the
+        miss-retry rebuild), run_build fires twice, and the final rc is the
+        retried build's rc."""
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT, 0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert dispatch_cov.calls == [True, True]
+        assert run_build.calls == 2
+
+    def test_force_true_non_stm_skips_prebuild(self):
+        """force=True but model_class != stm: no forced pre-build; behaves
+        like the plain (non-force) path."""
+        run_build = _FakeRunBuild([0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective={"model_class": "lda"}, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []
+
+    def test_force_true_stm_without_cache_uri_skips_prebuild(self):
+        """force=True + stm but no cache_uri: no forced pre-build; behaves
+        like the plain (non-force) path."""
+        run_build = _FakeRunBuild([0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective={"model_class": "stm"}, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []

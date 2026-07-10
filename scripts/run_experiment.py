@@ -483,11 +483,29 @@ def _dispatch_covariate_build(effective: dict, *, force: bool = False) -> int:
 
 
 def _build_only_with_auto_covariates(*, effective, auto, force, run_build, dispatch_cov):
-    """Run the dashboard build; if it exits with COVARIATE_CACHE_MISS_EXIT and
-    auto-rebuild is enabled for a gated STM build with a cache_uri, rebuild the
-    covariate cache once and re-run the build a single time. run_build() -> int
-    and dispatch_cov(force: bool) -> int are injected so this is Spark-free and
-    testable. Returns the final build return code."""
+    """Run the dashboard build, with two covariate-cache behaviors folded in
+    so both are covered by the same Spark-free injected-callable unit tests:
+
+    1. Forced pre-build: if `force` and this is a gated-STM build with a
+       cache_uri, rebuild the covariate cache FIRST (before the build ever
+       runs). If that forced rebuild fails, abort immediately and return its
+       rc — the build never runs against a rebuild that didn't happen.
+    2. Miss-retry: if the build then exits COVARIATE_CACHE_MISS_EXIT and
+       auto-rebuild is enabled for a gated STM build with a cache_uri,
+       rebuild the covariate cache once (passing `force` through — after a
+       forced pre-build a miss is unexpected, but the existing semantics of
+       passing `force` are preserved) and re-run the build a single time.
+
+    run_build() -> int and dispatch_cov(force: bool) -> int are injected so
+    this is Spark-free and testable. Returns the final build return code."""
+    if force and effective.get("model_class") == "stm" and effective.get("cache_uri"):
+        print("[run-exp] --build-only --force-covariates: rebuilding covariate "
+              "cache before the build", flush=True)
+        pre_rc = dispatch_cov(True)
+        if pre_rc != 0:
+            print(f"[run-exp] forced covariate pre-build failed ({pre_rc}); "
+                  "not running the dashboard build", flush=True)
+            return pre_rc
     rc = run_build()
     if (rc == COVARIATE_CACHE_MISS_EXIT and auto
             and effective.get("model_class") == "stm" and effective.get("cache_uri")):
@@ -1060,13 +1078,10 @@ def main(argv: list[str] | None = None) -> int:
         # Display-only join; cmd is passed as list to Popen, not via shell.
         print(f"[run-exp] build spark-submit: {' '.join(build_cmd)}", flush=True)
         write_build_section_header(summary_path)
-        if (args.force_covariates and effective.get("model_class") == "stm"
-                and effective.get("cache_uri")):
-            print("[run-exp] --build-only --force-covariates: rebuilding covariate "
-                  "cache before the build", flush=True)
-            _pre_rc = _dispatch_covariate_build(effective, force=True)
-            if _pre_rc != 0:
-                return _pre_rc
+        if (args.force_covariates and not (
+                effective.get("model_class") == "stm" and effective.get("cache_uri"))):
+            print("[run-exp] --force-covariates has no effect here: not an STM "
+                  "build with a cache_uri; skipping covariate rebuild", flush=True)
         build_rc = _build_only_with_auto_covariates(
             effective=effective, auto=args.auto_covariates,
             force=args.force_covariates,
