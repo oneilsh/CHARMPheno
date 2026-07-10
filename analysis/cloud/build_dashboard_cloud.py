@@ -1513,9 +1513,12 @@ def main(argv: list[str] | None = None) -> int:
                 # Optional gated / correlation outputs: include whichever were
                 # written so the downloadable zip is the COMPLETE bundle.
                 # gating.json + covariate_* need the covariate cache;
-                # correlation.json needs a gated fit with persisted n_pairs.
+                # correlation.json needs a gated fit with persisted n_pairs;
+                # concentration_heterogeneity.json is the off-by-default
+                # dedup/burstiness diagnostic (BUILD_CONCENTRATION_HETEROGENEITY_DIAGNOSTIC).
                 for f in ("gating.json", "covariate_schema.json",
-                          "covariate_effects.json", "correlation.json"):
+                          "covariate_effects.json", "correlation.json",
+                          "concentration_heterogeneity.json"):
                     p = out_dir / f
                     if p.exists():
                         zf.write(p, arcname=f)
