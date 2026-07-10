@@ -95,12 +95,17 @@ def test_sidecar_present_gated_ok():
         is_stm=True, gated=True, sidecar_present=True, allow_incomplete=False)
 
 
-def test_sidecar_missing_gated_raises_with_build_covariates_hint():
+def test_sidecar_missing_gated_raises_with_build_covariates_hint(capsys):
+    # Exit code is now the distinct COVARIATE_CACHE_MISS_EXIT sentinel (see
+    # test_covariate_miss_exit_code.py); the guidance message is printed
+    # (or logged) before the raise rather than carried in the SystemExit
+    # payload, so run_experiment.py can match on the code alone.
     with pytest.raises(SystemExit) as ei:
         bdc.assert_covariate_sidecar_present(
             is_stm=True, gated=True, sidecar_present=False,
             allow_incomplete=False, exp_hint="0028")
-    msg = str(ei.value)
+    assert ei.value.code == bdc.COVARIATE_CACHE_MISS_EXIT
+    msg = capsys.readouterr().out
     assert "build-covariates EXP=0028" in msg     # actionable, names the exp
     assert "predictive_gain" in msg               # names what gets skipped
     assert "allow-incomplete-bundle" in msg       # names the escape hatch
@@ -124,9 +129,10 @@ def test_sidecar_missing_non_stm_does_not_raise():
         is_stm=False, gated=False, sidecar_present=False, allow_incomplete=False)
 
 
-def test_sidecar_missing_hint_absent_still_actionable():
+def test_sidecar_missing_hint_absent_still_actionable(capsys):
     with pytest.raises(SystemExit) as ei:
         bdc.assert_covariate_sidecar_present(
             is_stm=True, gated=True, sidecar_present=False,
             allow_incomplete=False, exp_hint=None)
-    assert "build-covariates EXP=<id>" in str(ei.value)
+    assert ei.value.code == bdc.COVARIATE_CACHE_MISS_EXIT
+    assert "build-covariates EXP=<id>" in capsys.readouterr().out
