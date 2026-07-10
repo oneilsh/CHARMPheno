@@ -121,16 +121,24 @@ per regime is observable).
   "Which estimator finds the true c" and "which c makes the shipped system behave" are
   different questions; under known misspecification the second is the one with an operational
   answer.
-- **To close the §5 "is 4.6 too high" question empirically (bias inversion / indirect
-  inference):** the exp 0046 synthetic harness is a bias-calibration instrument. Plant at
-  several scales spanning the plausible range (c ∈ {2, 3.5, 5, 7, 10}) at the production
-  regime, map ĉ_MAP(c) and ĉ_marg(c) per f, and invert the real readings through the measured
-  maps. A single-point napkin (marginalized reads ~half of truth at f=0.5: 2.36/0.52 ≈ 4.5 ≈
-  the shipped 4.6) *hints* the two instruments reconcile to a common corrected scale, but the
-  MAP single-point (3.4/5=0.68; 5.3/0.68 ≈ 7.8) does not, so the multi-point inversion is
-  required to resolve it (nonlinearity and/or the sample-vs-full 5.30-vs-4.61 discrepancy are
-  doing work). If the two instruments reconcile after correction, most of the "one number"
-  goal is recovered — one pseudo-true scale, two independently-biased readings agreeing.
+- **§5 "is 4.6 too high" — RESOLVED by the bias inversion (run 2026-07-10,
+  `scripts/marginalized_scale_bias_inversion.py`, results
+  `docs/experiments/0046-marginalized-scale-decomposition/bias-inversion.md`).** Planting at
+  c ∈ {2, 3.5, 5, 7, 10} at the production regime and measuring ĉ_est(c_true) per f gives a
+  clean, near-linear, f-stable, invertible **MAP** map (ĉ/c_true ≈ 0.6–0.85, a constant
+  under-recovery) and a **SATURATED marginalized** map (at f=0.5 c_true 2→10 moves ĉ only
+  2.12→2.51 — nearly uninvertible). Three results: (1) the two instruments do NOT reconcile
+  (where marginalized is invertible at all they disagree 1.8–2.6×) — the napkin ratio-transfer
+  was coincidental because the marginalized map is saturated, not linear; (2) the shipped raw
+  MAP scale (4.6) is NOT too high — bias-corrected through the MAP instrument the true scale is
+  **~5.4–7** (MAP_full inverts to 6.95/5.60/5.41 across f), *higher* than shipped and near the
+  ~7.6 natural scale, so the marginalized "low" reading (2.36) was Laplace saturation, not a
+  genuine lower-scale signal; (3) the bias-corrected scale STILL drifts across f (6.95→5.41,
+  drift 1.55) — the genuine per-document concentration heterogeneity, now cleanly isolated from
+  estimator bias and quantified (~1.5 corrected-scale units). So marginalization is doubly dead
+  (biased AND uninvertible), the shipped scale is if anything conservative (a live option: ship
+  a bias-corrected ~6 instead of raw 4.6, at the cost of trusting the synthetic-β transfer),
+  and the heterogeneity is real.
 
 ## What this does NOT claim
 
