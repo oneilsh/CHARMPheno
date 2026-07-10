@@ -187,6 +187,32 @@ def assert_covariate_sidecar_matches_model(*, sidecar_names, model_covariate_nam
         )
 
 
+def build_marginalized_scale_diagnostic(
+    *, map_cstar_by_holdout, marg_cstar_by_holdout, n_samples, n_docs_sampled,
+    c_grid, holdouts,
+):
+    """Assemble the MAP-vs-marginalized held-out scale comparison for the
+    eta_scale diagnostic. Pure/deterministic (no Spark): given the smoothed c*
+    per holdout fraction for each estimator, return a dict recording both
+    curves and each estimator's residual drift (max - min c* across holdout
+    fractions -- the quantity that should be ~0 for a well-behaved,
+    prefix-independent scale). map_/marg_cstar_by_holdout are dicts keyed by
+    str(holdout_fraction) -> smoothed c* (float)."""
+    def _drift(d):
+        vals = [float(d[str(h)]) for h in holdouts]
+        return float(max(vals) - min(vals))
+    return {
+        "n_samples": int(n_samples),
+        "n_docs_sampled": int(n_docs_sampled),
+        "c_grid": list(c_grid),
+        "holdouts": [float(h) for h in holdouts],
+        "map_cstar_by_holdout": {str(h): float(map_cstar_by_holdout[str(h)]) for h in holdouts},
+        "marg_cstar_by_holdout": {str(h): float(marg_cstar_by_holdout[str(h)]) for h in holdouts},
+        "map_residual_drift": _drift(map_cstar_by_holdout),
+        "marg_residual_drift": _drift(marg_cstar_by_holdout),
+    }
+
+
 def _required_stm_outputs(*, gated: bool) -> list[str]:
     """Covariate-dependent bundle files an STM export must produce."""
     req = ["covariate_effects.json", "covariate_schema.json"]
@@ -827,6 +853,78 @@ def main(argv: list[str] | None = None) -> int:
                     "STM: smoothed held-out c*=%.4f (holdout 0.5, "
                     "grid_argmax=%.4f); robustness=%s.",
                     c_star, grid_argmax_c, robustness)
+
+                # FLAGGED diagnostic (Task 6', off by default): re-runs BOTH the
+                # MAP-plug-in sweep above and the Laplace-MC MARGINALIZED sweep
+                # (Task 5, corpus_heldout_scale_sweep_gated_rdd(marginalize=True))
+                # on the SAME sampled docs at the SAME 3 holdout fractions, and
+                # records both curves + each estimator's residual drift (max-min
+                # c* across holdouts -- ~0 for a well-behaved, prefix-independent
+                # scale). This is the real-corpus decisive test for whether
+                # marginalization's synthetic-K=60 bias inversion (exp 0046)
+                # also inverts on the misspecified real corpus, where the MAP
+                # estimate itself already drifts (4.58->3.65). Entirely
+                # diagnostic: it does NOT change eta_scale or eta_scale_diag's
+                # other fields, and its own try/except below ensures a failure
+                # here can never blank the shipped scale (unlike the outer
+                # except, which does exactly that on a real calibration
+                # failure). Own try/except is required for that isolation.
+                if os.environ.get("BUILD_MARGINALIZE_SCALE_DIAGNOSTIC"):
+                    try:
+                        _n_samp = int(os.environ.get(
+                            "BUILD_MARGINALIZE_SCALE_SAMPLES", "64"))
+                        _doc_frac = float(os.environ.get(
+                            "BUILD_MARGINALIZE_SCALE_DOC_FRAC", "0.02"))
+                        # Cost control: the marginalized sweep is ~n_samples x the
+                        # MAP cost, so it runs on a SAMPLE of the corpus (both
+                        # estimators on the SAME sampled docs for an
+                        # apples-to-apples comparison). The full-corpus MAP
+                        # robustness above is unaffected and still ships.
+                        _sampled = doc_rdd.sample(
+                            withReplacement=False, fraction=_doc_frac,
+                            seed=0).cache()
+                        _n_docs = _sampled.count()
+                        _map_by, _marg_by = {}, {}
+                        with _phase("eta_scale marginalized diagnostic "
+                                    "(cluster test)"):
+                            for hf in HOLDOUTS:
+                                _m = corpus_heldout_scale_sweep_gated_rdd(
+                                    _sampled, result.global_params,
+                                    stm_partition, c_grid=C_GRID,
+                                    holdout_frac=hf, reference=reference_id,
+                                    seed=0, marginalize=False)
+                                _g = corpus_heldout_scale_sweep_gated_rdd(
+                                    _sampled, result.global_params,
+                                    stm_partition, c_grid=C_GRID,
+                                    holdout_frac=hf, reference=reference_id,
+                                    seed=0, marginalize=True,
+                                    n_samples=_n_samp)
+                                _map_by[str(hf)] = smooth_scale_log_quadratic(
+                                    _m["lls"])["c_star"]
+                                _marg_by[str(hf)] = smooth_scale_log_quadratic(
+                                    _g["lls"])["c_star"]
+                        _sampled.unpersist()
+                        eta_scale_diag["marginalized_diagnostic"] = (
+                            build_marginalized_scale_diagnostic(
+                                map_cstar_by_holdout=_map_by,
+                                marg_cstar_by_holdout=_marg_by,
+                                n_samples=_n_samp, n_docs_sampled=_n_docs,
+                                c_grid=C_GRID, holdouts=HOLDOUTS))
+                        _md = eta_scale_diag["marginalized_diagnostic"]
+                        log.info(
+                            "STM marginalized-scale diagnostic (sample n=%d, "
+                            "S=%d): MAP drift=%.4f marg drift=%.4f; MAP "
+                            "c*=%s marg c*=%s",
+                            _n_docs, _n_samp, _md["map_residual_drift"],
+                            _md["marg_residual_drift"],
+                            _md["map_cstar_by_holdout"],
+                            _md["marg_cstar_by_holdout"])
+                    except Exception as _dexc:
+                        # diagnostic-only: NEVER affects the shipped eta_scale
+                        log.warning(
+                            "STM marginalized-scale diagnostic failed (%s); "
+                            "shipped eta_scale and bundle are UNAFFECTED.",
+                            _dexc)
             except Exception as exc:  # enhancement-only: never fatal
                 log.warning("STM: eta_scale held-out calibration failed (%s); "
                             "correlation.json omits eta_scale (dashboard falls "
