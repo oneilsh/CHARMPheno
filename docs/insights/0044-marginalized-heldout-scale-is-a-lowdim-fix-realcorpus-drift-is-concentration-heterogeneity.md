@@ -136,9 +136,22 @@ per regime is observable).
   genuine lower-scale signal; (3) the bias-corrected scale STILL drifts across f (6.95→5.41,
   drift 1.55) — the genuine per-document concentration heterogeneity, now cleanly isolated from
   estimator bias and quantified (~1.5 corrected-scale units). So marginalization is doubly dead
-  (biased AND uninvertible), the shipped scale is if anything conservative (a live option: ship
-  a bias-corrected ~6 instead of raw 4.6, at the cost of trusting the synthetic-β transfer),
-  and the heterogeneity is real.
+  (biased AND uninvertible), the shipped scale is if anything conservative, and the
+  heterogeneity is real. **Real-β transfer check (`scripts/realbeta_bias_transfer_check.py`):**
+  re-measuring the MAP map under the DEPLOYED β (from the exp 0047 bundle, only β swapped)
+  gives an under-recovery ratio of 0.63–0.80 that tracks the synthetic 0.66–0.86 in shape and
+  magnitude — so the ~0.66 is estimator geometry, not a synthetic-β artifact, and the
+  correction is EARNED with provenance under the deployed emission matrix (corrected scale
+  ~6–7.3, converging with the 5–7 faithful band and 7.6 natural scale — three independent
+  routes agree). **But the "ship a bias-corrected ~6" decision is demoted to the FALLBACK
+  branch (per Fable):** because the residual f-drift is a genuine distribution of per-document
+  scales, a single corrected c is just a different compromise point, not a recovered truth. On
+  the main line the fix is the per-document scale (multivariate-t), and the bias-corrected
+  inversion becomes its **validation target** — at the calibrated (c, ν) the model's own s_d
+  spread should REPRODUCE the per-f implied scales (6.95/5.60/5.41), a sharper falsifiable test
+  than "the drift shrinks." Sequence: (1) dedup/burstiness gate, (2) real-β bias map [done],
+  (3) the gate-selected heterogeneity fit, (4) scale decision — ship (c, ν) on the main line,
+  or the bias-corrected single-c only as fallback.
 
 ## What this does NOT claim
 

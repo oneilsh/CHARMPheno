@@ -65,3 +65,30 @@ assumes that bias transfers.
   here.
 - **The heterogeneity (residual f-drift ≈ 1.5) is real and quantified** — the case for the
   per-document scale (multivariate-t) fix, still gated on the burstiness/dedup check.
+
+## Real-β transfer check (`scripts/realbeta_bias_transfer_check.py`)
+
+The bias map above was measured under synthetic β. The correction only transfers if the
+under-recovery is a property of the estimator geometry (K, doc length, MAP-under-prior)
+rather than of the β it was measured with. Re-running the MAP plant over the DEPLOYED β
+(loaded from the exp 0047 bundle's model.json, non-gated, only β swapped):
+
+| c_true | REAL-β MAP ĉ (f=0.5/0.8/0.95) | ratio ĉ/c_true (f=0.5) | synth-β ratio (f=0.5) |
+|---|---|---|---|
+| 2.0 | 1.60 / 1.54 / 1.33 | 0.80 | 0.86 |
+| 3.5 | 2.54 / 2.50 / 2.26 | 0.73 | 0.76 |
+| 5.0 | 3.28 / 3.21 / 2.86 | 0.66 | 0.70 |
+| 7.0 | 4.44 / 4.23 / 3.65 | 0.63 | 0.66 |
+
+**The ratio transfers.** Real-β under-recovery (0.63–0.80) tracks synthetic-β (0.66–0.86)
+in both shape (declining with c_true) and magnitude (real-β ~0.03–0.07 lower — slightly
+MORE compressing). So the ~0.66 is estimator geometry, not a synthetic-β artifact: **the
+correction is earned, with provenance under the deployed emission matrix.** Inverting the
+shipped MAP_full readings (4.61/3.75/3.65) through the real-β map lands the corrected true
+scale at **~6–7.3** (slightly higher than the synthetic map's 5.4–7, since real-β is a bit
+more compressing) — still well above the shipped 4.6 and converging on the faithful band
+(5–7, insight 0037) and the natural scale (7.6, insight 0030): three independent routes
+now agree. Caveat: the real-β map is noisier at high f (dense background topic, D=1000), so
+the per-f corrected values are non-monotonic (~7.3/6.0/7.0) — the clean drift magnitude
+(~1.5) is better read from the smoother synthetic map; the real-β run confirms the LEVEL
+and the transfer, not a re-quantified drift shape.
