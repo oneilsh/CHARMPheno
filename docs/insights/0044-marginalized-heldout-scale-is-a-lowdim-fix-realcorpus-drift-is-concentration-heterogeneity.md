@@ -109,6 +109,10 @@ per regime is observable).
   increments log(s·p_w + i) for the i-th repeat make each repeat count less (growth ~log(n_w),
   first occurrence undamped, damping governed by an estimated per-topic s) — NOT the ad-hoc
   count-dampening log(1+n), and NOT a heavy-tailed prior absorbing a likelihood pathology.
+  RESULT — the gate came back GENUINE (**insight 0045**, exp 0047): spread survives dedup
+  (spread_ratio 0.98), ordering preserved (rank_corr 0.86), peakiness uncorrelated with
+  repeat-rate (burstiness_corr 0.009); burstiness exists (repeat_fraction median 0.29) but is
+  orthogonal. So the fix is prior-side (t-prior) and the DCM branch retires with evidence.
 - **Disposition for what ships now:** calibrate at the f matching the tool's dominant
   conditioning regime (matched-f calibration), ship that single number with the drift band
   quoted (MAP-side ≈ 3.7–4.6), and do NOT expose a per-request scale (a query-dependent
