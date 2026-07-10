@@ -128,15 +128,6 @@ def _dicts_close(a, b):
     return True
 
 
-def _planted_beta(K, V):
-    beta = np.full((K, V), 1e-3)
-    blk = V // K
-    for k in range(K):
-        beta[k, k * blk:(k + 1) * blk] += 2.0
-    beta /= beta.sum(axis=1, keepdims=True)
-    return beta
-
-
 def _build_fitted_corpus(*, seed=0):
     docs, planted, part = synthetic_gated_corpus(
         groups=("A", "B"), fg_per_group=1, bg_k=2, V=40, D=40, doc_len=25,
@@ -195,6 +186,70 @@ class TestNumpyRddParity:
         result = corpus_concentration_heterogeneity_rdd(
             rdd, global_params, part, c=4.0, reference=0, sample_frac=None,
         )
+
+        assert result["n_docs"] == expected["n_docs"]
+        assert result["n_skipped"] == expected["n_skipped"]
+        assert result["c"] == expected["c"]
+
+        for key in (
+            "top_mass_raw", "top_mass_dedup", "eff_topics_raw",
+            "eff_topics_dedup", "repeat_fraction",
+        ):
+            np.testing.assert_allclose(result[key], expected[key], rtol=1e-9, atol=1e-9)
+
+        for key in (
+            "spread_ratio_top_mass", "rank_corr_top_mass", "burstiness_corr_top_mass",
+        ):
+            np.testing.assert_allclose(result[key], expected[key], rtol=1e-9, atol=1e-9)
+
+        for summary_key in (
+            "top_mass_raw_summary", "top_mass_dedup_summary",
+            "eff_topics_raw_summary", "eff_topics_dedup_summary",
+            "repeat_fraction_summary",
+        ):
+            for stat_key, stat_val in expected[summary_key].items():
+                if stat_val is None:
+                    assert result[summary_key][stat_key] is None
+                else:
+                    np.testing.assert_allclose(
+                        result[summary_key][stat_key], stat_val, rtol=1e-9, atol=1e-9
+                    )
+
+    def test_numpy_rdd_parity_with_skipped_docs(self, spark):
+        """Same as test_numpy_rdd_parity, but with a handful of degenerate
+        docs (total < 2 tokens, or a single unique token) spliced in among
+        normal ones -- the base parity test above has zero skips, so it
+        never exercises whether the skip guard drops the SAME docs, in the
+        SAME relative order, on both the numpy oracle and the distributed
+        RDD path. A desync here would silently misalign the per-doc arrays
+        the two paths compare (or corrupt the rank/burstiness correlations)
+        without necessarily changing n_skipped, so this asserts n_skipped>0
+        on both sides AND full elementwise/summary parity."""
+        from spark_vi.mllib.topic.stm import (
+            corpus_concentration_heterogeneity_gated,
+            corpus_concentration_heterogeneity_rdd,
+        )
+
+        docs, part, gp, K = _build_fitted_corpus(seed=11)
+        global_params = _global_params_from_fit(gp)
+
+        degenerate = [
+            _doc([0], [1.0], groups=frozenset({"A"})),   # total < 2 -> skip
+            _doc([3], [5.0], groups=frozenset({"B"})),   # unique <= 1 -> skip
+            _doc([1], [1.0], groups=frozenset({"A"})),   # total < 2 -> skip
+        ]
+        mixed_docs = docs[:20] + degenerate + docs[20:]
+
+        expected = corpus_concentration_heterogeneity_gated(
+            mixed_docs, global_params, part, c=4.0, reference=0,
+        )
+        assert expected["n_skipped"] > 0
+
+        rdd = spark.sparkContext.parallelize(mixed_docs, numSlices=3)
+        result = corpus_concentration_heterogeneity_rdd(
+            rdd, global_params, part, c=4.0, reference=0, sample_frac=None,
+        )
+        assert result["n_skipped"] > 0
 
         assert result["n_docs"] == expected["n_docs"]
         assert result["n_skipped"] == expected["n_skipped"]

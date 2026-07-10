@@ -636,7 +636,7 @@ def corpus_concentration_heterogeneity_gated(
 
 def corpus_concentration_heterogeneity_rdd(
     doc_rdd, global_params, partition, *, c, reference=None,
-    sample_frac=None, seed=0, depth=2,
+    sample_frac=None, seed=0,
     lbfgs_max_iter=50, lbfgs_tol=1e-4,
 ) -> dict:
     """Distributed gated concentration-heterogeneity diagnostic.
