@@ -1674,3 +1674,109 @@ def test_build_stm_args_omits_global_scale_knobs_when_absent(monkeypatch):
     args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
     assert "--estimate-global-scale" not in args
     assert "--global-scale-step-cap" not in args
+
+
+class _FakeRunBuild:
+    """Pops successive return codes off a list; counts calls."""
+    def __init__(self, codes):
+        self._codes = list(codes)
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return self._codes.pop(0)
+
+
+class _FakeDispatchCov:
+    """Records the force arg on each call; returns a fixed rc."""
+    def __init__(self, rc=0):
+        self._rc = rc
+        self.calls = []
+
+    def __call__(self, force):
+        self.calls.append(force)
+        return self._rc
+
+
+class TestBuildOnlyWithAutoCovariates:
+    """_build_only_with_auto_covariates: on a COVARIATE_CACHE_MISS_EXIT (42)
+    from a gated STM build with a cache_uri, auto-rebuild the covariate cache
+    once and retry the build once. Spark-free: run_build/dispatch_cov are
+    injected fakes."""
+
+    STM_EFFECTIVE = {"model_class": "stm", "cache_uri": "gs://bucket/cache"}
+
+    def test_miss_then_success_rebuilds_once_and_retries(self):
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT, 0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert run_build.calls == 2
+        assert dispatch_cov.calls == [False]
+
+    def test_success_first_try_never_touches_covariates(self):
+        run_build = _FakeRunBuild([0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []
+
+    def test_auto_false_does_not_rebuild_on_miss(self):
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=False, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == rx.COVARIATE_CACHE_MISS_EXIT
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []
+
+    def test_covariate_rebuild_failure_aborts_without_retrying_build(self):
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT])
+        dispatch_cov = _FakeDispatchCov(rc=3)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 3
+        assert run_build.calls == 1  # no retry after a failed covariate rebuild
+        assert dispatch_cov.calls == [False]
+
+    def test_non_stm_or_missing_cache_uri_does_not_rebuild(self):
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective={"model_class": "lda"}, auto=True, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == rx.COVARIATE_CACHE_MISS_EXIT
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []
+
+    def test_stm_without_cache_uri_does_not_rebuild(self):
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective={"model_class": "stm"}, auto=True, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == rx.COVARIATE_CACHE_MISS_EXIT
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []
+
+    def test_force_arg_threaded_to_dispatch_cov(self):
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT, 0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert dispatch_cov.calls == [True]

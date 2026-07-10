@@ -38,6 +38,8 @@ from pyspark.sql import functions as F
 
 from _driver_common import _phase, configure_logging, make_spark_session
 
+COVARIATE_CACHE_MISS_EXIT = 42  # distinct exit code so run_experiment.py --build-only can auto-rebuild the covariate cache and retry (see run_experiment._build_only_with_auto_covariates)
+
 
 class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
                      argparse.RawDescriptionHelpFormatter):
@@ -288,9 +290,12 @@ def assert_covariate_sidecar_present(
         if log is not None:
             log.warning("%s (--allow-incomplete-bundle set; continuing)", detail)
         return
-    raise SystemExit(
-        detail + " Pass --allow-incomplete-bundle to accept the degraded bundle."
-    )
+    msg = detail + " Pass --allow-incomplete-bundle to accept the degraded bundle."
+    if log is not None:
+        log.error(msg)
+    else:
+        print(msg, flush=True)
+    raise SystemExit(COVARIATE_CACHE_MISS_EXIT)
 
 
 def _write_covariate_schema(spark, *, result, corpus, source_table, cohort_name,

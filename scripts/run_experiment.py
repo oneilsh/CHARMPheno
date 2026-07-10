@@ -20,6 +20,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPERIMENTS_DIR = REPO_ROOT / "docs" / "experiments"
 DEFAULTS_DIR = REPO_ROOT / "experiments" / "defaults"
+COVARIATE_CACHE_MISS_EXIT = 42  # MUST match analysis/cloud/build_dashboard_cloud.py
 
 
 def read_frontmatter(path: Path) -> dict:
@@ -459,6 +460,51 @@ def build_covariates_args(effective: dict) -> list[str]:
     return args
 
 
+def _dispatch_covariate_build(effective: dict, *, force: bool = False) -> int:
+    """Run analysis/cloud/build_stm_covariates.py via spark-submit; return its rc.
+
+    Factored out of the `--build-covariates-only` dispatch so
+    `_build_only_with_auto_covariates` can reuse it (via a lambda) to
+    auto-rebuild the covariate cache when `--build-only` reports a
+    COVARIATE_CACHE_MISS_EXIT.
+    """
+    cov_script = REPO_ROOT / "analysis" / "cloud" / "build_stm_covariates.py"
+    cov_args = build_covariates_args(effective)
+    if force:
+        cov_args.append("--force")
+    cov_cmd = build_spark_submit_cmd(str(cov_script), cov_args, REPO_ROOT)
+    print(f"[run-exp] build-covariates spark-submit: {' '.join(cov_cmd)}", flush=True)
+    import subprocess as _sp
+    result = _sp.run(cov_cmd, check=False)
+    if result.returncode != 0:
+        print(f"[run-exp] build-covariates exited non-zero ({result.returncode})",
+              flush=True)
+    return result.returncode
+
+
+def _build_only_with_auto_covariates(*, effective, auto, force, run_build, dispatch_cov):
+    """Run the dashboard build; if it exits with COVARIATE_CACHE_MISS_EXIT and
+    auto-rebuild is enabled for a gated STM build with a cache_uri, rebuild the
+    covariate cache once and re-run the build a single time. run_build() -> int
+    and dispatch_cov(force: bool) -> int are injected so this is Spark-free and
+    testable. Returns the final build return code."""
+    rc = run_build()
+    if (rc == COVARIATE_CACHE_MISS_EXIT and auto
+            and effective.get("model_class") == "stm" and effective.get("cache_uri")):
+        print("[run-exp] --build-only: covariate cache MISS (exit %d); "
+              "auto-rebuilding the covariate cache, then retrying the build once."
+              % rc, flush=True)
+        cov_rc = dispatch_cov(force)
+        if cov_rc != 0:
+            print(f"[run-exp] covariate rebuild failed ({cov_rc}); not retrying "
+                  "the dashboard build", flush=True)
+            return cov_rc
+        print("[run-exp] covariate cache rebuilt; re-running the dashboard build",
+              flush=True)
+        rc = run_build()
+    return rc
+
+
 def build_stm_args(
     effective: dict, out_dir: str, resume_from: Path | None = None,
 ) -> list[str]:
@@ -807,7 +853,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force-covariates", action="store_true",
                         help="With --build-covariates-only: delete the existing "
                              "covariate cache dir before rebuilding so the formula "
-                             "change is picked up.")
+                             "change is picked up. With --build-only: force-rebuild "
+                             "the covariate cache before the build.")
+    parser.add_argument("--auto-covariates", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="On --build-only, auto-rebuild the STM covariate cache "
+                             "if the build reports a covariate-cache miss, then "
+                             "retry once (default: on). --no-auto-covariates "
+                             "restores fail-fast.")
     parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR,
                         help="Base directory for run output. Default: %(default)s")
     parser.add_argument("--experiments-dir", type=Path, default=EXPERIMENTS_DIR,
@@ -830,9 +883,9 @@ def main(argv: list[str] | None = None) -> int:
               "--eval-only, --no-eval, and --build-only", flush=True)
         return 2
 
-    if args.force_covariates and not args.build_covariates_only:
-        print("[run-exp] ERROR: --force-covariates requires --build-covariates-only",
-              flush=True)
+    if args.force_covariates and not (args.build_covariates_only or args.build_only):
+        print("[run-exp] ERROR: --force-covariates requires --build-covariates-only "
+              "or --build-only", flush=True)
         return 2
 
     # 1. Select experiment file
@@ -913,18 +966,7 @@ def main(argv: list[str] | None = None) -> int:
             print("[run-exp] ERROR: --build-covariates-only requires cache_uri in "
                   "effective config", flush=True)
             return 2
-        cov_script = REPO_ROOT / "analysis" / "cloud" / "build_stm_covariates.py"
-        cov_args = build_covariates_args(effective)
-        if args.force_covariates:
-            cov_args.append("--force")
-        cov_cmd = build_spark_submit_cmd(str(cov_script), cov_args, REPO_ROOT)
-        print(f"[run-exp] build-covariates spark-submit: {' '.join(cov_cmd)}", flush=True)
-        import subprocess as _sp
-        result = _sp.run(cov_cmd, check=False)
-        if result.returncode != 0:
-            print(f"[run-exp] build-covariates exited non-zero ({result.returncode})",
-                  flush=True)
-        return result.returncode
+        return _dispatch_covariate_build(effective, force=args.force_covariates)
 
     # 3. Resolve save_dir, detect resume
     # Resume only when there's an actual checkpoint (manifest.json) inside the
@@ -1018,7 +1060,19 @@ def main(argv: list[str] | None = None) -> int:
         # Display-only join; cmd is passed as list to Popen, not via shell.
         print(f"[run-exp] build spark-submit: {' '.join(build_cmd)}", flush=True)
         write_build_section_header(summary_path)
-        build_rc = run_subprocess_tee_sanitize(build_cmd, summary_path, DROP_PATTERNS)
+        if (args.force_covariates and effective.get("model_class") == "stm"
+                and effective.get("cache_uri")):
+            print("[run-exp] --build-only --force-covariates: rebuilding covariate "
+                  "cache before the build", flush=True)
+            _pre_rc = _dispatch_covariate_build(effective, force=True)
+            if _pre_rc != 0:
+                return _pre_rc
+        build_rc = _build_only_with_auto_covariates(
+            effective=effective, auto=args.auto_covariates,
+            force=args.force_covariates,
+            run_build=lambda: run_subprocess_tee_sanitize(build_cmd, summary_path, DROP_PATTERNS),
+            dispatch_cov=lambda force: _dispatch_covariate_build(effective, force=force),
+        )
         with summary_path.open("a") as f:
             f.write(f"\n### Build complete (exit {build_rc})\n")
         if build_rc != 0:
