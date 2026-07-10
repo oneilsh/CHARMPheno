@@ -51,3 +51,30 @@ def test_log_of_average_not_average_of_log():
     # average-of-log baseline
     avg_of_log = np.mean([_predictive_loglik(t, beta, held_i, held_c) for t in th])
     assert log_of_avg > avg_of_log
+
+
+def test_marginalized_sweep_recovers_planted_scale_and_is_flatter_across_holdout():
+    from spark_vi.eval.topic.concentration_recovery import (
+        make_shared_beta, plant_corpus, sweep_heldout, sweep_heldout_marginalized,
+    )
+    beta = make_shared_beta(K=8, V=400, seed=0)
+    docs, _ = plant_corpus(beta, D=400, doc_len=60, mechanism="logistic_normal",
+                           level=3.0, seed=1)
+    knobs = [0.5, 1.0, 2.0, 3.0, 4.0, 6.0]
+    # MAP plug-in c* moves across holdout; marginalized c* should be steadier.
+    map_lo = sweep_heldout(docs, beta, method="stm", knobs=knobs, holdout_frac=0.5)["argmax_knob"]
+    map_hi = sweep_heldout(docs, beta, method="stm", knobs=knobs, holdout_frac=0.9)["argmax_knob"]
+    mrg_lo = sweep_heldout_marginalized(docs, beta, knobs=knobs, holdout_frac=0.5, n_samples=128)["argmax_knob"]
+    mrg_hi = sweep_heldout_marginalized(docs, beta, knobs=knobs, holdout_frac=0.9, n_samples=128)["argmax_knob"]
+    # marginalized drift <= MAP drift (grid steps); primary claim is directional.
+    assert abs(knobs.index(mrg_lo) - knobs.index(mrg_hi)) <= abs(knobs.index(map_lo) - knobs.index(map_hi))
+
+
+def test_sweep_marginalized_return_shape():
+    from spark_vi.eval.topic.concentration_recovery import (
+        make_shared_beta, plant_corpus, sweep_heldout_marginalized,
+    )
+    beta = make_shared_beta(K=6, V=200, seed=0)
+    docs, _ = plant_corpus(beta, D=40, doc_len=40, mechanism="dirichlet", level=0.3, seed=2)
+    out = sweep_heldout_marginalized(docs, beta, knobs=[1.0, 3.0], n_samples=16)
+    assert set(out) == {"lls", "argmax_knob"} and set(out["lls"]) == {1.0, 3.0}

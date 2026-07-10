@@ -692,3 +692,52 @@ def marginalized_predictive_loglik(theta_samples, beta_prob, held_indices, held_
     preds = theta_samples @ beta_prob                 # (S, V)
     avg = preds[:, held_indices].mean(axis=0)         # (n_held,)
     return float(np.sum(held_counts * np.log(avg + 1e-300)))
+
+
+def stm_marginalized_heldout_ll(
+    docs: list, beta: np.ndarray, *, c: float, n_samples: int = 64,
+    holdout_frac: float = 0.3, seed: int = 0, max_iter: int = 200, tol: float = 1e-6,
+) -> float:
+    """Marginalized (Laplace-sample) counterpart of stm_heldout_ll: infer the
+    visible-token MAP eta_hat AND its Laplace covariance nu_d, draw n_samples
+    theta from N(eta_hat, nu_d), and score the held-out half by the log-of-
+    average per-token predictive (marginalized_predictive_loglik). Non-gated
+    frozen-beta path (allowed=None, reference=None), so free_topics = all K and
+    the reference branch is inactive. Per-doc sample rng is seeded seed+i,
+    independent of c, matching heldout_split's split seed. Mean per held token."""
+    K = beta.shape[0]
+    Gamma = np.zeros((1, K)); x = np.array([1.0])
+    Sigma_inv = (1.0 / c) * np.eye(K)
+    total_ll = 0.0; total_tokens = 0
+    for i, doc in enumerate(docs):
+        split = heldout_split(doc, holdout_frac=holdout_frac, seed=seed + i)
+        if split is None:
+            continue
+        visible_doc, held_i, held_c = split
+        if held_c.size == 0:
+            continue
+        eta_hat, nu_d, _ = _stm_doc_inference(
+            indices=visible_doc.indices, counts=visible_doc.counts,
+            expElogbeta=beta, Gamma=Gamma, Sigma_inv_allowed=Sigma_inv, x=x,
+            max_iter=max_iter, tol=tol, allowed=None, reference=None,
+        )
+        th = laplace_theta_samples(
+            eta_hat, nu_d, np.arange(K), K, reference=None,
+            n_samples=n_samples, rng=np.random.default_rng(seed + i),
+        )
+        total_ll += marginalized_predictive_loglik(th, beta, held_i, held_c)
+        total_tokens += int(held_c.sum())
+    return total_ll / total_tokens
+
+
+def sweep_heldout_marginalized(
+    docs: list, beta: np.ndarray, *, knobs: list, n_samples: int = 64,
+    holdout_frac: float = 0.3, seed: int = 0,
+) -> dict:
+    """Marginalized analog of sweep_heldout (STM only): score each c via
+    stm_marginalized_heldout_ll on the SAME per-doc split/sample seeds, return
+    {"lls": {c: mean_ll}, "argmax_knob": best_c}."""
+    lls = {c: stm_marginalized_heldout_ll(docs, beta, c=c, n_samples=n_samples,
+                                          holdout_frac=holdout_frac, seed=seed)
+           for c in knobs}
+    return {"lls": lls, "argmax_knob": max(lls, key=lls.get)}
