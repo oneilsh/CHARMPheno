@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 from polyagamma import random_polyagamma
 from scipy.special import expit  # logistic sigmoid
+from scipy.stats import invwishart
 
 from spark_vi.models.topic._linalg import safe_inverse
 
@@ -57,9 +58,15 @@ def omega_expectation(b: np.ndarray, c: np.ndarray) -> np.ndarray:
 
 
 def omega_sample(b: np.ndarray, psi: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Exact Gibbs draw omega_k ~ PG(b_k, psi_k)."""
-    return random_polyagamma(h=np.asarray(b, dtype=np.float64),
-                             z=np.asarray(psi, dtype=np.float64), random_state=rng)
+    """Exact Gibbs draw omega_k ~ PG(b_k, psi_k). PG(0, z) is degenerate at 0 (a
+    stick with no trials-at-risk), which the sampler rejects (h must be > 0), so
+    those entries are set to 0 directly and only the b_k>0 sticks are drawn."""
+    b = np.asarray(b, dtype=np.float64); psi = np.asarray(psi, dtype=np.float64)
+    out = np.zeros_like(b)
+    pos = b > 0
+    if np.any(pos):
+        out[pos] = random_polyagamma(h=b[pos], z=psi[pos], random_state=rng)
+    return out
 
 
 def psi_posterior(n, b, mu, Sigma_inv, omega):
@@ -85,6 +92,11 @@ def gamma_ridge(M, X, *, ridge):
     X = np.asarray(X, dtype=np.float64); M = np.asarray(M, dtype=np.float64)
     P = X.shape[1]
     return np.linalg.solve(X.T @ X + ridge * np.eye(P), X.T @ M)
+
+
+# module-internal alias so pg_stm_gibbs can accept a ``gamma_ridge`` keyword
+# (the ridge penalty) without shadowing the ``gamma_ridge`` function above.
+_gamma_ridge_fit = gamma_ridge
 
 
 def beta_dirichlet_mean(word_topic_stats, *, eta):
@@ -403,3 +415,213 @@ class PGSTMVI:
         except np.linalg.LinAlgError:
             Sigma = Sigma + 1e-8 * np.eye(Ksm1)
         return Sigma
+
+
+# --------------------------------------------------------------------------- #
+# Task 7: exact blocked PG-Gibbs cross-check.
+# --------------------------------------------------------------------------- #
+
+
+def _jitter_to_pd(Sigma, dim):
+    """Symmetrize + add escalating diagonal jitter until Cholesky succeeds
+    (block-assembled Sigma can lose PD when independently-drawn blocks are
+    stitched — same guard as PGSTMVI._assemble_sigma, escalated for the noisier
+    IW draws)."""
+    Sigma = 0.5 * (Sigma + Sigma.T)
+    jit = 1e-8
+    while True:
+        try:
+            np.linalg.cholesky(Sigma)
+            return Sigma
+        except np.linalg.LinAlgError:
+            Sigma = Sigma + jit * np.eye(dim)
+            jit *= 10.0
+            if jit > 1.0:
+                return 0.5 * (Sigma + Sigma.T)
+
+
+def _draw_block_sigma(S, layout, partition, group_counts, D, *, Psi0_scale, nu0,
+                      Ksm1, rng):
+    """Sample the block-structured Sigma from the inverse-Wishart posterior, using
+    the SAME block layout as PGSTMVI._assemble_sigma (background from all docs; each
+    group's [gate, fg] block + its background<->gblock cross from that group's docs
+    via a joint draw; group<->group' never co-active -> 0). Posterior for a block
+    of dim ``p`` with scatter ``Sc`` over ``n`` docs and proper IW prior
+    (nu0, Psi0_scale*I): IW(nu0 + n, Psi0_scale*I + Sc). Its expectation matches
+    ``sigma_iw_posterior_mean``, so averaged Gibbs draws converge to VI's block
+    posterior mean — the cross-check."""
+    Sigma = np.zeros((Ksm1, Ksm1))
+    bg_sticks = layout["bg_sticks"]
+    nb = len(bg_sticks)
+    if nb > 0:
+        scale = Psi0_scale * np.eye(nb) + S[np.ix_(bg_sticks, bg_sticks)]
+        draw = np.atleast_2d(invwishart.rvs(df=nu0 + D, scale=scale, random_state=rng))
+        Sigma[np.ix_(bg_sticks, bg_sticks)] = draw
+    for g in partition.groups:
+        glay = layout["groups"][g]
+        gblock = np.concatenate([np.array([glay["gate"]], dtype=np.int64),
+                                 glay["fg_sticks"]]).astype(np.int64)
+        joint = np.concatenate([bg_sticks, gblock]).astype(np.int64)
+        n_g = group_counts[g]
+        dim = len(joint)
+        scale = Psi0_scale * np.eye(dim) + S[np.ix_(joint, joint)]
+        Sig_joint = np.atleast_2d(
+            invwishart.rvs(df=nu0 + n_g, scale=scale, random_state=rng))
+        gb_local = np.arange(nb, dim)
+        bg_local = np.arange(0, nb)
+        Sigma[np.ix_(gblock, gblock)] = Sig_joint[np.ix_(gb_local, gb_local)]
+        if nb > 0:
+            cross = Sig_joint[np.ix_(bg_local, gb_local)]
+            Sigma[np.ix_(bg_sticks, gblock)] = cross
+            Sigma[np.ix_(gblock, bg_sticks)] = cross.T
+    return _jitter_to_pd(Sigma, Ksm1)
+
+
+def pg_stm_gibbs(docs, K, V, partition, *, P, n_iter=400, burn=200, seed=0,
+                 Psi0_scale=1.0, nu0=None, gamma_ridge=1e-6, beta_eta=0.1):
+    """Exact blocked PG-Gibbs sampler over the gated nested stick-breaking
+    logistic-normal topic model — the audit that validates PGSTMVI's mean-field
+    delta-method and block-Sigma posterior (design 2026-07-11-pg-stm-inference-core-design.md).
+
+    Reuses the Task-6 ``stick_layout`` and per-doc active ordering
+    ``[background sticks, gate_g, fg_g sticks]``; differs from VI ONLY by SAMPLING
+    each latent instead of taking its variational expectation. Per sweep, per doc
+    (group g), given the current active logits psi:
+
+      1. theta = gated_theta(psi_bg, psi_gate_g, psi_fg_g) — EXACTLY from psi (the
+         whole point of the cross-check; NO delta method / no E[log theta]).
+      2. z ~ Categorical(theta_k * beta_{k,w}) per token, restricted to allowed
+         topics -> counts n_bg, n_fg.
+      3. gated_counts -> (gate_a, gate_b, b_bg, b_fg); assemble a_active/b_active in
+         the active order exactly as PGSTMVI._e_step_doc.
+      4. omega_active ~ PG(b_active, psi_active)  (omega_sample — the Gibbs draw).
+      5. (m, V) = psi_posterior(...); psi_active ~ N(m, V).
+
+    Global draws each sweep: beta_k ~ Dirichlet(word-topic counts + beta_eta) per
+    topic (a draw, not the posterior mean — more correct for Gibbs); Gamma = ridge
+    point on the sampled psi (kept consistent with Task 6); Sigma sampled block-wise
+    from the inverse-Wishart posterior (``_draw_block_sigma``).
+
+    Returns posterior MEANS of beta/Gamma/Sigma over the post-``burn`` sweeps plus
+    the retained ``Sigma_samples`` (n_iter-burn, K-1, K-1). beta recovery is
+    cross-model comparable with VI/planted; Sigma is a link-internal cross-check
+    only (compared VI-vs-Gibbs, never vs the softmax-planted Sigma_true).
+    """
+    rng = np.random.default_rng(seed)
+    K, V, P = int(K), int(V), int(P)
+    Ksm1 = K - 1
+    nu0 = float(nu0) if nu0 is not None else float((K - 1) + 2)
+    layout = stick_layout(partition)
+    B = layout["B"]
+    bg_sticks = layout["bg_sticks"]
+
+    # --- globals init (mirror PGSTMVI.fit) --------------------------------- #
+    beta = rng.random((K, V)) + beta_eta
+    beta /= beta.sum(axis=1, keepdims=True)
+    Gamma = np.zeros((P, Ksm1))
+    Sigma = np.eye(Ksm1)
+
+    # group -> doc indices; per-doc active/allowed layout; expanded token streams
+    group_docs = {g: [] for g in partition.groups}
+    doc_group = []
+    for d, doc in enumerate(docs):
+        (g,) = tuple(doc.groups)
+        group_docs[g].append(d)
+        doc_group.append(g)
+    group_counts = {g: len(v) for g, v in group_docs.items()}
+    D = len(docs)
+    X = np.stack([np.asarray(doc.x, dtype=np.float64) for doc in docs])  # (D, P)
+
+    doc_active = [layout["groups"][doc_group[d]]["active"] for d in range(D)]
+    doc_allowed = [layout["groups"][doc_group[d]]["allowed"] for d in range(D)]
+    # per-token word-id stream (bag-of-words expanded once; z drawn per token)
+    doc_words = [np.repeat(np.asarray(doc.indices, dtype=np.int64),
+                           np.asarray(doc.counts, dtype=np.int64)) for doc in docs]
+    # per-doc current active logits psi (init at prior mean = 0)
+    psi_docs = [np.zeros(len(doc_active[d])) for d in range(D)]
+
+    beta_sum = np.zeros((K, V))
+    Gamma_sum = np.zeros((P, Ksm1))
+    Sigma_samples = []
+
+    for it in range(n_iter):
+        # precompute per-group Sigma_inv over the group's active sticks
+        sig_inv = {g: safe_inverse(
+            Sigma[np.ix_(layout["groups"][g]["active"],
+                         layout["groups"][g]["active"])])
+            for g in partition.groups}
+
+        word_topic_counts = np.zeros((K, V))
+        S = np.zeros((Ksm1, Ksm1))
+        M = np.zeros((D, Ksm1))
+
+        for d, doc in enumerate(docs):
+            g = doc_group[d]
+            glay = layout["groups"][g]
+            active = doc_active[d]
+            allowed = doc_allowed[d]
+            m_g = glay["m_g"]
+            psi_active = psi_docs[d]
+            mu_active = (Gamma.T @ doc.x)[active]
+
+            # (1) theta EXACTLY from current psi (no delta method)
+            psi_bg = psi_active[:B - 1]
+            psi_gate = psi_active[B - 1]
+            psi_fg = psi_active[B:]
+            theta = gated_theta(psi_bg, psi_gate, psi_fg)   # (len(allowed),) in allowed order
+
+            # (2) sample z per token ~ Categorical(theta_k * beta_{k,w}) over allowed
+            words = doc_words[d]
+            if words.shape[0] > 0:
+                Pw = theta[None, :] * beta[np.ix_(allowed, words)].T   # (L, |allowed|)
+                Pw_sum = Pw.sum(axis=1, keepdims=True)
+                Pw = np.where(Pw_sum > 0, Pw / np.where(Pw_sum > 0, Pw_sum, 1.0),
+                              1.0 / len(allowed))
+                cdf = np.cumsum(Pw, axis=1)
+                cdf /= cdf[:, -1:]
+                u = rng.random(words.shape[0])
+                z_local = (u[:, None] < cdf).argmax(axis=1)   # index into allowed
+                n_allowed = np.bincount(z_local, minlength=len(allowed)).astype(np.float64)
+                np.add.at(word_topic_counts, (allowed[z_local], words), 1.0)
+            else:
+                n_allowed = np.zeros(len(allowed))
+
+            n_bg, n_fg = n_allowed[:B], n_allowed[B:]
+
+            # (3) gated sufficient stats, assembled in the active order
+            gate_a, gate_b, b_bg, b_fg = gated_counts(n_bg, n_fg)
+            a_active = np.concatenate([n_bg[:B - 1], np.array([gate_a]), n_fg[:m_g - 1]])
+            b_active = np.concatenate([b_bg, np.array([gate_b]), b_fg])
+
+            # (4) omega ~ PG(b, psi)  (exact Gibbs draw)
+            omega = omega_sample(b_active, psi_active, rng)
+
+            # (5) psi ~ N(m, V)
+            m, Vd = psi_posterior(a_active, b_active, mu_active, sig_inv[g], omega)
+            psi_active = rng.multivariate_normal(m, Vd)
+            psi_docs[d] = psi_active
+
+            M[d, active] = psi_active
+            e_active = psi_active - mu_active
+            S[np.ix_(active, active)] += np.outer(e_active, e_active)
+
+        # --- global draws ------------------------------------------------- #
+        # beta: conjugate Dirichlet draw per topic (a draw is more correct for Gibbs)
+        for k in range(K):
+            beta[k] = rng.dirichlet(word_topic_counts[k] + beta_eta)
+        # Gamma: ridge point on the sampled psi (consistent with Task 6)
+        Gamma = _gamma_ridge_fit(M, X, ridge=gamma_ridge)
+        # Sigma: block inverse-Wishart draw
+        Sigma = _draw_block_sigma(S, layout, partition, group_counts, D,
+                                  Psi0_scale=Psi0_scale, nu0=nu0, Ksm1=Ksm1, rng=rng)
+
+        if it >= burn:
+            beta_sum += beta
+            Gamma_sum += Gamma
+            Sigma_samples.append(Sigma.copy())
+
+    n_kept = max(len(Sigma_samples), 1)
+    Sigma_samples = np.array(Sigma_samples) if Sigma_samples else np.empty((0, Ksm1, Ksm1))
+    return {"beta": beta_sum / n_kept, "Gamma": Gamma_sum / n_kept,
+            "Sigma": Sigma_samples.mean(axis=0) if len(Sigma_samples) else Sigma,
+            "Sigma_samples": Sigma_samples}
