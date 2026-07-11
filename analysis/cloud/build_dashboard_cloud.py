@@ -223,6 +223,43 @@ def _required_stm_outputs(*, gated: bool) -> list[str]:
     return req
 
 
+def _parse_scale_grid(spec: str) -> list[float]:
+    """Parse a comma-separated scale grid; 'inf' -> math.inf (for the nu grid)."""
+    out = []
+    for tok in spec.split(","):
+        tok = tok.strip()
+        out.append(float("inf") if tok.lower() == "inf" else float(tok))
+    return out
+
+
+# Optional gated / correlation / diagnostic outputs: whichever of these were
+# actually written to out_dir get zipped alongside the required base files, so
+# the downloadable zip is the COMPLETE bundle. A new diagnostic's filename
+# MUST be added here -- writing its JSON to out_dir but forgetting this tuple
+# is the omission that broke two prior cluster runs (t_prior_scale.json added
+# for BUILD_T_PRIOR_SCALE, mirroring concentration_heterogeneity.json before it).
+_OPTIONAL_BUNDLE_FILES = (
+    "gating.json", "covariate_schema.json", "covariate_effects.json",
+    "correlation.json", "concentration_heterogeneity.json",
+    "t_prior_scale.json",
+)
+
+
+def _zip_optional_files(out_dir: Path, zip_path: Path,
+                         required: tuple[str, ...]) -> None:
+    """Write `zip_path` from scratch: `required` files unconditionally, plus
+    whichever of `_OPTIONAL_BUNDLE_FILES` exist in `out_dir`.
+    """
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in required:
+            zf.write(out_dir / f, arcname=f)
+        for f in _OPTIONAL_BUNDLE_FILES:
+            p = out_dir / f
+            if p.exists():
+                zf.write(p, arcname=f)
+                print(f"[driver]   zip: +{f}", flush=True)
+
+
 def assert_stm_bundle_complete(out_dir, *, gated, allow_incomplete, log=None):
     """Fail loud when a gated/STM bundle is missing its covariate outputs.
 
@@ -1027,6 +1064,69 @@ def main(argv: list[str] | None = None) -> int:
                     "concentration-heterogeneity diagnostic failed (%s); "
                     "bundle UNAFFECTED.", _chexc)
 
+        # t_prior_scale diagnostic (FLAGGED, off by default): the multivariate-t
+        # per-document generative-scale (c, nu) sweep (design doc
+        # 2026-07-10-tprior-per-document-scale-design.md, corpus_tprior_scale_
+        # sweep_gated_rdd built in Tasks 1-4). Mirrors the concentration-
+        # heterogeneity block immediately above: its OWN top-level block (so it
+        # still runs under BUILD_ETA_SCALE_OVERRIDE), same gated-STM +
+        # covariate-sidecar preconditions, its OWN self-contained doc_rdd (the
+        # eta_scale block's doc_rdd may not exist under an override), never
+        # fatal -- any failure only logs a warning and writes nothing, so the
+        # shipped bundle and assert_stm_bundle_complete's required-file check
+        # are unaffected by the extra t_prior_scale.json this writes when it
+        # succeeds.
+        if os.environ.get("BUILD_T_PRIOR_SCALE") and (
+                is_stm and tbs and stm_partition is not None
+                and stm_cov_df is not None):
+            try:
+                from spark_vi.mllib.topic.stm import (
+                    corpus_tprior_scale_sweep_gated_rdd,
+                )
+                from spark_vi.mllib.topic._common import _vector_to_stm_document
+
+                _tp_frac = float(os.environ.get("BUILD_T_PRIOR_SCALE_DOC_FRAC", "0.05"))
+                _tp_nu = _parse_scale_grid(
+                    os.environ.get("BUILD_T_PRIOR_SCALE_NU_GRID", "2.5,5,10,20,inf"))
+                _tp_c = _parse_scale_grid(
+                    os.environ.get("BUILD_T_PRIOR_SCALE_C_GRID", "2,3,4,6,8,12"))
+                _stm_hardening = result.metadata.get("stm_hardening", {}) or {}
+                _tp_ref = 0 if _stm_hardening.get("reference_topic") else None
+
+                # Self-contained STMDocument RDD (same assembly as the
+                # eta_scale / concentration-heterogeneity / theta_histogram /
+                # predictive_gain blocks): rebuilt independently rather than
+                # depending on another block's doc_rdd, which may not exist.
+                _tp_doc_df = bow_df.select("person_id", "features").join(
+                    stm_cov_df.select("person_id", "source_cohort", "covariates"),
+                    on="person_id", how="inner",
+                )
+                _tp_doc_rdd = _tp_doc_df.rdd.map(
+                    lambda row: _vector_to_stm_document(
+                        row, features_col="features",
+                        covariates_col="covariates", group_col="source_cohort",
+                    )
+                )
+                # 5% sample: same convention as the heterogeneity diagnostic.
+                _tp_sample = _tp_doc_rdd.sample(False, _tp_frac, seed=0)
+                log.info("STM: t-prior scale sweep c_grid=%s nu_grid=%s frac=%s",
+                         _tp_c, _tp_nu, _tp_frac)
+                with _phase("t-prior scale sweep"):
+                    _tp = corpus_tprior_scale_sweep_gated_rdd(
+                        _tp_sample, result.global_params, stm_partition,
+                        c_grid=_tp_c, nu_grid=_tp_nu, reference=_tp_ref, seed=0,
+                    )
+                import json as _json
+                (out_dir / "t_prior_scale.json").write_text(_json.dumps(_tp, indent=2))
+                log.info(
+                    "t-prior scale (n=%d): argmax c*=%s nu*=%s | drift gauss=%.3f "
+                    "tprior=%.3f | sd*c* p50=%.3f",
+                    _tp["n_docs"], _tp["argmax"]["c"], _tp["argmax"]["nu"],
+                    _tp["drift"]["gaussian_spread"], _tp["drift"]["tprior_spread"],
+                    _tp["sd_readout"]["sd_c_quantiles"]["p50"])
+            except Exception as _tpexc:   # diagnostic-only: never fatal
+                log.warning("t-prior scale sweep failed (%s); bundle UNAFFECTED.", _tpexc)
+
         # theta_histogram: per-doc gated MAP theta distribution (the dashboard's
         # "topic mass distribution" panel). Plain-LDA writes per-doc theta
         # aggregates at fit time; the STM fit does not, so we compute them here
@@ -1505,24 +1605,16 @@ def main(argv: list[str] | None = None) -> int:
             # Local path required: zipfile can't write through the GCS FUSE
             # mount layer reliably (random-access writes). Stage in /tmp.
             tmp_zip = Path("/tmp") / zip_path.name
-            with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                # Base 4-file bundle (always written).
-                for f in ("model.json", "vocab.json",
-                          "phenotypes.json", "corpus_stats.json"):
-                    zf.write(out_dir / f, arcname=f)
-                # Optional gated / correlation outputs: include whichever were
-                # written so the downloadable zip is the COMPLETE bundle.
-                # gating.json + covariate_* need the covariate cache;
-                # correlation.json needs a gated fit with persisted n_pairs;
-                # concentration_heterogeneity.json is the off-by-default
-                # dedup/burstiness diagnostic (BUILD_CONCENTRATION_HETEROGENEITY_DIAGNOSTIC).
-                for f in ("gating.json", "covariate_schema.json",
-                          "covariate_effects.json", "correlation.json",
-                          "concentration_heterogeneity.json"):
-                    p = out_dir / f
-                    if p.exists():
-                        zf.write(p, arcname=f)
-                        print(f"[driver]   zip: +{f}", flush=True)
+            # Base 4-file bundle (always written) + whichever optional gated /
+            # correlation / diagnostic outputs exist (see _OPTIONAL_BUNDLE_FILES:
+            # gating.json + covariate_* need the covariate cache; correlation.json
+            # needs a gated fit with persisted n_pairs; concentration_heterogeneity.json
+            # / t_prior_scale.json are the off-by-default diagnostics).
+            _zip_optional_files(
+                out_dir, tmp_zip,
+                required=("model.json", "vocab.json",
+                          "phenotypes.json", "corpus_stats.json"),
+            )
             # Now copy the staged zip to the final destination (which may be
             # a GCS-mounted path that accepts sequential writes).
             import shutil
