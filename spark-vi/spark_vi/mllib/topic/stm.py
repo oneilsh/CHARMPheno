@@ -391,18 +391,17 @@ def _stm_doc_inference_tprior(
     single Gaussian solve at s_d=1 (nesting). Returns (eta_hat full-K, s_d float,
     nu_d Laplace cov from the final eta-step, n_em sweeps).
 
-    Convergence uses a two-consecutive-small-steps rule (``|sd_new - sd| <
-    sd_tol`` on two iterations in a row) rather than stopping on the first
-    small step: on the iteration a single-step check would fire, eta_hat was
-    still solved at the PRIOR sd (the eta-step warm-starts from last sweep,
-    the sd-step then updates from that eta), so a one-shot check returns a
-    (eta_hat, sd) pair that is off by roughly one sd-step from a true joint
-    fixed point -- fine relative to sd_tol itself, but not tight enough for
-    downstream consumers (e.g. warm-restarting from a converged solution) to
-    reproduce the same pair to floating-point precision. Requiring the small
-    step twice in a row waits for the sd update that follows an already-tiny
-    step, so the paired eta_hat and sd are mutually consistent to within the
-    (much smaller) step size actually taken, not just within sd_tol."""
+    The returned pair is a joint fixed point to tolerance, independent of how
+    fast the s_d sequence contracts: within each sweep the eta-step is solved at
+    the CURRENT sd, then the sd-step updates from that eta, so at loop exit
+    eta_hat is one sd-step stale (it was solved at the pre-update sd). We repair
+    this with ONE closing eta-solve at the final returned sd after the s_d
+    sequence terminates -- warm-started from the last eta, so ~1 L-BFGS
+    iteration. After it, eta_hat is exactly the Laplace argmax at the returned
+    sd (up to lbfgs_tol), and sd is the IG-mode of the immediately-prior
+    eta ~= eta_hat, so (eta_hat, sd) is mutually consistent to tolerance
+    regardless of contraction speed. n_em counts the s_d sweeps (not the closing
+    solve)."""
     allowed = np.asarray(allowed, dtype=np.int64)
     mu_allowed = (Gamma[:, allowed].T @ x)
     K_free = int(allowed.shape[0] - (1 if reference is not None else 0))
@@ -421,7 +420,6 @@ def _stm_doc_inference_tprior(
     eta_warm = eta_init
     eta_hat = nu_d = None
     n_em = 0
-    converged_once = False
     for n_em in range(1, sd_max_iter + 1):
         Sigma_inv_allowed = (1.0 / (sd * c)) * Rinv_allowed
         eta_hat, nu_d, _ = _stm_doc_inference(
@@ -434,11 +432,21 @@ def _stm_doc_inference_tprior(
         diff = eta_hat[allowed] - mu_allowed
         q_R = float(diff @ Rinv_allowed @ diff)
         sd_new = (nu + q_R / c) / (nu + K_free + 2.0)
-        small = abs(sd_new - sd) < sd_tol
+        converged = abs(sd_new - sd) < sd_tol
         sd = sd_new
-        if small and converged_once:
+        if converged:
             break
-        converged_once = small
+
+    # Closing eta-solve at the final sd: makes (eta_hat, sd) jointly consistent
+    # even when the s_d sequence stopped one step before eta caught up (or hit
+    # sd_max_iter). Warm-started from the last eta, so ~1 L-BFGS iteration.
+    Sigma_inv_allowed = (1.0 / (sd * c)) * Rinv_allowed
+    eta_hat, nu_d, _ = _stm_doc_inference(
+        indices=indices, counts=counts, expElogbeta=expElogbeta,
+        Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=x,
+        max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+        allowed=allowed, reference=reference, eta_init=eta_warm,
+    )
     return eta_hat, sd, nu_d, n_em
 
 
