@@ -91,35 +91,84 @@ def beta_dirichlet_mean(word_topic_stats, *, eta):
     return lam / lam.sum(axis=1, keepdims=True)
 
 
-def expected_log_theta(m, v):
-    """Delta-method E[log theta] under q(psi_k)=N(m_k, v_k): fourth-order Taylor expansion of
-    log-sigma (Kendall & Stuart, "The Advanced Theory of Statistics" Vol 1, ch.10 - higher-order
-    delta method; Bickel & Doksum, "Mathematical Statistics" - for smooth f and X~N(mu,v):
-    E[f(X)] ~ f(mu) + f''(mu) v/2 + f''''(mu) (3 v^2)/4! , using E[(X-mu)^4]=3v^2 for Gaussian X).
+def _elog_sigmoid(m, v, sign):
+    """Delta-method E[log sigma(sign*psi)] under psi~N(m, v), sign in {+1, -1}
+    (+1 -> E[log sigma(psi)], -1 -> E[log(1-sigma(psi))] = E[log sigma(-psi)]).
+    Fourth-order Taylor expansion of log-sigma (Kendall & Stuart, "The Advanced Theory of
+    Statistics" Vol 1, ch.10 - higher-order delta method; Bickel & Doksum, "Mathematical
+    Statistics" - for smooth f and X~N(mu,v): E[f(X)] ~ f(mu) + f''(mu) v/2 + f''''(mu) (3 v^2)/4!,
+    using E[(X-mu)^4]=3v^2 for Gaussian X).
 
     For f(x)=log sigma(x): f''(x) = -s(x), f''''(x) = -s(x)(1-2 sigma(x))^2 + 2 s(x)^2, where
     s(x)=sigma(x)(1-sigma(x)). For g(x)=log(1-sigma(x))=log sigma(-x), g''=f''(-x)=-s(x) and
     g''''=f''''(-x)=f''''(x) (both are even in the (1-2 sigma) term), so both branches share the
-    same s_k and 4th-order coefficient q_k evaluated at m_k.
+    same s and 4th-order coefficient q evaluated at m - only the base log-sigma term flips.
 
-    NOTE: the second-order-only truncation (drop the q_k term) is NOT sufficient here - verified
+    NOTE: the second-order-only truncation (drop the q term) is NOT sufficient here - verified
     against high-precision Gauss-Hermite quadrature (not just Monte-Carlo noise), its bias grows
     ~v^2/8 * f''''(m) and exceeds a 3e-3 tolerance once v gtrsim 0.4-0.5 (e.g. bias ~-0.0047 at
-    m=0.1, v=0.6). The 4th-order term is required for expected_log_theta to track the true
-    E[log theta] to the precision demanded by test_expected_log_theta_matches_montecarlo."""
+    m=0.1, v=0.6). The 4th-order term is required to track the true expectation to the precision
+    demanded by test_expected_log_theta_matches_quadrature / test_gated_expected_log_theta_matches_quadrature."""
     m = np.asarray(m, dtype=np.float64); v = np.asarray(v, dtype=np.float64)
     sig = expit(m); s = sig * (1.0 - sig)
-    q = -s * (1.0 - 2.0 * sig) ** 2 + 2.0 * s ** 2   # f''''(m_k), shared by log-sig & log(1-sig)
-    log_sig = np.log(sig); log_1msig = np.log1p(-sig)
+    q = -s * (1.0 - 2.0 * sig) ** 2 + 2.0 * s ** 2   # f''''(m), shared by log-sig & log(1-sig)
     corr = -0.5 * v * s + (v ** 2 / 8.0) * q         # 2nd + 4th order delta-method correction
-    ls_plus = log_sig + corr          # E[log sigma(psi_k)]
-    ls_minus = log_1msig + corr       # E[log (1-sigma(psi_k))]
+    base = np.log(sig) if sign > 0 else np.log1p(-sig)
+    return base + corr
+
+
+def expected_log_theta(m, v):
+    """Delta-method E[log theta] under q(psi_k)=N(m_k, v_k), composed from the per-stick
+    E[log sigma]/E[log(1-sigma)] terms via _elog_sigmoid (see its docstring for the delta-method
+    derivation and the 4th-order-term necessity)."""
+    m = np.asarray(m, dtype=np.float64); v = np.asarray(v, dtype=np.float64)
+    ls_plus = _elog_sigmoid(m, v, +1)     # E[log sigma(psi_k)]
+    ls_minus = _elog_sigmoid(m, v, -1)    # E[log (1-sigma(psi_k))]
     K = m.shape[0] + 1
     out = np.empty(K, dtype=np.float64)
     cum = np.concatenate([[0.0], np.cumsum(ls_minus)])   # cum[k] = sum_{j<k} ls_minus_j
     out[:K - 1] = ls_plus + cum[:K - 1]
     out[K - 1] = cum[K - 1]                               # = sum_j ls_minus_j
     return out
+
+
+def gated_theta(psi_bg, psi_gate, psi_fg):
+    """Nested stick-breaking composition: a per-group gate stick splits background vs
+    foreground mass, then a flat stick_to_simplex runs within each block. This is what keeps
+    gating consistent under stick-breaking (a single flat sequence isn't closed under
+    subsetting the allowed topics - see docs/superpowers/specs/2026-07-11-pg-stm-inference-core-design.md).
+
+    theta = concat(sigma(psi_gate) * stick_to_simplex(psi_bg),
+                    (1-sigma(psi_gate)) * stick_to_simplex(psi_fg)), length B+m_g."""
+    gate = expit(psi_gate)
+    theta_bg = gate * stick_to_simplex(psi_bg)
+    theta_fg = (1.0 - gate) * stick_to_simplex(psi_fg)
+    return np.concatenate([theta_bg, theta_fg])
+
+
+def gated_expected_log_theta(m_bg, v_bg, m_gate, v_gate, m_fg, v_fg):
+    """Composed E[log theta] for the nested gated stick-breaking: the gate contributes an
+    E[log sigma(psi_gate)] (resp. E[log(1-sigma(psi_gate))]) term, added to every background
+    (resp. foreground) entry's flat expected_log_theta. The gate term uses the SAME delta-method
+    helper (_elog_sigmoid) as the within-block sticks, so the gate's approximation accuracy
+    matches the sticks' exactly - see _elog_sigmoid's docstring for the derivation."""
+    eg_bg = _elog_sigmoid(m_gate, v_gate, +1)     # E[log sigma(psi_gate)], scalar
+    eg_fg = _elog_sigmoid(m_gate, v_gate, -1)     # E[log(1-sigma(psi_gate))], scalar
+    elog_bg = eg_bg + expected_log_theta(m_bg, v_bg)
+    elog_fg = eg_fg + expected_log_theta(m_fg, v_fg)
+    return np.concatenate([elog_bg, elog_fg])
+
+
+def gated_counts(n_bg, n_fg):
+    """Per-group sufficient stats for the nested gate + flat-block PG augmentation. The gate is
+    one binomial (N_bg successes out of N_bg+N_fg trials); each block's within-block sticks use
+    the flat stick_trials count (Task 1)."""
+    n_bg = np.asarray(n_bg, dtype=np.float64); n_fg = np.asarray(n_fg, dtype=np.float64)
+    gate_a = n_bg.sum()
+    gate_b = n_bg.sum() + n_fg.sum()
+    b_bg = stick_trials(n_bg)
+    b_fg = stick_trials(n_fg)
+    return gate_a, gate_b, b_bg, b_fg
 
 
 def token_responsibilities(doc_indices, elog_theta, elog_beta, allowed, *, counts):
