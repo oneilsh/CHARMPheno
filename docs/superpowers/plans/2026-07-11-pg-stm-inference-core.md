@@ -52,11 +52,13 @@ posterior.
 - `spark-vi/spark_vi/models/topic/pg_stm.py` — the whole core (link + PG conditionals +
   global updates + `PGSTMVI` full-batch driver + `pg_stm_gibbs` sampler). One module for the
   prototype; sub-project #2 may split it.
-- Tests (per concern): `spark-vi/tests/test_pg_stm_link.py` (T1),
-  `test_pg_stm_conditionals.py` (T2), `test_pg_stm_updates.py` (T3),
-  `test_pg_stm_assignment.py` (T4), `test_pg_stm_vi.py` (T5),
-  `test_pg_stm_gibbs.py` (T6), `test_pg_stm_runaway.py` (T7).
-- `spark-vi/pyproject.toml` (or the test env's requirements) — add `polyagamma`.
+- Tests (per concern): `test_pg_stm_link.py` (T1), `test_pg_stm_conditionals.py` (T2),
+  `test_pg_stm_updates.py` (T3), `test_pg_stm_assignment.py` (T4), `test_pg_stm_nested.py` (T5),
+  `test_pg_stm_vi.py` (T6), `test_pg_stm_gibbs.py` (T7), `test_pg_stm_runaway.py` (T8).
+- **NESTED gating (T5+):** Tasks 1–4 build FLAT stick-breaking block primitives; Task 5 composes
+  them into the nested per-group [gate, foreground] + shared background structure (K−1 sticks
+  total, a doc uses |allowed|−1). Tasks 6–8 build the gated driver/Gibbs/runaway on it.
+- `polyagamma==2.0.2` (wheels; verified) — dev env + later the cluster image.
 
 ## Test environment
 
@@ -523,43 +525,161 @@ git commit -m "feat(pg-stm): delta-method E[log theta] + gated token responsibil
 
 ---
 
-### Task 5: Full-batch PG-VI driver + planted recovery
+### Task 5: Nested composition layer (gate + per-block flat stick-breaking)
 
-Assemble the coordinate ascent (the Tier-3 SVI kernel at batch=full). This is an integration
-task; its correctness test is end-to-end **structure recovery** on a planted logistic-normal
-corpus.
+Compose the Task-1/Task-4 flat primitives into the nested gated structure: a per-group gate
+stick splits background vs foreground, then flat stick-breaking within each block. Pure
+functions, validated against quadrature — the intricate part is the composed `E[log θ]`.
+
+**Files:**
+- Modify: `spark-vi/spark_vi/models/topic/pg_stm.py`
+- Test: `spark-vi/tests/test_pg_stm_nested.py`
+
+**Interfaces — Produces** (all operate on a group-g doc's active sticks, split into the three
+groups background / gate / foreground; the Task-6 driver handles the global-index mapping):
+- `gated_theta(psi_bg, psi_gate, psi_fg) -> theta` — `theta = concat(σ(psi_gate)·stick_to_simplex(psi_bg),
+  (1−σ(psi_gate))·stick_to_simplex(psi_fg))`, length `len(psi_bg)+1 + len(psi_fg)+1` = B+m_g. `psi_gate`
+  is a scalar.
+- `gated_expected_log_theta(m_bg, v_bg, m_gate, v_gate, m_fg, v_fg) -> elog_theta` — length B+m_g:
+  background entries `= E[log σ(ψ_gate)] + expected_log_theta(m_bg, v_bg)`, foreground entries
+  `= E[log(1−σ(ψ_gate))] + expected_log_theta(m_fg, v_fg)`, where the gate terms use the SAME
+  delta method as one stick: `E[log σ(ψ_gate)] = log σ(m_gate) − 0.5 v_gate s + (v_gate²/8) q`,
+  `s=σ(m_gate)(1−σ(m_gate))`, `q=−s(1−2σ)²+2s²` (reuse the Task-4 helper — factor the single-stick
+  `E[log σ]`/`E[log(1−σ)]` out of `expected_log_theta` so both call it).
+- `gated_counts(n_bg, n_fg) -> (gate_a, gate_b, b_bg, b_fg)` — `gate_a = n_bg.sum()`,
+  `gate_b = n_bg.sum()+n_fg.sum()`, `b_bg = stick_trials(n_bg)`, `b_fg = stick_trials(n_fg)`.
+  (The gate is one binomial: N_bg successes of N; each block uses flat `stick_trials`.)
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# spark-vi/tests/test_pg_stm_nested.py
+import numpy as np
+from numpy.polynomial.hermite_e import hermegauss
+from scipy.special import expit
+from spark_vi.models.topic.pg_stm import (
+    gated_theta, gated_expected_log_theta, gated_counts,
+    stick_to_simplex, stick_trials)
+
+
+def test_gated_theta_sums_to_one_and_composes():
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        psi_bg = rng.normal(size=3)      # B=4 background topics
+        psi_gate = float(rng.normal())
+        psi_fg = rng.normal(size=2)      # m_g=3 foreground topics
+        theta = gated_theta(psi_bg, psi_gate, psi_fg)
+        assert theta.shape == (4 + 3,)
+        assert np.all(theta > 0) and abs(theta.sum() - 1.0) < 1e-12
+        # background mass = sigma(gate), foreground mass = 1-sigma(gate)
+        assert abs(theta[:4].sum() - expit(psi_gate)) < 1e-12
+        assert abs(theta[4:].sum() - (1 - expit(psi_gate))) < 1e-12
+        # within-block proportions match the flat map
+        assert np.allclose(theta[:4] / theta[:4].sum(), stick_to_simplex(psi_bg))
+        assert np.allclose(theta[4:] / theta[4:].sum(), stick_to_simplex(psi_fg))
+
+
+def test_gated_counts():
+    n_bg = np.array([3.0, 0.0, 5.0])     # N_bg=8
+    n_fg = np.array([2.0, 4.0])          # N_fg=6
+    ga, gb, b_bg, b_fg = gated_counts(n_bg, n_fg)
+    assert ga == 8.0 and gb == 14.0
+    assert np.allclose(b_bg, stick_trials(n_bg))
+    assert np.allclose(b_fg, stick_trials(n_fg))
+
+
+def _quad_elog_gated(m_bg, v_bg, m_gate, v_gate, m_fg, v_fg, nodes=64):
+    # Exact E[log theta] via per-stick Gaussian quadrature (deterministic reference).
+    x, w = hermegauss(nodes); w = w / np.sqrt(2 * np.pi)
+    def e_log_sig(m, v, sign):  # E[log sigma(sign*psi)], psi~N(m,v)
+        return float(w @ np.log(expit(sign * (m + np.sqrt(v) * x))))
+    def e_log_theta_flat(m, v):
+        K = len(m) + 1
+        lp = np.array([e_log_sig(m[j], v[j], +1) for j in range(len(m))])
+        lm = np.array([e_log_sig(m[j], v[j], -1) for j in range(len(m))])
+        out = np.empty(K); cum = np.concatenate([[0.0], np.cumsum(lm)])
+        out[:K-1] = lp + cum[:K-1]; out[K-1] = cum[K-1]; return out
+    eg_bg = e_log_sig(m_gate, v_gate, +1)      # E[log sigma(gate)]
+    eg_fg = e_log_sig(m_gate, v_gate, -1)      # E[log (1-sigma(gate))]
+    return np.concatenate([eg_bg + e_log_theta_flat(m_bg, v_bg),
+                           eg_fg + e_log_theta_flat(m_fg, v_fg)])
+
+
+def test_gated_expected_log_theta_matches_quadrature():
+    m_bg = np.array([0.3, -0.5]); v_bg = np.array([0.4, 0.2])
+    m_gate, v_gate = 0.2, 0.3
+    m_fg = np.array([0.1]); v_fg = np.array([0.5])
+    approx = gated_expected_log_theta(m_bg, v_bg, m_gate, v_gate, m_fg, v_fg)
+    exact = _quad_elog_gated(m_bg, v_bg, m_gate, v_gate, m_fg, v_fg)
+    assert np.allclose(approx, exact, atol=2e-3)   # same delta-method accuracy as Task 4
+```
+
+- [ ] **Step 2: Run to verify they fail** — import error for `gated_theta`.
+
+- [ ] **Step 3: Implement.** Add `gated_theta`, `gated_counts`, and `gated_expected_log_theta` to
+  `pg_stm.py`. Refactor Task 4's `expected_log_theta` to expose the single-stick delta-method
+  `E[log σ(m,v)]` / `E[log(1−σ(m,v))]` as a small helper (e.g. `_elog_sigmoid(m, v, sign)`) that both
+  `expected_log_theta` and the gate term in `gated_expected_log_theta` call — DRY, and it keeps the
+  gate's approximation identical to the sticks'. Re-run the Task-4 suite to confirm the refactor is
+  behavior-preserving (`test_pg_stm_assignment.py` still green).
+
+- [ ] **Step 4: Run to verify they pass** — `pytest tests/test_pg_stm_nested.py tests/test_pg_stm_assignment.py -v` green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add spark-vi/spark_vi/models/topic/pg_stm.py spark-vi/tests/test_pg_stm_nested.py
+git commit -m "feat(pg-stm): nested composition — gate + per-block stick-breaking (theta, E[log theta], counts)"
+```
+
+---
+
+### Task 6: Gated full-batch PG-VI driver + block-Σ IW + planted recovery
+
+Assemble the gated coordinate ascent: global stick layout (K−1 = background ∪ per-group
+[gate, foreground]), per-doc active sub-vector E-step under the block-Σ marginal, block-
+structured IW M-step, the `sigma_mode` flag. Integration task; correctness gate = recovery.
 
 **Files:**
 - Modify: `spark-vi/spark_vi/models/topic/pg_stm.py`
 - Test: `spark-vi/tests/test_pg_stm_vi.py`
 
 **Interfaces — Produces:**
-- `class PGSTMVI` with `__init__(self, K, V, partition, *, P, n_iter=200, Psi0_scale=1.0,
-  nu0=None, gamma_ridge=1e-6, beta_eta=0.1, sigma_mode="iw", seed=0)` and
-  `fit(self, docs) -> dict` returning `{"beta": (K,V), "Gamma": (P,K−1), "Sigma": (K−1,K−1),
-  "psi_mean": (D,K−1), "psi_var": (D,K−1), "sigma_max_trace": list[float]}` where
-  `sigma_max_trace` is `max|Σ|` per iteration (for the T7 divergence check).
-- `sigma_mode` selects the Σ M-step: `"iw"` (default) → `sigma_iw_posterior_mean` (proper
-  posterior); `"mle"` → the un-regularized point estimate `scatter_block / n_block` fed back
-  each iteration (the pre-ADR-0034 behavior). The flag exists ONLY to isolate the estimator
-  in T7 at fixed link/E-step; production is always `"iw"`.
+- `class PGSTMVI(K, V, partition, *, P, n_iter=200, Psi0_scale=1.0, nu0=None, gamma_ridge=1e-6,
+  beta_eta=0.1, sigma_mode="iw", seed=0)`; `fit(docs) -> {"beta": (K,V), "Gamma": (P,K−1),
+  "Sigma": (K−1,K−1), "psi_mean": (D,K−1), "psi_var": (D,K−1), "sigma_max_trace": list[float]}`.
+- `sigma_mode`: `"iw"` → block `sigma_iw_posterior_mean`; `"mle"` → un-regularized `scatter/n`
+  per block fed back (Task-8 isolation only). Production is `"iw"`.
 
-**The coordinate ascent per iteration** (consumes T1–T4):
-1. E-step per doc: use current `(Gamma, Sigma, beta)`. Compute `mu_d = Gamma.T @ x_d`,
-   `elog_beta = log(beta)` (or Dirichlet E[log β]); iterate a few inner rounds of
-   {responsibilities → counts `n` → `b = stick_trials(n)` → `c = sqrt(m² + diag(V))` →
-   `omega = omega_expectation(b, c)` → `(m, V) = psi_posterior(n, b, mu, Sigma_inv, omega)` →
-   `elog_theta = expected_log_theta(m, diag(V))`} to a small tol. Restrict all per-doc arrays
-   to `allowed = partition.allowed_indices(doc.groups)` and the corresponding stick indices.
-2. Accumulate global stats: word-topic stats for β; `(X, M)` for Γ; block-wise
-   `scatter_block = Σ_d (e_d e_dᵀ + V_d)` and per-block doc counts for Σ.
-3. M-step: `beta = beta_dirichlet_mean(...)`; `Gamma = gamma_ridge(M, X, ridge=...)`;
-   for each block, `Sigma[block] = sigma_iw_posterior_mean(scatter_block, n_block, ...)`;
-   cross-group entries left at 0 (never co-active).
+**Stick layout (implement as a small helper `stick_layout(partition)`):** background sticks =
+global indices `0..B−2`; group g (in `partition.groups` order) occupies `m_g` consecutive
+indices starting at `B−1 + Σ_{g'<g} m_{g'}`: the first is the **gate**, the next `m_g−1` are
+the foreground sticks. Total `K−1`. A group-g doc's ACTIVE global stick indices =
+`background_slice ∪ {gate_g} ∪ fg_g_slice`; its allowed TOPIC indices =
+`partition.allowed_indices(doc.groups)` (background topics ∪ group-g topics).
 
-Gating detail: the doc's stick set is the allowed topics in block order; `psi_posterior`
-operates on that sub-vector with `Sigma_inv` the inverse of the allowed sub-block (marginal
-precision — mirror the current STM's `safe_inverse(Sigma[ix_(allowed,allowed)])`).
+**Per-iteration coordinate ascent** (consumes Tasks 1–5):
+1. E-step per doc (group g): `Sigma_inv_active = safe_inverse(Sigma[ix_(active, active)])`,
+   `mu_active = (Gamma.T @ x)[active]`. Inner loop to a small tol:
+   responsibilities over allowed topics (`token_responsibilities` with a full-K `elog_theta`
+   that is `gated_expected_log_theta` on allowed, −inf elsewhere) → counts `n_allowed`, split
+   into `n_bg`/`n_fg` → `gated_counts` → per-stick `omega_expectation(b, c)` with
+   `b = [gate_b, b_bg..., b_fg...]` ordered to match `active`, `c = sqrt(m² + diag(V))` →
+   `psi_posterior(...)` over active sticks (with `n`/`b` being the successes/trials per active
+   stick: gate success = `gate_a`, background/foreground successes = the block counts) →
+   `gated_expected_log_theta`.
+2. Accumulate: word-topic stats (β); `(X, M=stacked active means placed into full K−1 with
+   inactive left at prior mean)` for Γ; block-wise `scatter` and per-block doc counts for Σ —
+   background block from ALL docs (every doc is active on background), each group block
+   `[gate_g, fg_g]` from that group's docs only, background↔group cross-block from that group's
+   docs, group↔group' left at prior.
+3. M-step: `beta_dirichlet_mean`; `gamma_ridge`; per block `sigma_iw_posterior_mean` (or
+   `scatter/n` if `sigma_mode="mle"`); assemble the block-Σ (group↔group' at prior/0). Record
+   `max|Σ|` into `sigma_max_trace`.
+
+Numerical guard (Task-1 watch-item): clip `psi` to a safe range (e.g. ±30) before
+`stick_to_simplex`/`gated_theta` to avoid the sigmoid-underflow `nan` on any transient extreme
+iterate; log if the clip ever trips.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -578,59 +698,53 @@ def _corpus(seed=0):
 def test_pgvi_recovers_planted_structure():
     docs, planted, part = _corpus(seed=0)
     P = docs[0].x.shape[0]
-    model = PGSTMVI(K=part.K, V=60, partition=part, P=P, n_iter=150, seed=0)
-    out = model.fit(docs)
+    out = PGSTMVI(K=part.K, V=60, partition=part, P=P, n_iter=150, seed=0).fit(docs)
     assert planted_recovery(out["beta"], planted["beta"]) >= 0.75
     for g in part.groups:
         assert foreground_recovers_group(out["beta"], part, g, planted["beta"])
-    # Sigma is a valid (K-1)x(K-1) PD-ish correlation-carrying matrix, and BOUNDED
     assert out["Sigma"].shape == (part.K - 1, part.K - 1)
-    assert np.all(np.isfinite(out["Sigma"]))
-    assert np.max(np.abs(out["Sigma"])) < 1e3           # bounded (no runaway on clean data)
+    assert np.all(np.isfinite(out["Sigma"])) and np.max(np.abs(out["Sigma"])) < 1e3
+    assert len(out["sigma_max_trace"]) == 150
 ```
 
 - [ ] **Step 2: Run to verify it fails** — `cannot import name 'PGSTMVI'`.
 
-- [ ] **Step 3: Implement `PGSTMVI`.** Compose the T1–T4 primitives into the coordinate
-  ascent described above. Keep every update a pure function of (globals, per-doc suff-stats)
-  so it ports to SVI. Initialize `beta` from a smoothed random count matrix, `Gamma=0`,
-  `Sigma=I`. Cache `allowed`/`Sigma_inv_allowed` per distinct group-set. Full reference for
-  the block accumulation + per-doc E-step loop is in the design doc's Inference section; the
-  recovery test is the correctness gate. Log per-iteration max|Σ| and a convergence delta.
+- [ ] **Step 3: Implement `stick_layout` + `PGSTMVI`.** Compose the Task 1–5 primitives per the
+  recipe above. Every update a pure function of (globals, per-doc suff-stats), so it ports to
+  SVI. Init `beta` from smoothed random counts, `Gamma=0`, `Sigma=I` (K−1). Cache
+  `active`/`Sigma_inv_active` per distinct group. The recovery test is the correctness gate; if
+  recovery is marginal, raise `n_iter` or E-step inner rounds — do NOT loosen the 0.75 threshold
+  without recording why.
 
-- [ ] **Step 4: Run to verify it passes**
-
-Run: `cd spark-vi && python -m pytest tests/test_pg_stm_vi.py -v`
-Expected: PASS. (If recovery is marginal, raise `n_iter` or the E-step inner rounds; do NOT
-loosen the 0.75 recovery threshold without recording why.)
+- [ ] **Step 4: Run to verify it passes** — `pytest tests/test_pg_stm_vi.py -v` PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add spark-vi/spark_vi/models/topic/pg_stm.py spark-vi/tests/test_pg_stm_vi.py
-git commit -m "feat(pg-stm): full-batch PG-VI driver (SVI kernel) + planted recovery"
+git commit -m "feat(pg-stm): gated PG-VI driver (nested, block-Sigma IW, sigma_mode) + recovery"
 ```
 
 ---
 
-### Task 6: Exact PG-Gibbs cross-check + VI≈Gibbs agreement
+### Task 7: Gated PG-Gibbs cross-check + VI≈Gibbs
 
-The audit. An exact blocked Gibbs sampler over (z, ψ, ω, Σ, Γ, β); its job is to confirm the
-VI's delta-method and Σ posterior aren't artifacts.
+Exact blocked Gibbs over the nested structure; audits the delta-method and the block-Σ
+posterior.
 
 **Files:**
 - Modify: `spark-vi/spark_vi/models/topic/pg_stm.py`
 - Test: `spark-vi/tests/test_pg_stm_gibbs.py`
 
-**Interfaces — Produces:**
-- `pg_stm_gibbs(docs, K, V, partition, *, P, n_iter=400, burn=200, ...) -> dict` — returns
-  posterior means `{"beta", "Gamma", "Sigma", "Sigma_samples": (n_kept, K−1, K−1)}`.
+**Interfaces — Produces:** `pg_stm_gibbs(docs, K, V, partition, *, P, n_iter=400, burn=200,
+seed=0, ...) -> {"beta", "Gamma", "Sigma", "Sigma_samples"}`.
 
-Per sweep: sample `z` per token from `Categorical(θ_d · β_{·,w})` with `θ_d =
-stick_to_simplex(ψ_d)` (**exact θ, no delta-method**); form counts `n`, `b=stick_trials(n)`;
-sample `ω_d = omega_sample(b, ψ_d[allowed], rng)`; sample `ψ_d ~ N(m, V)` from `psi_posterior`;
-sample `Σ ~ IW(Psi0 + scatter, nu0 + D)` block-wise (`scipy.stats.invwishart`); sample/`update
-Γ, β` conjugately. Keep post-burn Σ samples.
+Per sweep, per doc (group g): sample `z` per token from `Categorical(θ_d·β_{·,w})` with
+`θ_d = gated_theta(ψ_bg, ψ_gate_g, ψ_fg_g)` computed **exactly** from current ψ (no delta
+method); form `n_bg`/`n_fg`; `gated_counts`; sample `ω = omega_sample(b, ψ_active, rng)` per
+active stick; sample `ψ_active ~ N(m, V)` from `psi_posterior`; sample block-Σ from
+`scipy.stats.invwishart` (background block, per-group `[gate,fg]` block, cross via the joint);
+conjugate Γ, β. Keep post-burn Σ samples. Reuse the Task-6 `stick_layout`/`active` handling.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -658,43 +772,43 @@ def test_vi_matches_gibbs_on_sigma():
     P = docs[0].x.shape[0]
     vi = PGSTMVI(K=part.K, V=60, partition=part, P=P, n_iter=150, seed=0).fit(docs)
     gb = pg_stm_gibbs(docs, K=part.K, V=60, partition=part, P=P, n_iter=400, burn=200, seed=0)
-    # Correlation structure agrees: compare standardized Sigma (correlation) off-diagonals.
     def corr(S):
         d = np.sqrt(np.diag(S)); return S / np.outer(d, d)
-    assert np.allclose(corr(vi["Sigma"]), corr(gb["Sigma"]), atol=0.15)
+    # Compare the SHARED background block's correlation (present in every doc, best-identified).
+    B = len(part.background_indices())
+    assert np.allclose(corr(vi["Sigma"])[:B-1, :B-1], corr(gb["Sigma"])[:B-1, :B-1], atol=0.15)
 ```
 
 - [ ] **Step 2: Run to verify they fail** — import error.
 
-- [ ] **Step 3: Implement `pg_stm_gibbs`** per the sweep above, reusing T1/T2 primitives and
-  `scipy.stats.invwishart`. Share the block/`allowed` handling with `PGSTMVI`.
+- [ ] **Step 3: Implement `pg_stm_gibbs`** per the sweep above, reusing Task 1/2/5 primitives,
+  the Task-6 `stick_layout`, and `scipy.stats.invwishart`.
 
-- [ ] **Step 4: Run to verify they pass** — PASS (2). (Gibbs is stochastic; the atol=0.15 on
-  the correlation is deliberately loose. If it fails, first raise `n_iter`/`burn`; a genuine
-  VI–Gibbs *correlation* mismatch is a real finding to report, not to paper over.)
+- [ ] **Step 4: Run to verify they pass** — PASS (2). Gibbs is stochastic; atol=0.15 on the
+  background-block correlation is deliberately loose. Raise `n_iter`/`burn` if it flakes; a
+  genuine VI–Gibbs correlation mismatch is a real finding to report, not to paper over.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add spark-vi/spark_vi/models/topic/pg_stm.py spark-vi/tests/test_pg_stm_gibbs.py
-git commit -m "feat(pg-stm): exact PG-Gibbs cross-check + VI-vs-Gibbs Sigma agreement"
+git commit -m "feat(pg-stm): gated PG-Gibbs cross-check + VI-vs-Gibbs Sigma agreement"
 ```
 
 ---
 
-### Task 7: The runaway reproduction + the milestone-1 checkpoint
+### Task 8: Gated runaway checkpoint (the milestone-1 gate)
 
-The decisive test: reproduce the Σ runaway with the current point-estimate EM, and show
-PG-VI stays bounded and gives the weakly-identified topic a *wide* posterior.
+Reproduce the Σ runaway and show the IW posterior cures it, isolating the estimator at fixed
+link (`sigma_mode` mle vs iw on the same gated model).
 
 **Files:**
 - Create: `spark-vi/tests/test_pg_stm_runaway.py`
-- Create: `docs/experiments/0049-pg-stm-runaway-checkpoint.md` (records the checkpoint result)
+- Create: `docs/experiments/0049-pg-stm-runaway-checkpoint.md`
 
-**Interfaces — Consumes:** `PGSTMVI` (T5); `fit_stm` and `final_sigma_range` (from
-`tests/_stm_synth.py`); `gated_ln_corpus` with a doc-scarce planted topic.
+**Interfaces — Consumes:** `PGSTMVI` (Task 6); `gated_ln_corpus`, `fit_stm`, `final_sigma_range`.
 
-- [ ] **Step 1: Write the failing/gating tests**
+- [ ] **Step 1: Write the gating tests**
 
 ```python
 # spark-vi/tests/test_pg_stm_runaway.py
@@ -704,16 +818,15 @@ from tests._stm_synth import gated_ln_corpus, fit_stm, final_sigma_range
 
 
 def _scarce_corpus(seed=0):
-    # A group whose foreground topic is used by very few docs (ess ~ 15): the weakly-
-    # identified-variance regime that drove the point-EM runaway (insight 0033).
+    # Group B's foreground used by ~3% of docs (ess ~ 15-30): the weakly-identified-variance
+    # regime that drove the point-EM runaway (insight 0033).
     return gated_ln_corpus(group_weights={"A": 0.97, "B": 0.03}, fg_per_group=1, bg_k=2,
                            V=60, D=1000, doc_len=40, seed=seed)
 
 
 def test_DECISIVE_estimator_isolation_mle_diverges_iw_bounded():
-    # The clean test: SAME stick-breaking model, SAME E-step, vary ONLY the Sigma M-step.
-    # MLE (point estimate fed back, no trust region) vs IW (proper posterior). Isolates the
-    # ESTIMATOR from the link — the crux of the whole bet.
+    # SAME gated nested model, SAME E-step; vary ONLY the Sigma M-step: MLE (point estimate
+    # fed back, no trust region) vs IW (proper posterior). Isolates the estimator from the link.
     docs, planted, part = _scarce_corpus()
     P = docs[0].x.shape[0]
     mle = PGSTMVI(K=part.K, V=60, partition=part, P=P, n_iter=150, sigma_mode="mle", seed=0).fit(docs)
@@ -723,77 +836,71 @@ def test_DECISIVE_estimator_isolation_mle_diverges_iw_bounded():
 
 
 def test_scarce_topic_gets_wide_not_divergent_posterior_under_iw():
-    # Under IW, the weakly-identified stick shows a WIDE but finite per-doc posterior variance
-    # (honest uncertainty), not a divergent point.
     docs, planted, part = _scarce_corpus()
     P = docs[0].x.shape[0]
     out = PGSTMVI(K=part.K, V=60, partition=part, P=P, n_iter=150, sigma_mode="iw", seed=0).fit(docs)
     pv = out["psi_var"]
     assert np.all(np.isfinite(pv))
-    assert pv.max() < 1e2 and pv.max() > pv.mean()  # elevated but bounded
+    assert pv.max() < 1e2 and pv.max() > pv.mean()   # elevated but bounded
 
 
 def test_CONTEXT_current_softmax_point_em_also_blows_up_here():
-    # Secondary/context (NOT the isolation — link AND estimator both differ from PG-VI):
-    # confirms this regime genuinely triggers the DOCUMENTED softmax point-EM pathology.
+    # Context only (link AND estimator both differ from PG-VI): confirms the regime triggers
+    # the DOCUMENTED softmax point-EM pathology.
     docs, planted, part = _scarce_corpus()
     gp = fit_stm(docs, K=part.K, V=60, sigma_init=1.0, n_iter=200, seed=0,
-                 estimate_sigma_diagonal=True)     # UN-PINNED: the config that blew up
+                 estimate_sigma_diagonal=True)
     lo, hi = final_sigma_range(gp)
     assert hi > 1e3
 ```
 
 - [ ] **Step 2: Run to verify.** The DECISIVE test drives the milestone: `sigma_mode="mle"`
-  must reproduce a divergence (`sigma_max_trace` explodes) and `"iw"` must stay bounded — same
-  link, same E-step, only the Σ M-step differs, so a pass is unambiguous evidence the *proper
-  prior/posterior* is what cures it. If `"mle"` does NOT diverge on this regime, increase
-  scarcity (lower B's share, raise D) until the un-regularized point estimate blows up — the
-  divergence must be real for the contrast to mean anything. The CONTEXT test (softmax
-  point-EM) should pass immediately; if it doesn't, it is context only and does NOT block the
-  milestone (note it and move on — the decisive test is the isolation one).
+  must diverge (`sigma_max_trace` explodes) and `"iw"` stay bounded — same gated model, same
+  E-step, only the Σ M-step differs. If `"mle"` does NOT diverge, increase scarcity (lower B's
+  share, raise D) until the un-regularized point estimate blows up. The CONTEXT test should pass
+  immediately; if not, it's context only and does NOT block the milestone.
 
-- [ ] **Step 3: No new implementation** — this task is the gate over T5's `"iw"` path. If the
-  `"iw"` arm fails to stay bounded, the defect is in T5 (or the bet itself); investigate with
-  systematic-debugging, do not weaken the bound thresholds.
+- [ ] **Step 3: No new implementation** — the gate over Task 6's `"iw"` path. If `"iw"` fails to
+  stay bounded, the defect is in Task 6 (or the bet); investigate with systematic-debugging, do
+  NOT weaken the bound thresholds.
 
-- [ ] **Step 4: Run the full gate**
+- [ ] **Step 4: Run the full gate** — `pytest tests/test_pg_stm_runaway.py -v`. Milestone 1.
 
-Run: `cd spark-vi && python -m pytest tests/test_pg_stm_runaway.py -v`
-Expected: point-EM runs away (PASS on the divergence assertion), PG-VI bounded + wide
-posterior (PASS). This is milestone 1.
-
-- [ ] **Step 5: Record the checkpoint + commit**
-
-Write `docs/experiments/0049-pg-stm-runaway-checkpoint.md`: the three synthetic results
-(runaway reproduced at hi=<value>; PG-VI max|Σ|=<value>; VI–Gibbs correlation atol; recovery
-score), and the **checkpoint verdict** — bet holds → proceed to sub-project #2; or bet fails
-→ the publishable stop. Leave the numeric values as the one section filled on completion.
+- [ ] **Step 5: Record the checkpoint + commit.** Write
+  `docs/experiments/0049-pg-stm-runaway-checkpoint.md`: the three synthetic results (MLE
+  `max sigma_max_trace`, IW `max|Σ|`, VI–Gibbs background-block correlation atol, recovery
+  score) and the **checkpoint verdict** — bet holds → proceed to sub-project #2; or bet fails →
+  the publishable stop. Numeric values are the one section filled on completion.
 
 ```bash
 git add spark-vi/tests/test_pg_stm_runaway.py docs/experiments/0049-pg-stm-runaway-checkpoint.md
-git commit -m "test(pg-stm): runaway reproduction + milestone-1 checkpoint gate"
+git commit -m "test(pg-stm): gated runaway reproduction + milestone-1 checkpoint gate"
 ```
 
 ---
 
 ## Post-implementation (controller)
 
-- All 7 task tests green = milestone 1 reached. Read the checkpoint verdict in exp 0049.
+- All 8 task tests green = milestone 1 reached. Read the checkpoint verdict in exp 0049.
 - **Bet holds** → the design's sub-project #2 (distributed SVI) is the next brainstorm.
-- **Bet fails** (PG-VI also diverges / VI≠Gibbs) → STOP; that is the publishable negative
-  result. Write the insight; do not proceed to #2.
+- **Bet fails** (PG-VI `"iw"` also diverges / VI≠Gibbs on the shared background block) → STOP;
+  publishable negative result. Write the insight; do not proceed to #2.
 - `polyagamma` must be added to the cluster image before sub-project #2 (it ships wheels).
 
 ## Self-Review notes
 
-- **Spec coverage:** stick-breaking link (T1), PG ω + ψ-Gaussian (T2), IW Σ + Γ + β (T3),
-  delta-method E[log θ] (T4), full-batch on-path PG-VI + recovery (T5), Gibbs cross-check +
-  VI≈Gibbs (T6), runaway cure + checkpoint (T7). No reference topic (Σ,Γ are K−1 throughout).
-  Block-structured Σ handled in T5's accumulation. `polyagamma` dependency in T2. All covered.
-- **Type consistency:** ψ/sticks are (K−1)-dim, θ/β rows are K-dim, Σ/Γ are (K−1); `stick_trials`
-  returns (K−1); `omega_expectation`/`psi_posterior` operate on the doc's allowed stick sub-set;
-  `PGSTMVI.fit` and `pg_stm_gibbs` return the same `Sigma` (K−1,K−1) shape the tests compare.
-- **Research honesty:** T2/T4 formulas are validated against brute-force/Monte-Carlo references
-  (not self-consistency); T5/T6 correctness is end-to-end recovery + VI≈Gibbs; T7 is the gate.
-  The one place the implementer must derive-to-pass-a-test (not transcribe) is T5's E-step inner
-  loop and block accumulation — the design doc gives the recipe, the recovery test is the check.
+- **Spec coverage:** flat stick-breaking primitives (T1), PG ω + ψ-Gaussian (T2), IW Σ + Γ + β
+  (T3), delta-method E[log θ] (T4) — all reused as block primitives; nested composition (gate +
+  per-block, T5); gated full-batch on-path PG-VI + block-Σ IW + recovery (T6); gated Gibbs +
+  VI≈Gibbs (T7); gated runaway cure + checkpoint (T8). Nested = K−1 sticks (background ∪
+  per-group [gate, foreground]); a doc uses |allowed|−1. No reference topic.
+- **Type consistency:** flat sticks (Ki−1) within a block of Ki topics; `gated_theta` length
+  B+m_g; ψ/Σ/Γ are (K−1); `PGSTMVI.fit` and `pg_stm_gibbs` return the same `Sigma` (K−1,K−1)
+  the tests compare; `sigma_mode`/`sigma_max_trace` consistent across T6/T8.
+- **Research honesty:** T1–T5 formulas validated against brute-force/quadrature references;
+  T6/T7 correctness is end-to-end recovery + VI≈Gibbs; T8 is the estimator-isolation gate. The
+  derive-to-pass-a-test parts are T6's gated E-step assembly + block-Σ accumulation (recipe in
+  the design; recovery is the check) and T7's Gibbs sweep.
+- **Parameterization caveat (unchanged):** `gated_ln_corpus` is softmax-planted, so only β
+  recovery is cross-model; all Σ checks are link-internal (VI≈Gibbs on the shared background
+  block, boundedness, MLE-vs-IW).
