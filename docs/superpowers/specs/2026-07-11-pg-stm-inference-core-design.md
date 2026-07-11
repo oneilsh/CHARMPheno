@@ -126,9 +126,13 @@ stick-breaking link + count factorization, the PG-VI coordinate updates (ω, Gau
 Σ, delta-method assignment), and the PG-Gibbs cross-check (same module or a test sibling),
 plus a runaway-reproduction harness that plants the doc-scarce topic.
 
-**Dependency:** `pypolyagamma` (Devroye-method PG sampler — validated, standard). Added for
-the core; the cluster-image build risk lands in sub-project #2, and the vendor-a-sampler
-fallback is revisited only if that build actually chokes.
+**Dependency:** `polyagamma` (Bleki's maintained, numpy-based PG sampler; PyPI
+`polyagamma==2.0.2`, ships arm64/x86 wheels). Verified installing cleanly and sampling in
+the dev env — `random_polyagamma(h=b, z=ψ)` is the vectorized PG(b, ψ) draw the ω update
+needs. Chosen over the older `pypolyagamma` (Linderman's C++ package), which fails to build
+against modern setuptools (stale `pkg_resources` import) — verified broken here. Because
+`polyagamma` ships wheels, there is no cluster-image build risk in sub-project #2 either, so
+the vendor-a-sampler fallback is not needed.
 
 **Reuse:** `tests/_stm_synth.py` (`synthetic_gated_corpus`, `planted_recovery`,
 `foreground_recovers_group`), `TopicBlockPartition` (gating), and the Γ-ridge / β-Dirichlet
