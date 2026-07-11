@@ -7,7 +7,6 @@ from spark_vi.models.topic._linalg import safe_inverse
 
 
 def _setup(K=4, V=12, reference=None):
-    rng = np.random.default_rng(0)
     beta = np.full((K, V), 1e-3)
     blk = V // K
     for k in range(K):

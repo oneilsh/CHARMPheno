@@ -109,6 +109,41 @@ class TestRddParity:
         assert got["n_docs"] == expected["n_docs"]
         assert abs(got["sd_readout"]["sd_c_quantiles"]["p50"]
                    - expected["sd_readout"]["sd_c_quantiles"]["p50"]) < 1e-6
+        # Drift readout parity -- the headline falsifiable output. Given
+        # matching visible/held splits (same seed + same doc order/index),
+        # the per-frac c* argmax selection is a discrete grid pick, so it
+        # should match exactly (no floating-point tolerance needed).
+        assert got["drift"]["gaussian"] == expected["drift"]["gaussian"]
+        assert got["drift"]["tprior"] == expected["drift"]["tprior"]
+        assert got["drift"]["gaussian_spread"] == expected["drift"]["gaussian_spread"]
+        assert got["drift"]["tprior_spread"] == expected["drift"]["tprior_spread"]
+
+    def test_rdd_sweep_is_deterministic_across_invocations(self, spark):
+        # Locks reproducibility across the ~12 distributed actions inside
+        # corpus_tprior_scale_sweep_gated_rdd (one c-sweep per nu in the grid,
+        # per (nu, frac) in the drift readout, plus the sd collect()): the
+        # (index, doc) assignment must be pinned once and reused, not
+        # re-derived per action (see the indexed-RDD-caching fix). Running
+        # the same call twice on the same parallelized corpus must produce
+        # byte-identical grid LLs, argmax, drift, and sd p50.
+        import math
+        from spark_vi.mllib.topic.stm import corpus_tprior_scale_sweep_gated_rdd
+        docs, part, gp = _build_fitted_corpus(seed=11)
+        c_grid = [2, 4, 8]
+        nu_grid = [5, math.inf]
+        rdd = spark.sparkContext.parallelize(docs, numSlices=3)
+        first = corpus_tprior_scale_sweep_gated_rdd(
+            rdd, gp, part, c_grid=c_grid, nu_grid=nu_grid,
+            holdout_frac=0.3, drift_fracs=(0.2, 0.3), seed=0)
+        rdd2 = spark.sparkContext.parallelize(docs, numSlices=3)
+        second = corpus_tprior_scale_sweep_gated_rdd(
+            rdd2, gp, part, c_grid=c_grid, nu_grid=nu_grid,
+            holdout_frac=0.3, drift_fracs=(0.2, 0.3), seed=0)
+        assert first["grid"] == second["grid"]
+        assert first["argmax"] == second["argmax"]
+        assert first["drift"] == second["drift"]
+        assert (first["sd_readout"]["sd_quantiles"]["p50"]
+                == second["sd_readout"]["sd_quantiles"]["p50"])
 
     def test_rdd_output_json_safe(self, spark):
         import json, math

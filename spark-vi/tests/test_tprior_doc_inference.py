@@ -142,6 +142,64 @@ def test_returned_pair_is_self_consistent_correlated_R_small_nu():
     assert np.allclose(eta_t[al], eta_re[al], atol=1e-8)
 
 
+def test_nu_inf_reproduces_single_gaussian_solve_reference0():
+    # Production (exp 0048) fits with reference_topic=True -> reference=0, but
+    # every other test in this file uses reference=None. Cover the pinned-
+    # reference path explicitly: nu=inf must still nest the plain Gaussian
+    # solve, now with topic 0 pinned at eta=0 and K_free = |allowed| - 1.
+    kw, R = _setup(reference=0)
+    c = 4.0
+    eta_t, sd_t, _, n_em = _stm_doc_inference_tprior(**kw, c=c, nu=math.inf)
+    assert sd_t == 1.0 and n_em == 1
+    Sigma_inv_allowed = (1.0 / c) * kw["Rinv_allowed"]
+    eta_g, _, _ = _stm_doc_inference(
+        indices=kw["indices"], counts=kw["counts"], expElogbeta=kw["expElogbeta"],
+        Gamma=kw["Gamma"], Sigma_inv_allowed=Sigma_inv_allowed, x=kw["x"],
+        allowed=kw["allowed"], reference=kw["reference"],
+    )
+    al = kw["allowed"]
+    assert np.allclose(eta_t[al], eta_g[al], atol=1e-8)
+    assert eta_t[0] == 0.0
+
+
+def test_returned_pair_is_self_consistent_correlated_R_small_nu_reference0():
+    # reference=0 variant of test_returned_pair_is_self_consistent_correlated_R_small_nu
+    # (correlated R, nu=2.5): the pinned-reference s_d step uses the FULL
+    # allowed-set q_R (including the reference's (0 - mu_ref) deviation) and
+    # K_free = |allowed| - 1 (see _stm_doc_inference_tprior's docstring). The
+    # same closing-eta-solve invariant must still hold with the reference
+    # pinned: re-solving _stm_doc_inference(..., reference=0) at the returned
+    # sd reproduces the returned eta_hat.
+    #
+    # The pinned sub-problem (K_free = 3 here) converges its EM sd-sequence
+    # more slowly than the unconstrained one at the library's DEFAULT
+    # sd_tol=1e-4/sd_max_iter=10 -- empirically the default leaves a ~7e-5
+    # residual (still within the documented "up to lbfgs_tol" bound, since
+    # 7e-5 < lbfgs_tol=1e-4, but not tight enough for a 1e-8 regression
+    # guard). Tightening sd_tol/sd_max_iter here (not a production default
+    # change -- just this test's exercise of the invariant) lets the EM
+    # sequence actually reach the fixed point, so the closing-eta-solve
+    # invariant can be checked at high precision.
+    rho = 0.5
+    K = 4
+    R = _equicorr(K, rho)
+    assert not np.allclose(R, np.eye(K))          # guard: R really is correlated
+    kw, R = _setup(K=K, R=R, reference=0)
+    c, nu = 4.0, 2.5
+    lbfgs_tol = 1e-4
+    eta_t, sd_t, _, _ = _stm_doc_inference_tprior(
+        **kw, c=c, nu=nu, lbfgs_tol=lbfgs_tol, sd_tol=1e-6, sd_max_iter=30)
+    al = kw["allowed"]
+    assert eta_t[0] == 0.0                        # reference stays pinned at 0
+    Sigma_inv_allowed = (1.0 / (sd_t * c)) * kw["Rinv_allowed"]
+    eta_re, _, _ = _stm_doc_inference(
+        indices=kw["indices"], counts=kw["counts"], expElogbeta=kw["expElogbeta"],
+        Gamma=kw["Gamma"], Sigma_inv_allowed=Sigma_inv_allowed, x=kw["x"],
+        tol=lbfgs_tol, allowed=al, reference=kw["reference"], eta_init=eta_t,
+    )
+    assert np.allclose(eta_t[al], eta_re[al], atol=1e-8)
+
+
 def test_warm_start_invariance_correlated_R_small_nu():
     # Same correlated-R / small-nu regime; cold vs warm-restarted-from-cold.
     # Two different inits converge the sd sequence to within O(sd_tol) of the
