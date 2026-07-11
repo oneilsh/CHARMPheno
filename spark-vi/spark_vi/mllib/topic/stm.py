@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import pickle
 from pathlib import Path
 from typing import Any
@@ -370,6 +371,75 @@ def _gated_mode_theta(eta_hat: np.ndarray, allowed: np.ndarray, K: int) -> np.nd
     theta = np.zeros(K, dtype=np.float64)
     theta[allowed] = w / w.sum()
     return theta
+
+
+def _stm_doc_inference_tprior(
+    *, indices, counts, expElogbeta, Gamma, Rinv_allowed, x, c, nu,
+    allowed, reference=None, eta_init=None, sd_init=1.0,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4, sd_max_iter=10, sd_tol=1e-4,
+):
+    """Per-document joint MAP (eta, s_d) under the multivariate-t prior
+    eta_d | s_d ~ N(mu_d, s_d*c*R), s_d ~ Inverse-Gamma(nu/2, nu/2)
+    (design doc 2026-07-10-tprior-per-document-scale-design.md).
+
+    Explicit EM / coordinate ascent: the eta-step is the existing gated Laplace
+    solve (``_stm_doc_inference``) at prior precision (1/(s_d*c))*Rinv_allowed,
+    warm-started across sweeps; the s_d-step is the closed-form Inverse-Gamma
+    mode  s_d = (nu + q_R/c)/(nu + K_free + 2)  with
+    q_R = (eta-mu)^T Rinv_allowed (eta-mu) over the allowed set (reference pinned
+    at 0) and K_free = |allowed| - (1 if reference else 0). nu=inf recovers the
+    single Gaussian solve at s_d=1 (nesting). Returns (eta_hat full-K, s_d float,
+    nu_d Laplace cov from the final eta-step, n_em sweeps).
+
+    Convergence uses a two-consecutive-small-steps rule (``|sd_new - sd| <
+    sd_tol`` on two iterations in a row) rather than stopping on the first
+    small step: on the iteration a single-step check would fire, eta_hat was
+    still solved at the PRIOR sd (the eta-step warm-starts from last sweep,
+    the sd-step then updates from that eta), so a one-shot check returns a
+    (eta_hat, sd) pair that is off by roughly one sd-step from a true joint
+    fixed point -- fine relative to sd_tol itself, but not tight enough for
+    downstream consumers (e.g. warm-restarting from a converged solution) to
+    reproduce the same pair to floating-point precision. Requiring the small
+    step twice in a row waits for the sd update that follows an already-tiny
+    step, so the paired eta_hat and sd are mutually consistent to within the
+    (much smaller) step size actually taken, not just within sd_tol."""
+    allowed = np.asarray(allowed, dtype=np.int64)
+    mu_allowed = (Gamma[:, allowed].T @ x)
+    K_free = int(allowed.shape[0] - (1 if reference is not None else 0))
+
+    if not math.isfinite(nu):
+        Sigma_inv_allowed = (1.0 / c) * Rinv_allowed
+        eta_hat, nu_d, _ = _stm_doc_inference(
+            indices=indices, counts=counts, expElogbeta=expElogbeta,
+            Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=x,
+            max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+            allowed=allowed, reference=reference, eta_init=eta_init,
+        )
+        return eta_hat, 1.0, nu_d, 1
+
+    sd = float(sd_init)
+    eta_warm = eta_init
+    eta_hat = nu_d = None
+    n_em = 0
+    converged_once = False
+    for n_em in range(1, sd_max_iter + 1):
+        Sigma_inv_allowed = (1.0 / (sd * c)) * Rinv_allowed
+        eta_hat, nu_d, _ = _stm_doc_inference(
+            indices=indices, counts=counts, expElogbeta=expElogbeta,
+            Gamma=Gamma, Sigma_inv_allowed=Sigma_inv_allowed, x=x,
+            max_iter=lbfgs_max_iter, tol=lbfgs_tol,
+            allowed=allowed, reference=reference, eta_init=eta_warm,
+        )
+        eta_warm = eta_hat
+        diff = eta_hat[allowed] - mu_allowed
+        q_R = float(diff @ Rinv_allowed @ diff)
+        sd_new = (nu + q_R / c) / (nu + K_free + 2.0)
+        small = abs(sd_new - sd) < sd_tol
+        sd = sd_new
+        if small and converged_once:
+            break
+        converged_once = small
+    return eta_hat, sd, nu_d, n_em
 
 
 def corpus_concentration_stm(
