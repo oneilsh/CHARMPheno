@@ -240,6 +240,7 @@ def _stm_doc_inference(
     tol: float = 1e-4,
     allowed: np.ndarray | None = None,
     reference: int | None = None,
+    eta_init: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Per-doc Laplace approximation, optionally restricted to an allowed topic
     set and optionally with one topic pinned to eta=0 (the reference).
@@ -266,6 +267,10 @@ def _stm_doc_inference(
     and it still contributes to the data term. In the returned arrays the
     reference has eta_hat=0 (finite) and nu_d row/col exactly 0 (it is pinned, so
     it carries no posterior variance).
+
+    eta_init (optional full-K vector) warm-starts the L-BFGS from the given mode
+    over the allowed (and, under reference, free) set; None uses cold zeros (the
+    default, byte-identical to prior behavior).
     """
     K = expElogbeta.shape[0]
     if allowed is None:
@@ -280,7 +285,10 @@ def _stm_doc_inference(
 
     if reference is None:
         # Canonical path — unchanged from before.
-        eta0 = np.zeros(n_sub, dtype=np.float64)
+        if eta_init is None:
+            eta0 = np.zeros(n_sub, dtype=np.float64)
+        else:
+            eta0 = np.asarray(eta_init, dtype=np.float64)[allowed].copy()
         f = partial(_stm_neg_log_joint, **common)
         g = partial(_stm_neg_log_joint_grad, **common)
         result = minimize(f, x0=eta0, jac=g, method="L-BFGS-B",
@@ -314,8 +322,11 @@ def _stm_doc_inference(
     def g_free(nu_free: np.ndarray) -> np.ndarray:
         return _stm_neg_log_joint_grad(_full(nu_free), **common)[free]
 
-    result = minimize(f_free, x0=np.zeros(free.shape[0], dtype=np.float64),
-                      jac=g_free, method="L-BFGS-B",
+    if eta_init is None:
+        x0 = np.zeros(free.shape[0], dtype=np.float64)
+    else:
+        x0 = np.asarray(eta_init, dtype=np.float64)[allowed][free].copy()
+    result = minimize(f_free, x0=x0, jac=g_free, method="L-BFGS-B",
                       options={"maxiter": max_iter, "gtol": tol})
     eta_sub = _full(result.x)
     H_full = _stm_neg_log_joint_hessian(eta_sub, **common)   # (n_sub, n_sub)
