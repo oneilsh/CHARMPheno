@@ -72,3 +72,50 @@ def test_output_is_json_safe():
         docs, gp, part, c_grid=[2, 4], nu_grid=[5, math.inf],
         holdout_frac=0.3, drift_fracs=(0.2, 0.3), seed=0)
     json.dumps(t)   # must not raise
+
+
+class TestRddParity:
+    def test_rdd_matches_numpy(self, spark):
+        import math
+        from spark_vi.mllib.topic.stm import (
+            corpus_tprior_scale_sweep_gated,
+            corpus_tprior_scale_sweep_gated_rdd,
+        )
+        docs, part, gp = _build_fitted_corpus(seed=3)
+        c_grid = [2, 4, 8]
+        nu_grid = [5, math.inf]
+        expected = corpus_tprior_scale_sweep_gated(
+            docs, gp, part, c_grid=c_grid, nu_grid=nu_grid,
+            holdout_frac=0.3, drift_fracs=(0.2, 0.3), seed=0)
+        rdd = spark.sparkContext.parallelize(docs, numSlices=3)
+        got = corpus_tprior_scale_sweep_gated_rdd(
+            rdd, gp, part, c_grid=c_grid, nu_grid=nu_grid,
+            holdout_frac=0.3, drift_fracs=(0.2, 0.3), seed=0)
+        # grid LLs match doc-for-doc (same splits, same cold start per (doc, c))
+        exp_by = {(r["c"], r["nu"]): r["ll"] for r in expected["grid"]}
+        got_by = {(r["c"], r["nu"]): r["ll"] for r in got["grid"]}
+        assert set(exp_by) == set(got_by)
+        for k in exp_by:
+            assert abs(exp_by[k] - got_by[k]) < 1e-6
+        # argmax selection (which grid point wins) must match exactly; the
+        # winning ll itself is subject to the same distributed-reduction
+        # ULP-level reordering noise as the grid (treeReduce sums partition
+        # totals in a different grouping than the numpy sequential loop --
+        # not a correctness issue, see the grid check above), so compare it
+        # with the same tolerance rather than dict `==`.
+        assert got["argmax"]["c"] == expected["argmax"]["c"]
+        assert got["argmax"]["nu"] == expected["argmax"]["nu"]
+        assert abs(got["argmax"]["ll"] - expected["argmax"]["ll"]) < 1e-6
+        assert got["n_docs"] == expected["n_docs"]
+        assert abs(got["sd_readout"]["sd_c_quantiles"]["p50"]
+                   - expected["sd_readout"]["sd_c_quantiles"]["p50"]) < 1e-6
+
+    def test_rdd_output_json_safe(self, spark):
+        import json, math
+        from spark_vi.mllib.topic.stm import corpus_tprior_scale_sweep_gated_rdd
+        docs, part, gp = _build_fitted_corpus(seed=9)
+        rdd = spark.sparkContext.parallelize(docs, numSlices=2)
+        got = corpus_tprior_scale_sweep_gated_rdd(
+            rdd, gp, part, c_grid=[2, 4], nu_grid=[5, math.inf],
+            holdout_frac=0.3, drift_fracs=(0.2, 0.3), seed=0)
+        json.dumps(got)

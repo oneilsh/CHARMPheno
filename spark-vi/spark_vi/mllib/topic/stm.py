@@ -1657,6 +1657,180 @@ def corpus_heldout_scale_sweep_gated_rdd(
     return {"lls": lls, "argmax_c": argmax_c, "n_docs": n_docs}
 
 
+def corpus_tprior_scale_sweep_gated_rdd(
+    doc_rdd, global_params, partition, *, c_grid, nu_grid,
+    holdout_frac=0.3, drift_fracs=(0.2, 0.3, 0.5), reference=None, seed=0,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4, sd_max_iter=10, sd_tol=1e-4, depth=2,
+) -> dict:
+    """Distributed multivariate-t (c, nu) sweep -- the cluster stand-in for
+    ``corpus_tprior_scale_sweep_gated``. Same output dict; doc-for-doc
+    identical LLs.
+
+    Each (doc, c) pair is solved from a COLD start (``eta_init=None``),
+    exactly mirroring ``_c_sweep_at_nu`` (Task 3): the per-doc objective is a
+    log-mixture, not globally concave in eta, so warm-starting across the
+    c-grid is not guaranteed to land in the same basin as a cold start and
+    would silently break both the numpy/RDD parity and the nu=inf nesting
+    against the Gaussian sweep. Cold-starting also makes the per-(doc, c)
+    computation embarrassingly parallel and independent of ``numSlices`` --
+    the property this RDD sibling needs for order-independent partitioning.
+
+    Structure mirrors ``corpus_heldout_scale_sweep_gated_rdd``'s
+    ``zipWithIndex().mapPartitions(_local).treeReduce(_combine, depth=depth)``
+    idiom, run twice: once per (nu, frac) pair for the grid + drift readouts
+    (each its own distributed c-sweep pass), and once more as a plain
+    ``map(...).collect()`` for the s_d readout at the resolved (c*, nu*) on
+    full docs (no split). ``zipWithIndex`` gives each doc the same index
+    ``enumerate(docs)`` would on the driver, so ``heldout_split(seed=seed+i)``
+    reproduces the identical visible/held split doc-for-doc -- required for
+    parity, since the split is itself a random draw.
+    """
+    from scipy.special import digamma
+    from spark_vi.eval.topic.concentration_heterogeneity import _json_safe
+
+    lam = np.asarray(global_params["lambda"], dtype=np.float64)
+    Gamma = np.asarray(global_params["Gamma"], dtype=np.float64)
+    Sigma = np.asarray(global_params["Sigma"], dtype=np.float64)
+    K = lam.shape[0]
+    lam_rowsum = lam.sum(axis=1, keepdims=True)
+    expElogbeta = np.exp(digamma(lam) - digamma(lam_rowsum))
+    beta_prob = lam / lam_rowsum
+    d = np.diag(Sigma)
+    R = Sigma / np.sqrt(np.outer(d, d))
+
+    sc = doc_rdd.context
+    gp_b = sc.broadcast((expElogbeta, beta_prob, Gamma, R))
+    p_b = sc.broadcast(partition)
+    c_list = list(c_grid)
+
+    # Each (nu, frac) c-sweep as one distributed pass over indexed docs.
+    def _pass(nu, frac):
+        _nu, _frac = nu, frac
+
+        def _local(rows, _gp=gp_b, _cl=c_list, _p=p_b, _K=K,
+                   _ref=reference, _seed=seed, _nu=_nu, _frac=_frac,
+                   _li=lbfgs_max_iter, _lt=lbfgs_tol, _si=sd_max_iter, _st=sd_tol):
+            import numpy as _np
+            from spark_vi.eval.topic.concentration_recovery import (
+                _predictive_loglik, heldout_split,
+            )
+            from spark_vi.models.topic._linalg import safe_inverse
+            from spark_vi.mllib.topic.stm import (
+                _stm_doc_inference_tprior, _gated_mode_theta,
+            )
+            eE, bp, Gm, Rr = _gp.value
+            part = _p.value
+            cache = {}
+            sll = {c: 0.0 for c in _cl}
+            ntk = {c: 0 for c in _cl}
+            ndoc = 0
+            for i, doc in rows:
+                split = heldout_split(doc, holdout_frac=_frac, seed=_seed + i)
+                if split is None:
+                    continue
+                vis, hi, hc = split
+                if hc.size == 0:
+                    continue
+                allowed = part.allowed_indices(doc.groups)
+                key = tuple(allowed.tolist())
+                Rinv = cache.get(key)
+                if Rinv is None:
+                    Rinv = safe_inverse(Rr[_np.ix_(allowed, allowed)])
+                    cache[key] = Rinv
+                ndoc += 1
+                nh = int(hc.sum())
+                for c in _cl:
+                    # Cold-start every (doc, c): see docstring -- warm-starting
+                    # across the c-grid would break parity + nesting (Task 3).
+                    eta_hat, _sd, _nud, _n = _stm_doc_inference_tprior(
+                        indices=vis.indices, counts=vis.counts, expElogbeta=eE,
+                        Gamma=Gm, Rinv_allowed=Rinv, x=doc.x, c=c, nu=_nu,
+                        allowed=allowed, reference=_ref, eta_init=None,
+                        lbfgs_max_iter=_li, lbfgs_tol=_lt,
+                        sd_max_iter=_si, sd_tol=_st,
+                    )
+                    th = _gated_mode_theta(eta_hat, allowed, _K)
+                    sll[c] += _predictive_loglik(th, bp, hi, hc)
+                    ntk[c] += nh
+            return [((sll, ntk), ndoc)]
+
+        def _combine(a, b):
+            (sa, ta), na = a
+            (sb, tb), nb = b
+            return ({c: sa[c] + sb[c] for c in sa},
+                    {c: ta[c] + tb[c] for c in ta}), na + nb
+
+        (sll, ntk), ndoc = (
+            doc_rdd.zipWithIndex()
+            .map(lambda t: (t[1], t[0]))       # (index, doc)
+            .mapPartitions(_local).treeReduce(_combine, depth=depth)
+        )
+        lls = {c: (sll[c] / ntk[c] if ntk[c] else float("-inf")) for c in c_list}
+        return lls, max(lls, key=lls.get), ndoc
+
+    # Grid at holdout_frac
+    grid = []
+    n_docs = 0
+    for nu in nu_grid:
+        lls, _amax, ndoc = _pass(nu, holdout_frac)
+        n_docs = ndoc
+        for c in c_list:
+            grid.append({"c": float(c), "nu": _nu_key(nu), "ll": float(lls[c])})
+    best = max(grid, key=lambda r: r["ll"])
+    c_star = best["c"]
+    nu_star = math.inf if best["nu"] == "inf" else float(best["nu"])
+
+    # Drift
+    gaussian, tprior = [], []
+    for f in drift_fracs:
+        _l, ag, _n = _pass(math.inf, f); gaussian.append({"frac": float(f), "c_star": float(ag)})
+        _l, at, _n = _pass(nu_star, f);  tprior.append({"frac": float(f), "c_star": float(at)})
+
+    def _spread(rows):
+        cs = [r["c_star"] for r in rows]
+        return float(max(cs) - min(cs))
+
+    # s_d readout at (c*, nu*): one map -> collect the sd scalars (n is small)
+    def _sd_local(doc, _gp=gp_b, _p=p_b, _cs=c_star, _ns=nu_star,
+                  _ref=reference, _li=lbfgs_max_iter, _lt=lbfgs_tol,
+                  _si=sd_max_iter, _st=sd_tol):
+        import numpy as _np
+        from spark_vi.models.topic._linalg import safe_inverse
+        from spark_vi.mllib.topic.stm import _stm_doc_inference_tprior
+        eE, bp, Gm, Rr = _gp.value
+        part = _p.value
+        allowed = part.allowed_indices(doc.groups)
+        Rinv = safe_inverse(Rr[_np.ix_(allowed, allowed)])
+        _eta, sd, _nud, _n = _stm_doc_inference_tprior(
+            indices=doc.indices, counts=doc.counts, expElogbeta=eE, Gamma=Gm,
+            Rinv_allowed=Rinv, x=doc.x, c=_cs, nu=_ns, allowed=allowed,
+            reference=_ref, lbfgs_max_iter=_li, lbfgs_tol=_lt,
+            sd_max_iter=_si, sd_tol=_st,
+        )
+        return float(sd)
+
+    sd_arr = np.asarray(doc_rdd.map(_sd_local).collect(), dtype=np.float64)
+
+    def _q(a):
+        ps = np.quantile(a, [0.10, 0.25, 0.50, 0.75, 0.90])
+        return {"p10": float(ps[0]), "p25": float(ps[1]), "p50": float(ps[2]),
+                "p75": float(ps[3]), "p90": float(ps[4])}
+
+    out = {
+        "grid": grid,
+        "argmax": {"c": c_star, "nu": _nu_key(nu_star), "ll": best["ll"]},
+        "n_docs": int(n_docs),
+        "drift": {"fracs": [float(f) for f in drift_fracs],
+                  "gaussian": gaussian, "tprior": tprior,
+                  "gaussian_spread": _spread(gaussian),
+                  "tprior_spread": _spread(tprior)},
+        "sd_readout": {"n_docs": int(sd_arr.size),
+                       "sd_quantiles": _q(sd_arr),
+                       "sd_c_quantiles": _q(sd_arr * c_star)},
+    }
+    return _json_safe(out)
+
+
 def smooth_scale_log_quadratic(lls: dict, *, window_radius: int = 2) -> dict:
     """Reduce a held-out-LL-vs-scale grid (``corpus_heldout_scale_sweep_gated{,_rdd}``'s
     ``"lls"``) to a smoothed c* by local quadratic interpolation in log c.
