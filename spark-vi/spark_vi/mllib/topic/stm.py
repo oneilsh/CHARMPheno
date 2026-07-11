@@ -1337,6 +1337,186 @@ def corpus_heldout_scale_sweep_gated(
     return {"lls": lls, "argmax_c": argmax_c, "n_docs": n_docs}
 
 
+def _nu_key(nu):
+    return "inf" if not math.isfinite(nu) else float(nu)
+
+
+def _c_sweep_at_nu(
+    docs, *, expElogbeta, beta_prob, Gamma, R, Rinv_cache, partition, c_grid, nu,
+    holdout_frac, reference, seed, K, lbfgs_max_iter, lbfgs_tol,
+    sd_max_iter, sd_tol,
+):
+    """One 1-D held-out c-sweep at a fixed nu. Returns ({c: mean_per_token_ll},
+    argmax_c).
+
+    Each (doc, c) pair is solved from a COLD start (eta_init=None), matching
+    ``corpus_heldout_scale_sweep_gated`` byte-for-byte at nu=inf (the load-
+    bearing nesting check, ``test_nu_inf_column_matches_gaussian_sweep``).
+    An earlier version warm-started eta across c within each doc; empirically
+    (verified against this exact synthetic corpus) that changes the recovered
+    per-doc mode by O(1e-3-1e-2) in held-out log-lik, NOT just solver-tolerance
+    noise -- it persists at gtol as tight as 1e-8, so it lands in a genuinely
+    different stationary point. The per-doc data term here is a log-MIXTURE,
+    -log(softmax(eta)^T expElogbeta_w) (the direct predictive-probability form
+    ``_predictive_loglik`` scores against, not the Jensen/variational surrogate
+    sum_k p_k log(beta_k) that is guaranteed concave), so it is not globally
+    concave in eta and a warm start is not guaranteed to reach the same basin
+    as a cold start. Cold-starting every (doc, c) trades some redundant
+    L-BFGS work for a result that is reproducible and consistent with the
+    Gaussian sweep by construction rather than by luck."""
+    from spark_vi.eval.topic.concentration_recovery import (
+        _predictive_loglik, heldout_split,
+    )
+    from spark_vi.models.topic._linalg import safe_inverse
+
+    sum_ll = {c: 0.0 for c in c_grid}
+    n_tok = {c: 0 for c in c_grid}
+    for i, doc in enumerate(docs):
+        split = heldout_split(doc, holdout_frac=holdout_frac, seed=seed + i)
+        if split is None:
+            continue
+        visible_doc, held_indices, held_counts = split
+        if held_counts.size == 0:
+            continue
+        allowed = partition.allowed_indices(doc.groups)
+        key = tuple(allowed.tolist())
+        Rinv_allowed = Rinv_cache.get(key)
+        if Rinv_allowed is None:
+            Rinv_allowed = safe_inverse(R[np.ix_(allowed, allowed)])
+            Rinv_cache[key] = Rinv_allowed
+        n_held = int(held_counts.sum())
+        for c in c_grid:
+            eta_hat, _sd, _nu_d, _n = _stm_doc_inference_tprior(
+                indices=visible_doc.indices, counts=visible_doc.counts,
+                expElogbeta=expElogbeta, Gamma=Gamma, Rinv_allowed=Rinv_allowed,
+                x=doc.x, c=c, nu=nu, allowed=allowed, reference=reference,
+                eta_init=None, lbfgs_max_iter=lbfgs_max_iter,
+                lbfgs_tol=lbfgs_tol, sd_max_iter=sd_max_iter, sd_tol=sd_tol,
+            )
+            theta_hat = _gated_mode_theta(eta_hat, allowed, K)
+            sum_ll[c] += _predictive_loglik(theta_hat, beta_prob, held_indices, held_counts)
+            n_tok[c] += n_held
+    lls = {c: (sum_ll[c] / n_tok[c] if n_tok[c] else float("-inf")) for c in c_grid}
+    argmax_c = max(lls, key=lls.get)
+    return lls, argmax_c
+
+
+def _count_contributing(docs, partition, holdout_frac, seed):
+    from spark_vi.eval.topic.concentration_recovery import heldout_split
+    n = 0
+    for i, doc in enumerate(docs):
+        split = heldout_split(doc, holdout_frac=holdout_frac, seed=seed + i)
+        if split is None:
+            continue
+        _v, _hi, hc = split
+        if hc.size == 0:
+            continue
+        n += 1
+    return n
+
+
+def corpus_tprior_scale_sweep_gated(
+    docs, global_params, partition, *, c_grid, nu_grid,
+    holdout_frac=0.3, drift_fracs=(0.2, 0.3, 0.5), reference=None, seed=0,
+    lbfgs_max_iter=50, lbfgs_tol=1e-4, sd_max_iter=10, sd_tol=1e-4,
+) -> dict:
+    """Driver-side 2-D held-out (c, nu) sweep for the multivariate-t per-document
+    scale diagnostic (design doc 2026-07-10-tprior-per-document-scale-design.md).
+
+    Mirrors ``corpus_heldout_scale_sweep_gated`` (same heldout_split, same
+    inference-vs-scoring role split, same short-doc skips). Emits the (c, nu)
+    grid + argmax, the f-drift readout (c* across drift_fracs at nu=inf vs
+    nu=nu*), and the s_d readout (sd and sd*c* quantiles at (c*, nu*), inferred
+    on full docs). Both readouts emit numbers only, no verdicts. nu=inf column
+    reproduces the Gaussian sweep (nesting). See the RDD sibling for cluster use.
+    """
+    from scipy.special import digamma
+    from spark_vi.eval.topic.concentration_heterogeneity import _json_safe
+
+    lam = np.asarray(global_params["lambda"], dtype=np.float64)
+    Gamma = np.asarray(global_params["Gamma"], dtype=np.float64)
+    Sigma = np.asarray(global_params["Sigma"], dtype=np.float64)
+    K = lam.shape[0]
+    lam_rowsum = lam.sum(axis=1, keepdims=True)
+    expElogbeta = np.exp(digamma(lam) - digamma(lam_rowsum))
+    beta_prob = lam / lam_rowsum
+    d = np.diag(Sigma)
+    R = Sigma / np.sqrt(np.outer(d, d))
+    Rinv_cache: dict[tuple, np.ndarray] = {}
+
+    common = dict(
+        expElogbeta=expElogbeta, beta_prob=beta_prob, Gamma=Gamma, R=R,
+        Rinv_cache=Rinv_cache, partition=partition, c_grid=list(c_grid),
+        holdout_frac=holdout_frac, reference=reference, seed=seed, K=K,
+        lbfgs_max_iter=lbfgs_max_iter, lbfgs_tol=lbfgs_tol,
+        sd_max_iter=sd_max_iter, sd_tol=sd_tol,
+    )
+
+    # --- 2-D grid at holdout_frac ---
+    grid = []
+    lls_by_nu = {}
+    for nu in nu_grid:
+        lls, _ = _c_sweep_at_nu(docs, nu=nu, **common)
+        lls_by_nu[_nu_key(nu)] = lls
+        for c in c_grid:
+            grid.append({"c": float(c), "nu": _nu_key(nu), "ll": float(lls[c])})
+    best = max(grid, key=lambda r: r["ll"])
+    c_star = best["c"]
+    nu_star = math.inf if best["nu"] == "inf" else float(best["nu"])
+
+    # --- drift readout: c*(f) at nu=inf vs nu=nu* ---
+    def _c_star_at(nu, frac):
+        d2 = dict(common); d2["holdout_frac"] = frac
+        _, argmax_c = _c_sweep_at_nu(docs, nu=nu, **d2)
+        return float(argmax_c)
+
+    gaussian = [{"frac": float(f), "c_star": _c_star_at(math.inf, f)} for f in drift_fracs]
+    tprior = [{"frac": float(f), "c_star": _c_star_at(nu_star, f)} for f in drift_fracs]
+    def _spread(rows):
+        cs = [r["c_star"] for r in rows]
+        return float(max(cs) - min(cs))
+
+    # --- s_d readout at (c*, nu*), full docs (no split) ---
+    from spark_vi.models.topic._linalg import safe_inverse
+    sd_vals = []
+    for doc in docs:
+        allowed = partition.allowed_indices(doc.groups)
+        key = tuple(allowed.tolist())
+        Rinv_allowed = Rinv_cache.get(key)
+        if Rinv_allowed is None:
+            Rinv_allowed = safe_inverse(R[np.ix_(allowed, allowed)])
+            Rinv_cache[key] = Rinv_allowed
+        _eta, sd, _nu_d, _n = _stm_doc_inference_tprior(
+            indices=doc.indices, counts=doc.counts, expElogbeta=expElogbeta,
+            Gamma=Gamma, Rinv_allowed=Rinv_allowed, x=doc.x, c=c_star, nu=nu_star,
+            allowed=allowed, reference=reference,
+            lbfgs_max_iter=lbfgs_max_iter, lbfgs_tol=lbfgs_tol,
+            sd_max_iter=sd_max_iter, sd_tol=sd_tol,
+        )
+        sd_vals.append(sd)
+    sd_arr = np.asarray(sd_vals, dtype=np.float64)
+    def _q(a):
+        ps = np.quantile(a, [0.10, 0.25, 0.50, 0.75, 0.90])
+        return {"p10": float(ps[0]), "p25": float(ps[1]), "p50": float(ps[2]),
+                "p75": float(ps[3]), "p90": float(ps[4])}
+
+    n_docs = _count_contributing(docs, partition, holdout_frac, seed)
+
+    out = {
+        "grid": grid,
+        "argmax": {"c": c_star, "nu": _nu_key(nu_star), "ll": best["ll"]},
+        "n_docs": n_docs,
+        "drift": {"fracs": [float(f) for f in drift_fracs],
+                  "gaussian": gaussian, "tprior": tprior,
+                  "gaussian_spread": _spread(gaussian),
+                  "tprior_spread": _spread(tprior)},
+        "sd_readout": {"n_docs": int(sd_arr.size),
+                       "sd_quantiles": _q(sd_arr),
+                       "sd_c_quantiles": _q(sd_arr * c_star)},
+    }
+    return _json_safe(out)
+
+
 def corpus_heldout_scale_sweep_gated_rdd(
     doc_rdd, global_params, partition, *, c_grid,
     holdout_frac=0.3, reference=None, seed=0,
