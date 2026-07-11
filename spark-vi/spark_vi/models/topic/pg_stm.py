@@ -9,6 +9,8 @@ import numpy as np
 from polyagamma import random_polyagamma
 from scipy.special import expit  # logistic sigmoid
 
+from spark_vi.models.topic._linalg import safe_inverse
+
 
 def stick_to_simplex(psi: np.ndarray) -> np.ndarray:
     """Stick-breaking map: psi (K-1,) -> theta (K,) on the simplex.
@@ -182,3 +184,222 @@ def token_responsibilities(doc_indices, elog_theta, elog_beta, allowed, *, count
     phi = np.exp(log_unnorm); phi /= phi.sum(axis=1, keepdims=True)
     n = (phi * np.asarray(counts, dtype=np.float64)[:, None]).sum(axis=0)
     return phi, n
+
+
+# --------------------------------------------------------------------------- #
+# Task 6: gated full-batch PG-VI driver + block-Sigma IW M-step.
+# --------------------------------------------------------------------------- #
+
+_PSI_CLIP = 30.0   # numerical guard (Task-1 watch-item): keep sigmoid off 0/1
+
+
+def stick_layout(partition):
+    """Global stick layout (dimension K-1) for the nested gated stick-breaking model.
+
+    Background sticks = global indices 0..B-2 (B = #background topics -> B-1 sticks).
+    Group g (in ``partition.groups`` order) occupies m_g consecutive indices starting
+    at ``B-1 + sum_{g'<g} m_{g'}``: the first is the GATE stick, the next m_g-1 are the
+    group's foreground sticks. A group-g doc's ACTIVE global stick indices, in order,
+    are ``[background_sticks (0..B-2), gate_g, fg_g_sticks]``; its allowed TOPIC indices
+    are ``partition.allowed_indices({g})`` = background topics then group-g topics.
+
+    Returns a dict::
+
+        {"B": B, "bg_sticks": (B-1,) int array,
+         "groups": {g: {"m_g", "gate", "fg_sticks", "active", "allowed"}}}
+    """
+    B = int(partition.background_k)
+    bg_sticks = np.arange(0, B - 1, dtype=np.int64)      # 0..B-2  (B-1 sticks)
+    groups = {}
+    offset = B - 1
+    for g, m_g in partition.foreground:
+        gate = offset
+        fg_sticks = np.arange(offset + 1, offset + m_g, dtype=np.int64)  # m_g-1 sticks
+        active = np.concatenate([bg_sticks, np.array([gate], dtype=np.int64),
+                                 fg_sticks]).astype(np.int64)
+        allowed = partition.allowed_indices(frozenset({g})).astype(np.int64)
+        groups[g] = {"m_g": int(m_g), "gate": int(gate), "fg_sticks": fg_sticks,
+                     "active": active, "allowed": allowed}
+        offset += m_g
+    return {"B": B, "bg_sticks": bg_sticks, "groups": groups}
+
+
+class PGSTMVI:
+    """Full-batch mean-field coordinate ascent for the gated, nested stick-breaking
+    logistic-normal topic model under Polya-Gamma augmentation (design
+    2026-07-11-pg-stm-inference-core-design.md). Composes the Task 1-5 primitives.
+
+    Every update is a pure function of (globals, per-doc sufficient stats), so the
+    E-step / stat accumulation ports verbatim to a stochastic (minibatch) driver.
+
+    Parameters
+    ----------
+    K, V : int
+        #topics and vocabulary size.
+    partition : TopicBlockPartition
+        Background/foreground gating layout (defines the stick layout + allowed sets).
+    P : int
+        Covariate dimension.
+    n_iter : int
+        Outer coordinate-ascent sweeps.
+    Psi0_scale, nu0 : IW prior scale (Psi0 = Psi0_scale * I) and dof. ``nu0=None`` ->
+        (K-1)+2 (proper: nu0 > dim+1 for every block, so a finite PD mean even at
+        n_docs=0 — the runaway cure).
+    gamma_ridge, beta_eta : ridge for the Gamma regression / Dirichlet smoothing for beta.
+    sigma_mode : ``"iw"`` (production) block IW posterior mean, or ``"mle"`` un-regularized
+        ``scatter/n`` per block (Task-8 isolation only).
+    """
+
+    def __init__(self, K, V, partition, *, P, n_iter=200, Psi0_scale=1.0, nu0=None,
+                 gamma_ridge=1e-6, beta_eta=0.1, sigma_mode="iw", seed=0,
+                 inner_rounds=8, inner_tol=1e-3):
+        if sigma_mode not in ("iw", "mle"):
+            raise ValueError(f"sigma_mode must be 'iw' or 'mle', got {sigma_mode!r}")
+        self.K = int(K); self.V = int(V); self.partition = partition
+        self.P = int(P); self.n_iter = int(n_iter)
+        self.Psi0_scale = float(Psi0_scale)
+        self.nu0 = float(nu0) if nu0 is not None else float((K - 1) + 2)
+        self.gamma_ridge = float(gamma_ridge); self.beta_eta = float(beta_eta)
+        self.sigma_mode = sigma_mode; self.seed = int(seed)
+        self.inner_rounds = int(inner_rounds); self.inner_tol = float(inner_tol)
+        self.layout = stick_layout(partition)
+        self._clip_tripped = 0
+
+    # -- per-doc E-step -------------------------------------------------------- #
+    def _e_step_doc(self, doc, glay, log_beta, Gamma, Sigma):
+        B = self.layout["B"]; m_g = glay["m_g"]
+        active = glay["active"]; allowed = glay["allowed"]
+        Sigma_inv_active = safe_inverse(Sigma[np.ix_(active, active)])
+        mu_active = (Gamma.T @ doc.x)[active]
+        A = active.shape[0]
+        m = mu_active.copy()
+        V = np.eye(A)
+        phi = None
+        for _ in range(self.inner_rounds):
+            m_prev = m
+            vdiag = np.diag(V)
+            mc = np.clip(m, -_PSI_CLIP, _PSI_CLIP)
+            if not np.array_equal(mc, m):
+                self._clip_tripped += 1
+            # slice active positions into [background | gate | foreground]
+            m_bg, v_bg = mc[:B - 1], vdiag[:B - 1]
+            m_gate, v_gate = mc[B - 1], vdiag[B - 1]
+            m_fg, v_fg = mc[B:], vdiag[B:]
+            gelog = gated_expected_log_theta(m_bg, v_bg, m_gate, v_gate, m_fg, v_fg)
+            elog_theta = np.full(self.K, -np.inf)
+            elog_theta[allowed] = gelog
+            phi, n_full = token_responsibilities(
+                doc.indices, elog_theta, log_beta, allowed, counts=doc.counts)
+            n_allowed = n_full[allowed]
+            n_bg, n_fg = n_allowed[:B], n_allowed[B:]
+            gate_a, gate_b, b_bg, b_fg = gated_counts(n_bg, n_fg)
+            a_active = np.concatenate([n_bg[:B - 1], np.array([gate_a]), n_fg[:m_g - 1]])
+            b_active = np.concatenate([b_bg, np.array([gate_b]), b_fg])
+            c = np.sqrt(m ** 2 + vdiag)
+            omega = omega_expectation(b_active, c)
+            m, V = psi_posterior(a_active, b_active, mu_active, Sigma_inv_active, omega)
+            if np.max(np.abs(m - m_prev)) < self.inner_tol:
+                break
+        return m, V, phi, active, allowed, mu_active
+
+    def fit(self, docs):
+        rng = np.random.default_rng(self.seed)
+        K, V, P = self.K, self.V, self.P
+        Ksm1 = K - 1
+        # --- init: beta from smoothed random counts, Gamma=0, Sigma=I ---------- #
+        beta = rng.random((K, V)) + self.beta_eta
+        beta /= beta.sum(axis=1, keepdims=True)
+        Gamma = np.zeros((P, Ksm1))
+        Sigma = np.eye(Ksm1)
+
+        # group -> doc indices (each doc has exactly one group here)
+        group_docs = {g: [] for g in self.partition.groups}
+        for d, doc in enumerate(docs):
+            (g,) = tuple(doc.groups)
+            group_docs[g].append(d)
+        group_counts = {g: len(v) for g, v in group_docs.items()}
+        D = len(docs)
+        X = np.stack([np.asarray(doc.x, dtype=np.float64) for doc in docs])  # (D, P)
+
+        bg_sticks = self.layout["bg_sticks"]
+        sigma_max_trace = []
+
+        for _ in range(self.n_iter):
+            log_beta = np.log(beta)
+            word_topic_stats = np.zeros((K, V))
+            M = np.zeros((D, Ksm1))               # stacked active means (inactive at 0)
+            S = np.zeros((Ksm1, Ksm1))            # global block scatter
+            psi_mean = np.zeros((D, Ksm1))
+            psi_var = np.zeros((D, Ksm1))
+
+            for d, doc in enumerate(docs):
+                (g,) = tuple(doc.groups)
+                glay = self.layout["groups"][g]
+                m, Vd, phi, active, allowed, mu_active = self._e_step_doc(
+                    doc, glay, log_beta, Gamma, Sigma)
+                # word-topic stats: sum_tokens phi * counts at [allowed, doc.indices]
+                word_topic_stats[:, doc.indices] += (phi * doc.counts[:, None]).T
+                # Gamma / Sigma / output accumulation
+                M[d, active] = m
+                psi_mean[d, active] = m
+                psi_var[d, active] = np.diag(Vd)
+                e_active = m - mu_active
+                S[np.ix_(active, active)] += np.outer(e_active, e_active) + Vd
+
+            # --- M-step ------------------------------------------------------- #
+            beta = beta_dirichlet_mean(word_topic_stats, eta=self.beta_eta)
+            Gamma = gamma_ridge(M, X, ridge=self.gamma_ridge)
+            Sigma = self._assemble_sigma(S, bg_sticks, group_counts, D)
+            sigma_max_trace.append(float(np.max(np.abs(Sigma))))
+
+        if self._clip_tripped:
+            import logging
+            logging.getLogger(__name__).info(
+                "PGSTMVI psi clip (+-%g) tripped %d times during fit",
+                _PSI_CLIP, self._clip_tripped)
+
+        return {"beta": beta, "Gamma": Gamma, "Sigma": Sigma,
+                "psi_mean": psi_mean, "psi_var": psi_var,
+                "sigma_max_trace": sigma_max_trace}
+
+    # -- block-structured Sigma assembly -------------------------------------- #
+    def _block_estimate(self, scatter, n_docs, dim):
+        if self.sigma_mode == "iw":
+            return sigma_iw_posterior_mean(
+                scatter, n_docs, Psi0=self.Psi0_scale * np.eye(dim),
+                nu0=self.nu0, dim=dim)
+        return scatter / max(float(n_docs), 1.0)      # "mle": un-regularized point est.
+
+    def _assemble_sigma(self, S, bg_sticks, group_counts, D):
+        Ksm1 = self.K - 1
+        Sigma = np.zeros((Ksm1, Ksm1))
+        nb = len(bg_sticks)
+        # background block: ALL docs are active on background.
+        if nb > 0:
+            Sigma[np.ix_(bg_sticks, bg_sticks)] = self._block_estimate(
+                S[np.ix_(bg_sticks, bg_sticks)], D, nb)
+        # each group block [gate, fg] + its background<->gblock cross, from that
+        # group's docs only. group<->group' never co-active -> left at 0.
+        for g in self.partition.groups:
+            glay = self.layout["groups"][g]
+            gblock = np.concatenate([np.array([glay["gate"]], dtype=np.int64),
+                                     glay["fg_sticks"]]).astype(np.int64)
+            joint = np.concatenate([bg_sticks, gblock]).astype(np.int64)
+            n_g = group_counts[g]
+            # sigma_iw / scatter-over-n is an ELEMENTWISE map with a scalar denom, so
+            # the joint estimate's gblock & cross entries depend only on the group's
+            # scatter (bg<->gblock and gblock<->gblock in S receive group-g docs only).
+            Sig_joint = self._block_estimate(S[np.ix_(joint, joint)], n_g, len(joint))
+            gb_local = np.arange(nb, len(joint))
+            bg_local = np.arange(0, nb)
+            Sigma[np.ix_(gblock, gblock)] = Sig_joint[np.ix_(gb_local, gb_local)]
+            if nb > 0:
+                cross = Sig_joint[np.ix_(bg_local, gb_local)]
+                Sigma[np.ix_(bg_sticks, gblock)] = cross
+                Sigma[np.ix_(gblock, bg_sticks)] = cross.T
+        Sigma = 0.5 * (Sigma + Sigma.T)
+        try:
+            np.linalg.cholesky(Sigma)
+        except np.linalg.LinAlgError:
+            Sigma = Sigma + 1e-8 * np.eye(Ksm1)
+        return Sigma
