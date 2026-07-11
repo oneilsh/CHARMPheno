@@ -40,28 +40,40 @@ a go/no-go checkpoint (below), not a shippable model.
 Generative, per document d with covariates x_d and allowed topic block A_d (background ∪
 its group):
 
-- **Stick-breaking multinomial link** (Linderman, Johnson & Adams 2015): over a fixed
-  topic order, θ_d is built from K−1 binary logistic splits with logits ψ_d ∈ R^(K−1):
-  θ_{d,1}=σ(ψ_{d,1}); θ_{d,k}=σ(ψ_{d,k})·∏_{j<k}(1−σ(ψ_{d,j})); θ_{d,K}=∏_{j<K}(1−σ(ψ_{d,j})).
-  The order is **block-respecting**: background sticks first, then each group's foreground,
-  so the stick structure honors the mask. (Within-block order: frequency-sorted.)
-- **Correlated Gaussian prior on the stick logits:** ψ_d ~ Normal(Γᵀx_d, Σ). This is where
-  Γ (covariate mean, continuous covariates intact), Σ (correlation + scale), and gating
-  (ψ restricted to A_d) all live. **Σ is the covariance of the stick logits, not the softmax
-  logits** — an order-dependent reparameterization of the current STM's R; it is refit and
-  reinterpreted, not transferred.
+- **Nested (hierarchical) stick-breaking link** (Linderman, Johnson & Adams 2015 flat
+  stick-breaking, composed into two levels — the composition is what makes gating consistent
+  under stick-breaking; flat single-sequence stick-breaking is NOT closed under subsetting the
+  allowed topic set, so a shared background Σ would be ill-defined). For a group-g doc:
+  - **Level 0 — the gate** (one logit ψ_gate): `π_bg = σ(ψ_gate)`, `π_fg = 1 − σ(ψ_gate)` split
+    mass between the shared background block and the doc's foreground block F_g.
+  - **Level 1 — within each block** (flat stick-breaking): `θ_k = π_bg · sb(ψ_bg)_k` for k in
+    background (B−1 sticks, SHARED across all docs), `θ_k = π_fg · sb(ψ_fg_g)_k` for k in F_g
+    (m_g−1 sticks, g's block), and **θ_k = 0 exactly** for k in any other group (hard gating).
+  Because the within-background break sits *under* π_bg, background stick j means the same
+  thing for every doc regardless of group — so a single shared Σ is well-defined. This nested
+  structure also generalizes to an ontology cascade (gate → level-1 categories → … → leaf
+  phenotypes), which is why gating is the entry point for later ontology-guided fits.
+- **Correlated Gaussian prior on the full stick vector** ψ_d = [ψ_gate, ψ_bg (B−1),
+  ψ_fg_1 (m_1−1), …, ψ_fg_G] ~ Normal(Γᵀx_d, Σ). A group-g doc's E-step runs on the ACTIVE
+  sub-vector [ψ_gate, ψ_bg, ψ_fg_g]; the other groups' foreground sticks are inactive. Γ
+  carries continuous covariates; Σ is **block-structured** (a gate dim, a background block,
+  one block per group, learned cross-terms gate↔background and gate↔group, and group↔group'
+  never co-active → kept at prior). Σ is the covariance of the stick logits (an order-
+  dependent reparameterization of the current STM's R — refit, not transferred).
 - **Tokens:** z_{d,n} ~ Categorical(θ_d); w_{d,n} ~ Categorical(β_{z}). β is (K×V).
-- **Pólya-Gamma augmentation** (Polson, Scott & Windle 2013): the per-topic counts factor
-  the multinomial into K−1 binomials — at stick k, n_{d,k} "successes" out of the trials
-  still at risk b_{d,k} = Σ_{j≥k} n_{d,j}; augmenting each with ω_{d,k} ~ PG(b_{d,k}, ψ_{d,k})
-  makes ψ_d **conditionally Gaussian**.
+- **Pólya-Gamma augmentation** (Polson, Scott & Windle 2013): the counts factor into binomials
+  — the **gate** (N_bg "successes" out of N total), plus flat within-block stick-breaking
+  binomials in background and in F_g (at stick k, n_k successes out of trials-at-risk
+  b_k = Σ_{j≥k} n_j *within the block*); augmenting each with ω ~ PG(b, ψ) makes ψ_d
+  **conditionally Gaussian**.
 
 Two consequences, both accepted:
 
-- **No reference topic.** Stick-breaking is inherently identified (ψ ∈ R^(K−1) is a
-  bijection to the simplex interior), so the softmax translation gauge — and the
-  reference-topic pin that fixed it — disappears. Σ and Γ are naturally (K−1)-dimensional;
-  no pinned coordinate, no `Γ[:,0]≈0` special-casing.
+- **No reference topic.** Nested stick-breaking is inherently identified (the gate + each
+  block's flat stick-breaking are all bijective), so the softmax translation gauge — and the
+  reference-topic pin that fixed it — disappears. The full stick vector has dimension
+  **K − G** (1 gate + (B−1) background + Σ_g(m_g−1) foreground, for G groups); Σ and Γ are
+  (K−G)-dimensional. No pinned coordinate, no `Γ[:,0]≈0` special-casing.
 - **Σ prior = Inverse-Wishart** (this sub-project). Conjugate to the Gaussian → closed-form
   Σ update in both the VI kernel and the Gibbs cross-check; proper → a genuine trust region
   that tests the runaway-cure with the least new machinery. Block-structured to honor gating
@@ -77,17 +89,23 @@ Two consequences, both accepted:
 full corpus, so sub-project #2 is "the same updates, minibatched + `treeReduce`-d with a
 Robbins-Monro ρ," no algorithm rework. Coordinate ascent over q(z)q(ψ)q(ω)q(β)q(Γ)q(Σ):
 
-- ω_d | ψ_d → Pólya-Gamma (closed form)
-- ψ_d | ω_d, counts, Γ, Σ → Gaussian (the PG result)
+All operate on the doc's ACTIVE stick vector [ψ_gate, ψ_bg, ψ_fg_g] and the block-Σ marginal
+over those dims (mirroring the current gated STM's marginal-precision E-step):
+
+- ω_d | ψ_d → Pólya-Gamma (closed form) — per gate + per within-block stick
+- ψ_d | ω_d, counts, Γ, Σ → Gaussian (the PG result), over the active sticks
 - Σ | {ψ_d − Γᵀx_d} → Inverse-Wishart (conjugate; **the update that used to run away, now a
-  proper posterior**)
+  proper posterior**), block-structured (gate dim, background block, per-group blocks, learned
+  gate↔block cross-terms; group↔group' kept at prior)
 - Γ | {ψ_d} → Gaussian / ridge (as current STM)
 - β | topic-word stats → Dirichlet (as current STM)
 
 **The one deliberate approximation:** the token-assignment update needs E_q[log θ_k], which
 under a stick-breaking-Gaussian ψ is not closed form (unlike Dirichlet's digamma). The VI
-kernel uses a **delta-method** approximation (log θ at the posterior-mean ψ + a variance
-correction). This is the mean-field bias that could in principle mask Σ behavior.
+kernel uses a **delta-method** approximation, composed per the nested structure:
+E[log θ_k] = E[log σ(ψ_gate)] (background) or E[log(1−σ(ψ_gate))] (foreground) + the flat
+per-block delta-method term. This is the mean-field bias that could in principle mask Σ
+behavior.
 
 **Gibbs cross-check** (exact): sample ψ | ω, counts (Gaussian); ω | ψ (PG); z | ψ, β
 (Categorical with θ computed *exactly* from sampled ψ); Σ | ψ (IW); Γ, β conjugate. This
