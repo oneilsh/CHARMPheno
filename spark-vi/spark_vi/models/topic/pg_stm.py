@@ -69,3 +69,23 @@ def psi_posterior(n, b, mu, Sigma_inv, omega):
     V = np.linalg.inv(prec)
     m = V @ (np.asarray(Sigma_inv, dtype=np.float64) @ np.asarray(mu, dtype=np.float64) + kappa)
     return m, V
+
+
+def sigma_iw_posterior_mean(scatter, n_docs, *, Psi0, nu0, dim):
+    """Inverse-Wishart posterior mean E[Sigma] = (Psi0 + scatter)/(nu0 + n_docs - dim - 1).
+    Proper prior (nu0 > dim + 1) => finite PD mean even at n_docs = 0 (the runaway cure)."""
+    denom = nu0 + n_docs - dim - 1.0
+    return (np.asarray(Psi0, dtype=np.float64) + np.asarray(scatter, dtype=np.float64)) / denom
+
+
+def gamma_ridge(M, X, *, ridge):
+    """Ridge regression of stacked posterior means M (D, K-1) on covariates X (D, P)."""
+    X = np.asarray(X, dtype=np.float64); M = np.asarray(M, dtype=np.float64)
+    P = X.shape[1]
+    return np.linalg.solve(X.T @ X + ridge * np.eye(P), X.T @ M)
+
+
+def beta_dirichlet_mean(word_topic_stats, *, eta):
+    """Row-normalized Dirichlet posterior mean of the (K,V) topic-word matrix."""
+    lam = np.asarray(word_topic_stats, dtype=np.float64) + eta
+    return lam / lam.sum(axis=1, keepdims=True)
