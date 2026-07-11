@@ -401,7 +401,15 @@ def _stm_doc_inference_tprior(
     sd (up to lbfgs_tol), and sd is the IG-mode of the immediately-prior
     eta ~= eta_hat, so (eta_hat, sd) is mutually consistent to tolerance
     regardless of contraction speed. n_em counts the s_d sweeps (not the closing
-    solve)."""
+    solve).
+
+    On the pinned-reference path (``reference`` not None), q_R is the FULL
+    allowed-set quadratic evaluated with eta_ref=0 -- i.e. the s_d step rescales
+    exactly the same prior penalty the eta-step applies -- a clean coordinate
+    ascent under the existing pinned-reference convention (eta_ref pinned at
+    0, K_free = |allowed| - 1). This includes the reference's own (0 - mu_ref)
+    deviation in q_R; in practice that term is negligible since the reference
+    topic's Gamma column is ~0 (so mu_ref ~= 0)."""
     allowed = np.asarray(allowed, dtype=np.int64)
     mu_allowed = (Gamma[:, allowed].T @ x)
     K_free = int(allowed.shape[0] - (1 if reference is not None else 0))
@@ -1684,6 +1692,18 @@ def corpus_tprior_scale_sweep_gated_rdd(
     ``enumerate(docs)`` would on the driver, so ``heldout_split(seed=seed+i)``
     reproduces the identical visible/held split doc-for-doc -- required for
     parity, since the split is itself a random draw.
+
+    The (index, doc) RDD is materialized ONCE (``.persist()`` + a forced
+    ``.count()``) at the top of this call and reused for every pass below
+    (grid, drift, sd readout -- ~12 actions total). ``zipWithIndex`` on a
+    non-deterministic parent (e.g. a ``sample()``-on-a-join upstream) can
+    assign a DIFFERENT index to the same document on each recomputation;
+    since ``heldout_split(seed=seed+i)`` keys the visible/held split off
+    that index, an un-cached re-derivation could silently run different
+    passes on different splits, breaking the "common split across all
+    knobs" invariant this diagnostic depends on and making the run
+    non-reproducible. Caching pins the (index, doc) assignment for the
+    lifetime of the call; the cache is released in a ``finally`` block.
     """
     from scipy.special import digamma
     from spark_vi.eval.topic.concentration_heterogeneity import _json_safe
@@ -1703,113 +1723,123 @@ def corpus_tprior_scale_sweep_gated_rdd(
     p_b = sc.broadcast(partition)
     c_list = list(c_grid)
 
-    # Each (nu, frac) c-sweep as one distributed pass over indexed docs.
-    def _pass(nu, frac):
-        _nu, _frac = nu, frac
+    # Materialize the (index, doc) assignment ONCE and reuse it across every
+    # pass below -- see docstring. Forcing .count() pins the cache before any
+    # downstream action can trigger a (potentially different) recomputation.
+    indexed = doc_rdd.zipWithIndex().map(lambda t: (t[1], t[0])).persist()
+    indexed.count()
+    try:
+        # Each (nu, frac) c-sweep as one distributed pass over the cached
+        # indexed docs.
+        def _pass(nu, frac):
+            _nu, _frac = nu, frac
 
-        def _local(rows, _gp=gp_b, _cl=c_list, _p=p_b, _K=K,
-                   _ref=reference, _seed=seed, _nu=_nu, _frac=_frac,
-                   _li=lbfgs_max_iter, _lt=lbfgs_tol, _si=sd_max_iter, _st=sd_tol):
+            def _local(rows, _gp=gp_b, _cl=c_list, _p=p_b, _K=K,
+                       _ref=reference, _seed=seed, _nu=_nu, _frac=_frac,
+                       _li=lbfgs_max_iter, _lt=lbfgs_tol, _si=sd_max_iter, _st=sd_tol):
+                import numpy as _np
+                from spark_vi.eval.topic.concentration_recovery import (
+                    _predictive_loglik, heldout_split,
+                )
+                from spark_vi.models.topic._linalg import safe_inverse
+                from spark_vi.mllib.topic.stm import (
+                    _stm_doc_inference_tprior, _gated_mode_theta,
+                )
+                eE, bp, Gm, Rr = _gp.value
+                part = _p.value
+                cache = {}
+                sll = {c: 0.0 for c in _cl}
+                ntk = {c: 0 for c in _cl}
+                ndoc = 0
+                for i, doc in rows:
+                    split = heldout_split(doc, holdout_frac=_frac, seed=_seed + i)
+                    if split is None:
+                        continue
+                    vis, hi, hc = split
+                    if hc.size == 0:
+                        continue
+                    allowed = part.allowed_indices(doc.groups)
+                    key = tuple(allowed.tolist())
+                    Rinv = cache.get(key)
+                    if Rinv is None:
+                        Rinv = safe_inverse(Rr[_np.ix_(allowed, allowed)])
+                        cache[key] = Rinv
+                    ndoc += 1
+                    nh = int(hc.sum())
+                    for c in _cl:
+                        # Cold-start every (doc, c): see docstring -- warm-starting
+                        # across the c-grid would break parity + nesting (Task 3).
+                        eta_hat, _sd, _nud, _n = _stm_doc_inference_tprior(
+                            indices=vis.indices, counts=vis.counts, expElogbeta=eE,
+                            Gamma=Gm, Rinv_allowed=Rinv, x=doc.x, c=c, nu=_nu,
+                            allowed=allowed, reference=_ref, eta_init=None,
+                            lbfgs_max_iter=_li, lbfgs_tol=_lt,
+                            sd_max_iter=_si, sd_tol=_st,
+                        )
+                        th = _gated_mode_theta(eta_hat, allowed, _K)
+                        sll[c] += _predictive_loglik(th, bp, hi, hc)
+                        ntk[c] += nh
+                return [((sll, ntk), ndoc)]
+
+            def _combine(a, b):
+                (sa, ta), na = a
+                (sb, tb), nb = b
+                return ({c: sa[c] + sb[c] for c in sa},
+                        {c: ta[c] + tb[c] for c in ta}), na + nb
+
+            (sll, ntk), ndoc = (
+                indexed.mapPartitions(_local).treeReduce(_combine, depth=depth)
+            )
+            lls = {c: (sll[c] / ntk[c] if ntk[c] else float("-inf")) for c in c_list}
+            return lls, max(lls, key=lls.get), ndoc
+
+        # Grid at holdout_frac
+        grid = []
+        n_docs = 0
+        for nu in nu_grid:
+            lls, _amax, ndoc = _pass(nu, holdout_frac)
+            n_docs = ndoc
+            for c in c_list:
+                grid.append({"c": float(c), "nu": _nu_key(nu), "ll": float(lls[c])})
+        best = max(grid, key=lambda r: r["ll"])
+        c_star = best["c"]
+        nu_star = math.inf if best["nu"] == "inf" else float(best["nu"])
+
+        # Drift
+        gaussian, tprior = [], []
+        for f in drift_fracs:
+            _l, ag, _n = _pass(math.inf, f); gaussian.append({"frac": float(f), "c_star": float(ag)})
+            _l, at, _n = _pass(nu_star, f);  tprior.append({"frac": float(f), "c_star": float(at)})
+
+        def _spread(rows):
+            cs = [r["c_star"] for r in rows]
+            return float(max(cs) - min(cs))
+
+        # s_d readout at (c*, nu*): one map -> collect the sd scalars (n is
+        # small), reusing the same cached (index, doc) assignment.
+        def _sd_local(doc, _gp=gp_b, _p=p_b, _cs=c_star, _ns=nu_star,
+                      _ref=reference, _li=lbfgs_max_iter, _lt=lbfgs_tol,
+                      _si=sd_max_iter, _st=sd_tol):
             import numpy as _np
-            from spark_vi.eval.topic.concentration_recovery import (
-                _predictive_loglik, heldout_split,
-            )
             from spark_vi.models.topic._linalg import safe_inverse
-            from spark_vi.mllib.topic.stm import (
-                _stm_doc_inference_tprior, _gated_mode_theta,
-            )
+            from spark_vi.mllib.topic.stm import _stm_doc_inference_tprior
             eE, bp, Gm, Rr = _gp.value
             part = _p.value
-            cache = {}
-            sll = {c: 0.0 for c in _cl}
-            ntk = {c: 0 for c in _cl}
-            ndoc = 0
-            for i, doc in rows:
-                split = heldout_split(doc, holdout_frac=_frac, seed=_seed + i)
-                if split is None:
-                    continue
-                vis, hi, hc = split
-                if hc.size == 0:
-                    continue
-                allowed = part.allowed_indices(doc.groups)
-                key = tuple(allowed.tolist())
-                Rinv = cache.get(key)
-                if Rinv is None:
-                    Rinv = safe_inverse(Rr[_np.ix_(allowed, allowed)])
-                    cache[key] = Rinv
-                ndoc += 1
-                nh = int(hc.sum())
-                for c in _cl:
-                    # Cold-start every (doc, c): see docstring -- warm-starting
-                    # across the c-grid would break parity + nesting (Task 3).
-                    eta_hat, _sd, _nud, _n = _stm_doc_inference_tprior(
-                        indices=vis.indices, counts=vis.counts, expElogbeta=eE,
-                        Gamma=Gm, Rinv_allowed=Rinv, x=doc.x, c=c, nu=_nu,
-                        allowed=allowed, reference=_ref, eta_init=None,
-                        lbfgs_max_iter=_li, lbfgs_tol=_lt,
-                        sd_max_iter=_si, sd_tol=_st,
-                    )
-                    th = _gated_mode_theta(eta_hat, allowed, _K)
-                    sll[c] += _predictive_loglik(th, bp, hi, hc)
-                    ntk[c] += nh
-            return [((sll, ntk), ndoc)]
+            allowed = part.allowed_indices(doc.groups)
+            Rinv = safe_inverse(Rr[_np.ix_(allowed, allowed)])
+            _eta, sd, _nud, _n = _stm_doc_inference_tprior(
+                indices=doc.indices, counts=doc.counts, expElogbeta=eE, Gamma=Gm,
+                Rinv_allowed=Rinv, x=doc.x, c=_cs, nu=_ns, allowed=allowed,
+                reference=_ref, lbfgs_max_iter=_li, lbfgs_tol=_lt,
+                sd_max_iter=_si, sd_tol=_st,
+            )
+            return float(sd)
 
-        def _combine(a, b):
-            (sa, ta), na = a
-            (sb, tb), nb = b
-            return ({c: sa[c] + sb[c] for c in sa},
-                    {c: ta[c] + tb[c] for c in ta}), na + nb
-
-        (sll, ntk), ndoc = (
-            doc_rdd.zipWithIndex()
-            .map(lambda t: (t[1], t[0]))       # (index, doc)
-            .mapPartitions(_local).treeReduce(_combine, depth=depth)
+        sd_arr = np.asarray(
+            indexed.map(lambda t: t[1]).map(_sd_local).collect(), dtype=np.float64,
         )
-        lls = {c: (sll[c] / ntk[c] if ntk[c] else float("-inf")) for c in c_list}
-        return lls, max(lls, key=lls.get), ndoc
-
-    # Grid at holdout_frac
-    grid = []
-    n_docs = 0
-    for nu in nu_grid:
-        lls, _amax, ndoc = _pass(nu, holdout_frac)
-        n_docs = ndoc
-        for c in c_list:
-            grid.append({"c": float(c), "nu": _nu_key(nu), "ll": float(lls[c])})
-    best = max(grid, key=lambda r: r["ll"])
-    c_star = best["c"]
-    nu_star = math.inf if best["nu"] == "inf" else float(best["nu"])
-
-    # Drift
-    gaussian, tprior = [], []
-    for f in drift_fracs:
-        _l, ag, _n = _pass(math.inf, f); gaussian.append({"frac": float(f), "c_star": float(ag)})
-        _l, at, _n = _pass(nu_star, f);  tprior.append({"frac": float(f), "c_star": float(at)})
-
-    def _spread(rows):
-        cs = [r["c_star"] for r in rows]
-        return float(max(cs) - min(cs))
-
-    # s_d readout at (c*, nu*): one map -> collect the sd scalars (n is small)
-    def _sd_local(doc, _gp=gp_b, _p=p_b, _cs=c_star, _ns=nu_star,
-                  _ref=reference, _li=lbfgs_max_iter, _lt=lbfgs_tol,
-                  _si=sd_max_iter, _st=sd_tol):
-        import numpy as _np
-        from spark_vi.models.topic._linalg import safe_inverse
-        from spark_vi.mllib.topic.stm import _stm_doc_inference_tprior
-        eE, bp, Gm, Rr = _gp.value
-        part = _p.value
-        allowed = part.allowed_indices(doc.groups)
-        Rinv = safe_inverse(Rr[_np.ix_(allowed, allowed)])
-        _eta, sd, _nud, _n = _stm_doc_inference_tprior(
-            indices=doc.indices, counts=doc.counts, expElogbeta=eE, Gamma=Gm,
-            Rinv_allowed=Rinv, x=doc.x, c=_cs, nu=_ns, allowed=allowed,
-            reference=_ref, lbfgs_max_iter=_li, lbfgs_tol=_lt,
-            sd_max_iter=_si, sd_tol=_st,
-        )
-        return float(sd)
-
-    sd_arr = np.asarray(doc_rdd.map(_sd_local).collect(), dtype=np.float64)
+    finally:
+        indexed.unpersist()
 
     def _q(a):
         ps = np.quantile(a, [0.10, 0.25, 0.50, 0.75, 0.90])
