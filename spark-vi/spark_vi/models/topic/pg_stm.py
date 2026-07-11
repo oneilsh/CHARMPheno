@@ -89,3 +89,47 @@ def beta_dirichlet_mean(word_topic_stats, *, eta):
     """Row-normalized Dirichlet posterior mean of the (K,V) topic-word matrix."""
     lam = np.asarray(word_topic_stats, dtype=np.float64) + eta
     return lam / lam.sum(axis=1, keepdims=True)
+
+
+def expected_log_theta(m, v):
+    """Delta-method E[log theta] under q(psi_k)=N(m_k, v_k): fourth-order Taylor expansion of
+    log-sigma (Kendall & Stuart, "The Advanced Theory of Statistics" Vol 1, ch.10 - higher-order
+    delta method; Bickel & Doksum, "Mathematical Statistics" - for smooth f and X~N(mu,v):
+    E[f(X)] ~ f(mu) + f''(mu) v/2 + f''''(mu) (3 v^2)/4! , using E[(X-mu)^4]=3v^2 for Gaussian X).
+
+    For f(x)=log sigma(x): f''(x) = -s(x), f''''(x) = -s(x)(1-2 sigma(x))^2 + 2 s(x)^2, where
+    s(x)=sigma(x)(1-sigma(x)). For g(x)=log(1-sigma(x))=log sigma(-x), g''=f''(-x)=-s(x) and
+    g''''=f''''(-x)=f''''(x) (both are even in the (1-2 sigma) term), so both branches share the
+    same s_k and 4th-order coefficient q_k evaluated at m_k.
+
+    NOTE: the second-order-only truncation (drop the q_k term) is NOT sufficient here - verified
+    against high-precision Gauss-Hermite quadrature (not just Monte-Carlo noise), its bias grows
+    ~v^2/8 * f''''(m) and exceeds a 3e-3 tolerance once v gtrsim 0.4-0.5 (e.g. bias ~-0.0047 at
+    m=0.1, v=0.6). The 4th-order term is required for expected_log_theta to track the true
+    E[log theta] to the precision demanded by test_expected_log_theta_matches_montecarlo."""
+    m = np.asarray(m, dtype=np.float64); v = np.asarray(v, dtype=np.float64)
+    sig = expit(m); s = sig * (1.0 - sig)
+    q = -s * (1.0 - 2.0 * sig) ** 2 + 2.0 * s ** 2   # f''''(m_k), shared by log-sig & log(1-sig)
+    log_sig = np.log(sig); log_1msig = np.log1p(-sig)
+    corr = -0.5 * v * s + (v ** 2 / 8.0) * q         # 2nd + 4th order delta-method correction
+    ls_plus = log_sig + corr          # E[log sigma(psi_k)]
+    ls_minus = log_1msig + corr       # E[log (1-sigma(psi_k))]
+    K = m.shape[0] + 1
+    out = np.empty(K, dtype=np.float64)
+    cum = np.concatenate([[0.0], np.cumsum(ls_minus)])   # cum[k] = sum_{j<k} ls_minus_j
+    out[:K - 1] = ls_plus + cum[:K - 1]
+    out[K - 1] = cum[K - 1]                               # = sum_j ls_minus_j
+    return out
+
+
+def token_responsibilities(doc_indices, elog_theta, elog_beta, allowed, *, counts):
+    """LDA-style responsibilities restricted to the allowed topic set.
+    phi_{n,k} ∝ exp(elog_theta_k + elog_beta_{k, w_n}) for k in allowed, else 0."""
+    K = elog_theta.shape[0]
+    log_unnorm = elog_theta[None, :] + elog_beta[:, doc_indices].T   # (n_tok, K)
+    mask = np.full(K, -np.inf); mask[np.asarray(allowed)] = 0.0
+    log_unnorm = log_unnorm + mask[None, :]
+    log_unnorm -= log_unnorm.max(axis=1, keepdims=True)
+    phi = np.exp(log_unnorm); phi /= phi.sum(axis=1, keepdims=True)
+    n = (phi * np.asarray(counts, dtype=np.float64)[:, None]).sum(axis=0)
+    return phi, n
