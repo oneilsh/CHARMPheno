@@ -332,6 +332,50 @@ def token_responsibilities(doc_indices, elog_theta, elog_beta, allowed, *, count
 _PSI_CLIP = 30.0   # numerical guard (Task-1 watch-item): keep sigmoid off 0/1
 
 
+def pg_estep_doc(doc, glay, log_beta, Gamma, Sigma, *, K, B, inner_rounds, inner_tol):
+    """Per-document mean-field PG E-step, as a PURE function (no model instance) so a
+    Spark worker can call it directly. Returns
+    (m, V, phi, active, allowed, mu_active, n_clips); PGSTMVI._e_step_doc wraps it and
+    folds n_clips into its clip counter. Inner coordinate ascent over the active stick
+    sub-vector: gated E[log theta] -> token responsibilities -> PG omega -> psi posterior
+    (m, V), to inner_tol / inner_rounds."""
+    m_g = glay["m_g"]
+    active = glay["active"]; allowed = glay["allowed"]
+    Sigma_inv_active = safe_inverse(Sigma[np.ix_(active, active)])
+    mu_active = (Gamma.T @ doc.x)[active]
+    A = active.shape[0]
+    m = mu_active.copy()
+    V = np.eye(A)
+    phi = None
+    n_clips = 0
+    for _ in range(inner_rounds):
+        m_prev = m
+        vdiag = np.diag(V)
+        mc = np.clip(m, -_PSI_CLIP, _PSI_CLIP)
+        if not np.array_equal(mc, m):
+            n_clips += 1
+        # slice active positions into [background | gate | foreground]
+        m_bg, v_bg = mc[:B - 1], vdiag[:B - 1]
+        m_gate, v_gate = mc[B - 1], vdiag[B - 1]
+        m_fg, v_fg = mc[B:], vdiag[B:]
+        gelog = gated_expected_log_theta(m_bg, v_bg, m_gate, v_gate, m_fg, v_fg)
+        elog_theta = np.full(K, -np.inf)
+        elog_theta[allowed] = gelog
+        phi, n_full = token_responsibilities(
+            doc.indices, elog_theta, log_beta, allowed, counts=doc.counts)
+        n_allowed = n_full[allowed]
+        n_bg, n_fg = n_allowed[:B], n_allowed[B:]
+        gate_a, gate_b, b_bg, b_fg = gated_counts(n_bg, n_fg)
+        a_active = np.concatenate([n_bg[:B - 1], np.array([gate_a]), n_fg[:m_g - 1]])
+        b_active = np.concatenate([b_bg, np.array([gate_b]), b_fg])
+        c = np.sqrt(m ** 2 + vdiag)
+        omega = omega_expectation(b_active, c)
+        m, V = psi_posterior(a_active, b_active, mu_active, Sigma_inv_active, omega)
+        if np.max(np.abs(m - m_prev)) < inner_tol:
+            break
+    return m, V, phi, active, allowed, mu_active, n_clips
+
+
 def stick_layout(partition):
     """Global stick layout (dimension K-1) for the nested gated stick-breaking model.
 
@@ -404,41 +448,13 @@ class PGSTMVI:
         self.layout = stick_layout(partition)
         self._clip_tripped = 0
 
-    # -- per-doc E-step -------------------------------------------------------- #
+    # -- per-doc E-step (delegates to the module free function so a Spark worker can
+    #    run it without a model instance) --------------------------------------- #
     def _e_step_doc(self, doc, glay, log_beta, Gamma, Sigma):
-        B = self.layout["B"]; m_g = glay["m_g"]
-        active = glay["active"]; allowed = glay["allowed"]
-        Sigma_inv_active = safe_inverse(Sigma[np.ix_(active, active)])
-        mu_active = (Gamma.T @ doc.x)[active]
-        A = active.shape[0]
-        m = mu_active.copy()
-        V = np.eye(A)
-        phi = None
-        for _ in range(self.inner_rounds):
-            m_prev = m
-            vdiag = np.diag(V)
-            mc = np.clip(m, -_PSI_CLIP, _PSI_CLIP)
-            if not np.array_equal(mc, m):
-                self._clip_tripped += 1
-            # slice active positions into [background | gate | foreground]
-            m_bg, v_bg = mc[:B - 1], vdiag[:B - 1]
-            m_gate, v_gate = mc[B - 1], vdiag[B - 1]
-            m_fg, v_fg = mc[B:], vdiag[B:]
-            gelog = gated_expected_log_theta(m_bg, v_bg, m_gate, v_gate, m_fg, v_fg)
-            elog_theta = np.full(self.K, -np.inf)
-            elog_theta[allowed] = gelog
-            phi, n_full = token_responsibilities(
-                doc.indices, elog_theta, log_beta, allowed, counts=doc.counts)
-            n_allowed = n_full[allowed]
-            n_bg, n_fg = n_allowed[:B], n_allowed[B:]
-            gate_a, gate_b, b_bg, b_fg = gated_counts(n_bg, n_fg)
-            a_active = np.concatenate([n_bg[:B - 1], np.array([gate_a]), n_fg[:m_g - 1]])
-            b_active = np.concatenate([b_bg, np.array([gate_b]), b_fg])
-            c = np.sqrt(m ** 2 + vdiag)
-            omega = omega_expectation(b_active, c)
-            m, V = psi_posterior(a_active, b_active, mu_active, Sigma_inv_active, omega)
-            if np.max(np.abs(m - m_prev)) < self.inner_tol:
-                break
+        m, V, phi, active, allowed, mu_active, n_clips = pg_estep_doc(
+            doc, glay, log_beta, Gamma, Sigma, K=self.K, B=self.layout["B"],
+            inner_rounds=self.inner_rounds, inner_tol=self.inner_tol)
+        self._clip_tripped += n_clips
         return m, V, phi, active, allowed, mu_active
 
     def fit(self, docs):
