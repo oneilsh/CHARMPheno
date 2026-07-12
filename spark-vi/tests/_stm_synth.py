@@ -323,6 +323,99 @@ def gated_ln_corpus_overlap(*, group_weights, fg_per_group, bg_k, V, D, doc_len,
     return docs, part, Sigma_true, beta
 
 
+def gated_ln_corpus_stick(*, group_weights, fg_per_group, bg_k, V, D, doc_len,
+                          rho_bg=0.3, rho_grp=0.3, rho_cross=0.2, eta_scale=1.0, seed=0):
+    """STICK-NATIVE gated corpus: draw psi ~ N(0, Sigma_true) in the model's own
+    (K-1)-dim STICK space and compose theta = gated_theta(psi), so the planted Sigma is
+    IDENTIFIED by the likelihood (unlike gated_ln_corpus, which plants eta in SOFTMAX
+    space and leaves the stick-space Sigma only weakly identified — the confound behind
+    the Task-7 VI-vs-Gibbs xfail). This is the corpus on which VI-vs-Gibbs Sigma
+    agreement is a meaningful pass/fail gate and true Sigma-recovery (not just beta) can
+    be tested.
+
+    Construction mirrors the model exactly (see pg_stm.stick_layout / gated_theta):
+
+      * Sigma_true is (K-1)x(K-1) in stick space, block-structured like the estimator's
+        _assemble_sigma: a shared background-stick block (indices 0..B-2), one
+        [gate_g, fg_g] block per group, background<->group cross-terms, and the
+        never-co-active group<->group' entries filled by the max-det PD completion
+        (pd_complete — used ONLY to build a valid PD ground truth; those entries never
+        enter any doc's draw). Unit diagonal, off-diagonals rho_bg / rho_grp / rho_cross,
+        scaled by eta_scale.
+      * For a group-g doc, the ACTIVE stick sub-vector [psi_bg (B-1), psi_gate,
+        psi_fg (m_g-1)] ~ N(0, Sigma_true[active, active]); theta over the doc's allowed
+        topics = gated_theta(psi_bg, psi_gate, psi_fg) (background topics 0..B-1 then the
+        group's m_g foreground topics), placed into the length-K theta at those global
+        indices; tokens ~ Multinomial(doc_len, theta @ beta).
+
+    Domain-agnostic: integer token ids only. Returns docs, part, Sigma_true (stick-space,
+    (K-1)x(K-1), == eta_scale * planted correlation), beta."""
+    from spark_vi.models.topic.pg_stm import stick_layout, gated_theta
+
+    rng = np.random.default_rng(seed)
+    groups = tuple(group_weights)
+    part = TopicBlockPartition(group_var="g", background_k=bg_k,
+                               foreground=tuple((g, fg_per_group) for g in groups))
+    K = part.K
+    lay = stick_layout(part)
+
+    # beta: same planted topic-word structure as gated_ln_corpus (a shared common pool
+    # [0:C] + a disjoint per-topic signature block), so beta is recoverable and topic
+    # identity is not degenerate.
+    sig = max(1, (V // 2) // K)
+    C = max(1, min(sig, V - K * sig))
+    beta = np.full((K, V), 1e-3)
+    for k in range(K):
+        beta[k, 0:C] += rng.random(C) + 0.1
+        lo = C + k * sig
+        beta[k, lo:lo + sig] += 5.0
+    beta /= beta.sum(axis=1, keepdims=True)
+
+    # Sigma_true in STICK space (dimension K-1), block-structured + PD-completed.
+    Ksm1 = K - 1
+    bg_sticks = lay["bg_sticks"]
+    Sigma_true = np.eye(Ksm1)
+    obs = np.eye(Ksm1, dtype=bool)
+    for a in bg_sticks:
+        for b in bg_sticks:
+            if a != b:
+                Sigma_true[a, b] = rho_bg; obs[a, b] = True
+    for g in groups:
+        gl = lay["groups"][g]
+        block = np.concatenate([[gl["gate"]], gl["fg_sticks"]]).astype(np.int64)
+        for i in block:
+            for j in block:
+                if i != j:
+                    Sigma_true[i, j] = rho_grp; obs[i, j] = True
+        for a in bg_sticks:
+            for c in block:
+                Sigma_true[a, c] = Sigma_true[c, a] = rho_cross
+                obs[a, c] = obs[c, a] = True
+    Sigma_true = pd_complete(Sigma_true, obs)
+    Sigma_true = float(eta_scale) * Sigma_true
+
+    gl_list = list(groups)
+    wts = np.array([group_weights[g] for g in gl_list], float); wts /= wts.sum()
+    nb = len(bg_sticks)                         # B-1 background sticks
+    docs = []
+    for _ in range(D):
+        g = gl_list[int(rng.choice(len(gl_list), p=wts))]
+        active = lay["groups"][g]["active"]     # [bg_sticks, gate_g, fg_g_sticks]
+        psi = rng.multivariate_normal(np.zeros(active.shape[0]),
+                                      Sigma_true[np.ix_(active, active)])
+        psi_bg, psi_gate, psi_fg = psi[:nb], psi[nb], psi[nb + 1:]
+        theta_allowed = gated_theta(psi_bg, psi_gate, psi_fg)   # [bg topics, fg topics]
+        allowed = np.concatenate([part.background_indices(),
+                                  part.block_indices(g)]).astype(np.int64)
+        theta = np.zeros(K); theta[allowed] = theta_allowed
+        toks = rng.choice(V, size=doc_len, p=theta @ beta)
+        u, c = np.unique(toks, return_counts=True)
+        docs.append(STMDocument(indices=u.astype(np.int32),
+                                counts=c.astype(np.float64), length=int(c.sum()),
+                                x=np.array([1.0]), groups=frozenset({g})))
+    return docs, part, Sigma_true, beta
+
+
 def fit_stm(docs, *, K, V, sigma_init, n_iter=250, batch=None, seed=42,
             partition=None, init_data=None, **model_kwargs):
     m = OnlineSTM(K=K, vocab_size=V, P=1, sigma_init=sigma_init,

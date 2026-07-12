@@ -101,9 +101,15 @@ def test_gibbs_sigma_is_valid(vi_gibbs_bgk4):
 
 @pytest.mark.xfail(reason="MILESTONE FINDING (exp 0049): mean-field VI Sigma does "
                           "NOT match exact Gibbs on the multi-stick background "
-                          "correlation block (mean-field diagonal-posterior artifact "
-                          "on weakly-identified high-index sticks). Not a sampler "
-                          "bug; not loosened. See module docstring + task-7-report.md.",
+                          "correlation block (mean-field ATTENUATION — PG precision "
+                          "diag(omega) swamps the correlated prior — + delta-method, on "
+                          "weakly-identified high-index sticks; V_d is FULL, not diagonal). "
+                          "CONFOUNDED here by the softmax-planted corpus (stick-space Sigma "
+                          "weakly identified). The un-confounded establishment is "
+                          "test_pg_stm_stick_native.py + insight 0044: on a stick-native "
+                          "corpus where Gibbs DOES recover the planted correlation, VI still "
+                          "fails (wrong sign) — a genuine mean-field limitation. Not a "
+                          "sampler bug; not loosened. See module docstring.",
                    strict=False)
 def test_vi_matches_gibbs_on_background_block_correlation(vi_gibbs_bgk4):
     """The originally-intended milestone gate, asserted VERBATIM at atol=0.15 on the
