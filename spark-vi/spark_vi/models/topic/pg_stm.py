@@ -105,6 +105,133 @@ def beta_dirichlet_mean(word_topic_stats, *, eta):
     return lam / lam.sum(axis=1, keepdims=True)
 
 
+def pg_gamma_ridge_moments(XtX, XtM, *, ridge):
+    """Ridge regression of the stacked posterior means on covariates, in MOMENT form:
+    Gamma = solve(XtX + ridge*I, XtM). Identical to ``gamma_ridge(M, X)`` with
+    XtX = X.T @ X (P,P) and XtM = X.T @ M (P,K-1) — the form a distributed accumulator
+    reduces, so only (P,P) + (P,K-1) reach the driver, never the (D,*) stacks."""
+    XtX = np.asarray(XtX, dtype=np.float64); XtM = np.asarray(XtM, dtype=np.float64)
+    P = XtX.shape[0]
+    return np.linalg.solve(XtX + ridge * np.eye(P), XtM)
+
+
+# --------------------------------------------------------------------------- #
+# Distributable PG sufficient statistics + M-step (shared by the single-machine
+# PGSTMVI.fit and the distributed StreamingPGSTM: mapPartitions -> pg_accumulate_doc,
+# treeReduce -> pg_combine_stats, driver -> pg_mstep). Only global-shaped arrays are
+# accumulated, so the reduce sends nothing per-document to the driver.
+# --------------------------------------------------------------------------- #
+
+
+def pg_empty_stats(K, V, P, groups):
+    """Zeroed PG sufficient-stat accumulator (a dict): word-topic stats (K,V), the
+    covariate moments XtX (P,P) / XtM (P,K-1) for the ridge Gamma, the block scatter
+    S (K-1,K-1), per-group doc counts, and D."""
+    Ksm1 = K - 1
+    return {"wts": np.zeros((K, V), dtype=np.float64),
+            "XtX": np.zeros((P, P), dtype=np.float64),
+            "XtM": np.zeros((P, Ksm1), dtype=np.float64),
+            "S": np.zeros((Ksm1, Ksm1), dtype=np.float64),
+            "group_counts": {g: 0 for g in groups}, "D": 0}
+
+
+def pg_accumulate_doc(stats, doc, estep_out, *, K):
+    """Add one document's contribution to a PG sufficient-stat accumulator, IN PLACE.
+    ``estep_out`` = (m, V, phi, active, allowed, mu_active) from the per-doc E-step."""
+    m, V, phi, active, allowed, mu_active = estep_out
+    x = np.asarray(doc.x, dtype=np.float64)
+    stats["wts"][:, doc.indices] += (phi * doc.counts[:, None]).T
+    stats["XtX"] += np.outer(x, x)
+    stats["XtM"][:, active] += np.outer(x, m)          # inactive dims contribute 0
+    e = m - mu_active
+    stats["S"][np.ix_(active, active)] += np.outer(e, e) + V
+    (g,) = tuple(doc.groups)
+    stats["group_counts"][g] += 1
+    stats["D"] += 1
+
+
+def pg_combine_stats(a, b):
+    """Pure elementwise sum of two accumulators — a valid (associative) treeReduce
+    combiner."""
+    gc = dict(a["group_counts"])
+    for g, n in b["group_counts"].items():
+        gc[g] = gc.get(g, 0) + n
+    return {"wts": a["wts"] + b["wts"], "XtX": a["XtX"] + b["XtX"],
+            "XtM": a["XtM"] + b["XtM"], "S": a["S"] + b["S"],
+            "group_counts": gc, "D": a["D"] + b["D"]}
+
+
+def _block_estimate_mode(scatter, n_docs, dim, *, sigma_mode, Psi0_scale, nu0):
+    """One block's covariance estimate: IW posterior mean (proper prior) or the
+    un-regularized scatter/n point estimate (the runaway-isolation contrast)."""
+    if sigma_mode == "iw":
+        return sigma_iw_posterior_mean(scatter, n_docs,
+                                       Psi0=Psi0_scale * np.eye(dim), nu0=nu0, dim=dim)
+    return scatter / max(float(n_docs), 1.0)
+
+
+def assemble_sigma(S, bg_sticks, group_counts, D, *, K, groups, layout,
+                   sigma_mode, Psi0_scale, nu0):
+    """Block-structured Sigma from the global block scatter S: a shared background
+    block (all docs), one [gate, fg] block per group + its background<->group cross
+    (that group's docs only), and the never-co-active group<->group' cross-blocks
+    completed by the max-determinant PD completion (``pd_complete``; Dempster 1972) —
+    NOT zero-filled. Returns a PD (K-1)x(K-1) matrix. Shared by PGSTMVI and
+    StreamingPGSTM so both assemble Sigma identically."""
+    Ksm1 = K - 1
+    Sigma = np.zeros((Ksm1, Ksm1))
+    observed = np.eye(Ksm1, dtype=bool)             # diagonal always observed
+    nb = len(bg_sticks)
+    if nb > 0:
+        Sigma[np.ix_(bg_sticks, bg_sticks)] = _block_estimate_mode(
+            S[np.ix_(bg_sticks, bg_sticks)], D, nb,
+            sigma_mode=sigma_mode, Psi0_scale=Psi0_scale, nu0=nu0)
+        observed[np.ix_(bg_sticks, bg_sticks)] = True
+    for g in groups:
+        glay = layout["groups"][g]
+        gblock = np.concatenate([np.array([glay["gate"]], dtype=np.int64),
+                                 glay["fg_sticks"]]).astype(np.int64)
+        joint = np.concatenate([bg_sticks, gblock]).astype(np.int64)
+        n_g = group_counts[g]
+        Sig_joint = _block_estimate_mode(
+            S[np.ix_(joint, joint)], n_g, len(joint),
+            sigma_mode=sigma_mode, Psi0_scale=Psi0_scale, nu0=nu0)
+        gb_local = np.arange(nb, len(joint))
+        bg_local = np.arange(0, nb)
+        Sigma[np.ix_(gblock, gblock)] = Sig_joint[np.ix_(gb_local, gb_local)]
+        observed[np.ix_(gblock, gblock)] = True
+        if nb > 0:
+            cross = Sig_joint[np.ix_(bg_local, gb_local)]
+            Sigma[np.ix_(bg_sticks, gblock)] = cross
+            Sigma[np.ix_(gblock, bg_sticks)] = cross.T
+            observed[np.ix_(bg_sticks, gblock)] = True
+            observed[np.ix_(gblock, bg_sticks)] = True
+    Sigma = 0.5 * (Sigma + Sigma.T)
+    observed = observed | observed.T
+    if not observed.all():
+        Sigma = pd_complete(Sigma, observed)
+    else:
+        try:
+            np.linalg.cholesky(Sigma)
+        except np.linalg.LinAlgError:
+            Sigma = nearest_spd(Sigma)
+    return Sigma
+
+
+def pg_mstep(stats, *, beta_eta, gamma_ridge, sigma_mode, Psi0_scale, nu0,
+             partition, layout):
+    """The full PG M-step from reduced sufficient stats: Dirichlet-mean beta, moment-
+    form ridge Gamma, block-IW (or scatter/n) Sigma. Pure — the driver's per-iteration
+    global update, identical single-machine and distributed."""
+    K = stats["wts"].shape[0]
+    beta = beta_dirichlet_mean(stats["wts"], eta=beta_eta)
+    Gamma = pg_gamma_ridge_moments(stats["XtX"], stats["XtM"], ridge=gamma_ridge)
+    Sigma = assemble_sigma(stats["S"], layout["bg_sticks"], stats["group_counts"],
+                           stats["D"], K=K, groups=partition.groups, layout=layout,
+                           sigma_mode=sigma_mode, Psi0_scale=Psi0_scale, nu0=nu0)
+    return beta, Gamma, Sigma
+
+
 def _elog_sigmoid(m, v, sign):
     """Delta-method E[log sigma(sign*psi)] under psi~N(m, v), sign in {+1, -1}
     (+1 -> E[log sigma(psi)], -1 -> E[log(1-sigma(psi))] = E[log sigma(-psi)]).
@@ -325,43 +452,31 @@ class PGSTMVI:
         Sigma = np.eye(Ksm1)
 
         # group -> doc indices (each doc has exactly one group here)
-        group_docs = {g: [] for g in self.partition.groups}
-        for d, doc in enumerate(docs):
-            (g,) = tuple(doc.groups)
-            group_docs[g].append(d)
-        group_counts = {g: len(v) for g, v in group_docs.items()}
         D = len(docs)
-        X = np.stack([np.asarray(doc.x, dtype=np.float64) for doc in docs])  # (D, P)
-
-        bg_sticks = self.layout["bg_sticks"]
         sigma_max_trace = []
 
         for _ in range(self.n_iter):
             log_beta = np.log(beta)
-            word_topic_stats = np.zeros((K, V))
-            M = np.zeros((D, Ksm1))               # stacked active means (inactive at 0)
-            S = np.zeros((Ksm1, Ksm1))            # global block scatter
+            # Accumulate the SAME distributable sufficient stats the streaming driver
+            # reduces (pg_accumulate_doc / pg_mstep), plus per-doc psi diagnostics that
+            # are driver-only (not part of the reduced globals).
+            stats = pg_empty_stats(K, V, self.P, self.partition.groups)
             psi_mean = np.zeros((D, Ksm1))
             psi_var = np.zeros((D, Ksm1))
-
             for d, doc in enumerate(docs):
                 (g,) = tuple(doc.groups)
                 glay = self.layout["groups"][g]
-                m, Vd, phi, active, allowed, mu_active = self._e_step_doc(
-                    doc, glay, log_beta, Gamma, Sigma)
-                # word-topic stats: sum_tokens phi * counts at [allowed, doc.indices]
-                word_topic_stats[:, doc.indices] += (phi * doc.counts[:, None]).T
-                # Gamma / Sigma / output accumulation
-                M[d, active] = m
+                estep = self._e_step_doc(doc, glay, log_beta, Gamma, Sigma)
+                m, Vd, phi, active, allowed, mu_active = estep
+                pg_accumulate_doc(stats, doc, estep, K=K)
                 psi_mean[d, active] = m
                 psi_var[d, active] = np.diag(Vd)
-                e_active = m - mu_active
-                S[np.ix_(active, active)] += np.outer(e_active, e_active) + Vd
 
-            # --- M-step ------------------------------------------------------- #
-            beta = beta_dirichlet_mean(word_topic_stats, eta=self.beta_eta)
-            Gamma = gamma_ridge(M, X, ridge=self.gamma_ridge)
-            Sigma = self._assemble_sigma(S, bg_sticks, group_counts, D)
+            # --- M-step (identical to the distributed driver's) ---------------- #
+            beta, Gamma, Sigma = pg_mstep(
+                stats, beta_eta=self.beta_eta, gamma_ridge=self.gamma_ridge,
+                sigma_mode=self.sigma_mode, Psi0_scale=self.Psi0_scale, nu0=self.nu0,
+                partition=self.partition, layout=self.layout)
             sigma_max_trace.append(float(np.max(np.abs(Sigma))))
 
         if self._clip_tripped:
@@ -374,71 +489,14 @@ class PGSTMVI:
                 "psi_mean": psi_mean, "psi_var": psi_var,
                 "sigma_max_trace": sigma_max_trace}
 
-    # -- block-structured Sigma assembly -------------------------------------- #
-    def _block_estimate(self, scatter, n_docs, dim):
-        if self.sigma_mode == "iw":
-            return sigma_iw_posterior_mean(
-                scatter, n_docs, Psi0=self.Psi0_scale * np.eye(dim),
-                nu0=self.nu0, dim=dim)
-        return scatter / max(float(n_docs), 1.0)      # "mle": un-regularized point est.
-
+    # -- block-structured Sigma assembly (delegates to the module function so the
+    #    single-machine and distributed paths assemble Sigma identically) --------- #
     def _assemble_sigma(self, S, bg_sticks, group_counts, D):
-        Ksm1 = self.K - 1
-        Sigma = np.zeros((Ksm1, Ksm1))
-        # `observed` marks the entries we actually estimate from data. The background
-        # block, each group's [gate, fg] block, and their background<->group cross-terms
-        # are measured; the group<->group' cross-blocks are NEVER co-active (hard gating),
-        # so they are UNOBSERVED and must be COMPLETED, not zero-filled.
-        observed = np.eye(Ksm1, dtype=bool)         # diagonal always observed
-        nb = len(bg_sticks)
-        # background block: ALL docs are active on background.
-        if nb > 0:
-            Sigma[np.ix_(bg_sticks, bg_sticks)] = self._block_estimate(
-                S[np.ix_(bg_sticks, bg_sticks)], D, nb)
-            observed[np.ix_(bg_sticks, bg_sticks)] = True
-        gblocks = []
-        # each group block [gate, fg] + its background<->gblock cross, from that
-        # group's docs only.
-        for g in self.partition.groups:
-            glay = self.layout["groups"][g]
-            gblock = np.concatenate([np.array([glay["gate"]], dtype=np.int64),
-                                     glay["fg_sticks"]]).astype(np.int64)
-            gblocks.append(gblock)
-            joint = np.concatenate([bg_sticks, gblock]).astype(np.int64)
-            n_g = group_counts[g]
-            # sigma_iw / scatter-over-n is an ELEMENTWISE map with a scalar denom, so
-            # the joint estimate's gblock & cross entries depend only on the group's
-            # scatter (bg<->gblock and gblock<->gblock in S receive group-g docs only).
-            Sig_joint = self._block_estimate(S[np.ix_(joint, joint)], n_g, len(joint))
-            gb_local = np.arange(nb, len(joint))
-            bg_local = np.arange(0, nb)
-            Sigma[np.ix_(gblock, gblock)] = Sig_joint[np.ix_(gb_local, gb_local)]
-            observed[np.ix_(gblock, gblock)] = True
-            if nb > 0:
-                cross = Sig_joint[np.ix_(bg_local, gb_local)]
-                Sigma[np.ix_(bg_sticks, gblock)] = cross
-                Sigma[np.ix_(gblock, bg_sticks)] = cross.T
-                observed[np.ix_(bg_sticks, gblock)] = True
-                observed[np.ix_(gblock, bg_sticks)] = True
-        Sigma = 0.5 * (Sigma + Sigma.T)
-        observed = observed | observed.T
-        # If any group<->group' entry is unobserved, complete it with the maximum-
-        # determinant PD completion (Dempster 1972 covariance selection: zero PRECISION,
-        # not zero covariance, on the free entries) instead of the transitively
-        # inconsistent zero-fill + single jitter, which could return a non-PD Sigma
-        # (bg_k=2 iw: eigmin ~ -0.017, Cholesky fails). pd_complete preserves every
-        # measured entry EXACTLY and guarantees a PD result (Dykstra min-Frobenius
-        # fallback only if the measured blocks admit no PD completion at all).
-        if not observed.all():
-            Sigma = pd_complete(Sigma, observed)
-        else:
-            # Fully observed (e.g. a single group, nothing free to complete): guard
-            # PD directly with the nearest SPD projection.
-            try:
-                np.linalg.cholesky(Sigma)
-            except np.linalg.LinAlgError:
-                Sigma = nearest_spd(Sigma)
-        return Sigma
+        return assemble_sigma(
+            S, bg_sticks, group_counts, D, K=self.K, groups=self.partition.groups,
+            layout=self.layout, sigma_mode=self.sigma_mode,
+            Psi0_scale=self.Psi0_scale, nu0=self.nu0)
+
 
 
 # --------------------------------------------------------------------------- #
