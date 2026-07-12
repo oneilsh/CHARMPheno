@@ -103,6 +103,14 @@ def test_streaming_fullbatch_matches_single_machine(spark):
 
 ---
 
+> **BUILD NOTE (Task 3, as-built):** a fully-distributed exact-Gibbs Σ sampler was
+> prototyped but drifts to the wrong-sign correlation from any init (unpinned
+> label-switching across the shared background block). Since Σ is a single small
+> (K−1)×(K−1) global, it does NOT need full-corpus distribution — the as-shipped
+> `pg_stm_sigma_readout` collects a driver-side **subsample** and runs the VALIDATED
+> single-machine `pg_stm_gibbs` (recovers the planted correlation; the F4 positive
+> control). The distributed exact sampler is deferred as a future optimization.
+
 ### Task 3: Distributed exact-Gibbs Σ pass (comorbidity read-out)
 
 **Files:**
