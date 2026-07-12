@@ -76,6 +76,7 @@ def psi_posterior(n, b, mu, Sigma_inv, omega):
     kappa = np.asarray(n, dtype=np.float64)[:b.shape[0]] - b / 2.0
     prec = np.asarray(Sigma_inv, dtype=np.float64) + np.diag(np.asarray(omega, dtype=np.float64))
     V = np.linalg.inv(prec)
+    V = 0.5 * (V + V.T)          # prec is PD so V is too; kill np.linalg.inv float asymmetry
     m = V @ (np.asarray(Sigma_inv, dtype=np.float64) @ np.asarray(mu, dtype=np.float64) + kappa)
     return m, V
 

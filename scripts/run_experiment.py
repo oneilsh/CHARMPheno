@@ -1106,6 +1106,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
+    elif effective.get("model_class") == "pg_stm":
+        # PG-STM saves an npz + manifest (a methods-experiment artifact), not an
+        # STMModel bundle, so the NPMI eval driver can't read it. Its topic quality is
+        # visible in the fit log's per-iteration top-terms; the runaway diagnostics
+        # (Phase-1 Sigma eigmin/max|Sigma|/PD) are in the run's manifest.json.
+        print("[run-exp] model_class=pg_stm: NPMI eval not wired for the npz result; "
+              "skipping eval (see manifest.json + fit-log top terms).", flush=True)
     else:
         # 6. Dispatch eval (capture stdout into a string for sanitized append)
         eval_script = REPO_ROOT / "analysis" / "cloud" / "eval_coherence_cloud.py"

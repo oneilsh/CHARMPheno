@@ -48,3 +48,17 @@ def test_psi_posterior_two_sticks_coupled_prior():
     m_ref = V_ref @ (Sigma_inv @ mu + kappa)
     assert np.allclose(V, V_ref, atol=1e-12)
     assert np.allclose(m, m_ref, atol=1e-12)
+
+
+def test_psi_posterior_V_is_exactly_symmetric():
+    """np.linalg.inv can leave tiny asymmetry in V, which made rng.multivariate_normal
+    warn "covariance is not symmetric positive-semidefinite" in the Gibbs draw. V must be
+    returned EXACTLY symmetric (prec is PD, so V is too)."""
+    rng = np.random.default_rng(0)
+    for _ in range(50):
+        A = rng.normal(size=(4, 4)); Sigma = A @ A.T + np.eye(4)
+        Sigma_inv = np.linalg.inv(Sigma)
+        omega = rng.random(4) * 5.0
+        _m, V = psi_posterior(rng.random(5), rng.random(4), rng.normal(size=4),
+                              Sigma_inv, omega)
+        assert np.array_equal(V, V.T), "psi_posterior V must be exactly symmetric"

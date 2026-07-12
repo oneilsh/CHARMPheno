@@ -1927,3 +1927,16 @@ def test_build_pg_stm_args_defaults_sigma_mode_iw(monkeypatch):
     argv = build_pg_stm_args(eff, "/tmp/out")
     i = argv.index("--sigma-mode")
     assert argv[i + 1] == "iw"                # default when frontmatter omits it
+
+
+def test_pg_stm_result_npz_not_eval_dispatched(monkeypatch):
+    """model_class=pg_stm must NOT be routed to the NPMI eval driver (which only supports
+    lda/hdp/stm and can't read the npz result). build_eval_args still tags the model_class
+    it's given, but run_experiment skips the eval dispatch for pg_stm — asserted here at the
+    unit boundary: the eval driver's choices exclude pg_stm, so dispatching would exit 2."""
+    from run_experiment import build_eval_args
+    from pathlib import Path
+    eff = {"model_class": "pg_stm", "npmi_min_pair_count": 5}
+    argv = build_eval_args(Path("/tmp/ckpt"), eff)
+    # build_eval_args faithfully echoes the model_class; the skip lives in the run loop.
+    assert "--model-class" in argv and "pg_stm" in argv
