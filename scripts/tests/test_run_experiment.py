@@ -1868,3 +1868,62 @@ class TestBuildOnlyWithAutoCovariates:
         assert rc == 0
         assert run_build.calls == 1
         assert dispatch_cov.calls == []
+
+
+# --- pg_stm model_class dispatch (sub-project 2) ------------------------------
+
+def test_validate_frontmatter_accepts_pg_stm():
+    from run_experiment import validate_frontmatter
+    fm = {"id": "0050", "slug": "pg", "cohort": "cancer_or_dementia",
+          "model_class": "pg_stm", "covariate_formula": "~ C(sex) + age",
+          "categorical_cols": ["sex"], "continuous_cols": ["age"]}
+    validate_frontmatter(fm)                # must not raise / exit
+
+
+def test_build_fit_driver_path_pg_stm():
+    from run_experiment import build_fit_driver_path
+    path = build_fit_driver_path({"model_class": "pg_stm"})
+    assert path.endswith("pg_stm_bigquery_cloud.py")
+
+
+def test_build_pg_stm_args_emits_sigma_mode_and_gating(monkeypatch):
+    monkeypatch.setenv("WORKSPACE_CDR", "proj.ds")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    from run_experiment import build_pg_stm_args, build_fit_args
+    eff = {
+        "model_class": "pg_stm", "source_table": "condition_era",
+        "doc_unit": "patient_cohort", "doc_min_length": 20, "K": 50,
+        "max_iter": 100, "vocab_size": 10000, "min_df": 20,
+        "min_patient_count": 20, "subsampling_rate": 0.2, "tau0": 64.0,
+        "kappa": 0.7, "person_mod": 4, "cohort_def": "cancer_or_dementia",
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"], "background_k": 30,
+        "foreground": "cancer:10,dementia:10", "group_var": "source_cohort",
+        "sigma_mode": "mle", "gibbs_sweeps": 40,
+    }
+    argv = build_pg_stm_args(eff, "/tmp/out")
+    assert "--sigma-mode" in argv and "mle" in argv
+    assert "--gibbs-sweeps" in argv and "40" in argv
+    assert "--background-k" in argv and "cancer:10,dementia:10" in argv
+    # STM-only hardening flags must NOT be emitted by the pg_stm builder.
+    assert "--spectral-init" not in argv and "--reference-topic" not in argv
+    assert "--sigma-init" not in argv and "--lbfgs-max-iter" not in argv
+    # The dispatch routes model_class=pg_stm here too.
+    assert build_fit_args(eff, "/tmp/out") == argv
+
+
+def test_build_pg_stm_args_defaults_sigma_mode_iw(monkeypatch):
+    monkeypatch.setenv("WORKSPACE_CDR", "p.d")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "b")
+    from run_experiment import build_pg_stm_args
+    eff = {
+        "model_class": "pg_stm", "source_table": "condition_era",
+        "doc_min_length": 20, "K": 6, "max_iter": 10, "vocab_size": 100,
+        "min_df": 2, "min_patient_count": 5, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "person_mod": 4, "cohort_def": "x",
+        "covariate_formula": "~ C(sex)", "categorical_cols": ["sex"],
+        "continuous_cols": [],
+    }
+    argv = build_pg_stm_args(eff, "/tmp/out")
+    i = argv.index("--sigma-mode")
+    assert argv[i + 1] == "iw"                # default when frontmatter omits it
