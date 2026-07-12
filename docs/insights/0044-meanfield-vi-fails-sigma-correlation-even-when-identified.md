@@ -45,6 +45,22 @@ the exact PG-Gibbs sampler; compare the recovered r01 to the planted value.
 The bg_k=4 (3×3 block) version shows the same pattern: Gibbs lands near planted on the
 low-index sticks while VI reads spurious ±0.8–0.9 across the whole block.
 
+**Honesty caveat on the positive control (added 2026-07-12).** At bg_k=3 / D=1000 the
+background-stick correlation is only WEAKLY identified: exact Gibbs recovery is
+stream-sensitive and bimodal (~±0.3 depending on corpus/gibbs seed — e.g. across 6
+corpus×gibbs-seed combinations, ~half land near +0.3 and half near −0.3). This is a
+property of the corpus identification, NOT the sampler: it reproduces with both the
+reference `polyagamma` package and the pure-numpy sampler (`spark_vi.models.topic._pg`,
+which replaced the native dependency so the engine ships self-contained on Spark
+executors — its distributional equivalence to `polyagamma` is proven by KS test in
+`tests/test_pg_sampler.py`, KS ~0.01, p>0.27). So the "Gibbs recovers" positive control is
+a BEST-CASE demonstration (Gibbs CAN find the planted correlation on a recovering seed),
+not a claim that Gibbs robustly recovers at this identification level; a rock-solid
+positive control needs a higher-identification corpus (larger D / more tokens per doc). The
+LOAD-BEARING half of the finding is unchanged and seed-robust: mean-field VI reads the
+WRONG SIGN in every seed (it never recovers), while Gibbs at least sometimes does — so
+mean-field cannot be trusted for the Σ correlation read-out regardless.
+
 ## Interpretation
 
 The VI≠Gibbs disagreement is a GENUINE mean-field limitation, NOT the softmax-planting

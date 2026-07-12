@@ -6,11 +6,11 @@ Linderman/Johnson/Adams 2015 (stick-breaking multinomial + PG); Blei/Lafferty 20
 from __future__ import annotations
 
 import numpy as np
-from polyagamma import random_polyagamma
 from scipy.special import expit  # logistic sigmoid
 from scipy.stats import invwishart
 
 from spark_vi.models.topic._linalg import safe_inverse, pd_complete, nearest_spd
+from spark_vi.models.topic._pg import random_polyagamma  # pure-numpy PG (no native dep)
 
 
 def stick_to_simplex(psi: np.ndarray) -> np.ndarray:
