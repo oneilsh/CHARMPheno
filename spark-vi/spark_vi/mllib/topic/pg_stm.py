@@ -1,15 +1,22 @@
-"""Distributed PG-STM (sub-project 2): mini-batch PG-SVI + a distributed exact-Gibbs
-Sigma pass, both over an RDD of ``STMDocument``.
+"""Distributed PG-STM (sub-project 2).
 
-The per-document math lives in ``spark_vi.models.topic.pg_stm`` (pure functions); this
-module only ORCHESTRATES it across Spark using the same ``mapPartitions(_local)
-.treeReduce(_combine)`` sufficient-statistic idiom as ``spark_vi.mllib.topic.stm``. Each
-worker folds ``pg_accumulate_doc(pg_estep_doc(...))`` over its partition into ONE
-``PGSuffStats`` (small, global-shaped arrays only); the tree-reduce sums them; the driver
-runs the shared ``pg_mstep``. Consequently ``StreamingPGSTM(batch="all").fit`` reproduces
-the single-machine ``PGSTMVI.fit`` by construction (Hoffman et al. 2013, "Stochastic
-Variational Inference", JMLR 14:1303-1347 — full-batch is SVI at mini-batch fraction 1,
-learning rate 1).
+Phase 1 — ``StreamingPGSTM``: distributed mini-batch PG-SVI over an RDD of
+``STMDocument`` (the runaway-cure test; ``sigma_mode`` iw|mle). The per-document math
+lives in ``spark_vi.models.topic.pg_stm`` (pure functions); this module only ORCHESTRATES
+it across Spark using the same ``mapPartitions(_local).treeReduce(_combine)`` idiom as
+``spark_vi.mllib.topic.stm``. Each worker folds ``pg_accumulate_doc(pg_estep_doc(...))``
+over its partition into ONE small ``PGSuffStats``; the tree-reduce sums them; the driver
+runs the shared ``pg_mstep``. So ``StreamingPGSTM(batch="all").fit`` reproduces the
+single-machine ``PGSTMVI.fit`` by construction (Hoffman et al. 2013, "Stochastic
+Variational Inference", JMLR 14:1303-1347).
+
+Phase 2 — ``pg_stm_sigma_readout``: the comorbidity Sigma-correlation read-out (which
+mean-field VI cannot produce — insight 0044). Sigma is a single small (K-1)x(K-1) global,
+so it does NOT need full-corpus distribution: a large driver-collected SUBSAMPLE, run
+through the VALIDATED exact single-machine ``pg_stm_gibbs``, estimates it (recovers the
+planted stick correlation where mean-field flips its sign). A fully-distributed exact
+sampler is deferred — a naive port drifts (label-switching across the shared background
+block was not pinned), and the subsample is statistically sufficient for a global Sigma.
 """
 from __future__ import annotations
 
@@ -17,7 +24,7 @@ import numpy as np
 
 from spark_vi.models.topic.pg_stm import (
     pg_estep_doc, pg_empty_stats, pg_accumulate_doc, pg_combine_stats, pg_mstep,
-    stick_layout,
+    stick_layout, pg_stm_gibbs,
 )
 
 
@@ -133,3 +140,31 @@ class StreamingPGSTM:
                 on_iteration(t, {"beta": beta, "Gamma": Gamma, "Sigma": Sigma})
         return {"beta": beta, "Gamma": Gamma, "Sigma": Sigma,
                 "sigma_max_trace": sigma_max_trace}
+
+
+def pg_stm_sigma_readout(doc_rdd, *, K, V, partition, P, subsample_n=20000,
+                         n_iter=600, burn=300, Psi0_scale=1.0, nu0=None,
+                         gamma_ridge=1e-6, beta_eta=0.1, seed=0):
+    """Phase-2 comorbidity Sigma-correlation read-out. Collects a driver-side SUBSAMPLE
+    of ``subsample_n`` documents (Sigma is a small (K-1)x(K-1) global — a representative
+    subsample estimates it) and runs the VALIDATED exact single-machine
+    ``pg_stm_gibbs`` on it, returning the trustworthy-correlation Sigma (+ beta, Gamma,
+    Sigma_samples). This is the correlation read-out mean-field VI cannot produce
+    (insight 0044). ``subsample_n`` <= 0 uses the whole corpus (only for small corpora).
+
+    Reuses the exact sampler rather than a bespoke distributed one because a naive
+    distributed exact-Gibbs drifts (unpinned label-switching across the shared background
+    block) — deferred as a future optimization; the subsample is statistically sufficient
+    for a single global Sigma."""
+    if subsample_n and subsample_n > 0:
+        total = doc_rdd.count()
+        if total > subsample_n:
+            frac = min(1.0, (subsample_n * 1.2) / total)     # oversample, then trim
+            docs = doc_rdd.sample(False, frac, seed=seed).take(int(subsample_n))
+        else:
+            docs = doc_rdd.collect()
+    else:
+        docs = doc_rdd.collect()
+    return pg_stm_gibbs(docs, K=K, V=V, partition=partition, P=P, n_iter=n_iter,
+                        burn=burn, seed=seed, Psi0_scale=Psi0_scale, nu0=nu0,
+                        gamma_ridge=gamma_ridge, beta_eta=beta_eta)
