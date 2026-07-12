@@ -104,20 +104,25 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def _make_topic_terms_logger(every_n, idx_to_cid, name_by_id, topic_labels, top_n=8):
-    """on_iteration callback printing the top-N terms per topic every `every_n` sweeps —
-    the phenotype-quality readout for a gated PG-STM fit (there is no NPMI eval for the
-    npz result). Reads beta directly from the iteration payload."""
+def _make_pg_iter_logger(max_iter, every_n, idx_to_cid, name_by_id, topic_labels, top_n=8):
+    """on_iteration callback (fires EVERY SVI iteration). Prints a lightweight per-iter
+    HEARTBEAT — ``iter t/N: max|Sigma|=.. eigmin=..`` — so a long distributed fit is not
+    silent AND the mle arm's Sigma runaway is watchable live; plus the top-N terms per
+    topic every ``every_n`` iters (the phenotype-quality readout, since pg_stm has no NPMI
+    eval)."""
     def _on_iter(t, payload):
-        if every_n <= 0 or t % every_n != 0:
-            return
-        beta = payload["beta"]                                  # (K, V)
-        for k in range(beta.shape[0]):
-            top = np.argsort(beta[k])[::-1][:top_n]
-            label = f"[{topic_labels[k]}] " if topic_labels is not None else ""
-            terms = " ".join(str(name_by_id.get(idx_to_cid.get(int(i)), idx_to_cid.get(int(i))))
-                             for i in top)
-            print(f"[driver]   iter {t} topic {k} {label}β*: {terms}", flush=True)
+        S = 0.5 * (payload["Sigma"] + payload["Sigma"].T)
+        eig = float(np.linalg.eigvalsh(S).min())
+        print(f"[driver]   iter {t + 1}/{max_iter}: max|Sigma|={np.max(np.abs(S)):.4g} "
+              f"eigmin={eig:.3g}", flush=True)
+        if every_n > 0 and t % every_n == 0:
+            beta = payload["beta"]                              # (K, V)
+            for k in range(beta.shape[0]):
+                top = np.argsort(beta[k])[::-1][:top_n]
+                label = f"[{topic_labels[k]}] " if topic_labels is not None else ""
+                terms = " ".join(str(name_by_id.get(idx_to_cid.get(int(i)),
+                                                    idx_to_cid.get(int(i)))) for i in top)
+                print(f"[driver]   iter {t} topic {k} {label}β*: {terms}", flush=True)
     return _on_iter
 
 
@@ -215,9 +220,9 @@ def main() -> int:
             est = StreamingPGSTM(K=K, V=V, partition=partition, P=P,
                                  sigma_mode=args.sigma_mode, seed=seed)
             idx_to_cid = {idx: cid for cid, idx in vocab_map.items()}
-            on_iter = _make_topic_terms_logger(
-                every_n=10, idx_to_cid=idx_to_cid, name_by_id=name_by_id,
-                topic_labels=partition.topic_labels())
+            on_iter = _make_pg_iter_logger(
+                max_iter=args.max_iter, every_n=10, idx_to_cid=idx_to_cid,
+                name_by_id=name_by_id, topic_labels=partition.topic_labels())
             svi = est.fit(doc_rdd, max_iter=args.max_iter,
                           batch=args.subsampling_rate, tau0=args.tau0, kappa=args.kappa,
                           on_iteration=on_iter)
