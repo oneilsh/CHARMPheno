@@ -10,7 +10,7 @@ from polyagamma import random_polyagamma
 from scipy.special import expit  # logistic sigmoid
 from scipy.stats import invwishart
 
-from spark_vi.models.topic._linalg import safe_inverse
+from spark_vi.models.topic._linalg import safe_inverse, pd_complete, nearest_spd
 
 
 def stick_to_simplex(psi: np.ndarray) -> np.ndarray:
@@ -385,17 +385,25 @@ class PGSTMVI:
     def _assemble_sigma(self, S, bg_sticks, group_counts, D):
         Ksm1 = self.K - 1
         Sigma = np.zeros((Ksm1, Ksm1))
+        # `observed` marks the entries we actually estimate from data. The background
+        # block, each group's [gate, fg] block, and their background<->group cross-terms
+        # are measured; the group<->group' cross-blocks are NEVER co-active (hard gating),
+        # so they are UNOBSERVED and must be COMPLETED, not zero-filled.
+        observed = np.eye(Ksm1, dtype=bool)         # diagonal always observed
         nb = len(bg_sticks)
         # background block: ALL docs are active on background.
         if nb > 0:
             Sigma[np.ix_(bg_sticks, bg_sticks)] = self._block_estimate(
                 S[np.ix_(bg_sticks, bg_sticks)], D, nb)
+            observed[np.ix_(bg_sticks, bg_sticks)] = True
+        gblocks = []
         # each group block [gate, fg] + its background<->gblock cross, from that
-        # group's docs only. group<->group' never co-active -> left at 0.
+        # group's docs only.
         for g in self.partition.groups:
             glay = self.layout["groups"][g]
             gblock = np.concatenate([np.array([glay["gate"]], dtype=np.int64),
                                      glay["fg_sticks"]]).astype(np.int64)
+            gblocks.append(gblock)
             joint = np.concatenate([bg_sticks, gblock]).astype(np.int64)
             n_g = group_counts[g]
             # sigma_iw / scatter-over-n is an ELEMENTWISE map with a scalar denom, so
@@ -405,15 +413,31 @@ class PGSTMVI:
             gb_local = np.arange(nb, len(joint))
             bg_local = np.arange(0, nb)
             Sigma[np.ix_(gblock, gblock)] = Sig_joint[np.ix_(gb_local, gb_local)]
+            observed[np.ix_(gblock, gblock)] = True
             if nb > 0:
                 cross = Sig_joint[np.ix_(bg_local, gb_local)]
                 Sigma[np.ix_(bg_sticks, gblock)] = cross
                 Sigma[np.ix_(gblock, bg_sticks)] = cross.T
+                observed[np.ix_(bg_sticks, gblock)] = True
+                observed[np.ix_(gblock, bg_sticks)] = True
         Sigma = 0.5 * (Sigma + Sigma.T)
-        try:
-            np.linalg.cholesky(Sigma)
-        except np.linalg.LinAlgError:
-            Sigma = Sigma + 1e-8 * np.eye(Ksm1)
+        observed = observed | observed.T
+        # If any group<->group' entry is unobserved, complete it with the maximum-
+        # determinant PD completion (Dempster 1972 covariance selection: zero PRECISION,
+        # not zero covariance, on the free entries) instead of the transitively
+        # inconsistent zero-fill + single jitter, which could return a non-PD Sigma
+        # (bg_k=2 iw: eigmin ~ -0.017, Cholesky fails). pd_complete preserves every
+        # measured entry EXACTLY and guarantees a PD result (Dykstra min-Frobenius
+        # fallback only if the measured blocks admit no PD completion at all).
+        if not observed.all():
+            Sigma = pd_complete(Sigma, observed)
+        else:
+            # Fully observed (e.g. a single group, nothing free to complete): guard
+            # PD directly with the nearest SPD projection.
+            try:
+                np.linalg.cholesky(Sigma)
+            except np.linalg.LinAlgError:
+                Sigma = nearest_spd(Sigma)
         return Sigma
 
 

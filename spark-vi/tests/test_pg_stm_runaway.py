@@ -9,23 +9,38 @@ block inverse-Wishart posterior mean (proper prior nu0>dim+1 => finite PD mean e
 at n_docs->0). Any divergence is therefore attributable to the ESTIMATOR, not the
 link — the whole point of the checkpoint.
 
-MEASURED RESULT (exp 0049; scarce corpus below, seed 0): the PG + stick-breaking MLE
-does NOT reproduce the softmax point-EM's 10^10 magnitude blow-up (insight 0033) — it
-CONVERGES to a modestly-inflated fixed point (max|Sigma| ~ 3.8, no 1e3 divergence).
-The instability it DOES show is loss of positive-definiteness: the un-regularized
-MLE Sigma goes INDEFINITE (eigmin ~ -0.30), while the IW posterior over the identical
-E-step stays bounded (max|Sigma| ~ 3.9) AND positive-definite (eigmin > 0). So the
-decisive assertion is the reframed, honest one — MLE non-PD vs IW bounded+PD — not
-the brief's literal >1e3 (which the milder PG+stick MLE never reaches; see the doc).
+MEASURED RESULT, HONEST REFRAME (exp 0049; F1/F3 after the assembly fix). Two things
+the toy scale does NOT show, recorded so the next stage is not built on an overclaim:
+
+  1. The PG + stick-breaking MLE does NOT reproduce the softmax point-EM's 10^10
+     magnitude blow-up (insight 0033) — it converges to a modestly-inflated fixed
+     point (max|Sigma| ~ 4, no 1e3 divergence).
+  2. After ``_assemble_sigma`` was fixed to complete the unobserved group<->group'
+     cross-blocks with the max-determinant PD completion (``_linalg.pd_complete``)
+     instead of ZERO-FILLING them, the un-regularized MLE Sigma is NO LONGER
+     indefinite. The earlier "MLE eigmin ~ -0.30, Cholesky fails" contrast was a
+     block-STITCHING artifact of the zero-fill (the whole-branch review proved the
+     -0.30 neg-eigenvector loaded on the zeroed cross-block), NOT an estimator
+     variance runaway. With the fix, BOTH estimators are PD at toy scale.
+
+What SURVIVES as a genuine (but MILD, non-decisive) estimator signal at toy scale:
+the raw ``scatter/n`` MLE blocks sit ON the PD boundary — the completion's
+min-Frobenius fallback has to floor them, so MLE eigmin lands at ~+0.000 — while the
+IW posterior blocks are strictly PD-completable and land comfortably interior
+(eigmin ~ +0.012..+0.018), with a uniformly smaller max|Sigma| (IW more bounded). So
+IW is better-conditioned, but the toy K=6 / D=1000 corpus does NOT decisively
+separate the two the way the confounded zero-fill contrast appeared to.
+
+THE DECISIVE runaway-cure test therefore moves to SCALE / real data (the insight-0033
+10^10 regime is larger-K / no-reference-topic / real corpus) — sub-project #2's
+distributed PG-SVI on exp-0027. This file now asserts the honestly-supportable toy
+claims: IW is PD + bounded + recovers beta (machinery validated), both estimators are
+PD after the fix (no toy runaway), and IW is the better-conditioned of the two.
 
 The corpus is bg_k=4 (a genuine 3-stick background CORRELATION block estimated from
-all D docs), not the brief's bg_k=2. Rationale recorded in the doc: at bg_k=2 the
-whole Sigma is [bg-stick, gateA, gateB] with the gateA<->gateB cross STRUCTURALLY
-forced to 0 (groups never co-active), so the assembled 3x3 can be a hair indefinite
-under EITHER estimator — a block-STITCHING artifact that confounds the estimator
-contrast. A real background block gives the IW posterior an identified covariance to
-regularize, so IW is robustly PD there and the MLE-vs-IW contrast isolates the
-estimator cleanly."""
+all D docs). Historically bg_k=2 was chosen to dodge the gateA<->gateB zero-fill; that
+dodge is now unnecessary (pd_complete handles the cross-block), but bg_k=4 is kept so
+the IW posterior has an identified multi-stick background covariance to regularize."""
 import numpy as np
 import pytest
 
@@ -54,31 +69,52 @@ def scarce_fits():
     return {"part": part, "beta": beta, "mle": mle, "iw": iw}
 
 
-def test_DECISIVE_estimator_isolation_mle_nonpd_iw_bounded_and_pd(scarce_fits):
-    """THE milestone gate. SAME gated nested model, SAME E-step; vary ONLY the Sigma
-    M-step. The un-regularized MLE point estimate drives Sigma INDEFINITE (eigmin < 0);
-    the proper IW posterior over the identical E-step stays finite, bounded
-    (max|Sigma| < 100) AND positive-definite (eigmin > 0). That is the cure."""
-    mle, iw = scarce_fits["mle"], scarce_fits["iw"]
-
-    mle_eigmin = float(np.linalg.eigvalsh(mle["Sigma"]).min())
+def test_iw_posterior_is_pd_bounded_and_finite(scarce_fits):
+    """MACHINERY GATE (the honestly-supportable toy claim). The block inverse-Wishart
+    posterior mean over the scarce-group E-step is finite, bounded (max|Sigma| < 100),
+    and strictly positive-definite (Cholesky succeeds). This is what a proper prior
+    buys — a usable covariance on a corpus where an un-regularized scatter estimate is
+    only marginally conditioned."""
+    iw = scarce_fits["iw"]
     iw_eigmin = float(np.linalg.eigvalsh(iw["Sigma"]).min())
-
-    # MLE: un-regularized scatter/n on the scarce group -> Sigma loses PD (indefinite).
-    assert mle_eigmin < 0.0, f"expected MLE Sigma indefinite, got eigmin={mle_eigmin}"
-
-    # IW: proper posterior -> bounded AND positive-definite (the load-bearing cure).
     assert np.all(np.isfinite(iw["Sigma"]))
     assert np.max(np.abs(iw["Sigma"])) < 1e2, "IW Sigma must stay bounded"
     assert iw_eigmin > 0.0, f"expected IW Sigma PD, got eigmin={iw_eigmin}"
     np.linalg.cholesky(iw["Sigma"])          # canonical PD check (raises if not PD)
 
-    # the contrast is decisive, not marginal: IW's eigmin clears MLE's by a wide gap.
-    assert iw_eigmin - mle_eigmin > 0.1
 
-    # neither estimator reaches the softmax point-EM 10^10 runaway: the PG+stick MLE
-    # pathology at this scarcity is loss-of-PD, not magnitude divergence (both ~O(1)).
+def test_both_estimators_pd_after_assembly_fix_no_toy_runaway(scarce_fits):
+    """HONEST REFRAME (F3). After ``_assemble_sigma`` completes the unobserved
+    group<->group' cross-blocks with the max-det PD completion instead of zero-filling
+    them, BOTH sigma_modes yield a PD, bounded Sigma at toy scale — the earlier
+    "MLE indefinite" contrast was the zero-fill stitching artifact, not an estimator
+    runaway (see module docstring + exp 0049). Neither reaches the softmax 10^10 regime.
+
+    The MILD surviving estimator signal, asserted here as a non-decisive regression
+    guard (NOT the runaway cure — that moves to scale): the IW posterior is the
+    better-conditioned of the two — interior-PD (its blocks are strictly PD-completable,
+    so eigmin stays comfortably > 0), where the raw scatter/n MLE sits ON the PD boundary
+    (its blocks are floored by the completion, eigmin ~ +0.000). Measured across bg_k=4
+    seeds 0/1/2 and bg_k=2 seeds 0/1/2: MLE eigmin is at the floor in every seed while IW
+    is interior (+0.007..+0.018). (max|Sigma| is NOT a reliable discriminator — both are
+    O(1) and their ordering flips seed-to-seed — so it is not asserted as a direction.)"""
+    mle, iw = scarce_fits["mle"], scarce_fits["iw"]
+    mle_eigmin = float(np.linalg.eigvalsh(mle["Sigma"]).min())
+    iw_eigmin = float(np.linalg.eigvalsh(iw["Sigma"]).min())
+
+    # Both PD after the assembly fix (no toy runaway under either estimator).
+    assert mle_eigmin >= 0.0, f"MLE Sigma should be PD after fix, got {mle_eigmin}"
+    assert iw_eigmin > 0.0, f"IW Sigma should be PD, got {iw_eigmin}"
+    np.linalg.cholesky(mle["Sigma"])
+    np.linalg.cholesky(iw["Sigma"])
+
+    # Neither estimator reaches the softmax point-EM 10^10 runaway (both ~O(1)).
     assert np.max(np.abs(mle["Sigma"])) < 1e2
+    assert np.max(np.abs(iw["Sigma"])) < 1e2
+
+    # Mild, non-decisive: IW is interior-PD where the raw scatter/n MLE is boundary-PD.
+    assert iw_eigmin >= mle_eigmin, (
+        f"IW should be at least as interior-PD as MLE: iw={iw_eigmin}, mle={mle_eigmin}")
 
 
 def test_scarce_topic_gets_wide_not_divergent_posterior_under_iw(scarce_fits):

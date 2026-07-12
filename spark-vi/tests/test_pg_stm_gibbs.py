@@ -19,15 +19,21 @@ MILESTONE FINDING (exp 0049), recorded by the tests below and detailed in
     data (posterior std shrinks 0.46->0.06 as D grows), recovers beta, and is
     internally valid (symmetric/PD/bounded); VI is self-consistent (its returned
     Sigma matches the empirical covariance of its own recovered per-doc logits) and
-    converged (n_iter 150==400). The disagreement is a genuine mean-field artifact:
-    mean-field's per-doc posterior V_d is DIAGONAL, so it cannot represent
-    within-doc stick covariance, and the background Sigma correlation is driven by
-    the correlation of shrunken point estimates — spuriously high/unstable on the
-    weakly-identified high-index background sticks (VI reads r12~0.77 where exact
-    Gibbs is diffuse ~0.26). Even at D=2000, where Gibbs IS identified (std 0.12),
-    VI (+0.85) is grossly off from Gibbs (-0.16). Mean-field also UNDERESTIMATES the
-    background variance (stick-2 var ~0.06 in VI vs ~1.5 in Gibbs — textbook
-    mean-field underdispersion).
+    converged (n_iter 150==400). The disagreement is a genuine mean-field artifact,
+    but NOT because the per-doc posterior is diagonal — psi_posterior returns a FULL
+    V_d = (Sigma_inv + diag(omega))^-1, which carries off-diagonal within-doc
+    covariance. The real mechanism is mean-field ATTENUATION: the PG data precision
+    diag(omega) is ADDED to the correlated prior precision Sigma_inv, so as omega
+    grows the posterior precision is dominated by its diagonal data term and V_d's
+    correlations are shrunk toward the data-driven (weakly correlated) solution —
+    the correlated prior is swamped. Combined with the delta-method E[log theta] and
+    the between-doc mean-field factorization (q(psi_d) independent across d, so Sigma
+    sees only the scatter of per-doc MEANS, not their posterior spread), VI reads a
+    spuriously high/unstable background correlation on the weakly-identified high-index
+    sticks (VI r12~0.77 where exact Gibbs is diffuse ~0.26). Even at D=2000, where
+    Gibbs IS identified (std 0.12), VI (+0.85) is grossly off from Gibbs (-0.16). The
+    between-doc factorization also UNDERESTIMATES the background variance (stick-2 var
+    ~0.06 in VI vs ~1.5 in Gibbs — textbook mean-field underdispersion).
   * Background-block agreement at atol=0.15 is asserted verbatim but marked xfail
     (the finding); NOT loosened to force a pass.
 
