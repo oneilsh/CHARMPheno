@@ -44,8 +44,9 @@ its group):
   stick-breaking, composed into two levels — the composition is what makes gating consistent
   under stick-breaking; flat single-sequence stick-breaking is NOT closed under subsetting the
   allowed topic set, so a shared background Σ would be ill-defined). For a group-g doc:
-  - **Level 0 — the gate** (one logit ψ_gate): `π_bg = σ(ψ_gate)`, `π_fg = 1 − σ(ψ_gate)` split
-    mass between the shared background block and the doc's foreground block F_g.
+  - **Level 0 — the gate** (a per-group logit ψ_gate_g, folded into group g's block):
+    `π_bg = σ(ψ_gate_g)`, `π_fg = 1 − σ(ψ_gate_g)` split mass between the shared background
+    block and the doc's foreground block F_g.
   - **Level 1 — within each block** (flat stick-breaking): `θ_k = π_bg · sb(ψ_bg)_k` for k in
     background (B−1 sticks, SHARED across all docs), `θ_k = π_fg · sb(ψ_fg_g)_k` for k in F_g
     (m_g−1 sticks, g's block), and **θ_k = 0 exactly** for k in any other group (hard gating).
@@ -53,13 +54,14 @@ its group):
   thing for every doc regardless of group — so a single shared Σ is well-defined. This nested
   structure also generalizes to an ontology cascade (gate → level-1 categories → … → leaf
   phenotypes), which is why gating is the entry point for later ontology-guided fits.
-- **Correlated Gaussian prior on the full stick vector** ψ_d = [ψ_gate, ψ_bg (B−1),
-  ψ_fg_1 (m_1−1), …, ψ_fg_G] ~ Normal(Γᵀx_d, Σ). A group-g doc's E-step runs on the ACTIVE
-  sub-vector [ψ_gate, ψ_bg, ψ_fg_g]; the other groups' foreground sticks are inactive. Γ
-  carries continuous covariates; Σ is **block-structured** (a gate dim, a background block,
-  one block per group, learned cross-terms gate↔background and gate↔group, and group↔group'
-  never co-active → kept at prior). Σ is the covariance of the stick logits (an order-
-  dependent reparameterization of the current STM's R — refit, not transferred).
+- **Correlated Gaussian prior on the full stick vector** ψ_d = [ψ_bg (B−1); per group g:
+  ψ_gate_g (1), ψ_fg_g (m_g−1)] ~ Normal(Γᵀx_d, Σ), total dimension **K−1**. A group-g doc's
+  E-step runs on the ACTIVE sub-vector [ψ_bg, ψ_gate_g, ψ_fg_g] — exactly |allowed|−1 sticks;
+  the other groups' (gate+foreground) sticks are inactive. Γ carries continuous covariates;
+  Σ is **block-structured**: a shared background block (B−1), one block per group ([gate_g,
+  fg_g], m_g×m_g), learned background↔group cross-terms, and group↔group' never co-active →
+  kept at prior. Σ is the covariance of the stick logits (an order-dependent reparameterization
+  of the current STM's R — refit, not transferred).
 - **Tokens:** z_{d,n} ~ Categorical(θ_d); w_{d,n} ~ Categorical(β_{z}). β is (K×V).
 - **Pólya-Gamma augmentation** (Polson, Scott & Windle 2013): the counts factor into binomials
   — the **gate** (N_bg "successes" out of N total), plus flat within-block stick-breaking
@@ -72,8 +74,8 @@ Two consequences, both accepted:
 - **No reference topic.** Nested stick-breaking is inherently identified (the gate + each
   block's flat stick-breaking are all bijective), so the softmax translation gauge — and the
   reference-topic pin that fixed it — disappears. The full stick vector has dimension
-  **K − G** (1 gate + (B−1) background + Σ_g(m_g−1) foreground, for G groups); Σ and Γ are
-  (K−G)-dimensional. No pinned coordinate, no `Γ[:,0]≈0` special-casing.
+  **K − 1** ((B−1) background + Σ_g(1 gate + m_g−1) per group = K−1); a group-g doc uses
+  |allowed|−1 of them. Σ and Γ are (K−1)-dimensional. No pinned coordinate, no `Γ[:,0]≈0`.
 - **Σ prior = Inverse-Wishart** (this sub-project). Conjugate to the Gaussian → closed-form
   Σ update in both the VI kernel and the Gibbs cross-check; proper → a genuine trust region
   that tests the runaway-cure with the least new machinery. Block-structured to honor gating
@@ -89,7 +91,7 @@ Two consequences, both accepted:
 full corpus, so sub-project #2 is "the same updates, minibatched + `treeReduce`-d with a
 Robbins-Monro ρ," no algorithm rework. Coordinate ascent over q(z)q(ψ)q(ω)q(β)q(Γ)q(Σ):
 
-All operate on the doc's ACTIVE stick vector [ψ_gate, ψ_bg, ψ_fg_g] and the block-Σ marginal
+All operate on the doc's ACTIVE stick vector [ψ_bg, ψ_gate_g, ψ_fg_g] and the block-Σ marginal
 over those dims (mirroring the current gated STM's marginal-precision E-step):
 
 - ω_d | ψ_d → Pólya-Gamma (closed form) — per gate + per within-block stick
