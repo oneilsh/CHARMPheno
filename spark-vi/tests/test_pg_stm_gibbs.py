@@ -68,6 +68,26 @@ def test_gibbs_recovers_planted():
     assert planted_recovery(out["beta"], planted["beta"]) >= 0.75
 
 
+def test_gibbs_beta_fixed_pins_topics_and_is_not_resampled():
+    """condition-on-beta read-out (queue item 4): when ``beta_fixed`` is given,
+    the sampler holds beta constant (never redraws it) and samples only the
+    latents/Gamma/Sigma. Fixing beta pins topic identity through the token
+    assignment step, which is the fix for the label-switching that confounds a
+    free full-Gibbs Sigma read-out. The returned beta must be exactly the fixed
+    beta, and Sigma must remain a valid PD covariance."""
+    docs, planted, part = _corpus(bg_k=4, seed=1)
+    P = docs[0].x.shape[0]
+    beta_fixed = planted["beta"].copy()
+    out = pg_stm_gibbs(docs, K=part.K, V=60, partition=part, P=P,
+                       n_iter=120, burn=60, seed=0, beta_fixed=beta_fixed)
+    # beta held constant -> post-burn mean equals the fixed beta (up to the fp
+    # accumulation of summing the same array n_kept times then dividing)
+    assert np.allclose(out["beta"], beta_fixed, rtol=0, atol=1e-12)
+    S = out["Sigma"]
+    assert np.allclose(S, S.T, atol=1e-8)
+    assert np.linalg.eigvalsh(S).min() > 0
+
+
 @pytest.fixture(scope="module")
 def vi_gibbs_bgk4():
     """VI + Gibbs fit on a bg_k=4 corpus -> B=4 background topics -> a genuine 3x3

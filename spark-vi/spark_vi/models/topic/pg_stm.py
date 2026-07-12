@@ -577,7 +577,8 @@ def _draw_block_sigma(S, layout, partition, group_counts, D, *, Psi0_scale, nu0,
 
 
 def pg_stm_gibbs(docs, K, V, partition, *, P, n_iter=400, burn=200, seed=0,
-                 Psi0_scale=1.0, nu0=None, gamma_ridge=1e-6, beta_eta=0.1):
+                 Psi0_scale=1.0, nu0=None, gamma_ridge=1e-6, beta_eta=0.1,
+                 beta_fixed=None):
     """Exact blocked PG-Gibbs sampler over the gated nested stick-breaking
     logistic-normal topic model — the audit that validates PGSTMVI's mean-field
     delta-method and block-Sigma posterior (design 2026-07-11-pg-stm-inference-core-design.md).
@@ -615,8 +616,19 @@ def pg_stm_gibbs(docs, K, V, partition, *, P, n_iter=400, burn=200, seed=0,
     bg_sticks = layout["bg_sticks"]
 
     # --- globals init (mirror PGSTMVI.fit) --------------------------------- #
-    beta = rng.random((K, V)) + beta_eta
-    beta /= beta.sum(axis=1, keepdims=True)
+    # ``beta_fixed`` (queue item 4: condition-on-VI-beta read-out) holds the
+    # topic-word distributions constant, pinning topic identity through the
+    # token-assignment step so the Sigma read-out is not confounded by
+    # label-switching across/within sweeps. When None, beta is sampled (the
+    # free full-Gibbs cross-check).
+    fix_beta = beta_fixed is not None
+    if fix_beta:
+        beta = np.asarray(beta_fixed, dtype=np.float64)
+        if beta.shape != (K, V):
+            raise ValueError(f"beta_fixed must have shape {(K, V)}, got {beta.shape}")
+    else:
+        beta = rng.random((K, V)) + beta_eta
+        beta /= beta.sum(axis=1, keepdims=True)
     Gamma = np.zeros((P, Ksm1))
     Sigma = np.eye(Ksm1)
 
@@ -705,9 +717,11 @@ def pg_stm_gibbs(docs, K, V, partition, *, P, n_iter=400, burn=200, seed=0,
             S[np.ix_(active, active)] += np.outer(e_active, e_active)
 
         # --- global draws ------------------------------------------------- #
-        # beta: conjugate Dirichlet draw per topic (a draw is more correct for Gibbs)
-        for k in range(K):
-            beta[k] = rng.dirichlet(word_topic_counts[k] + beta_eta)
+        # beta: conjugate Dirichlet draw per topic (a draw is more correct for
+        # Gibbs) UNLESS beta is held fixed (condition-on-VI-beta read-out).
+        if not fix_beta:
+            for k in range(K):
+                beta[k] = rng.dirichlet(word_topic_counts[k] + beta_eta)
         # Gamma: ridge point on the sampled psi (consistent with Task 6)
         Gamma = _gamma_ridge_fit(M, X, ridge=gamma_ridge)
         # Sigma: block inverse-Wishart draw
