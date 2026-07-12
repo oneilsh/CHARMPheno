@@ -65,7 +65,7 @@ real cancer/dementia corpus — same gated nested stick-breaking model, same E-s
 
 ## Run
 
-`make exp ID=50` (after adding `polyagamma==2.0.2` to the cluster image). Then compare the
+`make exp ID=50`. Then compare the
 `sigma_max_trace` / final Σ eigmin / max|Σ| / Cholesky status against exp 0051 (mle), and
 record whether IW cures the runaway at scale. If confirmed, write the insight.
 

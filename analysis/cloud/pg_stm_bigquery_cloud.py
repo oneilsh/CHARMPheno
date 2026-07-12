@@ -16,7 +16,8 @@ manifest.json. Dashboard export is sub-project 3, not here.
 
 NOTE: this driver's end-to-end BigQuery path is exercised on the CLUSTER (make exp
 ID=50/51); the engine it calls (StreamingPGSTM, pg_stm_sigma_readout) is unit-validated
-locally. polyagamma must be on the cluster image.
+locally. The Pólya-Gamma sampler is pure-numpy (spark_vi.models.topic._pg) — NO native
+polyagamma dependency on any node.
 """
 from __future__ import annotations
 
