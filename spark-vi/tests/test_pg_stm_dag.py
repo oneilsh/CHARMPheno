@@ -297,3 +297,40 @@ def test_fit_routes_background_only_docs_and_they_inform_the_design():
     assert out["beta"].shape == (part.K, 40)
     assert out["Sigma"].shape == (part.K - 1, part.K - 1)
     assert np.isfinite(out["beta"]).all() and np.isfinite(out["Sigma"]).all()
+
+
+def test_background_only_corpus_recovers_planted_background():
+    """PLANTED: a pure background-only corpus (no groups, flat background stick-breaking
+    theta_bg = stick_to_simplex(psi_bg), psi_bg ~ N(0, sigma_true[bg,bg])) on a planted
+    background beta. REAL: nothing. Synthetic -> MATH-CORRECTNESS: fitting a
+    background-only-only corpus with PGSTMDag recovers the planted BACKGROUND topics by
+    block-mass (planted_recovery, the DAG suite's standard measure), validating the flat
+    E-step end-to-end and its consistency with the shared background block. Recovers 4 of
+    5 planted background topics; the 5th is the LEAST-ATTESTED topic (mean-0 stick-breaking
+    under-weights later sticks, so the last background topic receives little corpus mass) —
+    an attestation/information property of the plant, NOT an estimator limitation of the
+    flat E-step (insight 0053). Does NOT prove gated-mixture behavior or transfer to real
+    data."""
+    import numpy as np
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    from spark_vi.models.topic.pg_stm_dag import DagGate, PGSTMDag
+    from tests._stm_synth import dag_offset_corpus, real_beta_from, planted_recovery
+    part = TopicBlockPartition(group_var="g", background_k=5, foreground=(("A", 3),))
+    K, V = part.K, 60
+    beta = real_beta_from(K, V, seed=1)
+    dag = DagGate([(), (0,)])
+    Ksm1 = K - 1
+    node_offsets = {0: np.zeros(Ksm1), 1: np.zeros(Ksm1)}
+    docs, doc_nodes = dag_offset_corpus(
+        dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+        node_of_group={"A": 1}, doc_nodes_plan={}, n_background_only=400,
+        sigma_true=2.0 * np.eye(Ksm1), doc_len=60, seed=3)
+    assert len(docs) == 400 and all(d.groups == frozenset() for d in docs)
+    out = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=1, n_iter=40, seed=0).fit(docs, doc_nodes)
+    # Recovery measured by BLOCK-MASS (planted_recovery, the DAG suite's standard
+    # attestation-robust measure): does some fitted background topic put >= 0.5 mass on
+    # each planted background topic's high-probability word block? Single-word argmax is
+    # NOT used here: it is tie-break-brittle under topic overlap and conflates recovery
+    # with the stick-breaking attestation skew below.
+    rec = planted_recovery(out["beta"][:part.background_k], beta[:part.background_k])
+    assert rec >= 4, f"flat path did not recover the attested background topics: {rec}/5"
