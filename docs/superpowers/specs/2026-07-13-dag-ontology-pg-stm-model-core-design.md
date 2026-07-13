@@ -58,6 +58,18 @@ reachable). This spec builds the model core that makes that pooling structure re
 the closure-indicator M-step, the `DagGate` input structure, and the four validation
 tests (Section: Validation).
 
+**v1 split (decided at planning, 2026-07-13).** The construction has two separable pieces.
+*Piece A — mean-offsets:* subtype/intermediate nodes contribute only a **mean shift** on
+the topics their anchor already owns (no new topics), so the model is the existing PG-STM
+with an **augmented covariate** `w_d = [x_d ; closure_indicator_d]`, coefficient `[Γ ; B]`,
+and a depth-scaled penalty on `B` — the E-step, Σ, β, and gate are reused unchanged and the
+gate/Σ-composition risk below **does not arise**. *Piece B — node-owned topics:* letting a
+subtype own *distinct* topics is what forces the multi-level gate/Σ composition (the flagged
+risk). **This spec's first plan implements Piece A only** (`docs/superpowers/plans/2026-07-13-
+dag-ontology-pg-stm-model-core.md`); Piece B is a follow-on plan. Piece A pools topic-*usage
+levels* across the closure and delivers the fallback/coverage guarantees; the scarce-block
+**Σ**-rescue that motivated the pivot is the later read-out-honesty spec, not Piece A.
+
 **Out (each a later spec):** the OMOP DAG-builder (real `concept_ancestor` + leaf list →
 `DagGate`); the read-out honesty layer (shipped posterior intervals over Σ; LKJ/half-t
 priors on gated blocks); the soft-gate for unlabeled documents (prevalence / MNAR /
