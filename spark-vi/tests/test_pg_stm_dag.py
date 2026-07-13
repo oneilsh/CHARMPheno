@@ -165,50 +165,69 @@ def test_fallback_spurious_node_offset_shrinks_to_near_zero():
         f"spurious node did not deactivate: norms={norms}"
 
 
-def test_offset_interval_widths_order_scarce_above_populated():
-    """PLANTED: node offsets + Sigma on root->anchor->{populated subtype, scarce subtype},
-    with anchor-only docs so both subtype increments are IDENTIFIED. REAL: overlap beta.
-    Realistic-overlap synthetic -> MATH-CORRECTNESS (RELATIVE uncertainty only): the ridge-
-    posterior interval WIDTHS on the identified subtype increments ORDER correctly -- the
-    data-scarce subtype's interval is WIDER than the well-populated subtype's (ratio > 1.5).
-    We assert the ORDERING, NOT absolute coverage: a coverage probe (offsets redrawn per rep,
-    near-real config) measured coverage ~0.13 vs nominal 0.90 -- the ridge-conditional posterior
-    is built from mean-field-biased psi-means and is severely OVERconfident absolutely, so
-    calibrated intervals are deferred to the read-out-honesty spec (insight 0051). We measure
-    increments (subtype-vs-anchor), NOT the individual anchor offsets, which are un-identified
-    under a partitioning gate (dummy trap, insight 0050) and carry no sample-size signal. Does
-    NOT prove absolute coverage anywhere, nor transfer to real data (Task 7's spurious-edge
-    check is the transfer-side guard). The width ratio depends only on the fixed design moments
-    (Ainv from doc-counts), so it is stable across seeds/iterations."""
+def test_offset_uncertainty_is_ordinal_ranks_scarce_above_populated():
+    """PLANTED: node offsets + Sigma on root->anchor->{populated subtype, scarce subtype}
+    with anchor-only docs so both increments are identified. REAL: overlap beta.
+    Realistic-overlap synthetic -> MATH-CORRECTNESS (RELATIVE uncertainty only): the ordinal
+    read-out ranks the data-scarce subtype as LESS resolved than the populated subtype
+    (rank[scarce] > rank[populated]) and its calibration status is 'ordinal'. Rank is a
+    design-moment property (independent of sigma^2 / iterations). We assert ORDERING, not
+    absolute coverage: those intervals are overconfident (~0.13 vs 0.90, insight 0051) and
+    calibrated absolute intervals are deferred to the read-out-honesty engine. Anchor
+    offsets are un-identified under a partitioning gate (dummy trap, insight 0050) so we
+    measure identified subtype increments. Does NOT prove absolute coverage or transfer."""
     from spark_vi.models.topic.partition import TopicBlockPartition
     part = TopicBlockPartition(group_var="g", background_k=6, foreground=(("A", 4), ("B", 4)))
     K, V = part.K, 120
-    # 0 root; 1 anchor(A), 2 anchor(B); 3,4 = subtypes under anchor 1 (populated / scarce)
-    dag = DagGate([(), (0,), (0,), (1,), (1,)])
+    dag = DagGate([(), (0,), (0,), (1,), (1,)])       # 0 root; 1,2 anchors; 3,4 subtypes under 1
     Ksm1 = K - 1
-    lay = stick_layout(part)
-    aA = lay["groups"]["A"]["active"]
-    wide_pop = []; wide_scarce = []
+    ranks_scarce = []; ranks_pop = []
     for rep in range(3):
         beta = real_beta_from(K, V, seed=200 + rep)
         rng = np.random.default_rng(9 + rep)
-        node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1),
-                        2: rng.standard_normal(Ksm1), 3: rng.standard_normal(Ksm1),
-                        4: rng.standard_normal(Ksm1)}
+        node_offsets = {u: rng.standard_normal(Ksm1) for u in (1, 2, 3, 4)}
+        node_offsets[0] = np.zeros(Ksm1)
         docs, doc_nodes = dag_offset_corpus(
             dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
             node_of_group={"A": 1, "B": 2},
-            # anchor-A-only docs (node 1) identify the subtype increments; node 3 populated
-            # (240) vs node 4 scarce (24, 10x fewer); node 2 keeps group B's block populated.
-            doc_nodes_plan={1: 120, 2: 120, 3: 240, 4: 24},
+            doc_nodes_plan={1: 120, 2: 120, 3: 240, 4: 24},   # node 3 populated, node 4 scarce
             sigma_true=3.0 * np.eye(Ksm1), doc_len=50, seed=100 + rep)
         out = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=docs[0].x.shape[0],
                        n_iter=25, lam_base=1e-3, seed=rep).fit(docs, doc_nodes)
-        sd = np.sqrt(out["offset_cov_diag"])            # (U, K-1)
-        wide_pop.append(float(np.mean(sd[3][aA])))       # populated subtype
-        wide_scarce.append(float(np.mean(sd[4][aA])))    # scarce subtype
-    ratio = np.mean(wide_scarce) / np.mean(wide_pop)
-    assert ratio > 1.5, f"scarce subtype interval not wider than populated (ratio={ratio:.2f})"
+        ou = out["offset_uncertainty"]
+        assert ou["calibration"] == "ordinal"
+        assert "offset_cov_diag" not in out               # no raw widths exported
+        ranks_pop.append(int(ou["rank"][3])); ranks_scarce.append(int(ou["rank"][4]))
+    assert np.mean(ranks_scarce) > np.mean(ranks_pop), (
+        f"scarce subtype not ranked less-resolved: scarce={ranks_scarce} pop={ranks_pop}")
+
+
+def test_identified_flag_true_for_populated_false_for_zero_doc_node():
+    """PLANTED: offsets on root->2 anchors, one anchor's subtype well-populated, plus a
+    ZERO-doc extra node. REAL: overlap beta. Realistic-overlap synthetic -> MATH-CORRECTNESS:
+    the `identified` flag is True for a well-populated distinct node (data halves the prior
+    variance) and False for a node with no attesting documents (posterior variance == prior
+    variance, ratio 1). Proves the flag distinguishes data-identified from prior-dominated
+    offsets. Does NOT prove real-data identifiability or transfer."""
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition(group_var="g", background_k=6, foreground=(("A", 4), ("B", 4)))
+    K, V = part.K, 120
+    dag = DagGate([(), (0,), (0,), (1,), (1,)])       # node 4 will attest NO documents
+    Ksm1 = K - 1
+    rng = np.random.default_rng(3)
+    node_offsets = {u: rng.standard_normal(Ksm1) for u in (1, 2, 3)}
+    node_offsets[0] = np.zeros(Ksm1); node_offsets[4] = np.zeros(Ksm1)
+    beta = real_beta_from(K, V, seed=7)
+    docs, doc_nodes = dag_offset_corpus(
+        dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+        node_of_group={"A": 1, "B": 2},
+        doc_nodes_plan={1: 200, 2: 200, 3: 300},          # node 4 absent -> zero-doc column
+        sigma_true=3.0 * np.eye(Ksm1), doc_len=50, seed=5)
+    out = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=docs[0].x.shape[0],
+                   n_iter=25, lam_base=1e-3, seed=0).fit(docs, doc_nodes)
+    ident = out["offset_uncertainty"]["identified"]
+    assert ident[3] == True, "well-populated subtype should be data-identified"
+    assert ident[4] == False, "zero-doc node should be prior-dominated"
 
 
 from spark_vi.models.topic.pg_stm_dag import inject_spurious_edges

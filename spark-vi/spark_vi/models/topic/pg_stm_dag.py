@@ -3,8 +3,10 @@
 A document's mean logits gain an additive term summed over its ancestral closure in
 an is-a DAG: mu_d = Gamma^T x_d + sum_{u in closure(v_d)} eta_u. v1 realizes eta_u as a
 MEAN SHIFT only (nodes own no new topics), so the model is the existing PG-STM with an
-augmented covariate w_d = [x_d ; closure_indicator_d] and coefficient [Gamma ; B], plus
-a depth-scaled ridge penalty on B. See docs/superpowers/plans/2026-07-13-dag-ontology-
+augmented covariate w_d = [x_d ; offset_indicator_d] (the NON-root closure indicator;
+the root column is dropped because it equals the covariate intercept) and coefficient
+[Gamma ; B_nonroot], plus a depth-scaled ridge penalty on B_nonroot. The fitted B is
+node-id-indexed with B[root] = 0. See docs/superpowers/plans/2026-07-13-dag-ontology-
 pg-stm-model-core.md and the spec it implements.
 """
 from __future__ import annotations
@@ -117,8 +119,10 @@ def root_only_dag() -> DagGate:
 class PGSTMDag:
     """Gated PG-STM with an additive mean-offset summed over each document's ancestral
     closure (v1: mean shift only). Realized as PGSTMVI on an augmented covariate
-    w_d = [x_d ; closure_indicator_d] with coefficient [Gamma ; B] and a depth-scaled
-    ridge penalty on B. Gate / Sigma / beta / E-step are pg_stm's, unchanged."""
+    w_d = [x_d ; offset_indicator_d] (the NON-root closure indicator) with coefficient
+    [Gamma ; B_nonroot] and a depth-scaled ridge penalty on B_nonroot. The fitted B
+    returned by fit() is node-id-indexed with B[root] = 0. Gate / Sigma / beta / E-step
+    are pg_stm's, unchanged."""
 
     def __init__(self, K, V, partition, dag, *, P, n_iter=200, gamma_ridge=1e-6,
                  lam_base=1.0, gamma_depth=1.0, Psi0_scale=1.0, nu0=None, beta_eta=0.1,
@@ -171,26 +175,39 @@ class PGSTMDag:
                                    sigma_mode=self.sigma_mode, Psi0_scale=self.Psi0_scale,
                                    nu0=self.nu0)
         Gamma = Cf[:self.P]
-        B_nonroot = Cf[self.P:]                             # (U_off, K-1) for nodes 1..U-1
-        B = np.zeros((self.U, Ksm1))                        # node-id-indexed; root row 0 stays 0
-        B[1:] = B_nonroot
-        # RELATIVE-uncertainty read-out only: sigma2 * (XtX+diag(penalty))^-1 at the VI psi-mean.
-        # NOT calibrated for absolute coverage -- it omits psi posterior uncertainty AND is blind
-        # to mean-field bias in the psi-means, so absolute coverage collapses (~0.13, insight 0051).
-        # Only the cross-node WIDTH ORDERING (scarce wider) is trustworthy; calibrated absolute
-        # intervals are the read-out-honesty spec's job.
-        resid = psi_mean - self._design(docs_aug) @ Cf    # (D, K-1) on active-filled psi_mean
-        sigma2 = max(float(np.mean(resid ** 2)), 1e-8)
+        B_nonroot = Cf[self.P:]
+        B = np.zeros((self.U, Ksm1)); B[1:] = B_nonroot
+        # Ordinal (RELATIVE) read-out. rank / parent_ratio / the identified ratio all cancel
+        # the global sigma^2, so no residual-scale estimate is needed. NOT calibrated for
+        # absolute coverage (built from mean-field-biased psi-means; ~0.13 vs 0.90, insight
+        # 0051); calibrated absolute intervals are the read-out-honesty engine's job (0052).
         Ainv = np.linalg.inv(stats["XtX"] + np.diag(penalty))
-        var_nonroot = sigma2 * np.diag(Ainv)[self.P:]       # (U_off,)
-        var_by_node = np.zeros(self.U); var_by_node[1:] = var_nonroot   # root=0
-        offset_cov_diag = np.repeat(var_by_node[:, None], Ksm1, axis=1) # (U, K-1) node-indexed
+        ainv_off = np.diag(Ainv)[self.P:]                 # (U_off,) proportional to node variance
+        pen_off = penalty[self.P:]
+        # fraction of prior variance remaining after the data (shrinkage factor); a heuristic
+        # threshold of 0.5 flags "data at least halved the prior variance" as identified.
+        remaining = pen_off * ainv_off                    # sigma^2 cancels
+        var_full = np.full(self.U, np.inf); var_full[1:] = ainv_off   # root has no offset variance
+        # 1-based uncertainty rank among non-root nodes (1 = smallest variance = most resolved)
+        order = np.argsort(ainv_off, kind="stable")
+        rank_nonroot = np.empty(self.U_off, dtype=np.int64)
+        rank_nonroot[order] = np.arange(1, self.U_off + 1)
+        rank = np.zeros(self.U, dtype=np.int64); rank[1:] = rank_nonroot
+        identified = np.zeros(self.U, dtype=bool); identified[1:] = remaining < 0.5
+        parent_ratio = np.full(self.U, np.nan)
+        for u in range(1, self.U):
+            ps = self.dag.parents[u]
+            if not ps:
+                continue
+            p = min(ps, key=lambda q: (int(self.dag.depth[q]), q))   # min-depth parent (tiebreak id)
+            if p == 0:
+                continue                                   # parent is root -> no offset variance
+            parent_ratio[u] = var_full[u] / var_full[p]
+        offset_uncertainty = {"calibration": "ordinal", "rank": rank,
+                              "parent_ratio": parent_ratio, "identified": identified}
         return {"beta": beta, "Gamma": Gamma, "B": B, "Sigma": Sigma,
                 "node_norms": np.linalg.norm(B, axis=1),
-                "offset_cov_diag": offset_cov_diag, "psi_mean": psi_mean}
-
-    def _design(self, docs_aug):
-        return np.stack([np.asarray(d.x, dtype=np.float64) for d in docs_aug])
+                "offset_uncertainty": offset_uncertainty, "psi_mean": psi_mean}
 
 
 def inject_spurious_edges(dag, extra_parents):
