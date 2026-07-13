@@ -4,6 +4,7 @@ from spark_vi.models.topic.pg_stm_dag import DagGate, offset_penalty, dag_offset
 
 
 def test_dag_closure_and_indicator_over_two_levels():
+    """Deterministic structure check; no empirical or transfer claim."""
     # 0=root; 1,2 anchors under root; 3 = subtype under anchor 1
     dag = DagGate([(), (0,), (0,), (1,)])
     assert dag.n_nodes == 4
@@ -15,6 +16,7 @@ def test_dag_closure_and_indicator_over_two_levels():
 
 
 def test_dag_diamond_shared_ancestor_counted_once():
+    """Deterministic structure check; no empirical or transfer claim."""
     # 3 has two parents 1 and 2, both under root 0 (a diamond)
     dag = DagGate([(), (0,), (0,), (1, 2)])
     assert dag.closure(frozenset({3})) == frozenset({3, 1, 2, 0})
@@ -22,22 +24,26 @@ def test_dag_diamond_shared_ancestor_counted_once():
 
 
 def test_dag_depth_is_shortest_root_distance():
+    """Deterministic structure check; no empirical or transfer claim."""
     dag = DagGate([(), (0,), (1,), (0, 2)])   # node 3 reachable via 0 (d=1) or via 2 (d=3)
     assert list(dag.depth) == [0, 1, 2, 1]    # shortest wins for node 3
 
 
 def test_dag_rejects_parent_index_not_less_than_child():
+    """Deterministic structure check; no empirical or transfer claim."""
     with pytest.raises(ValueError):
         DagGate([(), (2,), (0,)])             # node 1's parent 2 > 1 -> not topo-ordered
 
 
 def test_dag_dump_lists_nodes_with_depth_and_parents():
+    """Deterministic structure check; no empirical or transfer claim."""
     dag = DagGate([(), (0,), (1,)])
     d = dag.dump()
     assert d[2] == {"node": 2, "depth": 2, "parents": [1]}
 
 
 def test_offset_penalty_is_depth_scaled_on_node_block_only():
+    """Deterministic linear-algebra check; no empirical or transfer claim."""
     dag = DagGate([(), (0,), (1,)])            # depths 0,1,2
     pen = offset_penalty(P=2, dag=dag, gamma_ridge=1e-6, lam_base=2.0, gamma_depth=1.0)
     assert pen.shape == (2 + 3,)
@@ -46,6 +52,7 @@ def test_offset_penalty_is_depth_scaled_on_node_block_only():
 
 
 def test_dag_offset_ridge_recovers_well_posed_coefficients():
+    """Deterministic linear-algebra check; no empirical or transfer claim."""
     rng = np.random.default_rng(0)
     n, d, k = 500, 4, 3
     W = rng.standard_normal((n, d))
@@ -56,6 +63,7 @@ def test_dag_offset_ridge_recovers_well_posed_coefficients():
 
 
 def test_dag_offset_ridge_shrinks_an_unconstrained_column_to_zero():
+    """Deterministic linear-algebra check; no empirical or transfer claim."""
     # design column 3 is all-zero (a "never-active" node) -> its coeff row must go ~0
     rng = np.random.default_rng(1)
     n, k = 400, 2
@@ -211,7 +219,7 @@ def test_inject_spurious_edges_adds_random_leaves_and_shrinks_on_replay():
     that on a planted corpus (offsets truly 0 on injected nodes) their norms shrink. This
     test is synthetic and asserts MATH-CORRECTNESS of the hook only."""
     base = DagGate([(), (0,), (0,)])
-    dag2 = inject_spurious_edges(base, extra_parents=[1, 2], seed=0)
+    dag2 = inject_spurious_edges(base, extra_parents=[1, 2])
     assert dag2.n_nodes == 5                                    # 2 injected leaves
     assert dag2.parents[3] in ((1,), (2,)) and dag2.parents[4] in ((1,), (2,))
     # injected nodes attest no documents -> their offset columns are never active -> ~0

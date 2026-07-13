@@ -9,9 +9,15 @@ pg-stm-model-core.md and the spec it implements.
 """
 from __future__ import annotations
 
+import dataclasses
 from typing import Sequence
 
 import numpy as np
+
+from spark_vi.models.topic.pg_stm import (
+    pg_empty_stats, pg_accumulate_doc, pg_estep_doc, beta_dirichlet_mean,
+    assemble_sigma, stick_layout,
+)
 
 
 class DagGate:
@@ -86,14 +92,6 @@ def dag_offset_ridge(WtW, WtM, *, penalty):
     WtW = np.asarray(WtW, dtype=np.float64)
     WtM = np.asarray(WtM, dtype=np.float64)
     return np.linalg.solve(WtW + np.diag(np.asarray(penalty, dtype=np.float64)), WtM)
-
-
-import dataclasses
-
-from spark_vi.models.topic.pg_stm import (
-    pg_empty_stats, pg_accumulate_doc, pg_estep_doc, beta_dirichlet_mean,
-    assemble_sigma, stick_layout,
-)
 
 
 def root_only_dag() -> DagGate:
@@ -174,12 +172,12 @@ class PGSTMDag:
         return np.stack([np.asarray(d.x, dtype=np.float64) for d in docs_aug])
 
 
-def inject_spurious_edges(dag, extra_parents, *, seed=0):
+def inject_spurious_edges(dag, extra_parents):
     """Return a new DagGate with one extra leaf node per entry in ``extra_parents`` (each
     value = the parent node id). Used by the real-data fallback check (Test 3b): inject
     random cross-edges into the real DAG, fit on the real corpus, and verify the injected
     offsets die (they are spurious BY CONSTRUCTION, so no planted truth is needed). The
-    real-corpus run is the OMOP-integration phase; this builds and unit-tests the
+    real-corpus run is the real-corpus integration phase; this builds and unit-tests the
     injector."""
     parents = [list(ps) for ps in dag.parents]
     for p in extra_parents:

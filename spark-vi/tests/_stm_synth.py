@@ -432,7 +432,6 @@ def real_beta_from(K, V, *, source=None, seed=0):
     if source is not None:
         import numpy as _np
         return _np.load(source)["beta"]
-    from math import isqrt  # noqa: F401  (kept for parity; not required)
     # borrow a realistic-overlap beta shaped (K, V)
     gw = {"A": 0.5, "B": 0.5}
     fg = max(1, (K - 2) // 2)
@@ -461,7 +460,6 @@ def dag_offset_corpus(*, dag, node_offsets, partition, beta, node_of_group,
     anchor_ids = set(node_of_group.values())
 
     def anchor_of(v):
-        cur = v
         chain = [v] + sorted(dag.ancestors(v))
         for c in chain:
             if c in anchor_ids:
