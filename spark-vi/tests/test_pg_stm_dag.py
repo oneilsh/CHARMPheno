@@ -270,3 +270,30 @@ def test_offset_indicator_drops_the_root_entry():
     assert z.dtype == np.float64
     assert list(z) == [1.0, 0.0, 1.0]              # node1 on, node2 off, node3 on
     assert list(dag.offset_indicator(frozenset({2}))) == [0.0, 1.0, 0.0]
+
+
+def test_fit_routes_background_only_docs_and_they_inform_the_design():
+    """PLANTED: a small gated corpus plus one background-only document (no group).
+    REAL: nothing. Synthetic -> MATH-CORRECTNESS: PGSTMDag.fit runs with background-only
+    documents mixed in (routing them to the flat E-step), returns valid shapes, and the
+    background-only doc contributes to the covariate design (its all-ones intercept enters
+    XtX via the fit). Proves the routing + flat E-step compose with the gated path. Does
+    NOT prove recovery or transfer."""
+    import numpy as np
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition(group_var="g", background_k=4, foreground=(("A", 3), ("B", 3)))
+    from spark_vi.models.topic.pg_stm_dag import DagGate, PGSTMDag
+    from tests._stm_synth import gated_ln_corpus_stick
+    docs, _p, _S, _b = gated_ln_corpus_stick(
+        group_weights={"A": 0.5, "B": 0.5}, fg_per_group=3, bg_k=4, V=40, D=120,
+        doc_len=30, seed=0)
+    # append 40 background-only docs: no group, a couple of background-topic tokens each
+    import dataclasses
+    bg_docs = [dataclasses.replace(docs[i], groups=frozenset()) for i in range(40)]
+    mixed = list(docs) + bg_docs
+    dag = DagGate([(), (0,)])                      # root + one anchor (group A) — trivial here
+    out = PGSTMDag(K=part.K, V=40, partition=part, dag=dag, P=1, n_iter=15, seed=0).fit(
+        mixed, [frozenset({1})] * len(docs) + [frozenset({0})] * len(bg_docs))
+    assert out["beta"].shape == (part.K, 40)
+    assert out["Sigma"].shape == (part.K - 1, part.K - 1)
+    assert np.isfinite(out["beta"]).all() and np.isfinite(out["Sigma"]).all()

@@ -19,7 +19,10 @@ import numpy as np
 from spark_vi.models.topic.pg_stm import (
     pg_empty_stats, pg_accumulate_doc, pg_estep_doc, beta_dirichlet_mean,
     assemble_sigma, stick_layout,
+    expected_log_theta, token_responsibilities, stick_trials, omega_expectation,
+    psi_posterior, _PSI_CLIP,
 )
+from spark_vi.models.topic._linalg import safe_inverse
 
 
 class DagGate:
@@ -116,6 +119,42 @@ def root_only_dag() -> DagGate:
     return DagGate([()])
 
 
+def _bg_estep_doc(doc, bg_lay, log_beta, Gamma, Sigma, *, K, inner_rounds, inner_tol):
+    """Flat (non-gated) background-only mean-field PG E-step for a document with no
+    foreground group. Uses only the background block: active = background sticks, allowed
+    = background topics, a flat stick-breaking (no gate stick). Returns the same
+    (m, V, phi, active, allowed, mu_active, n_clips) tuple as pg_estep_doc, so
+    pg_accumulate_doc consumes it identically. Reuses pg_stm's flat primitives unchanged;
+    it is pg_estep_doc with the gate term removed."""
+    active = bg_lay["active"]; allowed = bg_lay["allowed"]
+    Sigma_inv_active = safe_inverse(Sigma[np.ix_(active, active)])
+    mu_active = (Gamma.T @ doc.x)[active]
+    A = active.shape[0]
+    m = mu_active.copy()
+    V = np.eye(A)
+    phi = None
+    n_clips = 0
+    for _ in range(inner_rounds):
+        m_prev = m
+        vdiag = np.diag(V)
+        mc = np.clip(m, -_PSI_CLIP, _PSI_CLIP)
+        if not np.array_equal(mc, m):
+            n_clips += 1
+        elog_flat = expected_log_theta(mc, vdiag)          # (len(allowed),)
+        elog_theta = np.full(K, -np.inf)
+        elog_theta[allowed] = elog_flat
+        phi, n_full = token_responsibilities(
+            doc.indices, elog_theta, log_beta, allowed, counts=doc.counts)
+        n_allowed = n_full[allowed]
+        b_active = stick_trials(n_allowed)
+        c = np.sqrt(m ** 2 + vdiag)
+        omega = omega_expectation(b_active, c)
+        m, V = psi_posterior(n_allowed, b_active, mu_active, Sigma_inv_active, omega)
+        if np.max(np.abs(m - m_prev)) < inner_tol:
+            break
+    return m, V, phi, active, allowed, mu_active, n_clips
+
+
 class PGSTMDag:
     """Gated PG-STM with an additive mean-offset summed over each document's ancestral
     closure (v1: mean shift only). Realized as PGSTMVI on an augmented covariate
@@ -156,15 +195,23 @@ class PGSTMDag:
         D = len(docs_aug)
         psi_mean = np.zeros((D, Ksm1))
         stats = pg_empty_stats(K, V, Pw, self.partition.groups)   # bound for the read-out below
+        bg_lay = {"active": self.layout["bg_sticks"],
+                  "allowed": self.partition.background_indices().astype(np.int64)}
         for _ in range(self.n_iter):
             log_beta = np.log(beta)
             stats = pg_empty_stats(K, V, Pw, self.partition.groups)
             for d, doc in enumerate(docs_aug):
-                (g,) = tuple(doc.groups)
-                glay = self.layout["groups"][g]
-                m, Vd, phi, active, allowed, mu_active, _nc = pg_estep_doc(
-                    doc, glay, log_beta, Cf, Sigma, K=K, B=self.layout["B"],
-                    inner_rounds=self.inner_rounds, inner_tol=self.inner_tol)
+                gs = tuple(doc.groups)
+                if gs:
+                    (g,) = gs
+                    glay = self.layout["groups"][g]
+                    estep = pg_estep_doc(doc, glay, log_beta, Cf, Sigma, K=K,
+                                         B=self.layout["B"], inner_rounds=self.inner_rounds,
+                                         inner_tol=self.inner_tol)
+                else:
+                    estep = _bg_estep_doc(doc, bg_lay, log_beta, Cf, Sigma, K=K,
+                                          inner_rounds=self.inner_rounds, inner_tol=self.inner_tol)
+                m, Vd, phi, active, allowed, mu_active, _nc = estep
                 pg_accumulate_doc(stats, doc, (m, Vd, phi, active, allowed, mu_active), K=K)
                 psi_mean[d, active] = m
             beta = beta_dirichlet_mean(stats["wts"], eta=self.beta_eta)
