@@ -156,5 +156,19 @@ class PGSTMDag:
                                    sigma_mode=self.sigma_mode, Psi0_scale=self.Psi0_scale,
                                    nu0=self.nu0)
         Gamma, B = Cf[:self.P], Cf[self.P:]
+        # RELATIVE-uncertainty read-out only: sigma2 * (XtX+diag(penalty))^-1 at the VI psi-mean.
+        # NOT calibrated for absolute coverage -- it omits psi posterior uncertainty AND is blind
+        # to mean-field bias in the psi-means, so absolute coverage collapses (~0.13, insight 0051).
+        # Only the cross-node WIDTH ORDERING (scarce wider) is trustworthy; calibrated absolute
+        # intervals are the read-out-honesty spec's job.
+        resid = psi_mean - self._design(docs_aug) @ Cf    # (D, K-1) on active-filled psi_mean
+        sigma2 = max(float(np.mean(resid ** 2)), 1e-8)
+        Ainv = np.linalg.inv(stats["XtX"] + np.diag(penalty))
+        cov_diag_full = sigma2 * np.diag(Ainv)             # (P+U,)
+        offset_cov_diag = np.repeat(cov_diag_full[self.P:][:, None], Ksm1, axis=1)
         return {"beta": beta, "Gamma": Gamma, "B": B, "Sigma": Sigma,
-                "node_norms": np.linalg.norm(B, axis=1), "psi_mean": psi_mean}
+                "node_norms": np.linalg.norm(B, axis=1),
+                "offset_cov_diag": offset_cov_diag, "psi_mean": psi_mean}
+
+    def _design(self, docs_aug):
+        return np.stack([np.asarray(d.x, dtype=np.float64) for d in docs_aug])

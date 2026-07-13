@@ -153,3 +153,49 @@ def test_fallback_spurious_node_offset_shrinks_to_near_zero():
     # spurious node 3's offset must be much smaller than the earned anchors' offsets
     assert norms[3] < 0.25 * min(norms[1], norms[2]), \
         f"spurious node did not deactivate: norms={norms}"
+
+
+def test_offset_interval_widths_order_scarce_above_populated():
+    """PLANTED: node offsets + Sigma on root->anchor->{populated subtype, scarce subtype},
+    with anchor-only docs so both subtype increments are IDENTIFIED. REAL: overlap beta.
+    Realistic-overlap synthetic -> MATH-CORRECTNESS (RELATIVE uncertainty only): the ridge-
+    posterior interval WIDTHS on the identified subtype increments ORDER correctly -- the
+    data-scarce subtype's interval is WIDER than the well-populated subtype's (ratio > 1.5).
+    We assert the ORDERING, NOT absolute coverage: a coverage probe (offsets redrawn per rep,
+    near-real config) measured coverage ~0.13 vs nominal 0.90 -- the ridge-conditional posterior
+    is built from mean-field-biased psi-means and is severely OVERconfident absolutely, so
+    calibrated intervals are deferred to the read-out-honesty spec (insight 0051). We measure
+    increments (subtype-vs-anchor), NOT the individual anchor offsets, which are un-identified
+    under a partitioning gate (dummy trap, insight 0050) and carry no sample-size signal. Does
+    NOT prove absolute coverage anywhere, nor transfer to real data (Task 7's spurious-edge
+    check is the transfer-side guard). The width ratio depends only on the fixed design moments
+    (Ainv from doc-counts), so it is stable across seeds/iterations."""
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition(group_var="g", background_k=6, foreground=(("A", 4), ("B", 4)))
+    K, V = part.K, 120
+    # 0 root; 1 anchor(A), 2 anchor(B); 3,4 = subtypes under anchor 1 (populated / scarce)
+    dag = DagGate([(), (0,), (0,), (1,), (1,)])
+    Ksm1 = K - 1
+    lay = stick_layout(part)
+    aA = lay["groups"]["A"]["active"]
+    wide_pop = []; wide_scarce = []
+    for rep in range(3):
+        beta = real_beta_from(K, V, seed=200 + rep)
+        rng = np.random.default_rng(9 + rep)
+        node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1),
+                        2: rng.standard_normal(Ksm1), 3: rng.standard_normal(Ksm1),
+                        4: rng.standard_normal(Ksm1)}
+        docs, doc_nodes = dag_offset_corpus(
+            dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+            node_of_group={"A": 1, "B": 2},
+            # anchor-A-only docs (node 1) identify the subtype increments; node 3 populated
+            # (240) vs node 4 scarce (24, 10x fewer); node 2 keeps group B's block populated.
+            doc_nodes_plan={1: 120, 2: 120, 3: 240, 4: 24},
+            sigma_true=3.0 * np.eye(Ksm1), doc_len=50, seed=100 + rep)
+        out = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=docs[0].x.shape[0],
+                       n_iter=25, lam_base=1e-3, seed=rep).fit(docs, doc_nodes)
+        sd = np.sqrt(out["offset_cov_diag"])            # (U, K-1)
+        wide_pop.append(float(np.mean(sd[3][aA])))       # populated subtype
+        wide_scarce.append(float(np.mean(sd[4][aA])))    # scarce subtype
+    ratio = np.mean(wide_scarce) / np.mean(wide_pop)
+    assert ratio > 1.5, f"scarce subtype interval not wider than populated (ratio={ratio:.2f})"

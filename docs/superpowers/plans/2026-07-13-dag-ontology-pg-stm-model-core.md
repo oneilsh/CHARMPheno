@@ -547,55 +547,75 @@ def test_fallback_spurious_node_offset_shrinks_to_near_zero():
 
 ---
 
-### Task 6: Test 4 — offset-interval coverage (calibration honesty)
+### Task 6: Test 4 — offset-interval RELATIVE-uncertainty ordering (coverage deferred)
 
 **Files:**
-- Modify: `spark-vi/spark_vi/models/topic/pg_stm_dag.py` (add `offset_posterior_cov`)
+- Modify: `spark-vi/spark_vi/models/topic/pg_stm_dag.py` (add `offset_cov_diag` to `fit` + `_design`)
 - Test: `spark-vi/tests/test_pg_stm_dag.py`
 
+**SCOPE DECISION (user, insight 0051):** the ridge-conditional intervals are a **relative**
+read-out only. A coverage probe (offsets redrawn per rep, near-real config) measured absolute
+coverage ≈ 0.13 vs nominal 0.90 — the intervals are built from mean-field-biased ψ-means and are
+severely overconfident, so **no absolute-coverage assertion is made here** (calibrated intervals
+are deferred to the read-out-honesty spec). What IS robust and asserted: the interval-**width
+ordering** (data-scarce node wider than well-populated), which depends only on the fixed design
+moments (`Ainv` from doc-counts), so it is stable and cheap. Individual anchor offsets are
+un-identified under a partitioning gate (dummy trap, insight 0050) → the ordering is asserted on
+**identified subtype increments**, not anchors.
+
 **Interfaces:**
-- Produces: `PGSTMDag.fit` also returns `"offset_cov_diag"` (per node, per stick posterior variance of B) computed from the ridge normal-equations covariance `sigma2 * (WtW+diag(penalty))^{-1}` at the converged ψ mean. Coverage uses `B ± 1.645*sqrt(var)` (90%).
+- Produces: `PGSTMDag.fit` also returns `"offset_cov_diag"` (per node, per stick posterior
+  variance of B) from the ridge normal-equations covariance `sigma2 * (WtW+diag(penalty))^{-1}`
+  at the converged ψ mean. This is a **relative** interval-width read-out (see scope decision).
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # append to tests/test_pg_stm_dag.py
-def test_offset_interval_coverage_is_calibrated_well_populated_vs_scarce():
-    """PLANTED: node offsets + Sigma; REAL: overlap beta. Realistic-overlap synthetic ->
-    MATH-CORRECTNESS (calibration): the ridge-posterior 90% offset intervals cover the
-    planted offsets near 90%, and the SCARCE node's intervals are WIDER than the
-    well-populated node's. Reports coverage separately. Does NOT prove coverage on real
-    data (unmeasurable -> the real-data spurious-edge check, Task 7, is the transfer-side
-    guard)."""
+def test_offset_interval_widths_order_scarce_above_populated():
+    """PLANTED: node offsets + Sigma on root->anchor->{populated subtype, scarce subtype},
+    with anchor-only docs so both subtype increments are IDENTIFIED. REAL: overlap beta.
+    Realistic-overlap synthetic -> MATH-CORRECTNESS (RELATIVE uncertainty only): the ridge-
+    posterior interval WIDTHS on the identified subtype increments ORDER correctly -- the
+    data-scarce subtype's interval is WIDER than the well-populated subtype's (ratio > 1.5).
+    We assert the ORDERING, NOT absolute coverage: a coverage probe (offsets redrawn per rep,
+    near-real config) measured coverage ~0.13 vs nominal 0.90 -- the ridge-conditional posterior
+    is built from mean-field-biased psi-means and is severely OVERconfident absolutely, so
+    calibrated intervals are deferred to the read-out-honesty spec (insight 0051). We measure
+    increments (subtype-vs-anchor), NOT the individual anchor offsets, which are un-identified
+    under a partitioning gate (dummy trap, insight 0050) and carry no sample-size signal. Does
+    NOT prove absolute coverage anywhere, nor transfer to real data (Task 7's spurious-edge
+    check is the transfer-side guard). The width ratio depends only on the fixed design moments
+    (Ainv from doc-counts), so it is stable across seeds/iterations."""
     from spark_vi.models.topic.partition import TopicBlockPartition
     part = TopicBlockPartition(group_var="g", background_k=6, foreground=(("A", 4), ("B", 4)))
-    K, V = part.K, 300
-    beta = real_beta_from(K, V, seed=8)
-    dag = DagGate([(), (0,), (0,)])
+    K, V = part.K, 120
+    # 0 root; 1 anchor(A), 2 anchor(B); 3,4 = subtypes under anchor 1 (populated / scarce)
+    dag = DagGate([(), (0,), (0,), (1,), (1,)])
     Ksm1 = K - 1
-    rng = np.random.default_rng(9)
-    node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1), 2: rng.standard_normal(Ksm1)}
     lay = stick_layout(part)
-    covered = 0; total = 0
-    wide_scarce = []; wide_pop = []
-    for rep in range(8):
+    aA = lay["groups"]["A"]["active"]
+    wide_pop = []; wide_scarce = []
+    for rep in range(3):
+        beta = real_beta_from(K, V, seed=200 + rep)
+        rng = np.random.default_rng(9 + rep)
+        node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1),
+                        2: rng.standard_normal(Ksm1), 3: rng.standard_normal(Ksm1),
+                        4: rng.standard_normal(Ksm1)}
         docs, doc_nodes = dag_offset_corpus(
             dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
-            node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 600, 2: 60},   # B scarce
-            sigma_true=3.0 * np.eye(Ksm1), doc_len=80, seed=100 + rep)
+            node_of_group={"A": 1, "B": 2},
+            # anchor-A-only docs (node 1) identify the subtype increments; node 3 populated
+            # (240) vs node 4 scarce (24, 10x fewer); node 2 keeps group B's block populated.
+            doc_nodes_plan={1: 120, 2: 120, 3: 240, 4: 24},
+            sigma_true=3.0 * np.eye(Ksm1), doc_len=50, seed=100 + rep)
         out = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=docs[0].x.shape[0],
-                       n_iter=60, lam_base=1e-3, seed=rep).fit(docs, doc_nodes)
+                       n_iter=25, lam_base=1e-3, seed=rep).fit(docs, doc_nodes)
         sd = np.sqrt(out["offset_cov_diag"])            # (U, K-1)
-        aA, aB = lay["groups"]["A"]["active"], lay["groups"]["B"]["active"]
-        for nid, act in ((1, aA), (2, aB)):
-            lo = out["B"][nid][act] - 1.645 * sd[nid][act]
-            hi = out["B"][nid][act] + 1.645 * sd[nid][act]
-            truth = node_offsets[nid][act]
-            covered += int(np.sum((truth >= lo) & (truth <= hi))); total += act.size
-        wide_pop.append(np.mean(sd[1][aA])); wide_scarce.append(np.mean(sd[2][aB]))
-    cov = covered / total
-    assert 0.80 <= cov <= 0.98, f"offset-interval coverage {cov:.2f} not near nominal 0.90"
-    assert np.mean(wide_scarce) > 1.5 * np.mean(wide_pop), "scarce node not wider"
+        wide_pop.append(float(np.mean(sd[3][aA])))       # populated subtype
+        wide_scarce.append(float(np.mean(sd[4][aA])))    # scarce subtype
+    ratio = np.mean(wide_scarce) / np.mean(wide_pop)
+    assert ratio > 1.5, f"scarce subtype interval not wider than populated (ratio={ratio:.2f})"
 ```
 
 - [ ] **Step 2: Run test, verify fail** — FAIL (`offset_cov_diag` missing).
@@ -604,6 +624,11 @@ def test_offset_interval_coverage_is_calibrated_well_populated_vs_scarce():
 
 ```python
 # in PGSTMDag.fit, replace the return with (after computing Gamma, B):
+        # RELATIVE-uncertainty read-out only: sigma2 * (XtX+diag(penalty))^-1 at the VI psi-mean.
+        # NOT calibrated for absolute coverage -- it omits psi posterior uncertainty AND is blind
+        # to mean-field bias in the psi-means, so absolute coverage collapses (~0.13, insight 0051).
+        # Only the cross-node WIDTH ORDERING (scarce wider) is trustworthy; calibrated absolute
+        # intervals are the read-out-honesty spec's job.
         resid = psi_mean - self._design(docs_aug) @ Cf    # (D, K-1) on active-filled psi_mean
         sigma2 = max(float(np.mean(resid ** 2)), 1e-8)
         Ainv = np.linalg.inv(stats["XtX"] + np.diag(penalty))
@@ -621,11 +646,15 @@ and add a small helper on the class:
         return np.stack([np.asarray(d.x, dtype=np.float64) for d in docs_aug])
 ```
 
-*(This is the ridge-conditional posterior at the VI ψ-mean — an approximation that omits ψ uncertainty; the docstring/test say so. Σ posterior intervals are the read-out-honesty spec, not here.)*
+*(Ridge-conditional posterior at the VI ψ-mean — omits ψ uncertainty and mean-field bias, so it
+is a RELATIVE read-out only. Absolute-coverage calibration and Σ posterior intervals are the
+read-out-honesty spec, not here. See insight 0051.)*
 
-- [ ] **Step 4: Run test, verify pass** — PASS. (If coverage runs low because the ridge underestimates variance, that is a real finding — record the measured coverage in the test and note the ψ-uncertainty omission as the cause; do not widen the band arbitrarily.)
+- [ ] **Step 4: Run test, verify pass** — PASS (ratio ~2.0 > 1.5). The width ratio is n_iter- and
+  seed-independent (it depends only on the design moments), so a rough fit suffices; do not add an
+  absolute-coverage assertion (deferred, per the scope decision).
 
-- [ ] **Step 5: Commit** — `git commit -am "feat(dag): ridge-posterior offset intervals + coverage calibration test (Test 4)"`
+- [ ] **Step 5: Commit** — `git commit -am "feat(dag): ridge-posterior offset intervals (relative read-out) + scarce>populated width-ordering test (Test 4); coverage deferred (insight 0051)"`
 
 ---
 
