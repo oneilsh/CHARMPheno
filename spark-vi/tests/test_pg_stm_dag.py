@@ -199,3 +199,33 @@ def test_offset_interval_widths_order_scarce_above_populated():
         wide_scarce.append(float(np.mean(sd[4][aA])))    # scarce subtype
     ratio = np.mean(wide_scarce) / np.mean(wide_pop)
     assert ratio > 1.5, f"scarce subtype interval not wider than populated (ratio={ratio:.2f})"
+
+
+from spark_vi.models.topic.pg_stm_dag import inject_spurious_edges
+
+
+def test_inject_spurious_edges_adds_random_leaves_and_shrinks_on_replay():
+    """Mechanical check of the real-data fallback HOOK (Task-3b machinery). The real-data
+    RUN (inject into the OMOP DAG, fit on the real corpus, verify injected offsets die) is
+    the OMOP-integration phase; here we prove the injector produces valid extra leaves and
+    that on a planted corpus (offsets truly 0 on injected nodes) their norms shrink. This
+    test is synthetic and asserts MATH-CORRECTNESS of the hook only."""
+    base = DagGate([(), (0,), (0,)])
+    dag2 = inject_spurious_edges(base, extra_parents=[1, 2], seed=0)
+    assert dag2.n_nodes == 5                                    # 2 injected leaves
+    assert dag2.parents[3] in ((1,), (2,)) and dag2.parents[4] in ((1,), (2,))
+    # injected nodes attest no documents -> their offset columns are never active -> ~0
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition(group_var="g", background_k=6, foreground=(("A", 4), ("B", 4)))
+    K, V = part.K, 300
+    beta = real_beta_from(K, V, seed=10)
+    Ksm1 = K - 1; rng = np.random.default_rng(11)
+    node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1), 2: rng.standard_normal(Ksm1),
+                    3: np.zeros(Ksm1), 4: np.zeros(Ksm1)}
+    docs, doc_nodes = dag_offset_corpus(
+        dag=dag2, node_offsets=node_offsets, partition=part, beta=beta,
+        node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 300, 2: 300},   # nobody at 3,4
+        sigma_true=3.0 * np.eye(Ksm1), doc_len=80, seed=12)
+    out = PGSTMDag(K=K, V=V, partition=part, dag=dag2, P=docs[0].x.shape[0],
+                   n_iter=50, lam_base=1e-2, seed=0).fit(docs, doc_nodes)
+    assert out["node_norms"][3] < 1e-6 and out["node_norms"][4] < 1e-6

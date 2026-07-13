@@ -172,3 +172,16 @@ class PGSTMDag:
 
     def _design(self, docs_aug):
         return np.stack([np.asarray(d.x, dtype=np.float64) for d in docs_aug])
+
+
+def inject_spurious_edges(dag, extra_parents, *, seed=0):
+    """Return a new DagGate with one extra leaf node per entry in ``extra_parents`` (each
+    value = the parent node id). Used by the real-data fallback check (Test 3b): inject
+    random cross-edges into the real DAG, fit on the real corpus, and verify the injected
+    offsets die (they are spurious BY CONSTRUCTION, so no planted truth is needed). The
+    real-corpus run is the OMOP-integration phase; this builds and unit-tests the
+    injector."""
+    parents = [list(ps) for ps in dag.parents]
+    for p in extra_parents:
+        parents.append([int(p)])       # new leaf appended -> index > its parent, stays topo-ordered
+    return DagGate(parents)
