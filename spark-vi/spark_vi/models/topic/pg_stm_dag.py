@@ -67,6 +67,17 @@ class DagGate:
             z[u] = 1.0
         return z
 
+    @property
+    def n_offset_nodes(self) -> int:
+        """Number of non-root nodes (the offset block covers nodes 1..n_nodes-1; the root
+        column is dropped because it equals the covariate intercept)."""
+        return self.n_nodes - 1
+
+    def offset_indicator(self, nodes) -> np.ndarray:
+        """Closure indicator over the NON-root nodes (drops index 0). Length n_nodes-1,
+        entry i corresponds to node i+1."""
+        return self.closure_indicator(nodes)[1:]
+
     def dump(self) -> list[dict]:
         return [{"node": u, "depth": int(self.depth[u]), "parents": list(self.parents[u])}
                 for u in range(self.n_nodes)]

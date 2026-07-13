@@ -237,3 +237,15 @@ def test_inject_spurious_edges_adds_random_leaves_and_shrinks_on_replay():
     out = PGSTMDag(K=K, V=V, partition=part, dag=dag2, P=docs[0].x.shape[0],
                    n_iter=50, lam_base=1e-2, seed=0).fit(docs, doc_nodes)
     assert out["node_norms"][3] < 1e-6 and out["node_norms"][4] < 1e-6
+
+
+def test_offset_indicator_drops_the_root_entry():
+    """Deterministic structure check; no empirical or transfer claim. The offset design
+    omits the root column (it equals the covariate intercept), so offset_indicator is the
+    closure indicator over non-root nodes 1..U-1."""
+    dag = DagGate([(), (0,), (0,), (1,)])          # root; anchors 1,2; subtype 3 under 1
+    assert dag.n_offset_nodes == 3
+    z = dag.offset_indicator(frozenset({3}))       # closure {3,1,0}; drop root -> nodes 1,2,3
+    assert z.dtype == np.float64
+    assert list(z) == [1.0, 0.0, 1.0]              # node1 on, node2 off, node3 on
+    assert list(dag.offset_indicator(frozenset({2}))) == [0.0, 1.0, 0.0]
