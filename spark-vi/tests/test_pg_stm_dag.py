@@ -89,3 +89,40 @@ def test_pgstmdag_root_only_matches_flat_pgstmvi():
     assert np.allclose(out["beta"], vi["beta"], atol=2e-3)
     assert np.allclose(out["Sigma"], vi["Sigma"], atol=2e-3)
     assert out["B"].shape == (1, part.K - 1)                 # one node offset row
+
+
+from spark_vi.models.topic.pg_stm import stick_layout
+from tests._stm_synth import dag_offset_corpus, real_beta_from
+
+
+def test_offset_recovery_through_two_level_closure():
+    """PLANTED: node offsets on a root->anchor->subtype DAG + a planted Sigma. REAL: beta
+    (realistic overlap, topic_overlap=0.6) and doc-length distribution. Realistic-overlap
+    synthetic -> MATH-CORRECTNESS: given a known closure structure, PGSTMDag recovers the
+    planted node offsets (subtype offset separated from its anchor's) through a two-level
+    closure. Does NOT prove real-data offsets are recoverable, nor transfer."""
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition(group_var="g", background_k=6,
+                               foreground=(("A", 4), ("B", 4)))
+    K, V = part.K, 300
+    beta = real_beta_from(K, V, seed=2)
+    # DAG: 0 root; 1,2 anchors (= groups A,B); 3 = subtype under anchor 1
+    dag = DagGate([(), (0,), (0,), (1,)])
+    Ksm1 = K - 1
+    rng = np.random.default_rng(3)
+    node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1),
+                    2: rng.standard_normal(Ksm1), 3: rng.standard_normal(Ksm1)}
+    sigma_true = 3.0 * np.eye(Ksm1)
+    docs, doc_nodes = dag_offset_corpus(
+        dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+        node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 400, 2: 400, 3: 400},
+        sigma_true=sigma_true, doc_len=80, seed=4)
+    out = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=docs[0].x.shape[0],
+                   n_iter=60, lam_base=1e-3, gamma_depth=1.0, seed=0).fit(docs, doc_nodes)
+    B = out["B"]
+    # recovery is up to the root/intercept reparam; compare on the ACTIVE sticks of each
+    # node's own block via correlation of recovered vs planted subtype offset.
+    lay = stick_layout(part)
+    a1 = lay["groups"]["A"]["active"]
+    r = np.corrcoef(B[3][a1], node_offsets[3][a1])[0, 1]
+    assert r > 0.6, f"subtype offset not recovered through the 2-level closure (r={r:.2f})"

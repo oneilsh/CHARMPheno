@@ -423,6 +423,78 @@ def gated_ln_corpus_stick(*, group_weights, fg_per_group, bg_k, V, D, doc_len,
     return docs, part, Sigma_true, beta
 
 
+def real_beta_from(K, V, *, source=None, seed=0):
+    """Topic-word matrix (K,V) for DAG plants. If ``source`` names an export bundle, load
+    its beta (realistic overlap by construction). Otherwise (default) synthesize a
+    REALISTIC-OVERLAP beta via gated_ln_corpus_stick(topic_overlap=0.6) — the honest
+    stand-in until a real bundle is wired; the caller's test docstring must not claim
+    transfer from it."""
+    if source is not None:
+        import numpy as _np
+        return _np.load(source)["beta"]
+    from math import isqrt  # noqa: F401  (kept for parity; not required)
+    # borrow a realistic-overlap beta shaped (K, V)
+    gw = {"A": 0.5, "B": 0.5}
+    fg = max(1, (K - 2) // 2)
+    _d, _p, _S, beta = gated_ln_corpus_stick(
+        group_weights=gw, fg_per_group=fg, bg_k=K - 2 * fg, V=V, D=4, doc_len=10,
+        topic_overlap=0.6, seed=seed)
+    return beta[:K] if beta.shape[0] >= K else np.pad(beta, ((0, K - beta.shape[0]), (0, 0)))
+
+
+def dag_offset_corpus(*, dag, node_offsets, partition, beta, node_of_group,
+                      doc_nodes_plan, sigma_true, doc_len, seed):
+    """Plant additive node offsets on a DagGate and generate a gated corpus.
+
+    For a document at most-specific node v (anchor = the top-level node on v's root
+    path, mapped back to a partition group via ``node_of_group`` inverse), the mean over
+    its ACTIVE sticks is mu = sum_{u in closure(v)} node_offsets[u]; psi ~ N(mu[active],
+    sigma_true[active,active]); theta = gated_theta(psi split into bg/gate/fg); tokens ~
+    Multinomial(doc_len, theta @ beta). ``doc_nodes_plan`` maps node id -> #docs at that
+    node. Returns (docs, doc_nodes) with doc.groups = {anchor group} and doc_nodes[d] =
+    frozenset({v}). Domain-agnostic (integer ids only)."""
+    from spark_vi.models.topic.pg_stm import stick_layout, gated_theta
+    rng = np.random.default_rng(seed)
+    lay = stick_layout(partition)
+    group_of_node = {nid: g for g, nid in node_of_group.items()}
+    # anchor(v) = the child-of-root on v's path (the node whose parent chain hits an anchor id)
+    anchor_ids = set(node_of_group.values())
+
+    def anchor_of(v):
+        cur = v
+        chain = [v] + sorted(dag.ancestors(v))
+        for c in chain:
+            if c in anchor_ids:
+                return c
+        raise ValueError(f"node {v} has no anchor ancestor")
+
+    docs, doc_nodes = [], []
+    nb = len(lay["bg_sticks"])
+    for v, n_docs in doc_nodes_plan.items():
+        g = group_of_node[anchor_of(v)]
+        active = lay["groups"][g]["active"]
+        allowed = np.concatenate([partition.background_indices(),
+                                  partition.block_indices(g)]).astype(np.int64)
+        mu_full = np.zeros(partition.K - 1)
+        for u in dag.closure(frozenset({v})):
+            mu_full = mu_full + node_offsets[u]
+        mu_a = mu_full[active]
+        Sa = sigma_true[np.ix_(active, active)]
+        for _ in range(n_docs):
+            psi = rng.multivariate_normal(mu_a, Sa)
+            psi_bg, psi_gate, psi_fg = psi[:nb], psi[nb], psi[nb + 1:]
+            theta_allowed = gated_theta(psi_bg, psi_gate, psi_fg)
+            theta = np.zeros(partition.K); theta[allowed] = theta_allowed
+            toks = rng.choice(partition.beta_dim if hasattr(partition, "beta_dim") else beta.shape[1],
+                              size=doc_len, p=theta @ beta)
+            u_, c_ = np.unique(toks, return_counts=True)
+            docs.append(STMDocument(indices=u_.astype(np.int32), counts=c_.astype(np.float64),
+                                    length=int(c_.sum()), x=np.array([1.0]),
+                                    groups=frozenset({g})))
+            doc_nodes.append(frozenset({v}))
+    return docs, doc_nodes
+
+
 def fit_stm(docs, *, K, V, sigma_init, n_iter=250, batch=None, seed=42,
             partition=None, init_data=None, **model_kwargs):
     m = OnlineSTM(K=K, vocab_size=V, P=1, sigma_init=sigma_init,
