@@ -126,3 +126,30 @@ def test_offset_recovery_through_two_level_closure():
     a1 = lay["groups"]["A"]["active"]
     r = np.corrcoef(B[3][a1], node_offsets[3][a1])[0, 1]
     assert r > 0.6, f"subtype offset not recovered through the 2-level closure (r={r:.2f})"
+
+
+def test_fallback_spurious_node_offset_shrinks_to_near_zero():
+    """PLANTED: offsets on a TREE only (root, two anchors) with a SPURIOUS extra subtype
+    node whose true offset is 0. REAL: overlap beta. Realistic-overlap synthetic ->
+    MATH-CORRECTNESS: an unearned node's offset norm shrinks far below an earned node's
+    ('reduces to the simpler model where the data is tree-like'). Does NOT prove the
+    SURVIVING structure is correct, only that unearned structure deactivates."""
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition(group_var="g", background_k=6, foreground=(("A", 4), ("B", 4)))
+    K, V = part.K, 300
+    beta = real_beta_from(K, V, seed=5)
+    dag = DagGate([(), (0,), (0,), (1,)])            # node 3 = the spurious subtype
+    Ksm1 = K - 1
+    rng = np.random.default_rng(6)
+    node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1),
+                    2: rng.standard_normal(Ksm1), 3: np.zeros(Ksm1)}   # 3 is truly 0
+    docs, doc_nodes = dag_offset_corpus(
+        dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+        node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 400, 2: 400, 3: 200},
+        sigma_true=3.0 * np.eye(Ksm1), doc_len=80, seed=7)
+    out = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=docs[0].x.shape[0],
+                   n_iter=60, lam_base=1e-2, gamma_depth=1.0, seed=0).fit(docs, doc_nodes)
+    norms = out["node_norms"]
+    # spurious node 3's offset must be much smaller than the earned anchors' offsets
+    assert norms[3] < 0.25 * min(norms[1], norms[2]), \
+        f"spurious node did not deactivate: norms={norms}"
