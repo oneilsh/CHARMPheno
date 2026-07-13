@@ -84,14 +84,18 @@ class DagGate:
 
 
 def offset_penalty(P, dag, *, gamma_ridge, lam_base, gamma_depth):
-    """(P + n_nodes,) ridge penalty: ``gamma_ridge`` on each covariate row, and
-    ``lam_base * (1 + depth[u]) ** gamma_depth`` on each node-offset row. Depth-scaling
-    (deeper => larger penalty) encodes "prefer general explanations, specialize only on
-    evidence" (a structural, inspectable shrinkage; not an inference hyperparameter).
-    A node whose closure-indicator column is never active is pulled to 0 by its penalty."""
-    pen = np.empty(int(P) + dag.n_nodes, dtype=np.float64)
+    """(P + n_nodes-1,) ridge penalty: ``gamma_ridge`` on each covariate row, and
+    ``lam_base * (1 + depth[u]) ** gamma_depth`` on each NON-root node-offset row (nodes
+    1..n_nodes-1; the root column is dropped because it equals the covariate intercept).
+    Depth-scaling (deeper => larger penalty) encodes "prefer general explanations,
+    specialize only on evidence" (a structural, inspectable shrinkage; not an inference
+    hyperparameter) and softly attributes a no-direct-docs internal node's shared child
+    signal to the shallower ancestor. A node whose offset column is never active is pulled
+    to 0 by its penalty."""
+    pen = np.empty(int(P) + dag.n_offset_nodes, dtype=np.float64)
     pen[:P] = float(gamma_ridge)
-    pen[P:] = float(lam_base) * (1.0 + dag.depth.astype(np.float64)) ** float(gamma_depth)
+    depth_nonroot = dag.depth.astype(np.float64)[1:]
+    pen[P:] = float(lam_base) * (1.0 + depth_nonroot) ** float(gamma_depth)
     return pen
 
 

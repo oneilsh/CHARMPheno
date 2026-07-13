@@ -42,13 +42,14 @@ def test_dag_dump_lists_nodes_with_depth_and_parents():
     assert d[2] == {"node": 2, "depth": 2, "parents": [1]}
 
 
-def test_offset_penalty_is_depth_scaled_on_node_block_only():
-    """Deterministic linear-algebra check; no empirical or transfer claim."""
-    dag = DagGate([(), (0,), (1,)])            # depths 0,1,2
+def test_offset_penalty_is_depth_scaled_on_non_root_node_block():
+    """Deterministic linear-algebra check; no empirical or transfer claim. The penalty
+    excludes the root (its offset column is dropped) and depth-scales the non-root rows."""
+    dag = DagGate([(), (0,), (1,)])            # depths 0,1,2 ; non-root nodes 1,2 (depths 1,2)
     pen = offset_penalty(P=2, dag=dag, gamma_ridge=1e-6, lam_base=2.0, gamma_depth=1.0)
-    assert pen.shape == (2 + 3,)
-    assert np.allclose(pen[:2], 1e-6)          # covariates lightly ridged
-    assert np.allclose(pen[2:], [2.0 * 1, 2.0 * 2, 2.0 * 3])   # lam_base*(1+depth)
+    assert pen.shape == (2 + 2,)               # P covariate rows + (n_nodes-1) offset rows
+    assert np.allclose(pen[:2], 1e-6)
+    assert np.allclose(pen[2:], [2.0 * 2, 2.0 * 3])   # lam_base*(1+depth) for nodes 1,2
 
 
 def test_dag_offset_ridge_recovers_well_posed_coefficients():
