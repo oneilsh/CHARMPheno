@@ -88,6 +88,35 @@ def test_gibbs_beta_fixed_pins_topics_and_is_not_resampled():
     assert np.linalg.eigvalsh(S).min() > 0
 
 
+def test_gibbs_beta_init_warm_starts_but_still_samples_beta():
+    """co-sampling read-out (queue item 4, Fable round 3): ``beta_init`` warm-starts
+    beta (label anchor) but — unlike beta_fixed — keeps SAMPLING it, so beta can
+    relax off the warm start toward the data's posterior. Starting from a random
+    (wrong) beta, the sampled beta must MOVE away from the init and toward the
+    planted topics; Sigma stays PD."""
+    docs, planted, part = _corpus(bg_k=4, seed=1)
+    P = docs[0].x.shape[0]
+    rng = np.random.default_rng(9)
+    beta_init = rng.random((part.K, 60))
+    beta_init /= beta_init.sum(axis=1, keepdims=True)
+    out = pg_stm_gibbs(docs, K=part.K, V=60, partition=part, P=P,
+                       n_iter=150, burn=80, seed=0, beta_init=beta_init)
+    # beta is NOT frozen: it moved off the (wrong) warm start...
+    assert not np.allclose(out["beta"], beta_init, atol=1e-3)
+    # ...and toward the planted topics (co-sampling recovers content).
+    assert planted_recovery(out["beta"], planted["beta"]) >= 0.5
+    S = out["Sigma"]
+    assert np.linalg.eigvalsh(S).min() > 0
+
+
+def test_gibbs_beta_fixed_and_beta_init_are_mutually_exclusive():
+    docs, planted, part = _corpus(bg_k=2, seed=1)
+    b = planted["beta"]
+    with pytest.raises(ValueError):
+        pg_stm_gibbs(docs, K=part.K, V=60, partition=part, P=docs[0].x.shape[0],
+                     n_iter=5, burn=2, beta_fixed=b, beta_init=b)
+
+
 @pytest.fixture(scope="module")
 def vi_gibbs_bgk4():
     """VI + Gibbs fit on a bg_k=4 corpus -> B=4 background topics -> a genuine 3x3

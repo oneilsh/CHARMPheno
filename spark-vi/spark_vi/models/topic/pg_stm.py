@@ -578,7 +578,7 @@ def _draw_block_sigma(S, layout, partition, group_counts, D, *, Psi0_scale, nu0,
 
 def pg_stm_gibbs(docs, K, V, partition, *, P, n_iter=400, burn=200, seed=0,
                  Psi0_scale=1.0, nu0=None, gamma_ridge=1e-6, beta_eta=0.1,
-                 beta_fixed=None):
+                 beta_fixed=None, beta_init=None):
     """Exact blocked PG-Gibbs sampler over the gated nested stick-breaking
     logistic-normal topic model — the audit that validates PGSTMVI's mean-field
     delta-method and block-Sigma posterior (design 2026-07-11-pg-stm-inference-core-design.md).
@@ -616,16 +616,27 @@ def pg_stm_gibbs(docs, K, V, partition, *, P, n_iter=400, burn=200, seed=0,
     bg_sticks = layout["bg_sticks"]
 
     # --- globals init (mirror PGSTMVI.fit) --------------------------------- #
-    # ``beta_fixed`` (queue item 4: condition-on-VI-beta read-out) holds the
-    # topic-word distributions constant, pinning topic identity through the
-    # token-assignment step so the Sigma read-out is not confounded by
-    # label-switching across/within sweeps. When None, beta is sampled (the
-    # free full-Gibbs cross-check).
+    # Two ways to supply beta (queue item 4, Fable round 3):
+    #  * ``beta_fixed`` FREEZES beta (never redrawn) — pins topic identity, but
+    #    the Sigma read-out then inherits any error in that beta. DEAD as a
+    #    shipping read-out under topic overlap (insight 0048): VI's beta is too
+    #    sharpened, and freezing it corrupts Sigma.
+    #  * ``beta_init`` WARM-STARTS beta (label anchor) but keeps SAMPLING it, so
+    #    beta relaxes off the (sharpened VI) warm start toward the data's
+    #    posterior — the co-sampling read-out. The warm start keeps the chain in
+    #    one labeling basin (solves the item-1 free-Gibbs label-switching).
+    #  * neither -> random init, free-sampled (the cross-check).
+    if beta_fixed is not None and beta_init is not None:
+        raise ValueError("pass beta_fixed OR beta_init, not both")
     fix_beta = beta_fixed is not None
     if fix_beta:
         beta = np.asarray(beta_fixed, dtype=np.float64)
         if beta.shape != (K, V):
             raise ValueError(f"beta_fixed must have shape {(K, V)}, got {beta.shape}")
+    elif beta_init is not None:
+        beta = np.asarray(beta_init, dtype=np.float64).copy()
+        if beta.shape != (K, V):
+            raise ValueError(f"beta_init must have shape {(K, V)}, got {beta.shape}")
     else:
         beta = rng.random((K, V)) + beta_eta
         beta /= beta.sum(axis=1, keepdims=True)
