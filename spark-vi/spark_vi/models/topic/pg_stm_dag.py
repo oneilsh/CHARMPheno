@@ -125,6 +125,7 @@ class PGSTMDag:
                  inner_rounds=8, inner_tol=1e-3, sigma_mode="iw", seed=0):
         self.K, self.V, self.partition, self.dag = K, V, partition, dag
         self.P, self.U = P, dag.n_nodes
+        self.U_off = dag.n_offset_nodes
         self.n_iter, self.beta_eta, self.sigma_mode = n_iter, beta_eta, sigma_mode
         self.gamma_ridge, self.lam_base, self.gamma_depth = gamma_ridge, lam_base, gamma_depth
         self.Psi0_scale = Psi0_scale
@@ -134,22 +135,23 @@ class PGSTMDag:
 
     def fit(self, docs, doc_nodes):
         rng = np.random.default_rng(self.seed)
-        K, V, Pw = self.K, self.V, self.P + self.U
+        K, V, Pw = self.K, self.V, self.P + self.U_off
         Ksm1 = K - 1
-        # augment each doc's covariate with its closure indicator: w = [x ; z]
+        # augment each doc's covariate with its NON-root closure indicator: w = [x ; z_nonroot]
         docs_aug = []
         for doc, nodes in zip(docs, doc_nodes):
-            z = self.dag.closure_indicator(nodes)
+            z = self.dag.offset_indicator(nodes)
             w = np.concatenate([np.asarray(doc.x, dtype=np.float64), z])
             docs_aug.append(dataclasses.replace(doc, x=w))
         penalty = offset_penalty(self.P, self.dag, gamma_ridge=self.gamma_ridge,
                                  lam_base=self.lam_base, gamma_depth=self.gamma_depth)
         beta = rng.random((K, V)) + self.beta_eta
         beta /= beta.sum(axis=1, keepdims=True)
-        Cf = np.zeros((Pw, Ksm1))                 # [Gamma ; B] stacked
+        Cf = np.zeros((Pw, Ksm1))                 # [Gamma ; B_nonroot] stacked
         Sigma = np.eye(Ksm1)
         D = len(docs_aug)
         psi_mean = np.zeros((D, Ksm1))
+        stats = pg_empty_stats(K, V, Pw, self.partition.groups)   # bound for the read-out below
         for _ in range(self.n_iter):
             log_beta = np.log(beta)
             stats = pg_empty_stats(K, V, Pw, self.partition.groups)
@@ -168,7 +170,10 @@ class PGSTMDag:
                                    groups=self.partition.groups, layout=self.layout,
                                    sigma_mode=self.sigma_mode, Psi0_scale=self.Psi0_scale,
                                    nu0=self.nu0)
-        Gamma, B = Cf[:self.P], Cf[self.P:]
+        Gamma = Cf[:self.P]
+        B_nonroot = Cf[self.P:]                             # (U_off, K-1) for nodes 1..U-1
+        B = np.zeros((self.U, Ksm1))                        # node-id-indexed; root row 0 stays 0
+        B[1:] = B_nonroot
         # RELATIVE-uncertainty read-out only: sigma2 * (XtX+diag(penalty))^-1 at the VI psi-mean.
         # NOT calibrated for absolute coverage -- it omits psi posterior uncertainty AND is blind
         # to mean-field bias in the psi-means, so absolute coverage collapses (~0.13, insight 0051).
@@ -177,8 +182,9 @@ class PGSTMDag:
         resid = psi_mean - self._design(docs_aug) @ Cf    # (D, K-1) on active-filled psi_mean
         sigma2 = max(float(np.mean(resid ** 2)), 1e-8)
         Ainv = np.linalg.inv(stats["XtX"] + np.diag(penalty))
-        cov_diag_full = sigma2 * np.diag(Ainv)             # (P+U,)
-        offset_cov_diag = np.repeat(cov_diag_full[self.P:][:, None], Ksm1, axis=1)
+        var_nonroot = sigma2 * np.diag(Ainv)[self.P:]       # (U_off,)
+        var_by_node = np.zeros(self.U); var_by_node[1:] = var_nonroot   # root=0
+        offset_cov_diag = np.repeat(var_by_node[:, None], Ksm1, axis=1) # (U, K-1) node-indexed
         return {"beta": beta, "Gamma": Gamma, "B": B, "Sigma": Sigma,
                 "node_norms": np.linalg.norm(B, axis=1),
                 "offset_cov_diag": offset_cov_diag, "psi_mean": psi_mean}
