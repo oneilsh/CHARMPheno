@@ -496,7 +496,6 @@ def dag_offset_corpus(*, dag, node_offsets, partition, beta, node_of_group,
     # background-only members: no group, attest only the root, flat background stick-breaking
     if n_background_only > 0:
         bg_sticks = lay["bg_sticks"]
-        bg_topics = partition.background_indices()
         Bk = partition.background_k
         Sbg = sigma_true[np.ix_(bg_sticks, bg_sticks)]
         mu_bg = np.zeros(len(bg_sticks))                 # root offset is 0
