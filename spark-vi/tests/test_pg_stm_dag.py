@@ -64,3 +64,28 @@ def test_dag_offset_ridge_shrinks_an_unconstrained_column_to_zero():
     pen = np.array([1e-8, 1e-8, 1e-8, 5.0])
     got = dag_offset_ridge(W.T @ W, W.T @ M, penalty=pen)
     assert np.allclose(got[3], 0.0, atol=1e-9)      # unconstrained + penalized -> exactly ~0
+
+
+from spark_vi.models.topic.pg_stm import PGSTMVI
+from spark_vi.models.topic.pg_stm_dag import PGSTMDag, root_only_dag
+from tests._stm_synth import gated_ln_corpus_stick
+
+
+def test_pgstmdag_root_only_matches_flat_pgstmvi():
+    """PLANTED: a stick-native gated corpus. REAL: nothing. Synthetic -> MATH-CORRECTNESS
+    only: with a root-only DAG (the offset is a single global intercept, collinear with
+    the covariate intercept), PGSTMDag is a reparameterization of PGSTMVI and must return
+    the SAME beta and Sigma. Proves the augmented-covariate machinery does not perturb the
+    validated flat model. Does NOT prove anything about multi-level DAG behavior."""
+    docs, part, _St, _b = gated_ln_corpus_stick(
+        group_weights={"A": 0.5, "B": 0.5}, fg_per_group=2, bg_k=3, V=60, D=300,
+        doc_len=40, seed=0)
+    P = docs[0].x.shape[0]
+    vi = PGSTMVI(K=part.K, V=60, partition=part, P=P, n_iter=40, seed=0).fit(docs)
+    dag = root_only_dag()
+    doc_nodes = [frozenset({0})] * len(docs)                 # every doc attests the root
+    out = PGSTMDag(K=part.K, V=60, partition=part, dag=dag, P=P, n_iter=40,
+                   gamma_ridge=1e-6, lam_base=1e-6, gamma_depth=1.0, seed=0).fit(docs, doc_nodes)
+    assert np.allclose(out["beta"], vi["beta"], atol=2e-3)
+    assert np.allclose(out["Sigma"], vi["Sigma"], atol=2e-3)
+    assert out["B"].shape == (1, part.K - 1)                 # one node offset row

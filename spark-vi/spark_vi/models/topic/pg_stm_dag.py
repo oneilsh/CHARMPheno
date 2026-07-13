@@ -86,3 +86,75 @@ def dag_offset_ridge(WtW, WtM, *, penalty):
     WtW = np.asarray(WtW, dtype=np.float64)
     WtM = np.asarray(WtM, dtype=np.float64)
     return np.linalg.solve(WtW + np.diag(np.asarray(penalty, dtype=np.float64)), WtM)
+
+
+import dataclasses
+
+from spark_vi.models.topic.pg_stm import (
+    pg_empty_stats, pg_accumulate_doc, pg_estep_doc, beta_dirichlet_mean,
+    assemble_sigma, stick_layout,
+)
+
+
+def root_only_dag() -> DagGate:
+    """The degenerate DAG: a single root node. The offset is one global intercept."""
+    return DagGate([()])
+
+
+class PGSTMDag:
+    """Gated PG-STM with an additive mean-offset summed over each document's ancestral
+    closure (v1: mean shift only). Realized as PGSTMVI on an augmented covariate
+    w_d = [x_d ; closure_indicator_d] with coefficient [Gamma ; B] and a depth-scaled
+    ridge penalty on B. Gate / Sigma / beta / E-step are pg_stm's, unchanged."""
+
+    def __init__(self, K, V, partition, dag, *, P, n_iter=200, gamma_ridge=1e-6,
+                 lam_base=1.0, gamma_depth=1.0, Psi0_scale=1.0, nu0=None, beta_eta=0.1,
+                 inner_rounds=8, inner_tol=1e-3, sigma_mode="iw", seed=0):
+        self.K, self.V, self.partition, self.dag = K, V, partition, dag
+        self.P, self.U = P, dag.n_nodes
+        self.n_iter, self.beta_eta, self.sigma_mode = n_iter, beta_eta, sigma_mode
+        self.gamma_ridge, self.lam_base, self.gamma_depth = gamma_ridge, lam_base, gamma_depth
+        self.Psi0_scale = Psi0_scale
+        self.nu0 = float(nu0) if nu0 is not None else float((K - 1) + 2)
+        self.inner_rounds, self.inner_tol, self.seed = inner_rounds, inner_tol, seed
+        self.layout = stick_layout(partition)
+
+    def fit(self, docs, doc_nodes):
+        rng = np.random.default_rng(self.seed)
+        K, V, Pw = self.K, self.V, self.P + self.U
+        Ksm1 = K - 1
+        # augment each doc's covariate with its closure indicator: w = [x ; z]
+        docs_aug = []
+        for doc, nodes in zip(docs, doc_nodes):
+            z = self.dag.closure_indicator(nodes)
+            w = np.concatenate([np.asarray(doc.x, dtype=np.float64), z])
+            docs_aug.append(dataclasses.replace(doc, x=w))
+        penalty = offset_penalty(self.P, self.dag, gamma_ridge=self.gamma_ridge,
+                                 lam_base=self.lam_base, gamma_depth=self.gamma_depth)
+        beta = rng.random((K, V)) + self.beta_eta
+        beta /= beta.sum(axis=1, keepdims=True)
+        Cf = np.zeros((Pw, Ksm1))                 # [Gamma ; B] stacked
+        Sigma = np.eye(Ksm1)
+        D = len(docs_aug)
+        psi_mean = np.zeros((D, Ksm1))
+        for _ in range(self.n_iter):
+            log_beta = np.log(beta)
+            stats = pg_empty_stats(K, V, Pw, self.partition.groups)
+            for d, doc in enumerate(docs_aug):
+                (g,) = tuple(doc.groups)
+                glay = self.layout["groups"][g]
+                m, Vd, phi, active, allowed, mu_active, _nc = pg_estep_doc(
+                    doc, glay, log_beta, Cf, Sigma, K=K, B=self.layout["B"],
+                    inner_rounds=self.inner_rounds, inner_tol=self.inner_tol)
+                pg_accumulate_doc(stats, doc, (m, Vd, phi, active, allowed, mu_active), K=K)
+                psi_mean[d, active] = m
+            beta = beta_dirichlet_mean(stats["wts"], eta=self.beta_eta)
+            Cf = dag_offset_ridge(stats["XtX"], stats["XtM"], penalty=penalty)
+            Sigma = assemble_sigma(stats["S"], self.layout["bg_sticks"],
+                                   stats["group_counts"], stats["D"], K=K,
+                                   groups=self.partition.groups, layout=self.layout,
+                                   sigma_mode=self.sigma_mode, Psi0_scale=self.Psi0_scale,
+                                   nu0=self.nu0)
+        Gamma, B = Cf[:self.P], Cf[self.P:]
+        return {"beta": beta, "Gamma": Gamma, "B": B, "Sigma": Sigma,
+                "node_norms": np.linalg.norm(B, axis=1), "psi_mean": psi_mean}
