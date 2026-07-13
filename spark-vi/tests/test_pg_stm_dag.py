@@ -334,3 +334,59 @@ def test_background_only_corpus_recovers_planted_background():
     # with the stick-breaking attestation skew below.
     rec = planted_recovery(out["beta"][:part.background_k], beta[:part.background_k])
     assert rec >= 4, f"flat path did not recover the attested background topics: {rec}/5"
+
+
+def test_background_only_members_flip_anchor_identification_and_identified_increments_recover():
+    """PLANTED: node offsets + Sigma on root->{A(anchor docs + subtype A1); B(subtype B1 only,
+    no anchor docs)}. REAL: overlap beta (topic_overlap=0.6) + doc-length. Realistic-overlap
+    synthetic -> MATH-CORRECTNESS. Validates two robust facts of background-only member support:
+    (1) IDENTIFICATION-FLAG FLIP: the anchor-A increment is un-identified under the partitioning
+    gate WITHOUT background-only members (identified=False, the insight-0050 dummy trap) and
+    becomes identified=True WITH them (the trap is broken for the identification flag). (2) The
+    IDENTIFIED subtype increment (A1, which has branching evidence: anchor-A docs vs A1 docs
+    separate the levels) recovers, measured on FOREGROUND (node-specific) sticks -- the shared
+    background-stick offset is weakly identified so recovery is NOT measured there (insight
+    0050/0054). Does NOT claim anchor-LEVEL point recovery (anchor levels stay confounded with the
+    global intercept on group foreground sticks; background-only docs never activate those sticks,
+    so they flip the identification flag WITHOUT restoring the level's point estimate -- insight
+    0052/0054), NOR recovery of the no-direct-docs anchor B (its node B/B1 increments are
+    collinear -- a collapsible degenerate chain per insight 0054), NOR transfer to real data."""
+    import numpy as np
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    from spark_vi.models.topic.pg_stm_dag import DagGate, PGSTMDag
+    from spark_vi.models.topic.pg_stm import stick_layout
+    from tests._stm_synth import dag_offset_corpus, real_beta_from
+    part = TopicBlockPartition(group_var="g", background_k=6, foreground=(("A", 4), ("B", 4)))
+    K, V = part.K, 300
+    dag = DagGate([(), (0,), (0,), (1,), (2,)])       # root; A=1 (docs), B=2 (no docs); A1=3, B1=4
+    Ksm1 = K - 1
+    rng = np.random.default_rng(4)
+    node_offsets = {u: rng.standard_normal(Ksm1) for u in (1, 2, 3, 4)}
+    node_offsets[0] = np.zeros(Ksm1)
+    beta = real_beta_from(K, V, seed=2)
+    common = dict(dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+                  node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 400, 3: 400, 4: 500},
+                  sigma_true=3.0 * np.eye(Ksm1), doc_len=80, seed=6)
+    # WITHOUT background-only members: anchor-A increment un-identified (the insight-0050 trap)
+    docs0, dn0 = dag_offset_corpus(n_background_only=0, **common)
+    out0 = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=1, n_iter=60, lam_base=1e-3,
+                    seed=0).fit(docs0, dn0)
+    assert out0["offset_uncertainty"]["identified"][1] == False, \
+        f"anchor A unexpectedly identified without bg-only: {out0['offset_uncertainty']['identified']}"
+    # WITH background-only members: the trap is broken for the identification flag
+    docs1, dn1 = dag_offset_corpus(n_background_only=600, **common)
+    out1 = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=1, n_iter=60, lam_base=1e-3,
+                    seed=0).fit(docs1, dn1)
+    ident = out1["offset_uncertainty"]["identified"]
+    assert ident[1] == True, f"background-only members did not flip anchor A identification: {ident}"
+    # A1 (branching evidence: anchor-A docs vs A1 docs) is identified -- assert the premise the
+    # foreground-increment recovery check below relies on, so the test self-verifies its docstring
+    assert ident[3] == True, f"subtype A1 unexpectedly un-identified: {ident}"
+    # the IDENTIFIED subtype increment (A1) recovers on FOREGROUND sticks (insight 0050/0054)
+    lay = stick_layout(part)
+    actA = lay["groups"]["A"]["active"]
+    bg = set(np.asarray(lay["bg_sticks"]).tolist())
+    fgA = np.array([d for d in actA if d not in bg], dtype=np.int64)
+    B = out1["B"]
+    r_fg = np.corrcoef(B[3][fgA], node_offsets[3][fgA])[0, 1]
+    assert r_fg > 0.4, f"identified subtype A1 foreground increment did not recover: r={r_fg:.2f}"
