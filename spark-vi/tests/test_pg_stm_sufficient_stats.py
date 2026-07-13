@@ -18,6 +18,7 @@ from spark_vi.models.topic.pg_stm import (
     PGSTMVI, pg_empty_stats, pg_accumulate_doc, pg_combine_stats, pg_mstep,
     stick_layout,
 )
+from spark_vi.models.topic.types import STMDocument
 from tests._stm_synth import gated_ln_corpus
 
 
@@ -96,3 +97,22 @@ def test_accumulate_then_mstep_matches_single_machine_one_iter():
     assert np.allclose(beta, ref["beta"], atol=1e-10)
     assert np.allclose(Gamma, ref["Gamma"], atol=1e-10)
     assert np.allclose(Sigma, ref["Sigma"], atol=1e-10)
+
+
+def test_pg_accumulate_doc_tolerates_group_less_document():
+    """Deterministic structure check; no empirical or transfer claim. A background-only
+    document (no foreground group) accumulates its word/covariate/scatter stats and
+    increments D, but touches no per-group count."""
+    K, V, P = 4, 5, 1
+    stats = pg_empty_stats(K, V, P, groups=("A",))
+    doc = STMDocument(indices=np.array([0, 1], dtype=np.int32),
+                      counts=np.array([2.0, 1.0]), length=3,
+                      x=np.array([1.0]), groups=frozenset())
+    active = np.array([0, 1], dtype=np.int64)          # 2 background sticks
+    m = np.array([0.1, -0.2]); Vd = np.eye(2)
+    phi = np.array([[0.6, 0.4, 0.0, 0.0], [0.3, 0.7, 0.0, 0.0]])   # (n_tok, K)
+    allowed = np.array([0, 1, 2], dtype=np.int64); mu_active = np.zeros(2)
+    pg_accumulate_doc(stats, doc, (m, Vd, phi, active, allowed, mu_active), K=K)
+    assert stats["D"] == 1
+    assert stats["group_counts"] == {"A": 0}           # no group incremented
+    assert np.allclose(stats["XtX"], np.array([[1.0]]))  # x x^T for x=[1]

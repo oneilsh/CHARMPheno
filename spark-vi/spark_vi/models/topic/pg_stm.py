@@ -146,8 +146,10 @@ def pg_accumulate_doc(stats, doc, estep_out, *, K):
     stats["XtM"][:, active] += np.outer(x, m)          # inactive dims contribute 0
     e = m - mu_active
     stats["S"][np.ix_(active, active)] += np.outer(e, e) + V
-    (g,) = tuple(doc.groups)
-    stats["group_counts"][g] += 1
+    gs = tuple(doc.groups)
+    if gs:                                  # background-only docs (no group) skip the per-group count
+        (g,) = gs
+        stats["group_counts"][g] += 1
     stats["D"] += 1
 
 
