@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from spark_vi.models.topic.pg_stm_dag import DagGate
+from spark_vi.models.topic.pg_stm_dag import DagGate, offset_penalty, dag_offset_ridge
 
 
 def test_dag_closure_and_indicator_over_two_levels():
@@ -35,3 +35,32 @@ def test_dag_dump_lists_nodes_with_depth_and_parents():
     dag = DagGate([(), (0,), (1,)])
     d = dag.dump()
     assert d[2] == {"node": 2, "depth": 2, "parents": [1]}
+
+
+def test_offset_penalty_is_depth_scaled_on_node_block_only():
+    dag = DagGate([(), (0,), (1,)])            # depths 0,1,2
+    pen = offset_penalty(P=2, dag=dag, gamma_ridge=1e-6, lam_base=2.0, gamma_depth=1.0)
+    assert pen.shape == (2 + 3,)
+    assert np.allclose(pen[:2], 1e-6)          # covariates lightly ridged
+    assert np.allclose(pen[2:], [2.0 * 1, 2.0 * 2, 2.0 * 3])   # lam_base*(1+depth)
+
+
+def test_dag_offset_ridge_recovers_well_posed_coefficients():
+    rng = np.random.default_rng(0)
+    n, d, k = 500, 4, 3
+    W = rng.standard_normal((n, d))
+    coeff = rng.standard_normal((d, k))
+    M = W @ coeff
+    got = dag_offset_ridge(W.T @ W, W.T @ M, penalty=np.full(d, 1e-8))
+    assert np.allclose(got, coeff, atol=1e-4)
+
+
+def test_dag_offset_ridge_shrinks_an_unconstrained_column_to_zero():
+    # design column 3 is all-zero (a "never-active" node) -> its coeff row must go ~0
+    rng = np.random.default_rng(1)
+    n, k = 400, 2
+    W = rng.standard_normal((n, 4)); W[:, 3] = 0.0
+    M = W[:, :3] @ rng.standard_normal((3, k))
+    pen = np.array([1e-8, 1e-8, 1e-8, 5.0])
+    got = dag_offset_ridge(W.T @ W, W.T @ M, penalty=pen)
+    assert np.allclose(got[3], 0.0, atol=1e-9)      # unconstrained + penalized -> exactly ~0

@@ -64,3 +64,25 @@ class DagGate:
     def dump(self) -> list[dict]:
         return [{"node": u, "depth": int(self.depth[u]), "parents": list(self.parents[u])}
                 for u in range(self.n_nodes)]
+
+
+def offset_penalty(P, dag, *, gamma_ridge, lam_base, gamma_depth):
+    """(P + n_nodes,) ridge penalty: ``gamma_ridge`` on each covariate row, and
+    ``lam_base * (1 + depth[u]) ** gamma_depth`` on each node-offset row. Depth-scaling
+    (deeper => larger penalty) encodes "prefer general explanations, specialize only on
+    evidence" (a structural, inspectable shrinkage; not an inference hyperparameter).
+    A node whose closure-indicator column is never active is pulled to 0 by its penalty."""
+    pen = np.empty(int(P) + dag.n_nodes, dtype=np.float64)
+    pen[:P] = float(gamma_ridge)
+    pen[P:] = float(lam_base) * (1.0 + dag.depth.astype(np.float64)) ** float(gamma_depth)
+    return pen
+
+
+def dag_offset_ridge(WtW, WtM, *, penalty):
+    """Penalized moment-form ridge: solve (WtW + diag(penalty)) C = WtM. Generalizes
+    pg_gamma_ridge_moments' scalar ridge to a per-row penalty vector, so covariate and
+    node-offset rows are shrunk independently (depth-scaled). WtW is (P+U, P+U), WtM is
+    (P+U, K-1)."""
+    WtW = np.asarray(WtW, dtype=np.float64)
+    WtM = np.asarray(WtM, dtype=np.float64)
+    return np.linalg.solve(WtW + np.diag(np.asarray(penalty, dtype=np.float64)), WtM)
