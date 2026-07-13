@@ -324,7 +324,8 @@ def gated_ln_corpus_overlap(*, group_weights, fg_per_group, bg_k, V, D, doc_len,
 
 
 def gated_ln_corpus_stick(*, group_weights, fg_per_group, bg_k, V, D, doc_len,
-                          rho_bg=0.3, rho_grp=0.3, rho_cross=0.2, eta_scale=1.0, seed=0):
+                          rho_bg=0.3, rho_grp=0.3, rho_cross=0.2, eta_scale=1.0,
+                          topic_overlap=0.0, seed=0):
     """STICK-NATIVE gated corpus: draw psi ~ N(0, Sigma_true) in the model's own
     (K-1)-dim STICK space and compose theta = gated_theta(psi), so the planted Sigma is
     IDENTIFIED by the likelihood (unlike gated_ln_corpus, which plants eta in SOFTMAX
@@ -360,15 +361,21 @@ def gated_ln_corpus_stick(*, group_weights, fg_per_group, bg_k, V, D, doc_len,
     lay = stick_layout(part)
 
     # beta: same planted topic-word structure as gated_ln_corpus (a shared common pool
-    # [0:C] + a disjoint per-topic signature block), so beta is recoverable and topic
-    # identity is not degenerate.
+    # [0:C] + a per-topic signature block), so beta is recoverable and topic identity is
+    # not degenerate. topic_overlap in [0,1) widens each signature window symmetrically by
+    # round(topic_overlap*sig) words into its neighbors, so adjacent topics SHARE
+    # vocabulary (realistic overlapping phenotypes); topic_overlap=0 -> disjoint blocks
+    # (backward compatible).
     sig = max(1, (V // 2) // K)
     C = max(1, min(sig, V - K * sig))
+    extra = int(round(float(topic_overlap) * sig))
+    sig_lo, sig_hi = C, C + K * sig
     beta = np.full((K, V), 1e-3)
     for k in range(K):
         beta[k, 0:C] += rng.random(C) + 0.1
-        lo = C + k * sig
-        beta[k, lo:lo + sig] += 5.0
+        lo = max(C + k * sig - extra, sig_lo)
+        hi = min(C + k * sig + sig + extra, sig_hi)
+        beta[k, lo:hi] += 5.0
     beta /= beta.sum(axis=1, keepdims=True)
 
     # Sigma_true in STICK space (dimension K-1), block-structured + PD-completed.

@@ -37,6 +37,32 @@ def _corr(S):
     return S / np.outer(d, d)
 
 
+def test_topic_overlap_default_is_backward_compatible():
+    """topic_overlap=0.0 (the default) must reproduce the original disjoint-
+    signature beta byte-for-byte, so existing fixtures are unchanged."""
+    kw = dict(group_weights={"A": 0.5, "B": 0.5}, fg_per_group=2, bg_k=4,
+              V=200, D=20, doc_len=30, seed=1)
+    _, _, _, beta0 = gated_ln_corpus_stick(**kw)
+    _, _, _, beta_default = gated_ln_corpus_stick(topic_overlap=0.0, **kw)
+    assert np.array_equal(beta0, beta_default)
+
+
+def test_topic_overlap_increases_adjacent_topic_similarity():
+    """topic_overlap>0 makes neighboring topics SHARE signature vocabulary, so
+    adjacent-topic cosine similarity rises -- a realistic 'overlapping phenotypes'
+    corpus rather than cleanly separable signatures."""
+    kw = dict(group_weights={"A": 0.5, "B": 0.5}, fg_per_group=6, bg_k=8,
+              V=400, D=20, doc_len=30, seed=1)
+
+    def adj_cos(beta):
+        n = beta / np.linalg.norm(beta, axis=1, keepdims=True)
+        return float(np.mean([n[k] @ n[k + 1] for k in range(len(beta) - 1)]))
+
+    _, _, _, beta_disjoint = gated_ln_corpus_stick(topic_overlap=0.0, **kw)
+    _, _, _, beta_overlap = gated_ln_corpus_stick(topic_overlap=0.6, **kw)
+    assert adj_cos(beta_overlap) > adj_cos(beta_disjoint) + 0.05
+
+
 @pytest.fixture(scope="module")
 def stick_native_fit():
     """VI + Gibbs on one stick-native corpus (Σ identified in stick space). bg_k=3 ->
