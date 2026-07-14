@@ -23,3 +23,20 @@ def closure_gram(dag, doc_nodes):
         z = dag.offset_indicator(nodes)
         G += np.outer(z, z)
     return G
+
+
+def foreground_grams(dag, doc_nodes, doc_groups, partition):
+    """Per-group foreground Grams, each accumulated over the documents that activate that
+    group's sticks (i.e. belong to the group), with the intercept column included. The
+    design row is w = [1.0, z_d]; each group's Gram is (1+U, 1+U). A group whose documents
+    all attest its anchor makes the intercept column equal the anchor column -> a zero
+    eigenvalue naming that group's absolute-level design wall per node (insight 0054)."""
+    U = dag.n_offset_nodes
+    out = {g: np.zeros((1 + U, 1 + U), dtype=np.float64) for g in partition.groups}
+    for nodes, g in zip(doc_nodes, doc_groups):
+        if g not in out:
+            continue
+        z = dag.offset_indicator(nodes)
+        w = np.concatenate([np.array([1.0]), z])
+        out[g] += np.outer(w, w)
+    return out

@@ -1,6 +1,7 @@
 import numpy as np
 from spark_vi.models.topic.pg_stm_dag import DagGate
-from spark_vi.models.topic.dag_identify import closure_gram
+from spark_vi.models.topic.partition import TopicBlockPartition
+from spark_vi.models.topic.dag_identify import closure_gram, foreground_grams
 
 
 def test_closure_gram_matches_hand_computation():
@@ -14,3 +15,24 @@ def test_closure_gram_matches_hand_computation():
     # outer([1,0]) + 2*outer([1,1]) = [[1,0],[0,0]] + 2*[[1,1],[1,1]]
     assert G.shape == (2, 2)
     assert np.allclose(G, np.array([[3.0, 2.0], [2.0, 2.0]]))
+
+
+def test_foreground_gram_exposes_anchor_level_vs_intercept_collinearity():
+    """Deterministic linear-algebra check; no empirical or transfer claim. Within a group
+    whose documents all attest its anchor, the intercept column equals that anchor's
+    closure-indicator column, so the per-group foreground Gram is rank-deficient along the
+    level-vs-intercept direction (a zero eigenvalue) -- the per-node absolute-level design
+    wall of insight 0054. Proves the foreground Gram surfaces the wall; does NOT prove
+    anything about recovery or real data."""
+    part = TopicBlockPartition(group_var="g", background_k=2, foreground=(("A", 2),))
+    dag = DagGate([(), (0,)])                  # root 0; node 1 = anchor A
+    # every group-A doc attests the anchor (node 1) -> z = [1]; w = [intercept=1, z=1]
+    doc_nodes = [frozenset({1}), frozenset({1}), frozenset({1})]
+    doc_groups = ["A", "A", "A"]
+    grams = foreground_grams(dag, doc_nodes, doc_groups, part)
+    A = grams["A"]
+    assert A.shape == (2, 2)                    # [intercept, node1]
+    # both columns are all-ones over the 3 docs -> A = 3 * ones((2,2)) -> rank 1
+    assert np.allclose(A, 3.0 * np.ones((2, 2)))
+    evals = np.linalg.eigvalsh(A)
+    assert np.isclose(evals.min(), 0.0)        # level-vs-intercept null direction
