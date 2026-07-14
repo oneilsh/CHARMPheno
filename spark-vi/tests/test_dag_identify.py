@@ -3,6 +3,7 @@ from spark_vi.models.topic.pg_stm_dag import DagGate
 from spark_vi.models.topic.partition import TopicBlockPartition
 from spark_vi.models.topic.dag_identify import closure_gram, foreground_grams, identifiability_spectrum
 from spark_vi.models.topic.dag_identify import detect_confounds
+from spark_vi.models.topic.dag_identify import build_quotient
 
 
 def _spectrum(G):
@@ -107,3 +108,39 @@ def test_detect_hysteresis_keeps_prior_collapse_within_band():
     # but if previously collapsed and within band, hysteresis keeps it
     res = detect_confounds(dag, G, sp, tol=0.5, prev_collapsed={(1, 2)}, band=1.0)
     assert (1, 2) in res["collapsed_edges"]
+
+
+def test_build_quotient_collapses_chain_and_preserves_topology():
+    """Deterministic structure check; no empirical or transfer claim. Collapsing a
+    parent-child chain yields a quotient DagGate with one fewer offset node, root preserved,
+    a valid topological order, and a node_map that sends both chain members to the same
+    quotient node and other nodes to distinct ones. Proves the quotient construction;
+    asserts nothing about recovery or real data."""
+    # root; node1 (no own docs) -> node2 (sole child) collapse; node3 = a distinct sibling of node1
+    dag = DagGate([(), (0,), (1,), (0,)])
+    doc_nodes = [frozenset({2})] * 5 + [frozenset({3})] * 5
+    G = closure_gram(dag, doc_nodes)
+    det = detect_confounds(dag, G, identifiability_spectrum(G), tol=1e-6)
+    q = build_quotient(dag, det)
+    qd = q["quotient_dag"]; nm = q["node_map"]
+    assert qd.n_nodes == 3                       # root + merged{1,2} + node3
+    assert qd.parents[0] == ()                   # root preserved
+    assert nm[1] == nm[2]                         # chain members merged
+    assert nm[3] != nm[1] and nm[3] != 0          # sibling stays separate
+    # topological validity: every parent id < child id (DagGate constructed successfully)
+    for child, ps in enumerate(qd.parents):
+        for p in ps:
+            assert p < child
+
+
+def test_build_quotient_is_identity_when_nothing_collapses():
+    """Deterministic structure check; no empirical or transfer claim. A fully-identified DAG
+    (no column-equality edges) quotients to a graph with the same node count and identity
+    node_map. Proves the compiler is the identity when there is nothing to collapse."""
+    dag = DagGate([(), (0,), (0,)])
+    doc_nodes = [frozenset({1})] * 5 + [frozenset({2})] * 5      # distinct supports
+    G = closure_gram(dag, doc_nodes)
+    det = detect_confounds(dag, G, identifiability_spectrum(G), tol=1e-6)
+    q = build_quotient(dag, det)
+    assert q["quotient_dag"].n_nodes == dag.n_nodes
+    assert list(q["node_map"]) == list(range(dag.n_nodes))

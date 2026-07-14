@@ -11,6 +11,8 @@ no offset column). Grams are offset-index-ordered, shape (U, U) with U = dag.n_o
 """
 import numpy as np
 
+from spark_vi.models.topic.pg_stm_dag import DagGate
+
 
 def closure_gram(dag, doc_nodes):
     """Pooled closure-indicator Gram G = sum_d z_d z_d^T over the corpus, where
@@ -103,3 +105,52 @@ def detect_confounds(dag, G, spectrum, *, tol, prev_collapsed=None, band=0.0):
     flagged_dim = max(0, null_dim - collapse_dims)
     return {"collapse_sets": collapse_sets, "collapsed_edges": collapsed_edges,
             "margins": margins, "flagged_dim": flagged_dim}
+
+
+def build_quotient(dag, detected):
+    """Rewrite the DAG to its identified quotient: merge each detected parent-child
+    column-equality set into one node, keep every other node, and re-number quotient nodes
+    in a topological order (root first) so the resulting DagGate satisfies parent-id <
+    child-id. Returns the quotient DagGate and a node_map (original node id -> quotient node
+    id). The merge is faithful by construction because merged columns are (numerically)
+    equal; Task 6's invariant test proves it against the moment."""
+    n = dag.n_nodes
+    # 1. representative per original node: min id of its collapse set, else itself
+    rep = list(range(n))
+    for s in detected["collapse_sets"]:
+        r = min(s)
+        for u in s:
+            rep[u] = r
+    # 2. quotient adjacency among representatives (original edges lifted through rep)
+    reps = sorted(set(rep))                       # includes 0 (root is its own rep)
+    radj_parents = {r: set() for r in reps}
+    for child in range(n):
+        rc = rep[child]
+        for p in dag.parents[child]:
+            rp = rep[p]
+            if rp != rc:
+                radj_parents[rc].add(rp)
+    # 3. topological order of the quotient (Kahn), root first, deterministic by id
+    indeg = {r: len(radj_parents[r]) for r in reps}
+    children_of = {r: set() for r in reps}
+    for r in reps:
+        for p in radj_parents[r]:
+            children_of[p].add(r)
+    order = []
+    ready = sorted(r for r in reps if indeg[r] == 0)   # root (0) has indeg 0
+    while ready:
+        r = ready.pop(0)
+        order.append(r)
+        for ch in sorted(children_of[r]):
+            indeg[ch] -= 1
+            if indeg[ch] == 0:
+                ready.append(ch)
+        ready.sort()
+    # 4. assign quotient ids in topo order; force root (rep 0) to quotient 0
+    assert order[0] == 0, "root must sort first"
+    qid = {r: i for i, r in enumerate(order)}
+    node_map = np.array([qid[rep[u]] for u in range(n)], dtype=np.int64)
+    # 5. build the quotient DagGate
+    new_parents = [tuple(sorted(qid[p] for p in radj_parents[r])) for r in order]
+    quotient_dag = DagGate(new_parents)
+    return {"quotient_dag": quotient_dag, "node_map": node_map}
