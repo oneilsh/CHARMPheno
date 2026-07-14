@@ -18,7 +18,7 @@ import numpy as np
 
 from spark_vi.models.topic.pg_stm import (
     pg_empty_stats, pg_accumulate_doc, pg_estep_doc, beta_dirichlet_mean,
-    assemble_sigma, stick_layout,
+    assemble_sigma, stick_layout, gated_theta,
     expected_log_theta, token_responsibilities, stick_trials, omega_expectation,
     psi_posterior, _PSI_CLIP,
 )
@@ -153,6 +153,38 @@ def _bg_estep_doc(doc, bg_lay, log_beta, Gamma, Sigma, *, K, inner_rounds, inner
         if np.max(np.abs(m - m_prev)) < inner_tol:
             break
     return m, V, phi, active, allowed, mu_active, n_clips
+
+
+def _softgate_estep_doc(doc, candidates, glay_by_group, log_beta, Cf, Sigma, dag,
+                        *, K, B, inner_rounds, inner_tol):
+    """Fractional-z soft-gate E-step for a partially-labeled document: a mixture over the
+    document's candidate closures, each scored by its marginal evidence. Returns posterior
+    membership `weights`, the expected non-root closure indicator `z_bar`, and the per-
+    candidate E-step tuples (for membership-weighted stat accumulation). One hard candidate
+    reduces to pg_estep_doc. See PLDA (Ramage et al. 2011) for the partial-label semantics."""
+    esteps, evid = [], []
+    for (_p, nodes, g) in candidates:
+        z = dag.offset_indicator(nodes)
+        w = np.concatenate([np.asarray(doc.x, dtype=np.float64), z])
+        aug = dataclasses.replace(doc, x=w)
+        est = pg_estep_doc(aug, glay_by_group[g], log_beta, Cf, Sigma,
+                           K=K, B=B, inner_rounds=inner_rounds, inner_tol=inner_tol)
+        m, Vd, phi, active, allowed, mu_active, _nc = est
+        psi_bg, psi_gate, psi_fg = m[:B - 1], m[B - 1], m[B:]
+        theta_allowed = gated_theta(psi_bg, psi_gate, psi_fg)
+        # marginal token evidence under this candidate (bag-of-words, in `allowed` order)
+        beta_allowed = np.exp(log_beta[allowed][:, doc.indices])      # (|allowed|, L)
+        tok = theta_allowed @ beta_allowed                            # (L,)
+        evid.append(float(np.sum(doc.counts * np.log(np.maximum(tok, 1e-300)))))
+        esteps.append(est)
+    priors = np.array([p for (p, _n, _g) in candidates], dtype=np.float64)
+    logw = np.log(np.maximum(priors, 1e-300)) + np.array(evid)
+    weights = np.exp(logw - logw.max()); weights /= weights.sum()
+    U = dag.n_offset_nodes
+    z_bar = np.zeros(U)
+    for wgt, (_p, nodes, _g) in zip(weights, candidates):
+        z_bar = z_bar + wgt * dag.offset_indicator(nodes)
+    return weights, z_bar, esteps
 
 
 class PGSTMDag:
