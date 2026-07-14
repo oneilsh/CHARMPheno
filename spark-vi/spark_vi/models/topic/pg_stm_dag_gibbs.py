@@ -76,7 +76,8 @@ class PGSTMDagGibbs:
         self.beta_eta, self.seed = beta_eta, seed
         self.layout = stick_layout(partition)
 
-    def run(self, docs, doc_candidates, *, beta_init=None, penalty_override=None):
+    def run(self, docs, doc_candidates, *, beta_init=None, penalty_override=None,
+            sigma_fixed=None):
         """Run the sweep. ``doc_candidates[d]`` is a list of (prior, nodes) pairs (the
         document's group is ``next(iter(docs[d].groups))``, shared across all of a
         document's candidates). Returns
@@ -123,7 +124,11 @@ class PGSTMDagGibbs:
             beta /= beta.sum(axis=1, keepdims=True)
 
         Cf = np.zeros((Pw, Ksm1))
-        Sigma = np.eye(Ksm1)
+        # sigma_fixed holds Sigma constant (skip the block-IW draw) -- a calibration
+        # diagnostic: pinning Sigma at a known truth isolates Sigma-estimation error from
+        # increment-prior misspecification in the coverage decomposition (insight 0057).
+        Sigma = (np.eye(Ksm1) if sigma_fixed is None
+                 else np.asarray(sigma_fixed, dtype=np.float64).copy())
 
         # augmented covariate w = [x ; offset_indicator(nodes)]; the offset half is
         # re-sampled each sweep for soft (multi-candidate) docs, fixed for hard docs
@@ -192,9 +197,10 @@ class PGSTMDagGibbs:
                 beta[k] = rng.dirichlet(word_topic_counts[k] + self.beta_eta)
             # offset block: matrix-normal draw, fed back (Task 1 primitive)
             Cf = dag_offset_ridge_draw(W.T @ W, W.T @ M, Sigma, penalty=penalty, rng=rng)
-            # Sigma: block inverse-Wishart draw
-            Sigma = _draw_block_sigma(S, layout, self.partition, group_counts, D,
-                                      Psi0_scale=1.0, nu0=nu0, Ksm1=Ksm1, rng=rng)
+            # Sigma: block inverse-Wishart draw (unless held fixed for the diagnostic)
+            if sigma_fixed is None:
+                Sigma = _draw_block_sigma(S, layout, self.partition, group_counts, D,
+                                          Psi0_scale=1.0, nu0=nu0, Ksm1=Ksm1, rng=rng)
 
             if it >= self.burn:
                 kept.append(Cf[P:].copy())

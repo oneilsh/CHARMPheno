@@ -145,7 +145,8 @@ def _warm_start_nodes(dag, doc_candidates):
 
 
 def dag_offset_readout(docs, doc_nodes, doc_candidates, doc_groups, partition, dag, *,
-                       P=1, tol=1.0, lam_base=0.25, n_iter=200, burn=100, seed=0):
+                       P=1, tol=1.0, lam_base=0.25, n_iter=200, burn=100, seed=0,
+                       sigma_fixed=None):
     """End-to-end DAG-offset read-out: warm-start -> compile -> co-sampled Gibbs -> assemble.
 
     Phase A (VI warm-start): a cheap `PGSTMDag` VI fit on OBSERVABLE warm-start node
@@ -236,7 +237,8 @@ def dag_offset_readout(docs, doc_nodes, doc_candidates, doc_groups, partition, d
 
     eng = PGSTMDagGibbs(K=K, V=V, partition=partition, dag=q["quotient_dag"], P=P,
                         n_iter=n_iter, burn=burn, lam_base=lam_base, seed=seed)
-    out = eng.run(docs, qcand, beta_init=beta_warm, penalty_override=penalty)
+    out = eng.run(docs, qcand, beta_init=beta_warm, penalty_override=penalty,
+                  sigma_fixed=sigma_fixed)
 
     # ---- identified sub-block per node: its group's foreground sticks (insight 0054/0057) ----
     # A node's offset is identified only on the sticks its own documents activate. Map each
@@ -263,4 +265,9 @@ def dag_offset_readout(docs, doc_nodes, doc_candidates, doc_groups, partition, d
     ro = assemble_readout(dag, out["increment_draws"], node_map, cls, ci_level=0.90,
                           node_sticks=node_sticks)
     ro["prevalence"] = node_prevalence(dag, doc_nodes, doc_candidates, memberships)
+    # raw material for calibration diagnostics (joint/Mahalanobis coverage on the emitted
+    # increment draws, marginal-vs-joint coverage-frame check; insight 0057). Not part of the
+    # shipped read-out contract -- a private hook consumers ignore.
+    ro["_debug"] = {"increment_draws": out["increment_draws"], "node_map": node_map,
+                    "node_sticks": node_sticks}
     return ro
