@@ -5,6 +5,7 @@ from spark_vi.models.topic.dag_identify import closure_gram, foreground_grams, i
 from spark_vi.models.topic.dag_identify import detect_confounds
 from spark_vi.models.topic.dag_identify import build_quotient
 from spark_vi.models.topic.dag_identify import quotient_moment_matches_projection
+from spark_vi.models.topic.dag_identify import expected_closure_gram
 
 
 def _spectrum(G):
@@ -420,3 +421,21 @@ def test_quotient_merged_node_carries_the_identified_sum_at_fit_level():
     B_merged = outq["B"][int(nm[2])][actB]
     assert np.corrcoef(B_sum, B_merged)[0, 1] > 0.999      # same direction (identified sum)
     assert np.abs(B_sum - B_merged).max() < 1e-2           # up to the light-ridge reparameterization
+
+
+def test_expected_gram_reduces_to_closure_gram_on_hard_membership():
+    dag = DagGate([(), (0,), (0,), (1,), (2,)])
+    doc_nodes = [frozenset({1})] * 5 + [frozenset({3})] * 4 + [frozenset({4})] * 6
+    hard = [[(1.0, nodes)] for nodes in doc_nodes]
+    assert np.allclose(expected_closure_gram(dag, hard), closure_gram(dag, doc_nodes))
+
+
+def test_expected_gram_spreads_a_soft_doc_across_candidates():
+    dag = DagGate([(), (0,), (0,), (1,), (2,)])          # A1=3 under A=1, B1=4 under B=2
+    # one doc, 50/50 between subtype A1 (closure {3,1}) and subtype B1 (closure {4,2})
+    soft = [[(0.5, frozenset({3})), (0.5, frozenset({4}))]]
+    G = expected_closure_gram(dag, soft)                 # offset idx: 0=A,1=B,2=A1,3=B1
+    # each subtype's own diagonal gets half weight (less curvature than a hard doc)
+    assert np.isclose(G[2, 2], 0.5) and np.isclose(G[3, 3], 0.5)
+    # A1 and B1 never co-occur within the doc's mixture -> zero cross moment
+    assert np.isclose(G[2, 3], 0.0)

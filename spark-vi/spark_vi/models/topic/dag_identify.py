@@ -27,6 +27,22 @@ def closure_gram(dag, doc_nodes):
     return G
 
 
+def expected_closure_gram(dag, doc_candidates):
+    """Expected closure Gram Ḡ = sum_d sum_c p_c z_c z_c^T = sum_d E[z_d z_d^T] under a
+    soft membership posterior. doc_candidates[d] = list of (weight, nodes) candidate
+    closures for document d (labeled docs: a single (1.0, nodes)). Carries the within-doc
+    spread (a doc split across candidates adds fractional curvature to each), so a
+    soft-gated coordinate is appropriately closer to the design null than a hard one.
+    Reduces to closure_gram on hard membership. Shape (U, U), U = dag.n_offset_nodes."""
+    U = dag.n_offset_nodes
+    G = np.zeros((U, U), dtype=np.float64)
+    for cands in doc_candidates:
+        for p, nodes in cands:
+            z = dag.offset_indicator(nodes)
+            G += float(p) * np.outer(z, z)
+    return G
+
+
 def foreground_grams(dag, doc_nodes, doc_groups, partition):
     """Per-group foreground Grams, each accumulated over the documents that activate that
     group's sticks (i.e. belong to the group), with the intercept column included. The
