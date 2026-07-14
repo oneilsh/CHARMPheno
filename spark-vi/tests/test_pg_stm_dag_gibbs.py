@@ -1,6 +1,6 @@
 import numpy as np
 from spark_vi.models.topic.pg_stm_dag import dag_offset_ridge
-from spark_vi.models.topic.pg_stm_dag_gibbs import dag_offset_ridge_draw
+from spark_vi.models.topic.pg_stm_dag_gibbs import dag_offset_ridge_draw, PGSTMDagGibbs
 
 
 def test_offset_draw_mean_is_the_ridge_and_covariance_is_matrix_normal():
@@ -82,3 +82,31 @@ def test_softgate_membership_favors_the_generating_leaf():
         pred_leaf = min(cand[int(np.argmax(weights))][1])
         hits += (pred_leaf == true_leaf)
     assert hits / len(docs) > 0.7        # membership recovers the generating leaf > chance (0.5)
+
+
+from tests._stm_synth import planted_recovery
+
+
+def test_gibbs_recovers_a_planted_identified_increment():
+    part = TopicBlockPartition(group_var="g", background_k=3, foreground=(("A", 2), ("B", 2)))
+    K, V = part.K, 120
+    dag = DagGate([(), (0,), (0,), (1,), (1,)])           # A has TWO leaves -> A1 increment identified
+    rng = np.random.default_rng(7)
+    node_offsets = {u: 2.0 * rng.standard_normal(K - 1) for u in (1, 2, 3, 4)}
+    node_offsets[0] = np.zeros(K - 1)
+    beta = real_beta_from(K, V, seed=2)
+    docs, doc_nodes, cand = dag_offset_corpus(
+        dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+        node_of_group={"A": 1, "B": 2},
+        doc_nodes_plan={1: 200, 3: 200, 4: 200, 2: 150}, sigma_true=1.0 * np.eye(K - 1),
+        doc_len=80, seed=8)
+    eng = PGSTMDagGibbs(K=K, V=V, partition=part, dag=dag, P=1, n_iter=120, burn=60,
+                        lam_base=0.25, seed=0)
+    out = eng.run(docs, cand, beta_init=beta)
+    draws = out["increment_draws"]                        # (n_kept, U, Ksm1)
+    assert draws.shape[1] == dag.n_offset_nodes
+    # the A1 (node 3) increment posterior mean correlates with the planted increment
+    b3 = draws[:, 3 - 1, :].mean(axis=0)
+    assert np.corrcoef(b3, node_offsets[3])[0, 1] > 0.5
+    # Sigma stays PD
+    assert np.linalg.eigvalsh(out["Sigma"]).min() > -1e-8
