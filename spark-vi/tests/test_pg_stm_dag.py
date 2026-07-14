@@ -123,7 +123,7 @@ def test_offset_recovery_through_two_level_closure():
     node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1),
                     2: rng.standard_normal(Ksm1), 3: rng.standard_normal(Ksm1)}
     sigma_true = 3.0 * np.eye(Ksm1)
-    docs, doc_nodes = dag_offset_corpus(
+    docs, doc_nodes, _cand = dag_offset_corpus(
         dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
         node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 400, 2: 400, 3: 400},
         sigma_true=sigma_true, doc_len=80, seed=4)
@@ -153,7 +153,7 @@ def test_fallback_spurious_node_offset_shrinks_to_near_zero():
     rng = np.random.default_rng(6)
     node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1),
                     2: rng.standard_normal(Ksm1), 3: np.zeros(Ksm1)}   # 3 is truly 0
-    docs, doc_nodes = dag_offset_corpus(
+    docs, doc_nodes, _cand = dag_offset_corpus(
         dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
         node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 400, 2: 400, 3: 200},
         sigma_true=3.0 * np.eye(Ksm1), doc_len=80, seed=7)
@@ -187,7 +187,7 @@ def test_offset_uncertainty_is_ordinal_ranks_scarce_above_populated():
         rng = np.random.default_rng(9 + rep)
         node_offsets = {u: rng.standard_normal(Ksm1) for u in (1, 2, 3, 4)}
         node_offsets[0] = np.zeros(Ksm1)
-        docs, doc_nodes = dag_offset_corpus(
+        docs, doc_nodes, _cand = dag_offset_corpus(
             dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
             node_of_group={"A": 1, "B": 2},
             doc_nodes_plan={1: 120, 2: 120, 3: 240, 4: 24},   # node 3 populated, node 4 scarce
@@ -218,7 +218,7 @@ def test_identified_flag_true_for_populated_false_for_zero_doc_node():
     node_offsets = {u: rng.standard_normal(Ksm1) for u in (1, 2, 3)}
     node_offsets[0] = np.zeros(Ksm1); node_offsets[4] = np.zeros(Ksm1)
     beta = real_beta_from(K, V, seed=7)
-    docs, doc_nodes = dag_offset_corpus(
+    docs, doc_nodes, _cand = dag_offset_corpus(
         dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
         node_of_group={"A": 1, "B": 2},
         doc_nodes_plan={1: 200, 2: 200, 3: 300},          # node 4 absent -> zero-doc column
@@ -251,7 +251,7 @@ def test_inject_spurious_edges_adds_random_leaves_and_shrinks_on_replay():
     Ksm1 = K - 1; rng = np.random.default_rng(11)
     node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1), 2: rng.standard_normal(Ksm1),
                     3: np.zeros(Ksm1), 4: np.zeros(Ksm1)}
-    docs, doc_nodes = dag_offset_corpus(
+    docs, doc_nodes, _cand = dag_offset_corpus(
         dag=dag2, node_offsets=node_offsets, partition=part, beta=beta,
         node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 300, 2: 300},   # nobody at 3,4
         sigma_true=3.0 * np.eye(Ksm1), doc_len=80, seed=12)
@@ -321,7 +321,7 @@ def test_background_only_corpus_recovers_planted_background():
     dag = DagGate([(), (0,)])
     Ksm1 = K - 1
     node_offsets = {0: np.zeros(Ksm1), 1: np.zeros(Ksm1)}
-    docs, doc_nodes = dag_offset_corpus(
+    docs, doc_nodes, _cand = dag_offset_corpus(
         dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
         node_of_group={"A": 1}, doc_nodes_plan={}, n_background_only=400,
         sigma_true=2.0 * np.eye(Ksm1), doc_len=60, seed=3)
@@ -368,13 +368,13 @@ def test_background_only_members_flip_anchor_identification_and_identified_incre
                   node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 400, 3: 400, 4: 500},
                   sigma_true=3.0 * np.eye(Ksm1), doc_len=80, seed=6)
     # WITHOUT background-only members: anchor-A increment un-identified (the insight-0050 trap)
-    docs0, dn0 = dag_offset_corpus(n_background_only=0, **common)
+    docs0, dn0, _cand0 = dag_offset_corpus(n_background_only=0, **common)
     out0 = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=1, n_iter=60, lam_base=1e-3,
                     seed=0).fit(docs0, dn0)
     assert out0["offset_uncertainty"]["identified"][1] == False, \
         f"anchor A unexpectedly identified without bg-only: {out0['offset_uncertainty']['identified']}"
     # WITH background-only members: the trap is broken for the identification flag
-    docs1, dn1 = dag_offset_corpus(n_background_only=600, **common)
+    docs1, dn1, _cand1 = dag_offset_corpus(n_background_only=600, **common)
     out1 = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=1, n_iter=60, lam_base=1e-3,
                     seed=0).fit(docs1, dn1)
     ident = out1["offset_uncertainty"]["identified"]
