@@ -232,7 +232,7 @@ def test_quotient_of_fully_identified_dag_fits_identically():
     rng = np.random.default_rng(0)
     node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1)}
     beta = real_beta_from(K, V, seed=1)
-    docs, doc_nodes = dag_offset_corpus(
+    docs, doc_nodes, _cand = dag_offset_corpus(
         dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
         node_of_group={"A": 1}, doc_nodes_plan={1: 60}, sigma_true=2.0 * np.eye(Ksm1),
         doc_len=40, seed=2)
@@ -307,7 +307,7 @@ def test_compiler_collapses_no_direct_docs_anchor_on_realistic_corpus():
     node_offsets = {u: rng.standard_normal(Ksm1) for u in (1, 2, 3, 4)}
     node_offsets[0] = np.zeros(Ksm1)
     beta = real_beta_from(K, V, seed=2)
-    docs, doc_nodes = dag_offset_corpus(
+    docs, doc_nodes, _cand = dag_offset_corpus(
         dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
         node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 400, 3: 400, 4: 500},
         n_background_only=600, sigma_true=3.0 * np.eye(Ksm1), doc_len=80, seed=6)
@@ -337,7 +337,7 @@ def test_closure_gram_equals_fit_moment_offset_block():
     rng = np.random.default_rng(0)
     node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1), 2: rng.standard_normal(Ksm1)}
     beta = real_beta_from(K, V, seed=1)
-    docs, doc_nodes = dag_offset_corpus(
+    docs, doc_nodes, _cand = dag_offset_corpus(
         dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
         node_of_group={"A": 1}, doc_nodes_plan={1: 30, 2: 30}, sigma_true=2.0 * np.eye(Ksm1),
         doc_len=40, seed=2)
@@ -406,7 +406,7 @@ def test_quotient_merged_node_carries_the_identified_sum_at_fit_level():
     node_offsets = {u: rng.standard_normal(Ksm1) for u in (1, 2, 3, 4)}
     node_offsets[0] = np.zeros(Ksm1)
     beta = real_beta_from(K, V, seed=2)
-    docs, doc_nodes = dag_offset_corpus(
+    docs, doc_nodes, _cand = dag_offset_corpus(
         dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
         node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 400, 3: 400, 4: 500},
         n_background_only=600, sigma_true=3.0 * np.eye(Ksm1), doc_len=80, seed=6)
