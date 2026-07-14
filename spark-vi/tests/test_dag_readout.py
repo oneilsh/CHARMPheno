@@ -1,6 +1,8 @@
 import numpy as np
-from spark_vi.models.topic.dag_readout import assemble_readout, node_prevalence
+from spark_vi.models.topic.dag_readout import assemble_readout, node_prevalence, dag_offset_readout
 from spark_vi.models.topic.pg_stm_dag import DagGate
+from spark_vi.models.topic.partition import TopicBlockPartition
+from tests._stm_synth import dag_offset_corpus, real_beta_from
 
 
 class DummyDag:
@@ -55,3 +57,25 @@ def test_prevalence_adds_soft_membership_to_labeled_mass():
     assert np.isclose(prev[3]["inferred_total"], 10 + 4 * 0.75)     # + soft mass landing on A1
     assert prev[3]["recall_ratio"] < 1.0                            # labeled undercounts inferred
     assert np.isclose(prev[3]["recall_ratio"], 10 / 13.0)
+
+
+def test_end_to_end_readout_statuses_on_the_0054_corpus():
+    part = TopicBlockPartition(group_var="g", background_k=3, foreground=(("A", 2), ("B", 2)))
+    K, V = part.K, 120
+    dag = DagGate([(), (0,), (0,), (1,), (2,)])           # B(2) no own docs
+    rng = np.random.default_rng(11)
+    node_offsets = {u: 2.0 * rng.standard_normal(K - 1) for u in (1, 2, 3, 4)}
+    node_offsets[0] = np.zeros(K - 1)
+    beta = real_beta_from(K, V, seed=2)
+    docs, doc_nodes, cand = dag_offset_corpus(
+        dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+        node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 200, 3: 200, 4: 250},
+        sigma_true=1.0 * np.eye(K - 1), doc_len=80, seed=12)
+    doc_groups = [next(iter(d.groups)) for d in docs]
+    ro = dag_offset_readout(docs, doc_nodes, cand, doc_groups, part, dag,
+                            P=1, tol=1.0, lam_base=0.25, n_iter=80, burn=40, seed=0)
+    st = {u: ro["coordinates"][u]["status"] for u in ro["coordinates"]}
+    assert st[3] == "identified"                          # A1 increment
+    assert st[1] == "gauge" and st[2] == "gauge"          # anchor levels
+    assert st[4] == "unresolved"                          # B1 subsumed, no own docs
+    assert ro["coordinates"][4]["recipe"]["attest_node"] == 2
