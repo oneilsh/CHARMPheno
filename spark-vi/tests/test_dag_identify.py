@@ -320,3 +320,103 @@ def test_compiler_collapses_no_direct_docs_anchor_on_realistic_corpus():
     assert nm[1] != nm[3] and nm[1] != nm[2] and nm[3] != nm[2]          # A, A1, merged-B distinct
     assert q["quotient_dag"].n_nodes == 4                                # root + A + A1 + merged-B
     assert quotient_moment_matches_projection(dag, G, q, doc_nodes) < 1e-9
+
+
+def test_closure_gram_equals_fit_moment_offset_block():
+    """PLANTED: a small DAG-offset corpus. REAL: nothing. Synthetic -> MATH-CORRECTNESS:
+    closure_gram(dag, doc_nodes) equals the offset block of the augmented design moment the fit
+    accumulates (w = [x ; offset_indicator], XtX[P:, P:] = sum z z^T), so the compiler rides on
+    the exact moment PGSTMDag.fit forms ("if you can fit, you can compile"). Does NOT prove
+    recovery or transfer."""
+    from tests._stm_synth import dag_offset_corpus, real_beta_from
+    part = TopicBlockPartition(group_var="g", background_k=4, foreground=(("A", 3),))
+    K, V = part.K, 60
+    dag = DagGate([(), (0,), (1,)])
+    Ksm1 = K - 1
+    rng = np.random.default_rng(0)
+    node_offsets = {0: np.zeros(Ksm1), 1: rng.standard_normal(Ksm1), 2: rng.standard_normal(Ksm1)}
+    beta = real_beta_from(K, V, seed=1)
+    docs, doc_nodes = dag_offset_corpus(
+        dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+        node_of_group={"A": 1}, doc_nodes_plan={1: 30, 2: 30}, sigma_true=2.0 * np.eye(Ksm1),
+        doc_len=40, seed=2)
+    G = closure_gram(dag, doc_nodes)
+    P, U = 1, dag.n_offset_nodes
+    XtX = np.zeros((P + U, P + U))
+    for doc, nodes in zip(docs, doc_nodes):
+        w = np.concatenate([np.asarray(doc.x, float), dag.offset_indicator(nodes)])
+        XtX += np.outer(w, w)
+    assert np.allclose(G, XtX[P:, P:])
+
+
+def test_tolerance_tracks_distinguishing_doc_count_and_min_eig_is_monotone():
+    """Deterministic linear-algebra check; no empirical or transfer claim. On chains where the
+    anchor has a controlled number of own (distinguishing) documents: the column-equality metric
+    d(anchor, subtype) equals exactly that count; the collapse decision flips at tol crossing d
+    (strict d < tol, so NO collapse at tol == d); and the smallest eigenvalue grows monotonically
+    with own-doc count -- the effective-rank / fragility continuum (weakly-identified -> identified).
+    Asserts nothing about recovery or real data."""
+    dag = DagGate([(), (0,), (1,)])
+    prev_min = -1.0
+    for own in (0, 5, 25, 100):
+        doc_nodes = [frozenset({2})] * 200 + [frozenset({1})] * own
+        G = closure_gram(dag, doc_nodes)
+        assert G[1, 1] + G[0, 0] - 2 * G[0, 1] == own          # metric counts distinguishing docs
+        sp = identifiability_spectrum(G)
+        assert frozenset({1, 2}) in detect_confounds(dag, G, sp, tol=own + 0.5)["collapse_sets"]
+        if own > 0:                                            # strict d < tol: no collapse at tol == d
+            assert frozenset({1, 2}) not in detect_confounds(dag, G, sp, tol=float(own))["collapse_sets"]
+        min_eig = float(np.linalg.eigvalsh(G).min())
+        assert min_eig > prev_min                              # monotone: more own docs -> more identified
+        prev_min = min_eig
+
+
+def test_cross_tree_coincidence_via_coattestation_is_flagged_not_merged():
+    """Deterministic linear-algebra check; no empirical or transfer claim. Two NON-adjacent
+    subtypes under different anchors that are only ever co-attested (identical support columns) are
+    a confound but not a parent-child chain: detect_confounds flags the direction (flagged_dim >= 1)
+    and does NOT merge them -- the safety split on a many-to-many-style attestation pattern. Asserts
+    nothing about recovery or real data."""
+    dag = DagGate([(), (0,), (0,), (1,), (2,)])              # root; A=1, B=2; A1=3, B1=4
+    doc_nodes = [frozenset({1})] * 50 + [frozenset({2})] * 50 + [frozenset({3, 4})] * 100
+    G = closure_gram(dag, doc_nodes)
+    det = detect_confounds(dag, G, identifiability_spectrum(G), tol=1.0)
+    assert not any({3, 4} <= set(s) for s in det["collapse_sets"])   # 3 and 4 NOT merged
+    assert det["flagged_dim"] >= 1                                    # confound flagged
+
+
+def test_quotient_merged_node_carries_the_identified_sum_at_fit_level():
+    """PLANTED: the insight-0054 no-direct-docs-anchor corpus. REAL: overlap beta. Realistic-overlap
+    synthetic -> MATH-CORRECTNESS: fitting the original DAG splits the un-identified anchor/subtype
+    direction arbitrarily (B_B, B_B1), but fitting the compiler's quotient yields a single merged
+    node equal to their vector sum on the group's active dims -- the compiler removes the arbitrary
+    split while preserving the identified quantity through an actual fit. Equality holds up to the
+    light depth-scaled ridge reparameterization (one merged-node penalty vs two chain-node
+    penalties), so the check is correlation ~1 plus a small absolute bound, not machine-exact. Does
+    NOT prove recovery or transfer."""
+    from spark_vi.models.topic.pg_stm_dag import PGSTMDag
+    from spark_vi.models.topic.pg_stm import stick_layout
+    from tests._stm_synth import dag_offset_corpus, real_beta_from
+    part = TopicBlockPartition(group_var="g", background_k=6, foreground=(("A", 4), ("B", 4)))
+    K, V = part.K, 300
+    dag = DagGate([(), (0,), (0,), (1,), (2,)])
+    Ksm1 = K - 1
+    rng = np.random.default_rng(4)
+    node_offsets = {u: rng.standard_normal(Ksm1) for u in (1, 2, 3, 4)}
+    node_offsets[0] = np.zeros(Ksm1)
+    beta = real_beta_from(K, V, seed=2)
+    docs, doc_nodes = dag_offset_corpus(
+        dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+        node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 400, 3: 400, 4: 500},
+        n_background_only=600, sigma_true=3.0 * np.eye(Ksm1), doc_len=80, seed=6)
+    G = closure_gram(dag, doc_nodes)
+    q = build_quotient(dag, detect_confounds(dag, G, identifiability_spectrum(G), tol=1.0))
+    nm = q["node_map"]
+    out0 = PGSTMDag(K=K, V=V, partition=part, dag=dag, P=1, n_iter=25, lam_base=1e-3, seed=0).fit(docs, doc_nodes)
+    qdoc = [frozenset(int(nm[u]) for u in s) for s in doc_nodes]
+    outq = PGSTMDag(K=K, V=V, partition=part, dag=q["quotient_dag"], P=1, n_iter=25, lam_base=1e-3, seed=0).fit(docs, qdoc)
+    actB = stick_layout(part)["groups"]["B"]["active"]
+    B_sum = (out0["B"][2] + out0["B"][4])[actB]
+    B_merged = outq["B"][int(nm[2])][actB]
+    assert np.corrcoef(B_sum, B_merged)[0, 1] > 0.999      # same direction (identified sum)
+    assert np.abs(B_sum - B_merged).max() < 1e-2           # up to the light-ridge reparameterization
