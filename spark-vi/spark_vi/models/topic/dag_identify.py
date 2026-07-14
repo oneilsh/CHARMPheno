@@ -51,3 +51,55 @@ def identifiability_spectrum(G):
     G = np.asarray(G, dtype=np.float64)
     evals, evecs = np.linalg.eigh(G)          # ascending, orthonormal columns
     return {"eigenvalues": evals, "eigenvectors": evecs}
+
+
+def _uf_find(parent, x):
+    while parent[x] != x:
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    return x
+
+
+def _uf_union(parent, a, b):
+    ra, rb = _uf_find(parent, a), _uf_find(parent, b)
+    if ra != rb:
+        parent[min(ra, rb)] = max(ra, rb)      # deterministic: point smaller root at larger
+
+
+def detect_confounds(dag, G, spectrum, *, tol, prev_collapsed=None, band=0.0):
+    """Detect the confounds the compiler can safely auto-collapse (parent-child
+    column-equality chains: ||z_parent - z_child||^2 < tol) and count the residual
+    confounded dimension it must instead flag. Hysteresis: with prev_collapsed given, a
+    fresh edge needs ||.||^2 < tol - band to collapse and a previously-collapsed edge stays
+    collapsed unless ||.||^2 > tol + band, so near-threshold decisions do not churn between
+    snapshots. Root edges are skipped (no offset column; anchor-level walls are the
+    foreground Grams' concern). flagged_dim = null_dim - collapse_dims counts confounds not
+    explained by auto-collapsed chains (multi-child / diamond / cross-tree / multi-parent)."""
+    G = np.asarray(G, dtype=np.float64)
+    prev_collapsed = set() if prev_collapsed is None else set(prev_collapsed)
+    n = dag.n_nodes
+    parent = list(range(n))
+    collapsed_edges = set()
+    margins = {}
+    for c in range(1, n):
+        i = c - 1
+        for p in dag.parents[c]:
+            if p == 0:
+                continue
+            j = p - 1
+            d = float(G[i, i] + G[j, j] - 2.0 * G[i, j])       # ||z_c - z_p||^2 >= 0
+            margins[(p, c)] = tol - d
+            was = (p, c) in prev_collapsed
+            thresh = (tol + band) if was else (tol - band)     # hysteresis
+            if d < thresh:
+                _uf_union(parent, p, c)
+                collapsed_edges.add((p, c))
+    groups = {}
+    for u in range(1, n):
+        groups.setdefault(_uf_find(parent, u), set()).add(u)
+    collapse_sets = [frozenset(s) for s in groups.values() if len(s) >= 2]
+    collapse_dims = sum(len(s) - 1 for s in collapse_sets)
+    null_dim = int(np.sum(spectrum["eigenvalues"] < tol))
+    flagged_dim = max(0, null_dim - collapse_dims)
+    return {"collapse_sets": collapse_sets, "collapsed_edges": collapsed_edges,
+            "margins": margins, "flagged_dim": flagged_dim}

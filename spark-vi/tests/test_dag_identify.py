@@ -2,6 +2,11 @@ import numpy as np
 from spark_vi.models.topic.pg_stm_dag import DagGate
 from spark_vi.models.topic.partition import TopicBlockPartition
 from spark_vi.models.topic.dag_identify import closure_gram, foreground_grams, identifiability_spectrum
+from spark_vi.models.topic.dag_identify import detect_confounds
+
+
+def _spectrum(G):
+    return identifiability_spectrum(G)
 
 
 def test_closure_gram_matches_hand_computation():
@@ -54,3 +59,51 @@ def test_spectrum_is_raw_and_ascending_and_flags_exact_confound_as_zero():
     assert np.isclose(sp2["eigenvalues"][0], 0.0)
     v = sp2["eigenvectors"][:, 0]
     assert np.isclose(abs(v[0]), abs(v[1]))                      # supported on {a,b} equally
+
+
+def test_detect_collapses_single_child_no_own_evidence_chain():
+    """Deterministic linear-algebra check; no empirical or transfer claim. A parent with no
+    own-level documents and a single child (z_parent == z_child) is a parent-child
+    column-equality confound: detect_confounds auto-collapses that edge, lists the pair as a
+    collapse set, and reports zero flagged residual. Proves the chain-collapse rule; asserts
+    nothing about recovery or real data."""
+    dag = DagGate([(), (0,), (1,)])            # root; node 1 (no own docs); node 2 sole child
+    # every doc sits at node 2 -> z=[1,1] for all -> z_node1 == z_node2 exactly
+    doc_nodes = [frozenset({2})] * 5
+    G = closure_gram(dag, doc_nodes)
+    res = detect_confounds(dag, G, _spectrum(G), tol=1e-6)
+    assert frozenset({1, 2}) in res["collapse_sets"]
+    assert (1, 2) in res["collapsed_edges"]
+    assert res["flagged_dim"] == 0
+
+
+def test_detect_flags_non_adjacent_coincident_support_without_merging():
+    """Deterministic linear-algebra check; no empirical or transfer claim. Two non-adjacent
+    nodes (siblings under the root) that happen to be attested by the same document set are
+    a confound (identical columns) but NOT a parent-child chain, so detect_confounds does
+    NOT auto-collapse them; the confounded direction shows up as flagged_dim >= 1. Proves the
+    safety split (understood structure collapses, merely detected structure escalates)."""
+    dag = DagGate([(), (0,), (0,)])            # root; nodes 1 and 2 both children of root (siblings)
+    # every doc attests BOTH node 1 and node 2 -> z=[1,1] always -> identical columns
+    doc_nodes = [frozenset({1, 2})] * 5
+    G = closure_gram(dag, doc_nodes)
+    res = detect_confounds(dag, G, _spectrum(G), tol=1e-6)
+    assert res["collapse_sets"] == []          # not a parent-child edge -> not collapsed
+    assert res["flagged_dim"] >= 1             # detected and escalated
+
+
+def test_detect_hysteresis_keeps_prior_collapse_within_band():
+    """Deterministic linear-algebra check; no empirical or transfer claim. A near-threshold
+    edge that was collapsed on a previous snapshot stays collapsed under a small count
+    perturbation (its distance is within the hysteresis band), rather than flipping. Proves
+    the determinism policy; asserts nothing about real data."""
+    dag = DagGate([(), (0,), (1,)])
+    # z_node1 vs z_node2 differ by exactly one document (one doc sits at node 1 alone)
+    doc_nodes = [frozenset({2})] * 20 + [frozenset({1})]     # ||z2 - z1||^2 = 1 (the lone node-1 doc)
+    G = closure_gram(dag, doc_nodes)
+    sp = _spectrum(G)
+    # tol below 1 -> not collapsed fresh
+    assert (1, 2) not in detect_confounds(dag, G, sp, tol=0.5)["collapsed_edges"]
+    # but if previously collapsed and within band, hysteresis keeps it
+    res = detect_confounds(dag, G, sp, tol=0.5, prev_collapsed={(1, 2)}, band=1.0)
+    assert (1, 2) in res["collapsed_edges"]
