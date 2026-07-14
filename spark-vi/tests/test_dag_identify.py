@@ -1,7 +1,7 @@
 import numpy as np
 from spark_vi.models.topic.pg_stm_dag import DagGate
 from spark_vi.models.topic.partition import TopicBlockPartition
-from spark_vi.models.topic.dag_identify import closure_gram, foreground_grams
+from spark_vi.models.topic.dag_identify import closure_gram, foreground_grams, identifiability_spectrum
 
 
 def test_closure_gram_matches_hand_computation():
@@ -36,3 +36,21 @@ def test_foreground_gram_exposes_anchor_level_vs_intercept_collinearity():
     assert np.allclose(A, 3.0 * np.ones((2, 2)))
     evals = np.linalg.eigvalsh(A)
     assert np.isclose(evals.min(), 0.0)        # level-vs-intercept null direction
+
+
+def test_spectrum_is_raw_and_ascending_and_flags_exact_confound_as_zero():
+    """Deterministic linear-algebra check; no empirical or transfer claim. The spectrum is
+    the raw ascending eigendecomposition with no threshold: a full-rank Gram has all
+    positive eigenvalues, and a Gram with two identical columns has an exact zero
+    eigenvalue whose eigenvector is the difference direction. Proves the kernel is
+    threshold-free; asserts no tier or collapse."""
+    G_full = np.array([[3.0, 2.0], [2.0, 2.0]])
+    sp = identifiability_spectrum(G_full)
+    assert np.all(np.diff(sp["eigenvalues"]) >= -1e-12)          # ascending
+    assert sp["eigenvalues"].min() > 1e-9                        # full rank
+    # two identical columns (z_a == z_b) -> exact null direction e_a - e_b
+    G_conf = np.array([[4.0, 4.0], [4.0, 4.0]])
+    sp2 = identifiability_spectrum(G_conf)
+    assert np.isclose(sp2["eigenvalues"][0], 0.0)
+    v = sp2["eigenvectors"][:, 0]
+    assert np.isclose(abs(v[0]), abs(v[1]))                      # supported on {a,b} equally

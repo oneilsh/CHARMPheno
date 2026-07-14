@@ -40,3 +40,14 @@ def foreground_grams(dag, doc_nodes, doc_groups, partition):
         w = np.concatenate([np.array([1.0]), z])
         out[g] += np.outer(w, w)
     return out
+
+
+def identifiability_spectrum(G):
+    """Raw, threshold-free symmetric eigen-spectrum of a closure Gram. Returns eigenvalues
+    ascending and their unit eigenvectors (columns), via numpy.linalg.eigh (G is symmetric
+    PSD). No cutoff and no naming happen here -- the small-but-nonzero eigenvalues are the
+    weakly-identified directions, left as raw numbers for the quotient builder (which owns
+    the one numeric tolerance) and the reporting layer (which owns any tiers)."""
+    G = np.asarray(G, dtype=np.float64)
+    evals, evecs = np.linalg.eigh(G)          # ascending, orthonormal columns
+    return {"eigenvalues": evals, "eigenvectors": evecs}
