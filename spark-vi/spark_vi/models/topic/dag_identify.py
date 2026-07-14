@@ -154,3 +154,32 @@ def build_quotient(dag, detected):
     new_parents = [tuple(sorted(qid[p] for p in radj_parents[r])) for r in order]
     quotient_dag = DagGate(new_parents)
     return {"quotient_dag": quotient_dag, "node_map": node_map}
+
+
+def quotient_moment_matches_projection(dag, G, quotient, doc_nodes):
+    """Correctness invariant: quotient-then-form-the-moment == form-the-moment-then-project.
+    Recompute the quotient DAG's pooled Gram from the corpus mapped through node_map, and
+    compare it to the original Gram restricted to one representative original offset index
+    per quotient offset node. Returns the max abs difference; ~0 (machine precision) for
+    exact column-equality collapses, which certifies the quotient faithfully represents the
+    identified part of the original design."""
+    G = np.asarray(G, dtype=np.float64)
+    node_map = quotient["node_map"]
+    quotient_dag = quotient["quotient_dag"]
+    # G_q: recompute on the quotient DAG from the remapped corpus
+    q_doc_nodes = [frozenset(int(node_map[u]) for u in nodes) for nodes in doc_nodes]
+    G_q = closure_gram(quotient_dag, q_doc_nodes)
+    # projection: one representative ORIGINAL offset index per quotient OFFSET node.
+    # quotient offset node q (id 1..Uq) <- pick any original node u with node_map[u]==q;
+    # its offset index is u-1. Order reps by quotient offset id so rows/cols align with G_q.
+    Uq = quotient_dag.n_offset_nodes
+    reps_off = np.empty(Uq, dtype=np.int64)
+    seen = {}
+    for u in range(dag.n_nodes):
+        q = int(node_map[u])
+        if q >= 1 and q not in seen:
+            seen[q] = u - 1                       # original offset index for quotient node q
+    for q in range(1, Uq + 1):
+        reps_off[q - 1] = seen[q]
+    G_proj = G[np.ix_(reps_off, reps_off)]
+    return float(np.max(np.abs(G_q - G_proj)))

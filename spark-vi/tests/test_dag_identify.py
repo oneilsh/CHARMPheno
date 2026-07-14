@@ -4,6 +4,7 @@ from spark_vi.models.topic.partition import TopicBlockPartition
 from spark_vi.models.topic.dag_identify import closure_gram, foreground_grams, identifiability_spectrum
 from spark_vi.models.topic.dag_identify import detect_confounds
 from spark_vi.models.topic.dag_identify import build_quotient
+from spark_vi.models.topic.dag_identify import quotient_moment_matches_projection
 
 
 def _spectrum(G):
@@ -144,3 +145,19 @@ def test_build_quotient_is_identity_when_nothing_collapses():
     q = build_quotient(dag, det)
     assert q["quotient_dag"].n_nodes == dag.n_nodes
     assert list(q["node_map"]) == list(range(dag.n_nodes))
+
+
+def test_quotient_moment_equals_projection_on_exact_confound():
+    """Deterministic linear-algebra check; no empirical or transfer claim. The headline
+    correctness invariant: for an exact parent-child column-equality collapse, forming the
+    quotient DAG's moment equals restricting the original moment to the surviving
+    coordinates (residual ~ 0 at machine precision). This is what makes 'map back to the
+    original for the report' provably faithful. Proves the invariant on a plant; asserts
+    nothing about recovery or real data."""
+    dag = DagGate([(), (0,), (1,), (0,)])         # collapse {1,2}; node3 distinct
+    doc_nodes = [frozenset({2})] * 6 + [frozenset({3})] * 4
+    G = closure_gram(dag, doc_nodes)
+    det = detect_confounds(dag, G, identifiability_spectrum(G), tol=1e-6)
+    q = build_quotient(dag, det)
+    resid = quotient_moment_matches_projection(dag, G, q, doc_nodes)
+    assert resid < 1e-9
