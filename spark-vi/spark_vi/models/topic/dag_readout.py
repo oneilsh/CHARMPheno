@@ -69,7 +69,18 @@ def node_prevalence(dag, doc_nodes, doc_candidates, memberships):
 
 def assemble_readout(dag, increment_draws, node_map, classification,
                      *, ci_level=0.90, fragility_margin=None, spectrum=None,
+                     node_sticks=None,
                      doc_nodes=None, doc_candidates=None, memberships=None):
+    """Assemble the per-coordinate-class ReadOut from the quotient increment draws.
+
+    ``node_sticks`` (optional) maps an original node id -> the array of STICK indices on
+    which that node's offset is IDENTIFIED (its own group's foreground sticks -- the sticks
+    its documents actually activate; insight 0054). When supplied, an identified coordinate
+    reports increment_mean / ci on ONLY those sticks (plus a `sticks` field naming them), so
+    the object never carries a number for a stick the node's documents never touch (those
+    sit pinned at the prior and are not the node's to claim -- insight 0057, the read-out
+    half of insight 0053's block-granularity rule). When None, the full (K-1) vector is
+    reported (backward-compatible)."""
     gauge = set(classification["gauge_nodes"])
     unresolved = dict(classification["unresolved"])
     lo_q, hi_q = (1 - ci_level) / 2, 1 - (1 - ci_level) / 2
@@ -91,12 +102,19 @@ def assemble_readout(dag, increment_draws, node_map, classification,
         else:
             q = int(node_map[u])
             col = increment_draws[:, q - 1, :]            # (n_kept, Ksm1)
-            mean = col.mean(axis=0)
             status = "identified"
-            entry = {"node": u, "parent": parent, "status": status,
-                     "increment_mean": mean,
-                     "ci_low": np.quantile(col, lo_q, axis=0),
-                     "ci_high": np.quantile(col, hi_q, axis=0)}
+            entry = {"node": u, "parent": parent, "status": status}
+            if node_sticks is not None and u in node_sticks:
+                idx = np.asarray(node_sticks[u], dtype=int)
+                sub = col[:, idx]
+                entry["sticks"] = idx.tolist()
+                entry["increment_mean"] = sub.mean(axis=0)
+                entry["ci_low"] = np.quantile(sub, lo_q, axis=0)
+                entry["ci_high"] = np.quantile(sub, hi_q, axis=0)
+            else:
+                entry["increment_mean"] = col.mean(axis=0)
+                entry["ci_low"] = np.quantile(col, lo_q, axis=0)
+                entry["ci_high"] = np.quantile(col, hi_q, axis=0)
             coords[u] = entry
     readout = {"calibration": "absolute", "coordinates": coords,
                "meta": {"n_draws": int(increment_draws.shape[0]), "ci_level": ci_level}}
@@ -220,7 +238,29 @@ def dag_offset_readout(docs, doc_nodes, doc_candidates, doc_groups, partition, d
                         n_iter=n_iter, burn=burn, lam_base=lam_base, seed=seed)
     out = eng.run(docs, qcand, beta_init=beta_warm, penalty_override=penalty)
 
+    # ---- identified sub-block per node: its group's foreground sticks (insight 0054/0057) ----
+    # A node's offset is identified only on the sticks its own documents activate. Map each
+    # node -> its anchor (the child-of-root on its path) -> that anchor's group (read off the
+    # observable doc groups) -> that group's foreground sticks. The read-out then claims a
+    # number only on those sticks, not on the other groups' prior-pinned sticks.
+    def _anchor_of(u):
+        for c in [u] + sorted(dag.ancestors(u)):
+            if dag.parents[c] and 0 in dag.parents[c]:
+                return c
+        return None
+    anchor_group = {}
+    for g, wn in zip(doc_groups, warm_nodes):
+        a = _anchor_of(min(wn))
+        if a is not None:
+            anchor_group[a] = g
+    node_sticks = {}
+    for u in range(1, dag.n_nodes):
+        g = anchor_group.get(_anchor_of(u))
+        if g is not None:
+            node_sticks[u] = np.asarray(layout["groups"][g]["fg_sticks"], dtype=int)
+
     # ---- Phase C: assembly ----
-    ro = assemble_readout(dag, out["increment_draws"], node_map, cls, ci_level=0.90)
+    ro = assemble_readout(dag, out["increment_draws"], node_map, cls, ci_level=0.90,
+                          node_sticks=node_sticks)
     ro["prevalence"] = node_prevalence(dag, doc_nodes, doc_candidates, memberships)
     return ro
