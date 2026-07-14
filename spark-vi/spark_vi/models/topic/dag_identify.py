@@ -75,8 +75,11 @@ def detect_confounds(dag, G, spectrum, *, tol, prev_collapsed=None, band=0.0):
     fresh edge needs ||.||^2 < tol - band to collapse and a previously-collapsed edge stays
     collapsed unless ||.||^2 > tol + band, so near-threshold decisions do not churn between
     snapshots. Root edges are skipped (no offset column; anchor-level walls are the
-    foreground Grams' concern). flagged_dim = null_dim - collapse_dims counts confounds not
-    explained by auto-collapsed chains (multi-child / diamond / cross-tree / multi-parent)."""
+    foreground Grams' concern). Only edges into a
+    SINGLE-parent child auto-collapse (a multi-parent child is not a chain edge -- merging it
+    would transitively fuse its distinct parents; left for flagged_dim instead).
+    flagged_dim = null_dim - collapse_dims counts confounds not explained by auto-collapsed
+    chains (multi-child / diamond / cross-tree / multi-parent)."""
     G = np.asarray(G, dtype=np.float64)
     prev_collapsed = set() if prev_collapsed is None else set(prev_collapsed)
     n = dag.n_nodes
@@ -84,18 +87,20 @@ def detect_confounds(dag, G, spectrum, *, tol, prev_collapsed=None, band=0.0):
     collapsed_edges = set()
     margins = {}
     for c in range(1, n):
-        i = c - 1
-        for p in dag.parents[c]:
-            if p == 0:
-                continue
-            j = p - 1
-            d = float(G[i, i] + G[j, j] - 2.0 * G[i, j])       # ||z_c - z_p||^2 >= 0
-            margins[(p, c)] = tol - d
-            was = (p, c) in prev_collapsed
-            thresh = (tol + band) if was else (tol - band)     # hysteresis
-            if d < thresh:
-                _uf_union(parent, p, c)
-                collapsed_edges.add((p, c))
+        ps = dag.parents[c]
+        if len(ps) != 1:                # multi-parent (or orphan) child: not a chain edge -> flag
+            continue
+        (p,) = ps
+        if p == 0:                      # anchor's parent is the root (no offset column) -> skip
+            continue
+        i, j = c - 1, p - 1
+        d = float(G[i, i] + G[j, j] - 2.0 * G[i, j])           # ||z_c - z_p||^2 >= 0
+        margins[(p, c)] = tol - d
+        was = (p, c) in prev_collapsed
+        thresh = (tol + band) if was else (tol - band)         # hysteresis
+        if d < thresh:
+            _uf_union(parent, p, c)
+            collapsed_edges.add((p, c))
     groups = {}
     for u in range(1, n):
         groups.setdefault(_uf_find(parent, u), set()).add(u)
