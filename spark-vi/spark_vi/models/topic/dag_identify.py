@@ -139,6 +139,56 @@ def detect_confounds(dag, G, spectrum, *, tol, prev_collapsed=None, band=0.0):
             "margins": margins, "flagged_dim": flagged_dim}
 
 
+def classify_null_directions(dag, G, fg_grams, detected, *, tol):
+    """Split the design's null directions into the read-out's two labels:
+      * GAUGE (partition identity): a group whose documents all attest their anchor makes
+        that group's foreground-Gram intercept column equal the anchor's offset column, i.e.
+        the column-equality metric ||intercept_col - offset_col_j||^2 < tol over the group's
+        docs. Such an anchor level is a gauge freedom (no attestation resolves it; report the
+        fixed convention).
+      * UNRESOLVED (contingent): a non-representative member of a closure-Gram collapse set
+        (a no-own-documents subtype). Its individual increment is subsumed into the merged
+        quotient node; report a recipe = documents at the missing-evidence anchor that would
+        break the collinearity (docs_needed from the column-equality margin).
+    The two labels are DISJOINT by construction: a subsumed (non-representative) collapse
+    member is reported as UNRESOLVED with its recipe, and its surviving representative anchor
+    is the gauge; a node is never both. `G` (the pooled closure Gram) is accepted for a later
+    cross-check but is currently unused. Returns
+    {"gauge_nodes": frozenset, "unresolved": {node: {"attest_node", "docs_needed"}}}.
+    """
+    # --- UNRESOLVED: non-rep members of each collapse set, with an attestation recipe.
+    # Computed first so GAUGE can be made disjoint from it below.
+    unresolved = {}
+    margins = detected["margins"]                          # {(parent, child): tol - ||z_c - z_p||^2}
+    for s in detected["collapse_sets"]:
+        rep = min(s)
+        for u in s:
+            if u == rep:
+                continue
+            # the missing-evidence anchor = u's parent inside the collapsed chain
+            ps = [p for p in dag.parents[u] if p in s or p == rep]
+            attest = ps[0] if ps else rep
+            # margin m = tol - d IS the shortfall: additional distinguishing docs at `attest`
+            # needed to push d up to tol and break the null.
+            m = margins.get((attest, u), margins.get((rep, u), float(tol)))
+            docs_needed = max(1, int(np.ceil(m)))          # docs at `attest` that break the null
+            unresolved[u] = {"attest_node": int(attest), "docs_needed": docs_needed}
+    # --- GAUGE: per-group foreground Gram intercept-column == offset-column (direct metric,
+    # mirroring detect_confounds; uses `tol` consistently). Row/col 0 is the intercept; offset
+    # index j -> Gram index j+1 -> node id j+1.
+    gauge_candidates = set()
+    for g, W in fg_grams.items():
+        W = np.asarray(W, dtype=np.float64)
+        U = W.shape[0] - 1
+        for j in range(U):
+            d = float(W[0, 0] + W[j + 1, j + 1] - 2.0 * W[0, j + 1])   # ||intercept - offset_j||^2
+            if d < tol:
+                gauge_candidates.add(j + 1)                # node j+1's level equals the intercept
+    # DISJOINTNESS: a subsumed collapse member is UNRESOLVED, not a gauge.
+    gauge_nodes = frozenset(gauge_candidates - set(unresolved.keys()))
+    return {"gauge_nodes": gauge_nodes, "unresolved": unresolved}
+
+
 def build_quotient(dag, detected):
     """Rewrite the DAG to its identified quotient: merge each detected parent-child
     column-equality set into one node, keep every other node, and re-number quotient nodes

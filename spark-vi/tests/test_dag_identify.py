@@ -439,3 +439,53 @@ def test_expected_gram_spreads_a_soft_doc_across_candidates():
     assert np.isclose(G[2, 2], 0.5) and np.isclose(G[3, 3], 0.5)
     # A1 and B1 never co-occur within the doc's mixture -> zero cross moment
     assert np.isclose(G[2, 3], 0.0)
+
+
+from spark_vi.models.topic.dag_identify import (foreground_grams, classify_null_directions,
+                                                identifiability_spectrum)
+
+
+def test_classify_labels_gauge_levels_and_unresolved_subsumed_subtype():
+    # insight-0054 attestation: A(1) has own docs + A1(3); B(2) has NO own docs + B1(4)
+    dag = DagGate([(), (0,), (0,), (1,), (2,)])
+    doc_nodes = [frozenset({1})] * 400 + [frozenset({3})] * 400 + [frozenset({4})] * 500
+    doc_groups = ["A"] * 800 + ["B"] * 500
+
+    class P:                     # minimal partition stub: two groups
+        groups = ("A", "B")
+    G = closure_gram(dag, doc_nodes)
+    fg = foreground_grams(dag, doc_nodes, doc_groups, P())
+    det = detect_confounds(dag, G, identifiability_spectrum(G), tol=1.0)
+    cls = classify_null_directions(dag, G, fg, det, tol=1.0)
+
+    # anchor LEVELS A and B are partition-identity gauges
+    assert {1, 2} <= cls["gauge_nodes"]
+    # B1 (no own docs, subsumed into B) is UNRESOLVED with a recipe pointing at B
+    assert 4 in cls["unresolved"] and cls["unresolved"][4]["attest_node"] == 2
+    assert cls["unresolved"][4]["docs_needed"] >= 1
+    # A1 is neither gauge nor unresolved (it is the one identified increment)
+    assert 3 not in cls["gauge_nodes"] and 3 not in cls["unresolved"]
+
+
+def test_classify_gauge_and_unresolved_are_disjoint_under_sparse_evidence():
+    # insight-0054 setup, but group B now has THREE own-anchor docs (frozenset({2})*3),
+    # so d(2,4) = 3 (the three B-only docs distinguish node2 from node4). With tol=5.0 the
+    # edge still collapses (3 < 5) -> node 4 UNRESOLVED, shortfall = tol - d = 5 - 3 = 2.
+    dag = DagGate([(), (0,), (0,), (1,), (2,)])
+    doc_nodes = ([frozenset({1})] * 400 + [frozenset({3})] * 400
+                 + [frozenset({4})] * 500 + [frozenset({2})] * 3)
+    doc_groups = ["A"] * 800 + ["B"] * 503
+
+    class P:
+        groups = ("A", "B")
+    G = closure_gram(dag, doc_nodes)
+    fg = foreground_grams(dag, doc_nodes, doc_groups, P())
+    det = detect_confounds(dag, G, identifiability_spectrum(G), tol=5.0)
+    cls = classify_null_directions(dag, G, fg, det, tol=5.0)
+
+    # the two labels never overlap
+    assert cls["gauge_nodes"].isdisjoint(set(cls["unresolved"]))
+    # node 4 is the subsumed subtype -> UNRESOLVED, not a gauge
+    assert 4 in cls["unresolved"] and 4 not in cls["gauge_nodes"]
+    # shortfall recipe: 2 more distinguishing docs at node 2 (tol - d = 5 - 3)
+    assert cls["unresolved"][4]["docs_needed"] == 2
