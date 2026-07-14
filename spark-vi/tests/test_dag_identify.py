@@ -285,3 +285,38 @@ def test_build_quotient_collapses_a_three_node_chain():
     for child, ps in enumerate(q["quotient_dag"].parents):
         for p in ps:
             assert p < child
+
+
+def test_compiler_collapses_no_direct_docs_anchor_on_realistic_corpus():
+    """PLANTED: the insight-0054 DAG-offset corpus -- anchor A (anchor-level docs + subtype A1),
+    anchor B (ONLY a subtype B1, no anchor-level docs), plus background-only members -- on a
+    realistic-overlap beta. REAL: overlap beta. Realistic-overlap synthetic -> MATH-CORRECTNESS:
+    the compiler reads the design moment and AUTO-COLLAPSES the no-direct-docs anchor B into its
+    sole subtype B1 (z_B == z_B1, the un-identified anchor insight 0054 found by hand), KEEPS the
+    identified A/A1 distinction (A has direct docs, so z_A != z_A1), reports zero flagged residual,
+    and the quotient faithfully represents the identified design (invariant residual ~0). Proves
+    the compiler reproduces the 0054 collapse deterministically from a count reduce; does NOT prove
+    recovery or transfer to real data."""
+    from tests._stm_synth import dag_offset_corpus, real_beta_from
+    part = TopicBlockPartition(group_var="g", background_k=6, foreground=(("A", 4), ("B", 4)))
+    K, V = part.K, 300
+    dag = DagGate([(), (0,), (0,), (1,), (2,)])       # root; A=1, B=2; A1=3, B1=4
+    Ksm1 = K - 1
+    rng = np.random.default_rng(4)
+    node_offsets = {u: rng.standard_normal(Ksm1) for u in (1, 2, 3, 4)}
+    node_offsets[0] = np.zeros(Ksm1)
+    beta = real_beta_from(K, V, seed=2)
+    docs, doc_nodes = dag_offset_corpus(
+        dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+        node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 400, 3: 400, 4: 500},
+        n_background_only=600, sigma_true=3.0 * np.eye(Ksm1), doc_len=80, seed=6)
+    G = closure_gram(dag, doc_nodes)
+    det = detect_confounds(dag, G, identifiability_spectrum(G), tol=1.0)
+    assert frozenset({2, 4}) in det["collapse_sets"] and len(det["collapse_sets"]) == 1  # only B->B1
+    assert det["flagged_dim"] == 0                                       # no residual confound
+    q = build_quotient(dag, det)
+    nm = q["node_map"]
+    assert nm[2] == nm[4]                                                # B and B1 merged
+    assert nm[1] != nm[3] and nm[1] != nm[2] and nm[3] != nm[2]          # A, A1, merged-B distinct
+    assert q["quotient_dag"].n_nodes == 4                                # root + A + A1 + merged-B
+    assert quotient_moment_matches_projection(dag, G, q, doc_nodes) < 1e-9
