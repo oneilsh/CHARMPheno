@@ -83,7 +83,8 @@ def detect_confounds(dag, G, spectrum, *, tol, prev_collapsed=None, band=0.0):
     G = np.asarray(G, dtype=np.float64)
     prev_collapsed = set() if prev_collapsed is None else set(prev_collapsed)
     n = dag.n_nodes
-    parent = list(range(n))
+    parent = list(range(n))         # hysteresis decisions -> the QUOTIENT
+    parent_bare = list(range(n))    # bare-tol decisions -> the flagged_dim accounting
     collapsed_edges = set()
     margins = {}
     for c in range(1, n):
@@ -96,6 +97,8 @@ def detect_confounds(dag, G, spectrum, *, tol, prev_collapsed=None, band=0.0):
         i, j = c - 1, p - 1
         d = float(G[i, i] + G[j, j] - 2.0 * G[i, j])           # ||z_c - z_p||^2 >= 0
         margins[(p, c)] = tol - d
+        if d < tol:                     # genuine bare-tol null direction (hysteresis-independent)
+            _uf_union(parent_bare, p, c)
         was = (p, c) in prev_collapsed
         thresh = (tol + band) if was else (tol - band)         # hysteresis
         if d < thresh:
@@ -105,9 +108,17 @@ def detect_confounds(dag, G, spectrum, *, tol, prev_collapsed=None, band=0.0):
     for u in range(1, n):
         groups.setdefault(_uf_find(parent, u), set()).add(u)
     collapse_sets = [frozenset(s) for s in groups.values() if len(s) >= 2]
-    collapse_dims = sum(len(s) - 1 for s in collapse_sets)
+    # flagged_dim uses BARE-tol collapse dims, not the hysteresis quotient: a
+    # hysteresis-retained-but-not-actually-null collapse (d in [tol, tol+band]) removes a node
+    # from the quotient but is NOT a null direction, so counting it here would let it mask a
+    # genuine separate confound. Each bare-tol chain dim IS a null dim, so this never
+    # under-reports. (Equals collapse_dims when band == 0.)
+    bare_groups = {}
+    for u in range(1, n):
+        bare_groups.setdefault(_uf_find(parent_bare, u), set()).add(u)
+    collapse_dims_bare = sum(len(s) - 1 for s in bare_groups.values() if len(s) >= 2)
     null_dim = int(np.sum(spectrum["eigenvalues"] < tol))
-    flagged_dim = max(0, null_dim - collapse_dims)
+    flagged_dim = max(0, null_dim - collapse_dims_bare)
     return {"collapse_sets": collapse_sets, "collapsed_edges": collapsed_edges,
             "margins": margins, "flagged_dim": flagged_dim}
 
@@ -152,7 +163,8 @@ def build_quotient(dag, detected):
                 ready.append(ch)
         ready.sort()
     # 4. assign quotient ids in topo order; force root (rep 0) to quotient 0
-    assert order[0] == 0, "root must sort first"
+    if order[0] != 0:               # fail loud (survives python -O): root (id 0) must sort first
+        raise ValueError(f"quotient topological order must start at the root, got {order[0]}")
     qid = {r: i for i, r in enumerate(order)}
     node_map = np.array([qid[rep[u]] for u in range(n)], dtype=np.int64)
     # 5. build the quotient DagGate

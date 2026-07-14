@@ -208,7 +208,8 @@ def test_foreground_gram_names_level_wall_only_for_the_no_parent_attestation_anc
     # beyond the intercept-anchor collinearity.
     assert np.isclose(np.linalg.eigvalsh(b).min(), 0.0)
     # full B foreground Gram (intercept + node2 + node3): node2 and node3 columns identical
-    # within B (every B doc attests both) AND equal the intercept -> rank 1 -> two zero evals
+    # within B (every B doc attests both) AND equal the intercept -> rank 1 (a 4x4 with node1's
+    # column all-zero for group B) -> three zero eigenvalues; we assert the >= 2 lower bound.
     full_b = grams["B"]
     zero_evals_b = np.sum(np.linalg.eigvalsh(full_b) < 1e-9)
     assert zero_evals_b >= 2
@@ -243,3 +244,44 @@ def test_quotient_of_fully_identified_dag_fits_identically():
                     seed=0).fit(docs, doc_nodes)
     assert np.allclose(out0["beta"], out1["beta"], atol=1e-8)
     assert np.allclose(out0["Sigma"], out1["Sigma"], atol=1e-8)
+
+
+def test_flagged_dim_ignores_hysteresis_retained_non_null_collapse():
+    """Deterministic linear-algebra check; no empirical or transfer claim. Regression for the
+    flagged_dim/hysteresis threshold seam: a hysteresis-retained collapse whose columns are NOT
+    within-tol-equal (d >= tol, kept only because it was previously collapsed and d < tol+band)
+    removes a node from the quotient but is NOT a null direction, so it must not cancel a
+    genuine separate confound in flagged_dim. Here nodes 3,4 are an exact sibling coincidence
+    (one real null direction) and edge (1,2) is retained but non-null; flagged_dim must stay 1.
+    Proves the flag accounting uses bare-tol collapse dims; asserts nothing about real data."""
+    # root; node1 -> node2 (near-collinear chain); node3, node4 siblings under root (coincident)
+    dag = DagGate([(), (0,), (1,), (0,), (0,)])
+    doc_nodes = ([frozenset({2})] * 20        # node2 docs: z = [1,1,0,0]
+                 + [frozenset({1})] * 2       # node1-only docs: z = [1,0,0,0] -> ||z1-z2||^2 = 2
+                 + [frozenset({3, 4})] * 5)   # attest BOTH 3 and 4 -> z3 == z4 exactly (1 null dim)
+    G = closure_gram(dag, doc_nodes)
+    sp = _spectrum(G)
+    tol, band = 0.5, 2.0
+    res = detect_confounds(dag, G, sp, tol=tol, prev_collapsed={(1, 2)}, band=band)
+    # edge (1,2): d=2 -> not bare-null (>= tol), but retained by hysteresis (2 < tol+band=2.5)
+    assert frozenset({1, 2}) in res["collapse_sets"]
+    # the genuine 3,4 coincidence must remain flagged, not masked by the retained (1,2) collapse
+    assert res["flagged_dim"] == 1
+
+
+def test_build_quotient_collapses_a_three_node_chain():
+    """Deterministic structure check; no empirical or transfer claim. A three-node
+    column-equality chain (parent and middle both attested only through the leaf) collapses to a
+    single quotient node with a valid topology, exercising a multi-node (len>2) collapse set.
+    Asserts nothing about recovery or real data."""
+    dag = DagGate([(), (0,), (1,), (2,)])     # root; 1 -> 2 -> 3, all attested only at node 3
+    doc_nodes = [frozenset({3})] * 6          # z1 == z2 == z3 exactly
+    G = closure_gram(dag, doc_nodes)
+    det = detect_confounds(dag, G, _spectrum(G), tol=1e-6)
+    assert frozenset({1, 2, 3}) in det["collapse_sets"]
+    q = build_quotient(dag, det)
+    assert q["quotient_dag"].n_nodes == 2     # root + the merged {1,2,3}
+    assert q["node_map"][1] == q["node_map"][2] == q["node_map"][3]
+    for child, ps in enumerate(q["quotient_dag"].parents):
+        for p in ps:
+            assert p < child
