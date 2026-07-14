@@ -79,3 +79,38 @@ def test_end_to_end_readout_statuses_on_the_0054_corpus():
     assert st[1] == "gauge" and st[2] == "gauge"          # anchor levels
     assert st[4] == "unresolved"                          # B1 subsumed, no own docs
     assert ro["coordinates"][4]["recipe"]["attest_node"] == 2
+
+
+def _covers(entry, truth):
+    return bool(np.all(entry["ci_low"] <= truth) and np.all(truth <= entry["ci_high"]))
+
+
+def test_coverage_plant_identified_covers_designwall_reports_unresolved():
+    part = TopicBlockPartition(group_var="g", background_k=3, foreground=(("A", 2), ("B", 2)))
+    K, V = part.K, 120
+    dag = DagGate([(), (0,), (0,), (1,), (2,)])           # A1(3) identified; B(2)/B1(4) design wall
+    beta = real_beta_from(K, V, seed=2)
+    R, covered = 12, 0
+    designwall_ok = True
+    for rep in range(R):
+        rng = np.random.default_rng(100 + rep)            # REDRAW TRUTH per replicate (insight 0051)
+        node_offsets = {u: 2.0 * rng.standard_normal(K - 1) for u in (1, 2, 3, 4)}
+        node_offsets[0] = np.zeros(K - 1)
+        docs, doc_nodes, cand = dag_offset_corpus(
+            dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+            node_of_group={"A": 1, "B": 2},
+            doc_nodes_plan={1: 200, 3: 200, 4: 250},
+            partial_label_plan={1: 60},                   # SOFT-GATED cell
+            sigma_true=1.0 * np.eye(K - 1), doc_len=80, seed=1000 + rep)
+        doc_groups = [next(iter(d.groups)) for d in docs]
+        ro = dag_offset_readout(docs, doc_nodes, cand, doc_groups, part, dag,
+                                P=1, tol=1.0, lam_base=0.25, n_iter=80, burn=40, seed=0)
+        c3 = ro["coordinates"][3]
+        if c3["status"] in ("identified", "fragile"):
+            covered += _covers(c3, node_offsets[3])
+        # design-wall coords: NO point estimate, recipe/convention present
+        designwall_ok &= ("increment_mean" not in ro["coordinates"][4]) and \
+                          ("recipe" in ro["coordinates"][4]) and \
+                          ("increment_mean" not in ro["coordinates"][2])
+    assert designwall_ok
+    assert covered / R >= 0.6            # wide-but-covers (loose band at R=12; tighten if R raised)
