@@ -110,3 +110,36 @@ def test_gibbs_recovers_a_planted_identified_increment():
     assert np.corrcoef(b3, node_offsets[3])[0, 1] > 0.5
     # Sigma stays PD
     assert np.linalg.eigvalsh(out["Sigma"]).min() > -1e-8
+
+
+from spark_vi.models.topic.dag_identify import (
+    build_quotient, closure_gram, detect_confounds, identifiability_spectrum,
+)
+
+
+def test_quotient_posterior_matches_projected_original_on_identified_coords():
+    part = TopicBlockPartition(group_var="g", background_k=3, foreground=(("A", 2), ("B", 2)))
+    K, V = part.K, 120
+    dag = DagGate([(), (0,), (0,), (1,), (2,)])           # B(2) no own docs -> {2,4} collapse
+    rng = np.random.default_rng(9)
+    node_offsets = {u: 2.0 * rng.standard_normal(K - 1) for u in (1, 2, 3, 4)}
+    node_offsets[0] = np.zeros(K - 1)
+    beta = real_beta_from(K, V, seed=2)
+    docs, doc_nodes, cand = dag_offset_corpus(
+        dag=dag, node_offsets=node_offsets, partition=part, beta=beta,
+        node_of_group={"A": 1, "B": 2}, doc_nodes_plan={1: 200, 3: 200, 4: 250},
+        sigma_true=1.0 * np.eye(K - 1), doc_len=80, seed=10)
+    G = closure_gram(dag, doc_nodes)
+    det = detect_confounds(dag, G, identifiability_spectrum(G), tol=1.0)
+    q = build_quotient(dag, det)
+    qcand = [[(p, frozenset(int(q["node_map"][u]) for u in nodes)) for p, nodes in c] for c in cand]
+
+    orig = PGSTMDagGibbs(K=K, V=V, partition=part, dag=dag, P=1, n_iter=120, burn=60,
+                         lam_base=0.25, seed=0).run(docs, cand, beta_init=beta)
+    quot = PGSTMDagGibbs(K=K, V=V, partition=part, dag=q["quotient_dag"], P=1, n_iter=120,
+                         burn=60, lam_base=0.25, seed=0).run(docs, qcand, beta_init=beta)
+    # A1 (node 3) survives in the quotient; its posterior-mean increment matches in both fits
+    q3 = int(q["node_map"][3])
+    b_orig = orig["increment_draws"][:, 3 - 1, :].mean(axis=0)
+    b_quot = quot["increment_draws"][:, q3 - 1, :].mean(axis=0)
+    assert np.corrcoef(b_orig, b_quot)[0, 1] > 0.9
