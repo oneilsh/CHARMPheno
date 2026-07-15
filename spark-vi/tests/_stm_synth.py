@@ -601,3 +601,41 @@ def dag_placement_corpus(*, parent, node_prev, V, doc_len, seed):
         docs.append(np.concatenate(toks).astype(np.int64))
         labels.append(v)
     return docs, np.array(labels), node_codes
+
+
+def dag_placement_corpus_multi(*, parent, leaf_prev, comorbid_rate, V, doc_len, seed):
+    """Multi-parent hierarchical-placement plant with comorbid patients. Each non-root node owns a
+    signature vocab block plus one exact 'node code'. An item's frontier is 1 leaf (prob
+    1-comorbid_rate) or 2 distinct leaves (prob comorbid_rate); it emits a shared common pool + the
+    signature blocks along the union of its frontier's closures. Labels are frozensets (the frontier
+    truth). Returns (docs, labels, node_codes)."""
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    rng = np.random.default_rng(seed)
+    lay = DagLayout(parent, n_bg=2, tpn=1)
+    nodes = lay.nodes
+    C = V // 3                                             # shared common pool [0:C]
+    sig = max(2, (V - C) // (len(nodes) + 1))
+    node_sig = {u: np.arange(C + i * sig, C + i * sig + sig) for i, u in enumerate(nodes)}
+    node_codes = {u: int(node_sig[u][0]) for u in nodes}
+    leaves = sorted(leaf_prev.keys())
+    p = np.array([leaf_prev[u] for u in leaves], float); p /= p.sum()
+    docs, labels = [], []
+    for _ in range(2400):
+        if len(leaves) >= 2 and rng.random() < comorbid_rate:
+            f = frozenset(rng.choice(leaves, size=2, replace=False, p=p).tolist())
+        else:
+            f = frozenset({int(rng.choice(leaves, p=p))})
+        blocks = set()
+        for leaf in f:
+            for u in lay.closure(leaf):
+                if u != 0:
+                    blocks.add(u)
+        blocks = sorted(blocks)
+        toks = [rng.integers(0, C, size=doc_len // 2)]
+        per = max(1, (doc_len - doc_len // 2) // len(blocks))
+        for u in blocks:
+            toks.append(rng.choice(node_sig[u], size=per))
+        docs.append(np.concatenate(toks).astype(np.int64))
+        labels.append(f)
+    return docs, labels, node_codes

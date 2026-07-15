@@ -225,3 +225,14 @@ def test_render_profile_dag_renders_each_node_once():
     # node 4 is reachable via parents 1 and 2, but its full affinity bar is rendered once
     # its numeric affinity 0.40 should appear exactly once (rendered once, referenced elsewhere)
     assert s.count("0.40") == 1
+
+def test_dag_placement_corpus_multi_shapes():
+    from tests._stm_synth import dag_placement_corpus_multi
+
+    docs, labels, node_codes = dag_placement_corpus_multi(
+        parent=DIAMOND, leaf_prev={4: .5, 5: .5}, comorbid_rate=0.3,
+        V=120, doc_len=48, seed=0)
+    assert len(docs) == len(labels)
+    assert all(isinstance(f, frozenset) and len(f) >= 1 for f in labels)
+    assert set(node_codes.keys()) == set(DIAMOND.keys())
+    assert any(len(f) > 1 for f in labels)                  # some comorbid patients exist
