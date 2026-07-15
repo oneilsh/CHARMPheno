@@ -43,3 +43,13 @@ def test_ledger_counts_and_coarsening():
     # dropped 103 (depth 2) rewires to its nearest surviving ancestors 101/102 (depth 1), so the
     # true depth drop is 1 -- NOT 2 (it does not fall all the way back to the anchor).
     assert abs(led["mean_depth_drop"] - 1.0) < 1e-9
+
+def test_to_engine_maps_anchor_to_zero_and_loads_into_daglayout():
+    from spark_vi.models.topic.dag_placement import DagLayout
+    dag = build_condition_dag(DIAMOND_EDGES, ANCHOR, DIAMOND_NODES)
+    parent_int, int2cid, cid2int = dag.to_engine()
+    assert cid2int[ANCHOR] == 0                          # anchor -> root 0
+    assert int2cid[cid2int[103]] == 103                  # round-trips
+    lay = DagLayout(parent_int, n_bg=2, tpn=1)
+    assert lay.K == 2 + 4                                # 4 non-root nodes (101,102,103,104) + 2 bg
+    assert 0 in lay.closure(cid2int[104])                # every node's closure reaches the root

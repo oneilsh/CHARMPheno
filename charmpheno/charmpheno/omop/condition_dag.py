@@ -38,6 +38,19 @@ class ConditionDag:
         self._depth[cid] = d
         return d
 
+    def to_engine(self):
+        """Remap concept ids to contiguous engine ids: anchor -> 0 (root), descendants -> 1..N in
+        (depth, cid) order. Returns (parent_int, int2cid, cid2int); `parent_int` is the
+        `{child: [parents]}` map that spark_vi's DagLayout consumes directly."""
+        order = sorted((n for n in self.nodes() if n != self.anchor),
+                       key=lambda c: (self.depth(c), c))
+        cid2int = {self.anchor: 0}
+        for i, c in enumerate(order, start=1):
+            cid2int[c] = i
+        int2cid = {i: c for c, i in cid2int.items()}
+        parent_int = {cid2int[c]: [cid2int[p] for p in ps] for c, ps in self.parents.items()}
+        return parent_int, int2cid, cid2int
+
 
 def build_condition_dag(edges, anchor, node_ids, names=None):
     """From min-sep-1 (ancestor, descendant) edges restricted to `node_ids` (standard-condition
