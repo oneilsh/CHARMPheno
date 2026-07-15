@@ -2,6 +2,7 @@ import numpy as np
 from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, strip_dag_node_codes, fit_gated, profile, evaluate
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
+DIAMOND = {1: 0, 2: 0, 3: 0, 4: [1, 2], 5: [1, 3]}  # multi-parent DAG: node 4,5 have two parents
 
 def test_daglayout_structure_and_masks():
     lay = DagLayout(PARENT, n_bg=2, tpn=1)
@@ -135,3 +136,22 @@ def test_end_to_end_recovers_family_and_subtype():
     assert m["auc_by_depth"][1] >= 0.85           # family level
     assert m["auc_by_depth"][2] >= 0.75           # subtype level
     assert m["mrr"] >= 0.6
+
+def test_daglayout_multiparent_diamond():
+    lay = DagLayout(DIAMOND, n_bg=2, tpn=1)
+    assert lay.parents[4] == [1, 2] and lay.parents[5] == [1, 3]
+    assert lay.closure(4) == [0, 1, 2, 4]          # all ancestors, depth-sorted, root first
+    assert lay.closure(5) == [0, 1, 3, 5]
+    assert lay.depth(4) == 2 and lay.depth(1) == 1 and lay.depth(0) == 0   # longest path
+    assert lay.subtree(1) == {1, 4, 5} and lay.subtree(2) == {2, 4}
+    want = {0, 1} | set(lay.block[1]) | set(lay.block[2]) | set(lay.block[3]) \
+        | set(lay.block[4]) | set(lay.block[5])
+    assert set(lay.allowed_set({4, 5}).tolist()) == want   # union of closures over the frontier
+
+def test_daglayout_singleparent_backward_compat():
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)               # scalar-parent map still works
+    assert lay.closure(3) == [0, 1, 3]                   # exact old list ordering
+    assert list(lay.allowed(3)) == [0, 1] + lay.block[1] + lay.block[3]
+    assert list(lay.allowed(1)) == [0, 1] + lay.block[1]
+    assert lay.depth(3) == 2 and lay.depth(1) == 1
+    assert lay.subtree(1) == {1, 3, 4}

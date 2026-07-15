@@ -7,29 +7,50 @@ import numpy as np
 
 class DagLayout:
     """Topic-block layout over a label DAG: `n_bg` shared background topics, then `tpn` topics per
-    non-root node. `parent` maps child id -> parent id; the root is id 0 (no entry)."""
+    non-root node. `parent` maps child id -> parent id OR list of parent ids (multi-parent DAG); the
+    root is id 0 (no entry). A scalar parent is normalized to a one-element list, so single-parent
+    tree maps keep working unchanged."""
 
     def __init__(self, parent, n_bg=2, tpn=1):
-        self.parent = dict(parent)
-        self.nodes = sorted(parent.keys())
+        self.parents = {c: (list(p) if isinstance(p, (list, tuple, set)) else [p])
+                        for c, p in parent.items()}
+        self.nodes = sorted(self.parents.keys())
         self.n_bg = int(n_bg)
         self.tpn = int(tpn)
         self.children = {0: []}
-        for c, p in parent.items():
-            self.children.setdefault(p, []).append(c)
+        for c, ps in self.parents.items():
             self.children.setdefault(c, [])
+            for p in ps:
+                self.children.setdefault(p, []).append(c)
         for p in self.children:
             self.children[p] = sorted(self.children[p])
         self.block = {u: list(range(n_bg + i * tpn, n_bg + (i + 1) * tpn))
                       for i, u in enumerate(self.nodes)}
         self.K = n_bg + len(self.nodes) * tpn
+        self._depth = {}
+
+    def depth(self, v):
+        """Longest path length from root to v (root = 0). Memoized."""
+        if v in self._depth:
+            return self._depth[v]
+        ps = self.parents.get(v, [])
+        d = 0 if not ps else 1 + max(self.depth(p) for p in ps)
+        self._depth[v] = d
+        return d
 
     def closure(self, v):
-        c = [v]
-        while v in self.parent:
-            v = self.parent[v]
-            c.append(v)
-        return c[::-1]
+        """All ancestors of v plus v, as a list sorted by (depth, id) so root comes first. For a
+        single-parent tree this reproduces the old root..v ordering exactly."""
+        seen = set()
+        stack = [v]
+        while stack:
+            x = stack.pop()
+            if x in seen:
+                continue
+            seen.add(x)
+            for p in self.parents.get(x, []):
+                stack.append(p)
+        return sorted(seen, key=lambda u: (self.depth(u), u))
 
     def subtree(self, u):
         out = {u}
@@ -37,8 +58,9 @@ class DagLayout:
         while stack:
             x = stack.pop()
             for ch in self.children.get(x, []):
-                out.add(ch)
-                stack.append(ch)
+                if ch not in out:
+                    out.add(ch)
+                    stack.append(ch)
         return out
 
     def allowed(self, v):
@@ -48,8 +70,14 @@ class DagLayout:
                 al += self.block[u]
         return np.array(sorted(al), dtype=int)
 
-    def depth(self, v):
-        return len(self.closure(v)) - 1
+    def allowed_set(self, frontier):
+        """Background ∪ blocks over the union of closures of the frontier nodes (set-valued gate)."""
+        al = set(range(self.n_bg))
+        for f in frontier:
+            for u in self.closure(f):
+                if u != 0:
+                    al.update(self.block[u])
+        return np.array(sorted(al), dtype=int)
 
 
 def label_from_coded(coded_nodes, lay):
