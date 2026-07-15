@@ -213,3 +213,15 @@ def test_identifiability_multiparent_siblings():
     pairs = {(min(u, v), max(u, v)) for u, v, _ in flagged}
     assert (4, 5) in pairs                                    # siblings sharing a parent, flagged
     assert (2, 3) not in pairs                                # share only root's... (2,3 share parent 0)
+
+def test_render_profile_dag_renders_each_node_once():
+    from spark_vi.models.topic.dag_placement import render_profile
+    lay = DagLayout(DIAMOND)
+    aff = {u: 0.1 * u for u in lay.nodes}
+    s = render_profile(aff, lay, true_node=4)
+    assert "true" in s
+    for u in lay.nodes:                                  # every node appears
+        assert str(u) in s
+    # node 4 is reachable via parents 1 and 2, but its full affinity bar is rendered once
+    # its numeric affinity 0.40 should appear exactly once (rendered once, referenced elsewhere)
+    assert s.count("0.40") == 1
