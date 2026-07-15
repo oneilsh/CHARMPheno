@@ -61,10 +61,17 @@ def build_condition_dag(edges, anchor, node_ids, names=None):
     for a, d in edges:
         if a in nodeset and d in nodeset and a != d:
             parents[d].append(a)
+    orphans = set()
     for c in nodeset:
         if c != anchor and c not in parents:
             parents[c] = [anchor]
-    return ConditionDag(parents, anchor, {c: (names or {}).get(c, str(c)) for c in nodeset})
+            orphans.add(c)                              # no in-set parent -> attached to anchor
+    dag = ConditionDag(parents, anchor, {c: (names or {}).get(c, str(c)) for c in nodeset})
+    # Observability: a node orphaned here is indistinguishable in structure from a genuine depth-1
+    # child, so surface the set — a large/unexpected orphan count signals an upstream edges/node_ids
+    # extraction problem (e.g. a real parent filtered out as non-standard), not a real depth-1 node.
+    dag.orphans = orphans
+    return dag
 
 
 def prune_by_attestation(dag, counts, min_n):
@@ -73,21 +80,10 @@ def prune_by_attestation(dag, counts, min_n):
     never dropped. This is the principled size cap: a node no cohort patient populates cannot have a
     learnable topic."""
     keep = {n for n in dag.nodes() if n == dag.anchor or counts.get(n, 0) >= min_n}
-    new_parents = {}
-    for c in keep:
-        if c == dag.anchor:
-            continue
-        surv, seen, stack = set(), set(), list(dag.parents.get(c, []))
-        while stack:
-            p = stack.pop()
-            if p in seen:
-                continue
-            seen.add(p)
-            if p in keep:
-                surv.add(p)
-            else:
-                stack.extend(dag.parents.get(p, []))
-        new_parents[c] = sorted(surv) if surv else [dag.anchor]
+    # Rewire each survivor to its nearest surviving ancestors — the SAME walk the pruning ledger
+    # uses to report where patients land, so the two can never disagree (single source of truth).
+    new_parents = {c: sorted(_nearest_surviving_ancestors(dag, c, keep))
+                   for c in keep if c != dag.anchor}
     return ConditionDag(new_parents, dag.anchor, dag.names)
 
 
@@ -125,14 +121,17 @@ def pruning_ledger(before, after, counts, *, cohort_frontiers=None):
             dfr = [c for c in fr if c in dropped]
             if dfr:
                 coarsened += 1
-                worst = max(before.depth(c) for c in dfr)
                 # where the patient actually lands after pruning: surviving frontier members plus
                 # the nearest surviving ancestors its dropped members rewire up to (NOT the anchor).
                 landing = {c for c in fr if c in kept}
                 for c in dfr:
                     landing |= _nearest_surviving_ancestors(before, c, kept)
-                aft = max((after.depth(a) for a in landing), default=0)
-                drops.append(worst - aft)
+                # measure both depths in the ORIGINAL-ontology (before) frame, so the drop reads as
+                # "levels rolled up in the original ontology" and isn't confounded by the landing
+                # node itself losing ancestors elsewhere in the prune.
+                worst = max(before.depth(c) for c in dfr)
+                landed = max((before.depth(a) for a in landing), default=0)
+                drops.append(worst - landed)
         n = len(cohort_frontiers)
         led["coarsening_rate"] = coarsened / n if n else 0.0
         led["mean_depth_drop"] = (sum(drops) / len(drops)) if drops else 0.0

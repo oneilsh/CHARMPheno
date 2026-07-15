@@ -16,6 +16,8 @@ def test_build_orphan_attaches_to_anchor():
     dag = build_condition_dag([(200, 201)], anchor=200, node_ids={200, 201, 202})
     assert dag.parents[202] == [200]
     assert dag.depth(202) == 1
+    assert dag.orphans == {202}                          # orphan surfaced for observability
+    assert 201 not in dag.orphans                        # a genuine edge child is not an orphan
 
 def test_prune_drops_low_count_and_rewires():
     dag = build_condition_dag(DIAMOND_EDGES, ANCHOR, DIAMOND_NODES)
