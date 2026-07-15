@@ -237,26 +237,53 @@ def _auc(scores, y):
     return (ranks[y == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
 
 
+def _hops(a, b, lay):
+    """Undirected hop distance between two nodes over parent/child edges (BFS)."""
+    if a == b:
+        return 0
+    seen = {a}
+    queue = [(a, 0)]
+    while queue:
+        x, d = queue.pop(0)
+        for nb in list(lay.parents.get(x, [])) + lay.children.get(x, []):
+            if nb == b:
+                return d + 1
+            if nb not in seen:
+                seen.add(nb)
+                queue.append((nb, d + 1))
+    return float("inf")
+
+
 def evaluate(profiles, test_labels, lay):
-    """Per-node case-finding AUC (subtree membership), AUC by depth, and true-node MRR / top-2.
+    """Per-node case-finding AUC (subtree membership), AUC by longest-path depth, and set-valued
+    ranking. `test_labels` entries may be frontier sets or scalars (scalars -> singletons). A patient
+    is a positive for node u if any of its frontier lies in subtree(u). MRR/top2/mean_hops use the
+    BEST (closest) true frontier node. frontier_size_mean and multi_frontier_rate instrument the
+    comorbid/contradictory ambiguity (the DAG cannot tell those apart; we surface it, not resolve it).
     Profiles are the graded affinity dicts from `profile`; scoring never collapses to one node."""
+    fronts = [set(t) if hasattr(t, "__iter__") else {t} for t in test_labels]
     P = np.array([[pr[u] for u in lay.nodes] for pr in profiles])
-    node_auc = {u: _auc(P[:, i], [t in lay.subtree(u) for t in test_labels])
+    node_auc = {u: _auc(P[:, i], [bool(f & lay.subtree(u)) for f in fronts])
                 for i, u in enumerate(lay.nodes)}
-    ranks = []
-    for i, t in enumerate(test_labels):
-        if t not in lay.nodes:            # root / LCA-collapsed label: no rankable target node
+    ranks, hops = [], []
+    for i, f in enumerate(fronts):
+        true_idx = [lay.nodes.index(t) for t in f if t in lay.nodes]   # skip root/unscoreable
+        if not true_idx:
             continue
-        ti = lay.nodes.index(t)
-        ranks.append(1 + int((P[i] > P[i][ti]).sum()))
-    ranks = np.array(ranks)
-    mrr = float(np.mean(1.0 / ranks)) if len(ranks) else float("nan")
-    top2 = float(np.mean(ranks <= 2)) if len(ranks) else float("nan")
+        ranks.append(min(1 + int((P[i] > P[i][j]).sum()) for j in true_idx))   # best (smallest) rank
+        pred = lay.nodes[int(np.argmax(P[i]))]
+        hops.append(min(_hops(pred, lay.nodes[j], lay) for j in true_idx))
+    ranks = np.array(ranks, dtype=float) if ranks else np.array([np.nan])
     by_depth = {}
     for dep in sorted({lay.depth(u) for u in lay.nodes}):
         us = [u for u in lay.nodes if lay.depth(u) == dep]
         by_depth[dep] = float(np.nanmean([node_auc[u] for u in us]))
-    return {"node_auc": node_auc, "auc_by_depth": by_depth, "mrr": mrr, "top2": top2}
+    return {"node_auc": node_auc, "auc_by_depth": by_depth,
+            "mrr": float(np.nanmean(1.0 / ranks)),
+            "top2": float(np.nanmean(ranks <= 2)),
+            "mean_hops": float(np.mean(hops)) if hops else float("nan"),
+            "frontier_size_mean": float(np.mean([len(f) for f in fronts])),
+            "multi_frontier_rate": float(np.mean([len(f) > 1 for f in fronts]))}
 
 
 def _node_topic_mean(beta_hat, lay, u):

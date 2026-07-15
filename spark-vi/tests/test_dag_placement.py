@@ -177,3 +177,19 @@ def test_fit_gated_accepts_frontier_sets():
     beta = fit_gated(docs[:800], set_labels, lay, 120, n_iter=40, burn=20, rng=rng)
     assert beta.shape == (lay.K, 120)
     assert np.allclose(beta.sum(1), 1.0, atol=1e-6)
+
+def test_evaluate_set_valued_and_instrumented():
+    lay = DagLayout(DIAMOND)
+    labels = [frozenset({4}), frozenset({4, 5}), frozenset({2, 3}), frozenset({1})]
+    profiles = []
+    for f in labels:                                   # closure-loaded perfect profiles
+        load = set()
+        for t in f:
+            load |= (set(lay.closure(t)) - {0})
+        profiles.append({u: (1.0 if u in load else 0.0) for u in lay.nodes})
+    m = evaluate(profiles, labels, lay)
+    assert all(v >= 0.99 for v in m["node_auc"].values())   # every node perfectly separated
+    assert m["mrr"] == 1.0                                   # best true node ranks first each doc
+    assert abs(m["frontier_size_mean"] - 1.5) < 1e-9
+    assert abs(m["multi_frontier_rate"] - 0.5) < 1e-9        # 2 of 4 docs are comorbid
+    assert np.isfinite(m["mean_hops"])
