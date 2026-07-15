@@ -277,8 +277,10 @@ def evaluate(profiles, test_labels, lay):
     ranks = np.array(ranks, dtype=float) if ranks else np.array([np.nan])
     by_depth = {}
     for dep in sorted({lay.depth(u) for u in lay.nodes}):
-        us = [u for u in lay.nodes if lay.depth(u) == dep]
-        by_depth[dep] = float(np.nanmean([node_auc[u] for u in us]))
+        vals = [node_auc[u] for u in lay.nodes if lay.depth(u) == dep]
+        # guard the all-nan slice (every node in the depth has an empty positive/negative class,
+        # e.g. the degenerate all-root batch) so numpy does not warn on an empty mean
+        by_depth[dep] = float(np.nanmean(vals)) if any(not np.isnan(v) for v in vals) else float("nan")
     # Guard mrr AND top2 symmetrically: with no rankable docs, both are nan (not applicable).
     # (np.nan <= 2 is False, so an unguarded top2 would silently read 0.0 instead of nan.)
     return {"node_auc": node_auc, "auc_by_depth": by_depth,

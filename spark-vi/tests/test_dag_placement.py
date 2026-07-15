@@ -212,7 +212,8 @@ def test_identifiability_multiparent_siblings():
     flagged = identifiability_annotation(beta, lay, tol=0.99)
     pairs = {(min(u, v), max(u, v)) for u, v, _ in flagged}
     assert (4, 5) in pairs                                    # siblings sharing a parent, flagged
-    assert (2, 3) not in pairs                                # share only root's... (2,3 share parent 0)
+    # 2,3 ARE candidates (siblings under root 0) but their betas are not near-identical, so tol-gated out
+    assert (2, 3) not in pairs
 
 def test_render_profile_dag_renders_each_node_once():
     from spark_vi.models.topic.dag_placement import render_profile
