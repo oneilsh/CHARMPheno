@@ -497,8 +497,9 @@ def test_evaluate_perfect_profiles_score_high():
     lay = DagLayout(PARENT, n_bg=2, tpn=1)
     labels = np.array([3, 4, 5, 6, 1, 2] * 5)
     profiles = []
-    for y in labels:                              # planted "perfect" affinity: 1.0 on the true node
-        profiles.append({u: (1.0 if u == y else 0.0) for u in lay.nodes})
+    for y in labels:                              # planted "perfect" affinity: closure-loaded
+        cl = [u for u in lay.closure(y) if u != 0]   # true node + all its ancestors (not root)
+        profiles.append({u: (1.0 if u in cl else 0.0) for u in lay.nodes})
     m = evaluate(profiles, labels, lay)
     assert m["mrr"] == 1.0 and m["top2"] == 1.0
     assert all(v >= 0.99 for v in m["node_auc"].values())
