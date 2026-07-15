@@ -78,6 +78,22 @@ def prune_by_attestation(dag, counts, min_n):
     return ConditionDag(new_parents, dag.anchor, dag.names)
 
 
+def _nearest_surviving_ancestors(dag, node, keep):
+    """The kept nodes a dropped `node` rewires up to (transitive walk past dropped ancestors) — the
+    same landing set `prune_by_attestation` reattaches its descendants to."""
+    surv, seen, stack = set(), set(), list(dag.parents.get(node, []))
+    while stack:
+        p = stack.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        if p in keep:
+            surv.add(p)
+        else:
+            stack.extend(dag.parents.get(p, []))
+    return surv or {dag.anchor}
+
+
 def pruning_ledger(before, after, counts, *, cohort_frontiers=None):
     """A receipt for what pruning discarded. Structural stats need only the two DAGs + counts:
     kept/dropped totals, breakdown by (pre-prune) depth, resulting K (= engine topic-count driver),
@@ -97,7 +113,12 @@ def pruning_ledger(before, after, counts, *, cohort_frontiers=None):
             if dfr:
                 coarsened += 1
                 worst = max(before.depth(c) for c in dfr)
-                aft = max((after.depth(c) for c in fr if c in kept), default=0)
+                # where the patient actually lands after pruning: surviving frontier members plus
+                # the nearest surviving ancestors its dropped members rewire up to (NOT the anchor).
+                landing = {c for c in fr if c in kept}
+                for c in dfr:
+                    landing |= _nearest_surviving_ancestors(before, c, kept)
+                aft = max((after.depth(a) for a in landing), default=0)
                 drops.append(worst - aft)
         n = len(cohort_frontiers)
         led["coarsening_rate"] = coarsened / n if n else 0.0

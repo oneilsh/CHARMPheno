@@ -39,3 +39,7 @@ def test_ledger_counts_and_coarsening():
                          cohort_frontiers=[{103}, {104}, {101}, {103}])
     assert led["K_nodes"] == 4 and led["dropped"] == 1
     assert led["dropped_by_depth"] == {2: 1}           # 103 was at depth 2
+    assert abs(led["coarsening_rate"] - 0.5) < 1e-9    # 2 of 4 patients coarsened
+    # dropped 103 (depth 2) rewires to its nearest surviving ancestors 101/102 (depth 1), so the
+    # true depth drop is 1 -- NOT 2 (it does not fall all the way back to the anchor).
+    assert abs(led["mean_depth_drop"] - 1.0) < 1e-9
