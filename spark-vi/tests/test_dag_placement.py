@@ -1,5 +1,5 @@
 import numpy as np
-from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, strip_dag_node_codes
+from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, strip_dag_node_codes, fit_gated
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
 
@@ -49,3 +49,14 @@ def test_dag_placement_corpus_shapes():
     # a node's exact code appears in items labeled at/below that node
     below3 = [d for d, y in zip(docs, labels) if y in {3}]
     assert any(node_codes[3] in d for d in below3)
+
+def test_fit_gated_learns_node_signatures():
+    from tests._stm_synth import dag_placement_corpus
+    docs, labels, _ = dag_placement_corpus(
+        parent=PARENT, node_prev={1:.18,2:.18,3:.16,4:.16,5:.16,6:.16},
+        V=120, doc_len=40, seed=1)
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)
+    rng = np.random.default_rng(3)
+    beta = fit_gated(docs[:1400], labels[:1400], lay, 120, n_iter=60, burn=30, rng=rng)
+    assert beta.shape == (lay.K, 120)
+    assert np.allclose(beta.sum(1), 1.0, atol=1e-6)

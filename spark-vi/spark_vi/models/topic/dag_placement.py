@@ -74,3 +74,66 @@ def strip_dag_node_codes(doc, dag_node_codes):
         return doc
     mask = ~np.isin(doc, np.fromiter(dag_node_codes, dtype=doc.dtype))
     return doc[mask]
+
+
+from types import SimpleNamespace
+from spark_vi.models.topic.spectral_init import word_cooccurrence, find_anchors, recover_beta
+
+
+def _as_counts(doc):
+    idx, cnt = np.unique(np.asarray(doc), return_counts=True)
+    return SimpleNamespace(indices=idx, counts=cnt.astype(np.float64))
+
+
+def fit_gated(train_docs, train_labels, lay, V, *, alpha=0.1, beta_prior=0.02,
+              n_iter=150, burn=80, rng=None):
+    """Gated collapsed Gibbs (Griffiths & Steyvers 2004): each training item is masked to
+    allowed(label) = background ∪ blocks along its label's closure, tying topics to nodes
+    structurally. Anchor-word spectral init (Arora et al. 2013) seeds beta. Returns posterior-mean
+    beta_hat (K, V)."""
+    K = lay.K
+    counted = [_as_counts(d) for d in train_docs]
+    Q = word_cooccurrence(counted, V)
+    beta0 = recover_beta(Q, find_anchors(Q, K))
+    beta0 = beta0 + 1e-6
+    beta0 /= beta0.sum(1, keepdims=True)
+    n_kw = np.zeros((K, V))
+    n_k = np.zeros(K)
+    allowed = [lay.allowed(v) for v in train_labels]
+    words = [np.asarray(d, dtype=np.int64) for d in train_docs]
+    Z = []
+    for d in range(len(train_docs)):
+        al = allowed[d]
+        w = words[d]
+        r = beta0[al][:, w].T
+        r = r / r.sum(1, keepdims=True)
+        zi = al[(rng.random(len(w))[:, None] < np.cumsum(r, 1)).argmax(1)]
+        Z.append(zi)
+        np.add.at(n_kw, (zi, w), 1.0)
+        for k in zi:
+            n_k[k] += 1.0
+    Vb = V * beta_prior
+    acc = np.zeros((K, V))
+    nacc = 0
+    for it in range(n_iter):
+        for d in range(len(train_docs)):
+            al = allowed[d]
+            w = words[d]
+            zi = Z[d]
+            for i in range(len(w)):
+                wi = w[i]
+                k = zi[i]
+                n_kw[k, wi] -= 1.0
+                n_k[k] -= 1.0
+                p = (n_kw[al, wi] + beta_prior) / (n_k[al] + Vb)
+                p /= p.sum()
+                knew = al[np.searchsorted(np.cumsum(p), rng.random())]
+                zi[i] = knew
+                n_kw[knew, wi] += 1.0
+                n_k[knew] += 1.0
+        if it >= burn:
+            acc += n_kw + beta_prior
+            nacc += 1
+    beta_hat = acc / nacc
+    beta_hat /= beta_hat.sum(1, keepdims=True)
+    return beta_hat
