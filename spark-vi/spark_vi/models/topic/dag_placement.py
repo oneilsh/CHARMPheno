@@ -231,3 +231,30 @@ def identifiability_annotation(beta_hat, lay, *, tol=0.9):
         if c >= tol:
             out.append((u, v, c))
     return out
+
+
+def render_profile(affinity, lay, *, names=None, true_node=None, width=24):
+    """Indented DAG tree with a unicode affinity bar per node (spot-check output, sim and real)."""
+    names = names or {}
+    lines = []
+
+    def bar(x):
+        n = int(round(max(0.0, min(1.0, x)) * width))
+        return "█" * n + "▁" * (width - n)
+
+    def walk(v, prefix, is_last):
+        if v == 0:
+            lines.append(names.get(0, "root"))
+        else:
+            a = affinity.get(v, 0.0)
+            conn = "└─ " if is_last else "├─ "
+            mark = "  <- true" if v == true_node else ""
+            nm = str(names.get(v, v)).ljust(10)
+            lines.append(f"{prefix}{conn}{nm} {bar(a)} {a:0.2f}{mark}")
+        kids = lay.children.get(v, [])
+        child_prefix = prefix + ("   " if is_last else "│  ") if v != 0 else ""
+        for i, c in enumerate(kids):
+            walk(c, child_prefix, i == len(kids) - 1)
+
+    walk(0, "", True)
+    return "\n".join(lines)

@@ -91,3 +91,13 @@ def test_identifiability_flags_near_identical_siblings():
     pairs = {(min(u, v), max(u, v)) for u, v, _ in flagged}
     assert (3, 4) in pairs
     assert (3, 5) not in pairs                    # cross-branch never reported
+
+def test_render_profile_marks_true_and_shows_all_nodes():
+    from spark_vi.models.topic.dag_placement import render_profile
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)
+    aff = {1: 0.6, 2: 0.0, 3: 0.05, 4: 0.0, 5: 0.2, 6: 0.15}
+    s = render_profile(aff, lay, true_node=1)
+    assert "true" in s
+    for u in lay.nodes:                                   # every node rendered
+        assert str(u) in s or (str(u) in s)
+    assert s.count("\n") >= len(lay.nodes)
