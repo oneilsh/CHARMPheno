@@ -205,3 +205,29 @@ def evaluate(profiles, test_labels, lay):
         by_depth[dep] = float(np.nanmean([node_auc[u] for u in us]))
     return {"node_auc": node_auc, "auc_by_depth": by_depth,
             "mrr": float(np.mean(1.0 / ranks)), "top2": float(np.mean(ranks <= 2))}
+
+
+def _node_topic_mean(beta_hat, lay, u):
+    return beta_hat[lay.block[u]].mean(0)
+
+
+def identifiability_annotation(beta_hat, lay, *, tol=0.9):
+    """Post-fit diagnostic: flag WITHIN-STRUCTURE node pairs (siblings, or parent<->child) whose
+    learned topic distributions are near-collinear (cosine >= tol) -> hard to separate. Cross-branch
+    pairs are never reported; their similarity is a reporting fact, not a structural one."""
+    def cos(a, b):
+        return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
+    pairs = set()
+    for u in lay.nodes:                                  # parent<->child
+        for c in lay.children.get(u, []):
+            pairs.add((u, c))
+    for p, kids in lay.children.items():                 # siblings
+        for i in range(len(kids)):
+            for j in range(i + 1, len(kids)):
+                pairs.add((kids[i], kids[j]))
+    out = []
+    for u, v in pairs:
+        c = cos(_node_topic_mean(beta_hat, lay, u), _node_topic_mean(beta_hat, lay, v))
+        if c >= tol:
+            out.append((u, v, c))
+    return out

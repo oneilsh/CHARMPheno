@@ -79,3 +79,15 @@ def test_evaluate_perfect_profiles_score_high():
     m = evaluate(profiles, labels, lay)
     assert m["mrr"] == 1.0 and m["top2"] == 1.0
     assert all(v >= 0.99 for v in m["node_auc"].values())
+
+def test_identifiability_flags_near_identical_siblings():
+    from spark_vi.models.topic.dag_placement import identifiability_annotation
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)
+    beta = np.random.default_rng(0).random((lay.K, 20)) + 0.01
+    # make siblings 3 and 4 near-identical topics
+    beta[lay.block[4][0]] = beta[lay.block[3][0]].copy()
+    beta /= beta.sum(1, keepdims=True)
+    flagged = identifiability_annotation(beta, lay, tol=0.99)
+    pairs = {(min(u, v), max(u, v)) for u, v, _ in flagged}
+    assert (3, 4) in pairs
+    assert (3, 5) not in pairs                    # cross-branch never reported
