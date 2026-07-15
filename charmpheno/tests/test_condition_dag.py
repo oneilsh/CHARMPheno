@@ -1,4 +1,4 @@
-from charmpheno.omop.condition_dag import ConditionDag, build_condition_dag, prune_by_attestation
+from charmpheno.omop.condition_dag import ConditionDag, build_condition_dag, prune_by_attestation, pruning_ledger
 
 DIAMOND_EDGES = [(100, 101), (100, 102), (101, 103), (102, 103), (103, 104)]
 DIAMOND_NODES = {100, 101, 102, 103, 104}
@@ -29,3 +29,13 @@ def test_prune_never_drops_anchor():
     dag = build_condition_dag(DIAMOND_EDGES, ANCHOR, DIAMOND_NODES)
     pruned = prune_by_attestation(dag, counts={}, min_n=999)   # everything below threshold
     assert pruned.nodes() == {ANCHOR}                 # only the anchor survives
+
+def test_ledger_counts_and_coarsening():
+    dag = build_condition_dag(DIAMOND_EDGES, ANCHOR, DIAMOND_NODES)
+    counts = {101: 50, 102: 40, 103: 0, 104: 20}
+    pruned = prune_by_attestation(dag, counts, min_n=5)
+    # 2 of 4 patients had their most-specific node (103) pruned -> coarsened
+    led = pruning_ledger(dag, pruned, counts,
+                         cohort_frontiers=[{103}, {104}, {101}, {103}])
+    assert led["K_nodes"] == 4 and led["dropped"] == 1
+    assert led["dropped_by_depth"] == {2: 1}           # 103 was at depth 2

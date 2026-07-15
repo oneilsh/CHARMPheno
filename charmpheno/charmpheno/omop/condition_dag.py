@@ -76,3 +76,30 @@ def prune_by_attestation(dag, counts, min_n):
                 stack.extend(dag.parents.get(p, []))
         new_parents[c] = sorted(surv) if surv else [dag.anchor]
     return ConditionDag(new_parents, dag.anchor, dag.names)
+
+
+def pruning_ledger(before, after, counts, *, cohort_frontiers=None):
+    """A receipt for what pruning discarded. Structural stats need only the two DAGs + counts:
+    kept/dropped totals, breakdown by (pre-prune) depth, resulting K (= engine topic-count driver),
+    and the smallest kept count. When `cohort_frontiers` (per-patient most-specific attested
+    concept-id sets) is supplied, also report the coarsening rate (fraction of patients whose
+    most-specific node was pruned, so their frontier rolled up) and the mean depth drop for them."""
+    kept = after.nodes()
+    dropped = before.nodes() - kept
+    led = {"kept": len(kept), "dropped": len(dropped), "K_nodes": len(kept),
+           "kept_by_depth": dict(sorted(Counter(before.depth(n) for n in kept).items())),
+           "dropped_by_depth": dict(sorted(Counter(before.depth(n) for n in dropped).items())),
+           "min_count_kept": min((counts.get(n, 0) for n in kept if n != before.anchor), default=0)}
+    if cohort_frontiers is not None:
+        coarsened, drops = 0, []
+        for fr in cohort_frontiers:
+            dfr = [c for c in fr if c in dropped]
+            if dfr:
+                coarsened += 1
+                worst = max(before.depth(c) for c in dfr)
+                aft = max((after.depth(c) for c in fr if c in kept), default=0)
+                drops.append(worst - aft)
+        n = len(cohort_frontiers)
+        led["coarsening_rate"] = coarsened / n if n else 0.0
+        led["mean_depth_drop"] = (sum(drops) / len(drops)) if drops else 0.0
+    return led
