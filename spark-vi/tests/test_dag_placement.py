@@ -227,6 +227,16 @@ def test_render_profile_dag_renders_each_node_once():
     # its numeric affinity 0.40 should appear exactly once (rendered once, referenced elsewhere)
     assert s.count("0.40") == 1
 
+def test_render_profile_marks_every_true_frontier_node():
+    from spark_vi.models.topic.dag_placement import render_profile
+    lay = DagLayout(DIAMOND)
+    aff = {u: 0.1 * u for u in lay.nodes}
+    # set-valued frontier: BOTH true nodes must be marked
+    s = render_profile(aff, lay, true_node=frozenset({2, 4}))
+    assert s.count("<- true") == 2
+    # a single-id true_node still marks exactly one (backward compatible)
+    assert render_profile(aff, lay, true_node=2).count("<- true") == 1
+
 def test_dag_placement_corpus_multi_shapes():
     from tests._stm_synth import dag_placement_corpus_multi
 

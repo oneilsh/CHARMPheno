@@ -321,8 +321,15 @@ def identifiability_annotation(beta_hat, lay, *, tol=0.9):
 def render_profile(affinity, lay, *, names=None, true_node=None, width=24):
     """Indented DAG tree with a unicode affinity bar per node (spot-check output). A multi-parent
     node is rendered in full ONCE (first encounter); later encounters show a short reference line so
-    the tree stays readable and no node's affinity is double-counted visually."""
+    the tree stays readable and no node's affinity is double-counted visually. `true_node` may be a
+    single node id OR an iterable of node ids (a set-valued frontier); EVERY true node is marked."""
     names = names or {}
+    if true_node is None:
+        true_set = set()
+    elif hasattr(true_node, "__iter__"):
+        true_set = set(true_node)
+    else:
+        true_set = {true_node}
     lines = []
     seen = set()
 
@@ -341,7 +348,7 @@ def render_profile(affinity, lay, *, names=None, true_node=None, width=24):
                 return
             seen.add(v)
             a = affinity.get(v, 0.0)
-            mark = "  <- true" if v == true_node else ""
+            mark = "  <- true" if v in true_set else ""
             lines.append(f"{prefix}{conn}{nm} {bar(a)} {a:0.2f}{mark}")
         kids = lay.children.get(v, [])
         child_prefix = prefix + ("   " if is_last else "│  ") if v != 0 else ""
