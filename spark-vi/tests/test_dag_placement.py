@@ -1,5 +1,5 @@
 import numpy as np
-from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, strip_dag_node_codes, fit_gated, profile
+from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, strip_dag_node_codes, fit_gated, profile, evaluate
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
 
@@ -68,3 +68,14 @@ def test_profile_returns_node_affinity():
     pr = profile(np.array([1, 2, 3, 4, 5]), beta, lay, n_iter=20, burn=10, rng=rng)
     assert set(pr.keys()) == set(lay.nodes)
     assert all(0.0 <= v <= 1.0 for v in pr.values())
+
+def test_evaluate_perfect_profiles_score_high():
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)
+    labels = np.array([3, 4, 5, 6, 1, 2] * 5)
+    profiles = []
+    for y in labels:                              # planted "perfect" affinity: closure-loaded
+        cl = [u for u in lay.closure(y) if u != 0]   # true node + all its ancestors (not root)
+        profiles.append({u: (1.0 if u in cl else 0.0) for u in lay.nodes})
+    m = evaluate(profiles, labels, lay)
+    assert m["mrr"] == 1.0 and m["top2"] == 1.0
+    assert all(v >= 0.99 for v in m["node_auc"].values())

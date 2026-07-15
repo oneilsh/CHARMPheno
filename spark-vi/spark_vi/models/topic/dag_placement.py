@@ -174,3 +174,34 @@ def profile(doc, beta_hat, lay, *, alpha=0.1, n_iter=60, burn=30, rng=None):
             nacc += 1
     th = acc / max(nacc, 1)
     return {u: float(th[lay.block[u]].sum()) for u in lay.nodes}
+
+
+def _auc(scores, y):
+    y = np.asarray(y)
+    n1 = int(y.sum())
+    n0 = len(y) - n1
+    if n1 == 0 or n0 == 0:
+        return float("nan")
+    order = np.argsort(scores)
+    ranks = np.empty(len(scores))
+    ranks[order] = np.arange(1, len(scores) + 1)
+    return (ranks[y == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
+
+
+def evaluate(profiles, test_labels, lay):
+    """Per-node case-finding AUC (subtree membership), AUC by depth, and true-node MRR / top-2.
+    Profiles are the graded affinity dicts from `profile`; scoring never collapses to one node."""
+    P = np.array([[pr[u] for u in lay.nodes] for pr in profiles])
+    node_auc = {u: _auc(P[:, i], [t in lay.subtree(u) for t in test_labels])
+                for i, u in enumerate(lay.nodes)}
+    ranks = []
+    for i, t in enumerate(test_labels):
+        ti = lay.nodes.index(t)
+        ranks.append(1 + int((P[i] > P[i][ti]).sum()))
+    ranks = np.array(ranks)
+    by_depth = {}
+    for dep in sorted({lay.depth(u) for u in lay.nodes}):
+        us = [u for u in lay.nodes if lay.depth(u) == dep]
+        by_depth[dep] = float(np.nanmean([node_auc[u] for u in us]))
+    return {"node_auc": node_auc, "auc_by_depth": by_depth,
+            "mrr": float(np.mean(1.0 / ranks)), "top2": float(np.mean(ranks <= 2))}
