@@ -50,3 +50,27 @@ class DagLayout:
 
     def depth(self, v):
         return len(self.closure(v)) - 1
+
+
+def label_from_coded(coded_nodes, lay):
+    """The item's label from its in-window coded nodes. If they lie on a single root->node path
+    (one node is a descendant-or-self of all others), return that deepest node (most-specific).
+    Otherwise return the lowest common ancestor (deepest node that is an ancestor-or-self of all)."""
+    nodes = list(dict.fromkeys(coded_nodes))
+    for cand in nodes:                                   # single-path: cand's closure holds all
+        cset = set(lay.closure(cand))
+        if all(n in cset for n in nodes):
+            return cand
+    common = set(lay.closure(nodes[0]))
+    for n in nodes[1:]:
+        common &= set(lay.closure(n))
+    return max(common, key=lay.depth)                    # root (0) is always common
+
+
+def strip_dag_node_codes(doc, dag_node_codes):
+    """Remove every token whose id matches a DAG-node code (leakage strip; evaluation only)."""
+    doc = np.asarray(doc)
+    if not dag_node_codes:
+        return doc
+    mask = ~np.isin(doc, np.fromiter(dag_node_codes, dtype=doc.dtype))
+    return doc[mask]

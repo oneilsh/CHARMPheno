@@ -1,5 +1,5 @@
 import numpy as np
-from spark_vi.models.topic.dag_placement import DagLayout
+from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, strip_dag_node_codes
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
 
@@ -18,3 +18,21 @@ def test_daglayout_tpn_two():
     lay = DagLayout(PARENT, n_bg=1, tpn=2)
     assert lay.K == 1 + 6 * 2
     assert len(lay.block[3]) == 2
+
+def test_label_same_path_is_deepest():
+    lay = DagLayout(PARENT)
+    # {1,3} lie on one path root->1->3 : most-specific = deepest = 3
+    assert label_from_coded([1, 3], lay) == 3
+    assert label_from_coded([3], lay) == 3
+
+def test_label_siblings_is_lca():
+    lay = DagLayout(PARENT)
+    # {3,4} are siblings under 1 : LCA = 1
+    assert label_from_coded([3, 4], lay) == 1
+    # {3,5} cross-branch under root : LCA = 0
+    assert label_from_coded([3, 5], lay) == 0
+
+def test_strip_dag_node_codes():
+    doc = np.array([10, 3, 11, 1, 12])          # 3 and 1 are DAG-node codes
+    out = strip_dag_node_codes(doc, {1, 3})
+    assert list(out) == [10, 11, 12]
