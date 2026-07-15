@@ -1,5 +1,5 @@
 import numpy as np
-from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, strip_dag_node_codes, fit_gated
+from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, strip_dag_node_codes, fit_gated, profile
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
 
@@ -60,3 +60,11 @@ def test_fit_gated_learns_node_signatures():
     beta = fit_gated(docs[:1400], labels[:1400], lay, 120, n_iter=60, burn=30, rng=rng)
     assert beta.shape == (lay.K, 120)
     assert np.allclose(beta.sum(1), 1.0, atol=1e-6)
+
+def test_profile_returns_node_affinity():
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)
+    beta = np.full((lay.K, 30), 1e-3); beta /= beta.sum(1, keepdims=True)
+    rng = np.random.default_rng(0)
+    pr = profile(np.array([1, 2, 3, 4, 5]), beta, lay, n_iter=20, burn=10, rng=rng)
+    assert set(pr.keys()) == set(lay.nodes)
+    assert all(0.0 <= v <= 1.0 for v in pr.values())

@@ -145,3 +145,32 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
     beta_hat = acc / nacc
     beta_hat /= beta_hat.sum(1, keepdims=True)
     return beta_hat
+
+
+def profile(doc, beta_hat, lay, *, alpha=0.1, n_iter=60, burn=30, rng=None):
+    """Unmasked fold-in (topics fixed) -> per-node affinity = posterior mean mass on each node's
+    block. The full profile IS the output; do not collapse to a single node."""
+    K = lay.K
+    w = np.asarray(doc, dtype=np.int64)
+    ndk = np.zeros(K)
+    zi = rng.integers(K, size=len(w))
+    for k in zi:
+        ndk[k] += 1.0
+    acc = np.zeros(K)
+    nacc = 0
+    for it in range(n_iter):
+        for i in range(len(w)):
+            wi = w[i]
+            k = zi[i]
+            ndk[k] -= 1.0
+            p = (ndk + alpha) * beta_hat[:, wi]
+            s = p.sum()
+            p = p / s if s > 0 else np.full(K, 1.0 / K)
+            knew = int(np.searchsorted(np.cumsum(p), rng.random()))
+            zi[i] = knew
+            ndk[knew] += 1.0
+        if it >= burn:
+            acc += ndk / max(len(w), 1)
+            nacc += 1
+    th = acc / max(nacc, 1)
+    return {u: float(th[lay.block[u]].sum()) for u in lay.nodes}
