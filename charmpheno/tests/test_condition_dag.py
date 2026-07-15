@@ -53,3 +53,22 @@ def test_to_engine_maps_anchor_to_zero_and_loads_into_daglayout():
     lay = DagLayout(parent_int, n_bg=2, tpn=1)
     assert lay.K == 2 + 4                                # 4 non-root nodes (101,102,103,104) + 2 bg
     assert 0 in lay.closure(cid2int[104])                # every node's closure reaches the root
+
+def test_real_diabetes_subtree_structure():
+    import csv
+    from pathlib import Path
+    from spark_vi.models.topic.dag_placement import DagLayout
+    path = Path(__file__).parent / "data" / "diabetes_subtree_edges.csv"
+    with open(path) as fh:
+        rows = list(csv.reader(fh))[1:]                 # skip header
+    edges = [(int(a), int(d)) for a, d in rows]
+    ANCHOR_DM = 201820                                  # SNOMED "Diabetes mellitus"
+    node_ids = {a for a, _ in edges} | {d for _, d in edges} | {ANCHOR_DM}
+    dag = build_condition_dag(edges, ANCHOR_DM, node_ids)
+    assert len(dag.nodes()) == 127                       # the real diabetes type/status taxonomy
+    assert max(dag.depth(n) for n in dag.nodes()) == 4
+    multiparent = sum(1 for c, ps in dag.parents.items() if len(ps) > 1)
+    assert multiparent == 12                             # real type x status cross-axes
+    parent_int, int2cid, _ = dag.to_engine()
+    lay = DagLayout(parent_int, n_bg=2, tpn=1)
+    assert lay.K == 2 + 126                              # 126 non-root nodes + 2 background
