@@ -57,6 +57,8 @@ def label_from_coded(coded_nodes, lay):
     (one node is a descendant-or-self of all others), return that deepest node (most-specific).
     Otherwise return the lowest common ancestor (deepest node that is an ancestor-or-self of all)."""
     nodes = list(dict.fromkeys(coded_nodes))
+    if not nodes:
+        return 0
     for cand in nodes:                                   # single-path: cand's closure holds all
         cset = set(lay.closure(cand))
         if all(n in cset for n in nodes):
@@ -98,11 +100,17 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
     omitted: the gate already fixes each document's admissible topics to its label closure, so the
     per-document mixing term is not what we are estimating here — we want the node-tied topic-word
     distributions. This is a supervised topic-word estimator, not the full unsupervised LDA sampler;
-    hence there is no `alpha` argument."""
+    hence there is no `alpha` argument. The returned beta_hat averages the post-burn token counts
+    (n_kw + beta_prior) and normalizes once — the averaged-counts point estimate, not the mean of
+    per-sweep normalized rows."""
+    rng = np.random.default_rng() if rng is None else rng
     K = lay.K
     counted = [_as_counts(d) for d in train_docs]
     Q = word_cooccurrence(counted, V)
     beta0 = recover_beta(Q, find_anchors(Q, K))
+    if beta0.shape[0] < K:
+        pad = np.full((K - beta0.shape[0], V), 1.0 / V)
+        beta0 = np.vstack([beta0, pad])
     beta0 = beta0 + 1e-6
     beta0 /= beta0.sum(1, keepdims=True)
     n_kw = np.zeros((K, V))
@@ -142,7 +150,7 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
         if it >= burn:
             acc += n_kw + beta_prior
             nacc += 1
-    beta_hat = acc / nacc
+    beta_hat = acc / max(nacc, 1)
     beta_hat /= beta_hat.sum(1, keepdims=True)
     return beta_hat
 
@@ -150,6 +158,7 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
 def profile(doc, beta_hat, lay, *, alpha=0.1, n_iter=60, burn=30, rng=None):
     """Unmasked fold-in (topics fixed) -> per-node affinity = posterior mean mass on each node's
     block. The full profile IS the output; do not collapse to a single node."""
+    rng = np.random.default_rng() if rng is None else rng
     K = lay.K
     w = np.asarray(doc, dtype=np.int64)
     ndk = np.zeros(K)
@@ -196,15 +205,18 @@ def evaluate(profiles, test_labels, lay):
                 for i, u in enumerate(lay.nodes)}
     ranks = []
     for i, t in enumerate(test_labels):
+        if t not in lay.nodes:            # root / LCA-collapsed label: no rankable target node
+            continue
         ti = lay.nodes.index(t)
         ranks.append(1 + int((P[i] > P[i][ti]).sum()))
     ranks = np.array(ranks)
+    mrr = float(np.mean(1.0 / ranks)) if len(ranks) else float("nan")
+    top2 = float(np.mean(ranks <= 2)) if len(ranks) else float("nan")
     by_depth = {}
     for dep in sorted({lay.depth(u) for u in lay.nodes}):
         us = [u for u in lay.nodes if lay.depth(u) == dep]
         by_depth[dep] = float(np.nanmean([node_auc[u] for u in us]))
-    return {"node_auc": node_auc, "auc_by_depth": by_depth,
-            "mrr": float(np.mean(1.0 / ranks)), "top2": float(np.mean(ranks <= 2))}
+    return {"node_auc": node_auc, "auc_by_depth": by_depth, "mrr": mrr, "top2": top2}
 
 
 def _node_topic_mean(beta_hat, lay, u):

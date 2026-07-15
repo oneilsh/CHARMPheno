@@ -32,6 +32,9 @@ def test_label_siblings_is_lca():
     # {3,5} cross-branch under root : LCA = 0
     assert label_from_coded([3, 5], lay) == 0
 
+def test_label_from_coded_empty_is_root():
+    assert label_from_coded([], DagLayout(PARENT)) == 0
+
 def test_strip_dag_node_codes():
     doc = np.array([10, 3, 11, 1, 12])          # 3 and 1 are DAG-node codes
     out = strip_dag_node_codes(doc, {1, 3})
@@ -80,6 +83,19 @@ def test_evaluate_perfect_profiles_score_high():
     assert m["mrr"] == 1.0 and m["top2"] == 1.0
     assert all(v >= 0.99 for v in m["node_auc"].values())
 
+def test_evaluate_tolerates_root_label():
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)
+    labels = np.array([3, 0, 4, 5])
+    profiles = []
+    for y in labels:
+        if y == 0:
+            profiles.append({u: 0.0 for u in lay.nodes})   # root: no informative affinity
+        else:
+            cl = [u for u in lay.closure(y) if u != 0]
+            profiles.append({u: (1.0 if u in cl else 0.0) for u in lay.nodes})
+    m = evaluate(profiles, labels, lay)                    # must not raise on the root label
+    assert np.isfinite(m["mrr"])                            # 3 of 4 items are rankable
+
 def test_identifiability_flags_near_identical_siblings():
     from spark_vi.models.topic.dag_placement import identifiability_annotation
     lay = DagLayout(PARENT, n_bg=2, tpn=1)
@@ -99,7 +115,7 @@ def test_render_profile_marks_true_and_shows_all_nodes():
     s = render_profile(aff, lay, true_node=1)
     assert "true" in s
     for u in lay.nodes:                                   # every node rendered
-        assert str(u) in s or (str(u) in s)
+        assert str(u) in s
     assert s.count("\n") >= len(lay.nodes)
 
 def test_end_to_end_recovers_family_and_subtype():
