@@ -8,7 +8,7 @@ refinements. Here's where it went and where it's going.
 Reading the whole arc end to end, the calibration failure was never an estimator problem. Five
 estimator families — Laplace (compressed), mean-field VI (attenuated, sign-flipped), EM (ran away),
 the marginalized read-out (saturated), and exact Gibbs (basin-trapped) — all hit the *same* object
-in the *same* regime (short items, scarce gated blocks). When point-estimation through exact
+in the *same* regime (short documents, scarce community gated blocks). When point-estimation through exact
 sampling all fail identically, the verdict isn't "find the right estimator"; it's that the
 correlated-Gaussian-through-softmax likelihood geometry is multimodal and weakly identified exactly
 where the use case lives. Continuing meant open-ended inference research with no guaranteed endpoint.
@@ -21,15 +21,15 @@ where every estimator class fails on scarce gated blocks.
 
 ## The sharper correction: we were grading the wrong thing
 
-The bigger realization: calibrated coverage was never the right success metric for the actual goal.
-The goal is **placement / retrieval** — take an item with a known hierarchical label, hide it, and
+The bigger realization: calibrated coverage was only one potential success metric for the actual goal.
+Another is **placement / retrieval** — take a user-day with a known hierarchical label, hide it, and
 place it in the label DAG from its features alone, scored by how close the placement lands
 (DAG-distance, per-node precision/recall under heavy imbalance). That needs *monotone discriminative
-scores*, not calibrated intervals. So the coverage failures that consumed the last several turns are
-largely **orthogonal** to the objective — a genuinely liberating finding, because coverage in this
-regime looks regime-hard for any family, and we no longer need to win it.
+scores*, not calibrated intervals. The coverage failures that consumed the last several turns are
+largely **orthogonal** to this objective — a genuinely liberating finding, because coverage in this
+regime looks regime-hard for any family.
 
-And on the metric that *does* matter, the same "separate what's correct from where the residual
+And on the metric that matters here, the same "separate what's correct from where the residual
 lives" instrument that made the true-state oracle so clean paid off again. My first read-out forced
 the affinity profile down to a single hard node (argmax + threshold), and placement accuracy was
 barely above chance. But that collapse was the wrong read-out: scoring the **whole affinity profile
@@ -76,11 +76,11 @@ the given structure, and I suspect it's where something genuinely new could show
 ## Next
 
 Validation so far is synthetic and model-matched — it proves the mechanics, not real-world accuracy,
-and the real test is a held-out labeled corpus (imagine placing held-out items — tweets, say — into a
-learned topic hierarchy) where the leakage line is where the result lives or dies. First real target
-is a common category with clean sub-structure (power before rarity). The engine is domain-agnostic —
-`(docs, labels, dag)` as integer ids — so the same code that scored 0.97 on the plant is what points
-at the real corpus once it's assembled. Spec is written; plan is next.
+and the real test is a held-out labeled corpus (imagine placing held-out items — individual tweets, say, or
+tweet-days — into a learned topic hierarchy) where the leakage line is where the result lives or dies.
+First real target is a common category with clean sub-structure (power before rarity). The engine is 
+domain-agnostic — `(docs, labels, dag)` as integer ids — so the same code that scored 0.97 on the plant 
+is what points at the real corpus once it's assembled. Spec is written; plan is next.
 
 The throughline I'd underline for you: the two best moves this whole arc — the true-state oracle and
 the affinity-profile-vs-hard-placement split — are the same instrument, *isolate what is provably
