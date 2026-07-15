@@ -85,12 +85,20 @@ def _as_counts(doc):
     return SimpleNamespace(indices=idx, counts=cnt.astype(np.float64))
 
 
-def fit_gated(train_docs, train_labels, lay, V, *, alpha=0.1, beta_prior=0.02,
+def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
               n_iter=150, burn=80, rng=None):
-    """Gated collapsed Gibbs (Griffiths & Steyvers 2004): each training item is masked to
+    """Gated topic training by collapsed sampling: each training item is masked to
     allowed(label) = background ∪ blocks along its label's closure, tying topics to nodes
     structurally. Anchor-word spectral init (Arora et al. 2013) seeds beta. Returns posterior-mean
-    beta_hat (K, V)."""
+    beta_hat (K, V).
+
+    The per-token conditional uses ONLY the collapsed word-topic factor
+    (n_kw + beta_prior) / (n_k + V*beta_prior) of Griffiths & Steyvers (2004), restricted to the
+    gated allowed-set. The usual document-topic Dirichlet factor (n_dk + alpha) is intentionally
+    omitted: the gate already fixes each document's admissible topics to its label closure, so the
+    per-document mixing term is not what we are estimating here — we want the node-tied topic-word
+    distributions. This is a supervised topic-word estimator, not the full unsupervised LDA sampler;
+    hence there is no `alpha` argument."""
     K = lay.K
     counted = [_as_counts(d) for d in train_docs]
     Q = word_cooccurrence(counted, V)
