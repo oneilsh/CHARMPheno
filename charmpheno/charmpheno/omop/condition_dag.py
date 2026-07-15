@@ -52,3 +52,27 @@ def build_condition_dag(edges, anchor, node_ids, names=None):
         if c != anchor and c not in parents:
             parents[c] = [anchor]
     return ConditionDag(parents, anchor, {c: (names or {}).get(c, str(c)) for c in nodeset})
+
+
+def prune_by_attestation(dag, counts, min_n):
+    """Drop every non-anchor node with fewer than `min_n` attesting patients; rewire each surviving
+    node to its nearest surviving ancestors (transitive walk up past dropped nodes). The anchor is
+    never dropped. This is the principled size cap: a node no cohort patient populates cannot have a
+    learnable topic."""
+    keep = {n for n in dag.nodes() if n == dag.anchor or counts.get(n, 0) >= min_n}
+    new_parents = {}
+    for c in keep:
+        if c == dag.anchor:
+            continue
+        surv, seen, stack = set(), set(), list(dag.parents.get(c, []))
+        while stack:
+            p = stack.pop()
+            if p in seen:
+                continue
+            seen.add(p)
+            if p in keep:
+                surv.add(p)
+            else:
+                stack.extend(dag.parents.get(p, []))
+        new_parents[c] = sorted(surv) if surv else [dag.anchor]
+    return ConditionDag(new_parents, dag.anchor, dag.names)

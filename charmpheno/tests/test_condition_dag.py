@@ -1,4 +1,4 @@
-from charmpheno.omop.condition_dag import ConditionDag, build_condition_dag
+from charmpheno.omop.condition_dag import ConditionDag, build_condition_dag, prune_by_attestation
 
 DIAMOND_EDGES = [(100, 101), (100, 102), (101, 103), (102, 103), (103, 104)]
 DIAMOND_NODES = {100, 101, 102, 103, 104}
@@ -16,3 +16,16 @@ def test_build_orphan_attaches_to_anchor():
     dag = build_condition_dag([(200, 201)], anchor=200, node_ids={200, 201, 202})
     assert dag.parents[202] == [200]
     assert dag.depth(202) == 1
+
+def test_prune_drops_low_count_and_rewires():
+    dag = build_condition_dag(DIAMOND_EDGES, ANCHOR, DIAMOND_NODES)
+    counts = {101: 50, 102: 40, 103: 0, 104: 20}     # 103 is below threshold
+    pruned = prune_by_attestation(dag, counts, min_n=5)
+    assert 103 not in pruned.nodes()                  # dropped
+    assert pruned.nodes() == {100, 101, 102, 104}
+    assert set(pruned.parents[104]) == {101, 102}     # 104 rewired past dropped 103 to its parents
+
+def test_prune_never_drops_anchor():
+    dag = build_condition_dag(DIAMOND_EDGES, ANCHOR, DIAMOND_NODES)
+    pruned = prune_by_attestation(dag, counts={}, min_n=999)   # everything below threshold
+    assert pruned.nodes() == {ANCHOR}                 # only the anchor survives
