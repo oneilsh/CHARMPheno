@@ -236,3 +236,24 @@ def test_dag_placement_corpus_multi_shapes():
     assert all(isinstance(f, frozenset) and len(f) >= 1 for f in labels)
     assert set(node_codes.keys()) == set(DIAMOND.keys())
     assert any(len(f) > 1 for f in labels)                  # some comorbid patients exist
+
+
+def test_end_to_end_multiparent_comorbid():
+    from tests._stm_synth import dag_placement_corpus_multi
+    docs, labels, node_codes = dag_placement_corpus_multi(
+        parent=DIAMOND, leaf_prev={4: .5, 5: .5}, comorbid_rate=0.3,
+        V=120, doc_len=48, seed=2)
+    lay = DagLayout(DIAMOND, n_bg=2, tpn=1)
+    ntr = int(0.7 * len(docs))
+    rng = np.random.default_rng(5)
+    beta = fit_gated(docs[:ntr], labels[:ntr], lay, 120, n_iter=80, burn=40, rng=rng)
+    codes = set(node_codes.values())
+    profs = [profile(strip_dag_node_codes(d, codes), beta, lay, n_iter=40, burn=20, rng=rng)
+             for d in docs[ntr:]]
+    m = evaluate(profs, labels[ntr:], lay)
+    # multi-parent recovery: loose floors (investigate, do NOT loosen, if these fail).
+    assert m["auc_by_depth"][1] >= 0.80          # shallow (axis parents 1,2,3)
+    assert m["node_auc"][4] >= 0.70              # a multi-parent leaf is found above chance
+    assert m["node_auc"][5] >= 0.70
+    assert m["multi_frontier_rate"] > 0.0        # comorbid patients are present + measured
+    assert np.isfinite(m["mrr"])
