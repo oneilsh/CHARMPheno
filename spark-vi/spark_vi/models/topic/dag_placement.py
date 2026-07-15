@@ -97,6 +97,16 @@ def label_from_coded(coded_nodes, lay):
     return max(common, key=lay.depth)                    # root (0) is always common
 
 
+def frontier_from_coded(coded_nodes, lay):
+    """The set-valued truth: the most-specific attested nodes = attested nodes with NO attested
+    descendant. Drops attested ancestors (same-path -> most-specific), keeps incomparable attested
+    nodes as a set (comorbid or contradictory — the DAG cannot tell these apart, so we do not roll
+    them up; multi-frontier is instrumented by evaluate). Returns a frozenset."""
+    C = set(coded_nodes)
+    return frozenset(c for c in C
+                     if not any((c2 != c) and (c2 in lay.subtree(c)) for c2 in C))
+
+
 def strip_dag_node_codes(doc, dag_node_codes):
     """Remove every token whose id matches a DAG-node code (leakage strip; evaluation only)."""
     doc = np.asarray(doc)

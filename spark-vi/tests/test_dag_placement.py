@@ -1,5 +1,5 @@
 import numpy as np
-from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, strip_dag_node_codes, fit_gated, profile, evaluate
+from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, frontier_from_coded, strip_dag_node_codes, fit_gated, profile, evaluate
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
 DIAMOND = {1: 0, 2: 0, 3: 0, 4: [1, 2], 5: [1, 3]}  # multi-parent DAG: node 4,5 have two parents
@@ -155,3 +155,12 @@ def test_daglayout_singleparent_backward_compat():
     assert list(lay.allowed(1)) == [0, 1] + lay.block[1]
     assert lay.depth(3) == 2 and lay.depth(1) == 1
     assert lay.subtree(1) == {1, 3, 4}
+
+def test_frontier_from_coded_cases():
+    lay = DagLayout(DIAMOND)
+    assert frontier_from_coded([1, 4], lay) == frozenset({4})       # same-path -> most-specific
+    assert frontier_from_coded([4, 5], lay) == frozenset({4, 5})    # comorbid incomparable -> set
+    assert frontier_from_coded([2, 3], lay) == frozenset({2, 3})    # contradictory siblings -> set
+    assert frontier_from_coded([1, 2, 4], lay) == frozenset({4})    # both parents + child -> child
+    # single-parent tree: ancestor+descendant collapses to the descendant
+    assert frontier_from_coded([1, 3], DagLayout(PARENT)) == frozenset({3})
