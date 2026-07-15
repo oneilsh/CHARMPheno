@@ -101,3 +101,21 @@ def test_render_profile_marks_true_and_shows_all_nodes():
     for u in lay.nodes:                                   # every node rendered
         assert str(u) in s or (str(u) in s)
     assert s.count("\n") >= len(lay.nodes)
+
+def test_end_to_end_recovers_family_and_subtype():
+    from tests._stm_synth import dag_placement_corpus
+    docs, labels, node_codes = dag_placement_corpus(
+        parent=PARENT, node_prev={1:.18,2:.18,3:.16,4:.16,5:.16,6:.16},
+        V=120, doc_len=40, seed=2)
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)
+    ntr = int(0.7 * len(docs))
+    rng = np.random.default_rng(5)
+    beta = fit_gated(docs[:ntr], labels[:ntr], lay, 120, n_iter=80, burn=40, rng=rng)
+    codes = set(node_codes.values())
+    profs = [profile(strip_dag_node_codes(d, codes), beta, lay, n_iter=40, burn=20, rng=rng)
+             for d in docs[ntr:]]
+    m = evaluate(profs, labels[ntr:], lay)
+    # gated-train places well; sim validated family ~0.99 / subtype ~0.97 (spec). Loose floors:
+    assert m["auc_by_depth"][1] >= 0.85           # family level
+    assert m["auc_by_depth"][2] >= 0.75           # subtype level
+    assert m["mrr"] >= 0.6
