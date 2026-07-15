@@ -300,13 +300,14 @@ def identifiability_annotation(beta_hat, lay, *, tol=0.9):
     def cos(a, b):
         return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
     pairs = set()
-    for u in lay.nodes:                                  # parent<->child
-        for c in lay.children.get(u, []):
-            pairs.add((u, c))
-    for p, kids in lay.children.items():                 # siblings
+    for c, ps in lay.parents.items():                    # every parent<->child edge
+        for p in ps:
+            if p != 0:
+                pairs.add((min(p, c), max(p, c)))
+    for p, kids in lay.children.items():                 # siblings sharing at least one parent
         for i in range(len(kids)):
             for j in range(i + 1, len(kids)):
-                pairs.add((kids[i], kids[j]))
+                pairs.add((min(kids[i], kids[j]), max(kids[i], kids[j])))
     out = []
     for u, v in pairs:
         c = cos(_node_topic_mean(beta_hat, lay, u), _node_topic_mean(beta_hat, lay, v))
