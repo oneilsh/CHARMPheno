@@ -153,7 +153,9 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
     beta0 /= beta0.sum(1, keepdims=True)
     n_kw = np.zeros((K, V))
     n_k = np.zeros(K)
-    allowed = [lay.allowed(v) for v in train_labels]
+    # Each label may be a scalar node id or a frontier set (comorbid patient). A comorbid patient
+    # trains every block along the union of its frontier's closures — strictly better use of data.
+    allowed = [lay.allowed_set(y if hasattr(y, "__iter__") else (y,)) for y in train_labels]
     words = [np.asarray(d, dtype=np.int64) for d in train_docs]
     Z = []
     for d in range(len(train_docs)):

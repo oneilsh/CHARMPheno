@@ -164,3 +164,16 @@ def test_frontier_from_coded_cases():
     assert frontier_from_coded([1, 2, 4], lay) == frozenset({4})    # both parents + child -> child
     # single-parent tree: ancestor+descendant collapses to the descendant
     assert frontier_from_coded([1, 3], DagLayout(PARENT)) == frozenset({3})
+
+def test_fit_gated_accepts_frontier_sets():
+    from tests._stm_synth import dag_placement_corpus
+    # comorbid training labels (sets) must be accepted and produce a valid beta_hat
+    docs, labels, _ = dag_placement_corpus(
+        parent=PARENT, node_prev={1:.18,2:.18,3:.16,4:.16,5:.16,6:.16},
+        V=120, doc_len=40, seed=1)
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)
+    set_labels = [frozenset({int(y)}) for y in labels[:800]]   # scalars as singleton sets
+    rng = np.random.default_rng(3)
+    beta = fit_gated(docs[:800], set_labels, lay, 120, n_iter=40, burn=20, rng=rng)
+    assert beta.shape == (lay.K, 120)
+    assert np.allclose(beta.sum(1), 1.0, atol=1e-6)
