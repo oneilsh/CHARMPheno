@@ -273,14 +273,17 @@ def evaluate(profiles, test_labels, lay):
         ranks.append(min(1 + int((P[i] > P[i][j]).sum()) for j in true_idx))   # best (smallest) rank
         pred = lay.nodes[int(np.argmax(P[i]))]
         hops.append(min(_hops(pred, lay.nodes[j], lay) for j in true_idx))
+    have_ranks = len(ranks) > 0                          # some doc had a rankable true frontier node
     ranks = np.array(ranks, dtype=float) if ranks else np.array([np.nan])
     by_depth = {}
     for dep in sorted({lay.depth(u) for u in lay.nodes}):
         us = [u for u in lay.nodes if lay.depth(u) == dep]
         by_depth[dep] = float(np.nanmean([node_auc[u] for u in us]))
+    # Guard mrr AND top2 symmetrically: with no rankable docs, both are nan (not applicable).
+    # (np.nan <= 2 is False, so an unguarded top2 would silently read 0.0 instead of nan.)
     return {"node_auc": node_auc, "auc_by_depth": by_depth,
-            "mrr": float(np.nanmean(1.0 / ranks)),
-            "top2": float(np.nanmean(ranks <= 2)),
+            "mrr": float(np.nanmean(1.0 / ranks)) if have_ranks else float("nan"),
+            "top2": float(np.nanmean(ranks <= 2)) if have_ranks else float("nan"),
             "mean_hops": float(np.mean(hops)) if hops else float("nan"),
             "frontier_size_mean": float(np.mean([len(f) for f in fronts])),
             "multi_frontier_rate": float(np.mean([len(f) > 1 for f in fronts]))}

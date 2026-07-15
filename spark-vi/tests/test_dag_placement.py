@@ -193,3 +193,12 @@ def test_evaluate_set_valued_and_instrumented():
     assert abs(m["frontier_size_mean"] - 1.5) < 1e-9
     assert abs(m["multi_frontier_rate"] - 0.5) < 1e-9        # 2 of 4 docs are comorbid
     assert np.isfinite(m["mean_hops"])
+
+
+def test_evaluate_all_unrankable_labels_are_nan():
+    # every doc's frontier collapses to root (0) -> no rankable true node -> mrr AND top2 are nan.
+    lay = DagLayout(DIAMOND)
+    labels = [frozenset({0}), frozenset({0})]
+    profiles = [{u: 0.0 for u in lay.nodes} for _ in labels]
+    m = evaluate(profiles, labels, lay)
+    assert np.isnan(m["mrr"]) and np.isnan(m["top2"])       # not applicable, not 0.0
