@@ -36,3 +36,16 @@ def test_strip_dag_node_codes():
     doc = np.array([10, 3, 11, 1, 12])          # 3 and 1 are DAG-node codes
     out = strip_dag_node_codes(doc, {1, 3})
     assert list(out) == [10, 11, 12]
+
+def test_dag_placement_corpus_shapes():
+    from tests._stm_synth import dag_placement_corpus
+
+    docs, labels, node_codes = dag_placement_corpus(
+        parent=PARENT, node_prev={1: .18, 2: .18, 3: .16, 4: .16, 5: .16, 6: .16},
+        V=120, doc_len=40, seed=0)
+    assert len(docs) == len(labels)
+    assert set(labels.tolist()) <= set(PARENT.keys())
+    assert set(node_codes.keys()) == set(PARENT.keys())
+    # a node's exact code appears in items labeled at/below that node
+    below3 = [d for d, y in zip(docs, labels) if y in {3}]
+    assert any(node_codes[3] in d for d in below3)

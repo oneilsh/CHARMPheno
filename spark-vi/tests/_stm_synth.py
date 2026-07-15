@@ -574,3 +574,30 @@ def fit_stm(docs, *, K, V, sigma_init, n_iter=250, batch=None, seed=42,
                   for kk, v in stats.items()}
         gp = m.update_global(gp, scaled, learning_rate=(t + 64) ** -0.7)
     return gp
+
+
+def dag_placement_corpus(*, parent, node_prev, V, doc_len, seed):
+    """Domain-agnostic hierarchical-placement plant. Each non-root node owns a signature vocab
+    block plus a single exact 'node code'; an item at node v emits a shared common pool + the
+    signature blocks along closure(v). Returns (docs, labels, node_codes)."""
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    rng = np.random.default_rng(seed)
+    lay = DagLayout(parent, n_bg=2, tpn=1)
+    nodes = lay.nodes
+    C = V // 3                                            # shared common pool [0:C]
+    sig = max(2, (V - C) // (len(nodes) + 1))
+    node_sig = {u: np.arange(C + i * sig, C + i * sig + sig) for i, u in enumerate(nodes)}
+    node_codes = {u: int(node_sig[u][0]) for u in nodes}  # the exact marker code
+    p = np.array([node_prev[u] for u in nodes], float); p /= p.sum()
+    docs, labels = [], []
+    for _ in range(sum(1 for _ in range(2000))):          # 2000 items
+        v = int(rng.choice(nodes, p=p))
+        path = [u for u in lay.closure(v) if u != 0]
+        toks = [rng.integers(0, C, size=doc_len // 2)]    # background/common pool
+        per = max(1, (doc_len - doc_len // 2) // len(path))
+        for u in path:
+            toks.append(rng.choice(node_sig[u], size=per))
+        docs.append(np.concatenate(toks).astype(np.int64))
+        labels.append(v)
+    return docs, np.array(labels), node_codes
