@@ -1,0 +1,88 @@
+"""Correlation bundle export: logistic-normal topic correlation R + identified
+mask, over the dashboard's kept topics in block order. Unidentified cells (no
+joint document support) serialize as null so the frontend can grey them.
+
+The identifiability floor is the model's min_pair_support: a cell is identified
+iff the two topics were co-realized in >= min_pair_support documents (Blei &
+Lafferty 2007 logistic-normal correlation; identifiability by support).
+"""
+from __future__ import annotations
+
+import math
+
+
+def _cell(x):
+    return None if (x is None or (isinstance(x, float) and math.isnan(x))) else float(x)
+
+
+def build_correlation_json(R, identified, support, partition, kept_topic_ids,
+                            reference_id=None, eta_scale=None,
+                            eta_scale_diagnostic=None):
+    """correlation.json over kept topics in block order; null for unidentified R.
+
+    reference_id: if given, this topic id is dropped from topic_order (and
+    every row/col it participates in). The STM reference topic is pinned at
+    eta=0 (unit-variance, ~zero off-diagonal in Sigma) so it is inert; its
+    n_pairs entries still mark it identified, which would otherwise render a
+    spurious zero-correlation band in the dashboard (Component 3,
+    docs/superpowers/specs/2026-07-01-gated-ctm-correlation-reporting-design.md).
+
+    eta_scale: a SINGLE pooled scalar `c` (corpus_eta_scale_gated_rdd /
+    corpus_eta_scale_gated) such that the generative covariance is
+    Sigma_gen = c*R -- the generation input. The fitted correlation R is unit-
+    diagonal by construction (variance pinned to 1 for fit stability, ADR 0034);
+    c reintroduces the discarded scale at export. A per-topic empirical variance
+    came out about 10x too compressed (the unit-diagonal fit shrinks eta), and a
+    per-topic free diagonal estimated at fit time reopened the variance-runaway
+    failure mode (insight 0033); the runaway-safe, data-driven answer is this one
+    pooled scalar estimated at export with beta and R frozen (ADR 0036 addendum).
+    When not None, emitted as "eta_scale": float(eta_scale); when None, the key is
+    omitted entirely and the dashboard falls back to the unit-diagonal R.
+
+    eta_scale_diagnostic: optional held-out calibration provenance for the
+    shipped eta_scale -- method name, c* per holdout fraction (robustness
+    across holdout_frac in {0.5, 0.8, 0.95}, probing stability as the visible
+    token set shrinks toward the small-seed regime), the c_grid searched, and
+    the per-c mean held-out log-likelihoods at the shipped holdout
+    (corpus_heldout_scale_sweep_gated_rdd, the validated unbiased estimator --
+    see HS-1 / insight 0038). This bounded grid sweep is the sole eta_scale
+    estimator in the export path; the iterated pooled EM
+    (corpus_eta_scale_gated_rdd) it superseded was biased and unstable and is
+    no longer used here (it remains in the library). A plain JSON-serializable
+    dict, emitted verbatim (not coerced): when not None, "eta_scale_diagnostic":
+    eta_scale_diagnostic. The dashboard itself ignores this field (reads only
+    "eta_scale"); it exists purely for transparency. When None (default), the
+    key is omitted entirely.
+    """
+    labels = partition.topic_labels()                 # length K, by original id
+    order = [i for i in kept_topic_ids if i != reference_id]  # already block-ordered upstream
+    block_labels = [labels[i] for i in order]
+    R_out, id_out, sup_out = [], [], []
+    for i in order:
+        R_out.append([_cell(R[i][j]) for j in order])
+        id_out.append([bool(identified[i][j]) for j in order])
+        sup_out.append([int(support[i][j]) for j in order])
+    # topic_order / reference_topic are published in the dashboard's COMPACTED
+    # display space (position within kept_topic_ids), matching model.beta,
+    # covariate_effects per_topic, and gating.topic_blocks — all built
+    # positionally over the kept topics (model_adapter.py subsets by `kept`).
+    # The dashboard sampler indexes those compacted arrays with these values, so
+    # emitting the raw original id would mis-index whenever a k-anon-suppressed
+    # group leaves a gap in kept (the rare-disease case). R/identified/support
+    # above stay keyed by original id (Sigma lives in original K-space); their
+    # output rows are already positional, so only these two id fields remap.
+    pos = {int(tid): p for p, tid in enumerate(kept_topic_ids)}
+    out = {
+        "topic_order": [pos[int(i)] for i in order],
+        "block_labels": block_labels,
+        "R": R_out,
+        "identified": id_out,
+        "support": sup_out,
+        "reference_topic": (pos.get(int(reference_id))
+                            if reference_id is not None else None),
+    }
+    if eta_scale is not None:
+        out["eta_scale"] = float(eta_scale)
+    if eta_scale_diagnostic is not None:
+        out["eta_scale_diagnostic"] = eta_scale_diagnostic
+    return out

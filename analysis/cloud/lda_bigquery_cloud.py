@@ -56,33 +56,28 @@ def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, name_by_id):
                  toward 1.0 means the topic specialized (or, at small K,
                  collapsed onto a single term).
     """
+    from spark_vi.models.topic.diagnostics import topic_word_summary
+
     def _on_iter(iter_num: int, global_params: dict,
                  _: list[float]) -> None:
         if every_n <= 0 or iter_num % every_n != 0:
             return
         lam = global_params["lambda"]                         # (K, V)
         alpha = global_params["alpha"]                        # (K,)
-        lam_row_sums = lam.sum(axis=1)                        # (K,)
-        E_beta = lam_row_sums / max(lam_row_sums.sum(), 1e-12)  # (K,)
-        peak = lam.max(axis=1) / np.maximum(lam_row_sums, 1e-12)
-        topics = lam / lam_row_sums[:, None]                  # row-stochastic
-        # Sort topics by Σλ_k descending so the heaviest topics are listed
-        # first. The k label printed on each line is the topic's native
-        # index (stable across iterations), so a topic moving up or down
-        # the ranking is a meaningful signal.
-        order = np.argsort(lam_row_sums)[::-1]
+        s = topic_word_summary(lam, top_n)
+        # Heaviest topics first; printed k is the native (stable) index, so a
+        # topic moving up/down the Σλ ranking across iters is a real signal.
+        order = np.argsort(s["row_sums"])[::-1]
         print(f"[driver]   --- topics @ iter {iter_num} ---", flush=True)
         for k in order:
-            top = topics[k].argsort()[::-1][:top_n]
             terms = ", ".join(
-                f"{name_by_id.get(idx_to_cid[int(j)], '?')[:24]}"
-                f"({topics[k, int(j)]:.3f})"
-                for j in top
+                f"{name_by_id.get(idx_to_cid[int(j)], '?')[:24]}({p:.3f})"
+                for j, p in zip(s["top_indices"][k], s["top_probs"][k])
             )
             print(
                 f"[driver]    topic {k:>2}  "
-                f"α={alpha[k]:.4g}  E[β]={E_beta[k]:.4f}  "
-                f"Σλ={lam_row_sums[k]:.3g}  peak={peak[k]:.3f}  | {terms}",
+                f"α={alpha[k]:.4g}  E[β]={s['mass_fraction'][k]:.4f}  "
+                f"Σλ={s['row_sums'][k]:.3g}  peak={s['peak'][k]:.3f}  | {terms}",
                 flush=True,
             )
     return _on_iter
@@ -94,6 +89,12 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Imported here (not at module top) so the module itself stays importable
+    # without charmpheno on the path (mirrors the "driver-side imports proven
+    # first" deferral used for the other charmpheno imports below) — only
+    # needed to source the --cohort choices from the shared registry.
+    from charmpheno.omop.cohorts import SUPPORTED_COHORTS
+
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=_HelpFormatter)
     parser.add_argument(
@@ -206,11 +207,15 @@ def main(argv: list[str] | None = None) -> int:
               "Enable with --optimize-topic-concentration if you want it."),
     )
     parser.add_argument(
-        "--doc-unit", choices=["patient", "patient_year"], default="patient",
+        "--doc-unit", choices=["patient", "patient_year", "patient_cohort"],
+        default="patient",
         help=("How OMOP event rows become documents (see ADR 0018). "
               "'patient' = one doc per person over full history (legacy "
               "default). 'patient_year' = one doc per (person, year-active), "
-              "requires --source-table condition_era for era replication."),
+              "requires --source-table condition_era for era replication. "
+              "'patient_cohort' = one doc per (person, cohort index date) "
+              "windowed via --cohort (PatientCohortDocSpec); its doc_id "
+              "carries a source_cohort: prefix that LDA ignores."),
     )
     parser.add_argument(
         "--doc-min-length", type=int, default=None,
@@ -226,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--cohort",
-        choices=["none", "first_cancer_year", "first_dementia_year"],
+        choices=["none", *sorted(SUPPORTED_COHORTS)],
         default="none",
         help=("Optional cohort filter applied after the base BQ load. "
               "'none' (default) keeps the full sampled corpus. "
@@ -238,9 +243,22 @@ def main(argv: list[str] | None = None) -> int:
               "all-cause dementia dx (descendants of SNOMED 4182210 — "
               "AD, vascular, Lewy body, FTD, NOS) and windows their "
               "events to the 365 days starting at that first dx. "
-              "All cohort options require 365 days of observation_period "
-              "coverage on each side of the index date. "
+              "All cohort options require a fully-observed 365-day follow-up "
+              "and, by default, 365 days of prior observation_period coverage "
+              "(see --prior-obs-days). "
+              "Any cohort registered in charmpheno.omop.cohorts."
+              "SUPPORTED_COHORTS is accepted (e.g. population_cancer, "
+              "population_eds) — LDA fits the BOW directly and never reads "
+              "source_cohort/gating, so the cohort only selects/windows "
+              "documents, same as the two names above. "
               "Requires --source-table condition_era."),
+    )
+    parser.add_argument(
+        "--prior-obs-days", type=int, default=365,
+        help=("Prior-observation lookback (days) for the cohort index date. "
+              "365 (default) requires a year of pre-index coverage; 0 drops "
+              "the lookback, admitting prevalent cases. Keys the corpus cache. "
+              "No effect when --cohort none."),
     )
     parser.add_argument(
         "--corpus-cache-uri", type=str, default=None,
@@ -311,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
         min_patient_count=args.min_patient_count,
         cache_uri=args.corpus_cache_uri or None,
         cohort=args.cohort,
+        prior_obs_days=args.prior_obs_days,
     )
     bow_df = bow_df.persist()
     n_docs = bow_df.count()  # forces materialization
@@ -368,6 +387,19 @@ def main(argv: list[str] | None = None) -> int:
         ).collect()
         theta_arr = np.asarray(theta_rows, dtype=np.float64)
         aggregates = compute_theta_aggregates(theta_arr)
+
+        # Per-document concentration readout (ENHANCEMENT-ONLY, never fatal).
+        # Mirrors the STM path's corpus_concentration_stm_rdd metadata key so
+        # downstream reads "concentration_readout" regardless of model class.
+        conc = None
+        try:
+            from spark_vi.eval.topic.concentration import lda_concentration_readout
+            conc = lda_concentration_readout(theta_arr)
+            print(f"[driver]   concentration readout: top_mass p50={conc['top_mass']['p50']:.3f} "
+                  f"eff_topics p50={conc['eff_topics']['p50']:.1f} (n={conc['n_docs']})", flush=True)
+        except Exception as exc:
+            print(f"[driver]   concentration readout failed ({exc}); omitted.", flush=True)
+
         augmented = VIResult(
             global_params=model.result.global_params,   # unchanged — no γ to drop
             elbo_trace=model.result.elbo_trace,
@@ -388,11 +420,13 @@ def main(argv: list[str] | None = None) -> int:
                     "min_patient_count": args.min_patient_count,
                     "doc_spec": doc_spec.manifest(),
                     "cohort": args.cohort,
+                    "prior_obs_days": args.prior_obs_days,
                 },
                 "theta_histogram": aggregates["theta_histogram"],
                 "theta_percentiles": aggregates["theta_percentiles"],
                 "corpus_prevalence": aggregates["corpus_prevalence"],
                 "n_patients": aggregates["n_patients"],
+                **({"concentration_readout": conc} if conc is not None else {}),
             },
         )
         print(

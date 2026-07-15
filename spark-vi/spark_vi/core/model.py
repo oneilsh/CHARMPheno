@@ -177,14 +177,18 @@ class VIModel(ABC):
 
           * numeric scalar (`int`, `float`, NumPy scalar, 0-d ndarray)
             — round-trips inline in `manifest.json` as a JSON list.
-          * 1-D `np.ndarray` — round-trips as a sidecar
-            `traces/<name>.npy` of shape `(n_iter, dim)`.
+          * `np.ndarray` of any rank — round-trips as a sidecar
+            `traces/<name>.npy` of shape `(n_iter, *dims)`. 1-D (e.g. a
+            K-vector) and higher-rank (e.g. STM's (P, K) Gamma) both work.
           * any other JSON-serializable value (`list`, `dict`, `str`,
             ...) — round-trips inline in `manifest.json` as-is. Useful
             for top-N term labels, named-region markers, etc.
 
-        Keep values small. Heavy per-iter state has no business here;
-        a (K, V) topic-word matrix per iter is not a diagnostic.
+        Keep values small — this is opt-in (the default returns {}), and the
+        framework persists faithfully with no size cap, so a (K, V) topic-word
+        matrix per iter would bloat every checkpoint. A model that would
+        otherwise emit heavy per-iter state should suppress it here (return {}
+        or omit the key).
         """
         return {}
 

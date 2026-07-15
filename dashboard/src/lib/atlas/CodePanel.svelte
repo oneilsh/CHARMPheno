@@ -2,7 +2,7 @@
   import {
     bundle, selectedPhenotypeId, advancedView, hoveredCodeIdx,
     searchedConditionIdx, searchedPhenotypeForPatients,
-    prevalenceReader, tauThreshold,
+    coverageReader, tauThreshold, predictiveGain, selectedPhenotypeLiveDist,
   } from '../store'
   import { topRelevantCodes } from '../inference'
   import { go } from '../router'
@@ -12,7 +12,7 @@
   function findInPatients() {
     if ($selectedPhenotypeId === null) return
     searchedPhenotypeForPatients.set($selectedPhenotypeId)
-    go('patient')
+    go('sim', 'explore')
   }
 
   let lambda = 0.6
@@ -32,8 +32,47 @@
 
   $: maxPwk = top.length ? Math.max(...top.map((r) => r.pwk)) : 1
 
-  $: reader = $prevalenceReader
+  $: reader = $coverageReader
   $: hasHistogram = !!(pheno?.theta_histogram && pheno?.theta_percentiles && $bundle?.phenotypes.theta_histogram_bin_edges)
+  // Phenotype-detail histogram source. Prefer the LIVE atlas cohort — the same
+  // generatively-sampled, covariate-conditioned cohort that sizes the bubbles —
+  // so the histogram reshapes as the covariates move and its tail above τ IS the
+  // coverage bubble. Fall back to the static exported theta_histogram for
+  // non-STM / legacy bundles (no live cohort).
+  $: histEdges = $bundle?.phenotypes.theta_histogram_bin_edges
+  $: histSource = $selectedPhenotypeLiveDist
+    ? { hist: $selectedPhenotypeLiveDist.histogram as (number | null)[], pcts: $selectedPhenotypeLiveDist.percentiles, edges: $selectedPhenotypeLiveDist.binEdges }
+    : (hasHistogram && pheno && histEdges
+        ? { hist: pheno.theta_histogram!, pcts: pheno.theta_percentiles!, edges: histEdges }
+        : null)
+
+  // Task 6b: presence/mean_gain/depth scalars block. Gated on the bundle
+  // carrying predictive_gain at all (the per-phenotype fields are hydrated
+  // together from that block — see bundle.ts) so bundles without it render
+  // exactly as before with no new row.
+  $: hasPredictiveGainFields = !!$bundle?.phenotypes.predictive_gain
+
+  // Advanced-mode "gain detail" hover: the secondary predictive-gain scalars
+  // (presence / depth / dedup / length-corr) bundled into ONE tooltip so the
+  // detail header stays uncluttered. Distinctiveness (mean_gain) keeps its own
+  // first-class chip; these are its finer-grained companions. Values are
+  // per-phenotype so the tip is built here rather than in copy.ts. The overlay
+  // (.app-tip) is white-space: pre-wrap, so the blank-line separators render.
+  function gainDetailTip(p: {
+    presence?: number | null; presence_beats_zero?: number | null
+    depth?: number | null; dedup_gain?: number | null; length_corr?: number | null
+  }): string {
+    const pct = (v?: number | null) => (v == null || Number.isNaN(v)) ? '—' : (v * 100).toFixed(0) + '%'
+    const nats = (v?: number | null) => (v == null || Number.isNaN(v)) ? '—' : v.toFixed(2) + ' nats'
+    const corr = (v?: number | null) => (v == null || Number.isNaN(v)) ? '—' : v.toFixed(2)
+    return [
+      `Presence: ${pct(p.presence)} — the share of this phenotype's patients for whom it adds signal that beats noise: the per-patient held-out gain exceeds that patient's own permuted-topic null (a per-patient permutation test — "statistically present," not merely a positive point estimate). "How widely it genuinely helps."`,
+      `Beats-zero: ${pct(p.presence_beats_zero)} — the looser companion: the share with any positive per-patient gain (> 0), no null test. If this sits well above Presence, many of those positive estimates are inside the noise.`,
+      `Depth: ${pct(p.depth)} — this phenotype's share of the total unique predictive structure across those patients (a broad phenotype others overlap scores low; a niche one nothing else explains scores high). "How much."`,
+      `Dedup gain: ${nats(p.dedup_gain)} — the mean held-out gain with repeated codes capped at 1, so a few bursty codes can't inflate it.`,
+      `Length corr: ${corr(p.length_corr)} — correlation of per-patient gain with record length (a confound check: a high value means the signal mostly tracks how much data a patient has).`,
+    ].join('\n\n')
+  }
 
   // Share of patients below τ — the mass the histogram omits because its
   // x-axis starts at τ. Summed from bins whose upper edge is at or below τ;
@@ -76,34 +115,35 @@
           title={copy.phenotypeDetail.findInPatientsTip}
           data-tour="find-in-patients"
         >
-          find in patients →
+          find in simulated patients →
         </button>
       </div>
       <h2 class="title">{pheno.label || `Phenotype ${pheno.id}`}</h2>
       {#if pheno.description}
         <p class="desc-text">{pheno.description}</p>
       {/if}
-      <div class="stats" data-numeric data-tour="detail-stats">
-        <span class="stat" title={hasHistogram
-          ? ($advancedView
-            ? copy.phenotypeDetail.prevalence.tipAdvanced($tauThreshold)
-            : copy.phenotypeDetail.prevalence.tipBasic($tauThreshold))
-          : copy.phenotypeDetail.prevalence.tipNoHistogram
-        }>
-          <span class="stat-k">{hasHistogram && $advancedView ? copy.phenotypeDetail.prevalence.labelAdvanced : copy.phenotypeDetail.prevalence.labelBasic}<span class="help-mark" aria-hidden="true">?</span></span>
-          <span class="stat-v">{(reader(pheno) * 100).toFixed(1)}%</span>
-        </span>
-        {#if $advancedView}
+      {#if $advancedView}
+        <!-- Stats are advanced-only diagnostics. Coherence (NPMI) leads — how
+             tightly the phenotype's leading conditions co-occur; the map's
+             bubble opacity already encodes it, so the basic view omits it. -->
+        <div class="stats" data-numeric data-tour="detail-stats">
+          <span class="stat" title={copy.phenotypeDetail.coherenceTip}>
+            <span class="stat-k">Coherence<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="stat-v">{pheno.npmi == null ? '—' : pheno.npmi.toFixed(3)}</span>
+          </span>
+          <span class="stat" title={hasHistogram
+            ? copy.phenotypeDetail.coverage.tipAdvanced($tauThreshold)
+            : copy.phenotypeDetail.coverage.tipNoHistogram
+          }>
+            <span class="stat-k">{copy.phenotypeDetail.coverage.labelAdvanced}<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="stat-v">{(reader(pheno) * 100).toFixed(1)}%</span>
+          </span>
           {#if hasHistogram}
             <span class="stat" title={copy.phenotypeDetail.topicMassTip}>
               <span class="stat-k">Topic mass</span>
               <span class="stat-v">{(pheno.corpus_prevalence * 100).toFixed(1)}%</span>
             </span>
           {/if}
-          <span class="stat" title={copy.phenotypeDetail.coherenceTip}>
-            <span class="stat-k">Coherence</span>
-            <span class="stat-v">{pheno.npmi == null ? '—' : pheno.npmi.toFixed(3)}</span>
-          </span>
           <span class="stat" title={copy.phenotypeDetail.pairCoverageTip}>
             <span class="stat-k">Pair cov</span>
             <span class="stat-v">{pheno.pair_coverage == null ? '—' : (pheno.pair_coverage * 100).toFixed(0) + '%'}</span>
@@ -120,15 +160,42 @@
               <span class="stat-v">{pheno.quality}</span>
             </span>
           {/if}
-        {/if}
-      </div>
+        </div>
+      {/if}
+      {#if hasPredictiveGainFields && $advancedView}
+        <!-- Distinctiveness = mean unique held-out predictive gain (nats): how
+             specific this phenotype's vocabulary is vs. the corpus background.
+             Shown with the permutation null band so a value inside the noise
+             floor is visibly untrustworthy. NOT bubble size (that is coverage). -->
+        <div class="stats" data-numeric>
+          <span class="stat" title={copy.phenotypeDetail.distinctivenessTip}>
+            <span class="stat-k">Distinctiveness<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="stat-v">{pheno.mean_gain == null ? '—' : `${pheno.mean_gain.toFixed(2)} nats`}</span>
+          </span>
+          {#if $predictiveGain?.null_band}
+            <span class="stat" title={copy.phenotypeDetail.nullBandTip}>
+              <span class="stat-k">Noise floor</span>
+              <span class="stat-v">{$predictiveGain.null_band.p95.toFixed(2)} nats (p95)</span>
+            </span>
+          {/if}
+          <!-- Secondary gain scalars (presence/depth/dedup/length-corr) buried
+               in one hover to keep the header compact; value shown is presence.
+               NOTE: bind data-tip, NOT title. This tip is per-phenotype (dynamic);
+               the tooltip system caches title->data-tip on first hover and removes
+               title, but Svelte then re-adds a fresh title on reselect, leaving the
+               custom overlay showing the stale cached data-tip while the browser's
+               native title tooltip shows the new value (two tooltips, different
+               values). data-tip has no native tooltip and stays reactively fresh. -->
+          <span class="stat" data-tip={gainDetailTip(pheno)}>
+            <span class="stat-k">Presence<span class="help-mark" aria-hidden="true">?</span></span>
+            <span class="stat-v">{pheno.presence == null ? '—' : (pheno.presence * 100).toFixed(0) + '%'}</span>
+          </span>
+        </div>
+      {/if}
     </header>
 
-    {#if hasHistogram && $advancedView}
-      {@const edges = $bundle!.phenotypes.theta_histogram_bin_edges!}
-      {@const hist = pheno.theta_histogram!}
-      {@const pcts = pheno.theta_percentiles!}
-      {@const belowTau = fractionBelowTau(hist, edges, $tauThreshold)}
+    {#if histSource && $advancedView}
+      {@const belowTau = fractionBelowTau(histSource.hist, histSource.edges, $tauThreshold)}
       <div class="hist-wrap" data-tour="histogram">
         <span class="hist-head">
           <span class="eyebrow" title={copy.phenotypeDetail.histogram.tip}>{copy.phenotypeDetail.histogram.title}</span>
@@ -137,9 +204,9 @@
           </span>
         </span>
         <PrevalenceHistogram
-          histogram={hist}
-          binEdges={edges}
-          percentiles={pcts}
+          histogram={histSource.hist}
+          binEdges={histSource.edges}
+          percentiles={histSource.pcts}
           tau={$tauThreshold}
           width={360}
           height={120}

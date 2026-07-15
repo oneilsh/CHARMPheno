@@ -1,18 +1,37 @@
 <script lang="ts">
   import {
-    phenotypesById, advancedView, searchedConditionIdx, searchedPhenotypeSet,
+    phenotypesById, advancedView, searchedConditionIdx, searchedPhenotypeSet, bundle,
   } from '../store'
   import { phenotypeHue } from '../palette'
+  import { explainedVsPrior } from './codeComposition'
+  import { copy } from '../copy'
   export let theta: number[]
   export let height = 28
   export let labels = true
   export let onSelect: ((id: number) => void) | null = null
   export let otherThreshold = 0.05
+  // Label for the folded-tail band. Defaults to "Other" (the comorbid-mix
+  // reading); the Simulator's dominant-vote bar passes "other leads".
+  export let otherLabel = 'Other'
   // The patient's code bag. When provided AND the user has pinned a
   // condition via the search box AND this patient actually has that
   // condition, magenta dots mark every band whose phenotype contains
   // the searched condition in its top relevance-ranked codes.
   export let codeBag: number[] | null = null
+
+  // Opt-in prior-vs-evidence residual overlay. Off by default so the shared
+  // neighbor-strip usage (NeighborRibbon) stays clean; the main patient bar
+  // passes showResidual={true}.
+  export let showResidual = false
+
+  $: split = showResidual && $bundle
+    ? explainedVsPrior(theta, codeBag ?? [], $bundle.model.beta, $bundle.model.K)
+    : null
+  // Fraction of each band that is prior-supported (0..1 within the band).
+  function priorFrac(k: number): number {
+    if (!split) return 0
+    return theta[k] > 0 ? split.prior[k] / theta[k] : 0
+  }
 
   // In basic mode, dead/mixed phenotype bands ALSO fold into "Other"
   // regardless of weight, so bad-phenotype names never appear in the
@@ -59,7 +78,7 @@
       {#if otherFrac > 0}
         <span class="band-label other" style="width: {(otherFrac * 100).toFixed(2)}%">
           <span class="dot"></span>
-          <span class="lab">Other</span>
+          <span class="lab">{otherLabel}</span>
         </span>
       {/if}
     </div>
@@ -72,7 +91,11 @@
         title={`${$phenotypesById.get(b.k)?.label || `Phenotype ${b.k}`}: ${(b.v * 100).toFixed(1)}%`}
         on:click={() => onSelect?.(b.k)}
         aria-label={`${$phenotypesById.get(b.k)?.label || `Phenotype ${b.k}`}, ${(b.v * 100).toFixed(1)} percent`}
-      ></button>
+      >
+        {#if showResidual && priorFrac(b.k) > 0}
+          <span class="prior-fill" style="width: {(priorFrac(b.k) * 100).toFixed(2)}%" aria-hidden="true"></span>
+        {/if}
+      </button>
     {/each}
     {#if otherFrac > 0}
       <!-- onSelect(-1) is the sentinel "Other / tail phenotypes" view.
@@ -115,6 +138,10 @@
         <span class="pct other" style="width: {(otherFrac * 100).toFixed(2)}%">{(otherFrac * 100).toFixed(0)}%</span>
       {/if}
     </div>
+  {/if}
+
+  {#if showResidual}
+    <p class="residual-note">{copy.contributingCodes.evidenceVsPrior}</p>
   {/if}
 </div>
 
@@ -165,6 +192,7 @@
     gap: 1px;
   }
   .band {
+    position: relative;
     border: 0;
     padding: 0;
     cursor: pointer;
@@ -177,6 +205,15 @@
   .band:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
+  }
+  .prior-fill {
+    position: absolute;
+    top: 0; right: 0; height: 100%;
+    background-image: repeating-linear-gradient(
+      45deg, transparent, transparent 2px,
+      rgba(255, 255, 255, 0.45) 2px, rgba(255, 255, 255, 0.45) 3px
+    );
+    pointer-events: none;
   }
   .other-band {
     background: var(--surface-deep);
@@ -217,5 +254,11 @@
     white-space: nowrap;
     padding-right: 0.4rem;
     letter-spacing: 0.02em;
+  }
+
+  .residual-note {
+    font-size: var(--fs-micro);
+    color: var(--ink-faint);
+    line-height: 1.4;
   }
 </style>

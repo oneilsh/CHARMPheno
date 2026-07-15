@@ -19,6 +19,22 @@ class DashboardExport:
     topic_indices: np.ndarray     # K_display (original model-side topic ids)
     theta_histogram: np.ndarray | None = field(default=None)   # K_display × n_bins; np.nan = suppressed (use np.nansum to aggregate); None for HDP/legacy
     theta_percentiles: np.ndarray | None = field(default=None)  # K_display × 5 in [p5, p25, p50, p75, p95] column order; None for HDP/legacy
+    topic_blocks: list | None = field(default=None)             # block label per displayed topic (aligned to topic_indices); None when no partition
+    # --- Predictive-gain aggregates (PROVISIONAL schema, Phase-2 of the
+    # predictive-gain metric; see spark_vi.mllib.topic.predictive_gain). All
+    # K_display-aligned to topic_indices, same convention as theta_histogram.
+    # STM + gated only; None everywhere else (and on any enhancement-only
+    # build-phase failure). Bundle-level scalars (null_band,
+    # observed_delta_range, prominence_bin_edges, the downdate audit, the
+    # generative scale used, and n_docs) are NOT carried on this dataclass —
+    # they pass straight from the build phase to write_phenotypes_bundle.
+    presence: np.ndarray | None = field(default=None)        # K_display; the SHIPPED presence — fraction of a topic's documents where per-doc Delta_k beats that doc's own permuted-topic null (a per-doc permutation test, "statistically present" rather than merely >0). Sourced at the export boundary from the library's presence_vs_null (see corpus_predictive_gain_gated); presence_beats_zero is the looser companion diagnostic.
+    presence_beats_zero: np.ndarray | None = field(default=None)  # K_display; DIAGNOSTIC companion to presence — the looser fraction of a topic's docs with Delta_k > 0 (positive gain over the background baseline, no null test). Sourced from the library's `presence`. Kept so the dashboard can show both and reveal whether the permuted null actually collapsed to ~0 on the real corpus.
+    mean_gain: np.ndarray | None = field(default=None)       # K_display; mean per-doc held-out predictive gain Delta_k
+    depth: np.ndarray | None = field(default=None)           # K_display; topic k's share of total held-out predictive structure across its documents
+    prominence_hist: np.ndarray | None = field(default=None)  # K_display × n_bins; per-topic Delta_k histogram
+    length_corr: np.ndarray | None = field(default=None)     # K_display; Pearson correlation of per-doc Delta_k with document token length
+    dedup_gain: np.ndarray | None = field(default=None)      # K_display; mean_gain with held-out counts capped at 1
 
 
 def _global_params(result) -> dict[str, np.ndarray]:
@@ -139,14 +155,94 @@ def adapt_hdp(result, *, top_k: int = 50) -> DashboardExport:
     )
 
 
+def adapt_stm(result, *, corpus_prevalence: np.ndarray | None = None,
+              partition=None, suppressed=frozenset()) -> DashboardExport:
+    """STM → DashboardExport. α-equivalent derived from softmax(Γ[intercept]).
+
+    ``corpus_prevalence`` is the faithful corpus-mean topic proportion
+    ``(1/D) Σ_d softmax(Γᵀ x_d)``, computed distributively by the in-enclave
+    dashboard driver (see ``corpus_mean_topic_proportions_rdd``). When omitted
+    (cache miss, or a caller without the covariate sidecar) the v1 stand-in
+    ``softmax(Γ[intercept])`` is used instead — a reference-level approximation
+    that affects only the dashboard's "default topic proportion" widget.
+
+    ``partition`` is an optional ``TopicBlockPartition`` describing the
+    background/foreground block layout. When supplied, topics whose ids are in
+    ``suppressed`` are excluded from all output arrays and ``topic_blocks`` is
+    populated with the block label for each surviving topic (aligned to
+    ``topic_indices``). When ``partition`` is None the function behaves
+    identically to the pre-gating implementation (all topics kept,
+    ``topic_blocks=None``).
+    """
+    gp = _global_params(result)
+    meta = result.metadata
+    lambda_ = np.asarray(gp["lambda"], dtype=np.float64)
+    K = lambda_.shape[0]
+    kept = [i for i in range(K) if i not in suppressed]
+    beta_full = lambda_ / lambda_.sum(axis=1, keepdims=True)
+    Gamma = np.asarray(gp["Gamma"], dtype=np.float64)  # (P, K)
+    covariate_names = meta["covariate_manifest"]["covariate_names"]
+    intercept_idx = next(
+        (i for i, n in enumerate(covariate_names) if "intercept" in str(n).lower()),
+        None,
+    )
+    if intercept_idx is not None:
+        eta_bar = Gamma[intercept_idx]
+        alpha_eq = np.exp(eta_bar - eta_bar.max())
+        alpha_eq /= alpha_eq.sum()
+    else:
+        alpha_eq = np.full(K, 1.0 / K)
+    # Faithful corpus-mean (1/D) Σ_d softmax(Γᵀ x_d) when the driver supplied
+    # it; otherwise the v1 stand-in (== α_eq at the intercept). Either way this
+    # affects only the dashboard "default topic proportion" display.
+    corpus_prev = (np.asarray(corpus_prevalence, dtype=np.float64)
+                   if corpus_prevalence is not None else alpha_eq.copy())
+
+    topic_blocks = None
+    if partition is not None:
+        labels = partition.topic_labels()
+        topic_blocks = [labels[i] for i in kept]
+
+    beta = beta_full[kept]
+    alpha = alpha_eq[kept]
+    corpus_prev = corpus_prev[kept]
+    # Non-renormalization after subsetting suppressed topics is intentional and
+    # mirrors HDP top-K behavior: corpus_prevalence is a per-topic display
+    # quantity (fraction of patients expressing topic k), not a distribution, so
+    # it deliberately does NOT re-sum to 1 after k-anon suppression.
+
+    # theta_histogram / theta_percentiles: optional pass-through if metadata has them.
+    # Both are K × * on axis 0 and must be subset by `kept` to stay aligned with
+    # topic_indices.  When partition is None, kept == list(range(K)) so the slice
+    # is an identity and output is byte-identical to the pre-gating path.
+    raw_hist = meta.get("theta_histogram")
+    theta_histogram = _parse_theta_histogram(raw_hist)[kept] if raw_hist is not None else None
+    raw_pct = meta.get("theta_percentiles")
+    theta_percentiles = _parse_theta_percentiles(raw_pct)[kept] if raw_pct is not None else None
+    return DashboardExport(
+        beta=beta, alpha=alpha, corpus_prevalence=corpus_prev,
+        topic_indices=np.array(kept, dtype=np.int64),
+        theta_histogram=theta_histogram, theta_percentiles=theta_percentiles,
+        topic_blocks=topic_blocks,
+    )
+
+
 _LDA_ALIASES = {"lda", "onlinelda", "onlineldamodel", "onlineldaestimator"}
 _HDP_ALIASES = {"hdp", "onlinehdp", "onlinehdpmodel", "onlinehdpestimator"}
+_STM_ALIASES = {"stm", "onlinestm"}
 
 
-def adapt(result, *, hdp_top_k: int = 50) -> DashboardExport:
+def adapt(
+    result,
+    *,
+    hdp_top_k: int = 50,
+    stm_corpus_prevalence: np.ndarray | None = None,
+) -> DashboardExport:
     mc = _model_class(result)
     if mc in _LDA_ALIASES:
         return adapt_lda(result)
     if mc in _HDP_ALIASES:
         return adapt_hdp(result, top_k=hdp_top_k)
+    if mc in _STM_ALIASES:
+        return adapt_stm(result, corpus_prevalence=stm_corpus_prevalence)
     raise ValueError(f"unsupported model class: {mc}")

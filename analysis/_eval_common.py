@@ -13,6 +13,68 @@ import sys
 import numpy as np
 
 
+def stm_sigma_diagnostic(Sigma, labels=None, top_k: int = 8):
+    """Per-topic eta-variance ranking + spectrum summary for an STM covariance.
+
+    Surfaces the largest-variance ("runaway") topics at eval time, so a
+    saved model can be inspected via ``make eval-exp ID=N`` without a refit.
+
+    Parameters
+    ----------
+    Sigma : array-like
+        The (K, K) topic covariance over global topic ids
+        (``global_params["Sigma"]``). Returns ``None`` for anything that is not
+        a square 2-D matrix (e.g. a legacy diagonal-Σ K-vector, or a non-STM
+        model with no Σ) so callers can guard on the return value.
+    labels : list | dict | None
+        Optional topic-id -> block-name map (``None`` block -> "background"),
+        e.g. ``foreground_reference_groups(topic_block_spec)``.
+    top_k : int
+        How many largest-variance topics to list.
+
+    Returns
+    -------
+    str | None
+        A multi-line report naming the largest-variance ("runaway") topics and
+        the eigenvalue range (min/max eigenvalue of Σ, a reporting statistic
+        only -- the fit only ever uses within-allowed-set marginal sub-blocks
+        of Σ, not the full assembled matrix), or ``None`` if Sigma is not a
+        square matrix.
+    """
+    if Sigma is None:
+        return None
+    Sigma = np.asarray(Sigma, dtype=float)
+    if Sigma.ndim != 2 or Sigma.shape[0] != Sigma.shape[1]:
+        return None
+    K = Sigma.shape[0]
+    diag = np.diag(Sigma)
+    order = np.argsort(diag)[::-1]
+
+    def _blk(k: int) -> str:
+        if labels is None:
+            return "?"
+        lab = labels.get(k) if isinstance(labels, dict) else labels[k]
+        return "background" if lab is None else str(lab)
+
+    # Symmetrized eigenvalue range (Σ is symmetric up to fp; guard anyway).
+    # Reporting statistic only: the full-matrix eigenvalue range spans
+    # cross-block entries that never enter the fit.
+    w = np.linalg.eigvalsh(0.5 * (Sigma + Sigma.T))
+    wmin, wmax = float(w[0]), float(w[-1])
+
+    n = min(top_k, K)
+    lines = [
+        f"Sigma spectrum (reporting statistic): eig[min={wmin:.3g} max={wmax:.3g}]",
+        f"top-{n} topics by eta-variance Sigma_ii:",
+    ]
+    for k in order[:n]:
+        lines.append(f"  topic {int(k):3d} [{_blk(int(k))}]  Sigma_ii={diag[k]:.3e}")
+    amax = int(order[0])
+    lines.append(
+        f"runaway = topic {amax} [{_blk(amax)}]  Sigma_ii={diag[amax]:.3e}")
+    return "\n".join(lines)
+
+
 def _resolve_use_color(mode: str) -> bool:
     """Map a CLI --color {auto, always, never} value to a bool."""
     if mode == "always":
@@ -90,7 +152,7 @@ def print_ranked_report(
 
     total_pairs = report.per_topic_total_pairs
     print(
-        f"\n  per-topic stats (reference=full corpus, "
+        f"\n  per-topic stats (reference=fit corpus, "
         f"reference_size={report.reference_size}, top_n={report.top_n}, "
         f"min_pair_count={report.min_pair_count}, "
         f"unrated={report.n_topics_unrated}/{len(npmi_arr)}, "

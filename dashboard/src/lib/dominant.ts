@@ -28,3 +28,22 @@ export function displayedDominant(
   }
   return best >= 0 ? best : dominant(theta)
 }
+
+// Fraction of draws whose DISPLAYED dominant phenotype is each k — a distribution
+// over phenotypes that sums to 1. Unlike the mean of theta (which flattens toward
+// an even mix as the draws disagree, since averaging a distribution over draws
+// smooths it), this "most often leads" vote concentrates when the draws agree on a
+// leading phenotype and only spreads when they genuinely disagree — the same
+// agree/ambiguous signal the per-sample structure strip shows, summarised.
+export function dominantVote(
+  thetaSamples: number[][],
+  phenotypes: Phenotype[],
+  advancedView: boolean,
+): number[] {
+  const K = thetaSamples[0]?.length ?? phenotypes.length
+  const vote = new Array<number>(K).fill(0)
+  if (thetaSamples.length === 0) return vote
+  for (const t of thetaSamples) vote[displayedDominant(t, phenotypes, advancedView)] += 1
+  for (let k = 0; k < K; k++) vote[k] /= thetaSamples.length
+  return vote
+}

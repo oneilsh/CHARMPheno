@@ -2,10 +2,12 @@
   import {
     bundle, cohort, patientsById, selectedPatientId, selectedPhenotypeId,
     advancedView, searchedPhenotypeForPatients, phenotypesById,
+    colorByGroup,
   } from '../store'
-  import { generateCohort } from '../cohort'
+  import { onMount } from 'svelte'
   import { phenotypeHue } from '../palette'
   import { displayedDominant } from '../dominant'
+  import { ensurePatientProjection } from '../patient/projection'
   import PatientMap from '../patient/PatientMap.svelte'
   import PatientBrowser from '../patient/PatientBrowser.svelte'
   import ProfileBar from '../patient/ProfileBar.svelte'
@@ -14,9 +16,18 @@
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
   import { copy } from '../copy'
 
-  // Initial batch size; adaptive sizing in cohort.ts may grow this.
-  const COHORT_N = 1500
-  const NEIGHBORS = 8
+  // Explore Cohort is now a pure viewer: the cohort it shows ($cohort) is
+  // generated on app load / cohort switch (App.svelte) and re-generated from
+  // the Simulate Cohort tab (Simulator.svelte's Simulate button, which
+  // conditions on the source cohort + covariates and refits this projection).
+  // The old in-panel source-cohort / covariate / Regenerate controls moved
+  // there, so nothing here mutates the cohort. Ensure a layout exists whenever
+  // this tab mounts (the load-time fit may have been superseded/invalidated).
+  onMount(ensurePatientProjection)
+
+  // A gated STM bundle carries a group per patient, which the color-by-group
+  // toggle below can display.
+  $: hasGroup = !!$bundle?.gating
 
   // Visible-in-current-mode patients (basic = clean only, advanced = all).
   // We default the detail panel selection to one of these so basic mode
@@ -47,26 +58,6 @@
   // click anywhere outside, not only by re-clicking the link.
   let whatIsEl: HTMLDetailsElement
   let whatIsOpen = false
-
-  function regenCohort() {
-    if (!$bundle || !$cohort) return
-    // Derive next seed from the current cohort, not a local counter:
-    // tab unmount resets locals but the store survives, so this keeps
-    // the regen sequence (42 → 43 → 44 ...) deterministic and walkthrough-
-    // friendly even if the user navigates away and back.
-    const nextSeed = $cohort.seed + 1
-    cohort.set(generateCohort({
-      model: $bundle.model,
-      meanCodesPerDoc: $bundle.corpusStats.mean_codes_per_doc,
-      n: COHORT_N,
-      seed: nextSeed,
-      nNeighbors: NEIGHBORS,
-      qualityByPhenotype: $bundle.phenotypes.phenotypes.map((p) => p.quality),
-    }))
-    // Selection no longer points at a valid patient after regenerate;
-    // let the reactive block above pick patients[0].
-    selectedPatientId.set(null)
-  }
 </script>
 
 <svelte:window on:click={(e) => {
@@ -79,7 +70,7 @@
   <header class="section-head">
     <div class="title-block">
       <div class="title-row">
-        <h1>{copy.patient.title}</h1>
+        <p class="kicker">{copy.patient.kicker}</p>
         <details class="what-is" bind:this={whatIsEl} bind:open={whatIsOpen}>
           <summary>{copy.patient.whatIsSummary}</summary>
           <div class="what-is-body popover">
@@ -89,30 +80,30 @@
           </div>
         </details>
       </div>
-      <p class="kicker">{copy.patient.kicker}</p>
-    </div>
-    <div class="controls">
-      <div class="control-stack">
-        <ConditionSearch entityLabel="patients" />
-        {#if $searchedPhenotypeForPatients !== null}
-          <div class="phenotype-chip" title={copy.patient.findPhenotypeChipTip}>
-            <span class="chip-label">Highlighting patients with</span>
-            <span class="chip-val">{$phenotypesById.get($searchedPhenotypeForPatients)?.label || `Phenotype ${$searchedPhenotypeForPatients}`}</span>
-            <button class="chip-clear" type="button" on:click={() => searchedPhenotypeForPatients.set(null)} title="Clear">×</button>
-          </div>
-        {/if}
-      </div>
     </div>
   </header>
 
   <div class="grid">
     <div class="left-col">
       <PatientMap />
+
       <div class="map-actions">
-        <button class="btn-ghost regen" on:click={regenCohort}
-          title="Re-roll the synthetic cohort with a new random seed">
-          ↻ regenerate cohort
-        </button>
+        <div class="control-stack">
+          <ConditionSearch entityLabel="patients" />
+          {#if $searchedPhenotypeForPatients !== null}
+            <div class="phenotype-chip" title={copy.patient.findPhenotypeChipTip}>
+              <span class="chip-label">Highlighting patients with</span>
+              <span class="chip-val">{$phenotypesById.get($searchedPhenotypeForPatients)?.label || `Phenotype ${$searchedPhenotypeForPatients}`}</span>
+              <button class="chip-clear" type="button" on:click={() => searchedPhenotypeForPatients.set(null)} title="Clear">×</button>
+            </div>
+          {/if}
+        </div>
+        {#if hasGroup}
+          <label class="color-toggle" title="Color patient-atlas points by each patient's gating group instead of dominant phenotype.">
+            <input type="checkbox" bind:checked={$colorByGroup} />
+            <span>color by group</span>
+          </label>
+        {/if}
       </div>
       <PatientBrowser />
     </div>
@@ -134,6 +125,7 @@
           <ProfileBar
             theta={current.theta}
             codeBag={current.code_bag}
+            showResidual={true}
             height={44}
             onSelect={(k) => selectedPhenotypeId.set(k)}
           />
@@ -152,7 +144,7 @@
 
   .section-head {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr;
     align-items: end;
     gap: 2rem;
     padding-bottom: 1.5rem;
@@ -160,7 +152,6 @@
     border-bottom: 1px solid var(--rule);
   }
   .title-block { display: flex; flex-direction: column; gap: 0.45rem; }
-  .title-block h1 { margin: 0.1rem 0 0; }
   .title-row {
     display: flex;
     align-items: baseline;
@@ -169,7 +160,7 @@
     position: relative;
   }
   .kicker {
-    margin: 0.25rem 0 0;
+    margin: 0;
     font-size: var(--fs-small);
     color: var(--ink-muted);
     max-width: 105ch;
@@ -229,25 +220,35 @@
     font-weight: 600;
   }
 
-  .controls {
-    display: flex;
-    align-items: end;
-    gap: 1.25rem;
-  }
   .control-stack {
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
-    align-items: flex-end;
+    align-items: flex-start;
   }
-  .regen { font-family: var(--font-body); font-size: var(--fs-small); }
-  .regen:hover { color: var(--accent); }
-  /* Sits just below the patient map, right-aligned; pulled up tight against
-     the map (overrides the left-col's 1.25rem gap). */
+  /* Sits just below the patient map: the condition-search control-stack on
+     the left, the color-by-group toggle on the right, pulled up tight
+     against the map (overrides the left-col's 1.25rem gap). When there's
+     no gating group the toggle is absent and the stack just sits left. */
   .map-actions {
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.85rem;
     margin-top: -0.75rem;
+  }
+
+  .color-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-family: var(--font-mono);
+    font-size: var(--fs-micro);
+    color: var(--ink-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    user-select: none;
   }
 
   .phenotype-chip {

@@ -3,32 +3,32 @@
   import { get } from 'svelte/store'
   import {
     bundle, advancedView, cohort, manifest, patientProjection,
-    prevalenceReader,
+    coverageReader, resetConditioningForCohort,
     searchedConditionIdx, searchedPhenotypeForPatients,
     selectedCohort, selectedPatientId, selectedPhenotypeId,
-    simulatorPrefix,
+    simulatorPrefix, simulatorResult,
   } from './lib/store'
   import type { DashboardBundle } from './lib/types'
   import { loadBundle, loadManifest } from './lib/bundle'
-  import { route, type Route } from './lib/router'
+  import { topRoute, type TopId } from './lib/router'
   import { copy } from './lib/copy'
   import { generateCohort } from './lib/cohort'
+  import { computePosteriorPredictive, DEFAULT_SIM_SAMPLES } from './lib/simulator/computePP'
+  import { ALL_SUBCOHORTS } from './lib/conditioning/marginalSampler'
   import { ensurePatientProjection } from './lib/patient/projection'
   import CohortSelector from './lib/CohortSelector.svelte'
   import Tabs from './lib/Tabs.svelte'
-  import Atlas from './lib/tabs/Atlas.svelte'
-  import Patient from './lib/tabs/Patient.svelte'
-  import Simulator from './lib/tabs/Simulator.svelte'
+  import PhenotypeAtlas from './lib/tabs/PhenotypeAtlas.svelte'
+  import SimulatorGroup from './lib/tabs/SimulatorGroup.svelte'
   import { installTooltips } from './lib/tooltip'
   import { startTour } from './lib/tour'
 
-  // Mapping from route id to its top-level tab component. Paired with
-  // router.ts's TABS list, adding a new tab is then a two-line change:
-  // append to TABS, add an entry here.
-  const TAB_COMPONENTS: Record<Route, ConstructorOfATypedSvelteComponent> = {
-    atlas: Atlas,
-    patient: Patient,
-    simulator: Simulator,
+  // Mapping from top-route id to its top-level container component. Paired
+  // with router.ts's TOP_TABS list, adding a new top tab is then a two-line
+  // change: append to TOP_TABS, add an entry here.
+  const TOP_COMPONENTS: Record<TopId, ConstructorOfATypedSvelteComponent> = {
+    atlas: PhenotypeAtlas,
+    sim: SimulatorGroup,
   }
 
   // Initial batch size. Adaptive sizing in cohort.ts may push the final
@@ -48,7 +48,7 @@
   // or unknown null); fall back to id 0 if nothing qualifies.
   function pickDefaultPhenotype(b: DashboardBundle | null): number | null {
     if (!b) return null
-    const reader = get(prevalenceReader)
+    const reader = get(coverageReader)
     const ps = b.phenotypes.phenotypes
     const good = ps.filter((p) => p.quality === 'phenotype' || p.quality === 'anchor' || p.quality == null)
     const pool = good.length ? good : ps
@@ -60,23 +60,6 @@
       if (a > b_ || (a === b_ && p.corpus_prevalence > best.corpus_prevalence)) best = p
     }
     return best ? best.id : null
-  }
-
-  // Seed the simulator with three related inflammatory conditions
-  // (atopic-airway + skin) so the default Simulate run has something
-  // interesting to chew on instead of drawing from the bare prior.
-  // Looked up by exact description so we keep working if vocab ids
-  // shift between bundles. Falls back silently if any of these aren't
-  // in the vocab.
-  const SIMULATOR_SEED_CONDITIONS = ['Asthma', 'Psoriasis', 'Atopic dermatitis']
-  function pickSimulatorSeedPrefix(b: typeof $bundle): number[] {
-    if (!b) return []
-    const out: number[] = []
-    for (const desc of SIMULATOR_SEED_CONDITIONS) {
-      const c = b.vocab.codes.find((x) => x.description === desc)
-      if (c) out.push(c.id)
-    }
-    return out
   }
 
   // Token guarding against stale loads: if the user changes cohorts twice
@@ -92,7 +75,14 @@
     // from the old K, the cohort's UMAP, etc.) don't briefly render
     // against the new model's data.
     bundle.set(null)
+    // A new cohort may carry different gating/covariate schema than the
+    // last one, so per-panel conditioning state (group/covariate values)
+    // must not survive the switch. Reset here (cohort change), not on tab
+    // switch, so navigating between tabs never clobbers a panel's in-
+    // progress conditioning.
+    resetConditioningForCohort()
     cohort.set(null)
+    simulatorResult.set(null)
     patientProjection.set(null)
     selectedPhenotypeId.set(null)
     selectedPatientId.set(null)
@@ -103,7 +93,21 @@
       if (token !== loadToken) return  // a newer load has started; abandon
       bundle.set(b)
       selectedPhenotypeId.set(pickDefaultPhenotype(b))
-      simulatorPrefix.set(pickSimulatorSeedPrefix(b))
+      // No pre-seeded starting conditions: the default population is a clean
+      // "from scratch" draw, seeded as a result below so the Simulate tab is
+      // populated on arrival rather than generated on the fly.
+      simulatorPrefix.set([])
+      // STM bundles (covariateEffects + correlation) get a faithful
+      // sample-mode cohort on load: each patient draws its own covariates
+      // and group from the bundle's marginals (sampleMarginalCovariates /
+      // sampleMarginalGroup) and its theta from the conditional logistic-
+      // normal (sampleConditionedTheta), rather than the plain Dirichlet
+      // prior. This makes the initial Patient Atlas a mixed, representative
+      // cohort — correlated comorbidity blocks and per-patient groups
+      // (so color-by-group is meaningful before the user regenerates
+      // anything). Non-STM bundles are unaffected: no `conditioning` means
+      // cohort.ts falls through to the unchanged Dirichlet draw.
+      const isStm = !!b.covariateEffects && !!b.correlation
       const c = generateCohort({
         model: b.model,
         meanCodesPerDoc: b.corpusStats.mean_codes_per_doc,
@@ -113,9 +117,21 @@
         // Adaptive sizing: oversample until one bucket hits 1000, then
         // truncate both to round-100 counts. See cohort.ts.
         qualityByPhenotype: b.phenotypes.phenotypes.map((p) => p.quality),
+        ...(isStm
+          ? { conditioning: { mode: 'sample' as const, values: {}, group: null, bundle: b } }
+          : {}),
       })
       if (token !== loadToken) return
       cohort.set(c)
+      // Seed a default posterior-predictive result so the Simulate tab's
+      // sample-mix + predicted-record panels are populated on arrival, never
+      // generated on the fly. Empty prefix + all-subcohorts = a representative
+      // "from scratch" population, in sync with the representative Explore
+      // cohort generated just above. The Simulate button regenerates it.
+      simulatorResult.set(computePosteriorPredictive(
+        b, [], { values: {}, group: ALL_SUBCOHORTS },
+        { nSamples: DEFAULT_SIM_SAMPLES, seed: DEFAULT_COHORT_SEED, autoregressive: false },
+      ))
       // Start the patient-atlas UMAP fit now, on load, rather than lazily when
       // the Patient/Simulator tab first mounts. fitAsync runs in the background
       // without blocking the UI, so the layout is ready by the time the user
@@ -210,7 +226,7 @@
     <p class="loading"><span class="loading-dot"></span> loading model bundle</p>
   {:else}
     <Tabs />
-    <svelte:component this={TAB_COMPONENTS[$route]} />
+    <svelte:component this={TOP_COMPONENTS[$topRoute]} />
   {/if}
 </main>
 

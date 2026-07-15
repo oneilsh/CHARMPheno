@@ -8,12 +8,12 @@
   --font-body: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
 
-  --fs-h1: clamp(1.5rem, 2vw, 1.85rem);
-  --fs-h2: 1.0625rem;
-  --fs-h3: 0.95rem;
-  --fs-body: 0.875rem;
-  --fs-small: 0.78rem;
-  --fs-micro: 0.68rem;
+  --fs-h1: clamp(1.55rem, 2vw, 1.9rem);
+  --fs-h2: 1.125rem;
+  --fs-h3: 1rem;
+  --fs-body: 0.9375rem;
+  --fs-small: 0.84rem;
+  --fs-micro: 0.74rem;
 
   --tracking-eyebrow: 0.1em;
   --tracking-tight: -0.018em;

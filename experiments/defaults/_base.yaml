@@ -11,6 +11,11 @@ max_iter: 20
 vocab_size: 10000
 min_df: 20
 min_patient_count: 20
+# Prior-observation lookback (days) for cohort index dates. 365 requires a
+# year of pre-index coverage (excludes prevalent cases); 0 drops the lookback.
+# No effect on the unfiltered "general" cohort. Keys the corpus + covariate
+# caches, so changing it forces a rebuild.
+prior_obs_days: 365
 subsampling_rate: 0.2
 tau0: 64
 kappa: 0.7
@@ -26,3 +31,15 @@ optimize_topic_concentration: false
 # in frontmatter to dial bundle size or NPMI sample size.
 vocab_top_n: 5000
 top_n_codes_for_npmi: 20
+
+# --- STM (prevalence-only) defaults ---
+# model_class: stm in the experiment frontmatter triggers the STM path.
+# covariate_formula, categorical_cols, continuous_cols are REQUIRED in
+# frontmatter when model_class: stm; no sensible default exists.
+# STM uses random_seed (not 'seed'); null = nondeterministic, set in
+# experiment frontmatter for reproducibility.
+random_seed: null
+sigma_init: 1.0
+sigma_ridge: 1.0e-6
+lbfgs_max_iter: 50
+lbfgs_tol: 1.0e-4

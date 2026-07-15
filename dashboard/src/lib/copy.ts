@@ -28,49 +28,56 @@ const pct = (tau: number): string => (tau * 100).toFixed(0)
 export const copy = {
   // ── Masthead ──────────────────────────────────────────────────────────
   masthead: {
-    subtitle: `explore latent health`,
+    subtitle: `exploring latent phenotypes`,
     // Model-size readout (K/V/n), shown in the masthead beside the cohort
     // selector in advanced mode.
     meta: {
-      k: `K: the number of phenotypes the model was asked to learn from the dataset.`,
-      v: `V: distinct medical codes displayed in the dashboard / total distinct codes in the source dataset. Low-count observations (< 20 patients) are suppressed.`,
-      n: `n: number of 'patients' the model was trained on (in thousands). See the cohort definition in the dropdown for details.`,
+      k: `K: the number of phenotypes (topics) the model was asked to learn from the dataset.`,
+      v: `V: distinct conditions displayed in the dashboard, over total distinct conditions in the source dataset. Low-count conditions are suppressed for patient privacy.`,
+      n: `n: number of patient records the model was fit on (in thousands).`,
     },
   },
 
   // ── Phenotype Atlas tab ───────────────────────────────────────────────
   atlas: {
     title: `Phenotype Atlas`,
-    kicker: `Phenotypes are clusters of conditions or other events shared by patients. Phenotype bubbles that sit closer together share more top-weighted events. Bubble size estimates prevalence: the fraction of patients for whom the phenotype makes up at least 2% of their coded activity.`,
+    kicker: (): string =>
+      `Each marker is a learned phenotype. Bubbles that sit closer together share more of their leading conditions; bubble size corresponds roughly to usage by cohort, and bubble opacity indicates how frequenty the top codes appear together in patient records.`,
     whatIsSummary: `What's a phenotype?`,
     // kLabel: the phenotype count K (or a "~80" fallback while loading).
     whatIs: (kLabel: string | number): string[] => [
-      `A <em>phenotype</em> here is a recurring pattern of clinical conditions or other medical events that tends to appear together across patients. For example, "Type 2 diabetes care" concentrates on diabetes, retinopathy, neuropathy, and related conditions.`,
-      `These phenotypes were learned automatically from de-identified patient records using a topic model (Latent Dirichlet Allocation). The model didn't know about diseases ahead of time; it just looked for groups of conditions that tend to co-occur, and produced ${kLabel} phenotypes.`,
+      `A <em>phenotype</em> here is a recurring pattern of clinical conditions that tends to appear together across patients.`,
+      `These phenotypes were learned automatically from de-identified patient records using a Bayesian probabilistic model. The model didn't know about diseases ahead of time; it just looked for groups of conditions that tend to co-occur, and produced ${kLabel} phenotypes.`,
       `A patient is a mix of phenotypes, not a single one. A phenotype is not a diagnosis; it's a pattern. Some patterns name a single disease, others name a family of related conditions, and some describe broad health backgrounds (e.g. chronic comorbidity follow-up).`,
     ],
     legend: {
       coherence: `Coherence: how reliably the phenotype's leading conditions actually co-occur in the same patients. Higher means the conditions really do show up together; lower means the pattern is weaker or more diffuse. (Bubble color encodes this.)`,
-      prevalence: (tau: number): string =>
-        `Prevalence: estimated share of patients for whom this phenotype makes up at least ${pct(tau)}% (τ) of their coded activity. Bubble size scales with this share.`,
-      topicMass: `Topic mass: mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
+      coverage: (tau: number): string =>
+        `Patient coverage: within a phenotype's cohort, the fraction of patients for whom it accounts for more than ${pct(tau)}% of their coded activity (θ > ${tau.toFixed(2)}). Shared phenotypes are measured across all patients; a group-specific phenotype within its own group's patients, so each cohort uses the full size range. Bubble size scales with this value; covariate sliders resample it, so bubbles grow or shrink with the population you condition on.`,
+      topicMass: `Topic mass: mean topic mixture share across patients (patient-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
+      // Legacy: predictive_gain no longer drives bubble sizing (that's always
+      // `coverage` now — see Task 4); mean_gain surfaces instead as the
+      // advanced-only "Distinctiveness" stat in the CodePanel detail view
+      // (phenotypeDetail.distinctivenessTip). Kept here, unreferenced, in
+      // case the atlas legend grows a distinctiveness entry later.
+      meanGain: `Predictive contribution: the phenotype's mean unique held-out predictive gain (nats) — how much this phenotype, on its own, improves the model's ability to predict a held-out patient's conditions. Bubble size scales with this value.`,
     },
   },
 
   // ── Phenotype detail (CodePanel) ──────────────────────────────────────
   phenotypeDetail: {
     empty: `Select a phenotype on the map to read its top conditions.`,
-    findInPatientsTip: `Switch to the Patient Atlas with patients carrying this phenotype highlighted`,
-    prevalence: {
-      labelBasic: `Prevalence`,
-      labelAdvanced: `Prevalence (patients)`,
-      tipAdvanced: (tau: number): string =>
-        `Fraction of patients with θ > τ = ${tau.toFixed(2)} — at least ${pct(tau)}% of their coded activity is attributed to this phenotype. A threshold-based approximation of clinical prevalence in the cohort.`,
+    findInPatientsTip: `Switch to the Patient Atlas with simulated patients carrying this phenotype highlighted`,
+    coverage: {
+      labelBasic: `Coverage`,
+      labelAdvanced: `Coverage`,
       tipBasic: (tau: number): string =>
-        `Fraction of patients for whom this phenotype makes up at least ${pct(tau)}% of their coded activity.`,
-      tipNoHistogram: `Topic mass (no patient distribution available for this bundle).`,
+        `Coverage: within this phenotype's cohort, the share of patients for whom it accounts for more than ${pct(tau)}% of their coded activity (θ > ${tau.toFixed(2)}). A group-specific phenotype is measured among its own group's patients.`,
+      tipAdvanced: (tau: number): string =>
+        `Coverage: the fraction of a phenotype's cohort with θ > τ = ${tau.toFixed(2)} — at least ${pct(tau)}% of their coded activity is attributed to it. Shared phenotypes are scaled across all patients, a group-specific phenotype within its own group's patients. For STM bundles this is estimated from patients sampled at the current covariate profile; otherwise from the θ-histogram.`,
+      tipNoHistogram: `Coverage: the cohort-average share of activity attributed to this phenotype (no per-patient histogram available for this model).`,
     },
-    topicMassTip: `Mean topic mixture share across patients (doc-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
+    topicMassTip: `Mean topic mixture share across patients (patient-mean of θ). Sums to 100% across phenotypes; not a patient count.`,
     coherenceTip: `Coherence: how reliably this phenotype's leading conditions co-occur in real patients (NPMI: normalized pointwise mutual information). Higher means the conditions really do show up together.`,
     pairCoverageTip: `Pair coverage: fraction of the leading-condition pairs that had enough joint observations to actually contribute to the coherence number. Low coverage means the coherence value was computed on only a few pairs and is less trustworthy.`,
     sourceTip: `Source #: the raw topic index from the LDA fit before sorting. Useful for cross-referencing the underlying model.`,
@@ -83,9 +90,18 @@ export const copy = {
     },
     histogram: {
       title: `Phenotype Prominence`,
-      tip: `How prominently this phenotype features in each patient's mixture, across the cohort. The x-axis is the share of a patient's coded activity attributed to this phenotype (shown from τ upward); the y-axis is the share of patients at each level. Patients below τ are summarised by the '< τ' figure rather than drawn. Bins with fewer than 20 patients are suppressed for privacy.`,
+      tip: `How prominently this phenotype features across patients. The x-axis is the share of a patient's record attributed to this phenotype (shown from τ upward); the y-axis is the share of patients at each level. This is the same model-sampled cohort that sizes the atlas bubble — the mass above τ IS the coverage bubble — so it reshapes as you change the patient features. Patients below τ are summarised by the '< τ' figure rather than drawn.`,
       belowTauTip: `Share of patients for whom this phenotype is below the τ threshold — i.e. they are not counted as having it. Not drawn on the chart (the x-axis starts at τ).`,
     },
+    // Predictive-gain scalars. presenceTip/depthTip date from Task 6a/6b and
+    // are no longer referenced in the UI (mean_gain, demoted to an advanced-
+    // only "Distinctiveness" stat, is now the only one shown — see
+    // distinctivenessTip/nullBandTip below); kept defined in case a future
+    // view resurfaces them.
+    presenceTip: `Presence: how widely — the fraction of patients where this phenotype adds real predictive signal (clears the model's own noise floor), in held-out predictive nats.`,
+    depthTip: `Depth: how much — this phenotype's share of the unique predictive structure in the patients who have it (a broad phenotype others overlap scores low; a niche one nothing else explains scores high).`,
+    distinctivenessTip: `Distinctiveness: this phenotype's mean unique held-out predictive gain (nats) — how specific its conditions are versus the dataset background (a niche phenotype scores high; a common one whose conditions are everywhere scores low). This is NOT how common the phenotype is (that is coverage), and it is not a per-patient count.`,
+    nullBandTip: `Noise floor: the 95th-percentile predictive gain of a randomized (null) phenotype, in nats. A distinctiveness value near or below this is inside the noise and should not be over-read.`,
     relevance: {
       weightingTip: `Relevance term weighting. The slider blends two views of 'top conditions': raw frequency (how much of the phenotype's mass falls on this condition) and lift (how much more this condition shows up here than in the overall dataset). Slide left for surprise/lift, right for sheer frequency.`,
       liftEndTip: `Lift: how much more this condition appears in this phenotype than across all patients overall. Surfaces rare-but-concentrated conditions.`,
@@ -103,13 +119,43 @@ export const copy = {
     suppressedTip: `< 20 patients (suppressed for privacy)`,
   },
 
+  // ── Correlation heatmap (chart-internal labels) ────────────────────────
+  correlation: {
+    ariaLabel: `Phenotype correlation heatmap`,
+    heading: `Phenotype Correlations`,
+    kicker: `Pairwise correlation between phenotype mixture shares, grouped by cohort. Grey cells lack enough joint observations to estimate a correlation.`,
+  },
+
+  // ── Phenotype difference pane (Compare tab) ────────────────────────────
+  difference: {
+    // Two-sided A-vs-B contrast.
+    sub: `Conditions ranked by how much more they distinguish one phenotype from the other. The number is the relevance gap — higher means the condition is more specific to that side.`,
+    deltaLabel: `distinctiveness`,
+    deltaTip: `How much more strongly this condition defines this side's phenotype than the one it is compared against — the relevance gap (λ·log p(condition) + (1−λ)·log lift, this side minus the other). Higher means more specific to this side.`,
+    // Self view (diagonal click): one phenotype's own ranked conditions.
+    selfSub: `This phenotype's leading conditions, ranked by relevance.`,
+    shareLabel: `share`,
+    shareTip: `The condition's share of this phenotype's probability mass (raw frequency p(condition | phenotype)).`,
+  },
+
   // ── Phenotype browser (table) ─────────────────────────────────────────
   phenotypeBrowser: {
-    topicMassTip: `Mean topic mixture share (doc-mean of θ). Sums to 100% across phenotypes.`,
-    prevTipAdvanced: (tau: number): string =>
+    coverageTipAdvanced: (tau: number): string =>
       `Fraction of patients with mixture weight above τ = ${tau.toFixed(2)} (at least ${pct(tau)}% of their coded activity).`,
-    prevTipBasic: (tau: number): string =>
+    coverageTipBasic: (tau: number): string =>
       `Fraction of patients for whom this phenotype makes up at least ${pct(tau)}% of their coded activity.`,
+  },
+
+  // ── Conditioning panel (Simulate tab: source cohort + covariates) ──────
+  conditioningBar: {
+    sourceCohortLabel: `Source cohort`,
+    sourceCohortSub: `Who to sample from — and, optionally, the covariate profile to condition on.`,
+    allSubcohorts: `All subcohorts`,
+    backgroundOnly: `Background only`,
+    covariateToggleTip: `When on, generation conditions each patient on the covariate values below instead of the cohort-average profile.`,
+    covariatesOn: `custom covariates`,
+    covariatesOff: `average covariates`,
+    resetCovariates: `Reset to averages`,
   },
 
   // ── Condition search ──────────────────────────────────────────────────
@@ -145,27 +191,25 @@ export const copy = {
     heading: `Top contributing codes`,
     openInAtlasTip: `Switch to the Phenotype Atlas with this phenotype selected`,
     otherLabel: `Other / tail phenotypes`,
+    composition: `Each code below is split across the phenotypes the model attributes it to for this patient. Select a phenotype band above to sort and highlight by that phenotype.`,
     subOther: `Codes from this patient's record that the model attributes to phenotypes outside this patient's dominant mix, ordered by tail-responsibility.`,
-    subMatch: `Codes from this patient's record that match this phenotype, ordered by occurrence count.`,
-    hintNoSelection: `Click a phenotype band above to see which codes from this patient's record drove the assignment.`,
-    hintNoCodes: (label: string): string =>
-      `No codes from this patient's record contribute to ${label}.`,
+    subMatch: `Every code in this patient's record, sorted and highlighted by its contribution to this phenotype.`,
+    emptyRecord: `This patient's record has no codes to attribute.`,
+    evidenceVsPrior: `Hatched portions of each band are phenotype mass the model leans on the population prior for, rather than this patient's own codes — an approximate evidence-vs-prior cue, not an exact split.`,
   },
 
   // ── Simulator tab ─────────────────────────────────────────────────────
   simulator: {
     title: `Simulator`,
-    kicker: `Pick some starting conditions and the model will tell you what kind of patient this looks like and what else would round out their year.`,
+    kicker: `Pick some starting conditions and the model will tell you what kind of patient this looks like and what else would round out their record.`,
     whatIsSummary: `What is this?`,
     whatIs: [
-      `The simulator asks the model: <em>given these conditions, what kind of patient could this be?</em> It answers by drawing many possible complete year-of-life records from the model's distribution.`,
-      `Each draw is one plausible patient. The <strong>profile bar</strong> shows the average phenotype mix across those draws. The <strong>expected codes</strong> table shows what the model thinks fills in the rest of the year. The <strong>atlas</strong> shows where these patients land relative to the synthetic cohort - tight cluster means the conditions you gave nail one kind of patient, smeared cloud means they're consistent with several.`,
+      `The simulator asks the model: <em>given these conditions, what kind of patient could this be?</em> It answers by drawing many possible complete records from the model's distribution.`,
+      `Each draw is one plausible patient. The <strong>profile bar</strong> shows the average phenotype mix across those draws. The <strong>expected codes</strong> table shows what the model thinks fills in the rest of the record. The <strong>atlas</strong> shows where these patients land relative to the synthetic cohort - tight cluster means the conditions you gave nail one kind of patient, smeared cloud means they're consistent with several.`,
       `Start by clicking conditions on the left, or just hit Simulate to draw new patients from scratch.`,
     ],
-    runSub: `Draw a batch of plausible patients from the conditions above.`,
-    autoregressiveTip: `When on, the model re-evaluates the phenotype mix after every drawn code so each token shifts the next one's distribution.`,
-    phenotypeMixHeading: `This patient is a mix of…`,
-    phenotypeMixSub: (n: number): string => `Average across ${n} simulated draws.`,
+    runSub: `Draw a fresh population from the current source cohort and starting conditions.`,
+    autoregressiveTip: `When on, the model re-evaluates the phenotype mix after every drawn code so each new code shifts the next one's distribution.`,
     emptyFromScratch: `Add some starting conditions on the left (or just hit Simulate to draw patients from scratch), then click <strong>simulate →</strong> to see what kind of patient this looks like.`,
     emptyReady: (n: number): string =>
       `${n} starting condition${n === 1 ? '' : 's'} ready. Click <strong>simulate →</strong> to see what kind of patient this looks like.`,
@@ -182,19 +226,14 @@ export const copy = {
   predictedRecord: {
     heading: `Model expects to also see`,
     sub: (n: number): string =>
-      `Across ${n} simulated years, the model most often fills these in. The bar shows how often this condition shows up (P10 → P90, tick at median).`,
+      `Across ${n} simulated records, the model most often fills these in — grouped by the phenotype that generated them. The bar and percentage show the share of those records the condition appears in.`,
     hintEmpty: `Run the simulator to see what the model predicts.`,
     hintNone: `The model did not predict any additional conditions in this run.`,
   },
 
-  // ── Simulator: mini atlas ─────────────────────────────────────────────
-  simMiniMap: {
-    sub: `Each bright dot is one simulated patient on the same atlas as the patient cohort.`,
-  },
-
   // ── Simulator: conditions editor ──────────────────────────────────────
   conditionsEditor: {
-    sub: `Conditions this patient already has. The simulator fills in the rest of their year.`,
+    sub: `Conditions this patient already has. The simulator fills in the rest of their record.`,
     hint: `Each click draws one random condition from that phenotype's profile.`,
   },
 
@@ -227,15 +266,23 @@ export const copy = {
     basic: {
       welcome: {
         title: `Welcome to CHARMPheno`,
-        body: `This dashboard explores <em>phenotypes</em> — recurring patterns of clinical conditions a model learned from de-identified patient records. The tour takes about a minute and visits all three tabs. You can leave any time with the × or the Esc key.`,
+        body: `This dashboard explores <em>phenotypes</em> — recurring patterns of clinical conditions a model learned from de-identified patient records. This tour walks the whole app: the <strong>Phenotype Atlas</strong>, then the <strong>Simulator</strong>. A couple of minutes; leave any time with the × or the Esc key.`,
       },
-      cohort: {
-        title: `Pick a cohort`,
-        body: `Each cohort is a separate model fit on a different slice of patients (different inclusion criteria or time window). Switch cohorts here at any time — everything below reloads for the model you choose.`,
+      model: {
+        title: `Pick a model`,
+        body: `Each model is a separate fit on a different slice of patients — a different cohort or subgroup. Switch models here at any time; everything below reloads for the one you choose.`,
       },
       atlasMap: {
         title: `The phenotype atlas`,
-        body: `Every bubble is one learned phenotype. Bubbles that sit close together share their leading conditions; bigger bubbles show up in more patients. Click any bubble to inspect it.`,
+        body: `Every bubble is one learned phenotype. Bubbles that sit close together share their leading conditions; a bubble's <strong>size</strong> shows how much of the cohort it accounts for, and its <strong>opacity</strong> shows how tightly its conditions actually co-occur. The legend marks the foreground-cohort phenotypes. Click any bubble to inspect it.`,
+      },
+      atlasCovariates: {
+        title: `Break out by patient features`,
+        body: `Open this to condition the atlas on patient features like sex or age. The bubbles resize to show how each phenotype's prominence shifts for the group you pick — the same population you'd simulate later.`,
+      },
+      browse: {
+        title: `Browse every phenotype`,
+        body: `The full phenotype list sits below the map — sortable and searchable by name. Reach for it when you'd rather scan a table than hunt through bubbles; selecting a row lights it up on the map.`,
       },
       findCondition: {
         title: `Find a condition`,
@@ -243,31 +290,55 @@ export const copy = {
       },
       atlasDetail: {
         title: `Inside a phenotype`,
-        body: `The selected phenotype's leading conditions appear here, along with how prevalent it is and how reliably its conditions co-occur. Hover any label with a dotted underline or a <strong>?</strong> for a plain-language explanation.`,
+        body: `The selected phenotype's leading conditions appear here, under a plain-language summary the model wrote for it. <strong>Find in simulated patients</strong> jumps to the synthetic patients who carry it — we'll get to those shortly.`,
       },
-      findInPatients: {
-        title: `Jump to the patients`,
-        body: `<strong>Find in patients</strong> carries this phenotype over to the Patient Atlas and rings every synthetic patient who carries it — connecting "what is this pattern" to "who has it."`,
+      compareHeatmap: {
+        title: `Compare phenotypes`,
+        body: `The Compare tab lays out how phenotypes relate: the heatmap shows which pairs tend to co-occur in the same patients. Pick the rows and columns to focus on the phenotypes you care about.`,
+      },
+      compareDiff: {
+        title: `What sets two apart`,
+        body: `Click any cell and this panel spells out the difference between those two phenotypes — the conditions most distinctive to each side. The <em>distinctiveness</em> score ranks how strongly a condition pulls toward one over the other.`,
+      },
+      simRun: {
+        title: `Simulate a cohort`,
+        body: `A population is already generated for you — the panels on the right. This is where you regenerate it: adjust the source cohort and starting conditions below, then hit <strong>regenerate</strong> and the model draws a fresh batch of plausible records.`,
+      },
+      simConditions: {
+        title: `Starting conditions`,
+        body: `Seed the simulation with specific conditions here, or leave it empty to draw from scratch. Every generated patient is a plausible record consistent with what you set.`,
+      },
+      simConditioning: {
+        title: `Who are you simulating?`,
+        body: `Choose which subgroup to draw from and, optionally, fix patient features like sex or age. It's the same conditioning that resized the atlas bubbles — here it shapes the patients you generate.`,
+      },
+      sampleMix: {
+        title: `The cohort's phenotype mix`,
+        body: `This panel summarizes the phenotype makeup across the drawn patients and how confident the model is about it — a read on what kind of cohort your settings produce.`,
+      },
+      predicted: {
+        title: `What the records look like`,
+        body: `The posterior-predictive panel: the conditions and phenotypes the model expects to round out patients like these — shown at both the phenotype and the individual-code level.`,
       },
       patientMap: {
-        title: `Synthetic patients`,
-        body: `Now the patients. <strong>These are not real people</strong> — each dot is a synthetic record the model generated. Patients near each other carry a similar mix of phenotypes, in the same 2D space as the atlas you just saw.`,
+        title: `Explore the patients`,
+        body: `The Explore tab plots the generated patients. <strong>These are not real people</strong> — each dot is a synthetic record. Patients near each other carry a similar phenotype mix, in the same space as the atlas.`,
       },
       patientProfile: {
         title: `A patient is a mix`,
-        body: `No patient is a single phenotype. This profile bar shows the selected patient's blend; click a band to see which of their conditions drove that part of the mix.`,
+        body: `No patient is a single phenotype. This profile bar shows the selected patient's blend: solid bands are backed by the patient's own conditions, hatched bands lean on the population prior. Click a band to see what drove it.`,
       },
-      openInAtlas: {
-        title: `…and back again`,
-        body: `The link runs both ways: <strong>open in atlas</strong> takes whichever phenotype band you're inspecting back to the Phenotype Atlas, selected and ready. The two atlases are two views of the same model.`,
+      contributingCodes: {
+        title: `Which codes, which phenotypes`,
+        body: `Each of the patient's conditions is split across the phenotypes it points to, for this patient — the model's per-code reasoning behind the mix above. Hover a segment to name the phenotype it belongs to.`,
       },
-      simulator: {
-        title: `Ask the model "what if?"`,
-        body: `Give the model some starting conditions here and hit <strong>simulate</strong>. It draws many plausible complete records and tells you what kind of patient this looks like and what else would tend to round out their year.`,
+      similarPatients: {
+        title: `Similar patients`,
+        body: `Because every synthetic patient sits in the same phenotype space, the model can surface the nearest matches to whoever you're viewing. That's the basis for <strong>phenotype-based patient search and cohort matching</strong> — find people whose overall pattern looks like this one, not just those sharing a single code.`,
       },
       viewToggle: {
         title: `Want to go deeper?`,
-        body: `That's the basics. Flip this to <strong>advanced</strong> whenever you're ready — it reveals the model's internals, and a second tour (same link) walks you through them. Explore away.`,
+        body: `That's the tour. Flip this to <strong>advanced</strong> whenever you're ready — it reveals the model's internals and diagnostics, and a second tour (same link) walks you through them. Explore away.`,
       },
     },
     advanced: {
@@ -281,11 +352,11 @@ export const copy = {
       },
       detailStats: {
         title: `Phenotype diagnostics`,
-        body: `Advanced mode adds quality diagnostics for the selected phenotype: <em>topic mass</em> (its average share across patients), <em>coherence</em> (how tightly its leading conditions co-occur), and <em>pair coverage</em> (how much evidence that coherence rests on). Hover each for detail.`,
+        body: `In advanced mode the detail panel adds numbers for the selected phenotype: <em>coherence</em> (how tightly its leading conditions co-occur — the same signal the bubble opacity carries), <em>topic mass</em> (its average share across patients), and <em>pair coverage</em> (how much evidence that coherence rests on). Hover each for detail.`,
       },
       histogram: {
-        title: `Phenotype prominence`,
-        body: `This shows how prominently the selected phenotype features across patients: the x-axis is the share of a patient's coded activity it accounts for (from the τ threshold up), the y-axis the share of patients. Low-count bins are suppressed for privacy.`,
+        title: `Prominence & coverage`,
+        body: `The detail behind a bubble's size: the x-axis is the share of a patient's coded activity this phenotype accounts for (from the τ threshold up), the y-axis the share of patients. Read off both how many patients express the phenotype and how strongly. Low-count bins are suppressed for privacy.`,
       },
       relevance: {
         title: `Re-rank the conditions`,
@@ -293,7 +364,7 @@ export const copy = {
       },
       quality: {
         title: `Every phenotype, graded`,
-        body: `Advanced mode also shows the weaker bubbles basic mode hides. Each phenotype carries a <em>quality</em> grade — from a clean disease pattern down to <em>mixed</em> (merged areas) or <em>dead</em> (effectively unused) — so you can tell signal from noise.`,
+        body: `Advanced mode also shows the weaker bubbles basic mode hides. Each phenotype carries a <em>quality</em> grade — a clean disease pattern, a broad <em>background</em> baseline, a <em>mixed</em> slot that merges unrelated themes, or a <em>dead</em> unused one — so you can tell signal from noise.`,
       },
       simulator: {
         title: `Tune the simulation`,

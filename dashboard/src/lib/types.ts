@@ -18,11 +18,44 @@ export interface Phenotype {
   theta_histogram?: (number | null)[]
   theta_percentiles?: ThetaPercentiles
   original_topic_id: number
+  // Hydrated at load time (see bundle.ts) from the bundle-level
+  // `predictive_gain` parallel arrays, indexed onto each phenotype by
+  // display position. Absent entirely on bundles without a
+  // `predictive_gain` block (backward-compatible: every reader falls back).
+  presence?: number | null
+  presence_beats_zero?: number | null
+  mean_gain?: number | null
+  depth?: number | null
+  length_corr?: number | null
+  dedup_gain?: number | null
+  prominence_hist?: (number | null)[]
 }
 export interface PhenotypesBundle {
   phenotypes: Phenotype[]
   theta_histogram_bin_edges?: number[]
   theta_histogram_min_count?: number
+  predictive_gain?: PredictiveGain
+}
+
+// Held-out predictive-gain diagnostics, written by the cluster export only
+// for gated STM bundles (Task 5 of the predictive-gain metric). Per-topic
+// arrays are length K_display and aligned BY POSITION to the `phenotypes`
+// array (same [kept] display order) — see bundle.ts for the hydration step
+// that distributes these onto each Phenotype by index.
+export interface PredictiveGain {
+  presence: (number | null)[]                 // the "statistically present" fraction (per-doc gain beats the doc's own permuted-topic null)
+  presence_beats_zero?: (number | null)[]     // looser diagnostic (per-doc gain > 0, no null test); absent on older bundles
+  mean_gain: (number | null)[]
+  depth: (number | null)[]
+  prominence_hist: (number | null)[][]
+  length_corr: (number | null)[]
+  dedup_gain: (number | null)[]
+  prominence_bin_edges: number[]
+  null_band: { mean: number; std: number; n: number; p95: number; hist: number[] }
+  observed_delta_range: [number, number]
+  downdate_audit: { max_abs_overall: number; n_docs_audited: number }
+  scale: number
+  n_docs: number
 }
 export interface VocabCode {
   id: number; code: string; description: string; domain: string; corpus_freq: number
@@ -39,8 +72,58 @@ export interface CorpusStats {
   corpus_size_docs: number; mean_codes_per_doc: number; k: number; v: number; v_full: number
   cohort?: CohortMeta
 }
+export type CovariateRecipe =
+  | { kind: 'intercept' }
+  | { kind: 'main'; var: string }
+  | { kind: 'dummy'; var: string; level: string }
+  | { kind: 'interaction'; factors: CovariateRecipe[] }
+
+export interface CovariateControl {
+  name: string
+  type: 'continuous' | 'categorical'
+  range?: [number, number]
+  default?: number
+  reference?: string
+  levels?: string[]
+  proportions?: Record<string, number>
+}
+export interface CovariateSchema {
+  k: number
+  controls: CovariateControl[]
+  design_columns: { name: string; recipe: CovariateRecipe }[]
+  unsupported: string[]
+}
+export type CovariateEffects = { covariate: string; per_topic: number[] }[]
+
+export interface GatingSpec {
+  group_var: string
+  groups: string[]
+  topic_blocks: string[]
+  group_var_label?: string
+  group_labels?: Record<string, string>
+  group_proportions?: Record<string, number>
+  // Cohort share in no foreground group (background-only). group_proportions
+  // sum to (1 - background_only_proportion); the marginal sampler draws a
+  // background-only (null-group) patient with this probability.
+  background_only_proportion?: number
+}
+
+export interface Correlation {
+  topic_order: number[]
+  block_labels: string[]
+  R: (number | null)[][]
+  identified: boolean[][]
+  support: number[][]
+  reference_topic?: number | null
+  eta_scale?: number   // pooled generative variance level c (scalar): Sigma_gen = eta_scale * R. Absent on older bundles → dashboard falls back to unit-diagonal R
+}
+
 export interface DashboardBundle {
   model: Model; phenotypes: PhenotypesBundle; vocab: VocabBundle; corpusStats: CorpusStats
+  covariateSchema?: CovariateSchema
+  covariateEffects?: CovariateEffects
+  gating?: GatingSpec
+  correlation?: Correlation
 }
 
 // Top-level data/manifest.json: lists which per-cohort bundles are
@@ -63,6 +146,10 @@ export interface SyntheticPatient {
   // or mixed. Basic mode hides patients with isClean=false; advanced
   // mode shows them. Always true when no quality labels are available.
   isClean: boolean
+  // Gating group this patient was drawn under (set mode: shared across the
+  // cohort; sample mode: per-patient marginal draw). Null for non-STM
+  // bundles or ungated STM bundles.
+  group?: string | null
 }
 export interface SyntheticCohort {
   patients: SyntheticPatient[]; seed: number

@@ -69,6 +69,10 @@ def _fmt_diagnostic(value: object) -> str:
         if value.ndim == 0:
             return f"{float(value):.4g}"
         flat = value.ravel()
+        if not np.issubdtype(flat.dtype, np.number):
+            # Non-numeric arrays (e.g. string label arrays from topic_block_labels)
+            # fall back to repr rather than crashing on float() conversion.
+            return repr(flat[:6].tolist()) + (", ..." if flat.size > 6 else "")
         head = ", ".join(f"{float(x):.4g}" for x in flat[:6])
         suffix = ", ..." if flat.size > 6 else ""
         return f"[{head}{suffix}]"

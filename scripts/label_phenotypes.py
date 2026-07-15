@@ -61,6 +61,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -92,6 +93,85 @@ PROVIDER_CHAIN: list[tuple[str, str, str]] = [
 ]
 
 QualityCategory = Literal["phenotype", "background", "anchor", "mixed", "dead"]
+
+
+def _topic_block_line(
+    *,
+    block: str | None,
+    groups: list[str] | None,
+    group_var: str | None,
+) -> str:
+    """Per-topic gating-block context for a gated/blocked STM, or "" if none.
+
+    A gated STM partitions its topics into a shared BACKGROUND block (fit on the
+    full corpus, available to every group) and one FOREGROUND block per group
+    (fit ONLY on that group's documents). ``block`` is the topic's block:
+    "background", or a group name from ``groups``. Foreground topics are
+    group-specific by construction, so the corpus-wide "background" KIND cannot
+    apply to them — without this signal the labeler mislabels a foreground
+    symptom cluster as generic background (the exp-0027 spot-check failure).
+    Empty string for non-gated bundles (block is None).
+    """
+    if not block:
+        return ""
+    others = ", ".join(groups or [])
+    if block == "background":
+        return (
+            f"Topic block: BACKGROUND (shared). Fit on the full corpus and "
+            f"available to every {group_var} group ({others}); it captures "
+            f"structure common to the whole cohort. A corpus-wide 'background' "
+            f"reading is appropriate here when the content is a generic baseline."
+        )
+    return (
+        f"Topic block: FOREGROUND for the {block!r} subgroup. Fit ONLY on "
+        f"documents from the {block!r} {group_var} group, so it is specific to "
+        f"that subgroup, not corpus-wide. Frame the label around the {block!r} "
+        f"subgroup. If the content is a generic symptom/comorbidity cluster, "
+        f"that is the subgroup's characteristic burden (e.g. \"{block} symptom "
+        f"burden\") — a real pattern for that group, NOT a corpus-wide "
+        f"'background' and NOT 'dead' (it carries this subgroup's mass; check "
+        f"the usage stat). Reserve 'dead' for near-zero-mass topics and 'mixed' "
+        f"for genuinely unrelated content — judge coherence honestly."
+    )
+
+
+def _build_gating_context_block(
+    group_var: str | None, groups: list[str] | None,
+) -> str:
+    """Render the gated-structure section for the system prompt, or "".
+
+    Explains ONCE (constant across topics, so prompt-cache-safe) that this is a
+    gated/blocked STM: topics belong either to a shared background block or to
+    one group's foreground block, and each topic's message carries a
+    'Topic block:' line the model must weigh. Without this, the model has no
+    frame for the per-topic block line.
+    """
+    if not group_var or not groups:
+        return ""
+    joined = ", ".join(repr(g) for g in groups)
+    return f"""
+
+## Gated topic structure
+
+This is a GATED (blocked) topic model over a combined cohort split by \
+`{group_var}` into the groups {joined}. Topics are partitioned into blocks:
+
+- a shared **background** block, fit on the full corpus and available to \
+every group — these can be corpus-wide baselines / catch-alls; and
+- one **foreground** block per group, fit ONLY on that group's documents — \
+these describe structure specific to that subgroup.
+
+Each topic's message includes a `Topic block:` line telling you which block \
+it is in. Weigh it: a foreground topic is group-specific BY CONSTRUCTION, so \
+frame its label around its subgroup rather than as a corpus-wide 'background' \
+baseline — even a generic-looking symptom cluster is that subgroup's \
+characteristic burden and should be labeled as such (a real pattern for that \
+group), NOT demoted to 'dead'. Reserve 'background' for background-block \
+topics. This does NOT override honesty about coherence or mass: use the usage \
+stat — a genuinely incoherent foreground topic is still 'mixed', and one with \
+near-zero mass is still 'dead'; but a coherent foreground topic that carries \
+real subgroup mass is a phenotype, not dead.
+"""
 
 
 def _build_cohort_context_block(cohort: dict[str, str] | None) -> str:
@@ -134,22 +214,189 @@ learned topic is about the filter condition.
 def _build_system_prompt(
     *,
     max_words: int,
-    alpha_histogram_str: str,
     kl_histogram_str: str,
-    alpha_min: float,
-    alpha_median: float,
-    alpha_max: float,
     kl_min: float,
     kl_median: float,
     kl_max: float,
     kl_dead_threshold: float,
     kl_dead_threshold_explanation: str,
-    alpha_separates_well: bool,
+    has_alpha: bool = True,
+    alpha_histogram_str: str | None = None,
+    alpha_min: float | None = None,
+    alpha_median: float | None = None,
+    alpha_max: float | None = None,
+    alpha_separates_well: bool | None = None,
     cohort: dict[str, str] | None = None,
+    gating: dict | None = None,
+    covariate_context: dict | None = None,
 ) -> str:
     # All substitutions happen once per run so the resulting string is
     # byte-identical across topics (enabling prompt caching).
+    #
+    # The mass signal that disambiguates `background` (absorbs real corpus
+    # mass) from `dead` (no mass) among low-KL topics is model-dependent:
+    #   - Dirichlet models (LDA/HDP): the per-topic asymmetric-α prior weight.
+    #   - logistic-normal (STM): no per-topic α, so we use the posterior
+    #     corpus mass share (the `usage` stat) — a more direct mass signal.
+    # KL stays the PRIMARY classifier in both regimes; only the supporting
+    # disambiguator text below swaps. See insight 0024 (rubric blind spots).
     cohort_block = _build_cohort_context_block(cohort)
+    gating_block = _build_gating_context_block(
+        (gating or {}).get("group_var"), (gating or {}).get("groups"),
+    )
+    covariate_block = build_covariate_guidance_block(covariate_context)
+    supporting_signal_name = "α" if has_alpha else "corpus mass"
+    low_mass_phrase = "α near floor" if has_alpha else "near-zero corpus mass"
+    low_usage_real_clause = (
+        "a low-usage topic with α well above floor and high KL"
+        if has_alpha
+        else "a low-usage topic with high KL"
+    )
+    mixed_signal_clause = "α above floor" if has_alpha else "the topic carries mass"
+    if has_alpha:
+        background_ii = """\
+  (ii) **KL is at or below the dead threshold BUT α is well above \
+median (typically 3× median or higher, often the fit's α-max).** This \
+is the universal-symptom or chronic-comorbidity catch-all topic that \
+absorbs every patient's baseline coding load. Its top-N looks like \
+corpus marginal (low KL) precisely because every doc loads heavily on \
+it (high α) — that's the topic's job. Calling such a topic `dead` \
+would mis-label something carrying 10–70% of total corpus mass."""
+    else:
+        background_ii = """\
+  (ii) **KL is at or below the dead threshold BUT corpus mass is high \
+(a large share of total token mass).** This \
+is the universal-symptom or chronic-comorbidity catch-all topic that \
+absorbs every patient's baseline coding load. Its top-N looks like \
+corpus marginal (low KL) precisely because every doc loads heavily on \
+it (high corpus mass) — that's the topic's job. Calling such a topic \
+`dead` would mis-label something carrying 10–70% of total corpus mass."""
+
+    if has_alpha:
+        mass_signal_section = f"""\
+**alpha (α) — supporting signal only on this fit.** α is the per-topic \
+asymmetric-Dirichlet prior weight; in theory the optimizer pushes α \
+down for unused slots and up for used ones. In practice on this fit \
+the α distribution is heavily compressed (most topics sit in a tight \
+band near the minimum), so α alone CANNOT reliably distinguish dead \
+from used.
+
+α distribution across this fit:
+{alpha_histogram_str}
+  min = {alpha_min:.4f}, median = {alpha_median:.4f}, max = {alpha_max:.4f}
+
+**Do NOT classify a topic as `dead` based on α alone.** Many real \
+rare-condition phenotypes on this fit have α near the floor but KL in \
+the top quartile (highly distinct from corpus). KL is the trustworthy \
+signal. Use α only as a soft cross-check: α well above the median \
+combined with high KL strengthens the case for a real topic, but α \
+near floor is meaningless on its own."""
+        dead_case_a = f"""\
+  (a) KL ≤ {kl_dead_threshold:.3f} AND α near floor → the topic's word \
+      distribution is essentially the corpus marginal AND the topic \
+      carries little doc mass (unused slot whose top-N is η-smoothing \
+      noise approximating common-word baseline). This is the \
+      low-KL-low-α case. **If α is well above median (3×+ median), \
+      see `background` instead — the topic absorbs real mass and \
+      should not be called dead just because its top-N matches the \
+      corpus marginal.**"""
+        dead_case_b = """\
+  (b) KL above the threshold BUT the top-N is genuinely incoherent — \
+      rare scattered concepts with no shared theme and no clinical \
+      story (case a from the prior framing, unused slot whose top-N \
+      is η-smoothing noise of rare concepts). Rarer than (a). α near \
+      floor + low NPMI strengthens this case but is not required."""
+        step1_disambiguator = f"""\
+1. **Check KL against the dead threshold.** If KL ≤ \
+{kl_dead_threshold:.3f}, the topic's word distribution is the corpus \
+marginal — now check α to disambiguate:
+   - **α well above median (3×+ median, often the fit's α-max)** → \
+`background`. This is the universal-symptom or chronic-comorbidity \
+catch-all that absorbs real corpus mass (every doc loads on it). \
+Stop.
+   - **α at or near floor** → likely `dead` (case a — low-KL-low-α, unused \
+slot whose top-N is η-smoothing noise), BUT apply the coherence override \
+first. Stop only if it fails.
+   - **Coherence override (before finalizing `dead`):** look at the top-N, \
+*especially by lift*. If it names a recognizable clinical syndrome — a \
+coherent theme, e.g. a specific disease with its complications — prefer a \
+diffuse `phenotype` over `dead`, even at low KL and floor α. A flat, low-peak \
+topic can still be a real but *diffuse* phenotype; flatness itself depresses \
+both KL and NPMI, so do not let low KL or low NPMI alone condemn a \
+thematically coherent topic. **BUT the override does NOT apply when the \
+coherent-looking theme sits ONLY in the frequency list and the lift list is \
+scattered, clinically unrelated outliers** — that is the corpus baseline \
+showing through, not a distinct phenotype, so do not rescue it; fall back to \
+the mass signal (α well above median / high mass → `background`; floor α / \
+near-zero mass → `dead`). The override rescues genuinely diffuse *distinct* \
+phenotypes, not generic baselines wearing a coherent-looking frequency list. \
+Reserve `dead` for low-KL topics whose top-N has \
+*no* coherent clinical theme.
+The disambiguator is α-magnitude, then coherence. KL ≤ threshold + high α = \
+background; KL ≤ threshold + floor α + incoherent top-N = dead; KL ≤ \
+threshold + coherent top-N = diffuse phenotype."""
+    else:
+        mass_signal_section = """\
+**Topic mass (`usage`) — supporting signal only.** This model has no \
+per-topic Dirichlet prior (α). The posterior signal for how much a \
+topic is actually used is its **corpus mass share** — the `usage` \
+stat in each topic's message (the percent of total corpus token mass \
+the topic carries). A topic that absorbs a large share of corpus mass \
+is doing real work even if its top words look generic; a topic with \
+near-zero mass is an unused slot.
+
+**Do NOT classify a topic as `dead` based on corpus mass alone.** Many \
+real rare-condition phenotypes carry little corpus mass but have KL in \
+the top quartile (highly distinct from corpus). KL is the trustworthy \
+signal. Use corpus mass only as a soft cross-check: high mass with low \
+KL points to a background catch-all, while near-zero mass with low KL \
+points to a dead slot."""
+        dead_case_a = f"""\
+  (a) KL ≤ {kl_dead_threshold:.3f} AND near-zero corpus mass → the \
+      topic's word distribution is essentially the corpus marginal AND \
+      the topic carries little mass (unused slot whose top-N is \
+      η-smoothing noise approximating common-word baseline). This is \
+      the low-KL-low-mass case. **If corpus mass is high, see \
+      `background` instead — the topic absorbs real mass and should \
+      not be called dead just because its top-N matches the corpus \
+      marginal.**"""
+        dead_case_b = """\
+  (b) KL above the threshold BUT the top-N is genuinely incoherent — \
+      rare scattered concepts with no shared theme and no clinical \
+      story (case a from the prior framing, unused slot whose top-N \
+      is η-smoothing noise of rare concepts). Rarer than (a). \
+      near-zero corpus mass + low NPMI strengthens this case but is \
+      not required."""
+        step1_disambiguator = f"""\
+1. **Check KL against the dead threshold.** If KL ≤ \
+{kl_dead_threshold:.3f}, the topic's word distribution is the corpus \
+marginal — now check corpus mass (`usage`) to disambiguate:
+   - **High corpus mass (a large share of total token mass)** → \
+`background`. This is the universal-symptom or chronic-comorbidity \
+catch-all that absorbs real corpus mass (every doc loads on it). \
+Stop.
+   - **Near-zero corpus mass** → likely `dead` (case a — low-KL-low-mass, \
+unused slot whose top-N is η-smoothing noise), BUT apply the coherence \
+override first. Stop only if it fails.
+   - **Coherence override (before finalizing `dead`):** look at the top-N, \
+*especially by lift*. If it names a recognizable clinical syndrome — a \
+coherent theme, e.g. a specific disease with its complications — prefer a \
+diffuse `phenotype` over `dead`, even at low KL and modest mass. A flat, \
+low-peak topic can still be a real but *diffuse* phenotype; flatness itself \
+depresses both KL and NPMI, so do not let low KL or low NPMI alone condemn a \
+thematically coherent topic. **BUT the override does NOT apply when the \
+coherent-looking theme sits ONLY in the frequency list and the lift list is \
+scattered, clinically unrelated outliers** — that is the corpus baseline \
+showing through, not a distinct phenotype, so do not rescue it; fall back to \
+the mass signal (high corpus mass → `background`; near-zero mass → `dead`). \
+The override rescues genuinely diffuse *distinct* phenotypes, not generic \
+baselines wearing a coherent-looking frequency list. \
+Reserve `dead` for low-KL topics whose top-N has \
+*no* coherent clinical theme.
+The disambiguator is corpus mass share, then coherence. KL ≤ threshold + high \
+mass = background; KL ≤ threshold + near-zero mass + incoherent top-N = dead; \
+KL ≤ threshold + coherent top-N = diffuse phenotype."""
+
     return f"""\
 You are a clinical informatics expert interpreting learned topics from \
 an LDA topic model trained over patient records. Each topic is a \
@@ -161,7 +408,7 @@ The current model is trained over patient conditions only (no drugs, \
 procedures, measurements, or labs); your interpretations should reflect \
 that — describe conditions and their clinical relationships, not \
 treatments or workups.
-{cohort_block}
+{cohort_block}{gating_block}{covariate_block}
 
 ## Two rankings
 
@@ -184,6 +431,15 @@ OR dead-baseline (case b below). The distinctiveness stats disambiguate.
 - **A single concept dominates the frequency list AND tops the lift \
 list** → anchor.
 
+**The lift list is a coherence check on the frequency list.** A topic whose \
+frequency list looks like a tidy theme but whose lift list is scattered, \
+clinically UNRELATED outliers (e.g. lipoma of the neck, thrombocytosis, testicular \
+pain, hearing loss — concepts with no shared story) is NOT a distinct phenotype: \
+the apparent frequency-list theme is the corpus baseline showing through. Weigh it \
+explicitly — generic-comorbidity frequency + noise lift → `background`; no single \
+frequency theme either → `mixed`; near-zero mass on top of that → `dead`. A tidy \
+frequency list ALONE does not earn `phenotype` when the lift list contradicts it.
+
 ## Topic-level statistics
 
 **KL(β ‖ corpus) is the PRIMARY classifier.** It measures how far the \
@@ -204,25 +460,9 @@ learned-topic cluster (higher KL):
 Topics with KL above this threshold may still be `dead` (case a — \
 unused slot with random rare top-N) but only if the top-N is genuinely \
 incoherent. Topics with KL well above the threshold and a coherent \
-top-N are real, regardless of α.
+top-N are real, regardless of {supporting_signal_name}.
 
-**alpha (α) — supporting signal only on this fit.** α is the per-topic \
-asymmetric-Dirichlet prior weight; in theory the optimizer pushes α \
-down for unused slots and up for used ones. In practice on this fit \
-the α distribution is heavily compressed (most topics sit in a tight \
-band near the minimum), so α alone CANNOT reliably distinguish dead \
-from used.
-
-α distribution across this fit:
-{alpha_histogram_str}
-  min = {alpha_min:.4f}, median = {alpha_median:.4f}, max = {alpha_max:.4f}
-
-**Do NOT classify a topic as `dead` based on α alone.** Many real \
-rare-condition phenotypes on this fit have α near the floor but KL in \
-the top quartile (highly distinct from corpus). KL is the trustworthy \
-signal. Use α only as a soft cross-check: α well above the median \
-combined with high KL strengthens the case for a real topic, but α \
-near floor is meaningless on its own.
+{mass_signal_section}
 
 Two more contextual stats:
 
@@ -234,8 +474,8 @@ cleared the joint-count threshold. Low coverage = NPMI averaged over \
 few pairs and less reliable.
 - **usage** (% of corpus mass): how much of the corpus this topic \
 carries. Useful for distinguishing real catch-alls (high usage) from \
-narrow phenotypes (lower usage), but a low-usage topic with α \
-well above floor and high KL is still a real phenotype.
+narrow phenotypes (lower usage), but {low_usage_real_clause} \
+is still a real phenotype.
 
 ## Quality categories
 
@@ -245,7 +485,7 @@ Classify each topic into exactly one of:
 share a coherent clinical theme. The common case for clinically useful \
 topics; usage can range from <1% (rare condition) to several percent \
 (common condition) — usage does NOT disqualify a topic from being a \
-phenotype, and neither does α near floor on its own. KL is what \
+phenotype, and neither does {low_mass_phrase} on its own. KL is what \
 matters.
 
 - **background** — Two recognized patterns:
@@ -253,13 +493,7 @@ matters.
 max) AND top concepts are common comorbidities or generic acute \
 symptoms (e.g. HTN/HLD/T2DM/GERD/anxiety; or pain/chest pain/nausea/ \
 SoB/vomiting).
-  (ii) **KL is at or below the dead threshold BUT α is well above \
-median (typically 3× median or higher, often the fit's α-max).** This \
-is the universal-symptom or chronic-comorbidity catch-all topic that \
-absorbs every patient's baseline coding load. Its top-N looks like \
-corpus marginal (low KL) precisely because every doc loads heavily on \
-it (high α) — that's the topic's job. Calling such a topic `dead` \
-would mis-label something carrying 10–70% of total corpus mass.
+{background_ii}
 Either pattern: the topic carries real data but the pattern is the \
 corpus's chronic or acute baseline, useful for cohort *exclusion*, \
 not selection.
@@ -267,7 +501,7 @@ not selection.
 - **anchor** — one concept dominates both rankings; the topic \
 essentially names that concept.
 
-- **mixed** — α above floor BUT the two rankings together span \
+- **mixed** — {mixed_signal_clause} BUT the two rankings together span \
 **clinically unrelated** themes with no single clinical story. \
 Includes the **topic-merging** case: two distinct themes share one \
 slot due to insufficient model capacity.
@@ -293,26 +527,19 @@ unrelated halves — these are the real mixed cases):
     different cancers), "Voice and swallowing disorders" if the voice \
     and swallowing concepts come from unrelated underlying conditions
 
-Test for the distinction: if a clinician could draft a single-sentence \
-mechanism sentence that ties the two halves together ("RA patients \
-develop these complications because..."), it is `phenotype`. If the \
-two halves require unrelated mechanisms or just happen to land in the \
-same topic, it is `mixed`.
+Test for the distinction: the two halves are one `phenotype` only if a \
+RECOGNIZED clinical relationship joins them — a named syndrome, a known \
+complication of the other, or a shared pathophysiology a clinician would state \
+without hedging ("RA patients develop these complications because..."). A \
+plausible-sounding but post-hoc rationalization ("both are common in sick or \
+elderly patients", "both involve inflammation") does NOT qualify — if you have \
+to reach for the mechanism, it is `mixed`. Two individually-coherent but \
+clinically SEPARATE themes sharing one slot is topic-merging `mixed`, not a \
+phenotype.
 
 - **dead** — either:
-  (a) KL ≤ {kl_dead_threshold:.3f} AND α near floor → the topic's word \
-      distribution is essentially the corpus marginal AND the topic \
-      carries little doc mass (unused slot whose top-N is η-smoothing \
-      noise approximating common-word baseline). This is the \
-      low-KL-low-α case. **If α is well above median (3×+ median), \
-      see `background` instead — the topic absorbs real mass and \
-      should not be called dead just because its top-N matches the \
-      corpus marginal.**
-  (b) KL above the threshold BUT the top-N is genuinely incoherent — \
-      rare scattered concepts with no shared theme and no clinical \
-      story (case a from the prior framing, unused slot whose top-N \
-      is η-smoothing noise of rare concepts). Rarer than (a). α near \
-      floor + low NPMI strengthens this case but is not required.
+{dead_case_a}
+{dead_case_b}
 Either way: no useful clinical interpretation AND no significant mass.
 
 ## Decision order
@@ -320,18 +547,7 @@ Either way: no useful clinical interpretation AND no significant mass.
 To avoid rationalizing a label first and then picking a quality, \
 classify in this order:
 
-1. **Check KL against the dead threshold.** If KL ≤ \
-{kl_dead_threshold:.3f}, the topic's word distribution is the corpus \
-marginal — now check α to disambiguate:
-   - **α well above median (3×+ median, often the fit's α-max)** → \
-`background`. This is the universal-symptom or chronic-comorbidity \
-catch-all that absorbs real corpus mass (every doc loads on it). \
-Stop.
-   - **α at or near floor** → `dead` (case a — low-KL-low-α, unused \
-slot whose top-N is η-smoothing noise). Stop.
-The disambiguator is purely α-magnitude. KL ≤ threshold + high α = \
-real mass-bearing baseline (background); KL ≤ threshold + floor α = \
-no mass and no signal (dead).
+{step1_disambiguator}
 2. Check whether one concept dominates both rankings → `anchor`.
 3. **Check for background BEFORE checking for mixed.** If top \
 concepts are HTN/HLD/T2DM/GERD/anxiety/obesity for chronic catch-all, \
@@ -352,7 +568,11 @@ no plausible clinical mechanism connects them, this is `dead` \
 (case a — unused slot with η-smoothing noise in the top-N). Be \
 careful: a coherent narrow phenotype is NOT dead; case (a) is for \
 truly random-looking top-N.
-6. Otherwise it is `phenotype`. Single-theme conjunctions are fine.
+6. Otherwise it is `phenotype` — but FIRST confirm the lift list corroborates \
+the theme. If the lift list is scattered, clinically unrelated outliers (the \
+lift-list coherence check above), do not default to `phenotype`: prefer \
+`background` (generic/high-mass baseline) or `mixed` (no single theme). \
+Single-theme conjunctions with a corroborating lift list are fine.
 
 ## Output fields
 
@@ -362,7 +582,12 @@ Decide this FIRST using the rule above.
 - **label**: a concise clinician-voice label, at most {max_words} words. \
 Examples: "Type 2 diabetes care", "Chronic comorbidity catch-all". \
 For mixed/dead, use something honest: "Mixed clinical themes", \
-"Unused / low-signal topic".
+"Unused / low-signal topic". \
+Do NOT prefix the label with the cohort or group name: write \
+"Hepatobiliary-pancreatic cancer", not "Cancer: hepatobiliary-pancreatic" \
+or "Cancer cohort: ...". The cohort is shown separately in the dashboard, so \
+repeating it in every label is redundant. (Naming the specific disease is \
+fine — "Breast cancer" is good; it's the generic cohort prefix to drop.)
 
 - **description**: 2-3 sentences, clinician voice, plain clinical \
 English. No model terminology, no references to topics, codes, or \
@@ -535,6 +760,8 @@ def _build_agent(
     kl_dead_threshold_explanation: str,
     alpha_separates_well: bool,
     cohort: dict[str, str] | None = None,
+    gating: dict | None = None,
+    covariate_context: dict | None = None,
 ):
     """Build a pydantic-ai Agent for the given model string with the API
     key passed in explicitly (not via env), structured output, and the
@@ -574,32 +801,43 @@ def _build_agent(
             f"Supported: google-gla, openai, anthropic."
         )
 
-    sorted_a = sorted(alpha_arr)
+    # alpha_arr is None for models with no per-topic Dirichlet prior (STM);
+    # the system prompt then uses corpus mass (`usage`) as the supporting
+    # background/dead disambiguator instead of α-magnitude.
+    has_alpha = alpha_arr is not None
     sorted_k = sorted(kl_arr)
-    K = len(alpha_arr)
-    a_min, a_max = sorted_a[0], sorted_a[-1]
+    K = len(kl_arr)
     k_min, k_max = sorted_k[0], sorted_k[-1]
-    a_med = sorted_a[K // 2]
     k_med = sorted_k[K // 2]
-    alpha_hist = _format_histogram(
-        _histogram(alpha_arr, n_bins=10), fmt=".4f",
-    )
     kl_hist = _format_histogram(
         _histogram(kl_arr, n_bins=12), fmt=".2f",
     )
+    sp_kwargs = dict(
+        max_words=max_words,
+        kl_histogram_str=kl_hist,
+        kl_min=k_min, kl_median=k_med, kl_max=k_max,
+        kl_dead_threshold=kl_dead_threshold,
+        kl_dead_threshold_explanation=kl_dead_threshold_explanation,
+        has_alpha=has_alpha,
+        cohort=cohort,
+        gating=gating,
+        covariate_context=covariate_context,
+    )
+    if has_alpha:
+        sorted_a = sorted(alpha_arr)
+        a_min, a_max = sorted_a[0], sorted_a[-1]
+        a_med = sorted_a[K // 2]
+        alpha_hist = _format_histogram(
+            _histogram(alpha_arr, n_bins=10), fmt=".4f",
+        )
+        sp_kwargs.update(
+            alpha_histogram_str=alpha_hist,
+            alpha_min=a_min, alpha_median=a_med, alpha_max=a_max,
+            alpha_separates_well=alpha_separates_well,
+        )
     return Agent(
         model,
-        system_prompt=_build_system_prompt(
-            max_words=max_words,
-            alpha_histogram_str=alpha_hist,
-            kl_histogram_str=kl_hist,
-            alpha_min=a_min, alpha_median=a_med, alpha_max=a_max,
-            kl_min=k_min, kl_median=k_med, kl_max=k_max,
-            kl_dead_threshold=kl_dead_threshold,
-            kl_dead_threshold_explanation=kl_dead_threshold_explanation,
-            alpha_separates_well=alpha_separates_well,
-            cohort=cohort,
-        ),
+        system_prompt=_build_system_prompt(**sp_kwargs),
         output_type=PhenotypeLabel,
     )
 
@@ -865,27 +1103,213 @@ def _format_code_list(codes: list[dict]) -> list[str]:
     return lines
 
 
+def _percentile(sorted_xs: list[float], q: float) -> float:
+    """Linear-interpolated percentile of a pre-sorted list (q in [0, 100])."""
+    n = len(sorted_xs)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return sorted_xs[0]
+    pos = (n - 1) * (q / 100.0)
+    lo = math.floor(pos)
+    hi = math.ceil(pos)
+    if lo == hi:
+        return sorted_xs[int(lo)]
+    frac = pos - lo
+    return sorted_xs[int(lo)] * (1.0 - frac) + sorted_xs[int(hi)] * frac
+
+
+def _percentile_rank(sorted_xs: list[float], x: float) -> float:
+    """Percentile rank of x within sorted_xs (midpoint method, in [0, 100]).
+
+    (#strictly-less + 0.5·#equal) / n · 100 — so the median maps near 50 and
+    the extremes near 0/100, giving the LLM a distribution-relative position
+    (a large raw effect near the median reads as typical, not notable).
+    """
+    n = len(sorted_xs)
+    if n == 0:
+        return 50.0
+    less = sum(1 for v in sorted_xs if v < x)
+    equal = sum(1 for v in sorted_xs if v == x)
+    return 100.0 * (less + 0.5 * equal) / n
+
+
+def _covariate_display(column: str, schema: dict) -> tuple[str, str]:
+    """(kind, human-readable display) for a design-matrix column name.
+
+    Parses formulaic's categorical-contrast naming `C(var)[T.level]` into a
+    'level vs. reference' phrase (reference level pulled from the schema's
+    controls), and treats a bare continuous control name as 'continuous'.
+    Falls back to the raw column name for anything unrecognized.
+    """
+    controls = {c.get("name"): c for c in (schema.get("controls") or [])}
+    m = re.match(r"^C\((?P<var>[^)]+)\)\[T\.(?P<level>.+)\]$", column)
+    if m:
+        var, level = m.group("var"), m.group("level")
+        ref = (controls.get(var) or {}).get("reference")
+        ref_str = f" vs. reference {ref!r}" if ref is not None else ""
+        return "categorical", f"{var}: {level!r}{ref_str}"
+    ctl = controls.get(column)
+    if ctl is not None and ctl.get("type") == "continuous":
+        return "continuous", f"{column} (per-unit increase)"
+    # Unknown shape — keep the raw name; guess kind from a bracketed contrast.
+    return ("categorical" if "[" in column else "continuous"), column
+
+
+def build_covariate_context(
+    covariate_effects: list[dict] | None,
+    covariate_schema: dict | None,
+    *,
+    reference_topic: int,
+) -> dict | None:
+    """Structured prevalence-covariate context for the annotator, or None.
+
+    covariate_effects: rows {"covariate": name, "per_topic": [Gamma]*K} as
+        exported to covariate_effects.json. The `Intercept` row (baseline
+        prevalence, not a covariate *relationship*) is dropped.
+    covariate_schema: covariate_schema.json (controls carry the reference
+        level for categorical contrasts and the continuous/categorical kind).
+    reference_topic: the topic whose Gamma is pinned to 0 by the STM K−1
+        parameterization — excluded from each covariate's across-topic
+        distribution and never annotated (its 0 effects are an artifact).
+
+    For each remaining covariate, computes the across-topic effect
+    distribution (over non-reference topics) plus each topic's effect and its
+    percentile rank within that distribution — so the LLM can judge notability
+    relative to the spread rather than an absolute magnitude. Returns None when
+    no covariate rows remain (e.g. an Intercept-only, pre-sex-fix bundle).
+    """
+    if not covariate_effects:
+        return None
+    schema = covariate_schema or {}
+    covs: list[dict] = []
+    for entry in covariate_effects:
+        col = entry.get("covariate")
+        if col is None or col == "Intercept":
+            continue
+        per_topic = [float(x) for x in entry.get("per_topic", [])]
+        K = len(per_topic)
+        nonref = [per_topic[k] for k in range(K) if k != reference_topic]
+        if not nonref:
+            continue
+        srt = sorted(nonref)
+        dist = {
+            "min": srt[0], "max": srt[-1], "mean": sum(srt) / len(srt),
+            "median": _percentile(srt, 50),
+            "p10": _percentile(srt, 10), "p25": _percentile(srt, 25),
+            "p75": _percentile(srt, 75), "p90": _percentile(srt, 90),
+        }
+        pct = [
+            (None if k == reference_topic else _percentile_rank(srt, per_topic[k]))
+            for k in range(K)
+        ]
+        kind, display = _covariate_display(col, schema)
+        covs.append({
+            "column": col, "display": display, "kind": kind,
+            "distribution": dist, "effects": per_topic, "percentiles": pct,
+        })
+    if not covs:
+        return None
+    return {"reference_topic": reference_topic, "covariates": covs}
+
+
+def covariate_lines_for_topic(
+    context: dict | None, topic_id: int,
+) -> list[str]:
+    """Per-topic prevalence-covariate lines for the user message, or []."""
+    if not context or topic_id == context.get("reference_topic"):
+        return []
+    lines = [
+        "Prevalence covariate effects "
+        "(Gamma, logit scale, relative to the reference topic):"
+    ]
+    for cov in context["covariates"]:
+        eff = cov["effects"][topic_id]
+        pct = cov["percentiles"][topic_id]
+        d = cov["distribution"]
+        pct_str = f"percentile {pct:.0f}" if pct is not None else "n/a"
+        lines.append(
+            f"  {cov['display']}: {eff:+.3f}   "
+            f"({pct_str} of this effect across topics; distribution "
+            f"median {d['median']:+.3f}, p10/p90 {d['p10']:+.3f}/{d['p90']:+.3f}, "
+            f"range [{d['min']:+.3f}, {d['max']:+.3f}])"
+        )
+    return lines
+
+
+def build_covariate_guidance_block(context: dict | None) -> str:
+    """Constant system-prompt guidance on reading the covariate effects, or "".
+
+    Byte-identical across topics (prompt-cache-safe). Explains the logit scale,
+    reference-relativity, distribution-relative notability, and the hard rule
+    against fabricated ratios.
+    """
+    if not context:
+        return ""
+    names = ", ".join(c["display"] for c in context["covariates"])
+    return (
+        "\n\n## Prevalence covariate effects\n"
+        f"Each topic's message may include prevalence covariate effects ({names}). "
+        "These are STM prevalence (Gamma) coefficients on the LOGIT (log-odds) "
+        "scale for the topic's expected proportion, expressed RELATIVE TO THE "
+        "REFERENCE TOPIC (whose effects are pinned to 0 by construction — that "
+        "is an artifact, never a finding). Use them ONLY as follows:\n"
+        "- The SIGN gives direction: e.g. a positive sex 'M vs. reference F' "
+        "effect means the phenotype is relatively more prevalent in males; a "
+        "positive age effect means it rises with age.\n"
+        "- MAGNITUDE is meaningful ONLY relative to the distribution shown. A "
+        "topic is notable on a covariate when its effect sits in a TAIL of that "
+        "covariate's across-topic distribution (a high or low percentile); a "
+        "large-looking number near the median is TYPICAL, not notable.\n"
+        "- NEVER state a numeric probability, ratio, or 'X% more likely' — the "
+        "logit scale does not support it. Use qualitative language "
+        "('more common in males', 'skews older').\n"
+        "- For a FOREGROUND (subgroup) topic the effect is estimated within that "
+        "subgroup's documents; frame it within the subgroup.\n"
+        "- Fold a covariate relationship into the DESCRIPTION only when it is "
+        "genuinely notable (a tail percentile); otherwise omit it. Keep it to a "
+        "brief clause and never invent a mechanism."
+    )
+
+
 def _build_user_message(
     *,
     phenotype_id: int,
     top_by_freq: list[dict],
     top_by_lift: list[dict],
-    alpha: float,
+    alpha: float | None,
     kl: float,
     npmi: float,
     pair_coverage: float,
     usage_frac: float,
     max_words: int,
+    block: str | None = None,
+    groups: list[str] | None = None,
+    group_var: str | None = None,
+    covariate_context: dict | None = None,
 ) -> str:
     # Stats are listed in decision order (alpha and KL first — the
     # primary classifiers — then the supporting contextual stats).
+    # alpha is None for models with no per-topic Dirichlet prior (STM);
+    # the line is omitted and the system prompt directs the model to the
+    # corpus-mass `usage` stat instead.
     lines = [
         f"Topic id: {phenotype_id}",
         f"Label budget: at most {max_words} words.",
+    ]
+    block_line = _topic_block_line(block=block, groups=groups, group_var=group_var)
+    if block_line:
+        lines += ["", block_line]
+    lines += [
         "",
         "Distinctiveness statistics (primary classifiers):",
-        f"  alpha:           {alpha:.4f}    "
-        f"(check against the fit's min/floor in the system prompt)",
+    ]
+    if alpha is not None:
+        lines.append(
+            f"  alpha:           {alpha:.4f}    "
+            f"(check against the fit's min/floor in the system prompt)"
+        )
+    lines += [
         f"  KL(beta||corpus): {kl:.3f}    "
         f"(check against the fit's min/median/max in the system prompt)",
         "",
@@ -893,6 +1317,11 @@ def _build_user_message(
         f"  NPMI:            {npmi:.3f}",
         f"  pair_coverage:   {pair_coverage:.0%} of top-N pairs scored",
         f"  usage:           {usage_frac * 100:.2f}% of total corpus mass",
+    ]
+    cov_lines = covariate_lines_for_topic(covariate_context, phenotype_id)
+    if cov_lines:
+        lines += ["", *cov_lines]
+    lines += [
         "",
         "Top conditions by within-topic frequency "
         "(description · weight · lift):",
@@ -913,12 +1342,16 @@ def _label_one(
     phenotype_id: int,
     top_by_freq: list[dict],
     top_by_lift: list[dict],
-    alpha: float,
+    alpha: float | None,
     kl: float,
     npmi: float,
     pair_coverage: float,
     usage_frac: float,
     max_words: int,
+    block: str | None = None,
+    groups: list[str] | None = None,
+    group_var: str | None = None,
+    covariate_context: dict | None = None,
 ) -> tuple[PhenotypeLabel, dict]:
     """One labeling call. Returns (output, usage_dict)."""
     user_text = _build_user_message(
@@ -927,6 +1360,8 @@ def _label_one(
         alpha=alpha, kl=kl,
         npmi=npmi, pair_coverage=pair_coverage, usage_frac=usage_frac,
         max_words=max_words,
+        block=block, groups=groups, group_var=group_var,
+        covariate_context=covariate_context,
     )
     result = agent.run_sync(user_text)
     out: PhenotypeLabel = result.output
@@ -1003,6 +1438,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Only label the first N phenotypes (for cost-bound dry runs).",
     )
     parser.add_argument(
+        "--topic-ids", type=str, default=None,
+        help="Comma-separated phenotype ids to label (e.g. '36,41,44'), for "
+             "spot-checking specific topics across blocks/kinds. Overrides "
+             "--limit. Ids index phenotypes.json (== original topic id when "
+             "the bundle preserves order). Out-of-range ids are an error.",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Print what would be sent but don't call the API.",
     )
@@ -1033,8 +1475,43 @@ def main(argv: list[str] | None = None) -> int:
         stats_b = json.loads(stats_p.read_text())
         cohort_meta = stats_b.get("cohort") or None
 
+    # gating.json (optional): a gated/blocked STM tags each topic with its
+    # block (background vs a group's foreground). Passing each topic's block
+    # to the model stops foreground symptom-clusters being mislabeled as
+    # corpus-wide background. Absent for non-gated bundles.
+    gating_p = bundle_dir / "gating.json"
+    topic_blocks: list[str] | None = None
+    gating_groups: list[str] | None = None
+    gating_group_var: str | None = None
+    if gating_p.is_file():
+        gating_b = json.loads(gating_p.read_text())
+        topic_blocks = gating_b.get("topic_blocks") or None
+        gating_groups = gating_b.get("groups") or None
+        gating_group_var = gating_b.get("group_var") or None
+
     beta = model_b["beta"]
     alpha_arr = model_b.get("alpha")
+    # STM (logistic-normal) has NO per-topic Dirichlet prior. Its exported
+    # `alpha` is softmax(Gamma[intercept]) — a baseline (reference-covariate)
+    # topic-proportion alpha-EQUIVALENT, not a Dirichlet weight — so routing it
+    # through the Dirichlet-alpha rubric feeds the model false premises ("the
+    # optimizer pushes alpha down", "asymmetric-Dirichlet prior weight"). Detect
+    # STM via an explicit model_class, or the STM-only `sigma` array as a
+    # fallback for bundles that predate model_class, and drop alpha so the
+    # no-alpha branch fires (corpus-mass `usage` disambiguator, correct
+    # logistic-normal language). See insight 0024 (STM rubric adaptation).
+    _model_class = str(model_b.get("model_class", "")).lower()
+    is_stm = _model_class in ("stm", "onlinestm") or (
+        not _model_class and "sigma" in model_b
+    )
+    if is_stm and alpha_arr is not None:
+        print(
+            "[label] STM bundle: dropping the exported alpha-equivalent "
+            "(softmax(Gamma intercept)) — using corpus mass (usage) as the "
+            "background/dead disambiguator per the logistic-normal rubric",
+            flush=True,
+        )
+        alpha_arr = None
     vocab_codes = vocab_b["codes"]
     phenotypes = phens_b["phenotypes"]
 
@@ -1049,15 +1526,72 @@ def main(argv: list[str] | None = None) -> int:
             f"beta rows are not all width {V_disp} (the displayed vocab "
             f"size); is this a pre-trim bundle?",
         )
-    if not alpha_arr or len(alpha_arr) != K:
+    if topic_blocks is not None:
+        if len(topic_blocks) != K:
+            raise SystemExit(
+                f"gating.json 'topic_blocks' has length {len(topic_blocks)}, "
+                f"expected {K} (one per topic); mismatched bundle?",
+            )
+        import collections as _collections
+        _bc = _collections.Counter(topic_blocks)
+        print(
+            f"[label] gated bundle: {gating_group_var} groups={gating_groups}; "
+            f"topic blocks {dict(_bc)}",
+            flush=True,
+        )
+    # alpha is OPTIONAL: only Dirichlet-family models (LDA/HDP) have a
+    # per-topic prior weight. STM (logistic-normal) has none, in which case
+    # the rubric uses corpus mass (`usage`) as the background/dead
+    # disambiguator. A present-but-wrong-length alpha is a malformed bundle.
+    has_alpha = alpha_arr is not None
+    if has_alpha and len(alpha_arr) != K:
         raise SystemExit(
-            f"model.json missing 'alpha' array of length {K}; the labeling "
-            f"rubric needs the per-topic Dirichlet prior weights to detect "
-            f"floor-α (dead) topics.",
+            f"model.json 'alpha' array has length {len(alpha_arr)}, expected "
+            f"{K} (one per topic); is this a stale or mismatched bundle?",
         )
 
+    # covariate_effects.json + covariate_schema.json (optional): STM prevalence
+    # (Gamma) effects per topic per covariate. When present, each topic's
+    # message carries its sex/age effect alongside that covariate's across-topic
+    # distribution, so the model can add honest, distribution-relative prevalence
+    # insights ("more common in males"). Absent for non-STM / pre-covariate
+    # (or Intercept-only, pre-sex-fix) bundles — then covariate_context is None.
+    covariate_context = None
+    cov_eff_p = bundle_dir / "covariate_effects.json"
+    cov_schema_p = bundle_dir / "covariate_schema.json"
+    corr_p = bundle_dir / "correlation.json"
+    if cov_eff_p.is_file():
+        cov_effects = json.loads(cov_eff_p.read_text())
+        # Reject a length-mismatched Gamma rather than silently mis-indexing.
+        bad = [e.get("covariate") for e in cov_effects
+               if len(e.get("per_topic", [])) != K]
+        if bad:
+            print(f"[label] WARNING: covariate_effects rows {bad} are not length "
+                  f"{K}; skipping covariate insights (stale/mismatched bundle?)",
+                  flush=True)
+        else:
+            cov_schema = (json.loads(cov_schema_p.read_text())
+                          if cov_schema_p.is_file() else {})
+            # Reference topic (Gamma pinned to 0): authoritative from
+            # correlation.json; else default 0.
+            ref_topic = 0
+            if corr_p.is_file():
+                try:
+                    ref_topic = int(json.loads(corr_p.read_text())
+                                    .get("reference_topic", 0) or 0)
+                except (ValueError, TypeError):
+                    ref_topic = 0
+            covariate_context = build_covariate_context(
+                cov_effects, cov_schema, reference_topic=ref_topic,
+            )
+    if covariate_context is not None:
+        _cov_names = ", ".join(c["display"] for c in covariate_context["covariates"])
+        print(f"[label] covariate insights: {_cov_names} "
+              f"(reference topic {covariate_context['reference_topic']})",
+              flush=True)
+
     # Per-topic distinctiveness signals.
-    #   alpha[k] reflects the asymmetric-α optimizer's verdict on topic k.
+    #   alpha[k] (when present) reflects the asymmetric-α optimizer's verdict.
     #   KL(β[k]||p(w)) reflects how far the topic departs from the corpus
     #     marginal — low KL = baseline pseudo-coherent (dead case b).
     corpus_freq_disp = [c.get("corpus_freq", 0.0) for c in vocab_codes]
@@ -1065,8 +1599,6 @@ def main(argv: list[str] | None = None) -> int:
         _kl_div_topic_vs_corpus(beta[k], corpus_freq_disp)
         for k in range(K)
     ]
-    alpha_arr = [float(a) for a in alpha_arr]
-    alpha_sorted = sorted(alpha_arr)
     kl_sorted = sorted(kl_arr)
 
     def _median(xs: list[float]) -> float:
@@ -1078,25 +1610,39 @@ def main(argv: list[str] | None = None) -> int:
             return xs[mid]
         return 0.5 * (xs[mid - 1] + xs[mid])
 
-    a_min, a_med, a_max = alpha_sorted[0], _median(alpha_sorted), alpha_sorted[-1]
     k_min, k_med, k_max = kl_sorted[0], _median(kl_sorted), kl_sorted[-1]
 
-    # KL is the primary classifier on this fit (α's range is typically
-    # too compressed for α-near-floor to be a reliable dead signal).
-    # Compute the data-driven KL dead threshold from the natural valley
-    # in the lower half of the KL distribution.
+    # KL is the primary classifier (α's range is typically too compressed
+    # for α-near-floor to be a reliable dead signal, and STM has no α at
+    # all). Compute the data-driven KL dead threshold from the natural
+    # valley in the lower half of the KL distribution.
     kl_dead_threshold, kl_threshold_explanation = _kl_recommended_threshold(kl_arr)
     n_kl_below = sum(1 for v in kl_arr if v <= kl_dead_threshold)
-    # α "separates well" when the elevated cluster is clearly above
-    # the floor cluster — a heuristic, currently not used to gate
-    # behavior (the prompt always demotes α to supporting), but logged.
-    alpha_separates_well = (a_max / max(a_min, 1e-9)) >= 2.5
 
-    print(
-        f"[label] alpha[K={K}] min={a_min:.4f} median={a_med:.4f} "
-        f"max={a_max:.4f} (separates_well={alpha_separates_well})",
-        flush=True,
-    )
+    if has_alpha:
+        alpha_arr = [float(a) for a in alpha_arr]
+        alpha_sorted = sorted(alpha_arr)
+        a_min, a_med, a_max = (
+            alpha_sorted[0], _median(alpha_sorted), alpha_sorted[-1],
+        )
+        # α "separates well" when the elevated cluster is clearly above
+        # the floor cluster — a heuristic, currently not used to gate
+        # behavior (the prompt always demotes α to supporting), but logged.
+        alpha_separates_well = (a_max / max(a_min, 1e-9)) >= 2.5
+        print(
+            f"[label] alpha[K={K}] min={a_min:.4f} median={a_med:.4f} "
+            f"max={a_max:.4f} (separates_well={alpha_separates_well})",
+            flush=True,
+        )
+    else:
+        alpha_arr = None
+        alpha_separates_well = False
+        print(
+            "[label] no per-topic alpha in bundle (STM / non-Dirichlet) — "
+            "using corpus mass (usage) as the background/dead disambiguator",
+            flush=True,
+        )
+
     print(
         f"[label] KL(beta||corpus)[K={K}] min={k_min:.3f} median={k_med:.3f} "
         f"max={k_max:.3f}",
@@ -1108,17 +1654,39 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
+    # --topic-ids: explicit set of phenotype ids to label (overrides --limit).
+    requested_ids: list[int] | None = None
+    if args.topic_ids:
+        try:
+            requested_ids = [
+                int(x) for x in args.topic_ids.split(",") if x.strip() != ""
+            ]
+        except ValueError:
+            raise SystemExit(
+                f"--topic-ids must be comma-separated integers, got "
+                f"{args.topic_ids!r}"
+            )
+        for tid in requested_ids:
+            if not (0 <= tid < K):
+                raise SystemExit(
+                    f"--topic-ids: topic {tid} is out of range [0, {K})"
+                )
+
     todo: list[int] = []
-    for i, p in enumerate(phenotypes):
-        existing = (p.get("label") or "").strip()
+    candidate = requested_ids if requested_ids is not None else range(K)
+    for i in candidate:
+        existing = (phenotypes[i].get("label") or "").strip()
         if existing and not args.force:
             continue
         todo.append(i)
-        if args.limit is not None and len(todo) >= args.limit:
+        # --limit only bounds the default (all-topics) sweep; an explicit
+        # --topic-ids list is taken in full.
+        if requested_ids is None and args.limit is not None and len(todo) >= args.limit:
             break
 
     print(f"[label] {len(todo)}/{K} phenotypes to label "
-          f"(--force={args.force}, --limit={args.limit})", flush=True)
+          f"(--force={args.force}, --limit={args.limit}, "
+          f"--topic-ids={args.topic_ids})", flush=True)
     if not todo:
         print("[label] nothing to do", flush=True)
         return 0
@@ -1161,9 +1729,12 @@ def main(argv: list[str] | None = None) -> int:
             print(_build_user_message(
                 phenotype_id=i,
                 top_by_freq=top_freq, top_by_lift=top_lift,
-                alpha=alpha_arr[i], kl=kl_arr[i],
+                alpha=(alpha_arr[i] if has_alpha else None), kl=kl_arr[i],
                 npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
                 max_words=args.max_words,
+                block=(topic_blocks[i] if topic_blocks else None),
+                groups=gating_groups, group_var=gating_group_var,
+                covariate_context=covariate_context,
             ), flush=True)
         if len(todo) > 3:
             print(f"\n... and {len(todo) - 3} more "
@@ -1187,6 +1758,11 @@ def main(argv: list[str] | None = None) -> int:
         kl_dead_threshold_explanation=kl_threshold_explanation,
         alpha_separates_well=alpha_separates_well,
         cohort=cohort_meta,
+        gating=(
+            {"group_var": gating_group_var, "groups": gating_groups}
+            if topic_blocks is not None else None
+        ),
+        covariate_context=covariate_context,
     )
     print(f"[label] using model {model_str}", flush=True)
     if cohort_meta:
@@ -1205,9 +1781,12 @@ def main(argv: list[str] | None = None) -> int:
                 agent=agent,
                 phenotype_id=i,
                 top_by_freq=top_freq, top_by_lift=top_lift,
-                alpha=alpha_arr[i], kl=kl_arr[i],
+                alpha=(alpha_arr[i] if has_alpha else None), kl=kl_arr[i],
                 npmi=npmi, pair_coverage=pcov, usage_frac=usage_frac,
                 max_words=args.max_words,
+                block=(topic_blocks[i] if topic_blocks else None),
+                groups=gating_groups, group_var=gating_group_var,
+                covariate_context=covariate_context,
             )
         except Exception as e:
             print(f"[label] phenotype {i}: error: {e}", flush=True)

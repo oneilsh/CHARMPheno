@@ -11,6 +11,77 @@ import pytest
 from charmpheno.omop.bigquery import load_omop_bigquery
 
 
+def test_decode_sex_maps_standard_concepts_and_does_not_conflate_unknown(spark):
+    """gender_concept_id -> sex must map 8507->M, 8532->F, and everything else
+    (Unknown 8551, Other 8521, No-matching 0, null) to 'Unknown' — NOT silently
+    to 'F'. Conflating unknowns with Female makes the sex covariate a constant
+    when gender data is absent (the exp-0027 symptom: sex collapsed to F)."""
+    from pyspark.sql import functions as F
+    from charmpheno.omop.bigquery import decode_sex
+
+    rows = [(8507,), (8532,), (8551,), (8521,), (0,), (None,)]
+    df = spark.createDataFrame(rows, ["gender_concept_id"])
+    got = {
+        r["gender_concept_id"]: r["sex"]
+        for r in df.withColumn("sex", decode_sex(F.col("gender_concept_id"))).collect()
+    }
+    assert got[8507] == "M"
+    assert got[8532] == "F"
+    assert got[8551] == "Unknown"   # OMOP Unknown, not Female
+    assert got[8521] == "Unknown"   # OMOP Other, not Female
+    assert got[0] == "Unknown"      # No matching concept
+    assert got[None] == "Unknown"   # null gender, not Female
+
+
+def test_decode_sex_from_name_is_vocabulary_agnostic(spark):
+    """Decoding sex from the gender *concept name* must cover standard OMOP
+    ('MALE'/'FEMALE') and dataset-specific vocabularies alike (AoU uses
+    45878463 'Female' / 45880669 'Male'), and must NOT be fooled by AoU's
+    aggregated PPI concept 2000000002 whose name contains 'man'/'woman' as
+    substrings ('not man only, not woman only ...') — that maps to 'Unknown'.
+    Exact-token matching, whitespace/case tolerant."""
+    from pyspark.sql import functions as F
+    from charmpheno.omop.bigquery import decode_sex_from_name
+
+    rows = [
+        ("FEMALE",), ("MALE",),          # standard OMOP 8532 / 8507 names
+        ("Female",), ("Male",),          # AoU 45878463 / 45880669 names
+        ("Woman",), ("Man",),            # PPI-style gender identity
+        ("Not man only, not woman only, prefer not to answer",),  # AoU 2000000002
+        ("No matching concept",),        # concept_id 0
+        (None,),                         # null / no concept row
+        (" female ",),                   # whitespace + case tolerance
+    ]
+    df = spark.createDataFrame(rows, ["gender_concept_name"])
+    got = {
+        (r["gender_concept_name"] or "<null>"): r["sex"]
+        for r in df.withColumn(
+            "sex", decode_sex_from_name(F.col("gender_concept_name"))
+        ).collect()
+    }
+    assert got["FEMALE"] == "F"
+    assert got["MALE"] == "M"
+    assert got["Female"] == "F"
+    assert got["Male"] == "M"
+    assert got["Woman"] == "F"
+    assert got["Man"] == "M"
+    assert got["Not man only, not woman only, prefer not to answer"] == "Unknown"
+    assert got["No matching concept"] == "Unknown"
+    assert got["<null>"] == "Unknown"
+    assert got[" female "] == "F"
+
+
+def test_filter_known_sex_keeps_only_binary_sex(spark):
+    """filter_known_sex drops rows whose decoded sex is not M/F (Unknown,
+    Other, null), leaving only the binary-sex analysis population."""
+    from charmpheno.omop.bigquery import filter_known_sex
+
+    rows = [(1, "M"), (2, "F"), (3, "Unknown"), (4, "M"), (5, None), (6, "F")]
+    df = spark.createDataFrame(rows, ["person_id", "sex"])
+    kept = {r["person_id"] for r in filter_known_sex(df).collect()}
+    assert kept == {1, 2, 4, 6}
+
+
 def test_rejects_malformed_cdr_dataset(spark):
     with pytest.raises(ValueError, match="<project>.<dataset>"):
         load_omop_bigquery(

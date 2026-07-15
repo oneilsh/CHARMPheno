@@ -1,0 +1,20 @@
+# Third-party Python runtime deps the AoU Dataproc image does NOT ship but the
+# cloud jobs import at runtime, on the driver AND on every executor.
+#
+# The Makefile `cluster-overlay` target resolves this file's full dependency
+# closure with pip, PRUNES the compiled libs the image already provides
+# (numpy/pandas/scipy/pyarrow), and zips the remaining pure-Python leaves into
+# dist/formulaic_overlay.zip. That zip rides on `spark-submit --py-files`
+# alongside the source zips and runs on the image's own Python. Wiring lives in
+# build_spark_submit_cmd (scripts/run_experiment.py); rationale in CLUSTER_DEPS.md.
+#
+# Keep this MINIMAL: declare only what the image lacks (top-level packages; pip
+# resolves the closure, the prune step drops the image-provided compiled libs).
+#
+# Migration note: when spark-vi (and charmpheno) become standalone pip packages,
+# add them here and drop their spark_vi.zip / charmpheno.zip --py-files overlay —
+# this file becomes the single source of truth for the cluster Python env.
+
+# STM covariate/formula path (spark_vi.mllib.topic._formula). Optional extra of
+# spark-vi (spark-vi[formula]); LDA/HDP do not need it.
+formulaic>=1.0

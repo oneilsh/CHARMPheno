@@ -1,8 +1,14 @@
-.PHONY: help zip smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
 CHARMPHENO_ZIP  := $(REPO_ROOT)/charmpheno/dist/charmpheno.zip
+# Dependency-overlay zip: pure-Python deps the AoU Dataproc image lacks (see
+# cluster-requirements.txt), shipped on --py-files alongside the source zips
+# and run on the image's own Python (which provides numpy/pandas/scipy/pyarrow).
+CLUSTER_REQS        := $(REPO_ROOT)/analysis/cloud/cluster-requirements.txt
+CLUSTER_OVERLAY     := $(REPO_ROOT)/analysis/cloud/dist/formulaic_overlay.zip
+CLUSTER_OVERLAY_DIR := $(REPO_ROOT)/analysis/cloud/dist/overlay-build
 SCRIPT          := smoke_lda_cloud.py
 BQ_SCRIPT       := bq_smoke_cloud.py
 LDA_BQ_SCRIPT   := lda_bigquery_cloud.py
@@ -62,10 +68,13 @@ default: help
 help:
 	@echo "Cluster smoke targets (run from this dir on the Dataproc master):"
 	@echo ""
-	@echo "  make setup           - Discover workspace env (project, CDR, buckets) via the"
-	@echo "                         'wb' CLI; write to $(WORKSPACE_ENV). Pass CDR=<proj>.<ds>"
-	@echo "                         when the CDR is an external read-only project not"
-	@echo "                         surfaced by 'wb resource list'. Auto-runs if missing."
+	@echo "  make setup           - One-time per-cluster provisioning: discover workspace env"
+	@echo "                         (project, CDR, buckets) via the 'wb' CLI -> $(WORKSPACE_ENV),"
+	@echo "                         and build the cluster dependency overlay (deps the image"
+	@echo "                         lacks, e.g. formulaic). Pass CDR=<proj>.<ds> when the CDR is"
+	@echo "                         an external read-only project not surfaced by 'wb resource"
+	@echo "                         list'."
+	@echo "                         Workspace discovery auto-runs if $(WORKSPACE_ENV) is missing."
 	@echo "  make smoke           - LDA shim smoke: spark-submit via YARN (client mode)"
 	@echo "  make bq-smoke        - BigQuery read smoke (no spark_vi imports)"
 	@echo "  make lda-bq-smoke    - End-to-end: BQ -> CountVectorizer -> LDA shim"
@@ -107,6 +116,8 @@ help:
 	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
 	@echo "  build-dashboard-exp     - build dashboard bundle (auto-picks freshest fit needing build)"
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
+	@echo "  build-covariates EXP=N  - rebuild STM covariate cache for experiment N without re-running fit."
+	@echo "                         Useful when iterating on covariate_formula. FORCE=1 invalidates cache."
 	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
 	@echo "                         Restricts to patients with a first malignant-cancer dx"
 	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
@@ -151,8 +162,43 @@ zip:
 	$(MAKE) -C $(REPO_ROOT)/spark-vi zip
 	$(MAKE) -C $(REPO_ROOT)/charmpheno zip
 
-# Always re-discover and rewrite $(WORKSPACE_ENV).
-setup:
+# Build the cluster dependency-overlay zip (pure-Python deps the image lacks).
+# Built on the master so pip resolves Linux wheels for the cluster's own
+# python3. build_spark_submit_cmd (run_experiment.py) detects
+# $(CLUSTER_OVERLAY) and appends it to --py-files; it runs on the image's
+# Python, so no interpreter override is needed. Only rebuilt when
+# cluster-requirements.txt (or this Makefile) changes.
+cluster-overlay: $(CLUSTER_OVERLAY)
+
+# Compiled libs the AoU image already ships. pip resolves formulaic's full
+# closure (pandas -> numpy, scipy, pyarrow ...), so we install it all to a
+# build dir and then PRUNE these four -- leaving only the pure-Python leaves
+# (formulaic, interface-meta, narwhals, wrapt, typing-extensions). This avoids
+# shadowing the image's compiled libs: a stray numpy 2.x under the image's
+# numpy-1.x-built pyarrow would crash with "AttributeError: _ARRAY_API not
+# found". With the leaves on --py-files, the image's own numpy/pandas/scipy/
+# pyarrow are used unchanged.
+CLUSTER_IMAGE_LIBS := numpy pandas scipy pyarrow
+
+# Rebuild when the requirements OR this Makefile's recipe changes.
+$(CLUSTER_OVERLAY): $(CLUSTER_REQS) $(REPO_ROOT)/analysis/cloud/Makefile
+	rm -rf $(CLUSTER_OVERLAY_DIR)
+	mkdir -p $(CLUSTER_OVERLAY_DIR) $(dir $(CLUSTER_OVERLAY))
+	python3 -m pip install --quiet --target $(CLUSTER_OVERLAY_DIR) -r $(CLUSTER_REQS)
+	cd $(CLUSTER_OVERLAY_DIR) && for p in $(CLUSTER_IMAGE_LIBS); do \
+		rm -rf "$$p" "$$p".libs "$$p"-*.dist-info "$$p".dist-info; \
+	done
+	rm -f $(CLUSTER_OVERLAY)
+	cd $(CLUSTER_OVERLAY_DIR) && zip -qr $(CLUSTER_OVERLAY) . \
+		-x "*.pyc" -x "*/__pycache__/*"
+	@echo "Wrote $(CLUSTER_OVERLAY)"
+
+# One-time per-cluster provisioning: re-discover and rewrite $(WORKSPACE_ENV),
+# and build the cluster dependency overlay (pure-Python deps the image lacks).
+# The overlay is a file-target keyed on cluster-requirements.txt, so it only
+# rebuilds when that changes — `make setup` then `make exp ID=N` is enough on
+# a fresh cluster.
+setup: cluster-overlay
 	$(SETUP_CMD)
 
 # Auto-run setup the first time anything needs $(WORKSPACE_ENV) on a fresh
@@ -276,12 +322,12 @@ RUN_ID          ?=
 # frontmatter; run them on the cluster via these targets.
 
 # Pick lowest-NNNN with status: pending; fit + eval; write summary.md
-next-exp: zip $(WORKSPACE_ENV)
+next-exp: zip cluster-overlay $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py --next --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
 
 # Same pipeline pinned to specific id (auto-resumes if RUN_ID dir exists)
-exp: zip $(WORKSPACE_ENV)
+exp: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
@@ -301,16 +347,33 @@ summary-tail:
 
 # Re-run eval only against an existing experiment's checkpoint; appends a
 # timestamped ## Eval (NPMI) section to summary.md.
-eval-exp: zip $(WORKSPACE_ENV)
+eval-exp: zip cluster-overlay $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py $(if $(ID),--id $(ID)) --eval-only --runs-dir $(RUNS_DIR)
 
 # Build dashboard bundle for an experiment. With no ID, picks the most
 # recent fit whose bundle is missing or older than the fit checkpoint.
 # With ID=N, force-rebuilds the named experiment.
-build-dashboard-exp: zip $(WORKSPACE_ENV)
+build-dashboard-exp: zip cluster-overlay $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py $(if $(ID),--id $(ID)) --build-only --runs-dir $(RUNS_DIR)
+
+# Rebuild only the STM covariate cache for an experiment, without re-running
+# the fit. Useful when iterating on covariate_formula: change the formula in
+# the experiment frontmatter, then run this target to refresh the cache before
+# the next `make exp EXP=N`.
+#
+# Usage:
+#   make build-covariates EXP=NNNN
+#   make build-covariates EXP=NNNN FORCE=1   # invalidate cache, force rebuild
+build-covariates: zip cluster-overlay $(WORKSPACE_ENV)
+ifndef EXP
+	$(error EXP=NNNN required, e.g. make build-covariates EXP=0002)
+endif
+	. ./$(WORKSPACE_ENV) && \
+	python $(REPO_ROOT)/scripts/run_experiment.py \
+		--id $(EXP) --build-covariates-only --runs-dir $(RUNS_DIR) \
+		$(if $(FORCE),--force-covariates)
 
 lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	@mkdir -p $(RUNS_DIR) && \

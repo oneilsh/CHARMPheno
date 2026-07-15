@@ -1,6 +1,6 @@
 <script lang="ts">
   import {
-    bundle, patientsById, selectedPatientId, simulatorPrefix,
+    bundle, patientsById, selectedPatientId, simulatorPrefix, simulatorResult,
     advancedView,
   } from '../store'
   import { phenotypeHue } from '../palette'
@@ -30,17 +30,26 @@
     return filtered.filter((p) => (p.label || '').toLowerCase().includes(q))
   })()
 
+  // Editing the starting conditions invalidates the shown result so the
+  // panels never display a population from a stale set of conditions; the user
+  // regenerates to apply. (Done here, per-edit, rather than via a reactive on
+  // the prefix — a reactive would also fire on mount and wipe the default
+  // result the app seeds at load.)
+  function invalidateResult() { simulatorResult.set(null) }
+
   function copyFromPatient() {
     const p = $selectedPatientId ? $patientsById.get($selectedPatientId) : null
-    if (p) simulatorPrefix.set([...p.code_bag])
+    if (p) { simulatorPrefix.set([...p.code_bag]); invalidateResult() }
   }
-  function clearAll() { simulatorPrefix.set([]) }
+  function clearAll() { simulatorPrefix.set([]); invalidateResult() }
   function add(idx: number) {
     simulatorPrefix.update((prev) => [...prev, idx])
+    invalidateResult()
     searchText = ''
   }
   function removeAt(i: number) {
     simulatorPrefix.update((prev) => prev.filter((_, j) => j !== i))
+    invalidateResult()
   }
 
   // Sample ONE code from beta[k] via inverse-CDF on Math.random(). Each
@@ -50,6 +59,7 @@
   // generative metaphor (every action is a sample from the model).
   function drawFromPhenotype(k: number) {
     if (!$bundle) return
+    invalidateResult()
     const row = $bundle.model.beta[k]
     const r = Math.random()
     let acc = 0
@@ -67,10 +77,9 @@
   $: prefixList = $simulatorPrefix.map((idx, i) => ({ idx, i })).reverse()
 </script>
 
-<section class="editor">
+<section class="editor" data-tour="sim-conditions">
   <header class="head">
-    <span class="eyebrow">Starting point</span>
-    <h3>Conditions</h3>
+    <span class="eyebrow">Starting conditions</span>
     <p class="sub">{copy.conditionsEditor.sub}</p>
   </header>
 
@@ -158,12 +167,6 @@
     gap: 0.25rem;
     padding-bottom: 0.7rem;
     border-bottom: 1px solid var(--rule);
-  }
-  .head h3 {
-    font-size: 1.05rem;
-    font-weight: 600;
-    letter-spacing: var(--tracking-tight);
-    margin: 0;
   }
   .sub {
     margin: 0.15rem 0 0;

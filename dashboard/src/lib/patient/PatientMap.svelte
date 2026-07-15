@@ -4,9 +4,9 @@
   import {
     bundle, cohort, selectedPatientId, selectedPhenotypeId,
     searchedConditionIdx, searchedPhenotypeForPatients, advancedView,
-    patientProjection, patientProjectionFitting,
+    patientProjection, patientProjectionFitting, colorByGroup,
   } from '../store'
-  import { phenotypeHue } from '../palette'
+  import { phenotypeHue, groupHue } from '../palette'
   import { displayedDominant } from '../dominant'
   import { ensurePatientProjection } from './projection'
   import type { Phenotype, SyntheticPatient } from '../types'
@@ -52,7 +52,12 @@
     if (allPatients.length === 0) return
     const { patientCoords } = $patientProjection
     const hue = $phenotypeHue
+    const gHue = $groupHue
     const advanced = $advancedView
+    // Color-by-group only takes effect when the cohort actually carries
+    // per-patient groups (gated STM bundle); otherwise silently fall back
+    // to the default dominant-phenotype coloring.
+    const byGroup = $colorByGroup && allPatients.some((p) => p.group != null)
 
     // Basic mode hides patients whose dominant is dead/mixed. The UMAP
     // layout is still fit on the full cohort so coords are stable across
@@ -121,7 +126,9 @@
 
     nodes.append('circle')
       .attr('r', DOT_R)
-      .attr('fill', (d) => hue(displayedDominant(d.patient.theta, phenotypes, advanced)))
+      .attr('fill', (d) => (byGroup
+        ? gHue(d.patient.group)
+        : hue(displayedDominant(d.patient.theta, phenotypes, advanced))))
       .attr('fill-opacity', 0.78)
       .attr('stroke', '#18181b')
       .attr('stroke-opacity', 0.25)
@@ -175,13 +182,16 @@
   // when the bundle (and thus phenotypeOrder) does, and render() reads
   // the current value when it runs - including it just forces a redraw
   // on bundle load that the $patientProjection dependency already covers.
-  $: $selectedPatientId, $searchedConditionIdx, $searchedPhenotypeForPatients, $advancedView, $patientProjection && svgEl && render()
+  $: $selectedPatientId, $searchedConditionIdx, $searchedPhenotypeForPatients, $advancedView, $colorByGroup, $patientProjection && svgEl && render()
 
   // For the legend caption: count of patients currently visible on the
   // atlas. Basic = clean only; advanced = full cohort.
   $: visibleCount = $cohort
     ? ($advancedView ? $cohort.patients.length : $cohort.patients.filter((p) => p.isClean).length)
     : 0
+  // Mirrors the `byGroup` fallback logic inside render(): only claim
+  // "color = group" when the cohort actually carries per-patient groups.
+  $: legendByGroup = $colorByGroup && ($cohort?.patients.some((p) => p.group != null) ?? false)
   onMount(render)
 </script>
 
@@ -198,7 +208,7 @@
   <figcaption class="legend">
     {#if $cohort}
       <div class="legend-row">
-        <span class="eyebrow" title={copy.patientMap.legendTip}>{visibleCount} synthetic patients · color = dominant phenotype</span>
+        <span class="eyebrow" title={copy.patientMap.legendTip}>{visibleCount} synthetic patients · color = {legendByGroup ? 'group' : 'dominant phenotype'}</span>
       </div>
       <div class="legend-note">{copy.patientMap.legendNote}</div>
     {/if}

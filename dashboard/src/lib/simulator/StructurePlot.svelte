@@ -14,6 +14,9 @@
   // plot, where a tightly-inferred prior produces a near-uniform color
   // block and an ambiguous prior produces a rainbow.
   export let thetaSamples: number[][] = []
+  // One-line confidence readout shown under the heading (computed by the parent
+  // from the dominant-vote): { text, hue } or null to omit.
+  export let summary: { text: string; hue: string | null } | null = null
 
   // Threshold below which a phenotype is folded into "Other" in basic
   // mode. Matches ProfileBar's default so the structure plot and the
@@ -129,10 +132,16 @@
   function onLeave() { hoverIdx = null }
 </script>
 
-<section class="structure">
+<section class="structure" data-tour="sample-mix">
   <header>
     <span class="eyebrow">Per-sample mix</span>
     <h4>{copy.structurePlot.heading}</h4>
+    {#if summary}
+      <p class="readout">
+        <span class="readout-dot" style="background: {summary.hue ?? 'var(--ink-faint)'}"></span>
+        {summary.text}
+      </p>
+    {/if}
     <p class="sub">{copy.structurePlot.sub}</p>
   </header>
 
@@ -237,6 +246,22 @@
     color: var(--ink-faint);
     font-style: italic;
     line-height: 1.5;
+  }
+  /* Confidence readout: the one-line "mostly X" / "split across several" verdict. */
+  .readout {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.35rem 0 0;
+    font-size: var(--fs-small);
+    color: var(--ink);
+    font-weight: 500;
+  }
+  .readout-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
   }
   svg {
     width: 100%;

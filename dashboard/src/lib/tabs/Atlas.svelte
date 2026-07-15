@@ -1,10 +1,17 @@
 <script lang="ts">
-  import { bundle } from '../store'
+  import { bundle, atlasConditioning } from '../store'
   import TopicMap from '../atlas/TopicMap.svelte'
   import CodePanel from '../atlas/CodePanel.svelte'
   import ConditionSearch from '../atlas/ConditionSearch.svelte'
   import PhenotypeBrowser from '../atlas/PhenotypeBrowser.svelte'
+  import ConditioningBar from '../conditioning/ConditioningBar.svelte'
   import { copy } from '../copy'
+
+  // (Conditioning reset on cohort change is handled centrally in App.svelte via
+  // resetConditioningForCohort(); no per-panel reset needed here.)
+
+  // Explore is bubbles-only — the topic-correlation heatmap moved to the
+  // Compare subtab (Compare.svelte).
 
   // Background-click closes the disclosure popover so the user doesn't
   // have to find and click the same link again to dismiss it.
@@ -22,7 +29,7 @@
   <header class="section-head">
     <div class="title-block">
       <div class="title-row">
-        <h1>{copy.atlas.title}</h1>
+        <p class="kicker">{copy.atlas.kicker()}</p>
         <details class="what-is" bind:this={whatIsEl} bind:open={whatIsOpen}>
           <summary>{copy.atlas.whatIsSummary}</summary>
           <div class="what-is-body popover">
@@ -32,16 +39,19 @@
           </div>
         </details>
       </div>
-      <p class="kicker">{copy.atlas.kicker}</p>
-    </div>
-    <div class="controls">
-      <ConditionSearch />
     </div>
   </header>
 
   <div class="grid">
     <div class="left-col">
-      <TopicMap />
+      <TopicMap>
+        <ConditioningBar store={atlasConditioning} showGroup={false} inlineControls tourAnchor="atlas-covariates" />
+      </TopicMap>
+
+      <div class="map-actions">
+        <ConditionSearch />
+      </div>
+
       <PhenotypeBrowser />
     </div>
     <CodePanel />
@@ -55,7 +65,7 @@
 
   .section-head {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr;
     align-items: end;
     gap: 2rem;
     padding-bottom: 1.5rem;
@@ -67,7 +77,6 @@
     flex-direction: column;
     gap: 0.45rem;
   }
-  .title-block h1 { margin: 0.1rem 0 0; }
   .title-row {
     display: flex;
     align-items: baseline;
@@ -76,7 +85,7 @@
     position: relative;
   }
   .kicker {
-    margin: 0.25rem 0 0;
+    margin: 0;
     font-size: var(--fs-small);
     color: var(--ink-muted);
     max-width: 105ch;
@@ -141,10 +150,14 @@
     color: var(--ink);
   }
 
-  .controls {
+  /* Sits just below the topic map, right-aligned and pulled up tight
+     against it (overrides the left-col's 1.25rem gap) — mirrors the
+     under-map control row in Patient.svelte. */
+  .map-actions {
     display: flex;
-    align-items: end;
-    gap: 1.25rem;
+    align-items: center;
+    justify-content: flex-end;
+    margin-top: -0.75rem;
   }
 
   .grid {

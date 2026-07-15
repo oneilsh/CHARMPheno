@@ -1,23 +1,63 @@
 import { writable } from 'svelte/store'
 
-// Single source of truth for the dashboard's top-level tabs. Both
-// Tabs.svelte (renders the nav) and App.svelte (renders the active
-// tab's component) iterate over this list, so adding a new tab only
-// requires extending TABS plus importing the component in App.svelte.
-export const TABS = [
-  { id: 'atlas',     label: 'Phenotype Atlas' },
-  { id: 'patient',   label: 'Patient Atlas' },
-  { id: 'simulator', label: 'Simulator' },
+// Two-level hash routing: `#/<top>/<sub>`. TOP_TABS drives the top nav
+// (Tabs.svelte); SUBTABS drives the second-level nav (SubTabs.svelte). App.svelte
+// renders the active top component; each top component renders its active subtab.
+export const TOP_TABS = [
+  { id: 'atlas', label: 'Phenotype Atlas' },
+  { id: 'sim', label: 'Simulator' },
 ] as const
 
-export type Route = (typeof TABS)[number]['id']
-const ROUTE_IDS = TABS.map((t) => t.id) as readonly string[]
+export type TopId = (typeof TOP_TABS)[number]['id']
 
-function parseHash(): Route {
-  const h = window.location.hash.replace(/^#\//, '')
-  return ROUTE_IDS.includes(h) ? (h as Route) : 'atlas'
+export const SUBTABS: Record<TopId, readonly { id: string; label: string }[]> = {
+  atlas: [
+    { id: 'explore', label: 'Explore' },
+    { id: 'compare', label: 'Compare' },
+  ],
+  sim: [
+    { id: 'simulate', label: 'Simulate' },
+    { id: 'explore', label: 'Explore' },
+  ],
 }
 
-export const route = writable<Route>(parseHash())
-window.addEventListener('hashchange', () => route.set(parseHash()))
-export function go(to: Route): void { window.location.hash = `#/${to}` }
+const TOP_IDS = TOP_TABS.map((t) => t.id) as readonly string[]
+
+// Legacy single-segment hashes from the old three-tab layout.
+const LEGACY: Record<string, { top: TopId; sub: string }> = {
+  atlas: { top: 'atlas', sub: 'explore' },
+  patient: { top: 'sim', sub: 'explore' },
+  simulator: { top: 'sim', sub: 'simulate' },
+}
+
+export function parseRoute(hash: string): { top: TopId; sub: string } {
+  const path = hash.replace(/^#\/?/, '')
+  const [rawTop, rawSub] = path.split('/')
+  if (rawTop && !rawSub && LEGACY[rawTop]) return LEGACY[rawTop]
+  const top = (TOP_IDS.includes(rawTop) ? rawTop : 'atlas') as TopId
+  const subs = SUBTABS[top].map((s) => s.id)
+  const sub = subs.includes(rawSub) ? rawSub : subs[0]
+  return { top, sub }
+}
+
+function current() {
+  return parseRoute(typeof window === 'undefined' ? '' : window.location.hash)
+}
+
+const first = current()
+export const topRoute = writable<TopId>(first.top)
+export const subRoute = writable<string>(first.sub)
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('hashchange', () => {
+    const r = current()
+    topRoute.set(r.top)
+    subRoute.set(r.sub)
+  })
+}
+
+export function go(top: TopId, sub?: string): void {
+  const subs = SUBTABS[top].map((s) => s.id)
+  const s = sub && subs.includes(sub) ? sub : subs[0]
+  window.location.hash = `#/${top}/${s}`
+}

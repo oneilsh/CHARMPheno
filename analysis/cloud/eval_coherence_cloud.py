@@ -1,10 +1,17 @@
-"""Cloud-side NPMI coherence for a saved OnlineLDA / OnlineHDP checkpoint.
+"""Cloud-side NPMI coherence for a saved OnlineLDA / OnlineHDP / STM checkpoint.
 
 Mirrors `analysis/local/eval_coherence.py` for the BigQuery-sourced cloud
 setting. Loads the augmented VIResult written by `lda_bigquery_cloud.py`
-/ `hdp_bigquery_cloud.py`, reproduces the BQ -> BOW pipeline from
-`metadata['corpus_manifest']` with the *frozen* vocab from
-`metadata['vocab']`, and computes per-topic NPMI over the full corpus.
+/ `hdp_bigquery_cloud.py` / `stm_bigquery_cloud.py`, reproduces the BQ -> BOW
+pipeline from `metadata['corpus_manifest']` (including the fit cohort and its
+prior_obs_days lookback) with the *frozen* vocab from `metadata['vocab']`, and
+computes per-topic NPMI over that fit corpus. The cohort is reproduced, not
+skipped: cohort-derived columns (e.g. source_cohort for the combined cohort's
+patient_cohort doc_spec) only exist once the cohort filter runs, and a
+cohort-matched reference scores coherence over the corpus the topics saw.
+
+STM is scored exactly like LDA: its topic-term β (global_params['lambda']) is
+K×V with fixed K and no Dirichlet alpha, so all K topics are scored.
 
 For HDP, only the top-K topics by E[β_t] are scored (the corpus stick
 shrinks unused topics toward 0; scoring them would add noise rather than
@@ -37,6 +44,23 @@ from _driver_common import _phase, configure_logging, make_spark_session
 # (adding the repo root to sys.path) runs first.
 
 
+def foreground_reference_groups(topic_block_spec):
+    """Map topic index -> group label (None = background / full-corpus reference).
+
+    Foreground topics are scored against their group's sub-corpus rather than the
+    full corpus: scoring a rare phenotype against majority docs that can never
+    contain it triggers the NPMI zero-pair penalty (docs/insights/0007). Returns
+    {} when there is no gating partition (all topics scored on the full corpus).
+    """
+    if not topic_block_spec:
+        return {}
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    part = TopicBlockPartition.from_dict(topic_block_spec)
+    labels = part.topic_labels()
+    return {k: (None if lbl == "background" else lbl)
+            for k, lbl in enumerate(labels)}
+
+
 class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
                      argparse.RawDescriptionHelpFormatter):
     """Show defaults automatically, and preserve the docstring's paragraph layout."""
@@ -55,9 +79,10 @@ def main(argv: list[str] | None = None) -> int:
         help="number of top terms per topic used for the NPMI computation",
     )
     parser.add_argument(
-        "--model-class", choices=["lda", "hdp"], default="lda",
-        help="lda scores all K rows of lambda; hdp scores the top-K topics "
-             "by E[beta_t] (see --hdp-k).",
+        "--model-class", choices=["lda", "hdp", "stm"], default="lda",
+        help="lda/stm score all K rows of lambda (STM's topic-term beta has "
+             "the same K×V shape, fixed K, and no Dirichlet alpha); hdp scores "
+             "the top-K topics by E[beta_t] (see --hdp-k).",
     )
     parser.add_argument(
         "--hdp-k", type=int, default=50,
@@ -103,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[2]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
-    from analysis._eval_common import print_ranked_report  # noqa: E402
+    from analysis._eval_common import print_ranked_report, stm_sigma_diagnostic  # noqa: E402
 
     configure_logging()
 
@@ -134,11 +159,39 @@ def main(argv: list[str] | None = None) -> int:
         doc_spec_manifest = corpus.get("doc_spec", {"name": "patient"})
         doc_spec = DocSpec.from_manifest(doc_spec_manifest)
         source_table = corpus.get("source_table", "condition_occurrence")
+        # Reproduce the fit COHORT, not just the base load: cohort-derived
+        # columns (e.g. source_cohort for the combined cohort's patient_cohort
+        # doc_spec) only exist once the cohort filter is applied, and a
+        # cohort-matched NPMI reference is the corpus the topics were fit on.
+        cohort = corpus.get("cohort")
+        if cohort == "none":
+            cohort = None
+        # prior_obs_days entered the manifest after the cohort feature; older
+        # checkpoints default to the historical 365-day lookback.
+        prior_obs_days = corpus.get("prior_obs_days", 365)
+        topic_block_spec = corpus.get("topic_block_spec")
+        fg_groups = foreground_reference_groups(topic_block_spec)
+        if fg_groups:
+            print(f"[driver]   gating: {sum(v is not None for v in fg_groups.values())} "
+                  f"foreground topics scored on group sub-corpora", flush=True)
         print(f"[driver]   corpus_manifest: cdr={corpus['cdr']}, "
               f"source_table={source_table}, "
-              f"person_mod={corpus['person_mod']}", flush=True)
+              f"person_mod={corpus['person_mod']}, cohort={cohort}, "
+              f"prior_obs_days={prior_obs_days}", flush=True)
         print(f"[driver]   doc_spec: {doc_spec_manifest}", flush=True)
         print(f"[driver]   frozen vocab: {len(vocab_list)} terms", flush=True)
+
+        # STM Σ eta-variance diagnostic: identify the largest-η-variance
+        # topics from the saved model. The eigen-spectrum it also reports is a
+        # reporting statistic only (full-matrix Σ, not the within-fit
+        # marginal sub-blocks). No-op (None) for non-STM models or legacy
+        # diagonal-Σ K-vectors. This runs on eval-only too, so
+        # `make eval-exp ID=N` inspects a saved fit without a refit.
+        sigma_report = stm_sigma_diagnostic(
+            result.global_params.get("Sigma"), labels=fg_groups)
+        if sigma_report is not None:
+            for line in sigma_report.splitlines():
+                print(f"[driver]   {line}", flush=True)
 
         if corpus["cdr"] != cdr_env:
             log = logging.getLogger(__name__)
@@ -158,6 +211,8 @@ def main(argv: list[str] | None = None) -> int:
                 billing_project=billing,
                 person_sample_mod=corpus["person_mod"],
                 source_table=source_table,
+                cohort=cohort,
+                prior_obs_days=prior_obs_days,
             ).persist()
             summary = omop.agg(
                 F.count(F.lit(1)).alias("rows"),
@@ -174,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"[driver]   vocab size: {len(vocab_map)}", flush=True)
 
-        with _phase("npmi reference (full corpus)"):
+        with _phase("npmi reference (fit corpus)"):
             reference_df = bow_df.persist()
             n_ref = reference_df.count()
             print(f"[driver]   reference: {n_ref} docs", flush=True)
@@ -213,6 +268,70 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 mask = None
             reference_rdd = reference_df.rdd.map(BOWDocument.from_spark_row)
+            if fg_groups:
+                bow_g = bow_df.withColumn(
+                    "source_cohort", F.split(F.col("doc_id"), ":").getItem(0))
+                K = topic_term.shape[0]
+                per_topic = np.full(K, np.nan)
+                # One CoherenceReport per block. Each block is scored against
+                # its OWN reference corpus (background -> full corpus; each
+                # foreground group -> its group sub-corpus), so we keep the
+                # reports separate and print one ranked section per block
+                # rather than merging into a single misleading reference_size.
+                # Passing the full topic_term + a boolean topic_mask (instead
+                # of a sliced matrix) makes each report's topic_indices/
+                # top_term_indices carry GLOBAL topic ids, which print_ranked_report
+                # needs to label topics and index lambda_ correctly.
+                block_reports = []  # (label, CoherenceReport), background first
+
+                bg_mask = np.array([fg_groups[k] is None for k in range(K)])
+                if bg_mask.any():
+                    bg_rep = compute_npmi_coherence(
+                        topic_term, reference_rdd, top_n=args.top_n,
+                        topic_mask=bg_mask,
+                        min_pair_count=args.npmi_min_pair_count)
+                    for j, k in enumerate(bg_rep.topic_indices):
+                        per_topic[int(k)] = bg_rep.per_topic_npmi[j]
+                    block_reports.append(("background", bg_rep))
+
+                for g in sorted({v for v in fg_groups.values() if v is not None}):
+                    g_mask = np.array([fg_groups[k] == g for k in range(K)])
+                    g_ref = (bow_g.where(F.col("source_cohort") == g)
+                             .rdd.map(BOWDocument.from_spark_row))
+                    g_rep = compute_npmi_coherence(
+                        topic_term, g_ref, top_n=args.top_n,
+                        topic_mask=g_mask,
+                        min_pair_count=args.npmi_min_pair_count)
+                    for j, k in enumerate(g_rep.topic_indices):
+                        per_topic[int(k)] = g_rep.per_topic_npmi[j]
+                    block_reports.append((g, g_rep))
+
+                # Compact at-a-glance overview in topic-id order.
+                print("[driver]   per-topic NPMI (block-aware reference):", flush=True)
+                labels = foreground_reference_groups(topic_block_spec)
+                for k in range(K):
+                    blk = "background" if labels[k] is None else labels[k]
+                    print(f"[driver]     topic {k:3d} [{blk}] NPMI={per_topic[k]:+.4f}",
+                          flush=True)
+
+                # Per-block ranked detail with top terms (STM has no per-topic
+                # alpha, so alpha=None). Same printer the non-gated path uses.
+                for label, rep in block_reports:
+                    print(f"\n[driver]   === block '{label}' "
+                          f"(reference={rep.reference_size} docs, "
+                          f"{len(rep.topic_indices)} topics) ===", flush=True)
+                    print_ranked_report(rep, name_by_idx, lambda_,
+                                        alpha=None, color=args.color)
+
+                # Same NaN-aware bound check the non-gated path applies.
+                rated = ~np.isnan(per_topic)
+                assert (per_topic[rated] >= -1.0).all(), "NPMI < -1 found"
+                assert (per_topic[rated] <= 1.0).all(), "NPMI > 1 found"
+
+                reference_df.unpersist()
+                omop.unpersist()
+                print("[driver] EVAL COHERENCE CLOUD PASSED", flush=True)
+                return 0
             report = compute_npmi_coherence(
                 topic_term, reference_rdd, top_n=args.top_n,
                 topic_mask=mask,

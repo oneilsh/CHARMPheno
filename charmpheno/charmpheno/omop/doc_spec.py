@@ -227,6 +227,38 @@ class PatientYearDocSpec(DocSpec):
         )
 
 
+@_register
+@dataclass(frozen=True)
+class PatientCohortDocSpec(DocSpec):
+    """One document per (patient, source_cohort).
+
+    doc_id = "{source_cohort}:{person_id}". Used by the combined
+    cancer_or_dementia corpus so a comorbid patient's two documents (one per
+    cohort) stay distinct through the groupBy(doc_id) in to_bow_dataframe.
+    The source_cohort is recovered downstream by splitting doc_id on ':'.
+    """
+    name: str = field(default="patient_cohort", init=False)
+    required_columns: tuple[str, ...] = field(
+        default=("person_id", "source_cohort"), init=False)
+    min_doc_length: int = 0
+
+    def derive_docs(self, events_df: DataFrame) -> DataFrame:
+        self.validate(events_df)
+        return events_df.withColumn(
+            "doc_id",
+            F.concat_ws(":",
+                        F.col("source_cohort").cast("string"),
+                        F.col("person_id").cast("string")),
+        )
+
+    def manifest(self) -> dict[str, Any]:
+        return {"name": self.name, "min_doc_length": self.min_doc_length}
+
+    @classmethod
+    def _from_manifest(cls, d: dict[str, Any]) -> "PatientCohortDocSpec":
+        return cls(min_doc_length=int(d.get("min_doc_length", 0)))
+
+
 def doc_spec_from_cli(name: str, *, min_doc_length: int | None = None) -> DocSpec:
     """Driver-side factory: build a DocSpec from a CLI --doc-unit value.
 

@@ -1,28 +1,32 @@
 <script lang="ts">
   import {
-    bundle, simulatorPrefix, advancedView,
+    bundle, cohort, simulatorPrefix, simulatorResult, advancedView, simulatorConditioning,
   } from '../store'
-  import { runSimulator } from '../simulator/runSamples'
+  import { computePosteriorPredictive, DEFAULT_SIM_SAMPLES } from '../simulator/computePP'
+  import { generateCohort } from '../cohort'
+  import { dominantVote } from '../dominant'
+  import { ensurePatientProjection } from '../patient/projection'
   import ConditionsEditor from '../simulator/ConditionsEditor.svelte'
   import PredictedRecord from '../simulator/PredictedRecord.svelte'
-  import SimMiniMap from '../simulator/SimMiniMap.svelte'
   import StructurePlot from '../simulator/StructurePlot.svelte'
-  import ProfileBar from '../patient/ProfileBar.svelte'
+  import ConditioningBar from '../conditioning/ConditioningBar.svelte'
+  import { phenotypeHue } from '../palette'
   import { copy } from '../copy'
 
-  // Default N: enough samples for a stable median and a smooth atlas
-  // cloud, low enough that even autoregressive mode (which re-fits theta
-  // per token) feels responsive.
-  const DEFAULT_N = 200
+  // Explore-Cohort ("$cohort") sizing for the cohort this Simulate click
+  // generates - matches App.svelte's initial-load defaults (same N/
+  // neighbors) so the shared atlas has consistent density regardless of
+  // whether it was populated on load or via Simulate Cohort.
+  const COHORT_N = 1500
+  const COHORT_NEIGHBORS = 8
   // Seed sequence starts at 42 (matches the Patient atlas's seed default)
   // and auto-bumps on each Simulate click so the user sees variation
   // without managing a seed input. The first run is therefore always
   // reproducible across reloads, which keeps walkthrough demos stable.
   let seedCounter = 42
 
-  let nSamples = DEFAULT_N
+  let nSamples = DEFAULT_SIM_SAMPLES
   let autoregressive = false
-  let result: ReturnType<typeof runSimulator> | null = null
   let running = false
 
   let whatIsEl: HTMLDetailsElement
@@ -36,38 +40,69 @@
     // simulator (variational E-step in a loop) blocks the main thread.
     await new Promise((r) => setTimeout(r, 0))
     try {
-      result = runSimulator({
-        alpha: $bundle.model.alpha,
-        beta: $bundle.model.beta,
-        meanCodesPerDoc: $bundle.corpusStats.mean_codes_per_doc,
-        prefix: $simulatorPrefix,
-        nSamples,
+      const b = $bundle
+      // The posterior-predictive draw (sample-mix + predicted-record panels)
+      // is shared with the app's load-time default seeding; see computePP.ts.
+      simulatorResult.set(computePosteriorPredictive(
+        b, $simulatorPrefix, $simulatorConditioning,
+        { nSamples, seed, autoregressive },
+      ))
+
+      // Simulate also (re)generates the shared cohort that Explore Cohort
+      // displays: a 'set'-mode cohort at the same covariate values/group,
+      // conditioned on the same starting-condition prefix (empty prefix ->
+      // ordinary prior draw). Reusing this one trigger for both panels keeps
+      // "what you configured" and "what you see in Explore Cohort" in sync.
+      const prefixCounts = new Map<number, number>()
+      for (const w of $simulatorPrefix) prefixCounts.set(w, (prefixCounts.get(w) ?? 0) + 1)
+      const newCohort = generateCohort({
+        model: b.model,
+        meanCodesPerDoc: b.corpusStats.mean_codes_per_doc,
+        n: COHORT_N,
         seed,
-        autoregressive,
+        nNeighbors: COHORT_NEIGHBORS,
+        qualityByPhenotype: b.phenotypes.phenotypes.map((p) => p.quality),
+        conditioning: {
+          mode: 'set',
+          values: $simulatorConditioning.values,
+          group: $simulatorConditioning.group,
+          bundle: b,
+          prefixCounts,
+          beta: b.model.beta,
+        },
       })
+      cohort.set(newCohort)
+      ensurePatientProjection()
     } finally {
       running = false
     }
   }
 
-  // Clear the result whenever the prefix changes so the output never
-  // reflects a stale set of starting conditions. Using Svelte's reactive
-  // syntax (rather than a bare .subscribe()) so the dependency is auto-
-  // unsubscribed when this component unmounts - a raw .subscribe() leaks
-  // a handler every time the Simulator tab is left and re-entered.
-  $: $simulatorPrefix, (result = null)
+  // Dominant-phenotype vote across the draws: the fraction of simulated patients
+  // whose LEADING phenotype is each one. Used only for the one-line confidence
+  // readout above the per-sample strip (the mean-θ profile bar was dropped — it
+  // flattened toward an even mix regardless of the model; the per-sample strip is
+  // the real overview). See dominantVote.
+  $: voteTheta = ($simulatorResult && $simulatorResult.thetaSamples.length > 0 && $bundle)
+    ? dominantVote($simulatorResult.thetaSamples, $bundle.phenotypes.phenotypes, $advancedView)
+    : null
 
-  // Mean theta across samples for the profile bar. Aggregating to mean
-  // is the right move here - taking per-component medians would not sum
-  // to 1 across phenotypes. The atlas cloud below carries the
-  // uncertainty story; the bar shows the typical mix.
-  $: meanTheta = (() => {
-    if (!result || result.thetaSamples.length === 0) return null
-    const K = result.thetaSamples[0].length
-    const m = new Array(K).fill(0)
-    for (const t of result.thetaSamples) for (let k = 0; k < K; k++) m[k] += t[k]
-    for (let k = 0; k < K; k++) m[k] /= result.thetaSamples.length
-    return m as number[]
+  // One-line "how confident is the model" verdict from the vote: a clear leader
+  // (concentrated conditions) vs a split across profiles (ambiguous conditions).
+  $: confidence = (() => {
+    if (!voteTheta || !$bundle) return null
+    const ordered = voteTheta
+      .map((v, k) => ({ k, v }))
+      .filter((x) => x.v > 0)
+      .sort((a, b) => b.v - a.v)
+    if (ordered.length === 0) return null
+    const top = ordered[0]
+    const name = (k: number) => $bundle!.phenotypes.phenotypes[k]?.label || `Phenotype ${k}`
+    const pct = (v: number) => Math.round(v * 100)
+    if (top.v >= 0.5) return { text: `Mostly ${name(top.k)} — leads ${pct(top.v)}% of draws`, hue: $phenotypeHue(top.k) }
+    if (top.v >= 0.3) return { text: `Leans ${name(top.k)} (${pct(top.v)}% of draws), but mixed`, hue: $phenotypeHue(top.k) }
+    const names = ordered.slice(0, 3).map((x) => name(x.k)).join(', ')
+    return { text: `Split across several profiles — ${names}…`, hue: null as string | null }
   })()
 </script>
 
@@ -81,7 +116,7 @@
   <header class="section-head">
     <div class="title-block">
       <div class="title-row">
-        <h1>{copy.simulator.title}</h1>
+        <p class="kicker">{copy.simulator.kicker}</p>
         <details class="what-is" bind:this={whatIsEl} bind:open={whatIsOpen}>
           <summary>{copy.simulator.whatIsSummary}</summary>
           <div class="what-is-body popover">
@@ -91,24 +126,21 @@
           </div>
         </details>
       </div>
-      <p class="kicker">{copy.simulator.kicker}</p>
     </div>
   </header>
 
   <div class="grid">
     <div class="left-col" data-tour="simulator-input">
-      <ConditionsEditor />
-
-      <!-- Run panel: the advanced sampling knobs (if any) and the Simulate
-           button, grouped under the conditions so the left column reads as a
-           top-to-bottom recipe — set conditions, tune the run, simulate. -->
+      <!-- Run panel on top: a population is already present (seeded at load),
+           so "Run the model" is the prominent regenerate action; the source-
+           cohort and starting-condition inputs it draws from sit below. -->
       <div class="run-panel" data-tour="sim-controls">
         <div class="run-head">
           <span class="eyebrow">Run the model</span>
           <span class="run-sub">{copy.simulator.runSub}</span>
         </div>
-        {#if $advancedView}
-          <div class="run-opts">
+        <div class="run-opts">
+          {#if $advancedView}
             <label class="control n-control">
               <span class="ctl-head"><span class="eyebrow">Samples</span> <span class="ctl-v" data-numeric>{nSamples}</span></span>
               <input type="range" min="20" max="1000" step="20" bind:value={nSamples} />
@@ -117,27 +149,24 @@
               <input type="checkbox" bind:checked={autoregressive} />
               <span class="eyebrow">Autoregressive</span>
             </label>
-          </div>
-        {/if}
+          {/if}
+        </div>
         <button class="btn btn-primary run-btn" on:click={simulate} disabled={running || !$bundle}>
-          {running ? 'sampling…' : 'simulate →'}
+          {running ? 'sampling…' : 'regenerate →'}
         </button>
       </div>
+
+      <ConditioningBar store={simulatorConditioning} layout="stacked" tourAnchor="sim-conditioning" />
+      <ConditionsEditor />
     </div>
 
     <div class="right-col">
-      {#if result && meanTheta}
-        <div class="profile-block">
-          <header class="profile-head">
-            <span class="eyebrow">Phenotype mix</span>
-            <h3>{copy.simulator.phenotypeMixHeading}</h3>
-            <p class="sub">{copy.simulator.phenotypeMixSub(result.thetaSamples.length)}</p>
-          </header>
-          <ProfileBar theta={meanTheta} height={44} />
-        </div>
-        <StructurePlot thetaSamples={result.thetaSamples} />
-        <PredictedRecord codeCountsSamples={result.codeCountsSamples} />
-        <SimMiniMap thetaSamples={result.thetaSamples} />
+      {#if $simulatorResult}
+        <StructurePlot thetaSamples={$simulatorResult.thetaSamples} summary={confidence} />
+        <PredictedRecord
+          codeCountsSamples={$simulatorResult.codeCountsSamples}
+          codeTopicCounts={$simulatorResult.codeTopicCounts}
+        />
       {:else}
         <div class="empty-card">
           <span class="eyebrow">Awaiting input</span>
@@ -159,7 +188,7 @@
 
   .section-head {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr;
     align-items: end;
     gap: 2rem;
     padding-bottom: 1.5rem;
@@ -167,7 +196,6 @@
     border-bottom: 1px solid var(--rule);
   }
   .title-block { display: flex; flex-direction: column; gap: 0.45rem; }
-  .title-block h1 { margin: 0.1rem 0 0; }
   .title-row {
     display: flex;
     align-items: baseline;
@@ -176,7 +204,7 @@
     position: relative;
   }
   .kicker {
-    margin: 0.25rem 0 0;
+    margin: 0;
     font-size: var(--fs-small);
     color: var(--ink-muted);
     max-width: 105ch;
@@ -300,35 +328,6 @@
     min-width: 0;
   }
 
-  .profile-block {
-    background: var(--surface);
-    border: 1px solid var(--rule);
-    border-radius: var(--radius-sm);
-    padding: 1.25rem;
-  }
-  .profile-head {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    margin-bottom: 1rem;
-    padding-bottom: 0.85rem;
-    border-bottom: 1px solid var(--rule);
-  }
-  .profile-head h3 {
-    margin: 0;
-    font-size: 1.4rem;
-    font-weight: 600;
-    letter-spacing: var(--tracking-display);
-    line-height: 1.15;
-    color: var(--ink);
-    font-family: var(--font-mono);
-  }
-  .profile-head .sub {
-    margin: 0.15rem 0 0;
-    font-size: var(--fs-micro);
-    color: var(--ink-faint);
-    font-style: italic;
-  }
   .empty-card {
     display: flex;
     flex-direction: column;

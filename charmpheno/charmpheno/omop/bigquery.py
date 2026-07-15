@@ -45,6 +45,7 @@ def load_omop_bigquery(
     person_sample_mod: int | None = None,
     source_table: str = "condition_occurrence",
     cohort: str | None = None,
+    prior_obs_days: int | None = None,
 ) -> DataFrame:
     """Load OMOP-shaped data from a BigQuery CDR dataset.
 
@@ -68,6 +69,10 @@ def load_omop_bigquery(
             (default) keeps the full sampled corpus. See
             ``charmpheno.omop.cohorts.SUPPORTED_COHORTS`` for accepted names
             (e.g. "first_cancer_year").
+        prior_obs_days: prior-observation lookback (days) for the cohort's
+            index date. None (default) defers to the cohort default (365); 0
+            drops the lookback, admitting prevalent cases. Ignored when
+            ``cohort`` is None.
 
     Returns:
         DataFrame with the canonical required OMOP columns
@@ -157,12 +162,187 @@ def load_omop_bigquery(
             "condition_start_date" if source_table == "condition_occurrence"
             else "condition_era_start_date"
         )
+        # prior_obs_days=None defers to apply_cohort's default lookback, so the
+        # 365-day default lives in exactly one place (cohorts._WINDOW_DAYS).
+        lookback_kw = (
+            {} if prior_obs_days is None else {"prior_obs_days": prior_obs_days}
+        )
         omop = apply_cohort(
             omop, cohort,
             spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project,
             date_col=date_col,
+            **lookback_kw,
         )
 
     validate(omop)
     return omop
+
+
+def decode_sex(gender_concept_id_col):
+    """Map an OMOP gender_concept_id column to a sex string M / F / Unknown.
+
+    Standard OMOP gender concepts: 8507 = Male, 8532 = Female. Every other
+    value — Unknown (8551), Other (8521), No matching concept (0), and null —
+    maps to 'Unknown', NOT to 'F'. Collapsing unknowns into Female silently
+    turns the sex covariate into a constant whenever gender data is absent or
+    non-standard, which is a data-integrity bug (observed on exp 0027, where
+    sex collapsed to a single 'F' level and dropped out of the design matrix).
+    Concept IDs per the OHDSI OMOP CDM Gender vocabulary.
+    """
+    from pyspark.sql import functions as F
+
+    return (
+        F.when(gender_concept_id_col == 8507, "M")
+        .when(gender_concept_id_col == 8532, "F")
+        .otherwise("Unknown")
+    )
+
+
+def decode_sex_from_name(gender_concept_name_col):
+    """Map an OMOP gender *concept name* to a sex string M / F / Unknown.
+
+    Decodes from the concept NAME rather than a hard-coded concept-id list so
+    the mapping is vocabulary-agnostic. The standard OMOP Gender concepts are
+    8507 'MALE' / 8532 'FEMALE', but datasets routinely carry their own
+    encoding: the All of Us Registered Tier `person.gender_concept_id` uses
+    45878463 'Female' / 45880669 'Male' plus custom 2000000000+ concepts for
+    aggregated gender-identity survey responses — none of which are 8507/8532,
+    so an id-based decoder collapses every AoU person to 'Unknown' and silently
+    drops C(sex) from the design matrix (exp 0027/0028). Reading the name
+    handles all of these through OMOP's own vocabulary.
+
+    Matching is on the lower-cased, trimmed name against the exact tokens
+    {female, woman} -> 'F' and {male, man} -> 'M'; every other value maps to
+    'Unknown', NOT to a sex. Exact-token (not substring) matching is
+    deliberate: AoU's aggregated concept name 'Not man only, not woman only,
+    prefer not to answer' contains 'man'/'woman' as substrings, so a substring
+    rule would misclassify it — and conflating unknowns with a sex turns the
+    covariate into a constant.
+
+    Standard gender concepts per the OHDSI OMOP CDM Gender vocabulary; AoU
+    gender concept ids per the All of Us CDR `person` table.
+    """
+    from pyspark.sql import functions as F
+
+    norm = F.lower(F.trim(gender_concept_name_col))
+    return (
+        F.when(norm.isin("female", "woman"), "F")
+        .when(norm.isin("male", "man"), "M")
+        .otherwise("Unknown")
+    )
+
+
+def filter_known_sex(person_df: "DataFrame") -> "DataFrame":
+    """Keep only rows with a decoded binary sex ('M' or 'F').
+
+    Drops persons whose sex decoded to 'Unknown' (OMOP Unknown/Other, null, or
+    a non-standard/aggregated concept) so the analysis population is restricted
+    to those with a known Male/Female sex-at-birth. Operates on the decoded
+    `sex` column produced by decode_sex_from_name.
+    """
+    from pyspark.sql import functions as F
+
+    return person_df.where(F.col("sex").isin("M", "F"))
+
+
+def load_person_table(
+    *,
+    spark,
+    cdr_dataset: str,
+    billing_project: str,
+    person_sample_mod: int | None = None,
+    cohort: str | None = None,
+    known_sex_only: bool = False,
+) -> "DataFrame":
+    """Load a per-person covariate source table from BigQuery.
+
+    Reads the OMOP `person` table and projects it to the minimal columns
+    needed for STM covariate materialization: `person_id`, `age`
+    (year-of-birth based, approximate), and `sex` (M/F/Unknown string).
+
+    Callers should pass the resulting DataFrame to
+    `charmpheno.omop.covariates.build_patient_covariate_df`, which
+    evaluates the formula against this projection.  If the formula
+    references columns not present here (e.g. race, ethnicity), the
+    BQ query in this function must be extended.
+
+    Args:
+        spark: active SparkSession with the spark-bigquery-connector.
+        cdr_dataset: fully-qualified BQ dataset "<project>.<dataset>".
+        billing_project: GCP project for billing.
+        person_sample_mod: if set, keep rows where MOD(person_id, M) == 0.
+            Should match the corpus person_sample_mod so the broadcast join
+            in the driver covers the same person population.
+        cohort: ignored at person-table level — the corpus load already
+            restricted the person population; kept for API consistency.
+            Pass None unless you want an informational cohort label column
+            (which is a literal column, not a filter).
+        known_sex_only: when True, keep only persons whose decoded sex is
+            'M' or 'F', dropping 'Unknown'/other (see filter_known_sex). The
+            fit corpus is `bow ⋈ covariates` (inner), so restricting the
+            covariate person set here restricts the fit population.
+
+    Returns:
+        Spark DataFrame with columns: person_id (long), year_of_birth
+        (int), sex_at_birth_concept_id (int), sex_concept_name (string, from
+        the concept vocabulary), age (double), sex (string M/F/Unknown decoded
+        from the concept name). One row per person_id in the sampled
+        population.
+
+    Sex source: reads ``person.sex_at_birth_concept_id`` (standard OMOP Gender
+    concepts 8507 'Male' / 8532 'Female'), NOT ``gender_concept_id``. In the
+    All of Us CDR the `person` table stores *gender identity* in
+    ``gender_concept_id`` (custom concepts 45878463 'Female' / 45880669 'Male'
+    / 1585841 'Non-Binary' / 2000000002 'Not man only, not woman only' / ...)
+    and *sex assigned at birth* in ``sex_at_birth_concept_id``. Decoding
+    ``gender_concept_id`` collapsed every AoU person to a single non-standard
+    level and dropped C(sex) from the design matrix (exp 0027/0028); sex at
+    birth is the intended prevalence covariate here.
+    """
+    from pyspark.sql import functions as F
+
+    if not isinstance(cdr_dataset, str) or cdr_dataset.count(".") != 1:
+        raise ValueError(
+            f"cdr_dataset must be '<project>.<dataset>', got {cdr_dataset!r}"
+        )
+    if person_sample_mod is not None and person_sample_mod < 1:
+        raise ValueError(
+            f"person_sample_mod must be >= 1 or None, got {person_sample_mod}"
+        )
+
+    def _read(table: str) -> "DataFrame":
+        return (
+            spark.read.format("bigquery")
+            .option("table", f"{cdr_dataset}.{table}")
+            .option("parentProject", billing_project)
+            .load()
+        )
+
+    df = _read("person").select(
+        "person_id", "year_of_birth", "sex_at_birth_concept_id"
+    )
+
+    if person_sample_mod is not None:
+        df = df.where((F.col("person_id") % person_sample_mod) == 0)
+
+    # Resolve the sex concept NAME so decoding is vocabulary-agnostic (the
+    # standard OMOP 8507/8532 concepts carry human-readable 'Male'/'Female'
+    # names). The `concept` table is large but only a handful of distinct sex
+    # concepts participate; no broadcast hint (an explicit F.broadcast on the
+    # full concept table OOM'd the driver in client mode — see
+    # load_omop_bigquery), let AQE pick the join strategy.
+    sex_concept = _read("concept").select(
+        F.col("concept_id").alias("sex_at_birth_concept_id"),
+        F.col("concept_name").alias("sex_concept_name"),
+    )
+    df = df.join(sex_concept, on="sex_at_birth_concept_id", how="left")
+
+    # Approximate age from year_of_birth; 2025 is a fixed reference year
+    # matching the nominal AoU CDR snapshot used at time of writing.
+    df = df.withColumn("age", (F.lit(2025) - F.col("year_of_birth")).cast("double"))
+    df = df.withColumn("sex", decode_sex_from_name(F.col("sex_concept_name")))
+
+    if known_sex_only:
+        df = filter_known_sex(df)
+    return df

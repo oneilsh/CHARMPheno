@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import os
 import re
 import signal
 import subprocess
@@ -19,6 +20,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPERIMENTS_DIR = REPO_ROOT / "docs" / "experiments"
 DEFAULTS_DIR = REPO_ROOT / "experiments" / "defaults"
+COVARIATE_CACHE_MISS_EXIT = 42  # MUST match analysis/cloud/build_dashboard_cloud.py
 
 
 def read_frontmatter(path: Path) -> dict:
@@ -239,7 +241,10 @@ def build_lda_args(
         # `cohort_def` is the driver-side argparse value (e.g. first_dementia_year);
         # `cohort` is the display id used for record-keeping and defaults lookup.
         "--cohort", str(effective["cohort_def"]),
+        "--prior-obs-days", str(effective.get("prior_obs_days", 365)),
     ]
+    if effective.get("cache_uri"):
+        args += ["--corpus-cache-uri", str(effective["cache_uri"])]
     # BooleanOptionalAction in the driver: --optimize-doc-concentration / --no-...
     if effective.get("optimize_doc_concentration", True):
         args.append("--optimize-doc-concentration")
@@ -252,6 +257,348 @@ def build_lda_args(
     if resume_from is not None:
         args += ["--resume-from", str(resume_from)]
     return args
+
+
+def validate_frontmatter(fm: dict) -> None:
+    """Validate experiment frontmatter; exit(2) on missing/invalid fields."""
+    required = ["id", "slug", "cohort", "model_class"]
+    for key in required:
+        if key not in fm:
+            print(f"[run-exp] ERROR: frontmatter missing required field {key!r}",
+                  flush=True)
+            sys.exit(2)
+
+    model_class = fm["model_class"]
+    if model_class not in ("lda", "stm"):
+        print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
+              f"(currently: lda, stm; hdp planned)", flush=True)
+        sys.exit(2)
+
+    if model_class == "stm":
+        stm_required = ["covariate_formula", "categorical_cols", "continuous_cols"]
+        for key in stm_required:
+            if key not in fm:
+                print(f"[run-exp] ERROR: model_class=stm requires "
+                      f"frontmatter field {key!r}", flush=True)
+                sys.exit(2)
+
+
+def build_fit_driver_path(effective: dict) -> str:
+    """Return path (relative to repo root) to the fit driver for this model_class."""
+    model_class = effective.get("model_class", "lda")
+    base = "analysis/cloud"
+    if model_class == "lda":
+        return f"{base}/lda_bigquery_cloud.py"
+    if model_class == "stm":
+        return f"{base}/stm_bigquery_cloud.py"
+    raise ValueError(f"no fit driver for model_class={model_class!r}")
+
+
+def build_fit_args(
+    effective: dict, out_dir: str, resume_from: Path | None = None,
+) -> list[str]:
+    """Build argv for the fit driver, dispatching on model_class.
+
+    resume_from (when set) is threaded to whichever driver runs so a re-run
+    continues a prior checkpoint (LDA and STM both support --resume-from;
+    --max-iter is then ADDITIONAL iterations on top of the loaded count).
+    """
+    model_class = effective.get("model_class", "lda")
+    if model_class == "lda":
+        return build_lda_args(effective, Path(out_dir), resume_from)
+    if model_class == "stm":
+        return build_stm_args(effective, out_dir, resume_from)
+    raise ValueError(f"unknown model_class: {model_class!r}")
+
+
+def _norm_cohort(c):
+    """Normalize the 'none' sentinel / empty string to Python None so a
+    checkpoint and config that mean 'no cohort' compare equal."""
+    return None if c in (None, "none", "") else c
+
+
+def _resume_corpus_mismatches(checkpoint_manifest: dict, effective: dict) -> list[str]:
+    """Compare a checkpoint's corpus_manifest to the current effective config.
+
+    Returns a list of human-readable mismatches on the fields that determine
+    corpus MEMBERSHIP; empty list = compatible. Warm-starting onto a checkpoint
+    whose corpus differs (e.g. a different person_mod sample or cohort lookback)
+    silently trains on the wrong data, so the caller refuses to resume on any
+    mismatch. Only fields PRESENT in the checkpoint are compared, so a
+    checkpoint predating a field (e.g. prior_obs_days) is not penalized.
+
+    vocab_size is deliberately NOT compared: STM stores the realized vocab
+    count (post min_df/min_patient_count pruning) while config carries the
+    CountVectorizer cap, so they legitimately differ for the same corpus. A
+    genuine vocab-dimension change fails loudly at warm-start (the K x V lambda
+    shape won't match), so it doesn't need a silent-corruption guard.
+    """
+    expected = {
+        "person_mod": effective.get("person_mod"),
+        "source_table": effective.get("source_table"),
+        "cohort": _norm_cohort(effective.get("cohort_def", effective.get("cohort"))),
+        "prior_obs_days": effective.get("prior_obs_days"),
+    }
+    mismatches: list[str] = []
+    for key, want in expected.items():
+        if key not in checkpoint_manifest:
+            continue  # checkpoint predates this field; can't verify, don't block
+        got = checkpoint_manifest[key]
+        got_cmp = _norm_cohort(got) if key == "cohort" else got
+        if got_cmp != want:
+            mismatches.append(f"{key}: checkpoint={got!r} != config={want!r}")
+    # doc_spec is stored as a manifest dict; compare just its spec name.
+    ck_doc = checkpoint_manifest.get("doc_spec")
+    if isinstance(ck_doc, dict) and "name" in ck_doc:
+        want_doc = effective.get("doc_unit", "patient_year")
+        if ck_doc["name"] != want_doc:
+            mismatches.append(
+                f"doc_spec: checkpoint={ck_doc['name']!r} != config={want_doc!r}"
+            )
+    if "topic_block_spec" in checkpoint_manifest:
+        # Compare topic-block specs as plain dicts. This function runs in the
+        # orchestration python, which has NO spark_vi (it ships only inside
+        # spark-submit's py-files), so we must NOT import TopicBlockPartition
+        # here — doing so crashed `make exp ID=N` resume with ModuleNotFoundError.
+        # Mirror TopicBlockPartition.to_dict()'s shape:
+        # {group_var, background_k, foreground: [[label, size], ...]}.
+        ck_spec = checkpoint_manifest["topic_block_spec"] or None
+        want_spec = None
+        if effective.get("background_k") is not None and effective.get("foreground"):
+            fg = [[lbl.strip(), int(sz)] for lbl, _, sz in
+                  (piece.partition(":") for piece in
+                   str(effective["foreground"]).split(","))]
+            want_spec = {
+                "group_var": str(effective.get("group_var", "source_cohort")),
+                "background_k": int(effective["background_k"]),
+                "foreground": fg,
+            }
+
+        def _norm(spec):
+            # Normalize for comparison: foreground entries to lists, ints to
+            # ints, so a JSON-loaded checkpoint (lists) and a config-built spec
+            # compare structurally regardless of list/tuple provenance.
+            if not spec:
+                return None
+            return (
+                str(spec.get("group_var")),
+                int(spec.get("background_k")),
+                tuple((str(g), int(sz)) for g, sz in spec.get("foreground", [])),
+            )
+
+        if _norm(ck_spec) != _norm(want_spec):
+            mismatches.append(
+                f"topic_block_spec: checkpoint={ck_spec!r} != config={want_spec!r}")
+    return mismatches
+
+
+def check_resume_compat(save_dir: Path, effective: dict) -> None:
+    """Exit(2) if resuming would warm-start onto a corpus that no longer
+    matches the experiment config. No-op when the checkpoint has no readable
+    corpus_manifest (nothing to verify)."""
+    import json
+    try:
+        manifest = json.loads((save_dir / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return
+    corpus = (manifest.get("metadata") or {}).get("corpus_manifest")
+    if not corpus:
+        return
+    mismatches = _resume_corpus_mismatches(corpus, effective)
+    if mismatches:
+        print("[run-exp] ERROR: refusing to resume — the checkpoint's corpus "
+              "differs from the current experiment config:", flush=True)
+        for m in mismatches:
+            print(f"[run-exp]   - {m}", flush=True)
+        print(f"[run-exp] Revert the config to match, or clear the checkpoint "
+              f"dir to start fresh: rm -rf {save_dir}", flush=True)
+        sys.exit(2)
+
+
+def _require_workspace_env() -> tuple[str, str]:
+    """Read the BigQuery CDR + billing project from the workspace environment.
+
+    These are environment-specific (set by the workspace setup), never part of
+    the committed experiment config — so they are sourced here, not from
+    `effective`. The LDA driver reads the same two env vars itself; the STM
+    drivers take them as --cdr/--billing args, so we resolve them here.
+    """
+    cdr = os.environ.get("WORKSPACE_CDR")
+    billing = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not (cdr and billing):
+        print("[run-exp] ERROR: WORKSPACE_CDR and GOOGLE_CLOUD_PROJECT must be set "
+              "in env for STM runs (source the workspace env first).", flush=True)
+        sys.exit(2)
+    return cdr, billing
+
+
+def build_covariates_args(effective: dict) -> list[str]:
+    """Build argv for analysis/cloud/build_stm_covariates.py from an effective config."""
+    cdr, billing = _require_workspace_env()
+    args = [
+        "--cdr", cdr,
+        "--billing", billing,
+        "--source-table", str(effective["source_table"]),
+        "--person-mod", str(effective["person_mod"]),
+        "--cache-uri", str(effective["cache_uri"]),
+        "--covariate-formula", str(effective["covariate_formula"]),
+        "--categorical-cols", ",".join(effective.get("categorical_cols", [])),
+        "--continuous-cols", ",".join(effective.get("continuous_cols", [])),
+    ]
+    cohort_def = effective.get("cohort_def", effective.get("cohort", ""))
+    if cohort_def and cohort_def != "none":
+        args += ["--cohort", str(cohort_def)]
+    args += ["--prior-obs-days", str(effective.get("prior_obs_days", 365))]
+    # A gated experiment keys the covariate sidecar on (person_id, group) so
+    # the gated dashboard prevalence can group by the label — pass the same
+    # --group-var the fit driver uses (build_stm_args). Gating is signalled by
+    # background_k + foreground being set.
+    if effective.get("background_k") is not None and effective.get("foreground"):
+        args += ["--group-var", str(effective.get("group_var", "source_cohort"))]
+    if effective.get("known_sex_only"):
+        args += ["--known-sex-only"]
+    return args
+
+
+def _dispatch_covariate_build(effective: dict, *, force: bool = False) -> int:
+    """Run analysis/cloud/build_stm_covariates.py via spark-submit; return its rc.
+
+    Factored out of the `--build-covariates-only` dispatch so
+    `_build_only_with_auto_covariates` can reuse it (via a lambda) to
+    auto-rebuild the covariate cache when `--build-only` reports a
+    COVARIATE_CACHE_MISS_EXIT.
+    """
+    cov_script = REPO_ROOT / "analysis" / "cloud" / "build_stm_covariates.py"
+    cov_args = build_covariates_args(effective)
+    if force:
+        cov_args.append("--force")
+    cov_cmd = build_spark_submit_cmd(str(cov_script), cov_args, REPO_ROOT)
+    print(f"[run-exp] build-covariates spark-submit: {' '.join(cov_cmd)}", flush=True)
+    import subprocess as _sp
+    result = _sp.run(cov_cmd, check=False)
+    if result.returncode != 0:
+        print(f"[run-exp] build-covariates exited non-zero ({result.returncode})",
+              flush=True)
+    return result.returncode
+
+
+def _build_only_with_auto_covariates(*, effective, auto, force, run_build, dispatch_cov):
+    """Run the dashboard build, with two covariate-cache behaviors folded in
+    so both are covered by the same Spark-free injected-callable unit tests:
+
+    1. Forced pre-build: if `force` and this is a gated-STM build with a
+       cache_uri, rebuild the covariate cache FIRST (before the build ever
+       runs). If that forced rebuild fails, abort immediately and return its
+       rc — the build never runs against a rebuild that didn't happen.
+    2. Miss-retry: if the build then exits COVARIATE_CACHE_MISS_EXIT and
+       auto-rebuild is enabled for a gated STM build with a cache_uri,
+       rebuild the covariate cache once (passing `force` through — after a
+       forced pre-build a miss is unexpected, but the existing semantics of
+       passing `force` are preserved) and re-run the build a single time.
+
+    run_build() -> int and dispatch_cov(force: bool) -> int are injected so
+    this is Spark-free and testable. Returns the final build return code."""
+    if force and effective.get("model_class") == "stm" and effective.get("cache_uri"):
+        print("[run-exp] --build-only --force-covariates: rebuilding covariate "
+              "cache before the build", flush=True)
+        pre_rc = dispatch_cov(True)
+        if pre_rc != 0:
+            print(f"[run-exp] forced covariate pre-build failed ({pre_rc}); "
+                  "not running the dashboard build", flush=True)
+            return pre_rc
+    rc = run_build()
+    if (rc == COVARIATE_CACHE_MISS_EXIT and auto
+            and effective.get("model_class") == "stm" and effective.get("cache_uri")):
+        print("[run-exp] --build-only: covariate cache MISS (exit %d); "
+              "auto-rebuilding the covariate cache, then retrying the build once."
+              % rc, flush=True)
+        cov_rc = dispatch_cov(force)
+        if cov_rc != 0:
+            print(f"[run-exp] covariate rebuild failed ({cov_rc}); not retrying "
+                  "the dashboard build", flush=True)
+            return cov_rc
+        print("[run-exp] covariate cache rebuilt; re-running the dashboard build",
+              flush=True)
+        rc = run_build()
+    return rc
+
+
+def build_stm_args(
+    effective: dict, out_dir: str, resume_from: Path | None = None,
+) -> list[str]:
+    """Build argv for analysis/cloud/stm_bigquery_cloud.py."""
+    cdr, billing = _require_workspace_env()
+    common = [
+        "--cdr", cdr,
+        "--billing", billing,
+        "--source-table", str(effective["source_table"]),
+        "--doc-spec", str(effective.get("doc_unit", "patient_year")),
+        "--doc-min-length", str(effective["doc_min_length"]),
+        "--K", str(effective["K"]),
+        "--max-iter", str(effective["max_iter"]),
+        "--vocab-size", str(effective["vocab_size"]),
+        "--min-df", str(effective["min_df"]),
+        "--min-patient-count", str(effective["min_patient_count"]),
+        "--subsampling-rate", str(effective["subsampling_rate"]),
+        "--tau0", str(effective["tau0"]),
+        "--kappa", str(effective["kappa"]),
+        "--save-interval", str(effective["save_interval"]),
+        "--print-topics-every", str(effective.get("print_topics_every", 10)),
+        "--person-mod", str(effective["person_mod"]),
+        "--cohort", str(effective.get("cohort_def", effective.get("cohort", ""))),
+        "--prior-obs-days", str(effective.get("prior_obs_days", 365)),
+        "--out-dir", str(out_dir),
+    ]
+    if effective.get("cache_uri"):
+        common.extend(["--cache-uri", str(effective["cache_uri"])])
+    if effective.get("random_seed") is not None:
+        common.extend(["--random-seed", str(effective["random_seed"])])
+    gating: list[str] = []
+    if effective.get("background_k") is not None and effective.get("foreground"):
+        gating = [
+            "--background-k", str(effective["background_k"]),
+            "--foreground", str(effective["foreground"]),
+            "--group-var", str(effective.get("group_var", "source_cohort")),
+        ]
+    hardening: list[str] = []
+    # reference_topic + spectral_init default to True (insight 0030). Emit the
+    # explicit boolean so the driver receives the intended value, not its own default.
+    ref = effective.get("reference_topic", True)
+    hardening.append("--reference-topic" if ref else "--no-reference-topic")
+    spec = effective.get("spectral_init", True)
+    hardening.append("--spectral-init" if spec else "--no-spectral-init")
+    # spectral_method defaults to "auto" (ADR 0037: dense below a vocab threshold,
+    # scalable above). Emit the flag only for an explicit override; "auto" is the
+    # driver default and stays implicit.
+    method = effective.get("spectral_method", "auto")
+    if method != "auto":
+        hardening.extend(["--spectral-method", str(method)])
+    if effective.get("spectral_d") is not None:
+        hardening.extend(["--spectral-d", str(effective["spectral_d"])])
+    if effective.get("spectral_min_doc_freq") is not None:
+        hardening.extend(["--spectral-min-doc-freq", str(effective["spectral_min_doc_freq"])])
+    if effective.get("min_pair_support") is not None:
+        hardening.extend(["--min-pair-support", str(effective["min_pair_support"])])
+    if effective.get("estimate_sigma_diagonal"):
+        hardening.append("--estimate-sigma-diagonal")
+    if effective.get("estimate_global_scale"):
+        hardening.append("--estimate-global-scale")
+    if "global_scale_step_cap" in effective:
+        hardening.extend(["--global-scale-step-cap", str(effective["global_scale_step_cap"])])
+    pin = effective.get("sigma_diagonal_pin")
+    if pin is not None and float(pin) != 1.0:
+        hardening += ["--sigma-diagonal-pin", str(float(pin))]
+    if effective.get("known_sex_only"):
+        hardening.append("--known-sex-only")
+    return common + [
+        "--covariate-formula", str(effective["covariate_formula"]),
+        "--categorical-cols", ",".join(effective.get("categorical_cols", [])),
+        "--continuous-cols", ",".join(effective.get("continuous_cols", [])),
+        "--sigma-init", str(effective.get("sigma_init", 1.0)),
+        "--sigma-ridge", str(effective.get("sigma_ridge", 1e-6)),
+        "--lbfgs-max-iter", str(effective.get("lbfgs_max_iter", 50)),
+        "--lbfgs-tol", str(effective.get("lbfgs_tol", 1e-4)),
+    ] + hardening + gating + (["--resume-from", str(resume_from)] if resume_from is not None else [])
 
 
 def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:
@@ -282,13 +629,19 @@ def build_dashboard_args(
     direct `[...]` access because they live in `_base.yaml` — if they're
     missing, a KeyError is the right failure mode (the YAML chain is broken).
     """
-    return [
+    args = [
         "--checkpoint", str(checkpoint_dir),
         "--model-class", str(effective.get("model_class", "lda")),
         "--zip-name", zip_name,
         "--vocab-top-n", str(effective["vocab_top_n"]),
         "--top-n-codes-for-npmi", str(effective["top_n_codes_for_npmi"]),
     ]
+    # STM uses the covariate cache to compute the faithful corpus-mean
+    # corpus_prevalence; pass it through when configured (ignored for LDA/HDP,
+    # which need no covariate sidecar). Mirrors the build/eval arg convention.
+    if effective.get("cache_uri"):
+        args.extend(["--cache-uri", str(effective["cache_uri"])])
+    return args
 
 
 # Spark configuration constants. Match the existing per-cohort Makefile targets.
@@ -305,13 +658,43 @@ SPARK_SUBMIT_FLAGS = [
 ]
 
 
+def cluster_overlay_path(repo_root: Path) -> Path:
+    """Path to the cluster dependency-overlay zip.
+
+    Carries the pure-Python runtime deps the AoU Dataproc image does NOT ship
+    (formulaic and its pure-Python leaves), built by the Makefile
+    `cluster-overlay` target from cluster-requirements.txt. The image already
+    provides numpy/pandas/scipy/pyarrow, so the overlay carries only the
+    leaves and rides on --py-files atop the image's own Python.
+    """
+    return repo_root / "analysis" / "cloud" / "dist" / "formulaic_overlay.zip"
+
+
 def build_spark_submit_cmd(
     script: str, script_args: list[str], repo_root: Path,
 ) -> list[str]:
-    """Build the full spark-submit command line."""
-    spark_vi_zip = repo_root / "spark-vi" / "dist" / "spark_vi.zip"
-    charmpheno_zip = repo_root / "charmpheno" / "dist" / "charmpheno.zip"
-    py_files_val = f"{spark_vi_zip},{charmpheno_zip}"
+    """Build the full spark-submit command line.
+
+    All Python travels via --py-files on the image's own interpreter -- no
+    interpreter override, no --files. Two zips of our own source (spark_vi,
+    charmpheno) ride so editing them only needs a fast `make zip`. A third,
+    the dependency overlay, carries the pure-Python runtime deps the image
+    does NOT ship (e.g. `formulaic`, needed by the STM covariate/formula path)
+    built on the master from cluster-requirements.txt (see the Makefile
+    `cluster-overlay` target). The image supplies numpy/pandas/scipy/pyarrow,
+    so the overlay holds only the pure-Python leaves and never shadows the
+    image's compiled libs. The overlay is absent for LDA/HDP runs that never
+    import formulaic -- then only the source zips ride.
+    """
+    py_files = [
+        repo_root / "spark-vi" / "dist" / "spark_vi.zip",
+        repo_root / "charmpheno" / "dist" / "charmpheno.zip",
+    ]
+    overlay = cluster_overlay_path(repo_root)
+    if overlay.exists():
+        py_files.append(overlay)
+    py_files_val = ",".join(str(p) for p in py_files)
+
     return (
         ["spark-submit"]
         + SPARK_SUBMIT_FLAGS
@@ -481,6 +864,21 @@ def main(argv: list[str] | None = None) -> int:
                              "If --id is omitted, auto-selects the most recent "
                              "fit whose dashboard_bundle/corpus_stats.json is "
                              "missing or older than manifest.json.")
+    parser.add_argument("--build-covariates-only", action="store_true",
+                        help="Rebuild the STM covariate cache for the given experiment "
+                             "without re-running the fit. Requires --id N and "
+                             "model_class=stm.")
+    parser.add_argument("--force-covariates", action="store_true",
+                        help="With --build-covariates-only: delete the existing "
+                             "covariate cache dir before rebuilding so the formula "
+                             "change is picked up. With --build-only: force-rebuild "
+                             "the covariate cache before the build.")
+    parser.add_argument("--auto-covariates", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="On --build-only, auto-rebuild the STM covariate cache "
+                             "if the build reports a covariate-cache miss, then "
+                             "retry once (default: on). --no-auto-covariates "
+                             "restores fail-fast.")
     parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR,
                         help="Base directory for run output. Default: %(default)s")
     parser.add_argument("--experiments-dir", type=Path, default=EXPERIMENTS_DIR,
@@ -496,6 +894,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only and (args.eval_only or args.no_eval):
         print("[run-exp] ERROR: --build-only is contradictory with --eval-only "
               "and --no-eval", flush=True)
+        return 2
+
+    if args.build_covariates_only and (args.eval_only or args.no_eval or args.build_only):
+        print("[run-exp] ERROR: --build-covariates-only is contradictory with "
+              "--eval-only, --no-eval, and --build-only", flush=True)
+        return 2
+
+    if args.force_covariates and not (args.build_covariates_only or args.build_only):
+        print("[run-exp] ERROR: --force-covariates requires --build-covariates-only "
+              "or --build-only", flush=True)
         return 2
 
     # 1. Select experiment file
@@ -541,9 +949,13 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError as e:
             print(f"[run-exp] ERROR: {e}", flush=True)
             return 2
+    elif args.build_covariates_only:
+        # --build-covariates-only without --id has no auto-discovery path.
+        print("[run-exp] ERROR: --build-covariates-only requires --id N", flush=True)
+        return 2
     else:
         print("[run-exp] ERROR: provide --next, --id N, --eval-only, "
-              "or --build-only (the last two auto-discover when --id is omitted)",
+              "--build-only, or --build-covariates-only",
               flush=True)
         return 2
     print(f"[run-exp] experiment: {exp_path}", flush=True)
@@ -554,21 +966,25 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         print(f"[run-exp] ERROR: {e}", flush=True)
         return 2
-    required = ["id", "slug", "cohort", "model_class"]
-    for k in required:
-        if k not in fm:
-            print(f"[run-exp] ERROR: frontmatter missing required field {k!r}", flush=True)
-            return 2
-    if fm["model_class"] != "lda":
-        print(f"[run-exp] ERROR: only model_class: lda supported in Increment 1 "
-              f"(got {fm['model_class']!r})", flush=True)
-        return 2
+    validate_frontmatter(fm)
     try:
         defaults = load_defaults(fm["cohort"], args.defaults_dir)
     except FileNotFoundError as e:
         print(f"[run-exp] ERROR: {e}", flush=True)
         return 2
     effective = merge_config(defaults, fm)
+
+    # 2b. --build-covariates-only: dispatch to standalone script and return.
+    if args.build_covariates_only:
+        if effective.get("model_class") != "stm":
+            print(f"[run-exp] ERROR: --build-covariates-only requires model_class=stm, "
+                  f"got {effective.get('model_class')!r}", flush=True)
+            return 2
+        if not effective.get("cache_uri"):
+            print("[run-exp] ERROR: --build-covariates-only requires cache_uri in "
+                  "effective config", flush=True)
+            return 2
+        return _dispatch_covariate_build(effective, force=args.force_covariates)
 
     # 3. Resolve save_dir, detect resume
     # Resume only when there's an actual checkpoint (manifest.json) inside the
@@ -583,6 +999,12 @@ def main(argv: list[str] | None = None) -> int:
     resume_from: Path | None = save_dir if has_checkpoint else None
     print(f"[run-exp] save_dir: {save_dir}  resume: {resume_from is not None}",
           flush=True)
+    # Guard: a fit resume warm-starts onto the checkpoint's params, so refuse
+    # when the checkpoint's corpus no longer matches the config (eval-only /
+    # build-only just read the checkpoint, so they don't warm-start and skip
+    # the check). Exits(2) on mismatch with remediation guidance.
+    if resume_from is not None and not (args.eval_only or args.build_only):
+        check_resume_compat(save_dir, effective)
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # 4. Write summary header (new file or append session marker)
@@ -604,9 +1026,10 @@ def main(argv: list[str] | None = None) -> int:
         mode = "--eval-only" if args.eval_only else "--build-only"
         print(f"[run-exp] {mode}: skipping fit dispatch", flush=True)
     else:
-        lda_script = REPO_ROOT / "analysis" / "cloud" / "lda_bigquery_cloud.py"
-        lda_args = build_lda_args(effective, save_dir, resume_from)
-        fit_cmd = build_spark_submit_cmd(str(lda_script), lda_args, REPO_ROOT)
+        fit_script = REPO_ROOT / build_fit_driver_path(effective)
+        # Both LDA and STM support --resume-from; build_fit_args threads it.
+        fit_args = build_fit_args(effective, str(save_dir), resume_from)
+        fit_cmd = build_spark_submit_cmd(str(fit_script), fit_args, REPO_ROOT)
         # Display-only join; cmd is passed as list to Popen/run, not via shell.
         print(f"[run-exp] spark-submit: {' '.join(fit_cmd)}", flush=True)
         fit_rc = run_subprocess_tee_sanitize(fit_cmd, summary_path, DROP_PATTERNS)
@@ -655,7 +1078,16 @@ def main(argv: list[str] | None = None) -> int:
         # Display-only join; cmd is passed as list to Popen, not via shell.
         print(f"[run-exp] build spark-submit: {' '.join(build_cmd)}", flush=True)
         write_build_section_header(summary_path)
-        build_rc = run_subprocess_tee_sanitize(build_cmd, summary_path, DROP_PATTERNS)
+        if (args.force_covariates and not (
+                effective.get("model_class") == "stm" and effective.get("cache_uri"))):
+            print("[run-exp] --force-covariates has no effect here: not an STM "
+                  "build with a cache_uri; skipping covariate rebuild", flush=True)
+        build_rc = _build_only_with_auto_covariates(
+            effective=effective, auto=args.auto_covariates,
+            force=args.force_covariates,
+            run_build=lambda: run_subprocess_tee_sanitize(build_cmd, summary_path, DROP_PATTERNS),
+            dispatch_cov=lambda force: _dispatch_covariate_build(effective, force=force),
+        )
         with summary_path.open("a") as f:
             f.write(f"\n### Build complete (exit {build_rc})\n")
         if build_rc != 0:

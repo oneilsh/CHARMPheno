@@ -12,8 +12,10 @@ Currently implemented:
 - ``first_cancer_year``: patients with a first malignant-cancer diagnosis
   (excluding non-melanoma skin cancer and carcinoma in situ), windowed
   to the 365 days starting at that first dx. Requires >= 365 days of
-  observation_period coverage both before (to make "first" meaningful)
-  and after (to make the doc window fully observed) the index date.
+  post-index observation_period coverage (so the doc window is fully
+  observed) and, by default, >= 365 days of prior coverage (so "first" is
+  meaningful); the prior lookback is configurable via ``prior_obs_days``
+  (0 drops it, admitting prevalent cases). See ``_window_observed_cohort``.
 - ``first_dementia_year``: patients with a first all-cause dementia
   diagnosis (Alzheimer's, vascular, Lewy body, FTD, dementia NOS — i.e.
   descendants of SNOMED "Dementia"), windowed to the 365 days starting
@@ -22,8 +24,32 @@ Currently implemented:
 """
 from __future__ import annotations
 
-from pyspark.sql import DataFrame, SparkSession
+import hashlib
+import inspect
+import sys
+from collections.abc import Sequence
+
+from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
+
+
+def cohort_defs_version() -> str:
+    """Content hash of this module's source, for cache-key invalidation.
+
+    Folded into the corpus + covariate cache keys so that ANY change to a cohort
+    definition or its helper logic auto-invalidates cached corpora — no manual
+    version bump to remember. Coarse by design: any edit to this module changes
+    the hash and invalidates ALL cohort caches (correctness over cache reuse).
+
+    Falls back to a constant if the source is unavailable (e.g. a byte-compiled
+    deploy with no .py in the zip), in which case invalidation relies on the
+    manual ``v`` in the cache-key payloads — so bump that too on shape changes.
+    """
+    try:
+        src = inspect.getsource(sys.modules[__name__])
+    except (OSError, TypeError):
+        return "src-unavailable"
+    return hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
 
 
 # Top-level SNOMED concept whose descendants define the inclusion set for
@@ -75,13 +101,83 @@ _DEMENTIA_ANCESTOR = 4182210
 # later is a one-liner.
 _DEMENTIA_EXCLUSION_ANCESTORS: tuple[int, ...] = ()
 
+# Top-level OMOP concept whose descendants define Ehlers-Danlos syndrome.
+# Provided by the domain owner (2026-07-03). No exclusions.
+# VERIFY ON FIRST RUN (as with dementia): count the descendants —
+#   SELECT COUNT(*) FROM concept_ancestor WHERE ancestor_concept_id = 79145;
+# Expect a non-zero descendant set (the EDS subtypes). If you see 0, the id is
+# wrong for this vocab version — re-confirm the OMOP concept for the SNOMED
+# "Ehlers-Danlos syndrome" hierarchy before fitting.
+_EDS_ANCESTOR = 79145
+
+# Disease registry for the generalized population+disease cohort. Each entry is
+# fully described by concept ancestors; adding a rare disease is a new entry
+# here + a SUPPORTED_COHORTS/COHORT_METADATA/apply_cohort line, no new function.
+_DISEASE_REGISTRY: dict[str, dict] = {
+    "cancer": {
+        "inclusion_ancestors": (_CANCER_ANCESTOR,),
+        "exclusion_ancestors": _CANCER_EXCLUSION_ANCESTORS,
+    },
+    "eds": {
+        "inclusion_ancestors": (_EDS_ANCESTOR,),
+        "exclusion_ancestors": (),
+    },
+}
+
+
+# Drug classes for the population_glp1 gated cohort, resolved by RxNorm
+# Ingredient NAME (not hard-coded concept_ids, so it is portable across CDR
+# vocab versions). VERIFY ON FIRST RUN that each name set resolves to a
+# non-empty ingredient set on the target CDR (see apply_population_drug_cohort's
+# build-time diagnostic).
+_DRUG_REGISTRY: dict[str, dict] = {
+    # Each class = descendants of its ATC-class concept (the authoritative
+    # definition), with ingredient names kept as a belt-and-suspenders fallback.
+    # ATC A10BJ = 1123618 "GLP-1 analogues"; A10BK = 1123627 "SGLT2 inhibitors".
+    # tirzepatide is NOT under A10BJ (dual GIP/GLP-1), so it stays its own arm.
+    # VERIFY the seed ids resolve to a non-trivial descendant set on the CDR.
+    "glp1_ra": {
+        "ingredient_names": (
+            "semaglutide", "liraglutide", "dulaglutide", "exenatide", "lixisenatide",
+        ),
+        "seed_concept_ids": (1123618,),
+    },
+    "sglt2i": {
+        "ingredient_names": (
+            "empagliflozin", "dapagliflozin", "canagliflozin", "ertugliflozin",
+        ),
+        "seed_concept_ids": (1123627,),
+    },
+    # tirzepatide (FDA 2022): pin the OMOP concept id as an explicit seed so the
+    # class set is descendants-of-779705 regardless of how this CDR's vocab
+    # names/classes the ingredient (name-only match under-counted it). VERIFY
+    # 779705 on the CDR (SELECT ... FROM concept WHERE concept_id=779705).
+    "tirzepatide": {
+        "ingredient_names": ("tirzepatide",),
+        "seed_concept_ids": (779705,),
+    },
+}
+
 
 # Names accepted by the CLI/loader. Add a new key here when adding a new
 # cohort function so the registry stays the single source of truth.
 SUPPORTED_COHORTS: tuple[str, ...] = (
     "first_cancer_year",
     "first_dementia_year",
+    "cancer_or_dementia",
+    "population_cancer",
+    "population_cancer_sparse",
+    "population_eds",
+    "population_sparse",
+    "population_glp1",
 )
+
+# Fixed salt for the general-population random-window assignment. Hashing
+# person_id with a constant salt makes each person's sampled 1-year window
+# deterministic and reproducible across runs (Spark's F.rand() is not
+# resume-stable), while still spreading windows pseudo-uniformly across each
+# person's observation history.
+_RANDOM_WINDOW_SALT = 20260702
 
 
 # User-facing metadata for each cohort. Consumed by the dashboard bundle
@@ -109,10 +205,10 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "Patients with a first malignant-cancer diagnosis (SNOMED "
             "443392 and descendants), excluding non-melanoma skin cancer "
             "(BCC/SCC) and carcinoma in situ. The document window is the "
-            "365 days starting at that first diagnosis. Patients must "
-            "have at least 365 days of observation_period coverage both "
-            "before and after the index date, so 'first' is meaningful "
-            "and the follow-up window is fully observed."
+            "365 days starting at that first diagnosis. The follow-up window "
+            "must be fully observed (365 days of post-index "
+            "observation_period coverage); by default 'first' also requires "
+            "365 days of prior coverage, relaxable via prior_obs_days."
         ),
     },
     "first_dementia_year": {
@@ -125,10 +221,104 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "mixed dementia). The document window is the 365 days "
             "starting at that first diagnosis, capturing the early-stage "
             "comorbidity cascade (delirium, falls, polypharmacy, "
-            "behavioral disturbance, aspiration pneumonia). Patients "
-            "must have at least 365 days of observation_period coverage "
-            "both before and after the index date, so 'first' is "
-            "meaningful and the follow-up window is fully observed."
+            "behavioral disturbance, aspiration pneumonia). The follow-up "
+            "window must be fully observed (365 days of post-index "
+            "observation_period coverage); by default 'first' also requires "
+            "365 days of prior coverage, relaxable via prior_obs_days."
+        ),
+    },
+    "cancer_or_dementia": {
+        "id": "cancer_or_dementia",
+        "label": "Cancer or Dementia (combined, source-labeled)",
+        "description": (
+            "Union of the first-cancer-year and first-dementia-year cohorts, "
+            "each document labeled by its source cohort. A patient qualifying "
+            "for both contributes two documents (one per cohort). Used as an "
+            "STM validation: a source_cohort covariate should produce strongly "
+            "separable cancer vs dementia topic structure."
+        ),
+    },
+    "population_cancer": {
+        "id": "population_cancer",
+        "label": "Population + Cancer (gated)",
+        "description": (
+            "The whole (sampled) population as a shared background, with a "
+            "cancer subcohort carrying its own foreground topics. Disjoint, one "
+            "document per person: patients with a first malignant-cancer "
+            "diagnosis (SNOMED 443392 and descendants, excluding non-melanoma "
+            "skin cancer and carcinoma in situ) get the 365-day post-diagnosis "
+            "window and source_cohort='cancer'; every other person gets a "
+            "deterministic random 365-day window anchored on one of their own "
+            "condition-eras (so it captures real activity, not an empty calendar "
+            "year) and source_cohort='general' (background-only, since 'general' "
+            "has no foreground block). Trains general-population background "
+            "topics against cancer-specific foreground under one gated STM."
+        ),
+    },
+    "population_cancer_sparse": {
+        "id": "population_cancer_sparse",
+        "label": "Population + Cancer + Sparse (gated)",
+        "description": (
+            "As Population + Cancer, but the non-cancer arm is split by "
+            "in-window coding density: heavily-coded years (>= 20 events) stay "
+            "source_cohort='general' (background-only), while light-coder years "
+            "(5-19 events) become source_cohort='sparse' — their own foreground "
+            "block. Lets a gated STM surface whether light-coder general years "
+            "are generic-checkup content or carry real structure (exp 0029). "
+            "Three disjoint source_cohort tags: cancer, general, sparse."
+        ),
+    },
+    "population_eds": {
+        "id": "population_eds",
+        "label": "Population + Ehlers-Danlos (gated)",
+        "description": (
+            "The whole population as a shared background, with an "
+            "Ehlers-Danlos syndrome (EDS) subcohort carrying its own foreground "
+            "topics — a rare-disease-on-a-background-population example. Disjoint, "
+            "one document per person: persons with a first EDS diagnosis (OMOP "
+            "79145 and descendants) get the 365-day post-diagnosis window and "
+            "source_cohort='eds'; every other person gets a deterministic random "
+            "365-day window anchored on one of their own condition-eras and "
+            "source_cohort='general' (background-only). K=60 (40 shared "
+            "background + 20 EDS foreground), fit on the full population as a "
+            "gated block-wise correlated STM with a sex-at-birth (M/F) and age "
+            "prevalence covariate."
+        ),
+    },
+    "population_sparse": {
+        "id": "population_sparse",
+        "label": "Population + Sparse (gated)",
+        "description": (
+            "The whole population split by in-window coding density — no disease "
+            "anchor. Each person is windowed to one deterministic random "
+            "event-anchored 365-day span, then split by event count: heavily-coded "
+            "years (>= 20 events) are source_cohort='general' (background-only), "
+            "light-coder years (5-19 events) become source_cohort='sparse' — their "
+            "own foreground block. K=50 (40 background + 10 sparse). A gated "
+            "block-wise correlated STM reads the sparse foreground topics to show "
+            "what light-coder general years are made of, against a clean "
+            "whole-population background."
+        ),
+    },
+    "population_glp1": {
+        "id": "population_glp1",
+        "label": "Population + GLP-1 vs SGLT2i (gated)",
+        "description": (
+            "The whole population as a shared background, with two drug "
+            "foreground arms anchored on the first year after starting a "
+            "medication (incident new-user: a year of prior coverage, a "
+            "fully-observed follow-up year): glp1_ra (GLP-1 receptor agonists) "
+            "and sglt2i (SGLT2 inhibitors, the active comparator). Users of both "
+            "are assigned to the earlier drug's arm only when that index year is "
+            "monotherapy (the other drug started > 1 year away); in-window "
+            "both-users are excluded. Tirzepatide (dual GIP/GLP-1) users are "
+            "excluded entirely (kept out of the GLP-1 arm and the background). "
+            "Documents are the conditions in that year; "
+            "drugs are the anchor only. The general background carries the same "
+            "1-year-prior + 1-year-follow-up observability bracket. A gated "
+            "block-wise correlated STM then shows what is distinctive to each "
+            "arm and its (anti-)correlations with the background comorbidity "
+            "topics."
         ),
     },
 }
@@ -153,25 +343,198 @@ def apply_cohort(
     cdr_dataset: str,
     billing_project: str,
     date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
 ) -> DataFrame:
     """Dispatch on cohort name. Raises ValueError on unknown names.
 
     Kept as a thin registry rather than inlined in the loader so adding
     a new cohort means adding a function below + a SUPPORTED_COHORTS
     entry, without touching the loader call site.
+
+    prior_obs_days is the per-cohort prior-observation lookback (default
+    ``_WINDOW_DAYS`` = 365); see :func:`_window_observed_cohort`.
     """
     if cohort == "first_cancer_year":
         return apply_first_cancer_year_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
         )
     if cohort == "first_dementia_year":
         return apply_first_dementia_year_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "cancer_or_dementia":
+        return apply_cancer_or_dementia_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_cancer":
+        return apply_population_cancer_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_cancer_sparse":
+        return apply_population_cancer_sparse_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_eds":
+        return apply_population_disease_cohort(
+            cond_df, disease="eds", spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_sparse":
+        return apply_population_sparse_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_glp1":
+        return apply_population_drug_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
         )
     raise ValueError(
         f"cohort {cohort!r} not supported (supported: {SUPPORTED_COHORTS})"
+    )
+
+
+def _window_observed_cohort(
+    first_dx: DataFrame,
+    observation_period: DataFrame,
+    *,
+    prior_obs_days: int,
+    window_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Keep the (person_id, index_date) rows that are adequately observed.
+
+    Two observation-period gates, joined against ``observation_period``:
+
+    - **Prior lookback**: ``index_date >= observation_period_start_date +
+      prior_obs_days``. At the default 365 this makes "first dx" mean "first
+      with a year of prior coverage", excluding prevalent cases whose true
+      first dx predates the record. ``prior_obs_days=0`` drops the lookback
+      (admitting those prevalent cases); the gate then only requires the
+      index to fall within an observation period at all.
+    - **Follow-up**: ``index_date + window_days <=
+      observation_period_end_date``, so the document window is fully observed
+      (absence of a code in the window is informative, not merely unobserved).
+      Independent of ``prior_obs_days``.
+
+    Returns ``(person_id, index_date)`` for the surviving rows.
+    """
+    return (
+        first_dx.join(observation_period, on="person_id", how="inner")
+        .where(F.col("index_date") >= F.date_add(
+            F.col("observation_period_start_date"), prior_obs_days))
+        .where(F.date_add(F.col("index_date"), window_days)
+               <= F.col("observation_period_end_date"))
+        # A person may have several observation_period rows that each satisfy
+        # the gates; distinct() collapses them so a survivor is one row, not one
+        # per qualifying period (which would fan out duplicate documents in the
+        # downstream cond_df join and over-weight multi-period patients).
+        .select("person_id", "index_date")
+        .distinct()
+    )
+
+
+def _concept_set_from_ancestors(
+    ca_df: DataFrame,
+    *,
+    inclusion_ancestors: Sequence[int],
+    exclusion_ancestors: Sequence[int] = (),
+) -> DataFrame:
+    """Build a concept-id set from a concept_ancestor DataFrame.
+
+    Includes-then-excludes: (⋃ descendants of ``inclusion_ancestors``) −
+    (⋃ descendants of ``exclusion_ancestors``). A concept reachable from both
+    an inclusion and an exclusion ancestor is excluded. ``ca_df`` must have
+    ``ancestor_concept_id`` and ``descendant_concept_id`` columns; returns a
+    distinct single-column ``concept_id`` DataFrame. Predicates on
+    ``ancestor_concept_id`` push down to BQ, so only the ~thousands of relevant
+    concept ids materialize, not the full concept_ancestor table.
+    """
+    included = (
+        ca_df.where(F.col("ancestor_concept_id").isin(list(inclusion_ancestors)))
+        .select(F.col("descendant_concept_id").alias("concept_id"))
+        .distinct()
+    )
+    if exclusion_ancestors:
+        excluded = (
+            ca_df.where(F.col("ancestor_concept_id").isin(list(exclusion_ancestors)))
+            .select(F.col("descendant_concept_id").alias("concept_id"))
+        )
+        included = included.subtract(excluded).distinct()
+    return included
+
+
+def apply_first_diagnosis_year_cohort(
+    cond_df: DataFrame,
+    *,
+    inclusion_ancestors: Sequence[int],
+    exclusion_ancestors: Sequence[int] = (),
+    window_days: int = _WINDOW_DAYS,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Filter to persons with a first qualifying dx + a ``window_days`` window.
+
+    Generalizes the per-disease first-year cohorts: the concept set is
+    (⋃ descendants of ``inclusion_ancestors``) − (⋃ descendants of
+    ``exclusion_ancestors``) via :func:`_concept_set_from_ancestors`; the
+    document window is ``[index_date, index_date + window_days)``. Same
+    observation-period bracketing as the cancer/dementia cohorts
+    (:func:`_window_observed_cohort`, ``prior_obs_days`` lookback). Returns
+    ``cond_df``'s schema, filtered.
+    """
+    def _read(table: str) -> DataFrame:
+        return (
+            spark.read.format("bigquery")
+            .option("table", f"{cdr_dataset}.{table}")
+            .option("parentProject", billing_project)
+            .load()
+        )
+
+    ca = _read("concept_ancestor").select(
+        "ancestor_concept_id", "descendant_concept_id",
+    )
+    concepts = _concept_set_from_ancestors(
+        ca,
+        inclusion_ancestors=inclusion_ancestors,
+        exclusion_ancestors=exclusion_ancestors,
+    )
+
+    first_dx = (
+        cond_df.join(F.broadcast(concepts), on="concept_id", how="inner")
+        .groupBy("person_id")
+        .agg(F.min(date_col).alias("index_date"))
+    )
+
+    op = _read("observation_period").select(
+        "person_id",
+        "observation_period_start_date",
+        "observation_period_end_date",
+    )
+    cohort_df = _window_observed_cohort(
+        first_dx, op, prior_obs_days=prior_obs_days,
+    )
+
+    return (
+        cond_df.join(cohort_df, on="person_id", how="inner")
+        .where(F.col(date_col) >= F.col("index_date"))
+        .where(F.col(date_col) < F.date_add(F.col("index_date"), window_days))
+        .drop("index_date")
     )
 
 
@@ -182,6 +545,7 @@ def apply_first_cancer_year_cohort(
     cdr_dataset: str,
     billing_project: str,
     date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
 ) -> DataFrame:
     """Filter to patients with a first cancer dx + 1-year follow-up window.
 
@@ -236,23 +600,15 @@ def apply_first_cancer_year_cohort(
                .agg(F.min(date_col).alias("index_date"))
     )
 
-    # Observation-period filter: 365d both sides of index. "Before" makes
-    # "first" mean "first in record with adequate lookback"; "after" makes
-    # the doc window fully observed (so absence of a code in the window
-    # is informative rather than "we just couldn't see them").
+    # Observation-period gating (prior lookback + fully-observed follow-up);
+    # see _window_observed_cohort. prior_obs_days controls the lookback.
     op = _read("observation_period").select(
         "person_id",
         "observation_period_start_date",
         "observation_period_end_date",
     )
-    cohort_df = (
-        first_dx.join(op, on="person_id", how="inner")
-                .where(F.col("index_date") >= F.date_add(
-                    F.col("observation_period_start_date"), _WINDOW_DAYS,
-                ))
-                .where(F.date_add(F.col("index_date"), _WINDOW_DAYS)
-                       <= F.col("observation_period_end_date"))
-                .select("person_id", "index_date")
+    cohort_df = _window_observed_cohort(
+        first_dx, op, prior_obs_days=prior_obs_days,
     )
 
     # Filter the events: cohort members only, in the doc window. Not
@@ -276,6 +632,7 @@ def apply_first_dementia_year_cohort(
     cdr_dataset: str,
     billing_project: str,
     date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
 ) -> DataFrame:
     """Filter to patients with a first dementia dx + 1-year follow-up.
 
@@ -338,14 +695,8 @@ def apply_first_dementia_year_cohort(
         "observation_period_start_date",
         "observation_period_end_date",
     )
-    cohort_df = (
-        first_event.join(op, on="person_id", how="inner")
-                   .where(F.col("index_date") >= F.date_add(
-                       F.col("observation_period_start_date"), _WINDOW_DAYS,
-                   ))
-                   .where(F.date_add(F.col("index_date"), _WINDOW_DAYS)
-                          <= F.col("observation_period_end_date"))
-                   .select("person_id", "index_date")
+    cohort_df = _window_observed_cohort(
+        first_event, op, prior_obs_days=prior_obs_days,
     )
 
     return (
@@ -356,3 +707,656 @@ def apply_first_dementia_year_cohort(
                ))
                .drop("index_date")
     )
+
+
+def _combine_cohorts(
+    cancer_events: DataFrame, dementia_events: DataFrame,
+) -> DataFrame:
+    """Tag each cohort's events with source_cohort and union (no dedup).
+
+    A comorbid patient's cancer-window events (tagged "cancer") and
+    dementia-window events (tagged "dementia") both survive, so they become
+    two distinct documents downstream via PatientCohortDocSpec.
+    """
+    c = cancer_events.withColumn("source_cohort", F.lit("cancer"))
+    d = dementia_events.withColumn("source_cohort", F.lit("dementia"))
+    return c.unionByName(d)
+
+
+def apply_cancer_or_dementia_cohort(
+    cond_df: DataFrame,
+    *,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Combined cancer-or-dementia cohort with a source_cohort label column.
+
+    Composes the two single-disease cohorts and unions their tagged events.
+    Returns cond_df's schema plus a `source_cohort` string column. Both arms
+    share the same ``prior_obs_days`` lookback.
+    """
+    cancer = apply_first_cancer_year_cohort(
+        cond_df, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        prior_obs_days=prior_obs_days,
+    )
+    dementia = apply_first_dementia_year_cohort(
+        cond_df, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        prior_obs_days=prior_obs_days,
+    )
+    return _combine_cohorts(cancer, dementia)
+
+
+def _random_observed_year_cohort(
+    cond_df: DataFrame,
+    *,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    window_days: int = _WINDOW_DAYS,
+    prior_obs_days: int = 0,
+) -> DataFrame:
+    """Window each person to ONE deterministic random event-anchored year.
+
+    Unlike the disease cohorts, the general population has no index event to
+    anchor on. Rather than a random CALENDAR window (usually empty — bursty
+    coding over long observation periods), we anchor on the person's own coding:
+    :func:`_random_event_windows` picks a random fully-observed event date and
+    windows the following ``window_days``. The choice is a deterministic,
+    resume-stable pseudo-random pick (hash-based).
+
+    Returns ``cond_df``'s schema, filtered to each person's sampled window.
+    Persons with no event that has a fully-observed forward window are dropped.
+    """
+    op = (
+        spark.read.format("bigquery")
+        .option("table", f"{cdr_dataset}.observation_period")
+        .option("parentProject", billing_project)
+        .load()
+        .select(
+            "person_id",
+            "observation_period_start_date",
+            "observation_period_end_date",
+        )
+    )
+    windows = _random_event_windows(
+        cond_df, op, date_col=date_col, window_days=window_days,
+        prior_obs_days=prior_obs_days,
+    )
+
+    return (
+        cond_df.join(windows, on="person_id", how="inner")
+        .where(F.col(date_col) >= F.col("index_date"))
+        .where(F.col(date_col) < F.date_add(F.col("index_date"), window_days))
+        .drop("index_date")
+    )
+
+
+def _random_event_windows(
+    cond_df: DataFrame,
+    observation_period: DataFrame,
+    *,
+    date_col: str,
+    window_days: int = _WINDOW_DAYS,
+    prior_obs_days: int = 0,
+) -> DataFrame:
+    """Anchor one deterministic random fully-observed window per person ON an event.
+
+    A random CALENDAR window over the observation period is usually empty:
+    EHR coding is bursty (clustered around real health events) while
+    observation periods span years, so a random year misses the activity and the
+    document is dropped by doc_min_length. Instead we anchor on the coding
+    itself: for each person, consider their event dates whose forward
+    ``window_days`` is fully observed (``event_date + window_days <=
+    observation_period_end`` for some period covering the event), and pick ONE
+    deterministically (min ``hash(person_id, event_date, salt)``, so it is a
+    reproducible pseudo-random choice — Spark's ``F.rand()`` is not
+    resume-stable). The window ``[index_date, index_date + window_days)`` then
+    contains at least the anchoring event and its surrounding activity.
+
+    Args:
+        cond_df: events (``person_id`` + ``date_col``).
+        observation_period: ``person_id`` + observation_period start/end dates.
+
+    Returns ``(person_id, index_date)``; persons with no event that has a
+    fully-observed forward window are dropped.
+    """
+    events = cond_df.select(
+        "person_id", F.col(date_col).alias("event_date"),
+    ).distinct()
+
+    # Eligible anchors: an event whose forward window is inside SOME observation
+    # period of that person (event within the period, and window end <= period
+    # end). A person may have several periods; any one covering the window works.
+    eligible = (
+        events.join(observation_period, on="person_id", how="inner")
+        .where(F.col("event_date") >= F.date_add(
+            F.col("observation_period_start_date"), prior_obs_days))
+        .where(
+            F.date_add(F.col("event_date"), window_days)
+            <= F.col("observation_period_end_date")
+        )
+        .select("person_id", "event_date")
+        .distinct()
+    )
+
+    # Deterministic pseudo-random pick: the eligible event with the smallest
+    # hash per person (ties broken by earliest date for stability).
+    ranked = eligible.withColumn(
+        "h", F.hash(F.col("person_id"), F.col("event_date"), F.lit(_RANDOM_WINDOW_SALT)),
+    )
+    chosen = ranked.withColumn(
+        "rn",
+        F.row_number().over(
+            Window.partitionBy("person_id").orderBy(
+                F.col("h").asc(), F.col("event_date").asc(),
+            )
+        ),
+    ).where(F.col("rn") == 1)
+
+    return chosen.select("person_id", F.col("event_date").alias("index_date"))
+
+
+def apply_population_disease_cohort(
+    cond_df: DataFrame,
+    *,
+    disease: str,
+    window_days: int = _WINDOW_DAYS,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Whole-population background + a single disease foreground, disjoint.
+
+    Generalizes :func:`apply_population_cancer_cohort` to any registered
+    ``disease`` (see ``_DISEASE_REGISTRY``). One document per person:
+
+    - disease arm — persons with a first qualifying dx (via
+      :func:`apply_first_diagnosis_year_cohort` on the registry's ancestors),
+      windowed to ``window_days`` post-dx, tagged ``source_cohort=<disease>``.
+    - ``general`` arm — every OTHER person, on a deterministic random
+      event-anchored ``window_days`` window (:func:`_random_observed_year_cohort`),
+      tagged ``source_cohort='general'`` (background-only).
+
+    ``window_days`` threads to BOTH arms so foreground and background windows
+    match. Arms are disjoint by person (general = ``left_anti`` of the disease
+    arm's persons). Returns ``cond_df``'s schema plus a ``source_cohort`` column.
+    """
+    try:
+        spec = _DISEASE_REGISTRY[disease]
+    except KeyError:
+        raise ValueError(
+            f"disease {disease!r} not in registry "
+            f"(known: {tuple(_DISEASE_REGISTRY)})"
+        )
+
+    diseased = apply_first_diagnosis_year_cohort(
+        cond_df,
+        inclusion_ancestors=spec["inclusion_ancestors"],
+        exclusion_ancestors=spec["exclusion_ancestors"],
+        window_days=window_days,
+        spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        prior_obs_days=prior_obs_days,
+    )
+    diseased_persons = diseased.select("person_id").distinct()
+
+    non_diseased = cond_df.join(diseased_persons, on="person_id", how="left_anti")
+    general = _random_observed_year_cohort(
+        non_diseased, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        window_days=window_days,
+    )
+
+    return (
+        diseased.withColumn("source_cohort", F.lit(disease))
+        .unionByName(general.withColumn("source_cohort", F.lit("general")))
+    )
+
+
+def apply_population_cancer_cohort(
+    cond_df: DataFrame,
+    *,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Whole-population background + a cancer foreground subcohort, disjoint.
+
+    One document per person, tagged with a ``source_cohort`` column:
+
+    - **cancer** — patients with a qualifying first cancer dx (the existing
+      :func:`apply_first_cancer_year_cohort`), windowed to the 365 days after
+      that diagnosis. These carry the cancer foreground topics.
+    - **general** — every OTHER person (no qualifying cancer dx), windowed to a
+      deterministic random 365-day span anchored on one of their own
+      condition-eras (:func:`_random_observed_year_cohort` →
+      :func:`_random_event_windows`). ``source_cohort='general'`` is not a
+      foreground group, so these documents resolve to background-only via
+      :meth:`TopicBlockPartition.allowed_indices`.
+
+    The arms are disjoint by person (the general arm is the ``left_anti`` of the
+    cancer arm's persons), so no patient contributes two documents. Returns
+    ``cond_df``'s schema plus a ``source_cohort`` string column.
+    """
+    return apply_population_disease_cohort(
+        cond_df, disease="cancer", window_days=_WINDOW_DAYS,
+        spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        prior_obs_days=prior_obs_days,
+    )
+
+
+def _bucket_general_by_density(
+    general_events: DataFrame,
+    *,
+    sparse_min: int = 5,
+    dense_min: int = 20,
+) -> DataFrame:
+    """Split the windowed general arm into 'sparse' and 'general' by density.
+
+    Tags each person's in-window events by their per-person event count:
+
+    - ``count >= dense_min``            -> ``source_cohort='general'`` (dense;
+      background-only, the usual heavily-coded general year).
+    - ``sparse_min <= count < dense_min`` -> ``source_cohort='sparse'`` (a
+      light-coder year, given its OWN foreground block so exp 0029 can read
+      whether such years are generic-checkup content or real signal).
+    - ``count < sparse_min``            -> dropped (they fall under
+      ``doc_min_length`` anyway).
+
+    The count is the raw in-window event-row count, a proxy for eventual
+    document length (which is measured on post-vocab tokens in
+    ``to_bow_dataframe``, so the bucketing is approximate at the vocab-filter
+    boundary). Row-preserving: every kept person's event rows survive, tagged.
+    """
+    counts = general_events.groupBy("person_id").agg(
+        F.count(F.lit(1)).alias("_n_events")
+    )
+    return (
+        general_events.join(counts, on="person_id", how="inner")
+        .withColumn(
+            "source_cohort",
+            F.when(F.col("_n_events") >= dense_min, F.lit("general"))
+            .when(F.col("_n_events") >= sparse_min, F.lit("sparse")),
+        )
+        .where(F.col("source_cohort").isNotNull())
+        .drop("_n_events")
+    )
+
+
+def apply_population_cancer_sparse_cohort(
+    cond_df: DataFrame,
+    *,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """population_cancer + a third 'sparse' foreground for light-coder years.
+
+    Identical to :func:`apply_population_cancer_cohort` except the general
+    (non-cancer) arm is split by in-window coding density
+    (:func:`_bucket_general_by_density`): heavily-coded years stay
+    ``source_cohort='general'`` (background-only), while light-coder years
+    (``sparse_min..dense_min-1`` events) become ``source_cohort='sparse'`` — a
+    dedicated foreground block. exp 0029 reads the sparse foreground topics to
+    test whether light-coder general years are generic-checkup content or carry
+    real structure. Three disjoint ``source_cohort`` tags: cancer, general,
+    sparse. Returns ``cond_df``'s schema plus ``source_cohort``.
+    """
+    cancer = apply_first_cancer_year_cohort(
+        cond_df, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        prior_obs_days=prior_obs_days,
+    )
+    cancer_persons = cancer.select("person_id").distinct()
+
+    non_cancer = cond_df.join(cancer_persons, on="person_id", how="left_anti")
+    general = _random_observed_year_cohort(
+        non_cancer, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+    )
+    general_tagged = _bucket_general_by_density(general)
+
+    return cancer.withColumn("source_cohort", F.lit("cancer")).unionByName(
+        general_tagged
+    )
+
+
+def apply_population_sparse_cohort(
+    cond_df: DataFrame,
+    *,
+    window_days: int = _WINDOW_DAYS,
+    sparse_min: int = 5,
+    dense_min: int = 20,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Whole population split by in-window coding density — no disease arm.
+
+    Every person is windowed to one deterministic random event-anchored
+    ``window_days`` span (:func:`_random_observed_year_cohort`), then split by
+    per-person in-window event count (:func:`_bucket_general_by_density`):
+    ``>= dense_min`` -> ``source_cohort='general'`` (dense background),
+    ``sparse_min..dense_min-1`` -> ``source_cohort='sparse'`` (a light-coder
+    foreground block), ``< sparse_min`` dropped. Unlike
+    :func:`apply_population_cancer_sparse_cohort`, there is NO disease foreground
+    — cancer/EDS patients simply fold into the population, giving a clean
+    whole-population reference for reading what light-coder years contain.
+
+    ``prior_obs_days`` is accepted for a uniform :func:`apply_cohort` signature
+    but unused (there is no disease index event to be "first" of). Returns
+    ``cond_df``'s schema plus a ``source_cohort`` column.
+    """
+    general = _random_observed_year_cohort(
+        cond_df, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        window_days=window_days,
+    )
+    return _bucket_general_by_density(
+        general, sparse_min=sparse_min, dense_min=dense_min,
+    )
+
+
+def _ingredient_concept_ids(
+    concept_df: DataFrame, ingredient_names: Sequence[str],
+    *, extra_concept_ids: Sequence[int] = (),
+) -> DataFrame:
+    """Resolve seed drug concept_ids by RxNorm Ingredient name + explicit pins.
+
+    ``concept_df`` must have ``concept_id``, ``concept_name``, ``vocabulary_id``,
+    ``concept_class_id``. Returns the distinct ``concept_id`` of standard RxNorm
+    ingredients whose name matches ``ingredient_names``, UNION any
+    ``extra_concept_ids`` pinned explicitly. The pins are included even when they
+    do not match the name/class filter — a robustness hatch for newer drugs
+    whose vocab naming/classing may not match the expected Ingredient name (e.g.
+    tirzepatide). These are SEED ids; expand them to a full class set with
+    :func:`_expand_descendants` before matching ``drug_era``.
+    """
+    names_lower = [n.lower() for n in ingredient_names]
+    by_name = (
+        concept_df
+        .where(F.col("vocabulary_id") == "RxNorm")
+        .where(F.col("concept_class_id") == "Ingredient")
+        .where(F.lower(F.col("concept_name")).isin(names_lower))
+        .select("concept_id")
+    )
+    if extra_concept_ids:
+        extra = concept_df.sparkSession.createDataFrame(
+            [(int(c),) for c in extra_concept_ids], ["concept_id"],
+        )
+        by_name = by_name.unionByName(extra)
+    return by_name.distinct()
+
+
+def _expand_descendants(ca_df: DataFrame, seed_ids: DataFrame) -> DataFrame:
+    """All descendants (including the seeds themselves) of ``seed_ids`` via
+    ``concept_ancestor``.
+
+    ``ca_df`` has ``ancestor_concept_id``, ``descendant_concept_id``;
+    ``seed_ids`` is a single-column ``concept_id`` DataFrame. Returns the
+    distinct ``concept_id`` set = seeds ∪ their descendants. ``drug_era`` is
+    ingredient-level so the ingredient (a self-descendant) matches directly;
+    expanding to descendants also captures any clinical-drug-level rows and
+    guards against incomplete ingredient rollup for newer drugs. Self is
+    unioned back in case ``concept_ancestor`` lacks a self-row for a seed.
+    """
+    descendants = (
+        ca_df.join(
+            seed_ids,
+            ca_df.ancestor_concept_id == seed_ids.concept_id,
+            how="inner",
+        )
+        .select(ca_df.descendant_concept_id.alias("concept_id"))
+    )
+    return descendants.unionByName(seed_ids.select("concept_id")).distinct()
+
+
+def _first_drug_era_dates(
+    drug_era_df: DataFrame, ingredient_concept_ids: DataFrame,
+) -> DataFrame:
+    """Earliest drug_era start per person among the given ingredient concept_ids.
+
+    ``drug_era_df`` has ``person_id``, ``drug_concept_id``,
+    ``drug_era_start_date``. Returns ``(person_id, index_date)`` — the person's
+    first exposure to the class. Persons with no matching era are absent.
+    """
+    return (
+        drug_era_df.join(
+            F.broadcast(ingredient_concept_ids),
+            drug_era_df.drug_concept_id == ingredient_concept_ids.concept_id,
+            how="inner",
+        )
+        .groupBy("person_id")
+        .agg(F.min("drug_era_start_date").alias("index_date"))
+    )
+
+
+def _assign_drug_groups(
+    g: DataFrame, s: DataFrame, t: DataFrame,
+    *, window_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Assign each drug-exposed person to exactly one foreground group.
+
+    Inputs are per-class first-era dates ``(person_id, index_date)`` for
+    glp1_ra (``g``), sglt2i (``s``), tirzepatide (``t``). Two drug arms
+    (glp1_ra, sglt2i); tirzepatide is resolved only to EXCLUDE its users:
+
+    - has tirzepatide                    -> EXCLUDED (dropped; kept out of the
+      single arms AND, via the caller's left_anti on all tracked drug persons,
+      out of the general background: a dual GIP/GLP-1 patient is neither a pure
+      GLP-1-RA new-user nor an untreated background person)
+    - has glp1_ra AND sglt2i, no tirzepatide:
+        - ``|g - s| > window_days`` -> the EARLIER drug's single arm (the second
+          drug starts OUTSIDE the index year, so that year is genuine
+          monotherapy; index = earlier of g, s)
+        - ``|g - s| <= window_days`` -> EXCLUDED (the second drug starts INSIDE
+          the index year, contaminating it; no combination-therapy arm)
+    - has glp1_ra only                   -> ``glp1_ra``      (index = g)
+    - has sglt2i only                    -> ``sglt2i``       (index = s)
+
+    Returns ``(person_id, source_cohort, index_date)`` for the two arms only.
+    """
+    g2 = g.select("person_id", F.col("index_date").alias("g_date"))
+    s2 = s.select("person_id", F.col("index_date").alias("s_date"))
+    t2 = t.select("person_id", F.col("index_date").alias("t_date"))
+    joined = (
+        g2.join(s2, on="person_id", how="full_outer")
+          .join(t2, on="person_id", how="full_outer")
+    )
+    has_g = F.col("g_date").isNotNull()
+    has_s = F.col("s_date").isNotNull()
+    has_t = F.col("t_date").isNotNull()
+    gap = F.abs(F.datediff(F.col("g_date"), F.col("s_date")))
+    earlier_index = F.least(F.col("g_date"), F.col("s_date"))
+    # For a long-gap both-user, the arm is whichever drug was initiated first.
+    earlier_arm = F.when(F.col("g_date") <= F.col("s_date"), F.lit("glp1_ra")) \
+                   .otherwise(F.lit("sglt2i"))
+
+    source = (
+        F.when(has_t, F.lit(None))                 # tirzepatide user -> excluded
+        .when(has_g & has_s & (gap > window_days), earlier_arm)  # clean monotherapy year
+        .when(has_g & has_s, F.lit(None))          # in-window both-user -> excluded
+        .when(has_g, F.lit("glp1_ra"))
+        .when(has_s, F.lit("sglt2i"))
+        .otherwise(F.lit(None))
+    )
+    index_date = (
+        F.when(has_t, F.lit(None))
+        .when(has_g & has_s & (gap > window_days), earlier_index)
+        .when(has_g & has_s, F.lit(None))
+        .when(has_g, F.col("g_date"))
+        .when(has_s, F.col("s_date"))
+        .otherwise(F.lit(None))
+    )
+    return (
+        joined.withColumn("source_cohort", source)
+        .withColumn("index_date", index_date)
+        .where(F.col("source_cohort").isNotNull())
+        .select("person_id", "source_cohort", "index_date")
+    )
+
+
+def _coinitiation_gap_histogram(g: DataFrame, s: DataFrame) -> DataFrame:
+    """Bucketed |g - s| gap counts for persons who are new-users of BOTH
+    glp1_ra and sglt2i. A no-fit diagnostic on the both-user population: how many
+    fall > 1 year apart (recovered to a single arm) vs in-window (excluded).
+    Returns ``(bucket, n)``.
+    """
+    both = (
+        g.select("person_id", F.col("index_date").alias("g_date"))
+        .join(s.select("person_id", F.col("index_date").alias("s_date")),
+              on="person_id", how="inner")
+    )
+    gap = F.abs(F.datediff(F.col("g_date"), F.col("s_date")))
+    bucket = (
+        F.when(gap <= 7, "0-7")
+        .when(gap <= 30, "8-30")
+        .when(gap <= 90, "31-90")
+        .when(gap <= 180, "91-180")
+        .when(gap <= 365, "181-365")
+        .otherwise("366+")
+    )
+    return (
+        both.withColumn("bucket", bucket)
+        .groupBy("bucket")
+        .agg(F.count(F.lit(1)).alias("n"))
+    )
+
+
+def apply_population_drug_cohort(
+    cond_df: DataFrame,
+    *,
+    window_days: int = _WINDOW_DAYS,
+    prior_obs_days: int = _WINDOW_DAYS,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+) -> DataFrame:
+    """Whole-population background + two drug foreground arms, disjoint.
+
+    Anchors on ``drug_era``: each per-class set is the descendants
+    (:func:`_expand_descendants`) of its seed ingredients (resolved by name +
+    optional pinned ids via :func:`_ingredient_concept_ids`), and the first
+    matching era per person gives that class's index date. These are partitioned
+    by :func:`_assign_drug_groups` into glp1_ra and sglt2i (a both-GLP1+SGLT2i
+    user goes to the earlier drug's arm only when the two starts are >
+    ``window_days`` apart, else is excluded). Tirzepatide is resolved only to
+    exclude its users (from the arms and, via the general left_anti, the
+    background); there is no tirzepatide or combination arm.
+    Chosen index dates are new-user-bracketed
+    (:func:`_window_observed_cohort`: ``prior_obs_days`` prior coverage + observed
+    ``window_days`` follow-up). The ``general`` arm is every person with NO
+    tracked drug exposure, windowed to a random observed year with the SAME
+    prior+forward bracket (:func:`_random_observed_year_cohort`). Documents are
+    the person's condition rows in ``[index_date, index_date + window_days)``.
+    Returns ``cond_df``'s schema plus a ``source_cohort`` column.
+    """
+    def _read(table: str) -> DataFrame:
+        return (
+            spark.read.format("bigquery")
+            .option("table", f"{cdr_dataset}.{table}")
+            .option("parentProject", billing_project)
+            .load()
+        )
+
+    concept = _read("concept").select(
+        "concept_id", "concept_name", "vocabulary_id", "concept_class_id",
+    )
+    ca = _read("concept_ancestor").select(
+        "ancestor_concept_id", "descendant_concept_id",
+    )
+    drug_era = _read("drug_era").select(
+        "person_id", "drug_concept_id", "drug_era_start_date",
+    )
+    op = _read("observation_period").select(
+        "person_id",
+        "observation_period_start_date",
+        "observation_period_end_date",
+    )
+
+    def _first_dates(class_key: str) -> DataFrame:
+        spec = _DRUG_REGISTRY[class_key]
+        seeds = _ingredient_concept_ids(
+            concept, spec["ingredient_names"],
+            extra_concept_ids=spec.get("seed_concept_ids", ()),
+        )
+        # cache: concept_set is scanned twice (count + the era join), dates is
+        # reused downstream (partition + gap histogram + general left_anti) —
+        # avoids re-scanning concept_ancestor / drug_era each time.
+        concept_set = _expand_descendants(ca, seeds).cache()
+        dates = _first_drug_era_dates(drug_era, concept_set).cache()
+        # Loud resolution: log BOTH the concept-set size AND the resulting person
+        # count. A thin/empty concept set is a mis-spec (wrong or non-standard
+        # seed id — a non-standard pin has no concept_ancestor hierarchy, so the
+        # set collapses to just itself); zero persons despite a plausible set
+        # means the seed doesn't match how drug_era tags the drug. Either is a
+        # definition bug, not a rare drug.
+        print(f"[cohort population_glp1] {class_key}: resolved "
+              f"{concept_set.count()} drug concept(s), "
+              f"{dates.count()} persons with a first era", flush=True)
+        return dates
+
+    g = _first_dates("glp1_ra")
+    s = _first_dates("sglt2i")
+    t = _first_dates("tirzepatide")
+
+    # Build-time diagnostic: both-user |g-s| gap distribution. Buckets past
+    # window_days (> 365d, the "366+" bucket) are recovered into a single arm;
+    # the rest are excluded. Ascending gap order (not lexicographic).
+    _gap_bucket_order = ("0-7", "8-30", "31-90", "91-180", "181-365", "366+")
+    print("[cohort population_glp1] GLP-1/SGLT2i both-user |g-s| gap histogram "
+          f"(> {window_days}d -> single arm, else excluded):", flush=True)
+    _gap_counts = {
+        r["bucket"]: r["n"] for r in _coinitiation_gap_histogram(g, s).collect()
+    }
+    for bucket in _gap_bucket_order:
+        print(f"[cohort population_glp1]   {bucket}: {_gap_counts.get(bucket, 0)}",
+              flush=True)
+
+    assigned = _assign_drug_groups(g, s, t, window_days=window_days)
+
+    # New-user observation bracket on the chosen index; rejoin to recover the tag.
+    bracketed = _window_observed_cohort(
+        assigned.select("person_id", "index_date"), op,
+        prior_obs_days=prior_obs_days, window_days=window_days,
+    )
+    drug_docs = assigned.join(bracketed, on=["person_id", "index_date"], how="inner")
+    drug_windows = (
+        cond_df.join(drug_docs, on="person_id", how="inner")
+        .where(F.col(date_col) >= F.col("index_date"))
+        .where(F.col(date_col) < F.date_add(F.col("index_date"), window_days))
+        .drop("index_date")
+    )
+
+    # general = persons with NO tracked drug exposure at all (excluded both-users
+    # and inadequately-observed initiators are NOT background).
+    drug_persons = (
+        g.select("person_id")
+        .unionByName(s.select("person_id"))
+        .unionByName(t.select("person_id"))
+        .distinct()
+    )
+    non_drug = cond_df.join(drug_persons, on="person_id", how="left_anti")
+    general = _random_observed_year_cohort(
+        non_drug, spark=spark, cdr_dataset=cdr_dataset,
+        billing_project=billing_project, date_col=date_col,
+        window_days=window_days, prior_obs_days=prior_obs_days,
+    ).withColumn("source_cohort", F.lit("general"))
+
+    return drug_windows.unionByName(general)

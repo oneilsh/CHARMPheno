@@ -50,12 +50,8 @@
   $: yMax = visibleValues.length ? Math.max(...visibleValues) : 1e-4
 
   // ── Bar geometry ──────────────────────────────────────────────────────────
-  // Bar pixel width = width of one bin in the display domain.
-  // Use the first bin width as representative (bins are uniform in local-test).
-  $: binPixW = binEdges.length >= 2
-    ? xScale(binEdges[1]) - xScale(binEdges[0])
-    : 4
-
+  // Bar pixel width is derived per-bar from its clamped [lo, hi] display span
+  // (see the bars block), so no single representative width is needed here.
   function barHeight(val: number | null): number {
     if (val === null || val <= 0) return 0
     return Math.min(val / yMax, 1) * chartH
@@ -170,11 +166,14 @@
   <!-- Bars -->
   {#each visibleBins as { i, val, lo, hi, inRange }}
     {#if inRange}
-      {@const bx = xScale(lo)}
+      <!-- Clamp the bar to [xMin, xMax]: the bin straddling τ has lo < xMin, so an
+           unclamped left edge would spill left of the axis over the y-axis labels
+           (and the top bin can spill past the right edge). -->
+      {@const bx = xScale(Math.max(lo, xMin))}
       {@const bh = barHeight(val)}
       {@const by = PAD_TOP + chartH - bh}
       {@const isHovered = hoveredBin === i}
-      {@const barW = Math.max(binPixW - 0.5, 1)}
+      {@const barW = Math.max(xScale(Math.min(hi, xMax)) - bx - 0.5, 1)}
 
       <!-- Null bins still get a full-height transparent hit-target so the
            tooltip is reachable; non-null bins get the visible colored bar. -->

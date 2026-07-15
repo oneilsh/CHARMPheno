@@ -1,20 +1,71 @@
 <script lang="ts">
   import {
     bundle, selectedPhenotypeId, advancedView,
-    phenotypeFilter, phenotypeSortBy, searchedConditionIdx,
-    prevalenceReader, tauThreshold, isVisibleInCurrentMode,
+    phenotypeFilter, phenotypeSortBy, phenotypeSortDir, searchedConditionIdx,
+    coverageReader, tauThreshold, isVisibleInCurrentMode,
+    type PhenotypeSortKey,
   } from '../store'
+  import { groupHue } from '../palette'
   import { phenotypesContainingCode } from '../inference'
   import type { Phenotype } from '../types'
   import { copy } from '../copy'
 
   // Reactively bind the τ-aware reader so all call sites stay in sync.
-  $: reader = $prevalenceReader
+  $: reader = $coverageReader
 
-  // Filter+sort phenotype list. Sort key state lives in the global store so
-  // it's preserved across tab switches. Simple-mode hides dead+mixed (matches
+  // Filter+sort phenotype list. Sort key/dir live in the global store so
+  // they're preserved across tab switches. Simple-mode hides dead+mixed (matches
   // the bubble atlas filter).
   $: phenotypes = ($bundle?.phenotypes.phenotypes ?? []) as Phenotype[]
+
+  // Cohort (gated bundles): block name per phenotype, with a display label that
+  // matches the atlas ("background" -> "All") and the shared cohort hue.
+  $: gated = !!$bundle?.gating
+  $: blockOf = (p: Phenotype) => $bundle?.gating?.topic_blocks?.[p.id] ?? ''
+  $: cohortLabel = (p: Phenotype) => {
+    const b = blockOf(p)
+    if (!b) return ''
+    if (b === 'background') return 'All'
+    return $bundle?.gating?.group_labels?.[b] ?? b
+  }
+
+  // Clickable-header sort: re-clicking the active column flips direction;
+  // switching column resets to that column's natural default (text asc,
+  // numeric desc).
+  const defaultDir = (key: PhenotypeSortKey): 'asc' | 'desc' =>
+    key === 'label' || key === 'cohort' ? 'asc' : 'desc'
+  function sortByCol(key: PhenotypeSortKey) {
+    if ($phenotypeSortBy === key) {
+      phenotypeSortDir.update((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      phenotypeSortBy.set(key)
+      phenotypeSortDir.set(defaultDir(key))
+    }
+  }
+
+  // Ascending-sense comparator; direction is applied in the sort call. nulls
+  // sort as -Infinity so they trail on descending (the default for coherence).
+  // Takes `prevReader` explicitly (rather than closing over the top-level
+  // `reader` binding) so the `filtered` reactive statement that calls this
+  // sees `reader` as a real argument and re-runs whenever a conditioning
+  // change produces a new $coverageReader.
+  function cmp(a: Phenotype, b: Phenotype, key: PhenotypeSortKey, prevReader: (p: Phenotype) => number): number {
+    switch (key) {
+      case 'id':
+        return a.id - b.id
+      case 'label':
+        return (a.label || `Phenotype ${a.id}`).localeCompare(b.label || `Phenotype ${b.id}`)
+      case 'cohort':
+        return cohortLabel(a).localeCompare(cohortLabel(b)) || a.id - b.id
+      case 'coherence':
+        return (a.npmi ?? -Infinity) - (b.npmi ?? -Infinity)
+      case 'coverage':
+      default: {
+        const d = prevReader(a) - prevReader(b)
+        return d !== 0 ? d : a.corpus_prevalence - b.corpus_prevalence
+      }
+    }
+  }
 
   // Optional restriction: when the user has pinned a condition via the
   // search bar, restrict the table to phenotypes containing that condition
@@ -27,6 +78,13 @@
       })
     : null
 
+  // Depends explicitly on `reader` (not just $phenotypeSortBy/$phenotypeSortDir)
+  // so a conditioning change — which produces a new $coverageReader — is
+  // seen by Svelte's dependency tracker and re-runs this block, re-sorting
+  // the rows when the active sort column is 'coverage'. (cmp() closes over
+  // `reader` internally, but a call inside the statement isn't enough for
+  // Svelte's static reactive-dependency analysis to pick it up — passing it
+  // as an explicit comparator argument makes the dependency visible.)
   $: filtered = phenotypes
     .filter((p) => {
       if (!$isVisibleInCurrentMode(p)) return false
@@ -37,28 +95,11 @@
       const desc = (p.description || '').toLowerCase()
       return label.includes(q) || desc.includes(q)
     })
-    .sort((a, b) => {
-      switch ($phenotypeSortBy) {
-        case 'label': {
-          const la = a.label || `Phenotype ${a.id}`
-          const lb = b.label || `Phenotype ${b.id}`
-          return la.localeCompare(lb)
-        }
-        case 'coherence': {
-          if (a.npmi == null && b.npmi == null) return 0
-          if (a.npmi == null) return 1
-          if (b.npmi == null) return -1
-          return b.npmi - a.npmi
-        }
-        case 'topic_mass':
-          return b.corpus_prevalence - a.corpus_prevalence
-        case 'prevalence':
-        default: {
-          const diff = reader(b) - reader(a)
-          return diff !== 0 ? diff : (b.corpus_prevalence - a.corpus_prevalence)
-        }
-      }
-    })
+    .sort((a, b) => ($phenotypeSortDir === 'asc' ? 1 : -1) * cmp(a, b, $phenotypeSortBy, reader))
+
+  // Sort indicator for a column header (active column only).
+  $: arrow = (key: PhenotypeSortKey) =>
+    $phenotypeSortBy === key ? ($phenotypeSortDir === 'asc' ? '▲' : '▼') : ''
 
   // Color-code the quality chip the same way CodePanel does
   const qualityClass: Record<string, string> = {
@@ -76,13 +117,17 @@
     ? Math.max(...phenotypes.map(reader), 1e-9)
     : 1e-9
 
-  // Topic mass domain: based on raw corpus_prevalence (doc-mean θ).
-  $: maxMass = phenotypes.length
-    ? Math.max(...phenotypes.map((p) => p.corpus_prevalence), 1e-9)
+  // Coherence (NPMI) bar: normalize each value to the FULL set's max so widths
+  // stay stable as the filter narrows (same rationale as maxPrev). NPMI can be
+  // negative (anti-coherent); those clamp to an empty bar rather than reversing.
+  $: maxCoh = phenotypes.length
+    ? Math.max(...phenotypes.map((p) => p.npmi ?? 0), 1e-9)
     : 1e-9
+  const cohWidth = (npmi: number | null): number =>
+    npmi == null ? 0 : Math.max(0, Math.min(npmi / maxCoh, 1)) * 100
 </script>
 
-<details class="browser" open>
+<details class="browser" open data-tour="phenotype-browser">
   <summary>
     <span class="summary-text">
       Browse all phenotypes ({filtered.length}/{phenotypes.length})
@@ -107,17 +152,6 @@
         >×</button>
       {/if}
     </div>
-    <div class="sort">
-      <span class="eyebrow">Sort by</span>
-      <select bind:value={$phenotypeSortBy}>
-        <option value="prevalence">{$advancedView ? 'Prevalence (patients)' : 'Prevalence'}</option>
-        <option value="label">Label (A–Z)</option>
-        {#if $advancedView}
-          <option value="coherence">Coherence</option>
-          <option value="topic_mass">Topic mass</option>
-        {/if}
-      </select>
-    </div>
     {#if containingSet}
       <span class="filter-chip filter-chip-search" title="Filtered to phenotypes containing the searched condition">
         contains searched condition · {filtered.length} match{filtered.length === 1 ? '' : 'es'}
@@ -131,27 +165,48 @@
     <table class="phenos">
       <thead>
         <tr>
-          <th class="col-id">#</th>
-          <th class="col-label">Label</th>
+          <th class="col-id">
+            <button class="th-sort" class:active={$phenotypeSortBy === 'id'} on:click={() => sortByCol('id')}>#<span class="arrow">{arrow('id')}</span></button>
+          </th>
+          <th class="col-label">
+            <button class="th-sort" class:active={$phenotypeSortBy === 'label'} on:click={() => sortByCol('label')}>Label<span class="arrow">{arrow('label')}</span></button>
+          </th>
+          {#if gated}
+            <th class="col-cohort">
+              <button class="th-sort" class:active={$phenotypeSortBy === 'cohort'} on:click={() => sortByCol('cohort')}>Cohort<span class="arrow">{arrow('cohort')}</span></button>
+            </th>
+          {/if}
           {#if $advancedView}
             <th class="col-quality">Quality</th>
-            <th class="col-coh" data-numeric>Coherence</th>
-            <th class="col-mass" data-numeric title={copy.phenotypeBrowser.topicMassTip}>Topic mass</th>
           {/if}
+          <th class="col-coh" data-numeric title={copy.phenotypeDetail.coherenceTip}>
+            <button class="th-sort th-sort-num" class:active={$phenotypeSortBy === 'coherence'} on:click={() => sortByCol('coherence')}><span class="arrow">{arrow('coherence')}</span>Coherence</button>
+          </th>
           <th class="col-prev" data-numeric title={$advancedView
-            ? copy.phenotypeBrowser.prevTipAdvanced($tauThreshold)
-            : copy.phenotypeBrowser.prevTipBasic($tauThreshold)
-          }>{$advancedView ? 'Prevalence (patients)' : 'Prevalence'}</th>
+            ? copy.phenotypeBrowser.coverageTipAdvanced($tauThreshold)
+            : copy.phenotypeBrowser.coverageTipBasic($tauThreshold)
+          }>
+            <button class="th-sort th-sort-num" class:active={$phenotypeSortBy === 'coverage'} on:click={() => sortByCol('coverage')}><span class="arrow">{arrow('coverage')}</span>Coverage</button>
+          </th>
         </tr>
       </thead>
       <tbody>
         {#each filtered as p (p.id)}
           <tr
+            data-pid={p.id}
             class:selected={$selectedPhenotypeId === p.id}
             on:click={() => selectedPhenotypeId.set(p.id)}
           >
             <td class="col-id" data-numeric>{p.id}</td>
             <td class="col-label">{p.label || `Phenotype ${p.id}`}</td>
+            {#if gated}
+              <td class="col-cohort">
+                <span class="cohort-cell">
+                  <span class="cohort-sw" style="background:{$groupHue(blockOf(p))}"></span>
+                  {cohortLabel(p)}
+                </span>
+              </td>
+            {/if}
             {#if $advancedView}
               <td class="col-quality">
                 {#if p.quality}
@@ -160,16 +215,17 @@
                   <span class="qchip qchip-empty">·</span>
                 {/if}
               </td>
-              <td class="col-coh" data-numeric>{p.npmi == null ? '—' : p.npmi.toFixed(3)}</td>
-              <td class="col-mass" data-numeric>
-                <span class="prev-row">
-                  <span class="prev-bar">
-                    <span class="prev-fill mass-fill" style="width: {(p.corpus_prevalence / maxMass) * 100}%"></span>
-                  </span>
-                  <span class="prev-num">{(p.corpus_prevalence * 100).toFixed(1)}%</span>
-                </span>
-              </td>
             {/if}
+            <td class="col-coh" data-numeric>
+              {#if p.npmi == null}
+                <span class="prev-row"><span class="prev-num">—</span></span>
+              {:else}
+                <span class="prev-row">
+                  <span class="prev-bar"><span class="prev-fill coh-fill" style="width: {cohWidth(p.npmi)}%"></span></span>
+                  <span class="prev-num prev-num-coh">{p.npmi.toFixed(3)}</span>
+                </span>
+              {/if}
+            </td>
             <td class="col-prev" data-numeric>
               <span class="prev-row">
                 <span class="prev-bar">
@@ -184,7 +240,7 @@
           </tr>
         {/each}
         {#if filtered.length === 0}
-          <tr><td colspan={$advancedView ? 6 : 3} class="empty">No phenotypes match.</td></tr>
+          <tr><td colspan={4 + (gated ? 1 : 0) + ($advancedView ? 1 : 0)} class="empty">No phenotypes match.</td></tr>
         {/if}
       </tbody>
     </table>
@@ -262,11 +318,6 @@
     padding: 0 0.2rem;
   }
   .filter-clear:hover { color: var(--ink); }
-  .sort {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-  }
   .filter-chip {
     font-family: var(--font-mono);
     font-size: var(--fs-micro);
@@ -309,6 +360,47 @@
     border-bottom: 1px solid var(--rule);
     font-weight: 500;
   }
+  /* Column headers double as sort buttons: click to sort, re-click to flip. */
+  .th-sort {
+    background: none;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .th-sort:hover { color: var(--ink-muted); }
+  .th-sort.active { color: var(--ink); }
+  /* Fixed-width slot so the layout doesn't shift as the arrow appears/hides. */
+  .arrow {
+    display: inline-block;
+    width: 0.85em;
+    text-align: center;
+    font-size: 0.7em;
+    color: var(--accent);
+    vertical-align: middle;
+  }
+  .th-sort-num .arrow { margin-right: 0.1rem; }
+
+  .col-cohort { width: 7rem; }
+  .cohort-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--ink-muted);
+  }
+  .cohort-sw {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+    border: 0.5px solid rgba(24, 24, 27, 0.25);
+  }
   .phenos td {
     padding: 0.45rem 0.85rem;
     border-bottom: 1px solid var(--rule-faint);
@@ -324,9 +416,12 @@
   .col-id { width: 3.5rem; color: var(--ink-faint); }
   .col-label { color: var(--ink); }
   .col-quality { width: 7.5rem; }
-  .col-coh { width: 5.5rem; text-align: right; }
-  .col-mass { width: 8rem; text-align: right; }
+  .col-coh { width: 8.5rem; text-align: right; }
   .col-prev { width: 9.5rem; text-align: right; }
+  /* Coherence bar reads as a cooler tone than coverage's accent so the two
+     numeric columns are visually distinguishable at a glance. */
+  .coh-fill { background: var(--ink-muted); }
+  .prev-num-coh { min-width: 2.9rem; }
 
   .prev-row {
     display: inline-flex;
@@ -347,7 +442,6 @@
     height: 100%;
     background: var(--accent);
   }
-  .mass-fill { background: var(--ink-faint); opacity: 0.85; }
   .prev-num {
     color: var(--ink);
     min-width: 3rem;

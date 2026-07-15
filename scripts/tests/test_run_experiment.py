@@ -11,6 +11,68 @@ import run_experiment as rx
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+class TestResumeCorpusMismatches:
+    """The resume guard compares a checkpoint's corpus_manifest to the current
+    effective config and refuses to warm-start onto a different corpus."""
+
+    BASE_MANIFEST = {
+        "person_mod": 4,
+        "source_table": "condition_era",
+        "cohort": "cancer_or_dementia",
+        "prior_obs_days": 0,
+        "vocab_size": 10000,
+        "doc_spec": {"name": "patient_cohort", "min_doc_length": 20},
+    }
+    BASE_EFFECTIVE = {
+        "person_mod": 4,
+        "source_table": "condition_era",
+        "cohort_def": "cancer_or_dementia",
+        "prior_obs_days": 0,
+        "vocab_size": 10000,
+        "doc_unit": "patient_cohort",
+    }
+
+    def test_matching_config_has_no_mismatches(self):
+        assert rx._resume_corpus_mismatches(self.BASE_MANIFEST, self.BASE_EFFECTIVE) == []
+
+    def test_person_mod_change_is_flagged(self):
+        eff = dict(self.BASE_EFFECTIVE, person_mod=1)
+        out = rx._resume_corpus_mismatches(self.BASE_MANIFEST, eff)
+        assert any("person_mod" in m for m in out)
+
+    def test_prior_obs_days_change_is_flagged(self):
+        eff = dict(self.BASE_EFFECTIVE, prior_obs_days=365)
+        out = rx._resume_corpus_mismatches(self.BASE_MANIFEST, eff)
+        assert any("prior_obs_days" in m for m in out)
+
+    def test_doc_spec_name_change_is_flagged(self):
+        eff = dict(self.BASE_EFFECTIVE, doc_unit="patient_year")
+        out = rx._resume_corpus_mismatches(self.BASE_MANIFEST, eff)
+        assert any("doc_spec" in m for m in out)
+
+    def test_vocab_size_difference_is_not_flagged(self):
+        """vocab_size is NOT a guard field: STM stores the realized vocab count
+        (post-pruning) while config carries the CountVectorizer cap, so they
+        legitimately differ for the same corpus. A true vocab-dimension change
+        fails loudly at warm-start (K x V shape), not silently."""
+        manifest = dict(self.BASE_MANIFEST, vocab_size=4422)
+        eff = dict(self.BASE_EFFECTIVE, vocab_size=10000)
+        assert rx._resume_corpus_mismatches(manifest, eff) == []
+
+    def test_missing_checkpoint_field_is_not_flagged(self):
+        """A checkpoint predating a field (e.g. prior_obs_days) must not block
+        resume — we can't verify it, so we don't penalize it."""
+        manifest = {k: v for k, v in self.BASE_MANIFEST.items()
+                    if k != "prior_obs_days"}
+        eff = dict(self.BASE_EFFECTIVE, prior_obs_days=365)
+        assert rx._resume_corpus_mismatches(manifest, eff) == []
+
+    def test_cohort_none_sentinel_matches_python_none(self):
+        manifest = dict(self.BASE_MANIFEST, cohort=None)
+        eff = dict(self.BASE_EFFECTIVE, cohort_def="none")
+        assert rx._resume_corpus_mismatches(manifest, eff) == []
+
+
 def test_read_frontmatter_parses_yaml_block():
     path = FIXTURES / "sample_experiment.md"
     fm = rx.read_frontmatter(path)
@@ -248,6 +310,56 @@ def test_build_lda_args_general_cohort_maps_to_none():
     assert args[idx + 1] == "none"
 
 
+def test_build_lda_args_forwards_cache_uri():
+    """cache_uri in effective forwards to --corpus-cache-uri; absent, no flag."""
+    base = {
+        "model_class": "lda", "source_table": "condition_era",
+        "doc_unit": "patient_year", "doc_min_length": 20,
+        "K": 40, "max_iter": 20, "vocab_size": 10000,
+        "min_df": 20, "min_patient_count": 20,
+        "subsampling_rate": 0.2, "tau0": 64, "kappa": 0.7,
+        "save_interval": 5, "print_topics_every": 1,
+        "person_mod": 10, "top_n_tokens": 6, "seed": 42,
+        "optimize_doc_concentration": True,
+        "optimize_topic_concentration": False,
+        "cohort": "general",
+        "cohort_def": "none",
+    }
+    with_cache = dict(base, cache_uri="hdfs:///user/dataproc/charm/corpus_cache")
+    args = rx.build_lda_args(with_cache, Path("/tmp/foo"), resume_from=None)
+    assert "--corpus-cache-uri" in args
+    idx = args.index("--corpus-cache-uri")
+    assert args[idx + 1] == "hdfs:///user/dataproc/charm/corpus_cache"
+
+    without_cache = dict(base)
+    args_no_cache = rx.build_lda_args(without_cache, Path("/tmp/foo"), resume_from=None)
+    assert "--corpus-cache-uri" not in args_no_cache
+
+
+def test_build_lda_args_population_cancer_cohort_docunit():
+    """population_cancer + patient_cohort pass through build_lda_args unchanged."""
+    effective = {
+        "model_class": "lda", "source_table": "condition_era",
+        "doc_unit": "patient_cohort", "doc_min_length": 20,
+        "K": 40, "max_iter": 20, "vocab_size": 10000,
+        "min_df": 20, "min_patient_count": 20,
+        "subsampling_rate": 0.2, "tau0": 64, "kappa": 0.7,
+        "save_interval": 5, "print_topics_every": 1,
+        "person_mod": 10, "top_n_tokens": 6, "seed": 42,
+        "optimize_doc_concentration": True,
+        "optimize_topic_concentration": False,
+        "cohort": "population_cancer",
+        "cohort_def": "population_cancer",
+    }
+    args = rx.build_lda_args(effective, Path("/tmp/foo"), resume_from=None)
+    assert "--cohort" in args
+    idx = args.index("--cohort")
+    assert args[idx + 1] == "population_cancer"
+    assert "--doc-unit" in args
+    idx = args.index("--doc-unit")
+    assert args[idx + 1] == "patient_cohort"
+
+
 def test_build_eval_args_minimum(tmp_path):
     checkpoint = tmp_path / "0042-try-k60"
     args = rx.build_eval_args(checkpoint, {"model_class": "lda"})
@@ -279,6 +391,54 @@ def test_build_spark_submit_cmd_structure(tmp_path):
     # Script + script args at the end, in order
     assert cmd[-len(script_args) - 1] == script
     assert cmd[-len(script_args):] == script_args
+
+
+def _make_zips(repo_root):
+    (repo_root / "spark-vi" / "dist").mkdir(parents=True)
+    (repo_root / "spark-vi" / "dist" / "spark_vi.zip").touch()
+    (repo_root / "charmpheno" / "dist").mkdir(parents=True)
+    (repo_root / "charmpheno" / "dist" / "charmpheno.zip").touch()
+
+
+def test_build_spark_submit_cmd_appends_overlay_when_present(tmp_path):
+    # The dependency-overlay zip carries the pure-Python deps the image lacks
+    # (formulaic & friends). It rides on --py-files alongside the source zips,
+    # on the image's own python -- no interpreter override, no --files. See
+    # build_spark_submit_cmd / Makefile `cluster-overlay`.
+    repo_root = tmp_path
+    _make_zips(repo_root)
+    dist = repo_root / "analysis" / "cloud" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "formulaic_overlay.zip").touch()
+
+    cmd = rx.build_spark_submit_cmd(
+        "/repo/analysis/cloud/stm_bigquery_cloud.py", ["--K", "40"], repo_root
+    )
+
+    # Overlay appended to --py-files alongside the source zips.
+    py_files_val = cmd[cmd.index("--py-files") + 1]
+    assert "formulaic_overlay.zip" in py_files_val
+    assert "spark_vi.zip" in py_files_val
+    assert "charmpheno.zip" in py_files_val
+    # No PEX-era interpreter machinery: the image's python runs untouched.
+    assert "--files" not in cmd
+    assert not any(c.startswith("spark.pyspark.python=") for c in cmd)
+    assert not any(c.startswith("spark.pyspark.driver.python=") for c in cmd)
+
+
+def test_build_spark_submit_cmd_omits_overlay_when_absent(tmp_path):
+    # No overlay (e.g. LDA/HDP runs that never import formulaic) => only the
+    # source zips ride; the job uses the image's python untouched.
+    repo_root = tmp_path
+    _make_zips(repo_root)
+
+    cmd = rx.build_spark_submit_cmd(
+        "/repo/analysis/cloud/lda_bigquery_cloud.py", [], repo_root
+    )
+    py_files_val = cmd[cmd.index("--py-files") + 1]
+    assert "formulaic_overlay.zip" not in py_files_val
+    assert "spark_vi.zip" in py_files_val and "charmpheno.zip" in py_files_val
+    assert "--files" not in cmd
 
 
 def test_write_summary_header_creates_file(tmp_path):
@@ -385,6 +545,347 @@ def test_noise_patterns_drops_yarn_log():
 def test_noise_patterns_drops_gcs_chatter():
     line = "26/05/28 20:46:13 INFO GoogleHadoopOutputStream: hflush(): No-op due to rate limit ...\n"
     assert rx.sanitize_line(line, rx.DROP_PATTERNS) is None
+
+
+class TestModelClassDispatch:
+    def test_stm_passes_validation(self):
+        fm = {
+            "id": "0099-test", "slug": "test", "cohort": "dementia",
+            "model_class": "stm", "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"], "continuous_cols": ["age"],
+        }
+        # Should not raise (LDA gate previously rejected anything != "lda").
+        from run_experiment import validate_frontmatter
+        validate_frontmatter(fm)  # idempotent — passes for stm with required keys
+
+    def test_stm_requires_covariate_formula(self):
+        fm = {
+            "id": "0099-test", "slug": "test", "cohort": "dementia",
+            "model_class": "stm",
+            # covariate_formula missing
+        }
+        from run_experiment import validate_frontmatter
+        with pytest.raises(SystemExit):
+            validate_frontmatter(fm)
+
+    def test_build_fit_args_dispatches_to_stm_driver(self):
+        fm = {
+            "id": "0099", "slug": "test", "cohort": "dementia",
+            "model_class": "stm", "covariate_formula": "~ C(sex)",
+            "categorical_cols": ["sex"], "continuous_cols": [],
+        }
+        effective = {**fm, "K": 40, "max_iter": 20}
+        from run_experiment import build_fit_driver_path
+        path = build_fit_driver_path(effective)
+        assert path.endswith("stm_bigquery_cloud.py")
+
+    def test_build_stm_args_required_flags_present(self, tmp_path, monkeypatch):
+        """build_stm_args must emit all flags required by the STM driver argparse."""
+        monkeypatch.setenv("WORKSPACE_CDR", "myproject.mydataset")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "my-billing-project")
+        effective = {
+            "model_class": "stm",
+            "source_table": "condition_era",
+            "doc_unit": "patient_year",
+            "doc_min_length": 20,
+            "K": 40,
+            "max_iter": 20,
+            "vocab_size": 10000,
+            "min_df": 20,
+            "min_patient_count": 20,
+            "subsampling_rate": 0.2,
+            "tau0": 64.0,
+            "kappa": 0.7,
+            "save_interval": 5,
+            "person_mod": 10,
+            "cohort": "dementia",
+            "cohort_def": "first_dementia_year",
+            "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"],
+            "continuous_cols": ["age"],
+        }
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        # Required driver flags must be present.
+        assert "--cdr" in args and "myproject.mydataset" in args
+        assert "--billing" in args and "my-billing-project" in args
+        assert "--out-dir" in args and str(tmp_path / "out") in args
+        assert "--covariate-formula" in args
+        # Renamed flags — old names must not appear.
+        assert "--doc-spec" in args
+        assert "--doc-unit" not in args
+        assert "--save-dir" not in args
+        assert "--seed" not in args
+        # No resume by default.
+        assert "--resume-from" not in args
+
+    def test_build_stm_args_threads_resume_from(self, tmp_path, monkeypatch):
+        """resume_from -> --resume-from on the STM driver, via build_stm_args
+        and the build_fit_args dispatch (so re-runs continue a checkpoint)."""
+        monkeypatch.setenv("WORKSPACE_CDR", "p.d")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "bill")
+        effective = {
+            "model_class": "stm", "source_table": "condition_era",
+            "doc_unit": "patient_cohort", "doc_min_length": 20, "K": 40,
+            "max_iter": 20, "vocab_size": 10000, "min_df": 20,
+            "min_patient_count": 20, "subsampling_rate": 0.2, "tau0": 64.0,
+            "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+            "cohort_def": "cancer_or_dementia",
+            "covariate_formula": "~ C(source_cohort)",
+            "categorical_cols": ["source_cohort"], "continuous_cols": [],
+        }
+        ckpt = tmp_path / "ckpt"
+        direct = rx.build_stm_args(effective, str(tmp_path / "out"), ckpt)
+        assert "--resume-from" in direct
+        assert str(ckpt) in direct
+        # The dispatch threads it too.
+        viafit = rx.build_fit_args(effective, str(tmp_path / "out"), ckpt)
+        assert "--resume-from" in viafit and str(ckpt) in viafit
+
+    def test_build_stm_args_sources_cdr_billing_from_env(self, tmp_path, monkeypatch):
+        """Regression: cdr/billing come from the workspace env, NOT the merged
+        config (which never carries them). Previously build_stm_args read
+        effective['cdr'] and KeyError'd on the cluster."""
+        monkeypatch.setenv("WORKSPACE_CDR", "env.cdr")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "env-billing")
+        effective = {  # deliberately NO 'cdr'/'billing' keys
+            "model_class": "stm", "source_table": "condition_era",
+            "doc_min_length": 20, "K": 4, "max_iter": 2, "vocab_size": 100,
+            "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+            "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 10,
+            "cohort": "cancer_or_dementia", "cohort_def": "cancer_or_dementia",
+            "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"], "continuous_cols": ["age"],
+        }
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert args[args.index("--cdr") + 1] == "env.cdr"
+        assert args[args.index("--billing") + 1] == "env-billing"
+
+    def test_build_stm_args_missing_env_exits_cleanly(self, tmp_path, monkeypatch):
+        """No WORKSPACE_CDR/GOOGLE_CLOUD_PROJECT -> clean exit(2), not KeyError."""
+        import pytest
+        monkeypatch.delenv("WORKSPACE_CDR", raising=False)
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        effective = {
+            "model_class": "stm", "source_table": "condition_era",
+            "doc_min_length": 20, "K": 4, "max_iter": 2, "vocab_size": 100,
+            "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+            "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 10,
+            "cohort": "general", "cohort_def": "none",
+            "covariate_formula": "~ age",
+            "categorical_cols": [], "continuous_cols": ["age"],
+        }
+        with pytest.raises(SystemExit):
+            rx.build_stm_args(effective, str(tmp_path / "out"))
+
+    def test_build_covariates_args_emits_group_var_when_gated(self, tmp_path, monkeypatch):
+        """A gated experiment (background_k + foreground set) must pass
+        --group-var to build_stm_covariates, so the covariate cache is keyed on
+        (person_id, group) and the gated dashboard prevalence can group by it.
+        Without this the sidecar is person-only and gating.json is dropped."""
+        monkeypatch.setenv("WORKSPACE_CDR", "proj.ds")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+        effective = {
+            "source_table": "condition_era", "person_mod": 4,
+            "cache_uri": "hdfs:///cache", "cohort": "cancer_or_dementia",
+            "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"], "continuous_cols": ["age"],
+            "prior_obs_days": 0,
+            "background_k": 30, "foreground": "[[cancer,10],[dementia,10]]",
+            "group_var": "source_cohort",
+        }
+        args = rx.build_covariates_args(effective)
+        assert "--group-var" in args
+        assert args[args.index("--group-var") + 1] == "source_cohort"
+
+    def test_build_covariates_args_omits_group_var_when_ungated(self, tmp_path, monkeypatch):
+        """An ungated experiment must NOT pass --group-var — the sidecar keys
+        on person_id alone."""
+        monkeypatch.setenv("WORKSPACE_CDR", "proj.ds")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+        effective = {
+            "source_table": "condition_era", "person_mod": 4,
+            "cache_uri": "hdfs:///cache", "cohort": "dementia",
+            "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"], "continuous_cols": ["age"],
+            "prior_obs_days": 365,
+        }
+        args = rx.build_covariates_args(effective)
+        assert "--group-var" not in args
+
+    def test_build_stm_args_parses_against_driver_argparse(self, tmp_path, monkeypatch):
+        """argv from build_stm_args must parse cleanly via the driver's own argparse."""
+        import argparse
+        import importlib.util
+
+        monkeypatch.setenv("WORKSPACE_CDR", "proj.ds")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+        effective = {
+            "model_class": "stm",
+            "source_table": "condition_era",
+            "doc_unit": "patient_year",
+            "doc_min_length": 20,
+            "K": 10,
+            "max_iter": 5,
+            "vocab_size": 1000,
+            "min_df": 5,
+            "min_patient_count": 5,
+            "subsampling_rate": 0.1,
+            "tau0": 64.0,
+            "kappa": 0.7,
+            "save_interval": 2,
+            "person_mod": 10,
+            "cohort": "dementia",
+            "cohort_def": "first_dementia_year",
+            "covariate_formula": "~ C(sex)",
+            "categorical_cols": ["sex"],
+            "continuous_cols": [],
+        }
+        argv = rx.build_stm_args(effective, str(tmp_path / "out"))
+
+        # Load the driver module without executing __main__ so we can call
+        # parse_args directly with a supplied argv list.
+        # The driver does `from _driver_common import ...` so its directory
+        # must be on sys.path during import.
+        import sys
+        driver_dir = Path(__file__).parents[2] / "analysis" / "cloud"
+        driver_path = driver_dir / "stm_bigquery_cloud.py"
+        sys.path.insert(0, str(driver_dir))
+        try:
+            spec_obj = importlib.util.spec_from_file_location("stm_driver_under_test", driver_path)
+            mod = importlib.util.module_from_spec(spec_obj)
+            spec_obj.loader.exec_module(mod)
+        except ImportError:
+            pytest.skip("driver imports unavailable (PySpark/cloud deps not installed)")
+        finally:
+            sys.path.pop(0)
+
+        # Patch error() to raise ValueError instead of calling sys.exit(2),
+        # so a bad argv produces a test failure rather than a process exit.
+        _orig_error = argparse.ArgumentParser.error
+
+        def _raise(self, message):
+            raise ValueError(f"argparse error: {message}")
+
+        argparse.ArgumentParser.error = _raise
+        try:
+            # parse_args() in the driver calls p.parse_args() with no args —
+            # we monkey-patch sys.argv momentarily.
+            import sys
+            _orig_argv = sys.argv
+            sys.argv = ["stm_bigquery_cloud.py"] + argv
+            ns = mod.parse_args()
+        finally:
+            sys.argv = _orig_argv
+            argparse.ArgumentParser.error = _orig_error
+
+        assert ns.cdr == "proj.ds"
+        assert ns.billing == "proj"
+        assert ns.out_dir == str(tmp_path / "out")
+        assert ns.covariate_formula == "~ C(sex)"
+
+    def test_build_fit_driver_path_lda(self):
+        from run_experiment import build_fit_driver_path
+        path = build_fit_driver_path({"model_class": "lda"})
+        assert path.endswith("lda_bigquery_cloud.py")
+
+    def _base_stm_effective(self, monkeypatch):
+        """Minimal STM effective config for build_stm_args tests."""
+        monkeypatch.setenv("WORKSPACE_CDR", "p.d")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "bill")
+        return {
+            "model_class": "stm",
+            "source_table": "condition_era",
+            "doc_min_length": 20,
+            "K": 4,
+            "max_iter": 2,
+            "vocab_size": 100,
+            "min_df": 2,
+            "min_patient_count": 20,
+            "subsampling_rate": 1.0,
+            "tau0": 64.0,
+            "kappa": 0.7,
+            "save_interval": 5,
+            "person_mod": 10,
+            "cohort": "dementia",
+            "cohort_def": "first_dementia_year",
+            "covariate_formula": "~ C(sex)",
+            "categorical_cols": ["sex"],
+            "continuous_cols": [],
+        }
+
+    def test_build_stm_args_spectral_method_scalable_emitted(
+            self, tmp_path, monkeypatch):
+        """spectral_method='scalable' + spectral_d + spectral_min_doc_freq emit
+        the three flags into the arg list."""
+        effective = self._base_stm_effective(monkeypatch)
+        effective["spectral_method"] = "scalable"
+        effective["spectral_d"] = 256
+        effective["spectral_min_doc_freq"] = 3
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert "--spectral-method" in args
+        assert args[args.index("--spectral-method") + 1] == "scalable"
+        assert "--spectral-d" in args
+        assert args[args.index("--spectral-d") + 1] == "256"
+        assert "--spectral-min-doc-freq" in args
+        assert args[args.index("--spectral-min-doc-freq") + 1] == "3"
+
+    def test_build_stm_args_spectral_method_default_dense_omitted(
+            self, tmp_path, monkeypatch):
+        """An effective config with no spectral_method key emits neither
+        --spectral-method nor --spectral-d (the 'auto' default stays implicit;
+        ADR 0037)."""
+        effective = self._base_stm_effective(monkeypatch)
+        # Deliberately do NOT set spectral_method / spectral_d / spectral_min_doc_freq.
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert "--spectral-method" not in args
+        assert "--spectral-d" not in args
+        assert "--spectral-min-doc-freq" not in args
+
+    def test_build_stm_args_known_sex_only_emitted_when_set(
+            self, tmp_path, monkeypatch):
+        """known_sex_only: true -> --known-sex-only; absent -> omitted."""
+        effective = self._base_stm_effective(monkeypatch)
+        effective["known_sex_only"] = True
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert "--known-sex-only" in args
+
+        effective2 = self._base_stm_effective(monkeypatch)
+        args2 = rx.build_stm_args(effective2, str(tmp_path / "out"))
+        assert "--known-sex-only" not in args2
+
+    def test_build_covariates_args_known_sex_only_emitted_when_set(
+            self, tmp_path, monkeypatch):
+        """known_sex_only flows to the covariate-cache builder too, so the
+        shared sidecar covers the same M/F person set as the fit."""
+        effective = self._base_stm_effective(monkeypatch)
+        effective["cache_uri"] = "hdfs:///cov"
+        effective["known_sex_only"] = True
+        args = rx.build_covariates_args(effective)
+        assert "--known-sex-only" in args
+
+    def test_build_stm_args_sigma_diagonal_pin_emitted_when_set(
+            self, tmp_path, monkeypatch):
+        """sigma_diagonal_pin: 5.0 -> --sigma-diagonal-pin 5.0 (calibrated
+        constant generative scale c*, ADR 0036)."""
+        effective = self._base_stm_effective(monkeypatch)
+        effective["sigma_diagonal_pin"] = 5.0
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert "--sigma-diagonal-pin" in args
+        assert args[args.index("--sigma-diagonal-pin") + 1] == "5.0"
+
+    def test_build_stm_args_sigma_diagonal_pin_default_omitted(
+            self, tmp_path, monkeypatch):
+        """Absent sigma_diagonal_pin, or an explicit 1.0 (the standard
+        unit-diagonal pin), must NOT emit --sigma-diagonal-pin so default
+        runs stay byte-identical to pre-C1 argv."""
+        effective = self._base_stm_effective(monkeypatch)
+        args = rx.build_stm_args(effective, str(tmp_path / "out"))
+        assert "--sigma-diagonal-pin" not in args
+
+        effective2 = self._base_stm_effective(monkeypatch)
+        effective2["sigma_diagonal_pin"] = 1.0
+        args2 = rx.build_stm_args(effective2, str(tmp_path / "out"))
+        assert "--sigma-diagonal-pin" not in args2
 
 
 def test_noise_patterns_keep_driver_lines():
@@ -698,6 +1199,28 @@ class TestBuildDashboardArgs:
         with pytest.raises(KeyError):
             rx.build_dashboard_args(effective, tmp_path / "ck", "z.zip")
 
+    def test_stm_with_cache_uri_passes_cache_uri(self, tmp_path):
+        effective = {
+            "model_class": "stm",
+            "vocab_top_n": 5000,
+            "top_n_codes_for_npmi": 20,
+            "cache_uri": "gs://bucket/cache",
+        }
+        args = rx.build_dashboard_args(effective, tmp_path / "ck", "z.zip")
+        assert "--cache-uri" in args
+        assert args[args.index("--cache-uri") + 1] == "gs://bucket/cache"
+
+    def test_no_cache_uri_omits_flag(self, tmp_path):
+        # Without cache_uri configured (e.g. LDA, or STM before the cache is
+        # built), the flag must be absent so the driver falls back cleanly.
+        effective = {
+            "model_class": "lda",
+            "vocab_top_n": 5000,
+            "top_n_codes_for_npmi": 20,
+        }
+        args = rx.build_dashboard_args(effective, tmp_path / "ck", "z.zip")
+        assert "--cache-uri" not in args
+
 
 class TestWriteBuildSectionHeader:
     def test_appends_header_with_timestamp(self, tmp_path):
@@ -755,3 +1278,593 @@ class TestBuildOnlyMain:
         out_lower = capsys.readouterr().out.lower()
         assert "no fits need building" in out_lower \
                or "nothing to build" in out_lower
+
+
+class TestBuildCovariatesOnly:
+    """--build-covariates-only flag: arg parsing, validation, mutual exclusion."""
+
+    def _write_stm_experiment(self, dir_path: Path, *, id: int, slug: str) -> Path:
+        path = dir_path / f"{id:04d}-{slug}.md"
+        path.write_text(
+            f"---\n"
+            f"id: {id}\n"
+            f"slug: {slug}\n"
+            f"status: pending\n"
+            f"model_class: stm\n"
+            f"cohort: dementia\n"
+            f"covariate_formula: \"~ C(sex) + age\"\n"
+            f"categorical_cols: [sex]\n"
+            f"continuous_cols: [age]\n"
+            f"---\n\n# {slug}\n"
+        )
+        return path
+
+    def test_flag_is_parseable(self, tmp_path, capsys):
+        """--build-covariates-only is accepted by the parser (not an unknown arg)."""
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        # Without --id this should fail cleanly (not with an argparse error).
+        rc = rx.main([
+            "--build-covariates-only",
+            "--runs-dir", str(runs),
+        ])
+        assert rc == 2
+        out = capsys.readouterr().out
+        assert "build-covariates-only" in out
+
+    def test_requires_id(self, tmp_path, capsys):
+        """--build-covariates-only without --id exits 2 with a clear message."""
+        rc = rx.main([
+            "--build-covariates-only",
+            "--runs-dir", str(tmp_path / "runs"),
+        ])
+        assert rc == 2
+        assert "id" in capsys.readouterr().out.lower()
+
+    def test_mutually_exclusive_with_eval_only(self, tmp_path, capsys):
+        rc = rx.main([
+            "--build-covariates-only", "--eval-only",
+            "--id", "1",
+            "--runs-dir", str(tmp_path),
+        ])
+        assert rc == 2
+        assert "contradictory" in capsys.readouterr().out.lower()
+
+    def test_mutually_exclusive_with_no_eval(self, tmp_path, capsys):
+        rc = rx.main([
+            "--build-covariates-only", "--no-eval",
+            "--id", "1",
+            "--runs-dir", str(tmp_path),
+        ])
+        assert rc == 2
+
+    def test_mutually_exclusive_with_build_only(self, tmp_path, capsys):
+        rc = rx.main([
+            "--build-covariates-only", "--build-only",
+            "--id", "1",
+            "--runs-dir", str(tmp_path),
+        ])
+        assert rc == 2
+
+    def test_force_covariates_requires_build_covariates_only(self, tmp_path, capsys):
+        """--force-covariates without --build-covariates-only exits 2."""
+        rc = rx.main([
+            "--force-covariates", "--id", "1",
+            "--runs-dir", str(tmp_path),
+        ])
+        assert rc == 2
+        assert "force-covariates" in capsys.readouterr().out.lower()
+
+    def test_rejects_non_stm_model_class(self, tmp_path, capsys):
+        """--build-covariates-only on an LDA experiment exits 2."""
+        exp_dir = tmp_path / "exp"
+        exp_dir.mkdir()
+        defaults_dir = tmp_path / "defaults"
+        defaults_dir.mkdir()
+        (defaults_dir / "_base.yaml").write_text(
+            "source_table: condition_era\nperson_mod: 10\n"
+            "cache_uri: gs://fake/cache\n"
+        )
+        (defaults_dir / "dementia.yaml").write_text("cohort: dementia\n")
+        p = exp_dir / "0042-lda-test.md"
+        p.write_text(
+            "---\n"
+            "id: 42\nslug: lda-test\ncohort: dementia\nmodel_class: lda\n"
+            "status: pending\n"
+            "---\n"
+        )
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        rc = rx.main([
+            "--id", "42",
+            "--build-covariates-only",
+            "--runs-dir", str(runs),
+            "--experiments-dir", str(exp_dir),
+            "--defaults-dir", str(defaults_dir),
+        ])
+        assert rc == 2
+        out = capsys.readouterr().out.lower()
+        assert "model_class" in out or "stm" in out
+
+    def test_build_covariates_args_minimal(self, monkeypatch):
+        """build_covariates_args produces expected CLI flags from effective config."""
+        monkeypatch.setenv("WORKSPACE_CDR", "my_cdr")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "my_billing")
+        effective = {
+            "source_table": "condition_era",
+            "person_mod": 10,
+            "cache_uri": "gs://bucket/cache",
+            "covariate_formula": "~ C(sex) + age",
+            "categorical_cols": ["sex"],
+            "continuous_cols": ["age"],
+            "cohort": "dementia",
+            "cohort_def": "first_dementia_year",
+        }
+        args = rx.build_covariates_args(effective)
+        assert "--cdr" in args and "my_cdr" in args
+        assert "--billing" in args and "my_billing" in args
+        assert "--cache-uri" in args and "gs://bucket/cache" in args
+        assert "--covariate-formula" in args
+        assert "--categorical-cols" in args
+        assert "--continuous-cols" in args
+        assert "--cohort" in args and "first_dementia_year" in args
+
+    def test_build_covariates_args_no_cohort_def(self, monkeypatch):
+        """When cohort_def is 'none', --cohort is omitted."""
+        monkeypatch.setenv("WORKSPACE_CDR", "c")
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "b")
+        effective = {
+            "source_table": "condition_era",
+            "person_mod": 10,
+            "cache_uri": "gs://bucket/cache",
+            "covariate_formula": "~ age",
+            "categorical_cols": [],
+            "continuous_cols": ["age"],
+            "cohort": "general",
+            "cohort_def": "none",
+        }
+        args = rx.build_covariates_args(effective)
+        assert "--cohort" not in args
+
+
+def test_build_stm_args_includes_gating_flags(monkeypatch):
+    monkeypatch.setenv("WORKSPACE_CDR", "proj.ds")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    from run_experiment import build_stm_args
+    eff = {
+        "source_table": "condition_era", "doc_min_length": 20, "K": 50,
+        "max_iter": 20, "vocab_size": 10000, "min_df": 20,
+        "min_patient_count": 20, "subsampling_rate": 0.2, "tau0": 64.0,
+        "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+        "background_k": 30, "foreground": "cancer:10,dementia:10",
+        "group_var": "source_cohort",
+    }
+    argv = build_stm_args(eff, "/tmp/out")
+    assert "--background-k" in argv and "30" in argv
+    assert "--foreground" in argv and "cancer:10,dementia:10" in argv
+    assert "--group-var" in argv and "source_cohort" in argv
+
+
+def test_build_stm_args_omits_gating_when_absent(monkeypatch):
+    monkeypatch.setenv("WORKSPACE_CDR", "proj.ds")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    from run_experiment import build_stm_args
+    eff = {
+        "source_table": "condition_era", "doc_min_length": 20, "K": 40,
+        "max_iter": 20, "vocab_size": 10000, "min_df": 20,
+        "min_patient_count": 20, "subsampling_rate": 0.2, "tau0": 64.0,
+        "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+    }
+    argv = build_stm_args(eff, "/tmp/out")
+    assert "--background-k" not in argv and "--foreground" not in argv
+
+
+def test_resume_mismatch_on_changed_partition():
+    from run_experiment import _resume_corpus_mismatches
+    ck = {"person_mod": 4, "source_table": "condition_era",
+          "topic_block_spec": {"group_var": "source_cohort", "background_k": 30,
+                               "foreground": [["cancer", 10], ["dementia", 10]]}}
+    eff = {"person_mod": 4, "source_table": "condition_era",
+           "background_k": 20, "foreground": "cancer:10,dementia:10",
+           "group_var": "source_cohort", "K": 40}
+    out = _resume_corpus_mismatches(ck, eff)
+    assert any("topic_block_spec" in m for m in out)
+
+
+def test_resume_partition_check_needs_no_spark_vi(monkeypatch):
+    """Regression: _resume_corpus_mismatches runs in the orchestration python,
+    which has NO spark_vi (it ships only inside spark-submit's py-files). The
+    topic_block_spec comparison must not import spark_vi — doing so crashed
+    `make exp ID=N` resume with ModuleNotFoundError. We reproduce the cluster
+    condition by blocking any spark_vi import, then assert match + mismatch
+    both still resolve."""
+    import builtins
+    import run_experiment as rx
+
+    real_import = builtins.__import__
+
+    def _blocked(name, *args, **kwargs):
+        if name == "spark_vi" or name.startswith("spark_vi."):
+            raise ModuleNotFoundError("No module named 'spark_vi'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _blocked)
+
+    ck = {"topic_block_spec": {"group_var": "source_cohort", "background_k": 30,
+                               "foreground": [["cancer", 10], ["dementia", 10]]}}
+    eff_match = {"background_k": 30, "foreground": "cancer:10,dementia:10",
+                 "group_var": "source_cohort"}
+    eff_diff = {"background_k": 20, "foreground": "cancer:10,dementia:10",
+                "group_var": "source_cohort"}
+    assert rx._resume_corpus_mismatches(ck, eff_match) == []
+    assert any("topic_block_spec" in m
+               for m in rx._resume_corpus_mismatches(ck, eff_diff))
+
+
+def test_build_stm_args_threads_hardening_flags(monkeypatch):
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    effective = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 300, "vocab_size": 3000,
+        "min_df": 5, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 50, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+        "reference_topic": True,
+        "spectral_init": True,
+    }
+    args = run_experiment.build_stm_args(effective, out_dir="/tmp/out")
+    assert "--reference-topic" in args
+    assert "--spectral-init" in args
+    # IW-prior flags (sigma_prior_scale, sigma_prior_count) were removed from the
+    # driver in the PD-completion arc — they must never appear in the arg list.
+    assert "--sigma-prior-scale" not in args
+    assert "--sigma-prior-count" not in args
+
+
+def test_build_stm_args_hardening_flags_default_on(monkeypatch):
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    effective = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 300, "vocab_size": 3000,
+        "min_df": 5, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 50, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+    }
+    args = run_experiment.build_stm_args(effective, out_dir="/tmp/out")
+    assert "--reference-topic" in args
+    assert "--spectral-init" in args
+    assert "--sigma-prior-scale" not in args
+    assert "--sigma-prior-count" not in args
+
+
+def test_build_stm_args_hardening_flags_disabled(monkeypatch):
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    effective = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 300, "vocab_size": 3000,
+        "min_df": 5, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 50, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+        "reference_topic": False,
+        "spectral_init": False,
+    }
+    args = run_experiment.build_stm_args(effective, out_dir="/tmp/out")
+    assert "--no-reference-topic" in args
+    assert "--no-spectral-init" in args
+
+
+def test_build_stm_args_emits_full_sigma_knobs(monkeypatch):
+    """min_pair_support is emitted when set in effective.
+    sigma_diag_shrink was removed from the driver in the PD-completion arc —
+    it must be silently ignored even when present in historical frontmatter."""
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    eff = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 2, "vocab_size": 100,
+        "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+        "min_pair_support": 30,
+    }
+    args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
+    assert "--sigma-diag-shrink" not in args
+    assert "--min-pair-support" in args and "30" in args
+
+
+def test_build_stm_args_omits_full_sigma_knobs_when_absent(monkeypatch):
+    """Default path: no min_pair_support in effective -> the --min-pair-support flag is
+    not emitted. (sigma_diag_shrink was removed in the PD-completion arc and is no longer
+    emittable at all, so it is covered by the historical-keys regression test below, not
+    here.)"""
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    eff = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 2, "vocab_size": 100,
+        "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+    }
+    args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
+    assert "--sigma-diag-shrink" not in args
+    assert "--min-pair-support" not in args
+
+
+def test_build_stm_args_ignores_historical_iw_prior_and_diag_shrink_keys(monkeypatch):
+    """Regression: historical frontmatter keys sigma_prior_scale, sigma_prior_count,
+    sigma_diag_shrink must NOT produce any CLI flags — these args were removed from
+    the STM driver in the PD-completion arc (Task 2). An experiment doc that still
+    carries them (e.g. exp 0022/0023/0024) must run without error and without
+    emitting the now-nonexistent flags."""
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    eff = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 2, "vocab_size": 100,
+        "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+        # Historical IW-prior + diag-shrink keys from pre-PD-completion experiments:
+        "sigma_prior_scale": 2.0,
+        "sigma_prior_count": 500.0,
+        "sigma_diag_shrink": 0.25,
+    }
+    args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
+    assert "--sigma-prior-scale" not in args
+    assert "--sigma-prior-count" not in args
+    assert "--sigma-diag-shrink" not in args
+
+
+def test_build_stm_args_emits_global_scale_knobs(monkeypatch):
+    """estimate_global_scale + global_scale_step_cap in effective -> emitted as
+    --estimate-global-scale --global-scale-step-cap <value>, mirroring the
+    --estimate-sigma-diagonal / --min-pair-support emit pattern above."""
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    eff = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 2, "vocab_size": 100,
+        "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+        "estimate_global_scale": True,
+        "global_scale_step_cap": 1.5,
+    }
+    args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
+    assert "--estimate-global-scale" in args
+    assert "--global-scale-step-cap" in args and "1.5" in args
+
+
+def test_build_stm_args_omits_global_scale_knobs_when_absent(monkeypatch):
+    """Default path: no estimate_global_scale/global_scale_step_cap in effective ->
+    neither flag is emitted."""
+    import run_experiment
+    monkeypatch.setattr(run_experiment, "_require_workspace_env",
+                        lambda: ("proj.ds", "billing"))
+    eff = {
+        "source_table": "condition_era", "doc_unit": "patient",
+        "doc_min_length": 1, "K": 40, "max_iter": 2, "vocab_size": 100,
+        "min_df": 2, "min_patient_count": 20, "subsampling_rate": 1.0,
+        "tau0": 64.0, "kappa": 0.7, "save_interval": 5, "person_mod": 4,
+        "covariate_formula": "~ C(sex) + age", "categorical_cols": ["sex"],
+        "continuous_cols": ["age"],
+    }
+    args = run_experiment.build_stm_args(eff, out_dir="/tmp/out")
+    assert "--estimate-global-scale" not in args
+    assert "--global-scale-step-cap" not in args
+
+
+class _FakeRunBuild:
+    """Pops successive return codes off a list; counts calls.
+
+    Optionally appends "build" to a shared `log` list, so a test can assert
+    call ORDER across run_build/dispatch_cov (e.g. pre-build dispatch must
+    happen before the first run_build)."""
+    def __init__(self, codes, log=None):
+        self._codes = list(codes)
+        self.calls = 0
+        self.log = log
+
+    def __call__(self):
+        self.calls += 1
+        if self.log is not None:
+            self.log.append("build")
+        return self._codes.pop(0)
+
+
+class _FakeDispatchCov:
+    """Records the force arg on each call; returns a fixed rc.
+
+    Optionally appends ("cov", force) to a shared `log` list — see
+    _FakeRunBuild."""
+    def __init__(self, rc=0, log=None):
+        self._rc = rc
+        self.calls = []
+        self.log = log
+
+    def __call__(self, force):
+        self.calls.append(force)
+        if self.log is not None:
+            self.log.append(("cov", force))
+        return self._rc
+
+
+class TestBuildOnlyWithAutoCovariates:
+    """_build_only_with_auto_covariates: on a COVARIATE_CACHE_MISS_EXIT (42)
+    from a gated STM build with a cache_uri, auto-rebuild the covariate cache
+    once and retry the build once. Spark-free: run_build/dispatch_cov are
+    injected fakes."""
+
+    STM_EFFECTIVE = {"model_class": "stm", "cache_uri": "gs://bucket/cache"}
+
+    def test_miss_then_success_rebuilds_once_and_retries(self):
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT, 0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert run_build.calls == 2
+        assert dispatch_cov.calls == [False]
+
+    def test_success_first_try_never_touches_covariates(self):
+        run_build = _FakeRunBuild([0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []
+
+    def test_auto_false_does_not_rebuild_on_miss(self):
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=False, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == rx.COVARIATE_CACHE_MISS_EXIT
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []
+
+    def test_covariate_rebuild_failure_aborts_without_retrying_build(self):
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT])
+        dispatch_cov = _FakeDispatchCov(rc=3)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 3
+        assert run_build.calls == 1  # no retry after a failed covariate rebuild
+        assert dispatch_cov.calls == [False]
+
+    def test_non_stm_or_missing_cache_uri_does_not_rebuild(self):
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective={"model_class": "lda"}, auto=True, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == rx.COVARIATE_CACHE_MISS_EXIT
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []
+
+    def test_stm_without_cache_uri_does_not_rebuild(self):
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective={"model_class": "stm"}, auto=True, force=False,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == rx.COVARIATE_CACHE_MISS_EXIT
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []
+
+    def test_force_arg_threaded_to_dispatch_cov(self):
+        """force=True on a gated-STM build now ALSO triggers the forced
+        pre-build dispatch (folded in below), so a subsequent miss-retry
+        dispatch is the second call, not the only one."""
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT, 0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert dispatch_cov.calls == [True, True]
+
+    # --- Fix 1: force-covariates pre-build folded into the helper ---------
+
+    def test_force_true_prebuild_dispatches_before_first_build(self):
+        """force=True + stm + cache_uri: a forced pre-build dispatch runs
+        BEFORE the first run_build call (order matters — a stale cache must
+        never be built against)."""
+        log: list = []
+        run_build = _FakeRunBuild([0], log=log)
+        dispatch_cov = _FakeDispatchCov(rc=0, log=log)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert log == [("cov", True), "build"]
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == [True]
+
+    def test_force_true_prebuild_failure_skips_build_entirely(self):
+        """A failing forced pre-build aborts immediately — the (possibly
+        stale) build must never run."""
+        run_build = _FakeRunBuild([0])
+        dispatch_cov = _FakeDispatchCov(rc=5)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 5
+        assert run_build.calls == 0
+        assert dispatch_cov.calls == [True]
+
+    def test_force_true_prebuild_then_miss_retry_rebuilds_again(self):
+        """force=True + the build STILL misses on the first try (unexpected
+        but possible): dispatch_cov fires twice (forced pre-build, then the
+        miss-retry rebuild), run_build fires twice, and the final rc is the
+        retried build's rc."""
+        run_build = _FakeRunBuild([rx.COVARIATE_CACHE_MISS_EXIT, 0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective=self.STM_EFFECTIVE, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert dispatch_cov.calls == [True, True]
+        assert run_build.calls == 2
+
+    def test_force_true_non_stm_skips_prebuild(self):
+        """force=True but model_class != stm: no forced pre-build; behaves
+        like the plain (non-force) path."""
+        run_build = _FakeRunBuild([0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective={"model_class": "lda"}, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []
+
+    def test_force_true_stm_without_cache_uri_skips_prebuild(self):
+        """force=True + stm but no cache_uri: no forced pre-build; behaves
+        like the plain (non-force) path."""
+        run_build = _FakeRunBuild([0])
+        dispatch_cov = _FakeDispatchCov(rc=0)
+        rc = rx._build_only_with_auto_covariates(
+            effective={"model_class": "stm"}, auto=True, force=True,
+            run_build=run_build, dispatch_cov=dispatch_cov,
+        )
+        assert rc == 0
+        assert run_build.calls == 1
+        assert dispatch_cov.calls == []

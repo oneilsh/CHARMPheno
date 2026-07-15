@@ -1,5 +1,5 @@
 """OMOP-shaped I/O and schema utilities."""
-from charmpheno.omop.bigquery import load_omop_bigquery
+from charmpheno.omop.bigquery import load_omop_bigquery, load_person_table
 from charmpheno.omop.cohorts import (
     COHORT_METADATA,
     SUPPORTED_COHORTS,
@@ -10,6 +10,7 @@ from charmpheno.omop.cohorts import (
 )
 from charmpheno.omop.doc_spec import (
     DocSpec,
+    PatientCohortDocSpec,
     PatientDocSpec,
     PatientYearDocSpec,
     doc_spec_from_cli,
@@ -22,6 +23,7 @@ __all__ = [
     "CANONICAL_COLUMNS",
     "COHORT_METADATA",
     "DocSpec",
+    "PatientCohortDocSpec",
     "PatientDocSpec",
     "PatientYearDocSpec",
     "SUPPORTED_COHORTS",
@@ -31,6 +33,7 @@ __all__ = [
     "cohort_metadata",
     "doc_spec_from_cli",
     "load_omop_bigquery",
+    "load_person_table",
     "load_omop_parquet",
     "to_bow_dataframe",
     "validate",

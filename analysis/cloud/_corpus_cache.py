@@ -40,6 +40,7 @@ def compute_cache_key(
     min_df: int | float,
     doc_spec_manifest: dict,
     cohort: str | None = None,
+    prior_obs_days: int = 365,
 ) -> str:
     """Stable 16-hex-char hash of the inputs that determine the cached corpus.
 
@@ -47,8 +48,24 @@ def compute_cache_key(
     transformation changes shape in a non-back-compat way; old cache entries
     silently miss and rebuild rather than load wrong data. v=3 added the
     cohort key so cohort-filtered corpora can't collide with their full-
-    corpus equivalents.
+    corpus equivalents. v=4 added prior_obs_days: the cohort's prior-
+    observation lookback changes membership (a 0-day lookback admits prevalent
+    cases a 365-day lookback excludes), so the two must not alias. v=5 was
+    bumped when the population_cancer general arm switched its background window
+    from a random calendar year to a random condition-era-anchored year: the
+    cohort's documents changed, so corpora cached under the old windowing must
+    miss and rebuild rather than load stale documents. (The cohort name is in
+    the key but its code version is not, so a cohort-logic change is exactly the
+    case this version bump exists for.) v=6 forces one rebuild so the new
+    pre-filter per-group doc-length diagnostic (to_bow_dataframe) runs on the
+    already-cached population_cancer corpus; the corpus content is otherwise
+    identical to v=5.
     """
+    # cohort_defs is a content hash of charmpheno.omop.cohorts, so a change to
+    # ANY cohort's membership/logic auto-invalidates cached corpora without a
+    # manual `v` bump. `v` remains for shape changes unrelated to cohort code
+    # (and as the fallback when the source hash is unavailable).
+    from charmpheno.omop.cohorts import cohort_defs_version
     payload = {
         "source_table": source_table,
         "person_mod": int(person_mod),
@@ -56,7 +73,9 @@ def compute_cache_key(
         "min_df": float(min_df),
         "doc_spec": doc_spec_manifest,
         "cohort": cohort,
-        "v": 3,
+        "prior_obs_days": int(prior_obs_days),
+        "cohort_defs": cohort_defs_version(),
+        "v": 7,
     }
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]

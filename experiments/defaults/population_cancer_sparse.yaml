@@ -1,0 +1,13 @@
+# Population + Cancer + Sparse gated cohort (exp 0029). Like population_cancer,
+# but the non-cancer arm is split by in-window coding density into a dense
+# 'general' (background-only) group and a light-coder 'sparse' foreground
+# group, so a gated STM can read what sparse general-years are made of. The
+# experiment frontmatter supplies the STM covariate + gating fields (K,
+# background_k, foreground: cancer:N,sparse:M, group_var, covariate_formula);
+# this file exists so load_defaults finds a <cohort>.yaml to merge over
+# _base.yaml.
+#
+# `cohort` is the display/lookup id (matches filename); `cohort_def` is the
+# value passed to the driver's --cohort.
+cohort: population_cancer_sparse
+cohort_def: population_cancer_sparse

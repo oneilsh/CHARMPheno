@@ -253,3 +253,55 @@ def test_vocab_and_min_patient_count_conflict_raises(spark):
     df = _tiny_omop_df(spark)
     with pytest.raises(ValueError, match="min_patient_count"):
         to_bow_dataframe(df, doc_spec=PatientDocSpec(), vocab=[4567, 8910], min_patient_count=20)
+
+
+def test_doc_length_report_percentiles_and_thresholds(spark):
+    """doc_length_report returns, per group, the doc count, token-count
+    percentiles, and how many docs clear each candidate min_doc_length — the
+    inputs needed to choose the threshold from the real distribution."""
+    from charmpheno.omop.topic_prep import doc_length_report
+
+    # grouped-like frame: one row per document, a `tokens` array + a group col.
+    rows = [
+        ("general", ["a"] * 3),
+        ("general", ["a"] * 8),
+        ("general", ["a"] * 25),
+        ("cancer", ["a"] * 40),
+        ("cancer", ["a"] * 50),
+    ]
+    grouped = spark.createDataFrame(rows, ["source_cohort", "tokens"])
+    rep = {r["group"]: r for r in doc_length_report(grouped, group_col="source_cohort")}
+
+    g = rep["general"]
+    assert g["n_docs"] == 3
+    assert g["pct"][2] == 8                    # median of {3, 8, 25}
+    assert (g["ge5"], g["ge10"], g["ge20"], g["ge30"]) == (2, 1, 1, 0)
+
+    c = rep["cancer"]
+    assert c["n_docs"] == 2
+    assert (c["ge20"], c["ge30"]) == (2, 2)
+
+
+def test_group_top_codes_ranks_by_document_frequency(spark):
+    """group_top_codes returns, per group, the most frequent codes by DOCUMENT
+    frequency (a code counts once per doc), so a within-doc repeat can't inflate
+    it — the content peek for 'what is each cohort's docs made of'."""
+    from charmpheno.omop.topic_prep import group_top_codes
+
+    # (doc_id, group, concept_name); doc 1 repeats "wellness" within-doc.
+    rows = [
+        ("d1", "general", "wellness"),
+        ("d1", "general", "wellness"),   # repeat in same doc -> counts once
+        ("d1", "general", "hypertension"),
+        ("d2", "general", "wellness"),
+        ("d3", "cancer", "chemotherapy"),
+        ("d3", "cancer", "nausea"),
+    ]
+    ev = spark.createDataFrame(rows, ["doc_id", "source_cohort", "concept_name"])
+    top = group_top_codes(ev, group_col="source_cohort", top_n=5)
+
+    # "wellness" appears in 2 general docs (d1, d2); "hypertension" in 1.
+    gen = dict(top["general"])
+    assert gen["wellness"] == 2 and gen["hypertension"] == 1
+    assert top["general"][0][0] == "wellness"          # ranked first
+    assert {name for name, _ in top["cancer"]} == {"chemotherapy", "nausea"}
