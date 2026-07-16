@@ -217,3 +217,84 @@ def test_strip_test_features_removes_named_vocab_dims(spark):
     out = strip_test_features(df, {2}).collect()[0]["features"]
     assert out.size == 6
     assert dict(zip(out.indices.tolist(), out.values.tolist())) == {0: 1.0, 4: 3.0}
+
+
+def test_assemble_from_events_end_to_end(spark):
+    """Full assembly on synthetic events + a tiny DAG: schema, frontier engine-ids,
+    leakage strip on TEST only, and a DagLayout-loadable bundle."""
+    from charmpheno.omop.case_finding_assembly import assemble_from_events
+    from charmpheno.omop.condition_dag import build_condition_dag
+    from spark_vi.models.topic.dag_placement import DagLayout
+
+    # DAG: anchor 100 -> 200 (T2), 300 (T1); 200 -> 400 (T2-with-complication node).
+    edges = [(100, 200), (100, 300), (200, 400)]
+    before = build_condition_dag(
+        edges, anchor=100, node_ids=[200, 300, 400],
+        names={100: "diabetes", 200: "T2", 300: "T1", 400: "T2-renal"},
+    )
+
+    # 30 diabetes patients attest 200 (+ some 400) + a rides-along non-node 999;
+    # 30 background patients attest only non-node codes. One 365-day window each,
+    # collapsed to one doc by PatientCohortDocSpec.
+    rows = []
+    for pid in range(30):                       # diabetes / foreground
+        rows.append((pid, 200, "diabetes", dt.date(2015, 1, 1)))
+        rows.append((pid, 999, "diabetes", dt.date(2015, 2, 1)))
+        if pid % 2 == 0:
+            rows.append((pid, 400, "diabetes", dt.date(2015, 3, 1)))
+    for pid in range(100, 130):                 # background / general
+        rows.append((pid, 888, "general", dt.date(2016, 1, 1)))
+        rows.append((pid, 777, "general", dt.date(2016, 2, 1)))
+    ev = spark.createDataFrame(
+        rows, ["person_id", "concept_id", "source_cohort",
+               "condition_era_start_date"])
+
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+    bundle = assemble_from_events(
+        ev, before, doc_spec=PatientCohortDocSpec(min_doc_length=0),
+        min_n=1, holdout_frac=0.3, split_salt=20260716,
+        vocab_size=100, min_df=1, min_patient_count=1, n_bg=2, tpn=1)
+
+    # bundle plumbing
+    assert set(bundle.parent_int) and 0 not in bundle.parent_int      # anchor has no parent
+    lay = DagLayout(bundle.parent_int, n_bg=2, tpn=1)
+    # K_nodes (pruning_ledger's `kept`) always includes the anchor/root; DagLayout.nodes
+    # always excludes it (root=0 has no entry in the parent map) -- structural invariant
+    # K_nodes == len(lay.nodes) + 1, independent of what min_n prunes. (Plan transcription
+    # note: the plan's literal assertion had `+ 0`, which is mathematically impossible given
+    # the existing, read-only pruning_ledger/DagLayout semantics -- corrected to `+ 1` here;
+    # see the Task 6 report for the derivation.)
+    assert bundle.ledger["K_nodes"] == len(lay.nodes) + 1
+    assert bundle.name_by_id[200] == "T2"
+
+    # schema the shim consumes
+    for df in (bundle.train_df, bundle.test_df):
+        assert set(["person_id", "doc_id", "features", "frontier",
+                    "source_cohort"]) <= set(df.columns)
+
+    # a foreground TEST doc that attested 400 has frontier == {engine(400)};
+    # a background doc has frontier == [].
+    test_rows = {r["doc_id"]: r for r in bundle.test_df.collect()}
+    cid2int = bundle.cid2int
+    fg = [r for did, r in test_rows.items() if did.startswith("diabetes:")]
+    bg = [r for did, r in test_rows.items() if did.startswith("general:")]
+    assert fg and bg
+    for r in fg:
+        assert set(r["frontier"]) in ({cid2int[200]}, {cid2int[400]})
+    for r in bg:
+        assert list(r["frontier"]) == []
+
+    # leakage strip: TEST foreground features must NOT contain the node-200 vocab
+    # dim, but MUST retain the rides-along non-node 999.
+    vm = bundle.vocab_map
+    node200_idx = vm[200]
+    non_node_idx = vm[999]
+    for r in fg:
+        assert node200_idx not in set(r["features"].indices.tolist())
+        assert non_node_idx in set(r["features"].indices.tolist())
+
+    # train features are NOT stripped: a train foreground doc keeps node 200.
+    train_fg = [r for r in bundle.train_df.collect()
+                if r["doc_id"].startswith("diabetes:")]
+    assert train_fg
+    assert any(node200_idx in set(r["features"].indices.tolist()) for r in train_fg)

@@ -22,6 +22,8 @@ See docs/superpowers/specs/2026-07-15-case-finding-assembly-design.md.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from charmpheno.omop.condition_dag import _nearest_surviving_ancestors
 from spark_vi.models.topic.dag_placement import frontier_from_coded
 
@@ -194,3 +196,84 @@ def strip_test_features(test_df, drop_idxs, *, features_col="features"):
 
     udf = F.udf(_strip, VectorUDT())
     return test_df.withColumn(features_col, udf(F.col(features_col)))
+
+
+@dataclass
+class CaseFindingBundle:
+    """The assembled case-finding corpus. `train_df`/`test_df` carry
+    [person_id, doc_id, features, frontier(engine-ids), source_cohort] — the exact
+    shape GatedLDAEstimator(labelCol="frontier").fit consumes and dag_placement's
+    evaluate scores. `parent_int`/`int2cid`/`cid2int` bridge engine <-> concept-id;
+    `vocab_map` is {concept_id: vocab_idx}; `name_by_id` is {concept_id:
+    concept_name} for interpretation (render_profile); `ledger` is the pruning
+    receipt (kept/dropped/K_nodes + coarsening)."""
+    train_df: object
+    test_df: object
+    parent_int: dict
+    int2cid: dict
+    cid2int: dict
+    vocab_map: dict
+    name_by_id: dict
+    ledger: dict
+
+
+def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
+                         holdout_frac=0.2, split_salt=_SPLIT_SALT,
+                         vocab_size, min_df, min_patient_count,
+                         n_bg=2, tpn=1) -> CaseFindingBundle:
+    """Assemble the case-finding bundle from already-windowed events (with a
+    `source_cohort` column) + the pre-prune concept-id DAG. This is the testable
+    core: no BigQuery, pure Spark + domain logic. See the module docstring for the
+    id-space ordering.
+
+    `cohort_frontiers` for the ledger's coarsening rate is computed from the
+    FOREGROUND docs only (background attestations are empty) and collected to the
+    driver — foreground scale, run once at prep time."""
+    from pyspark.sql import functions as F
+    from charmpheno.omop.condition_dag import prune_by_attestation, pruning_ledger
+    from charmpheno.omop.topic_prep import to_bow_dataframe
+    from spark_vi.models.topic.dag_placement import DagLayout
+
+    attested = doc_attested_nodes(
+        events_df, before_dag.nodes(), doc_spec=doc_spec).cache()
+    try:
+        counts = node_patient_counts(attested)
+        after_dag = prune_by_attestation(before_dag, counts, min_n)
+        parent_int, int2cid, cid2int = after_dag.to_engine()
+        lay = DagLayout(parent_int, n_bg=n_bg, tpn=tpn)
+        keep = after_dag.nodes()
+
+        fg_sets = [
+            {int(c) for c in r["attested_cids"]}
+            for r in attested.where(F.size("attested_cids") > 0)
+                             .select("attested_cids").collect()
+        ]
+        cohort_frontiers = [most_specific_cids(s, before_dag) for s in fg_sets]
+        ledger = pruning_ledger(before_dag, after_dag, counts,
+                                cohort_frontiers=cohort_frontiers)
+
+        fr = attach_frontiers(attested, before_dag, keep, cid2int, lay)
+
+        bow_df, vocab_map = to_bow_dataframe(
+            events_df, doc_spec=doc_spec, vocab_size=vocab_size,
+            min_df=min_df, min_patient_count=min_patient_count)
+
+        labeled = (
+            bow_df.join(fr.select("doc_id", "frontier", "source_cohort"),
+                        on="doc_id", how="left")
+            .withColumn("frontier",
+                        F.coalesce(F.col("frontier"),
+                                   F.array().cast("array<bigint>")))
+        )
+        train_df, test_df = split_train_test(
+            labeled, holdout_frac=holdout_frac, split_salt=split_salt)
+
+        drop_idxs = {vocab_map[c] for c in before_dag.nodes() if c in vocab_map}
+        test_df = strip_test_features(test_df, drop_idxs)
+
+        return CaseFindingBundle(
+            train_df=train_df, test_df=test_df, parent_int=parent_int,
+            int2cid=int2cid, cid2int=cid2int, vocab_map=vocab_map,
+            name_by_id=dict(before_dag.names), ledger=ledger)
+    finally:
+        attested.unpersist()
