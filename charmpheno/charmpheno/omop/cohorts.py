@@ -110,6 +110,18 @@ _DEMENTIA_EXCLUSION_ANCESTORS: tuple[int, ...] = ()
 # "Ehlers-Danlos syndrome" hierarchy before fitting.
 _EDS_ANCESTOR = 79145
 
+# Top-level SNOMED concept for diabetes mellitus. concept_ancestor(201820)
+# returns the diabetes TYPE/etiology/status taxonomy (T1/T2/MODY/neonatal/
+# gestational/secondary x remission/control/pregnancy) — 127 standard-condition
+# descendants on the AoU vocab (offline-verified 2026-07-15). Classic
+# complications (nephropathy/retinopathy/neuropathy/CKD) are NOT is-a
+# descendants of 201820 (they live under 442793); by design they ride along as
+# learned vocabulary in each type node's topic rather than as DAG nodes. VERIFY
+# ON FIRST RUN: SELECT COUNT(*) FROM concept_ancestor WHERE
+# ancestor_concept_id = 201820 (expect ~hundreds; 0 means wrong id for this
+# vocab version).
+_DIABETES_ANCESTOR = 201820
+
 # Disease registry for the generalized population+disease cohort. Each entry is
 # fully described by concept ancestors; adding a rare disease is a new entry
 # here + a SUPPORTED_COHORTS/COHORT_METADATA/apply_cohort line, no new function.
@@ -120,6 +132,10 @@ _DISEASE_REGISTRY: dict[str, dict] = {
     },
     "eds": {
         "inclusion_ancestors": (_EDS_ANCESTOR,),
+        "exclusion_ancestors": (),
+    },
+    "diabetes": {
+        "inclusion_ancestors": (_DIABETES_ANCESTOR,),
         "exclusion_ancestors": (),
     },
 }
