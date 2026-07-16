@@ -80,3 +80,30 @@ def test_doc_frontier_engine_ids_rolls_pruned_attestation_up():
     lay = DagLayout(parent_int, n_bg=2, tpn=1)
     fr = doc_frontier_engine_ids({400}, dag, after.nodes(), cid2int, lay)
     assert fr == sorted([cid2int[200], cid2int[300]])
+
+
+def test_strip_features_drops_only_named_dims_preserving_size():
+    from pyspark.ml.linalg import SparseVector
+    from charmpheno.omop.case_finding_assembly import strip_features
+    v = SparseVector(10, [1, 3, 5, 7], [2.0, 1.0, 4.0, 1.0])
+    out = strip_features(v, {3, 7})
+    assert out.size == 10
+    assert dict(zip(out.indices.tolist(), out.values.tolist())) == {1: 2.0, 5: 4.0}
+
+
+def test_strip_features_empty_drop_is_identity():
+    from pyspark.ml.linalg import SparseVector
+    from charmpheno.omop.case_finding_assembly import strip_features
+    v = SparseVector(5, [0, 2], [1.0, 3.0])
+    out = strip_features(v, set())
+    assert out.size == 5
+    assert dict(zip(out.indices.tolist(), out.values.tolist())) == {0: 1.0, 2: 3.0}
+
+
+def test_strip_features_all_dropped_yields_empty_vector():
+    from pyspark.ml.linalg import SparseVector
+    from charmpheno.omop.case_finding_assembly import strip_features
+    v = SparseVector(4, [1, 2], [5.0, 6.0])
+    out = strip_features(v, {1, 2})
+    assert out.size == 4
+    assert out.indices.tolist() == [] and out.values.tolist() == []

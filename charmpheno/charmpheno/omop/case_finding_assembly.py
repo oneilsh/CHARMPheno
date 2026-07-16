@@ -74,3 +74,21 @@ def doc_frontier_engine_ids(attested_cids, before_dag, keep, cid2int, lay) -> li
     survivors = roll_up_to_survivors(attested_cids, before_dag, keep)
     engine_ids = [cid2int[c] for c in survivors if c in cid2int]
     return sorted(frontier_from_coded(engine_ids, lay))
+
+
+def strip_features(vec, drop_idxs):
+    """Return a SparseVector equal to `vec` with the vocab dims in `drop_idxs`
+    removed (leakage strip; held-out docs only). `vec.size` is preserved so the
+    vector still matches the model vocabulary; the dropped indices simply become
+    zero (absent from the sparse representation). This is the case-finding test:
+    a held-out patient must not read its own DAG-node type code off its features."""
+    from pyspark.ml.linalg import SparseVector
+    if not drop_idxs:
+        return vec
+    drop = {int(i) for i in drop_idxs}
+    kept = [(int(i), float(v)) for i, v in zip(vec.indices, vec.values)
+            if int(i) not in drop]
+    if not kept:
+        return SparseVector(vec.size, [], [])
+    idxs, vals = zip(*kept)
+    return SparseVector(vec.size, list(idxs), list(vals))
