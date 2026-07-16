@@ -264,19 +264,34 @@ def _average_precision(scores, y):
     return float(np.sum((recall - r_prev) * precision))
 
 
-def _bootstrap_ci(P, fronts, lay, node_pos, *, n_boot=1000, seed=0):
+def _bootstrap_ci(P, fronts, lay, node_pos, *, n_boot=500, seed=0, max_docs=5000):
     """Percentile bootstrap 95% CIs for the headline metrics, resampling DOCS
     with replacement (docs are one-per-patient here, so this is a patient-
     clustered bootstrap). Returns {metric: (lo, hi)} for ap_macro, mrr, top2,
-    recall_at_1. Fixed seed -> resume-stable."""
+    recall_at_1.
+
+    `recall_at_1` here is the SAME frontier-normalized recall the top-level
+    `recall_at_k[1]` reports (|top-1 ∩ frontier| / |frontier|), not top-1 accuracy
+    — so the CI brackets the metric it names even for multi-node (comorbid)
+    frontiers. To keep cost bounded (the per-node AP is recomputed each replicate),
+    the doc set is subsampled to at most `max_docs` before bootstrapping when
+    larger; the CIs then reflect that subsample (wider, still valid). Fixed seed
+    -> resume-stable."""
     rng = np.random.default_rng(seed)
     n = P.shape[0]
     nodes = lay.nodes
+    sel = np.arange(n)
+    if n > max_docs:
+        sel = np.sort(rng.choice(n, size=max_docs, replace=False))
+    Ps = P[sel]
+    fs = [fronts[j] for j in sel]
+    poss = {u: [node_pos[u][j] for j in sel] for u in nodes}
+    m = len(sel)
 
     def _metrics(idx):
-        Pb = P[idx]
-        fb = [fronts[j] for j in idx]
-        posb = {u: [node_pos[u][j] for j in idx] for u in nodes}
+        Pb = Ps[idx]
+        fb = [fs[j] for j in idx]
+        posb = {u: [poss[u][j] for j in idx] for u in nodes}
         aps = [_average_precision(Pb[:, i], posb[u]) for i, u in enumerate(nodes)]
         aps = [a for a in aps if not np.isnan(a)]
         apm = float(np.mean(aps)) if aps else np.nan
@@ -286,7 +301,7 @@ def _bootstrap_ci(P, fronts, lay, node_pos, *, n_boot=1000, seed=0):
             if not ti:
                 continue
             top1 = int(np.argmax(Pb[i]))
-            r1.append(1.0 if top1 in ti else 0.0)
+            r1.append(len({top1} & set(ti)) / len(ti))     # matches recall_at_k[1]
             rk = min(1 + int((Pb[i] > Pb[i][j]).sum()) for j in ti)
             ranks.append(1.0 / rk)
             top2.append(1.0 if rk <= 2 else 0.0)
@@ -297,7 +312,7 @@ def _bootstrap_ci(P, fronts, lay, node_pos, *, n_boot=1000, seed=0):
 
     draws = {"ap_macro": [], "mrr": [], "top2": [], "recall_at_1": []}
     for _ in range(n_boot):
-        idx = rng.integers(0, n, size=n)
+        idx = rng.integers(0, m, size=m)
         apm, mrr, top2, r1 = _metrics(idx)
         draws["ap_macro"].append(apm); draws["mrr"].append(mrr)
         draws["top2"].append(top2); draws["recall_at_1"].append(r1)

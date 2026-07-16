@@ -324,3 +324,20 @@ def test_evaluate_adds_pr_recall_ci_keys():
         lo, hi = ev["ci"][key]
         assert lo <= hi
     assert ev["ci"]["ap_macro"][0] <= ev["ap_macro"] <= ev["ci"]["ap_macro"][1] + 1e-9
+
+
+def test_bootstrap_recall_at_1_matches_frontier_normalized_recall():
+    """Regression: the CI's recall_at_1 must be the SAME frontier-normalized
+    recall as the reported recall_at_k[1] (|top-1 ∩ frontier| / |frontier|), not
+    top-1 accuracy. A single doc with a 2-node comorbid frontier whose argmax hits
+    ONE true node has recall@1 = 0.5; with one doc every bootstrap resample is that
+    doc, so the CI collapses to exactly (0.5, 0.5) — the old top-1-accuracy code
+    gave 1.0."""
+    from spark_vi.models.topic.dag_placement import DagLayout, evaluate
+    lay = DagLayout({1: 0, 2: 0, 3: 0}, n_bg=2, tpn=1)     # nodes [1,2,3]
+    # one doc, true frontier {1,2}, argmax at node 1 -> recall@1 = 1/2.
+    profiles = [{1: 0.9, 2: 0.1, 3: 0.0}]
+    labels = [{1, 2}]
+    ev = evaluate(profiles, labels, lay)
+    assert abs(ev["recall_at_k"][1] - 0.5) < 1e-9
+    assert ev["ci"]["recall_at_1"] == (0.5, 0.5)
