@@ -24,7 +24,22 @@ def test_diabetes_experiments_parse_and_build(monkeypatch):
         eff = _load_effective(mod, exp)
         assert eff["model_class"] == "dag_placement"
         assert eff["init"] == init
-        assert eff["anchor"] == 201820
+        assert eff["disease"] == "diabetes"
         mod.validate_frontmatter(eff)                 # must not exit
         args = mod.build_dag_placement_args(eff, "/out")
         assert args[args.index("--init") + 1] == init
+
+
+def test_rare6_forest_experiment_parses_and_builds(monkeypatch):
+    mod = importlib.import_module("run_experiment")
+    monkeypatch.setattr(mod, "_require_workspace_env", lambda: ("p.d", "bill"))
+    eff = _load_effective(mod, "docs/experiments/0055-dag-placement-rare6-forest.md")
+    assert eff["model_class"] == "dag_placement"
+    assert eff["disease"] == "rare6"
+    assert eff["min_n"] == 20 and eff["n_bg"] == 40 and eff["person_mod"] == 1
+    assert eff["init"] == "spectral"
+    mod.validate_frontmatter(eff)                     # must not exit
+    args = mod.build_dag_placement_args(eff, "/out")
+    assert args[args.index("--disease") + 1] == "rare6"
+    assert args[args.index("--min-n") + 1] == "20"
+    assert "--K" not in args                          # K is emergent

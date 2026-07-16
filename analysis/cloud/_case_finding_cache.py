@@ -35,7 +35,7 @@ def _module_source_hash(module) -> str:
 
 def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
                              min_patient_count, doc_min_length, prior_obs_days,
-                             window_days, anchor, min_n, holdout_frac, split_salt=None,
+                             window_days, disease, min_n, holdout_frac, split_salt=None,
                              n_bg, tpn, cdr=None, strip_mode="test_only") -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
@@ -48,6 +48,11 @@ def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
     given, so the key stays consistent with the split the (unparameterized)
     driver actually produces — callers that don't vary the salt (the driver has
     no --split-salt) get a correct, stable key rather than a missing-arg error.
+
+    `disease` is the corpus identity (it determines both the foreground cohort
+    and the label-DAG anchors via cohorts.disease_anchors); the anchor concept-
+    ids no longer appear in the key directly. cohort_defs_version() folds in the
+    registry, so editing a disease's anchor set also invalidates the key.
     """
     from charmpheno.omop import condition_dag, case_finding_assembly
     from charmpheno.omop.cohorts import cohort_defs_version
@@ -58,13 +63,13 @@ def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
         "vocab_size": vocab_size, "min_df": float(min_df),
         "min_patient_count": int(min_patient_count),
         "doc_min_length": int(doc_min_length), "prior_obs_days": int(prior_obs_days),
-        "window_days": int(window_days), "anchor": int(anchor), "min_n": int(min_n),
+        "window_days": int(window_days), "disease": str(disease), "min_n": int(min_n),
         "holdout_frac": float(holdout_frac), "split_salt": int(split_salt),
         "n_bg": int(n_bg), "tpn": int(tpn), "cdr": cdr, "strip_mode": strip_mode,
         "cohort_defs": cohort_defs_version(),
         "dag_src": _module_source_hash(condition_dag),
         "assembly_src": _module_source_hash(case_finding_assembly),
-        "v": 2,
+        "v": 3,
     }
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
@@ -138,7 +143,7 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
         key_params = {k: assembly_params[k] for k in (
             "source_table", "person_mod", "vocab_size", "min_df",
             "min_patient_count", "doc_min_length", "prior_obs_days", "window_days",
-            "anchor", "min_n", "holdout_frac", "split_salt", "n_bg", "tpn", "cdr",
+            "disease", "min_n", "holdout_frac", "split_salt", "n_bg", "tpn", "cdr",
             "strip_mode",
         ) if k in assembly_params}
         key = compute_bundle_cache_key(**key_params)

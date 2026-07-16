@@ -1,7 +1,9 @@
 """Cloud fit+eval driver for the gated-SVI hierarchical case-finding engine.
 
-Assembles the diabetes case-finding corpus (piece-2 assemble_case_finding_corpus,
-cached), fits the gated MLlib shim (GatedLDAEstimator), scores held-out placement
+Assembles the case-finding corpus for a chosen `disease` (piece-2
+assemble_case_finding_corpus, cached) — a single-disease type taxonomy
+(diabetes, eds) or the multi-disease rare-disease forest (rare6) — fits the
+gated MLlib shim (GatedLDAEstimator), scores held-out placement
 inline (dag_placement.evaluate), and saves an npz + manifest.json artifact (the
 pg_stm methods-experiment pattern; the NPMI coherence eval cannot score a
 placement model). K is EMERGENT (n_bg + surviving-DAG-nodes * tpn), so there is
@@ -133,8 +135,10 @@ def parse_args(argv=None):
     p.add_argument("--doc-min-length", type=int, default=0)
     p.add_argument("--prior-obs-days", type=int, default=365)
     p.add_argument("--window-days", type=int, default=365)
-    # assembly / DAG
-    p.add_argument("--anchor", type=int, default=201820)
+    # assembly / DAG. `disease` selects both the foreground cohort and the label-
+    # DAG anchors (cohorts.disease_anchors): single-disease (diabetes, eds) roots
+    # at one anchor; a multi-disease name (rare6) builds a forest of subtrees.
+    p.add_argument("--disease", default="diabetes")
     p.add_argument("--min-n", type=int, default=50)
     p.add_argument("--holdout-frac", type=float, default=0.2)
     p.add_argument("--strip-mode", choices=["test_only", "both"], default="test_only")
@@ -176,7 +180,7 @@ def main() -> int:
                 person_mod=args.person_mod, vocab_size=args.vocab_size,
                 min_df=args.min_df, min_patient_count=args.min_patient_count,
                 doc_min_length=args.doc_min_length, prior_obs_days=args.prior_obs_days,
-                window_days=args.window_days, anchor=args.anchor, min_n=args.min_n,
+                window_days=args.window_days, disease=args.disease, min_n=args.min_n,
                 holdout_frac=args.holdout_frac, n_bg=args.n_bg, tpn=args.tpn,
                 strip_mode=args.strip_mode)
             print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
@@ -235,7 +239,7 @@ def main() -> int:
             manifest = {
                 "model_class": "dag_placement",
                 "init": args.init, "K": lay.K, "n_bg": args.n_bg, "tpn": args.tpn,
-                "anchor": args.anchor, "min_n": args.min_n, "strip_mode": args.strip_mode,
+                "disease": args.disease, "min_n": args.min_n, "strip_mode": args.strip_mode,
                 "max_iter": args.max_iter, "metrics": metrics, "ledger": bundle.ledger,
                 "corpus_stats": corpus_stats,
                 "corpus_manifest": {

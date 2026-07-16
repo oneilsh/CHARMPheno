@@ -405,20 +405,64 @@ def test_condition_dag_from_frames_builds_taxonomy_from_omop_frames(spark):
         ],
         ["ancestor_concept_id", "descendant_concept_id", "min_levels_of_separation"],
     )
-    dag = _condition_dag_from_frames(concept, ca, anchor=100)
+    dag = _condition_dag_from_frames(concept, ca, anchors=[100])
     assert dag.nodes() == {100, 200, 300, 400}
     assert dag.parents[400] == [200]            # sep-1 edge only, not 100->400
     assert set(dag.parents[200]) == {100}
     assert dag.names[200] == "T2"
 
 
+def test_condition_dag_from_frames_builds_forest_over_multiple_anchors(spark):
+    from charmpheno.omop.case_finding_assembly import _condition_dag_from_frames
+    # Two disjoint disease subtrees: anchor 100 -> 200; anchor 500 -> 600.
+    concept = spark.createDataFrame(
+        [
+            (100, "diseaseA", "S", "Condition"),
+            (200, "A-subtype", "S", "Condition"),
+            (500, "diseaseB", "S", "Condition"),
+            (600, "B-subtype", "S", "Condition"),
+        ],
+        ["concept_id", "concept_name", "standard_concept", "domain_id"],
+    )
+    ca = spark.createDataFrame(
+        [(100, 200, 1), (500, 600, 1)],
+        ["ancestor_concept_id", "descendant_concept_id", "min_levels_of_separation"],
+    )
+    dag = _condition_dag_from_frames(concept, ca, anchors=[100, 500], root=-1)
+    # synthetic root over both anchors; each anchor a depth-1 child of the root.
+    assert dag.anchor == -1
+    assert dag.nodes() == {-1, 100, 200, 500, 600}
+    assert dag.parents[100] == [-1]
+    assert dag.parents[500] == [-1]
+    assert dag.parents[200] == [100]            # within-subtree structure preserved
+    assert dag.parents[600] == [500]
+    assert dag.depth(200) == 2 and dag.depth(100) == 1
+    # to_engine() maps the synthetic root to engine-id 0.
+    _, int2cid, cid2int = dag.to_engine()
+    assert cid2int[-1] == 0
+
+
+def test_condition_dag_from_frames_rejects_multi_anchor_without_root(spark):
+    import pytest
+    from charmpheno.omop.case_finding_assembly import _condition_dag_from_frames
+    concept = spark.createDataFrame(
+        [(100, "a", "S", "Condition")],
+        ["concept_id", "concept_name", "standard_concept", "domain_id"])
+    ca = spark.createDataFrame(
+        [(100, 100, 0)],
+        ["ancestor_concept_id", "descendant_concept_id", "min_levels_of_separation"])
+    with pytest.raises(ValueError, match="forest"):
+        _condition_dag_from_frames(concept, ca, anchors=[100, 500])
+
+
 def test_assemble_case_finding_corpus_importable_signature():
     import inspect
     from charmpheno.omop.case_finding_assembly import assemble_case_finding_corpus
     p = inspect.signature(assemble_case_finding_corpus).parameters
-    assert {"anchor", "cdr", "billing", "person_mod", "min_n", "vocab_size",
+    assert {"disease", "cdr", "billing", "person_mod", "min_n", "vocab_size",
             "holdout_frac", "n_bg", "tpn"} <= set(p)
-    assert p["anchor"].default == 201820
+    assert p["disease"].default == "diabetes"
+    assert "anchor" not in p                     # anchor is derived from disease now
 
 
 def test_strip_mode_both_strips_train_features(spark):

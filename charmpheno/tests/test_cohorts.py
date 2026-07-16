@@ -19,6 +19,33 @@ def test_supported_cohorts_includes_first_dementia_year():
     assert "first_dementia_year" in SUPPORTED_COHORTS
 
 
+def test_disease_anchors_single_disease_returns_one_anchor():
+    from charmpheno.omop.cohorts import disease_anchors
+    assert disease_anchors("diabetes") == (201820,)
+    assert disease_anchors("eds") == (79145,)
+
+
+def test_disease_anchors_rare6_returns_six_distinct_anchors():
+    from charmpheno.omop.cohorts import disease_anchors
+    anchors = disease_anchors("rare6")
+    assert len(anchors) == 6 and len(set(anchors)) == 6
+    # EDS leads the forest; the five distinct-phenotype additions are present.
+    assert anchors[0] == 79145
+    assert set(anchors) == {79145, 438688, 257628, 40352976, 76685, 432595}
+
+
+def test_disease_anchors_rejects_unknown_disease():
+    from charmpheno.omop.cohorts import disease_anchors
+    with pytest.raises(ValueError, match="not in registry"):
+        disease_anchors("not_a_disease")
+
+
+def test_supported_cohorts_and_metadata_include_rare6():
+    from charmpheno.omop.cohorts import SUPPORTED_COHORTS, COHORT_METADATA
+    assert "population_rare6" in SUPPORTED_COHORTS
+    assert "population_rare6" in COHORT_METADATA
+
+
 def test_apply_cohort_rejects_unknown_name():
     with pytest.raises(ValueError, match="not supported"):
         apply_cohort(

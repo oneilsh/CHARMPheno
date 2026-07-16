@@ -27,12 +27,12 @@ def test_build_dag_placement_args_shape(monkeypatch):
     eff = {"model_class": "dag_placement", "source_table": "condition_era",
            "person_mod": 10, "vocab_size": 5000, "min_df": 20,
            "min_patient_count": 20, "doc_min_length": 0, "prior_obs_days": 365,
-           "window_days": 365, "anchor": 201820, "min_n": 50, "holdout_frac": 0.2,
+           "window_days": 365, "disease": "diabetes", "min_n": 50, "holdout_frac": 0.2,
            "n_bg": 2, "tpn": 1, "max_iter": 100, "seed": 42, "init": "spectral",
            "spectral_max_vocab": 8000, "cache_uri": "hdfs:///c"}
     args = mod.build_dag_placement_args(eff, "/out")
     assert "--init" in args and args[args.index("--init") + 1] == "spectral"
-    assert "--anchor" in args and args[args.index("--anchor") + 1] == "201820"
+    assert "--disease" in args and args[args.index("--disease") + 1] == "diabetes"
     assert "--out-dir" in args and args[args.index("--out-dir") + 1] == "/out"
     assert "--cache-uri" in args and args[args.index("--cache-uri") + 1] == "hdfs:///c"
     assert "--K" not in args                       # K is emergent
@@ -44,11 +44,11 @@ def test_build_fit_args_routes_dag_placement(monkeypatch):
     eff = {"model_class": "dag_placement", "source_table": "condition_era",
            "person_mod": 10, "vocab_size": 5000, "min_df": 20,
            "min_patient_count": 20, "doc_min_length": 0, "prior_obs_days": 365,
-           "window_days": 365, "anchor": 201820, "min_n": 50, "holdout_frac": 0.2,
+           "window_days": 365, "disease": "diabetes", "min_n": 50, "holdout_frac": 0.2,
            "n_bg": 2, "tpn": 1, "max_iter": 100, "seed": 42, "init": "random",
            "spectral_max_vocab": 8000}
     args = mod.build_fit_args(eff, "/out")
-    assert "--anchor" in args     # routed to build_dag_placement_args
+    assert "--disease" in args  # routed to build_dag_placement_args
 
 
 def test_build_dag_placement_args_includes_strip_mode(monkeypatch):

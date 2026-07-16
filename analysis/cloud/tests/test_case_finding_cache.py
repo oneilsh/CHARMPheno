@@ -29,11 +29,11 @@ def test_bundle_cache_key_sensitive_and_stable():
     from _case_finding_cache import compute_bundle_cache_key
     base = dict(source_table="condition_era", person_mod=10, vocab_size=5000,
                 min_df=20, min_patient_count=20, doc_min_length=0,
-                prior_obs_days=365, window_days=365, anchor=201820, min_n=50,
+                prior_obs_days=365, window_days=365, disease="diabetes", min_n=50,
                 holdout_frac=0.2, split_salt=20260716, n_bg=2, tpn=1, cdr="p.d")
     k0 = compute_bundle_cache_key(**base)
     assert k0 == compute_bundle_cache_key(**base)              # stable
-    for field, val in [("anchor", 442793), ("min_n", 25), ("holdout_frac", 0.3),
+    for field, val in [("disease", "rare6"), ("min_n", 25), ("holdout_frac", 0.3),
                        ("person_mod", 20), ("vocab_size", 3000), ("n_bg", 3),
                        ("tpn", 2)]:
         assert compute_bundle_cache_key(**{**base, field: val}) != k0
@@ -72,7 +72,7 @@ def test_bundle_cache_miss_then_hit(spark, tmp_path):
     uri = f"file://{tmp_path}/cache2"
     params = dict(source_table="condition_era", person_mod=10, vocab_size=5000,
                   min_df=20, min_patient_count=20, doc_min_length=0,
-                  prior_obs_days=365, window_days=365, anchor=201820, min_n=50,
+                  prior_obs_days=365, window_days=365, disease="diabetes", min_n=50,
                   holdout_frac=0.2, split_salt=20260716, n_bg=2, tpn=1, cdr="p.d",
                   billing="bp")
     b1 = load_or_build_case_finding_bundle(
@@ -100,7 +100,7 @@ def test_bundle_cache_miss_then_hit_without_split_salt(spark, tmp_path):
     # Exactly the kwargs dag_placement_cloud.py passes — NO split_salt.
     params = dict(source_table="condition_era", person_mod=10, vocab_size=5000,
                   min_df=20, min_patient_count=20, doc_min_length=0,
-                  prior_obs_days=365, window_days=365, anchor=201820, min_n=50,
+                  prior_obs_days=365, window_days=365, disease="diabetes", min_n=50,
                   holdout_frac=0.2, n_bg=2, tpn=1, cdr="p.d", billing="bp")
     b1 = load_or_build_case_finding_bundle(
         spark, cache_uri=uri, _assemble_fn=_stub_assemble, **params)

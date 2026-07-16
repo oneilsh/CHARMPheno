@@ -33,6 +33,13 @@ from spark_vi.models.topic.dag_placement import frontier_from_coded
 # cohorts._RANDOM_WINDOW_SALT.
 _SPLIT_SALT = 20260716
 
+# Synthetic concept-id for the multi-disease forest root. Real OMOP concept_ids
+# are positive, so -1 is a safe sentinel that cannot collide with an attested
+# code; it becomes engine-id 0 (the never-pruned DAG root) after to_engine().
+# Used only when a disease resolves to more than one DAG anchor (the rare6
+# forest); single-anchor diseases root the DAG at the anchor itself.
+_FOREST_ROOT_CID = -1
+
 
 def _descendants(children_map: dict[int, list[int]], root: int) -> set[int]:
     """Proper descendants of `root` in a {parent: [children]} concept-id map."""
@@ -317,19 +324,41 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
         train_att.unpersist(); test_att.unpersist()
 
 
-def _condition_dag_from_frames(concept_df, ca_df, anchor):
+def _condition_dag_from_frames(concept_df, ca_df, anchors, root=None):
     """Build the concept-id ConditionDag from `concept` + `concept_ancestor`
-    frames. Nodes = standard-condition (standard_concept='S', domain_id=
-    'Condition') descendants of `anchor` (+ the anchor); edges = min-sep-1
-    concept_ancestor pairs among the nodes (the node membership is pushed into the
-    edge scan so only ~DAG-size rows collect, not the full concept_ancestor
-    table); names from `concept`. Delegates assembly to piece-1
-    build_condition_dag."""
+    frames.
+
+    `anchors` is one anchor concept-id or a sequence of them. Nodes = standard-
+    condition (standard_concept='S', domain_id='Condition') descendants of ANY
+    anchor (+ the anchors themselves); edges = min-sep-1 concept_ancestor pairs
+    among the nodes (node membership is pushed into the edge scan so only
+    ~DAG-size rows collect, not the full concept_ancestor table); names from
+    `concept`. Delegates assembly to piece-1 build_condition_dag.
+
+    Single-disease case (`root=None`): exactly one anchor is required and the DAG
+    is rooted at it directly (unchanged legacy behavior).
+
+    Multi-disease forest (`root` given, a synthetic sentinel concept-id): the DAG
+    is rooted at `root`, and each disease anchor is wired as a depth-1 child of
+    the root via an explicit (root, anchor) edge, so the anchors' subtrees hang
+    side by side under one connected forest. A descendant whose only min-sep-1
+    parent was filtered out (non-standard/wrong-domain) still orphan-attaches to
+    the root rather than its disease anchor — surfaced via `dag.orphans`, and
+    typically pruned by min_n as a rare subtype; acceptable for v1."""
     from pyspark.sql import functions as F
     from charmpheno.omop.condition_dag import build_condition_dag
 
+    anchor_list = [int(a) for a in ([anchors] if isinstance(anchors, int) else anchors)]
+    if root is None:
+        if len(anchor_list) != 1:
+            raise ValueError(
+                "single-anchor DAG requires exactly one anchor; pass a synthetic "
+                f"`root` to build a forest over {len(anchor_list)} anchors")
+        root = anchor_list[0]
+    root = int(root)
+
     desc = (
-        ca_df.where(F.col("ancestor_concept_id") == anchor)
+        ca_df.where(F.col("ancestor_concept_id").isin(anchor_list))
              .select(F.col("descendant_concept_id").alias("concept_id"))
     )
     std_cond = (
@@ -340,7 +369,10 @@ def _condition_dag_from_frames(concept_df, ca_df, anchor):
     node_rows = desc.join(std_cond, on="concept_id", how="inner").collect()
     node_ids = [int(r["concept_id"]) for r in node_rows]
     names = {int(r["concept_id"]): r["concept_name"] for r in node_rows}
-    nodeset = list(set(node_ids) | {anchor})
+    # nodeset for the edge scan = descendants + anchors (+ root added by
+    # build_condition_dag). The synthetic root is never in concept_ancestor, so
+    # min-sep-1 edges only reconstruct within-subtree structure.
+    nodeset = list(set(node_ids) | set(anchor_list))
 
     edges = [
         (int(r["ancestor_concept_id"]), int(r["descendant_concept_id"]))
@@ -350,17 +382,29 @@ def _condition_dag_from_frames(concept_df, ca_df, anchor):
                       .select("ancestor_concept_id", "descendant_concept_id")
                       .collect()
     ]
-    anchor_row = (concept_df.where(F.col("concept_id") == anchor)
-                  .select("concept_name").head(1))
-    if anchor_row:
-        names[anchor] = anchor_row[0][0]
-    return build_condition_dag(edges, anchor, node_ids, names)
+    # Names for the anchors (they may or may not be standard conditions in
+    # `concept`, and are needed regardless as DAG nodes).
+    anchor_rows = (concept_df.where(F.col("concept_id").isin(anchor_list))
+                   .select("concept_id", "concept_name").collect())
+    for r in anchor_rows:
+        names[int(r["concept_id"])] = r["concept_name"]
+
+    if root not in anchor_list:
+        # Forest: connect the synthetic root to each disease anchor explicitly so
+        # the anchors are depth-1 children (not orphans), and give the root a name.
+        edges += [(root, a) for a in anchor_list]
+        names.setdefault(root, "rare-disease forest root")
+
+    # node_ids passed to build_condition_dag must include the anchors so they are
+    # in the nodeset (build_condition_dag adds only the root).
+    return build_condition_dag(edges, root, node_ids + anchor_list, names)
 
 
-def load_condition_dag(spark, *, anchor, cdr, billing):
-    """Read `concept` + `concept_ancestor` from BigQuery and build the anchor's
-    condition DAG (concept-id space). BQ wrapper around
-    _condition_dag_from_frames."""
+def load_condition_dag(spark, *, anchors, cdr, billing, root=None):
+    """Read `concept` + `concept_ancestor` from BigQuery and build the condition
+    DAG (concept-id space) over one or more `anchors`. BQ wrapper around
+    _condition_dag_from_frames; pass a synthetic `root` for a multi-anchor
+    forest (see that function)."""
     def _read(table):
         return (spark.read.format("bigquery")
                 .option("table", f"{cdr}.{table}")
@@ -370,10 +414,10 @@ def load_condition_dag(spark, *, anchor, cdr, billing):
         "concept_id", "concept_name", "standard_concept", "domain_id")
     ca = _read("concept_ancestor").select(
         "ancestor_concept_id", "descendant_concept_id", "min_levels_of_separation")
-    return _condition_dag_from_frames(concept, ca, anchor)
+    return _condition_dag_from_frames(concept, ca, anchors, root=root)
 
 
-def assemble_case_finding_corpus(spark, *, anchor=201820, cdr, billing,
+def assemble_case_finding_corpus(spark, *, disease="diabetes", cdr, billing,
                                  source_table="condition_era", person_mod,
                                  min_n, holdout_frac=0.2, split_salt=_SPLIT_SALT,
                                  vocab_size, min_df, min_patient_count,
@@ -381,14 +425,20 @@ def assemble_case_finding_corpus(spark, *, anchor=201820, cdr, billing,
                                  prior_obs_days=365, window_days=365,
                                  strip_mode="test_only"):
     """End-to-end BQ assembly: load OMOP (person_mod sample), apply the
-    diabetes+background cohort (one 365-day window per patient), load the anchor
-    DAG, and assemble the bundle. Thin wrapper over assemble_from_events; the
-    per-doc unit is PatientCohortDocSpec (doc_id = source_cohort:person_id) so each
-    patient's single window is exactly one document (see the plan's design
-    correction). Requires a live CDR; unit tests cover assemble_from_events and
+    `disease`+background cohort (one `window_days` window per patient), build the
+    disease's label DAG, and assemble the bundle.
+
+    `disease` is the single knob. Its DAG anchors come from the cohort registry
+    (cohorts.disease_anchors) — the SAME concept ancestors that define the
+    foreground arm — so a single-disease name (diabetes, eds) roots the DAG at
+    one anchor while a multi-disease name (rare6) builds a forest of the six
+    anchors' subtrees under a synthetic root (_FOREST_ROOT_CID). Thin wrapper
+    over assemble_from_events; the per-doc unit is PatientCohortDocSpec (doc_id =
+    source_cohort:person_id) so each patient's single window is exactly one
+    document. Requires a live CDR; unit tests cover assemble_from_events and
     _condition_dag_from_frames directly."""
     from charmpheno.omop import load_omop_bigquery
-    from charmpheno.omop.cohorts import apply_population_disease_cohort
+    from charmpheno.omop.cohorts import apply_population_disease_cohort, disease_anchors
     from charmpheno.omop.doc_spec import PatientCohortDocSpec
 
     omop = load_omop_bigquery(
@@ -396,10 +446,13 @@ def assemble_case_finding_corpus(spark, *, anchor=201820, cdr, billing,
         person_sample_mod=person_mod, source_table=source_table)
     date_col = "condition_era_start_date"
     events = apply_population_disease_cohort(
-        omop, disease="diabetes", window_days=window_days,
+        omop, disease=disease, window_days=window_days,
         spark=spark, cdr_dataset=cdr, billing_project=billing,
         date_col=date_col, prior_obs_days=prior_obs_days)
-    before_dag = load_condition_dag(spark, anchor=anchor, cdr=cdr, billing=billing)
+    anchors = disease_anchors(disease)
+    root = _FOREST_ROOT_CID if len(anchors) > 1 else None
+    before_dag = load_condition_dag(
+        spark, anchors=anchors, root=root, cdr=cdr, billing=billing)
     doc_spec = PatientCohortDocSpec(min_doc_length=doc_min_length)
     return assemble_from_events(
         events, before_dag, doc_spec=doc_spec, min_n=min_n,

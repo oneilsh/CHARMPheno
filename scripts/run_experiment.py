@@ -681,7 +681,7 @@ def build_dag_placement_args(
         "--doc-min-length", str(effective["doc_min_length"]),
         "--prior-obs-days", str(effective.get("prior_obs_days", 365)),
         "--window-days", str(effective.get("window_days", 365)),
-        "--anchor", str(effective.get("anchor", 201820)),
+        "--disease", str(effective.get("disease", "diabetes")),
         "--min-n", str(effective["min_n"]),
         "--holdout-frac", str(effective.get("holdout_frac", 0.2)),
         "--n-bg", str(effective["n_bg"]),

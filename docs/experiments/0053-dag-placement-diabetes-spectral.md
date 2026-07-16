@@ -7,7 +7,7 @@ cohort: population_diabetes
 cohort_def: population_diabetes
 person_mod: 10
 prior_obs_days: 365
-anchor: 201820
+disease: diabetes
 min_n: 50
 n_bg: 20
 tpn: 5

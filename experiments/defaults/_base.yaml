@@ -48,8 +48,10 @@ lbfgs_tol: 1.0e-4
 # model_class: dag_placement triggers the gated-SVI placement engine. K is
 # EMERGENT (n_bg + surviving-DAG-nodes * tpn), NOT set here. init=random is the
 # validated default; init=spectral is the pre-registered A/B arm (dense
-# block-aligned anchor-word seed, Arora et al. 2013). anchor 201820 = diabetes.
-anchor: 201820
+# block-aligned anchor-word seed, Arora et al. 2013). `disease` selects both the
+# foreground cohort and the label-DAG anchors (cohorts.disease_anchors):
+# 'diabetes'/'eds' root at one anchor; 'rare6' builds a six-disease forest.
+disease: diabetes
 min_n: 50
 n_bg: 20
 tpn: 5

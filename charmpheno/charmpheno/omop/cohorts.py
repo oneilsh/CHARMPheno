@@ -122,9 +122,36 @@ _EDS_ANCESTOR = 79145
 # vocab version).
 _DIABETES_ANCESTOR = 201820
 
+# Top-level OMOP concepts for five additional rare/uncommon autoimmune-ish
+# diseases, chosen to be phenotypically DISTINCT from each other (unlike the
+# diabetes TYPE taxonomy, whose subtypes are near-identical phenotypes) and
+# common enough to yield fittable case counts on All of Us (counts confirmed by
+# the domain owner, 2026-07-15; concept-ids vocab-verified offline). Together
+# with EDS they form the "rare6" multi-disease case-finding forest. VERIFY ON
+# FIRST RUN, as with the other anchors: SELECT COUNT(*) FROM concept_ancestor
+# WHERE ancestor_concept_id = <id> (expect a non-zero descendant/subtype set).
+_SARCOIDOSIS_ANCESTOR = 438688      # Sarcoidosis (AoU-over-represented, few 1000s)
+_SLE_ANCESTOR = 257628              # Systemic lupus erythematosus (~6500, best-powered)
+_SCLERODERMA_ANCESTOR = 40352976    # Scleroderma / systemic sclerosis (few 1000s)
+_MYASTHENIA_GRAVIS_ANCESTOR = 76685  # Myasthenia gravis (~1100)
+_AMYLOIDOSIS_ANCESTOR = 432595      # Amyloidosis (~1500)
+
+# The multi-disease rare-disease forest foreground: a patient qualifies for the
+# "rare6" arm if they have a first dx under ANY of these six anchors. The same
+# tuple doubles as the label-DAG roots (each anchor becomes a subtree under a
+# synthetic forest root; see case_finding_assembly). Distinct phenotypes + a
+# whole-population clean background is the rare-disease case-finding thesis in
+# practice (project_kg_rare_disease_casefinding).
+_RARE6_ANCESTORS: tuple[int, ...] = (
+    _EDS_ANCESTOR, _SARCOIDOSIS_ANCESTOR, _SLE_ANCESTOR,
+    _SCLERODERMA_ANCESTOR, _MYASTHENIA_GRAVIS_ANCESTOR, _AMYLOIDOSIS_ANCESTOR,
+)
+
 # Disease registry for the generalized population+disease cohort. Each entry is
 # fully described by concept ancestors; adding a rare disease is a new entry
 # here + a SUPPORTED_COHORTS/COHORT_METADATA/apply_cohort line, no new function.
+# A multi-ancestor entry (rare6) is a foreground union: apply_first_diagnosis_
+# year_cohort already unions descendants of all inclusion_ancestors.
 _DISEASE_REGISTRY: dict[str, dict] = {
     "cancer": {
         "inclusion_ancestors": (_CANCER_ANCESTOR,),
@@ -138,7 +165,30 @@ _DISEASE_REGISTRY: dict[str, dict] = {
         "inclusion_ancestors": (_DIABETES_ANCESTOR,),
         "exclusion_ancestors": (),
     },
+    "rare6": {
+        "inclusion_ancestors": _RARE6_ANCESTORS,
+        "exclusion_ancestors": (),
+    },
 }
+
+
+def disease_anchors(disease: str) -> tuple[int, ...]:
+    """The DAG anchor concept-ids for a registered disease — its cohort inclusion
+    ancestors reused as the label-DAG roots.
+
+    A single-disease cohort (diabetes, eds, cancer) yields one anchor and a DAG
+    rooted directly at it; the multi-disease forest (rare6) yields the full anchor
+    set, which case_finding_assembly hangs under a synthetic forest root. Keeping
+    the DAG anchors identical to the cohort inclusion ancestors makes ``disease``
+    the single knob that determines both which patients are foreground and which
+    subtree(s) their frontier is scored against.
+    """
+    try:
+        return tuple(_DISEASE_REGISTRY[disease]["inclusion_ancestors"])
+    except KeyError:
+        raise ValueError(
+            f"disease {disease!r} not in registry (known: {tuple(_DISEASE_REGISTRY)})"
+        )
 
 
 # Drug classes for the population_glp1 gated cohort, resolved by RxNorm
@@ -184,6 +234,7 @@ SUPPORTED_COHORTS: tuple[str, ...] = (
     "population_cancer",
     "population_cancer_sparse",
     "population_eds",
+    "population_rare6",
     "population_sparse",
     "population_glp1",
 )
@@ -301,6 +352,25 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "prevalence covariate."
         ),
     },
+    "population_rare6": {
+        "id": "population_rare6",
+        "label": "Population + Rare-disease forest (gated)",
+        "description": (
+            "The whole population as a shared clean background, with a six-disease "
+            "rare-disease foreground: Ehlers-Danlos syndrome (OMOP 79145), "
+            "sarcoidosis (438688), systemic lupus erythematosus (257628), "
+            "scleroderma/systemic sclerosis (40352976), myasthenia gravis (76685), "
+            "and amyloidosis (432595). Disjoint, one document per person: a person "
+            "with a first dx under ANY of the six anchors gets the 365-day "
+            "post-diagnosis window and source_cohort='rare6'; every other person "
+            "gets a deterministic random event-anchored 365-day window and "
+            "source_cohort='general' (background-only). Unlike a single-disease "
+            "type taxonomy, the six diseases are phenotypically distinct, so a "
+            "gated placement model can both find cases against the background and "
+            "route each to the right disease subtree — the rare-disease "
+            "case-finding thesis in practice."
+        ),
+    },
     "population_sparse": {
         "id": "population_sparse",
         "label": "Population + Sparse (gated)",
@@ -403,6 +473,12 @@ def apply_cohort(
     if cohort == "population_eds":
         return apply_population_disease_cohort(
             cond_df, disease="eds", spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_rare6":
+        return apply_population_disease_cohort(
+            cond_df, disease="rare6", spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
             prior_obs_days=prior_obs_days,
         )

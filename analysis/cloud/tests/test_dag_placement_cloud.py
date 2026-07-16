@@ -25,12 +25,12 @@ def test_profiles_from_scored_rows_maps_affinity_and_frontier():
 def test_parse_args_surface():
     from dag_placement_cloud import parse_args
     a = parse_args([
-        "--cdr", "p.d", "--billing", "bp", "--anchor", "201820",
+        "--cdr", "p.d", "--billing", "bp", "--disease", "rare6",
         "--min-n", "50", "--n-bg", "2", "--tpn", "1", "--person-mod", "10",
         "--vocab-size", "5000", "--init", "spectral", "--out-dir", "/tmp/x",
         "--strip-mode", "both",
     ])
-    assert a.anchor == 201820 and a.min_n == 50 and a.n_bg == 2 and a.tpn == 1
+    assert a.disease == "rare6" and a.min_n == 50 and a.n_bg == 2 and a.tpn == 1
     assert a.init == "spectral" and a.out_dir == "/tmp/x"
     assert a.strip_mode == "both"
     # K is emergent: there must be NO --K arg.
