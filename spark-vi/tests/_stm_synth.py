@@ -639,3 +639,34 @@ def dag_placement_corpus_multi(*, parent, leaf_prev, comorbid_rate, V, doc_len, 
         docs.append(np.concatenate(toks).astype(np.int64))
         labels.append(f)
     return docs, labels, node_codes
+
+
+def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0):
+    """In-memory batch-VB driver for GatedOnlineLDA (no Spark), mirroring fit_stm.
+
+    Full-batch lr=1.0 each iteration = variational EM — the cleanest regime for the
+    SVI-vs-Gibbs placement equivalence gate. `model` is a GatedOnlineLDA; `gated_docs` are
+    GatedBOWDocuments (frontier tags drive the gate)."""
+    import numpy as np
+    np.random.seed(seed)
+    gp = model.initialize_global(None)
+    for _ in range(n_iter):
+        gp = model.update_global(gp, model.local_update(gated_docs, gp), learning_rate=1.0)
+    return gp
+
+
+def svi_node_profiles(model, gp, docs, lay):
+    """Ungated full-K fold-in of each held-out doc -> theta -> node_affinity dict. The SVI
+    analogue of [dag_placement.profile(...) for d in docs]; scored by dag_placement.evaluate."""
+    import numpy as np
+    from spark_vi.models.topic.types import GatedBOWDocument
+    from spark_vi.models.topic.gated_lda import node_affinity
+    out = []
+    for d in docs:
+        idx, cnt = np.unique(np.asarray(d), return_counts=True)
+        bow = GatedBOWDocument(indices=idx.astype(np.int32),
+                               counts=cnt.astype(np.float64), length=int(cnt.sum()),
+                               frontier=frozenset())          # empty = ungated
+        theta = model.infer_local(bow, gp)["theta"]
+        out.append(node_affinity(theta, lay))
+    return out
