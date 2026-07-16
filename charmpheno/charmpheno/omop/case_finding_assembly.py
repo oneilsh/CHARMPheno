@@ -205,8 +205,13 @@ class CaseFindingBundle:
     shape GatedLDAEstimator(labelCol="frontier").fit consumes and dag_placement's
     evaluate scores. `parent_int`/`int2cid`/`cid2int` bridge engine <-> concept-id;
     `vocab_map` is {concept_id: vocab_idx}; `name_by_id` is {concept_id:
-    concept_name} for interpretation (render_profile); `ledger` is the pruning
-    receipt (kept/dropped/K_nodes + coarsening)."""
+    concept_name} for interpretation; `ledger` is the pruning receipt
+    (kept/dropped/K_nodes + coarsening).
+
+    NOTE (id space): `name_by_id` is keyed on CONCEPT-ids, but
+    dag_placement.render_profile keys its `names` on ENGINE-ids (lay.nodes). Remap
+    before rendering:  {i: name_by_id[c] for i, c in int2cid.items() if c in name_by_id}.
+    Passing name_by_id straight into render_profile silently mislabels every node."""
     train_df: object
     test_df: object
     parent_int: dict
