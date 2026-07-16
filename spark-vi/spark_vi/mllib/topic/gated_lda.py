@@ -38,6 +38,15 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
                     typeConverter=TypeConverters.toFloat)
     gammaShape = Param(Params._dummy(), "gammaShape", "Gamma init shape for gamma/lambda",
                        typeConverter=TypeConverters.toFloat)
+    init = Param(Params._dummy(), "init",
+                 "lambda init strategy: 'random' (default) or 'spectral' "
+                 "(dense block-aligned anchor-word seed, Arora et al. 2013)",
+                 typeConverter=TypeConverters.toString)
+    spectralMaxVocab = Param(Params._dummy(), "spectralMaxVocab",
+                             "max vocab for the DENSE spectral init (V x V driver "
+                             "co-occurrence); at/above this, spectral raises "
+                             "(scalable projected variant deferred)",
+                             typeConverter=TypeConverters.toInt)
 
 
 def _layout(est_or_model) -> DagLayout:
@@ -50,11 +59,12 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
     @keyword_only
     def __init__(self, *, featuresCol="features", labelCol="frontier", parent=None,
                  nBg=2, tpn=1, maxIter=20, seed=None, caviMaxIter=100, caviTol=1e-3,
-                 gammaShape=100.0):
+                 gammaShape=100.0, init="random", spectralMaxVocab=8000):
         super().__init__()
         self._setDefault(featuresCol="features", labelCol="frontier", nBg=2, tpn=1,
                          maxIter=20, nodeAffinityCol="nodeAffinity",
-                         caviMaxIter=100, caviTol=1e-3, gammaShape=100.0)
+                         caviMaxIter=100, caviTol=1e-3, gammaShape=100.0,
+                         init="random", spectralMaxVocab=8000)
         self.setParams(**self._input_kwargs)
 
     @keyword_only
@@ -74,9 +84,28 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
             raise ValueError("Cannot fit on an empty DataFrame.")
         V = first[0][0].size
         seed = self.getOrDefault("seed") if self.isSet("seed") else None
+        init = self.getOrDefault("init")
+
+        # Validate init early (fail fast on the driver, not deep in a Spark task).
+        from spark_vi.models.topic.gated_init import INIT_STRATEGIES
+        if init != "random" and init not in INIT_STRATEGIES:
+            raise ValueError(
+                f"unknown init strategy {init!r}; "
+                f"known: {['random'] + sorted(INIT_STRATEGIES)}"
+            )
+        # Dense spectral init builds a driver-side V x V co-occurrence; guard it.
+        # The scalable projected block-aligned variant (distributed co-occurrence +
+        # random projection, the gated analogue of STM ADR 0032) is deferred.
+        if init == "spectral" and V >= self.getOrDefault("spectralMaxVocab"):
+            raise NotImplementedError(
+                f"dense spectral init needs a {V}x{V} driver co-occurrence "
+                f"(vocab {V} >= spectralMaxVocab {self.getOrDefault('spectralMaxVocab')}); "
+                "the scalable projected block-aligned init is not built yet. "
+                "Use init='random' or reduce vocab_size."
+            )
 
         model_obj = GatedOnlineLDA(
-            lay, V, init="random",
+            lay, V, init=init,
             alpha=1.0 / lay.K, eta=1.0 / lay.K,
             gamma_shape=self.getOrDefault("gammaShape"),
             cavi_max_iter=self.getOrDefault("caviMaxIter"),
@@ -94,8 +123,24 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
         rdd = (dataset.select(features_col, label_col).rdd.map(_to_gated)
                .persist(StorageLevel.MEMORY_AND_DISK))
         rdd.count()
+
+        # Non-random init needs the training corpus in the driver (the dense,
+        # collect-to-driver path, mirroring the STM shim's dense spectral seed,
+        # mllib/topic/stm.py). The block-aligned strategy expects token-id arrays
+        # + per-doc frontier labels via data_summary; initialize_global runs it.
+        data_summary = None
+        if init != "random":
+            collected = dataset.select(features_col, label_col).collect()
+            train_docs, train_labels = [], []
+            for r in collected:
+                bow = _vector_to_bow_document(r[0])
+                train_docs.append(np.repeat(bow.indices, bow.counts.astype(int)))
+                train_labels.append(frozenset(int(x) for x in (r[1] or [])))
+            data_summary = {"train_docs": train_docs, "train_labels": train_labels}
+
         try:
-            result = VIRunner(model_obj, config=config).fit(rdd)
+            result = VIRunner(model_obj, config=config).fit(
+                rdd, data_summary=data_summary)
         finally:
             rdd.unpersist(blocking=False)
 
