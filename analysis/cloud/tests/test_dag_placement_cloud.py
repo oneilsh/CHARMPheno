@@ -28,9 +28,11 @@ def test_parse_args_surface():
         "--cdr", "p.d", "--billing", "bp", "--anchor", "201820",
         "--min-n", "50", "--n-bg", "2", "--tpn", "1", "--person-mod", "10",
         "--vocab-size", "5000", "--init", "spectral", "--out-dir", "/tmp/x",
+        "--strip-mode", "both",
     ])
     assert a.anchor == 201820 and a.min_n == 50 and a.n_bg == 2 and a.tpn == 1
     assert a.init == "spectral" and a.out_dir == "/tmp/x"
+    assert a.strip_mode == "both"
     # K is emergent: there must be NO --K arg.
     assert not hasattr(a, "K")
 

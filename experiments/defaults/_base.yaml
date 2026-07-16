@@ -59,3 +59,4 @@ init: random
 spectral_max_vocab: 8000
 cavi_max_iter: 100
 cavi_tol: 1.0e-3
+strip_mode: test_only

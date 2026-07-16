@@ -419,3 +419,31 @@ def test_assemble_case_finding_corpus_importable_signature():
     assert {"anchor", "cdr", "billing", "person_mod", "min_n", "vocab_size",
             "holdout_frac", "n_bg", "tpn"} <= set(p)
     assert p["anchor"].default == 201820
+
+
+def test_strip_mode_both_strips_train_features(spark):
+    from charmpheno.omop.case_finding_assembly import assemble_from_events
+    from charmpheno.omop.condition_dag import build_condition_dag
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+    import datetime as dt
+    edges = [(100, 200), (100, 300)]
+    before = build_condition_dag(edges, anchor=100, node_ids=[200, 300],
+                                 names={100: "dm", 200: "T2", 300: "T1"})
+    rows = []
+    for pid in range(40):
+        rows.append((pid, 200, "diabetes", dt.date(2015, 1, 1)))
+        rows.append((pid, 999, "diabetes", dt.date(2015, 2, 1)))
+    ev = spark.createDataFrame(rows, ["person_id", "concept_id", "source_cohort",
+                                      "condition_era_start_date"])
+    kw = dict(doc_spec=PatientCohortDocSpec(min_doc_length=0), min_n=2,
+              holdout_frac=0.3, split_salt=20260716, vocab_size=100, min_df=1,
+              min_patient_count=1, n_bg=2, tpn=1)
+    b_test = assemble_from_events(ev, before, strip_mode="test_only", **kw)
+    b_both = assemble_from_events(ev, before, strip_mode="both", **kw)
+    node200 = b_both.vocab_map.get(200)
+    if node200 is not None:
+        train_has = any(node200 in set(r["features"].indices.tolist())
+                        for r in b_test.train_df.collect())
+        train_stripped = all(node200 not in set(r["features"].indices.tolist())
+                             for r in b_both.train_df.collect())
+        assert train_has and train_stripped

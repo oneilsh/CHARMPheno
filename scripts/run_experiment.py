@@ -691,6 +691,7 @@ def build_dag_placement_args(
         "--cavi-tol", str(effective.get("cavi_tol", 1e-3)),
         "--init", str(effective.get("init", "random")),
         "--spectral-max-vocab", str(effective.get("spectral_max_vocab", 8000)),
+        "--strip-mode", str(effective.get("strip_mode", "test_only")),
         "--out-dir", str(out_dir),
     ]
     if effective.get("seed") is not None:

@@ -52,6 +52,7 @@ def parse_args(argv=None):
     p.add_argument("--anchor", type=int, default=201820)
     p.add_argument("--min-n", type=int, default=50)
     p.add_argument("--holdout-frac", type=float, default=0.2)
+    p.add_argument("--strip-mode", choices=["test_only", "both"], default="test_only")
     # gating
     p.add_argument("--n-bg", type=int, default=2)
     p.add_argument("--tpn", type=int, default=1)
@@ -86,7 +87,8 @@ def main() -> int:
                 min_df=args.min_df, min_patient_count=args.min_patient_count,
                 doc_min_length=args.doc_min_length, prior_obs_days=args.prior_obs_days,
                 window_days=args.window_days, anchor=args.anchor, min_n=args.min_n,
-                holdout_frac=args.holdout_frac, n_bg=args.n_bg, tpn=args.tpn)
+                holdout_frac=args.holdout_frac, n_bg=args.n_bg, tpn=args.tpn,
+                strip_mode=args.strip_mode)
             print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
 
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
@@ -109,7 +111,11 @@ def main() -> int:
                   f"auc_by_depth={metrics['auc_by_depth']} mrr={metrics['mrr']:.3f} "
                   f"top2={metrics['top2']:.3f} mean_hops={metrics['mean_hops']:.2f} "
                   f"frontier_size_mean={metrics['frontier_size_mean']:.2f} "
-                  f"multi_frontier_rate={metrics['multi_frontier_rate']:.3f}",
+                  f"multi_frontier_rate={metrics['multi_frontier_rate']:.3f} "
+                  f"ap_macro={metrics['ap_macro']:.3f} "
+                  f"ap_prevalence_weighted={metrics['ap_prevalence_weighted']:.3f} "
+                  f"recall_at_k={metrics['recall_at_k']} "
+                  f"test_coarsening_rate={bundle.ledger.get('test_coarsening_rate')}",
                   flush=True)
             # Spot-check render for a few foreground held-out docs. names must be
             # ENGINE-id-keyed (remap concept-id name_by_id via int2cid).
@@ -129,7 +135,7 @@ def main() -> int:
             manifest = {
                 "model_class": "dag_placement",
                 "init": args.init, "K": lay.K, "n_bg": args.n_bg, "tpn": args.tpn,
-                "anchor": args.anchor, "min_n": args.min_n,
+                "anchor": args.anchor, "min_n": args.min_n, "strip_mode": args.strip_mode,
                 "max_iter": args.max_iter, "metrics": metrics, "ledger": bundle.ledger,
                 "corpus_manifest": {
                     "cdr": args.cdr, "source_table": args.source_table,

@@ -225,7 +225,7 @@ class CaseFindingBundle:
 def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
                          holdout_frac=0.2, split_salt=_SPLIT_SALT,
                          vocab_size, min_df, min_patient_count,
-                         n_bg=2, tpn=1) -> CaseFindingBundle:
+                         n_bg=2, tpn=1, strip_mode="test_only") -> CaseFindingBundle:
     """Assemble the case-finding bundle from already-windowed events (with a
     `source_cohort` column) + the pre-prune concept-id DAG. This is the testable
     core: no BigQuery, pure Spark + domain logic. See the module docstring for the
@@ -303,6 +303,11 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
         # 6) leakage strip (test_only): drop DAG-node type codes from TEST features.
         drop_idxs = {vocab_map[c] for c in before_dag.nodes() if c in vocab_map}
         test_df = strip_test_features(test_df, drop_idxs)
+        if strip_mode == "both":
+            train_df = strip_test_features(train_df, drop_idxs)
+        elif strip_mode != "test_only":
+            raise ValueError(
+                f"strip_mode must be 'test_only' or 'both', got {strip_mode!r}")
 
         return CaseFindingBundle(
             train_df=train_df, test_df=test_df, parent_int=parent_int,
@@ -373,7 +378,8 @@ def assemble_case_finding_corpus(spark, *, anchor=201820, cdr, billing,
                                  min_n, holdout_frac=0.2, split_salt=_SPLIT_SALT,
                                  vocab_size, min_df, min_patient_count,
                                  n_bg=2, tpn=1, doc_min_length=0,
-                                 prior_obs_days=365, window_days=365):
+                                 prior_obs_days=365, window_days=365,
+                                 strip_mode="test_only"):
     """End-to-end BQ assembly: load OMOP (person_mod sample), apply the
     diabetes+background cohort (one 365-day window per patient), load the anchor
     DAG, and assemble the bundle. Thin wrapper over assemble_from_events; the
@@ -398,4 +404,5 @@ def assemble_case_finding_corpus(spark, *, anchor=201820, cdr, billing,
     return assemble_from_events(
         events, before_dag, doc_spec=doc_spec, min_n=min_n,
         holdout_frac=holdout_frac, split_salt=split_salt, vocab_size=vocab_size,
-        min_df=min_df, min_patient_count=min_patient_count, n_bg=n_bg, tpn=tpn)
+        min_df=min_df, min_patient_count=min_patient_count, n_bg=n_bg, tpn=tpn,
+        strip_mode=strip_mode)

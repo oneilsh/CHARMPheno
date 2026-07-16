@@ -36,7 +36,7 @@ def _module_source_hash(module) -> str:
 def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
                              min_patient_count, doc_min_length, prior_obs_days,
                              window_days, anchor, min_n, holdout_frac, split_salt=None,
-                             n_bg, tpn, cdr=None) -> str:
+                             n_bg, tpn, cdr=None, strip_mode="test_only") -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
     Folds cohort_defs_version() plus content hashes of condition_dag +
@@ -60,7 +60,7 @@ def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
         "doc_min_length": int(doc_min_length), "prior_obs_days": int(prior_obs_days),
         "window_days": int(window_days), "anchor": int(anchor), "min_n": int(min_n),
         "holdout_frac": float(holdout_frac), "split_salt": int(split_salt),
-        "n_bg": int(n_bg), "tpn": int(tpn), "cdr": cdr,
+        "n_bg": int(n_bg), "tpn": int(tpn), "cdr": cdr, "strip_mode": strip_mode,
         "cohort_defs": cohort_defs_version(),
         "dag_src": _module_source_hash(condition_dag),
         "assembly_src": _module_source_hash(case_finding_assembly),
@@ -139,6 +139,7 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
             "source_table", "person_mod", "vocab_size", "min_df",
             "min_patient_count", "doc_min_length", "prior_obs_days", "window_days",
             "anchor", "min_n", "holdout_frac", "split_salt", "n_bg", "tpn", "cdr",
+            "strip_mode",
         ) if k in assembly_params}
         key = compute_bundle_cache_key(**key_params)
         cached = try_load(spark, cache_uri, key)
