@@ -1,0 +1,117 @@
+"""GatedOnlineLDA: the SVI (variational) twin of the collapsed-Gibbs placement engine.
+
+Overrides exactly two OnlineLDA methods:
+  * local_update — restrict each training doc's CAVI to DagLayout.allowed_set(frontier)
+    (the exact variational analogue of the Gibbs gate in dag_placement.fit_gated); sstats
+    for disallowed topics stay zero, welding each node's topic to its subtree's documents.
+  * initialize_global — dispatch on a pluggable init strategy (default "random").
+
+Everything else (update_global SVI natural-gradient beta step, compute_elbo, combine_stats,
+VIRunner integration) is inherited from OnlineLDA. Deployment folds held-out docs in UNGATED
+(empty frontier -> full-K CAVI) -> theta -> node_affinity.
+
+Validated against the collapsed-Gibbs oracle (dag_placement.fit_gated): placement (node-AUC by
+depth, MRR, top2) matches at every depth; the DAG gate supplies the identifiability spectral
+init provides in ungated LDA, so random init is the default (see the design spec's prototype
+findings). References: Hoffman, Blei, Bach (2010) Online LDA; Griffiths & Steyvers (2004) the
+oracle; the placement design docs/superpowers/specs/2026-07-15-gated-svi-placement-engine-design.md.
+"""
+from __future__ import annotations
+
+from typing import Any, Iterable
+
+import numpy as np
+from scipy.special import digamma
+
+from spark_vi.models.topic.dag_placement import DagLayout
+from spark_vi.models.topic.lda import OnlineLDA, _cavi_doc_inference
+from spark_vi.models.topic.types import GatedBOWDocument
+
+
+def node_affinity(theta: np.ndarray, lay: DagLayout) -> dict[int, float]:
+    """Per-node affinity from a full-K theta: the mass on each node's topic block.
+
+    The SVI analogue of dag_placement.profile's per-node readout. The full dict IS the
+    case-finding output; do not collapse to a single node."""
+    return {u: float(theta[lay.block[u]].sum()) for u in lay.nodes}
+
+
+class GatedOnlineLDA(OnlineLDA):
+    def __init__(self, lay: DagLayout, vocab_size: int, *, init: str = "random", **kw) -> None:
+        super().__init__(K=lay.K, vocab_size=vocab_size, **kw)
+        self.lay = lay
+        self.init = init
+
+    def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
+        """Random Gamma lambda (default), or a pluggable init strategy's lambda.
+
+        "random": inherited OnlineLDA Gamma init — the validated default (the gate already
+        welds topics to nodes, so no symmetry-breaking seed is needed). Other strategies
+        (Task 3) resolve from gated_init.INIT_STRATEGIES and need the training corpus in
+        data_summary. An unknown name raises ValueError — including when gated_init itself
+        hasn't been built yet (pre-Task-3): the registry import is caught so a missing
+        module surfaces as the same "unknown init strategy" error, not an ImportError."""
+        gp = super().initialize_global(data_summary)
+        if self.init == "random":
+            return gp
+        try:
+            from spark_vi.models.topic.gated_init import INIT_STRATEGIES
+        except ImportError:
+            INIT_STRATEGIES = {}
+        if self.init not in INIT_STRATEGIES:
+            raise ValueError(
+                f"unknown init strategy {self.init!r}; "
+                f"known: {['random'] + sorted(INIT_STRATEGIES)}"
+            )
+        strat = INIT_STRATEGIES[self.init]
+        gp["lambda"] = strat(data_summary, self.lay, self.V)
+        return gp
+
+    def local_update(
+        self,
+        rows: Iterable[GatedBOWDocument],
+        global_params: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """Gated E-step: per doc, CAVI over expElogbeta[allowed] with alpha[allowed];
+        scatter sstats to lambda_stats[allowed, indices]. Disallowed topics get zero
+        contribution — the variational twin of the Gibbs gate.
+
+        allowed = lay.allowed_set(frontier) (background + closure blocks of the frontier),
+        or all K when the frontier is empty (ungated). Cost is O(|allowed|) per token =
+        the doc's frontier closure (bounded by DAG depth), not K."""
+        lam = global_params["lambda"]
+        alpha = global_params["alpha"]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+        lambda_stats = np.zeros_like(lam)
+        doc_loglik_sum = 0.0
+        doc_theta_kl_sum = 0.0
+        n_docs = 0
+
+        for doc in rows:
+            if doc.frontier:
+                allowed = self.lay.allowed_set(doc.frontier)
+            else:
+                allowed = np.arange(self.K)
+            gamma_init = np.random.gamma(self.gamma_shape, 1.0 / self.gamma_shape,
+                                         size=len(allowed))
+            gamma, expElogthetad, phi_norm, _ = _cavi_doc_inference(
+                indices=doc.indices,
+                counts=doc.counts,
+                expElogbeta=expElogbeta[allowed],
+                alpha=alpha[allowed],
+                gamma_init=gamma_init,
+                max_iter=self.cavi_max_iter,
+                tol=self.cavi_tol,
+            )
+            sstats_row = np.outer(expElogthetad, doc.counts / phi_norm)
+            lambda_stats[np.ix_(allowed, doc.indices)] += sstats_row
+            doc_loglik_sum += float(np.sum(doc.counts * np.log(phi_norm)))
+            n_docs += 1
+
+        return {
+            "lambda_stats": lambda_stats,
+            "doc_loglik_sum": np.array(doc_loglik_sum),
+            "doc_theta_kl_sum": np.array(doc_theta_kl_sum),
+            "n_docs": np.array(float(n_docs)),
+        }
