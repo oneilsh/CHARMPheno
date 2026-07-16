@@ -241,6 +241,74 @@ def _auc(scores, y):
     return (ranks[y == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
 
 
+def _average_precision(scores, y):
+    """Average precision (area under the precision-recall curve, the step
+    definition used by sklearn.metrics.average_precision_score): AP = sum_i
+    (R_i - R_{i-1}) * P_i over distinct score thresholds i (descending). Tied
+    scores share a threshold, so AP is order-invariant and a constant scorer
+    yields AP == prevalence. No positives -> nan."""
+    scores = np.asarray(scores, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n1 = y.sum()
+    if n1 == 0:
+        return float("nan")
+    order = np.argsort(-scores, kind="mergesort")          # desc, stable
+    s, yy = scores[order], y[order]
+    tp_cum = np.cumsum(yy)
+    pp_cum = np.arange(1, len(yy) + 1)
+    group_end = np.concatenate((s[1:] != s[:-1], [True]))  # last index of each tie group
+    ends = np.where(group_end)[0]
+    recall = tp_cum[ends] / n1
+    precision = tp_cum[ends] / pp_cum[ends]
+    r_prev = np.concatenate(([0.0], recall[:-1]))
+    return float(np.sum((recall - r_prev) * precision))
+
+
+def _bootstrap_ci(P, fronts, lay, node_pos, *, n_boot=1000, seed=0):
+    """Percentile bootstrap 95% CIs for the headline metrics, resampling DOCS
+    with replacement (docs are one-per-patient here, so this is a patient-
+    clustered bootstrap). Returns {metric: (lo, hi)} for ap_macro, mrr, top2,
+    recall_at_1. Fixed seed -> resume-stable."""
+    rng = np.random.default_rng(seed)
+    n = P.shape[0]
+    nodes = lay.nodes
+
+    def _metrics(idx):
+        Pb = P[idx]
+        fb = [fronts[j] for j in idx]
+        posb = {u: [node_pos[u][j] for j in idx] for u in nodes}
+        aps = [_average_precision(Pb[:, i], posb[u]) for i, u in enumerate(nodes)]
+        aps = [a for a in aps if not np.isnan(a)]
+        apm = float(np.mean(aps)) if aps else np.nan
+        r1, ranks, top2 = [], [], []
+        for i, f in enumerate(fb):
+            ti = [nodes.index(t) for t in f if t in nodes]
+            if not ti:
+                continue
+            top1 = int(np.argmax(Pb[i]))
+            r1.append(1.0 if top1 in ti else 0.0)
+            rk = min(1 + int((Pb[i] > Pb[i][j]).sum()) for j in ti)
+            ranks.append(1.0 / rk)
+            top2.append(1.0 if rk <= 2 else 0.0)
+        return (apm,
+                float(np.mean(ranks)) if ranks else np.nan,
+                float(np.mean(top2)) if top2 else np.nan,
+                float(np.mean(r1)) if r1 else np.nan)
+
+    draws = {"ap_macro": [], "mrr": [], "top2": [], "recall_at_1": []}
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        apm, mrr, top2, r1 = _metrics(idx)
+        draws["ap_macro"].append(apm); draws["mrr"].append(mrr)
+        draws["top2"].append(top2); draws["recall_at_1"].append(r1)
+    out = {}
+    for k, vals in draws.items():
+        v = np.array([x for x in vals if not np.isnan(x)])
+        out[k] = (float(np.percentile(v, 2.5)), float(np.percentile(v, 97.5))) \
+            if len(v) else (float("nan"), float("nan"))
+    return out
+
+
 def _hops(a, b, lay):
     """Undirected hop distance between two nodes over parent/child edges (BFS)."""
     if a == b:
@@ -291,12 +359,49 @@ def evaluate(profiles, test_labels, lay):
         by_depth[dep] = float(np.nanmean(vals)) if any(not np.isnan(v) for v in vals) else float("nan")
     # Guard mrr AND top2 symmetrically: with no rankable docs, both are nan (not applicable).
     # (np.nan <= 2 is False, so an unguarded top2 would silently read 0.0 instead of nan.)
+
+    # --- PR-AUC (average precision) per node + summaries ---------------------
+    node_pos = {u: [bool(f & lay.subtree(u)) for f in fronts] for u in lay.nodes}
+    node_ap = {u: _average_precision(P[:, i], node_pos[u])
+               for i, u in enumerate(lay.nodes)}
+    valid_ap = {u: a for u, a in node_ap.items() if not np.isnan(a)}
+    npos = {u: int(np.sum(node_pos[u])) for u in lay.nodes}
+    ap_macro = float(np.mean(list(valid_ap.values()))) if valid_ap else float("nan")
+    tot_pos = sum(npos[u] for u in valid_ap)
+    ap_prevalence_weighted = (
+        float(sum(valid_ap[u] * npos[u] for u in valid_ap) / tot_pos)
+        if tot_pos else float("nan"))
+    # micro AP: pool every (node, doc) pair into one ranking.
+    flat_scores = P.reshape(-1)
+    # NOTE order: reshape(-1) walks docs-major (row d, then node i); build labels to match.
+    flat_labels = np.array([node_pos[lay.nodes[i]][d]
+                            for d in range(P.shape[0]) for i in range(P.shape[1])])
+    ap_micro = _average_precision(flat_scores, flat_labels)
+
+    # --- recall@k over the FULL set-valued frontier -------------------------
+    def _recall_at_k(k):
+        rec = []
+        for i, f in enumerate(fronts):
+            true_idx = [lay.nodes.index(t) for t in f if t in lay.nodes]
+            if not true_idx:
+                continue
+            topk = set(np.argsort(-P[i], kind="mergesort")[:k].tolist())
+            rec.append(len(topk & set(true_idx)) / len(true_idx))
+        return float(np.mean(rec)) if rec else float("nan")
+    recall_at_k = {k: _recall_at_k(k) for k in (1, 2, 3)}
+
+    # --- percentile bootstrap CIs (resample docs = patients; 1 doc/patient) --
+    ci = _bootstrap_ci(P, fronts, lay, node_pos)
+
     return {"node_auc": node_auc, "auc_by_depth": by_depth,
             "mrr": float(np.nanmean(1.0 / ranks)) if have_ranks else float("nan"),
             "top2": float(np.nanmean(ranks <= 2)) if have_ranks else float("nan"),
             "mean_hops": float(np.mean(hops)) if hops else float("nan"),
             "frontier_size_mean": float(np.mean([len(f) for f in fronts])),
-            "multi_frontier_rate": float(np.mean([len(f) > 1 for f in fronts]))}
+            "multi_frontier_rate": float(np.mean([len(f) > 1 for f in fronts])),
+            "node_ap": node_ap, "ap_macro": ap_macro, "ap_micro": ap_micro,
+            "ap_prevalence_weighted": ap_prevalence_weighted,
+            "recall_at_k": recall_at_k, "ci": ci}
 
 
 def _node_topic_mean(beta_hat, lay, u):

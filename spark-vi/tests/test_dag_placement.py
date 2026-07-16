@@ -285,3 +285,42 @@ def test_auc_partial_ties_midrank():
 def test_auc_perfect_and_degenerate():
     assert _auc(np.array([3.0, 2.0, 1.0, 0.0]), [1, 1, 0, 0]) == 1.0
     assert np.isnan(_auc(np.array([1.0, 2.0]), [1, 1]))     # one class -> nan
+
+
+from spark_vi.models.topic.dag_placement import (
+    DagLayout, evaluate, _average_precision,
+)
+
+
+def test_average_precision_perfect_and_constant():
+    # perfect ranking -> AP 1.0
+    assert abs(_average_precision([3.0, 2.0, 1.0, 0.0], [1, 1, 0, 0]) - 1.0) < 1e-9
+    # constant scores -> AP == prevalence (2/4), NOT 0/1 (the AUC-tie failure mode)
+    assert abs(_average_precision([1.0, 1.0, 1.0, 1.0], [1, 0, 1, 0]) - 0.5) < 1e-9
+    import numpy as np
+    assert np.isnan(_average_precision([1.0, 2.0], [0, 0]))   # no positives -> nan
+
+
+def test_evaluate_adds_pr_recall_ci_keys():
+    parent = {1: 0, 2: 0, 3: 1}
+    lay = DagLayout(parent, n_bg=2, tpn=1)     # nodes [1,2,3], depth(3)=2
+    # 4 docs: two truly under node 1 (via leaf 3), two under node 2.
+    profiles = [
+        {1: 0.6, 2: 0.1, 3: 0.5},   # true {3}
+        {1: 0.4, 2: 0.2, 3: 0.3},   # true {3}
+        {1: 0.1, 2: 0.7, 3: 0.0},   # true {2}
+        {1: 0.2, 2: 0.6, 3: 0.1},   # true {2}
+    ]
+    labels = [{3}, {3}, {2}, {2}]
+    ev = evaluate(profiles, labels, lay)
+    assert set(ev["node_ap"]) == {1, 2, 3}
+    assert 0.0 <= ev["ap_macro"] <= 1.0
+    assert 0.0 <= ev["ap_micro"] <= 1.0
+    assert 0.0 <= ev["ap_prevalence_weighted"] <= 1.0
+    assert set(ev["recall_at_k"]) == {1, 2, 3}
+    assert 0.0 <= ev["recall_at_k"][1] <= ev["recall_at_k"][3] <= 1.0
+    # CI present for the headline metrics and brackets the point estimate.
+    for key in ("ap_macro", "mrr", "top2", "recall_at_1"):
+        lo, hi = ev["ci"][key]
+        assert lo <= hi
+    assert ev["ci"]["ap_macro"][0] <= ev["ap_macro"] <= ev["ci"]["ap_macro"][1] + 1e-9
