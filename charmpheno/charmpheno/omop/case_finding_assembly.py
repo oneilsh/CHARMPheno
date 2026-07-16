@@ -92,3 +92,52 @@ def strip_features(vec, drop_idxs):
         return SparseVector(vec.size, [], [])
     idxs, vals = zip(*kept)
     return SparseVector(vec.size, list(idxs), list(vals))
+
+
+def doc_attested_nodes(events_df, node_cids, *, doc_spec):
+    """Per document, the distinct in-window condition concept-ids that are DAG
+    nodes. Derives doc_id via `doc_spec`, then LEFT-joins a full doc roster
+    against the node-filtered attestations so background docs (no DAG-node code)
+    survive with an empty `attested_cids` (they get a `[]` frontier downstream).
+
+    Returns [doc_id, person_id, source_cohort, attested_cids: array<bigint>].
+    person_id and source_cohort are constant within a doc_id (the cohort arms are
+    disjoint by person and doc_id encodes source_cohort), so F.first is
+    well-defined."""
+    from pyspark.sql import functions as F
+
+    ev = doc_spec.derive_docs(events_df)
+    roster = ev.groupBy("doc_id").agg(
+        F.first("person_id").alias("person_id"),
+        F.first("source_cohort").alias("source_cohort"),
+    )
+    attested = (
+        ev.where(F.col("concept_id").isin(list(node_cids)))
+          .groupBy("doc_id")
+          .agg(F.collect_set(F.col("concept_id").cast("long")).alias("attested_cids"))
+    )
+    return (
+        roster.join(attested, on="doc_id", how="left")
+        .withColumn(
+            "attested_cids",
+            F.coalesce(F.col("attested_cids"),
+                       F.array().cast("array<bigint>")),
+        )
+    )
+
+
+def node_patient_counts(attested_df) -> dict[int, int]:
+    """Distinct `person_id` per attested node concept-id (patient count, the
+    learnability measure the prune uses — NOT patient-year count). Collected to a
+    small driver dict (one entry per DAG node)."""
+    from pyspark.sql import functions as F
+
+    exploded = attested_df.select(
+        "person_id", F.explode("attested_cids").alias("node_cid"),
+    ).distinct()
+    rows = (
+        exploded.groupBy("node_cid")
+        .agg(F.countDistinct("person_id").alias("n"))
+        .collect()
+    )
+    return {int(r["node_cid"]): int(r["n"]) for r in rows}

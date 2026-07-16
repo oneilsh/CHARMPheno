@@ -107,3 +107,57 @@ def test_strip_features_all_dropped_yields_empty_vector():
     out = strip_features(v, {1, 2})
     assert out.size == 4
     assert out.indices.tolist() == [] and out.values.tolist() == []
+
+
+import datetime as dt
+from charmpheno.omop.doc_spec import PatientCohortDocSpec
+
+
+def _events(spark, rows):
+    # rows: (person_id, concept_id, source_cohort, start_date)
+    return spark.createDataFrame(
+        rows,
+        ["person_id", "concept_id", "source_cohort", "condition_era_start_date"],
+    )
+
+
+def test_doc_attested_nodes_keeps_only_dag_nodes_and_background_empty(spark):
+    from charmpheno.omop.case_finding_assembly import doc_attested_nodes
+    node_cids = {200, 300, 400}
+    ev = _events(spark, [
+        (1, 200, "diabetes", dt.date(2015, 1, 1)),   # node
+        (1, 999, "diabetes", dt.date(2015, 2, 1)),   # non-node (rides along)
+        (1, 400, "diabetes", dt.date(2015, 3, 1)),   # node
+        (2, 888, "general",  dt.date(2016, 1, 1)),   # background, no node code
+    ])
+    out = {
+        r["doc_id"]: (r["person_id"], r["source_cohort"], sorted(r["attested_cids"]))
+        for r in doc_attested_nodes(
+            ev, node_cids, doc_spec=PatientCohortDocSpec()).collect()
+    }
+    assert out["diabetes:1"] == (1, "diabetes", [200, 400])
+    assert out["general:2"] == (2, "general", [])       # background survives, empty
+
+
+def test_doc_attested_nodes_distinct_within_doc(spark):
+    from charmpheno.omop.case_finding_assembly import doc_attested_nodes
+    ev = _events(spark, [
+        (1, 200, "diabetes", dt.date(2015, 1, 1)),
+        (1, 200, "diabetes", dt.date(2015, 6, 1)),   # same node twice in the window
+    ])
+    row = doc_attested_nodes(ev, {200}, doc_spec=PatientCohortDocSpec()).collect()[0]
+    assert sorted(row["attested_cids"]) == [200]
+
+
+def test_node_patient_counts_counts_distinct_patients_not_docs(spark):
+    from charmpheno.omop.case_finding_assembly import (
+        doc_attested_nodes, node_patient_counts,
+    )
+    ev = _events(spark, [
+        (1, 200, "diabetes", dt.date(2015, 1, 1)),
+        (2, 200, "diabetes", dt.date(2016, 1, 1)),   # node 200: 2 distinct patients
+        (2, 300, "diabetes", dt.date(2016, 2, 1)),   # node 300: 1 patient
+        (3, 999, "general",  dt.date(2017, 1, 1)),   # no node -> contributes nothing
+    ])
+    att = doc_attested_nodes(ev, {200, 300}, doc_spec=PatientCohortDocSpec())
+    assert node_patient_counts(att) == {200: 2, 300: 1}
