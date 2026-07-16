@@ -226,14 +226,18 @@ def profile(doc, beta_hat, lay, *, alpha=0.1, n_iter=60, burn=30, rng=None):
 
 
 def _auc(scores, y):
+    """Mann-Whitney (rank-sum) AUC. Ties in `scores` get AVERAGE (mid)ranks
+    (scipy.stats.rankdata method='average'), so tied score blocks contribute
+    0.5 per positive-negative pair — the correct ROC-AUC. (argsort's distinct
+    ranks made a tie block read as 0 or 1 depending on row order.) One-class
+    input -> nan."""
+    from scipy.stats import rankdata
     y = np.asarray(y)
     n1 = int(y.sum())
     n0 = len(y) - n1
     if n1 == 0 or n0 == 0:
         return float("nan")
-    order = np.argsort(scores)
-    ranks = np.empty(len(scores))
-    ranks[order] = np.arange(1, len(scores) + 1)
+    ranks = rankdata(scores, method="average")
     return (ranks[y == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
 
 
@@ -260,7 +264,11 @@ def evaluate(profiles, test_labels, lay):
     is a positive for node u if any of its frontier lies in subtree(u). MRR/top2/mean_hops use the
     BEST (closest) true frontier node. frontier_size_mean and multi_frontier_rate instrument the
     comorbid/contradictory ambiguity (the DAG cannot tell those apart; we surface it, not resolve it).
-    Profiles are the graded affinity dicts from `profile`; scoring never collapses to one node."""
+    Profiles are the graded affinity dicts from `profile`; scoring never collapses to one node.
+
+    Tie policy: node AUC/PR use midranks (see `_auc`). MRR/top2 count only nodes with STRICTLY
+    greater affinity than the true node (best-rank-among-ties — optimistic, appropriate for a
+    set-valued truth). mean_hops uses `argmax` (ties broken by node id)."""
     fronts = [set(t) if hasattr(t, "__iter__") else {t} for t in test_labels]
     P = np.array([[pr[u] for u in lay.nodes] for pr in profiles])
     node_auc = {u: _auc(P[:, i], [bool(f & lay.subtree(u)) for f in fronts])

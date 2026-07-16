@@ -1,5 +1,5 @@
 import numpy as np
-from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, frontier_from_coded, strip_dag_node_codes, fit_gated, profile, evaluate
+from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, frontier_from_coded, strip_dag_node_codes, fit_gated, profile, evaluate, _auc
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
 DIAMOND = {1: 0, 2: 0, 3: 0, 4: [1, 2], 5: [1, 3]}  # multi-parent DAG: node 4,5 have two parents
@@ -268,3 +268,20 @@ def test_end_to_end_multiparent_comorbid():
     assert m["node_auc"][5] >= 0.70
     assert m["multi_frontier_rate"] > 0.0        # comorbid patients are present + measured
     assert np.isfinite(m["mrr"])
+
+
+def test_auc_all_ties_is_half():
+    # identical scores -> AUC must be 0.5 regardless of label order.
+    assert abs(_auc(np.zeros(6), [1, 0, 1, 0, 1, 0]) - 0.5) < 1e-9
+    assert abs(_auc(np.zeros(6), [0, 0, 0, 1, 1, 1]) - 0.5) < 1e-9
+
+
+def test_auc_partial_ties_midrank():
+    # scores [1,1,0,0], labels [1,0,1,0]: the two positives tie a positive with a
+    # negative at each score level -> AUC 0.5 (midranks), NOT order-dependent 0/1.
+    assert abs(_auc(np.array([1.0, 1.0, 0.0, 0.0]), [1, 0, 1, 0]) - 0.5) < 1e-9
+
+
+def test_auc_perfect_and_degenerate():
+    assert _auc(np.array([3.0, 2.0, 1.0, 0.0]), [1, 1, 0, 0]) == 1.0
+    assert np.isnan(_auc(np.array([1.0, 2.0]), [1, 1]))     # one class -> nan
