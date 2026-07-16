@@ -324,6 +324,51 @@ def _bootstrap_ci(P, fronts, lay, node_pos, *, n_boot=500, seed=0, max_docs=5000
     return out
 
 
+def _detection_metrics(case_score, is_fg, *, sens_targets=(0.80, 0.90, 0.95)):
+    """Foreground-vs-background DETECTION: in a background-dominated cohort, can
+    the model flag the rare true cases without flooding on false positives?
+
+    This is the deployment metric — most patients are NOT in any rare-disease
+    group; we want high affinity for those who should be placed and low affinity
+    for those who should not. `case_score` is a per-doc scalar (higher = more
+    case-like, e.g. the strongest single disease-node affinity); `is_fg` is the
+    boolean truth (the patient truly belongs to >= 1 scoreable disease node).
+
+    Reports discrimination — ROC-AUC and PR-AUC (the latter honest under the
+    heavy class imbalance, floored at the foreground prevalence) — and, at each
+    target foreground sensitivity, the operating point that achieves it: the
+    score threshold, the realized sensitivity, the background false-positive rate
+    (fraction of background patients wrongly flagged), the specificity, and the
+    precision (PPV — of everyone flagged at this threshold, the fraction that are
+    real cases, which the low prevalence makes the demanding number). Either
+    class empty -> nan / no operating points."""
+    s = np.asarray(case_score, dtype=float)
+    y = np.asarray(is_fg, dtype=bool)
+    n_fg, n_bg = int(y.sum()), int((~y).sum())
+    out = {"auc": _auc(s, y.astype(int)),
+           "ap": _average_precision(s, y.astype(int)),
+           "prevalence": float(n_fg / len(y)) if len(y) else float("nan"),
+           "n_foreground": n_fg, "n_background": n_bg,
+           "operating_points": {}}
+    if n_fg and n_bg:
+        fg, bg = np.sort(s[y]), s[~y]
+        for t in sens_targets:
+            # Threshold = the k-th largest foreground score, k = ceil(t * n_fg),
+            # i.e. the smallest score among the top-t fraction of foreground. No
+            # np.quantile interpolation-kwarg version worries. Realized
+            # sensitivity is >= t (ties may catch a few more).
+            k = max(1, int(np.ceil(t * n_fg)))
+            thr = float(fg[n_fg - k])
+            sens = float(np.mean(s[y] >= thr))
+            fpr = float(np.mean(bg >= thr))
+            denom = sens * n_fg + fpr * n_bg
+            ppv = float(sens * n_fg / denom) if denom > 0 else float("nan")
+            out["operating_points"][f"{t:.2f}"] = {
+                "threshold": thr, "sensitivity": sens, "bg_fpr": fpr,
+                "specificity": 1.0 - fpr, "precision": ppv}
+    return out
+
+
 def _hops(a, b, lay):
     """Undirected hop distance between two nodes over parent/child edges (BFS)."""
     if a == b:
@@ -351,7 +396,14 @@ def evaluate(profiles, test_labels, lay):
 
     Tie policy: node AUC/PR use midranks (see `_auc`). MRR/top2 count only nodes with STRICTLY
     greater affinity than the true node (best-rank-among-ties — optimistic, appropriate for a
-    set-valued truth). mean_hops uses `argmax` (ties broken by node id)."""
+    set-valued truth). mean_hops uses `argmax` (ties broken by node id).
+
+    The `detection` block (see `_detection_metrics`) is the deployment metric: it scores whether the
+    model separates the rare true cases from the background-dominated majority (foreground = any
+    scoreable frontier node; background = empty/root-only frontier), with ROC/PR-AUC and, at target
+    sensitivities, the background false-positive rate + precision. The node-level AUC/PR above already
+    use background docs as the negative class; this block reports the case-vs-background question
+    directly, plus the background-block topic mass per class."""
     fronts = [set(t) if hasattr(t, "__iter__") else {t} for t in test_labels]
     P = np.array([[pr[u] for u in lay.nodes] for pr in profiles])
     node_auc = {u: _auc(P[:, i], [bool(f & lay.subtree(u)) for f in fronts])
@@ -408,6 +460,32 @@ def evaluate(profiles, test_labels, lay):
     # --- percentile bootstrap CIs (resample docs = patients; 1 doc/patient) --
     ci = _bootstrap_ci(P, fronts, lay, node_pos)
 
+    # --- foreground-vs-background DETECTION (the deployment metric) ----------
+    # A patient is a detection-positive iff it truly belongs to >= 1 scoreable
+    # disease node (empty/root-only frontier = background). The case score is the
+    # strongest single disease-node affinity (what you would threshold to flag a
+    # candidate); disease_mass (total non-background topic mass) is reported as a
+    # complementary aggregate score. Background-block mass = 1 - disease_mass
+    # (the blocks partition [0,K), see DagLayout), summarized over each class to
+    # show that background patients park their mass on the background topics.
+    node_set = set(lay.nodes)
+    is_fg = np.array([bool(f & node_set) for f in fronts])
+    if P.size:
+        disease_mass = P.sum(axis=1)
+        case_score = P.max(axis=1)
+    else:
+        disease_mass = np.zeros(len(fronts))
+        case_score = np.zeros(len(fronts))
+    bg_mass = np.clip(1.0 - disease_mass, 0.0, 1.0)
+    n_fg, n_bg = int(is_fg.sum()), int((~is_fg).sum())
+    detection = _detection_metrics(case_score, is_fg)
+    detection["auc_disease_mass"] = _auc(disease_mass, is_fg.astype(int))
+    detection["ap_disease_mass"] = _average_precision(disease_mass, is_fg.astype(int))
+    detection["bg_mass_background_mean"] = (
+        float(bg_mass[~is_fg].mean()) if n_bg else float("nan"))
+    detection["bg_mass_foreground_mean"] = (
+        float(bg_mass[is_fg].mean()) if n_fg else float("nan"))
+
     return {"node_auc": node_auc, "auc_by_depth": by_depth,
             "mrr": float(np.nanmean(1.0 / ranks)) if have_ranks else float("nan"),
             "top2": float(np.nanmean(ranks <= 2)) if have_ranks else float("nan"),
@@ -416,7 +494,7 @@ def evaluate(profiles, test_labels, lay):
             "multi_frontier_rate": float(np.mean([len(f) > 1 for f in fronts])),
             "node_ap": node_ap, "ap_macro": ap_macro, "ap_micro": ap_micro,
             "ap_prevalence_weighted": ap_prevalence_weighted,
-            "recall_at_k": recall_at_k, "ci": ci}
+            "recall_at_k": recall_at_k, "ci": ci, "detection": detection}
 
 
 def _node_topic_mean(beta_hat, lay, u):

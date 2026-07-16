@@ -88,8 +88,17 @@ K is emergent (`n_bg` + surviving-DAG-nodes × `tpn`), so there is no `K` field.
 Distinct phenotypes should make the per-disease AUC high (routing a held-out
 case to its disease subtree is easy when the diseases don't overlap), a sharp
 contrast to the diabetes arms where near-identical types capped `ap_macro`
-around 0.19. Watch `test_coarsening_rate` (how much the test foreground was
-rolled up by a train-pruned DAG) and the corpus stats' rare6-vs-general split
-to confirm the background is clean. Shares the `case_finding_cache` with the
+around 0.19.
+
+The headline for deployment is the new `metrics.detection` block — the
+foreground-vs-background question, since in practice the vast majority of
+patients scored will NOT be in any rare-disease group. It reports case-vs-
+background ROC/PR-AUC and, at 80/90/95% sensitivity, the background false-
+positive rate and precision (with ~5% prevalence, precision is the demanding
+number: catching the true cases without flooding on false flags). The
+`bg_mass_*` fields confirm background patients park their topic mass on the
+background block rather than on disease nodes. Also watch `test_coarsening_rate`
+(how much the test foreground was rolled up by a train-pruned DAG) and the
+corpus stats' rare6-vs-general split to confirm the background is clean. Shares the `case_finding_cache` with the
 other dag_placement runs; `disease` is folded into the cache key, so this
 corpus is built and cached under its own key.

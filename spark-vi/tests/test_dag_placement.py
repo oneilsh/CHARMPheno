@@ -84,6 +84,66 @@ def test_evaluate_perfect_profiles_score_high():
     assert m["mrr"] == 1.0 and m["top2"] == 1.0
     assert all(v >= 0.99 for v in m["node_auc"].values())
 
+def test_detection_metrics_separates_and_reports_operating_points():
+    from spark_vi.models.topic.dag_placement import _detection_metrics
+    # perfectly separable: foreground scores strictly above background scores.
+    fg = [0.9, 0.8, 0.85, 0.95]
+    bg = [0.1, 0.2, 0.15, 0.05, 0.3, 0.0]
+    scores = fg + bg
+    is_fg = [True] * len(fg) + [False] * len(bg)
+    d = _detection_metrics(scores, is_fg)
+    assert d["auc"] == 1.0                       # perfect ranking
+    assert d["n_foreground"] == 4 and d["n_background"] == 6
+    assert abs(d["prevalence"] - 0.4) < 1e-9
+    op = d["operating_points"]["0.90"]
+    # catches all 4 foreground (>=90%), zero background above the threshold.
+    assert op["sensitivity"] >= 0.90
+    assert op["bg_fpr"] == 0.0 and op["specificity"] == 1.0
+    assert op["precision"] == 1.0                # perfectly separable -> all flags real
+
+
+def test_detection_metrics_reports_background_false_positives():
+    from spark_vi.models.topic.dag_placement import _detection_metrics
+    # overlap: one background sits at 0.7, above the weakest foreground.
+    fg = [0.6, 0.8, 0.9, 0.75]
+    bg = [0.1, 0.7, 0.2, 0.05]
+    d = _detection_metrics(fg + bg, [True] * 4 + [False] * 4)
+    op = d["operating_points"]["0.90"]
+    # threshold drops to catch >=90% of fg (all 4, thr=0.6); the 0.7 background
+    # is then a false positive -> bg_fpr = 1/4.
+    assert op["sensitivity"] >= 0.90
+    assert abs(op["bg_fpr"] - 0.25) < 1e-9
+    assert op["precision"] < 1.0                 # a background leaks in
+
+
+def test_detection_metrics_one_class_is_nan():
+    from spark_vi.models.topic.dag_placement import _detection_metrics
+    d = _detection_metrics([0.1, 0.2, 0.3], [False, False, False])
+    assert np.isnan(d["auc"]) and d["operating_points"] == {}
+
+
+def test_evaluate_detection_block_backgrounds_park_on_background_block():
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)
+    # 4 foreground docs (each loads its own node), 6 background docs (empty
+    # frontier, ~zero disease-node affinity -> mass parks on the background block).
+    labels = [3, 4, 5, 6, frozenset(), frozenset(),
+              frozenset(), frozenset(), frozenset(), frozenset()]
+    profiles = []
+    for y in labels:
+        if not y or (hasattr(y, "__iter__") and not len(y)):
+            profiles.append({u: 0.01 for u in lay.nodes})       # diffuse, tiny -> background
+        else:
+            cl = [u for u in lay.closure(y) if u != 0]
+            profiles.append({u: (0.8 if u in cl else 0.0) for u in lay.nodes})
+    m = evaluate(profiles, labels, lay)
+    det = m["detection"]
+    assert det["n_foreground"] == 4 and det["n_background"] == 6
+    assert det["auc"] >= 0.99                                    # cases separate from background
+    # background docs put nearly all mass on the background block; foreground far less.
+    assert det["bg_mass_background_mean"] > det["bg_mass_foreground_mean"]
+    assert det["bg_mass_background_mean"] > 0.9
+
+
 def test_evaluate_tolerates_root_label():
     lay = DagLayout(PARENT, n_bg=2, tpn=1)
     labels = np.array([3, 0, 4, 5])

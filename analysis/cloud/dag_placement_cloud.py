@@ -221,6 +221,17 @@ def main() -> int:
                   f"recall_at_k={metrics['recall_at_k']} "
                   f"test_coarsening_rate={bundle.ledger.get('test_coarsening_rate')}",
                   flush=True)
+            det = metrics["detection"]
+            op90 = det["operating_points"].get("0.90", {})
+            print(f"[driver]   detection (case vs background): "
+                  f"auc={det['auc']:.3f} ap={det['ap']:.3f} "
+                  f"(prevalence={det['prevalence']:.3f}, "
+                  f"n_fg={det['n_foreground']}/n_bg={det['n_background']}); "
+                  f"disease_mass auc={det['auc_disease_mass']:.3f}; "
+                  f"@90%-sens: bg_fpr={op90.get('bg_fpr', float('nan')):.3f} "
+                  f"precision={op90.get('precision', float('nan')):.3f}; "
+                  f"bg_mass mean bg={det['bg_mass_background_mean']:.3f} "
+                  f"fg={det['bg_mass_foreground_mean']:.3f}", flush=True)
             # Spot-check render for a few foreground held-out docs. names must be
             # ENGINE-id-keyed (remap concept-id name_by_id via int2cid).
             names = {i: bundle.name_by_id[c] for i, c in bundle.int2cid.items()
