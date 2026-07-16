@@ -48,24 +48,18 @@ class GatedOnlineLDA(OnlineLDA):
 
         "random": inherited OnlineLDA Gamma init — the validated default (the gate already
         welds topics to nodes, so no symmetry-breaking seed is needed). Other strategies
-        (Task 3) resolve from gated_init.INIT_STRATEGIES and need the training corpus in
-        data_summary. An unknown name raises ValueError — including when gated_init itself
-        hasn't been built yet (pre-Task-3): the registry import is caught so a missing
-        module surfaces as the same "unknown init strategy" error, not an ImportError."""
-        gp = super().initialize_global(data_summary)
+        resolve from gated_init.INIT_STRATEGIES and need the training corpus in data_summary.
+        An unknown name raises ValueError."""
         if self.init == "random":
-            return gp
-        try:
-            from spark_vi.models.topic.gated_init import INIT_STRATEGIES
-        except ImportError:
-            INIT_STRATEGIES = {}
+            return super().initialize_global(data_summary)
+        from spark_vi.models.topic.gated_init import INIT_STRATEGIES
         if self.init not in INIT_STRATEGIES:
             raise ValueError(
                 f"unknown init strategy {self.init!r}; "
                 f"known: {['random'] + sorted(INIT_STRATEGIES)}"
             )
-        strat = INIT_STRATEGIES[self.init]
-        gp["lambda"] = strat(data_summary, self.lay, self.V)
+        gp = super().initialize_global(data_summary)
+        gp["lambda"] = INIT_STRATEGIES[self.init](data_summary, self.lay, self.V)
         return gp
 
     def local_update(
