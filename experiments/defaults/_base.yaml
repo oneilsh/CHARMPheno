@@ -51,8 +51,8 @@ lbfgs_tol: 1.0e-4
 # block-aligned anchor-word seed, Arora et al. 2013). anchor 201820 = diabetes.
 anchor: 201820
 min_n: 50
-n_bg: 2
-tpn: 1
+n_bg: 20
+tpn: 5
 holdout_frac: 0.2
 window_days: 365
 init: random

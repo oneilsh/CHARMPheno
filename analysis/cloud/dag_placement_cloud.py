@@ -35,6 +35,34 @@ def profiles_from_scored_rows(rows, lay):
     return profiles, test_labels
 
 
+def _log_corpus_stats(bundle, lay):
+    """Log + return train/test corpus stats: doc counts, per-source_cohort
+    breakdown, how many docs carry a frontier (rankable foreground), and the vocab
+    / topic-structure dimensions. One lightweight aggregation pass per split."""
+    from pyspark.sql import functions as F
+
+    def _stats(df, name):
+        agg = (df.groupBy("source_cohort")
+               .agg(F.count(F.lit(1)).alias("n"),
+                    F.sum((F.size("frontier") > 0).cast("long")).alias("fg"))
+               .collect())
+        by = {r["source_cohort"]: (int(r["n"]), int(r["fg"])) for r in agg}
+        total = sum(n for n, _ in by.values())
+        fg = sum(f for _, f in by.values())
+        print(f"[driver]   corpus[{name}]: {total} docs, {fg} with a frontier; "
+              + ", ".join(f"{k}={n}" for k, (n, _) in sorted(by.items())), flush=True)
+        return {"n_docs": total, "n_frontier": fg,
+                "by_source_cohort": {k: n for k, (n, _) in by.items()}}
+
+    stats = {"train": _stats(bundle.train_df, "train"),
+             "test": _stats(bundle.test_df, "test"),
+             "vocab_size": len(bundle.vocab_map), "K": lay.K,
+             "n_nodes": len(lay.nodes), "n_bg": lay.n_bg, "tpn": lay.tpn}
+    print(f"[driver]   corpus: V={stats['vocab_size']} vocab, K={lay.K} topics "
+          f"({lay.n_bg} bg + {len(lay.nodes)} nodes x {lay.tpn} tpn)", flush=True)
+    return stats
+
+
 def _topic_node_labels(lay, int2cid, name_by_id, n_bg):
     """Length-K block labels: background topics -> 'bg'; each node's topic block ->
     the node's condition name (engine-id -> concept-id -> name). Lets the per-iter
@@ -111,8 +139,8 @@ def parse_args(argv=None):
     p.add_argument("--holdout-frac", type=float, default=0.2)
     p.add_argument("--strip-mode", choices=["test_only", "both"], default="test_only")
     # gating
-    p.add_argument("--n-bg", type=int, default=2)
-    p.add_argument("--tpn", type=int, default=1)
+    p.add_argument("--n-bg", type=int, default=20)
+    p.add_argument("--tpn", type=int, default=5)
     # SVI
     p.add_argument("--max-iter", type=int, default=100)
     p.add_argument("--seed", type=int, default=None)
@@ -154,6 +182,7 @@ def main() -> int:
             print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
 
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
+        corpus_stats = _log_corpus_stats(bundle, lay)
 
         with _phase(f"gated-svi fit (init={args.init}, K={lay.K})"):
             est = GatedLDAEstimator(
@@ -208,6 +237,7 @@ def main() -> int:
                 "init": args.init, "K": lay.K, "n_bg": args.n_bg, "tpn": args.tpn,
                 "anchor": args.anchor, "min_n": args.min_n, "strip_mode": args.strip_mode,
                 "max_iter": args.max_iter, "metrics": metrics, "ledger": bundle.ledger,
+                "corpus_stats": corpus_stats,
                 "corpus_manifest": {
                     "cdr": args.cdr, "source_table": args.source_table,
                     "person_mod": args.person_mod, "vocab_size": args.vocab_size,

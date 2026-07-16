@@ -77,3 +77,26 @@ def test_parse_args_topic_logging_flags():
     # default off
     b = parse_args(["--cdr", "p.d", "--billing", "b", "--out-dir", "/x"])
     assert b.print_topics_every == 0
+
+
+def test_log_corpus_stats_counts(spark):
+    """Corpus stats: per-split doc counts, per-source_cohort breakdown, how many
+    docs carry a frontier, and the vocab/topic dims."""
+    from types import SimpleNamespace
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from dag_placement_cloud import _log_corpus_stats
+    train = spark.createDataFrame(
+        [(1, "diabetes", [3]), (2, "diabetes", [2]), (3, "general", [])],
+        ["person_id", "source_cohort", "frontier"])
+    test = spark.createDataFrame(
+        [(4, "diabetes", [3]), (5, "general", [])],
+        ["person_id", "source_cohort", "frontier"])
+    bundle = SimpleNamespace(train_df=train, test_df=test,
+                             vocab_map={100: 0, 200: 1, 300: 2})
+    lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=20, tpn=5)
+    stats = _log_corpus_stats(bundle, lay)
+    assert stats["train"]["n_docs"] == 3 and stats["train"]["n_frontier"] == 2
+    assert stats["train"]["by_source_cohort"] == {"diabetes": 2, "general": 1}
+    assert stats["test"]["n_docs"] == 2 and stats["test"]["n_frontier"] == 1
+    assert stats["vocab_size"] == 3 and stats["n_bg"] == 20 and stats["tpn"] == 5
+    assert stats["K"] == lay.K == 20 + 3 * 5

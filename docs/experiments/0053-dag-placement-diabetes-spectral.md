@@ -9,8 +9,9 @@ person_mod: 10
 prior_obs_days: 365
 anchor: 201820
 min_n: 50
-n_bg: 2
-tpn: 1
+n_bg: 20
+tpn: 5
+print_topics_every: 10
 holdout_frac: 0.2
 init: spectral
 max_iter: 100
