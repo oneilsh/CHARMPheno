@@ -25,6 +25,12 @@ from __future__ import annotations
 from charmpheno.omop.condition_dag import _nearest_surviving_ancestors
 from spark_vi.models.topic.dag_placement import frontier_from_coded
 
+# Fixed salt for the deterministic train/test split. Hashing person_id with a
+# constant salt makes the split reproducible + resume-stable across runs (Spark's
+# F.rand() is not), while spreading patients pseudo-uniformly. Mirrors
+# cohorts._RANDOM_WINDOW_SALT.
+_SPLIT_SALT = 20260716
+
 
 def _descendants(children_map: dict[int, list[int]], root: int) -> set[int]:
     """Proper descendants of `root` in a {parent: [children]} concept-id map."""
@@ -141,3 +147,50 @@ def node_patient_counts(attested_df) -> dict[int, int]:
         .collect()
     )
     return {int(r["node_cid"]): int(r["n"]) for r in rows}
+
+
+def attach_frontiers(attested_df, before_dag, keep, cid2int, lay):
+    """Add a `frontier: array<bigint>` column (ENGINE-id space) to `attested_df`
+    by applying `doc_frontier_engine_ids` per row. The DAG/keep/cid2int/lay
+    structures are small and picklable; they are captured in the UDF closure and
+    broadcast with the task."""
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import ArrayType, LongType
+
+    def _fr(cids):
+        return [int(x) for x in doc_frontier_engine_ids(
+            [int(c) for c in (cids or [])], before_dag, keep, cid2int, lay)]
+
+    udf = F.udf(_fr, ArrayType(LongType()))
+    return attested_df.withColumn("frontier", udf(F.col("attested_cids")))
+
+
+def split_train_test(df, *, holdout_frac, split_salt=_SPLIT_SALT):
+    """Deterministic salted-hash split on person_id (resume-stable; F.hash, not
+    F.rand). A person's docs never straddle the split — the bucket is a pure
+    function of person_id + salt — so a patient-keyed holdout stays correct even
+    if the doc unit ever becomes many-per-patient. Returns (train_df, test_df)."""
+    from pyspark.sql import functions as F
+
+    bucket = F.pmod(F.hash(F.col("person_id"), F.lit(split_salt)), F.lit(10000))
+    thresh = int(round(holdout_frac * 10000))
+    tagged = df.withColumn("_split_bucket", bucket)
+    test = tagged.where(F.col("_split_bucket") < thresh).drop("_split_bucket")
+    train = tagged.where(F.col("_split_bucket") >= thresh).drop("_split_bucket")
+    return train, test
+
+
+def strip_test_features(test_df, drop_idxs, *, features_col="features"):
+    """Apply the SparseVector leakage strip to `features_col`, removing the vocab
+    dims in `drop_idxs` (the DAG-node type codes). Held-out docs only — the caller
+    passes only the test split here."""
+    from pyspark.sql import functions as F
+    from pyspark.ml.linalg import VectorUDT
+
+    drop = {int(i) for i in drop_idxs}
+
+    def _strip(v):
+        return strip_features(v, drop)
+
+    udf = F.udf(_strip, VectorUDT())
+    return test_df.withColumn(features_col, udf(F.col(features_col)))

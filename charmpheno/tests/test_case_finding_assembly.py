@@ -161,3 +161,59 @@ def test_node_patient_counts_counts_distinct_patients_not_docs(spark):
     ])
     att = doc_attested_nodes(ev, {200, 300}, doc_spec=PatientCohortDocSpec())
     assert node_patient_counts(att) == {200: 2, 300: 1}
+
+
+from pyspark.ml.linalg import SparseVector
+
+
+def test_attach_frontiers_emits_engine_ids_and_empty_for_background(spark):
+    from charmpheno.omop.case_finding_assembly import (
+        doc_attested_nodes, attach_frontiers,
+    )
+    from charmpheno.omop.condition_dag import build_condition_dag
+    from spark_vi.models.topic.dag_placement import DagLayout
+    edges = [(100, 200), (200, 400)]
+    dag = build_condition_dag(edges, anchor=100, node_ids=[200, 400])
+    parent_int, int2cid, cid2int = dag.to_engine()
+    lay = DagLayout(parent_int, n_bg=2, tpn=1)
+
+    ev = _events(spark, [
+        (1, 200, "diabetes", dt.date(2015, 1, 1)),
+        (1, 400, "diabetes", dt.date(2015, 2, 1)),   # descendant -> frontier {400}
+        (2, 777, "general",  dt.date(2016, 1, 1)),   # background -> []
+    ])
+    att = doc_attested_nodes(ev, dag.nodes(), doc_spec=PatientCohortDocSpec())
+    out = {
+        r["doc_id"]: sorted(r["frontier"])
+        for r in attach_frontiers(att, dag, dag.nodes(), cid2int, lay).collect()
+    }
+    assert out["diabetes:1"] == [cid2int[400]]
+    assert out["general:2"] == []
+
+
+def test_split_train_test_is_deterministic_and_person_disjoint(spark):
+    from charmpheno.omop.case_finding_assembly import split_train_test
+    df = spark.createDataFrame(
+        [(pid, f"diabetes:{pid}") for pid in range(200)],
+        ["person_id", "doc_id"],
+    )
+    tr1, te1 = split_train_test(df, holdout_frac=0.25, split_salt=20260716)
+    tr2, te2 = split_train_test(df, holdout_frac=0.25, split_salt=20260716)
+    test_ids_1 = {r["person_id"] for r in te1.collect()}
+    test_ids_2 = {r["person_id"] for r in te2.collect()}
+    train_ids_1 = {r["person_id"] for r in tr1.collect()}
+    assert test_ids_1 == test_ids_2                       # deterministic
+    assert test_ids_1 & train_ids_1 == set()              # disjoint
+    assert test_ids_1 | train_ids_1 == set(range(200))    # a partition
+    assert 0.15 < len(test_ids_1) / 200 < 0.35            # roughly holdout_frac
+
+
+def test_strip_test_features_removes_named_vocab_dims(spark):
+    from charmpheno.omop.case_finding_assembly import strip_test_features
+    df = spark.createDataFrame(
+        [(1, SparseVector(6, [0, 2, 4], [1.0, 2.0, 3.0]))],
+        ["person_id", "features"],
+    )
+    out = strip_test_features(df, {2}).collect()[0]["features"]
+    assert out.size == 6
+    assert dict(zip(out.indices.tolist(), out.values.tolist())) == {0: 1.0, 4: 3.0}
