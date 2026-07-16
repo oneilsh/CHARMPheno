@@ -61,3 +61,17 @@ def test_build_dag_placement_args_includes_strip_mode(monkeypatch):
            "n_bg": 2, "tpn": 1, "max_iter": 100, "strip_mode": "both"}
     args = mod.build_dag_placement_args(eff, "/out")
     assert args[args.index("--strip-mode") + 1] == "both"
+
+
+def test_build_dag_placement_args_emits_topic_logging_flags(monkeypatch):
+    import importlib
+    mod = importlib.import_module("run_experiment")
+    monkeypatch.setattr(mod, "_require_workspace_env", lambda: ("p.d", "bill"))
+    eff = {"model_class": "dag_placement", "source_table": "condition_era",
+           "person_mod": 10, "vocab_size": 5000, "min_df": 20,
+           "min_patient_count": 20, "doc_min_length": 0, "min_n": 50,
+           "n_bg": 2, "tpn": 1, "max_iter": 100,
+           "print_topics_every": 10, "top_n_tokens": 6}
+    args = mod.build_dag_placement_args(eff, "/out")
+    assert args[args.index("--print-topics-every") + 1] == "10"
+    assert args[args.index("--top-n-tokens") + 1] == "6"

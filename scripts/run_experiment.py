@@ -692,6 +692,9 @@ def build_dag_placement_args(
         "--init", str(effective.get("init", "random")),
         "--spectral-max-vocab", str(effective.get("spectral_max_vocab", 8000)),
         "--strip-mode", str(effective.get("strip_mode", "test_only")),
+        # Per-iter top-terms logging reuses the shared _base.yaml knobs (STM parity).
+        "--print-topics-every", str(effective.get("print_topics_every", 0)),
+        "--top-n-tokens", str(effective.get("top_n_tokens", 8)),
         "--out-dir", str(out_dir),
     ]
     if effective.get("seed") is not None:

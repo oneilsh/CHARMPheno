@@ -11,6 +11,8 @@ spectralMaxVocab guard bounds the dense path.
 """
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 from pyspark import StorageLevel, keyword_only
 from pyspark.ml.base import Estimator, Model
@@ -69,10 +71,27 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                          caviMaxIter=100, caviTol=1e-3, gammaShape=100.0,
                          init="random", spectralMaxVocab=8000)
         self.setParams(**self._input_kwargs)
+        # Diagnostic-only per-iteration callback (mirrors OnlineLDAEstimator).
+        # Stored as an instance attribute, not a Param — callables aren't
+        # MLlib-serializable and persistence is deferred (ADR 0009).
+        self._on_iteration = None
 
     @keyword_only
     def setParams(self, **kwargs):
         return self._set(**kwargs)
+
+    def setOnIteration(
+        self, fn: Callable[[int, dict, list[float]], None] | None,
+    ) -> "GatedLDAEstimator":
+        """Register a per-iteration diagnostic callback for the next fit.
+
+        Signature: fn(iter_num, global_params, elbo_trace). Runs on the driver in
+        the fit's hot path; throttle with a modulo if non-trivial. The callback
+        must not mutate global_params (the same dict feeds the next iteration's
+        broadcast). Not persisted (callables aren't MLlib-serializable; ADR 0009).
+        """
+        self._on_iteration = fn
+        return self
 
     def _fit(self, dataset) -> "GatedLDAModel":
         from spark_vi.core.runner import VIRunner
@@ -143,7 +162,7 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
 
         try:
             result = VIRunner(model_obj, config=config).fit(
-                rdd, data_summary=data_summary)
+                rdd, data_summary=data_summary, on_iteration=self._on_iteration)
         finally:
             rdd.unpersist(blocking=False)
 

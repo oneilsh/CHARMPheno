@@ -90,3 +90,27 @@ def test_gated_shim_spectral_fits_and_seeds_lambda(spark):
     lam_s = m_spec.result.global_params["lambda"]
     assert lam_r.shape == lam_s.shape
     assert not np.allclose(lam_r, lam_s)   # spectral seed changed the trajectory
+
+
+def test_gated_shim_on_iteration_callback_fires(spark):
+    """setOnIteration registers a per-iter callback that the runner invokes with
+    (iter_num, global_params, elbo_trace); global_params carries the (K,V) lambda
+    so a driver can log per-topic top terms as the fit evolves (STM parity)."""
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    from pyspark.ml.linalg import SparseVector
+    rows = []
+    for _ in range(12):
+        rows.append((SparseVector(6, [0, 1], [2.0, 1.0]), [1]))
+        rows.append((SparseVector(6, [2, 3], [2.0, 1.0]), [2]))
+    df = spark.createDataFrame(rows, ["features", "frontier"])
+    seen = []
+
+    def _cb(it, gp, elbo):
+        seen.append((it, "lambda" in gp, gp["lambda"].shape))
+
+    est = GatedLDAEstimator(parent={1: 0, 2: 0}, nBg=2, tpn=1, maxIter=3, seed=0)
+    assert est.setOnIteration(_cb) is est          # chainable
+    est.fit(df)
+    assert seen                                    # callback fired at least once
+    it, has_lambda, shape = seen[-1]
+    assert has_lambda and shape[0] == 4            # K = n_bg(2) + 2 nodes * tpn(1)

@@ -35,6 +35,63 @@ def profiles_from_scored_rows(rows, lay):
     return profiles, test_labels
 
 
+def _topic_node_labels(lay, int2cid, name_by_id, n_bg):
+    """Length-K block labels: background topics -> 'bg'; each node's topic block ->
+    the node's condition name (engine-id -> concept-id -> name). Lets the per-iter
+    topic log show which DAG node each topic belongs to as it evolves."""
+    labels = ["bg"] * lay.K
+    for u in lay.nodes:
+        cid = int2cid.get(u)
+        nm = name_by_id.get(cid, str(cid))
+        for k in lay.block[u]:
+            labels[k] = nm
+    return labels
+
+
+def _vocab_concept_names(spark, cdr, billing, vocab_map):
+    """{concept_id: concept_name} for the vocabulary (for the per-iter top-terms
+    log). A small filtered read of `concept`, mirroring _corpus_load's lookup;
+    done only when topic logging is on, so a cache-hit fit without logging skips
+    the BigQuery round-trip."""
+    from pyspark.sql import functions as F
+    cids = [int(c) for c in vocab_map.keys()]
+    rows = (spark.read.format("bigquery")
+            .option("table", f"{cdr}.concept")
+            .option("parentProject", billing).load()
+            .select("concept_id", "concept_name")
+            .where(F.col("concept_id").isin(cids))
+            .collect())
+    return {int(r["concept_id"]): r["concept_name"] for r in rows}
+
+
+def _make_topic_evolution_logger(top_n, every_n, idx_to_cid, vocab_names, topic_labels):
+    """Build a per-iteration callback that prints top-N terms per topic (STM parity,
+    mirrors stm_bigquery_cloud._make_topic_evolution_logger). Each topic line shows
+    its DAG-node block, E[beta], sum(lambda), peak, and its heaviest vocab terms
+    (concept name, falling back to concept-id). Heaviest topics first. The runner
+    wraps the call so a logging slip can't kill the fit."""
+    from spark_vi.models.topic.diagnostics import topic_word_summary
+
+    def _on_iter(iter_num, global_params, _elbo):
+        if every_n <= 0 or iter_num % every_n != 0:
+            return
+        lam = global_params["lambda"]
+        s = topic_word_summary(lam, top_n)
+        order = np.argsort(s["row_sums"])[::-1]
+        print(f"[driver]   --- topics @ iter {iter_num} ---", flush=True)
+        for k in order:
+            ki = int(k)
+            terms = ", ".join(
+                f"{str(vocab_names.get(idx_to_cid.get(int(j)), idx_to_cid.get(int(j), '?')))[:24]}"
+                f"({p:.3f})"
+                for j, p in zip(s["top_indices"][ki], s["top_probs"][ki]))
+            blk = f" [{topic_labels[ki]:>16.16}]" if topic_labels is not None else ""
+            print(f"[driver]    topic {ki:>2}{blk}  E[β]={s['mass_fraction'][ki]:.4f}  "
+                  f"Σλ={s['row_sums'][ki]:.3g}  peak={s['peak'][ki]:.3f}  | {terms}",
+                  flush=True)
+    return _on_iter
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Gated-SVI hierarchical case-finding fit + inline placement eval.")
@@ -63,6 +120,11 @@ def parse_args(argv=None):
     p.add_argument("--cavi-tol", type=float, default=1e-3)
     p.add_argument("--init", choices=["random", "spectral"], default="random")
     p.add_argument("--spectral-max-vocab", type=int, default=8000)
+    # per-iter topic logging (STM parity)
+    p.add_argument("--print-topics-every", type=int, default=0,
+                   help="Print top-N terms per topic every N iters (0 = off). "
+                        "Resolves vocab names via a small concept read.")
+    p.add_argument("--top-n-tokens", type=int, default=8)
     p.add_argument("--cache-uri", default=None)
     p.add_argument("--out-dir", required=True)
     p.add_argument("--resume-from", default="",
@@ -100,6 +162,15 @@ def main() -> int:
                 maxIter=args.max_iter, seed=args.seed,
                 caviMaxIter=args.cavi_max_iter, caviTol=args.cavi_tol,
                 init=args.init, spectralMaxVocab=args.spectral_max_vocab)
+            if args.print_topics_every > 0:
+                vocab_names = _vocab_concept_names(
+                    spark, args.cdr, args.billing, bundle.vocab_map)
+                idx_to_cid = {idx: cid for cid, idx in bundle.vocab_map.items()}
+                topic_labels = _topic_node_labels(
+                    lay, bundle.int2cid, bundle.name_by_id, args.n_bg)
+                est.setOnIteration(_make_topic_evolution_logger(
+                    args.top_n_tokens, args.print_topics_every,
+                    idx_to_cid, vocab_names, topic_labels))
             model = est.fit(bundle.train_df)
 
         with _phase("transform + inline placement eval"):
