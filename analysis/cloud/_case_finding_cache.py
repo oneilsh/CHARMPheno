@@ -35,7 +35,7 @@ def _module_source_hash(module) -> str:
 
 def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
                              min_patient_count, doc_min_length, prior_obs_days,
-                             window_days, anchor, min_n, holdout_frac, split_salt,
+                             window_days, anchor, min_n, holdout_frac, split_salt=None,
                              n_bg, tpn, cdr=None) -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
@@ -43,9 +43,16 @@ def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
     case_finding_assembly, so any assembly-logic edit auto-invalidates the cache
     (same discipline as _corpus_cache's cohort_defs). `v` is the manual shape
     version for layout changes unrelated to that source.
+
+    `split_salt` defaults to the assembly's own `_SPLIT_SALT` constant when not
+    given, so the key stays consistent with the split the (unparameterized)
+    driver actually produces — callers that don't vary the salt (the driver has
+    no --split-salt) get a correct, stable key rather than a missing-arg error.
     """
     from charmpheno.omop import condition_dag, case_finding_assembly
     from charmpheno.omop.cohorts import cohort_defs_version
+    if split_salt is None:
+        split_salt = case_finding_assembly._SPLIT_SALT
     payload = {
         "source_table": source_table, "person_mod": int(person_mod),
         "vocab_size": vocab_size, "min_df": float(min_df),

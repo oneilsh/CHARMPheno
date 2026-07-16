@@ -81,3 +81,30 @@ def test_bundle_cache_miss_then_hit(spark, tmp_path):
         spark, cache_uri=uri, _assemble_fn=_stub_assemble, **params)
     assert calls["n"] == 1                       # built once, second call is a HIT
     assert b1.parent_int == b2.parent_int == built.parent_int
+
+
+def test_bundle_cache_miss_then_hit_without_split_salt(spark, tmp_path):
+    """Regression: the driver does NOT pass split_salt (there is no --split-salt),
+    so a cached run must not require it. compute_bundle_cache_key defaults it to
+    the assembly's _SPLIT_SALT; before that fix this call raised TypeError at
+    startup on every `make exp` run with a cache_uri."""
+    from _case_finding_cache import load_or_build_case_finding_bundle
+    built = _tiny_bundle(spark)
+    calls = {"n": 0}
+
+    def _stub_assemble(spark_, **kw):
+        calls["n"] += 1
+        return built
+
+    uri = f"file://{tmp_path}/cache3"
+    # Exactly the kwargs dag_placement_cloud.py passes — NO split_salt.
+    params = dict(source_table="condition_era", person_mod=10, vocab_size=5000,
+                  min_df=20, min_patient_count=20, doc_min_length=0,
+                  prior_obs_days=365, window_days=365, anchor=201820, min_n=50,
+                  holdout_frac=0.2, n_bg=2, tpn=1, cdr="p.d", billing="bp")
+    b1 = load_or_build_case_finding_bundle(
+        spark, cache_uri=uri, _assemble_fn=_stub_assemble, **params)
+    b2 = load_or_build_case_finding_bundle(
+        spark, cache_uri=uri, _assemble_fn=_stub_assemble, **params)
+    assert calls["n"] == 1                       # miss builds once, then HIT
+    assert b1.parent_int == b2.parent_int == built.parent_int
