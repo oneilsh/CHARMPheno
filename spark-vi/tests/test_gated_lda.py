@@ -74,6 +74,28 @@ def test_node_affinity_sums_blocks():
         assert np.isclose(aff[u], 0.1 * lay.tpn)
 
 
+def test_local_update_gamma_init_is_content_deterministic_with_seed():
+    # Regression: GatedOnlineLDA.local_update must inherit OnlineLDA's content-deterministic
+    # gamma_init seeding (blake2b hash of random_seed + doc content) so a distributed fit is
+    # reproducible regardless of Spark partition/executor/iteration order — not draw gamma_init
+    # from the plain global RNG, which would make lambda_stats vary run-to-run for the same docs.
+    lay = _lay()
+    V = 30
+    m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    gp = m.initialize_global(None)
+    docs = [
+        GatedBOWDocument(indices=np.array([5, 6], dtype=np.int32),
+                         counts=np.array([2.0, 1.0]), length=3,
+                         frontier=frozenset({3})),
+        GatedBOWDocument(indices=np.array([1, 2, 7], dtype=np.int32),
+                         counts=np.array([1.0, 3.0, 2.0]), length=6,
+                         frontier=frozenset()),
+    ]
+    out1 = m.local_update(docs, gp)
+    out2 = m.local_update(docs, gp)
+    np.testing.assert_array_equal(out1["lambda_stats"], out2["lambda_stats"])
+
+
 def test_unknown_init_strategy_raises():
     lay = _lay()
     import pytest

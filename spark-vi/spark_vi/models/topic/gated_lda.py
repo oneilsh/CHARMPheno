@@ -18,6 +18,7 @@ oracle; the placement design docs/superpowers/specs/2026-07-15-gated-svi-placeme
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Iterable
 
 import numpy as np
@@ -88,13 +89,33 @@ class GatedOnlineLDA(OnlineLDA):
         doc_theta_kl_sum = 0.0
         n_docs = 0
 
+        # gamma_init draws Gamma(gamma_shape, 1/gamma_shape) per doc, sized to the gated
+        # allowed set — same content-deterministic seeding contract as OnlineLDA.local_update
+        # (lda.py), so a distributed fit is reproducible regardless of Spark partition /
+        # executor / iteration order. When random_seed is None, falls back to the global RNG.
         for doc in rows:
             if doc.frontier:
                 allowed = self.lay.allowed_set(doc.frontier)
             else:
                 allowed = np.arange(self.K)
-            gamma_init = np.random.gamma(self.gamma_shape, 1.0 / self.gamma_shape,
-                                         size=len(allowed))
+            if self.random_seed is None:
+                gamma_init = np.random.gamma(
+                    shape=self.gamma_shape,
+                    scale=1.0 / self.gamma_shape,
+                    size=len(allowed),
+                )
+            else:
+                h = hashlib.blake2b(digest_size=8)
+                h.update(str(self.random_seed).encode("utf-8"))
+                h.update(np.ascontiguousarray(doc.indices, dtype=np.int32).tobytes())
+                h.update(np.ascontiguousarray(doc.counts, dtype=np.float64).tobytes())
+                doc_seed = int.from_bytes(h.digest(), "little")
+                doc_rng = np.random.default_rng(doc_seed)
+                gamma_init = doc_rng.gamma(
+                    shape=self.gamma_shape,
+                    scale=1.0 / self.gamma_shape,
+                    size=len(allowed),
+                )
             gamma, expElogthetad, phi_norm, _ = _cavi_doc_inference(
                 indices=doc.indices,
                 counts=doc.counts,
