@@ -103,6 +103,34 @@ def test_unknown_init_strategy_raises():
         GatedOnlineLDA(lay, 30, init="banana").initialize_global(None)
 
 
+def test_optimize_alpha_unsupported_raises():
+    # Regression: GatedOnlineLDA.local_update never emits e_log_theta_sum, so
+    # optimize_alpha=True flowing through **kw to OnlineLDA.__init__ would otherwise
+    # let update_global crash on a missing target_stats key deep in an M-step (on Spark
+    # executors, not at construction time). Fail fast at __init__ instead.
+    lay = _lay()
+    import pytest
+    with pytest.raises(NotImplementedError, match="optimize_alpha"):
+        GatedOnlineLDA(lay, 30, alpha=0.1, eta=0.02, optimize_alpha=True)
+
+
+def test_compute_elbo_is_finite_and_gated_doc_kl_is_positive():
+    # FIX 2: the gated local_update must accumulate a real per-doc Dirichlet KL (over the
+    # doc's allowed sub-simplex), not the hardcoded 0.0 surrogate, so compute_elbo (and
+    # VIRunner's convergence check on the production shim path) is a real variational bound.
+    lay = _lay()
+    V = 30
+    m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    gp = m.initialize_global(None)
+    doc = GatedBOWDocument(indices=np.array([5, 6], dtype=np.int32),
+                           counts=np.array([2.0, 1.0]), length=3,
+                           frontier=frozenset({3}))
+    stats = m.local_update([doc], gp)
+    assert float(stats["doc_theta_kl_sum"]) > 0.0
+    elbo = m.compute_elbo(gp, stats)
+    assert np.isfinite(elbo)
+
+
 from spark_vi.models.topic.dag_placement import fit_gated, profile, evaluate
 from _stm_synth import (
     dag_placement_corpus, fit_gated_svi_local, svi_node_profiles,

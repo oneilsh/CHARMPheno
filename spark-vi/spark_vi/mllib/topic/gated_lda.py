@@ -16,7 +16,7 @@ from pyspark.ml.param.shared import HasFeaturesCol, HasLabelCol, HasMaxIter, Has
 
 from spark_vi.core.config import VIConfig
 from spark_vi.models.topic.dag_placement import DagLayout
-from spark_vi.models.topic.gated_lda import GatedOnlineLDA, node_affinity
+from spark_vi.models.topic.gated_lda import GatedOnlineLDA
 from spark_vi.models.topic.types import GatedBOWDocument
 from spark_vi.mllib.topic._common import _vector_to_bow_document
 
@@ -110,6 +110,9 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
 
 
 class GatedLDAModel(_GatedLDAParams, Model):
+    # Documents intent for a future _PersistableModel checkpoint/persist mixin; the model
+    # does not inherit _PersistableModel in v1, so this attribute is currently inert
+    # (persistence is deferred to v2). Kept because it costs nothing and records the plan.
     _expected_model_class = "GatedOnlineLDA"
 
     def __init__(self, result, *, parent, nBg, tpn):

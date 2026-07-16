@@ -25,7 +25,7 @@ import numpy as np
 from scipy.special import digamma
 
 from spark_vi.models.topic.dag_placement import DagLayout
-from spark_vi.models.topic.lda import OnlineLDA, _cavi_doc_inference
+from spark_vi.models.topic.lda import OnlineLDA, _cavi_doc_inference, _dirichlet_kl
 from spark_vi.models.topic.types import GatedBOWDocument
 
 
@@ -40,6 +40,11 @@ def node_affinity(theta: np.ndarray, lay: DagLayout) -> dict[int, float]:
 class GatedOnlineLDA(OnlineLDA):
     def __init__(self, lay: DagLayout, vocab_size: int, *, init: str = "random", **kw) -> None:
         super().__init__(K=lay.K, vocab_size=vocab_size, **kw)
+        if self.optimize_alpha:
+            raise NotImplementedError(
+                "optimize_alpha is not supported by GatedOnlineLDA in v1 (the gated "
+                "local_update does not emit the e_log_theta_sum stat); use a fixed alpha."
+            )
         self.lay = lay
         self.init = init
 
@@ -122,6 +127,14 @@ class GatedOnlineLDA(OnlineLDA):
             sstats_row = np.outer(expElogthetad, doc.counts / phi_norm)
             lambda_stats[np.ix_(allowed, doc.indices)] += sstats_row
             doc_loglik_sum += float(np.sum(doc.counts * np.log(phi_norm)))
+            # Gated posterior KL: KL(q(theta_d) || p(theta_d)) restricted to the doc's
+            # allowed sub-simplex (gamma and alpha[allowed] are both length-|allowed|),
+            # the gated analogue of OnlineLDA.local_update's full-K _dirichlet_kl call
+            # (Blei/Hoffman-style variational Dirichlet KL; see lda.py's _dirichlet_kl).
+            # This only feeds compute_elbo's convergence bound below — it does NOT
+            # touch lambda_stats, n_docs, or doc_loglik_sum, so the fit trajectory
+            # (lambda update) and the SVI-vs-Gibbs equivalence gate are unaffected.
+            doc_theta_kl_sum += _dirichlet_kl(gamma, alpha[allowed])
             n_docs += 1
 
         return {

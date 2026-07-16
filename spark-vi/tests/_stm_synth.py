@@ -647,7 +647,6 @@ def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0):
     Full-batch lr=1.0 each iteration = variational EM — the cleanest regime for the
     SVI-vs-Gibbs placement equivalence gate. `model` is a GatedOnlineLDA; `gated_docs` are
     GatedBOWDocuments (frontier tags drive the gate)."""
-    import numpy as np
     np.random.seed(seed)
     gp = model.initialize_global(None)
     for _ in range(n_iter):
@@ -657,8 +656,12 @@ def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0):
 
 def svi_node_profiles(model, gp, docs, lay):
     """Ungated full-K fold-in of each held-out doc -> theta -> node_affinity dict. The SVI
-    analogue of [dag_placement.profile(...) for d in docs]; scored by dag_placement.evaluate."""
-    import numpy as np
+    analogue of [dag_placement.profile(...) for d in docs]; scored by dag_placement.evaluate.
+
+    The fold-in is intentionally UNGATED and stochastic (infer_local draws gamma_init from
+    the global RNG, not a content-deterministic seed); determinism across the equivalence
+    tests comes from the driver's `np.random.seed` call upstream (see fit_gated_svi_local),
+    not from anything in this function."""
     from spark_vi.models.topic.types import GatedBOWDocument
     from spark_vi.models.topic.gated_lda import node_affinity
     out = []

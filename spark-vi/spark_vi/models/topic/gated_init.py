@@ -16,12 +16,16 @@ findings. Kept for the real-DAG A/B harness and as the extension point for futur
 (e.g. phenotype-profile seeding)."""
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 from spark_vi.models.topic.dag_placement import _as_counts
 from spark_vi.models.topic.spectral_init import (
     word_cooccurrence, find_anchors, recover_beta,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _union_closure(front, lay):
@@ -66,12 +70,21 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0)
     for u in sorted(lay.nodes, key=lambda x: (lay.depth(x), x)):   # forward topological
         docs_u = [counted[d] for d in range(len(counted)) if u in trains[d]]
         if not docs_u:
+            logger.warning(
+                "spectral_block_aligned_lambda: node %s has zero training docs; "
+                "its block stays at the 1e-9 floor (uninitialized).", u,
+            )
             continue
         Q_u = word_cooccurrence(docs_u, V)
         anc = [a for a in lay.closure(u) if a not in (u, 0)]
         seed = list(bg_anchors) + [a for p in anc for a in node_anchors.get(p, [])]
         fg_anchors = find_anchors(Q_u, lay.tpn, seed_rows=seed)
         if not fg_anchors:
+            logger.warning(
+                "spectral_block_aligned_lambda: node %s found no anchors "
+                "(sparse/degenerate co-occurrence); its block stays at the "
+                "1e-9 floor (uninitialized).", u,
+            )
             continue
         node_anchors[u] = list(fg_anchors)
         combined_beta = recover_beta(Q_u, list(seed) + list(fg_anchors))
