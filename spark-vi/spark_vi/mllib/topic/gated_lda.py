@@ -2,9 +2,12 @@
 
 Mirrors mllib/topic/lda.py (ADR 0009): a translation layer over GatedOnlineLDA + VIRunner.
 fit trains GATED (each row carries features + a frontier = set of DAG node ids); transform
-folds held-out docs in UNGATED (full-K) and emits per-node affinity. v1 uses init="random"
-(the validated default); block-aligned spectral init on Spark (distributed co-occurrence) is
-deferred (the in-engine "spectral" strategy is validated in the no-Spark harness).
+folds held-out docs in UNGATED (full-K) and emits per-node affinity. init="random" is the
+validated default; init="spectral" runs the DENSE block-aligned anchor-word seed (Arora et al.
+2013) by collecting the training corpus to the driver (mirroring the STM shim's dense spectral
+path, mllib/topic/stm.py) and passing it via data_summary. The SCALABLE projected block-aligned
+variant (distributed co-occurrence + random projection, for large vocabularies) is deferred; the
+spectralMaxVocab guard bounds the dense path.
 """
 from __future__ import annotations
 
