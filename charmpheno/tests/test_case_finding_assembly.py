@@ -300,6 +300,86 @@ def test_assemble_from_events_end_to_end(spark):
     assert any(node200_idx in set(r["features"].indices.tolist()) for r in train_fg)
 
 
+def test_assemble_prunes_and_fits_vocab_on_train_only(spark):
+    """Leakage check: a node attested by 2 patients (one train, one test) with
+    min_n=2 must be PRUNED under train-only counting (train count 1 < 2) even
+    though the combined train+test count (2) would satisfy min_n; a token that
+    appears ONLY in a test patient's document must be absent from the
+    train-fit (and frozen-for-test) vocab.
+
+    Person ids 500 (lands TRAIN) / 507 (lands TEST) are pinned by directly
+    inspecting split_train_test(..., holdout_frac=0.3, split_salt=20260716) --
+    the assertion right after building `ev` verifies the pin still holds
+    rather than assuming it, so this test stays honest if the hash/threshold
+    ever changes."""
+    from charmpheno.omop.case_finding_assembly import (
+        assemble_from_events, split_train_test,
+    )
+    from charmpheno.omop.condition_dag import build_condition_dag
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+    import datetime as dt
+
+    edges = [(100, 200), (100, 300), (200, 400)]
+    before = build_condition_dag(edges, anchor=100, node_ids=[200, 300, 400],
+                                 names={100: "dm", 200: "T2", 300: "T1", 400: "T2r"})
+
+    rows = []
+    for pid in range(40):                        # baseline diabetes patients
+        rows.append((pid, 200, "diabetes", dt.date(2015, 1, 1)))
+        rows.append((pid, 999, "diabetes", dt.date(2015, 2, 1)))
+    for pid in range(100, 140):                   # baseline background patients
+        rows.append((pid, 888, "general", dt.date(2016, 1, 1)))
+        rows.append((pid, 777, "general", dt.date(2016, 2, 1)))
+    # Node 400 (T2r) attested by exactly two patients: 500 (train) and 507
+    # (test) under split_salt=20260716 / holdout_frac=0.3. Combined count = 2
+    # (>= min_n) but TRAIN-only count = 1 (< min_n) -- this is exactly the
+    # transductive leakage the split-first fix closes.
+    train_pid, test_pid = 500, 507
+    rows.append((train_pid, 200, "diabetes", dt.date(2015, 1, 1)))
+    rows.append((train_pid, 400, "diabetes", dt.date(2015, 1, 2)))
+    rows.append((test_pid, 200, "diabetes", dt.date(2015, 1, 1)))
+    rows.append((test_pid, 400, "diabetes", dt.date(2015, 1, 2)))
+    # Token 555 appears ONLY in the test patient's document.
+    rows.append((test_pid, 555, "diabetes", dt.date(2015, 1, 3)))
+
+    ev = spark.createDataFrame(
+        rows, ["person_id", "concept_id", "source_cohort",
+               "condition_era_start_date"])
+
+    # Verify the pinned split assignment before trusting the rest of the fixture.
+    _, te_check = split_train_test(ev, holdout_frac=0.3, split_salt=20260716)
+    test_ids = {r["person_id"] for r in te_check.select("person_id").distinct().collect()}
+    assert train_pid not in test_ids and test_pid in test_ids
+
+    bundle = assemble_from_events(
+        ev, before, doc_spec=PatientCohortDocSpec(min_doc_length=0),
+        min_n=2, holdout_frac=0.3, split_salt=20260716,
+        vocab_size=100, min_df=1, min_patient_count=1, n_bg=2, tpn=1)
+
+    tr = {r["person_id"] for r in bundle.train_df.collect()}
+    te = {r["person_id"] for r in bundle.test_df.collect()}
+    assert tr and te and (tr & te == set())
+    assert train_pid in tr and test_pid in te
+
+    # node 400: TRAIN count 1 < min_n=2 -> pruned; absent from the train-fit
+    # (pruned) DAG engine map, regardless of the combined train+test count.
+    assert 400 not in bundle.cid2int
+
+    # token 555: zero occurrences in TRAIN docs -> absent from the (train-fit,
+    # frozen-for-test) vocab, even though it occurs once in the raw corpus.
+    assert 555 not in bundle.vocab_map
+
+    # ledger reports test coarsening.
+    assert "test_coarsening_rate" in bundle.ledger
+    assert "test_fg_docs" in bundle.ledger
+    assert bundle.ledger["test_fg_docs"] > 0
+    assert 0.0 <= bundle.ledger["test_coarsening_rate"] <= 1.0
+
+    # DagLayout loads; K emergent from TRAIN-surviving nodes.
+    from spark_vi.models.topic.dag_placement import DagLayout
+    DagLayout(bundle.parent_int, n_bg=2, tpn=1)
+
+
 def test_condition_dag_from_frames_builds_taxonomy_from_omop_frames(spark):
     from charmpheno.omop.case_finding_assembly import _condition_dag_from_frames
     # concept: anchor 100 + standard conditions 200,300,400; 999 non-standard,

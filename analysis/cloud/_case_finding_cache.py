@@ -64,7 +64,7 @@ def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
         "cohort_defs": cohort_defs_version(),
         "dag_src": _module_source_hash(condition_dag),
         "assembly_src": _module_source_hash(case_finding_assembly),
-        "v": 1,
+        "v": 2,
     }
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]

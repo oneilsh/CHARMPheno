@@ -231,48 +231,76 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
     core: no BigQuery, pure Spark + domain logic. See the module docstring for the
     id-space ordering.
 
-    `cohort_frontiers` for the ledger's coarsening rate is computed from the
-    FOREGROUND docs only (background attestations are empty) and collected to the
-    driver — foreground scale, run once at prep time."""
+    Split-first, leakage-free: patients are split into train/test BEFORE
+    anything else runs. DAG pruning (`min_n`) and vocabulary fitting both see
+    TRAIN patients only; TEST attestations are rolled onto the TRAIN-pruned DAG
+    (`attach_frontiers` walks each dropped test node up to its nearest
+    surviving ancestor) and TEST documents are bag-of-worded with the FROZEN
+    train vocabulary. `ledger["test_coarsening_rate"]`/`["test_fg_docs"]`
+    report how much the test foreground was coarsened by a DAG pruned on train
+    counts alone. `cohort_frontiers` (train) for the ledger's (train)
+    coarsening rate is computed from the FOREGROUND docs only (background
+    attestations are empty) and collected to the driver — foreground scale,
+    run once at prep time."""
     from pyspark.sql import functions as F
     from charmpheno.omop.condition_dag import prune_by_attestation, pruning_ledger
     from charmpheno.omop.topic_prep import to_bow_dataframe
     from spark_vi.models.topic.dag_placement import DagLayout
 
-    attested = doc_attested_nodes(
-        events_df, before_dag.nodes(), doc_spec=doc_spec).cache()
+    node_cids = before_dag.nodes()
+    # 1) split PATIENTS first (events carry person_id); nothing downstream sees
+    #    the other side. Same deterministic hash as the doc-level split.
+    train_events, test_events = split_train_test(
+        events_df, holdout_frac=holdout_frac, split_salt=split_salt)
+
+    # 2) prune the DAG on TRAIN patient counts only.
+    train_att = doc_attested_nodes(train_events, node_cids, doc_spec=doc_spec).cache()
+    test_att = doc_attested_nodes(test_events, node_cids, doc_spec=doc_spec).cache()
     try:
-        counts = node_patient_counts(attested)
+        counts = node_patient_counts(train_att)
         after_dag = prune_by_attestation(before_dag, counts, min_n)
         parent_int, int2cid, cid2int = after_dag.to_engine()
         lay = DagLayout(parent_int, n_bg=n_bg, tpn=tpn)
         keep = after_dag.nodes()
 
-        fg_sets = [
-            {int(c) for c in r["attested_cids"]}
-            for r in attested.where(F.size("attested_cids") > 0)
-                             .select("attested_cids").collect()
-        ]
-        cohort_frontiers = [most_specific_cids(s, before_dag) for s in fg_sets]
+        # 3) ledger: TRAIN coarsening (as before) + TEST coarsening (new).
+        def _fg_ms(att_df):
+            return [most_specific_cids({int(c) for c in r["attested_cids"]}, before_dag)
+                    for r in att_df.where(F.size("attested_cids") > 0)
+                                   .select("attested_cids").collect()]
+        train_fg = _fg_ms(train_att)
         ledger = pruning_ledger(before_dag, after_dag, counts,
-                                cohort_frontiers=cohort_frontiers)
+                                cohort_frontiers=train_fg)
+        test_fg = _fg_ms(test_att)
+        test_coarsened = sum(1 for ms in test_fg if any(c not in keep for c in ms))
+        ledger["test_fg_docs"] = len(test_fg)
+        ledger["test_coarsening_rate"] = (
+            test_coarsened / len(test_fg) if test_fg else 0.0)
 
-        fr = attach_frontiers(attested, before_dag, keep, cid2int, lay)
+        # 4) frontiers for both sides via the TRAIN DAG (test attestations to
+        #    pruned nodes roll up to nearest surviving ancestor).
+        train_fr = attach_frontiers(train_att, before_dag, keep, cid2int, lay)
+        test_fr = attach_frontiers(test_att, before_dag, keep, cid2int, lay)
 
-        bow_df, vocab_map = to_bow_dataframe(
-            events_df, doc_spec=doc_spec, vocab_size=vocab_size,
+        # 5) vocab fit on TRAIN; frozen for TEST.
+        train_bow, vocab_map = to_bow_dataframe(
+            train_events, doc_spec=doc_spec, vocab_size=vocab_size,
             min_df=min_df, min_patient_count=min_patient_count)
+        vocab_list = [None] * len(vocab_map)
+        for cid, idx in vocab_map.items():
+            vocab_list[idx] = cid
+        test_bow, _ = to_bow_dataframe(test_events, doc_spec=doc_spec, vocab=vocab_list)
 
-        labeled = (
-            bow_df.join(fr.select("doc_id", "frontier", "source_cohort"),
-                        on="doc_id", how="left")
-            .withColumn("frontier",
-                        F.coalesce(F.col("frontier"),
-                                   F.array().cast("array<bigint>")))
-        )
-        train_df, test_df = split_train_test(
-            labeled, holdout_frac=holdout_frac, split_salt=split_salt)
+        def _label(bow, fr):
+            return (bow.join(fr.select("doc_id", "frontier", "source_cohort"),
+                             on="doc_id", how="left")
+                    .withColumn("frontier",
+                                F.coalesce(F.col("frontier"),
+                                           F.array().cast("array<bigint>"))))
+        train_df = _label(train_bow, train_fr)
+        test_df = _label(test_bow, test_fr)
 
+        # 6) leakage strip (test_only): drop DAG-node type codes from TEST features.
         drop_idxs = {vocab_map[c] for c in before_dag.nodes() if c in vocab_map}
         test_df = strip_test_features(test_df, drop_idxs)
 
@@ -281,7 +309,7 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
             int2cid=int2cid, cid2int=cid2int, vocab_map=vocab_map,
             name_by_id=dict(before_dag.names), ledger=ledger)
     finally:
-        attested.unpersist()
+        train_att.unpersist(); test_att.unpersist()
 
 
 def _condition_dag_from_frames(concept_df, ca_df, anchor):
