@@ -277,3 +277,92 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
             name_by_id=dict(before_dag.names), ledger=ledger)
     finally:
         attested.unpersist()
+
+
+def _condition_dag_from_frames(concept_df, ca_df, anchor):
+    """Build the concept-id ConditionDag from `concept` + `concept_ancestor`
+    frames. Nodes = standard-condition (standard_concept='S', domain_id=
+    'Condition') descendants of `anchor` (+ the anchor); edges = min-sep-1
+    concept_ancestor pairs among the nodes (the node membership is pushed into the
+    edge scan so only ~DAG-size rows collect, not the full concept_ancestor
+    table); names from `concept`. Delegates assembly to piece-1
+    build_condition_dag."""
+    from pyspark.sql import functions as F
+    from charmpheno.omop.condition_dag import build_condition_dag
+
+    desc = (
+        ca_df.where(F.col("ancestor_concept_id") == anchor)
+             .select(F.col("descendant_concept_id").alias("concept_id"))
+    )
+    std_cond = (
+        concept_df.where((F.col("standard_concept") == "S")
+                         & (F.col("domain_id") == "Condition"))
+                  .select("concept_id", "concept_name")
+    )
+    node_rows = desc.join(std_cond, on="concept_id", how="inner").collect()
+    node_ids = [int(r["concept_id"]) for r in node_rows]
+    names = {int(r["concept_id"]): r["concept_name"] for r in node_rows}
+    nodeset = list(set(node_ids) | {anchor})
+
+    edges = [
+        (int(r["ancestor_concept_id"]), int(r["descendant_concept_id"]))
+        for r in ca_df.where(F.col("min_levels_of_separation") == 1)
+                      .where(F.col("ancestor_concept_id").isin(nodeset))
+                      .where(F.col("descendant_concept_id").isin(nodeset))
+                      .select("ancestor_concept_id", "descendant_concept_id")
+                      .collect()
+    ]
+    anchor_row = (concept_df.where(F.col("concept_id") == anchor)
+                  .select("concept_name").head(1))
+    if anchor_row:
+        names[anchor] = anchor_row[0][0]
+    return build_condition_dag(edges, anchor, node_ids, names)
+
+
+def load_condition_dag(spark, *, anchor, cdr, billing):
+    """Read `concept` + `concept_ancestor` from BigQuery and build the anchor's
+    condition DAG (concept-id space). BQ wrapper around
+    _condition_dag_from_frames."""
+    def _read(table):
+        return (spark.read.format("bigquery")
+                .option("table", f"{cdr}.{table}")
+                .option("parentProject", billing).load())
+
+    concept = _read("concept").select(
+        "concept_id", "concept_name", "standard_concept", "domain_id")
+    ca = _read("concept_ancestor").select(
+        "ancestor_concept_id", "descendant_concept_id", "min_levels_of_separation")
+    return _condition_dag_from_frames(concept, ca, anchor)
+
+
+def assemble_case_finding_corpus(spark, *, anchor=201820, cdr, billing,
+                                 source_table="condition_era", person_mod,
+                                 min_n, holdout_frac=0.2, split_salt=_SPLIT_SALT,
+                                 vocab_size, min_df, min_patient_count,
+                                 n_bg=2, tpn=1, doc_min_length=0,
+                                 prior_obs_days=365, window_days=365):
+    """End-to-end BQ assembly: load OMOP (person_mod sample), apply the
+    diabetes+background cohort (one 365-day window per patient), load the anchor
+    DAG, and assemble the bundle. Thin wrapper over assemble_from_events; the
+    per-doc unit is PatientCohortDocSpec (doc_id = source_cohort:person_id) so each
+    patient's single window is exactly one document (see the plan's design
+    correction). Requires a live CDR; unit tests cover assemble_from_events and
+    _condition_dag_from_frames directly."""
+    from charmpheno.omop import load_omop_bigquery
+    from charmpheno.omop.cohorts import apply_population_disease_cohort
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+
+    omop = load_omop_bigquery(
+        spark=spark, cdr_dataset=cdr, billing_project=billing,
+        person_sample_mod=person_mod, source_table=source_table)
+    date_col = "condition_era_start_date"
+    events = apply_population_disease_cohort(
+        omop, disease="diabetes", window_days=window_days,
+        spark=spark, cdr_dataset=cdr, billing_project=billing,
+        date_col=date_col, prior_obs_days=prior_obs_days)
+    before_dag = load_condition_dag(spark, anchor=anchor, cdr=cdr, billing=billing)
+    doc_spec = PatientCohortDocSpec(min_doc_length=doc_min_length)
+    return assemble_from_events(
+        events, before_dag, doc_spec=doc_spec, min_n=min_n,
+        holdout_frac=holdout_frac, split_salt=split_salt, vocab_size=vocab_size,
+        min_df=min_df, min_patient_count=min_patient_count, n_bg=n_bg, tpn=tpn)

@@ -298,3 +298,44 @@ def test_assemble_from_events_end_to_end(spark):
                 if r["doc_id"].startswith("diabetes:")]
     assert train_fg
     assert any(node200_idx in set(r["features"].indices.tolist()) for r in train_fg)
+
+
+def test_condition_dag_from_frames_builds_taxonomy_from_omop_frames(spark):
+    from charmpheno.omop.case_finding_assembly import _condition_dag_from_frames
+    # concept: anchor 100 + standard conditions 200,300,400; 999 non-standard,
+    # 555 wrong-domain -> excluded as nodes.
+    concept = spark.createDataFrame(
+        [
+            (100, "diabetes", "S", "Condition"),
+            (200, "T2",       "S", "Condition"),
+            (300, "T1",       "S", "Condition"),
+            (400, "T2-renal", "S", "Condition"),
+            (999, "non-std",  None, "Condition"),   # not standard
+            (555, "a drug",   "S", "Drug"),          # wrong domain
+        ],
+        ["concept_id", "concept_name", "standard_concept", "domain_id"],
+    )
+    # concept_ancestor: descendants of 100 + min-sep-1 edges. Include a sep-2 row
+    # (100->400) that must NOT become a direct edge.
+    ca = spark.createDataFrame(
+        [
+            (100, 200, 1), (100, 300, 1), (100, 400, 2),
+            (200, 400, 1),
+            (100, 999, 1), (100, 555, 1),   # candidates filtered out by concept join
+        ],
+        ["ancestor_concept_id", "descendant_concept_id", "min_levels_of_separation"],
+    )
+    dag = _condition_dag_from_frames(concept, ca, anchor=100)
+    assert dag.nodes() == {100, 200, 300, 400}
+    assert dag.parents[400] == [200]            # sep-1 edge only, not 100->400
+    assert set(dag.parents[200]) == {100}
+    assert dag.names[200] == "T2"
+
+
+def test_assemble_case_finding_corpus_importable_signature():
+    import inspect
+    from charmpheno.omop.case_finding_assembly import assemble_case_finding_corpus
+    p = inspect.signature(assemble_case_finding_corpus).parameters
+    assert {"anchor", "cdr", "billing", "person_mod", "min_n", "vocab_size",
+            "holdout_frac", "n_bg", "tpn"} <= set(p)
+    assert p["anchor"].default == 201820
