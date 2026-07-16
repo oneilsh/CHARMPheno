@@ -15,6 +15,7 @@ tpn: 5
 print_topics_every: 10
 holdout_frac: 0.2
 init: spectral
+spectral_max_vocab: 12000
 strip_mode: test_only
 max_iter: 100
 seed: 42
@@ -71,6 +72,14 @@ one of the six gets a set-valued (multi-disease) frontier.
   2013), which won every placement metric over random init on the diabetes arms.
   `strip_mode: test_only` (the default) — the leakage strip removes DAG-node
   type codes from held-out documents only.
+- `spectral_max_vocab: 12000` — raises the gated shim's dense-spectral guard
+  above the shared `vocab_size: 10000`. The gated engine currently has only the
+  DENSE block-aligned init (a V×V driver co-occurrence, ~800 MB at V=10000);
+  its default cap is a conservative 8000. STM ran dense spectral at this same
+  V=10000 (exp 0030), so the driver handles it. The scalable projected init
+  (which sidesteps the V×V matrix) exists in spark_vi but is not yet wired into
+  the gated shim; building it is the clean fix for larger vocabularies. If the
+  driver OOMs on the co-occurrence, fall back to `init: random`.
 
 K is emergent (`n_bg` + surviving-DAG-nodes × `tpn`), so there is no `K` field.
 
