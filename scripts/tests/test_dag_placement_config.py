@@ -64,12 +64,24 @@ def test_dag_placement_batch_is_asymmetric_alpha(monkeypatch):
         assert args[args.index("--node-alpha-scale") + 1] == "0.1"
 
 
-def test_rare6_symmetric_arm_parses_and_emits_scale_one(monkeypatch):
-    # exp 0056 = the symmetric-alpha rare6 baseline (A/B against 0055's 0.1).
+def test_rare6_alpha_by_strip_2x2_grid(monkeypatch):
+    # The rare6 2x2: strip_mode (test_only|both) x node_alpha_scale (0.1|1.0).
+    #   0055 asym/test_only  0056 sym/test_only
+    #   0057 asym/both       0058 sym/both
     mod = importlib.import_module("run_experiment")
     monkeypatch.setattr(mod, "_require_workspace_env", lambda: ("p.d", "bill"))
-    eff = _load_effective(mod, "docs/experiments/0056-dag-placement-rare6-symmetric.md")
-    assert eff["disease"] == "rare6" and eff["node_alpha_scale"] == 1.0
-    mod.validate_frontmatter(eff)
-    args = mod.build_dag_placement_args(eff, "/out")
-    assert args[args.index("--node-alpha-scale") + 1] == "1.0"
+    grid = {
+        "0055-dag-placement-rare6-forest": (0.1, "test_only"),
+        "0056-dag-placement-rare6-symmetric": (1.0, "test_only"),
+        "0057-dag-placement-rare6-asym-stripboth": (0.1, "both"),
+        "0058-dag-placement-rare6-sym-stripboth": (1.0, "both"),
+    }
+    for slug, (scale, strip) in grid.items():
+        eff = _load_effective(mod, f"docs/experiments/{slug}.md")
+        assert eff["disease"] == "rare6"
+        assert eff["node_alpha_scale"] == scale
+        assert eff["strip_mode"] == strip
+        mod.validate_frontmatter(eff)
+        args = mod.build_dag_placement_args(eff, "/out")
+        assert args[args.index("--node-alpha-scale") + 1] == str(scale)
+        assert args[args.index("--strip-mode") + 1] == strip
