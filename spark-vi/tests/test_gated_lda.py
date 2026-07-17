@@ -211,3 +211,19 @@ def test_svi_matches_gibbs_placement_multi_parent():
     max_depth = max(lay.depth(u) for u in lay.nodes)
     assert ev_s["auc_by_depth"][max_depth] >= ev_g["auc_by_depth"][max_depth] - 0.08
     assert ev_s["mrr"] >= ev_g["mrr"] - 0.08
+
+
+def test_initialize_global_uses_precomputed_spectral_lambda():
+    # When data_summary carries a precomputed (K,V) 'spectral_lambda', the model
+    # seeds lambda from it directly (the scalable path) instead of running a
+    # dense INIT_STRATEGIES strategy.
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+
+    lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)      # K = 4
+    V = 6
+    m = GatedOnlineLDA(lay, V, init="spectral")
+    planted = np.arange(lay.K * V, dtype=np.float64).reshape(lay.K, V) + 1.0
+    gp = m.initialize_global({"spectral_lambda": planted})
+    assert np.allclose(gp["lambda"], planted)

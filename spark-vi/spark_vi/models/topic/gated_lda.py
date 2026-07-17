@@ -67,7 +67,13 @@ class GatedOnlineLDA(OnlineLDA):
                 f"known: {['random'] + sorted(INIT_STRATEGIES)}"
             )
         gp = super().initialize_global(data_summary)
-        gp["lambda"] = INIT_STRATEGIES[self.init](data_summary, self.lay, self.V)
+        # Scalable path: the shim precomputed the (K,V) lambda on the RDD and
+        # handed it over via data_summary (mirrors the STM shim's spectral_beta);
+        # use it directly. Dense path: run the collect-to-driver strategy.
+        if data_summary is not None and "spectral_lambda" in data_summary:
+            gp["lambda"] = np.asarray(data_summary["spectral_lambda"], dtype=np.float64)
+        else:
+            gp["lambda"] = INIT_STRATEGIES[self.init](data_summary, self.lay, self.V)
         return gp
 
     def local_update(
