@@ -62,3 +62,14 @@ def test_dag_placement_batch_is_asymmetric_alpha(monkeypatch):
         mod.validate_frontmatter(eff)
         args = mod.build_dag_placement_args(eff, "/out")
         assert args[args.index("--node-alpha-scale") + 1] == "0.1"
+
+
+def test_rare6_symmetric_arm_parses_and_emits_scale_one(monkeypatch):
+    # exp 0056 = the symmetric-alpha rare6 baseline (A/B against 0055's 0.1).
+    mod = importlib.import_module("run_experiment")
+    monkeypatch.setattr(mod, "_require_workspace_env", lambda: ("p.d", "bill"))
+    eff = _load_effective(mod, "docs/experiments/0056-dag-placement-rare6-symmetric.md")
+    assert eff["disease"] == "rare6" and eff["node_alpha_scale"] == 1.0
+    mod.validate_frontmatter(eff)
+    args = mod.build_dag_placement_args(eff, "/out")
+    assert args[args.index("--node-alpha-scale") + 1] == "1.0"
