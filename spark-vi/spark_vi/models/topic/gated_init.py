@@ -149,7 +149,15 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
     Returns a (K, V) λ = block-aligned β * scale, the same contract as the dense
     function (a drop-in seed). Numerically identical to the single-pass
     all-groups accumulation — same doc set and same per-word sketch rows per
-    node, just materialized one node at a time."""
+    node, just materialized one node at a time (`filter` preserves partition
+    membership and order, so the float32 accumulation is identical, not merely
+    equivalent; a future repartition of `group_rdd` would break that).
+
+    COST: this issues `n_nodes + 1` sequential passes, each a full scan of the
+    cached corpus — fine for tens of nodes, but O(n_nodes) passes is slow for
+    hundreds. The bounded-memory batching variant (recover B node slabs per pass
+    via a non-empty `_NodeGroups(batch)`, batched within a depth level so no node
+    shares a batch with an ancestor) is the follow-up for large DAGs."""
     from pyspark import StorageLevel
     from spark_vi.models.topic.spectral_init_scalable import (
         projected_cooccurrence_rdd, find_anchors_projected,
