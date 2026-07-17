@@ -151,6 +151,15 @@ def parse_args(argv=None):
                         "down-weights disease-node topics (asymmetric prior).")
     # SVI
     p.add_argument("--max-iter", type=int, default=100)
+    p.add_argument("--mini-batch-fraction", type=float, default=0.0,
+                   help="SVI mini-batch fraction in (0,1]; 0 = full-batch. "
+                        "Mini-batching makes the decaying step size legitimate.")
+    p.add_argument("--learning-rate-tau0", type=float, default=1.0,
+                   help="SVI step-size delay tau0 in rho=(tau0+t+1)^-kappa; larger "
+                        "= gentler slow start (less aggressive early steps).")
+    p.add_argument("--learning-rate-kappa", type=float, default=0.7,
+                   help="SVI step-size decay exponent kappa in (0.5,1]; larger "
+                        "decays faster.")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--cavi-max-iter", type=int, default=100)
     p.add_argument("--cavi-tol", type=float, default=1e-3)
@@ -199,7 +208,10 @@ def main() -> int:
                 maxIter=args.max_iter, seed=args.seed,
                 caviMaxIter=args.cavi_max_iter, caviTol=args.cavi_tol,
                 init=args.init, spectralMaxVocab=args.spectral_max_vocab,
-                nodeAlphaScale=args.node_alpha_scale)
+                nodeAlphaScale=args.node_alpha_scale,
+                miniBatchFraction=args.mini_batch_fraction,
+                learningRateTau0=args.learning_rate_tau0,
+                learningRateKappa=args.learning_rate_kappa)
             if args.print_topics_every > 0:
                 vocab_names = _vocab_concept_names(
                     spark, args.cdr, args.billing, bundle.vocab_map)
@@ -257,6 +269,9 @@ def main() -> int:
                 "init": args.init, "K": lay.K, "n_bg": args.n_bg, "tpn": args.tpn,
                 "disease": args.disease, "min_n": args.min_n, "strip_mode": args.strip_mode,
                 "node_alpha_scale": args.node_alpha_scale,
+                "mini_batch_fraction": args.mini_batch_fraction,
+                "learning_rate_tau0": args.learning_rate_tau0,
+                "learning_rate_kappa": args.learning_rate_kappa,
                 "max_iter": args.max_iter, "metrics": metrics, "ledger": bundle.ledger,
                 "corpus_stats": corpus_stats,
                 "corpus_manifest": {

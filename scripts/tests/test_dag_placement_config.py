@@ -64,6 +64,23 @@ def test_dag_placement_batch_is_asymmetric_alpha(monkeypatch):
         assert args[args.index("--node-alpha-scale") + 1] == "0.1"
 
 
+def test_dag_placement_svi_schedule_defaults(monkeypatch):
+    # _base sets mini-batch SVI (0.1) + a gentler slow-start (tau0 10, kappa 0.7)
+    # + max_iter 200; all dag_placement exps inherit it and emit the CLI flags.
+    mod = importlib.import_module("run_experiment")
+    monkeypatch.setattr(mod, "_require_workspace_env", lambda: ("p.d", "bill"))
+    eff = _load_effective(mod, "docs/experiments/0055-dag-placement-rare6-forest.md")
+    assert eff["mini_batch_fraction"] == 0.1
+    assert eff["learning_rate_tau0"] == 10.0
+    assert eff["learning_rate_kappa"] == 0.7
+    assert eff["max_iter"] == 200
+    args = mod.build_dag_placement_args(eff, "/out")
+    assert args[args.index("--mini-batch-fraction") + 1] == "0.1"
+    assert args[args.index("--learning-rate-tau0") + 1] == "10.0"
+    assert args[args.index("--learning-rate-kappa") + 1] == "0.7"
+    assert args[args.index("--max-iter") + 1] == "200"
+
+
 def test_rare6_alpha_by_strip_2x2_grid(monkeypatch):
     # The rare6 2x2: strip_mode (test_only|both) x node_alpha_scale (0.1|1.0).
     #   0055 asym/test_only  0056 sym/test_only

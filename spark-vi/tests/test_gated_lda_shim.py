@@ -64,6 +64,37 @@ def test_gated_shim_node_alpha_scale_builds_asymmetric_alpha(spark):
     assert np.allclose(m_sym.result.global_params["alpha"], 1.0 / K)
 
 
+def test_gated_shim_svi_schedule_params_default_and_settable():
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    est = GatedLDAEstimator(parent={1: 0, 2: 0})
+    assert est.getOrDefault("miniBatchFraction") == 0.0    # full-batch default
+    assert est.getOrDefault("learningRateTau0") == 1.0
+    assert est.getOrDefault("learningRateKappa") == 0.7
+    est2 = GatedLDAEstimator(parent={1: 0, 2: 0}, miniBatchFraction=0.1,
+                             learningRateTau0=10.0, learningRateKappa=0.75)
+    assert est2.getOrDefault("miniBatchFraction") == 0.1
+    assert est2.getOrDefault("learningRateTau0") == 10.0
+    assert est2.getOrDefault("learningRateKappa") == 0.75
+
+
+def test_gated_shim_minibatch_fit_smoke(spark):
+    # The mini-batch SVI path (miniBatchFraction in (0,1]) must fit without error
+    # and produce a K-row lambda, exercising VIConfig(mini_batch_fraction=...).
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    parent = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
+    V = 30
+    rng = np.random.default_rng(0)
+    rows = []
+    for _ in range(60):
+        leaf = int(rng.choice([3, 4, 5, 6]))
+        idx = sorted(rng.choice(V, size=6, replace=False).tolist())
+        rows.append((Vectors.sparse(V, idx, [1.0] * len(idx)), [leaf]))
+    df = spark.createDataFrame(rows, ["features", "frontier"])
+    m = GatedLDAEstimator(parent=parent, nBg=2, tpn=1, miniBatchFraction=0.5,
+                          learningRateTau0=10.0, maxIter=3, seed=0).fit(df)
+    assert m.result.global_params["lambda"].shape[0] == 2 + len(parent)   # K rows
+
+
 def test_gated_shim_init_param_defaults_random():
     from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
     est = GatedLDAEstimator(parent={1: 0, 2: 0})

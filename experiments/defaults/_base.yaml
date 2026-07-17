@@ -67,3 +67,15 @@ strip_mode: test_only
 # al. 2009) that down-weights disease-node topics so background docs stay on the
 # background block at ungated transform time.
 node_alpha_scale: 1.0
+# SVI optimizer schedule. mini_batch_fraction 0.1 = sample 10% of the corpus per
+# iteration (mini-batch SVI, Hoffman et al. 2013) — this is what makes the
+# decaying Robbins-Monro step size legitimate; a decaying step over full batches
+# stalls before convergence. learning_rate_tau0 10 (vs the aggressive default 1)
+# is a gentler slow-start: it tames the large early steps (rho_1 0.62 -> 0.19)
+# that noisy early mini-batches would otherwise over-trust. kappa 0.7 = the
+# standard text-corpus decay. NOTE: with mini-batching the per-iteration ELBO is
+# a noisy 10% estimate, so the relative-ELBO early stop is unreliable — max_iter
+# is effectively the budget; size it for enough epochs (max_iter * fraction).
+mini_batch_fraction: 0.1
+learning_rate_tau0: 10.0
+learning_rate_kappa: 0.7

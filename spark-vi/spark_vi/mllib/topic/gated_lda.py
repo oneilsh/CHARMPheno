@@ -53,6 +53,24 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
                            "transform time, keeps background docs on the background "
                            "block.",
                            typeConverter=TypeConverters.toFloat)
+    miniBatchFraction = Param(Params._dummy(), "miniBatchFraction",
+                              "SVI mini-batch fraction in (0, 1]; each iteration "
+                              "samples this fraction of the corpus. 0.0 = full-batch "
+                              "(default). Mini-batching is what makes the decaying "
+                              "Robbins-Monro step size appropriate (Hoffman et al. 2013).",
+                              typeConverter=TypeConverters.toFloat)
+    learningRateTau0 = Param(Params._dummy(), "learningRateTau0",
+                             "SVI step-size delay tau0 in rho_t = (tau0 + t + 1)^-kappa "
+                             "(Hoffman et al. 2013). Larger tau0 down-weights early "
+                             "iterations (a gentler, less aggressive slow start). "
+                             "Default 1.0.",
+                             typeConverter=TypeConverters.toFloat)
+    learningRateKappa = Param(Params._dummy(), "learningRateKappa",
+                              "SVI step-size decay exponent kappa in rho_t = "
+                              "(tau0 + t + 1)^-kappa. Robbins-Monro convergence holds "
+                              "for kappa in (0.5, 1]; larger kappa decays faster. "
+                              "Default 0.7.",
+                              typeConverter=TypeConverters.toFloat)
     init = Param(Params._dummy(), "init",
                  "lambda init strategy: 'random' (default) or 'spectral' "
                  "(dense block-aligned anchor-word seed, Arora et al. 2013)",
@@ -75,12 +93,15 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
     def __init__(self, *, featuresCol="features", labelCol="frontier", parent=None,
                  nBg=2, tpn=1, maxIter=20, seed=None, caviMaxIter=100, caviTol=1e-3,
                  gammaShape=100.0, init="random", spectralMaxVocab=8000,
-                 nodeAlphaScale=1.0):
+                 nodeAlphaScale=1.0, miniBatchFraction=0.0,
+                 learningRateTau0=1.0, learningRateKappa=0.7):
         super().__init__()
         self._setDefault(featuresCol="features", labelCol="frontier", nBg=2, tpn=1,
                          maxIter=20, nodeAffinityCol="nodeAffinity",
                          caviMaxIter=100, caviTol=1e-3, gammaShape=100.0,
-                         init="random", spectralMaxVocab=8000, nodeAlphaScale=1.0)
+                         init="random", spectralMaxVocab=8000, nodeAlphaScale=1.0,
+                         miniBatchFraction=0.0, learningRateTau0=1.0,
+                         learningRateKappa=0.7)
         self.setParams(**self._input_kwargs)
         # Diagnostic-only per-iteration callback (mirrors OnlineLDAEstimator).
         # Stored as an instance attribute, not a Param — callables aren't
@@ -155,7 +176,17 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
             cavi_tol=self.getOrDefault("caviTol"),
             random_seed=seed,
         )
-        config = VIConfig(max_iterations=self.getOrDefault("maxIter"), random_seed=seed)
+        # SVI schedule: mini_batch_fraction 0.0 (the shim default) -> None ==
+        # full-batch (every iteration sees the whole corpus). A value in (0, 1]
+        # switches to mini-batch SVI, which is what makes the decaying step size
+        # legitimate (a decaying rho over full batches stalls — VIConfig docs).
+        mbf = float(self.getOrDefault("miniBatchFraction"))
+        config = VIConfig(
+            max_iterations=self.getOrDefault("maxIter"), random_seed=seed,
+            mini_batch_fraction=(mbf if mbf and mbf > 0.0 else None),
+            learning_rate_tau0=float(self.getOrDefault("learningRateTau0")),
+            learning_rate_kappa=float(self.getOrDefault("learningRateKappa")),
+        )
 
         def _to_gated(row):
             bow = _vector_to_bow_document(row[0])

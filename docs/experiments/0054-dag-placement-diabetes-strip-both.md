@@ -16,7 +16,7 @@ holdout_frac: 0.2
 init: spectral
 node_alpha_scale: 0.1
 strip_mode: both
-max_iter: 100
+max_iter: 200
 seed: 42
 cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
 ---
