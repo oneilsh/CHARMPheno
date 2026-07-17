@@ -125,16 +125,32 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                                   scale: float = 200.0) -> np.ndarray:
     """Distributed random-projection analogue of `spectral_block_aligned_lambda`.
 
-    `rdd` is an RDD of GatedBOWDocument. Runs ONE distributed projected-
-    co-occurrence pass (never a driver V×V matrix, ADR 0032) with each doc's
-    groups = closure(frontier) minus root 0, so `group_QR[u]` is the projected
-    image of the dense per-node co-occurrence Q_u. Then a driver-side FORWARD-
-    TOPOLOGICAL loop (ancestors first by lay.depth) recovers each node's block by
-    anchor-word spectral recovery (Arora et al. 2013) deflated against background
-    + already-recovered proper-ancestor anchors, exactly as the dense path — the
-    projection preserves the residual-norm geometry the greedy anchor search
-    needs (Johnson–Lindenstrauss). Returns a (K, V) λ = block-aligned β * scale,
-    the same contract as the dense function (a drop-in seed)."""
+    `rdd` is an RDD of GatedBOWDocument. Never forms a driver V×V matrix (ADR
+    0032). Runs a STREAMING sequence of projected co-occurrence passes so the
+    driver holds only ONE (V, d) sketch at a time — O(V·d) driver memory,
+    INDEPENDENT of the node count. (Accumulating every node's sketch in a single
+    pass instead costs O(n_nodes·V·d) on the driver, which overflows
+    spark.driver.maxResultSize once the DAG has more than a handful of nodes.)
+
+    A doc trains node u iff u is in its frontier closure (root 0 dropped), so the
+    per-node co-occurrence Q_u equals the POOLED sketch of the sub-RDD filtered to
+    those docs — this is what lets each node use its own one-slab pass:
+
+    Step 1 (background): pooled sketch over ALL docs (one pass) → n_bg anchors →
+    background block.
+    Step 2 (each node u, ancestors-first by lay.depth): pooled sketch over the
+    sub-RDD of docs training u (one pass = Q_u's sketch); find tpn anchors on it
+    deflated against background + u's already-recovered proper-ancestor anchors
+    (seed_rows), recover the combined anchors, keep the trailing foreground rows
+    into u's block. Anchor-word spectral recovery (Arora et al. 2013); the random
+    projection preserves the residual-norm geometry the greedy anchor search needs
+    (Johnson–Lindenstrauss).
+
+    Returns a (K, V) λ = block-aligned β * scale, the same contract as the dense
+    function (a drop-in seed). Numerically identical to the single-pass
+    all-groups accumulation — same doc set and same per-word sketch rows per
+    node, just materialized one node at a time."""
+    from pyspark import StorageLevel
     from spark_vi.models.topic.spectral_init_scalable import (
         projected_cooccurrence_rdd, find_anchors_projected,
         recover_beta_projected, default_projection_dim,
@@ -151,46 +167,56 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
             for u in L.closure(f):
                 if u != 0:
                     groups.add(u)
-        return _GroupDoc(doc.indices, doc.counts, tuple(groups))
+        # frozenset so each node's `_u in gd.groups` filter is O(1); computed once
+        # here and cached so the per-node passes never recompute closures.
+        return _GroupDoc(doc.indices, doc.counts, frozenset(groups))
 
-    res = projected_cooccurrence_rdd(
-        rdd.map(_to_group), _NodeGroups(tuple(lay.nodes)), V, d, seed
-    )
+    group_rdd = rdd.map(_to_group).persist(StorageLevel.MEMORY_AND_DISK)
+    no_groups = _NodeGroups(())          # pooled-only passes (no per-group slabs)
+    try:
+        group_rdd.count()                # materialize the cache once
 
-    beta = np.zeros((lay.K, V), dtype=np.float64)
+        beta = np.zeros((lay.K, V), dtype=np.float64)
 
-    # Step 1: background block on the pooled sketch.
-    bg_anchors = find_anchors_projected(
-        res.pooled_QR, res.p_w, res.df_w, lay.n_bg, min_doc_freq=min_doc_freq)
-    bg_beta = recover_beta_projected(res.pooled_QR, res.p_w, bg_anchors)
-    for i in range(min(lay.n_bg, bg_beta.shape[0])):
-        beta[i] = bg_beta[i]
+        # Step 1: background block on the pooled sketch over ALL docs.
+        pooled = projected_cooccurrence_rdd(group_rdd, no_groups, V, d, seed)
+        bg_anchors = find_anchors_projected(
+            pooled.pooled_QR, pooled.p_w, pooled.df_w, lay.n_bg,
+            min_doc_freq=min_doc_freq)
+        bg_beta = recover_beta_projected(pooled.pooled_QR, pooled.p_w, bg_anchors)
+        for i in range(min(lay.n_bg, bg_beta.shape[0])):
+            beta[i] = bg_beta[i]
 
-    # Step 2: each node, ancestors first, deflated vs bg + ancestor anchors.
-    node_anchors: dict[int, list] = {}
-    for u in sorted(lay.nodes, key=lambda x: (lay.depth(x), x)):
-        if int(res.group_df_w[u].sum()) == 0:
-            logger.warning(
-                "scalable_block_aligned_lambda: node %s has zero training docs; "
-                "its block stays at the 1e-9 floor (uninitialized).", u)
-            continue
-        anc = [a for a in lay.closure(u) if a not in (u, 0)]
-        seed_rows = list(bg_anchors) + [a for p in anc for a in node_anchors.get(p, [])]
-        fg_anchors = find_anchors_projected(
-            res.group_QR[u], res.group_p_w[u], res.group_df_w[u], lay.tpn,
-            seed_rows=seed_rows, min_doc_freq=min_doc_freq)
-        if not fg_anchors:
-            logger.warning(
-                "scalable_block_aligned_lambda: node %s found no anchors "
-                "(sparse/degenerate sketch); its block stays at the 1e-9 floor.", u)
-            continue
-        node_anchors[u] = list(fg_anchors)
-        combined_beta = recover_beta_projected(
-            res.group_QR[u], res.group_p_w[u], list(seed_rows) + list(fg_anchors))
-        fg_beta = combined_beta[len(seed_rows):]
-        for j, idx in enumerate(lay.block[u]):
-            if j < fg_beta.shape[0]:
-                beta[idx] = fg_beta[j]
+        # Step 2: each node, ancestors first, its OWN filtered one-slab pass.
+        node_anchors: dict[int, list] = {}
+        for u in sorted(lay.nodes, key=lambda x: (lay.depth(x), x)):
+            rdd_u = group_rdd.filter(lambda gd, _u=u: _u in gd.groups)
+            res_u = projected_cooccurrence_rdd(rdd_u, no_groups, V, d, seed)
+            if int(res_u.df_w.sum()) == 0:
+                logger.warning(
+                    "scalable_block_aligned_lambda: node %s has zero training "
+                    "docs; its block stays at the 1e-9 floor (uninitialized).", u)
+                continue
+            anc = [a for a in lay.closure(u) if a not in (u, 0)]
+            seed_rows = list(bg_anchors) + [a for p in anc
+                                            for a in node_anchors.get(p, [])]
+            fg_anchors = find_anchors_projected(
+                res_u.pooled_QR, res_u.p_w, res_u.df_w, lay.tpn,
+                seed_rows=seed_rows, min_doc_freq=min_doc_freq)
+            if not fg_anchors:
+                logger.warning(
+                    "scalable_block_aligned_lambda: node %s found no anchors "
+                    "(sparse/degenerate sketch); its block stays at the floor.", u)
+                continue
+            node_anchors[u] = list(fg_anchors)
+            combined_beta = recover_beta_projected(
+                res_u.pooled_QR, res_u.p_w, list(seed_rows) + list(fg_anchors))
+            fg_beta = combined_beta[len(seed_rows):]
+            for j, idx in enumerate(lay.block[u]):
+                if j < fg_beta.shape[0]:
+                    beta[idx] = fg_beta[j]
+    finally:
+        group_rdd.unpersist(blocking=False)
 
     beta = beta + 1e-9                                   # strictly positive λ
     return beta * float(scale)
