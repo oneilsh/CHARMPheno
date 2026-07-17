@@ -14,7 +14,7 @@ n_bg: 40
 tpn: 5
 print_topics_every: 10
 holdout_frac: 0.2
-init: spectral
+init: random
 node_alpha_scale: 0.1
 spectral_max_vocab: 12000
 strip_mode: both

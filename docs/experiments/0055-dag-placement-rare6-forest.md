@@ -14,7 +14,7 @@ n_bg: 40
 tpn: 5
 print_topics_every: 10
 holdout_frac: 0.2
-init: spectral
+init: random
 node_alpha_scale: 0.1
 spectral_max_vocab: 12000
 strip_mode: test_only
@@ -69,18 +69,21 @@ one of the six gets a set-valued (multi-disease) frontier.
   reference (vs 20 in the diabetes arms).
 - `tpn: 5` — five topics per surviving DAG node (matching the diabetes arms for
   comparability; a knob to revisit if per-node topics look redundant).
-- `init: spectral` — the dense block-aligned anchor-word seed (Arora et al.
-  2013), which won every placement metric over random init on the diabetes arms.
-  `strip_mode: test_only` (the default) — the leakage strip removes DAG-node
-  type codes from held-out documents only.
-- `spectral_max_vocab: 12000` — raises the gated shim's dense-spectral guard
-  above the shared `vocab_size: 10000`. The gated engine currently has only the
-  DENSE block-aligned init (a V×V driver co-occurrence, ~800 MB at V=10000);
-  its default cap is a conservative 8000. STM ran dense spectral at this same
-  V=10000 (exp 0030), so the driver handles it. The scalable projected init
-  (which sidesteps the V×V matrix) exists in spark_vi but is not yet wired into
-  the gated shim; building it is the clean fix for larger vocabularies. If the
-  driver OOMs on the co-occurrence, fall back to `init: random`.
+- `init: random` — the validated default (the DAG gate supplies the
+  identifiability the spectral seed was meant to provide). Switched from
+  `spectral` because the DENSE block-aligned spectral init is a driver-side
+  bottleneck at K=180 / V=10000 / person_mod=1: it collects the whole training
+  corpus to the driver and builds ~29 V×V co-occurrence matrices (pooled + one
+  per node), single-threaded — the fit stalled before iteration 1. And the
+  premise no longer holds: post-gating-fix, random ≥ spectral on the diabetes
+  arms (0052 random detection 0.719 ≥ 0053 spectral 0.684), so spectral's earlier
+  "win" was a bug-era artifact. The SCALABLE projected init (distributed
+  co-occurrence, no V×V driver matrix; `spectral_init_scalable.py`) is the clean
+  fix if we later find a spectral-shaped gap that random can't close — it is not
+  yet wired into the gated shim. `strip_mode: test_only` (the default) — the
+  leakage strip removes DAG-node type codes from held-out documents only.
+- `spectral_max_vocab: 12000` — inert while `init: random` (it only guards the
+  dense spectral path); kept so a future spectral run needs no config change.
 
 K is emergent (`n_bg` + surviving-DAG-nodes × `tpn`), so there is no `K` field.
 

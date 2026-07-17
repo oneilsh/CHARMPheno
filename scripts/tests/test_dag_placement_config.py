@@ -37,7 +37,7 @@ def test_rare6_forest_experiment_parses_and_builds(monkeypatch):
     assert eff["model_class"] == "dag_placement"
     assert eff["disease"] == "rare6"
     assert eff["min_n"] == 20 and eff["n_bg"] == 40 and eff["person_mod"] == 1
-    assert eff["init"] == "spectral"
+    assert eff["init"] == "random"                    # dense spectral too slow at K=180/V=10k
     mod.validate_frontmatter(eff)                     # must not exit
     args = mod.build_dag_placement_args(eff, "/out")
     assert args[args.index("--disease") + 1] == "rare6"
