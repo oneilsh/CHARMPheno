@@ -81,6 +81,26 @@ def test_dag_placement_svi_schedule_defaults(monkeypatch):
     assert args[args.index("--max-iter") + 1] == "200"
 
 
+def test_rare6_spectral_init_diagnostic_parses_and_builds(monkeypatch):
+    # exp 0059 = the best 2x2 cell (0058: sym alpha + strip both) with init flipped
+    # random->spectral, to isolate the init axis of the 0.709->0.585 under-training
+    # confound. Same corpus/schedule as 0058; only `init` differs.
+    mod = importlib.import_module("run_experiment")
+    monkeypatch.setattr(mod, "_require_workspace_env", lambda: ("p.d", "bill"))
+    eff = _load_effective(
+        mod, "docs/experiments/0059-dag-placement-rare6-sym-stripboth-spectral.md")
+    assert eff["disease"] == "rare6"
+    assert eff["init"] == "spectral"
+    assert eff["node_alpha_scale"] == 1.0          # symmetric (matches 0058)
+    assert eff["strip_mode"] == "both"             # strip_both (matches 0058)
+    assert eff["spectral_max_vocab"] == 12000      # dense-path guard above V~10000
+    mod.validate_frontmatter(eff)                  # must not exit
+    args = mod.build_dag_placement_args(eff, "/out")
+    assert args[args.index("--init") + 1] == "spectral"
+    assert args[args.index("--strip-mode") + 1] == "both"
+    assert args[args.index("--node-alpha-scale") + 1] == "1.0"
+
+
 def test_rare6_alpha_by_strip_2x2_grid(monkeypatch):
     # The rare6 2x2: strip_mode (test_only|both) x node_alpha_scale (0.1|1.0).
     #   0055 asym/test_only  0056 sym/test_only
