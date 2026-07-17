@@ -145,6 +145,10 @@ def parse_args(argv=None):
     # gating
     p.add_argument("--n-bg", type=int, default=20)
     p.add_argument("--tpn", type=int, default=5)
+    p.add_argument("--node-alpha-scale", type=float, default=1.0,
+                   help="Multiplier on the per-node-topic Dirichlet alpha vs the "
+                        "background alpha (1/K). 1.0 = symmetric (default); <1 "
+                        "down-weights disease-node topics (asymmetric prior).")
     # SVI
     p.add_argument("--max-iter", type=int, default=100)
     p.add_argument("--seed", type=int, default=None)
@@ -194,7 +198,8 @@ def main() -> int:
                 parent=bundle.parent_int, nBg=args.n_bg, tpn=args.tpn,
                 maxIter=args.max_iter, seed=args.seed,
                 caviMaxIter=args.cavi_max_iter, caviTol=args.cavi_tol,
-                init=args.init, spectralMaxVocab=args.spectral_max_vocab)
+                init=args.init, spectralMaxVocab=args.spectral_max_vocab,
+                nodeAlphaScale=args.node_alpha_scale)
             if args.print_topics_every > 0:
                 vocab_names = _vocab_concept_names(
                     spark, args.cdr, args.billing, bundle.vocab_map)
@@ -251,6 +256,7 @@ def main() -> int:
                 "model_class": "dag_placement",
                 "init": args.init, "K": lay.K, "n_bg": args.n_bg, "tpn": args.tpn,
                 "disease": args.disease, "min_n": args.min_n, "strip_mode": args.strip_mode,
+                "node_alpha_scale": args.node_alpha_scale,
                 "max_iter": args.max_iter, "metrics": metrics, "ledger": bundle.ledger,
                 "corpus_stats": corpus_stats,
                 "corpus_manifest": {

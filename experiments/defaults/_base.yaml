@@ -62,3 +62,8 @@ spectral_max_vocab: 8000
 cavi_max_iter: 100
 cavi_tol: 1.0e-3
 strip_mode: test_only
+# node_alpha_scale multiplies the per-node-topic Dirichlet alpha vs the background
+# alpha (1/K). 1.0 = symmetric (default); <1 = block-asymmetric prior (Wallach et
+# al. 2009) that down-weights disease-node topics so background docs stay on the
+# background block at ungated transform time.
+node_alpha_scale: 1.0

@@ -34,6 +34,36 @@ def test_gated_shim_fit_transform_smoke(spark):
     assert len(aff) == n_nodes            # one affinity per DAG node
 
 
+def test_gated_shim_node_alpha_scale_builds_asymmetric_alpha(spark):
+    # nodeAlphaScale<1 must give the per-node blocks a smaller Dirichlet alpha
+    # than the background block: alpha_background = 1/K, alpha_node = scale/K.
+    # alpha is fixed (optimize_alpha disabled), so the fitted vector equals the
+    # constructed one.
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    parent = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
+    V = 30
+    n_bg, tpn = 2, 1
+    K = n_bg + len(parent) * tpn                       # 2 + 6 = 8
+    rng = np.random.default_rng(0)
+    rows = []
+    for _ in range(40):
+        leaf = int(rng.choice([3, 4, 5, 6]))
+        idx = sorted(rng.choice(V, size=6, replace=False).tolist())
+        rows.append((Vectors.sparse(V, idx, [1.0] * len(idx)), [leaf]))
+    df = spark.createDataFrame(rows, ["features", "frontier"])
+
+    m = GatedLDAEstimator(parent=parent, nBg=n_bg, tpn=tpn,
+                          nodeAlphaScale=0.1, maxIter=2, seed=0).fit(df)
+    alpha = m.result.global_params["alpha"]
+    assert alpha.shape == (K,)
+    assert np.allclose(alpha[:n_bg], 1.0 / K)          # background unchanged
+    assert np.allclose(alpha[n_bg:], 0.1 / K)          # node blocks down-weighted
+    # symmetric default is unchanged (regression guard).
+    m_sym = GatedLDAEstimator(parent=parent, nBg=n_bg, tpn=tpn,
+                              maxIter=2, seed=0).fit(df)
+    assert np.allclose(m_sym.result.global_params["alpha"], 1.0 / K)
+
+
 def test_gated_shim_init_param_defaults_random():
     from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
     est = GatedLDAEstimator(parent={1: 0, 2: 0})

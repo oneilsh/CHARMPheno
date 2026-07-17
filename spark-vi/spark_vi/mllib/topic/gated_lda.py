@@ -43,6 +43,16 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
                     typeConverter=TypeConverters.toFloat)
     gammaShape = Param(Params._dummy(), "gammaShape", "Gamma init shape for gamma/lambda",
                        typeConverter=TypeConverters.toFloat)
+    nodeAlphaScale = Param(Params._dummy(), "nodeAlphaScale",
+                           "multiplier on the per-node-topic Dirichlet alpha "
+                           "relative to the background alpha (1/K); 1.0 = symmetric "
+                           "(default). <1 down-weights the node blocks so a document "
+                           "needs stronger evidence to place mass on a disease node — "
+                           "an asymmetric prior (Wallach et al. 2009) that reflects "
+                           "the low prevalence of any single node and, at ungated "
+                           "transform time, keeps background docs on the background "
+                           "block.",
+                           typeConverter=TypeConverters.toFloat)
     init = Param(Params._dummy(), "init",
                  "lambda init strategy: 'random' (default) or 'spectral' "
                  "(dense block-aligned anchor-word seed, Arora et al. 2013)",
@@ -64,12 +74,13 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
     @keyword_only
     def __init__(self, *, featuresCol="features", labelCol="frontier", parent=None,
                  nBg=2, tpn=1, maxIter=20, seed=None, caviMaxIter=100, caviTol=1e-3,
-                 gammaShape=100.0, init="random", spectralMaxVocab=8000):
+                 gammaShape=100.0, init="random", spectralMaxVocab=8000,
+                 nodeAlphaScale=1.0):
         super().__init__()
         self._setDefault(featuresCol="features", labelCol="frontier", nBg=2, tpn=1,
                          maxIter=20, nodeAffinityCol="nodeAffinity",
                          caviMaxIter=100, caviTol=1e-3, gammaShape=100.0,
-                         init="random", spectralMaxVocab=8000)
+                         init="random", spectralMaxVocab=8000, nodeAlphaScale=1.0)
         self.setParams(**self._input_kwargs)
         # Diagnostic-only per-iteration callback (mirrors OnlineLDAEstimator).
         # Stored as an instance attribute, not a Param — callables aren't
@@ -126,9 +137,19 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                 "Use init='random' or reduce vocab_size."
             )
 
+        # Dirichlet alpha over the K topics. Symmetric 1/K by default; when
+        # nodeAlphaScale != 1, the per-node blocks (contiguous topics
+        # [n_bg, K), background is [0, n_bg)) are scaled to make them a priori
+        # rarer — a block-asymmetric prior (Wallach et al. 2009). OnlineLDA
+        # accepts a length-K alpha vector; alpha is fixed (optimize_alpha is
+        # disabled for the gated engine), so this vector holds through the fit
+        # and into transform.
+        node_alpha_scale = float(self.getOrDefault("nodeAlphaScale"))
+        alpha_vec = np.full(lay.K, 1.0 / lay.K, dtype=np.float64)
+        alpha_vec[lay.n_bg:] *= node_alpha_scale
         model_obj = GatedOnlineLDA(
             lay, V, init=init,
-            alpha=1.0 / lay.K, eta=1.0 / lay.K,
+            alpha=alpha_vec, eta=1.0 / lay.K,
             gamma_shape=self.getOrDefault("gammaShape"),
             cavi_max_iter=self.getOrDefault("caviMaxIter"),
             cavi_tol=self.getOrDefault("caviTol"),

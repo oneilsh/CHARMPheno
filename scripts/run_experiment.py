@@ -686,6 +686,7 @@ def build_dag_placement_args(
         "--holdout-frac", str(effective.get("holdout_frac", 0.2)),
         "--n-bg", str(effective["n_bg"]),
         "--tpn", str(effective["tpn"]),
+        "--node-alpha-scale", str(effective.get("node_alpha_scale", 1.0)),
         "--max-iter", str(effective["max_iter"]),
         "--cavi-max-iter", str(effective.get("cavi_max_iter", 100)),
         "--cavi-tol", str(effective.get("cavi_tol", 1e-3)),
