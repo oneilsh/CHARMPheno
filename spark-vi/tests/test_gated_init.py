@@ -134,3 +134,45 @@ def test_scalable_block_aligned_lambda_zero_doc_node_stays_at_floor(spark):
     assert not np.isnan(lam).any()
     scale = 200.0
     assert np.allclose(lam[lay.block[2][0]], 1e-9 * scale)   # untouched floor
+
+
+def test_scalable_block_aligned_lambda_multi_ancestor_diamond(spark):
+    # Diamond DAG {1:0, 2:0, 3:[1,2]}: node 3 has TWO proper ancestors, so its seed
+    # concatenates BOTH parents' anchors ([a for p in anc for a in node_anchors[p]]).
+    # This exercises the multi-parent deflation path (single-parent tests only put one
+    # ancestor in the seed). Node 3's block must be recovered off the floor, emphasize
+    # its OWN tokens, and differ from both parent blocks (deflated against both).
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.types import GatedBOWDocument
+    from spark_vi.models.topic.gated_init import scalable_block_aligned_lambda
+
+    lay = DagLayout({1: 0, 2: 0, 3: [1, 2]}, n_bg=2, tpn=1)   # K = 2 + 3*1 = 5
+    V = 12
+
+    def doc(idx, frontier):
+        idx = sorted(idx)
+        return GatedBOWDocument(indices=np.asarray(idx, dtype=np.int32),
+                                counts=np.ones(len(idx), dtype=np.float64),
+                                length=len(idx), frontier=frozenset(frontier))
+
+    rows = []
+    for _ in range(30):
+        rows.append(doc([10, 11, 0, 1], []))         # background-only (tokens 10,11)
+        rows.append(doc([0, 1, 10], [1]))            # node 1: own tokens 0,1
+        rows.append(doc([2, 3, 10], [2]))            # node 2: own tokens 2,3
+        rows.append(doc([4, 5, 0, 2, 10], [3]))      # node 3: own tokens 4,5 (+ inherits 0,2)
+    rdd = spark.sparkContext.parallelize(rows, 3)
+
+    lam = scalable_block_aligned_lambda(rdd, lay, V, seed=0, min_doc_freq=1)
+    assert lam.shape == (lay.K, V)
+    assert not np.isnan(lam).any()
+    b1, b2, b3 = lam[lay.block[1][0]], lam[lay.block[2][0]], lam[lay.block[3][0]]
+    scale = 200.0
+    assert not np.allclose(b3, 1e-9 * scale)                 # node 3 recovered, not floor
+    # node 3 emphasizes its own tokens 4/5 more than either parent block does
+    assert b3[4] + b3[5] > b1[4] + b1[5]
+    assert b3[4] + b3[5] > b2[4] + b2[5]
+    # deflated against BOTH ancestors -> distinct from both parent blocks
+    assert not np.allclose(b3, b1)
+    assert not np.allclose(b3, b2)
