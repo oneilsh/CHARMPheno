@@ -176,3 +176,75 @@ def test_scalable_block_aligned_lambda_multi_ancestor_diamond(spark):
     # deflated against BOTH ancestors -> distinct from both parent blocks
     assert not np.allclose(b3, b1)
     assert not np.allclose(b3, b2)
+
+
+def test_anchor_scope_rejects_unknown():
+    import numpy as np
+    import pytest
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_init import spectral_block_aligned_lambda
+    lay = DagLayout({1: 0}, n_bg=1, tpn=1)
+    ds = {"train_docs": [np.array([0, 1])], "train_labels": [frozenset()]}
+    with pytest.raises(ValueError, match="anchor_scope"):
+        spectral_block_aligned_lambda(ds, lay, 4, anchor_scope="bogus")
+
+
+def test_frontier_scope_keeps_foreground_tokens_out_of_background_dense():
+    # Background docs use tokens {0,1,2}; node-1 docs use foreground-only tokens
+    # {5,6} (never in a background doc). Under anchor_scope="frontier" the
+    # background sketch is built ONLY from empty-frontier docs, so 5/6 cannot
+    # become background anchors -> the background block sits at the floor on them,
+    # while node 1's block carries them. This is the anchor-stealing the option
+    # prevents (background can't grab a rare node's defining word).
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_init import spectral_block_aligned_lambda
+
+    V = 8
+    lay = DagLayout({1: 0}, n_bg=1, tpn=1)                     # K = 2
+    train_docs, train_labels = [], []
+    for _ in range(30):
+        train_docs.append(np.array([0, 0, 1, 1, 2]))          # background
+        train_labels.append(frozenset())
+        train_docs.append(np.array([5, 5, 6, 6, 0]))          # node 1: 5,6 fg-only
+        train_labels.append(frozenset({1}))
+    ds = {"train_docs": train_docs, "train_labels": train_labels}
+
+    floor = 1e-9 * 200.0
+    lam = spectral_block_aligned_lambda(ds, lay, V, anchor_scope="frontier")
+    bg = lam[0]                                               # n_bg=1 -> block 0
+    node = lam[lay.block[1][0]]
+    assert bg[5] <= floor * 10 and bg[6] <= floor * 10       # bg never saw 5/6
+    assert node[5] + node[6] > bg[5] + bg[6]                 # node 1 carries them
+    assert node[5] + node[6] > 0.01
+
+
+def test_scalable_frontier_scope_keeps_foreground_out_of_background(spark):
+    # The distributed path honors anchor_scope="frontier" the same way: a
+    # foreground-only token stays at the floor in the background block.
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.types import GatedBOWDocument
+    from spark_vi.models.topic.gated_init import scalable_block_aligned_lambda
+
+    lay = DagLayout({1: 0}, n_bg=1, tpn=1)
+    V = 8
+
+    def doc(idx, frontier):
+        idx = sorted(idx)
+        return GatedBOWDocument(indices=np.asarray(idx, dtype=np.int32),
+                                counts=np.ones(len(idx), dtype=np.float64),
+                                length=len(idx), frontier=frozenset(frontier))
+    rows = []
+    for _ in range(30):
+        rows.append(doc([0, 1, 2], []))
+        rows.append(doc([5, 6, 0], [1]))
+    rdd = spark.sparkContext.parallelize(rows, 3)
+
+    floor = 1e-9 * 200.0
+    lam = scalable_block_aligned_lambda(rdd, lay, V, seed=0, min_doc_freq=1,
+                                        anchor_scope="frontier")
+    bg = lam[0]
+    node = lam[lay.block[1][0]]
+    assert bg[5] <= floor * 10 and bg[6] <= floor * 10
+    assert node[5] + node[6] > bg[5] + bg[6]

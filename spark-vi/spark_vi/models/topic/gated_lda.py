@@ -73,7 +73,9 @@ class GatedOnlineLDA(OnlineLDA):
         if data_summary is not None and "spectral_lambda" in data_summary:
             gp["lambda"] = np.asarray(data_summary["spectral_lambda"], dtype=np.float64)
         else:
-            gp["lambda"] = INIT_STRATEGIES[self.init](data_summary, self.lay, self.V)
+            scope = (data_summary or {}).get("anchor_scope", "closure")
+            gp["lambda"] = INIT_STRATEGIES[self.init](
+                data_summary, self.lay, self.V, anchor_scope=scope)
         return gp
 
     def local_update(

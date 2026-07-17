@@ -101,6 +101,30 @@ def test_gated_shim_init_param_defaults_random():
     assert est.getOrDefault("init") == "random"
 
 
+def test_gated_shim_anchor_scope_param_defaults_and_settable():
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    est = GatedLDAEstimator(parent={1: 0, 2: 0})
+    assert est.getOrDefault("anchorScope") == "closure"
+    est2 = GatedLDAEstimator(parent={1: 0, 2: 0}, anchorScope="frontier")
+    assert est2.getOrDefault("anchorScope") == "frontier"
+
+
+def test_gated_shim_frontier_scope_scalable_fit(spark):
+    # anchorScope='frontier' on the scalable path fits end-to-end and yields a
+    # K-row lambda (background from empty-frontier docs, node from its own docs).
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    from pyspark.ml.linalg import SparseVector
+    rows = []
+    for _ in range(20):
+        rows.append((SparseVector(8, [0, 1, 2], [1.0, 1.0, 1.0]), []))    # background
+        rows.append((SparseVector(8, [0, 5, 6], [1.0, 1.0, 1.0]), [1]))   # node 1
+    df = spark.createDataFrame(rows, ["features", "frontier"])
+    m = GatedLDAEstimator(parent={1: 0}, nBg=1, tpn=1, init="spectral",
+                          spectralMethod="scalable", spectralMinDocFreq=1,
+                          anchorScope="frontier", maxIter=2, seed=0).fit(df)
+    assert m.result.global_params["lambda"].shape[0] == 1 + 1   # n_bg + 1 node
+
+
 def test_gated_shim_unknown_init_raises(spark):
     from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
     from pyspark.ml.linalg import SparseVector

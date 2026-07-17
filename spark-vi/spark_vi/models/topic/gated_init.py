@@ -28,6 +28,15 @@ from spark_vi.models.topic.spectral_init import (
 logger = logging.getLogger(__name__)
 
 
+ANCHOR_SCOPES = ("closure", "frontier")
+
+
+def _validate_anchor_scope(anchor_scope):
+    if anchor_scope not in ANCHOR_SCOPES:
+        raise ValueError(
+            f"anchor_scope must be one of {ANCHOR_SCOPES}, got {anchor_scope!r}")
+
+
 def _union_closure(front, lay):
     s = set()
     for f in front:
@@ -37,17 +46,43 @@ def _union_closure(front, lay):
     return s
 
 
-def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0) -> np.ndarray:
+def _anchor_node_set(front, lay, anchor_scope):
+    """Nodes whose anchor sketch this doc feeds, under `anchor_scope`.
+
+    "closure" (default): the doc trains every node in its frontier's closure
+    (ancestors included) — a leaf doc contributes to its parents' anchors too.
+    "frontier": only the most-specific attested nodes (the frontier itself, root
+    dropped) — so a node's anchors come only from docs where it is the deepest
+    attested node, never from a descendant's docs. Background is handled
+    separately (empty set here = a background doc in both scopes)."""
+    if anchor_scope == "closure":
+        return _union_closure(front, lay)
+    return {int(u) for u in front if u != 0}          # "frontier"
+
+
+def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
+                                  anchor_scope: str = "closure") -> np.ndarray:
     """Forward-topological block-aligned spectral lambda seed.
 
     data_summary carries {"train_docs": [token-id arrays], "train_labels": [node id or
     frontier set per doc]}. Returns a (K, V) lambda = block-aligned beta * scale.
 
-    Step 1 (background): pooled Q over all docs -> n_bg anchors -> background block.
-    Step 2 (each node, ancestors-first by lay.depth): docs training node u = those with u in
-    the union of their frontier closures; find tpn anchors on the within-node Q_u deflated
-    against background + u's already-recovered proper-ancestor anchors (seed_rows AND
-    include-then-drop in recover_beta), recover into u's block."""
+    Step 1 (background): pooled Q over the background doc set -> n_bg anchors ->
+    background block.
+    Step 2 (each node, ancestors-first by lay.depth): docs training node u = those in u's
+    anchor node set; find tpn anchors on the within-node Q_u deflated against background +
+    u's already-recovered proper-ancestor anchors (seed_rows AND include-then-drop in
+    recover_beta), recover into u's block.
+
+    `anchor_scope` controls which docs feed each anchor set (see `_anchor_node_set`):
+    "closure" (default, legacy) pools background over ALL docs and trains node u from every
+    doc with u in its closure; "frontier" pools background over ONLY background docs (empty
+    frontier) and trains node u from ONLY docs where u is the most-specific attested node —
+    so anchor selection (a max-residual / information-content search) cannot let background
+    steal a foreground node's defining word, nor a parent steal a child's, at any depth. In
+    "frontier" mode an internal node whose patients always carry a subtype gets no
+    node-specific docs and stays at the floor (informative: no distinct own-signal)."""
+    _validate_anchor_scope(anchor_scope)
     if not (isinstance(data_summary, dict)
             and "train_docs" in data_summary and "train_labels" in data_summary):
         raise ValueError(
@@ -57,14 +92,25 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0)
     train_labels = data_summary["train_labels"]
     counted = [_as_counts(d) for d in train_docs]
     fronts = [set(y) if hasattr(y, "__iter__") else {int(y)} for y in train_labels]
-    trains = [_union_closure(f, lay) for f in fronts]
+    trains = [_anchor_node_set(f, lay, anchor_scope) for f in fronts]
 
     beta = np.zeros((lay.K, V))
-    Q_all = word_cooccurrence(counted, V)
-    bg_anchors = find_anchors(Q_all, lay.n_bg)
-    bg_beta = recover_beta(Q_all, bg_anchors)
-    for i in range(min(lay.n_bg, bg_beta.shape[0])):
-        beta[i] = bg_beta[i]
+    # Background doc set: all docs ("closure") vs only background docs ("frontier").
+    if anchor_scope == "closure":
+        bg_docs = counted
+    else:
+        bg_docs = [counted[d] for d in range(len(counted)) if not trains[d]]
+    if not bg_docs:
+        logger.warning(
+            "spectral_block_aligned_lambda: no background docs under anchor_scope="
+            "%r; background block stays at the 1e-9 floor.", anchor_scope)
+        bg_anchors = []
+    else:
+        Q_all = word_cooccurrence(bg_docs, V)
+        bg_anchors = find_anchors(Q_all, lay.n_bg)
+        bg_beta = recover_beta(Q_all, bg_anchors)
+        for i in range(min(lay.n_bg, bg_beta.shape[0])):
+            beta[i] = bg_beta[i]
 
     node_anchors: dict[int, list] = {}
     for u in sorted(lay.nodes, key=lambda x: (lay.depth(x), x)):   # forward topological
@@ -122,7 +168,8 @@ class _NodeGroups:
 
 def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                                   seed: int = 0, min_doc_freq: int = 5,
-                                  scale: float = 200.0) -> np.ndarray:
+                                  scale: float = 200.0,
+                                  anchor_scope: str = "closure") -> np.ndarray:
     """Distributed random-projection analogue of `spectral_block_aligned_lambda`.
 
     `rdd` is an RDD of GatedBOWDocument. Never forms a driver V×V matrix (ADR
@@ -157,27 +204,31 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
     cached corpus — fine for tens of nodes, but O(n_nodes) passes is slow for
     hundreds. The bounded-memory batching variant (recover B node slabs per pass
     via a non-empty `_NodeGroups(batch)`, batched within a depth level so no node
-    shares a batch with an ancestor) is the follow-up for large DAGs."""
+    shares a batch with an ancestor) is the follow-up for large DAGs.
+
+    `anchor_scope` mirrors the dense function: "closure" (default) trains each
+    node's sketch from every doc in its frontier closure and background from ALL
+    docs; "frontier" trains node u only from docs where u is the most-specific
+    attested node (u in gd.groups := the frontier itself) and background only from
+    empty-frontier docs — so anchor selection cannot let background or a parent
+    steal a descendant's defining word (see `_anchor_node_set`)."""
     from pyspark import StorageLevel
     from spark_vi.models.topic.spectral_init_scalable import (
         projected_cooccurrence_rdd, find_anchors_projected,
         recover_beta_projected, default_projection_dim,
     )
+    _validate_anchor_scope(anchor_scope)
     if d is None:
         d = default_projection_dim(lay.K, V)
 
     lay_b = rdd.context.broadcast(lay)
 
-    def _to_group(doc, _lay=lay_b):
+    def _to_group(doc, _lay=lay_b, _scope=anchor_scope):
         L = _lay.value
-        groups = set()
-        for f in doc.frontier:
-            for u in L.closure(f):
-                if u != 0:
-                    groups.add(u)
         # frozenset so each node's `_u in gd.groups` filter is O(1); computed once
-        # here and cached so the per-node passes never recompute closures.
-        return _GroupDoc(doc.indices, doc.counts, frozenset(groups))
+        # here and cached so the per-node passes never recompute the node set.
+        return _GroupDoc(doc.indices, doc.counts,
+                         frozenset(_anchor_node_set(doc.frontier, L, _scope)))
 
     group_rdd = rdd.map(_to_group).persist(StorageLevel.MEMORY_AND_DISK)
     no_groups = _NodeGroups(())          # pooled-only passes (no per-group slabs)
@@ -186,8 +237,11 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
 
         beta = np.zeros((lay.K, V), dtype=np.float64)
 
-        # Step 1: background block on the pooled sketch over ALL docs.
-        pooled = projected_cooccurrence_rdd(group_rdd, no_groups, V, d, seed)
+        # Step 1: background block. "closure" pools over ALL docs; "frontier" pools
+        # over only background docs (empty node set) so foreground can't seed bg.
+        bg_rdd = (group_rdd if anchor_scope == "closure"
+                  else group_rdd.filter(lambda gd: len(gd.groups) == 0))
+        pooled = projected_cooccurrence_rdd(bg_rdd, no_groups, V, d, seed)
         bg_anchors = find_anchors_projected(
             pooled.pooled_QR, pooled.p_w, pooled.df_w, lay.n_bg,
             min_doc_freq=min_doc_freq)

@@ -696,6 +696,7 @@ def build_dag_placement_args(
         "--init", str(effective.get("init", "random")),
         "--spectral-max-vocab", str(effective.get("spectral_max_vocab", 8000)),
         "--spectral-method", str(effective.get("spectral_method", "auto")),
+        "--anchor-scope", str(effective.get("anchor_scope", "closure")),
         "--strip-mode", str(effective.get("strip_mode", "test_only")),
         # Per-iter top-terms logging reuses the shared _base.yaml knobs (STM parity).
         "--print-topics-every", str(effective.get("print_topics_every", 0)),

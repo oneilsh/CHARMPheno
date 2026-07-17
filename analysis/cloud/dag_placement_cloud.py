@@ -171,6 +171,14 @@ def parse_args(argv=None):
                         "vocab size vs --spectral-max-vocab, 'dense' forces the "
                         "exact single-driver path, 'scalable' forces the "
                         "distributed random-projection path (ADR 0037).")
+    p.add_argument("--anchor-scope", choices=["closure", "frontier"],
+                   default="closure",
+                   help="Which docs feed each spectral anchor set: 'closure' "
+                        "(node u from every doc with u in its closure, background "
+                        "from all docs) or 'frontier' (node u only from docs where "
+                        "u is the most-specific attested node, background only from "
+                        "empty-frontier docs) — 'frontier' stops background/ancestors "
+                        "stealing a descendant's defining anchor.")
     # per-iter topic logging (STM parity)
     p.add_argument("--print-topics-every", type=int, default=0,
                    help="Print top-N terms per topic every N iters (0 = off). "
@@ -221,6 +229,7 @@ def main() -> int:
                 caviMaxIter=args.cavi_max_iter, caviTol=args.cavi_tol,
                 init=args.init, spectralMaxVocab=args.spectral_max_vocab,
                 spectralMethod=args.spectral_method,
+                anchorScope=args.anchor_scope,
                 nodeAlphaScale=args.node_alpha_scale,
                 miniBatchFraction=args.mini_batch_fraction,
                 learningRateTau0=args.learning_rate_tau0,
@@ -282,6 +291,7 @@ def main() -> int:
                 "init": args.init, "K": lay.K, "n_bg": args.n_bg, "tpn": args.tpn,
                 "spectral_method_requested": args.spectral_method,
                 "spectral_method_resolved": resolved_spectral,
+                "anchor_scope": args.anchor_scope,
                 "disease": args.disease, "min_n": args.min_n, "strip_mode": args.strip_mode,
                 "node_alpha_scale": args.node_alpha_scale,
                 "mini_batch_fraction": args.mini_batch_fraction,

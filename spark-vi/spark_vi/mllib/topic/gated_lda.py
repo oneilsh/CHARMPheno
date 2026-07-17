@@ -89,6 +89,13 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
     spectralMinDocFreq = Param(Params._dummy(), "spectralMinDocFreq",
                                "min within-group document frequency for a scalable "
                                "anchor candidate")
+    anchorScope = Param(Params._dummy(), "anchorScope",
+                        "which docs feed each spectral anchor set: 'closure' "
+                        "(default; node u from every doc with u in its closure, "
+                        "background from all docs) or 'frontier' (node u only from "
+                        "docs where u is the most-specific attested node, background "
+                        "only from empty-frontier docs) — 'frontier' stops "
+                        "background/ancestors stealing a descendant's anchor")
 
 
 def _layout(est_or_model) -> DagLayout:
@@ -103,7 +110,7 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                  nBg=2, tpn=1, maxIter=20, seed=None, caviMaxIter=100, caviTol=1e-3,
                  gammaShape=100.0, init="random", spectralMaxVocab=8000,
                  spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
-                 nodeAlphaScale=1.0, miniBatchFraction=0.0,
+                 anchorScope="closure", nodeAlphaScale=1.0, miniBatchFraction=0.0,
                  learningRateTau0=1.0, learningRateKappa=0.7):
         super().__init__()
         self._setDefault(featuresCol="features", labelCol="frontier", nBg=2, tpn=1,
@@ -111,7 +118,7 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                          caviMaxIter=100, caviTol=1e-3, gammaShape=100.0,
                          init="random", spectralMaxVocab=8000,
                          spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
-                         nodeAlphaScale=1.0,
+                         anchorScope="closure", nodeAlphaScale=1.0,
                          miniBatchFraction=0.0, learningRateTau0=1.0,
                          learningRateKappa=0.7)
         self.setParams(**self._input_kwargs)
@@ -221,6 +228,7 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                     d=(sd if sd > 0 else None),
                     seed=(seed or 0),
                     min_doc_freq=int(self.getOrDefault("spectralMinDocFreq")),
+                    anchor_scope=self.getOrDefault("anchorScope"),
                 )
                 data_summary = {"spectral_lambda": lam0}
             else:  # dense — collect-to-driver exact path
@@ -230,7 +238,10 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                     bow = _vector_to_bow_document(r[0])
                     train_docs.append(np.repeat(bow.indices, bow.counts.astype(int)))
                     train_labels.append(frozenset(int(x) for x in (r[1] or [])))
-                data_summary = {"train_docs": train_docs, "train_labels": train_labels}
+                # anchor_scope rides along so initialize_global's dense strategy
+                # honors it too (the scalable path already baked it into lam0).
+                data_summary = {"train_docs": train_docs, "train_labels": train_labels,
+                                "anchor_scope": self.getOrDefault("anchorScope")}
 
         try:
             result = VIRunner(model_obj, config=config).fit(

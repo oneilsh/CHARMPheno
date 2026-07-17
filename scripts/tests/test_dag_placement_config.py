@@ -115,6 +115,23 @@ def test_spectral_method_config_and_argv(monkeypatch):
     assert eff52["spectral_method"] == "auto"
 
 
+def test_anchor_scope_config_and_argv(monkeypatch):
+    # _base default is 'closure'; exp 0060 forces 'frontier'; both emit --anchor-scope.
+    mod = importlib.import_module("run_experiment")
+    monkeypatch.setattr(mod, "_require_workspace_env", lambda: ("p.d", "bill"))
+    eff60 = _load_effective(
+        mod, "docs/experiments/0060-dag-placement-rare6-frontier-anchors.md")
+    assert eff60["anchor_scope"] == "frontier"
+    assert eff60["spectral_method"] == "scalable" and eff60["strip_mode"] == "both"
+    args = mod.build_dag_placement_args(eff60, "/out")
+    assert args[args.index("--anchor-scope") + 1] == "frontier"
+    # a diabetes exp inherits the _base default 'closure'
+    eff52 = _load_effective(mod, "docs/experiments/0052-dag-placement-diabetes-random.md")
+    assert eff52["anchor_scope"] == "closure"
+    args52 = mod.build_dag_placement_args(eff52, "/out")
+    assert args52[args52.index("--anchor-scope") + 1] == "closure"
+
+
 def test_rare6_alpha_by_strip_2x2_grid(monkeypatch):
     # The rare6 2x2: strip_mode (test_only|both) x node_alpha_scale (0.1|1.0).
     #   0055 asym/test_only  0056 sym/test_only
