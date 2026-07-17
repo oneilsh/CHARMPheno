@@ -59,6 +59,7 @@ holdout_frac: 0.2
 window_days: 365
 init: random
 spectral_max_vocab: 8000
+spectral_method: auto      # auto|dense|scalable; auto routes by vocab vs spectral_max_vocab
 cavi_max_iter: 100
 cavi_tol: 1.0e-3
 strip_mode: test_only

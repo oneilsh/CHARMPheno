@@ -101,6 +101,20 @@ def test_rare6_spectral_init_diagnostic_parses_and_builds(monkeypatch):
     assert args[args.index("--node-alpha-scale") + 1] == "1.0"
 
 
+def test_spectral_method_config_and_argv(monkeypatch):
+    # _base default is 'auto'; exp 0059 forces 'scalable'; both emit --spectral-method.
+    mod = importlib.import_module("run_experiment")
+    monkeypatch.setattr(mod, "_require_workspace_env", lambda: ("p.d", "bill"))
+    eff59 = _load_effective(
+        mod, "docs/experiments/0059-dag-placement-rare6-sym-stripboth-spectral.md")
+    assert eff59["spectral_method"] == "scalable"
+    args = mod.build_dag_placement_args(eff59, "/out")
+    assert args[args.index("--spectral-method") + 1] == "scalable"
+    # a diabetes exp inherits the _base default 'auto'
+    eff52 = _load_effective(mod, "docs/experiments/0052-dag-placement-diabetes-random.md")
+    assert eff52["spectral_method"] == "auto"
+
+
 def test_rare6_alpha_by_strip_2x2_grid(monkeypatch):
     # The rare6 2x2: strip_mode (test_only|both) x node_alpha_scale (0.1|1.0).
     #   0055 asym/test_only  0056 sym/test_only

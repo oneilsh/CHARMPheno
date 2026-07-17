@@ -17,6 +17,7 @@ holdout_frac: 0.2
 init: spectral
 node_alpha_scale: 1.0
 spectral_max_vocab: 12000
+spectral_method: scalable
 strip_mode: both
 max_iter: 200
 seed: 42

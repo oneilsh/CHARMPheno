@@ -165,6 +165,12 @@ def parse_args(argv=None):
     p.add_argument("--cavi-tol", type=float, default=1e-3)
     p.add_argument("--init", choices=["random", "spectral"], default="random")
     p.add_argument("--spectral-max-vocab", type=int, default=8000)
+    p.add_argument("--spectral-method", choices=["auto", "dense", "scalable"],
+                   default="auto",
+                   help="Spectral anchor-word init strategy: 'auto' routes by "
+                        "vocab size vs --spectral-max-vocab, 'dense' forces the "
+                        "exact single-driver path, 'scalable' forces the "
+                        "distributed random-projection path (ADR 0037).")
     # per-iter topic logging (STM parity)
     p.add_argument("--print-topics-every", type=int, default=0,
                    help="Print top-N terms per topic every N iters (0 = off). "
@@ -201,6 +207,12 @@ def main() -> int:
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
         corpus_stats = _log_corpus_stats(bundle, lay)
 
+        from spark_vi.mllib.topic.stm import resolve_spectral_method
+        resolved_spectral = resolve_spectral_method(
+            args.spectral_method, len(bundle.vocab_map), threshold=args.spectral_max_vocab)
+        print(f"[driver]   spectral init: requested={args.spectral_method} "
+              f"resolved={resolved_spectral}", flush=True)
+
         with _phase(f"gated-svi fit (init={args.init}, K={lay.K})"):
             est = GatedLDAEstimator(
                 featuresCol="features", labelCol="frontier",
@@ -208,6 +220,7 @@ def main() -> int:
                 maxIter=args.max_iter, seed=args.seed,
                 caviMaxIter=args.cavi_max_iter, caviTol=args.cavi_tol,
                 init=args.init, spectralMaxVocab=args.spectral_max_vocab,
+                spectralMethod=args.spectral_method,
                 nodeAlphaScale=args.node_alpha_scale,
                 miniBatchFraction=args.mini_batch_fraction,
                 learningRateTau0=args.learning_rate_tau0,
@@ -267,6 +280,8 @@ def main() -> int:
             manifest = {
                 "model_class": "dag_placement",
                 "init": args.init, "K": lay.K, "n_bg": args.n_bg, "tpn": args.tpn,
+                "spectral_method_requested": args.spectral_method,
+                "spectral_method_resolved": resolved_spectral,
                 "disease": args.disease, "min_n": args.min_n, "strip_mode": args.strip_mode,
                 "node_alpha_scale": args.node_alpha_scale,
                 "mini_batch_fraction": args.mini_batch_fraction,
