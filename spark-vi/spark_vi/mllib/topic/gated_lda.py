@@ -3,11 +3,11 @@
 Mirrors mllib/topic/lda.py (ADR 0009): a translation layer over GatedOnlineLDA + VIRunner.
 fit trains GATED (each row carries features + a frontier = set of DAG node ids); transform
 folds held-out docs in UNGATED (full-K) and emits per-node affinity. init="random" is the
-validated default; init="spectral" runs the DENSE block-aligned anchor-word seed (Arora et al.
-2013) by collecting the training corpus to the driver (mirroring the STM shim's dense spectral
-path, mllib/topic/stm.py) and passing it via data_summary. The SCALABLE projected block-aligned
-variant (distributed co-occurrence + random projection, for large vocabularies) is deferred; the
-spectralMaxVocab guard bounds the dense path.
+validated default; init="spectral" seeds lambda from anchor-word spectral recovery (Arora et al.
+2013), routed by spectralMethod between DENSE (collect the corpus to the driver, exact V×V,
+mirroring the STM shim's dense spectral path, mllib/topic/stm.py) and SCALABLE (distributed
+random-projection sketch over the RDD, ADR 0032 — the gated analogue, for large vocabularies).
+"auto" picks dense below spectralMaxVocab and scalable at/above it (resolve_spectral_method).
 """
 from __future__ import annotations
 
@@ -77,9 +77,18 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
                  typeConverter=TypeConverters.toString)
     spectralMaxVocab = Param(Params._dummy(), "spectralMaxVocab",
                              "max vocab for the DENSE spectral init (V x V driver "
-                             "co-occurrence); at/above this, spectral raises "
-                             "(scalable projected variant deferred)",
+                             "co-occurrence); the spectralMethod='auto' threshold "
+                             "below which dense is used (scalable at/above)",
                              typeConverter=TypeConverters.toInt)
+    spectralMethod = Param(Params._dummy(), "spectralMethod",
+                           "spectral routing: 'auto'|'dense'|'scalable' "
+                           "(auto -> dense if V < spectralMaxVocab else scalable)")
+    spectralD = Param(Params._dummy(), "spectralD",
+                      "random-projection dim for scalable init (0 = auto: "
+                      "min(V, max(K, 1000)))")
+    spectralMinDocFreq = Param(Params._dummy(), "spectralMinDocFreq",
+                               "min within-group document frequency for a scalable "
+                               "anchor candidate")
 
 
 def _layout(est_or_model) -> DagLayout:
@@ -93,13 +102,16 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
     def __init__(self, *, featuresCol="features", labelCol="frontier", parent=None,
                  nBg=2, tpn=1, maxIter=20, seed=None, caviMaxIter=100, caviTol=1e-3,
                  gammaShape=100.0, init="random", spectralMaxVocab=8000,
+                 spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
                  nodeAlphaScale=1.0, miniBatchFraction=0.0,
                  learningRateTau0=1.0, learningRateKappa=0.7):
         super().__init__()
         self._setDefault(featuresCol="features", labelCol="frontier", nBg=2, tpn=1,
                          maxIter=20, nodeAffinityCol="nodeAffinity",
                          caviMaxIter=100, caviTol=1e-3, gammaShape=100.0,
-                         init="random", spectralMaxVocab=8000, nodeAlphaScale=1.0,
+                         init="random", spectralMaxVocab=8000,
+                         spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
+                         nodeAlphaScale=1.0,
                          miniBatchFraction=0.0, learningRateTau0=1.0,
                          learningRateKappa=0.7)
         self.setParams(**self._input_kwargs)
@@ -147,17 +159,6 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                 f"unknown init strategy {init!r}; "
                 f"known: {['random'] + sorted(INIT_STRATEGIES)}"
             )
-        # Dense spectral init builds a driver-side V x V co-occurrence; guard it.
-        # The scalable projected block-aligned variant (distributed co-occurrence +
-        # random projection, the gated analogue of STM ADR 0032) is deferred.
-        if init == "spectral" and V >= self.getOrDefault("spectralMaxVocab"):
-            raise NotImplementedError(
-                f"dense spectral init needs a {V}x{V} driver co-occurrence "
-                f"(vocab {V} >= spectralMaxVocab {self.getOrDefault('spectralMaxVocab')}); "
-                "the scalable projected block-aligned init is not built yet. "
-                "Use init='random' or reduce vocab_size."
-            )
-
         # Dirichlet alpha over the K topics. Symmetric 1/K by default; when
         # nodeAlphaScale != 1, the per-node blocks (contiguous topics
         # [n_bg, K), background is [0, n_bg)) are scaled to make them a priori
@@ -198,19 +199,38 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                .persist(StorageLevel.MEMORY_AND_DISK))
         rdd.count()
 
-        # Non-random init needs the training corpus in the driver (the dense,
-        # collect-to-driver path, mirroring the STM shim's dense spectral seed,
-        # mllib/topic/stm.py). The block-aligned strategy expects token-id arrays
-        # + per-doc frontier labels via data_summary; initialize_global runs it.
+        # Non-random init: seed lambda from anchor-word spectral recovery. init
+        # "spectral" routes dense (collect the corpus to the driver, exact V×V,
+        # validated small-V default) vs scalable (distributed random-projection
+        # sketch, ADR 0032 — the gated analogue), by spectralMethod. Passed to
+        # initialize_global via data_summary; dense hands {train_docs,train_labels},
+        # scalable hands a precomputed {spectral_lambda}.
         data_summary = None
         if init != "random":
-            collected = dataset.select(features_col, label_col).collect()
-            train_docs, train_labels = [], []
-            for r in collected:
-                bow = _vector_to_bow_document(r[0])
-                train_docs.append(np.repeat(bow.indices, bow.counts.astype(int)))
-                train_labels.append(frozenset(int(x) for x in (r[1] or [])))
-            data_summary = {"train_docs": train_docs, "train_labels": train_labels}
+            from spark_vi.mllib.topic.stm import resolve_spectral_method
+            resolved = resolve_spectral_method(
+                self.getOrDefault("spectralMethod"), V,
+                threshold=self.getOrDefault("spectralMaxVocab"))
+            if resolved == "scalable":
+                from spark_vi.models.topic.gated_init import (
+                    scalable_block_aligned_lambda,
+                )
+                sd = int(self.getOrDefault("spectralD"))
+                lam0 = scalable_block_aligned_lambda(
+                    rdd, lay, V,
+                    d=(sd if sd > 0 else None),
+                    seed=(seed or 0),
+                    min_doc_freq=int(self.getOrDefault("spectralMinDocFreq")),
+                )
+                data_summary = {"spectral_lambda": lam0}
+            else:  # dense — collect-to-driver exact path
+                collected = dataset.select(features_col, label_col).collect()
+                train_docs, train_labels = [], []
+                for r in collected:
+                    bow = _vector_to_bow_document(r[0])
+                    train_docs.append(np.repeat(bow.indices, bow.counts.astype(int)))
+                    train_labels.append(frozenset(int(x) for x in (r[1] or [])))
+                data_summary = {"train_docs": train_docs, "train_labels": train_labels}
 
         try:
             result = VIRunner(model_obj, config=config).fit(

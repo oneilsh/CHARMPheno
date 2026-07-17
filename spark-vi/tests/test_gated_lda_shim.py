@@ -114,19 +114,52 @@ def test_gated_shim_unknown_init_raises(spark):
         est.fit(df)
 
 
-def test_gated_shim_spectral_vocab_guard_raises(spark):
+def test_gated_shim_spectral_method_param_defaults_and_settable():
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    est = GatedLDAEstimator(parent={1: 0, 2: 0})
+    assert est.getOrDefault("spectralMethod") == "auto"
+    est2 = GatedLDAEstimator(parent={1: 0, 2: 0}, spectralMethod="scalable")
+    assert est2.getOrDefault("spectralMethod") == "scalable"
+
+
+def test_gated_shim_scalable_spectral_fits_and_seeds_lambda(spark):
+    # Forcing spectralMethod='scalable' at small V routes through the distributed
+    # projected init and fits; the resulting lambda differs from a random-init fit
+    # on the same corpus (the scalable seed took effect), and no dense V×V is built.
     from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
     from pyspark.ml.linalg import SparseVector
-    import pytest
-    # V = 6 features but spectralMaxVocab = 4 -> dense V x V guard trips.
-    df = spark.createDataFrame(
-        [(SparseVector(6, [0, 1], [1.0, 1.0]), [1])],
-        ["features", "frontier"],
-    )
-    est = GatedLDAEstimator(parent={1: 0, 2: 0}, init="spectral",
-                            spectralMaxVocab=4, maxIter=1)
-    with pytest.raises(NotImplementedError, match="scalable"):
-        est.fit(df)
+    import numpy as np
+    rows = []
+    for _ in range(30):
+        rows.append((SparseVector(8, [0, 1, 6], [3.0, 2.0, 1.0]), [1]))
+        rows.append((SparseVector(8, [2, 3, 6], [3.0, 2.0, 1.0]), [2]))
+    df = spark.createDataFrame(rows, ["features", "frontier"])
+    parent = {1: 0, 2: 0}
+    m_rand = GatedLDAEstimator(parent=parent, nBg=2, tpn=1, init="random",
+                               maxIter=2, seed=0).fit(df)
+    m_scal = GatedLDAEstimator(parent=parent, nBg=2, tpn=1, init="spectral",
+                               spectralMethod="scalable", spectralMinDocFreq=1,
+                               maxIter=2, seed=0).fit(df)
+    lam_r = m_rand.result.global_params["lambda"]
+    lam_s = m_scal.result.global_params["lambda"]
+    assert lam_r.shape == lam_s.shape == (2 + len(parent), 8)
+    assert not np.allclose(lam_r, lam_s)
+
+
+def test_gated_shim_spectral_auto_routes_scalable_above_threshold(spark):
+    # spectralMethod='auto' with a tiny spectralMaxVocab threshold routes a
+    # V>=threshold corpus to the scalable path and fits (no NotImplementedError).
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    from pyspark.ml.linalg import SparseVector
+    rows = []
+    for _ in range(20):
+        rows.append((SparseVector(8, [0, 1, 6], [2.0, 1.0, 1.0]), [1]))
+        rows.append((SparseVector(8, [2, 3, 6], [2.0, 1.0, 1.0]), [2]))
+    df = spark.createDataFrame(rows, ["features", "frontier"])
+    m = GatedLDAEstimator(parent={1: 0, 2: 0}, nBg=2, tpn=1, init="spectral",
+                          spectralMethod="auto", spectralMaxVocab=4,
+                          spectralMinDocFreq=1, maxIter=2, seed=0).fit(df)   # V=8 >= 4
+    assert m.result.global_params["lambda"].shape[0] == 4
 
 
 def test_gated_shim_spectral_fits_and_seeds_lambda(spark):
