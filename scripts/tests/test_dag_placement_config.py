@@ -43,19 +43,21 @@ def test_rare6_forest_experiment_parses_and_builds(monkeypatch):
     assert args[args.index("--disease") + 1] == "rare6"
     assert args[args.index("--min-n") + 1] == "20"
     assert "--K" not in args                          # K is emergent
-    assert args[args.index("--node-alpha-scale") + 1] == "1.0"   # symmetric default
+    assert args[args.index("--node-alpha-scale") + 1] == "0.1"   # asymmetric (52+)
 
 
-def test_asymmetric_alpha_arms_parse_and_emit_scale(monkeypatch):
+def test_dag_placement_batch_is_asymmetric_alpha(monkeypatch):
+    # 0052-0055 all carry the block-asymmetric prior (node_alpha_scale: 0.1);
+    # the engine default stays symmetric (1.0) via _base for any other exp.
     mod = importlib.import_module("run_experiment")
     monkeypatch.setattr(mod, "_require_workspace_env", lambda: ("p.d", "bill"))
-    for exp, disease in [
-        ("docs/experiments/0056-dag-placement-diabetes-asym-alpha.md", "diabetes"),
-        ("docs/experiments/0057-dag-placement-rare6-asym-alpha.md", "rare6"),
+    for exp in [
+        "docs/experiments/0052-dag-placement-diabetes-random.md",
+        "docs/experiments/0053-dag-placement-diabetes-spectral.md",
+        "docs/experiments/0054-dag-placement-diabetes-strip-both.md",
+        "docs/experiments/0055-dag-placement-rare6-forest.md",
     ]:
         eff = _load_effective(mod, exp)
-        assert eff["model_class"] == "dag_placement"
-        assert eff["disease"] == disease
         assert eff["node_alpha_scale"] == 0.1
         mod.validate_frontmatter(eff)
         args = mod.build_dag_placement_args(eff, "/out")
