@@ -4,11 +4,14 @@ Overrides exactly two OnlineLDA methods:
   * local_update — restrict each training doc's CAVI to DagLayout.allowed_set(frontier)
     (the exact variational analogue of the Gibbs gate in dag_placement.fit_gated); sstats
     for disallowed topics stay zero, welding each node's topic to its subtree's documents.
+    An empty frontier is a labeled background doc, gated to the background block only (NOT
+    full-K) — the same convention as the Gibbs oracle and the gated STM.
   * initialize_global — dispatch on a pluggable init strategy (default "random").
 
 Everything else (update_global SVI natural-gradient beta step, compute_elbo, combine_stats,
-VIRunner integration) is inherited from OnlineLDA. Deployment folds held-out docs in UNGATED
-(empty frontier -> full-K CAVI) -> theta -> node_affinity.
+VIRunner integration) is inherited from OnlineLDA. TRAINING is gated (above); DEPLOYMENT is
+different — GatedLDAModel._transform folds held-out docs in UNGATED full-K CAVI (the label is
+unknown at scoring time, which is the whole point) -> theta -> node_affinity.
 
 Validated against the collapsed-Gibbs oracle (dag_placement.fit_gated): placement (node-AUC by
 depth, MRR, top2) matches at every depth; the DAG gate supplies the identifiability spectral
@@ -76,9 +79,16 @@ class GatedOnlineLDA(OnlineLDA):
         scatter sstats to lambda_stats[allowed, indices]. Disallowed topics get zero
         contribution — the variational twin of the Gibbs gate.
 
-        allowed = lay.allowed_set(frontier) (background + closure blocks of the frontier),
-        or all K when the frontier is empty (ungated). Cost is O(|allowed|) per token =
-        the doc's frontier closure (bounded by DAG depth), not K."""
+        allowed = lay.allowed_set(frontier) = background ∪ closure blocks of the frontier.
+        An EMPTY frontier is a labeled background document (a known negative: this item
+        belongs to no node), so it is gated to the BACKGROUND block only — NOT full-K.
+        This matches both the collapsed-Gibbs oracle (dag_placement.fit_gated, which gates
+        every training doc via allowed_set, so empty -> background-only) and the gated STM
+        (partition.TopicBlockPartition.allowed_indices: a group with no foreground block
+        contributes to the background only). Letting background docs go full-K instead
+        lets the large background population train the node topics, collapsing them into
+        generic comorbidity and destroying node specificity. Cost is O(|allowed|) per
+        token = the doc's frontier closure (bounded by DAG depth), not K."""
         lam = global_params["lambda"]
         alpha = global_params["alpha"]
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
@@ -93,10 +103,12 @@ class GatedOnlineLDA(OnlineLDA):
         # (lda.py), so a distributed fit is reproducible regardless of Spark partition /
         # executor / iteration order. When random_seed is None, falls back to the global RNG.
         for doc in rows:
-            if doc.frontier:
-                allowed = self.lay.allowed_set(doc.frontier)
-            else:
-                allowed = np.arange(self.K)
+            # allowed_set(empty) == background block only, so a labeled background doc
+            # (empty frontier) trains the background topics but NOT the node topics —
+            # the same gate the Gibbs oracle and the gated STM apply. (Deployment /
+            # transform is a separate, deliberately ungated full-K path; see
+            # GatedLDAModel._transform in the mllib shim.)
+            allowed = self.lay.allowed_set(doc.frontier)
             if self.random_seed is None:
                 gamma_init = np.random.gamma(
                     shape=self.gamma_shape,

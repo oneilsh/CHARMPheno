@@ -47,7 +47,11 @@ def test_local_update_gates_sstats_to_allowed_rows_only():
     assert stats[sorted(allowed)].sum() > 0.0           # allowed rows got mass
 
 
-def test_local_update_empty_frontier_is_ungated():
+def test_local_update_empty_frontier_is_background_only():
+    # A labeled background doc (empty frontier) is a known negative and must be gated
+    # to the BACKGROUND block only — NOT full-K. Otherwise the large background
+    # population trains the node topics and collapses them into generic comorbidity
+    # (matches the Gibbs oracle and the gated STM's TopicBlockPartition.allowed_indices).
     lay = _lay()
     V = 30
     m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
@@ -56,9 +60,11 @@ def test_local_update_empty_frontier_is_ungated():
                            counts=np.array([2.0, 1.0]), length=3,
                            frontier=frozenset())
     out = m.local_update([doc], gp)
-    # Ungated: every topic row is eligible, so total sstats mass spreads over all K
-    # (no row structurally forced to zero by the gate).
-    assert out["lambda_stats"].sum() > 0.0
+    stats = out["lambda_stats"]
+    bg = list(range(lay.n_bg))
+    node_rows = [k for k in range(lay.K) if k not in bg]
+    assert np.allclose(stats[node_rows], 0.0)           # node topics get NOTHING
+    assert stats[bg].sum() > 0.0                         # only the background block trained
     assert out["n_docs"] == 1.0
 
 
