@@ -81,7 +81,11 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
     so anchor selection (a max-residual / information-content search) cannot let background
     steal a foreground node's defining word, nor a parent steal a child's, at any depth. In
     "frontier" mode an internal node whose patients always carry a subtype gets no
-    node-specific docs and stays at the floor (informative: no distinct own-signal)."""
+    node-specific docs and stays at the floor (informative: no distinct own-signal) — and,
+    as a corollary, a descendant is then NOT deflated against that ancestor's increment
+    (node_anchors[p] is absent), so its block can absorb the un-anchored ancestor signal;
+    the "isolate u's own increment" guarantee holds only for ancestors that have their own
+    frontier docs."""
     _validate_anchor_scope(anchor_scope)
     if not (isinstance(data_summary, dict)
             and "train_docs" in data_summary and "train_labels" in data_summary):

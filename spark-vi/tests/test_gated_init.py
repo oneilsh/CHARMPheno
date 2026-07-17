@@ -219,6 +219,40 @@ def test_frontier_scope_keeps_foreground_tokens_out_of_background_dense():
     assert node[5] + node[6] > 0.01
 
 
+def test_frontier_scope_parent_does_not_steal_child_anchor_depth2():
+    # 2-level chain {1:0, 2:1}: node 2 is a child of node 1. Node 2's defining
+    # tokens {6,7} appear ONLY in node-2 (frontier={2}) docs. Under
+    # anchor_scope="frontier", node 1's sketch is built ONLY from frontier=={1}
+    # docs (which never contain 6/7), so node 1 CANNOT steal node 2's anchor — its
+    # block stays at the floor on 6/7 while node 2's block carries them. This is
+    # the "can't propagate at any depth" claim the option makes.
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_init import spectral_block_aligned_lambda
+
+    V = 10
+    lay = DagLayout({1: 0, 2: 1}, n_bg=1, tpn=1)              # K = 3
+    train_docs, train_labels = [], []
+    for _ in range(30):
+        train_docs.append(np.array([0, 0, 1, 1]))            # background: 0,1
+        train_labels.append(frozenset())
+        train_docs.append(np.array([3, 3, 4, 4, 0]))         # node 1 (most-specific): 3,4
+        train_labels.append(frozenset({1}))
+        train_docs.append(np.array([6, 6, 7, 7, 3, 0]))      # node 2: 6,7 (+ inherits 3)
+        train_labels.append(frozenset({2}))
+    ds = {"train_docs": train_docs, "train_labels": train_labels}
+
+    floor = 1e-9 * 200.0
+    lam = spectral_block_aligned_lambda(ds, lay, V, anchor_scope="frontier")
+    b1 = lam[lay.block[1][0]]
+    b2 = lam[lay.block[2][0]]
+    # node 1's frontier docs never contain 6/7 -> its block can't grab them
+    assert b1[6] <= floor * 10 and b1[7] <= floor * 10
+    # node 2 carries its own tokens and is deflated against node 1 (distinct block)
+    assert b2[6] + b2[7] > 0.01
+    assert not np.allclose(b1, b2)
+
+
 def test_scalable_frontier_scope_keeps_foreground_out_of_background(spark):
     # The distributed path honors anchor_scope="frontier" the same way: a
     # foreground-only token stays at the floor in the background block.
