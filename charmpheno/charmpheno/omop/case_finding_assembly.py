@@ -40,6 +40,18 @@ _SPLIT_SALT = 20260716
 # forest); single-anchor diseases root the DAG at the anchor itself.
 _FOREST_ROOT_CID = -1
 
+# Lookback mode requires at least one year of pre-index observation so the
+# feature window [index - lookback_days, index) is anchored on real recorded
+# history (the "≥1yr of history before index" requirement; see the lookback
+# design doc's "Cohort gate" section). This floor is a fixed design invariant
+# of the pre-diagnosis framing, not the forward-mode `prior_obs_days` knob:
+# the up-to-5yr feature window (lookback_days=1825) is deliberately clipped to
+# whatever history exists beyond this 1-year floor, so the gate stays at 365
+# regardless of lookback_days. Kept intrinsic to the lookback path (rather than
+# threaded from prior_obs_days) so a lookback experiment cannot silently
+# disable it by inheriting prior_obs_days=0 from a forward config.
+_LOOKBACK_PRIOR_OBS_DAYS = 365
+
 
 def _descendants(children_map: dict[int, list[int]], root: int) -> set[int]:
     """Proper descendants of `root` in a {parent: [children]} concept-id map."""
@@ -489,10 +501,15 @@ def assemble_case_finding_corpus(spark, *, disease="diabetes", cdr, billing,
     date_col = "condition_era_start_date"
 
     if window_mode == "lookback":
+        # The lookback prior-observation gate is the fixed ≥1yr floor
+        # (_LOOKBACK_PRIOR_OBS_DAYS), NOT the forward-mode prior_obs_days knob:
+        # it is intrinsic to the pre-diagnosis framing so a lookback experiment
+        # cannot disable it by inheriting prior_obs_days=0 from a forward config.
         index_df = case_finding_index_table(
             omop, disease=disease, spark=spark, cdr_dataset=cdr,
             billing_project=billing, date_col=date_col,
-            prior_obs_days=prior_obs_days, label_window_days=label_window_days)
+            prior_obs_days=_LOOKBACK_PRIOR_OBS_DAYS,
+            label_window_days=label_window_days)
         feature_events, label_events = lookback_feature_label_events(
             omop, index_df, date_col=date_col,
             lookback_days=lookback_days, label_window_days=label_window_days)
