@@ -57,6 +57,13 @@ n_bg: 20
 tpn: 5
 holdout_frac: 0.2
 window_days: 365
+# window_mode=forward: existing single-window behavior (unchanged default).
+# window_mode=lookback: pre-index feature frame (lookback_days back from an
+# index date) + forward label frame (label_window_days), leakage-free by
+# construction (see exps 0061/0062).
+window_mode: forward
+lookback_days: 365
+label_window_days: 365
 init: random
 spectral_max_vocab: 8000
 spectral_method: auto      # auto|dense|scalable; auto routes by vocab vs spectral_max_vocab

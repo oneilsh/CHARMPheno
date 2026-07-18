@@ -36,7 +36,9 @@ def _module_source_hash(module) -> str:
 def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
                              min_patient_count, doc_min_length, prior_obs_days,
                              window_days, disease, min_n, holdout_frac, split_salt=None,
-                             n_bg, tpn, cdr=None, strip_mode="test_only") -> str:
+                             n_bg, tpn, cdr=None, strip_mode="test_only",
+                             window_mode="forward", lookback_days=365,
+                             label_window_days=365) -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
     Folds cohort_defs_version() plus content hashes of condition_dag +
@@ -66,10 +68,12 @@ def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
         "window_days": int(window_days), "disease": str(disease), "min_n": int(min_n),
         "holdout_frac": float(holdout_frac), "split_salt": int(split_salt),
         "n_bg": int(n_bg), "tpn": int(tpn), "cdr": cdr, "strip_mode": strip_mode,
+        "window_mode": window_mode, "lookback_days": int(lookback_days),
+        "label_window_days": int(label_window_days),
         "cohort_defs": cohort_defs_version(),
         "dag_src": _module_source_hash(condition_dag),
         "assembly_src": _module_source_hash(case_finding_assembly),
-        "v": 3,
+        "v": 4,
     }
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
@@ -144,7 +148,7 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
             "source_table", "person_mod", "vocab_size", "min_df",
             "min_patient_count", "doc_min_length", "prior_obs_days", "window_days",
             "disease", "min_n", "holdout_frac", "split_salt", "n_bg", "tpn", "cdr",
-            "strip_mode",
+            "strip_mode", "window_mode", "lookback_days", "label_window_days",
         ) if k in assembly_params}
         key = compute_bundle_cache_key(**key_params)
         cached = try_load(spark, cache_uri, key)

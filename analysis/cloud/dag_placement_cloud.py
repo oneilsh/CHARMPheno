@@ -135,6 +135,18 @@ def parse_args(argv=None):
     p.add_argument("--doc-min-length", type=int, default=0)
     p.add_argument("--prior-obs-days", type=int, default=365)
     p.add_argument("--window-days", type=int, default=365)
+    p.add_argument("--window-mode", choices=["forward", "lookback"], default="forward",
+                   help="'forward': existing single-window behavior (label window "
+                        "runs forward from the observation window). 'lookback': "
+                        "pre-index feature frame (--lookback-days back from an "
+                        "index date) + forward label frame (--label-window-days), "
+                        "leakage-free by construction.")
+    p.add_argument("--lookback-days", type=int, default=365,
+                   help="window_mode=lookback only: how far back from the index "
+                        "date the feature window extends.")
+    p.add_argument("--label-window-days", type=int, default=365,
+                   help="window_mode=lookback only: how far forward from the "
+                        "index date the label window extends.")
     # assembly / DAG. `disease` selects both the foreground cohort and the label-
     # DAG anchors (cohorts.disease_anchors): single-disease (diabetes, eds) roots
     # at one anchor; a multi-disease name (rare6) builds a forest of subtrees.
@@ -209,7 +221,9 @@ def main() -> int:
                 doc_min_length=args.doc_min_length, prior_obs_days=args.prior_obs_days,
                 window_days=args.window_days, disease=args.disease, min_n=args.min_n,
                 holdout_frac=args.holdout_frac, n_bg=args.n_bg, tpn=args.tpn,
-                strip_mode=args.strip_mode)
+                strip_mode=args.strip_mode, window_mode=args.window_mode,
+                lookback_days=args.lookback_days,
+                label_window_days=args.label_window_days)
             print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
 
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
@@ -293,6 +307,8 @@ def main() -> int:
                 "spectral_method_resolved": resolved_spectral,
                 "anchor_scope": args.anchor_scope,
                 "disease": args.disease, "min_n": args.min_n, "strip_mode": args.strip_mode,
+                "window_mode": args.window_mode, "lookback_days": args.lookback_days,
+                "label_window_days": args.label_window_days,
                 "node_alpha_scale": args.node_alpha_scale,
                 "mini_batch_fraction": args.mini_batch_fraction,
                 "learning_rate_tau0": args.learning_rate_tau0,

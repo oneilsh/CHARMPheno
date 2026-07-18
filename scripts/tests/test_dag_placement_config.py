@@ -132,6 +132,22 @@ def test_anchor_scope_config_and_argv(monkeypatch):
     assert args52[args52.index("--anchor-scope") + 1] == "closure"
 
 
+def test_lookback_window_config_and_argv(monkeypatch):
+    mod = importlib.import_module("run_experiment")
+    monkeypatch.setattr(mod, "_require_workspace_env", lambda: ("p.d", "bill"))
+    for slug, lb in [("0061-dag-placement-rare6-lookback-1yr", 365),
+                     ("0062-dag-placement-rare6-lookback-5yr", 1825)]:
+        eff = _load_effective(mod, f"docs/experiments/{slug}.md")
+        assert eff["window_mode"] == "lookback"
+        assert eff["lookback_days"] == lb
+        assert eff["label_window_days"] == 365
+        args = mod.build_dag_placement_args(eff, "/out")
+        assert args[args.index("--window-mode") + 1] == "lookback"
+        assert args[args.index("--lookback-days") + 1] == str(lb)
+    eff52 = _load_effective(mod, "docs/experiments/0052-dag-placement-diabetes-random.md")
+    assert eff52["window_mode"] == "forward"     # _base default preserves forward
+
+
 def test_rare6_alpha_by_strip_2x2_grid(monkeypatch):
     # The rare6 2x2: strip_mode (test_only|both) x node_alpha_scale (0.1|1.0).
     #   0055 asym/test_only  0056 sym/test_only
