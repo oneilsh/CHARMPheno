@@ -491,3 +491,47 @@ def test_strip_mode_both_strips_train_features(spark):
         train_stripped = all(node200 not in set(r["features"].indices.tolist())
                              for r in b_both.train_df.collect())
         assert train_has and train_stripped
+
+
+def test_assemble_from_events_label_events_decouples_features_from_frontier(spark):
+    # Feature frame carries ONLY non-node tokens (pre-index phenotype); the label
+    # frame carries the DAG node code. The frontier must come from the label frame
+    # and the BOW features from the feature frame — never mixed.
+    import datetime as dt
+    from charmpheno.omop.case_finding_assembly import assemble_from_events, _condition_dag_from_frames
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+    # Minimal DAG: root anchor 100, one child node 200 (single-disease).
+    concept = spark.createDataFrame(
+        [(100, "anchor", "S", "Condition"), (200, "sub", "S", "Condition")],
+        ["concept_id", "concept_name", "standard_concept", "domain_id"])
+    ca = spark.createDataFrame(
+        [(100, 200, 1)],
+        ["ancestor_concept_id", "descendant_concept_id", "min_levels_of_separation"])
+    dag = _condition_dag_from_frames(concept, ca, anchors=100, root=None)
+
+    def ev(rows):   # (person, concept, source_cohort, date)
+        return spark.createDataFrame(
+            [(p, c, s, d) for (p, c, s, d) in rows],
+            ["person_id", "concept_id", "source_cohort", "condition_era_start_date"])
+    feats, labels = [], []
+    for p in range(1, 13):
+        feats += [(p, 900, "dis", dt.date(2014, 1, 1)), (p, 901, "dis", dt.date(2014, 2, 1))]
+        labels += [(p, 200, "dis", dt.date(2015, 1, 1))]        # node code, post-index
+    for p in range(100, 130):
+        feats += [(p, 900, "general", dt.date(2014, 1, 1))]     # background feature only
+    feature_events, label_events = ev(feats), ev(labels)
+
+    doc_spec = PatientCohortDocSpec(min_doc_length=0)
+    bundle = assemble_from_events(
+        feature_events, dag, doc_spec=doc_spec, min_n=2, holdout_frac=0.25,
+        vocab_size=50, min_df=1, min_patient_count=1, n_bg=2, tpn=1,
+        label_events=label_events)
+    # Node code 200 defines the DAG; it must NOT be in the feature vocab (features
+    # are the 900/901 tokens only) — proving features came from the feature frame.
+    assert 200 not in bundle.vocab_map
+    assert 900 in bundle.vocab_map
+    # Foreground docs got a non-empty frontier (from the label frame's node code).
+    fr = {r["doc_id"]: r["frontier"]
+          for r in bundle.train_df.select("doc_id", "frontier").collect()}
+    assert any(len(v) > 0 for k, v in fr.items() if k.startswith("dis:"))
+    assert all(len(v) == 0 for k, v in fr.items() if k.startswith("general:"))

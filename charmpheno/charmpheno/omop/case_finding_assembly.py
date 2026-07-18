@@ -232,7 +232,8 @@ class CaseFindingBundle:
 def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
                          holdout_frac=0.2, split_salt=_SPLIT_SALT,
                          vocab_size, min_df, min_patient_count,
-                         n_bg=2, tpn=1, strip_mode="test_only") -> CaseFindingBundle:
+                         n_bg=2, tpn=1, strip_mode="test_only",
+                         label_events=None) -> CaseFindingBundle:
     """Assemble the case-finding bundle from already-windowed events (with a
     `source_cohort` column) + the pre-prune concept-id DAG. This is the testable
     core: no BigQuery, pure Spark + domain logic. See the module docstring for the
@@ -248,7 +249,18 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
     counts alone. `cohort_frontiers` (train) for the ledger's (train)
     coarsening rate is computed from the FOREGROUND docs only (background
     attestations are empty) and collected to the driver — foreground scale,
-    run once at prep time."""
+    run once at prep time.
+
+    `label_events` (optional): when given, the frontier (attestation ->
+    `doc_attested_nodes`/`attach_frontiers`) is derived from `label_events`
+    instead of `events_df`, while features (`to_bow_dataframe`) still come from
+    `events_df`. This is lookback mode: a patient's features are their
+    pre-index history and their frontier is read from a separate forward
+    window. The patient split is applied to BOTH frames with the same
+    `split_train_test(holdout_frac, split_salt)` so a person's feature and
+    label rows land on the same side. When `label_events is None` (default,
+    forward mode) behavior is unchanged: frontier and features both come from
+    `events_df`."""
     from pyspark.sql import functions as F
     from charmpheno.omop.condition_dag import prune_by_attestation, pruning_ledger
     from charmpheno.omop.topic_prep import to_bow_dataframe
@@ -256,13 +268,26 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
 
     node_cids = before_dag.nodes()
     # 1) split PATIENTS first (events carry person_id); nothing downstream sees
-    #    the other side. Same deterministic hash as the doc-level split.
+    #    the other side. Same deterministic hash as the doc-level split. When a
+    #    separate label frame is given (lookback mode: features are the
+    #    pre-index window, the frontier is read from the forward label window),
+    #    split it on the SAME person hash so a person's feature and label rows
+    #    stay on the same side. label_events is None in forward mode -> frontier
+    #    and features both come from events_df (unchanged).
     train_events, test_events = split_train_test(
         events_df, holdout_frac=holdout_frac, split_salt=split_salt)
+    if label_events is None:
+        train_lab, test_lab = train_events, test_events
+    else:
+        train_lab, test_lab = split_train_test(
+            label_events, holdout_frac=holdout_frac, split_salt=split_salt)
 
-    # 2) prune the DAG on TRAIN patient counts only.
-    train_att = doc_attested_nodes(train_events, node_cids, doc_spec=doc_spec).cache()
-    test_att = doc_attested_nodes(test_events, node_cids, doc_spec=doc_spec).cache()
+    # 2) prune the DAG on TRAIN patient counts only. Attestations come from the
+    #    label frame (== events_df in forward mode). NOTE (lookback mode): the
+    #    leakage strip below (step 6) is a no-op in this mode, since DAG node
+    #    codes are absent from the feature frame (events_df) by construction.
+    train_att = doc_attested_nodes(train_lab, node_cids, doc_spec=doc_spec).cache()
+    test_att = doc_attested_nodes(test_lab, node_cids, doc_spec=doc_spec).cache()
     try:
         counts = node_patient_counts(train_att)
         after_dag = prune_by_attestation(before_dag, counts, min_n)
