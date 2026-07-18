@@ -535,3 +535,12 @@ def test_assemble_from_events_label_events_decouples_features_from_frontier(spar
           for r in bundle.train_df.select("doc_id", "frontier").collect()}
     assert any(len(v) > 0 for k, v in fr.items() if k.startswith("dis:"))
     assert all(len(v) == 0 for k, v in fr.items() if k.startswith("general:"))
+
+
+def test_assemble_case_finding_corpus_accepts_window_mode_params():
+    import inspect
+    from charmpheno.omop.case_finding_assembly import assemble_case_finding_corpus
+    sig = inspect.signature(assemble_case_finding_corpus)
+    assert sig.parameters["window_mode"].default == "forward"
+    assert sig.parameters["lookback_days"].default == 365
+    assert sig.parameters["label_window_days"].default == 365

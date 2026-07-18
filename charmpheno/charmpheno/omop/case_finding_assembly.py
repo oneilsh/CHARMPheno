@@ -448,10 +448,23 @@ def assemble_case_finding_corpus(spark, *, disease="diabetes", cdr, billing,
                                  vocab_size, min_df, min_patient_count,
                                  n_bg=2, tpn=1, doc_min_length=0,
                                  prior_obs_days=365, window_days=365,
-                                 strip_mode="test_only"):
+                                 strip_mode="test_only", window_mode="forward",
+                                 lookback_days=365, label_window_days=365):
     """End-to-end BQ assembly: load OMOP (person_mod sample), apply the
-    `disease`+background cohort (one `window_days` window per patient), build the
-    disease's label DAG, and assemble the bundle.
+    `disease`+background cohort, build the disease's label DAG, and assemble the
+    bundle.
+
+    `window_mode="forward"` (default, unchanged behavior): one `window_days`
+    window per patient via `apply_population_disease_cohort`; frontier and
+    features both come from that single window (`assemble_from_events`'s
+    `label_events=None` path).
+
+    `window_mode="lookback"`: an index date per patient
+    (`cohorts.case_finding_index_table`) splits raw events into a pre-index
+    feature frame (`lookback_days` back) and a forward label frame
+    (`label_window_days` forward) via `cohorts.lookback_feature_label_events`.
+    Features are read from the feature frame, the frontier from the label frame
+    (`assemble_from_events(..., label_events=label_events)`).
 
     `disease` is the single knob. Its DAG anchors come from the cohort registry
     (cohorts.disease_anchors) — the SAME concept ancestors that define the
@@ -461,19 +474,39 @@ def assemble_case_finding_corpus(spark, *, disease="diabetes", cdr, billing,
     over assemble_from_events; the per-doc unit is PatientCohortDocSpec (doc_id =
     source_cohort:person_id) so each patient's single window is exactly one
     document. Requires a live CDR; unit tests cover assemble_from_events and
-    _condition_dag_from_frames directly."""
+    _condition_dag_from_frames directly (the lookback BQ body here is
+    cluster-covered, not unit-tested — only the arg surface is)."""
     from charmpheno.omop import load_omop_bigquery
-    from charmpheno.omop.cohorts import apply_population_disease_cohort, disease_anchors
+    from charmpheno.omop.cohorts import (
+        apply_population_disease_cohort, disease_anchors,
+        case_finding_index_table, lookback_feature_label_events,
+    )
     from charmpheno.omop.doc_spec import PatientCohortDocSpec
 
     omop = load_omop_bigquery(
         spark=spark, cdr_dataset=cdr, billing_project=billing,
         person_sample_mod=person_mod, source_table=source_table)
     date_col = "condition_era_start_date"
-    events = apply_population_disease_cohort(
-        omop, disease=disease, window_days=window_days,
-        spark=spark, cdr_dataset=cdr, billing_project=billing,
-        date_col=date_col, prior_obs_days=prior_obs_days)
+
+    if window_mode == "lookback":
+        index_df = case_finding_index_table(
+            omop, disease=disease, spark=spark, cdr_dataset=cdr,
+            billing_project=billing, date_col=date_col,
+            prior_obs_days=prior_obs_days, label_window_days=label_window_days)
+        feature_events, label_events = lookback_feature_label_events(
+            omop, index_df, date_col=date_col,
+            lookback_days=lookback_days, label_window_days=label_window_days)
+        events, label_arg = feature_events, label_events
+    elif window_mode == "forward":
+        events = apply_population_disease_cohort(
+            omop, disease=disease, window_days=window_days,
+            spark=spark, cdr_dataset=cdr, billing_project=billing,
+            date_col=date_col, prior_obs_days=prior_obs_days)
+        label_arg = None
+    else:
+        raise ValueError(
+            f"window_mode must be 'forward' or 'lookback', got {window_mode!r}")
+
     anchors = disease_anchors(disease)
     root = _FOREST_ROOT_CID if len(anchors) > 1 else None
     before_dag = load_condition_dag(
@@ -483,4 +516,4 @@ def assemble_case_finding_corpus(spark, *, disease="diabetes", cdr, billing,
         events, before_dag, doc_spec=doc_spec, min_n=min_n,
         holdout_frac=holdout_frac, split_salt=split_salt, vocab_size=vocab_size,
         min_df=min_df, min_patient_count=min_patient_count, n_bg=n_bg, tpn=tpn,
-        strip_mode=strip_mode)
+        strip_mode=strip_mode, label_events=label_arg)
