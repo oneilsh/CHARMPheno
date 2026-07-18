@@ -20,17 +20,27 @@ spectral_max_vocab: 12000
 spectral_method: scalable
 anchor_scope: frontier
 strip_mode: both
-max_iter: 200
+max_iter: 1000
 seed: 42
 cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
 ---
 
 # exp 0060 — DAG-placement rare6 forest, FRONTIER-scoped spectral anchors
 
-Identical to exp 0059 (sym α + strip_both + scalable-spectral init, detection auc
-0.695) in every field EXCEPT `anchor_scope: frontier` (0059 is the default
-`closure`). A clean A/B on the anchor-scope hypothesis; same cached strip_both
-corpus, same scalable init, same schedule.
+Differs from exp 0059 (sym α + strip_both + scalable-spectral init) in
+`anchor_scope: frontier` (0059 is the default `closure`) and, as of the long
+run, `max_iter: 1000`.
+
+The frontier-vs-closure A/B is already sealed at `max_iter: 200` (both full-200,
+both reproduced): frontier wins every metric — detection 0.709 vs 0.697, and
+deep-node routing `auc_by_depth` d2 0.604 vs 0.575, d3 0.586 vs 0.552. At 200
+iters the fit had effectively converged by ~150 (full-200 ≈ early-stopped-157).
+`max_iter: 1000` is a long-run probe: does that plateau simply hold, or is there
+slow late-stage drift the 200-iter budget missed? Now that mini-batch fits run
+the full budget (no noisy-ELBO early stop), all 1000 iterations execute. The
+Robbins-Monro step size keeps shrinking (rho ≈ 0.017 at iter 200 → ≈ 0.007 at
+1000), so late updates are small — improvement, if any, will be gradual. NB: this
+overwrites 0060's run dir; the sealed 200-iter A/B numbers above are the record.
 
 ## The hypothesis
 
