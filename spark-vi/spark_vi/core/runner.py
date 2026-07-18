@@ -100,10 +100,13 @@ class VIRunner:
     ) -> VIResult:
         """Run the distributed VI loop until convergence (full-batch) or max_iterations.
 
-        Mini-batch fits (cfg.mini_batch_fraction set) never early-stop — the
-        per-minibatch ELBO is too noisy for a valid convergence test, so they run
-        the full max_iterations, matching Spark MLlib's online LDA. Only full-batch
-        fits use the ELBO relative-change early-stop.
+        Mini-batch fits never early-stop — the per-minibatch ELBO is too noisy for
+        a valid convergence test, so they run the full max_iterations, matching
+        Spark MLlib's online LDA. Only full-batch fits use the ELBO relative-change
+        early-stop. "Full-batch" here means cfg.mini_batch_fraction is None; a set
+        fraction is always treated as mini-batch — including 1.0, since
+        RDD.sample(fraction=1.0) is still a stochastic (non-identity) draw, so its
+        ELBO is a sampled quantity. Use None (not 1.0) for full-batch + early-stop.
 
         The returned VIResult's `metadata` is the merge of
         `model.get_metadata()` with runner-set keys (`model_class`, and
