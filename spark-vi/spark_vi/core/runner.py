@@ -98,7 +98,12 @@ class VIRunner:
         resume_from: Path | str | None = None,
         on_iteration: Callable[[int, dict, list[float]], None] | None = None,
     ) -> VIResult:
-        """Run the distributed VI loop until convergence or max_iterations.
+        """Run the distributed VI loop until convergence (full-batch) or max_iterations.
+
+        Mini-batch fits (cfg.mini_batch_fraction set) never early-stop — the
+        per-minibatch ELBO is too noisy for a valid convergence test, so they run
+        the full max_iterations, matching Spark MLlib's online LDA. Only full-batch
+        fits use the ELBO relative-change early-stop.
 
         The returned VIResult's `metadata` is the merge of
         `model.get_metadata()` with runner-set keys (`model_class`, and
@@ -325,7 +330,17 @@ class VIRunner:
             if cfg.mini_batch_fraction is not None:
                 batch_rdd.unpersist(blocking=False)
 
-            if model.has_converged(elbo_trace, cfg.convergence_tol):
+            # Early-stop only in FULL-BATCH mode. In mini-batch SVI the
+            # per-iteration ELBO is computed on a fresh random sub-sample, so
+            # its iteration-to-iteration variance makes a two-point
+            # relative-change test fire on coincidental closeness, not true
+            # convergence (repeatedly observed: false stops at iter 67 and 157
+            # of a 200-iter budget). Spark MLlib's reference online LDA
+            # (OnlineLDAOptimizer) has NO convergence tolerance and runs exactly
+            # maxIterations for this reason; we match it — mini-batch fits run
+            # the full budget, full-batch fits keep the valid corpus-wide check.
+            if (cfg.mini_batch_fraction is None
+                    and model.has_converged(elbo_trace, cfg.convergence_tol)):
                 converged = True
                 log.info("Converged at iteration %d (ELBO=%.6f)", step + 1, elbo)
                 # One-more unpersist for the final broadcast.

@@ -92,6 +92,30 @@ def test_vi_runner_rejects_non_vi_model(spark):
 # Mini-batch sampling tests --------------------------------------------------
 
 
+def test_vi_runner_mini_batch_never_early_stops(spark):
+    """Mini-batch fits ignore the (noisy) per-minibatch ELBO convergence check
+    and run the full max_iterations, matching Spark MLlib's online LDA (which has
+    no convergence tolerance). Even an absurdly wide tolerance that WOULD trip
+    has_converged after 2 iters must not early-stop a mini-batch fit — whereas
+    the same wide tolerance DOES stop a full-batch fit (see
+    test_vi_runner_early_stop_branch_triggers)."""
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.models.topic.counting import CountingModel
+
+    rdd = spark.sparkContext.parallelize([1] * 100 + [0] * 100, numSlices=4).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
+    model = CountingModel()
+    runner = VIRunner(
+        model=model,
+        config=VIConfig(max_iterations=6, convergence_tol=1e10,   # would stop @2 if gated off
+                        mini_batch_fraction=0.5, random_seed=42),
+    )
+    result = runner.fit(rdd)
+    assert result.converged is False
+    assert result.n_iterations == 6
+    assert len(result.elbo_trace) == 6
+
+
 def test_vi_runner_uses_mini_batch_when_fraction_set(spark):
     """With mini_batch_fraction set, the runner samples each iteration.
 
