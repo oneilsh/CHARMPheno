@@ -1452,3 +1452,63 @@ def apply_population_drug_cohort(
     ).withColumn("source_cohort", F.lit("general"))
 
     return drug_windows.unionByName(general)
+
+
+def lookback_feature_label_events(events_df, index_df, *, date_col,
+                                  lookback_days, label_window_days):
+    """Split raw events into a pre-index feature frame and a forward label frame.
+
+    `index_df` = (person_id, index_date, source_cohort). Feature frame = events in
+    [index_date - lookback_days, index_date); label frame = events in
+    [index_date, index_date + label_window_days). Each frame carries source_cohort
+    (index_date dropped). Events only occur within observation periods, so the
+    lookback naturally yields the available history (up to lookback_days); the
+    >=1yr-prior observation requirement is enforced upstream in the index table.
+    """
+    joined = events_df.join(F.broadcast(index_df), on="person_id", how="inner")
+    feature = (joined
+               .where(F.col(date_col) < F.col("index_date"))
+               .where(F.col(date_col) >= F.date_sub(F.col("index_date"), lookback_days))
+               .drop("index_date"))
+    label = (joined
+             .where(F.col(date_col) >= F.col("index_date"))
+             .where(F.col(date_col) < F.date_add(F.col("index_date"), label_window_days))
+             .drop("index_date"))
+    return feature, label
+
+
+def case_finding_index_table(cond_df, *, disease, spark, cdr_dataset,
+                             billing_project, date_col, prior_obs_days=365,
+                             label_window_days=_WINDOW_DAYS):
+    """(person_id, index_date, source_cohort) for the disease + general arms.
+
+    Foreground: first qualifying dx (min over the disease's inclusion-minus-
+    exclusion descendants), gated by _window_observed_cohort so the symmetric
+    bracket [index - prior_obs_days, index + label_window_days) is observed.
+    Background: _random_event_windows over everyone else, same gate. No windowing
+    of events here — just the gated index per person; lookback_feature_label_events
+    does the windowing. Reuses the same helpers as the forward cohorts."""
+    spec = _DISEASE_REGISTRY[disease]
+
+    def _read(table):
+        return (spark.read.format("bigquery")
+                .option("table", f"{cdr_dataset}.{table}")
+                .option("parentProject", billing_project).load())
+
+    ca = _read("concept_ancestor").select("ancestor_concept_id", "descendant_concept_id")
+    concepts = _concept_set_from_ancestors(
+        ca, inclusion_ancestors=spec["inclusion_ancestors"],
+        exclusion_ancestors=spec["exclusion_ancestors"])
+    first_dx = (cond_df.join(F.broadcast(concepts), on="concept_id", how="inner")
+                .groupBy("person_id").agg(F.min(date_col).alias("index_date")))
+    op = _read("observation_period").select(
+        "person_id", "observation_period_start_date", "observation_period_end_date")
+
+    fg = (_window_observed_cohort(first_dx, op, prior_obs_days=prior_obs_days,
+                                  window_days=label_window_days)
+          .withColumn("source_cohort", F.lit(disease)))
+    non = cond_df.join(fg.select("person_id").distinct(), on="person_id", how="left_anti")
+    bg = (_random_event_windows(non, op, date_col=date_col,
+                                window_days=label_window_days, prior_obs_days=prior_obs_days)
+          .withColumn("source_cohort", F.lit("general")))
+    return fg.unionByName(bg)

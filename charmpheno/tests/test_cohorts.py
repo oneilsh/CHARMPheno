@@ -525,3 +525,32 @@ def test_expand_descendants_includes_self_and_children(spark):
     seeds = spark.createDataFrame([(779705,)], ["concept_id"])
     out = {r["concept_id"] for r in _expand_descendants(ca, seeds).collect()}
     assert out == {779705, 900, 901}
+
+
+def test_lookback_feature_label_events_splits_pre_and_post_index(spark):
+    import datetime as dt
+    from charmpheno.omop.cohorts import lookback_feature_label_events
+    events = spark.createDataFrame(
+        [   # person, concept, date
+            (1, 900, dt.date(2013, 6, 1)),   # 1.5y pre-index -> feature (within 5y, before)
+            (1, 901, dt.date(2014, 6, 1)),   # 0.5y pre-index -> feature
+            (1, 200, dt.date(2015, 1, 1)),   # index day -> label
+            (1, 201, dt.date(2015, 6, 1)),   # 0.5y post -> label
+            (1, 999, dt.date(2011, 1, 1)),   # 4y pre -> feature only if lookback>=~4y
+        ],
+        ["person_id", "concept_id", "condition_era_start_date"])
+    index_df = spark.createDataFrame(
+        [(1, dt.date(2015, 1, 1), "dis")], ["person_id", "index_date", "source_cohort"])
+    feat, lab = lookback_feature_label_events(
+        events, index_df, date_col="condition_era_start_date",
+        lookback_days=365, label_window_days=365)
+    fc = {r["concept_id"] for r in feat.collect()}
+    lc = {r["concept_id"] for r in lab.collect()}
+    assert fc == {901}                    # only within [index-1y, index)
+    assert lc == {200, 201}               # only within [index, index+1y)
+    assert "index_date" not in feat.columns and "source_cohort" in feat.columns
+    # 5-year lookback pulls the older feature events too
+    feat5, _ = lookback_feature_label_events(
+        events, index_df, date_col="condition_era_start_date",
+        lookback_days=1825, label_window_days=365)
+    assert {r["concept_id"] for r in feat5.collect()} == {900, 901, 999}
