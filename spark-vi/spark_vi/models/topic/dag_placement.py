@@ -226,6 +226,78 @@ def profile(doc, beta_hat, lay, *, alpha=0.1, n_iter=60, burn=30, rng=None):
     return {u: float(th[lay.block[u]].sum()) for u in lay.nodes}
 
 
+def _lr_logratio_rows(lam, lay, *, alpha, bg, epsilon):
+    """Per-node shrunk log-ratio row log[P(w|node u)/bg(w)], stacked [n_nodes x V].
+
+    P(w|node u) = (Σ_{k in block(u)} λ[k,w] + α·bg(w)) / (Σλ(u) + α) — Dirichlet /
+    empirical-Bayes smoothing toward the background base rate bg: large α pulls a
+    mass-starved node toward bg (under-evidenced and unseen codes -> log-ratio ≈ 0),
+    small α trusts the node's own counts. Floored at epsilon so α=0 never yields
+    log(0)."""
+    n_nodes = len(lay.nodes)
+    logratio = np.zeros((n_nodes, lam.shape[1]))
+    for i, u in enumerate(lay.nodes):
+        nc = lam[lay.block[u]].sum(axis=0)
+        p_u = (nc + alpha * bg) / (nc.sum() + alpha)
+        logratio[i] = np.log(np.maximum(p_u, epsilon) / bg)
+    return logratio
+
+
+def _lr_base_rate(bow, background, epsilon):
+    if background is None:
+        col = np.asarray(bow.sum(axis=0)).ravel().astype(float)
+        bg = col / max(col.sum(), 1.0)
+    else:
+        bg = np.asarray(background, dtype=float)
+    return np.maximum(bg, epsilon)
+
+
+def lr_placement_scores(bow, lam, lay, *, alpha, background=None, epsilon=1e-9,
+                        count_mode="raw", length_normalize=False):
+    """Per-node Naive-Bayes log-likelihood-ratio placement score.
+
+    s(i,u) = Σ_w cnt(i,w)·log[P(w|node u)/bg(w)], reading the learned topic-word
+    counts λ as class-conditional distributions (P(w|node u) = the node block's λ
+    rows summed+normalized+shrunk toward bg; see `_lr_logratio_rows`). Unlike
+    θ-mass this does not compete on the simplex, and the log-ratio down-weights
+    common codes automatically (idf-for-free). `bow` [n_docs x V] counts (dense or
+    scipy.sparse); `background` = base rate (None -> corpus code frequency from
+    bow). count_mode 'raw'|'log1p' (saturate repeated codes); length_normalize
+    divides by the per-doc token count. Returns [n_docs x n_nodes], columns in
+    lay.nodes order."""
+    lam = np.asarray(lam, dtype=float)
+    bg = _lr_base_rate(bow, background, epsilon)
+    logratio = _lr_logratio_rows(lam, lay, alpha=alpha, bg=bg, epsilon=epsilon)
+    X = bow
+    if count_mode == "log1p":
+        if hasattr(X, "data"):
+            X = X.copy(); X.data = np.log1p(X.data)
+        else:
+            X = np.log1p(X)
+    scores = np.asarray(X @ logratio.T, dtype=float)
+    if length_normalize:
+        tok = np.asarray(bow.sum(axis=1)).ravel().astype(float)
+        scores = scores / np.maximum(tok, 1.0)[:, None]
+    return scores
+
+
+def lr_decompose(bow_row, lam, lay, u, *, alpha, background, epsilon=1e-9,
+                 count_mode="raw"):
+    """Itemized (w, count, contribution) for lr_placement_scores(...)[i, node u]
+    (raw, no length-normalization). Σ contributions == that score. Only codes
+    present in bow_row are returned, sorted by |contribution| desc."""
+    lam = np.asarray(lam, dtype=float)
+    bg = np.maximum(np.asarray(background, dtype=float), epsilon)
+    logratio = _lr_logratio_rows(lam, lay, alpha=alpha, bg=bg,
+                                 epsilon=epsilon)[lay.nodes.index(u)]
+    row = np.asarray(bow_row).ravel().astype(float)
+    cnt = np.log1p(row) if count_mode == "log1p" else row
+    contrib = cnt * logratio
+    out = [(int(w), float(row[w]), float(contrib[w])) for w in np.nonzero(row)[0]]
+    out.sort(key=lambda t: -abs(t[2]))
+    return out
+
+
 def _auc(scores, y):
     """Mann-Whitney (rank-sum) AUC. Ties in `scores` get AVERAGE (mid)ranks
     (scipy.stats.rankdata method='average'), so tied score blocks contribute

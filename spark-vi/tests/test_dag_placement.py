@@ -532,3 +532,59 @@ def test_evaluate_fdr_multimorbidity_beats_argmax():
     # patient (<=1); FDR credits both true nodes (~2). Both count true captures.
     assert mm["argmax_true_baseline_per_multimorbid"] <= 1.0
     assert mm["mean_true_discoveries_per_multimorbid"] > mm["argmax_true_baseline_per_multimorbid"]
+
+
+from spark_vi.models.topic.dag_placement import lr_placement_scores, lr_decompose
+
+def _lr_lay():
+    return DagLayout({1: [0], 2: [0]}, n_bg=1, tpn=1)   # 2 nodes, blocks [1],[2]; K=3
+
+def test_lr_scores_distinctive_code_separates_where_thetamass_would_not():
+    lay = _lr_lay()
+    V = 6
+    lam = np.full((3, V), 1.0)          # bg topic 0 flat
+    lam[1] = np.array([1, 1, 1, 40, 1, 1.0])   # node 1 signature = code 3
+    lam[2] = np.array([1, 1, 1, 1, 40, 1.0])   # node 2 signature = code 4
+    # background base rate: code 3 and 4 are globally rare, code 0 common
+    bg = np.array([50, 10, 10, 1, 1, 1.0]); bg = bg / bg.sum()
+    case = np.zeros(V); case[3] = 1; case[0] = 5     # has the node-1 signature + common noise
+    ctrl = np.zeros(V); ctrl[0] = 6                  # only the common code
+    S = lr_placement_scores(np.vstack([case, ctrl]), lam, lay, alpha=1.0, background=bg)
+    # Raw LR scores can be negative (the shared common-code terms are penalised
+    # under every node); what matters is RANKING. The case outranks the control on
+    # node 1 (has its signature), and for the case node 1 (its signature) beats
+    # node 2. That separation is exactly what the θ-mass readout misses.
+    assert S[0, 0] > S[1, 0]                          # case > control on node 1
+    assert S[0, 0] > S[0, 1]                          # case's node 1 (signature) > its node 2
+
+def test_lr_scores_shrinkage_pulls_toward_zero():
+    lay = _lr_lay()
+    V = 5
+    lam = np.full((3, V), 1.0); lam[1, 2] = 20.0       # node 1 likes code 2
+    bg = np.array([10, 10, 1, 10, 10.0]); bg = bg / bg.sum()
+    doc = np.zeros(V); doc[2] = 1
+    s_small = lr_placement_scores(doc[None], lam, lay, alpha=0.0, background=bg)[0, 0]
+    s_big = lr_placement_scores(doc[None], lam, lay, alpha=1e6, background=bg)[0, 0]
+    assert s_small > s_big                              # strong shrinkage -> toward 0
+    assert abs(s_big) < 1e-2                             # alpha huge -> ~neutral
+
+def test_lr_scores_alpha_zero_unseen_code_is_finite():
+    lay = _lr_lay()
+    V = 4
+    lam = np.full((3, V), 1.0); lam[1, 1] = 5.0
+    lam[1, 3] = 0.0                                     # node 1 NEVER saw code 3
+    bg = np.array([1, 1, 1, 1.0]) / 4
+    doc = np.zeros(V); doc[3] = 1                       # patient has the unseen code
+    s = lr_placement_scores(doc[None], lam, lay, alpha=0.0, background=bg)[0, 0]
+    assert np.isfinite(s)                               # epsilon floor, not -inf
+
+def test_lr_decompose_sums_to_score():
+    lay = _lr_lay()
+    V = 5
+    lam = np.full((3, V), 1.0); lam[1] = np.array([1, 1, 20, 1, 5.0])
+    bg = np.array([20, 10, 1, 5, 2.0]); bg = bg / bg.sum()
+    doc = np.array([0, 1, 2, 0, 3.0])                   # counts
+    parts = lr_decompose(doc, lam, lay, 1, alpha=1.0, background=bg)
+    score = lr_placement_scores(doc[None], lam, lay, alpha=1.0, background=bg)[0, 0]
+    assert abs(sum(c for _, _, c in parts) - score) < 1e-9
+    assert all(cnt > 0 for _, cnt, _ in parts)          # only present codes listed
