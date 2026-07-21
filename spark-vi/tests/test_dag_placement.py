@@ -588,3 +588,27 @@ def test_lr_decompose_sums_to_score():
     score = lr_placement_scores(doc[None], lam, lay, alpha=1.0, background=bg)[0, 0]
     assert abs(sum(c for _, _, c in parts) - score) < 1e-9
     assert all(cnt > 0 for _, cnt, _ in parts)          # only present codes listed
+
+
+from spark_vi.models.topic.dag_placement import lr_auc_sweep
+
+def test_lr_auc_sweep_separates_planted_cases():
+    rng = np.random.default_rng(0)
+    lay = _lr_lay()                                  # 2 nodes; BOTH informative so
+    V = 8                                            # max-over-nodes has no flat node
+    lam = np.full((3, V), 1.0)                       # to win at ~0 (a real-data hazard,
+    lam[1, 5] = 60.0                                 # noted in the caveats)
+    lam[2, 6] = 60.0                                 # node 1 -> code 5, node 2 -> code 6
+    bg = np.full(V, 1.0) / V
+    rows, is_fg = [], []
+    for _ in range(20):                              # node-1 cases: code 5 + light noise
+        d = np.zeros(V); d[5] = 1; d[0] = rng.integers(0, 2); rows.append(d); is_fg.append(True)
+    for _ in range(20):                              # node-2 cases: code 6
+        d = np.zeros(V); d[6] = 1; d[0] = rng.integers(0, 2); rows.append(d); is_fg.append(True)
+    for _ in range(300):                             # controls: only the common code
+        d = np.zeros(V); d[0] = rng.integers(1, 4); rows.append(d); is_fg.append(False)
+    bow = np.array(rows)
+    out = lr_auc_sweep(bow, lam, lay, np.array(is_fg),
+                       alpha_grid=[0.0, 1.0, 10.0, 100.0], background=bg)
+    assert set(out) == {0.0, 1.0, 10.0, 100.0}
+    assert max(out.values()) > 0.9                   # SOME alpha cleanly separates the signal

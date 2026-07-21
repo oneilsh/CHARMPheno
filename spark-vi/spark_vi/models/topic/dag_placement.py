@@ -298,6 +298,21 @@ def lr_decompose(bow_row, lam, lay, u, *, alpha, background, epsilon=1e-9,
     return out
 
 
+def lr_auc_sweep(bow, lam, lay, is_fg, *, alpha_grid, background=None,
+                 count_mode="raw", length_normalize=False):
+    """{alpha: case-vs-background ROC-AUC} of the max-over-nodes LR score, for each
+    alpha in alpha_grid. The fork-settler vs the θ-mass detection AUC: LR-AUC ≫
+    θ-AUC => signal present but buried (θ-mass was the wrong lens); LR-AUC ≈ θ-AUC
+    => signal genuinely absent."""
+    y = np.asarray(is_fg, dtype=int)
+    out = {}
+    for a in alpha_grid:
+        s = lr_placement_scores(bow, lam, lay, alpha=float(a), background=background,
+                                count_mode=count_mode, length_normalize=length_normalize)
+        out[float(a)] = _auc(s.max(axis=1), y)
+    return out
+
+
 def _auc(scores, y):
     """Mann-Whitney (rank-sum) AUC. Ties in `scores` get AVERAGE (mid)ranks
     (scipy.stats.rankdata method='average'), so tied score blocks contribute
