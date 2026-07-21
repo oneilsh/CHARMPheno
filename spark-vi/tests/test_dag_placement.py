@@ -490,3 +490,43 @@ def test_zib_gap_large_for_non_beta_sample():
 
 def test_zib_gap_degenerate_returns_nan():
     assert np.isnan(_zib_empirical_gap(np.zeros(50)))
+
+
+def _toy_lay():
+    # 3-node flat layout: root 0 with children 1,2,3. DagLayout(parent_map,
+    # n_bg, tpn); parent_map is child -> [parent], root 0 has no entry.
+    return DagLayout({1: [0], 2: [0], 3: [0]}, n_bg=2, tpn=1)
+
+def test_evaluate_backward_compatible_and_fdr_block_present():
+    lay = _toy_lay()
+    # NOTE: the plan's original premise gave every one of the 30 patients
+    # (cases and background alike) the IDENTICAL profile (0.6 on node 1, 0.05
+    # elsewhere) -- with cases statistically indistinguishable from the
+    # background reference, per_node_discoveries correctly finds p=1.0 for
+    # every doc (each value ties every reference value) and BH rejects
+    # nothing, so "n_discoveries >= 1" was unreachable regardless of
+    # implementation. Fixed here by giving cases a genuinely elevated node-1
+    # mass vs a distinct background reference, with a background arm large
+    # enough (n_bg=60) that the BH floor 1/(n_bg+1) clears the q=0.1
+    # threshold once corrected across all m=n_case+n_bg tests (verified: floor
+    # ~0.016, required cases ~3.7 given q=0.1 and m=75, n_case=15 well above).
+    n_case, n_bg = 15, 60
+    profiles = [{u: (0.6 if u == 1 else 0.05) for u in lay.nodes} for _ in range(n_case)] + \
+               [{u: 0.05 for u in lay.nodes} for _ in range(n_bg)]
+    labels = [{1} for _ in range(n_case)] + [set() for _ in range(n_bg)]   # cases on node 1
+    out = evaluate(profiles, labels, lay)                            # no doc_lengths
+    for k in ("mrr", "top2", "auc_by_depth", "detection", "recall_at_k"):
+        assert k in out                                             # prior keys intact
+    assert "fdr" in out and 0.1 in out["fdr"]["by_q"]
+    assert out["fdr"]["by_q"][0.1]["n_discoveries"] >= 1
+
+def test_evaluate_fdr_multimorbidity_beats_argmax():
+    lay = _toy_lay()
+    # patients truly on BOTH node 1 and node 2, with mass on both blocks.
+    profiles = [{1: 0.4, 2: 0.4, 3: 0.02} for _ in range(20)] + \
+               [{u: 0.02 for u in lay.nodes} for _ in range(200)]
+    labels = [{1, 2} for _ in range(20)] + [set() for _ in range(200)]
+    out = evaluate(profiles, labels, lay, doc_lengths=[10.0] * 220)
+    mm = out["fdr"]["multimorbidity"]
+    # argmax can credit at most one node per patient (<=1); FDR can credit both.
+    assert mm["mean_discoveries_per_multimorbid"] > mm["argmax_baseline_per_multimorbid"]

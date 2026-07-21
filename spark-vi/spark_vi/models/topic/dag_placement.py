@@ -507,7 +507,8 @@ def _hops(a, b, lay):
     return float("inf")
 
 
-def evaluate(profiles, test_labels, lay):
+def evaluate(profiles, test_labels, lay, *, doc_lengths=None,
+            fdr_q_grid=(0.05, 0.10, 0.20), n_length_bins=4):
     """Per-node case-finding AUC (subtree membership), AUC by longest-path depth, and set-valued
     ranking. `test_labels` entries may be frontier sets or scalars (scalars -> singletons). A patient
     is a positive for node u if any of its frontier lies in subtree(u). MRR/top2/mean_hops use the
@@ -607,6 +608,55 @@ def evaluate(profiles, test_labels, lay):
     detection["bg_mass_foreground_mean"] = (
         float(bg_mass[is_fg].mean()) if n_fg else float("nan"))
 
+    # --- FDR readout: background-relative, per-node, multiple-testing corrected -
+    # Post-hoc on P (node-block mass). Each (patient, node) is its own test; the
+    # background docs are the empirical null (Efron two-groups); BH per node.
+    node_list = lay.nodes
+    lengths = (np.asarray(doc_lengths, dtype=float) if doc_lengths is not None
+               else np.ones(len(fronts)))
+    nlb = n_length_bins if doc_lengths is not None else 1
+    q_grid = list(fdr_q_grid)
+    disc = per_node_discoveries(P, is_fg, lengths, q_grid=q_grid,
+                                n_length_bins=nlb)
+    truth = np.array([[node_pos[u][i] for u in node_list]
+                      for i in range(len(fronts))], dtype=bool)   # [n_docs x n_nodes]
+    by_q = {}
+    for q in q_grid:
+        m = disc["discoveries"][q]
+        ndisc = int(m.sum())
+        tp = int((m & truth).sum())
+        total_pos = int(truth.sum())
+        by_q[q] = {
+            "n_discoveries": ndisc,
+            "precision": float(tp / ndisc) if ndisc else float("nan"),
+            "recall": float(tp / total_pos) if total_pos else float("nan")}
+    # multimorbidity payoff at the middle q: discoveries per truly-multimorbid
+    # patient vs the argmax baseline (argmax credits <=1 node per patient).
+    q_mid = q_grid[len(q_grid) // 2]
+    mm_rows = np.array([len(f & set(node_list)) >= 2 for f in fronts])
+    if mm_rows.any():
+        m_mid = disc["discoveries"][q_mid]
+        mean_disc = float(m_mid[mm_rows].sum(axis=1).mean())
+        argmax_node = np.argmax(P[mm_rows], axis=1)
+        argmax_tp = truth[mm_rows][np.arange(mm_rows.sum()), argmax_node]
+        argmax_base = float(argmax_tp.mean())
+    else:
+        mean_disc = float("nan"); argmax_base = float("nan")
+    gaps = [_zib_empirical_gap(P[~is_fg, u]) for u in range(len(node_list))]
+    gaps = [g for g in gaps if not np.isnan(g)]
+    fdr_block = {
+        "q_grid": q_grid,
+        "by_q": by_q,
+        "multimorbidity": {
+            "mean_discoveries_per_multimorbid": mean_disc,
+            "argmax_baseline_per_multimorbid": argmax_base},
+        "saturation_rate": float(disc["floor"][disc["discoveries"][q_mid]].mean())
+            if disc["discoveries"][q_mid].any() else float("nan"),
+        "zib_gap_mean": float(np.mean(gaps)) if gaps else float("nan"),
+        "zib_gap_max": float(np.max(gaps)) if gaps else float("nan"),
+        "n_length_bins_effective": int(len(np.unique(disc["bins"]))),
+    }
+
     return {"node_auc": node_auc, "auc_by_depth": by_depth,
             "mrr": float(np.nanmean(1.0 / ranks)) if have_ranks else float("nan"),
             "top2": float(np.nanmean(ranks <= 2)) if have_ranks else float("nan"),
@@ -615,7 +665,8 @@ def evaluate(profiles, test_labels, lay):
             "multi_frontier_rate": float(np.mean([len(f) > 1 for f in fronts])),
             "node_ap": node_ap, "ap_macro": ap_macro, "ap_micro": ap_micro,
             "ap_prevalence_weighted": ap_prevalence_weighted,
-            "recall_at_k": recall_at_k, "ci": ci, "detection": detection}
+            "recall_at_k": recall_at_k, "ci": ci, "detection": detection,
+            "fdr": fdr_block}
 
 
 def _node_topic_mean(beta_hat, lay, u):
