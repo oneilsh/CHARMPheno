@@ -34,6 +34,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -87,6 +88,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "random held-out foreground cases, written to "
                         "{run_dir}/lr_readout/decompose.txt (in-enclave; "
                         "never printed to stdout).")
+    p.add_argument("--sample-background", type=int, default=0,
+                   help="Also itemize this many random BACKGROUND (empty-"
+                        "frontier) held-out docs, each decomposed against the "
+                        "node it scores HIGHEST on (the contrast: why did a "
+                        "non-case most resemble a disease?). Written to the "
+                        "same decompose.txt.")
     p.add_argument("--person", type=int, default=None,
                    help="Itemize an lr_decompose breakdown for this single "
                         "person_id instead of a random sample (also written "
@@ -112,11 +119,17 @@ def resolve_alpha_grid(multipliers, lam, lay) -> list[float]:
     median(node Sigma-lambda) (the Empirical-Bayes shrinkage target's natural
     unit -- see `_lr_logratio_rows`); 0.0 is kept absolute (0x median is still
     just 0, and 0 is the meaningful "no shrinkage" baseline, not a scaled
-    quantity)."""
+    quantity), and inf is kept absolute (the parameter-free α->∞ limit -- a
+    multiplier of median Sigma-lambda would be meaningless, and inf*0 is nan)."""
     lam = np.asarray(lam, dtype=float)
     node_sums = np.array([lam[lay.block[u]].sum() for u in lay.nodes], dtype=float)
     med = float(np.median(node_sums)) if len(node_sums) else 0.0
-    return sorted({0.0 if m == 0.0 else m * med for m in multipliers})
+
+    def _scale(m):
+        if m == 0.0 or math.isinf(m):
+            return m                       # 0 and inf are absolute, not scaled
+        return m * med
+    return sorted({_scale(m) for m in multipliers})
 
 
 def load_run(run_dir):
@@ -261,57 +274,68 @@ def _hash_person(person_id) -> str:
     return hashlib.sha256(str(person_id).encode("utf-8")).hexdigest()[:12]
 
 
-def render_decompose_rows(rows, idx_to_cid, name_by_id) -> list[str]:
+def render_decompose_rows(rows, idx_to_cid, name_by_cid) -> list[str]:
     """[(w, count, contribution), ...] (Task 1's lr_decompose output, already
     sorted by |contribution| desc) -> rendered lines with concept NAMES in
     place of raw vocab indices. `idx_to_cid` = vocab-idx -> concept-id (the
     inverse of CaseFindingBundle.vocab_map, which is {concept_id: vocab_idx});
-    `name_by_id` = concept-id -> concept name (CaseFindingBundle.name_by_id).
-    Falls back to the concept id, then the raw vocab index, if a lookup
-    misses. Pure string formatting; input order is preserved."""
+    `name_by_cid` = concept-id -> concept name for the FULL vocabulary (from
+    _vocab_concept_names' BigQuery lookup -- NOT bundle.name_by_id, which only
+    covers the ~DAG-node concepts). Falls back to the concept id, then the raw
+    vocab index, if a lookup misses. Pure string formatting; order preserved."""
     lines = []
     for w, count, contribution in rows:
         cid = idx_to_cid.get(w, w)
-        name = name_by_id.get(cid, cid)
+        name = name_by_cid.get(cid, cid)
         lines.append(f"{contribution:+.1f}  x{count:g}  {name}")
     return lines
 
 
-def select_cases(bundle, *, sample_cases=0, person=None, seed=0):
-    """Up to `sample_cases` random foreground held-out test docs (nonempty
-    frontier), or the single doc matching `person` (a person_id), as
-    `(person_id, SparseVector features, frontier engine-ids)` tuples.
-    Cluster-only: collects a small sample to the driver, not unit-tested."""
+def select_cases(bundle, *, sample_cases=0, sample_background=0, person=None, seed=0):
+    """Held-out test docs to itemize, as `(person_id, SparseVector features,
+    frontier engine-ids)` tuples: the single `person` doc if given, else up to
+    `sample_cases` random FOREGROUND docs (nonempty frontier) plus up to
+    `sample_background` random BACKGROUND docs (empty frontier). A background
+    doc's empty frontier signals the viewer to decompose it against its
+    top-scoring node. Cluster-only: collects a small sample, not unit-tested."""
     from pyspark.sql import functions as F
 
     df = bundle.test_df
     if person is not None:
-        df = df.filter(F.col("person_id") == person)
-    else:
-        df = df.filter(F.size(F.col("frontier")) > 0)
-        if sample_cases:
-            df = df.orderBy(F.rand(seed)).limit(sample_cases)
-    rows = df.select("person_id", "features", "frontier").collect()
-    return [(r["person_id"], r["features"], list(r["frontier"])) for r in rows]
+        rows = (df.filter(F.col("person_id") == person)
+                  .select("person_id", "features", "frontier").collect())
+        return [(r["person_id"], r["features"], list(r["frontier"])) for r in rows]
+
+    def _take(sub, n, salt):
+        rows = (sub.orderBy(F.rand(seed + salt)).limit(n)
+                   .select("person_id", "features", "frontier").collect())
+        return [(r["person_id"], r["features"], list(r["frontier"])) for r in rows]
+
+    out = []
+    if sample_cases:
+        out += _take(df.filter(F.size(F.col("frontier")) > 0), sample_cases, 0)
+    if sample_background:
+        out += _take(df.filter(F.size(F.col("frontier")) == 0), sample_background, 1)
+    return out
 
 
-def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background):
-    """Write an lr_decompose breakdown for each selected case's true frontier
-    node(s), rendered with concept names, to
-    {run_dir}/lr_readout/decompose.txt. Row-level (per-patient) content stays
-    in that file only -- in-enclave, never printed to stdout; any stdout/log
-    line here references only the SHA-256-truncated person id (this repo's
-    row-level log hygiene rule). Returns the written Path.
-
-    `idx_to_cid` inverts CaseFindingBundle.vocab_map ({concept_id: vocab_idx}
-    -> {vocab_idx: concept_id}); node names come from `int2cid` (engine-id ->
-    concept-id) composed with `name_by_id` (concept-id -> name) -- see the
-    id-space note on CaseFindingBundle: name_by_id must NOT be indexed by
-    engine-id directly."""
-    from spark_vi.models.topic.dag_placement import lr_decompose
+def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background,
+                      vocab_names):
+    """Write an lr_decompose breakdown for each selected doc to
+    {run_dir}/lr_readout/decompose.txt. A FOREGROUND doc (nonempty frontier) is
+    decomposed against each of its true frontier node(s); a BACKGROUND doc
+    (empty frontier) against the single node it scores HIGHEST on (the contrast
+    view). Codes are rendered with `vocab_names` (concept-id -> name for the
+    full vocabulary, from _vocab_concept_names -- NOT bundle.name_by_id, which
+    only covers the ~DAG-node concepts). Row-level content stays in that file
+    (in-enclave, never printed); stdout references only SHA-256-hashed ids.
+    Returns the written Path."""
+    from spark_vi.models.topic.dag_placement import lr_decompose, lr_placement_scores
 
     idx_to_cid = {i: c for c, i in bundle.vocab_map.items()}
-    node_name = {u: bundle.name_by_id.get(bundle.int2cid.get(u), u) for u in lay.nodes}
+    node_name = {u: vocab_names.get(bundle.int2cid.get(u),
+                                    bundle.name_by_id.get(bundle.int2cid.get(u), u))
+                 for u in lay.nodes}
     vocab_size = len(bundle.vocab_map)
 
     out_dir = Path(run_dir) / "lr_readout"
@@ -322,15 +346,22 @@ def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background):
     for person_id, sv, frontier in cases:
         bow_row = np.zeros(vocab_size, dtype=float)
         bow_row[np.asarray(sv.indices, dtype=np.int64)] = np.asarray(sv.values, dtype=float)
-        header = [f"person_id={person_id}"]
-        for u in frontier:
-            if u not in lay.block:
-                continue  # frontier node pruned out of this layout; skip
+        targets = [u for u in frontier if u in lay.block]
+        if targets:
+            kind, tag = "foreground", "true node"
+        else:
+            # background (or an all-pruned frontier): decompose the top-scoring node.
+            s = lr_placement_scores(bow_row[None], lam, lay, alpha=alpha,
+                                    background=background)[0]
+            targets = [lay.nodes[int(np.argmax(s))]]
+            kind, tag = "background", "top LR node"
+        header = [f"person_id={person_id}  [{kind}]"]
+        for u in targets:
             rows = lr_decompose(bow_row, lam, lay, u, alpha=alpha,
                                 background=background)
-            header.append(f"  true node: {node_name.get(u, u)} (engine id {u})")
+            header.append(f"  {tag}: {node_name.get(u, u)} (engine id {u})")
             header.extend("    " + ln for ln in render_decompose_rows(
-                rows, idx_to_cid, bundle.name_by_id))
+                rows, idx_to_cid, vocab_names))
         blocks.append("\n".join(header))
 
     out_path.write_text("\n\n".join(blocks) + "\n" if blocks else "")
@@ -385,16 +416,23 @@ def npmi_table(spark, lam, bundle, topic_labels, *, top_n=20):
     return rows
 
 
-def _viewer_alpha(multipliers, alpha_values):
-    """The single alpha value the per-case viewer's lr_decompose calls use:
-    the design-doc's canonical x1-median-Sigma-lambda shrinkage (multiplier
-    == 1.0) if it's in the swept grid, else the middle of the swept alpha
-    values (both lists are aligned + sorted the same way -- see
-    resolve_alpha_grid)."""
-    for m, a in zip(multipliers, alpha_values):
-        if m == 1.0:
-            return a
-    return alpha_values[len(alpha_values) // 2] if alpha_values else 0.0
+def _viewer_alpha(alpha_values, lr_aucs):
+    """The single alpha the per-case viewer decomposes at: the OPERATING point
+    -- the swept alpha with the highest case-vs-background LR-AUC. The low-alpha
+    log-LR over-penalises common codes (the gate under-represents them; see the
+    real-data note), so at low alpha cases do not even separate -- decomposing
+    there shows the wrong regime. Picking the best-AUC alpha means the per-code
+    breakdown reflects where cases actually separate, so it is interpretable.
+
+    inf is excluded from the choice: at inf the per-code contributions are the
+    unbounded (nc/bg - Σλ) limit (huge numbers, dominated by the -Σλ offset), so
+    the best-AUC FINITE alpha gives a readable log-ratio breakdown that still
+    sums to its score -- and near the peak it approximates the inf limit anyway."""
+    finite = [a for a in alpha_values if math.isfinite(a)]
+    pool = finite or list(alpha_values)
+    if not pool:
+        return 0.0
+    return max(pool, key=lambda a: lr_aucs.get(a, float("-inf")))
 
 
 def _background_from_bow(bow, epsilon=1e-9):
@@ -458,18 +496,34 @@ def main() -> int:
         npmi_table(spark, lam, bundle, topic_labels)
 
         # Per-case decomposition viewer: row-level, written in-enclave only.
-        if args.sample_cases or args.person is not None:
+        if args.sample_cases or args.sample_background or args.person is not None:
             cases = select_cases(bundle, sample_cases=args.sample_cases,
+                                 sample_background=args.sample_background,
                                  person=args.person)
             if not cases:
-                print("[lr_readout]   WARNING: --sample-cases/--person "
-                      "matched no held-out foreground cases; viewer not "
-                      "written.", flush=True)
+                print("[lr_readout]   WARNING: --sample-cases/--sample-background/"
+                      "--person matched no held-out docs; viewer not written.",
+                      flush=True)
             else:
+                # Concept names for the FULL vocabulary via BigQuery (bundle.name_by_id
+                # only covers DAG-node concepts, so vocab codes would print as raw ids).
+                # Best-effort: on any failure fall back to numeric ids.
+                cdr = manifest.get("corpus_manifest", {}).get("cdr") or manifest.get("cdr")
+                billing = os.environ.get("GOOGLE_CLOUD_PROJECT")
+                vocab_names = {}
+                try:
+                    from dag_placement_cloud import _vocab_concept_names
+                    vocab_names = _vocab_concept_names(spark, cdr, billing,
+                                                       bundle.vocab_map)
+                except Exception as exc:  # noqa: BLE001 - names are best-effort
+                    print(f"[lr_readout]   WARNING: could not fetch concept names "
+                          f"({exc}); decompose.txt will show numeric concept ids. "
+                          f"(needs manifest cdr + GOOGLE_CLOUD_PROJECT.)", flush=True)
                 background = _background_from_bow(bow)
-                viewer_alpha = _viewer_alpha(multipliers, alpha_values)
+                viewer_alpha = _viewer_alpha(alpha_values, lr_aucs)
                 write_case_viewer(args.run_dir, bundle, lam, lay, cases,
-                                  alpha=viewer_alpha, background=background)
+                                  alpha=viewer_alpha, background=background,
+                                  vocab_names=vocab_names)
     return 0
 
 

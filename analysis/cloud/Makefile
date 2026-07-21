@@ -345,8 +345,13 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 #                      own default is 0, which would MISS the cache key)
 # If the key still misses (e.g. a different experiment), pass the exact bundle
 # dir instead:  make lr-readout ID=N LR_ARGS="--bundle-path <cache_uri>/<key>"
-LR_CACHE_URI      ?= hdfs:///user/dataproc/charm/case_finding_cache
-LR_DOC_MIN_LENGTH ?= 10
+LR_CACHE_URI         ?= hdfs:///user/dataproc/charm/case_finding_cache
+LR_DOC_MIN_LENGTH    ?= 10
+# alpha grid: multipliers of the median node Sigma-lambda; 0 (no shrinkage) and
+# inf (the parameter-free limit) are always meaningful. 'inf' is a valid token.
+LR_ALPHA_GRID        ?= 0,1,10,100,inf
+LR_SAMPLE_CASES      ?= 20
+LR_SAMPLE_BACKGROUND ?= 5
 lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
@@ -363,6 +368,9 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
 	    --cache-uri $(LR_CACHE_URI) \
 	    --doc-min-length $(LR_DOC_MIN_LENGTH) \
+	    --alpha-grid $(LR_ALPHA_GRID) \
+	    --sample-cases $(LR_SAMPLE_CASES) \
+	    --sample-background $(LR_SAMPLE_BACKGROUND) \
 	    $(LR_ARGS)
 
 # Print summary.md for an experiment (copy/paste back to chat)

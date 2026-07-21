@@ -233,13 +233,22 @@ def _lr_logratio_rows(lam, lay, *, alpha, bg, epsilon):
     empirical-Bayes smoothing toward the background base rate bg: large α pulls a
     mass-starved node toward bg (under-evidenced and unseen codes -> log-ratio ≈ 0),
     small α trusts the node's own counts. Floored at epsilon so α=0 never yields
-    log(0)."""
+    log(0).
+
+    α = inf (the parameter-free limit): as α->∞, log(P/bg) = log((nc/bg + α)/(Σλ + α))
+    ~ (nc/bg - Σλ)/α, so the score's RANKING converges (up to the positive 1/α scale,
+    which AUC/argmax ignore) to the knob-free direction (nc/bg - Σλ) — a "lift minus
+    node-mass" score. This is the limit the α sweep approaches; use it to read the
+    readout with no shrinkage hyperparameter to choose."""
     n_nodes = len(lay.nodes)
     logratio = np.zeros((n_nodes, lam.shape[1]))
     for i, u in enumerate(lay.nodes):
         nc = lam[lay.block[u]].sum(axis=0)
-        p_u = (nc + alpha * bg) / (nc.sum() + alpha)
-        logratio[i] = np.log(np.maximum(p_u, epsilon) / bg)
+        if np.isinf(alpha):
+            logratio[i] = nc / bg - nc.sum()          # parameter-free α->∞ limit
+        else:
+            p_u = (nc + alpha * bg) / (nc.sum() + alpha)
+            logratio[i] = np.log(np.maximum(p_u, epsilon) / bg)
     return logratio
 
 

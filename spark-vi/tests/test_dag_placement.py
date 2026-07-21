@@ -590,6 +590,21 @@ def test_lr_decompose_sums_to_score():
     assert all(cnt > 0 for _, cnt, _ in parts)          # only present codes listed
 
 
+def test_lr_placement_scores_infinite_alpha_is_finite_and_separates():
+    # alpha=inf is the parameter-free limit (score direction nc/bg - Σλ). It must
+    # stay finite and still rank a distinctive-code case above a common-code control.
+    lay = _lr_lay()
+    V = 6
+    lam = np.full((3, V), 1.0); lam[1, 3] = 40.0          # node 1 signature = code 3
+    bg = np.array([50, 10, 10, 1, 1, 1.0]); bg = bg / bg.sum()
+    case = np.zeros(V); case[3] = 1; case[0] = 5
+    ctrl = np.zeros(V); ctrl[0] = 6
+    S = lr_placement_scores(np.vstack([case, ctrl]), lam, lay,
+                            alpha=float("inf"), background=bg)
+    assert np.isfinite(S).all()
+    assert S[0, 0] > S[1, 0]                              # separates at the limit
+
+
 from spark_vi.models.topic.dag_placement import lr_auc_sweep
 
 def test_lr_auc_sweep_separates_planted_cases():
