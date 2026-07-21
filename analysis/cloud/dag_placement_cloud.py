@@ -28,13 +28,16 @@ def profiles_from_scored_rows(rows, lay):
 
     Each row's `nodeAffinity` is a DenseVector ordered by lay.nodes; the profile
     is dict(zip(lay.nodes, affinity)). `frontier` (engine-ids) becomes the truth
-    set. Pure; the driver collects the test set (held-out scale) before calling."""
-    profiles, test_labels = [], []
+    set. `features` (the BOW vector) is summed to a per-doc token count, fed to
+    evaluate's length-conditioned FDR block. Pure; the driver collects the test
+    set (held-out scale) before calling."""
+    profiles, test_labels, doc_lengths = [], [], []
     for r in rows:
         aff = r["nodeAffinity"].toArray()
         profiles.append({u: float(aff[i]) for i, u in enumerate(lay.nodes)})
         test_labels.append({int(x) for x in r["frontier"]})
-    return profiles, test_labels
+        doc_lengths.append(float(r["features"].toArray().sum()))
+    return profiles, test_labels, doc_lengths
 
 
 def _log_corpus_stats(bundle, lay):
@@ -260,10 +263,11 @@ def main() -> int:
             model = est.fit(bundle.train_df)
 
         with _phase("transform + inline placement eval"):
-            scored = model.transform(bundle.test_df).select("nodeAffinity", "frontier")
+            scored = model.transform(bundle.test_df).select(
+                "nodeAffinity", "frontier", "features")
             rows = scored.collect()
-            profiles, test_labels = profiles_from_scored_rows(rows, lay)
-            metrics = evaluate(profiles, test_labels, lay)
+            profiles, test_labels, doc_lengths = profiles_from_scored_rows(rows, lay)
+            metrics = evaluate(profiles, test_labels, lay, doc_lengths=doc_lengths)
             print(f"[driver]   placement metrics: "
                   f"auc_by_depth={metrics['auc_by_depth']} mrr={metrics['mrr']:.3f} "
                   f"top2={metrics['top2']:.3f} mean_hops={metrics['mean_hops']:.2f} "
@@ -285,6 +289,21 @@ def main() -> int:
                   f"precision={op90.get('precision', float('nan')):.3f}; "
                   f"bg_mass mean bg={det['bg_mass_background_mean']:.3f} "
                   f"fg={det['bg_mass_foreground_mean']:.3f}", flush=True)
+            fdr = metrics["fdr"]
+            # NOTE: the by_q dict-comprehension is built as its own variable rather
+            # than inlined via `{{...}}` in the f-string below — braces escaped with
+            # `{{`/`}}` across ADJACENT (implicitly-concatenated) f-string literals do
+            # not form one interpolated expression; each literal is parsed on its own,
+            # so a naive `f"...{{expr}}" f"...more"` split prints the comprehension's
+            # SOURCE TEXT verbatim instead of evaluating it (verified empirically).
+            by_q_summary = {q: (v["n_discoveries"], round(v["precision"], 3),
+                                 round(v["recall"], 3))
+                            for q, v in fdr["by_q"].items()}
+            print(f"[driver]   fdr: by_q={by_q_summary} "
+                  f"multimorbidity={fdr['multimorbidity']} "
+                  f"saturation={fdr['saturation_rate']:.3f} "
+                  f"zib_gap_mean={fdr['zib_gap_mean']:.3f} "
+                  f"bins={fdr['n_length_bins_effective']}", flush=True)
             # Spot-check render for a few foreground held-out docs. names must be
             # ENGINE-id-keyed (remap concept-id name_by_id via int2cid).
             names = {i: bundle.name_by_id[c] for i, c in bundle.int2cid.items()
@@ -313,7 +332,8 @@ def main() -> int:
                 "mini_batch_fraction": args.mini_batch_fraction,
                 "learning_rate_tau0": args.learning_rate_tau0,
                 "learning_rate_kappa": args.learning_rate_kappa,
-                "max_iter": args.max_iter, "metrics": metrics, "ledger": bundle.ledger,
+                "max_iter": args.max_iter, "metrics": metrics, "fdr": metrics["fdr"],
+                "ledger": bundle.ledger,
                 "corpus_stats": corpus_stats,
                 "corpus_manifest": {
                     "cdr": args.cdr, "source_table": args.source_table,

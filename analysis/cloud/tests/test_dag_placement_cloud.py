@@ -3,23 +3,37 @@ and the arg surface. The end-to-end BQ+fit run is the cluster smoke."""
 
 
 def test_profiles_from_scored_rows_maps_affinity_and_frontier():
-    from pyspark.ml.linalg import DenseVector
+    from pyspark.ml.linalg import DenseVector, Vectors
     from spark_vi.models.topic.dag_placement import DagLayout
     from dag_placement_cloud import profiles_from_scored_rows
     lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=2, tpn=1)   # nodes = [1,2,3]
     # a "row" needs __getitem__ by name; use dicts (the driver indexes by name).
     rows = [
-        {"nodeAffinity": DenseVector([0.5, 0.3, 0.2]), "frontier": [3]},
-        {"nodeAffinity": DenseVector([0.1, 0.8, 0.1]), "frontier": [2, 1]},
+        {"nodeAffinity": DenseVector([0.5, 0.3, 0.2]), "frontier": [3],
+         "features": Vectors.sparse(5, {0: 1.0, 1: 2.0})},
+        {"nodeAffinity": DenseVector([0.1, 0.8, 0.1]), "frontier": [2, 1],
+         "features": Vectors.sparse(5, {2: 4.0})},
     ]
-    profiles, labels = profiles_from_scored_rows(rows, lay)
+    profiles, labels, lengths = profiles_from_scored_rows(rows, lay)
     assert profiles[0] == {1: 0.5, 2: 0.3, 3: 0.2}
     assert labels[0] == {3}
     assert labels[1] == {1, 2}
+    assert lengths == [3.0, 4.0]
     # profiles feed evaluate cleanly
     from spark_vi.models.topic.dag_placement import evaluate
     ev = evaluate(profiles, labels, lay)
     assert "auc_by_depth" in ev and "mrr" in ev
+
+
+def test_profiles_from_scored_rows_returns_token_lengths():
+    from pyspark.ml.linalg import Vectors
+    from dag_placement_cloud import profiles_from_scored_rows
+    from spark_vi.models.topic.dag_placement import DagLayout
+    lay = DagLayout({1: [0], 2: [0]}, n_bg=1, tpn=1)
+    rows = [{"nodeAffinity": Vectors.dense([0.3, 0.1]), "frontier": [1],
+             "features": Vectors.sparse(5, {0: 2.0, 3: 1.0})}]
+    profiles, labels, lengths = profiles_from_scored_rows(rows, lay)
+    assert lengths == [3.0]                        # 2 + 1
 
 
 def test_parse_args_surface():
