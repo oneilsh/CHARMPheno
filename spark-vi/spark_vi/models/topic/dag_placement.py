@@ -633,26 +633,33 @@ def evaluate(profiles, test_labels, lay, *, doc_lengths=None,
             "n_discoveries": ndisc,
             "precision": float(tp / ndisc) if ndisc else float("nan"),
             "recall": float(tp / total_pos) if total_pos else float("nan")}
-    # multimorbidity payoff at the middle q: discoveries per truly-multimorbid
-    # patient vs the argmax baseline (argmax credits <=1 node per patient).
+    # multimorbidity payoff at the middle q, measured on CORRECT captures so it is
+    # like-for-like: mean TRUE node-discoveries per truly-multimorbid patient (a
+    # patient whose true frontier has >=2 scoreable nodes) vs the argmax true-hit
+    # baseline. FDR can credit several true nodes at once (the simplex fix), while
+    # argmax credits at most one node/patient (so its true-capture is <=1). The
+    # raw total-discovery count (incl. false ones) is reported separately for
+    # context, NOT as the headline — comparing a count to a rate would overstate.
     q_mid = q_grid[len(q_grid) // 2]
     mm_rows = np.array([len(f & set(node_list)) >= 2 for f in fronts])
     if mm_rows.any():
         m_mid = disc["discoveries"][q_mid]
-        mean_disc = float(m_mid[mm_rows].sum(axis=1).mean())
+        mean_true_disc = float((m_mid & truth)[mm_rows].sum(axis=1).mean())
+        mean_total_disc = float(m_mid[mm_rows].sum(axis=1).mean())
         argmax_node = np.argmax(P[mm_rows], axis=1)
         argmax_tp = truth[mm_rows][np.arange(mm_rows.sum()), argmax_node]
         argmax_base = float(argmax_tp.mean())
     else:
-        mean_disc = float("nan"); argmax_base = float("nan")
+        mean_true_disc = mean_total_disc = argmax_base = float("nan")
     gaps = [_zib_empirical_gap(P[~is_fg, u]) for u in range(len(node_list))]
     gaps = [g for g in gaps if not np.isnan(g)]
     fdr_block = {
         "q_grid": q_grid,
         "by_q": by_q,
         "multimorbidity": {
-            "mean_discoveries_per_multimorbid": mean_disc,
-            "argmax_baseline_per_multimorbid": argmax_base},
+            "mean_true_discoveries_per_multimorbid": mean_true_disc,
+            "argmax_true_baseline_per_multimorbid": argmax_base,
+            "mean_total_discoveries_per_multimorbid": mean_total_disc},
         "saturation_rate": float(disc["floor"][disc["discoveries"][q_mid]].mean())
             if disc["discoveries"][q_mid].any() else float("nan"),
         "zib_gap_mean": float(np.mean(gaps)) if gaps else float("nan"),

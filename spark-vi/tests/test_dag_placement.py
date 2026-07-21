@@ -528,5 +528,7 @@ def test_evaluate_fdr_multimorbidity_beats_argmax():
     labels = [{1, 2} for _ in range(20)] + [set() for _ in range(200)]
     out = evaluate(profiles, labels, lay, doc_lengths=[10.0] * 220)
     mm = out["fdr"]["multimorbidity"]
-    # argmax can credit at most one node per patient (<=1); FDR can credit both.
-    assert mm["mean_discoveries_per_multimorbid"] > mm["argmax_baseline_per_multimorbid"]
+    # Like-for-like on CORRECT captures: argmax credits at most one true node per
+    # patient (<=1); FDR credits both true nodes (~2). Both count true captures.
+    assert mm["argmax_true_baseline_per_multimorbid"] <= 1.0
+    assert mm["mean_true_discoveries_per_multimorbid"] > mm["argmax_true_baseline_per_multimorbid"]
