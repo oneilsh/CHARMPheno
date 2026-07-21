@@ -401,3 +401,29 @@ def test_bootstrap_recall_at_1_matches_frontier_normalized_recall():
     ev = evaluate(profiles, labels, lay)
     assert abs(ev["recall_at_k"][1] - 0.5) < 1e-9
     assert ev["ci"]["recall_at_1"] == (0.5, 0.5)
+
+
+import numpy as np
+from spark_vi.models.topic.dag_placement import _empirical_right_tail_p, _fdr_reject
+
+def test_empirical_right_tail_p_counts_and_floor():
+    ref = np.array([0.0, 0.1, 0.2, 0.3])          # n=4
+    # value above all -> ge=0 -> p=(0+1)/(4+1)=0.2 (floored, never 0)
+    # value 0.2 -> ge counts {0.2,0.3}=2 -> p=(2+1)/5=0.6
+    p = _empirical_right_tail_p(np.array([0.5, 0.2, -1.0]), ref)
+    assert np.allclose(p, [0.2, 0.6, 1.0])
+    assert (p > 0).all()
+
+def test_fdr_reject_bh_uniform_calibration():
+    rng = np.random.default_rng(0)
+    p = rng.uniform(size=5000)                    # pure null
+    rej = _fdr_reject(p, 0.1, "bh")
+    assert rej.sum() <= 0.02 * len(p)             # few false rejections under the null
+
+def test_fdr_reject_bh_planted_and_by_subset():
+    p = np.concatenate([np.full(20, 1e-6), np.random.default_rng(1).uniform(size=980)])
+    bh = _fdr_reject(p, 0.1, "bh")
+    by = _fdr_reject(p, 0.1, "by")
+    assert bh[:20].all()                          # the strong signals are found
+    assert set(np.nonzero(by)[0]).issubset(set(np.nonzero(bh)[0]))   # BY ⊆ BH
+    assert by.sum() <= bh.sum()

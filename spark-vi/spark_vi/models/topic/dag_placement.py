@@ -264,6 +264,44 @@ def _average_precision(scores, y):
     return float(np.sum((recall - r_prev) * precision))
 
 
+def _empirical_right_tail_p(values, reference):
+    """Right-tail empirical p-value of each `values[i]` against an empirical
+    `reference` sample: p = (#{reference >= value} + 1) / (n + 1). The +1/(n+1)
+    plug (never 0) bounds the resolution at the reference size and keeps BH
+    well-defined. Vectorised via searchsorted on the sorted reference."""
+    ref = np.sort(np.asarray(reference, dtype=float))
+    v = np.asarray(values, dtype=float)
+    n = len(ref)
+    if n == 0:
+        return np.ones_like(v)
+    ge = n - np.searchsorted(ref, v, side="left")     # count of ref >= v
+    return (ge + 1.0) / (n + 1.0)
+
+
+def _fdr_reject(pvals, q, method="bh"):
+    """Step-up multiple-testing rejection at false-discovery-rate q.
+
+    method='bh': Benjamini & Hochberg 1995 (JRSS-B 57:289) — reject the k largest
+    ranks with p_(i) <= (i/m) q. method='by': Benjamini & Yekutieli 2001 (Ann.
+    Statist. 29:1165) — the same with the harmonic penalty c(m)=sum_{i<=m} 1/i,
+    valid under arbitrary dependence (conservative). Returns a boolean mask
+    aligned to `pvals`."""
+    p = np.asarray(pvals, dtype=float)
+    m = len(p)
+    if m == 0:
+        return np.zeros(0, dtype=bool)
+    order = np.argsort(p, kind="mergesort")
+    ranked = p[order]
+    c = 1.0 if method == "bh" else float(np.sum(1.0 / np.arange(1, m + 1)))
+    thresh = (np.arange(1, m + 1) / m) * (q / c)
+    below = ranked <= thresh
+    kmax = int(np.max(np.nonzero(below)[0])) + 1 if below.any() else 0
+    reject = np.zeros(m, dtype=bool)
+    if kmax:
+        reject[order[:kmax]] = True
+    return reject
+
+
 def _bootstrap_ci(P, fronts, lay, node_pos, *, n_boot=500, seed=0, max_docs=5000):
     """Percentile bootstrap 95% CIs for the headline metrics, resampling DOCS
     with replacement (docs are one-per-patient here, so this is a patient-
