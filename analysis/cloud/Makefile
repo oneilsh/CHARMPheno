@@ -334,10 +334,21 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 
 # Post-hoc likelihood-ratio readout on an EXISTING run (no re-fit). Reads the
 # run's saved lambda + cached bundle; prints LR-AUC(alpha) vs theta-mass AUC.
+# Runs via spark-submit --py-files (like every other Spark job here) so spark_vi
+# + charmpheno reach the driver AND executors; plain `python` cannot import them.
 lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
-	python $(REPO_ROOT)/analysis/cloud/lr_readout.py \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 8g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
+	    $(REPO_ROOT)/analysis/cloud/lr_readout.py \
 	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* $(LR_ARGS)
 
 # Print summary.md for an experiment (copy/paste back to chat)
