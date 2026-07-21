@@ -199,13 +199,20 @@ def locate_bundle(spark, manifest, *, bundle_path=None, cache_uri=None,
     return bundle
 
 
-def build_test_bow(bundle, vocab_size):
-    """[n_docs x vocab_size] scipy.sparse CSR bag-of-words + boolean is_fg
-    (True iff the doc's frontier is nonempty), read from
-    bundle.test_df["features","frontier"] (features = a SparseVector per
-    CaseFindingBundle's documented schema). Cluster-only: collects the held-out
-    split to the driver (the same held-out scale dag_placement_cloud.py already
-    collects for its inline eval), not unit-tested."""
+def build_test_bow(bundle, vocab_size, lay):
+    """[n_docs x vocab_size] scipy.sparse CSR bag-of-words + boolean is_fg,
+    read from bundle.test_df["features","frontier"] (features = a SparseVector
+    per CaseFindingBundle's documented schema). Cluster-only: collects the
+    held-out split to the driver (the same held-out scale dag_placement_cloud.py
+    already collects for its inline eval), not unit-tested.
+
+    is_fg MUST match `evaluate`'s detection definition exactly: foreground iff the
+    frontier intersects the SCOREABLE nodes `lay.nodes` (which exclude root 0), not
+    merely "frontier nonempty". A root-only / out-of-layout frontier (e.g. {0} for
+    a patient coded only with a single-anchor disease's anchor) is BACKGROUND in
+    the manifest's theta-mass AUC; counting it foreground here would make LR-AUC and
+    theta-AUC use different positive sets and confound the fork-settler."""
+    scoreable = set(lay.nodes)
     rows = bundle.test_df.select("features", "frontier").collect()
     n = len(rows)
     indptr = np.zeros(n + 1, dtype=np.int64)
@@ -216,7 +223,7 @@ def build_test_bow(bundle, vocab_size):
         idx_chunks.append(np.asarray(sv.indices, dtype=np.int64))
         data_chunks.append(np.asarray(sv.values, dtype=np.float64))
         indptr[i + 1] = indptr[i] + len(sv.indices)
-        is_fg[i] = len(r["frontier"]) > 0
+        is_fg[i] = bool({int(x) for x in r["frontier"]} & scoreable)
     indices = np.concatenate(idx_chunks) if idx_chunks else np.array([], dtype=np.int64)
     data = np.concatenate(data_chunks) if data_chunks else np.array([], dtype=np.float64)
     bow = sp.csr_matrix((data, indices, indptr), shape=(n, vocab_size))
@@ -420,11 +427,25 @@ def main() -> int:
 
         lay = DagLayout(bundle.parent_int, n_bg=manifest["n_bg"], tpn=manifest["tpn"])
         vocab_size = len(bundle.vocab_map)
-        bow, is_fg = build_test_bow(bundle, vocab_size)
+        bow, is_fg = build_test_bow(bundle, vocab_size, lay)
         print(f"[lr_readout]   held-out test set: {bow.shape[0]} docs, "
               f"{int(is_fg.sum())} foreground, V={vocab_size}, "
               f"K={lay.K} ({lay.n_bg} bg + {len(lay.nodes)} nodes x {lay.tpn} tpn)",
               flush=True)
+        # Self-check: our foreground/background counts (foreground = frontier ∩
+        # lay.nodes, matching evaluate) must equal the manifest's detection block,
+        # else LR-AUC and theta-AUC are scored over different truth sets. A
+        # mismatch means the wrong bundle/test set was loaded -- warn loudly.
+        det = manifest.get("metrics", {}).get("detection", {})
+        m_fg, m_bg = det.get("n_foreground"), det.get("n_background")
+        if m_fg is not None and (int(is_fg.sum()) != m_fg
+                                 or int((~is_fg).sum()) != (m_bg or 0)):
+            print(f"[lr_readout] WARNING: foreground/background counts "
+                  f"({int(is_fg.sum())}/{int((~is_fg).sum())}) differ from the "
+                  f"manifest's detection block ({m_fg}/{m_bg}) -- the loaded test "
+                  f"set may not match the fit; LR-AUC vs theta-AUC is then not "
+                  f"strictly comparable. Check --bundle-path / the corpus config.",
+                  flush=True)
 
         alpha_values = resolve_alpha_grid(multipliers, lam, lay)
         lr_aucs = lr_auc_sweep(
