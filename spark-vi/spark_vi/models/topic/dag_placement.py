@@ -3,6 +3,7 @@ a label DAG from their features via gated collapsed-Gibbs topic learning (Griffi
 2004) with anchor-word spectral init (Arora et al. 2013). See
 docs/superpowers/specs/2026-07-15-anchor-first-hierarchical-case-finding-design.md."""
 import numpy as np
+from scipy import stats as _sps
 
 
 class DagLayout:
@@ -300,6 +301,36 @@ def _fdr_reject(pvals, q, method="bh"):
     if kmax:
         reject[order[:kmax]] = True
     return reject
+
+
+def _zib_empirical_gap(values, *, zero_eps=1e-6):
+    """Max-CDF-gap between a fitted zero-inflated Beta and the empirical CDF of
+    `values` (node-block mass in [0,1]). The mixture is pi0 * 1[x<=0] + (1-pi0) *
+    Beta(a,b) with pi0 the mass at <= zero_eps and Beta MLE (scipy) on the
+    positive part. Returns a KS-style statistic in [0,1]; nan if degenerate
+    (all-zero or <2 positive points). Diagnostic only: it decides whether the
+    exportable null (sub-project 2) can be a ~3KB parametric fit or must ship a
+    tail-dense empirical grid; the FDR p-values never use it."""
+    v = np.sort(np.asarray(values, dtype=float))
+    v = np.clip(v, 0.0, 1.0)
+    n = len(v)
+    if n == 0:
+        return float("nan")
+    pos = v[v > zero_eps]
+    if len(pos) < 2:
+        return float("nan")
+    pi0 = float(np.mean(v <= zero_eps))
+    try:
+        a, b, _, _ = _sps.beta.fit(pos, floc=0.0, fscale=1.0)
+    except Exception:
+        return float("nan")
+    # Empirical CDF at each sorted v[i], tie-corrected: plain (i+1)/n over-weights
+    # the *position within* a tied block (e.g. the point mass at 0) rather than
+    # using the count of all tied members, which spuriously inflates the gap at
+    # an atom. searchsorted(..., side="right") counts all values <= v[i].
+    emp = np.searchsorted(v, v, side="right") / n
+    fit = pi0 + (1.0 - pi0) * _sps.beta.cdf(v, a, b)      # mixture CDF (Beta.cdf(0)=0)
+    return float(np.max(np.abs(emp - fit)))
 
 
 def _assign_length_bins(lengths, ref_lengths, n_bins):

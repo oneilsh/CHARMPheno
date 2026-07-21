@@ -472,3 +472,21 @@ def test_per_node_discoveries_length_conditioning_calibrates_pvalues():
     p_pool = pooled["pmat"][longm, 0].mean()
     p_cond = cond["pmat"][longm, 0].mean()
     assert p_cond > p_pool + 0.15   # ~0.50 vs ~0.25: conditioning removes the false significance
+
+
+from spark_vi.models.topic.dag_placement import _zib_empirical_gap
+
+def test_zib_gap_small_for_beta_like_sample():
+    rng = np.random.default_rng(0)
+    pos = rng.beta(2.0, 8.0, size=4000)
+    vals = np.concatenate([np.zeros(1000), pos])      # zero-inflated Beta by construction
+    assert _zib_empirical_gap(vals) < 0.05
+
+def test_zib_gap_large_for_non_beta_sample():
+    rng = np.random.default_rng(1)
+    # a bimodal positive part a single Beta cannot fit
+    vals = np.concatenate([rng.uniform(0.05, 0.10, 2000), rng.uniform(0.85, 0.95, 2000)])
+    assert _zib_empirical_gap(vals) > 0.15
+
+def test_zib_gap_degenerate_returns_nan():
+    assert np.isnan(_zib_empirical_gap(np.zeros(50)))
