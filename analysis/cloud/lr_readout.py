@@ -446,6 +446,39 @@ def _background_from_bow(bow, epsilon=1e-9):
     return np.maximum(bg, epsilon)
 
 
+def detection_report(bow, is_fg, lam, lay, *, alpha, background, theta_det):
+    """Deployment metrics for the LR score at `alpha` (max-over-nodes), printed
+    beside the run's theta-mass detection block from the manifest. On this
+    heavily imbalanced data ROC-AUC hides low precision at low prevalence, so
+    the honest numbers are PR-AUC (average precision; random baseline = the
+    prevalence) and, at each target foreground sensitivity, the precision (PPV)
+    and background false-positive rate you would operate at. Reuses the engine's
+    _detection_metrics so LR and theta-mass are scored identically."""
+    from spark_vi.models.topic.dag_placement import (lr_placement_scores,
+                                                      _detection_metrics)
+    s = lr_placement_scores(bow, lam, lay, alpha=alpha, background=background)
+    d = _detection_metrics(s.max(axis=1), np.asarray(is_fg, dtype=bool))
+    alab = "inf" if math.isinf(alpha) else f"{alpha:.4g}"
+
+    def _ops(det, label):
+        print(f"[lr_readout]   {label}: ROC-AUC={det.get('auc', float('nan')):.4f}  "
+              f"PR-AUC(AP)={det.get('ap', float('nan')):.4f}", flush=True)
+        for t in ("0.80", "0.90", "0.95"):
+            op = det.get("operating_points", {}).get(t, {})
+            if op:
+                print(f"[lr_readout]       @{t} sens: precision={op.get('precision', float('nan')):.4f}"
+                      f"  bg_fpr={op.get('bg_fpr', float('nan')):.4f}"
+                      f"  specificity={op.get('specificity', float('nan')):.4f}", flush=True)
+
+    print(f"[lr_readout] detection metrics (prevalence={d['prevalence']:.4f} = the "
+          f"random PR-AUC baseline; n_fg={d['n_foreground']}/n_bg={d['n_background']}):",
+          flush=True)
+    _ops(d, f"LR   @alpha={alab}")
+    if theta_det:
+        _ops(theta_det, "theta-mass (from manifest)")
+    return d
+
+
 def main() -> int:
     from spark_vi.models.topic.dag_placement import DagLayout, lr_auc_sweep
 
@@ -490,6 +523,13 @@ def main() -> int:
             bow, lam, lay, is_fg, alpha_grid=alpha_values,
             count_mode=args.count_mode, length_normalize=args.length_normalize)
         print_readout(multipliers, alpha_values, lr_aucs, theta_auc)
+
+        # Deployment metrics (PR-AUC + precision@sensitivity) at the best-AUC
+        # alpha -- the honest read on imbalanced data, beside theta-mass.
+        best_alpha = max(alpha_values, key=lambda a: lr_aucs.get(a, float("-inf")))
+        detection_report(bow, is_fg, lam, lay, alpha=best_alpha,
+                         background=_background_from_bow(bow),
+                         theta_det=manifest["metrics"].get("detection", {}))
 
         # NPMI coherence: always printed (aggregate output, no egress concern).
         topic_labels = build_topic_labels(lay, bundle)
