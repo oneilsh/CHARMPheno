@@ -317,7 +317,10 @@ def _zib_empirical_gap(values, *, zero_eps=1e-6):
     if n == 0:
         return float("nan")
     pos = v[v > zero_eps]
-    if len(pos) < 2:
+    if len(pos) < 2 or np.ptp(pos) == 0.0:
+        # <2 positive points, or a constant positive part (zero variance): no
+        # Beta is fittable — scipy's method-of-moments would divide by the zero
+        # variance and warn. The diagnostic is undefined here; return nan.
         return float("nan")
     pi0 = float(np.mean(v <= zero_eps))
     try:
