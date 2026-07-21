@@ -162,8 +162,11 @@ def locate_bundle(spark, manifest, *, bundle_path=None, cache_uri=None,
     from _case_finding_cache import compute_bundle_cache_key, try_load
 
     if bundle_path:
-        p = Path(bundle_path)
-        bundle = try_load(spark, str(p.parent), p.name)
+        # Split with string ops, NOT pathlib: Path("gs://bucket/.../key").parent
+        # collapses the scheme's "//" to "/" (gs:/bucket/...), losing the URI
+        # authority and misdirecting try_load. rpartition keeps gs://... intact.
+        parent, _, key = bundle_path.rstrip("/").rpartition("/")
+        bundle = try_load(spark, parent, key)
         if bundle is None:
             print(f"[lr_readout] WARNING: --bundle-path {bundle_path} did not "
                   "load (missing train.parquet/test.parquet/meta under that "
@@ -218,9 +221,9 @@ def build_test_bow(bundle, vocab_size):
 
 def print_readout(multipliers, alpha_values, lr_aucs, theta_auc, *, gap_tol=0.05):
     """Table: alpha (+ its multiplier), LR-AUC, the gap vs theta_auc, and a
-    verdict label. gap_tol brackets "approximately equal" (calibrated to the
-    ROC-AUC's own noise floor at typical held-out sizes, not a tuned
-    threshold -- move it if a run's CI is visibly wider)."""
+    verdict label. gap_tol brackets "approximately equal" -- a coarse readout
+    default (0.05 AUC), NOT a calibrated threshold; widen it if a run's AUC
+    bootstrap CI is visibly wider than that."""
     print(f"[lr_readout] theta-mass detection AUC (from the run's manifest): "
           f"{theta_auc:.4f}", flush=True)
     print("[lr_readout] LR-AUC(alpha) sweep:", flush=True)
