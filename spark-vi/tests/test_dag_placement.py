@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, frontier_from_coded, strip_dag_node_codes, fit_gated, profile, evaluate, _auc
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
@@ -427,3 +428,51 @@ def test_fdr_reject_bh_planted_and_by_subset():
     assert bh[:20].all()                          # the strong signals are found
     assert set(np.nonzero(by)[0]).issubset(set(np.nonzero(bh)[0]))   # BY ⊆ BH
     assert by.sum() <= bh.sum()
+
+
+from spark_vi.models.topic.dag_placement import _assign_length_bins, per_node_discoveries
+
+def test_assign_length_bins_quantile_and_single():
+    ref = np.arange(100.0)
+    b = _assign_length_bins(np.array([1.0, 50.0, 99.0]), ref, 4)
+    assert b[0] == 0 and b[2] == 3 and 0 <= b[1] <= 3
+    assert (_assign_length_bins(np.array([1.0, 9.0]), ref, 1) == 0).all()
+
+def test_per_node_discoveries_recovers_planted_signal():
+    rng = np.random.default_rng(0)
+    n_bg, n_case, n_nodes = 500, 40, 3
+    P = rng.uniform(0, 0.05, size=(n_bg + n_case, n_nodes))
+    is_fg = np.zeros(n_bg + n_case, bool); is_fg[n_bg:] = True
+    P[n_bg:, 1] += 0.6                       # cases are elevated on node 1
+    out = per_node_discoveries(P, is_fg, np.full(n_bg + n_case, 10.0),
+                               q_grid=[0.1], n_length_bins=1)
+    disc = out["discoveries"][0.1]
+    assert disc[n_bg:, 1].mean() > 0.7       # most true cases discovered on node 1
+    assert disc[:n_bg, 1].mean() < 0.1       # few background discovered
+
+@pytest.mark.xfail(reason="Test premise is mathematically unreachable as parameterized, not an "
+                          "implementation bug: with is_fg all-False, the null reference for the "
+                          "unconditioned (n_length_bins=1) arm is the FULL 1200-doc population, "
+                          "and the planted confound hits exactly 50% of it. Because the reference "
+                          "is self-inclusive (each doc's own bin+background slice contains "
+                          "itself), the empirical right-tail p for the k-th most extreme "
+                          "'elevated' doc is p_(k) ~= k/(n+1), while its BH threshold at the same "
+                          "rank is (k/n)*q -- a ratio of ~1/q (=10 at q=0.1) at EVERY rank, "
+                          "independent of n and of effect size (verified empirically: boosting "
+                          "the confound offset 0.3 -> 3.0 leaves both arms at 0 discoveries). So "
+                          "uncond always yields 0 discoveries too, making `cond < uncond` "
+                          "unsatisfiable as `0 < 0`. Kept verbatim per the Task-2 brief; not "
+                          "loosened.", strict=False)
+def test_per_node_discoveries_length_conditioning_controls_fdr():
+    # Long records carry more mass on node 0 for EVERYONE (a length confound, not
+    # signal). Unconditioned scoring falsely flags long background docs; the
+    # length-conditioned null removes it.
+    rng = np.random.default_rng(2)
+    n, n_nodes = 1200, 2
+    length = rng.choice([5.0, 50.0], size=n)
+    is_fg = np.zeros(n, bool)                 # ALL background: any discovery is false
+    P = rng.uniform(0, 0.02, size=(n, n_nodes))
+    P[length == 50.0, 0] += 0.3              # confound: long docs, node 0
+    uncond = per_node_discoveries(P, is_fg, length, q_grid=[0.1], n_length_bins=1)
+    cond = per_node_discoveries(P, is_fg, length, q_grid=[0.1], n_length_bins=2)
+    assert cond["discoveries"][0.1][:, 0].sum() < uncond["discoveries"][0.1][:, 0].sum()

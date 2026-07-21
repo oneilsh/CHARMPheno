@@ -302,6 +302,58 @@ def _fdr_reject(pvals, q, method="bh"):
     return reject
 
 
+def _assign_length_bins(lengths, ref_lengths, n_bins):
+    """Assign each `lengths[i]` to a quantile bin (0..n_bins-1) of the reference
+    length distribution `ref_lengths` (the background records). n_bins<=1 returns
+    all zeros (the unconditioned null). Ties/degenerate quantiles collapse to
+    fewer effective bins, which is harmless (a bin just holds more docs)."""
+    lengths = np.asarray(lengths, dtype=float)
+    if n_bins <= 1 or len(ref_lengths) == 0:
+        return np.zeros(len(lengths), dtype=int)
+    edges = np.quantile(np.asarray(ref_lengths, dtype=float),
+                        np.linspace(0.0, 1.0, n_bins + 1)[1:-1])
+    return np.digitize(lengths, edges).astype(int)
+
+
+def per_node_discoveries(P, is_fg, doc_lengths, *, q_grid,
+                         n_length_bins=4, method="bh"):
+    """Length-conditioned, background-relative per-node discovery.
+
+    P is the [n_docs x n_nodes] node-block affinity (profile mass per node). For
+    each node u and length bin b, the null reference is the background docs'
+    node-u mass in bin b; the per-doc p-value is the right-tail empirical p
+    against that reference (Efron two-groups empirical null; the background arm is
+    the null sample). Benjamini-Hochberg (or BY) is then applied per node column
+    across all docs, giving a discovery set at each q in q_grid. Returns pmat, the
+    floor mask (p at the 1/(n_ref+1) resolution floor), the per-q discovery masks,
+    and the bin ids."""
+    P = np.asarray(P, dtype=float)
+    is_fg = np.asarray(is_fg, dtype=bool)
+    n, n_nodes = P.shape
+    ref_lengths = doc_lengths[~is_fg] if (~is_fg).any() else doc_lengths
+    bins = _assign_length_bins(doc_lengths, ref_lengths, n_length_bins)
+    pmat = np.ones((n, n_nodes))
+    floor = np.zeros((n, n_nodes), dtype=bool)
+    for b in np.unique(bins):
+        in_b = bins == b
+        ref_rows = in_b & (~is_fg)
+        idx = np.nonzero(in_b)[0]
+        for u in range(n_nodes):
+            ref = P[ref_rows, u]
+            if len(ref) == 0:
+                continue
+            p = _empirical_right_tail_p(P[idx, u], ref)
+            pmat[idx, u] = p
+            floor[idx, u] = p <= (1.0 / (len(ref) + 1.0) + 1e-12)
+    discoveries = {}
+    for q in q_grid:
+        mask = np.zeros((n, n_nodes), dtype=bool)
+        for u in range(n_nodes):
+            mask[:, u] = _fdr_reject(pmat[:, u], q, method)
+        discoveries[q] = mask
+    return {"pmat": pmat, "floor": floor, "discoveries": discoveries, "bins": bins}
+
+
 def _bootstrap_ci(P, fronts, lay, node_pos, *, n_boot=500, seed=0, max_docs=5000):
     """Percentile bootstrap 95% CIs for the headline metrics, resampling DOCS
     with replacement (docs are one-per-patient here, so this is a patient-
