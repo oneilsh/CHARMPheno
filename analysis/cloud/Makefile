@@ -336,6 +336,17 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 # run's saved lambda + cached bundle; prints LR-AUC(alpha) vs theta-mass AUC.
 # Runs via spark-submit --py-files (like every other Spark job here) so spark_vi
 # + charmpheno reach the driver AND executors; plain `python` cannot import them.
+#
+# The cached bundle is located by RECOMPUTING its cache key from the run's
+# manifest, but two key inputs are not saved in the manifest, so they default
+# here to the rare6 (0061/0062) values and are overridable:
+#   LR_CACHE_URI     - the fit's --cache-uri (bundle cache root)
+#   LR_DOC_MIN_LENGTH- the fit's --doc-min-length (rare6 used 10; the driver's
+#                      own default is 0, which would MISS the cache key)
+# If the key still misses (e.g. a different experiment), pass the exact bundle
+# dir instead:  make lr-readout ID=N LR_ARGS="--bundle-path <cache_uri>/<key>"
+LR_CACHE_URI      ?= hdfs:///user/dataproc/charm/case_finding_cache
+LR_DOC_MIN_LENGTH ?= 10
 lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
@@ -349,7 +360,10 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.python.worker.memory=2g \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
 	    $(REPO_ROOT)/analysis/cloud/lr_readout.py \
-	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* $(LR_ARGS)
+	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
+	    --cache-uri $(LR_CACHE_URI) \
+	    --doc-min-length $(LR_DOC_MIN_LENGTH) \
+	    $(LR_ARGS)
 
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
