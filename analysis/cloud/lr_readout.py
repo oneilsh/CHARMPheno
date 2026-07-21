@@ -31,7 +31,9 @@ unit-tested in analysis/cloud/tests/test_lr_readout.py.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -80,13 +82,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--length-normalize", action="store_true",
                    help="Passed through to lr_placement_scores/lr_auc_sweep.")
     p.add_argument("--sample-cases", type=int, default=0,
-                   help="(Task 3) itemize an lr_decompose breakdown for this "
-                        "many random held-out foreground cases. Not wired in "
-                        "this driver yet.")
+                   help="Itemize an lr_decompose breakdown (per true frontier "
+                        "node, rendered with concept names) for this many "
+                        "random held-out foreground cases, written to "
+                        "{run_dir}/lr_readout/decompose.txt (in-enclave; "
+                        "never printed to stdout).")
     p.add_argument("--person", type=int, default=None,
-                   help="(Task 3) itemize an lr_decompose breakdown for this "
-                        "single person_id instead of a random sample. Not "
-                        "wired in this driver yet.")
+                   help="Itemize an lr_decompose breakdown for this single "
+                        "person_id instead of a random sample (also written "
+                        "to {run_dir}/lr_readout/decompose.txt).")
     return p
 
 
@@ -242,6 +246,161 @@ def print_readout(multipliers, alpha_values, lr_aucs, theta_auc, *, gap_tol=0.05
               f"LR-AUC={auc:.4f}  gap={gap:+.4f}   {verdict}", flush=True)
 
 
+def _hash_person(person_id) -> str:
+    """SHA-256-truncated person id for row-level stdout/log lines (this repo
+    hashes ids in row-level log output; aggregate outputs print freely). The
+    written decompose.txt itself keeps the raw id -- it stays in the run dir,
+    in-enclave, and is never printed."""
+    return hashlib.sha256(str(person_id).encode("utf-8")).hexdigest()[:12]
+
+
+def render_decompose_rows(rows, idx_to_cid, name_by_id) -> list[str]:
+    """[(w, count, contribution), ...] (Task 1's lr_decompose output, already
+    sorted by |contribution| desc) -> rendered lines with concept NAMES in
+    place of raw vocab indices. `idx_to_cid` = vocab-idx -> concept-id (the
+    inverse of CaseFindingBundle.vocab_map, which is {concept_id: vocab_idx});
+    `name_by_id` = concept-id -> concept name (CaseFindingBundle.name_by_id).
+    Falls back to the concept id, then the raw vocab index, if a lookup
+    misses. Pure string formatting; input order is preserved."""
+    lines = []
+    for w, count, contribution in rows:
+        cid = idx_to_cid.get(w, w)
+        name = name_by_id.get(cid, cid)
+        lines.append(f"{contribution:+.1f}  x{count:g}  {name}")
+    return lines
+
+
+def select_cases(bundle, *, sample_cases=0, person=None, seed=0):
+    """Up to `sample_cases` random foreground held-out test docs (nonempty
+    frontier), or the single doc matching `person` (a person_id), as
+    `(person_id, SparseVector features, frontier engine-ids)` tuples.
+    Cluster-only: collects a small sample to the driver, not unit-tested."""
+    from pyspark.sql import functions as F
+
+    df = bundle.test_df
+    if person is not None:
+        df = df.filter(F.col("person_id") == person)
+    else:
+        df = df.filter(F.size(F.col("frontier")) > 0)
+        if sample_cases:
+            df = df.orderBy(F.rand(seed)).limit(sample_cases)
+    rows = df.select("person_id", "features", "frontier").collect()
+    return [(r["person_id"], r["features"], list(r["frontier"])) for r in rows]
+
+
+def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background):
+    """Write an lr_decompose breakdown for each selected case's true frontier
+    node(s), rendered with concept names, to
+    {run_dir}/lr_readout/decompose.txt. Row-level (per-patient) content stays
+    in that file only -- in-enclave, never printed to stdout; any stdout/log
+    line here references only the SHA-256-truncated person id (this repo's
+    row-level log hygiene rule). Returns the written Path.
+
+    `idx_to_cid` inverts CaseFindingBundle.vocab_map ({concept_id: vocab_idx}
+    -> {vocab_idx: concept_id}); node names come from `int2cid` (engine-id ->
+    concept-id) composed with `name_by_id` (concept-id -> name) -- see the
+    id-space note on CaseFindingBundle: name_by_id must NOT be indexed by
+    engine-id directly."""
+    from spark_vi.models.topic.dag_placement import lr_decompose
+
+    idx_to_cid = {i: c for c, i in bundle.vocab_map.items()}
+    node_name = {u: bundle.name_by_id.get(bundle.int2cid.get(u), u) for u in lay.nodes}
+    vocab_size = len(bundle.vocab_map)
+
+    out_dir = Path(run_dir) / "lr_readout"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "decompose.txt"
+
+    blocks = []
+    for person_id, sv, frontier in cases:
+        bow_row = np.zeros(vocab_size, dtype=float)
+        bow_row[np.asarray(sv.indices, dtype=np.int64)] = np.asarray(sv.values, dtype=float)
+        header = [f"person_id={person_id}"]
+        for u in frontier:
+            if u not in lay.block:
+                continue  # frontier node pruned out of this layout; skip
+            rows = lr_decompose(bow_row, lam, lay, u, alpha=alpha,
+                                background=background)
+            header.append(f"  true node: {node_name.get(u, u)} (engine id {u})")
+            header.extend("    " + ln for ln in render_decompose_rows(
+                rows, idx_to_cid, bundle.name_by_id))
+        blocks.append("\n".join(header))
+
+    out_path.write_text("\n\n".join(blocks) + "\n" if blocks else "")
+    print(f"[lr_readout]   wrote {len(cases)} case decomposition(s) "
+          f"(persons: {', '.join(_hash_person(c[0]) for c in cases)}) to "
+          f"{out_path}", flush=True)
+    return out_path
+
+
+def build_topic_labels(lay, bundle):
+    """{topic index in [0, K): label} for every topic in the fit's layout --
+    background topics labeled 'bg{i}'; node topics labeled with the node's
+    concept name (+ engine id), and a `[j]` tpn sub-index suffix only when
+    tpn>1 (so single-topic-per-node layouts, the common case, stay terse)."""
+    labels = {}
+    for i in range(lay.n_bg):
+        labels[i] = f"bg{i}"
+    for u in lay.nodes:
+        name = bundle.name_by_id.get(bundle.int2cid.get(u), str(u))
+        for j, t in enumerate(lay.block[u]):
+            suffix = f"[{j}]" if lay.tpn > 1 else ""
+            labels[t] = f"{name} (node {u}){suffix}"
+    return labels
+
+
+def npmi_table(spark, lam, bundle, topic_labels, *, top_n=20):
+    """NPMI coherence for every topic (beta = row-normalized lambda), against
+    the held-out test corpus as the co-occurrence reference. Returns
+    `(topic, label, npmi)` rows sorted by npmi desc (NaN/unrated topics last),
+    and prints the table. `topic_labels` from `build_topic_labels`."""
+    from spark_vi.eval.topic import compute_npmi_coherence
+    from spark_vi.models.topic.types import BOWDocument
+
+    lam = np.asarray(lam, dtype=float)
+    beta = lam / np.maximum(lam.sum(axis=1, keepdims=True), 1e-12)
+    ref = bundle.test_df.select("features").rdd.map(BOWDocument.from_spark_row)
+    ref.cache()
+    report = compute_npmi_coherence(beta, ref, top_n=top_n)
+
+    rows = [(int(t), topic_labels.get(int(t), str(t)), float(s))
+            for t, s in zip(report.topic_indices, report.per_topic_npmi)]
+    rows.sort(key=lambda r: (math.isnan(r[2]), -r[2] if not math.isnan(r[2]) else 0.0))
+
+    print(f"[lr_readout] NPMI coherence (top_n={top_n}, K={len(rows)}, "
+          f"{report.n_topics_unrated} unrated, reference_size="
+          f"{report.reference_size}): mean={report.mean:.4f} "
+          f"median={report.median:.4f} min={report.min:.4f} "
+          f"max={report.max:.4f}", flush=True)
+    for t, label, npmi in rows:
+        val = "nan" if math.isnan(npmi) else f"{npmi:+.4f}"
+        print(f"[lr_readout]   topic {t:3d}  {label:40s}  npmi={val}", flush=True)
+    return rows
+
+
+def _viewer_alpha(multipliers, alpha_values):
+    """The single alpha value the per-case viewer's lr_decompose calls use:
+    the design-doc's canonical x1-median-Sigma-lambda shrinkage (multiplier
+    == 1.0) if it's in the swept grid, else the middle of the swept alpha
+    values (both lists are aligned + sorted the same way -- see
+    resolve_alpha_grid)."""
+    for m, a in zip(multipliers, alpha_values):
+        if m == 1.0:
+            return a
+    return alpha_values[len(alpha_values) // 2] if alpha_values else 0.0
+
+
+def _background_from_bow(bow, epsilon=1e-9):
+    """Corpus code base rate from `bow` (mirrors dag_placement._lr_base_rate's
+    background=None branch): the same base rate lr_auc_sweep computes
+    internally for its own background=None calls, computed once here so the
+    viewer's lr_decompose calls are directly comparable to the AUC sweep's
+    scores."""
+    col = np.asarray(bow.sum(axis=0)).ravel().astype(float)
+    bg = col / max(col.sum(), 1.0)
+    return np.maximum(bg, epsilon)
+
+
 def main() -> int:
     from spark_vi.models.topic.dag_placement import DagLayout, lr_auc_sweep
 
@@ -273,9 +432,23 @@ def main() -> int:
             count_mode=args.count_mode, length_normalize=args.length_normalize)
         print_readout(multipliers, alpha_values, lr_aucs, theta_auc)
 
+        # NPMI coherence: always printed (aggregate output, no egress concern).
+        topic_labels = build_topic_labels(lay, bundle)
+        npmi_table(spark, lam, bundle, topic_labels)
+
+        # Per-case decomposition viewer: row-level, written in-enclave only.
         if args.sample_cases or args.person is not None:
-            print("[lr_readout]   --sample-cases/--person itemized breakdown: "
-                  "not wired in this driver (Task 3).", flush=True)
+            cases = select_cases(bundle, sample_cases=args.sample_cases,
+                                 person=args.person)
+            if not cases:
+                print("[lr_readout]   WARNING: --sample-cases/--person "
+                      "matched no held-out foreground cases; viewer not "
+                      "written.", flush=True)
+            else:
+                background = _background_from_bow(bow)
+                viewer_alpha = _viewer_alpha(multipliers, alpha_values)
+                write_case_viewer(args.run_dir, bundle, lam, lay, cases,
+                                  alpha=viewer_alpha, background=background)
     return 0
 
 
