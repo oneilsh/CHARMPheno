@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, frontier_from_coded, strip_dag_node_codes, fit_gated, profile, evaluate, _auc
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
@@ -450,29 +449,26 @@ def test_per_node_discoveries_recovers_planted_signal():
     assert disc[n_bg:, 1].mean() > 0.7       # most true cases discovered on node 1
     assert disc[:n_bg, 1].mean() < 0.1       # few background discovered
 
-@pytest.mark.xfail(reason="Test premise is mathematically unreachable as parameterized, not an "
-                          "implementation bug: with is_fg all-False, the null reference for the "
-                          "unconditioned (n_length_bins=1) arm is the FULL 1200-doc population, "
-                          "and the planted confound hits exactly 50% of it. Because the reference "
-                          "is self-inclusive (each doc's own bin+background slice contains "
-                          "itself), the empirical right-tail p for the k-th most extreme "
-                          "'elevated' doc is p_(k) ~= k/(n+1), while its BH threshold at the same "
-                          "rank is (k/n)*q -- a ratio of ~1/q (=10 at q=0.1) at EVERY rank, "
-                          "independent of n and of effect size (verified empirically: boosting "
-                          "the confound offset 0.3 -> 3.0 leaves both arms at 0 discoveries). So "
-                          "uncond always yields 0 discoveries too, making `cond < uncond` "
-                          "unsatisfiable as `0 < 0`. Kept verbatim per the Task-2 brief; not "
-                          "loosened.", strict=False)
-def test_per_node_discoveries_length_conditioning_controls_fdr():
-    # Long records carry more mass on node 0 for EVERYONE (a length confound, not
-    # signal). Unconditioned scoring falsely flags long background docs; the
-    # length-conditioned null removes it.
+def test_per_node_discoveries_length_conditioning_calibrates_pvalues():
+    # Long records carry more node-0 mass for EVERYONE (a length confound, NOT
+    # signal). Assert on the p-values, not BH discoveries: with an all-background,
+    # self-referential null the BH floor (1/(n+1) > q/m when m ~ n) suppresses
+    # discoveries in BOTH arms, so a discovery-count comparison is degenerate
+    # (0 < 0). The p-values, however, show the effect directly: pooling the
+    # short+long null makes a length-confounded long doc look falsely significant
+    # (small p); conditioning on length compares it to its own (long) bin, where
+    # its mass is typical, restoring a calibrated (larger) p. That correction is
+    # exactly what length-conditioning is for.
     rng = np.random.default_rng(2)
     n, n_nodes = 1200, 2
-    length = rng.choice([5.0, 50.0], size=n)
-    is_fg = np.zeros(n, bool)                 # ALL background: any discovery is false
+    length = rng.choice([5.0, 50.0], size=n)  # ~50/50 -> the median splits the bins
+    is_fg = np.zeros(n, bool)
     P = rng.uniform(0, 0.02, size=(n, n_nodes))
-    P[length == 50.0, 0] += 0.3              # confound: long docs, node 0
-    uncond = per_node_discoveries(P, is_fg, length, q_grid=[0.1], n_length_bins=1)
+    P[length == 50.0, 0] += 0.3               # confound: long docs, node 0
+    pooled = per_node_discoveries(P, is_fg, length, q_grid=[0.1], n_length_bins=1)
     cond = per_node_discoveries(P, is_fg, length, q_grid=[0.1], n_length_bins=2)
-    assert cond["discoveries"][0.1][:, 0].sum() < uncond["discoveries"][0.1][:, 0].sum()
+    assert len(np.unique(cond["bins"])) == 2                 # conditioning really split
+    longm = length == 50.0
+    p_pool = pooled["pmat"][longm, 0].mean()
+    p_cond = cond["pmat"][longm, 0].mean()
+    assert p_cond > p_pool + 0.15   # ~0.50 vs ~0.25: conditioning removes the false significance
