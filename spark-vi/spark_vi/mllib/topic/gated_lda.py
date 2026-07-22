@@ -96,6 +96,12 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
                         "docs where u is the most-specific attested node, background "
                         "only from empty-frontier docs) — 'frontier' stops "
                         "background/ancestors stealing a descendant's anchor")
+    optimizeDocConcentration = Param(Params._dummy(), "optimizeDocConcentration",
+                                     "learn an asymmetric per-node Dirichlet alpha "
+                                     "from data (Wallach et al. 2009); nodeAlphaScale "
+                                     "sets the initial alpha, optimize refines it. "
+                                     "Default False.",
+                                     typeConverter=TypeConverters.toBoolean)
 
 
 def _layout(est_or_model) -> DagLayout:
@@ -111,7 +117,8 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                  gammaShape=100.0, init="random", spectralMaxVocab=8000,
                  spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
                  anchorScope="closure", nodeAlphaScale=1.0, miniBatchFraction=0.0,
-                 learningRateTau0=1.0, learningRateKappa=0.7):
+                 learningRateTau0=1.0, learningRateKappa=0.7,
+                 optimizeDocConcentration=False):
         super().__init__()
         self._setDefault(featuresCol="features", labelCol="frontier", nBg=2, tpn=1,
                          maxIter=20, nodeAffinityCol="nodeAffinity",
@@ -120,7 +127,7 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                          spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
                          anchorScope="closure", nodeAlphaScale=1.0,
                          miniBatchFraction=0.0, learningRateTau0=1.0,
-                         learningRateKappa=0.7)
+                         learningRateKappa=0.7, optimizeDocConcentration=False)
         self.setParams(**self._input_kwargs)
         # Diagnostic-only per-iteration callback (mirrors OnlineLDAEstimator).
         # Stored as an instance attribute, not a Param — callables aren't
@@ -176,8 +183,22 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
         node_alpha_scale = float(self.getOrDefault("nodeAlphaScale"))
         alpha_vec = np.full(lay.K, 1.0 / lay.K, dtype=np.float64)
         alpha_vec[lay.n_bg:] *= node_alpha_scale
+
+        optimize_alpha = bool(self.getOrDefault("optimizeDocConcentration"))
+        frontier_hist = None
+        if optimize_alpha:
+            # Static allowed-set group structure from the (fixed) training labels.
+            # Foreground+background scale; collected once at fit time.
+            frontier_hist = {
+                frozenset(int(x) for x in (fr or [])): int(n)
+                for fr, n in (
+                    dataset.select(label_col).rdd
+                    .map(lambda r: frozenset(int(x) for x in (r[0] or [])))
+                    .countByValue().items())
+            }
         model_obj = GatedOnlineLDA(
             lay, V, init=init,
+            optimize_alpha=optimize_alpha, frontier_histogram=frontier_hist,
             alpha=alpha_vec, eta=1.0 / lay.K,
             gamma_shape=self.getOrDefault("gammaShape"),
             cavi_max_iter=self.getOrDefault("caviMaxIter"),

@@ -255,3 +255,37 @@ def test_gated_shim_on_iteration_callback_fires(spark):
     assert seen                                    # callback fired at least once
     it, has_lambda, shape = seen[-1]
     assert has_lambda and shape[0] == 4            # K = n_bg(2) + 2 nodes * tpn(1)
+
+
+def test_gated_shim_optimize_doc_concentration_param_defaults_and_settable():
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    est = GatedLDAEstimator(parent={1: 0, 2: 0})
+    assert est.getOrDefault("optimizeDocConcentration") is False
+    est2 = GatedLDAEstimator(parent={1: 0, 2: 0}, optimizeDocConcentration=True)
+    assert est2.getOrDefault("optimizeDocConcentration") is True
+
+
+def test_gated_shim_optimize_alpha_learns_asymmetric(spark):
+    # A corpus where node 1 fires often (common) and node 2 rarely (rare) should,
+    # with optimizeDocConcentration on, learn alpha(node1) > alpha(node2).
+    import numpy as np
+    from pyspark.ml.linalg import Vectors
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    from spark_vi.models.topic.dag_placement import DagLayout
+    parent = {1: 0, 2: 0}
+    V = 24
+    rng = np.random.default_rng(0)
+    rows = []
+    for _ in range(120):
+        leaf = 1 if rng.random() < 0.75 else 2          # node1 common, node2 rare
+        idx = sorted(rng.choice(V, size=5, replace=False).tolist())
+        rows.append((Vectors.sparse(V, idx, [1.0] * len(idx)), [leaf]))
+    for _ in range(60):
+        idx = sorted(rng.choice(V, size=5, replace=False).tolist())
+        rows.append((Vectors.sparse(V, idx, [1.0] * len(idx)), []))  # background
+    df = spark.createDataFrame(rows, ["features", "frontier"])
+    model = GatedLDAEstimator(parent=parent, nBg=2, tpn=1, maxIter=8, seed=0,
+                              optimizeDocConcentration=True).fit(df)
+    lay = DagLayout(parent, n_bg=2, tpn=1)
+    alpha = model.result.global_params["alpha"]
+    assert alpha[lay.block[1][0]] > alpha[lay.block[2][0]]
