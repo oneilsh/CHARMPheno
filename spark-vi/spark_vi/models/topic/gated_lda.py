@@ -51,6 +51,14 @@ class GatedOnlineLDA(OnlineLDA):
         super().__init__(K=lay.K, vocab_size=vocab_size, optimize_alpha=False, **kw)
         self.lay = lay
         self.init = init
+        if getattr(self, "optimize_eta", False):
+            # The gated update_global override optimizes only alpha; it never
+            # touches eta. Fail fast rather than silently ignoring optimize_eta
+            # (out of scope for the gated engine; the shim never enables it).
+            raise NotImplementedError(
+                "optimize_eta is not supported by GatedOnlineLDA (only the gated "
+                "per-node alpha is learned; eta stays fixed)."
+            )
         self.optimize_alpha = bool(optimize_alpha)          # gated flag (drives our override)
         if self.optimize_alpha and frontier_histogram is None:
             raise ValueError(

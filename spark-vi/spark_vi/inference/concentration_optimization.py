@@ -228,4 +228,15 @@ def gated_alpha_newton_step(
     H = X.T @ (X * (Ng * tri_gsum)[:, None])                  # (B,B)
     H[np.diag_indices_from(H)] -= m * polygamma(1, a) * sum_Ng
 
-    return -np.linalg.solve(H, g)
+    # A tied block with no labeled coverage (sum_Ng[b] == 0 — a DAG node absent
+    # from every training frontier's allowed set) has an all-zero Hessian row and
+    # a zero gradient, so the full solve would be singular. Such a block has no
+    # data to move its alpha, so it legitimately stays at its init (Delta = 0).
+    # Uncovered blocks never appear in any group, so they are decoupled from the
+    # covered blocks in H — solving the covered sub-system is exact.
+    delta = np.zeros_like(a)
+    covered = sum_Ng > 0
+    if covered.any():
+        idx = np.ix_(covered, covered)
+        delta[covered] = -np.linalg.solve(H[idx], g[covered])
+    return delta

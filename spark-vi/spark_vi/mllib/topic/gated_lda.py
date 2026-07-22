@@ -177,9 +177,9 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
         # nodeAlphaScale != 1, the per-node blocks (contiguous topics
         # [n_bg, K), background is [0, n_bg)) are scaled to make them a priori
         # rarer — a block-asymmetric prior (Wallach et al. 2009). OnlineLDA
-        # accepts a length-K alpha vector; alpha is fixed (optimize_alpha is
-        # disabled for the gated engine), so this vector holds through the fit
-        # and into transform.
+        # accepts a length-K alpha vector; this is the INITIAL alpha. With
+        # optimizeDocConcentration=False (default) it holds through the fit and
+        # into transform; with it True, the gated per-node Newton step refines it.
         node_alpha_scale = float(self.getOrDefault("nodeAlphaScale"))
         alpha_vec = np.full(lay.K, 1.0 / lay.K, dtype=np.float64)
         alpha_vec[lay.n_bg:] *= node_alpha_scale

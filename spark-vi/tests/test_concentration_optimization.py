@@ -177,3 +177,20 @@ def test_gated_alpha_newton_step_iterates_toward_optimum():
         prev = cur
         last_step = np.abs(d).max()
     assert last_step < 1e-3                          # converged
+
+
+def test_gated_alpha_newton_step_handles_uncovered_block():
+    # A tied block never present in any group (a DAG node with no labeled coverage)
+    # must not make the dense solve singular; it stays put (Delta = 0) while the
+    # covered blocks still move. Guards the crash the full-space solve would raise.
+    import numpy as np
+    from spark_vi.inference.concentration_optimization import gated_alpha_newton_step
+    m = np.array([2.0, 1.0, 1.0])
+    a = np.array([0.3, 0.1, 0.2])
+    e = np.array([-3.0, -0.5, 0.0])          # uncovered block has no data (e=0)
+    Ng = np.array([25.0])
+    memb = np.array([[True, True, False]])   # block index 2 is uncovered
+    d = gated_alpha_newton_step(a, m, e, Ng, memb)
+    assert np.isfinite(d).all()              # no LinAlgError / NaN
+    assert d[2] == 0.0                        # uncovered block does not move
+    assert d[0] != 0.0 or d[1] != 0.0         # covered blocks still move
