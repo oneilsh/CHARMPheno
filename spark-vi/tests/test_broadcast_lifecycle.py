@@ -106,12 +106,17 @@ def test_vi_runner_unpersists_prior_broadcasts_convergence_path(spark):
     )
 
 
-def test_vi_runner_transform_unpersists_its_broadcast(spark):
-    """transform() creates exactly one broadcast and unpersists it once.
+def test_vi_runner_transform_does_not_eagerly_unpersist_its_broadcast(spark):
+    """transform() must NOT eagerly unpersist its broadcast.
 
-    Same transparent-proxy pattern as the fit() lifecycle tests. Pins down
-    that the inference path doesn't leak even though it has no iterative
-    loop.
+    The returned RDD captures the broadcast in its closure, so the broadcast has
+    to live as long as the RDD is used. Unlike fit() — whose per-iteration
+    broadcasts are unpersisted AFTER that iteration's action has read them — a
+    lazy transform has no action of its own, so an eager unpersist frees nothing
+    and forces a re-broadcast on every downstream action. Lifetime is delegated
+    to Spark's ContextCleaner (GC of the returned RDD), matching MLlib's own
+    models. We assert (1) the broadcast is not eagerly unpersisted, and (2) the
+    result is correct across MULTIPLE actions on the same returned RDD.
     """
     from unittest.mock import patch
     from spark_vi.core import VIRunner
@@ -149,9 +154,14 @@ def test_vi_runner_transform_unpersists_its_broadcast(spark):
 
     with patch.object(spark.sparkContext, "broadcast", side_effect=_wrapping_broadcast):
         out = runner.transform(rdd, global_params={"k": np.array(1.0)})
-        out.collect()  # force execution
+        first = sorted(out.collect())
+        second = sorted(out.collect())   # a second action must still work
 
-    assert len(unpersist_calls) == 1, (
-        f"Expected exactly 1 unpersist for transform's single broadcast, "
-        f"got {len(unpersist_calls)}"
+    assert first == second == [1.0, 2.0], (
+        "transform result must be correct and reusable across multiple actions"
+    )
+    assert unpersist_calls == [], (
+        "transform must NOT eagerly unpersist its broadcast — lifetime is the "
+        f"returned RDD's (ContextCleaner reclaims it on GC); got {len(unpersist_calls)} "
+        "eager unpersist call(s)"
     )

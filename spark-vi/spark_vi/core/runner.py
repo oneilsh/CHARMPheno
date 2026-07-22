@@ -397,18 +397,12 @@ class VIRunner:
         def _infer(row, _bcast=bcast, _model=model):
             return _model.infer_local(row, _bcast.value)
 
-        try:
-            return data_rdd.map(_infer)
-        finally:
-            # Eager unpersist matches fit()'s broadcast discipline. The
-            # returned RDD captures bcast in the closure, so this is safe:
-            # Spark resolves bcast.value at task launch time, which has
-            # already happened (or will be re-broadcast lazily) when the
-            # caller materializes the RDD.
-            #
-            # Note: if the caller chains .map / .filter and triggers an
-            # action much later, the broadcast may already be unpersisted.
-            # That is acceptable for transform — Spark re-broadcasts on
-            # demand. Long-lived inference pipelines should call
-            # .persist() on the returned RDD.
-            bcast.unpersist(blocking=False)
+        # Do NOT eagerly unpersist bcast here. The returned RDD captures it in
+        # the closure, so the broadcast must live as long as the RDD is used.
+        # Unlike fit() — whose per-iteration broadcasts are unpersisted AFTER
+        # that iteration's action has read them — a lazy transform has no action
+        # of its own, so unpersisting now frees nothing and forces a re-broadcast
+        # on every downstream action. Spark's ContextCleaner reclaims the
+        # broadcast when the returned RDD is garbage-collected, matching how
+        # MLlib's own models manage their transform broadcasts.
+        return data_rdd.map(_infer)

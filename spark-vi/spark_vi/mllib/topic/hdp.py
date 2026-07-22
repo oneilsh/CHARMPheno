@@ -556,12 +556,13 @@ class OnlineHDPModel(_OnlineHDPParams, _PersistableModel, Model):
 
         infer_udf = F.udf(_infer, returnType=VectorUDT())
 
-        try:
-            out_col = self.getOrDefault("topicDistributionCol")
-            features_col = self.getOrDefault("featuresCol")
-            return dataset.withColumn(out_col, infer_udf(F.col(features_col)))
-        finally:
-            bcast.unpersist(blocking=False)
+        # Broadcast lifetime is the returned DataFrame's: its UDF closure holds
+        # bcast, so do NOT eagerly unpersist (a lazy transform has no action to
+        # unpersist after — see VIRunner.transform). ContextCleaner reclaims it
+        # when the DataFrame is garbage-collected.
+        out_col = self.getOrDefault("topicDistributionCol")
+        features_col = self.getOrDefault("featuresCol")
+        return dataset.withColumn(out_col, infer_udf(F.col(features_col)))
 
     def logLikelihood(self, dataset):
         raise NotImplementedError(

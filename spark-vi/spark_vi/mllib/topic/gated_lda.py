@@ -323,8 +323,9 @@ class GatedLDAModel(_GatedLDAParams, Model):
             return DenseVector([float(theta[p["blocks"][u]].sum()) for u in p["nodes"]])
 
         udf = F.udf(_affinity, returnType=VectorUDT())
-        try:
-            out_col = self.getOrDefault("nodeAffinityCol")
-            return dataset.withColumn(out_col, udf(F.col(self.getOrDefault("featuresCol"))))
-        finally:
-            bcast.unpersist(blocking=False)
+        # Broadcast lifetime is the returned DataFrame's: its UDF closure holds
+        # bcast, so do NOT eagerly unpersist (a lazy transform has no action to
+        # unpersist after — see VIRunner.transform). ContextCleaner reclaims it
+        # when the DataFrame is garbage-collected.
+        out_col = self.getOrDefault("nodeAffinityCol")
+        return dataset.withColumn(out_col, udf(F.col(self.getOrDefault("featuresCol"))))
