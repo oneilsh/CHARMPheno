@@ -269,12 +269,12 @@ def validate_frontmatter(fm: dict) -> None:
             sys.exit(2)
 
     model_class = fm["model_class"]
-    if model_class not in ("lda", "stm", "pg_stm", "dag_placement"):
+    if model_class not in ("lda", "stm", "dag_placement"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
-              f"(currently: lda, stm, pg_stm, dag_placement; hdp planned)", flush=True)
+              f"(currently: lda, stm, dag_placement; hdp planned)", flush=True)
         sys.exit(2)
 
-    if model_class in ("stm", "pg_stm"):
+    if model_class == "stm":
         stm_required = ["covariate_formula", "categorical_cols", "continuous_cols"]
         for key in stm_required:
             if key not in fm:
@@ -291,8 +291,6 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/lda_bigquery_cloud.py"
     if model_class == "stm":
         return f"{base}/stm_bigquery_cloud.py"
-    if model_class == "pg_stm":
-        return f"{base}/pg_stm_bigquery_cloud.py"
     if model_class == "dag_placement":
         return f"{base}/dag_placement_cloud.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
@@ -312,8 +310,6 @@ def build_fit_args(
         return build_lda_args(effective, Path(out_dir), resume_from)
     if model_class == "stm":
         return build_stm_args(effective, out_dir, resume_from)
-    if model_class == "pg_stm":
-        return build_pg_stm_args(effective, out_dir, resume_from)
     if model_class == "dag_placement":
         return build_dag_placement_args(effective, out_dir, resume_from)
     raise ValueError(f"unknown model_class: {model_class!r}")
@@ -607,58 +603,6 @@ def build_stm_args(
         "--lbfgs-max-iter", str(effective.get("lbfgs_max_iter", 50)),
         "--lbfgs-tol", str(effective.get("lbfgs_tol", 1e-4)),
     ] + hardening + gating + (["--resume-from", str(resume_from)] if resume_from is not None else [])
-
-
-def build_pg_stm_args(
-    effective: dict, out_dir: str, resume_from: Path | None = None,
-) -> list[str]:
-    """Build argv for analysis/cloud/pg_stm_bigquery_cloud.py (the distributed PG-STM
-    engine: PG-SVI + Sigma read-out). Reuses the STM corpus/covariate/gating args but
-    drops the STM-specific hardening (spectral/reference/lbfgs/sigma-init) and adds the
-    PG knobs: --sigma-mode (iw|mle, the runaway-cure contrast) and the Phase-2 Sigma
-    read-out controls."""
-    cdr, billing = _require_workspace_env()
-    common = [
-        "--cdr", cdr,
-        "--billing", billing,
-        "--source-table", str(effective["source_table"]),
-        "--doc-spec", str(effective.get("doc_unit", "patient_year")),
-        "--doc-min-length", str(effective["doc_min_length"]),
-        "--K", str(effective["K"]),
-        "--max-iter", str(effective["max_iter"]),
-        "--vocab-size", str(effective["vocab_size"]),
-        "--min-df", str(effective["min_df"]),
-        "--min-patient-count", str(effective["min_patient_count"]),
-        "--subsampling-rate", str(effective["subsampling_rate"]),
-        "--tau0", str(effective["tau0"]),
-        "--kappa", str(effective["kappa"]),
-        "--person-mod", str(effective["person_mod"]),
-        "--cohort", str(effective.get("cohort_def", effective.get("cohort", ""))),
-        "--prior-obs-days", str(effective.get("prior_obs_days", 365)),
-        "--out-dir", str(out_dir),
-    ]
-    if effective.get("cache_uri"):
-        common.extend(["--cache-uri", str(effective["cache_uri"])])
-    if effective.get("random_seed") is not None:
-        common.extend(["--random-seed", str(effective["random_seed"])])
-    gating: list[str] = []
-    if effective.get("background_k") is not None and effective.get("foreground"):
-        gating = [
-            "--background-k", str(effective["background_k"]),
-            "--foreground", str(effective["foreground"]),
-            "--group-var", str(effective.get("group_var", "source_cohort")),
-        ]
-    pg = [
-        "--sigma-mode", str(effective.get("sigma_mode", "iw")),
-        "--gibbs-sweeps", str(effective.get("gibbs_sweeps", 0)),
-        "--sigma-readout-subsample", str(effective.get("sigma_readout_subsample", 20000)),
-    ]
-    return common + [
-        "--covariate-formula", str(effective["covariate_formula"]),
-        "--categorical-cols", ",".join(effective.get("categorical_cols", [])),
-        "--continuous-cols", ",".join(effective.get("continuous_cols", [])),
-    ] + pg + gating + (
-        ["--resume-from", str(resume_from)] if resume_from is not None else [])
 
 
 def build_dag_placement_args(
@@ -1162,14 +1106,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
-    elif effective.get("model_class") in ("pg_stm", "dag_placement"):
-        # pg_stm and dag_placement save an npz + manifest (a methods-experiment
-        # artifact), not a topic-word bundle the NPMI eval driver can read. Their
-        # metrics live in manifest.json (dag_placement: placement AUC/MRR; pg_stm:
-        # Sigma diagnostics) + the fit log.
-        mc = effective.get("model_class")
-        print(f"[run-exp] model_class={mc}: NPMI eval not wired for the npz result; "
-              "skipping eval (see manifest.json + fit log).", flush=True)
+    elif effective.get("model_class") == "dag_placement":
+        # dag_placement saves an npz + manifest (a methods-experiment artifact),
+        # not a topic-word bundle the NPMI eval driver can read. Its metrics live
+        # in manifest.json (placement AUC/MRR) + the fit log.
+        print("[run-exp] model_class=dag_placement: NPMI eval not wired for the npz "
+              "result; skipping eval (see manifest.json + fit log).", flush=True)
     else:
         # 6. Dispatch eval (capture stdout into a string for sanitized append)
         eval_script = REPO_ROOT / "analysis" / "cloud" / "eval_coherence_cloud.py"
