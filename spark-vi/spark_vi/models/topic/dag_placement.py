@@ -2,8 +2,12 @@
 a label DAG from their features via gated collapsed-Gibbs topic learning (Griffiths & Steyvers
 2004) with anchor-word spectral init (Arora et al. 2013). See
 docs/superpowers/specs/2026-07-15-anchor-first-hierarchical-case-finding-design.md."""
+from types import SimpleNamespace
+
 import numpy as np
 from scipy import stats as _sps
+
+from spark_vi.models.topic.spectral_init import word_cooccurrence, find_anchors, recover_beta
 
 
 class DagLayout:
@@ -30,12 +34,17 @@ class DagLayout:
         self.K = n_bg + len(self.nodes) * tpn
         self._depth = {}
 
-    def depth(self, v):
-        """Longest path length from root to v (root = 0). Memoized."""
+    def depth(self, v, _stack=()):
+        """Longest path length from root to v (root = 0). Memoized; cycle-guarded.
+
+        Input parent maps are acyclic by construction (ConditionDag.to_engine), but
+        DagLayout is the domain-agnostic public entry and can be built from any integer
+        map, so the _stack guard prevents a malformed cyclic map from recursing forever.
+        """
         if v in self._depth:
             return self._depth[v]
-        ps = self.parents.get(v, [])
-        d = 0 if not ps else 1 + max(self.depth(p) for p in ps)
+        ps = [p for p in self.parents.get(v, []) if p != v and p not in _stack]
+        d = 0 if not ps else 1 + max(self.depth(p, _stack + (v,)) for p in ps)
         self._depth[v] = d
         return d
 
@@ -115,10 +124,6 @@ def strip_dag_node_codes(doc, dag_node_codes):
         return doc
     mask = ~np.isin(doc, np.fromiter(dag_node_codes, dtype=doc.dtype))
     return doc[mask]
-
-
-from types import SimpleNamespace
-from spark_vi.models.topic.spectral_init import word_cooccurrence, find_anchors, recover_beta
 
 
 def _as_counts(doc):

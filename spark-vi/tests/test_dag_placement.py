@@ -20,6 +20,13 @@ def test_daglayout_tpn_two():
     assert lay.K == 1 + 6 * 2
     assert len(lay.block[3]) == 2
 
+def test_daglayout_depth_cycle_guarded():
+    # DagLayout is the domain-agnostic public entry: a malformed cyclic parent map must
+    # not recurse forever. The guard yields a finite depth rather than hanging.
+    lay = DagLayout({1: 0, 2: [1, 3], 3: [2]})   # 2<->3 cycle
+    assert lay.depth(1) == 1
+    assert lay.depth(2) < float("inf") and lay.depth(3) < float("inf")
+
 def test_label_same_path_is_deepest():
     lay = DagLayout(PARENT)
     # {1,3} lie on one path root->1->3 : most-specific = deepest = 3
