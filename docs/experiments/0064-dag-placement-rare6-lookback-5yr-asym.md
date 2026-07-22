@@ -1,7 +1,7 @@
 ---
 id: 64
 slug: dag-placement-rare6-lookback-5yr-asym
-status: pending
+status: done
 model_class: dag_placement
 cohort: population_rare6
 cohort_def: population_rare6
@@ -62,3 +62,12 @@ shared `case_finding_cache`) and only re-fits — no BigQuery re-assembly. Run
   and does the answer depend on history depth. If asymmetry helps but is
   history-sensitive, that motivates the learned per-node optimizeDocConcentration
   (branch case-finding) over a single hand-set scale.
+
+## Result (NULL — see insight 0060)
+
+Indistinguishable from symmetric 0062. LR alpha->inf: ROC 0.7749 / PR-AUC 0.1724
+(0062 sym: 0.778 / 0.171); theta-mass ROC 0.6396 (0062: 0.639); prec@80% 0.0709.
+Within <=0.003 of the symmetric arm at both history depths -> the block-asymmetric
+prior is a null lever for detection (the LR readout bypasses the theta-prior
+alpha). 5yr NPMI mean 0.2177 > 1yr 0.1905 (more history sharpens topics not
+detection). See docs/insights/0060.

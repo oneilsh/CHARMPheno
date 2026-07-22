@@ -1,7 +1,7 @@
 ---
 id: 63
 slug: dag-placement-rare6-lookback-1yr-asym
-status: pending
+status: done
 model_class: dag_placement
 cohort: population_rare6
 cohort_def: population_rare6
@@ -68,3 +68,12 @@ at the shared `case_finding_cache`, this run REUSES 0061's already-assembled
   next.
 - Pair with exp 0064 (5yr lookback, asym 0.1) for the asymmetry axis at both
   history depths.
+
+## Result (NULL — see insight 0060)
+
+Indistinguishable from symmetric 0061. LR alpha->inf: ROC 0.7747 / PR-AUC 0.2191
+(0061 sym: 0.778 / 0.222); theta-mass ROC 0.6525 (0061: 0.646); prec@80% 0.0804.
+Every metric within <=0.003 of the symmetric arm. The block-asymmetric prior is a
+null lever for detection — the forward-mode "asym helps" was an init/epochs
+confound, and the LR readout reads lambda directly (bypassing the theta-prior
+alpha). NPMI mean 0.1905. See docs/insights/0060.
