@@ -1,5 +1,5 @@
 import numpy as np
-from spark_vi.models.topic.dag_placement import DagLayout, label_from_coded, frontier_from_coded, strip_dag_node_codes, fit_gated, profile, evaluate, _auc
+from spark_vi.models.topic.dag_placement import DagLayout, frontier_from_coded, strip_dag_node_codes, fit_gated, profile, evaluate, _auc
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
 DIAMOND = {1: 0, 2: 0, 3: 0, 4: [1, 2], 5: [1, 3]}  # multi-parent DAG: node 4,5 have two parents
@@ -26,22 +26,6 @@ def test_daglayout_depth_cycle_guarded():
     lay = DagLayout({1: 0, 2: [1, 3], 3: [2]})   # 2<->3 cycle
     assert lay.depth(1) == 1
     assert lay.depth(2) < float("inf") and lay.depth(3) < float("inf")
-
-def test_label_same_path_is_deepest():
-    lay = DagLayout(PARENT)
-    # {1,3} lie on one path root->1->3 : most-specific = deepest = 3
-    assert label_from_coded([1, 3], lay) == 3
-    assert label_from_coded([3], lay) == 3
-
-def test_label_siblings_is_lca():
-    lay = DagLayout(PARENT)
-    # {3,4} are siblings under 1 : LCA = 1
-    assert label_from_coded([3, 4], lay) == 1
-    # {3,5} cross-branch under root : LCA = 0
-    assert label_from_coded([3, 5], lay) == 0
-
-def test_label_from_coded_empty_is_root():
-    assert label_from_coded([], DagLayout(PARENT)) == 0
 
 def test_strip_dag_node_codes():
     doc = np.array([10, 3, 11, 1, 12])          # 3 and 1 are DAG-node codes

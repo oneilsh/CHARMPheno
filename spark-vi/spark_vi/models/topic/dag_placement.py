@@ -90,23 +90,6 @@ class DagLayout:
         return np.array(sorted(al), dtype=int)
 
 
-def label_from_coded(coded_nodes, lay):
-    """The item's label from its in-window coded nodes. If they lie on a single root->node path
-    (one node is a descendant-or-self of all others), return that deepest node (most-specific).
-    Otherwise return the lowest common ancestor (deepest node that is an ancestor-or-self of all)."""
-    nodes = list(dict.fromkeys(coded_nodes))
-    if not nodes:
-        return 0
-    for cand in nodes:                                   # single-path: cand's closure holds all
-        cset = set(lay.closure(cand))
-        if all(n in cset for n in nodes):
-            return cand
-    common = set(lay.closure(nodes[0]))
-    for n in nodes[1:]:
-        common &= set(lay.closure(n))
-    return max(common, key=lay.depth)                    # root (0) is always common
-
-
 def frontier_from_coded(coded_nodes, lay):
     """The set-valued truth: the most-specific attested nodes = attested nodes with NO attested
     descendant. Drops attested ancestors (same-path -> most-specific), keeps incomparable attested
