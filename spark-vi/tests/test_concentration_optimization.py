@@ -84,3 +84,96 @@ def test_alpha_newton_step_importable_from_inference_module():
 def test_eta_newton_step_importable_from_inference_module():
     delta = eta_newton_step(eta=0.1, e_log_phi_sum=-200.0, K=5, V=20)
     assert np.isfinite(delta)
+
+
+def test_gated_alpha_newton_step_matches_finite_difference_gradient():
+    # The raw Newton step is -H^-1 g. We validate the assembled gradient g and
+    # Hessian H against numerical differentiation of the exact gated ELBO-in-alpha
+    #   L(a) = Σ_g N_g[logΓ(Σ_{b in g} m_b a_b) − Σ_{b in g} m_b logΓ(a_b)]
+    #        + Σ_b e_b a_b            (data term is linear in a_b; constant drops)
+    # on a tiny system (2 groups, 3 tied blocks).
+    import numpy as np
+    from scipy.special import gammaln
+    from spark_vi.inference.concentration_optimization import gated_alpha_newton_step
+
+    m = np.array([2.0, 1.0, 1.0])                    # block sizes: bg=2, two nodes tpn=1
+    a = np.array([0.30, 0.05, 0.12])                 # current tied alpha
+    e = np.array([-3.1, -0.7, -1.4])                 # data term (scaled)
+    Ng = np.array([40.0, 15.0])
+    memb = np.array([[True, True, False],            # group 0: bg + node1
+                     [True, False, True]])           # group 1: bg + node2
+
+    def L(av):
+        val = float(np.dot(e, av))
+        for g in range(len(Ng)):
+            idx = np.where(memb[g])[0]
+            s = np.sum(m[idx] * av[idx])
+            val += Ng[g] * (gammaln(s) - np.sum(m[idx] * gammaln(av[idx])))
+        return val
+
+    # numerical gradient and Hessian of L at a
+    eps = 1e-6
+    B = a.shape[0]
+    grad = np.zeros(B)
+    for b in range(B):
+        ap = a.copy(); ap[b] += eps
+        am = a.copy(); am[b] -= eps
+        grad[b] = (L(ap) - L(am)) / (2 * eps)
+    H = np.zeros((B, B))
+    for b in range(B):
+        for c in range(B):
+            app = a.copy(); app[b] += eps; app[c] += eps
+            apm = a.copy(); apm[b] += eps; apm[c] -= eps
+            amp = a.copy(); amp[b] -= eps; amp[c] += eps
+            amm = a.copy(); amm[b] -= eps; amm[c] -= eps
+            H[b, c] = (L(app) - L(apm) - L(amp) + L(amm)) / (4 * eps * eps)
+
+    expected_delta = -np.linalg.solve(H, grad)       # the Newton step L should produce
+    got = gated_alpha_newton_step(a, m, e, Ng, memb)
+    assert np.allclose(got, expected_delta, rtol=1e-3, atol=1e-5), (got, expected_delta)
+
+
+def test_gated_alpha_newton_step_iterates_toward_optimum():
+    # Repeated damped Newton steps on a fixed synthetic system should climb L
+    # (monotone non-decreasing) and converge (‖Δα‖ shrinks). Guards the sign.
+    #
+    # e magnitude note: each group's Dirichlet log-partition term
+    # N_g[logΓ(Σ m_b a_b) − Σ m_b logΓ(a_b)] is convex-in-reverse (its negative
+    # is the Dirichlet cumulant function, which is convex), so along any ray
+    # where a group's blocks scale up together it grows like +N_g·log(M_g)·t
+    # (M_g = Σ_{b in g} m_b), unboundedly — this is the standard fact that the
+    # asymmetric-Dirichlet Newton objective is concave but need not have a
+    # finite maximum. Since e is linear in the same directions, L(a) is
+    # bounded above only if |e_b| is large enough, in the SAME units as N_g,
+    # to out-pace that growth (realistic e_log_theta_node_sum values are sums
+    # over ~N_g documents, so they are O(N_g), not O(1)). We scale the raw
+    # per-doc data term (-4.0, -0.5, -2.0) by the group size so the synthetic
+    # system has a genuine finite optimum instead of diverging to +infinity.
+    import numpy as np
+    from scipy.special import gammaln
+    from spark_vi.inference.concentration_optimization import gated_alpha_newton_step
+
+    m = np.array([2.0, 1.0, 1.0])
+    e = np.array([-4.0, -0.5, -2.0]) * 50.0
+    Ng = np.array([50.0, 20.0])
+    memb = np.array([[True, True, False], [True, False, True]])
+
+    def L(av):
+        val = float(np.dot(e, av))
+        for g in range(len(Ng)):
+            idx = np.where(memb[g])[0]
+            s = np.sum(m[idx] * av[idx])
+            val += Ng[g] * (gammaln(s) - np.sum(m[idx] * gammaln(av[idx])))
+        return val
+
+    a = np.array([0.2, 0.2, 0.2])
+    prev = L(a)
+    last_step = None
+    for _ in range(50):
+        d = gated_alpha_newton_step(a, m, e, Ng, memb)
+        a = np.maximum(a + 0.5 * d, 1e-3)          # ρ damping + floor
+        cur = L(a)
+        assert cur >= prev - 1e-6                   # monotone ascent
+        prev = cur
+        last_step = np.abs(d).max()
+    assert last_step < 1e-3                          # converged

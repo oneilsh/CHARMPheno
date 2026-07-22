@@ -172,3 +172,60 @@ def beta_concentration_closed_form(
             f"got {s_log_one_minus}"
         )
     return -n / s_log_one_minus
+
+
+def gated_alpha_newton_step(
+    alpha_tied: np.ndarray,
+    block_sizes: np.ndarray,
+    e_log_theta_block_sum_scaled: np.ndarray,
+    group_counts: np.ndarray,
+    group_membership: np.ndarray,
+) -> np.ndarray:
+    """One exact Newton step for a per-node-tied asymmetric Dirichlet α under a
+    DAG gate (GatedOnlineLDA).
+
+    Generalizes the symmetric-simplex Newton of Blei, Ng, Jordan 2003 (A.4.2) to
+    (a) a block-tied α (one shared value per DAG node, so the chain rule folds in
+    the |block| topics that share it) and (b) per-document gated sub-simplices:
+    each distinct allowed-set 'group' g contributes a Dirichlet log-normalizer over
+    only its own blocks A_g, so the ψ(Σ α) coupling is per-group, not global.
+
+    The tied space is small (~1 + n_nodes), so the dense Hessian is inverted
+    directly with np.linalg.solve — no Sherman-Morrison structured inverse (that
+    exists only to stay O(K) for a free per-topic α, which we do not use here).
+
+    Parameters
+    ----------
+    alpha_tied : (B,) current tied α; index 0 = background, 1.. = per node.
+    block_sizes : (B,) topics sharing each tied value (n_bg, then tpn per node).
+    e_log_theta_block_sum_scaled : (B,) corpus-scaled Σ_d Σ_{k in block} E[log θ_dk].
+    group_counts : (G,) corpus doc-count N_g of each distinct allowed-set group.
+    group_membership : (G, B) bool; True where tied block b ∈ group g's allowed set.
+
+    Returns
+    -------
+    (B,) raw Δα_tied. The caller applies ρ_t damping and the post-step floor
+    (clip to [1e-3, ∞)), matching the pure contract of alpha_newton_step.
+    """
+    a = np.asarray(alpha_tied, dtype=np.float64)
+    m = np.asarray(block_sizes, dtype=np.float64)
+    e = np.asarray(e_log_theta_block_sum_scaled, dtype=np.float64)
+    Ng = np.asarray(group_counts, dtype=np.float64)
+    memb = np.asarray(group_membership, dtype=bool)
+
+    ma = m * a                                     # (B,) m_b α_b
+    group_sum = memb @ ma                          # (G,) Σ_{b in g} m_b α_b
+    psi_gsum = digamma(group_sum)                  # (G,)
+    tri_gsum = polygamma(1, group_sum)             # (G,)
+
+    # gradient: prior + data
+    sum_Ng = (memb * Ng[:, None]).sum(axis=0)                  # (B,) Σ_{g: b in g} N_g
+    sum_Ng_psi = (memb * (Ng * psi_gsum)[:, None]).sum(axis=0) # (B,)
+    g = m * (sum_Ng_psi - sum_Ng * digamma(a)) + e
+
+    # Hessian: H = Xᵀ diag(N_g ψ'(Σ)) X  −  diag(m_b ψ'(α_b) Σ_{g:b} N_g)
+    X = memb * m[None, :]                                      # (G,B) m_b [b in g]
+    H = X.T @ (X * (Ng * tri_gsum)[:, None])                  # (B,B)
+    H[np.diag_indices_from(H)] -= m * polygamma(1, a) * sum_Ng
+
+    return -np.linalg.solve(H, g)
