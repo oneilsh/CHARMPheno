@@ -301,9 +301,19 @@ class GatedLDAModel(_GatedLDAParams, Model):
         })
 
         def _affinity(features):
+            import hashlib
             p = bcast.value
             doc = _vector_to_bow_document(features)
-            rng = np.random.default_rng()
+            # Content-deterministic gamma_init (mirrors GatedOnlineLDA.local_update's
+            # blake2b-of-content seeding): identical docs get identical init on every
+            # run, so held-out node-affinity scores are reproducible and independent
+            # of Spark partition/executor order. gammaShape is high (concentrated init
+            # near 1.0) so this barely moves the CAVI fixed point — but a scoring path
+            # feeding AUC / precision@sens must not be run-to-run random.
+            h = hashlib.blake2b(digest_size=8)
+            h.update(np.ascontiguousarray(doc.indices, dtype=np.int32).tobytes())
+            h.update(np.ascontiguousarray(doc.counts, dtype=np.float64).tobytes())
+            rng = np.random.default_rng(int.from_bytes(h.digest(), "little"))
             gamma_init = rng.gamma(p["gamma_shape"], 1.0 / p["gamma_shape"], size=p["K"])
             gamma, _, _, _ = _cavi_doc_inference(
                 indices=doc.indices, counts=doc.counts, expElogbeta=p["expElogbeta"],

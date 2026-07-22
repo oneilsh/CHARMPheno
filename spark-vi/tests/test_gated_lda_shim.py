@@ -34,6 +34,29 @@ def test_gated_shim_fit_transform_smoke(spark):
     assert len(aff) == n_nodes            # one affinity per DAG node
 
 
+def test_gated_shim_transform_is_deterministic(spark):
+    # The held-out fold-in feeds AUC/precision metrics, so two transforms of the
+    # same model + data must yield identical node-affinity vectors (content-seeded
+    # gamma_init, not an unseeded RNG).
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    parent = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
+    V = 30
+    rng = np.random.default_rng(0)
+    rows = []
+    for _ in range(40):
+        leaf = int(rng.choice([3, 4, 5, 6]))
+        idx = sorted(rng.choice(V, size=6, replace=False).tolist())
+        rows.append((Vectors.sparse(V, idx, [1.0] * len(idx)), [leaf]))
+    df = spark.createDataFrame(rows, ["features", "frontier"])
+    model = GatedLDAEstimator(parent=parent, nBg=2, tpn=1, maxIter=3, seed=0).fit(df)
+
+    a1 = [r[0] for r in model.transform(df).select("nodeAffinity").collect()]
+    a2 = [r[0] for r in model.transform(df).select("nodeAffinity").collect()]
+    assert len(a1) == len(a2) == 40
+    for v1, v2 in zip(a1, a2):
+        assert np.array_equal(v1.toArray(), v2.toArray())
+
+
 def test_gated_shim_node_alpha_scale_builds_asymmetric_alpha(spark):
     # nodeAlphaScale<1 must give the per-node blocks a smaller Dirichlet alpha
     # than the background block: alpha_background = 1/K, alpha_node = scale/K.
