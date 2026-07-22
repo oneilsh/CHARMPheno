@@ -81,26 +81,66 @@ def _topic_node_labels(lay, int2cid, name_by_id, n_bg):
     return labels
 
 
-def _log_learned_alpha(model, lay, int2cid, name_by_id, n_bg):
+def _node_coverage(train_df, lay):
+    """Per-node training COVERAGE: the number of train docs where the node is in the
+    allowed set (its closure was attested) — exactly the docs the node's learned
+    alpha is estimated from. Returns {node_id: doc_count}. Collected from the frontier
+    column at foreground scale (one groupBy), so cheap; only called when the learned
+    alpha is logged."""
+    from pyspark.sql import functions as F
+    counts = (train_df.select("frontier").rdd
+              .map(lambda r: frozenset(int(x) for x in (r[0] or [])))
+              .countByValue())
+    cov = {u: 0 for u in lay.nodes}
+    for frontier, cnt in counts.items():
+        covered = set()
+        for f in frontier:
+            covered.update(lay.closure(f))           # closure = node + all ancestors (node ids)
+        for u in covered:
+            if u in cov:
+                cov[u] += int(cnt)
+    return cov
+
+
+def _spearman(x, y):
+    """Spearman rank correlation via numpy (no scipy dependency in the driver)."""
+    if len(x) < 3:
+        return float("nan")
+    rx = np.argsort(np.argsort(np.asarray(x, dtype=float)))
+    ry = np.argsort(np.argsort(np.asarray(y, dtype=float)))
+    if rx.std() == 0 or ry.std() == 0:
+        return float("nan")
+    return float(np.corrcoef(rx, ry)[0, 1])
+
+
+def _log_learned_alpha(model, lay, int2cid, name_by_id, n_bg, train_df):
     """Print the learned per-node Dirichlet alpha (optimizeDocConcentration) sorted
-    high->low, mapped to condition names, alongside the background alpha. Answers
-    'what did the learned alpha range over, and which nodes moved' directly from the
-    fitted vector. Single-seed fits are multimodal (insight 0059), so read the range
-    and gross ordering, not a per-node point value."""
+    high->low, mapped to condition names, alongside the background alpha AND each
+    node's training coverage (docs the alpha is estimated from). Reports the Spearman
+    correlation between learned alpha and coverage: does the learned alpha track node
+    prevalence/coverage, or something else (e.g. footprint diffuseness)? Single-seed
+    fits are multimodal (insight 0059), so read the range + correlation, not per-node
+    point values."""
     alpha = model.result.global_params["alpha"]
     bg_alpha = float(alpha[0])                       # background block (all n_bg share it)
+    cov = _node_coverage(train_df, lay)
     rows = []
     for u in lay.nodes:
         a_u = float(alpha[lay.block[u][0]])          # tying: all tpn topics share it
         nm = name_by_id.get(int2cid.get(u), str(u))
-        rows.append((a_u, u, nm))
+        rows.append((a_u, u, nm, cov.get(u, 0)))
     rows.sort(reverse=True)
     lo, hi = rows[-1][0], rows[0][0]
+    # correlation over COVERED nodes only (uncovered alpha is just the init, uninformative)
+    covered = [(a, c) for a, _, _, c in rows if c > 0]
+    rho = _spearman([a for a, _ in covered], [c for _, c in covered]) if covered else float("nan")
     print(f"[driver]   learned alpha (optimizeDocConcentration): background={bg_alpha:.4g}; "
-          f"node blocks min={lo:.4g} max={hi:.4g} (init was 1/K={1.0/lay.K:.4g})", flush=True)
-    for a_u, u, nm in rows:
+          f"node blocks min={lo:.4g} max={hi:.4g} (init was 1/K={1.0/lay.K:.4g}); "
+          f"Spearman(alpha, coverage) over {len(covered)} covered nodes = {rho:.3f}", flush=True)
+    for a_u, u, nm, c in rows:
         rel = ">bg" if a_u > bg_alpha else "<bg"
-        print(f"[driver]     alpha[node {u:>2} {nm[:34]:<34}] = {a_u:.4g}  {rel}", flush=True)
+        print(f"[driver]     alpha[node {u:>2} {nm[:34]:<34}] = {a_u:.4g}  {rel}  "
+              f"coverage={c}", flush=True)
 
 
 def _vocab_concept_names(spark, cdr, billing, vocab_map):
@@ -291,7 +331,7 @@ def main() -> int:
             model = est.fit(bundle.train_df)
             if args.optimize_doc_concentration:
                 _log_learned_alpha(model, lay, bundle.int2cid,
-                                   bundle.name_by_id, args.n_bg)
+                                   bundle.name_by_id, args.n_bg, bundle.train_df)
 
         with _phase("transform + inline placement eval"):
             scored = model.transform(bundle.test_df).select(
