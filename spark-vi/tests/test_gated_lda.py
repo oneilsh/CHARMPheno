@@ -261,6 +261,45 @@ def test_gated_local_update_no_stat_when_alpha_fixed():
     assert "e_log_theta_node_sum" not in out
 
 
+def test_gated_update_global_leaves_alpha_fixed_when_disabled():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=6, random_seed=0)          # alpha fixed
+    gp = m.initialize_global(None)
+    alpha0 = gp["alpha"].copy()
+    stats = {"lambda_stats": np.ones((lay.K, 6)), "n_docs": np.array(4.0)}
+    gp2 = m.update_global(gp, stats, learning_rate=0.5)
+    assert np.array_equal(gp2["alpha"], alpha0)                   # unchanged
+    assert not np.array_equal(gp2["lambda"], gp["lambda"])        # lambda still moves
+
+def test_gated_update_global_learns_asymmetric_alpha():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)                  # B=3: bg,node1,node2
+    hist = {frozenset({1}): 30, frozenset({2}): 30, frozenset(): 40}
+    m = GatedOnlineLDA(lay, vocab_size=6, optimize_alpha=True, random_seed=0,
+                       frontier_histogram=hist)
+    gp = m.initialize_global(None)
+    # Make node1 look 'common' (E[log θ] near 0) and node2 'rare' (very negative):
+    # tied order [bg, node1, node2].
+    stats = {
+        "lambda_stats": np.ones((lay.K, 6)),
+        "n_docs": np.array(100.0),
+        "e_log_theta_node_sum": np.array([-20.0, -2.0, -40.0]),
+    }
+    gp2 = m.update_global(gp, stats, learning_rate=1.0)
+    a_full = gp2["alpha"]
+    a_node1 = a_full[lay.block[1][0]]
+    a_node2 = a_full[lay.block[2][0]]
+    assert a_node1 > a_node2                                      # common node gets larger alpha
+    assert a_full.min() >= 1e-3                                   # floor respected
+    # tying preserved: all topics in a block share one value
+    assert np.allclose(a_full[lay.block[1]], a_node1)
+
+
 def test_initialize_global_uses_precomputed_spectral_lambda():
     # When data_summary carries a precomputed (K,V) 'spectral_lambda', the model
     # seeds lambda from it directly (the scalable path) instead of running a

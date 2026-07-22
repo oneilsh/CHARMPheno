@@ -27,6 +27,7 @@ from typing import Any, Iterable
 import numpy as np
 from scipy.special import digamma
 
+from spark_vi.inference.concentration_optimization import gated_alpha_newton_step
 from spark_vi.models.topic.dag_placement import DagLayout
 from spark_vi.models.topic.lda import OnlineLDA, _cavi_doc_inference, _dirichlet_kl
 from spark_vi.models.topic.types import GatedBOWDocument
@@ -190,3 +191,53 @@ class GatedOnlineLDA(OnlineLDA):
         if node_theta_sum is not None:
             result["e_log_theta_node_sum"] = node_theta_sum
         return result
+
+    def update_global(self, global_params, target_stats, learning_rate):
+        """SVI natural-gradient λ step (inherited form) + gated per-node α step.
+
+        The λ update is the same natural-gradient step OnlineLDA.update_global
+        computes; we recompute it here (a few lines) rather than toggling the
+        parent's optimize flags, so the gated α path is explicit. η is never
+        optimized in the gated engine.
+        """
+        lam = global_params["lambda"]
+        alpha = global_params["alpha"]
+        eta = global_params["eta"]
+        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        target_lam = eta + expElogbeta * target_stats["lambda_stats"]
+        new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
+        new_alpha = alpha
+        if self.optimize_alpha:
+            new_alpha = self._gated_alpha_update(alpha, target_stats, learning_rate)
+        return {"lambda": new_lam, "alpha": new_alpha, "eta": eta}
+
+    def _gated_alpha_update(self, alpha_full, target_stats, learning_rate):
+        """Contract α to tied space, take one damped gated Newton step, expand back.
+
+        Blei-Ng-Jordan 2003 A.4.2 generalized to per-node tying + gated
+        sub-simplices; see gated_alpha_newton_step. Floors α at 1e-3.
+        """
+        nodes = self.lay.nodes
+        B = self._block_sizes.shape[0]
+        # contract: one representative topic per tied block (tying keeps them equal)
+        a_tied = np.empty(B, dtype=np.float64)
+        a_tied[0] = alpha_full[0]                              # a background topic
+        for i, u in enumerate(nodes, start=1):
+            a_tied[i] = alpha_full[self.lay.block[u][0]]
+        # static group structure from the frontier histogram
+        groups = list(self._frontier_histogram.items())
+        group_counts = np.array([c for _, c in groups], dtype=np.float64)
+        memb = np.zeros((len(groups), B), dtype=bool)
+        for g, (frontier, _) in enumerate(groups):
+            for k in self.lay.allowed_set(frontier):
+                memb[g, self._topic_to_tied[k]] = True
+        delta = gated_alpha_newton_step(
+            a_tied, self._block_sizes,
+            target_stats["e_log_theta_node_sum"], group_counts, memb)
+        a_tied_new = np.maximum(a_tied + learning_rate * delta, 1e-3)
+        # expand back to length-K
+        out = alpha_full.copy()
+        out[: self.lay.n_bg] = a_tied_new[0]
+        for i, u in enumerate(nodes, start=1):
+            out[self.lay.block[u]] = a_tied_new[i]
+        return out
