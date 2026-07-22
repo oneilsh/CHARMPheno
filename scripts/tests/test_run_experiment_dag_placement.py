@@ -75,3 +75,17 @@ def test_build_dag_placement_args_emits_topic_logging_flags(monkeypatch):
     args = mod.build_dag_placement_args(eff, "/out")
     assert args[args.index("--print-topics-every") + 1] == "10"
     assert args[args.index("--top-n-tokens") + 1] == "6"
+
+
+def test_build_dag_placement_args_optimize_doc_concentration_flag(monkeypatch):
+    # store-true flag: present only when frontmatter sets it truthy.
+    mod = _run_exp(monkeypatch)
+    base = {"model_class": "dag_placement", "source_table": "condition_era",
+            "person_mod": 10, "vocab_size": 5000, "min_df": 20,
+            "min_patient_count": 20, "doc_min_length": 0, "min_n": 50,
+            "n_bg": 2, "tpn": 1, "max_iter": 100}
+    # absent -> flag not emitted (byte-identical default path)
+    assert "--optimize-doc-concentration" not in mod.build_dag_placement_args(base, "/out")
+    # true -> flag emitted (no value; argparse store_true)
+    on = {**base, "optimize_doc_concentration": True}
+    assert "--optimize-doc-concentration" in mod.build_dag_placement_args(on, "/out")

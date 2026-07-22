@@ -81,6 +81,28 @@ def _topic_node_labels(lay, int2cid, name_by_id, n_bg):
     return labels
 
 
+def _log_learned_alpha(model, lay, int2cid, name_by_id, n_bg):
+    """Print the learned per-node Dirichlet alpha (optimizeDocConcentration) sorted
+    high->low, mapped to condition names, alongside the background alpha. Answers
+    'what did the learned alpha range over, and which nodes moved' directly from the
+    fitted vector. Single-seed fits are multimodal (insight 0059), so read the range
+    and gross ordering, not a per-node point value."""
+    alpha = model.result.global_params["alpha"]
+    bg_alpha = float(alpha[0])                       # background block (all n_bg share it)
+    rows = []
+    for u in lay.nodes:
+        a_u = float(alpha[lay.block[u][0]])          # tying: all tpn topics share it
+        nm = name_by_id.get(int2cid.get(u), str(u))
+        rows.append((a_u, u, nm))
+    rows.sort(reverse=True)
+    lo, hi = rows[-1][0], rows[0][0]
+    print(f"[driver]   learned alpha (optimizeDocConcentration): background={bg_alpha:.4g}; "
+          f"node blocks min={lo:.4g} max={hi:.4g} (init was 1/K={1.0/lay.K:.4g})", flush=True)
+    for a_u, u, nm in rows:
+        rel = ">bg" if a_u > bg_alpha else "<bg"
+        print(f"[driver]     alpha[node {u:>2} {nm[:34]:<34}] = {a_u:.4g}  {rel}", flush=True)
+
+
 def _vocab_concept_names(spark, cdr, billing, vocab_map):
     """{concept_id: concept_name} for the vocabulary (for the per-iter top-terms
     log). A small filtered read of `concept`, mirroring _corpus_load's lookup;
@@ -163,7 +185,12 @@ def parse_args(argv=None):
     p.add_argument("--node-alpha-scale", type=float, default=1.0,
                    help="Multiplier on the per-node-topic Dirichlet alpha vs the "
                         "background alpha (1/K). 1.0 = symmetric (default); <1 "
-                        "down-weights disease-node topics (asymmetric prior).")
+                        "down-weights disease-node topics (asymmetric prior). When "
+                        "--optimize-doc-concentration is set this is the INITIAL alpha.")
+    p.add_argument("--optimize-doc-concentration", action="store_true",
+                   help="Learn an asymmetric per-node Dirichlet alpha from data "
+                        "(Wallach et al. 2009); node-alpha-scale sets the initial "
+                        "alpha, the gated Newton step refines it. Off by default.")
     # SVI
     p.add_argument("--max-iter", type=int, default=100)
     p.add_argument("--mini-batch-fraction", type=float, default=0.0,
@@ -248,6 +275,7 @@ def main() -> int:
                 spectralMethod=args.spectral_method,
                 anchorScope=args.anchor_scope,
                 nodeAlphaScale=args.node_alpha_scale,
+                optimizeDocConcentration=args.optimize_doc_concentration,
                 miniBatchFraction=args.mini_batch_fraction,
                 learningRateTau0=args.learning_rate_tau0,
                 learningRateKappa=args.learning_rate_kappa)
@@ -261,6 +289,9 @@ def main() -> int:
                     args.top_n_tokens, args.print_topics_every,
                     idx_to_cid, vocab_names, topic_labels))
             model = est.fit(bundle.train_df)
+            if args.optimize_doc_concentration:
+                _log_learned_alpha(model, lay, bundle.int2cid,
+                                   bundle.name_by_id, args.n_bg)
 
         with _phase("transform + inline placement eval"):
             scored = model.transform(bundle.test_df).select(
@@ -329,6 +360,7 @@ def main() -> int:
                 "window_mode": args.window_mode, "lookback_days": args.lookback_days,
                 "label_window_days": args.label_window_days,
                 "node_alpha_scale": args.node_alpha_scale,
+                "optimize_doc_concentration": args.optimize_doc_concentration,
                 "mini_batch_fraction": args.mini_batch_fraction,
                 "learning_rate_tau0": args.learning_rate_tau0,
                 "learning_rate_kappa": args.learning_rate_kappa,

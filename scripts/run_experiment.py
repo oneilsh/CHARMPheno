@@ -654,6 +654,10 @@ def build_dag_placement_args(
         args.extend(["--seed", str(effective["seed"])])
     if effective.get("cache_uri"):
         args.extend(["--cache-uri", str(effective["cache_uri"])])
+    # Store-true flag: learn the asymmetric per-node alpha (optimizeDocConcentration).
+    # node_alpha_scale is the initial alpha; the gated Newton step refines it.
+    if effective.get("optimize_doc_concentration"):
+        args.append("--optimize-doc-concentration")
     return args
 
 
