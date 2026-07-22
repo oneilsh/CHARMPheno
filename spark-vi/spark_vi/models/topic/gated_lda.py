@@ -41,15 +41,29 @@ def node_affinity(theta: np.ndarray, lay: DagLayout) -> dict[int, float]:
 
 
 class GatedOnlineLDA(OnlineLDA):
-    def __init__(self, lay: DagLayout, vocab_size: int, *, init: str = "random", **kw) -> None:
-        super().__init__(K=lay.K, vocab_size=vocab_size, **kw)
-        if self.optimize_alpha:
-            raise NotImplementedError(
-                "optimize_alpha is not supported by GatedOnlineLDA in v1 (the gated "
-                "local_update does not emit the e_log_theta_sum stat); use a fixed alpha."
-            )
+    def __init__(self, lay: DagLayout, vocab_size: int, *, init: str = "random",
+                 optimize_alpha: bool = False,
+                 frontier_histogram: dict | None = None, **kw) -> None:
+        # optimize_alpha is handled by the gated per-node Newton step (this class),
+        # NOT OnlineLDA's full-K alpha_newton_step; pass it to the parent as False
+        # so the inherited update_global never runs the vanilla alpha step.
+        super().__init__(K=lay.K, vocab_size=vocab_size, optimize_alpha=False, **kw)
         self.lay = lay
         self.init = init
+        self.optimize_alpha = bool(optimize_alpha)          # gated flag (drives our override)
+        if self.optimize_alpha and frontier_histogram is None:
+            raise ValueError(
+                "optimize_alpha=True requires frontier_histogram "
+                "{frozenset(frontier): count} — the static allowed-set group structure."
+            )
+        self._frontier_histogram = frontier_histogram
+        # Tied-alpha layout: index 0 = background, i = lay.nodes[i-1].
+        self._block_sizes = np.array(
+            [lay.n_bg] + [lay.tpn] * len(lay.nodes), dtype=np.float64)
+        self._topic_to_tied = np.zeros(lay.K, dtype=np.int64)   # bg topics -> 0
+        for i, u in enumerate(lay.nodes, start=1):
+            for k in lay.block[u]:
+                self._topic_to_tied[k] = i
 
     def initialize_global(self, data_summary: Any | None) -> dict[str, np.ndarray]:
         """Random Gamma lambda (default), or a pluggable init strategy's lambda.
@@ -105,6 +119,9 @@ class GatedOnlineLDA(OnlineLDA):
         doc_loglik_sum = 0.0
         doc_theta_kl_sum = 0.0
         n_docs = 0
+        node_theta_sum = (
+            np.zeros(self._block_sizes.shape[0], dtype=np.float64)
+            if self.optimize_alpha else None)
 
         # gamma_init draws Gamma(gamma_shape, 1/gamma_shape) per doc, sized to the gated
         # allowed set — same content-deterministic seeding contract as OnlineLDA.local_update
@@ -157,9 +174,19 @@ class GatedOnlineLDA(OnlineLDA):
             doc_theta_kl_sum += _dirichlet_kl(gamma, alpha[allowed])
             n_docs += 1
 
-        return {
+            if node_theta_sum is not None:
+                # Per-tied-block Σ_{k in block} (ψ(γ_k) − ψ(γ_sum)) over this doc's
+                # allowed topics; γ is aligned with `allowed`. Blocks absent from
+                # `allowed` contribute nothing (they stay at their prior).
+                e_log_theta_d = digamma(gamma) - digamma(gamma.sum())
+                np.add.at(node_theta_sum, self._topic_to_tied[allowed], e_log_theta_d)
+
+        result = {
             "lambda_stats": lambda_stats,
             "doc_loglik_sum": np.array(doc_loglik_sum),
             "doc_theta_kl_sum": np.array(doc_theta_kl_sum),
             "n_docs": np.array(float(n_docs)),
         }
+        if node_theta_sum is not None:
+            result["e_log_theta_node_sum"] = node_theta_sum
+        return result

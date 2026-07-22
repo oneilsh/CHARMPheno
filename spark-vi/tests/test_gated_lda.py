@@ -109,17 +109,6 @@ def test_unknown_init_strategy_raises():
         GatedOnlineLDA(lay, 30, init="banana").initialize_global(None)
 
 
-def test_optimize_alpha_unsupported_raises():
-    # Regression: GatedOnlineLDA.local_update never emits e_log_theta_sum, so
-    # optimize_alpha=True flowing through **kw to OnlineLDA.__init__ would otherwise
-    # let update_global crash on a missing target_stats key deep in an M-step (on Spark
-    # executors, not at construction time). Fail fast at __init__ instead.
-    lay = _lay()
-    import pytest
-    with pytest.raises(NotImplementedError, match="optimize_alpha"):
-        GatedOnlineLDA(lay, 30, alpha=0.1, eta=0.02, optimize_alpha=True)
-
-
 def test_compute_elbo_is_finite_and_gated_doc_kl_is_positive():
     # FIX 2: the gated local_update must accumulate a real per-doc Dirichlet KL (over the
     # doc's allowed sub-simplex), not the hardcoded 0.0 surrogate, so compute_elbo (and
@@ -211,6 +200,65 @@ def test_svi_matches_gibbs_placement_multi_parent():
     max_depth = max(lay.depth(u) for u in lay.nodes)
     assert ev_s["auc_by_depth"][max_depth] >= ev_g["auc_by_depth"][max_depth] - 0.08
     assert ev_s["mrr"] >= ev_g["mrr"] - 0.08
+
+
+def test_gated_optimize_alpha_requires_frontier_histogram():
+    import pytest
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)
+    with pytest.raises(ValueError, match="frontier_histogram"):
+        GatedOnlineLDA(lay, vocab_size=5, optimize_alpha=True)   # no histogram
+
+def test_gated_tied_layout_shapes():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=2, tpn=1)          # 3 nodes
+    m = GatedOnlineLDA(lay, vocab_size=5, optimize_alpha=True,
+                       frontier_histogram={frozenset({3}): 4, frozenset(): 6})
+    # tied layout: [bg, node1, node2, node3]
+    assert list(m._block_sizes) == [2, 1, 1, 1]
+    # topic_to_tied: topics 0,1 -> 0 (bg); block(1)->1, block(2)->2, block(3)->3
+    assert m._topic_to_tied[0] == 0 and m._topic_to_tied[1] == 0
+    assert m._topic_to_tied[lay.block[1][0]] == 1
+    assert m._topic_to_tied[lay.block[3][0]] == 3
+
+def test_gated_local_update_emits_node_theta_stat():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.types import GatedBOWDocument
+    lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)                # B = 1 + 2 = 3
+    m = GatedOnlineLDA(lay, vocab_size=6, optimize_alpha=True, random_seed=0,
+                       frontier_histogram={frozenset({1}): 1, frozenset(): 1})
+    gp = m.initialize_global(None)
+    docs = [GatedBOWDocument(indices=np.array([0, 3], np.int32),
+                             counts=np.array([2.0, 1.0]), length=3,
+                             frontier=frozenset({1})),
+            GatedBOWDocument(indices=np.array([1, 4], np.int32),
+                             counts=np.array([1.0, 1.0]), length=2,
+                             frontier=frozenset())]           # background doc
+    out = m.local_update(docs, gp)
+    stat = out["e_log_theta_node_sum"]
+    assert stat.shape == (3,)                                  # [bg, node1, node2]
+    # node2 is in neither doc's allowed set (doc1 -> node1 only; doc2 -> bg only)
+    assert stat[2] == 0.0
+    # background block is in both docs' allowed sets -> nonzero
+    assert stat[0] != 0.0
+
+def test_gated_local_update_no_stat_when_alpha_fixed():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.types import GatedBOWDocument
+    lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=6, random_seed=0)        # optimize_alpha False
+    gp = m.initialize_global(None)
+    out = m.local_update([GatedBOWDocument(indices=np.array([0], np.int32),
+                                           counts=np.array([1.0]), length=1,
+                                           frontier=frozenset({1}))], gp)
+    assert "e_log_theta_node_sum" not in out
 
 
 def test_initialize_global_uses_precomputed_spectral_lambda():
