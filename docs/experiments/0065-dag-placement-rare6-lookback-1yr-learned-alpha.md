@@ -77,18 +77,25 @@ re-fits. Run 0061 first (or confirm its bundle is cached).
   ~0061 (null on detection, per insight 0060) — confirm or refute.
 - NPMI table + per-iter topics vs 0061: did learned alpha reshape composition?
 
-## Result (NULL on detection + HURTS placement — see insight 0061)
+## Result (NULL on detection; argmax shift NOT settled — see insight 0061)
 
 - **Detection null (as 0060 predicted):** LR alpha->inf ROC 0.777 / PR-AUC 0.223
   (0061 sym 0.778 / 0.222). The LR readout bypasses theta, so learned alpha does
   not move detection.
-- **Learned alpha HURTS theta-mass placement:** mrr 0.442 (0063 fixed-asym 0.585),
-  top2 0.405 (0.607), disease_mass auc 0.626 (0.68) — worst of the three arms.
+- **Cross-node argmax shifted, but placement NOT settled:** mrr 0.585->0.442,
+  top2 0.607->0.405 dropped, BUT per-node discrimination auc_by_depth
+  {0.62,0.48,0.68}->{0.61,0.47,0.68} and detection are UNCHANGED. The mrr/top2
+  shift is the mechanical effect of a non-uniform node prior on the fold-in argmax
+  (high-alpha nodes up-ranked), confounded by single-seed multimodality (0059),
+  and measured on the WRONG objective for a fit alpha (optimize_alpha maximizes
+  held-out LIKELIHOOD, not ranking — and LL was not measured). Not "a fit alpha is
+  worse".
 - **Learned alpha is non-degenerate:** background=0.0200 (learned UP 3.4x from init
   1/K=0.0059); node blocks span 0.0058-0.0467, 19/26 below background. Highest:
   Scleroderma (0.047), Lichen amyloidosis, EDS. Lowest: lung+lymph sarcoid,
   Myasthenia gravis, Neurosarcoidosis. Single-seed (multimodal, insight 0059).
 - **NPMI unchanged** (0.183). Same coherent node topics.
-- **Decision: do NOT use optimize_alpha in production.** Closes the alpha-prior
-  thread — neither fixed (0060) nor learned (0061) asymmetry helps case-finding.
-  Binding constraint = information (meds/labs), not priors.
+- **Decision: keep optimize_alpha OFF in production** (null on detection, no
+  demonstrated benefit). To adjudicate placement: measure held-out LL + ensemble
+  over seeds. Detection thread closed (neither fixed 0060 nor learned 0061
+  asymmetry moves it; binding constraint = information/meds+labs).
