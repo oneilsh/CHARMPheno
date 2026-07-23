@@ -54,6 +54,21 @@ def test_ranking_summary_lines_hit_and_miss():
     assert "1. Gamma" in j3 and "<- TOP" in j3
 
 
+def test_render_decompose_rows_handles_routing_tuple():
+    import importlib
+    mod = importlib.import_module("lr_readout")
+    idx_to_cid = {0: 100, 1: 200}
+    name_by_id = {100: "Distinctive code", 200: "Generic code"}
+    # 4-tuples: (w, count, r_u_w, contribution)
+    rows = [(0, 1.0, 0.95, 3.2), (1, 4.0, 0.02, -0.01)]
+    lines = mod.render_decompose_rows(rows, idx_to_cid, name_by_id)
+    assert any("Distinctive code" in ln and "r=0.95" in ln for ln in lines)
+    assert any("Generic code" in ln and "r=0.02" in ln for ln in lines)
+    # backward compatible with the 3-tuple (no routing column)
+    lines3 = mod.render_decompose_rows([(0, 1.0, 3.2)], idx_to_cid, name_by_id)
+    assert any("Distinctive code" in ln for ln in lines3)
+
+
 def test_classify_error_class_covers_the_2x2_plus_node_confusion():
     import importlib
     mod = importlib.import_module("lr_readout")

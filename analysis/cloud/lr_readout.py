@@ -122,6 +122,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "sensitivity) whose max-node-LR score threshold defines "
                         "'called rare' vs 'called background' for --viewer-per-class. "
                         "Default 0.80.")
+    p.add_argument("--viewer-score-mode", choices=["lr", "explain_away"], default="lr",
+                   help="Score the case viewer's per-doc ranking/classification with "
+                        "either plain 'lr' (lr_placement_scores/lr_decompose, default, "
+                        "unchanged behavior) or 'explain_away' (the responsibility-"
+                        "weighted explain_away_placement_scores/explain_away_decompose, "
+                        "at the same viewer alpha -- comorbid codes routed away from a "
+                        "node are suppressed toward 0 instead of docking its score; the "
+                        "plain-LR max score is also printed on each case's header line "
+                        "for contrast). Independent of the unconditional plain-LR + "
+                        "explain-away @alpha=inf detection block printed by "
+                        "detection_report, which always prints both.")
     return p
 
 
@@ -306,18 +317,27 @@ def _hash_person(person_id) -> str:
 
 def render_decompose_rows(rows, idx_to_cid, name_by_cid) -> list[str]:
     """[(w, count, contribution), ...] (Task 1's lr_decompose output, already
-    sorted by |contribution| desc) -> rendered lines with concept NAMES in
-    place of raw vocab indices. `idx_to_cid` = vocab-idx -> concept-id (the
-    inverse of CaseFindingBundle.vocab_map, which is {concept_id: vocab_idx});
-    `name_by_cid` = concept-id -> concept name for the FULL vocabulary (from
-    _vocab_concept_names' BigQuery lookup -- NOT bundle.name_by_id, which only
-    covers the ~DAG-node concepts). Falls back to the concept id, then the raw
-    vocab index, if a lookup misses. Pure string formatting; order preserved."""
+    sorted by |contribution| desc) OR [(w, count, r_u_w, contribution), ...]
+    (explain_away_decompose's form, with the routing weight r(u|w)) -> rendered
+    lines with concept NAMES in place of raw vocab indices. `idx_to_cid` =
+    vocab-idx -> concept-id (the inverse of CaseFindingBundle.vocab_map, which
+    is {concept_id: vocab_idx}); `name_by_cid` = concept-id -> concept name for
+    the FULL vocabulary (from _vocab_concept_names' BigQuery lookup -- NOT
+    bundle.name_by_id, which only covers the ~DAG-node concepts). Falls back to
+    the concept id, then the raw vocab index, if a lookup misses. Pure string
+    formatting; order preserved."""
     lines = []
-    for w, count, contribution in rows:
-        cid = idx_to_cid.get(w, w)
-        name = name_by_cid.get(cid, cid)
-        lines.append(f"{contribution:+.1f}  x{count:g}  {name}")
+    for r in rows:
+        if len(r) == 4:
+            w, count, r_uw, contribution = r
+            cid = idx_to_cid.get(w, w)
+            name = name_by_cid.get(cid, cid)
+            lines.append(f"{contribution:+.1f}  x{count:g}  r={r_uw:.2f}  {name}")
+        else:
+            w, count, contribution = r
+            cid = idx_to_cid.get(w, w)
+            name = name_by_cid.get(cid, cid)
+            lines.append(f"{contribution:+.1f}  x{count:g}  {name}")
     return lines
 
 
@@ -413,31 +433,50 @@ _CLASS_ORDER = [
 
 def _render_case(person_id, sv, frontier, *, lam, lay, alpha, background,
                  node_name, idx_to_cid, vocab_names, nodes, vocab_size, top_nodes,
-                 count_mode="raw", length_normalize=False):
+                 count_mode="raw", length_normalize=False, score_mode="lr"):
     """One patient's viewer block (string): token/code counts, the LR ranking +
-    HIT/MISS summary, and the per-code lr_decompose for the top node (+ each true
+    HIT/MISS summary, and the per-code decompose for the top node (+ each true
     node not the top). Pure per-doc; scores this doc against all nodes under the
     same `count_mode`/`length_normalize` as the AUC sweep (so a log1p run's viewer
-    matches its score)."""
+    matches its score). `score_mode` 'lr' (default, unchanged) uses
+    lr_placement_scores/lr_decompose; 'explain_away' uses the responsibility-weighted
+    explain_away_placement_scores/explain_away_decompose instead (whose decompose rows
+    carry the routing weight r(u|w), rendered via render_decompose_rows' 4-tuple form)
+    and additionally prints the plain-LR max score on the header line for contrast."""
     from spark_vi.models.topic.dag_placement import lr_decompose, lr_placement_scores
     bow_row = np.zeros(vocab_size, dtype=float)
     bow_row[np.asarray(sv.indices, dtype=np.int64)] = np.asarray(sv.values, dtype=float)
-    scores = lr_placement_scores(bow_row[None], lam, lay, alpha=alpha,
-                                 background=background, count_mode=count_mode,
-                                 length_normalize=length_normalize)[0]
+    lr_scores = lr_placement_scores(bow_row[None], lam, lay, alpha=alpha,
+                                    background=background, count_mode=count_mode,
+                                    length_normalize=length_normalize)[0]
+    contrast = ""
+    if score_mode == "explain_away":
+        from spark_vi.models.topic.dag_placement import (
+            explain_away_decompose, explain_away_placement_scores)
+        scores = explain_away_placement_scores(
+            bow_row[None], lam, lay, alpha=alpha, background=background,
+            count_mode=count_mode, length_normalize=length_normalize)[0]
+        contrast = f"  [plain-LR max score={lr_scores.max():+.3f} for contrast]"
+    else:
+        scores = lr_scores
     true_set = [u for u in frontier if u in lay.block]
     kind = "foreground" if true_set else "background"
     rank_lines, top_node = _ranking_summary_lines(scores, nodes, true_set,
                                                   node_name, top_nodes)
 
     def _decomp(u, why):
-        rows = lr_decompose(bow_row, lam, lay, u, alpha=alpha, background=background,
-                            count_mode=count_mode)
+        if score_mode == "explain_away":
+            rows = explain_away_decompose(bow_row, lam, lay, u, alpha=alpha,
+                                          background=background, count_mode=count_mode)
+        else:
+            rows = lr_decompose(bow_row, lam, lay, u, alpha=alpha, background=background,
+                                count_mode=count_mode)
         return [f"  WHY {why} ({node_name.get(u, u)}):"] + \
                ["    " + ln for ln in render_decompose_rows(rows, idx_to_cid, vocab_names)]
 
     out = [f"person_id={person_id}  [{kind}]  "
-           f"({int(bow_row.sum())} coded tokens, {int((bow_row > 0).sum())} distinct codes)"]
+           f"({int(bow_row.sum())} coded tokens, {int((bow_row > 0).sum())} distinct codes)"
+           f"{contrast}"]
     out += rank_lines
     out += _decomp(top_node, "top")                       # why the model called it
     for u in true_set:                                    # why the truth scored as it did
@@ -458,13 +497,14 @@ def _viewer_context(bundle, lay, vocab_names):
 
 def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background,
                       vocab_names, top_nodes=8, count_mode="raw",
-                      length_normalize=False):
+                      length_normalize=False, score_mode="lr"):
     """Write a flat (ungrouped) LR breakdown for each selected doc to
     {run_dir}/lr_readout/decompose.txt. Per patient: token/code counts; the LR
     RANKING over DAG nodes (top `top_nodes`); (foreground) the TRUE node(s) + rank
     + a HIT/MISS verdict; and the per-code lr_decompose for the top node (+ each
     true node not the top). Row-level content stays in this file (in-enclave, never
-    printed); stdout references only SHA-256-hashed ids. Returns the written Path."""
+    printed); stdout references only SHA-256-hashed ids. `score_mode` 'lr'|'explain_away'
+    -- see `_render_case`. Returns the written Path."""
     ctx = _viewer_context(bundle, lay, vocab_names)
     out_dir = Path(run_dir) / "lr_readout"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -472,7 +512,8 @@ def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background,
     blocks = [_render_case(pid, sv, fr, lam=lam, lay=lay, alpha=alpha,
                            background=background, vocab_names=vocab_names,
                            top_nodes=top_nodes, count_mode=count_mode,
-                           length_normalize=length_normalize, **ctx)
+                           length_normalize=length_normalize, score_mode=score_mode,
+                           **ctx)
               for pid, sv, fr in cases]
     out_path.write_text("\n\n".join(blocks) + "\n" if blocks else "")
     print(f"[lr_readout]   wrote {len(cases)} case decomposition(s) "
@@ -484,12 +525,13 @@ def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background,
 def write_case_viewer_by_class(run_dir, bundle, lam, lay, meta, scores, is_fg, *,
                                alpha, background, vocab_names, call_threshold,
                                per_class, top_nodes=8, seed=0, count_mode="raw",
-                               length_normalize=False):
-    """Classify EVERY held-out doc by the background-vs-rare confusion (max-node LR
+                               length_normalize=False, score_mode="lr"):
+    """Classify EVERY held-out doc by the background-vs-rare confusion (max-node
     case score vs `call_threshold`), sample up to `per_class` per class, and write
     them GROUPED by class (false-positive first) to decompose.txt. `scores` is the
-    [n_docs x n_nodes] LR matrix at the viewer alpha (aligned with `meta`/`is_fg`).
-    Returns (written Path, {class: total_count})."""
+    [n_docs x n_nodes] matrix (LR or explain-away, matching `score_mode`) at the
+    viewer alpha (aligned with `meta`/`is_fg`). `score_mode` 'lr'|'explain_away' --
+    see `_render_case`. Returns (written Path, {class: total_count})."""
     ctx = _viewer_context(bundle, lay, vocab_names)
     nodes = ctx["nodes"]
     block_set = set(lay.block)
@@ -510,8 +552,9 @@ def write_case_viewer_by_class(run_dir, bundle, lam, lay, meta, scores, is_fg, *
     out_path = out_dir / "decompose.txt"
     counts = {k: len(v) for k, v in buckets.items()}
 
-    sections = [f"call threshold = {call_threshold:+.3f} (max-node LR case score); "
-                "class totals: " + ", ".join(f"{k}={counts[k]}" for k, _ in _CLASS_ORDER)]
+    sections = [f"call threshold = {call_threshold:+.3f} (max-node {score_mode} case "
+                "score); class totals: " +
+                ", ".join(f"{k}={counts[k]}" for k, _ in _CLASS_ORDER)]
     for cls, label in _CLASS_ORDER:
         idxs = buckets[cls]
         if not per_class or not idxs:
@@ -525,7 +568,8 @@ def write_case_viewer_by_class(run_dir, bundle, lam, lay, meta, scores, is_fg, *
             block.append(_render_case(pid, sv, frontier, lam=lam, lay=lay, alpha=alpha,
                                       background=background, vocab_names=vocab_names,
                                       top_nodes=top_nodes, count_mode=count_mode,
-                                      length_normalize=length_normalize, **ctx))
+                                      length_normalize=length_normalize,
+                                      score_mode=score_mode, **ctx))
         sections.append("\n\n".join(block))
 
     out_path.write_text("\n\n\n".join(sections) + "\n")
@@ -645,6 +689,15 @@ def detection_report(bow, is_fg, lam, lay, *, alpha, background, theta_det,
     _ops(d, f"LR   @alpha={alab}")
     if theta_det:
         _ops(theta_det, "theta-mass (from manifest)")
+
+    # Explain-away (responsibility-weighted) LR, at the alpha->inf lift limit, beside
+    # plain LR: does routing comorbid codes to background lift detection?
+    from spark_vi.models.topic.dag_placement import explain_away_placement_scores
+    ea = explain_away_placement_scores(
+        bow, lam, lay, alpha=float("inf"), background=background,
+        count_mode=count_mode, length_normalize=length_normalize)
+    ea_det = _detection_metrics(ea.max(axis=1), np.asarray(is_fg, dtype=bool))
+    _ops(ea_det, "explain-away @alpha=inf")
     return d
 
 
@@ -729,12 +782,19 @@ def main() -> int:
                 # Error-class grouped viewer: classify every held-out doc by the
                 # background-vs-rare confusion at the target-sensitivity operating
                 # point, sample per class, group by class (false-positive first).
+                # `--viewer-score-mode` picks which score classifies/ranks the docs
+                # (independent of the unconditional plain+explain-away detection block
+                # in detection_report, which always prints both).
                 from spark_vi.models.topic.dag_placement import (
-                    lr_placement_scores, _detection_metrics)
-                scores = lr_placement_scores(bow, lam, lay, alpha=viewer_alpha,
-                                             background=background,
-                                             count_mode=args.count_mode,
-                                             length_normalize=args.length_normalize)
+                    lr_placement_scores, explain_away_placement_scores,
+                    _detection_metrics)
+                score_fn = (explain_away_placement_scores
+                           if args.viewer_score_mode == "explain_away"
+                           else lr_placement_scores)
+                scores = score_fn(bow, lam, lay, alpha=viewer_alpha,
+                                  background=background,
+                                  count_mode=args.count_mode,
+                                  length_normalize=args.length_normalize)
                 sens = args.viewer_call_sensitivity
                 op = _detection_metrics(
                     scores.max(axis=1), is_fg, sens_targets=(sens,)
@@ -755,7 +815,8 @@ def main() -> int:
                         vocab_names=vocab_names, call_threshold=thr,
                         per_class=args.viewer_per_class, top_nodes=args.viewer_top_nodes,
                         count_mode=args.count_mode,
-                        length_normalize=args.length_normalize)
+                        length_normalize=args.length_normalize,
+                        score_mode=args.viewer_score_mode)
             else:
                 cases = select_cases(bundle, sample_cases=args.sample_cases,
                                      sample_background=args.sample_background,
@@ -770,7 +831,8 @@ def main() -> int:
                                       vocab_names=vocab_names,
                                       top_nodes=args.viewer_top_nodes,
                                       count_mode=args.count_mode,
-                                      length_normalize=args.length_normalize)
+                                      length_normalize=args.length_normalize,
+                                      score_mode=args.viewer_score_mode)
     return 0
 
 
