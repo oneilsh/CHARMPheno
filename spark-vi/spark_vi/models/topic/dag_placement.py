@@ -74,6 +74,16 @@ class DagLayout:
                     stack.append(ch)
         return out
 
+    def descendants(self, u):
+        """Proper descendants of u (every v of which u is a proper ancestor), sorted by
+        (depth, id). The mirror of `closure` (ancestors + self): `descendants` reuses the
+        children adjacency via `subtree` (u + descendants) and drops u, so there is no
+        separate adjacency to keep in sync. A leaf has none; the anchor's descendants are
+        every other node. Used by reverse-topological spectral init to deflate a node
+        against its already-recovered descendants."""
+        return sorted((v for v in self.subtree(u) if v != u),
+                      key=lambda v: (self.depth(v), v))
+
     def allowed(self, v):
         al = list(range(self.n_bg))
         for u in self.closure(v):

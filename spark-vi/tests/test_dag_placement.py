@@ -737,3 +737,25 @@ def test_log1p_dense_bow_does_not_crash_and_matches_sparse():
                                               count_mode="log1p")
     assert np.allclose(lr_dense, lr_sparse, atol=1e-9)
     assert np.allclose(ea_dense, ea_sparse, atol=1e-9)
+
+
+def test_daglayout_descendants_is_proper_and_mirrors_closure():
+    from spark_vi.models.topic.dag_placement import DagLayout
+    # DAG: 1 -> 2 -> 4, 1 -> 3, and 4 also a child of 3 (multi-parent diamond)
+    lay = DagLayout({2: 1, 3: 1, 4: 2}, n_bg=1, tpn=1)
+    lay.parents.setdefault(4, [])
+    if 3 not in lay.parents[4]:
+        lay.parents[4].append(3)          # 4 has parents {2,3}
+    lay.children.setdefault(3, [])
+    if 4 not in lay.children[3]:
+        lay.children[3].append(4)
+    # node 1 (anchor) has every other node as a descendant
+    assert set(lay.descendants(1)) == {2, 3, 4}
+    # node 4 (leaf) has none
+    assert lay.descendants(4) == []
+    # descendants excludes u itself and is disjoint from proper ancestors
+    assert 2 not in lay.descendants(2)
+    assert set(lay.descendants(2)) == {4}
+    # sorted by (depth, id)
+    d = lay.descendants(1)
+    assert d == sorted(d, key=lambda x: (lay.depth(x), x))
