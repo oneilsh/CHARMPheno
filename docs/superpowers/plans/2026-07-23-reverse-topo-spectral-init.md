@@ -264,7 +264,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 3: `topo_order` in the scalable spectral init + dense/scalable parity
+### Task 3: `topo_order` in the scalable spectral init + reverse-mode effect/direction
 
 **Files:**
 - Modify: `spark-vi/spark_vi/models/topic/gated_init.py`
@@ -274,35 +274,70 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Consumes: `_node_order_and_relatives` (Task 2).
 - Produces: `scalable_block_aligned_lambda(..., topo_order="forward")`.
 
-- [ ] **Step 1: Write the failing test (parity under reverse)**
+NOTE (plan correction — read before writing the test): there is NO existing dense-vs-scalable
+parity test, and dense vs scalable are NOT expected to match numerically — `scalable_block_aligned_lambda`
+uses a random-projection sketch (Johnson–Lindenstrauss), so its own docstring only claims parity
+with the SINGLE-PASS scalable accumulation, never with the exact dense function. So DO NOT assert
+`allclose(dense, scalable)`. Instead test the scalable path's reverse mode directly, mirroring the
+EXISTING scalable test `test_scalable_block_aligned_lambda_is_block_aligned_and_deflated` (which uses
+the `spark` fixture and builds an RDD of `GatedBOWDocument`, repeating each doc ~30x): run scalable
+forward vs reverse on a parent/child plant with a shared word and assert (a) the two modes DIFFER
+(so `topo_order` takes effect on the distributed path) and (b) the shared-word block FLIPS from parent
+(forward) to child (reverse) — the same semantic flip as the dense Task-2 test, on the scalable path.
 
-Add to `spark-vi/tests/test_gated_init.py`. Mirror the EXISTING forward dense/scalable parity test (find it in the file — reuse its corpus/SparkContext fixture and tolerance) but pass `topo_order="reverse"` to both. Skeleton:
+- [ ] **Step 1: Write the failing tests**
+
+Add to `spark-vi/tests/test_gated_init.py`. Use the `spark` fixture and `GatedBOWDocument` exactly
+as `test_scalable_block_aligned_lambda_is_block_aligned_and_deflated` does (find it in the file and
+copy its `doc(...)` helper + `spark.sparkContext.parallelize(rows, 3)` pattern; `seed=0` makes the
+projection deterministic). Plant: 1 background topic, parent P=1, child C=2 (chain), tpn=1; vocab
+0=bg,1=p_word,2=c_word,3=shared_word; P docs carry {p_word, shared_word}, C docs carry {c_word,
+shared_word}, shared_word repeated MORE than the private word (as in the dense Task-2 flip test).
 
 ```python
-def test_dense_scalable_parity_reverse(spark_context):     # reuse the existing fixture name
+def test_scalable_reverse_topo_flips_shared_word_block(spark):
     import numpy as np
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_init import (
-        spectral_block_aligned_lambda, scalable_block_aligned_lambda)
     from spark_vi.models.topic.types import GatedBOWDocument
-    # Reuse the same tiny labeled corpus the forward parity test builds. Build the dense
-    # data_summary {train_docs, train_labels} and the RDD of GatedBOWDocument from it.
-    lay = DagLayout({2: 1, 3: 1}, n_bg=2, tpn=1)
-    # ... construct docs/labels exactly as the forward parity test does ...
-    dense = spectral_block_aligned_lambda(
-        {"train_docs": train_docs, "train_labels": train_labels},
-        lay, V, anchor_scope="closure", topo_order="reverse")
-    rdd = spark_context.parallelize(gated_docs)
-    scal = scalable_block_aligned_lambda(rdd, lay, V, anchor_scope="closure",
-                                         topo_order="reverse")
-    assert np.allclose(dense, scal, atol=<same tol as the forward parity test>)
+    from spark_vi.models.topic.gated_init import scalable_block_aligned_lambda
+    lay = DagLayout({1: 0, 2: 1}, n_bg=1, tpn=1)     # bg=[0], P=[1], C=[2]; K=3
+    V = 4                                            # 0=bg,1=p_word,2=c_word,3=shared
+
+    def doc(idx, frontier):
+        idx = sorted(idx)
+        return GatedBOWDocument(indices=np.asarray(idx, dtype=np.int32),
+                                counts=np.ones(len(idx), dtype=np.float64),
+                                length=len(idx), frontier=frozenset(frontier))
+
+    rows = []
+    for _ in range(30):
+        rows.append(doc([0], []))                                  # background
+        rows.append(doc([1, 3, 3], [1]))                           # P: p_word + shared(x2)
+        rows.append(doc([2, 3, 3], [2]))                           # C: c_word + shared(x2)
+    rdd = spark.sparkContext.parallelize(rows, 3)
+
+    fwd = scalable_block_aligned_lambda(rdd, lay, V, seed=0, min_doc_freq=1,
+                                        anchor_scope="frontier", topo_order="forward")
+    rev = scalable_block_aligned_lambda(rdd, lay, V, seed=0, min_doc_freq=1,
+                                        anchor_scope="frontier", topo_order="reverse")
+    p_block, c_block, shared = lay.block[1][0], lay.block[2][0], 3
+    # (a) topo_order takes effect on the scalable path
+    assert not np.allclose(fwd, rev)
+    # (b) shared word flips parent (forward) -> child (reverse)
+    assert fwd[p_block, shared] > fwd[c_block, shared]
+    assert rev[c_block, shared] > rev[p_block, shared]
 ```
 
-Match the forward parity test's exact corpus, V, fixture, and tolerance — this task only adds the `topo_order="reverse"` axis.
+If the projection at `seed=0` makes the flip ambiguous, STRENGTHEN THE PLANT (more doc repeats, a
+larger shared/private contrast, `d=V` via the `d=` kwarg to make the sketch near-lossless) — do NOT
+weaken the strict `>` assertions. If after reasonable strengthening the flip cannot be made
+deterministic on the projected path, KEEP assertion (a) (`not allclose`, which alone proves
+`topo_order` changes the scalable output) and report the flip as BLOCKED with the observed β values,
+rather than loosening.
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd spark-vi && ../.venv/bin/python -m pytest tests/test_gated_init.py::test_dense_scalable_parity_reverse -q`
+Run: `cd spark-vi && ../.venv/bin/python -m pytest tests/test_gated_init.py::test_scalable_reverse_topo_flips_shared_word_block -q`
 Expected: FAIL (`scalable_block_aligned_lambda` has no `topo_order` kwarg).
 
 - [ ] **Step 3: Thread topo_order into the scalable function**
@@ -325,13 +360,13 @@ Replace the `anc = ...` line with `anc = relatives(u)`. Leave the background ste
 - [ ] **Step 4: Run to verify it passes + full suite**
 
 Run: `cd spark-vi && ../.venv/bin/python -m pytest tests/test_gated_init.py -q`
-Expected: all pass (reverse parity + all existing forward tests).
+Expected: all pass (scalable reverse flip/effect + all existing forward tests unchanged).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add spark-vi/spark_vi/models/topic/gated_init.py spark-vi/tests/test_gated_init.py
-git commit -m "feat(gated-init): topo_order in scalable spectral init + dense/scalable parity
+git commit -m "feat(gated-init): topo_order in scalable spectral init + reverse flip/effect test
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -493,6 +528,6 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ## Self-Review
 
-- **Spec coverage:** `descendants` (T1), dense topo_order + helper + validation + semantic-flip (T2), scalable topo_order + parity (T3), full wiring model→shim→driver→run_experiment (T4), exp 0069 (T5). Default-unchanged guard = the existing forward suites staying green (T2 Step 6, T3 Step 4). ✓
+- **Spec coverage:** `descendants` (T1), dense topo_order + helper + validation + semantic-flip (T2), scalable topo_order + reverse effect/flip (T3), full wiring model→shim→driver→run_experiment (T4), exp 0069 (T5). Default-unchanged guard = the existing forward suites staying green (T2 Step 6, T3 Step 4). ✓
 - **Placeholder scan:** T3 Step 1 and T5 Step 1 reference the EXISTING forward parity test / 0067 frontmatter rather than duplicating them verbatim, because the implementer must match those exact fixtures/fields (copying a stale copy would risk drift). Every new function/method/arg has complete code. The semantic-flip fixture (T2 Step 5) is complete with an explicit "strengthen the plant, not the assertion" escape hatch.
 - **Type consistency:** `topo_order` is a `str` in {forward, reverse} everywhere; `_node_order_and_relatives(lay, topo_order) -> (order, relatives)` used identically in T2/T3; `descendants(u) -> list[int]` defined T1, used by `_node_order_and_relatives` reverse branch. Param name `spectralTopoOrder` (camelCase shim) ↔ arg `--spectral-topo-order` ↔ field `spectral_topo_order` consistent with the `anchorScope`/`--anchor-scope`/`anchor_scope` precedent. ✓
