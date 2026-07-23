@@ -214,6 +214,24 @@ def profile(doc, beta_hat, lay, *, alpha=0.1, n_iter=60, burn=30, rng=None):
     return {u: float(th[lay.block[u]].sum()) for u in lay.nodes}
 
 
+def _routing_rows(lam, lay, *, epsilon=1e-9):
+    """Per-node soft responsibility Rnode[u,w] = fraction of code w's total
+    topic-probability that lands on node u's topic block. Codes compete across ALL
+    topics (background + nodes) with a UNIFORM topic prior (responsibility ∝
+    P(w|topic) = λ[k]/Σλ[k]); a code unseen in every topic -> 0 everywhere. This is
+    the "explain-away" routing (Pearl 1988; the mixture E-step's soft assignment):
+    a comorbid code claimed by a background topic gets ~0 node responsibility, so it
+    neither penalizes nor spuriously supports a foreground node. Returns [n_nodes x V]
+    in lay.nodes order."""
+    lam = np.asarray(lam, dtype=float)
+    ptopic = lam / np.maximum(lam.sum(axis=1, keepdims=True), epsilon)  # P(w|topic k)
+    rtopic = ptopic / np.maximum(ptopic.sum(axis=0, keepdims=True), epsilon)  # responsibility
+    rnode = np.zeros((len(lay.nodes), lam.shape[1]), dtype=float)
+    for i, u in enumerate(lay.nodes):
+        rnode[i] = rtopic[lay.block[u]].sum(axis=0)
+    return rnode
+
+
 def _lr_logratio_rows(lam, lay, *, alpha, bg, epsilon):
     """Per-node shrunk log-ratio row log[P(w|node u)/bg(w)], stacked [n_nodes x V].
 

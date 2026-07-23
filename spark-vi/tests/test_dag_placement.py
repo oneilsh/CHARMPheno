@@ -618,3 +618,27 @@ def test_lr_auc_sweep_separates_planted_cases():
                        alpha_grid=[0.0, 1.0, 10.0, 100.0], background=bg)
     assert set(out) == {0.0, 1.0, 10.0, 100.0}
     assert max(out.values()) > 0.9                   # SOME alpha cleanly separates the signal
+
+
+def test_routing_rows_soft_responsibility_and_conservation():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout, _routing_rows
+    lay = DagLayout({1: 0, 2: 0}, n_bg=1, tpn=1)               # K=3: [bg, node1, node2]
+    V = 3
+    lam = np.zeros((3, V))
+    lam[0] = [8.0, 0.0, 2.0]     # background topic: code0 (and some code2)
+    lam[1] = [0.0, 5.0, 0.0]     # node1 topic: code1 only (distinctive)
+    lam[2] = [0.0, 0.0, 6.0]     # node2 topic: code2 only
+    r = _routing_rows(lam, lay)                                # [2 nodes x V]
+    # code1 is emitted only by node1's topic -> fully node1
+    assert np.isclose(r[0, 1], 1.0) and np.isclose(r[1, 1], 0.0)
+    # code0 is emitted only by background -> neither node claims it
+    assert np.isclose(r[0, 0], 0.0) and np.isclose(r[1, 0], 0.0)
+    # code2 is shared by background (P=2/10=0.2) and node2 (P=6/6=1.0):
+    # node2 responsibility = 1.0 / (0.2 + 1.0) = 0.8333...
+    assert np.isclose(r[1, 2], 1.0 / 1.2, atol=1e-6)
+    # conservation: node responsibilities + background responsibility = 1 per seen code
+    #   (background resp = 1 - sum of node resp); must be in [0,1].
+    node_sum = r.sum(axis=0)
+    assert np.all(node_sum <= 1.0 + 1e-9) and np.all(node_sum >= -1e-9)
+    assert np.isclose(node_sum[2], 1.0 / 1.2, atol=1e-6)       # only node2 (+bg) see code2
