@@ -700,3 +700,40 @@ def test_explain_away_decompose_shows_routing_and_sums_to_score():
     score = explain_away_placement_scores(row[None], lam, lay, alpha=float("inf"),
                                           background=bg)[0, lay.nodes.index(1)]
     assert np.isclose(total, score, atol=1e-6)
+
+
+def test_log1p_dense_bow_does_not_crash_and_matches_sparse():
+    # Regression for the broken sparse/dense discriminator: `hasattr(X, "data")`
+    # is true for BOTH scipy sparse matrices AND numpy ndarrays (ndarray.data is a
+    # read-only memoryview), so a dense bow with count_mode="log1p" used to take the
+    # sparse in-place-mutate branch (`X.data = np.log1p(X.data)`) and crash with
+    # AttributeError: attribute 'data' of 'numpy.ndarray' objects is not writable.
+    # The driver's per-case viewer builds exactly this kind of dense bow row.
+    import scipy.sparse
+    from spark_vi.models.topic.dag_placement import explain_away_placement_scores
+
+    lay = _lr_lay()
+    V = 6
+    lam = np.full((3, V), 1.0)
+    lam[1] = np.array([1, 1, 1, 40, 1, 1.0])
+    lam[2] = np.array([1, 1, 1, 1, 40, 1.0])
+    bg = np.array([50, 10, 10, 1, 1, 1.0]); bg = bg / bg.sum()
+    dense = np.zeros((2, V))
+    dense[0, 3] = 1; dense[0, 0] = 5
+    dense[1, 0] = 6
+
+    lr_dense = lr_placement_scores(dense, lam, lay, alpha=1.0, background=bg,
+                                   count_mode="log1p")
+    ea_dense = explain_away_placement_scores(dense, lam, lay, alpha=1.0, background=bg,
+                                             count_mode="log1p")
+    assert lr_dense.shape == (2, 2) and np.isfinite(lr_dense).all()
+    assert ea_dense.shape == (2, 2) and np.isfinite(ea_dense).all()
+
+    # sparse/dense equivalence: same scores either way under count_mode="log1p"
+    sparse = scipy.sparse.csr_matrix(dense)
+    lr_sparse = lr_placement_scores(sparse, lam, lay, alpha=1.0, background=bg,
+                                    count_mode="log1p")
+    ea_sparse = explain_away_placement_scores(sparse, lam, lay, alpha=1.0, background=bg,
+                                              count_mode="log1p")
+    assert np.allclose(lr_dense, lr_sparse, atol=1e-9)
+    assert np.allclose(ea_dense, ea_sparse, atol=1e-9)

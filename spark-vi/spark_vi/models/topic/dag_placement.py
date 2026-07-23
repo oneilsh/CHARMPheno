@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 from scipy import stats as _sps
+from scipy.sparse import issparse
 
 from spark_vi.models.topic.spectral_init import word_cooccurrence, find_anchors, recover_beta
 
@@ -285,7 +286,7 @@ def lr_placement_scores(bow, lam, lay, *, alpha, background=None, epsilon=1e-9,
     logratio = _lr_logratio_rows(lam, lay, alpha=alpha, bg=bg, epsilon=epsilon)
     X = bow
     if count_mode == "log1p":
-        if hasattr(X, "data"):
+        if issparse(X):
             X = X.copy(); X.data = np.log1p(X.data)
         else:
             X = np.log1p(X)
@@ -313,7 +314,7 @@ def explain_away_placement_scores(bow, lam, lay, *, alpha, background=None,
     weight = _routing_rows(lam, lay, epsilon=epsilon) * logratio   # Rnode ⊙ logratio
     X = bow
     if count_mode == "log1p":
-        if hasattr(X, "data"):
+        if issparse(X):
             X = X.copy(); X.data = np.log1p(X.data)
         else:
             X = np.log1p(X)
@@ -327,11 +328,13 @@ def explain_away_placement_scores(bow, lam, lay, *, alpha, background=None,
 def explain_away_decompose(bow_row, lam, lay, u, *, alpha, background,
                            epsilon=1e-9, count_mode="raw"):
     """Itemized (w, count, r(u|w), contribution) for
-    explain_away_placement_scores(...)[i, node u]. contribution = cnt · r(u|w) ·
-    log[P(w|u)/bg(w)]; Σ contribution == that node's score. r(u|w) is the routing
-    weight (0 = the code went to background/another node; ~1 = it belongs to u), so
-    the viewer can show WHERE each code routed. Only codes present in bow_row are
-    returned, sorted by |contribution| desc."""
+    explain_away_placement_scores(...)[i, node u] (raw, no length-normalization).
+    contribution = cnt · r(u|w) · log[P(w|u)/bg(w)]; Σ contribution == that node's
+    RAW score (length_normalize divides the placement score by token count after
+    this sum, so the two only match when length_normalize=False). r(u|w) is the
+    routing weight (0 = the code went to background/another node; ~1 = it belongs
+    to u), so the viewer can show WHERE each code routed. Only codes present in
+    bow_row are returned, sorted by |contribution| desc."""
     lam = np.asarray(lam, dtype=float)
     bg = np.maximum(np.asarray(background, dtype=float), epsilon)
     i = lay.nodes.index(u)

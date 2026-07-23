@@ -552,7 +552,7 @@ def write_case_viewer_by_class(run_dir, bundle, lam, lay, meta, scores, is_fg, *
     out_path = out_dir / "decompose.txt"
     counts = {k: len(v) for k, v in buckets.items()}
 
-    sections = [f"call threshold = {call_threshold:+.3f} (max-node {score_mode} case "
+    sections = [f"call threshold = {call_threshold:+.3f} (max-node {score_mode.upper()} case "
                 "score); class totals: " +
                 ", ".join(f"{k}={counts[k]}" for k, _ in _CLASS_ORDER)]
     for cls, label in _CLASS_ORDER:
@@ -665,9 +665,13 @@ def detection_report(bow, is_fg, lam, lay, *, alpha, background, theta_det,
     and background false-positive rate you would operate at. Reuses the engine's
     _detection_metrics so LR and theta-mass are scored identically. `count_mode`
     /`length_normalize` match the AUC sweep so the reported operating points are
-    for the same score."""
+    for the same score. Also always prints an unconditional explain-away
+    (responsibility-weighted LR) block at the alpha->inf lift limit, beside the
+    plain-LR and theta-mass blocks, so the three detection lenses are directly
+    comparable in every run."""
     from spark_vi.models.topic.dag_placement import (lr_placement_scores,
-                                                      _detection_metrics)
+                                                      _detection_metrics,
+                                                      explain_away_placement_scores)
     s = lr_placement_scores(bow, lam, lay, alpha=alpha, background=background,
                             count_mode=count_mode, length_normalize=length_normalize)
     d = _detection_metrics(s.max(axis=1), np.asarray(is_fg, dtype=bool))
@@ -692,7 +696,6 @@ def detection_report(bow, is_fg, lam, lay, *, alpha, background, theta_det,
 
     # Explain-away (responsibility-weighted) LR, at the alpha->inf lift limit, beside
     # plain LR: does routing comorbid codes to background lift detection?
-    from spark_vi.models.topic.dag_placement import explain_away_placement_scores
     ea = explain_away_placement_scores(
         bow, lam, lay, alpha=float("inf"), background=background,
         count_mode=count_mode, length_normalize=length_normalize)
