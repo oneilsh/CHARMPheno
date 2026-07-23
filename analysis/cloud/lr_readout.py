@@ -102,6 +102,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="How many top-ranked DAG nodes to list per case in the "
                         "decompose viewer (the 'what else did this patient match, "
                         "and was the call right' ranking). Default 8.")
+    p.add_argument("--viewer-per-class", type=int, default=0,
+                   help="Error-class viewer: sample up to this many held-out "
+                        "patients from EACH background-vs-rare confusion class "
+                        "(false-positive: background called rare; false-negative: "
+                        "rare called background; node-confusion; correct; true-"
+                        "negative), grouped in decompose.txt. 0 = off (use "
+                        "--sample-cases/--sample-background instead).")
+    p.add_argument("--viewer-call-sensitivity", type=float, default=0.80,
+                   help="The detection operating point (target foreground "
+                        "sensitivity) whose max-node-LR score threshold defines "
+                        "'called rare' vs 'called background' for --viewer-per-class. "
+                        "Default 0.80.")
     return p
 
 
@@ -217,11 +229,14 @@ def locate_bundle(spark, manifest, *, bundle_path=None, cache_uri=None,
 
 
 def build_test_bow(bundle, vocab_size, lay):
-    """[n_docs x vocab_size] scipy.sparse CSR bag-of-words + boolean is_fg,
-    read from bundle.test_df["features","frontier"] (features = a SparseVector
-    per CaseFindingBundle's documented schema). Cluster-only: collects the
-    held-out split to the driver (the same held-out scale dag_placement_cloud.py
-    already collects for its inline eval), not unit-tested.
+    """([n_docs x vocab_size] scipy.sparse CSR bag-of-words, boolean is_fg, meta),
+    read from bundle.test_df["person_id","features","frontier"] (features = a
+    SparseVector per CaseFindingBundle's documented schema). `meta` is a list of
+    (person_id, features SparseVector, frontier engine-id list) ALIGNED with the
+    bow rows (one collect, one order) so the case viewer can classify/decompose
+    the same docs the AUC is scored over. Cluster-only: collects the held-out
+    split to the driver (the same held-out scale dag_placement_cloud.py already
+    collects for its inline eval), not unit-tested.
 
     is_fg MUST match `evaluate`'s detection definition exactly: foreground iff the
     frontier intersects the SCOREABLE nodes `lay.nodes` (which exclude root 0), not
@@ -230,21 +245,24 @@ def build_test_bow(bundle, vocab_size, lay):
     the manifest's theta-mass AUC; counting it foreground here would make LR-AUC and
     theta-AUC use different positive sets and confound the fork-settler."""
     scoreable = set(lay.nodes)
-    rows = bundle.test_df.select("features", "frontier").collect()
+    rows = bundle.test_df.select("person_id", "features", "frontier").collect()
     n = len(rows)
     indptr = np.zeros(n + 1, dtype=np.int64)
     idx_chunks, data_chunks = [], []
     is_fg = np.zeros(n, dtype=bool)
+    meta = []
     for i, r in enumerate(rows):
         sv = r["features"]
         idx_chunks.append(np.asarray(sv.indices, dtype=np.int64))
         data_chunks.append(np.asarray(sv.values, dtype=np.float64))
         indptr[i + 1] = indptr[i] + len(sv.indices)
-        is_fg[i] = bool({int(x) for x in r["frontier"]} & scoreable)
+        frontier = [int(x) for x in r["frontier"]]
+        is_fg[i] = bool(set(frontier) & scoreable)
+        meta.append((r["person_id"], sv, frontier))
     indices = np.concatenate(idx_chunks) if idx_chunks else np.array([], dtype=np.int64)
     data = np.concatenate(data_chunks) if data_chunks else np.array([], dtype=np.float64)
     bow = sp.csr_matrix((data, indices, indptr), shape=(n, vocab_size))
-    return bow, is_fg
+    return bow, is_fg, meta
 
 
 def print_readout(multipliers, alpha_values, lr_aucs, theta_auc, *, gap_tol=0.05):
@@ -355,62 +373,150 @@ def _ranking_summary_lines(scores, nodes, true_set, node_name, top_nodes):
     return lines, top_node
 
 
-def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background,
-                      vocab_names, top_nodes=8):
-    """Write a debuggable LR breakdown for each selected doc to
-    {run_dir}/lr_readout/decompose.txt. Per patient: token/code counts; (foreground
-    only) the TRUE frontier node(s) with their rank + score and a HIT/MISS verdict;
-    the LR RANKING over DAG nodes (top `top_nodes` -- 'what else did this patient
-    match'); and the per-code lr_decompose for BOTH the top-ranked node (why the
-    model landed there) and each true node that is not the top (why the truth lost).
-    Background docs (no true node) get the ranking + the top node's decomposition.
-    Codes render with `vocab_names` (full-vocab concept-id -> name). Row-level content
-    stays in this file (in-enclave, never printed); stdout references only
-    SHA-256-hashed ids. Returns the written Path."""
+def _classify_error_class(is_fg, called_rare, hit):
+    """The background-vs-rare confusion class for one held-out patient. `called_rare`
+    = the max-node LR case score cleared the detection threshold; `hit` = the
+    top-ranked node is (one of) the patient's true frontier node(s)."""
+    if is_fg and called_rare:
+        return "rare_called_rare_correct" if hit else "rare_called_rare_wrong_disease"
+    if is_fg and not called_rare:
+        return "rare_called_background"           # false negative
+    if (not is_fg) and called_rare:
+        return "background_called_rare"           # false positive
+    return "background_called_background"          # true negative
+
+
+# Display order + labels; false-positive (background->rare) first since it is the
+# error class that most concerns deployment, then false-negative, then the
+# less-bad node-confusion, then the correct calls.
+_CLASS_ORDER = [
+    ("background_called_rare",
+     "FALSE POSITIVE  -  background patient called RARE"),
+    ("rare_called_background",
+     "FALSE NEGATIVE  -  rare-disease patient called BACKGROUND"),
+    ("rare_called_rare_wrong_disease",
+     "rare patient, called RARE but WRONG disease (node confusion)"),
+    ("rare_called_rare_correct",
+     "rare patient, called RARE and CORRECT disease"),
+    ("background_called_background",
+     "true negative  -  background called background"),
+]
+
+
+def _render_case(person_id, sv, frontier, *, lam, lay, alpha, background,
+                 node_name, idx_to_cid, vocab_names, nodes, vocab_size, top_nodes):
+    """One patient's viewer block (string): token/code counts, the LR ranking +
+    HIT/MISS summary, and the per-code lr_decompose for the top node (+ each true
+    node not the top). Pure per-doc; scores this doc against all nodes."""
     from spark_vi.models.topic.dag_placement import lr_decompose, lr_placement_scores
+    bow_row = np.zeros(vocab_size, dtype=float)
+    bow_row[np.asarray(sv.indices, dtype=np.int64)] = np.asarray(sv.values, dtype=float)
+    scores = lr_placement_scores(bow_row[None], lam, lay, alpha=alpha,
+                                 background=background)[0]
+    true_set = [u for u in frontier if u in lay.block]
+    kind = "foreground" if true_set else "background"
+    rank_lines, top_node = _ranking_summary_lines(scores, nodes, true_set,
+                                                  node_name, top_nodes)
 
-    idx_to_cid = {i: c for c, i in bundle.vocab_map.items()}
-    node_name = {u: vocab_names.get(bundle.int2cid.get(u),
-                                    bundle.name_by_id.get(bundle.int2cid.get(u), u))
-                 for u in lay.nodes}
-    vocab_size = len(bundle.vocab_map)
-    nodes = list(lay.nodes)
-
-    out_dir = Path(run_dir) / "lr_readout"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "decompose.txt"
-
-    def _decomp(bow_row, u, why):
+    def _decomp(u, why):
         rows = lr_decompose(bow_row, lam, lay, u, alpha=alpha, background=background)
         return [f"  WHY {why} ({node_name.get(u, u)}):"] + \
                ["    " + ln for ln in render_decompose_rows(rows, idx_to_cid, vocab_names)]
 
-    blocks = []
-    for person_id, sv, frontier in cases:
-        bow_row = np.zeros(vocab_size, dtype=float)
-        bow_row[np.asarray(sv.indices, dtype=np.int64)] = np.asarray(sv.values, dtype=float)
-        scores = lr_placement_scores(bow_row[None], lam, lay, alpha=alpha,
-                                     background=background)[0]
-        true_set = [u for u in frontier if u in lay.block]
-        kind = "foreground" if true_set else "background"
-        rank_lines, top_node = _ranking_summary_lines(
-            scores, nodes, true_set, node_name, top_nodes)
+    out = [f"person_id={person_id}  [{kind}]  "
+           f"({int(bow_row.sum())} coded tokens, {int((bow_row > 0).sum())} distinct codes)"]
+    out += rank_lines
+    out += _decomp(top_node, "top")                       # why the model called it
+    for u in true_set:                                    # why the truth scored as it did
+        if u != top_node:
+            out += _decomp(u, "true")
+    return "\n".join(out)
 
-        header = [f"person_id={person_id}  [{kind}]  "
-                  f"({int(bow_row.sum())} coded tokens, {int((bow_row > 0).sum())} "
-                  f"distinct codes)"]
-        header += rank_lines
-        header += _decomp(bow_row, top_node, "top")           # why the model called it
-        for u in true_set:                                    # why the truth scored as it did
-            if u != top_node:
-                header += _decomp(bow_row, u, "true")
-        blocks.append("\n".join(header))
 
+def _viewer_context(bundle, lay, vocab_names):
+    """Shared lookups the case renderer needs (node names, vocab-idx->cid, sizes)."""
+    idx_to_cid = {i: c for c, i in bundle.vocab_map.items()}
+    node_name = {u: vocab_names.get(bundle.int2cid.get(u),
+                                    bundle.name_by_id.get(bundle.int2cid.get(u), u))
+                 for u in lay.nodes}
+    return dict(node_name=node_name, idx_to_cid=idx_to_cid, nodes=list(lay.nodes),
+                vocab_size=len(bundle.vocab_map))
+
+
+def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background,
+                      vocab_names, top_nodes=8):
+    """Write a flat (ungrouped) LR breakdown for each selected doc to
+    {run_dir}/lr_readout/decompose.txt. Per patient: token/code counts; the LR
+    RANKING over DAG nodes (top `top_nodes`); (foreground) the TRUE node(s) + rank
+    + a HIT/MISS verdict; and the per-code lr_decompose for the top node (+ each
+    true node not the top). Row-level content stays in this file (in-enclave, never
+    printed); stdout references only SHA-256-hashed ids. Returns the written Path."""
+    ctx = _viewer_context(bundle, lay, vocab_names)
+    out_dir = Path(run_dir) / "lr_readout"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "decompose.txt"
+    blocks = [_render_case(pid, sv, fr, lam=lam, lay=lay, alpha=alpha,
+                           background=background, vocab_names=vocab_names,
+                           top_nodes=top_nodes, **ctx)
+              for pid, sv, fr in cases]
     out_path.write_text("\n\n".join(blocks) + "\n" if blocks else "")
     print(f"[lr_readout]   wrote {len(cases)} case decomposition(s) "
           f"(persons: {', '.join(_hash_person(c[0]) for c in cases)}) to "
           f"{out_path}", flush=True)
     return out_path
+
+
+def write_case_viewer_by_class(run_dir, bundle, lam, lay, meta, scores, is_fg, *,
+                               alpha, background, vocab_names, call_threshold,
+                               per_class, top_nodes=8, seed=0):
+    """Classify EVERY held-out doc by the background-vs-rare confusion (max-node LR
+    case score vs `call_threshold`), sample up to `per_class` per class, and write
+    them GROUPED by class (false-positive first) to decompose.txt. `scores` is the
+    [n_docs x n_nodes] LR matrix at the viewer alpha (aligned with `meta`/`is_fg`).
+    Returns (written Path, {class: total_count})."""
+    ctx = _viewer_context(bundle, lay, vocab_names)
+    nodes = ctx["nodes"]
+    block_set = set(lay.block)
+    case_score = scores.max(axis=1)
+    top_idx = scores.argmax(axis=1)
+
+    buckets = {k: [] for k, _ in _CLASS_ORDER}
+    for i, (_pid, _sv, frontier) in enumerate(meta):
+        true_set = [u for u in frontier if u in block_set]
+        top_node = int(nodes[int(top_idx[i])])
+        cls = _classify_error_class(bool(is_fg[i]), bool(case_score[i] >= call_threshold),
+                                    top_node in true_set)
+        buckets[cls].append(i)
+
+    rng = np.random.default_rng(seed)
+    out_dir = Path(run_dir) / "lr_readout"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "decompose.txt"
+    counts = {k: len(v) for k, v in buckets.items()}
+
+    sections = [f"call threshold = {call_threshold:+.3f} (max-node LR case score); "
+                "class totals: " + ", ".join(f"{k}={counts[k]}" for k, _ in _CLASS_ORDER)]
+    for cls, label in _CLASS_ORDER:
+        idxs = buckets[cls]
+        if not per_class or not idxs:
+            continue
+        take = (idxs if len(idxs) <= per_class
+                else sorted(rng.choice(idxs, size=per_class, replace=False).tolist()))
+        bar = "=" * 72
+        block = [bar, f"=== {label}   (showing {len(take)} of {len(idxs)})", bar]
+        for i in take:
+            pid, sv, frontier = meta[i]
+            block.append(_render_case(pid, sv, frontier, lam=lam, lay=lay, alpha=alpha,
+                                      background=background, vocab_names=vocab_names,
+                                      top_nodes=top_nodes, **ctx))
+        sections.append("\n\n".join(block))
+
+    out_path.write_text("\n\n\n".join(sections) + "\n")
+    shown = sum(min(per_class, counts[k]) for k, _ in _CLASS_ORDER if buckets[k])
+    print(f"[lr_readout]   wrote error-class case viewer ({shown} cases across "
+          f"{sum(1 for k, _ in _CLASS_ORDER if buckets[k])} classes) to {out_path}; "
+          f"class totals: {counts}", flush=True)
+    return out_path, counts
 
 
 def build_topic_labels(lay, bundle):
@@ -540,7 +646,7 @@ def main() -> int:
 
         lay = DagLayout(bundle.parent_int, n_bg=manifest["n_bg"], tpn=manifest["tpn"])
         vocab_size = len(bundle.vocab_map)
-        bow, is_fg = build_test_bow(bundle, vocab_size, lay)
+        bow, is_fg, meta = build_test_bow(bundle, vocab_size, lay)
         print(f"[lr_readout]   held-out test set: {bow.shape[0]} docs, "
               f"{int(is_fg.sum())} foreground, V={vocab_size}, "
               f"K={lay.K} ({lay.n_bg} bg + {len(lay.nodes)} nodes x {lay.tpn} tpn)",
@@ -578,35 +684,64 @@ def main() -> int:
         npmi_table(spark, lam, bundle, topic_labels)
 
         # Per-case decomposition viewer: row-level, written in-enclave only.
-        if args.sample_cases or args.sample_background or args.person is not None:
-            cases = select_cases(bundle, sample_cases=args.sample_cases,
-                                 sample_background=args.sample_background,
-                                 person=args.person)
-            if not cases:
-                print("[lr_readout]   WARNING: --sample-cases/--sample-background/"
-                      "--person matched no held-out docs; viewer not written.",
-                      flush=True)
+        if (args.viewer_per_class or args.sample_cases or args.sample_background
+                or args.person is not None):
+            # Concept names for the FULL vocabulary via BigQuery (bundle.name_by_id
+            # only covers DAG-node concepts, so vocab codes would print as raw ids).
+            # Best-effort: on any failure fall back to numeric ids.
+            cdr = manifest.get("corpus_manifest", {}).get("cdr") or manifest.get("cdr")
+            billing = os.environ.get("GOOGLE_CLOUD_PROJECT")
+            vocab_names = {}
+            try:
+                from dag_placement_cloud import _vocab_concept_names
+                vocab_names = _vocab_concept_names(spark, cdr, billing, bundle.vocab_map)
+            except Exception as exc:  # noqa: BLE001 - names are best-effort
+                print(f"[lr_readout]   WARNING: could not fetch concept names "
+                      f"({exc}); decompose.txt will show numeric concept ids. "
+                      f"(needs manifest cdr + GOOGLE_CLOUD_PROJECT.)", flush=True)
+            background = _background_from_bow(bow)
+            viewer_alpha = _viewer_alpha(alpha_values, lr_aucs)
+
+            if args.viewer_per_class:
+                # Error-class grouped viewer: classify every held-out doc by the
+                # background-vs-rare confusion at the target-sensitivity operating
+                # point, sample per class, group by class (false-positive first).
+                from spark_vi.models.topic.dag_placement import (
+                    lr_placement_scores, _detection_metrics)
+                scores = lr_placement_scores(bow, lam, lay, alpha=viewer_alpha,
+                                             background=background)
+                sens = args.viewer_call_sensitivity
+                op = _detection_metrics(
+                    scores.max(axis=1), is_fg, sens_targets=(sens,)
+                )["operating_points"].get(f"{sens:.2f}", {})
+                thr = op.get("threshold")
+                if thr is None:
+                    print("[lr_readout]   WARNING: could not derive a call threshold "
+                          f"at sensitivity {sens} (no foreground?); error-class "
+                          "viewer not written.", flush=True)
+                else:
+                    print(f"[lr_readout]   error-class viewer: call threshold at "
+                          f"sensitivity {sens:.2f} = {thr:+.3f} (bg_fpr="
+                          f"{op.get('bg_fpr', float('nan')):.3f}, precision="
+                          f"{op.get('precision', float('nan')):.3f})", flush=True)
+                    write_case_viewer_by_class(
+                        args.run_dir, bundle, lam, lay, meta, scores, is_fg,
+                        alpha=viewer_alpha, background=background,
+                        vocab_names=vocab_names, call_threshold=thr,
+                        per_class=args.viewer_per_class, top_nodes=args.viewer_top_nodes)
             else:
-                # Concept names for the FULL vocabulary via BigQuery (bundle.name_by_id
-                # only covers DAG-node concepts, so vocab codes would print as raw ids).
-                # Best-effort: on any failure fall back to numeric ids.
-                cdr = manifest.get("corpus_manifest", {}).get("cdr") or manifest.get("cdr")
-                billing = os.environ.get("GOOGLE_CLOUD_PROJECT")
-                vocab_names = {}
-                try:
-                    from dag_placement_cloud import _vocab_concept_names
-                    vocab_names = _vocab_concept_names(spark, cdr, billing,
-                                                       bundle.vocab_map)
-                except Exception as exc:  # noqa: BLE001 - names are best-effort
-                    print(f"[lr_readout]   WARNING: could not fetch concept names "
-                          f"({exc}); decompose.txt will show numeric concept ids. "
-                          f"(needs manifest cdr + GOOGLE_CLOUD_PROJECT.)", flush=True)
-                background = _background_from_bow(bow)
-                viewer_alpha = _viewer_alpha(alpha_values, lr_aucs)
-                write_case_viewer(args.run_dir, bundle, lam, lay, cases,
-                                  alpha=viewer_alpha, background=background,
-                                  vocab_names=vocab_names,
-                                  top_nodes=args.viewer_top_nodes)
+                cases = select_cases(bundle, sample_cases=args.sample_cases,
+                                     sample_background=args.sample_background,
+                                     person=args.person)
+                if not cases:
+                    print("[lr_readout]   WARNING: --sample-cases/--sample-background/"
+                          "--person matched no held-out docs; viewer not written.",
+                          flush=True)
+                else:
+                    write_case_viewer(args.run_dir, bundle, lam, lay, cases,
+                                      alpha=viewer_alpha, background=background,
+                                      vocab_names=vocab_names,
+                                      top_nodes=args.viewer_top_nodes)
     return 0
 
 

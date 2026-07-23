@@ -52,3 +52,21 @@ def test_ranking_summary_lines_hit_and_miss():
     j3 = "\n".join(lines3)
     assert "CALL:" not in j3 and "TRUE frontier" not in j3
     assert "1. Gamma" in j3 and "<- TOP" in j3
+
+
+def test_classify_error_class_covers_the_2x2_plus_node_confusion():
+    import importlib
+    mod = importlib.import_module("lr_readout")
+    c = mod._classify_error_class
+    # is_fg, called_rare, hit
+    assert c(False, True, False) == "background_called_rare"            # FALSE POSITIVE
+    assert c(True, False, False) == "rare_called_background"            # FALSE NEGATIVE
+    assert c(True, True, False) == "rare_called_rare_wrong_disease"     # node confusion
+    assert c(True, True, True) == "rare_called_rare_correct"           # correct
+    assert c(False, False, False) == "background_called_background"     # true negative
+    # every class label appears in the display order exactly once
+    labels = [k for k, _ in mod._CLASS_ORDER]
+    assert set(labels) == {"background_called_rare", "rare_called_background",
+                           "rare_called_rare_wrong_disease", "rare_called_rare_correct",
+                           "background_called_background"}
+    assert len(labels) == len(set(labels))
