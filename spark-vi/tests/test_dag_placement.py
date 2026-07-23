@@ -642,3 +642,37 @@ def test_routing_rows_soft_responsibility_and_conservation():
     node_sum = r.sum(axis=0)
     assert np.all(node_sum <= 1.0 + 1e-9) and np.all(node_sum >= -1e-9)
     assert np.isclose(node_sum[2], 1.0 / 1.2, atol=1e-6)       # only node2 (+bg) see code2
+
+def test_explain_away_suppresses_comorbid_negatives():
+    # A doc = 1 distinctive rare code (d, emitted by node1) + several generic codes
+    # (g*, emitted by background). Plain LR docks node1 for the generic codes (they
+    # are below base rate under node1); explain-away routes them to background, so
+    # they contribute ~0 -> explain-away score(node1) >= plain LR score(node1).
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import (
+        DagLayout, explain_away_placement_scores, lr_placement_scores)
+    lay = DagLayout({1: 0, 2: 0}, n_bg=1, tpn=1)               # K=3
+    V = 4                                                      # d=0, g1=1, g2=2, g3=3
+    lam = np.zeros((3, V))
+    lam[0] = [0.0, 40.0, 40.0, 40.0]   # background: the generic codes
+    lam[1] = [30.0, 0.0, 0.0, 0.0]     # node1: distinctive code d only
+    lam[2] = [0.0, 1.0, 1.0, 1.0]      # node2: weak/uniform
+    bow = np.zeros((1, V)); bow[0] = [1, 1, 1, 1]              # d + 3 generic codes
+    bg = np.array([0.10, 0.30, 0.30, 0.30])                   # base rate (d rarer)
+    i = lay.nodes.index(1)
+    lr = lr_placement_scores(bow, lam, lay, alpha=float("inf"), background=bg)[0, i]
+    ea = explain_away_placement_scores(bow, lam, lay, alpha=float("inf"),
+                                       background=bg)[0, i]
+    assert ea >= lr - 1e-9        # comorbid negatives suppressed
+    assert ea > 0.0               # the distinctive code still carries positive signal
+
+def test_explain_away_background_only_doc_scores_near_zero():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout, explain_away_placement_scores
+    lay = DagLayout({1: 0, 2: 0}, n_bg=1, tpn=1)
+    V = 3
+    lam = np.zeros((3, V)); lam[0] = [5.0, 5.0, 5.0]           # only background has mass
+    bow = np.zeros((1, V)); bow[0] = [1, 1, 1]
+    s = explain_away_placement_scores(bow, lam, lay, alpha=float("inf"),
+                                      background=np.array([0.34, 0.33, 0.33]))
+    assert np.allclose(s, 0.0, atol=1e-6)                      # nodes have no routing -> ~0

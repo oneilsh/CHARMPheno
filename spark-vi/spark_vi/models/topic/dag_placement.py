@@ -296,6 +296,34 @@ def lr_placement_scores(bow, lam, lay, *, alpha, background=None, epsilon=1e-9,
     return scores
 
 
+def explain_away_placement_scores(bow, lam, lay, *, alpha, background=None,
+                                  epsilon=1e-9, count_mode="raw",
+                                  length_normalize=False):
+    """Explain-away (responsibility-weighted) LR placement score:
+    s(i,u) = Σ_w cnt(i,w) · r(u|w) · log[P(w|u)/bg(w)], where r(u|w) is code w's soft
+    responsibility on node u's block (_routing_rows). Codes competing to a background
+    topic (comorbidities) get r(u|w) ~ 0, so their evidence -- crucially the SMALL
+    NEGATIVE log-ratios that make the plain LR penalize comorbidity-heavy patients --
+    is suppressed toward 0 instead of docking the node. Same signature/shape as
+    lr_placement_scores; the α->∞ lift limit applies to the evidence term, routing is
+    α-independent (raw normalized λ). Returns [n_docs x n_nodes], lay.nodes order."""
+    lam = np.asarray(lam, dtype=float)
+    bg = _lr_base_rate(bow, background, epsilon)
+    logratio = _lr_logratio_rows(lam, lay, alpha=alpha, bg=bg, epsilon=epsilon)
+    weight = _routing_rows(lam, lay, epsilon=epsilon) * logratio   # Rnode ⊙ logratio
+    X = bow
+    if count_mode == "log1p":
+        if hasattr(X, "data"):
+            X = X.copy(); X.data = np.log1p(X.data)
+        else:
+            X = np.log1p(X)
+    scores = np.asarray(X @ weight.T, dtype=float)
+    if length_normalize:
+        tok = np.asarray(bow.sum(axis=1)).ravel().astype(float)
+        scores = scores / np.maximum(tok, 1.0)[:, None]
+    return scores
+
+
 def lr_decompose(bow_row, lam, lay, u, *, alpha, background, epsilon=1e-9,
                  count_mode="raw"):
     """Itemized (w, count, contribution) for lr_placement_scores(...)[i, node u]
