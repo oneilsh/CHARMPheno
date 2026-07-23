@@ -12,6 +12,97 @@ elsewhere.
 
 ---
 
+## 2026-07-16..23 — case-finding branch pre-merge review (7-lesson walkthrough) + the alpha / explain-away / n_bg / reverse-topo mini-arc
+
+Pre-merge review of the unmerged `case-finding` branch — the ontology/DAG placement
+engine. Seven-lesson bottom-up walkthrough (1 DAG substrate, 2 corpus assembly +
+set-valued truth, 3 gated variational engine, 4 spectral init, 5 fit + evaluate,
+6 readouts + cloud drivers, 7 the freshly-built alpha + explain-away + n_bg mini-arc).
+The engine is sound; one real bug caught and fixed; a large empirical mini-arc ran
+alongside the review and CONVERGED to a clean negative result. The pg-stm arc was
+excised from this branch (`ddcf52d`, archived on origin/pg-stm) so the review covers
+only the ontology/placement production path.
+
+### Reviewed clean (Lessons 1-6)
+
+- **DAG substrate / assembly / gated engine / spectral init / fit+evaluate / drivers.**
+  Multi-parent DAG-native `DagLayout` (closure=ancestors, depth=longest-path), set-valued
+  frontier truth (drop attested ancestors, keep incomparable), the hard-gate CAVI engine
+  (cost ~DAG depth not K), anchor-word spectral init (Arora 2013) with forward-topological
+  ancestor deflation, the supervised gated-Gibbs `fit_gated` oracle + unmasked `profile`
+  fold-in, and `evaluate`'s metric suite (midrank node-AUC, best-rank-among-ties MRR,
+  Efron two-groups empirical-null per-node FDR, bootstrap CIs). Unusually well-documented
+  (every tie policy, the supervised-estimator rationale, the micro-AP ordering hazard).
+  Lesson-1/2 detours committed: cycle-guarded `DagLayout.depth` (`14147d8`), deleted the
+  vestigial `label_from_coded` (`4d45069`).
+
+### Shipped — the mini-arc (all SDD, per-task + final review)
+
+- **pg-stm excision + broadcast-unpersist fix** (`ddcf52d`, `52d6791`). Removed the
+  ineffective eager `bcast.unpersist()` from every lazy transform path (it freed nothing
+  and forced re-broadcast churn) across VIRunner + lda/gated/hdp shims; rely on
+  ContextCleaner. + content-deterministic transform seed (`593368b`).
+- **Gated `optimize_alpha`** (`e3e335..f959daf`). Per-node tied asymmetric Dirichlet via an
+  exact dense gated Newton over allowed-set groups; the covered-subset solve (final-review
+  CRITICAL) fixes a singular Hessian on zero-coverage DAG nodes. + deployment-alpha modes
+  (`4afe40c`, transformAlphaMode {fitted|symmetric|block_balanced}) decoupling the fit-aid
+  alpha from the fold-in prior.
+- **Explain-away (responsibility-weighted) LR scorer** (`14faa14..66c0c0b`). `_routing_rows`
+  (Pearl-1988 soft routing on raw lambda), `explain_away_placement_scores`,
+  `explain_away_decompose`; wired into the LR readout as `--viewer-score-mode explain_away`
+  with a side-by-side detection block + the error-class viewer.
+- **Reverse-topological spectral init** (`600ef95..38ad031`). `topo_order {forward,reverse}`
+  on both spectral functions (reverse deflates each node against its proper-descendants,
+  leaves-first) + `DagLayout.descendants`; threaded model->shim->driver->run_experiment,
+  default forward = zero behavior change. Final review READY-TO-MERGE.
+
+### Caught
+
+- **CRITICAL (fixed `66c0c0b`) — broken sparse/dense discriminator.** `hasattr(X, "data")`
+  is true for numpy ndarrays too (read-only `.data` memoryview), so a DENSE bow (the viewer's
+  `_render_case` path) with `--count-mode log1p` crashed. Pre-existing in `lr_placement_scores`,
+  copied into the new scorer; fixed BOTH to `scipy.sparse.issparse` + a regression test (dense
+  log1p finite + sparse==dense). The whole-branch review found it; the per-task reviews did not.
+- **Important (fixed `045a6f4`)** — `gated_init` module/function docstrings still said init
+  "must run in FORWARD topological order" after reverse mode landed.
+- **Plan bug caught pre-dispatch** — the reverse-topo plan assumed a dense/scalable numerical
+  *parity* test, but the scalable path is a JL random-projection approximation (no exact-dense
+  parity is claimed); corrected the plan (`84ab2e0`) to test the scalable reverse effect+flip.
+
+### The empirical result (insights 0059-0063) — a converged negative
+
+The mini-arc ran a systematic sweep of model-side levers on rare6 case-finding. **Six
+consecutive nulls** (fixed alpha 0060, learned alpha 0061, explain-away routing + n_bg 0062,
+reverse-topo init 0063, count-mode log1p) spanning the prior, the scoring scheme, the init
+geometry, and model capacity. The single durable contribution is the **LR readout LENS**
+(+0.11-0.13 ROC over theta-mass), a readout change not a model change. Both error classes are
+information-bound (FP = genuine code-level similarity e.g. anemia+CKD ~ SLE; FN = data
+starvation, the rare-called-background count byte-identical at 276 across 0067/0068/0069).
+Full collation: `docs/reports/2026-07-23-case-finding-levers-retrospective.md`. Conclusion:
+the model side is exhausted; the binding constraint is INFORMATION (meds/labs = the MixEHR
+multi-domain direction). Every null lever is retained as a validated, characterized capability.
+
+### Parked / deferred
+
+- **LR-FDR readout (queued build).** The Efron empirical-null FDR (`per_node_discoveries`) is
+  applied ONLY to theta-mass (where it found zero discoveries — buried signal); it is
+  score-agnostic, so wiring it onto the LR / explain-away scores tests whether LR's edge yields
+  FDR-controlled discoveries. Cheap, post-hoc; spec pending.
+- **Dead / orphaned code** (surfaced Lessons 5-6): `identifiability_annotation` (tested, ZERO
+  production consumers — a pg-stm vestige; wire-in or remove); `fit_gated`/`profile` (Gibbs
+  oracle, test-only — label as such); `_zib_empirical_gap`/`zib_gap` (printed+saved but its
+  exportable-null consumer was never built). Decisions deferred to a dead-code pass.
+- **Held-out log-likelihood** — the fair "is the learned alpha a better model" test (its actual
+  objective) was never measured; would settle the open placement question independent of detection.
+- **Pre-existing reds (not from this arc):** `test_stm_integration::test_synthetic_recovery_full_batch`
+  (STM gamma-sign, sign_match 0.625<0.75, fixed seed) and `test_fit_stm_local_reference_topic_end_to_end`
+  (removed Sigma-prior CLI args) remain red on the branch — decide fix/xfail/accept at merge; do NOT
+  loosen thresholds. Untracked scratch `tests/test_t3b_diag_tmp.py` (imports the removed pg_stm shim)
+  is the user's to delete.
+
+Branch NOT merged to main. Reverse-topo feature is Ready-to-merge; the mini-arc is a publishable
+negative. Next strategic step is multi-domain features (MixEHR), not another model-side lever.
+
 ## 2026-07-08..10 — STM branch pre-merge review, part 2 (7-lesson walkthrough since the 2026-06-26 sign-off)
 
 Second pre-merge review of the unmerged `stm` branch, covering `f79d059..HEAD`

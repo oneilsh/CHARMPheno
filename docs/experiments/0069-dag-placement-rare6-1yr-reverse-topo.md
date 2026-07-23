@@ -1,7 +1,7 @@
 ---
 id: 69
 slug: dag-placement-rare6-1yr-reverse-topo
-status: pending
+status: done
 model_class: dag_placement
 cohort: population_rare6
 cohort_def: population_rare6
@@ -81,3 +81,21 @@ alongside the collation of all levers tried.
   0067.
 - NPMI coherence vs 0067 (0.190 / 0.172 at n_bg 40... note 0067 was 0.183/0.156;
   compare like-for-like against 0067's own run).
+
+## Result — NULL (init geometry washes out; see insight 0063)
+
+Reverse-topo init is indistinguishable from forward (0067) on every axis: LR ROC 0.778->0.779,
+explain-away 0.767->0.773, theta-mass 0.647->0.655, placement mrr 0.596->0.590 — all <= 0.01 =
+single-seed re-fit noise. FN class (rare_called_background) IDENTICAL at 276 (=0067=0068); FP class
+13158->12608 but bg_fpr@80%-sens 0.406->0.413 (flat-to-worse), so the FP "drop" is a threshold
+artifact (the error-class threshold moved +0.713->+0.734), not a real gain. Node topics are coherent
+(NPMI up to 0.49 for cardiac amyloidosis/sarcoidosis; mean 0.188 ~ 0067). Learned-alpha ordering
+shifted again (single-seed multimodality, insight 0059; Spearman(alpha,coverage)=0.18, tracks
+diffuseness not prevalence).
+
+MECHANISM: the DAG gate already supplies identifiability, so the spectral init only sets the STARTING
+lambda; 200 SVI iterations then move off it and the init geometry does not survive — exactly the
+prototype finding that spectral init (either direction) does not beat random on this engine. Sixth
+model-side null in a row (fixed/learned alpha, explain-away, n_bg, now topo-order); binding constraint
+is INFORMATION (meds/labs = MixEHR), not init. Feature stays as a validated capability (topo_order
+knob, forward default). Full collation: docs/reports/2026-07-23-case-finding-levers-retrospective.md.
