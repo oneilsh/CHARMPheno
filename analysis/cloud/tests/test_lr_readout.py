@@ -23,3 +23,32 @@ def test_render_decompose_rows_uses_concept_names():
     lines = mod.render_decompose_rows(rows, idx_to_cid, name_by_id)
     assert "Lupus erythematosus" in lines[0] and "+5.9" in lines[0]
     assert "Essential hypertension" in lines[1] and "-3.9" in lines[1]
+
+
+def test_ranking_summary_lines_hit_and_miss():
+    import importlib
+    mod = importlib.import_module("lr_readout")
+    nodes = [1, 2, 3, 4]
+    names = {1: "Alpha", 2: "Beta", 3: "Gamma", 4: "Delta"}
+    scores = [0.5, 0.1, 2.0, -0.3]                 # aligned with nodes -> node 3 highest
+
+    # true = node 3 (the top) -> HIT, rank 1
+    lines, top = mod._ranking_summary_lines(scores, nodes, [3], names, top_nodes=3)
+    assert top == 3
+    j = "\n".join(lines)
+    assert "CALL: HIT" in j and "true best rank = 1/4" in j
+    assert "1. Gamma" in j and "<- TRUE" in j
+    assert j.count("\n") >= 3                       # summary + ranking header + 3 rows
+
+    # true = node 2 (rank 3) -> MISS, top is node 3
+    lines2, top2 = mod._ranking_summary_lines(scores, nodes, [2], names, top_nodes=4)
+    j2 = "\n".join(lines2)
+    assert top2 == 3
+    assert "CALL: MISS" in j2 and "true best rank = 3/4" in j2
+    assert "top = Gamma" in j2
+
+    # background (no true node) -> ranking only, no CALL line
+    lines3, top3 = mod._ranking_summary_lines(scores, nodes, [], names, top_nodes=2)
+    j3 = "\n".join(lines3)
+    assert "CALL:" not in j3 and "TRUE frontier" not in j3
+    assert "1. Gamma" in j3 and "<- TOP" in j3

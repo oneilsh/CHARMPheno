@@ -98,6 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Itemize an lr_decompose breakdown for this single "
                         "person_id instead of a random sample (also written "
                         "to {run_dir}/lr_readout/decompose.txt).")
+    p.add_argument("--viewer-top-nodes", type=int, default=8,
+                   help="How many top-ranked DAG nodes to list per case in the "
+                        "decompose viewer (the 'what else did this patient match, "
+                        "and was the call right' ranking). Default 8.")
     return p
 
 
@@ -319,17 +323,50 @@ def select_cases(bundle, *, sample_cases=0, sample_background=0, person=None, se
     return out
 
 
+def _ranking_summary_lines(scores, nodes, true_set, node_name, top_nodes):
+    """Pure: given per-node LR `scores` (aligned with `nodes`), the patient's TRUE
+    frontier node set, and `node_name`, return (lines, top_node) for the viewer.
+    The highest-scoring node is the model's CALL; HIT iff it is in `true_set`. For
+    a foreground case also reports the true node(s) and their rank so a MISS is
+    debuggable ('what did the patient match instead, and where did the truth land').
+    Background cases (empty true_set) get the ranking only."""
+    n = len(nodes)
+    order = sorted(range(n), key=lambda i: scores[i], reverse=True)   # score desc
+    score_of = {int(nodes[i]): float(scores[i]) for i in range(n)}
+    rank_of = {int(nodes[order[r]]): r + 1 for r in range(n)}
+    top_node = int(nodes[order[0]])
+    lines = []
+    if true_set:
+        hit = top_node in true_set
+        best_rank = min(rank_of[u] for u in true_set)
+        tn = ", ".join(f"{node_name.get(u, u)} (id {u}, rank {rank_of[u]}/{n}, "
+                       f"score {score_of[u]:+.2f})" for u in true_set)
+        lines.append(f"  TRUE frontier: {tn}")
+        lines.append(f"  CALL: {'HIT' if hit else 'MISS'} "
+                     f"(top = {node_name.get(top_node, top_node)}, "
+                     f"true best rank = {best_rank}/{n})")
+    k = min(top_nodes, n)
+    lines.append(f"  LR ranking (top {k} of {n}):")
+    for r in range(k):
+        u = int(nodes[order[r]])
+        mark = "  <- TRUE" if u in true_set else ("  <- TOP" if r == 0 else "")
+        lines.append(f"    {r + 1:>2}. {str(node_name.get(u, u))[:36]:<36} "
+                     f"score={score_of[u]:+.3f}{mark}")
+    return lines, top_node
+
+
 def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background,
-                      vocab_names):
-    """Write an lr_decompose breakdown for each selected doc to
-    {run_dir}/lr_readout/decompose.txt. A FOREGROUND doc (nonempty frontier) is
-    decomposed against each of its true frontier node(s); a BACKGROUND doc
-    (empty frontier) against the single node it scores HIGHEST on (the contrast
-    view). Codes are rendered with `vocab_names` (concept-id -> name for the
-    full vocabulary, from _vocab_concept_names -- NOT bundle.name_by_id, which
-    only covers the ~DAG-node concepts). Row-level content stays in that file
-    (in-enclave, never printed); stdout references only SHA-256-hashed ids.
-    Returns the written Path."""
+                      vocab_names, top_nodes=8):
+    """Write a debuggable LR breakdown for each selected doc to
+    {run_dir}/lr_readout/decompose.txt. Per patient: token/code counts; (foreground
+    only) the TRUE frontier node(s) with their rank + score and a HIT/MISS verdict;
+    the LR RANKING over DAG nodes (top `top_nodes` -- 'what else did this patient
+    match'); and the per-code lr_decompose for BOTH the top-ranked node (why the
+    model landed there) and each true node that is not the top (why the truth lost).
+    Background docs (no true node) get the ranking + the top node's decomposition.
+    Codes render with `vocab_names` (full-vocab concept-id -> name). Row-level content
+    stays in this file (in-enclave, never printed); stdout references only
+    SHA-256-hashed ids. Returns the written Path."""
     from spark_vi.models.topic.dag_placement import lr_decompose, lr_placement_scores
 
     idx_to_cid = {i: c for c, i in bundle.vocab_map.items()}
@@ -337,31 +374,36 @@ def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background,
                                     bundle.name_by_id.get(bundle.int2cid.get(u), u))
                  for u in lay.nodes}
     vocab_size = len(bundle.vocab_map)
+    nodes = list(lay.nodes)
 
     out_dir = Path(run_dir) / "lr_readout"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "decompose.txt"
 
+    def _decomp(bow_row, u, why):
+        rows = lr_decompose(bow_row, lam, lay, u, alpha=alpha, background=background)
+        return [f"  WHY {why} ({node_name.get(u, u)}):"] + \
+               ["    " + ln for ln in render_decompose_rows(rows, idx_to_cid, vocab_names)]
+
     blocks = []
     for person_id, sv, frontier in cases:
         bow_row = np.zeros(vocab_size, dtype=float)
         bow_row[np.asarray(sv.indices, dtype=np.int64)] = np.asarray(sv.values, dtype=float)
-        targets = [u for u in frontier if u in lay.block]
-        if targets:
-            kind, tag = "foreground", "true node"
-        else:
-            # background (or an all-pruned frontier): decompose the top-scoring node.
-            s = lr_placement_scores(bow_row[None], lam, lay, alpha=alpha,
-                                    background=background)[0]
-            targets = [lay.nodes[int(np.argmax(s))]]
-            kind, tag = "background", "top LR node"
-        header = [f"person_id={person_id}  [{kind}]"]
-        for u in targets:
-            rows = lr_decompose(bow_row, lam, lay, u, alpha=alpha,
-                                background=background)
-            header.append(f"  {tag}: {node_name.get(u, u)} (engine id {u})")
-            header.extend("    " + ln for ln in render_decompose_rows(
-                rows, idx_to_cid, vocab_names))
+        scores = lr_placement_scores(bow_row[None], lam, lay, alpha=alpha,
+                                     background=background)[0]
+        true_set = [u for u in frontier if u in lay.block]
+        kind = "foreground" if true_set else "background"
+        rank_lines, top_node = _ranking_summary_lines(
+            scores, nodes, true_set, node_name, top_nodes)
+
+        header = [f"person_id={person_id}  [{kind}]  "
+                  f"({int(bow_row.sum())} coded tokens, {int((bow_row > 0).sum())} "
+                  f"distinct codes)"]
+        header += rank_lines
+        header += _decomp(bow_row, top_node, "top")           # why the model called it
+        for u in true_set:                                    # why the truth scored as it did
+            if u != top_node:
+                header += _decomp(bow_row, u, "true")
         blocks.append("\n".join(header))
 
     out_path.write_text("\n\n".join(blocks) + "\n" if blocks else "")
@@ -563,7 +605,8 @@ def main() -> int:
                 viewer_alpha = _viewer_alpha(alpha_values, lr_aucs)
                 write_case_viewer(args.run_dir, bundle, lam, lay, cases,
                                   alpha=viewer_alpha, background=background,
-                                  vocab_names=vocab_names)
+                                  vocab_names=vocab_names,
+                                  top_nodes=args.viewer_top_nodes)
     return 0
 
 
