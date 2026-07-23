@@ -85,3 +85,24 @@ def test_classify_error_class_covers_the_2x2_plus_node_confusion():
                            "rare_called_rare_wrong_disease", "rare_called_rare_correct",
                            "background_called_background"}
     assert len(labels) == len(set(labels))
+
+
+def test_fdr_truth_and_mm_rows_from_frontiers():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    import importlib
+    mod = importlib.import_module("lr_readout")
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=1, tpn=1)      # 2,3 children of 1
+    # frontiers per doc (engine ids): doc0 = {2} (deep single), doc1 = {2,3} (multimorbid),
+    # doc2 = {} (background)
+    frontiers = [[2], [2, 3], []]
+    truth, mm_rows = mod.fdr_truth_mm_rows(frontiers, lay)
+    node_idx = {u: i for i, u in enumerate(lay.nodes)}
+    # doc0 frontier {2}: true for node 2 AND its ancestor node 1 (subtree membership)
+    assert truth[0, node_idx[2]] and truth[0, node_idx[1]] and not truth[0, node_idx[3]]
+    # doc0 is NOT multimorbid (single frontier node), despite truth having 2 trues
+    assert not mm_rows[0]
+    # doc1 frontier {2,3}: multimorbid (>=2 scoreable frontier nodes)
+    assert mm_rows[1]
+    # doc2 background: no truth, not multimorbid
+    assert not truth[2].any() and not mm_rows[2]

@@ -704,6 +704,36 @@ def detection_report(bow, is_fg, lam, lay, *, alpha, background, theta_det,
     return d
 
 
+def fdr_truth_mm_rows(frontiers, lay):
+    """From per-doc frontier engine-id lists -> (truth [n_docs x n_nodes] bool subtree
+    membership, mm_rows [n_docs] bool = >=2 scoreable frontier nodes). Mirrors evaluate's
+    node_pos/mm_rows so the LR-FDR is scored on the SAME truth as the theta-mass FDR."""
+    node_set = set(lay.nodes)
+    truth = np.zeros((len(frontiers), len(lay.nodes)), dtype=bool)
+    mm_rows = np.zeros(len(frontiers), dtype=bool)
+    for i, fr in enumerate(frontiers):
+        fset = set(int(x) for x in fr)
+        for j, u in enumerate(lay.nodes):
+            truth[i, j] = bool(fset & lay.subtree(u))
+        mm_rows[i] = len(fset & node_set) >= 2
+    return truth, mm_rows
+
+
+def fdr_report_lines(P, is_fg, lengths, truth, mm_rows, label, *, q_grid=(0.05, 0.10, 0.20)):
+    """Rendered by_q lines for one score matrix's FDR discovery report (n_disc, precision,
+    recall per q), labeled. Uses the engine's fdr_discovery_report so LR/explain-away are
+    scored identically to the theta-mass FDR."""
+    from spark_vi.models.topic.dag_placement import fdr_discovery_report
+    rep = fdr_discovery_report(P, is_fg, lengths, truth, mm_rows,
+                               q_grid=q_grid, n_length_bins=4)
+    parts = []
+    for q in q_grid:
+        v = rep["by_q"][q]
+        parts.append(f"q={q}: (n={v['n_discoveries']}, "
+                     f"prec={v['precision']:.3f}, rec={v['recall']:.3f})")
+    return [f"[lr_readout]   fdr {label}: " + "  ".join(parts)]
+
+
 def main() -> int:
     from spark_vi.models.topic.dag_placement import DagLayout, lr_auc_sweep
 
@@ -757,6 +787,32 @@ def main() -> int:
                          theta_det=manifest["metrics"].get("detection", {}),
                          count_mode=args.count_mode,
                          length_normalize=args.length_normalize)
+
+        # FDR discovery: run the SAME empirical-null per-node FDR on LR + explain-away
+        # scores (alpha->inf lift limit) beside the theta-mass FDR from the manifest,
+        # which found zero discoveries (buried signal). Does LR surface discoveries?
+        from spark_vi.models.topic.dag_placement import (
+            lr_placement_scores, explain_away_placement_scores)
+        frontiers = [fr for (_pid, _sv, fr) in meta]
+        truth, mm_rows = fdr_truth_mm_rows(frontiers, lay)
+        lengths = np.asarray(bow.sum(axis=1)).ravel().astype(float)
+        bg_rate = _background_from_bow(bow)
+        theta_fdr = manifest.get("metrics", {}).get("fdr") or manifest.get("fdr")
+        if theta_fdr and "by_q" in theta_fdr:
+            tparts = "  ".join(
+                f"q={q}: (n={v['n_discoveries']}, prec={v.get('precision', float('nan'))}, "
+                f"rec={v.get('recall', float('nan'))})"
+                for q, v in theta_fdr["by_q"].items())
+            print(f"[lr_readout]   fdr theta-mass (manifest): {tparts}", flush=True)
+        for label, P in (
+            ("LR @alpha=inf", lr_placement_scores(
+                bow, lam, lay, alpha=float("inf"), background=bg_rate,
+                count_mode=args.count_mode, length_normalize=args.length_normalize)),
+            ("explain-away @alpha=inf", explain_away_placement_scores(
+                bow, lam, lay, alpha=float("inf"), background=bg_rate,
+                count_mode=args.count_mode, length_normalize=args.length_normalize))):
+            for ln in fdr_report_lines(P, is_fg, lengths, truth, mm_rows, label):
+                print(ln, flush=True)
 
         # NPMI coherence: always printed (aggregate output, no egress concern).
         topic_labels = build_topic_labels(lay, bundle)
