@@ -676,3 +676,27 @@ def test_explain_away_background_only_doc_scores_near_zero():
     s = explain_away_placement_scores(bow, lam, lay, alpha=float("inf"),
                                       background=np.array([0.34, 0.33, 0.33]))
     assert np.allclose(s, 0.0, atol=1e-6)                      # nodes have no routing -> ~0
+
+
+def test_explain_away_decompose_shows_routing_and_sums_to_score():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import (
+        DagLayout, explain_away_decompose, explain_away_placement_scores)
+    lay = DagLayout({1: 0, 2: 0}, n_bg=1, tpn=1)
+    V = 4
+    lam = np.zeros((3, V))
+    lam[0] = [0.0, 40.0, 40.0, 40.0]; lam[1] = [30.0, 0.0, 0.0, 0.0]; lam[2] = [0.0, 1.0, 1.0, 1.0]
+    row = np.array([1.0, 1.0, 1.0, 1.0])
+    bg = np.array([0.10, 0.30, 0.30, 0.30])
+    rows = explain_away_decompose(row, lam, lay, 1, alpha=float("inf"), background=bg)
+    by_w = {w: (cnt, r, c) for (w, cnt, r, c) in rows}
+    # distinctive code d=0 routes to node1 (r ~ 1), positive contribution
+    assert by_w[0][1] > 0.9 and by_w[0][2] > 0.0
+    # generic codes route to background (r ~ 0) -> contribution ~ 0 (not negative)
+    for g in (1, 2, 3):
+        assert abs(by_w[g][1]) < 0.05 and abs(by_w[g][2]) < 1e-3
+    # Σ contribution == the node score
+    total = sum(c for (_w, _cnt, _r, c) in rows)
+    score = explain_away_placement_scores(row[None], lam, lay, alpha=float("inf"),
+                                          background=bg)[0, lay.nodes.index(1)]
+    assert np.isclose(total, score, atol=1e-6)

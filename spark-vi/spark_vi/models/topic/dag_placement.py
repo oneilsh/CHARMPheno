@@ -324,6 +324,28 @@ def explain_away_placement_scores(bow, lam, lay, *, alpha, background=None,
     return scores
 
 
+def explain_away_decompose(bow_row, lam, lay, u, *, alpha, background,
+                           epsilon=1e-9, count_mode="raw"):
+    """Itemized (w, count, r(u|w), contribution) for
+    explain_away_placement_scores(...)[i, node u]. contribution = cnt · r(u|w) ·
+    log[P(w|u)/bg(w)]; Σ contribution == that node's score. r(u|w) is the routing
+    weight (0 = the code went to background/another node; ~1 = it belongs to u), so
+    the viewer can show WHERE each code routed. Only codes present in bow_row are
+    returned, sorted by |contribution| desc."""
+    lam = np.asarray(lam, dtype=float)
+    bg = np.maximum(np.asarray(background, dtype=float), epsilon)
+    i = lay.nodes.index(u)
+    logratio = _lr_logratio_rows(lam, lay, alpha=alpha, bg=bg, epsilon=epsilon)[i]
+    rnode = _routing_rows(lam, lay, epsilon=epsilon)[i]
+    row = np.asarray(bow_row).ravel().astype(float)
+    cnt = np.log1p(row) if count_mode == "log1p" else row
+    contrib = cnt * rnode * logratio
+    out = [(int(w), float(row[w]), float(rnode[w]), float(contrib[w]))
+           for w in np.nonzero(row)[0]]
+    out.sort(key=lambda t: -abs(t[3]))
+    return out
+
+
 def lr_decompose(bow_row, lam, lay, u, *, alpha, background, epsilon=1e-9,
                  count_mode="raw"):
     """Itemized (w, count, contribution) for lr_placement_scores(...)[i, node u]
