@@ -68,10 +68,12 @@ the parameter-free lift limit).
 1. **Richer features (meds / labs) — the MixEHR multi-domain direction.** The ONLY lever that attacks the
    actual binding constraint (adds separating information the condition codes lack). Not tested. This is
    the strategic next step.
-2. **LR-FDR readout.** The Efron two-groups empirical-null FDR machinery (per_node_discoveries) is
-   currently applied ONLY to theta-mass, where it found zero discoveries because theta-mass buries the
-   signal. It is score-agnostic; wiring it onto the LR / explain-away scores tests whether LR's +0.12-ROC
-   edge yields actual FDR-controlled discoveries. Cheap, post-hoc, no re-fit. Queued (spec pending).
+2. **LR-FDR readout — BUILT 2026-07-23 (commits c2b49ab..ec3fe99), awaiting cluster run.** The Efron
+   two-groups empirical-null FDR (per_node_discoveries) was applied ONLY to theta-mass, where it found
+   zero discoveries because theta-mass buries the signal. Now wired (score-agnostic engine helper
+   fdr_discovery_report) onto the LR + explain-away scores in lr_readout, beside the theta-mass FDR --
+   `make lr-readout ID=N` prints a 3-way by_q table. Tests whether LR's +0.12-ROC edge yields actual
+   FDR-controlled discoveries. Post-hoc, no re-fit. RESULT PENDING (user re-runs 0067/0069).
 3. **Held-out log-likelihood.** The fair "is the learned alpha a better model" test (the objective
    optimize_alpha actually maximizes) was never measured — only ranking/detection were. Would settle the
    placement question the alpha work left open, independent of the detection nulls.
