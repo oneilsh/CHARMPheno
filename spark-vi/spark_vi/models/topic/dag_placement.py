@@ -477,6 +477,8 @@ def _zib_empirical_gap(values, *, zero_eps=1e-6):
     exportable null (sub-project 2) can be a ~3KB parametric fit or must ship a
     tail-dense empirical grid; the FDR p-values never use it."""
     v = np.sort(np.asarray(values, dtype=float))
+    if v.size and (v[0] < -1e-9 or v[-1] > 1.0 + 1e-9):
+        return float("nan")   # ZIB models simplex mass in [0,1]; undefined for unbounded (e.g. LR) scores
     v = np.clip(v, 0.0, 1.0)
     n = len(v)
     if n == 0:

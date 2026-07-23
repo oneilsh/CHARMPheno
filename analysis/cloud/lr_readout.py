@@ -799,9 +799,17 @@ def main() -> int:
         bg_rate = _background_from_bow(bow)
         theta_fdr = manifest.get("metrics", {}).get("fdr") or manifest.get("fdr")
         if theta_fdr and "by_q" in theta_fdr:
+            def _f(x):
+                # manifest values may be a plain float, None, or a JSON "nan" string;
+                # coerce to float (falling back to nan) so the manifest line formats
+                # with the SAME :.3f width as the LR/explain-away lines below.
+                try:
+                    return float(x)
+                except (TypeError, ValueError):
+                    return float("nan")
             tparts = "  ".join(
-                f"q={q}: (n={v['n_discoveries']}, prec={v.get('precision', float('nan'))}, "
-                f"rec={v.get('recall', float('nan'))})"
+                f"q={q}: (n={int(v.get('n_discoveries', 0))}, "
+                f"prec={_f(v.get('precision')):.3f}, rec={_f(v.get('recall')):.3f})"
                 for q, v in theta_fdr["by_q"].items())
             print(f"[lr_readout]   fdr theta-mass (manifest): {tparts}", flush=True)
         for label, P in (

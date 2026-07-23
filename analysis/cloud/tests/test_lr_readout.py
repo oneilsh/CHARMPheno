@@ -106,3 +106,26 @@ def test_fdr_truth_and_mm_rows_from_frontiers():
     assert mm_rows[1]
     # doc2 background: no truth, not multimorbid
     assert not truth[2].any() and not mm_rows[2]
+
+
+def test_fdr_report_lines_renders_end_to_end():
+    # End-to-end render test for fdr_report_lines: a tiny planted case (a few
+    # background docs low on every node, a couple foreground docs high on node
+    # 0) run through the real engine (fdr_discovery_report), asserting only on
+    # the rendered format -- not on specific discovery counts, which is the
+    # engine's own contract (spark-vi/tests/test_dag_placement.py).
+    import numpy as np
+    import importlib
+    mod = importlib.import_module("lr_readout")
+    n_bg, n_fg, n_nodes = 20, 3, 2
+    P = np.full((n_bg + n_fg, n_nodes), 0.02)
+    P[n_bg:, 0] = 0.9                                         # foreground: high on node 0
+    is_fg = np.zeros(n_bg + n_fg, dtype=bool); is_fg[n_bg:] = True
+    truth = np.zeros((n_bg + n_fg, n_nodes), dtype=bool)
+    truth[n_bg:, 0] = True                                    # fg docs are node-0 positives
+    mm_rows = np.zeros(n_bg + n_fg, dtype=bool)               # none multimorbid
+    lengths = np.ones(n_bg + n_fg)
+    lines = mod.fdr_report_lines(P, is_fg, lengths, truth, mm_rows, "LR @alpha=inf")
+    assert isinstance(lines, list) and all(isinstance(ln, str) for ln in lines)
+    assert any("LR @alpha=inf" in ln and "q=0.05" in ln
+              and "n=" in ln and "prec=" in ln and "rec=" in ln for ln in lines)

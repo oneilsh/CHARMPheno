@@ -482,6 +482,20 @@ def test_zib_gap_large_for_non_beta_sample():
 def test_zib_gap_degenerate_returns_nan():
     assert np.isnan(_zib_empirical_gap(np.zeros(50)))
 
+def test_zib_gap_in_simplex_returns_finite_or_nan():
+    rng = np.random.default_rng(2)
+    pos = rng.beta(2.0, 8.0, size=200)
+    vals = np.concatenate([np.zeros(50), pos])
+    gap = _zib_empirical_gap(vals)
+    assert np.isnan(gap) or np.isfinite(gap)
+
+def test_zib_gap_out_of_simplex_returns_nan():
+    # ZIB models node-block mass in [0,1]; unbounded scores (e.g. LR/explain-away
+    # log-ratios) are out of domain and must return nan rather than a silently
+    # clipped, meaningless statistic.
+    vals = np.array([-0.5, 0.3, 2.1])
+    assert np.isnan(_zib_empirical_gap(vals))
+
 
 def _toy_lay():
     # 3-node flat layout: root 0 with children 1,2,3. DagLayout(parent_map,
