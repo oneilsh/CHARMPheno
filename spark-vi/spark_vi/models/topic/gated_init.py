@@ -37,6 +37,41 @@ def _validate_anchor_scope(anchor_scope):
             f"anchor_scope must be one of {ANCHOR_SCOPES}, got {anchor_scope!r}")
 
 
+TOPO_ORDERS = ("forward", "reverse")
+
+
+def _validate_topo_order(topo_order):
+    if topo_order not in TOPO_ORDERS:
+        raise ValueError(
+            f"topo_order must be one of {TOPO_ORDERS}, got {topo_order!r}")
+
+
+def _node_order_and_relatives(lay, topo_order):
+    """(ordered node list, relatives(u)) for the deflation loop.
+
+    forward: nodes ascending depth (ancestors first); each node is deflated against its
+    proper ANCESTORS (closure minus self/root) — a node's topic is its increment over its
+    ancestors. reverse: nodes descending depth (leaves first); each node is deflated against
+    its proper DESCENDANTS (subtree minus self) — leaves claim their full signal first and an
+    ancestor's topic is the residual after its descendants. A proper descendant always has
+    strictly greater longest-path depth than its ancestor, so descending-depth order
+    guarantees every descendant is recovered before the node (the mirror of the forward
+    ancestors-first guarantee)."""
+    _validate_topo_order(topo_order)
+    if topo_order == "forward":
+        order = sorted(lay.nodes, key=lambda x: (lay.depth(x), x))
+
+        def relatives(u):
+            return [a for a in lay.closure(u) if a not in (u, 0)]
+    else:
+        order = sorted(lay.nodes, key=lambda x: (lay.depth(x), x), reverse=True)
+
+        def relatives(u):
+            return list(lay.descendants(u))     # already proper; 0 is never a descendant
+
+    return order, relatives
+
+
 def _union_closure(front, lay):
     s = set()
     for f in front:
@@ -61,7 +96,8 @@ def _anchor_node_set(front, lay, anchor_scope):
 
 
 def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
-                                  anchor_scope: str = "closure") -> np.ndarray:
+                                  anchor_scope: str = "closure",
+                                  topo_order: str = "forward") -> np.ndarray:
     """Forward-topological block-aligned spectral lambda seed.
 
     data_summary carries {"train_docs": [token-id arrays], "train_labels": [node id or
@@ -117,7 +153,8 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
             beta[i] = bg_beta[i]
 
     node_anchors: dict[int, list] = {}
-    for u in sorted(lay.nodes, key=lambda x: (lay.depth(x), x)):   # forward topological
+    order, relatives = _node_order_and_relatives(lay, topo_order)
+    for u in order:
         docs_u = [counted[d] for d in range(len(counted)) if u in trains[d]]
         if not docs_u:
             logger.warning(
@@ -126,7 +163,7 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
             )
             continue
         Q_u = word_cooccurrence(docs_u, V)
-        anc = [a for a in lay.closure(u) if a not in (u, 0)]
+        anc = relatives(u)
         seed = list(bg_anchors) + [a for p in anc for a in node_anchors.get(p, [])]
         fg_anchors = find_anchors(Q_u, lay.tpn, seed_rows=seed)
         if not fg_anchors:

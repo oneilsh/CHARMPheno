@@ -253,6 +253,68 @@ def test_frontier_scope_parent_does_not_steal_child_anchor_depth2():
     assert not np.allclose(b1, b2)
 
 
+def test_node_order_and_relatives_forward_vs_reverse():
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_init import _node_order_and_relatives
+    lay = DagLayout({1: 0, 2: 1, 3: 2}, n_bg=1, tpn=1)    # chain 1 -> 2 -> 3
+    order_f, rel_f = _node_order_and_relatives(lay, "forward")
+    order_r, rel_r = _node_order_and_relatives(lay, "reverse")
+    # forward: ascending depth (ancestor first); reverse: descending (leaf first)
+    assert order_f == [1, 2, 3]
+    assert order_r == [3, 2, 1]
+    # forward deflates node 3 against its proper ancestors {1,2}; reverse against
+    # its proper descendants (none for the leaf)
+    assert set(rel_f(3)) == {1, 2} and rel_r(3) == []
+    # forward: anchor node 1 has no ancestors; reverse: node 1 deflates against {2,3}
+    assert rel_f(1) == [] and set(rel_r(1)) == {2, 3}
+
+
+def test_topo_order_validation_rejects_unknown():
+    import pytest
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_init import spectral_block_aligned_lambda
+    lay = DagLayout({2: 1}, n_bg=1, tpn=1)
+    with pytest.raises(ValueError):
+        spectral_block_aligned_lambda(
+            {"train_docs": [[0, 1]], "train_labels": [frozenset()]},
+            lay, 3, topo_order="sideways")
+
+
+def test_reverse_topo_flips_shared_word_block():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_init import spectral_block_aligned_lambda
+    # 1 background topic + parent P=1, child C=2 (chain), tpn=1 -> K=3 blocks: bg=[0], P=[1], C=[2]
+    lay = DagLayout({1: 0, 2: 1}, n_bg=1, tpn=1)
+    # vocab: 0=bg_word, 1=p_word, 2=c_word, 3=shared_word
+    # background docs: bg_word only; P docs: p_word + shared_word; C docs: c_word + shared_word.
+    # shared_word OUTNUMBERS the private word (4 vs 2 repeats) so it is each node's
+    # own top (tpn=1) anchor when recovered UNDEFLATED (first in whatever order runs).
+    # This is a structural, non-borderline plant: find_anchors' min_marginal_frac
+    # candidacy bar (row marginal >= mean nonzero marginal) then EXCLUDES the private
+    # word as a candidate once shared is seeded away, so the node processed SECOND
+    # finds no anchor at all and stays at the 1e-9 floor on shared -- while the node
+    # processed FIRST claims shared outright. (Plant strengthened per the brief: a
+    # tied 3-vs-3 count makes both blocks land on the exact same tie-broken value
+    # regardless of topo_order, which is why this asymmetry is required.)
+    bg_doc = [0, 0, 0, 0]
+    p_doc = [1, 1, 3, 3, 3, 3]
+    c_doc = [2, 2, 3, 3, 3, 3]
+    docs = [bg_doc] * 4 + [p_doc] * 4 + [c_doc] * 4
+    labels = [frozenset()] * 4 + [frozenset({1})] * 4 + [frozenset({2})] * 4
+    ds = {"train_docs": docs, "train_labels": labels}
+    fwd = spectral_block_aligned_lambda(ds, lay, 4, anchor_scope="frontier",
+                                        topo_order="forward")
+    rev = spectral_block_aligned_lambda(ds, lay, 4, anchor_scope="frontier",
+                                        topo_order="reverse")
+    shared = 3
+    p_block, c_block = lay.block[1][0], lay.block[2][0]
+    # forward: shared word's mass is higher in the PARENT block than the child block
+    assert fwd[p_block, shared] > fwd[c_block, shared]
+    # reverse: the ordering flips -> shared word's mass is higher in the CHILD block
+    assert rev[c_block, shared] > rev[p_block, shared]
+
+
 def test_scalable_frontier_scope_keeps_foreground_out_of_background(spark):
     # The distributed path honors anchor_scope="frontier" the same way: a
     # foreground-only token stays at the floor in the background block.
