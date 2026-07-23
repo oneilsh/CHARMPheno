@@ -7,9 +7,14 @@ NOT in this registry.
 
 `spectral_block_aligned_lambda` generalizes OnlineLDA.spectral_init.spectral_init_beta's
 background->foreground init to a multi-level DAG: each node is recovered by anchor-word
-spectral recovery (Arora et al. 2013) DEFLATED against its already-recovered closure-ancestor
-anchors, so it must run in FORWARD topological order (ancestors first — a node can only be
-deflated against ancestors already recovered). This is a documented OPTIONAL strategy: on the
+spectral recovery (Arora et al. 2013) DEFLATED against its already-recovered relatives. The
+`topo_order` knob picks which relatives: "forward" (default) recovers nodes ancestors-first
+and deflates each against its proper ANCESTORS (a node's topic = its increment over its
+ancestors); "reverse" recovers leaves-first and deflates each against its proper DESCENDANTS
+(leaves claim their full signal first; an ancestor's topic = the residual after its
+descendants). Either way a node can only be deflated against relatives already recovered, so
+the iteration order is depth-monotonic in the chosen direction (see `_node_order_and_relatives`).
+This is a documented OPTIONAL strategy: on the
 synthetic plants it did not improve the gated fit (the gate already breaks symmetry) and could
 regress shallow nodes when a recovered seed row was imperfect — see the design spec's prototype
 findings. Kept for the real-DAG A/B harness and as the extension point for future strategies
@@ -98,17 +103,26 @@ def _anchor_node_set(front, lay, anchor_scope):
 def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
                                   anchor_scope: str = "closure",
                                   topo_order: str = "forward") -> np.ndarray:
-    """Forward-topological block-aligned spectral lambda seed.
+    """Block-aligned spectral lambda seed (topological, direction set by `topo_order`).
 
     data_summary carries {"train_docs": [token-id arrays], "train_labels": [node id or
     frontier set per doc]}. Returns a (K, V) lambda = block-aligned beta * scale.
 
     Step 1 (background): pooled Q over the background doc set -> n_bg anchors ->
     background block.
-    Step 2 (each node, ancestors-first by lay.depth): docs training node u = those in u's
-    anchor node set; find tpn anchors on the within-node Q_u deflated against background +
-    u's already-recovered proper-ancestor anchors (seed_rows AND include-then-drop in
+    Step 2 (each node, in the topo order set by `topo_order`): docs training node u = those
+    in u's anchor node set; find tpn anchors on the within-node Q_u deflated against
+    background + u's already-recovered relative anchors (seed_rows AND include-then-drop in
     recover_beta), recover into u's block.
+
+    `topo_order` picks the deflation direction (see `_node_order_and_relatives`): "forward"
+    (default) processes nodes ancestors-first and deflates u against its proper ANCESTORS
+    (u's topic = its increment over its ancestors); "reverse" processes leaves-first and
+    deflates u against its proper DESCENDANTS (leaves claim their full signal first; u's
+    topic = the residual after its descendants). The "isolate u's own signal" guarantee for
+    a given relative holds only when that relative has its own recovered anchors (see the
+    anchor_scope corollary below — under "reverse" the same caveat applies to descendants
+    that got no own docs).
 
     `anchor_scope` controls which docs feed each anchor set (see `_anchor_node_set`):
     "closure" (default, legacy) pools background over ALL docs and trains node u from every
