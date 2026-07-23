@@ -315,6 +315,68 @@ def test_reverse_topo_flips_shared_word_block():
     assert rev[c_block, shared] > rev[p_block, shared]
 
 
+def test_scalable_reverse_topo_flips_shared_word_block(spark):
+    # Distributed-path mirror of test_reverse_topo_flips_shared_word_block: same
+    # parent/child chain + shared-word plant, run through the random-projection
+    # sketch instead of the exact dense co-occurrence. Dense vs scalable are NOT
+    # expected to match numerically (scalable is a JL sketch, per its docstring's
+    # parity claim with only the single-pass accumulation) -- this test only checks
+    # that topo_order takes effect on the scalable path and flips the same block.
+    #
+    # PLANT NOTE (strengthened past the brief's draft plant): the dense flip test's
+    # mechanism is candidacy exclusion via `min_marginal_frac` (a word below the MEAN
+    # marginal cannot anchor). `find_anchors_projected`'s candidacy bar is different
+    # (ADR 0032): absolute document frequency `df_w >= min_doc_freq`, not a mean-
+    # relative marginal. The brief's draft plant (private word once per doc, shared
+    # word 2x per doc, same doc count for both -> equal df) never triggers that bar,
+    # so both blocks' own anchor is undeflated (whichever node runs is unaffected by
+    # the other's seed) and forward == reverse bit-for-bit (confirmed empirically).
+    # Fix: give the SHARED word high document frequency (present in every doc) and
+    # each node's PRIVATE word low document frequency (present in only 2 of 30 docs),
+    # with min_doc_freq=5 between them. Now shared is the only candidate for whichever
+    # node runs first (private is below the floor) -- it claims shared outright; the
+    # node processed SECOND is deflated away from shared (already chosen) and has no
+    # other candidate (private is still below the floor), so it finds NO anchors and
+    # stays at the 1e-9 floor entirely. That is the same "second node gets nothing"
+    # asymmetry as the dense test, reproduced through the df-based candidacy bar.
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.types import GatedBOWDocument
+    from spark_vi.models.topic.gated_init import scalable_block_aligned_lambda
+    lay = DagLayout({1: 0, 2: 1}, n_bg=1, tpn=1)     # bg=[0], P=[1], C=[2]; K=3
+    V = 4                                            # 0=bg,1=p_word,2=c_word,3=shared
+
+    def doc(idx, frontier):
+        idx = sorted(idx)
+        return GatedBOWDocument(indices=np.asarray(idx, dtype=np.int32),
+                                counts=np.ones(len(idx), dtype=np.float64),
+                                length=len(idx), frontier=frozenset(frontier))
+
+    rows = []
+    for _ in range(2):
+        rows.append(doc([1, 1, 3, 3], [1]))            # P: p_word(x2) + shared(x2)
+        rows.append(doc([2, 2, 3, 3], [2]))            # C: c_word(x2) + shared(x2)
+    for _ in range(28):
+        rows.append(doc([3, 3], [1]))                  # P: shared only (own word absent)
+        rows.append(doc([3, 3], [2]))                  # C: shared only (own word absent)
+    for _ in range(30):
+        rows.append(doc([0, 0], []))                   # background
+    rdd = spark.sparkContext.parallelize(rows, 3)
+    # df: p_word=2, c_word=2 (below the 5 floor -> never a candidate); shared=30
+    # (present in every P/C doc -> always a candidate) -- see PLANT NOTE above.
+
+    fwd = scalable_block_aligned_lambda(rdd, lay, V, seed=0, min_doc_freq=5,
+                                        anchor_scope="frontier", topo_order="forward")
+    rev = scalable_block_aligned_lambda(rdd, lay, V, seed=0, min_doc_freq=5,
+                                        anchor_scope="frontier", topo_order="reverse")
+    p_block, c_block, shared = lay.block[1][0], lay.block[2][0], 3
+    # (a) topo_order takes effect on the scalable path
+    assert not np.allclose(fwd, rev)
+    # (b) shared word flips parent (forward) -> child (reverse)
+    assert fwd[p_block, shared] > fwd[c_block, shared]
+    assert rev[c_block, shared] > rev[p_block, shared]
+
+
 def test_scalable_frontier_scope_keeps_foreground_out_of_background(spark):
     # The distributed path honors anchor_scope="frontier" the same way: a
     # foreground-only token stays at the floor in the background block.

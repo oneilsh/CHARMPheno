@@ -224,7 +224,8 @@ class _NodeGroups:
 def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                                   seed: int = 0, min_doc_freq: int = 5,
                                   scale: float = 200.0,
-                                  anchor_scope: str = "closure") -> np.ndarray:
+                                  anchor_scope: str = "closure",
+                                  topo_order: str = "forward") -> np.ndarray:
     """Distributed random-projection analogue of `spectral_block_aligned_lambda`.
 
     `rdd` is an RDD of GatedBOWDocument. Never forms a driver V×V matrix (ADR
@@ -240,13 +241,20 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
 
     Step 1 (background): pooled sketch over ALL docs (one pass) → n_bg anchors →
     background block.
-    Step 2 (each node u, ancestors-first by lay.depth): pooled sketch over the
-    sub-RDD of docs training u (one pass = Q_u's sketch); find tpn anchors on it
-    deflated against background + u's already-recovered proper-ancestor anchors
+    Step 2 (each node u, in the topo order set by `topo_order`): pooled sketch over
+    the sub-RDD of docs training u (one pass = Q_u's sketch); find tpn anchors on
+    it deflated against background + u's already-recovered relative anchors
     (seed_rows), recover the combined anchors, keep the trailing foreground rows
     into u's block. Anchor-word spectral recovery (Arora et al. 2013); the random
     projection preserves the residual-norm geometry the greedy anchor search needs
     (Johnson–Lindenstrauss).
+
+    `topo_order` picks the deflation direction, mirroring the dense
+    `spectral_block_aligned_lambda` (see `_node_order_and_relatives`): "forward"
+    (default) processes nodes ancestors-first and deflates u against its proper
+    ANCESTORS (u's topic = its increment over its ancestors); "reverse" processes
+    leaves-first and deflates u against its proper DESCENDANTS (leaves claim their
+    full signal first; u's topic = the residual after its descendants).
 
     Returns a (K, V) λ = block-aligned β * scale, the same contract as the dense
     function (a drop-in seed). Numerically identical to the single-pass
@@ -304,9 +312,10 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
         for i in range(min(lay.n_bg, bg_beta.shape[0])):
             beta[i] = bg_beta[i]
 
-        # Step 2: each node, ancestors first, its OWN filtered one-slab pass.
+        # Step 2: each node, in `topo_order`, its OWN filtered one-slab pass.
         node_anchors: dict[int, list] = {}
-        for u in sorted(lay.nodes, key=lambda x: (lay.depth(x), x)):
+        order, relatives = _node_order_and_relatives(lay, topo_order)
+        for u in order:
             rdd_u = group_rdd.filter(lambda gd, _u=u: _u in gd.groups)
             res_u = projected_cooccurrence_rdd(rdd_u, no_groups, V, d, seed)
             if int(res_u.df_w.sum()) == 0:
@@ -314,7 +323,7 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                     "scalable_block_aligned_lambda: node %s has zero training "
                     "docs; its block stays at the 1e-9 floor (uninitialized).", u)
                 continue
-            anc = [a for a in lay.closure(u) if a not in (u, 0)]
+            anc = relatives(u)
             seed_rows = list(bg_anchors) + [a for p in anc
                                             for a in node_anchors.get(p, [])]
             fg_anchors = find_anchors_projected(
