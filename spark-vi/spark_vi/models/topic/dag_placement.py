@@ -721,6 +721,7 @@ def fdr_discovery_report(P, is_fg, doc_lengths, truth, mm_rows, *,
     gaps = [_zib_empirical_gap(P[~is_fg, u]) for u in range(n_nodes)]
     gaps = [g for g in gaps if not np.isnan(g)]
     return {
+        "q_grid": q_grid,
         "by_q": by_q,
         "multimorbidity": {
             "mean_true_discoveries_per_multimorbid": mean_true_disc,

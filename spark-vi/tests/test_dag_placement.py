@@ -549,7 +549,7 @@ def test_fdr_discovery_report_planted_and_null():
     # planted node-0 signal -> discoveries at q=0.20 with precision 1.0 (only true node-0 docs)
     assert rep["by_q"][0.20]["n_discoveries"] >= 1
     assert rep["by_q"][0.20]["precision"] == 1.0
-    assert set(rep.keys()) == {"by_q", "multimorbidity", "saturation_rate",
+    assert set(rep.keys()) == {"q_grid", "by_q", "multimorbidity", "saturation_rate",
                                "zib_gap_mean", "zib_gap_max", "n_length_bins_effective"}
 
 
