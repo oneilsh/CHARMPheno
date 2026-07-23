@@ -1,7 +1,7 @@
 ---
 id: 68
 slug: dag-placement-rare6-1yr-learned-alpha-nbg80
-status: pending
+status: done
 model_class: dag_placement
 cohort: population_rare6
 cohort_def: population_rare6
@@ -93,3 +93,21 @@ possible future cache-key refinement if we sweep n_bg often.)
   they now route to a background topic (drop out of the rare calls)?
 - NPMI coherence: more/smaller background topics may raise or fragment coherence;
   watch mean/median vs 0067 (0.183 / 0.156).
+
+## Result — NULL on the FP class (see insight 0062)
+
+Doubling background capacity did NOT reduce the false positives. Error-class totals
+vs 0067: background_called_rare 13158 -> 12992 (-1.3%, noise); rare_called_background
+276 -> 276 (identical); bg_fpr @80% sens 0.406 -> 0.439 (if anything worse). Detection
+flat-to-slightly-worse: LR ROC 0.778 -> 0.770, explain-away 0.767 -> 0.766, theta-mass
+0.647 -> 0.657; all moves <= ~0.01 = single-seed re-fit noise. Placement mrr 0.596 ->
+0.632 (re-fit side effect, not the FP target). Learned alpha again tracks footprint
+diffuseness not prevalence (Spearman(alpha,coverage)=0.09).
+
+Mechanism (insight 0062): the FP codes are GENUINELY disease-associated (anemia of
+chronic disease, CKD = lupus nephritis are real SLE features), not comorbid noise a
+background topic could claim away, so from condition codes alone a background patient
+with anemia+CKD is indistinguishable from SLE. Capacity is the wrong lever; the binding
+constraint is INFORMATION (meds/labs = MixEHR direction). explain-away's gap to LR did
+narrow (0.0106 -> 0.0044) as pre-registered (its FP fix is n_bg-bounded) but immaterial
+since LR itself did not improve. n_bg=80 NOT adopted.

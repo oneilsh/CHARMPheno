@@ -1,7 +1,7 @@
 ---
 id: 67
 slug: dag-placement-rare6-1yr-learned-alpha-deploy-symmetric
-status: pending
+status: done
 model_class: dag_placement
 cohort: population_rare6
 cohort_def: population_rare6
@@ -69,3 +69,14 @@ avoid the re-fit; not built (kept minimal).
   the fit is the same as 0065).
 - Optional follow: transform_alpha_mode: block_balanced with a high
   transform_bg_weight (e.g. 0.9) to test the background-vs-node baseline.
+
+## Result — mrr recovered under symmetric deploy; explain-away null (see insight 0062)
+
+Symmetric deploy RECOVERED mrr to 0.596 (vs 0065's fitted-deploy 0.442) -> confirms the
+0065 argmax drop was the deploy-prior bias, not the fit (insight 0061). This fit is the
+substrate for the explain-away A/B: LR @alpha=inf ROC 0.778 / PR 0.222; explain-away
+0.767 / 0.212 (routing null-to-slightly-negative). Error-class totals at 80% sens:
+background_called_rare=13158 (the dominant FP class, 44% of background),
+rare_called_background=276 (FN), rare_called_rare_correct=457. Explain-away left the FN
+class unmoved (276) -> those patients are info-limited, not comorbidity-drag-limited.
+Motivated exp 0068 (double n_bg) -> also null. Full analysis: insight 0062.
