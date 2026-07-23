@@ -79,9 +79,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "non-default value, or the recomputed cache key will "
                         "miss.")
     p.add_argument("--count-mode", choices=["raw", "log1p"], default="raw",
-                   help="Passed through to lr_placement_scores/lr_auc_sweep.")
+                   help="Per-code weighting in the LR score, applied CONSISTENTLY "
+                        "across the AUC sweep, the detection report, the error-class "
+                        "classification, and the decompose viewer. 'raw' = weight by "
+                        "code count (a code seen 4x contributes 4x); 'log1p' = weight "
+                        "by log1p(count) (dampens repeated codes -- both repeated "
+                        "positive matches and repeated generic-comorbidity negatives).")
     p.add_argument("--length-normalize", action="store_true",
-                   help="Passed through to lr_placement_scores/lr_auc_sweep.")
+                   help="Divide each node's LR score by the doc's token count "
+                        "(reduces the penalty a comorbidity-heavy patient pays for "
+                        "simply having more codes). Applied to the sweep + detection "
+                        "+ classification scores.")
     p.add_argument("--sample-cases", type=int, default=0,
                    help="Itemize an lr_decompose breakdown (per true frontier "
                         "node, rendered with concept names) for this many "
@@ -404,22 +412,27 @@ _CLASS_ORDER = [
 
 
 def _render_case(person_id, sv, frontier, *, lam, lay, alpha, background,
-                 node_name, idx_to_cid, vocab_names, nodes, vocab_size, top_nodes):
+                 node_name, idx_to_cid, vocab_names, nodes, vocab_size, top_nodes,
+                 count_mode="raw", length_normalize=False):
     """One patient's viewer block (string): token/code counts, the LR ranking +
     HIT/MISS summary, and the per-code lr_decompose for the top node (+ each true
-    node not the top). Pure per-doc; scores this doc against all nodes."""
+    node not the top). Pure per-doc; scores this doc against all nodes under the
+    same `count_mode`/`length_normalize` as the AUC sweep (so a log1p run's viewer
+    matches its score)."""
     from spark_vi.models.topic.dag_placement import lr_decompose, lr_placement_scores
     bow_row = np.zeros(vocab_size, dtype=float)
     bow_row[np.asarray(sv.indices, dtype=np.int64)] = np.asarray(sv.values, dtype=float)
     scores = lr_placement_scores(bow_row[None], lam, lay, alpha=alpha,
-                                 background=background)[0]
+                                 background=background, count_mode=count_mode,
+                                 length_normalize=length_normalize)[0]
     true_set = [u for u in frontier if u in lay.block]
     kind = "foreground" if true_set else "background"
     rank_lines, top_node = _ranking_summary_lines(scores, nodes, true_set,
                                                   node_name, top_nodes)
 
     def _decomp(u, why):
-        rows = lr_decompose(bow_row, lam, lay, u, alpha=alpha, background=background)
+        rows = lr_decompose(bow_row, lam, lay, u, alpha=alpha, background=background,
+                            count_mode=count_mode)
         return [f"  WHY {why} ({node_name.get(u, u)}):"] + \
                ["    " + ln for ln in render_decompose_rows(rows, idx_to_cid, vocab_names)]
 
@@ -444,7 +457,8 @@ def _viewer_context(bundle, lay, vocab_names):
 
 
 def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background,
-                      vocab_names, top_nodes=8):
+                      vocab_names, top_nodes=8, count_mode="raw",
+                      length_normalize=False):
     """Write a flat (ungrouped) LR breakdown for each selected doc to
     {run_dir}/lr_readout/decompose.txt. Per patient: token/code counts; the LR
     RANKING over DAG nodes (top `top_nodes`); (foreground) the TRUE node(s) + rank
@@ -457,7 +471,8 @@ def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background,
     out_path = out_dir / "decompose.txt"
     blocks = [_render_case(pid, sv, fr, lam=lam, lay=lay, alpha=alpha,
                            background=background, vocab_names=vocab_names,
-                           top_nodes=top_nodes, **ctx)
+                           top_nodes=top_nodes, count_mode=count_mode,
+                           length_normalize=length_normalize, **ctx)
               for pid, sv, fr in cases]
     out_path.write_text("\n\n".join(blocks) + "\n" if blocks else "")
     print(f"[lr_readout]   wrote {len(cases)} case decomposition(s) "
@@ -468,7 +483,8 @@ def write_case_viewer(run_dir, bundle, lam, lay, cases, *, alpha, background,
 
 def write_case_viewer_by_class(run_dir, bundle, lam, lay, meta, scores, is_fg, *,
                                alpha, background, vocab_names, call_threshold,
-                               per_class, top_nodes=8, seed=0):
+                               per_class, top_nodes=8, seed=0, count_mode="raw",
+                               length_normalize=False):
     """Classify EVERY held-out doc by the background-vs-rare confusion (max-node LR
     case score vs `call_threshold`), sample up to `per_class` per class, and write
     them GROUPED by class (false-positive first) to decompose.txt. `scores` is the
@@ -508,7 +524,8 @@ def write_case_viewer_by_class(run_dir, bundle, lam, lay, meta, scores, is_fg, *
             pid, sv, frontier = meta[i]
             block.append(_render_case(pid, sv, frontier, lam=lam, lay=lay, alpha=alpha,
                                       background=background, vocab_names=vocab_names,
-                                      top_nodes=top_nodes, **ctx))
+                                      top_nodes=top_nodes, count_mode=count_mode,
+                                      length_normalize=length_normalize, **ctx))
         sections.append("\n\n".join(block))
 
     out_path.write_text("\n\n\n".join(sections) + "\n")
@@ -594,17 +611,21 @@ def _background_from_bow(bow, epsilon=1e-9):
     return np.maximum(bg, epsilon)
 
 
-def detection_report(bow, is_fg, lam, lay, *, alpha, background, theta_det):
+def detection_report(bow, is_fg, lam, lay, *, alpha, background, theta_det,
+                     count_mode="raw", length_normalize=False):
     """Deployment metrics for the LR score at `alpha` (max-over-nodes), printed
     beside the run's theta-mass detection block from the manifest. On this
     heavily imbalanced data ROC-AUC hides low precision at low prevalence, so
     the honest numbers are PR-AUC (average precision; random baseline = the
     prevalence) and, at each target foreground sensitivity, the precision (PPV)
     and background false-positive rate you would operate at. Reuses the engine's
-    _detection_metrics so LR and theta-mass are scored identically."""
+    _detection_metrics so LR and theta-mass are scored identically. `count_mode`
+    /`length_normalize` match the AUC sweep so the reported operating points are
+    for the same score."""
     from spark_vi.models.topic.dag_placement import (lr_placement_scores,
                                                       _detection_metrics)
-    s = lr_placement_scores(bow, lam, lay, alpha=alpha, background=background)
+    s = lr_placement_scores(bow, lam, lay, alpha=alpha, background=background,
+                            count_mode=count_mode, length_normalize=length_normalize)
     d = _detection_metrics(s.max(axis=1), np.asarray(is_fg, dtype=bool))
     alab = "inf" if math.isinf(alpha) else f"{alpha:.4g}"
 
@@ -677,7 +698,9 @@ def main() -> int:
         best_alpha = max(alpha_values, key=lambda a: lr_aucs.get(a, float("-inf")))
         detection_report(bow, is_fg, lam, lay, alpha=best_alpha,
                          background=_background_from_bow(bow),
-                         theta_det=manifest["metrics"].get("detection", {}))
+                         theta_det=manifest["metrics"].get("detection", {}),
+                         count_mode=args.count_mode,
+                         length_normalize=args.length_normalize)
 
         # NPMI coherence: always printed (aggregate output, no egress concern).
         topic_labels = build_topic_labels(lay, bundle)
@@ -709,7 +732,9 @@ def main() -> int:
                 from spark_vi.models.topic.dag_placement import (
                     lr_placement_scores, _detection_metrics)
                 scores = lr_placement_scores(bow, lam, lay, alpha=viewer_alpha,
-                                             background=background)
+                                             background=background,
+                                             count_mode=args.count_mode,
+                                             length_normalize=args.length_normalize)
                 sens = args.viewer_call_sensitivity
                 op = _detection_metrics(
                     scores.max(axis=1), is_fg, sens_targets=(sens,)
@@ -728,7 +753,9 @@ def main() -> int:
                         args.run_dir, bundle, lam, lay, meta, scores, is_fg,
                         alpha=viewer_alpha, background=background,
                         vocab_names=vocab_names, call_threshold=thr,
-                        per_class=args.viewer_per_class, top_nodes=args.viewer_top_nodes)
+                        per_class=args.viewer_per_class, top_nodes=args.viewer_top_nodes,
+                        count_mode=args.count_mode,
+                        length_normalize=args.length_normalize)
             else:
                 cases = select_cases(bundle, sample_cases=args.sample_cases,
                                      sample_background=args.sample_background,
@@ -741,7 +768,9 @@ def main() -> int:
                     write_case_viewer(args.run_dir, bundle, lam, lay, cases,
                                       alpha=viewer_alpha, background=background,
                                       vocab_names=vocab_names,
-                                      top_nodes=args.viewer_top_nodes)
+                                      top_nodes=args.viewer_top_nodes,
+                                      count_mode=args.count_mode,
+                                      length_normalize=args.length_normalize)
     return 0
 
 
