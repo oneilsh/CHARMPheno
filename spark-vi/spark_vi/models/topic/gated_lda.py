@@ -97,8 +97,9 @@ class GatedOnlineLDA(OnlineLDA):
             gp["lambda"] = np.asarray(data_summary["spectral_lambda"], dtype=np.float64)
         else:
             scope = (data_summary or {}).get("anchor_scope", "closure")
+            topo = (data_summary or {}).get("topo_order", "forward")
             gp["lambda"] = INIT_STRATEGIES[self.init](
-                data_summary, self.lay, self.V, anchor_scope=scope)
+                data_summary, self.lay, self.V, anchor_scope=scope, topo_order=topo)
         return gp
 
     def local_update(

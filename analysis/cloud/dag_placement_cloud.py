@@ -273,6 +273,10 @@ def parse_args(argv=None):
                         "u is the most-specific attested node, background only from "
                         "empty-frontier docs) — 'frontier' stops background/ancestors "
                         "stealing a descendant's defining anchor.")
+    p.add_argument("--spectral-topo-order", choices=["forward", "reverse"],
+                   default="forward",
+                   help="spectral init deflation order (forward=ancestors-first, "
+                        "reverse=leaves-first); default forward")
     # per-iter topic logging (STM parity)
     p.add_argument("--print-topics-every", type=int, default=0,
                    help="Print top-N terms per topic every N iters (0 = off). "
@@ -326,6 +330,7 @@ def main() -> int:
                 init=args.init, spectralMaxVocab=args.spectral_max_vocab,
                 spectralMethod=args.spectral_method,
                 anchorScope=args.anchor_scope,
+                spectralTopoOrder=args.spectral_topo_order,
                 nodeAlphaScale=args.node_alpha_scale,
                 optimizeDocConcentration=args.optimize_doc_concentration,
                 transformAlphaMode=args.transform_alpha_mode,
@@ -411,6 +416,7 @@ def main() -> int:
                 "spectral_method_requested": args.spectral_method,
                 "spectral_method_resolved": resolved_spectral,
                 "anchor_scope": args.anchor_scope,
+                "spectral_topo_order": args.spectral_topo_order,
                 "disease": args.disease, "min_n": args.min_n, "strip_mode": args.strip_mode,
                 "window_mode": args.window_mode, "lookback_days": args.lookback_days,
                 "label_window_days": args.label_window_days,

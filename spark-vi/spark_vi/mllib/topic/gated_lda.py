@@ -96,6 +96,12 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
                         "docs where u is the most-specific attested node, background "
                         "only from empty-frontier docs) — 'frontier' stops "
                         "background/ancestors stealing a descendant's anchor")
+    spectralTopoOrder = Param(Params._dummy(), "spectralTopoOrder",
+                              "spectral init deflation order: 'forward' (default; nodes "
+                              "ancestors-first, each deflated against its ancestors = "
+                              "increment-over-ancestors) or 'reverse' (leaves-first, each "
+                              "deflated against its descendants = residual-after-descendants)",
+                              typeConverter=TypeConverters.toString)
     optimizeDocConcentration = Param(Params._dummy(), "optimizeDocConcentration",
                                      "learn an asymmetric per-node Dirichlet alpha "
                                      "from data (Wallach et al. 2009); nodeAlphaScale "
@@ -173,7 +179,8 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                  nBg=2, tpn=1, maxIter=20, seed=None, caviMaxIter=100, caviTol=1e-3,
                  gammaShape=100.0, init="random", spectralMaxVocab=8000,
                  spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
-                 anchorScope="closure", nodeAlphaScale=1.0, miniBatchFraction=0.0,
+                 anchorScope="closure", spectralTopoOrder="forward",
+                 nodeAlphaScale=1.0, miniBatchFraction=0.0,
                  learningRateTau0=1.0, learningRateKappa=0.7,
                  optimizeDocConcentration=False, transformAlphaMode="fitted",
                  transformAlpha=0.0, transformBgWeight=0.5):
@@ -183,7 +190,8 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                          caviMaxIter=100, caviTol=1e-3, gammaShape=100.0,
                          init="random", spectralMaxVocab=8000,
                          spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
-                         anchorScope="closure", nodeAlphaScale=1.0,
+                         anchorScope="closure", spectralTopoOrder="forward",
+                         nodeAlphaScale=1.0,
                          miniBatchFraction=0.0, learningRateTau0=1.0,
                          learningRateKappa=0.7, optimizeDocConcentration=False,
                          transformAlphaMode="fitted", transformAlpha=0.0,
@@ -310,6 +318,7 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                     seed=(seed or 0),
                     min_doc_freq=int(self.getOrDefault("spectralMinDocFreq")),
                     anchor_scope=self.getOrDefault("anchorScope"),
+                    topo_order=self.getOrDefault("spectralTopoOrder"),
                 )
                 data_summary = {"spectral_lambda": lam0}
             else:  # dense — collect-to-driver exact path
@@ -319,10 +328,12 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                     bow = _vector_to_bow_document(r[0])
                     train_docs.append(np.repeat(bow.indices, bow.counts.astype(int)))
                     train_labels.append(frozenset(int(x) for x in (r[1] or [])))
-                # anchor_scope rides along so initialize_global's dense strategy
-                # honors it too (the scalable path already baked it into lam0).
+                # anchor_scope/topo_order ride along so initialize_global's dense
+                # strategy honors them too (the scalable path already baked them
+                # into lam0).
                 data_summary = {"train_docs": train_docs, "train_labels": train_labels,
-                                "anchor_scope": self.getOrDefault("anchorScope")}
+                                "anchor_scope": self.getOrDefault("anchorScope"),
+                                "topo_order": self.getOrDefault("spectralTopoOrder")}
 
         try:
             result = VIRunner(model_obj, config=config).fit(

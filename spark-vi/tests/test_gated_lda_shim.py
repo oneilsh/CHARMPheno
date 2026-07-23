@@ -423,3 +423,11 @@ def test_gated_shim_transform_symmetric_mode_runs(spark):
     model.set(model.transformAlphaMode, "symmetric")
     out = model.transform(df).select("nodeAffinity").head()[0]
     assert len(out) == 6                                         # one affinity per node
+
+
+def test_shim_spectral_topo_order_param_default_and_set():
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    est = GatedLDAEstimator()
+    assert est.getOrDefault("spectralTopoOrder") == "forward"
+    est2 = GatedLDAEstimator(spectralTopoOrder="reverse")
+    assert est2.getOrDefault("spectralTopoOrder") == "reverse"
