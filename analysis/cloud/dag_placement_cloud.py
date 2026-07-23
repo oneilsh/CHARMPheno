@@ -231,6 +231,18 @@ def parse_args(argv=None):
                    help="Learn an asymmetric per-node Dirichlet alpha from data "
                         "(Wallach et al. 2009); node-alpha-scale sets the initial "
                         "alpha, the gated Newton step refines it. Off by default.")
+    p.add_argument("--transform-alpha-mode", default="fitted",
+                   choices=["fitted", "symmetric", "block_balanced"],
+                   help="Deployment (fold-in) Dirichlet alpha: 'fitted' (default; "
+                        "the fitted alpha) | 'symmetric' (flat 1/K or --transform-alpha; "
+                        "neutral between nodes) | 'block_balanced' (nodes equal, "
+                        "background collective mass = --transform-bg-weight). Decouples "
+                        "the fitting-aid alpha from the deployment prior.")
+    p.add_argument("--transform-alpha", type=float, default=0.0,
+                   help="Per-topic alpha for --transform-alpha-mode symmetric (<=0 -> 1/K).")
+    p.add_argument("--transform-bg-weight", type=float, default=0.5,
+                   help="Collective background prior mass in (0,1) for "
+                        "--transform-alpha-mode block_balanced.")
     # SVI
     p.add_argument("--max-iter", type=int, default=100)
     p.add_argument("--mini-batch-fraction", type=float, default=0.0,
@@ -316,6 +328,9 @@ def main() -> int:
                 anchorScope=args.anchor_scope,
                 nodeAlphaScale=args.node_alpha_scale,
                 optimizeDocConcentration=args.optimize_doc_concentration,
+                transformAlphaMode=args.transform_alpha_mode,
+                transformAlpha=args.transform_alpha,
+                transformBgWeight=args.transform_bg_weight,
                 miniBatchFraction=args.mini_batch_fraction,
                 learningRateTau0=args.learning_rate_tau0,
                 learningRateKappa=args.learning_rate_kappa)
@@ -401,6 +416,7 @@ def main() -> int:
                 "label_window_days": args.label_window_days,
                 "node_alpha_scale": args.node_alpha_scale,
                 "optimize_doc_concentration": args.optimize_doc_concentration,
+                "transform_alpha_mode": args.transform_alpha_mode,
                 "mini_batch_fraction": args.mini_batch_fraction,
                 "learning_rate_tau0": args.learning_rate_tau0,
                 "learning_rate_kappa": args.learning_rate_kappa,

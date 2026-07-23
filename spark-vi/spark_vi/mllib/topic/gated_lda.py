@@ -102,12 +102,69 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
                                      "sets the initial alpha, optimize refines it. "
                                      "Default False.",
                                      typeConverter=TypeConverters.toBoolean)
+    transformAlphaMode = Param(Params._dummy(), "transformAlphaMode",
+                               "deployment (transform/fold-in) Dirichlet alpha: "
+                               "'fitted' (default; the fitted alpha, asymmetric if "
+                               "optimizeDocConcentration) | 'symmetric' (flat per-topic "
+                               "alpha = transformAlpha, default 1/K; neutral between "
+                               "nodes) | 'block_balanced' (all nodes equal, background "
+                               "collective mass = transformBgWeight; neutral between "
+                               "nodes AND controls the bg-vs-node baseline). Decouples "
+                               "the fitting-aid alpha from the deployment prior so a "
+                               "learned alpha need not bias the placement argmax.",
+                               typeConverter=TypeConverters.toString)
+    transformAlpha = Param(Params._dummy(), "transformAlpha",
+                           "per-topic alpha for transformAlphaMode='symmetric' "
+                           "(<=0 -> 1/K).", typeConverter=TypeConverters.toFloat)
+    transformBgWeight = Param(Params._dummy(), "transformBgWeight",
+                              "collective background prior mass in (0,1) for "
+                              "transformAlphaMode='block_balanced' (nodes split the "
+                              "rest equally; total concentration 1.0). Default 0.5.",
+                              typeConverter=TypeConverters.toFloat)
 
 
 def _layout(est_or_model) -> DagLayout:
     return DagLayout(est_or_model.getOrDefault("parent"),
                      n_bg=est_or_model.getOrDefault("nBg"),
                      tpn=est_or_model.getOrDefault("tpn"))
+
+
+def _deployment_alpha(fitted_alpha, lay, mode, scalar, bg_weight):
+    """Build the length-K Dirichlet alpha used at TRANSFORM (fold-in) time.
+
+    'fitted'         -> the fitted alpha unchanged (asymmetric if the model learned it).
+    'symmetric'      -> a flat per-topic alpha (scalar>0 else 1/K); neutral between nodes.
+    'block_balanced' -> all node blocks equal AND an explicit background-vs-nodes split:
+                        background collective mass = bg_weight, the n_nodes node blocks
+                        split (1-bg_weight) equally (each node's tpn topics share its
+                        node share); total concentration 1.0. Neutral between nodes,
+                        controls the bg-vs-node baseline independent of topic counts.
+
+    Decouples the fitting-aid alpha from the deployment prior: a learned alpha can help
+    the fit while the deployment stays inter-node-neutral so it does not bias the
+    node-affinity argmax (insight 0061). NOTE: for RANKING/AUC the inter-node-symmetric
+    modes are equivalent (an equal per-node baseline cancels in the argmax); they differ
+    on the bg-vs-node baseline, which matters for calibration / operating points.
+    """
+    K = lay.K
+    if mode == "fitted":
+        return np.asarray(fitted_alpha, dtype=np.float64)
+    if mode == "symmetric":
+        a = float(scalar) if scalar and scalar > 0 else 1.0 / K
+        return np.full(K, a, dtype=np.float64)
+    if mode == "block_balanced":
+        w = float(bg_weight)
+        if not (0.0 < w < 1.0):
+            raise ValueError(f"transformBgWeight must be in (0,1), got {bg_weight}")
+        out = np.empty(K, dtype=np.float64)
+        out[:lay.n_bg] = w / lay.n_bg                        # background collective = w
+        per_node_topic = (1.0 - w) / (len(lay.nodes) * lay.tpn)  # nodes equal, share 1-w
+        for u in lay.nodes:
+            out[lay.block[u]] = per_node_topic
+        return out
+    raise ValueError(
+        f"unknown transformAlphaMode {mode!r}; "
+        "expected 'fitted' | 'symmetric' | 'block_balanced'")
 
 
 class GatedLDAEstimator(_GatedLDAParams, Estimator):
@@ -118,7 +175,8 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                  spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
                  anchorScope="closure", nodeAlphaScale=1.0, miniBatchFraction=0.0,
                  learningRateTau0=1.0, learningRateKappa=0.7,
-                 optimizeDocConcentration=False):
+                 optimizeDocConcentration=False, transformAlphaMode="fitted",
+                 transformAlpha=0.0, transformBgWeight=0.5):
         super().__init__()
         self._setDefault(featuresCol="features", labelCol="frontier", nBg=2, tpn=1,
                          maxIter=20, nodeAffinityCol="nodeAffinity",
@@ -127,7 +185,9 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                          spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
                          anchorScope="closure", nodeAlphaScale=1.0,
                          miniBatchFraction=0.0, learningRateTau0=1.0,
-                         learningRateKappa=0.7, optimizeDocConcentration=False)
+                         learningRateKappa=0.7, optimizeDocConcentration=False,
+                         transformAlphaMode="fitted", transformAlpha=0.0,
+                         transformBgWeight=0.5)
         self.setParams(**self._input_kwargs)
         # Diagnostic-only per-iteration callback (mirrors OnlineLDAEstimator).
         # Stored as an instance attribute, not a Param — callables aren't
@@ -291,7 +351,9 @@ class GatedLDAModel(_GatedLDAParams, Model):
         self._result = result
         self._setDefault(featuresCol="features", labelCol="frontier", nBg=nBg, tpn=tpn,
                          parent=parent, nodeAffinityCol="nodeAffinity",
-                         caviMaxIter=100, caviTol=1e-3, gammaShape=100.0)
+                         caviMaxIter=100, caviTol=1e-3, gammaShape=100.0,
+                         transformAlphaMode="fitted", transformAlpha=0.0,
+                         transformBgWeight=0.5)
 
     @property
     def result(self):
@@ -306,7 +368,13 @@ class GatedLDAModel(_GatedLDAParams, Model):
         lay = _layout(self)
         lam = self._result.global_params["lambda"]
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
-        alpha = self._result.global_params["alpha"]
+        # Deployment alpha (may differ from the fitted alpha — see _deployment_alpha):
+        # decouples a learned fitting-aid alpha from the fold-in prior.
+        alpha = _deployment_alpha(
+            self._result.global_params["alpha"], lay,
+            self.getOrDefault("transformAlphaMode"),
+            float(self.getOrDefault("transformAlpha")),
+            float(self.getOrDefault("transformBgWeight")))
         gamma_shape = float(self.getOrDefault("gammaShape"))
         cavi_max_iter = int(self.getOrDefault("caviMaxIter"))
         cavi_tol = float(self.getOrDefault("caviTol"))

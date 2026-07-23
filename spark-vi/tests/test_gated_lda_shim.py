@@ -366,3 +366,60 @@ def test_gated_optimize_alpha_recovers_planted_alpha_ensemble(spark):
     assert np.argmin(ens) == nodes.index(4)                   # lowest planted -> lowest learned
     rho = spearmanr(planted, ens).correlation
     assert rho >= 0.9, f"ensemble planted->learned rank corr too low: {rho} (ens={list(ens)})"
+
+
+def test_deployment_alpha_modes():
+    # _deployment_alpha builds the fold-in prior: fitted unchanged; symmetric flat;
+    # block_balanced keeps nodes equal but sets the bg-vs-node collective split.
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.mllib.topic.gated_lda import _deployment_alpha
+    lay = DagLayout({1: 0, 2: 0, 3: 0}, n_bg=2, tpn=1)          # K=5, 2 bg + 3 nodes
+    fitted = np.arange(5, dtype=float) + 1.0
+
+    assert np.array_equal(_deployment_alpha(fitted, lay, "fitted", 0.0, 0.5), fitted)
+
+    sym = _deployment_alpha(fitted, lay, "symmetric", 0.0, 0.5)  # <=0 -> 1/K
+    assert np.allclose(sym, 1.0 / 5)
+    assert np.allclose(_deployment_alpha(fitted, lay, "symmetric", 0.02, 0.5), 0.02)
+
+    bb = _deployment_alpha(fitted, lay, "block_balanced", 0.0, 0.6)
+    assert np.allclose(bb[:2].sum(), 0.6)                        # background collective = w
+    node_vals = [bb[lay.block[u][0]] for u in lay.nodes]
+    assert np.allclose(node_vals, node_vals[0])                  # all nodes equal (unbiased)
+    assert np.allclose(bb.sum(), 1.0)                            # total concentration 1
+
+    import pytest
+    with pytest.raises(ValueError, match="transformBgWeight"):
+        _deployment_alpha(fitted, lay, "block_balanced", 0.0, 1.5)
+    with pytest.raises(ValueError, match="transformAlphaMode"):
+        _deployment_alpha(fitted, lay, "banana", 0.0, 0.5)
+
+
+def test_gated_shim_transform_alpha_mode_param_defaults_and_settable():
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    est = GatedLDAEstimator(parent={1: 0, 2: 0})
+    assert est.getOrDefault("transformAlphaMode") == "fitted"   # byte-identical default
+    assert est.getOrDefault("transformBgWeight") == 0.5
+    est2 = GatedLDAEstimator(parent={1: 0, 2: 0}, transformAlphaMode="block_balanced",
+                             transformBgWeight=0.9)
+    assert est2.getOrDefault("transformAlphaMode") == "block_balanced"
+    assert est2.getOrDefault("transformBgWeight") == 0.9
+
+
+def test_gated_shim_transform_symmetric_mode_runs(spark):
+    # transform with a symmetric deployment alpha runs end-to-end and yields the
+    # per-node affinity vector (decoupled from whatever alpha was fitted).
+    import numpy as np
+    from pyspark.ml.linalg import Vectors
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    parent = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
+    V = 30
+    rng = np.random.default_rng(0)
+    rows = [(Vectors.sparse(V, sorted(rng.choice(V, 6, replace=False).tolist()),
+                            [1.0] * 6), [int(rng.choice([3, 4, 5, 6]))]) for _ in range(40)]
+    df = spark.createDataFrame(rows, ["features", "frontier"])
+    model = GatedLDAEstimator(parent=parent, nBg=2, tpn=1, maxIter=3, seed=0).fit(df)
+    model.set(model.transformAlphaMode, "symmetric")
+    out = model.transform(df).select("nodeAffinity").head()[0]
+    assert len(out) == 6                                         # one affinity per node
