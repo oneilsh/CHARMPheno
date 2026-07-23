@@ -525,6 +525,48 @@ def test_evaluate_fdr_multimorbidity_beats_argmax():
     assert mm["mean_true_discoveries_per_multimorbid"] > mm["argmax_true_baseline_per_multimorbid"]
 
 
+def test_fdr_discovery_report_planted_and_null():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import fdr_discovery_report
+    n_bg_docs, n_fg_docs, n_nodes = 200, 40, 3
+    # Background docs are exact zeros on every node (a degenerate, zero-variance
+    # null) and foreground docs are a constant elevated mass on node 0 only. This
+    # is deliberately noise-free rather than rng-perturbed: _empirical_right_tail_p
+    # gives every tied background doc p=1.0 (it never exceeds its own reference)
+    # while every foreground doc gets the floor p=1/(n_bg+1), so the test is a
+    # deterministic, seed-independent check of the planted-signal contract rather
+    # than one draw of a BH procedure that (correctly, by construction) admits a
+    # bounded rate of false discoveries at the reference tail under real noise.
+    P = np.zeros((n_bg_docs + n_fg_docs, n_nodes))
+    P[n_bg_docs:, 0] = 0.9                                                 # planted signal
+    is_fg = np.zeros(n_bg_docs + n_fg_docs, dtype=bool); is_fg[n_bg_docs:] = True
+    truth = np.zeros((n_bg_docs + n_fg_docs, n_nodes), dtype=bool)
+    truth[n_bg_docs:, 0] = True                                            # fg docs are node-0 positives
+    mm_rows = np.zeros(n_bg_docs + n_fg_docs, dtype=bool)                  # none multimorbid
+    lengths = np.ones(n_bg_docs + n_fg_docs)
+    rep = fdr_discovery_report(P, is_fg, lengths, truth, mm_rows,
+                               q_grid=(0.05, 0.10, 0.20), n_length_bins=1)
+    # planted node-0 signal -> discoveries at q=0.20 with precision 1.0 (only true node-0 docs)
+    assert rep["by_q"][0.20]["n_discoveries"] >= 1
+    assert rep["by_q"][0.20]["precision"] == 1.0
+    assert set(rep.keys()) == {"by_q", "multimorbidity", "saturation_rate",
+                               "zib_gap_mean", "zib_gap_max", "n_length_bins_effective"}
+
+
+def test_fdr_discovery_report_all_null_no_discoveries():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import fdr_discovery_report
+    n, n_nodes = 120, 2
+    rng = np.random.default_rng(1)
+    P = np.abs(rng.normal(0.0, 0.01, size=(n, n_nodes)))     # no fg/bg separation
+    is_fg = np.zeros(n, dtype=bool); is_fg[100:] = True
+    truth = np.zeros((n, n_nodes), dtype=bool); truth[100:, 0] = True
+    mm_rows = np.zeros(n, dtype=bool)
+    rep = fdr_discovery_report(P, is_fg, np.ones(n), truth, mm_rows,
+                               q_grid=(0.05, 0.10, 0.20), n_length_bins=1)
+    assert all(rep["by_q"][q]["n_discoveries"] == 0 for q in (0.05, 0.10, 0.20))
+
+
 from spark_vi.models.topic.dag_placement import lr_placement_scores, lr_decompose
 
 def _lr_lay():

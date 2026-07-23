@@ -675,6 +675,65 @@ def _hops(a, b, lay):
     return float("inf")
 
 
+def fdr_discovery_report(P, is_fg, doc_lengths, truth, mm_rows, *,
+                         q_grid=(0.05, 0.10, 0.20), n_length_bins=4, method="bh"):
+    """Length-conditioned, background-relative per-node FDR discovery report for ANY
+    [n_docs x n_nodes] score matrix P (theta-mass, LR, or explain-away). Reuses the
+    Efron two-groups empirical null (per_node_discoveries): background docs are the
+    per-node/per-length-bin null, BH (or BY) per node column. Returns the by_q
+    precision/recall (vs `truth` = subtree-membership positives), the multimorbidity
+    payoff (mean TRUE node-discoveries per truly-multimorbid patient `mm_rows` vs the
+    argmax true-hit baseline), the p-floor saturation rate, and the zero-inflated-Beta
+    KS diagnostic. `truth` [n_docs x n_nodes] bool and `mm_rows` [n_docs] bool are
+    supplied by the caller (mm_rows is NOT derivable from truth: a single deep frontier
+    node makes truth true for all its ancestors). This is the exact block evaluate used
+    to build inline; both evaluate (theta-mass) and the LR readout (LR/explain-away)
+    call it so the comparison is like-for-like."""
+    P = np.asarray(P, dtype=float)
+    is_fg = np.asarray(is_fg, dtype=bool)
+    truth = np.asarray(truth, dtype=bool)
+    mm_rows = np.asarray(mm_rows, dtype=bool)
+    n_nodes = P.shape[1]
+    q_grid = list(q_grid)
+    disc = per_node_discoveries(P, is_fg, np.asarray(doc_lengths, dtype=float),
+                                q_grid=q_grid, n_length_bins=n_length_bins,
+                                method=method)
+    by_q = {}
+    for q in q_grid:
+        m = disc["discoveries"][q]
+        ndisc = int(m.sum())
+        tp = int((m & truth).sum())
+        total_pos = int(truth.sum())
+        by_q[q] = {
+            "n_discoveries": ndisc,
+            "precision": float(tp / ndisc) if ndisc else float("nan"),
+            "recall": float(tp / total_pos) if total_pos else float("nan")}
+    q_mid = q_grid[len(q_grid) // 2]
+    if mm_rows.any():
+        m_mid = disc["discoveries"][q_mid]
+        mean_true_disc = float((m_mid & truth)[mm_rows].sum(axis=1).mean())
+        mean_total_disc = float(m_mid[mm_rows].sum(axis=1).mean())
+        argmax_node = np.argmax(P[mm_rows], axis=1)
+        argmax_tp = truth[mm_rows][np.arange(mm_rows.sum()), argmax_node]
+        argmax_base = float(argmax_tp.mean())
+    else:
+        mean_true_disc = mean_total_disc = argmax_base = float("nan")
+    gaps = [_zib_empirical_gap(P[~is_fg, u]) for u in range(n_nodes)]
+    gaps = [g for g in gaps if not np.isnan(g)]
+    return {
+        "by_q": by_q,
+        "multimorbidity": {
+            "mean_true_discoveries_per_multimorbid": mean_true_disc,
+            "argmax_true_baseline_per_multimorbid": argmax_base,
+            "mean_total_discoveries_per_multimorbid": mean_total_disc},
+        "saturation_rate": float(disc["floor"][disc["discoveries"][q_mid]].mean())
+            if disc["discoveries"][q_mid].any() else float("nan"),
+        "zib_gap_mean": float(np.mean(gaps)) if gaps else float("nan"),
+        "zib_gap_max": float(np.max(gaps)) if gaps else float("nan"),
+        "n_length_bins_effective": int(len(np.unique(disc["bins"]))),
+    }
+
+
 def evaluate(profiles, test_labels, lay, *, doc_lengths=None,
             fdr_q_grid=(0.05, 0.10, 0.20), n_length_bins=4):
     """Per-node case-finding AUC (subtree membership), AUC by longest-path depth, and set-valued
@@ -777,60 +836,15 @@ def evaluate(profiles, test_labels, lay, *, doc_lengths=None,
         float(bg_mass[is_fg].mean()) if n_fg else float("nan"))
 
     # --- FDR readout: background-relative, per-node, multiple-testing corrected -
-    # Post-hoc on P (node-block mass). Each (patient, node) is its own test; the
-    # background docs are the empirical null (Efron two-groups); BH per node.
     node_list = lay.nodes
     lengths = (np.asarray(doc_lengths, dtype=float) if doc_lengths is not None
                else np.ones(len(fronts)))
     nlb = n_length_bins if doc_lengths is not None else 1
-    q_grid = list(fdr_q_grid)
-    disc = per_node_discoveries(P, is_fg, lengths, q_grid=q_grid,
-                                n_length_bins=nlb)
     truth = np.array([[node_pos[u][i] for u in node_list]
-                      for i in range(len(fronts))], dtype=bool)   # [n_docs x n_nodes]
-    by_q = {}
-    for q in q_grid:
-        m = disc["discoveries"][q]
-        ndisc = int(m.sum())
-        tp = int((m & truth).sum())
-        total_pos = int(truth.sum())
-        by_q[q] = {
-            "n_discoveries": ndisc,
-            "precision": float(tp / ndisc) if ndisc else float("nan"),
-            "recall": float(tp / total_pos) if total_pos else float("nan")}
-    # multimorbidity payoff at the middle q, measured on CORRECT captures so it is
-    # like-for-like: mean TRUE node-discoveries per truly-multimorbid patient (a
-    # patient whose true frontier has >=2 scoreable nodes) vs the argmax true-hit
-    # baseline. FDR can credit several true nodes at once (the simplex fix), while
-    # argmax credits at most one node/patient (so its true-capture is <=1). The
-    # raw total-discovery count (incl. false ones) is reported separately for
-    # context, NOT as the headline — comparing a count to a rate would overstate.
-    q_mid = q_grid[len(q_grid) // 2]
+                      for i in range(len(fronts))], dtype=bool)
     mm_rows = np.array([len(f & set(node_list)) >= 2 for f in fronts])
-    if mm_rows.any():
-        m_mid = disc["discoveries"][q_mid]
-        mean_true_disc = float((m_mid & truth)[mm_rows].sum(axis=1).mean())
-        mean_total_disc = float(m_mid[mm_rows].sum(axis=1).mean())
-        argmax_node = np.argmax(P[mm_rows], axis=1)
-        argmax_tp = truth[mm_rows][np.arange(mm_rows.sum()), argmax_node]
-        argmax_base = float(argmax_tp.mean())
-    else:
-        mean_true_disc = mean_total_disc = argmax_base = float("nan")
-    gaps = [_zib_empirical_gap(P[~is_fg, u]) for u in range(len(node_list))]
-    gaps = [g for g in gaps if not np.isnan(g)]
-    fdr_block = {
-        "q_grid": q_grid,
-        "by_q": by_q,
-        "multimorbidity": {
-            "mean_true_discoveries_per_multimorbid": mean_true_disc,
-            "argmax_true_baseline_per_multimorbid": argmax_base,
-            "mean_total_discoveries_per_multimorbid": mean_total_disc},
-        "saturation_rate": float(disc["floor"][disc["discoveries"][q_mid]].mean())
-            if disc["discoveries"][q_mid].any() else float("nan"),
-        "zib_gap_mean": float(np.mean(gaps)) if gaps else float("nan"),
-        "zib_gap_max": float(np.max(gaps)) if gaps else float("nan"),
-        "n_length_bins_effective": int(len(np.unique(disc["bins"]))),
-    }
+    fdr_block = fdr_discovery_report(P, is_fg, lengths, truth, mm_rows,
+                                     q_grid=tuple(fdr_q_grid), n_length_bins=nlb)
 
     return {"node_auc": node_auc, "auc_by_depth": by_depth,
             "mrr": float(np.nanmean(1.0 / ranks)) if have_ranks else float("nan"),
