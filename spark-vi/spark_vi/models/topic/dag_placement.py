@@ -140,7 +140,12 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
     distributions. This is a supervised topic-word estimator, not the full unsupervised LDA sampler;
     hence there is no `alpha` argument. The returned beta_hat averages the post-burn token counts
     (n_kw + beta_prior) and normalizes once — the averaged-counts point estimate, not the mean of
-    per-sweep normalized rows."""
+    per-sweep normalized rows.
+
+    ORACLE / VALIDATOR — NOT the production fit path. This collapsed-Gibbs estimator is the reference
+    the production SVI engine (GatedOnlineLDA, models/topic/gated_lda.py) is validated against; the
+    cloud driver (analysis/cloud/dag_placement_cloud.py) fits via SVI and never calls this. Used in
+    tests only (its runtime — a Python per-token loop — is not tuned for production scale)."""
     rng = np.random.default_rng() if rng is None else rng
     K = lay.K
     counted = [_as_counts(d) for d in train_docs]
@@ -197,7 +202,11 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
 
 def profile(doc, beta_hat, lay, *, alpha=0.1, n_iter=60, burn=30, rng=None):
     """Unmasked fold-in (topics fixed) -> per-node affinity = posterior mean mass on each node's
-    block. The full profile IS the output; do not collapse to a single node."""
+    block. The full profile IS the output; do not collapse to a single node.
+
+    ORACLE / VALIDATOR — the Gibbs-oracle fold-in counterpart of `fit_gated`, NOT the production
+    read-out. Deployment folds held-out docs in via the SVI GatedLDAModel.transform (mllib shim) ->
+    nodeAffinity; the cloud driver feeds those SVI profiles to `evaluate`, never this. Test/oracle only."""
     rng = np.random.default_rng() if rng is None else rng
     K = lay.K
     w = np.asarray(doc, dtype=np.int64)
@@ -473,9 +482,13 @@ def _zib_empirical_gap(values, *, zero_eps=1e-6):
     `values` (node-block mass in [0,1]). The mixture is pi0 * 1[x<=0] + (1-pi0) *
     Beta(a,b) with pi0 the mass at <= zero_eps and Beta MLE (scipy) on the
     positive part. Returns a KS-style statistic in [0,1]; nan if degenerate
-    (all-zero or <2 positive points). Diagnostic only: it decides whether the
-    exportable null (sub-project 2) can be a ~3KB parametric fit or must ship a
-    tail-dense empirical grid; the FDR p-values never use it."""
+    (all-zero or <2 positive points). Diagnostic only: it would decide whether an
+    exportable null could be a ~3KB parametric fit or must ship a tail-dense
+    empirical grid; the FDR p-values never use it. NOTE: that export ("sub-project 2")
+    was never built, so this has no automated downstream consumer today — it is
+    computed, printed, and saved to the manifest for human inspection only. Kept
+    (cheap) rather than pruned. Returns nan for out-of-[0,1] input (e.g. LR scores),
+    so the LR/explain-away FDR reports it as nan, not a fabricated number."""
     v = np.sort(np.asarray(values, dtype=float))
     if v.size and (v[0] < -1e-9 or v[-1] > 1.0 + 1e-9):
         return float("nan")   # ZIB models simplex mass in [0,1]; undefined for unbounded (e.g. LR) scores
@@ -859,33 +872,6 @@ def evaluate(profiles, test_labels, lay, *, doc_lengths=None,
             "ap_prevalence_weighted": ap_prevalence_weighted,
             "recall_at_k": recall_at_k, "ci": ci, "detection": detection,
             "fdr": fdr_block}
-
-
-def _node_topic_mean(beta_hat, lay, u):
-    return beta_hat[lay.block[u]].mean(0)
-
-
-def identifiability_annotation(beta_hat, lay, *, tol=0.9):
-    """Post-fit diagnostic: flag WITHIN-STRUCTURE node pairs (siblings, or parent<->child) whose
-    learned topic distributions are near-collinear (cosine >= tol) -> hard to separate. Cross-branch
-    pairs are never reported; their similarity is a reporting fact, not a structural one."""
-    def cos(a, b):
-        return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
-    pairs = set()
-    for c, ps in lay.parents.items():                    # every parent<->child edge
-        for p in ps:
-            if p != 0:
-                pairs.add((min(p, c), max(p, c)))
-    for p, kids in lay.children.items():                 # siblings sharing at least one parent
-        for i in range(len(kids)):
-            for j in range(i + 1, len(kids)):
-                pairs.add((min(kids[i], kids[j]), max(kids[i], kids[j])))
-    out = []
-    for u, v in pairs:
-        c = cos(_node_topic_mean(beta_hat, lay, u), _node_topic_mean(beta_hat, lay, v))
-        if c >= tol:
-            out.append((u, v, c))
-    return out
 
 
 def render_profile(affinity, lay, *, names=None, true_node=None, width=24):

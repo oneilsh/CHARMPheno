@@ -148,18 +148,6 @@ def test_evaluate_tolerates_root_label():
     m = evaluate(profiles, labels, lay)                    # must not raise on the root label
     assert np.isfinite(m["mrr"])                            # 3 of 4 items are rankable
 
-def test_identifiability_flags_near_identical_siblings():
-    from spark_vi.models.topic.dag_placement import identifiability_annotation
-    lay = DagLayout(PARENT, n_bg=2, tpn=1)
-    beta = np.random.default_rng(0).random((lay.K, 20)) + 0.01
-    # make siblings 3 and 4 near-identical topics
-    beta[lay.block[4][0]] = beta[lay.block[3][0]].copy()
-    beta /= beta.sum(1, keepdims=True)
-    flagged = identifiability_annotation(beta, lay, tol=0.99)
-    pairs = {(min(u, v), max(u, v)) for u, v, _ in flagged}
-    assert (3, 4) in pairs
-    assert (3, 5) not in pairs                    # cross-branch never reported
-
 def test_render_profile_marks_true_and_shows_all_nodes():
     from spark_vi.models.topic.dag_placement import render_profile
     lay = DagLayout(PARENT, n_bg=2, tpn=1)
@@ -253,18 +241,6 @@ def test_evaluate_all_unrankable_labels_are_nan():
     profiles = [{u: 0.0 for u in lay.nodes} for _ in labels]
     m = evaluate(profiles, labels, lay)
     assert np.isnan(m["mrr"]) and np.isnan(m["top2"])       # not applicable, not 0.0
-
-def test_identifiability_multiparent_siblings():
-    from spark_vi.models.topic.dag_placement import identifiability_annotation
-    lay = DagLayout(DIAMOND, n_bg=2, tpn=1)
-    beta = np.random.default_rng(0).random((lay.K, 20)) + 0.01
-    beta[lay.block[4][0]] = beta[lay.block[5][0]].copy()     # 4,5 share parent 1 (siblings) -> near-identical
-    beta /= beta.sum(1, keepdims=True)
-    flagged = identifiability_annotation(beta, lay, tol=0.99)
-    pairs = {(min(u, v), max(u, v)) for u, v, _ in flagged}
-    assert (4, 5) in pairs                                    # siblings sharing a parent, flagged
-    # 2,3 ARE candidates (siblings under root 0) but their betas are not near-identical, so tol-gated out
-    assert (2, 3) not in pairs
 
 def test_render_profile_dag_renders_each_node_once():
     from spark_vi.models.topic.dag_placement import render_profile
