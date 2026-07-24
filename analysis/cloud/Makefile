@@ -345,7 +345,14 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 #                      own default is 0, which would MISS the cache key)
 # If the key still misses (e.g. a different experiment), pass the exact bundle
 # dir instead:  make lr-readout ID=N LR_ARGS="--bundle-path <cache_uri>/<key>"
-LR_CACHE_URI         ?= hdfs:///user/dataproc/charm/case_finding_cache
+#
+# PERSISTENCE: the bundle cache MUST live on GCS, not HDFS. HDFS on Dataproc is
+# per-cluster ephemeral -- a fresh cluster has an empty HDFS, so a bundle written
+# during the fit is gone and the readout aborts (it needs the bundle for the
+# held-out test BOW + frontiers; the run-dir only holds lambda + manifest). GCS
+# persists across cluster restarts. This default and the experiments' `cache_uri`
+# must match; keep both on GCS (the same staging bucket the runs already use).
+LR_CACHE_URI         ?= gs://dataproc-staging-getting-started-with-registered-tier-data-copy/charm/case_finding_cache
 LR_DOC_MIN_LENGTH    ?= 10
 # alpha grid: multipliers of the median node Sigma-lambda; 0 (no shrinkage) and
 # inf (the parameter-free limit) are always meaningful. 'inf' is a valid token.

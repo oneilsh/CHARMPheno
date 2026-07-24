@@ -28,7 +28,7 @@ label_window_days: 365
 spectral_topo_order: reverse
 max_iter: 200
 seed: 42
-cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
+cache_uri: gs://dataproc-staging-getting-started-with-registered-tier-data-copy/charm/case_finding_cache
 ---
 
 # exp 0069 — reverse-topological spectral init (leaves-first) A/B vs 0067
