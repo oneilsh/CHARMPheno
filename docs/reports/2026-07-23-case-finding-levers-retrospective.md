@@ -68,12 +68,18 @@ the parameter-free lift limit).
 1. **Richer features (meds / labs) — the MixEHR multi-domain direction.** The ONLY lever that attacks the
    actual binding constraint (adds separating information the condition codes lack). Not tested. This is
    the strategic next step.
-2. **LR-FDR readout — BUILT 2026-07-23 (commits c2b49ab..ec3fe99), awaiting cluster run.** The Efron
-   two-groups empirical-null FDR (per_node_discoveries) was applied ONLY to theta-mass, where it found
-   zero discoveries because theta-mass buries the signal. Now wired (score-agnostic engine helper
-   fdr_discovery_report) onto the LR + explain-away scores in lr_readout, beside the theta-mass FDR --
-   `make lr-readout ID=N` prints a 3-way by_q table. Tests whether LR's +0.12-ROC edge yields actual
-   FDR-controlled discoveries. Post-hoc, no re-fit. RESULT PENDING (user re-runs 0067/0069).
+2. **LR-FDR readout — BUILT + RUN 2026-07-24: RESOLVED, NEGATIVE (insight 0064).** The Efron
+   two-groups empirical-null FDR (per_node_discoveries) was wired (score-agnostic engine helper
+   fdr_discovery_report) onto the LR + explain-away scores beside theta-mass; `make lr-readout ID=69`
+   prints a 3-way by_q table. RESULT: ALL THREE scorers give ZERO discoveries at every q (0.05/0.10/0.20).
+   LR's +0.12-ROC / 2.7x-PR-AUC aggregate advantage does NOT yield a single FDR-controlled discovery.
+   ROC is average case-level ranking; FDR asks whether any individual (patient,node) score is extreme
+   enough vs the length-matched background null to survive BH correction across ~31k patients — and at
+   4.5% prevalence with heavy overlap (LR bg_fpr 0.43 @ 80% sens, precision 0.08) no threshold reaches
+   q-controlled precision with any recall. So LR is a TRIAGE RANKER, not a discoverer; the buried-signal
+   problem is NOT a lens artifact at the discovery level — it is information-limited. (Not a bug: the
+   planted unit test discovers on separated data.) So THIS un-chased lever is now chased and negative;
+   only lever #1 (information/MixEHR) remains.
 3. **Held-out log-likelihood.** The fair "is the learned alpha a better model" test (the objective
    optimize_alpha actually maximizes) was never measured — only ranking/detection were. Would settle the
    placement question the alpha work left open, independent of the detection nulls.
