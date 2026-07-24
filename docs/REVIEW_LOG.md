@@ -12,7 +12,7 @@ elsewhere.
 
 ---
 
-## 2026-07-16..23 — case-finding branch pre-merge review (7-lesson walkthrough) + the alpha / explain-away / n_bg / reverse-topo mini-arc
+## 2026-07-16..24 — case-finding branch pre-merge review (7-lesson walkthrough) + the alpha / explain-away / n_bg / reverse-topo / LR-FDR mini-arc
 
 Pre-merge review of the unmerged `case-finding` branch — the ontology/DAG placement
 engine. Seven-lesson bottom-up walkthrough (1 DAG substrate, 2 corpus assembly +
@@ -82,16 +82,26 @@ Full collation: `docs/reports/2026-07-23-case-finding-levers-retrospective.md`. 
 the model side is exhausted; the binding constraint is INFORMATION (meds/labs = the MixEHR
 multi-domain direction). Every null lever is retained as a validated, characterized capability.
 
+Extended to the DISCOVERY readout (insight 0064): the LR-FDR readout was built (below) and run —
+applying the same empirical-null per-node FDR to the LR + explain-away score matrices gives ZERO
+FDR-controlled discoveries at every q, identical to theta-mass. LR's +0.12-ROC aggregate edge is
+average ranking, not individually BH-defensible extremity, so LR is a TRIAGE RANKER not a discoverer;
+the buried-signal problem is information-limited, not lens-specific, even at the discovery level.
+
 ### Parked / deferred
 
-- **LR-FDR readout (queued build).** The Efron empirical-null FDR (`per_node_discoveries`) is
-  applied ONLY to theta-mass (where it found zero discoveries — buried signal); it is
-  score-agnostic, so wiring it onto the LR / explain-away scores tests whether LR's edge yields
-  FDR-controlled discoveries. Cheap, post-hoc; spec pending.
-- **Dead / orphaned code** (surfaced Lessons 5-6): `identifiability_annotation` (tested, ZERO
-  production consumers — a pg-stm vestige; wire-in or remove); `fit_gated`/`profile` (Gibbs
-  oracle, test-only — label as such); `_zib_empirical_gap`/`zib_gap` (printed+saved but its
-  exportable-null consumer was never built). Decisions deferred to a dead-code pass.
+- **LR-FDR readout — BUILT + RUN (RESOLVED, insight 0064).** SDD (`c2b49ab..ec3fe99`): extracted
+  `evaluate`'s FDR reporting into a reusable engine helper `fdr_discovery_report` (evaluate
+  byte-identical) + an lr_readout block running it on the LR / explain-away score matrices beside the
+  theta-mass FDR. Final review confirmed the theta-mass-vs-LR comparison is provably like-for-like.
+  RESULT: all three scorers give ZERO discoveries at every q -> LR is a ranker not a discoverer (folded
+  into the empirical result above). Kept as a validated, permanent capability (`make lr-readout`).
+- **Dead-code sweep — DONE (`032f51f`).** `identifiability_annotation` + its `_node_topic_mean` helper
+  had ZERO production consumers (a pg-stm identifiability-arc vestige kept alive only by two tests) ->
+  removed both + the tests. `fit_gated`/`profile` labeled ORACLE/VALIDATOR (production fits + reads out
+  via the SVI GatedOnlineLDA, not these). `_zib_empirical_gap` labeled human-inspection-only (its
+  sub-project-2 export consumer was never built; NaN off-[0,1] so LR/EA FDR reports it as nan). Kept
+  (cheap, honest) rather than pruned.
 - **Held-out log-likelihood** — the fair "is the learned alpha a better model" test (its actual
   objective) was never measured; would settle the open placement question independent of detection.
 - **Pre-existing reds (not from this arc):** `test_stm_integration::test_synthetic_recovery_full_batch`
