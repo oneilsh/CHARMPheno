@@ -537,5 +537,5 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ## Post-plan wrap-up (controller, after Task 6)
 
 - [ ] Whole-branch review (superpowers:requesting-code-review, most capable model) over `git merge-base main HEAD`..HEAD.
-- [ ] Add an insights entry (`docs/insights/NNNN-*.md`) recording the FDR-delta result — positive (specificity gain quantified) or negative (drug corroboration null on synthetic) — per the maintain-the-insights-log convention.
+- [ ] Add an insights entry (`docs/insights/NNNN-*.md`) recording the FDR-delta result — positive (specificity gain quantified) or negative (cross-domain corroboration null on synthetic) — per the maintain-the-insights-log convention.
 - [ ] Do NOT merge or push; present the branch to the user for the merge/PR decision and the follow-on (SVI-path threading, real-cohort ablation).
