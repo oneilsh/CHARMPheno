@@ -269,16 +269,16 @@ def validate_frontmatter(fm: dict) -> None:
             sys.exit(2)
 
     model_class = fm["model_class"]
-    if model_class not in ("lda", "stm"):
+    if model_class not in ("lda", "stm", "dag_placement"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
-              f"(currently: lda, stm; hdp planned)", flush=True)
+              f"(currently: lda, stm, dag_placement; hdp planned)", flush=True)
         sys.exit(2)
 
     if model_class == "stm":
         stm_required = ["covariate_formula", "categorical_cols", "continuous_cols"]
         for key in stm_required:
             if key not in fm:
-                print(f"[run-exp] ERROR: model_class=stm requires "
+                print(f"[run-exp] ERROR: model_class={model_class} requires "
                       f"frontmatter field {key!r}", flush=True)
                 sys.exit(2)
 
@@ -291,6 +291,8 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/lda_bigquery_cloud.py"
     if model_class == "stm":
         return f"{base}/stm_bigquery_cloud.py"
+    if model_class == "dag_placement":
+        return f"{base}/dag_placement_cloud.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
@@ -308,6 +310,8 @@ def build_fit_args(
         return build_lda_args(effective, Path(out_dir), resume_from)
     if model_class == "stm":
         return build_stm_args(effective, out_dir, resume_from)
+    if model_class == "dag_placement":
+        return build_dag_placement_args(effective, out_dir, resume_from)
     raise ValueError(f"unknown model_class: {model_class!r}")
 
 
@@ -599,6 +603,66 @@ def build_stm_args(
         "--lbfgs-max-iter", str(effective.get("lbfgs_max_iter", 50)),
         "--lbfgs-tol", str(effective.get("lbfgs_tol", 1e-4)),
     ] + hardening + gating + (["--resume-from", str(resume_from)] if resume_from is not None else [])
+
+
+def build_dag_placement_args(
+    effective: dict, out_dir: str, resume_from: Path | None = None,
+) -> list[str]:
+    """Build argv for analysis/cloud/dag_placement_cloud.py (gated-SVI case-finding).
+
+    K is emergent (n_bg + surviving-DAG-nodes * tpn), so there is NO --K. Resume is
+    unsupported (GatedLDAModel is not persistable in v1); resume_from is ignored.
+    """
+    cdr, billing = _require_workspace_env()
+    args = [
+        "--cdr", cdr,
+        "--billing", billing,
+        "--source-table", str(effective["source_table"]),
+        "--person-mod", str(effective["person_mod"]),
+        "--vocab-size", str(effective["vocab_size"]),
+        "--min-df", str(effective["min_df"]),
+        "--min-patient-count", str(effective["min_patient_count"]),
+        "--doc-min-length", str(effective["doc_min_length"]),
+        "--prior-obs-days", str(effective.get("prior_obs_days", 365)),
+        "--window-days", str(effective.get("window_days", 365)),
+        "--window-mode", str(effective.get("window_mode", "forward")),
+        "--lookback-days", str(effective.get("lookback_days", 365)),
+        "--label-window-days", str(effective.get("label_window_days", 365)),
+        "--disease", str(effective.get("disease", "diabetes")),
+        "--min-n", str(effective["min_n"]),
+        "--holdout-frac", str(effective.get("holdout_frac", 0.2)),
+        "--n-bg", str(effective["n_bg"]),
+        "--tpn", str(effective["tpn"]),
+        "--node-alpha-scale", str(effective.get("node_alpha_scale", 1.0)),
+        "--transform-alpha-mode", str(effective.get("transform_alpha_mode", "fitted")),
+        "--transform-alpha", str(effective.get("transform_alpha", 0.0)),
+        "--transform-bg-weight", str(effective.get("transform_bg_weight", 0.5)),
+        "--mini-batch-fraction", str(effective.get("mini_batch_fraction", 0.0)),
+        "--learning-rate-tau0", str(effective.get("learning_rate_tau0", 1.0)),
+        "--learning-rate-kappa", str(effective.get("learning_rate_kappa", 0.7)),
+        "--max-iter", str(effective["max_iter"]),
+        "--cavi-max-iter", str(effective.get("cavi_max_iter", 100)),
+        "--cavi-tol", str(effective.get("cavi_tol", 1e-3)),
+        "--init", str(effective.get("init", "random")),
+        "--spectral-max-vocab", str(effective.get("spectral_max_vocab", 8000)),
+        "--spectral-method", str(effective.get("spectral_method", "auto")),
+        "--anchor-scope", str(effective.get("anchor_scope", "closure")),
+        "--spectral-topo-order", str(effective.get("spectral_topo_order", "forward")),
+        "--strip-mode", str(effective.get("strip_mode", "test_only")),
+        # Per-iter top-terms logging reuses the shared _base.yaml knobs (STM parity).
+        "--print-topics-every", str(effective.get("print_topics_every", 0)),
+        "--top-n-tokens", str(effective.get("top_n_tokens", 8)),
+        "--out-dir", str(out_dir),
+    ]
+    if effective.get("seed") is not None:
+        args.extend(["--seed", str(effective["seed"])])
+    if effective.get("cache_uri"):
+        args.extend(["--cache-uri", str(effective["cache_uri"])])
+    # Store-true flag: learn the asymmetric per-node alpha (optimizeDocConcentration).
+    # node_alpha_scale is the initial alpha; the gated Newton step refines it.
+    if effective.get("optimize_doc_concentration"):
+        args.append("--optimize-doc-concentration")
+    return args
 
 
 def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:
@@ -1050,6 +1114,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
+    elif effective.get("model_class") == "dag_placement":
+        # dag_placement saves an npz + manifest (a methods-experiment artifact),
+        # not a topic-word bundle the NPMI eval driver can read. Its metrics live
+        # in manifest.json (placement AUC/MRR) + the fit log.
+        print("[run-exp] model_class=dag_placement: NPMI eval not wired for the npz "
+              "result; skipping eval (see manifest.json + fit log).", flush=True)
     else:
         # 6. Dispatch eval (capture stdout into a string for sanitized append)
         eval_script = REPO_ROOT / "analysis" / "cloud" / "eval_coherence_cloud.py"

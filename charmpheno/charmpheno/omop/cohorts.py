@@ -110,9 +110,48 @@ _DEMENTIA_EXCLUSION_ANCESTORS: tuple[int, ...] = ()
 # "Ehlers-Danlos syndrome" hierarchy before fitting.
 _EDS_ANCESTOR = 79145
 
+# Top-level SNOMED concept for diabetes mellitus. concept_ancestor(201820)
+# returns the diabetes TYPE/etiology/status taxonomy (T1/T2/MODY/neonatal/
+# gestational/secondary x remission/control/pregnancy) — 127 standard-condition
+# descendants on the AoU vocab (offline-verified 2026-07-15). Classic
+# complications (nephropathy/retinopathy/neuropathy/CKD) are NOT is-a
+# descendants of 201820 (they live under 442793); by design they ride along as
+# learned vocabulary in each type node's topic rather than as DAG nodes. VERIFY
+# ON FIRST RUN: SELECT COUNT(*) FROM concept_ancestor WHERE
+# ancestor_concept_id = 201820 (expect ~hundreds; 0 means wrong id for this
+# vocab version).
+_DIABETES_ANCESTOR = 201820
+
+# Top-level OMOP concepts for five additional rare/uncommon autoimmune-ish
+# diseases, chosen to be phenotypically DISTINCT from each other (unlike the
+# diabetes TYPE taxonomy, whose subtypes are near-identical phenotypes) and
+# common enough to yield fittable case counts on All of Us (counts confirmed by
+# the domain owner, 2026-07-15; concept-ids vocab-verified offline). Together
+# with EDS they form the "rare6" multi-disease case-finding forest. VERIFY ON
+# FIRST RUN, as with the other anchors: SELECT COUNT(*) FROM concept_ancestor
+# WHERE ancestor_concept_id = <id> (expect a non-zero descendant/subtype set).
+_SARCOIDOSIS_ANCESTOR = 438688      # Sarcoidosis (AoU-over-represented, few 1000s)
+_SLE_ANCESTOR = 257628              # Systemic lupus erythematosus (~6500, best-powered)
+_SCLERODERMA_ANCESTOR = 40352976    # Scleroderma / systemic sclerosis (few 1000s)
+_MYASTHENIA_GRAVIS_ANCESTOR = 76685  # Myasthenia gravis (~1100)
+_AMYLOIDOSIS_ANCESTOR = 432595      # Amyloidosis (~1500)
+
+# The multi-disease rare-disease forest foreground: a patient qualifies for the
+# "rare6" arm if they have a first dx under ANY of these six anchors. The same
+# tuple doubles as the label-DAG roots (each anchor becomes a subtree under a
+# synthetic forest root; see case_finding_assembly). Distinct phenotypes + a
+# whole-population clean background is the rare-disease case-finding thesis in
+# practice (project_kg_rare_disease_casefinding).
+_RARE6_ANCESTORS: tuple[int, ...] = (
+    _EDS_ANCESTOR, _SARCOIDOSIS_ANCESTOR, _SLE_ANCESTOR,
+    _SCLERODERMA_ANCESTOR, _MYASTHENIA_GRAVIS_ANCESTOR, _AMYLOIDOSIS_ANCESTOR,
+)
+
 # Disease registry for the generalized population+disease cohort. Each entry is
 # fully described by concept ancestors; adding a rare disease is a new entry
 # here + a SUPPORTED_COHORTS/COHORT_METADATA/apply_cohort line, no new function.
+# A multi-ancestor entry (rare6) is a foreground union: apply_first_diagnosis_
+# year_cohort already unions descendants of all inclusion_ancestors.
 _DISEASE_REGISTRY: dict[str, dict] = {
     "cancer": {
         "inclusion_ancestors": (_CANCER_ANCESTOR,),
@@ -122,7 +161,34 @@ _DISEASE_REGISTRY: dict[str, dict] = {
         "inclusion_ancestors": (_EDS_ANCESTOR,),
         "exclusion_ancestors": (),
     },
+    "diabetes": {
+        "inclusion_ancestors": (_DIABETES_ANCESTOR,),
+        "exclusion_ancestors": (),
+    },
+    "rare6": {
+        "inclusion_ancestors": _RARE6_ANCESTORS,
+        "exclusion_ancestors": (),
+    },
 }
+
+
+def disease_anchors(disease: str) -> tuple[int, ...]:
+    """The DAG anchor concept-ids for a registered disease — its cohort inclusion
+    ancestors reused as the label-DAG roots.
+
+    A single-disease cohort (diabetes, eds, cancer) yields one anchor and a DAG
+    rooted directly at it; the multi-disease forest (rare6) yields the full anchor
+    set, which case_finding_assembly hangs under a synthetic forest root. Keeping
+    the DAG anchors identical to the cohort inclusion ancestors makes ``disease``
+    the single knob that determines both which patients are foreground and which
+    subtree(s) their frontier is scored against.
+    """
+    try:
+        return tuple(_DISEASE_REGISTRY[disease]["inclusion_ancestors"])
+    except KeyError:
+        raise ValueError(
+            f"disease {disease!r} not in registry (known: {tuple(_DISEASE_REGISTRY)})"
+        )
 
 
 # Drug classes for the population_glp1 gated cohort, resolved by RxNorm
@@ -168,6 +234,7 @@ SUPPORTED_COHORTS: tuple[str, ...] = (
     "population_cancer",
     "population_cancer_sparse",
     "population_eds",
+    "population_rare6",
     "population_sparse",
     "population_glp1",
 )
@@ -285,6 +352,25 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "prevalence covariate."
         ),
     },
+    "population_rare6": {
+        "id": "population_rare6",
+        "label": "Population + Rare-disease forest (gated)",
+        "description": (
+            "The whole population as a shared clean background, with a six-disease "
+            "rare-disease foreground: Ehlers-Danlos syndrome (OMOP 79145), "
+            "sarcoidosis (438688), systemic lupus erythematosus (257628), "
+            "scleroderma/systemic sclerosis (40352976), myasthenia gravis (76685), "
+            "and amyloidosis (432595). Disjoint, one document per person: a person "
+            "with a first dx under ANY of the six anchors gets the 365-day "
+            "post-diagnosis window and source_cohort='rare6'; every other person "
+            "gets a deterministic random event-anchored 365-day window and "
+            "source_cohort='general' (background-only). Unlike a single-disease "
+            "type taxonomy, the six diseases are phenotypically distinct, so a "
+            "gated placement model can both find cases against the background and "
+            "route each to the right disease subtree — the rare-disease "
+            "case-finding thesis in practice."
+        ),
+    },
     "population_sparse": {
         "id": "population_sparse",
         "label": "Population + Sparse (gated)",
@@ -387,6 +473,12 @@ def apply_cohort(
     if cohort == "population_eds":
         return apply_population_disease_cohort(
             cond_df, disease="eds", spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_rare6":
+        return apply_population_disease_cohort(
+            cond_df, disease="rare6", spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
             prior_obs_days=prior_obs_days,
         )
@@ -1360,3 +1452,63 @@ def apply_population_drug_cohort(
     ).withColumn("source_cohort", F.lit("general"))
 
     return drug_windows.unionByName(general)
+
+
+def lookback_feature_label_events(events_df, index_df, *, date_col,
+                                  lookback_days, label_window_days):
+    """Split raw events into a pre-index feature frame and a forward label frame.
+
+    `index_df` = (person_id, index_date, source_cohort). Feature frame = events in
+    [index_date - lookback_days, index_date); label frame = events in
+    [index_date, index_date + label_window_days). Each frame carries source_cohort
+    (index_date dropped). Events only occur within observation periods, so the
+    lookback naturally yields the available history (up to lookback_days); the
+    >=1yr-prior observation requirement is enforced upstream in the index table.
+    """
+    joined = events_df.join(F.broadcast(index_df), on="person_id", how="inner")
+    feature = (joined
+               .where(F.col(date_col) < F.col("index_date"))
+               .where(F.col(date_col) >= F.date_sub(F.col("index_date"), lookback_days))
+               .drop("index_date"))
+    label = (joined
+             .where(F.col(date_col) >= F.col("index_date"))
+             .where(F.col(date_col) < F.date_add(F.col("index_date"), label_window_days))
+             .drop("index_date"))
+    return feature, label
+
+
+def case_finding_index_table(cond_df, *, disease, spark, cdr_dataset,
+                             billing_project, date_col, prior_obs_days=365,
+                             label_window_days=_WINDOW_DAYS):
+    """(person_id, index_date, source_cohort) for the disease + general arms.
+
+    Foreground: first qualifying dx (min over the disease's inclusion-minus-
+    exclusion descendants), gated by _window_observed_cohort so the symmetric
+    bracket [index - prior_obs_days, index + label_window_days) is observed.
+    Background: _random_event_windows over everyone else, same gate. No windowing
+    of events here — just the gated index per person; lookback_feature_label_events
+    does the windowing. Reuses the same helpers as the forward cohorts."""
+    spec = _DISEASE_REGISTRY[disease]
+
+    def _read(table):
+        return (spark.read.format("bigquery")
+                .option("table", f"{cdr_dataset}.{table}")
+                .option("parentProject", billing_project).load())
+
+    ca = _read("concept_ancestor").select("ancestor_concept_id", "descendant_concept_id")
+    concepts = _concept_set_from_ancestors(
+        ca, inclusion_ancestors=spec["inclusion_ancestors"],
+        exclusion_ancestors=spec["exclusion_ancestors"])
+    first_dx = (cond_df.join(F.broadcast(concepts), on="concept_id", how="inner")
+                .groupBy("person_id").agg(F.min(date_col).alias("index_date")))
+    op = _read("observation_period").select(
+        "person_id", "observation_period_start_date", "observation_period_end_date")
+
+    fg = (_window_observed_cohort(first_dx, op, prior_obs_days=prior_obs_days,
+                                  window_days=label_window_days)
+          .withColumn("source_cohort", F.lit(disease)))
+    non = cond_df.join(fg.select("person_id").distinct(), on="person_id", how="left_anti")
+    bg = (_random_event_windows(non, op, date_col=date_col,
+                                window_days=label_window_days, prior_obs_days=prior_obs_days)
+          .withColumn("source_cohort", F.lit("general")))
+    return fg.unionByName(bg)

@@ -1,0 +1,8 @@
+# Rare-disease-forest case-finding cohort defaults. The corpus identity comes
+# from `disease` (rare6) — the six-disease foreground union + whole-population
+# background hard-wired via cohorts.disease_anchors inside
+# assemble_case_finding_corpus. This file exists so load_defaults finds a
+# <cohort>.yaml to merge over _base.yaml (--cohort is vestigial for this model,
+# as with the other gated cohorts; `disease` is the real knob).
+cohort: population_rare6
+cohort_def: population_rare6

@@ -323,6 +323,240 @@ def gated_ln_corpus_overlap(*, group_weights, fg_per_group, bg_k, V, D, doc_len,
     return docs, part, Sigma_true, beta
 
 
+def gated_ln_corpus_stick(*, group_weights, fg_per_group, bg_k, V, D, doc_len,
+                          rho_bg=0.3, rho_grp=0.3, rho_cross=0.2, eta_scale=1.0,
+                          topic_overlap=0.0, seed=0):
+    """STICK-NATIVE gated corpus: draw psi ~ N(0, Sigma_true) in the model's own
+    (K-1)-dim STICK space and compose theta = gated_theta(psi), so the planted Sigma is
+    IDENTIFIED by the likelihood (unlike gated_ln_corpus, which plants eta in SOFTMAX
+    space and leaves the stick-space Sigma only weakly identified — the confound behind
+    the Task-7 VI-vs-Gibbs xfail). This is the corpus on which VI-vs-Gibbs Sigma
+    agreement is a meaningful pass/fail gate and true Sigma-recovery (not just beta) can
+    be tested.
+
+    Construction mirrors the model exactly (see pg_stm.stick_layout / gated_theta):
+
+      * Sigma_true is (K-1)x(K-1) in stick space, block-structured like the estimator's
+        _assemble_sigma: a shared background-stick block (indices 0..B-2), one
+        [gate_g, fg_g] block per group, background<->group cross-terms, and the
+        never-co-active group<->group' entries filled by the max-det PD completion
+        (pd_complete — used ONLY to build a valid PD ground truth; those entries never
+        enter any doc's draw). Unit diagonal, off-diagonals rho_bg / rho_grp / rho_cross,
+        scaled by eta_scale.
+      * For a group-g doc, the ACTIVE stick sub-vector [psi_bg (B-1), psi_gate,
+        psi_fg (m_g-1)] ~ N(0, Sigma_true[active, active]); theta over the doc's allowed
+        topics = gated_theta(psi_bg, psi_gate, psi_fg) (background topics 0..B-1 then the
+        group's m_g foreground topics), placed into the length-K theta at those global
+        indices; tokens ~ Multinomial(doc_len, theta @ beta).
+
+    Domain-agnostic: integer token ids only. Returns docs, part, Sigma_true (stick-space,
+    (K-1)x(K-1), == eta_scale * planted correlation), beta."""
+    from spark_vi.models.topic.pg_stm import stick_layout, gated_theta
+
+    rng = np.random.default_rng(seed)
+    groups = tuple(group_weights)
+    part = TopicBlockPartition(group_var="g", background_k=bg_k,
+                               foreground=tuple((g, fg_per_group) for g in groups))
+    K = part.K
+    lay = stick_layout(part)
+
+    # beta: same planted topic-word structure as gated_ln_corpus (a shared common pool
+    # [0:C] + a per-topic signature block), so beta is recoverable and topic identity is
+    # not degenerate. topic_overlap in [0,1) widens each signature window symmetrically by
+    # round(topic_overlap*sig) words into its neighbors, so adjacent topics SHARE
+    # vocabulary (realistic overlapping phenotypes); topic_overlap=0 -> disjoint blocks
+    # (backward compatible).
+    sig = max(1, (V // 2) // K)
+    C = max(1, min(sig, V - K * sig))
+    extra = int(round(float(topic_overlap) * sig))
+    sig_lo, sig_hi = C, C + K * sig
+    beta = np.full((K, V), 1e-3)
+    for k in range(K):
+        beta[k, 0:C] += rng.random(C) + 0.1
+        lo = max(C + k * sig - extra, sig_lo)
+        hi = min(C + k * sig + sig + extra, sig_hi)
+        beta[k, lo:hi] += 5.0
+    beta /= beta.sum(axis=1, keepdims=True)
+
+    # Sigma_true in STICK space (dimension K-1), block-structured + PD-completed.
+    Ksm1 = K - 1
+    bg_sticks = lay["bg_sticks"]
+    Sigma_true = np.eye(Ksm1)
+    obs = np.eye(Ksm1, dtype=bool)
+    for a in bg_sticks:
+        for b in bg_sticks:
+            if a != b:
+                Sigma_true[a, b] = rho_bg; obs[a, b] = True
+    for g in groups:
+        gl = lay["groups"][g]
+        block = np.concatenate([[gl["gate"]], gl["fg_sticks"]]).astype(np.int64)
+        for i in block:
+            for j in block:
+                if i != j:
+                    Sigma_true[i, j] = rho_grp; obs[i, j] = True
+        for a in bg_sticks:
+            for c in block:
+                Sigma_true[a, c] = Sigma_true[c, a] = rho_cross
+                obs[a, c] = obs[c, a] = True
+    Sigma_true = pd_complete(Sigma_true, obs)
+    Sigma_true = float(eta_scale) * Sigma_true
+
+    gl_list = list(groups)
+    wts = np.array([group_weights[g] for g in gl_list], float); wts /= wts.sum()
+    nb = len(bg_sticks)                         # B-1 background sticks
+    docs = []
+    for _ in range(D):
+        g = gl_list[int(rng.choice(len(gl_list), p=wts))]
+        active = lay["groups"][g]["active"]     # [bg_sticks, gate_g, fg_g_sticks]
+        psi = rng.multivariate_normal(np.zeros(active.shape[0]),
+                                      Sigma_true[np.ix_(active, active)])
+        psi_bg, psi_gate, psi_fg = psi[:nb], psi[nb], psi[nb + 1:]
+        theta_allowed = gated_theta(psi_bg, psi_gate, psi_fg)   # [bg topics, fg topics]
+        allowed = np.concatenate([part.background_indices(),
+                                  part.block_indices(g)]).astype(np.int64)
+        theta = np.zeros(K); theta[allowed] = theta_allowed
+        toks = rng.choice(V, size=doc_len, p=theta @ beta)
+        u, c = np.unique(toks, return_counts=True)
+        docs.append(STMDocument(indices=u.astype(np.int32),
+                                counts=c.astype(np.float64), length=int(c.sum()),
+                                x=np.array([1.0]), groups=frozenset({g})))
+    return docs, part, Sigma_true, beta
+
+
+def real_beta_from(K, V, *, source=None, seed=0):
+    """Topic-word matrix (K,V) for DAG plants. If ``source`` names an export bundle, load
+    its beta (realistic overlap by construction). Otherwise (default) synthesize a
+    REALISTIC-OVERLAP beta via gated_ln_corpus_stick(topic_overlap=0.6) — the honest
+    stand-in until a real bundle is wired; the caller's test docstring must not claim
+    transfer from it."""
+    if source is not None:
+        import numpy as _np
+        return _np.load(source)["beta"]
+    # borrow a realistic-overlap beta shaped (K, V)
+    gw = {"A": 0.5, "B": 0.5}
+    fg = max(1, (K - 2) // 2)
+    _d, _p, _S, beta = gated_ln_corpus_stick(
+        group_weights=gw, fg_per_group=fg, bg_k=K - 2 * fg, V=V, D=4, doc_len=10,
+        topic_overlap=0.6, seed=seed)
+    return beta[:K] if beta.shape[0] >= K else np.pad(beta, ((0, K - beta.shape[0]), (0, 0)))
+
+
+def dag_offset_corpus(*, dag, node_offsets, partition, beta, node_of_group,
+                      doc_nodes_plan, sigma_true, doc_len, seed, n_background_only=0,
+                      partial_label_plan=None):
+    """Plant additive node offsets on a DagGate and generate a gated corpus.
+
+    For a document at most-specific node v (anchor = the top-level node on v's root
+    path, mapped back to a partition group via ``node_of_group`` inverse), the mean over
+    its ACTIVE sticks is mu = sum_{u in closure(v)} node_offsets[u]; psi ~ N(mu[active],
+    sigma_true[active,active]); theta = gated_theta(psi split into bg/gate/fg); tokens ~
+    Multinomial(doc_len, theta @ beta). ``doc_nodes_plan`` maps node id -> #docs at that
+    node. Returns (docs, doc_nodes, doc_candidates) with doc.groups = {anchor group} and
+    doc_nodes[d] = frozenset({v}). ``doc_candidates[d]`` is a list of (weight, leaf_set)
+    pairs; for every hard/background doc it is the single hard candidate
+    [(1.0, doc_nodes[d])]. If ``n_background_only > 0``, appends that many additional
+    background-only documents (no group, doc_nodes entry frozenset({0})) generated by a
+    flat background stick-breaking on sigma_true restricted to the background sticks, with
+    the root offset (zero). If ``partial_label_plan`` is given, it maps an INTERNAL node id
+    -> #docs to generate under a randomly chosen descendant LEAF of that node (same
+    generative path as the hard arm), but with doc_candidates set to the UNIFORM mixture
+    over ALL of that internal node's leaves (the true generating leaf is hidden from the
+    candidate set; doc_nodes still records the hidden truth, for scoring only). Domain-
+    agnostic (integer ids only)."""
+    from spark_vi.models.topic.pg_stm import stick_layout, gated_theta, stick_to_simplex
+    rng = np.random.default_rng(seed)
+    lay = stick_layout(partition)
+    group_of_node = {nid: g for g, nid in node_of_group.items()}
+    # anchor(v) = the child-of-root on v's path (the node whose parent chain hits an anchor id)
+    anchor_ids = set(node_of_group.values())
+
+    def anchor_of(v):
+        chain = [v] + sorted(dag.ancestors(v))
+        for c in chain:
+            if c in anchor_ids:
+                return c
+        raise ValueError(f"node {v} has no anchor ancestor")
+
+    docs, doc_nodes = [], []
+    nb = len(lay["bg_sticks"])
+    for v, n_docs in doc_nodes_plan.items():
+        g = group_of_node[anchor_of(v)]
+        active = lay["groups"][g]["active"]
+        allowed = np.concatenate([partition.background_indices(),
+                                  partition.block_indices(g)]).astype(np.int64)
+        mu_full = np.zeros(partition.K - 1)
+        for u in dag.closure(frozenset({v})):
+            mu_full = mu_full + node_offsets[u]
+        mu_a = mu_full[active]
+        Sa = sigma_true[np.ix_(active, active)]
+        for _ in range(n_docs):
+            psi = rng.multivariate_normal(mu_a, Sa)
+            psi_bg, psi_gate, psi_fg = psi[:nb], psi[nb], psi[nb + 1:]
+            theta_allowed = gated_theta(psi_bg, psi_gate, psi_fg)
+            theta = np.zeros(partition.K); theta[allowed] = theta_allowed
+            toks = rng.choice(partition.beta_dim if hasattr(partition, "beta_dim") else beta.shape[1],
+                              size=doc_len, p=theta @ beta)
+            u_, c_ = np.unique(toks, return_counts=True)
+            docs.append(STMDocument(indices=u_.astype(np.int32), counts=c_.astype(np.float64),
+                                    length=int(c_.sum()), x=np.array([1.0]),
+                                    groups=frozenset({g})))
+            doc_nodes.append(frozenset({v}))
+    # background-only members: no group, attest only the root, flat background stick-breaking
+    if n_background_only > 0:
+        bg_sticks = lay["bg_sticks"]
+        Bk = partition.background_k
+        Sbg = sigma_true[np.ix_(bg_sticks, bg_sticks)]
+        mu_bg = np.zeros(len(bg_sticks))                 # root offset is 0
+        beta_bg = beta[:Bk]                              # (Bk, V) background topic-word rows
+        for _ in range(n_background_only):
+            psi_bg = rng.multivariate_normal(mu_bg, Sbg)
+            theta_bg = stick_to_simplex(psi_bg)          # (Bk,)
+            toks = rng.choice(beta.shape[1], size=doc_len, p=theta_bg @ beta_bg)
+            u_, c_ = np.unique(toks, return_counts=True)
+            docs.append(STMDocument(indices=u_.astype(np.int32), counts=c_.astype(np.float64),
+                                    length=int(c_.sum()), x=np.array([1.0]),
+                                    groups=frozenset()))
+            doc_nodes.append(frozenset({0}))
+
+    doc_candidates = [[(1.0, dn)] for dn in doc_nodes]
+
+    def _leaves_under(node):
+        kids = [c for c in range(dag.n_nodes) if node in dag.parents[c]]
+        if not kids:
+            return [node]
+        out = []
+        for c in kids:
+            out.extend(_leaves_under(c))
+        return sorted(set(out))
+
+    if partial_label_plan:
+        for internal, n_docs in partial_label_plan.items():
+            leaves = _leaves_under(internal)
+            g = group_of_node[anchor_of(internal)]
+            active = lay["groups"][g]["active"]
+            allowed = np.concatenate([partition.background_indices(),
+                                      partition.block_indices(g)]).astype(np.int64)
+            cand = [(1.0 / len(leaves), frozenset({leaf})) for leaf in leaves]
+            for _ in range(n_docs):
+                true_leaf = int(rng.choice(leaves))
+                mu_full = np.zeros(partition.K - 1)
+                for u in dag.closure(frozenset({true_leaf})):
+                    mu_full = mu_full + node_offsets[u]
+                psi = rng.multivariate_normal(mu_full[active], sigma_true[np.ix_(active, active)])
+                psi_bg, psi_gate, psi_fg = psi[:nb], psi[nb], psi[nb + 1:]
+                theta = np.zeros(partition.K)
+                theta[allowed] = gated_theta(psi_bg, psi_gate, psi_fg)
+                toks = rng.choice(beta.shape[1], size=doc_len, p=theta @ beta)
+                u_, c_ = np.unique(toks, return_counts=True)
+                docs.append(STMDocument(indices=u_.astype(np.int32), counts=c_.astype(np.float64),
+                                        length=int(c_.sum()), x=np.array([1.0]),
+                                        groups=frozenset({g})))
+                doc_nodes.append(frozenset({true_leaf}))     # the hidden truth (for scoring only)
+                doc_candidates.append(cand)
+
+    return docs, doc_nodes, doc_candidates
+
+
 def fit_stm(docs, *, K, V, sigma_init, n_iter=250, batch=None, seed=42,
             partition=None, init_data=None, **model_kwargs):
     m = OnlineSTM(K=K, vocab_size=V, P=1, sigma_init=sigma_init,
@@ -340,3 +574,102 @@ def fit_stm(docs, *, K, V, sigma_init, n_iter=250, batch=None, seed=42,
                   for kk, v in stats.items()}
         gp = m.update_global(gp, scaled, learning_rate=(t + 64) ** -0.7)
     return gp
+
+
+def dag_placement_corpus(*, parent, node_prev, V, doc_len, seed):
+    """Domain-agnostic hierarchical-placement plant. Each non-root node owns a signature vocab
+    block plus a single exact 'node code'; an item at node v emits a shared common pool + the
+    signature blocks along closure(v). Returns (docs, labels, node_codes)."""
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    rng = np.random.default_rng(seed)
+    lay = DagLayout(parent, n_bg=2, tpn=1)
+    nodes = lay.nodes
+    C = V // 3                                            # shared common pool [0:C]
+    sig = max(2, (V - C) // (len(nodes) + 1))
+    node_sig = {u: np.arange(C + i * sig, C + i * sig + sig) for i, u in enumerate(nodes)}
+    node_codes = {u: int(node_sig[u][0]) for u in nodes}  # the exact marker code
+    p = np.array([node_prev[u] for u in nodes], float); p /= p.sum()
+    docs, labels = [], []
+    for _ in range(sum(1 for _ in range(2000))):          # 2000 items
+        v = int(rng.choice(nodes, p=p))
+        path = [u for u in lay.closure(v) if u != 0]
+        toks = [rng.integers(0, C, size=doc_len // 2)]    # background/common pool
+        per = max(1, (doc_len - doc_len // 2) // len(path))
+        for u in path:
+            toks.append(rng.choice(node_sig[u], size=per))
+        docs.append(np.concatenate(toks).astype(np.int64))
+        labels.append(v)
+    return docs, np.array(labels), node_codes
+
+
+def dag_placement_corpus_multi(*, parent, leaf_prev, comorbid_rate, V, doc_len, seed):
+    """Multi-parent hierarchical-placement plant with comorbid patients. Each non-root node owns a
+    signature vocab block plus one exact 'node code'. An item's frontier is 1 leaf (prob
+    1-comorbid_rate) or 2 distinct leaves (prob comorbid_rate); it emits a shared common pool + the
+    signature blocks along the union of its frontier's closures. Labels are frozensets (the frontier
+    truth). Returns (docs, labels, node_codes)."""
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    rng = np.random.default_rng(seed)
+    lay = DagLayout(parent, n_bg=2, tpn=1)
+    nodes = lay.nodes
+    C = V // 3                                             # shared common pool [0:C]
+    sig = max(2, (V - C) // (len(nodes) + 1))
+    node_sig = {u: np.arange(C + i * sig, C + i * sig + sig) for i, u in enumerate(nodes)}
+    node_codes = {u: int(node_sig[u][0]) for u in nodes}
+    leaves = sorted(leaf_prev.keys())
+    p = np.array([leaf_prev[u] for u in leaves], float); p /= p.sum()
+    docs, labels = [], []
+    for _ in range(2400):
+        if len(leaves) >= 2 and rng.random() < comorbid_rate:
+            f = frozenset(rng.choice(leaves, size=2, replace=False, p=p).tolist())
+        else:
+            f = frozenset({int(rng.choice(leaves, p=p))})
+        blocks = set()
+        for leaf in f:
+            for u in lay.closure(leaf):
+                if u != 0:
+                    blocks.add(u)
+        blocks = sorted(blocks)
+        toks = [rng.integers(0, C, size=doc_len // 2)]
+        per = max(1, (doc_len - doc_len // 2) // len(blocks))
+        for u in blocks:
+            toks.append(rng.choice(node_sig[u], size=per))
+        docs.append(np.concatenate(toks).astype(np.int64))
+        labels.append(f)
+    return docs, labels, node_codes
+
+
+def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0):
+    """In-memory batch-VB driver for GatedOnlineLDA (no Spark), mirroring fit_stm.
+
+    Full-batch lr=1.0 each iteration = variational EM — the cleanest regime for the
+    SVI-vs-Gibbs placement equivalence gate. `model` is a GatedOnlineLDA; `gated_docs` are
+    GatedBOWDocuments (frontier tags drive the gate)."""
+    np.random.seed(seed)
+    gp = model.initialize_global(None)
+    for _ in range(n_iter):
+        gp = model.update_global(gp, model.local_update(gated_docs, gp), learning_rate=1.0)
+    return gp
+
+
+def svi_node_profiles(model, gp, docs, lay):
+    """Ungated full-K fold-in of each held-out doc -> theta -> node_affinity dict. The SVI
+    analogue of [dag_placement.profile(...) for d in docs]; scored by dag_placement.evaluate.
+
+    The fold-in is intentionally UNGATED and stochastic (infer_local draws gamma_init from
+    the global RNG, not a content-deterministic seed); determinism across the equivalence
+    tests comes from the driver's `np.random.seed` call upstream (see fit_gated_svi_local),
+    not from anything in this function."""
+    from spark_vi.models.topic.types import GatedBOWDocument
+    from spark_vi.models.topic.gated_lda import node_affinity
+    out = []
+    for d in docs:
+        idx, cnt = np.unique(np.asarray(d), return_counts=True)
+        bow = GatedBOWDocument(indices=idx.astype(np.int32),
+                               counts=cnt.astype(np.float64), length=int(cnt.sum()),
+                               frontier=frozenset())          # empty = ungated
+        theta = model.infer_local(bow, gp)["theta"]
+        out.append(node_affinity(theta, lay))
+    return out

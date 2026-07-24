@@ -12,6 +12,122 @@ elsewhere.
 
 ---
 
+## 2026-07-16..24 — case-finding branch pre-merge review (7-lesson walkthrough) + the alpha / explain-away / n_bg / reverse-topo / LR-FDR mini-arc
+
+Pre-merge review of the unmerged `case-finding` branch — the ontology/DAG placement
+engine. Seven-lesson bottom-up walkthrough (1 DAG substrate, 2 corpus assembly +
+set-valued truth, 3 gated variational engine, 4 spectral init, 5 fit + evaluate,
+6 readouts + cloud drivers, 7 the freshly-built alpha + explain-away + n_bg mini-arc).
+The engine is sound; one real bug caught and fixed; a large empirical mini-arc ran
+alongside the review and CONVERGED to a clean negative result. The pg-stm arc was
+excised from this branch (`ddcf52d`, archived on origin/pg-stm) so the review covers
+only the ontology/placement production path.
+
+### Reviewed clean (Lessons 1-6)
+
+- **DAG substrate / assembly / gated engine / spectral init / fit+evaluate / drivers.**
+  Multi-parent DAG-native `DagLayout` (closure=ancestors, depth=longest-path), set-valued
+  frontier truth (drop attested ancestors, keep incomparable), the hard-gate CAVI engine
+  (cost ~DAG depth not K), anchor-word spectral init (Arora 2013) with forward-topological
+  ancestor deflation, the supervised gated-Gibbs `fit_gated` oracle + unmasked `profile`
+  fold-in, and `evaluate`'s metric suite (midrank node-AUC, best-rank-among-ties MRR,
+  Efron two-groups empirical-null per-node FDR, bootstrap CIs). Unusually well-documented
+  (every tie policy, the supervised-estimator rationale, the micro-AP ordering hazard).
+  Lesson-1/2 detours committed: cycle-guarded `DagLayout.depth` (`14147d8`), deleted the
+  vestigial `label_from_coded` (`4d45069`).
+
+### Shipped — the mini-arc (all SDD, per-task + final review)
+
+- **pg-stm excision + broadcast-unpersist fix** (`ddcf52d`, `52d6791`). Removed the
+  ineffective eager `bcast.unpersist()` from every lazy transform path (it freed nothing
+  and forced re-broadcast churn) across VIRunner + lda/gated/hdp shims; rely on
+  ContextCleaner. + content-deterministic transform seed (`593368b`).
+- **Gated `optimize_alpha`** (`e3e335..f959daf`). Per-node tied asymmetric Dirichlet via an
+  exact dense gated Newton over allowed-set groups; the covered-subset solve (final-review
+  CRITICAL) fixes a singular Hessian on zero-coverage DAG nodes. + deployment-alpha modes
+  (`4afe40c`, transformAlphaMode {fitted|symmetric|block_balanced}) decoupling the fit-aid
+  alpha from the fold-in prior.
+- **Explain-away (responsibility-weighted) LR scorer** (`14faa14..66c0c0b`). `_routing_rows`
+  (Pearl-1988 soft routing on raw lambda), `explain_away_placement_scores`,
+  `explain_away_decompose`; wired into the LR readout as `--viewer-score-mode explain_away`
+  with a side-by-side detection block + the error-class viewer.
+- **Reverse-topological spectral init** (`600ef95..38ad031`). `topo_order {forward,reverse}`
+  on both spectral functions (reverse deflates each node against its proper-descendants,
+  leaves-first) + `DagLayout.descendants`; threaded model->shim->driver->run_experiment,
+  default forward = zero behavior change. Final review READY-TO-MERGE.
+
+### Caught
+
+- **CRITICAL (fixed `66c0c0b`) — broken sparse/dense discriminator.** `hasattr(X, "data")`
+  is true for numpy ndarrays too (read-only `.data` memoryview), so a DENSE bow (the viewer's
+  `_render_case` path) with `--count-mode log1p` crashed. Pre-existing in `lr_placement_scores`,
+  copied into the new scorer; fixed BOTH to `scipy.sparse.issparse` + a regression test (dense
+  log1p finite + sparse==dense). The whole-branch review found it; the per-task reviews did not.
+- **Important (fixed `045a6f4`)** — `gated_init` module/function docstrings still said init
+  "must run in FORWARD topological order" after reverse mode landed.
+- **Plan bug caught pre-dispatch** — the reverse-topo plan assumed a dense/scalable numerical
+  *parity* test, but the scalable path is a JL random-projection approximation (no exact-dense
+  parity is claimed); corrected the plan (`84ab2e0`) to test the scalable reverse effect+flip.
+
+### The empirical result (insights 0059-0063) — a converged negative
+
+The mini-arc ran a systematic sweep of model-side levers on rare6 case-finding. **Six
+consecutive nulls** (fixed alpha 0060, learned alpha 0061, explain-away routing + n_bg 0062,
+reverse-topo init 0063, count-mode log1p) spanning the prior, the scoring scheme, the init
+geometry, and model capacity. The single durable contribution is the **LR readout LENS**
+(+0.11-0.13 ROC over theta-mass), a readout change not a model change. Both error classes are
+information-bound (FP = genuine code-level similarity e.g. anemia+CKD ~ SLE; FN = data
+starvation, the rare-called-background count byte-identical at 276 across 0067/0068/0069).
+Full collation: `docs/reports/2026-07-23-case-finding-levers-retrospective.md`. Conclusion:
+the model side is exhausted; the binding constraint is INFORMATION (meds/labs = the MixEHR
+multi-domain direction). Every null lever is retained as a validated, characterized capability.
+
+Extended to the DISCOVERY readout (insight 0064): the LR-FDR readout was built (below) and run —
+applying the same empirical-null per-node FDR to the LR + explain-away score matrices gives ZERO
+FDR-controlled discoveries at every q, identical to theta-mass. LR's +0.12-ROC aggregate edge is
+average ranking, not individually BH-defensible extremity, so LR is a TRIAGE RANKER not a discoverer;
+the buried-signal problem is information-limited, not lens-specific, even at the discovery level.
+
+### Parked / deferred
+
+- **LR-FDR readout — BUILT + RUN (RESOLVED, insight 0064).** SDD (`c2b49ab..ec3fe99`): extracted
+  `evaluate`'s FDR reporting into a reusable engine helper `fdr_discovery_report` (evaluate
+  byte-identical) + an lr_readout block running it on the LR / explain-away score matrices beside the
+  theta-mass FDR. Final review confirmed the theta-mass-vs-LR comparison is provably like-for-like.
+  RESULT: all three scorers give ZERO discoveries at every q -> LR is a ranker not a discoverer (folded
+  into the empirical result above). Kept as a validated, permanent capability (`make lr-readout`).
+- **Dead-code sweep — DONE (`032f51f`).** `identifiability_annotation` + its `_node_topic_mean` helper
+  had ZERO production consumers (a pg-stm identifiability-arc vestige kept alive only by two tests) ->
+  removed both + the tests. `fit_gated`/`profile` labeled ORACLE/VALIDATOR (production fits + reads out
+  via the SVI GatedOnlineLDA, not these). `_zib_empirical_gap` labeled human-inspection-only (its
+  sub-project-2 export consumer was never built; NaN off-[0,1] so LR/EA FDR reports it as nan). Kept
+  (cheap, honest) rather than pruned.
+- **Held-out log-likelihood** — the fair "is the learned alpha a better model" test (its actual
+  objective) was never measured; would settle the open placement question independent of detection.
+- **Two pre-existing STM reds (NOT from this arc; NOT case-finding concerns — both live on main too,
+  since STM is merged). Verified 2026-07-24:**
+  1. `spark-vi/tests/test_stm_integration.py::test_synthetic_recovery_full_batch` — **REMOVED.** A
+     qualitative Γ-sign recovery check (sign_match 0.625 vs a 0.75 floor, seed 42) that was fragile by
+     design (a sign-pattern threshold on an L-BFGS fit is sensitive to float-reduction order across
+     BLAS/platforms) AND redundant: the Γ M-step is pinned exactly by
+     `test_stm_contract.test_gamma_solves_ridge_regression` (`Γ̂ = (XᵀX+ridge·I)⁻¹Xᵀμ`, assert_allclose),
+     the η E-step by `test_stm_math`'s finite-difference gradient/Hessian tests, and end-to-end recovery
+     by `test_gated_stm_recovers_planted_minority_phenotype` + `test_reference_fit_pins_reference_end_to_end`.
+     A breadcrumb comment records this in the file. (Sibling `test_minibatch_converges_to_neighborhood_of_full_batch`
+     shares the same `sign_match>=0.75` pattern but also carries a more robust `rel_diff<0.05` check and
+     tests a different property — left in place; revisit if it ever flakes.)
+  2. `tests/scripts/test_fit_stm_local.py::test_fit_stm_local_reference_topic_end_to_end` — **FIXED
+     `63ea17e`.** It passed the REMOVED `--sigma-prior-scale`/`--sigma-prior-count` args (dropped under
+     ADR 0034) AND asserted `sigma_diag_shrink` (also gone, replaced by `estimate_sigma_diagonal` /
+     `sigma_diagonal_pin`) — stale in two places. Trimmed to the test's actual purpose (the
+     `--reference-topic` flag threads through + Γ's reference column is zeroed + `--no-spectral-init`),
+     leaving the detailed Σ-hardening schema to the dedicated Σ tests so it can't go stale on the next
+     schema change. All 6 tests in the file green.
+  Untracked scratch `tests/test_t3b_diag_tmp.py` (imports the removed pg_stm shim) is the user's to delete.
+
+Branch NOT merged to main. Reverse-topo feature is Ready-to-merge; the mini-arc is a publishable
+negative. Next strategic step is multi-domain features (MixEHR), not another model-side lever.
+
 ## 2026-07-08..10 — STM branch pre-merge review, part 2 (7-lesson walkthrough since the 2026-06-26 sign-off)
 
 Second pre-merge review of the unmerged `stm` branch, covering `f79d059..HEAD`

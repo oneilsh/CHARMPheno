@@ -1,0 +1,8 @@
+# Diabetes case-finding cohort defaults. The corpus identity actually comes from
+# `disease` (diabetes, from _base.yaml), which selects both the diabetes+background
+# cohort and the label-DAG anchor (201820) via cohorts.disease_anchors inside
+# assemble_case_finding_corpus; this file exists so load_defaults finds a
+# <cohort>.yaml to merge over _base.yaml (--cohort is vestigial for this model,
+# as with the gated STM cohorts).
+cohort: population_diabetes
+cohort_def: population_diabetes

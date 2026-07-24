@@ -55,6 +55,19 @@ authors, year, title, venue, a link if available, and a short note on its role.
 - **Perotte, Wood, Elhadad & Bartlett (2011).** Hierarchically Supervised Latent Dirichlet Allocation (HSLDA). *NeurIPS* 24.
   — flat LDA topics + ICD-9-tree label supervision (child label requires parent). Hierarchy on the *label-prediction* side, not topic access. **(landscape)**
 
+## Pólya-Gamma augmentation & identifiability
+
+- **Polson, Scott & Windle (2013).** Bayesian Inference for Logistic Models Using Pólya–Gamma Latent Variables. *JASA* 108(504):1339–1349. (arXiv:1205.0310)
+  — the PG data-augmentation that makes the logistic-normal/stick-breaking likelihood conditionally Gaussian; the substrate for the whole PG-STM Gibbs + VI engine. *used in:* `spark-vi/spark_vi/models/topic/_pg.py`, `spark-vi/spark_vi/models/topic/pg_stm.py`
+- **Linderman, Johnson & Adams (2015).** Dependent Multinomial Models Made Easy: Stick-Breaking with the Pólya-Gamma Augmentation. *NeurIPS* 28. (arXiv:1506.05843)
+  — stick-breaking multinomial + PG augmentation with a correlated Gaussian prior on the sticks; the closest existing model to the nested-stick-breaking gated PG-STM (the DAG offsets add an additive closure-sum mean on top). *used in:* `spark-vi/spark_vi/models/topic/pg_stm.py`
+- **Searle (1971).** Linear Models. Wiley.
+  — estimable functions of a rank-deficient design: which linear contrasts of the coefficients are identified vs. lie in the design's null space. The classical theory the identifiability compiler mechanizes over the closure Gram (identified increments vs. GAUGE/UNRESOLVED null directions). **(landscape)**
+- **Clustering and Pruning in Causal Data Fusion (2025).** arXiv:2505.15215.
+  — causal-inference analogue of the compiler's core invariant: pruning/clustering a graph neither gains nor loses identifiability, and an identifying functional obtained on the pruned graph transfers to the original. The same "quotient preserves the identified functional" principle, in do-calculus rather than design-matrix identifiability. **(landscape)**
+- **Think Before You Fit: Parameter Identifiability, Sensitivity and Uncertainty in Systems Biology Models (2025).** arXiv:2508.18853.
+  — the identifiability-before-fitting stance in systems biology (structural + practical identifiability of ODE parameters ahead of estimation). The same pre-fit philosophy the identifiability compiler takes for ontology-offset contrasts; different model class. **(landscape)**
+
 ## Phenotyping / EHR topic models
 
 - **Li, Nair, Lu, Wen, Wang et al. (2020).** Inferring Multimodal Latent Topics from EHRs (MixEHR). *Nature Communications* 11:2536.

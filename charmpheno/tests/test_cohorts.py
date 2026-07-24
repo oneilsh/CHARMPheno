@@ -19,6 +19,33 @@ def test_supported_cohorts_includes_first_dementia_year():
     assert "first_dementia_year" in SUPPORTED_COHORTS
 
 
+def test_disease_anchors_single_disease_returns_one_anchor():
+    from charmpheno.omop.cohorts import disease_anchors
+    assert disease_anchors("diabetes") == (201820,)
+    assert disease_anchors("eds") == (79145,)
+
+
+def test_disease_anchors_rare6_returns_six_distinct_anchors():
+    from charmpheno.omop.cohorts import disease_anchors
+    anchors = disease_anchors("rare6")
+    assert len(anchors) == 6 and len(set(anchors)) == 6
+    # EDS leads the forest; the five distinct-phenotype additions are present.
+    assert anchors[0] == 79145
+    assert set(anchors) == {79145, 438688, 257628, 40352976, 76685, 432595}
+
+
+def test_disease_anchors_rejects_unknown_disease():
+    from charmpheno.omop.cohorts import disease_anchors
+    with pytest.raises(ValueError, match="not in registry"):
+        disease_anchors("not_a_disease")
+
+
+def test_supported_cohorts_and_metadata_include_rare6():
+    from charmpheno.omop.cohorts import SUPPORTED_COHORTS, COHORT_METADATA
+    assert "population_rare6" in SUPPORTED_COHORTS
+    assert "population_rare6" in COHORT_METADATA
+
+
 def test_apply_cohort_rejects_unknown_name():
     with pytest.raises(ValueError, match="not supported"):
         apply_cohort(
@@ -498,3 +525,32 @@ def test_expand_descendants_includes_self_and_children(spark):
     seeds = spark.createDataFrame([(779705,)], ["concept_id"])
     out = {r["concept_id"] for r in _expand_descendants(ca, seeds).collect()}
     assert out == {779705, 900, 901}
+
+
+def test_lookback_feature_label_events_splits_pre_and_post_index(spark):
+    import datetime as dt
+    from charmpheno.omop.cohorts import lookback_feature_label_events
+    events = spark.createDataFrame(
+        [   # person, concept, date
+            (1, 900, dt.date(2013, 6, 1)),   # 1.5y pre-index -> feature (within 5y, before)
+            (1, 901, dt.date(2014, 6, 1)),   # 0.5y pre-index -> feature
+            (1, 200, dt.date(2015, 1, 1)),   # index day -> label
+            (1, 201, dt.date(2015, 6, 1)),   # 0.5y post -> label
+            (1, 999, dt.date(2011, 1, 1)),   # 4y pre -> feature only if lookback>=~4y
+        ],
+        ["person_id", "concept_id", "condition_era_start_date"])
+    index_df = spark.createDataFrame(
+        [(1, dt.date(2015, 1, 1), "dis")], ["person_id", "index_date", "source_cohort"])
+    feat, lab = lookback_feature_label_events(
+        events, index_df, date_col="condition_era_start_date",
+        lookback_days=365, label_window_days=365)
+    fc = {r["concept_id"] for r in feat.collect()}
+    lc = {r["concept_id"] for r in lab.collect()}
+    assert fc == {901}                    # only within [index-1y, index)
+    assert lc == {200, 201}               # only within [index, index+1y)
+    assert "index_date" not in feat.columns and "source_cohort" in feat.columns
+    # 5-year lookback pulls the older feature events too
+    feat5, _ = lookback_feature_label_events(
+        events, index_df, date_col="condition_era_start_date",
+        lookback_days=1825, label_window_days=365)
+    assert {r["concept_id"] for r in feat5.collect()} == {900, 901, 999}

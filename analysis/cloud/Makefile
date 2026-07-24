@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -331,6 +331,54 @@ exp: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
+
+# Post-hoc likelihood-ratio readout on an EXISTING run (no re-fit). Reads the
+# run's saved lambda + cached bundle; prints LR-AUC(alpha) vs theta-mass AUC.
+# Runs via spark-submit --py-files (like every other Spark job here) so spark_vi
+# + charmpheno reach the driver AND executors; plain `python` cannot import them.
+#
+# The cached bundle is located by RECOMPUTING its cache key from the run's
+# manifest, but two key inputs are not saved in the manifest, so they default
+# here to the rare6 (0061/0062) values and are overridable:
+#   LR_CACHE_URI     - the fit's --cache-uri (bundle cache root)
+#   LR_DOC_MIN_LENGTH- the fit's --doc-min-length (rare6 used 10; the driver's
+#                      own default is 0, which would MISS the cache key)
+# If the key still misses (e.g. a different experiment), pass the exact bundle
+# dir instead:  make lr-readout ID=N LR_ARGS="--bundle-path <cache_uri>/<key>"
+#
+# PERSISTENCE: the bundle cache MUST live on GCS, not HDFS. HDFS on Dataproc is
+# per-cluster ephemeral -- a fresh cluster has an empty HDFS, so a bundle written
+# during the fit is gone and the readout aborts (it needs the bundle for the
+# held-out test BOW + frontiers; the run-dir only holds lambda + manifest). GCS
+# persists across cluster restarts. This default and the experiments' `cache_uri`
+# must match; keep both on GCS (the same staging bucket the runs already use).
+LR_CACHE_URI         ?= gs://dataproc-staging-getting-started-with-registered-tier-data-copy/charm/case_finding_cache
+LR_DOC_MIN_LENGTH    ?= 10
+# alpha grid: multipliers of the median node Sigma-lambda; 0 (no shrinkage) and
+# inf (the parameter-free limit) are always meaningful. 'inf' is a valid token.
+LR_ALPHA_GRID        ?= 0,1,10,100,inf
+LR_SAMPLE_CASES      ?= 20
+LR_SAMPLE_BACKGROUND ?= 5
+lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 8g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
+	    $(REPO_ROOT)/analysis/cloud/lr_readout.py \
+	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
+	    --cache-uri $(LR_CACHE_URI) \
+	    --doc-min-length $(LR_DOC_MIN_LENGTH) \
+	    --alpha-grid $(LR_ALPHA_GRID) \
+	    --sample-cases $(LR_SAMPLE_CASES) \
+	    --sample-background $(LR_SAMPLE_BACKGROUND) \
+	    $(LR_ARGS)
 
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:

@@ -65,3 +65,25 @@ class STMDocument:
     length: int
     x: np.ndarray
     groups: frozenset = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class GatedBOWDocument:
+    """Bag-of-words document tagged with a DAG frontier for gated topic training.
+
+    Mirrors STMDocument's `groups` gating precedent, but the gate is a set of DAG
+    node ids (the doc's frontier = most-specific attested nodes) rather than covariate
+    groups. GatedOnlineLDA restricts each training doc's variational E-step to
+    DagLayout.allowed_set(frontier). Empty frontier = ungated (full-K), used for
+    held-out fold-in at deployment.
+
+    Invariants (callers' responsibility — not enforced at construction):
+      indices: sorted int32 array of token indices, all in [0, vocab_size).
+      counts:  float64 array with len(counts) == len(indices), all > 0.
+      length:  int total tokens (sum of counts).
+      frontier: frozenset[int] of DAG node ids (empty = ungated).
+    """
+    indices: np.ndarray
+    counts: np.ndarray
+    length: int
+    frontier: frozenset = frozenset()

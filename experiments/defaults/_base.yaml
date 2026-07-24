@@ -43,3 +43,48 @@ sigma_init: 1.0
 sigma_ridge: 1.0e-6
 lbfgs_max_iter: 50
 lbfgs_tol: 1.0e-4
+
+# --- dag_placement (hierarchical case-finding) defaults ---
+# model_class: dag_placement triggers the gated-SVI placement engine. K is
+# EMERGENT (n_bg + surviving-DAG-nodes * tpn), NOT set here. init=random is the
+# validated default; init=spectral is the pre-registered A/B arm (dense
+# block-aligned anchor-word seed, Arora et al. 2013). `disease` selects both the
+# foreground cohort and the label-DAG anchors (cohorts.disease_anchors):
+# 'diabetes'/'eds' root at one anchor; 'rare6' builds a six-disease forest.
+disease: diabetes
+min_n: 50
+n_bg: 20
+tpn: 5
+holdout_frac: 0.2
+window_days: 365
+# window_mode=forward: existing single-window behavior (unchanged default).
+# window_mode=lookback: pre-index feature frame (lookback_days back from an
+# index date) + forward label frame (label_window_days), leakage-free by
+# construction (see exps 0061/0062).
+window_mode: forward
+lookback_days: 365
+label_window_days: 365
+init: random
+spectral_max_vocab: 8000
+spectral_method: auto      # auto|dense|scalable; auto routes by vocab vs spectral_max_vocab
+anchor_scope: closure      # closure|frontier; frontier = bg/node anchors from only their own docs
+cavi_max_iter: 100
+cavi_tol: 1.0e-3
+strip_mode: test_only
+# node_alpha_scale multiplies the per-node-topic Dirichlet alpha vs the background
+# alpha (1/K). 1.0 = symmetric (default); <1 = block-asymmetric prior (Wallach et
+# al. 2009) that down-weights disease-node topics so background docs stay on the
+# background block at ungated transform time.
+node_alpha_scale: 1.0
+# SVI optimizer schedule. mini_batch_fraction 0.1 = sample 10% of the corpus per
+# iteration (mini-batch SVI, Hoffman et al. 2013) — this is what makes the
+# decaying Robbins-Monro step size legitimate; a decaying step over full batches
+# stalls before convergence. learning_rate_tau0 10 (vs the aggressive default 1)
+# is a gentler slow-start: it tames the large early steps (rho_1 0.62 -> 0.19)
+# that noisy early mini-batches would otherwise over-trust. kappa 0.7 = the
+# standard text-corpus decay. NOTE: with mini-batching the per-iteration ELBO is
+# a noisy 10% estimate, so the relative-ELBO early stop is unreliable — max_iter
+# is effectively the budget; size it for enough epochs (max_iter * fraction).
+mini_batch_fraction: 0.1
+learning_rate_tau0: 10.0
+learning_rate_kappa: 0.7

@@ -98,7 +98,15 @@ class VIRunner:
         resume_from: Path | str | None = None,
         on_iteration: Callable[[int, dict, list[float]], None] | None = None,
     ) -> VIResult:
-        """Run the distributed VI loop until convergence or max_iterations.
+        """Run the distributed VI loop until convergence (full-batch) or max_iterations.
+
+        Mini-batch fits never early-stop — the per-minibatch ELBO is too noisy for
+        a valid convergence test, so they run the full max_iterations, matching
+        Spark MLlib's online LDA. Only full-batch fits use the ELBO relative-change
+        early-stop. "Full-batch" here means cfg.mini_batch_fraction is None; a set
+        fraction is always treated as mini-batch — including 1.0, since
+        RDD.sample(fraction=1.0) is still a stochastic (non-identity) draw, so its
+        ELBO is a sampled quantity. Use None (not 1.0) for full-batch + early-stop.
 
         The returned VIResult's `metadata` is the merge of
         `model.get_metadata()` with runner-set keys (`model_class`, and
@@ -325,7 +333,17 @@ class VIRunner:
             if cfg.mini_batch_fraction is not None:
                 batch_rdd.unpersist(blocking=False)
 
-            if model.has_converged(elbo_trace, cfg.convergence_tol):
+            # Early-stop only in FULL-BATCH mode. In mini-batch SVI the
+            # per-iteration ELBO is computed on a fresh random sub-sample, so
+            # its iteration-to-iteration variance makes a two-point
+            # relative-change test fire on coincidental closeness, not true
+            # convergence (repeatedly observed: false stops at iter 67 and 157
+            # of a 200-iter budget). Spark MLlib's reference online LDA
+            # (OnlineLDAOptimizer) has NO convergence tolerance and runs exactly
+            # maxIterations for this reason; we match it — mini-batch fits run
+            # the full budget, full-batch fits keep the valid corpus-wide check.
+            if (cfg.mini_batch_fraction is None
+                    and model.has_converged(elbo_trace, cfg.convergence_tol)):
                 converged = True
                 log.info("Converged at iteration %d (ELBO=%.6f)", step + 1, elbo)
                 # One-more unpersist for the final broadcast.
@@ -379,18 +397,12 @@ class VIRunner:
         def _infer(row, _bcast=bcast, _model=model):
             return _model.infer_local(row, _bcast.value)
 
-        try:
-            return data_rdd.map(_infer)
-        finally:
-            # Eager unpersist matches fit()'s broadcast discipline. The
-            # returned RDD captures bcast in the closure, so this is safe:
-            # Spark resolves bcast.value at task launch time, which has
-            # already happened (or will be re-broadcast lazily) when the
-            # caller materializes the RDD.
-            #
-            # Note: if the caller chains .map / .filter and triggers an
-            # action much later, the broadcast may already be unpersisted.
-            # That is acceptable for transform — Spark re-broadcasts on
-            # demand. Long-lived inference pipelines should call
-            # .persist() on the returned RDD.
-            bcast.unpersist(blocking=False)
+        # Do NOT eagerly unpersist bcast here. The returned RDD captures it in
+        # the closure, so the broadcast must live as long as the RDD is used.
+        # Unlike fit() — whose per-iteration broadcasts are unpersisted AFTER
+        # that iteration's action has read them — a lazy transform has no action
+        # of its own, so unpersisting now frees nothing and forces a re-broadcast
+        # on every downstream action. Spark's ContextCleaner reclaims the
+        # broadcast when the returned RDD is garbage-collected, matching how
+        # MLlib's own models manage their transform broadcasts.
+        return data_rdd.map(_infer)

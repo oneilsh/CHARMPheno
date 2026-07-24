@@ -94,20 +94,21 @@ def test_fit_stm_local_reference_topic_end_to_end(tmp_path):
         "--K", "5", "--background-k", "3", "--foreground", "rare_dx:2",
         "--covariate-formula", "~ C(sex) + age",
         "--reference-topic", "--no-spectral-init",
-        "--sigma-prior-scale", "2.0", "--sigma-prior-count", "500.0",
         "--max-iter", "8", "--out-dir", str(out)])
     assert rc == 0
     manifest = json.loads((out / "manifest.json").read_text())
     hardening = manifest["metadata"]["stm_hardening"]
+    # This test's job (per its name/docstring): the --reference-topic flag threads through
+    # to the engine and the saved Gamma has its reference column zeroed. Assert exactly that
+    # + the --no-spectral-init we set to isolate the path. The detailed Sigma-hardening schema
+    # (the inverse-Wishart args were removed under ADR 0034 unit-diagonal; sigma_diag_shrink
+    # was likewise replaced by estimate_sigma_diagonal / sigma_diagonal_pin) is exercised by
+    # the dedicated Sigma/hardening tests -- coupling this test to that schema made it stale
+    # twice, so it no longer over-asserts the full hardening dict.
     assert hardening["reference_topic"] is True
-    assert hardening["sigma_prior_scale"] == 2.0
-    assert hardening["sigma_prior_count"] == 500.0
     assert hardening["spectral_init"] is False
-    assert hardening["spectral_method"] == "dense"
-    assert hardening["sigma_diag_shrink"] == 0.0
-    assert hardening["min_pair_support"] == 1
     Gamma = np.load(out / "params" / "Gamma.npy")
-    assert np.allclose(Gamma[:, 0], 0.0)
+    assert np.allclose(Gamma[:, 0], 0.0)               # reference column zeroed
 
 
 def test_fit_stm_local_spectral_init_end_to_end(tmp_path):
