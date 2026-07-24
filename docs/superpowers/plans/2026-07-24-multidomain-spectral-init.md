@@ -13,12 +13,13 @@
 Every task's requirements implicitly include this section. Values are copied verbatim from the spec.
 
 - **Engine stays domain-agnostic:** integer token ids and integer domain-boundary offsets only. NO clinical/OMOP/EHR vocabulary in `spark_vi/**` or its tests. The domain edge (which integers are drugs) lives in `analysis/cloud`, out of scope for this plan.
+- **Domain-neutral naming in engine code AND tests (including comments/docstrings):** refer to domains as `0`/`1` (or `a`/`b`), never by clinical role. So: `V_a`/`V_b` not `V_cond`/`V_drug`, `b_only_node` not `drug_only_node`, `planted_a`/`planted_b`, "domain-1 signature" not "drug signature". Clinical semantics (conditions corroborated by drugs) appear ONLY in this plan's motivation prose and the L3/charmpheno layer — never inside `spark_vi/**` or `spark-vi/tests/**`.
 - **Cite methods in docstrings:** anchor-word = Arora, Ge, Halpern, Mimno, Moitra, Sontag, Wu, Zhu 2013 ("A Practical Algorithm for Topic Modeling with Provable Guarantees", ICML). Corroboration / anchor-and-learn phenotyping = Halpern, Horng, Choi, Sontag 2016 (JAMIA, "Electronic medical record phenotyping using the anchor and learn framework"). A method/default/constant from the literature must cite its source.
 - **No LaTeX; Unicode Greek only** (α, β, θ, Σ, η, λ). The IDE does not render math delimiters.
 - **TDD** (superpowers:test-driven-development): failing test first, minimal impl, green, commit.
-- **Domain-boundary representation (fixed for the whole plan):** `domain_bounds` is a strictly-increasing sequence of cumulative column offsets starting at 0 and ending at V, so domain `d` spans columns `[domain_bounds[d], domain_bounds[d+1])`. Example for V_C conditions then V_D drugs: `domain_bounds = [0, V_C, V_C + V_D]`. `None` means "single pooled domain" and MUST reproduce current behavior byte-for-byte. This generalizes to N domains at no extra cost.
+- **Domain-boundary representation (fixed for the whole plan):** `domain_bounds` is a strictly-increasing sequence of cumulative column offsets starting at 0 and ending at V, so domain `d` spans columns `[domain_bounds[d], domain_bounds[d+1])`. Example: domain 0 spans `[0, V_a)`, domain 1 spans `[V_a, V_a + V_b)`, so `domain_bounds = [0, V_a, V_a + V_b]`. `None` means "single pooled domain" and MUST reproduce current behavior byte-for-byte. This generalizes to N domains at no extra cost.
 - **Backward compatibility:** every new parameter is keyword-only with a default that reproduces existing behavior. Existing callers and existing tests must stay green untouched.
-- **Load-bearing prerequisite (state in code/test docstrings, do not silently assume):** the cross-domain tie is `Q_CD`, which exists only from WITHIN-DOCUMENT cross-domain co-occurrence. If drugs and conditions live in separate documents `Q_CD = 0` and the two hulls disconnect. The synthetic generator MUST place a topic's condition tokens and drug tokens in the SAME document.
+- **Load-bearing prerequisite (state in code/test docstrings, do not silently assume):** the cross-domain tie is `Q_01` (the domain-0×domain-1 co-occurrence block), which exists only from WITHIN-DOCUMENT cross-domain co-occurrence. If the two domains' tokens live in separate documents `Q_01 = 0` and the two hulls disconnect. The synthetic generator MUST place a topic's domain-0 tokens and domain-1 tokens in the SAME document.
 - **Commit trailer EXACTLY:**
   ```
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
@@ -30,7 +31,7 @@ Every task's requirements implicitly include this section. Values are copied ver
 - `spark-vi/spark_vi/models/topic/spectral_init.py` — MODIFY. `find_anchors` gains `domain_bounds` (per-domain candidate floor); new pure helper `split_domains`. `spectral_init_beta` gains `domain_bounds` passthrough.
 - `spark-vi/tests/test_spectral_init.py` — MODIFY. Unit tests for the per-domain floor, `split_domains`, and the joint-recovery acceptance test.
 - `spark-vi/tests/_stm_synth.py` — MODIFY. New two-domain planted generator `two_domain_dag_corpus`.
-- `spark-vi/spark_vi/models/topic/dag_placement.py` — MODIFY. `fit_gated` gains `domain_bounds` passthrough to `find_anchors` so the case-finding seed surfaces drug anchors.
+- `spark-vi/spark_vi/models/topic/dag_placement.py` — MODIFY. `fit_gated` gains `domain_bounds` passthrough to `find_anchors` so the case-finding seed surfaces the sparser domain's anchors.
 - `spark-vi/tests/test_dag_placement.py` — MODIFY. Two-domain fit-path test + the FDR-delta specificity acceptance test.
 
 ## Out of scope / follow-on (do NOT build here)
@@ -80,15 +81,15 @@ def test_find_anchors_per_domain_floor_admits_sparse_domain_anchor():
     import numpy as np
     from spark_vi.models.topic.spectral_init import find_anchors
     # Domain A = cols [0:4] (dense), domain B = cols [4:6] (sparse).
-    # Build Q directly: dense block carries most mass; the drug anchor (col 4)
-    # co-occurs purely with a single A word (col 0) but at low total mass.
+    # Build Q directly: dense block carries most mass; the domain-B anchor (col 4)
+    # co-occurs purely with a single domain-A word (col 0) but at low total mass.
     V = 6
     Q = np.zeros((V, V))
     # dense domain-A co-occurrence
     Q[0, 1] = Q[1, 0] = 0.20
     Q[2, 3] = Q[3, 2] = 0.20
     Q[0, 2] = Q[2, 0] = 0.10
-    # sparse domain-B anchor col 4 pairs only with col 0 (its condition), low mass
+    # sparse domain-B anchor col 4 pairs only with its domain-A partner col 0, low mass
     Q[0, 4] = Q[4, 0] = 0.02
     # col 5 is domain-B noise, negligible
     Q[5, 5] = 1e-9
@@ -237,14 +238,14 @@ Add to `spectral_init.py`:
 def split_domains(beta, domain_bounds):
     """Split a joint K×V β into per-domain row-renormalized bases.
 
-    Under the shared-topic multi-domain model a drawn condition and drawn drug
-    from one document share the same θ, so the joint co-occurrence factors as
-    Q_CD = (B_C)ᵀ A (B_D) (spec) and ONE anchor defines the topic across both
-    domains. After recover_beta returns the joint β over the concatenated vocab,
-    slicing each topic row at the domain boundaries and renormalizing each slice
-    to sum 1 gives the per-domain P(word | topic) matrices — the MixEHR-style
-    bases (β^C, β^D) that share topic identity (Halpern, Horng, Choi, Sontag,
-    JAMIA 2016, anchor-and-learn corroboration).
+    Under the shared-topic multi-domain model a token drawn in domain 0 and a
+    token drawn in domain 1 from one document share the same θ, so the joint
+    co-occurrence factors as Q_01 = (B_0)ᵀ A (B_1) (spec) and ONE anchor defines
+    the topic across both domains. After recover_beta returns the joint β over
+    the concatenated vocab, slicing each topic row at the domain boundaries and
+    renormalizing each slice to sum 1 gives the per-domain P(word | topic)
+    matrices — the MixEHR-style bases (β^0, β^1) that share topic identity
+    (Halpern, Horng, Choi, Sontag, JAMIA 2016, anchor-and-learn corroboration).
 
     domain_bounds: strictly-increasing cumulative offsets [0, ..., V]. Returns a
     list of (K, V_d) row-stochastic matrices in domain order. A topic that never
@@ -290,12 +291,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Test: `spark-vi/tests/test_spectral_init.py`
 
 **Interfaces:**
-- Produces: `two_domain_dag_corpus(*, parent, node_prev, V_cond, V_drug, doc_len, seed, drug_only_node=None, generic_drug=False) -> (docs, labels, domain_bounds, planted_cond, planted_drug, node_codes)`.
-  - `docs`: list of integer token arrays spanning `[0, V_cond + V_drug)`; a doc at node v emits a shared common pool + the condition signatures along `closure(v)` AND the drug signatures along `closure(v)`, in the SAME array (within-doc cross-domain co-occurrence — the load-bearing tie).
-  - `domain_bounds = [0, V_cond, V_cond + V_drug]`.
-  - `planted_cond` (K, V_cond) and `planted_drug` (K, V_drug): the per-domain ground-truth signatures aligned to `DagLayout` slot order (reuse the `dag_placement_corpus` slotting convention).
-  - `drug_only_node` (optional node id): that node's CONDITION signature is made ambiguous (shared with its parent/sibling, no unique condition token) while its DRUG signature stays unique — the "recovered from the drug alone" case the spec requires.
-  - `generic_drug` (bool): if True, add one drug token emitted by EVERY document regardless of node (the co-prescribed-PPI control of Risk 1 / insight 0021) — used by the FDR-delta control in Task 6.
+- Produces: `two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed, b_only_node=None, ubiquitous_b=False) -> (docs, labels, domain_bounds, planted_a, planted_b, slot_of_node, node_codes)`.
+  - `docs`: list of integer token arrays spanning `[0, V_a + V_b)`; a doc at node v emits a shared common pool + the domain-0 signatures along `closure(v)` AND the domain-1 signatures along `closure(v)`, in the SAME array (within-doc cross-domain co-occurrence — the load-bearing tie).
+  - `domain_bounds = [0, V_a, V_a + V_b]`.
+  - `planted_a` (K, V_a) and `planted_b` (K, V_b): the per-domain ground-truth signatures aligned to `DagLayout` slot order (reuse the `dag_placement_corpus` slotting convention).
+  - `slot_of_node`: dict {node id -> DagLayout slot index}, so a caller can index `planted_a`/`planted_b` rows for a given node without re-deriving the slotting. (Consumed by Tasks 4/5/6.)
+  - `b_only_node` (optional node id): that node's DOMAIN-0 signature is made ambiguous (shared with its parent, no unique domain-0 token) while its DOMAIN-1 signature stays unique — the "recovered from domain 1 alone" case the spec requires.
+  - `ubiquitous_b` (bool): if True, add one domain-1 token emitted by EVERY document regardless of node (the universal-anchor control of Risk 1 / insight 0021) — used by the FDR-delta control in Task 6.
   - `node_codes`: exact per-node marker code dict (mirrors `dag_placement_corpus`), for `strip_dag_node_codes` at eval.
 - Consumes: `DagLayout` from `dag_placement`; the slotting/common-pool conventions of the existing `dag_placement_corpus` (line ~579).
 
@@ -303,28 +305,25 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ```python
 def test_two_domain_corpus_within_doc_cross_domain():
-    """Every doc's tokens span BOTH domains (Q_CD != 0 prerequisite) and a
-    drug-only node's docs still carry its unique drug signature."""
+    """Every doc's tokens span BOTH domains (Q_01 != 0 prerequisite) and a
+    domain-1-only node's docs still carry its unique domain-1 signature."""
     import numpy as np
     from tests._stm_synth import two_domain_dag_corpus
     parent = {1: 0, 2: 1, 3: 1}     # root 0 -> node 1 -> leaves 2,3
-    docs, labels, domain_bounds, pc, pd_, codes = two_domain_dag_corpus(
+    docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
         parent=parent, node_prev={1: 1.0, 2: 1.0, 3: 1.0},
-        V_cond=30, V_drug=12, doc_len=24, seed=1, drug_only_node=3)
-    Vc = domain_bounds[1]
-    # at least one doc has both a condition token (<Vc) and a drug token (>=Vc)
-    spanning = [d for d in docs if (np.asarray(d) < Vc).any() and (np.asarray(d) >= Vc).any()]
+        V_a=30, V_b=12, doc_len=24, seed=1, b_only_node=3)
+    Va = domain_bounds[1]
+    # at least half the docs carry a domain-0 token (<Va) AND a domain-1 token (>=Va)
+    spanning = [d for d in docs if (np.asarray(d) < Va).any() and (np.asarray(d) >= Va).any()]
     assert len(spanning) > 0.5 * len(docs)
     # planted shapes
-    assert pc.shape[1] == Vc and pd_.shape[1] == domain_bounds[2] - Vc
-    # drug_only_node=3 has a nonzero unique drug signature row
-    from spark_vi.models.topic.dag_placement import DagLayout
-    lay = DagLayout(parent, n_bg=2, tpn=1)
-    # its condition signature is (near) ambiguous; its drug signature is not
-    assert pd_.sum(axis=1).max() > 0
+    assert pa.shape[1] == Va and pb.shape[1] == domain_bounds[2] - Va
+    # b_only_node=3 has a nonzero unique domain-1 signature row (recovered in Task 4)
+    assert pb[slot_of_node[3]].sum() > 0
 ```
 
-(Keep the assertions to structural invariants the generator guarantees — spanning docs, shapes, a nonzero planted drug signature. The recovery claim is Task 4.)
+(Keep the assertions to structural invariants the generator guarantees — spanning docs, shapes, a nonzero planted domain-1 signature. The recovery claim is Task 4.)
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -333,7 +332,7 @@ Expected: FAIL (`two_domain_dag_corpus` not defined).
 
 - [ ] **Step 3: Implement the generator**
 
-Model it on `dag_placement_corpus` (`_stm_synth.py` ~line 579). Concatenated vocab: conditions `[0, V_cond)`, drugs `[V_cond, V_cond+V_drug)`. Within each domain, reserve a shared common pool then per-node signature blocks (reuse the `C = V//3`, `sig` slotting idea separately per domain). For a doc at node v: emit common-pool tokens from BOTH domains + condition-signature tokens for every node in `closure(v)` (minus root) + drug-signature tokens for every node in `closure(v)`. For `drug_only_node`, set that node's condition signature block to its PARENT's condition block (ambiguous — no unique condition token) but keep a unique drug block. For `generic_drug=True`, append one extra drug column index emitted by every doc. Build `planted_cond`/`planted_drug` as (K, V_d) rows aligned to `DagLayout` slot order exactly like `dag_placement_corpus` builds `node_sig`. Return `domain_bounds = [0, V_cond, V_cond + V_drug]`. Docstring MUST state the within-doc co-occurrence prerequisite and that ids are integer/domain-agnostic.
+Model it on `dag_placement_corpus` (`_stm_synth.py` ~line 579). Concatenated vocab: domain 0 `[0, V_a)`, domain 1 `[V_a, V_a+V_b)`. Within each domain, reserve a shared common pool then per-node signature blocks (reuse the `C = V//3`, `sig` slotting idea separately per domain). For a doc at node v: emit common-pool tokens from BOTH domains + domain-0-signature tokens for every node in `closure(v)` (minus root) + domain-1-signature tokens for every node in `closure(v)`. For `b_only_node`, set that node's domain-0 signature block to its PARENT's domain-0 block (ambiguous — no unique domain-0 token) but keep a unique domain-1 block. For `ubiquitous_b=True`, append one extra domain-1 column index emitted by every doc. Build `planted_a`/`planted_b` as (K, V_d) rows aligned to `DagLayout` slot order exactly like `dag_placement_corpus` builds `node_sig`, and return `slot_of_node` mapping each node id to its slot index. Return `domain_bounds = [0, V_a, V_a + V_b]`. Docstring MUST state the within-doc co-occurrence prerequisite and that ids are integer/domain-agnostic.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -346,9 +345,9 @@ Expected: PASS.
 git add spark-vi/tests/_stm_synth.py spark-vi/tests/test_spectral_init.py
 git commit -m "test(synth): two-domain planted DAG corpus for multi-domain init
 
-Conditions + drugs in ONE concatenated vocab, co-occurring WITHIN each
-document (the Q_CD prerequisite). Supports a drug-only node (ambiguous
-condition, unique drug) and a generic co-prescribed-drug control.
+Two domains in ONE concatenated vocab, co-occurring WITHIN each document
+(the Q_01 prerequisite). Supports a domain-1-only node (ambiguous in
+domain 0, unique in domain 1) and a ubiquitous domain-1 token control.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -362,15 +361,15 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `two_domain_dag_corpus` (Task 3), `word_cooccurrence`, `find_anchors(domain_bounds=...)` (Task 1), `recover_beta`, `split_domains` (Task 2).
-- Produces: no new code — an integration test asserting the whole recipe recovers both domains, including a topic anchored from the DRUG domain alone.
+- Produces: no new code — an integration test asserting the whole recipe recovers both domains, including a topic anchored from DOMAIN 1 alone.
 
 - [ ] **Step 1: Write the acceptance test**
 
 ```python
-def test_multidomain_init_recovers_both_domains_incl_drug_anchored():
+def test_multidomain_init_recovers_both_domains_incl_b_anchored():
     """The joint recipe (one Q, one greedy with per-domain floor, one recover,
     split) recovers per-domain phenotypes for every node, INCLUDING a node whose
-    condition signature is ambiguous but whose drug signature is unique."""
+    domain-0 signature is ambiguous but whose domain-1 signature is unique."""
     import numpy as np
     from types import SimpleNamespace
     from tests._stm_synth import two_domain_dag_corpus
@@ -378,36 +377,36 @@ def test_multidomain_init_recovers_both_domains_incl_drug_anchored():
         word_cooccurrence, find_anchors, recover_beta, split_domains)
 
     parent = {1: 0, 2: 1, 3: 1}
-    docs, labels, domain_bounds, pc, pd_, codes = two_domain_dag_corpus(
+    docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
         parent=parent, node_prev={1: 1.0, 2: 1.0, 3: 1.0},
-        V_cond=40, V_drug=16, doc_len=30, seed=3, drug_only_node=3)
+        V_a=40, V_b=16, doc_len=30, seed=3, b_only_node=3)
     V = domain_bounds[-1]
     counted = [SimpleNamespace(indices=np.unique(np.asarray(d)),
                counts=np.unique(np.asarray(d), return_counts=True)[1].astype(float))
                for d in docs]
     Q = word_cooccurrence(counted, V)
-    K = pc.shape[0]
+    K = pa.shape[0]
     anchors = find_anchors(Q, K, domain_bounds=domain_bounds)
     beta = recover_beta(Q, anchors)
-    bc, bd = split_domains(beta, domain_bounds)
+    ba, bb = split_domains(beta, domain_bounds)
 
-    # at least one anchor comes from the DRUG domain (id >= V_cond)
+    # at least one anchor comes from domain 1 (id >= V_a)
     assert any(a >= domain_bounds[1] for a in anchors)
-    # drug-domain recovery: node 3's unique planted drug block is captured by
-    # some recovered drug topic (support-overlap mass), even though its
-    # condition signature is ambiguous.
+    # domain-1 recovery: node 3's unique planted domain-1 block is captured by
+    # some recovered domain-1 topic (support-overlap mass), even though its
+    # domain-0 signature is ambiguous.
     def _support(row, eps=1e-3):
         return np.where(row > eps)[0]
-    node3_drug_support = _support(pd_[_node3_slot(parent)])
-    assert bd[:, node3_drug_support].sum(axis=1).max() > 0.4
+    node_b_support = _support(pb[slot_of_node[3]])
+    assert bb[:, node_b_support].sum(axis=1).max() > 0.4
 ```
 
-Include a tiny local helper (or inline) mapping node 3 to its `DagLayout` slot to index `pd_` — reuse the slotting the generator returns (prefer having the generator return a `slot_of_node` dict if that is cleaner; if so, add it to Task 3's return and update Task 3's test).
+The node→slot mapping comes from the generator's `slot_of_node` return (Task 3) — no local helper needed.
 
 - [ ] **Step 2: Run the acceptance test**
 
 Run: `cd spark-vi && python -m pytest tests/test_spectral_init.py -v -k multidomain_init_recovers`
-Expected: PASS. If the drug-anchored node does not clear the margin, STRENGTHEN THE PLANT (purer/denser unique drug signature in the generator), never loosen the assertion (test-honesty). If a strengthened plant still fails, that is a real negative — stop and report.
+Expected: PASS. If the domain-1-anchored node does not clear the margin, STRENGTHEN THE PLANT (purer/denser unique domain-1 signature in the generator), never loosen the assertion (test-honesty). If a strengthened plant still fails, that is a real negative — stop and report.
 
 - [ ] **Step 3: Commit**
 
@@ -416,8 +415,8 @@ git add spark-vi/tests/test_spectral_init.py spark-vi/tests/_stm_synth.py
 git commit -m "test(spectral-init): multi-domain joint recovery acceptance
 
 One joint Q -> per-domain-floored greedy -> recover -> split recovers both
-condition and drug bases, including a node anchored from the drug domain
-alone (ambiguous condition, unique drug).
+per-domain bases, including a node anchored from domain 1 alone (ambiguous
+in domain 0, unique in domain 1).
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -438,16 +437,16 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing test**
 
 ```python
-def test_fit_gated_domain_bounds_surfaces_drug_seed():
-    """With domain_bounds, fit_gated's spectral seed admits a drug anchor for a
-    drug-only node, and the fit still returns a valid (K,V) beta."""
+def test_fit_gated_domain_bounds_surfaces_b_seed():
+    """With domain_bounds, fit_gated's spectral seed admits a domain-1 anchor for
+    a domain-1-only node, and the fit still returns a valid (K,V) beta."""
     import numpy as np
     from tests._stm_synth import two_domain_dag_corpus
     from spark_vi.models.topic.dag_placement import DagLayout, fit_gated
     parent = {1: 0, 2: 1, 3: 1}
-    docs, labels, domain_bounds, pc, pd_, codes = two_domain_dag_corpus(
+    docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
         parent=parent, node_prev={1: 1.0, 2: 1.0, 3: 1.0},
-        V_cond=40, V_drug=16, doc_len=30, seed=5, drug_only_node=3)
+        V_a=40, V_b=16, doc_len=30, seed=5, b_only_node=3)
     lay = DagLayout(parent, n_bg=2, tpn=1)
     V = domain_bounds[-1]
     rng = np.random.default_rng(0)
@@ -479,8 +478,8 @@ git add spark-vi/spark_vi/models/topic/spectral_init.py spark-vi/spark_vi/models
 git commit -m "feat(dag-placement): thread domain_bounds through fit path
 
 spectral_init_beta and fit_gated accept optional domain_bounds and pass it
-to find_anchors so the multi-domain seed surfaces drug anchors. None keeps
-existing behavior byte-for-byte.
+to find_anchors so the multi-domain seed surfaces the sparser domain's
+anchors. None keeps existing behavior byte-for-byte.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -493,26 +492,26 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Test: `spark-vi/tests/test_dag_placement.py` (test-only; the empirical specificity claim)
 
 **Interfaces:**
-- Consumes: `two_domain_dag_corpus` (Task 3, with `drug_only_node` and `generic_drug`), `fit_gated(domain_bounds=...)` (Task 5), `profile`, `strip_dag_node_codes`, `evaluate` (existing), `per_node_discoveries` / the `fdr_block` from `evaluate` (existing).
-- Produces: no new engine code — an acceptance test that fits + profiles + evaluates the SAME corpus with the drug domain IN vs OUT (drug columns dropped) and asserts the corroborating-drug node gains discoveries / lower per-node FDR at fixed q, while a generic co-prescribed drug does NOT.
+- Consumes: `two_domain_dag_corpus` (Task 3, with `b_only_node` and `ubiquitous_b`), `fit_gated(domain_bounds=...)` (Task 5), `profile`, `strip_dag_node_codes`, `evaluate` (existing), `per_node_discoveries` / the `fdr_block` from `evaluate` (existing).
+- Produces: no new engine code — an acceptance test that fits + profiles + evaluates the SAME corpus with domain 1 IN vs OUT (domain-1 columns dropped) and asserts the corroborating-domain node gains discoveries / lower per-node FDR at fixed q, while a ubiquitous domain-1 token does NOT.
 
 - [ ] **Step 1: Write the acceptance test**
 
-Follow the existing end-to-end pattern (`test_dag_placement.py` ~line 162-173): build the two-domain corpus with `drug_only_node=<leaf>`; split train/test; `fit_gated` with `domain_bounds`; `profile(strip_dag_node_codes(d, codes), beta, lay, ...)` per held-out doc; `evaluate(profs, labels_test, lay)`. Then repeat with the drug columns removed (condition-only vocab, `domain_bounds=None`). Compare the `fdr_block` / per-node discoveries for the drug-only node.
+Follow the existing end-to-end pattern (`test_dag_placement.py` ~line 162-173): build the two-domain corpus with `b_only_node=<leaf>`; split train/test; `fit_gated` with `domain_bounds`; `profile(strip_dag_node_codes(d, codes), beta, lay, ...)` per held-out doc; `evaluate(profs, labels_test, lay)`. Then repeat with the domain-1 columns removed (domain-0-only vocab, `domain_bounds=None`). Compare the `fdr_block` / per-node discoveries for the domain-1-only node.
 
 ```python
-def test_fdr_delta_corroborating_drug_raises_leaf_specificity():
-    """Specificity claim (spec): a node-specific drug lowers that leaf node's
-    per-node FDR (more discoveries at fixed q) vs conditions-only, because the
-    corroborating domain sharpens node-vs-background contrast. A GENERIC
-    co-prescribed drug (insight 0021 universal anchor) does NOT."""
-    # ... build corpus, fit+profile+evaluate drugs-IN and drugs-OUT ...
-    # assert discoveries_in[drug_only_node] >= discoveries_out[drug_only_node]
+def test_fdr_delta_corroborating_domain_raises_leaf_specificity():
+    """Specificity claim (spec): a node-specific domain-1 signature lowers that
+    leaf node's per-node FDR (more discoveries at fixed q) vs domain-0-only,
+    because the corroborating domain sharpens node-vs-background contrast. A
+    UBIQUITOUS domain-1 token (insight 0021 universal anchor) does NOT."""
+    # ... build corpus, fit+profile+evaluate domain-1 IN and OUT ...
+    # assert discoveries_in[b_only_node] >= discoveries_out[b_only_node]
     #   with a margin, at the SAME sensitivity/q
-    # assert generic-drug variant shows no such gain (control)
+    # assert ubiquitous-domain-1 variant shows no such gain (control)
 ```
 
-Make the plant STRONG (a drug that fires only for the drug-only node, dense unique block) so the direction is unambiguous. Assert a DIRECTIONAL inequality with margin at matched q — never a brittle exact number. Hold leakage fixed: `strip_dag_node_codes` removes the exact node-marker codes in BOTH arms so the FDR drop comes from corroboration, not from smuggling the label into features (spec Risk 2). Document that assertion explicitly in the test.
+Make the plant STRONG (a domain-1 signature that fires only for `b_only_node`, dense unique block) so the direction is unambiguous. Assert a DIRECTIONAL inequality with margin at matched q — never a brittle exact number. Hold leakage fixed: `strip_dag_node_codes` removes the exact node-marker codes in BOTH arms so the FDR drop comes from corroboration, not from smuggling the label into features (spec Risk 2). Document that assertion explicitly in the test.
 
 - [ ] **Step 2: Run the acceptance test**
 
@@ -523,12 +522,12 @@ Expected: PASS. If the direction does not hold with a strong plant, STOP — tha
 
 ```bash
 git add spark-vi/tests/test_dag_placement.py
-git commit -m "test(dag-placement): FDR-delta specificity acceptance for drug corroboration
+git commit -m "test(dag-placement): FDR-delta specificity acceptance for cross-domain corroboration
 
-Node-specific drug lowers that leaf's per-node FDR (more discoveries at
-fixed q) vs conditions-only; a generic co-prescribed drug does not. Leakage
-held fixed (node-marker codes stripped in both arms) so the gain is
-corroboration, not label smuggling.
+Node-specific domain-1 signature lowers that leaf's per-node FDR (more
+discoveries at fixed q) vs domain-0-only; a ubiquitous domain-1 token does
+not. Leakage held fixed (node-marker codes stripped in both arms) so the
+gain is corroboration, not label smuggling.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
