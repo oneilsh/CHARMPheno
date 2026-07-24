@@ -112,12 +112,13 @@ the buried-signal problem is information-limited, not lens-specific, even at the
      (`addopts = -m 'not slow and not cluster'`) and never runs in CI or a normal suite. Decide (whenever
      STM is next touched): investigate Γ-sign / bump corpus-or-iters until it genuinely clears 0.75 /
      xfail-with-reason. Do NOT loosen the threshold.
-  2. `tests/scripts/test_fit_stm_local.py::test_fit_stm_local_reference_topic_end_to_end` — passes the
-     REMOVED `--sigma-prior-scale`/`--sigma-prior-count` inverse-Wishart args (dropped under ADR 0034
-     unit-diagonal Σ) and asserts on `sigma_prior_scale`/`sigma_prior_count` metadata; argparse errors
-     "unrecognized arguments" before the body runs. It is NOT slow-marked, so it DOES run and fail in a
-     normal `tests/scripts` run. Fix: update the test to the current hardening CLI
-     (`--sigma-diagonal-pin`/`--estimate-sigma-diagonal`) or xfail-with-reason.
+  2. `tests/scripts/test_fit_stm_local.py::test_fit_stm_local_reference_topic_end_to_end` — **FIXED
+     `63ea17e`.** It passed the REMOVED `--sigma-prior-scale`/`--sigma-prior-count` args (dropped under
+     ADR 0034) AND asserted `sigma_diag_shrink` (also gone, replaced by `estimate_sigma_diagonal` /
+     `sigma_diagonal_pin`) — stale in two places. Trimmed to the test's actual purpose (the
+     `--reference-topic` flag threads through + Γ's reference column is zeroed + `--no-spectral-init`),
+     leaving the detailed Σ-hardening schema to the dedicated Σ tests so it can't go stale on the next
+     schema change. All 6 tests in the file green.
   Untracked scratch `tests/test_t3b_diag_tmp.py` (imports the removed pg_stm shim) is the user's to delete.
 
 Branch NOT merged to main. Reverse-topo feature is Ready-to-merge; the mini-arc is a publishable
