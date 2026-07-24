@@ -603,6 +603,98 @@ def dag_placement_corpus(*, parent, node_prev, V, doc_len, seed):
     return docs, np.array(labels), node_codes
 
 
+def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
+                          b_only_node=None, ubiquitous_b=False):
+    """Two-domain planted hierarchical-placement corpus over a SINGLE concatenated
+    vocabulary: domain 0 ids [0:V_a), domain 1 ids [V_a:V_a+V_b). Every document's
+    token array carries BOTH domain-0 and domain-1 signature tokens for the SAME
+    DagLayout closure(v) -- within-document cross-domain co-occurrence. This is the
+    load-bearing prerequisite: it is what makes the joint co-occurrence block between
+    the two domains' vocabularies nonzero; without it the domain-0 and domain-1
+    anchor hulls would never appear in the same document and would be structurally
+    disconnected. All ids are plain integers; domains are 0/1, never given
+    domain-specific vocabulary semantics.
+
+    Mirrors dag_placement_corpus's construction (shared common pool + per-node
+    exclusive signature block, C = V//3 / sig slotting) but applies it SEPARATELY
+    within each domain, and slots both domains' signature blocks into the SAME
+    DagLayout node order.
+
+    ``b_only_node``, if given, makes that node's DOMAIN-0 signature block IDENTICAL
+    to its (first) parent's domain-0 block -- so domain 0 alone has no unique token
+    for it -- while its domain-1 block stays exclusive: the "recoverable from domain
+    1 alone" case. ``ubiquitous_b=True`` adds one reserved domain-1 column (unused by
+    any node's exclusive block) emitted by EVERY document regardless of node -- a
+    universal-anchor control.
+
+    Returns (docs, labels, domain_bounds, planted_a, planted_b, slot_of_node,
+    node_codes):
+      - domain_bounds = [0, V_a, V_a + V_b].
+      - planted_a (K, V_a) / planted_b (K, V_b): ground-truth signature-block
+        indicator rows, K = number of non-root nodes, aligned to DagLayout slot
+        order (row k = the node at slot_of_node^-1(k)).
+      - slot_of_node: dict {node id -> row index into planted_a/planted_b}.
+      - node_codes: {node id -> exact domain-0 marker token id}, mirrors
+        dag_placement_corpus, for strip_dag_node_codes at eval.
+    """
+    from spark_vi.models.topic.dag_placement import DagLayout
+    rng = np.random.default_rng(seed)
+    lay = DagLayout(parent, n_bg=2, tpn=1)
+    nodes = lay.nodes
+    K = len(nodes)
+    slot_of_node = {u: i for i, u in enumerate(nodes)}
+
+    def _blocks(V):
+        C = V // 3                                        # shared common pool [0:C]
+        sig = max(2, (V - C) // (K + 1))                   # +1 reserves a spare block
+        node_sig = {u: np.arange(C + i * sig, C + i * sig + sig) for i, u in enumerate(nodes)}
+        return C, sig, node_sig
+
+    C_a, sig_a, node_sig_a = _blocks(V_a)
+    C_b, sig_b, node_sig_b = _blocks(V_b)
+
+    if b_only_node is not None:
+        parents = [p for p in lay.parents.get(b_only_node, []) if p in node_sig_a]
+        if not parents:
+            raise ValueError(
+                f"b_only_node {b_only_node} has no non-root parent with a domain-0 "
+                "signature block to share (root carries no signature block)")
+        node_sig_a[b_only_node] = node_sig_a[parents[0]]   # ambiguous in domain 0
+
+    ubiq_col_b = C_b + K * sig_b if ubiquitous_b else None  # the spare, unassigned block
+
+    node_codes = {u: int(node_sig_a[u][0]) for u in nodes}
+
+    planted_a = np.zeros((K, V_a))
+    planted_b = np.zeros((K, V_b))
+    for u in nodes:
+        planted_a[slot_of_node[u], node_sig_a[u]] += 1.0
+        planted_b[slot_of_node[u], node_sig_b[u]] += 1.0
+    if ubiquitous_b:
+        planted_b[:, ubiq_col_b] += 1.0
+
+    p = np.array([node_prev[u] for u in nodes], float); p /= p.sum()
+    docs, labels = [], []
+    for _ in range(2000):                                  # 2000 items
+        v = int(rng.choice(nodes, p=p))
+        path = [u for u in lay.closure(v) if u != 0]
+        n_common = doc_len // 2
+        n_a_common, n_b_common = n_common // 2, n_common - n_common // 2
+        toks = [rng.integers(0, C_a, size=n_a_common),                    # domain-0 common pool
+               V_a + rng.integers(0, C_b, size=n_b_common)]               # domain-1 common pool
+        per = max(1, (doc_len - n_common) // (2 * len(path)))
+        for u in path:
+            toks.append(rng.choice(node_sig_a[u], size=per))              # domain-0 signature
+            toks.append(V_a + rng.choice(node_sig_b[u], size=per))        # domain-1 signature
+        if ubiquitous_b:
+            toks.append(np.array([V_a + ubiq_col_b]))                     # universal token
+        docs.append(np.concatenate(toks).astype(np.int64))
+        labels.append(v)
+
+    domain_bounds = [0, V_a, V_a + V_b]
+    return docs, np.array(labels), domain_bounds, planted_a, planted_b, slot_of_node, node_codes
+
+
 def dag_placement_corpus_multi(*, parent, leaf_prev, comorbid_rate, V, doc_len, seed):
     """Multi-parent hierarchical-placement plant with comorbid patients. Each non-root node owns a
     signature vocab block plus one exact 'node code'. An item's frontier is 1 leaf (prob

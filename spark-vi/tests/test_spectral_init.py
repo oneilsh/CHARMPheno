@@ -104,3 +104,22 @@ def test_split_domains_single_domain_is_identity_up_to_renorm():
     beta = np.array([[0.5, 0.3, 0.2], [0.1, 0.6, 0.3]])
     (only,) = split_domains(beta, [0, 3])
     np.testing.assert_allclose(only, beta)   # already row-stochastic
+
+
+def test_two_domain_corpus_within_doc_cross_domain():
+    """Every doc's tokens span BOTH domains (Q_01 != 0 prerequisite) and a
+    domain-1-only node's docs still carry its unique domain-1 signature."""
+    import numpy as np
+    from tests._stm_synth import two_domain_dag_corpus
+    parent = {1: 0, 2: 1, 3: 1}     # root 0 -> node 1 -> leaves 2,3
+    docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
+        parent=parent, node_prev={1: 1.0, 2: 1.0, 3: 1.0},
+        V_a=30, V_b=12, doc_len=24, seed=1, b_only_node=3)
+    Va = domain_bounds[1]
+    # at least half the docs carry a domain-0 token (<Va) AND a domain-1 token (>=Va)
+    spanning = [d for d in docs if (np.asarray(d) < Va).any() and (np.asarray(d) >= Va).any()]
+    assert len(spanning) > 0.5 * len(docs)
+    # planted shapes
+    assert pa.shape[1] == Va and pb.shape[1] == domain_bounds[2] - Va
+    # b_only_node=3 has a nonzero unique domain-1 signature row (recovered in Task 4)
+    assert pb[slot_of_node[3]].sum() > 0
