@@ -104,11 +104,21 @@ the buried-signal problem is information-limited, not lens-specific, even at the
   (cheap, honest) rather than pruned.
 - **Held-out log-likelihood** — the fair "is the learned alpha a better model" test (its actual
   objective) was never measured; would settle the open placement question independent of detection.
-- **Pre-existing reds (not from this arc):** `test_stm_integration::test_synthetic_recovery_full_batch`
-  (STM gamma-sign, sign_match 0.625<0.75, fixed seed) and `test_fit_stm_local_reference_topic_end_to_end`
-  (removed Sigma-prior CLI args) remain red on the branch — decide fix/xfail/accept at merge; do NOT
-  loosen thresholds. Untracked scratch `tests/test_t3b_diag_tmp.py` (imports the removed pg_stm shim)
-  is the user's to delete.
+- **Two pre-existing STM reds (NOT from this arc; NOT case-finding concerns — both live on main too,
+  since STM is merged). Verified 2026-07-24:**
+  1. `spark-vi/tests/test_stm_integration.py::test_synthetic_recovery_full_batch` — a qualitative STM
+     Γ-sign recovery check on a toy synthetic corpus; sign_match 0.625 vs the 0.75 floor (5/8 vs 6/8
+     entries, seed 42). It is `@pytest.mark.slow`, so it is DESELECTED by default
+     (`addopts = -m 'not slow and not cluster'`) and never runs in CI or a normal suite. Decide (whenever
+     STM is next touched): investigate Γ-sign / bump corpus-or-iters until it genuinely clears 0.75 /
+     xfail-with-reason. Do NOT loosen the threshold.
+  2. `tests/scripts/test_fit_stm_local.py::test_fit_stm_local_reference_topic_end_to_end` — passes the
+     REMOVED `--sigma-prior-scale`/`--sigma-prior-count` inverse-Wishart args (dropped under ADR 0034
+     unit-diagonal Σ) and asserts on `sigma_prior_scale`/`sigma_prior_count` metadata; argparse errors
+     "unrecognized arguments" before the body runs. It is NOT slow-marked, so it DOES run and fail in a
+     normal `tests/scripts` run. Fix: update the test to the current hardening CLI
+     (`--sigma-diagonal-pin`/`--estimate-sigma-diagonal`) or xfail-with-reason.
+  Untracked scratch `tests/test_t3b_diag_tmp.py` (imports the removed pg_stm shim) is the user's to delete.
 
 Branch NOT merged to main. Reverse-topo feature is Ready-to-merge; the mini-arc is a publishable
 negative. Next strategic step is multi-domain features (MixEHR), not another model-side lever.
