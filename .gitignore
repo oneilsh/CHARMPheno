@@ -59,3 +59,6 @@ notebooks/exploratory/
 
 # Local template stash path (if we ever symlink or check stub refs)
 *.ref
+
+# Root-level npm deps (dashboard npm run at repo root); regenerable, never track
+node_modules/
