@@ -126,11 +126,18 @@ def _as_counts(doc):
 
 
 def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
-              n_iter=150, burn=80, rng=None):
+              n_iter=150, burn=80, rng=None, domain_bounds=None):
     """Gated topic training by collapsed sampling: each training item is masked to
     allowed(label) = background ∪ blocks along its label's closure, tying topics to nodes
     structurally. Anchor-word spectral init (Arora et al. 2013) seeds beta. Returns posterior-mean
     beta_hat (K, V).
+
+    ``domain_bounds`` (optional; spec's multi-domain joint-Q construction) is passed
+    straight through to the spectral seed's ``find_anchors(Q, K, ...)`` call so anchors
+    for a sparser domain clear their own per-domain candidate floor instead of the
+    pooled-Q mean being dominated by a denser domain (see
+    ``spectral_init.find_anchors`` / ``_domain_candidate_mask``). Default ``None``
+    reproduces current single-pooled-domain behavior byte-for-byte.
 
     The per-token conditional uses ONLY the collapsed word-topic factor
     (n_kw + beta_prior) / (n_k + V*beta_prior) of Griffiths & Steyvers (2004), restricted to the
@@ -150,7 +157,7 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
     K = lay.K
     counted = [_as_counts(d) for d in train_docs]
     Q = word_cooccurrence(counted, V)
-    beta0 = recover_beta(Q, find_anchors(Q, K))
+    beta0 = recover_beta(Q, find_anchors(Q, K, domain_bounds=domain_bounds))
     if beta0.shape[0] < K:
         pad = np.full((K - beta0.shape[0], V), 1.0 / V)
         beta0 = np.vstack([beta0, pad])

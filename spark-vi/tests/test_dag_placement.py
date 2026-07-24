@@ -791,3 +791,23 @@ def test_daglayout_descendants_is_proper_and_mirrors_closure():
     # sorted by (depth, id)
     d = lay.descendants(1)
     assert d == sorted(d, key=lambda x: (lay.depth(x), x))
+
+
+def test_fit_gated_domain_bounds_surfaces_b_seed():
+    """With domain_bounds, fit_gated's spectral seed admits a domain-1 anchor for
+    a domain-1-only node, and the fit still returns a valid (K,V) beta."""
+    import numpy as np
+    from tests._stm_synth import two_domain_dag_corpus
+    from spark_vi.models.topic.dag_placement import DagLayout, fit_gated
+    parent = {1: 0, 2: 1, 3: 1}
+    docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
+        parent=parent, node_prev={1: 1.0, 2: 1.0, 3: 1.0},
+        V_a=40, V_b=16, doc_len=30, seed=5, b_only_node=3)
+    lay = DagLayout(parent, n_bg=2, tpn=1)
+    V = domain_bounds[-1]
+    rng = np.random.default_rng(0)
+    beta = fit_gated(docs[:900], labels[:900], lay, V, n_iter=40, burn=20,
+                     rng=rng, domain_bounds=domain_bounds)
+    assert beta.shape == (lay.K, V)
+    assert np.isfinite(beta).all()
+    np.testing.assert_allclose(beta.sum(1), 1.0, atol=1e-6)

@@ -245,7 +245,7 @@ def recover_beta(Q: np.ndarray, anchors, rows=None) -> np.ndarray:
     return beta
 
 
-def spectral_init_beta(docs, partition, V: int) -> np.ndarray:
+def spectral_init_beta(docs, partition, V: int, *, domain_bounds=None) -> np.ndarray:
     """Block-aware K×V β seed in ``partition`` slot order.
 
     Step 1 (background): pooled Q over all docs → ``background_k`` anchors →
@@ -259,13 +259,23 @@ def spectral_init_beta(docs, partition, V: int) -> np.ndarray:
     Non-gated partitions (background_k = K, no foreground groups) execute step 1
     only and produce exactly what a global single-pass anchor-word init would —
     the degenerate, identical case.
+
+    ``domain_bounds`` (optional; spec's multi-domain joint-Q construction) is
+    passed straight through to EVERY ``find_anchors`` call this makes — the
+    background pooled-Q call in step 1 and each group's within-group Q_g call in
+    step 2 — so a sparser domain's anchors clear the per-domain candidate floor
+    instead of being swamped by the pooled mean (see ``find_anchors`` /
+    ``_domain_candidate_mask``). ``word_cooccurrence`` already builds the joint Q
+    over the concatenated multi-domain vocab unchanged; only this floor threading
+    is needed. Default ``None`` reproduces current single-pooled-domain behavior
+    byte-for-byte.
     """
     K = partition.K
     beta = np.zeros((K, V), dtype=np.float64)
 
     # Step 1: background block on pooled Q.
     Q_all = word_cooccurrence(docs, V)
-    bg_anchors = find_anchors(Q_all, partition.background_k)
+    bg_anchors = find_anchors(Q_all, partition.background_k, domain_bounds=domain_bounds)
     bg_beta = recover_beta(Q_all, bg_anchors)
     bg_idx = partition.background_indices()
     # bg_beta has one row per found anchor; if find_anchors fell short (corpus
@@ -290,7 +300,8 @@ def spectral_init_beta(docs, partition, V: int) -> np.ndarray:
         fg_idx = partition.block_indices(g)
         docs_g = [d for d in docs if g in d.groups]
         Q_g = word_cooccurrence(docs_g, V)
-        fg_anchors = find_anchors(Q_g, len(fg_idx), seed_rows=bg_anchors)
+        fg_anchors = find_anchors(Q_g, len(fg_idx), seed_rows=bg_anchors,
+                                  domain_bounds=domain_bounds)
         if not fg_anchors:
             continue
         combined = list(bg_anchors) + list(fg_anchors)
