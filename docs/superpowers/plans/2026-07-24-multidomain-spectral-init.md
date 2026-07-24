@@ -4,7 +4,7 @@
 
 **Goal:** Extend the anchor-word spectral init to multiple token domains (v1: conditions + drugs) so a DAG node's topic can be anchored by whichever domain is purest for it, each topic recovers a proper per-domain distribution, and a corroborating domain sharpens node-vs-background contrast (specificity).
 
-**Architecture:** ONE joint co-occurrence Q over the concatenated vocab `[conditions ; drugs]` with the cross-block intact; ONE greedy anchor search on it; a per-domain candidate floor so a sparser domain still yields anchors; a post-recovery split/renormalize into per-domain bases sharing topic identity. Reuses `word_cooccurrence`, `find_anchors` (one new kwarg), `recover_beta` verbatim. The fit stays a single joint β over the concatenated vocab (drugs are simply more tokens); the per-domain split is the readout/validation artifact. Validation is on planted two-domain synthetic corpora only — the domain-agnostic engine never sees clinical vocabulary.
+**Architecture:** ONE joint co-occurrence Q over the concatenated vocab `[conditions ; drugs]` with the cross-block intact; ONE greedy anchor search on it; a per-domain candidate floor so a sparser domain still yields anchors; a post-recovery split/renormalize into per-domain bases sharing topic identity. Reuses `word_cooccurrence`, `find_anchors` (one new kwarg), `recover_beta` verbatim. The `split_domains` output is **both** the per-domain readout/validation artifact **and** the initializer seed for each per-domain λ_m in the SP2 model core (arc design `2026-07-24-multidomain-gated-lda-arc-design.md`): `initialize_global` will set λ_m = scale·β^m + prior. SP1 itself validates the init recipe against the existing single-domain Gibbs oracle (`fit_gated` over the concatenated vocab, drugs as extra tokens) as an early read; the true per-domain-β oracle is built in SP2. Validation is on planted two-domain synthetic corpora only — the domain-agnostic engine never sees clinical vocabulary.
 
 **Tech Stack:** Python, numpy, scipy (`scipy.optimize.nnls`), pytest. No Spark in the v1 engine path (the Gibbs `fit_gated` oracle is the validator, matching the branch's placement-validation convention).
 
@@ -35,9 +35,9 @@ Every task's requirements implicitly include this section. Values are copied ver
 
 ## Out of scope / follow-on (do NOT build here)
 
-- Threading `domain_bounds` through the production SVI path (`gated_init.spectral_block_aligned_lambda`, `spectral_init_scalable.py`, `GatedOnlineLDA`, `dag_placement_cloud.py`). v1 validates via the Gibbs oracle; SVI wiring is a separate increment.
-- The real-cohort FDR-delta ablation and any `analysis/cloud` Makefile target / drug-domain cohort builder. Depends on separately-spec'd cluster drivers (condition/drug DAG builders).
-- Any change to how the model consumes β (no MixEHR multi-domain likelihood rewrite). v1 fits a single joint β over concatenated tokens.
+- The multi-domain **model core** (per-domain λ_m, block-Dirichlet expectation, shared gated θ with ω_m, multi-domain ELBO). That is **SP2** (arc design `2026-07-24-multidomain-gated-lda-arc-design.md`), which consumes SP1's `split_domains` output as the λ_m seed. SP1 stops at producing the per-domain bases + validating the anchor recipe; it does not build the multi-domain fit.
+- Threading `domain_bounds` through the production SVI path (`gated_init.spectral_block_aligned_lambda`, `spectral_init_scalable.py`, `GatedOnlineLDA`, `dag_placement_cloud.py`). SP1 validates via the Gibbs oracle; SVI wiring lands with SP2/SP3.
+- The real-cohort FDR-delta ablation and any `analysis/cloud` Makefile target / drug-domain cohort builder. That is **SP4**; depends on separately-spec'd cluster drivers (condition/drug DAG builders).
 
 ---
 
