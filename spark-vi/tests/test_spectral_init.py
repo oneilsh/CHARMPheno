@@ -123,3 +123,38 @@ def test_two_domain_corpus_within_doc_cross_domain():
     assert pa.shape[1] == Va and pb.shape[1] == domain_bounds[2] - Va
     # b_only_node=3 has a nonzero unique domain-1 signature row (recovered in Task 4)
     assert pb[slot_of_node[3]].sum() > 0
+
+
+def test_multidomain_init_recovers_both_domains_incl_b_anchored():
+    """The joint recipe (one Q, one greedy with per-domain floor, one recover,
+    split) recovers per-domain phenotypes for every node, INCLUDING a node whose
+    domain-0 signature is ambiguous but whose domain-1 signature is unique."""
+    import numpy as np
+    from types import SimpleNamespace
+    from tests._stm_synth import two_domain_dag_corpus
+    from spark_vi.models.topic.spectral_init import (
+        word_cooccurrence, find_anchors, recover_beta, split_domains)
+
+    parent = {1: 0, 2: 1, 3: 1}
+    docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
+        parent=parent, node_prev={1: 1.0, 2: 1.0, 3: 1.0},
+        V_a=40, V_b=16, doc_len=30, seed=3, b_only_node=3)
+    V = domain_bounds[-1]
+    counted = [SimpleNamespace(indices=np.unique(np.asarray(d)),
+               counts=np.unique(np.asarray(d), return_counts=True)[1].astype(float))
+               for d in docs]
+    Q = word_cooccurrence(counted, V)
+    K = pa.shape[0]
+    anchors = find_anchors(Q, K, domain_bounds=domain_bounds)
+    beta = recover_beta(Q, anchors)
+    ba, bb = split_domains(beta, domain_bounds)
+
+    # at least one anchor comes from domain 1 (id >= V_a)
+    assert any(a >= domain_bounds[1] for a in anchors)
+    # domain-1 recovery: node 3's unique planted domain-1 block is captured by
+    # some recovered domain-1 topic (support-overlap mass), even though its
+    # domain-0 signature is ambiguous.
+    def _support(row, eps=1e-3):
+        return np.where(row > eps)[0]
+    node_b_support = _support(pb[slot_of_node[3]])
+    assert bb[:, node_b_support].sum(axis=1).max() > 0.4

@@ -604,7 +604,8 @@ def dag_placement_corpus(*, parent, node_prev, V, doc_len, seed):
 
 
 def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
-                          b_only_node=None, ubiquitous_b=False):
+                          b_only_node=None, ubiquitous_b=False,
+                          b_only_signal_boost=4):
     """Two-domain planted hierarchical-placement corpus over a SINGLE concatenated
     vocabulary: domain 0 ids [0:V_a), domain 1 ids [V_a:V_a+V_b). Every document's
     token array carries BOTH domain-0 and domain-1 signature tokens for the SAME
@@ -623,9 +624,19 @@ def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
     ``b_only_node``, if given, makes that node's DOMAIN-0 signature block IDENTICAL
     to its (first) parent's domain-0 block -- so domain 0 alone has no unique token
     for it -- while its domain-1 block stays exclusive: the "recoverable from domain
-    1 alone" case. ``ubiquitous_b=True`` adds one reserved domain-1 column (unused by
-    any node's exclusive block) emitted by EVERY document regardless of node -- a
-    universal-anchor control.
+    1 alone" case. Its domain-1 signature draws are additionally scaled by
+    ``b_only_signal_boost`` (default 4): a node's OWN path contribution is diluted by
+    construction (draws are split evenly across every node on closure(v), so a
+    node reached via a longer path gets fewer own-signature draws than a node
+    generated alone), which otherwise leaves b_only_node's unique domain-1 block
+    below the anchor candidate's per-domain marginal floor (find_anchors,
+    min_marginal_frac) and unrecoverable no matter how pure it is. The boost only
+    densifies b_only_node's domain-1 draws (domain-0 stays untouched, so the
+    domain-0 ambiguity this parameter exists to create is unaffected); it is what
+    makes the "recoverable from domain 1 alone" case in the name actually true
+    rather than merely nonzero. ``ubiquitous_b=True`` adds one reserved domain-1
+    column (unused by any node's exclusive block) emitted by EVERY document
+    regardless of node -- a universal-anchor control.
 
     Returns (docs, labels, domain_bounds, planted_a, planted_b, slot_of_node,
     node_codes):
@@ -685,7 +696,8 @@ def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
         per = max(1, (doc_len - n_common) // (2 * len(path)))
         for u in path:
             toks.append(rng.choice(node_sig_a[u], size=per))              # domain-0 signature
-            toks.append(V_a + rng.choice(node_sig_b[u], size=per))        # domain-1 signature
+            b_per = per * b_only_signal_boost if u == b_only_node else per
+            toks.append(V_a + rng.choice(node_sig_b[u], size=b_per))      # domain-1 signature
         if ubiquitous_b:
             toks.append(np.array([V_a + ubiq_col_b]))                     # universal token
         docs.append(np.concatenate(toks).astype(np.int64))
