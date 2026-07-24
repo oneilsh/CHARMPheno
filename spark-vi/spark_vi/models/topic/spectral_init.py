@@ -300,3 +300,32 @@ def spectral_init_beta(docs, partition, V: int) -> np.ndarray:
         beta[fg_idx[:n_fg]] = fg_beta[:n_fg]
 
     return beta
+
+
+def split_domains(beta, domain_bounds):
+    """Split a joint K×V β into per-domain row-renormalized bases.
+
+    Under the shared-topic multi-domain model a token drawn in domain 0 and a
+    token drawn in domain 1 from one document share the same θ, so the joint
+    co-occurrence factors as Q_01 = (B_0)ᵀ A (B_1) (spec) and ONE anchor defines
+    the topic across both domains. After recover_beta returns the joint β over
+    the concatenated vocab, slicing each topic row at the domain boundaries and
+    renormalizing each slice to sum 1 gives the per-domain P(word | topic)
+    matrices — the MixEHR-style bases (β^0, β^1) that share topic identity
+    (Halpern, Horng, Choi, Sontag, JAMIA 2016, anchor-and-learn corroboration).
+
+    domain_bounds: strictly-increasing cumulative offsets [0, ..., V]. Returns a
+    list of (K, V_d) row-stochastic matrices in domain order. A topic that never
+    expresses a domain (all-zero slice) falls back to a uniform row there so each
+    returned matrix stays a valid stochastic matrix.
+    """
+    out = []
+    for lo, hi in zip(domain_bounds[:-1], domain_bounds[1:]):
+        sub = beta[:, lo:hi].copy()
+        rs = sub.sum(axis=1, keepdims=True)
+        zero = (rs[:, 0] <= 0)
+        if zero.any():
+            sub[zero] = 1.0 / (hi - lo)
+            rs[zero, 0] = 1.0
+        out.append(sub / rs)
+    return out

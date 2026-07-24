@@ -76,3 +76,31 @@ def test_find_anchors_per_domain_floor_admits_sparse_domain_anchor():
     # by the pooled floor, but clears the sparse-domain mean under per-domain.
     assert 4 not in pooled
     assert 4 in per_dom
+
+
+def test_split_domains_renormalizes_each_slice():
+    import numpy as np
+    from spark_vi.models.topic.spectral_init import split_domains
+    # K=2 topics, V=5: domain A cols [0:3], domain B cols [3:5].
+    beta = np.array([
+        [0.4, 0.1, 0.1, 0.2, 0.2],   # topic 0
+        [0.0, 0.0, 0.0, 0.5, 0.5],   # topic 1: zero over domain A
+    ])
+    A, B = split_domains(beta, [0, 3, 5])
+    assert A.shape == (2, 3) and B.shape == (2, 2)
+    # topic 0 domain-A slice [0.4,0.1,0.1] renormalized by 0.6
+    np.testing.assert_allclose(A[0], np.array([0.4, 0.1, 0.1]) / 0.6)
+    np.testing.assert_allclose(B[0], np.array([0.2, 0.2]) / 0.4)
+    # every returned row sums to 1
+    np.testing.assert_allclose(A.sum(1), 1.0)
+    np.testing.assert_allclose(B.sum(1), 1.0)
+    # topic 1 is zero over domain A -> uniform fallback, still stochastic
+    np.testing.assert_allclose(A[1], np.full(3, 1.0 / 3))
+
+
+def test_split_domains_single_domain_is_identity_up_to_renorm():
+    import numpy as np
+    from spark_vi.models.topic.spectral_init import split_domains
+    beta = np.array([[0.5, 0.3, 0.2], [0.1, 0.6, 0.3]])
+    (only,) = split_domains(beta, [0, 3])
+    np.testing.assert_allclose(only, beta)   # already row-stochastic
