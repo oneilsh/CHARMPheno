@@ -80,8 +80,35 @@ def _row_normalize(Q: np.ndarray) -> np.ndarray:
     return Q / rs_safe
 
 
+def _domain_candidate_mask(marginal, min_marginal_frac, domain_bounds):
+    """Boolean 'eligible to be an anchor' mask, floored WITHIN each domain.
+
+    The candidate floor (find_anchors docstring) keeps sub-promille noise words
+    from being picked as spurious hull vertices. On a multi-domain joint Q the
+    pooled mean is dominated by the densest domain, so a sparser domain's real
+    anchors fall below the pooled bar and no anchor ever comes from it (spec:
+    'domain imbalance is the most likely thing to silently break init'). The fix
+    is to compare each word only to the mean nonzero marginal of ITS OWN domain.
+
+    domain_bounds is a strictly-increasing cumulative-offset sequence starting at
+    0 and ending at V; domain d spans [domain_bounds[d], domain_bounds[d+1]).
+    None -> a single pooled domain, reproducing the original pooled floor exactly.
+    """
+    V = marginal.shape[0]
+    if domain_bounds is None:
+        domain_bounds = [0, V]
+    mask = np.zeros(V, dtype=bool)
+    for lo, hi in zip(domain_bounds[:-1], domain_bounds[1:]):
+        seg = marginal[lo:hi]
+        pos = seg > 0
+        thr = min_marginal_frac * seg[pos].mean() if pos.any() else 0.0
+        mask[lo:hi] = seg >= thr
+    return mask
+
+
 def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
-                 min_marginal_frac: float = 1.0) -> list[int]:
+                 min_marginal_frac: float = 1.0,
+                 domain_bounds=None) -> list[int]:
     """Greedy farthest-point anchor selection on the row-normalized rows of Q.
 
     Gram–Schmidt "pivoted QR" geometry (Arora et al. 2013, Algorithm 4): build
@@ -110,6 +137,17 @@ def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
     phenotype rows. Seeds that are (near) linearly dependent on the existing
     basis are skipped, never erroring.
 
+    ``domain_bounds`` (optional cumulative column-offset sequence, e.g. a
+    concatenated multi-domain vocab ``[domain_0 ; domain_1 ; ...]``) floors the
+    candidate marginal WITHIN each domain instead of over the pooled Q. On a
+    joint Q built from domains of very different density (spec risk: domain
+    imbalance is the most likely thing to silently break init), the pooled mean
+    is dominated by the densest domain and a sparser domain's real anchors never
+    clear the bar — no anchor is ever drawn from it. Flooring per-domain fixes
+    this while leaving the greedy hull-vertex geometry itself untouched. Default
+    ``None`` reproduces the single pooled-domain floor exactly (see
+    ``_domain_candidate_mask``).
+
     Returns the ``n`` newly chosen anchor word ids in selection order.
     """
     Qbar = _row_normalize(Q)
@@ -117,9 +155,7 @@ def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
     norms = (Qbar * Qbar).sum(axis=1)            # squared row norms
 
     marginal = Q.sum(axis=1)
-    pos = marginal > 0
-    thr = min_marginal_frac * marginal[pos].mean() if pos.any() else 0.0
-    candidate = marginal >= thr                   # eligible to BE an anchor
+    candidate = _domain_candidate_mask(marginal, min_marginal_frac, domain_bounds)
 
     basis: list[np.ndarray] = []                  # orthonormal residual basis
     EPS = 1e-12

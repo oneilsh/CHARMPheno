@@ -29,3 +29,50 @@ def test_block_aware_init_recovers_rare_group_foreground():
     docs = [d for i, d in enumerate(docs) if ("rare" not in d.groups) or (i % 4 == 0)]
     beta0 = spectral_init_beta(docs, part, 240)
     assert foreground_recovers_group(beta0, part, "rare", planted, thresh=0.4)
+
+
+def test_find_anchors_domain_bounds_none_is_identical():
+    """domain_bounds=None reproduces the pooled-floor behavior exactly."""
+    import numpy as np
+    from spark_vi.models.topic.spectral_init import find_anchors, word_cooccurrence
+    from types import SimpleNamespace
+    rng = np.random.default_rng(0)
+    V = 20
+    docs = []
+    for _ in range(200):
+        toks = rng.integers(0, V, size=8)
+        u, c = np.unique(toks, return_counts=True)
+        docs.append(SimpleNamespace(indices=u, counts=c.astype(float)))
+    Q = word_cooccurrence(docs, V)
+    assert find_anchors(Q, 5) == find_anchors(Q, 5, domain_bounds=None)
+    assert find_anchors(Q, 5) == find_anchors(Q, 5, domain_bounds=[0, V])
+
+
+def test_find_anchors_per_domain_floor_admits_sparse_domain_anchor():
+    """A pure anchor in a sparse second domain clears its WITHIN-domain floor
+    even though its marginal is below the pooled mean, so it can be selected.
+    Under the pooled floor it is excluded; under the per-domain floor it is not."""
+    import numpy as np
+    from spark_vi.models.topic.spectral_init import find_anchors
+    # Domain A = cols [0:4] (dense), domain B = cols [4:6] (sparse).
+    # Build Q directly: dense block carries most mass; the domain-B anchor
+    # (col 4) co-occurs purely with a single domain-A word (col 0) but at low
+    # total mass.
+    V = 6
+    Q = np.zeros((V, V))
+    # dense domain-A co-occurrence
+    Q[0, 1] = Q[1, 0] = 0.20
+    Q[2, 3] = Q[3, 2] = 0.20
+    Q[0, 2] = Q[2, 0] = 0.10
+    # sparse domain-B anchor col 4 pairs only with its domain-A partner col 0, low mass
+    Q[0, 4] = Q[4, 0] = 0.02
+    # col 5 is domain-B noise, negligible
+    Q[5, 5] = 1e-9
+    Q = Q / Q.sum()
+    domain_bounds = [0, 4, 6]
+    pooled = find_anchors(Q, 4)                      # pooled floor
+    per_dom = find_anchors(Q, 4, domain_bounds=domain_bounds)
+    # The domain-B anchor (col 4) is below the pooled marginal mean and excluded
+    # by the pooled floor, but clears the sparse-domain mean under per-domain.
+    assert 4 not in pooled
+    assert 4 in per_dom
