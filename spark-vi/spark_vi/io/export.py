@@ -72,7 +72,7 @@ def _check_saveable_param(name: str, arr: object) -> np.ndarray:
             f"global_params[{name!r}] ({type(arr).__name__}) is not convertible "
             f"to a numeric array: {exc}"
         ) from exc
-    if out.dtype == object:
+    if out.dtype.hasobject:
         raise UnsupportedGlobalParamError(
             f"global_params[{name!r}] is a {type(arr).__name__}, which converts "
             f"to an OBJECT-dtype array; np.save can only store that as a pickle "

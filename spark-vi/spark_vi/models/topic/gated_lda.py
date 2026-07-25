@@ -28,8 +28,8 @@ seam), feeding both that weight and the per-domain THETA-CONTRIBUTION INSTRUMENT
 omega-weighted evidence mass each domain adds to gamma, which collapses to omega_m times
 domain-m token volume EXACTLY (insight 0069) and is therefore an omega-application trace,
 NOT the volume-imbalance diagnostic omega could be tuned against. Apart from that one
-per-token weight the
-gated CAVI never changes — it only ever sees a concatenated (K, V) expElogbeta and per-doc
+per-token weight the gated CAVI never changes — it only ever sees a concatenated (K, V)
+expElogbeta and per-doc
 concatenated indices — so local_update, update_global, compute_elbo, infer_local and
 iteration_summary each branch on `self.domains is None` and their domains=None arm is the
 original single-array code, unchanged. combine_stats and VIRunner integration are untouched
@@ -153,8 +153,9 @@ class GatedOnlineLDA(OnlineLDA):
         # Per-domain modality weight omega (see _resolve_omega). None (the default)
         # = the unweighted MixEHR-faithful path, byte-identical to pre-omega code.
         self.omega = self._resolve_omega(omega)
-        # Last aggregated per-domain theta-contribution (the volume-imbalance
-        # instrument; see local_update). Stashed driver-side by update_global so
+        # Last aggregated per-domain theta-contribution (the omega-application
+        # trace, NOT a volume-imbalance diagnostic; see local_update's docstring
+        # for what it is and is not). Stashed driver-side by update_global so
         # iteration_summary -- whose signature only carries global_params -- can
         # surface it. None until the first M-step; multi-domain only.
         self._theta_contribution_by_domain = None

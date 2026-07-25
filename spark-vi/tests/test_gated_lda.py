@@ -1286,12 +1286,15 @@ def _contrib_docs():
 def test_theta_contribution_by_domain_reported():
     """local_update emits the per-domain theta-contribution instrument.
 
-    Length n_domains, nonnegative, and LARGER for the higher-volume domain under
-    omega = 1 -- the volume-imbalance read the arc design needs to tune omega at
-    all. Under omega = 1 the documented definition reduces to the per-domain token
-    volume exactly (the 1e-100 phi_norm guard is below float64 resolution here), so
-    the assertion is on the known volumes (4, 14), not on a re-run of the code.
-    domains=None must NOT grow the key (single-domain stats dict unchanged)."""
+    Length n_domains, nonnegative, and LARGER for the higher-volume domain -- not
+    a volume-imbalance readout (insight 0069: the stat collapses to omega_m times
+    domain-m token volume for every omega, so it carries no fit-dependent signal),
+    just the cheapest regression guard that omega is actually being applied to
+    theta. Under omega = 1 the documented definition reduces to the per-domain
+    token volume exactly (the 1e-100 phi_norm guard is below float64 resolution
+    here), so the assertion is on the known volumes (4, 14), not on a re-run of
+    the code. domains=None must NOT grow the key (single-domain stats dict
+    unchanged)."""
     import numpy as np
     lay = _omega_lay()
     V, doms = 8, [4, 4]
