@@ -314,3 +314,54 @@ def test_initialize_global_uses_precomputed_spectral_lambda():
     planted = np.arange(lay.K * V, dtype=np.float64).reshape(lay.K, V) + 1.0
     gp = m.initialize_global({"spectral_lambda": planted})
     assert np.allclose(gp["lambda"], planted)
+
+
+# --- SP2 Task 1: per-domain dict-lambda storage + assemble/split + init ---
+
+def test_domains_none_is_single_array_unchanged():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=12, random_seed=7)          # domains=None
+    gp = m.initialize_global(None)
+    assert isinstance(gp["lambda"], np.ndarray) and gp["lambda"].shape == (lay.K, 12)
+
+
+def test_multidomain_init_is_per_domain_dict():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=56, domains=[40, 16], random_seed=7)
+    gp = m.initialize_global(None)
+    lam = gp["lambda"]
+    assert set(lam) == {0, 1}
+    assert lam[0].shape == (lay.K, 40) and lam[1].shape == (lay.K, 16)
+
+
+def test_assemble_split_round_trip():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], random_seed=1)
+    lam = {0: np.abs(np.random.default_rng(0).normal(size=(lay.K, 4))) + .1,
+           1: np.abs(np.random.default_rng(1).normal(size=(lay.K, 3))) + .1}
+    eb = m._assemble_expElogbeta(lam)
+    assert eb.shape == (lay.K, 7)
+    # each block equals its own full-row normalization
+    from scipy.special import digamma
+    np.testing.assert_allclose(eb[:, :4], np.exp(digamma(lam[0]) - digamma(lam[0].sum(1, keepdims=True))))
+    # split of a concatenated array round-trips the block shapes
+    back = m._split_to_domains(eb)
+    assert back[0].shape == (lay.K, 4) and back[1].shape == (lay.K, 3)
+
+
+def test_domains_must_sum_to_vocab():
+    import pytest
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    with pytest.raises(ValueError):
+        GatedOnlineLDA(lay, vocab_size=56, domains=[40, 10])   # 50 != 56

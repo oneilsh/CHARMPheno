@@ -44,13 +44,33 @@ def node_affinity(theta: np.ndarray, lay: DagLayout) -> dict[int, float]:
 class GatedOnlineLDA(OnlineLDA):
     def __init__(self, lay: DagLayout, vocab_size: int, *, init: str = "random",
                  optimize_alpha: bool = False,
-                 frontier_histogram: dict | None = None, **kw) -> None:
+                 frontier_histogram: dict | None = None,
+                 domains: list[int] | None = None, **kw) -> None:
         # optimize_alpha is handled by the gated per-node Newton step (this class),
         # NOT OnlineLDA's full-K alpha_newton_step; pass it to the parent as False
         # so the inherited update_global never runs the vanilla alpha step.
         super().__init__(K=lay.K, vocab_size=vocab_size, optimize_alpha=False, **kw)
         self.lay = lay
         self.init = init
+        # Multi-domain (MixEHR-style, Li, Nair, Lu et al. 2020, Nat. Commun.) storage:
+        # `domains` is a sequence of per-domain vocab sizes [V_0, V_1, ...] that MUST
+        # sum to vocab_size. `domains=None` (default) keeps the single-domain (K, V)
+        # array path byte-for-byte unchanged everywhere in this class. When set,
+        # global_params["lambda"] becomes a literal per-domain dict {m: (K, V_m)};
+        # `_domain_bounds` are the cumulative offsets [0, V_0, V_0+V_1, ...] used to
+        # assemble/split a concatenated (K, V) view for the shared gated CAVI.
+        if domains is not None:
+            if sum(domains) != vocab_size:
+                raise ValueError(
+                    f"domains {list(domains)} sum to {sum(domains)}, "
+                    f"expected vocab_size={vocab_size}"
+                )
+            self.domains = list(domains)
+            self._domain_bounds = np.concatenate(
+                ([0], np.cumsum(self.domains))).astype(np.int64)
+        else:
+            self.domains = None
+            self._domain_bounds = None
         if getattr(self, "optimize_eta", False):
             # The gated update_global override optimizes only alpha; it never
             # touches eta. Fail fast rather than silently ignoring optimize_eta
@@ -80,7 +100,37 @@ class GatedOnlineLDA(OnlineLDA):
         "random": inherited OnlineLDA Gamma init — the validated default (the gate already
         welds topics to nodes, so no symmetry-breaking seed is needed). Other strategies
         resolve from gated_init.INIT_STRATEGIES and need the training corpus in data_summary.
-        An unknown name raises ValueError."""
+        An unknown name raises ValueError.
+
+        Multi-domain (self.domains set, MixEHR-style, Li, Nair, Lu et al. 2020, Nat.
+        Commun.): global_params["lambda"] is a per-domain dict {m: (K, V_m)} instead of
+        a single (K, V) array; alpha/eta are unaffected (they live in the shared
+        DAG-gated theta, not per-domain). "random" draws one Gamma(gamma_shape,
+        1/gamma_shape) block per domain (see `_random_domain_lambda`, the per-domain
+        analogue of OnlineLDA.initialize_global's single draw). domains=None keeps the
+        single-array path below UNCHANGED (byte-identical)."""
+        if self.domains is not None:
+            if self.init == "random":
+                lam = self._random_domain_lambda()
+            else:
+                # TODO(SP2/SP3): multi-domain spectral seed — join Q over the
+                # concatenated vocab -> find_anchors(..., domain_bounds=self._domain_bounds)
+                # -> recover_beta -> spectral_init.split_domains -> per-domain lambda_m
+                # (scaled like gated_init.spectral_block_aligned_lambda's single-domain
+                # seed). Not wired up in SP2 Task 1: gated_init's per-node topo-order
+                # deflation loop does not yet thread domain_bounds through
+                # find_anchors/recover_beta, and no Task 1 test exercises it — only
+                # init="random" is required/validated on the multi-domain path so far.
+                raise NotImplementedError(
+                    f"multi-domain spectral init {self.init!r} is not implemented yet; "
+                    "only init='random' is supported when domains is set (SP2 Task 1). "
+                    "See the TODO above this raise for the planned SP1-seed wiring."
+                )
+            return {
+                "lambda": lam,
+                "alpha": self.alpha.copy(),         # defensive copy — runner mutates
+                "eta": np.array(self.eta),          # 0-d ndarray for combine_stats type-uniformity
+            }
         if self.init == "random":
             return super().initialize_global(data_summary)
         from spark_vi.models.topic.gated_init import INIT_STRATEGIES
@@ -101,6 +151,48 @@ class GatedOnlineLDA(OnlineLDA):
             gp["lambda"] = INIT_STRATEGIES[self.init](
                 data_summary, self.lay, self.V, anchor_scope=scope, topo_order=topo)
         return gp
+
+    def _random_domain_lambda(self) -> dict[int, np.ndarray]:
+        """Per-domain Gamma(gamma_shape, 1/gamma_shape) draw, one (K, V_m) block per
+        domain in domain order — the multi-domain analogue of
+        OnlineLDA.initialize_global's single (K, V) draw (same distribution, same RNG
+        seeding contract). Drawing the blocks sequentially from one RNG stream means a
+        single-domain-shaped `domains=[V]` reproduces the domains=None draw exactly."""
+        if self.random_seed is None:
+            def draw(size):
+                return np.random.gamma(
+                    shape=self.gamma_shape, scale=1.0 / self.gamma_shape, size=size)
+        else:
+            rng = np.random.default_rng(self.random_seed)
+
+            def draw(size):
+                return rng.gamma(
+                    shape=self.gamma_shape, scale=1.0 / self.gamma_shape, size=size)
+        return {m: draw((self.lay.K, v)) for m, v in enumerate(self.domains)}
+
+    def _assemble_expElogbeta(self, lam_dict: dict[int, np.ndarray]) -> np.ndarray:
+        """Assemble the concatenated (K, V) expElogbeta the shared gated CAVI consumes
+        from a per-domain lambda dict {m: (K, V_m)} (MixEHR-style storage; Li, Nair, Lu
+        et al. 2020, Nat. Commun.).
+
+        Each domain is normalized ON ITS OWN full row — exp(psi(lam_m) -
+        psi(lam_m.sum(axis=1))) — then the blocks are concatenated in domain order.
+        This is type-safe: a domain's rows can never be normalized against another
+        domain's mass (the failure mode a single pooled array cannot prevent)."""
+        blocks = [
+            np.exp(digamma(lam_dict[m]) - digamma(lam_dict[m].sum(axis=1, keepdims=True)))
+            for m in range(len(self.domains))
+        ]
+        return np.concatenate(blocks, axis=1)
+
+    def _split_to_domains(self, concat: np.ndarray) -> dict[int, np.ndarray]:
+        """Slice a concatenated (K, V) array into a per-domain dict {m: (K, V_m)} at
+        self._domain_bounds — the inverse of `_assemble_expElogbeta`'s concatenation."""
+        bounds = self._domain_bounds
+        return {
+            m: concat[:, bounds[m]:bounds[m + 1]]
+            for m in range(len(self.domains))
+        }
 
     def local_update(
         self,
