@@ -469,6 +469,89 @@ def test_multidomain_spectral_seed_fixes_topic_death():
             assert recovery > 0.5, (u, md, recovery)         # spectral: ~0.67-0.72, no topic death
 
 
+def test_multidomain_svi_planted_bonly_node_recovery():
+    """SVI acceptance analogue of SP1 Task 4: a spectral-seeded multi-domain fit
+    recovers each node's planted per-domain signature on a NON-FLAT DAG containing
+    a `b_only_node` -- a node recoverable from domain 1 ALONE. This is the
+    genuinely new case here: both other multi-domain tests in this file use a flat
+    DAG (`parent={1:0,2:0,3:0}`) with `b_only_node=None`, where every node's
+    signature is undiluted in both domains and no shared-parent ambiguity exists.
+
+    DAG: parent={1: 0, 2: 1} -- node 1 is node 2's non-root parent (required by
+    `b_only_node`; the corpus generator raises if the target's only parent is the
+    root, which carries no signature block to share). b_only_node=2 makes node
+    2's DOMAIN-0 signature block IDENTICAL to node 1's, at the generator's own
+    documented default boost (b_only_signal_boost=4, not hand-tuned here).
+
+    HONESTY ABOUT WHAT'S IDENTIFIED (do not over-claim): in DOMAIN 0, node 2's
+    planted support IS node 1's planted support by construction, so mass there
+    does NOT uniquely identify node 2 -- it is equally consistent with node 1.
+    The domain-0 assertions below check for MASS on that (shared) support, not
+    for discriminating the two nodes. In DOMAIN 1, node 2's support is exclusive
+    to it, so recovery there IS unique identification -- the actual point of the
+    "recoverable from domain 1 alone" plant, and it gets the strongest gate below.
+
+    anchor_scope="frontier": this DAG is genuinely hierarchical (node 1 is an
+    ancestor of node 2, so EVERY document's frontier closure includes node 1),
+    unlike the flat DAGs above where closure(v) == {v} and anchor_scope is moot.
+    Verified: under the default "closure" scope this exact corpus/fit produces
+    near-uniform-or-worse recovery everywhere (domain 0: ~0.23-0.25 vs uniform
+    0.225; domain 1 node 1: ~0.20 vs uniform 0.1875; domain 1 node 2: ~0.006 --
+    total topic death) because node 1's anchor sketch pools over every document
+    (it is common to all of them), which -- as gated_init.py's own docstring
+    documents -- lets a parent's ubiquity get mistaken for background at anchor
+    selection. "frontier" (trains each node's sketch only from docs where it is
+    the deepest attested node) is the documented fix for exactly this DAG shape,
+    applied here via data_summary's existing anchor_scope knob -- a configuration
+    choice for a non-flat DAG, not a plant or assertion hack.
+
+    Batch-VB (Hoffman, Blei & Bach 2010) full-batch lr=1.0 for 50 iterations,
+    mirroring the other two multi-domain tests. Dead-topic baselines (uniform
+    mass on the same support): ~0.225 domain 0, ~0.1875 domain 1. Observed
+    recovery, stable across corpus seeds 1-8 (this test pins seed=5): domain 0
+    node 1 ~0.50-0.53, node 2 (shared/ambiguous) ~0.47-0.50; domain 1 node 1
+    ~0.49-0.50, node 2 (unique) ~0.76-0.82."""
+    import numpy as np
+    from tests._stm_synth import two_domain_dag_corpus
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.types import GatedBOWDocument
+    parent = {1: 0, 2: 1}
+    docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
+        parent=parent, node_prev={1: 1., 2: 1.}, V_a=40, V_b=16,
+        doc_len=40, seed=5, b_only_node=2)
+    lay = DagLayout(parent, n_bg=2, tpn=1); V = domain_bounds[-1]
+    ds = {"train_docs": [np.asarray(d) for d in docs[:800]],
+          "train_labels": [int(f) for f in labels[:800]],
+          "anchor_scope": "frontier"}   # non-flat DAG: see docstring for why
+    m = GatedOnlineLDA(lay, vocab_size=V, domains=[40, 16], init="spectral", random_seed=0)
+    gp = m.initialize_global(ds)
+    assert set(gp["lambda"]) == {0, 1}                       # per-domain dict seed
+    gdocs = [GatedBOWDocument(indices=np.unique(d).astype(np.int32),
+             counts=np.unique(d, return_counts=True)[1].astype(float), length=len(d),
+             frontier=frozenset({int(f)}))
+             for d, f in zip(docs[:800], labels[:800])]
+    for _ in range(50):
+        gp = m.update_global(gp, m.local_update(gdocs, gp), learning_rate=1.0)
+    planted = {0: pa, 1: pb}
+    for md in (0, 1):
+        lam_m = gp["lambda"][md]
+        beta_m = lam_m / lam_m.sum(1, keepdims=True)
+        np.testing.assert_allclose(beta_m.sum(1), 1.0)       # valid per-domain distribution
+        assert np.isfinite(lam_m).all()
+        for u in lay.nodes:
+            support = np.where(planted[md][slot_of_node[u]] > 1e-3)[0]
+            recovery = float(beta_m[lay.block[u]][:, support].sum(axis=1).max())
+            uniform = len(support) / lam_m.shape[1]          # dead-topic baseline
+            assert recovery > 1.5 * uniform, (u, md, recovery, uniform)   # clear of dead-topic
+            if u == 2 and md == 1:
+                # domain 1 is where b_only_node=2's EXCLUSIVE signature lives --
+                # unique identification, the strongest claim this plant supports.
+                assert recovery > 0.6, (u, md, recovery, uniform)         # observed ~0.76-0.82
+            else:
+                assert recovery > 0.4, (u, md, recovery, uniform)         # observed ~0.47-0.53
+
+
 def test_single_domain_fit_byte_identical():
     """domains=None reproduces the current gated fit exactly (fixed seed): two
     independently-run fits over the same docs/seed must be bit-identical, and the
