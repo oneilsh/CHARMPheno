@@ -156,20 +156,28 @@ class GatedOnlineLDA(OnlineLDA):
         if self.domains is not None:
             if self.init == "random":
                 lam = self._random_domain_lambda()
+            elif data_summary is not None and "spectral_lambda" in data_summary:
+                # Scalable/shim path (SP3): the per-domain dict lambda is precomputed
+                # on the RDD and handed over (mirrors the single-domain spectral_lambda
+                # handoff below); use it directly.
+                sl = data_summary["spectral_lambda"]
+                lam = {int(m): np.asarray(v, dtype=np.float64) for m, v in sl.items()}
             else:
-                # TODO(SP2/SP3): multi-domain spectral seed — join Q over the
-                # concatenated vocab -> find_anchors(..., domain_bounds=self._domain_bounds)
-                # -> recover_beta -> spectral_init.split_domains -> per-domain lambda_m
-                # (scaled like gated_init.spectral_block_aligned_lambda's single-domain
-                # seed). Not wired up in SP2 Task 1: gated_init's per-node topo-order
-                # deflation loop does not yet thread domain_bounds through
-                # find_anchors/recover_beta, and no Task 1 test exercises it — only
-                # init="random" is required/validated on the multi-domain path so far.
-                raise NotImplementedError(
-                    f"multi-domain spectral init {self.init!r} is not implemented yet; "
-                    "only init='random' is supported when domains is set (SP2 Task 1). "
-                    "See the TODO above this raise for the planned SP1-seed wiring."
-                )
+                # Multi-domain spectral seed: block-aligned anchor recipe with the
+                # per-domain candidate floor, split into per-domain lambda_m. Fixes the
+                # random-init topic-death of insight 0066 (a node anchors on its
+                # sparse-domain word, defining the topic across both domains via Q_01).
+                from spark_vi.models.topic.gated_init import (
+                    INIT_STRATEGIES, multidomain_spectral_lambda)
+                if self.init not in INIT_STRATEGIES:
+                    raise ValueError(
+                        f"unknown init strategy {self.init!r}; "
+                        f"known: {['random'] + sorted(INIT_STRATEGIES)}")
+                scope = (data_summary or {}).get("anchor_scope", "closure")
+                topo = (data_summary or {}).get("topo_order", "forward")
+                lam = multidomain_spectral_lambda(
+                    data_summary, self.lay, self.domains,
+                    anchor_scope=scope, topo_order=topo)
             return {
                 "lambda": lam,
                 "alpha": self.alpha.copy(),         # defensive copy — runner mutates

@@ -429,6 +429,46 @@ def test_multidomain_em_refines_seeded_per_domain_betas():
             assert recovery > 0.4, (u, md, recovery, uniform)   # recovered ~0.5 >> uniform
 
 
+def test_multidomain_spectral_seed_fixes_topic_death():
+    """The multi-domain spectral seed (block-aligned anchors WITH the per-domain
+    candidate floor, split per-domain) gives every node's block topic traction in
+    BOTH domains, so a fit at random_seed=0 -- the seed that suffers topic-death
+    under RANDOM init (insight 0066) -- recovers EVERY node/domain (>0.5 mass on the
+    planted support), not just the lucky ones. Without the per-domain floor the
+    denser domain dominates anchor selection and a node's sparse-domain slice dies
+    (recovery ~0.005); with it, a node anchors on its sparse-domain word which then
+    defines the topic across both domains via the Q_01 within-doc tie."""
+    import numpy as np
+    from tests._stm_synth import two_domain_dag_corpus
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.types import GatedBOWDocument
+    parent = {1: 0, 2: 0, 3: 0}
+    docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
+        parent=parent, node_prev={1: 1., 2: 1., 3: 1.}, V_a=40, V_b=16,
+        doc_len=40, seed=5, b_only_node=None)
+    lay = DagLayout(parent, n_bg=2, tpn=1); V = domain_bounds[-1]
+    ds = {"train_docs": [np.asarray(d) for d in docs[:800]],
+          "train_labels": [int(f) for f in labels[:800]]}
+    m = GatedOnlineLDA(lay, vocab_size=V, domains=[40, 16], init="spectral", random_seed=0)
+    gp = m.initialize_global(ds)
+    assert set(gp["lambda"]) == {0, 1}                       # per-domain dict seed
+    assert gp["lambda"][0].shape == (lay.K, 40) and gp["lambda"][1].shape == (lay.K, 16)
+    gdocs = [GatedBOWDocument(indices=np.unique(d).astype(np.int32),
+             counts=np.unique(d, return_counts=True)[1].astype(float), length=len(d),
+             frontier=frozenset({int(f)}))
+             for d, f in zip(docs[:800], labels[:800])]
+    for _ in range(50):
+        gp = m.update_global(gp, m.local_update(gdocs, gp), learning_rate=1.0)
+    planted = {0: pa, 1: pb}
+    for md in (0, 1):
+        beta_m = gp["lambda"][md] / gp["lambda"][md].sum(1, keepdims=True)
+        for u in lay.nodes:
+            support = np.where(planted[md][slot_of_node[u]] > 1e-3)[0]
+            recovery = float(beta_m[lay.block[u]][:, support].sum(axis=1).max())
+            assert recovery > 0.5, (u, md, recovery)         # spectral: ~0.67-0.72, no topic death
+
+
 def test_single_domain_fit_byte_identical():
     """domains=None reproduces the current gated fit exactly (fixed seed): two
     independently-run fits over the same docs/seed must be bit-identical, and the

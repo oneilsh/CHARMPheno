@@ -102,7 +102,8 @@ def _anchor_node_set(front, lay, anchor_scope):
 
 def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
                                   anchor_scope: str = "closure",
-                                  topo_order: str = "forward") -> np.ndarray:
+                                  topo_order: str = "forward",
+                                  domain_bounds=None) -> np.ndarray:
     """Block-aligned spectral lambda seed (topological, direction set by `topo_order`).
 
     data_summary carries {"train_docs": [token-id arrays], "train_labels": [node id or
@@ -161,7 +162,7 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
         bg_anchors = []
     else:
         Q_all = word_cooccurrence(bg_docs, V)
-        bg_anchors = find_anchors(Q_all, lay.n_bg)
+        bg_anchors = find_anchors(Q_all, lay.n_bg, domain_bounds=domain_bounds)
         bg_beta = recover_beta(Q_all, bg_anchors)
         for i in range(min(lay.n_bg, bg_beta.shape[0])):
             beta[i] = bg_beta[i]
@@ -179,7 +180,7 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
         Q_u = word_cooccurrence(docs_u, V)
         anc = relatives(u)
         seed = list(bg_anchors) + [a for p in anc for a in node_anchors.get(p, [])]
-        fg_anchors = find_anchors(Q_u, lay.tpn, seed_rows=seed)
+        fg_anchors = find_anchors(Q_u, lay.tpn, seed_rows=seed, domain_bounds=domain_bounds)
         if not fg_anchors:
             logger.warning(
                 "spectral_block_aligned_lambda: node %s found no anchors "
@@ -196,6 +197,38 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
 
     beta = beta + 1e-9                                    # keep lambda strictly positive
     return beta * float(scale)
+
+
+def multidomain_spectral_lambda(data_summary, lay, domains, *, scale: float = 200.0,
+                                anchor_scope: str = "closure",
+                                topo_order: str = "forward") -> dict:
+    """Per-domain dict-lambda spectral seed for the multi-domain gated model.
+
+    Runs the block-aligned anchor recipe (spectral_block_aligned_lambda) on the
+    joint co-occurrence over the concatenated vocab [domain 0; domain 1; ...] WITH
+    the per-domain candidate floor threaded through anchor selection (domain_bounds
+    from `domains`), then splits the block-aligned joint beta into per-domain
+    row-normalized matrices (spectral_init.split_domains) scaled into lambda_m.
+
+    The per-domain floor is load-bearing: without it the denser domain dominates
+    anchor selection and a node's sparse-domain slice is under-seeded, which the
+    E/M then leaves as topic-death (a node topic stuck at the uniform prior; see
+    insight 0066). With it, a node can anchor on its sparse-domain word, which
+    then defines the topic across BOTH domains via the within-document cross-block
+    co-occurrence (Q_01) — the MixEHR shared-theta tie (Li et al. 2020).
+
+    `domains` = per-domain vocab sizes [V_0, V_1, ...]; V = sum(domains). Returns
+    {m: (K, V_m)} lambda, each block a scaled per-domain distribution + a tiny
+    positive floor. data_summary carries {'train_docs':..., 'train_labels':...} as
+    for spectral_block_aligned_lambda."""
+    from spark_vi.models.topic.spectral_init import split_domains
+    V = int(sum(domains))
+    bounds = np.concatenate(([0], np.cumsum(domains))).astype(np.int64).tolist()
+    beta_joint = spectral_block_aligned_lambda(
+        data_summary, lay, V, scale=1.0, anchor_scope=anchor_scope,
+        topo_order=topo_order, domain_bounds=bounds)          # (K, V), rows joint distributions
+    per_domain = split_domains(beta_joint, bounds)            # each row-normalized within its domain
+    return {m: per_domain[m] * float(scale) + 1e-9 for m in range(len(domains))}
 
 
 INIT_STRATEGIES = {"spectral": spectral_block_aligned_lambda}
