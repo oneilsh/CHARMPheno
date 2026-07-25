@@ -818,3 +818,29 @@ class GatedOnlineLDA(OnlineLDA):
                 f" frac=[{', '.join(f'{f:.3g}' for f in frac)}]"
             )
         return out
+
+    def get_metadata(self) -> dict[str, Any]:
+        """Shape constants plus, in multi-domain mode, the constants needed to
+        RECONSTRUCT a fitted model from a saved VIResult.
+
+        `domains` fixes the per-domain vocabulary widths that slice the
+        concatenated id space; `eta_m` and `omega` are not recoverable from
+        global_params -- in multi-domain mode global_params["eta"] is only a
+        scalar-mean placeholder and omega never enters global_params at all
+        (it weights theta during inference, not any stored parameter). Without
+        these three a saved multi-domain result cannot be interpreted, let
+        alone served. All values are plain Python types: `metadata` is written
+        verbatim into manifest.json.
+
+        eta provenance: multi-domain update_global/compute_elbo read eta from
+        `self._eta_domains`, not from global_params, which is sound only because
+        `optimize_eta` is rejected in __init__ so eta cannot change during a
+        fit. `test_optimize_eta_rejected_pins_the_eta_provenance_invariant`
+        pins that.
+        """
+        md = super().get_metadata()
+        if self.domains is not None:
+            md["domains"] = [int(v) for v in self.domains]
+            md["eta_m"] = [float(x) for x in self._eta_domains]
+            md["omega"] = [float(x) for x in self.omega]
+        return md

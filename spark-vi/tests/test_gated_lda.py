@@ -1552,3 +1552,50 @@ def test_multidomain_init_strategy_without_a_multidomain_form_raises(monkeypatch
         GatedOnlineLDA(lay, 8, domains=[4, 4], init="other").initialize_global(None)
     # single-domain still dispatches that strategy normally (no behavior change)
     assert "other" in gated_init.INIT_STRATEGIES
+
+
+def test_multidomain_get_metadata_carries_reconstruction_constants():
+    """A saved multi-domain result must be reconstructable: domains, eta_m and
+    omega have to travel in metadata, since global_params["eta"] is only a
+    scalar-mean placeholder in multi-domain mode."""
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=56, domains=[40, 16],
+                       eta=[0.02, 0.05], omega=[1.0, 0.4], random_seed=0)
+    md = m.get_metadata()
+    assert md["K"] == lay.K and md["V"] == 56
+    assert md["domains"] == [40, 16]
+    assert md["eta_m"] == [0.02, 0.05]
+    assert md["omega"] == [1.0, 0.4]
+    # JSON-serializable: metadata is written verbatim into manifest.json.
+    import json
+    json.dumps(md)
+
+
+def test_single_domain_get_metadata_unchanged():
+    """domains=None must return exactly the base contract, so existing archives
+    and consumers see no new keys."""
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=12, random_seed=0)
+    assert m.get_metadata() == {"K": lay.K, "V": 12}
+
+
+def test_optimize_eta_rejected_pins_the_eta_provenance_invariant():
+    """Multi-domain reads eta from instance state; single-domain reads it from
+    global_params["eta"]. Those two sources are equivalent ONLY because eta
+    cannot change during a fit -- optimize_eta is rejected outright. This test
+    pins that rejection: if it is ever relaxed, multi-domain eta provenance
+    silently diverges from single-domain and a resumed fit takes eta from the
+    reconstructed model rather than the checkpoint."""
+    import pytest
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    for kwargs in ({}, {"domains": [40, 16]}):
+        vocab = 56 if kwargs else 12
+        with pytest.raises(NotImplementedError, match="optimize_eta"):
+            GatedOnlineLDA(lay, vocab_size=vocab, optimize_eta=True, **kwargs)
