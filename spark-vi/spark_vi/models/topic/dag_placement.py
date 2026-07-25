@@ -125,6 +125,24 @@ def _as_counts(doc):
     return SimpleNamespace(indices=idx, counts=cnt.astype(np.float64))
 
 
+def _resolve_domain_priors(beta_prior, n_domains):
+    """Resolve `beta_prior` to one eta_m per domain (MixEHR-style per-modality Dirichlet
+    concentration; Li, Nair, Lu et al. 2020, Nat. Commun.). A scalar broadcasts to every
+    domain — with one domain that is exactly the scalar, so the single-domain path keeps
+    the caller's own float and its arithmetic unchanged. A sequence must give one strictly
+    positive value per domain."""
+    if np.isscalar(beta_prior):
+        etas = [float(beta_prior)] * n_domains
+    else:
+        etas = [float(b) for b in beta_prior]
+        if len(etas) != n_domains:
+            raise ValueError(
+                f"beta_prior sequence length {len(etas)} != n_domains {n_domains}")
+    if any(e <= 0 for e in etas):
+        raise ValueError(f"all beta_prior components must be > 0, got {etas}")
+    return etas
+
+
 def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
               n_iter=150, burn=80, rng=None, domain_bounds=None):
     """Gated topic training by collapsed sampling: each training item is masked to
@@ -132,22 +150,43 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
     structurally. Anchor-word spectral init (Arora et al. 2013) seeds beta. Returns posterior-mean
     beta_hat (K, V).
 
-    ``domain_bounds`` (optional; spec's multi-domain joint-Q construction) is passed
-    straight through to the spectral seed's ``find_anchors(Q, K, ...)`` call so anchors
-    for a sparser domain clear their own per-domain candidate floor instead of the
-    pooled-Q mean being dominated by a denser domain (see
-    ``spectral_init.find_anchors`` / ``_domain_candidate_mask``). Default ``None``
-    reproduces current single-pooled-domain behavior byte-for-byte.
+    ``domain_bounds`` (optional) are the cumulative offsets [0, V_0, V_0+V_1, ...] over the
+    concatenated vocabulary: token id w belongs to domain
+    searchsorted(domain_bounds, w, "right") - 1. It does two things.
 
-    The per-token conditional uses ONLY the collapsed word-topic factor
-    (n_kw + beta_prior) / (n_k + V*beta_prior) of Griffiths & Steyvers (2004), restricted to the
-    gated allowed-set. The usual document-topic Dirichlet factor (n_dk + alpha) is intentionally
+    (1) It is passed straight through to the spectral seed's ``find_anchors(Q, K, ...)`` call
+    so anchors for a sparser domain clear their own per-domain candidate floor instead of the
+    pooled-Q mean being dominated by a denser domain (see ``spectral_init.find_anchors`` /
+    ``_domain_candidate_mask``).
+
+    (2) It makes the collapsed conditional PER DOMAIN (MixEHR's per-modality topic-word
+    distributions; Li, Nair, Lu et al. 2020, Nat. Commun.): a topic holds one distribution
+    per domain over that domain's own ids, so a token w in domain m is sampled with
+    (n_kw + eta_m) / (n_{k,·∈m} + V_m·eta_m) — the per-domain token total n_{k,·∈m} and the
+    per-domain vocabulary size V_m, NOT the pooled totals. Pooling would make a topic's
+    domain-m evidence compete against its token mass in every OTHER domain, penalizing
+    topics whose domain mix differs from the corpus average. ``beta_prior`` may be a scalar
+    (the same eta for every domain) or one eta_m per domain.
+
+    Returned beta_hat is normalized PER DOMAIN BLOCK — beta_hat[k, V_m block] sums to 1 for
+    each topic k and domain m — so it means the same object as the SVI engine's per-domain
+    lambda dict (GatedOnlineLDA with `domains=...`, where each lam_m row-normalizes on its
+    own) and the two are directly comparable domain by domain.
+
+    ``domain_bounds=None`` == one domain spanning [0, V). That is not a special case: with
+    N=1 the per-domain totals ARE the pooled totals, V_0·eta_0 IS V·beta_prior, and
+    per-domain-block normalization IS row normalization — the same code path therefore
+    reproduces the single-pooled-domain sampler byte-for-byte.
+
+    The per-token conditional uses ONLY the collapsed word-topic factor of
+    Griffiths & Steyvers (2004), restricted to the gated allowed-set. The usual
+    document-topic Dirichlet factor (n_dk + alpha) is intentionally
     omitted: the gate already fixes each document's admissible topics to its label closure, so the
     per-document mixing term is not what we are estimating here — we want the node-tied topic-word
     distributions. This is a supervised topic-word estimator, not the full unsupervised LDA sampler;
     hence there is no `alpha` argument. The returned beta_hat averages the post-burn token counts
-    (n_kw + beta_prior) and normalizes once — the averaged-counts point estimate, not the mean of
-    per-sweep normalized rows.
+    (n_kw + eta_{m(w)}, the per-domain prior broadcast over each block) and normalizes once — the
+    averaged-counts point estimate, not the mean of per-sweep normalized rows.
 
     ORACLE / VALIDATOR — NOT the production fit path. This collapsed-Gibbs estimator is the reference
     the production SVI engine (GatedOnlineLDA, models/topic/gated_lda.py) is validated against; the
@@ -155,6 +194,18 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
     tests only (its runtime — a Python per-token loop — is not tuned for production scale)."""
     rng = np.random.default_rng() if rng is None else rng
     K = lay.K
+    bounds = np.asarray([0, V] if domain_bounds is None else domain_bounds, dtype=np.int64)
+    if bounds[0] != 0 or bounds[-1] != V or np.any(np.diff(bounds) <= 0):
+        raise ValueError(
+            f"domain_bounds {list(bounds)} must be strictly increasing offsets from 0 "
+            f"to V={V} (the concatenated vocabulary must be covered exactly once)")
+    n_dom = len(bounds) - 1
+    etas = np.asarray(_resolve_domain_priors(beta_prior, n_dom), dtype=np.float64)
+    # Per-domain denominators V_m·eta_m and the length-V prior vector (eta_m over block m).
+    v_eta = np.array([(bounds[m + 1] - bounds[m]) * etas[m] for m in range(n_dom)])
+    prior_vec = np.empty(V, dtype=np.float64)
+    for m in range(n_dom):
+        prior_vec[bounds[m]:bounds[m + 1]] = etas[m]
     counted = [_as_counts(d) for d in train_docs]
     Q = word_cooccurrence(counted, V)
     beta0 = recover_beta(Q, find_anchors(Q, K, domain_bounds=domain_bounds))
@@ -164,11 +215,13 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
     beta0 = beta0 + 1e-6
     beta0 /= beta0.sum(1, keepdims=True)
     n_kw = np.zeros((K, V))
-    n_k = np.zeros(K)
+    n_km = np.zeros((K, n_dom))            # per-domain topic token totals n_{k,·∈m}
     # Each label may be a scalar node id or a frontier set (comorbid patient). A comorbid patient
     # trains every block along the union of its frontier's closures — strictly better use of data.
     allowed = [lay.allowed_set(y if hasattr(y, "__iter__") else (y,)) for y in train_labels]
     words = [np.asarray(d, dtype=np.int64) for d in train_docs]
+    # Per-token domain index, precomputed once per doc (constant over the sweeps).
+    doms = [np.searchsorted(bounds, w, side="right") - 1 for w in words]
     Z = []
     for d in range(len(train_docs)):
         al = allowed[d]
@@ -178,32 +231,34 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
         zi = al[(rng.random(len(w))[:, None] < np.cumsum(r, 1)).argmax(1)]
         Z.append(zi)
         np.add.at(n_kw, (zi, w), 1.0)
-        for k in zi:
-            n_k[k] += 1.0
-    Vb = V * beta_prior
+        np.add.at(n_km, (zi, doms[d]), 1.0)
     acc = np.zeros((K, V))
     nacc = 0
     for it in range(n_iter):
         for d in range(len(train_docs)):
             al = allowed[d]
             w = words[d]
+            dm = doms[d]
             zi = Z[d]
             for i in range(len(w)):
                 wi = w[i]
+                mi = dm[i]
                 k = zi[i]
                 n_kw[k, wi] -= 1.0
-                n_k[k] -= 1.0
-                p = (n_kw[al, wi] + beta_prior) / (n_k[al] + Vb)
+                n_km[k, mi] -= 1.0
+                p = (n_kw[al, wi] + etas[mi]) / (n_km[al, mi] + v_eta[mi])
                 p /= p.sum()
                 knew = al[np.searchsorted(np.cumsum(p), rng.random())]
                 zi[i] = knew
                 n_kw[knew, wi] += 1.0
-                n_k[knew] += 1.0
+                n_km[knew, mi] += 1.0
         if it >= burn:
-            acc += n_kw + beta_prior
+            acc += n_kw + prior_vec
             nacc += 1
     beta_hat = acc / max(nacc, 1)
-    beta_hat /= beta_hat.sum(1, keepdims=True)
+    for m in range(n_dom):
+        blk = beta_hat[:, bounds[m]:bounds[m + 1]]      # view; n_dom == 1 -> the whole row
+        blk /= blk.sum(1, keepdims=True)
     return beta_hat
 
 
