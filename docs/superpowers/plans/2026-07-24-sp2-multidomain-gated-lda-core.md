@@ -113,7 +113,7 @@ Expected: FAIL (`domains` unexpected kwarg / helpers undefined).
 
 - [ ] **Step 4: Run to verify pass + regressions**
 
-Run: `cd spark-vi && python -m pytest tests/test_gated_lda.py tests/test_lda.py -q`
+Run: `cd spark-vi && python -m pytest tests/test_gated_lda.py tests/test_lda_contract.py -q`
 Expected: PASS (single-domain gated + vanilla LDA unchanged).
 
 - [ ] **Step 5: Commit** (`feat(gated-lda): per-domain dict-lambda storage + assemble/split + init`, trailer.)
@@ -173,7 +173,7 @@ def test_single_domain_fit_byte_identical():
 
 - [ ] **Step 2: Run to verify failure.**
 - [ ] **Step 3: Implement** the `domains`-branch in `local_update`/`update_global`/`compute_elbo`/`infer_local` + per-domain η. Keep the single-domain branch literally the current code (byte-identical). ELBO note: token-loglik + shared θ-KL are unchanged (they operate over the concatenated vocab); only the global β-KL becomes per-(topic, domain).
-- [ ] **Step 4: Run to verify pass + regressions** (`tests/test_gated_lda.py tests/test_lda.py`).
+- [ ] **Step 4: Run to verify pass + regressions** (`tests/test_gated_lda.py tests/test_lda_contract.py`).
 - [ ] **Step 5: Commit** (`feat(gated-lda): dict-aware multi-domain E/M-step + per-domain eta/ELBO`, trailer.)
 
 ---
