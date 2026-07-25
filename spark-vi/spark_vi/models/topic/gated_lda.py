@@ -1,6 +1,9 @@
 """GatedOnlineLDA: the SVI (variational) twin of the collapsed-Gibbs placement engine.
 
-Overrides exactly two OnlineLDA methods:
+Overrides local_update, initialize_global, and update_global (the gated per-node α step);
+compute_elbo and infer_local are ALSO overridden, but only branch away from the inherited
+OnlineLDA behavior in multi-domain mode (see below) — with domains=None they delegate to
+super() and are byte-identical to the base class.
   * local_update — restrict each training doc's CAVI to DagLayout.allowed_set(frontier)
     (the exact variational analogue of the Gibbs gate in dag_placement.fit_gated); sstats
     for disallowed topics stay zero, welding each node's topic to its subtree's documents.
@@ -8,10 +11,18 @@ Overrides exactly two OnlineLDA methods:
     full-K) — the same convention as the Gibbs oracle and the gated STM.
   * initialize_global — dispatch on a pluggable init strategy (default "random").
 
-Everything else (update_global SVI natural-gradient beta step, compute_elbo, combine_stats,
-VIRunner integration) is inherited from OnlineLDA. TRAINING is gated (above); DEPLOYMENT is
-different — GatedLDAModel._transform folds held-out docs in UNGATED full-K CAVI (the label is
-unknown at scoring time, which is the whole point) -> theta -> node_affinity.
+Multi-domain (MixEHR-style; Li, Nair, Lu et al. 2020, Nat. Commun.), keyed on the `domains`
+constructor arg (a sequence of per-domain vocab sizes summing to vocab_size): global_params
+["lambda"] becomes a literal per-domain dict {m: (K, V_m)} instead of one (K, V) array, each
+block independently row-normalized (`_assemble_expElogbeta`/`_split_to_domains`), each with
+its own eta_m prior (`_eta_vocab_vector`). The gated CAVI itself never changes — it only ever
+sees a concatenated (K, V) expElogbeta and per-doc concatenated indices — so local_update,
+update_global, compute_elbo, and infer_local each branch on `self.domains is None` and their
+domains=None arm is the original single-array code, unchanged. combine_stats and VIRunner
+integration are untouched either way (sufficient stats stay a flat concatenated array).
+TRAINING is gated (above); DEPLOYMENT is different — GatedLDAModel._transform folds held-out
+docs in UNGATED full-K CAVI (the label is unknown at scoring time, which is the whole point)
+-> theta -> node_affinity.
 
 Validated against the collapsed-Gibbs oracle (dag_placement.fit_gated): placement (node-AUC by
 depth, MRR, top2) matches at every depth; the DAG gate supplies the identifiability spectral
@@ -45,11 +56,26 @@ class GatedOnlineLDA(OnlineLDA):
     def __init__(self, lay: DagLayout, vocab_size: int, *, init: str = "random",
                  optimize_alpha: bool = False,
                  frontier_histogram: dict | None = None,
-                 domains: list[int] | None = None, **kw) -> None:
+                 domains: list[int] | None = None,
+                 eta: float | Iterable[float] | None = None, **kw) -> None:
         # optimize_alpha is handled by the gated per-node Newton step (this class),
         # NOT OnlineLDA's full-K alpha_newton_step; pass it to the parent as False
         # so the inherited update_global never runs the vanilla alpha step.
-        super().__init__(K=lay.K, vocab_size=vocab_size, optimize_alpha=False, **kw)
+        #
+        # eta: OnlineLDA.__init__ requires a single valid positive scalar (it is
+        # never optimized here — optimize_eta is disallowed below), so when eta is
+        # a per-domain sequence we forward its mean as that placeholder scalar
+        # (self.eta / global_params["eta"]; used only for iteration_summary-style
+        # display in multi-domain mode). The per-domain prior actually consumed by
+        # update_global/compute_elbo is `self._eta_domains` (set below, after
+        # super().__init__ so a bare `eta=None` can default off self.eta).
+        forward_eta = (
+            float(np.mean(list(eta)))
+            if (domains is not None and eta is not None and not np.isscalar(eta))
+            else eta
+        )
+        super().__init__(K=lay.K, vocab_size=vocab_size, optimize_alpha=False,
+                          eta=forward_eta, **kw)
         self.lay = lay
         self.init = init
         # Multi-domain (MixEHR-style, Li, Nair, Lu et al. 2020, Nat. Commun.) storage:
@@ -68,9 +94,27 @@ class GatedOnlineLDA(OnlineLDA):
             self.domains = list(domains)
             self._domain_bounds = np.concatenate(
                 ([0], np.cumsum(self.domains))).astype(np.int64)
+            # Per-domain eta prior (MixEHR-style; Li 2020): a scalar broadcasts to
+            # every domain (matches the domains=None default); a length-n_domains
+            # sequence gives each domain its own concentration eta_m.
+            if eta is None:
+                self._eta_domains = [self.eta] * len(self.domains)
+            elif np.isscalar(eta):
+                self._eta_domains = [float(eta)] * len(self.domains)
+            else:
+                eta_seq = [float(e) for e in eta]
+                if len(eta_seq) != len(self.domains):
+                    raise ValueError(
+                        f"eta sequence length {len(eta_seq)} != "
+                        f"n_domains {len(self.domains)}"
+                    )
+                if any(e <= 0 for e in eta_seq):
+                    raise ValueError(f"all eta components must be > 0, got {eta_seq}")
+                self._eta_domains = eta_seq
         else:
             self.domains = None
             self._domain_bounds = None
+            self._eta_domains = None
         if getattr(self, "optimize_eta", False):
             # The gated update_global override optimizes only alpha; it never
             # touches eta. Fail fast rather than silently ignoring optimize_eta
@@ -194,6 +238,24 @@ class GatedOnlineLDA(OnlineLDA):
             for m in range(len(self.domains))
         }
 
+    def _eta_vocab_vector(self) -> np.ndarray:
+        """Length-V Dirichlet-prior intercept vector consumed by update_global's
+        natural-gradient target (eta_vec) and compute_elbo's global KL.
+
+        domains=None: self.eta broadcast over the full vocabulary (the existing
+        scalar-eta behavior — byte-identical to OnlineLDA's `eta + ...`, since a
+        scalar and a length-V array filled with that scalar add identically).
+        Multi-domain: each domain m's own `self._eta_domains[m]` (MixEHR-style
+        per-domain concentration; Li, Nair, Lu et al. 2020, Nat. Commun.)
+        broadcast over its own block, concatenated in domain order."""
+        if self.domains is None:
+            return np.full(self.V, self.eta, dtype=np.float64)
+        out = np.empty(self.V, dtype=np.float64)
+        bounds = self._domain_bounds
+        for m in range(len(self.domains)):
+            out[bounds[m]:bounds[m + 1]] = self._eta_domains[m]
+        return out
+
     def local_update(
         self,
         rows: Iterable[GatedBOWDocument],
@@ -215,9 +277,21 @@ class GatedOnlineLDA(OnlineLDA):
         token = the doc's frontier closure (bounded by DAG depth), not K."""
         lam = global_params["lambda"]
         alpha = global_params["alpha"]
-        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        if self.domains is None:
+            expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+            lambda_stats = np.zeros_like(lam)
+        else:
+            # Multi-domain (MixEHR-style; Li, Nair, Lu et al. 2020, Nat. Commun.):
+            # assemble the concatenated expElogbeta from the per-domain dict lambda.
+            # Everything below is IDENTICAL either way — the gated CAVI only ever
+            # sees a concatenated (K, V) expElogbeta and each doc's concatenated
+            # token indices; it does not know domains exist. lambda_stats stays a
+            # single concatenated (K, V) array (not a dict) so VIRunner's mini-batch
+            # scaling / combine_stats / broadcast are untouched (see the plan's
+            # "transient sufficient-stats stay concatenated" constraint).
+            expElogbeta = self._assemble_expElogbeta(lam)
+            lambda_stats = np.zeros((self.K, self.V), dtype=np.float64)
 
-        lambda_stats = np.zeros_like(lam)
         doc_loglik_sum = 0.0
         doc_theta_kl_sum = 0.0
         n_docs = 0
@@ -300,13 +374,31 @@ class GatedOnlineLDA(OnlineLDA):
         computes; we recompute it here (a few lines) rather than toggling the
         parent's optimize flags, so the gated α path is explicit. η is never
         optimized in the gated engine.
+
+        Multi-domain (MixEHR-style; Li, Nair, Lu et al. 2020, Nat. Commun.):
+        `lam` is a per-domain dict {m: (K, V_m)}. The natural-gradient target is
+        computed ONCE over the concatenated vocabulary (assembled expElogbeta *
+        the concatenated lambda_stats sufficient statistic, plus the per-domain
+        eta_vec intercept), then split back into a per-domain dict and blended
+        per domain — same (1-rho)*old + rho*target form as the single-array path,
+        just applied block-by-block.
         """
         lam = global_params["lambda"]
         alpha = global_params["alpha"]
         eta = global_params["eta"]
-        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
-        target_lam = eta + expElogbeta * target_stats["lambda_stats"]
-        new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
+        if self.domains is None:
+            expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+            target_lam = eta + expElogbeta * target_stats["lambda_stats"]
+            new_lam = (1.0 - learning_rate) * lam + learning_rate * target_lam
+        else:
+            expElogbeta = self._assemble_expElogbeta(lam)
+            eta_vec = self._eta_vocab_vector()          # per-domain eta_m, broadcast per block
+            target = eta_vec + expElogbeta * target_stats["lambda_stats"]
+            target_dict = self._split_to_domains(target)
+            new_lam = {
+                m: (1.0 - learning_rate) * lam[m] + learning_rate * target_dict[m]
+                for m in range(len(self.domains))
+            }
         new_alpha = alpha
         if self.optimize_alpha:
             new_alpha = self._gated_alpha_update(alpha, target_stats, learning_rate)
@@ -342,3 +434,66 @@ class GatedOnlineLDA(OnlineLDA):
         for i, u in enumerate(nodes, start=1):
             out[self.lay.block[u]] = a_tied_new[i]
         return out
+
+    def compute_elbo(self, global_params, aggregated_stats):
+        """ELBO = doc-data-likelihood − doc-level KL − global KL (same accounting
+        as OnlineLDA.compute_elbo; see its docstring for the sign convention).
+        domains=None delegates to the inherited single-array global KL, unchanged.
+
+        Multi-domain (MixEHR-style; Li, Nair, Lu et al. 2020, Nat. Commun.): each
+        topic's global KL decomposes into a SUM over domains of independent
+        per-domain-block Dirichlet KLs — one KL(Dirichlet(lam_m[k]) ||
+        Dirichlet(eta_m . 1_{V_m})) per (topic, domain), each block scored against
+        its OWN eta_m prior — NOT a single KL over the naively concatenated
+        vector. Dirichlet KL is not separable across a concatenation in general
+        (gammaln of the FULL row-sum differs from the sum of gammaln of each
+        block's own sum); this is exactly why `_assemble_expElogbeta` normalizes
+        each domain block on its own row in the first place. Token-loglik and
+        theta-KL are unchanged either way: local_update aggregates them as scalars
+        over the concatenated vocabulary, independent of how lambda is stored.
+        """
+        if self.domains is None:
+            return super().compute_elbo(global_params, aggregated_stats)
+        lam = global_params["lambda"]
+        eta_vec = self._eta_vocab_vector()
+        bounds = self._domain_bounds
+        global_kl = 0.0
+        for m in range(len(self.domains)):
+            eta_vec_m = eta_vec[bounds[m]:bounds[m + 1]]
+            lam_m = lam[m]
+            for k in range(self.K):
+                global_kl += _dirichlet_kl(lam_m[k], eta_vec_m)
+        return float(
+            float(aggregated_stats["doc_loglik_sum"])
+            - float(aggregated_stats["doc_theta_kl_sum"])
+            - global_kl
+        )
+
+    def infer_local(self, row, global_params):
+        """Single-document E-step under fixed global params (deployment fold-in;
+        UNGATED full-K — see the module docstring). domains=None delegates to the
+        inherited single-array path, unchanged. Multi-domain (MixEHR-style; Li,
+        Nair, Lu et al. 2020, Nat. Commun.) assembles the concatenated expElogbeta
+        from the per-domain lambda dict first; the CAVI call is otherwise
+        identical to OnlineLDA.infer_local."""
+        if self.domains is None:
+            return super().infer_local(row, global_params)
+        lam = global_params["lambda"]
+        alpha = global_params["alpha"]
+        expElogbeta = self._assemble_expElogbeta(lam)
+        gamma_init = np.random.gamma(
+            shape=self.gamma_shape,
+            scale=1.0 / self.gamma_shape,
+            size=self.K,
+        )
+        gamma, _, _, _ = _cavi_doc_inference(
+            indices=row.indices,
+            counts=row.counts,
+            expElogbeta=expElogbeta,
+            alpha=alpha,
+            gamma_init=gamma_init,
+            max_iter=self.cavi_max_iter,
+            tol=self.cavi_tol,
+        )
+        theta = gamma / gamma.sum()
+        return {"gamma": gamma, "theta": theta}

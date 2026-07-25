@@ -365,3 +365,146 @@ def test_domains_must_sum_to_vocab():
     lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
     with pytest.raises(ValueError):
         GatedOnlineLDA(lay, vocab_size=56, domains=[40, 10])   # 50 != 56
+
+
+# --- SP2 Task 2: dict-aware E/M-step + per-domain eta + multi-domain ELBO ---
+
+def test_multidomain_fit_recovers_valid_per_domain_betas():
+    """A gated multi-domain fit yields per-domain beta blocks that are proper
+    distributions (each lam_m row-normalizes to 1)."""
+    import numpy as np
+    from tests._stm_synth import two_domain_dag_corpus
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.types import GatedBOWDocument
+    parent = {1: 0, 2: 1, 3: 1}
+    docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
+        parent=parent, node_prev={1: 1., 2: 1., 3: 1.}, V_a=40, V_b=16,
+        doc_len=30, seed=5, b_only_node=3)
+    lay = DagLayout(parent, n_bg=2, tpn=1); V = domain_bounds[-1]
+    gdocs = [GatedBOWDocument(indices=np.unique(d).astype(np.int32),
+             counts=np.unique(d, return_counts=True)[1].astype(float), length=len(d),
+             frontier=frozenset(f) if hasattr(f, "__iter__") else frozenset({f}))
+             for d, f in zip(docs[:600], labels[:600])]
+    m = GatedOnlineLDA(lay, vocab_size=V, domains=[40, 16], random_seed=0)
+    gp = m.initialize_global(None)
+    for _ in range(20):
+        gp = m.update_global(gp, m.local_update(gdocs, gp), learning_rate=0.5)
+    for md in (0, 1):
+        lam_m = gp["lambda"][md]
+        beta_m = lam_m / lam_m.sum(1, keepdims=True)
+        np.testing.assert_allclose(beta_m.sum(1), 1.0)
+        assert np.isfinite(lam_m).all()
+
+
+def test_single_domain_fit_byte_identical():
+    """domains=None reproduces the current gated fit exactly (fixed seed): two
+    independently-run fits over the same docs/seed must be bit-identical, and the
+    lambda representation stays a plain (K, V) ndarray (not a dict)."""
+    import numpy as np
+    lay = _lay()
+    V = 30
+    docs = [
+        GatedBOWDocument(indices=np.array([5, 6], dtype=np.int32),
+                         counts=np.array([2.0, 1.0]), length=3,
+                         frontier=frozenset({3})),
+        GatedBOWDocument(indices=np.array([1, 2, 7], dtype=np.int32),
+                         counts=np.array([1.0, 3.0, 2.0]), length=6,
+                         frontier=frozenset()),
+    ]
+
+    def run():
+        m = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+        gp = m.initialize_global(None)
+        for _ in range(5):
+            gp = m.update_global(gp, m.local_update(docs, gp), learning_rate=0.5)
+        return gp
+
+    gp1, gp2 = run(), run()
+    assert isinstance(gp1["lambda"], np.ndarray)
+    np.testing.assert_array_equal(gp1["lambda"], gp2["lambda"])
+
+
+def test_multidomain_compute_elbo_matches_manual_per_domain_kl():
+    """ELBO's global KL term for a per-domain eta must equal the hand-computed
+    Sigma_k Sigma_m KL(Dirichlet(lam_m[k]) || Dirichlet(eta_m . 1_{V_m})) — NOT a
+    single KL over the naively concatenated vector (Dirichlet KL does not
+    decompose that way across a concatenation)."""
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.lda import _dirichlet_kl
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], eta=[0.5, 0.2], random_seed=3)
+    gp = m.initialize_global(None)
+    aggregated_stats = {"doc_loglik_sum": np.array(-12.3), "doc_theta_kl_sum": np.array(1.7)}
+    elbo = m.compute_elbo(gp, aggregated_stats)
+
+    manual_kl = 0.0
+    eta_by_domain = {0: 0.5, 1: 0.2}
+    for md, V_m in enumerate([4, 3]):
+        eta_vec = np.full(V_m, eta_by_domain[md])
+        for k in range(lay.K):
+            manual_kl += _dirichlet_kl(gp["lambda"][md][k], eta_vec)
+    expected = (float(aggregated_stats["doc_loglik_sum"])
+                - float(aggregated_stats["doc_theta_kl_sum"]) - manual_kl)
+    np.testing.assert_allclose(elbo, expected)
+
+
+def test_multidomain_infer_local_assembles_dict_lambda():
+    """infer_local (deployment fold-in) must work off the dict-lambda in multi-domain
+    mode: assemble the concatenated expElogbeta and run the same full-K CAVI."""
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], random_seed=2)
+    gp = m.initialize_global(None)
+    row = GatedBOWDocument(indices=np.array([0, 4], dtype=np.int32),
+                           counts=np.array([2.0, 1.0]), length=3)
+    out = m.infer_local(row, gp)
+    assert out["theta"].shape == (lay.K,)
+    np.testing.assert_allclose(out["theta"].sum(), 1.0)
+    assert np.isfinite(out["gamma"]).all()
+
+
+def test_eta_scalar_broadcasts_to_all_domains():
+    """A scalar eta under multi-domain applies the SAME concentration to every
+    domain block (matches the domains=None default-broadcast behavior)."""
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], eta=0.3, random_seed=0)
+    vec = m._eta_vocab_vector()
+    assert vec.shape == (7,)
+    np.testing.assert_allclose(vec, 0.3)
+
+
+def test_eta_per_domain_sequence_applies_per_block():
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], eta=[0.5, 0.2], random_seed=0)
+    vec = m._eta_vocab_vector()
+    np.testing.assert_allclose(vec[:4], 0.5)
+    np.testing.assert_allclose(vec[4:], 0.2)
+
+
+def test_eta_per_domain_sequence_length_mismatch_raises():
+    import pytest
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    with pytest.raises(ValueError):
+        GatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], eta=[0.5, 0.2, 0.1])
+
+
+def test_eta_per_domain_sequence_rejects_nonpositive():
+    import pytest
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    with pytest.raises(ValueError):
+        GatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], eta=[0.5, 0.0])
