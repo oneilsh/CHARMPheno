@@ -789,14 +789,22 @@ def dag_placement_corpus_multi(*, parent, leaf_prev, comorbid_rate, V, doc_len, 
     return docs, labels, node_codes
 
 
-def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0):
+def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0, data_summary=None):
     """In-memory batch-VB driver for GatedOnlineLDA (no Spark), mirroring fit_stm.
 
     Full-batch lr=1.0 each iteration = variational EM — the cleanest regime for the
     SVI-vs-Gibbs placement equivalence gate. `model` is a GatedOnlineLDA; `gated_docs` are
-    GatedBOWDocuments (frontier tags drive the gate)."""
+    GatedBOWDocuments (frontier tags drive the gate).
+
+    `data_summary` (default None) is passed straight through to `initialize_global`, so a
+    caller whose model was built with `init="spectral"` can hand over the
+    {"train_docs": [...], "train_labels": [...], "anchor_scope": ...} dict the spectral
+    seed needs (see `gated_init.py`); every existing caller passes nothing and keeps
+    getting `initialize_global(None)` exactly as before (random init, or a spectral model
+    falling back to its own None-handling) — this parameter only ADDS a path, it does not
+    change the None one."""
     np.random.seed(seed)
-    gp = model.initialize_global(None)
+    gp = model.initialize_global(data_summary)
     for _ in range(n_iter):
         gp = model.update_global(gp, model.local_update(gated_docs, gp), learning_rate=1.0)
     return gp

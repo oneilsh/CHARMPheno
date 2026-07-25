@@ -625,6 +625,133 @@ def test_multidomain_svi_planted_bonly_node_recovery():
                 assert recovery > best_other, (u, md, recovery, best_other)
 
 
+def test_multidomain_svi_matches_gibbs_placement():
+    """Multi-domain placement-equivalence gate: the SVI engine (GatedOnlineLDA, mean-field
+    variational EM -- Hoffman, Blei & Bach 2010) and the collapsed-Gibbs oracle (`fit_gated`
+    -- Griffiths & Steyvers 2004 collapsed sampling, plus the per-domain word-topic factor
+    added in the immediately preceding task, MixEHR-style: Li, Nair, Lu et al. 2020, Nat.
+    Commun.) must place held-out, UNGATED fold-in documents onto the same DAG nodes within
+    a documented tolerance. Uses the two-domain corpus (`two_domain_dag_corpus`) with the
+    b_only_node ambiguity (a node recoverable from domain 1 alone) and the exact plant/fit
+    config verified in `test_multidomain_svi_planted_bonly_node_recovery` (parent=
+    {1:0,2:1,3:1}, b_only_node=3, V_a=40, V_b=16, doc_len=40, corpus seed=5, bg_frac=0.2,
+    anchor_scope="frontier") as the starting point (task-5 brief); eta=0.02/alpha=0.1 are
+    set explicitly (rather than left at the K-dependent default) to match fit_gated's
+    default beta_prior=0.02 -- the two engines must see the SAME Dirichlet concentration
+    to be a fair comparison.
+
+    TRAINING-SET SIZE IS DELIBERATE, not accidental. At this DAG's moderate/large training
+    sizes (n_train 40-500, spot-checked, not asserted here) every node-AUC AND mrr/top2
+    saturate to EXACTLY 1.0 for BOTH engines -- the corpus's per-node signature blocks are
+    mutually exclusive columns by construction (see `two_domain_dag_corpus`), so once a
+    node's block topic has ANY traction, placement becomes a deterministic lookup and both
+    engines tie perfectly. That is a degenerate "free win" with zero power to detect a
+    real SVI-vs-Gibbs disagreement -- exactly what the brief warns against shipping.
+    n_train=25 is the smallest size that still has a real background pool under
+    anchor_scope="frontier" (>=3 background docs at bg_frac=0.2, spot-checked across split
+    seeds 0/7/13) and gives a genuine, small MRR gap while node-AUC stays saturated at 1.0
+    for both engines (spot-checked mrr gaps across those 3 split seeds: 0.063/0.013/0.013,
+    never favoring one engine consistently) -- i.e. the two engines agree on WHICH node
+    scores highest almost always, and disagree only in fine-grained per-doc ranking at the
+    margins: exactly the kind of finite-sample estimation noise (a 25-document, mostly
+    16-foreground-document Gibbs fit vs. a 50-iteration batch-VB fit) the tolerance below
+    is FOR, not a fragile coin-flip -- the direction and rough magnitude repeat across
+    those three independent splits.
+
+    Background docs (bg_frac>0) are kept in TRAINING (their real seeding role for the
+    n_bg=2 background block; see two_domain_dag_corpus's docstring and insight 0066) but
+    dropped from EVAL -- `evaluate` scores a profile against its true node, and a
+    background doc's frontier is empty (no true node to score against).
+
+    TOLERANCE (0.08 on mrr/top2/depth-2 AUC): matches the upper end of the established
+    single-domain gates (0.05-0.08; see `test_svi_matches_gibbs_placement_multi_parent`,
+    the most structurally similar sibling -- also a max-depth-only check). It covers (a)
+    the stochastic collapsed-Gibbs FOLD-IN sampler (`profile`, 60 iters/30 burn per doc --
+    Monte-Carlo noise in the readout, not model disagreement), (b) the n_train=25 finite-
+    training-sample regime (chosen for informativeness, see above), and (c) finite-test-
+    set noise (n_test=300, a rank-based proportion metric's standard error is ~0.01-0.03
+    at this n). The observed gap on this exact config (split seed=0) is mrr 0.0633 --
+    comfortably inside 0.08, not fit to the observed number after the fact (0.08 is the
+    pre-existing sibling-gate value).
+
+    Depth-1 (node 1) AUC is NOT asserted: node 1 is nodes 2 and 3's ancestor, so its
+    subtree covers the WHOLE DAG; restricted to labeled-foreground-only eval docs (the
+    eval-set convention above -- no scoreable negative exists for node 1), `evaluate`
+    returns nan for it, for BOTH engines -- a property of this DAG shape plus that
+    convention, not an engine defect. Only depth-2 (nodes 2, 3 -- genuinely
+    distinguishable siblings, one via its own domain-0 block, one via its boosted
+    domain-1 block) is asserted, mirroring `test_svi_matches_gibbs_placement_multi_parent`'s
+    max-depth-only pattern.
+
+    MEASURED on this exact config (split seed=0, n_train=25, n_test=300): Gibbs
+    auc_by_depth={1: nan, 2: 1.0}, mrr=0.9433, top2=1.0; SVI auc_by_depth={1: nan, 2: 1.0},
+    mrr=0.88, top2=1.0. Measured wall-clock for this test alone: ~13s (fit_gated ~11s at
+    n_iter=150/burn=80 default; SVI fit ~1s at n_iter=50; fold-in+evaluate for both engines
+    combined ~1s; corpus generation negligible)."""
+    import numpy as np
+    from tests._stm_synth import two_domain_dag_corpus, fit_gated_svi_local, svi_node_profiles
+    from spark_vi.models.topic.dag_placement import DagLayout, fit_gated, profile, evaluate
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.types import GatedBOWDocument
+
+    parent = {1: 0, 2: 1, 3: 1}
+    B_ONLY = 3
+    V_a, V_b, doc_len = 40, 16, 40
+    docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
+        parent=parent, node_prev={1: 1., 2: 1., 3: 1.}, V_a=V_a, V_b=V_b,
+        doc_len=doc_len, seed=5, b_only_node=B_ONLY, bg_frac=0.2)
+    lay = DagLayout(parent, n_bg=2, tpn=1)
+    V = domain_bounds[-1]
+
+    # Deliberate split: background docs are appended AFTER foreground docs in the
+    # generator, so an unshuffled prefix slice would silently contain none of them (see
+    # brief item 3 / two_domain_dag_corpus's bg_frac docstring) -- permute first, keep a
+    # TRAIN prefix mixing foreground+background (background does real seeding work under
+    # anchor_scope="frontier"), then EVAL only on labeled foreground docs from the rest.
+    n_train, n_test = 25, 300
+    perm = np.random.default_rng(0).permutation(len(docs))
+    train_idx = perm[:n_train]
+    tr_d = [docs[i] for i in train_idx]
+    tr_l_raw = [labels[i] for i in train_idx]              # int or frozenset() (background)
+    assert sum(1 for f in tr_l_raw if isinstance(f, frozenset)) > 0   # real bg docs present
+    tr_l_gibbs = [f if isinstance(f, frozenset) else int(f) for f in tr_l_raw]
+
+    test_pool = [i for i in perm[n_train:] if not isinstance(labels[i], frozenset)]
+    test_idx = test_pool[:n_test]
+    te_d = [docs[i] for i in test_idx]
+    te_l = [int(labels[i]) for i in test_idx]
+
+    def _bow_multi(tokens):
+        idx, cnt = np.unique(np.asarray(tokens), return_counts=True)
+        return idx.astype(np.int32), cnt.astype(np.float64), int(cnt.sum())
+
+    # --- Gibbs oracle (Griffiths & Steyvers 2004; per-domain factor MixEHR-style) ---
+    beta_g = fit_gated(tr_d, tr_l_gibbs, lay, V, beta_prior=0.02,
+                       domain_bounds=domain_bounds, rng=np.random.default_rng(0))
+    ev_g = evaluate([profile(d, beta_g, lay, rng=np.random.default_rng(i))
+                     for i, d in enumerate(te_d)], te_l, lay)
+
+    # --- Gated SVI (spectral seed via fit_gated_svi_local's optional data_summary) ---
+    bow = [GatedBOWDocument(*_bow_multi(d), frontier=(f if isinstance(f, frozenset)
+                                                      else frozenset({int(f)})))
+           for d, f in zip(tr_d, tr_l_raw)]
+    ds = {"train_docs": [np.asarray(d) for d in tr_d],
+          "train_labels": tr_l_gibbs, "anchor_scope": "frontier"}
+    m = GatedOnlineLDA(lay, vocab_size=V, domains=[V_a, V_b], eta=0.02, alpha=0.1,
+                       init="spectral", random_seed=0)
+    gp = fit_gated_svi_local(m, bow, n_iter=50, data_summary=ds)
+    ev_s = evaluate(svi_node_profiles(m, gp, te_d, lay), te_l, lay)
+
+    # Depth-1 (node 1) is structurally nan for both engines under this eval convention
+    # (see docstring) -- assert that explicitly rather than silently skip it.
+    assert np.isnan(ev_g["auc_by_depth"][1]) and np.isnan(ev_s["auc_by_depth"][1])
+
+    TOL = 0.08     # matches test_svi_matches_gibbs_placement_multi_parent's upper bound
+    assert ev_s["auc_by_depth"][2] >= ev_g["auc_by_depth"][2] - TOL
+    assert ev_s["mrr"] >= ev_g["mrr"] - TOL
+    assert ev_s["top2"] >= ev_g["top2"] - TOL
+
+
 def test_single_domain_fit_byte_identical():
     """domains=None reproduces the current gated fit exactly (fixed seed): two
     independently-run fits over the same docs/seed must be bit-identical, and the
