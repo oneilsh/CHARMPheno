@@ -605,7 +605,7 @@ def dag_placement_corpus(*, parent, node_prev, V, doc_len, seed):
 
 def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
                           b_only_node=None, ubiquitous_b=False,
-                          b_only_signal_boost=4):
+                          b_only_signal_boost=4, bg_frac=0.0):
     """Two-domain planted hierarchical-placement corpus over a SINGLE concatenated
     vocabulary: domain 0 ids [0:V_a), domain 1 ids [V_a:V_a+V_b). Every document's
     token array carries BOTH domain-0 and domain-1 signature tokens for the SAME
@@ -638,9 +638,36 @@ def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
     column (unused by any node's exclusive block) emitted by EVERY document
     regardless of node -- a universal-anchor control.
 
+    ``bg_frac`` (default 0.0, byte-identical to the pre-``bg_frac`` corpus --
+    every existing caller passes no docs with an empty frontier, so this
+    default must reproduce the old corpus exactly, and does): the fraction of
+    the corpus emitted as BACKGROUND-ONLY documents -- common-pool tokens
+    from BOTH domains only, no node signature at all, labeled with an EMPTY
+    frontier (``frozenset()``, mirroring the ungated fold-in doc built in
+    ``svi_node_profiles``) rather than a node id. Without this, every one of
+    the 2000 documents carries a node signature, i.e. the corpus has ZERO
+    true background documents -- and the gated spectral seed
+    (``spectral_block_aligned_lambda``) needs a real background pool to
+    anchor ``lay.n_bg``'s background topics on. Two failure modes follow from
+    that absence, one per ``anchor_scope``: under ``"closure"`` the
+    background pool is drawn from EVERY doc (background and foreground
+    alike), so with no true background docs the background anchors are free
+    to land on and absorb a node's own signature block instead (BACKGROUND-
+    ANCHOR THEFT -- not "a parent stealing a child's word", a mechanism that
+    does not exist in this generator); under ``"frontier"`` the background
+    pool is docs with an empty frontier specifically, so with none the
+    background block simply never gets seeded (stays at the ``1e-9`` floor
+    and logs a warning). ``bg_frac>0`` gives ``"frontier"`` scope a genuine
+    background pool, so node blocks are not left double-duty as both a
+    node-signature estimator and an implicit background estimator.
+
     Returns (docs, labels, domain_bounds, planted_a, planted_b, slot_of_node,
     node_codes):
       - domain_bounds = [0, V_a, V_a + V_b].
+      - labels: a plain node id per foreground doc (as before), or
+        ``frozenset()`` for a ``bg_frac`` background doc -- an object array
+        when ``bg_frac>0`` (mixed int/frozenset), the original int64 array
+        when ``bg_frac=0.0``.
       - planted_a (K, V_a) / planted_b (K, V_b): ground-truth signature-block
         indicator rows, K = number of non-root nodes, aligned to DagLayout slot
         order (row k = the node at slot_of_node^-1(k)).
@@ -685,8 +712,11 @@ def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
         planted_b[:, ubiq_col_b] += 1.0
 
     p = np.array([node_prev[u] for u in nodes], float); p /= p.sum()
+    n_total = 2000                                          # 2000 items total, as before
+    n_bg_docs = int(round(n_total * bg_frac))               # 0 when bg_frac=0.0 (the default)
+    n_fg_docs = n_total - n_bg_docs
     docs, labels = [], []
-    for _ in range(2000):                                  # 2000 items
+    for _ in range(n_fg_docs):                              # foreground (node-signature) docs
         v = int(rng.choice(nodes, p=p))
         path = [u for u in lay.closure(v) if u != 0]
         n_common = doc_len // 2
@@ -703,8 +733,21 @@ def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
         docs.append(np.concatenate(toks).astype(np.int64))
         labels.append(v)
 
+    for _ in range(n_bg_docs):                              # background-only docs (bg_frac>0)
+        # Full doc_len of common-pool tokens from BOTH domains, no node signature at all --
+        # a real background doc for the gated spectral seed's background block to anchor on
+        # (see the bg_frac docstring paragraph above). This loop runs zero times, and issues
+        # zero rng calls, when bg_frac=0.0, so the foreground draws above -- and therefore the
+        # returned corpus -- are byte-identical to the pre-bg_frac generator in that case.
+        n_a_common, n_b_common = doc_len // 2, doc_len - doc_len // 2
+        toks = [rng.integers(0, C_a, size=n_a_common),                    # domain-0 common pool
+               V_a + rng.integers(0, C_b, size=n_b_common)]               # domain-1 common pool
+        docs.append(np.concatenate(toks).astype(np.int64))
+        labels.append(frozenset())                          # empty frontier = background
+
     domain_bounds = [0, V_a, V_a + V_b]
-    return docs, np.array(labels), domain_bounds, planted_a, planted_b, slot_of_node, node_codes
+    labels_arr = np.array(labels, dtype=object) if n_bg_docs else np.array(labels)
+    return docs, labels_arr, domain_bounds, planted_a, planted_b, slot_of_node, node_codes
 
 
 def dag_placement_corpus_multi(*, parent, leaf_prev, comorbid_rate, V, doc_len, seed):
