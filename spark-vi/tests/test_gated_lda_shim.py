@@ -901,6 +901,44 @@ def test_multidomain_fit_forwards_eta_per_domain(spark):
     assert m_default.result.metadata["eta_m"] == [1.0 / K, 1.0 / K]
 
 
+def test_multidomain_save_load_reproduces_node_affinity(spark, tmp_path):
+    """The whole persistence story end to end: fit multi-domain through the shim,
+    score, save, load, rebuild the Model from the loaded VIResult, score again --
+    and get the SAME nodeAffinity. A dict lambda that round-trips with string keys
+    or reordered blocks would load cleanly and score differently.
+
+    Comparison is rid-keyed via `_affinities_by_rid`, not positional: collect()
+    order is not stable across two equivalently-built repartition(2) frames (see
+    `_two_domain_df`). omega is deliberately left UNSET on the rebuilt model --
+    `_transform_omega` falls back to `result.metadata["omega"]`, so this test
+    exercises that metadata path rather than papering over it with an explicit
+    `_set`. featuresCols IS set on the rebuilt model: a loader knows its own input
+    column names, but they are not recorded in the metadata (only the widths are)."""
+    from spark_vi.io.export import load_result, save_result
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator, GatedLDAModel
+    df = _two_domain_df(spark)
+    parent = {1: 0, 2: 1, 3: 1}
+    est = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                            parent=parent, nBg=2, tpn=1,
+                            maxIter=2, seed=0, omega=[1.0, 0.4])
+    model = est.fit(df)
+    before = _affinities_by_rid(model, df)
+
+    save_result(model.result, tmp_path / "fit")
+    loaded = load_result(tmp_path / "fit")
+    assert isinstance(loaded.global_params["lambda"], dict)
+    assert sorted(loaded.global_params["lambda"]) == [0, 1]
+    assert all(isinstance(k, int) for k in loaded.global_params["lambda"])
+    assert loaded.metadata["domains"] == [6, 4]
+    assert loaded.metadata["omega"] == [1.0, 0.4]
+
+    rebuilt = GatedLDAModel(loaded, parent=parent, nBg=2, tpn=1)
+    rebuilt._set(featuresCols=["c", "d"])          # a loader knows its input columns
+    assert not rebuilt.isSet("omega")              # metadata fallback does the work
+    after = _affinities_by_rid(rebuilt, df)
+    np.testing.assert_allclose(before, after, rtol=1e-12, atol=0.0)
+
+
 def test_single_domain_shim_path_unchanged(spark):
     """featuresCols unset keeps the existing single-featuresCol behavior: a single
     (K, V) array lambda and no domains in metadata."""
