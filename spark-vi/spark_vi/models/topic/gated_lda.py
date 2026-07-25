@@ -25,14 +25,23 @@ the omega == 1 bound — a convergence diagnostic, not a bound on the weighted o
 Each token's domain stays live at the point gamma/phi are formed (`_token_domains`, the v2
 seam), feeding both that weight and the per-domain THETA-CONTRIBUTION INSTRUMENT
 (local_update's `theta_contribution_by_domain` stat, surfaced by `iteration_summary`): the
-omega-weighted evidence mass each domain adds to gamma, which is what omega must be tuned
-against since observed volume cannot identify it. Apart from that one per-token weight the
+omega-weighted evidence mass each domain adds to gamma, which collapses to omega_m times
+domain-m token volume EXACTLY (insight 0069) and is therefore an omega-application trace,
+NOT the volume-imbalance diagnostic omega could be tuned against. Apart from that one
+per-token weight the
 gated CAVI never changes — it only ever sees a concatenated (K, V) expElogbeta and per-doc
 concatenated indices — so local_update, update_global, compute_elbo, infer_local and
 iteration_summary each branch on `self.domains is None` and their domains=None arm is the
 original single-array code, unchanged. combine_stats and VIRunner integration are untouched
 either way (sufficient stats stay flat arrays: the concatenated lambda_stats plus the
 length-n_domains instrument, both correctly summed by the default elementwise combine).
+v2 SEAM SCOPE: `_token_domains` keeps each token's modality live where gamma/phi are formed,
+but `_cavi_doc_inference` itself still gathers phi domain-agnostically (`eb_d =
+expElogbeta[:, indices]`). A v2 generative per-domain proportion pi contributes an
+expElogpi_k[m_n] factor of shape (K, n_unique), which does NOT fit through the current
+signature: v2 is a ONE-PARAMETER addition to `_cavi_doc_inference` plus passing
+`self._expElogpi[:, tok_dom]` at each caller. Cheap, but not zero-plumbing — do not plan on
+"no signature change".
 TRAINING is gated (above); DEPLOYMENT is different — GatedLDAModel._transform folds held-out
 docs in UNGATED full-K CAVI (the label is unknown at scoring time, which is the whole point)
 -> theta -> node_affinity.
@@ -53,6 +62,7 @@ from scipy.special import digamma
 
 from spark_vi.inference.concentration_optimization import gated_alpha_newton_step
 from spark_vi.models.topic.dag_placement import DagLayout
+from spark_vi.models.topic.domains import domains_to_bounds, resolve_per_domain
 from spark_vi.models.topic.lda import OnlineLDA, _cavi_doc_inference, _dirichlet_kl
 from spark_vi.models.topic.types import GatedBOWDocument
 
@@ -76,18 +86,38 @@ class GatedOnlineLDA(OnlineLDA):
         # NOT OnlineLDA's full-K alpha_newton_step; pass it to the parent as False
         # so the inherited update_global never runs the vanilla alpha step.
         #
+        # Materialize `domains` once, up front: len() below must not consume a
+        # one-shot iterable that `self.domains = list(domains)` then re-reads.
+        domains = None if domains is None else list(domains)
         # eta: OnlineLDA.__init__ requires a single valid positive scalar (it is
         # never optimized here — optimize_eta is disallowed below), so when eta is
         # a per-domain sequence we forward its mean as that placeholder scalar
         # (self.eta / global_params["eta"]; used only for iteration_summary-style
         # display in multi-domain mode). The per-domain prior actually consumed by
-        # update_global/compute_elbo is `self._eta_domains` (set below, after
-        # super().__init__ so a bare `eta=None` can default off self.eta).
-        forward_eta = (
-            float(np.mean(list(eta)))
-            if (domains is not None and eta is not None and not np.isscalar(eta))
-            else eta
-        )
+        # update_global/compute_elbo is `self._eta_domains` (resolved here when eta
+        # was given, or after super().__init__ off self.eta when it was not).
+        #
+        # Resolution goes through the shared `domains.resolve_per_domain`, so a 0-d
+        # ndarray eta (np.array(0.02)) is treated as the scalar it is instead of
+        # raising "iteration over a 0-d array", and a per-domain eta with
+        # domains=None raises a NAMED error here rather than an opaque TypeError
+        # from OnlineLDA's `eta <= 0` comparison against a list.
+        eta_domains = None
+        if eta is not None:
+            if domains is not None:
+                eta_domains = resolve_per_domain(eta, len(domains), "eta")
+                forward_eta = float(eta_domains.mean())
+            else:
+                materialized = (list(eta) if (not isinstance(eta, np.ndarray)
+                                              and hasattr(eta, "__iter__")) else eta)
+                if np.ndim(materialized) != 0:
+                    raise ValueError(
+                        "a per-domain eta sequence requires multi-domain mode "
+                        "(domains=[V_0, V_1, ...]); with domains=None there is "
+                        "one vocabulary and eta must be a positive scalar")
+                forward_eta = eta
+        else:
+            forward_eta = None
         super().__init__(K=lay.K, vocab_size=vocab_size, optimize_alpha=False,
                           eta=forward_eta, **kw)
         self.lay = lay
@@ -106,25 +136,16 @@ class GatedOnlineLDA(OnlineLDA):
                     f"expected vocab_size={vocab_size}"
                 )
             self.domains = list(domains)
-            self._domain_bounds = np.concatenate(
-                ([0], np.cumsum(self.domains))).astype(np.int64)
+            self._domain_bounds = domains_to_bounds(self.domains)
             # Per-domain eta prior (MixEHR-style; Li 2020): a scalar broadcasts to
             # every domain (matches the domains=None default); a length-n_domains
-            # sequence gives each domain its own concentration eta_m.
-            if eta is None:
-                self._eta_domains = [self.eta] * len(self.domains)
-            elif np.isscalar(eta):
-                self._eta_domains = [float(eta)] * len(self.domains)
-            else:
-                eta_seq = [float(e) for e in eta]
-                if len(eta_seq) != len(self.domains):
-                    raise ValueError(
-                        f"eta sequence length {len(eta_seq)} != "
-                        f"n_domains {len(self.domains)}"
-                    )
-                if any(e <= 0 for e in eta_seq):
-                    raise ValueError(f"all eta components must be > 0, got {eta_seq}")
-                self._eta_domains = eta_seq
+            # sequence gives each domain its own concentration eta_m. Resolved
+            # above when eta was passed; a bare eta=None defaults off self.eta
+            # (OnlineLDA's own validated scalar default), which is why this half
+            # runs after super().__init__.
+            self._eta_domains = (
+                eta_domains if eta_domains is not None
+                else resolve_per_domain(self.eta, len(self.domains), "eta"))
         else:
             self.domains = None
             self._domain_bounds = None
@@ -174,32 +195,48 @@ class GatedOnlineLDA(OnlineLDA):
         DAG-gated theta, not per-domain). "random" draws one Gamma(gamma_shape,
         1/gamma_shape) block per domain (see `_random_domain_lambda`, the per-domain
         analogue of OnlineLDA.initialize_global's single draw). domains=None keeps the
-        single-array path below UNCHANGED (byte-identical)."""
+        single-array path below UNCHANGED (byte-identical).
+
+        The init NAME is validated FIRST in both modes, before the precomputed-lambda
+        shortcut. It used to be checked only on the recipe branch, so multi-domain
+        init="banana" with a precomputed spectral_lambda silently succeeded where
+        single-domain raised. Dispatch is then through
+        gated_init.MULTIDOMAIN_INIT_STRATEGIES, so a strategy with no multi-domain
+        implementation raises NotImplementedError rather than quietly getting the
+        spectral recipe run under its name."""
         if self.domains is not None:
             if self.init == "random":
                 lam = self._random_domain_lambda()
-            elif data_summary is not None and "spectral_lambda" in data_summary:
-                # Scalable/shim path (SP3): the per-domain dict lambda is precomputed
-                # on the RDD and handed over (mirrors the single-domain spectral_lambda
-                # handoff below); use it directly.
-                sl = data_summary["spectral_lambda"]
-                lam = {int(m): np.asarray(v, dtype=np.float64) for m, v in sl.items()}
             else:
-                # Multi-domain spectral seed: block-aligned anchor recipe with the
-                # per-domain candidate floor, split into per-domain lambda_m. Fixes the
-                # random-init topic-death of insight 0066 (a node anchors on its
-                # sparse-domain word, defining the topic across both domains via Q_01).
                 from spark_vi.models.topic.gated_init import (
-                    INIT_STRATEGIES, multidomain_spectral_lambda)
+                    INIT_STRATEGIES, MULTIDOMAIN_INIT_STRATEGIES)
                 if self.init not in INIT_STRATEGIES:
                     raise ValueError(
                         f"unknown init strategy {self.init!r}; "
                         f"known: {['random'] + sorted(INIT_STRATEGIES)}")
-                scope = (data_summary or {}).get("anchor_scope", "closure")
-                topo = (data_summary or {}).get("topo_order", "forward")
-                lam = multidomain_spectral_lambda(
-                    data_summary, self.lay, self.domains,
-                    anchor_scope=scope, topo_order=topo)
+                if data_summary is not None and "spectral_lambda" in data_summary:
+                    # Scalable/shim path (SP3): the per-domain dict lambda is
+                    # precomputed on the RDD and handed over (mirrors the
+                    # single-domain spectral_lambda handoff below); use it directly.
+                    sl = data_summary["spectral_lambda"]
+                    lam = {int(m): np.asarray(v, dtype=np.float64)
+                           for m, v in sl.items()}
+                elif self.init not in MULTIDOMAIN_INIT_STRATEGIES:
+                    raise NotImplementedError(
+                        f"init strategy {self.init!r} has no multi-domain "
+                        f"(per-domain dict lambda) implementation; known "
+                        f"multi-domain strategies: "
+                        f"{['random'] + sorted(MULTIDOMAIN_INIT_STRATEGIES)}")
+                else:
+                    # Multi-domain spectral seed: block-aligned anchor recipe with the
+                    # per-domain candidate floor, split into per-domain lambda_m. Fixes
+                    # the random-init topic-death of insight 0066 (a node anchors on its
+                    # sparse-domain word, defining the topic across both domains via Q_01).
+                    scope = (data_summary or {}).get("anchor_scope", "closure")
+                    topo = (data_summary or {}).get("topo_order", "forward")
+                    lam = MULTIDOMAIN_INIT_STRATEGIES[self.init](
+                        data_summary, self.lay, self.domains,
+                        anchor_scope=scope, topo_order=topo)
             return {
                 "lambda": lam,
                 "alpha": self.alpha.copy(),         # defensive copy — runner mutates
@@ -261,7 +298,13 @@ class GatedOnlineLDA(OnlineLDA):
 
     def _split_to_domains(self, concat: np.ndarray) -> dict[int, np.ndarray]:
         """Slice a concatenated (K, V) array into a per-domain dict {m: (K, V_m)} at
-        self._domain_bounds — the inverse of `_assemble_expElogbeta`'s concatenation."""
+        self._domain_bounds — the inverse of `_assemble_expElogbeta`'s concatenation.
+
+        The blocks are VIEWS into `concat`, not copies: writing to a returned block
+        writes through to the source array. Deliberate — both callers (update_global's
+        natural-gradient blend, and the round-trip test) only READ the blocks and build
+        fresh arrays from them, so copying would add an O(K·V) allocation per M-step for
+        no behavioral gain. A future caller that needs to mutate a block must .copy()."""
         bounds = self._domain_bounds
         return {
             m: concat[:, bounds[m]:bounds[m + 1]]
@@ -306,13 +349,15 @@ class GatedOnlineLDA(OnlineLDA):
         mode: with domains=None there is no modality axis to weight, so a passed
         omega is a contradiction and raises rather than being silently ignored.
 
-        The scalar/sequence dispatch is by the resolved array's ndim, NOT
-        np.isscalar (which is False for a 0-d ndarray, so np.array(0.5) would take
-        the sequence branch and fail opaquely); iterables are materialized first so
-        a one-shot iterator is not consumed twice. The VALUE check runs before that
-        dispatch, so neither branch can bypass it (a scalar -1.0 slipping through
-        gives negative theta mass and a negative node_affinity score -- garbage
-        rankings with no error raised).
+        Resolution is the shared `domains.resolve_per_domain` (the single
+        scalar-or-per-domain resolver, also used for eta_m and the Gibbs oracle's
+        beta_prior_m), with allow_zero=True because 0.0 is a legal omega. Two
+        properties it guarantees and this dial needs: the scalar/sequence dispatch
+        is by the resolved array's ndim, NOT np.isscalar (which is False for a 0-d
+        ndarray, so np.array(0.5) would take the sequence branch and fail
+        opaquely), and the VALUE check runs BEFORE that dispatch so neither branch
+        can bypass it (a scalar -1.0 slipping through gives negative theta mass and
+        a negative node_affinity score -- garbage rankings with no error raised).
         """
         if omega is None:
             return None
@@ -320,24 +365,8 @@ class GatedOnlineLDA(OnlineLDA):
             raise ValueError(
                 "omega requires multi-domain mode (domains=[V_0, V_1, ...]); a "
                 "single-domain model has no modality to weight")
-        n = len(self.domains)
-        raw = (omega if isinstance(omega, np.ndarray)
-               else list(omega) if hasattr(omega, "__iter__") else omega)
-        arr = np.asarray(raw, dtype=np.float64)
-        # Value check BEFORE the shape dispatch, so it cannot be short-circuited by
-        # the scalar/0-d branch: a negative omega yields negative theta mass, which
-        # node_affinity would sum into a negative node score and silently corrupt
-        # the placement ranking rather than failing.
-        if not np.all(np.isfinite(arr)) or np.any(arr < 0.0):
-            raise ValueError(
-                f"omega components must be finite and >= 0, got {arr.tolist()}")
-        if arr.ndim == 0:
-            return np.full(n, float(arr), dtype=np.float64)
-        if arr.ndim != 1 or arr.shape[0] != n:
-            raise ValueError(
-                f"omega must be a scalar or a length-{n} (n_domains) sequence, "
-                f"got shape {arr.shape}")
-        return arr
+        return resolve_per_domain(omega, len(self.domains), "omega",
+                                  allow_zero=True)
 
     def _token_domains(self, indices: np.ndarray) -> np.ndarray:
         """Per-token domain index for a document's concatenated vocabulary ids:
@@ -431,11 +460,21 @@ class GatedOnlineLDA(OnlineLDA):
         (fixed-point) sweep, the same convention the lambda sufficient statistics
         `outer(expElogthetad, counts / phi_norm)` already use.
 
-        Why it exists: omega is TUNED, never fitted (`_resolve_omega`), and it
-        cannot be tuned without seeing what each domain actually contributes to the
-        shared theta. Nonnegative by construction; under omega = 1 it is the
-        per-domain token volume, so the ratio between entries is the raw
-        volume-imbalance a high-utilization domain imposes on theta. The stat is
+        WHAT IT IS, AND IS NOT (insight 0069): this quantity collapses to
+        omega_m * (domain-m token volume) EXACTLY -- for every omega, not just
+        omega = 1 -- because the guard factor (phi_norm - 1e-100) / phi_norm is
+        bit-exactly 1.0 in float64 away from the underflow floor. A partition of
+        the gamma INCREMENT is a partition of the evidence, and the CAVI
+        gamma-update conserves evidence mass across topics, so it cannot depend on
+        how the mass was distributed. It is therefore NOT a posterior diagnostic
+        and CANNOT show whether one modality dominates the shared theta, so it
+        cannot inform omega tuning (a per-domain token count is its free
+        equivalent). What it IS: an exact trace that omega was applied, to which
+        domains, in what proportion -- the cheapest regression guard on "omega
+        weights theta" (exactly 0.25x when omega_m is, exactly 0 at omega_m = 0).
+        Measuring domination needs a quantity sensitive to WHERE the mass landed
+        (each domain's marginal contribution to fitted theta, or a
+        leave-one-domain-out refit). Nonnegative by construction. The stat is
         additive across partitions, so the default `combine_stats` elementwise sum
         aggregates it with no override. domains=None emits no such key (the
         single-domain stats dict is unchanged)."""
@@ -748,10 +787,12 @@ class GatedOnlineLDA(OnlineLDA):
             domain's topics diverging in mass while the other's stay flat.
           * θ_contrib_m -- the aggregated per-domain θ-contribution from the last
             M-step (see local_update for the exact definition) with each domain's
-            share of the total. This is the volume-imbalance read that says whether
-            a domain is dominating the shared θ by sheer token volume, i.e. the
-            quantity ω is tuned against. Omitted before the first M-step, when no
-            batch has been aggregated yet.
+            share of the total. Read it as an ω-APPLICATION TRACE, not as a
+            volume-imbalance diagnostic: it equals ω_m × (domain-m token volume)
+            exactly, for every ω (insight 0069), so it confirms the dial reached the
+            γ accumulation but says nothing about whether a modality dominates the
+            fitted θ. Omitted before the first M-step, when no batch has been
+            aggregated yet.
         """
         if self.domains is None:
             return super().iteration_summary(global_params)

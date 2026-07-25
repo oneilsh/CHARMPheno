@@ -350,12 +350,23 @@ def test_assemble_split_round_trip():
            1: np.abs(np.random.default_rng(1).normal(size=(lay.K, 3))) + .1}
     eb = m._assemble_expElogbeta(lam)
     assert eb.shape == (lay.K, 7)
-    # each block equals its own full-row normalization
+    # EACH block equals its OWN full-row normalization -- domain 1 is checked by
+    # value too, not just by shape: a bug that normalized only the second block
+    # against the wrong row mass is precisely what this test exists to catch, and a
+    # shape-only assertion on domain 1 would pass straight through it.
     from scipy.special import digamma
     np.testing.assert_allclose(eb[:, :4], np.exp(digamma(lam[0]) - digamma(lam[0].sum(1, keepdims=True))))
-    # split of a concatenated array round-trips the block shapes
+    np.testing.assert_allclose(eb[:, 4:], np.exp(digamma(lam[1]) - digamma(lam[1].sum(1, keepdims=True))))
+    # cross-check the type-safety claim: normalizing the CONCATENATED array instead
+    # (the failure a single pooled array cannot prevent) gives a different answer.
+    pooled = np.exp(digamma(np.concatenate([lam[0], lam[1]], axis=1))
+                    - digamma(np.concatenate([lam[0], lam[1]], axis=1).sum(1, keepdims=True)))
+    assert not np.allclose(eb, pooled)
+    # split of a concatenated array round-trips the block shapes AND the values
     back = m._split_to_domains(eb)
     assert back[0].shape == (lay.K, 4) and back[1].shape == (lay.K, 3)
+    np.testing.assert_allclose(back[0], eb[:, :4])
+    np.testing.assert_allclose(back[1], eb[:, 4:])
 
 
 def test_domains_must_sum_to_vocab():
@@ -1464,3 +1475,77 @@ def test_iteration_summary_domains_none_is_byte_identical_to_base():
     assert m.iteration_summary(gp) == base.iteration_summary(gp)
     gp2 = m.update_global(gp, m.local_update(_contrib_docs(), gp), learning_rate=0.5)
     assert m.iteration_summary(gp2) == base.iteration_summary(gp2)
+
+
+# --- final-review fix wave: shared resolvers, init dispatch, empty partition ---
+
+
+def test_multidomain_local_update_emits_instrument_for_an_empty_partition():
+    """An empty Spark partition is a real occurrence, and local_update documents the
+    instrument as emitted for EVERY multi-domain batch, empty or not -- the stats
+    dict's key set must not depend on partition contents, or combine_stats would
+    reduce a ragged set of keys."""
+    import numpy as np
+    lay = _omega_lay()
+    m = GatedOnlineLDA(lay, 8, domains=[4, 4], random_seed=0)
+    gp = m.initialize_global(None)
+    st = m.local_update([], gp)
+    assert "theta_contribution_by_domain" in st
+    np.testing.assert_array_equal(st["theta_contribution_by_domain"], np.zeros(2))
+    np.testing.assert_array_equal(st["lambda_stats"], np.zeros((lay.K, 8)))
+    assert float(st["n_docs"]) == 0.0
+
+
+def test_eta_accepts_a_0d_ndarray_like_the_equivalent_float():
+    """np.isscalar(np.array(0.02)) is False, so the pre-consolidation eta branch fed
+    a 0-d array to a list comprehension and raised 'iteration over a 0-d array'.
+    Every scalar spelling must resolve to the same per-domain prior."""
+    import numpy as np
+    lay = _omega_lay()
+    for val in (0.02, np.float64(0.02), np.array(0.02)):
+        m = GatedOnlineLDA(lay, 8, domains=[4, 4], eta=val)
+        np.testing.assert_allclose(m._eta_domains, [0.02, 0.02])
+        np.testing.assert_allclose(m._eta_vocab_vector(), np.full(8, 0.02))
+        assert m.eta == 0.02          # the forwarded placeholder scalar is unchanged
+
+
+def test_eta_sequence_without_domains_is_a_named_error():
+    """A per-domain eta with domains=None used to reach OnlineLDA's `eta <= 0` and
+    die with "'<=' not supported between 'list' and 'int'"; there is no modality
+    axis to spread it over, so it must be rejected by name."""
+    import pytest
+    with pytest.raises(ValueError, match="eta"):
+        GatedOnlineLDA(_omega_lay(), 8, eta=[0.5, 0.2])
+
+
+def test_multidomain_init_name_is_validated_before_the_precomputed_lambda():
+    """Order of checks: an unknown init name must raise in BOTH modes, including
+    when a precomputed spectral_lambda would otherwise short-circuit the recipe.
+    Multi-domain used to validate the name only on the recipe branch, so
+    init='banana' + a handed-over lambda silently succeeded."""
+    import numpy as np
+    import pytest
+    lay = _omega_lay()
+    sl = {0: np.ones((lay.K, 4)), 1: np.ones((lay.K, 4))}
+    with pytest.raises(ValueError, match="init"):
+        GatedOnlineLDA(lay, 8, domains=[4, 4], init="banana").initialize_global(
+            {"spectral_lambda": sl})
+    # the same input under a KNOWN strategy name is accepted and used as-is
+    gp = GatedOnlineLDA(lay, 8, domains=[4, 4], init="spectral").initialize_global(
+        {"spectral_lambda": sl})
+    np.testing.assert_array_equal(gp["lambda"][0], sl[0])
+    np.testing.assert_array_equal(gp["lambda"][1], sl[1])
+
+
+def test_multidomain_init_strategy_without_a_multidomain_form_raises(monkeypatch):
+    """A future strategy registered in INIT_STRATEGIES but with no multi-domain
+    implementation must raise, not silently get the spectral recipe run under its
+    name (the multi-domain arm used to ignore WHICH strategy was named)."""
+    import pytest
+    from spark_vi.models.topic import gated_init
+    monkeypatch.setitem(gated_init.INIT_STRATEGIES, "other", lambda *a, **k: None)
+    lay = _omega_lay()
+    with pytest.raises(NotImplementedError, match="multi-domain"):
+        GatedOnlineLDA(lay, 8, domains=[4, 4], init="other").initialize_global(None)
+    # single-domain still dispatches that strategy normally (no behavior change)
+    assert "other" in gated_init.INIT_STRATEGIES
