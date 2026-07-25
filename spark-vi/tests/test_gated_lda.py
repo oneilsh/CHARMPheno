@@ -488,13 +488,17 @@ def test_multidomain_svi_planted_bonly_node_recovery():
     domain-0 discrimination check below for every node).
 
     HONESTY ABOUT WHAT'S IDENTIFIED (do not over-claim): in DOMAIN 0, node 3's
-    planted support IS node 1's planted support by construction, so mass there
-    does NOT uniquely identify node 3 -- it is equally consistent with node 1,
-    and the discrimination check (below) is deliberately SKIPPED for this one
-    (domain 0, node 3) cell; only a mass/magnitude gate applies there. In DOMAIN
-    1, node 3's support is exclusive to it, so recovery there IS unique
-    identification -- the actual point of the "recoverable from domain 1 alone"
-    plant, and it gets the strongest gate below.
+    planted support IS node 1's planted support by construction -- ground truth
+    TIES there (both rows put mass 1.0 on the identical 6-column block) -- so
+    the ambiguity is SYMMETRIC: node 1's domain-0 topic cannot legitimately be
+    required to "beat" node 3's on that support, or vice versa. The
+    discrimination check (below) is deliberately SKIPPED for BOTH sides of the
+    shared block (domain 0, node 3 AND domain 0, node 1 -- derived from the DAG
+    via `lay.parents[B_ONLY]`, not hardcoded); only a mass/magnitude gate
+    applies to either. In DOMAIN 1, node 3's support is exclusive to it, so
+    recovery there IS unique identification -- the actual point of the
+    "recoverable from domain 1 alone" plant, and it gets the strongest gate
+    below.
 
     ROOT CAUSE this test's first version missed, and the reason for `bg_frac`
     (see `two_domain_dag_corpus`'s docstring): the corpus generator previously
@@ -530,19 +534,19 @@ def test_multidomain_svi_planted_bonly_node_recovery():
     corpus, so an unshuffled prefix slice would contain zero of them and
     silently reproduce the exact failure `bg_frac` exists to fix.
 
-    FIT-DEPENDENCE (this is the assertion the seed alone cannot satisfy):
-    at the spectral seed, BEFORE any EM iteration, domain 0's node-1
-    discrimination check already FAILS on this exact config (owner=0.539 <
-    best_other=0.709 -- node 3's shared-support topic actually scores higher
-    on node 1's own support than node 1's topic does), and it FLIPS to passing
-    only after the 50-iteration fit (owner=0.938 > best_other=0.641). Verified
-    stable across corpus seeds 1-8 (SEED discrim always False, FIT discrim
-    always True) -- this is not a fluke of seed=5. So this test is not
-    re-covering ground `test_multidomain_spectral_seed_fixes_topic_death`
-    already covers: that test only checks the seed-independent mass gate,
-    which (measured) three of these four (domain, node) magnitude gates
-    already clear at the seed alone; the discrimination check below is what
-    actually depends on the SVI fit.
+    FIT-DEPENDENCE (this is the assertion the seed alone cannot satisfy --
+    so this test is not re-covering ground `test_multidomain_spectral_seed_fixes_topic_death`
+    already covers, which only checks seed-independent mass gates): domain 0,
+    node 2's magnitude gate (`recovery > 0.4`) is the well-posed one that
+    carries this, on a domain-0 support genuinely EXCLUSIVE to node 2 (not the
+    shared/tied block -- see HONESTY above). At the spectral seed, BEFORE any
+    EM iteration, this gate FAILS on this exact config (recovery=0.2796 <
+    0.4), and it PASSES only after the 50-iteration fit (recovery=0.8615).
+    (An earlier version of this test instead rested this claim on domain 0,
+    node 1's DISCRIMINATION check -- which does flip seed-False to fit-True on
+    this config, but that cell sits on the shared/tied support the HONESTY
+    section above excludes from discrimination for exactly this reason: a
+    tie is not a well-posed thing to require one side to "beat".)
 
     Batch-VB (Hoffman, Blei & Bach 2010) full-batch lr=1.0 for 50 iterations,
     mirroring the other two multi-domain tests. Dead-topic baselines (uniform
@@ -596,19 +600,26 @@ def test_multidomain_svi_planted_bonly_node_recovery():
                 # unique identification, the strongest claim this plant supports.
                 assert recovery > 0.6, (u, md, recovery, uniform)         # observed ~0.98
             else:
+                # (domain=0, node=2) is the FIT-DEPENDENT cell (see docstring): this
+                # gate FAILS at the spectral seed (0.2796) and only PASSES after the
+                # 50-iteration fit (0.8615) -- on a domain-0 support genuinely
+                # exclusive to node 2, so it is well-posed (unlike a discrimination
+                # check on a shared/tied support would be).
                 assert recovery > 0.4, (u, md, recovery, uniform)         # observed ~0.64-0.97
 
-            shared_ambiguous = (md == 0 and u == B_ONLY)      # by construction, see docstring
+            # The domain-0 ambiguity is SYMMETRIC: b_only_node's domain-0 block is
+            # made identical to its shared parent's (see two_domain_dag_corpus), so
+            # ground truth TIES between the two of them on that support -- neither
+            # can legitimately "beat" the other there. Skip discrimination for BOTH
+            # sides of the shared block (derived from the DAG, not hardcoded), not
+            # just b_only_node itself; the magnitude gate above still applies to both.
+            shared_parent = lay.parents[B_ONLY][0]
+            shared_ambiguous = (md == 0 and u in (B_ONLY, shared_parent))
             if not shared_ambiguous:
                 # Discrimination: the OWNER block must beat every OTHER topic's mass
                 # on this support -- not merely accumulate mass itself (mass alone is
                 # what the rejected first version of this test checked, and it let a
-                # sibling's topic silently outscore the true owner). For (domain=0,
-                # node=1) this is the fit-dependent assertion: it FAILS at the
-                # spectral seed and only passes after the 50-iteration fit (see
-                # docstring) -- so this loop is load-bearing on the SVI fit itself,
-                # not merely on the seed `test_multidomain_spectral_seed_fixes_topic_death`
-                # already covers.
+                # sibling's topic silently outscore the true owner).
                 other_topics = [k for k in range(lay.K) if k not in lay.block[u]]
                 best_other = float(beta_m[other_topics][:, support].sum(axis=1).max())
                 assert recovery > best_other, (u, md, recovery, best_other)

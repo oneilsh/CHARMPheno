@@ -638,9 +638,10 @@ def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
     column (unused by any node's exclusive block) emitted by EVERY document
     regardless of node -- a universal-anchor control.
 
-    ``bg_frac`` (default 0.0, byte-identical to the pre-``bg_frac`` corpus --
-    every existing caller passes no docs with an empty frontier, so this
-    default must reproduce the old corpus exactly, and does): the fraction of
+    ``bg_frac`` (default 0.0, byte-identical to the pre-``bg_frac`` corpus:
+    at 0.0, ``n_bg_docs`` below is 0, so the background-doc loop issues ZERO
+    ``rng`` calls and simply doesn't run, leaving the foreground loop's draws
+    -- and therefore the returned corpus -- untouched): the fraction of
     the corpus emitted as BACKGROUND-ONLY documents -- common-pool tokens
     from BOTH domains only, no node signature at all, labeled with an EMPTY
     frontier (``frozenset()``, mirroring the ungated fold-in doc built in
