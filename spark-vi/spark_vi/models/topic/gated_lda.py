@@ -23,11 +23,16 @@ data log-likelihood all keep TRUE counts. omega is a tuned-vs-task pseudo-likeli
 not a fitted parameter (see `_resolve_omega`), and under omega != 1 `compute_elbo` reports
 the omega == 1 bound — a convergence diagnostic, not a bound on the weighted objective.
 Each token's domain stays live at the point gamma/phi are formed (`_token_domains`, the v2
-seam). Apart from that one per-token weight the gated CAVI never changes — it only ever
-sees a concatenated (K, V) expElogbeta and per-doc concatenated indices — so local_update,
-update_global, compute_elbo, and infer_local each branch on `self.domains is None` and their
-domains=None arm is the original single-array code, unchanged. combine_stats and VIRunner
-integration are untouched either way (sufficient stats stay a flat concatenated array).
+seam), feeding both that weight and the per-domain THETA-CONTRIBUTION INSTRUMENT
+(local_update's `theta_contribution_by_domain` stat, surfaced by `iteration_summary`): the
+omega-weighted evidence mass each domain adds to gamma, which is what omega must be tuned
+against since observed volume cannot identify it. Apart from that one per-token weight the
+gated CAVI never changes — it only ever sees a concatenated (K, V) expElogbeta and per-doc
+concatenated indices — so local_update, update_global, compute_elbo, infer_local and
+iteration_summary each branch on `self.domains is None` and their domains=None arm is the
+original single-array code, unchanged. combine_stats and VIRunner integration are untouched
+either way (sufficient stats stay flat arrays: the concatenated lambda_stats plus the
+length-n_domains instrument, both correctly summed by the default elementwise combine).
 TRAINING is gated (above); DEPLOYMENT is different — GatedLDAModel._transform folds held-out
 docs in UNGATED full-K CAVI (the label is unknown at scoring time, which is the whole point)
 -> theta -> node_affinity.
@@ -127,6 +132,11 @@ class GatedOnlineLDA(OnlineLDA):
         # Per-domain modality weight omega (see _resolve_omega). None (the default)
         # = the unweighted MixEHR-faithful path, byte-identical to pre-omega code.
         self.omega = self._resolve_omega(omega)
+        # Last aggregated per-domain theta-contribution (the volume-imbalance
+        # instrument; see local_update). Stashed driver-side by update_global so
+        # iteration_summary -- whose signature only carries global_params -- can
+        # surface it. None until the first M-step; multi-domain only.
+        self._theta_contribution_by_domain = None
         if getattr(self, "optimize_eta", False):
             # The gated update_global override optimizes only alpha; it never
             # touches eta. Fail fast rather than silently ignoring optimize_eta
@@ -337,21 +347,39 @@ class GatedOnlineLDA(OnlineLDA):
 
         THIS IS THE v2 SEAM. Every per-token quantity that must know which
         modality a token came from resolves it here -- today the omega gamma-weight
-        (`_gamma_count_weight`), tomorrow a v2 per-domain proportion pi_m or a
-        per-domain theta-contribution instrument. Keeping the lookup a named unit
-        (rather than inlining a domain-agnostic gather) is what keeps each token's
-        domain live at the point gamma/phi are formed."""
+        (`_gamma_count_weight`) and the per-domain theta-contribution instrument
+        (`local_update`), tomorrow a v2 per-domain proportion pi_m. Keeping the
+        lookup a named unit (rather than inlining a domain-agnostic gather) is what
+        keeps each token's domain live at the point gamma/phi are formed.
+
+        Out-of-vocabulary ids raise ValueError NAMING the offending id: searchsorted
+        SATURATES rather than failing (an id == vocab_size returns n_domains, one
+        past the last domain), so without this check a bad id either surfaces
+        downstream as an opaque "index out of bounds" from the omega gather, or --
+        if the per-domain weight/stat arrays ever grew a sentinel entry -- silently
+        resolves to the WRONG domain with no error at all. The check is two
+        reductions over the doc's unique ids, negligible beside the per-doc CAVI."""
         if self.domains is None:
             raise ValueError(
                 "_token_domains requires multi-domain mode (domains=[V_0, ...])")
-        return np.searchsorted(
-            self._domain_bounds, np.asarray(indices), side="right") - 1
+        idx = np.asarray(indices)
+        if idx.size:
+            lo, hi = int(idx.min()), int(idx.max())
+            if lo < 0 or hi >= self.V:
+                bad = lo if lo < 0 else hi
+                raise ValueError(
+                    f"token id {bad} is outside the vocabulary range "
+                    f"[0, {self.V}) spanned by domains {self.domains}")
+        return np.searchsorted(self._domain_bounds, idx, side="right") - 1
 
     def _gamma_count_weight(self, indices: np.ndarray) -> np.ndarray | None:
         """Per-token omega weight for the gamma recurrence: omega[_token_domains(w)].
 
         None when omega is unset -- `_cavi_doc_inference` then runs its original
-        unweighted recurrence, so the default path is bit-for-bit unchanged."""
+        unweighted recurrence, so the default path is bit-for-bit unchanged.
+        Used by `infer_local` (deployment fold-in); `local_update` resolves the seam
+        once per document instead, because it needs the token domains for the
+        theta-contribution instrument as well and must not pay for two lookups."""
         if self.omega is None:
             return None
         return self.omega[self._token_domains(indices)]
@@ -374,7 +402,43 @@ class GatedOnlineLDA(OnlineLDA):
         contributes to the background only). Letting background docs go full-K instead
         lets the large background population train the node topics, collapsing them into
         generic comorbidity and destroying node specificity. Cost is O(|allowed|) per
-        token = the doc's frontier closure (bounded by DAG depth), not K."""
+        token = the doc's frontier closure (bounded by DAG depth), not K.
+
+        MULTI-DOMAIN ONLY, additionally emits `theta_contribution_by_domain`, a
+        length-n_domains array: the total omega-weighted evidence mass each domain
+        contributed to the doc-topic accumulation gamma over this batch. Definition,
+        exactly. For one document the CAVI gamma recurrence is
+
+            gamma = alpha + expElogtheta_d * (eb_d @ (w * counts / phi_norm))
+
+        (`_cavi_doc_inference`; w = the per-token omega weight, 1 when omega is
+        unset), so the evidence mass the tokens add to gamma OVER AND ABOVE the
+        prior alpha is
+
+            Sigma_k (gamma_k - alpha_k)
+              = Sigma_n w_n * counts_n * (eb_d[:, n] . expElogtheta_d) / phi_norm_n
+              = Sigma_n w_n * counts_n * (phi_norm_n - 1e-100) / phi_norm_n
+
+        -- the second line is an identity, not an approximation, because phi_norm_n
+        IS eb_d[:, n] . expElogtheta_d + 1e-100 by construction. So each token
+        contributes exactly its own omega-weighted count, less a shave from the
+        1e-100 underflow guard (below float64 resolution unless the token's topic
+        mass has itself underflowed, in which case the token genuinely moves gamma
+        by nothing). Grouping that per-token term by `_token_domains` and summing
+        over the batch is this stat; summing it over domains recovers the batch's
+        whole gamma increment. It is evaluated at the CONVERGED expElogtheta_d /
+        phi_norm returned by the CAVI loop -- i.e. it is the increment of the next
+        (fixed-point) sweep, the same convention the lambda sufficient statistics
+        `outer(expElogthetad, counts / phi_norm)` already use.
+
+        Why it exists: omega is TUNED, never fitted (`_resolve_omega`), and it
+        cannot be tuned without seeing what each domain actually contributes to the
+        shared theta. Nonnegative by construction; under omega = 1 it is the
+        per-domain token volume, so the ratio between entries is the raw
+        volume-imbalance a high-utilization domain imposes on theta. The stat is
+        additive across partitions, so the default `combine_stats` elementwise sum
+        aggregates it with no override. domains=None emits no such key (the
+        single-domain stats dict is unchanged)."""
         lam = global_params["lambda"]
         alpha = global_params["alpha"]
         if self.domains is None:
@@ -398,6 +462,12 @@ class GatedOnlineLDA(OnlineLDA):
         node_theta_sum = (
             np.zeros(self._block_sizes.shape[0], dtype=np.float64)
             if self.optimize_alpha else None)
+        # Per-domain theta-contribution instrument (see the docstring). Emitted for
+        # every multi-domain batch, empty or not, so the stats dict's key set does
+        # not depend on partition contents.
+        theta_contribution = (
+            None if self.domains is None
+            else np.zeros(len(self.domains), dtype=np.float64))
 
         # gamma_init draws Gamma(gamma_shape, 1/gamma_shape) per doc, sized to the gated
         # allowed set — same content-deterministic seeding contract as OnlineLDA.local_update
@@ -410,6 +480,17 @@ class GatedOnlineLDA(OnlineLDA):
             # transform is a separate, deliberately ungated full-K path; see
             # GatedLDAModel._transform in the mllib shim.)
             allowed = self.lay.allowed_set(doc.frontier)
+            # v2 SEAM, resolved ONCE per doc and shared by both per-token consumers:
+            # the omega gamma-weight and the per-domain theta-contribution below.
+            # domains=None has no domain axis, and omega then cannot be set either
+            # (`_resolve_omega` rejects it), so both stay None and the recurrence is
+            # the original unweighted one, bit-for-bit.
+            if self.domains is None:
+                tok_dom = None
+                w_tok = None
+            else:
+                tok_dom = self._token_domains(doc.indices)
+                w_tok = None if self.omega is None else self.omega[tok_dom]
             if self.random_seed is None:
                 gamma_init = np.random.gamma(
                     shape=self.gamma_shape,
@@ -440,7 +521,7 @@ class GatedOnlineLDA(OnlineLDA):
                 # accumulation by each token's omega_m and touches nothing else.
                 # None (omega unset, incl. every domains=None model) = the
                 # unweighted recurrence, bit-for-bit unchanged.
-                gamma_count_weight=self._gamma_count_weight(doc.indices),
+                gamma_count_weight=w_tok,
             )
             sstats_row = np.outer(expElogthetad, doc.counts / phi_norm)
             lambda_stats[np.ix_(allowed, doc.indices)] += sstats_row
@@ -454,6 +535,20 @@ class GatedOnlineLDA(OnlineLDA):
             # (lambda update) and the SVI-vs-Gibbs equivalence gate are unaffected.
             doc_theta_kl_sum += _dirichlet_kl(gamma, alpha[allowed])
             n_docs += 1
+
+            if theta_contribution is not None:
+                # Per-token share of Sigma_k (gamma_k - alpha_k) at the converged
+                # (expElogthetad, phi_norm): w_n * counts_n * (phi_norm_n - 1e-100)
+                # / phi_norm_n, grouped by the token's domain. The guard factor is
+                # the exact algebraic residue of _cavi_doc_inference's
+                # `phi_norm = eb_d.T @ expElogthetad + 1e-100` -- see the docstring.
+                # Nonnegative termwise (counts, omega and phi_norm - 1e-100 all are),
+                # so the accumulated stat is nonnegative too.
+                share = doc.counts * ((phi_norm - 1e-100) / phi_norm)
+                if w_tok is not None:
+                    share = share * w_tok
+                theta_contribution += np.bincount(
+                    tok_dom, weights=share, minlength=len(self.domains))
 
             if node_theta_sum is not None:
                 # Per-tied-block Σ_{k in block} (ψ(γ_k) − ψ(γ_sum)) over this doc's
@@ -470,6 +565,8 @@ class GatedOnlineLDA(OnlineLDA):
         }
         if node_theta_sum is not None:
             result["e_log_theta_node_sum"] = node_theta_sum
+        if theta_contribution is not None:
+            result["theta_contribution_by_domain"] = theta_contribution
         return result
 
     def update_global(self, global_params, target_stats, learning_rate):
@@ -486,11 +583,21 @@ class GatedOnlineLDA(OnlineLDA):
         the concatenated lambda_stats sufficient statistic, plus the per-domain
         eta_vec intercept), then split back into a per-domain dict and blended
         per domain — same (1-rho)*old + rho*target form as the single-array path,
-        just applied block-by-block.
+        just applied block-by-block. The aggregated per-domain theta-contribution
+        instrument (see local_update) is stashed here for `iteration_summary`: this
+        is the driver-side hook that sees the combined stats, and
+        iteration_summary's signature carries only global_params. It is read-only
+        bookkeeping -- nothing in the fit consumes it.
         """
         lam = global_params["lambda"]
         alpha = global_params["alpha"]
         eta = global_params["eta"]
+        if self.domains is not None and "theta_contribution_by_domain" in target_stats:
+            # Post-scaling (VIRunner hands update_global the corpus-equivalent
+            # target_stats), so in mini-batch mode this reads as a whole-corpus
+            # contribution rather than one batch's.
+            self._theta_contribution_by_domain = np.asarray(
+                target_stats["theta_contribution_by_domain"], dtype=np.float64)
         if self.domains is None:
             expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
             target_lam = eta + expElogbeta * target_stats["lambda_stats"]
@@ -620,3 +727,52 @@ class GatedOnlineLDA(OnlineLDA):
         )
         theta = gamma / gamma.sum()
         return {"gamma": gamma, "theta": theta}
+
+    def iteration_summary(self, global_params: dict[str, np.ndarray]) -> str:
+        """Per-iter α / η / Σλ view, dict-λ aware, plus the θ-contribution read.
+
+        domains=None delegates to OnlineLDA.iteration_summary and is byte-identical
+        to it. Multi-domain REQUIRES an override: the inherited implementation does
+        `float(global_params["eta"])` and `lam.sum(axis=1)`, and neither works on a
+        per-domain η sequence or a per-domain dict λ -- so VIRunner (core/runner.py,
+        which calls this every iteration) raised outright on any multi-domain fit
+        driven through it. Every multi-domain test on this branch drove its fits
+        locally, which is why it stayed hidden; the multi-domain path is now tested.
+
+        What the multi-domain line adds over the single-domain one:
+          * η_m -- each domain's own Dirichlet concentration (MixEHR-style
+            per-domain prior; Li, Nair, Lu et al. 2020, Nat. Commun.), since there
+            is no longer a single scalar η to print.
+          * Σλ_k PER DOMAIN -- λ row mass spread within each block. Pooling the
+            blocks would hide exactly the failure this diagnostic is for: one
+            domain's topics diverging in mass while the other's stay flat.
+          * θ_contrib_m -- the aggregated per-domain θ-contribution from the last
+            M-step (see local_update for the exact definition) with each domain's
+            share of the total. This is the volume-imbalance read that says whether
+            a domain is dominating the shared θ by sheer token volume, i.e. the
+            quantity ω is tuned against. Omitted before the first M-step, when no
+            batch has been aggregated yet.
+        """
+        if self.domains is None:
+            return super().iteration_summary(global_params)
+        alpha = np.asarray(global_params["alpha"])
+        lam = global_params["lambda"]
+        eta_str = ", ".join(f"{e:.4g}" for e in self._eta_domains)
+        lam_parts = []
+        for m in range(len(self.domains)):
+            rs = lam[m].sum(axis=1)
+            lam_parts.append(f"Σλ_k[m{m}: min={rs.min():.3g} max={rs.max():.3g}]")
+        out = (
+            f"α[min={alpha.min():.4g} max={alpha.max():.4g} mean={alpha.mean():.4g}], "
+            f"η_m=[{eta_str}], "
+            + " ".join(lam_parts)
+        )
+        contrib = self._theta_contribution_by_domain
+        if contrib is not None:
+            total = float(contrib.sum())
+            frac = contrib / total if total > 0.0 else np.zeros_like(contrib)
+            out += (
+                f", θ_contrib_m=[{', '.join(f'{c:.4g}' for c in contrib)}]"
+                f" frac=[{', '.join(f'{f:.3g}' for f in frac)}]"
+            )
+        return out

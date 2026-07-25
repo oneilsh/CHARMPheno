@@ -1245,3 +1245,222 @@ def test_omega_scalar_broadcasts_to_all_domains():
     for seq in ([1.0, 0.5], (1.0, 0.5), np.array([1.0, 0.5]), (x for x in (1.0, 0.5))):
         m = GatedOnlineLDA(lay, 8, domains=[4, 4], omega=seq)
         np.testing.assert_allclose(m.omega, [1.0, 0.5])
+
+
+# --- SP2 Task 7: per-domain theta-contribution instrument + v2 seam ---
+
+
+def _contrib_docs():
+    """Three-doc hand-built two-domain batch (V_m = 4 each, so domain 1 is ids 4..7).
+
+    Hand-built rather than planted: the instrument is an EXACT accounting identity
+    on the gamma recurrence, so the per-domain token volumes have to be known
+    exactly (4 in domain 0, 14 in domain 1). A planted corpus would only let us
+    assert an inequality. Volumes by domain:
+        doc 0: 2 + 3     doc 1: 1 + 9     doc 2: 1 + 2   ->  (4, 14)
+    """
+    return [
+        GatedBOWDocument(indices=np.array([0, 5], dtype=np.int32),
+                         counts=np.array([2.0, 3.0]), length=5,
+                         frontier=frozenset({1})),
+        GatedBOWDocument(indices=np.array([1, 4, 6], dtype=np.int32),
+                         counts=np.array([1.0, 4.0, 5.0]), length=10,
+                         frontier=frozenset({2})),
+        GatedBOWDocument(indices=np.array([0, 7], dtype=np.int32),
+                         counts=np.array([1.0, 2.0]), length=3,
+                         frontier=frozenset()),
+    ]
+
+
+def test_theta_contribution_by_domain_reported():
+    """local_update emits the per-domain theta-contribution instrument.
+
+    Length n_domains, nonnegative, and LARGER for the higher-volume domain under
+    omega = 1 -- the volume-imbalance read the arc design needs to tune omega at
+    all. Under omega = 1 the documented definition reduces to the per-domain token
+    volume exactly (the 1e-100 phi_norm guard is below float64 resolution here), so
+    the assertion is on the known volumes (4, 14), not on a re-run of the code.
+    domains=None must NOT grow the key (single-domain stats dict unchanged)."""
+    import numpy as np
+    lay = _omega_lay()
+    V, doms = 8, [4, 4]
+    docs = _contrib_docs()
+
+    m = GatedOnlineLDA(lay, V, domains=doms, alpha=0.1, eta=0.02, random_seed=0)
+    gp = m.initialize_global(None)
+    st = m.local_update(docs, gp)
+    c = np.asarray(st["theta_contribution_by_domain"])
+    assert c.shape == (len(doms),), c.shape
+    assert np.all(c >= 0.0), c
+    assert c[1] > c[0], c
+    np.testing.assert_allclose(c, [4.0, 14.0], rtol=1e-12)
+
+    m1 = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    st1 = m1.local_update(docs, m1.initialize_global(None))
+    assert "theta_contribution_by_domain" not in st1, sorted(st1)
+
+
+def test_theta_contribution_equals_gamma_increment_from_cavi():
+    """The stat IS the per-domain partition of the gamma increment, not a proxy.
+
+    For one document the CAVI recurrence is
+        gamma = alpha + expElogtheta_d * (eb_d @ (w * counts / phi_norm))
+    so the total evidence mass the tokens add to gamma over the prior is
+    sum_k (gamma_k - alpha_k). This test reproduces that sweep independently (same
+    gamma_init off the global RNG) and asserts the emitted stat sums to it. Run
+    under omega != 1 so the weighted form is the one being checked."""
+    import numpy as np
+    from spark_vi.models.topic.lda import _cavi_doc_inference
+    lay = _omega_lay()
+    V_m, V = 4, 8
+    doc = GatedBOWDocument(indices=np.array([1, 2, 4, 6], dtype=np.int32),
+                           counts=np.array([3.0, 1.0, 7.0, 2.0]), length=13,
+                           frontier=frozenset({1}))
+    m = GatedOnlineLDA(lay, V, domains=[V_m, V_m], omega=[1.0, 0.3],
+                       alpha=0.1, eta=0.02)
+    assert m.random_seed is None            # LOAD-BEARING: gamma_init off global RNG
+    gp = {"lambda": _omega_split_lambda(lay, V_m),
+          "alpha": m.alpha.copy(), "eta": np.array(m.eta)}
+
+    np.random.seed(11)
+    st = m.local_update([doc], gp)
+
+    allowed = lay.allowed_set(doc.frontier)
+    np.random.seed(11)                      # same draw local_update just consumed
+    gamma_init = np.random.gamma(shape=m.gamma_shape, scale=1.0 / m.gamma_shape,
+                                 size=len(allowed))
+    eb = m._assemble_expElogbeta(gp["lambda"])[allowed]
+    a_d = gp["alpha"][allowed]
+    w_tok = m._gamma_count_weight(doc.indices)
+    _, eth, phi_norm, _ = _cavi_doc_inference(
+        indices=doc.indices, counts=doc.counts, expElogbeta=eb, alpha=a_d,
+        gamma_init=gamma_init, max_iter=m.cavi_max_iter, tol=m.cavi_tol,
+        gamma_count_weight=w_tok)
+    gamma_next = a_d + eth * (eb[:, doc.indices] @ (w_tok * doc.counts / phi_norm))
+    increment = float((gamma_next - a_d).sum())
+
+    c = np.asarray(st["theta_contribution_by_domain"])
+    np.testing.assert_allclose(c.sum(), increment, rtol=1e-12)
+    # and the split is by TOKEN domain: ids 1,2 are domain 0, ids 4,6 are domain 1
+    np.testing.assert_allclose(c, [3.0 + 1.0, 0.3 * (7.0 + 2.0)], rtol=1e-12)
+
+
+def test_theta_contribution_responds_to_omega():
+    """The instrument measures the OMEGA-WEIGHTED mass it claims, not raw volume.
+
+    Down-weighting domain 1 must scale its reported contribution by exactly that
+    weight and leave domain 0's alone; omega_1 = 0 (a domain dropped from theta)
+    must report exactly zero. Without this the docstring's definition would be
+    unverified prose and the stat could silently be plain token volume."""
+    import numpy as np
+    lay = _omega_lay()
+    V, doms = 8, [4, 4]
+    docs = _contrib_docs()
+
+    def contrib(omega):
+        m = GatedOnlineLDA(lay, V, domains=doms, omega=omega,
+                           alpha=0.1, eta=0.02, random_seed=0)
+        gp = m.initialize_global(None)
+        return np.asarray(m.local_update(docs, gp)["theta_contribution_by_domain"])
+
+    ref = contrib(None)
+    down = contrib([1.0, 0.25])
+    np.testing.assert_allclose(down[0], ref[0], rtol=1e-12)
+    np.testing.assert_allclose(down[1], 0.25 * ref[1], rtol=1e-12)
+    assert down[1] < down[0]                      # the imbalance read flips
+    dropped = contrib([1.0, 0.0])
+    assert dropped[1] == 0.0 and dropped[0] > 0.0, dropped
+    np.testing.assert_allclose(contrib(0.5), 0.5 * ref, rtol=1e-12)
+
+
+def test_theta_contribution_sums_across_partitions():
+    """The stat is additive: the default combine_stats (elementwise sum) must give
+    the whole batch's contribution from two partitions' halves, so a distributed
+    fit reads the same imbalance a local one does."""
+    import numpy as np
+    lay = _omega_lay()
+    m = GatedOnlineLDA(lay, 8, domains=[4, 4], alpha=0.1, eta=0.02, random_seed=0)
+    gp = m.initialize_global(None)
+    docs = _contrib_docs()
+    whole = m.local_update(docs, gp)
+    merged = m.combine_stats(m.local_update(docs[:1], gp), m.local_update(docs[1:], gp))
+    np.testing.assert_allclose(merged["theta_contribution_by_domain"],
+                               whole["theta_contribution_by_domain"], rtol=1e-12)
+
+
+def test_v2_seam_per_token_domain_live():
+    """_token_domains is the v2 seam: each token's domain, resolved where gamma/phi
+    are formed. Asymmetric domain widths so a transposed bound would show; the
+    BLOCK BOUNDARIES (last id of domain 0, first id of domain 1) are the point --
+    an off-by-one in searchsorted's side= is exactly what this catches."""
+    import numpy as np
+    import pytest
+    lay = _omega_lay()
+    m = GatedOnlineLDA(lay, 8, domains=[3, 5])         # bounds [0, 3, 8]
+    np.testing.assert_array_equal(m._token_domains(np.arange(8)),
+                                  [0, 0, 0, 1, 1, 1, 1, 1])
+    assert int(m._token_domains(np.array([2]))[0]) == 0     # last id of domain 0
+    assert int(m._token_domains(np.array([3]))[0]) == 1     # first id of domain 1
+    assert m._token_domains(np.array([], dtype=np.int32)).size == 0
+    # three domains incl. a width-1 block: bounds [0, 2, 5, 6]
+    m3 = GatedOnlineLDA(lay, 6, domains=[2, 3, 1])
+    np.testing.assert_array_equal(m3._token_domains(np.arange(6)),
+                                  [0, 0, 1, 1, 1, 2])
+    assert int(m3._token_domains(np.array([5]))[0]) == 2    # last id of the last domain
+    # Out of range must be a NAMED ValueError. searchsorted saturates instead of
+    # failing (id 8 with domains=[4,4] returns 2), which the omega gather surfaces
+    # as an opaque "index 2 is out of bounds" IndexError -- and would silently read
+    # the WRONG domain if the weight array ever grew a sentinel entry.
+    mo = GatedOnlineLDA(lay, 8, domains=[4, 4], omega=[1.0, 0.5])
+    for bad in ([8], [-1], [0, 4, 99]):
+        with pytest.raises(ValueError, match="outside the vocabulary"):
+            mo._token_domains(np.array(bad, dtype=np.int64))
+    bad_doc = GatedBOWDocument(indices=np.array([8], dtype=np.int32),
+                               counts=np.array([1.0]), length=1,
+                               frontier=frozenset({1}))
+    with pytest.raises(ValueError, match="outside the vocabulary"):
+        mo.local_update([bad_doc], mo.initialize_global(None))
+    # domains=None has no domain axis
+    with pytest.raises(ValueError, match="multi-domain"):
+        GatedOnlineLDA(lay, 8)._token_domains(np.array([0]))
+
+
+def test_iteration_summary_multidomain_surfaces_eta_lambda_and_theta_contribution():
+    """iteration_summary must SURVIVE multi-domain and surface the instrument.
+
+    The base OnlineLDA implementation does float(global_params["eta"]) and
+    lam.sum(axis=1) -- both raise on a per-domain eta sequence / dict lambda, so
+    VIRunner (which calls this every iteration) broke outright in multi-domain
+    mode. Deleting the override makes this test raise, which is the regression
+    guard. The theta-contribution appears only after the first M-step has handed
+    the aggregated stat over."""
+    import numpy as np
+    lay = _omega_lay()
+    m = GatedOnlineLDA(lay, 8, domains=[4, 4], eta=[0.02, 0.05],
+                       alpha=0.1, random_seed=0)
+    gp = m.initialize_global(None)
+    s0 = m.iteration_summary(gp)
+    assert isinstance(s0, str) and s0 and "\n" not in s0
+    assert "θ_contrib_m" not in s0                     # nothing aggregated yet
+    assert "η_m=[0.02, 0.05]" in s0, s0
+    assert "Σλ_k[m0:" in s0 and "Σλ_k[m1:" in s0, s0
+
+    gp = m.update_global(gp, m.local_update(_contrib_docs(), gp), learning_rate=1.0)
+    s1 = m.iteration_summary(gp)
+    assert "\n" not in s1
+    assert "θ_contrib_m=[4, 14]" in s1, s1        # the (4, 14) volumes, .4g-formatted
+    assert "η_m=[0.02, 0.05]" in s1, s1
+
+
+def test_iteration_summary_domains_none_is_byte_identical_to_base():
+    """domains=None must produce the base OnlineLDA string byte-for-byte -- the
+    override may only ever branch, never reformat the single-domain line."""
+    import numpy as np
+    from spark_vi.models.topic.lda import OnlineLDA
+    lay = _omega_lay()
+    m = GatedOnlineLDA(lay, 8, alpha=0.1, eta=0.02, random_seed=0)
+    base = OnlineLDA(K=lay.K, vocab_size=8, alpha=0.1, eta=0.02, random_seed=0)
+    gp = m.initialize_global(None)
+    assert m.iteration_summary(gp) == base.iteration_summary(gp)
+    gp2 = m.update_global(gp, m.local_update(_contrib_docs(), gp), learning_rate=0.5)
+    assert m.iteration_summary(gp2) == base.iteration_summary(gp2)
