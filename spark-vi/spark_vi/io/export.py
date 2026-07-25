@@ -32,6 +32,59 @@ from spark_vi.core.result import VIResult
 _FORMAT_VERSION = 1
 
 
+class UnsupportedGlobalParamError(TypeError):
+    """A global_params value this format cannot write and read back.
+
+    `save_result` stores one params/<name>.npy per global_params entry and
+    `load_result` reads them with np.load's default allow_pickle=False (they
+    are model parameters, not our own trusted trace sidecars). Anything that does
+    not convert to a NUMERIC array therefore becomes an OBJECT array, which
+    np.save happily pickles -- the write SUCCEEDS and the later load fails with
+    "Object arrays cannot be loaded when allow_pickle=False". Raising here
+    converts that silent, delayed corruption into an immediate named failure.
+    """
+
+
+def _check_saveable_param(name: str, arr: object) -> np.ndarray:
+    """Return `arr` as the ndarray to write, or raise UnsupportedGlobalParamError.
+
+    The test is on the CONVERTED dtype, not on ``isinstance(arr, np.ndarray)``:
+    0-d array arithmetic in numpy returns an np.float64 SCALAR (``np.array(0.0) +
+    np.array(1.0)`` is not an ndarray), so models that keep a scalar parameter in
+    global_params legitimately hand this function numpy scalars, and those write
+    and load back as ordinary 0-d numeric .npy files. Object dtype is exactly the
+    boundary that matters: it is the only thing np.save can store solely as a
+    pickle, and therefore the only thing `load_result`'s allow_pickle=False
+    cannot read.
+
+    The one object-dtype shape currently reachable in this repo is the
+    multi-domain gated topic model's per-domain dict lambda ({m: (K, V_m)},
+    MixEHR-style storage; Li, Nair, Lu et al. 2020, Nat. Commun.): np.asarray on
+    a dict yields a 0-d object array that writes as a few hundred pickled bytes
+    and never loads back. Persisting it properly (one params/lambda_<m>.npy per
+    domain plus the domain sizes in the manifest, and the matching load/resume
+    path) is SP3's export task, not a silent write.
+    """
+    try:
+        out = np.asarray(arr)
+    except Exception as exc:                      # ragged input, etc.
+        raise UnsupportedGlobalParamError(
+            f"global_params[{name!r}] ({type(arr).__name__}) is not convertible "
+            f"to a numeric array: {exc}"
+        ) from exc
+    if out.dtype == object:
+        raise UnsupportedGlobalParamError(
+            f"global_params[{name!r}] is a {type(arr).__name__}, which converts "
+            f"to an OBJECT-dtype array; np.save can only store that as a pickle "
+            f"and load_result reads params with allow_pickle=False, so the write "
+            f"would succeed and the read would fail. Only numeric arrays are "
+            f"supported. In particular, multi-domain per-domain dict lambda "
+            f"export ({{domain: (K, V_m)}}) is NOT IMPLEMENTED (SP3 owns it) -- "
+            f"a multi-domain fit cannot be checkpointed or exported yet."
+        )
+    return out
+
+
 def _classify_trace(name: str, trace: list) -> str:
     """Decide on-disk strategy for a single diagnostic_traces entry.
 
@@ -99,6 +152,12 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
 
     An empty trace list round-trips inline as ``[]``; an empty
     diagnostic_traces dict produces no traces/ directory.
+
+    Raises UnsupportedGlobalParamError if a `global_params` value does not
+    convert to a NUMERIC array (see `_check_saveable_param`) -- notably the
+    multi-domain gated model's per-domain dict lambda, whose export is not
+    implemented yet. `diagnostic_traces` are unaffected: they have their own
+    sidecar path and are loaded with allow_pickle=True.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -106,7 +165,7 @@ def save_result(result: VIResult, out_dir: Path | str) -> None:
     params_dir.mkdir(exist_ok=True)
 
     for name, arr in result.global_params.items():
-        np.save(params_dir / f"{name}.npy", np.asarray(arr))
+        np.save(params_dir / f"{name}.npy", _check_saveable_param(name, arr))
 
     # Split diagnostic_traces by storage strategy. Array traces go to
     # traces/<name>.npy; scalar (and empty) traces stay inline in JSON.

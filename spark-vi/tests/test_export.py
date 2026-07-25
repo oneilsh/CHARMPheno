@@ -421,3 +421,72 @@ def test_save_result_round_trips_empty_diagnostic_trace(tmp_path):
 
     assert loaded.diagnostic_traces == {"foo": []}
     assert not (out / "traces").exists()
+
+
+def test_save_result_rejects_dict_valued_global_param(tmp_path):
+    """A dict-valued global param (the multi-domain per-domain lambda) must FAIL
+    LOUDLY, not write an unreadable file.
+
+    np.save(np.asarray(dict)) succeeds -- it pickles a 0-d object array of a few
+    hundred bytes -- and load_result, which reads params with allow_pickle=False,
+    then dies with "Object arrays cannot be loaded when allow_pickle=False". A
+    checkpointed multi-domain fit would therefore look saved and be unreadable.
+    """
+    import pytest as _pytest
+
+    from spark_vi.core import VIResult
+    from spark_vi.io.export import UnsupportedGlobalParamError, save_result
+
+    r = VIResult(
+        global_params={"lambda": {0: np.ones((2, 3)), 1: np.ones((2, 4))},
+                       "alpha": np.array(1.0)},
+        elbo_trace=[-1.0],
+        n_iterations=1,
+        converged=False,
+        metadata={},
+    )
+    out = tmp_path / "dict_lambda"
+    with _pytest.raises(UnsupportedGlobalParamError, match="lambda"):
+        save_result(r, out)
+    assert not (out / "params" / "lambda.npy").exists()
+
+
+def test_save_result_rejects_object_dtype_global_param(tmp_path):
+    """An object-dtype ndarray param is the same silent-unreadable trap as a dict
+    (np.save pickles it; load_result's allow_pickle=False cannot read it back)."""
+    import pytest as _pytest
+
+    from spark_vi.core import VIResult
+    from spark_vi.io.export import UnsupportedGlobalParamError, save_result
+
+    r = VIResult(
+        global_params={"weird": np.array([{"a": 1}, {"b": 2}], dtype=object)},
+        elbo_trace=[-1.0],
+        n_iterations=1,
+        converged=False,
+        metadata={},
+    )
+    with _pytest.raises(UnsupportedGlobalParamError, match="OBJECT-dtype"):
+        save_result(r, tmp_path / "obj")
+
+
+def test_save_result_accepts_numpy_scalar_global_params(tmp_path):
+    """A numpy SCALAR param must still save and load. 0-d array arithmetic returns
+    np.float64 (np.array(0.0) + np.array(1.0) is not an ndarray), so models that
+    keep a scalar in global_params hand save_result numpy scalars routinely -- the
+    dict/object-dtype guard must not reject them."""
+    from spark_vi.core import VIResult
+    from spark_vi.io.export import load_result, save_result
+
+    r = VIResult(
+        global_params={"theta": np.array(0.0) + np.array(1.0), "n": 3},
+        elbo_trace=[-1.0],
+        n_iterations=1,
+        converged=False,
+        metadata={},
+    )
+    out = tmp_path / "scalars"
+    save_result(r, out)
+    loaded = load_result(out)
+    assert float(loaded.global_params["theta"]) == 1.0
+    assert int(loaded.global_params["n"]) == 3
