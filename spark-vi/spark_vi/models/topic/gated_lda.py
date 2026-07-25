@@ -299,7 +299,10 @@ class GatedOnlineLDA(OnlineLDA):
         The scalar/sequence dispatch is by the resolved array's ndim, NOT
         np.isscalar (which is False for a 0-d ndarray, so np.array(0.5) would take
         the sequence branch and fail opaquely); iterables are materialized first so
-        a one-shot iterator is not consumed twice.
+        a one-shot iterator is not consumed twice. The VALUE check runs before that
+        dispatch, so neither branch can bypass it (a scalar -1.0 slipping through
+        gives negative theta mass and a negative node_affinity score -- garbage
+        rankings with no error raised).
         """
         if omega is None:
             return None
@@ -311,15 +314,19 @@ class GatedOnlineLDA(OnlineLDA):
         raw = (omega if isinstance(omega, np.ndarray)
                else list(omega) if hasattr(omega, "__iter__") else omega)
         arr = np.asarray(raw, dtype=np.float64)
+        # Value check BEFORE the shape dispatch, so it cannot be short-circuited by
+        # the scalar/0-d branch: a negative omega yields negative theta mass, which
+        # node_affinity would sum into a negative node score and silently corrupt
+        # the placement ranking rather than failing.
+        if not np.all(np.isfinite(arr)) or np.any(arr < 0.0):
+            raise ValueError(
+                f"omega components must be finite and >= 0, got {arr.tolist()}")
         if arr.ndim == 0:
             return np.full(n, float(arr), dtype=np.float64)
         if arr.ndim != 1 or arr.shape[0] != n:
             raise ValueError(
                 f"omega must be a scalar or a length-{n} (n_domains) sequence, "
                 f"got shape {arr.shape}")
-        if not np.all(np.isfinite(arr)) or np.any(arr < 0.0):
-            raise ValueError(
-                f"omega components must be finite and >= 0, got {arr.tolist()}")
         return arr
 
     def _token_domains(self, indices: np.ndarray) -> np.ndarray:
@@ -554,10 +561,16 @@ class GatedOnlineLDA(OnlineLDA):
         omega-weighted objective: the modality weight tempers q(theta_d)'s
         pseudo-likelihood (see `_resolve_omega`), and the terms aggregated here
         (token loglik from TRUE counts, Dirichlet KLs) are the unweighted ELBO's
-        evaluated at the weighted fit's q. It stays a valid CONVERGENCE DIAGNOSTIC
-        -- monotone in practice, finite, comparable across iterations of one fit --
-        but is not comparable across different omega, and is deliberately NOT
-        rewritten to chase the weighted objective.
+        evaluated at the weighted fit's q. It remains finite and comparable across
+        iterations of ONE fit -- a convergence DIAGNOSTIC -- but it is not
+        comparable across different omega, and MONOTONICITY IS NOT GUARANTEED:
+        nothing here establishes that the omega == 1 bound increases along a fit
+        that optimizes the omega-weighted objective. That matters operationally,
+        because VIModel.has_converged (core/model.py) stops on the TWO-SIDED rule
+        abs(curr - prev) / max(abs(prev), 1e-12) < tol, which a non-monotone trace
+        can satisfy at a turning point. Read it as a trace to inspect, not as a
+        certificate. It is deliberately NOT rewritten to chase the weighted
+        objective.
         """
         if self.domains is None:
             return super().compute_elbo(global_params, aggregated_stats)

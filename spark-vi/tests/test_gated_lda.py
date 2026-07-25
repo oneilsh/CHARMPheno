@@ -1131,6 +1131,13 @@ def test_omega_weights_gamma_only_sstats_and_loglik_use_true_counts():
                                    frontier=frozenset({1}))
     m_om = GatedOnlineLDA(lay, V, domains=[V_m, V_m], omega=[1.0, w], eta=0.02)
     m_pl = GatedOnlineLDA(lay, V, domains=[V_m, V_m], eta=0.02)
+    # LOAD-BEARING: both arms must take local_update's random_seed=None branch, which
+    # draws gamma_init from the GLOBAL RNG (seeded below) and so gives the two arms an
+    # identical init. With random_seed set, the per-doc seed is a hash of doc.counts --
+    # and the two arms' counts differ by construction (c vs w*c), so the inits would
+    # diverge and the exact factor-w equality below would fail for a reason that has
+    # nothing to do with omega. Do not add random_seed= to these constructors.
+    assert m_om.random_seed is None and m_pl.random_seed is None
     np.random.seed(3)
     gp = m_om.initialize_global(None)          # shared global params for both arms
     np.random.seed(4)
@@ -1195,10 +1202,31 @@ def test_omega_length_mismatch_raises():
         GatedOnlineLDA(_omega_lay(), 8, domains=[4, 4], omega=[1.0, 1.0, 1.0])
 
 
-def test_omega_rejects_negative():
+def test_omega_rejects_negative_and_nonfinite_in_every_input_form():
+    """The finite/nonnegative check must apply to the SCALAR and 0-d forms too, not
+    just to sequences: the scalar broadcast is a separate dispatch branch, and if it
+    returns before validation a negative omega produces NEGATIVE theta mass, which
+    flows into node_affinity as a negative node score and silently corrupts the
+    placement ranking (no exception, no warning). Every accepted input form is
+    covered here because the scalar dispatch is exactly where that hole opened."""
+    import numpy as np
     import pytest
-    with pytest.raises(ValueError, match="omega"):
-        GatedOnlineLDA(_omega_lay(), 8, domains=[4, 4], omega=[1.0, -0.5])
+    lay = _omega_lay()
+    bad_scalars = [-0.5, np.array(-0.5), np.float64(-0.5),
+                   float("nan"), float("inf"), np.array(float("nan"))]
+    for val in bad_scalars:
+        with pytest.raises(ValueError, match="omega"):
+            GatedOnlineLDA(lay, 8, domains=[4, 4], omega=val)
+    bad_sequences = [[1.0, -0.5], (1.0, float("nan")), np.array([1.0, float("inf")]),
+                     [-1.0, -1.0]]
+    for seq in bad_sequences:
+        with pytest.raises(ValueError, match="omega"):
+            GatedOnlineLDA(lay, 8, domains=[4, 4], omega=seq)
+    # 0.0 is legal (drop a domain from theta entirely), in both forms
+    np.testing.assert_allclose(
+        GatedOnlineLDA(lay, 8, domains=[4, 4], omega=0.0).omega, [0.0, 0.0])
+    np.testing.assert_allclose(
+        GatedOnlineLDA(lay, 8, domains=[4, 4], omega=[1.0, 0.0]).omega, [1.0, 0.0])
 
 
 def test_omega_scalar_broadcasts_to_all_domains():
