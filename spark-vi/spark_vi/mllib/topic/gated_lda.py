@@ -21,6 +21,7 @@ from pyspark.ml.param.shared import HasFeaturesCol, HasLabelCol, HasMaxIter, Has
 
 from spark_vi.core.config import VIConfig
 from spark_vi.models.topic.dag_placement import DagLayout
+from spark_vi.models.topic.domains import domains_to_bounds
 from spark_vi.models.topic.gated_lda import GatedOnlineLDA
 from spark_vi.models.topic.types import GatedBOWDocument
 from spark_vi.mllib.topic._common import _vector_to_bow_document
@@ -37,6 +38,16 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
                          "[0, V_0, V_0+V_1, ...]; normally DERIVED from the first "
                          "row's per-column vector sizes.",
                          typeConverter=TypeConverters.toListInt)
+    omega = Param(Params._dummy(), "omega",
+                  "per-domain modality weight on the doc-topic accumulation "
+                  "(theta only; lambda sstats and the data loglik use TRUE counts). "
+                  "Default all 1.0 = faithful MixEHR, volume speaks (Li, Nair, Lu "
+                  "et al. 2020). A tuned-vs-task tempering weight, NOT fitted.",
+                  typeConverter=TypeConverters.toListFloat)
+    etaPerDomain = Param(Params._dummy(), "etaPerDomain",
+                         "per-domain Dirichlet prior on the topic-word blocks; "
+                         "unset = the scalar 1/K used by the single-domain path.",
+                         typeConverter=TypeConverters.toListFloat)
     parent = Param(Params._dummy(), "parent",
                    "DAG parent map {child_int: parent_int or [parent_ints]}, anchor->0",
                    typeConverter=TypeConverters.identity)
@@ -240,7 +251,8 @@ def _deployment_alpha(fitted_alpha, lay, mode, scalar, bg_weight):
 class GatedLDAEstimator(_GatedLDAParams, Estimator):
     @keyword_only
     def __init__(self, *, featuresCol="features", featuresCols=None,
-                 domainBounds=None, labelCol="frontier", parent=None,
+                 domainBounds=None, omega=None, etaPerDomain=None,
+                 labelCol="frontier", parent=None,
                  nBg=2, tpn=1, maxIter=20, seed=None, caviMaxIter=100, caviTol=1e-3,
                  gammaShape=100.0, init="random", spectralMaxVocab=8000,
                  spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
@@ -253,6 +265,9 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
         # featuresCols defaults to [] = unset = single-domain via featuresCol.
         # domainBounds gets NO default on purpose: `isSet("domainBounds")` is what
         # distinguishes "authoritative explicit layout" from "derive from row one".
+        # omega and etaPerDomain get no default for the same reason: unset must
+        # reach the engine as None / the scalar 1/K, which is the pre-multi-domain
+        # behavior, and `omega=[1, 1, ...]` is only legal WITH domains.
         self._setDefault(featuresCol="features", featuresCols=[],
                          labelCol="frontier", nBg=2, tpn=1,
                          maxIter=20, nodeAffinityCol="nodeAffinity",
@@ -357,10 +372,23 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                     .map(lambda r: frozenset(int(x) for x in (r[0] or [])))
                     .countByValue().items())
             }
+        # omega / etaPerDomain are multi-domain-only quantities, forwarded when SET
+        # and otherwise left at the pre-multi-domain defaults: None (unweighted,
+        # MixEHR-faithful raw volume; Li, Nair, Lu et al. 2020) and the scalar 1/K
+        # eta the single-domain path has always used.
+        #
+        # Deliberately NOT gated on `fcols`: a per-domain weight with no domains is
+        # a contradiction, and the engine RAISES a named error for it
+        # (_resolve_omega / resolve_per_domain). Gating here would instead discard
+        # the caller's omega silently -- a fit that runs and serves an unweighted
+        # theta the caller never asked for.
         model_obj = GatedOnlineLDA(
             lay, V, init=init, domains=domains,
             optimize_alpha=optimize_alpha, frontier_histogram=frontier_hist,
-            alpha=alpha_vec, eta=1.0 / lay.K,
+            alpha=alpha_vec,
+            omega=(list(self.getOrDefault("omega")) if self.isSet("omega") else None),
+            eta=(list(self.getOrDefault("etaPerDomain"))
+                 if self.isSet("etaPerDomain") else 1.0 / lay.K),
             gamma_shape=self.getOrDefault("gammaShape"),
             cavi_max_iter=self.getOrDefault("caviMaxIter"),
             cavi_tol=self.getOrDefault("caviTol"),
@@ -507,6 +535,35 @@ class GatedLDAModel(_GatedLDAParams, Model):
     def result(self):
         return self._result
 
+    def _transform_omega(self, n_domains: int) -> np.ndarray:
+        """Resolve the length-n_domains modality weight the fold-in must apply.
+
+        Precedence: the `omega` Param when SET (an explicit deployment dial), else
+        the fitted omega recorded in `result.metadata` by GatedOnlineLDA
+        .get_metadata, else all 1.0 (unweighted raw volume = faithful MixEHR; Li,
+        Nair, Lu et al. 2020, Nat. Commun.).
+
+        The metadata fallback is what makes a model rebuilt from a LOADED VIResult
+        serve the theta it was fitted with: omega never enters global_params (it
+        weights theta during inference, not any stored parameter), so without it a
+        loaded multi-domain model would silently fold in unweighted -- exactly the
+        train/serve skew applying omega here exists to prevent.
+
+        The length check is not decoration: omega is gathered per token as
+        omega[domain_of(w)], so a too-long omega weights the wrong domains and a
+        too-short one raises an opaque index error inside a Spark task.
+        """
+        if self.isSet("omega"):
+            omega = np.asarray(self.getOrDefault("omega"), dtype=np.float64)
+        else:
+            recorded = (self._result.metadata or {}).get("omega")
+            omega = (np.ones(n_domains, dtype=np.float64) if recorded is None
+                     else np.asarray(recorded, dtype=np.float64))
+        if omega.shape != (n_domains,):
+            raise ValueError(f"omega has {omega.size} entries for "
+                             f"{n_domains} domains")
+        return omega
+
     def _transform(self, dataset):
         from pyspark.ml.linalg import DenseVector, VectorUDT
         from pyspark.sql import functions as F
@@ -515,7 +572,40 @@ class GatedLDAModel(_GatedLDAParams, Model):
 
         lay = _layout(self)
         lam = self._result.global_params["lambda"]
-        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        if isinstance(lam, dict):
+            # Per-domain dict lambda: each block normalizes over its OWN vocabulary
+            # (the MixEHR per-modality model, where a token's domain is exogenous),
+            # then the blocks concatenate into the engine's single id space. This is
+            # GatedOnlineLDA._assemble_expElogbeta's arithmetic; it is repeated here
+            # because _transform holds a VIResult, not a model instance.
+            lam_blocks = [lam[m] for m in sorted(lam)]
+            expElogbeta = np.concatenate(
+                [np.exp(digamma(b) - digamma(b.sum(axis=1, keepdims=True)))
+                 for b in lam_blocks], axis=1)
+            sizes = [int(b.shape[1]) for b in lam_blocks]
+            bounds = domains_to_bounds(sizes)
+            omega = self._transform_omega(len(sizes))
+        else:
+            # Single-domain: unchanged. omega would have nothing to weight here, so
+            # it is rejected rather than dropped -- the same call the engine's
+            # _resolve_omega makes, at the only other place omega is consumed.
+            if self.isSet("omega"):
+                raise ValueError(
+                    "omega requires multi-domain mode: the fitted lambda is a "
+                    "single (K, V) array, so there are no domains to weight")
+            expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+            sizes, bounds, omega = None, None, None
+        # featuresCols set = the multi-domain INPUT shape: one vector column per
+        # domain, concatenated by the same helper the fit's row mapper used (which
+        # also rejects a row whose widths disagree with the fitted layout). Unset =
+        # one already-concatenated features column, the single-domain path.
+        fcols = list(self.getOrDefault("featuresCols") or [])
+        if fcols and sizes is None:
+            raise ValueError(
+                f"featuresCols={fcols} is set but the fitted lambda is a single "
+                f"(K, V) array, so the per-domain widths needed to concatenate "
+                f"those columns are unknown; fit with featuresCols or transform a "
+                f"single concatenated featuresCol")
         # Deployment alpha (may differ from the fitted alpha — see _deployment_alpha):
         # decouples a learned fitting-aid alpha from the fold-in prior.
         alpha = _deployment_alpha(
@@ -535,12 +625,17 @@ class GatedLDAModel(_GatedLDAParams, Model):
             "expElogbeta": expElogbeta, "alpha": alpha, "gamma_shape": gamma_shape,
             "cavi_max_iter": cavi_max_iter, "cavi_tol": cavi_tol, "K": K,
             "nodes": nodes, "blocks": blocks,
+            "sizes": (sizes if fcols else None), "bounds": bounds, "omega": omega,
         })
 
-        def _affinity(features):
+        def _affinity(*features):
             import hashlib
             p = bcast.value
-            doc = _vector_to_bow_document(features)
+            if p["sizes"] is None:
+                doc = _vector_to_bow_document(features[0])
+                indices, counts = doc.indices, doc.counts
+            else:
+                indices, counts = _concat_domain_features(features, p["sizes"])
             # Content-deterministic gamma_init (mirrors GatedOnlineLDA.local_update's
             # blake2b-of-content seeding): identical docs get identical init on every
             # run, so held-out node-affinity scores are reproducible and independent
@@ -548,14 +643,23 @@ class GatedLDAModel(_GatedLDAParams, Model):
             # near 1.0) so this barely moves the CAVI fixed point — but a scoring path
             # feeding AUC / precision@sens must not be run-to-run random.
             h = hashlib.blake2b(digest_size=8)
-            h.update(np.ascontiguousarray(doc.indices, dtype=np.int32).tobytes())
-            h.update(np.ascontiguousarray(doc.counts, dtype=np.float64).tobytes())
+            h.update(np.ascontiguousarray(indices, dtype=np.int32).tobytes())
+            h.update(np.ascontiguousarray(counts, dtype=np.float64).tobytes())
             rng = np.random.default_rng(int.from_bytes(h.digest(), "little"))
             gamma_init = rng.gamma(p["gamma_shape"], 1.0 / p["gamma_shape"], size=p["K"])
+            # omega weights theta, and theta is what this function returns, so the
+            # deployed read-out must use the SAME per-token weight the fit used or
+            # fitted and served theta diverge silently. None = the identity path,
+            # byte-identical to the pre-omega single-domain call.
+            w_tok = None
+            if p["bounds"] is not None:
+                dom = np.searchsorted(p["bounds"], indices, side="right") - 1
+                w_tok = p["omega"][dom]
             gamma, _, _, _ = _cavi_doc_inference(
-                indices=doc.indices, counts=doc.counts, expElogbeta=p["expElogbeta"],
+                indices=indices, counts=counts, expElogbeta=p["expElogbeta"],
                 alpha=p["alpha"], gamma_init=gamma_init,
-                max_iter=p["cavi_max_iter"], tol=p["cavi_tol"])
+                max_iter=p["cavi_max_iter"], tol=p["cavi_tol"],
+                gamma_count_weight=w_tok)
             theta = gamma / gamma.sum()
             return DenseVector([float(theta[p["blocks"][u]].sum()) for u in p["nodes"]])
 
@@ -565,4 +669,6 @@ class GatedLDAModel(_GatedLDAParams, Model):
         # unpersist after — see VIRunner.transform). ContextCleaner reclaims it
         # when the DataFrame is garbage-collected.
         out_col = self.getOrDefault("nodeAffinityCol")
-        return dataset.withColumn(out_col, udf(F.col(self.getOrDefault("featuresCol"))))
+        in_cols = ([F.col(c) for c in fcols] if fcols
+                   else [F.col(self.getOrDefault("featuresCol"))])
+        return dataset.withColumn(out_col, udf(*in_cols))

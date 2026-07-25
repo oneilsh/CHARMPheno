@@ -627,6 +627,171 @@ def test_multidomain_dense_spectral_init_builds_docs_through_the_shared_helper(s
     assert lam[0].shape[1] == 6 and lam[1].shape[1] == 4
 
 
+def _two_domain_df(spark):
+    """Six two-domain rows: domain 0 width 6, domain 1 width 4, frontiers over
+    nodes 2 and 3 of the DAG {1:0, 2:1, 3:1}, two partitions so the reduce
+    combines more than one. Deliberately tiny -- these are shim-contract tests,
+    not recovery tests."""
+    from pyspark.ml.linalg import SparseVector, VectorUDT
+    from pyspark.sql.types import ArrayType, IntegerType, StructField, StructType
+    schema = StructType([
+        StructField("c", VectorUDT()), StructField("d", VectorUDT()),
+        StructField("frontier", ArrayType(IntegerType())),
+    ])
+    rows = [
+        (SparseVector(6, {0: 2.0, 1: 1.0}), SparseVector(4, {0: 3.0}), [2]),
+        (SparseVector(6, {1: 1.0, 2: 2.0}), SparseVector(4, {1: 1.0}), [2]),
+        (SparseVector(6, {0: 1.0, 2: 1.0}), SparseVector(4, {0: 2.0, 1: 1.0}), [2]),
+        (SparseVector(6, {3: 3.0, 4: 1.0}), SparseVector(4, {2: 2.0}), [3]),
+        (SparseVector(6, {4: 1.0, 5: 1.0}), SparseVector(4, {3: 4.0}), [3]),
+        (SparseVector(6, {3: 1.0, 5: 2.0}), SparseVector(4, {2: 1.0, 3: 1.0}), [3]),
+    ]
+    return spark.createDataFrame(rows, schema=schema).repartition(2)
+
+
+def test_multidomain_shim_transform_produces_node_affinity(spark):
+    """A multi-domain fitted model must transform: _transform currently assumes an
+    ndarray lambda and raises on the per-domain dict."""
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    df = _two_domain_df(spark)                     # helper added in this task
+    est = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                            parent={1: 0, 2: 1, 3: 1}, nBg=2, tpn=1,
+                            maxIter=2, seed=0, omega=[1.0, 0.4])
+    model = est.fit(df)
+    out = model.transform(df).select("nodeAffinity").collect()
+    assert len(out) == df.count()
+    for r in out:
+        vals = list(r[0])
+        assert len(vals) == 3                      # one per DAG node
+        assert all(v >= 0.0 for v in vals)
+
+
+def test_transform_applies_omega_so_deployed_theta_matches_fitted(spark):
+    """omega weights theta, and theta IS the deployed read-out, so transform must
+    apply the same per-token weight the fit used. Directional: down-weighting
+    domain 1 must change nodeAffinity relative to omega=1 on the SAME fitted
+    lambda."""
+    import numpy as np
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    df = _two_domain_df(spark)
+    est = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                            parent={1: 0, 2: 1, 3: 1}, nBg=2, tpn=1,
+                            maxIter=2, seed=0, omega=[1.0, 1.0])
+    model = est.fit(df)
+    base = np.array([list(r[0]) for r in model.transform(df).select("nodeAffinity").collect()])
+    model._set(omega=[1.0, 0.05])                  # same lambda, different dial
+    down = np.array([list(r[0]) for r in model.transform(df).select("nodeAffinity").collect()])
+    assert not np.allclose(base, down), "transform ignored omega"
+
+
+def test_transform_reads_omega_from_metadata_on_a_rebuilt_model(spark):
+    """A model rebuilt from a LOADED VIResult carries no omega Param, so transform
+    falls back to the fitted omega recorded in result.metadata -- otherwise a
+    served theta would silently differ from the fitted one (the train/serve skew
+    this task exists to prevent). Param, when set, still wins."""
+    import numpy as np
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator, GatedLDAModel
+    df = _two_domain_df(spark)
+    parent = {1: 0, 2: 1, 3: 1}
+    est = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                            parent=parent, nBg=2, tpn=1,
+                            maxIter=2, seed=0, omega=[1.0, 0.05])
+    fitted = est.fit(df)
+    assert fitted.result.metadata["omega"] == [1.0, 0.05]
+
+    # Rebuild as a loader would: only the result + DAG shape, no fit-time Params.
+    rebuilt = GatedLDAModel(fitted.result, parent=parent, nBg=2, tpn=1)
+    rebuilt._set(featuresCols=["c", "d"])          # a loader knows its input columns
+    assert not rebuilt.isSet("omega")
+    a_fit = np.array([list(r[0])
+                      for r in fitted.transform(df).select("nodeAffinity").collect()])
+    a_reb = np.array([list(r[0])
+                      for r in rebuilt.transform(df).select("nodeAffinity").collect()])
+    np.testing.assert_allclose(a_reb, a_fit)
+
+    # ...and an explicit Param overrides the recorded value.
+    rebuilt._set(omega=[1.0, 1.0])
+    a_one = np.array([list(r[0])
+                      for r in rebuilt.transform(df).select("nodeAffinity").collect()])
+    assert not np.allclose(a_one, a_fit)
+
+
+def test_transform_rejects_an_omega_of_the_wrong_length(spark):
+    """A per-domain weight whose length disagrees with the domain count is a
+    caller error: gathering it by token domain would either raise an opaque
+    index error or silently weight the wrong domains."""
+    import pytest
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    df = _two_domain_df(spark)
+    est = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                            parent={1: 0, 2: 1, 3: 1}, nBg=2, tpn=1,
+                            maxIter=1, seed=0)
+    model = est.fit(df)
+    model._set(omega=[1.0, 0.5, 0.25])             # 3 weights, 2 domains
+    with pytest.raises(ValueError, match=r"omega has 3 entries for 2 domains"):
+        model.transform(df)
+
+
+def test_single_domain_transform_rejects_an_omega_set_after_the_fit(spark):
+    """A single-domain model has no domains to weight, so an omega set on it is
+    rejected at transform instead of being silently dropped (the fit-time engine
+    check cannot see a Param set afterwards)."""
+    import pytest
+    from pyspark.ml.linalg import SparseVector
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    df = spark.createDataFrame(
+        [(SparseVector(6, {0: 1.0, 1: 2.0}), [1]),
+         (SparseVector(6, {2: 1.0}), [2])], ["features", "frontier"])
+    model = GatedLDAEstimator(labelCol="frontier", parent={1: 0, 2: 0}, nBg=1,
+                              tpn=1, maxIter=1, seed=0).fit(df)
+    model.transform(df).select("nodeAffinity").collect()      # fine without omega
+    model._set(omega=[1.0, 0.5])
+    with pytest.raises(ValueError, match="omega requires multi-domain mode"):
+        model.transform(df)
+
+
+def test_shim_omega_and_eta_per_domain_params_settable():
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    est = GatedLDAEstimator(parent={1: 0, 2: 0})
+    assert not est.isSet("omega")                  # unset = unweighted MixEHR default
+    assert not est.isSet("etaPerDomain")
+    est2 = GatedLDAEstimator(parent={1: 0, 2: 0}, featuresCols=["c", "d"],
+                             omega=[1.0, 0.25], etaPerDomain=[0.02, 0.1])
+    assert est2.getOrDefault("omega") == [1.0, 0.25]
+    assert est2.getOrDefault("etaPerDomain") == [0.02, 0.1]
+
+
+def test_omega_without_features_cols_raises_rather_than_being_ignored(spark):
+    """omega is forwarded whenever SET, not only when featuresCols is, so a
+    per-domain weight on a single-domain fit hits the engine's named error. Gating
+    it on featuresCols instead would discard the caller's omega silently and serve
+    an unweighted theta they never asked for."""
+    import pytest
+    from pyspark.ml.linalg import SparseVector
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    df = spark.createDataFrame(
+        [(SparseVector(6, {0: 1.0, 1: 2.0}), [1]),
+         (SparseVector(6, {2: 1.0}), [2])], ["features", "frontier"])
+    est = GatedLDAEstimator(labelCol="frontier", parent={1: 0, 2: 0}, nBg=1, tpn=1,
+                            maxIter=1, seed=0, omega=[1.0, 0.5])
+    with pytest.raises(ValueError, match="omega requires multi-domain mode"):
+        est.fit(df)
+
+
+def test_multidomain_fit_forwards_eta_per_domain(spark):
+    """etaPerDomain reaches the engine's per-domain Dirichlet prior; unset keeps
+    the scalar 1/K the single-domain path uses."""
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    df = _two_domain_df(spark)
+    kw = dict(featuresCols=["c", "d"], labelCol="frontier",
+              parent={1: 0, 2: 1, 3: 1}, nBg=2, tpn=1, maxIter=1, seed=0)
+    m = GatedLDAEstimator(etaPerDomain=[0.02, 0.5], **kw).fit(df)
+    assert m.result.metadata["eta_m"] == [0.02, 0.5]
+    K = 2 + 3                                       # n_bg + nodes * tpn
+    m_default = GatedLDAEstimator(**kw).fit(df)
+    assert m_default.result.metadata["eta_m"] == [1.0 / K, 1.0 / K]
+
+
 def test_single_domain_shim_path_unchanged(spark):
     """featuresCols unset keeps the existing single-featuresCol behavior: a single
     (K, V) array lambda and no domains in metadata."""
