@@ -99,7 +99,13 @@ Sequence SP1 → SP2 → SP3 → SP4; each its own spec → plan → build.
 
 - **SP1 — Multi-domain spectral init.** Per-domain candidate floor in `find_anchors`; `split_domains` post-recovery; two-domain planted generator; joint-recovery + FDR-delta acceptance via the Gibbs oracle. De-risks anchor-basis alignment cheaply. Plan drafted at `docs/superpowers/plans/2026-07-24-multidomain-spectral-init.md` — **light revision:** reframe the split as the *seed for SP2's λ_m* (not just a readout); otherwise as written.
 - **SP2 — Multi-domain gated LDA core.** Per-domain λ_m (block-Dirichlet expectation), shared gated θ with **ω_m** + per-modality θ-contribution instrumentation, per-domain η_m, per-domain sstats/M-step, multi-domain ELBO, the **v2-seam invariant**; multi-domain Gibbs oracle + planted per-domain recovery + SVI≈Gibbs equivalence. Seeded by SP1. The statistical heart.
-- **SP3 — Doc representation + mllib shim (stub).** Multi-domain engine doc; shim = concatenated `featuresCol` + `domainBounds` Param + `ω`/`η` config + split-on-ingest; Model emits per-domain λ_m; `labelCol`=frontier reused. Expand just-in-time after SP2.
+- **SP3 — Doc representation + mllib shim.** **EXPANDED 2026-07-25 and SPLIT IN TWO** (it spanned three layers with different constraints, and the third depends on the first two):
+  - **SP3a — persistence + shim**, `spark-vi` only: `docs/superpowers/specs/2026-07-25-sp3a-multidomain-persistence-and-shim-design.md`
+  - **SP3b — drug domain + cloud driver**, `charmpheno` + `analysis/cloud`: `docs/superpowers/specs/2026-07-25-sp3b-drug-domain-and-cloud-driver-design.md`
+
+  Two amendments the expansion made to this stub:
+  - **The shim takes SEPARATE per-domain feature columns** (`featuresCols`), not the concatenated `featuresCol` + `domainBounds` Param this stub proposed. User decision, 2026-07-25. Bounds are derived from the per-column vector sizes and every row validated against them, since a mis-sized vector could otherwise re-lay-out the vocabulary silently.
+  - **Blocker 1 below is RESOLVED — the immunity hypothesis held.** The pre-registered probe was run (2026-07-25) and the scalable path matched or beat the dense+floor seed on five of six per-domain cells post-EM. No per-domain rule and no `domain_bounds` plumbing are needed there; SP3a owes the *test* plus a docstring. The probe also suggested the dense floor's own value is a degenerate-plant artifact (it rescues three near-dead cells on a background-starved, label-unidentifiable corpus and does nothing on a well-specified one) — which would question insight 0065's framing, and is held pending the committed multi-seed test. Numbers in the SP3a design.
 
   **SP3 BLOCKERS carried over from SP2's final review — read before planning SP3:**
 
