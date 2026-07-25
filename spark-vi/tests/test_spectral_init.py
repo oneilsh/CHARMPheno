@@ -127,7 +127,7 @@ def test_two_domain_corpus_within_doc_cross_domain():
 
 def test_multidomain_init_recovers_both_domains_incl_b_anchored():
     """The joint recipe (one Q, one greedy with per-domain floor, one recover,
-    split) recovers per-domain phenotypes for every node, INCLUDING a node whose
+    split) recovers each node's per-domain token signature, INCLUDING a node whose
     domain-0 signature is ambiguous but whose domain-1 signature is unique."""
     import numpy as np
     from types import SimpleNamespace
@@ -158,3 +158,78 @@ def test_multidomain_init_recovers_both_domains_incl_b_anchored():
         return np.where(row > eps)[0]
     node_b_support = _support(pb[slot_of_node[3]])
     assert bb[:, node_b_support].sum(axis=1).max() > 0.4
+
+
+def test_find_anchors_rejects_bounds_that_do_not_cover_the_vocabulary():
+    """A silent wrong answer before the shared validator existed: bounds ending
+    short of V returned FEWER anchors than requested, with every column past the
+    last bound permanently ineligible to anchor."""
+    import numpy as np
+    import pytest
+    from spark_vi.models.topic.spectral_init import find_anchors
+    Q = np.eye(6) / 6.0
+    with pytest.raises(ValueError, match="domain_bounds"):
+        find_anchors(Q, 4, domain_bounds=[0, 3])
+
+
+def test_split_domains_rejects_bounds_that_do_not_cover_the_vocabulary():
+    """The same silent failure on the split side: bounds ending short of V used to
+    DROP the trailing columns from the returned per-domain blocks."""
+    import numpy as np
+    import pytest
+    from spark_vi.models.topic.spectral_init import split_domains
+    with pytest.raises(ValueError, match="domain_bounds"):
+        split_domains(np.full((2, 6), 1.0 / 6), [0, 3])
+
+
+def _two_domain_grouped_docs(seed=0):
+    """Docs over a dense domain 0 (ids 0..3) and a sparse domain 1 (ids 4, 5),
+    with a foreground group so BOTH spectral_init_beta anchor passes are live."""
+    import numpy as np
+    from types import SimpleNamespace
+    rng = np.random.default_rng(seed)
+    docs = []
+    for i in range(120):
+        in_group = (i % 3 == 0)
+        toks = list(rng.choice([0, 1, 2, 3], size=8))
+        if in_group:
+            toks += [2, 3, 2, 3]            # the group's dense-domain signature
+        if i % 20 == 0:
+            toks += [4, 0]                  # rare sparse-domain word, paired cross-domain
+        if i % 60 == 0:
+            toks += [5]                     # sparse-domain noise
+        u, c = np.unique(np.array(toks), return_counts=True)
+        docs.append(SimpleNamespace(indices=u, counts=c.astype(float),
+                                    groups=frozenset(["g"]) if in_group else frozenset()))
+    return docs
+
+
+def test_spectral_init_beta_threads_domain_bounds_to_both_anchor_passes():
+    """spectral_init_beta's domain_bounds passthrough is LIVE, in both the pooled
+    background pass and each within-group pass, and None == one pooled domain.
+
+    Without the per-domain floor the sparse domain (ids 4, 5) is below the pooled
+    marginal mean, so no recovered topic carries appreciable mass there. With it,
+    a background topic AND a foreground topic land on the sparse domain -- which
+    is exactly the failure mode ('domain imbalance silently breaks init') the
+    parameter exists to prevent."""
+    import numpy as np
+    from spark_vi.models.topic.partition import TopicBlockPartition
+    docs = _two_domain_grouped_docs()
+    part = TopicBlockPartition(group_var="g", background_k=2, foreground=(("g", 2),))
+    V, bounds = 6, [0, 4, 6]
+
+    pooled = spectral_init_beta(docs, part, V)
+    one_domain = spectral_init_beta(docs, part, V, domain_bounds=[0, V])
+    per_domain = spectral_init_beta(docs, part, V, domain_bounds=bounds)
+
+    # domain_bounds=None is exactly one pooled domain spanning [0, V).
+    np.testing.assert_allclose(pooled, one_domain)
+    # Under the pooled floor no topic reaches the sparse domain; under the
+    # per-domain floor a background topic (row < 2) and a foreground topic
+    # (row >= 2) both do -- so both find_anchors call sites got the bounds.
+    sparse_mass_pooled = pooled[:, 4:].sum(axis=1)
+    sparse_mass_per_domain = per_domain[:, 4:].sum(axis=1)
+    assert sparse_mass_pooled.max() < 0.05
+    assert sparse_mass_per_domain[:2].max() > 0.1          # background pass
+    assert sparse_mass_per_domain[2:].max() > 0.5          # within-group pass

@@ -8,6 +8,7 @@ import numpy as np
 from scipy import stats as _sps
 from scipy.sparse import issparse
 
+from spark_vi.models.topic.domains import resolve_per_domain, validate_domain_bounds
 from spark_vi.models.topic.spectral_init import word_cooccurrence, find_anchors, recover_beta
 
 
@@ -137,17 +138,14 @@ def _resolve_domain_priors(beta_prior, n_domains):
     Dirichlet), which makes the conditional 0/0 for any topic with no tokens in the
     relevant domain — it emitted a stream of "invalid value encountered in divide"
     RuntimeWarnings and leaned on the seeded init to keep the result finite. Rejecting it
-    is deliberate; see fit_gated's byte-for-byte note."""
-    if np.isscalar(beta_prior):
-        etas = [float(beta_prior)] * n_domains
-    else:
-        etas = [float(b) for b in beta_prior]
-        if len(etas) != n_domains:
-            raise ValueError(
-                f"beta_prior sequence length {len(etas)} != n_domains {n_domains}")
-    if any(e <= 0 for e in etas):
-        raise ValueError(f"all beta_prior components must be > 0, got {etas}")
-    return etas
+    is deliberate; see fit_gated's byte-for-byte note.
+
+    Thin wrapper over the shared `domains.resolve_per_domain` (one resolver for every
+    scalar-or-per-domain hyperparameter on this branch: eta_m, omega_m, beta_prior_m),
+    which dispatches scalar-vs-sequence on ndim rather than np.isscalar -- the latter is
+    False for a 0-d ndarray, so beta_prior=np.array(0.02) used to raise "TypeError:
+    iteration over a 0-d array" from the list comprehension above."""
+    return resolve_per_domain(beta_prior, n_domains, "beta_prior")
 
 
 def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
@@ -205,11 +203,7 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
     tests only (its runtime — a Python per-token loop — is not tuned for production scale)."""
     rng = np.random.default_rng() if rng is None else rng
     K = lay.K
-    bounds = np.asarray([0, V] if domain_bounds is None else domain_bounds, dtype=np.int64)
-    if bounds[0] != 0 or bounds[-1] != V or np.any(np.diff(bounds) <= 0):
-        raise ValueError(
-            f"domain_bounds {list(bounds)} must be strictly increasing offsets from 0 "
-            f"to V={V} (the concatenated vocabulary must be covered exactly once)")
+    bounds = validate_domain_bounds(domain_bounds, V)     # None -> [0, V], one domain
     n_dom = len(bounds) - 1
     etas = np.asarray(_resolve_domain_priors(beta_prior, n_dom), dtype=np.float64)
     # Per-domain denominators V_m·eta_m and the length-V prior vector (eta_m over block m).

@@ -1117,3 +1117,17 @@ def test_fit_gated_single_domain_matches_pre_change_golden():
     np.testing.assert_allclose(beta_none, GOLDEN, rtol=1e-12, atol=0.0)
     _lay, beta_one = _tiny_two_domain_fit(domain_bounds=[0, 8])   # one domain over all ids
     np.testing.assert_array_equal(beta_none, beta_one)
+
+
+def test_resolve_domain_priors_accepts_every_scalar_spelling():
+    """np.isscalar(np.array(0.02)) is False, so the pre-consolidation resolver sent a
+    0-d ndarray down the SEQUENCE branch and raised 'iteration over a 0-d array'.
+    All scalar spellings must broadcast identically, and a fit must accept them."""
+    import numpy as np
+    from spark_vi.models.topic.dag_placement import _resolve_domain_priors
+    for val in (0.02, np.float64(0.02), np.array(0.02)):
+        np.testing.assert_allclose(_resolve_domain_priors(val, 2), [0.02, 0.02])
+    _lay, beta_float = _tiny_two_domain_fit(domain_bounds=[0, 4, 8], beta_prior=0.02)
+    _lay, beta_0d = _tiny_two_domain_fit(domain_bounds=[0, 4, 8],
+                                        beta_prior=np.array(0.02))
+    np.testing.assert_array_equal(beta_float, beta_0d)

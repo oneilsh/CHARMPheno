@@ -32,6 +32,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.optimize import nnls
 
+from spark_vi.models.topic.domains import validate_domain_bounds
+
 
 def word_cooccurrence(docs, V: int) -> np.ndarray:
     """V×V normalized same-document word co-occurrence matrix Q.
@@ -93,10 +95,14 @@ def _domain_candidate_mask(marginal, min_marginal_frac, domain_bounds):
     domain_bounds is a strictly-increasing cumulative-offset sequence starting at
     0 and ending at V; domain d spans [domain_bounds[d], domain_bounds[d+1]).
     None -> a single pooled domain, reproducing the original pooled floor exactly.
+    It is VALIDATED here (`domains.validate_domain_bounds`), which is what makes
+    every `find_anchors` caller -- including `spectral_init_beta` and
+    `gated_init.spectral_block_aligned_lambda` -- raise on malformed bounds
+    instead of silently leaving the uncovered tail of the vocabulary ineligible
+    to anchor.
     """
     V = marginal.shape[0]
-    if domain_bounds is None:
-        domain_bounds = [0, V]
+    domain_bounds = validate_domain_bounds(domain_bounds, V)
     mask = np.zeros(V, dtype=bool)
     for lo, hi in zip(domain_bounds[:-1], domain_bounds[1:]):
         seg = marginal[lo:hi]
@@ -146,7 +152,10 @@ def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
     clear the bar — no anchor is ever drawn from it. Flooring per-domain fixes
     this while leaving the greedy hull-vertex geometry itself untouched. Default
     ``None`` reproduces the single pooled-domain floor exactly (see
-    ``_domain_candidate_mask``).
+    ``_domain_candidate_mask``). Bounds that do not cover [0, V) exactly once
+    raise ValueError (``domains.validate_domain_bounds``): the previous silent
+    behavior returned FEWER anchors than asked for, with every column past the
+    last bound permanently ineligible.
 
     Returns the ``n`` newly chosen anchor word ids in selection order.
     """
@@ -268,8 +277,19 @@ def spectral_init_beta(docs, partition, V: int, *, domain_bounds=None) -> np.nda
     ``_domain_candidate_mask``). ``word_cooccurrence`` already builds the joint Q
     over the concatenated multi-domain vocab unchanged; only this floor threading
     is needed. Default ``None`` reproduces current single-pooled-domain behavior
-    byte-for-byte.
+    byte-for-byte. Validated up front (`domains.validate_domain_bounds`) so a
+    malformed sequence fails before the O(V^2) co-occurrence pass rather than
+    inside the first ``find_anchors`` call.
+
+    No in-repo caller passes ``domain_bounds`` here yet: this is the BLOCK-AWARE
+    STM entry point, while the multi-domain gated arc seeds through
+    ``gated_init.multidomain_spectral_lambda``. The passthrough is kept because a
+    multi-domain STM would need exactly it, and it is covered by
+    ``test_spectral_init_beta_threads_domain_bounds_to_both_anchor_passes`` (which
+    asserts both anchor passes receive it), not left as untested surface.
     """
+    if domain_bounds is not None:
+        domain_bounds = validate_domain_bounds(domain_bounds, V)
     K = partition.K
     beta = np.zeros((K, V), dtype=np.float64)
 
@@ -325,11 +345,15 @@ def split_domains(beta, domain_bounds):
     matrices — the MixEHR-style bases (β^0, β^1) that share topic identity
     (Halpern, Horng, Choi, Sontag, JAMIA 2016, anchor-and-learn corroboration).
 
-    domain_bounds: strictly-increasing cumulative offsets [0, ..., V]. Returns a
-    list of (K, V_d) row-stochastic matrices in domain order. A topic that never
-    expresses a domain (all-zero slice) falls back to a uniform row there so each
-    returned matrix stays a valid stochastic matrix.
+    domain_bounds: strictly-increasing cumulative offsets [0, ..., V], validated
+    against β's own column count (`domains.validate_domain_bounds`) -- bounds
+    ending short of V used to silently DROP the uncovered trailing columns from
+    the returned blocks. Returns a list of (K, V_d) row-stochastic matrices in
+    domain order. A topic that never expresses a domain (all-zero slice) falls
+    back to a uniform row there so each returned matrix stays a valid stochastic
+    matrix.
     """
+    domain_bounds = validate_domain_bounds(domain_bounds, np.shape(beta)[1])
     out = []
     for lo, hi in zip(domain_bounds[:-1], domain_bounds[1:]):
         sub = beta[:, lo:hi].copy()

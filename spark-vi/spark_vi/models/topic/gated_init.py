@@ -136,7 +136,23 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
     as a corollary, a descendant is then NOT deflated against that ancestor's increment
     (node_anchors[p] is absent), so its block can absorb the un-anchored ancestor signal;
     the "isolate u's own increment" guarantee holds only for ancestors that have their own
-    frontier docs."""
+    frontier docs.
+
+    `domain_bounds` (optional cumulative offsets [0, V_0, V_0+V_1, ..., V] over a
+    concatenated multi-domain vocabulary) is passed to EVERY `find_anchors` call this makes —
+    the pooled background call in step 1 and each node's within-node call in step 2 — so each
+    domain's candidate floor is computed against its OWN mean marginal (see
+    `spectral_init.find_anchors` / `_domain_candidate_mask`). It is LOAD-BEARING for
+    multi-domain seeds: without it the denser domain dominates anchor selection, a node's
+    sparse-domain slice is under-seeded, and the E/M leaves that node's topic dead at the
+    prior (insight 0066; recovery 0.005 vs 0.675 at random_seed=0). Default `None` = one
+    pooled domain, byte-identical to the single-domain behavior;
+    `multidomain_spectral_lambda` is the multi-domain entry point that derives these bounds
+    from per-domain sizes. Malformed bounds raise (`domains.validate_domain_bounds`).
+
+    NOTE: only this DENSE path takes `domain_bounds` — the distributed twin
+    `scalable_block_aligned_lambda` does not. See the arc design's SP3 stub for that
+    explicit blocker and its "absolute-df floor may be structurally immune" hypothesis."""
     _validate_anchor_scope(anchor_scope)
     if not (isinstance(data_summary, dict)
             and "train_docs" in data_summary and "train_labels" in data_summary):
@@ -221,9 +237,10 @@ def multidomain_spectral_lambda(data_summary, lay, domains, *, scale: float = 20
     {m: (K, V_m)} lambda, each block a scaled per-domain distribution + a tiny
     positive floor. data_summary carries {'train_docs':..., 'train_labels':...} as
     for spectral_block_aligned_lambda."""
+    from spark_vi.models.topic.domains import domains_to_bounds
     from spark_vi.models.topic.spectral_init import split_domains
     V = int(sum(domains))
-    bounds = np.concatenate(([0], np.cumsum(domains))).astype(np.int64).tolist()
+    bounds = domains_to_bounds(domains).tolist()
     beta_joint = spectral_block_aligned_lambda(
         data_summary, lay, V, scale=1.0, anchor_scope=anchor_scope,
         topo_order=topo_order, domain_bounds=bounds)          # (K, V), rows joint distributions
@@ -232,6 +249,15 @@ def multidomain_spectral_lambda(data_summary, lay, domains, *, scale: float = 20
 
 
 INIT_STRATEGIES = {"spectral": spectral_block_aligned_lambda}
+
+# Multi-domain counterparts, keyed by the SAME strategy names. A strategy needs a
+# separate entry because its multi-domain form has a different signature and return
+# type (per-domain sizes in, a per-domain dict lambda {m: (K, V_m)} out), so
+# INIT_STRATEGIES entries are not usable as-is. Keeping it a registry rather than
+# hard-wiring the one implementation means a future strategy that is added to
+# INIT_STRATEGIES but has no multi-domain form raises in GatedOnlineLDA.
+# initialize_global instead of silently running the spectral recipe under its name.
+MULTIDOMAIN_INIT_STRATEGIES = {"spectral": multidomain_spectral_lambda}
 
 
 class _GroupDoc:
