@@ -1574,6 +1574,26 @@ def test_multidomain_get_metadata_carries_reconstruction_constants():
     json.dumps(md)
 
 
+def test_multidomain_get_metadata_default_omega_is_ones_not_none():
+    """omega=None (the default, unweighted, MixEHR-faithful path per
+    `_resolve_omega`) must be recorded as the all-ones vector, not None: SP2
+    established omega=[1, 1, ...] is byte-identical to omega=None, so the
+    reconstructed model must see the same list[float] a model that was fit with
+    an explicit all-ones omega would -- None is not a valid list[float] entry
+    and previously raised TypeError here."""
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
+    m = GatedOnlineLDA(lay, vocab_size=56, domains=[40, 16], random_seed=0)
+    assert m.omega is None
+    md = m.get_metadata()
+    assert md["domains"] == [40, 16]
+    assert "eta_m" in md
+    assert md["omega"] == [1.0, 1.0]
+    import json
+    json.dumps(md)
+
+
 def test_single_domain_get_metadata_unchanged():
     """domains=None must return exactly the base contract, so existing archives
     and consumers see no new keys."""

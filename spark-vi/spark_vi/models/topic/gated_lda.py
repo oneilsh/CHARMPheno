@@ -832,6 +832,14 @@ class GatedOnlineLDA(OnlineLDA):
         alone served. All values are plain Python types: `metadata` is written
         verbatim into manifest.json.
 
+        `self.omega is None` is `_resolve_omega`'s own "no explicit weight" case --
+        the unweighted, MixEHR-faithful default (Li, Nair, Lu et al. 2020, Nat.
+        Commun.) -- and SP2 established that omega=[1, 1, ...] is byte-identical
+        to omega=None. So the recorded value here is the all-ones vector, not
+        None: a model reconstructed from the manifest must behave identically to
+        the one that was fit, and None is not a valid entry in a `list[float]`
+        contract.
+
         eta provenance: multi-domain update_global/compute_elbo read eta from
         `self._eta_domains`, not from global_params, which is sound only because
         `optimize_eta` is rejected in __init__ so eta cannot change during a
@@ -842,5 +850,6 @@ class GatedOnlineLDA(OnlineLDA):
         if self.domains is not None:
             md["domains"] = [int(v) for v in self.domains]
             md["eta_m"] = [float(x) for x in self._eta_domains]
-            md["omega"] = [float(x) for x in self.omega]
+            omega = self.omega if self.omega is not None else np.ones(len(self.domains))
+            md["omega"] = [float(x) for x in omega]
         return md
