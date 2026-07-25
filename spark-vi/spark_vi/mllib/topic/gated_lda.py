@@ -139,6 +139,17 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
                               typeConverter=TypeConverters.toFloat)
 
 
+# Per-domain lambda scale for a SPECTRAL seed, held equal to
+# gated_init.multidomain_spectral_lambda's `scale` default. spectral_init.split_domains
+# returns ROW-STOCHASTIC blocks (it renormalizes each block to sum 1, discarding
+# whatever lambda scale the joint carried), so a block must be scaled back up to
+# lambda magnitude afterwards. Anchor-word recovery (Arora et al. 2013) supplies the
+# topic SHAPE; the scale is the pseudo-count magnitude of the seed, not a recovered
+# quantity — and the dense and scalable multi-domain routes must use the same one or
+# they would hand the engine seeds of different strength.
+_SPECTRAL_LAMBDA_SCALE = 200.0
+
+
 def _concat_domain_features(vectors, sizes):
     """Concatenate per-domain sparse vectors into the engine's single id space.
 
@@ -153,8 +164,19 @@ def _concat_domain_features(vectors, sizes):
     with the established layout: the layout is derived once per fit, and a row
     that silently re-lays-out the vocabulary would corrupt the fit with no
     symptom (SP3a design).
+
+    Equally, `len(vectors)` must equal `len(sizes)`: a bare zip TRUNCATES to the
+    shorter, silently dropping a trailing domain — the same invisible re-layout,
+    reachable wherever the columns and the widths do not arrive together (e.g. a
+    model carrying featuresCols and domainBounds as separate Params).
     """
     import numpy as np
+    vectors, sizes = list(vectors), list(sizes)
+    if len(vectors) != len(sizes):
+        raise ValueError(
+            f"_concat_domain_features got {len(vectors)} vector(s) for "
+            f"{len(sizes)} domain size(s); the counts must match or a trailing "
+            f"domain would be silently dropped")
     idx_parts, cnt_parts, offset = [], [], 0
     for m, (v, width) in enumerate(zip(vectors, sizes)):
         if int(v.size) != int(width):
@@ -404,6 +426,23 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                     anchor_scope=self.getOrDefault("anchorScope"),
                     topo_order=self.getOrDefault("spectralTopoOrder"),
                 )
+                if fcols:
+                    # scalable_block_aligned_lambda returns the JOINT (K, V) lambda,
+                    # but the engine's multi-domain arm consumes a per-domain dict
+                    # {m: (K, V_m)} (it calls .items() on it). Convert here, mirroring
+                    # gated_init.multidomain_spectral_lambda's final step exactly:
+                    # split_domains renormalizes each block ROW-STOCHASTIC, dropping
+                    # the joint's lambda scale, so _SPECTRAL_LAMBDA_SCALE is re-applied
+                    # — a bare split would hand the engine a seed of row mass ~1
+                    # instead of ~200, which looks like a working fit that simply never
+                    # concentrates. Reachable on shipped defaults: spectralMethod="auto"
+                    # routes scalable once V >= spectralMaxVocab, and a CONCATENATED
+                    # multi-domain V crosses that far more easily than a single one.
+                    from spark_vi.models.topic.domains import domains_to_bounds
+                    from spark_vi.models.topic.spectral_init import split_domains
+                    blocks = split_domains(lam0, domains_to_bounds(sizes).tolist())
+                    lam0 = {m: blocks[m] * _SPECTRAL_LAMBDA_SCALE + 1e-9
+                            for m in range(len(sizes))}
                 data_summary = {"spectral_lambda": lam0}
             else:  # dense — collect-to-driver exact path
                 # Multi-domain: build the driver-side docs through the SAME

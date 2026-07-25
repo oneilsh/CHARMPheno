@@ -545,6 +545,88 @@ def test_explicit_domain_bounds_override_an_unrepresentative_first_row(spark):
                           nBg=2, tpn=1, maxIter=1, seed=0).fit(ok)
 
 
+def test_concat_domain_features_rejects_a_column_count_mismatch():
+    """len(vectors) != len(sizes) must raise, not zip-truncate. A short `sizes`
+    would silently drop the trailing domain -- the same invisible re-layout the
+    per-vector size check exists to stop -- and the columns and the widths do not
+    always arrive together (a model carries them as separate Params)."""
+    import pytest
+    from pyspark.ml.linalg import SparseVector
+    from spark_vi.mllib.topic.gated_lda import _concat_domain_features
+    v0, v1 = SparseVector(4, {0: 1.0}), SparseVector(3, {1: 1.0})
+    with pytest.raises(ValueError, match=r"2 vector\(s\) for 1 domain size\(s\)"):
+        _concat_domain_features([v0, v1], [4])
+    with pytest.raises(ValueError, match=r"1 vector\(s\) for 2 domain size\(s\)"):
+        _concat_domain_features([v0], [4, 3])
+
+
+def _multidomain_spectral_rows():
+    """Two domains with per-node-distinct tokens in BOTH domains, so the
+    block-aligned anchor recipe has a candidate per block in each domain."""
+    from pyspark.ml.linalg import SparseVector
+    rows = []
+    for _ in range(20):
+        rows.append((SparseVector(6, {0: 3.0, 1: 2.0}), SparseVector(4, {0: 2.0}), [1]))
+        rows.append((SparseVector(6, {2: 3.0, 3: 2.0}), SparseVector(4, {1: 2.0}), [2]))
+        rows.append((SparseVector(6, {4: 3.0, 5: 2.0}), SparseVector(4, {2: 2.0,
+                                                                        3: 1.0}), []))
+    return rows
+
+
+def _multidomain_schema():
+    from pyspark.ml.linalg import VectorUDT
+    from pyspark.sql.types import ArrayType, IntegerType, StructField, StructType
+    return StructType([
+        StructField("c", VectorUDT()), StructField("d", VectorUDT()),
+        StructField("frontier", ArrayType(IntegerType())),
+    ])
+
+
+def test_multidomain_scalable_spectral_init_yields_per_domain_dict_lambda(spark):
+    """featuresCols + init='spectral' routed SCALABLE must fit and seed a per-domain
+    dict lambda. scalable_block_aligned_lambda returns the JOINT (K, V) array while
+    the engine's multi-domain arm calls .items() on the handed-over seed, so an
+    unconverted joint raises a bare AttributeError naming neither domains nor init.
+    Reachable on shipped defaults: spectralMethod='auto' routes scalable at
+    V >= spectralMaxVocab, and a CONCATENATED multi-domain V crosses that easily.
+
+    The row-mass assertion pins the NORMALIZATION convention, which is the half a
+    shape-only check would miss: split_domains returns row-stochastic blocks, so a
+    conversion that forgets to re-apply the lambda scale hands the engine a seed of
+    row mass ~1 instead of ~200 -- a fit that runs, and simply never concentrates.
+    """
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    df = spark.createDataFrame(_multidomain_spectral_rows(), schema=_multidomain_schema())
+    m = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                          parent={1: 0, 2: 0}, nBg=1, tpn=1,
+                          init="spectral", spectralMethod="scalable",
+                          spectralMinDocFreq=1, maxIter=1, seed=0).fit(df)
+    lam = m.result.global_params["lambda"]
+    assert isinstance(lam, dict) and sorted(lam) == [0, 1]
+    assert lam[0].shape[1] == 6 and lam[1].shape[1] == 4
+    assert m.result.metadata["domains"] == [6, 4]
+    # Seed magnitude survived the per-domain split (scale ~200, not ~1). One SVI
+    # step keeps a large fraction of the seed, so ~1 and ~200 are far apart here.
+    for md in (0, 1):
+        assert lam[md].sum(axis=1).min() > 50.0, lam[md].sum(axis=1)
+
+
+def test_multidomain_dense_spectral_init_builds_docs_through_the_shared_helper(spark):
+    """featuresCols + init='spectral' routed DENSE collects to the driver and builds
+    train_docs through _concat_domain_features, so the seed sees exactly the
+    concatenated ids the fit will see. Covers the dense multi-domain branch (the
+    other fit tests all use init='random', which never reaches it)."""
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    df = spark.createDataFrame(_multidomain_spectral_rows(), schema=_multidomain_schema())
+    m = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                          parent={1: 0, 2: 0}, nBg=1, tpn=1,
+                          init="spectral", spectralMethod="dense",
+                          maxIter=1, seed=0).fit(df)
+    lam = m.result.global_params["lambda"]
+    assert isinstance(lam, dict) and sorted(lam) == [0, 1]
+    assert lam[0].shape[1] == 6 and lam[1].shape[1] == 4
+
+
 def test_single_domain_shim_path_unchanged(spark):
     """featuresCols unset keeps the existing single-featuresCol behavior: a single
     (K, V) array lambda and no domains in metadata."""
