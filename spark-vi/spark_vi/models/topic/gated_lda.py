@@ -15,7 +15,15 @@ Multi-domain (MixEHR-style; Li, Nair, Lu et al. 2020, Nat. Commun.), keyed on th
 constructor arg (a sequence of per-domain vocab sizes summing to vocab_size): global_params
 ["lambda"] becomes a literal per-domain dict {m: (K, V_m)} instead of one (K, V) array, each
 block independently row-normalized (`_assemble_expElogbeta`/`_split_to_domains`), each with
-its own eta_m prior (`_eta_vocab_vector`). The gated CAVI itself never changes — it only ever
+its own eta_m prior (`_eta_vocab_vector`). An optional per-domain MODALITY WEIGHT omega_m
+(`_resolve_omega`, default None = all 1.0 = MixEHR-faithful raw volume) tempers domain m's
+contribution to the shared theta and NOTHING else: gamma = alpha + Sigma_m omega_m
+Sigma_{tokens in m} count * phi, while phi_norm, the lambda sufficient statistics and the
+data log-likelihood all keep TRUE counts. omega is a tuned-vs-task pseudo-likelihood weight,
+not a fitted parameter (see `_resolve_omega`), and under omega != 1 `compute_elbo` reports
+the omega == 1 bound — a convergence diagnostic, not a bound on the weighted objective.
+Each token's domain stays live at the point gamma/phi are formed (`_token_domains`, the v2
+seam). Apart from that one per-token weight the gated CAVI never changes — it only ever
 sees a concatenated (K, V) expElogbeta and per-doc concatenated indices — so local_update,
 update_global, compute_elbo, and infer_local each branch on `self.domains is None` and their
 domains=None arm is the original single-array code, unchanged. combine_stats and VIRunner
@@ -57,7 +65,8 @@ class GatedOnlineLDA(OnlineLDA):
                  optimize_alpha: bool = False,
                  frontier_histogram: dict | None = None,
                  domains: list[int] | None = None,
-                 eta: float | Iterable[float] | None = None, **kw) -> None:
+                 eta: float | Iterable[float] | None = None,
+                 omega: float | Iterable[float] | None = None, **kw) -> None:
         # optimize_alpha is handled by the gated per-node Newton step (this class),
         # NOT OnlineLDA's full-K alpha_newton_step; pass it to the parent as False
         # so the inherited update_global never runs the vanilla alpha step.
@@ -115,6 +124,9 @@ class GatedOnlineLDA(OnlineLDA):
             self.domains = None
             self._domain_bounds = None
             self._eta_domains = None
+        # Per-domain modality weight omega (see _resolve_omega). None (the default)
+        # = the unweighted MixEHR-faithful path, byte-identical to pre-omega code.
+        self.omega = self._resolve_omega(omega)
         if getattr(self, "optimize_eta", False):
             # The gated update_global override optimizes only alpha; it never
             # touches eta. Fail fast rather than silently ignoring optimize_eta
@@ -264,6 +276,79 @@ class GatedOnlineLDA(OnlineLDA):
             out[bounds[m]:bounds[m + 1]] = self._eta_domains[m]
         return out
 
+    def _resolve_omega(self, omega) -> np.ndarray | None:
+        """Validate the per-domain modality weight into a length-n_domains float
+        array, or None for the unweighted default.
+
+        omega_m is the PSEUDO-LIKELIHOOD (tempering) weight domain m's tokens carry
+        in the doc-topic (gamma) accumulation: gamma = alpha + Sigma_m omega_m
+        Sigma_{tokens in m} count * phi. It is NOT a fitted quantity and NOT part
+        of the generative model: MixEHR (Li, Nair, Lu et al. 2020, Nat. Commun.)
+        lets raw token volume speak for itself, i.e. omega == 1 for every modality,
+        which is why None/1.0 is the default. omega is TUNED FOR A DOWNSTREAM TASK
+        (de-biasing a domain whose token volume reflects utilization rather than
+        signal), never read off the fit -- observed volume cannot identify it.
+
+        Contract: None (all 1.0), a scalar (the same weight on every domain -- a
+        global tempering of the doc-topic term), or a length-n_domains sequence of
+        finite nonnegative weights (0.0 = drop that domain from theta entirely,
+        while its lambda still trains on its true counts). Requires multi-domain
+        mode: with domains=None there is no modality axis to weight, so a passed
+        omega is a contradiction and raises rather than being silently ignored.
+
+        The scalar/sequence dispatch is by the resolved array's ndim, NOT
+        np.isscalar (which is False for a 0-d ndarray, so np.array(0.5) would take
+        the sequence branch and fail opaquely); iterables are materialized first so
+        a one-shot iterator is not consumed twice.
+        """
+        if omega is None:
+            return None
+        if self.domains is None:
+            raise ValueError(
+                "omega requires multi-domain mode (domains=[V_0, V_1, ...]); a "
+                "single-domain model has no modality to weight")
+        n = len(self.domains)
+        raw = (omega if isinstance(omega, np.ndarray)
+               else list(omega) if hasattr(omega, "__iter__") else omega)
+        arr = np.asarray(raw, dtype=np.float64)
+        if arr.ndim == 0:
+            return np.full(n, float(arr), dtype=np.float64)
+        if arr.ndim != 1 or arr.shape[0] != n:
+            raise ValueError(
+                f"omega must be a scalar or a length-{n} (n_domains) sequence, "
+                f"got shape {arr.shape}")
+        if not np.all(np.isfinite(arr)) or np.any(arr < 0.0):
+            raise ValueError(
+                f"omega components must be finite and >= 0, got {arr.tolist()}")
+        return arr
+
+    def _token_domains(self, indices: np.ndarray) -> np.ndarray:
+        """Per-token domain index for a document's concatenated vocabulary ids:
+        the m with _domain_bounds[m] <= id < _domain_bounds[m+1], via searchsorted
+        on the cumulative per-domain offsets. Multi-domain only (domains=None has
+        no domain axis); ids must lie in [0, vocab_size).
+
+        THIS IS THE v2 SEAM. Every per-token quantity that must know which
+        modality a token came from resolves it here -- today the omega gamma-weight
+        (`_gamma_count_weight`), tomorrow a v2 per-domain proportion pi_m or a
+        per-domain theta-contribution instrument. Keeping the lookup a named unit
+        (rather than inlining a domain-agnostic gather) is what keeps each token's
+        domain live at the point gamma/phi are formed."""
+        if self.domains is None:
+            raise ValueError(
+                "_token_domains requires multi-domain mode (domains=[V_0, ...])")
+        return np.searchsorted(
+            self._domain_bounds, np.asarray(indices), side="right") - 1
+
+    def _gamma_count_weight(self, indices: np.ndarray) -> np.ndarray | None:
+        """Per-token omega weight for the gamma recurrence: omega[_token_domains(w)].
+
+        None when omega is unset -- `_cavi_doc_inference` then runs its original
+        unweighted recurrence, so the default path is bit-for-bit unchanged."""
+        if self.omega is None:
+            return None
+        return self.omega[self._token_domains(indices)]
+
     def local_update(
         self,
         rows: Iterable[GatedBOWDocument],
@@ -344,6 +429,11 @@ class GatedOnlineLDA(OnlineLDA):
                 gamma_init=gamma_init,
                 max_iter=self.cavi_max_iter,
                 tol=self.cavi_tol,
+                # Per-domain modality weight, theta-ONLY: scales this doc's gamma
+                # accumulation by each token's omega_m and touches nothing else.
+                # None (omega unset, incl. every domains=None model) = the
+                # unweighted recurrence, bit-for-bit unchanged.
+                gamma_count_weight=self._gamma_count_weight(doc.indices),
             )
             sstats_row = np.outer(expElogthetad, doc.counts / phi_norm)
             lambda_stats[np.ix_(allowed, doc.indices)] += sstats_row
@@ -459,6 +549,15 @@ class GatedOnlineLDA(OnlineLDA):
         each domain block on its own row in the first place. Token-loglik and
         theta-KL are unchanged either way: local_update aggregates them as scalars
         over the concatenated vocabulary, independent of how lambda is stored.
+
+        UNDER omega != 1 THIS IS THE omega == 1 BOUND, not an exact bound on the
+        omega-weighted objective: the modality weight tempers q(theta_d)'s
+        pseudo-likelihood (see `_resolve_omega`), and the terms aggregated here
+        (token loglik from TRUE counts, Dirichlet KLs) are the unweighted ELBO's
+        evaluated at the weighted fit's q. It stays a valid CONVERGENCE DIAGNOSTIC
+        -- monotone in practice, finite, comparable across iterations of one fit --
+        but is not comparable across different omega, and is deliberately NOT
+        rewritten to chase the weighted objective.
         """
         if self.domains is None:
             return super().compute_elbo(global_params, aggregated_stats)
@@ -502,6 +601,9 @@ class GatedOnlineLDA(OnlineLDA):
             gamma_init=gamma_init,
             max_iter=self.cavi_max_iter,
             tol=self.cavi_tol,
+            # theta is the deployment READ-OUT, and omega is a weight ON theta, so
+            # the fold-in applies it exactly as the training E-step does.
+            gamma_count_weight=self._gamma_count_weight(row.indices),
         )
         theta = gamma / gamma.sum()
         return {"gamma": gamma, "theta": theta}

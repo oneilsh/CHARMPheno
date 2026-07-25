@@ -1017,3 +1017,203 @@ def test_eta_per_domain_sequence_rejects_nonpositive():
     lay = DagLayout({1: 0, 2: 1, 3: 1}, n_bg=2, tpn=1)
     with pytest.raises(ValueError):
         GatedOnlineLDA(lay, vocab_size=7, domains=[4, 3], eta=[0.5, 0.0])
+
+
+# --- SP2 Task 6: per-domain modality weight omega (theta-only) + v2 seam ---
+
+
+def _omega_lay():
+    """Flat two-node layout: topic 0 = background, 1 = node 1's block, 2 = node 2's."""
+    return DagLayout({1: 0, 2: 0}, n_bg=1, tpn=1)
+
+
+def test_omega_ones_is_identity():
+    """omega=None and omega=[1, 1] must reproduce the multi-domain fit EXACTLY
+    (bitwise, at a fixed seed): the weight enters the gamma recurrence as a
+    multiplication by 1.0, which is exact in IEEE-754, so an all-ones omega is
+    not merely close to the unweighted path -- it IS the unweighted path."""
+    import numpy as np
+    lay = _omega_lay()
+    V, doms = 8, [4, 4]
+    docs = [
+        GatedBOWDocument(indices=np.array([0, 5], dtype=np.int32),
+                         counts=np.array([2.0, 3.0]), length=5,
+                         frontier=frozenset({1})),
+        GatedBOWDocument(indices=np.array([1, 2, 4, 6], dtype=np.int32),
+                         counts=np.array([1.0, 4.0, 2.0, 5.0]), length=12,
+                         frontier=frozenset({2})),
+        GatedBOWDocument(indices=np.array([0, 3, 7], dtype=np.int32),
+                         counts=np.array([1.0, 1.0, 2.0]), length=4,
+                         frontier=frozenset()),
+    ]
+
+    def run(omega):
+        m = GatedOnlineLDA(lay, V, domains=doms, omega=omega,
+                           alpha=0.1, eta=0.02, random_seed=0)
+        gp = m.initialize_global(None)
+        stats = m.local_update(docs, gp)
+        for _ in range(5):
+            gp = m.update_global(gp, m.local_update(docs, gp), learning_rate=0.5)
+        return gp, stats
+
+    gp_none, st_none = run(None)
+    gp_ones, st_ones = run([1.0, 1.0])
+    for md in (0, 1):
+        assert np.array_equal(gp_none["lambda"][md], gp_ones["lambda"][md]), md
+    # the per-doc sufficient statistics are identical too, not just the fit endpoint
+    for key in ("lambda_stats", "doc_loglik_sum", "doc_theta_kl_sum", "n_docs"):
+        assert np.array_equal(st_none[key], st_ones[key]), key
+
+
+def _omega_split_lambda(lay, V_m):
+    """Hand-built per-domain lambda: node 1's topic explains domain-0 token 0,
+    node 2's topic explains domain-1 token 0. No fit (hence no spectral seed and
+    no background-doc requirement) -- the point is the READ-OUT under omega, so
+    the topic-word map is planted directly and exactly."""
+    import numpy as np
+    lam = {0: np.full((lay.K, V_m), 0.01), 1: np.full((lay.K, V_m), 0.01)}
+    lam[0][lay.block[1][0], 0] = 10.0          # domain 0 explained by node 1's topic
+    lam[1][lay.block[2][0], 0] = 10.0          # domain 1 explained by node 2's topic
+    return lam
+
+
+def test_omega_downweights_domain_shifts_theta():
+    """On a held-out doc where domain 1 is HIGH-VOLUME (20 tokens vs 2), a small
+    omega_1 shifts theta toward the domain-0-explained block. Directional: the
+    node-1/node-2 mass ratio must strictly increase as omega_1 shrinks, because
+    omega tempers domain 1's contribution to the gamma (doc-topic) accumulation."""
+    import numpy as np
+    lay = _omega_lay()
+    V_m, V = 4, 8
+    lam = _omega_split_lambda(lay, V_m)
+    # 2 domain-0 tokens (id 0) vs 20 domain-1 tokens (id V_m + 0): volume says node 2.
+    row = GatedBOWDocument(indices=np.array([0, V_m], dtype=np.int32),
+                           counts=np.array([2.0, 20.0]), length=22)
+
+    def theta(omega):
+        m = GatedOnlineLDA(lay, V, domains=[V_m, V_m], omega=omega, alpha=0.1)
+        gp = {"lambda": lam, "alpha": m.alpha.copy(), "eta": np.array(m.eta)}
+        np.random.seed(0)                       # same gamma_init for every arm
+        return m.infer_local(row, gp)["theta"]
+
+    def ratio(th):
+        return float(th[lay.block[1]].sum()) / float(th[lay.block[2]].sum())
+
+    th_ones = theta(None)
+    th_down = theta([1.0, 0.05])
+    assert ratio(th_ones) < 1.0, ratio(th_ones)          # volume wins at omega = 1
+    assert ratio(th_down) > ratio(th_ones), (ratio(th_ones), ratio(th_down))
+    assert float(th_down[lay.block[1]].sum()) > float(th_ones[lay.block[1]].sum())
+    # monotone in omega_1, not just a two-point flip
+    rs = [ratio(theta([1.0, w])) for w in (1.0, 0.5, 0.2, 0.05)]
+    assert all(b > a for a, b in zip(rs, rs[1:])), rs
+
+
+def test_omega_weights_gamma_only_sstats_and_loglik_use_true_counts():
+    """omega weights theta and NOTHING else.
+
+    Exact equivalence: for a doc whose tokens all live in domain 1, omega_1 = w
+    enters the gamma recurrence as a pure count scaling (phi_norm carries no
+    counts at all), so the converged gamma under omega=[1, w] on counts c is
+    IDENTICAL to the gamma under omega=None on counts w*c. The lambda sufficient
+    statistics and the doc log-likelihood, however, use TRUE counts -- so they
+    must come out a factor w SMALLER in the scaled-count run, not equal to it.
+    If omega ever leaked into the sstats or into doc_loglik, the two runs would
+    agree exactly instead, and this assertion would fail."""
+    import numpy as np
+    lay = _omega_lay()
+    V_m, V, w = 4, 8, 0.4
+    idx = np.array([V_m + 0, V_m + 1, V_m + 2], dtype=np.int32)   # domain 1 only
+    counts = np.array([5.0, 2.0, 9.0])
+    doc = GatedBOWDocument(indices=idx, counts=counts, length=16,
+                           frontier=frozenset({1}))
+    doc_scaled = GatedBOWDocument(indices=idx, counts=w * counts, length=16,
+                                   frontier=frozenset({1}))
+    m_om = GatedOnlineLDA(lay, V, domains=[V_m, V_m], omega=[1.0, w], eta=0.02)
+    m_pl = GatedOnlineLDA(lay, V, domains=[V_m, V_m], eta=0.02)
+    np.random.seed(3)
+    gp = m_om.initialize_global(None)          # shared global params for both arms
+    np.random.seed(4)
+    st_om = m_om.local_update([doc], gp)
+    np.random.seed(4)                          # same gamma_init draw
+    st_pl = m_pl.local_update([doc_scaled], gp)
+    np.testing.assert_allclose(st_pl["lambda_stats"], w * st_om["lambda_stats"],
+                               rtol=1e-12, atol=0)
+    np.testing.assert_allclose(float(st_pl["doc_loglik_sum"]),
+                               w * float(st_om["doc_loglik_sum"]), rtol=1e-12)
+    # ... and the omega run's own sstats reconstruct the TRUE counts: summing the
+    # phi-weighted topic mass over a token's column gives back count_n (not w*count_n),
+    # since sum_k expElogbeta[k,n] * sstats[k,n] = count_n * (phi_norm - 1e-100)/phi_norm.
+    eb = m_om._assemble_expElogbeta(gp["lambda"])
+    allowed = lay.allowed_set(doc.frontier)
+    sel = np.ix_(allowed, idx)
+    recon = (eb[sel] * st_om["lambda_stats"][sel]).sum(axis=0)
+    np.testing.assert_allclose(recon, counts, rtol=1e-12)
+    # sanity: omega DID move the fit (otherwise the above is vacuous)
+    np.random.seed(4)
+    st_ref = m_pl.local_update([doc], gp)
+    assert not np.allclose(st_om["lambda_stats"], st_ref["lambda_stats"])
+
+
+def test_omega_leaves_phi_norm_omega_free():
+    """phi_norm must stay the omega-FREE function of (gamma, expElogbeta) it is in
+    the unweighted recurrence: eb_d.T @ expElogthetad + 1e-100. Checked at the
+    converged gamma of a weighted run, so a refactor that folded the per-token
+    weight into phi_norm (and thus into the data log-likelihood) would fail here."""
+    import numpy as np
+    from spark_vi.models.topic.lda import _cavi_doc_inference
+    rng = np.random.default_rng(0)
+    K, n_unique = 3, 5
+    indices = np.array([0, 2, 5, 6, 9], dtype=np.int32)
+    counts = np.array([3.0, 1.0, 7.0, 2.0, 4.0])
+    eb = rng.gamma(1.0, 1.0, size=(K, 10))
+    w_tok = np.array([1.0, 1.0, 0.3, 0.3, 0.3])          # domain-1 tokens downweighted
+    gamma, eth, phi_norm, _ = _cavi_doc_inference(
+        indices=indices, counts=counts, expElogbeta=eb, alpha=0.1,
+        gamma_init=np.full(K, 1.0), max_iter=50, tol=1e-9,
+        gamma_count_weight=w_tok)
+    assert phi_norm.shape == (n_unique,)
+    np.testing.assert_array_equal(phi_norm, eb[:, indices].T @ eth + 1e-100)
+    # and the weight is not a no-op on gamma
+    g_unw, _, _, _ = _cavi_doc_inference(
+        indices=indices, counts=counts, expElogbeta=eb, alpha=0.1,
+        gamma_init=np.full(K, 1.0), max_iter=50, tol=1e-9)
+    assert not np.allclose(gamma, g_unw)
+
+
+def test_omega_requires_domains():
+    """omega with domains=None is a contradiction (no modality to weight) and must
+    raise an explicit ValueError, not be silently ignored."""
+    import pytest
+    with pytest.raises(ValueError, match="omega"):
+        GatedOnlineLDA(_omega_lay(), 8, omega=[1.0, 1.0])
+
+
+def test_omega_length_mismatch_raises():
+    import pytest
+    with pytest.raises(ValueError, match="omega"):
+        GatedOnlineLDA(_omega_lay(), 8, domains=[4, 4], omega=[1.0, 1.0, 1.0])
+
+
+def test_omega_rejects_negative():
+    import pytest
+    with pytest.raises(ValueError, match="omega"):
+        GatedOnlineLDA(_omega_lay(), 8, domains=[4, 4], omega=[1.0, -0.5])
+
+
+def test_omega_scalar_broadcasts_to_all_domains():
+    """A scalar omega applies the same weight to every domain (a global tempering
+    of the doc-topic accumulation). A 0-d ndarray must behave like the equivalent
+    python float -- np.isscalar(np.array(0.5)) is False, so scalar dispatch here
+    uses np.ndim."""
+    import numpy as np
+    lay = _omega_lay()
+    for val in (0.5, np.array(0.5), np.float64(0.5)):
+        m = GatedOnlineLDA(lay, 8, domains=[4, 4], omega=val)
+        np.testing.assert_allclose(m.omega, [0.5, 0.5])
+    assert GatedOnlineLDA(lay, 8, domains=[4, 4]).omega is None
+    # every sequence form resolves the same way (a generator must not be consumed
+    # by validation before it reaches the array)
+    for seq in ([1.0, 0.5], (1.0, 0.5), np.array([1.0, 0.5]), (x for x in (1.0, 0.5))):
+        m = GatedOnlineLDA(lay, 8, domains=[4, 4], omega=seq)
+        np.testing.assert_allclose(m.omega, [1.0, 0.5])
