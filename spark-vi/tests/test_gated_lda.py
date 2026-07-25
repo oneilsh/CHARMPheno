@@ -670,9 +670,15 @@ def test_multidomain_svi_matches_gibbs_placement():
     so neither covers the other's labels and depth-1 node-AUC is SCOREABLE (on a DAG whose
     single depth-1 node is every other node's ancestor it is structurally nan, because that
     node has no negative among labeled foreground eval docs). Six nodes give mrr real
-    resolution. `b_only_node=3` keeps the multi-domain case that motivates the per-domain
-    factor: node 3's domain-0 signature block is identical to its parent node 1's, so node 3
-    is separable from domain 1 alone.
+    resolution. `b_only_node=3` puts the multi-domain case that motivates the per-domain
+    factor INTO THE CORPUS -- node 3's domain-0 signature block is identical to its parent
+    node 1's, so node 3 is separable from domain 1 alone -- but this READ-OUT cannot resolve
+    it: with the SVI arm switched to `domains=None` (the per-domain factor gone entirely),
+    node 3's per-true-node mrr is still 1.000 and every assertion below still passes. The
+    test that resolves that case discriminatively is
+    `test_multidomain_svi_planted_bonly_node_recovery`, which scores node 3's recovery on its
+    planted per-domain signature support. Do not read this gate as evidence about node 3's
+    domain asymmetry.
 
     IDENTIFIABILITY OF THE LABEL (`ancestor_signature_decay=0.5`) -- load-bearing, and the
     reason an earlier version of this gate could not be written honestly. Every document's
@@ -683,11 +689,30 @@ def test_multidomain_svi_matches_gibbs_placement():
     tie-break -- and the two engines break it in opposite directions (measured on the even
     plant: for docs at node 5, Gibbs put the child ahead 0.2578 vs 0.2450 while SVI put the
     parent ahead 0.4253 vs 0.2796, driving split-averaged mrr to 0.9971 vs 0.8756 with
-    per-node mrr pinned at exactly 0.500 -- a deterministic rank-2). At decay=0.5 a node's
-    own signature is twice its parent's, the label is identified from the tokens, and the
-    disagreement disappears entirely (numbers below). The knob's default is 1.0 and
-    reproduces every other caller's corpus byte-identically; see
+    per-node mrr pinned at exactly 0.500 -- a deterministic rank-2). The knob's default is
+    1.0 and reproduces every other caller's corpus byte-identically; see
     `two_domain_dag_corpus`'s docstring.
+
+    The exact arithmetic at decay=0.5 on THIS config, because the margin is what matters and
+    it is not simply "double": doc_len=40 gives n_common=20, so a depth-2 label has
+    per = (40-20)//(2*2) = 5 draws of its own block per domain and its one ancestor gets
+    max(1, round(5*0.5)) = 2 -- a 2.5x margin. A depth-1 label has per = (40-20)//(2*1) = 10
+    and no non-root ancestor, so the knob does not touch it.
+
+    THE BIAS IS OUT-VOTED, NOT REMOVED -- and the margin needed is measurable, so a future
+    reader should not treat 0.5 as cosmetic. Sweeping the knob on this DAG (max depth 2, so
+    only the k=1 ratio matters; note round() makes decay=0.9 and decay=0.75 produce the
+    IDENTICAL corpus, ancestor draws = 4 in both):
+        decay 1.00 -> ancestor 5 vs own 5 = 1.0x  -> unidentified; split-averaged mrr 0.9971
+                      (Gibbs) vs 0.8756 (SVI), per-node mrr pinned at 0.500
+        decay 0.90 / 0.75 -> 4 vs 5 = 1.25x       -> swap PARTIALLY returns: split 0 gives
+                      Gibbs mrr 1.0000 vs SVI 0.9133 with node 4 at exactly 0.500, while
+                      split 3 is clean (1.0000 / 1.0000)
+        decay 0.50 -> 2 vs 5 = 2.5x               -> clean on all 8 splits (this gate)
+        decay 0.25 -> 1 vs 5 = 5.0x               -> clean (splits 0, 3 spot-checked)
+    So the SVI arm's ancestor-inflation bias (it puts more affinity on an ancestor block than
+    the oracle does; see SCOPE below) is still present at decay=0.5 -- it is simply out-voted
+    by a 2.5x identifiability margin. It re-emerges at 1.25x.
 
     Background docs (`bg_frac=0.2`) stay in TRAINING -- they are the pool the gated spectral
     seed's `n_bg` background block anchors on under `anchor_scope="frontier"`, and without
@@ -721,6 +746,36 @@ def test_multidomain_svi_matches_gibbs_placement():
     both engines with spread 0.0000, and structurally so -- a node/ancestor swap moves the
     true node to rank 2, never worse, which `mean(rank <= 2)` cannot see.
 
+    SCOPE -- WHAT THIS GATE DOES NOT CERTIFY. Read this before citing the test. A mutation
+    matrix over the SVI arm, 8 splits, everything else held fixed (mean mrr / mean depth-1
+    AUC / mean profile-L1, against the oracle's 1.0000 / 1.0000):
+        production                1.0000 / 0.9934 / 0.2356   passes
+        n_iter=1                  1.0000 / 0.9823 / 0.2344   PASSES
+        alpha=1.0                 1.0000 / 1.0000 / 0.3818   PASSES
+        eta=0.5                   1.0000 / 0.8404 / 0.3419   fires (depth-AUC, by 0.0796)
+        domains=None (SP2 off)    1.0000 / 0.9148 / 0.2142   fires (depth-AUC, by 0.0052)
+        init="random"             0.7325 / 0.6161 / 0.9852   fires (everything, by 0.19-0.70)
+    The RANKING assertions (mrr and per-true-node mrr) are 1.0000 with a worst per-node gap
+    of exactly 0.0000 for EVERY one of those arms except random init. So this gate certifies
+    SEED-PLUS-FOLD-IN placement-ranking equivalence; it does NOT certify the per-domain
+    variational updates, and it does NOT certify that E/M refinement happened at all -- it
+    passes at n_iter=1. On this plant the placement RANKING genuinely does not depend on
+    either: the spectral seed already places correctly, and 50 iterations of gated variational
+    EM do not change which node wins. That is a finding about the plant and the read-out, not
+    a defect to engineer around, and it is why no assertion here was contrived to depend on
+    `domains`. Note the `domains=None` arm fires only by 0.0052 on a statistic whose own
+    split-to-split spread is 0.0300 -- that is inside the noise and MUST NOT be relied on as
+    per-domain coverage.
+
+    The tests that DO carry what this one does not:
+      * per-domain E/M being load-bearing end-to-end --
+        `test_multidomain_svi_planted_bonly_node_recovery`'s (domain 0, node 2) magnitude
+        gate, which FAILS at the spectral seed (recovery 0.2796) and passes only after the
+        50-iteration fit (0.8615);
+      * the per-domain collapsed denominator --
+        `test_fit_gated_per_domain_denominator_sets_the_conditional` in
+        `tests/test_dag_placement.py`, mutation-pinned against a pooled denominator.
+
     TOLERANCES. 0.08 (the upper end of the single-domain sibling gates) two-sided on the
     split-averaged mrr, on each node's split-averaged mrr, and on each depth's
     split-averaged AUC. What it is a tolerance FOR: (a) the stochastic collapsed-Gibbs
@@ -732,12 +787,23 @@ def test_multidomain_svi_matches_gibbs_placement():
     EIGHT splits, not one and not five: on the pre-decay plant SVI's per-split mrr had sd
     0.0871, which puts the standard error of a FIVE-split mean at 0.039 -- the 5-split mean
     gap there was 0.0750 (inside 0.08) while the 8-split mean gap was 0.1215 (outside), so a
-    5-split mean would itself have been a lucky read. 0.60 on the mean profile L1 is a
-    coarse bound on a range-[0,2] statistic, placed between the measured 0.2356 (worst
-    split 0.3043) and the mutation's 1.0191-1.0542; it is deliberately loose because the two
-    engines genuinely differ in affinity CONCENTRATION even where they agree on rank (SVI's
-    node topics retain 0.17-0.51 of their domain-0 mass on the shared common pool where the
-    Gibbs oracle retains 0.01-0.23), which is a calibration difference, not a placement one.
+    5-split mean would itself have been a lucky read.
+
+    0.45 on the mean profile L1 (a range-[0,2] statistic) is set FROM the measurement, not
+    picked round: worst measured per-split value 0.3043 plus one full observed split-to-split
+    range (0.1508 to 0.3043 = 0.1535) = 0.4578, taken down to 0.45. The multiplier is
+    therefore "worst split + one full range", the same one-range-of-headroom rule the 0.08
+    tolerance uses against its 0.0300 spread. What it CATCHES: gross profile divergence --
+    the random-init mutant at mean 0.9852 (per-split max 1.0542), 2.2x the bound. What it
+    does NOT catch, measured, so do not claim otherwise: affinity-CONCENTRATION drift. The
+    alpha=1.0 mutant sits at mean 0.3818 (max 0.3983) and the eta=0.5 mutant at mean 0.3419,
+    both UNDER 0.45 and neither caught by this bound (eta=0.5 is caught, but by the depth-AUC
+    assertion, not this one). The bound cannot be tightened to catch them without dropping
+    below production's own worst split plus its spread. That the two engines differ in
+    concentration at all is expected and is the open calibration finding: SVI's node topics
+    retain 0.17-0.51 of their domain-0 mass on the shared common pool where the Gibbs oracle
+    retains 0.01-0.23, so for docs at node 2 SVI reports affinity 0.834 against the oracle's
+    0.506 (truth ~0.50) -- a level difference, not a placement one.
 
     RUNTIME: ~92 s measured (8 splits x ~11.5 s; per split `fit_gated` ~6.5 s, Gibbs
     fold-in over 300 docs ~2.7 s, SVI fit ~2.0 s, SVI fold-in ~0.06 s, two `evaluate`
@@ -805,7 +871,12 @@ def test_multidomain_svi_matches_gibbs_placement():
         g_mrr.append(ev_g["mrr"]); s_mrr.append(ev_s["mrr"])
         l1s.append(_profile_l1(prof_g, prof_s, lay))
         pn_g, pn_s = _per_node_mrr(prof_g, te_l, lay), _per_node_mrr(prof_s, te_l, lay)
-        for u in lay.nodes:                      # every node is labeled (node_prev all 1.0)
+        # Every node must draw at least one eval doc, or the per-node loop below would index a
+        # missing key. node_prev is 1.0 for all six nodes and n_test is 300, so this holds
+        # comfortably (measured minimum over the 8 splits: 40 docs for the thinnest node) --
+        # but it is a probabilistic property of the split, so assert it instead of trusting it.
+        assert set(pn_g) == set(lay.nodes) == set(pn_s), (sorted(pn_g), sorted(pn_s))
+        for u in lay.nodes:
             g_node[u].append(pn_g[u]); s_node[u].append(pn_s[u])
         for d in depths:
             g_depth[d].append(ev_g["auc_by_depth"][d]); s_depth[d].append(ev_s["auc_by_depth"][d])
@@ -829,8 +900,10 @@ def test_multidomain_svi_matches_gibbs_placement():
         assert np.isfinite(gd) and np.isfinite(sd), (d, gd, sd)
         assert abs(sd - gd) <= TOL, (d, gd, sd, g_depth[d], s_depth[d])
     # Scale-SENSITIVE profile divergence (rank correlation and node-AUC are both blind to a
-    # per-node scale offset). Coarse by design -- the engines differ in concentration.
-    assert float(np.mean(l1s)) <= 0.60, (float(np.mean(l1s)), l1s)
+    # per-node scale offset). 0.45 = worst measured split (0.3043) + one full observed
+    # split-to-split range (0.1535). Catches GROSS divergence (random init: 0.9852); does NOT
+    # catch concentration drift (alpha=1.0: 0.3818, eta=0.5: 0.3419) -- see TOLERANCES.
+    assert float(np.mean(l1s)) <= 0.45, (float(np.mean(l1s)), l1s)
 
 
 def test_single_domain_fit_byte_identical():
