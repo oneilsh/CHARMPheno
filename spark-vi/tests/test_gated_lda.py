@@ -369,32 +369,64 @@ def test_domains_must_sum_to_vocab():
 
 # --- SP2 Task 2: dict-aware E/M-step + per-domain eta + multi-domain ELBO ---
 
-def test_multidomain_fit_recovers_valid_per_domain_betas():
-    """A gated multi-domain fit yields per-domain beta blocks that are proper
-    distributions (each lam_m row-normalizes to 1)."""
+def test_multidomain_em_refines_seeded_per_domain_betas():
+    """The dict-aware multi-domain E/M-step recovers each node's planted per-domain
+    signature (>0.4 mass on the planted support in BOTH domains) when its block
+    topic is given initial traction — a direct validation of the multi-domain E/M
+    math (a broken assemble / split-target / per-domain normalization could not
+    reach this).
+
+    Each block topic is seeded with a gentle bump (0.3) on its OWN planted
+    per-domain support — a symmetry-break, NOT the answer: the bump is tiny next
+    to the ~1.0-per-column Gamma random lambda, so the E/M must still concentrate
+    each block topic from ~0.03 raw column mass to the ~0.5 recovered support mass
+    (half of each domain's tokens are the shared common pool, absorbed by the
+    background block; the other half is the node signature). The traction bump is
+    REQUIRED because random init alone is seed-fragile here: a node's block topic
+    can suffer topic-death (its signal absorbed by the background block) on some
+    seeds (worst-node recovery across seeds 0-4: 0.13/0.51/0.13/0.50/0.50) — a
+    known LDA local optimum that the SP1 spectral seed addresses in production
+    (see insight 0066). This test isolates E/M correctness from that init
+    fragility; the random-init/spectral-seed path is validated separately.
+    """
     import numpy as np
     from tests._stm_synth import two_domain_dag_corpus
     from spark_vi.models.topic.dag_placement import DagLayout
     from spark_vi.models.topic.gated_lda import GatedOnlineLDA
     from spark_vi.models.topic.types import GatedBOWDocument
-    parent = {1: 0, 2: 1, 3: 1}
+    # Flat DAG: every node is a direct child of the root, so each node's signature
+    # is node-specific and undiluted by a shared-parent block. b_only_node=None ->
+    # every node has a clean unique signature in BOTH domains.
+    parent = {1: 0, 2: 0, 3: 0}
     docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
         parent=parent, node_prev={1: 1., 2: 1., 3: 1.}, V_a=40, V_b=16,
-        doc_len=30, seed=5, b_only_node=3)
+        doc_len=40, seed=5, b_only_node=None)
     lay = DagLayout(parent, n_bg=2, tpn=1); V = domain_bounds[-1]
     gdocs = [GatedBOWDocument(indices=np.unique(d).astype(np.int32),
              counts=np.unique(d, return_counts=True)[1].astype(float), length=len(d),
-             frontier=frozenset(f) if hasattr(f, "__iter__") else frozenset({f}))
-             for d, f in zip(docs[:600], labels[:600])]
+             frontier=frozenset({int(f)}))
+             for d, f in zip(docs[:800], labels[:800])]
     m = GatedOnlineLDA(lay, vocab_size=V, domains=[40, 16], random_seed=0)
     gp = m.initialize_global(None)
-    for _ in range(20):
-        gp = m.update_global(gp, m.local_update(gdocs, gp), learning_rate=0.5)
+    planted = {0: pa, 1: pb}
+    # Gentle traction bump on each block topic's OWN planted support (symmetry-break).
+    for u in lay.nodes:
+        for md in (0, 1):
+            support = np.where(planted[md][slot_of_node[u]] > 1e-3)[0]
+            for k in lay.block[u]:
+                gp["lambda"][md][k, support] += 0.3
+    for _ in range(50):
+        gp = m.update_global(gp, m.local_update(gdocs, gp), learning_rate=1.0)
     for md in (0, 1):
         lam_m = gp["lambda"][md]
         beta_m = lam_m / lam_m.sum(1, keepdims=True)
-        np.testing.assert_allclose(beta_m.sum(1), 1.0)
+        np.testing.assert_allclose(beta_m.sum(1), 1.0)          # valid per-domain distribution
         assert np.isfinite(lam_m).all()
+        for u in lay.nodes:
+            support = np.where(planted[md][slot_of_node[u]] > 1e-3)[0]
+            recovery = float(beta_m[lay.block[u]][:, support].sum(axis=1).max())
+            uniform = len(support) / lam_m.shape[1]             # dead-topic baseline (~0.15/0.125)
+            assert recovery > 0.4, (u, md, recovery, uniform)   # recovered ~0.5 >> uniform
 
 
 def test_single_domain_fit_byte_identical():
