@@ -431,3 +431,136 @@ def test_shim_spectral_topo_order_param_default_and_set():
     assert est.getOrDefault("spectralTopoOrder") == "forward"
     est2 = GatedLDAEstimator(spectralTopoOrder="reverse")
     assert est2.getOrDefault("spectralTopoOrder") == "reverse"
+
+
+def test_concat_domain_features_offsets_and_sorts():
+    """Per-domain vectors concatenate into the engine's single id space: domain m
+    ids shift by bounds[m], and the result stays globally sorted."""
+    import numpy as np
+    from pyspark.ml.linalg import SparseVector
+    from spark_vi.mllib.topic.gated_lda import _concat_domain_features
+    v0 = SparseVector(4, {0: 2.0, 3: 1.0})
+    v1 = SparseVector(3, {1: 5.0})
+    idx, cnt = _concat_domain_features([v0, v1], [4, 3])
+    np.testing.assert_array_equal(idx, np.array([0, 3, 5], dtype=np.int32))
+    np.testing.assert_array_equal(cnt, np.array([2.0, 1.0, 5.0]))
+    assert np.all(np.diff(idx) > 0)
+
+
+def test_concat_domain_features_rejects_a_mis_sized_vector():
+    """A vector whose size disagrees with the established layout must raise, naming
+    the domain and both sizes -- silently re-laying-out the vocabulary would
+    corrupt the fit with no symptom."""
+    import pytest
+    from pyspark.ml.linalg import SparseVector
+    from spark_vi.mllib.topic.gated_lda import _concat_domain_features
+    with pytest.raises(ValueError, match=r"domain 1.*size 9.*expected 3"):
+        _concat_domain_features([SparseVector(4, {0: 1.0}), SparseVector(9, {1: 1.0})],
+                                [4, 3])
+
+
+def test_multidomain_shim_fit_derives_domain_sizes(spark):
+    """A fit with featuresCols derives the per-domain widths from the first row and
+    produces a per-domain dict lambda of those widths."""
+    from pyspark.ml.linalg import SparseVector, VectorUDT
+    from pyspark.sql.types import ArrayType, IntegerType, StructField, StructType
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    schema = StructType([
+        StructField("c", VectorUDT()), StructField("d", VectorUDT()),
+        StructField("frontier", ArrayType(IntegerType())),
+    ])
+    rows = [
+        (SparseVector(6, {0: 2.0, 1: 1.0}), SparseVector(4, {0: 3.0}), [2]),
+        (SparseVector(6, {1: 1.0, 2: 2.0}), SparseVector(4, {1: 1.0}), [2]),
+        (SparseVector(6, {3: 3.0, 4: 1.0}), SparseVector(4, {2: 2.0}), [3]),
+        (SparseVector(6, {4: 1.0, 5: 1.0}), SparseVector(4, {3: 4.0}), [3]),
+    ]
+    df = spark.createDataFrame(rows, schema=schema).repartition(2)
+    est = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                            parent={1: 0, 2: 1, 3: 1}, nBg=2, tpn=1,
+                            maxIter=1, seed=0)
+    model = est.fit(df)
+    lam = model.result.global_params["lambda"]
+    assert isinstance(lam, dict) and sorted(lam) == [0, 1]
+    assert lam[0].shape[1] == 6 and lam[1].shape[1] == 4
+    assert model.result.metadata["domains"] == [6, 4]
+
+
+def test_multidomain_shim_fit_rejects_a_mis_sized_row(spark):
+    """A row disagreeing with the derived layout fails the fit rather than
+    silently re-laying-out the vocabulary."""
+    import pytest
+    from pyspark.ml.linalg import SparseVector, VectorUDT
+    from pyspark.sql.types import ArrayType, IntegerType, StructField, StructType
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    schema = StructType([
+        StructField("c", VectorUDT()), StructField("d", VectorUDT()),
+        StructField("frontier", ArrayType(IntegerType())),
+    ])
+    rows = [
+        (SparseVector(6, {0: 1.0}), SparseVector(4, {0: 1.0}), [2]),
+        (SparseVector(6, {1: 1.0}), SparseVector(9, {1: 1.0}), [3]),   # wrong width
+    ]
+    df = spark.createDataFrame(rows, schema=schema)
+    est = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                            parent={1: 0, 2: 1, 3: 1}, nBg=2, tpn=1,
+                            maxIter=1, seed=0)
+    with pytest.raises(Exception, match="domain 1"):
+        est.fit(df)
+
+
+def test_explicit_domain_bounds_override_an_unrepresentative_first_row(spark):
+    """domainBounds is the escape hatch for a dataset whose first row does not
+    carry the true per-domain widths (a narrower vector, e.g. a producer that
+    sized it to the max nonzero id). When set it is AUTHORITATIVE: the fit uses
+    those widths and every row -- the first included -- is validated against them,
+    so a first row that disagrees fails instead of silently defining the layout."""
+    import pytest
+    from pyspark.ml.linalg import SparseVector, VectorUDT
+    from pyspark.sql.types import ArrayType, IntegerType, StructField, StructType
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    schema = StructType([
+        StructField("c", VectorUDT()), StructField("d", VectorUDT()),
+        StructField("frontier", ArrayType(IntegerType())),
+    ])
+    # Every row is width 6/4; bounds declaring 6/4 must fit fine...
+    ok = spark.createDataFrame(
+        [(SparseVector(6, {0: 1.0}), SparseVector(4, {0: 1.0}), [2]),
+         (SparseVector(6, {3: 1.0}), SparseVector(4, {2: 1.0}), [3])], schema=schema)
+    est = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                            domainBounds=[0, 6, 10], parent={1: 0, 2: 1, 3: 1},
+                            nBg=2, tpn=1, maxIter=1, seed=0)
+    model = est.fit(ok)
+    assert model.result.metadata["domains"] == [6, 4]
+    # ...and bounds that disagree with the actual vectors must fail per-row.
+    bad = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                            domainBounds=[0, 5, 9], parent={1: 0, 2: 1, 3: 1},
+                            nBg=2, tpn=1, maxIter=1, seed=0)
+    with pytest.raises(Exception, match="domain 0"):
+        bad.fit(ok)
+    # Malformed bounds are rejected on the driver, before any Spark work.
+    with pytest.raises(ValueError, match="strictly increasing"):
+        GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                          domainBounds=[0, 6, 6], parent={1: 0, 2: 1, 3: 1},
+                          nBg=2, tpn=1, maxIter=1, seed=0).fit(ok)
+
+
+def test_single_domain_shim_path_unchanged(spark):
+    """featuresCols unset keeps the existing single-featuresCol behavior: a single
+    (K, V) array lambda and no domains in metadata."""
+    import numpy as np
+    from pyspark.ml.linalg import SparseVector, VectorUDT
+    from pyspark.sql.types import ArrayType, IntegerType, StructField, StructType
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    schema = StructType([
+        StructField("features", VectorUDT()),
+        StructField("frontier", ArrayType(IntegerType())),
+    ])
+    rows = [(SparseVector(8, {0: 1.0, 1: 2.0}), [2]),
+            (SparseVector(8, {2: 1.0, 3: 1.0}), [3])]
+    df = spark.createDataFrame(rows, schema=schema)
+    est = GatedLDAEstimator(labelCol="frontier", parent={1: 0, 2: 1, 3: 1},
+                            nBg=2, tpn=1, maxIter=1, seed=0)
+    model = est.fit(df)
+    assert isinstance(model.result.global_params["lambda"], np.ndarray)
+    assert "domains" not in model.result.metadata

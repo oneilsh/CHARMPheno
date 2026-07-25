@@ -27,6 +27,16 @@ from spark_vi.mllib.topic._common import _vector_to_bow_document
 
 
 class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
+    featuresCols = Param(Params._dummy(), "featuresCols",
+                         "ordered per-domain feature column names (multi-domain, "
+                         "MixEHR-style per-modality vocabularies; Li, Nair, Lu et al. "
+                         "2020, Nat. Commun.). Unset = single-domain via featuresCol.",
+                         typeConverter=TypeConverters.toListString)
+    domainBounds = Param(Params._dummy(), "domainBounds",
+                         "optional explicit cumulative per-domain offsets "
+                         "[0, V_0, V_0+V_1, ...]; normally DERIVED from the first "
+                         "row's per-column vector sizes.",
+                         typeConverter=TypeConverters.toListInt)
     parent = Param(Params._dummy(), "parent",
                    "DAG parent map {child_int: parent_int or [parent_ints]}, anchor->0",
                    typeConverter=TypeConverters.identity)
@@ -129,6 +139,38 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
                               typeConverter=TypeConverters.toFloat)
 
 
+def _concat_domain_features(vectors, sizes):
+    """Concatenate per-domain sparse vectors into the engine's single id space.
+
+    The engine stores one topic-word matrix per domain but consumes ONE
+    concatenated token-id space, with a token's domain recovered by
+    `searchsorted(domain_bounds, w)`. Domain m's local ids therefore shift by
+    `sum(sizes[:m])`. Because each domain's ids are already ascending and the
+    domains are laid out in order, the concatenated ids are GLOBALLY sorted,
+    which is what the E-step's `expElogbeta[:, indices]` gather assumes.
+
+    Raises ValueError naming the domain and both widths if a vector disagrees
+    with the established layout: the layout is derived once per fit, and a row
+    that silently re-lays-out the vocabulary would corrupt the fit with no
+    symptom (SP3a design).
+    """
+    import numpy as np
+    idx_parts, cnt_parts, offset = [], [], 0
+    for m, (v, width) in enumerate(zip(vectors, sizes)):
+        if int(v.size) != int(width):
+            raise ValueError(
+                f"featuresCols domain {m} vector size {int(v.size)} != expected "
+                f"{int(width)} (layout derived from the first row); every row must "
+                f"use the same per-domain vocabulary widths")
+        bow = _vector_to_bow_document(v)
+        idx_parts.append(bow.indices.astype(np.int64) + offset)
+        cnt_parts.append(bow.counts)
+        offset += int(width)
+    indices = np.concatenate(idx_parts).astype(np.int32) if idx_parts else np.empty(0, np.int32)
+    counts = np.concatenate(cnt_parts) if cnt_parts else np.empty(0, np.float64)
+    return indices, counts
+
+
 def _layout(est_or_model) -> DagLayout:
     return DagLayout(est_or_model.getOrDefault("parent"),
                      n_bg=est_or_model.getOrDefault("nBg"),
@@ -175,7 +217,8 @@ def _deployment_alpha(fitted_alpha, lay, mode, scalar, bg_weight):
 
 class GatedLDAEstimator(_GatedLDAParams, Estimator):
     @keyword_only
-    def __init__(self, *, featuresCol="features", labelCol="frontier", parent=None,
+    def __init__(self, *, featuresCol="features", featuresCols=None,
+                 domainBounds=None, labelCol="frontier", parent=None,
                  nBg=2, tpn=1, maxIter=20, seed=None, caviMaxIter=100, caviTol=1e-3,
                  gammaShape=100.0, init="random", spectralMaxVocab=8000,
                  spectralMethod="auto", spectralD=0, spectralMinDocFreq=5,
@@ -185,7 +228,11 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                  optimizeDocConcentration=False, transformAlphaMode="fitted",
                  transformAlpha=0.0, transformBgWeight=0.5):
         super().__init__()
-        self._setDefault(featuresCol="features", labelCol="frontier", nBg=2, tpn=1,
+        # featuresCols defaults to [] = unset = single-domain via featuresCol.
+        # domainBounds gets NO default on purpose: `isSet("domainBounds")` is what
+        # distinguishes "authoritative explicit layout" from "derive from row one".
+        self._setDefault(featuresCol="features", featuresCols=[],
+                         labelCol="frontier", nBg=2, tpn=1,
                          maxIter=20, nodeAffinityCol="nodeAffinity",
                          caviMaxIter=100, caviTol=1e-3, gammaShape=100.0,
                          init="random", spectralMaxVocab=8000,
@@ -225,12 +272,36 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
             raise ValueError("GatedLDAEstimator requires a `parent` DAG map.")
         lay = _layout(self)
 
-        features_col = self.getOrDefault("featuresCol")
+        fcols = list(self.getOrDefault("featuresCols") or [])
         label_col = self.getOrDefault("labelCol")
-        first = dataset.select(features_col).head(1)
-        if not first:
-            raise ValueError("Cannot fit on an empty DataFrame.")
-        V = first[0][0].size
+        if fcols:
+            first = dataset.select(*fcols).head(1)
+            if not first:
+                raise ValueError("Cannot fit on an empty DataFrame.")
+            if self.isSet("domainBounds"):
+                # Explicit bounds are AUTHORITATIVE, not merely cross-checked: this
+                # is the escape hatch for a dataset whose first row is
+                # unrepresentative, so it must not be rejected for disagreeing with
+                # that row. Every row -- the first included -- is then validated
+                # against these widths by _concat_domain_features.
+                bounds = [int(b) for b in self.getOrDefault("domainBounds")]
+                if len(bounds) != len(fcols) + 1 or bounds[0] != 0 or \
+                        any(b <= a for a, b in zip(bounds, bounds[1:])):
+                    raise ValueError(
+                        f"domainBounds {bounds} must be strictly increasing, start "
+                        f"at 0, and have len(featuresCols)+1 = {len(fcols) + 1} entries")
+                sizes = [b - a for a, b in zip(bounds, bounds[1:])]
+            else:
+                sizes = [int(first[0][i].size) for i in range(len(fcols))]
+            V = sum(sizes)
+            domains = sizes
+        else:
+            features_col = self.getOrDefault("featuresCol")
+            first = dataset.select(features_col).head(1)
+            if not first:
+                raise ValueError("Cannot fit on an empty DataFrame.")
+            V = first[0][0].size
+            domains = None
         seed = self.getOrDefault("seed") if self.isSet("seed") else None
         init = self.getOrDefault("init")
 
@@ -265,7 +336,7 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                     .countByValue().items())
             }
         model_obj = GatedOnlineLDA(
-            lay, V, init=init,
+            lay, V, init=init, domains=domains,
             optimize_alpha=optimize_alpha, frontier_histogram=frontier_hist,
             alpha=alpha_vec, eta=1.0 / lay.K,
             gamma_shape=self.getOrDefault("gammaShape"),
@@ -285,14 +356,27 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
             learning_rate_kappa=float(self.getOrDefault("learningRateKappa")),
         )
 
-        def _to_gated(row):
-            bow = _vector_to_bow_document(row[0])
-            frontier = frozenset(int(x) for x in (row[1] or []))
-            return GatedBOWDocument(indices=bow.indices, counts=bow.counts,
-                                    length=bow.length, frontier=frontier)
+        if fcols:
+            n_dom = len(fcols)
 
-        rdd = (dataset.select(features_col, label_col).rdd.map(_to_gated)
-               .persist(StorageLevel.MEMORY_AND_DISK))
+            def _to_gated(row):
+                indices, counts = _concat_domain_features(
+                    [row[i] for i in range(n_dom)], sizes)
+                frontier = frozenset(int(x) for x in (row[n_dom] or []))
+                return GatedBOWDocument(indices=indices, counts=counts,
+                                        length=int(counts.sum()), frontier=frontier)
+
+            rdd = (dataset.select(*fcols, label_col).rdd.map(_to_gated)
+                   .persist(StorageLevel.MEMORY_AND_DISK))
+        else:
+            def _to_gated(row):
+                bow = _vector_to_bow_document(row[0])
+                frontier = frozenset(int(x) for x in (row[1] or []))
+                return GatedBOWDocument(indices=bow.indices, counts=bow.counts,
+                                        length=bow.length, frontier=frontier)
+
+            rdd = (dataset.select(features_col, label_col).rdd.map(_to_gated)
+                   .persist(StorageLevel.MEMORY_AND_DISK))
         rdd.count()
 
         # Non-random init: seed lambda from anchor-word spectral recovery. init
@@ -322,12 +406,26 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                 )
                 data_summary = {"spectral_lambda": lam0}
             else:  # dense — collect-to-driver exact path
-                collected = dataset.select(features_col, label_col).collect()
-                train_docs, train_labels = [], []
-                for r in collected:
-                    bow = _vector_to_bow_document(r[0])
-                    train_docs.append(np.repeat(bow.indices, bow.counts.astype(int)))
-                    train_labels.append(frozenset(int(x) for x in (r[1] or [])))
+                # Multi-domain: build the driver-side docs through the SAME
+                # _concat_domain_features helper the fit's row mapper uses, so the
+                # spectral seed sees exactly the concatenated ids the fit will see
+                # (a divergent layout here would seed the wrong vocabulary silently).
+                if fcols:
+                    collected = dataset.select(*fcols, label_col).collect()
+                    train_docs, train_labels = [], []
+                    for r in collected:
+                        indices, counts = _concat_domain_features(
+                            [r[i] for i in range(len(fcols))], sizes)
+                        train_docs.append(np.repeat(indices, counts.astype(int)))
+                        train_labels.append(
+                            frozenset(int(x) for x in (r[len(fcols)] or [])))
+                else:
+                    collected = dataset.select(features_col, label_col).collect()
+                    train_docs, train_labels = [], []
+                    for r in collected:
+                        bow = _vector_to_bow_document(r[0])
+                        train_docs.append(np.repeat(bow.indices, bow.counts.astype(int)))
+                        train_labels.append(frozenset(int(x) for x in (r[1] or [])))
                 # anchor_scope/topo_order ride along so initialize_global's dense
                 # strategy honors them too (the scalable path already baked them
                 # into lam0).
