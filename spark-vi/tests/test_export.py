@@ -68,7 +68,7 @@ def test_export_writes_format_version_in_manifest(tmp_path):
     out = tmp_path / "v"
     save_result(r, out)
     manifest = json.loads((out / "manifest.json").read_text())
-    assert manifest["format_version"] == 1
+    assert manifest["format_version"] == 2
 
 
 def test_load_result_rejects_unknown_format_version(tmp_path):
@@ -423,19 +423,14 @@ def test_save_result_round_trips_empty_diagnostic_trace(tmp_path):
     assert not (out / "traces").exists()
 
 
-def test_save_result_rejects_dict_valued_global_param(tmp_path):
-    """A dict-valued global param (the multi-domain per-domain lambda) must FAIL
-    LOUDLY, not write an unreadable file.
-
-    np.save(np.asarray(dict)) succeeds -- it pickles a 0-d object array of a few
-    hundred bytes -- and load_result, which reads params with allow_pickle=False,
-    then dies with "Object arrays cannot be loaded when allow_pickle=False". A
-    checkpointed multi-domain fit would therefore look saved and be unreadable.
-    """
-    import pytest as _pytest
-
+def test_save_result_writes_dict_valued_global_param_with_ragged_widths(tmp_path):
+    """A dict-valued global param (the multi-domain per-domain lambda) writes
+    one .npy per key even when the blocks have different widths (V_m differs
+    per domain) -- there is no single array to write, so np.save is never
+    handed the dict itself (which would silently pickle a 0-d object array
+    that load_result's allow_pickle=False could never read back)."""
     from spark_vi.core import VIResult
-    from spark_vi.io.export import UnsupportedGlobalParamError, save_result
+    from spark_vi.io.export import load_result, save_result
 
     r = VIResult(
         global_params={"lambda": {0: np.ones((2, 3)), 1: np.ones((2, 4))},
@@ -446,9 +441,15 @@ def test_save_result_rejects_dict_valued_global_param(tmp_path):
         metadata={},
     )
     out = tmp_path / "dict_lambda"
-    with _pytest.raises(UnsupportedGlobalParamError, match="lambda"):
-        save_result(r, out)
+    save_result(r, out)
     assert not (out / "params" / "lambda.npy").exists()
+    assert (out / "params" / "lambda_0.npy").exists()
+    assert (out / "params" / "lambda_1.npy").exists()
+
+    loaded = load_result(out)
+    lam = loaded.global_params["lambda"]
+    assert lam[0].shape == (2, 3)
+    assert lam[1].shape == (2, 4)
 
 
 def test_save_result_rejects_object_dtype_global_param(tmp_path):
@@ -490,3 +491,73 @@ def test_save_result_accepts_numpy_scalar_global_params(tmp_path):
     loaded = load_result(out)
     assert float(loaded.global_params["theta"]) == 1.0
     assert int(loaded.global_params["n"]) == 3
+
+
+def test_dict_param_round_trips_per_key(tmp_path):
+    """A dict-valued global param (the multi-domain per-domain lambda) writes one
+    .npy per key and loads back as a dict with INT keys in domain order."""
+    import numpy as np
+    from spark_vi.core.result import VIResult
+    from spark_vi.io.export import load_result, save_result
+    lam = {0: np.arange(6.0).reshape(2, 3), 1: np.arange(4.0).reshape(2, 2)}
+    res = VIResult(global_params={"lambda": lam, "alpha": np.array([0.1, 0.2])},
+                   elbo_trace=[-1.0], n_iterations=1, converged=False,
+                   metadata={"model_class": "GatedOnlineLDA"})
+    save_result(res, tmp_path / "r")
+    assert (tmp_path / "r" / "params" / "lambda_0.npy").exists()
+    assert (tmp_path / "r" / "params" / "lambda_1.npy").exists()
+    assert not (tmp_path / "r" / "params" / "lambda.npy").exists()
+    back = load_result(tmp_path / "r")
+    got = back.global_params["lambda"]
+    assert isinstance(got, dict)
+    assert list(got) == [0, 1]                     # int keys, domain order
+    assert all(isinstance(k, int) for k in got)
+    np.testing.assert_array_equal(got[0], lam[0])
+    np.testing.assert_array_equal(got[1], lam[1])
+    np.testing.assert_array_equal(back.global_params["alpha"], res.global_params["alpha"])
+
+
+def test_dict_param_keys_recorded_in_manifest(tmp_path):
+    """The manifest records the dict param's keys so load does not have to glob."""
+    import json
+    import numpy as np
+    from spark_vi.core.result import VIResult
+    from spark_vi.io.export import save_result
+    res = VIResult(global_params={"lambda": {0: np.ones((2, 3)), 1: np.ones((2, 2))}},
+                   elbo_trace=[], n_iterations=0, converged=False)
+    save_result(res, tmp_path / "r")
+    manifest = json.loads((tmp_path / "r" / "manifest.json").read_text())
+    assert manifest["format_version"] == 2
+    assert manifest["dict_param_keys"] == {"lambda": [0, 1]}
+    assert manifest["param_names"] == ["lambda"]
+
+
+def test_format_version_1_archive_still_loads(tmp_path):
+    """A v1 archive has no dict_param_keys; its single-array lambda must still load."""
+    import json
+    import numpy as np
+    out = tmp_path / "v1"
+    (out / "params").mkdir(parents=True)
+    np.save(out / "params" / "lambda.npy", np.ones((2, 5)))
+    (out / "manifest.json").write_text(json.dumps({
+        "format_version": 1, "elbo_trace": [-2.0], "n_iterations": 1,
+        "converged": True, "metadata": {}, "param_names": ["lambda"],
+        "diagnostic_traces": {},
+    }))
+    from spark_vi.io.export import load_result
+    back = load_result(out)
+    assert isinstance(back.global_params["lambda"], np.ndarray)
+    assert back.global_params["lambda"].shape == (2, 5)
+
+
+def test_unsupported_value_inside_a_dict_param_still_raises(tmp_path):
+    """The guard must reach INSIDE a dict param: a non-numeric block is still
+    unwritable, and the error must name the offending key, not just the param."""
+    import numpy as np
+    import pytest
+    from spark_vi.core.result import VIResult
+    from spark_vi.io.export import UnsupportedGlobalParamError, save_result
+    res = VIResult(global_params={"lambda": {0: np.ones((2, 3)), 1: {"nested": 1}}},
+                   elbo_trace=[], n_iterations=0, converged=False)
+    with pytest.raises(UnsupportedGlobalParamError, match=r"lambda\[1\]"):
+        save_result(res, tmp_path / "r")
