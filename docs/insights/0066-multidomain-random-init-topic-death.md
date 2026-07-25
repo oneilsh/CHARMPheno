@@ -1,6 +1,7 @@
 # 0066 — Multi-domain gated LDA under random init suffers per-seed topic death; the spectral seed is the fix
 
 **Date:** 2026-07-24
+**Premise questioned by [0067](0067-background-starved-plants-frame-a-correct-spectral-seed-as-broken.md)** — every measurement below was taken on a corpus with **zero background documents**, which independently causes the background block to absorb foreground signatures (the absorption this entry describes). Whether random multi-domain init still suffers topic death with a background pool present is untested. Read the conclusion as established for background-starved corpora only.
 **Context:** SP2 of the multi-domain gated DAG LDA arc (branch `multidomain-spectral-init`). The dict-λ multi-domain `GatedOnlineLDA` (per-domain topic-word matrices, shared gated θ). Findings on planted, domain-agnostic two-domain synthetic corpora.
 
 ## Finding
