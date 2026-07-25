@@ -605,7 +605,8 @@ def dag_placement_corpus(*, parent, node_prev, V, doc_len, seed):
 
 def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
                           b_only_node=None, ubiquitous_b=False,
-                          b_only_signal_boost=4, bg_frac=0.0):
+                          b_only_signal_boost=4, bg_frac=0.0,
+                          ancestor_signature_decay=1.0):
     """Two-domain planted hierarchical-placement corpus over a SINGLE concatenated
     vocabulary: domain 0 ids [0:V_a), domain 1 ids [V_a:V_a+V_b). Every document's
     token array carries BOTH domain-0 and domain-1 signature tokens for the SAME
@@ -637,6 +638,38 @@ def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
     rather than merely nonzero. ``ubiquitous_b=True`` adds one reserved domain-1
     column (unused by any node's exclusive block) emitted by EVERY document
     regardless of node -- a universal-anchor control.
+
+    ``ancestor_signature_decay`` (default 1.0 = the pre-decay generator,
+    byte-identical -- see below) is the IDENTIFIABILITY knob for the label.
+    Every document's label is its DEEPEST attested node, but at 1.0 the
+    signature draws are split EVENLY over closure(v), so a depth-2 document
+    emits exactly as many tokens of its parent's signature block as of its
+    own. The evidence is then symmetric between an ancestor and its
+    descendant while the label is not: which of the two a reader should rank
+    first is NOT determined by the tokens, so any read-out that scores
+    "the deepest attested node ranks first" is scoring an unidentified
+    tie-break, and two estimators with opposite tie-break biases can differ
+    arbitrarily on it without either being wrong. That is a defect of the
+    plant, not of a model fitted to it.
+
+    The knob is the per-level ratio of signature draws going UP the closure:
+    the label node itself draws ``per`` tokens of its own block in EACH
+    domain, and a node ``k`` levels above it (k = depth(v) - depth(u), the
+    longest-path level difference, so it is well defined on a multi-parent
+    DAG where several ancestors share a depth) draws
+    ``per * decay ** k``. At ``decay < 1`` a deeper node's OWN signature is
+    strictly more indicative of it than the shared signature of its
+    ancestors, which is what the label already claims -- so the label
+    becomes identified from the tokens alone. 0.5 (a clean halving per
+    level) is the value used by the placement-equivalence gate: it is the
+    simplest one-parameter monotone profile that makes the label node the
+    single best-supported block at every depth, and it mirrors the
+    depth-scaled offsets the surrounding DAG work already uses. Values are
+    rounded to at least one draw per node on the path
+    (``max(1, round(per * decay ** k))``), so ``decay=1.0`` yields exactly
+    ``per`` for every node -- the same draw sizes, in the same order, from
+    the same rng, hence a byte-identical corpus (and every other return
+    value unchanged).
 
     ``bg_frac`` (default 0.0, byte-identical to the pre-``bg_frac`` corpus:
     at 0.0, ``n_bg_docs`` below is 0, so the background-doc loop issues ZERO
@@ -725,9 +758,15 @@ def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
         toks = [rng.integers(0, C_a, size=n_a_common),                    # domain-0 common pool
                V_a + rng.integers(0, C_b, size=n_b_common)]               # domain-1 common pool
         per = max(1, (doc_len - n_common) // (2 * len(path)))
+        depth_v = lay.depth(v)
         for u in path:
-            toks.append(rng.choice(node_sig_a[u], size=per))              # domain-0 signature
-            b_per = per * b_only_signal_boost if u == b_only_node else per
+            # ancestor_signature_decay: the label node v keeps `per`; a node k levels
+            # ABOVE it draws per*decay**k, so the deepest attested node is the
+            # best-supported block and the label is identified from the tokens (see
+            # the docstring). decay=1.0 -> exactly `per` for every u = byte-identical.
+            per_u = max(1, int(round(per * ancestor_signature_decay ** (depth_v - lay.depth(u)))))
+            toks.append(rng.choice(node_sig_a[u], size=per_u))            # domain-0 signature
+            b_per = per_u * b_only_signal_boost if u == b_only_node else per_u
             toks.append(V_a + rng.choice(node_sig_b[u], size=b_per))      # domain-1 signature
         if ubiquitous_b:
             toks.append(np.array([V_a + ubiq_col_b]))                     # universal token

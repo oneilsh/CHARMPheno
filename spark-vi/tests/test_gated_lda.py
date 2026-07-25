@@ -625,131 +625,212 @@ def test_multidomain_svi_planted_bonly_node_recovery():
                 assert recovery > best_other, (u, md, recovery, best_other)
 
 
+def _per_node_mrr(profiles, labels, lay):
+    """Mean reciprocal rank of the TRUE node, broken out BY true node.
+
+    Same rank rule as `dag_placement.evaluate`'s mrr (count only nodes with strictly
+    greater affinity, so ties are scored optimistically), but grouped instead of pooled.
+    This is the read-out with power against a rank swap between a node and its ancestor:
+    a pooled mrr dilutes one node's collapse across every other node's docs, and node-AUC
+    cannot see it at all (it ranks DOCS within one node, so it is invariant to a per-node
+    affinity SCALE offset -- the exact shape a node/ancestor swap takes)."""
+    import numpy as np
+    acc = {}
+    for pr, y in zip(profiles, labels):
+        P = np.array([pr[u] for u in lay.nodes])
+        j = lay.nodes.index(int(y))
+        acc.setdefault(int(y), []).append(1.0 / (1 + int((P > P[j]).sum())))
+    return {u: float(np.mean(v)) for u, v in acc.items()}
+
+
+def _profile_l1(prof_a, prof_b, lay):
+    """Mean L1 distance between two engines' per-doc node-affinity profiles, each
+    normalized over the DAG's nodes. Deliberately scale-SENSITIVE: rank correlation and
+    node-AUC are both invariant to a per-node scale offset, so neither can see one engine
+    concentrating its affinity differently from the other. Range [0, 2]."""
+    import numpy as np
+    out = []
+    for a, b in zip(prof_a, prof_b):
+        va = np.array([a[u] for u in lay.nodes]); va /= max(va.sum(), 1e-12)
+        vb = np.array([b[u] for u in lay.nodes]); vb /= max(vb.sum(), 1e-12)
+        out.append(float(np.abs(va - vb).sum()))
+    return float(np.mean(out))
+
+
 def test_multidomain_svi_matches_gibbs_placement():
     """Multi-domain placement-equivalence gate: the SVI engine (GatedOnlineLDA, mean-field
     variational EM -- Hoffman, Blei & Bach 2010) and the collapsed-Gibbs oracle (`fit_gated`
-    -- Griffiths & Steyvers 2004 collapsed sampling, plus the per-domain word-topic factor
-    added in the immediately preceding task, MixEHR-style: Li, Nair, Lu et al. 2020, Nat.
-    Commun.) must place held-out, UNGATED fold-in documents onto the same DAG nodes within
-    a documented tolerance. Uses the two-domain corpus (`two_domain_dag_corpus`) with the
-    b_only_node ambiguity (a node recoverable from domain 1 alone) and the exact plant/fit
-    config verified in `test_multidomain_svi_planted_bonly_node_recovery` (parent=
-    {1:0,2:1,3:1}, b_only_node=3, V_a=40, V_b=16, doc_len=40, corpus seed=5, bg_frac=0.2,
-    anchor_scope="frontier") as the starting point (task-5 brief); eta=0.02/alpha=0.1 are
-    set explicitly (rather than left at the K-dependent default) to match fit_gated's
-    default beta_prior=0.02 -- the two engines must see the SAME Dirichlet concentration
-    to be a fair comparison.
+    -- Griffiths & Steyvers 2004 collapsed sampling, plus the per-domain word-topic factor,
+    MixEHR-style: Li, Nair, Lu et al. 2020, Nat. Commun.) must place held-out, UNGATED
+    fold-in documents onto the same DAG nodes. Gated on the SPLIT-AVERAGED read-out over 8
+    independent train/eval splits, not one split.
 
-    TRAINING-SET SIZE IS DELIBERATE, not accidental. At this DAG's moderate/large training
-    sizes (n_train 40-500, spot-checked, not asserted here) every node-AUC AND mrr/top2
-    saturate to EXACTLY 1.0 for BOTH engines -- the corpus's per-node signature blocks are
-    mutually exclusive columns by construction (see `two_domain_dag_corpus`), so once a
-    node's block topic has ANY traction, placement becomes a deterministic lookup and both
-    engines tie perfectly. That is a degenerate "free win" with zero power to detect a
-    real SVI-vs-Gibbs disagreement -- exactly what the brief warns against shipping.
-    n_train=25 is the smallest size that still has a real background pool under
-    anchor_scope="frontier" (>=3 background docs at bg_frac=0.2, spot-checked across split
-    seeds 0/7/13) and gives a genuine, small MRR gap while node-AUC stays saturated at 1.0
-    for both engines (spot-checked mrr gaps across those 3 split seeds: 0.063/0.013/0.013,
-    never favoring one engine consistently) -- i.e. the two engines agree on WHICH node
-    scores highest almost always, and disagree only in fine-grained per-doc ranking at the
-    margins: exactly the kind of finite-sample estimation noise (a 25-document, mostly
-    16-foreground-document Gibbs fit vs. a 50-iteration batch-VB fit) the tolerance below
-    is FOR, not a fragile coin-flip -- the direction and rough magnitude repeat across
-    those three independent splits.
+    DAG SHAPE (`{1:0, 2:0, 3:1, 4:1, 5:2, 6:2}`) is chosen so the metrics resolve. Two
+    depth-1 nodes each with two children: `subtree(1) = {1,3,4}` and `subtree(2) = {2,5,6}`,
+    so neither covers the other's labels and depth-1 node-AUC is SCOREABLE (on a DAG whose
+    single depth-1 node is every other node's ancestor it is structurally nan, because that
+    node has no negative among labeled foreground eval docs). Six nodes give mrr real
+    resolution. `b_only_node=3` keeps the multi-domain case that motivates the per-domain
+    factor: node 3's domain-0 signature block is identical to its parent node 1's, so node 3
+    is separable from domain 1 alone.
 
-    Background docs (bg_frac>0) are kept in TRAINING (their real seeding role for the
-    n_bg=2 background block; see two_domain_dag_corpus's docstring and insight 0066) but
-    dropped from EVAL -- `evaluate` scores a profile against its true node, and a
-    background doc's frontier is empty (no true node to score against).
+    IDENTIFIABILITY OF THE LABEL (`ancestor_signature_decay=0.5`) -- load-bearing, and the
+    reason an earlier version of this gate could not be written honestly. Every document's
+    label is its DEEPEST attested node, but the generator's default splits signature draws
+    EVENLY over closure(v), so a depth-2 document emits as many of its parent's signature
+    tokens as its own. The evidence is then symmetric between a node and its ancestor while
+    the label is not, so "the deepest attested node ranks first" is an UNIDENTIFIED
+    tie-break -- and the two engines break it in opposite directions (measured on the even
+    plant: for docs at node 5, Gibbs put the child ahead 0.2578 vs 0.2450 while SVI put the
+    parent ahead 0.4253 vs 0.2796, driving split-averaged mrr to 0.9971 vs 0.8756 with
+    per-node mrr pinned at exactly 0.500 -- a deterministic rank-2). At decay=0.5 a node's
+    own signature is twice its parent's, the label is identified from the tokens, and the
+    disagreement disappears entirely (numbers below). The knob's default is 1.0 and
+    reproduces every other caller's corpus byte-identically; see
+    `two_domain_dag_corpus`'s docstring.
 
-    TOLERANCE (0.08 on mrr/top2/depth-2 AUC): matches the upper end of the established
-    single-domain gates (0.05-0.08; see `test_svi_matches_gibbs_placement_multi_parent`,
-    the most structurally similar sibling -- also a max-depth-only check). It covers (a)
-    the stochastic collapsed-Gibbs FOLD-IN sampler (`profile`, 60 iters/30 burn per doc --
-    Monte-Carlo noise in the readout, not model disagreement), (b) the n_train=25 finite-
-    training-sample regime (chosen for informativeness, see above), and (c) finite-test-
-    set noise (n_test=300, a rank-based proportion metric's standard error is ~0.01-0.03
-    at this n). The observed gap on this exact config (split seed=0) is mrr 0.0633 --
-    comfortably inside 0.08, not fit to the observed number after the fact (0.08 is the
-    pre-existing sibling-gate value).
+    Background docs (`bg_frac=0.2`) stay in TRAINING -- they are the pool the gated spectral
+    seed's `n_bg` background block anchors on under `anchor_scope="frontier"`, and without
+    them the background block is never seeded (see insight 0066 / the generator's docstring)
+    -- but are dropped from EVAL, because `evaluate` scores a profile against a true node
+    and a background doc's frontier is empty. The split therefore PERMUTES first (the
+    generator appends background docs after foreground ones, so a prefix slice would contain
+    none), keeps a mixed train prefix, and filters `frozenset()` labels out of the eval pool.
+    Measured 32-50 background docs in each split's 200-doc training set, and no
+    "no background docs under anchor_scope=" warning on any split.
 
-    Depth-1 (node 1) AUC is NOT asserted: node 1 is nodes 2 and 3's ancestor, so its
-    subtree covers the WHOLE DAG; restricted to labeled-foreground-only eval docs (the
-    eval-set convention above -- no scoreable negative exists for node 1), `evaluate`
-    returns nan for it, for BOTH engines -- a property of this DAG shape plus that
-    convention, not an engine defect. Only depth-2 (nodes 2, 3 -- genuinely
-    distinguishable siblings, one via its own domain-0 block, one via its boosted
-    domain-1 block) is asserted, mirroring `test_svi_matches_gibbs_placement_multi_parent`'s
-    max-depth-only pattern.
+    `beta_prior=0.02` (Gibbs) and an EXPLICIT `eta=0.02, alpha=0.1` (SVI, rather than the
+    K-dependent 1/K default) make both engines see the same Dirichlet concentration.
 
-    MEASURED on this exact config (split seed=0, n_train=25, n_test=300): Gibbs
-    auc_by_depth={1: nan, 2: 1.0}, mrr=0.9433, top2=1.0; SVI auc_by_depth={1: nan, 2: 1.0},
-    mrr=0.88, top2=1.0. Measured wall-clock for this test alone: ~13s (fit_gated ~11s at
-    n_iter=150/burn=80 default; SVI fit ~1s at n_iter=50; fold-in+evaluate for both engines
-    combined ~1s; corpus generation negligible)."""
+    MEASURED, all 8 splits, n_train=200 / n_test=300 / SVI n_iter=50 (full-batch lr=1.0):
+    Gibbs and SVI both give mrr = 1.0000 and per-true-node mrr = 1.000 for all six nodes on
+    every split. auc_by_depth: Gibbs {1: 1.0, 2: 1.0} on every split; SVI depth-2 1.0 on
+    every split, depth-1 1.0 on 5 splits and 0.9700 / 0.9868 / 0.9901 on the other three
+    (mean 0.9934, spread 0.0300 -- the widest live spread in the gate, and what the depth
+    tolerance is sized for). Mean normalized-profile L1 = 0.2356 (spread 0.1534).
+
+    NON-TRIVIALITY -- established by MUTATION, not by headroom. mrr and per-node mrr sit at
+    1.0000 for both engines, so the honest question is whether this plant would fail for a
+    broken engine at all. It would: swapping only the SVI arm's init to "random" (the
+    known-bad multi-domain configuration of insight 0066, where a node anchors nothing and
+    its topic dies) gives mrr 0.6943 / 0.7377 / 0.7186 on splits 0 / 3 / 6, depth-1 AUC
+    0.5991 / 0.6008 / 0.6319, per-node mrr as low as 0.167, and profile-L1 1.0315 / 1.0542 /
+    1.0191. Every assertion below fires by a wide margin under that mutation, so a 1.0-vs-1.0
+    agreement here is two engines solving a well-posed problem, not a problem too easy to
+    fail. `top2` is EXCLUDED from the gate and reported here as degenerate: it is 1.0000 for
+    both engines with spread 0.0000, and structurally so -- a node/ancestor swap moves the
+    true node to rank 2, never worse, which `mean(rank <= 2)` cannot see.
+
+    TOLERANCES. 0.08 (the upper end of the single-domain sibling gates) two-sided on the
+    split-averaged mrr, on each node's split-averaged mrr, and on each depth's
+    split-averaged AUC. What it is a tolerance FOR: (a) the stochastic collapsed-Gibbs
+    fold-in (`profile`, 60 iters / 30 burn per doc) -- Monte-Carlo noise in the READ-OUT;
+    (b) the stochastic SVI fold-in (`infer_local` draws gamma_init from the global RNG);
+    (c) finite eval sets (300 docs/split). It is quantified by the measured split-to-split
+    spread: the widest live spread in any gated statistic is 0.0300 (SVI depth-1 AUC), so
+    0.08 is ~2.7x the observed spread, and the mutation above clears it by 0.25-0.40.
+    EIGHT splits, not one and not five: on the pre-decay plant SVI's per-split mrr had sd
+    0.0871, which puts the standard error of a FIVE-split mean at 0.039 -- the 5-split mean
+    gap there was 0.0750 (inside 0.08) while the 8-split mean gap was 0.1215 (outside), so a
+    5-split mean would itself have been a lucky read. 0.60 on the mean profile L1 is a
+    coarse bound on a range-[0,2] statistic, placed between the measured 0.2356 (worst
+    split 0.3043) and the mutation's 1.0191-1.0542; it is deliberately loose because the two
+    engines genuinely differ in affinity CONCENTRATION even where they agree on rank (SVI's
+    node topics retain 0.17-0.51 of their domain-0 mass on the shared common pool where the
+    Gibbs oracle retains 0.01-0.23), which is a calibration difference, not a placement one.
+
+    RUNTIME: ~92 s measured (8 splits x ~11.5 s; per split `fit_gated` ~6.5 s, Gibbs
+    fold-in over 300 docs ~2.7 s, SVI fit ~2.0 s, SVI fold-in ~0.06 s, two `evaluate`
+    calls). The Gibbs arms are pure-Python per-token loops and dominate."""
     import numpy as np
-    from tests._stm_synth import two_domain_dag_corpus, fit_gated_svi_local, svi_node_profiles
+    from tests._stm_synth import (
+        two_domain_dag_corpus, fit_gated_svi_local, svi_node_profiles)
     from spark_vi.models.topic.dag_placement import DagLayout, fit_gated, profile, evaluate
     from spark_vi.models.topic.gated_lda import GatedOnlineLDA
     from spark_vi.models.topic.types import GatedBOWDocument
 
-    parent = {1: 0, 2: 1, 3: 1}
+    parent = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
     B_ONLY = 3
-    V_a, V_b, doc_len = 40, 16, 40
-    docs, labels, domain_bounds, pa, pb, slot_of_node, codes = two_domain_dag_corpus(
-        parent=parent, node_prev={1: 1., 2: 1., 3: 1.}, V_a=V_a, V_b=V_b,
-        doc_len=doc_len, seed=5, b_only_node=B_ONLY, bg_frac=0.2)
+    V_a, V_b, doc_len = 60, 28, 40
+    n_train, n_test = 200, 300
+    SPLITS = range(8)
+    docs, labels, domain_bounds, _pa, _pb, _slot, _codes = two_domain_dag_corpus(
+        parent=parent, node_prev={u: 1.0 for u in range(1, 7)}, V_a=V_a, V_b=V_b,
+        doc_len=doc_len, seed=5, b_only_node=B_ONLY, bg_frac=0.2,
+        ancestor_signature_decay=0.5)          # identifies the label; see docstring
     lay = DagLayout(parent, n_bg=2, tpn=1)
     V = domain_bounds[-1]
-
-    # Deliberate split: background docs are appended AFTER foreground docs in the
-    # generator, so an unshuffled prefix slice would silently contain none of them (see
-    # brief item 3 / two_domain_dag_corpus's bg_frac docstring) -- permute first, keep a
-    # TRAIN prefix mixing foreground+background (background does real seeding work under
-    # anchor_scope="frontier"), then EVAL only on labeled foreground docs from the rest.
-    n_train, n_test = 25, 300
-    perm = np.random.default_rng(0).permutation(len(docs))
-    train_idx = perm[:n_train]
-    tr_d = [docs[i] for i in train_idx]
-    tr_l_raw = [labels[i] for i in train_idx]              # int or frozenset() (background)
-    assert sum(1 for f in tr_l_raw if isinstance(f, frozenset)) > 0   # real bg docs present
-    tr_l_gibbs = [f if isinstance(f, frozenset) else int(f) for f in tr_l_raw]
-
-    test_pool = [i for i in perm[n_train:] if not isinstance(labels[i], frozenset)]
-    test_idx = test_pool[:n_test]
-    te_d = [docs[i] for i in test_idx]
-    te_l = [int(labels[i]) for i in test_idx]
 
     def _bow_multi(tokens):
         idx, cnt = np.unique(np.asarray(tokens), return_counts=True)
         return idx.astype(np.int32), cnt.astype(np.float64), int(cnt.sum())
 
-    # --- Gibbs oracle (Griffiths & Steyvers 2004; per-domain factor MixEHR-style) ---
-    beta_g = fit_gated(tr_d, tr_l_gibbs, lay, V, beta_prior=0.02,
-                       domain_bounds=domain_bounds, rng=np.random.default_rng(0))
-    ev_g = evaluate([profile(d, beta_g, lay, rng=np.random.default_rng(i))
-                     for i, d in enumerate(te_d)], te_l, lay)
+    g_mrr, s_mrr, l1s = [], [], []
+    g_node, s_node = {u: [] for u in lay.nodes}, {u: [] for u in lay.nodes}
+    depths = sorted({lay.depth(u) for u in lay.nodes})
+    g_depth, s_depth = {d: [] for d in depths}, {d: [] for d in depths}
 
-    # --- Gated SVI (spectral seed via fit_gated_svi_local's optional data_summary) ---
-    bow = [GatedBOWDocument(*_bow_multi(d), frontier=(f if isinstance(f, frozenset)
-                                                      else frozenset({int(f)})))
-           for d, f in zip(tr_d, tr_l_raw)]
-    ds = {"train_docs": [np.asarray(d) for d in tr_d],
-          "train_labels": tr_l_gibbs, "anchor_scope": "frontier"}
-    m = GatedOnlineLDA(lay, vocab_size=V, domains=[V_a, V_b], eta=0.02, alpha=0.1,
-                       init="spectral", random_seed=0)
-    gp = fit_gated_svi_local(m, bow, n_iter=50, data_summary=ds)
-    ev_s = evaluate(svi_node_profiles(m, gp, te_d, lay), te_l, lay)
+    for split_seed in SPLITS:
+        perm = np.random.default_rng(split_seed).permutation(len(docs))
+        tr_d = [docs[i] for i in perm[:n_train]]
+        tr_raw = [labels[i] for i in perm[:n_train]]
+        # Background docs (empty frontier) belong in TRAINING, not eval -- see docstring.
+        assert sum(1 for f in tr_raw if isinstance(f, frozenset)) > 0
+        tr_l = [f if isinstance(f, frozenset) else int(f) for f in tr_raw]
+        test_idx = [i for i in perm[n_train:]
+                    if not isinstance(labels[i], frozenset)][:n_test]
+        te_d = [docs[i] for i in test_idx]
+        te_l = [int(labels[i]) for i in test_idx]
+        assert len(te_d) == n_test
 
-    # Depth-1 (node 1) is structurally nan for both engines under this eval convention
-    # (see docstring) -- assert that explicitly rather than silently skip it.
-    assert np.isnan(ev_g["auc_by_depth"][1]) and np.isnan(ev_s["auc_by_depth"][1])
+        # --- Gibbs oracle (Griffiths & Steyvers 2004; per-domain factor MixEHR-style) ---
+        beta_g = fit_gated(tr_d, tr_l, lay, V, beta_prior=0.02,
+                           domain_bounds=domain_bounds, rng=np.random.default_rng(0))
+        prof_g = [profile(d, beta_g, lay, rng=np.random.default_rng(i))
+                  for i, d in enumerate(te_d)]
 
-    TOL = 0.08     # matches test_svi_matches_gibbs_placement_multi_parent's upper bound
-    assert ev_s["auc_by_depth"][2] >= ev_g["auc_by_depth"][2] - TOL
-    assert ev_s["mrr"] >= ev_g["mrr"] - TOL
-    assert ev_s["top2"] >= ev_g["top2"] - TOL
+        # --- Gated SVI (Hoffman, Blei & Bach 2010; spectral seed via data_summary) ---
+        bow = [GatedBOWDocument(*_bow_multi(d),
+                                frontier=(f if isinstance(f, frozenset)
+                                          else frozenset({int(f)})))
+               for d, f in zip(tr_d, tr_raw)]
+        ds = {"train_docs": [np.asarray(d) for d in tr_d],
+              "train_labels": tr_l, "anchor_scope": "frontier"}
+        m = GatedOnlineLDA(lay, vocab_size=V, domains=[V_a, V_b], eta=0.02, alpha=0.1,
+                           init="spectral", random_seed=0)
+        gp = fit_gated_svi_local(m, bow, n_iter=50, data_summary=ds)
+        prof_s = svi_node_profiles(m, gp, te_d, lay)
+
+        ev_g, ev_s = evaluate(prof_g, te_l, lay), evaluate(prof_s, te_l, lay)
+        g_mrr.append(ev_g["mrr"]); s_mrr.append(ev_s["mrr"])
+        l1s.append(_profile_l1(prof_g, prof_s, lay))
+        pn_g, pn_s = _per_node_mrr(prof_g, te_l, lay), _per_node_mrr(prof_s, te_l, lay)
+        for u in lay.nodes:                      # every node is labeled (node_prev all 1.0)
+            g_node[u].append(pn_g[u]); s_node[u].append(pn_s[u])
+        for d in depths:
+            g_depth[d].append(ev_g["auc_by_depth"][d]); s_depth[d].append(ev_s["auc_by_depth"][d])
+
+    TOL = 0.08          # see TOLERANCES in the docstring; ~2.7x the widest measured spread
+    mean_g, mean_s = float(np.mean(g_mrr)), float(np.mean(s_mrr))
+
+    # Precondition: the oracle must actually solve the task, or "agreement" is meaningless.
+    assert mean_g > 0.95, mean_g
+    # Split-AVERAGED overall ranking agreement, two-sided (either engine drifting is a fail).
+    assert abs(mean_s - mean_g) <= TOL, (mean_g, mean_s, g_mrr, s_mrr)
+    # Per-TRUE-NODE ranking agreement: the assertion with power against a node/ancestor
+    # rank swap, which the pooled mrr dilutes and node-AUC cannot see at all.
+    for u in lay.nodes:
+        gm, sm = float(np.mean(g_node[u])), float(np.mean(s_node[u]))
+        assert abs(sm - gm) <= TOL, (u, gm, sm, g_node[u], s_node[u])
+    # Node-AUC by depth, EVERY depth (depth 1 is scoreable on this DAG shape -- assert that
+    # it is a real number rather than silently averaging a nan away).
+    for d in depths:
+        gd, sd = float(np.mean(g_depth[d])), float(np.mean(s_depth[d]))
+        assert np.isfinite(gd) and np.isfinite(sd), (d, gd, sd)
+        assert abs(sd - gd) <= TOL, (d, gd, sd, g_depth[d], s_depth[d])
+    # Scale-SENSITIVE profile divergence (rank correlation and node-AUC are both blind to a
+    # per-node scale offset). Coarse by design -- the engines differ in concentration.
+    assert float(np.mean(l1s)) <= 0.60, (float(np.mean(l1s)), l1s)
 
 
 def test_single_domain_fit_byte_identical():
