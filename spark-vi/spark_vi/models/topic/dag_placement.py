@@ -129,8 +129,15 @@ def _resolve_domain_priors(beta_prior, n_domains):
     """Resolve `beta_prior` to one eta_m per domain (MixEHR-style per-modality Dirichlet
     concentration; Li, Nair, Lu et al. 2020, Nat. Commun.). A scalar broadcasts to every
     domain — with one domain that is exactly the scalar, so the single-domain path keeps
-    the caller's own float and its arithmetic unchanged. A sequence must give one strictly
-    positive value per domain."""
+    the caller's own float and its arithmetic unchanged. A sequence must give one value per
+    domain.
+
+    Every eta_m must be strictly positive, on the scalar path too. This narrows the
+    accepted-input contract: the pre-multi-domain code ran beta_prior=0 (an improper
+    Dirichlet), which makes the conditional 0/0 for any topic with no tokens in the
+    relevant domain — it emitted a stream of "invalid value encountered in divide"
+    RuntimeWarnings and leaned on the seeded init to keep the result finite. Rejecting it
+    is deliberate; see fit_gated's byte-for-byte note."""
     if np.isscalar(beta_prior):
         etas = [float(beta_prior)] * n_domains
     else:
@@ -176,7 +183,11 @@ def fit_gated(train_docs, train_labels, lay, V, *, beta_prior=0.02,
     ``domain_bounds=None`` == one domain spanning [0, V). That is not a special case: with
     N=1 the per-domain totals ARE the pooled totals, V_0·eta_0 IS V·beta_prior, and
     per-domain-block normalization IS row normalization — the same code path therefore
-    reproduces the single-pooled-domain sampler byte-for-byte.
+    reproduces the single-pooled-domain sampler byte-for-byte, for every beta_prior it
+    accepts. The ACCEPTED-INPUT contract is narrower by exactly one case: beta_prior <= 0
+    now raises ValueError (see ``_resolve_domain_priors``) where the pre-multi-domain code
+    ran it into a 0/0 conditional under a stream of divide warnings. Arithmetic identity is
+    unaffected; nothing in this repo passes a non-positive beta_prior.
 
     The per-token conditional uses ONLY the collapsed word-topic factor of
     Griffiths & Steyvers (2004), restricted to the gated allowed-set. The usual

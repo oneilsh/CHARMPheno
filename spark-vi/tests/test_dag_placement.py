@@ -915,19 +915,26 @@ def test_fdr_delta_corroborating_domain_raises_leaf_specificity():
     assert tp_in >= tp_out + MARGIN
     # ...and not by "flagging everything": each arm's false discoveries stay within BH's
     # own nominal allowance at this q (q*(tp+fp), floored at 5 so an arm with almost no
-    # discoveries is still held to an absolute ceiling). Observed: IN tp=204/204 fp~12-13
-    # of 396 non-target held-out items (observed FDR ~0.06 < q=0.10), OUT tp=fp=0.
-    # (This guard read `fp <= 5` while fit_gated returned a GLOBALLY row-normalized beta;
-    # once beta became per-domain normalized -- each domain a distribution over its own
-    # ids, the MixEHR per-modality likelihood the profile fold-in actually assumes -- the
-    # domain-1 tokens carry their own conditional instead of a concatenated-vocabulary one
-    # and the same q admits a few more discoveries. tp is unchanged at its 204/204 ceiling
-    # and the observed FDR is still below nominal, so this is the same result read through
-    # the corrected likelihood, not a degradation; the guard is restated as the calibration
-    # claim it was standing in for. Verified: the per-domain NORMALIZATION alone moves
-    # fp 1 -> 13 with the pooled sampler unchanged.)
+    # discoveries is still held to an absolute ceiling), AND under an absolute ceiling that
+    # pins the observed value so a further specificity loss cannot pass silently.
+    # Observed: IN tp=204/204, fp~12-13 of 396 non-target held-out items (observed FDR
+    # ~0.06 < q=0.10); OUT tp=fp=0.
+    #
+    # This guard read `fp <= 5` while fit_gated returned a GLOBALLY row-normalized beta.
+    # beta is now normalized per domain block, and that convention change alone (verified:
+    # per-domain-renormalizing the UNCHANGED pooled-sampler beta reproduces it) moves
+    # fp 1 -> 13. Attribution, precisely: in MixEHR (Li, Nair, Lu et al. 2020) a token's
+    # modality is EXOGENOUS -- each modality carries its own token count and the topic does
+    # not generate the modality -- so the per-token likelihood is the per-domain factor with
+    # no P(m|k) term, and per-domain normalization is the v1 / MixEHR-faithful convention.
+    # Global row-normalization implicitly carried a topic-specific modality proportion (the
+    # fraction of topic k's row mass falling in domain m) -- precisely the generative pi_km
+    # this arc defers to its v2 seam, where v2's pi nests MixEHR by adding that one factor.
+    # So fp 1 -> 13 is the read-out cost of dropping that implicit pi_km: an empirical cost
+    # of the v1 pi-free convention, NOT evidence that either normalization is "correct".
+    # The cost is tracked for an insights entry at plan wrap-up.
     for tp, fp in ((tp_in, fp_in), (tp_out, fp_out)):
-        assert fp <= max(5.0, 0.10 * (tp + fp)), (tp, fp)
+        assert fp <= max(5.0, 0.10 * (tp + fp)) and fp <= 20, (tp, fp)
 
     ctp_in, cfp_in, cn_true_in = _fdr_delta_arm(
         b_only_node=None, ubiquitous_b=True, domain1_in=True, **common)
@@ -969,7 +976,13 @@ def test_fit_gated_multidomain_recovers_both_domain_signatures():
     owns a unique, undiluted signature block in each domain, so a correct per-domain
     estimator must put nearly all of that node's per-domain mass on its own block.
     The dead-topic baseline is the uniform mass on the same support (~0.15 in domain 0,
-    ~0.125 in domain 1), asserted alongside so the gate cannot be met by a flat row."""
+    ~0.125 in domain 1); recovery is asserted to clear BOTH the absolute gate and 5x that
+    baseline, so the gate cannot be met by a flat row.
+
+    NOTE (scope of this test): it does NOT discriminate the per-domain denominator from the
+    pooled one -- the pooled sampler recovers this plant just as well, because every topic
+    here has a roughly balanced domain mix. The denominator itself is pinned by
+    test_fit_gated_per_domain_denominator_sets_the_conditional below."""
     from tests._stm_synth import two_domain_dag_corpus
     parent = {1: 0, 2: 0, 3: 0}
     docs, labels, domain_bounds, pa, pb, slot_of_node, _codes = two_domain_dag_corpus(
@@ -989,7 +1002,68 @@ def test_fit_gated_multidomain_recovers_both_domain_signatures():
             support = np.where(planted[m][slot_of_node[u]] > 1e-3)[0]
             recovery = float(beta_m[lay.block[u]][:, support].sum(1).max())
             uniform = len(support) / beta_m.shape[1]      # dead/flat-topic baseline
-            assert recovery > 0.8, (u, m, recovery, uniform)   # observed ~0.99
+            assert recovery > 0.8, (u, m, recovery, uniform)        # observed ~0.99
+            assert recovery > 5 * uniform, (u, m, recovery, uniform)  # not a flat row
+
+
+class _ScriptedRng:
+    """Deterministic stand-in for numpy's Generator, exposing only the two calls fit_gated
+    makes of it: `random(size)` for the vectorized initial per-token assignment -- all
+    zeros, so every token starts in the FIRST admissible topic -- and `random()` for each
+    per-token resample, which yields `first` once and then `filler` forever. Scripting the
+    draws makes the sampler a deterministic function of its own conditional, so a
+    hand-computed conditional can be checked against the topic the sampler actually picks."""
+
+    def __init__(self, first, filler=0.5):
+        self.first = float(first)
+        self.filler = float(filler)
+        self.n_scalar = 0
+
+    def random(self, size=None):
+        if size is not None:
+            return np.zeros(size)
+        u = self.first if self.n_scalar == 0 else self.filler
+        self.n_scalar += 1
+        return u
+
+
+def test_fit_gated_per_domain_denominator_sets_the_conditional():
+    """The per-domain denominator n_{k,.in m} + V_m*eta_m -- the whole point of the
+    multi-domain oracle -- pinned by a HAND-COMPUTED conditional. Recovery on a planted
+    corpus cannot do this job: the pooled denominator recovers those plants just as well,
+    so only the sampler's arithmetic itself can be held to account.
+
+    Setup: one doc, one non-root node, n_bg=1 => exactly two admissible topics [0, 1].
+    Domain 0 = ids [0:4), domain 1 = ids [4:6). eta = 0.5 in BOTH domains (one scalar), so
+    the numerator (n_kw + eta) is identical under either denominator and ONLY the
+    denominator is under test. The doc is [4,4,4] + 30 domain-0 tokens, so with the
+    scripted rng sending every token to the first admissible topic, topic 0 starts at
+    n_km[0] = [30, 3] and n_kw[0, 4] = 3 -- a domain-0 volume that dwarfs domain 1, which
+    is exactly what a pooled denominator would wrongly charge against a domain-1 token.
+
+    The first token processed is id 4 (domain 1). After its own decrement (n_kw[0,4] = 2,
+    n_km[0,1] = 2, n_km[0,0] = 30) the two admissible topics' unnormalized conditionals are
+
+      per-domain: [(2 + .5) / (2 + 2*.5), (0 + .5) / (0 + 2*.5)] = [5/6, 1/2]
+                  -> normalized p[0] = (5/6) / (4/3) = 0.625
+      pooled:     [(2 + .5) / (32 + 6*.5), (0 + .5) / (0 + 6*.5)] = [1/14, 1/6]
+                  -> normalized p[0] = (1/14) / (5/21) = 0.300
+
+    The sampler takes topic 0 iff its draw u < p[0], so the fit must flip across 0.625 and
+    must NOT flip across 0.300. A pooled denominator inverts BOTH assertions."""
+    lay = DagLayout({1: 0}, n_bg=1, tpn=1)
+    assert list(lay.allowed_set([1])) == [0, 1]        # exactly two admissible topics
+    doc = np.array([4, 4, 4] + [0] * 10 + [1] * 10 + [2] * 5 + [3] * 5)
+    assert int((doc < 4).sum()) == 30 and int((doc >= 4).sum()) == 3
+
+    def fit(u):
+        return fit_gated([doc], [1], lay, 6, beta_prior=0.5, n_iter=1, burn=0,
+                         rng=_ScriptedRng(u), domain_bounds=[0, 4, 6])
+
+    # flips exactly at the per-domain threshold 0.625 ...
+    assert not np.array_equal(fit(0.624), fit(0.626))
+    # ... and nothing happens at the pooled threshold 0.300
+    np.testing.assert_array_equal(fit(0.29), fit(0.31))
 
 
 def test_fit_gated_per_domain_beta_prior_smooths_each_block_separately():
