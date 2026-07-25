@@ -627,26 +627,52 @@ def test_multidomain_dense_spectral_init_builds_docs_through_the_shared_helper(s
     assert lam[0].shape[1] == 6 and lam[1].shape[1] == 4
 
 
-def _two_domain_df(spark):
+def _two_domain_df(spark, *, empty_domain1=False):
     """Six two-domain rows: domain 0 width 6, domain 1 width 4, frontiers over
     nodes 2 and 3 of the DAG {1:0, 2:1, 3:1}, two partitions so the reduce
-    combines more than one. Deliberately tiny -- these are shim-contract tests,
-    not recovery tests."""
+    combines more than one, and a `rid` row key. Deliberately tiny -- these are
+    shim-contract tests, not recovery tests.
+
+    `rid` exists because collect() order is NOT a contract here: a repartition(2)
+    round-robin can hand two runs the same rows in different orders, so comparing
+    two transforms POSITIONALLY silently compares different documents (observed:
+    max|diff| 1.7e-2 raw, 1.2e-15 after sorting). Compare via
+    `_affinities_by_rid`.
+
+    empty_domain1=True keeps every row's domain-0 vector, frontier and rid, and
+    empties ONLY the domain-1 vector (same width 4, no nonzeros). That frame is
+    the omega=0 counterfactual: a weight of 0 removes a domain's tokens from the
+    gamma sum exactly, so it must fold in identically to a frame where those
+    tokens are simply absent (see the direction test)."""
     from pyspark.ml.linalg import SparseVector, VectorUDT
     from pyspark.sql.types import ArrayType, IntegerType, StructField, StructType
     schema = StructType([
+        StructField("rid", IntegerType()),
         StructField("c", VectorUDT()), StructField("d", VectorUDT()),
         StructField("frontier", ArrayType(IntegerType())),
     ])
     rows = [
-        (SparseVector(6, {0: 2.0, 1: 1.0}), SparseVector(4, {0: 3.0}), [2]),
-        (SparseVector(6, {1: 1.0, 2: 2.0}), SparseVector(4, {1: 1.0}), [2]),
-        (SparseVector(6, {0: 1.0, 2: 1.0}), SparseVector(4, {0: 2.0, 1: 1.0}), [2]),
-        (SparseVector(6, {3: 3.0, 4: 1.0}), SparseVector(4, {2: 2.0}), [3]),
-        (SparseVector(6, {4: 1.0, 5: 1.0}), SparseVector(4, {3: 4.0}), [3]),
-        (SparseVector(6, {3: 1.0, 5: 2.0}), SparseVector(4, {2: 1.0, 3: 1.0}), [3]),
+        (0, SparseVector(6, {0: 2.0, 1: 1.0}), SparseVector(4, {0: 3.0}), [2]),
+        (1, SparseVector(6, {1: 1.0, 2: 2.0}), SparseVector(4, {1: 1.0}), [2]),
+        (2, SparseVector(6, {0: 1.0, 2: 1.0}), SparseVector(4, {0: 2.0, 1: 1.0}), [2]),
+        (3, SparseVector(6, {3: 3.0, 4: 1.0}), SparseVector(4, {2: 2.0}), [3]),
+        (4, SparseVector(6, {4: 1.0, 5: 1.0}), SparseVector(4, {3: 4.0}), [3]),
+        (5, SparseVector(6, {3: 1.0, 5: 2.0}), SparseVector(4, {2: 1.0, 3: 1.0}), [3]),
     ]
+    if empty_domain1:
+        rows = [(rid, c, SparseVector(4, {}), fr) for rid, c, d, fr in rows]
     return spark.createDataFrame(rows, schema=schema).repartition(2)
+
+
+def _affinities_by_rid(model, df):
+    """Transform df and return the nodeAffinity matrix ordered by the `rid` key.
+
+    Never compare two transforms by collect() order: it is not stable across runs
+    (see _two_domain_df), so a positional comparison can pair up different
+    documents and either invent a difference or hide one."""
+    import numpy as np
+    rows = model.transform(df).select("rid", "nodeAffinity").collect()
+    return np.array([list(r[1]) for r in sorted(rows, key=lambda r: r[0])])
 
 
 def test_multidomain_shim_transform_produces_node_affinity(spark):
@@ -678,9 +704,9 @@ def test_transform_applies_omega_so_deployed_theta_matches_fitted(spark):
                             parent={1: 0, 2: 1, 3: 1}, nBg=2, tpn=1,
                             maxIter=2, seed=0, omega=[1.0, 1.0])
     model = est.fit(df)
-    base = np.array([list(r[0]) for r in model.transform(df).select("nodeAffinity").collect()])
+    base = _affinities_by_rid(model, df)
     model._set(omega=[1.0, 0.05])                  # same lambda, different dial
-    down = np.array([list(r[0]) for r in model.transform(df).select("nodeAffinity").collect()])
+    down = _affinities_by_rid(model, df)
     assert not np.allclose(base, down), "transform ignored omega"
 
 
@@ -703,23 +729,64 @@ def test_transform_reads_omega_from_metadata_on_a_rebuilt_model(spark):
     rebuilt = GatedLDAModel(fitted.result, parent=parent, nBg=2, tpn=1)
     rebuilt._set(featuresCols=["c", "d"])          # a loader knows its input columns
     assert not rebuilt.isSet("omega")
-    a_fit = np.array([list(r[0])
-                      for r in fitted.transform(df).select("nodeAffinity").collect()])
-    a_reb = np.array([list(r[0])
-                      for r in rebuilt.transform(df).select("nodeAffinity").collect()])
+    a_fit = _affinities_by_rid(fitted, df)
+    a_reb = _affinities_by_rid(rebuilt, df)
     np.testing.assert_allclose(a_reb, a_fit)
 
     # ...and an explicit Param overrides the recorded value.
     rebuilt._set(omega=[1.0, 1.0])
-    a_one = np.array([list(r[0])
-                      for r in rebuilt.transform(df).select("nodeAffinity").collect()])
+    a_one = _affinities_by_rid(rebuilt, df)
     assert not np.allclose(a_one, a_fit)
 
 
-def test_transform_rejects_an_omega_of_the_wrong_length(spark):
-    """A per-domain weight whose length disagrees with the domain count is a
-    caller error: gathering it by token domain would either raise an opaque
-    index error or silently weight the wrong domains."""
+def test_transform_omega_zero_equals_dropping_that_domains_tokens(spark):
+    """Pins the omega->domain DIRECTION, which "changing omega changes the output"
+    cannot: reversing the gather (omega[::-1]) or using side="left" leaves every
+    other omega assertion in this file green, and the engine's own exactness
+    instrument does not cover the shim because the gather is duplicated there.
+
+    Exact, not directional: omega_m = 0 multiplies domain m's tokens by 0 in the
+    gamma recurrence's count vector, and phi_norm is per-token, so the gamma map
+    becomes term-for-term the map of a document that simply lacks those tokens.
+    So omega=[1, 0] on the real frame must reproduce omega=[1, 1] on the frame
+    whose domain-1 vectors are empty. A reversed gather would zero domain 0
+    instead and the two would disagree grossly; side="left" misassigns every id
+    that sits exactly on a bound (global id 6 = domain 1's first id) plus id 0
+    (searchsorted -> -1 -> the LAST omega), so it is caught too.
+
+    The two frames hold different token content, so the content-seeded gamma_init
+    differs; caviTol is tightened so both runs sit ON the (identical) fixed point,
+    which is what the equality is about. Comparison is keyed by rid, never by
+    collect() order (see _two_domain_df)."""
+    import numpy as np
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    df = _two_domain_df(spark)
+    df_no_d1 = _two_domain_df(spark, empty_domain1=True)
+    model = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                              parent={1: 0, 2: 1, 3: 1}, nBg=2, tpn=1,
+                              maxIter=2, seed=0, omega=[1.0, 1.0]).fit(df)
+    model._set(caviTol=1e-12, caviMaxIter=2000)     # converge to the fixed point
+
+    model._set(omega=[1.0, 0.0])                    # domain 1 weighted out
+    weighted_out = _affinities_by_rid(model, df)
+    model._set(omega=[1.0, 1.0])                    # domain 1 absent instead
+    absent = _affinities_by_rid(model, df_no_d1)
+    np.testing.assert_allclose(weighted_out, absent, atol=1e-9)
+    # Guard against the assertion being vacuous: domain 1 does move the read-out,
+    # so the agreement above is omega=0 acting on the right domain, not a no-op.
+    unweighted = _affinities_by_rid(model, df)
+    assert not np.allclose(unweighted, absent, atol=1e-9)
+
+
+def test_transform_rejects_a_malformed_omega_through_the_shared_validator(spark):
+    """omega goes through domains.resolve_per_domain -- the ONE per-domain
+    validator -- so the shim and the engine reject the same caller errors with the
+    same message. The NEGATIVE case is the one that matters: transform is the only
+    place a bad omega can still enter (the engine validates at fit time, and a
+    Param can be _set on a model afterwards), and a negative weight drives gamma
+    negative, whereupon digamma returns NaN and nodeAffinity comes out NaN with no
+    error raised at all."""
+    import numpy as np
     import pytest
     from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
     df = _two_domain_df(spark)
@@ -728,8 +795,50 @@ def test_transform_rejects_an_omega_of_the_wrong_length(spark):
                             maxIter=1, seed=0)
     model = est.fit(df)
     model._set(omega=[1.0, 0.5, 0.25])             # 3 weights, 2 domains
-    with pytest.raises(ValueError, match=r"omega has 3 entries for 2 domains"):
+    with pytest.raises(ValueError, match=r"omega must be a scalar or a length-2"):
         model.transform(df)
+    model._set(omega=[1.0, -5.0])                  # would silently emit NaN
+    with pytest.raises(ValueError, match=r"omega components must be finite and >= 0"):
+        model.transform(df)
+    # 0.0 IS legal (drop the domain), and the read-out is finite.
+    model._set(omega=[1.0, 0.0])
+    assert np.all(np.isfinite(_affinities_by_rid(model, df)))
+
+
+def test_transform_rejects_a_features_cols_domain_count_mismatch(spark):
+    """featuresCols disagreeing with the fitted domain count is knowable on the
+    driver, so it raises there rather than surfacing per-row from inside a Spark
+    task."""
+    import pytest
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    df = _two_domain_df(spark)
+    model = GatedLDAEstimator(featuresCols=["c", "d"], labelCol="frontier",
+                              parent={1: 0, 2: 1, 3: 1}, nBg=2, tpn=1,
+                              maxIter=1, seed=0).fit(df)
+    model._set(featuresCols=["c"])                 # 1 column, 2 fitted domains
+    with pytest.raises(ValueError, match=r"1 column\(s\).*2 domain\(s\)"):
+        model.transform(df)
+
+
+def test_directly_constructed_single_domain_model_transforms(spark):
+    """A loader rebuilds a GatedLDAModel directly from a saved VIResult, so NO
+    Params are copied from a fit -- and a single-domain loader has no reason to
+    set featuresCols. _transform reads that Param unconditionally, so without a
+    model-level default it raises KeyError on a path with nothing to do with
+    multi-domain. No _set call here on purpose."""
+    import numpy as np
+    from pyspark.ml.linalg import SparseVector
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator, GatedLDAModel
+    parent = {1: 0, 2: 0}
+    df = spark.createDataFrame(
+        [(0, SparseVector(6, {0: 1.0, 1: 2.0}), [1]),
+         (1, SparseVector(6, {2: 1.0, 3: 1.0}), [2])], ["rid", "features", "frontier"])
+    fitted = GatedLDAEstimator(labelCol="frontier", parent=parent, nBg=1, tpn=1,
+                               maxIter=1, seed=0).fit(df)
+    rebuilt = GatedLDAModel(fitted.result, parent=parent, nBg=1, tpn=1)
+    assert rebuilt.getOrDefault("featuresCols") == []      # unset = single-domain
+    np.testing.assert_array_equal(_affinities_by_rid(rebuilt, df),
+                                  _affinities_by_rid(fitted, df))
 
 
 def test_single_domain_transform_rejects_an_omega_set_after_the_fit(spark):

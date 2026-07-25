@@ -21,7 +21,7 @@ from pyspark.ml.param.shared import HasFeaturesCol, HasLabelCol, HasMaxIter, Has
 
 from spark_vi.core.config import VIConfig
 from spark_vi.models.topic.dag_placement import DagLayout
-from spark_vi.models.topic.domains import domains_to_bounds
+from spark_vi.models.topic.domains import domains_to_bounds, resolve_per_domain
 from spark_vi.models.topic.gated_lda import GatedOnlineLDA
 from spark_vi.models.topic.types import GatedBOWDocument
 from spark_vi.mllib.topic._common import _vector_to_bow_document
@@ -466,7 +466,6 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                     # concentrates. Reachable on shipped defaults: spectralMethod="auto"
                     # routes scalable once V >= spectralMaxVocab, and a CONCATENATED
                     # multi-domain V crosses that far more easily than a single one.
-                    from spark_vi.models.topic.domains import domains_to_bounds
                     from spark_vi.models.topic.spectral_init import split_domains
                     blocks = split_domains(lam0, domains_to_bounds(sizes).tolist())
                     lam0 = {m: blocks[m] * _SPECTRAL_LAMBDA_SCALE + 1e-9
@@ -525,7 +524,14 @@ class GatedLDAModel(_GatedLDAParams, Model):
     def __init__(self, result, *, parent, nBg, tpn):
         super().__init__()
         self._result = result
-        self._setDefault(featuresCol="features", labelCol="frontier", nBg=nBg, tpn=tpn,
+        # featuresCols=[] (= unset = single-domain) must be a DEFAULT here, not only
+        # on the estimator: a directly-constructed model -- which is how a loader
+        # rebuilds one from a saved VIResult -- gets no Params copied from a fit, and
+        # `_transform` reads featuresCols unconditionally, so without this default
+        # getOrDefault raises KeyError on a path that has nothing to do with
+        # multi-domain (a single-domain loader never sets featuresCols).
+        self._setDefault(featuresCol="features", featuresCols=[],
+                         labelCol="frontier", nBg=nBg, tpn=tpn,
                          parent=parent, nodeAffinityCol="nodeAffinity",
                          caviMaxIter=100, caviTol=1e-3, gammaShape=100.0,
                          transformAlphaMode="fitted", transformAlpha=0.0,
@@ -549,20 +555,22 @@ class GatedLDAModel(_GatedLDAParams, Model):
         loaded multi-domain model would silently fold in unweighted -- exactly the
         train/serve skew applying omega here exists to prevent.
 
-        The length check is not decoration: omega is gathered per token as
-        omega[domain_of(w)], so a too-long omega weights the wrong domains and a
-        too-short one raises an opaque index error inside a Spark task.
+        Validation goes through `domains.resolve_per_domain` -- the ONE per-domain
+        hyperparameter validator, which exists because three hand-rolled copies had
+        diverged -- with allow_zero=True because 0.0 is a legal omega ("drop this
+        domain"). A hand-rolled LENGTH check would not be enough: this is now the
+        only place a bad omega can enter (the engine validates at fit time, and an
+        omega Param can be _set on a model afterwards), and a NEGATIVE omega drives
+        gamma negative, whereupon digamma returns NaN and transform emits NaN
+        nodeAffinity with no error raised at all. Sharing the validator also means
+        the shim and the engine report the same caller error the same way.
         """
         if self.isSet("omega"):
-            omega = np.asarray(self.getOrDefault("omega"), dtype=np.float64)
+            raw = self.getOrDefault("omega")
         else:
             recorded = (self._result.metadata or {}).get("omega")
-            omega = (np.ones(n_domains, dtype=np.float64) if recorded is None
-                     else np.asarray(recorded, dtype=np.float64))
-        if omega.shape != (n_domains,):
-            raise ValueError(f"omega has {omega.size} entries for "
-                             f"{n_domains} domains")
-        return omega
+            raw = np.ones(n_domains, dtype=np.float64) if recorded is None else recorded
+        return resolve_per_domain(raw, n_domains, "omega", allow_zero=True)
 
     def _transform(self, dataset):
         from pyspark.ml.linalg import DenseVector, VectorUDT
@@ -606,6 +614,13 @@ class GatedLDAModel(_GatedLDAParams, Model):
                 f"(K, V) array, so the per-domain widths needed to concatenate "
                 f"those columns are unknown; fit with featuresCols or transform a "
                 f"single concatenated featuresCol")
+        if fcols and len(fcols) != len(sizes):
+            # Knowable on the DRIVER: _concat_domain_features would catch it too,
+            # but only once per row inside a Spark task, as a py4j-wrapped error.
+            raise ValueError(
+                f"featuresCols has {len(fcols)} column(s) but the fitted lambda "
+                f"has {len(sizes)} domain(s) of widths {sizes}; the counts must "
+                f"match or a trailing domain would be silently dropped")
         # Deployment alpha (may differ from the fitted alpha — see _deployment_alpha):
         # decouples a learned fitting-aid alpha from the fold-in prior.
         alpha = _deployment_alpha(
