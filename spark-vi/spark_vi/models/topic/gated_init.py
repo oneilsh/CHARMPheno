@@ -151,10 +151,14 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
     from per-domain sizes. Malformed bounds raise (`domains.validate_domain_bounds`).
 
     NOTE: only this DENSE path takes `domain_bounds` — the distributed twin
-    `scalable_block_aligned_lambda` does not, and SETTLED (not merely hypothesized) not
-    to need it: see `scalable_block_aligned_lambda`'s docstring and
-    `test_scalable_init_matches_dense_per_domain_floor_seed`
-    (spark-vi/tests/test_gated_lda.py) for the measured cross-seed comparison."""
+    `scalable_block_aligned_lambda` does not take it and (measured) still recovers
+    every node on a well-specified multi-domain plant, because recovery there is
+    carried by the gated EM rather than the seed. See that function's docstring and
+    `test_scalable_init_recovers_every_identifying_signal`
+    (spark-vi/tests/test_gated_lda.py). CAVEAT on the "0.005 vs 0.675" figure above:
+    it comes from insight 0066's BACKGROUND-STARVED plant; insight 0067 later showed
+    the dense floor's apparent value is largely a degenerate-plant artifact, so read
+    "LOAD-BEARING" as "load-bearing on that degenerate plant", not unconditionally."""
     _validate_anchor_scope(anchor_scope)
     if not (isinstance(data_summary, dict)
             and "train_docs" in data_summary and "train_labels" in data_summary):
@@ -338,21 +342,31 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
     steal a descendant's defining word (see `_anchor_node_set`).
 
     UNLIKE `spectral_block_aligned_lambda`, this function takes NO `domain_bounds`
-    and carries no per-domain candidate floor — and, measured, it does not need
-    one. `find_anchors_projected`'s candidate gate is an ABSOLUTE per-word
-    document-frequency floor (`df_w >= min_doc_freq`, ADR 0032, adopted precisely
-    because the dense function's MEAN-RELATIVE marginal floor over-excludes
-    rare-but-pure words under the sketch), not a pooled-mean-relative one — so
-    there is no pooled mean for a denser domain to dominate and no floor to add.
-    `test_scalable_init_matches_dense_per_domain_floor_seed`
-    (spark-vi/tests/test_gated_lda.py) measures this directly: on the same
-    b_only-node two-domain plant that motivates the dense per-domain floor
-    (insight 0066), post-EM per-domain recovery from this function's seed matched
-    or beat the dense function's seed WITH `domain_bounds` across 3 fit seeds x 2
-    domains x 3 nodes, well inside a tolerance set from the observed seed-to-seed
-    spread — i.e. the arc's pre-registered SP3 blocker 1 is closed: the scalable
-    path needed no floor analogue because its floor rule was never the kind that
-    could be dominated in the first place."""
+    and carries no per-domain candidate floor — and, measured, a multi-domain fit
+    seeded here still recovers every node. `find_anchors_projected`'s candidate
+    gate is an ABSOLUTE per-word document-frequency floor (`df_w >= min_doc_freq`,
+    ADR 0032, adopted because the dense function's MEAN-RELATIVE marginal floor
+    over-excludes rare-but-pure words under the sketch), not a pooled-mean-relative
+    one — so there is no pooled mean for a denser domain to dominate.
+
+    What is SETTLED, and what is not (corrected 2026-07-26 after a fuller test —
+    an earlier version of this docstring overclaimed):
+    `test_scalable_init_recovers_every_identifying_signal`
+    (spark-vi/tests/test_gated_lda.py) fits the b_only-node two-domain plant from
+    THIS seed across 8 projection draws and asserts post-EM recovery of every
+    node's IDENTIFYING per-domain signal above a floor — and it passes. What is
+    NOT claimed: that this seed matches or beats the dense+floor seed cell-for-cell
+    (an 8-seed comparison showed the scalable seed is itself FRAGILE — an
+    exclusive-node signal can be 0.0 at init on some draws), nor that the dense
+    per-domain floor is redundant in general. The honest reading: on a
+    WELL-SPECIFIED plant, recovery is carried by the gated EM, which refines a
+    fragile scalable seed back up — not by the seed's own quality or by a floor
+    analogue (consistent with insight 0067, where the dense floor's apparent value
+    was itself a degenerate-plant artifact). The arc's SP3 blocker-1 question ("is
+    the production scalable init adequate for a multi-domain fit?") is answered YES
+    by that recovery gate; the stronger "immune / needs no floor, proven by a
+    dense comparison" framing was a premature reading of a 3-seed lucky draw and is
+    withdrawn."""
     from pyspark import StorageLevel
     from spark_vi.models.topic.spectral_init_scalable import (
         projected_cooccurrence_rdd, find_anchors_projected,
