@@ -137,6 +137,11 @@ def load_omop_bigquery(
             f"cohort {cohort!r} not supported "
             f"(supported: {SUPPORTED_COHORTS})"
         )
+    if cohort is not None and source_table not in ("condition_occurrence", "condition_era"):
+        raise ValueError(
+            f"cohort filtering requires a condition source_table (the cohort index "
+            f"date is condition-derived); got source_table={source_table!r} with "
+            f"cohort={cohort!r}. Load without cohort= and window downstream.")
 
     def _read(table: str) -> DataFrame:
         return (

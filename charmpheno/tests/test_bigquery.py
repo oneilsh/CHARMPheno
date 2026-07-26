@@ -147,6 +147,29 @@ def test_drug_era_column_normalization_is_declared():
     assert extra == ("drug_era_start_date", "drug_era_end_date")
 
 
+def test_rejects_cohort_with_non_condition_source_table():
+    """cohort filtering hardcodes a condition-derived index date
+    (condition_era_start_date for the era path); passing cohort= with
+    source_table='drug_era' must fast-fail with a named ValueError here,
+    not fall through to apply_cohort and crash later with a cryptic
+    AnalysisException about a missing column. Uses a real SUPPORTED_COHORTS
+    name so this exercises the NEW source_table+cohort guard, not the
+    pre-existing unknown-cohort check."""
+    from charmpheno.omop.bigquery import load_omop_bigquery
+    from charmpheno.omop.cohorts import SUPPORTED_COHORTS
+
+    assert "first_cancer_year" in SUPPORTED_COHORTS
+    with pytest.raises(ValueError, match="condition source_table"):
+        load_omop_bigquery(
+            spark=object(),
+            cdr_dataset="p.d",
+            billing_project="b",
+            concept_types=("drug",),
+            source_table="drug_era",
+            cohort="first_cancer_year",
+        )
+
+
 @pytest.mark.cluster
 def test_smoke_against_real_cdr(spark):
     """Reads a tiny slice from the workspace CDR; requires env + connector."""
