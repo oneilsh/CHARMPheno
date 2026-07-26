@@ -114,7 +114,8 @@ help:
 	@echo "                         EVAL_ARGS='--model-class hdp --hdp-k 50'"
 	@echo "                         RESUME: make hdp-bq-fit-eval RUN_ID=<existing-id> HDP_BQ_ARGS='--max-iter <N more>'"
 	@echo "  next-exp [NO_EVAL=1]    Pick lowest-NNNN pending experiment; fit (+ eval unless NO_EVAL)."
-	@echo "  exp ID=N [NO_EVAL=1]    Run/resume experiment N; fit (+ eval unless NO_EVAL)."
+	@echo "  exp ID=N [NO_EVAL=1] [LR=1]  Run/resume experiment N; fit (+ eval unless NO_EVAL)."
+	@echo "                         LR=1 also runs the LR readout after the fit (dag_placement runs only)."
 	@echo "  summary ID=N            Print summary.md for experiment N."
 	@echo "  summary-tail ID=N       Print only the most-recent ## section of summary.md."
 	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
@@ -349,11 +350,18 @@ next-exp: zip cluster-overlay $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py --next --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
 
-# Same pipeline pinned to specific id (auto-resumes if RUN_ID dir exists)
+# Same pipeline pinned to specific id (auto-resumes if RUN_ID dir exists).
+# LR=1 also runs the post-hoc likelihood-ratio readout (the `lr-readout` target)
+# on the SAME run after the fit+eval. Opt-in because it applies only to
+# dag_placement (gated case-finding) experiments -- on an lda/stm run there is no
+# gated lambda for lr_readout.py to read and it will error. All LR_* knobs / LR_ARGS
+# pass straight through the recursive make invocation, e.g.
+#   make exp ID=N LR=1 LR_CACHE_URI=gs://... LR_ARGS="--bundle-path <cache_uri>/<key>"
 exp: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
 	python $(REPO_ROOT)/scripts/run_experiment.py --id $(ID) --runs-dir $(RUNS_DIR) $(if $(NO_EVAL),--no-eval)
+	@if [ -n "$(LR)" ]; then $(MAKE) lr-readout ID=$(ID); fi
 
 # Post-hoc likelihood-ratio readout on an EXISTING run (no re-fit). Reads the
 # run's saved lambda + cached bundle; prints LR-AUC(alpha) vs theta-mass AUC.
