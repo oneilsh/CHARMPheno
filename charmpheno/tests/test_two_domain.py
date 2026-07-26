@@ -55,6 +55,41 @@ import datetime as dt
 from charmpheno.omop.condition_dag import build_condition_dag
 
 
+def _two_domain_bundle(spark, *, strip_mode="both"):
+    """A CLEAN two-domain bundle for fit/seam tests: conditions attest DAG
+    nodes (+ a rides-along non-node code); drugs are ordinary drug concept-ids
+    in a domain DISJOINT from the condition vocabulary. Unlike the strip
+    test's fixture below, this one does NOT emit a node-marker id as a drug
+    token -- that synthetic overlap exists only to pin the per-domain-strip
+    symmetry property, and would be noise in a plain fit smoke test."""
+    from charmpheno.omop.two_domain import (
+        assemble_two_domain_from_events, DomainVocabSpec)
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+    # anchor 100 -> node 200, node 300 (a 2-node DAG), same shape as the strip
+    # test's fixture but without the synthetic marker-in-drugs row.
+    before = build_condition_dag(
+        [(100, 200), (100, 300)], anchor=100, node_ids=[200, 300],
+        names={100: "root", 200: "A", 300: "B"})
+    cond_rows, drug_rows = [], []
+    for pid in range(20):                       # foreground: attest a node + a drug
+        node = 200 if pid % 2 == 0 else 300
+        cond_rows.append((pid, node, "dz", dt.date(2015, 1, 1)))
+        cond_rows.append((pid, 999, "dz", dt.date(2015, 2, 1)))    # rides-along non-node
+        drug_rows.append((pid, 900 + (pid % 3), "dz", dt.date(2015, 1, 5)))
+    for pid in range(100, 115):                 # background
+        cond_rows.append((pid, 888, "bg", dt.date(2016, 1, 1)))
+        drug_rows.append((pid, 950, "bg", dt.date(2016, 1, 5)))
+    cond = spark.createDataFrame(
+        cond_rows, ["person_id", "concept_id", "source_cohort", "condition_era_start_date"])
+    drug = spark.createDataFrame(
+        drug_rows, ["person_id", "concept_id", "source_cohort", "drug_era_start_date"])
+    return assemble_two_domain_from_events(
+        cond, drug, before, doc_spec=PatientCohortDocSpec(min_doc_length=0), min_n=1,
+        vocab_a=DomainVocabSpec(vocab_size=100, min_df=1, min_patient_count=1),
+        vocab_b=DomainVocabSpec(vocab_size=100, min_df=1, min_patient_count=1),
+        holdout_frac=0.3, strip_mode=strip_mode)
+
+
 def test_assemble_two_domain_bundle_shape_and_per_domain_strip(spark):
     """The bundle exposes two aligned feature columns + a CONDITION-ONLY frontier;
     the per-domain leakage strip removes the condition node-marker ids from
@@ -114,3 +149,25 @@ def test_assemble_two_domain_bundle_shape_and_per_domain_strip(spark):
         assert b200 not in set(r["features_b"].indices)     # stripped from drugs too
     assert any(r["features_b"].numNonzeros() > 0
                for r in bundle.train_df.collect())          # other drugs intact
+
+
+def test_two_domain_bundle_fits_through_the_gated_shim_and_round_trips(spark, tmp_path):
+    """The SP3b<->SP3a seam: a two-domain bundle fits via GatedLDAEstimator with
+    featuresCols=[features_a, features_b], yields a per-domain dict lambda, and the
+    saved VIResult round-trips. Structural (shape + round-trip), not a recovery gate."""
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    from spark_vi.io.export import save_result, load_result
+    bundle = _two_domain_bundle(spark)
+    est = GatedLDAEstimator(
+        featuresCols=["features_a", "features_b"], labelCol="frontier",
+        parent=bundle.parent_int, nBg=2, tpn=1, maxIter=2, seed=0)
+    model = est.fit(bundle.train_df)
+    lam = model.result.global_params["lambda"]
+    assert isinstance(lam, dict) and set(lam) == {0, 1}
+    assert model.result.metadata["domains"] == [len(bundle.vocab_map_a),
+                                                 len(bundle.vocab_map_b)]
+    save_result(model.result, tmp_path / "fit")
+    loaded = load_result(tmp_path / "fit")
+    assert isinstance(loaded.global_params["lambda"], dict)
+    assert loaded.metadata["domains"] == [len(bundle.vocab_map_a),
+                                          len(bundle.vocab_map_b)]
