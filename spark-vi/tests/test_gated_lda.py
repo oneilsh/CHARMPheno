@@ -1619,3 +1619,95 @@ def test_optimize_eta_rejected_pins_the_eta_provenance_invariant():
         vocab = 56 if kwargs else 12
         with pytest.raises(NotImplementedError, match="optimize_eta"):
             GatedOnlineLDA(lay, vocab_size=vocab, optimize_eta=True, **kwargs)
+
+
+def test_scalable_init_matches_dense_per_domain_floor_seed(spark):
+    """The arc's pre-registered SP3 gate. The production (scalable) spectral init
+    never received the per-domain candidate floor that the dense path has, and the
+    mllib shim routes to the scalable path above spectralMaxVocab -- so a
+    production-size multi-domain fit runs on an init that the dense acceptance
+    tests never covered.
+
+    The floors are different RULES, which is why immunity was plausible: dense
+    find_anchors uses a MEAN-RELATIVE marginal floor (a denser domain can dominate
+    the pooled mean), while find_anchors_projected uses an ABSOLUTE
+    document-frequency floor (df_w >= min_doc_freq, ADR 0032, adopted because the
+    mean-relative rule over-excludes rare-but-pure words in the sketch setting).
+    An absolute per-word threshold has no pooled mean to be swamped.
+
+    Gate: post-EM per-domain recovery from the scalable seed is not materially
+    worse than from the dense+floor seed, per node and per domain, across several
+    fit seeds. TOL is set from the observed seed-to-seed spread, NOT from a single
+    comparison (SP2 lost a review round to a single-seed gate that passed on a
+    lucky draw)."""
+    import numpy as np
+    from tests._stm_synth import two_domain_dag_corpus
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.gated_init import (
+        multidomain_spectral_lambda, scalable_block_aligned_lambda,
+    )
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.spectral_init import split_domains
+    from spark_vi.models.topic.types import GatedBOWDocument
+    parent, b_only = {1: 0, 2: 1, 3: 1}, 3
+    V_A, V_B = 40, 16
+    docs, labels, bounds, pa, pb, slot, _ = two_domain_dag_corpus(
+        parent=parent, node_prev={1: 1.0, 2: 1.0, 3: 1.0}, V_a=V_A, V_b=V_B,
+        doc_len=40, seed=5, b_only_node=b_only, bg_frac=0.2,
+        ancestor_signature_decay=0.5)
+    lay = DagLayout(parent, n_bg=2, tpn=1)
+    V = bounds[-1]
+    rng = np.random.default_rng(0)
+    keep = [int(i) for i in rng.permutation(len(docs))[:800]]
+    tr_docs = [np.asarray(docs[i]) for i in keep]
+    tr_labels = [labels[i] for i in keep]
+    gdocs = []
+    for d, y in zip(tr_docs, tr_labels):
+        idx, cnt = np.unique(np.asarray(d), return_counts=True)
+        fr = frozenset(y) if hasattr(y, "__iter__") else frozenset({int(y)})
+        gdocs.append(GatedBOWDocument(indices=idx.astype(np.int32),
+                                      counts=cnt.astype(float),
+                                      length=int(cnt.sum()), frontier=fr))
+    ds = {"train_docs": tr_docs, "train_labels": tr_labels,
+          "anchor_scope": "frontier"}
+    planted, Vm = {0: pa, 1: pb}, {0: V_A, 1: V_B}
+
+    def _post_em(lam_seed, fit_seed):
+        m = GatedOnlineLDA(lay, vocab_size=V, domains=[V_A, V_B],
+                           random_seed=fit_seed)
+        gp = m.initialize_global(None)
+        gp["lambda"] = {md: np.array(lam_seed[md], dtype=np.float64)
+                        for md in (0, 1)}
+        for _ in range(50):
+            gp = m.update_global(gp, m.local_update(gdocs, gp), learning_rate=1.0)
+        out = {}
+        for md in (0, 1):
+            beta = gp["lambda"][md] / gp["lambda"][md].sum(axis=1, keepdims=True)
+            for u in lay.nodes:
+                sup = np.where(planted[md][slot[u]] > 1e-3)[0]
+                out[(md, u)] = float(beta[lay.block[u]][:, sup].sum(axis=1).max())
+        return out
+
+    dense = multidomain_spectral_lambda(ds, lay, [V_A, V_B], anchor_scope="frontier")
+    rdd = spark.sparkContext.parallelize(gdocs, 4)
+    scal_joint = scalable_block_aligned_lambda(rdd, lay, V, anchor_scope="frontier",
+                                              min_doc_freq=5, seed=0)
+    scal_blocks = split_domains(scal_joint, bounds)
+    scal = {md: (scal_blocks[md] + 1e-9) * 200.0 for md in (0, 1)}
+
+    TOL = 0.15                 # see spread assertion below
+    spreads = []
+    for fit_seed in (0, 1, 2):
+        d_rec, s_rec = _post_em(dense, fit_seed), _post_em(scal, fit_seed)
+        for key in d_rec:
+            spreads.append(s_rec[key] - d_rec[key])
+            assert s_rec[key] > d_rec[key] - TOL, (fit_seed, key, d_rec[key], s_rec[key])
+        # neither seed may leave a node at the dead-topic floor
+        for md in (0, 1):
+            unif = None
+            for u in lay.nodes:
+                sup = np.where(planted[md][slot[u]] > 1e-3)[0]
+                unif = len(sup) / Vm[md]
+                assert s_rec[(md, u)] > 1.5 * unif, (fit_seed, md, u, s_rec[(md, u)], unif)
+    # TOL must exceed the observed spread, or the gate is a coin flip.
+    assert TOL > float(np.std(spreads)) * 2.0, (TOL, float(np.std(spreads)))

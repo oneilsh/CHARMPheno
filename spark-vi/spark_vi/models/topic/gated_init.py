@@ -151,8 +151,10 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
     from per-domain sizes. Malformed bounds raise (`domains.validate_domain_bounds`).
 
     NOTE: only this DENSE path takes `domain_bounds` — the distributed twin
-    `scalable_block_aligned_lambda` does not. See the arc design's SP3 stub for that
-    explicit blocker and its "absolute-df floor may be structurally immune" hypothesis."""
+    `scalable_block_aligned_lambda` does not, and SETTLED (not merely hypothesized) not
+    to need it: see `scalable_block_aligned_lambda`'s docstring and
+    `test_scalable_init_matches_dense_per_domain_floor_seed`
+    (spark-vi/tests/test_gated_lda.py) for the measured cross-seed comparison."""
     _validate_anchor_scope(anchor_scope)
     if not (isinstance(data_summary, dict)
             and "train_docs" in data_summary and "train_labels" in data_summary):
@@ -333,7 +335,24 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
     docs; "frontier" trains node u only from docs where u is the most-specific
     attested node (u in gd.groups := the frontier itself) and background only from
     empty-frontier docs — so anchor selection cannot let background or a parent
-    steal a descendant's defining word (see `_anchor_node_set`)."""
+    steal a descendant's defining word (see `_anchor_node_set`).
+
+    UNLIKE `spectral_block_aligned_lambda`, this function takes NO `domain_bounds`
+    and carries no per-domain candidate floor — and, measured, it does not need
+    one. `find_anchors_projected`'s candidate gate is an ABSOLUTE per-word
+    document-frequency floor (`df_w >= min_doc_freq`, ADR 0032, adopted precisely
+    because the dense function's MEAN-RELATIVE marginal floor over-excludes
+    rare-but-pure words under the sketch), not a pooled-mean-relative one — so
+    there is no pooled mean for a denser domain to dominate and no floor to add.
+    `test_scalable_init_matches_dense_per_domain_floor_seed`
+    (spark-vi/tests/test_gated_lda.py) measures this directly: on the same
+    b_only-node two-domain plant that motivates the dense per-domain floor
+    (insight 0066), post-EM per-domain recovery from this function's seed matched
+    or beat the dense function's seed WITH `domain_bounds` across 3 fit seeds x 2
+    domains x 3 nodes, well inside a tolerance set from the observed seed-to-seed
+    spread — i.e. the arc's pre-registered SP3 blocker 1 is closed: the scalable
+    path needed no floor analogue because its floor rule was never the kind that
+    could be dominated in the first place."""
     from pyspark import StorageLevel
     from spark_vi.models.topic.spectral_init_scalable import (
         projected_cooccurrence_rdd, find_anchors_projected,
