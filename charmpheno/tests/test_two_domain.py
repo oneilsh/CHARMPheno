@@ -73,6 +73,12 @@ def test_assemble_two_domain_bundle_shape_and_per_domain_strip(spark):
         cond_rows.append((pid, node, "dz", dt.date(2015, 1, 1)))
         cond_rows.append((pid, 999, "dz", dt.date(2015, 2, 1)))    # rides-along non-node
         drug_rows.append((pid, 900 + (pid % 3), "dz", dt.date(2015, 1, 5)))
+        # SYNTHETIC (not realistic OMOP -- condition and drug concept-ids are
+        # disjoint namespaces): emit the node-marker concept-id 200 as a DRUG
+        # token too, so 200 lands in BOTH vocab_map_a AND vocab_map_b. This is
+        # the only way to test that the strip LOGIC is symmetric across domains
+        # (a hardcode-to-A strip would leave 200 in features_b).
+        drug_rows.append((pid, 200, "dz", dt.date(2015, 1, 6)))
     for pid in range(100, 115):                 # background
         cond_rows.append((pid, 888, "bg", dt.date(2016, 1, 1)))
         drug_rows.append((pid, 950, "bg", dt.date(2016, 1, 5)))
@@ -98,5 +104,13 @@ def test_assemble_two_domain_bundle_shape_and_per_domain_strip(spark):
     assert a200 is not None
     for r in bundle.train_df.collect() + bundle.test_df.collect():
         assert a200 not in set(r["features_a"].indices)     # stripped from conditions
+    # per-domain-ness: 200 is ALSO a drug token here (synthetic), so it lands in
+    # vocab_map_b; a symmetric per-domain strip zeroes it in features_b too, while
+    # a strip hardcoded to features_a would leave it. This pins the load-bearing
+    # property (the strip is per-domain, not hardcoded to A).
+    b200 = bundle.vocab_map_b.get(200)
+    assert b200 is not None
+    for r in bundle.train_df.collect() + bundle.test_df.collect():
+        assert b200 not in set(r["features_b"].indices)     # stripped from drugs too
     assert any(r["features_b"].numNonzeros() > 0
-               for r in bundle.train_df.collect())          # drugs intact
+               for r in bundle.train_df.collect())          # other drugs intact
