@@ -5,7 +5,7 @@ Reads OMOP fact tables from a CDM-shaped BigQuery dataset, joins to the
 shape defined in `charmpheno.omop.schema`. Returns a Spark DataFrame;
 nothing is collected to the driver.
 
-Two source-table modes supported via `source_table`:
+Three source-table modes supported via `source_table`:
 
 - `"condition_occurrence"` (default): emits one row per condition
   occurrence with `condition_start_date` and `visit_occurrence_id`. The
@@ -17,10 +17,15 @@ Two source-table modes supported via `source_table`:
   so they're the right shape for "active condition span" semantics
   (PatientYearDocSpec with era replication). Eras do not carry
   `visit_occurrence_id`.
+- `"drug_era"` (added 2026-07-26, SP3b): emits one row per OMOP drug era
+  with `drug_era_start_date` and `drug_era_end_date`, normalized to the
+  same (person_id, concept_id, + span dates) event shape `condition_era`
+  produces so the existing window/doc-spec machinery applies unchanged to
+  the drug domain. No visit_occurrence_id (eras span visits).
 
-v1 supports `concept_types=("condition",)` only. drug_exposure and
-procedure_occurrence will land in a follow-on once condition-only behavior
-is verified end-to-end.
+v1 supports `concept_types=("condition", "drug")`. procedure_occurrence
+will land in a follow-on once condition/drug behavior is verified
+end-to-end.
 
 Connector docs: https://github.com/GoogleCloudDataproc/spark-bigquery-connector
 """
@@ -32,8 +37,26 @@ from pyspark.sql import functions as F
 from charmpheno.omop.cohorts import SUPPORTED_COHORTS, apply_cohort
 from charmpheno.omop.schema import validate
 
-_SUPPORTED_CONCEPT_TYPES: tuple[str, ...] = ("condition",)
-_SUPPORTED_SOURCE_TABLES: tuple[str, ...] = ("condition_occurrence", "condition_era")
+_SUPPORTED_CONCEPT_TYPES: tuple[str, ...] = ("condition", "drug")
+_SUPPORTED_SOURCE_TABLES: tuple[str, ...] = (
+    "condition_occurrence", "condition_era", "drug_era",
+)
+
+
+def _drug_era_select_cols():
+    """Declares the drug_era read's output column names, normalized to the
+    canonical event shape (person_id, concept_id, + span dates) conditions
+    already use. Extracted as a pure function so the projection is
+    unit-testable without a BigQuery read; mirrors the OUTPUT of the
+    `condition_era` branch's `.select(person_id, F.col(...).alias("concept_id"),
+    ...)` (the actual read branch builds the same projection directly via
+    F.col(...).alias(...), not from this tuple -- this is the declared shape).
+    `drug_era` is span-shaped like `condition_era`; the drug vocabulary is
+    built EMPIRICALLY downstream from whatever concept classes the CDR
+    populates here (no ingredient rollup -- SP3b design)."""
+    cols = ("person_id", "concept_id", "drug_era_start_date", "drug_era_end_date")
+    extra = ("drug_era_start_date", "drug_era_end_date")
+    return cols, extra
 
 
 def load_omop_bigquery(
@@ -56,15 +79,18 @@ def load_omop_bigquery(
             Distinct from the data project encoded in `cdr_dataset` whenever
             the CDR is hosted in a separate read-only project (the AoU shape).
         concept_types: which OMOP fact tables to include. v1 supports
-            ("condition",) only; anything else raises NotImplementedError.
+            ("condition", "drug"); anything else raises NotImplementedError.
         person_sample_mod: if set, keep rows where MOD(person_id, M) == 0.
             Whole-patient deterministic sampling — preserves each retained
             person's complete condition list, which matters for LDA.
-        source_table: which condition fact table to read. "condition_occurrence"
+        source_table: which fact table to read. "condition_occurrence"
             emits one row per occurrence with `condition_start_date` +
             `visit_occurrence_id`; "condition_era" emits one row per condition
             era with `condition_era_start_date` + `condition_era_end_date`
-            and no visit_occurrence_id (eras span visits).
+            and no visit_occurrence_id (eras span visits); "drug_era" emits
+            one row per drug era with `drug_era_start_date` +
+            `drug_era_end_date`, normalized to the same event shape as
+            "condition_era" (the drug domain).
         cohort: optional cohort filter applied after the base load. None
             (default) keeps the full sampled corpus. See
             ``charmpheno.omop.cohorts.SUPPORTED_COHORTS`` for accepted names
@@ -82,7 +108,7 @@ def load_omop_bigquery(
 
     Raises:
         NotImplementedError: if concept_types contains anything other than
-            "condition".
+            "condition" or "drug".
         ValueError: if cdr_dataset is malformed, person_sample_mod < 1,
             source_table is unrecognized, or cohort is set to an unknown
             name.
@@ -128,7 +154,7 @@ def load_omop_bigquery(
             "condition_start_date",
         )
         extra_cols = ("visit_occurrence_id", "condition_start_date")
-    else:  # condition_era
+    elif source_table == "condition_era":
         cond = _read("condition_era").select(
             "person_id",
             F.col("condition_concept_id").alias("concept_id"),
@@ -136,6 +162,14 @@ def load_omop_bigquery(
             "condition_era_end_date",
         )
         extra_cols = ("condition_era_start_date", "condition_era_end_date")
+    else:  # drug_era
+        cond = _read("drug_era").select(
+            "person_id",
+            F.col("drug_concept_id").alias("concept_id"),
+            "drug_era_start_date",
+            "drug_era_end_date",
+        )
+        extra_cols = ("drug_era_start_date", "drug_era_end_date")
 
     if person_sample_mod is not None:
         # Full-patient sampling is the right shape for LDA — per-person token

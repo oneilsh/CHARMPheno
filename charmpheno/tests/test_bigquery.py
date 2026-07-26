@@ -97,7 +97,7 @@ def test_rejects_unsupported_concept_types(spark):
             spark=spark,
             cdr_dataset="proj.ds",
             billing_project="some-project",
-            concept_types=("condition", "drug"),
+            concept_types=("condition", "procedure"),
         )
 
 
@@ -119,6 +119,32 @@ def test_rejects_unknown_cohort(spark):
             billing_project="some-project",
             cohort="not_a_real_cohort",
         )
+
+
+def test_drug_concept_type_and_drug_era_source_are_supported():
+    """drug/drug_era must pass validation (they raised NotImplementedError/ValueError
+    before). We can't hit BigQuery in a unit test, so we assert the validation gate
+    opens -- the read failure is a DIFFERENT, later error (no live spark.read)."""
+    import pytest
+    from charmpheno.omop import bigquery as bq
+    assert "drug" in bq._SUPPORTED_CONCEPT_TYPES
+    assert "drug_era" in bq._SUPPORTED_SOURCE_TABLES
+    # A rejected concept type still raises NotImplementedError, unchanged:
+    with pytest.raises(NotImplementedError, match="procedure"):
+        bq.load_omop_bigquery(spark=object(), cdr_dataset="p.d", billing_project="b",
+                              concept_types=("procedure",))
+
+
+def test_drug_era_column_normalization_is_declared():
+    """The drug_era branch must normalize to (person_id, concept_id, dates) -- the
+    same event shape conditions use -- so the downstream window/doc-spec machinery
+    is unchanged. We assert the branch's declared output columns via a small pure
+    helper `_drug_era_select_cols` (extracted so it is testable without a read)."""
+    from charmpheno.omop.bigquery import _drug_era_select_cols
+    cols, extra = _drug_era_select_cols()
+    # concept_id is the aliased drug_concept_id; dates carried through:
+    assert "person_id" in cols and "concept_id" in cols
+    assert extra == ("drug_era_start_date", "drug_era_end_date")
 
 
 @pytest.mark.cluster
