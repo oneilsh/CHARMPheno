@@ -66,6 +66,15 @@ The extension point is already documented there: `_SUPPORTED_CONCEPT_TYPES = ("c
 - A drug DAG. Not needed — see the gate/domain orthogonality above.
 - Mid-fit checkpoint/resume (SP3a defers it). **If the planned fit sizes make Dataproc preemption likely, this becomes a real prerequisite** rather than a deferral, because a preempted multi-domain fit currently loses all progress.
 
+## Updates from SP3a (folded in 2026-07-26, after SP3a completed)
+
+SP3a is done and its findings change two things here:
+
+- **The scalable spectral init is seed-fragile — the driver must pin AND surface the projection seed (insight 0070).** At production V a concatenated multi-domain vocabulary routes through `scalable_block_aligned_lambda` (above `spectralMaxVocab`), whose random-projection draw is genuinely fragile: on the synthetic plant, an exclusive node's per-domain signal reached 0.0 at *initialization* on several draws, and only the gated EM's robustness recovered it. The shim fits with `seed=(seed or 0)`, so an unset seed silently uses projection seed 0 — a fixed, unvalidated draw. On real data with a harder identifiability structure, EM may not fully rescue a bad draw. Therefore the driver **must**: (1) set the spectral/projection seed explicitly from config (never rely on the `or 0` default), and (2) surface an init-quality read after the fit — at minimum, flag any node whose fitted per-domain topic mass never rose off the prior (a "dead node" check). This is the concrete, pre-registered sanity read the driver smoke check asserts, not "it ran".
+- **The `featuresCols` contract is now real and exact.** SP3a's shim takes an ordered `featuresCols` (one sparse vector per domain over its own vocabulary), derives `domainBounds` from the first row and validates every row against it, and forwards `omega` / `etaPerDomain` only when set. Assembly must emit exactly that shape; a per-domain vector whose declared size disagrees with the fitted layout raises (by design), so the assembly's per-domain `vocab_size` is load-bearing and must be stable across the corpus.
+
+**Realism discipline (this arc's recurring lesson).** Synthetic validation here has repeatedly been misled by delicate plant/metric interactions (insights 0067, 0068, 0070). SP3b is the first real-data step, so its acceptance must not lean on a single green number: the assembly unit tests assert *structural* correctness (shapes, id ranges, alignment, leakage) rather than a recovery threshold, and the cluster smoke check asserts concrete sanity reads (no dead node topics; per-domain vocab sizes within a plausible band; the two-column contract holds end to end) — a fit that "ran" is not a fit that is trustworthy.
+
 ## Risks
 
 - **This layer's input contract is the driver's contract**, so a change to the per-domain vocabulary decisions after the driver exists means driver rework. The user accepted this coupling when choosing to stand the driver up in SP3 rather than SP4.
