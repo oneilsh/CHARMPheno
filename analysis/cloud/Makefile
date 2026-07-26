@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -12,6 +12,7 @@ CLUSTER_OVERLAY_DIR := $(REPO_ROOT)/analysis/cloud/dist/overlay-build
 SCRIPT          := smoke_lda_cloud.py
 BQ_SCRIPT       := bq_smoke_cloud.py
 LDA_BQ_SCRIPT   := lda_bigquery_cloud.py
+MULTIDOMAIN_SCRIPT := multidomain_cloud.py
 HDP_BQ_SCRIPT   := hdp_bigquery_cloud.py
 EVAL_SCRIPT     := eval_coherence_cloud.py
 BUNDLE_SCRIPT   := build_dashboard_cloud.py
@@ -22,6 +23,7 @@ WORKSPACE_ENV   := .workspace_env
 # Args forwarded to lda-bq-smoke / hdp-bq-smoke / eval-bq-coherence / inspect
 # (override on command line).
 LDA_BQ_ARGS     ?=
+MULTIDOMAIN_ARGS ?=
 HDP_BQ_ARGS     ?=
 EVAL_ARGS       ?=
 BUNDLE_ARGS     ?=
@@ -80,6 +82,8 @@ help:
 	@echo "  make lda-bq-smoke    - End-to-end: BQ -> CountVectorizer -> LDA shim"
 	@echo "                         Override args via LDA_BQ_ARGS='--K 10 --person-mod 5000'"
 	@echo "                         Tune SVI step: LDA_BQ_ARGS='--tau0 64 --kappa 0.7'"
+	@echo "  make multidomain-bq-smoke - End-to-end multi-domain (condition+drug) gated fit"
+	@echo "                         MULTIDOMAIN_ARGS must set --cdr --billing --seed --out-dir"
 	@echo "                         (defaults τ₀=1024 κ=0.51 give ρ_0 ≈ 0.029 — slow on small corpora)"
 	@echo "                         Checkpoint/resume: SAVE_DIR=/mnt/gcs/\$$BUCKET/runs/<id>/"
 	@echo "                                            SAVE_INTERVAL=10  RESUME_FROM=<prev-save-dir>"
@@ -238,6 +242,25 @@ lda-bq-smoke: zip $(WORKSPACE_ENV)
 	    --resume-from "$(RESUME_FROM)" \
 	    --corpus-cache-uri "$(CORPUS_CACHE_URI)" \
 	    $(LDA_BQ_ARGS)
+
+# End-to-end multi-domain (condition+drug) gated fit. --seed and --out-dir are
+# REQUIRED by the driver (insight 0070: the spectral seed is a deliberate,
+# recorded choice); pass them via MULTIDOMAIN_ARGS, e.g.
+#   make multidomain-bq-smoke MULTIDOMAIN_ARGS="--cdr <ds> --billing <proj> \
+#       --seed 0 --out-dir /mnt/gcs/<bucket>/runs/md-001/ --disease diabetes"
+multidomain-bq-smoke: zip $(WORKSPACE_ENV)
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 4g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
+	    $(MULTIDOMAIN_SCRIPT) \
+	    $(MULTIDOMAIN_ARGS)
 
 hdp-bq-smoke: zip $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
