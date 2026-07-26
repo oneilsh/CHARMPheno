@@ -35,6 +35,15 @@ logger = logging.getLogger(__name__)
 
 ANCHOR_SCOPES = ("closure", "frontier")
 
+# Pseudo-count magnitude of a spectral lambda seed. Anchor recovery (Arora et al.
+# 2013) supplies the topic SHAPE; this is the seed's total mass per topic, not a
+# recovered quantity. It is the single source of truth for every spectral seed
+# path -- the dense single-domain seed, the multi-domain dense seed, the scalable
+# seed, AND the mllib shim's scalable->dict conversion -- so the dense and scalable
+# multi-domain routes cannot drift to different seed strengths (SP3a whole-branch
+# review Minor 1).
+SPECTRAL_LAMBDA_SCALE = 200.0
+
 
 def _validate_anchor_scope(anchor_scope):
     if anchor_scope not in ANCHOR_SCOPES:
@@ -100,7 +109,7 @@ def _anchor_node_set(front, lay, anchor_scope):
     return {int(u) for u in front if u != 0}          # "frontier"
 
 
-def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
+def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = SPECTRAL_LAMBDA_SCALE,
                                   anchor_scope: str = "closure",
                                   topo_order: str = "forward",
                                   domain_bounds=None) -> np.ndarray:
@@ -221,7 +230,7 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
     return beta * float(scale)
 
 
-def multidomain_spectral_lambda(data_summary, lay, domains, *, scale: float = 200.0,
+def multidomain_spectral_lambda(data_summary, lay, domains, *, scale: float = SPECTRAL_LAMBDA_SCALE,
                                 anchor_scope: str = "closure",
                                 topo_order: str = "forward") -> dict:
     """Per-domain dict-lambda spectral seed for the multi-domain gated model.
@@ -288,7 +297,7 @@ class _NodeGroups:
 
 def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                                   seed: int = 0, min_doc_freq: int = 5,
-                                  scale: float = 200.0,
+                                  scale: float = SPECTRAL_LAMBDA_SCALE,
                                   anchor_scope: str = "closure",
                                   topo_order: str = "forward") -> np.ndarray:
     """Distributed random-projection analogue of `spectral_block_aligned_lambda`.

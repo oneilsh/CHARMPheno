@@ -150,15 +150,16 @@ class _GatedLDAParams(HasFeaturesCol, HasLabelCol, HasMaxIter, HasSeed):
                               typeConverter=TypeConverters.toFloat)
 
 
-# Per-domain lambda scale for a SPECTRAL seed, held equal to
-# gated_init.multidomain_spectral_lambda's `scale` default. spectral_init.split_domains
-# returns ROW-STOCHASTIC blocks (it renormalizes each block to sum 1, discarding
-# whatever lambda scale the joint carried), so a block must be scaled back up to
-# lambda magnitude afterwards. Anchor-word recovery (Arora et al. 2013) supplies the
-# topic SHAPE; the scale is the pseudo-count magnitude of the seed, not a recovered
-# quantity — and the dense and scalable multi-domain routes must use the same one or
-# they would hand the engine seeds of different strength.
-_SPECTRAL_LAMBDA_SCALE = 200.0
+# Per-domain lambda scale for a SPECTRAL seed. spectral_init.split_domains returns
+# ROW-STOCHASTIC blocks (it renormalizes each block to sum 1, discarding whatever
+# lambda scale the joint carried), so when the shim converts a scalable joint seed
+# to a per-domain dict it must scale each block back up to lambda magnitude. This is
+# imported (not redefined) from gated_init so the shim's scalable->dict conversion
+# and gated_init's dense/multidomain seeds cannot drift to different strengths --
+# they are the SAME constant (SP3a whole-branch review Minor 1).
+from spark_vi.models.topic.gated_init import (          # noqa: E402
+    SPECTRAL_LAMBDA_SCALE as _SPECTRAL_LAMBDA_SCALE,
+)
 
 
 def _concat_domain_features(vectors, sizes):

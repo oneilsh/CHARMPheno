@@ -1677,7 +1677,8 @@ def test_scalable_init_recovers_every_identifying_signal(spark):
     import numpy as np
     from tests._stm_synth import two_domain_dag_corpus
     from spark_vi.models.topic.dag_placement import DagLayout
-    from spark_vi.models.topic.gated_init import scalable_block_aligned_lambda
+    from spark_vi.models.topic.gated_init import (
+        scalable_block_aligned_lambda, SPECTRAL_LAMBDA_SCALE)
     from spark_vi.models.topic.gated_lda import GatedOnlineLDA
     from spark_vi.models.topic.spectral_init import split_domains
     from spark_vi.models.topic.types import GatedBOWDocument
@@ -1732,7 +1733,7 @@ def test_scalable_init_recovers_every_identifying_signal(spark):
         rdd = spark.sparkContext.parallelize(gdocs, 4)
         scal_joint = scalable_block_aligned_lambda(
             rdd, lay, V, anchor_scope="frontier", min_doc_freq=5, seed=fit_seed)
-        scal = {md: (b + 1e-9) * 200.0
+        scal = {md: (b + 1e-9) * SPECTRAL_LAMBDA_SCALE
                 for md, b in enumerate(split_domains(scal_joint, bounds))}
         rec = _post_em(scal, fit_seed)
         for (md, u) in ident:
