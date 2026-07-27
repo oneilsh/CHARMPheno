@@ -84,6 +84,88 @@ def dead_node_report(lam_dict, lay, *, min_peak_ratio=5.0):
     return sorted(dead)
 
 
+def _topic_block_labels(lay, node_names, n_bg):
+    """PURE: length-K list of per-topic block labels. Background topics [0, n_bg)
+    label 'bg'; each DAG node u's topic block (lay.block[u]) labels with the node's
+    name (node_names[u], engine-id keyed), falling back to the id.
+
+    node_names is the engine-id -> display-name map main() builds by remapping
+    concept-id names through int2cid (the same {i: name_by_id[c]} bridge the
+    dead-node labeling uses)."""
+    labels = ["bg"] * lay.K
+    for u in lay.nodes:
+        nm = node_names.get(u, str(u))
+        for k in lay.block[u]:
+            labels[int(k)] = nm
+    return labels
+
+
+def _log_topics(lam_dict, idx2name_by_domain, labels, top_n, *, domain_tags=None):
+    """PURE (Spark-free) final topic dump: for each topic (heaviest total Sigma-lambda
+    first), print its block label and its top-N heaviest tokens in EACH domain,
+    mapped to concept names.
+
+    lam_dict: fitted per-domain dict lambda {m: (K, V_m)}.
+    idx2name_by_domain: {m: {token_index: display_name}} — the per-domain vocab
+        resolved to concept names (main() builds it from vocab_map_m + a BigQuery
+        concept-name read).
+    labels: length-K per-topic block labels (_topic_block_labels), or None.
+    domain_tags: optional {m: short_tag} (e.g. {0: 'cond', 1: 'drug'}); defaults
+        to 'm{m}'.
+
+    Returns the topic ids in printed (heaviest-first) order — for tests. A topic
+    still at the prior in a domain simply shows that domain's flattest tokens; the
+    ordering is by summed mass across domains so the data-rich topics surface."""
+    from spark_vi.models.topic.diagnostics import topic_word_summary
+    summ = {m: topic_word_summary(np.asarray(lam, dtype=float), top_n)
+            for m, lam in lam_dict.items()}
+    K = len(labels) if labels is not None else next(iter(lam_dict.values())).shape[0]
+    total = np.zeros(K, dtype=float)
+    for s in summ.values():
+        total += np.asarray(s["row_sums"], dtype=float)
+    order = [int(k) for k in np.argsort(total)[::-1]]
+    tags = domain_tags or {}
+    print("[driver]   === final topics (top terms per domain, heaviest first) ===",
+          flush=True)
+    for ki in order:
+        blk = f" [{labels[ki]:>18.18}]" if labels is not None else ""
+        print(f"[driver]    topic {ki:>2}{blk}  Sigma-lam(total)={total[ki]:.3g}",
+              flush=True)
+        for m in sorted(lam_dict.keys()):
+            s = summ[m]
+            names = idx2name_by_domain.get(m, {})
+            terms = ", ".join(
+                f"{str(names.get(int(j), j))[:22]}({p:.3f})"
+                for j, p in zip(s["top_indices"][ki], s["top_probs"][ki]))
+            print(f"[driver]        {tags.get(m, f'm{m}'):>4}: {terms}", flush=True)
+    return order
+
+
+def _vocab_concept_names(spark, cdr, billing, vocab_map):
+    """{concept_id: concept_name} for one domain's vocabulary (for the final topic
+    dump). A small filtered read of `concept`, mirroring dag_placement_cloud's
+    identical helper (duplicated rather than shared because sibling drivers are not
+    on the spark-submit --py-files path, so multidomain_cloud cannot import it)."""
+    from pyspark.sql import functions as F
+    cids = [int(c) for c in vocab_map.keys()]
+    if not cids:
+        return {}
+    rows = (spark.read.format("bigquery")
+            .option("table", f"{cdr}.concept")
+            .option("parentProject", billing).load()
+            .select("concept_id", "concept_name")
+            .where(F.col("concept_id").isin(cids))
+            .collect())
+    return {int(r["concept_id"]): r["concept_name"] for r in rows}
+
+
+def _idx_to_name(vocab_map, names_by_cid):
+    """PURE: {token_index: display_name} from a {concept_id: index} vocab map and a
+    {concept_id: name} lookup (name falls back to the concept id as a string)."""
+    return {int(idx): names_by_cid.get(int(cid), str(cid))
+            for cid, idx in vocab_map.items()}
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Multi-domain (condition+drug) gated topic-model fit.")
@@ -143,6 +225,9 @@ def parse_args(argv=None):
     p.add_argument("--min-peak-ratio", type=float, default=5.0,
                    help="dead_node_report threshold: a node's per-domain topic "
                         "row is 'still at prior' if peak/mean < this.")
+    p.add_argument("--top-n-tokens", type=int, default=8,
+                   help="Final topic dump: top-N heaviest tokens to print per "
+                        "topic per domain (0 disables the dump).")
     p.add_argument("--resume-from", default="",
                    help="Unused (GatedLDAModel is not persistable in v1); "
                         "accepted for run_experiment parity.")
@@ -310,6 +395,24 @@ def main(argv=None) -> int:
                 print(f"[driver]   dead-node report: EMPTY (every node "
                       f"concentrated in >=1 domain; init OK)", flush=True)
 
+        # Resolve each domain's vocabulary to concept names ONCE: used both for the
+        # final topic dump and persisted into the manifest so the saved artifact is
+        # self-describing (a later no-refit inspection can map token index ->
+        # concept). Two small filtered `concept` reads (cond + drug vocab ids).
+        with _phase("resolve per-domain vocab names"):
+            names_a_bycid = _vocab_concept_names(
+                spark, args.cdr, args.billing, bundle.vocab_map_a)
+            names_b_bycid = _vocab_concept_names(
+                spark, args.cdr, args.billing, bundle.vocab_map_b)
+            idx2name = {0: _idx_to_name(bundle.vocab_map_a, names_a_bycid),
+                        1: _idx_to_name(bundle.vocab_map_b, names_b_bycid)}
+
+        if args.top_n_tokens > 0:
+            with _phase("final topic dump (top terms per domain)"):
+                labels = _topic_block_labels(lay, names, args.n_bg)
+                _log_topics(lam_dict, idx2name, labels, args.top_n_tokens,
+                            domain_tags={0: "cond", 1: "drug"})
+
         with _phase("save"):
             out = Path(args.out_dir)
             out.mkdir(parents=True, exist_ok=True)
@@ -345,7 +448,15 @@ def main(argv=None) -> int:
                     "holdout_frac": args.holdout_frac,
                     "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
                     "name_by_id": {str(c): n
-                                   for c, n in bundle.name_by_id.items()}},
+                                   for c, n in bundle.name_by_id.items()},
+                    # Per-domain vocabularies + concept names: makes the saved
+                    # artifact self-describing so a later no-refit inspection can
+                    # map a topic's token indices (domain 0 = cond, 1 = drug) to
+                    # concepts. {concept_id: index} + {concept_id: name} per domain.
+                    "vocab_a": {str(c): i for c, i in bundle.vocab_map_a.items()},
+                    "vocab_b": {str(c): i for c, i in bundle.vocab_map_b.items()},
+                    "vocab_names_a": {str(c): n for c, n in names_a_bycid.items()},
+                    "vocab_names_b": {str(c): n for c, n in names_b_bycid.items()}},
             }
             (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
             print(f"[driver]   saved multidomain_gated result to {out}", flush=True)

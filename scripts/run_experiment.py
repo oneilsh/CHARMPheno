@@ -719,6 +719,9 @@ def build_multidomain_args(
         "--anchor-scope", str(effective.get("anchor_scope", "closure")),
         "--spectral-topo-order", str(effective.get("spectral_topo_order", "forward")),
         "--min-peak-ratio", str(effective.get("min_peak_ratio", 5.0)),
+        # Final per-domain topic dump: top-N tokens per topic (reuses the shared
+        # _base.yaml top_n_tokens knob; 0 disables the dump).
+        "--top-n-tokens", str(effective.get("top_n_tokens", 8)),
     ]
     # omega / eta_per_domain: emit ONLY when set (None -> shim scalar default).
     # A frontmatter value may be a comma-string ("1.0,0.5") or a YAML list; both

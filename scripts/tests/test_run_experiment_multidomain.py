@@ -69,6 +69,16 @@ def test_build_multidomain_args_emits_omega_eta_from_list_and_string(monkeypatch
     assert args2[args2.index("--omega") + 1] == "1.0,0.5"
 
 
+def test_build_multidomain_args_emits_top_n_tokens(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    # from _base.yaml (top_n_tokens: 6) via merge; drives the final topic dump.
+    args = mod.build_multidomain_args({**_min_eff(), "top_n_tokens": 6}, "/out")
+    assert args[args.index("--top-n-tokens") + 1] == "6"
+    # default when unset in effective config
+    args2 = mod.build_multidomain_args(_min_eff(), "/out")
+    assert args2[args2.index("--top-n-tokens") + 1] == "8"
+
+
 def test_build_fit_args_routes_multidomain(monkeypatch):
     mod = _run_exp(monkeypatch)
     args = mod.build_fit_args(_min_eff(), "/out")

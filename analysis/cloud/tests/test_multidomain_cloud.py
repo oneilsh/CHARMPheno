@@ -27,6 +27,57 @@ def test_parse_args_parses_omega_and_eta_per_domain_to_float_lists():
     assert b.omega is None and b.eta_per_domain is None
 
 
+def test_parse_args_top_n_tokens_defaults_and_settable():
+    from multidomain_cloud import parse_args
+    base = ["--cdr", "p.d", "--billing", "b", "--out-dir", "/x", "--seed", "0"]
+    assert parse_args(base).top_n_tokens == 8            # default
+    assert parse_args(base + ["--top-n-tokens", "0"]).top_n_tokens == 0  # disable
+
+
+def test_topic_block_labels_bg_then_node_blocks():
+    from multidomain_cloud import _topic_block_labels
+    from spark_vi.models.topic.dag_placement import DagLayout
+    lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)         # K = 2 bg + 2 nodes*1 = 4
+    labels = _topic_block_labels(lay, {1: "diabetes", 2: "eds"}, n_bg=2)
+    assert labels[:2] == ["bg", "bg"]                    # background block
+    # each node's topic block carries the node name; id fallback when unnamed.
+    node_topic = {u: list(lay.block[u]) for u in lay.nodes}
+    for k in node_topic[1]:
+        assert labels[k] == "diabetes"
+    for k in node_topic[2]:
+        assert labels[k] == "eds"
+
+
+def test_idx_to_name_inverts_vocab_and_falls_back_to_cid():
+    from multidomain_cloud import _idx_to_name
+    vocab = {201820: 0, 4048098: 1, 999: 2}              # {concept_id: index}
+    names = {201820: "Diabetes", 4048098: "Neuropathy"}  # 999 has no name
+    out = _idx_to_name(vocab, names)
+    assert out == {0: "Diabetes", 1: "Neuropathy", 2: "999"}
+
+
+def test_log_topics_orders_by_total_mass_and_maps_names(capsys):
+    """_log_topics prints heaviest-first across both domains and resolves token
+    indices to concept names. Topic 1 is the data-rich topic (big mass in domain
+    0), so it must print before topic 0."""
+    import numpy as np
+    from multidomain_cloud import _log_topics
+    K, Va, Vb = 2, 4, 3
+    lam0 = np.full((K, Va), 0.01)
+    lam0[1, 0] = 500.0                                   # topic 1 heavy in domain 0
+    lam1 = np.full((K, Vb), 0.01)
+    lam1[0, 2] = 5.0                                     # topic 0 mild in domain 1
+    idx2name = {0: {0: "Metformin-cond", 1: "b", 2: "c", 3: "d"},
+                1: {0: "e", 1: "f", 2: "Insulin-drug"}}
+    order = _log_topics({0: lam0, 1: lam1}, idx2name, ["bg", "diabetes"], top_n=2,
+                        domain_tags={0: "cond", 1: "drug"})
+    assert order == [1, 0]                               # heaviest (topic 1) first
+    out = capsys.readouterr().out
+    assert "Metformin-cond" in out and "Insulin-drug" in out
+    assert "cond:" in out and "drug:" in out
+    assert "[          diabetes]" in out or "diabetes" in out
+
+
 def test_dead_node_report_flags_a_node_stuck_at_the_prior():
     """A node whose per-domain topic never rose off the ~uniform prior is dead;
     a node with concentrated mass is not."""
