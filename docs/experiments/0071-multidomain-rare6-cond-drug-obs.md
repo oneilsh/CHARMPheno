@@ -35,6 +35,10 @@ strip_mode: both
 max_iter: 200
 cavi_max_iter: 100
 cavi_tol: 1.0e-3
+# Full-batch baseline: pin mini_batch_fraction: 0.0 so this experiment does NOT
+# inherit _base.yaml's 0.1 (which would silently flip it to mini-batch SVI now
+# that the multidomain driver wires the knob). exp 0072 is the mini-batch A/B.
+mini_batch_fraction: 0.0
 min_peak_ratio: 5.0
 top_n_tokens: 8
 seed: 42

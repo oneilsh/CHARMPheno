@@ -262,6 +262,18 @@ def parse_args(argv=None):
     p.add_argument("--max-iter", type=int, default=100)
     p.add_argument("--cavi-max-iter", type=int, default=100)
     p.add_argument("--cavi-tol", type=float, default=1e-3)
+    # SVI optimizer schedule (mirrors dag_placement_cloud). mini_batch_fraction
+    # 0.0 = full-batch (every iter sees the whole corpus). A value in (0, 1]
+    # switches to mini-batch stochastic VI (Hoffman et al. 2013), which is what
+    # makes the decaying Robbins-Monro step legitimate; then the per-iter ELBO is
+    # a noisy estimate so the relative-ELBO early stop is unreliable and max_iter
+    # is the real budget (size it for enough epochs: max_iter * fraction).
+    p.add_argument("--mini-batch-fraction", type=float, default=0.0,
+                   help="SVI mini-batch fraction in (0,1]; 0 = full-batch.")
+    p.add_argument("--learning-rate-tau0", type=float, default=1.0,
+                   help="SVI slow-start (tau0); 10 tames noisy early mini-batches.")
+    p.add_argument("--learning-rate-kappa", type=float, default=0.7,
+                   help="SVI forgetting rate (kappa); 0.7 = standard text decay.")
     p.add_argument("--init", choices=["random", "spectral"], default="spectral")
     p.add_argument("--spectral-max-vocab", type=int, default=8000)
     p.add_argument("--spectral-method", choices=["auto", "dense", "scalable"],
@@ -451,7 +463,10 @@ def main(argv=None) -> int:
                 spectralMethod=args.spectral_method,
                 anchorScope=args.anchor_scope,
                 spectralTopoOrder=args.spectral_topo_order,
-                omega=args.omega, etaPerDomain=args.eta_per_domain)
+                omega=args.omega, etaPerDomain=args.eta_per_domain,
+                miniBatchFraction=args.mini_batch_fraction,
+                learningRateTau0=args.learning_rate_tau0,
+                learningRateKappa=args.learning_rate_kappa)
             model = est.fit(bundle.train_df)
 
         with _phase("dead-node init-quality read"):
@@ -502,6 +517,9 @@ def main(argv=None) -> int:
                 "lookback_days": args.lookback_days,
                 "label_window_days": args.label_window_days,
                 "omega": args.omega, "eta_per_domain": args.eta_per_domain,
+                "mini_batch_fraction": args.mini_batch_fraction,
+                "learning_rate_tau0": args.learning_rate_tau0,
+                "learning_rate_kappa": args.learning_rate_kappa,
                 "spectral_method": args.spectral_method,
                 "anchor_scope": args.anchor_scope,
                 "spectral_topo_order": args.spectral_topo_order,

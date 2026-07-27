@@ -103,6 +103,19 @@ def test_parse_args_domains_defaults_to_drug_era_and_splits_a_list():
     assert a.domains == ["drug_era", "observation"]
 
 
+def test_parse_args_svi_schedule_defaults_full_batch_and_settable():
+    from multidomain_cloud import parse_args
+    base = ["--cdr", "p.d", "--billing", "b", "--out-dir", "/x", "--seed", "0"]
+    a = parse_args(base)
+    assert a.mini_batch_fraction == 0.0         # default = full-batch
+    assert a.learning_rate_tau0 == 1.0 and a.learning_rate_kappa == 0.7
+    b = parse_args(base + ["--mini-batch-fraction", "0.1",
+                           "--learning-rate-tau0", "10.0",
+                           "--learning-rate-kappa", "0.7"])
+    assert b.mini_batch_fraction == 0.1
+    assert b.learning_rate_tau0 == 10.0 and b.learning_rate_kappa == 0.7
+
+
 def test_parse_args_window_mode_and_lookback_knobs():
     from multidomain_cloud import parse_args
     base = ["--cdr", "p.d", "--billing", "b", "--out-dir", "/x", "--seed", "0"]

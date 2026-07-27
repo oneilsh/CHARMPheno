@@ -79,6 +79,20 @@ def test_build_multidomain_args_emits_top_n_tokens(monkeypatch):
     assert args2[args2.index("--top-n-tokens") + 1] == "8"
 
 
+def test_build_multidomain_args_emits_svi_schedule(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    # mini-batch experiment (exp 0072 shape)
+    eff = {**_min_eff(), "mini_batch_fraction": 0.1,
+           "learning_rate_tau0": 10.0, "learning_rate_kappa": 0.7}
+    args = mod.build_multidomain_args(eff, "/out")
+    assert args[args.index("--mini-batch-fraction") + 1] == "0.1"
+    assert args[args.index("--learning-rate-tau0") + 1] == "10.0"
+    assert args[args.index("--learning-rate-kappa") + 1] == "0.7"
+    # pinned full-batch (exp 0070/0071 shape) survives the round trip
+    pinned = mod.build_multidomain_args({**_min_eff(), "mini_batch_fraction": 0.0}, "/out")
+    assert pinned[pinned.index("--mini-batch-fraction") + 1] == "0.0"
+
+
 def test_build_fit_args_routes_multidomain(monkeypatch):
     mod = _run_exp(monkeypatch)
     args = mod.build_fit_args(_min_eff(), "/out")
