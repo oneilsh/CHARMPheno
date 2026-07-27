@@ -111,6 +111,43 @@ def test_multidomain_strip_removes_marker_from_a_noncondition_domain(spark):
                for r in bundle.train_df.collect())       # other obs tokens intact
 
 
+def test_lookback_feature_frames_splits_all_domains_against_one_index(spark):
+    """One shared (condition-derived) index splits every domain into a pre-index
+    FEATURE frame; the condition (domain 0) forward window is the LABEL frame. A
+    post-index drug/observation event never enters any feature frame."""
+    from charmpheno.omop.multi_domain import lookback_feature_frames
+    from pyspark.sql import Row
+    # index: person 1 indexed 2020-06-01.
+    index_df = spark.createDataFrame(
+        [Row(person_id=1, index_date=dt.date(2020, 6, 1), source_cohort="dz")])
+    cond = spark.createDataFrame([
+        Row(person_id=1, concept_id=201, condition_era_start_date=dt.date(2020, 1, 1)),  # pre  -> feature
+        Row(person_id=1, concept_id=202, condition_era_start_date=dt.date(2020, 7, 1)),  # post -> label
+    ])
+    drug = spark.createDataFrame([
+        Row(person_id=1, concept_id=900, drug_era_start_date=dt.date(2020, 2, 1)),       # pre  -> feature
+        Row(person_id=1, concept_id=901, drug_era_start_date=dt.date(2020, 8, 1)),       # post -> dropped
+    ])
+    obs = spark.createDataFrame([
+        Row(person_id=1, concept_id=700, observation_date=dt.date(2020, 3, 1)),          # pre  -> feature
+    ])
+    feats, cond_label = lookback_feature_frames(
+        [cond, drug, obs], index_df,
+        ["condition_era_start_date", "drug_era_start_date", "observation_date"],
+        lookback_days=365, label_window_days=365)
+    assert len(feats) == 3
+    cond_feat_cids = {r["concept_id"] for r in feats[0].collect()}
+    drug_feat_cids = {r["concept_id"] for r in feats[1].collect()}
+    obs_feat_cids = {r["concept_id"] for r in feats[2].collect()}
+    label_cids = {r["concept_id"] for r in cond_label.collect()}
+    assert cond_feat_cids == {201}          # pre-index condition only
+    assert drug_feat_cids == {900}          # pre-index drug; post-index 901 dropped
+    assert obs_feat_cids == {700}
+    assert label_cids == {202}              # forward-window condition only
+    # every feature frame carries source_cohort (from the index join)
+    assert "source_cohort" in feats[1].columns
+
+
 def test_multidomain_bundle_fits_through_the_gated_shim_and_round_trips(spark, tmp_path):
     """The SP3c<->SP3a seam: a 3-domain bundle fits via GatedLDAEstimator with
     featuresCols=[features_0, features_1, features_2], yields a per-domain dict

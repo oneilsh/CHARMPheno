@@ -111,6 +111,37 @@ class MultiDomainBundle:
     ledger: dict
 
 
+def lookback_feature_frames(domain_raws, index_df, date_cols, *,
+                            lookback_days, label_window_days):
+    """Split every domain's raw events against ONE shared index into pre-index
+    FEATURE frames, and return the condition (domain 0) forward-window LABEL frame.
+
+    domain_raws[0] MUST be conditions (the label/gate source). For each domain i,
+    `cohorts.lookback_feature_label_events` splits domain_raws[i] on date_cols[i]:
+    the pre-index [index - lookback_days, index) window is kept as that domain's
+    feature frame. Only domain 0's forward [index, index + label_window_days)
+    window is kept as the label frame -- the gate is condition-only, so a
+    drug/observation event never defines a frontier. index_df carries
+    source_cohort, which the join propagates onto every feature/label frame.
+    """
+    from charmpheno.omop.cohorts import lookback_feature_label_events
+
+    if len(domain_raws) != len(date_cols):
+        raise ValueError(
+            f"domain_raws ({len(domain_raws)}) and date_cols ({len(date_cols)}) "
+            f"must have the same length")
+
+    feature_frames, cond_label = [], None
+    for i, (raw, dc) in enumerate(zip(domain_raws, date_cols)):
+        feat, lab = lookback_feature_label_events(
+            raw, index_df, date_col=dc,
+            lookback_days=lookback_days, label_window_days=label_window_days)
+        feature_frames.append(feat)
+        if i == 0:
+            cond_label = lab
+    return feature_frames, cond_label
+
+
 def _frozen_vocab_spec(spec: DomainVocabSpec, vocab_map: dict) -> DomainVocabSpec:
     """A DomainVocabSpec that pins `vocab_map` as a frozen concept-id list (index
     order), so a TEST BOW is bag-of-worded against the TRAIN-fit vocabulary. The
