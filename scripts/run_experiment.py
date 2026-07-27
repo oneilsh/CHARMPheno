@@ -722,6 +722,13 @@ def build_multidomain_args(
         # Final per-domain topic dump: top-N tokens per topic (reuses the shared
         # _base.yaml top_n_tokens knob; 0 disables the dump).
         "--top-n-tokens", str(effective.get("top_n_tokens", 8)),
+        "--domains", str(effective.get("domains", "drug_era")),
+        "--window-mode", str(effective.get("window_mode", "forward")),
+        "--lookback-days", str(effective.get("lookback_days", 365)),
+        "--label-window-days", str(effective.get("label_window_days", 365)),
+        "--obs-vocab-size", str(effective.get("obs_vocab_size", 1500)),
+        "--obs-min-df", str(effective.get("obs_min_df", 20)),
+        "--obs-min-patient-count", str(effective.get("obs_min_patient_count", 20)),
     ]
     # omega / eta_per_domain: emit ONLY when set (None -> shim scalar default).
     # A frontmatter value may be a comma-string ("1.0,0.5") or a YAML list; both

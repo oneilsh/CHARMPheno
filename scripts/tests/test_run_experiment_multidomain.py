@@ -85,3 +85,23 @@ def test_build_fit_args_routes_multidomain(monkeypatch):
     # routed to build_multidomain_args: has the two-domain drug source flag,
     # which no other builder emits.
     assert "--source-table-drug" in args
+
+
+def test_build_multidomain_args_emits_domains_and_window_mode(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    eff = {**_min_eff(), "domains": "drug_era,observation",
+           "window_mode": "lookback", "lookback_days": 365, "label_window_days": 365,
+           "obs_vocab_size": 1500, "obs_min_df": 20, "obs_min_patient_count": 20}
+    args = mod.build_multidomain_args(eff, "/out")
+    assert args[args.index("--domains") + 1] == "drug_era,observation"
+    assert args[args.index("--window-mode") + 1] == "lookback"
+    assert args[args.index("--lookback-days") + 1] == "365"
+    assert args[args.index("--label-window-days") + 1] == "365"
+    assert args[args.index("--obs-vocab-size") + 1] == "1500"
+
+
+def test_build_multidomain_args_defaults_domains_and_forward(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_multidomain_args(_min_eff(), "/out")
+    assert args[args.index("--domains") + 1] == "drug_era"          # exp-0070 shape
+    assert args[args.index("--window-mode") + 1] == "forward"
