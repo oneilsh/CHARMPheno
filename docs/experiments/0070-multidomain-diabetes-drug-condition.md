@@ -6,6 +6,8 @@ model_class: multidomain
 cohort: population_diabetes
 cohort_def: population_diabetes
 disease: diabetes
+domains: drug_era
+window_mode: forward
 person_mod: 10
 prior_obs_days: 365
 window_days: 365
