@@ -281,7 +281,19 @@ class GatedLDAEstimator(_GatedLDAParams, Estimator):
                          learningRateKappa=0.7, optimizeDocConcentration=False,
                          transformAlphaMode="fitted", transformAlpha=0.0,
                          transformBgWeight=0.5)
-        self.setParams(**self._input_kwargs)
+        # `omega`, `etaPerDomain`, and `domainBounds` carry NO default and use
+        # isSet() as their unset signal (see _setDefault above and the isSet
+        # guards in _fit / _transform). A caller that forwards an unset value as
+        # an explicit None -- e.g. a cloud driver passing `omega=args.omega` where
+        # the CLI arg was omitted -- would otherwise _set(param=None), tripping
+        # isSet() while the value is None, and later crash (`list(None)` in _fit,
+        # `None[0]` in the domainBounds branch). Treat explicit-None as
+        # not-passed for exactly these three, so unset reaches the engine as the
+        # documented default (None / scalar 1/K) regardless of how it was spelled.
+        kwargs = {k: v for k, v in self._input_kwargs.items()
+                  if not (k in ("omega", "etaPerDomain", "domainBounds")
+                          and v is None)}
+        self.setParams(**kwargs)
         # Diagnostic-only per-iteration callback (mirrors OnlineLDAEstimator).
         # Stored as an instance attribute, not a Param — callables aren't
         # MLlib-serializable and persistence is deferred (ADR 0009).

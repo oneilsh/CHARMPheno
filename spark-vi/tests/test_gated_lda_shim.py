@@ -100,6 +100,44 @@ def test_gated_shim_svi_schedule_params_default_and_settable():
     assert est2.getOrDefault("learningRateKappa") == 0.75
 
 
+def test_gated_shim_explicit_none_omega_eta_is_unset_not_set_to_none():
+    # A driver forwarding an unset CLI arg passes omega=None / etaPerDomain=None
+    # explicitly. @keyword_only funnels those into _input_kwargs, so a naive
+    # _set would mark the Param SET-with-value-None -- tripping the isSet() guard
+    # in _fit (`list(None)` -> TypeError) and _transform. explicit-None MUST be
+    # treated as not-passed for these no-default, isSet-gated params.
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    est = GatedLDAEstimator(parent={1: 0, 2: 0}, omega=None, etaPerDomain=None,
+                            domainBounds=None)
+    assert not est.isSet("omega")
+    assert not est.isSet("etaPerDomain")
+    assert not est.isSet("domainBounds")
+    # a real value still sets the Param (explicit-None is the only special case).
+    est2 = GatedLDAEstimator(parent={1: 0, 2: 0}, omega=[1.0, 0.5])
+    assert est2.isSet("omega")
+    assert est2.getOrDefault("omega") == [1.0, 0.5]
+
+
+def test_gated_shim_explicit_none_omega_fits_single_domain(spark):
+    # End-to-end regression for the exp-0070 driver crash: a single-domain fit
+    # constructed with explicit omega=None / etaPerDomain=None must run (it used
+    # to raise `TypeError: 'NoneType' object is not iterable` at _fit line 390).
+    from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
+    parent = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
+    V = 30
+    rng = np.random.default_rng(0)
+    rows = []
+    for _ in range(40):
+        leaf = int(rng.choice([3, 4, 5, 6]))
+        idx = sorted(rng.choice(V, size=6, replace=False).tolist())
+        rows.append((Vectors.sparse(V, idx, [1.0] * len(idx)), [leaf]))
+    df = spark.createDataFrame(rows, ["features", "frontier"])
+    model = GatedLDAEstimator(parent=parent, nBg=2, tpn=1, maxIter=3, seed=0,
+                              omega=None, etaPerDomain=None).fit(df)
+    out = model.transform(df)                       # transform must not crash either
+    assert "nodeAffinity" in out.columns
+
+
 def test_gated_shim_minibatch_fit_smoke(spark):
     # The mini-batch SVI path (miniBatchFraction in (0,1]) must fit without error
     # and produce a K-row lambda, exercising VIConfig(mini_batch_fraction=...).
