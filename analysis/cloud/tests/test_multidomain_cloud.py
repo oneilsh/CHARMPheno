@@ -123,6 +123,22 @@ def test_domain_vocab_spec_selects_the_right_arg_group():
     assert _domain_vocab_spec(a, "observation").vocab_size == 1500
 
 
+def test_parse_args_rejects_unregistered_source_table_cond():
+    """--source-table-cond condition_occurrence is a valid OMOP load source but
+    is NOT in DOMAIN_REGISTRY (only condition_era is a registered condition
+    source); main() does an unguarded DOMAIN_REGISTRY[cond_table] lookup, so
+    parse_args must catch this with a clean p.error (SystemExit) instead of
+    letting a raw KeyError surface deep in main(). A registered value
+    (condition_era) must still be accepted."""
+    from multidomain_cloud import parse_args
+    import pytest
+    base = ["--cdr", "p.d", "--billing", "b", "--out-dir", "/x", "--seed", "0"]
+    with pytest.raises(SystemExit):
+        parse_args(base + ["--source-table-cond", "condition_occurrence"])
+    a = parse_args(base + ["--source-table-cond", "condition_era"])
+    assert a.source_table_cond == "condition_era"
+
+
 def test_domain_registry_maps_source_tables_to_date_cols_and_names():
     from multidomain_cloud import DOMAIN_REGISTRY
     assert DOMAIN_REGISTRY["condition_era"]["date_col"] == "condition_era_start_date"

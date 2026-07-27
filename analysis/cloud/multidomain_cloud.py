@@ -292,6 +292,12 @@ def parse_args(argv=None):
         p.error(f"--domains entries must be extra domains in "
                 f"{sorted(k for k in DOMAIN_REGISTRY if k != 'condition_era')}; "
                 f"got {unknown}")
+    # --source-table-cond must be a registered domain (DOMAIN_REGISTRY[cond_table]
+    # is looked up unguarded in main()); catch an unregistered condition source
+    # table here with a clean error rather than a raw KeyError deep in main().
+    if args.source_table_cond not in DOMAIN_REGISTRY:
+        p.error(f"--source-table-cond must be one of {sorted(DOMAIN_REGISTRY)}; "
+                f"got {args.source_table_cond!r}")
     return args
 
 

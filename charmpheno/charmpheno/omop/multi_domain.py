@@ -22,7 +22,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pyspark.ml.linalg import SparseVector, VectorUDT
-from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 
@@ -183,7 +182,6 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
     is expected only in vocab 0, but the strip is symmetric across domains).
     `strip_mode="test_only"` (default) strips TEST only; `"both"` also strips TRAIN.
     """
-    from pyspark.sql import functions as F
     from charmpheno.omop.condition_dag import prune_by_attestation, pruning_ledger
     from charmpheno.omop.case_finding_assembly import (
         _SPLIT_SALT, split_train_test, doc_attested_nodes, node_patient_counts,

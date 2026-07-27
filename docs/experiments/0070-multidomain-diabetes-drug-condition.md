@@ -45,11 +45,16 @@ seed: 42
 # exp 0070 — Multi-domain (condition + drug) gated fit, diabetes
 
 First tracked run of the two-domain, MixEHR-style gated topic model (SP3b):
-conditions (domain A, `condition_era`) + drugs (domain B, `drug_era`) over two
+conditions (domain 0, `condition_era`) + drugs (domain 1, `drug_era`) over two
 independent vocabularies, sharing one DAG-gated per-document theta with a
 **condition-only gate** (gate ⟂ domain — the gate acts on theta's support from
 the label's DAG closure; the domains act on beta's normalizer). Drugs are
 features, never a label: they need a vocabulary, not a DAG.
+
+SP3c generalized the assembler/driver to N domains (`--domains` is a comma
+list of extra domains beyond conditions); exp 0070 now routes through that
+generalized N-domain path as the N=2 (`domains: drug_era`, `window_mode:
+forward`) regression case, rather than a dedicated two-domain code path.
 
 This is the harness wiring of `analysis/cloud/multidomain_cloud.py` — the same
 driver as `make multidomain-bq-smoke`, now reachable as `make exp ID=70` so the
@@ -63,11 +68,12 @@ fit is a tracked, resumable-config, summary-captured experiment like every other
    the wrong date column for drugs), windows both to the same per-patient
    diabetes cohort window (`window_days`, forward mode), builds the diabetes
    label DAG (single anchor 201820, no forest root).
-2. Assembles a `TwoDomainBundle` (`charmpheno.omop.two_domain`) with two aligned
-   sparse feature columns (`features_a` conditions, `features_b` drugs), each
-   over its own per-domain vocabulary, leakage stripped per domain.
-3. Fits `GatedLDAEstimator(featuresCols=["features_a","features_b"], seed=42)` to
-   a per-domain dict lambda `{0: (K, V_a), 1: (K, V_b)}`.
+2. Assembles a `MultiDomainBundle` (`charmpheno.omop.multi_domain`) with two
+   aligned sparse feature columns (`features_0` conditions, `features_1`
+   drugs), each over its own per-domain vocabulary, leakage stripped per
+   domain.
+3. Fits `GatedLDAEstimator(featuresCols=["features_0","features_1"], seed=42)`
+   to a per-domain dict lambda `{0: (K, V_0), 1: (K, V_1)}`.
 4. Logs the **dead-node init-quality read** (insight 0070: the scalable spectral
    init is seed-fragile; a dead node = a projection draw the EM did not rescue),
    and writes the `VIResult` through SP3a's dict-lambda-aware `save_result`.
@@ -84,8 +90,9 @@ bundle the coherence driver can read — `run_experiment` skips eval for
 - `dead_nodes`: MUST be empty. A non-empty list is the pre-registered
   init-fragility signature — re-run with a different `seed` (do not silently
   accept seed 0's draw).
-- `corpus_stats`: per-domain vocab sizes (`V_a` cond, `V_b` drug) within a
-  plausible band, train/test doc counts, how many docs carry a frontier.
+- `corpus_stats`: per-domain vocab sizes (`vocab_sizes`, keyed by domain name —
+  `condition`, `drug`) within a plausible band, train/test doc counts, how
+  many docs carry a frontier.
 - `ledger`: the two-domain assembly provenance (per-domain prune/strip counts).
 
 This is a **smoke/sanity** run, not a quality gate — SP3b's acceptance is
