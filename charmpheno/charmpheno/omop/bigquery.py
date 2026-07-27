@@ -22,10 +22,13 @@ Three source-table modes supported via `source_table`:
   same (person_id, concept_id, + span dates) event shape `condition_era`
   produces so the existing window/doc-spec machinery applies unchanged to
   the drug domain. No visit_occurrence_id (eras span visits).
+- `"observation"` (added 2026-07-27, SP3c): emits one row per OMOP
+  observation with a single `observation_date` -- a POINT event, not a
+  span (unlike condition_era/drug_era). No visit_occurrence_id.
 
-v1 supports `concept_types=("condition", "drug")`. procedure_occurrence
-will land in a follow-on once condition/drug behavior is verified
-end-to-end.
+v1 supports `concept_types=("condition", "drug", "observation")`.
+procedure_occurrence will land in a follow-on once condition/drug/
+observation behavior is verified end-to-end.
 
 Connector docs: https://github.com/GoogleCloudDataproc/spark-bigquery-connector
 """
@@ -37,9 +40,9 @@ from pyspark.sql import functions as F
 from charmpheno.omop.cohorts import SUPPORTED_COHORTS, apply_cohort
 from charmpheno.omop.schema import validate
 
-_SUPPORTED_CONCEPT_TYPES: tuple[str, ...] = ("condition", "drug")
+_SUPPORTED_CONCEPT_TYPES: tuple[str, ...] = ("condition", "drug", "observation")
 _SUPPORTED_SOURCE_TABLES: tuple[str, ...] = (
-    "condition_occurrence", "condition_era", "drug_era",
+    "condition_occurrence", "condition_era", "drug_era", "observation",
 )
 
 
@@ -56,6 +59,19 @@ def _drug_era_select_cols():
     populates here (no ingredient rollup -- SP3b design)."""
     cols = ("person_id", "concept_id", "drug_era_start_date", "drug_era_end_date")
     extra = ("drug_era_start_date", "drug_era_end_date")
+    return cols, extra
+
+
+def _observation_select_cols():
+    """Declares the observation read's output column names, normalized to a
+    POINT-event shape (person_id, concept_id, observation_date) -- observation
+    has a single `observation_date`, NOT a span (unlike condition_era/drug_era).
+    Extracted as a pure function so the projection is unit-testable without a
+    BigQuery read. The observation vocabulary is built EMPIRICALLY downstream from
+    whatever concept classes the CDR populates (no rollup -- SP3c design;
+    observation is the most heterogeneous OMOP domain)."""
+    cols = ("person_id", "concept_id", "observation_date")
+    extra = ("observation_date",)
     return cols, extra
 
 
@@ -79,7 +95,8 @@ def load_omop_bigquery(
             Distinct from the data project encoded in `cdr_dataset` whenever
             the CDR is hosted in a separate read-only project (the AoU shape).
         concept_types: which OMOP fact tables to include. v1 supports
-            ("condition", "drug"); anything else raises NotImplementedError.
+            ("condition", "drug", "observation"); anything else raises
+            NotImplementedError.
         person_sample_mod: if set, keep rows where MOD(person_id, M) == 0.
             Whole-patient deterministic sampling — preserves each retained
             person's complete condition list, which matters for LDA.
@@ -90,7 +107,9 @@ def load_omop_bigquery(
             and no visit_occurrence_id (eras span visits); "drug_era" emits
             one row per drug era with `drug_era_start_date` +
             `drug_era_end_date`, normalized to the same event shape as
-            "condition_era" (the drug domain).
+            "condition_era" (the drug domain); "observation" emits one row
+            per OMOP observation with a single `observation_date` (a POINT
+            event, not a span) and no visit_occurrence_id.
         cohort: optional cohort filter applied after the base load. None
             (default) keeps the full sampled corpus. See
             ``charmpheno.omop.cohorts.SUPPORTED_COHORTS`` for accepted names
@@ -167,7 +186,7 @@ def load_omop_bigquery(
             "condition_era_end_date",
         )
         extra_cols = ("condition_era_start_date", "condition_era_end_date")
-    else:  # drug_era
+    elif source_table == "drug_era":
         cond = _read("drug_era").select(
             "person_id",
             F.col("drug_concept_id").alias("concept_id"),
@@ -175,6 +194,13 @@ def load_omop_bigquery(
             "drug_era_end_date",
         )
         extra_cols = ("drug_era_start_date", "drug_era_end_date")
+    else:  # observation
+        cond = _read("observation").select(
+            "person_id",
+            F.col("observation_concept_id").alias("concept_id"),
+            "observation_date",
+        )
+        extra_cols = ("observation_date",)
 
     if person_sample_mod is not None:
         # Full-patient sampling is the right shape for LDA — per-person token
