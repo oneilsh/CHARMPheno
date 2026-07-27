@@ -1,21 +1,28 @@
-"""Cloud fit driver for the MULTI-DOMAIN (two-domain, MixEHR-style) gated topic
-model: conditions (domain A) + drugs (domain B) over two independent
-vocabularies, sharing the gated per-document theta with a CONDITION-ONLY gate
-(gate ⟂ domain; SP3b arc design). Mirrors dag_placement_cloud.py's structure
+"""Cloud fit driver for the MULTI-DOMAIN (N-domain, MixEHR-style) gated topic
+model: conditions (always domain 0) plus any number of extra domains
+(drug_era, observation, ... selected via --domains) over independent
+per-domain vocabularies, sharing the gated per-document theta with a
+CONDITION-ONLY gate (gate ⟂ domain; SP3b arc design, generalized to N domains
++ a lookback window mode in SP3c). Mirrors dag_placement_cloud.py's structure
 (argparse in parse_args, _driver_common, assemble -> GatedLDAEstimator.fit ->
-save) but wires the TWO-domain path: it loads condition_era AND drug_era
-separately, windows both to the same per-patient cohort window, assembles a
-TwoDomainBundle (charmpheno.omop.two_domain.assemble_two_domain_from_events),
-fits GatedLDAEstimator(featuresCols=["features_a","features_b"]) to a per-domain
-dict lambda, logs a dead-node init-quality read, and writes the VIResult via
-spark_vi.io.export.save_result (dict-lambda aware since SP3a).
+save) but wires the N-domain path: it loads condition_era and every extra
+domain's source table (DOMAIN_REGISTRY), windows them either to one shared
+forward window (--window-mode forward, the original exp-0070 shape) or to a
+leakage-free pre-index lookback feature window + forward condition-only label
+window (--window-mode lookback), assembles a MultiDomainBundle
+(charmpheno.omop.multi_domain.assemble_multidomain_from_events), fits
+GatedLDAEstimator(featuresCols=["features_0", ..., "features_{N-1}"]) to a
+per-domain dict lambda, logs a dead-node init-quality read, and writes the
+VIResult via spark_vi.io.export.save_result (dict-lambda aware since SP3a).
 
 K is EMERGENT (n_bg + surviving-DAG-nodes * tpn), so there is no --K. Resume is
 unsupported (GatedLDAModel is not persistable in v1).
 
-Only parse_args + the pure dead_node_report helper are unit-tested
-(test_multidomain_cloud.py); the main() body (live BQ load + Dataproc fit +
-artifact write) is CLUSTER-COVERED (make multidomain-bq-smoke), not run here.
+Only parse_args + the pure helpers (dead_node_report, _topic_block_labels,
+_log_topics, _vocab_concept_names, _idx_to_name, DOMAIN_REGISTRY,
+_domain_vocab_spec) are unit-tested (test_multidomain_cloud.py); the main()
+body (live BQ load + Dataproc fit + artifact write) is CLUSTER-COVERED (make
+multidomain-bq-smoke), not run here.
 """
 from __future__ import annotations
 
@@ -26,6 +33,30 @@ from pathlib import Path
 import numpy as np
 
 from _driver_common import _phase, configure_logging, make_spark_session
+
+# The clinical-semantics layer: which OMOP source tables can be domains, their
+# per-domain event date column, and a short display/persistence name. Condition is
+# always domain 0; the others are selected by --domains. The engine + assembler
+# stay index-based and never see these names (SP3c design).
+DOMAIN_REGISTRY = {
+    "condition_era": {"date_col": "condition_era_start_date", "name": "condition",
+                      "arg": "cond"},
+    "drug_era":      {"date_col": "drug_era_start_date",      "name": "drug",
+                      "arg": "drug"},
+    "observation":   {"date_col": "observation_date",         "name": "observation",
+                      "arg": "obs"},
+}
+
+
+def _domain_vocab_spec(args, source_table):
+    """DomainVocabSpec for a source table, reading that domain's --<arg>-* controls
+    (cond/drug/obs) off the parsed args."""
+    from charmpheno.omop.multi_domain import DomainVocabSpec
+    a = DOMAIN_REGISTRY[source_table]["arg"]
+    return DomainVocabSpec(
+        vocab_size=getattr(args, f"{a}_vocab_size"),
+        min_df=getattr(args, f"{a}_min_df"),
+        min_patient_count=getattr(args, f"{a}_min_patient_count"))
 
 
 def _parse_float_list(s):
@@ -168,7 +199,8 @@ def _idx_to_name(vocab_map, names_by_cid):
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Multi-domain (condition+drug) gated topic-model fit.")
+        description="Multi-domain (N-domain, condition + --domains) gated "
+                     "topic-model fit.")
     p.add_argument("--cdr", required=True)
     p.add_argument("--billing", required=True)
     p.add_argument("--out-dir", required=True)
@@ -181,7 +213,20 @@ def parse_args(argv=None):
                         "scalable init is seed-fragile; the seed must be a "
                         "deliberate, recorded choice, not a silent default).")
     p.add_argument("--source-table-cond", default="condition_era")
+    # SP3c: superseded by --domains, which drives main()'s domain_tables list
+    # directly by source-table name. Kept accepted (unused by main()) for CLI
+    # back-compat with run_experiment.py's invocation.
     p.add_argument("--source-table-drug", default="drug_era")
+    p.add_argument("--domains", default="drug_era",
+                   help="Comma list of EXTRA domains beyond conditions (subset of "
+                        "{drug_era, observation}); condition is always domain 0. "
+                        "Default 'drug_era' = the two-domain exp-0070 shape.")
+    p.add_argument("--window-mode", choices=["forward", "lookback"], default="forward",
+                   help="forward = one shared window (exp 0070). lookback = pre-index "
+                        "feature window (all domains) + forward condition label window "
+                        "(leakage-free; parity with the single-domain rare6 exps).")
+    p.add_argument("--lookback-days", type=int, default=365)
+    p.add_argument("--label-window-days", type=int, default=365)
     p.add_argument("--person-mod", type=int, default=10)
     p.add_argument("--disease", default="diabetes")
     p.add_argument("--min-n", type=int, default=50)
@@ -198,6 +243,9 @@ def parse_args(argv=None):
     p.add_argument("--drug-vocab-size", type=int, default=2000)
     p.add_argument("--drug-min-df", type=int, default=20)
     p.add_argument("--drug-min-patient-count", type=int, default=20)
+    p.add_argument("--obs-vocab-size", type=int, default=1500)
+    p.add_argument("--obs-min-df", type=int, default=20)
+    p.add_argument("--obs-min-patient-count", type=int, default=20)
     # gating
     p.add_argument("--n-bg", type=int, default=20)
     p.add_argument("--tpn", type=int, default=5)
@@ -235,36 +283,40 @@ def parse_args(argv=None):
     # Parse the two comma-lists to float lists (None when unset).
     args.omega = _parse_float_list(args.omega)
     args.eta_per_domain = _parse_float_list(args.eta_per_domain)
+    # --domains is EXTRA domains beyond conditions (which is always domain 0 and
+    # never itself a --domains entry); normalize the comma-list to a list of
+    # source-table names and validate against DOMAIN_REGISTRY.
+    args.domains = [d for d in args.domains.split(",") if d.strip()]
+    unknown = [d for d in args.domains if d not in DOMAIN_REGISTRY or d == "condition_era"]
+    if unknown:
+        p.error(f"--domains entries must be extra domains in "
+                f"{sorted(k for k in DOMAIN_REGISTRY if k != 'condition_era')}; "
+                f"got {unknown}")
     return args
 
 
-def _window_drug_events_to_cohort(cond_windowed, drug_df, *,
-                                   cond_date_col, drug_date_col, window_days):
-    """Window the drug frame to the SAME per-patient cohort window as the
-    (already-windowed) condition frame, carrying source_cohort across.
-
-    The condition cohort (apply_population_disease_cohort) has already windowed
-    and tagged the condition events with source_cohort but dropped the index
-    date. We reconstruct each (person, source_cohort) window START as the min
-    in-window condition date and keep drug rows in [start, start+window_days).
-    This keeps the two domains on the same window and gives every windowed
-    condition-patient their aligned drug BOW (empty if none). Cluster-covered.
-    """
+def _window_events_to_cohort(cond_windowed, dom_df, *,
+                             cond_date_col, dom_date_col, window_days):
+    """Window a secondary-domain event frame to the SAME per-patient cohort window
+    as the (already-windowed) condition frame, carrying source_cohort across.
+    Domain-neutral (was _window_drug_events_to_cohort; SP3c). Cluster-covered."""
     from pyspark.sql import functions as F
     bounds = (cond_windowed.groupBy("person_id", "source_cohort")
               .agg(F.min(cond_date_col).alias("_win_start")))
     return (
-        drug_df.join(bounds, on="person_id", how="inner")
-        .where(F.col(drug_date_col) >= F.col("_win_start"))
-        .where(F.col(drug_date_col)
-               < F.date_add(F.col("_win_start"), window_days))
+        dom_df.join(bounds, on="person_id", how="inner")
+        .where(F.col(dom_date_col) >= F.col("_win_start"))
+        .where(F.col(dom_date_col) < F.date_add(F.col("_win_start"), window_days))
         .drop("_win_start")
     )
 
 
-def _log_corpus_stats(bundle, lay):
+def _log_corpus_stats(bundle, lay, domain_names):
     """Log + return train/test doc counts, per-source_cohort breakdown, how many
-    docs carry a frontier, and the per-domain vocab / topic-structure dims."""
+    docs carry a frontier, and the per-domain vocab / topic-structure dims.
+
+    domain_names labels the printout / stats dict (bundle.vocab_maps is index-only;
+    the driver owns the N clinical names, in domain order)."""
     from pyspark.sql import functions as F
 
     def _stats(df, name):
@@ -281,14 +333,14 @@ def _log_corpus_stats(bundle, lay):
         return {"n_docs": total, "n_frontier": fg,
                 "by_source_cohort": {k: n for k, (n, _) in by.items()}}
 
+    vocab_sizes = {n: len(vm) for n, vm in zip(domain_names, bundle.vocab_maps)}
     stats = {"train": _stats(bundle.train_df, "train"),
              "test": _stats(bundle.test_df, "test"),
-             "vocab_size_a": len(bundle.vocab_map_a),
-             "vocab_size_b": len(bundle.vocab_map_b),
+             "vocab_sizes": vocab_sizes,
              "K": lay.K, "n_nodes": len(lay.nodes),
              "n_bg": lay.n_bg, "tpn": lay.tpn}
-    print(f"[driver]   corpus: V_a={stats['vocab_size_a']} (cond) "
-          f"V_b={stats['vocab_size_b']} (drug), K={lay.K} topics "
+    v_str = ", ".join(f"V_{n}={v}" for n, v in vocab_sizes.items())
+    print(f"[driver]   corpus: {v_str}, K={lay.K} topics "
           f"({lay.n_bg} bg + {len(lay.nodes)} nodes x {lay.tpn} tpn)", flush=True)
     return stats
 
@@ -298,10 +350,10 @@ def main(argv=None) -> int:
     from charmpheno.omop.case_finding_assembly import (
         _FOREST_ROOT_CID, load_condition_dag)
     from charmpheno.omop.cohorts import (
-        apply_population_disease_cohort, disease_anchors)
+        apply_population_disease_cohort, case_finding_index_table, disease_anchors)
     from charmpheno.omop.doc_spec import PatientCohortDocSpec
-    from charmpheno.omop.two_domain import (
-        DomainVocabSpec, assemble_two_domain_from_events)
+    from charmpheno.omop.multi_domain import (
+        assemble_multidomain_from_events, lookback_feature_frames)
     from spark_vi.io.export import save_result
     from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
     from spark_vi.models.topic.dag_placement import DagLayout
@@ -309,65 +361,81 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     configure_logging()
     with make_spark_session(app_name="multidomain-gated-fit") as spark:
-        with _phase("load + window both domains (condition + drug)"):
-            # Load BOTH domains WITHOUT `cohort=`: load_omop_bigquery's cohort
+        # Domain 0 is always conditions; --domains supplies the extra domains in
+        # order. domain_tables/domain_names/date_cols/vocab_specs are all index-
+        # aligned to this ordering and thread through the rest of main() (bundle
+        # fields are index-only; the driver owns the clinical names).
+        cond_table = args.source_table_cond
+        domain_tables = [cond_table, *args.domains]     # source tables, domain order
+        domain_names = [DOMAIN_REGISTRY[t]["name"] for t in domain_tables]
+        date_cols = [DOMAIN_REGISTRY[t]["date_col"] for t in domain_tables]
+        vocab_specs = [_domain_vocab_spec(args, t) for t in domain_tables]
+
+        with _phase(f"load {len(domain_tables)} domains: {domain_names}"):
+            # Load every domain WITHOUT `cohort=`: load_omop_bigquery's cohort
             # post-filter picks its date_col by CONDITION source-table and would
-            # pick the wrong column for drug_era (Task 1 footgun). Windowing /
-            # frontier are handled below + inside the two-domain assembler, exactly
-            # as case_finding_assembly.assemble_case_finding_corpus does (it also
-            # never passes cohort=).
-            cond_raw = load_omop_bigquery(
-                spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
-                person_sample_mod=args.person_mod,
-                source_table=args.source_table_cond)
-            drug_raw = load_omop_bigquery(
-                spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
-                person_sample_mod=args.person_mod,
-                source_table=args.source_table_drug)
-            cond_date_col = "condition_era_start_date"
-            drug_date_col = "drug_era_start_date"
+            # pick the wrong column for a non-condition domain (Task 1 footgun).
+            # Windowing / frontier are handled below + inside the multi-domain
+            # assembler, exactly as case_finding_assembly.assemble_case_finding_corpus
+            # does (it also never passes cohort=).
+            raws = [load_omop_bigquery(
+                        spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
+                        person_sample_mod=args.person_mod, source_table=t)
+                    for t in domain_tables]
 
-            # condition cohort = whole-pop background + one disease foreground,
-            # windowed + source_cohort-tagged (forward mode; mirrors the single-
-            # domain forward path).
-            cond_events = apply_population_disease_cohort(
-                cond_raw, disease=args.disease, window_days=args.window_days,
-                spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
-                date_col=cond_date_col, prior_obs_days=args.prior_obs_days)
-            # align drugs to the same per-patient window (condition-only gate:
-            # drugs are features, never a frontier/label).
-            drug_events = _window_drug_events_to_cohort(
-                cond_events, drug_raw, cond_date_col=cond_date_col,
-                drug_date_col=drug_date_col, window_days=args.window_days)
+        with _phase(f"window ({args.window_mode}) + assemble"):
+            cond_date_col = date_cols[0]
+            if args.window_mode == "lookback":
+                # Leakage-free: pre-index FEATURE window (all domains) + forward
+                # condition-only LABEL window from ONE shared index (case_finding_
+                # index_table), parity with the single-domain rare6 exps.
+                index_df = case_finding_index_table(
+                    raws[0], disease=args.disease, spark=spark,
+                    cdr_dataset=args.cdr, billing_project=args.billing,
+                    date_col=cond_date_col, prior_obs_days=args.prior_obs_days,
+                    label_window_days=args.label_window_days)
+                feats, cond_label = lookback_feature_frames(
+                    raws, index_df, date_cols,
+                    lookback_days=args.lookback_days,
+                    label_window_days=args.label_window_days)
+                cond_feature, extra_features, label_arg = feats[0], feats[1:], cond_label
+            else:  # forward
+                # condition cohort = whole-pop background + one disease foreground,
+                # windowed + source_cohort-tagged; mirrors the single-domain forward
+                # path. Extra domains are aligned to the SAME per-patient window
+                # (condition-only gate: extra domains are features, never a
+                # frontier/label).
+                cond_feature = apply_population_disease_cohort(
+                    raws[0], disease=args.disease, window_days=args.window_days,
+                    spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
+                    date_col=cond_date_col, prior_obs_days=args.prior_obs_days)
+                extra_features = [
+                    _window_events_to_cohort(
+                        cond_feature, raw, cond_date_col=cond_date_col,
+                        dom_date_col=dc, window_days=args.window_days)
+                    for raw, dc in zip(raws[1:], date_cols[1:])]
+                label_arg = None
 
-        with _phase("build condition DAG"):
             anchors = disease_anchors(args.disease)
             root = _FOREST_ROOT_CID if len(anchors) > 1 else None
             before_dag = load_condition_dag(
-                spark, anchors=anchors, root=root,
-                cdr=args.cdr, billing=args.billing)
+                spark, anchors=anchors, root=root, cdr=args.cdr, billing=args.billing)
 
-        with _phase("assemble two-domain bundle"):
             doc_spec = PatientCohortDocSpec(min_doc_length=args.doc_min_length)
-            bundle = assemble_two_domain_from_events(
-                cond_events, drug_events, before_dag,
-                doc_spec=doc_spec, min_n=args.min_n,
-                vocab_a=DomainVocabSpec(
-                    vocab_size=args.cond_vocab_size, min_df=args.cond_min_df,
-                    min_patient_count=args.cond_min_patient_count),
-                vocab_b=DomainVocabSpec(
-                    vocab_size=args.drug_vocab_size, min_df=args.drug_min_df,
-                    min_patient_count=args.drug_min_patient_count),
+            bundle = assemble_multidomain_from_events(
+                cond_feature, extra_features, before_dag, doc_spec=doc_spec,
+                min_n=args.min_n, vocab_specs=vocab_specs,
                 holdout_frac=args.holdout_frac, n_bg=args.n_bg, tpn=args.tpn,
-                strip_mode=args.strip_mode)
+                strip_mode=args.strip_mode, label_events=label_arg)
             print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
 
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
-        corpus_stats = _log_corpus_stats(bundle, lay)
+        corpus_stats = _log_corpus_stats(bundle, lay, domain_names)
 
         with _phase(f"multi-domain gated fit (init={args.init}, K={lay.K})"):
+            feature_cols = [f"features_{i}" for i in range(len(domain_tables))]
             est = GatedLDAEstimator(
-                featuresCols=["features_a", "features_b"], labelCol="frontier",
+                featuresCols=feature_cols, labelCol="frontier",
                 parent=bundle.parent_int, nBg=args.n_bg, tpn=args.tpn,
                 # explicit seed from --seed (insight 0070): a deliberate, recorded
                 # choice, NOT the shim's silent seed=(seed or 0) default.
@@ -398,20 +466,18 @@ def main(argv=None) -> int:
         # Resolve each domain's vocabulary to concept names ONCE: used both for the
         # final topic dump and persisted into the manifest so the saved artifact is
         # self-describing (a later no-refit inspection can map token index ->
-        # concept). Two small filtered `concept` reads (cond + drug vocab ids).
+        # concept). N small filtered `concept` reads (one per domain's vocab ids).
         with _phase("resolve per-domain vocab names"):
-            names_a_bycid = _vocab_concept_names(
-                spark, args.cdr, args.billing, bundle.vocab_map_a)
-            names_b_bycid = _vocab_concept_names(
-                spark, args.cdr, args.billing, bundle.vocab_map_b)
-            idx2name = {0: _idx_to_name(bundle.vocab_map_a, names_a_bycid),
-                        1: _idx_to_name(bundle.vocab_map_b, names_b_bycid)}
+            names_bycid = [_vocab_concept_names(spark, args.cdr, args.billing, vm)
+                           for vm in bundle.vocab_maps]
+            idx2name = {i: _idx_to_name(vm, names_bycid[i])
+                        for i, vm in enumerate(bundle.vocab_maps)}
 
         if args.top_n_tokens > 0:
             with _phase("final topic dump (top terms per domain)"):
                 labels = _topic_block_labels(lay, names, args.n_bg)
                 _log_topics(lam_dict, idx2name, labels, args.top_n_tokens,
-                            domain_tags={0: "cond", 1: "drug"})
+                            domain_tags={i: n for i, n in enumerate(domain_names)})
 
         with _phase("save"):
             out = Path(args.out_dir)
@@ -424,7 +490,11 @@ def main(argv=None) -> int:
                 "init": args.init, "seed": args.seed,
                 "K": lay.K, "n_bg": args.n_bg, "tpn": args.tpn,
                 "disease": args.disease, "min_n": args.min_n,
-                "strip_mode": args.strip_mode, "window_days": args.window_days,
+                "strip_mode": args.strip_mode,
+                "domains": domain_names, "window_mode": args.window_mode,
+                "window_days": args.window_days,
+                "lookback_days": args.lookback_days,
+                "label_window_days": args.label_window_days,
                 "omega": args.omega, "eta_per_domain": args.eta_per_domain,
                 "spectral_method": args.spectral_method,
                 "anchor_scope": args.anchor_scope,
@@ -435,28 +505,31 @@ def main(argv=None) -> int:
                 "ledger": bundle.ledger,
                 "corpus_manifest": {
                     "cdr": args.cdr,
-                    "source_table_cond": args.source_table_cond,
-                    "source_table_drug": args.source_table_drug,
+                    "domain_tables": domain_tables,
                     "person_mod": args.person_mod,
-                    "cond_vocab_size": args.cond_vocab_size,
-                    "cond_min_df": args.cond_min_df,
-                    "cond_min_patient_count": args.cond_min_patient_count,
-                    "drug_vocab_size": args.drug_vocab_size,
-                    "drug_min_df": args.drug_min_df,
-                    "drug_min_patient_count": args.drug_min_patient_count,
+                    # Per-domain vocab-fit knobs, keyed by NAME (domain 0 =
+                    # condition, always first) -- generalizes the old hardcoded
+                    # cond_vocab_size/drug_vocab_size pair to N domains.
+                    "vocab_specs": {
+                        n: {"vocab_size": vs.vocab_size, "min_df": vs.min_df,
+                            "min_patient_count": vs.min_patient_count}
+                        for n, vs in zip(domain_names, vocab_specs)},
                     "prior_obs_days": args.prior_obs_days,
                     "holdout_frac": args.holdout_frac,
                     "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
                     "name_by_id": {str(c): n
                                    for c, n in bundle.name_by_id.items()},
-                    # Per-domain vocabularies + concept names: makes the saved
-                    # artifact self-describing so a later no-refit inspection can
-                    # map a topic's token indices (domain 0 = cond, 1 = drug) to
-                    # concepts. {concept_id: index} + {concept_id: name} per domain.
-                    "vocab_a": {str(c): i for c, i in bundle.vocab_map_a.items()},
-                    "vocab_b": {str(c): i for c, i in bundle.vocab_map_b.items()},
-                    "vocab_names_a": {str(c): n for c, n in names_a_bycid.items()},
-                    "vocab_names_b": {str(c): n for c, n in names_b_bycid.items()}},
+                    # Per-domain vocabularies + concept names, keyed by NAME: makes
+                    # the saved artifact self-describing so a later no-refit
+                    # inspection can map a topic's token indices (domain i =
+                    # domain_names[i]) to concepts. {concept_id: index} +
+                    # {concept_id: name} per domain.
+                    **{f"vocab_{domain_names[i]}": {str(c): j for c, j in vm.items()}
+                       for i, vm in enumerate(bundle.vocab_maps)},
+                    **{f"vocab_names_{domain_names[i]}":
+                       {str(c): n for c, n in names_bycid[i].items()}
+                       for i in range(len(bundle.vocab_maps))},
+                },
             }
             (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
             print(f"[driver]   saved multidomain_gated result to {out}", flush=True)

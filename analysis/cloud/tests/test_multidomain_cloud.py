@@ -95,6 +95,42 @@ def test_dead_node_report_flags_a_node_stuck_at_the_prior():
     assert 2 in dead and 1 not in dead
 
 
+def test_parse_args_domains_defaults_to_drug_era_and_splits_a_list():
+    from multidomain_cloud import parse_args
+    base = ["--cdr", "p.d", "--billing", "b", "--out-dir", "/x", "--seed", "0"]
+    assert parse_args(base).domains == ["drug_era"]                     # default
+    a = parse_args(base + ["--domains", "drug_era,observation"])
+    assert a.domains == ["drug_era", "observation"]
+
+
+def test_parse_args_window_mode_and_lookback_knobs():
+    from multidomain_cloud import parse_args
+    base = ["--cdr", "p.d", "--billing", "b", "--out-dir", "/x", "--seed", "0"]
+    assert parse_args(base).window_mode == "forward"                   # default
+    a = parse_args(base + ["--window-mode", "lookback",
+                           "--lookback-days", "1825", "--label-window-days", "365"])
+    assert a.window_mode == "lookback"
+    assert a.lookback_days == 1825 and a.label_window_days == 365
+
+
+def test_domain_vocab_spec_selects_the_right_arg_group():
+    from multidomain_cloud import parse_args, _domain_vocab_spec
+    a = parse_args(["--cdr", "p.d", "--billing", "b", "--out-dir", "/x", "--seed", "0",
+                    "--cond-vocab-size", "5000", "--drug-vocab-size", "2000",
+                    "--obs-vocab-size", "1500"])
+    assert _domain_vocab_spec(a, "condition_era").vocab_size == 5000
+    assert _domain_vocab_spec(a, "drug_era").vocab_size == 2000
+    assert _domain_vocab_spec(a, "observation").vocab_size == 1500
+
+
+def test_domain_registry_maps_source_tables_to_date_cols_and_names():
+    from multidomain_cloud import DOMAIN_REGISTRY
+    assert DOMAIN_REGISTRY["condition_era"]["date_col"] == "condition_era_start_date"
+    assert DOMAIN_REGISTRY["drug_era"]["date_col"] == "drug_era_start_date"
+    assert DOMAIN_REGISTRY["observation"]["date_col"] == "observation_date"
+    assert DOMAIN_REGISTRY["observation"]["name"] == "observation"
+
+
 def test_dead_node_report_spares_a_node_alive_in_only_one_domain():
     """dead_node_report's cross-domain check is an OR: a node concentrated in
     ANY domain is alive, even if flat in every other domain. This distinguishes
