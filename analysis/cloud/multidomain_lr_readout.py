@@ -147,14 +147,38 @@ def main(argv=None) -> int:
     name_by_engine = {i: name_by_id.get(c, str(c)) for i, c in int2cid.items()}
     alpha_grid = parse_alpha_grid(args.alpha_grid)
 
-    with make_spark_session(app_name="multidomain-lr-readout") as spark:
-        rows = spark.read.parquet(str(run_dir / "test_docs")).select(
-            "person_id", *feature_cols, "frontier").collect()
-        aff_rows = spark.read.parquet(str(run_dir / "test_affinities")).select(
-            "person_id", "nodeAffinity").collect()
+    if not (run_dir / "test_docs").exists():
+        raise SystemExit(
+            f"[lr] no test_docs/ under {run_dir} -- this run was fit before "
+            "LR-readout persistence, or its test split was empty. Re-fit to "
+            "produce a readable artifact.")
+
+    try:
+        with make_spark_session(app_name="multidomain-lr-readout") as spark:
+            rows = spark.read.parquet(str(run_dir / "test_docs")).select(
+                "person_id", *feature_cols, "frontier").collect()
+            # test_affinities/ ALSO persists frontier alongside nodeAffinity
+            # (multidomain_cloud.py's write). Read it from HERE, not from the
+            # test_docs collect above: two separate spark.read.parquet(...)
+            # .collect() calls are not guaranteed to return rows in the same
+            # order, so pairing aff[i] with frontiers[i] (from the OTHER
+            # collect) would silently score theta against the wrong patient's
+            # label. Within a single collect, row order is fixed, so aff and
+            # aff_frontiers stay aligned.
+            aff_rows = spark.read.parquet(str(run_dir / "test_affinities")).select(
+                "person_id", "nodeAffinity", "frontier").collect()
+    except Exception as e:
+        # run_dir may be a gs:// path, so the local .exists() guard above can't
+        # see a missing/incomplete GCS run dir -- catch the Spark-side failure
+        # (AnalysisException et al.) too and re-raise with the same clear message.
+        raise SystemExit(
+            f"[lr] failed to read test_docs/ or test_affinities/ under {run_dir} "
+            f"-- this run may predate LR-readout persistence, or its test split "
+            f"was empty. Re-fit to produce a readable artifact. ({e})") from e
 
     bows, frontiers, pids = build_domain_bows(rows, feature_cols, vocab_sizes)
     aff = affinity_matrix(aff_rows, len(lay.nodes))
+    aff_frontiers = [[int(x) for x in r["frontier"]] for r in aff_rows]
 
     # rare6 anchor engine-ids (skip anchors pruned out of the DAG).
     anchors = []
@@ -196,7 +220,7 @@ def main(argv=None) -> int:
     print("[lr] " + header, flush=True)
     for u in anchors:
         dname = str(name_by_engine.get(u, int2cid.get(u)))[:24]
-        theta_auc, n_pos = per_disease_auc_row(aff, frontiers, u, lay, parent_int)
+        theta_auc, n_pos = per_disease_auc_row(aff, aff_frontiers, u, lay, parent_int)
         line = dname.ljust(26) + str(n_pos).rjust(5) + f"  {theta_auc:5.3f}"
         for name in subsets:
             auc, _ = per_disease_auc_row(subset_scores[name], frontiers, u, lay,

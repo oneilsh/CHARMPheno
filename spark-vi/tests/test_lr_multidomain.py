@@ -54,3 +54,11 @@ def test_auc_sweep_multidomain_matches_manual_auc():
     for a in (1.0, 10.0):
         s = lr_placement_scores_multidomain(bows, lam, lay, alpha=a)
         assert np.isclose(sweep[a], _auc(s.max(axis=1), is_fg))
+
+
+def test_empty_domains_raises():
+    import pytest
+    from spark_vi.models.topic.dag_placement import lr_placement_scores_multidomain
+    lay, lam, bows = _tiny()
+    with pytest.raises(ValueError):
+        lr_placement_scores_multidomain(bows, lam, lay, alpha=1.0, domains=[])
