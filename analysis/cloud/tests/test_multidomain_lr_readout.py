@@ -59,6 +59,29 @@ def test_per_disease_auc_row_uses_max_over_subtree():
     assert auc == 1.0                                      # doc0 ranks top -> perfect
 
 
+def test_load_lambda_dict_reads_sidecars(tmp_path):
+    # The multidomain driver clobbers save_result's manifest, so the readout must
+    # load the lambda .npy sidecars directly, keyed by their integer domain suffix
+    # (and ignore the alpha sidecar).
+    from multidomain_lr_readout import load_lambda_dict
+    params = tmp_path / "params"
+    params.mkdir()
+    np.save(params / "lambda_0.npy", np.ones((4, 6)))
+    np.save(params / "lambda_1.npy", np.ones((4, 3)))
+    np.save(params / "alpha.npy", np.ones(4))            # not lambda_<m> -> ignored
+    lam = load_lambda_dict(tmp_path)
+    assert set(lam) == {0, 1}
+    assert lam[0].shape == (4, 6) and lam[1].shape == (4, 3)
+
+
+def test_load_lambda_dict_missing_raises(tmp_path):
+    import pytest
+    from multidomain_lr_readout import load_lambda_dict
+    (tmp_path / "params").mkdir()
+    with pytest.raises(SystemExit):
+        load_lambda_dict(tmp_path)
+
+
 def test_build_parser_defaults():
     from multidomain_lr_readout import build_parser
     args = build_parser().parse_args(["--run-dir", "/runs/0071-x"])

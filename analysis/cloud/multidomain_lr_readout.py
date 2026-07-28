@@ -118,18 +118,42 @@ def affinity_matrix(aff_rows, n_nodes):
     return out
 
 
+def load_lambda_dict(run_dir):
+    """Load the per-domain lambda dict from save_result's sidecars
+    (params/lambda_<m>.npy), keyed by the integer domain suffix -- WITHOUT
+    spark_vi.io.export.load_result.
+
+    Why not load_result: the multidomain fit driver OVERWRITES save_result's
+    manifest.json with its own (rich, domain-aware) manifest, which does not
+    carry save_result's `param_names`/`dict_param_keys`, so load_result raises
+    KeyError('param_names') on these run dirs. The lambda .npy sidecars are still
+    present, so we read them directly. (The driver-clobbers-save_result-manifest
+    is a separate hygiene bug; loading the sidecars is robust to it either way.)
+    """
+    import re
+    params = Path(run_dir) / "params"
+    lam = {}
+    for p in sorted(params.glob("lambda_*.npy")):
+        mo = re.match(r"lambda_(\d+)\.npy$", p.name)
+        if mo:
+            lam[int(mo.group(1))] = np.load(p)
+    if not lam:
+        raise SystemExit(
+            f"[lr] no params/lambda_*.npy under {run_dir} -- not a multidomain "
+            "fit artifact, or its lambda sidecars are missing.")
+    return lam
+
+
 def main(argv=None) -> int:
     from _driver_common import make_spark_session
     from charmpheno.omop.cohorts import disease_anchors
-    from spark_vi.io.export import load_result
     from spark_vi.models.topic.dag_placement import (
         DagLayout, lr_placement_scores_multidomain)
 
     args = build_parser().parse_args(argv)
     run_dir = Path(args.run_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
-    result = load_result(run_dir)
-    lam_dict = result.global_params["lambda"]                 # {m: [K x V_m]}
+    lam_dict = load_lambda_dict(run_dir)                      # {m: [K x V_m]}
     n_dom = len(lam_dict)
     feature_cols = [f"features_{i}" for i in range(n_dom)]
     vocab_sizes = [lam_dict[m].shape[1] for m in range(n_dom)]
