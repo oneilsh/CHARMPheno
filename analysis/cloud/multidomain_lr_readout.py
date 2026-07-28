@@ -70,8 +70,41 @@ def subtree_nodes(parent_int, root):
     return seen
 
 
+# --- driver-local test-set artifact: ONE source of truth for the sidecar names,
+# imported by BOTH the writer (multidomain_cloud.py's persistence) via
+# save_test_set and the reader (main) via load_test_set, so the two halves of the
+# cross-process contract can never drift apart on a rename. ---
+def _bow_path(run_dir, m):
+    return Path(run_dir) / f"test_bow_{m}.npz"
+
+
+def _aff_path(run_dir):
+    return Path(run_dir) / "test_affinity.npy"
+
+
+def _meta_path(run_dir):
+    return Path(run_dir) / "test_meta.json"
+
+
+def save_test_set(out_dir, bows, aff, frontiers, aff_frontiers):
+    """Write the DRIVER-LOCAL held-out test set (the writer half of the contract
+    load_test_set reads). `bows` = {m: scipy CSR [n x V_m]}; `aff` = dense
+    [n x n_nodes] theta-mass affinity; `frontiers` pairs with `bows` (their shared
+    collect), `aff_frontiers` pairs with `aff` (its own collect). Called by
+    multidomain_cloud.py after the fit; kept here so writer and reader share these
+    exact filenames/JSON keys."""
+    for m, csr in bows.items():
+        sp.save_npz(str(_bow_path(out_dir, m)), csr)
+    np.save(str(_aff_path(out_dir)), aff)
+    _meta_path(out_dir).write_text(json.dumps({
+        "n_docs": len(frontiers),
+        "frontiers": [[int(x) for x in fr] for fr in frontiers],
+        "aff_frontiers": [[int(x) for x in fr] for fr in aff_frontiers],
+    }))
+
+
 def load_test_set(run_dir, n_dom):
-    """Load the DRIVER-LOCAL held-out test set written by multidomain_cloud.py:
+    """Load the DRIVER-LOCAL held-out test set written by save_test_set:
     per-domain scipy CSR (test_bow_<m>.npz), the dense theta-mass affinity
     (test_affinity.npy), and the frontiers + count (test_meta.json). No Spark.
 
@@ -80,16 +113,14 @@ def load_test_set(run_dir, n_dom):
     fit-time collect); `aff_frontiers` pairs with `aff` (its own collect) -- keep
     them separate so the theta baseline never scores against another collect's
     labels."""
-    run_dir = Path(run_dir)
-    meta_path = run_dir / "test_meta.json"
-    if not meta_path.exists():
+    if not _meta_path(run_dir).exists():
         raise SystemExit(
             f"[lr] no test_meta.json under {run_dir} -- this run was fit before "
             "LR-readout persistence, or its test split was empty. Re-fit on the "
             "current code to produce a readable artifact.")
-    meta = json.loads(meta_path.read_text())
-    bows = {m: sp.load_npz(str(run_dir / f"test_bow_{m}.npz")) for m in range(n_dom)}
-    aff = np.load(str(run_dir / "test_affinity.npy"))
+    meta = json.loads(_meta_path(run_dir).read_text())
+    bows = {m: sp.load_npz(str(_bow_path(run_dir, m))) for m in range(n_dom)}
+    aff = np.load(str(_aff_path(run_dir)))
     frontiers = [[int(x) for x in fr] for fr in meta["frontiers"]]
     aff_frontiers = [[int(x) for x in fr] for fr in meta["aff_frontiers"]]
     return bows, frontiers, aff, aff_frontiers, int(meta["n_docs"])

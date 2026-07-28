@@ -18,19 +18,18 @@ def test_children_map_and_subtree_from_parent_int():
     assert subtree_nodes(parent_int, 300) == {300, 201}
 
 
-def test_load_test_set_roundtrip(tmp_path):
-    # Driver-local sidecars (scipy CSR per domain + dense affinity + frontiers
-    # json), as multidomain_cloud.py writes them. 2 domains (V0=4, V1=3), 2 docs.
-    import json
+def test_save_load_test_set_roundtrip(tmp_path):
+    # Drive BOTH halves of the driver<->readout contract through the SHARED
+    # save_test_set/load_test_set pair (the driver writes via save_test_set), so a
+    # writer-side filename/key rename can't pass unnoticed. 2 domains (V0=4, V1=3),
+    # 2 docs; aff_frontiers deliberately differ from frontiers to prove they stay
+    # separate (the theta-baseline alignment guarantee).
     from scipy import sparse as sp
-    from multidomain_lr_readout import load_test_set
-    sp.save_npz(str(tmp_path / "test_bow_0.npz"),
-                sp.csr_matrix(np.array([[1.0, 0, 2, 0], [0, 0, 0, 3]])))
-    sp.save_npz(str(tmp_path / "test_bow_1.npz"),
-                sp.csr_matrix(np.array([[0.0, 1, 0], [1, 0, 1]])))
-    np.save(str(tmp_path / "test_affinity.npy"), np.zeros((2, 5)))
-    (tmp_path / "test_meta.json").write_text(json.dumps({
-        "n_docs": 2, "frontiers": [[5], []], "aff_frontiers": [[7], []]}))
+    from multidomain_lr_readout import save_test_set, load_test_set
+    bows_in = {0: sp.csr_matrix(np.array([[1.0, 0, 2, 0], [0, 0, 0, 3]])),
+               1: sp.csr_matrix(np.array([[0.0, 1, 0], [1, 0, 1]]))}
+    save_test_set(tmp_path, bows_in, np.zeros((2, 5)),
+                  frontiers=[[5], []], aff_frontiers=[[7], []])
     bows, frontiers, aff, aff_frontiers, n = load_test_set(tmp_path, 2)
     assert set(bows) == {0, 1}
     assert bows[0].shape == (2, 4) and bows[1].shape == (2, 3)

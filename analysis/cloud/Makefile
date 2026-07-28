@@ -413,10 +413,11 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    $(LR_ARGS)
 
 # Post-hoc likelihood-ratio readout for a MULTI-DOMAIN gated run (no re-fit).
-# Reads the run's saved per-domain lambda + manifest + the persisted held-out
-# test set (test_docs/ + test_affinities/, written by multidomain_cloud.py) --
-# entirely from the run dir. Unlike `lr-readout` above, there is no bundle
-# cache and no --cache-uri: the readout is self-contained (no BigQuery).
+# Reads the run's saved per-domain lambda + manifest + the driver-local held-out
+# test set (test_bow_<m>.npz + test_affinity.npy + test_meta.json, written by
+# multidomain_cloud.py) -- entirely from the run dir. Unlike `lr-readout` above,
+# there is no bundle cache and no --cache-uri: the readout is self-contained (no
+# BigQuery), and needs no Spark session (spark-submit is only the --py-files vehicle).
 MULTIDOMAIN_LR_ALPHA_GRID ?= 0,1,10,100,inf
 multidomain-lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi

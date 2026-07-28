@@ -580,8 +580,10 @@ def main(argv=None) -> int:
             # CAVI re-run); test_meta.json = the frontiers + count. Guarded on a
             # non-empty test split.
             from scipy import sparse as _sp
+            from multidomain_lr_readout import save_test_set
             test_rows = bundle.test_df.select(*_test_persist_cols(feature_cols)).collect()
             if test_rows:
+                bows = {}
                 for m, col in enumerate(feature_cols):
                     V = int(test_rows[0][col].size)          # per-domain vocab width
                     indptr, idx, val = [0], [], []
@@ -590,21 +592,20 @@ def main(argv=None) -> int:
                         idx.extend(int(i) for i in sv.indices)
                         val.extend(float(x) for x in sv.values)
                         indptr.append(len(idx))
-                    csr = _sp.csr_matrix((val, idx, indptr), shape=(len(test_rows), V))
-                    _sp.save_npz(str(out / f"test_bow_{m}.npz"), csr)
+                    bows[m] = _sp.csr_matrix((val, idx, indptr),
+                                             shape=(len(test_rows), V))
                 # affinities (theta baseline) collected with their OWN frontiers --
-                # a separate collect than test_rows, so pair each within its own
-                # collect (row order is not shared across two collects).
+                # a separate collect than test_rows, so keep each frame's frontiers
+                # with its own rows (row order is not shared across two collects).
                 aff_rows = (model.transform(bundle.test_df)
                             .select("nodeAffinity", "frontier").collect())
                 aff = np.array([np.asarray(r["nodeAffinity"].toArray(), dtype=float)
                                 for r in aff_rows])
-                np.save(str(out / "test_affinity.npy"), aff)
-                (out / "test_meta.json").write_text(json.dumps({
-                    "n_docs": len(test_rows),
-                    "frontiers": [[int(x) for x in r["frontier"]] for r in test_rows],
-                    "aff_frontiers": [[int(x) for x in r["frontier"]] for r in aff_rows],
-                }))
+                # save_test_set owns the sidecar filenames/keys (shared with the
+                # readout's load_test_set -- one source of truth for the contract).
+                save_test_set(out, bows, aff,
+                              [r["frontier"] for r in test_rows],
+                              [r["frontier"] for r in aff_rows])
                 print(f"[driver]   persisted {len(test_rows)} test docs "
                       f"(driver-local) for LR readout -> {out}", flush=True)
             else:
