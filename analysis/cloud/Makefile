@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -123,6 +123,7 @@ help:
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
 	@echo "  build-covariates EXP=N  - rebuild STM covariate cache for experiment N without re-running fit."
 	@echo "                         Useful when iterating on covariate_formula. FORCE=1 invalidates cache."
+	@echo "  multidomain-lr-readout ID=N [MULTIDOMAIN_LR_ALPHA_GRID=..]  Post-hoc per-domain LR readout (multidomain fit)"
 	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
 	@echo "                         Restricts to patients with a first malignant-cancer dx"
 	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
@@ -410,6 +411,28 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --sample-cases $(LR_SAMPLE_CASES) \
 	    --sample-background $(LR_SAMPLE_BACKGROUND) \
 	    $(LR_ARGS)
+
+# Post-hoc likelihood-ratio readout for a MULTI-DOMAIN gated run (no re-fit).
+# Reads the run's saved per-domain lambda + manifest + the persisted held-out
+# test set (test_docs/ + test_affinities/, written by multidomain_cloud.py) --
+# entirely from the run dir. Unlike `lr-readout` above, there is no bundle
+# cache and no --cache-uri: the readout is self-contained (no BigQuery).
+MULTIDOMAIN_LR_ALPHA_GRID ?= 0,1,10,100,inf
+multidomain-lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 8g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
+	    $(REPO_ROOT)/analysis/cloud/multidomain_lr_readout.py \
+	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
+	    --alpha-grid $(MULTIDOMAIN_LR_ALPHA_GRID)
 
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
