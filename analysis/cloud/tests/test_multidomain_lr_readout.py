@@ -3,14 +3,19 @@ import numpy as np
 
 def test_children_map_and_subtree_from_parent_int():
     from multidomain_lr_readout import children_map, subtree_nodes
-    # forest: 100 -> {200 (->201), 300}; 200 has child 201.
-    parent_int = {200: 100, 300: 100, 201: 200}
+    # forest: 100 -> {200, 300}; 201 is MULTI-PARENT (child of both 200 and 300)
+    # -- parent_int is always list-valued in production (ConditionDag.to_engine
+    # emits {child: [parents]} even for single-parent nodes).
+    parent_int = {200: [100], 300: [100], 201: [200, 300]}
     cmap = children_map(parent_int)
-    assert cmap[100] == {200, 300} and cmap[200] == {201}
-    # subtree(100) = 100 + all descendants; subtree(200) = {200, 201}
+    assert cmap[100] == {200, 300}
+    assert cmap[200] == {201}
+    assert cmap[300] == {201}
+    # subtree(100) = 100 + all descendants; subtree(200)/(300) both reach 201
+    # through their respective edge to the multi-parent node.
     assert subtree_nodes(parent_int, 100) == {100, 200, 300, 201}
     assert subtree_nodes(parent_int, 200) == {200, 201}
-    assert subtree_nodes(parent_int, 300) == {300}       # leaf
+    assert subtree_nodes(parent_int, 300) == {300, 201}
 
 
 def test_build_domain_bows_shapes_and_frontier():
@@ -40,7 +45,9 @@ def test_per_disease_auc_row_uses_max_over_subtree():
     from spark_vi.models.topic.dag_placement import DagLayout
     from multidomain_lr_readout import per_disease_auc_row
     lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=1, tpn=1)     # nodes: 1,2,3 ; 3 child of 1
-    parent_int = {1: 0, 2: 0, 3: 1}
+    # list-valued, matching production (ConditionDag.to_engine always emits a
+    # parents LIST, even for single-parent nodes).
+    parent_int = {1: [0], 2: [0], 3: [1]}
     # scores [n_docs x n_nodes] aligned to lay.nodes; make node 3 high for doc0.
     n3 = lay.nodes.index(3)
     scores = np.zeros((4, len(lay.nodes)))

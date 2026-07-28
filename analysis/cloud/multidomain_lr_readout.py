@@ -45,10 +45,12 @@ def parse_alpha_grid(s):
 
 
 def children_map(parent_int):
-    """{node: set(children)} inverted from {node: parent}."""
+    """{node: set(children)} inverted from {node: [parents]} (list-valued,
+    multi-parent DAG per ConditionDag.to_engine)."""
     cmap = {}
-    for child, parent in parent_int.items():
-        cmap.setdefault(int(parent), set()).add(int(child))
+    for child, parents in parent_int.items():
+        for parent in parents:
+            cmap.setdefault(int(parent), set()).add(int(child))
     return cmap
 
 
@@ -134,11 +136,15 @@ def main(argv=None) -> int:
     domain_names = manifest.get("domains", [f"m{i}" for i in range(n_dom)])
 
     cm = manifest["corpus_manifest"]
-    parent_int = {int(k): int(v) for k, v in cm["parent_int"].items()}
+    parent_int = {int(k): [int(x) for x in v] for k, v in cm["parent_int"].items()}
     lay = DagLayout(parent_int, n_bg=manifest["n_bg"], tpn=manifest["tpn"])
     int2cid = {int(k): int(v) for k, v in cm["int2cid"].items()}
     cid2int = {c: i for i, c in int2cid.items()}
     name_by_id = {int(k): v for k, v in cm["name_by_id"].items()}
+    # int2cid is engine-id -> concept-id; name_by_id is concept-id -> name. The
+    # anchor loop below prints ENGINE ids, so it needs the composed engine-id ->
+    # name map (mirrors multidomain_cloud.py's name_by_engine construction).
+    name_by_engine = {i: name_by_id.get(c, str(c)) for i, c in int2cid.items()}
     alpha_grid = parse_alpha_grid(args.alpha_grid)
 
     with make_spark_session(app_name="multidomain-lr-readout") as spark:
@@ -189,7 +195,7 @@ def main(argv=None) -> int:
         header += "  " + name[:12].rjust(12)
     print("[lr] " + header, flush=True)
     for u in anchors:
-        dname = str(name_by_id.get(u, int2cid.get(u)))[:24]
+        dname = str(name_by_engine.get(u, int2cid.get(u)))[:24]
         theta_auc, n_pos = per_disease_auc_row(aff, frontiers, u, lay, parent_int)
         line = dname.ljust(26) + str(n_pos).rjust(5) + f"  {theta_auc:5.3f}"
         for name in subsets:

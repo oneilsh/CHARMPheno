@@ -547,8 +547,8 @@ def main(argv=None) -> int:
                     "prior_obs_days": args.prior_obs_days,
                     "holdout_frac": args.holdout_frac,
                     "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
-                    "parent_int": {str(i): int(p)
-                                   for i, p in bundle.parent_int.items()},
+                    "parent_int": {str(i): [int(x) for x in ps]
+                                   for i, ps in bundle.parent_int.items()},
                     "name_by_id": {str(c): n
                                    for c, n in bundle.name_by_id.items()},
                     # Per-domain vocabularies + concept names, keyed by NAME: makes
