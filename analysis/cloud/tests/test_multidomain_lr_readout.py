@@ -121,19 +121,40 @@ def test_per_disease_pr_perfect_ranker():
     assert prec_at[0.5] == 1.0 and prec_at[0.8] == 1.0
 
 
-def test_per_disease_pr_uninformative_ranker_is_near_prevalence():
+def test_per_disease_pr_constant_scorer_is_exactly_prevalence_any_arrangement():
+    # A constant (zero-information) scorer must yield AP == prevalence EXACTLY and
+    # must not depend on WHICH rows are the positives (ties collapse to one
+    # threshold). This is the regression guard for the row-order tie bug.
     from multidomain_lr_readout import per_disease_pr
     lay, parent_int = _pr_fixture()
     col = lay.nodes.index(1)
-    # Constant score -> every doc tied; AP of a random ranker ~= prevalence.
-    n, n_pos_want = 100, 20
+    n, k = 100, 20
     scores = np.zeros((n, len(lay.nodes)))
-    scores[:, col] = 1.0
-    frontiers = [[1] if i % 5 == 0 else [] for i in range(n)]   # 20/100 = 0.2
+    scores[:, col] = 1.0                      # all tied
+    for positives in ([i for i in range(n) if i % 5 == 0],   # spread
+                      list(range(k)),                        # first rows
+                      list(range(n - k, n))):                # last rows
+        frontiers = [[1] if i in set(positives) else [] for i in range(n)]
+        pr_auc, prec_at, n_pos = per_disease_pr(scores, frontiers, 1, lay, parent_int)
+        assert n_pos == k
+        assert abs(pr_auc - k / n) < 1e-9              # EXACTLY prevalence
+        assert abs(prec_at[0.5] - k / n) < 1e-9
+        assert abs(prec_at[0.8] - k / n) < 1e-9
+
+
+def test_per_disease_pr_uses_max_over_subtree():
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from multidomain_lr_readout import per_disease_pr
+    lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=1, tpn=1)   # node 3 is a child of 1
+    parent_int = {1: [0], 2: [0], 3: [1]}
+    n3 = lay.nodes.index(3)
+    scores = np.zeros((4, len(lay.nodes)))
+    scores[0, n3] = 10.0                                 # doc0 strong at SUBTYPE 3
+    frontiers = [[3], [], [], []]                        # doc0 positive for anchor 1 via 3
     pr_auc, prec_at, n_pos = per_disease_pr(scores, frontiers, 1, lay, parent_int)
-    assert n_pos == n_pos_want
-    assert abs(pr_auc - 0.2) < 0.05            # ~= prevalence baseline
-    assert abs(prec_at[0.5] - 0.2) < 0.05
+    assert n_pos == 1                                    # subtree positive counted
+    assert pr_auc == 1.0                                 # max-over-subtree ranks it top
+    assert prec_at[0.5] == 1.0
 
 
 def test_per_disease_pr_reads_the_right_operating_point():
