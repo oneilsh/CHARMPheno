@@ -39,7 +39,6 @@ from spark_vi.core.config import VIConfig
 from spark_vi.core.model import VIModel
 from spark_vi.core.result import VIResult
 from spark_vi.diagnostics.persist import assert_persisted
-from spark_vi.io.export import load_result, save_result
 
 log = logging.getLogger(__name__)
 
@@ -152,6 +151,14 @@ class VIRunner:
                 Exceptions are caught and logged so a buggy diagnostic
                 doesn't kill the fit.
         """
+        # Lazy import to break a module-load cycle: spark_vi.io.export imports
+        # spark_vi.core.result (which triggers spark_vi.core.__init__ -> runner),
+        # so a module-level `from spark_vi.io.export import ...` here deadlocks any
+        # consumer that imports export BEFORE core (e.g. a post-hoc readout doing
+        # `from spark_vi.io.export import load_result` first). These names are only
+        # used inside fit(), so importing them here is sufficient and cycle-free.
+        from spark_vi.io.export import load_result, save_result
+
         model = self.model
         cfg = self.config
 
