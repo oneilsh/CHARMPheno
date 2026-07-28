@@ -160,6 +160,12 @@ def test_domain_registry_maps_source_tables_to_date_cols_and_names():
     assert DOMAIN_REGISTRY["observation"]["name"] == "observation"
 
 
+def test_test_persist_cols_is_person_features_frontier():
+    from multidomain_cloud import _test_persist_cols
+    assert _test_persist_cols(["features_0", "features_1", "features_2"]) == \
+        ["person_id", "features_0", "features_1", "features_2", "frontier"]
+
+
 def test_dead_node_report_spares_a_node_alive_in_only_one_domain():
     """dead_node_report's cross-domain check is an OR: a node concentrated in
     ANY domain is alive, even if flat in every other domain. This distinguishes

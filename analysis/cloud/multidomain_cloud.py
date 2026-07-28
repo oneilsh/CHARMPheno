@@ -329,6 +329,12 @@ def _window_events_to_cohort(cond_windowed, dom_df, *,
     )
 
 
+def _test_persist_cols(feature_cols):
+    """Columns of bundle.test_df to persist for the post-hoc LR readout:
+    person_id + every per-domain feature column + the frontier labels."""
+    return ["person_id", *feature_cols, "frontier"]
+
+
 def _log_corpus_stats(bundle, lay, domain_names):
     """Log + return train/test doc counts, per-source_cohort breakdown, how many
     docs carry a frontier, and the per-domain vocab / topic-structure dims.
@@ -541,6 +547,8 @@ def main(argv=None) -> int:
                     "prior_obs_days": args.prior_obs_days,
                     "holdout_frac": args.holdout_frac,
                     "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
+                    "parent_int": {str(i): int(p)
+                                   for i, p in bundle.parent_int.items()},
                     "name_by_id": {str(c): n
                                    for c, n in bundle.name_by_id.items()},
                     # Per-domain vocabularies + concept names, keyed by NAME: makes
@@ -557,6 +565,25 @@ def main(argv=None) -> int:
             }
             (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
             print(f"[driver]   saved multidomain_gated result to {out}", flush=True)
+
+        with _phase("persist test set (post-hoc LR readout)"):
+            # Self-contained artifact (choice C): the LR readout loads these from
+            # the run dir -- no BigQuery, no bundle cache. test_docs = held-out
+            # per-domain BOWs + frontier (LR scoring input); test_affinities = the
+            # model's native theta-mass node scores (the readout's baseline, so no
+            # CAVI re-run). Guarded on a non-empty test split.
+            n_test = bundle.test_df.count()
+            if n_test > 0:
+                (bundle.test_df.select(*_test_persist_cols(feature_cols))
+                 .write.mode("overwrite").parquet(str(out / "test_docs")))
+                (model.transform(bundle.test_df)
+                 .select("person_id", "nodeAffinity", "frontier")
+                 .write.mode("overwrite").parquet(str(out / "test_affinities")))
+                print(f"[driver]   persisted {n_test} test docs + affinities "
+                      f"for LR readout -> {out}", flush=True)
+            else:
+                print("[driver]   test split empty; skipping LR-readout persistence",
+                      flush=True)
     return 0
 
 
