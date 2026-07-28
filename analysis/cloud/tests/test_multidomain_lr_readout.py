@@ -95,3 +95,75 @@ def test_build_parser_defaults():
     args = build_parser().parse_args(["--run-dir", "/runs/0071-x"])
     assert args.run_dir == "/runs/0071-x"
     assert args.alpha_grid == "0,1,10,100,inf"             # default sweep
+
+
+def _pr_fixture():
+    """A 1-node layout (node 1, no children) + scores/frontiers helper: node 1 is
+    the anchor, so subtree(1) == {1} and the per-disease score is that column."""
+    from spark_vi.models.topic.dag_placement import DagLayout
+    lay = DagLayout({1: [0]}, n_bg=1, tpn=1)
+    parent_int = {1: [0]}
+    return lay, parent_int
+
+
+def test_per_disease_pr_perfect_ranker():
+    from multidomain_lr_readout import per_disease_pr
+    lay, parent_int = _pr_fixture()
+    col = lay.nodes.index(1)
+    # 2 positives ranked strictly above 6 negatives -> perfect PR.
+    scores = np.zeros((8, len(lay.nodes)))
+    scores[:, col] = [9.0, 8.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    frontiers = [[1], [1], [], [], [], [], [], []]
+    pr_auc, prec_at, n_pos = per_disease_pr(scores, frontiers, 1, lay, parent_int,
+                                           recalls=(0.5, 0.8))
+    assert n_pos == 2
+    assert pr_auc == 1.0
+    assert prec_at[0.5] == 1.0 and prec_at[0.8] == 1.0
+
+
+def test_per_disease_pr_uninformative_ranker_is_near_prevalence():
+    from multidomain_lr_readout import per_disease_pr
+    lay, parent_int = _pr_fixture()
+    col = lay.nodes.index(1)
+    # Constant score -> every doc tied; AP of a random ranker ~= prevalence.
+    n, n_pos_want = 100, 20
+    scores = np.zeros((n, len(lay.nodes)))
+    scores[:, col] = 1.0
+    frontiers = [[1] if i % 5 == 0 else [] for i in range(n)]   # 20/100 = 0.2
+    pr_auc, prec_at, n_pos = per_disease_pr(scores, frontiers, 1, lay, parent_int)
+    assert n_pos == n_pos_want
+    assert abs(pr_auc - 0.2) < 0.05            # ~= prevalence baseline
+    assert abs(prec_at[0.5] - 0.2) < 0.05
+
+
+def test_per_disease_pr_reads_the_right_operating_point():
+    from multidomain_lr_readout import per_disease_pr
+    lay, parent_int = _pr_fixture()
+    col = lay.nodes.index(1)
+    # Ranked order: P N P N  (2 positives). Cumulative precision/recall:
+    #   rank1 P: tp=1 -> prec 1/1=1.00, rec 0.5
+    #   rank2 N: tp=1 -> prec 1/2=0.50, rec 0.5
+    #   rank3 P: tp=2 -> prec 2/3=0.667, rec 1.0
+    # precision@0.5 = 1.00 (first index reaching rec>=0.5)
+    # precision@1.0 = 0.667 ; precision@1.5 unreachable -> nan
+    scores = np.zeros((4, len(lay.nodes)))
+    scores[:, col] = [4.0, 3.0, 2.0, 1.0]
+    frontiers = [[1], [], [1], []]
+    pr_auc, prec_at, n_pos = per_disease_pr(scores, frontiers, 1, lay, parent_int,
+                                           recalls=(0.5, 1.0, 1.5))
+    assert n_pos == 2
+    assert prec_at[0.5] == 1.0
+    assert abs(prec_at[1.0] - 2.0 / 3.0) < 1e-9
+    assert np.isnan(prec_at[1.5])              # unreachable recall
+    # AP = sum over positives of precision at that positive = (1.0 + 0.667)/2
+    assert abs(pr_auc - (1.0 + 2.0 / 3.0) / 2.0) < 1e-9
+
+
+def test_per_disease_pr_one_class_is_nan():
+    from multidomain_lr_readout import per_disease_pr
+    lay, parent_int = _pr_fixture()
+    scores = np.zeros((4, len(lay.nodes)))
+    pr_auc, prec_at, n_pos = per_disease_pr(scores, [[], [], [], []], 1, lay,
+                                           parent_int)
+    assert n_pos == 0
+    assert np.isnan(pr_auc) and np.isnan(prec_at[0.5])

@@ -141,6 +141,58 @@ def per_disease_auc_row(scores, frontiers, anchor, lay, parent_int):
     return _auc(node_score, y), int(y.sum())
 
 
+def per_disease_pr(scores, frontiers, anchor, lay, parent_int, recalls=(0.5, 0.8)):
+    """(pr_auc, {recall: precision}, n_pos) for detecting disease `anchor`.
+
+    Same detection problem as `per_disease_auc_row` -- positive = the doc's
+    frontier intersects subtree(anchor); per-disease score = max over that
+    subtree's columns -- so PR and ROC numbers are directly comparable.
+
+    pr_auc = step-wise AVERAGE PRECISION, Sum_i (rec_i - rec_{i-1}) * prec_i
+    (Davis & Goadrich 2006, "The relationship between Precision-Recall and ROC
+    curves", ICML): the trapezoidal rule is optimistically biased on PR curves
+    because precision is not linear between operating points. At rare-disease
+    base rates the random-classifier PR-AUC is the PREVALENCE (not 0.5), so the
+    caller prints n_pos/n_docs beside it.
+
+    prec_at[r] = precision at the smallest threshold reaching recall >= r
+    (nan if r is unreachable). One-class input -> nan, matching `_auc`.
+    """
+    sub = subtree_nodes(parent_int, anchor) & set(lay.nodes)
+    nan_out = (float("nan"), {float(r): float("nan") for r in recalls}, 0)
+    if not sub:
+        return nan_out
+    cols = [lay.nodes.index(u) for u in sub]
+    node_score = np.asarray(scores)[:, cols].max(axis=1)
+    y = np.array([1 if (set(fr) & sub) else 0 for fr in frontiers], dtype=int)
+    n_pos = int(y.sum())
+    if n_pos == 0 or n_pos == len(y):
+        return (float("nan"), {float(r): float("nan") for r in recalls}, n_pos)
+
+    # Descending order with ties broken in REVERSE row order (ascending stable
+    # sort, then reverse) -- the scikit-learn `average_precision_score`
+    # convention. Sorting descending directly via argsort(-score, "mergesort")
+    # keeps ties in FORWARD row order instead, which is not neutral: for a
+    # score-tied ranker fed a systematic (non-shuffled) frontier pattern it
+    # biases AP away from the prevalence baseline (caught by
+    # test_per_disease_pr_uninformative_ranker_is_near_prevalence).
+    order = np.argsort(node_score, kind="mergesort")[::-1]
+    y_sorted = y[order]
+    tp = np.cumsum(y_sorted)
+    fp = np.cumsum(1 - y_sorted)
+    precision = tp / np.maximum(tp + fp, 1)
+    recall = tp / n_pos
+
+    # Average precision: precision summed at each POSITIVE (where recall steps).
+    ap = float(np.sum(precision * y_sorted) / n_pos)
+
+    prec_at = {}
+    for r in recalls:
+        hit = np.nonzero(recall >= float(r))[0]
+        prec_at[float(r)] = float(precision[hit[0]]) if hit.size else float("nan")
+    return ap, prec_at, n_pos
+
+
 def load_lambda_dict(run_dir):
     """Load the per-domain lambda dict from save_result's sidecars
     (params/lambda_<m>.npy), keyed by the integer domain suffix -- WITHOUT
@@ -242,6 +294,49 @@ def main(argv=None) -> int:
                                          parent_int)
             line += "  " + f"{auc:12.3f}"
         print("[lr] " + line, flush=True)
+
+    # --- PR-AUC table (same subsets as the AUC table). `prev` = n_pos/n_docs is
+    # the random-classifier PR-AUC, the baseline that makes PR-AUC readable at
+    # rare-disease base rates. ---
+    print(f"[lr] === per-disease x domain-subset PR-AUC (avg precision, "
+          f"alpha={a_head}) ===", flush=True)
+    header = "disease".ljust(26) + "n+".rjust(5) + "   prev"
+    for name in subsets:
+        header += "  " + name[:12].rjust(12)
+    print("[lr] " + header, flush=True)
+    for u in anchors:
+        dname = str(name_by_engine.get(u, int2cid.get(u)))[:24]
+        _, _, n_pos = per_disease_pr(subset_scores["all"], frontiers, u, lay,
+                                     parent_int)
+        prev = (n_pos / n_docs) if n_docs else float("nan")
+        line = dname.ljust(26) + str(n_pos).rjust(5) + f"  {prev:5.4f}"
+        for name in subsets:
+            pr_auc, _, _ = per_disease_pr(subset_scores[name], frontiers, u, lay,
+                                          parent_int)
+            line += "  " + f"{pr_auc:12.3f}"
+        print("[lr] " + line, flush=True)
+
+    # --- Precision@recall: the deployability read ("flag enough patients to catch
+    # 80% of true cases -- what fraction of the flagged list is real?") for the
+    # three headline subsets, incl. the cond vs cond+drug operational comparison.
+    # drop:<last domain> is cond+drug when observation is the last domain; fall
+    # back to whatever exists so this never KeyErrors on a 1- or 2-domain run. ---
+    headline = [n for n in ("all", "only:condition",
+                            f"drop:{domain_names[-1]}") if n in subsets]
+    print("[lr] === precision @ recall (headline subsets) ===", flush=True)
+    header = "disease".ljust(26) + "n+".rjust(5)
+    for name in headline:
+        header += "  " + f"{name[:10]}@50%".rjust(16) + f"{name[:10]}@80%".rjust(16)
+    print("[lr] " + header, flush=True)
+    for u in anchors:
+        dname = str(name_by_engine.get(u, int2cid.get(u)))[:24]
+        cells, n_pos_seen = "", 0
+        for name in headline:
+            _, prec_at, n_pos = per_disease_pr(subset_scores[name], frontiers, u,
+                                               lay, parent_int, recalls=(0.5, 0.8))
+            n_pos_seen = n_pos          # same positive set for every subset
+            cells += "  " + f"{prec_at[0.5]:16.3f}" + f"{prec_at[0.8]:16.3f}"
+        print("[lr] " + f"{dname:<26}{n_pos_seen:>5}" + cells, flush=True)
 
     print(f"[lr] scored {n_docs} held-out docs; {len(anchors)} rare6 anchors "
           f"present; domains={domain_names}", flush=True)
