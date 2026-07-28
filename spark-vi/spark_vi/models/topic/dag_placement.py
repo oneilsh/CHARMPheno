@@ -467,6 +467,50 @@ def lr_auc_sweep(bow, lam, lay, is_fg, *, alpha_grid, background=None,
     return out
 
 
+def lr_placement_scores_multidomain(bows, lam_dict, lay, *, alpha, domains=None,
+                                    backgrounds=None, epsilon=1e-9, count_mode="raw"):
+    """Multi-domain per-node LR placement score: the per-domain SUM of the
+    single-domain `lr_placement_scores`. Every domain's lam_dict[m] shares the
+    same K topics and the same `lay`, so the node-placement log-likelihood-ratio
+    is additive across domains -- and a domain SUBSET is the per-domain
+    decomposition (cond-only, leave-one-out, ...).
+
+    bows: {m: [n_docs x V_m]} per-domain BOW matrices (dense or scipy.sparse).
+    lam_dict: {m: [K x V_m]} the fitted per-domain topic-word counts.
+    domains: iterable of domain keys to include (None = all keys of `bows`).
+    backgrounds: {m: base_rate} per domain (None entry -> derived from bows[m],
+        matching lr_placement_scores). Returns [n_docs x n_nodes], lay.nodes order.
+
+    Note: length_normalize is intentionally NOT supported here -- per-domain
+    length normalization would break additivity; the readout uses raw counts.
+    """
+    doms = list(bows.keys()) if domains is None else list(domains)
+    if not doms:
+        raise ValueError("domains must select at least one domain")
+    backgrounds = backgrounds or {}
+    total = None
+    for m in doms:
+        s = lr_placement_scores(bows[m], lam_dict[m], lay, alpha=alpha,
+                                background=backgrounds.get(m), epsilon=epsilon,
+                                count_mode=count_mode)
+        total = s if total is None else total + s
+    return total
+
+
+def lr_auc_sweep_multidomain(bows, lam_dict, lay, is_fg, *, alpha_grid,
+                             domains=None, backgrounds=None, count_mode="raw"):
+    """{alpha: max-over-nodes ROC-AUC vs is_fg} for the multi-domain LR score,
+    over a domain subset. Mirrors the single-domain `lr_auc_sweep`."""
+    y = np.asarray(is_fg, dtype=int)
+    out = {}
+    for a in alpha_grid:
+        s = lr_placement_scores_multidomain(bows, lam_dict, lay, alpha=float(a),
+                                            domains=domains, backgrounds=backgrounds,
+                                            count_mode=count_mode)
+        out[float(a)] = _auc(s.max(axis=1), y)
+    return out
+
+
 def _auc(scores, y):
     """Mann-Whitney (rank-sum) AUC. Ties in `scores` get AVERAGE (mid)ranks
     (scipy.stats.rankdata method='average'), so tied score blocks contribute
