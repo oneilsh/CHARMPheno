@@ -729,6 +729,7 @@ def build_multidomain_args(
         "--obs-vocab-size", str(effective.get("obs_vocab_size", 1500)),
         "--obs-min-df", str(effective.get("obs_min_df", 20)),
         "--obs-min-patient-count", str(effective.get("obs_min_patient_count", 20)),
+        "--obs-exclude-vocab", str(effective.get("obs_exclude_vocab", "")),
         # SVI schedule (mirrors build_dag_placement_args). Default 0.0 = full-batch;
         # _base.yaml sets 0.1, so a multidomain experiment inherits mini-batch
         # UNLESS its frontmatter pins mini_batch_fraction: 0.0 (exps 0070/0071 do).

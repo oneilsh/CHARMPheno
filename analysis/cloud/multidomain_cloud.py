@@ -246,6 +246,12 @@ def parse_args(argv=None):
     p.add_argument("--obs-vocab-size", type=int, default=1500)
     p.add_argument("--obs-min-df", type=int, default=20)
     p.add_argument("--obs-min-patient-count", type=int, default=20)
+    p.add_argument("--obs-exclude-vocab", default="",
+                   type=lambda s: tuple(x.strip() for x in s.split(",") if x.strip()),
+                   help="Comma list of OMOP vocabulary_id values to drop from the "
+                        "OBSERVATION domain (e.g. 'PPI' = the All of Us survey/SDOH "
+                        "vocabulary; insight 0071 found observation net-negative). "
+                        "Empty = no strip.")
     # gating
     p.add_argument("--n-bg", type=int, default=20)
     p.add_argument("--tpn", type=int, default=5)
@@ -404,7 +410,11 @@ def main(argv=None) -> int:
             # does (it also never passes cohort=).
             raws = [load_omop_bigquery(
                         spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
-                        person_sample_mod=args.person_mod, source_table=t)
+                        person_sample_mod=args.person_mod, source_table=t,
+                        # observation-only: strip the AoU survey/SDOH vocabulary
+                        # (insight 0071). Other domains load unfiltered.
+                        exclude_vocabularies=(args.obs_exclude_vocab
+                                              if t == "observation" else ()))
                     for t in domain_tables]
 
         with _phase(f"window ({args.window_mode}) + assemble"):
@@ -537,6 +547,7 @@ def main(argv=None) -> int:
                     "cdr": args.cdr,
                     "domain_tables": domain_tables,
                     "person_mod": args.person_mod,
+                    "obs_exclude_vocab": list(args.obs_exclude_vocab),
                     # Per-domain vocab-fit knobs, keyed by NAME (domain 0 =
                     # condition, always first) -- generalizes the old hardcoded
                     # cond_vocab_size/drug_vocab_size pair to N domains.

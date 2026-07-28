@@ -119,3 +119,13 @@ def test_build_multidomain_args_defaults_domains_and_forward(monkeypatch):
     args = mod.build_multidomain_args(_min_eff(), "/out")
     assert args[args.index("--domains") + 1] == "drug_era"          # exp-0070 shape
     assert args[args.index("--window-mode") + 1] == "forward"
+
+
+def test_build_multidomain_args_emits_obs_exclude_vocab(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_multidomain_args({**_min_eff(), "obs_exclude_vocab": "PPI"},
+                                      "/out")
+    assert args[args.index("--obs-exclude-vocab") + 1] == "PPI"
+    # unset -> empty string (the driver parses that to ())
+    d = mod.build_multidomain_args(_min_eff(), "/out")
+    assert d[d.index("--obs-exclude-vocab") + 1] == ""

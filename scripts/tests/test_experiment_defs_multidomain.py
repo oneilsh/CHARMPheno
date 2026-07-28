@@ -43,3 +43,12 @@ def test_exp_0072_is_the_minibatch_ab_of_0071():
     # the A/B distinction: mini-batch schedule (vs 0071's pinned 0.0)
     assert fm["mini_batch_fraction"] == 0.1
     assert fm["learning_rate_tau0"] == 10.0 and fm["learning_rate_kappa"] == 0.7
+
+
+def test_exps_0071_0072_strip_the_ppi_vocabulary():
+    # insight 0071: observation is net-negative; strip the AoU survey vocabulary.
+    for name in ("0071-multidomain-rare6-cond-drug-obs.md",
+                 "0072-multidomain-rare6-cond-drug-obs-minibatch.md"):
+        mod, fm = _fm(name)
+        mod.validate_frontmatter(fm)
+        assert fm["obs_exclude_vocab"] == "PPI", name

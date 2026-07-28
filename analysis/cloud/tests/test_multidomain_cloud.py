@@ -193,3 +193,13 @@ def test_dead_node_report_spares_a_node_alive_in_only_one_domain():
     dead = dead_node_report({0: lam0, 1: lam1}, lay, min_peak_ratio=5.0)
     assert 1 not in dead   # alive in domain 1 -> spared by the cross-domain OR
     assert 2 in dead       # flat in both domains -> genuinely dead
+
+
+def test_parse_args_obs_exclude_vocab_defaults_empty_and_parses_a_list():
+    from multidomain_cloud import parse_args
+    base = ["--cdr", "p.d", "--billing", "b", "--out-dir", "/x", "--seed", "0"]
+    assert parse_args(base).obs_exclude_vocab == ()          # default = no strip
+    a = parse_args(base + ["--obs-exclude-vocab", "PPI"])
+    assert a.obs_exclude_vocab == ("PPI",)
+    b = parse_args(base + ["--obs-exclude-vocab", "PPI,SNOMED"])
+    assert b.obs_exclude_vocab == ("PPI", "SNOMED")

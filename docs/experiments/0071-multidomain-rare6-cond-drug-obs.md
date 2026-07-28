@@ -26,6 +26,11 @@ drug_min_patient_count: 20
 obs_vocab_size: 1500
 obs_min_df: 20
 obs_min_patient_count: 20
+# insight 0071: the observation domain was net-negative for all six rare
+# diseases (drop:observation >= all everywhere). Strip the All of Us survey/SDOH
+# vocabulary (vocabulary_id='PPI'), which dominates its token volume with low
+# disease specificity. Re-fit required (this changes the observation vocabulary).
+obs_exclude_vocab: PPI
 init: spectral
 spectral_max_vocab: 12000
 spectral_method: scalable
@@ -73,6 +78,15 @@ resume unsupported (v1). No NPMI eval (npz + manifest artifact).
   corroborating drugs + observations? Does the observation domain add signal or
   erode to prior (the SP4 ω question)?
 - `ledger`: the multi-domain assembly provenance.
+- **Did the PPI strip help?** Compare the readout's `drop:observation` column to
+  `all`: insight 0071 had `drop:observation >= all` for all six diseases (observation
+  was pure drag). If the gap narrows or closes, the AoU survey vocabulary was the
+  drag; if it persists, the remaining clinical junk ("History of event",
+  "Long-term current use of...") is, and a max_df cap is the next lever.
+- **The new PR tables:** PR-AUC beside `prev` (prevalence = the random baseline)
+  and precision@50%/80% recall for all / only:condition / drop:observation --
+  whether the ranking AUC translates into deployable precision at these base
+  rates, and whether cond+drug beats cond-alone operationally.
 
 ## Knobs
 

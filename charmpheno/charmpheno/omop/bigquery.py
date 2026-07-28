@@ -75,6 +75,23 @@ def _observation_select_cols():
     return cols, extra
 
 
+def _exclude_vocab_filter(df, exclude_vocabularies):
+    """Drop rows whose `vocabulary_id` is in `exclude_vocabularies`; NULL-SAFE --
+    a concept absent from the OMOP `concept` table has a null vocabulary_id from
+    the left join and is KEPT (an unmapped code is not evidence of being a survey
+    item). Empty tuple = identity (no filter).
+
+    Motivation: All of Us stores its survey/SDOH observations under
+    vocabulary_id 'PPI' (Participant-Provided Information), which dominates the
+    observation domain's token volume with low disease specificity (insight
+    0071). The mechanism is general -- any domain, any vocabulary."""
+    if not exclude_vocabularies:
+        return df
+    keep = (~F.col("vocabulary_id").isin(list(exclude_vocabularies))
+            ) | F.col("vocabulary_id").isNull()
+    return df.where(keep)
+
+
 def load_omop_bigquery(
     *,
     spark: SparkSession,
@@ -85,6 +102,7 @@ def load_omop_bigquery(
     source_table: str = "condition_occurrence",
     cohort: str | None = None,
     prior_obs_days: int | None = None,
+    exclude_vocabularies: tuple[str, ...] = (),
 ) -> DataFrame:
     """Load OMOP-shaped data from a BigQuery CDR dataset.
 
@@ -118,6 +136,12 @@ def load_omop_bigquery(
             index date. None (default) defers to the cohort default (365); 0
             drops the lookback, admitting prevalent cases. Ignored when
             ``cohort`` is None.
+        exclude_vocabularies: OMOP `vocabulary_id` values to drop (e.g.
+            ("PPI",) to strip the All of Us survey/SDOH vocabulary from the
+            observation domain -- insight 0071). Default () = no filtering,
+            byte-identical to before. NULL-safe: concepts missing from the
+            `concept` table (null vocabulary_id) are KEPT. `vocabulary_id` is
+            not added to the output schema.
 
     Returns:
         DataFrame with the canonical required OMOP columns
@@ -209,13 +233,21 @@ def load_omop_bigquery(
         cond = cond.where((F.col("person_id") % person_sample_mod) == 0)
     cond = cond.where(F.col("concept_id") != 0)
 
-    concept = _read("concept").select("concept_id", "concept_name")
+    # vocabulary_id is selected ONLY when a filter needs it, so the default path
+    # reads exactly the same columns as before.
+    concept_cols = ["concept_id", "concept_name"]
+    if exclude_vocabularies:
+        concept_cols.append("vocabulary_id")
+    concept = _read("concept").select(*concept_cols)
 
     # No broadcast hint: full OMOP `concept` (~8M rows, name strings) exceeds
     # autoBroadcastJoinThreshold, so AQE will pick shuffle-hash or sort-merge
     # at runtime. An explicit F.broadcast() here OOM'd the driver in client
     # mode — keep it implicit and let the planner choose.
     omop = cond.join(concept, on="concept_id", how="left")
+    # Vocabulary exclusion runs after the left join (it needs vocabulary_id) and
+    # before the canonical projection (which drops it again).
+    omop = _exclude_vocab_filter(omop, exclude_vocabularies)
     # Reorder so canonical required columns come first, then source-specific.
     omop = omop.select("person_id", "concept_id", "concept_name", *extra_cols)
 
