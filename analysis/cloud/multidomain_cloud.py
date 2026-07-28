@@ -568,19 +568,45 @@ def main(argv=None) -> int:
 
         with _phase("persist test set (post-hoc LR readout)"):
             # Self-contained artifact (choice C): the LR readout loads these from
-            # the run dir -- no BigQuery, no bundle cache. test_docs = held-out
-            # per-domain BOWs + frontier (LR scoring input); test_affinities = the
+            # the run dir -- no BigQuery, no bundle cache. Written DRIVER-LOCAL
+            # (scipy/numpy/json sidecars), NOT via a distributed Spark
+            # DataFrame.write.parquet(local_path): the runs dir is a driver-only
+            # fuse mount, so executors writing partitions there land nothing the
+            # driver can read back -- the same reason save_result writes params/
+            # with np.save on the driver. The held-out split is collected to the
+            # driver (the LR readout collects it anyway). test_bow_<m>.npz = held-
+            # out per-domain BOWs (LR scoring input); test_affinity.npy = the
             # model's native theta-mass node scores (the readout's baseline, so no
-            # CAVI re-run). Guarded on a non-empty test split.
-            n_test = bundle.test_df.count()
-            if n_test > 0:
-                (bundle.test_df.select(*_test_persist_cols(feature_cols))
-                 .write.mode("overwrite").parquet(str(out / "test_docs")))
-                (model.transform(bundle.test_df)
-                 .select("person_id", "nodeAffinity", "frontier")
-                 .write.mode("overwrite").parquet(str(out / "test_affinities")))
-                print(f"[driver]   persisted {n_test} test docs + affinities "
-                      f"for LR readout -> {out}", flush=True)
+            # CAVI re-run); test_meta.json = the frontiers + count. Guarded on a
+            # non-empty test split.
+            from scipy import sparse as _sp
+            test_rows = bundle.test_df.select(*_test_persist_cols(feature_cols)).collect()
+            if test_rows:
+                for m, col in enumerate(feature_cols):
+                    V = int(test_rows[0][col].size)          # per-domain vocab width
+                    indptr, idx, val = [0], [], []
+                    for r in test_rows:
+                        sv = r[col]
+                        idx.extend(int(i) for i in sv.indices)
+                        val.extend(float(x) for x in sv.values)
+                        indptr.append(len(idx))
+                    csr = _sp.csr_matrix((val, idx, indptr), shape=(len(test_rows), V))
+                    _sp.save_npz(str(out / f"test_bow_{m}.npz"), csr)
+                # affinities (theta baseline) collected with their OWN frontiers --
+                # a separate collect than test_rows, so pair each within its own
+                # collect (row order is not shared across two collects).
+                aff_rows = (model.transform(bundle.test_df)
+                            .select("nodeAffinity", "frontier").collect())
+                aff = np.array([np.asarray(r["nodeAffinity"].toArray(), dtype=float)
+                                for r in aff_rows])
+                np.save(str(out / "test_affinity.npy"), aff)
+                (out / "test_meta.json").write_text(json.dumps({
+                    "n_docs": len(test_rows),
+                    "frontiers": [[int(x) for x in r["frontier"]] for r in test_rows],
+                    "aff_frontiers": [[int(x) for x in r["frontier"]] for r in aff_rows],
+                }))
+                print(f"[driver]   persisted {len(test_rows)} test docs "
+                      f"(driver-local) for LR readout -> {out}", flush=True)
             else:
                 print("[driver]   test split empty; skipping LR-readout persistence",
                       flush=True)

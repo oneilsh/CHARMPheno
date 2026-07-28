@@ -1,16 +1,18 @@
 """Post-hoc likelihood-ratio placement readout for a MULTI-DOMAIN gated run
 (no re-fit). Loads a run dir's dict-lambda + manifest + the persisted held-out
-test set (test_docs/ + test_affinities/, written by multidomain_cloud.py), and
-emits a per-rare-disease x domain-subset LR-AUC table plus the theta-mass
-baseline. Self-contained: no BigQuery, no bundle cache (choice C).
+test set (test_bow_<m>.npz + test_affinity.npy + test_meta.json, written
+DRIVER-LOCAL by multidomain_cloud.py), and emits a per-rare-disease x
+domain-subset LR-AUC table plus the theta-mass baseline. Self-contained and
+Spark-FREE: no BigQuery, no bundle cache, no Spark session (choice C).
 
 The multi-domain LR score is the per-domain SUM of the single-domain
 lr_placement_scores; a domain subset is the per-domain decomposition. Per-disease
 detection is max-over-subtree(anchor) vs frontier-hits-subtree.
 
-Only build_parser + the pure helpers (children_map, subtree_nodes,
-build_domain_bows, per_disease_auc_row) are unit-tested; main() (Spark load +
-parquet reads) is cluster-covered (make multidomain-lr-readout ID=N).
+Every function here is pure and unit-tested (build_parser, parse_alpha_grid,
+children_map, subtree_nodes, per_disease_auc_row, load_lambda_dict,
+load_test_set); main() wires them and is cluster-run (make multidomain-lr-readout
+ID=N).
 """
 from __future__ import annotations
 
@@ -27,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Multi-domain per-domain LR placement-lift readout.")
     p.add_argument("--run-dir", required=True,
                    help="Run directory containing manifest.json + params/ + "
-                        "test_docs/ + test_affinities/.")
+                        "test_bow_<m>.npz + test_affinity.npy + test_meta.json.")
     p.add_argument("--alpha-grid", default="0,1,10,100,inf",
                    help="Comma list of LR-shrinkage alphas (inf = the lift limit).")
     return p
@@ -68,29 +70,29 @@ def subtree_nodes(parent_int, root):
     return seen
 
 
-def build_domain_bows(rows, feature_cols, vocab_sizes):
-    """(bows {m: csr [n x V_m]}, frontiers list[list[int]], person_ids list) from
-    collected test_docs rows. rows[i][feature_cols[m]] is a SparseVector-like
-    (.indices/.values/.size); vocab_sizes[m] pins V_m."""
-    n = len(rows)
-    bows = {}
-    for m, col in enumerate(feature_cols):
-        V = int(vocab_sizes[m])
-        indptr = np.zeros(n + 1, dtype=np.int64)
-        idx_chunks, data_chunks = [], []
-        for i, r in enumerate(rows):
-            sv = r[col]
-            idx = np.asarray(sv.indices, dtype=np.int64)
-            val = np.asarray(sv.values, dtype=np.float64)
-            idx_chunks.append(idx)
-            data_chunks.append(val)
-            indptr[i + 1] = indptr[i] + len(idx)
-        indices = np.concatenate(idx_chunks) if idx_chunks else np.array([], np.int64)
-        data = np.concatenate(data_chunks) if data_chunks else np.array([], np.float64)
-        bows[m] = sp.csr_matrix((data, indices, indptr), shape=(n, V))
-    frontiers = [[int(x) for x in r["frontier"]] for r in rows]
-    person_ids = [r["person_id"] for r in rows]
-    return bows, frontiers, person_ids
+def load_test_set(run_dir, n_dom):
+    """Load the DRIVER-LOCAL held-out test set written by multidomain_cloud.py:
+    per-domain scipy CSR (test_bow_<m>.npz), the dense theta-mass affinity
+    (test_affinity.npy), and the frontiers + count (test_meta.json). No Spark.
+
+    Returns (bows {m: csr [n x V_m]}, frontiers list[list[int]], aff [n x n_nodes],
+    aff_frontiers list[list[int]], n_docs). `frontiers` pairs with `bows` (same
+    fit-time collect); `aff_frontiers` pairs with `aff` (its own collect) -- keep
+    them separate so the theta baseline never scores against another collect's
+    labels."""
+    run_dir = Path(run_dir)
+    meta_path = run_dir / "test_meta.json"
+    if not meta_path.exists():
+        raise SystemExit(
+            f"[lr] no test_meta.json under {run_dir} -- this run was fit before "
+            "LR-readout persistence, or its test split was empty. Re-fit on the "
+            "current code to produce a readable artifact.")
+    meta = json.loads(meta_path.read_text())
+    bows = {m: sp.load_npz(str(run_dir / f"test_bow_{m}.npz")) for m in range(n_dom)}
+    aff = np.load(str(run_dir / "test_affinity.npy"))
+    frontiers = [[int(x) for x in fr] for fr in meta["frontiers"]]
+    aff_frontiers = [[int(x) for x in fr] for fr in meta["aff_frontiers"]]
+    return bows, frontiers, aff, aff_frontiers, int(meta["n_docs"])
 
 
 def per_disease_auc_row(scores, frontiers, anchor, lay, parent_int):
@@ -106,16 +108,6 @@ def per_disease_auc_row(scores, frontiers, anchor, lay, parent_int):
     node_score = scores[:, cols].max(axis=1)
     y = np.array([1 if (set(fr) & sub) else 0 for fr in frontiers], dtype=int)
     return _auc(node_score, y), int(y.sum())
-
-
-# ---- affinity (theta-mass) baseline ---------------------------------------
-def affinity_matrix(aff_rows, n_nodes):
-    """[n_docs x n_nodes] dense node-affinity matrix from collected
-    test_affinities rows (r['nodeAffinity'] a DenseVector-like)."""
-    out = np.zeros((len(aff_rows), n_nodes), dtype=float)
-    for i, r in enumerate(aff_rows):
-        out[i, :] = np.asarray(r["nodeAffinity"].toArray(), dtype=float)
-    return out
 
 
 def load_lambda_dict(run_dir):
@@ -145,7 +137,6 @@ def load_lambda_dict(run_dir):
 
 
 def main(argv=None) -> int:
-    from _driver_common import make_spark_session
     from charmpheno.omop.cohorts import disease_anchors
     from spark_vi.models.topic.dag_placement import (
         DagLayout, lr_placement_scores_multidomain)
@@ -155,8 +146,6 @@ def main(argv=None) -> int:
     manifest = json.loads((run_dir / "manifest.json").read_text())
     lam_dict = load_lambda_dict(run_dir)                      # {m: [K x V_m]}
     n_dom = len(lam_dict)
-    feature_cols = [f"features_{i}" for i in range(n_dom)]
-    vocab_sizes = [lam_dict[m].shape[1] for m in range(n_dom)]
     domain_names = manifest.get("domains", [f"m{i}" for i in range(n_dom)])
 
     cm = manifest["corpus_manifest"]
@@ -171,38 +160,9 @@ def main(argv=None) -> int:
     name_by_engine = {i: name_by_id.get(c, str(c)) for i, c in int2cid.items()}
     alpha_grid = parse_alpha_grid(args.alpha_grid)
 
-    if not (run_dir / "test_docs").exists():
-        raise SystemExit(
-            f"[lr] no test_docs/ under {run_dir} -- this run was fit before "
-            "LR-readout persistence, or its test split was empty. Re-fit to "
-            "produce a readable artifact.")
-
-    try:
-        with make_spark_session(app_name="multidomain-lr-readout") as spark:
-            rows = spark.read.parquet(str(run_dir / "test_docs")).select(
-                "person_id", *feature_cols, "frontier").collect()
-            # test_affinities/ ALSO persists frontier alongside nodeAffinity
-            # (multidomain_cloud.py's write). Read it from HERE, not from the
-            # test_docs collect above: two separate spark.read.parquet(...)
-            # .collect() calls are not guaranteed to return rows in the same
-            # order, so pairing aff[i] with frontiers[i] (from the OTHER
-            # collect) would silently score theta against the wrong patient's
-            # label. Within a single collect, row order is fixed, so aff and
-            # aff_frontiers stay aligned.
-            aff_rows = spark.read.parquet(str(run_dir / "test_affinities")).select(
-                "person_id", "nodeAffinity", "frontier").collect()
-    except Exception as e:
-        # run_dir may be a gs:// path, so the local .exists() guard above can't
-        # see a missing/incomplete GCS run dir -- catch the Spark-side failure
-        # (AnalysisException et al.) too and re-raise with the same clear message.
-        raise SystemExit(
-            f"[lr] failed to read test_docs/ or test_affinities/ under {run_dir} "
-            f"-- this run may predate LR-readout persistence, or its test split "
-            f"was empty. Re-fit to produce a readable artifact. ({e})") from e
-
-    bows, frontiers, pids = build_domain_bows(rows, feature_cols, vocab_sizes)
-    aff = affinity_matrix(aff_rows, len(lay.nodes))
-    aff_frontiers = [[int(x) for x in r["frontier"]] for r in aff_rows]
+    # Driver-local test set (scipy CSR per domain + dense affinity + frontiers
+    # json), written by multidomain_cloud.py's persistence. No Spark, no BQ.
+    bows, frontiers, aff, aff_frontiers, n_docs = load_test_set(run_dir, n_dom)
 
     # rare6 anchor engine-ids (skip anchors pruned out of the DAG).
     anchors = []
@@ -252,7 +212,7 @@ def main(argv=None) -> int:
             line += "  " + f"{auc:12.3f}"
         print("[lr] " + line, flush=True)
 
-    print(f"[lr] scored {len(pids)} held-out docs; {len(anchors)} rare6 anchors "
+    print(f"[lr] scored {n_docs} held-out docs; {len(anchors)} rare6 anchors "
           f"present; domains={domain_names}", flush=True)
     return 0
 

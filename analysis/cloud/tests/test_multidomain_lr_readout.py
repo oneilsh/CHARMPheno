@@ -18,23 +18,32 @@ def test_children_map_and_subtree_from_parent_int():
     assert subtree_nodes(parent_int, 300) == {300, 201}
 
 
-def test_build_domain_bows_shapes_and_frontier():
-    from multidomain_lr_readout import build_domain_bows
-    # two fake collected rows, 2 domains (V0=4, V1=3); features are (indices, values)
-    class FakeVec:
-        def __init__(self, size, idx, val):
-            self.size, self.indices, self.values = size, np.array(idx), np.array(val, dtype=float)
-    rows = [
-        {"person_id": "a", "features_0": FakeVec(4, [0, 2], [1.0, 3.0]),
-         "features_1": FakeVec(3, [1], [2.0]), "frontier": [5]},
-        {"person_id": "b", "features_0": FakeVec(4, [], []),
-         "features_1": FakeVec(3, [0, 2], [1.0, 1.0]), "frontier": []},
-    ]
-    bows, frontiers, pids = build_domain_bows(rows, ["features_0", "features_1"], [4, 3])
+def test_load_test_set_roundtrip(tmp_path):
+    # Driver-local sidecars (scipy CSR per domain + dense affinity + frontiers
+    # json), as multidomain_cloud.py writes them. 2 domains (V0=4, V1=3), 2 docs.
+    import json
+    from scipy import sparse as sp
+    from multidomain_lr_readout import load_test_set
+    sp.save_npz(str(tmp_path / "test_bow_0.npz"),
+                sp.csr_matrix(np.array([[1.0, 0, 2, 0], [0, 0, 0, 3]])))
+    sp.save_npz(str(tmp_path / "test_bow_1.npz"),
+                sp.csr_matrix(np.array([[0.0, 1, 0], [1, 0, 1]])))
+    np.save(str(tmp_path / "test_affinity.npy"), np.zeros((2, 5)))
+    (tmp_path / "test_meta.json").write_text(json.dumps({
+        "n_docs": 2, "frontiers": [[5], []], "aff_frontiers": [[7], []]}))
+    bows, frontiers, aff, aff_frontiers, n = load_test_set(tmp_path, 2)
     assert set(bows) == {0, 1}
     assert bows[0].shape == (2, 4) and bows[1].shape == (2, 3)
-    assert bows[0][0, 2] == 3.0 and bows[1][1, 0] == 1.0   # values landed
-    assert frontiers == [[5], []] and pids == ["a", "b"]
+    assert bows[0][0, 2] == 2.0 and bows[1][1, 0] == 1.0   # values landed
+    assert frontiers == [[5], []] and aff_frontiers == [[7], []]  # kept separate
+    assert aff.shape == (2, 5) and n == 2
+
+
+def test_load_test_set_missing_raises(tmp_path):
+    import pytest
+    from multidomain_lr_readout import load_test_set
+    with pytest.raises(SystemExit):        # no test_meta.json -> clear SystemExit
+        load_test_set(tmp_path, 2)
 
 
 def test_per_disease_auc_row_uses_max_over_subtree():
