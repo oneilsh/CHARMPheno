@@ -30,7 +30,15 @@ build-backend = "poetry.core.masonry.api"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 markers = [
-    "slow: integration tests (simulator data, local Spark, minutes-scale)",
+    # `slow` is deselected by default (see addopts below). Measured 2026-07-29:
+    # the @slow tier is ~82% of total runtime (10 tests were 874s of 1071s) while
+    # being the LEAST sensitive to routine edits -- these pin settled math, so they
+    # break on semantic regressions in a refactor rather than on day-to-day change.
+    # That makes them a MERGE gate, not a dev-loop gate: run `make test-all` at
+    # branch-merge / walkthrough time. Marking a test @slow is a deliberate trade
+    # (it leaves the default loop), so keep cheap unit coverage of the same code
+    # path in the fast tier.
+    "slow: recovery / oracle-equivalence / end-to-end gate on simulator data (local Spark, minutes-scale); run via `make test-all` at merge/walkthrough time",
     "cluster: tests that require a real Dataproc cluster (manual only)",
 ]
 addopts = "-m 'not slow and not cluster'"

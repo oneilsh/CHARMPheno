@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from spark_vi.models.topic.dag_placement import DagLayout, frontier_from_coded, strip_dag_node_codes, fit_gated, profile, evaluate, _auc
 
 PARENT = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}   # root 0 -> families 1,2 -> subtypes
@@ -45,6 +46,7 @@ def test_dag_placement_corpus_shapes():
     below3 = [d for d, y in zip(docs, labels) if y in {3}]
     assert any(node_codes[3] in d for d in below3)
 
+@pytest.mark.slow
 def test_fit_gated_learns_node_signatures():
     from tests._stm_synth import dag_placement_corpus
     docs, labels, _ = dag_placement_corpus(
@@ -158,6 +160,7 @@ def test_render_profile_marks_true_and_shows_all_nodes():
         assert str(u) in s
     assert s.count("\n") >= len(lay.nodes)
 
+@pytest.mark.slow
 def test_end_to_end_recovers_family_and_subtype():
     from tests._stm_synth import dag_placement_corpus
     docs, labels, node_codes = dag_placement_corpus(
@@ -276,6 +279,7 @@ def test_dag_placement_corpus_multi_shapes():
     assert any(len(f) > 1 for f in labels)                  # some comorbid patients exist
 
 
+@pytest.mark.slow
 def test_end_to_end_multiparent_comorbid():
     from tests._stm_synth import dag_placement_corpus_multi
     docs, labels, node_codes = dag_placement_corpus_multi(
@@ -884,6 +888,7 @@ def _fdr_delta_arm(*, parent, node_prev, b_only_node, target_node, V_a, V_b, doc
     return tp, fp, int(is_target.sum())
 
 
+@pytest.mark.slow
 def test_fdr_delta_corroborating_domain_raises_leaf_specificity():
     """Specificity claim (spec): a node-specific domain-1 signature lowers that leaf
     node's per-node FDR (more discoveries at fixed q) vs domain-0-only, because the

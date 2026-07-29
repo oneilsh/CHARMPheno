@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from spark_vi.models.topic.types import GatedBOWDocument
 
 
@@ -132,6 +133,7 @@ from _stm_synth import (
 )
 
 
+@pytest.mark.slow
 def test_svi_matches_gibbs_placement_single_parent():
     """Placement-based, depth-weighted equivalence gate (NOT beta cosine). Gated SVI must
     match the collapsed-Gibbs oracle on node-AUC-by-depth (deep depth held to the oracle),
@@ -176,6 +178,7 @@ def _bow(tokens):
 from _stm_synth import dag_placement_corpus_multi
 
 
+@pytest.mark.slow
 def test_svi_matches_gibbs_placement_multi_parent():
     """Same placement-based gate on a multi-parent diamond with comorbid (set-valued)
     frontiers. Prototype: aucD1~0.99/aucD2~1.0 both engines, mrr within ~0.01."""
@@ -668,6 +671,7 @@ def _profile_l1(prof_a, prof_b, lay):
     return float(np.mean(out))
 
 
+@pytest.mark.slow
 def test_multidomain_svi_matches_gibbs_placement():
     """Multi-domain placement-equivalence gate: the SVI engine (GatedOnlineLDA, mean-field
     variational EM -- Hoffman, Blei & Bach 2010) and the collapsed-Gibbs oracle (`fit_gated`
@@ -1643,6 +1647,7 @@ def _identifying_cells(planted, slot, lay):
     return cells
 
 
+@pytest.mark.slow
 def test_scalable_init_recovers_every_identifying_signal(spark):
     """Production-path recovery gate for the SCALABLE spectral init.
 

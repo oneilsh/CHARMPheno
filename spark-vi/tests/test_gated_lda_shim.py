@@ -329,6 +329,7 @@ def test_gated_shim_optimize_alpha_learns_asymmetric(spark):
     assert alpha[lay.block[1][0]] > alpha[lay.block[2][0]]
 
 
+@pytest.mark.slow
 def test_gated_optimize_alpha_recovers_planted_alpha_ensemble(spark):
     # Faithful generative recovery, ENSEMBLE form. Plant a KNOWN per-node Dirichlet
     # alpha; draw each doc's theta from Dir(alpha over its allowed set); generate
