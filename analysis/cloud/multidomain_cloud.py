@@ -190,6 +190,28 @@ def _vocab_concept_names(spark, cdr, billing, vocab_map):
     return {int(r["concept_id"]): r["concept_name"] for r in rows}
 
 
+def _vocab_vocabulary_tally(spark, cdr, billing, vocab_map):
+    """{vocabulary_id: count} over the FITTED vocabulary's concept_ids.
+
+    The decisive check that a --*-exclude-vocab filter actually matched rows:
+    `isin` is case-sensitive, so a mis-cased value silently drops nothing and the
+    fit looks successful. vocab_sizes cannot show this (it is pinned by the
+    --*-vocab-size cap either way). Empty vocab_map -> {}."""
+    from pyspark.sql import functions as F
+    cids = [int(c) for c in vocab_map.keys()]
+    if not cids:
+        return {}
+    rows = (spark.read.format("bigquery")
+            .option("table", f"{cdr}.concept")
+            .option("parentProject", billing).load()
+            .select("concept_id", "vocabulary_id")
+            .where(F.col("concept_id").isin(cids))
+            .groupBy("vocabulary_id")
+            .agg(F.count(F.lit(1)).alias("n"))
+            .collect())
+    return {r["vocabulary_id"]: int(r["n"]) for r in rows}
+
+
 def _idx_to_name(vocab_map, names_by_cid):
     """PURE: {token_index: display_name} from a {concept_id: index} vocab map and a
     {concept_id: name} lookup (name falls back to the concept id as a string)."""
@@ -509,6 +531,25 @@ def main(argv=None) -> int:
                            for vm in bundle.vocab_maps]
             idx2name = {i: _idx_to_name(vm, names_bycid[i])
                         for i, vm in enumerate(bundle.vocab_maps)}
+            # Decisive check that a --*-exclude-vocab filter actually matched rows
+            # (see _vocab_vocabulary_tally): vocab_sizes alone cannot show this,
+            # since it is pinned by the --*-vocab-size cap either way.
+            vocab_vocabulary_tally = {
+                domain_names[i]: _vocab_vocabulary_tally(
+                    spark, args.cdr, args.billing, vm)
+                for i, vm in enumerate(bundle.vocab_maps)}
+            for n in domain_names:
+                print(f"[driver]   vocab vocabulary_id tally {n}: "
+                      f"{vocab_vocabulary_tally[n]}", flush=True)
+            if args.obs_exclude_vocab and "observation" in domain_names:
+                obs_tally = vocab_vocabulary_tally["observation"]
+                still_present = sorted(set(args.obs_exclude_vocab) & set(obs_tally))
+                if still_present:
+                    print(f"[driver]   WARNING: --obs-exclude-vocab="
+                          f"{list(args.obs_exclude_vocab)} but the fitted "
+                          f"observation vocabulary still contains {still_present} "
+                          f"-- the filter did NOT apply (check case/whitespace)",
+                          flush=True)
 
         if args.top_n_tokens > 0:
             with _phase("final topic dump (top terms per domain)"):
@@ -548,6 +589,11 @@ def main(argv=None) -> int:
                     "domain_tables": domain_tables,
                     "person_mod": args.person_mod,
                     "obs_exclude_vocab": list(args.obs_exclude_vocab),
+                    # Evidence the exclude filter actually matched rows (a
+                    # mis-cased/whitespace vocabulary_id would silently drop
+                    # nothing); keyed by domain name, {vocabulary_id: count}
+                    # over the FITTED vocabulary. See _vocab_vocabulary_tally.
+                    "vocab_vocabulary_tally": vocab_vocabulary_tally,
                     # Per-domain vocab-fit knobs, keyed by NAME (domain 0 =
                     # condition, always first) -- generalizes the old hardcoded
                     # cond_vocab_size/drug_vocab_size pair to N domains.

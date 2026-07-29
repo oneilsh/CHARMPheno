@@ -686,6 +686,18 @@ def build_multidomain_args(
     passing an empty/degenerate list would instead assert a per-domain vector.
     """
     cdr, billing = _require_workspace_env()
+    # Comma-string-or-list normalizer: a frontmatter value may be written as a
+    # comma-string ("1.0,0.5") or a YAML list, and both must normalize to the
+    # comma-string the driver's argparse expects. Used below by omega /
+    # eta_per_domain (emitted only when set) AND obs_exclude_vocab (always
+    # emitted -- a YAML list here must not silently str()-serialize to
+    # "['PPI', 'SNOMED']", which would parse into garbage tuple entries and make
+    # the vocabulary strip silently no-op). Defined BEFORE the args list so it is
+    # bound before use, not just before the omega/eta_per_domain call sites.
+    def _as_comma(v):
+        if isinstance(v, (list, tuple)):
+            return ",".join(str(x) for x in v)
+        return str(v)
     args = [
         "--cdr", cdr,
         "--billing", billing,
@@ -729,7 +741,7 @@ def build_multidomain_args(
         "--obs-vocab-size", str(effective.get("obs_vocab_size", 1500)),
         "--obs-min-df", str(effective.get("obs_min_df", 20)),
         "--obs-min-patient-count", str(effective.get("obs_min_patient_count", 20)),
-        "--obs-exclude-vocab", str(effective.get("obs_exclude_vocab", "")),
+        "--obs-exclude-vocab", _as_comma(effective.get("obs_exclude_vocab", "")),
         # SVI schedule (mirrors build_dag_placement_args). Default 0.0 = full-batch;
         # _base.yaml sets 0.1, so a multidomain experiment inherits mini-batch
         # UNLESS its frontmatter pins mini_batch_fraction: 0.0 (exps 0070/0071 do).
@@ -738,12 +750,9 @@ def build_multidomain_args(
         "--learning-rate-kappa", str(effective.get("learning_rate_kappa", 0.7)),
     ]
     # omega / eta_per_domain: emit ONLY when set (None -> shim scalar default).
-    # A frontmatter value may be a comma-string ("1.0,0.5") or a YAML list; both
-    # normalize to the comma-string the driver's _parse_float_list expects.
-    def _as_comma(v):
-        if isinstance(v, (list, tuple)):
-            return ",".join(str(x) for x in v)
-        return str(v)
+    # _as_comma (defined above, before the args list) normalizes the frontmatter
+    # comma-string-or-YAML-list to the comma-string the driver's
+    # _parse_float_list expects.
     if effective.get("omega") is not None:
         args.extend(["--omega", _as_comma(effective["omega"])])
     if effective.get("eta_per_domain") is not None:

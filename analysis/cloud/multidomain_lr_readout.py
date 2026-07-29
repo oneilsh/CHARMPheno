@@ -141,32 +141,6 @@ def per_disease_auc_row(scores, frontiers, anchor, lay, parent_int):
     return _auc(node_score, y), int(y.sum())
 
 
-def _precision_at_recall(scores, y, recalls):
-    """{recall: precision at the smallest achievable THRESHOLD reaching recall >= r}
-    (nan if unreachable). Tie-collapsed on distinct score thresholds, mirroring
-    `_average_precision` / sklearn's _binary_clf_curve: a precision read from
-    inside a tie block is not an operating point any threshold can realize."""
-    scores = np.asarray(scores, dtype=float)
-    y = np.asarray(y, dtype=float)
-    n1 = y.sum()
-    out = {float(r): float("nan") for r in recalls}
-    if n1 == 0:
-        return out
-    order = np.argsort(-scores, kind="mergesort")
-    s, yy = scores[order], y[order]
-    tp_cum = np.cumsum(yy)
-    pp_cum = np.arange(1, len(yy) + 1)
-    group_end = np.concatenate((s[1:] != s[:-1], [True]))
-    ends = np.where(group_end)[0]
-    recall = tp_cum[ends] / n1
-    precision = tp_cum[ends] / pp_cum[ends]
-    for r in recalls:
-        hit = np.nonzero(recall >= float(r))[0]
-        if hit.size:
-            out[float(r)] = float(precision[hit[0]])
-    return out
-
-
 def per_disease_pr(scores, frontiers, anchor, lay, parent_int, recalls=(0.5, 0.8)):
     """(pr_auc, {recall: precision}, n_pos) for detecting disease `anchor`.
 
@@ -183,10 +157,12 @@ def per_disease_pr(scores, frontiers, anchor, lay, parent_int, recalls=(0.5, 0.8
     n_pos/n_docs beside it.
 
     prec_at[r] = precision at the smallest ACHIEVABLE threshold reaching
-    recall >= r (nan if r is unreachable); see `_precision_at_recall`.
+    recall >= r (nan if r is unreachable); see
+    `spark_vi.models.topic.dag_placement._precision_at_recall`.
     One-class input -> nan, matching `_auc`.
     """
-    from spark_vi.models.topic.dag_placement import _average_precision
+    from spark_vi.models.topic.dag_placement import (
+        _average_precision, _precision_at_recall)
     sub = subtree_nodes(parent_int, anchor) & set(lay.nodes)
     if not sub:
         return float("nan"), {float(r): float("nan") for r in recalls}, 0
@@ -296,12 +272,20 @@ def main(argv=None) -> int:
     print("[lr] " + header, flush=True)
     for u in anchors:
         dname = str(name_by_engine.get(u, int2cid.get(u)))[:24]
-        theta_auc, n_pos = per_disease_auc_row(aff, aff_frontiers, u, lay, parent_int)
-        line = dname.ljust(26) + str(n_pos).rjust(5) + f"  {theta_auc:5.3f}"
+        # theta_auc alone uses the theta-mass collect (aff / aff_frontiers) --
+        # a deliberate, previously-reviewed alignment guarantee that must not
+        # change. Its OWN n_pos is discarded here: the printed "n+" column uses
+        # the frontiers-based n_pos below instead, so n+ means one thing across
+        # every column of this table AND matches the PR table / prev.
+        theta_auc, _ = per_disease_auc_row(aff, aff_frontiers, u, lay, parent_int)
+        n_pos, cells = None, ""
         for name in subsets:
-            auc, _ = per_disease_auc_row(subset_scores[name], frontiers, u, lay,
-                                         parent_int)
-            line += "  " + f"{auc:12.3f}"
+            auc, n_pos_sub = per_disease_auc_row(subset_scores[name], frontiers, u,
+                                                 lay, parent_int)
+            if name == "all":
+                n_pos = n_pos_sub          # same positive set for every subset
+            cells += "  " + f"{auc:12.3f}"
+        line = dname.ljust(26) + str(n_pos).rjust(5) + f"  {theta_auc:5.3f}" + cells
         print("[lr] " + line, flush=True)
 
     # --- PR-AUC table (same subsets as the AUC table). `prev` = n_pos/n_docs is

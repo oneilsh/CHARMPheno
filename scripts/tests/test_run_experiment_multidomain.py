@@ -129,3 +129,12 @@ def test_build_multidomain_args_emits_obs_exclude_vocab(monkeypatch):
     # unset -> empty string (the driver parses that to ())
     d = mod.build_multidomain_args(_min_eff(), "/out")
     assert d[d.index("--obs-exclude-vocab") + 1] == ""
+
+
+def test_build_multidomain_args_normalizes_obs_exclude_vocab_list(monkeypatch):
+    # A YAML list in frontmatter must reach the driver as a comma string, not
+    # "['PPI', 'SNOMED']" (which would silently no-op the vocabulary strip).
+    mod = _run_exp(monkeypatch)
+    args = mod.build_multidomain_args(
+        {**_min_eff(), "obs_exclude_vocab": ["PPI", "SNOMED"]}, "/out")
+    assert args[args.index("--obs-exclude-vocab") + 1] == "PPI,SNOMED"

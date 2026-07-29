@@ -195,6 +195,13 @@ def test_dead_node_report_spares_a_node_alive_in_only_one_domain():
     assert 2 in dead       # flat in both domains -> genuinely dead
 
 
+def test_vocab_vocabulary_tally_empty_vocab_is_empty_dict():
+    # Empty vocab_map must short-circuit BEFORE touching spark (spark=None here
+    # would blow up on any real spark.read call).
+    from multidomain_cloud import _vocab_vocabulary_tally
+    assert _vocab_vocabulary_tally(None, "p.d", "b", {}) == {}
+
+
 def test_parse_args_obs_exclude_vocab_defaults_empty_and_parses_a_list():
     from multidomain_cloud import parse_args
     base = ["--cdr", "p.d", "--billing", "b", "--out-dir", "/x", "--seed", "0"]

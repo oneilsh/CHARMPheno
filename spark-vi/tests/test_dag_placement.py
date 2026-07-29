@@ -328,6 +328,21 @@ def test_average_precision_perfect_and_constant():
     assert np.isnan(_average_precision([1.0, 2.0], [0, 0]))   # no positives -> nan
 
 
+def test_precision_at_recall_is_tie_collapsed_and_handles_unreachable():
+    from spark_vi.models.topic.dag_placement import _precision_at_recall
+    # Ranked P N P N -> tie-free: prec@0.5 = 1.0, prec@1.0 = 2/3, prec@1.5 = nan
+    got = _precision_at_recall([4.0, 3.0, 2.0, 1.0], [1, 0, 1, 0], (0.5, 1.0, 1.5))
+    assert got[0.5] == 1.0
+    assert abs(got[1.0] - 2.0 / 3.0) < 1e-9
+    import numpy as np
+    assert np.isnan(got[1.5])
+    # All tied -> one threshold -> precision == prevalence at every reachable recall
+    tied = _precision_at_recall([1.0] * 10, [1] * 3 + [0] * 7, (0.5, 1.0))
+    assert abs(tied[0.5] - 0.3) < 1e-9 and abs(tied[1.0] - 0.3) < 1e-9
+    # No positives -> all nan
+    assert np.isnan(_precision_at_recall([1.0, 2.0], [0, 0], (0.5,))[0.5])
+
+
 def test_evaluate_adds_pr_recall_ci_keys():
     parent = {1: 0, 2: 0, 3: 1}
     lay = DagLayout(parent, n_bg=2, tpn=1)     # nodes [1,2,3], depth(3)=2

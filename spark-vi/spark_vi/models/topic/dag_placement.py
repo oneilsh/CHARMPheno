@@ -550,6 +550,39 @@ def _average_precision(scores, y):
     return float(np.sum((recall - r_prev) * precision))
 
 
+def _precision_at_recall(scores, y, recalls):
+    """{recall: precision at the smallest achievable THRESHOLD reaching recall >= r}
+    (nan if unreachable). Tie-collapsed on distinct score thresholds, mirroring
+    `_average_precision` / sklearn's _binary_clf_curve: a precision read from
+    inside a tie block is not an operating point any threshold can realize.
+
+    This deliberately differs from `_detection_metrics`'s `operating_points`
+    convention below, which thresholds at a ceil-k rank on SORTED FOREGROUND
+    scores (no tie collapse) and reweights by fg/bg prevalence: the two are
+    solving different problems (a single anchor's own recall curve here, vs a
+    deployment operating point against a background-dominated cohort there) and
+    will disagree on tied scores, so they are not interchangeable numbers."""
+    scores = np.asarray(scores, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n1 = y.sum()
+    out = {float(r): float("nan") for r in recalls}
+    if n1 == 0:
+        return out
+    order = np.argsort(-scores, kind="mergesort")
+    s, yy = scores[order], y[order]
+    tp_cum = np.cumsum(yy)
+    pp_cum = np.arange(1, len(yy) + 1)
+    group_end = np.concatenate((s[1:] != s[:-1], [True]))
+    ends = np.where(group_end)[0]
+    recall = tp_cum[ends] / n1
+    precision = tp_cum[ends] / pp_cum[ends]
+    for r in recalls:
+        hit = np.nonzero(recall >= float(r))[0]
+        if hit.size:
+            out[float(r)] = float(precision[hit[0]])
+    return out
+
+
 def _empirical_right_tail_p(values, reference):
     """Right-tail empirical p-value of each `values[i]` against an empirical
     `reference` sample: p = (#{reference >= value} + 1) / (n + 1). The +1/(n+1)
