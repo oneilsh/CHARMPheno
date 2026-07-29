@@ -71,7 +71,16 @@ def test_vi_runner_unpersists_prior_broadcasts_max_iterations_path(spark):
     """
     from spark_vi.core import VIConfig
 
-    cfg = VIConfig(max_iterations=4, convergence_tol=1e-10)
+    # mini_batch_fraction=1.0 (not None) to guarantee 4 iterations: this test is
+    # about broadcast lifecycle across the full loop, and a full-batch fit can no
+    # longer supply them. Full batch takes an undamped rho=1 step (see
+    # test_vi_runner_full_batch_uses_undamped_step), so the conjugate model behind
+    # _run_with_broadcast_tracking reaches its exact posterior in ONE iteration and
+    # then converges at iteration 2. A set fraction is always treated as mini-batch
+    # and never early-stops (VIRunner.fit docstring); 1.0 keeps essentially all the
+    # data, and sampling creates no broadcasts, so the counting math is unchanged.
+    cfg = VIConfig(max_iterations=4, convergence_tol=1e-10,
+                   mini_batch_fraction=1.0, random_seed=0)
     result, unpersist_calls = _run_with_broadcast_tracking(spark, cfg)
 
     assert result.converged is False

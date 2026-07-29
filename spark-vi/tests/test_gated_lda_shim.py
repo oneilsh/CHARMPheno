@@ -644,10 +644,35 @@ def test_multidomain_scalable_spectral_init_yields_per_domain_dict_lambda(spark)
     assert isinstance(lam, dict) and sorted(lam) == [0, 1]
     assert lam[0].shape[1] == 6 and lam[1].shape[1] == 4
     assert m.result.metadata["domains"] == [6, 4]
-    # Seed magnitude survived the per-domain split (scale ~200, not ~1). One SVI
-    # step keeps a large fraction of the seed, so ~1 and ~200 are far apart here.
+    # The seed's DIRECTION survived the per-domain split, asserted via per-topic
+    # CONCENTRATION rather than row mass.
+    #
+    # Row mass can no longer carry this check. Full batch takes an undamped rho=1
+    # step (see tests/test_runner.py::test_vi_runner_full_batch_uses_undamped_step),
+    # which REPLACES lambda with eta + the first E-step's expected counts, so after
+    # one iteration lambda's row mass reflects the CORPUS, not the seed -- a seed
+    # wrongly scaled to row mass ~1 would land at the same row mass as a correct
+    # ~200 one, and the old `> 50.0` floor became unsatisfiable (measured
+    # [62.1, 41.3, 40.5]) without indicating any defect.
+    #
+    # What a correctly-scaled seed still buys is a DECISIVE first E-step, which
+    # shows up as BALANCED topic mass. A seed flattened toward row mass ~1 is
+    # dominated by the eta prior, the first E-step is mushy, and mass collapses
+    # onto fewer topics leaving one starved -- the insight 0066 topic-death
+    # signature, and the real content of "a fit that runs and never concentrates".
+    #
+    # Threshold validated by deliberately patching SPECTRAL_LAMBDA_SCALE to 1.0 and
+    # re-running this fit. Domain 1 row masses, min/max ratio:
+    #     correct (scale 200): [62.1, 41.3, 40.5] -> 0.652
+    #     broken  (scale 1.0): [85.6, 41.3, 17.1] -> 0.199
+    # so 0.4 sits with ~1.6x margin either side. Two rejected alternatives, both
+    # measured on the same pair: per-topic peak fraction (0.649 vs 0.471) discriminates
+    # only on domain 1 and only just; distinct argmax per topic is 3/3 in BOTH cases
+    # and is therefore vacuous. Domain 0 does not discriminate either way (0.987 vs
+    # 0.927) -- it is asserted for symmetry, and domain 1 carries the check.
     for md in (0, 1):
-        assert lam[md].sum(axis=1).min() > 50.0, lam[md].sum(axis=1)
+        mass = lam[md].sum(axis=1)
+        assert mass.min() / mass.max() > 0.4, (md, mass)
 
 
 def test_multidomain_dense_spectral_init_builds_docs_through_the_shared_helper(spark):

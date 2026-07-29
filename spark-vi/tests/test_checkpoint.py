@@ -64,6 +64,16 @@ def test_auto_checkpoint_writes_per_interval(spark, tmp_path):
         convergence_tol=1e-12,
         checkpoint_interval=2,
         checkpoint_dir=ckpt,
+        # mini_batch_fraction=1.0 (not None) to guarantee 4 iterations: this test
+        # is about the checkpoint-INTERVAL mechanics, and a full-batch fit can no
+        # longer supply the iterations. Full batch takes an undamped rho=1 step
+        # (see test_vi_runner_full_batch_uses_undamped_step), so this CONJUGATE
+        # model reaches its exact posterior in ONE iteration, the ELBO stops
+        # changing, and any positive tolerance then converges at iteration 2.
+        # A set fraction is always treated as mini-batch and never early-stops
+        # (VIRunner.fit docstring), while 1.0 keeps essentially all the data.
+        mini_batch_fraction=1.0,
+        random_seed=0,
     )
     runner = VIRunner(CountingModel(), cfg)
     result = runner.fit(rdd)
@@ -79,9 +89,25 @@ def test_auto_checkpoint_writes_per_interval(spark, tmp_path):
 
 
 def test_auto_checkpoint_then_resume_via_kwarg(spark, tmp_path):
-    """End-to-end: auto-checkpoint during a 3-iteration run, then resume via
-    resume_from for 3 more, and verify equivalence with a 6-iteration continuous
-    run. No monkey-patching anywhere — the API is the user-facing contract.
+    """End-to-end: auto-checkpoint during a run, then resume via resume_from, and
+    verify equivalence with a continuous run. No monkey-patching anywhere — the API
+    is the user-facing contract.
+
+    KNOWN WEAKNESS, do not read more into a pass here than is there. Full batch now
+    takes an undamped rho=1 step (see test_vi_runner_full_batch_uses_undamped_step),
+    so this CONJUGATE model reaches its exact posterior — Beta(1+60, 1+40) — in ONE
+    iteration and every run lands there regardless of history. The parameter
+    equivalence below is therefore satisfied TRIVIALLY and can no longer detect a
+    resume that drops or double-counts state; what still has teeth is the iteration
+    bookkeeping (session 1 + session 2). A resume test with real power needs a model
+    whose parameters keep moving, so that a broken resume produces a DIFFERENT
+    answer rather than the same fixed point — tests/test_runner.py's
+    `_make_stub(real_has_converged=True)` (theta += 1 per step, deterministic, never
+    plateaus) is the shape that would do it. Switching mini-batch on instead would
+    NOT work: the runner seeds its sampling RNG once per fit() from
+    cfg.random_seed and consumes draws by `step`, not by the global `t`, so a
+    resumed mini-batch run replays draws 0,1,2 rather than 3,4,5 and is not
+    equivalent to a continuous run by construction.
     """
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.topic.counting import CountingModel
@@ -111,5 +137,14 @@ def test_auto_checkpoint_then_resume_via_kwarg(spark, tmp_path):
         continuous.global_params["alpha"],
         rtol=1e-6,
     )
-    # The resumed run reports its total iteration count (session 1 + session 2).
-    assert resumed.n_iterations == 6
+    # The resumed run reports its TOTAL iteration count (session 1 + session 2).
+    # Session 1 converges at iteration 2 (one rho=1 step reaches the fixed point,
+    # iteration 2 then sees zero ELBO change); the resumed session adds 1 before
+    # converging again, for 3 -- not the 6 that the pre-rho=1 damped schedule took
+    # to creep there.
+    assert resumed.n_iterations == 3
+    assert resumed.converged is True
+    # The exact conjugate posterior, which is what makes the equivalence above
+    # trivial: Beta(1 + 60 ones, 1 + 40 zeros).
+    assert (float(resumed.global_params["alpha"]),
+            float(resumed.global_params["beta"])) == (61.0, 41.0)
