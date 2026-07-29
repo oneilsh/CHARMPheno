@@ -467,8 +467,79 @@ def lr_auc_sweep(bow, lam, lay, is_fg, *, alpha_grid, background=None,
     return out
 
 
+NORMALIZE_MODES = (None, "std", "length", "length+std")
+
+
+def _domain_scale(s):
+    """Per-domain scalar score scale for cross-domain comparability: the standard
+    deviation of the whole [n_docs x n_nodes] score matrix.
+
+    ONE scalar (never per-column) makes the per-domain transform affine over the
+    whole matrix, so it preserves every within-domain ordering -- doc ranking AND
+    max-over-nodes -- and moves only each domain's RELATIVE weight in the sum.
+    Centering is deliberately omitted: a constant added to a domain's whole matrix
+    cancels in both operations the readout performs, so scale is the minimal honest
+    transform. A non-finite or non-positive std returns 1.0, so a constant or
+    empty domain passes through unchanged instead of producing inf/nan (an
+    all-zero domain then contributes nothing -- an inert domain, for free).
+    See docs/superpowers/specs/2026-07-29-domain-normalized-lr-combination-design.md
+    """
+    sd = float(np.std(np.asarray(s, dtype=float)))
+    return sd if np.isfinite(sd) and sd > 0.0 else 1.0
+
+
+def lr_domain_score_matrices(bows, lam_dict, lay, *, alpha, domains=None,
+                             backgrounds=None, epsilon=1e-9, count_mode="raw",
+                             normalize=None):
+    """{m: [n_docs x n_nodes]} per-domain LR placement score matrices, each already
+    transformed per `normalize`. Summing a subset's matrices IS
+    `lr_placement_scores_multidomain` over that subset, so a caller scoring MANY
+    domain subsets (the readout's all / only:m / drop:m decomposition) computes
+    each domain ONCE.
+
+    normalize -- per-domain, applied before the caller sums:
+      None          raw per-domain log-LR sums (plain Naive-Bayes-across-domains).
+      'std'         divide by `_domain_scale`: equalizes each domain's score SCALE
+                    so a high-token-volume domain cannot dominate the sum by
+                    magnitude alone.
+      'length'      per-doc divide by that domain's token count (mean log-LR per
+                    token): removes the within-domain, across-doc utilization
+                    confound, where heavily-coded patients own the head of the
+                    ranking regardless of which codes they have.
+      'length+std'  both.
+
+    Each domain's transform is computed from that domain ALONE, so it does not
+    depend on which subset the caller sums -- the per-domain decomposition stays
+    coherent across subsets. Per-domain normalization costs the summed score its
+    reading as a joint log-likelihood ratio; the readout is a RANKER at the
+    alpha->inf lift limit (already not a posterior), so cross-domain comparability
+    is worth more here than joint-likelihood interpretation. Rationale and the
+    empirical motivation (insight 0072) are in
+    docs/superpowers/specs/2026-07-29-domain-normalized-lr-combination-design.md
+    """
+    if normalize not in NORMALIZE_MODES:
+        raise ValueError(
+            f"normalize must be one of {NORMALIZE_MODES}, got {normalize!r}")
+    doms = list(bows.keys()) if domains is None else list(domains)
+    if not doms:
+        raise ValueError("domains must select at least one domain")
+    backgrounds = backgrounds or {}
+    length_normalize = normalize in ("length", "length+std")
+    out = {}
+    for m in doms:
+        s = lr_placement_scores(bows[m], lam_dict[m], lay, alpha=alpha,
+                                background=backgrounds.get(m), epsilon=epsilon,
+                                count_mode=count_mode,
+                                length_normalize=length_normalize)
+        if normalize in ("std", "length+std"):
+            s = s / _domain_scale(s)
+        out[m] = s
+    return out
+
+
 def lr_placement_scores_multidomain(bows, lam_dict, lay, *, alpha, domains=None,
-                                    backgrounds=None, epsilon=1e-9, count_mode="raw"):
+                                    backgrounds=None, epsilon=1e-9,
+                                    count_mode="raw", normalize=None):
     """Multi-domain per-node LR placement score: the per-domain SUM of the
     single-domain `lr_placement_scores`. Every domain's lam_dict[m] shares the
     same K topics and the same `lay`, so the node-placement log-likelihood-ratio
@@ -480,33 +551,34 @@ def lr_placement_scores_multidomain(bows, lam_dict, lay, *, alpha, domains=None,
     domains: iterable of domain keys to include (None = all keys of `bows`).
     backgrounds: {m: base_rate} per domain (None entry -> derived from bows[m],
         matching lr_placement_scores). Returns [n_docs x n_nodes], lay.nodes order.
-
-    Note: length_normalize is intentionally NOT supported here -- per-domain
-    length normalization would break additivity; the readout uses raw counts.
+    normalize: per-domain transform applied BEFORE the sum -- None (raw, the
+        default and unchanged behavior), 'std', 'length', or 'length+std'. See
+        `lr_domain_score_matrices`; a subset is still the sum of its member
+        domains under every rule.
     """
-    doms = list(bows.keys()) if domains is None else list(domains)
-    if not doms:
-        raise ValueError("domains must select at least one domain")
-    backgrounds = backgrounds or {}
+    mats = lr_domain_score_matrices(bows, lam_dict, lay, alpha=alpha,
+                                    domains=domains, backgrounds=backgrounds,
+                                    epsilon=epsilon, count_mode=count_mode,
+                                    normalize=normalize)
     total = None
-    for m in doms:
-        s = lr_placement_scores(bows[m], lam_dict[m], lay, alpha=alpha,
-                                background=backgrounds.get(m), epsilon=epsilon,
-                                count_mode=count_mode)
+    for s in mats.values():           # insertion order == the caller's `domains`
         total = s if total is None else total + s
     return total
 
 
 def lr_auc_sweep_multidomain(bows, lam_dict, lay, is_fg, *, alpha_grid,
-                             domains=None, backgrounds=None, count_mode="raw"):
+                             domains=None, backgrounds=None, count_mode="raw",
+                             normalize=None):
     """{alpha: max-over-nodes ROC-AUC vs is_fg} for the multi-domain LR score,
-    over a domain subset. Mirrors the single-domain `lr_auc_sweep`."""
+    over a domain subset and under a per-domain normalization rule. Mirrors the
+    single-domain `lr_auc_sweep`."""
     y = np.asarray(is_fg, dtype=int)
     out = {}
     for a in alpha_grid:
         s = lr_placement_scores_multidomain(bows, lam_dict, lay, alpha=float(a),
                                             domains=domains, backgrounds=backgrounds,
-                                            count_mode=count_mode)
+                                            count_mode=count_mode,
+                                            normalize=normalize)
         out[float(a)] = _auc(s.max(axis=1), y)
     return out
 
