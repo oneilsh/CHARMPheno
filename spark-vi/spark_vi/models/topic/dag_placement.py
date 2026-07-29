@@ -505,8 +505,19 @@ def lr_domain_score_matrices(bows, lam_dict, lay, *, alpha, domains=None,
       'length'      per-doc divide by that domain's token count (mean log-LR per
                     token): removes the within-domain, across-doc utilization
                     confound, where heavily-coded patients own the head of the
-                    ranking regardless of which codes they have.
-      'length+std'  both.
+                    ranking regardless of which codes they have. Trade-off, not
+                    a clean win: dividing out length also discards EVIDENCE
+                    QUANTITY, which at rare-disease base rates is real signal
+                    (a synthetic measured this rule costing a signal-carrying
+                    subset 0.716 -> 0.337 PR-AUC with no noise domain even
+                    present). There is also no denominator shrinkage -- a doc
+                    with a single token in a domain gets that one code's full
+                    per-token log-LR as the domain's entire score, so
+                    sparse-domain docs are high-variance and can populate the
+                    ranking's head after 'std'. A `tok + k` or `sqrt(tok)`
+                    denominator would temper this; out of scope here. See
+                    docs/superpowers/specs/2026-07-29-domain-normalized-lr-combination-design.md
+      'length+std'  both (inherits length's trade-off above).
 
     Each domain's transform is computed from that domain ALONE, so it does not
     depend on which subset the caller sums -- the per-domain decomposition stays

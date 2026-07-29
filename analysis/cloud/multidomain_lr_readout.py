@@ -10,8 +10,11 @@ lr_placement_scores; a domain subset is the per-domain decomposition. Per-diseas
 detection is max-over-subtree(anchor) vs frontier-hits-subtree. --normalize
 applies a per-domain transform before that sum (none/std/length/length+std) so a
 high-token-volume domain cannot dominate the ranking by magnitude alone; the
-final table compares every rule against dropping the suspect domain outright
-(insight 0072).
+final two tables print PR-AUC under every rule for subset `all` and for subset
+`drop:<last domain>` so both readings the design spec's acceptance criterion
+needs (within-rule drag, and across-rule cost to the kept domains) are visible
+(insight 0072; corrected acceptance criterion in
+docs/superpowers/specs/2026-07-29-domain-normalized-lr-combination-design.md).
 
 Every function here is pure and unit-tested (build_parser, parse_alpha_grid,
 children_map, subtree_nodes, per_disease_auc_row, load_lambda_dict,
@@ -207,9 +210,15 @@ def pr_by_normalization(bows, lam_dict, lay, frontiers, anchors, parent_int, *,
     under each per-domain normalization rule.
 
     This is the A/B for insight 0072's finding that a high-volume low-signal
-    domain costs most of the precision: compare subset `all` under each rule
-    against the subset that DROPS the suspect domain under rule 'none'. PR (not
-    ROC) is the metric, because the damage is at the head of the ranking.
+    domain costs most of the precision. The caller compares this called TWICE
+    -- once with `domains=subsets["all"]`, once with `domains=subsets[ref_name]`
+    (e.g. `drop:<domain>`) -- so that BOTH drag(rule) (all vs drop:X within a
+    rule) and the rule's effect on the kept domains (drop:X across rules) are
+    visible; a single rule's `all`-vs-`drop:X` difference under only rule
+    'none' is NOT a valid acceptance criterion on its own (see the design
+    spec's "Acceptance criterion" section for the refuted single-difference
+    version and why). PR (not ROC) is the metric, because the damage is at the
+    head of the ranking.
     """
     from spark_vi.models.topic.dag_placement import lr_domain_score_matrices
     out = {}
@@ -355,6 +364,11 @@ def main(argv=None) -> int:
     for name in subsets:
         header += "  " + name[:12].rjust(12)
     print("[lr] " + header, flush=True)
+    # Captured for reuse by the domain-normalization comparison blocks below --
+    # the positive set for a disease depends only on frontiers/anchor, never on
+    # which domains or normalization rule produced the score matrix, so this one
+    # n_pos serves every rule x subset combination those blocks print.
+    n_pos_by_anchor = {}
     for u in anchors:
         dname = str(name_by_engine.get(u, int2cid.get(u)))[:24]
         n_pos = None
@@ -366,6 +380,7 @@ def main(argv=None) -> int:
             if name == "all":
                 n_pos = n_pos_sub          # same positive set for every subset
             cells += "  " + f"{pr_auc:12.3f}"
+        n_pos_by_anchor[u] = n_pos
         prev = (n_pos / n_docs) if n_docs else float("nan")
         line += str(n_pos).rjust(5) + f"{prev:7.4f}" + cells
         print("[lr] " + line, flush=True)
@@ -394,38 +409,61 @@ def main(argv=None) -> int:
             cells += "  " + f"{prec_at[0.5]:16.3f}" + f"{prec_at[0.8]:16.3f}"
         print("[lr] " + f"{dname:<26}{n_pos_seen:>5}" + cells, flush=True)
 
-    # --- Domain-normalization comparison: PR-AUC for subset `all` under every
-    # rule, beside the un-normalized drop-the-suspect-domain column as the
-    # target. insight 0072 measured drop:observation >= all for every disease;
-    # the question here is whether a normalization rule closes that gap so a
-    # low-signal domain can stay in the model without costing precision. ---
+    # --- Domain-normalization comparison: PR-AUC under every rule, printed as
+    # TWO STACKED BLOCKS of identical shape (subset `all`, then subset
+    # `drop:<last_domain>`) rather than paired columns in one table, so no rule
+    # name needs truncating (`length+std` is 10 chars).
+    #
+    # This is the corrected acceptance criterion (see the design spec's
+    # "Acceptance criterion" section -- the original single cross-rule
+    # difference conflated two independent quantities and could invert the
+    # ranking of rules). Two readings, neither sufficient alone:
+    #   reading 1 (within a rule, across these two blocks): drop:X minus all is
+    #     drag(rule) -- what keeping domain X costs under that rule.
+    #   reading 2 (across rules, within the drop:X block): shows what the rule
+    #     does to the domains you KEEP, since every non-`none` rule also
+    #     re-weights the retained domains against each other, not only against
+    #     the dropped one -- so a rule can shrink drag(rule) while degrading
+    #     the kept domains. ---
     ref_name = f"drop:{last_domain}" if f"drop:{last_domain}" in subsets else None
     all_by_rule = pr_by_normalization(bows, lam_dict, lay, frontiers, anchors,
                                       parent_int, alpha=a_head)
-    ref = {}
+    ref_by_rule = {}
     if ref_name:
-        ref = pr_by_normalization(bows, lam_dict, lay, frontiers, anchors,
-                                  parent_int, alpha=a_head,
-                                  domains=subsets[ref_name], rules=("none",))["none"]
-    print(f"[lr] === PR-AUC by domain-normalization rule (subset=all, "
-          f"alpha={a_head}) ===", flush=True)
-    header = "disease".ljust(26)
-    for rule in NORMALIZE_RULES:
-        header += "  " + f"all|{rule}"[:14].rjust(14)
-    if ref_name:
-        header += "  " + f"{ref_name}|none"[:18].rjust(18)
-    print("[lr] " + header, flush=True)
-    for u in anchors:
-        dname = str(name_by_engine.get(u, int2cid.get(u)))[:24]
-        line = dname.ljust(26)
+        ref_by_rule = pr_by_normalization(bows, lam_dict, lay, frontiers, anchors,
+                                          parent_int, alpha=a_head,
+                                          domains=subsets[ref_name])
+
+    def _print_normalization_block(title, by_rule):
+        print(f"[lr] === PR-AUC by domain-normalization rule ({title}, "
+              f"alpha={a_head}) ===", flush=True)
+        header = "disease".ljust(26) + "n+".rjust(5) + "  prev".rjust(7)
         for rule in NORMALIZE_RULES:
-            line += "  " + f"{all_by_rule[rule][u]:14.3f}"
-        if ref_name:
-            line += "  " + f"{ref[u]:18.3f}"
-        print("[lr] " + line, flush=True)
+            header += "  " + rule.rjust(12)
+        print("[lr] " + header, flush=True)
+        for u in anchors:
+            dname = str(name_by_engine.get(u, int2cid.get(u)))[:24]
+            n_pos = n_pos_by_anchor.get(u)
+            prev = (n_pos / n_docs) if n_docs else float("nan")
+            line = dname.ljust(26) + str(n_pos).rjust(5) + f"{prev:7.4f}"
+            for rule in NORMALIZE_RULES:
+                line += "  " + f"{by_rule[rule][u]:12.3f}"
+            print("[lr] " + line, flush=True)
+
+    _print_normalization_block("subset=all", all_by_rule)
     if ref_name:
-        print(f"[lr]   (target: an all|<rule> column matching {ref_name}|none "
-              f"means keeping {last_domain} costs no precision)", flush=True)
+        _print_normalization_block(f"subset={ref_name}", ref_by_rule)
+        print(f"[lr]   reading 1 (within a rule, across the two blocks above): "
+              f"{ref_name} minus all is what keeping {last_domain} costs under "
+              f"that rule.", flush=True)
+        print(f"[lr]   reading 2 (across rules, within the {ref_name} block): "
+              f"shows what the rule does to the domains you keep -- a rule can "
+              f"shrink reading 1's cost while degrading these. Neither block "
+              f"alone proves a rule is better; see the design spec's "
+              f"acceptance criterion.", flush=True)
+    else:
+        print(f"[lr]   (no drop:<domain> reference block -- only {n_dom} "
+              f"domain(s) in this run)", flush=True)
 
     print(f"[lr] scored {n_docs} held-out docs; {len(anchors)} rare6 anchors "
           f"present; domains={domain_names}", flush=True)

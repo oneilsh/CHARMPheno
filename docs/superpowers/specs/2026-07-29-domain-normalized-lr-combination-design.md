@@ -52,6 +52,16 @@ Four rules, all label-free and all readout-side (no re-fit):
 | `length` | per-doc divide by domain m's token count (mean log-LR per token) | (ii) |
 | `length+std` | length-normalize, then scale-equalize | (i) + (ii) |
 
+**Caveat on `length` (not a clean win):** per-doc division also discards **evidence
+quantity**, which at rare-disease base rates is real signal — removing it can cost more
+than the confound it fixes. (The synthetic in the Acceptance-criterion section below
+measured `length` costing a signal-carrying subset 0.716 → 0.337 PR-AUC, with the noise
+domain not even present in that column.) There is also no denominator shrinkage: a doc
+with a single token in a domain contributes that one code's full per-token log-LR as the
+domain's entire term, so sparse-domain docs get high-variance extreme values that can
+populate the head of the ranking after `std`. A `tok + k` or `sqrt(tok)` denominator would
+temper this; out of scope here, noted only as a possible follow-up.
+
 ### Why scale-only, and why a single scalar
 
 Centering is provably irrelevant here: adding a constant to a domain's whole score matrix
@@ -91,6 +101,20 @@ driven toward zero where a domain earns nothing, e.g. via the already-implemente
 incomparable scales are meaningless. The goal here is converting *catastrophic* into
 *bounded and predictable*, and measuring how much of the observed drag that removes.
 
+`_domain_scale`'s use of a single whole-matrix std has two further limits beyond the 1/√D
+dilution bound above:
+
+- **Conflates two spreads.** `σ_m` = std of the whole `[n_docs x n_nodes]` matrix mixes
+  across-doc spread (the volume component that actually drives cross-domain dominance in
+  the sum) with across-node spread (which only decides which node wins for a given doc, not
+  the domain's overall magnitude). A domain with wide node-to-node but narrow doc-to-doc
+  spread is over-shrunk relative to what dilution alone would call for.
+- **Transductive, not deployable as-is.** `σ_m` is estimated from the batch being scored, so
+  a single patient's score is not computable in isolation and is not stable as the scoring
+  cohort changes. Fine for a batch research readout; if `std` is ever promoted to a deployed
+  default, `σ_m` must be persisted from a reference cohort rather than recomputed per
+  scoring batch.
+
 ## Components
 
 ### 1. Library — `spark-vi/spark_vi/models/topic/dag_placement.py`
@@ -117,23 +141,76 @@ incomparable scales are meaningless. The goal here is converting *catastrophic* 
 - Compute per-domain matrices once via `lr_domain_score_matrices`; build each subset as the
   sum of its selected matrices, replacing the current per-subset recompute (which recomputed
   each domain roughly `n_dom + 2` times).
-- New table: **per-disease PR-AUC for subset `all` under each of the four rules**, printed
-  beside the un-normalized `drop:<last domain>` column as the reference target. This is the
+- New tables: **per-disease PR-AUC under each of the four rules**, printed as two stacked
+  blocks of identical shape — one for subset `all`, one for subset `drop:<last domain>` —
+  rather than paired columns in one table, so both readings the (corrected) acceptance
+  criterion needs are visible: within-rule `drop:X` minus `all` is `drag(rule)`; across
+  rules, the `drop:X` block alone shows what the rule does to the domains kept. This is the
   A/B, and it needs no re-fit — exp 0071/0072 already persist their held-out test sets.
 
 ### Acceptance criterion
 
-Per disease, define
+**Correction of record.** This section originally defined a single cross-rule difference,
+`gap(rule) = PR_AUC(drop:observation, none) − PR_AUC(all, rule)`, as the pass/fail measure.
+**That criterion is REFUTED** — see the counterexample below — because it conflates two
+independent quantities and can invert the ranking of rules relative to the property it
+claims to measure. It is kept here, marked refuted, for the record; do not use it as a
+gate.
+
+Per disease and rule, define two **separate** quantities:
 
 ```
-gap(rule) = PR_AUC(drop:observation, none) − PR_AUC(all, rule)
+drag(rule)              = PR_AUC(drop:X, rule) − PR_AUC(all, rule)
+PR_AUC(drop:X, rule)    (compared across rules)
 ```
 
-`gap(none)` is today's drag (large: 0.100 absolute for Ehlers-Danlos). Success is
-`gap(rule)` shrinking toward zero for some rule — i.e. keeping observation in the model
-costs little relative to dropping it. Judge on **PR, not ROC** (insight 0072, Finding 2).
-This is a measurement, not a threshold: whichever rule shrinks the gap most becomes the
-default, and if none does, that is itself the finding that pushes to reliability weighting.
+`drag(rule)` — what keeping domain X costs under that rule — **is** the criterion: success
+is `drag(rule)` shrinking toward zero relative to `drag(none)` (today's baseline, large:
+0.351 absolute in the synthetic below; 0.100 absolute for Ehlers-Danlos in the original
+condition+drug+observation readout). Judge on **PR, not ROC** (insight 0072, Finding 2),
+because the damage is at the head of the ranking.
+
+`PR_AUC(drop:X, rule)` compared across rules is the separate "would we be better off
+curating domain X out entirely, under this rule?" baseline. **Both numbers are required**:
+a rule can shrink `drag(rule)` while degrading the domains it keeps — i.e. while lowering
+`PR_AUC(drop:X, rule)` relative to `PR_AUC(drop:X, none)` — because every non-`none` rule
+also re-weights the retained domains against *each other*, not only against the dropped
+domain.
+
+**Why the original single-difference criterion is wrong.** It decomposes as
+
+```
+gap(rule) = PR_AUC(drop:X, none) − PR_AUC(all, rule)
+          = drag(rule) − [PR_AUC(drop:X, rule) − PR_AUC(drop:X, none)]
+                          \____________________________________________/
+                             the rule's effect on the domains KEPT
+```
+
+The bracketed term is nonzero for every non-`none` rule, so `gap` mixes "does this rule
+help domain X's drag" with "does this rule also hurt the domains we kept" into one number
+— and can rank rules backwards relative to `drag` alone.
+
+**Counterexample (synthetic, refuting the original criterion).** 3000 docs, 2% prevalence,
+3 domains: domain 0 = strong signal, domain 1 = weak signal, domain 2 = high-volume pure
+noise with lognormal per-doc volume heterogeneity and no class enrichment.
+
+| rule | PR(all) | PR(drop:2) | drag(rule) | gap(rule) [refuted] |
+|---|---|---|---|---|
+| none | 0.365 | 0.716 | 0.351 | 0.351 |
+| std | 0.539 | 0.631 | 0.092 | 0.177 |
+| length | 0.337 | 0.337 | −0.001 | 0.378 |
+| length+std | 0.337 | 0.410 | 0.073 | 0.379 |
+
+`length` drives the noise domain's drag to (numerically) zero — the stated goal, fully
+achieved — yet scores **worst** on `gap`, because it also collapses `PR(drop:2)` from 0.716
+to 0.337 (Finding 2's evidence-quantity cost, incurred even though the noise domain isn't
+in that column at all). `std` cuts drag 74% but `gap` shows only 50% of that improvement.
+On `drag` alone the ranking is `length` ≈ `length+std` < `std` ≪ `none`; on the refuted
+`gap`, `std` looks better than `length` — an inversion of the true drag ranking.
+
+This is a measurement, not a threshold: report both `drag(rule)` and `PR_AUC(drop:X,
+rule)` per candidate rule; a rule only wins if it improves (or does not much worsen) both.
+If no rule does, that is itself the finding that pushes to reliability weighting.
 
 ## Testing
 
@@ -154,8 +231,12 @@ Readout (`analysis/cloud/tests/test_multidomain_lr_readout.py`):
 
 - Parser default is `none`; a bad `--normalize` value is rejected.
 - The rule-name → library-value mapping (`"none"` → `None`) round-trips.
-- The comparison-table helper returns `{rule: {anchor: pr_auc}}`, and its `none` entry
-  matches `per_disease_pr` called directly on the un-normalized subset sum.
+- The comparison-table helper (`pr_by_normalization`) returns `{rule: {anchor: pr_auc}}`,
+  and its `none` entry matches `per_disease_pr` called directly on the un-normalized subset
+  sum, for both the `all` subset and an arbitrary `domains=` restriction, with the default
+  `rules` returning all four rules (the capability the two-block `all` / `drop:X` readout
+  depends on — the original single-block table only ever called it with `rules=("none",)`
+  for the reference subset).
 
 ## Out of scope
 

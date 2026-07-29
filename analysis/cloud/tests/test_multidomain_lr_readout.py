@@ -259,3 +259,27 @@ def test_pr_by_normalization_honors_the_domain_subset():
                                         domains=[0]),
         frontiers, anchor, lay, parent_int)[0]
     assert np.isclose(table["none"][anchor], direct)
+
+
+def test_pr_by_normalization_default_rules_cover_all_four_for_a_restricted_subset():
+    # Fix 1a's two-block readout (subset=all, subset=drop:X) calls
+    # pr_by_normalization with an explicit `domains=` restriction (the
+    # reference/drop:X subset) and relies on the DEFAULT `rules` covering all
+    # four normalization rules -- not just 'none' as the earlier single-block
+    # table did. This is the capability that change depends on: every rule's
+    # PR-AUC must be independently computable for a subset OTHER than `all`,
+    # each matching per_disease_pr on that subset's own normalized sum.
+    from spark_vi.models.topic.dag_placement import lr_placement_scores_multidomain
+    from multidomain_lr_readout import (
+        NORMALIZE_RULES, normalize_arg, per_disease_pr, pr_by_normalization)
+    lay, parent_int, lam, bows, anchor, frontiers = _norm_fixture()
+    table = pr_by_normalization(bows, lam, lay, frontiers, [anchor], parent_int,
+                                alpha=float("inf"), domains=[0])
+    assert set(table) == set(NORMALIZE_RULES)
+    for rule in NORMALIZE_RULES:
+        direct = per_disease_pr(
+            lr_placement_scores_multidomain(bows, lam, lay, alpha=float("inf"),
+                                            domains=[0],
+                                            normalize=normalize_arg(rule)),
+            frontiers, anchor, lay, parent_int)[0]
+        assert np.isclose(table[rule][anchor], direct), rule
