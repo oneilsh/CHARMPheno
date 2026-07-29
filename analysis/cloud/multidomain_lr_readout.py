@@ -7,12 +7,16 @@ Spark-FREE: no BigQuery, no bundle cache, no Spark session (choice C).
 
 The multi-domain LR score is the per-domain SUM of the single-domain
 lr_placement_scores; a domain subset is the per-domain decomposition. Per-disease
-detection is max-over-subtree(anchor) vs frontier-hits-subtree.
+detection is max-over-subtree(anchor) vs frontier-hits-subtree. --normalize
+applies a per-domain transform before that sum (none/std/length/length+std) so a
+high-token-volume domain cannot dominate the ranking by magnitude alone; the
+final table compares every rule against dropping the suspect domain outright
+(insight 0072).
 
 Every function here is pure and unit-tested (build_parser, parse_alpha_grid,
 children_map, subtree_nodes, per_disease_auc_row, load_lambda_dict,
-load_test_set); main() wires them and is cluster-run (make multidomain-lr-readout
-ID=N).
+load_test_set, normalize_arg, pr_by_normalization); main() wires them and is
+cluster-run (make multidomain-lr-readout ID=N).
 """
 from __future__ import annotations
 
@@ -24,6 +28,19 @@ import numpy as np
 from scipy import sparse as sp
 
 
+# CLI spellings of the per-domain normalization rules. 'none' maps to the
+# library's None; see spark_vi.models.topic.dag_placement.NORMALIZE_MODES and
+# docs/superpowers/specs/2026-07-29-domain-normalized-lr-combination-design.md
+NORMALIZE_RULES = ("none", "std", "length", "length+std")
+
+
+def normalize_arg(rule):
+    """CLI rule name -> the library `normalize` value ('none' -> None)."""
+    if rule not in NORMALIZE_RULES:
+        raise ValueError(f"unknown normalization rule {rule!r}")
+    return None if rule == "none" else rule
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Multi-domain per-domain LR placement-lift readout.")
@@ -32,6 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "test_bow_<m>.npz + test_affinity.npy + test_meta.json.")
     p.add_argument("--alpha-grid", default="0,1,10,100,inf",
                    help="Comma list of LR-shrinkage alphas (inf = the lift limit).")
+    p.add_argument("--normalize", default="none", choices=list(NORMALIZE_RULES),
+                   help="Per-domain score normalization applied before the "
+                        "domain sum: none (raw), std (equalize per-domain scale), "
+                        "length (per-doc mean log-LR per token), or length+std. "
+                        "Governs the main tables; the comparison table always "
+                        "shows every rule.")
     return p
 
 
@@ -178,6 +201,30 @@ def per_disease_pr(scores, frontiers, anchor, lay, parent_int, recalls=(0.5, 0.8
     return ap, prec_at, n_pos
 
 
+def pr_by_normalization(bows, lam_dict, lay, frontiers, anchors, parent_int, *,
+                        alpha, domains=None, rules=NORMALIZE_RULES):
+    """{rule: {anchor: pr_auc}} -- PR-AUC per anchor for ONE fixed domain subset,
+    under each per-domain normalization rule.
+
+    This is the A/B for insight 0072's finding that a high-volume low-signal
+    domain costs most of the precision: compare subset `all` under each rule
+    against the subset that DROPS the suspect domain under rule 'none'. PR (not
+    ROC) is the metric, because the damage is at the head of the ranking.
+    """
+    from spark_vi.models.topic.dag_placement import lr_domain_score_matrices
+    out = {}
+    for rule in rules:
+        mats = lr_domain_score_matrices(bows, lam_dict, lay, alpha=alpha,
+                                        domains=domains,
+                                        normalize=normalize_arg(rule))
+        scores = None
+        for s in mats.values():
+            scores = s if scores is None else scores + s
+        out[rule] = {u: per_disease_pr(scores, frontiers, u, lay, parent_int)[0]
+                     for u in anchors}
+    return out
+
+
 def load_lambda_dict(run_dir):
     """Load the per-domain lambda dict from save_result's sidecars
     (params/lambda_<m>.npy), keyed by the integer domain suffix -- WITHOUT
@@ -207,7 +254,7 @@ def load_lambda_dict(run_dir):
 def main(argv=None) -> int:
     from charmpheno.omop.cohorts import disease_anchors
     from spark_vi.models.topic.dag_placement import (
-        DagLayout, lr_placement_scores_multidomain)
+        DagLayout, lr_domain_score_matrices)
 
     args = build_parser().parse_args(argv)
     run_dir = Path(args.run_dir)
@@ -227,6 +274,7 @@ def main(argv=None) -> int:
     # name map (mirrors multidomain_cloud.py's name_by_engine construction).
     name_by_engine = {i: name_by_id.get(c, str(c)) for i, c in int2cid.items()}
     alpha_grid = parse_alpha_grid(args.alpha_grid)
+    norm = normalize_arg(args.normalize)
 
     # Driver-local test set (scipy CSR per domain + dense affinity + frontiers
     # json), written by multidomain_cloud.py's persistence. No Spark, no BQ.
@@ -252,20 +300,30 @@ def main(argv=None) -> int:
     from spark_vi.models.topic.dag_placement import lr_auc_sweep_multidomain
     is_fg = np.array([1 if (set(fr) & set(lay.nodes)) else 0 for fr in frontiers],
                      dtype=int)
-    sweep = lr_auc_sweep_multidomain(bows, lam_dict, lay, is_fg, alpha_grid=alpha_grid)
-    print("[lr] === overall detection LR-AUC(alpha), all domains, max-over-nodes ===",
-          flush=True)
+    sweep = lr_auc_sweep_multidomain(bows, lam_dict, lay, is_fg,
+                                     alpha_grid=alpha_grid, normalize=norm)
+    print(f"[lr] === overall detection LR-AUC(alpha), all domains, "
+          f"max-over-nodes, normalize={args.normalize} ===", flush=True)
     for a in alpha_grid:
         print(f"[lr]   alpha={a}: {sweep[a]:.3f}", flush=True)
 
     # Per-disease x domain-subset table at the alpha=inf lift limit (headline).
     # Score ONCE per subset (scores do not depend on the anchor), then loop anchors.
     a_head = alpha_grid[-1]
-    subset_scores = {name: lr_placement_scores_multidomain(
-                         bows, lam_dict, lay, alpha=a_head, domains=doms)
-                     for name, doms in subsets.items()}
-    print(f"[lr] === per-disease x domain-subset LR-AUC (alpha={a_head}) ===",
-          flush=True)
+    # Per-domain score matrices ONCE; every subset is the sum of its members.
+    # Each domain's normalization is computed from that domain alone, so a
+    # domain contributes the same in `all` as in `drop:x` and the decomposition
+    # stays coherent across subsets.
+    dom_mats = lr_domain_score_matrices(bows, lam_dict, lay, alpha=a_head,
+                                        normalize=norm)
+    subset_scores = {}
+    for name, doms in subsets.items():
+        total = None
+        for i in doms:
+            total = dom_mats[i] if total is None else total + dom_mats[i]
+        subset_scores[name] = total
+    print(f"[lr] === per-disease x domain-subset LR-AUC (alpha={a_head}, "
+          f"normalize={args.normalize}) ===", flush=True)
     header = "disease".ljust(26) + "n+".rjust(5) + "  theta"
     for name in subsets:
         header += "  " + name[:12].rjust(12)
@@ -292,7 +350,7 @@ def main(argv=None) -> int:
     # the random-classifier PR-AUC, the baseline that makes PR-AUC readable at
     # rare-disease base rates. ---
     print(f"[lr] === per-disease x domain-subset PR-AUC (avg precision, "
-          f"alpha={a_head}) ===", flush=True)
+          f"alpha={a_head}, normalize={args.normalize}) ===", flush=True)
     header = "disease".ljust(26) + "n+".rjust(5) + "  prev".rjust(7)
     for name in subsets:
         header += "  " + name[:12].rjust(12)
@@ -335,6 +393,39 @@ def main(argv=None) -> int:
             n_pos_seen = n_pos          # same positive set for every subset
             cells += "  " + f"{prec_at[0.5]:16.3f}" + f"{prec_at[0.8]:16.3f}"
         print("[lr] " + f"{dname:<26}{n_pos_seen:>5}" + cells, flush=True)
+
+    # --- Domain-normalization comparison: PR-AUC for subset `all` under every
+    # rule, beside the un-normalized drop-the-suspect-domain column as the
+    # target. insight 0072 measured drop:observation >= all for every disease;
+    # the question here is whether a normalization rule closes that gap so a
+    # low-signal domain can stay in the model without costing precision. ---
+    ref_name = f"drop:{last_domain}" if f"drop:{last_domain}" in subsets else None
+    all_by_rule = pr_by_normalization(bows, lam_dict, lay, frontiers, anchors,
+                                      parent_int, alpha=a_head)
+    ref = {}
+    if ref_name:
+        ref = pr_by_normalization(bows, lam_dict, lay, frontiers, anchors,
+                                  parent_int, alpha=a_head,
+                                  domains=subsets[ref_name], rules=("none",))["none"]
+    print(f"[lr] === PR-AUC by domain-normalization rule (subset=all, "
+          f"alpha={a_head}) ===", flush=True)
+    header = "disease".ljust(26)
+    for rule in NORMALIZE_RULES:
+        header += "  " + f"all|{rule}"[:14].rjust(14)
+    if ref_name:
+        header += "  " + f"{ref_name}|none"[:18].rjust(18)
+    print("[lr] " + header, flush=True)
+    for u in anchors:
+        dname = str(name_by_engine.get(u, int2cid.get(u)))[:24]
+        line = dname.ljust(26)
+        for rule in NORMALIZE_RULES:
+            line += "  " + f"{all_by_rule[rule][u]:14.3f}"
+        if ref_name:
+            line += "  " + f"{ref[u]:18.3f}"
+        print("[lr] " + line, flush=True)
+    if ref_name:
+        print(f"[lr]   (target: an all|<rule> column matching {ref_name}|none "
+              f"means keeping {last_domain} costs no precision)", flush=True)
 
     print(f"[lr] scored {n_docs} held-out docs; {len(anchors)} rare6 anchors "
           f"present; domains={domain_names}", flush=True)

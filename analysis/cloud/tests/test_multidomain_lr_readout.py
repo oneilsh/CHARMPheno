@@ -188,3 +188,74 @@ def test_per_disease_pr_one_class_is_nan():
                                            parent_int)
     assert n_pos == 0
     assert np.isnan(pr_auc) and np.isnan(prec_at[0.5])
+
+
+def test_normalize_arg_maps_none_to_the_library_value():
+    from multidomain_lr_readout import NORMALIZE_RULES, normalize_arg
+    assert normalize_arg("none") is None
+    assert normalize_arg("std") == "std"
+    assert normalize_arg("length+std") == "length+std"
+    assert NORMALIZE_RULES == ("none", "std", "length", "length+std")
+
+
+def test_normalize_arg_rejects_unknown_rule():
+    import pytest
+    from multidomain_lr_readout import normalize_arg
+    with pytest.raises(ValueError):
+        normalize_arg("zscore")
+
+
+def test_build_parser_normalize_default_and_choices():
+    import pytest
+    from multidomain_lr_readout import build_parser
+    p = build_parser()
+    assert p.parse_args(["--run-dir", "/x"]).normalize == "none"
+    assert p.parse_args(["--run-dir", "/x", "--normalize", "std"]).normalize == "std"
+    with pytest.raises(SystemExit):
+        p.parse_args(["--run-dir", "/x", "--normalize", "bogus"])
+
+
+def _norm_fixture():
+    """2-domain LR inputs over the _pr_fixture 1-node layout (anchor = node 1,
+    subtree(1) == {1}): per-domain lam sharing the K topics, per-domain BOWs with
+    different V, and frontiers alternating hit/miss so y carries both classes."""
+    lay, parent_int = _pr_fixture()
+    rng = np.random.default_rng(3)
+    lam = {0: rng.random((lay.K, 6)) + 0.1, 1: rng.random((lay.K, 4)) + 0.1}
+    bows = {0: rng.integers(0, 3, size=(8, 6)).astype(float),
+            1: rng.integers(0, 3, size=(8, 4)).astype(float)}
+    frontiers = [[1] if i % 2 == 0 else [] for i in range(8)]
+    return lay, parent_int, lam, bows, 1, frontiers
+
+
+def test_pr_by_normalization_shape_and_none_matches_direct_pr():
+    # 'none' must agree with per_disease_pr on the un-normalized subset sum, so
+    # the comparison table's reference column is the same number the PR table
+    # already prints.
+    from spark_vi.models.topic.dag_placement import lr_placement_scores_multidomain
+    from multidomain_lr_readout import (
+        NORMALIZE_RULES, per_disease_pr, pr_by_normalization)
+    lay, parent_int, lam, bows, anchor, frontiers = _norm_fixture()
+    table = pr_by_normalization(bows, lam, lay, frontiers, [anchor], parent_int,
+                                alpha=float("inf"))
+    assert set(table) == set(NORMALIZE_RULES)
+    assert set(table["std"]) == {anchor}
+    direct = per_disease_pr(
+        lr_placement_scores_multidomain(bows, lam, lay, alpha=float("inf")),
+        frontiers, anchor, lay, parent_int)[0]
+    assert np.isclose(table["none"][anchor], direct)
+
+
+def test_pr_by_normalization_honors_the_domain_subset():
+    # A subset restriction must reach the scorer: single-domain 'none' equals
+    # per_disease_pr on that domain alone.
+    from spark_vi.models.topic.dag_placement import lr_placement_scores_multidomain
+    from multidomain_lr_readout import per_disease_pr, pr_by_normalization
+    lay, parent_int, lam, bows, anchor, frontiers = _norm_fixture()
+    table = pr_by_normalization(bows, lam, lay, frontiers, [anchor], parent_int,
+                                alpha=float("inf"), domains=[0], rules=("none",))
+    direct = per_disease_pr(
+        lr_placement_scores_multidomain(bows, lam, lay, alpha=float("inf"),
+                                        domains=[0]),
+        frontiers, anchor, lay, parent_int)[0]
+    assert np.isclose(table["none"][anchor], direct)

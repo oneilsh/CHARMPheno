@@ -123,7 +123,7 @@ help:
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
 	@echo "  build-covariates EXP=N  - rebuild STM covariate cache for experiment N without re-running fit."
 	@echo "                         Useful when iterating on covariate_formula. FORCE=1 invalidates cache."
-	@echo "  multidomain-lr-readout ID=N [MULTIDOMAIN_LR_ALPHA_GRID=..]  Post-hoc per-domain LR readout (multidomain fit)"
+	@echo "  multidomain-lr-readout ID=N [MULTIDOMAIN_LR_ALPHA_GRID=.. MULTIDOMAIN_LR_NORMALIZE=none|std|length|length+std]  Post-hoc per-domain LR readout (multidomain fit)"
 	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
 	@echo "                         Restricts to patients with a first malignant-cancer dx"
 	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
@@ -419,6 +419,7 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 # there is no bundle cache and no --cache-uri: the readout is self-contained (no
 # BigQuery), and needs no Spark session (spark-submit is only the --py-files vehicle).
 MULTIDOMAIN_LR_ALPHA_GRID ?= 0,1,10,100,inf
+MULTIDOMAIN_LR_NORMALIZE ?= none
 multidomain-lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
@@ -433,7 +434,8 @@ multidomain-lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
 	    $(REPO_ROOT)/analysis/cloud/multidomain_lr_readout.py \
 	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
-	    --alpha-grid $(MULTIDOMAIN_LR_ALPHA_GRID)
+	    --alpha-grid $(MULTIDOMAIN_LR_ALPHA_GRID) \
+	    --normalize $(MULTIDOMAIN_LR_NORMALIZE)
 
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
