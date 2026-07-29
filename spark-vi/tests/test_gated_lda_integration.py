@@ -97,22 +97,43 @@ def test_multidomain_gated_fit_runs_one_iteration_through_vi_runner(spark):
     assert "θ_contrib_m=[" in line, line
 
 
-def test_multidomain_gated_fit_with_checkpointing_fails_loudly(spark, tmp_path):
-    """Checkpointing a multi-domain fit is NOT supported yet, and must say so.
+def test_multidomain_gated_fit_checkpoint_round_trips_the_dict_lambda(spark, tmp_path):
+    """A checkpointed multi-domain fit writes a checkpoint that loads back with its
+    per-domain lambda intact -- the whole round trip, through the real runner.
 
-    VIRunnerConfig.checkpoint_dir routes the interim VIResult through
-    io.export.save_result, which has no per-domain dict lambda writer (SP3 owns
-    it). Before the guard, np.save pickled the dict into a ~573-byte 0-d object
-    array: the fit reported success and the checkpoint was unreadable, because
-    load_result reads params with allow_pickle=False. This test pins the loud
-    failure -- and is the reason the smoke test above runs without checkpointing.
+    History, because this test used to pin the OPPOSITE contract: checkpointing a
+    multi-domain fit was unsupported, and `VIConfig.checkpoint_dir` had to raise
+    `UnsupportedGlobalParamError`. The reason was that io.export.save_result had no
+    per-domain dict lambda writer, so np.save pickled the dict into a ~573-byte 0-d
+    object array -- the fit reported success and the checkpoint was unreadable,
+    because load_result reads params with allow_pickle=False. SP3 added the writer:
+    save_result is now format_version 2 and records a dict param's domain keys under
+    the manifest's "dict_param_keys", one params/<name>_<key>.npy per domain, with
+    load_result converting those JSON string keys back to int. The guard therefore
+    no longer fires, and what is worth pinning is the round trip it stood in for --
+    that the on-disk checkpoint is byte-exact and not silently pickled or lossy.
+
+    The runner's final-save guarantee means a configured checkpoint_dir also holds
+    the FINAL VIResult after fit() returns, which is what this reads back.
     """
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.io.export import UnsupportedGlobalParamError
+    from spark_vi.io.export import load_result
     _lay, model = _tiny_model()
     rdd = _tiny_two_domain_rdd(spark)
 
+    ckpt = tmp_path / "ckpt"
     cfg = VIConfig(max_iterations=1, random_seed=0, convergence_tol=1e-9,
-                   checkpoint_interval=1, checkpoint_dir=tmp_path / "ckpt")
-    with pytest.raises(UnsupportedGlobalParamError, match="lambda"):
-        VIRunner(model, config=cfg).fit(rdd)
+                   checkpoint_interval=1, checkpoint_dir=ckpt)
+    result = VIRunner(model, config=cfg).fit(rdd)
+
+    reloaded = load_result(ckpt)
+    lam, lam_back = result.global_params["lambda"], reloaded.global_params["lambda"]
+    # int domain keys (not the JSON strings), one sidecar per domain, byte-exact.
+    assert isinstance(lam_back, dict)
+    assert sorted(lam_back) == sorted(lam) == [0, 1]
+    for m in (0, 1):
+        assert lam_back[m].shape == lam[m].shape
+        np.testing.assert_array_equal(lam_back[m], lam[m])
+    # the flat params round-trip alongside the dict one
+    np.testing.assert_array_equal(reloaded.global_params["alpha"],
+                                  result.global_params["alpha"])
