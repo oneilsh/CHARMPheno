@@ -115,6 +115,52 @@ def dead_node_report(lam_dict, lay, *, min_peak_ratio=5.0):
     return sorted(dead)
 
 
+def starved_topic_report(lam_dict, lay, *, tol=1e-6):
+    """PURE (Spark-free) init-quality read COMPLEMENTARY to `dead_node_report`:
+    topic ids that were assigned essentially NO DATA in ANY domain.
+
+    Why `dead_node_report` cannot see these. It reports at NODE granularity with an
+    ANY-topic-alive rule: a node is spared as soon as ONE of its `tpn` topics
+    concentrates. With tpn=5 a node can carry one live topic and four topics still
+    sitting at the prior and still read "alive". exp 0071 did exactly that
+    (insight 0074): topics 102/103/104 of one node were byte-identical at
+    Σλ(total) = 43.3, which is exactly Σ_m η_m·V_m -- the prior with zero data --
+    while the node-level report printed "EMPTY (init OK)".
+
+    The test needs no knowledge of η_m. Since
+    ``λ_k[m][v] = η_m + (expected count of v in topic k, domain m)`` and η_m is
+    constant across v, a topic with zero assigned data has an EXACTLY CONSTANT row.
+    So a topic is starved iff ``(max - min) <= tol * max`` in EVERY domain. A `tol`
+    slightly above 0 also catches mass that is numerically negligible rather than
+    literally zero.
+
+    This is a fit-quality read, not an error: starved topics at large K are expected
+    slack (K is emergent from n_bg + nodes x tpn, so a rare node's deep sub-block
+    can simply have too few patients). It exists to be REPORTED rather than
+    silently absorbed -- the failure mode it prevents is reading "dead-node report:
+    EMPTY" as "every topic is carrying signal".
+
+    Args:
+        lam_dict: fitted per-domain dict lambda {m: (K, V_m)}.
+        lay: the DagLayout (for K).
+        tol: relative flatness tolerance (default 1e-6).
+
+    Returns:
+        Sorted list of starved topic ids (0 <= k < lay.K), background topics
+        included -- a starved background topic is wasted capacity too.
+    """
+    starved = []
+    for k in range(lay.K):
+        for lam in lam_dict.values():
+            row = np.asarray(lam[k], dtype=float)
+            hi = float(row.max())
+            if hi <= 0.0 or (hi - float(row.min())) > tol * hi:
+                break                       # carries data in this domain -> alive
+        else:
+            starved.append(int(k))          # flat in EVERY domain
+    return starved
+
+
 def _topic_block_labels(lay, node_names, n_bg):
     """PURE: length-K list of per-topic block labels. Background topics [0, n_bg)
     label 'bg'; each DAG node u's topic block (lay.block[u]) labels with the node's
@@ -522,6 +568,25 @@ def main(argv=None) -> int:
                 print(f"[driver]   dead-node report: EMPTY (every node "
                       f"concentrated in >=1 domain; init OK)", flush=True)
 
+            # Topic-level starvation, which the node-level report above CANNOT see:
+            # it spares a node as soon as one of its tpn topics concentrates, so
+            # starved sibling topics stay invisible (insight 0074 -- exp 0071 had
+            # three byte-identical topics at the prior under an "EMPTY" report).
+            starved = starved_topic_report(lam_dict, lay)
+            if starved:
+                block_labels = _topic_block_labels(lay, names, args.n_bg)
+                shown = ", ".join(f"{k}({block_labels[k]})" for k in starved[:12])
+                more = f" ... +{len(starved) - 12} more" if len(starved) > 12 else ""
+                print(f"[driver]   STARVED TOPICS (row exactly at the eta prior in "
+                      f"EVERY domain = zero assigned data): {len(starved)}/{lay.K}"
+                      f" -> {shown}{more}", flush=True)
+                print(f"[driver]     (expected slack at large emergent K; a read, "
+                      f"not an error -- but do not treat an EMPTY dead-node report "
+                      f"as 'every topic carries signal')", flush=True)
+            else:
+                print(f"[driver]   starved-topic report: EMPTY (every one of "
+                      f"{lay.K} topics carries data in >=1 domain)", flush=True)
+
         # Resolve each domain's vocabulary to concept names ONCE: used both for the
         # final topic dump and persisted into the manifest so the saved artifact is
         # self-describing (a later no-refit inspection can map token index ->
@@ -582,6 +647,9 @@ def main(argv=None) -> int:
                 "spectral_topo_order": args.spectral_topo_order,
                 "min_peak_ratio": args.min_peak_ratio,
                 "dead_nodes": dead,
+                # Topic-level starvation, which dead_nodes cannot express (it is
+                # node-granular with an any-topic-alive rule; insight 0074).
+                "starved_topics": starved,
                 "corpus_stats": corpus_stats,
                 "ledger": bundle.ledger,
                 "corpus_manifest": {

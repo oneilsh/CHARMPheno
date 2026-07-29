@@ -68,6 +68,16 @@ Every conclusion above holds in both exp 0071 (full-batch) and exp 0072 (mini-ba
 
 `all|none` PR-AUC, 0071 → 0072: Ehlers-Danlos 0.038 → 0.068, myasthenia gravis 0.012 → 0.028, scleroderma 0.090 → 0.097, sarcoidosis 0.050 → 0.059, amyloidosis 0.017 → 0.019; only systemic lupus regresses (0.104 → 0.099). Five of six favor the mini-batch fit. The A/B was designed as a cost/throughput check, not a quality one, so this is unexplained and deserves its own look before mini-batch is treated as merely cheaper.
 
+**AMENDMENT 2026-07-29 — investigated, and it SURVIVES.** The first hypothesis was that exp 0071 was not a legitimate full-batch baseline at all, and that turned out to be *half* right. A real defect was found (insight 0074): `VIRunner` applied the decaying Robbins-Monro step to full batches, damping them toward a deterministic target and making the early stop fire on the vanishing step. exp 0070/0071 had both run that path. So the defect was genuine and is fixed (commit 49cd7ad).
+
+**But re-running exp 0071 on the corrected `rho=1` optimizer moved the numbers by less than 0.008, in no systematic direction** (`all`: EDS 0.038→0.036, sarcoid 0.050→0.051, SLE 0.104→0.112, sclero 0.090→0.084, MG 0.012→0.012, amyloid 0.017→0.017). Against the corrected baseline, mini-batch still wins 5 of 6. **Finding 6 is not a baseline artifact.**
+
+Why the defect didn't matter here: the synthetic that measured it used *random* init, where damping is expensive; the experiments use *spectral* init, which starts near a good solution, so the large early steps the damped schedule squandered were not carrying much of the work. Reproducing a mechanism does not license a claim about its magnitude under a different initialization.
+
+Leading explanation now — a **compute-shape** difference, not a bug: full batch *converged* at iteration 13 of 200, a genuine local fixed point reached from the spectral seed, while mini-batch never early-stops and ran 200 × 0.1 = 20 epochs of noisy updates. That is SVI-noise-as-regularizer escaping the seed's basin, consistent with this arc's history of seed-dependent basins. Testable: run full batch from several seeds, or with the early stop disabled, and see whether it reaches mini-batch's quality. If it does not, mini-batch is better *on the merits* for this task and not merely cheaper — which would be a genuine methods result, not an accident.
+
+Insight 0073's other findings all replicate on the corrected fit: `std` still reliably reduces the drag, `length` still unlocks myasthenia gravis (`all` 0.012 → 0.077 under `length+std`) and still destroys scleroderma (0.084 → 0.043).
+
 ## Implication / next lever
 
 The rules trade off in **opposite directions across diseases** (`length` unlocks MG by +209% and destroys scleroderma by −52%, in the same fit, on the same subset). No single global rule can therefore be right, which retires the search for one and makes the case for **per-node / per-disease reliability weighting** empirical rather than speculative: weight each domain by what it demonstrably earns for that node, with `explain_away_placement_scores` already in the library as one candidate mechanism.

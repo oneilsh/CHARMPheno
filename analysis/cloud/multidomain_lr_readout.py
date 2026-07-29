@@ -100,6 +100,49 @@ def subtree_nodes(parent_int, root):
 # imported by BOTH the writer (multidomain_cloud.py's persistence) via
 # save_test_set and the reader (main) via load_test_set, so the two halves of the
 # cross-process contract can never drift apart on a rename. ---
+def scoreable_targets(anchor_cids, cid2int, lay, parent_int):
+    """[(engine_id, note)] the nodes to score, resolved from a manifest's disease
+    anchor concept-ids. Handles BOTH cohort shapes.
+
+    `charmpheno.omop.cohorts.disease_anchors` documents the split: a MULTI-anchor
+    cohort (rare6) hands its anchors to `case_finding_assembly`, which hangs them
+    under a SYNTHETIC forest root, so each anchor is an ordinary DAG node and scores
+    directly. A SINGLE-anchor cohort (diabetes, eds, cancer) is rooted DIRECTLY at
+    its one anchor -- that anchor becomes engine id 0, which has no entry in
+    `lay.nodes` and is by construction not a scoreable node (every document's
+    frontier is inside it, so "does this patient belong under the root?" is
+    vacuously true for the whole cohort).
+
+    For that case the meaningful targets are the root's CHILDREN -- the type
+    taxonomy immediately beneath the anchor (e.g. type 1 / type 2 / gestational /
+    secondary diabetes). That is what per-node placement means for a single-disease
+    cohort, and without it the readout printed every table empty (insight 0074,
+    Finding 5).
+
+    Returns (engine_id, note) pairs; `note` is "" for a direct anchor hit and
+    "child of <cid>" for a substituted child, so main() can say which it scored.
+    Anchors that resolve to neither a node nor any child are dropped.
+    """
+    nodes = set(lay.nodes)
+    kids = children_map(parent_int)
+    out, seen = [], set()
+    for cid in anchor_cids:
+        u = cid2int.get(int(cid))
+        if u is None:
+            continue
+        if u in nodes:
+            targets = [(u, "")]
+        else:
+            # Anchor is the DAG root (or was pruned): score its children instead.
+            targets = [(c, f"child of {cid}")
+                       for c in sorted(kids.get(u, ())) if c in nodes]
+        for t, note in targets:
+            if t not in seen:
+                seen.add(t)
+                out.append((t, note))
+    return out
+
+
 def _bow_path(run_dir, m):
     return Path(run_dir) / f"test_bow_{m}.npz"
 
@@ -289,12 +332,20 @@ def main(argv=None) -> int:
     # json), written by multidomain_cloud.py's persistence. No Spark, no BQ.
     bows, frontiers, aff, aff_frontiers, n_docs = load_test_set(run_dir, n_dom)
 
-    # rare6 anchor engine-ids (skip anchors pruned out of the DAG).
-    anchors = []
-    for cid in disease_anchors(manifest["disease"]):
-        u = cid2int.get(int(cid))
-        if u is not None and u in set(lay.nodes):
-            anchors.append(u)
+    # Anchor engine-ids to score. A multi-anchor cohort scores its anchors directly;
+    # a SINGLE-anchor cohort is rooted at its anchor, so we score that root's
+    # children instead (see scoreable_targets). Anchors pruned out of the DAG drop.
+    targets = scoreable_targets(disease_anchors(manifest["disease"]),
+                                cid2int, lay, parent_int)
+    anchors = [u for u, _ in targets]
+    if not anchors:
+        print(f"[lr] NO SCOREABLE TARGETS for disease={manifest['disease']!r}: its "
+              f"anchors resolve to neither a DAG node nor any child. Every "
+              f"per-disease table below will be empty.", flush=True)
+    for u, note in targets:
+        if note:
+            print(f"[lr]   scoring {u} ({name_by_engine.get(u, u)}) -- {note} "
+                  f"(single-anchor cohort: the anchor is the DAG root)", flush=True)
 
     # domain subsets: all, each-alone, leave-one-out (labeled by name).
     subsets = {"all": list(range(n_dom))}

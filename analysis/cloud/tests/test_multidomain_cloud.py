@@ -95,6 +95,59 @@ def test_dead_node_report_flags_a_node_stuck_at_the_prior():
     assert 2 in dead and 1 not in dead
 
 
+def test_starved_topic_report_catches_what_dead_node_report_cannot():
+    """Reproduces the exp 0071 signature (insight 0074): a node with tpn>1 whose
+    FIRST topic concentrated and whose SIBLINGS sit exactly at the eta prior.
+
+    dead_node_report is node-granular with an any-topic-alive rule, so it calls that
+    node healthy and reports EMPTY. starved_topic_report works per TOPIC and names
+    the siblings. This is the exact pair of verdicts that made three byte-identical
+    zero-data topics invisible behind "dead-node report: EMPTY (init OK)".
+    """
+    import numpy as np
+    from multidomain_cloud import dead_node_report, starved_topic_report
+    from spark_vi.models.topic.dag_placement import DagLayout
+    lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=3)          # 3 topics per node
+    V0, V1, eta0, eta1 = 20, 8, 0.05, 0.02
+    # Everything starts EXACTLY at its per-domain eta prior = zero assigned data.
+    lam = {0: np.full((lay.K, V0), eta0), 1: np.full((lay.K, V1), eta1)}
+    # Give ONE topic of each node real mass, in one domain only.
+    for u in (1, 2):
+        k_live = lay.block[u][0]
+        lam[0][k_live, :3] += 100.0
+    # ...and give the background block mass so it is not itself reported.
+    for k in range(lay.n_bg):
+        lam[1][k, 0] += 50.0
+
+    # dead_node_report: both nodes look ALIVE (one live topic each is enough).
+    assert dead_node_report(lam, lay, min_peak_ratio=5.0) == []
+
+    # starved_topic_report: names every sibling that got nothing, in both nodes.
+    starved = starved_topic_report(lam, lay)
+    expected = sorted(lay.block[1][1:] + lay.block[2][1:])
+    assert starved == expected, (starved, expected)
+    # The live topics and the fed background topics are NOT reported.
+    for u in (1, 2):
+        assert lay.block[u][0] not in starved
+    assert all(k not in starved for k in range(lay.n_bg))
+
+
+def test_starved_topic_report_empty_when_every_topic_has_data():
+    """No false positives: a fit where every topic carries data in at least one
+    domain reports nothing, so an EMPTY report is meaningful rather than vacuous."""
+    import numpy as np
+    from multidomain_cloud import starved_topic_report
+    from spark_vi.models.topic.dag_placement import DagLayout
+    lay = DagLayout({1: 0, 2: 0}, n_bg=1, tpn=2)
+    lam = {0: np.full((lay.K, 12), 0.05), 1: np.full((lay.K, 5), 0.02)}
+    for k in range(lay.K):
+        lam[0][k, k % 12] += 7.0          # every topic gets some mass in domain 0
+    assert starved_topic_report(lam, lay) == []
+    # A single starved topic is still found among otherwise-healthy ones.
+    lam[0][3] = 0.05
+    assert starved_topic_report(lam, lay) == [3]
+
+
 def test_parse_args_domains_defaults_to_drug_era_and_splits_a_list():
     from multidomain_cloud import parse_args
     base = ["--cdr", "p.d", "--billing", "b", "--out-dir", "/x", "--seed", "0"]

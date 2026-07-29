@@ -190,6 +190,45 @@ def test_per_disease_pr_one_class_is_nan():
     assert np.isnan(pr_auc) and np.isnan(prec_at[0.5])
 
 
+def test_scoreable_targets_scores_multi_anchor_nodes_directly():
+    """rare6 shape: anchors hang under a synthetic forest root, so each anchor IS a
+    DAG node and scores directly, with no substitution note."""
+    from multidomain_lr_readout import scoreable_targets
+    from spark_vi.models.topic.dag_placement import DagLayout
+    # forest root 0 -> anchors 1, 2; each anchor has a subtype child.
+    parent_int = {1: [0], 2: [0], 3: [1], 4: [2]}
+    lay = DagLayout(parent_int, n_bg=1, tpn=1)
+    cid2int = {100: 1, 200: 2}
+    assert scoreable_targets([100, 200], cid2int, lay, parent_int) == [(1, ""), (2, "")]
+
+
+def test_scoreable_targets_substitutes_children_for_a_root_anchor():
+    """Single-anchor shape (diabetes/eds/cancer): the cohort is rooted DIRECTLY at
+    its one anchor, so that anchor is engine id 0 and is NOT in lay.nodes. Scoring it
+    is vacuous (every document is under it), so its CHILDREN -- the type taxonomy --
+    are the targets. Without this the readout printed every table empty
+    (insight 0074, Finding 5)."""
+    from multidomain_lr_readout import scoreable_targets
+    from spark_vi.models.topic.dag_placement import DagLayout
+    parent_int = {1: [0], 2: [0], 3: [1]}      # root 0 = the anchor concept itself
+    lay = DagLayout(parent_int, n_bg=1, tpn=1)
+    assert 0 not in set(lay.nodes)             # the root is never a scoreable node
+    got = scoreable_targets([201820], {201820: 0}, lay, parent_int)
+    assert got == [(1, "child of 201820"), (2, "child of 201820")]
+
+
+def test_scoreable_targets_drops_unresolvable_anchors_and_dedupes():
+    from multidomain_lr_readout import scoreable_targets
+    from spark_vi.models.topic.dag_placement import DagLayout
+    parent_int = {1: [0], 2: [0]}
+    lay = DagLayout(parent_int, n_bg=1, tpn=1)
+    # 999 is absent from cid2int; 888 maps to a node pruned out of lay.nodes.
+    assert scoreable_targets([999], {}, lay, parent_int) == []
+    assert scoreable_targets([888], {888: 77}, lay, parent_int) == []
+    # The same node reached twice appears once.
+    assert scoreable_targets([100, 101], {100: 1, 101: 1}, lay, parent_int) == [(1, "")]
+
+
 def test_normalize_arg_maps_none_to_the_library_value():
     from multidomain_lr_readout import NORMALIZE_RULES, normalize_arg
     assert normalize_arg("none") is None
