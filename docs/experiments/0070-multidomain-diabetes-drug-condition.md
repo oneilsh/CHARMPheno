@@ -98,6 +98,14 @@ bundle the coherence driver can read — `run_experiment` skips eval for
   `condition`, `drug`) within a plausible band, train/test doc counts, how
   many docs carry a frontier.
 - `ledger`: the two-domain assembly provenance (per-domain prune/strip counts).
+- **RE-RUN 2026-07-29 on a corrected full-batch optimizer (insight 0074).** Earlier
+  runs of this experiment are invalid as full-batch results: `VIRunner` applied the
+  decaying Robbins-Monro step `rho_t = (tau0+t+1)^-kappa` to FULL batches, where
+  the target is a deterministic map, so the parameters froze short of the batch-VB
+  fixed point and the relative-ELBO early stop fired on the vanishing step instead
+  of on convergence. Full batch now uses `rho = 1` (batch variational EM). Expect
+  FEWER iterations but a better fit; `mini_batch_fraction: 0.0` stays correct and
+  `learning_rate_tau0`/`learning_rate_kappa` are now inert on this path.
 
 This is a **smoke/sanity** run, not a quality gate — SP3b's acceptance is
 structural (shapes, id ranges, alignment, leakage), and the specificity

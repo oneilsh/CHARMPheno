@@ -19,15 +19,21 @@ def test_vi_runner_fits_counting_model_end_to_end(spark):
     )
     result = runner.fit(rdd)
 
-    # Posterior mean ≈ 70 / 100 = 0.7 (with Beta(1,1) prior and learning rate
-    # schedule that hasn't fully saturated in 5 iterations — check at a loose
-    # tolerance).
+    # Full batch takes an undamped rho = 1 step, so this CONJUGATE model lands on
+    # its EXACT posterior in a single iteration: Beta(1 + 70, 1 + 30). Iteration 2
+    # then sees zero ELBO change and the fit converges.
+    #
+    # This used to assert only a loose 0.55 < mean < 0.85 over 5 iterations,
+    # because the runner applied a decaying rho to full batches and the fit merely
+    # crept toward the posterior (see test_vi_runner_full_batch_uses_undamped_step).
+    # The exact pin below is the point: batch VB on a conjugate model is a
+    # one-step, closed-form answer, and anything less means the step is damped.
     a = float(result.global_params["alpha"])
     b = float(result.global_params["beta"])
-    mean = a / (a + b)
-    assert 0.55 < mean < 0.85
-    assert result.n_iterations == 5  # hit max, not convergence (tight tol)
-    assert len(result.elbo_trace) == 5
+    assert (a, b) == (71.0, 31.0)
+    assert a / (a + b) == pytest.approx(70 / 100, abs=0.005)
+    assert result.n_iterations == 2 and result.converged is True
+    assert len(result.elbo_trace) == 2
 
 
 def test_vi_runner_early_stop_branch_triggers(spark):
@@ -57,19 +63,25 @@ def test_vi_runner_early_stop_branch_triggers(spark):
 
 
 def test_vi_runner_runs_to_max_iterations_without_convergence(spark):
-    """With a tight tolerance, the runner should exhaust max_iterations.
+    """With a tight tolerance and an ELBO that keeps moving, the runner exhausts
+    max_iterations: no early-stop, converged=False, n_iterations == max.
 
-    Exercises the other branch of the loop: no early-stop, converged=False,
-    n_iterations == max_iterations.
+    Uses the strictly-changing-ELBO stub (with the REAL has_converged) rather than
+    CountingModel, because a conjugate model can no longer reach this branch: a
+    full-batch fit takes an undamped rho=1 step, so CountingModel lands on its
+    exact posterior in ONE iteration, the ELBO stops changing, and any positive
+    tolerance then converges. That is a property of correct batch VB, not a
+    regression — see test_vi_runner_full_batch_uses_undamped_step. Testing the
+    tolerance branch against a model whose ELBO genuinely keeps changing is also
+    what this test always meant to do; previously it leaned on a damped step size
+    to keep a conjugate model from converging.
     """
     from spark_vi.core import VIConfig, VIRunner
-    from spark_vi.models.topic.counting import CountingModel
 
     rdd = spark.sparkContext.parallelize([1] * 100 + [0] * 100, numSlices=4).persist()
     rdd.count()  # materialize for VIRunner's strict cache precondition
-    model = CountingModel()
     runner = VIRunner(
-        model=model,
+        model=_make_stub(real_has_converged=True),
         config=VIConfig(max_iterations=3, convergence_tol=1e-10),
     )
     result = runner.fit(rdd)
@@ -114,6 +126,83 @@ def test_vi_runner_mini_batch_never_early_stops(spark):
     assert result.converged is False
     assert result.n_iterations == 6
     assert len(result.elbo_trace) == 6
+
+
+def _rho_spy_model():
+    """CountingModel that records every learning_rate the runner hands it."""
+    from spark_vi.models.topic.counting import CountingModel
+
+    class _RhoSpy(CountingModel):
+        def __init__(self):
+            super().__init__(prior_alpha=1.0, prior_beta=1.0)
+            self.rhos = []
+
+        def update_global(self, global_params, target_stats, learning_rate):
+            self.rhos.append(float(learning_rate))
+            return super().update_global(global_params, target_stats,
+                                        learning_rate)
+
+    return _RhoSpy()
+
+
+def test_vi_runner_full_batch_uses_undamped_step(spark):
+    """A full-batch fit must use rho = 1 (batch variational EM), NOT the decaying
+    Robbins-Monro schedule.
+
+    Regression for a real defect: the runner applied rho_t = (tau0+t+1)^-kappa
+    unconditionally, so full-batch fits took damped steps toward a DETERMINISTIC
+    target. Since the step magnitude is rho·‖T(params)-params‖, a vanishing rho
+    freezes the parameters while the fixed-point residual is still large -- the fit
+    lands short of the batch-VB fixed point and the relative-ELBO early stop fires
+    on the vanishing step rather than on convergence (insight 0074; it silently
+    under-fit the exp 0070/0071 full-batch baselines).
+
+    Also pins that learning_rate_tau0/kappa are INERT on the full-batch path: the
+    values below would give rho_1 = 0.19 if the schedule were (wrongly) applied.
+    """
+    from spark_vi.core import VIConfig, VIRunner
+
+    rdd = spark.sparkContext.parallelize([1] * 70 + [0] * 30, numSlices=4).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
+    model = _rho_spy_model()
+    result = VIRunner(
+        model=model,
+        config=VIConfig(max_iterations=4, convergence_tol=1e-12,
+                        mini_batch_fraction=None,                 # full batch
+                        learning_rate_tau0=10.0, learning_rate_kappa=0.7),
+    ).fit(rdd)
+
+    # Every step is undamped, whatever tau0/kappa say.
+    assert model.rhos == [1.0] * result.n_iterations, model.rhos
+    # The CONSEQUENCE, which is what actually matters: an undamped step reaches
+    # this conjugate model's EXACT posterior — Beta(1 + 70, 1 + 30) — in one
+    # iteration, so iteration 2 sees zero ELBO change and the fit converges before
+    # max_iterations. Under the damped schedule the first step moved only
+    # rho_1 = (10+1)^-0.7 = 0.19 of the way and no iteration was ever exact.
+    assert (float(result.global_params["alpha"]),
+            float(result.global_params["beta"])) == (71.0, 31.0)
+    assert result.n_iterations == 2 and result.converged is True
+
+
+def test_vi_runner_mini_batch_still_decays(spark):
+    """The counterpart to test_vi_runner_full_batch_uses_undamped_step: with a
+    fraction set, the Robbins-Monro schedule is still applied exactly as
+    Hoffman et al. 2013 specify, rho_t = (tau0 + t + 1)^-kappa with t from 0."""
+    from spark_vi.core import VIConfig, VIRunner
+
+    rdd = spark.sparkContext.parallelize([1] * 70 + [0] * 30, numSlices=4).persist()
+    rdd.count()  # materialize for VIRunner's strict cache precondition
+    model = _rho_spy_model()
+    VIRunner(
+        model=model,
+        config=VIConfig(max_iterations=4, convergence_tol=1e-12,
+                        mini_batch_fraction=0.5, random_seed=42,
+                        learning_rate_tau0=10.0, learning_rate_kappa=0.7),
+    ).fit(rdd)
+
+    expected = [(10.0 + t + 1) ** -0.7 for t in range(4)]
+    assert np.allclose(model.rhos, expected), (model.rhos, expected)
+    assert model.rhos[0] < 1.0 and model.rhos == sorted(model.rhos, reverse=True)
 
 
 def test_vi_runner_uses_mini_batch_when_fraction_set(spark):
@@ -219,6 +308,10 @@ def test_vi_runner_full_batch_path_unchanged_when_fraction_none(spark):
     Anchors that adding mini-batch did not regress the full-batch path. The
     number-pin here mirrors the existing end-to-end test; if those values
     drift, both tests should be updated together.
+
+    The pin is now the EXACT conjugate posterior rather than a loose band: the
+    full-batch step is rho = 1 (batch variational EM), which reaches Beta(1+70,
+    1+30) in one iteration. See test_vi_runner_full_batch_uses_undamped_step.
     """
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.topic.counting import CountingModel
@@ -235,10 +328,10 @@ def test_vi_runner_full_batch_path_unchanged_when_fraction_none(spark):
 
     a = float(result.global_params["alpha"])
     b = float(result.global_params["beta"])
-    mean = a / (a + b)
-    assert 0.55 < mean < 0.85
-    assert result.n_iterations == 5
-    assert len(result.elbo_trace) == 5
+    assert (a, b) == (71.0, 31.0)
+    assert 0.55 < a / (a + b) < 0.85
+    assert result.n_iterations == 2
+    assert len(result.elbo_trace) == 2
 
 
 def test_runner_transform_calls_infer_local_on_each_row(spark):
@@ -267,7 +360,8 @@ def test_runner_transform_calls_infer_local_on_each_row(spark):
 # Metadata merge / diagnostics / final-save tests --------------------------
 
 
-def _make_stub(get_metadata=None, iteration_diagnostics=None):
+def _make_stub(get_metadata=None, iteration_diagnostics=None, *,
+               real_has_converged=False):
     """Construct a deterministic VIModel suitable for fit() integration tests.
 
     Single-key float global param; local_update is a no-op stat so update_global
@@ -275,6 +369,10 @@ def _make_stub(get_metadata=None, iteration_diagnostics=None):
     has_converged with the default relative tolerance only fires once values
     plateau — by default we keep ELBO changing each step so fits run to
     max_iterations.
+
+    `real_has_converged=True` keeps VIModel's DEFAULT relative-change
+    has_converged instead of the always-False stub, for tests that need to
+    exercise the tolerance branch itself on a model whose ELBO keeps moving.
     """
     from spark_vi.core.model import VIModel
     import numpy as np
@@ -295,8 +393,8 @@ def _make_stub(get_metadata=None, iteration_diagnostics=None):
             # theta is the cleanest source of monotone change.
             return float(global_params["theta"])
 
-        def has_converged(self, elbo_trace, convergence_tol):
-            return False
+    if not real_has_converged:
+        _Stub.has_converged = lambda self, elbo_trace, convergence_tol: False
 
     if get_metadata is not None:
         _Stub.get_metadata = lambda self, _gm=get_metadata: _gm()

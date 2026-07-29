@@ -107,6 +107,14 @@ class VIRunner:
         RDD.sample(fraction=1.0) is still a stochastic (non-identity) draw, so its
         ELBO is a sampled quantity. Use None (not 1.0) for full-batch + early-stop.
 
+        The same distinction sets the M-step STEP SIZE: full batch uses rho = 1
+        (batch variational EM), mini-batch uses the decaying Robbins-Monro
+        rho_t = (tau0 + t + 1)^-kappa. A decaying rho over full batches freezes the
+        parameters short of the fixed point and makes the early stop fire on the
+        vanishing step; see the M-step comment in the loop below for the mechanism
+        and the measurements. Consequently learning_rate_tau0/kappa have NO effect
+        on a full-batch fit.
+
         The returned VIResult's `metadata` is the merge of
         `model.get_metadata()` with runner-set keys (`model_class`, and
         `checkpoint` for interim saves); runner-set keys win on conflict so
@@ -259,11 +267,40 @@ class VIRunner:
             else:
                 target_stats = aggregated
 
-            # M-step (Robbins-Monro step size).
-            # Hoffman et al. 2013 index t from 1 so the first rho is (tau0+1)^-kappa
-            # rather than (tau0)^-kappa — the latter can collapse to 1.0 and
-            # force a full jump on the first step (see SVI paper §3).
-            rho_t = (cfg.learning_rate_tau0 + t + 1) ** -cfg.learning_rate_kappa
+            # M-step step size. MINI-BATCH uses the decaying Robbins-Monro
+            # schedule; FULL BATCH uses rho = 1 (batch variational EM).
+            #
+            # Why full batch must NOT decay: with the whole corpus every
+            # iteration, `target_stats` is a DETERMINISTIC map T(params) of the
+            # current parameters, so update_global's
+            # `new = (1 - rho)·old + rho·T(old)` moves by rho·‖T(old) - old‖. As
+            # rho_t -> 0 the parameters freeze even while the fixed-point residual
+            # ‖T(old) - old‖ is still large, so (a) the fit lands materially short
+            # of the batch-VB fixed point at any finite iteration budget, and
+            # (b) the relative-ELBO early stop below fires on the vanishing step
+            # rather than on convergence. Sum_t rho_t diverges for kappa < 1, so
+            # the damped iteration would reach the same fixed point EVENTUALLY --
+            # this is a finite-budget defect, not an asymptotic one, which is why
+            # it went unnoticed. Measured on a 1600-doc gated synthetic at 200
+            # iterations (insight 0074): the decaying schedule reached placement
+            # MRR 0.856 / top2 0.828 versus 0.910 / 0.988 at rho = 1, and its
+            # early stop fired at iteration 15 with 760 nats still to gain.
+            # rho = 1 is also the only full-batch regime this project validates:
+            # every SVI-vs-Gibbs equivalence gate runs through
+            # tests/_stm_synth.fit_gated_svi_local, whose docstring reads
+            # "Full-batch lr=1.0 each iteration = variational EM".
+            #
+            # Mini-batch: Hoffman et al. 2013 index t from 1 so the first rho is
+            # (tau0+1)^-kappa rather than (tau0)^-kappa — the latter can collapse
+            # to 1.0 and force a full jump on the first step (see SVI paper §3).
+            #
+            # NOTE for optimize_alpha / optimize_eta models: update_global applies
+            # this same rate to its Newton step, so a full-batch fit now takes an
+            # UNDAMPED Newton step. That is the standard choice (a Newton step
+            # damped by rho ~ 0.02 barely moves alpha at all), but it is a
+            # behaviour change for full-batch fits with those flags on.
+            rho_t = (1.0 if cfg.mini_batch_fraction is None else
+                     (cfg.learning_rate_tau0 + t + 1) ** -cfg.learning_rate_kappa)
             global_params = model.update_global(global_params, target_stats, learning_rate=rho_t)
 
             # 6. ELBO + convergence. Pass the *raw* aggregated stats (not the

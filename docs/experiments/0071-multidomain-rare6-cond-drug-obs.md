@@ -87,6 +87,20 @@ resume unsupported (v1). No NPMI eval (npz + manifest artifact).
   and precision@50%/80% recall for all / only:condition / drop:observation --
   whether the ranking AUC translates into deployable precision at these base
   rates, and whether cond+drug beats cond-alone operationally.
+- **RE-RUN 2026-07-29 on a corrected full-batch optimizer (insight 0074).** Every
+  earlier run of this experiment is invalid as a full-batch baseline: `VIRunner`
+  applied the decaying Robbins-Monro step `rho_t = (tau0+t+1)^-kappa` to FULL
+  batches, where the target is a deterministic map, so the parameters froze short
+  of the batch-VB fixed point and the relative-ELBO early stop fired on the
+  vanishing step rather than on convergence. Full batch now uses `rho = 1` (batch
+  variational EM, the regime every SVI-vs-Gibbs gate validates). Expect this fit to
+  run FEWER iterations but land FURTHER along, and expect its numbers to improve
+  relative to the values recorded in insights 0071/0072/0073. Specifically:
+  insight 0073's Finding 6 ("mini-batch beat full-batch on case-finding PR in 5 of
+  6 diseases") was measured against the defective baseline and is the thing this
+  re-run adjudicates -- if the gap closes or reverses, it was an artifact.
+  `mini_batch_fraction: 0.0` is unchanged and still correct; `learning_rate_tau0`
+  and `learning_rate_kappa` are now INERT on this path.
 
 ## Knobs
 
