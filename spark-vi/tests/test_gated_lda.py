@@ -1744,3 +1744,103 @@ def test_scalable_init_recovers_every_identifying_signal(spark):
         for (md, u) in ident:
             unif = len(np.where(planted[md][slot[u]] > 1e-3)[0]) / Vm[md]
             assert rec[(md, u)] > FLOOR, (fit_seed, md, u, rec[(md, u)], unif)
+
+
+# --- Production-path optimizer equivalence -----------------------------------
+
+
+@pytest.mark.slow
+def test_vi_runner_full_batch_matches_local_variational_em(spark):
+    """PRODUCTION-PATH gate: VIRunner's full-batch fit must reach the same ELBO as
+    `fit_gated_svi_local`, the in-memory lr=1.0 variational-EM reference that every
+    SVI-vs-Gibbs gate in this file is written against.
+
+    Why this exists. A real defect lived in the production full-batch path for its
+    whole life (insight 0074): VIRunner applied the decaying Robbins-Monro step
+    rho_t = (tau0 + t + 1)^-kappa UNCONDITIONALLY, so full batches were damped toward
+    a DETERMINISTIC target -- the parameters froze short of the fixed point and the
+    early stop fired on the vanishing step. Every equivalence gate here validated
+    `fit_gated_svi_local` at lr=1.0 and none of them touched VIRunner, so the two
+    paths ran different optimizers and nothing noticed. Fixing that instance without
+    closing the gap would leave the next one free to happen; this is the gap.
+
+    Not exact parameter equality, deliberately: `local_update` draws its gamma init
+    from the global numpy RNG, so partitioning the corpus changes the draw sequence.
+    The ELBO is the right currency -- it is what the optimizer optimizes.
+
+    DISCRIMINATION, measured by restoring the unconditional decaying rho and
+    re-running this exact setup:
+
+        rho = 1 (fixed):  production converges at iteration 6, ELBO -219689.68,
+                          gap to the reference  0.00 nats
+        damped (the bug): production runs all 40 iterations WITHOUT converging,
+                          ELBO -219895.52 and still climbing ~10 nats/iter,
+                          gap to the reference  -205.84 nats
+
+    so the 20-nat tolerance below sits ~10x inside the regression and ~infinitely
+    outside the correct case.
+
+    Note what does NOT discriminate, so nobody mistakes it for the gate: placement
+    metrics come out IDENTICAL under both schedules on this corpus (mrr 0.841,
+    top2 0.809), because a 206-nat ELBO deficit does not move node placement here.
+    An earlier draft of this test asserted only placement and would have passed with
+    the bug in place. They are kept below as a cheap floor against a grosser
+    production-path break, but the ELBO assertion is what closes the gap.
+    """
+    import numpy as np
+    from tests._stm_synth import (dag_placement_corpus, fit_gated_svi_local,
+                                  svi_node_profiles)
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.models.topic.dag_placement import DagLayout, evaluate
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    from spark_vi.models.topic.types import GatedBOWDocument
+
+    parent = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
+    V, doc_len, n_train, n_iter = 120, 60, 900, 40
+    docs, labels, _ = dag_placement_corpus(
+        parent=parent, node_prev={u: 1 for u in range(1, 7)},
+        V=V, doc_len=doc_len, seed=1)
+    lay = DagLayout(parent, n_bg=2, tpn=1)
+    tr_d, tr_l = docs[:n_train], labels[:n_train]
+    te_d, te_l = docs[n_train:], labels[n_train:]
+    bow = [GatedBOWDocument(*_bow(d), frontier=frozenset({int(y)}))
+           for d, y in zip(tr_d, tr_l)]
+
+    # Reference arm: the validated in-memory lr=1.0 variational EM.
+    m_ref = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    gp_ref = fit_gated_svi_local(m_ref, bow, n_iter=n_iter, seed=0)
+    ev_ref = evaluate(svi_node_profiles(m_ref, gp_ref, te_d, lay), te_l, lay)
+
+    # Production arm: the same model, same budget, through VIRunner's full-batch
+    # path (mini_batch_fraction=None).
+    np.random.seed(0)
+    m_prod = GatedOnlineLDA(lay, V, alpha=0.1, eta=0.02, random_seed=0)
+    rdd = spark.sparkContext.parallelize(bow, 4).persist()
+    rdd.count()                     # materialize for VIRunner's cache precondition
+    res = VIRunner(m_prod, VIConfig(max_iterations=n_iter, convergence_tol=1e-12,
+                                    mini_batch_fraction=None, random_seed=0)).fit(rdd)
+    # THE GATE, asserted first so it is what reports on a regression: same ELBO. The
+    # reference keeps no ELBO trace, so score its final parameters with the same
+    # full-batch statistics the production arm used.
+    elbo_ref = float(m_ref.compute_elbo(gp_ref, m_ref.local_update(bow, gp_ref)))
+    assert res.elbo_trace[-1] >= elbo_ref - 20.0, (
+        f"production ELBO {res.elbo_trace[-1]:.2f} vs reference {elbo_ref:.2f} "
+        f"(gap {res.elbo_trace[-1] - elbo_ref:+.2f} nats); the damped-rho "
+        f"regression shows up here as ~-206 nats")
+
+    # Corollary of a correct step size: it finishes well inside the budget, because
+    # batch VB with rho=1 reaches its fixed point fast (measured: iteration 6 of 40,
+    # last relative ELBO change ~1e-13). The damped schedule cannot converge at all
+    # here -- its step vanishes faster than it closes the residual.
+    assert res.converged is True, (res.n_iterations, res.elbo_trace[-3:])
+
+    ev_prod = evaluate(svi_node_profiles(m_prod, res.global_params, te_d, lay),
+                       te_l, lay)
+
+    # Secondary floor only -- see the docstring: these are NOT sensitive to the
+    # regression this test exists for.
+    assert ev_prod["mrr"] >= ev_ref["mrr"] - 0.05, (ev_prod["mrr"], ev_ref["mrr"])
+    assert ev_prod["top2"] >= ev_ref["top2"] - 0.05, (ev_prod["top2"], ev_ref["top2"])
+    for dep, auc_ref in ev_ref["auc_by_depth"].items():
+        assert ev_prod["auc_by_depth"][dep] >= auc_ref - 0.05, (
+            dep, ev_prod["auc_by_depth"][dep], auc_ref)
