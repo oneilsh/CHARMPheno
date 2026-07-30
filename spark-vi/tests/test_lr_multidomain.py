@@ -33,6 +33,27 @@ def test_lr_background_sparse_dense_and_fixed_scoring_equivalence():
     assert np.allclose(scaled, raw * 7.0)
 
 
+def test_lr_background_floors_absent_columns_and_remains_normalized():
+    """Reference splits may omit codes, but their base rates remain probabilities."""
+    from spark_vi.models.topic.dag_placement import lr_background
+
+    background = lr_background(np.array([[2.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))
+
+    assert np.isclose(background.sum(), 1.0, rtol=0.0, atol=1e-12)
+    assert np.all(background > 0.0)
+    assert np.isclose(background[1], background[2])
+
+
+def test_lr_background_all_zero_corpus_is_uniform():
+    """Without reference counts, symmetric epsilon flooring yields a uniform prior."""
+    from spark_vi.models.topic.dag_placement import lr_background
+
+    background = lr_background(np.zeros((2, 3)))
+
+    assert np.allclose(background, np.full(3, 1.0 / 3.0))
+    assert np.isclose(background.sum(), 1.0)
+
+
 def test_multidomain_score_is_the_per_domain_sum():
     from spark_vi.models.topic.dag_placement import (
         lr_placement_scores, lr_placement_scores_multidomain)
@@ -166,6 +187,16 @@ def test_domain_scale_falls_back_to_one_on_a_constant_domain():
     from spark_vi.models.topic.dag_placement import _domain_scale, domain_score_scale
     for x in (np.zeros((4, 3)), np.full((4, 3), 2.5)):
         assert domain_score_scale(x) == _domain_scale(x) == 1.0
+
+
+def test_domain_score_scale_empty_input_returns_one_without_warnings():
+    """An empty score matrix is inert and must not emit NumPy reduction warnings."""
+    import warnings
+    from spark_vi.models.topic.dag_placement import domain_score_scale
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        assert domain_score_scale(np.empty((0, 3))) == 1.0
 
 
 def test_combine_domain_score_matrices_applies_fixed_scales_and_weights():

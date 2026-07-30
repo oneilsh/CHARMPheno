@@ -350,11 +350,14 @@ def lr_background(bow, *, epsilon=1e-9):
 
     The caller chooses the reference rows. Reusing the returned vector when
     scoring another cohort prevents the score transformation from depending on
-    the composition of that scoring batch.
+    the composition of that scoring batch. Absent vocabulary entries are
+    epsilon-floored and the result is renormalized, so it remains a probability
+    distribution; an all-zero reference corpus therefore yields a uniform rate.
     """
     col = np.asarray(bow.sum(axis=0)).ravel().astype(float)
     bg = col / max(float(col.sum()), 1.0)
-    return np.maximum(bg, epsilon)
+    bg = np.maximum(bg, epsilon)
+    return bg / bg.sum()
 
 
 def _lr_base_rate(bow, background, epsilon):
@@ -493,7 +496,10 @@ def domain_score_scale(scores):
     all-zero domain then contributes nothing -- an inert domain, for free).
     See docs/superpowers/specs/2026-07-29-domain-normalized-lr-combination-design.md
     """
-    sd = float(np.std(np.asarray(scores, dtype=float)))
+    values = np.asarray(scores, dtype=float)
+    if values.size == 0:
+        return 1.0
+    sd = float(np.std(values))
     return sd if np.isfinite(sd) and sd > 0.0 else 1.0
 
 
