@@ -2,6 +2,7 @@
 a label DAG from their features via gated collapsed-Gibbs topic learning (Griffiths & Steyvers
 2004) with anchor-word spectral init (Arora et al. 2013). See
 docs/superpowers/specs/2026-07-15-anchor-first-hierarchical-case-finding-design.md."""
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import numpy as np
@@ -317,6 +318,113 @@ def _routing_rows(lam, lay, *, epsilon=1e-9):
     for i, u in enumerate(lay.nodes):
         rnode[i] = rtopic[lay.block[u]].sum(axis=0)
     return rnode
+
+
+def _normalize_prob(x, epsilon):
+    """Return a nonnegative probability vector with a uniform empty fallback.
+
+    Epsilon makes log-space comparisons safe, but flooring after normalization
+    alone no longer sums to one.  Renormalizing after the floor preserves the
+    probability contract used by Jensen-Shannon divergence.
+    """
+    epsilon = float(epsilon)
+    if epsilon < 0.0:
+        raise ValueError("epsilon must be nonnegative")
+    x = np.asarray(x, dtype=float)
+    x = np.where(np.isfinite(x), np.maximum(x, 0.0), 0.0)
+    if x.size == 0:
+        return x
+    total = float(x.sum())
+    if total <= 0.0:
+        return np.full(x.shape, 1.0 / x.size)
+    prob = x / total
+    if epsilon:
+        prob = np.maximum(prob, epsilon)
+        prob /= prob.sum()
+    return prob
+
+
+def _js_divergence(p, q, epsilon):
+    """Jensen-Shannon divergence between two smoothed probability vectors."""
+    p = _normalize_prob(p, epsilon)
+    q = _normalize_prob(q, epsilon)
+    mid = 0.5 * (p + q)
+    return (0.5 * float(np.sum(p * np.log(p / mid))) +
+            0.5 * float(np.sum(q * np.log(q / mid))))
+
+
+@dataclass(frozen=True)
+class DomainReliability:
+    """Label-free, model-derived reliability components for every node and domain."""
+
+    domain_keys: tuple[int, ...]
+    distinctiveness: np.ndarray
+    ownership: np.ndarray
+    viability: np.ndarray
+
+    def weights(self, candidate):
+        """Return nonnegative per-node domain weights that each sum to one.
+
+        Candidate ``product`` requires all three signals.  When a node has no
+        finite evidence in any domain, symmetry is retained with uniform weights
+        rather than selecting a domain through an arbitrary numerical fallback.
+        """
+        if candidate == "distinctiveness":
+            raw = self.distinctiveness
+        elif candidate == "ownership":
+            raw = self.ownership
+        elif candidate == "product":
+            raw = self.distinctiveness * self.ownership * self.viability
+        else:
+            raise ValueError(f"unknown domain reliability candidate: {candidate!r}")
+
+        raw = np.maximum(np.asarray(raw, dtype=float), 0.0)
+        n_domains = raw.shape[1]
+        if n_domains == 0:
+            return raw.copy()
+        total = raw.sum(axis=1, keepdims=True)
+        valid = np.isfinite(total) & (total > 0.0)
+        weights = np.divide(raw, total, out=np.zeros_like(raw), where=valid)
+        weights[~valid[:, 0]] = 1.0 / n_domains
+        return weights
+
+
+def domain_reliability(lam_dict, lay, *, epsilon=1e-12, viability_tol=1e-6):
+    """Derive per-node, per-domain reliability from fitted topic-word λ values.
+
+    Distinctiveness is the bounded Jensen-Shannon divergence between a node's
+    topic block and the fitted background.  It is a proxy for learned model
+    structure, not a measure of downstream task utility.  Ownership is the
+    node distribution's expected explain-away routing responsibility, while
+    viability is the share of that node's topics with vocabulary contrast.
+    """
+    domain_keys = tuple(sorted(lam_dict))
+    if not domain_keys:
+        raise ValueError("lam_dict must contain at least one domain")
+
+    n_nodes = len(lay.nodes)
+    n_domains = len(domain_keys)
+    distinctiveness = np.zeros((n_nodes, n_domains), dtype=float)
+    ownership = np.zeros((n_nodes, n_domains), dtype=float)
+    viability = np.zeros((n_nodes, n_domains), dtype=float)
+
+    for m, key in enumerate(domain_keys):
+        lam = np.asarray(lam_dict[key], dtype=float)
+        if lam.ndim != 2 or lam.shape[0] != lay.K:
+            raise ValueError("each domain lambda must have shape [lay.K, vocabulary]")
+        background = _normalize_prob(lam[:lay.n_bg].sum(axis=0), epsilon)
+        routing = _routing_rows(lam, lay, epsilon=epsilon)
+        for i, u in enumerate(lay.nodes):
+            topics = lay.block[u]
+            node = _normalize_prob(lam[topics].sum(axis=0), epsilon)
+            distinctiveness[i, m] = _js_divergence(node, background, epsilon)
+            ownership[i, m] = float(np.sum(node * routing[i]))
+            live = [np.max(lam[k]) - np.min(lam[k]) >
+                    viability_tol * max(float(np.max(lam[k])), float(epsilon))
+                    for k in topics]
+            viability[i, m] = float(np.mean(live)) if live else 0.0
+
+    return DomainReliability(domain_keys, distinctiveness, ownership, viability)
 
 
 def _lr_logratio_rows(lam, lay, *, alpha, bg, epsilon):
