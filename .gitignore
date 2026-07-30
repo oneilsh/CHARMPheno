@@ -29,6 +29,9 @@ htmlcov/
 # Claude Code / agent caches
 .claude/
 
+# Agent implementation worktrees
+.worktrees/
+
 # Jupyter
 .ipynb_checkpoints/
 
