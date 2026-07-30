@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -124,6 +124,8 @@ help:
 	@echo "  build-covariates EXP=N  - rebuild STM covariate cache for experiment N without re-running fit."
 	@echo "                         Useful when iterating on covariate_formula. FORCE=1 invalidates cache."
 	@echo "  multidomain-lr-readout ID=N [MULTIDOMAIN_LR_ALPHA_GRID=.. MULTIDOMAIN_LR_NORMALIZE=none|std|length|length+std]  Post-hoc per-domain LR readout (multidomain fit)"
+	@echo "  multidomain-weighting-readout ID=N"
+	@echo "                         Nested-CV supervised ceiling + model-derived domain reliability (no refit)"
 	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
 	@echo "                         Restricts to patients with a first malignant-cancer dx"
 	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
@@ -436,6 +438,18 @@ multidomain-lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
 	    --alpha-grid $(MULTIDOMAIN_LR_ALPHA_GRID) \
 	    --normalize $(MULTIDOMAIN_LR_NORMALIZE)
+
+# Spark-free reliability readout on the same driver-local artifacts as the
+# multidomain LR readout. The zip/overlay prerequisites mirror cluster delivery,
+# while PYTHONPATH makes them importable to a plain Python driver.
+MULTIDOMAIN_WEIGHTING_ARGS ?=
+multidomain-weighting-readout: zip cluster-overlay $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	. ./$(WORKSPACE_ENV) && \
+	PYTHONPATH=$(SPARK_VI_ZIP):$(CHARMPHENO_ZIP):$(CLUSTER_OVERLAY):$${PYTHONPATH:-} \
+	python3 $(REPO_ROOT)/analysis/cloud/multidomain_weighting_readout.py \
+	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
+	    $(MULTIDOMAIN_WEIGHTING_ARGS)
 
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
