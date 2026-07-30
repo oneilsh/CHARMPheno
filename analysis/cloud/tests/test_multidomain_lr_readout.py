@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 
 
@@ -29,13 +31,62 @@ def test_save_load_test_set_roundtrip(tmp_path):
     bows_in = {0: sp.csr_matrix(np.array([[1.0, 0, 2, 0], [0, 0, 0, 3]])),
                1: sp.csr_matrix(np.array([[0.0, 1, 0], [1, 0, 1]]))}
     save_test_set(tmp_path, bows_in, np.zeros((2, 5)),
-                  frontiers=[[5], []], aff_frontiers=[[7], []])
+                  frontiers=[[5], []], aff_frontiers=[[7], []],
+                  person_ids=[101, 202])
     bows, frontiers, aff, aff_frontiers, n = load_test_set(tmp_path, 2)
     assert set(bows) == {0, 1}
     assert bows[0].shape == (2, 4) and bows[1].shape == (2, 3)
     assert bows[0][0, 2] == 2.0 and bows[1][1, 0] == 1.0   # values landed
     assert frontiers == [[5], []] and aff_frontiers == [[7], []]  # kept separate
     assert aff.shape == (2, 5) and n == 2
+    meta = json.loads((tmp_path / "test_meta.json").read_text())
+    assert meta["person_row_attestation"] == {
+        "row_count": 2,
+        "unique_person_count": 2,
+        "one_row_per_person": True,
+    }
+    assert "101" not in (tmp_path / "test_meta.json").read_text()
+    assert "202" not in (tmp_path / "test_meta.json").read_text()
+
+
+def test_save_test_set_rejects_duplicate_people_before_writing(tmp_path):
+    """Catches persisting a row-fold artifact that can leak one person across folds."""
+    import pytest
+    from scipy import sparse as sp
+    from multidomain_lr_readout import save_test_set
+
+    bows = {0: sp.csr_matrix(np.ones((2, 3)))}
+    with pytest.raises(ValueError, match="person_ids.*unique"):
+        save_test_set(
+            tmp_path,
+            bows,
+            np.zeros((2, 1)),
+            frontiers=[[1], []],
+            aff_frontiers=[[1], []],
+            person_ids=[101, 101],
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_save_test_set_rejects_person_row_count_mismatch_before_writing(tmp_path):
+    """Catches attesting uniqueness for IDs that are not aligned to every BOW row."""
+    import pytest
+    from scipy import sparse as sp
+    from multidomain_lr_readout import save_test_set
+
+    bows = {0: sp.csr_matrix(np.ones((2, 3)))}
+    with pytest.raises(ValueError, match="person_ids.*frontiers"):
+        save_test_set(
+            tmp_path,
+            bows,
+            np.zeros((2, 1)),
+            frontiers=[[1], []],
+            aff_frontiers=[[1], []],
+            person_ids=[101],
+        )
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_load_test_set_missing_raises(tmp_path):

@@ -466,6 +466,28 @@ def test_discrete_policies_cover_every_subset_and_normalization_in_stable_order(
     assert got == expected
 
 
+def test_ordinal_domain_labels_name_policies_and_select_condition_drug():
+    """Catches exposing ordinal policy names or treating the first two as baseline."""
+    from multidomain_weighting import (
+        _fixed_condition_drug_domains,
+        discrete_policies,
+    )
+
+    labels = {0: "condition", 1: "observation", 2: "drug"}
+    policies = discrete_policies((0, 1, 2), domain_labels=labels)
+
+    assert _fixed_condition_drug_domains(
+        (0, 1, 2),
+        domain_labels=labels,
+    ) == (0, 2)
+    assert ("only:observation|std", (1,), "std") in policies
+    assert ("drop:observation|none", (0, 2), "none") in policies
+    assert all(
+        "only:0" not in name and "drop:1" not in name
+        for name, _, _ in policies
+    )
+
+
 def _fold_local_normalization_fixture(seed):
     """Planted multi-domain scores with row-varying utilization."""
     from scipy import sparse as sp
@@ -963,6 +985,72 @@ def test_outer_fold_scores_apply_training_backgrounds_and_scales():
     assert np.array_equal(
         evaluated["scores"]["continuous"], expected_continuous
     )
+
+
+def test_reordered_ordinal_outer_fold_uses_named_condition_drug_baseline():
+    """Catches fixed:condition_drug silently using condition+observation."""
+    from multidomain_weighting import (
+        _backgrounds_from_rows,
+        _evaluate_outer_fold,
+        _raw_scores_for_rows,
+        _weighted_subtree_score,
+        simplex_grid,
+        stratified_folds,
+        subtree_columns,
+    )
+
+    named_bows, named_lam, lay, _, _, y = _nested_bow_fixture()
+    names = ("condition", "observation", "drug")
+    bows = {index: named_bows[name] for index, name in enumerate(names)}
+    lam_dict = {index: named_lam[name] for index, name in enumerate(names)}
+    domain_labels = dict(enumerate(names))
+    outer_train, outer_test = stratified_folds(y, n_splits=5, seed=19)[0]
+    columns = subtree_columns(lay, {1, 2})
+
+    evaluated = _evaluate_outer_fold(
+        bows=bows,
+        lam_dict=lam_dict,
+        lay=lay,
+        y=y,
+        columns=columns,
+        outer_train=outer_train,
+        outer_test=outer_test,
+        inner_folds=3,
+        grid=simplex_grid(3, 0.5),
+        inner_seed=101,
+        domain_labels=domain_labels,
+    )
+
+    backgrounds = _backgrounds_from_rows(bows, outer_train)
+    raw_test = _raw_scores_for_rows(
+        bows,
+        lam_dict,
+        lay,
+        outer_test,
+        backgrounds,
+    )
+    expected = _weighted_subtree_score(
+        {0: raw_test[0], 2: raw_test[2]},
+        np.ones(2),
+        columns,
+    )
+    wrong_first_two = _weighted_subtree_score(
+        {0: raw_test[0], 1: raw_test[1]},
+        np.ones(2),
+        columns,
+    )
+
+    assert np.allclose(evaluated["scores"]["fixed:condition_drug"], expected)
+    assert not np.allclose(expected, wrong_first_two)
+    assert evaluated["discrete_policy"].split("|", 1)[0] in {
+        "all",
+        "only:condition",
+        "only:observation",
+        "only:drug",
+        "drop:condition",
+        "drop:observation",
+        "drop:drug",
+    }
 
 
 def test_outer_fold_selection_ignores_test_labels_and_test_bow_rows():

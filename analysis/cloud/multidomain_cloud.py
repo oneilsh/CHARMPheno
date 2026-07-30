@@ -702,8 +702,8 @@ def main(argv=None) -> int:
             # driver (the LR readout collects it anyway). test_bow_<m>.npz = held-
             # out per-domain BOWs (LR scoring input); test_affinity.npy = the
             # model's native theta-mass node scores (the readout's baseline, so no
-            # CAVI re-run); test_meta.json = the frontiers + count. Guarded on a
-            # non-empty test split.
+            # CAVI re-run); test_meta.json = frontiers, count, and a privacy-safe
+            # one-row-per-person attestation. Guarded on a non-empty test split.
             from scipy import sparse as _sp
             from multidomain_lr_readout import save_test_set
             test_rows = bundle.test_df.select(*_test_persist_cols(feature_cols)).collect()
@@ -730,7 +730,8 @@ def main(argv=None) -> int:
                 # readout's load_test_set -- one source of truth for the contract).
                 save_test_set(out, bows, aff,
                               [r["frontier"] for r in test_rows],
-                              [r["frontier"] for r in aff_rows])
+                              [r["frontier"] for r in aff_rows],
+                              person_ids=[r["person_id"] for r in test_rows])
                 print(f"[driver]   persisted {len(test_rows)} test docs "
                       f"(driver-local) for LR readout -> {out}", flush=True)
             else:

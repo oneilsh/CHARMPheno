@@ -156,6 +156,8 @@ def select_simplex_weights(train_matrices, y, columns, *, grid) -> np.ndarray:
 
 def discrete_policies(
     domain_keys,
+    *,
+    domain_labels=None,
 ) -> tuple[tuple[str, tuple[int, ...], str], ...]:
     """Enumerate every nonempty domain subset crossed with four transforms.
 
@@ -165,6 +167,7 @@ def discrete_policies(
     domains = tuple(sorted(domain_keys))
     if not domains:
         raise ValueError("domain_keys must contain at least one domain")
+    labels = _domain_label_map(domains, domain_labels)
     normalizations = ("none", "std", "length", "length+std")
     policies = []
     for size in range(1, len(domains) + 1):
@@ -172,12 +175,14 @@ def discrete_policies(
             if len(subset) == len(domains):
                 subset_name = "all"
             elif len(subset) == 1:
-                subset_name = f"only:{subset[0]}"
+                subset_name = f"only:{labels[subset[0]]}"
             elif len(subset) == len(domains) - 1:
                 missing = next(domain for domain in domains if domain not in subset)
-                subset_name = f"drop:{missing}"
+                subset_name = f"drop:{labels[missing]}"
             else:
-                subset_name = "subset:" + "+".join(str(domain) for domain in subset)
+                subset_name = "subset:" + "+".join(
+                    labels[domain] for domain in subset
+                )
             for normalization in normalizations:
                 policies.append(
                     (
@@ -187,6 +192,21 @@ def discrete_policies(
                     )
                 )
     return tuple(policies)
+
+
+def _domain_label_map(domain_keys, domain_labels):
+    """Return a validated engine-key to display-name mapping."""
+    domains = tuple(sorted(domain_keys))
+    if domain_labels is None:
+        return {domain: str(domain) for domain in domains}
+    if not isinstance(domain_labels, dict) or set(domain_labels) != set(domains):
+        raise ValueError("domain_labels must map every domain key exactly once")
+    labels = [domain_labels[domain] for domain in domains]
+    if any(not isinstance(label, str) for label in labels):
+        raise ValueError("domain_labels values must be strings")
+    if len(set(labels)) != len(labels):
+        raise ValueError("domain_labels values must be unique")
+    return {domain: domain_labels[domain] for domain in domains}
 
 
 def _transformed_fold_matrices(
@@ -272,12 +292,13 @@ def _inner_oof_selection(
     inner_folds,
     grid,
     seed,
+    domain_labels=None,
 ):
     """Select discrete and continuous rules from pooled inner OOF predictions."""
     outer_train = np.asarray(outer_train, dtype=int)
     train_y = np.asarray(y, dtype=int)[outer_train]
     domains = tuple(sorted(bows))
-    policies = discrete_policies(domains)
+    policies = discrete_policies(domains, domain_labels=domain_labels)
     pooled_policy_scores = {
         name: np.empty(len(outer_train), dtype=float) for name, _, _ in policies
     }
@@ -349,9 +370,17 @@ def _inner_oof_selection(
     return selected_policy, selected_weights
 
 
-def _fixed_condition_drug_domains(domain_keys):
+def _fixed_condition_drug_domains(domain_keys, *, domain_labels=None):
     """Resolve the predeclared condition+drug baseline for named or ordinal keys."""
     domains = tuple(sorted(domain_keys))
+    if domain_labels is not None:
+        labels = _domain_label_map(domains, domain_labels)
+        key_by_label = {label: key for key, label in labels.items()}
+        if "condition" not in key_by_label or "drug" not in key_by_label:
+            raise ValueError(
+                "domain_labels must include condition and drug for the fixed baseline"
+            )
+        return (key_by_label["condition"], key_by_label["drug"])
     if "condition" in domains and "drug" in domains:
         return ("condition", "drug")
     return domains[: min(2, len(domains))]
@@ -370,6 +399,7 @@ def _evaluate_outer_fold(
     grid,
     inner_seed,
     model_weights=None,
+    domain_labels=None,
 ):
     """Select on outer-training inner OOF data and score one frozen outer test."""
     outer_train = np.asarray(outer_train, dtype=int)
@@ -387,6 +417,7 @@ def _evaluate_outer_fold(
         inner_folds=inner_folds,
         grid=grid,
         seed=inner_seed,
+        domain_labels=domain_labels,
     )
 
     raw_test, raw_scales = _transformed_fold_matrices(
@@ -412,7 +443,10 @@ def _evaluate_outer_fold(
     else:
         discrete_test, discrete_scales = raw_test, raw_scales
 
-    fixed_domains = _fixed_condition_drug_domains(bows)
+    fixed_domains = _fixed_condition_drug_domains(
+        bows,
+        domain_labels=domain_labels,
+    )
     fixed_matrices = {domain: raw_test[domain] for domain in fixed_domains}
     fixed_score = _weighted_subtree_score(
         fixed_matrices,
@@ -617,6 +651,7 @@ def evaluate_anchor_nested(
     repeats=5,
     grid_step=0.05,
     seed=0,
+    domain_labels=None,
 ) -> dict:
     """Evaluate fixed, discrete, and continuous scores with honest nested CV.
 
@@ -634,6 +669,8 @@ def evaluate_anchor_nested(
     if int(repeats) != repeats or int(repeats) < 1:
         raise ValueError("repeats must be a positive integer")
     repeats = int(repeats)
+    if domain_labels is not None:
+        domain_labels = _domain_label_map(domains, domain_labels)
 
     scoreable_subtree = _descendant_subtree(parent_int, anchor) & set(lay.nodes)
     columns = subtree_columns(lay, scoreable_subtree)
@@ -685,6 +722,7 @@ def evaluate_anchor_nested(
                 grid=grid,
                 inner_seed=int(seed) + 100_000 * (repeat + 1) + fold,
                 model_weights=model_weights,
+                domain_labels=domain_labels,
             )
             for strategy, scores in evaluated["scores"].items():
                 pooled_scores[strategy][outer_test] = scores

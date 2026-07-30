@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from collections.abc import Mapping
 import json
 import math
 from pathlib import Path
@@ -43,7 +44,10 @@ def _grid_step(value: str) -> float:
         raise argparse.ArgumentTypeError("must be a finite positive number") from None
     if not math.isfinite(parsed) or parsed <= 0.0:
         raise argparse.ArgumentTypeError("must be a finite positive number")
-    units = round(1.0 / parsed)
+    reciprocal = 1.0 / parsed
+    if not math.isfinite(reciprocal):
+        raise argparse.ArgumentTypeError("reciprocal grid size must be finite")
+    units = round(reciprocal)
     if units < 1 or not math.isclose(
         parsed * units,
         1.0,
@@ -97,6 +101,7 @@ def load_artifact(
     from charmpheno.omop.cohorts import disease_anchors
     from multidomain_lr_readout import (
         load_lambda_dict,
+        load_person_row_attestation,
         load_test_set,
         scoreable_targets,
         subtree_nodes,
@@ -111,6 +116,8 @@ def load_artifact(
         _abort(f"missing manifest.json under {run_dir}")
     except json.JSONDecodeError as error:
         _abort(f"invalid manifest.json under {run_dir}: {error}")
+    if not isinstance(manifest, Mapping):
+        _abort("manifest root must be a mapping")
 
     disease = manifest.get("disease")
     if disease != "rare6":
@@ -128,16 +135,22 @@ def load_artifact(
             f"found {actual_keys}"
         )
     n_domains = len(lam_dict)
-    domains = manifest.get("domains", [f"m{index}" for index in expected_keys])
-    if (
-        not isinstance(domains, list)
-        or len(domains) != n_domains
-        or len(set(domains)) != n_domains
-    ):
+    domains = manifest.get("domains")
+    if not isinstance(domains, list):
+        _abort("manifest domains must be a list")
+    if any(not isinstance(domain, str) for domain in domains):
+        _abort("manifest domain entries must be strings")
+    if len(domains) != n_domains:
         _abort(
-            "manifest domains must be a unique name for each lambda domain; "
-            f"found {domains!r} for {n_domains} domains"
+            "manifest domains must provide one name per lambda domain; "
+            f"found {len(domains)} names for {n_domains} domains"
         )
+    normalized_domains = [str(domain) for domain in domains]
+    if len(set(normalized_domains)) != n_domains:
+        _abort("manifest domain names must be unique after output normalization")
+    if not {"condition", "drug"}.issubset(normalized_domains):
+        _abort("manifest domains must include condition and drug")
+    domain_labels = dict(zip(expected_keys, normalized_domains))
 
     try:
         corpus_manifest = manifest["corpus_manifest"]
@@ -192,6 +205,10 @@ def load_artifact(
         _abort(
             f"frontiers length {len(frontiers)} does not match n_docs={n_docs}"
         )
+    try:
+        person_row_attestation = load_person_row_attestation(run_dir, n_docs)
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError) as error:
+        _abort(str(error))
 
     targets = []
     for concept_id in disease_anchors(disease):
@@ -220,7 +237,8 @@ def load_artifact(
         "run_dir": run_dir,
         "manifest": manifest,
         "disease": disease,
-        "domains": [str(domain) for domain in domains],
+        "domains": normalized_domains,
+        "domain_labels": domain_labels,
         "lam_dict": lam_dict,
         "bows": bows,
         "frontiers": frontiers,
@@ -228,6 +246,7 @@ def load_artifact(
         "parent_int": parent_int,
         "targets": targets,
         "n_docs": int(n_docs),
+        "person_row_attestation": person_row_attestation,
     }
 
 
@@ -633,6 +652,7 @@ def main(argv=None) -> int:
                     artifact["frontiers"],
                     anchor=target["anchor"],
                     parent_int=artifact["parent_int"],
+                    domain_labels=artifact["domain_labels"],
                     **cv_config,
                 )
             )

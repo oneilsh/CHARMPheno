@@ -18,8 +18,9 @@ docs/superpowers/specs/2026-07-29-domain-normalized-lr-combination-design.md).
 
 Every function here is pure and unit-tested (build_parser, parse_alpha_grid,
 children_map, subtree_nodes, per_disease_auc_row, load_lambda_dict,
-load_test_set, normalize_arg, pr_by_normalization); main() wires them and is
-cluster-run (make multidomain-lr-readout ID=N).
+load_test_set, load_person_row_attestation, normalize_arg,
+pr_by_normalization); main() wires them and is cluster-run
+(make multidomain-lr-readout ID=N).
 """
 from __future__ import annotations
 
@@ -155,13 +156,34 @@ def _meta_path(run_dir):
     return Path(run_dir) / "test_meta.json"
 
 
-def save_test_set(out_dir, bows, aff, frontiers, aff_frontiers):
+def save_test_set(
+    out_dir,
+    bows,
+    aff,
+    frontiers,
+    aff_frontiers,
+    *,
+    person_ids,
+):
     """Write the DRIVER-LOCAL held-out test set (the writer half of the contract
     load_test_set reads). `bows` = {m: scipy CSR [n x V_m]}; `aff` = dense
     [n x n_nodes] theta-mass affinity; `frontiers` pairs with `bows` (their shared
     collect), `aff_frontiers` pairs with `aff` (its own collect). Called by
     multidomain_cloud.py after the fit; kept here so writer and reader share these
-    exact filenames/JSON keys."""
+    exact filenames/JSON keys.
+
+    ``person_ids`` is used only to prove the one-row-per-person invariant needed
+    by supervised row-level CV. Raw identifiers and hashes are never persisted.
+    """
+    person_ids = list(person_ids)
+    if len(person_ids) != len(frontiers):
+        raise ValueError(
+            "person_ids must have exactly one entry per frontiers row"
+        )
+    unique_person_count = len(set(person_ids))
+    if unique_person_count != len(person_ids):
+        raise ValueError("person_ids must be unique for row-level CV")
+
     for m, csr in bows.items():
         sp.save_npz(str(_bow_path(out_dir, m)), csr)
     np.save(str(_aff_path(out_dir)), aff)
@@ -169,6 +191,11 @@ def save_test_set(out_dir, bows, aff, frontiers, aff_frontiers):
         "n_docs": len(frontiers),
         "frontiers": [[int(x) for x in fr] for fr in frontiers],
         "aff_frontiers": [[int(x) for x in fr] for fr in aff_frontiers],
+        "person_row_attestation": {
+            "row_count": len(person_ids),
+            "unique_person_count": unique_person_count,
+            "one_row_per_person": True,
+        },
     }))
 
 
@@ -193,6 +220,38 @@ def load_test_set(run_dir, n_dom):
     frontiers = [[int(x) for x in fr] for fr in meta["frontiers"]]
     aff_frontiers = [[int(x) for x in fr] for fr in meta["aff_frontiers"]]
     return bows, frontiers, aff, aff_frontiers, int(meta["n_docs"])
+
+
+def load_person_row_attestation(run_dir, n_docs):
+    """Load and validate the privacy-safe proof required for row-level CV."""
+    meta = json.loads(_meta_path(run_dir).read_text())
+    attestation = meta.get("person_row_attestation")
+    if not isinstance(attestation, dict):
+        raise ValueError(
+            "missing person-row uniqueness attestation; re-fit this legacy artifact"
+        )
+    if attestation.get("one_row_per_person") is not True:
+        raise ValueError(
+            "person-row attestation one_row_per_person must be true"
+        )
+    row_count = attestation.get("row_count")
+    if row_count != n_docs:
+        raise ValueError(
+            f"person-row attestation row_count={row_count} does not match "
+            f"n_docs={n_docs}"
+        )
+    unique_person_count = attestation.get("unique_person_count")
+    if unique_person_count != n_docs:
+        raise ValueError(
+            "person-row attestation "
+            f"unique_person_count={unique_person_count} does not match "
+            f"n_docs={n_docs}"
+        )
+    return {
+        "row_count": int(row_count),
+        "unique_person_count": int(unique_person_count),
+        "one_row_per_person": True,
+    }
 
 
 def per_disease_auc_row(scores, frontiers, anchor, lay, parent_int):

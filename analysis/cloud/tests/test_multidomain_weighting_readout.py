@@ -19,11 +19,16 @@ def _write_synthetic_artifact(run_dir: Path) -> Path:
     run_dir.mkdir()
     (run_dir / "params").mkdir()
     parent_int = {engine_id: [0] for engine_id in range(1, 7)}
-    int2cid = {0: -1, **dict(enumerate(RARE6_CIDS, start=1))}
+    parent_int[7] = [1]
+    int2cid = {
+        0: -1,
+        **dict(enumerate(RARE6_CIDS, start=1)),
+        7: 900001,
+    }
     manifest = {
         "model_class": "multidomain_gated",
         "disease": "rare6",
-        "domains": ["condition", "drug"],
+        "domains": ["condition", "observation", "drug"],
         "n_bg": 1,
         "tpn": 1,
         "corpus_manifest": {
@@ -35,62 +40,97 @@ def _write_synthetic_artifact(run_dir: Path) -> Path:
                 for engine_id, concept_id in int2cid.items()
             },
             "name_by_id": {
-                str(concept_id): f"disease-{index}"
-                for index, concept_id in enumerate(RARE6_CIDS, start=1)
+                **{
+                    str(concept_id): f"disease-{index}"
+                    for index, concept_id in enumerate(RARE6_CIDS, start=1)
+                },
+                "900001": "disease-1-descendant",
             },
         },
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest))
 
-    # DagLayout has one background topic plus one topic for each of six nodes.
-    for domain in range(2):
-        lam = np.full((7, 4), 1.0)
-        for node in range(1, 7):
-            lam[node, (node + domain) % 4] += 4.0 + domain
+    # Reordered three-domain layout: one background plus seven node topics.
+    for domain in range(3):
+        lam = np.full((8, 5), 1.0)
+        for node in range(1, 8):
+            lam[node, (node + domain) % 5] += 4.0 + domain
         np.save(run_dir / "params" / f"lambda_{domain}.npy", lam)
 
-    # Every anchor has four positives and four negatives, supporting nested 2x2 CV.
-    frontiers = [list(range(1, 7)) for _ in range(4)] + [[] for _ in range(4)]
-    bows = {
-        0: sp.csr_matrix(
-            np.array(
-                [
-                    [6, 1, 0, 1],
-                    [5, 0, 1, 1],
-                    [4, 1, 1, 0],
-                    [5, 1, 0, 0],
-                    [0, 1, 5, 1],
-                    [1, 0, 6, 1],
-                    [0, 1, 4, 2],
-                    [1, 1, 5, 0],
-                ],
-                dtype=float,
-            )
-        ),
-        1: sp.csr_matrix(
-            np.array(
-                [
-                    [1, 5, 0, 1],
-                    [0, 6, 1, 0],
-                    [1, 4, 0, 2],
-                    [0, 5, 1, 1],
-                    [5, 0, 1, 1],
-                    [4, 1, 0, 2],
-                    [6, 0, 1, 0],
-                    [5, 1, 1, 0],
-                ],
-                dtype=float,
-            )
-        ),
-    }
+    # Each disease has a different four-row positive set. Row 0 reaches anchor 1
+    # only through descendant node 7, exercising descendant-frontier truth.
+    frontiers = [
+        [7],
+        [1, 2],
+        [1, 3],
+        [1, 4],
+        [2, 3],
+        [2, 4, 6],
+        [2, 5, 6],
+        [3, 4],
+        [3, 5],
+        [4, 5],
+        [5, 6],
+        [6],
+    ]
+    rows = np.arange(12)[:, None]
+    columns = np.arange(5)[None, :]
+    bows = {}
+    for domain in range(3):
+        dense = 1.0 + ((rows + 1) * (columns + domain + 1)) % 5
+        dense[:, domain] += np.array(
+            [sum(frontier) % (domain + 3) for frontier in frontiers],
+            dtype=float,
+        )
+        bows[domain] = sp.csr_matrix(dense)
     save_test_set(
         run_dir,
         bows,
-        np.zeros((8, 6), dtype=float),
+        np.zeros((12, 7), dtype=float),
         frontiers,
         frontiers,
+        person_ids=list(range(1001, 1013)),
     )
     return run_dir
+
+
+def _run_readout_cli(run_dir: Path, output_prefix: Path):
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "analysis" / "cloud" / "multidomain_weighting_readout.py"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(
+            None,
+            [
+                str(repo_root / "spark-vi"),
+                env.get("PYTHONPATH"),
+            ],
+        )
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--run-dir",
+            str(run_dir),
+            "--outer-folds",
+            "2",
+            "--inner-folds",
+            "2",
+            "--repeats",
+            "1",
+            "--grid-step",
+            "0.5",
+            "--seed",
+            "17",
+            "--output-prefix",
+            str(output_prefix),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
 
 
 def test_parser_defaults_are_the_preregistered_design():
@@ -119,6 +159,8 @@ def test_parser_defaults_are_the_preregistered_design():
         ("--grid-step", "0.3"),
         ("--grid-step", "nan"),
         ("--grid-step", "inf"),
+        ("--grid-step", "1e-309"),
+        ("--grid-step", "5e-324"),
     ],
 )
 def test_parser_rejects_invalid_cv_values(option, value):
@@ -152,8 +194,13 @@ def test_load_artifact_reconstructs_the_real_manifest_and_dag(tmp_path):
     run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
     artifact = load_artifact(run_dir, outer_folds=2)
 
-    assert artifact["domains"] == ["condition", "drug"]
-    assert artifact["lay"].nodes == [1, 2, 3, 4, 5, 6]
+    assert artifact["domains"] == ["condition", "observation", "drug"]
+    assert artifact["domain_labels"] == {
+        0: "condition",
+        1: "observation",
+        2: "drug",
+    }
+    assert artifact["lay"].nodes == [1, 2, 3, 4, 5, 6, 7]
     assert [target["concept_id"] for target in artifact["targets"]] == list(
         RARE6_CIDS
     )
@@ -167,11 +214,51 @@ def test_load_artifact_rejects_noncontiguous_lambda_keys(tmp_path):
     from multidomain_weighting_readout import load_artifact
 
     run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
-    (run_dir / "params" / "lambda_1.npy").rename(
-        run_dir / "params" / "lambda_2.npy"
+    (run_dir / "params" / "lambda_2.npy").rename(
+        run_dir / "params" / "lambda_3.npy"
     )
 
     with pytest.raises(SystemExit, match="lambda keys.*contiguous"):
+        load_artifact(run_dir, outer_folds=2)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("root-list", "manifest root must be a mapping"),
+        ("domains-scalar", "manifest domains must be a list"),
+        ("domains-unhashable", "manifest domain entries must be strings"),
+        ("domains-nonstring", "manifest domain entries must be strings"),
+        ("domains-duplicate", "manifest domain names must be unique"),
+        ("domains-missing-fixed", "manifest domains must include condition and drug"),
+    ],
+)
+def test_load_artifact_rejects_malformed_manifest_domains(
+    tmp_path,
+    mutation,
+    message,
+):
+    """Catches raw Python errors or collapsed report keys from malformed metadata."""
+    from multidomain_weighting_readout import load_artifact
+
+    run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if mutation == "root-list":
+        manifest = []
+    elif mutation == "domains-scalar":
+        manifest["domains"] = "condition,drug"
+    elif mutation == "domains-unhashable":
+        manifest["domains"] = [["condition"], "observation", "drug"]
+    elif mutation == "domains-nonstring":
+        manifest["domains"] = [1, "observation", "1"]
+    elif mutation == "domains-duplicate":
+        manifest["domains"] = ["condition", "observation", "condition"]
+    elif mutation == "domains-missing-fixed":
+        manifest["domains"] = ["condition", "observation", "measurement"]
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(SystemExit, match=message):
         load_artifact(run_dir, outer_folds=2)
 
 
@@ -180,9 +267,9 @@ def test_load_artifact_rejects_bow_row_count_mismatch(tmp_path):
     from multidomain_weighting_readout import load_artifact
 
     run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
-    sp.save_npz(run_dir / "test_bow_1.npz", sp.csr_matrix(np.ones((7, 4))))
+    sp.save_npz(run_dir / "test_bow_1.npz", sp.csr_matrix(np.ones((11, 5))))
 
-    with pytest.raises(SystemExit, match="BOW domain 1.*n_docs=8"):
+    with pytest.raises(SystemExit, match="BOW domain 1.*n_docs=12"):
         load_artifact(run_dir, outer_folds=2)
 
 
@@ -191,7 +278,7 @@ def test_load_artifact_rejects_lambda_bow_vocabulary_mismatch(tmp_path):
     from multidomain_weighting_readout import load_artifact
 
     run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
-    np.save(run_dir / "params" / "lambda_0.npy", np.ones((7, 3)))
+    np.save(run_dir / "params" / "lambda_0.npy", np.ones((8, 4)))
 
     with pytest.raises(SystemExit, match="vocabulary width.*domain 0"):
         load_artifact(run_dir, outer_folds=2)
@@ -207,7 +294,58 @@ def test_load_artifact_rejects_frontier_count_mismatch(tmp_path):
     meta["frontiers"] = meta["frontiers"][:-1]
     meta_path.write_text(json.dumps(meta))
 
-    with pytest.raises(SystemExit, match="frontiers length 7.*n_docs=8"):
+    with pytest.raises(SystemExit, match="frontiers length 11.*n_docs=12"):
+        load_artifact(run_dir, outer_folds=2)
+
+
+@pytest.mark.parametrize(
+    ("attestation", "message"),
+    [
+        (None, "missing person-row uniqueness attestation"),
+        (
+            {
+                "row_count": 12,
+                "unique_person_count": 11,
+                "one_row_per_person": False,
+            },
+            "one_row_per_person.*true",
+        ),
+        (
+            {
+                "row_count": 11,
+                "unique_person_count": 11,
+                "one_row_per_person": True,
+            },
+            "row_count=11.*n_docs=12",
+        ),
+        (
+            {
+                "row_count": 12,
+                "unique_person_count": 11,
+                "one_row_per_person": True,
+            },
+            "unique_person_count=11.*n_docs=12",
+        ),
+    ],
+)
+def test_load_artifact_requires_consistent_person_uniqueness_attestation(
+    tmp_path,
+    attestation,
+    message,
+):
+    """Catches row-level CV on legacy, duplicate-person, or inconsistent artifacts."""
+    from multidomain_weighting_readout import load_artifact
+
+    run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
+    meta_path = run_dir / "test_meta.json"
+    meta = json.loads(meta_path.read_text())
+    if attestation is None:
+        meta.pop("person_row_attestation")
+    else:
+        meta["person_row_attestation"] = attestation
+    meta_path.write_text(json.dumps(meta))
+
+    with pytest.raises(SystemExit, match=message):
         load_artifact(run_dir, outer_folds=2)
 
 
@@ -232,12 +370,12 @@ def test_load_artifact_rejects_insufficient_disease_class_counts(tmp_path):
     run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
     meta_path = run_dir / "test_meta.json"
     meta = json.loads(meta_path.read_text())
-    meta["frontiers"] = [[1]] + [[] for _ in range(7)]
+    meta["frontiers"] = [[1]] + [[] for _ in range(11)]
     meta_path.write_text(json.dumps(meta))
 
     with pytest.raises(
         SystemExit,
-        match="anchor 1.*1 positives.*7 negatives.*outer_folds=2",
+        match="anchor 1.*1 positives.*11 negatives.*outer_folds=2",
     ):
         load_artifact(run_dir, outer_folds=2)
 
@@ -444,54 +582,92 @@ def test_end_to_end_synthetic_artifact_cli_writes_parseable_reports(tmp_path):
     """Catches wiring that works only with monkeypatches, Spark, or clinical data."""
     run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
     output_prefix = tmp_path / "readout" / "hybrid"
-    repo_root = Path(__file__).resolve().parents[3]
-    script = repo_root / "analysis" / "cloud" / "multidomain_weighting_readout.py"
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(
-        filter(
-            None,
-            [
-                str(repo_root / "spark-vi"),
-                env.get("PYTHONPATH"),
-            ],
-        )
-    )
-
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(script),
-            "--run-dir",
-            str(run_dir),
-            "--outer-folds",
-            "2",
-            "--inner-folds",
-            "2",
-            "--repeats",
-            "1",
-            "--grid-step",
-            "0.5",
-            "--seed",
-            "17",
-            "--output-prefix",
-            str(output_prefix),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    completed = _run_readout_cli(run_dir, output_prefix)
 
     assert completed.returncode == 0, completed.stderr
     result = json.loads(Path(f"{output_prefix}.json").read_text())
     markdown = Path(f"{output_prefix}.md").read_text()
+    meta = json.loads((run_dir / "test_meta.json").read_text())
     assert len(result["anchors"]) == 6
+    assert result["domains"] == ["condition", "observation", "drug"]
     assert result["cv_config"]["seed"] == 17
     assert result["macro_summary"]["repeats"][0]["repeat"] == 0
+    assert result["anchors"][0]["n_positive"] == 4
+    assert meta["frontiers"][0] == [7]
+    assert meta["person_row_attestation"] == {
+        "row_count": 12,
+        "unique_person_count": 12,
+        "one_row_per_person": True,
+    }
+    allowed_policy_prefixes = {
+        "all",
+        "only:condition",
+        "only:observation",
+        "only:drug",
+        "drop:condition",
+        "drop:observation",
+        "drop:drug",
+    }
+    observed_policy_prefixes = set()
+    for anchor in result["anchors"]:
+        assert set(anchor["strategies"]) == set(STRATEGIES)
+        assert set(anchor["continuous_median_weights"]) == {
+            "condition",
+            "observation",
+            "drug",
+        }
+        for repeat in anchor["repeats"]:
+            for fold in repeat["folds"]:
+                prefix = fold["discrete_policy"].split("|", 1)[0]
+                assert prefix in allowed_policy_prefixes
+                observed_policy_prefixes.add(prefix)
+    assert observed_policy_prefixes != {"all"}
+    independently_computed_macro = sum(
+        anchor["repeats"][0]["strategies"]["continuous"]["ap"]
+        for anchor in result["anchors"]
+    ) / 6
+    assert result["macro_summary"]["repeats"][0]["strategies"]["continuous"][
+        "ap"
+    ] == pytest.approx(independently_computed_macro)
     assert markdown.startswith("# Hybrid domain-weight readout\n")
     assert "[weighting] macro/per-disease median AP" in completed.stdout
     assert str(Path(f"{output_prefix}.json")) in completed.stdout
     assert str(Path(f"{output_prefix}.md")) in completed.stdout
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "missing person-row uniqueness attestation"),
+        ("duplicate", "one_row_per_person must be true"),
+    ],
+)
+def test_subprocess_rejects_unattested_or_duplicate_person_rows(
+    tmp_path,
+    mutation,
+    message,
+):
+    """Catches the real CLI bypassing person-row checks performed by the loader."""
+    run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
+    meta_path = run_dir / "test_meta.json"
+    meta = json.loads(meta_path.read_text())
+    if mutation == "missing":
+        meta.pop("person_row_attestation")
+    else:
+        meta["person_row_attestation"] = {
+            "row_count": 12,
+            "unique_person_count": 11,
+            "one_row_per_person": False,
+        }
+    meta_path.write_text(json.dumps(meta))
+    output_prefix = tmp_path / "readout" / "invalid"
+
+    completed = _run_readout_cli(run_dir, output_prefix)
+
+    assert completed.returncode != 0
+    assert message in completed.stderr
+    assert not Path(f"{output_prefix}.json").exists()
+    assert not Path(f"{output_prefix}.md").exists()
 
 
 def test_make_target_resolves_the_run_and_uses_python_without_spark():
