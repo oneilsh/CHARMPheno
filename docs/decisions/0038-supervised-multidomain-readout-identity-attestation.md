@@ -19,9 +19,9 @@ condition-plus-observation if manifest order changes.
 ## Decision
 
 The fit-time writer receives person IDs from the same collected rows used to
-construct the persisted BOWs. Before writing any sidecar, it asserts that the ID
-count matches the row count and that every ID is unique. It persists no raw ID or
-hash. Instead, `test_meta.json` carries only:
+construct the persisted BOWs. Before writing any supervised-readout test
+sidecar, it asserts that the ID count matches the row count and that every ID is
+unique. It persists no raw ID or hash. Instead, `test_meta.json` carries only:
 
 - `row_count`;
 - `unique_person_count`; and

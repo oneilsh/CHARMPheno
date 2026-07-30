@@ -1003,7 +1003,11 @@ git commit -m "feat(case-finding): add hybrid domain-weight readout CLI"
   an ADR rather than silently diverging.
 
 **Interfaces:**
-- Consumes the CLI and existing exp 0072/0071 run artifacts.
+- **Superseded history:** the original interface consumed the CLI and existing
+  exp 0072/0071 artifacts; those sidecars must not be used for this supervised
+  row-level CV readout.
+- **Active execution:** consumes the CLI and fresh attested exp 0073/0074
+  artifacts, exact configuration clones of exp 0072/0071 respectively.
 - Produces verified code plus empirical reports and an insight.
 
 - [ ] **Step 1: Run focused local verification**
