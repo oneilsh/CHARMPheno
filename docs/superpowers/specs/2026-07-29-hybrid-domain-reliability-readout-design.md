@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-29
 **Branch:** `multidomain-spectral-init`
-**Status:** approved in conversation; written-spec review pending
+**Status:** approved
 **Motivates:** insights 0071–0074 and the domain-normalization result that no
 single global rule is best across rare6 diseases
 
