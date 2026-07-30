@@ -345,13 +345,22 @@ def _lr_logratio_rows(lam, lay, *, alpha, bg, epsilon):
     return logratio
 
 
+def lr_background(bow, *, epsilon=1e-9):
+    """Empirical vocabulary base rate from a fixed reference BOW corpus.
+
+    The caller chooses the reference rows. Reusing the returned vector when
+    scoring another cohort prevents the score transformation from depending on
+    the composition of that scoring batch.
+    """
+    col = np.asarray(bow.sum(axis=0)).ravel().astype(float)
+    bg = col / max(float(col.sum()), 1.0)
+    return np.maximum(bg, epsilon)
+
+
 def _lr_base_rate(bow, background, epsilon):
     if background is None:
-        col = np.asarray(bow.sum(axis=0)).ravel().astype(float)
-        bg = col / max(col.sum(), 1.0)
-    else:
-        bg = np.asarray(background, dtype=float)
-    return np.maximum(bg, epsilon)
+        return lr_background(bow, epsilon=epsilon)
+    return np.maximum(np.asarray(background, dtype=float), epsilon)
 
 
 def lr_placement_scores(bow, lam, lay, *, alpha, background=None, epsilon=1e-9,
@@ -470,7 +479,7 @@ def lr_auc_sweep(bow, lam, lay, is_fg, *, alpha_grid, background=None,
 NORMALIZE_MODES = (None, "std", "length", "length+std")
 
 
-def _domain_scale(s):
+def domain_score_scale(scores):
     """Per-domain scalar score scale for cross-domain comparability: the standard
     deviation of the whole [n_docs x n_nodes] score matrix.
 
@@ -484,8 +493,66 @@ def _domain_scale(s):
     all-zero domain then contributes nothing -- an inert domain, for free).
     See docs/superpowers/specs/2026-07-29-domain-normalized-lr-combination-design.md
     """
-    sd = float(np.std(np.asarray(s, dtype=float)))
+    sd = float(np.std(np.asarray(scores, dtype=float)))
     return sd if np.isfinite(sd) and sd > 0.0 else 1.0
+
+
+def _domain_scale(scores):
+    """Backward-compatible private spelling; use domain_score_scale in new code."""
+    return domain_score_scale(scores)
+
+
+def combine_domain_score_matrices(matrices, *, weights=None, scales=None):
+    """Add per-domain score matrices after fixed reliability weighting.
+
+    A domain's score matrix is divided by a scale learned on a reference split,
+    then multiplied by its caller-chosen weight. Keeping those factors external
+    to the matrices makes validation/test ranking reproducible and prevents one
+    domain's scoring batch from changing another domain's relative contribution.
+    """
+    if not matrices:
+        raise ValueError("matrices must contain at least one domain")
+
+    weights = {} if weights is None else weights
+    scales = {} if scales is None else scales
+    keys = sorted(matrices)
+    matrix_keys = set(matrices)
+    if set(weights) - matrix_keys:
+        raise ValueError("weights must be keyed by matrices")
+    if set(scales) - matrix_keys:
+        raise ValueError("scales must be keyed by matrices")
+
+    prepared = {}
+    shape = None
+    for key in keys:
+        score = np.asarray(matrices[key], dtype=float)
+        if shape is None:
+            shape = score.shape
+        elif score.shape != shape:
+            raise ValueError("all matrices must have the same shape")
+        prepared[key] = score
+
+    total = np.zeros(shape, dtype=float)
+    has_positive_weight = False
+    for key in keys:
+        try:
+            weight = float(weights.get(key, 1.0))
+        except (TypeError, ValueError):
+            raise ValueError("weight must be finite and nonnegative") from None
+        if not np.isfinite(weight) or weight < 0.0:
+            raise ValueError("weight must be finite and nonnegative")
+        try:
+            scale = float(scales.get(key, 1.0))
+        except (TypeError, ValueError):
+            raise ValueError("scale must be finite and positive") from None
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ValueError("scale must be finite and positive")
+        has_positive_weight |= weight > 0.0
+        total += weight * prepared[key] / scale
+
+    if not has_positive_weight:
+        raise ValueError("at least one domain weight must be positive")
+    return total
 
 
 def lr_domain_score_matrices(bows, lam_dict, lay, *, alpha, domains=None,
@@ -499,7 +566,7 @@ def lr_domain_score_matrices(bows, lam_dict, lay, *, alpha, domains=None,
 
     normalize -- per-domain, applied before the caller sums:
       None          raw per-domain log-LR sums (plain Naive-Bayes-across-domains).
-      'std'         divide by `_domain_scale`: equalizes each domain's score SCALE
+      'std'         divide by `domain_score_scale`: equalizes each domain's score SCALE
                     so a high-token-volume domain cannot dominate the sum by
                     magnitude alone.
       'length'      per-doc divide by that domain's token count (mean log-LR per
@@ -543,7 +610,7 @@ def lr_domain_score_matrices(bows, lam_dict, lay, *, alpha, domains=None,
                                 count_mode=count_mode,
                                 length_normalize=length_normalize)
         if normalize in ("std", "length+std"):
-            s = s / _domain_scale(s)
+            s = s / domain_score_scale(s)
         out[m] = s
     return out
 

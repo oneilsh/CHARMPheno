@@ -14,6 +14,25 @@ def _tiny():
     return lay, {0: lam0, 1: lam1}, {0: bow0, 1: bow1}
 
 
+def test_lr_background_sparse_dense_and_fixed_scoring_equivalence():
+    """Fixed reference frequencies keep linear LR scoring independent of batch scale."""
+    from scipy import sparse as sp
+    from spark_vi.models.topic.dag_placement import (
+        lr_background, lr_placement_scores)
+
+    lay, lam, bows = _tiny()
+    train = np.asarray(bows[0][:3], dtype=float)
+    test = np.asarray(bows[0][3:], dtype=float)
+    bg = lr_background(train)
+
+    assert np.isclose(bg.sum(), 1.0)
+    assert np.allclose(bg, lr_background(sp.csr_matrix(train)))
+    raw = lr_placement_scores(test, lam[0], lay, alpha=float("inf"), background=bg)
+    scaled = lr_placement_scores(
+        test * 7.0, lam[0], lay, alpha=float("inf"), background=bg)
+    assert np.allclose(scaled, raw * 7.0)
+
+
 def test_multidomain_score_is_the_per_domain_sum():
     from spark_vi.models.topic.dag_placement import (
         lr_placement_scores, lr_placement_scores_multidomain)
@@ -104,9 +123,10 @@ def test_std_normalization_equalizes_domain_scale_exactly():
     # Mechanism check. Domain 1 is a 10x copy of domain 0, so un-normalized its
     # scale is ~10x; after 'std' both matrices have unit std.
     from spark_vi.models.topic.dag_placement import (
-        _domain_scale, lr_domain_score_matrices)
+        _domain_scale, domain_score_scale, lr_domain_score_matrices)
     lay, lam, bows = _tiny_scaled()
     raw = lr_domain_score_matrices(bows, lam, lay, alpha=1.0, normalize=None)
+    assert domain_score_scale(raw[0]) == _domain_scale(raw[0])
     assert np.isclose(_domain_scale(raw[1]) / _domain_scale(raw[0]), 10.0)
     norm = lr_domain_score_matrices(bows, lam, lay, alpha=1.0, normalize="std")
     assert np.isclose(np.std(norm[0]), 1.0)
@@ -143,9 +163,40 @@ def test_length_normalization_matches_per_domain_length_normalize():
 def test_domain_scale_falls_back_to_one_on_a_constant_domain():
     # An all-zero (no-token) domain has zero std; it must pass through as zeros
     # and contribute nothing, not produce inf/nan.
-    from spark_vi.models.topic.dag_placement import _domain_scale
-    assert _domain_scale(np.zeros((4, 3))) == 1.0
-    assert _domain_scale(np.full((4, 3), 2.5)) == 1.0
+    from spark_vi.models.topic.dag_placement import _domain_scale, domain_score_scale
+    for x in (np.zeros((4, 3)), np.full((4, 3), 2.5)):
+        assert domain_score_scale(x) == _domain_scale(x) == 1.0
+
+
+def test_combine_domain_score_matrices_applies_fixed_scales_and_weights():
+    """A wrong per-domain divisor or multiplier changes the combined score."""
+    from spark_vi.models.topic.dag_placement import combine_domain_score_matrices
+
+    mats = {
+        0: np.array([[2.0, 4.0], [6.0, 8.0]]),
+        1: np.array([[10.0, 20.0], [30.0, 40.0]]),
+    }
+    got = combine_domain_score_matrices(
+        mats, weights={0: 0.75, 1: 0.25}, scales={0: 2.0, 1: 10.0})
+    expect = 0.75 * mats[0] / 2.0 + 0.25 * mats[1] / 10.0
+    assert np.allclose(got, expect)
+
+
+def test_combine_domain_score_matrices_identity_and_validation():
+    """Invalid component shapes and multipliers cannot silently bias a ranking."""
+    import pytest
+    from spark_vi.models.topic.dag_placement import combine_domain_score_matrices
+
+    mats = {0: np.ones((3, 2)), 1: np.full((3, 2), 2.0)}
+    assert np.array_equal(combine_domain_score_matrices(mats), mats[0] + mats[1])
+    with pytest.raises(ValueError, match="same shape"):
+        combine_domain_score_matrices({0: mats[0], 1: np.ones((2, 2))})
+    with pytest.raises(ValueError, match="scale"):
+        combine_domain_score_matrices(mats, scales={1: 0.0})
+    with pytest.raises(ValueError, match="weight"):
+        combine_domain_score_matrices(mats, weights={1: -0.1})
+    with pytest.raises(ValueError, match="at least one"):
+        combine_domain_score_matrices(mats, weights={0: 0.0, 1: 0.0})
 
 
 def test_unknown_normalize_raises():
