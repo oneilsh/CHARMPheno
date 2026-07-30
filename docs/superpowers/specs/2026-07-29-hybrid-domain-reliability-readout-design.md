@@ -315,18 +315,24 @@ not part of the topic-model engine.
 
 ## Experiment sequence
 
-1. Develop and run unchanged on exp 0072, the mini-batch fit representing the
-   production compute regime and currently stronger PR result.
-2. Replicate unchanged on the corrected exp 0071 full-batch reference fit.
+1. Fit and run unchanged on exp 0073, an exact configuration clone of exp 0072.
+   This is the mini-batch production compute regime and currently stronger PR
+   result, now written under the person-row attestation contract.
+2. After adjudicating 0073 without changing the predeclared readout defaults,
+   replicate unchanged on exp 0074, an exact configuration clone of the
+   corrected exp 0071 full-batch reference.
 3. Compare PR headroom, domain-weight direction, model-derived reliability,
    and ranking-head patient overlap across the two fits.
 
-No new fit is required initially. Refit only if:
-
-- an existing artifact lacks information required for honest folds;
-- a one-row-per-person invariant cannot be established; or
-- a later design explicitly adds across-seed stability as a model-derived
-  reliability signal.
+**Supersession (2026-07-30):** The original no-refit assumption was falsified by
+artifact review. The existing 0071/0072 sidecars lack the persisted
+one-row-per-person attestation required to justify row-level cross-validation.
+They remain valid for their prior unsupervised and LR readouts; they are invalid
+only as inputs to this supervised-CV readout. The attestation cannot be added
+after the aligned person IDs have been discarded, so fresh fits are required.
+Exps 0073/0074 change only run identity and the sidecar contract, not their
+respective 0072/0071 model or corpus configurations. See
+[ADR 0038](../../decisions/0038-supervised-multidomain-readout-identity-attestation.md).
 
 New fits are operationally affordable, so lack of a reusable artifact is not a
 reason to weaken the evaluation protocol.

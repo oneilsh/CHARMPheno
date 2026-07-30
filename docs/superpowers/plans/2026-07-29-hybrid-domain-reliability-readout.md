@@ -987,6 +987,15 @@ git commit -m "feat(case-finding): add hybrid domain-weight readout CLI"
 
 ### Task 6: Verification, Real Readouts, and Research Record
 
+> **Execution supersession (2026-07-30):** Steps 4 and 6 below preserve the
+> original 0072/0071 commands as plan history, but those legacy sidecars lack the
+> person-row attestation required for supervised row-level CV and must not be
+> used for this readout. First fit exact-config clone 0073 and run
+> `multidomain-weighting-readout ID=73`; after adjudication, fit exact-config
+> clone 0074 of corrected 0071 and run the same readout with `ID=74`. This changes
+> artifact identity, not the preregistered configurations or readout defaults.
+> See [ADR 0038](../../decisions/0038-supervised-multidomain-readout-identity-attestation.md).
+
 **Files:**
 - Modify: `docs/REVIEW_LOG.md`
 - Create after results: `docs/insights/0075-hybrid-domain-reliability-readout.md`
