@@ -321,6 +321,108 @@ def test_continuous_selector_rejects_non_simplex_candidates():
         )
 
 
+def test_model_derived_weights_do_not_consume_case_labels():
+    """Catches replacing fixed model evidence with label-selected weights."""
+    from multidomain_weighting import evaluate_model_candidate
+
+    matrices = {
+        0: np.array([[4.0], [3.0], [2.0], [1.0]]),
+        1: np.zeros((4, 1)),
+    }
+    weights = np.array([1.0, 0.0])
+    scales = {0: 1.0, 1: 1.0}
+    y = np.array([1, 1, 0, 0])
+
+    got1 = evaluate_model_candidate(
+        matrices,
+        y,
+        np.array([0]),
+        weights=weights,
+        scales=scales,
+    )
+    got2 = evaluate_model_candidate(
+        matrices,
+        1 - y,
+        np.array([0]),
+        weights=weights,
+        scales=scales,
+    )
+
+    assert got1["weights"] == got2["weights"] == [1.0, 0.0]
+    assert got1["ap"] != got2["ap"]
+    json.dumps(got1, allow_nan=False)
+    json.dumps(got2, allow_nan=False)
+
+
+def test_model_derived_anchor_weights_apply_to_each_descendant_before_max():
+    """Catches descendant-specific weights or per-domain maxima before combination."""
+    from multidomain_weighting import evaluate_model_candidate
+
+    matrices = {
+        "condition": np.array([[10.0, 0.0], [6.0, 3.0], [4.0, 2.0]]),
+        "drug": np.array([[0.0, 10.0], [2.0, 7.0], [5.0, 1.0]]),
+    }
+    weights = np.array([0.8, 0.2])
+    scales = {"condition": 2.0, "drug": 1.0}
+    y = np.array([1, 0, 1])
+
+    got = evaluate_model_candidate(
+        matrices,
+        y,
+        np.array([0, 1]),
+        weights=weights,
+        scales=scales,
+    )
+    expected_scores = np.max(
+        0.8 * matrices["condition"] / 2.0 + 0.2 * matrices["drug"],
+        axis=1,
+    )
+    wrong_descendant_weights = np.max(
+        np.column_stack(
+            (
+                0.8 * matrices["condition"][:, 0] / 2.0
+                + 0.2 * matrices["drug"][:, 0],
+                0.2 * matrices["condition"][:, 1] / 2.0
+                + 0.8 * matrices["drug"][:, 1],
+            )
+        ),
+        axis=1,
+    )
+
+    assert got["scores"] == [float(score) for score in expected_scores]
+    assert not np.array_equal(expected_scores, wrong_descendant_weights)
+
+
+def test_model_derived_agreement_is_tie_stable_constant_safe_and_json_safe():
+    """Catches unstable top sets or NaN Spearman values from constant rankings."""
+    from multidomain_weighting import _agreement_diagnostics
+
+    tied = _agreement_diagnostics(
+        np.array([1.0, 1.0, 0.0, 0.0]),
+        np.array([0.0, 1.0, 1.0, 0.0]),
+        candidate_weights=np.array([0.8, 0.2]),
+        median_supervised_weights=np.array([0.6, 0.4]),
+        n_positive=1,
+    )
+    constant = _agreement_diagnostics(
+        np.ones(4),
+        np.array([4.0, 3.0, 2.0, 1.0]),
+        candidate_weights=np.array([0.2, 0.8]),
+        median_supervised_weights=np.array([0.6, 0.4]),
+        n_positive=1,
+    )
+
+    # Stable row order breaks the top-score ties: tied candidate -> row 0,
+    # tied ceiling -> row 1, so the top-1 sets are disjoint.
+    assert tied["top_set_jaccard_with_continuous"] == 0.0
+    assert isinstance(tied["spearman_with_continuous"], float)
+    assert tied["same_domain_order_as_median_supervised"] is True
+    assert constant["spearman_with_continuous"] is None
+    assert constant["same_domain_order_as_median_supervised"] is False
+    json.dumps(tied, allow_nan=False)
+    json.dumps(constant, allow_nan=False)
+
+
 def test_discrete_policies_cover_every_subset_and_normalization_in_stable_order():
     """Catches omitted subsets/rules or nondeterministic policy tie order."""
     from multidomain_weighting import discrete_policies
@@ -650,6 +752,127 @@ def _nested_bow_fixture():
     return bows, lam_dict, lay, frontiers, parent_int, y
 
 
+def test_model_derived_strategies_use_the_anchor_reliability_row_once_per_run(
+    monkeypatch,
+):
+    """Catches recomputation by fold or reliability aggregation over descendants."""
+    from spark_vi.models.topic import dag_placement
+    from multidomain_weighting import (
+        _backgrounds_from_rows,
+        _raw_scores_for_rows,
+        _scales_from_matrices,
+        _strategy_metrics,
+        evaluate_anchor_nested,
+        stratified_folds,
+        subtree_columns,
+    )
+
+    bows, lam_dict, lay, frontiers, parent_int, y = _nested_bow_fixture()
+    domains = tuple(sorted(bows))
+    reliability = dag_placement.DomainReliability(
+        domains,
+        distinctiveness=np.array([[9.0, 1.0, 0.0], [0.0, 1.0, 9.0]]),
+        ownership=np.array([[0.0, 2.0, 8.0], [8.0, 1.0, 1.0]]),
+        viability=np.ones((2, 3)),
+    )
+    calls = 0
+
+    def fixed_reliability(candidate_lam, candidate_layout):
+        nonlocal calls
+        calls += 1
+        assert candidate_lam is lam_dict
+        assert candidate_layout is lay
+        return reliability
+
+    monkeypatch.setattr(
+        dag_placement,
+        "domain_reliability",
+        fixed_reliability,
+    )
+    result = evaluate_anchor_nested(
+        bows,
+        lam_dict,
+        lay,
+        frontiers,
+        anchor=1,
+        parent_int=parent_int,
+        outer_folds=3,
+        inner_folds=2,
+        repeats=2,
+        grid_step=0.5,
+        seed=41,
+    )
+
+    expected_weights = {
+        "model:distinctiveness": np.array([0.9, 0.1, 0.0]),
+        "model:ownership": np.array([0.0, 0.2, 0.8]),
+        "model:product": np.array([0.0, 1.0, 0.0]),
+    }
+    columns = subtree_columns(lay, {1, 2})
+    expected_metrics = {}
+    for strategy, weights in expected_weights.items():
+        pooled = np.empty(len(y), dtype=float)
+        for outer_train, outer_test in stratified_folds(y, n_splits=3, seed=41):
+            backgrounds = _backgrounds_from_rows(bows, outer_train)
+            train_matrices = _raw_scores_for_rows(
+                bows,
+                lam_dict,
+                lay,
+                outer_train,
+                backgrounds,
+            )
+            test_matrices = _raw_scores_for_rows(
+                bows,
+                lam_dict,
+                lay,
+                outer_test,
+                backgrounds,
+            )
+            scales = _scales_from_matrices(train_matrices, columns)
+            combined = sum(
+                weights[column] * test_matrices[domain] / scales[domain]
+                for column, domain in enumerate(domains)
+            )
+            pooled[outer_test] = np.max(combined[:, columns], axis=1)
+        expected_metrics[strategy] = _strategy_metrics(pooled, y)
+
+    assert calls == 1
+    for repeat in result["repeats"]:
+        assert set(repeat["strategies"]) == {
+            "fixed:condition_drug",
+            "discrete",
+            "continuous",
+            "model:distinctiveness",
+            "model:ownership",
+            "model:product",
+        }
+        assert set(repeat["agreements"]) == set(expected_weights)
+        for strategy, weights in expected_weights.items():
+            agreement = repeat["agreements"][strategy]
+            assert agreement["weights"] == [float(weight) for weight in weights]
+            assert set(agreement) == {
+                "weights",
+                "spearman_with_continuous",
+                "top_set_jaccard_with_continuous",
+                "same_domain_order_as_median_supervised",
+            }
+            assert (
+                agreement["spearman_with_continuous"] is None
+                or isinstance(agreement["spearman_with_continuous"], float)
+            )
+            assert isinstance(
+                agreement["top_set_jaccard_with_continuous"],
+                float,
+            )
+            assert isinstance(
+                agreement["same_domain_order_as_median_supervised"],
+                bool,
+            )
+    for strategy, expected in expected_metrics.items():
+        assert result["repeats"][0]["strategies"][strategy] == expected
+    json.dumps(result, allow_nan=False)
+
+
 def test_outer_fold_scores_apply_training_backgrounds_and_scales():
     """Catches deriving outer-test transformations from the outer-test batch."""
     from multidomain_weighting import (
@@ -912,11 +1135,14 @@ def test_nested_evaluation_is_shared_oof_deterministic_and_json_safe():
     assert len(result["repeats"]) == 2
     for repeat_number, repeat in enumerate(result["repeats"]):
         assert repeat["repeat"] == repeat_number
-        assert set(repeat) == {"repeat", "strategies", "folds"}
+        assert set(repeat) == {"repeat", "strategies", "agreements", "folds"}
         assert set(repeat["strategies"]) == {
             "fixed:condition_drug",
             "discrete",
             "continuous",
+            "model:distinctiveness",
+            "model:ownership",
+            "model:product",
         }
         for metrics in repeat["strategies"].values():
             assert set(metrics) == {"ap", "precision_at_recall"}

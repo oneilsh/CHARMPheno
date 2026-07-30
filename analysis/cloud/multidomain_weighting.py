@@ -369,6 +369,7 @@ def _evaluate_outer_fold(
     inner_folds,
     grid,
     inner_seed,
+    model_weights=None,
 ):
     """Select on outer-training inner OOF data and score one frozen outer test."""
     outer_train = np.asarray(outer_train, dtype=int)
@@ -430,6 +431,19 @@ def _evaluate_outer_fold(
         columns,
         scales=raw_scales,
     )
+    model_scores = {
+        strategy: np.asarray(
+            evaluate_model_candidate(
+                raw_test,
+                np.asarray(y, dtype=int)[outer_test],
+                columns,
+                weights=weights,
+                scales=raw_scales,
+            )["scores"],
+            dtype=float,
+        )
+        for strategy, weights in (model_weights or {}).items()
+    }
     return {
         "discrete_policy": selected_policy[0],
         "continuous_weights": continuous_weights,
@@ -437,6 +451,7 @@ def _evaluate_outer_fold(
             "fixed:condition_drug": fixed_score,
             "discrete": discrete_score,
             "continuous": continuous_score,
+            **model_scores,
         },
     }
 
@@ -485,6 +500,110 @@ def _strategy_metrics(scores, y):
     }
 
 
+def evaluate_model_candidate(
+    matrices,
+    y,
+    columns,
+    *,
+    weights,
+    scales,
+) -> dict:
+    """Return JSON-safe fixed model weights, metrics, and patient scores.
+
+    The caller supplies one disease-anchor weight vector.  That vector and the
+    frozen fold-local scales apply to every node column before the descendant
+    maximum; labels are consumed only by the reported metrics.
+    """
+    weights = np.asarray(weights, dtype=float)
+    scores = _weighted_subtree_score(
+        matrices,
+        weights,
+        columns,
+        scales=scales,
+    )
+    return {
+        "weights": [float(weight) for weight in weights],
+        **_strategy_metrics(scores, y),
+        "scores": [float(score) for score in scores],
+    }
+
+
+def _agreement_diagnostics(
+    candidate_scores,
+    continuous_scores,
+    *,
+    candidate_weights,
+    median_supervised_weights,
+    n_positive,
+):
+    """Compare one fixed model candidate with the supervised OOF ceiling.
+
+    Stable descending row order resolves score ties for the predeclared top-set
+    comparison.  Constant inputs have no defined rank correlation and are
+    represented by ``None`` instead of a non-JSON NaN.
+    """
+    from scipy.stats import spearmanr
+
+    candidate_scores = np.asarray(candidate_scores, dtype=float)
+    continuous_scores = np.asarray(continuous_scores, dtype=float)
+    if (
+        candidate_scores.ndim != 1
+        or continuous_scores.ndim != 1
+        or candidate_scores.shape != continuous_scores.shape
+        or candidate_scores.size == 0
+    ):
+        raise ValueError("agreement score vectors must be nonempty and aligned")
+
+    candidate_constant = np.all(candidate_scores == candidate_scores[0])
+    continuous_constant = np.all(continuous_scores == continuous_scores[0])
+    if candidate_constant or continuous_constant:
+        correlation = None
+    else:
+        observed = float(
+            spearmanr(candidate_scores, continuous_scores).correlation
+        )
+        correlation = observed if np.isfinite(observed) else None
+
+    n_docs = len(candidate_scores)
+    top_count = min(
+        n_docs,
+        max(int(n_positive), int(np.ceil(0.01 * n_docs))),
+    )
+    candidate_top = set(
+        np.argsort(-candidate_scores, kind="mergesort")[:top_count].tolist()
+    )
+    continuous_top = set(
+        np.argsort(-continuous_scores, kind="mergesort")[:top_count].tolist()
+    )
+    jaccard = len(candidate_top & continuous_top) / len(
+        candidate_top | continuous_top
+    )
+
+    candidate_weights = np.asarray(candidate_weights, dtype=float)
+    median_supervised_weights = np.asarray(
+        median_supervised_weights,
+        dtype=float,
+    )
+    if (
+        candidate_weights.ndim != 1
+        or candidate_weights.shape != median_supervised_weights.shape
+    ):
+        raise ValueError("agreement weight vectors must be aligned")
+    candidate_order = tuple(
+        np.argsort(-candidate_weights, kind="mergesort").tolist()
+    )
+    supervised_order = tuple(
+        np.argsort(-median_supervised_weights, kind="mergesort").tolist()
+    )
+    return {
+        "spearman_with_continuous": correlation,
+        "top_set_jaccard_with_continuous": float(jaccard),
+        "same_domain_order_as_median_supervised": bool(
+            candidate_order == supervised_order
+        ),
+    }
+
+
 def evaluate_anchor_nested(
     bows,
     lam_dict,
@@ -523,6 +642,19 @@ def evaluate_anchor_nested(
     y = anchor_truth(frontiers, scoreable_subtree)
     grid = simplex_grid(len(domains), grid_step)
 
+    if anchor not in lay.nodes:
+        raise ValueError("anchor must be a scoreable layout node for model weights")
+    from spark_vi.models.topic.dag_placement import domain_reliability
+
+    reliability = domain_reliability(lam_dict, lay)
+    if tuple(reliability.domain_keys) != domains:
+        raise ValueError("domain reliability keys must match sorted BOW domains")
+    anchor_row = lay.nodes.index(anchor)
+    model_weights = {
+        f"model:{candidate}": reliability.weights(candidate)[anchor_row]
+        for candidate in ("distinctiveness", "ownership", "product")
+    }
+
     repeat_results = []
     for repeat in range(repeats):
         outer_partitions = stratified_folds(
@@ -534,6 +666,10 @@ def evaluate_anchor_nested(
             "fixed:condition_drug": np.empty(n_docs, dtype=float),
             "discrete": np.empty(n_docs, dtype=float),
             "continuous": np.empty(n_docs, dtype=float),
+            **{
+                strategy: np.empty(n_docs, dtype=float)
+                for strategy in model_weights
+            },
         }
         fold_results = []
         for fold, (outer_train, outer_test) in enumerate(outer_partitions):
@@ -548,6 +684,7 @@ def evaluate_anchor_nested(
                 inner_folds=inner_folds,
                 grid=grid,
                 inner_seed=int(seed) + 100_000 * (repeat + 1) + fold,
+                model_weights=model_weights,
             )
             for strategy, scores in evaluated["scores"].items():
                 pooled_scores[strategy][outer_test] = scores
@@ -563,6 +700,26 @@ def evaluate_anchor_nested(
                 }
             )
 
+        median_supervised_weights = np.median(
+            np.asarray(
+                [fold["continuous_weights"] for fold in fold_results],
+                dtype=float,
+            ),
+            axis=0,
+        )
+        agreements = {
+            strategy: {
+                "weights": [float(weight) for weight in weights],
+                **_agreement_diagnostics(
+                    pooled_scores[strategy],
+                    pooled_scores["continuous"],
+                    candidate_weights=weights,
+                    median_supervised_weights=median_supervised_weights,
+                    n_positive=int(y.sum()),
+                ),
+            }
+            for strategy, weights in model_weights.items()
+        }
         repeat_results.append(
             {
                 "repeat": int(repeat),
@@ -570,6 +727,7 @@ def evaluate_anchor_nested(
                     strategy: _strategy_metrics(scores, y)
                     for strategy, scores in pooled_scores.items()
                 },
+                "agreements": agreements,
                 "folds": fold_results,
             }
         )
