@@ -328,8 +328,8 @@ def _normalize_prob(x, epsilon):
     probability contract used by Jensen-Shannon divergence.
     """
     epsilon = float(epsilon)
-    if epsilon < 0.0:
-        raise ValueError("epsilon must be nonnegative")
+    if not np.isfinite(epsilon) or epsilon <= 0.0:
+        raise ValueError("epsilon must be finite and strictly positive")
     x = np.asarray(x, dtype=float)
     x = np.where(np.isfinite(x), np.maximum(x, 0.0), 0.0)
     if x.size == 0:
@@ -378,12 +378,14 @@ class DomainReliability:
         else:
             raise ValueError(f"unknown domain reliability candidate: {candidate!r}")
 
-        raw = np.maximum(np.asarray(raw, dtype=float), 0.0)
+        raw = np.asarray(raw, dtype=float)
+        invalid_row = ~np.isfinite(raw).all(axis=1, keepdims=True)
+        raw = np.maximum(raw, 0.0)
         n_domains = raw.shape[1]
         if n_domains == 0:
             return raw.copy()
         total = raw.sum(axis=1, keepdims=True)
-        valid = np.isfinite(total) & (total > 0.0)
+        valid = ~invalid_row & np.isfinite(total) & (total > 0.0)
         weights = np.divide(raw, total, out=np.zeros_like(raw), where=valid)
         weights[~valid[:, 0]] = 1.0 / n_domains
         return weights
@@ -398,6 +400,13 @@ def domain_reliability(lam_dict, lay, *, epsilon=1e-12, viability_tol=1e-6):
     node distribution's expected explain-away routing responsibility, while
     viability is the share of that node's topics with vocabulary contrast.
     """
+    epsilon = float(epsilon)
+    viability_tol = float(viability_tol)
+    if not np.isfinite(epsilon) or epsilon <= 0.0:
+        raise ValueError("epsilon must be finite and strictly positive")
+    if not np.isfinite(viability_tol) or viability_tol < 0.0:
+        raise ValueError("viability_tol must be finite and nonnegative")
+
     domain_keys = tuple(sorted(lam_dict))
     if not domain_keys:
         raise ValueError("lam_dict must contain at least one domain")
