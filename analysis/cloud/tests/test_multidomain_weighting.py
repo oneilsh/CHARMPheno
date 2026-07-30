@@ -364,6 +364,206 @@ def test_discrete_policies_cover_every_subset_and_normalization_in_stable_order(
     assert got == expected
 
 
+def _fold_local_normalization_fixture(seed):
+    """Planted multi-domain scores with row-varying utilization."""
+    from scipy import sparse as sp
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from multidomain_weighting import subtree_columns
+
+    rng = np.random.default_rng(seed)
+    lay = DagLayout({1: [0], 2: [1]}, n_bg=1, tpn=1)
+    y = np.array([1] * 8 + [0] * 16)
+    bows = {
+        domain: sp.csr_matrix(rng.poisson(1.5, size=(24, 5)).astype(float))
+        for domain in range(3)
+    }
+    for domain, matrix in bows.items():
+        dense = matrix.toarray()
+        dense[:8, (domain + 1) % 5] += rng.integers(0, 5, size=8)
+        dense[:, 0] *= rng.integers(1, 8, size=24)
+        bows[domain] = sp.csr_matrix(dense)
+    lam_dict = {
+        domain: rng.gamma(2.0, 2.0, size=(lay.K, 5)) for domain in range(3)
+    }
+    return bows, lam_dict, lay, y, subtree_columns(lay, {1, 2})
+
+
+@pytest.mark.parametrize(
+    ("fixture_seed", "expected_policy", "expected_weights"),
+    [
+        (0, "only:1|none", [0.0, 1.0, 0.0]),
+        (1, "only:2|std", [0.0, 0.0, 1.0]),
+        (8, "drop:2|length", [0.5, 0.5, 0.0]),
+        (22, "only:2|length+std", [0.0, 0.0, 1.0]),
+    ],
+)
+def test_inner_selection_distinguishes_all_fold_local_normalizations(
+    fixture_seed,
+    expected_policy,
+    expected_weights,
+):
+    """Catches collapsing length modes into raw none/std transformations."""
+    from multidomain_weighting import _inner_oof_selection, simplex_grid
+
+    bows, lam_dict, lay, y, columns = _fold_local_normalization_fixture(
+        fixture_seed
+    )
+    policy, weights = _inner_oof_selection(
+        bows,
+        lam_dict,
+        lay,
+        y,
+        columns,
+        np.arange(len(y)),
+        inner_folds=3,
+        grid=simplex_grid(3, 0.5),
+        seed=97,
+    )
+
+    assert policy[0] == expected_policy
+    assert np.array_equal(weights, np.asarray(expected_weights))
+
+
+def test_discrete_ap_ties_choose_first_policy_in_tuple_order():
+    """Catches reversed exact/tolerance tie resolution in discrete selection."""
+    from multidomain_weighting import (
+        _select_discrete_policy,
+        _select_discrete_policy_from_ap,
+    )
+
+    policies = (
+        ("first", (0,), "none"),
+        ("second", (1,), "none"),
+    )
+    y = np.array([1, 0, 1, 0])
+    identical_scores = np.array([4.0, 3.0, 2.0, 1.0])
+    selected = _select_discrete_policy(
+        policies,
+        {
+            "first": identical_scores,
+            "second": identical_scores.copy(),
+        },
+        y,
+    )
+
+    assert selected == policies[0]
+    assert _select_discrete_policy_from_ap(
+        policies, [0.5, 0.5 + 5e-13]
+    ) == policies[0]
+    assert _select_discrete_policy_from_ap(
+        policies, [0.5, 0.5 + 2e-12]
+    ) == policies[1]
+
+
+@pytest.mark.parametrize(
+    ("fixture_seed", "fold_number", "expected_policy"),
+    [
+        (3, 2, "only:0|length"),
+        (7, 1, "only:1|length+std"),
+    ],
+)
+def test_outer_fold_applies_frozen_length_modes(
+    fixture_seed,
+    fold_number,
+    expected_policy,
+):
+    """Catches raw outer scoring after a length policy wins inner OOF AP."""
+    from spark_vi.models.topic.dag_placement import (
+        combine_domain_score_matrices,
+        domain_score_scale,
+        lr_background,
+        lr_domain_score_matrices,
+    )
+    from multidomain_weighting import (
+        _evaluate_outer_fold,
+        discrete_policies,
+        max_subtree_score,
+        simplex_grid,
+        stratified_folds,
+    )
+
+    bows, lam_dict, lay, y, columns = _fold_local_normalization_fixture(
+        fixture_seed
+    )
+    outer_train, outer_test = stratified_folds(
+        y, n_splits=3, seed=41
+    )[fold_number]
+    evaluated = _evaluate_outer_fold(
+        bows=bows,
+        lam_dict=lam_dict,
+        lay=lay,
+        y=y,
+        columns=columns,
+        outer_train=outer_train,
+        outer_test=outer_test,
+        inner_folds=2,
+        grid=simplex_grid(3, 0.5),
+        inner_seed=101 + fold_number,
+    )
+
+    assert evaluated["discrete_policy"] == expected_policy
+    policy = next(
+        item
+        for item in discrete_policies(tuple(sorted(bows)))
+        if item[0] == expected_policy
+    )
+    _, subset, normalization = policy
+    backgrounds = {
+        domain: lr_background(bows[domain][outer_train])
+        for domain in sorted(bows)
+    }
+    length_train = lr_domain_score_matrices(
+        {domain: bows[domain][outer_train] for domain in sorted(bows)},
+        lam_dict,
+        lay,
+        alpha=float("inf"),
+        backgrounds=backgrounds,
+        normalize="length",
+    )
+    length_test = lr_domain_score_matrices(
+        {domain: bows[domain][outer_test] for domain in sorted(bows)},
+        lam_dict,
+        lay,
+        alpha=float("inf"),
+        backgrounds=backgrounds,
+        normalize="length",
+    )
+    frozen_scales = (
+        {
+            domain: domain_score_scale(
+                max_subtree_score(length_train[domain], columns)
+            )
+            for domain in subset
+        }
+        if normalization == "length+std"
+        else None
+    )
+    expected = max_subtree_score(
+        combine_domain_score_matrices(
+            {domain: length_test[domain] for domain in subset},
+            scales=frozen_scales,
+        ),
+        columns,
+    )
+    raw_test = lr_domain_score_matrices(
+        {domain: bows[domain][outer_test] for domain in sorted(bows)},
+        lam_dict,
+        lay,
+        alpha=float("inf"),
+        backgrounds=backgrounds,
+        normalize=None,
+    )
+    wrong_raw = max_subtree_score(
+        combine_domain_score_matrices(
+            {domain: raw_test[domain] for domain in subset}
+        ),
+        columns,
+    )
+
+    assert np.allclose(evaluated["scores"]["discrete"], expected)
+    assert not np.allclose(evaluated["scores"]["discrete"], wrong_raw)
+
+
 def test_inner_selection_uses_pooled_oof_ap_not_in_sample_or_mean_fold():
     """Catches replacing pooled inner OOF AP with in-sample or mean-fold AP."""
     from scipy import sparse as sp
@@ -593,6 +793,87 @@ def test_outer_fold_selection_ignores_test_labels_and_test_bow_rows():
     for strategy in ("fixed:condition_drug", "discrete", "continuous"):
         assert len(baseline["scores"][strategy]) == len(outer_test)
         assert len(altered["scores"][strategy]) == len(outer_test)
+
+
+def test_nested_metrics_equal_independently_reconstructed_aligned_oof_scores():
+    """Catches zero, fold-mean, short, or row-misaligned public metrics."""
+    from spark_vi.models.topic.dag_placement import (
+        _average_precision,
+        _precision_at_recall,
+    )
+    from multidomain_weighting import (
+        _evaluate_outer_fold,
+        evaluate_anchor_nested,
+        simplex_grid,
+        stratified_folds,
+    )
+
+    bows, lam_dict, lay, y, columns = _fold_local_normalization_fixture(0)
+    frontiers = [[2] if label else [] for label in y]
+    result = evaluate_anchor_nested(
+        bows,
+        lam_dict,
+        lay,
+        frontiers,
+        anchor=1,
+        parent_int={1: [0], 2: [1]},
+        outer_folds=3,
+        inner_folds=2,
+        repeats=1,
+        grid_step=0.5,
+        seed=41,
+    )
+    strategies = ("fixed:condition_drug", "discrete", "continuous")
+    pooled = {
+        strategy: np.full(len(y), np.nan, dtype=float)
+        for strategy in strategies
+    }
+    fold_ap = {strategy: [] for strategy in strategies}
+    outer_partitions = stratified_folds(y, n_splits=3, seed=41)
+    for fold_number, (outer_train, outer_test) in enumerate(outer_partitions):
+        fold_result = _evaluate_outer_fold(
+            bows=bows,
+            lam_dict=lam_dict,
+            lay=lay,
+            y=y,
+            columns=columns,
+            outer_train=outer_train,
+            outer_test=outer_test,
+            inner_folds=2,
+            grid=simplex_grid(3, 0.5),
+            inner_seed=100_041 + fold_number,
+        )
+        assert result["repeats"][0]["folds"][fold_number]["test_rows"] == [
+            int(row) for row in outer_test
+        ]
+        for strategy in strategies:
+            fold_scores = fold_result["scores"][strategy]
+            pooled[strategy][outer_test] = fold_scores
+            assert np.array_equal(
+                pooled[strategy][outer_test],
+                fold_scores,
+            )
+            fold_ap[strategy].append(
+                _average_precision(fold_scores, y[outer_test])
+            )
+
+    recalls = (0.10, 0.25, 0.50, 0.80)
+    public_strategies = result["repeats"][0]["strategies"]
+    for strategy in strategies:
+        assert len(pooled[strategy]) == result["n_docs"] == len(y)
+        assert np.all(np.isfinite(pooled[strategy]))
+        precision = _precision_at_recall(pooled[strategy], y, recalls)
+        expected = {
+            "ap": float(_average_precision(pooled[strategy], y)),
+            "precision_at_recall": {
+                format(recall, ".12g"): float(precision[recall])
+                for recall in recalls
+            },
+        }
+        assert public_strategies[strategy] == expected
+        assert abs(
+            expected["ap"] - float(np.mean(fold_ap[strategy]))
+        ) > 1e-3
 
 
 def test_nested_evaluation_is_shared_oof_deterministic_and_json_safe():

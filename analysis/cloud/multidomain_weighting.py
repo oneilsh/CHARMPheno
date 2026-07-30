@@ -3,6 +3,9 @@
 The helpers keep every learned transformation explicit: callers supply the
 rows used to estimate backgrounds and score scales, and validation/test rows
 are transformed only with those frozen training values.
+
+Implements the approved hybrid reliability design in
+``docs/superpowers/specs/2026-07-29-hybrid-domain-reliability-readout-design.md``.
 """
 from __future__ import annotations
 
@@ -107,7 +110,10 @@ def select_simplex_weights(train_matrices, y, columns, *, grid) -> np.ndarray:
 
     All candidates combine complete node matrices before the subtree maximum.
     An AP tie within 1e-12 first favors the candidate nearest uniform weights,
-    then the lexicographically smallest tuple.
+    then the lexicographically smallest tuple. The supervised multi-view
+    diagnostic follows the approved hybrid design; cross-validated downstream
+    prediction from shared multi-domain topics has precedent in MixEHR
+    (Li, Nair, Lu et al. 2020, Nature Communications 11:2536).
     """
     from spark_vi.models.topic.dag_placement import _average_precision
 
@@ -232,6 +238,17 @@ def _discrete_policy_score(matrices, policy, columns, *, scales):
     )
 
 
+def _select_discrete_policy_from_ap(policies, ap_values):
+    """Choose highest AP, retaining policy tuple order for ties within 1e-12."""
+    if not policies or len(policies) != len(ap_values):
+        raise ValueError("policies and ap_values must have the same nonzero length")
+    best_ap = max(ap_values)
+    for policy, ap in zip(policies, ap_values):
+        if best_ap - ap <= 1e-12:
+            return policy
+    raise RuntimeError("discrete policy selection produced no candidate")
+
+
 def _select_discrete_policy(policies, pooled_scores, y):
     """Choose highest pooled-OOF AP, retaining tuple order for 1e-12 ties."""
     from spark_vi.models.topic.dag_placement import _average_precision
@@ -241,11 +258,7 @@ def _select_discrete_policy(policies, pooled_scores, y):
         float(_average_precision(pooled_scores[name], labels))
         for name, _, _ in policies
     ]
-    best_ap = max(ap_values)
-    for policy, ap in zip(policies, ap_values):
-        if best_ap - ap <= 1e-12:
-            return policy
-    raise RuntimeError("discrete policy selection produced no candidate")
+    return _select_discrete_policy_from_ap(policies, ap_values)
 
 
 def _inner_oof_selection(
@@ -451,7 +464,12 @@ def _descendant_subtree(parent_int, anchor):
 
 
 def _strategy_metrics(scores, y):
-    """Return the public, strictly Python-valued AP/precision schema."""
+    """Return the public, strictly Python-valued AP/precision schema.
+
+    AP is the step integral over distinct score thresholds, not trapezoidal PR
+    interpolation (Davis & Goadrich 2006, ICML), so tied scores define one
+    achievable operating point and a constant ranker returns prevalence.
+    """
     from spark_vi.models.topic.dag_placement import (
         _average_precision,
         _precision_at_recall,
@@ -481,7 +499,13 @@ def evaluate_anchor_nested(
     grid_step=0.05,
     seed=0,
 ) -> dict:
-    """Evaluate fixed, discrete, and continuous scores with honest nested CV."""
+    """Evaluate fixed, discrete, and continuous scores with honest nested CV.
+
+    Per the approved hybrid reliability design, inner pooled OOF predictions
+    choose disease-specific rules and shared outer folds report the diagnostic
+    ceiling. The nested supervised rationale follows the cross-validated
+    MixEHR downstream classifier precedent (Li, Nair, Lu et al. 2020).
+    """
     domains = tuple(sorted(bows))
     if not domains or set(bows) != set(lam_dict):
         raise ValueError("bows and lam_dict must have identical nonempty domain keys")
