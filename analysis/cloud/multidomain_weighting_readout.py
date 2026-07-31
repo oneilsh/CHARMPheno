@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 from collections import Counter
 from collections.abc import Mapping
 import json
 import math
+import multiprocessing
+import os
 import sys
 from pathlib import Path
 from statistics import median
@@ -81,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grid-step", type=_grid_step, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-prefix", type=Path)
+    parser.add_argument(
+        "--jobs", type=_integer_at_least(1), default=1,
+        help="parallel worker processes over anchors (anchors are independent; "
+             "results are identical and in target order regardless of --jobs)",
+    )
     return parser
 
 
@@ -668,10 +676,82 @@ def _print_ap_table(result: dict) -> None:
         print_row(anchor["name"], anchor["strategies"])
 
 
-def main(argv=None) -> int:
-    """Run the Spark-free artifact evaluation and write both report formats."""
+# --- per-anchor parallelism (anchors are independent) ---
+
+# Read-only artifact data, stashed as process globals by the pool initializer so
+# each per-anchor task carries only the (small) target dict, not the corpus.
+_WORKER: dict = {}
+
+
+def _worker_init(bows, lam_dict, lay, frontiers, parent_int, domain_labels, cv_config):
+    """Pool initializer: pin BLAS to one thread per worker (avoid oversubscription
+    on a small master) and stash the artifact data as process globals."""
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+    _WORKER.update(
+        bows=bows, lam_dict=lam_dict, lay=lay, frontiers=frontiers,
+        parent_int=parent_int, domain_labels=domain_labels, cv_config=cv_config,
+    )
+
+
+def _worker_eval(target):
+    """Evaluate one anchor from the process-global artifact data. Returns
+    ``(target, evaluation, error_message)`` and never raises, so one bad anchor
+    cannot sink the pool."""
     from multidomain_weighting import evaluate_anchor_nested
 
+    try:
+        evaluation = evaluate_anchor_nested(
+            _WORKER["bows"], _WORKER["lam_dict"], _WORKER["lay"],
+            _WORKER["frontiers"], anchor=target["anchor"],
+            parent_int=_WORKER["parent_int"],
+            domain_labels=_WORKER["domain_labels"], **_WORKER["cv_config"],
+        )
+    except ValueError as error:
+        return (target, None, str(error))
+    return (target, evaluation, None)
+
+
+def _evaluate_targets(artifact, cv_config, *, jobs):
+    """Evaluate every target, serially (jobs<=1) or across a fork-based process
+    pool, in target order. Identical ``(target, evaluation, error)`` triples
+    either way — each anchor's nested CV is independent and seeded identically."""
+    init_args = (
+        artifact["bows"], artifact["lam_dict"], artifact["lay"],
+        artifact["frontiers"], artifact["parent_int"], artifact["domain_labels"],
+        cv_config,
+    )
+    targets = artifact["targets"]
+    if jobs <= 1:
+        _worker_init(*init_args)  # populate globals for the in-process path
+        return [_worker_eval(target) for target in targets]
+    ctx = multiprocessing.get_context("fork")
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=jobs, mp_context=ctx,
+        initializer=_worker_init, initargs=init_args,
+    ) as executor:
+        return list(executor.map(_worker_eval, targets, chunksize=1))
+
+
+def _partition_results(results):
+    """Split ``(target, evaluation, error)`` triples into aligned evaluated
+    targets + evaluations, and eval-failure skip records."""
+    evaluations, evaluated_targets, failures = [], [], []
+    for target, evaluation, error in results:
+        if error is not None:
+            failures.append({
+                "anchor": target["anchor"], "concept_id": target["concept_id"],
+                "name": target["name"], "reason": f"evaluation failed: {error}",
+            })
+        else:
+            evaluations.append(evaluation)
+            evaluated_targets.append(target)
+    return evaluations, evaluated_targets, failures
+
+
+def main(argv=None) -> int:
+    """Run the Spark-free artifact evaluation and write both report formats."""
     args = build_parser().parse_args(argv)
     cv_config = {
         "outer_folds": args.outer_folds,
@@ -684,35 +764,15 @@ def main(argv=None) -> int:
         args.run_dir,
         outer_folds=args.outer_folds,
     )
-    evaluations = []
-    evaluated_targets = []
-    eval_failures = []
-    for target in artifact["targets"]:
-        try:
-            evaluation = evaluate_anchor_nested(
-                artifact["bows"],
-                artifact["lam_dict"],
-                artifact["lay"],
-                artifact["frontiers"],
-                anchor=target["anchor"],
-                parent_int=artifact["parent_int"],
-                domain_labels=artifact["domain_labels"],
-                **cv_config,
-            )
-        except ValueError as error:
-            # A single anchor's nested-CV failure should not sink the whole
-            # readout at anchor scale; record it and continue.
-            eval_failures.append({
-                "anchor": target["anchor"], "concept_id": target["concept_id"],
-                "name": target["name"], "reason": f"evaluation failed: {error}",
-            })
-            sys.stderr.write(
-                f"[weighting] skipping {target['name']} ({target['concept_id']}): "
-                f"evaluation failed: {error}\n"
-            )
-            continue
-        evaluations.append(evaluation)
-        evaluated_targets.append(target)
+    # Evaluate anchors (independent), serially or across --jobs workers.
+    results = _evaluate_targets(artifact, cv_config, jobs=args.jobs)
+    evaluations, evaluated_targets, eval_failures = _partition_results(results)
+    for failure in eval_failures:
+        # A single anchor's nested-CV failure is recorded, not fatal, at scale.
+        sys.stderr.write(
+            f"[weighting] skipping {failure['name']} ({failure['concept_id']}): "
+            f"{failure['reason']}\n"
+        )
 
     # Only successfully-evaluated targets go into the report (kept aligned with
     # evaluations); everything dropped is reported under "skipped".
