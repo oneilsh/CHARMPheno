@@ -1,0 +1,8 @@
+# Expanded rare-disease-forest case-finding cohort defaults (ADR 0039). The
+# corpus identity comes from `disease` (rare_priority) — the anchor union +
+# whole-population background, hard-wired via cohorts.disease_anchors inside
+# assemble_case_finding_corpus. This file exists so load_defaults finds a
+# <cohort>.yaml to merge over _base.yaml (--cohort is vestigial for this model,
+# as with the other gated cohorts; `disease` is the real knob).
+cohort: population_rare_priority
+cohort_def: population_rare_priority
