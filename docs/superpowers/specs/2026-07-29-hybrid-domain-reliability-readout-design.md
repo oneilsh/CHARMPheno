@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-29
 **Branch:** `multidomain-spectral-init`
-**Status:** approved
+**Status:** implemented; attested results recorded in insight 0075
 **Motivates:** insights 0071–0074 and the domain-normalization result that no
 single global rule is best across rare6 diseases
 
@@ -18,19 +18,26 @@ combination of the existing per-domain α→∞ LR score matrices. It serves as 
 better domain combination alone, with the fitted topic model held fixed?
 
 The longer-term target remains usable for MONDO-scale DAGs containing diseases
-with few or zero confirmed examples. The same experiment therefore evaluates
+with few confirmed examples. The same experiment therefore evaluates
 predeclared model-derived reliability weights and establishes the seam for a
 later shrinkage estimator:
 
 ```text
-zero labels      -> model-derived domain weights
-some labels      -> disease-specific weights shrunk toward that fallback
-many labels      -> increasingly disease-specific weights
+few labels       -> strongly pooled disease/domain weights
+more labels      -> increasingly disease-specific weights
 ```
 
 The current rare6 held-out split is explicitly a **development benchmark**:
 method choices may use it. Final claims require validation on other rare
 diseases or a fresh patient split.
+
+**2026-07-30 scope amendment:** completely unseen diseases with no usable
+positive examples are not an operational requirement. Every disease anchor
+included in a fit may be assumed to have some known coded patients; the target
+is finding additional uncoded patients. Model-derived weights remain useful as
+priors and diagnostics, but no zero-label fallback is required. Generalization
+means sharing statistical strength across diseases and domains rather than
+fitting unrelated per-disease classifiers.
 
 ## Why a hybrid
 
@@ -52,10 +59,10 @@ another. Multi-view topic representations followed by supervised prediction
 have precedent in MixEHR, which evaluated a MixEHR-plus-logistic-regression
 classifier with five-fold cross-validation (Li, Nair, Lu et al. 2020).
 
-Unconstrained disease-specific supervision does not transfer to a MONDO node
-with no positives, however, and estimates for diseases with roughly 79–80
-positives can be unstable. It would also turn the readout into a collection of
-independent disease classifiers.
+Unconstrained disease-specific estimates for diseases with roughly 79–80
+positives can be unstable and do not share information across a MONDO-scale
+anchor set. They would also turn the readout into a collection of independent
+disease classifiers.
 
 ### Decision
 

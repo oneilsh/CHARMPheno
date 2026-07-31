@@ -42,6 +42,17 @@ authors, year, title, venue, a link if available, and a short note on its role.
 
 ## Topic hierarchies, supervision & gating
 
+- **McAuliffe & Blei (2007).** Supervised Topic Models. *NeurIPS* 20.
+  https://papers.nips.cc/paper_files/paper/2007/hash/d56b9fc4b0f1be8871f5e1c40c0067e7-Abstract.html
+  — introduces supervised LDA (sLDA), jointly learning topics and a
+  document-level response rather than fitting regression only after
+  unsupervised topic discovery. **(landscape)**
+- **Zhu, Ahmed & Xing (2012).** MedLDA: Maximum Margin Supervised Topic
+  Models. *JMLR* 13(74):2237–2278.
+  https://www.jmlr.org/papers/v13/zhu12a.html
+  — couples topic inference to max-margin classification or regression,
+  providing the discriminative alternative to likelihood-based sLDA.
+  **(landscape)**
 - **Ramage, Manning & Dumais (2011).** Partially Labeled Topic Models for Interpretable Text Mining (PLDA). *KDD*.
   — generative-restriction basis for "gated LDA"; the model our `TopicBlockPartition` gating reimplements. *used in:* `docs/insights/0028-...-plda.md`
 - **Ramage, Hall, Nallapati & Manning (2009).** Labeled LDA: A Supervised Topic Model for Credit Attribution in Multi-labeled Corpora. *EMNLP*.
@@ -71,7 +82,27 @@ authors, year, title, venue, a link if available, and a short note on its role.
 ## Phenotyping / EHR topic models
 
 - **Li, Nair, Lu, Wen, Wang et al. (2020).** Inferring Multimodal Latent Topics from EHRs (MixEHR). *Nature Communications* 11:2536.
-  — multi-view Dirichlet phenotype topic model; the lineage this project positions against.
+  https://doi.org/10.1038/s41467-020-16378-3
+  — multi-view Dirichlet phenotype topic model; inferred patient-topic
+  mixtures also feed downstream target-disease and mortality classifiers.
+- **Song, Sumba Toral, Xu, Liu, Guo et al. (2021).** Supervised
+  Multi-specialist Topic Model with Applications on Large-scale Electronic
+  Health Record Data (MixEHR-S). arXiv:2105.01238.
+  https://arxiv.org/abs/2105.01238
+  — jointly infers specialist-dependent disease topics and a probit target
+  label; the MixEHR-lineage example of supervision inside topic inference.
+  **(landscape)**
+- **Hughes, Hope, Weiner, McCoy, Perlis, Sudderth & Doshi-Velez (2018).**
+  Semi-Supervised Prediction-Constrained Topic Models. *AISTATS*, PMLR
+  84:1067–1076. https://proceedings.mlr.press/v84/hughes18a.html
+  — prediction-constrained training balances a generative account of EHR
+  features with label prediction and can use sparsely labeled cohorts.
+  **(landscape)**
+- **Ren, Kunes & Doshi-Velez (2020).** Prediction Focused Topic Models via
+  Feature Selection. *AISTATS*, PMLR 108:4420–4429.
+  https://proceedings.mlr.press/v108/ren20a.html
+  — uses supervision to suppress vocabulary features that hinder prediction,
+  directly relevant to noisy or heterogeneous OMOP domains. **(landscape)**
 - **MixEHR-Guided (MixEHR-G).** Modeling EHRs with a guided multi-modal topic model for large-scale automatic phenotyping. *Journal of Biomedical Informatics*, 2022. https://www.sciencedirect.com/science/article/pii/S1532046422001976
   — PheCode/surrogate-feature priors make topics identifiable with known phenotypes. (Li lab, McGill; first author to confirm.) **(landscape)**
 - **Song, Hu, Verma, Buckeridge & Li (2022).** Automatic Phenotyping by a Seed-guided Topic Model (MixEHR-Seed). *KDD '22* (ACM SIGKDD). DOI:10.1145/3534678.3542675

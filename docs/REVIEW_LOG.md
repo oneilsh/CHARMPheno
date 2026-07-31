@@ -12,6 +12,33 @@ elsewhere.
 
 ---
 
+## 2026-07-29..30 — hybrid multidomain reliability readout and scalable-placement review
+
+Implemented and reviewed a refit-free nested-CV diagnostic for combining
+condition, drug, and observation evidence in rare6 case finding. The shipped
+surface includes fixed fold-local LR backgrounds/scales, continuous
+nonnegative domain weights, a discrete policy selector, λ-derived
+distinctiveness/ownership/viability candidates, an attested one-row-per-person
+artifact contract (ADR 0038), and a Make-based cloud readout. Fresh mini-batch
+and full-batch replications (0073/0074) completed successfully.
+
+The empirical result is recorded in insight 0075: continuous disease-specific
+weights provide modest macro AP headroom over fixed condition+drug, while
+simple λ-derived reliability does not recover task utility and the discrete
+selector is unstable. The review explicitly rejects turning rare6's
+condition-heavy weights into a universal domain policy. The next design target
+is one shared, partially pooled, ontology-aware placement mechanism across many
+disease anchors, with every modeled disease allowed some coded positives;
+zero-shot diseases are not an operational requirement.
+
+The predictive topic-model bibliography was expanded with sLDA, MedLDA,
+prediction-constrained/focused topic models, and MixEHR-S. Two threads are
+parked: the N-domain driver bypasses the existing persistent case-finding cache,
+and conditionally independent token emissions can overcount correlated clinical
+evidence. Broad feature engineering, evidence groups that merely recreate
+topics, and speculative care-process latent variables were not accepted as
+solutions to the latter.
+
 ## 2026-07-16..24 — case-finding branch pre-merge review (7-lesson walkthrough) + the alpha / explain-away / n_bg / reverse-topo / LR-FDR mini-arc
 
 Pre-merge review of the unmerged `case-finding` branch — the ontology/DAG placement
