@@ -25,10 +25,12 @@ max:scaled 0.024), Marfan (0.001 → 0.016 → 0.015), Osler telangiectasia (0.0
 none of these. The arc premise — measurement carries the missing information for
 labs-dependent rare disease — is confirmed.
 
-## 2. But measurement degrades the condition domain in the shared-θ fit
+## 2. A candidate condition-degradation effect — which the ω=0.5 test below largely dissolves
 
 Condition-**alone** macro fell **0.024 → 0.020** when the third domain was swapped
-obs → measurement (same seed, same everything else). Per-disease the condition
+obs → measurement (same seed, same everything else). *(Update: exp 0079 shows this
+is mostly optimization/median noise, not strong modality interference — see the
+"ω=0.5 result" section at the end.)* Per-disease the condition
 column drops across most anchors — EDS 0.102 → 0.041, Long QT 0.067 → 0.047, SLE
 0.136 → 0.112, scleroderma 0.112 → 0.088, thoracic aneurysm 0.099 → 0.094. This
 is **modality interference**: measurement is high-coverage (labs are ordered for
@@ -83,9 +85,52 @@ shared-θ interference. Two things follow, in priority order:
    rather than as a domain that improves the average, and close the "make the
    average better" line of the arc.
 
-**Setting context.** Exp 0076 (rare_priority, cond+drug+obs, obs PPI-stripped) and
-exp 0078 (cond+drug+measurement, value-aware), both K=230, seed 42, full-batch,
-spectral scalable, ADR 0039 anchors. Readout: `--fixed-only`, 5 repeats × 5 outer,
-fold-local backgrounds, α→∞ LR, counts <20 suppressed. See insight 0078
-(representation validated), 0077 (survey), 0071 (observation drag), 0062
-(information constraint).
+## Update — ω=0.5 result (exp 0079): the decision fires → measurement is a specialist channel
+
+Exp 0079 re-fit 0078 with `omega: 1.0,1.0,0.5` (measurement tempered to half weight
+in the θ likelihood). Macro: condition **0.022**, drug 0.005, measurement 0.008,
+fixed:sum 0.017, max:raw 0.018, **max:scaled 0.018**. Versus 0078 (ω=1): condition
+0.020, max:scaled 0.017; versus 0076 (obs): condition 0.024.
+
+Two conclusions, both robust:
+
+- **The condition "degradation" was mostly noise.** Tempering barely moved
+  condition-alone (0.020 → 0.022, within the median's run-to-run noise over 39
+  mostly-tiny APs) and did **not** recover the anchors that looked worst — EDS
+  condition stayed 0.041 (0076 had 0.102), SLE/scleroderma/Long QT condition
+  columns essentially unchanged. If the drop were real θ-interference, halving
+  measurement's weight would have restored it; it didn't. So the 0076→0078
+  condition dip is best read as spectral-init/optimization variance (init is
+  seed-fragile, 0070) plus median noise, **not** a strong measurement interference
+  effect. Finding #2 above is softened accordingly.
+- **No combine beats condition-alone at macro, at any ω tested.** 0076 (0.024 vs
+  0.013), 0078 (0.020 vs 0.017), 0079 (0.022 vs 0.018) — condition-alone wins the
+  aggregate every time. Meanwhile measurement kept every specialist rescue under
+  tempering (GBS measurement 0.030, max:scaled 0.025; Marfan 0.017/0.016; Osler
+  0.020; EDS max:scaled 0.040; sarcoidosis, CIDP, FH).
+
+**The pre-registered decision (branch 2) therefore fires.** Tempering did not clear
+condition-alone, so aggregate case-finding is **information-limited** (insight
+0062), and measurement should ship as a **specialist channel**, not an
+average-improver. The "make the aggregate better" line of the measurement arc is
+closed.
+
+**Deployment shape (the keepable result).** Route each disease to the domain its
+evidence actually lives in — an interpretable, decided-once clinical property, NOT
+the out-of-fold weight-fitting that failed in 0076: condition for the majority;
+**measurement** for the labs/imaging-defined diseases (GBS←CSF, Marfan, Osler,
+EDS, sarcoidosis, CIDP, FH); **drug** for the pathognomonic-treatment diseases
+(MG←pyridostigmine, POTS). The `top` attribution column *is* this routing table,
+and `max:scaled` is a reasonable parameter-free default that approximates it
+automatically (it recovers GBS/Marfan/EDS that condition-alone scores at ~0). The
+tradeoff is explicit: condition-alone has the best macro but scores **zero** on
+GBS/Marfan/Osler; the specialist routing finds them at the cost of a small macro
+dip. For a rare-disease case-finding tool, finding the otherwise-invisible
+diseases is the point.
+
+**Setting context.** Exp 0076 (rare_priority, cond+drug+obs, obs PPI-stripped),
+exp 0078 (cond+drug+measurement value-aware, ω=1), exp 0079 (same, ω=1,1,0.5), all
+K=230, seed 42, full-batch, spectral scalable, ADR 0039 anchors. Readout:
+`--fixed-only`, 5 repeats × 5 outer, fold-local backgrounds, α→∞ LR, counts <20
+suppressed. See insight 0078 (representation validated), 0077 (survey), 0071
+(observation drag), 0062 (information constraint).
