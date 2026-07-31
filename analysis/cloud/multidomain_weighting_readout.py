@@ -6,6 +6,7 @@ from collections import Counter
 from collections.abc import Mapping
 import json
 import math
+import sys
 from pathlib import Path
 from statistics import median
 
@@ -92,7 +93,7 @@ def load_artifact(
     *,
     outer_folds: int,
 ) -> dict:
-    """Load and validate one persisted rare6 multidomain run.
+    """Load and validate one persisted multidomain run (any registered disease).
 
     This mirrors ``multidomain_lr_readout.main`` for sidecar loading and DAG
     reconstruction, then establishes every alignment invariant needed before
@@ -120,11 +121,12 @@ def load_artifact(
         _abort("manifest root must be a mapping")
 
     disease = manifest.get("disease")
-    if disease != "rare6":
-        _abort(
-            f"expected a rare6 artifact, found disease={disease!r} in "
-            f"{manifest_path}"
-        )
+    if not isinstance(disease, str) or not disease:
+        _abort(f"manifest disease must be a non-empty string; found {disease!r}")
+    try:
+        disease_anchors(disease)
+    except ValueError as error:
+        _abort(str(error))
 
     lam_dict = load_lambda_dict(run_dir)
     expected_keys = list(range(len(lam_dict)))
@@ -210,30 +212,54 @@ def load_artifact(
     except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError) as error:
         _abort(str(error))
 
+    # Build the scoreable target list. At anchor scale (N diseases, not just the
+    # six rare6) some anchors will not resolve to a DAG node, or will have too few
+    # held-out cases for nested CV; skip and report those rather than aborting the
+    # whole readout, so the evaluable anchors still get scored.
     targets = []
+    skipped = []
     for concept_id in disease_anchors(disease):
+        name = name_by_id.get(int(concept_id), str(concept_id))
         resolved = scoreable_targets([concept_id], cid2int, lay, parent_int)
         if len(resolved) != 1 or resolved[0][1]:
-            _abort(f"rare6 anchor {concept_id} does not resolve to a scoreable node")
+            skipped.append({
+                "concept_id": int(concept_id), "name": name,
+                "reason": "anchor does not resolve to a single scoreable DAG node",
+            })
+            continue
         anchor = int(resolved[0][0])
         subtree = subtree_nodes(parent_int, anchor) & set(lay.nodes)
         n_positive = sum(bool(set(frontier) & subtree) for frontier in frontiers)
         n_negative = n_docs - n_positive
         if min(n_positive, n_negative) < outer_folds:
-            _abort(
-                f"anchor {anchor} ({concept_id}) has {n_positive} positives and "
-                f"{n_negative} negatives; both must be at least "
-                f"outer_folds={outer_folds}"
-            )
-        targets.append(
-            {
-                "anchor": anchor,
-                "concept_id": int(concept_id),
-                "name": name_by_id.get(int(concept_id), str(concept_id)),
-            }
+            skipped.append({
+                "anchor": anchor, "concept_id": int(concept_id), "name": name,
+                "reason": (f"too few held-out cases ({n_positive} positive / "
+                           f"{n_negative} negative; need >= outer_folds={outer_folds})"),
+            })
+            continue
+        targets.append({
+            "anchor": anchor,
+            "concept_id": int(concept_id),
+            "name": name,
+            "n_positive": int(n_positive),
+        })
+
+    if not targets:
+        _abort(
+            f"no anchor has enough held-out cases to evaluate at "
+            f"outer_folds={outer_folds} (all {len(skipped)} anchors skipped)"
+        )
+    if skipped:
+        sys.stderr.write(
+            f"[weighting] skipping {len(skipped)}/{len(targets) + len(skipped)} "
+            "anchors (unresolved or too few held-out cases): "
+            + ", ".join(str(s["name"]) for s in skipped[:10])
+            + (" ..." if len(skipped) > 10 else "") + "\n"
         )
 
     return {
+        "skipped": skipped,
         "run_dir": run_dir,
         "manifest": manifest,
         "disease": disease,
@@ -258,15 +284,16 @@ def _median(values):
 def _validate_evaluations(artifact, evaluations, cv_config):
     targets = artifact["targets"]
     expected_repeats = int(cv_config["repeats"])
-    if len(targets) != 6 or len(evaluations) != 6:
+    if not targets or len(targets) != len(evaluations):
         _abort(
-            "macro reporting requires exactly six rare6 targets and evaluations; "
-            f"found {len(targets)} targets and {len(evaluations)} evaluations"
+            "macro reporting requires at least one target with a matching "
+            f"evaluation; found {len(targets)} targets and {len(evaluations)} "
+            "evaluations"
         )
     for target, evaluation in zip(targets, evaluations):
         if int(evaluation.get("anchor", -1)) != int(target["anchor"]):
             _abort(
-                "evaluation order must match rare6 target order; "
+                "evaluation order must match target order; "
                 f"expected anchor {target['anchor']}, "
                 f"found {evaluation.get('anchor')}"
             )
@@ -578,6 +605,22 @@ def render_markdown(result: dict) -> str:
                 f"{_format_number(agreement['median_top_set_jaccard'])} | "
                 f"{_format_number(agreement['same_domain_order_frequency'])} |"
             )
+
+    skipped = result.get("skipped") or []
+    if skipped:
+        lines.extend([
+            "",
+            f"## Skipped anchors ({len(skipped)})",
+            "",
+            "| Anchor | Concept | Reason |",
+            "|---|---|---|",
+        ])
+        for entry in skipped:
+            lines.append(
+                f"| {_markdown_cell(entry.get('name', '?'))} | "
+                f"{_markdown_cell(entry.get('concept_id', '—'))} | "
+                f"{_markdown_cell(entry.get('reason', ''))} |"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -642,29 +685,52 @@ def main(argv=None) -> int:
         outer_folds=args.outer_folds,
     )
     evaluations = []
+    evaluated_targets = []
+    eval_failures = []
     for target in artifact["targets"]:
         try:
-            evaluations.append(
-                evaluate_anchor_nested(
-                    artifact["bows"],
-                    artifact["lam_dict"],
-                    artifact["lay"],
-                    artifact["frontiers"],
-                    anchor=target["anchor"],
-                    parent_int=artifact["parent_int"],
-                    domain_labels=artifact["domain_labels"],
-                    **cv_config,
-                )
+            evaluation = evaluate_anchor_nested(
+                artifact["bows"],
+                artifact["lam_dict"],
+                artifact["lay"],
+                artifact["frontiers"],
+                anchor=target["anchor"],
+                parent_int=artifact["parent_int"],
+                domain_labels=artifact["domain_labels"],
+                **cv_config,
             )
         except ValueError as error:
-            _abort(
-                f"anchor {target['anchor']} ({target['concept_id']}) "
-                f"evaluation failed: {error}"
+            # A single anchor's nested-CV failure should not sink the whole
+            # readout at anchor scale; record it and continue.
+            eval_failures.append({
+                "anchor": target["anchor"], "concept_id": target["concept_id"],
+                "name": target["name"], "reason": f"evaluation failed: {error}",
+            })
+            sys.stderr.write(
+                f"[weighting] skipping {target['name']} ({target['concept_id']}): "
+                f"evaluation failed: {error}\n"
             )
+            continue
+        evaluations.append(evaluation)
+        evaluated_targets.append(target)
+
+    # Only successfully-evaluated targets go into the report (kept aligned with
+    # evaluations); everything dropped is reported under "skipped".
+    artifact["targets"] = evaluated_targets
+    if not evaluations:
+        _abort("every anchor evaluation failed; nothing to report")
 
     result = build_result(artifact, evaluations, cv_config=cv_config)
+    result["skipped"] = list(artifact.get("skipped", [])) + eval_failures
     json_path, markdown_path = write_reports(result, args.output_prefix)
     _print_ap_table(result)
+    if result["skipped"]:
+        print(
+            f"[weighting] scored {len(evaluations)} anchors; "
+            f"skipped {len(result['skipped'])} (unresolved / too few held-out "
+            "cases / eval failure) — see report",
+            flush=True,
+        )
     print(f"[weighting] JSON: {json_path}", flush=True)
     print(f"[weighting] Markdown: {markdown_path}", flush=True)
     return 0
