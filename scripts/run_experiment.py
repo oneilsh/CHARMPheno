@@ -742,6 +742,12 @@ def build_multidomain_args(
         "--obs-min-df", str(effective.get("obs_min_df", 20)),
         "--obs-min-patient-count", str(effective.get("obs_min_patient_count", 20)),
         "--obs-exclude-vocab", _as_comma(effective.get("obs_exclude_vocab", "")),
+        # Measurement domain (value-aware synthetic tokens; binary per-doc). The
+        # driver defaults these too, so they only matter when `measurement` is in
+        # `domains`.
+        "--meas-vocab-size", str(effective.get("meas_vocab_size", 2000)),
+        "--meas-min-df", str(effective.get("meas_min_df", 20)),
+        "--meas-min-patient-count", str(effective.get("meas_min_patient_count", 20)),
         # SVI schedule (mirrors build_dag_placement_args). Default 0.0 = full-batch;
         # _base.yaml sets 0.1, so a multidomain experiment inherits mini-batch
         # UNLESS its frontmatter pins mini_batch_fraction: 0.0 (exps 0070/0071 do).

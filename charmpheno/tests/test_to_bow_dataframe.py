@@ -52,6 +52,25 @@ def test_to_bow_dataframe_returns_sparse_features_per_patient(spark):
     assert counts_by_concept_2 == {4567: 1, 1234: 1}
 
 
+def test_to_bow_dataframe_binary_collapses_within_doc_repeats(spark):
+    from charmpheno.omop import to_bow_dataframe
+
+    df = _tiny_omop_df(spark)
+    # Default (count) mode: patient 1 has fever twice -> count 2. Binary mode:
+    # each token counts once per document -> count 1.
+    bow_df, vocab_map = to_bow_dataframe(df, binary=True)
+    rows = sorted(bow_df.collect(), key=lambda r: r["person_id"])
+    idx_to_concept = {v: k for k, v in vocab_map.items()}
+
+    sv1 = rows[0]["features"]
+    counts_1 = {idx_to_concept[idx]: int(c) for idx, c in zip(sv1.indices, sv1.values)}
+    assert counts_1 == {4567: 1, 8910: 1}   # fever de-duplicated (was 2 in count mode)
+
+    sv2 = rows[1]["features"]
+    counts_2 = {idx_to_concept[idx]: int(c) for idx, c in zip(sv2.indices, sv2.values)}
+    assert counts_2 == {4567: 1, 1234: 1}   # already unique -> unchanged
+
+
 def test_to_bow_dataframe_vocab_map_is_complete_and_contiguous(spark):
     from charmpheno.omop import to_bow_dataframe
     df = _tiny_omop_df(spark)

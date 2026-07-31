@@ -45,6 +45,8 @@ DOMAIN_REGISTRY = {
                       "arg": "drug"},
     "observation":   {"date_col": "observation_date",         "name": "observation",
                       "arg": "obs"},
+    "measurement":   {"date_col": "measurement_date",         "name": "measurement",
+                      "arg": "meas"},
 }
 
 
@@ -53,10 +55,15 @@ def _domain_vocab_spec(args, source_table):
     (cond/drug/obs) off the parsed args."""
     from charmpheno.omop.multi_domain import DomainVocabSpec
     a = DOMAIN_REGISTRY[source_table]["arg"]
+    # Measurement is tokenized with per-document binary presence: it has no OMOP
+    # era rollup and is extremely bursty (insight 0077), so binary reproduces for
+    # it what the era tables already do for condition/drug (near-binary per
+    # window). Other domains keep occurrence counts (binary defaults False).
     return DomainVocabSpec(
         vocab_size=getattr(args, f"{a}_vocab_size"),
         min_df=getattr(args, f"{a}_min_df"),
-        min_patient_count=getattr(args, f"{a}_min_patient_count"))
+        min_patient_count=getattr(args, f"{a}_min_patient_count"),
+        binary=(source_table == "measurement"))
 
 
 def _parse_float_list(s):
@@ -258,6 +265,32 @@ def _vocab_vocabulary_tally(spark, cdr, billing, vocab_map):
     return {r["vocabulary_id"]: int(r["n"]) for r in rows}
 
 
+def _measurement_vocab_names(spark, cdr, billing, vocab_map):
+    """{synthetic_token: 'RealName [state]'} for the measurement domain.
+
+    The measurement vocabulary is synthetic tokens (concept_id x value-state, see
+    charmpheno.omop.measurement_tokens), NOT real OMOP concepts, so the plain
+    `concept`-join in _vocab_concept_names would find nothing. Decode each token to
+    its real measurement_concept_id, read those real names once, and rebuild the
+    display name so topic dumps read 'Creatinine ... [high]' rather than a raw
+    synthetic id. Returns names keyed by the SYNTHETIC token (the vocab_map's
+    keys) so _idx_to_name works unchanged."""
+    from pyspark.sql import functions as F
+    from charmpheno.omop import measurement_tokens as mt
+    tokens = [int(c) for c in vocab_map.keys()]
+    if not tokens:
+        return {}
+    real_ids = sorted({mt.decode_token(t)[0] for t in tokens})
+    rows = (spark.read.format("bigquery")
+            .option("table", f"{cdr}.concept")
+            .option("parentProject", billing).load()
+            .select("concept_id", "concept_name")
+            .where(F.col("concept_id").isin(real_ids))
+            .collect())
+    real_name = {int(r["concept_id"]): r["concept_name"] for r in rows}
+    return {t: mt.decode_token_name(t, real_name) for t in tokens}
+
+
 def _idx_to_name(vocab_map, names_by_cid):
     """PURE: {token_index: display_name} from a {concept_id: index} vocab map and a
     {concept_id: name} lookup (name falls back to the concept id as a string)."""
@@ -287,8 +320,8 @@ def parse_args(argv=None):
     p.add_argument("--source-table-drug", default="drug_era")
     p.add_argument("--domains", default="drug_era",
                    help="Comma list of EXTRA domains beyond conditions (subset of "
-                        "{drug_era, observation}); condition is always domain 0. "
-                        "Default 'drug_era' = the two-domain exp-0070 shape.")
+                        "{drug_era, observation, measurement}); condition is always "
+                        "domain 0. Default 'drug_era' = the two-domain exp-0070 shape.")
     p.add_argument("--window-mode", choices=["forward", "lookback"], default="forward",
                    help="forward = one shared window (exp 0070). lookback = pre-index "
                         "feature window (all domains) + forward condition label window "
@@ -314,6 +347,12 @@ def parse_args(argv=None):
     p.add_argument("--obs-vocab-size", type=int, default=1500)
     p.add_argument("--obs-min-df", type=int, default=20)
     p.add_argument("--obs-min-patient-count", type=int, default=20)
+    # Measurement domain: value-aware synthetic tokens (concept x state), binary
+    # per-document presence. Vocab is (labs x states), so it is larger than a bare
+    # lab list -- default cap sits between drug and observation.
+    p.add_argument("--meas-vocab-size", type=int, default=2000)
+    p.add_argument("--meas-min-df", type=int, default=20)
+    p.add_argument("--meas-min-patient-count", type=int, default=20)
     p.add_argument("--obs-exclude-vocab", default="",
                    type=lambda s: tuple(x.strip() for x in s.split(",") if x.strip()),
                    help="Comma list of OMOP vocabulary_id values to drop from the "
@@ -592,8 +631,13 @@ def main(argv=None) -> int:
         # self-describing (a later no-refit inspection can map token index ->
         # concept). N small filtered `concept` reads (one per domain's vocab ids).
         with _phase("resolve per-domain vocab names"):
-            names_bycid = [_vocab_concept_names(spark, args.cdr, args.billing, vm)
-                           for vm in bundle.vocab_maps]
+            # Measurement's vocab is synthetic (concept x state) tokens, decoded
+            # specially; every other domain's vocab is real concept_ids.
+            names_bycid = [
+                _measurement_vocab_names(spark, args.cdr, args.billing, vm)
+                if domain_names[i] == "measurement"
+                else _vocab_concept_names(spark, args.cdr, args.billing, vm)
+                for i, vm in enumerate(bundle.vocab_maps)]
             idx2name = {i: _idx_to_name(vm, names_bycid[i])
                         for i, vm in enumerate(bundle.vocab_maps)}
             # Decisive check that a --*-exclude-vocab filter actually matched rows

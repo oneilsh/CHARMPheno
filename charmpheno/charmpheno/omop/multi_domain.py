@@ -34,6 +34,12 @@ class DomainVocabSpec:
     min_df: int | float = 1
     min_patient_count: int = 1
     vocab: list[int] | None = None
+    # binary=True tokenizes this domain with per-document PRESENCE (each token
+    # counts once per doc regardless of within-doc repeats). The measurement
+    # domain sets this: it has no OMOP era rollup and is extremely bursty (~924
+    # rows/person, insight 0077), so binary presence reproduces for it what the
+    # era tables already do for condition/drug (near-binary per patient-window).
+    binary: bool = False
 
 
 def _empty_vec_udf(size: int):
@@ -63,7 +69,8 @@ def multidomain_bow(domain_events, vocab_specs, *, doc_spec):
         bow, vm = to_bow_dataframe(
             ev, doc_spec=doc_spec, token_col="concept_id",
             vocab_size=spec.vocab_size, min_df=spec.min_df,
-            min_patient_count=spec.min_patient_count, vocab=spec.vocab)
+            min_patient_count=spec.min_patient_count, vocab=spec.vocab,
+            binary=spec.binary)
         bows.append(bow)
         vms.append(vm)
 
