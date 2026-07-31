@@ -10,6 +10,7 @@ import math
 import multiprocessing
 import os
 import sys
+import time
 from pathlib import Path
 from statistics import median
 
@@ -723,15 +724,40 @@ def _evaluate_targets(artifact, cv_config, *, jobs):
         cv_config,
     )
     targets = artifact["targets"]
+    total = len(targets)
+
+    def _tick(done, name):
+        sys.stderr.write(f"[weighting] {done}/{total} anchors done (last: {name})\n")
+        sys.stderr.flush()
+
+    print(f"[weighting] evaluating {total} anchors (jobs={jobs}) ...",
+          file=sys.stderr, flush=True)
+    start = time.perf_counter()
+
     if jobs <= 1:
         _worker_init(*init_args)  # populate globals for the in-process path
-        return [_worker_eval(target) for target in targets]
-    ctx = multiprocessing.get_context("fork")
-    with concurrent.futures.ProcessPoolExecutor(
-        max_workers=jobs, mp_context=ctx,
-        initializer=_worker_init, initargs=init_args,
-    ) as executor:
-        return list(executor.map(_worker_eval, targets, chunksize=1))
+        results = []
+        for done, target in enumerate(targets, 1):
+            results.append(_worker_eval(target))
+            _tick(done, target["name"])
+    else:
+        ctx = multiprocessing.get_context("fork")
+        results = [None] * total
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=jobs, mp_context=ctx,
+            initializer=_worker_init, initargs=init_args,
+        ) as executor:
+            futures = {executor.submit(_worker_eval, t): i
+                       for i, t in enumerate(targets)}
+            for done, future in enumerate(concurrent.futures.as_completed(futures), 1):
+                index = futures[future]
+                results[index] = future.result()  # completes out of order...
+                _tick(done, targets[index]["name"])
+        # ... but results stay in target order for a deterministic report.
+
+    print(f"[weighting] evaluated {total} anchors in "
+          f"{time.perf_counter() - start:.0f}s", file=sys.stderr, flush=True)
+    return results
 
 
 def _partition_results(results):
