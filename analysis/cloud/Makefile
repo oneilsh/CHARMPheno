@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout anchor-select
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout anchor-select summarize-exp
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -33,6 +33,9 @@ INSPECT_ARGS    ?=
 # floor; ANCHOR_ARGS forwards extra flags (e.g. --mondo-version) to the driver.
 ANCHOR_MIN_POSITIVES ?= 50
 ANCHOR_ARGS          ?=
+
+# Post-fit summary ("fit card") knobs: --top-n tokens/domain, --sample-nodes.
+SUMMARIZE_ARGS       ?=
 
 # Required for eval-bq-coherence: path to the augmented VIResult dir written
 # by lda_bigquery_cloud.py (local or GCS-mounted, e.g. /mnt/gcs/<bucket>/runs/<id>).
@@ -134,6 +137,9 @@ help:
 	@echo "  anchor-select [ANCHOR_MIN_POSITIVES=100 ANCHOR_ARGS='--mondo-version 2026-06-02']"
 	@echo "                         Map the #1079 seed -> OMOP anchors and count coded patients;"
 	@echo "                         writes anchor_selection_data/candidates_with_counts.tsv"
+	@echo "  summarize-exp ID=N [SUMMARIZE_ARGS='--top-n 8 --sample-nodes 12']"
+	@echo "                         Compact fit card (structure + health + node-topic sample);"
+	@echo "                         writes <run>/fit_card.md and upserts it into <run>/summary.md"
 	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
 	@echo "                         Restricts to patients with a first malignant-cancer dx"
 	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
@@ -479,6 +485,13 @@ anchor-select: zip cluster-overlay $(WORKSPACE_ENV)
 	    --out $(REPO_ROOT)/analysis/cloud/anchor_selection_data/candidates_with_counts.tsv \
 	    --min-positives $(ANCHOR_MIN_POSITIVES) \
 	    $(ANCHOR_ARGS)
+
+# Compact post-fit summary. Pure numpy+stdlib (no Spark/BQ), reads the run dir.
+summarize-exp:
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	python3 $(REPO_ROOT)/analysis/cloud/summarize_fit.py \
+	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
+	    $(SUMMARIZE_ARGS)
 
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
