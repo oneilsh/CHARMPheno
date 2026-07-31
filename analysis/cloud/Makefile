@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout anchor-select
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -28,6 +28,11 @@ HDP_BQ_ARGS     ?=
 EVAL_ARGS       ?=
 BUNDLE_ARGS     ?=
 INSPECT_ARGS    ?=
+
+# Anchor-selection (expanded-SNOMED) knobs. ANCHOR_MIN_POSITIVES is the power
+# floor; ANCHOR_ARGS forwards extra flags (e.g. --mondo-version) to the driver.
+ANCHOR_MIN_POSITIVES ?= 100
+ANCHOR_ARGS          ?=
 
 # Required for eval-bq-coherence: path to the augmented VIResult dir written
 # by lda_bigquery_cloud.py (local or GCS-mounted, e.g. /mnt/gcs/<bucket>/runs/<id>).
@@ -126,6 +131,9 @@ help:
 	@echo "  multidomain-lr-readout ID=N [MULTIDOMAIN_LR_ALPHA_GRID=.. MULTIDOMAIN_LR_NORMALIZE=none|std|length|length+std]  Post-hoc per-domain LR readout (multidomain fit)"
 	@echo "  multidomain-weighting-readout ID=N"
 	@echo "                         Nested-CV supervised ceiling + model-derived domain reliability (no refit)"
+	@echo "  anchor-select [ANCHOR_MIN_POSITIVES=100 ANCHOR_ARGS='--mondo-version 2026-06-02']"
+	@echo "                         Map the #1079 seed -> OMOP anchors and count coded patients;"
+	@echo "                         writes anchor_selection_data/candidates_with_counts.tsv"
 	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
 	@echo "                         Restricts to patients with a first malignant-cancer dx"
 	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
@@ -450,6 +458,27 @@ multidomain-weighting-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	python3 $(REPO_ROOT)/analysis/cloud/multidomain_weighting_readout.py \
 	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
 	    $(MULTIDOMAIN_WEIGHTING_ARGS)
+
+# Expanded-SNOMED anchor selection: map the #1079 seed to OMOP anchors and count
+# coded patients (spark-submit, since it reads condition_occurrence + vocab from
+# BigQuery). CDR/billing come from .workspace_env (WORKSPACE_CDR,
+# GOOGLE_CLOUD_PROJECT). Output lands under anchor_selection_data/.
+anchor-select: zip cluster-overlay $(WORKSPACE_ENV)
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 12g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
+	    $(REPO_ROOT)/analysis/cloud/anchor_selection_cloud.py \
+	    --cdr $$WORKSPACE_CDR --billing $$GOOGLE_CLOUD_PROJECT \
+	    --seed-tsv $(REPO_ROOT)/analysis/cloud/anchor_selection_data/priority_seed.tsv \
+	    --out $(REPO_ROOT)/analysis/cloud/anchor_selection_data/candidates_with_counts.tsv \
+	    --min-positives $(ANCHOR_MIN_POSITIVES) \
+	    $(ANCHOR_ARGS)
 
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
