@@ -54,6 +54,23 @@ hard-code — MG (drug) and Long QT (measurement) show domain relevance is real 
 but it is disease-specific and small, and better served by richer information
 than by weighting tuning.
 
+## What this does NOT mean
+
+It does **not** mean dropping the drug or observation domains. The fit is
+MixEHR-style multi-view (Li, Nair, Lu et al. 2020): all three domains jointly
+inform the shared patient-topic mixtures through per-domain emissions, and that
+representation is kept intact — drug's signal (MG→pyridostigmine, Behçet→
+colchicine) lives there. The conclusion is narrowly that *supervised per-disease
+weighting of the domain scores* (and pooling it across diseases) is not worth
+building; a fixed **inclusive** combination is ~as good on average. Observation's
+net drag (insight 0071) is a *representation* problem — PPI survey junk plus
+treating labs as bare presence tokens without their values — not evidence the
+domain is useless: it still earns weight where a real value signal exists (Long
+QT ← QT interval). The MixEHR lineage integrates every modality generatively and
+prunes none (MixEHR-SAGE adds labs/procedures/meds); the consistent move here is
+to keep all domains and make measurement **value-aware**, not to drop or
+per-disease-weight them.
+
 ## Case-finding here is information-limited, not weighting-limited
 
 Absolute utility is bimodal and diagnostic. Diseases with distinctive
