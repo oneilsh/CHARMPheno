@@ -64,3 +64,59 @@ def test_to_tsv_roundtrips_row_count():
     assert len(lines) == 1 + 4  # header + 4 rows
     assert "\tMONDO:0009688\t" not in tsv  # id is first column, no leading tab
     assert tsv.count("MONDO:0009688") == 2  # appears under both categories
+
+
+# --- YAML-source categorization (dismech #1079 keyword rules) ---
+
+
+def test_categorize_matches_on_label_keyword():
+    from anchor_selection import categorize
+
+    assert categorize({"mondo_label": "myasthenia gravis"}) == {"Neuroimmune"}
+    assert categorize({"mondo_label": "dilated cardiomyopathy 1A"}) == {"Cardiac"}
+
+
+def test_categorize_uses_synonyms_and_metadata_fields():
+    from anchor_selection import categorize
+
+    # keyword only present in a synonym, not the primary label
+    rec = {"mondo_label": "some obscure syndrome",
+           "mondo_synonyms": ["X-linked intellectual disability, Foo type"]}
+    assert categorize(rec) == {"Neurodevelopmental"}
+
+
+def test_categorize_cardiac_via_category_label_path():
+    from anchor_selection import categorize
+
+    # No cardiac keyword in the name, but a mondo_categories label is cardiovascular.
+    rec = {"mondo_label": "Fabry disease",
+           "mondo_categories": [{"id": "MONDO:x", "label": "cardiovascular disorder"}]}
+    assert categorize(rec) == {"Cardiac"}
+
+
+def test_categorize_can_return_multiple_categories():
+    from anchor_selection import categorize
+
+    rec = {"mondo_label": "fragile X-associated tremor/ataxia syndrome"}
+    assert categorize(rec) == {"Neurodevelopmental", "Neurodegenerative"}
+
+
+def test_categorize_returns_empty_for_unrelated_disease():
+    from anchor_selection import categorize
+
+    assert categorize({"mondo_label": "hereditary hemochromatosis"}) == set()
+
+
+def test_seed_rows_from_yaml_emits_one_row_per_category():
+    from anchor_selection import seed_rows_from_yaml
+
+    diseases = [
+        {"mondo_id": "MONDO:0009688", "mondo_label": "myasthenia gravis",
+         "prevalence_per_100k_us": 20.0, "prioritization_category": "initial"},
+        {"mondo_id": "MONDO:0000001", "mondo_label": "not a match"},
+    ]
+    rows = seed_rows_from_yaml(diseases)
+    assert len(rows) == 1
+    assert rows[0]["mondo_id"] == "MONDO:0009688"
+    assert rows[0]["category"] == "Neuroimmune"
+    assert rows[0]["prevalence_per_100k_us"] == 20.0
