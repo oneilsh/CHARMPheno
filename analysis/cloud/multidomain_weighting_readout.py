@@ -99,6 +99,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="parallel worker processes over anchors (anchors are independent; "
              "results are identical and in target order regardless of --jobs)",
     )
+    parser.add_argument(
+        "--min-cell", type=_integer_at_least(1), default=20,
+        help="small-cell floor (default 20, the AoU rule): --fixed-only suppresses "
+             "any anchor's n_positive and prevalence below this in the written and "
+             "printed reports so the digest is safe to copy out. AP/precision are "
+             "aggregate stats and are always reported.",
+    )
     return parser
 
 
@@ -790,12 +797,27 @@ def _partition_results(results):
     return evaluations, evaluated_targets, failures
 
 
-def build_fixed_result(artifact, evaluations) -> dict:
+def build_fixed_result(artifact, evaluations, *, min_cell=20) -> dict:
     """Compact summary for the --fixed-only path: per-anchor and macro median AP
-    (+ median precision-at-recall) for each domain-alone strategy and the
-    fixed-inclusive combination. Median-across-repeats per anchor, then
-    median-across-anchors for the macro row (mirrors _macro_summary)."""
+    (+ median precision-at-recall) for each domain-alone strategy, the
+    fixed-inclusive sum, and the max-combine strategies. Median-across-repeats per
+    anchor, then median-across-anchors for the macro row (mirrors _macro_summary).
+
+    DISCLOSURE: an anchor's held-out positive count (n_positive) and its
+    prevalence (= n_positive / n_docs, which recovers the count) are participant
+    counts. Any below ``min_cell`` (AoU small-cell floor, default 20) are
+    suppressed here — replaced with None + a ``count_suppressed`` flag — so the
+    written JSON/Markdown and the printed digest are all safe to copy out of the
+    environment. AP and precision-at-recall are aggregate performance statistics,
+    not counts, and are reported for every anchor (they are noisy at tiny n; the
+    suppressed flag marks which rows to read with that caution)."""
     order = list(evaluations[0]["strategy_order"])
+    # Domain-only strategies (for per-anchor attribution): strategy_order minus
+    # the combination strategies. Falls back cleanly for older evaluations that
+    # predate the explicit domain_names field.
+    combos = {"fixed:inclusive", "max:raw", "max:scaled"}
+    domain_names = evaluations[0].get(
+        "domain_names", [s for s in order if s not in combos])
     anchors = []
     for target, ev in zip(artifact["targets"], evaluations):
         strategies = {}
@@ -808,10 +830,19 @@ def build_fixed_result(artifact, evaluations) -> dict:
                                 for r in reps])
                     for rk in RECALL_KEYS},
             }
+        # Attribution: which single domain best finds this anchor ("drug matters
+        # here / conditions here"). argmax over domain-only AP; ties -> order.
+        dominant = max(domain_names, key=lambda n: strategies[n]["ap"])
+        # Suppress sub-floor participant counts (n_positive and prevalence, which
+        # recovers it) before they can leave the environment.
+        suppressed = int(ev["n_positive"]) < int(min_cell)
         anchors.append({
             "anchor": ev["anchor"], "concept_id": target["concept_id"],
-            "name": target["name"], "n_positive": ev["n_positive"],
-            "prevalence": ev["prevalence"], "strategies": strategies,
+            "name": target["name"],
+            "n_positive": None if suppressed else int(ev["n_positive"]),
+            "prevalence": None if suppressed else ev["prevalence"],
+            "count_suppressed": suppressed,
+            "strategies": strategies, "dominant_domain": dominant,
         })
     macro = {
         name: {
@@ -821,18 +852,39 @@ def build_fixed_result(artifact, evaluations) -> dict:
                             for a in anchors])
                 for rk in RECALL_KEYS},
         } for name in order}
-    return {"mode": "fixed", "strategy_order": order, "macro": macro,
-            "anchors": anchors,
-            "mean_prevalence": median([a["prevalence"] for a in anchors])}
+    # Macro prevalence is a median over anchors — an aggregate, not any single
+    # count — so it is computed from raw prevalences and is safe to report.
+    return {"mode": "fixed", "strategy_order": order, "domain_names": domain_names,
+            "min_cell": int(min_cell), "macro": macro, "anchors": anchors,
+            "n_count_suppressed": sum(a["count_suppressed"] for a in anchors),
+            "mean_prevalence": median([ev["prevalence"] for ev in evaluations])}
+
+
+def _count_cell(anchor: dict, floor: int) -> str:
+    """Paste-safe n+ display: '<{floor}' when the count was suppressed."""
+    return f"<{floor}" if anchor["count_suppressed"] else str(anchor["n_positive"])
+
+
+def _rank_key(result: dict):
+    """Sort anchors by the best non-diluting combine available (max:scaled),
+    falling back to the last strategy for older results."""
+    order = result["strategy_order"]
+    key = "max:scaled" if "max:scaled" in order else order[-1]
+    return lambda a: a["strategies"][key]["ap"]
 
 
 def render_fixed_markdown(result: dict) -> str:
     order = result["strategy_order"]
+    floor = result.get("min_cell", 20)
     lines = ["# Multidomain fixed-combination case-finding readout", "",
              f"Anchors scored: {len(result['anchors'])}  |  "
-             f"mean prevalence: {_format_number(result['mean_prevalence'], 4)}", "",
-             "Parameter-free: per-domain and fixed-inclusive AP only (no supervised "
-             "weighting). Median across repeats, then across anchors.", "",
+             f"mean prevalence: {_format_number(result['mean_prevalence'], 4)}  |  "
+             f"counts <{floor} suppressed "
+             f"({result.get('n_count_suppressed', 0)} anchors)", "",
+             "Parameter-free per-domain + combination AP (no supervised weighting): "
+             "`fixed:inclusive` = equal-weight sum; `max:raw`/`max:scaled` = max "
+             "across domains (scaled = fold-local standardized, the non-diluting "
+             "combine). Median across repeats, then across anchors.", "",
              "## Macro median AP", "",
              "| strategy | AP | " + " | ".join(f"P@{r}" for r in RECALL_KEYS) + " |",
              "| --- | --- |" + " --- |" * len(RECALL_KEYS)]
@@ -841,28 +893,29 @@ def render_fixed_markdown(result: dict) -> str:
         prec = " | ".join(_format_number(m["median_precision_at_recall"][r])
                           for r in RECALL_KEYS)
         lines.append(f"| {name} | {_format_number(m['ap'])} | {prec} |")
-    lines += ["", "## Per-anchor AP", "",
-              "| anchor | n+ | prev | " + " | ".join(order) + " |",
+    lines += ["", "## Per-anchor AP (ranked by max:scaled)", "",
+              "| anchor | n+ | top | " + " | ".join(order) + " |",
               "| --- | --- | --- |" + " --- |" * len(order)]
-    for a in sorted(result["anchors"], key=lambda x: x["strategies"][order[-1]]["ap"],
-                    reverse=True):
+    for a in sorted(result["anchors"], key=_rank_key(result), reverse=True):
         aps = " | ".join(_format_number(a["strategies"][n]["ap"]) for n in order)
-        lines.append(f"| {a['name']} | {a['n_positive']} | "
-                     f"{_format_number(a['prevalence'], 4)} | {aps} |")
+        lines.append(f"| {a['name']} | {_count_cell(a, floor)} | {a['dominant_domain']} "
+                     f"| {aps} |")
     return "\n".join(lines) + "\n"
 
 
 def _print_fixed_table(result: dict) -> None:
     order = result["strategy_order"]
-    print("[weighting] fixed-combination macro/per-anchor median AP", flush=True)
-    header = f"{'anchor':32s} {'n+':>5s} " + " ".join(f"{n[:12]:>12s}" for n in order)
+    print("[weighting] fixed-combination macro/per-anchor median AP "
+          f"(counts <{result.get('min_cell', 20)} suppressed)", flush=True)
+    header = (f"{'anchor':32s} {'n+':>5s} {'top':>12s} "
+              + " ".join(f"{n[:12]:>12s}" for n in order))
     print(header, flush=True)
     m = result["macro"]
-    print(f"{'MACRO':32s} {'':>5s} "
+    print(f"{'MACRO':32s} {'':>5s} {'':>12s} "
           + " ".join(f"{m[n]['ap']:>12.3f}" for n in order), flush=True)
-    for a in sorted(result["anchors"],
-                    key=lambda x: x["strategies"][order[-1]]["ap"], reverse=True):
-        print(f"{a['name'][:32]:32s} {a['n_positive']:>5d} "
+    for a in sorted(result["anchors"], key=_rank_key(result), reverse=True):
+        print(f"{a['name'][:32]:32s} {_count_cell(a, result.get('min_cell', 20)):>5s} "
+              f"{a['dominant_domain'][:12]:>12s} "
               + " ".join(f"{a['strategies'][n]['ap']:>12.3f}" for n in order),
               flush=True)
 
@@ -902,7 +955,7 @@ def main(argv=None) -> int:
         _abort("every anchor evaluation failed; nothing to report")
 
     if args.fixed_only:
-        result = build_fixed_result(artifact, evaluations)
+        result = build_fixed_result(artifact, evaluations, min_cell=args.min_cell)
         result["skipped"] = list(artifact.get("skipped", [])) + eval_failures
         # Distinct prefix so a fixed report never clobbers a nested one.
         prefix = Path(f"{args.output_prefix}_fixed")

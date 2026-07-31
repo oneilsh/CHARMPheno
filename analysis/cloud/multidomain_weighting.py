@@ -827,20 +827,32 @@ def evaluate_anchor_fixed(
         raise ValueError("anchor subtree has no scoreable layout nodes")
     y = anchor_truth(frontiers, scoreable_subtree)
 
-    strategy_names = [labels[d] for d in domains] + ["fixed:inclusive"]
+    domain_names = [labels[d] for d in domains]
+    # Combination strategies: the equal-weight sum (dilutes when a domain is a
+    # specialist, insight 0078) and two MAX-across-domain combines. 'max:raw' maxes
+    # the raw per-domain LR scores (dominated by the largest-magnitude domain);
+    # 'max:scaled' maxes fold-local-standardized scores (scale-invariant — "which
+    # domain is this patient most extreme in") and is the fair non-diluting combine.
+    strategy_names = domain_names + ["fixed:inclusive", "max:raw", "max:scaled"]
     repeat_results = []
     for repeat in range(repeats):
         outer_partitions = stratified_folds(
             y, n_splits=outer_folds, seed=int(seed) + repeat)
         pooled = {name: np.empty(n_docs, dtype=float) for name in strategy_names}
         for outer_train, outer_test in outer_partitions:
-            raw_test, _ = _transformed_fold_matrices(
+            raw_test, scales = _transformed_fold_matrices(
                 bows, lam_dict, lay, outer_train, outer_test, columns, length=False)
+            # Per-domain subtree-max score (scale is a positive scalar, so it
+            # commutes with the max: scaled_d = scales[d] * per_domain[d]).
+            per_domain = {d: max_subtree_score(raw_test[d], columns) for d in domains}
             for d in domains:
-                pooled[labels[d]][outer_test] = max_subtree_score(
-                    raw_test[d], columns)
+                pooled[labels[d]][outer_test] = per_domain[d]
             pooled["fixed:inclusive"][outer_test] = _weighted_subtree_score(
                 raw_test, np.ones(len(domains), dtype=float), columns)
+            pooled["max:raw"][outer_test] = np.vstack(
+                [per_domain[d] for d in domains]).max(axis=0)
+            pooled["max:scaled"][outer_test] = np.vstack(
+                [scales[d] * per_domain[d] for d in domains]).max(axis=0)
         repeat_results.append({
             "repeat": int(repeat),
             "strategies": {name: _strategy_metrics(pooled[name], y)
@@ -853,6 +865,7 @@ def evaluate_anchor_fixed(
         "n_positive": int(y.sum()),
         "prevalence": float(y.mean()),
         "strategy_order": strategy_names,
+        "domain_names": domain_names,
         "repeats": repeat_results,
     }
 
