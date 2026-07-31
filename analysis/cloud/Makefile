@@ -136,7 +136,9 @@ help:
 	@echo "  build-covariates EXP=N  - rebuild STM covariate cache for experiment N without re-running fit."
 	@echo "                         Useful when iterating on covariate_formula. FORCE=1 invalidates cache."
 	@echo "  multidomain-lr-readout ID=N [MULTIDOMAIN_LR_ALPHA_GRID=.. MULTIDOMAIN_LR_NORMALIZE=none|std|length|length+std]  Post-hoc per-domain LR readout (multidomain fit)"
-	@echo "  multidomain-weighting-readout ID=N [WEIGHTING_JOBS=4 MULTIDOMAIN_WEIGHTING_ARGS='--repeats 3 --inner-folds 3 --grid-step 0.1']"
+	@echo "  multidomain-weighting-readout ID=N [WEIGHTING_JOBS=4 WEIGHTING_FIXED=1 MULTIDOMAIN_WEIGHTING_ARGS='--repeats 3 --inner-folds 3 --grid-step 0.1']"
+	@echo "                         WEIGHTING_FIXED=1 = FAST parameter-free per-domain +"
+	@echo "                         fixed-inclusive AP (skips the supervised nested-CV search)."
 	@echo "                         Nested-CV supervised ceiling + model-derived domain reliability (no refit)."
 	@echo "                         WEIGHTING_JOBS parallelizes across anchors (master has 4 cores)."
 	@echo "  anchor-select [ANCHOR_MIN_POSITIVES=100 ANCHOR_ARGS='--mondo-version 2026-06-02']"
@@ -470,6 +472,10 @@ MULTIDOMAIN_WEIGHTING_ARGS ?=
 # Parallel worker processes over anchors for the weighting readout (master has 4
 # cores). WEIGHTING_JOBS=4 ~= 4x; results are identical and in target order.
 WEIGHTING_JOBS ?= 1
+# WEIGHTING_FIXED=1 runs the FAST parameter-free readout (per-domain +
+# fixed-inclusive AP only; skips the supervised nested-CV weight search that
+# insight 0076 closed). ~1000x faster; writes *_fixed.{json,md}.
+WEIGHTING_FIXED ?=
 multidomain-weighting-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
@@ -477,6 +483,7 @@ multidomain-weighting-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	python3 $(REPO_ROOT)/analysis/cloud/multidomain_weighting_readout.py \
 	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
 	    --jobs $(WEIGHTING_JOBS) \
+	    $(if $(WEIGHTING_FIXED),--fixed-only) \
 	    $(MULTIDOMAIN_WEIGHTING_ARGS)
 
 # Expanded-SNOMED anchor selection: map the #1079 seed to OMOP anchors and count

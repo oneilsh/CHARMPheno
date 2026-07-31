@@ -779,6 +779,84 @@ def evaluate_anchor_nested(
     }
 
 
+def evaluate_anchor_fixed(
+    bows,
+    lam_dict,
+    lay,
+    frontiers,
+    *,
+    anchor: int,
+    parent_int,
+    outer_folds=5,
+    repeats=5,
+    seed=0,
+    domain_labels=None,
+) -> dict:
+    """Fast, PARAMETER-FREE case-finding AP for an anchor: each domain alone plus
+    the fixed inclusive (equal-weight sum of all domains).
+
+    This is the readout for a *fixed* combination rule — the only thing insight
+    0076 left on the table once supervised/pooled domain weighting was closed. It
+    deliberately does NONE of the expensive work in ``evaluate_anchor_nested``:
+    no inner CV, no simplex grid, no discrete policy search, no model-reliability
+    candidates. The only cost is scoring each outer test fold once per repeat with
+    fold-local backgrounds (leakage-safe), so it runs ~1000x faster than the
+    nested readout while producing the same AP / precision-at-recall schema.
+
+    Strategies: one per domain (keyed by its label, e.g. 'condition') scored
+    alone, plus 'fixed:inclusive' (all domains summed with equal weight, raw LR,
+    no learned scales — the same combination ``_fixed_condition_drug_domains``
+    uses, generalized from the two-domain baseline to every loaded domain).
+    """
+    domains = tuple(sorted(bows))
+    if not domains or set(bows) != set(lam_dict):
+        raise ValueError("bows and lam_dict must have identical nonempty domain keys")
+    n_docs = len(frontiers)
+    if any(matrix.shape[0] != n_docs for matrix in bows.values()):
+        raise ValueError("every BOW matrix must have one row per frontier")
+    if int(repeats) != repeats or int(repeats) < 1:
+        raise ValueError("repeats must be a positive integer")
+    repeats = int(repeats)
+    labels = _domain_label_map(domains, domain_labels) if domain_labels else {
+        d: str(d) for d in domains
+    }
+
+    scoreable_subtree = _descendant_subtree(parent_int, anchor) & set(lay.nodes)
+    columns = subtree_columns(lay, scoreable_subtree)
+    if columns.size == 0:
+        raise ValueError("anchor subtree has no scoreable layout nodes")
+    y = anchor_truth(frontiers, scoreable_subtree)
+
+    strategy_names = [labels[d] for d in domains] + ["fixed:inclusive"]
+    repeat_results = []
+    for repeat in range(repeats):
+        outer_partitions = stratified_folds(
+            y, n_splits=outer_folds, seed=int(seed) + repeat)
+        pooled = {name: np.empty(n_docs, dtype=float) for name in strategy_names}
+        for outer_train, outer_test in outer_partitions:
+            raw_test, _ = _transformed_fold_matrices(
+                bows, lam_dict, lay, outer_train, outer_test, columns, length=False)
+            for d in domains:
+                pooled[labels[d]][outer_test] = max_subtree_score(
+                    raw_test[d], columns)
+            pooled["fixed:inclusive"][outer_test] = _weighted_subtree_score(
+                raw_test, np.ones(len(domains), dtype=float), columns)
+        repeat_results.append({
+            "repeat": int(repeat),
+            "strategies": {name: _strategy_metrics(pooled[name], y)
+                           for name in strategy_names},
+        })
+
+    return {
+        "anchor": int(anchor),
+        "n_docs": int(n_docs),
+        "n_positive": int(y.sum()),
+        "prevalence": float(y.mean()),
+        "strategy_order": strategy_names,
+        "repeats": repeat_results,
+    }
+
+
 def simplex_grid(n_domains: int, step: float) -> np.ndarray:
     """Enumerate simplex weights in deterministic lexicographic order.
 
