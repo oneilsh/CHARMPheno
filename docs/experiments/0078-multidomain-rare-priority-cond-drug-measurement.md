@@ -86,9 +86,13 @@ autoantibodies, cytopenias, renal/hepatic involvement) should gain placement AP.
    summarize-exp ID=78` for the measurement tokens surfacing per node — first
    check the representation carries signal (does Long QT recover QT-interval;
    do renal anchors recover creatinine/BUN [high]?).
-2. `make -C analysis/cloud multidomain-weighting-readout ID=78 WEIGHTING_JOBS=4`
-   for the per-disease case-finding AP. The comparison is the **fixed inclusive
-   combination** arm here (cond+drug+**measurement**) vs 0076's fixed cond+drug
-   (macro median AP 0.032) — judged by PR/AP and precision-at-recall, not ROC.
-   The supervised-weight arm is now a secondary diagnostic: does measurement earn
-   weight on the labs-dependent anchors it should?
+2. `make -C analysis/cloud multidomain-weighting-readout ID=78 WEIGHTING_FIXED=1`
+   — the **fast** parameter-free readout (per-domain + fixed-inclusive AP only;
+   skips the supervised nested-CV weight search that insight 0076 closed, so it
+   runs in ~seconds, not the ~18 min the full readout took). The comparison is the
+   **fixed inclusive** combination (cond+drug+**measurement**) vs 0076's fixed
+   cond+drug (macro median AP 0.032), plus per-domain AP (does *measurement alone*
+   find the labs-dependent diseases?) — judged by PR/AP and precision-at-recall,
+   not ROC. Only run the full supervised readout (drop `WEIGHTING_FIXED`) if the
+   fixed comparison suggests per-disease measurement weighting is worth
+   re-checking.

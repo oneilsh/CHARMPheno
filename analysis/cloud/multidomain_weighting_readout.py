@@ -86,6 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-prefix", type=Path)
     parser.add_argument(
+        "--fixed-only", action="store_true",
+        help="FAST parameter-free readout: per-domain and fixed-inclusive "
+             "(equal-weight all-domain) case-finding AP only. Skips the "
+             "supervised nested-CV weight search (the slow part, and the part "
+             "insight 0076 closed), so --inner-folds and --grid-step are ignored. "
+             "Runs ~1000x faster; use to compare a fixed domain combination "
+             "against a prior fit's fixed AP.",
+    )
+    parser.add_argument(
         "--jobs", type=_integer_at_least(1), default=1,
         help="parallel worker processes over anchors (anchors are independent; "
              "results are identical and in target order regardless of --jobs)",
@@ -700,14 +709,19 @@ def _worker_eval(target):
     """Evaluate one anchor from the process-global artifact data. Returns
     ``(target, evaluation, error_message)`` and never raises, so one bad anchor
     cannot sink the pool."""
-    from multidomain_weighting import evaluate_anchor_nested
+    import multidomain_weighting as mw
 
+    cv_config = dict(_WORKER["cv_config"])
+    fixed = cv_config.pop("mode", "nested") == "fixed"
+    # Attribute access (not a from-import of both names) so the nested path never
+    # touches evaluate_anchor_fixed — keeps nested-only test stubs valid.
+    evaluate = mw.evaluate_anchor_fixed if fixed else mw.evaluate_anchor_nested
     try:
-        evaluation = evaluate_anchor_nested(
+        evaluation = evaluate(
             _WORKER["bows"], _WORKER["lam_dict"], _WORKER["lay"],
             _WORKER["frontiers"], anchor=target["anchor"],
             parent_int=_WORKER["parent_int"],
-            domain_labels=_WORKER["domain_labels"], **_WORKER["cv_config"],
+            domain_labels=_WORKER["domain_labels"], **cv_config,
         )
     except ValueError as error:
         return (target, None, str(error))
@@ -776,16 +790,97 @@ def _partition_results(results):
     return evaluations, evaluated_targets, failures
 
 
+def build_fixed_result(artifact, evaluations) -> dict:
+    """Compact summary for the --fixed-only path: per-anchor and macro median AP
+    (+ median precision-at-recall) for each domain-alone strategy and the
+    fixed-inclusive combination. Median-across-repeats per anchor, then
+    median-across-anchors for the macro row (mirrors _macro_summary)."""
+    order = list(evaluations[0]["strategy_order"])
+    anchors = []
+    for target, ev in zip(artifact["targets"], evaluations):
+        strategies = {}
+        for name in order:
+            reps = ev["repeats"]
+            strategies[name] = {
+                "ap": median([r["strategies"][name]["ap"] for r in reps]),
+                "median_precision_at_recall": {
+                    rk: median([r["strategies"][name]["precision_at_recall"][rk]
+                                for r in reps])
+                    for rk in RECALL_KEYS},
+            }
+        anchors.append({
+            "anchor": ev["anchor"], "concept_id": target["concept_id"],
+            "name": target["name"], "n_positive": ev["n_positive"],
+            "prevalence": ev["prevalence"], "strategies": strategies,
+        })
+    macro = {
+        name: {
+            "ap": median([a["strategies"][name]["ap"] for a in anchors]),
+            "median_precision_at_recall": {
+                rk: median([a["strategies"][name]["median_precision_at_recall"][rk]
+                            for a in anchors])
+                for rk in RECALL_KEYS},
+        } for name in order}
+    return {"mode": "fixed", "strategy_order": order, "macro": macro,
+            "anchors": anchors,
+            "mean_prevalence": median([a["prevalence"] for a in anchors])}
+
+
+def render_fixed_markdown(result: dict) -> str:
+    order = result["strategy_order"]
+    lines = ["# Multidomain fixed-combination case-finding readout", "",
+             f"Anchors scored: {len(result['anchors'])}  |  "
+             f"mean prevalence: {_format_number(result['mean_prevalence'], 4)}", "",
+             "Parameter-free: per-domain and fixed-inclusive AP only (no supervised "
+             "weighting). Median across repeats, then across anchors.", "",
+             "## Macro median AP", "",
+             "| strategy | AP | " + " | ".join(f"P@{r}" for r in RECALL_KEYS) + " |",
+             "| --- | --- |" + " --- |" * len(RECALL_KEYS)]
+    for name in order:
+        m = result["macro"][name]
+        prec = " | ".join(_format_number(m["median_precision_at_recall"][r])
+                          for r in RECALL_KEYS)
+        lines.append(f"| {name} | {_format_number(m['ap'])} | {prec} |")
+    lines += ["", "## Per-anchor AP", "",
+              "| anchor | n+ | prev | " + " | ".join(order) + " |",
+              "| --- | --- | --- |" + " --- |" * len(order)]
+    for a in sorted(result["anchors"], key=lambda x: x["strategies"][order[-1]]["ap"],
+                    reverse=True):
+        aps = " | ".join(_format_number(a["strategies"][n]["ap"]) for n in order)
+        lines.append(f"| {a['name']} | {a['n_positive']} | "
+                     f"{_format_number(a['prevalence'], 4)} | {aps} |")
+    return "\n".join(lines) + "\n"
+
+
+def _print_fixed_table(result: dict) -> None:
+    order = result["strategy_order"]
+    print("[weighting] fixed-combination macro/per-anchor median AP", flush=True)
+    header = f"{'anchor':32s} {'n+':>5s} " + " ".join(f"{n[:12]:>12s}" for n in order)
+    print(header, flush=True)
+    m = result["macro"]
+    print(f"{'MACRO':32s} {'':>5s} "
+          + " ".join(f"{m[n]['ap']:>12.3f}" for n in order), flush=True)
+    for a in sorted(result["anchors"],
+                    key=lambda x: x["strategies"][order[-1]]["ap"], reverse=True):
+        print(f"{a['name'][:32]:32s} {a['n_positive']:>5d} "
+              + " ".join(f"{a['strategies'][n]['ap']:>12.3f}" for n in order),
+              flush=True)
+
+
 def main(argv=None) -> int:
     """Run the Spark-free artifact evaluation and write both report formats."""
     args = build_parser().parse_args(argv)
-    cv_config = {
-        "outer_folds": args.outer_folds,
-        "inner_folds": args.inner_folds,
-        "repeats": args.repeats,
-        "grid_step": args.grid_step,
-        "seed": args.seed,
-    }
+    if args.fixed_only:
+        cv_config = {"outer_folds": args.outer_folds, "repeats": args.repeats,
+                     "seed": args.seed, "mode": "fixed"}
+    else:
+        cv_config = {
+            "outer_folds": args.outer_folds,
+            "inner_folds": args.inner_folds,
+            "repeats": args.repeats,
+            "grid_step": args.grid_step,
+            "seed": args.seed,
+        }
     artifact = load_artifact(
         args.run_dir,
         outer_folds=args.outer_folds,
@@ -805,6 +900,25 @@ def main(argv=None) -> int:
     artifact["targets"] = evaluated_targets
     if not evaluations:
         _abort("every anchor evaluation failed; nothing to report")
+
+    if args.fixed_only:
+        result = build_fixed_result(artifact, evaluations)
+        result["skipped"] = list(artifact.get("skipped", [])) + eval_failures
+        # Distinct prefix so a fixed report never clobbers a nested one.
+        prefix = Path(f"{args.output_prefix}_fixed")
+        json_text = json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n"
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        json_path = Path(f"{prefix}.json")
+        markdown_path = Path(f"{prefix}.md")
+        json_path.write_text(json_text)
+        markdown_path.write_text(render_fixed_markdown(result))
+        _print_fixed_table(result)
+        if result["skipped"]:
+            print(f"[weighting] scored {len(evaluations)} anchors; skipped "
+                  f"{len(result['skipped'])} — see report", flush=True)
+        print(f"[weighting] JSON: {json_path}", flush=True)
+        print(f"[weighting] Markdown: {markdown_path}", flush=True)
+        return 0
 
     result = build_result(artifact, evaluations, cv_config=cv_config)
     result["skipped"] = list(artifact.get("skipped", [])) + eval_failures
