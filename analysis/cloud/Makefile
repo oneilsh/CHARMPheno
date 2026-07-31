@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout anchor-select summarize-exp
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout anchor-select summarize-exp measurement-survey
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -36,6 +36,10 @@ ANCHOR_ARGS          ?=
 
 # Post-fit summary ("fit card") knobs: --top-n tokens/domain, --sample-nodes.
 SUMMARIZE_ARGS       ?=
+
+# Measurement-domain survey (arc Step 1) knobs. Forwards flags to the driver,
+# e.g. '--person-mod 50 --top-concepts 300 --min-persons 50'.
+MEASUREMENT_SURVEY_ARGS ?=
 
 # Required for eval-bq-coherence: path to the augmented VIResult dir written
 # by lda_bigquery_cloud.py (local or GCS-mounted, e.g. /mnt/gcs/<bucket>/runs/<id>).
@@ -141,6 +145,11 @@ help:
 	@echo "  summarize-exp ID=N [SUMMARIZE_ARGS='--top-n 8 --sample-nodes 12']"
 	@echo "                         Compact fit card (structure + health + node-topic sample);"
 	@echo "                         writes <run>/fit_card.md and upserts it into <run>/summary.md"
+	@echo "  measurement-survey [MEASUREMENT_SURVEY_ARGS='--person-mod 50 --top-concepts 300']"
+	@echo "                         Privacy-safe survey of the OMOP measurement table (arc"
+	@echo "                         Step 1): per-lab value/range/unit coverage, unit spread,"
+	@echo "                         coded-value vocab, range-abnormality feasibility. Writes"
+	@echo "                         measurement_survey_data/*.tsv + a paste-back digest."
 	@echo "  make lda-bq-fit-eval-cancer - LDA fit + eval on the first-cancer-year cohort."
 	@echo "                         Restricts to patients with a first malignant-cancer dx"
 	@echo "                         (descendants of SNOMED 443392, minus NMSC and carcinoma"
@@ -490,6 +499,24 @@ anchor-select: zip cluster-overlay $(WORKSPACE_ENV)
 	    --out $(REPO_ROOT)/analysis/cloud/anchor_selection_data/candidates_with_counts.tsv \
 	    --min-positives $(ANCHOR_MIN_POSITIVES) \
 	    $(ANCHOR_ARGS)
+
+# Privacy-safe survey of the OMOP measurement table (measurement arc, Step 1).
+# spark-submit (reads measurement + concept from BigQuery). CDR/billing come from
+# .workspace_env; the driver applies the small-cell floor before writing, so only
+# aggregate counts >= floor land in measurement_survey_data/ + the stdout digest.
+measurement-survey: zip cluster-overlay $(WORKSPACE_ENV)
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 8g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
+	    $(REPO_ROOT)/analysis/cloud/measurement_survey_cloud.py \
+	    --cdr $$WORKSPACE_CDR --billing $$GOOGLE_CLOUD_PROJECT \
+	    $(MEASUREMENT_SURVEY_ARGS)
 
 # Compact post-fit summary. Pure numpy+stdlib (no Spark/BQ), reads the run dir.
 summarize-exp:
