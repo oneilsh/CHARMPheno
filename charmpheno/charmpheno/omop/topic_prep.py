@@ -205,6 +205,7 @@ def to_bow_dataframe(
     min_patient_count: int = 1,
     vocab: list[int] | None = None,
     length_report_group_col: str | None = None,
+    binary: bool = False,
 ) -> tuple[DataFrame, dict[int, int]]:
     """Group rows into bag-of-words documents and build a contiguous vocab map.
 
@@ -229,6 +230,16 @@ def to_bow_dataframe(
             privacy-preserving corpus construction: under PatientYearDocSpec
             one patient can contribute many year-documents, so min_df alone
             is not a reliable lower-bound on patient exposure.
+        binary: when True, each token counts at most ONCE per document —
+            duplicate (doc_id, token) event rows are collapsed before the
+            bag-of-words aggregation, so the resulting SparseVector is a
+            presence indicator (0/1) rather than an occurrence count. Default
+            False preserves the count-based behavior every existing caller
+            relies on. Used for the measurement domain, which has no OMOP era
+            rollup and is extremely bursty (insight 0077): binary presence
+            reproduces for it what the era tables already do for condition/drug.
+            Applies on both the fit path and the frozen-vocab path, and the
+            min_doc_length filter then counts DISTINCT tokens.
         vocab: optional pre-built vocabulary as a list of concept_ids in
             assignment order (``vocab[idx] = concept_id``). When provided,
             the fit step is skipped and a CountVectorizerModel is constructed
@@ -268,6 +279,15 @@ def to_bow_dataframe(
 
     # Add doc_id (may replicate event rows, e.g. era-spanning years).
     events_with_doc_id = doc_spec.derive_docs(df)
+
+    # Binary/presence tokenization: collapse duplicate (doc_id, token) rows so a
+    # token contributes count 1 per document regardless of within-doc repeats.
+    # Done here (after doc_id, before the group-by) so both the length report and
+    # the vocab stats see presence semantics. person_id is constant within a
+    # doc_id, so keeping it in the dedup key is a no-op for correctness but avoids
+    # dropping it from the frame.
+    if binary:
+        events_with_doc_id = events_with_doc_id.dropDuplicates(["doc_id", token_col])
 
     # Group event rows into per-doc bags. We groupBy (doc_id) and pull
     # person_id along via F.first — per spec contract, person_id is constant
