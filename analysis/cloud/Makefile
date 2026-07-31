@@ -132,8 +132,9 @@ help:
 	@echo "  build-covariates EXP=N  - rebuild STM covariate cache for experiment N without re-running fit."
 	@echo "                         Useful when iterating on covariate_formula. FORCE=1 invalidates cache."
 	@echo "  multidomain-lr-readout ID=N [MULTIDOMAIN_LR_ALPHA_GRID=.. MULTIDOMAIN_LR_NORMALIZE=none|std|length|length+std]  Post-hoc per-domain LR readout (multidomain fit)"
-	@echo "  multidomain-weighting-readout ID=N"
-	@echo "                         Nested-CV supervised ceiling + model-derived domain reliability (no refit)"
+	@echo "  multidomain-weighting-readout ID=N [WEIGHTING_JOBS=4 MULTIDOMAIN_WEIGHTING_ARGS='--repeats 3 --inner-folds 3 --grid-step 0.1']"
+	@echo "                         Nested-CV supervised ceiling + model-derived domain reliability (no refit)."
+	@echo "                         WEIGHTING_JOBS parallelizes across anchors (master has 4 cores)."
 	@echo "  anchor-select [ANCHOR_MIN_POSITIVES=100 ANCHOR_ARGS='--mondo-version 2026-06-02']"
 	@echo "                         Map the #1079 seed -> OMOP anchors and count coded patients;"
 	@echo "                         writes anchor_selection_data/candidates_with_counts.tsv"
@@ -457,12 +458,16 @@ multidomain-lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 # multidomain LR readout. The zip/overlay prerequisites mirror cluster delivery,
 # while PYTHONPATH makes them importable to a plain Python driver.
 MULTIDOMAIN_WEIGHTING_ARGS ?=
+# Parallel worker processes over anchors for the weighting readout (master has 4
+# cores). WEIGHTING_JOBS=4 ~= 4x; results are identical and in target order.
+WEIGHTING_JOBS ?= 1
 multidomain-weighting-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
 	PYTHONPATH=$(SPARK_VI_ZIP):$(CHARMPHENO_ZIP):$(CLUSTER_OVERLAY):$${PYTHONPATH:-} \
 	python3 $(REPO_ROOT)/analysis/cloud/multidomain_weighting_readout.py \
 	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
+	    --jobs $(WEIGHTING_JOBS) \
 	    $(MULTIDOMAIN_WEIGHTING_ARGS)
 
 # Expanded-SNOMED anchor selection: map the #1079 seed to OMOP anchors and count
