@@ -22,11 +22,13 @@ def _metric(ap):
     return {"ap": ap, "precision_at_recall": {rk: ap for rk in _RK}}
 
 
-def _evaluation(anchor, aps_by_repeat):
+def _evaluation(anchor, aps_by_repeat, n_positive=10):
     # aps_by_repeat: list over repeats of {strategy: ap}
     return {
-        "anchor": anchor, "n_docs": 100, "n_positive": 10, "prevalence": 0.1,
+        "anchor": anchor, "n_docs": 1000, "n_positive": n_positive,
+        "prevalence": n_positive / 1000.0,
         "strategy_order": list(_ORDER),
+        "domain_names": ["condition", "drug", "measurement"],
         "repeats": [
             {"repeat": i, "strategies": {s: _metric(aps[s]) for s in _ORDER}}
             for i, aps in enumerate(aps_by_repeat)
@@ -41,15 +43,15 @@ def test_build_fixed_result_medians_over_repeats_then_anchors():
     evA = _evaluation(1, [
         {"condition": 0.20, "drug": 0.05, "measurement": 0.10, "fixed:inclusive": 0.30},
         {"condition": 0.30, "drug": 0.15, "measurement": 0.20, "fixed:inclusive": 0.40},
-    ])
+    ], n_positive=100)  # >= floor -> count shown
     evB = _evaluation(2, [
         {"condition": 0.10, "drug": 0.02, "measurement": 0.50, "fixed:inclusive": 0.55},
-    ])
+    ], n_positive=6)    # < floor -> count suppressed
     artifact = {"targets": [
         {"anchor": 1, "concept_id": 11, "name": "A"},
         {"anchor": 2, "concept_id": 22, "name": "B"},
     ]}
-    result = build_fixed_result(artifact, [evA, evB])
+    result = build_fixed_result(artifact, [evA, evB], min_cell=20)
 
     assert result["mode"] == "fixed"
     assert result["strategy_order"] == _ORDER
@@ -57,23 +59,35 @@ def test_build_fixed_result_medians_over_repeats_then_anchors():
     a = next(x for x in result["anchors"] if x["anchor"] == 1)
     assert a["strategies"]["condition"]["ap"] == 0.25
     assert a["strategies"]["fixed:inclusive"]["ap"] == median([0.30, 0.40])
+    assert a["dominant_domain"] == "condition"          # highest domain-only AP
+    assert a["count_suppressed"] is False and a["n_positive"] == 100
     # macro measurement AP = median over anchors of their medians = median(0.15, 0.50)
     assert result["macro"]["measurement"]["ap"] == median([median([0.10, 0.20]), 0.50])
-    # precision-at-recall carried through with the same keys
     assert set(result["macro"]["condition"]["median_precision_at_recall"]) == set(_RK)
+
+    # sub-floor anchor B: count + prevalence suppressed; AP still present
+    b = next(x for x in result["anchors"] if x["anchor"] == 2)
+    assert b["count_suppressed"] is True
+    assert b["n_positive"] is None and b["prevalence"] is None
+    assert b["dominant_domain"] == "measurement"        # 0.50 is highest domain AP
+    assert b["strategies"]["measurement"]["ap"] == 0.50  # aggregate stat kept
+    assert result["n_count_suppressed"] == 1
 
 
 def test_render_fixed_markdown_has_macro_and_per_anchor_sections():
     from multidomain_weighting_readout import build_fixed_result, render_fixed_markdown
 
     evA = _evaluation(1, [
-        {"condition": 0.2, "drug": 0.05, "measurement": 0.4, "fixed:inclusive": 0.45}])
+        {"condition": 0.2, "drug": 0.05, "measurement": 0.4, "fixed:inclusive": 0.45}],
+        n_positive=8)  # < floor -> suppressed in the rendered table
     artifact = {"targets": [{"anchor": 1, "concept_id": 11, "name": "Long QT"}]}
-    md = render_fixed_markdown(build_fixed_result(artifact, [evA]))
+    md = render_fixed_markdown(build_fixed_result(artifact, [evA], min_cell=20))
     assert "Macro median AP" in md
     assert "Per-anchor AP" in md
     assert "Long QT" in md
     assert "fixed:inclusive" in md
+    assert "<20" in md          # suppressed count shown as the floor marker
+    assert "| 8 |" not in md    # raw sub-floor count never rendered
 
 
 def _install_stub(calls):
