@@ -113,20 +113,168 @@ def to_tsv(rows: list[SeedRow]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# YAML-source categorization: reproduce the dismech #1079 grouping directly from
+# the authoritative prioritised-rare-disease-list.yml, so the seed does not
+# depend on hand-transcribing a rendered issue. Keyword rules are verbatim from
+# the issue's "Grouping methodology" section; applied to the current YAML they
+# reproduce its category counts (Neurodevelopmental 311, Neurodegenerative 164,
+# Neuroimmune 12, Cardiac 306).
+# ---------------------------------------------------------------------------
+
+# A disease joins a category if any keyword is a substring of its lowercased
+# searchable metadata blob (label + synonyms + category labels + HPO categories).
+CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "Neurodevelopmental": (
+        "neurodevelopmental", "intellectual disability", "epileptic encephalopathy",
+        "developmental and epileptic encephalopathy", "autism", "rett syndrome",
+        "angelman", "fragile x", "tuberous sclerosis", "lissencephaly",
+        "microcephaly", "holoprosencephaly",
+    ),
+    "Neurodegenerative": (
+        "neurodegenerative", "neuronal ceroid", "amyotrophic lateral", "huntington",
+        "parkinson", "alzheimer", "ataxia", "spinal muscular atrophy",
+        "leukodystrophy", "neurodegenerat", "frontotemporal dementia", "prion",
+        "batten",
+    ),
+    "Neuroimmune": (
+        "multiple sclerosis", "autoimmune encephalitis", "myasthenia gravis",
+        "guillain-barr", "neuromyelitis optica", "neuroimmune", "neuroinflam",
+        "anti-nmda", "transverse myelitis", "chronic inflammatory demyelinating",
+    ),
+    "Cardiac": (
+        "cardiomyopath", "arrhythm", "long qt", "brugada", "cardiac", "heart defect",
+        "congenital heart", "catecholaminergic polymorphic", "marfan",
+        "loeys-dietz", "pulmonary arterial hypertension", "familial hypercholesterol",
+    ),
+}
+# Extra Cardiac rule: any disease whose mondo_categories / mondo_category_body_
+# system labels contain one of these is Cardiac, regardless of the keyword blob.
+_CARDIAC_CATEGORY_LABEL_KEYWORDS = ("cardiovascular", "cardiac", "heart")
+# Metadata fields (besides mondo_label + mondo_synonyms) whose label text feeds
+# the searchable blob, per the #1079 methodology.
+_META_LABEL_FIELDS = (
+    "mondo_categories", "mondo_category_body_system", "mondo_category_developmental",
+    "mondo_category_etiologic", "mondo_category_genetic", "mondo_category_extrinsic",
+    "mondo_category_molecular", "hpo_high_level_categories",
+)
+
+
+def _labels(value) -> list[str]:
+    """Label strings from a YAML field: a str, a list of str, or a list of
+    ``{id, label}`` dicts. Anything else yields nothing."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    out: list[str] = []
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                out.append(str(item.get("label", "")))
+            else:
+                out.append(str(item))
+    return out
+
+
+def _search_blob(record: dict) -> str:
+    parts = [str(record.get("mondo_label", ""))]
+    parts += _labels(record.get("mondo_synonyms"))
+    for field in _META_LABEL_FIELDS:
+        parts += _labels(record.get(field))
+    return " ~ ".join(parts).lower()
+
+
+def _category_label_text(record: dict) -> str:
+    parts: list[str] = []
+    for field in ("mondo_categories", "mondo_category_body_system"):
+        parts += _labels(record.get(field))
+    return " ~ ".join(parts).lower()
+
+
+def categorize(record: dict) -> set[str]:
+    """Categories a disease record joins under the #1079 keyword rules."""
+    blob = _search_blob(record)
+    cats = {cat for cat, kws in CATEGORY_KEYWORDS.items() if any(k in blob for k in kws)}
+    cat_text = _category_label_text(record)
+    if any(k in cat_text for k in _CARDIAC_CATEGORY_LABEL_KEYWORDS):
+        cats.add("Cardiac")
+    return cats
+
+
+def seed_rows_from_yaml(diseases: list[dict]) -> list[dict]:
+    """One row per (disease, category) for every categorized disease, preserving
+    the priorities/prevalence priors useful to the later power filter."""
+    rows: list[dict] = []
+    for d in diseases:
+        cats = categorize(d)
+        if not cats:
+            continue
+        for cat in sorted(cats):
+            rows.append(
+                {
+                    "mondo_id": d.get("mondo_id", ""),
+                    "label": d.get("mondo_label", ""),
+                    "category": cat,
+                    "prevalence_per_100k_us": d.get("prevalence_per_100k_us"),
+                    "prioritization_category": d.get("prioritization_category", ""),
+                }
+            )
+    return rows
+
+
+_YAML_TSV_COLS = (
+    "mondo_id", "label", "category", "prevalence_per_100k_us",
+    "prioritization_category",
+)
+
+
+def yaml_seed_to_tsv(rows: list[dict]) -> str:
+    lines = ["\t".join(_YAML_TSV_COLS)]
+    for r in rows:
+        vals = []
+        for c in _YAML_TSV_COLS:
+            v = r.get(c)
+            vals.append("" if v is None else str(v))
+        lines.append("\t".join(vals))
+    return "\n".join(lines) + "\n"
+
+
 def _main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        sys.stderr.write(
-            "usage: python anchor_selection.py <priority_list.md> > seed.tsv\n"
-        )
-        return 2
-    with open(argv[1], encoding="utf-8") as fh:
-        rows = parse_priority_seed(fh.read())
-    uniq = unique_diseases(rows)
-    sys.stderr.write(
-        f"parsed {len(rows)} (disease, category) rows; "
-        f"{len(uniq)} distinct MONDO ids\n"
+    usage = (
+        "usage:\n"
+        "  python anchor_selection.py parse-md <issue_1079.md>       > seed.tsv\n"
+        "  python anchor_selection.py from-yaml <priority_list.yml>  > seed.tsv\n"
     )
-    sys.stdout.write(to_tsv(rows))
+    if len(argv) != 3 or argv[1] not in ("parse-md", "from-yaml"):
+        sys.stderr.write(usage)
+        return 2
+
+    if argv[1] == "parse-md":
+        with open(argv[2], encoding="utf-8") as fh:
+            rows = parse_priority_seed(fh.read())
+        uniq = unique_diseases(rows)
+        sys.stderr.write(
+            f"parsed {len(rows)} (disease, category) rows; "
+            f"{len(uniq)} distinct MONDO ids\n"
+        )
+        sys.stdout.write(to_tsv(rows))
+        return 0
+
+    import yaml  # local import: only the YAML path needs PyYAML
+
+    with open(argv[2], encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+    rows = seed_rows_from_yaml(data["diseases"])
+    distinct = {r["mondo_id"] for r in rows}
+    from collections import Counter
+
+    per_cat = Counter(r["category"] for r in rows)
+    sys.stderr.write(
+        f"categorized {len(rows)} (disease, category) rows; "
+        f"{len(distinct)} distinct MONDO ids; per-category {dict(per_cat)}\n"
+    )
+    sys.stdout.write(yaml_seed_to_tsv(rows))
     return 0
 
 
