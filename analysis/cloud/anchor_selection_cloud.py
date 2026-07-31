@@ -173,23 +173,56 @@ def main(argv: list[str]) -> int:
         "positive_count", ascending=False
     )
 
+    # --- anchor<->anchor is-a edges (for the nesting rule downstream) ---
+    from anchor_neighborhoods import maximal_anchors
+
+    anchor_anc = (
+        _read_bq(spark, args.cdr, args.billing, "concept_ancestor")
+        .select("ancestor_concept_id", "descendant_concept_id")
+        .where(
+            F.col("ancestor_concept_id").isin(anchors)
+            & F.col("descendant_concept_id").isin(anchors)
+            & (F.col("ancestor_concept_id") != F.col("descendant_concept_id"))
+        )
+        .toPandas()
+    )
+    clearing = set(
+        per_anchor.loc[
+            per_anchor["positive_count"] >= args.min_positives, "standard_concept_id"
+        ].astype(int)
+    )
+    pairs = list(
+        zip(anchor_anc["ancestor_concept_id"].astype(int),
+            anchor_anc["descendant_concept_id"].astype(int))
+    )
+    maximal = maximal_anchors(clearing, pairs)
+    per_anchor["clears_floor"] = per_anchor["standard_concept_id"].astype(int).isin(clearing)
+    per_anchor["is_maximal"] = per_anchor["standard_concept_id"].astype(int).isin(maximal)
+
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     per_anchor.to_csv(out, sep="\t", index=False)
     mapping.to_csv(out.with_suffix(".mapping.tsv"), sep="\t", index=False)
+    anchor_anc.to_csv(out.with_suffix(".ancestry.tsv"), sep="\t", index=False)
 
     powered = per_anchor[per_anchor["positive_count"] >= args.min_positives]
+    powered_maximal = powered[powered["is_maximal"]]
     sys.stderr.write(
         f"[done] {len(per_anchor)} anchors; {len(powered)} clear "
-        f">= {args.min_positives} positives. wrote {out}\n"
+        f">= {args.min_positives} positives; {len(powered_maximal)} survive nesting "
+        f"(most-specific). wrote {out}\n"
     )
-    # per-category powered survivor counts (a disease can seed several categories)
-    cat_counts: dict[str, int] = {}
-    for cats in powered["categories"]:
-        for c in str(cats).split("|"):
-            if c:
-                cat_counts[c] = cat_counts.get(c, 0) + 1
-    sys.stderr.write(f"[done] powered per category: {cat_counts}\n")
+
+    def _per_category(frame) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for cats in frame["categories"]:
+            for c in str(cats).split("|"):
+                if c:
+                    counts[c] = counts.get(c, 0) + 1
+        return counts
+
+    sys.stderr.write(f"[done] powered per category:          {_per_category(powered)}\n")
+    sys.stderr.write(f"[done] powered+nested per category:   {_per_category(powered_maximal)}\n")
     return 0
 
 

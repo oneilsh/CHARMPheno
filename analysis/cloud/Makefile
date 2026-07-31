@@ -31,7 +31,7 @@ INSPECT_ARGS    ?=
 
 # Anchor-selection (expanded-SNOMED) knobs. ANCHOR_MIN_POSITIVES is the power
 # floor; ANCHOR_ARGS forwards extra flags (e.g. --mondo-version) to the driver.
-ANCHOR_MIN_POSITIVES ?= 100
+ANCHOR_MIN_POSITIVES ?= 50
 ANCHOR_ARGS          ?=
 
 # Required for eval-bq-coherence: path to the augmented VIResult dir written
