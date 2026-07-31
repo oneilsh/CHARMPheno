@@ -349,34 +349,50 @@ def test_load_artifact_requires_consistent_person_uniqueness_attestation(
         load_artifact(run_dir, outer_folds=2)
 
 
-def test_load_artifact_rejects_an_unscoreable_rare6_anchor(tmp_path):
-    """Catches silently reporting fewer than all preregistered rare6 diseases."""
+def test_load_artifact_skips_an_unscoreable_anchor(tmp_path):
+    """At anchor scale an unscoreable anchor is skipped + reported, not fatal;
+    the remaining anchors are still evaluated."""
     from multidomain_weighting_readout import load_artifact
 
     run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
     manifest_path = run_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    manifest["corpus_manifest"]["int2cid"].pop("6")
+    manifest["corpus_manifest"]["int2cid"].pop("6")  # anchor 432595 -> unresolvable
     manifest_path.write_text(json.dumps(manifest))
 
-    with pytest.raises(SystemExit, match="rare6 anchor 432595.*scoreable"):
+    artifact = load_artifact(run_dir, outer_folds=2)
+    skipped_ids = {int(entry["concept_id"]) for entry in artifact["skipped"]}
+    assert 432595 in skipped_ids
+    assert all(target["concept_id"] != 432595 for target in artifact["targets"])
+    assert len(artifact["targets"]) == 5  # the other five rare6 anchors survive
+
+
+def test_load_artifact_rejects_unregistered_disease(tmp_path):
+    """The readout now accepts any registered disease, but rejects unknown ones."""
+    from multidomain_weighting_readout import load_artifact
+
+    run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["disease"] = "not_a_disease"
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(SystemExit, match="not in registry"):
         load_artifact(run_dir, outer_folds=2)
 
 
-def test_load_artifact_rejects_insufficient_disease_class_counts(tmp_path):
-    """Catches attempting outer CV without enough positives and negatives."""
+def test_load_artifact_aborts_when_no_anchor_has_enough_cases(tmp_path):
+    """Thin anchors are skipped; if that leaves nothing evaluable, abort clearly."""
     from multidomain_weighting_readout import load_artifact
 
     run_dir = _write_synthetic_artifact(tmp_path / "0072-synthetic")
     meta_path = run_dir / "test_meta.json"
     meta = json.loads(meta_path.read_text())
+    # Only one doc has any frontier, so every anchor is below outer_folds=2.
     meta["frontiers"] = [[1]] + [[] for _ in range(11)]
     meta_path.write_text(json.dumps(meta))
 
-    with pytest.raises(
-        SystemExit,
-        match="anchor 1.*1 positives.*11 negatives.*outer_folds=2",
-    ):
+    with pytest.raises(SystemExit, match="no anchor has enough held-out cases"):
         load_artifact(run_dir, outer_folds=2)
 
 
