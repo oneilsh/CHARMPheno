@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout anchor-select summarize-exp measurement-survey
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout anchor-select anchor-hierarchy summarize-exp measurement-survey
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -33,6 +33,11 @@ INSPECT_ARGS    ?=
 # floor; ANCHOR_ARGS forwards extra flags (e.g. --mondo-version) to the driver.
 ANCHOR_MIN_POSITIVES ?= 50
 ANCHOR_ARGS          ?=
+
+# Compact Mondo class-hierarchy over a disease's anchors (ancestor reduction to
+# branch points). ANCHOR_HIER_ARGS forwards flags, e.g.
+# '--min-class-size 2 --max-class-fraction 0.6 --disease rare_priority'.
+ANCHOR_HIER_ARGS     ?=
 
 # Post-fit summary ("fit card") knobs: --top-n tokens/domain, --sample-nodes.
 SUMMARIZE_ARGS       ?=
@@ -144,6 +149,9 @@ help:
 	@echo "  anchor-select [ANCHOR_MIN_POSITIVES=100 ANCHOR_ARGS='--mondo-version 2026-06-02']"
 	@echo "                         Map the #1079 seed -> OMOP anchors and count coded patients;"
 	@echo "                         writes anchor_selection_data/candidates_with_counts.tsv"
+	@echo "  anchor-hierarchy [ANCHOR_HIER_ARGS='--min-class-size 2 --max-class-fraction 0.6']"
+	@echo "                         Compact Mondo class hierarchy over a disease's anchors"
+	@echo "                         (ancestor reduction to branch points; reports node count)."
 	@echo "  summarize-exp ID=N [SUMMARIZE_ARGS='--top-n 8 --sample-nodes 12']"
 	@echo "                         Compact fit card (structure + health + node-topic sample);"
 	@echo "                         writes <run>/fit_card.md and upserts it into <run>/summary.md"
@@ -506,6 +514,26 @@ anchor-select: zip cluster-overlay $(WORKSPACE_ENV)
 	    --out $(REPO_ROOT)/analysis/cloud/anchor_selection_data/candidates_with_counts.tsv \
 	    --min-positives $(ANCHOR_MIN_POSITIVES) \
 	    $(ANCHOR_ARGS)
+
+# Compact Mondo class-hierarchy induced by a disease's anchors. spark-submit
+# (maps anchors->MONDO via concept/concept_relationship); no patient data, so the
+# output is pure ontology structure (safe to paste/commit). Writes
+# anchor_selection_data/anchor_hierarchy.tsv + anchor_classes.tsv.
+anchor-hierarchy: zip cluster-overlay $(WORKSPACE_ENV)
+	. ./$(WORKSPACE_ENV) && \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 12g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
+	    $(REPO_ROOT)/analysis/cloud/anchor_hierarchy_cloud.py \
+	    --cdr $$WORKSPACE_CDR --billing $$GOOGLE_CLOUD_PROJECT \
+	    --seed-tsv $(REPO_ROOT)/analysis/cloud/anchor_selection_data/priority_seed.tsv \
+	    --out-dir $(REPO_ROOT)/analysis/cloud/anchor_selection_data \
+	    $(ANCHOR_HIER_ARGS)
 
 # Privacy-safe survey of the OMOP measurement table (measurement arc, Step 1).
 # spark-submit (reads measurement + concept from BigQuery). CDR/billing come from
