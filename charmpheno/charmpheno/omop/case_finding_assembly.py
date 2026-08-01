@@ -121,16 +121,26 @@ def strip_features(vec, drop_idxs):
     return SparseVector(vec.size, list(idxs), list(vals))
 
 
-def doc_attested_nodes(events_df, node_cids, *, doc_spec):
-    """Per document, the distinct in-window condition concept-ids that are DAG
-    nodes. Derives doc_id via `doc_spec`, then LEFT-joins a full doc roster
-    against the node-filtered attestations so background docs (no DAG-node code)
-    survive with an empty `attested_cids` (they get a `[]` frontier downstream).
+def doc_attested_nodes(events_df, node_cids, *, doc_spec, ancestor_df=None):
+    """Per document, the distinct DAG nodes the patient attests.
+
+    Derives doc_id via `doc_spec`, then LEFT-joins a full doc roster against the
+    per-doc attested node set so background docs survive with an empty
+    `attested_cids` (they get a `[]` frontier downstream).
+
+    Two attestation modes:
+      - ``ancestor_df is None`` (default): a doc attests a DAG node only if it
+        carries that EXACT concept-id. Byte-identical to the original behavior.
+      - ``ancestor_df`` given (concept_ancestor with ancestor/descendant columns):
+        ROLL-UP — a doc attests a DAG node if it carries the node OR any SNOMED
+        descendant of it. So a patient coded with a non-anchor "migraine" rolls up
+        to the class node "Disorder of head", letting class nodes gather their full
+        descendant population (richer class topics + class-level placement), not
+        just patients coded at the exact node. Anchors are unaffected as frontiers
+        (most_specific still picks the deepest attested node).
 
     Returns [doc_id, person_id, source_cohort, attested_cids: array<bigint>].
-    person_id and source_cohort are constant within a doc_id (the cohort arms are
-    disjoint by person and doc_id encodes source_cohort), so F.first is
-    well-defined."""
+    person_id and source_cohort are constant within a doc_id."""
     from pyspark.sql import functions as F
 
     ev = doc_spec.derive_docs(events_df)
@@ -138,11 +148,21 @@ def doc_attested_nodes(events_df, node_cids, *, doc_spec):
         F.first("person_id").alias("person_id"),
         F.first("source_cohort").alias("source_cohort"),
     )
-    attested = (
-        ev.where(F.col("concept_id").isin(list(node_cids)))
-          .groupBy("doc_id")
-          .agg(F.collect_set(F.col("concept_id").cast("long")).alias("attested_cids"))
-    )
+    if ancestor_df is None:
+        attested_src = (ev.where(F.col("concept_id").isin(list(node_cids)))
+                        .select("doc_id", F.col("concept_id").alias("node_cid")))
+    else:
+        # (DAG node, its SNOMED descendant incl. self) pairs, then map each doc's
+        # codes up to the node(s) they descend from.
+        node_desc = (ancestor_df
+                     .where(F.col("ancestor_concept_id").isin(list(node_cids)))
+                     .select(F.col("ancestor_concept_id").alias("node_cid"),
+                             F.col("descendant_concept_id").alias("concept_id")))
+        attested_src = (ev.select("doc_id", "concept_id")
+                        .join(node_desc, on="concept_id", how="inner")
+                        .select("doc_id", "node_cid"))
+    attested = (attested_src.groupBy("doc_id")
+                .agg(F.collect_set(F.col("node_cid").cast("long")).alias("attested_cids")))
     return (
         roster.join(attested, on="doc_id", how="left")
         .withColumn(

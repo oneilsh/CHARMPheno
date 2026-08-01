@@ -769,6 +769,9 @@ def build_multidomain_args(
         args.extend(["--omega", _as_comma(effective["omega"])])
     if effective.get("eta_per_domain") is not None:
         args.extend(["--eta-per-domain", _as_comma(effective["eta_per_domain"])])
+    # store_true flag: emit only when truthy in frontmatter.
+    if effective.get("rollup_attestation"):
+        args.append("--rollup-attestation")
     return args
 
 

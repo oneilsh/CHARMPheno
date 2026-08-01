@@ -407,6 +407,12 @@ def parse_args(argv=None):
                    help="keep only class candidates descending from this OMOP "
                         "concept_id (4274025 = 'Disease' drops cross-cutting "
                         "findings -- the structural disorder/finding split). '' = off.")
+    p.add_argument("--rollup-attestation", action="store_true",
+                   help="Roll each patient's condition codes UP to the nearest DAG "
+                        "node via concept_ancestor, so class nodes gather their full "
+                        "SNOMED-descendant population (richer class topics + "
+                        "class-level placement), not just exact-node codes. Needs a "
+                        "hierarchy to be useful.")
     p.add_argument("--hier-min-class-size", type=int, default=2)
     p.add_argument("--hier-max-class-fraction", type=float, default=1.0,
                    help="drop class nodes covering more than this fraction of "
@@ -587,12 +593,22 @@ def main(argv=None) -> int:
                 hier_min_class_size=args.hier_min_class_size,
                 hier_max_class_fraction=args.hier_max_class_fraction)
 
+            # Roll-up attestation reads concept_ancestor once (ancestor/descendant)
+            # and hands it to the assembler; None keeps exact-node attestation.
+            ancestor_df = None
+            if args.rollup_attestation:
+                ancestor_df = (spark.read.format("bigquery")
+                               .option("table", f"{args.cdr}.concept_ancestor")
+                               .option("parentProject", args.billing).load()
+                               .select("ancestor_concept_id", "descendant_concept_id"))
+
             doc_spec = PatientCohortDocSpec(min_doc_length=args.doc_min_length)
             bundle = assemble_multidomain_from_events(
                 cond_feature, extra_features, before_dag, doc_spec=doc_spec,
                 min_n=args.min_n, vocab_specs=vocab_specs,
                 holdout_frac=args.holdout_frac, n_bg=args.n_bg, tpn=args.tpn,
-                strip_mode=args.strip_mode, label_events=label_arg)
+                strip_mode=args.strip_mode, label_events=label_arg,
+                ancestor_df=ancestor_df)
             print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
 
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
@@ -717,6 +733,7 @@ def main(argv=None) -> int:
                 "hier_concept_class": args.hier_concept_class,
                 "hier_restrict_under": args.hier_restrict_under,
                 "hier_max_class_fraction": args.hier_max_class_fraction,
+                "rollup_attestation": args.rollup_attestation,
                 "spectral_topo_order": args.spectral_topo_order,
                 "min_peak_ratio": args.min_peak_ratio,
                 "dead_nodes": dead,

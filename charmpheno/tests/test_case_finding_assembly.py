@@ -139,6 +139,33 @@ def test_doc_attested_nodes_keeps_only_dag_nodes_and_background_empty(spark):
     assert out["general:2"] == (2, "general", [])       # background survives, empty
 
 
+def test_doc_attested_nodes_rollup_maps_descendants_to_nearest_dag_node(spark):
+    from charmpheno.omop.case_finding_assembly import doc_attested_nodes
+    node_cids = {200, 400}  # 200 = a class node, 400 = an anchor
+    # concept_ancestor (ancestor, descendant): 200 covers 999 (a non-node
+    # descendant) and itself; 400 covers itself. min_sep column not needed here.
+    ca = spark.createDataFrame(
+        [(200, 200), (200, 999), (400, 400)],
+        ["ancestor_concept_id", "descendant_concept_id"])
+    ev = _events(spark, [
+        (1, 999, "general", dt.date(2015, 1, 1)),   # non-node code UNDER class 200
+        (2, 400, "rare",    dt.date(2016, 1, 1)),   # anchor code
+        (3, 888, "general", dt.date(2016, 1, 1)),   # unrelated -> background
+    ])
+    out = {r["doc_id"]: sorted(r["attested_cids"])
+           for r in doc_attested_nodes(
+               ev, node_cids, doc_spec=PatientCohortDocSpec(), ancestor_df=ca).collect()}
+    assert out["general:1"] == [200]   # migraine-like code rolled UP to its class
+    assert out["rare:2"] == [400]      # anchor unchanged
+    assert out["general:3"] == []      # no descendant of any node -> background
+
+    # Without ancestor_df, the non-node code 999 attests nothing (exact-match).
+    exact = {r["doc_id"]: sorted(r["attested_cids"])
+             for r in doc_attested_nodes(
+                 ev, node_cids, doc_spec=PatientCohortDocSpec()).collect()}
+    assert exact["general:1"] == []    # 999 is not a DAG node -> not attested
+
+
 def test_doc_attested_nodes_distinct_within_doc(spark):
     from charmpheno.omop.case_finding_assembly import doc_attested_nodes
     ev = _events(spark, [
