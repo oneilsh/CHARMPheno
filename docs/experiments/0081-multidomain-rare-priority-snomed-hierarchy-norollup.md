@@ -1,7 +1,7 @@
 ---
 id: 81
 slug: multidomain-rare-priority-snomed-hierarchy-norollup
-status: pending
+status: partial
 model_class: multidomain
 cohort: population_rare_priority
 cohort_def: population_rare_priority
@@ -64,6 +64,35 @@ seed: 42
 ---
 
 # exp 0081 — SNOMED hierarchy WITHOUT roll-up (isolator vs 0080)
+
+## Result — classes come ALIVE and rare-flavored (AP lost to a 143; see 0083)
+
+Fit completed and saved, but the post-fit "persist test set" step was OOM-killed
+on the 4g driver (exit 143 / SIGTERM), so no `test_meta.json` was written and the
+AP readout can't run against this run. Fixed forward: `CHARM_DRIVER_MEMORY` knob
+(run_experiment) + spectral re-run as exp 0083. The **fit card still answers the
+isolator's main question**: K=350 (40 bg + 155 nodes x 2), random init, health
+11/155 dead + 50/350 starved (under-fit, as expected for random at this K).
+
+**The class nodes are ALIVE and rare-flavored** — the decisive contrast with
+roll-up 0080:
+- *Disorder of connective tissue* = collagen disease / Sjogren's / systemic
+  sclerosis / Raynaud's + hydroxychloroquine / methotrexate / prednisone +
+  complement C3-C4 / ANA / rheumatoid factor. (0080 roll-up: fracture / low back
+  pain / OA.) A textbook rare-autoimmune topic.
+- *Degenerative disorder* = monoclonal gammopathy / multiple myeloma /
+  polyneuropathy + serum protein electrophoresis (amyloidosis workup).
+- *Disorder of cardiovascular system* = atherosclerosis / PVD + midodrine (POTS) /
+  pyridostigmine (MG). (0080 roll-up: hypertension / T2DM / obesity.)
+- *Disorder of nervous system* = tingling / paresthesia + gabapentin
+  (neuropathy-flavored). (0080 roll-up: back pain / lumbar radiculopathy.)
+
+So: without roll-up the class nodes are neither dead (the gating flows anchor mass
+up to ancestors) nor flooded — the flooding was specifically the roll-up, exactly
+as insight 0080 predicted. What remains is the quantitative case-finding test on a
+well-conditioned fit: exp **0083** (this layout + spectral init) gives the clean
+AP verdict. Original notes follow.
+
 
 Isolates the hierarchy from the roll-up. Exp 0080 (hierarchy + roll-up) collapsed
 case-finding ~3× (insight 0080) because roll-up floods each class with the common

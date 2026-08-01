@@ -480,7 +480,9 @@ multidomain-lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 MULTIDOMAIN_WEIGHTING_ARGS ?=
 # Parallel worker processes over anchors for the weighting readout (master has 4
 # cores). WEIGHTING_JOBS=4 ~= 4x; results are identical and in target order.
-WEIGHTING_JOBS ?= 1
+# Default 4: the AoU Dataproc master has 4 cores and the readout is embarrassingly
+# parallel across anchors, so 4 is the sensible default (override to 1 to serialize).
+WEIGHTING_JOBS ?= 4
 # WEIGHTING_FIXED=1 runs the FAST parameter-free readout (per-domain +
 # fixed-inclusive AP only; skips the supervised nested-CV weight search that
 # insight 0076 closed). ~1000x faster; writes *_fixed.{json,md}.
