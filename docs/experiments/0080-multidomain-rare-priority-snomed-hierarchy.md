@@ -41,6 +41,13 @@ hier_concept_class: ""
 hier_restrict_under: 4274025
 hier_min_class_size: 2
 hier_max_class_fraction: 0.6
+# Roll each patient's condition codes UP to the nearest DAG node via
+# concept_ancestor, so a class node ("Disorder of head") gathers ALL its
+# descendant patients (migraine, glioma, ...), not just those coded at the exact
+# node -> richer class topics, stronger pooling, and class-level placement of
+# unclassified patients. Non-anchor patients land at the class (below any anchor),
+# so anchor case-finding labels are unchanged.
+rollup_attestation: true
 init: random
 spectral_max_vocab: 12000
 spectral_method: scalable

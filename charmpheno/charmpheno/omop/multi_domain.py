@@ -166,7 +166,8 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
                                      doc_spec, min_n, vocab_specs,
                                      holdout_frac=0.2, split_salt=None, n_bg=2,
                                      tpn=1, strip_mode="test_only",
-                                     label_events=None) -> MultiDomainBundle:
+                                     label_events=None,
+                                     ancestor_df=None) -> MultiDomainBundle:
     """Assemble the N-domain case-finding bundle from already-windowed events.
 
     A thin N-domain layer over the single-domain `assemble_from_events`
@@ -223,8 +224,12 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
             label_events, holdout_frac=holdout_frac, split_salt=split_salt)
 
     # 2) condition-only frontier: prune the DAG on TRAIN attestation counts.
-    train_att = doc_attested_nodes(train_lab, node_cids, doc_spec=doc_spec).cache()
-    test_att = doc_attested_nodes(test_lab, node_cids, doc_spec=doc_spec).cache()
+    # ancestor_df (concept_ancestor) enables ROLL-UP attestation: class nodes
+    # gather their full SNOMED-descendant population, not just exact-node codes.
+    train_att = doc_attested_nodes(train_lab, node_cids, doc_spec=doc_spec,
+                                   ancestor_df=ancestor_df).cache()
+    test_att = doc_attested_nodes(test_lab, node_cids, doc_spec=doc_spec,
+                                  ancestor_df=ancestor_df).cache()
     try:
         counts = node_patient_counts(train_att)
         after_dag = prune_by_attestation(before_dag, counts, min_n)
