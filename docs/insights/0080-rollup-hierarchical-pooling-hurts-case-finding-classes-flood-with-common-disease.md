@@ -72,14 +72,28 @@ inferred.
   readout uses the hierarchy as a *scoring* structure at evaluation time; it does
   not require fit-time pooling and is unaffected by this negative result.
 
-## Decision
+## Decision — REVISED (the negative result is confounded by under-fitting)
 
-Roll-up hierarchical pooling is **net-negative for aggregate case-finding** — do
-not ship it. Next, run exp 0081 (same hierarchy, `rollup_attestation: false`) to
-isolate whether pooling over *anchors only* is neutral/helpful or the class nodes
-go dead. If 0081 is also flat-or-worse, the hierarchical-pooling direction is
-closed for case-finding (0076 confirmed by construction), and the hierarchy's
-remaining value is the conditional within-class readout, not the generative fit.
+Initial read was "roll-up pooling is net-negative, don't ship." That is **too
+strong**: the 81/424 starved topics (random init, doubled K) mean the rare anchors
+were simply **under-fit**, so the AP drop conflates (a) pooling harm with (b) a
+degenerate fit. The mechanism above (common mass poured into tpn=2 class nodes)
+is a **capacity** problem — each class has far too few topics to absorb a huge
+heterogeneous population, so comorbidity leaks into the rare-anchor topics — and
+capacity/init are fixable, not fundamental. Before concluding anything about
+pooling, clear the confound:
+
+1. **Spectral init** on the same hierarchy+roll-up fit (exp 0082) — the spectral
+   0079 fit had 0 starved topics; random at K=424 has 81. This directly tests
+   whether the collapse was under-fitting. **Highest priority.**
+2. **Class capacity** — more topics for the class nodes (they must model whole
+   disease-class populations, not just the anchors). tpn is currently uniform;
+   raising it (or a class-specific capacity) is the second lever.
+3. **Roll-up isolation** — exp 0081 (`rollup_attestation: false`) shows whether
+   pooling over anchors-only avoids the flooding (or goes dead).
+
+Only if the fit is well-conditioned (few starved topics) AND the hierarchy still
+underperforms flat do we conclude pooling is closed for case-finding.
 
 **Setting context.** Exp 0080, rare_priority, cond+drug+measurement, SNOMED
 hierarchy (restrict-under 4274025, max_class_fraction 0.6, 60 classes) + roll-up,
