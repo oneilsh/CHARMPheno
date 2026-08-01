@@ -43,6 +43,13 @@ rollup_attestation: false
 init: spectral
 spectral_max_vocab: 12000
 spectral_method: scalable
+# Random-projection dim for the scalable init. The init COLLECTS a (V x d) sketch
+# per DAG node to the PYTHON driver (~#nodes * V_concat * d * 4 bytes). At the auto
+# default d~1000 that is 155 * 8774 * 1000 * 4 ~= 5.4GB -- which OOM-kills the init
+# (exit -9) on this 7.8GB / 2-core master. d=400 -> ~2.2GB, fits (free master RAM
+# first; drop to 300 if still tight). d only needs to JL-preserve pairwise word
+# distances (~400 >> log V), so anchor quality is essentially unchanged.
+spectral_proj_dim: 400
 anchor_scope: frontier
 spectral_topo_order: forward
 strip_mode: both
@@ -109,14 +116,19 @@ export CHARM_PROBE_EFFRANK=1            # per-node effective-rank table (spectra
 make -C analysis/cloud exp ID=83
 make -C analysis/cloud multidomain-weighting-readout ID=83 WEIGHTING_FIXED=1 WEIGHTING_JOBS=4
 ```
-**Driver memory:** use the DEFAULT 4g (do NOT export CHARM_DRIVER_MEMORY). In
-PySpark client mode the master runs both the JVM (bounded by --driver-memory) and
-the Python driver (numpy, unbounded), and spectral init holds ~3GB of per-node
-co-occurrence sketches in the PYTHON process. Raising --driver-memory to 12g on a
-RAM-limited master starves the Python side -> OS OOM-killer SIGKILLs init (exit
--9). 0082 (heavier, 192 nodes) succeeded at 4g, so 4g is proven for this workload.
-Only bump MODESTLY (6g) and only if the *persist* step OOMs (143), never for the
-spectral-init phase.
+**Driver memory (this master is 7.8GB / 2-core).** In PySpark client mode the
+master runs both the JVM (bounded by --driver-memory) and the Python driver
+(numpy, unbounded). The scalable spectral init COLLECTS a (V_concat x d) sketch
+PER NODE to the Python driver: 155 nodes * 8774 * d * 4 bytes. At the auto d~1000
+that is ~5.4GB, which OOM-kills init (exit -9) here. Two fixes, use both:
+1. **Shrink the sketch** via `spectral_proj_dim: 400` (set in frontmatter above) ->
+   ~2.2GB. Drop to 300 (~1.6GB) if still tight.
+2. **Free master RAM first** -- `ps aux --sort=-%mem | head` then shut idle Jupyter
+   kernels; the baseline was 5.5GB used / 2.3GB free, so freeing kernels is what
+   makes even a 2.2GB sketch comfortable.
+Do NOT raise --driver-memory for the init phase -- it bounds only the JVM and
+steals physical RAM from the Python sketch, making the OOM worse. A MODEST bump
+(CHARM_DRIVER_MEMORY=6g) is only for the *persist* collect (JVM-side, exit 143).
 Compare per-anchor AP to flat 0078 and to roll-up 0082 (0.006). Flat condition
 macro is the ~0.020 bar to beat. The `[effrank]` lines answer the capacity
 question in parallel.
