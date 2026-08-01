@@ -34,9 +34,10 @@ INSPECT_ARGS    ?=
 ANCHOR_MIN_POSITIVES ?= 50
 ANCHOR_ARGS          ?=
 
-# Compact Mondo class-hierarchy over a disease's anchors (ancestor reduction to
-# branch points). ANCHOR_HIER_ARGS forwards flags, e.g.
-# '--min-class-size 2 --max-class-fraction 0.6 --disease rare_priority'.
+# Compact class-hierarchy over a disease's anchors (ancestor reduction to branch
+# points). SOURCE = mondo (default) | snomed. ANCHOR_HIER_ARGS forwards flags,
+# e.g. '--min-class-size 2 --max-class-fraction 0.6 --disease rare_priority'.
+SOURCE               ?= mondo
 ANCHOR_HIER_ARGS     ?=
 
 # Post-fit summary ("fit card") knobs: --top-n tokens/domain, --sample-nodes.
@@ -531,6 +532,7 @@ anchor-hierarchy: zip cluster-overlay $(WORKSPACE_ENV)
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
 	    $(REPO_ROOT)/analysis/cloud/anchor_hierarchy_cloud.py \
 	    --cdr $$WORKSPACE_CDR --billing $$GOOGLE_CLOUD_PROJECT \
+	    --source $(SOURCE) \
 	    --seed-tsv $(REPO_ROOT)/analysis/cloud/anchor_selection_data/priority_seed.tsv \
 	    --out-dir $(REPO_ROOT)/analysis/cloud/anchor_selection_data \
 	    $(ANCHOR_HIER_ARGS)
