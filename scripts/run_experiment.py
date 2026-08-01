@@ -821,10 +821,20 @@ def build_dashboard_args(
 # Spark configuration constants. Match the existing per-cohort Makefile targets.
 # If these need to vary per-experiment, lift them into _base.yaml in a future
 # increment.
+#
+# Driver memory is env-overridable (CHARM_DRIVER_MEMORY, default 4g): the fit
+# itself is distributed, but the post-fit "persist test set" step COLLECTS the
+# held-out split to the driver (multidomain_cloud: bundle.test_df...collect()),
+# which can OOM-kill the driver (exit 143 / SIGTERM) on a large held-out set. A
+# borderline collect that squeaks through one run can be killed the next under
+# any extra master memory pressure, so raise this (e.g. 12g) when re-running a
+# fit whose eval died at "persist test set".
+_DRIVER_MEMORY = os.environ.get("CHARM_DRIVER_MEMORY", "4g")
+
 SPARK_SUBMIT_FLAGS = [
     "--master", "yarn",
     "--deploy-mode", "client",
-    "--driver-memory", "4g",
+    "--driver-memory", _DRIVER_MEMORY,
     "--conf", "spark.executor.cores=4",
     "--conf", "spark.executor.memory=6g",
     "--conf", "spark.executor.memoryOverhead=2g",
