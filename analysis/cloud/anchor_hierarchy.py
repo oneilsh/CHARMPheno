@@ -152,3 +152,30 @@ def reduce_to_anchor_hierarchy(
         "n_raw_ancestors": n_raw,
         "n_classes": len(classes),
     }
+
+
+def hierarchy_to_edges(reduced: dict, root, *, strip_prefix: str = "anchor:") -> list:
+    """Convert a reduce_to_anchor_hierarchy result into concept-id (parent, child)
+    edges for a DagLayout: root -> top classes, class -> class (multi-parent), and
+    class -> anchor; any node with no kept parent attaches directly to ``root``
+    (top classes and unclustered anchors alike).
+
+    Terminal ids carry ``strip_prefix`` (e.g. "anchor:76685"); it is stripped and
+    the remainder cast to the same type as ``root`` (int for concept-id space).
+    Class ids are used as-is (cast to root's type). Returns sorted unique edges.
+    """
+    cast = type(root)
+
+    def _cid(node):
+        s = node[len(strip_prefix):] if node.startswith(strip_prefix) else node
+        return cast(s)
+
+    edges = set()
+    for node, parents in reduced["parent_of"].items():
+        child = _cid(node)
+        if parents:
+            for p in parents:
+                edges.add((_cid(p), child))
+        else:
+            edges.add((root, child))
+    return sorted(edges)

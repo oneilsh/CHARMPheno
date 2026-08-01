@@ -748,6 +748,11 @@ def build_multidomain_args(
         "--meas-vocab-size", str(effective.get("meas_vocab_size", 2000)),
         "--meas-min-df", str(effective.get("meas_min_df", 20)),
         "--meas-min-patient-count", str(effective.get("meas_min_patient_count", 20)),
+        # Anchor hierarchy above anchors (default none = flat forest).
+        "--anchor-hierarchy", str(effective.get("anchor_hierarchy", "none")),
+        "--hier-concept-class", str(effective.get("hier_concept_class", "Disorder")),
+        "--hier-min-class-size", str(effective.get("hier_min_class_size", 2)),
+        "--hier-max-class-fraction", str(effective.get("hier_max_class_fraction", 1.0)),
         # SVI schedule (mirrors build_dag_placement_args). Default 0.0 = full-batch;
         # _base.yaml sets 0.1, so a multidomain experiment inherits mini-batch
         # UNLESS its frontmatter pins mini_batch_fraction: 0.0 (exps 0070/0071 do).

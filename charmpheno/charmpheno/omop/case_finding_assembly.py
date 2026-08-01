@@ -361,7 +361,63 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
         train_att.unpersist(); test_att.unpersist()
 
 
-def _condition_dag_from_frames(concept_df, ca_df, anchors, root=None):
+def _snomed_class_hierarchy(concept_df, ca_df, anchor_list, root, *,
+                            concept_class="Disorder", min_class_size=2,
+                            max_class_fraction=1.0):
+    """Compact SNOMED class hierarchy ABOVE the anchors, as concept-id edges.
+
+    Reduces the anchors' ``concept_ancestor`` closure to its branch points
+    (anchor_hierarchy.reduce_to_anchor_hierarchy) over Condition-domain STANDARD
+    concepts of the given ``concept_class`` ('Disorder' drops SNOMED's
+    cross-cutting "...finding" axis). Returns ``(edges, class_ids, class_names)``:
+    root->class, class->class (multi-parent), class->anchor edges in concept-id
+    space, the class node ids to add to the DAG, and their names. Anchors with no
+    kept class attach directly to ``root`` (handled by hierarchy_to_edges plus a
+    backstop for anchors absent from the ancestor scan)."""
+    from pyspark.sql import functions as F
+    from anchor_hierarchy import reduce_to_anchor_hierarchy, hierarchy_to_edges
+
+    anchors = [int(a) for a in anchor_list]
+    anc_rows = (ca_df.where(F.col("descendant_concept_id").isin(anchors)
+                            & (F.col("ancestor_concept_id") != F.col("descendant_concept_id")))
+                .select("ancestor_concept_id", "descendant_concept_id").collect())
+    anc_ids = sorted({int(r["ancestor_concept_id"]) for r in anc_rows})
+    cinfo = (concept_df.where(F.col("concept_id").isin(sorted(set(anc_ids) | set(anchors))))
+             .select("concept_id", "concept_name", "domain_id", "standard_concept",
+                     "concept_class_id").collect())
+    name = {int(r["concept_id"]): r["concept_name"] for r in cinfo}
+    valid = {int(r["concept_id"]) for r in cinfo
+             if r["domain_id"] == "Condition" and r["standard_concept"] == "S"
+             and (not concept_class or r["concept_class_id"] == concept_class)
+             } - set(anchors)
+    cls_rows = (ca_df.where(F.col("descendant_concept_id").isin(sorted(valid))
+                            & F.col("ancestor_concept_id").isin(sorted(valid))
+                            & (F.col("ancestor_concept_id") != F.col("descendant_concept_id")))
+                .select("ancestor_concept_id", "descendant_concept_id").collect())
+
+    parent_adj: dict = {}
+    for r in anc_rows:
+        a, d = int(r["ancestor_concept_id"]), int(r["descendant_concept_id"])
+        if a in valid:
+            parent_adj.setdefault(f"anchor:{d}", []).append(str(a))
+    for r in cls_rows:
+        a, d = int(r["ancestor_concept_id"]), int(r["descendant_concept_id"])
+        parent_adj.setdefault(str(d), []).append(str(a))
+
+    terminals = [f"anchor:{a}" for a in anchors if f"anchor:{a}" in parent_adj]
+    reduced = reduce_to_anchor_hierarchy(
+        terminals, parent_adj, stop=set(),
+        min_class_size=min_class_size, max_class_fraction=max_class_fraction)
+    edges = hierarchy_to_edges(reduced, int(root))
+    present = {a for a in anchors if f"anchor:{a}" in parent_adj}
+    edges += [(int(root), a) for a in anchors if a not in present]  # backstop
+    class_ids = [int(c) for c in reduced["classes"]]
+    return edges, class_ids, {c: name.get(c, str(c)) for c in class_ids}
+
+
+def _condition_dag_from_frames(concept_df, ca_df, anchors, root=None,
+                               anchor_hierarchy=None, hier_concept_class="Disorder",
+                               hier_min_class_size=2, hier_max_class_fraction=1.0):
     """Build the concept-id ConditionDag from `concept` + `concept_ancestor`
     frames.
 
@@ -426,32 +482,59 @@ def _condition_dag_from_frames(concept_df, ca_df, anchors, root=None):
     for r in anchor_rows:
         names[int(r["concept_id"])] = r["concept_name"]
 
+    class_ids: list = []
     if root not in anchor_list:
-        # Forest: connect the synthetic root to each disease anchor explicitly so
-        # the anchors are depth-1 children (not orphans), and give the root a name.
-        edges += [(root, a) for a in anchor_list]
+        if anchor_hierarchy == "snomed":
+            # Insert the compact SNOMED class hierarchy ABOVE anchors: root ->
+            # class -> ... -> anchor (real concept-ids), replacing the flat
+            # root->anchor forest edges. The min-sep-1 scan above only built the
+            # within-anchor-subtree edges (nodeset excludes classes), so classes
+            # get exactly the reduced hierarchy edges, not the raw closure.
+            h_edges, class_ids, class_names = _snomed_class_hierarchy(
+                concept_df, ca_df, anchor_list, root,
+                concept_class=hier_concept_class,
+                min_class_size=hier_min_class_size,
+                max_class_fraction=hier_max_class_fraction)
+            edges += h_edges
+            names.update(class_names)
+        else:
+            # Flat forest: root -> each disease anchor as a depth-1 child.
+            edges += [(root, a) for a in anchor_list]
         names.setdefault(root, "rare-disease forest root")
 
-    # node_ids passed to build_condition_dag must include the anchors so they are
-    # in the nodeset (build_condition_dag adds only the root).
-    return build_condition_dag(edges, root, node_ids + anchor_list, names)
+    # node_ids passed to build_condition_dag must include the anchors AND any
+    # class nodes so they are in the nodeset (build_condition_dag adds only root).
+    return build_condition_dag(edges, root, node_ids + anchor_list + class_ids, names)
 
 
-def load_condition_dag(spark, *, anchors, cdr, billing, root=None):
+def load_condition_dag(spark, *, anchors, cdr, billing, root=None,
+                       anchor_hierarchy=None, hier_concept_class="Disorder",
+                       hier_min_class_size=2, hier_max_class_fraction=1.0):
     """Read `concept` + `concept_ancestor` from BigQuery and build the condition
     DAG (concept-id space) over one or more `anchors`. BQ wrapper around
     _condition_dag_from_frames; pass a synthetic `root` for a multi-anchor
-    forest (see that function)."""
+    forest (see that function).
+
+    ``anchor_hierarchy="snomed"`` (opt-in; None = unchanged flat forest) inserts
+    the compact SNOMED class hierarchy above the anchors (root -> class -> anchor);
+    ``hier_*`` tune it (concept_class filter, min class size, umbrella cutoff)."""
     def _read(table):
         return (spark.read.format("bigquery")
                 .option("table", f"{cdr}.{table}")
                 .option("parentProject", billing).load())
 
+    # concept_class_id is needed only for the hierarchy path; selecting it always
+    # is harmless (the flat path ignores it).
     concept = _read("concept").select(
-        "concept_id", "concept_name", "standard_concept", "domain_id")
+        "concept_id", "concept_name", "standard_concept", "domain_id",
+        "concept_class_id")
     ca = _read("concept_ancestor").select(
         "ancestor_concept_id", "descendant_concept_id", "min_levels_of_separation")
-    return _condition_dag_from_frames(concept, ca, anchors, root=root)
+    return _condition_dag_from_frames(
+        concept, ca, anchors, root=root, anchor_hierarchy=anchor_hierarchy,
+        hier_concept_class=hier_concept_class,
+        hier_min_class_size=hier_min_class_size,
+        hier_max_class_fraction=hier_max_class_fraction)
 
 
 def assemble_case_finding_corpus(spark, *, disease="diabetes", cdr, billing,
