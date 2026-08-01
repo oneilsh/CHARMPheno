@@ -391,6 +391,16 @@ def parse_args(argv=None):
     p.add_argument("--spectral-max-vocab", type=int, default=8000)
     p.add_argument("--spectral-method", choices=["auto", "dense", "scalable"],
                    default="auto")
+    # Random-projection dimension for the scalable spectral init (0 = auto ~1000,
+    # per Arora/Mimno). The scalable init COLLECTS a (V x d) sketch per DAG node to
+    # the PYTHON driver -- ~#nodes*V*d*4 bytes -- which is the driver memory bottleneck
+    # on a small master. Lowering d (e.g. 400) shrinks that sketch proportionally
+    # with negligible anchor-quality cost (d only needs to JL-preserve pairwise
+    # distances; ~400 >> log V). Raise --driver-memory only helps the JVM, not this
+    # Python-side sketch -- shrink d instead when init gets OOM-killed (exit -9).
+    p.add_argument("--spectral-proj-dim", type=int, default=0,
+                   help="scalable-init random projection dim (0=auto ~1000); "
+                        "lower (e.g. 400) to fit the driver sketch on a small master.")
     p.add_argument("--anchor-scope", choices=["closure", "frontier"],
                    default="closure")
     # Insert the compact SNOMED class hierarchy ABOVE anchors (root -> class ->
@@ -625,6 +635,7 @@ def main(argv=None) -> int:
                 caviMaxIter=args.cavi_max_iter, caviTol=args.cavi_tol,
                 init=args.init, spectralMaxVocab=args.spectral_max_vocab,
                 spectralMethod=args.spectral_method,
+                spectralD=args.spectral_proj_dim,
                 anchorScope=args.anchor_scope,
                 spectralTopoOrder=args.spectral_topo_order,
                 omega=args.omega, etaPerDomain=args.eta_per_domain,
@@ -728,6 +739,7 @@ def main(argv=None) -> int:
                 "learning_rate_tau0": args.learning_rate_tau0,
                 "learning_rate_kappa": args.learning_rate_kappa,
                 "spectral_method": args.spectral_method,
+                "spectral_proj_dim": args.spectral_proj_dim,
                 "anchor_scope": args.anchor_scope,
                 "anchor_hierarchy": args.anchor_hierarchy,
                 "hier_concept_class": args.hier_concept_class,

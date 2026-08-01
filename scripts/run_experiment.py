@@ -728,6 +728,7 @@ def build_multidomain_args(
         "--init", str(effective.get("init", "spectral")),
         "--spectral-max-vocab", str(effective.get("spectral_max_vocab", 8000)),
         "--spectral-method", str(effective.get("spectral_method", "auto")),
+        "--spectral-proj-dim", str(effective.get("spectral_proj_dim", 0)),
         "--anchor-scope", str(effective.get("anchor_scope", "closure")),
         "--spectral-topo-order", str(effective.get("spectral_topo_order", "forward")),
         "--min-peak-ratio", str(effective.get("min_peak_ratio", 5.0)),
