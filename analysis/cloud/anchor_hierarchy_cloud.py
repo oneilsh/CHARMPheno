@@ -119,15 +119,55 @@ def _snomed_inputs(spark, args):
                .where(F.col("concept_id").isin(sorted(set(anc_ids) | set(anchor_ids))))
                .toPandas())
     name = {int(c): str(n) for c, n in zip(concept["concept_id"], concept["concept_name"])}
-    # Class candidates: Condition-domain STANDARD concepts. The concept_class
-    # filter (default 'Disorder') drops SNOMED's cross-cutting "...finding" axis
-    # (Measurement/Functional/Viscus-structure findings) that are ancestors but
-    # not disease classes; empty --snomed-concept-class disables it.
+    # Candidate class nodes: Condition-domain STANDARD ancestors (minus anchors).
     cc = args.snomed_concept_class
-    valid = {int(c) for c, d, st, k in zip(
-                concept["concept_id"], concept["domain_id"],
-                concept["standard_concept"], concept["concept_class_id"])
-             if d == "Condition" and st == "S" and (not cc or k == cc)} - set(anchor_ids)
+    valid_base = {int(c) for c, d, st, k in zip(
+                    concept["concept_id"], concept["domain_id"],
+                    concept["standard_concept"], concept["concept_class_id"])
+                  if d == "Condition" and st == "S" and (not cc or k == cc)} - set(anchor_ids)
+
+    # --- SURVEY: what metadata is actually available on these ancestors? ---
+    # In OMOP SNOMED, concept_class_id is 'Clinical Finding' for BOTH true
+    # disorders and cross-cutting findings, so it does NOT separate them. The
+    # structural separator is descent from the SNOMED "Disease" concept
+    # (4274025): disorders are under Disease; findings are under "Clinical
+    # finding" but not Disease. Survey both so the filter is chosen from data.
+    from collections import Counter
+    DISEASE = 4274025
+    under_rows = (_read_bq(spark, args.cdr, args.billing, "concept_ancestor")
+                  .select("descendant_concept_id")
+                  .where((F.col("ancestor_concept_id") == DISEASE)
+                         & F.col("descendant_concept_id").isin(sorted(valid_base)))
+                  .toPandas())
+    under_disease = {int(x) for x in under_rows["descendant_concept_id"]}
+    cc_ct = Counter(k for c, d, st, k in zip(
+        concept["concept_id"], concept["domain_id"], concept["standard_concept"],
+        concept["concept_class_id"]) if int(c) in valid_base)
+    dom_ct = Counter(d for c, d in zip(concept["concept_id"], concept["domain_id"])
+                     if int(c) in set(anc_ids))
+    not_under = sorted(valid_base - under_disease, key=lambda c: name.get(c, ""))
+    print("=" * 74, flush=True)
+    print(f"SNOMED ANCESTOR SURVEY  candidate classes (Condition/standard"
+          f"{'' if not cc else '/'+cc}): {len(valid_base)}", flush=True)
+    print(f"  concept_class_id: {dict(cc_ct)}", flush=True)
+    print(f"  ancestor domain_id: {dict(dom_ct)}", flush=True)
+    print(f"  under Disease(4274025): {len(valid_base & under_disease)}"
+          f" / {len(valid_base)}  (the rest are cross-cutting findings)", flush=True)
+    print(f"  NOT under Disease ({len(not_under)}): "
+          + ", ".join(name.get(c, str(c)) for c in not_under[:25]), flush=True)
+    print("=" * 74, flush=True)
+
+    # --restrict-under <concept_id> keeps only candidates descending from it
+    # (e.g. 4274025 = Disease -> drops the cross-cutting findings). Empty = off.
+    if args.restrict_under:
+        valid = valid_base & under_disease if int(args.restrict_under) == DISEASE else (
+            valid_base & {int(x) for x in (_read_bq(spark, args.cdr, args.billing,
+                "concept_ancestor").select("descendant_concept_id").where(
+                (F.col("ancestor_concept_id") == int(args.restrict_under))
+                & F.col("descendant_concept_id").isin(sorted(valid_base)))
+                .toPandas()["descendant_concept_id"])})
+    else:
+        valid = valid_base
     # 2) class->ancestors among the valid class set (for specificity ordering).
     ca_class = (_read_bq(spark, args.cdr, args.billing, "concept_ancestor")
                 .select("ancestor_concept_id", "descendant_concept_id")
@@ -161,9 +201,15 @@ def main(argv: list[str]) -> int:
     p.add_argument("--disease", default="rare_priority")
     p.add_argument("--mondo-version", default="2026-06-02")
     p.add_argument("--mondo-cache-dir", default="data/mondo")
-    p.add_argument("--snomed-concept-class", default="Disorder",
-                   help="snomed: keep only this concept_class_id as class nodes "
-                        "(drops the SNOMED finding axis); '' disables the filter")
+    p.add_argument("--snomed-concept-class", default="",
+                   help="snomed: keep only this concept_class_id as class nodes. "
+                        "NOTE: in OMOP SNOMED disorders are 'Clinical Finding', not "
+                        "'Disorder' (which matches NOTHING) -- prefer --restrict-under "
+                        "for the disorder/finding split. '' (default) = no filter.")
+    p.add_argument("--restrict-under", default="",
+                   help="snomed: keep only class candidates descending from this OMOP "
+                        "concept_id (4274025 = 'Disease' -> drops cross-cutting "
+                        "findings, the principled disorder/finding split). '' = off.")
     p.add_argument("--stop-ids", default="",
                    type=lambda s: [int(x) for x in s.split(",") if x.strip()],
                    help="snomed: OMOP concept_ids to exclude as over-general classes")

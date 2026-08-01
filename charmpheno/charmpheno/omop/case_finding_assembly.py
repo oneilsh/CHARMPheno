@@ -362,8 +362,8 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
 
 
 def _snomed_class_hierarchy(concept_df, ca_df, anchor_list, root, *,
-                            concept_class="Disorder", min_class_size=2,
-                            max_class_fraction=1.0):
+                            concept_class="", restrict_under=None,
+                            min_class_size=2, max_class_fraction=1.0):
     """Compact SNOMED class hierarchy ABOVE the anchors, as concept-id edges.
 
     Reduces the anchors' ``concept_ancestor`` closure to its branch points
@@ -390,6 +390,16 @@ def _snomed_class_hierarchy(concept_df, ca_df, anchor_list, root, *,
              if r["domain_id"] == "Condition" and r["standard_concept"] == "S"
              and (not concept_class or r["concept_class_id"] == concept_class)
              } - set(anchors)
+    # restrict_under: keep only candidates descending from this concept (e.g.
+    # 4274025 = SNOMED "Disease") -- the structural disorder/finding split, since
+    # concept_class_id does not separate them in OMOP SNOMED. NOTE: concept_class
+    # defaults EMPTY (OMOP has no 'Disorder' concept_class_id; it would match none).
+    if restrict_under:
+        under = {int(r["descendant_concept_id"]) for r in
+                 ca_df.where((F.col("ancestor_concept_id") == int(restrict_under))
+                             & F.col("descendant_concept_id").isin(sorted(valid)))
+                 .select("descendant_concept_id").collect()}
+        valid = valid & under
     cls_rows = (ca_df.where(F.col("descendant_concept_id").isin(sorted(valid))
                             & F.col("ancestor_concept_id").isin(sorted(valid))
                             & (F.col("ancestor_concept_id") != F.col("descendant_concept_id")))
@@ -416,7 +426,8 @@ def _snomed_class_hierarchy(concept_df, ca_df, anchor_list, root, *,
 
 
 def _condition_dag_from_frames(concept_df, ca_df, anchors, root=None,
-                               anchor_hierarchy=None, hier_concept_class="Disorder",
+                               anchor_hierarchy=None, hier_concept_class="",
+                               hier_restrict_under=None,
                                hier_min_class_size=2, hier_max_class_fraction=1.0):
     """Build the concept-id ConditionDag from `concept` + `concept_ancestor`
     frames.
@@ -493,6 +504,7 @@ def _condition_dag_from_frames(concept_df, ca_df, anchors, root=None,
             h_edges, class_ids, class_names = _snomed_class_hierarchy(
                 concept_df, ca_df, anchor_list, root,
                 concept_class=hier_concept_class,
+                restrict_under=hier_restrict_under,
                 min_class_size=hier_min_class_size,
                 max_class_fraction=hier_max_class_fraction)
             edges += h_edges
@@ -513,7 +525,8 @@ def _condition_dag_from_frames(concept_df, ca_df, anchors, root=None,
 
 
 def load_condition_dag(spark, *, anchors, cdr, billing, root=None,
-                       anchor_hierarchy=None, hier_concept_class="Disorder",
+                       anchor_hierarchy=None, hier_concept_class="",
+                       hier_restrict_under=None,
                        hier_min_class_size=2, hier_max_class_fraction=1.0):
     """Read `concept` + `concept_ancestor` from BigQuery and build the condition
     DAG (concept-id space) over one or more `anchors`. BQ wrapper around
@@ -538,6 +551,7 @@ def load_condition_dag(spark, *, anchors, cdr, billing, root=None,
     return _condition_dag_from_frames(
         concept, ca, anchors, root=root, anchor_hierarchy=anchor_hierarchy,
         hier_concept_class=hier_concept_class,
+        hier_restrict_under=hier_restrict_under,
         hier_min_class_size=hier_min_class_size,
         hier_max_class_fraction=hier_max_class_fraction)
 
