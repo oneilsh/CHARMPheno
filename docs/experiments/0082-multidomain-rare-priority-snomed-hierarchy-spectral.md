@@ -1,7 +1,7 @@
 ---
 id: 82
 slug: multidomain-rare-priority-snomed-hierarchy-spectral
-status: pending
+status: done
 model_class: multidomain
 cohort: population_rare_priority
 cohort_def: population_rare_priority
@@ -73,6 +73,21 @@ the flat 0079 fit; if it does so here and the AP recovers toward flat (~0.020),
 the 0080 collapse was under-fitting, not pooling. If starved topics stay low AND
 AP is still well below flat, pooling genuinely underperforms. Costs ~15–30 min of
 spectral init at K=424; worth it for a clean read. Original 0080 notes follow.
+
+## Result — confound cleared, collapse survives (insight 0080)
+
+Spectral gave a **well-conditioned fit**: 5/424 starved topics (was 81 under random
+0080), 2/192 dead nodes (was 22). Yet case-finding **collapsed identically**:
+condition macro AP **0.006** (byte-for-byte 0080's random-init number), fixed 0.006,
+max:scaled 0.005, vs flat ~0.020. Per-anchor pattern unchanged — large/distinctive
+anchors hold (Congenital heart 0.127, SLE 0.112, Sarcoidosis 0.066, EDS 0.059),
+mid-tier neuro anchors sharing a flooded class collapse (MS 0.017, MG 0.004,
+CIDP 0.003, ALS 0.011). Spectral node topics confirm the flooding verbatim
+(Disorder of nervous system = diabetes; connective tissue = fracture/back pain;
+cardiovascular = SVT/CABG). **Init is proven irrelevant** (random 0080 == spectral
+0082 at the macro), so the collapse is structural, not under-fitting. Next: exp
+0081 (roll-up off) to isolate roll-up flooding from the hierarchy itself; random
+init is fine there. Full decision in insight 0080.
 
 ## exp 0080 — Hierarchical layout: SNOMED class nodes above anchors
 

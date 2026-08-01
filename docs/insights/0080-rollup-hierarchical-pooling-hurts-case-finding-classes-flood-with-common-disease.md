@@ -2,7 +2,11 @@
 
 **Date:** 2026-08-01
 **Topic:** hierarchy | pooling | rollup | case-finding | multidomain | decision
-**Status:** Confirmed on exp 0080 (SNOMED class hierarchy + roll-up attestation)
+**Status:** Confirmed on exp 0080 (random init) AND exp 0082 (spectral init) —
+the under-fit confound is now CLEARED: a well-conditioned spectral fit (5/424
+starved, 2/192 dead) reproduces the collapse exactly (condition macro 0.006),
+so the collapse is structural, not degenerate fitting. Roll-up-off (exp 0081)
+still pending as the roll-up-vs-hierarchy isolator.
 
 Exp 0080 is the first fit with a real hierarchy above the anchors: the compact
 SNOMED class hierarchy (`root → Disorder-class → anchor → descendants`, 60 classes
@@ -56,13 +60,29 @@ wrong center. This is a direct, mechanistic confirmation of insight 0076's
 verdict (shared/pooled structure is not worth it), now demonstrated rather than
 inferred.
 
+## exp 0082 update — the fit-quality confound is cleared (spectral init)
+
+Exp 0082 reran the identical hierarchy+roll-up layout with **spectral init**. The
+fit is now well-conditioned — **5/424 starved topics** (was 81) and **2/192 dead
+nodes** (was 22) — yet case-finding **collapsed identically**: condition macro AP
+**0.006** (byte-for-byte the random-init number), fixed 0.006, max:scaled 0.005,
+vs flat ~0.020. The per-anchor pattern is unchanged: distinctive/large anchors
+hold (Congenital heart 0.127, SLE 0.112, Sarcoidosis 0.066, EDS 0.059) while the
+mid-tier neuro anchors sharing a flooded class collapse (MS 0.017, MG 0.004, CIDP
+0.003, ALS 0.011). The spectral node topics confirm the flooding verbatim:
+*Disorder of nervous system* = type-2 diabetes / diabetic neuropathy;
+*Disorder of connective tissue* = fracture / low back pain / OA;
+*Disorder of cardiovascular system* = SVT / CABG / arrhythmia.
+
+**Conclusion: the collapse is structural, not under-fitting.** Random init and
+spectral init give the *same* macro (0.006), so init is proven irrelevant here —
+which also means downstream isolators (0081) need not spend spectral time.
+
 ## Caveats
 
-- **Confounded with fit quality.** K doubled (230 → 424) and random init left
-  81/424 starved topics + 22/192 dead nodes — a worse-conditioned fit that drags
-  everything down somewhat. But the class-topic *content* (back pain, hypertension)
-  and the class-specific mid-tier collapse show the flooding is a real structural
-  effect, not just init noise.
+- **Fit quality is ruled out (was the main caveat, now closed).** The original
+  81/424 starved / 22/192 dead under random init is gone under spectral (5/2), and
+  the AP is unchanged. So the collapse is not a degenerate fit.
 - **Not yet isolated from roll-up.** This tested hierarchy **with** roll-up. The
   hierarchy **without** roll-up (classes pool only the anchor patients — a
   rare-flavored class mean, not flooded) is the clean isolator and is untested. It
@@ -72,28 +92,37 @@ inferred.
   readout uses the hierarchy as a *scoring* structure at evaluation time; it does
   not require fit-time pooling and is unaffected by this negative result.
 
-## Decision — REVISED (the negative result is confounded by under-fitting)
+## Decision — roll-up hierarchical pooling hurts rare-disease case-finding (fit-quality ruled out)
 
-Initial read was "roll-up pooling is net-negative, don't ship." That is **too
-strong**: the 81/424 starved topics (random init, doubled K) mean the rare anchors
-were simply **under-fit**, so the AP drop conflates (a) pooling harm with (b) a
-degenerate fit. The mechanism above (common mass poured into tpn=2 class nodes)
-is a **capacity** problem — each class has far too few topics to absorb a huge
-heterogeneous population, so comorbidity leaks into the rare-anchor topics — and
-capacity/init are fixable, not fundamental. Before concluding anything about
-pooling, clear the confound:
+The criterion set in the prior revision — *"only if the fit is well-conditioned
+AND the hierarchy still underperforms flat do we conclude pooling is closed"* — is
+now **met** by exp 0082: a clean spectral fit (5/424 starved) still gives condition
+macro 0.006 vs flat 0.020. Roll-up hierarchical pooling **structurally
+underperforms** flat for rare-disease case-finding. The mechanism is the flooding
+above: "all patients with a disorder of X" is dominated by common X disease, so the
+class is a bad pooling prior for rare X.
 
-1. **Spectral init** on the same hierarchy+roll-up fit (exp 0082) — the spectral
-   0079 fit had 0 starved topics; random at K=424 has 81. This directly tests
-   whether the collapse was under-fitting. **Highest priority.**
-2. **Class capacity** — more topics for the class nodes (they must model whole
-   disease-class populations, not just the anchors). tpn is currently uniform;
-   raising it (or a class-specific capacity) is the second lever.
-3. **Roll-up isolation** — exp 0081 (`rollup_attestation: false`) shows whether
-   pooling over anchors-only avoids the flooding (or goes dead).
+**Two hypotheses remain open** (0082 held tpn=2, so it only ruled out *global*
+under-fitting, not these):
 
-Only if the fit is well-conditioned (few starved topics) AND the hierarchy still
-underperforms flat do we conclude pooling is closed for case-finding.
+1. **Roll-up flooding is the specific villain** (not the hierarchy itself). Test:
+   **exp 0081** (`rollup_attestation: false`) — classes then pool only the
+   anchor-routed patients (a rare-flavored class mean, not flooded). Random init is
+   fine (0080==0082 proved init-independence). **Run next — cheapest cut.**
+   - If 0081 recovers toward flat → drop roll-up, keep the hierarchy (it's still
+     wanted as the *eval-time* scoring structure for the within-class readout).
+   - If 0081 stays low or classes go dead → hierarchy pooling doesn't help
+     case-finding regardless of roll-up.
+2. **Class under-capacity** — tpn=2 can't carve rare sub-populations (MS) out from
+   the common center (diabetes) inside a class block. Test only if 0081 is also
+   low: raise class-node capacity (data-driven fixed per-node block sizes, not
+   per-node stick-breaking — see the HDP-rejection discussion). This is the last
+   lever before closing fit-time pooling and using the hierarchy purely as an
+   eval-time scoring structure.
+
+**What is decided now:** do not ship roll-up hierarchical pooling for case-finding.
+The hierarchy as an *eval-time* scoring structure (the colleague's "rank within
+class" use-case) is untouched by this and remains the higher-value path.
 
 **Setting context.** Exp 0080, rare_priority, cond+drug+measurement, SNOMED
 hierarchy (restrict-under 4274025, max_class_fraction 0.6, 60 classes) + roll-up,
