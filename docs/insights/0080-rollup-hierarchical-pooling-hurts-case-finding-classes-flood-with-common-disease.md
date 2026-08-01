@@ -78,6 +78,22 @@ mid-tier neuro anchors sharing a flooded class collapse (MS 0.017, MG 0.004, CID
 spectral init give the *same* macro (0.006), so init is proven irrelevant here —
 which also means downstream isolators (0081) need not spend spectral time.
 
+## exp 0081 update — no roll-up un-floods the classes (fit card, AP pending 0083)
+
+Exp 0081 ran the identical hierarchy with `rollup_attestation: false`. Its AP was
+lost (the persist step was OOM-killed, exit 143), but the **fit card is
+decisive on the mechanism**: the class nodes are ALIVE and RARE-FLAVORED, not
+flooded. Side-by-side, same node, roll-up (0080) -> no-roll-up (0081):
+"Disorder of connective tissue" fracture/back-pain/OA -> Sjogren's/systemic
+sclerosis/ANA/complement/DMARDs; "Disorder of cardiovascular system"
+hypertension/T2DM -> atherosclerosis/PVD + midodrine(POTS)/pyridostigmine(MG);
+"Degenerative disorder" -> monoclonal gammopathy/myeloma/SPEP. So the flooding is
+SPECIFICALLY the roll-up (routing every descendant patient up), exactly as
+predicted here — and the classes are not dead (gating does flow anchor mass to
+ancestors). What no-roll-up's fit card cannot show is whether the rare-flavored
+classes HELP case-finding; that needs a well-conditioned fit's AP, deferred to
+exp 0083 (this layout + spectral init).
+
 ## Caveats
 
 - **Fit quality is ruled out (was the main caveat, now closed).** The original
