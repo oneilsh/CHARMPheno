@@ -105,11 +105,18 @@ raise `CHARM_PROBE_EFFRANK_MAX`.
 ## Readout
 ```
 make -C analysis/cloud clean-exp ID=83
-export CHARM_DRIVER_MEMORY=12g          # avoid the 0081 persist-collect OOM (143)
 export CHARM_PROBE_EFFRANK=1            # per-node effective-rank table (spectral only)
 make -C analysis/cloud exp ID=83
 make -C analysis/cloud multidomain-weighting-readout ID=83 WEIGHTING_FIXED=1 WEIGHTING_JOBS=4
 ```
+**Driver memory:** use the DEFAULT 4g (do NOT export CHARM_DRIVER_MEMORY). In
+PySpark client mode the master runs both the JVM (bounded by --driver-memory) and
+the Python driver (numpy, unbounded), and spectral init holds ~3GB of per-node
+co-occurrence sketches in the PYTHON process. Raising --driver-memory to 12g on a
+RAM-limited master starves the Python side -> OS OOM-killer SIGKILLs init (exit
+-9). 0082 (heavier, 192 nodes) succeeded at 4g, so 4g is proven for this workload.
+Only bump MODESTLY (6g) and only if the *persist* step OOMs (143), never for the
+spectral-init phase.
 Compare per-anchor AP to flat 0078 and to roll-up 0082 (0.006). Flat condition
 macro is the ~0.020 bar to beat. The `[effrank]` lines answer the capacity
 question in parallel.

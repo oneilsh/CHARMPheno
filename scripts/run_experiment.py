@@ -822,13 +822,16 @@ def build_dashboard_args(
 # If these need to vary per-experiment, lift them into _base.yaml in a future
 # increment.
 #
-# Driver memory is env-overridable (CHARM_DRIVER_MEMORY, default 4g): the fit
-# itself is distributed, but the post-fit "persist test set" step COLLECTS the
-# held-out split to the driver (multidomain_cloud: bundle.test_df...collect()),
-# which can OOM-kill the driver (exit 143 / SIGTERM) on a large held-out set. A
-# borderline collect that squeaks through one run can be killed the next under
-# any extra master memory pressure, so raise this (e.g. 12g) when re-running a
-# fit whose eval died at "persist test set".
+# Driver memory is env-overridable (CHARM_DRIVER_MEMORY, default 4g). This bounds
+# only the driver JVM. In client mode the master ALSO runs the Python driver
+# (numpy, unbounded by this flag), and spectral init holds ~3GB of per-node
+# co-occurrence sketches THERE. So raising this trades JVM heap against Python
+# RSS on a shared master: too high (e.g. 12g on a ~15GB master) starves the
+# Python side and the OS OOM-killer SIGKILLs spectral init (exit -9). Only the
+# post-fit "persist test set" collect (bundle.test_df...collect(), JVM-side) can
+# want more; if THAT dies (exit 143 / SIGTERM) bump MODESTLY (6g). 4g is proven
+# for spectral fits up to ~200 nodes (exp 0082); keep the default unless persist
+# specifically OOMs.
 _DRIVER_MEMORY = os.environ.get("CHARM_DRIVER_MEMORY", "4g")
 
 SPARK_SUBMIT_FLAGS = [
