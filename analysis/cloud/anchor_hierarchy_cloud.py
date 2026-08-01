@@ -114,13 +114,20 @@ def _snomed_inputs(spark, args):
     anc_ids = sorted(set(int(x) for x in ca_anchor["ancestor_concept_id"]))
     # keep only Condition-domain STANDARD concepts as candidate class nodes.
     concept = (_read_bq(spark, args.cdr, args.billing, "concept")
-               .select("concept_id", "concept_name", "domain_id", "standard_concept")
+               .select("concept_id", "concept_name", "domain_id", "standard_concept",
+                       "concept_class_id")
                .where(F.col("concept_id").isin(sorted(set(anc_ids) | set(anchor_ids))))
                .toPandas())
     name = {int(c): str(n) for c, n in zip(concept["concept_id"], concept["concept_name"])}
-    valid = {int(c) for c, d, s in zip(concept["concept_id"], concept["domain_id"],
-                                       concept["standard_concept"])
-             if d == "Condition" and s == "S"} - set(anchor_ids)
+    # Class candidates: Condition-domain STANDARD concepts. The concept_class
+    # filter (default 'Disorder') drops SNOMED's cross-cutting "...finding" axis
+    # (Measurement/Functional/Viscus-structure findings) that are ancestors but
+    # not disease classes; empty --snomed-concept-class disables it.
+    cc = args.snomed_concept_class
+    valid = {int(c) for c, d, st, k in zip(
+                concept["concept_id"], concept["domain_id"],
+                concept["standard_concept"], concept["concept_class_id"])
+             if d == "Condition" and st == "S" and (not cc or k == cc)} - set(anchor_ids)
     # 2) class->ancestors among the valid class set (for specificity ordering).
     ca_class = (_read_bq(spark, args.cdr, args.billing, "concept_ancestor")
                 .select("ancestor_concept_id", "descendant_concept_id")
@@ -154,6 +161,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--disease", default="rare_priority")
     p.add_argument("--mondo-version", default="2026-06-02")
     p.add_argument("--mondo-cache-dir", default="data/mondo")
+    p.add_argument("--snomed-concept-class", default="Disorder",
+                   help="snomed: keep only this concept_class_id as class nodes "
+                        "(drops the SNOMED finding axis); '' disables the filter")
     p.add_argument("--stop-ids", default="",
                    type=lambda s: [int(x) for x in s.split(",") if x.strip()],
                    help="snomed: OMOP concept_ids to exclude as over-general classes")
