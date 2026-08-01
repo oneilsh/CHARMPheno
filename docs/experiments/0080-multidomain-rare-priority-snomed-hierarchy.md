@@ -32,12 +32,13 @@ meas_min_patient_count: 20
 # max_class_fraction 0.6 drops the giant umbrellas ("Disease" 1.0, "Disorder of
 # body system" 0.85) so classes like cardiovascular/nervous-system hang off root.
 anchor_hierarchy: snomed
-# hier_concept_class EMPTY = no concept_class filter. The 'Disorder' filter
-# matched ZERO ancestors in the AoU CDR (its SNOMED disorders are classed
-# 'Clinical Finding', not 'Disorder'), which emptied the class set and collapsed
-# the hierarchy to flat. Empty reproduces the working standalone tree; pin the
-# correct concept_class_id later once the vocab value is confirmed.
+# concept_class filtering does NOT separate disorders from findings in OMOP SNOMED
+# (both are 'Clinical Finding'; 'Disorder' matches nothing). The structural split
+# is descent from the SNOMED "Disease" concept (4274025): disorders are under it,
+# cross-cutting findings (Measurement/Functional/... finding) are not. So no
+# concept_class filter, and restrict class candidates to descendants of Disease.
 hier_concept_class: ""
+hier_restrict_under: 4274025
 hier_min_class_size: 2
 hier_max_class_fraction: 0.6
 init: random

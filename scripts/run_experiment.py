@@ -750,7 +750,8 @@ def build_multidomain_args(
         "--meas-min-patient-count", str(effective.get("meas_min_patient_count", 20)),
         # Anchor hierarchy above anchors (default none = flat forest).
         "--anchor-hierarchy", str(effective.get("anchor_hierarchy", "none")),
-        "--hier-concept-class", str(effective.get("hier_concept_class", "Disorder")),
+        "--hier-concept-class", str(effective.get("hier_concept_class", "")),
+        "--hier-restrict-under", str(effective.get("hier_restrict_under", "")),
         "--hier-min-class-size", str(effective.get("hier_min_class_size", 2)),
         "--hier-max-class-fraction", str(effective.get("hier_max_class_fraction", 1.0)),
         # SVI schedule (mirrors build_dag_placement_args). Default 0.0 = full-batch;

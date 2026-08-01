@@ -399,9 +399,14 @@ def parse_args(argv=None):
     p.add_argument("--anchor-hierarchy", choices=["none", "snomed"], default="none",
                    help="none = flat root->anchor forest (default). snomed = insert "
                         "the compact SNOMED class hierarchy above anchors.")
-    p.add_argument("--hier-concept-class", default="Disorder",
-                   help="concept_class_id kept as class nodes (drops SNOMED's "
-                        "finding axis); '' disables the filter.")
+    p.add_argument("--hier-concept-class", default="",
+                   help="concept_class_id kept as class nodes. NOTE: OMOP SNOMED has "
+                        "no 'Disorder' class (disorders are 'Clinical Finding'); "
+                        "prefer --hier-restrict-under. '' = no filter.")
+    p.add_argument("--hier-restrict-under", default="",
+                   help="keep only class candidates descending from this OMOP "
+                        "concept_id (4274025 = 'Disease' drops cross-cutting "
+                        "findings -- the structural disorder/finding split). '' = off.")
     p.add_argument("--hier-min-class-size", type=int, default=2)
     p.add_argument("--hier-max-class-fraction", type=float, default=1.0,
                    help="drop class nodes covering more than this fraction of "
@@ -577,6 +582,8 @@ def main(argv=None) -> int:
                 anchor_hierarchy=(None if args.anchor_hierarchy == "none"
                                   else args.anchor_hierarchy),
                 hier_concept_class=args.hier_concept_class,
+                hier_restrict_under=(int(args.hier_restrict_under)
+                                     if args.hier_restrict_under else None),
                 hier_min_class_size=args.hier_min_class_size,
                 hier_max_class_fraction=args.hier_max_class_fraction)
 
@@ -708,6 +715,7 @@ def main(argv=None) -> int:
                 "anchor_scope": args.anchor_scope,
                 "anchor_hierarchy": args.anchor_hierarchy,
                 "hier_concept_class": args.hier_concept_class,
+                "hier_restrict_under": args.hier_restrict_under,
                 "hier_max_class_fraction": args.hier_max_class_fraction,
                 "spectral_topo_order": args.spectral_topo_order,
                 "min_peak_ratio": args.min_peak_ratio,
