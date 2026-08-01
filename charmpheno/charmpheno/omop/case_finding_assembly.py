@@ -504,7 +504,12 @@ def _condition_dag_from_frames(concept_df, ca_df, anchors, root=None,
 
     # node_ids passed to build_condition_dag must include the anchors AND any
     # class nodes so they are in the nodeset (build_condition_dag adds only root).
-    return build_condition_dag(edges, root, node_ids + anchor_list + class_ids, names)
+    # Protect the inserted class nodes (and, in the hierarchy path, the disease
+    # anchors) from attestation pruning: class nodes are rarely coded directly, so
+    # without this they fall below min_n and the hierarchy collapses back to flat.
+    protected = set(class_ids) | (set(anchor_list) if class_ids else set())
+    return build_condition_dag(edges, root, node_ids + anchor_list + class_ids, names,
+                               protected=protected)
 
 
 def load_condition_dag(spark, *, anchors, cdr, billing, root=None,

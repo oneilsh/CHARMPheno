@@ -13,10 +13,14 @@ class ConditionDag:
     """Multi-parent condition DAG in concept-id space, rooted at `anchor`. `parents` maps a
     non-anchor concept id to its list of parent concept ids (the anchor has no entry)."""
 
-    def __init__(self, parents, anchor, names=None):
+    def __init__(self, parents, anchor, names=None, protected=None):
         self.parents = {c: sorted(set(ps)) for c, ps in parents.items() if c != anchor}
         self.anchor = anchor
         self.names = dict(names or {})
+        # Nodes exempt from attestation pruning even below min_n — deliberate
+        # structural scaffolding (disease anchors + inserted class nodes) that must
+        # survive to provide the hierarchy/pooling even when rarely coded directly.
+        self.protected = set(protected or ())
         self._depth = {}
 
     def nodes(self):
@@ -52,7 +56,7 @@ class ConditionDag:
         return parent_int, int2cid, cid2int
 
 
-def build_condition_dag(edges, anchor, node_ids, names=None):
+def build_condition_dag(edges, anchor, node_ids, names=None, protected=None):
     """From min-sep-1 (ancestor, descendant) edges restricted to `node_ids` (standard-condition
     descendants incl. the anchor), assemble the multi-parent parent map. A node with no in-set
     parent (orphan) attaches to the anchor so the DAG is connected and rooted."""
@@ -66,7 +70,9 @@ def build_condition_dag(edges, anchor, node_ids, names=None):
         if c != anchor and c not in parents:
             parents[c] = [anchor]
             orphans.add(c)                              # no in-set parent -> attached to anchor
-    dag = ConditionDag(parents, anchor, {c: (names or {}).get(c, str(c)) for c in nodeset})
+    dag = ConditionDag(parents, anchor,
+                       {c: (names or {}).get(c, str(c)) for c in nodeset},
+                       protected=protected)
     # Observability: a node orphaned here is indistinguishable in structure from a genuine depth-1
     # child, so surface the set — a large/unexpected orphan count signals an upstream edges/node_ids
     # extraction problem (e.g. a real parent filtered out as non-standard), not a real depth-1 node.
@@ -79,12 +85,13 @@ def prune_by_attestation(dag, counts, min_n):
     node to its nearest surviving ancestors (transitive walk up past dropped nodes). The anchor is
     never dropped. This is the principled size cap: a node no cohort patient populates cannot have a
     learnable topic."""
-    keep = {n for n in dag.nodes() if n == dag.anchor or counts.get(n, 0) >= min_n}
+    keep = {n for n in dag.nodes()
+            if n == dag.anchor or n in dag.protected or counts.get(n, 0) >= min_n}
     # Rewire each survivor to its nearest surviving ancestors — the SAME walk the pruning ledger
     # uses to report where patients land, so the two can never disagree (single source of truth).
     new_parents = {c: sorted(_nearest_surviving_ancestors(dag, c, keep))
                    for c in keep if c != dag.anchor}
-    return ConditionDag(new_parents, dag.anchor, dag.names)
+    return ConditionDag(new_parents, dag.anchor, dag.names, protected=dag.protected)
 
 
 def _nearest_surviving_ancestors(dag, node, keep):
