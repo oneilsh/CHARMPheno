@@ -35,7 +35,7 @@ anchor_hierarchy: snomed
 hier_concept_class: Disorder
 hier_min_class_size: 2
 hier_max_class_fraction: 0.6
-init: spectral
+init: random
 spectral_max_vocab: 12000
 spectral_method: scalable
 anchor_scope: frontier
@@ -61,6 +61,9 @@ SNOMED descendants`) via `case_finding_assembly._snomed_class_hierarchy` —
 ontology above and below anchors, class nodes are real concepts (so patients coded
 at a general level, e.g. "Vasculitis", attach to the class node). Multi-parent DAG
 (a disorder can sit under several classes), matching the sub-anchor DAG below.
+
+**Init:** `random` (not spectral) — spectral added ~15 min setup/run and insight
+0070 found it non-critical; using random to iterate on the hierarchy faster.
 
 **What this turns on**
 
