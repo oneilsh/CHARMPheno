@@ -74,3 +74,26 @@ def test_real_diabetes_subtree_structure():
     parent_int, int2cid, _ = dag.to_engine()
     lay = DagLayout(parent_int, n_bg=2, tpn=1)
     assert lay.K == 2 + 126                              # 126 non-root nodes + 2 background
+
+
+def test_protected_nodes_survive_pruning_below_min_n():
+    # A protected class node with zero attestation must survive (it is deliberate
+    # hierarchy scaffolding, rarely coded directly); an unprotected zero-count node
+    # is still dropped. 200 survives on its own count.
+    dag = build_condition_dag(
+        [(0, 100), (100, 200), (0, 300)], 0, [100, 200, 300], {}, protected={100})
+    assert dag.protected == {100}
+    after = prune_by_attestation(dag, {200: 50}, min_n=20)
+    assert 100 in after.nodes()      # protected -> kept despite 0 attestation
+    assert 300 not in after.nodes()  # unprotected, 0 attestation -> dropped
+    assert 200 in after.nodes()      # kept via its own count
+    assert after.protected == {100}  # protection carried into the pruned DAG
+
+
+def test_default_protected_is_empty_flat_path_unchanged():
+    # Without protected=, behavior is exactly as before (anchor-only protection).
+    dag = build_condition_dag([(0, 100), (0, 300)], 0, [100, 300], {})
+    assert dag.protected == set()
+    after = prune_by_attestation(dag, {}, min_n=20)
+    assert 100 not in after.nodes() and 300 not in after.nodes()
+    assert after.nodes() == {0}
