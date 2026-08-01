@@ -49,6 +49,7 @@ Domain-agnostic: integer token ids only, no OMOP/EHR vocabulary.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -352,6 +353,70 @@ def recover_beta_projected(QR: np.ndarray, p_w: np.ndarray, anchors,
     return beta
 
 
+def _log_effective_ranks(res, partition, bg_anchors, *, max_probe, tau):
+    """Diagnostic: per-node effective rank (data-driven K_v) off the same sketch.
+
+    Reuses this init's projected per-group sketches (``res.group_QR[g]`` /
+    ``res.group_p_w[g]``) -- the exact matrices the fit builds -- to reveal each
+    node's intrinsic phenotype dimensionality via pivoted-QR rank revelation
+    (see ``effective_rank``). Deflates each node against the background anchors
+    (``seed_rows=bg_anchors``) so the reported rank is diversity BEYOND the shared
+    background, matching the fit's per-group deflation. Prints a table only; it
+    has NO effect on the returned beta. Opt-in via ``CHARM_PROBE_EFFRANK`` so it
+    never runs (or costs anything) on a normal fit.
+
+    Note: participation ratio is the scale-invariant, parameter-free estimate;
+    threshold(tau) and eigengap are cross-checks; n_probed is the hard collapse
+    point. The rightmost totals contrast a diversity-driven allocation
+    (Σ round(participation), floored at 1) against today's uniform tpn×nodes, to
+    show whether data-driven K_v would shrink or blow up the layout.
+    """
+    from spark_vi.models.topic.effective_rank import (
+        allocate_topics,
+        effective_rank_report,
+    )
+
+    reports = {}
+    for g in partition.groups:
+        QR = res.group_QR.get(g)
+        pw = res.group_p_w.get(g)
+        if QR is None or pw is None:
+            continue
+        Qbar = _row_normalize_projected(QR, pw)
+        reports[g] = effective_rank_report(
+            Qbar, max_probe, seed_rows=bg_anchors, tau=tau
+        )
+    if not reports:
+        print("[effrank] no foreground groups to probe", flush=True)
+        return
+
+    ordered = sorted(
+        reports.items(), key=lambda kv: kv[1]["participation"], reverse=True
+    )
+    print(
+        f"\n[effrank] per-node effective rank (max_probe={max_probe}, tau={tau}); "
+        "PR=participation (default), thr=threshold, gap=eigengap, n=collapse point",
+        flush=True,
+    )
+    print("[effrank] node\tPR\tthr\tgap\tn", flush=True)
+    for g, rep in ordered:
+        print(
+            f"[effrank] {g}\t{rep['participation']:.1f}\t"
+            f"{rep['threshold']}\t{rep['eigengap']}\t{rep['n_probed']}",
+            flush=True,
+        )
+    effranks = {g: rep["participation"] for g, rep in reports.items()}
+    alloc = allocate_topics(effranks, floor=1)
+    k_diversity = sum(alloc.values())
+    k_uniform = partition.K - partition.background_k
+    print(
+        f"[effrank] foreground K: diversity-driven Σround(PR)={k_diversity} "
+        f"vs uniform tpn×nodes={k_uniform} "
+        f"(bg={partition.background_k}, nodes={len(reports)})",
+        flush=True,
+    )
+
+
 def scalable_spectral_init_beta(
     rdd, partition, V: int, *, d: int | None = None,
     seed: int = 0, min_doc_freq: int = 5,
@@ -402,6 +467,16 @@ def scalable_spectral_init_beta(
     # Short-fill guard: fill only what find_anchors_projected returned.
     n_bg = min(len(bg_idx), bg_beta.shape[0])
     beta[bg_idx[:n_bg]] = bg_beta[:n_bg]
+
+    # Opt-in diagnostic (no effect on beta): dump per-node effective rank so we can
+    # see whether data-driven K_v would shrink or blow up the layout. Runs only
+    # when CHARM_PROBE_EFFRANK is set; CHARM_PROBE_EFFRANK_MAX overrides max_probe.
+    if os.environ.get("CHARM_PROBE_EFFRANK"):
+        try:
+            _mp = int(os.environ.get("CHARM_PROBE_EFFRANK_MAX", "40"))
+        except ValueError:
+            _mp = 40
+        _log_effective_ranks(res, partition, bg_anchors, max_probe=_mp, tau=0.01)
 
     # Step 2: each group's foreground on its within-group sketch, deflated vs bg.
     for g in partition.groups:
