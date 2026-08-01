@@ -393,6 +393,19 @@ def parse_args(argv=None):
                    default="auto")
     p.add_argument("--anchor-scope", choices=["closure", "frontier"],
                    default="closure")
+    # Insert the compact SNOMED class hierarchy ABOVE anchors (root -> class ->
+    # anchor -> descendants). "none" (default) = today's flat root -> anchor
+    # forest. See case_finding_assembly._snomed_class_hierarchy + insight 0079.
+    p.add_argument("--anchor-hierarchy", choices=["none", "snomed"], default="none",
+                   help="none = flat root->anchor forest (default). snomed = insert "
+                        "the compact SNOMED class hierarchy above anchors.")
+    p.add_argument("--hier-concept-class", default="Disorder",
+                   help="concept_class_id kept as class nodes (drops SNOMED's "
+                        "finding axis); '' disables the filter.")
+    p.add_argument("--hier-min-class-size", type=int, default=2)
+    p.add_argument("--hier-max-class-fraction", type=float, default=1.0,
+                   help="drop class nodes covering more than this fraction of "
+                        "anchors (suppresses over-general umbrellas; 1.0 = keep all).")
     p.add_argument("--spectral-topo-order", choices=["forward", "reverse"],
                    default="forward")
     p.add_argument("--min-peak-ratio", type=float, default=5.0,
@@ -560,7 +573,12 @@ def main(argv=None) -> int:
             anchors = disease_anchors(args.disease)
             root = _FOREST_ROOT_CID if len(anchors) > 1 else None
             before_dag = load_condition_dag(
-                spark, anchors=anchors, root=root, cdr=args.cdr, billing=args.billing)
+                spark, anchors=anchors, root=root, cdr=args.cdr, billing=args.billing,
+                anchor_hierarchy=(None if args.anchor_hierarchy == "none"
+                                  else args.anchor_hierarchy),
+                hier_concept_class=args.hier_concept_class,
+                hier_min_class_size=args.hier_min_class_size,
+                hier_max_class_fraction=args.hier_max_class_fraction)
 
             doc_spec = PatientCohortDocSpec(min_doc_length=args.doc_min_length)
             bundle = assemble_multidomain_from_events(
@@ -688,6 +706,9 @@ def main(argv=None) -> int:
                 "learning_rate_kappa": args.learning_rate_kappa,
                 "spectral_method": args.spectral_method,
                 "anchor_scope": args.anchor_scope,
+                "anchor_hierarchy": args.anchor_hierarchy,
+                "hier_concept_class": args.hier_concept_class,
+                "hier_max_class_fraction": args.hier_max_class_fraction,
                 "spectral_topo_order": args.spectral_topo_order,
                 "min_peak_ratio": args.min_peak_ratio,
                 "dead_nodes": dead,

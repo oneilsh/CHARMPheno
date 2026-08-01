@@ -96,6 +96,32 @@ def test_max_class_fraction_suppresses_the_umbrella():
     assert h["terminal_class"]["gpa"] is None     # its only class was dropped
 
 
+def test_hierarchy_to_edges_wires_root_classes_and_anchors():
+    from anchor_hierarchy import reduce_to_anchor_hierarchy, hierarchy_to_edges
+    # concept-id space: 100/101 anchors under class 200, which is under class 300.
+    adj = _adj([("anchor:100", "200"), ("anchor:101", "200"),
+                ("200", "300"), ("300", "9999")])
+    h = reduce_to_anchor_hierarchy(
+        ["anchor:100", "anchor:101"], adj, stop=["9999"], min_class_size=2)
+    edges = hierarchy_to_edges(h, 0)  # root concept-id 0
+    es = set(edges)
+    # 200 covers {100,101}; 300 covers the same -> chain collapses to one class 200.
+    assert (0, 200) in es               # top class -> root
+    assert (200, 100) in es and (200, 101) in es  # anchors under their class
+    assert all(isinstance(a, int) and isinstance(b, int) for a, b in edges)
+
+
+def test_hierarchy_to_edges_unclustered_anchor_attaches_to_root():
+    from anchor_hierarchy import reduce_to_anchor_hierarchy, hierarchy_to_edges
+    adj = _adj([("anchor:100", "200"), ("anchor:101", "200"), ("200", "9999"),
+                ("anchor:500", "600"), ("600", "9999")])
+    h = reduce_to_anchor_hierarchy(
+        ["anchor:100", "anchor:101", "anchor:500"], adj, stop=["9999"],
+        min_class_size=2)
+    edges = set(hierarchy_to_edges(h, 0))
+    assert (0, 500) in edges  # singleton anchor -> root directly
+
+
 def test_reports_raw_ancestor_count_we_avoid():
     from anchor_hierarchy import reduce_to_anchor_hierarchy
     adj = _adj([
