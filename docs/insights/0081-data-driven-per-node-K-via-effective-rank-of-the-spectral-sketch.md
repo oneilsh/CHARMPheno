@@ -2,8 +2,39 @@
 
 **Date:** 2026-08-01
 **Topic:** capacity | per-node-K | spectral | hierarchy | HDP | method | decision
-**Status:** Method built + validated on synthetic; awaiting real numbers (opt-in
-probe on a spectral fit). Motivated by insight 0080's open capacity hypothesis.
+**Status:** Method built + validated on synthetic; FIRST real numbers (exp 0084)
+exposed that RAW rank (background-only deflation) is volume-inflated and saturates
+-> refined to PROGRESSIVE (parent-)deflation + a labeled sidecar readout. Motivated
+by insight 0080's capacity hypothesis; now also serving phenotype profiling (a
+first-class use case independent of case-finding AP).
+
+## Real-data finding (exp 0084) and the parent-deflation refinement
+
+The first real probe (exp 0084, no-roll-up spectral, background-only deflation)
+came back SATURATED: ~140/155 nodes hit thr=40 and n_probed=40 (max_probe ceiling),
+PR spanned 2.3–36, and Σround(PR) ~2800 vs the current foreground K of 775 —
+"crazy large", the opposite of the hoped-for efficient bound. Diagnosis: the RAW
+per-node co-occurrence rank measures the node population's ENTIRE comorbidity load
+(every rare-disease patient also carries hypertension/diabetes/labs/drugs), which
+is high-dimensional EHR structure shared with background and ancestors — so raw
+rank is closer to a VOLUME proxy than a diversity one (the labeled readout reports
+corr(PR, log10 n_docs) precisely to confirm this).
+
+**Fix — progressive (parent-)deflation.** The meaningful K_v is a node's phenotype
+INCREMENT over its ancestors, not its whole load. The probe now deflates each node
+against background + its already-recovered ANCESTOR anchors (the SAME seed_rows the
+fit uses for that node, so it mirrors the forward topo-order deflation), collapsing
+the shared structure and leaving the node's own increment. Implemented in
+`gated_init.scalable_block_aligned_lambda` (the gated multidomain init — NOT the
+STM `scalable_spectral_init_beta`, which was the earlier wrong home).
+
+**Labeled sidecar readout.** The probe writes `effrank.json` (node -> {PR, thr,
+gap, n, n_docs}) to the run dir (path via CHARM_PROBE_EFFRANK_OUT, set by
+multidomain_cloud). `analysis/cloud/effrank_readout.py` (`make effrank-readout
+ID=N`) joins it with manifest names + each node's training-doc count (n_docs, now
+surfaced on ProjectedCoocResult) into a labeled table sorted by PR, plus the
+PR-vs-volume correlation and a saturation warning. n_docs is captured free (the
+per-node projected pass already counts docs).
 
 ## The problem
 

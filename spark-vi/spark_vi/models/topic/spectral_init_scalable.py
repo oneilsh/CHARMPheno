@@ -136,6 +136,10 @@ class ProjectedCoocResult:
                the wrong normalizer there. A doc in group g adds its SAME
                pw_contrib to both p_w and group_p_w[g].
     group_df_w:group label -> (V,) within-group document frequency over L ≥ 2 docs.
+    n_docs:    number of contributing docs (L ≥ 2) accumulated in this pass. For a
+               node-filtered pass (gated init's per-node ``rdd_u``) this is that
+               node's training-doc count -- surfaced for the effective-rank probe's
+               diversity-vs-volume readout (a node's rank vs how many docs it has).
     """
     pooled_QR: np.ndarray
     group_QR: dict
@@ -143,6 +147,7 @@ class ProjectedCoocResult:
     df_w: np.ndarray
     group_p_w: dict
     group_df_w: dict
+    n_docs: int = 0
 
 
 def projected_cooccurrence_rdd(
@@ -221,7 +226,7 @@ def projected_cooccurrence_rdd(
     )
     return ProjectedCoocResult(
         pooled_QR=pooled, group_QR=group_QR, p_w=p_w, df_w=df_w,
-        group_p_w=group_p_w, group_df_w=group_df_w,
+        group_p_w=group_p_w, group_df_w=group_df_w, n_docs=int(_n),
     )
 
 

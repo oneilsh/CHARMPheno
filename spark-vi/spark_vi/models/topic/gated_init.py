@@ -438,15 +438,24 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                     "scalable_block_aligned_lambda: node %s has zero training "
                     "docs; its block stays at the 1e-9 floor (uninitialized).", u)
                 continue
-            if probe_effrank:
-                # deflate against background so the rank measures diversity BEYOND
-                # the shared background, matching the fit's per-node deflation.
-                _qbar_u = _row_normalize_projected(res_u.pooled_QR, res_u.p_w)
-                effrank_reports[u] = effective_rank_report(
-                    _qbar_u, _probe_max, seed_rows=bg_anchors, tau=0.01)
             anc = relatives(u)
             seed_rows = list(bg_anchors) + [a for p in anc
                                             for a in node_anchors.get(p, [])]
+            if probe_effrank:
+                # PROGRESSIVE (parent-)deflation: deflate node u's sketch against
+                # background + u's already-recovered ANCESTOR anchors (the SAME
+                # seed_rows the fit uses for u), so the rank measures u's phenotypic
+                # INCREMENT over its ancestors -- NOT its whole comorbidity load
+                # (which is shared background/parent structure and would otherwise
+                # inflate every node's rank to the ceiling). Forward topo order
+                # guarantees ancestors are recovered before u, so their anchors are
+                # in node_anchors. (Reverse order deflates against descendants; the
+                # increment interpretation follows topo_order either way.)
+                _qbar_u = _row_normalize_projected(res_u.pooled_QR, res_u.p_w)
+                _rep_u = effective_rank_report(
+                    _qbar_u, _probe_max, seed_rows=seed_rows, tau=0.01)
+                _rep_u["n_docs"] = int(res_u.n_docs)   # diversity-vs-volume readout
+                effrank_reports[u] = _rep_u
             fg_anchors = find_anchors_projected(
                 res_u.pooled_QR, res_u.p_w, res_u.df_w, lay.tpn,
                 seed_rows=seed_rows, min_doc_freq=min_doc_freq)
@@ -464,11 +473,24 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                     beta[idx] = fg_beta[j]
 
         if probe_effrank:
-            from spark_vi.models.topic.effective_rank import log_effrank_table
+            from spark_vi.models.topic.effective_rank import (
+                log_effrank_table, save_effrank_sidecar,
+            )
             print("", flush=True)
             log_effrank_table(effrank_reports, n_nodes=len(lay.nodes),
                               k_uniform=len(lay.nodes) * lay.tpn,
                               printer=lambda s: print(s, flush=True))
+            # Persist a sidecar (node id -> report) so a post-fit readout can join
+            # names + doc counts without re-parsing logs or re-running the fit. The
+            # path is provided by the driver via CHARM_PROBE_EFFRANK_OUT (the fit's
+            # out_dir); log-only if unset.
+            _out = os.environ.get("CHARM_PROBE_EFFRANK_OUT")
+            if _out:
+                try:
+                    save_effrank_sidecar(effrank_reports, _out)
+                    print(f"[effrank] wrote sidecar -> {_out}", flush=True)
+                except OSError as e:
+                    print(f"[effrank] sidecar write failed ({e})", flush=True)
     finally:
         group_rdd.unpersist(blocking=False)
 
