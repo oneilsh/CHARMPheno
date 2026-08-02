@@ -420,8 +420,11 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
         # CHARM_PROBE_EFFRANK is set; CHARM_PROBE_EFFRANK_MAX overrides max_probe.
         probe_effrank = bool(os.environ.get("CHARM_PROBE_EFFRANK"))
         effrank_reports: dict[int, dict] = {}
+        node_pivots: dict[int, set] = {}   # node -> its FULL accumulated pivot claim
         if probe_effrank:
-            from spark_vi.models.topic.effective_rank import effective_rank_report
+            from spark_vi.models.topic.effective_rank import (
+                pivoted_qr_residual_spectrum, report_from_spectrum,
+            )
             try:
                 _probe_max = int(os.environ.get("CHARM_PROBE_EFFRANK_MAX", "40"))
             except ValueError:
@@ -442,18 +445,25 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
             seed_rows = list(bg_anchors) + [a for p in anc
                                             for a in node_anchors.get(p, [])]
             if probe_effrank:
-                # PROGRESSIVE (parent-)deflation: deflate node u's sketch against
-                # background + u's already-recovered ANCESTOR anchors (the SAME
-                # seed_rows the fit uses for u), so the rank measures u's phenotypic
-                # INCREMENT over its ancestors -- NOT its whole comorbidity load
-                # (which is shared background/parent structure and would otherwise
-                # inflate every node's rank to the ceiling). Forward topo order
-                # guarantees ancestors are recovered before u, so their anchors are
-                # in node_anchors. (Reverse order deflates against descendants; the
-                # increment interpretation follows topo_order either way.)
+                # HIERARCHICAL deflation: deflate node u's sketch against
+                # background + its ancestors' FULL accumulated pivot claim (not the
+                # fit's tpn anchors -- that under-deflates and every node re-counts
+                # shared comorbidity, inflating Σ rank). Ancestors claim first
+                # (forward topo order), so u measures only its INCREMENT and the
+                # total telescopes toward the corpus rank instead of summing
+                # per-node full ranks. node_pivots[u] carries u's FULL claim
+                # (ancestors' ∪ u's own) so descendants deflate against the whole
+                # chain regardless of whether relatives() gives direct parents or
+                # all ancestors.
+                _anc_pivots: set = set()
+                for _p in anc:
+                    _anc_pivots |= node_pivots.get(_p, set())
+                _seed = list(bg_anchors) + sorted(_anc_pivots)
                 _qbar_u = _row_normalize_projected(res_u.pooled_QR, res_u.p_w)
-                _rep_u = effective_rank_report(
-                    _qbar_u, _probe_max, seed_rows=seed_rows, tau=0.01)
+                _spec_u, _own_pivots = pivoted_qr_residual_spectrum(
+                    _qbar_u, _probe_max, seed_rows=_seed, return_pivots=True)
+                node_pivots[u] = _anc_pivots | set(int(x) for x in _own_pivots)
+                _rep_u = report_from_spectrum(_spec_u, tau=0.01)
                 _rep_u["n_docs"] = int(res_u.n_docs)   # diversity-vs-volume readout
                 effrank_reports[u] = _rep_u
             fg_anchors = find_anchors_projected(
