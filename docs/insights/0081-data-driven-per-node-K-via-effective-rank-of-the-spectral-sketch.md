@@ -175,6 +175,42 @@ top-level classes still double-count structure they share (we dropped the single
 bulk first); if the total is still large, restoring the umbrella root is the next
 lever.
 
+## exp 0085 (umbrella root + hierarchical deflation): telescoping works, but attribution is DEPTH-driven
+
+With the "Disease" umbrella (max_class_fraction 1.0) as a real claiming root +
+batched hierarchical deflation, d=800/max_probe=300:
+- **Σround(PR) 4708 -> 1326** (telescoping cut the double-counting ~3.5x), and
+  **corr(PR, log10 n_docs) = +0.30** (weak-moderate -- the deflation genuinely
+  decoupled rank from raw volume; the raw version tracked it much harder). The
+  estimator works.
+- **But the attribution is DEPTH-driven, not clinical.** Forward topo order lets
+  ancestors claim first, so every node at depth >=4 -- including the deep disease
+  anchors (EDS, Marfan, MS, Long QT, aneurysm) -- got 0 increment; their pooling
+  ancestors already claimed their directions. Only shallow anchors (Scleroderma,
+  SLE, Sarcoidosis, sitting at depth 1-3) claimed real rank. So "data-driven K_v"
+  under forward order gives K to whatever is shallow and ~1 to everything deep.
+- Part real (shawn: rare anchors have little unique signal beyond their neighbors;
+  conditioned on class, marginal info is small -- consistent with the case-finding
+  wash), part artifact (depth decides who claims).
+- **The umbrella HURT identification:** cond macro 0.021 (0083) -> 0.016 (0085),
+  max:scaled 0.015 < condition-only 0.016. "Disease" covers everyone, so every
+  anchor doc attests to it and its topic dilutes the anchor signal -- background
+  absorption failed for ID. Representation-vs-identification tension again.
+
+## The fix (exp 0086): reverse topo order = "phenotypes not correlated to known labels"
+
+shawn's idea -- "find phenotypes, but not ones strongly correlated to these known
+distinct labels" -- maps exactly onto **reverse topo order** (already built):
+recover leaves (anchors) FIRST with their full specific signal, then deflate each
+ancestor against its descendants, so class topics = structure NOT in any anchor
+descendant = the label-orthogonal residual. Flips the attribution so ANCHORS carry
+the signal and classes become background-like; may also help ID by keeping anchor
+topics pure. exp 0086 tests it (one variable off 0085). If a class pooling many
+anchors still collapses to ~0 residual, that is acceptable now (anchors carry the
+K). The deeper, un-built version is an explicit supervised orthogonalization of
+the shared/background topics against the label-discriminative subspace -- reserve
+for if reverse topo order under-delivers.
+
 ## Decision / sequencing
 
 Build first, wire into layout only if needed. Per insight 0080, per-node capacity
