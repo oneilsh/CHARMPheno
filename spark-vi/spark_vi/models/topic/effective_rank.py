@@ -38,7 +38,8 @@ import numpy as np
 _EPS = 1e-12
 
 
-def pivoted_qr_residual_spectrum(M, max_probe, *, seed_rows=None, eps=_EPS):
+def pivoted_qr_residual_spectrum(M, max_probe, *, seed_rows=None, eps=_EPS,
+                                 return_pivots=False):
     """Rank-revealing pivoted-QR spectrum of the rows of ``M``.
 
     ``M`` is ``(V, d)`` -- one row per candidate direction (a word's normalized
@@ -64,6 +65,13 @@ def pivoted_qr_residual_spectrum(M, max_probe, *, seed_rows=None, eps=_EPS):
     ``find_anchors_projected`` -- picking the largest-residual row, orthonormalizing
     its residual, projecting it out of the rest -- but at BLAS speed, which the
     ~O(#nodes) driver-side probe needs at V in the thousands.
+
+    ``return_pivots``: also return the row ids selected as pivots (in order),
+    EXCLUDING seed_rows -- the node's own newly-claimed directions. Used by the
+    hierarchical probe to accumulate a node's claim and deflate its descendants
+    against the ancestors' FULL claimed set (not just their fit anchors), so a
+    descendant measures its INCREMENT over its ancestors and shared structure is
+    counted once, not re-counted per node.
     """
     M = np.asarray(M, dtype=np.float64)
     V = M.shape[0]
@@ -82,6 +90,7 @@ def pivoted_qr_residual_spectrum(M, max_probe, *, seed_rows=None, eps=_EPS):
             si = int(s)
             deflate(si)
             chosen.append(si)         # seeds deflate but do not enter the spectrum
+    n_seed = len(chosen)
 
     spectrum: list[float] = []
     for _ in range(int(max_probe)):
@@ -95,6 +104,8 @@ def pivoted_qr_residual_spectrum(M, max_probe, *, seed_rows=None, eps=_EPS):
         spectrum.append(best)
         chosen.append(i)
         deflate(i)
+    if return_pivots:
+        return spectrum, chosen[n_seed:]   # newly-claimed pivots, seeds excluded
     return spectrum
 
 
@@ -164,6 +175,22 @@ def effective_rank(M, max_probe, *, method="participation", seed_rows=None,
     raise ValueError(f"unknown method: {method!r}")
 
 
+def report_from_spectrum(spec, *, tau=0.01):
+    """All three estimators + the raw spectrum, from an already-computed spectrum.
+
+    Split out so a caller that already ran ``pivoted_qr_residual_spectrum`` (e.g.
+    to also collect pivots for hierarchical deflation) can build the report
+    without re-running the pivoted-QR.
+    """
+    return {
+        "participation": participation_ratio(spec),
+        "threshold": threshold_rank(spec, tau=tau),
+        "eigengap": eigengap_rank(spec),
+        "n_probed": len(spec),
+        "spectrum": spec,
+    }
+
+
 def effective_rank_report(M, max_probe, *, seed_rows=None, tau=0.01):
     """All three estimators plus the raw spectrum, for side-by-side node dumps.
 
@@ -172,13 +199,7 @@ def effective_rank_report(M, max_probe, *, seed_rows=None, tau=0.01):
     (list) so the caller can eyeball the decay and pick an allocation rule.
     """
     spec = pivoted_qr_residual_spectrum(M, max_probe, seed_rows=seed_rows)
-    return {
-        "participation": participation_ratio(spec),
-        "threshold": threshold_rank(spec, tau=tau),
-        "eigengap": eigengap_rank(spec),
-        "n_probed": len(spec),
-        "spectrum": spec,
-    }
+    return report_from_spectrum(spec, tau=tau)
 
 
 def allocate_topics(effranks, *, floor=1, cap=None, round_fn=None):

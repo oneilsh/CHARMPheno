@@ -145,6 +145,36 @@ nodes. A principled larger per-node K, if ever wanted, needs a MODEL-SELECTION
 criterion (per-node held-out predictive gain / coherence drop-off), not linear
 co-occurrence rank.
 
+## REOPENED — hierarchical (full-ancestor-pivot) deflation may bound the total
+
+The negative result above used a WEAK deflation: each node was deflated against its
+ancestors' fit anchors only (tpn=2 directions per ancestor), so every node
+re-counted the same shared comorbidity and Σ blew up to 4708 -- it summed per-node
+FULL ranks, double-counting shared structure across the hierarchy. (shawn's
+diagnosis.)
+
+The fix: **hierarchical deflation** -- let ancestors claim their full rank first
+(forward topo order), then deflate each descendant against its ancestors' FULL
+accumulated pivot set (not tpn anchors). A descendant then measures only its
+INCREMENT over its ancestors, and the total telescopes toward the corpus's true
+dimensionality instead of Σ(per-node full ranks). Implemented: the probe now
+collects each node's pivots (`pivoted_qr_residual_spectrum(..., return_pivots=True)`)
+into `node_pivots[u]` (ancestors' ∪ own), and deflates u against
+`bg ∪ ancestors' accumulated pivots`. Synthetic validation: two children sharing
+a rank-5 parent subspace measure naive=10 independently vs **hier=0** when deflated
+against the parent's pivots -- the shared subspace collapses exactly as intended.
+
+**Open real-data test:** re-run the probe with a HIGH cap
+(CHARM_PROBE_EFFRANK_MAX=400 = d, effectively no cap) so top-level classes claim
+their full rank and descendants collapse to increments. If Σround(PR) comes down
+from 4708 to something near the corpus dimensionality (a few hundred), the
+hierarchical decomposition works and gives a bounded, non-double-counted per-node
+K_v -- reviving the estimator for phenotype profiling. Residual caveat: sibling
+top-level classes still double-count structure they share (we dropped the single
+"Disease" umbrella via max_class_fraction=0.6, so no single root claims the shared
+bulk first); if the total is still large, restoring the umbrella root is the next
+lever.
+
 ## Decision / sequencing
 
 Build first, wire into layout only if needed. Per insight 0080, per-node capacity

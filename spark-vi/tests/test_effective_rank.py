@@ -9,6 +9,7 @@ from spark_vi.models.topic.effective_rank import (
     log_effrank_table,
     participation_ratio,
     pivoted_qr_residual_spectrum,
+    report_from_spectrum,
     threshold_rank,
 )
 
@@ -90,6 +91,49 @@ def test_spectrum_respects_max_probe():
     M = _planted_rank_matrix(50, 40, rank=30, seed=3, noise=1e-3)
     spec = pivoted_qr_residual_spectrum(M, max_probe=8)
     assert len(spec) <= 8
+
+
+def test_return_pivots_excludes_seeds():
+    M = _planted_rank_matrix(80, 30, rank=5, seed=7, noise=1e-8)
+    spec, pivots = pivoted_qr_residual_spectrum(M, max_probe=20, return_pivots=True)
+    # pivots align 1:1 with the spectrum (one pivot per recorded direction)
+    assert len(pivots) == len(spec)
+    # seeded pivots are NOT returned; seeding two rows drops them from the pivots
+    spec2, pivots2 = pivoted_qr_residual_spectrum(
+        M, max_probe=20, seed_rows=[0, 1], return_pivots=True)
+    assert 0 not in pivots2 and 1 not in pivots2
+
+
+def test_report_from_spectrum_matches_effective_rank_report():
+    M = _planted_rank_matrix(80, 30, rank=5, seed=8, noise=1e-8)
+    spec = pivoted_qr_residual_spectrum(M, max_probe=20)
+    a = report_from_spectrum(spec)
+    b = effective_rank_report(M, max_probe=20)
+    assert a["participation"] == b["participation"]
+    assert a["threshold"] == b["threshold"]
+    assert a["n_probed"] == b["n_probed"]
+
+
+def test_hierarchical_deflation_bounds_the_total():
+    # Two children spanning the SAME rank-5 subspace as their parent. Measured
+    # independently each shows ~5, summing to ~15 (parent + 2 kids). But deflating
+    # the children against the parent's full pivot claim leaves ~0 increment, so
+    # the hierarchical total collapses toward the parent's 5 -- the effect the
+    # hierarchical probe relies on.
+    rng = np.random.default_rng(11)
+    basis = rng.standard_normal((5, 30))
+    parent = rng.standard_normal((80, 5)) @ basis + 1e-9 * rng.standard_normal((80, 30))
+    kidA = rng.standard_normal((80, 5)) @ basis + 1e-9 * rng.standard_normal((80, 30))
+    kidB = rng.standard_normal((80, 5)) @ basis + 1e-9 * rng.standard_normal((80, 30))
+    _, p_piv = pivoted_qr_residual_spectrum(parent, 20, return_pivots=True)
+    # naive: children measured independently
+    naive = (threshold_rank(pivoted_qr_residual_spectrum(kidA, 20))
+             + threshold_rank(pivoted_qr_residual_spectrum(kidB, 20)))
+    # hierarchical: children deflated against parent's pivots (same subspace)
+    hierA = threshold_rank(pivoted_qr_residual_spectrum(kidA, 20, seed_rows=p_piv))
+    hierB = threshold_rank(pivoted_qr_residual_spectrum(kidB, 20, seed_rows=p_piv))
+    assert naive >= 8               # ~5 + ~5 independently
+    assert hierA + hierB <= 2       # increment over the shared parent ~ 0
 
 
 def test_seed_rows_deflate_without_contributing():
