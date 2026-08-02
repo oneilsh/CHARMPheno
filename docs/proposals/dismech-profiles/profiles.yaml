@@ -1,0 +1,242 @@
+id: https://w3id.org/monarch-initiative/dismech/profiles
+name: dismech-profiles
+title: Phenotype Profiles (DisMech)
+description: >-
+  A lightweight schema for computationally-derived phenotype profiles attached to
+  a disease. A profile is a small, human-readable summary of an EHR-derived signal:
+  one or more categorical distributions over medical codes (conditions, drugs, labs,
+  ...) that tend to co-occur in a disease's patient cohort.
+
+  Design goals: (1) stay simple and presentation-agnostic — carry the data, not a
+  visualization; (2) key everything to MONDO so it slots into DisMech's existing
+  Mondo-based disease pages, and let Mondo's own subclass hierarchy express any
+  nesting; (3) push everything model-specific and fast-changing into an ignorable
+  `source` block, so the core survives changes to the underlying model. Codes are
+  labeled by OMOP concept_id (not source-vocabulary CURIEs), with the OMOP
+  vocabulary release recorded in `source` for provenance.
+license: BSD-3-Clause
+default_range: string
+default_prefix: dismech_profiles
+
+prefixes:
+  dismech_profiles: https://w3id.org/monarch-initiative/dismech/profiles/
+  linkml: https://w3id.org/linkml/
+  MONDO: http://purl.obolibrary.org/obo/MONDO_
+  xsd: http://www.w3.org/2001/XMLSchema#
+
+imports:
+  - linkml:types
+
+# NOTE ON CODES: medical codes are identified by OMOP concept_id (an integer),
+# deliberately NOT by source-vocabulary CURIEs (e.g. SNOMED/RxNorm/LOINC), which
+# have proven brittle to expose directly. The OMOP vocabulary release that resolves
+# these ids is recorded once per profile set in `Source.omop_vocabulary_version`.
+
+classes:
+
+  ProfileSet:
+    tree_root: true
+    description: >-
+      A collection of profiles produced by one modeling run over one dataset.
+      Carries the shared provenance (`source`) once; DisMech can render the whole
+      set or filter `profiles` to a single disease for a given page.
+    attributes:
+      id:
+        identifier: true
+        description: Stable identifier for this profile set.
+      name:
+        description: Human-readable name for this profile set.
+      source:
+        range: Source
+        inlined: true
+        description: Shared provenance for every profile in this set.
+      profiles:
+        range: Profile
+        multivalued: true
+        inlined_as_list: true
+        description: The profiles in this set.
+
+  Profile:
+    description: >-
+      A single computationally-derived phenotype profile associated with one
+      disease. Its content is one or more categorical distributions over OMOP
+      concepts, grouped by domain.
+    attributes:
+      id:
+        identifier: true
+        description: Stable identifier for this profile.
+      label:
+        required: true
+        description: Short human-readable name for the profile (e.g. its dominant theme).
+      description:
+        description: Optional longer free-text description of the profile.
+      disease:
+        range: uriorcurie
+        required: true
+        description: >-
+          The MONDO term this profile characterizes (e.g. MONDO:0020066). This is
+          the join key to a DisMech disease page. Any hierarchy/nesting is expressed
+          through Mondo itself, not through this schema.
+      prevalence:
+        range: float
+        minimum_value: 0
+        maximum_value: 1
+        description: >-
+          Optional. Fraction of the disease cohort that expresses this profile
+          (a privacy-safe aggregate).
+      distributions:
+        range: CodeDistribution
+        multivalued: true
+        inlined_as_list: true
+        required: true
+        description: One or more categorical distributions over codes, one per domain.
+      source:
+        range: Source
+        inlined: true
+        description: >-
+          Optional per-profile provenance. When omitted, the profile inherits the
+          enclosing ProfileSet's `source`.
+
+  CodeDistribution:
+    description: >-
+      One categorical distribution over OMOP concepts within a single domain
+      (e.g. a distribution over conditions, or over drugs). Weights are within-domain
+      probability masses and are typically truncated to the top-weighted codes.
+    attributes:
+      domain:
+        range: DomainEnum
+        required: true
+        description: The OMOP domain this distribution ranges over.
+      codes:
+        range: WeightedCode
+        multivalued: true
+        inlined_as_list: true
+        required: true
+        description: The weighted codes, conventionally ordered by descending weight.
+      truncated:
+        range: boolean
+        description: >-
+          True if only the top-weighted codes are listed and the low-weight tail is
+          omitted (the listed weights may therefore not sum to 1).
+
+  WeightedCode:
+    description: A single OMOP concept and its weight within a CodeDistribution.
+    attributes:
+      concept_id:
+        range: integer
+        required: true
+        description: >-
+          OMOP concept_id — the canonical code label. Resolve against the OMOP
+          vocabulary release named in `Source.omop_vocabulary_version`.
+      concept_name:
+        required: true
+        description: Human-readable OMOP concept name (denormalized for display).
+      weight:
+        range: float
+        required: true
+        minimum_value: 0
+        maximum_value: 1
+        description: Probability mass of this concept within its distribution.
+      value_qualifier:
+        range: ValueQualifierEnum
+        description: >-
+          For value-aware domains (chiefly measurements), the value band this token
+          represents — e.g. a "high" vs "low" abnormality of the same lab concept.
+
+  Source:
+    description: >-
+      Provenance for a profile set (or an individual profile): the dataset, the
+      OMOP vocabulary release, a free-text overview of the modeling, references, and
+      an open metadata escape hatch. Everything model-specific and fast-changing
+      lives here and can be ignored by consumers that only want the profiles.
+    attributes:
+      resource:
+        description: Name of the pipeline/tool that produced the profiles (e.g. "CHARMPheno").
+      description:
+        description: Free-text overview of the modeling approach that produced these profiles.
+      method:
+        range: MethodEnum
+        description: Coarse method category (kept intentionally loose).
+      dataset:
+        description: Source dataset (e.g. "All of Us").
+      dataset_version:
+        description: Dataset release/version (e.g. "CDR v8").
+      omop_vocabulary_version:
+        description: OMOP vocabulary release used to resolve all concept_ids in the set.
+      cohort_size:
+        range: integer
+        description: Number of patients in the cohort (a privacy-safe aggregate).
+      model_version:
+        description: Internal model/experiment version identifier (e.g. "exp-0083").
+      references:
+        range: Reference
+        multivalued: true
+        inlined_as_list: true
+        description: External references — publications, preprints, software, datasets, URLs.
+      metadata:
+        range: MetadataItem
+        multivalued: true
+        inlined_as_list: true
+        description: Arbitrary key/value provenance not covered by the named fields above.
+
+  Reference:
+    description: An external reference — a publication, preprint, software, dataset, or URL.
+    attributes:
+      id:
+        description: An identifier such as "PMID:12345678", "doi:10.1234/abcd", or a URL.
+      url:
+        range: uri
+        description: A resolvable URL, when available.
+      title:
+        description: Human-readable title.
+      type:
+        range: ReferenceTypeEnum
+        description: The kind of reference.
+
+  MetadataItem:
+    description: An arbitrary key/value provenance pair.
+    attributes:
+      key:
+        key: true
+        required: true
+      value:
+        required: true
+
+enums:
+
+  DomainEnum:
+    description: OMOP-aligned content domains a distribution can range over (extensible).
+    permissible_values:
+      condition:
+      drug:
+      measurement:
+      observation:
+      procedure:
+      device:
+      other:
+
+  ValueQualifierEnum:
+    description: Value band for value-aware (measurement) tokens.
+    permissible_values:
+      HIGH:
+      LOW:
+      NORMAL:
+      ABNORMAL:
+      POSITIVE:
+      NEGATIVE:
+
+  MethodEnum:
+    description: Coarse category for how a profile set was derived.
+    permissible_values:
+      COMPUTATIONAL_INFERENCE:
+      EHR_COHORT_ASSOCIATION:
+      OTHER:
+
+  ReferenceTypeEnum:
+    permissible_values:
+      PUBLICATION:
+      PREPRINT:
+      SOFTWARE:
+      DATASET:
+      WEBSITE:
+      OTHER:

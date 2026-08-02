@@ -1,0 +1,81 @@
+# Worked example instance of the `dismech-profiles` schema (tree_root: ProfileSet).
+#
+# Illustrative only. The `condition` concept_ids/names are REAL OMOP concepts drawn
+# from an All of Us Ehlers-Danlos cohort vocabulary; the `drug` and `measurement`
+# rows use PLACEHOLDER concept_ids (marked below) purely to demonstrate multi-domain
+# distributions and the value_qualifier field. Weights are made up.
+#
+# Validate with:  linkml-validate -s profiles.yaml -C ProfileSet example_ehlers_danlos.yaml
+
+id: charmpheno:profileset/aou-cdr8-rare-priority
+name: CHARMPheno rare-priority profiles (All of Us CDR v8)
+
+source:
+  resource: CHARMPheno
+  method: COMPUTATIONAL_INFERENCE
+  description: >-
+    Interpretable phenotype profiles discovered by a Bayesian multi-domain topic
+    model over structured EHR records (conditions, drugs, and value-aware lab
+    measurements), fit per Mondo-anchored cohort. Each profile is a group of codes
+    that tend to co-occur within the disease's patient population. Profiles contain
+    no patient-level data.
+  dataset: All of Us
+  dataset_version: Controlled Tier CDR v8
+  omop_vocabulary_version: v5.0 31-AUG-2024
+  cohort_size: 4200
+  model_version: exp-0083
+  references:
+    - id: "https://github.com/monarch-initiative/CHARMPheno"
+      url: "https://github.com/monarch-initiative/CHARMPheno"
+      title: CHARMPheno — interpretable computational phenotyping
+      type: SOFTWARE
+  metadata:
+    - key: min_cohort_size
+      value: "20"
+    - key: lookback_days
+      value: "365"
+
+profiles:
+
+  - id: charmpheno:profile/eds-chronic-pain-gi
+    label: Chronic pain & GI dysmotility pattern
+    description: >-
+      Co-occurring chronic pain, back/abdominal pain, and reflux commonly seen in
+      the Ehlers-Danlos / hypermobility population, with associated analgesic use.
+    disease: MONDO:0020066            # Ehlers-Danlos syndrome
+    prevalence: 0.34
+    distributions:
+      - domain: condition
+        truncated: true
+        codes:
+          - { concept_id: 436096, concept_name: "Chronic pain",                                   weight: 0.22 }
+          - { concept_id: 194133, concept_name: "Low back pain",                                   weight: 0.18 }
+          - { concept_id: 200219, concept_name: "Abdominal pain",                                  weight: 0.14 }
+          - { concept_id: 4144111, concept_name: "Gastroesophageal reflux disease without esophagitis", weight: 0.11 }
+          - { concept_id: 77670,  concept_name: "Chest pain",                                      weight: 0.08 }
+      - domain: drug
+        truncated: true
+        codes:
+          # PLACEHOLDER concept_ids (illustrative)
+          - { concept_id: 1177480, concept_name: "Ibuprofen",  weight: 0.15 }
+          - { concept_id: 1124957, concept_name: "Oxycodone",  weight: 0.09 }
+      - domain: measurement
+        truncated: true
+        codes:
+          # PLACEHOLDER concept_ids (illustrative) — value-aware tokens
+          - { concept_id: 3016723, concept_name: "Creatinine [Mass/volume] in Serum or Plasma", value_qualifier: HIGH, weight: 0.06 }
+
+  - id: charmpheno:profile/eds-dysautonomia-anxiety
+    label: Dysautonomia & anxiety pattern
+    description: >-
+      Sleep-disordered breathing and anxiety, a second recurrent theme in the
+      hypermobility population.
+    disease: MONDO:0020066
+    prevalence: 0.21
+    distributions:
+      - domain: condition
+        truncated: true
+        codes:
+          - { concept_id: 442588, concept_name: "Obstructive sleep apnea syndrome", weight: 0.24 }
+          - { concept_id: 442077, concept_name: "Anxiety disorder",                 weight: 0.19 }
+          - { concept_id: 4329041, concept_name: "Pain",                            weight: 0.10 }
