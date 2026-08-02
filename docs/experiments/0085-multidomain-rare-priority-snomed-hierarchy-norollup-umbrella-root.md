@@ -49,7 +49,7 @@ spectral_method: scalable
 # (exit -9) on this 7.8GB / 2-core master. d=400 -> ~2.2GB, fits (free master RAM
 # first; drop to 300 if still tight). d only needs to JL-preserve pairwise word
 # distances (~400 >> log V), so anchor quality is essentially unchanged.
-spectral_proj_dim: 2000
+spectral_proj_dim: 800
 anchor_scope: frontier
 spectral_topo_order: forward
 strip_mode: both
@@ -79,11 +79,17 @@ that claims the shared bulk FIRST (forward topo order), and every class below
 deflates against its full claim -> increments shrink, total telescopes toward the
 corpus dimensionality.
 
-**d=2000, no cap (max_probe=2000).** d is raised from 400 to reveal the corpus's
-true rank (the big driver affords it; the gated init holds one (V x d) sketch at a
-time, ~400MB/node, sequential). Tractable: dominant cost is per-node deflation
-against accumulated ancestor pivots, ~2 * seed * V * d * #nodes ~ 1.4e13 flops ~
-5-15 min of driver BLAS.
+**d=800, max_probe=300 (informed, tractable).** A first attempt at d=2000 /
+max_probe=2000 ran OVERNIGHT: the probe's seed deflation was memory-bound rank-1
+updates (fixed -> now one BLAS-3 projection), and TWO driver costs scale linearly
+with d -- the per-pivot selection loop (bounded by max_probe) and
+recover_beta_projected's NNLS (a driver loop over V words on (d, anchors) systems).
+The increments we care about are intrinsically LOW-dimensional (a node's specific
+phenotype is a handful of directions), so large d/max_probe buy nothing and just
+multiply driver time. d=800 gives ample JL headroom (>> log V); max_probe=300
+captures the shared bulk for deflation (top-300 directions carry the high-variance
+shared structure; descendants' increments barely move beyond that). Expect ~20-30
+min total.
 
 **Read the effrank by the per-node INCREMENTS, NOT Σ (the reframe that matters):**
 raising d lets the umbrella (Disease covers ALL patients) claim a LARGE rank (up
@@ -111,7 +117,7 @@ discrimination (still fine — its job here is the effrank telescoping).
 ```
 make -C analysis/cloud clean-exp ID=85
 export CHARM_PROBE_EFFRANK=1
-export CHARM_PROBE_EFFRANK_MAX=2000       # = d (projection dim); no cap below the sketch's ceiling
+export CHARM_PROBE_EFFRANK_MAX=300        # bounds the sequential per-pivot selection loop; captures the shared bulk
 make -C analysis/cloud exp ID=85
 make -C analysis/cloud summarize-exp ID=85
 make -C analysis/cloud effrank-readout ID=85
