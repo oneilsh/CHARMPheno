@@ -22,6 +22,7 @@ findings. Kept for the real-DAG A/B harness and as the extension point for futur
 from __future__ import annotations
 
 import logging
+import os
 
 import numpy as np
 
@@ -380,6 +381,7 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
     from spark_vi.models.topic.spectral_init_scalable import (
         projected_cooccurrence_rdd, find_anchors_projected,
         recover_beta_projected, default_projection_dim,
+        _row_normalize_projected,
     )
     _validate_anchor_scope(anchor_scope)
     if d is None:
@@ -413,6 +415,18 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
         for i in range(min(lay.n_bg, bg_beta.shape[0])):
             beta[i] = bg_beta[i]
 
+        # Opt-in diagnostic (no effect on lambda): dump per-node effective rank
+        # (data-driven K_v) off each node's own sketch. Runs only when
+        # CHARM_PROBE_EFFRANK is set; CHARM_PROBE_EFFRANK_MAX overrides max_probe.
+        probe_effrank = bool(os.environ.get("CHARM_PROBE_EFFRANK"))
+        effrank_reports: dict[int, dict] = {}
+        if probe_effrank:
+            from spark_vi.models.topic.effective_rank import effective_rank_report
+            try:
+                _probe_max = int(os.environ.get("CHARM_PROBE_EFFRANK_MAX", "40"))
+            except ValueError:
+                _probe_max = 40
+
         # Step 2: each node, in `topo_order`, its OWN filtered one-slab pass.
         node_anchors: dict[int, list] = {}
         order, relatives = _node_order_and_relatives(lay, topo_order)
@@ -424,6 +438,12 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                     "scalable_block_aligned_lambda: node %s has zero training "
                     "docs; its block stays at the 1e-9 floor (uninitialized).", u)
                 continue
+            if probe_effrank:
+                # deflate against background so the rank measures diversity BEYOND
+                # the shared background, matching the fit's per-node deflation.
+                _qbar_u = _row_normalize_projected(res_u.pooled_QR, res_u.p_w)
+                effrank_reports[u] = effective_rank_report(
+                    _qbar_u, _probe_max, seed_rows=bg_anchors, tau=0.01)
             anc = relatives(u)
             seed_rows = list(bg_anchors) + [a for p in anc
                                             for a in node_anchors.get(p, [])]
@@ -442,6 +462,13 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
             for j, idx in enumerate(lay.block[u]):
                 if j < fg_beta.shape[0]:
                     beta[idx] = fg_beta[j]
+
+        if probe_effrank:
+            from spark_vi.models.topic.effective_rank import log_effrank_table
+            print("", flush=True)
+            log_effrank_table(effrank_reports, n_nodes=len(lay.nodes),
+                              k_uniform=len(lay.nodes) * lay.tpn,
+                              printer=lambda s: print(s, flush=True))
     finally:
         group_rdd.unpersist(blocking=False)
 

@@ -6,6 +6,7 @@ from spark_vi.models.topic.effective_rank import (
     allocate_topics,
     effective_rank_report,
     eigengap_rank,
+    log_effrank_table,
     participation_ratio,
     pivoted_qr_residual_spectrum,
     threshold_rank,
@@ -115,6 +116,35 @@ def test_allocate_topics_rounds_and_clamps():
 def test_allocate_topics_no_cap():
     out = allocate_topics({1: 40.3}, floor=1, cap=None)
     assert out == {1: 40}
+
+
+def _report(pr, thr, gap, n):
+    return {"participation": pr, "threshold": thr, "eigengap": gap,
+            "n_probed": n, "spectrum": []}
+
+
+def test_log_effrank_table_sorts_and_summarizes():
+    lines = []
+    reports = {
+        7: _report(2.0, 2, 2, 2),      # tight leaf
+        3: _report(20.0, 25, 25, 40),  # broad class
+        5: _report(6.0, 6, 6, 8),      # mid
+    }
+    log_effrank_table(reports, n_nodes=3, k_uniform=6, printer=lines.append)
+    body = "\n".join(lines)
+    # rows sorted by participation desc: node 3 (20) before 5 (6) before 7 (2)
+    order = [ln.split("\t")[0].split()[-1] for ln in lines
+             if ln.count("\t") == 4 and "node" not in ln]
+    assert order == ["3", "5", "7"]
+    # diversity-driven K = round(20)+round(6)+round(2) = 28 vs uniform 6
+    assert "Σround(PR)=28" in body
+    assert "current foreground K=6" in body
+
+
+def test_log_effrank_table_empty():
+    lines = []
+    log_effrank_table({}, n_nodes=5, k_uniform=10, printer=lines.append)
+    assert any("no nodes probed" in ln for ln in lines)
 
 
 def test_allocate_total_tracks_diversity_not_node_count():

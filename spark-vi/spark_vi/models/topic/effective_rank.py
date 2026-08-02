@@ -197,3 +197,39 @@ def allocate_topics(effranks, *, floor=1, cap=None, round_fn=None):
             k = min(int(cap), k)
         out[node] = k
     return out
+
+
+def log_effrank_table(reports, *, n_nodes, k_uniform, printer=print,
+                      prefix="[effrank]"):
+    """Print a per-node effective-rank table + the diversity-vs-uniform K summary.
+
+    ``reports`` maps node id -> an ``effective_rank_report`` dict. Rows are sorted
+    by participation ratio (the default estimator) descending. The final line
+    contrasts a diversity-driven foreground K (``Σ round(participation)``, floored
+    at 1) against ``k_uniform`` (the current layout's foreground topic count), so
+    the reader sees at a glance whether data-driven K_v would shrink or blow up
+    the topic budget. ``printer`` is injectable for testing; defaults to ``print``.
+    """
+    if not reports:
+        printer(f"{prefix} no nodes probed")
+        return
+    ordered = sorted(
+        reports.items(), key=lambda kv: kv[1]["participation"], reverse=True
+    )
+    printer(
+        f"{prefix} per-node effective rank; PR=participation (default), "
+        "thr=threshold, gap=eigengap, n=collapse point"
+    )
+    printer(f"{prefix} node\tPR\tthr\tgap\tn")
+    for node, rep in ordered:
+        printer(
+            f"{prefix} {node}\t{rep['participation']:.1f}\t"
+            f"{rep['threshold']}\t{rep['eigengap']}\t{rep['n_probed']}"
+        )
+    effranks = {node: rep["participation"] for node, rep in reports.items()}
+    k_diversity = sum(allocate_topics(effranks, floor=1).values())
+    printer(
+        f"{prefix} foreground K: diversity-driven Σround(PR)={k_diversity} "
+        f"vs current foreground K={int(k_uniform)} "
+        f"(nodes probed={len(reports)}/{n_nodes})"
+    )

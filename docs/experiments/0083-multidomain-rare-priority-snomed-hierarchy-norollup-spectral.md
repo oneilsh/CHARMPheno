@@ -1,7 +1,7 @@
 ---
 id: 83
 slug: multidomain-rare-priority-snomed-hierarchy-norollup-spectral
-status: pending
+status: done
 model_class: multidomain
 cohort: population_rare_priority
 cohort_def: population_rare_priority
@@ -63,6 +63,20 @@ seed: 42
 ---
 
 # exp 0083 — SNOMED hierarchy, NO roll-up, SPECTRAL init (clean case-finding read)
+
+## Result — recovers to flat (roll-up flooding was the whole villain); insight 0082
+
+Condition macro AP **0.021** vs flat ~0.020 and roll-up 0082's 0.006. Removing
+roll-up recovers case-finding fully; the hierarchy is neutral (parity, not a win):
+EDS 0.060->0.083 and Scleroderma (0.086) benefit from coherent connective-tissue
+pooling, SLE/MS dilute, netting flat. Clean fit (a few thin deep nodes floored:
+32/33/34/78/94/102/150). Decision: roll-up closed; keep the no-roll-up hierarchy
+as the eval-time within-class scaffold (next build); fit-time pooling to BEAT flat
+is exploratory. **NOTE:** the effrank probe silently did not fire here — it was
+wired into the non-gated STM init, but the multidomain fit uses the gated init
+(scalable_block_aligned_lambda). Fixed after this run; a future spectral fit with
+CHARM_PROBE_EFFRANK=1 now emits the `[effrank]` table. Full read: insight 0082.
+
 
 The clean counterpart to exp 0082. The 2x2 across {roll-up, init} is now:
 
