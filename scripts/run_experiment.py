@@ -1162,6 +1162,20 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     effective = merge_config(defaults, fm)
 
+    # Fast-iteration override: CHARM_MAX_ITER caps EM iterations for the whole run.
+    # The effrank probe writes its sidecar during spectral INIT (before any EM
+    # iteration), so effrank-only iteration (topo order, deflation, d,
+    # max_class_fraction -- none of which need a converged fit) can set
+    # CHARM_MAX_ITER=1 to skip the ~15-20 min EM and still get effrank.json +
+    # manifest.json for `make effrank-readout`. Do NOT use it when you need the AP
+    # readout -- that scores the fitted lambda and needs a converged fit.
+    _max_iter_override = os.environ.get("CHARM_MAX_ITER")
+    if _max_iter_override:
+        effective["max_iter"] = int(_max_iter_override)
+        print(f"[run-exp] CHARM_MAX_ITER override: max_iter={effective['max_iter']} "
+              "(effrank-only fast mode; AP readout will NOT be meaningful)",
+              flush=True)
+
     # 2b. --build-covariates-only: dispatch to standalone script and return.
     if args.build_covariates_only:
         if effective.get("model_class") != "stm":
