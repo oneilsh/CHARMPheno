@@ -85,11 +85,18 @@ def pivoted_qr_residual_spectrum(M, max_probe, *, seed_rows=None, eps=_EPS,
             b /= nrm
             R[:] -= np.outer(R @ b, b)
 
-    if seed_rows is not None:
-        for s in seed_rows:
-            si = int(s)
-            deflate(si)
-            chosen.append(si)         # seeds deflate but do not enter the spectrum
+    if seed_rows is not None and len(seed_rows) > 0:
+        # BATCHED seed pre-deflation: project R onto the orthogonal complement of
+        # the seed rows' span in ONE BLAS-3 shot (QR + two matmuls) instead of k
+        # memory-bound rank-1 updates. Orthogonal projection onto a subspace is
+        # basis-independent, so this is numerically equivalent to the sequential
+        # Gram-Schmidt deflate() above -- but at BLAS-3 throughput, which the
+        # hierarchical probe needs when a node deflates against thousands of
+        # accumulated ancestor pivots (the seed loop was the overnight bottleneck).
+        seed_ids = sorted({int(s) for s in seed_rows})
+        Q, _ = np.linalg.qr(M[seed_ids].T)     # (d, r): orthonormal basis of span
+        R -= (R @ Q) @ Q.T
+        chosen.extend(seed_ids)                # excluded from selection + spectrum
     n_seed = len(chosen)
 
     spectrum: list[float] = []
