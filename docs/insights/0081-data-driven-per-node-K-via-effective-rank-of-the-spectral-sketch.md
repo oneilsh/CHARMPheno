@@ -2,11 +2,13 @@
 
 **Date:** 2026-08-01
 **Topic:** capacity | per-node-K | spectral | hierarchy | HDP | method | decision
-**Status:** Method built + validated on synthetic; FIRST real numbers (exp 0084)
-exposed that RAW rank (background-only deflation) is volume-inflated and saturates
--> refined to PROGRESSIVE (parent-)deflation + a labeled sidecar readout. Motivated
-by insight 0080's capacity hypothesis; now also serving phenotype profiling (a
-first-class use case independent of case-finding AP).
+**Status:** Method built + validated; real numbers (exp 0084 raw, exp 0083 re-probe
+with parent-deflation) yield a NEGATIVE RESULT — effrank-of-co-occurrence is not a
+usable K_v CEILING (EHR co-occurrence is intrinsically ~100-dim/node; parent-
+deflation does not collapse it). It survives as a FLOOR/prune detector (thin nodes
+-> tpn=1) and the tooling is reusable. See the NEGATIVE RESULT section below.
+Motivated by insight 0080's capacity hypothesis; the phenotype-profiling K should
+be chosen for interpretability, not data dimensionality.
 
 ## Real-data finding (exp 0084) and the parent-deflation refinement
 
@@ -108,6 +110,40 @@ fit of the SNOMED-hierarchy layout (e.g. re-init exp 0082) and read the
 it needs more capacity) while tight leaves show ~2? And does `Σround(PR)` come out
 near today's K (~a few hundred) or "crazy large"? If many nodes saturate at
 n_probed=max_probe, raise `CHARM_PROBE_EFFRANK_MAX`.
+
+## NEGATIVE RESULT (exp 0083 re-probe): effrank-of-co-occurrence is NOT a usable K_v ceiling
+
+Parent-deflation did NOT collapse the ranks. At max_probe=100 the parent-deflated
+Σround(PR) came to **4708** (vs ~2800 background-only at max_probe=40), with 50+
+nodes still SATURATING at 100. Confound: we changed deflation method AND ceiling
+(40->100) together, so most of the jump is the ceiling revealing previously-clipped
+directions — but the magnitude settles it regardless: parent-deflation removes only
+a handful of ancestor-anchor directions (~2-10), negligible against a co-occurrence
+rank of 100+. Deflation cannot rescue it.
+
+**Root cause:** EHR co-occurrence is intrinsically ~100-dimensional per populous
+node — every patient carries a rich, distinct comorbidity/lab/drug profile — so the
+effective rank measures the RICHNESS OF THE DATA, not the number of clinically
+meaningful phenotype topics. There is essentially NO natural data-driven ceiling.
+exp 0084 corroborates from the other side: at tpn=5 only 15/815 topics starved, so
+the fit uses about as many topics as it is given. "How many topics does the data
+support" has no useful finite answer here.
+
+**What survives:**
+- **effrank as a FLOOR/prune detector, not a ceiling.** The low end is clean and
+  meaningful: nodes 102 (PR 1.6), 133 (2.6), 78 (3.6), 32 (4.4), 8 (6.0), 28 (6.7)
+  are exactly the thin/degenerate nodes that floored/starved in the fit. effrank
+  reliably flags nodes that genuinely want only ~1-2 topics -> use it to prune thin
+  branches to tpn=1, NOT to set a large per-node ceiling.
+- **The tooling is sound and reusable** (probe, sidecar, labeled readout,
+  PR-vs-volume correlation) — it did its job by producing a clear negative result.
+
+**Reframe — choose K per node for the OBJECTIVE, not data dimensionality:**
+case-finding -> ~2 (exp 0084: more dilutes/hurts); phenotype profiling -> a small
+human-interpretable number (2-5 per class) with effrank floor-pruning of thin
+nodes. A principled larger per-node K, if ever wanted, needs a MODEL-SELECTION
+criterion (per-node held-out predictive gain / coherence drop-off), not linear
+co-occurrence rank.
 
 ## Decision / sequencing
 
