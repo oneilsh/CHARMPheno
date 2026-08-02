@@ -17,6 +17,7 @@ Two things it answers that the raw log table cannot:
 from __future__ import annotations
 
 import argparse
+import glob as _glob
 import json
 import math
 from pathlib import Path
@@ -129,10 +130,14 @@ def render(rows: list[dict], *, k_uniform: int | None = None) -> str:
 
 
 def _run_dir_glob(pattern: str) -> Path:
-    """Resolve a possibly-globbed --run-dir to a single existing directory."""
-    matches = sorted(Path().glob(pattern)) if any(c in pattern for c in "*?[") \
-        else [Path(pattern)]
-    dirs = [p for p in matches if p.is_dir()]
+    """Resolve a possibly-globbed --run-dir to a single existing directory.
+
+    Uses ``glob.glob`` (not ``Path.glob``) so ABSOLUTE globbed patterns work --
+    the runs dir is an absolute path and Path.glob rejects non-relative patterns.
+    """
+    matches = (sorted(_glob.glob(pattern)) if any(c in pattern for c in "*?[")
+               else [pattern])
+    dirs = [Path(p) for p in matches if Path(p).is_dir()]
     if not dirs:
         raise SystemExit(f"no run dir matched: {pattern}")
     return dirs[-1]
