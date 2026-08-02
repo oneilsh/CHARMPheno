@@ -49,7 +49,7 @@ spectral_method: scalable
 # (exit -9) on this 7.8GB / 2-core master. d=400 -> ~2.2GB, fits (free master RAM
 # first; drop to 300 if still tight). d only needs to JL-preserve pairwise word
 # distances (~400 >> log V), so anchor quality is essentially unchanged.
-spectral_proj_dim: 400
+spectral_proj_dim: 2000
 anchor_scope: frontier
 spectral_topo_order: forward
 strip_mode: both
@@ -79,14 +79,26 @@ that claims the shared bulk FIRST (forward topo order), and every class below
 deflates against its full claim -> increments shrink, total telescopes toward the
 corpus dimensionality.
 
-**Read the effrank first (the whole point):**
-- **Σround(PR) drops from 4708 toward the low hundreds** -> the umbrella root fixed
-  the double-counting; we have a bounded, non-double-counted per-node K_v for
-  phenotype profiling. Check the top rows: "Disease" should carry a large claim,
-  body-system classes much smaller increments.
-- **Still large** -> even the umbrella doesn't absorb the sibling overlap (sibling
-  body-system classes share structure not on the Disease->class path); then the
-  double-counting is inherent to a multi-parent DAG and effrank-as-K_v is closed.
+**d=2000, no cap (max_probe=2000).** d is raised from 400 to reveal the corpus's
+true rank (the big driver affords it; the gated init holds one (V x d) sketch at a
+time, ~400MB/node, sequential). Tractable: dominant cost is per-node deflation
+against accumulated ancestor pivots, ~2 * seed * V * d * #nodes ~ 1.4e13 flops ~
+5-15 min of driver BLAS.
+
+**Read the effrank by the per-node INCREMENTS, NOT Σ (the reframe that matters):**
+raising d lets the umbrella (Disease covers ALL patients) claim a LARGE rank (up
+to ~d), so Σround(PR) will be ~(root's big claim) + (small increments) -- it will
+NOT collapse to "low hundreds", and that is expected/correct, not a failure. The
+useful signal is the per-node increment (each node's phenotype dimensionality
+BEYOND its ancestors):
+- **Non-root nodes (body-system classes, anchors) show small, bounded PR**
+  (single / low-double digits) -> we have a usable per-node K_v for profiling;
+  Disease just eats the shared background. SUCCESS.
+- **Non-root nodes still show large PR** -> the umbrella's deflation didn't isolate
+  per-node structure (sibling overlap off the Disease->node path, inherent to a
+  multi-parent DAG); effrank-as-K_v is closed and K stays a modeling choice.
+Read the `effrank-readout` table DOWN PAST the Disease row; that increment
+distribution is the answer.
 
 **Watch the fit too (secondary):** "Disease" is a catch-all covering all anchors,
 so it acts like extra background — it MAY help identification by absorbing shared
@@ -99,7 +111,7 @@ discrimination (still fine — its job here is the effrank telescoping).
 ```
 make -C analysis/cloud clean-exp ID=85
 export CHARM_PROBE_EFFRANK=1
-export CHARM_PROBE_EFFRANK_MAX=400        # = d (projection dim); the sketch's hard ceiling
+export CHARM_PROBE_EFFRANK_MAX=2000       # = d (projection dim); no cap below the sketch's ceiling
 make -C analysis/cloud exp ID=85
 make -C analysis/cloud summarize-exp ID=85
 make -C analysis/cloud effrank-readout ID=85
