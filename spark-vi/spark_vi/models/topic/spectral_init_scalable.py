@@ -372,12 +372,13 @@ def _log_effective_ranks(res, partition, bg_anchors, *, max_probe, tau):
     show whether data-driven K_v would shrink or blow up the layout.
     """
     from spark_vi.models.topic.effective_rank import (
-        allocate_topics,
         effective_rank_report,
+        log_effrank_table,
     )
 
     reports = {}
-    for g in partition.groups:
+    groups = tuple(partition.groups)
+    for g in groups:
         QR = res.group_QR.get(g)
         pw = res.group_p_w.get(g)
         if QR is None or pw is None:
@@ -386,35 +387,10 @@ def _log_effective_ranks(res, partition, bg_anchors, *, max_probe, tau):
         reports[g] = effective_rank_report(
             Qbar, max_probe, seed_rows=bg_anchors, tau=tau
         )
-    if not reports:
-        print("[effrank] no foreground groups to probe", flush=True)
-        return
-
-    ordered = sorted(
-        reports.items(), key=lambda kv: kv[1]["participation"], reverse=True
-    )
-    print(
-        f"\n[effrank] per-node effective rank (max_probe={max_probe}, tau={tau}); "
-        "PR=participation (default), thr=threshold, gap=eigengap, n=collapse point",
-        flush=True,
-    )
-    print("[effrank] node\tPR\tthr\tgap\tn", flush=True)
-    for g, rep in ordered:
-        print(
-            f"[effrank] {g}\t{rep['participation']:.1f}\t"
-            f"{rep['threshold']}\t{rep['eigengap']}\t{rep['n_probed']}",
-            flush=True,
-        )
-    effranks = {g: rep["participation"] for g, rep in reports.items()}
-    alloc = allocate_topics(effranks, floor=1)
-    k_diversity = sum(alloc.values())
-    k_uniform = partition.K - partition.background_k
-    print(
-        f"[effrank] foreground K: diversity-driven Σround(PR)={k_diversity} "
-        f"vs uniform tpn×nodes={k_uniform} "
-        f"(bg={partition.background_k}, nodes={len(reports)})",
-        flush=True,
-    )
+    print("", flush=True)
+    log_effrank_table(reports, n_nodes=len(groups),
+                      k_uniform=partition.K - partition.background_k,
+                      printer=lambda s: print(s, flush=True))
 
 
 def scalable_spectral_init_beta(
