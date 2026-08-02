@@ -1,7 +1,7 @@
 ---
 id: 84
 slug: multidomain-rare-priority-snomed-hierarchy-norollup-tpn5
-status: pending
+status: done
 model_class: multidomain
 cohort: population_rare_priority
 cohort_def: population_rare_priority
@@ -63,6 +63,31 @@ seed: 42
 ---
 
 # exp 0084 — Capacity test: no-roll-up hierarchy at tpn=5 (+ effrank probe)
+
+## Result — capacity is a wash for case-finding (and dilutes condition)
+
+Macro AP tpn=2 (0083) -> tpn=5 (0084): condition **0.021 -> 0.014** (DOWN),
+measurement 0.006 -> 0.009, fixed:inclusive 0.018 -> 0.021, **max:scaled 0.019 ->
+0.019 (unchanged)**. More capacity did NOT turn parity into a win — it spread each
+node's signal across 5 topics and diluted the discriminative condition signal,
+with measurement picking up slack, netting a wash. Per-anchor mixed (Congenital
+heart max:scaled 0.097->0.115, Long QT up; SLE 0.046->0.040 down). **Capacity is
+not the case-finding lever, and blunt over-provisioning measurably hurts
+condition** — a concrete argument against "over-provision and let some die."
+
+BUT starvation stayed low (**15/815, ~2%**; dead 1/155), so the nodes genuinely
+have enough structure to fill ~5 topics — relevant for the PHENOTYPE-PROFILING use
+case (finer per-class resolution), which is a first-class goal independent of
+case-finding AP.
+
+**Effrank probe (raw, background-only deflation):** ~140/155 nodes SATURATED at
+max_probe=40 (thr=40, n=40); PR spanned 2.3–36; Σround(PR) ~2800 vs current 775 —
+"crazy large", because raw co-occurrence rank measures the node population's whole
+comorbidity load, not clean sub-phenotypes (a volume proxy). This motivated the
+PROGRESSIVE (parent-)deflation refinement + labeled sidecar readout (insight 0081,
+`make effrank-readout ID=N`), to be re-run for a meaningful K_v. Full read:
+insight 0082 (case-finding verdict), 0081 (effrank method).
+
 
 Flips ONLY `tpn` (2 -> 5) off the clean no-roll-up 0083 config. 0083 recovered
 case-finding to flat (cond macro 0.021 vs flat 0.020; insight 0082) but was a

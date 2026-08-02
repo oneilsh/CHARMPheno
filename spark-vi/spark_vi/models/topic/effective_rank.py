@@ -31,6 +31,8 @@ rule applies uniformly with no per-node calibration.
 """
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 _EPS = 1e-12
@@ -233,3 +235,28 @@ def log_effrank_table(reports, *, n_nodes, k_uniform, printer=print,
         f"vs current foreground K={int(k_uniform)} "
         f"(nodes probed={len(reports)}/{n_nodes})"
     )
+
+
+def save_effrank_sidecar(reports, path):
+    """Write a compact JSON sidecar of per-node effective-rank reports.
+
+    ``reports`` maps node id -> an ``effective_rank_report`` dict (optionally with
+    an ``n_docs`` field the caller added). The bulky raw ``spectrum`` is dropped;
+    the scalar estimators (participation/threshold/eigengap/n_probed) plus n_docs
+    are kept, JSON-coerced (numpy scalars -> Python). Keys are stringified node
+    ids (JSON object keys must be strings); a reader casts them back to int. A
+    post-fit readout joins this with the run's manifest (int2cid -> name_by_id)
+    and each node's n_docs for a labeled, count-annotated table.
+    """
+    out = {}
+    for node, rep in reports.items():
+        out[str(int(node))] = {
+            "participation": float(rep["participation"]),
+            "threshold": int(rep["threshold"]),
+            "eigengap": int(rep["eigengap"]),
+            "n_probed": int(rep["n_probed"]),
+            "n_docs": int(rep.get("n_docs", 0)),
+        }
+    with open(path, "w") as fh:
+        json.dump(out, fh, indent=2, sort_keys=True)
+    return out

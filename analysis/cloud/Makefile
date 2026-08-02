@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout anchor-select anchor-hierarchy summarize-exp measurement-survey clean-exp
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout anchor-select anchor-hierarchy summarize-exp effrank-readout measurement-survey clean-exp
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -563,6 +563,15 @@ summarize-exp:
 	python3 $(REPO_ROOT)/analysis/cloud/summarize_fit.py \
 	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*" \
 	    $(SUMMARIZE_ARGS)
+
+# Labeled per-node effective-rank readout (data-driven K_v). Pure numpy+stdlib,
+# reads the run dir's effrank.json sidecar (written by a spectral fit run with
+# CHARM_PROBE_EFFRANK=1) + manifest names/counts. Prints node -> name -> n_docs ->
+# effective rank, sorted by participation, with the PR-vs-volume correlation.
+effrank-readout:
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	python3 $(REPO_ROOT)/analysis/cloud/effrank_readout.py \
+	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*"
 
 # Remove an experiment's run dir(s) so the next `make exp ID=N` starts FRESH
 # (run_experiment auto-resumes an existing dir, which silently keeps a stale

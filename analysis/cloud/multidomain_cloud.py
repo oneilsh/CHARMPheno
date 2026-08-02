@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -623,6 +624,14 @@ def main(argv=None) -> int:
 
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
         corpus_stats = _log_corpus_stats(bundle, lay, domain_names)
+
+        # Point the opt-in effective-rank probe (spectral gated init) at a sidecar
+        # in the run dir, so a post-fit readout can join names + doc counts without
+        # re-running. The probe fires only when CHARM_PROBE_EFFRANK is set and init
+        # is spectral (random init builds no sketch to probe).
+        if os.environ.get("CHARM_PROBE_EFFRANK") and args.init == "spectral":
+            os.environ["CHARM_PROBE_EFFRANK_OUT"] = str(
+                Path(args.out_dir) / "effrank.json")
 
         with _phase(f"multi-domain gated fit (init={args.init}, K={lay.K})"):
             feature_cols = [f"features_{i}" for i in range(len(domain_tables))]
