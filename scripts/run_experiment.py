@@ -698,10 +698,16 @@ def build_multidomain_args(
         if isinstance(v, (list, tuple)):
             return ",".join(str(x) for x in v)
         return str(v)
+    # Corpus-bundle cache root: env override (CHARM_BUNDLE_CACHE_URI) or config.
+    # Empty = disabled. When set (a gs:// path), assemble is cached by corpus config
+    # so fit-param-only re-runs skip the ~5-6 min load+assemble.
+    _bundle_cache_uri = os.environ.get(
+        "CHARM_BUNDLE_CACHE_URI", str(effective.get("bundle_cache_uri", "")))
     args = [
         "--cdr", cdr,
         "--billing", billing,
         "--out-dir", str(out_dir),
+        "--bundle-cache-uri", _bundle_cache_uri,
         "--seed", str(effective["seed"]),
         "--source-table-cond", str(effective.get("source_table_cond", "condition_era")),
         "--source-table-drug", str(effective.get("source_table_drug", "drug_era")),

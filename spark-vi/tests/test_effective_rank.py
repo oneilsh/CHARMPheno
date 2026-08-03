@@ -104,6 +104,24 @@ def test_return_pivots_excludes_seeds():
     assert 0 not in pivots2 and 1 not in pivots2
 
 
+def test_eligible_floor_excludes_noise_directions():
+    # 20 shared words spanning a rank-4 subspace (eligible / high-df) + 200
+    # high-norm idiosyncratic "singleton" words (ineligible / low-df). Without the
+    # floor the noise inflates the rank; with it, only the ~4 shared directions
+    # count -- the fix for low-count nodes reading a spurious rank of >100.
+    rng = np.random.default_rng(3)
+    basis = rng.standard_normal((4, 50))
+    shared = rng.standard_normal((20, 4)) @ basis
+    noise = 5 * rng.standard_normal((200, 50))
+    M = np.vstack([shared, noise])
+    elig = np.array([True] * 20 + [False] * 200)
+    assert threshold_rank(pivoted_qr_residual_spectrum(M, 60)) > 20      # inflated
+    assert threshold_rank(pivoted_qr_residual_spectrum(M, 60, eligible=elig)) <= 5
+    # ineligible rows are never selected as pivots
+    _, piv = pivoted_qr_residual_spectrum(M, 60, eligible=elig, return_pivots=True)
+    assert all(p < 20 for p in piv)
+
+
 def test_report_from_spectrum_matches_effective_rank_report():
     M = _planted_rank_matrix(80, 30, rank=5, seed=8, noise=1e-8)
     spec = pivoted_qr_residual_spectrum(M, max_probe=20)
