@@ -606,11 +606,20 @@ def main(argv=None) -> int:
                                 corpus_cache_key(_corpus_cache_config(args)))
                      if args.bundle_cache_uri else None)
         bundle = None
-        if cache_dir and cache_exists(spark, cache_dir):
-            with _phase(f"load cached bundle ({cache_dir})"):
-                bundle = read_bundle(spark, MultiDomainBundle, cache_dir)
-                print(f"[driver]   cache HIT; ledger: {json.dumps(bundle.ledger)}",
+        # Cache read is best-effort: any failure (path/schema/FS) falls back to a
+        # normal assemble rather than aborting the run (the cache is a cluster-
+        # untested optimization; it must never cost a fit).
+        if cache_dir:
+            try:
+                if cache_exists(spark, cache_dir):
+                    with _phase(f"load cached bundle ({cache_dir})"):
+                        bundle = read_bundle(spark, MultiDomainBundle, cache_dir)
+                        print("[driver]   cache HIT; ledger: "
+                              f"{json.dumps(bundle.ledger)}", flush=True)
+            except Exception as e:                          # noqa: BLE001
+                print(f"[driver]   bundle cache read failed ({e}); re-assembling",
                       flush=True)
+                bundle = None
 
         if bundle is None:
             with _phase(f"load {len(domain_tables)} domains: {domain_names}"):
@@ -692,9 +701,15 @@ def main(argv=None) -> int:
                     ancestor_df=ancestor_df)
                 print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
             if cache_dir:
-                with _phase(f"write bundle cache ({cache_dir})"):
-                    write_bundle(spark, bundle, cache_dir)
-                    print(f"[driver]   cached bundle -> {cache_dir}", flush=True)
+                # Best-effort write: a cache failure must not abort a completed
+                # assemble (we already have the bundle; just skip caching it).
+                try:
+                    with _phase(f"write bundle cache ({cache_dir})"):
+                        write_bundle(spark, bundle, cache_dir)
+                        print(f"[driver]   cached bundle -> {cache_dir}", flush=True)
+                except Exception as e:                      # noqa: BLE001
+                    print(f"[driver]   bundle cache write failed ({e}); continuing "
+                          "without cache", flush=True)
 
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
         corpus_stats = _log_corpus_stats(bundle, lay, domain_names)
