@@ -1,7 +1,7 @@
 ---
 id: 86
 slug: multidomain-rare-priority-snomed-hierarchy-reverse-topo
-status: pending
+status: done
 model_class: multidomain
 cohort: population_rare_priority
 cohort_def: population_rare_priority
