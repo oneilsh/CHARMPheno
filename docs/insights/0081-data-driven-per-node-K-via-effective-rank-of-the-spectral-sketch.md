@@ -2,13 +2,14 @@
 
 **Date:** 2026-08-01
 **Topic:** capacity | per-node-K | spectral | hierarchy | HDP | method | decision
-**Status:** Method built + validated; real numbers (exp 0084 raw, exp 0083 re-probe
-with parent-deflation) yield a NEGATIVE RESULT — effrank-of-co-occurrence is not a
-usable K_v CEILING (EHR co-occurrence is intrinsically ~100-dim/node; parent-
-deflation does not collapse it). It survives as a FLOOR/prune detector (thin nodes
--> tpn=1) and the tooling is reusable. See the NEGATIVE RESULT section below.
-Motivated by insight 0080's capacity hypothesis; the phenotype-profiling K should
-be chosen for interpretability, not data dimensionality.
+**Status:** CLOSED (negative). Method built + validated, but effective rank of the
+co-occurrence sketch is NOT a valid per-node K / phenotype-count estimator: it
+measures word-space token richness (bounded by ~min(#words, d), NOT patient count),
+so even a 26-patient node reads ~90-170. Forward/reverse deflation and the
+df floor only move/trim the count; they don't make it phenotype count. See FINAL
+VERDICT below. Survives as: a FLOOR detector (thin nodes -> tpn=1), a rough
+richness sort (reverse per-anchor PR, ~half volume), and reusable tooling (cache,
+CHARM_MAX_ITER, labeled readout). Per-node K stays an interpretability choice.
 
 ## Real-data finding (exp 0084) and the parent-deflation refinement
 
@@ -227,6 +228,37 @@ directions supported by >= floor documents. Synthetic check: a rank-4 shared
 subspace + 200 singleton-noise words reads thr=50 without the floor, thr=4 with it.
 So the 0085/0086 effrank magnitudes were inflated (worst for small nodes) and must
 be re-measured with the floor (re-run 0085 forward + 0086 reverse).
+
+## FINAL VERDICT (0085/0086 re-run, df-floored): effrank of co-occurrence is NOT phenotype count -- thread CLOSED
+
+The df floor helped at the margin (forward Σ 1326->1050; reverse Σ 4474->3147,
+saturation 97->61 nodes) -- so the singleton-word inflation was real and is
+trimmed. But it did NOT fix the core problem: a 26-doc node ("Chronic nervous
+system disorder") still reads PR=92 / thr=168. Effective rank here is the
+dimensionality of the word x word co-occurrence, which is bounded by
+~min(#eligible-words, d) -- NOT by patient count -- so a few dozen token-rich
+patients produce a rank of hundreds. It measures EHR token-space RICHNESS, not
+reproducible phenotype count; with 26 patients you cannot separate "a phenotype"
+from "this patient's comorbidity," but the linear algebra counts both. The tell:
+after the df floor, corr(PR, log n_docs) went UP (forward 0.30->0.39, reverse
+0.31->0.48) -- what survives the noise trim is even more volume-driven.
+
+**Decision: close the effrank-as-K_v thread.** Effective rank of the spectral
+sketch is not a valid per-node K estimator (nor a phenotype count). Per-node K is
+a modeling/interpretability choice, bounded by patient support (heuristic
+min(K_max, ~n_docs/floor)), NOT derived from rank. A genuinely data-driven K would
+need a REPRODUCIBILITY criterion (bootstrap-stable directions, or held-out
+topic-count via CV) -- bounded by patient count as it should be -- but given
+case-finding does not benefit (insights 0080/0082, exps 0084-0086) and profiling K
+can be a small interpretable number, building it is not recommended unless a
+principled per-node K is wanted for its own sake. Salvage: reverse's per-anchor PR
+is a rough relative phenotypic-richness ranking of diseases, but ~half volume
+(corr 0.48) -- a sort, not a measure.
+
+**What the tooling leaves behind (still useful):** the effrank floor detector
+(thin/degenerate nodes -> tpn=1), the corpus-bundle cache (fit-param iteration
+skips assemble), CHARM_MAX_ITER (effrank-only fast mode), and the labeled
+effrank-readout with the PR-vs-volume correlation that made this diagnosis legible.
 
 ## Decision / sequencing
 
