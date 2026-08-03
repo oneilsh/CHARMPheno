@@ -39,7 +39,7 @@ _EPS = 1e-12
 
 
 def pivoted_qr_residual_spectrum(M, max_probe, *, seed_rows=None, eps=_EPS,
-                                 return_pivots=False):
+                                 return_pivots=False, eligible=None):
     """Rank-revealing pivoted-QR spectrum of the rows of ``M``.
 
     ``M`` is ``(V, d)`` -- one row per candidate direction (a word's normalized
@@ -72,11 +72,21 @@ def pivoted_qr_residual_spectrum(M, max_probe, *, seed_rows=None, eps=_EPS,
     against the ancestors' FULL claimed set (not just their fit anchors), so a
     descendant measures its INCREMENT over its ancestors and shared structure is
     counted once, not re-counted per node.
+
+    ``eligible`` (optional boolean array over rows): only eligible rows may be
+    SELECTED as pivots; ineligible rows still get deflated (they carry real
+    structure to remove) but never enter the spectrum. This is the probe's
+    document-frequency floor -- mirroring the fit's ``find_anchors`` min_doc_freq
+    candidate mask -- so a low-count node's rank counts only directions supported
+    by >= floor documents, NOT single-patient idiosyncratic words (which would
+    otherwise inflate a 26-doc node to a spurious rank of >100). Without it every
+    word row is eligible (the old behavior).
     """
     M = np.asarray(M, dtype=np.float64)
     V = M.shape[0]
     R = M.copy()                      # residuals, deflated in place
     chosen: list[int] = []
+    ineligible = None if eligible is None else ~np.asarray(eligible, dtype=bool)
 
     def deflate(row):
         b = R[row].copy()
@@ -104,6 +114,8 @@ def pivoted_qr_residual_spectrum(M, max_probe, *, seed_rows=None, eps=_EPS,
         norms2 = np.einsum("ij,ij->i", R, R)
         if chosen:
             norms2[chosen] = -np.inf   # never re-pick a chosen/seed row
+        if ineligible is not None:
+            norms2[ineligible] = -np.inf   # df floor: never SELECT a sub-floor word
         i = int(np.argmax(norms2))
         best = float(norms2[i])
         if best <= eps:

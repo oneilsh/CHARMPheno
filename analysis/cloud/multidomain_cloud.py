@@ -306,6 +306,11 @@ def parse_args(argv=None):
     p.add_argument("--cdr", required=True)
     p.add_argument("--billing", required=True)
     p.add_argument("--out-dir", required=True)
+    # Optional gs:// root for the corpus-bundle cache (bundle_cache). When set, the
+    # assembled bundle is cached keyed by the CORPUS config; a re-run that changes
+    # only fit params (init, tpn, topo order, d, max_iter, ...) loads it back in
+    # seconds instead of re-assembling (~5-6 min). Empty = disabled.
+    p.add_argument("--bundle-cache-uri", default="")
     # Insight 0070: the scalable spectral init is seed-FRAGILE; a real corpus may
     # expose a projection draw the EM does not fully rescue, so the seed must be a
     # DELIBERATE, recorded choice -- never the shim's silent seed=(seed or 0)
@@ -517,6 +522,55 @@ def _log_corpus_stats(bundle, lay, domain_names):
     return stats
 
 
+def _corpus_cache_config(args) -> dict:
+    """The CORPUS-affecting args, for the bundle cache key. Includes everything the
+    assemble + DAG build depend on (cohort, domains, window, per-domain vocab,
+    min_n, hierarchy, rollup, n_bg, tpn, cdr, split seed); EXCLUDES pure
+    fit-optimization params (init, spectral_*, topo order, max_iter, omega, eta,
+    cavi_*, learning_rate_*, min_peak_ratio) so fit iteration hits the cache while
+    any corpus change misses it. Conservative: n_bg/tpn/seed are included because
+    they feed assemble -- correctness over hit-rate."""
+    return {
+        "disease": args.disease,
+        "domains": list(args.domains),
+        "source_table_cond": args.source_table_cond,
+        "cdr": args.cdr,
+        "person_mod": args.person_mod,
+        "window_mode": args.window_mode,
+        "window_days": args.window_days,
+        "lookback_days": args.lookback_days,
+        "label_window_days": args.label_window_days,
+        "prior_obs_days": args.prior_obs_days,
+        "doc_min_length": args.doc_min_length,
+        "min_n": args.min_n,
+        "holdout_frac": args.holdout_frac,
+        "strip_mode": args.strip_mode,
+        "obs_exclude_vocab": args.obs_exclude_vocab,
+        "cond_vocab_size": args.cond_vocab_size,
+        "cond_min_df": args.cond_min_df,
+        "cond_min_patient_count": args.cond_min_patient_count,
+        "drug_vocab_size": args.drug_vocab_size,
+        "drug_min_df": args.drug_min_df,
+        "drug_min_patient_count": args.drug_min_patient_count,
+        "obs_vocab_size": args.obs_vocab_size,
+        "obs_min_df": args.obs_min_df,
+        "obs_min_patient_count": args.obs_min_patient_count,
+        "meas_vocab_size": args.meas_vocab_size,
+        "meas_min_df": args.meas_min_df,
+        "meas_min_patient_count": args.meas_min_patient_count,
+        "anchor_hierarchy": args.anchor_hierarchy,
+        "hier_concept_class": args.hier_concept_class,
+        "hier_restrict_under": args.hier_restrict_under,
+        "hier_min_class_size": args.hier_min_class_size,
+        "hier_max_class_fraction": args.hier_max_class_fraction,
+        "rollup_attestation": args.rollup_attestation,
+        "n_bg": args.n_bg,
+        "tpn": args.tpn,
+        "seed": args.seed,
+        "cache_format_version": 1,
+    }
+
+
 def main(argv=None) -> int:
     from charmpheno.omop import load_omop_bigquery
     from charmpheno.omop.case_finding_assembly import (
@@ -525,7 +579,10 @@ def main(argv=None) -> int:
         apply_population_disease_cohort, case_finding_index_table, disease_anchors)
     from charmpheno.omop.doc_spec import PatientCohortDocSpec
     from charmpheno.omop.multi_domain import (
-        assemble_multidomain_from_events, lookback_feature_frames)
+        MultiDomainBundle, assemble_multidomain_from_events,
+        lookback_feature_frames)
+    from bundle_cache import (
+        bundle_dir, cache_exists, corpus_cache_key, read_bundle, write_bundle)
     from spark_vi.io.export import save_result
     from spark_vi.mllib.topic.gated_lda import GatedLDAEstimator
     from spark_vi.models.topic.dag_placement import DagLayout
@@ -543,84 +600,101 @@ def main(argv=None) -> int:
         date_cols = [DOMAIN_REGISTRY[t]["date_col"] for t in domain_tables]
         vocab_specs = [_domain_vocab_spec(args, t) for t in domain_tables]
 
-        with _phase(f"load {len(domain_tables)} domains: {domain_names}"):
-            # Load every domain WITHOUT `cohort=`: load_omop_bigquery's cohort
-            # post-filter picks its date_col by CONDITION source-table and would
-            # pick the wrong column for a non-condition domain (Task 1 footgun).
-            # Windowing / frontier are handled below + inside the multi-domain
-            # assembler, exactly as case_finding_assembly.assemble_case_finding_corpus
-            # does (it also never passes cohort=).
-            raws = [load_omop_bigquery(
+        # Corpus-bundle cache: skip the ~5-6 min load+assemble when only fit
+        # params changed (bundle_cache keys on the corpus config only).
+        cache_dir = (bundle_dir(args.bundle_cache_uri,
+                                corpus_cache_key(_corpus_cache_config(args)))
+                     if args.bundle_cache_uri else None)
+        bundle = None
+        if cache_dir and cache_exists(spark, cache_dir):
+            with _phase(f"load cached bundle ({cache_dir})"):
+                bundle = read_bundle(spark, MultiDomainBundle, cache_dir)
+                print(f"[driver]   cache HIT; ledger: {json.dumps(bundle.ledger)}",
+                      flush=True)
+
+        if bundle is None:
+            with _phase(f"load {len(domain_tables)} domains: {domain_names}"):
+                # Load every domain WITHOUT `cohort=`: load_omop_bigquery's cohort
+                # post-filter picks its date_col by CONDITION source-table and would
+                # pick the wrong column for a non-condition domain (Task 1 footgun).
+                # Windowing / frontier are handled below + inside the multi-domain
+                # assembler, exactly as case_finding_assembly.assemble_case_finding_corpus
+                # does (it also never passes cohort=).
+                raws = [load_omop_bigquery(
+                            spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
+                            person_sample_mod=args.person_mod, source_table=t,
+                            # observation-only: strip the AoU survey/SDOH vocabulary
+                            # (insight 0071). Other domains load unfiltered.
+                            exclude_vocabularies=(args.obs_exclude_vocab
+                                                  if t == "observation" else ()))
+                        for t in domain_tables]
+
+            with _phase(f"window ({args.window_mode}) + assemble"):
+                cond_date_col = date_cols[0]
+                if args.window_mode == "lookback":
+                    # Leakage-free: pre-index FEATURE window (all domains) + forward
+                    # condition-only LABEL window from ONE shared index (case_finding_
+                    # index_table), parity with the single-domain rare6 exps.
+                    index_df = case_finding_index_table(
+                        raws[0], disease=args.disease, spark=spark,
+                        cdr_dataset=args.cdr, billing_project=args.billing,
+                        date_col=cond_date_col, prior_obs_days=args.prior_obs_days,
+                        label_window_days=args.label_window_days)
+                    feats, cond_label = lookback_feature_frames(
+                        raws, index_df, date_cols,
+                        lookback_days=args.lookback_days,
+                        label_window_days=args.label_window_days)
+                    cond_feature, extra_features, label_arg = feats[0], feats[1:], cond_label
+                else:  # forward
+                    # condition cohort = whole-pop background + one disease foreground,
+                    # windowed + source_cohort-tagged; mirrors the single-domain forward
+                    # path. Extra domains are aligned to the SAME per-patient window
+                    # (condition-only gate: extra domains are features, never a
+                    # frontier/label).
+                    cond_feature = apply_population_disease_cohort(
+                        raws[0], disease=args.disease, window_days=args.window_days,
                         spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
-                        person_sample_mod=args.person_mod, source_table=t,
-                        # observation-only: strip the AoU survey/SDOH vocabulary
-                        # (insight 0071). Other domains load unfiltered.
-                        exclude_vocabularies=(args.obs_exclude_vocab
-                                              if t == "observation" else ()))
-                    for t in domain_tables]
+                        date_col=cond_date_col, prior_obs_days=args.prior_obs_days)
+                    extra_features = [
+                        _window_events_to_cohort(
+                            cond_feature, raw, cond_date_col=cond_date_col,
+                            dom_date_col=dc, window_days=args.window_days)
+                        for raw, dc in zip(raws[1:], date_cols[1:])]
+                    label_arg = None
 
-        with _phase(f"window ({args.window_mode}) + assemble"):
-            cond_date_col = date_cols[0]
-            if args.window_mode == "lookback":
-                # Leakage-free: pre-index FEATURE window (all domains) + forward
-                # condition-only LABEL window from ONE shared index (case_finding_
-                # index_table), parity with the single-domain rare6 exps.
-                index_df = case_finding_index_table(
-                    raws[0], disease=args.disease, spark=spark,
-                    cdr_dataset=args.cdr, billing_project=args.billing,
-                    date_col=cond_date_col, prior_obs_days=args.prior_obs_days,
-                    label_window_days=args.label_window_days)
-                feats, cond_label = lookback_feature_frames(
-                    raws, index_df, date_cols,
-                    lookback_days=args.lookback_days,
-                    label_window_days=args.label_window_days)
-                cond_feature, extra_features, label_arg = feats[0], feats[1:], cond_label
-            else:  # forward
-                # condition cohort = whole-pop background + one disease foreground,
-                # windowed + source_cohort-tagged; mirrors the single-domain forward
-                # path. Extra domains are aligned to the SAME per-patient window
-                # (condition-only gate: extra domains are features, never a
-                # frontier/label).
-                cond_feature = apply_population_disease_cohort(
-                    raws[0], disease=args.disease, window_days=args.window_days,
-                    spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
-                    date_col=cond_date_col, prior_obs_days=args.prior_obs_days)
-                extra_features = [
-                    _window_events_to_cohort(
-                        cond_feature, raw, cond_date_col=cond_date_col,
-                        dom_date_col=dc, window_days=args.window_days)
-                    for raw, dc in zip(raws[1:], date_cols[1:])]
-                label_arg = None
+                anchors = disease_anchors(args.disease)
+                root = _FOREST_ROOT_CID if len(anchors) > 1 else None
+                before_dag = load_condition_dag(
+                    spark, anchors=anchors, root=root, cdr=args.cdr, billing=args.billing,
+                    anchor_hierarchy=(None if args.anchor_hierarchy == "none"
+                                      else args.anchor_hierarchy),
+                    hier_concept_class=args.hier_concept_class,
+                    hier_restrict_under=(int(args.hier_restrict_under)
+                                         if args.hier_restrict_under else None),
+                    hier_min_class_size=args.hier_min_class_size,
+                    hier_max_class_fraction=args.hier_max_class_fraction)
 
-            anchors = disease_anchors(args.disease)
-            root = _FOREST_ROOT_CID if len(anchors) > 1 else None
-            before_dag = load_condition_dag(
-                spark, anchors=anchors, root=root, cdr=args.cdr, billing=args.billing,
-                anchor_hierarchy=(None if args.anchor_hierarchy == "none"
-                                  else args.anchor_hierarchy),
-                hier_concept_class=args.hier_concept_class,
-                hier_restrict_under=(int(args.hier_restrict_under)
-                                     if args.hier_restrict_under else None),
-                hier_min_class_size=args.hier_min_class_size,
-                hier_max_class_fraction=args.hier_max_class_fraction)
+                # Roll-up attestation reads concept_ancestor once (ancestor/descendant)
+                # and hands it to the assembler; None keeps exact-node attestation.
+                ancestor_df = None
+                if args.rollup_attestation:
+                    ancestor_df = (spark.read.format("bigquery")
+                                   .option("table", f"{args.cdr}.concept_ancestor")
+                                   .option("parentProject", args.billing).load()
+                                   .select("ancestor_concept_id", "descendant_concept_id"))
 
-            # Roll-up attestation reads concept_ancestor once (ancestor/descendant)
-            # and hands it to the assembler; None keeps exact-node attestation.
-            ancestor_df = None
-            if args.rollup_attestation:
-                ancestor_df = (spark.read.format("bigquery")
-                               .option("table", f"{args.cdr}.concept_ancestor")
-                               .option("parentProject", args.billing).load()
-                               .select("ancestor_concept_id", "descendant_concept_id"))
-
-            doc_spec = PatientCohortDocSpec(min_doc_length=args.doc_min_length)
-            bundle = assemble_multidomain_from_events(
-                cond_feature, extra_features, before_dag, doc_spec=doc_spec,
-                min_n=args.min_n, vocab_specs=vocab_specs,
-                holdout_frac=args.holdout_frac, n_bg=args.n_bg, tpn=args.tpn,
-                strip_mode=args.strip_mode, label_events=label_arg,
-                ancestor_df=ancestor_df)
-            print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
+                doc_spec = PatientCohortDocSpec(min_doc_length=args.doc_min_length)
+                bundle = assemble_multidomain_from_events(
+                    cond_feature, extra_features, before_dag, doc_spec=doc_spec,
+                    min_n=args.min_n, vocab_specs=vocab_specs,
+                    holdout_frac=args.holdout_frac, n_bg=args.n_bg, tpn=args.tpn,
+                    strip_mode=args.strip_mode, label_events=label_arg,
+                    ancestor_df=ancestor_df)
+                print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
+            if cache_dir:
+                with _phase(f"write bundle cache ({cache_dir})"):
+                    write_bundle(spark, bundle, cache_dir)
+                    print(f"[driver]   cached bundle -> {cache_dir}", flush=True)
 
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
         corpus_stats = _log_corpus_stats(bundle, lay, domain_names)

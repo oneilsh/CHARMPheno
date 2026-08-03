@@ -211,6 +211,23 @@ K). The deeper, un-built version is an explicit supervised orthogonalization of
 the shared/background topics against the label-discriminative subspace -- reserve
 for if reverse topo order under-delivers.
 
+## CORRECTNESS FIX — the probe over-counted small nodes (single-patient words)
+
+shawn flagged that low-count nodes read implausibly high (e.g. "Chronic nervous
+system disorder", n_docs=26, PR=80/thr=164 -- 26 patients cannot support 164
+phenotypes). Cause: the probe's pivoted-QR ranked over ALL V word rows, including
+words appearing in only 1-2 of the node's docs; each such singleton word's
+conditional is a single patient's idiosyncratic comorbidity -> a distinct
+"direction" -> the rank inflates with per-patient NOISE, not reproducible
+phenotypes. The FIT never does this (find_anchors_projected applies a
+min_doc_freq=5 candidate floor); the probe skipped it. Fix: the probe now takes an
+``eligible`` mask (df_w >= min_doc_freq) -- ineligible words still deflate (real
+structure to remove) but can never be SELECTED as pivots, so the rank counts only
+directions supported by >= floor documents. Synthetic check: a rank-4 shared
+subspace + 200 singleton-noise words reads thr=50 without the floor, thr=4 with it.
+So the 0085/0086 effrank magnitudes were inflated (worst for small nodes) and must
+be re-measured with the floor (re-run 0085 forward + 0086 reverse).
+
 ## Decision / sequencing
 
 Build first, wire into layout only if needed. Per insight 0080, per-node capacity

@@ -460,8 +460,14 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                     _anc_pivots |= node_pivots.get(_p, set())
                 _seed = list(bg_anchors) + sorted(_anc_pivots)
                 _qbar_u = _row_normalize_projected(res_u.pooled_QR, res_u.p_w)
+                # df floor (same min_doc_freq as the fit's anchor selection): only
+                # words in >= min_doc_freq of this node's docs may be pivots, so the
+                # rank counts reproducible cross-patient directions, not single-
+                # patient idiosyncratic words (which inflate low-count nodes).
+                _elig = res_u.df_w >= min_doc_freq
                 _spec_u, _own_pivots = pivoted_qr_residual_spectrum(
-                    _qbar_u, _probe_max, seed_rows=_seed, return_pivots=True)
+                    _qbar_u, _probe_max, seed_rows=_seed, return_pivots=True,
+                    eligible=_elig)
                 node_pivots[u] = _anc_pivots | set(int(x) for x in _own_pivots)
                 _rep_u = report_from_spectrum(_spec_u, tau=0.01)
                 _rep_u["n_docs"] = int(res_u.n_docs)   # diversity-vs-volume readout
