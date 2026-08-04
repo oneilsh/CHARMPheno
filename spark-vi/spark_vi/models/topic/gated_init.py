@@ -456,6 +456,13 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
             # sketch) and reused across every node + null rep.
             _pa_R = precompute_projection_rows(V, d, seed)
             _pa_rng = np.random.default_rng(seed)
+            # Opt-in per-node DIAGNOSTIC (CHARM_PROBE_PA_DIAG=1): keep each node's
+            # real spectrum + null floor + doc-shape stats so we can see WHERE a
+            # blown-up pa_k comes from (leading vs tail, doc length, count
+            # concentration). All quantities are aggregate/derived (no patient rows,
+            # no per-token disclosure); printed to the log only, never committed.
+            _pa_diag = bool(os.environ.get("CHARM_PROBE_PA_DIAG"))
+            _pa_diag_rows: dict[int, dict] = {}
 
         # Step 2: each node, in `topo_order`, its OWN filtered one-slab pass.
         node_anchors: dict[int, list] = {}
@@ -533,6 +540,28 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                 _rep["pa_k_all"] = int(_pa_k_all)
                 _rep["pa_pr_raw"] = float(participation_ratio(_spec_pa))
                 effrank_reports[u] = _rep
+                if _pa_diag:
+                    # Aggregate doc-shape stats (no per-token / patient disclosure):
+                    # how long are the docs, how concentrated are the code counts,
+                    # how many distinct tokens carry the node's sketch.
+                    _uni = np.asarray(res_u.unigram) if res_u.unigram is not None \
+                        else np.zeros(0)
+                    _distinct = int((_uni > 0).sum())
+                    _tot = float(_uni.sum())
+                    _top = np.sort(_uni)[::-1] if _uni.size else np.zeros(0)
+                    _top1 = float(_top[0] / _tot) if _tot > 0 and _top.size else 0.0
+                    _top10 = float(_top[:10].sum() / _tot) if _tot > 0 else 0.0
+                    _hk = sorted((res_u.length_hist or {}).keys())
+                    _dl = (min(_hk), int(np.median(np.repeat(
+                        _hk, [res_u.length_hist[k] for k in _hk]))), max(_hk)) \
+                        if _hk else (0, 0, 0)
+                    _pa_diag_rows[u] = {
+                        "n_docs": int(res_u.n_docs), "distinct": _distinct,
+                        "doclen": _dl, "top1_frac": _top1, "top10_frac": _top10,
+                        "spec": [float(x) for x in _spec_pa[:150]],
+                        "floor": [float(x) for x in _floor_pa[:150]],
+                        "pa_k": int(_pa_k), "pa_k_all": int(_pa_k_all),
+                    }
             fg_anchors = find_anchors_projected(
                 res_u.pooled_QR, res_u.p_w, res_u.df_w, lay.tpn,
                 seed_rows=seed_rows, min_doc_freq=min_doc_freq)
@@ -575,6 +604,41 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                     print(f"[pa] {u}\t{k}\t{rep.get('pa_k_all', 0)}\t"
                           f"{rep.get('pa_pr_raw', 0.0):.1f}\t"
                           f"{rep.get('n_docs', 0)}", flush=True)
+                if _pa_diag and _pa_diag_rows:
+                    # Flag the pathological nodes (pa_k_all > n_docs -- "more
+                    # phenotypes than patients") plus the 3 best-supported nodes for
+                    # contrast, and dump each one's real-vs-null spectrum by position
+                    # so the blowup's location (leading vs tail) is visible.
+                    _pos = [0, 1, 2, 3, 4, 5, 8, 12, 20, 40, 80, 120]
+                    _flag = [u for u, dd in _pa_diag_rows.items()
+                             if dd["pa_k_all"] > dd["n_docs"] > 0]
+                    _ref = [u for _, u, _ in sorted(
+                        ((dd["n_docs"], u, None)
+                         for u, dd in _pa_diag_rows.items()), reverse=True)[:3]]
+                    print("[pa-diag] real spectrum vs null floor by position for "
+                          "flagged (pa_k_all>n_docs) + top-support nodes", flush=True)
+                    for u in list(dict.fromkeys(_flag + _ref)):
+                        dd = _pa_diag_rows[u]
+                        sp, fl = dd["spec"], dd["floor"]
+                        m = min(len(sp), len(fl))
+                        pos = [p for p in _pos if p < m]
+                        rr = [f"{sp[p] / (2 * fl[p]):.1f}" if fl[p] > 0 else "inf"
+                              for p in pos]
+                        print(f"[pa-diag] node {u} n_docs={dd['n_docs']} "
+                              f"distinct_tok={dd['distinct']} "
+                              f"doclen[min/med/max]={dd['doclen'][0]}/"
+                              f"{dd['doclen'][1]}/{dd['doclen'][2]} "
+                              f"top1={dd['top1_frac']:.2f} top10={dd['top10_frac']:.2f}"
+                              f"  pa_k={dd['pa_k']} pa_k_all={dd['pa_k_all']}",
+                              flush=True)
+                        print("[pa-diag]   pos:  " + " ".join(
+                            f"{p:>6}" for p in pos), flush=True)
+                        print("[pa-diag]   real: " + " ".join(
+                            f"{sp[p]:6.2f}" for p in pos), flush=True)
+                        print("[pa-diag]   flr:  " + " ".join(
+                            f"{fl[p]:6.2f}" for p in pos), flush=True)
+                        print("[pa-diag]   r/2f: " + " ".join(
+                            f"{v:>6}" for v in rr), flush=True)
             # Persist a sidecar (node id -> report) so a post-fit readout can join
             # names + doc counts without re-parsing logs or re-running the fit. The
             # path is provided by the driver via CHARM_PROBE_EFFRANK_OUT (the fit's
