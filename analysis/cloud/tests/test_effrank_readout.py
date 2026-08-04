@@ -90,11 +90,11 @@ def _pa_sidecar():
     # tiny pa_k -- even though its raw PR stays ~flat-high (the closed-negative
     # effective-rank behavior pa_k is meant to fix).
     return {
-        "3": {"participation": 90.0, "pa_k": 5, "pa_pr_raw": 90.0,
+        "3": {"participation": 90.0, "pa_k": 5, "pa_k_all": 12, "pa_pr_raw": 90.0,
               "threshold": 0, "eigengap": 0, "n_probed": 60, "n_docs": 40000},
-        "7": {"participation": 88.0, "pa_k": 2, "pa_pr_raw": 88.0,
+        "7": {"participation": 88.0, "pa_k": 2, "pa_k_all": 90, "pa_pr_raw": 88.0,
               "threshold": 0, "eigengap": 0, "n_probed": 60, "n_docs": 26},
-        "5": {"participation": 85.0, "pa_k": 9, "pa_pr_raw": 85.0,
+        "5": {"participation": 85.0, "pa_k": 9, "pa_k_all": 14, "pa_pr_raw": 85.0,
               "threshold": 0, "eigengap": 0, "n_probed": 60, "n_docs": 5000},
     }
 
@@ -117,8 +117,12 @@ def test_pa_volume_correlation_is_low_while_pr_is_high():
 def test_render_leads_with_pa_k_when_present():
     rows = build_rows(_pa_sidecar(), {3: "big", 7: "tiny", 5: "mid"}, {})
     out = render(rows, k_uniform=100)
-    assert "Σpa_k [parallel-analysis K]: 16" in out          # 5+2+9
+    assert "Σpa_k [parallel-analysis K, leading-run]: 16" in out   # 5+2+9
     assert "corr(pa_k, log10 n_docs)" in out
     assert "current foreground K: 100" in out
+    # the count-all diagnostic + the impossible-flag (node 7: pa_k_all 90 > 26 docs)
+    assert "count-all diagnostic" in out
+    assert "1 nodes had pa_k_all > n_docs" in out
+    assert "by support:" in out
     header = next(ln for ln in out.splitlines() if ln.strip().startswith("pa_k"))
     assert "pa_k" in header and "PR" in header

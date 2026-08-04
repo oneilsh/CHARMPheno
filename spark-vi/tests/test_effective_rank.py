@@ -9,6 +9,7 @@ from spark_vi.models.topic.effective_rank import (
     eigengap_rank,
     log_effrank_table,
     null_percentile_spectrum,
+    parallel_analysis_count_all,
     parallel_analysis_rank,
     participation_ratio,
     pivoted_qr_residual_spectrum,
@@ -197,12 +198,30 @@ def test_parallel_analysis_rank_counts_directions_above_margin():
     assert parallel_analysis_rank(real, floor) == 3          # 10,8,5 clear 4
 
 
-def test_parallel_analysis_rank_counts_all_positions_not_just_leading():
-    # The signal starts BELOW position 0 (the shared marginal direction sits under
-    # the null); count-all must still pick up the later signal directions.
+def test_parallel_analysis_rank_skips_below_null_background_at_pos0():
+    # Position 0 is the shared marginal/background direction and sits BELOW the null;
+    # bg_skip=1 (default) lets the phenotype block begin at position 1.
     real = [1.0, 20.0, 18.0, 1.5]      # position 0 below null, 1&2 well above
     floor = [2.0, 2.0, 2.0, 2.0]
-    assert parallel_analysis_rank(real, floor) == 2          # positions 1,2
+    assert parallel_analysis_rank(real, floor) == 2          # leading run at 1,2
+
+
+def test_parallel_analysis_rank_rejects_tail_only_clearings():
+    # The small-node pathology: leading directions are BELOW the null, but the TAIL
+    # floats above it (per-record cliques the marginal null can't reproduce). The
+    # leading-run rule returns 0 (no coherent leading block); count-all is fooled.
+    real = [1.0, 1.0, 1.0, 1.0, 1.0, 9.0, 9.0, 9.0]   # nothing clears until pos 5
+    floor = [2.0] * 8
+    assert parallel_analysis_rank(real, floor) == 0          # first clear at pos 5 > bg_skip
+    assert parallel_analysis_count_all(real, floor) == 3     # count-all sums the tail
+
+
+def test_parallel_analysis_rank_bg_skip_controls_allowed_lead():
+    # A node with two below-null background directions before its signal block.
+    real = [1.0, 1.0, 20.0, 18.0, 1.0]
+    floor = [2.0] * 5
+    assert parallel_analysis_rank(real, floor, bg_skip=1) == 0   # signal begins past pos1
+    assert parallel_analysis_rank(real, floor, bg_skip=2) == 2   # now the block is reached
 
 
 def test_parallel_analysis_rank_margin_is_tunable():
