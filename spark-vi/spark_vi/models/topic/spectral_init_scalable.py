@@ -94,6 +94,21 @@ def _r_rows(indices, seed: int, d: int, cache: dict | None = None) -> np.ndarray
     return out
 
 
+def precompute_projection_rows(V: int, d: int, seed: int) -> np.ndarray:
+    """All-token projection rows ``(V, d)`` for the driver-side parallel-analysis null.
+
+    A batched ``_r_rows`` over every token id, using the SAME per-row Gaussian
+    seeding as the distributed sketch (``R[j] = default_rng(SeedSequence([seed, j]))``),
+    so a null co-occurrence sketch built with these rows lands on the identical
+    projection scale as the real ``group_QR``/``pooled_QR`` -- which is what lets
+    ``parallel_analysis_rank`` compare the real and null spectra position by
+    position. Materialize once on the driver and share across every node and rep;
+    at V in the thousands and d~800 this is tens of MB, dwarfed by the sketches
+    already on the driver.
+    """
+    return _r_rows(np.arange(int(V)), int(seed), int(d))
+
+
 def _project_doc(indices, counts, R_rows):
     """Rank-1 projected co-occurrence + word-marginal contributions for one doc.
 
