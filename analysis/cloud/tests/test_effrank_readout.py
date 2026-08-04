@@ -5,6 +5,7 @@ from analysis.cloud.effrank_readout import (
     build_rows,
     node_depths,
     node_names,
+    pa_volume_correlation,
     pearson,
     pr_volume_correlation,
     render,
@@ -79,3 +80,45 @@ def test_render_includes_labels_counts_and_correlation():
     assert "current foreground K: 4" in out
     # diversity-driven K = round(20)+round(2) = 22
     assert "Σround(PR) [diversity-driven K]: 22" in out
+
+
+# --- parallel-analysis (pa_k) columns ---------------------------------------
+
+def _pa_sidecar():
+    # pa_k is DECORRELATED from n_docs: the biggest-volume node (40k docs) has a
+    # middling pa_k, a mid-volume node has the largest, and the 26-doc node has a
+    # tiny pa_k -- even though its raw PR stays ~flat-high (the closed-negative
+    # effective-rank behavior pa_k is meant to fix).
+    return {
+        "3": {"participation": 90.0, "pa_k": 5, "pa_pr_raw": 90.0,
+              "threshold": 0, "eigengap": 0, "n_probed": 60, "n_docs": 40000},
+        "7": {"participation": 88.0, "pa_k": 2, "pa_pr_raw": 88.0,
+              "threshold": 0, "eigengap": 0, "n_probed": 60, "n_docs": 26},
+        "5": {"participation": 85.0, "pa_k": 9, "pa_pr_raw": 85.0,
+              "threshold": 0, "eigengap": 0, "n_probed": 60, "n_docs": 5000},
+    }
+
+
+def test_build_rows_sorts_by_pa_k_when_present():
+    rows = build_rows(_pa_sidecar(), {}, {})
+    assert [r["node"] for r in rows] == [5, 3, 7]     # pa_k 9,5,2
+    assert rows[0]["pa_k"] == 9 and "pa_pr_raw" in rows[0]
+
+
+def test_pa_volume_correlation_is_low_while_pr_is_high():
+    rows = build_rows(_pa_sidecar(), {}, {})
+    # raw PR is ~flat-high regardless of n_docs; pa_k does not rise with n_docs.
+    assert abs(pa_volume_correlation(rows)) < 0.9
+    # the 26-doc node keeps a big raw PR (the closed-negative behavior) ...
+    small = next(r for r in rows if r["node"] == 7)
+    assert small["participation"] > 50 and small["pa_k"] <= 3   # ... but small pa_k
+
+
+def test_render_leads_with_pa_k_when_present():
+    rows = build_rows(_pa_sidecar(), {3: "big", 7: "tiny", 5: "mid"}, {})
+    out = render(rows, k_uniform=100)
+    assert "Σpa_k [parallel-analysis K]: 16" in out          # 5+2+9
+    assert "corr(pa_k, log10 n_docs)" in out
+    assert "current foreground K: 100" in out
+    header = next(ln for ln in out.splitlines() if ln.strip().startswith("pa_k"))
+    assert "pa_k" in header and "PR" in header

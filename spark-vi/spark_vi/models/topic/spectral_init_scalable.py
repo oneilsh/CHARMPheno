@@ -155,6 +155,14 @@ class ProjectedCoocResult:
                node-filtered pass (gated init's per-node ``rdd_u``) this is that
                node's training-doc count -- surfaced for the effective-rank probe's
                diversity-vs-volume readout (a node's rank vs how many docs it has).
+    unigram:   (V,) summed RAW token counts (Σ_docs counts, L ≥ 2), int64. Unlike
+               p_w (a length-normalized co-occurrence marginal), this is the plain
+               unigram frequency the parallel-analysis null samples tokens from.
+    length_hist: doc-length -> count over the L ≥ 2 contributing docs. A bounded
+               (few-thousand-key) summary of the node's doc-length distribution the
+               parallel-analysis null samples lengths from. Both are populated only
+               on the pooled path (a node-filtered ``rdd_u`` pass gives that node's
+               own marginal + lengths); the per-group slabs do not carry them.
     """
     pooled_QR: np.ndarray
     group_QR: dict
@@ -163,6 +171,8 @@ class ProjectedCoocResult:
     group_p_w: dict
     group_df_w: dict
     n_docs: int = 0
+    unigram: np.ndarray | None = None
+    length_hist: dict | None = None
 
 
 def projected_cooccurrence_rdd(
@@ -200,6 +210,8 @@ def projected_cooccurrence_rdd(
         group_df_w = {g: np.zeros(_V, dtype=np.int64) for g in _groups}
         p_w = np.zeros(_V, dtype=np.float64)
         df_w = np.zeros(_V, dtype=np.int64)
+        unigram = np.zeros(_V, dtype=np.int64)
+        length_hist: dict = {}
         known = set(_groups)
         r_cache: dict = {}
         n_docs = 0
@@ -215,13 +227,17 @@ def projected_cooccurrence_rdd(
             pooled[idx] += qr
             p_w[idx] += pw
             df_w[idx] += 1
+            unigram[idx] += np.asarray(doc.counts, dtype=np.int64)
+            Li = int(round(L))
+            length_hist[Li] = length_hist.get(Li, 0) + 1
             for g in doc.groups:
                 if g in known:
                     group_QR[g][idx] += qr
                     group_p_w[g][idx] += pw
                     group_df_w[g][idx] += 1
             n_docs += 1
-        return [(pooled, group_QR, p_w, df_w, group_p_w, group_df_w, n_docs)]
+        return [(pooled, group_QR, p_w, df_w, group_p_w, group_df_w, n_docs,
+                 unigram, length_hist)]
 
     def _combine(a, b):
         ga, gb = a[1], b[1]
@@ -230,18 +246,21 @@ def projected_cooccurrence_rdd(
         merged_pw = {g: gpa[g] + gpb[g] for g in gpa}
         gda, gdb = a[5], b[5]
         merged_df = {g: gda[g] + gdb[g] for g in gda}
+        hist = dict(a[8])
+        for k, v in b[8].items():
+            hist[k] = hist.get(k, 0) + v
         return (
             a[0] + b[0], merged, a[2] + b[2], a[3] + b[3],
-            merged_pw, merged_df, a[6] + b[6],
+            merged_pw, merged_df, a[6] + b[6], a[7] + b[7], hist,
         )
 
     (pooled, group_QR, p_w, df_w,
-     group_p_w, group_df_w, _n) = rdd.mapPartitions(_local).treeReduce(
-        _combine, depth=depth
-    )
+     group_p_w, group_df_w, _n, unigram, length_hist) = rdd.mapPartitions(
+        _local).treeReduce(_combine, depth=depth)
     return ProjectedCoocResult(
         pooled_QR=pooled, group_QR=group_QR, p_w=p_w, df_w=df_w,
         group_p_w=group_p_w, group_df_w=group_df_w, n_docs=int(_n),
+        unigram=unigram, length_hist=length_hist,
     )
 
 

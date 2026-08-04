@@ -74,7 +74,7 @@ def build_rows(sidecar: dict, names: dict[int, str],
     rows = []
     for k, rep in sidecar.items():
         u = int(k)
-        rows.append({
+        row = {
             "node": u,
             "name": names.get(u, str(u)),
             "depth": depths.get(u, -1),
@@ -83,8 +83,18 @@ def build_rows(sidecar: dict, names: dict[int, str],
             "threshold": int(rep.get("threshold", 0)),
             "eigengap": int(rep.get("eigengap", 0)),
             "n_probed": int(rep.get("n_probed", 0)),
-        })
-    rows.sort(key=lambda r: r["participation"], reverse=True)
+        }
+        # Parallel-analysis fields, present only when the pa probe ran.
+        if "pa_k" in rep:
+            row["pa_k"] = int(rep["pa_k"])
+        if "pa_pr_raw" in rep:
+            row["pa_pr_raw"] = float(rep["pa_pr_raw"])
+        rows.append(row)
+    # Sort by pa_k when present (the live estimator), else participation.
+    if any("pa_k" in r for r in rows):
+        rows.sort(key=lambda r: r.get("pa_k", -1), reverse=True)
+    else:
+        rows.sort(key=lambda r: r["participation"], reverse=True)
     return rows
 
 
@@ -98,34 +108,78 @@ def pr_volume_correlation(rows: list[dict]) -> float:
     return pearson(xs, ys)
 
 
+def pa_volume_correlation(rows: list[dict]) -> float:
+    """Pearson(pa_k, log10(n_docs)) over rows with pa_k present and n_docs > 0.
+
+    The acceptance signal for the parallel-analysis estimator: this should be FAR
+    below the raw ``corr(PR, log n_docs)`` (~0.4-0.5 for effective rank). A low
+    correlation means pa_k reflects per-node phenotype dimensionality, not just how
+    many patients the node has. Returns 0.0 if no row carries pa_k.
+    """
+    xs, ys = [], []
+    for r in rows:
+        if "pa_k" in r and r["n_docs"] > 0:
+            xs.append(r["pa_k"])
+            ys.append(math.log10(r["n_docs"]))
+    return pearson(xs, ys)
+
+
 def render(rows: list[dict], *, k_uniform: int | None = None) -> str:
-    """Render the labeled table + a diversity-vs-volume summary as text."""
+    """Render the labeled table + a diversity-vs-volume summary as text.
+
+    When the parallel-analysis probe ran (rows carry ``pa_k``), the table leads with
+    the sample-size-aware ``pa_k`` and its own volume correlation -- the live
+    per-node K estimate -- alongside the raw participation ratio (``PR``, the
+    closed-negative effective-rank number) for contrast.
+    """
+    has_pa = any("pa_k" in r for r in rows)
     corr = pr_volume_correlation(rows)
     k_div = sum(max(1, round(r["participation"])) for r in rows)
     max_n = max((r["n_probed"] for r in rows), default=0)
     saturated = sum(1 for r in rows if r["n_probed"] == max_n and max_n > 0)
     lines = []
-    lines.append("# Per-node effective rank (labeled)")
+    lines.append("# Per-node K probe (labeled)")
     lines.append("")
-    lines.append(f"nodes: {len(rows)}  |  "
-                 f"Σround(PR) [diversity-driven K]: {k_div}"
-                 + (f"  vs current foreground K: {k_uniform}"
-                    if k_uniform is not None else ""))
-    lines.append(f"corr(PR, log10 n_docs): {corr:+.2f}  "
-                 "(high => rank tracks volume, not diversity)")
+    if has_pa:
+        pa_total = sum(r.get("pa_k", 0) for r in rows)
+        pa_corr = pa_volume_correlation(rows)
+        lines.append(f"nodes: {len(rows)}  |  Σpa_k [parallel-analysis K]: "
+                     f"{pa_total}"
+                     + (f"  vs current foreground K: {k_uniform}"
+                        if k_uniform is not None else ""))
+        lines.append(f"corr(pa_k, log10 n_docs): {pa_corr:+.2f}  "
+                     f"(vs raw corr(PR, log n_docs): {corr:+.2f} -- pa_k should "
+                     "track volume far less)")
+    else:
+        lines.append(f"nodes: {len(rows)}  |  "
+                     f"Σround(PR) [diversity-driven K]: {k_div}"
+                     + (f"  vs current foreground K: {k_uniform}"
+                        if k_uniform is not None else ""))
+        lines.append(f"corr(PR, log10 n_docs): {corr:+.2f}  "
+                     "(high => rank tracks volume, not diversity)")
     if saturated:
         lines.append(f"NOTE: {saturated}/{len(rows)} nodes saturate at "
                      f"n_probed={max_n} (raise CHARM_PROBE_EFFRANK_MAX to see "
                      "their true rank).")
     lines.append("")
-    lines.append(f"{'PR':>6}  {'thr':>4} {'gap':>4} {'n':>4}  "
-                 f"{'depth':>5} {'n_docs':>8}  node  name")
-    for r in rows:
-        lines.append(
-            f"{r['participation']:6.1f}  {r['threshold']:>4} {r['eigengap']:>4} "
-            f"{r['n_probed']:>4}  {r['depth']:>5} {r['n_docs']:>8}  "
-            f"{r['node']:>4}  {r['name']}"
-        )
+    if has_pa:
+        lines.append(f"{'pa_k':>5}  {'PR':>6} {'n':>4}  "
+                     f"{'depth':>5} {'n_docs':>8}  node  name")
+        for r in rows:
+            lines.append(
+                f"{r.get('pa_k', 0):>5}  {r['participation']:6.1f} "
+                f"{r['n_probed']:>4}  {r['depth']:>5} {r['n_docs']:>8}  "
+                f"{r['node']:>4}  {r['name']}"
+            )
+    else:
+        lines.append(f"{'PR':>6}  {'thr':>4} {'gap':>4} {'n':>4}  "
+                     f"{'depth':>5} {'n_docs':>8}  node  name")
+        for r in rows:
+            lines.append(
+                f"{r['participation']:6.1f}  {r['threshold']:>4} "
+                f"{r['eigengap']:>4} {r['n_probed']:>4}  {r['depth']:>5} "
+                f"{r['n_docs']:>8}  {r['node']:>4}  {r['name']}"
+            )
     return "\n".join(lines)
 
 

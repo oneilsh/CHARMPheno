@@ -365,12 +365,17 @@ def build_null_spectrum(marginal, lengths, n_docs, V, d, seed, *,
         QR = np.zeros((V, d), dtype=np.float64)
         p_w = np.zeros(V, dtype=np.float64)
         draw_lens = lens[rng.integers(0, lens.size, size=n_sim)]
-        for L in draw_lens:
-            Li = int(L)
-            if Li < 2:
-                continue
-            toks = rng.choice(V, size=Li, p=probs)
-            idx, cnt = np.unique(toks, return_counts=True)
+        draw_lens = draw_lens[draw_lens >= 2]
+        if draw_lens.size == 0:
+            continue
+        # Draw ALL of this rep's tokens in ONE weighted sample (one O(V) cumsum)
+        # and partition into docs by the sampled lengths -- avoids paying the O(V)
+        # cumsum per doc, the driver-side bottleneck at V in the thousands.
+        all_toks = rng.choice(V, size=int(draw_lens.sum()), p=probs)
+        offsets = np.concatenate([[0], np.cumsum(draw_lens)])
+        for j in range(draw_lens.size):
+            seg = all_toks[offsets[j]:offsets[j + 1]]
+            idx, cnt = np.unique(seg, return_counts=True)
             qr, pwc = _project_doc(idx, cnt, R_rows[idx])
             QR[idx] += qr
             p_w[idx] += pwc
