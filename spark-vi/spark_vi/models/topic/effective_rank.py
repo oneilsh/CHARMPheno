@@ -210,7 +210,7 @@ def report_from_spectrum(spec, *, tau=0.01):
     }
 
 
-def singular_value_spectrum(M, max_probe):
+def singular_value_spectrum(M, max_probe, *, eligible=None):
     """Squared singular values of ``M`` (V, d), descending, top ``max_probe``.
 
     The spectrum parallel analysis actually compares. (The effective-rank estimators
@@ -223,10 +223,24 @@ def singular_value_spectrum(M, max_probe):
     V >= d, the usual sketch shape) -- squared singular values -- which is far cheaper
     than a full SVD at V in the thousands. Returns a plain list, length
     ``min(max_probe, min(V, d))``; empty for a degenerate ``M``.
+
+    ``eligible`` (optional boolean array over the V rows): a per-node
+    document-frequency floor -- only rows for words that RECUR within the node (e.g.
+    ``df_w >= k``) contribute; sub-floor rows are zeroed before the Gram. This is the
+    recurrence test that separates a phenotype from one patient's record: a
+    single-patient direction lives on words appearing in exactly one of the node's
+    docs (df=1), so zeroing sub-floor words collapses it, while a phenotype shared by
+    >= k patients (its words carry df >= k) survives. Apply the SAME mask to the null
+    so both spectra cover the same recurring vocabulary. Without it every row counts
+    (the plain spectrum).
     """
     M = np.asarray(M, dtype=np.float64)
     if M.ndim != 2 or min(M.shape) == 0:
         return []
+    if eligible is not None:
+        elig = np.asarray(eligible, dtype=bool)
+        if elig.shape[0] == M.shape[0] and not elig.all():
+            M = np.where(elig[:, None], M, 0.0)
     V, d = M.shape
     gram = M.T @ M if V >= d else M @ M.T
     ev = np.linalg.eigvalsh(gram)          # ascending, real (Gram is symmetric PSD)
@@ -354,7 +368,8 @@ def null_percentile_spectrum(null_specs, q=95):
 
 
 def build_null_spectrum(marginal, lengths, n_docs, V, d, seed, *,
-                        reps=5, cap=2000, max_probe=None, q=95, R_rows=None):
+                        reps=5, cap=2000, max_probe=None, q=95, R_rows=None,
+                        eligible=None):
     """Driver-side null spectrum for parallel analysis, from a node's OWN marginal.
 
     Draws ``reps`` null co-occurrence sketches that share the node's sample size and
@@ -387,6 +402,10 @@ def build_null_spectrum(marginal, lengths, n_docs, V, d, seed, *,
     sample of doc lengths (only L >= 2 is drawn, matching the co-occurrence
     contributors). Returns ``[]`` if the node has no usable support (no docs, empty
     marginal, or no length >= 2).
+
+    ``eligible`` (optional boolean array over the V rows): the per-node
+    document-frequency floor, applied to every null sketch exactly as to the real one
+    (see ``singular_value_spectrum``) so both cover the same recurring vocabulary.
 
     The projection helpers are imported lazily so the pure estimators above stay
     importable without the sketch module (or its scipy dependency).
@@ -432,7 +451,7 @@ def build_null_spectrum(marginal, lengths, n_docs, V, d, seed, *,
             QR[idx] += qr
             p_w[idx] += pwc
         Qbar = _row_normalize_projected(QR, p_w)
-        specs.append(singular_value_spectrum(Qbar, max_probe))
+        specs.append(singular_value_spectrum(Qbar, max_probe, eligible=eligible))
     return null_percentile_spectrum(specs, q=q)
 
 
@@ -544,6 +563,16 @@ def save_effrank_sidecar(reports, path):
             entry["pa_tau"] = float(rep["pa_tau"])
         if "pa_margin" in rep:
             entry["pa_margin"] = float(rep["pa_margin"])
+        # Recurrence-floored PA (per-node df floor): the spectrum over words that
+        # RECUR within the node, present only when that probe ran.
+        if "pa_k_rec" in rep:
+            entry["pa_k_rec"] = int(rep["pa_k_rec"])
+        if "pa_spec_rec" in rep:
+            entry["pa_spec_rec"] = [float(x) for x in rep["pa_spec_rec"]]
+        if "pa_floor_rec" in rep:
+            entry["pa_floor_rec"] = [float(x) for x in rep["pa_floor_rec"]]
+        if "pa_min_df" in rep:
+            entry["pa_min_df"] = int(rep["pa_min_df"])
         out[str(int(node))] = entry
     with open(path, "w") as fh:
         json.dump(out, fh, indent=2, sort_keys=True)

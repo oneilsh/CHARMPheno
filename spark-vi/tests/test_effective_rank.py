@@ -224,6 +224,24 @@ def test_parallel_analysis_rank_bg_skip_controls_allowed_lead():
     assert parallel_analysis_rank(real, floor, bg_skip=2) == 2   # now the block is reached
 
 
+def test_singular_value_spectrum_eligible_drops_subfloor_rows():
+    from spark_vi.models.topic.effective_rank import singular_value_spectrum
+    # 8 shared rows spanning a rank-2 subspace (the recurring phenotype) + 40
+    # high-norm single-patient rows. Without the floor the idiosyncratic rows
+    # dominate the spectrum; with it (only the 8 shared rows eligible) the rank
+    # collapses to the recurring ~2.
+    rng = np.random.default_rng(5)
+    basis = rng.standard_normal((2, 16))
+    shared = rng.standard_normal((8, 2)) @ basis
+    noise = 6 * rng.standard_normal((40, 16))
+    M = np.vstack([shared, noise])
+    elig = np.array([True] * 8 + [False] * 40)
+    full = singular_value_spectrum(M, 40)
+    masked = singular_value_spectrum(M, 40, eligible=elig)
+    assert threshold_rank(full) > 5              # idiosyncratic rows inflate it
+    assert threshold_rank(masked) <= 3           # only the recurring subspace
+
+
 def test_parallel_analysis_rank_tau_cuts_collapsed_null_tail():
     # The node-88 pathology: 2 genuine foreground directions, then the null has
     # COLLAPSED (floor -> ~0.05) so a negligible real tail (0.2, ~0.03% of the top)

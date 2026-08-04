@@ -94,6 +94,11 @@ def build_rows(sidecar: dict, names: dict[int, str],
         if "pa_spec" in rep and "pa_floor" in rep:
             row["pa_spec"] = [float(x) for x in rep["pa_spec"]]
             row["pa_floor"] = [float(x) for x in rep["pa_floor"]]
+        if "pa_k_rec" in rep:
+            row["pa_k_rec"] = int(rep["pa_k_rec"])
+        if "pa_spec_rec" in rep and "pa_floor_rec" in rep:
+            row["pa_spec_rec"] = [float(x) for x in rep["pa_spec_rec"]]
+            row["pa_floor_rec"] = [float(x) for x in rep["pa_floor_rec"]]
         rows.append(row)
     # Sort by pa_k when present (the live estimator), else participation.
     if any("pa_k" in r for r in rows):
@@ -187,6 +192,10 @@ def recompute_pa_k(rows: list[dict], *, margin=2.0, tau=0.01, bg_skip=1) -> None
             r["pa_k"] = pa_rank_from_spectrum(
                 r["pa_spec"], r["pa_floor"], margin=margin, tau=tau,
                 bg_skip=bg_skip)
+        if "pa_spec_rec" in r and "pa_floor_rec" in r:
+            r["pa_k_rec"] = pa_rank_from_spectrum(
+                r["pa_spec_rec"], r["pa_floor_rec"], margin=margin, tau=tau,
+                bg_skip=bg_skip)
 
 
 def pa_tau_sweep(rows, taus, *, margin=2.0, bg_skip=1):
@@ -239,6 +248,14 @@ def render(rows: list[dict], *, k_uniform: int | None = None) -> str:
                          "tail-noise inflation the leading-run rule removes)")
         lines.append(f"corr(pa_k, log10 n_docs): {pa_corr:+.2f}  "
                      f"(vs raw corr(PR, log n_docs): {corr:+.2f})")
+        if any("pa_k_rec" in r for r in rows):
+            rec_total = sum(r.get("pa_k_rec", 0) for r in rows)
+            rec_xy = [(r["pa_k_rec"], math.log10(r["n_docs"])) for r in rows
+                      if "pa_k_rec" in r and r["n_docs"] > 0]
+            rec_corr = pearson([x for x, _ in rec_xy], [y for _, y in rec_xy])
+            lines.append(f"  recurrence-floored (per-node df) Σpa_k_rec: "
+                         f"{rec_total}  |  corr(pa_k_rec, log10 n_docs): "
+                         f"{rec_corr:+.2f}")
         # By-support-bucket correlation, so a low-n inversion can't hide in the
         # aggregate (the count-all estimator's headline ~0 was two effects cancelling).
         bkt = pa_bucket_correlations(rows, key="pa_k")
@@ -257,11 +274,14 @@ def render(rows: list[dict], *, k_uniform: int | None = None) -> str:
                      "their true rank).")
     lines.append("")
     if has_pa:
-        lines.append(f"{'pa_k':>5} {'p_all':>5}  {'PR':>6}  "
+        has_rec = any("pa_k_rec" in r for r in rows)
+        rec_hdr = f"{'rec':>5} " if has_rec else ""
+        lines.append(f"{'pa_k':>5} {rec_hdr}{'p_all':>5}  {'PR':>6}  "
                      f"{'depth':>5} {'n_docs':>8}  node  name")
         for r in rows:
+            rec_cell = f"{r.get('pa_k_rec', 0):>5} " if has_rec else ""
             lines.append(
-                f"{r.get('pa_k', 0):>5} {r.get('pa_k_all', 0):>5}  "
+                f"{r.get('pa_k', 0):>5} {rec_cell}{r.get('pa_k_all', 0):>5}  "
                 f"{r['participation']:6.1f}  {r['depth']:>5} {r['n_docs']:>8}  "
                 f"{r['node']:>4}  {r['name']}"
             )
