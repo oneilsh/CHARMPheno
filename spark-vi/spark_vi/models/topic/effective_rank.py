@@ -210,6 +210,175 @@ def report_from_spectrum(spec, *, tau=0.01):
     }
 
 
+def singular_value_spectrum(M, max_probe):
+    """Squared singular values of ``M`` (V, d), descending, top ``max_probe``.
+
+    The spectrum parallel analysis actually compares. (The effective-rank estimators
+    above use the greedy pivoted-QR RESIDUAL sequence, which reuses the anchor-finding
+    geometry -- but that greedy picks extreme rows and its residual sequence does NOT
+    have the clean real-vs-null crossing that Horn's method relies on. The singular
+    values are the variance-per-direction quantities Horn's null was designed for, and
+    empirically give a stable, sample-size-aware count where the residual sequence
+    does not.) Computed via the eigenvalues of the smaller Gram matrix (``d x d`` when
+    V >= d, the usual sketch shape) -- squared singular values -- which is far cheaper
+    than a full SVD at V in the thousands. Returns a plain list, length
+    ``min(max_probe, min(V, d))``; empty for a degenerate ``M``.
+    """
+    M = np.asarray(M, dtype=np.float64)
+    if M.ndim != 2 or min(M.shape) == 0:
+        return []
+    V, d = M.shape
+    gram = M.T @ M if V >= d else M @ M.T
+    ev = np.linalg.eigvalsh(gram)          # ascending, real (Gram is symmetric PSD)
+    ev = np.maximum(ev[::-1], 0.0)         # descending, clip tiny negatives
+    return list(ev[: int(max_probe)])
+
+
+def parallel_analysis_rank(spec_real, floor, *, margin=2.0):
+    """Parallel-analysis per-node K: directions whose real variance clears the null.
+
+    ``spec_real`` and ``floor`` are squared-singular-value spectra on the SAME
+    projection scale (same ``d``, same projection seed): ``spec_real`` from the
+    node's real co-occurrence sketch (``singular_value_spectrum``), ``floor`` from
+    ``build_null_spectrum`` (a high percentile of null sketches drawn from the node's
+    OWN marginal at the node's OWN sample size). Returns the COUNT of positions where
+    ``spec_real[k] > margin * floor[k]``.
+
+    This is the fix for effective rank's missing noise model. Effective rank counts
+    every linear direction as signal, so it reads a low-support node's token-space
+    richness (~min(#words, d)) as a phenotype count -- a 26-doc node reads ~90.
+    Parallel analysis compares each direction to a null built at the node's ACTUAL
+    ``n_docs``: as support shrinks, finite-sample fluctuation (and hence the floor)
+    rises, so a small node clears only a few directions while a large node with
+    genuine structure clears more. Empirically (offline planted-topic sweeps) this
+    recovers a count that is STABLE across ``n_docs`` for a fixed structure and
+    collapses toward 0 for under-supported nodes -- the sample-size awareness
+    effective rank lacked.
+
+    COUNT-ALL, not contiguous-from-top: the leading singular direction (position 0)
+    is the shared marginal / background co-occurrence pervading every doc, and real
+    data spreads variance OUT of it into the phenotype directions, so ``spec_real[0]``
+    is actually BELOW the null there (ratio < 1). A contiguous Horn rule would stop
+    at position 0 and always return 0; counting all positions above the floor instead
+    yields the node's phenotype directions BEYOND that shared background -- which is
+    exactly the per-node FOREGROUND K in CHARM's design (the n_bg background block
+    already models the shared direction). So a K-topic node reads ~K-1 here (its
+    deviations beyond the shared mean), not K.
+
+    ``margin`` (default 2.0): a direction counts only if it clears ``margin x`` the
+    null percentile. The projected co-occurrence null slightly UNDER-states the real
+    tail (real docs carry within-doc concentration a marginal-i.i.d. null lacks, a
+    ~1.2-1.5x multiplicative tail bias), while genuine phenotype directions clear the
+    null by 5-50x; a factor-2 margin cleanly separates the two and also excludes the
+    below-null position-0 marginal. At strong signal the count is insensitive to the
+    exact margin (1.5/2/3 agree); the margin mainly sets sensitivity for weak/small
+    nodes. Comparison runs to ``min(len(spec_real), len(floor))``.
+    """
+    a = np.asarray(spec_real, dtype=np.float64)
+    b = np.asarray(floor, dtype=np.float64)
+    m = min(a.size, b.size)
+    if m == 0:
+        return 0
+    return int(np.count_nonzero(a[:m] > float(margin) * b[:m]))
+
+
+def null_percentile_spectrum(null_specs, q=95):
+    """Per-position ``q``-th percentile across a set of null spectra -> the floor.
+
+    ``null_specs`` is a list of squared-singular-value spectra (each non-increasing,
+    possibly ragged). Pads every spectrum to the longest length with 0.0, then takes
+    the ``q``-th percentile at each position. The result is itself non-increasing
+    (the per-position percentile of non-increasing columns is non-increasing) and is
+    the ``floor`` argument to ``parallel_analysis_rank``. Empty input -> empty list.
+    """
+    specs = [np.asarray(s, dtype=np.float64) for s in null_specs if len(s) > 0]
+    if not specs:
+        return []
+    length = max(s.size for s in specs)
+    padded = np.zeros((len(specs), length), dtype=np.float64)
+    for i, s in enumerate(specs):
+        padded[i, : s.size] = s
+    return list(np.percentile(padded, q, axis=0))
+
+
+def build_null_spectrum(marginal, lengths, n_docs, V, d, seed, *,
+                        reps=5, cap=2000, max_probe=None, q=95, R_rows=None):
+    """Driver-side null spectrum for parallel analysis, from a node's OWN marginal.
+
+    Draws ``reps`` null co-occurrence sketches that share the node's sample size and
+    token character but carry NO real co-occurrence structure, then returns the
+    per-position ``q``-th-percentile SINGULAR-VALUE spectrum (the noise floor for
+    ``parallel_analysis_rank``). Each null sketch is built from
+    ``n_sim = min(n_docs, cap)`` synthetic docs: a doc's length is drawn from the
+    node's own ``lengths`` sample and its tokens i.i.d. from the node's own unigram
+    ``marginal`` -- so any co-occurrence in the null is pure finite-sample
+    coincidence at the node's actual scale. Projecting each null doc with the SAME
+    projection rows (``R_rows``, same ``d``/seed as the real sketch) and normalizing
+    exactly as the real path (``_row_normalize_projected``) puts the null and real
+    spectra on one scale, so ``parallel_analysis_rank`` can compare them
+    position-by-position.
+
+    PER-NODE, not global: the null is drawn from THIS node's marginal + lengths, so
+    a node whose tokens are a few dominating concepts gets a very different floor
+    from a node spanning many -- preserving the per-node character a global-marginal
+    calibration would wash out (the whole point of a per-node K).
+
+    ``cap`` bounds the only cost that grows with the corpus: the finite-sample noise
+    floor SATURATES in ``n_docs`` (fluctuation stabilizes within a few thousand
+    docs), so simulating past ``cap`` docs buys nothing -- keeping the null to
+    bounded driver arithmetic even for a 100k-patient node. Cost is ``reps`` null
+    sketches + ``reps`` Gram-eigensolves per node; ``reps=5``/``cap=2000`` is the
+    tested default. ``R_rows`` (V, d), if given, is reused across reps and nodes
+    (precompute once via ``spectral_init_scalable.precompute_projection_rows``);
+    otherwise it is built here from ``seed``. ``marginal`` is a per-token
+    count/propensity vector (V,), normalized to a probability here; ``lengths`` is a
+    sample of doc lengths (only L >= 2 is drawn, matching the co-occurrence
+    contributors). Returns ``[]`` if the node has no usable support (no docs, empty
+    marginal, or no length >= 2).
+
+    The projection helpers are imported lazily so the pure estimators above stay
+    importable without the sketch module (or its scipy dependency).
+    """
+    from spark_vi.models.topic.spectral_init_scalable import (
+        _project_doc, _r_rows, _row_normalize_projected,
+    )
+    V = int(V)
+    d = int(d)
+    n_sim = int(min(int(n_docs), int(cap)))
+    if max_probe is None:
+        max_probe = d
+    marg = np.asarray(marginal, dtype=np.float64)
+    marg = np.where(marg > 0, marg, 0.0)
+    total = float(marg.sum())
+    lens = np.asarray([int(x) for x in np.asarray(lengths).ravel() if int(x) >= 2],
+                      dtype=np.int64)
+    if n_sim <= 0 or total <= 0.0 or lens.size == 0:
+        return []
+    probs = marg / total
+    if R_rows is None:
+        R_rows = _r_rows(np.arange(V), int(seed), d)
+    R_rows = np.asarray(R_rows, dtype=np.float64)
+
+    specs = []
+    for rep in range(int(reps)):
+        rng = np.random.default_rng(np.random.SeedSequence([int(seed), int(rep)]))
+        QR = np.zeros((V, d), dtype=np.float64)
+        p_w = np.zeros(V, dtype=np.float64)
+        draw_lens = lens[rng.integers(0, lens.size, size=n_sim)]
+        for L in draw_lens:
+            Li = int(L)
+            if Li < 2:
+                continue
+            toks = rng.choice(V, size=Li, p=probs)
+            idx, cnt = np.unique(toks, return_counts=True)
+            qr, pwc = _project_doc(idx, cnt, R_rows[idx])
+            QR[idx] += qr
+            p_w[idx] += pwc
+        Qbar = _row_normalize_projected(QR, p_w)
+        specs.append(singular_value_spectrum(Qbar, max_probe))
+    return null_percentile_spectrum(specs, q=q)
+
+
 def effective_rank_report(M, max_probe, *, seed_rows=None, tau=0.01):
     """All three estimators plus the raw spectrum, for side-by-side node dumps.
 
@@ -290,13 +459,22 @@ def save_effrank_sidecar(reports, path):
     """
     out = {}
     for node, rep in reports.items():
-        out[str(int(node))] = {
+        entry = {
             "participation": float(rep["participation"]),
             "threshold": int(rep["threshold"]),
             "eigengap": int(rep["eigengap"]),
             "n_probed": int(rep["n_probed"]),
             "n_docs": int(rep.get("n_docs", 0)),
         }
+        # Parallel-analysis fields (present only when CHARM_PROBE_PARALLEL_ANALYSIS
+        # ran): pa_k is the sample-size-aware per-node K; pa_pr_raw is the raw
+        # (un-deflated) participation of the SAME spectrum, kept beside it so the
+        # readout can show how far the null floor pulled the estimate down.
+        if "pa_k" in rep:
+            entry["pa_k"] = int(rep["pa_k"])
+        if "pa_pr_raw" in rep:
+            entry["pa_pr_raw"] = float(rep["pa_pr_raw"])
+        out[str(int(node))] = entry
     with open(path, "w") as fh:
         json.dump(out, fh, indent=2, sort_keys=True)
     return out
