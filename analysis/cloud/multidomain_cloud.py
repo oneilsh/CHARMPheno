@@ -714,11 +714,14 @@ def main(argv=None) -> int:
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
         corpus_stats = _log_corpus_stats(bundle, lay, domain_names)
 
-        # Point the opt-in effective-rank probe (spectral gated init) at a sidecar
-        # in the run dir, so a post-fit readout can join names + doc counts without
-        # re-running. The probe fires only when CHARM_PROBE_EFFRANK is set and init
-        # is spectral (random init builds no sketch to probe).
-        if os.environ.get("CHARM_PROBE_EFFRANK") and args.init == "spectral":
+        # Point the opt-in per-node K probes (spectral gated init) at a sidecar in
+        # the run dir, so a post-fit readout can join names + doc counts without
+        # re-running. Fires when CHARM_PROBE_EFFRANK (effective rank) OR
+        # CHARM_PROBE_PARALLEL_ANALYSIS (parallel-analysis pa_k) is set and init is
+        # spectral (random init builds no sketch to probe).
+        if ((os.environ.get("CHARM_PROBE_EFFRANK")
+             or os.environ.get("CHARM_PROBE_PARALLEL_ANALYSIS"))
+                and args.init == "spectral"):
             os.environ["CHARM_PROBE_EFFRANK_OUT"] = str(
                 Path(args.out_dir) / "effrank.json")
 

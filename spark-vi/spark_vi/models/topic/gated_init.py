@@ -381,7 +381,7 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
     from spark_vi.models.topic.spectral_init_scalable import (
         projected_cooccurrence_rdd, find_anchors_projected,
         recover_beta_projected, default_projection_dim,
-        _row_normalize_projected,
+        _row_normalize_projected, precompute_projection_rows,
     )
     _validate_anchor_scope(anchor_scope)
     if d is None:
@@ -415,10 +415,13 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
         for i in range(min(lay.n_bg, bg_beta.shape[0])):
             beta[i] = bg_beta[i]
 
-        # Opt-in diagnostic (no effect on lambda): dump per-node effective rank
-        # (data-driven K_v) off each node's own sketch. Runs only when
-        # CHARM_PROBE_EFFRANK is set; CHARM_PROBE_EFFRANK_MAX overrides max_probe.
+        # Opt-in diagnostics (no effect on lambda): dump per-node K estimates off
+        # each node's own sketch. CHARM_PROBE_EFFRANK -> the (closed-negative)
+        # effective-rank / hierarchical-deflation probe; CHARM_PROBE_PARALLEL_ANALYSIS
+        # -> the sample-size-aware parallel-analysis estimator (pa_k). Either or both.
         probe_effrank = bool(os.environ.get("CHARM_PROBE_EFFRANK"))
+        probe_pa = bool(os.environ.get("CHARM_PROBE_PARALLEL_ANALYSIS"))
+        probe_any = probe_effrank or probe_pa
         effrank_reports: dict[int, dict] = {}
         node_pivots: dict[int, set] = {}   # node -> its FULL accumulated pivot claim
         if probe_effrank:
@@ -429,6 +432,29 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                 _probe_max = int(os.environ.get("CHARM_PROBE_EFFRANK_MAX", "40"))
             except ValueError:
                 _probe_max = 40
+        if probe_pa:
+            from spark_vi.models.topic.effective_rank import (
+                build_null_spectrum, parallel_analysis_rank, participation_ratio,
+                singular_value_spectrum,
+            )
+
+            def _pa_int(name, default):
+                try:
+                    return int(os.environ.get(name, str(default)))
+                except ValueError:
+                    return default
+
+            _pa_max = _pa_int("CHARM_PROBE_PA_MAX", 300)
+            _pa_reps = _pa_int("CHARM_PROBE_PA_REPS", 5)
+            _pa_cap = _pa_int("CHARM_PROBE_PA_CAP", 2000)
+            try:
+                _pa_margin = float(os.environ.get("CHARM_PROBE_PA_MARGIN", "2.0"))
+            except ValueError:
+                _pa_margin = 2.0
+            # All-token projection rows, precomputed ONCE (same d/seed as the
+            # sketch) and reused across every node + null rep.
+            _pa_R = precompute_projection_rows(V, d, seed)
+            _pa_rng = np.random.default_rng(seed)
 
         # Step 2: each node, in `topo_order`, its OWN filtered one-slab pass.
         node_anchors: dict[int, list] = {}
@@ -472,6 +498,37 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                 _rep_u = report_from_spectrum(_spec_u, tau=0.01)
                 _rep_u["n_docs"] = int(res_u.n_docs)   # diversity-vs-volume readout
                 effrank_reports[u] = _rep_u
+            if probe_pa:
+                # Parallel analysis: the node's OWN raw singular-value spectrum vs a
+                # null drawn from the node's OWN unigram marginal + doc lengths at
+                # the node's OWN n_docs. pa_k = directions clearing margin x null =
+                # the sample-size-aware per-node foreground K. NOT hierarchically
+                # deflated (a per-node quantity; own population vs own-size null).
+                _qbar_pa = _row_normalize_projected(res_u.pooled_QR, res_u.p_w)
+                _spec_pa = singular_value_spectrum(_qbar_pa, _pa_max)
+                _hist = res_u.length_hist or {}
+                if _hist:
+                    _ul = np.array(sorted(_hist), dtype=np.int64)
+                    _wc = np.array([_hist[int(x)] for x in _ul], dtype=np.float64)
+                    _lens = _pa_rng.choice(
+                        _ul, size=int(min(4096, _wc.sum())), p=_wc / _wc.sum())
+                else:
+                    _lens = np.empty(0, dtype=np.int64)
+                _floor_pa = build_null_spectrum(
+                    res_u.unigram, _lens, res_u.n_docs, V, d, seed,
+                    reps=_pa_reps, cap=_pa_cap, max_probe=_pa_max, R_rows=_pa_R)
+                _pa_k = parallel_analysis_rank(_spec_pa, _floor_pa, margin=_pa_margin)
+                _rep = effrank_reports.get(u)
+                if _rep is None:
+                    _rep = report_from_spectrum(_spec_pa, tau=0.01) \
+                        if probe_effrank else {
+                            "participation": participation_ratio(_spec_pa),
+                            "threshold": 0, "eigengap": 0,
+                            "n_probed": len(_spec_pa)}
+                    _rep["n_docs"] = int(res_u.n_docs)
+                _rep["pa_k"] = int(_pa_k)
+                _rep["pa_pr_raw"] = float(participation_ratio(_spec_pa))
+                effrank_reports[u] = _rep
             fg_anchors = find_anchors_projected(
                 res_u.pooled_QR, res_u.p_w, res_u.df_w, lay.tpn,
                 seed_rows=seed_rows, min_doc_freq=min_doc_freq)
@@ -488,7 +545,7 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                 if j < fg_beta.shape[0]:
                     beta[idx] = fg_beta[j]
 
-        if probe_effrank:
+        if probe_any:
             from spark_vi.models.topic.effective_rank import (
                 log_effrank_table, save_effrank_sidecar,
             )
@@ -496,6 +553,20 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
             log_effrank_table(effrank_reports, n_nodes=len(lay.nodes),
                               k_uniform=len(lay.nodes) * lay.tpn,
                               printer=lambda s: print(s, flush=True))
+            if probe_pa:
+                _pa_items = sorted(
+                    ((int(rep.get("pa_k", 0)), u, rep)
+                     for u, rep in effrank_reports.items()),
+                    reverse=True)
+                _pa_total = sum(k for k, _, _ in _pa_items)
+                print(f"[pa] parallel-analysis per-node K (margin={_pa_margin}, "
+                      f"reps={_pa_reps}, cap={_pa_cap}): Σpa_k={_pa_total} "
+                      f"vs current foreground K={len(lay.nodes) * lay.tpn}",
+                      flush=True)
+                print("[pa] node\tpa_k\tpa_pr_raw\tn_docs", flush=True)
+                for k, u, rep in _pa_items:
+                    print(f"[pa] {u}\t{k}\t{rep.get('pa_pr_raw', 0.0):.1f}\t"
+                          f"{rep.get('n_docs', 0)}", flush=True)
             # Persist a sidecar (node id -> report) so a post-fit readout can join
             # names + doc counts without re-parsing logs or re-running the fit. The
             # path is provided by the driver via CHARM_PROBE_EFFRANK_OUT (the fit's
