@@ -452,6 +452,10 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                 _pa_margin = float(os.environ.get("CHARM_PROBE_PA_MARGIN", "2.0"))
             except ValueError:
                 _pa_margin = 2.0
+            try:
+                _pa_tau = float(os.environ.get("CHARM_PROBE_PA_TAU", "0.01"))
+            except ValueError:
+                _pa_tau = 0.01
             # All-token projection rows, precomputed ONCE (same d/seed as the
             # sketch) and reused across every node + null rep.
             _pa_R = precompute_projection_rows(V, d, seed)
@@ -525,7 +529,8 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                 _floor_pa = build_null_spectrum(
                     res_u.unigram, _lens, res_u.n_docs, V, d, seed,
                     reps=_pa_reps, cap=_pa_cap, max_probe=_pa_max, R_rows=_pa_R)
-                _pa_k = parallel_analysis_rank(_spec_pa, _floor_pa, margin=_pa_margin)
+                _pa_k = parallel_analysis_rank(
+                    _spec_pa, _floor_pa, margin=_pa_margin, tau=_pa_tau)
                 _pa_k_all = parallel_analysis_count_all(
                     _spec_pa, _floor_pa, margin=_pa_margin)
                 _rep = effrank_reports.get(u)
@@ -539,6 +544,14 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                 _rep["pa_k"] = int(_pa_k)
                 _rep["pa_k_all"] = int(_pa_k_all)
                 _rep["pa_pr_raw"] = float(participation_ratio(_spec_pa))
+                # Store the (truncated) real spectrum + null floor so the readout can
+                # RE-DERIVE pa_k at any margin/tau/bg_skip without a re-fit -- the
+                # cutoff becomes an instant re-render knob. Top 150 positions is well
+                # past any node's collapse; the rest is numerical dust.
+                _rep["pa_spec"] = [float(x) for x in _spec_pa[:150]]
+                _rep["pa_floor"] = [float(x) for x in _floor_pa[:150]]
+                _rep["pa_tau"] = float(_pa_tau)
+                _rep["pa_margin"] = float(_pa_margin)
                 effrank_reports[u] = _rep
                 if _pa_diag:
                     # Aggregate doc-shape stats (no per-token / patient disclosure):
