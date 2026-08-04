@@ -255,7 +255,7 @@ def parallel_analysis_count_all(spec_real, floor, *, margin=2.0):
     return int(np.count_nonzero(a[:m] > float(margin) * b[:m]))
 
 
-def parallel_analysis_rank(spec_real, floor, *, margin=2.0, bg_skip=1):
+def parallel_analysis_rank(spec_real, floor, *, margin=2.0, bg_skip=1, tau=0.0):
     """Parallel-analysis per-node K: the LEADING contiguous block above the null.
 
     ``spec_real`` and ``floor`` are squared-singular-value spectra on the SAME
@@ -292,6 +292,22 @@ def parallel_analysis_rank(spec_real, floor, *, margin=2.0, bg_skip=1):
     genuine phenotype directions clear it by 5-50x; a factor-2 margin cleanly
     separates the two. At strong signal the count is insensitive to the exact margin.
     Comparison runs to ``min(len(spec_real), len(floor))``.
+
+    ``tau`` (default 0.0 = off): a proportion-of-variance floor -- a direction also
+    has to carry at least ``tau`` times the LEADING foreground eigenvalue (the real
+    value at the run's start). This is the scree / percent-of-variance criterion,
+    and it plugs the one hole the null test alone leaves. On a severely
+    under-supported node the null COLLAPSES (few synthetic docs -> its tail falls to
+    ~numerical dust), so the node's own per-patient idiosyncratic tail -- itself
+    negligible, ~0.03% of the top eigenvalue -- still clears ``margin * null`` and
+    the leading run runs away (a 3-patient node read 65). Requiring the direction to
+    also be non-negligible in absolute terms (``>= tau * spec_real[start]``) cuts
+    exactly that: on real data the tiny-node tail sits <=1% of the top while
+    well-supported nodes carry 3-6% out to their genuine collapse, so tau~0.01
+    severs the former and leaves the latter to the null floor. The two conditions
+    are complementary -- the null floor cuts a tail that TRACKS the null (a
+    well-supported node's noise), tau cuts a tail that floats above a COLLAPSED null
+    (an under-supported node's idiosyncrasy). Neither alone suffices.
     """
     a = np.asarray(spec_real, dtype=np.float64)
     b = np.asarray(floor, dtype=np.float64)
@@ -309,9 +325,10 @@ def parallel_analysis_rank(spec_real, floor, *, margin=2.0, bg_skip=1):
             break
     if start < 0:
         return 0
+    var_floor = float(tau) * float(a[start])   # proportion-of-variance floor
     run = 0
     k = start
-    while k < m and clear[k]:
+    while k < m and clear[k] and a[k] >= var_floor:
         run += 1
         k += 1
     return int(run)
@@ -517,6 +534,16 @@ def save_effrank_sidecar(reports, path):
             entry["pa_k_all"] = int(rep["pa_k_all"])
         if "pa_pr_raw" in rep:
             entry["pa_pr_raw"] = float(rep["pa_pr_raw"])
+        # Store the spectra so the readout can re-derive pa_k at any cutoff without
+        # a re-fit (aggregate/derived quantities; no patient rows, no per-token data).
+        if "pa_spec" in rep:
+            entry["pa_spec"] = [float(x) for x in rep["pa_spec"]]
+        if "pa_floor" in rep:
+            entry["pa_floor"] = [float(x) for x in rep["pa_floor"]]
+        if "pa_tau" in rep:
+            entry["pa_tau"] = float(rep["pa_tau"])
+        if "pa_margin" in rep:
+            entry["pa_margin"] = float(rep["pa_margin"])
         out[str(int(node))] = entry
     with open(path, "w") as fh:
         json.dump(out, fh, indent=2, sort_keys=True)

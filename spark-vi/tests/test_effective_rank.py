@@ -224,6 +224,23 @@ def test_parallel_analysis_rank_bg_skip_controls_allowed_lead():
     assert parallel_analysis_rank(real, floor, bg_skip=2) == 2   # now the block is reached
 
 
+def test_parallel_analysis_rank_tau_cuts_collapsed_null_tail():
+    # The node-88 pathology: 2 genuine foreground directions, then the null has
+    # COLLAPSED (floor -> ~0.05) so a negligible real tail (0.2, ~0.03% of the top)
+    # still clears margin*floor. Without tau the leading run runs away; the
+    # proportion-of-variance floor severs the tail at the cliff.
+    real = [10.0, 80.0, 60.0, 0.2, 0.2, 0.2, 0.2]   # pos0 background (below null)
+    floor = [50.0, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
+    assert parallel_analysis_rank(real, floor, tau=0.0) == 6      # tail floats away
+    assert parallel_analysis_rank(real, floor, tau=0.01) == 2     # 0.2 < 0.01*80 -> cut
+    # tau does NOT touch a well-supported node whose tail is a real fraction of the
+    # top: here every kept direction is >= 1% of the leading, so tau is inert and
+    # the null floor governs.
+    real2 = [10.0, 100.0, 40.0, 20.0, 1.0]
+    floor2 = [50.0, 1.0, 1.0, 1.0, 50.0]                          # null cuts pos4
+    assert parallel_analysis_rank(real2, floor2, tau=0.01) == 3   # 100,40,20 kept
+
+
 def test_parallel_analysis_rank_margin_is_tunable():
     real = [10.0, 5.0, 2.5]
     floor = [2.0, 2.0, 2.0]

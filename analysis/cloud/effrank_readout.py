@@ -91,6 +91,9 @@ def build_rows(sidecar: dict, names: dict[int, str],
             row["pa_k_all"] = int(rep["pa_k_all"])
         if "pa_pr_raw" in rep:
             row["pa_pr_raw"] = float(rep["pa_pr_raw"])
+        if "pa_spec" in rep and "pa_floor" in rep:
+            row["pa_spec"] = [float(x) for x in rep["pa_spec"]]
+            row["pa_floor"] = [float(x) for x in rep["pa_floor"]]
         rows.append(row)
     # Sort by pa_k when present (the live estimator), else participation.
     if any("pa_k" in r for r in rows):
@@ -143,6 +146,63 @@ def pa_bucket_correlations(rows: list[dict], key="pa_k"):
                 xs.append(r[key])
                 ys.append(math.log10(r["n_docs"]))
         out.append((label, len(xs), pearson(xs, ys) if len(xs) >= 2 else 0.0))
+    return out
+
+
+def pa_rank_from_spectrum(spec, floor, *, margin=2.0, tau=0.01, bg_skip=1) -> int:
+    """Leading contiguous block above the null AND above a variance floor.
+
+    Dependency-free twin of ``effective_rank.parallel_analysis_rank`` (kept inline
+    so the readout needs no pyspark to import). Re-derives pa_k from the stored real
+    spectrum + null floor, so margin/tau/bg_skip are readout-time knobs -- sweep the
+    cutoff without a re-fit. See that function for the rationale.
+    """
+    m = min(len(spec), len(floor))
+    if m == 0:
+        return 0
+    clear = [spec[k] > margin * floor[k] for k in range(m)]
+    start = -1
+    for k in range(min(int(bg_skip) + 1, m)):
+        if clear[k]:
+            start = k
+            break
+    if start < 0:
+        return 0
+    var_floor = tau * spec[start]
+    run = 0
+    k = start
+    while k < m and clear[k] and spec[k] >= var_floor:
+        run += 1
+        k += 1
+    return run
+
+
+def recompute_pa_k(rows: list[dict], *, margin=2.0, tau=0.01, bg_skip=1) -> None:
+    """Overwrite each row's ``pa_k`` from its stored spectra at the given cutoff.
+
+    Rows without stored spectra (older sidecars) keep their fitted ``pa_k``.
+    """
+    for r in rows:
+        if "pa_spec" in r and "pa_floor" in r:
+            r["pa_k"] = pa_rank_from_spectrum(
+                r["pa_spec"], r["pa_floor"], margin=margin, tau=tau,
+                bg_skip=bg_skip)
+
+
+def pa_tau_sweep(rows, taus, *, margin=2.0, bg_skip=1):
+    """[(tau, Σpa_k, #nodes with pa_k > n_docs)] over a list of tau cutoffs.
+
+    Only rows carrying stored spectra participate. Lets the reader see the whole
+    cutoff curve at once -- where Σ stabilizes and where the impossible-count
+    (pa_k > n_docs, the under-support tell) drops to zero.
+    """
+    have = [r for r in rows if "pa_spec" in r and "pa_floor" in r]
+    out = []
+    for t in taus:
+        ks = [pa_rank_from_spectrum(r["pa_spec"], r["pa_floor"], margin=margin,
+                                    tau=t, bg_skip=bg_skip) for r in have]
+        imp = sum(1 for r, k in zip(have, ks) if k > r["n_docs"] > 0)
+        out.append((t, sum(ks), imp))
     return out
 
 
@@ -235,6 +295,15 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--run-dir", required=True,
                    help="the fit's run dir (has manifest.json + effrank.json)")
+    p.add_argument("--pa-tau", type=float, default=0.01,
+                   help="proportion-of-variance floor for pa_k (default 0.01); "
+                        "re-derived from stored spectra, no re-fit needed")
+    p.add_argument("--pa-margin", type=float, default=2.0,
+                   help="null-clearance margin for pa_k (default 2.0)")
+    p.add_argument("--pa-bg-skip", type=int, default=1,
+                   help="leading background directions to skip (default 1)")
+    p.add_argument("--pa-sweep", action="store_true",
+                   help="print a tau sweep (Σpa_k + impossible-count per cutoff)")
     args = p.parse_args(argv)
 
     run_dir = _run_dir_glob(args.run_dir)
@@ -252,8 +321,21 @@ def main(argv=None) -> int:
                   for n, ps in cm.get("parent_int", {}).items()}
     depths = node_depths(parent_int)
     rows = build_rows(sidecar, names, depths)
+    # Re-derive pa_k at the requested cutoff from stored spectra (no re-fit), then
+    # re-sort by the fresh pa_k so the table reflects the chosen knobs.
+    if any("pa_spec" in r for r in rows):
+        recompute_pa_k(rows, margin=args.pa_margin, tau=args.pa_tau,
+                       bg_skip=args.pa_bg_skip)
+        rows.sort(key=lambda r: r.get("pa_k", -1), reverse=True)
     k_uniform = len(parent_int) * int(manifest.get("tpn", 0)) or None
     print(render(rows, k_uniform=k_uniform))
+    if args.pa_sweep and any("pa_spec" in r for r in rows):
+        print(f"\n# tau sweep (margin={args.pa_margin}, bg_skip={args.pa_bg_skip})")
+        print(f"{'tau':>7} {'Σpa_k':>7} {'#impossible(pa_k>n_docs)':>26}")
+        for t, tot, imp in pa_tau_sweep(
+                rows, [0.0, 0.005, 0.01, 0.02, 0.05, 0.1],
+                margin=args.pa_margin, bg_skip=args.pa_bg_skip):
+            print(f"{t:>7.3f} {tot:>7} {imp:>26}")
     return 0
 
 
