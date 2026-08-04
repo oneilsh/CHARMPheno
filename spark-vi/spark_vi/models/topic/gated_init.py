@@ -456,6 +456,10 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                 _pa_tau = float(os.environ.get("CHARM_PROBE_PA_TAU", "0.01"))
             except ValueError:
                 _pa_tau = 0.01
+            # Per-node recurrence floor: a word must appear in >= this many of the
+            # node's docs to enter its spectrum (the per-node term-min-count). 0
+            # disables the recurrence-floored column.
+            _pa_min_df = _pa_int("CHARM_PROBE_PA_MIN_DF", 3)
             # All-token projection rows, precomputed ONCE (same d/seed as the
             # sketch) and reused across every node + null rep.
             _pa_R = precompute_projection_rows(V, d, seed)
@@ -552,6 +556,25 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                 _rep["pa_floor"] = [float(x) for x in _floor_pa[:150]]
                 _rep["pa_tau"] = float(_pa_tau)
                 _rep["pa_margin"] = float(_pa_margin)
+                if _pa_min_df > 1:
+                    # Per-node recurrence floor: restrict the spectrum (real AND
+                    # null) to words appearing in >= _pa_min_df of the node's docs,
+                    # so single-patient directions collapse and only phenotypes that
+                    # RECUR across patients survive. res_u.df_w is the within-node
+                    # document frequency per word.
+                    _elig = np.asarray(res_u.df_w) >= _pa_min_df
+                    _spec_rec = singular_value_spectrum(
+                        _qbar_pa, _pa_max, eligible=_elig)
+                    _floor_rec = build_null_spectrum(
+                        res_u.unigram, _lens, res_u.n_docs, V, d, seed,
+                        reps=_pa_reps, cap=_pa_cap, max_probe=_pa_max, R_rows=_pa_R,
+                        eligible=_elig)
+                    _pa_k_rec = parallel_analysis_rank(
+                        _spec_rec, _floor_rec, margin=_pa_margin, tau=_pa_tau)
+                    _rep["pa_k_rec"] = int(_pa_k_rec)
+                    _rep["pa_spec_rec"] = [float(x) for x in _spec_rec[:150]]
+                    _rep["pa_floor_rec"] = [float(x) for x in _floor_rec[:150]]
+                    _rep["pa_min_df"] = int(_pa_min_df)
                 effrank_reports[u] = _rep
                 if _pa_diag:
                     # Aggregate doc-shape stats (no per-token / patient disclosure):
@@ -612,11 +635,23 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                       f"(leading-run) vs Σpa_k_all={_pa_all_total} (count-all "
                       f"diagnostic) vs current foreground K={len(lay.nodes) * lay.tpn}",
                       flush=True)
-                print("[pa] node\tpa_k\tpa_k_all\tpa_pr_raw\tn_docs", flush=True)
-                for k, u, rep in _pa_items:
-                    print(f"[pa] {u}\t{k}\t{rep.get('pa_k_all', 0)}\t"
-                          f"{rep.get('pa_pr_raw', 0.0):.1f}\t"
-                          f"{rep.get('n_docs', 0)}", flush=True)
+                _has_rec = any("pa_k_rec" in rep for _, _, rep in _pa_items)
+                if _has_rec:
+                    _rec_total = sum(int(rep.get("pa_k_rec", 0))
+                                     for _, _, rep in _pa_items)
+                    print(f"[pa] recurrence-floored (min_df={_pa_min_df}): "
+                          f"Σpa_k_rec={_rec_total}", flush=True)
+                    print("[pa] node\tpa_k\tpa_k_rec\tpa_k_all\tn_docs", flush=True)
+                    for k, u, rep in _pa_items:
+                        print(f"[pa] {u}\t{k}\t{rep.get('pa_k_rec', 0)}\t"
+                              f"{rep.get('pa_k_all', 0)}\t{rep.get('n_docs', 0)}",
+                              flush=True)
+                else:
+                    print("[pa] node\tpa_k\tpa_k_all\tpa_pr_raw\tn_docs", flush=True)
+                    for k, u, rep in _pa_items:
+                        print(f"[pa] {u}\t{k}\t{rep.get('pa_k_all', 0)}\t"
+                              f"{rep.get('pa_pr_raw', 0.0):.1f}\t"
+                              f"{rep.get('n_docs', 0)}", flush=True)
                 if _pa_diag and _pa_diag_rows:
                     # Flag the pathological nodes (pa_k_all > n_docs -- "more
                     # phenotypes than patients") plus the 3 best-supported nodes for
