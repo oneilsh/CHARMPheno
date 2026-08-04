@@ -234,45 +234,18 @@ def singular_value_spectrum(M, max_probe):
     return list(ev[: int(max_probe)])
 
 
-def parallel_analysis_rank(spec_real, floor, *, margin=2.0):
-    """Parallel-analysis per-node K: directions whose real variance clears the null.
+def parallel_analysis_count_all(spec_real, floor, *, margin=2.0):
+    """Count of ALL positions where ``spec_real[k] > margin * floor[k]``.
 
-    ``spec_real`` and ``floor`` are squared-singular-value spectra on the SAME
-    projection scale (same ``d``, same projection seed): ``spec_real`` from the
-    node's real co-occurrence sketch (``singular_value_spectrum``), ``floor`` from
-    ``build_null_spectrum`` (a high percentile of null sketches drawn from the node's
-    OWN marginal at the node's OWN sample size). Returns the COUNT of positions where
-    ``spec_real[k] > margin * floor[k]``.
-
-    This is the fix for effective rank's missing noise model. Effective rank counts
-    every linear direction as signal, so it reads a low-support node's token-space
-    richness (~min(#words, d)) as a phenotype count -- a 26-doc node reads ~90.
-    Parallel analysis compares each direction to a null built at the node's ACTUAL
-    ``n_docs``: as support shrinks, finite-sample fluctuation (and hence the floor)
-    rises, so a small node clears only a few directions while a large node with
-    genuine structure clears more. Empirically (offline planted-topic sweeps) this
-    recovers a count that is STABLE across ``n_docs`` for a fixed structure and
-    collapses toward 0 for under-supported nodes -- the sample-size awareness
-    effective rank lacked.
-
-    COUNT-ALL, not contiguous-from-top: the leading singular direction (position 0)
-    is the shared marginal / background co-occurrence pervading every doc, and real
-    data spreads variance OUT of it into the phenotype directions, so ``spec_real[0]``
-    is actually BELOW the null there (ratio < 1). A contiguous Horn rule would stop
-    at position 0 and always return 0; counting all positions above the floor instead
-    yields the node's phenotype directions BEYOND that shared background -- which is
-    exactly the per-node FOREGROUND K in CHARM's design (the n_bg background block
-    already models the shared direction). So a K-topic node reads ~K-1 here (its
-    deviations beyond the shared mean), not K.
-
-    ``margin`` (default 2.0): a direction counts only if it clears ``margin x`` the
-    null percentile. The projected co-occurrence null slightly UNDER-states the real
-    tail (real docs carry within-doc concentration a marginal-i.i.d. null lacks, a
-    ~1.2-1.5x multiplicative tail bias), while genuine phenotype directions clear the
-    null by 5-50x; a factor-2 margin cleanly separates the two and also excludes the
-    below-null position-0 marginal. At strong signal the count is insensitive to the
-    exact margin (1.5/2/3 agree); the margin mainly sets sensitivity for weak/small
-    nodes. Comparison runs to ``min(len(spec_real), len(floor))``.
+    The naive parallel-analysis count. Kept as a DIAGNOSTIC, not the estimator:
+    offline sweeps (holding a phenotype structure fixed while growing ``n_docs``)
+    show this count is dominated by TAIL directions for under-supported nodes -- a
+    3-doc node reads ~100, with every "significant" direction sitting deep in the
+    spectrum tail (indices 60-250) and NONE in the top-10. Those are not phenotypes:
+    with few docs each patient's whole record is one tight clique that the
+    marginal-i.i.d. null (drawn from the node's more-spread aggregate marginal)
+    cannot reproduce, so the real tail floats above the null everywhere. See
+    ``parallel_analysis_rank`` for the estimator that rejects this.
     """
     a = np.asarray(spec_real, dtype=np.float64)
     b = np.asarray(floor, dtype=np.float64)
@@ -280,6 +253,68 @@ def parallel_analysis_rank(spec_real, floor, *, margin=2.0):
     if m == 0:
         return 0
     return int(np.count_nonzero(a[:m] > float(margin) * b[:m]))
+
+
+def parallel_analysis_rank(spec_real, floor, *, margin=2.0, bg_skip=1):
+    """Parallel-analysis per-node K: the LEADING contiguous block above the null.
+
+    ``spec_real`` and ``floor`` are squared-singular-value spectra on the SAME
+    projection scale (same ``d``, same projection seed): ``spec_real`` from the
+    node's real co-occurrence sketch (``singular_value_spectrum``), ``floor`` from
+    ``build_null_spectrum`` (a high percentile of null sketches drawn from the node's
+    OWN marginal at the node's OWN sample size). Returns the length of the LEADING
+    contiguous run of directions clearing ``margin * floor`` -- i.e. Horn's method:
+    retain the top components until the first that fails to beat the null.
+
+    Why leading-contiguous, not count-all (the earlier, wrong choice). A genuine
+    phenotype signal appears as a block of high-variance directions at the TOP of the
+    spectrum. An UNDER-supported node has no such leading block -- its leading
+    directions fall BELOW the null -- but its TAIL floats above the null (each of a
+    handful of patients contributes one tight record-clique the diffuse marginal null
+    cannot reproduce). Count-all summed that tail and read ~100 phenotypes from 3
+    patients. The leading-run rule ignores tail crossings, so an under-supported node
+    self-floors to ~0 (fall back to the default tpn) while a supported node recovers
+    its true count. Offline, with a fixed P-phenotype structure, this reads 0 while
+    n_docs is too small to resolve P, then locks onto exactly the right count once
+    it is (P=3 -> 2 by n~100; P=10 -> 9 by n~300); more phenotypes need more
+    replication, as they must.
+
+    ``bg_skip`` (default 1): how many leading BACKGROUND directions may sit below the
+    null before the phenotype block. Position 0 is the shared marginal / background
+    co-occurrence pervading every doc; real data spreads variance out of it, so it
+    reads BELOW the null (CHARM's n_bg block already models it). The phenotype block
+    is the contiguous above-null run that BEGINS within the first ``bg_skip + 1``
+    positions; a first crossing beyond that is tail noise, not signal -> return 0.
+
+    ``margin`` (default 2.0): a direction counts only if it clears ``margin x`` the
+    null percentile. The projected co-occurrence null slightly UNDER-states the real
+    tail (within-doc concentration a marginal-i.i.d. null lacks, ~1.2-1.5x), while
+    genuine phenotype directions clear it by 5-50x; a factor-2 margin cleanly
+    separates the two. At strong signal the count is insensitive to the exact margin.
+    Comparison runs to ``min(len(spec_real), len(floor))``.
+    """
+    a = np.asarray(spec_real, dtype=np.float64)
+    b = np.asarray(floor, dtype=np.float64)
+    m = min(a.size, b.size)
+    if m == 0:
+        return 0
+    clear = a[:m] > float(margin) * b[:m]
+    # The phenotype block must BEGIN within the first bg_skip+1 positions (allowing
+    # the shared-background direction(s) to sit below the null first). A first
+    # crossing deeper than that is per-record tail noise -> no coherent signal.
+    start = -1
+    for k in range(min(int(bg_skip) + 1, m)):
+        if clear[k]:
+            start = k
+            break
+    if start < 0:
+        return 0
+    run = 0
+    k = start
+    while k < m and clear[k]:
+        run += 1
+        k += 1
+    return int(run)
 
 
 def null_percentile_spectrum(null_specs, q=95):
@@ -472,11 +507,14 @@ def save_effrank_sidecar(reports, path):
             "n_docs": int(rep.get("n_docs", 0)),
         }
         # Parallel-analysis fields (present only when CHARM_PROBE_PARALLEL_ANALYSIS
-        # ran): pa_k is the sample-size-aware per-node K; pa_pr_raw is the raw
-        # (un-deflated) participation of the SAME spectrum, kept beside it so the
-        # readout can show how far the null floor pulled the estimate down.
+        # ran): pa_k is the sample-size-aware per-node K (LEADING contiguous block
+        # above the null); pa_k_all is the old count-all diagnostic (kept so the
+        # readout can show the tail-noise inflation the leading-run rule removes);
+        # pa_pr_raw is the raw participation of the SAME spectrum.
         if "pa_k" in rep:
             entry["pa_k"] = int(rep["pa_k"])
+        if "pa_k_all" in rep:
+            entry["pa_k_all"] = int(rep["pa_k_all"])
         if "pa_pr_raw" in rep:
             entry["pa_pr_raw"] = float(rep["pa_pr_raw"])
         out[str(int(node))] = entry

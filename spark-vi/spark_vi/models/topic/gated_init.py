@@ -434,7 +434,8 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                 _probe_max = 40
         if probe_pa:
             from spark_vi.models.topic.effective_rank import (
-                build_null_spectrum, parallel_analysis_rank, participation_ratio,
+                build_null_spectrum, parallel_analysis_count_all,
+                parallel_analysis_rank, participation_ratio,
                 singular_value_spectrum,
             )
 
@@ -518,6 +519,8 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                     res_u.unigram, _lens, res_u.n_docs, V, d, seed,
                     reps=_pa_reps, cap=_pa_cap, max_probe=_pa_max, R_rows=_pa_R)
                 _pa_k = parallel_analysis_rank(_spec_pa, _floor_pa, margin=_pa_margin)
+                _pa_k_all = parallel_analysis_count_all(
+                    _spec_pa, _floor_pa, margin=_pa_margin)
                 _rep = effrank_reports.get(u)
                 if _rep is None:
                     _rep = report_from_spectrum(_spec_pa, tau=0.01) \
@@ -527,6 +530,7 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                             "n_probed": len(_spec_pa)}
                     _rep["n_docs"] = int(res_u.n_docs)
                 _rep["pa_k"] = int(_pa_k)
+                _rep["pa_k_all"] = int(_pa_k_all)
                 _rep["pa_pr_raw"] = float(participation_ratio(_spec_pa))
                 effrank_reports[u] = _rep
             fg_anchors = find_anchors_projected(
@@ -559,13 +563,17 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                      for u, rep in effrank_reports.items()),
                     reverse=True)
                 _pa_total = sum(k for k, _, _ in _pa_items)
+                _pa_all_total = sum(int(rep.get("pa_k_all", 0))
+                                    for _, _, rep in _pa_items)
                 print(f"[pa] parallel-analysis per-node K (margin={_pa_margin}, "
                       f"reps={_pa_reps}, cap={_pa_cap}): Σpa_k={_pa_total} "
-                      f"vs current foreground K={len(lay.nodes) * lay.tpn}",
+                      f"(leading-run) vs Σpa_k_all={_pa_all_total} (count-all "
+                      f"diagnostic) vs current foreground K={len(lay.nodes) * lay.tpn}",
                       flush=True)
-                print("[pa] node\tpa_k\tpa_pr_raw\tn_docs", flush=True)
+                print("[pa] node\tpa_k\tpa_k_all\tpa_pr_raw\tn_docs", flush=True)
                 for k, u, rep in _pa_items:
-                    print(f"[pa] {u}\t{k}\t{rep.get('pa_pr_raw', 0.0):.1f}\t"
+                    print(f"[pa] {u}\t{k}\t{rep.get('pa_k_all', 0)}\t"
+                          f"{rep.get('pa_pr_raw', 0.0):.1f}\t"
                           f"{rep.get('n_docs', 0)}", flush=True)
             # Persist a sidecar (node id -> report) so a post-fit readout can join
             # names + doc counts without re-parsing logs or re-running the fit. The

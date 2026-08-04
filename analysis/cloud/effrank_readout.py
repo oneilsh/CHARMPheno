@@ -87,6 +87,8 @@ def build_rows(sidecar: dict, names: dict[int, str],
         # Parallel-analysis fields, present only when the pa probe ran.
         if "pa_k" in rep:
             row["pa_k"] = int(rep["pa_k"])
+        if "pa_k_all" in rep:
+            row["pa_k_all"] = int(rep["pa_k_all"])
         if "pa_pr_raw" in rep:
             row["pa_pr_raw"] = float(rep["pa_pr_raw"])
         rows.append(row)
@@ -124,6 +126,26 @@ def pa_volume_correlation(rows: list[dict]) -> float:
     return pearson(xs, ys)
 
 
+def pa_bucket_correlations(rows: list[dict], key="pa_k"):
+    """corr(``key``, log10 n_docs) within support buckets -> [(label, n, corr)].
+
+    The aggregate correlation can read ~0 while a low-support INVERSION (fewer docs
+    -> higher count) cancels a positive trend among well-supported nodes. Reporting
+    per bucket makes that cancellation visible instead of hiding it.
+    """
+    buckets = [("tiny <50", 0, 50), ("small 50-300", 50, 300),
+               ("big >=300", 300, 10 ** 12)]
+    out = []
+    for label, lo, hi in buckets:
+        xs, ys = [], []
+        for r in rows:
+            if key in r and lo <= r["n_docs"] < hi:
+                xs.append(r[key])
+                ys.append(math.log10(r["n_docs"]))
+        out.append((label, len(xs), pearson(xs, ys) if len(xs) >= 2 else 0.0))
+    return out
+
+
 def render(rows: list[dict], *, k_uniform: int | None = None) -> str:
     """Render the labeled table + a diversity-vs-volume summary as text.
 
@@ -142,14 +164,26 @@ def render(rows: list[dict], *, k_uniform: int | None = None) -> str:
     lines.append("")
     if has_pa:
         pa_total = sum(r.get("pa_k", 0) for r in rows)
+        pa_all_total = sum(r.get("pa_k_all", 0) for r in rows)
         pa_corr = pa_volume_correlation(rows)
-        lines.append(f"nodes: {len(rows)}  |  Σpa_k [parallel-analysis K]: "
-                     f"{pa_total}"
+        has_all = any("pa_k_all" in r for r in rows)
+        lines.append(f"nodes: {len(rows)}  |  Σpa_k [parallel-analysis K, "
+                     f"leading-run]: {pa_total}"
                      + (f"  vs current foreground K: {k_uniform}"
                         if k_uniform is not None else ""))
+        if has_all:
+            impossible = sum(1 for r in rows
+                             if r.get("pa_k_all", 0) > r["n_docs"] > 0)
+            lines.append(f"  (count-all diagnostic Σpa_k_all: {pa_all_total}; "
+                         f"{impossible} nodes had pa_k_all > n_docs -- the "
+                         "tail-noise inflation the leading-run rule removes)")
         lines.append(f"corr(pa_k, log10 n_docs): {pa_corr:+.2f}  "
-                     f"(vs raw corr(PR, log n_docs): {corr:+.2f} -- pa_k should "
-                     "track volume far less)")
+                     f"(vs raw corr(PR, log n_docs): {corr:+.2f})")
+        # By-support-bucket correlation, so a low-n inversion can't hide in the
+        # aggregate (the count-all estimator's headline ~0 was two effects cancelling).
+        bkt = pa_bucket_correlations(rows, key="pa_k")
+        lines.append("  by support: " + "  ".join(
+            f"{lab} (n={n}) {c:+.2f}" for lab, n, c in bkt))
     else:
         lines.append(f"nodes: {len(rows)}  |  "
                      f"Σround(PR) [diversity-driven K]: {k_div}"
@@ -163,12 +197,12 @@ def render(rows: list[dict], *, k_uniform: int | None = None) -> str:
                      "their true rank).")
     lines.append("")
     if has_pa:
-        lines.append(f"{'pa_k':>5}  {'PR':>6} {'n':>4}  "
+        lines.append(f"{'pa_k':>5} {'p_all':>5}  {'PR':>6}  "
                      f"{'depth':>5} {'n_docs':>8}  node  name")
         for r in rows:
             lines.append(
-                f"{r.get('pa_k', 0):>5}  {r['participation']:6.1f} "
-                f"{r['n_probed']:>4}  {r['depth']:>5} {r['n_docs']:>8}  "
+                f"{r.get('pa_k', 0):>5} {r.get('pa_k_all', 0):>5}  "
+                f"{r['participation']:6.1f}  {r['depth']:>5} {r['n_docs']:>8}  "
                 f"{r['node']:>4}  {r['name']}"
             )
     else:
