@@ -55,8 +55,14 @@ authors, year, title, venue, a link if available, and a short note on its role.
   **(landscape)**
 - **Ramage, Manning & Dumais (2011).** Partially Labeled Topic Models for Interpretable Text Mining (PLDA). *KDD*.
   — generative-restriction basis for "gated LDA"; the model our `TopicBlockPartition` gating reimplements. *used in:* `docs/insights/0028-...-plda.md`
+- **Ramage, Manning & Dumais (2011).** Partially Labeled Dirichlet *Process* (PLDP). *KDD* (companion model in the PLDA paper).
+  — nonparametric PLDA: a Dirichlet-process prior over each label's topic set learns how many topics each label needs. The lineage's native answer to our per-node-K question — and exactly the per-label stick-breaking we rejected on prior-dominance grounds (insights 0017, 0081/0083). **(landscape)**
 - **Ramage, Hall, Nallapati & Manning (2009).** Labeled LDA: A Supervised Topic Model for Credit Attribution in Multi-labeled Corpora. *EMNLP*.
   — the label-restricted special case (0 background) of PLDA. **(landscape)**
+- **Kang, Park & Chari (2014).** Hetero-Labeled LDA: A Partially Supervised Topic Model with Heterogeneous Labels. *ECML-PKDD*, LNCS. DOI:10.1007/978-3-662-44848-9_41.
+  — unifies *document* labels (doc→class, as in PLDA) and *feature/word* labels (word→class seeds) in one partially-supervised process, covering only a subset of classes. Our spectral anchors are word-labels and cohort/closure membership is a document-label, so this is the model that fuses the two supervision forms we already hold separately. **(landscape)**
+- **Tang, Mao & Huang (2018).** Labeled Phrase Latent Dirichlet Allocation and its Online Learning Algorithm. *Data Mining and Knowledge Discovery*. DOI:10.1007/s10618-018-0555-0.
+  — Labeled-LDA over phrases (partial word order) with a Gibbs batch + online learner; the streaming-inference descendant of the label-restricted line. **(landscape)**
 - **Blei, Griffiths & Jordan (2010).** The Nested Chinese Restaurant Process and Bayesian Nonparametric Inference of Topic Hierarchies. *JACM* 57(2):7. (arXiv:0710.0845)
   — hLDA / nCRP; the canonical "coarse-near-root, specific-near-leaves, doc-uses-a-path" hierarchy. Closest generative analogue to the ontology background-cascade idea (but learns the tree). **(landscape)**
 - **Paisley, Wang, Blei & Jordan (2015).** Nested Hierarchical Dirichlet Processes. *IEEE TPAMI* 37(2):256–270. (arXiv:1210.6738)
