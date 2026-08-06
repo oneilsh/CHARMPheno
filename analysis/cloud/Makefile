@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout anchor-select anchor-hierarchy summarize-exp effrank-readout measurement-survey clean-exp
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke multidomain-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout multidomain-lr-readout multidomain-weighting-readout anchor-select anchor-hierarchy summarize-exp effrank-readout covariate-readout measurement-survey clean-exp
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -571,6 +571,15 @@ summarize-exp:
 effrank-readout:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	python3 $(REPO_ROOT)/analysis/cloud/effrank_readout.py \
+	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*"
+
+# Labeled per-node covariate-adjusted prediction readout. Pure numpy-free stdlib,
+# reads the run dir's manifest.json (metrics.covariate_adjusted, written by a
+# --pred-cov run). Prints per-node score_cv->adj AUC/AP with names, sorted by AUC
+# lift, and a summary of whether the lift is AP-corroborated (real) or ranking-only.
+covariate-readout:
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	python3 $(REPO_ROOT)/analysis/cloud/covariate_readout.py \
 	    --run-dir "$(RUNS_DIR)/$(shell printf '%04d' $(ID))-*"
 
 # Remove an experiment's run dir(s) so the next `make exp ID=N` starts FRESH

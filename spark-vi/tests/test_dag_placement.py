@@ -1178,6 +1178,7 @@ def test_evaluate_covariate_adjusted_beats_score_alone_on_confounded_data():
     assert "covariate_adjusted" in ev
     ca = ev["covariate_adjusted"]
     assert ca["n_covariates"] == 1
+    assert ca["node_npos"][1] == 120           # per-node test-positive count present
     # the confounder materially improves node-1 adjusted AUC over score-only CV.
     assert ca["node_auc_adj"][1] > ca["node_auc_score_cv"][1] + 0.10
     assert ca["auc_adj_macro"] > ca["auc_score_cv_macro"]

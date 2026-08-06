@@ -1394,9 +1394,10 @@ def _covariate_adjusted_block(covariates, P, node_list, node_pos, case_score, is
     if cov.shape[0] != P.shape[0]:
         raise ValueError(
             f"covariates has {cov.shape[0]} rows but there are {P.shape[0]} docs")
-    auc_adj, ap_adj, auc_sc, ap_sc = {}, {}, {}, {}
+    auc_adj, ap_adj, auc_sc, ap_sc, npos = {}, {}, {}, {}, {}
     for i, u in enumerate(node_list):
         yv = np.asarray(node_pos[u], dtype=float)
+        npos[u] = int(yv.sum())            # test positives -> flags small-node AUC noise
         score = P[:, i:i + 1]
         oof_a = _ridge_logistic_oof(np.hstack([score, cov]), yv)
         oof_s = _ridge_logistic_oof(score, yv)
@@ -1416,6 +1417,7 @@ def _covariate_adjusted_block(covariates, P, node_list, node_pos, case_score, is
     return {
         "node_auc_adj": auc_adj, "node_ap_adj": ap_adj,
         "node_auc_score_cv": auc_sc, "node_ap_score_cv": ap_sc,
+        "node_npos": npos,
         "auc_adj_macro": _macro(auc_adj), "ap_adj_macro": _macro(ap_adj),
         "auc_score_cv_macro": _macro(auc_sc), "ap_score_cv_macro": _macro(ap_sc),
         "detection_auc_adj": (_auc(det_a, is_fg.astype(int))
