@@ -115,3 +115,65 @@ def test_log_corpus_stats_counts(spark):
     assert stats["test"]["n_docs"] == 2 and stats["test"]["n_frontier"] == 1
     assert stats["vocab_size"] == 3 and stats["n_bg"] == 20 and stats["tpn"] == 5
     assert stats["K"] == lay.K == 20 + 3 * 5
+
+
+# --- Task 0: covariate sidecar routing into the case-finding corpus ----------
+
+def test_covariates_from_scored_rows_absent_is_none_and_present_aligns():
+    from pyspark.ml.linalg import Vectors
+    from dag_placement_cloud import covariates_from_scored_rows
+    # no covariates column -> None (baseline path)
+    rows_no = [{"nodeAffinity": Vectors.dense([0.1, 0.2]), "frontier": [1],
+                "features": Vectors.sparse(2, {0: 1.0})}]
+    assert covariates_from_scored_rows(rows_no) is None
+    # present -> aligned (D, P) matrix in row order
+    rows_yes = [{"covariates": Vectors.dense([1.0, 2.0])},
+                {"covariates": Vectors.dense([3.0, 4.0])}]
+    X = covariates_from_scored_rows(rows_yes)
+    assert X.shape == (2, 2)
+    assert list(X[0]) == [1.0, 2.0] and list(X[1]) == [3.0, 4.0]
+
+
+def test_covariates_from_scored_rows_zero_fills_null_rows():
+    """A doc with no covariate match (null after a left join) becomes a zero
+    vector, so the 2x2 keeps an IDENTICAL doc set across cells (never drops)."""
+    from pyspark.ml.linalg import Vectors
+    from dag_placement_cloud import covariates_from_scored_rows
+    rows = [{"covariates": Vectors.dense([0.5, 1.0])},
+            {"covariates": None},                         # unmatched doc
+            {"covariates": Vectors.dense([2.0, 3.0])}]
+    X = covariates_from_scored_rows(rows)
+    assert X.shape == (3, 2)
+    assert list(X[1]) == [0.0, 0.0]
+
+
+def test_join_covariates_left_join_preserves_all_docs(spark):
+    from pyspark.ml.linalg import Vectors
+    from dag_placement_cloud import join_covariates, covariates_from_scored_rows
+    scored = spark.createDataFrame(
+        [(1, [3]), (2, [2]), (3, [])], ["person_id", "frontier"])
+    cov = spark.createDataFrame(
+        [(1, Vectors.dense([0.5, 1.0])), (2, Vectors.dense([-0.5, 2.0]))],
+        ["person_id", "covariates"])
+    joined = join_covariates(scored, cov, key="person_id")
+    rows = joined.orderBy("person_id").collect()
+    assert len(rows) == 3                                  # doc 3 kept (no cov match)
+    X = covariates_from_scored_rows(rows)
+    assert X.shape == (3, 2)
+    assert list(X[0]) == [0.5, 1.0] and list(X[1]) == [-0.5, 2.0]
+    assert list(X[2]) == [0.0, 0.0]                        # zero-filled
+
+
+def test_parse_args_covariate_surface():
+    from dag_placement_cloud import parse_args
+    a = parse_args(["--cdr", "p.d", "--billing", "b", "--out-dir", "/x",
+                    "--covariate-formula", "age + sex",
+                    "--covariate-continuous", "age",
+                    "--covariate-categorical", "sex",
+                    "--pred-cov", "on"])
+    assert a.covariate_formula == "age + sex"
+    assert a.covariate_continuous == ["age"] and a.covariate_categorical == ["sex"]
+    assert a.pred_cov == "on"
+    # defaults: no covariates -> baseline path
+    b = parse_args(["--cdr", "p.d", "--billing", "b", "--out-dir", "/x"])
+    assert b.covariate_formula is None and b.pred_cov == "off"
