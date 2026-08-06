@@ -667,6 +667,28 @@ def build_dag_placement_args(
     # node_alpha_scale is the initial alpha; the gated Newton step refines it.
     if effective.get("optimize_doc_concentration"):
         args.append("--optimize-doc-concentration")
+    # Patient covariates (cheap prediction axis). Mirrors the STM frontmatter keys
+    # (covariate_formula / categorical_cols / continuous_cols / known_sex_only) so a
+    # gated experiment declares covariates exactly as STM does; pred_cov gates
+    # whether evaluate() runs the covariate-adjusted readout.
+    def _as_comma(v):
+        return ",".join(str(x) for x in v) if isinstance(v, (list, tuple)) else str(v)
+    if effective.get("covariate_formula"):
+        args.extend(["--covariate-formula", str(effective["covariate_formula"])])
+        cats = effective.get("categorical_cols", [])
+        conts = effective.get("continuous_cols", [])
+        if cats:
+            args.extend(["--covariate-categorical", _as_comma(cats)])
+        if conts:
+            args.extend(["--covariate-continuous", _as_comma(conts)])
+        if effective.get("known_sex_only"):
+            args.append("--known-sex-only")
+    pred_cov = effective.get("pred_cov")
+    if pred_cov is not None:
+        # YAML parses `pred_cov: on` as boolean True (YAML 1.1), so normalize any
+        # truthy/`on`/`true`/`1`/`yes` to the literal "on" the driver expects.
+        on = pred_cov is True or str(pred_cov).strip().lower() in ("on", "true", "1", "yes")
+        args.extend(["--pred-cov", "on" if on else "off"])
     return args
 
 
