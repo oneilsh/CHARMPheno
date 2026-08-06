@@ -1151,3 +1151,59 @@ def test_resolve_domain_priors_accepts_every_scalar_spelling():
     _lay, beta_0d = _tiny_two_domain_fit(domain_bounds=[0, 4, 8],
                                         beta_prior=np.array(0.02))
     np.testing.assert_array_equal(beta_float, beta_0d)
+
+
+# --- Task 1: covariate-adjusted per-node prediction (cheap axis) --------------
+
+def test_evaluate_covariate_adjusted_beats_score_alone_on_confounded_data():
+    """A patient covariate that confounds node membership should let a per-node
+    classifier on [placement_score, x_d] beat the placement score alone (both
+    scored by out-of-fold CV). With covariates absent, evaluate returns exactly
+    the current keys (no covariate_adjusted block) and the analytic node_auc is
+    unchanged."""
+    import numpy as np
+    lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)          # nodes = [1, 2]
+    rng = np.random.default_rng(0)
+    n = 240
+    y1 = np.array([1] * (n // 2) + [0] * (n // 2))         # node-1 membership
+    # placement score for node 1: only WEAKLY separates true vs false.
+    s1 = 0.30 + 0.06 * y1 + rng.normal(0, 0.10, n)
+    s2 = 0.30 + 0.06 * (1 - y1) + rng.normal(0, 0.10, n)
+    profiles = [{1: float(s1[d]), 2: float(s2[d])} for d in range(n)]
+    labels = [{1} if y1[d] else {2} for d in range(n)]
+    # covariate STRONGLY tracks node-1 membership (a confounder the score misses).
+    x = (2.0 * y1 + rng.normal(0, 0.5, n)).reshape(-1, 1)
+
+    ev = evaluate(profiles, labels, lay, covariates=x)
+    assert "covariate_adjusted" in ev
+    ca = ev["covariate_adjusted"]
+    assert ca["n_covariates"] == 1
+    # the confounder materially improves node-1 adjusted AUC over score-only CV.
+    assert ca["node_auc_adj"][1] > ca["node_auc_score_cv"][1] + 0.10
+    assert ca["auc_adj_macro"] > ca["auc_score_cv_macro"]
+
+    # backward compatibility: no covariates -> no block, identical analytic metric.
+    ev0 = evaluate(profiles, labels, lay)
+    assert "covariate_adjusted" not in ev0
+    assert ev0["node_auc"] == ev["node_auc"]
+
+
+def test_evaluate_covariate_noise_does_not_beat_score_and_small_class_is_nan():
+    """A pure-noise covariate should not systematically beat score-only (adjusted
+    AUC ~ score-only, within CV noise), and a node with <2 positives yields nan
+    (cannot cross-validate) rather than raising."""
+    import numpy as np
+    lay = DagLayout({1: 0, 2: 0}, n_bg=2, tpn=1)
+    rng = np.random.default_rng(1)
+    n = 200
+    y1 = np.array([1] * 100 + [0] * 100)
+    s1 = 0.3 + 0.5 * y1 + rng.normal(0, 0.15, n)           # score genuinely informative
+    profiles = [{1: float(s1[d]), 2: 0.1} for d in range(n)]   # node 2 all-negative
+    labels = [{1} if y1[d] else set() for d in range(n)]
+    x = rng.normal(0, 1.0, (n, 2))                          # pure noise, 2 cols
+    ev = evaluate(profiles, labels, lay, covariates=x)
+    ca = ev["covariate_adjusted"]
+    # noise must not give a large spurious lift on the informative node.
+    assert ca["node_auc_adj"][1] <= ca["node_auc_score_cv"][1] + 0.05
+    # node 2 has zero positives -> not cross-validatable -> nan, no exception.
+    assert np.isnan(ca["node_auc_adj"][2])

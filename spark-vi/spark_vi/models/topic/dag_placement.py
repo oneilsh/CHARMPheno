@@ -1167,8 +1167,81 @@ def fdr_discovery_report(P, is_fg, doc_lengths, truth, mm_rows, *,
     }
 
 
+def _sigmoid(z):
+    return 1.0 / (1.0 + np.exp(-np.clip(z, -35.0, 35.0)))
+
+
+def _stratified_folds(y, k):
+    """Deterministic stratified fold ids for a binary label vector. Each class's
+    (row-sorted) members are striped round-robin across k folds, so every fold
+    holds ~the same class balance and the split is reproducible with no RNG."""
+    y = np.asarray(y).astype(bool)
+    fold = np.empty(len(y), dtype=int)
+    for idx in (np.where(y)[0], np.where(~y)[0]):
+        fold[idx] = np.arange(len(idx)) % k
+    return fold
+
+
+def _fit_ridge_logistic(X, y, *, l2, max_iter=100, tol=1e-7):
+    """L2-regularized logistic regression via IRLS (Newton). `X` is (n, p) with
+    NO intercept column (one is prepended here and left unpenalized). Returns the
+    weight vector of length p+1. The ridge penalty stabilizes small / separable
+    folds (finite weights instead of a diverging MLE)."""
+    n, p = X.shape
+    Xb = np.hstack([np.ones((n, 1)), X])
+    w = np.zeros(p + 1)
+    pen = np.full(p + 1, float(l2))
+    pen[0] = 0.0                                   # do not penalize the intercept
+    Pen = np.diag(pen)
+    for _ in range(max_iter):
+        mu = _sigmoid(Xb @ w)
+        W = np.clip(mu * (1.0 - mu), 1e-6, None)
+        g = Xb.T @ (mu - y) + pen * w
+        H = Xb.T @ (Xb * W[:, None]) + Pen
+        try:
+            step = np.linalg.solve(H, g)
+        except np.linalg.LinAlgError:
+            step = np.linalg.lstsq(H, g, rcond=None)[0]
+        w = w - step
+        if np.max(np.abs(step)) < tol:
+            break
+    return w
+
+
+def _ridge_logistic_oof(feats, y, *, k=5, l2=1.0):
+    """Out-of-fold predicted probabilities from a stratified k-fold L2 logistic.
+    Features are standardized per training fold (test fold uses train stats), so
+    the ridge penalty is comparable across columns and the reported AUC/AP are
+    honest held-out numbers, not in-sample-inflated. Returns None when the class
+    support is too small to cross-validate (either class < 2), so the caller can
+    record nan without special-casing."""
+    feats = np.asarray(feats, dtype=float)
+    if feats.ndim == 1:
+        feats = feats[:, None]
+    y = np.asarray(y, dtype=float)
+    n1, n0 = int(y.sum()), int((1.0 - y).sum())
+    if n1 < 2 or n0 < 2:
+        return None
+    kk = int(min(k, n1, n0))                       # never more folds than minority count
+    fold = _stratified_folds(y, kk)
+    oof = np.full(len(y), np.nan)
+    for f in range(kk):
+        te = fold == f
+        tr = ~te
+        if not te.any() or not tr.any() or y[tr].sum() == 0 or (1 - y[tr]).sum() == 0:
+            continue                               # a degenerate train fold: leave nan
+        Xtr, Xte = feats[tr], feats[te]
+        mu = Xtr.mean(axis=0)
+        sd = Xtr.std(axis=0)
+        sd[sd < 1e-12] = 1.0
+        w = _fit_ridge_logistic((Xtr - mu) / sd, y[tr], l2=l2)
+        Xte_b = np.hstack([np.ones((te.sum(), 1)), (Xte - mu) / sd])
+        oof[te] = _sigmoid(Xte_b @ w)
+    return oof if not np.isnan(oof).all() else None
+
+
 def evaluate(profiles, test_labels, lay, *, doc_lengths=None,
-            fdr_q_grid=(0.05, 0.10, 0.20), n_length_bins=4):
+            fdr_q_grid=(0.05, 0.10, 0.20), n_length_bins=4, covariates=None):
     """Per-node case-finding AUC (subtree membership), AUC by longest-path depth, and set-valued
     ranking. `test_labels` entries may be frontier sets or scalars (scalars -> singletons). A patient
     is a positive for node u if any of its frontier lies in subtree(u). MRR/top2/mean_hops use the
@@ -1185,7 +1258,13 @@ def evaluate(profiles, test_labels, lay, *, doc_lengths=None,
     scoreable frontier node; background = empty/root-only frontier), with ROC/PR-AUC and, at target
     sensitivities, the background false-positive rate + precision. The node-level AUC/PR above already
     use background docs as the negative class; this block reports the case-vs-background question
-    directly, plus the background-block topic mass per class."""
+    directly, plus the background-block topic mass per class.
+
+    `covariates` (optional, shape (D, P), aligned to `profiles`) enables the cheap
+    covariate-adjusted prediction axis: a `covariate_adjusted` block reporting
+    per-node and detection-level OOF-CV logistic AUC/AP on [placement_score, x_d]
+    vs [placement_score] alone. Absent -> the block is omitted and every other key
+    is byte-identical to the covariate-free result."""
     fronts = [set(t) if hasattr(t, "__iter__") else {t} for t in test_labels]
     P = np.array([[pr[u] for u in lay.nodes] for pr in profiles])
     node_auc = {u: _auc(P[:, i], [bool(f & lay.subtree(u)) for f in fronts])
@@ -1279,16 +1358,72 @@ def evaluate(profiles, test_labels, lay, *, doc_lengths=None,
     fdr_block = fdr_discovery_report(P, is_fg, lengths, truth, mm_rows,
                                      q_grid=tuple(fdr_q_grid), n_length_bins=nlb)
 
-    return {"node_auc": node_auc, "auc_by_depth": by_depth,
-            "mrr": float(np.nanmean(1.0 / ranks)) if have_ranks else float("nan"),
-            "top2": float(np.nanmean(ranks <= 2)) if have_ranks else float("nan"),
-            "mean_hops": float(np.mean(hops)) if hops else float("nan"),
-            "frontier_size_mean": float(np.mean([len(f) for f in fronts])),
-            "multi_frontier_rate": float(np.mean([len(f) > 1 for f in fronts])),
-            "node_ap": node_ap, "ap_macro": ap_macro, "ap_micro": ap_micro,
-            "ap_prevalence_weighted": ap_prevalence_weighted,
-            "recall_at_k": recall_at_k, "ci": ci, "detection": detection,
-            "fdr": fdr_block}
+    # --- covariate-adjusted prediction (Axis 2, cheap; opt-in) --------------
+    # Post-fit only: fit a per-node L2 logistic on [placement_score, x_d] and,
+    # separately, on [placement_score] alone, both scored by stratified out-of-
+    # fold CV. The delta (adj - score_cv) is the covariate's marginal lift at the
+    # DECISION -- it reshapes nothing in the fit. Absent covariates -> this block
+    # is omitted and every key above is byte-identical to the baseline.
+    covariate_adjusted = _covariate_adjusted_block(
+        covariates, P, node_list, node_pos, case_score, is_fg)
+
+    out = {"node_auc": node_auc, "auc_by_depth": by_depth,
+           "mrr": float(np.nanmean(1.0 / ranks)) if have_ranks else float("nan"),
+           "top2": float(np.nanmean(ranks <= 2)) if have_ranks else float("nan"),
+           "mean_hops": float(np.mean(hops)) if hops else float("nan"),
+           "frontier_size_mean": float(np.mean([len(f) for f in fronts])),
+           "multi_frontier_rate": float(np.mean([len(f) > 1 for f in fronts])),
+           "node_ap": node_ap, "ap_macro": ap_macro, "ap_micro": ap_micro,
+           "ap_prevalence_weighted": ap_prevalence_weighted,
+           "recall_at_k": recall_at_k, "ci": ci, "detection": detection,
+           "fdr": fdr_block}
+    if covariate_adjusted is not None:
+        out["covariate_adjusted"] = covariate_adjusted
+    return out
+
+
+def _covariate_adjusted_block(covariates, P, node_list, node_pos, case_score, is_fg):
+    """Per-node (and detection-level) covariate-adjusted AUC/AP via OOF-CV logistic
+    on [score, x_d] vs [score] alone. Returns None when covariates is None. `P` is
+    the (D, #nodes) affinity matrix; `node_list` indexes its columns."""
+    if covariates is None:
+        return None
+    cov = np.asarray(covariates, dtype=float)
+    if cov.ndim == 1:
+        cov = cov[:, None]
+    if cov.shape[0] != P.shape[0]:
+        raise ValueError(
+            f"covariates has {cov.shape[0]} rows but there are {P.shape[0]} docs")
+    auc_adj, ap_adj, auc_sc, ap_sc = {}, {}, {}, {}
+    for i, u in enumerate(node_list):
+        yv = np.asarray(node_pos[u], dtype=float)
+        score = P[:, i:i + 1]
+        oof_a = _ridge_logistic_oof(np.hstack([score, cov]), yv)
+        oof_s = _ridge_logistic_oof(score, yv)
+        auc_adj[u] = _auc(oof_a, yv) if oof_a is not None else float("nan")
+        ap_adj[u] = _average_precision(oof_a, yv) if oof_a is not None else float("nan")
+        auc_sc[u] = _auc(oof_s, yv) if oof_s is not None else float("nan")
+        ap_sc[u] = _average_precision(oof_s, yv) if oof_s is not None else float("nan")
+
+    def _macro(d):
+        vals = [v for v in d.values() if not np.isnan(v)]
+        return float(np.mean(vals)) if vals else float("nan")
+
+    # detection-level (foreground vs background) -- the deployment headline.
+    is_fg_f = is_fg.astype(float)
+    det_a = _ridge_logistic_oof(np.hstack([case_score[:, None], cov]), is_fg_f)
+    det_s = _ridge_logistic_oof(case_score[:, None], is_fg_f)
+    return {
+        "node_auc_adj": auc_adj, "node_ap_adj": ap_adj,
+        "node_auc_score_cv": auc_sc, "node_ap_score_cv": ap_sc,
+        "auc_adj_macro": _macro(auc_adj), "ap_adj_macro": _macro(ap_adj),
+        "auc_score_cv_macro": _macro(auc_sc), "ap_score_cv_macro": _macro(ap_sc),
+        "detection_auc_adj": (_auc(det_a, is_fg.astype(int))
+                              if det_a is not None else float("nan")),
+        "detection_auc_score_cv": (_auc(det_s, is_fg.astype(int))
+                                   if det_s is not None else float("nan")),
+        "n_covariates": int(cov.shape[1]),
+    }
 
 
 def render_profile(affinity, lay, *, names=None, true_node=None, width=24):
