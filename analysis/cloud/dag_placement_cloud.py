@@ -40,6 +40,52 @@ def profiles_from_scored_rows(rows, lay):
     return profiles, test_labels, doc_lengths
 
 
+def _csv_list(s):
+    """argparse type: 'a,b,c' -> ['a','b','c'] (empty/whitespace -> [])."""
+    return [t.strip() for t in s.split(",") if t.strip()]
+
+
+def _row_has(row, col):
+    """True if a collected row (dict OR pyspark Row) carries field `col`."""
+    fields = row.__fields__ if hasattr(row, "__fields__") else row.keys()
+    return col in fields
+
+
+def covariates_from_scored_rows(rows, col="covariates"):
+    """Aligned (D, P) patient-covariate matrix from the SAME collected rows that
+    `profiles_from_scored_rows` consumes, so the matrix aligns to evaluate()'s
+    profiles by position. Returns None when `col` is absent (the baseline path).
+
+    A null covariate cell (a doc with no sidecar match after the left join) is
+    zero-filled rather than dropped: the 2x2 must compare an identical doc set
+    across cells, so covariate presence never changes which docs are scored."""
+    if not rows or not _row_has(rows[0], col):
+        return None
+    P = None
+    for r in rows:
+        v = r[col]
+        if v is not None:
+            P = len(v)
+            break
+    if P is None:
+        return None                                    # column present but all null
+    out = np.zeros((len(rows), P), dtype=float)
+    for i, r in enumerate(rows):
+        v = r[col]
+        if v is not None:
+            out[i] = v.toArray()
+    return out
+
+
+def join_covariates(scored_df, cov_df, *, key="person_id"):
+    """Left-join the per-person covariate sidecar (`key`, covariates: Vector) onto
+    the scored test docs, preserving EVERY scored doc (unmatched -> null covariate,
+    zero-filled downstream). Left (not inner, as STM uses) so the doc set is stable
+    across the 2x2 cells. Broadcasts the small sidecar."""
+    from pyspark.sql import functions as F
+    return scored_df.join(F.broadcast(cov_df), on=key, how="left")
+
+
 def _log_corpus_stats(bundle, lay):
     """Log + return train/test corpus stats: doc counts, per-source_cohort
     breakdown, how many docs carry a frontier (rankable foreground), and the vocab
@@ -282,12 +328,63 @@ def parse_args(argv=None):
                    help="Print top-N terms per topic every N iters (0 = off). "
                         "Resolves vocab names via a small concept read.")
     p.add_argument("--top-n-tokens", type=int, default=8)
+    # Patient covariates (cheap prediction axis; see the 2x2 plan). Absent
+    # formula -> baseline path, byte-identical to today. `x_d` is demographic /
+    # nuisance adjusters (age, sex, site, birth-era) -- NOT the gating label.
+    p.add_argument("--covariate-formula", default=None,
+                   help="Formulaic patient-covariate formula (e.g. 'age + C(sex)'); "
+                        "absent -> no covariates (baseline). Loaded via the shared "
+                        "sidecar and joined to the corpus by person_id.")
+    p.add_argument("--covariate-categorical", default=[], type=_csv_list,
+                   help="Comma-separated categorical covariate source columns.")
+    p.add_argument("--covariate-continuous", default=[], type=_csv_list,
+                   help="Comma-separated continuous covariate source columns.")
+    p.add_argument("--known-sex-only", action="store_true",
+                   help="Restrict the person table to rows with a known sex "
+                        "(mirrors the STM covariate driver).")
+    p.add_argument("--pred-cov", choices=["on", "off"], default="off",
+                   help="Prediction axis: 'on' feeds joined covariates to "
+                        "evaluate() for the covariate-adjusted per-node readout. "
+                        "Requires --covariate-formula.")
     p.add_argument("--cache-uri", default=None)
     p.add_argument("--out-dir", required=True)
     p.add_argument("--resume-from", default="",
                    help="Unused (GatedLDAModel is not persistable in v1); "
                         "accepted for run_experiment parity.")
     return p.parse_args(argv)
+
+
+def _load_case_finding_covariates(spark, args):
+    """Load-or-build the patient-covariate sidecar for the case-finding corpus,
+    keyed by person_id (ungated: one covariate vector per person). Returns
+    (cov_df, covariate_names).
+
+    Reuses the SAME shared sidecar loader/cache as the STM pipeline
+    (`_covariates_load`) rather than a case-finding-specific copy, so the two
+    pipelines converge on one covariate path and the loader survives an eventual
+    STM removal. `x_d` is demographic/nuisance only; `validate_label_not_covariate`
+    rejects a formula that smuggles in the gating label."""
+    from _covariates_load import (
+        load_or_build_covariates, validate_label_not_covariate,
+    )
+    from charmpheno.omop import load_person_table
+    validate_label_not_covariate(
+        args.covariate_categorical, args.covariate_continuous)
+    with _phase("person table load"):
+        person_df = load_person_table(
+            spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
+            person_sample_mod=args.person_mod, cohort=None,
+            known_sex_only=args.known_sex_only)
+    with _phase("covariates load"):
+        cov_df, _spec, names = load_or_build_covariates(
+            spark, person_df=person_df,
+            covariate_formula=args.covariate_formula,
+            categorical_cols=args.covariate_categorical,
+            continuous_cols=args.covariate_continuous,
+            cdr=args.cdr, source_table=args.source_table, cohort=None,
+            person_mod=args.person_mod, cache_uri=args.cache_uri,
+            key_cols=("person_id",), prior_obs_days=args.prior_obs_days)
+    return cov_df, names
 
 
 def main() -> int:
@@ -353,12 +450,32 @@ def main() -> int:
                 _log_learned_alpha(model, lay, bundle.int2cid,
                                    bundle.name_by_id, args.n_bg, bundle.train_df)
 
+        # Prediction axis (cheap): load + join per-person covariates when opted in.
+        # Absent --pred-cov -> cov_df stays None and the block below is the exact
+        # baseline path (same select, no covariates arg to evaluate).
+        cov_df, covariate_names = (None, None)
+        if args.pred_cov == "on":
+            cov_df, covariate_names = _load_case_finding_covariates(spark, args)
+
         with _phase("transform + inline placement eval"):
-            scored = model.transform(bundle.test_df).select(
-                "nodeAffinity", "frontier", "features")
+            scored = model.transform(bundle.test_df)
+            if cov_df is not None:
+                scored = join_covariates(
+                    scored.select("person_id", "nodeAffinity", "frontier", "features"),
+                    cov_df, key="person_id")
+            else:
+                scored = scored.select("nodeAffinity", "frontier", "features")
             rows = scored.collect()
             profiles, test_labels, doc_lengths = profiles_from_scored_rows(rows, lay)
-            metrics = evaluate(profiles, test_labels, lay, doc_lengths=doc_lengths)
+            covariates = covariates_from_scored_rows(rows) if cov_df is not None else None
+            if covariates is not None:
+                n_missing = int((~covariates.any(axis=1)).sum())
+                print(f"[driver]   covariate-adjusted prediction ON: "
+                      f"P={covariates.shape[1]} covariates "
+                      f"({','.join(covariate_names or [])}); {n_missing}/{len(rows)} "
+                      f"docs zero-filled (no sidecar match)", flush=True)
+            metrics = evaluate(profiles, test_labels, lay,
+                               doc_lengths=doc_lengths, covariates=covariates)
             print(f"[driver]   placement metrics: "
                   f"auc_by_depth={metrics['auc_by_depth']} mrr={metrics['mrr']:.3f} "
                   f"top2={metrics['top2']:.3f} mean_hops={metrics['mean_hops']:.2f} "
@@ -380,6 +497,17 @@ def main() -> int:
                   f"precision={op90.get('precision', float('nan')):.3f}; "
                   f"bg_mass mean bg={det['bg_mass_background_mean']:.3f} "
                   f"fg={det['bg_mass_foreground_mean']:.3f}", flush=True)
+            ca = metrics.get("covariate_adjusted")
+            if ca is not None:
+                print(f"[driver]   covariate-adjusted (OOF-CV logistic, "
+                      f"P={ca['n_covariates']}): detection auc "
+                      f"score_cv={ca['detection_auc_score_cv']:.3f} -> "
+                      f"adj={ca['detection_auc_adj']:.3f}; per-node macro auc "
+                      f"score_cv={ca['auc_score_cv_macro']:.3f} -> "
+                      f"adj={ca['auc_adj_macro']:.3f}; ap macro "
+                      f"score_cv={ca['ap_score_cv_macro']:.3f} -> "
+                      f"adj={ca['ap_adj_macro']:.3f} "
+                      f"(delta = covariate lift at the DECISION)", flush=True)
             fdr = metrics["fdr"]
             # NOTE: the by_q dict-comprehension is built as its own variable rather
             # than inlined via `{{...}}` in the f-string below — braces escaped with
@@ -427,6 +555,12 @@ def main() -> int:
                 "learning_rate_tau0": args.learning_rate_tau0,
                 "learning_rate_kappa": args.learning_rate_kappa,
                 "max_iter": args.max_iter, "metrics": metrics, "fdr": metrics["fdr"],
+                "covariates": {
+                    "formula": args.covariate_formula,
+                    "categorical": args.covariate_categorical,
+                    "continuous": args.covariate_continuous,
+                    "names": covariate_names,
+                    "pred_cov": args.pred_cov},
                 "ledger": bundle.ledger,
                 "corpus_stats": corpus_stats,
                 "corpus_manifest": {
