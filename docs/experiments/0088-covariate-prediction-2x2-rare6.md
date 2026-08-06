@@ -28,7 +28,7 @@ label_window_days: 365
 spectral_topo_order: forward
 max_iter: 200
 seed: 42
-cache_uri: gs://dataproc-staging-getting-started-with-registered-tier-data-copy/charm/case_finding_cache
+cache_uri: gs://dataproc-staging-wb-fresh-seed-6621/charm/case_finding_cache
 # --- Patient covariates (cheap PREDICTION axis of the 2x2; plan
 #     docs/superpowers/plans/2026-08-06-covariate-prevalence-prediction-2x2.md).
 #     x_d is demographic/nuisance only -- the gating label (source_cohort) is
