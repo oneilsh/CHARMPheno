@@ -1032,6 +1032,30 @@ idiosyncrasy. Net: a better-motivated use of HDP than the global version we reje
 and an explicit *generative* $K_v$ rather than a post-hoc usage read — but not a free
 lunch on the truly tiny nodes.
 
+### Token-Level Role Covariate on Topic Assignment (Presenting vs Chronic)
+
+A parked idea for raising phenotype *specificity*. Each code token carries an
+observed **role** — presenting / chief-complaint, chronic comorbidity, rule-out,
+historical, family history — and the role **modulates that token's topic assignment**
+(biasing it toward acute/foreground topics vs background/chronic ones). A code
+appearing as the *presenting* complaint is far more diagnostic of the phenotype than
+the same code buried as an incidental comorbidity, so conditioning the topic draw on
+role concentrates the discriminative signal where it belongs.
+
+Relationships: it is the **observed, EHR-grounded analogue of hLDA's latent
+generic-vs-specific level** (we hand the model the level from record structure instead
+of inferring it), and the **token-role generalization of MixEHR's observation / NMAR
+model** ("why was this coded"). It is distinct from Hetero-Labeled LDA (Kang, Park &
+Chari 2014): hLLDA's feature-labels are word-*type* → class (static, global), whereas
+this is token-*occurrence* → role (dynamic, per-doc-per-word).
+
+**Data caveat (why it is parked, not built):** it requires per-occurrence role
+metadata — a chief-complaint field, or problem-list vs encounter-diagnosis status —
+which is not currently available to us (contractual/data constraint). Revisit if such
+token-level role metadata becomes accessible. (Contrast: HPO phenotype profiles *are*
+available and supply static word-type seeds, which is the Hetero-Labeled-LDA /
+MixEHR-Seed direction — a different lever, on the feature-label side.)
+
 ### Tree-Structured HDP for Hierarchical Cohort Pooling
 
 The HDP as planned uses the standard two-level topic-model tree: a global DP $G_0$
