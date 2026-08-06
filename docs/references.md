@@ -44,15 +44,21 @@ authors, year, title, venue, a link if available, and a short note on its role.
 
 - **McAuliffe & Blei (2007).** Supervised Topic Models. *NeurIPS* 20.
   https://papers.nips.cc/paper_files/paper/2007/hash/d56b9fc4b0f1be8871f5e1c40c0067e7-Abstract.html
-  — introduces supervised LDA (sLDA), jointly learning topics and a
-  document-level response rather than fitting regression only after
-  unsupervised topic discovery. **(landscape)**
+  — supervised LDA (sLDA): adds one output arrow, `y ~ GLM(ηᵀz̄)`, drawn from the
+  empirical topic frequencies `z̄` (not θ), learned *jointly* so topics are shaped to
+  predict the response. Joint beats two-stage, but the label is one term against
+  hundreds of word terms, so supervision is weak ("drowned out") — the failure mode
+  MedLDA (up-weight it) and PC training (constrain it) both target. **(landscape)**
 - **Zhu, Ahmed & Xing (2012).** MedLDA: Maximum Margin Supervised Topic
   Models. *JMLR* 13(74):2237–2278.
   https://www.jmlr.org/papers/v13/zhu12a.html
-  — couples topic inference to max-margin classification or regression,
-  providing the discriminative alternative to likelihood-based sLDA.
-  **(landscape)**
+  — LDA + SVM: replace sLDA's GLM with a max-margin **hinge** loss on `ηᵀz̄`, jointly;
+  the constant `C` is an explicit dial on how much supervision matters (fixes
+  drowning-out). An instance of **posterior regularization** (the margin is a posterior
+  constraint; Zhu's RegBayes). Cons for our case-finding: output is a *margin, not a
+  probability* (fights the FDR/empirical-p readout), *fully supervised*, *flat labels*,
+  and discriminative warping hurts topic interpretability. Gibbs-via-data-augmentation
+  variant: Zhu et al., *JMLR* 2014. **(landscape)**
 - **Ramage, Manning & Dumais (2011).** Partially Labeled Topic Models for Interpretable Text Mining (PLDA). *KDD*.
   — generative-restriction basis for "gated LDA"; the model our `TopicBlockPartition` gating reimplements. *used in:* `docs/insights/0028-...-plda.md`
 - **Ramage, Manning & Dumais (2011).** Partially Labeled Dirichlet *Process* (PLDP). *KDD* (companion model in the PLDA paper).
@@ -70,7 +76,18 @@ authors, year, title, venue, a link if available, and a short note on its role.
 - **Li & McCallum (2006).** Pachinko Allocation: DAG-Structured Mixture Models of Topic Correlations. *ICML*.
   — DAG (not tree) topic hierarchy; the multi-parent generalization relevant to MONDO. **(landscape)**
 - **Perotte, Wood, Elhadad & Bartlett (2011).** Hierarchically Supervised Latent Dirichlet Allocation (HSLDA). *NeurIPS* 24.
-  — flat LDA topics + ICD-9-tree label supervision (child label requires parent). Hierarchy on the *label-prediction* side, not topic access. **(landscape)**
+  — flat *shared* LDA topics + a per-label **probit** regressor `a_{l,d} ~ N(η_lᵀz̄_d, 1)`
+  that fires (`y=+1`) iff its score >0 AND its parent fired; the ontology enters ONLY
+  through this parent-gated firing (topics and η are not themselves hierarchical) — a
+  hard hierarchical constraint on the *label/output* side, vs our gating's hard
+  constraint on the *topic/representation* side. A label is a *dense regression over
+  shared topics*, not a per-node block (compositional, not holistic phenotypes). Tested
+  on EHR: **6,000 NewYork-Presbyterian 2009 discharge summaries (5,000 train / 1,000
+  test), 7,298 ICD-9 codes, ~8.4 codes/doc, 10k vocab**; out-of-sample ICD-9 prediction
+  by ROC. Result: full joint+hierarchical HSLDA beats both flat (independent regressors)
+  and two-stage (LDA-then-regress) — but predicts more correct labels **at the cost of
+  more false positives** (recall over precision; a caution for FDR-controlled
+  case-finding, and tiny-N by our standards). **(landscape)**
 - **Ganchev, Graça, Gillenwater & Taskar (2010).** Posterior Regularization for Structured Latent Variable Models. *JMLR* 11:2001–2049.
   — the framework: inject side-knowledge as *expectation constraints on the posterior* (a constrained/tilted E-step) instead of changing the model/prior. Our hard gating is the degenerate special case (constraint = "θ puts zero mass outside the allowed set"); prediction-constrained training is the soft-prediction-quality instance. The umbrella under which gating, PC training, and posterior-sparsity all sit. **(landscape)**
 - **Card, Tan & Smith (2018).** Neural Models for Documents with Metadata (SCHOLAR). *ACL*. (arXiv:1705.09296)
