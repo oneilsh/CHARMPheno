@@ -71,6 +71,10 @@ authors, year, title, venue, a link if available, and a short note on its role.
   — DAG (not tree) topic hierarchy; the multi-parent generalization relevant to MONDO. **(landscape)**
 - **Perotte, Wood, Elhadad & Bartlett (2011).** Hierarchically Supervised Latent Dirichlet Allocation (HSLDA). *NeurIPS* 24.
   — flat LDA topics + ICD-9-tree label supervision (child label requires parent). Hierarchy on the *label-prediction* side, not topic access. **(landscape)**
+- **Ganchev, Graça, Gillenwater & Taskar (2010).** Posterior Regularization for Structured Latent Variable Models. *JMLR* 11:2001–2049.
+  — the framework: inject side-knowledge as *expectation constraints on the posterior* (a constrained/tilted E-step) instead of changing the model/prior. Our hard gating is the degenerate special case (constraint = "θ puts zero mass outside the allowed set"); prediction-constrained training is the soft-prediction-quality instance. The umbrella under which gating, PC training, and posterior-sparsity all sit. **(landscape)**
+- **Card, Tan & Smith (2018).** Neural Models for Documents with Metadata (SCHOLAR). *ACL*. (arXiv:1705.09296)
+  — VAE topic model incorporating BOTH covariates and labels; explicitly generalizes STM (prevalence), SAGE (content deviations), and sLDA (supervision), defaulting to ProdLDA with no metadata. The neural "everything-at-once" of the design space we assemble conjugately. **(landscape)**
 
 ## Pólya-Gamma augmentation & identifiability
 
@@ -104,11 +108,29 @@ authors, year, title, venue, a link if available, and a short note on its role.
   — prediction-constrained training balances a generative account of EHR
   features with label prediction and can use sparsely labeled cohorts.
   **(landscape)**
+- **Hughes, Hope, Weiner, McCoy, Perlis, Sudderth & Doshi-Velez (2017).**
+  Prediction-Constrained Training for Semi-Supervised Mixture and Topic Models.
+  arXiv:1707.07341.
+  — the fuller companion to the AISTATS 2018 paper: develops the PC objective as
+  a constrained optimization (explain x SUBJECT TO predicting y well) that fixes
+  sLDA's supervision-drowned-out-by-the-word-likelihood failure; general beyond
+  topic models. Code: github.com/dtak/prediction-constrained-topic-models. **(landscape)**
+- **Hughes, Hope, Weiner, McCoy, Perlis, Sudderth & Doshi-Velez (2017).**
+  Prediction-Constrained Topic Models for Antidepressant Recommendation. *NeurIPS
+  ML4H workshop*. arXiv:1712.00499.
+  — the EHR *application* of PC training; improved antidepressant recommendation
+  from EHRs over prior supervised topic models. Proof the method survives clinical
+  data. **(landscape)**
 - **Ren, Kunes & Doshi-Velez (2020).** Prediction Focused Topic Models via
   Feature Selection. *AISTATS*, PMLR 108:4420–4429.
   https://proceedings.mlr.press/v108/ren20a.html
   — uses supervision to suppress vocabulary features that hinder prediction,
   directly relevant to noisy or heterogeneous OMOP domains. **(landscape)**
+- **Ren, Kunes & Doshi-Velez (2019).** Prediction Focused Topic Models for
+  Electronic Health Records. *NeurIPS ML4H workshop*. arXiv:1911.08551.
+  — the EHR extended-abstract companion to the feature-selection paper above:
+  supervised topic models over discrete counts (procedures/diagnoses/meds) that
+  keep only features that help (or don't hurt) prediction. **(landscape)**
 - **MixEHR-Guided (MixEHR-G).** Modeling EHRs with a guided multi-modal topic model for large-scale automatic phenotyping. *Journal of Biomedical Informatics*, 2022. https://www.sciencedirect.com/science/article/pii/S1532046422001976
   — PheCode/surrogate-feature priors make topics identifiable with known phenotypes. (Li lab, McGill; first author to confirm.) **(landscape)**
 - **Song, Hu, Verma, Buckeridge & Li (2022).** Automatic Phenotyping by a Seed-guided Topic Model (MixEHR-Seed). *KDD '22* (ACM SIGKDD). DOI:10.1145/3534678.3542675
