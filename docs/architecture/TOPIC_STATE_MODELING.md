@@ -1001,6 +1001,37 @@ statistically appropriate (don't claim causal relationships you can't support) b
 means the model may miss real interactions for uncommon conditions. Hierarchical or
 transfer learning approaches could help borrow strength across related phenotypes.
 
+### Two-Layer Capacity: Hard Node-Gating × Within-Node HDP for Per-Node K
+
+A parked idea for the per-node topic count ($K_v$) problem in the ontology-gated
+model. We rejected HDP/nonparametric priors globally (insight 0017: swapping $K$
+for the concentration $\gamma$ made results *more* sensitive; $\gamma$ is harder to
+set than $K$ — prior-dominance), and the init-side effective-rank / parallel-analysis
+$K_v$ estimators failed at $p \gg n$ (insights 0081, 0083). But those failures share
+a regime: a nonparametric prior arbitrating among *many* topics each backed by *weak*
+data. The **two-layer** idea quarantines the nonparametric machinery to where it is
+best behaved:
+
+- **Node layer (parametric, hard):** keep the PLDA-style ontology gate exactly as is
+  — it gives crisp, well-supported topics even at small node support (empirically our
+  strongest property).
+- **Within-node layer (nonparametric):** a Dirichlet process *inside each node's
+  block* learns how many sub-topics that node needs. This is **PLDP applied per-node**
+  (Ramage, Manning & Dumais 2011, the companion to PLDA).
+
+Why it might behave where the global HDP did not: within a single node the regime is
+*few topics, each with decent support* — exactly where the DP's $\gamma$ stops
+dominating. A **shared $\gamma$ across nodes with partial pooling** would tame the
+per-node prior-dominance further.
+
+Caveats to design around: (1) it is still a $\gamma$, so insight 0017's warning
+applies unless pooled; (2) it does **not** escape the $p \gg n$ wall (insight 0083) —
+at a 26-patient node the DP has no more information than the parallel-analysis probe
+did, so it still cannot separate a diffuse-real phenotype from one patient's
+idiosyncrasy. Net: a better-motivated use of HDP than the global version we rejected,
+and an explicit *generative* $K_v$ rather than a post-hoc usage read — but not a free
+lunch on the truly tiny nodes.
+
 ### Tree-Structured HDP for Hierarchical Cohort Pooling
 
 The HDP as planned uses the standard two-level topic-model tree: a global DP $G_0$
