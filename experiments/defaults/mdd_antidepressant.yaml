@@ -31,5 +31,7 @@ alpha: 1.1
 tau: 1.1
 pi_iters: 100
 max_iter: 500
+doc_batch_size: 2048        # doc-minibatch size for the PC full-batch gradient
+                            # assembly; bounds driver memory at real-corpus scale
 test_frac: 0.25
 seed: 0

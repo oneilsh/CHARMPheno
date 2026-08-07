@@ -201,6 +201,7 @@ def evaluate_pc_multitask(
     tau: float = 1.1,
     pi_iters: int = 100,
     max_iter: int = 500,
+    doc_batch_size: int = 2048,
     seed: int = 0,
     **model_kwargs: Any,
 ) -> dict[str, Any]:
@@ -248,6 +249,10 @@ def evaluate_pc_multitask(
         ``weight_y = 0``.
     alpha, tau, pi_iters, max_iter, seed :
         Passed through to :class:`~analysis.pc.model.PCTopicModel`.
+    doc_batch_size : int
+        Document-minibatch size for the PC / two-stage fits' full-batch gradient
+        assembly (see :class:`~analysis.pc.model.PCTopicModel`). Bounds driver
+        memory at real-corpus scale; the objective/optimizer are unchanged.
     **model_kwargs :
         Extra constructor kwargs shared by the PC and two-stage fits.
 
@@ -282,7 +287,7 @@ def evaluate_pc_multitask(
 
     shared = dict(
         K=K, C=C, alpha=alpha, tau=tau, pi_iters=pi_iters,
-        max_iter=max_iter, seed=seed, **model_kwargs,
+        max_iter=max_iter, doc_batch_size=doc_batch_size, seed=seed, **model_kwargs,
     )
 
     # --- Model 1: ONE shared faithful PC over all C heads (per-cell mask) ------
@@ -337,6 +342,7 @@ def evaluate_pc_vs_baselines(
     tau: float = 1.1,
     pi_iters: int = 100,
     max_iter: int = 500,
+    doc_batch_size: int = 2048,
     seed: int = 0,
     labeled_mask: np.ndarray | None = None,
     **model_kwargs: Any,
@@ -356,6 +362,10 @@ def evaluate_pc_vs_baselines(
     alpha, tau, pi_iters, max_iter, seed :
         Passed through to :class:`~analysis.pc.model.PCTopicModel` (the harness
         default ``pi_iters=100`` matches the model; tests may lower it for speed).
+    doc_batch_size : int
+        Document-minibatch size for the PC / two-stage fits' full-batch gradient
+        assembly (see :class:`~analysis.pc.model.PCTopicModel`); memory-bounding
+        only, the objective/optimizer are unchanged.
     labeled_mask : (D_tr,) or None
         Semi-supervised row mask. ``None`` => all train rows labeled. PC trains on
         every row (label-free ``pi``) but only masked rows contribute their label;
@@ -394,7 +404,7 @@ def evaluate_pc_vs_baselines(
 
     shared = dict(
         K=K, C=C, alpha=alpha, tau=tau, pi_iters=pi_iters,
-        max_iter=max_iter, seed=seed, **model_kwargs,
+        max_iter=max_iter, doc_batch_size=doc_batch_size, seed=seed, **model_kwargs,
     )
 
     # --- Model 1: faithful PC (supervised, label reshapes the topics) ---------

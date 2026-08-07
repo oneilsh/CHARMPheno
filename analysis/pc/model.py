@@ -37,6 +37,7 @@ from analysis.pc.slda_reference import (
     DEFAULT_PI_ITERS,
     DEFAULT_PI_STEP_SIZE,
     calc_loss__slda,
+    global_terms_from_param_vec,
     loss_from_param_vec,
     make_convex_alpha_minus_1,
     multinomial_coef_const,
@@ -117,6 +118,24 @@ class PCTopicModel:
         Divide the total loss by the token count (authors' default).
     max_iter : int, default 500
         L-BFGS-B iteration cap for ``fit``.
+    doc_batch_size : int, default 2048
+        Document-minibatch size for assembling the FULL-batch objective and
+        gradient inside ``fit``. Reverse-mode autograd through the unrolled
+        ``pi``-inference retains every intermediate (each of ``pi_iters`` steps
+        holds ``D x V`` arrays), so differentiating the whole corpus at once needs
+        a tape ~ ``D x pi_iters x V`` — tens of GB at real-corpus scale. Because
+        the loss is a plain SUM over documents plus a handful of global terms,
+        ``fit`` instead partitions the ``D`` training docs into contiguous
+        minibatches of this size, differentiates each minibatch's per-document loss
+        separately, and ACCUMULATES value+gradient; the global terms
+        (``loss_topics``, ``loss_w``, the multinomial coefficient) and the single
+        ``/ scale`` are applied once outside the loop. The result is the exact same
+        full-batch objective/gradient handed to L-BFGS-B, with peak tape bounded to
+        one minibatch (~ ``doc_batch_size x pi_iters x V``). When
+        ``doc_batch_size >= D`` the fit takes the original single-shot full-batch
+        path, byte-for-byte identical to before this knob existed (so small-``D``
+        tests and the oracle are unchanged). Does NOT change the objective's math
+        or the optimizer — only how the gradient is assembled.
     seed : int, default 0
         Seed for the random parameter init. Fits are deterministic given seed+data.
     init_scale : float, default 0.5
@@ -144,6 +163,7 @@ class PCTopicModel:
         pi_step_size: float = DEFAULT_PI_STEP_SIZE,
         rescale_by_n_tokens: bool = True,
         max_iter: int = 500,
+        doc_batch_size: int = 2048,
         seed: int = 0,
         init_scale: float = 0.5,
     ) -> None:
@@ -159,6 +179,9 @@ class PCTopicModel:
         self.pi_step_size = float(pi_step_size)
         self.rescale_by_n_tokens = bool(rescale_by_n_tokens)
         self.max_iter = int(max_iter)
+        self.doc_batch_size = int(doc_batch_size)
+        if self.doc_batch_size < 1:
+            raise ValueError("doc_batch_size must be a positive integer")
         self.seed = int(seed)
         self.init_scale = float(init_scale)
 
@@ -183,6 +206,79 @@ class PCTopicModel:
         w_KV = self.init_scale * rng.standard_normal((self.K, V))
         w_CK = np.zeros((self.C, self.K))
         return pack_param_vec(w_KV, w_CK)
+
+    def _make_minibatch_value_and_grad(
+        self, X, y_DC, y_rowmask, label_mask_DC, V, mult_const, loss_kwargs,
+    ):
+        """Build the ``vec -> (value, grad)`` closure for the minibatch fit path.
+
+        Returns a callable that reproduces the FULL-batch objective and gradient
+        of :func:`~analysis.pc.slda_reference.loss_from_param_vec` exactly, but
+        assembles them by accumulating over contiguous document minibatches so the
+        autograd tape never exceeds one minibatch. The decomposition it exploits::
+
+            loss_ttl = ( sum_d [loss_x_d + loss_pi_d + loss_y_d]      # per-doc
+                         + loss_topics + loss_w                       # global
+                         - weight_x * mult_coef_const ) / scale       # global const
+
+        Per-minibatch calls set ``include_global_terms=False``,
+        ``include_mult_coef=False`` and ``rescale_total_loss_by_n_tokens=False`` so
+        each returns ONLY its documents' ``loss_x + loss_pi + loss_y`` (unscaled,
+        the minibatch's own token sum never enters). The global terms are
+        differentiated once via
+        :func:`~analysis.pc.slda_reference.global_terms_from_param_vec`; the
+        multinomial coefficient is a parameter-free constant (zero gradient) added
+        once; and the whole accumulated value+gradient is divided by the single
+        GLOBAL ``scale = sum(X)`` (or 1 when ``rescale_by_n_tokens`` is off) — never
+        a per-minibatch scale. Both masks are sliced per minibatch so the observed
+        set is unchanged.
+
+        The returned callable is suitable for ``scipy.optimize.minimize(...,
+        jac=True)``: it returns ``(float value, float64 gradient)``.
+        """
+        D = X.shape[0]
+        bs = self.doc_batch_size
+        bounds = [(i, min(i + bs, D)) for i in range(0, D, bs)]
+        scale = float(np.sum(X)) if self.rescale_by_n_tokens else 1.0
+
+        # Per-doc kwargs: strip the token rescale (applied once, globally) and both
+        # the global regularizers and the multinomial constant (added once, below).
+        perdoc_kwargs = dict(loss_kwargs)
+        perdoc_kwargs["rescale_total_loss_by_n_tokens"] = False
+        perdoc_kwargs["include_global_terms"] = False
+        perdoc_kwargs["include_mult_coef"] = False
+
+        def _perdoc_loss(vec, lo, hi):
+            mb = None if label_mask_DC is None else label_mask_DC[lo:hi]
+            return loss_from_param_vec(
+                vec, X_DV=X[lo:hi], y_DC=y_DC[lo:hi], y_rowmask=y_rowmask[lo:hi],
+                label_mask=mb, K=self.K, V=V, C=self.C,
+                mult_coef_const_val=0.0, **perdoc_kwargs,
+            )
+
+        perdoc_vg = autograd.value_and_grad(_perdoc_loss)
+        global_vg = autograd.value_and_grad(global_terms_from_param_vec)
+        # Parameter-free constant part of loss_x (zero gradient), added once.
+        mult_term = -float(self.weight_x) * float(mult_const)
+        global_kwargs = dict(
+            K=self.K, V=V, C=self.C, tau=self.tau,
+            lambda_w=self.lambda_w, weight_y=self.weight_y,
+        )
+
+        def value_and_grad(vec):
+            vec = np.asarray(vec, dtype=np.float64)
+            total_val = 0.0
+            total_grad = np.zeros_like(vec)
+            for lo, hi in bounds:
+                v, g = perdoc_vg(vec, lo, hi)
+                total_val += float(v)
+                total_grad += np.asarray(g, dtype=np.float64)
+            gv, gg = global_vg(vec, **global_kwargs)
+            total_val += float(gv) + mult_term
+            total_grad += np.asarray(gg, dtype=np.float64)
+            return total_val / scale, total_grad / scale
+
+        return value_and_grad
 
     # -- fit ---------------------------------------------------------------
     def fit(
@@ -236,25 +332,50 @@ class PCTopicModel:
 
         loss_kwargs = self._loss_kwargs()
 
-        def objective(vec):
-            return loss_from_param_vec(
-                vec, X_DV=X, y_DC=y_DC, y_rowmask=y_rowmask,
-                label_mask=label_mask_DC,
-                K=self.K, V=V, C=self.C,
-                mult_coef_const_val=mult_const,
-                **loss_kwargs,
+        if self.doc_batch_size >= D:
+            # --- Single-shot full-batch path (unchanged; byte-for-byte the pre-
+            # minibatch behavior). Used whenever the whole corpus fits one batch,
+            # so small-D tests and the oracle are numerically identical. ----------
+            def objective(vec):
+                return loss_from_param_vec(
+                    vec, X_DV=X, y_DC=y_DC, y_rowmask=y_rowmask,
+                    label_mask=label_mask_DC,
+                    K=self.K, V=V, C=self.C,
+                    mult_coef_const_val=mult_const,
+                    **loss_kwargs,
+                )
+
+            grad_fn = autograd.grad(objective)
+            self.init_obj_ = float(objective(x0))
+            self.n_doc_batches_ = 1
+            res = minimize(
+                lambda v: float(objective(v)),
+                x0,
+                jac=lambda v: np.asarray(grad_fn(v), dtype=np.float64),
+                method="L-BFGS-B",
+                options=dict(maxiter=self.max_iter),
             )
-
-        grad_fn = autograd.grad(objective)
-
-        self.init_obj_ = float(objective(x0))
-        res = minimize(
-            lambda v: float(objective(v)),
-            x0,
-            jac=lambda v: np.asarray(grad_fn(v), dtype=np.float64),
-            method="L-BFGS-B",
-            options=dict(maxiter=self.max_iter),
-        )
+        else:
+            # --- Document-minibatch accumulation path (real-corpus scale). --------
+            # The full loss is (sum over docs of per-doc terms + global terms) /
+            # scale. We differentiate each contiguous doc minibatch's per-doc loss
+            # separately and accumulate value+grad, then add the (document-
+            # independent) global terms and the constant multinomial coefficient
+            # ONCE and divide by the single GLOBAL scale. This yields the EXACT
+            # full-batch objective/gradient while bounding the autograd tape to one
+            # minibatch. See PCTopicModel.doc_batch_size.
+            value_and_grad = self._make_minibatch_value_and_grad(
+                X, y_DC, y_rowmask, label_mask_DC, V, mult_const, loss_kwargs
+            )
+            self.init_obj_ = float(value_and_grad(x0)[0])
+            self.n_doc_batches_ = int(np.ceil(D / self.doc_batch_size))
+            res = minimize(
+                value_and_grad,
+                x0,
+                jac=True,
+                method="L-BFGS-B",
+                options=dict(maxiter=self.max_iter),
+            )
         self.result_ = res
         self.final_obj_ = float(res.fun)
         self.n_iter_ = int(res.nit)

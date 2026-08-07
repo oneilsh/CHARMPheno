@@ -694,6 +694,7 @@ def build_pc_args(
         "--tau", str(effective.get("tau", 1.1)),
         "--pi-iters", str(effective.get("pi_iters", 100)),
         "--max-iter", str(effective["max_iter"]),
+        "--doc-batch-size", str(effective.get("doc_batch_size", 2048)),
         "--lookback-days", str(effective.get("lookback_days", 365)),
         "--window-days", str(effective.get("window_days", 365)),
         "--stability-days", str(effective.get("stability_days", 90)),

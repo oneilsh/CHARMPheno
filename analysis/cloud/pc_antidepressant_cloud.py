@@ -249,6 +249,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tau", type=float, default=1.1, help="PC beta Dirichlet tau")
     parser.add_argument("--pi-iters", type=int, default=100, help="per-doc pi CAVI iters")
     parser.add_argument("--max-iter", type=int, default=500, help="PC global max iters")
+    parser.add_argument(
+        "--doc-batch-size", type=int, default=2048,
+        help=("document minibatch size for the PC full-batch gradient assembly; "
+              "bounds driver autograd memory (~ doc_batch_size x pi_iters x V) at "
+              "real-corpus scale without changing the objective or optimizer"),
+    )
     # --- Feature window ------------------------------------------------------
     parser.add_argument(
         "--lookback-days", type=int, default=365,
@@ -445,7 +451,8 @@ def main(argv: list[str] | None = None) -> int:
         results = evaluate_pc_multitask(
             X[tr], y[tr], mask[tr], X[te], y[te], mask[te],
             K=args.K, weight_y=args.weight_y, alpha=args.alpha, tau=args.tau,
-            pi_iters=args.pi_iters, max_iter=args.max_iter, seed=args.seed,
+            pi_iters=args.pi_iters, max_iter=args.max_iter,
+            doc_batch_size=args.doc_batch_size, seed=args.seed,
         )
 
     # --- Report: the Hughes per-drug table (PC vs two-stage vs LR-on-codes) ---
@@ -465,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
         "params": {
             "K": args.K, "weight_y": args.weight_y, "alpha": args.alpha,
             "tau": args.tau, "pi_iters": args.pi_iters, "max_iter": args.max_iter,
+            "doc_batch_size": args.doc_batch_size,
             "lookback_days": args.lookback_days, "window_days": args.window_days,
             "stability_days": args.stability_days, "grace_gap_days": args.grace_gap_days,
             "vocab_size": args.vocab_size, "min_df": args.min_df,
