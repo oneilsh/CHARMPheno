@@ -122,7 +122,8 @@ id-agnostic. Tests under `analysis/pc/tests/`.
   base model, so the future VI-native port re-wires rather than rewrites. TDD: (1) failing test that
   with λ=0 the objective's gradient/optimum reduces to plain LDA (topics match an unsupervised fit);
   (2) implement; (3) pass. Gradients hand-coded + checked against `scipy.optimize.check_grad`.
-- [ ] **Task A2 — synthetic known-signal validation.** Generate synthetic docs with a *planted*
+- [x] **Task A1 done** — `analysis/pc/{head,generative,objective}.py`; 67 tests; check_grad ~1e-9/8e-7; faithful invariants pinned. (commit 46e2bc6)
+- [ ] **Task A2 — synthetic known-signal validation.** (Builds the minimal `PCTopicModel` fit/transform/predict_proba wrapper it needs — that IS B1's core, so B1 collapses to polish.) Generate synthetic docs with a *planted*
   label-predictive topic; assert PC recovers heldout AUC ≫ chance and beats an unsupervised-LDA→logistic
   two-stage baseline. This is the "the machine works" gate.
 - [ ] **Task A3 — reference oracle.** Reproduce a result (or a small toy from the dtak repo) to confirm
