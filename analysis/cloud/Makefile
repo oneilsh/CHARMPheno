@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout pc-antidepressant
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -17,6 +17,7 @@ EVAL_SCRIPT     := eval_coherence_cloud.py
 BUNDLE_SCRIPT   := build_dashboard_cloud.py
 INSPECT_SCRIPT  := inspect_app.py
 SETUP_SCRIPT    := setup_workspace.py
+PC_AD_SCRIPT    := pc_antidepressant_cloud.py
 WORKSPACE_ENV   := .workspace_env
 
 # Args forwarded to lda-bq-smoke / hdp-bq-smoke / eval-bq-coherence / inspect
@@ -26,6 +27,9 @@ HDP_BQ_ARGS     ?=
 EVAL_ARGS       ?=
 BUNDLE_ARGS     ?=
 INSPECT_ARGS    ?=
+# Args forwarded to pc-antidepressant (Phase-C / experiment 0070). Override e.g.
+# PC_AD_ARGS='--K 25 --weight-y 100 --person-mod 1 --out runs/exp0070.json'
+PC_AD_ARGS      ?=
 
 # Required for eval-bq-coherence: path to the augmented VIResult dir written
 # by lda_bigquery_cloud.py (local or GCS-mounted, e.g. /mnt/gcs/<bucket>/runs/<id>).
@@ -83,6 +87,12 @@ help:
 	@echo "                         (defaults τ₀=1024 κ=0.51 give ρ_0 ≈ 0.029 — slow on small corpora)"
 	@echo "                         Checkpoint/resume: SAVE_DIR=/mnt/gcs/\$$BUCKET/runs/<id>/"
 	@echo "                                            SAVE_INTERVAL=10  RESUME_FROM=<prev-save-dir>"
+	@echo "  make pc-antidepressant - Phase-C (exp 0070): MDD antidepressant cohort ->"
+	@echo "                         fused (condition+drug+procedure) pre-index BOW ->"
+	@echo "                         joint multi-task Prediction-Constrained topic model;"
+	@echo "                         per-drug heldout AUC (PC vs two-stage vs LR) -> --out JSON."
+	@echo "                         Tune via PC_AD_ARGS='--K 25 --weight-y 100 --out runs/exp0070.json'"
+	@echo "                         (in-memory PC on the driver; needs autograd overlay + big driver mem)"
 	@echo "  make hdp-bq-smoke    - End-to-end: BQ -> CountVectorizer -> OnlineHDP shim"
 	@echo "                         Override args via HDP_BQ_ARGS='--T 100 --K 10 --person-mod 5000'"
 	@echo "                         Tune SVI step: HDP_BQ_ARGS='--tau0 64 --kappa 0.7'"
@@ -238,6 +248,27 @@ lda-bq-smoke: zip $(WORKSPACE_ENV)
 	    --resume-from "$(RESUME_FROM)" \
 	    --corpus-cache-uri "$(CORPUS_CACHE_URI)" \
 	    $(LDA_BQ_ARGS)
+
+# Phase-C: fused-vocab multi-task Prediction-Constrained topic model on the MDD
+# antidepressant cohort (experiment 0070). The in-memory PC eval runs on the
+# DRIVER (collect-to-memory), so (1) --driver-memory is large (a dense D×V
+# matrix), and (2) PYTHONPATH must include the repo root — `analysis.pc` is not
+# in any --py-files zip. The cluster-overlay ships `autograd` (fit's L-BFGS-B
+# Jacobian); scikit-learn is assumed present on the AoU image. This job does NOT
+# use the run_experiment.py lifecycle (no NPMI/dashboard) — it writes its own
+# per-drug AUC JSON via --out. Override knobs via PC_AD_ARGS.
+pc-antidepressant: zip cluster-overlay $(WORKSPACE_ENV)
+	. ./$(WORKSPACE_ENV) && \
+	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH \
+	spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 8g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
+	    $(PC_AD_SCRIPT) \
+	    $(PC_AD_ARGS)
 
 hdp-bq-smoke: zip $(WORKSPACE_ENV)
 	. ./$(WORKSPACE_ENV) && \
