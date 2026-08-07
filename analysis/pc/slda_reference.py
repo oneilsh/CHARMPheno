@@ -209,6 +209,7 @@ def calc_loss__slda(
     pi_step_size: float = DEFAULT_PI_STEP_SIZE,
     rescale_total_loss_by_n_tokens: bool = True,
     include_mult_coef: bool = True,
+    include_global_terms: bool = True,
     mult_coef_const_val: float | None = None,
     return_dict: bool = False,
 ):
@@ -252,6 +253,16 @@ def calc_loss__slda(
         alpha, tau, lambda_w, weight_*: hyperparameters (authors' defaults).
         pi_iters, pi_step_size: NEF unroll controls.
         include_mult_coef: include the constant multinomial coefficient in loss_x.
+        include_global_terms: include the two document-INDEPENDENT terms
+            ``loss_topics`` (Dirichlet-on-topics) and ``loss_w`` (ridge on
+            ``w_CK``). ``True`` (default) reproduces the authors' loss exactly; set
+            ``False`` for a per-document-only evaluation over a doc minibatch, where
+            the caller adds ``loss_topics``/``loss_w`` (and the global multinomial
+            coefficient) ONCE outside the accumulation loop — see
+            :func:`global_terms_from_param_vec` and
+            :meth:`analysis.pc.model.PCTopicModel.fit`'s minibatch path. The full
+            gradient is unchanged because the total loss is a plain sum of a
+            per-document part and this global part.
         mult_coef_const_val: precomputed constant (avoids recompute in a hot loop).
         return_dict: if True, return a dict of every term (numpy floats) plus the
             inferred ``pi_DK`` and per-doc ``y_proba_DC`` — for diagnostics/tests.
@@ -297,12 +308,21 @@ def calc_loss__slda(
         obs_DC = obs_DC * anp.asarray(label_mask, dtype=float)   # (D, C) AND
     loss_y = -weight_y * anp.sum(obs_DC * ll_DC)
 
-    # Global regularizers. Floor topics before log: softmax rows are positive in
-    # exact arithmetic but can underflow to 0.0 in float64 for very negative
-    # logits, which would make log(topics) = -inf. (loss_pi is already floored
-    # by its 1e-9 offset.)
-    loss_topics = -1.0 * (tau - 1.0) * anp.sum(anp.log(anp.maximum(topics_KV, 1e-300)))
-    loss_w = float(weight_y) * lambda_w * anp.sum(w_CK ** 2)
+    # Global (document-INDEPENDENT) regularizers. Floor topics before log:
+    # softmax rows are positive in exact arithmetic but can underflow to 0.0 in
+    # float64 for very negative logits, which would make log(topics) = -inf.
+    # (loss_pi is already floored by its 1e-9 offset.) With
+    # ``include_global_terms=False`` these are dropped so a per-document minibatch
+    # call returns only the decomposable per-doc part; the caller re-adds them
+    # once outside the accumulation loop (:func:`global_terms_loss`).
+    if include_global_terms:
+        loss_topics = -1.0 * (tau - 1.0) * anp.sum(
+            anp.log(anp.maximum(topics_KV, 1e-300))
+        )
+        loss_w = float(weight_y) * lambda_w * anp.sum(w_CK ** 2)
+    else:
+        loss_topics = 0.0
+        loss_w = 0.0
 
     if rescale_total_loss_by_n_tokens:
         scale_ttl = float(np.sum(np.asarray(X_DV)))
@@ -367,6 +387,42 @@ def softmax_rows(w):
     return e / anp.sum(e, axis=1, keepdims=True)
 
 
+def global_terms_loss(topics_KV, w_CK, *, tau: float, lambda_w: float, weight_y: float):
+    """The two document-INDEPENDENT loss terms, ``loss_topics + loss_w`` (unscaled).
+
+    Byte-for-byte the same expressions :func:`calc_loss__slda` uses for its global
+    regularizers (Dirichlet-on-topics prior + ridge on the head), factored out so
+    the minibatch-accumulation fit path can add them ONCE, outside the per-document
+    loop, rather than once per minibatch. They depend only on the parameters
+    (``topics_KV``, ``w_CK``), never on the documents, so pulling them out of the
+    per-doc sum is exact for both the loss value and its gradient. NOT divided by
+    the token-count ``scale`` — the caller applies the single global ``scale`` to
+    the whole accumulated total. Autograd-safe (used inside the differentiated
+    objective).
+    """
+    loss_topics = -1.0 * (tau - 1.0) * anp.sum(anp.log(anp.maximum(topics_KV, 1e-300)))
+    loss_w = float(weight_y) * lambda_w * anp.sum(w_CK ** 2)
+    return loss_topics + loss_w
+
+
+def global_terms_from_param_vec(
+    vec, *, K: int, V: int, C: int, tau: float, lambda_w: float, weight_y: float,
+):
+    """``loss_topics + loss_w`` as a function of the packed free vector.
+
+    The global-term analogue of :func:`loss_from_param_vec`: unpacks ``vec`` ->
+    ``(w_KV, w_CK)``, maps ``topics = softmax(w_KV)``, and returns
+    :func:`global_terms_loss`. ``autograd.grad`` of this is the global part of the
+    fit Jacobian; the minibatch path adds it to the accumulated per-document
+    gradient before the single ``/ scale``.
+    """
+    w_KV, w_CK = unpack_param_vec(vec, K=K, V=V, C=C)
+    topics_KV = softmax_rows(w_KV)
+    return global_terms_loss(
+        topics_KV, w_CK, tau=tau, lambda_w=lambda_w, weight_y=weight_y
+    )
+
+
 def loss_from_param_vec(
     vec,
     *,
@@ -387,6 +443,12 @@ def loss_from_param_vec(
     Jacobian. All data/hyperparameters are bound by the caller (closure/kwargs).
     ``label_mask`` (D, C) is forwarded unchanged, restricting ``loss_y`` to the
     observed cells (multi-task / index-drug mode); ``None`` => all cells observed.
+
+    Any extra ``loss_kwargs`` flow straight through to :func:`calc_loss__slda` — in
+    particular ``include_global_terms=False`` (paired with ``include_mult_coef=
+    False`` and ``rescale_total_loss_by_n_tokens=False``) yields the per-document
+    part ONLY, the primitive the minibatch-accumulation fit path differentiates
+    once per doc minibatch.
     """
     w_KV, w_CK = unpack_param_vec(vec, K=K, V=V, C=C)
     topics_KV = softmax_rows(w_KV)
