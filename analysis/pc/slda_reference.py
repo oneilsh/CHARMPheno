@@ -31,6 +31,24 @@ Symbols
                 ``pi_d`` sums to 1 the bias is unidentifiable — matches the authors
     y_DC        (D, C) binary labels in {0, 1}
     y_rowmask   (D,) 1 for labeled docs, 0 for unlabeled (semi-supervised)
+    label_mask  (D, C) 1 where cell (d, c) is OBSERVED, 0 where the label is
+                missing (per-cell / multi-task semi-supervision; see below)
+
+Per-cell missing labels (multi-task)
+------------------------------------
+The single shared topic model can carry ``C`` outcome heads while each document
+is labeled for only *some* of the ``C`` outcomes — the Hughes antidepressant
+setup, where a patient is labeled only for the drug they actually initiated
+(their "index drug"), so the ``D x C`` label matrix is almost all missing with
+about one observed cell per row. ``label_mask[d, c] == 1`` marks cell ``(d, c)``
+as observed; a missing cell contributes NOTHING to ``loss_y`` or its gradient,
+and — because ``pi_d`` here is label-free generative MAP — nothing to
+``pi``-inference either (that coupling is structurally absent in the faithful
+model). The per-cell mask composes with the per-row ``y_rowmask`` by logical AND:
+the effective observed set is ``obs_dc = y_rowmask[d] * label_mask[d, c]``, so a
+row switched off by ``y_rowmask`` drops all of its cells regardless of
+``label_mask``. ``label_mask is None`` recovers the all-observed behavior (every
+labeled row contributes all ``C`` cells).
 
 Parametrization
 ---------------
@@ -170,6 +188,7 @@ def calc_loss__slda(
     X_DV,
     y_DC,
     y_rowmask=None,
+    label_mask=None,
     *,
     alpha: float = 1.1,
     tau: float = 1.1,
@@ -194,8 +213,9 @@ def calc_loss__slda(
 
         loss_x      = -weight_x  * sum_d [ sum_v x_dv log(pi_d @ topics)_v  +  mult_coef_d ]
         loss_pi     = -weight_pi * sum_d sum_k a_m1 * log(1e-9 + pi_dk)
-        loss_y      = -weight_y  * sum_{d labeled} sum_c log_sigmoid( s_dc * (w_CK @ pi_d)_c )
+        loss_y      = -weight_y  * sum_{(d,c) observed} log_sigmoid( s_dc * (w_CK @ pi_d)_c )
                       with s_dc = sign(y_dc - 0.01)   (their binary convention)
+                      and "observed" = y_rowmask[d] * label_mask[d, c]
         loss_topics = -(tau - 1) * sum_kv log topics_kv
         loss_w      =  weight_y * lambda_w * sum w_CK^2
         loss_ttl    = (loss_x + loss_y + loss_pi + loss_topics + loss_w) / scale
@@ -203,8 +223,14 @@ def calc_loss__slda(
     ``scale = sum(X)`` when ``rescale_total_loss_by_n_tokens`` (the authors'
     default), else 1. Unlabeled docs (``y_rowmask == 0``) contribute to
     ``loss_x``/``loss_pi`` only — never to ``loss_y`` — which is the semi-supervised
-    asymmetry. ``weight_y == 0`` makes the loss (and its topic gradient)
-    independent of the labels: the unsupervised LDA-MAP baseline.
+    asymmetry. ``label_mask`` extends that asymmetry to the *cell* level: an
+    unobserved cell ``(d, c)`` is dropped from ``loss_y`` (and thus from every
+    parameter gradient) exactly as an unlabeled row is; the effective observed
+    set is ``obs_dc = y_rowmask[d] * label_mask[d, c]`` (logical AND). This is the
+    joint multi-task / index-drug mode: one shared topic model, ``C`` heads, each
+    head trained only on the cells observed for its outcome. ``weight_y == 0``
+    makes the loss (and its topic gradient) independent of the labels: the
+    unsupervised LDA-MAP baseline.
 
     Args:
         topics_KV: (K, V) simplex rows. May be autograd-boxed.
@@ -212,6 +238,8 @@ def calc_loss__slda(
         X_DV:      (D, V) counts (plain numpy).
         y_DC:      (D, C) binary labels.
         y_rowmask: (D,) 1=labeled, 0=unlabeled. None => all labeled.
+        label_mask: (D, C) 1=cell observed, 0=cell missing. None => every cell of
+            a labeled row observed. Composes with ``y_rowmask`` by AND.
         alpha, tau, lambda_w, weight_*: hyperparameters (authors' defaults).
         pi_iters, pi_step_size: NEF unroll controls.
         include_mult_coef: include the constant multinomial coefficient in loss_x.
@@ -245,11 +273,18 @@ def calc_loss__slda(
     # loss_pi : Dirichlet(alpha) MAP prior on pi over ALL docs.
     loss_pi = -weight_pi * anp.sum(a_m1 * anp.log(1e-9 + Pi_DK))
 
-    # loss_y : per-label logistic loss over LABELED docs only.
+    # loss_y : per-label logistic loss over OBSERVED cells only. The observed
+    # set is the per-row mask AND the per-cell mask, obs_dc = y_rowmask[d] *
+    # label_mask[d, c]; an unobserved cell multiplies its log-likelihood by 0 and
+    # so drops out of the loss and every parameter gradient. Both masks are
+    # constant in the parameters, so multiplying is autograd-safe.
     logits_DC = anp.dot(Pi_DK, w_CK.T)                # (D, C)
     sign_DC = anp.sign(y_DC - 0.01)                   # {-1, +1}, constant in params
     ll_DC = log_logistic_sigmoid(sign_DC * logits_DC)
-    loss_y = -weight_y * anp.sum(y_rowmask[:, None] * ll_DC)
+    obs_DC = y_rowmask[:, None]                        # (D, 1), broadcasts over C
+    if label_mask is not None:
+        obs_DC = obs_DC * anp.asarray(label_mask, dtype=float)   # (D, C) AND
+    loss_y = -weight_y * anp.sum(obs_DC * ll_DC)
 
     # Global regularizers.
     loss_topics = -1.0 * (tau - 1.0) * anp.sum(anp.log(topics_KV))
@@ -328,6 +363,7 @@ def loss_from_param_vec(
     V: int,
     C: int,
     mult_coef_const_val: float,
+    label_mask=None,
     **loss_kwargs,
 ):
     """Total loss as a function of the packed free vector — the autograd target.
@@ -335,11 +371,13 @@ def loss_from_param_vec(
     Unpacks ``vec`` -> ``(w_KV, w_CK)``, maps ``topics = softmax(w_KV)``, and calls
     :func:`calc_loss__slda`. ``autograd.grad`` of this w.r.t. ``vec`` is the fit's
     Jacobian. All data/hyperparameters are bound by the caller (closure/kwargs).
+    ``label_mask`` (D, C) is forwarded unchanged, restricting ``loss_y`` to the
+    observed cells (multi-task / index-drug mode); ``None`` => all cells observed.
     """
     w_KV, w_CK = unpack_param_vec(vec, K=K, V=V, C=C)
     topics_KV = softmax_rows(w_KV)
     return calc_loss__slda(
-        topics_KV, w_CK, X_DV, y_DC, y_rowmask,
+        topics_KV, w_CK, X_DV, y_DC, y_rowmask, label_mask,
         mult_coef_const_val=mult_coef_const_val,
         **loss_kwargs,
     )

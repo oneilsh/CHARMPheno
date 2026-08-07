@@ -21,6 +21,21 @@ pi-inference. Terms: ``loss_x`` (multinomial gen NLL, all docs) + ``loss_pi``
 free multiplier decoupled from token counts; ``weight_y = 0`` is unsupervised
 LDA-MAP. This is what removes the train/test ``pi`` mismatch (see the plan doc).
 
+*Multi-task / per-cell missing labels (index-drug).* The faithful model also
+supports ``C > 1`` outcome heads on ONE shared topic model where each document is
+labeled for only *some* outcomes: :meth:`PCTopicModel.fit` takes a per-cell
+``label_mask`` (``(D, C)``, 1 == observed) so ``loss_y`` (and every parameter
+gradient) sums over the observed cells only, ``obs(d, c) = labeled_mask[d] AND
+label_mask[d, c]``. The motivating case is Hughes' antidepressant setup — a
+patient labeled only for the drug they initiated (their "index drug"), an
+almost-all-missing ``D x C`` matrix with ~one observed cell per row — but any
+per-cell mask is accepted; ``label_mask = None`` is the unchanged all-observed
+behavior. Because ``pi`` is label-free generative MAP, a missing label drops out
+of ``loss_y`` only and never leaks into the representation. The eval harness
+exposes this as :func:`analysis.pc.evaluate.evaluate_pc_multitask` (one shared PC
+jointly fit across heads, per-outcome heldout scoring vs. the same masked
+two-stage / LR baselines).
+
 **VARIANT — the free-pi PC-family model (:class:`~analysis.pc.variants.PCTopicModelFreePi`,
 built on the factored A1 pieces below).** Gives each doc a FREE ``pi_d`` that the
 label shapes at train time; ``beta_k = softmax(w_k)``, ``pi_d = softmax(u_d)``,

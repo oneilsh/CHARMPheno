@@ -61,6 +61,25 @@ def _as_y_DC(y: np.ndarray, C: int) -> np.ndarray:
     return y
 
 
+def _as_label_mask_DC(label_mask, D: int, C: int) -> np.ndarray | None:
+    """Coerce a per-cell observed-mask to a ``(D, C)`` float 0/1 array, or None.
+
+    ``None`` passes through unchanged (all cells observed). A 1D ``(D,)`` mask for
+    the single-label case ``C == 1`` is promoted to a column. Any other shape that
+    is not exactly ``(D, C)`` is a caller error.
+    """
+    if label_mask is None:
+        return None
+    m = np.asarray(label_mask, dtype=np.float64)
+    if m.ndim == 1:
+        m = m[:, None]
+    if m.shape != (D, C):
+        raise ValueError(
+            f"label_mask has shape {m.shape}, expected (D, C) = {(D, C)}"
+        )
+    return m
+
+
 class PCTopicModel:
     """Faithful flat Prediction-Constrained topic model (in-memory reference).
 
@@ -69,8 +88,11 @@ class PCTopicModel:
     K : int
         Number of topics.
     C : int, default 1
-        Number of binary labels (one logistic head row each). ``C == 1`` is the
-        single-label case used by the synthetic gate and toy-bars oracle.
+        Number of binary labels/outcome heads (one logistic head row each).
+        ``C == 1`` is the single-label case used by the synthetic gate and
+        toy-bars oracle; ``C > 1`` with a per-cell ``label_mask`` in :meth:`fit`
+        is the joint multi-task / index-drug mode (one shared topic model, ``C``
+        heads, each head trained only on its outcome's observed cells).
     weight_y : float, default 1.0
         Weight on the prediction loss (the authors' PC dial). ``weight_y == 0`` =>
         unsupervised LDA-MAP (the two-stage baseline representation).
@@ -168,11 +190,35 @@ class PCTopicModel:
         X: np.ndarray,
         y: np.ndarray,
         labeled_mask: np.ndarray | None = None,
+        label_mask: np.ndarray | None = None,
     ) -> "PCTopicModel":
         """Fit global ``(w_KV, w_CK)`` by L-BFGS-B on the faithful PC loss.
 
-        ``labeled_mask is None`` => every doc labeled. When ``weight_y == 0`` the
-        label and ``labeled_mask`` are ignored (unsupervised LDA-MAP).
+        Parameters
+        ----------
+        X : (D, V) nonnegative counts.
+        y : (D, C) binary labels (a 1D (D,) vector is the single-label ``C == 1``
+            case). Values at *unobserved* cells are ignored, so any placeholder is
+            fine there.
+        labeled_mask : (D,) or None
+            Per-ROW semi-supervision. ``None`` => every row labeled. A row with
+            ``labeled_mask[d] == 0`` contributes to ``loss_x``/``loss_pi`` (its
+            words still shape the shared topics) but never to ``loss_y``.
+        label_mask : (D, C) or None
+            Per-CELL semi-supervision for joint multi-task fitting — ``True``/1
+            marks cell ``(d, c)`` as observed. This is the index-drug mode: one
+            shared topic model, ``C`` outcome heads, each head trained only on the
+            cells observed for its outcome, so an almost-all-missing label matrix
+            (about one observed cell per row) still trains every head off the
+            shared representation. ``None`` => all cells of a labeled row observed.
+            The two masks compose by logical AND — the effective observed set is
+            ``obs(d, c) = labeled_mask[d] AND label_mask[d, c]`` — so switching a
+            row off with ``labeled_mask`` drops all of its cells whatever
+            ``label_mask`` says.
+
+        When ``weight_y == 0`` the labels and both masks are ignored entirely
+        (unsupervised LDA-MAP). Backward compatible: with ``label_mask=None`` the
+        objective is byte-for-byte the previous per-row behavior.
         """
         X = np.asarray(X, dtype=np.float64)
         D, V = X.shape
@@ -183,6 +229,7 @@ class PCTopicModel:
             y_rowmask = np.ones(D)
         else:
             y_rowmask = np.asarray(labeled_mask, dtype=float)
+        label_mask_DC = _as_label_mask_DC(label_mask, D, self.C)
 
         mult_const = multinomial_coef_const(X)
         x0 = self._init_param_vec(V)
@@ -192,6 +239,7 @@ class PCTopicModel:
         def objective(vec):
             return loss_from_param_vec(
                 vec, X_DV=X, y_DC=y_DC, y_rowmask=y_rowmask,
+                label_mask=label_mask_DC,
                 K=self.K, V=V, C=self.C,
                 mult_coef_const_val=mult_const,
                 **loss_kwargs,
@@ -250,17 +298,22 @@ class PCTopicModel:
         return 1.0 / (1.0 + np.exp(-logits))
 
     # -- diagnostics -------------------------------------------------------
-    def loss_terms(self, X: np.ndarray, y: np.ndarray, labeled_mask=None) -> dict:
+    def loss_terms(
+        self, X: np.ndarray, y: np.ndarray, labeled_mask=None, label_mask=None
+    ) -> dict:
         """Return every loss term (as numpy floats) at the fitted parameters.
 
         Convenience for tests/reports; evaluates :func:`calc_loss__slda` with
-        ``return_dict=True`` at ``topics_``/``w_CK_``.
+        ``return_dict=True`` at ``topics_``/``w_CK_``. ``label_mask`` (D, C)
+        restricts ``loss_y`` to the observed cells, AND-composed with the per-row
+        ``labeled_mask`` exactly as in :meth:`fit`.
         """
         X = np.asarray(X, dtype=np.float64)
         y_DC = _as_y_DC(y, self.C)
         D = X.shape[0]
         y_rowmask = np.ones(D) if labeled_mask is None else np.asarray(labeled_mask, float)
+        label_mask_DC = _as_label_mask_DC(label_mask, D, self.C)
         return calc_loss__slda(
-            self.topics_, self.w_CK_, X, y_DC, y_rowmask,
+            self.topics_, self.w_CK_, X, y_DC, y_rowmask, label_mask_DC,
             return_dict=True, **self._loss_kwargs(),
         )

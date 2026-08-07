@@ -23,7 +23,11 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
-from analysis.pc.evaluate import evaluate_pc_vs_baselines, format_results_table
+from analysis.pc.evaluate import (
+    evaluate_pc_multitask,
+    evaluate_pc_vs_baselines,
+    format_results_table,
+)
 
 _VENDORED = os.path.join(
     os.path.dirname(__file__), "data", "toy_bars_3x3"
@@ -162,6 +166,126 @@ def test_degenerate_label_is_skipped_not_crash(capsys):
 
     table = format_results_table(res)
     assert "MACRO" in table
+    assert "skipped" in table
+    with capsys.disabled():
+        print()
+        print(table)
+
+
+# --- multi-task / per-cell missing-label path (evaluate_pc_multitask) -------
+
+def _mt_corpus(seed, D, C=2, V=12, n_tok=80):
+    """Small, easily-learnable multi-outcome corpus: ``C`` disjoint topic blocks,
+    each outcome driven by its own topic's per-doc weight. Fast to fit; both PC
+    and the two-stage baseline learn it well (so PC macro-AUC >= two-stage holds).
+    """
+    rng = np.random.default_rng(seed)
+    block = V // C
+    topics = np.full((C, V), 0.03)
+    for k in range(C):
+        topics[k, k * block:(k + 1) * block] += 1.0
+    topics /= topics.sum(axis=1, keepdims=True)
+    theta = rng.dirichlet(np.full(C, 0.5), size=D)
+    X = np.zeros((D, V))
+    for d in range(D):
+        X[d] = rng.multinomial(n_tok, theta[d] @ topics)
+    y = np.zeros((D, C))
+    for c in range(C):
+        y[:, c] = (theta[:, c] > np.median(theta[:, c])).astype(float)
+    return X, y
+
+
+def _index_drug_mask(D, C, seed):
+    """A ``(D, C)`` mask with exactly one observed cell per row (index-drug)."""
+    rng = np.random.default_rng(seed)
+    obs = rng.integers(0, C, size=D)
+    m = np.zeros((D, C))
+    m[np.arange(D), obs] = 1.0
+    return m
+
+
+def test_multitask_harness_wellformed_deterministic_and_pc_ge_two_stage(capsys):
+    """``evaluate_pc_multitask`` under an index-drug mask: same result-dict shape
+    as the single-task harness (so ``format_results_table`` works), per-column
+    observed-N reported, deterministic, and PC macro-AUC >= two-stage.
+
+    One-observed-cell-per-row (index-drug) is the primary use, but any per-cell
+    mask is accepted; the general-mask + degenerate path is covered below.
+    """
+    C = 2
+    Xtr, Ytr = _mt_corpus(0, 120, C=C)
+    Xte, Yte = _mt_corpus(1, 80, C=C)
+    mask_tr = _index_drug_mask(120, C, seed=5)      # one observed outcome / row
+    mask_te = np.ones((80, C))                       # score every test cell
+    assert np.array_equal(mask_tr.sum(axis=1), np.ones(120))  # index-drug invariant
+
+    kw = dict(K=2, weight_y=8.0, pi_iters=25, max_iter=50, seed=0)
+    res = evaluate_pc_multitask(Xtr, Ytr, mask_tr, Xte, Yte, mask_te, **kw)
+
+    # (a) same structure as evaluate_pc_vs_baselines
+    assert set(res.keys()) == {"PC", "two_stage", "lr_codes", "meta"}
+    assert res["meta"]["C"] == C
+    for key in ("PC", "two_stage", "lr_codes"):
+        _assert_bundle_shape(res[key], C)
+    # (b) per-column observed-N (train/test) in meta
+    meta = res["meta"]
+    assert meta["n_obs_train"] == [int(mask_tr[:, c].sum()) for c in range(C)]
+    assert meta["n_obs_test"] == [80, 80]
+    assert meta["n_labeled"] == int(mask_tr.sum())
+
+    # (c) determinism given the seed
+    res2 = evaluate_pc_multitask(Xtr, Ytr, mask_tr, Xte, Yte, mask_te, **kw)
+    for key in ("PC", "two_stage", "lr_codes"):
+        assert res[key]["macro"]["auc"] == res2[key]["macro"]["auc"]
+
+    # (d) PC macro-AUC meets or beats the unsupervised two-stage
+    pc = res["PC"]["macro"]["auc"]
+    ts = res["two_stage"]["macro"]["auc"]
+    assert pc is not None and ts is not None
+    assert pc >= ts, f"PC macro-AUC {pc:.4f} < two-stage {ts:.4f}"
+
+    # (e) the formatted table renders, including the observed-cells footer
+    table = format_results_table(res)
+    assert "MACRO" in table and "observed cells per label" in table
+    with capsys.disabled():
+        print()
+        print(table)
+
+
+def test_multitask_general_mask_degenerate_column_skipped(capsys):
+    """A GENERAL per-cell mask (not one-per-row) with a degenerate observed test
+    column: the outcome whose observed heldout cells are single-class is skipped
+    (AUC undefined) and dropped from the macro, no exception."""
+    C = 2
+    Xtr, Ytr = _mt_corpus(0, 100, C=C)
+    Xte, Yte = _mt_corpus(1, 60, C=C)
+
+    rng = np.random.default_rng(3)
+    mask_tr = (rng.random((100, C)) >= 0.3).astype(float)   # general per-cell mask
+    mask_te = (rng.random((60, C)) >= 0.3).astype(float)
+    for c in range(C):                                       # keep every column non-empty
+        if mask_tr[:, c].sum() == 0:
+            mask_tr[0, c] = 1.0
+    # Force outcome 1's OBSERVED heldout cells to be all-negative -> degenerate.
+    obs1 = mask_te[:, 1].astype(bool)
+    assert obs1.any()
+    Yte[obs1, 1] = 0.0
+
+    res = evaluate_pc_multitask(
+        Xtr, Ytr, mask_tr, Xte, Yte, mask_te,
+        K=2, weight_y=5.0, pi_iters=20, max_iter=40, seed=0,
+    )
+
+    for key in ("PC", "two_stage", "lr_codes"):
+        block = res[key]
+        _assert_bundle_shape(block, C)
+        lab1 = block["per_label"][1]
+        assert lab1["skipped"] is not None
+        assert lab1["auc"] is None and lab1["ap"] is None
+        assert block["macro"]["n_labels_skipped"] == 1
+        assert block["macro"]["n_labels_scored"] == 1
+
+    table = format_results_table(res)
     assert "skipped" in table
     with capsys.disabled():
         print()

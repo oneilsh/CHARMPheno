@@ -31,6 +31,14 @@ masked rows carry their label (the faithful model's ``pi`` is label-free anyway)
 the two LR baselines cannot use unlabeled rows, so they train on the labeled rows
 only. Both the two-stage's unsupervised topic fit and PC still see every row.
 
+Multi-task / index-drug (:func:`evaluate_pc_multitask`): the same three-model
+comparison under a per-CELL ``(D, C)`` observed-mask, where each document is
+labeled for only some of the ``C`` outcomes (the Hughes index-drug pattern is
+exactly one observed cell per row). ONE shared PC is fit across all heads with
+``label_mask``; each outcome is scored only over its observed test cells, and the
+baselines fit each outcome's logistic head on that outcome's own observed rows —
+so all three models see the identical supervision. Any per-cell mask is accepted.
+
 Everything is deterministic given ``seed`` (the model init) — the LR baselines
 are convex, so they add no randomness.
 """
@@ -124,6 +132,197 @@ def _lr_proba_per_label(
         pos_col = int(np.where(lr.classes_ == 1)[0][0])
         proba[:, c] = lr.predict_proba(X_te)[:, pos_col]
     return proba
+
+
+def _lr_proba_per_label_masked(
+    X_fit_full: np.ndarray,
+    y_DC: np.ndarray,
+    obs_DC: np.ndarray,
+    X_te: np.ndarray,
+    C: int,
+) -> np.ndarray:
+    """Per-label :class:`LogisticRegression` trained on each label's OWN observed
+    train rows, returning ``(N_te, C)`` probabilities.
+
+    The multi-task counterpart of :func:`_lr_proba_per_label`: instead of one
+    shared set of labeled rows, column ``c`` is fit only on the rows where
+    ``obs_DC[:, c]`` is True (the cells observed for outcome ``c``). Same
+    single-class fallback as :func:`_lr_proba_per_label` (a constant prediction
+    equal to the lone class), so an all-one-class or empty observed set yields a
+    chance-level heldout AUC rather than an exception.
+    """
+    N_te = X_te.shape[0]
+    proba = np.zeros((N_te, C), dtype=np.float64)
+    for c in range(C):
+        rows = np.where(obs_DC[:, c].astype(bool))[0]
+        yc = y_DC[rows, c]
+        classes = np.unique(yc)
+        if classes.size < 2:
+            proba[:, c] = float(classes[0]) if classes.size else 0.0
+            continue
+        lr = LogisticRegression(max_iter=1000)
+        lr.fit(X_fit_full[rows], yc)
+        pos_col = int(np.where(lr.classes_ == 1)[0][0])
+        proba[:, c] = lr.predict_proba(X_te)[:, pos_col]
+    return proba
+
+
+def _bundle_masked(
+    proba_DC: np.ndarray,
+    y_te_DC: np.ndarray,
+    mask_te_DC: np.ndarray,
+    C: int,
+) -> dict[str, Any]:
+    """Score each label column ONLY over its observed test cells, then macro it.
+
+    Reuses :func:`_score_label` (degenerate-column skip included) and
+    :func:`_macro`. Column ``c`` is scored over the rows where ``mask_te_DC[:, c]``
+    is True; a column with no observed test cell, or with a single class among
+    them, is reported as skipped and dropped from the macro-average.
+    """
+    per_label: dict[int, dict[str, Any]] = {}
+    for c in range(C):
+        rows = np.where(mask_te_DC[:, c].astype(bool))[0]
+        per_label[c] = _score_label(y_te_DC[rows, c], proba_DC[rows, c])
+    return {"per_label": per_label, "macro": _macro(per_label)}
+
+
+def evaluate_pc_multitask(
+    X_tr: np.ndarray,
+    y_tr: np.ndarray,
+    mask_tr: np.ndarray,
+    X_te: np.ndarray,
+    y_te: np.ndarray,
+    mask_te: np.ndarray,
+    *,
+    K: int,
+    weight_y: float,
+    alpha: float = 1.1,
+    tau: float = 1.1,
+    pi_iters: int = 100,
+    max_iter: int = 500,
+    seed: int = 0,
+    **model_kwargs: Any,
+) -> dict[str, Any]:
+    """Joint multi-task PC vs. the Hughes baselines under per-cell missing labels.
+
+    The multi-task / **index-drug** counterpart of :func:`evaluate_pc_vs_baselines`.
+    A single shared :class:`~analysis.pc.model.PCTopicModel` carries ``C`` outcome
+    heads while each document is labeled for only *some* of the ``C`` outcomes: the
+    ``(D, C)`` masks ``mask_tr`` / ``mask_te`` mark the observed cells. The primary
+    use is the index-drug pattern — exactly ONE observed cell per row (a patient
+    labeled only for the drug they initiated) — but any per-cell mask is accepted.
+
+    Three models, each scored per outcome ONLY over that outcome's observed test
+    cells (``mask_te[:, c]``):
+
+      1. **PC** — ONE shared PC fit on ``(X_tr, y_tr, label_mask=mask_tr)`` with
+         ``weight_y > 0``. Every head is trained off the same label-free ``pi``
+         representation, each on its own observed cells; ``predict_proba`` gives
+         all ``C`` heads for every test doc.
+      2. **Two-stage** — the SAME class with ``weight_y = 0`` (unsupervised
+         LDA-MAP; sees every train row's words), then one
+         :class:`~sklearn.linear_model.LogisticRegression` per outcome on the
+         frozen train ``Pi`` restricted to that outcome's observed train rows.
+      3. **LR-on-codes** — one logistic regression per outcome on the raw counts
+         ``X``, again restricted to that outcome's observed train rows.
+
+    Both baselines fit each column only where it is observed, so all three models
+    see the *same* supervision. Metrics per outcome are heldout ROC AUC and AP; a
+    degenerate observed test column (no positives, no negatives, or empty) is
+    skipped and dropped from the macro-average via the shared
+    :func:`_score_label`/:func:`_macro` helpers.
+
+    Parameters
+    ----------
+    X_tr, X_te : (D_tr, V), (D_te, V) nonnegative count matrices (dense).
+    y_tr, y_te : (D, C) binary labels in {0, 1}. Values at unobserved cells are
+        ignored, so any placeholder is fine there; ``y_te`` supplies the heldout
+        ground truth over the observed test cells.
+    mask_tr, mask_te : (D, C) observed-cell masks (True/1 == observed). Coerced to
+        ``(D, C)`` — a 1D ``(D,)`` mask is promoted for the single-outcome case.
+    K : int
+        Number of topics for both the PC and unsupervised (two-stage) fits.
+    weight_y : float
+        PC prediction weight (> 0). The two-stage model refits the SAME class with
+        ``weight_y = 0``.
+    alpha, tau, pi_iters, max_iter, seed :
+        Passed through to :class:`~analysis.pc.model.PCTopicModel`.
+    **model_kwargs :
+        Extra constructor kwargs shared by the PC and two-stage fits.
+
+    Returns
+    -------
+    dict
+        Same shape as :func:`evaluate_pc_vs_baselines`
+        (``{"PC", "two_stage", "lr_codes", "meta"}``, each model bundle carrying
+        ``per_label`` + ``macro``), so :func:`format_results_table` renders it. The
+        ``"meta"`` block additionally carries per-column observed counts
+        ``n_obs_train`` / ``n_obs_test`` (length-``C`` lists) and ``n_obs_train``'s
+        total in ``n_labeled``.
+    """
+    X_tr = np.asarray(X_tr, dtype=np.float64)
+    X_te = np.asarray(X_te, dtype=np.float64)
+    y_tr_DC = _as_y_DC(y_tr)
+    y_te_DC = _as_y_DC(y_te)
+    C = y_tr_DC.shape[1]
+    if y_te_DC.shape[1] != C:
+        raise ValueError(f"y_tr has C={C} labels but y_te has {y_te_DC.shape[1]}")
+
+    def _as_mask(m, D):
+        m = np.asarray(m, dtype=np.float64)
+        if m.ndim == 1:
+            m = m[:, None]
+        if m.shape != (D, C):
+            raise ValueError(f"mask has shape {m.shape}, expected (D, C)=({D}, {C})")
+        return m
+
+    mask_tr_DC = _as_mask(mask_tr, X_tr.shape[0])
+    mask_te_DC = _as_mask(mask_te, X_te.shape[0])
+
+    shared = dict(
+        K=K, C=C, alpha=alpha, tau=tau, pi_iters=pi_iters,
+        max_iter=max_iter, seed=seed, **model_kwargs,
+    )
+
+    # --- Model 1: ONE shared faithful PC over all C heads (per-cell mask) ------
+    pc = PCTopicModel(weight_y=weight_y, **shared).fit(
+        X_tr, y_tr_DC, label_mask=mask_tr_DC
+    )
+    pc_proba = pc.predict_proba(X_te)                      # (N_te, C)
+
+    # --- Model 2: two-stage (unsupervised weight_y=0 -> per-column masked LR) --
+    unsup = PCTopicModel(weight_y=0.0, **shared).fit(X_tr, y_tr_DC)
+    Pi_tr = unsup.Pi_                                       # (D_tr, K)
+    Pi_te = unsup.transform(X_te)                          # (N_te, K)
+    ts_proba = _lr_proba_per_label_masked(Pi_tr, y_tr_DC, mask_tr_DC, Pi_te, C)
+
+    # --- Model 3: LR straight on the raw codes (per-column masked) ------------
+    lrc_proba = _lr_proba_per_label_masked(X_tr, y_tr_DC, mask_tr_DC, X_te, C)
+
+    n_obs_train = [int(mask_tr_DC[:, c].sum()) for c in range(C)]
+    n_obs_test = [int(mask_te_DC[:, c].sum()) for c in range(C)]
+
+    return {
+        "PC": _bundle_masked(pc_proba, y_te_DC, mask_te_DC, C),
+        "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C),
+        "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C),
+        "meta": {
+            "C": C,
+            "K": int(K),
+            "weight_y": float(weight_y),
+            "n_train": int(X_tr.shape[0]),
+            "n_test": int(X_te.shape[0]),
+            "n_labeled": int(sum(n_obs_train)),
+            "n_obs_train": n_obs_train,
+            "n_obs_test": n_obs_test,
+            "model_names": {
+                "PC": "PC (faithful, joint)",
+                "two_stage": "two-stage (unsup+LR)",
+                "lr_codes": "LR-on-codes",
+            },
+        },
+    }
 
 
 def evaluate_pc_vs_baselines(
@@ -247,7 +446,10 @@ def format_results_table(results: dict[str, Any]) -> str:
     Mirrors the reporting style of ``analysis/pc/tests/test_reference_oracle.py``:
     a compact fixed-width table, one row per (model, label), a per-model macro
     line, and a footer that flags any skipped (degenerate) heldout label columns.
-    ``results`` is the dict returned by :func:`evaluate_pc_vs_baselines`.
+    ``results`` is the dict returned by :func:`evaluate_pc_vs_baselines` or
+    :func:`evaluate_pc_multitask`; the multi-task result additionally carries
+    per-column observed counts (``meta["n_obs_train"]``/``["n_obs_test"]``), which
+    are appended as a footer when present.
     """
     meta = results["meta"]
     names = meta["model_names"]
@@ -293,5 +495,12 @@ def format_results_table(results: dict[str, Any]) -> str:
         lines.append("  skipped (degenerate heldout label columns):")
         for s in skipped:
             lines.append(f"    - {s}")
+
+    if "n_obs_train" in meta:  # multi-task: report per-column observed counts
+        lines.append("  observed cells per label (train / test):")
+        for c in range(C):
+            lines.append(
+                f"    - label {c}: {meta['n_obs_train'][c]} / {meta['n_obs_test'][c]}"
+            )
 
     return "\n".join(lines)
