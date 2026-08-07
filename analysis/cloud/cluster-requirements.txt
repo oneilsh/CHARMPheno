@@ -18,3 +18,11 @@
 # STM covariate/formula path (spark_vi.mllib.topic._formula). Optional extra of
 # spark-vi (spark-vi[formula]); LDA/HDP do not need it.
 formulaic>=1.0
+
+# Phase-C Prediction-Constrained topic model (analysis.pc, driven by
+# pc_antidepressant_cloud.py / make pc-antidepressant). PCTopicModel.fit runs
+# L-BFGS-B with an autograd-computed Jacobian on the driver, so autograd (pure
+# Python; numpy + future) must ride the overlay. Only the `pc-antidepressant`
+# job imports it; LDA/HDP/STM do not. scikit-learn (the PC eval baselines) is
+# assumed present on the AoU Dataproc image — add it here if a run reports it missing.
+autograd>=1.5
