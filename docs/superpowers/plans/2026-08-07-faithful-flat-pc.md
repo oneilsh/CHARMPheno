@@ -30,6 +30,26 @@ Deferred integration (NOT this plan): gated/hierarchical PC = (DAG work on the e
 + (PG on `pg-stm`) + (this PC layer). That is why Phase 1 factors the PC layer to be **composable**
 (see Non-goals / Task 1) — so the layer moves onto the gated model later instead of forking.
 
+### Placement (revised 2026-08-07 — decided with user)
+
+Faithful PC is optimized by **full-batch gradient descent**, not variational inference, so it does
+**NOT** live in `spark-vi` core (which is a VI library: numpy/scipy only, `VIModel`/`VIRunner`
+contract shaped around the distributed SVI iteration). Instead:
+
+- **In-memory faithful PC → `analysis/pc/`** — a new **id-agnostic** subpackage (numpy/scipy only,
+  no autograd/torch; hand-coded gradients via `scipy.optimize` / a small Adam). This is the
+  **reference / correctness oracle**, the analogue of `fit_gated` for the gated SVI path. It is what
+  Phase A validates and Phase C runs.
+- **Pull-it-back-out path (future, NOT this plan):** once the reference is trusted, reimplement the
+  factored **PC head + constrained objective** as a **VIModel layer over `OnlineLDA`/`GatedOnlineLDA`**
+  — the distributed, VI-native *production* path — validated against this in-memory reference as the
+  oracle (mirroring `fit_gated` ↔ `GatedOnlineLDA`). Keeping the head + objective factored (Task A1)
+  is exactly what makes that port a re-wiring rather than a rewrite.
+
+Consequence for the three-layer framing: the in-memory reference needs **no mllib/Spark shim**
+(that layer is only for the future VI-native port). Phase B collapses to a thin driver-facing API in
+`analysis/pc/`; Phase C is the AoU application on top of it.
+
 ---
 
 ## Part I — Spec / Design
@@ -90,23 +110,33 @@ authors' public reference), then apply it to **antidepressant treatment stabilit
 
 ### Phase A — Core (validate the objective on KNOWN signal first)
 
-- [ ] **Task A0:** branch off `main` (see Branch strategy).
-- [ ] **Task A1 — PC objective + head, composably factored.** Add a supervised head (`η`, log-loss
-  on `z̄`) and the PC constrained objective as a layer over `OnlineLDA`. TDD: (1) failing test that
-  the head + objective reduce to plain LDA when λ=0; (2) implement; (3) pass. Keep the head/objective
-  separable from the base model (a mixin or wrapper), not welded to flat LDA.
+All Phase-A code lands in the new **`analysis/pc/`** subpackage (see Placement), numpy/scipy only,
+id-agnostic. Tests under `analysis/pc/tests/`.
+
+- [x] **Task A0:** branch off `main` (see Branch strategy). — done: `claude/faithful-flat-pc`.
+- [ ] **Task A1 — PC objective + head, composably factored.** In `analysis/pc/`, implement (a) a
+  supervised head `ŷ = softmax(ηᵀz̄)` with log-loss on the empirical topic frequencies `z̄` (NOT θ),
+  and (b) the PC constrained objective `−log p(x) + λ·(loss(y, predict(z̄)) − ε)` — generative over
+  ALL docs, prediction term over LABELED docs only (semi-supervised asymmetry). Factor the **head +
+  objective as standalone functions** (pure `(params, data) → (value, grad)`), separable from any
+  base model, so the future VI-native port re-wires rather than rewrites. TDD: (1) failing test that
+  with λ=0 the objective's gradient/optimum reduces to plain LDA (topics match an unsupervised fit);
+  (2) implement; (3) pass. Gradients hand-coded + checked against `scipy.optimize.check_grad`.
 - [ ] **Task A2 — synthetic known-signal validation.** Generate synthetic docs with a *planted*
   label-predictive topic; assert PC recovers heldout AUC ≫ chance and beats an unsupervised-LDA→logistic
   two-stage baseline. This is the "the machine works" gate.
 - [ ] **Task A3 — reference oracle.** Reproduce a result (or a small toy from the dtak repo) to confirm
   the objective matches the authors' (not naive up-weighting). Document any divergence.
 
-### Phase B — Shim + driver
+### Phase B — Driver-facing API + baselines
 
-- [ ] **Task B1 — mllib shim** (`spark_vi/mllib/topic/`): an Estimator/Model pair mirroring the LDA shim,
-  exposing the label column + ε/λ.
-- [ ] **Task B2 — charmpheno driver** (`analysis/cloud/`): fit + heldout-AUC eval; per-class AUC table
-  vs a logistic-regression-on-codes baseline and a Gibbs-LDA→logistic baseline (the Hughes comparison set).
+(No mllib/Spark shim — that belongs to the future VI-native port, not the in-memory reference.)
+
+- [ ] **Task B1 — driver-facing fit/transform API** in `analysis/pc/`: a small `PCTopicModel`-style
+  class (`fit(X, y, K, lambda, eps, ...)`, `transform(X) → z̄`, `predict_proba(X)`) wrapping the
+  Task-A1 objective + an optimizer (L-BFGS-B / Adam), with the label column + ε/λ as first-class args.
+- [ ] **Task B2 — baselines + eval harness**: heldout per-class AUC; PC vs a logistic-regression-on-codes
+  baseline and an unsupervised-LDA→logistic (two-stage) baseline — the Hughes comparison set.
 
 ### Phase C — Application (only after A+B are trusted): antidepressant stability on AoU OMOP
 
