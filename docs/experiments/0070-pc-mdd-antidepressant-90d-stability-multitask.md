@@ -1,11 +1,13 @@
 ---
 id: 70
 slug: pc-mdd-antidepressant-90d-stability-multitask
-status: planned
+status: pending
 model_class: pc
 cohort: mdd_antidepressant
-# --- feature (BOW) config ---
-feature_domains: [condition, drug, procedure]   # fused into ONE vocab
+# Real knobs map 1:1 to pc_antidepressant_cloud.py flags via build_pc_args
+# (key -> --key). Cohort defaults live in experiments/defaults/mdd_antidepressant.yaml;
+# only per-experiment overrides need appear here.
+# --- feature (fused-vocab BOW) config ---
 lookback_days: 365          # pre-index feature window [index-lookback, index)
 vocab_size: 2000
 min_df: 20
@@ -14,10 +16,10 @@ person_mod: 1
 # --- cohort / outcome config ---
 window_days: 365            # fully-observed follow-up (must be >= stability_days)
 stability_days: 90          # "the drug worked" = >=90d continuation
+# (prior coverage for the new-user gate is derived from lookback_days by the
+# PC driver; there is no separate --prior-obs-days flag)
 grace_gap_days: 30          # permissible refill gap in the coverage stitch
-prior_obs_days: 365         # required prior coverage (new-user gate)
 # --- model / eval config ---
-pc_multitask: true          # ONE shared PC, per-drug heads, per-cell missing labels
 K: 25                       # topics (TUNE)
 weight_y: 100.0             # PC prediction-constraint weight (TUNE)
 alpha: 1.1
@@ -26,10 +28,12 @@ pi_iters: 100
 max_iter: 500
 test_frac: 0.25
 seed: 0
-# NOTE: this experiment does NOT run via scripts/run_experiment.py (that runner
-# supports model_class lda|stm|dag_placement with an NPMI/dashboard lifecycle).
-# PC has a different, in-memory eval lifecycle. Run it with:  make pc-antidepressant
-run_via: make pc-antidepressant
+# Documentary-only (NOT driver flags; ignored by build_pc_args): the vocab is
+# fused across condition+drug+procedure and the model is joint multi-task PC
+# (one shared model, per-drug heads, per-cell missing labels).
+feature_domains: [condition, drug, procedure]
+pc_multitask: true
+run_via: make exp ID=70   # (or `make pc-antidepressant` for free-form sweeps)
 ---
 
 <!-- NUMBERING NOTE: authored on branch claude/faithful-flat-pc. `main` was at
@@ -39,7 +43,7 @@ next free experiment id — the slug disambiguates. The number is cosmetic. -->
 
 # Experiment 0070 — PC antidepressant-stability replication (fused vocab, multi-task)
 
-## Status: PLANNED — pre-registration. Results filled in AFTER the AoU run.
+## Status: PENDING — pre-registration. Results filled in AFTER the AoU run.
 
 Per our convention, an experiment doc is written when it is designed; the
 **Results** section stays empty until the driver has actually run on All-of-Us.
@@ -93,14 +97,21 @@ frozen representation) and logistic-regression-on-codes. Per-drug heldout ROC AU
 
 ## How to run (AoU Dataproc master)
 
+Tracked / reproducible (params from this frontmatter + `experiments/defaults/mdd_antidepressant.yaml`):
+```
+cd analysis/cloud && make exp ID=70
+```
+Free-form sweeps (K / weight_y grids) via the standalone target:
 ```
 cd analysis/cloud && make pc-antidepressant \
   PC_AD_ARGS='--K 25 --weight-y 100 --out runs/exp0070_results.json'
 ```
-Requires `WORKSPACE_CDR` / `GOOGLE_CLOUD_PROJECT` (via `make setup`). The in-memory
-PC eval runs on the **driver** (collect-to-memory) — hence `--driver-memory 8g`
-and `autograd` on the cluster overlay (`cluster-requirements.txt`). `analysis.pc`
-is put on `PYTHONPATH` by the target (it is not in any `--py-files` zip).
+Both require `WORKSPACE_CDR` / `GOOGLE_CLOUD_PROJECT` (via `make setup`). Either
+way the in-memory PC eval runs on the **driver** (collect-to-memory): the runner
+gives PC an 8g driver (`_driver_memory_for`, overridable via `CHARM_DRIVER_MEMORY`),
+puts `analysis.pc` on `PYTHONPATH` (it is not in any `--py-files` zip), and ships
+`autograd` on the cluster overlay. `make exp ID=70` fits, writes `pc_results.json`
++ `summary.md` under the run dir, and skips the NPMI eval (PC has its own metrics).
 
 ## To tune before trusting a number
 

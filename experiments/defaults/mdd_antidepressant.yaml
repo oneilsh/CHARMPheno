@@ -1,0 +1,35 @@
+# Cohort defaults for the Phase-C Prediction-Constrained (PC) antidepressant
+# replication. Layered as: _base.yaml -> mdd_antidepressant.yaml -> per-experiment
+# frontmatter. `mdd_antidepressant` is registered in charmpheno SUPPORTED_COHORTS;
+# the PC driver hard-wires it via apply_mdd_antidepressant_cohort, so there is NO
+# --cohort / cohort_def flag here (unlike the LDA/STM cohorts).
+#
+# This file's job: (1) satisfy load_defaults (which requires a <cohort>.yaml), and
+# (2) carry PC-shaped defaults that OVERRIDE the LDA-oriented _base.yaml (notably
+# model_class, K, vocab_size). build_pc_args reads only the keys it names, so the
+# LDA-specific _base keys (tau0/kappa/subsampling_rate/doc_unit/optimize_*/...)
+# sit unused in the merged config and never reach the PC driver.
+cohort: mdd_antidepressant
+model_class: pc
+
+# --- feature (fused-vocab BOW) ---
+vocab_size: 2000
+min_df: 20
+min_patient_count: 20
+lookback_days: 365          # pre-index feature window [index-lookback, index)
+person_mod: 1
+
+# --- cohort / outcome ---
+window_days: 365            # fully-observed follow-up (must be >= stability_days)
+stability_days: 90          # "the drug worked" = >=90d continuation
+grace_gap_days: 30          # permissible refill gap in the coverage stitch
+
+# --- model / eval ---
+K: 25                       # topics (TUNE)
+weight_y: 100.0             # PC prediction-constraint weight (TUNE)
+alpha: 1.1
+tau: 1.1
+pi_iters: 100
+max_iter: 500
+test_frac: 0.25
+seed: 0
