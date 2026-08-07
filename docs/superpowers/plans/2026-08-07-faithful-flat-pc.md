@@ -121,6 +121,25 @@ Parked VI-port fork (future, not this plan): the VI implementation faces the sam
 **PC-VI** (label-free E-step + constraint pushed to the globals; the real differentiator, harder in
 SVI). A1's factoring (pure head fns returning `grad_Pi`) supports both attachment points.
 
+Minibatch decomposition IS the bridge to the VI port (established while fixing the AoU-scale OOM,
+`6ab551b`). The faithful reference's gradient decomposes as `Σ_docs per-doc(pi_d, label terms) +
+global(topics, w)` with `pi_d` inferred **independently per document** — which is exactly the
+local/global split SVI needs. Three distinctions to carry forward when the port happens:
+- What the reference does now is minibatch **accumulation** for an exact full-batch L-BFGS step
+  (memory-bounded but still a full pass per step → slow). The VI port goes **stochastic**: each step
+  uses one minibatch's noisy gradient (SVI = minibatch SGD on the ELBO with the Robbins–Monro
+  `tau0`/`kappa` schedule the `OnlineLDA` runner already implements), and minibatches distribute as
+  Spark partitions. The decomposition is what makes both legal.
+- The genuinely slow part of the reference — autograd **through** 100 unrolled π-iterations — is what
+  VI *replaces*: the per-doc (local) variational params get cheap closed-form / natural-gradient
+  updates, no unrolled tape. The parked free-π variant (`analysis/pc/variants.py`) is that local step.
+- So VI-native PC ≈ existing `OnlineLDA` SVI machinery (minibatch loop, RM schedule, mllib shim) +
+  free-π local update + the PC constraint on the global step. Open research question the port must
+  answer: PC's label couples through the **global** topics without a clean conjugate update (why
+  Hughes used gradient-through-inference), so the global step is likely SVI-plus-a-gradient-correction,
+  not pure closed-form. Scope this against the actual `spark-vi` topic stack before committing to an
+  architecture.
+
 ---
 
 ## Part II — Plan (staged; validate the machine before the application)
