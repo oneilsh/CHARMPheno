@@ -5,7 +5,7 @@ Reads OMOP fact tables from a CDM-shaped BigQuery dataset, joins to the
 shape defined in `charmpheno.omop.schema`. Returns a Spark DataFrame;
 nothing is collected to the driver.
 
-Two source-table modes supported via `source_table`:
+Two condition source-table modes supported via `source_table`:
 
 - `"condition_occurrence"` (default): emits one row per condition
   occurrence with `condition_start_date` and `visit_occurrence_id`. The
@@ -18,9 +18,44 @@ Two source-table modes supported via `source_table`:
   (PatientYearDocSpec with era replication). Eras do not carry
   `visit_occurrence_id`.
 
-v1 supports `concept_types=("condition",)` only. drug_exposure and
-procedure_occurrence will land in a follow-on once condition-only behavior
-is verified end-to-end.
+Multi-domain fusion (`concept_types`)
+-------------------------------------
+`concept_types` selects which OMOP domains contribute concept "words":
+`"condition"`, `"drug"`, and `"procedure"`. Requesting more than one
+domain reads each domain's fact table, projects every one to a *single
+common schema* — `person_id`, `concept_id`, `concept_name`, and one
+shared `event_date` column — and UNIONs them into one flat DataFrame. The
+result is a single fused concept stream, so a downstream
+``to_bow_dataframe`` builds ONE flat vocabulary spanning all requested
+domains (a Hughes-style bag of OMOP concepts). This is the deliberately
+minimal fusion: no per-domain vocab, no domain-reliability weighting — all
+domains' concept_ids live in one token stream.
+
+Domain -> fact table / concept column / event date:
+
+- `"condition"`: `condition_occurrence` (`condition_concept_id`,
+  `condition_start_date`) or `condition_era` (`condition_concept_id`,
+  `condition_era_start_date`), per `source_table`.
+- `"drug"`: `drug_era` (`drug_concept_id`, `drug_era_start_date`). The
+  era table (not `drug_exposure`) is chosen to match the sibling
+  hybrid-domain branch, which normalizes drugs to the same span-shaped
+  event as `condition_era`; the empirical drug vocabulary is whatever
+  concept classes the CDR's drug_era populates (no ingredient rollup).
+- `"procedure"`: `procedure_occurrence` (`procedure_concept_id`,
+  `procedure_date`).
+
+Provenance note: OMOP concept_ids are globally unique across domains, so
+fusion is a plain union — no id can collide between a condition, a drug,
+and a procedure. A concept's originating domain is therefore always
+recoverable after the fact from ``concept.domain_id`` (the same `concept`
+table this loader already joins for `concept_name`); it is intentionally
+NOT carried as a column here, because the fused vocabulary is flat by
+design.
+
+The single-domain default ``concept_types=("condition",)`` keeps the exact
+legacy output (domain-specific date columns, `visit_occurrence_id`, cohort
+support) unchanged; only the multi-domain path emits the common
+`event_date` schema.
 
 Connector docs: https://github.com/GoogleCloudDataproc/spark-bigquery-connector
 """
@@ -32,8 +67,58 @@ from pyspark.sql import functions as F
 from charmpheno.omop.cohorts import SUPPORTED_COHORTS, apply_cohort
 from charmpheno.omop.schema import validate
 
-_SUPPORTED_CONCEPT_TYPES: tuple[str, ...] = ("condition",)
+_SUPPORTED_CONCEPT_TYPES: tuple[str, ...] = ("condition", "drug", "procedure")
 _SUPPORTED_SOURCE_TABLES: tuple[str, ...] = ("condition_occurrence", "condition_era")
+
+# The single event-date column the fused multi-domain stream emits. Each
+# domain's native start/event date is aliased to this shared name so the
+# per-domain frames share one schema and UNION cleanly. Downstream doc specs
+# that key on a date (e.g. PatientYearDocSpec) should set
+# ``date_start_col="event_date"`` when consuming a fused corpus.
+_FUSED_EVENT_DATE: str = "event_date"
+
+
+def _domain_source_spec(domain: str, source_table: str) -> tuple[str, str, str]:
+    """Map a fused-domain name to its (fact_table, concept_id_col, date_col).
+
+    Returns the BigQuery fact table to read, the domain-specific
+    ``*_concept_id`` column to alias to the common ``concept_id``, and the
+    domain-specific start/event date column to alias to the common
+    ``event_date`` (``_FUSED_EVENT_DATE``). ``source_table`` only selects the
+    condition variant (occurrence vs era); drug and procedure have a single
+    fact table each. Drug uses ``drug_era`` (span-shaped, matching the sibling
+    hybrid-domain branch), procedure uses ``procedure_occurrence``. Lifts the
+    condition/drug ``F.col(<domain>_concept_id).alias("concept_id")`` shape
+    from that branch so the two converge cleanly on a future merge.
+    """
+    if domain == "condition":
+        if source_table == "condition_era":
+            return "condition_era", "condition_concept_id", "condition_era_start_date"
+        return "condition_occurrence", "condition_concept_id", "condition_start_date"
+    if domain == "drug":
+        return "drug_era", "drug_concept_id", "drug_era_start_date"
+    if domain == "procedure":
+        return "procedure_occurrence", "procedure_concept_id", "procedure_date"
+    # Unreachable: callers validate against _SUPPORTED_CONCEPT_TYPES first.
+    raise NotImplementedError(f"no fused source spec for domain {domain!r}")
+
+
+def _read_domain_events(read, domain: str, source_table: str) -> DataFrame:
+    """Read one domain's fact table, projected to the common fused schema.
+
+    Emits exactly (``person_id``, ``concept_id``, ``event_date``) — the
+    domain's ``*_concept_id`` aliased to ``concept_id`` and its start/event
+    date aliased to ``event_date`` — so every domain's frame is union-
+    compatible before the shared ``concept`` name join. ``read`` is the
+    table-reader seam (``_read``) so tests can inject synthetic per-table
+    DataFrames without a BigQuery round-trip.
+    """
+    table, cid_col, date_col = _domain_source_spec(domain, source_table)
+    return read(table).select(
+        "person_id",
+        F.col(cid_col).alias("concept_id"),
+        F.col(date_col).alias(_FUSED_EVENT_DATE),
+    )
 
 
 def load_omop_bigquery(
@@ -55,11 +140,16 @@ def load_omop_bigquery(
         billing_project: GCP project that owns the BQ job (read-side billing).
             Distinct from the data project encoded in `cdr_dataset` whenever
             the CDR is hosted in a separate read-only project (the AoU shape).
-        concept_types: which OMOP fact tables to include. v1 supports
-            ("condition",) only; anything else raises NotImplementedError.
+        concept_types: which OMOP domains to fuse into the concept stream.
+            Supports "condition", "drug", "procedure". A single ("condition",)
+            (the default) returns the exact legacy condition output. Two or
+            more domains read each domain's fact table, project to a common
+            schema (person_id, concept_id, concept_name, event_date) and UNION
+            into one flat stream feeding a single fused vocabulary. Anything
+            outside the supported set raises NotImplementedError.
         person_sample_mod: if set, keep rows where MOD(person_id, M) == 0.
             Whole-patient deterministic sampling — preserves each retained
-            person's complete condition list, which matters for LDA.
+            person's complete concept list, which matters for LDA.
         source_table: which condition fact table to read. "condition_occurrence"
             emits one row per occurrence with `condition_start_date` +
             `visit_occurrence_id`; "condition_era" emits one row per condition
@@ -76,16 +166,19 @@ def load_omop_bigquery(
 
     Returns:
         DataFrame with the canonical required OMOP columns
-        (person_id, concept_id, concept_name) plus source-table-specific
-        date columns. Rows where concept_id == 0 (OMOP "no matching
-        concept") are dropped.
+        (person_id, concept_id, concept_name). The single-domain
+        ("condition",) path also carries the source-table-specific date
+        columns (and visit_occurrence_id for condition_occurrence); the fused
+        multi-domain path instead carries one common ``event_date`` column.
+        Rows where concept_id == 0 (OMOP "no matching concept") are dropped.
 
     Raises:
-        NotImplementedError: if concept_types contains anything other than
-            "condition".
-        ValueError: if cdr_dataset is malformed, person_sample_mod < 1,
-            source_table is unrecognized, or cohort is set to an unknown
-            name.
+        NotImplementedError: if concept_types contains a domain outside
+            ("condition", "drug", "procedure").
+        ValueError: if cdr_dataset is malformed, concept_types is empty,
+            person_sample_mod < 1, source_table is unrecognized, cohort is set
+            to an unknown name, or cohort is combined with a fused
+            (multi-domain) load.
     """
     if not isinstance(cdr_dataset, str) or cdr_dataset.count(".") != 1:
         raise ValueError(
@@ -97,6 +190,11 @@ def load_omop_bigquery(
             f"concept_types {unsupported} not supported in v1 "
             f"(supported: {_SUPPORTED_CONCEPT_TYPES})"
         )
+    # De-dupe while preserving caller order so a repeated domain can't
+    # double-count its concepts into the fused bag.
+    concept_types = tuple(dict.fromkeys(concept_types))
+    if not concept_types:
+        raise ValueError("concept_types must name at least one OMOP domain")
     if person_sample_mod is not None and person_sample_mod < 1:
         raise ValueError(
             f"person_sample_mod must be >= 1 or None, got {person_sample_mod}"
@@ -120,60 +218,100 @@ def load_omop_bigquery(
             .load()
         )
 
-    if source_table == "condition_occurrence":
-        cond = _read("condition_occurrence").select(
-            "person_id",
-            "visit_occurrence_id",
-            F.col("condition_concept_id").alias("concept_id"),
-            "condition_start_date",
+    # Single-domain condition load: preserve the exact legacy output (domain-
+    # specific date columns, visit_occurrence_id, and cohort windowing)
+    # byte-for-byte. Only the fused multi-domain path below reshapes to the
+    # common `event_date` schema, so the default corpus is untouched.
+    if concept_types == ("condition",):
+        if source_table == "condition_occurrence":
+            cond = _read("condition_occurrence").select(
+                "person_id",
+                "visit_occurrence_id",
+                F.col("condition_concept_id").alias("concept_id"),
+                "condition_start_date",
+            )
+            extra_cols = ("visit_occurrence_id", "condition_start_date")
+        else:  # condition_era
+            cond = _read("condition_era").select(
+                "person_id",
+                F.col("condition_concept_id").alias("concept_id"),
+                "condition_era_start_date",
+                "condition_era_end_date",
+            )
+            extra_cols = ("condition_era_start_date", "condition_era_end_date")
+
+        if person_sample_mod is not None:
+            # Full-patient sampling is the right shape for LDA — per-person
+            # token bags stay intact rather than getting truncated by row-level
+            # sampling. Whether MOD pushes down to BQ depends on the connector.
+            cond = cond.where((F.col("person_id") % person_sample_mod) == 0)
+        cond = cond.where(F.col("concept_id") != 0)
+
+        concept = _read("concept").select("concept_id", "concept_name")
+
+        # No broadcast hint: full OMOP `concept` (~8M rows, name strings)
+        # exceeds autoBroadcastJoinThreshold, so AQE will pick shuffle-hash or
+        # sort-merge at runtime. An explicit F.broadcast() here OOM'd the driver
+        # in client mode — keep it implicit and let the planner choose.
+        omop = cond.join(concept, on="concept_id", how="left")
+        # Reorder so canonical required columns come first, then source-specific.
+        omop = omop.select("person_id", "concept_id", "concept_name", *extra_cols)
+
+        if cohort is not None:
+            # The cohort filter applies AFTER concept-name join so callers see
+            # the same canonical schema regardless of cohort. The date column
+            # used by the cohort logic differs across source_table modes.
+            date_col = (
+                "condition_start_date" if source_table == "condition_occurrence"
+                else "condition_era_start_date"
+            )
+            # prior_obs_days=None defers to apply_cohort's default lookback, so
+            # the 365-day default lives in one place (cohorts._WINDOW_DAYS).
+            lookback_kw = (
+                {} if prior_obs_days is None else {"prior_obs_days": prior_obs_days}
+            )
+            omop = apply_cohort(
+                omop, cohort,
+                spark=spark, cdr_dataset=cdr_dataset,
+                billing_project=billing_project,
+                date_col=date_col,
+                **lookback_kw,
+            )
+
+        validate(omop)
+        return omop
+
+    # Fused multi-domain path: union each requested domain's events into ONE
+    # flat concept stream feeding a single downstream vocabulary. Cohort
+    # windowing is not offered here — the cohort index date is condition-derived
+    # and would be ambiguous once drug/procedure concepts share the stream.
+    if cohort is not None:
+        raise ValueError(
+            "cohort filtering is only supported for a single-domain condition "
+            f"load; got concept_types={concept_types!r} with cohort={cohort!r}. "
+            "Load condition-only with cohort=, or fuse without a cohort and "
+            "window downstream."
         )
-        extra_cols = ("visit_occurrence_id", "condition_start_date")
-    else:  # condition_era
-        cond = _read("condition_era").select(
-            "person_id",
-            F.col("condition_concept_id").alias("concept_id"),
-            "condition_era_start_date",
-            "condition_era_end_date",
-        )
-        extra_cols = ("condition_era_start_date", "condition_era_end_date")
+
+    events = None
+    for domain in concept_types:
+        frame = _read_domain_events(_read, domain, source_table)
+        events = frame if events is None else events.unionByName(frame)
 
     if person_sample_mod is not None:
-        # Full-patient sampling is the right shape for LDA — per-person token
-        # bags stay intact rather than getting truncated by row-level sampling.
-        # Whether MOD pushes down to BQ depends on the connector version.
-        cond = cond.where((F.col("person_id") % person_sample_mod) == 0)
-    cond = cond.where(F.col("concept_id") != 0)
+        # Same whole-patient sampling semantics as the condition path, applied
+        # once to the already-unioned stream.
+        events = events.where((F.col("person_id") % person_sample_mod) == 0)
+    events = events.where(F.col("concept_id") != 0)
 
     concept = _read("concept").select("concept_id", "concept_name")
-
-    # No broadcast hint: full OMOP `concept` (~8M rows, name strings) exceeds
-    # autoBroadcastJoinThreshold, so AQE will pick shuffle-hash or sort-merge
-    # at runtime. An explicit F.broadcast() here OOM'd the driver in client
-    # mode — keep it implicit and let the planner choose.
-    omop = cond.join(concept, on="concept_id", how="left")
-    # Reorder so canonical required columns come first, then source-specific.
-    omop = omop.select("person_id", "concept_id", "concept_name", *extra_cols)
-
-    if cohort is not None:
-        # The cohort filter applies AFTER concept-name join so callers see
-        # the same canonical schema regardless of cohort. The date column
-        # used by the cohort logic differs across source_table modes.
-        date_col = (
-            "condition_start_date" if source_table == "condition_occurrence"
-            else "condition_era_start_date"
-        )
-        # prior_obs_days=None defers to apply_cohort's default lookback, so the
-        # 365-day default lives in exactly one place (cohorts._WINDOW_DAYS).
-        lookback_kw = (
-            {} if prior_obs_days is None else {"prior_obs_days": prior_obs_days}
-        )
-        omop = apply_cohort(
-            omop, cohort,
-            spark=spark, cdr_dataset=cdr_dataset,
-            billing_project=billing_project,
-            date_col=date_col,
-            **lookback_kw,
-        )
+    # Implicit join strategy — see the condition path's note on why no
+    # F.broadcast() hint is used against the full `concept` table.
+    omop = events.join(concept, on="concept_id", how="left")
+    # One flat fused schema: canonical columns + the single common event date.
+    omop = omop.select(
+        "person_id", "concept_id", "concept_name", _FUSED_EVENT_DATE,
+    )
 
     validate(omop)
     return omop
