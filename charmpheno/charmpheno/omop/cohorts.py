@@ -147,6 +147,30 @@ _RARE6_ANCESTORS: tuple[int, ...] = (
     _SCLERODERMA_ANCESTOR, _MYASTHENIA_GRAVIS_ANCESTOR, _AMYLOIDOSIS_ANCESTOR,
 )
 
+# Major depressive disorder for the Hughes antidepressant-response replication
+# (Phase C). Inclusion is the SNOMED "Major depressive disorder" hierarchy;
+# bipolar disorder and schizoaffective disorder are EXCLUDED so the treated
+# indication is unipolar depression — an antidepressant started in a bipolar or
+# schizoaffective patient is a different clinical decision (mood stabiliser /
+# antipsychotic co-therapy, distinct response criteria) and would confound a
+# "the antidepressant worked" outcome. VERIFY ON FIRST RUN, per anchor:
+#   SELECT COUNT(*) FROM concept_ancestor WHERE ancestor_concept_id = 440383;
+# (expect a non-trivial MDD subtype set; 0 => wrong id for this vocab version).
+# Likewise 439254 (bipolar) and 4224940 (schizoaffective) for the exclusions.
+_MDD_ANCESTOR = 440383
+_MDD_EXCLUSION_ANCESTORS: tuple[int, ...] = (
+    439254,    # Bipolar disorder
+    4224940,   # Schizoaffective disorder
+)
+
+# Anxiety-disorder hierarchy. Added as a SEPARATE disease entry: anxiety is a
+# secondary antidepressant indication in Hughes, but the PRIMARY replication
+# cohort's indication is major depression, so anxiety is kept registered (for a
+# future secondary-indication arm) rather than folded into the MDD inclusion.
+# VERIFY ON FIRST RUN:
+#   SELECT COUNT(*) FROM concept_ancestor WHERE ancestor_concept_id = 441542;
+_ANXIETY_ANCESTOR = 441542
+
 # Disease registry for the generalized population+disease cohort. Each entry is
 # fully described by concept ancestors; adding a rare disease is a new entry
 # here + a SUPPORTED_COHORTS/COHORT_METADATA/apply_cohort line, no new function.
@@ -167,6 +191,14 @@ _DISEASE_REGISTRY: dict[str, dict] = {
     },
     "rare6": {
         "inclusion_ancestors": _RARE6_ANCESTORS,
+        "exclusion_ancestors": (),
+    },
+    "mdd": {
+        "inclusion_ancestors": (_MDD_ANCESTOR,),
+        "exclusion_ancestors": _MDD_EXCLUSION_ANCESTORS,
+    },
+    "anxiety": {
+        "inclusion_ancestors": (_ANXIETY_ANCESTOR,),
         "exclusion_ancestors": (),
     },
 }
@@ -222,7 +254,49 @@ _DRUG_REGISTRY: dict[str, dict] = {
         "ingredient_names": ("tirzepatide",),
         "seed_concept_ids": (779705,),
     },
+    # --- Antidepressants (Hughes Phase C replication) -----------------------
+    # Fifteen RxNorm-ingredient antidepressants across four pharmacologic
+    # classes, each a SEPARATE registry entry keyed by ingredient name and
+    # carrying a "class" tag (SSRI/SNRI/TCA/Atyp) so the index step can record
+    # WHICH drug (and class) a person initiated and the outcome labeler can tell
+    # a same-ingredient refill from a switch to a different ingredient. Same
+    # portable-by-name + pinned-id-fallback shape as the GLP-1 entries above:
+    # ``ingredient_names`` resolves on the CDR vocab, ``seed_concept_ids`` pins
+    # the AoU-validated OMOP standard concept ids so resolution is robust to
+    # vocab naming drift. VERIFY ON FIRST RUN that each pinned id is a standard
+    # RxNorm Ingredient that expands to a non-trivial drug_era-matchable set:
+    #   SELECT COUNT(*) FROM concept_ancestor WHERE ancestor_concept_id = <id>;
+    # (0 descendants => the pin is non-standard / misspec for this vocab
+    # version — a non-standard pin has no concept_ancestor rollup and collapses
+    # to just itself, silently under-counting exposure.)
+    "fluoxetine":    {"ingredient_names": ("fluoxetine",),    "seed_concept_ids": (755695,),   "class": "SSRI"},
+    "sertraline":    {"ingredient_names": ("sertraline",),    "seed_concept_ids": (739138,),   "class": "SSRI"},
+    "paroxetine":    {"ingredient_names": ("paroxetine",),    "seed_concept_ids": (722031,),   "class": "SSRI"},
+    "citalopram":    {"ingredient_names": ("citalopram",),    "seed_concept_ids": (797617,),   "class": "SSRI"},
+    "escitalopram":  {"ingredient_names": ("escitalopram",),  "seed_concept_ids": (715939,),   "class": "SSRI"},
+    "vilazodone":    {"ingredient_names": ("vilazodone",),    "seed_concept_ids": (40234834,), "class": "SSRI"},
+    "venlafaxine":   {"ingredient_names": ("venlafaxine",),   "seed_concept_ids": (743670,),   "class": "SNRI"},
+    "duloxetine":    {"ingredient_names": ("duloxetine",),    "seed_concept_ids": (715259,),   "class": "SNRI"},
+    "desvenlafaxine":{"ingredient_names": ("desvenlafaxine",),"seed_concept_ids": (717607,),   "class": "SNRI"},
+    "amitriptyline": {"ingredient_names": ("amitriptyline",), "seed_concept_ids": (710062,),   "class": "TCA"},
+    "imipramine":    {"ingredient_names": ("imipramine",),    "seed_concept_ids": (778268,),   "class": "TCA"},
+    "nortriptyline": {"ingredient_names": ("nortriptyline",), "seed_concept_ids": (721724,),   "class": "TCA"},
+    "bupropion":     {"ingredient_names": ("bupropion",),     "seed_concept_ids": (750982,),   "class": "Atyp"},
+    "trazodone":     {"ingredient_names": ("trazodone",),     "seed_concept_ids": (703547,),   "class": "Atyp"},
+    "vortioxetine":  {"ingredient_names": ("vortioxetine",),  "seed_concept_ids": (44507700,), "class": "Atyp"},
 }
+
+# The 15-drug antidepressant set (registry keys), in class order. The
+# antidepressant index + outcome steps iterate this to build the concept map;
+# keeping it as an explicit tuple (rather than filtering _DRUG_REGISTRY on the
+# "class" key) documents the exact Hughes drug list and its ordering.
+_ANTIDEPRESSANT_INGREDIENTS: tuple[str, ...] = (
+    "fluoxetine", "sertraline", "paroxetine", "citalopram", "escitalopram",
+    "vilazodone",                                        # SSRI
+    "venlafaxine", "duloxetine", "desvenlafaxine",       # SNRI
+    "amitriptyline", "imipramine", "nortriptyline",      # TCA
+    "bupropion", "trazodone", "vortioxetine",            # Atypical
+)
 
 
 # Names accepted by the CLI/loader. Add a new key here when adding a new
@@ -237,6 +311,7 @@ SUPPORTED_COHORTS: tuple[str, ...] = (
     "population_rare6",
     "population_sparse",
     "population_glp1",
+    "mdd_antidepressant",
 )
 
 # Fixed salt for the general-population random-window assignment. Hashing
@@ -407,6 +482,22 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "topics."
         ),
     },
+    "mdd_antidepressant": {
+        "id": "mdd_antidepressant",
+        "label": "MDD antidepressant initiators (Hughes replication)",
+        "description": (
+            "Major-depression patients (SNOMED 440383 and descendants, "
+            "excluding bipolar 439254 and schizoaffective 4224940) at their "
+            "first antidepressant drug_era across a 15-drug set (SSRI/SNRI/TCA/"
+            "atypical). Incident new-user bracket: a year of prior coverage and "
+            "a fully-observed follow-up window (>= the stability horizon), plus "
+            "a qualifying major-depression diagnosis on or before the index "
+            "date. Unlike the topic-model cohorts this cohort returns a "
+            "PER-PERSON index table (person_id, index_date, index drug + class, "
+            "source_cohort) — the input to the >=90-day antidepressant-stability "
+            "outcome labeler for the Hughes 'the drug worked' replication."
+        ),
+    },
 }
 
 
@@ -490,6 +581,12 @@ def apply_cohort(
         )
     if cohort == "population_glp1":
         return apply_population_drug_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "mdd_antidepressant":
+        return apply_mdd_antidepressant_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
             prior_obs_days=prior_obs_days,
@@ -1512,3 +1609,363 @@ def case_finding_index_table(cond_df, *, disease, spark, cdr_dataset,
                                 window_days=label_window_days, prior_obs_days=prior_obs_days)
           .withColumn("source_cohort", F.lit("general")))
     return fg.unionByName(bg)
+
+
+# --- Antidepressant initiation index + >=90-day stability outcome (Phase C) ---
+# The Hughes "antidepressant PC replication" core, decision-independent: a
+# per-drug incident-new-user index over a 15-drug antidepressant set restricted
+# to a major-depression sub-population, and a pure per-drug >=90-day continuation
+# ("the drug worked") outcome labeler. Both are built from the same
+# ingredient/class concept map so the index DRUG and a downstream SWITCH are
+# defined against one authoritative set. No driver / BQ->memory bridge here —
+# these are the composable pieces a future driver wires together.
+
+
+def _antidepressant_concept_map(
+    concept_df: DataFrame,
+    ca_df: DataFrame,
+    *,
+    ingredients: Sequence[str] = _ANTIDEPRESSANT_INGREDIENTS,
+) -> DataFrame:
+    """Map every antidepressant drug concept_id -> its ingredient name + class.
+
+    For each registered antidepressant ``ingredient`` (a ``_DRUG_REGISTRY`` key),
+    resolve its seed concept id by RxNorm Ingredient name with a pinned-id
+    fallback (:func:`_ingredient_concept_ids`) and expand to the full descendant
+    set (:func:`_expand_descendants`), tagging every resulting concept_id with
+    the ingredient's registry name and ``class`` tag. The union over all
+    ``ingredients`` is the single lookup the index + outcome steps join
+    ``drug_era`` against: it both DEFINES the 15-drug antidepressant set and
+    carries the ingredient/class identity needed to record which drug a person
+    started and to tell a same-ingredient refill from a switch to a DIFFERENT
+    ingredient.
+
+    ``concept_df`` needs concept_id/concept_name/vocabulary_id/concept_class_id;
+    ``ca_df`` needs ancestor_concept_id/descendant_concept_id. Returns a distinct
+    ``(concept_id, drug_name, drug_class)``. Distinct ingredients have disjoint
+    descendant sets, so a concept_id maps to exactly one ingredient in practice;
+    ``distinct()`` keeps the frame a set but does not arbitrate genuine overlap
+    (none is expected across these 15 mono-ingredient sets).
+    """
+    mapped: DataFrame | None = None
+    for name in ingredients:
+        spec = _DRUG_REGISTRY[name]
+        seeds = _ingredient_concept_ids(
+            concept_df, spec["ingredient_names"],
+            extra_concept_ids=spec.get("seed_concept_ids", ()),
+        )
+        tagged = (
+            _expand_descendants(ca_df, seeds)
+            .withColumn("drug_name", F.lit(name))
+            .withColumn("drug_class", F.lit(spec["class"]))
+        )
+        mapped = tagged if mapped is None else mapped.unionByName(tagged)
+    return mapped.distinct()
+
+
+def _first_antidepressant_index(
+    drug_era_df: DataFrame,
+    concept_map: DataFrame,
+) -> DataFrame:
+    """Per person: the first antidepressant era + which ingredient it was.
+
+    ``drug_era_df`` has person_id/drug_concept_id/drug_era_start_date;
+    ``concept_map`` is ``(concept_id, drug_name, drug_class)`` from
+    :func:`_antidepressant_concept_map`. The index DATE is the earliest
+    antidepressant ``drug_era_start_date`` across the whole 15-drug set (reusing
+    :func:`_first_drug_era_dates`); the index DRUG is the ingredient whose era
+    starts on that date. Same-day co-initiation of two ingredients (a genuine
+    tie) is broken deterministically by lowest ``drug_concept_id`` so the index
+    is single-valued and resume-stable. Returns ``(person_id, index_date,
+    index_drug_concept_id, index_drug_name, index_drug_class)``; persons with no
+    antidepressant era are absent.
+    """
+    ad_concepts = concept_map.select("concept_id").distinct()
+    index_dates = _first_drug_era_dates(drug_era_df, ad_concepts)
+
+    # Recover the ingredient whose era starts ON the index date. Joining on
+    # person_id then filtering start == index_date, then an inner join to
+    # concept_map, keeps only the antidepressant era(s) that opened the index.
+    starts = (
+        drug_era_df.join(index_dates, on="person_id", how="inner")
+        .where(F.col("drug_era_start_date") == F.col("index_date"))
+        .join(
+            F.broadcast(concept_map),
+            drug_era_df["drug_concept_id"] == concept_map["concept_id"],
+            how="inner",
+        )
+    )
+    ranked = starts.withColumn(
+        "_rn",
+        F.row_number().over(
+            Window.partitionBy("person_id").orderBy(F.col("drug_concept_id").asc())
+        ),
+    )
+    return (
+        ranked.where(F.col("_rn") == 1).select(
+            "person_id",
+            "index_date",
+            F.col("drug_concept_id").alias("index_drug_concept_id"),
+            F.col("drug_name").alias("index_drug_name"),
+            F.col("drug_class").alias("index_drug_class"),
+        )
+    )
+
+
+def _mdd_antidepressant_index(
+    cond_df: DataFrame,
+    drug_era_df: DataFrame,
+    observation_period: DataFrame,
+    concept_map: DataFrame,
+    mdd_concepts: DataFrame,
+    *,
+    date_col: str,
+    window_days: int = _WINDOW_DAYS,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """Pure core of the MDD antidepressant-initiator index (no BQ reads).
+
+    Composes the reusable primitives so the whole index is unit-testable on
+    synthetic frames:
+
+    1. First antidepressant era + its ingredient/class per person
+       (:func:`_first_antidepressant_index`).
+    2. Incident-new-user bracket (:func:`_window_observed_cohort`):
+       ``prior_obs_days`` of prior coverage AND a fully-observed ``window_days``
+       follow-up. ``window_days`` must be >= the outcome ``stability_days`` so the
+       stability window is guaranteed observed (the labeler then treats every
+       member as uncensored). Survivors are rejoined to recover the drug fields.
+    3. **Major-depression indication rule** (the tunable temporal choice): keep a
+       person only if they have a qualifying MDD condition (``mdd_concepts``, the
+       inclusion-minus-exclusion descendant set) dated **on or before the index
+       date** — i.e. the antidepressant is being started against an already-coded
+       depression indication. This is a semi-join (no fan-out). Debatable knob:
+       one could instead require the MDD dx within a bounded pre-index window
+       (e.g. 365d) or allow a short post-index grace (dx coded at the prescribing
+       visit); "any MDD dx up to index" is the most permissive faithful rule and
+       maximises the replication N.
+
+    ``cond_df`` has person_id/concept_id/``date_col``. Returns ``(person_id,
+    index_date, index_drug_concept_id, index_drug_name, index_drug_class,
+    source_cohort='mdd_antidepressant')``, one row per surviving person.
+    """
+    index = _first_antidepressant_index(drug_era_df, concept_map)
+
+    bracketed = _window_observed_cohort(
+        index.select("person_id", "index_date"), observation_period,
+        prior_obs_days=prior_obs_days, window_days=window_days,
+    )
+    index = index.join(bracketed, on=["person_id", "index_date"], how="inner")
+
+    # MDD indication on/before index: semi-join over persons whose earliest
+    # qualifying MDD dx precedes (or equals) their index date.
+    mdd_events = (
+        cond_df.join(F.broadcast(mdd_concepts), on="concept_id", how="inner")
+        .select("person_id", F.col(date_col).alias("_mdd_date"))
+    )
+    qualifying = (
+        mdd_events.join(index.select("person_id", "index_date"),
+                        on="person_id", how="inner")
+        .where(F.col("_mdd_date") <= F.col("index_date"))
+        .select("person_id")
+        .distinct()
+    )
+
+    return (
+        index.join(qualifying, on="person_id", how="inner")
+        .withColumn("source_cohort", F.lit("mdd_antidepressant"))
+        .select(
+            "person_id", "index_date", "index_drug_concept_id",
+            "index_drug_name", "index_drug_class", "source_cohort",
+        )
+    )
+
+
+def apply_mdd_antidepressant_cohort(
+    cond_df: DataFrame,
+    *,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    window_days: int = _WINDOW_DAYS,
+    prior_obs_days: int = _WINDOW_DAYS,
+) -> DataFrame:
+    """MDD antidepressant-initiator index table (Hughes Phase C replication).
+
+    Reads the CDR (concept, concept_ancestor, drug_era, observation_period),
+    builds the 15-drug antidepressant concept map + the MDD inclusion-minus-
+    exclusion condition set, and delegates the index logic to the pure
+    :func:`_mdd_antidepressant_index`. ``drug_era`` is projected with
+    ``drug_era_end_date`` and ``gap_days`` (beyond the start used for the index)
+    so the SAME read feeds :func:`antidepressant_stability_label` downstream.
+
+    Unlike the topic-model cohorts (which return a windowed events frame), this
+    returns a PER-PERSON index table ``(person_id, index_date,
+    index_drug_concept_id, index_drug_name, index_drug_class, source_cohort)`` —
+    the direct input to the >=90-day stability outcome labeler. ``window_days``
+    (the observed follow-up requirement) must be >= the labeler's
+    ``stability_days``; it defaults to a full observed year.
+    """
+    def _read(table: str) -> DataFrame:
+        return (
+            spark.read.format("bigquery")
+            .option("table", f"{cdr_dataset}.{table}")
+            .option("parentProject", billing_project)
+            .load()
+        )
+
+    concept = _read("concept").select(
+        "concept_id", "concept_name", "vocabulary_id", "concept_class_id",
+    )
+    ca = _read("concept_ancestor").select(
+        "ancestor_concept_id", "descendant_concept_id",
+    )
+    # Project end_date + gap_days too (not just start): the outcome labeler needs
+    # drug_era_end_date to measure continuous coverage.
+    drug_era = _read("drug_era").select(
+        "person_id", "drug_concept_id", "drug_era_start_date",
+        "drug_era_end_date", "gap_days",
+    )
+    op = _read("observation_period").select(
+        "person_id",
+        "observation_period_start_date",
+        "observation_period_end_date",
+    )
+
+    concept_map = _antidepressant_concept_map(concept, ca)
+    spec = _DISEASE_REGISTRY["mdd"]
+    mdd_concepts = _concept_set_from_ancestors(
+        ca,
+        inclusion_ancestors=spec["inclusion_ancestors"],
+        exclusion_ancestors=spec["exclusion_ancestors"],
+    )
+    return _mdd_antidepressant_index(
+        cond_df, drug_era, op, concept_map, mdd_concepts,
+        date_col=date_col, window_days=window_days, prior_obs_days=prior_obs_days,
+    )
+
+
+def antidepressant_stability_label(
+    drug_era_df: DataFrame,
+    index_df: DataFrame,
+    *,
+    drug_concept_sets: DataFrame,
+    stability_days: int = 90,
+    grace_gap_days: int = 30,
+) -> DataFrame:
+    """Per-drug >=90-day antidepressant-stability outcome ("the drug worked").
+
+    A PURE transform (no BQ reads) implementing a Hughes-style "sustained
+    continuation" definition. ``index_df`` is the MDD initiator index
+    (``person_id``, ``index_date``, ``index_drug_name`` at least);
+    ``drug_era_df`` has ``person_id``, ``drug_concept_id``,
+    ``drug_era_start_date``, ``drug_era_end_date``; ``drug_concept_sets`` is the
+    ``(concept_id, drug_name, ...)`` antidepressant map from
+    :func:`_antidepressant_concept_map` — it both restricts eras to the 15-drug
+    set and names each era's ingredient (so a switch to a DIFFERENT ingredient is
+    detectable). Returns one row per index person: ``(person_id,
+    index_drug_name, worked)`` with ``worked`` a boolean.
+
+    Definitional choices (all tunable; the debatable ones are flagged):
+
+    - **Positive (worked=True)**: the INDEX ingredient has continuous coverage
+      spanning >= ``stability_days`` from ``index_date``, where consecutive eras
+      of the SAME ingredient are stitched when the gap from one era's end to the
+      next era's start is <= ``grace_gap_days`` (a gap-and-islands stitch on the
+      island anchored at ``index_date``). Coverage span is
+      ``datediff(coverage_end, index_date)`` — a calendar-day span; the +/-1-day
+      inclusive/exclusive convention is a (minor, debatable) choice.
+    - **Negative (worked=False)**: index-ingredient coverage ends before
+      ``stability_days`` (discontinuation / a gap > ``grace_gap_days`` before
+      reaching it), OR the person initiates a DIFFERENT antidepressant ingredient
+      within ``[index_date, index_date + stability_days)`` (**switch = failure**,
+      overriding an otherwise-sufficient index coverage — debatable: some
+      definitions score a switch-then-stable as success). Switching is keyed on
+      INGREDIENT, so a dose/formulation change of the same ingredient is a refill,
+      not a switch.
+    - **Uncensored assumption**: the cohort's :func:`_window_observed_cohort`
+      follow-up gate (``window_days`` >= ``stability_days``) guarantees the
+      stability window is observed, so every ``index_df`` member is treated as
+      uncensored — absence of a continuing era is a real discontinuation, not an
+      unobserved one. This function depends on that upstream bracket.
+
+    Defaults: ``stability_days=90`` (Hughes ~3-month sustained continuation),
+    ``grace_gap_days=30`` (permissible refill gap; 30/45/60 are all defensible).
+    """
+    cm = drug_concept_sets.select(
+        F.col("concept_id").alias("_cm_concept_id"),
+        F.col("drug_name").alias("_era_drug_name"),
+    )
+    eras = (
+        drug_era_df.join(
+            F.broadcast(cm),
+            drug_era_df["drug_concept_id"] == F.col("_cm_concept_id"),
+            how="inner",
+        )
+        .join(
+            index_df.select("person_id", "index_date", "index_drug_name"),
+            on="person_id", how="inner",
+        )
+        .select(
+            "person_id", "index_date", "index_drug_name", "_era_drug_name",
+            "drug_era_start_date", "drug_era_end_date",
+        )
+    )
+
+    # Continuous coverage of the INDEX ingredient from index_date, via a
+    # gap-and-islands stitch. Island 1 is the run anchored at index_date (the
+    # earliest index-ingredient era starts exactly at index_date, since
+    # index_date is the person's first antidepressant era start).
+    idx_eras = eras.where(
+        (F.col("_era_drug_name") == F.col("index_drug_name"))
+        & (F.col("drug_era_end_date") >= F.col("index_date"))
+    )
+    w = Window.partitionBy("person_id").orderBy("drug_era_start_date")
+    prev_max_end = F.max("drug_era_end_date").over(
+        w.rowsBetween(Window.unboundedPreceding, -1)
+    )
+    is_break = prev_max_end.isNull() | (
+        F.col("drug_era_start_date") > F.date_add(prev_max_end, grace_gap_days)
+    )
+    islands = idx_eras.withColumn("_break", is_break.cast("int"))
+    islands = islands.withColumn(
+        "_island",
+        F.sum("_break").over(w.rowsBetween(Window.unboundedPreceding, 0)),
+    )
+    coverage = (
+        islands.where(F.col("_island") == 1)
+        .groupBy("person_id", "index_date")
+        .agg(F.max("drug_era_end_date").alias("_coverage_end"))
+        .withColumn(
+            "_covered",
+            F.datediff(F.col("_coverage_end"), F.col("index_date"))
+            >= F.lit(stability_days),
+        )
+        .select("person_id", "_covered")
+    )
+
+    # Switch = a DIFFERENT antidepressant ingredient initiated within the window.
+    switched = (
+        eras.where(
+            (F.col("_era_drug_name") != F.col("index_drug_name"))
+            & (F.col("drug_era_start_date") >= F.col("index_date"))
+            & (F.col("drug_era_start_date")
+               < F.date_add(F.col("index_date"), stability_days))
+        )
+        .select("person_id")
+        .distinct()
+        .withColumn("_switched", F.lit(True))
+    )
+
+    # Every cohort member is uncensored: a member with no qualifying coverage
+    # row (never reached the island / discontinued immediately) is worked=False.
+    return (
+        index_df.select("person_id", "index_drug_name")
+        .join(coverage, on="person_id", how="left")
+        .join(switched, on="person_id", how="left")
+        .withColumn("_covered", F.coalesce(F.col("_covered"), F.lit(False)))
+        .withColumn("_switched", F.coalesce(F.col("_switched"), F.lit(False)))
+        .withColumn("worked", F.col("_covered") & (~F.col("_switched")))
+        .select("person_id", "index_drug_name", "worked")
+    )
