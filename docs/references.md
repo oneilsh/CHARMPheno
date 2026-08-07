@@ -36,16 +36,58 @@ authors, year, title, venue, a link if available, and a short note on its role.
 - **Lee & Seung (2001).** Algorithms for Non-negative Matrix Factorization. *NIPS*.
   — implicit-φ ("Lee/Seung trick") in the LDA/HDP E-step. *used in:* `spark-vi/spark_vi/models/topic/lda.py`
 - **Eisenstein, Ahmed & Xing (2011).** Sparse Additive Generative Models of Text (SAGE). *ICML*.
-  — word-level sparse log-deviation background/foreground; alternative to gating.
+  — parameterizes each topic-word distribution as `β_k ∝ exp(m + η_k)`: a shared background
+  log-frequency `m` plus a *sparse* log-deviation `η_k`. The deviation reads natively as
+  **log-lift over the reference** (the interpretable weight — LDAvis "relevance", our dashboard's
+  metric), and deviations **add** in log-space (compositional). The alternative to gating for the
+  content/β axis; composes with hierarchy, covariates (STM content), and supervision.
+  **Two regimes for us:** (a) *flat/weak* — one global `m`, every topic a sparse deviation from it
+  (keeps all our topics, washes out average comorbidity for interpretability; does NOT tie
+  parent↔child, so no capture fix / no per-node-K); (b) *full cascade* — `β_node ∝ exp(m + Σ_anc dev + dev_node)`,
+  which makes ancestor-capture structurally impossible and per-node-K a shrinkage outcome, but
+  reopens "which parent topic does a child build on" when tpn>1. Non-conjugate (softmax), but
+  *augmented*-conjugate via Pólya-Gamma + a tree-Gaussian (optionally scale-mixed for sparsity)
+  prior — the `pg_stm` toolkit; the tree keeps the Gaussian solves sparse/efficient. **(landscape)**
+- **Doshi-Velez, Wallace & Adams (2015).** Graph-Sparse LDA: A Topic Model with Structured Sparsity. *AAAI* 29:2575–2581.
+  — SAGE's cousin on the *vocabulary* side: structured sparsity over a word-graph (UMLS tree) so each
+  topic is summarized by a few "concept" nodes that roll up their descendants. On an autism-spectrum
+  (ASD) EHR cohort it matched state-of-the-art prediction while needing ~6 concepts/topic vs ~119 for
+  a sparse-LDA baseline, surfacing clinically sensible concepts (Autistic disorder, Epilepsy, Down's,
+  Intellectual disability). Puts the ontology on the *codes* (our SNOMED is-a DAG), NOT on the
+  *phenotype tree* — a different, orthogonal use of ontology than our topic-side cascade. Same lab as
+  the PC/PF line. **(landscape)**
 - **Chang, Boyd-Graber, Gerrish, Wang & Blei (2009).** Reading Tea Leaves: How Humans Interpret Topic Models. *NeurIPS* 22.
   — perplexity vs. interpretability.
 
 ## Topic hierarchies, supervision & gating
 
+- **McAuliffe & Blei (2007).** Supervised Topic Models. *NeurIPS* 20.
+  https://papers.nips.cc/paper_files/paper/2007/hash/d56b9fc4b0f1be8871f5e1c40c0067e7-Abstract.html
+  — supervised LDA (sLDA): adds one output arrow, `y ~ GLM(ηᵀz̄)`, drawn from the
+  empirical topic frequencies `z̄` (not θ), learned *jointly* so topics are shaped to
+  predict the response. Joint beats two-stage, but the label is one term against
+  hundreds of word terms, so supervision is weak ("drowned out") — the failure mode
+  MedLDA (up-weight it) and PC training (constrain it) both target. **(landscape)**
+- **Zhu, Ahmed & Xing (2012).** MedLDA: Maximum Margin Supervised Topic
+  Models. *JMLR* 13(74):2237–2278.
+  https://www.jmlr.org/papers/v13/zhu12a.html
+  — LDA + SVM: replace sLDA's GLM with a max-margin **hinge** loss on `ηᵀz̄`, jointly;
+  the constant `C` is an explicit dial on how much supervision matters (fixes
+  drowning-out). An instance of **posterior regularization** (the margin is a posterior
+  constraint; Zhu's RegBayes). Cons for our case-finding: output is a *margin, not a
+  probability* (fights the FDR/empirical-p readout), *fully supervised*, *flat labels*,
+  and discriminative warping hurts topic interpretability. Gibbs-via-data-augmentation
+  variant: Zhu et al., *JMLR* 2014. **(landscape)**
 - **Ramage, Manning & Dumais (2011).** Partially Labeled Topic Models for Interpretable Text Mining (PLDA). *KDD*.
   — generative-restriction basis for "gated LDA"; the model our `TopicBlockPartition` gating reimplements. *used in:* `docs/insights/0028-...-plda.md`
+- **Ramage, Manning & Dumais (2011).** Partially Labeled Dirichlet *Process* (PLDP). *KDD* (companion model in the PLDA paper).
+  — nonparametric PLDA: a Dirichlet-process prior over each label's topic set learns how many topics each label needs. The lineage's native answer to our per-node-K question — and exactly the per-label stick-breaking we rejected on prior-dominance grounds (insights 0017, 0081/0083). **(landscape)**
 - **Ramage, Hall, Nallapati & Manning (2009).** Labeled LDA: A Supervised Topic Model for Credit Attribution in Multi-labeled Corpora. *EMNLP*.
   — the label-restricted special case (0 background) of PLDA. **(landscape)**
+- **Kang, Park & Chari (2014).** Hetero-Labeled LDA: A Partially Supervised Topic Model with Heterogeneous Labels. *ECML-PKDD*, LNCS. DOI:10.1007/978-3-662-44848-9_41.
+  — unifies *document* labels (doc→class, as in PLDA) and *feature/word* labels (word→class seeds) in one partially-supervised process, covering only a subset of classes. Our spectral anchors are word-labels and cohort/closure membership is a document-label, so this is the model that fuses the two supervision forms we already hold separately. **(landscape)**
+- **Tang, Mao & Huang (2018).** Labeled Phrase Latent Dirichlet Allocation and its Online Learning Algorithm. *Data Mining and Knowledge Discovery*. DOI:10.1007/s10618-018-0555-0.
+  — Labeled-LDA over phrases (partial word order) with a Gibbs batch + online learner; the streaming-inference descendant of the label-restricted line. **(landscape)**
 - **Blei, Griffiths & Jordan (2010).** The Nested Chinese Restaurant Process and Bayesian Nonparametric Inference of Topic Hierarchies. *JACM* 57(2):7. (arXiv:0710.0845)
   — hLDA / nCRP; the canonical "coarse-near-root, specific-near-leaves, doc-uses-a-path" hierarchy. Closest generative analogue to the ontology background-cascade idea (but learns the tree). **(landscape)**
 - **Paisley, Wang, Blei & Jordan (2015).** Nested Hierarchical Dirichlet Processes. *IEEE TPAMI* 37(2):256–270. (arXiv:1210.6738)
@@ -53,7 +95,22 @@ authors, year, title, venue, a link if available, and a short note on its role.
 - **Li & McCallum (2006).** Pachinko Allocation: DAG-Structured Mixture Models of Topic Correlations. *ICML*.
   — DAG (not tree) topic hierarchy; the multi-parent generalization relevant to MONDO. **(landscape)**
 - **Perotte, Wood, Elhadad & Bartlett (2011).** Hierarchically Supervised Latent Dirichlet Allocation (HSLDA). *NeurIPS* 24.
-  — flat LDA topics + ICD-9-tree label supervision (child label requires parent). Hierarchy on the *label-prediction* side, not topic access. **(landscape)**
+  — flat *shared* LDA topics + a per-label **probit** regressor `a_{l,d} ~ N(η_lᵀz̄_d, 1)`
+  that fires (`y=+1`) iff its score >0 AND its parent fired; the ontology enters ONLY
+  through this parent-gated firing (topics and η are not themselves hierarchical) — a
+  hard hierarchical constraint on the *label/output* side, vs our gating's hard
+  constraint on the *topic/representation* side. A label is a *dense regression over
+  shared topics*, not a per-node block (compositional, not holistic phenotypes). Tested
+  on EHR: **6,000 NewYork-Presbyterian 2009 discharge summaries (5,000 train / 1,000
+  test), 7,298 ICD-9 codes, ~8.4 codes/doc, 10k vocab**; out-of-sample ICD-9 prediction
+  by ROC. Result: full joint+hierarchical HSLDA beats both flat (independent regressors)
+  and two-stage (LDA-then-regress) — but predicts more correct labels **at the cost of
+  more false positives** (recall over precision; a caution for FDR-controlled
+  case-finding, and tiny-N by our standards). **(landscape)**
+- **Ganchev, Graça, Gillenwater & Taskar (2010).** Posterior Regularization for Structured Latent Variable Models. *JMLR* 11:2001–2049.
+  — the framework: inject side-knowledge as *expectation constraints on the posterior* (a constrained/tilted E-step) instead of changing the model/prior. Our hard gating is the degenerate special case (constraint = "θ puts zero mass outside the allowed set"); prediction-constrained training is the soft-prediction-quality instance. The umbrella under which gating, PC training, and posterior-sparsity all sit. **(landscape)**
+- **Card, Tan & Smith (2018).** Neural Models for Documents with Metadata (SCHOLAR). *ACL*. (arXiv:1705.09296)
+  — VAE topic model incorporating BOTH covariates and labels; explicitly generalizes STM (prevalence), SAGE (content deviations), and sLDA (supervision), defaulting to ProdLDA with no metadata. The neural "everything-at-once" of the design space we assemble conjugately. **(landscape)**
 
 ## Pólya-Gamma augmentation & identifiability
 
@@ -71,7 +128,45 @@ authors, year, title, venue, a link if available, and a short note on its role.
 ## Phenotyping / EHR topic models
 
 - **Li, Nair, Lu, Wen, Wang et al. (2020).** Inferring Multimodal Latent Topics from EHRs (MixEHR). *Nature Communications* 11:2536.
-  — multi-view Dirichlet phenotype topic model; the lineage this project positions against.
+  https://doi.org/10.1038/s41467-020-16378-3
+  — multi-view Dirichlet phenotype topic model; inferred patient-topic
+  mixtures also feed downstream target-disease and mortality classifiers.
+- **Song, Sumba Toral, Xu, Liu, Guo et al. (2021).** Supervised
+  Multi-specialist Topic Model with Applications on Large-scale Electronic
+  Health Record Data (MixEHR-S). arXiv:2105.01238.
+  https://arxiv.org/abs/2105.01238
+  — jointly infers specialist-dependent disease topics and a probit target
+  label; the MixEHR-lineage example of supervision inside topic inference.
+  **(landscape)**
+- **Hughes, Hope, Weiner, McCoy, Perlis, Sudderth & Doshi-Velez (2018).**
+  Semi-Supervised Prediction-Constrained Topic Models. *AISTATS*, PMLR
+  84:1067–1076. https://proceedings.mlr.press/v84/hughes18a.html
+  — prediction-constrained training balances a generative account of EHR
+  features with label prediction and can use sparsely labeled cohorts.
+  **(landscape)**
+- **Hughes, Hope, Weiner, McCoy, Perlis, Sudderth & Doshi-Velez (2017).**
+  Prediction-Constrained Training for Semi-Supervised Mixture and Topic Models.
+  arXiv:1707.07341.
+  — the fuller companion to the AISTATS 2018 paper: develops the PC objective as
+  a constrained optimization (explain x SUBJECT TO predicting y well) that fixes
+  sLDA's supervision-drowned-out-by-the-word-likelihood failure; general beyond
+  topic models. Code: github.com/dtak/prediction-constrained-topic-models. **(landscape)**
+- **Hughes, Hope, Weiner, McCoy, Perlis, Sudderth & Doshi-Velez (2017).**
+  Prediction-Constrained Topic Models for Antidepressant Recommendation. *NeurIPS
+  ML4H workshop*. arXiv:1712.00499.
+  — the EHR *application* of PC training; improved antidepressant recommendation
+  from EHRs over prior supervised topic models. Proof the method survives clinical
+  data. **(landscape)**
+- **Ren, Kunes & Doshi-Velez (2020).** Prediction Focused Topic Models via
+  Feature Selection. *AISTATS*, PMLR 108:4420–4429.
+  https://proceedings.mlr.press/v108/ren20a.html
+  — uses supervision to suppress vocabulary features that hinder prediction,
+  directly relevant to noisy or heterogeneous OMOP domains. **(landscape)**
+- **Ren, Kunes & Doshi-Velez (2019).** Prediction Focused Topic Models for
+  Electronic Health Records. *NeurIPS ML4H workshop*. arXiv:1911.08551.
+  — the EHR extended-abstract companion to the feature-selection paper above:
+  supervised topic models over discrete counts (procedures/diagnoses/meds) that
+  keep only features that help (or don't hurt) prediction. **(landscape)**
 - **MixEHR-Guided (MixEHR-G).** Modeling EHRs with a guided multi-modal topic model for large-scale automatic phenotyping. *Journal of Biomedical Informatics*, 2022. https://www.sciencedirect.com/science/article/pii/S1532046422001976
   — PheCode/surrogate-feature priors make topics identifiable with known phenotypes. (Li lab, McGill; first author to confirm.) **(landscape)**
 - **Song, Hu, Verma, Buckeridge & Li (2022).** Automatic Phenotyping by a Seed-guided Topic Model (MixEHR-Seed). *KDD '22* (ACM SIGKDD). DOI:10.1145/3534678.3542675
@@ -209,3 +304,37 @@ authors, year, title, venue, a link if available, and a short note on its role.
   — DP synthetic-EHR generation (masked autoregressive flows under a Gaussian-DP budget) on a small heterogeneous cohort; the synthetic-data-release counterpart to DPVI, and a reference point for the DP-vs-rare-sample tension.
 - **Dong, Roth & Su (2022).** Gaussian Differential Privacy. *JRSS-B* 84(1):3–37.
   — the DP accounting used by Su et al. (2023).
+
+## Clinical decision support / translatability / human factors
+
+Positioning references for the translatability angle: interpretable, uncertainty-aware,
+privacy-exportable Bayesian models as *informational* (non-device) CDS, presented to
+clinicians who make the decision. **(all landscape)**
+
+- **FDA (2022, updated Feb 2026).** Clinical Decision Support Software — Guidance for Industry and FDA Staff.
+  https://www.fda.gov/regulatory-information/search-fda-guidance-documents/clinical-decision-support-software
+  — the four "Non-Device CDS" criteria (21st Century Cures §520(o)(1)(E)). The load-bearing one for us:
+  a clinician must be able to *independently review the basis* for a recommendation — so interpretability
+  is the literal device/non-device line; a black box "will always be regulated regardless of risk." The
+  2026 update adds explicit transparency + automation-bias language. Our descriptive/interpretable Bayesian
+  angle is the regulatorily-privileged class.
+- **Köhler et al. (2009).** Clinical Diagnostics in Human Genetics with Semantic Similarity Searches in Ontologies (Phenomizer). *Am. J. Hum. Genet.* 85(4):457–464.
+  — HPO semantic-similarity rare-disease diagnosis; the ontology-driven incumbent.
+- **Bauer, Köhler, Schulz & Robinson (2012).** Bayesian Ontology Querying for Accurate and Noise-Tolerant Semantic Searches (BOQA). *Bioinformatics* 28(19):2502–2508.
+  — an actual *Bayesian* model over HPO for rare-disease diagnosis; the nearest "Bayesian + ontology + rare disease" precedent.
+- **Robinson et al. (2020).** Interpretable Clinical Genomics with a Likelihood Ratio Paradigm (LIRICAL). *Am. J. Hum. Genet.* 107(3):403–417.
+  — per-feature likelihood-ratio HPO diagnosis; the closest existing thing to an *informational* Bayesian rare-disease CDS (each phenotype's evidential contribution shown). We sit *upstream*: unsupervised sub-phenotype discovery from raw EHR vs matching to a fixed disease list.
+- **Smedley et al. (2015).** Next-generation Diagnostics and Disease-gene Discovery with the Exomiser. *Nat. Protoc.* 10(12):2004–2015.
+  — HPO phenotype + variant prioritization; the phenotype→gene matcher.
+- **Heckerman, Horvitz & Nathwani (1992).** Toward Normative Expert Systems: The Pathfinder Project. *Methods Inf. Med.* 31(2):90–105.
+  — classic Bayesian-network CDS (lymph-node pathology); the historical precedent that "Bayesian = interpretable CDS."
+- **Shwe et al. (1991).** Probabilistic Diagnosis Using a Reformulation of the INTERNIST-1/QMR Knowledge Base (QMR-DT). *Methods Inf. Med.* 30(4):241–255.
+  — decision-theoretic diagnostic Bayesian network; the other historical root.
+- **Hughes, Elibol, McCoy, Perlis & Doshi-Velez (2016).** Supervised Topic Models for Clinical Interpretability. arXiv:1612.01678.
+  — the interpretability-focused precursor to the PC line; motivates topic models as clinician-legible representations.
+- **Gigerenzer & Hoffrage (1995).** How to Improve Bayesian Reasoning Without Instruction: Frequency Formats. *Psychological Review* 102(4):684–704.
+  — natural frequencies: clinicians misread conditional probabilities but reason correctly with "of 100 patients, N…". The display science for presenting a posterior — and a natural-frequency rendering of our SAGE log-lift is exactly this.
+- **Risk and Uncertainty Communication in Deployed AI-based CDS: A Scoping Review (2025).** *ACM Trans. Computing for Healthcare.* DOI:10.1145/3830235.
+  — how deployed AI-CDS present uncertainty; icon arrays/pictograms; the open display-integration gap.
+- **Implicit versus Explicit Bayesian Priors for Epistemic Uncertainty Estimation in Clinical Decision Support (2025).** *PLOS Digital Health.*
+  — explicit priors give better epistemic uncertainty; the aleatoric-vs-epistemic distinction and per-case knowledge-boundary trust signal (a Bayesian advantage, and the automation-bias antidote).
