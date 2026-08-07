@@ -100,9 +100,26 @@ authors' public reference), then apply it to **antidepressant treatment stabilit
 - Reproduce the authors' behavior: use the public reference code
   (`github.com/dtak/prediction-constrained-topic-models`) as a **correctness oracle**, the same way
   `fit_gated` oracles the gated SVI.
-- Test harness: `cd spark-vi && ../.venv/bin/python -m pytest tests/test_pc_lda.py -q` (engine);
-  driver tests under `analysis/cloud/tests/`.
+- Test harness (revised): `.venv-pc/bin/python -m pytest analysis/pc/tests/ -q` (fresh-container venv;
+  numpy/scipy/scikit-learn/pytest + `autograd` for the faithful reference).
 - Commit trailer per the executing session's convention. Push only when the user asks.
+
+### FAITHFUL π-inference (decided 2026-08-07, after reading the reference code)
+
+Reading `slda_loss__autograd.py` + `calc_nef_map_pi_d_K__autograd.py`: Hughes infer each doc's π by
+**generative MAP from words only** (`pi_estimation_mode='missing_y'` — label-FREE, identical at train
+and test), then the label loss reshapes the **global topics** by autograd differentiating *through*
+that π-inference. Our first A2 pass instead gave each doc a free label-shaped π (train-π ≠ test-π).
+**Decision: the faithful reference matches Hughes** — generative-MAP π (unrolled NEF exponentiated-
+gradient) + autograd through π→topics. `autograd` is added to `analysis/pc/` ONLY (isolated to the
+non-VI reference; the VI core stays numpy/scipy). A1's hand-coded objective + the A2 free-π
+`PCTopicModel` are **preserved** as the seed for the future VI port.
+
+Parked VI-port fork (future, not this plan): the VI implementation faces the same choice —
+**supervised-VI** (label-shaped E-step = the free-π analogue; tractable in the SVI runner, drops into
+`local_update`, but reintroduces the train/test θ mismatch that makes sLDA's supervision weak) vs.
+**PC-VI** (label-free E-step + constraint pushed to the globals; the real differentiator, harder in
+SVI). A1's factoring (pure head fns returning `grad_Pi`) supports both attachment points.
 
 ---
 
