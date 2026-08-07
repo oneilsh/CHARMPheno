@@ -159,11 +159,13 @@ id-agnostic. Tests under `analysis/pc/tests/`.
 
 (No mllib/Spark shim — that belongs to the future VI-native port, not the in-memory reference.)
 
-- [ ] **Task B1 — driver-facing fit/transform API** in `analysis/pc/`: a small `PCTopicModel`-style
-  class (`fit(X, y, K, lambda, eps, ...)`, `transform(X) → z̄`, `predict_proba(X)`) wrapping the
-  Task-A1 objective + an optimizer (L-BFGS-B / Adam), with the label column + ε/λ as first-class args.
-- [ ] **Task B2 — baselines + eval harness**: heldout per-class AUC; PC vs a logistic-regression-on-codes
-  baseline and an unsupervised-LDA→logistic (two-stage) baseline — the Hughes comparison set.
+- [x] **Task B1 done** (folded into A2/A3) — `PCTopicModel.fit/transform/predict_proba` with the label
+  column + `weight_y` (the λ) as first-class args; the faithful model IS the driver-facing API.
+- [x] **Task B2 done** — `analysis/pc/evaluate.py`: `evaluate_pc_vs_baselines(...)` + `format_results_table(...)`.
+  Per-label heldout ROC AUC **and** AP, macro-averaged; PC vs two-stage (unsup `weight_y=0`→LR) vs
+  LR-on-codes (the Hughes set); multi-label, semi-supervised `labeled_mask`, degenerate-column skip.
+  id-agnostic (numpy in, metrics out) — the exact harness Phase C's AoU driver calls. On toy_bars:
+  PC macro-AUC 0.997 vs two-stage 0.536. This is the API boundary where Phase C plugs in real data.
 
 ### Phase C — Application (only after A+B are trusted): antidepressant stability on AoU OMOP
 
