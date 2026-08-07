@@ -304,3 +304,37 @@ authors, year, title, venue, a link if available, and a short note on its role.
   — DP synthetic-EHR generation (masked autoregressive flows under a Gaussian-DP budget) on a small heterogeneous cohort; the synthetic-data-release counterpart to DPVI, and a reference point for the DP-vs-rare-sample tension.
 - **Dong, Roth & Su (2022).** Gaussian Differential Privacy. *JRSS-B* 84(1):3–37.
   — the DP accounting used by Su et al. (2023).
+
+## Clinical decision support / translatability / human factors
+
+Positioning references for the translatability angle: interpretable, uncertainty-aware,
+privacy-exportable Bayesian models as *informational* (non-device) CDS, presented to
+clinicians who make the decision. **(all landscape)**
+
+- **FDA (2022, updated Feb 2026).** Clinical Decision Support Software — Guidance for Industry and FDA Staff.
+  https://www.fda.gov/regulatory-information/search-fda-guidance-documents/clinical-decision-support-software
+  — the four "Non-Device CDS" criteria (21st Century Cures §520(o)(1)(E)). The load-bearing one for us:
+  a clinician must be able to *independently review the basis* for a recommendation — so interpretability
+  is the literal device/non-device line; a black box "will always be regulated regardless of risk." The
+  2026 update adds explicit transparency + automation-bias language. Our descriptive/interpretable Bayesian
+  angle is the regulatorily-privileged class.
+- **Köhler et al. (2009).** Clinical Diagnostics in Human Genetics with Semantic Similarity Searches in Ontologies (Phenomizer). *Am. J. Hum. Genet.* 85(4):457–464.
+  — HPO semantic-similarity rare-disease diagnosis; the ontology-driven incumbent.
+- **Bauer, Köhler, Schulz & Robinson (2012).** Bayesian Ontology Querying for Accurate and Noise-Tolerant Semantic Searches (BOQA). *Bioinformatics* 28(19):2502–2508.
+  — an actual *Bayesian* model over HPO for rare-disease diagnosis; the nearest "Bayesian + ontology + rare disease" precedent.
+- **Robinson et al. (2020).** Interpretable Clinical Genomics with a Likelihood Ratio Paradigm (LIRICAL). *Am. J. Hum. Genet.* 107(3):403–417.
+  — per-feature likelihood-ratio HPO diagnosis; the closest existing thing to an *informational* Bayesian rare-disease CDS (each phenotype's evidential contribution shown). We sit *upstream*: unsupervised sub-phenotype discovery from raw EHR vs matching to a fixed disease list.
+- **Smedley et al. (2015).** Next-generation Diagnostics and Disease-gene Discovery with the Exomiser. *Nat. Protoc.* 10(12):2004–2015.
+  — HPO phenotype + variant prioritization; the phenotype→gene matcher.
+- **Heckerman, Horvitz & Nathwani (1992).** Toward Normative Expert Systems: The Pathfinder Project. *Methods Inf. Med.* 31(2):90–105.
+  — classic Bayesian-network CDS (lymph-node pathology); the historical precedent that "Bayesian = interpretable CDS."
+- **Shwe et al. (1991).** Probabilistic Diagnosis Using a Reformulation of the INTERNIST-1/QMR Knowledge Base (QMR-DT). *Methods Inf. Med.* 30(4):241–255.
+  — decision-theoretic diagnostic Bayesian network; the other historical root.
+- **Hughes, Elibol, McCoy, Perlis & Doshi-Velez (2016).** Supervised Topic Models for Clinical Interpretability. arXiv:1612.01678.
+  — the interpretability-focused precursor to the PC line; motivates topic models as clinician-legible representations.
+- **Gigerenzer & Hoffrage (1995).** How to Improve Bayesian Reasoning Without Instruction: Frequency Formats. *Psychological Review* 102(4):684–704.
+  — natural frequencies: clinicians misread conditional probabilities but reason correctly with "of 100 patients, N…". The display science for presenting a posterior — and a natural-frequency rendering of our SAGE log-lift is exactly this.
+- **Risk and Uncertainty Communication in Deployed AI-based CDS: A Scoping Review (2025).** *ACM Trans. Computing for Healthcare.* DOI:10.1145/3830235.
+  — how deployed AI-CDS present uncertainty; icon arrays/pictograms; the open display-integration gap.
+- **Implicit versus Explicit Bayesian Priors for Epistemic Uncertainty Estimation in Clinical Decision Support (2025).** *PLOS Digital Health.*
+  — explicit priors give better epistemic uncertainty; the aleatoric-vs-epistemic distinction and per-case knowledge-boundary trust signal (a Bayesian advantage, and the automation-bias antidote).

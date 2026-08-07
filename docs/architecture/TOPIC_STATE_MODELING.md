@@ -1056,6 +1056,35 @@ token-level role metadata becomes accessible. (Contrast: HPO phenotype profiles 
 available and supply static word-type seeds, which is the Hetero-Labeled-LDA /
 MixEHR-Seed direction — a different lever, on the feature-label side.)
 
+### Medication choice as heterogeneous treatment effects, not prediction
+
+A parked reframing for the medication-choice application. The Doshi-Velez antidepressant
+line (Hughes et al. 2017; JAMA Netw Open 2020, 81,630 MDD adults) found treatment-*specific*
+prediction no better than general-outcome prediction — but that is a *prediction* framing of a
+*causal* question. Drug choice is a **contrast** (outcome under X minus under Y), and prediction
+on the observed (confounded, clinician-selected) treatment cannot isolate it. Likely-better path,
+and one our stack is suited to: estimate **heterogeneous treatment effects (CATE / individualized
+treatment rules) conditioned on discovered sub-phenotypes** — a drug may help a *subtype* even when
+flat on average — with richer outcomes (trajectories, hospitalization, switching, side-effect codes)
+and treatment-*sequence*/temporal structure (the OU Stage-2 vehicle). Deliver *informationally*:
+surface the estimated contrast **with its uncertainty**, clinician decides. Honest caveat: differential
+antidepressant response is modest even in RCTs (STAR*D), so "better than medicate-or-not" is plausible,
+"decisive selection" may not be — which is fine for the informational posture.
+
+### Translatability: informational (non-device) Bayesian CDS + human-factors presentation
+
+A parked positioning idea (see the "Clinical decision support / translatability" refs). Interpretable +
+uncertainty-aware + privacy-exportable Bayesian models are the *regulatorily-privileged* class for CDS:
+the FDA Non-Device CDS criteria require a clinician to *independently review the basis*, so interpretability
+is the device/non-device line, and the 2026 update rewards transparency + automation-bias mitigation.
+Design principles: (a) present posteriors as **natural frequencies / icon arrays** (Gigerenzer) — a
+clinician-legible rendering of our SAGE **log-lift** ("of 100 patients with this phenotype, N carry code X
+vs M at baseline"); (b) show **per-case epistemic uncertainty** (a native Bayesian output) as the
+when-to-trust signal; (c) an **LLM translation layer constrained to explain the model's actual parameters**
+(not free-reason), keeping the Bayesian model as the auditable substrate, the LLM as translator, the clinician
+as decider. Positions us upstream of / complementary to the HPO matchers (Phenomizer/LIRICAL): discovery of
+unknown sub-phenotypes vs matching to a fixed disease list.
+
 ### Tree-Structured HDP for Hierarchical Cohort Pooling
 
 The HDP as planned uses the standard two-level topic-model tree: a global DP $G_0$
