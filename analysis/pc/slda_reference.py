@@ -155,7 +155,12 @@ def nef_map_pi_DK(
     a_m1 = float(convex_alpha_minus_1)
     step = float(pi_step_size)
     for _ in range(int(pi_iters)):
-        M_DV = anp.dot(Pi_DK, topics_KV)              # (D, V) per-token word probs
+        # Floor M_DV: a rare word with ~0 probability under every topic (softmax
+        # topic rows can underflow to exactly 0 in float64) would otherwise give
+        # x_dv / 0 = inf, which cascades (inf - inf at the max-subtract) to NaN.
+        # Never triggers in the well-conditioned toy-bars regime; real sparse
+        # corpora hit it on the first iteration.
+        M_DV = anp.maximum(anp.dot(Pi_DK, topics_KV), 1e-12)   # (D, V) word probs
         Q_DV = X_DV / M_DV                            # x_dv / M_dv
         grad_DK = step * (
             anp.dot(Q_DV, topics_KV.T)                # sum_v (x/M) topics_kv
@@ -163,7 +168,11 @@ def nef_map_pi_DK(
         )
         grad_DK = grad_DK - anp.max(grad_DK, axis=1, keepdims=True)
         new_Pi_DK = Pi_DK * anp.exp(grad_DK)
-        Pi_DK = new_Pi_DK / anp.sum(new_Pi_DK, axis=1, keepdims=True)
+        # Guard the normalizer too: if a row's updated mass underflows to 0,
+        # 0/0 = NaN; the floor keeps the (degenerate) row finite instead.
+        Pi_DK = new_Pi_DK / anp.maximum(
+            anp.sum(new_Pi_DK, axis=1, keepdims=True), 1e-300
+        )
     return Pi_DK
 
 
@@ -264,7 +273,9 @@ def calc_loss__slda(
 
     # loss_x : generative multinomial neg-log-likelihood over ALL docs.
     M_DV = anp.dot(Pi_DK, topics_KV)
-    loss_x = -weight_x * anp.sum(X_DV * anp.log(M_DV))
+    # Floor before log: an all-but-zero word prob -> log(0) = -inf -> NaN loss
+    # (and 0 * -inf = NaN where x_dv == 0). Same guard as the pi-inference divide.
+    loss_x = -weight_x * anp.sum(X_DV * anp.log(anp.maximum(M_DV, 1e-12)))
     if include_mult_coef:
         if mult_coef_const_val is None:
             mult_coef_const_val = multinomial_coef_const(X_DV)
@@ -286,8 +297,11 @@ def calc_loss__slda(
         obs_DC = obs_DC * anp.asarray(label_mask, dtype=float)   # (D, C) AND
     loss_y = -weight_y * anp.sum(obs_DC * ll_DC)
 
-    # Global regularizers.
-    loss_topics = -1.0 * (tau - 1.0) * anp.sum(anp.log(topics_KV))
+    # Global regularizers. Floor topics before log: softmax rows are positive in
+    # exact arithmetic but can underflow to 0.0 in float64 for very negative
+    # logits, which would make log(topics) = -inf. (loss_pi is already floored
+    # by its 1e-9 offset.)
+    loss_topics = -1.0 * (tau - 1.0) * anp.sum(anp.log(anp.maximum(topics_KV, 1e-300)))
     loss_w = float(weight_y) * lambda_w * anp.sum(w_CK ** 2)
 
     if rescale_total_loss_by_n_tokens:
