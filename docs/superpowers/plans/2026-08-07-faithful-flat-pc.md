@@ -169,14 +169,21 @@ id-agnostic. Tests under `analysis/pc/tests/`.
 
 ### Phase C — Application (only after A+B are trusted): antidepressant stability on AoU OMOP
 
-- [ ] **Task C0 — verify/port OMOP drug-cohort primitives.** The MDD cohort + antidepressant `drug_era`
-  new-user logic + 90-day-stability outcome reuse the GLP-1-comparator primitives (insight 0041) —
-  confirm they are on `main` or cherry-pick them; do NOT drag in unrelated experimental code.
-- [ ] **Task C1 — cohort + features.** MDD cohort (condition); 11 standard antidepressants (OMOP
-  drug concepts / ATC descendants); **outcome = ≥90-day continued prescription** (drug_era continuity)
-  as the effectiveness proxy; features = ICD/CPT/Rx codewords (fused vocab). Record N, positive rate.
-- [ ] **Task C2 — fit + report.** Per-drug heldout AUC (PC vs logistic-regression vs Gibbs-LDA), the
-  shape to reproduce being the paper's (~0.67–0.71 PC vs ~0.55–0.64 LR). Write `docs/experiments/00NN-*`.
+- [x] **Task C0 done** — the primitives were already in-repo (`apply_population_drug_cohort` / insight 0041),
+  reused via the *lower* primitives (`_ingredient_concept_ids`, `_expand_descendants`, `_first_drug_era_dates`,
+  `_window_observed_cohort`) rather than the GLP-1-specific 2-arm logic. No unrelated experimental code pulled.
+- [x] **Task C1 done** (`3d101e0` + `1a93882`) — MDD `_DISEASE_REGISTRY` entry (incl 440383, excl bipolar/
+  schizoaffective); 15 antidepressants (SSRI/SNRI/TCA/atypical) as `_DRUG_REGISTRY` entries w/ class tags +
+  pinned OMOP ids (from an AoU-validated notebook); `apply_mdd_antidepressant_cohort` (incident new-user at
+  first antidepressant era, MDD-restricted); **outcome = per-drug ≥90-day continuation** via
+  `antidepressant_stability_label` (gap-and-islands stitch, switch=failure, uncensored under the follow-up
+  gate); **fused multi-domain vocab** (condition+drug+procedure → one bag) via `load_omop_bigquery`. Decision:
+  features are the *fused* vocab, model is *joint multi-task* (per-cell missing labels), per user.
+- [~] **Task C2 in progress** — joint multi-task PC done + tested (`6749bb9`: `evaluate_pc_multitask`, per-cell
+  mask, recovery PC 0.797 vs two-stage 0.738). Capstone driver `analysis/cloud/pc_antidepressant_cloud.py`
+  (cohort→outcome→fused features→pre-index window→Spark→memory bridge→D×C label+mask→multi-task PC→per-drug
+  AUC) being built; runs in the user's AoU workspace, not here. Target shape: paper's ~0.67–0.71 PC vs ~0.55–0.64
+  LR. `docs/experiments/00NN-*` (date-slug per the new convention) written *after* the AoU run, not before.
 - [ ] **Task C3 — honest readout.** State up front that a null on AoU is ambiguous *only if* Phase A
   passed (machine trusted) — then a null is a *data* finding (AoU med-completeness / cross-system
   censoring make 90-day stability noisier than the single-hospital original), not a bug.
