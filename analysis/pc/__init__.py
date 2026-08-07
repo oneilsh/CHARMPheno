@@ -45,6 +45,7 @@ from __future__ import annotations
 from analysis.pc.head import softmax_head_loss
 from analysis.pc.generative import generative_neg_loglik
 from analysis.pc.objective import pack_params, unpack_params, pc_objective
+from analysis.pc.model import PCTopicModel
 
 __all__ = [
     "softmax_head_loss",
@@ -52,4 +53,5 @@ __all__ = [
     "pack_params",
     "unpack_params",
     "pc_objective",
+    "PCTopicModel",
 ]
