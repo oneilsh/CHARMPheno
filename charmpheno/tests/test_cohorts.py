@@ -358,9 +358,11 @@ def test_first_drug_era_dates_picks_earliest_era_per_person(spark):
 
 def test_drug_registry_shape():
     from charmpheno.omop.cohorts import _DRUG_REGISTRY
-    assert set(_DRUG_REGISTRY) == {"glp1_ra", "sglt2i", "tirzepatide"}
+    # GLP-1 comparator arms still present (unchanged shape: no class tag).
+    assert {"glp1_ra", "sglt2i", "tirzepatide"} <= set(_DRUG_REGISTRY)
     assert "semaglutide" in _DRUG_REGISTRY["glp1_ra"]["ingredient_names"]
     assert _DRUG_REGISTRY["tirzepatide"]["ingredient_names"] == ("tirzepatide",)
+    assert "class" not in _DRUG_REGISTRY["glp1_ra"]
 
 
 # --- partition core: precedence + in-window-both-user exclusion ----------
@@ -554,3 +556,243 @@ def test_lookback_feature_label_events_splits_pre_and_post_index(spark):
         events, index_df, date_col="condition_era_start_date",
         lookback_days=1825, label_window_days=365)
     assert {r["concept_id"] for r in feat5.collect()} == {900, 901, 999}
+
+
+# --- Antidepressant / MDD registry + concept map (Phase C, task 1) ------------
+
+def test_disease_registry_has_mdd_and_anxiety_with_expected_ancestors():
+    from charmpheno.omop.cohorts import (
+        _DISEASE_REGISTRY, _MDD_ANCESTOR, _MDD_EXCLUSION_ANCESTORS,
+        _ANXIETY_ANCESTOR,
+    )
+    assert _MDD_ANCESTOR == 440383
+    assert _MDD_EXCLUSION_ANCESTORS == (439254, 4224940)
+    assert _ANXIETY_ANCESTOR == 441542
+    assert _DISEASE_REGISTRY["mdd"] == {
+        "inclusion_ancestors": (440383,),
+        "exclusion_ancestors": (439254, 4224940),
+    }
+    assert _DISEASE_REGISTRY["anxiety"] == {
+        "inclusion_ancestors": (441542,),
+        "exclusion_ancestors": (),
+    }
+
+
+def test_drug_registry_has_15_antidepressants_with_class_tags_and_pins():
+    from charmpheno.omop.cohorts import (
+        _DRUG_REGISTRY, _ANTIDEPRESSANT_INGREDIENTS,
+    )
+    assert len(_ANTIDEPRESSANT_INGREDIENTS) == 15
+    assert set(_ANTIDEPRESSANT_INGREDIENTS) <= set(_DRUG_REGISTRY)
+    classes = {}
+    for name in _ANTIDEPRESSANT_INGREDIENTS:
+        entry = _DRUG_REGISTRY[name]
+        # portable-by-name + pinned-id fallback shape, plus a class tag
+        assert entry["ingredient_names"] == (name,)
+        assert len(entry["seed_concept_ids"]) == 1
+        assert entry["class"] in {"SSRI", "SNRI", "TCA", "Atyp"}
+        classes.setdefault(entry["class"], []).append(name)
+    assert classes["SSRI"][:2] == ["fluoxetine", "sertraline"]
+    # a couple of the AoU-validated pins
+    assert _DRUG_REGISTRY["fluoxetine"]["seed_concept_ids"] == (755695,)
+    assert _DRUG_REGISTRY["vortioxetine"]["seed_concept_ids"] == (44507700,)
+    assert _DRUG_REGISTRY["venlafaxine"]["class"] == "SNRI"
+
+
+def test_supported_cohorts_and_metadata_include_mdd_antidepressant():
+    from charmpheno.omop.cohorts import SUPPORTED_COHORTS, COHORT_METADATA
+    assert "mdd_antidepressant" in SUPPORTED_COHORTS
+    m = COHORT_METADATA["mdd_antidepressant"]
+    assert m["id"] == "mdd_antidepressant"
+    assert m["label"] and m["description"]
+
+
+def test_antidepressant_concept_map_tags_expanded_concepts_with_name_and_class(spark):
+    from charmpheno.omop.cohorts import _antidepressant_concept_map
+    concept = spark.createDataFrame(
+        [
+            (755695, "fluoxetine", "RxNorm", "Ingredient"),
+            (739138, "sertraline", "RxNorm", "Ingredient"),
+            (739138, "sertraline", "ATC", "Ingredient"),   # wrong vocab -> ignored
+        ],
+        ["concept_id", "concept_name", "vocabulary_id", "concept_class_id"],
+    )
+    # descendants (incl. self): fluoxetine 755695 -> {755695, 111}; sertraline -> {739138}
+    ca = spark.createDataFrame(
+        [(755695, 755695), (755695, 111), (739138, 739138)],
+        ["ancestor_concept_id", "descendant_concept_id"],
+    )
+    out = {
+        r["concept_id"]: (r["drug_name"], r["drug_class"])
+        for r in _antidepressant_concept_map(
+            concept, ca, ingredients=("fluoxetine", "sertraline"),
+        ).collect()
+    }
+    assert out == {
+        755695: ("fluoxetine", "SSRI"),
+        111: ("fluoxetine", "SSRI"),
+        739138: ("sertraline", "SSRI"),
+    }
+
+
+# --- Antidepressant first-era index + MDD indication (Phase C, task 2) ---------
+
+def _ad_concept_map(spark):
+    return spark.createDataFrame(
+        [(755695, "fluoxetine", "SSRI"), (739138, "sertraline", "SSRI")],
+        ["concept_id", "drug_name", "drug_class"],
+    )
+
+
+def test_first_antidepressant_index_picks_earliest_era_and_its_ingredient(spark):
+    import datetime as dt
+    from charmpheno.omop.cohorts import _first_antidepressant_index
+    d = dt.date
+    drug_era = spark.createDataFrame(
+        [
+            # person 1: fluoxetine later, sertraline earlier -> index = sertraline
+            (1, 755695, d(2020, 3, 1), d(2020, 9, 1)),
+            (1, 739138, d(2020, 1, 1), d(2020, 6, 1)),
+            # person 2: same-day co-initiation -> tie-break to lowest concept_id
+            (2, 755695, d(2021, 5, 1), d(2021, 8, 1)),
+            (2, 739138, d(2021, 5, 1), d(2021, 8, 1)),
+        ],
+        ["person_id", "drug_concept_id", "drug_era_start_date", "drug_era_end_date"],
+    )
+    out = {
+        r["person_id"]: (r["index_date"], r["index_drug_concept_id"],
+                         r["index_drug_name"], r["index_drug_class"])
+        for r in _first_antidepressant_index(drug_era, _ad_concept_map(spark)).collect()
+    }
+    assert out[1] == (d(2020, 1, 1), 739138, "sertraline", "SSRI")
+    # 739138 < 755695 -> sertraline wins the same-day tie deterministically
+    assert out[2] == (d(2021, 5, 1), 739138, "sertraline", "SSRI")
+
+
+def test_mdd_antidepressant_index_indication_and_new_user_bracket(spark):
+    """Correct index drug + the new-user bracket + the MDD-indication rule:
+    person 1 qualifies; person 2 is dropped for insufficient prior observation;
+    person 3 is dropped because their MDD dx is AFTER the index date."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import _mdd_antidepressant_index
+    d = dt.date
+
+    cond = spark.createDataFrame(
+        [
+            (1, 9001, d(2019, 6, 1)),   # MDD dx before index -> qualifies
+            (2, 9001, d(2019, 6, 1)),   # MDD before index (but obs too short)
+            (3, 9001, d(2020, 6, 1)),   # MDD AFTER index -> indication fails
+        ],
+        ["person_id", "concept_id", "condition_start_date"],
+    )
+    drug_era = spark.createDataFrame(
+        [
+            (1, 739138, d(2020, 1, 1), d(2020, 12, 1)),   # sertraline
+            (2, 755695, d(2020, 1, 1), d(2020, 12, 1)),   # fluoxetine
+            (3, 755695, d(2020, 1, 1), d(2020, 12, 1)),   # fluoxetine
+        ],
+        ["person_id", "drug_concept_id", "drug_era_start_date", "drug_era_end_date"],
+    )
+    op = spark.createDataFrame(
+        [
+            (1, d(2018, 1, 1), d(2022, 1, 1)),    # ample prior + follow-up
+            (2, d(2019, 11, 1), d(2022, 1, 1)),   # ~61d prior -> excluded at 365
+            (3, d(2018, 1, 1), d(2022, 1, 1)),    # ample, but indication fails
+        ],
+        ["person_id", "observation_period_start_date",
+         "observation_period_end_date"],
+    )
+    mdd_concepts = spark.createDataFrame([(9001,)], ["concept_id"])
+
+    out = {
+        r["person_id"]: (r["index_drug_name"], r["index_drug_class"],
+                         r["source_cohort"])
+        for r in _mdd_antidepressant_index(
+            cond, drug_era, op, _ad_concept_map(spark), mdd_concepts,
+            date_col="condition_start_date", window_days=365, prior_obs_days=365,
+        ).collect()
+    }
+    assert set(out) == {1}                                     # 2 and 3 dropped
+    assert out[1] == ("sertraline", "SSRI", "mdd_antidepressant")
+
+
+# --- >=90-day stability outcome labeler (Phase C, task 3) ---------------------
+
+def test_antidepressant_stability_label_all_scenarios(spark):
+    """Hand-built drug_era + index frames covering the five definitional cases:
+    clean >=90d continuation (positive); early discontinuation <90d (negative);
+    switch to another antidepressant within 90d (negative); a gap <= grace
+    stitched to positive; a gap > grace -> negative. Plus a cohort member with
+    NO era at all (uncensored -> negative)."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import antidepressant_stability_label
+    d = dt.date
+    fx, sx = 755695, 739138  # fluoxetine (index drug), sertraline (a switch target)
+
+    drug_era = spark.createDataFrame(
+        [
+            # p1 clean >=90d continuation -> positive
+            (1, fx, d(2020, 1, 1), d(2020, 4, 30)),
+            # p2 early discontinuation (45d) -> negative
+            (2, fx, d(2020, 1, 1), d(2020, 2, 15)),
+            # p3 index covered but SWITCH to sertraline at +31d -> negative
+            (3, fx, d(2020, 1, 1), d(2020, 6, 1)),
+            (3, sx, d(2020, 2, 1), d(2020, 8, 1)),
+            # p4 gap 24d (<= grace 30) stitched -> coverage to 2020-05-01 -> positive
+            (4, fx, d(2020, 1, 1), d(2020, 2, 15)),
+            (4, fx, d(2020, 3, 10), d(2020, 5, 1)),
+            # p5 gap 46d (> grace 30) broken -> first island 45d -> negative
+            (5, fx, d(2020, 1, 1), d(2020, 2, 15)),
+            (5, fx, d(2020, 4, 1), d(2020, 7, 1)),
+        ],
+        ["person_id", "drug_concept_id", "drug_era_start_date", "drug_era_end_date"],
+    )
+    # p6 is a cohort member with no drug_era row at all -> uncensored negative.
+    index_df = spark.createDataFrame(
+        [(p, d(2020, 1, 1), "fluoxetine") for p in (1, 2, 3, 4, 5, 6)],
+        ["person_id", "index_date", "index_drug_name"],
+    )
+    concept_map = spark.createDataFrame(
+        [(fx, "fluoxetine", "SSRI"), (sx, "sertraline", "SSRI")],
+        ["concept_id", "drug_name", "drug_class"],
+    )
+    out = {
+        r["person_id"]: r["worked"]
+        for r in antidepressant_stability_label(
+            drug_era, index_df, drug_concept_sets=concept_map,
+            stability_days=90, grace_gap_days=30,
+        ).collect()
+    }
+    assert out == {1: True, 2: False, 3: False, 4: True, 5: False, 6: False}
+
+
+def test_antidepressant_stability_label_grace_gap_is_tunable(spark):
+    """The stitch tolerance is the grace_gap_days knob: p5's 46d gap that breaks
+    at grace=30 gets stitched at grace=60, flipping the label to positive."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import antidepressant_stability_label
+    d = dt.date
+    fx = 755695
+    drug_era = spark.createDataFrame(
+        [
+            (5, fx, d(2020, 1, 1), d(2020, 2, 15)),
+            (5, fx, d(2020, 4, 1), d(2020, 7, 1)),   # 46d gap
+        ],
+        ["person_id", "drug_concept_id", "drug_era_start_date", "drug_era_end_date"],
+    )
+    index_df = spark.createDataFrame(
+        [(5, d(2020, 1, 1), "fluoxetine")],
+        ["person_id", "index_date", "index_drug_name"],
+    )
+    concept_map = spark.createDataFrame(
+        [(fx, "fluoxetine", "SSRI")], ["concept_id", "drug_name", "drug_class"],
+    )
+
+    def worked(grace):
+        return antidepressant_stability_label(
+            drug_era, index_df, drug_concept_sets=concept_map,
+            stability_days=90, grace_gap_days=grace,
+        ).collect()[0]["worked"]
+
+    assert worked(30) is False   # gap 46 > 30 -> broken, 45d island
+    assert worked(60) is True    # gap 46 <= 60 -> stitched to 2020-07-01
