@@ -1,5 +1,6 @@
 # venvs / caches
 .venv/
+.venv-pc/
 venv/
 env/
 __pycache__/
