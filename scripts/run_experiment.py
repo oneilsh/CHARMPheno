@@ -269,9 +269,9 @@ def validate_frontmatter(fm: dict) -> None:
             sys.exit(2)
 
     model_class = fm["model_class"]
-    if model_class not in ("lda", "stm", "dag_placement"):
+    if model_class not in ("lda", "stm", "dag_placement", "pc"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
-              f"(currently: lda, stm, dag_placement; hdp planned)", flush=True)
+              f"(currently: lda, stm, dag_placement, pc; hdp planned)", flush=True)
         sys.exit(2)
 
     if model_class == "stm":
@@ -293,6 +293,8 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/stm_bigquery_cloud.py"
     if model_class == "dag_placement":
         return f"{base}/dag_placement_cloud.py"
+    if model_class == "pc":
+        return f"{base}/pc_antidepressant_cloud.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
@@ -312,6 +314,8 @@ def build_fit_args(
         return build_stm_args(effective, out_dir, resume_from)
     if model_class == "dag_placement":
         return build_dag_placement_args(effective, out_dir, resume_from)
+    if model_class == "pc":
+        return build_pc_args(effective, out_dir, resume_from)
     raise ValueError(f"unknown model_class: {model_class!r}")
 
 
@@ -665,6 +669,48 @@ def build_dag_placement_args(
     return args
 
 
+def build_pc_args(
+    effective: dict, out_dir: str, resume_from: Path | None = None,
+) -> list[str]:
+    """Build argv for analysis/cloud/pc_antidepressant_cloud.py (Phase-C PC).
+
+    Faithful multi-task Prediction-Constrained topic model on the MDD
+    antidepressant cohort. Unlike dag_placement, ``K`` is a real flag. The PC
+    driver writes ONE results JSON via ``--out`` (no ``--out-dir``, no
+    ``manifest.json``), so we point ``--out`` at the run dir. cdr/billing come
+    from the workspace env exactly as the other drivers. Resume is unsupported
+    (there is no persisted PC checkpoint); ``resume_from`` is ignored, matching
+    :func:`build_dag_placement_args`. The cohort is hard-wired in the driver
+    (``apply_mdd_antidepressant_cohort``), so there is deliberately no
+    ``--cohort`` flag. Every key maps to ``--key.replace('_','-')``.
+    """
+    cdr, billing = _require_workspace_env()
+    args = [
+        "--cdr", cdr,
+        "--billing", billing,
+        "--K", str(effective["K"]),
+        "--weight-y", str(effective["weight_y"]),
+        "--alpha", str(effective.get("alpha", 1.1)),
+        "--tau", str(effective.get("tau", 1.1)),
+        "--pi-iters", str(effective.get("pi_iters", 100)),
+        "--max-iter", str(effective["max_iter"]),
+        "--lookback-days", str(effective.get("lookback_days", 365)),
+        "--window-days", str(effective.get("window_days", 365)),
+        "--stability-days", str(effective.get("stability_days", 90)),
+        "--grace-gap-days", str(effective.get("grace_gap_days", 30)),
+        "--vocab-size", str(effective["vocab_size"]),
+        "--min-df", str(effective["min_df"]),
+        "--min-patient-count", str(effective["min_patient_count"]),
+        "--person-mod", str(effective["person_mod"]),
+        "--test-frac", str(effective.get("test_frac", 0.25)),
+        "--seed", str(effective.get("seed", 0)),
+        "--out", str(Path(out_dir) / "pc_results.json"),
+    ]
+    if effective.get("cache_uri"):
+        args.extend(["--cache-uri", str(effective["cache_uri"])])
+    return args
+
+
 def build_eval_args(checkpoint_dir: Path, effective: dict) -> list[str]:
     """Build the CLI arg list for eval_coherence_cloud.py."""
     return [
@@ -714,12 +760,25 @@ def build_dashboard_args(
 SPARK_SUBMIT_FLAGS = [
     "--master", "yarn",
     "--deploy-mode", "client",
-    "--driver-memory", "4g",
     "--conf", "spark.executor.cores=4",
     "--conf", "spark.executor.memory=6g",
     "--conf", "spark.executor.memoryOverhead=2g",
     "--conf", "spark.python.worker.memory=2g",
 ]
+
+
+def _driver_memory_for(model_class: str) -> str:
+    """Driver memory for the fit spark-submit, overridable via CHARM_DRIVER_MEMORY.
+
+    The topic-model fits (lda/stm/dag_placement) stream on executors and are
+    fine at 4g. PC is different: its in-memory eval collects a dense ``D x V``
+    matrix to the DRIVER (client mode), so it needs more headroom. Lower
+    ``person_mod``/``vocab_size`` if even 8g OOMs on a large cohort.
+    """
+    override = os.environ.get("CHARM_DRIVER_MEMORY")
+    if override:
+        return override
+    return "8g" if model_class == "pc" else "4g"
 
 
 def cluster_overlay_path(repo_root: Path) -> Path:
@@ -736,6 +795,7 @@ def cluster_overlay_path(repo_root: Path) -> Path:
 
 def build_spark_submit_cmd(
     script: str, script_args: list[str], repo_root: Path,
+    driver_memory: str = "4g",
 ) -> list[str]:
     """Build the full spark-submit command line.
 
@@ -762,6 +822,7 @@ def build_spark_submit_cmd(
     return (
         ["spark-submit"]
         + SPARK_SUBMIT_FLAGS
+        + ["--driver-memory", driver_memory]
         + ["--py-files", py_files_val, script]
         + script_args
     )
@@ -808,6 +869,7 @@ class _SignalReceived(Exception):
 
 def run_subprocess_tee_sanitize(
     cmd: list[str], summary_path: Path, patterns: list[re.Pattern],
+    env: dict | None = None,
 ) -> int:
     """Run `cmd` as a subprocess; stream stdout line-by-line.
 
@@ -829,7 +891,7 @@ def run_subprocess_tee_sanitize(
     prev_int = signal.signal(signal.SIGINT, _handler)
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        bufsize=1, text=True,
+        bufsize=1, text=True, env=env,
     )
     assert proc.stdout is not None
     last_iter: int | None = None
@@ -1093,10 +1155,26 @@ def main(argv: list[str] | None = None) -> int:
         fit_script = REPO_ROOT / build_fit_driver_path(effective)
         # Both LDA and STM support --resume-from; build_fit_args threads it.
         fit_args = build_fit_args(effective, str(save_dir), resume_from)
-        fit_cmd = build_spark_submit_cmd(str(fit_script), fit_args, REPO_ROOT)
+        model_class = effective.get("model_class", "lda")
+        fit_cmd = build_spark_submit_cmd(
+            str(fit_script), fit_args, REPO_ROOT,
+            driver_memory=_driver_memory_for(model_class),
+        )
+        # PC's driver imports analysis.pc (the in-memory eval), which is NOT in
+        # any --py-files zip. In client mode the driver runs on the master where
+        # the repo is checked out, so putting REPO_ROOT on PYTHONPATH lets the
+        # import resolve. Other model_classes import only the zipped packages.
+        fit_env: dict | None = None
+        if model_class == "pc":
+            fit_env = {
+                **os.environ,
+                "PYTHONPATH": f"{REPO_ROOT}:{os.environ.get('PYTHONPATH', '')}",
+            }
         # Display-only join; cmd is passed as list to Popen/run, not via shell.
         print(f"[run-exp] spark-submit: {' '.join(fit_cmd)}", flush=True)
-        fit_rc = run_subprocess_tee_sanitize(fit_cmd, summary_path, DROP_PATTERNS)
+        fit_rc = run_subprocess_tee_sanitize(
+            fit_cmd, summary_path, DROP_PATTERNS, env=fit_env,
+        )
         if fit_rc != 0:
             print(f"[run-exp] fit exited non-zero ({fit_rc}); skipping eval", flush=True)
             with summary_path.open("a") as f:
@@ -1114,12 +1192,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
-    elif effective.get("model_class") == "dag_placement":
-        # dag_placement saves an npz + manifest (a methods-experiment artifact),
-        # not a topic-word bundle the NPMI eval driver can read. Its metrics live
-        # in manifest.json (placement AUC/MRR) + the fit log.
-        print("[run-exp] model_class=dag_placement: NPMI eval not wired for the npz "
-              "result; skipping eval (see manifest.json + fit log).", flush=True)
+    elif effective.get("model_class") in ("dag_placement", "pc"):
+        # These write their own self-contained result (dag_placement: npz +
+        # manifest with placement AUC/MRR; pc: pc_results.json with per-drug
+        # heldout AUC), not a topic-word bundle the NPMI eval driver can read.
+        _mc = effective.get("model_class")
+        _artifact = "pc_results.json" if _mc == "pc" else "manifest.json"
+        print(f"[run-exp] model_class={_mc}: NPMI eval not wired for the "
+              f"self-contained result; skipping eval (see {_artifact} + fit log).",
+              flush=True)
     else:
         # 6. Dispatch eval (capture stdout into a string for sanitized append)
         eval_script = REPO_ROOT / "analysis" / "cloud" / "eval_coherence_cloud.py"
