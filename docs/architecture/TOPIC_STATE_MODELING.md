@@ -1001,6 +1001,90 @@ statistically appropriate (don't claim causal relationships you can't support) b
 means the model may miss real interactions for uncommon conditions. Hierarchical or
 transfer learning approaches could help borrow strength across related phenotypes.
 
+### Two-Layer Capacity: Hard Node-Gating × Within-Node HDP for Per-Node K
+
+A parked idea for the per-node topic count ($K_v$) problem in the ontology-gated
+model. We rejected HDP/nonparametric priors globally (insight 0017: swapping $K$
+for the concentration $\gamma$ made results *more* sensitive; $\gamma$ is harder to
+set than $K$ — prior-dominance), and the init-side effective-rank / parallel-analysis
+$K_v$ estimators failed at $p \gg n$ (insights 0081, 0083). But those failures share
+a regime: a nonparametric prior arbitrating among *many* topics each backed by *weak*
+data. The **two-layer** idea quarantines the nonparametric machinery to where it is
+best behaved:
+
+- **Node layer (parametric, hard):** keep the PLDA-style ontology gate exactly as is
+  — it gives crisp, well-supported topics even at small node support (empirically our
+  strongest property).
+- **Within-node layer (nonparametric):** a Dirichlet process *inside each node's
+  block* learns how many sub-topics that node needs. This is **PLDP applied per-node**
+  (Ramage, Manning & Dumais 2011, the companion to PLDA).
+
+Why it might behave where the global HDP did not: within a single node the regime is
+*few topics, each with decent support* — exactly where the DP's $\gamma$ stops
+dominating. A **shared $\gamma$ across nodes with partial pooling** would tame the
+per-node prior-dominance further.
+
+Caveats to design around: (1) it is still a $\gamma$, so insight 0017's warning
+applies unless pooled; (2) it does **not** escape the $p \gg n$ wall (insight 0083) —
+at a 26-patient node the DP has no more information than the parallel-analysis probe
+did, so it still cannot separate a diffuse-real phenotype from one patient's
+idiosyncrasy. Net: a better-motivated use of HDP than the global version we rejected,
+and an explicit *generative* $K_v$ rather than a post-hoc usage read — but not a free
+lunch on the truly tiny nodes.
+
+### Token-Level Role Covariate on Topic Assignment (Presenting vs Chronic)
+
+A parked idea for raising phenotype *specificity*. Each code token carries an
+observed **role** — presenting / chief-complaint, chronic comorbidity, rule-out,
+historical, family history — and the role **modulates that token's topic assignment**
+(biasing it toward acute/foreground topics vs background/chronic ones). A code
+appearing as the *presenting* complaint is far more diagnostic of the phenotype than
+the same code buried as an incidental comorbidity, so conditioning the topic draw on
+role concentrates the discriminative signal where it belongs.
+
+Relationships: it is the **observed, EHR-grounded analogue of hLDA's latent
+generic-vs-specific level** (we hand the model the level from record structure instead
+of inferring it), and the **token-role generalization of MixEHR's observation / NMAR
+model** ("why was this coded"). It is distinct from Hetero-Labeled LDA (Kang, Park &
+Chari 2014): hLLDA's feature-labels are word-*type* → class (static, global), whereas
+this is token-*occurrence* → role (dynamic, per-doc-per-word).
+
+**Data caveat (why it is parked, not built):** it requires per-occurrence role
+metadata — a chief-complaint field, or problem-list vs encounter-diagnosis status —
+which is not currently available to us (contractual/data constraint). Revisit if such
+token-level role metadata becomes accessible. (Contrast: HPO phenotype profiles *are*
+available and supply static word-type seeds, which is the Hetero-Labeled-LDA /
+MixEHR-Seed direction — a different lever, on the feature-label side.)
+
+### Medication choice as heterogeneous treatment effects, not prediction
+
+A parked reframing for the medication-choice application. The Doshi-Velez antidepressant
+line (Hughes et al. 2017; JAMA Netw Open 2020, 81,630 MDD adults) found treatment-*specific*
+prediction no better than general-outcome prediction — but that is a *prediction* framing of a
+*causal* question. Drug choice is a **contrast** (outcome under X minus under Y), and prediction
+on the observed (confounded, clinician-selected) treatment cannot isolate it. Likely-better path,
+and one our stack is suited to: estimate **heterogeneous treatment effects (CATE / individualized
+treatment rules) conditioned on discovered sub-phenotypes** — a drug may help a *subtype* even when
+flat on average — with richer outcomes (trajectories, hospitalization, switching, side-effect codes)
+and treatment-*sequence*/temporal structure (the OU Stage-2 vehicle). Deliver *informationally*:
+surface the estimated contrast **with its uncertainty**, clinician decides. Honest caveat: differential
+antidepressant response is modest even in RCTs (STAR*D), so "better than medicate-or-not" is plausible,
+"decisive selection" may not be — which is fine for the informational posture.
+
+### Translatability: informational (non-device) Bayesian CDS + human-factors presentation
+
+A parked positioning idea (see the "Clinical decision support / translatability" refs). Interpretable +
+uncertainty-aware + privacy-exportable Bayesian models are the *regulatorily-privileged* class for CDS:
+the FDA Non-Device CDS criteria require a clinician to *independently review the basis*, so interpretability
+is the device/non-device line, and the 2026 update rewards transparency + automation-bias mitigation.
+Design principles: (a) present posteriors as **natural frequencies / icon arrays** (Gigerenzer) — a
+clinician-legible rendering of our SAGE **log-lift** ("of 100 patients with this phenotype, N carry code X
+vs M at baseline"); (b) show **per-case epistemic uncertainty** (a native Bayesian output) as the
+when-to-trust signal; (c) an **LLM translation layer constrained to explain the model's actual parameters**
+(not free-reason), keeping the Bayesian model as the auditable substrate, the LLM as translator, the clinician
+as decider. Positions us upstream of / complementary to the HPO matchers (Phenomizer/LIRICAL): discovery of
+unknown sub-phenotypes vs matching to a fixed disease list.
+
 ### Tree-Structured HDP for Hierarchical Cohort Pooling
 
 The HDP as planned uses the standard two-level topic-model tree: a global DP $G_0$
