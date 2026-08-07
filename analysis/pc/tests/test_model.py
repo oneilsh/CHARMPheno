@@ -1,12 +1,17 @@
-"""Unit tests for the ``PCTopicModel`` wrapper: fit decreases the objective,
-``lam=0`` gives a chance-level / zero-influence head (unsupervised LDA-MAP),
-``transform`` is label-free and shaped right, and refits are deterministic."""
+"""Unit tests for the free-pi PC-family variant ``PCTopicModelFreePi`` (the A2
+model, preserved as the VI-port seed; NOT Hughes' algorithm — the faithful
+reference is ``analysis.pc.model.PCTopicModel``, tested in
+``test_reference_oracle.py`` / ``test_synthetic_signal.py``).
+
+These pin the variant's contract: fit decreases the objective, ``lam=0`` gives a
+chance-level / zero-influence head (unsupervised LDA-MAP), ``transform`` is
+label-free and shaped right, and refits are deterministic."""
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from analysis.pc.model import PCTopicModel
+from analysis.pc.variants import PCTopicModelFreePi as PCTopicModel
 
 
 def _toy_corpus(seed=0, D=40, V=12, K_true=3):
