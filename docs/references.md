@@ -36,7 +36,26 @@ authors, year, title, venue, a link if available, and a short note on its role.
 - **Lee & Seung (2001).** Algorithms for Non-negative Matrix Factorization. *NIPS*.
   — implicit-φ ("Lee/Seung trick") in the LDA/HDP E-step. *used in:* `spark-vi/spark_vi/models/topic/lda.py`
 - **Eisenstein, Ahmed & Xing (2011).** Sparse Additive Generative Models of Text (SAGE). *ICML*.
-  — word-level sparse log-deviation background/foreground; alternative to gating.
+  — parameterizes each topic-word distribution as `β_k ∝ exp(m + η_k)`: a shared background
+  log-frequency `m` plus a *sparse* log-deviation `η_k`. The deviation reads natively as
+  **log-lift over the reference** (the interpretable weight — LDAvis "relevance", our dashboard's
+  metric), and deviations **add** in log-space (compositional). The alternative to gating for the
+  content/β axis; composes with hierarchy, covariates (STM content), and supervision.
+  **Two regimes for us:** (a) *flat/weak* — one global `m`, every topic a sparse deviation from it
+  (keeps all our topics, washes out average comorbidity for interpretability; does NOT tie
+  parent↔child, so no capture fix / no per-node-K); (b) *full cascade* — `β_node ∝ exp(m + Σ_anc dev + dev_node)`,
+  which makes ancestor-capture structurally impossible and per-node-K a shrinkage outcome, but
+  reopens "which parent topic does a child build on" when tpn>1. Non-conjugate (softmax), but
+  *augmented*-conjugate via Pólya-Gamma + a tree-Gaussian (optionally scale-mixed for sparsity)
+  prior — the `pg_stm` toolkit; the tree keeps the Gaussian solves sparse/efficient. **(landscape)**
+- **Doshi-Velez, Wallace & Adams (2015).** Graph-Sparse LDA: A Topic Model with Structured Sparsity. *AAAI* 29:2575–2581.
+  — SAGE's cousin on the *vocabulary* side: structured sparsity over a word-graph (UMLS tree) so each
+  topic is summarized by a few "concept" nodes that roll up their descendants. On an autism-spectrum
+  (ASD) EHR cohort it matched state-of-the-art prediction while needing ~6 concepts/topic vs ~119 for
+  a sparse-LDA baseline, surfacing clinically sensible concepts (Autistic disorder, Epilepsy, Down's,
+  Intellectual disability). Puts the ontology on the *codes* (our SNOMED is-a DAG), NOT on the
+  *phenotype tree* — a different, orthogonal use of ontology than our topic-side cascade. Same lab as
+  the PC/PF line. **(landscape)**
 - **Chang, Boyd-Graber, Gerrish, Wang & Blei (2009).** Reading Tea Leaves: How Humans Interpret Topic Models. *NeurIPS* 22.
   — perplexity vs. interpretability.
 
