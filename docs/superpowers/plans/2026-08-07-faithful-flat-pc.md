@@ -140,11 +140,20 @@ id-agnostic. Tests under `analysis/pc/tests/`.
   with λ=0 the objective's gradient/optimum reduces to plain LDA (topics match an unsupervised fit);
   (2) implement; (3) pass. Gradients hand-coded + checked against `scipy.optimize.check_grad`.
 - [x] **Task A1 done** — `analysis/pc/{head,generative,objective}.py`; 67 tests; check_grad ~1e-9/8e-7; faithful invariants pinned. (commit 46e2bc6)
-- [ ] **Task A2 — synthetic known-signal validation.** (Builds the minimal `PCTopicModel` fit/transform/predict_proba wrapper it needs — that IS B1's core, so B1 collapses to polish.) Generate synthetic docs with a *planted*
-  label-predictive topic; assert PC recovers heldout AUC ≫ chance and beats an unsupervised-LDA→logistic
-  two-stage baseline. This is the "the machine works" gate.
-- [ ] **Task A3 — reference oracle.** Reproduce a result (or a small toy from the dtak repo) to confirm
-  the objective matches the authors' (not naive up-weighting). Document any divergence.
+- [x] **Task A2 done** — synthetic known-signal gate + the `PCTopicModel` wrapper (fit/transform/
+  predict_proba). Hughes regime (dominant non-predictive structure + subtle low-mass predictive topic,
+  K_fit < K_dom): PC beats the unsupervised two-stage on heldout AUC (independent 8-seed sweep: PC
+  strict-wins 8/8). (commit 618b2a5; later re-pointed to the faithful model in A3.)
+- [x] **Task A3 done** — **faithful refactor + reference oracle.** `analysis/pc/slda_reference.py`
+  mirrors the authors' `calc_loss__slda` term-for-term (label-free NEF-MAP π, unrolled + autograd
+  through π→topics; per-label logistic head; loss_x/pi/y/topics/w; token rescaling). `PCTopicModel`
+  rewritten to the faithful algorithm; the A2 free-π model preserved as `variants.PCTopicModelFreePi`
+  (VI-port seed). Oracle on the authors' own `toy_bars_3x3` (vendored into `tests/data/`, MIT-attrib):
+  from scratch PC AUC 1.00 vs two-stage 0.51; **our loss at the authors' published known-good params
+  reproduces the PC trade-off** (good_loss_pc: loss_x 0.240 / loss_y 0.0012 / AUC 1.00 — near the
+  generative optimum yet predicting, vs good_loss_y wrecking topics at loss_x 3.32). 77 tests, ~98s.
+  Divergences documented in the module: softmax rows vs their (V−1) transform; fixed π unroll (no
+  restart/early-stop); no minibatching; α>1 required (NEF convexity).
 
 ### Phase B — Driver-facing API + baselines
 
