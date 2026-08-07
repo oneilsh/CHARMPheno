@@ -179,11 +179,14 @@ id-agnostic. Tests under `analysis/pc/tests/`.
   `antidepressant_stability_label` (gap-and-islands stitch, switch=failure, uncensored under the follow-up
   gate); **fused multi-domain vocab** (condition+drug+procedure → one bag) via `load_omop_bigquery`. Decision:
   features are the *fused* vocab, model is *joint multi-task* (per-cell missing labels), per user.
-- [~] **Task C2 in progress** — joint multi-task PC done + tested (`6749bb9`: `evaluate_pc_multitask`, per-cell
-  mask, recovery PC 0.797 vs two-stage 0.738). Capstone driver `analysis/cloud/pc_antidepressant_cloud.py`
-  (cohort→outcome→fused features→pre-index window→Spark→memory bridge→D×C label+mask→multi-task PC→per-drug
-  AUC) being built; runs in the user's AoU workspace, not here. Target shape: paper's ~0.67–0.71 PC vs ~0.55–0.64
-  LR. `docs/experiments/00NN-*` (date-slug per the new convention) written *after* the AoU run, not before.
+- [x] **Task C2 code-complete** (`6749bb9` + `2914103`), awaiting the AoU run — joint multi-task PC done + tested
+  (`evaluate_pc_multitask`, per-cell mask; recovery PC 0.797 vs two-stage 0.738). Capstone driver
+  `analysis/cloud/pc_antidepressant_cloud.py` wires cohort→outcome→fused features→pre-index window→Spark→memory
+  bridge→D×C label+mask→multi-task PC→per-drug AUC; 21 assembly tests pass. **Cannot run here** (every fact
+  table is a BQ read) — run in the AoU workspace: `cd charmpheno && poetry run python
+  ../analysis/cloud/pc_antidepressant_cloud.py --K … --weight-y …` with `WORKSPACE_CDR`/`GOOGLE_CLOUD_PROJECT`
+  set. Target shape: paper's ~0.67–0.71 PC vs ~0.55–0.64 LR. `docs/experiments/<date-slug>` written *after* the
+  run (per the new numbering convention), not before.
 - [ ] **Task C3 — honest readout.** State up front that a null on AoU is ambiguous *only if* Phase A
   passed (machine trusted) — then a null is a *data* finding (AoU med-completeness / cross-system
   censoring make 90-day stability noisier than the single-hospital original), not a bug.
