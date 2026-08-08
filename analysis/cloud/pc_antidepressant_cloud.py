@@ -52,7 +52,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -439,6 +441,20 @@ def _build_parser() -> argparse.ArgumentParser:
               "rho_t = (tau0 + t)^-kappa (must be in (0.5, 1.0]). Maps to "
               "PCEstimator.learningDecay. Ignored for --backend inmem."),
     )
+    parser.add_argument(
+        "--warm-start-unsup-iters", type=int, default=0,
+        help=("VI backend: unsupervised-warm-start protocol (Hughes et al.). "
+              "0 (default) = cold start (single-phase supervised fit, byte-for-byte "
+              "the prior behavior). N > 0 runs a two-phase fit: PHASE 1 fits the "
+              "SAME PCEstimator machinery at weight_y=0 (unsupervised LDA-MAP) for "
+              "N SVI iters to learn topics (the head stays at its zero init), then "
+              "PHASE 2 warm-starts the supervised fit (real weight_y, --max-iter "
+              "iters) from phase-1's topics with a FRESH Robbins-Monro schedule "
+              "(rho restarts near rho_0) and a fresh zero head. Distinct from "
+              "--resume-from (which continues the decayed counter). Ignored for "
+              "--backend inmem; skipped on --resume-from (resuming continues an "
+              "existing phase-2 fit)."),
+    )
     # --- Feature window ------------------------------------------------------
     parser.add_argument(
         "--lookback-days", type=int, default=365,
@@ -556,6 +572,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.resume_from and args.backend != "vi":
         print(f"ERROR: --resume-from is VI-only; got --backend {args.backend}.",
               file=sys.stderr)
+        return 1
+    if args.warm_start_unsup_iters and args.backend != "vi":
+        print(f"ERROR: --warm-start-unsup-iters is VI-only (the inmem L-BFGS "
+              f"backend has no SVI phase-1 to warm-start from); got --backend "
+              f"{args.backend}.", file=sys.stderr)
+        return 1
+    if args.warm_start_unsup_iters < 0:
+        print(f"ERROR: --warm-start-unsup-iters must be >= 0, got "
+              f"{args.warm_start_unsup_iters}.", file=sys.stderr)
         return 1
     if args.eval_only:
         if args.backend != "vi":
@@ -715,6 +740,7 @@ def main(argv: list[str] | None = None) -> int:
             "doc_batch_size": args.doc_batch_size,
             "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
             "kappa": args.kappa,
+            "warm_start_unsup_iters": args.warm_start_unsup_iters,
             "lookback_days": args.lookback_days, "window_days": args.window_days,
             "stability_days": args.stability_days, "grace_gap_days": args.grace_gap_days,
             "vocab_size": args.vocab_size, "min_df": args.min_df,
@@ -946,11 +972,53 @@ def _run_vi_backend(
                   f"converged={vres.converged}, final_elbo={vres.final_elbo}, "
                   f"|w_CK|max={w_ck_absmax:.4g}", flush=True)
     else:
-        with _phase(f"VI-PC fit (SVI, K={args.K}, weight_y={args.weight_y}, "
+        # Unsupervised-warm-start protocol (Hughes et al.): when
+        # --warm-start-unsup-iters N > 0 and we are NOT resuming, run PHASE 1
+        # (weight_y=0, N iters) to learn topics, then warm-init PHASE 2 (the real
+        # supervised fit) from phase-1's topics with a FRESH Robbins-Monro
+        # schedule. On --resume-from we skip phase 1 entirely: resuming continues
+        # an existing phase-2 fit (warm-start is a fresh-start init, not a resume).
+        warm_iters = int(args.warm_start_unsup_iters)
+        warm_start_dir = ""
+        if warm_iters > 0 and args.resume_from:
+            print("[driver] note: --warm-start-unsup-iters ignored on "
+                  "--resume-from (resuming continues the existing phase-2 fit; "
+                  "warm-start is a fresh-start init).", flush=True)
+            warm_iters = 0
+        if warm_iters > 0:
+            with _phase(f"VI-PC warm-start PHASE 1 (unsupervised LDA-MAP, "
+                        f"weight_y=0, {warm_iters} iters, K={args.K}, "
+                        f"subsamplingRate={args.subsampling_rate}, "
+                        f"tau0={args.tau0}, kappa={args.kappa})"):
+                # Phase 1 is a warm-up: it writes ONLY to a driver-local temp dir
+                # (loaded back on the driver by phase 2's warm-init), NOT to
+                # --save-dir. --save-dir checkpoints the real (phase-2) fit.
+                warm_start_dir = tempfile.mkdtemp(prefix="pc_warmup_")
+                phase1 = PCEstimator(
+                    featuresCol="features", labelCol="y", labelMaskCol="label_mask",
+                    numLabels=C, weightY=0.0, k=args.K,
+                    docConcentration=[float(args.alpha)],
+                    subsamplingRate=args.subsampling_rate,
+                    learningOffset=args.tau0, learningDecay=args.kappa,
+                    maxIter=warm_iters, seed=args.seed,
+                    probabilityCol="probability",
+                )
+                model_p1 = phase1.fit(train_df)
+                model_p1.save(warm_start_dir)
+                w1 = float(np.abs(model_p1.headWeights()).max())
+                print(f"[driver]   warm-start phase 1 done: "
+                      f"n_iter={model_p1.result.n_iterations}, "
+                      f"final_elbo={model_p1.result.final_elbo}, "
+                      f"|w_CK|max={w1:.4g} (head at zero init, as expected for "
+                      f"weight_y=0)", flush=True)
+
+        with _phase(f"VI-PC fit{' PHASE 2 (supervised, warm-started)' if warm_start_dir else ''} "
+                    f"(SVI, K={args.K}, weight_y={args.weight_y}, "
                     f"subsamplingRate={args.subsampling_rate}, tau0={args.tau0}, "
                     f"kappa={args.kappa}, maxIter={args.max_iter}, "
                     f"saveDir={args.save_dir or '<none>'}, "
-                    f"resumeFrom={args.resume_from or '<none>'})"):
+                    f"resumeFrom={args.resume_from or '<none>'}, "
+                    f"warmStartFrom={'<phase1>' if warm_start_dir else '<none>'})"):
             estimator = PCEstimator(
                 featuresCol="features", labelCol="y", labelMaskCol="label_mask",
                 numLabels=C, weightY=float(args.weight_y), k=args.K,
@@ -961,8 +1029,15 @@ def _run_vi_backend(
                 probabilityCol="probability",
                 saveDir=args.save_dir, saveInterval=args.save_interval,
                 resumeFrom=args.resume_from,
+                warmStartFrom=warm_start_dir,
             )
-            model = estimator.fit(train_df)
+            try:
+                model = estimator.fit(train_df)
+            finally:
+                # Phase-1 temp checkpoint is consumed by phase 2's warm-init;
+                # drop it once the fit has loaded it.
+                if warm_start_dir:
+                    shutil.rmtree(warm_start_dir, ignore_errors=True)
             vres = model.result
             w_ck_absmax = float(np.abs(model.headWeights()).max())
             print(f"[driver]   VI-PC fit done: n_iter={vres.n_iterations}, "

@@ -19,6 +19,7 @@ head trains on it — and ``_transform`` additionally appends a head-derived
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -217,6 +218,26 @@ class _PCParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
         "(0 = no warmup)",
         typeConverter=TypeConverters.toInt,
     )
+    warmStartFrom = Param(
+        Params._dummy(), "warmStartFrom",
+        "path to a previously-written save dir whose global params (topics/lambda) "
+        "SEED this fit as its initial global params, with a FRESH Robbins-Monro "
+        "iteration counter (rho restarts near rho_0). Empty (default) = cold start. "
+        "DISTINCT from resumeFrom, which CONTINUES the counter (decayed rho) — a "
+        "warm start needs the undecayed schedule so the head can move. The "
+        "unsupervised-warm-start protocol (Hughes et al.): fit phase 1 at "
+        "weightY == 0 (learns topics, leaves the head at its zero init), then "
+        "warm-start a supervised phase 2 (weightY > 0) from it. Mutually exclusive "
+        "with resumeFrom.",
+        typeConverter=TypeConverters.toString,
+    )
+
+    def setWarmStartFrom(self, value: str):
+        """Set warmStartFrom (path to a phase-1 checkpoint to warm-init from; empty = cold start)."""
+        return self._set(warmStartFrom=value)
+
+    def getWarmStartFrom(self) -> str:
+        return str(self.getOrDefault(self.warmStartFrom))
 
 
 def _build_model_and_config(
@@ -290,7 +311,7 @@ _PC_DEFAULTS = dict(
     gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
     numLabels=1, weightY=0.0, probabilityCol="probability",
     lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, topicTrust=0.1,
-    weightYWarmupIters=0,
+    weightYWarmupIters=0, warmStartFrom="",
 )
 
 
@@ -331,6 +352,7 @@ class PCEstimator(_PCParams, Estimator):
         headLrScale: float = 1.0,
         topicTrust: float = 0.1,
         weightYWarmupIters: int = 0,
+        warmStartFrom: str = "",
         # _PersistenceParams kwargs — see that mixin's docstring; these MUST
         # appear here explicitly (not just on the mixin) for kwarg-style
         # construction (the cloud driver builds via kwargs).
@@ -381,6 +403,25 @@ class PCEstimator(_PCParams, Estimator):
         # and > 0 fits go through this one VIRunner.fit code path.
         config, resume_path = apply_persistence_params(self, config)
 
+        # warmStartFrom is a PC-specific, fresh-counter warm-INIT (distinct from
+        # resumeFrom's continue-counter). Resolve + validate it here rather than
+        # in the shared apply_persistence_params so the LDA/HDP resume surface is
+        # untouched. Empty (default) => cold start (warm_start_path stays None).
+        warm_start = self.getOrDefault("warmStartFrom")
+        warm_start_path = None
+        if warm_start:
+            if resume_path is not None:
+                raise ValueError(
+                    "resumeFrom and warmStartFrom are mutually exclusive: "
+                    "resumeFrom continues the Robbins-Monro counter, "
+                    "warmStartFrom resets it. Set at most one."
+                )
+            if not (Path(warm_start) / "manifest.json").exists():
+                raise FileNotFoundError(
+                    f"No manifest.json at warmStartFrom path: {warm_start}"
+                )
+            warm_start_path = Path(warm_start)
+
         label_col = self.getOrDefault("labelCol") if self.isSet("labelCol") else None
         label_mask_col = (
             self.getOrDefault("labelMaskCol") if self.isSet("labelMaskCol") else None
@@ -420,6 +461,7 @@ class PCEstimator(_PCParams, Estimator):
             result = VIRunner(model_obj, config=config).fit(
                 pc_rdd,
                 resume_from=resume_path,
+                warm_start_from=warm_start_path,
                 on_iteration=self._on_iteration,
             )
         finally:

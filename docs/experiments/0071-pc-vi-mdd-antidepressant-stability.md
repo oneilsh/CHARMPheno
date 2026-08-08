@@ -33,6 +33,9 @@ seed: 0
 subsampling_rate: 0.05      # mini-batch fraction per SVI iteration (-> --subsampling-rate)
 tau0: 64.0                  # Robbins-Monro learning offset (-> --tau0)
 kappa: 0.6                  # Robbins-Monro learning decay in (0.5, 1.0] (-> --kappa)
+# warm_start_unsup_iters: 0 # unsup warm-start (Hughes): 0=cold start; N>0 = phase-1
+                            # weight_y=0 topic warm-up then fresh-RM supervised phase 2
+                            # (-> --warm-start-unsup-iters). See "Warm-start A/B" below.
 # Documentary-only (NOT driver flags; ignored by build_pc_args): the vocab is
 # fused across condition+drug+procedure and the model is joint multi-task PC
 # (one shared model, per-drug heads, per-cell missing labels).
@@ -108,6 +111,22 @@ non-degenerate drugs.
   `kappa=0.6`. If `vi_convergence.w_CK_absmax ≈ 0` after a run, lower `tau0`
   further (≈10–32) and/or raise `weight_y`; if the ELBO/head diverges, raise
   `tau0` or reach for the estimator's `head_lr_scale` / `weight_y_warmup_iters`.
+- **Unsupervised warm-start (`warm_start_unsup_iters`)** — Hughes et al. seed the
+  supervised PC fit from the topics of an *unsupervised* fit (they used Gibbs-LDA;
+  our analogue is a `weight_y=0` SVI phase). `0` (default) = cold start. `N > 0`
+  runs PHASE 1 (`weight_y=0`, N iters — learns topics, head stays at zero) then
+  warm-starts PHASE 2 (the real supervised fit, `--max-iter` iters) from those
+  topics with a **fresh** Robbins-Monro schedule so the head trains against an
+  undecayed ρ (a `--resume`-style decayed ρ would leave the head barely moving —
+  this knob is deliberately distinct from `--resume-from`). If a cold fit's
+  `w_CK_absmax` is low or its topics look label-agnostic, try `warm_start_unsup_iters:
+  50` and compare. **A/B (warm vs cold):** run two experiments differing ONLY in
+  this knob (`0` vs e.g. `50`); `warm_start_unsup_iters=0` is byte-for-byte the
+  single-phase fit, so the comparison isolates the warm-start's effect on the
+  head trajectory and per-drug AUC. Phase 1 does NOT checkpoint to the run dir
+  (it is a warm-up); `--save-dir` still checkpoints the real phase-2 fit, and
+  resume skips phase 1 (it continues an existing phase-2 fit).
+
 - **Verify concept ids** — the `_DRUG_REGISTRY` / MDD `_DISEASE_REGISTRY` entries
   carry `VERIFY ON FIRST RUN` comments; check `concept_ancestor` counts against
   the live CDR before trusting cohort N.
