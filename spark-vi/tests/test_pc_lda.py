@@ -336,3 +336,113 @@ def test_pc_supervised_beats_two_stage_on_heldout_auc(spark):
     assert pc_auc > two_auc + 0.05, (
         f"PC {pc_auc:.3f} did not beat two-stage {two_auc:.3f} by margin"
     )
+
+
+# ---------------------------------------------------------------------------
+# Increment 2 — AT-SCALE NUMERICAL STABILITY (the regression gate for the
+# supervised-topic-correction divergence).
+#
+# The bug: the supervised topic correction subtracted ρ·weight_y·grad_topics
+# from λ directly, where grad_topics is a corpus-SUMMED gradient in topic-
+# PROBABILITY space (expElogbeta ~ O(1/V)) while λ is in Dirichlet-COUNT space
+# (Σλ ~ corpus tokens). On a real 33k-doc run at weight_y=100 the correction
+# dwarfed λ → Σλ doubled every iter → the (unsupervised-LDA) ELBO computed on
+# the corrupted λ exploded to ±1e32 by iter 3. The increment-2 tests passed
+# only because their synthetic corpora were small enough to stay stable — a
+# TESTING GAP. This test fills it: a few-thousand-doc corpus is large enough
+# that the corpus-summed correction is decades larger than λ, so WITHOUT the
+# trust region λ diverges here; WITH it, everything stays bounded at
+# weight_y ∈ {100, 1000} AND an aggressive tau0=64.
+# ---------------------------------------------------------------------------
+
+def _scale_stability_corpus(n_docs=2500, K=4, C=2, block=5, seed=0):
+    """A few-thousand-doc labeled corpus: K disjoint vocab blocks, one predictive
+    block driving a single OBSERVED label cell/row. C>1, exactly one observed cell
+    per doc (semi-supervised asymmetry) — enough real supervised signal that the
+    topic correction is non-trivial, so the trust region is genuinely exercised."""
+    from spark_vi.models.topic.types import PCDocument
+    rng = np.random.default_rng(seed)
+    V = K * block
+    sig = V - block           # first column of the last (predictive) block
+    docs = []
+    for _ in range(n_docs):
+        t = int(rng.integers(0, K))
+        favored = list(range(t * block, (t + 1) * block))
+        counts = np.zeros(V)
+        for w in rng.choice(favored, size=int(rng.integers(8, 16)), replace=True):
+            counts[w] += 1.0
+        # Label: does this doc load on the predictive block? (observed on cell 0.)
+        label = 1.0 if t == K - 1 else 0.0
+        # A little label noise so the head can't saturate to a trivial separator.
+        if rng.random() < 0.1:
+            label = 1.0 - label
+        idx = np.nonzero(counts)[0].astype(np.int32)
+        y = np.zeros(C); y[0] = label
+        mask = np.zeros(C); mask[0] = 1.0        # exactly one observed cell/row
+        docs.append(PCDocument(
+            indices=idx, counts=counts[idx].astype(np.float64),
+            length=int(counts.sum()), y=y, label_mask=mask,
+        ))
+    return docs, V, K, C
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("weight_y", [100.0, 1000.0])
+def test_pc_supervised_at_scale_stability(spark, weight_y):
+    """At corpus scale + large weight_y + aggressive tau0=64, the trust-region
+    topic correction keeps the fit numerically bounded: ELBO stays finite and does
+    not explode, Σλ does not run away geometrically, |w_CK|max stays bounded.
+
+    This is the regression gate for the diverging supervised topic correction —
+    without the trust region λ diverges on this corpus (ELBO → ±1e32, Σλ doubling
+    per iter). Both weight_y values must stay bounded (weight_y is a robust dial)."""
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.models.topic.pc import OnlinePCLDA
+
+    docs, V, K, C = _scale_stability_corpus(n_docs=2500, K=4, C=2, seed=0)
+    rdd = spark.sparkContext.parallelize(docs, numSlices=4).persist()
+    rdd.count()
+
+    model = OnlinePCLDA(K=K, vocab_size=V, C=C, weight_y=weight_y,
+                        alpha=1.1, grad_cavi_iters=8, random_seed=0)
+
+    # Aggressive tau0=64 (the task's stress setting) + full-batch so the
+    # correction is summed over the whole corpus every iter — the exact
+    # divergence condition. The trust region must make this safe on its own.
+    cfg = VIConfig(max_iterations=40, learning_rate_tau0=64.0,
+                   learning_rate_kappa=0.6, random_seed=0, convergence_tol=1e-12)
+
+    sum_lam, wmax = [], []
+
+    def _rec(_it, gp, _trace):
+        sum_lam.append(float(np.asarray(gp["lambda"]).sum()))
+        wmax.append(float(np.abs(np.asarray(gp["w_CK"])).max()))
+
+    result = VIRunner(model, config=cfg).fit(rdd, on_iteration=_rec)
+    rdd.unpersist(blocking=False)
+
+    elbo = np.asarray(result.elbo_trace, dtype=np.float64)
+    sum_lam = np.asarray(sum_lam)
+    wmax = np.asarray(wmax)
+    print(f"\n[increment-2 at-scale stability, weight_y={weight_y:g}, tau0=64] "
+          f"ELBO first={elbo[0]:.4g} last={elbo[-1]:.4g} "
+          f"max|ELBO|={np.abs(elbo).max():.4g} | "
+          f"Sum_lambda first={sum_lam[0]:.4g} last={sum_lam[-1]:.4g} "
+          f"max={sum_lam.max():.4g} | |w_CK|max last={wmax[-1]:.4g} "
+          f"max={wmax.max():.4g}")
+
+    # ELBO stays FINITE and does not blow up (no 1e32).
+    assert np.all(np.isfinite(elbo)), f"ELBO went non-finite: {elbo}"
+    assert np.abs(elbo).max() < 1e9, (
+        f"ELBO exploded (max|ELBO|={np.abs(elbo).max():.3g}): {elbo}"
+    )
+    # Σλ stays bounded — no geometric runaway. Anchored to the first iterate:
+    # a doubling-per-iter runaway over 40 iters would be 2^40x; a 50x cap is a
+    # wide margin that still catches any geometric blow-up.
+    assert np.all(np.isfinite(sum_lam)), f"Sum_lambda went non-finite: {sum_lam}"
+    assert sum_lam.max() < 50.0 * sum_lam[0], (
+        f"Sum_lambda ran away: first={sum_lam[0]:.4g} max={sum_lam.max():.4g}"
+    )
+    # |w_CK|max stays bounded.
+    assert np.all(np.isfinite(wmax)), f"|w_CK|max went non-finite: {wmax}"
+    assert wmax.max() < 1e3, f"|w_CK|max ran away: {wmax.max():.4g}"

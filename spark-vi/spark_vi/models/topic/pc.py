@@ -268,6 +268,18 @@ class OnlinePCLDA(VIModel):
                   (bounds the autograd tape; default 20).
         head_lr_scale: extra multiplier on the head SGD step size — the RM ↔
                   weight_y decoupling knob (see the class note below). Default 1.0.
+        topic_trust: trust-region fraction for the supervised topic correction on
+                  λ. Each λ cell's per-iteration supervised change is clipped to
+                  ``±topic_trust · λ[k,v]`` (a per-CELL relative cap on the current
+                  λ, which already carries the corpus scaling, so the cap is
+                  scale-invariant). This keeps ``λ_new ≥ (1-topic_trust)·λ_unsup >
+                  0`` — no cell nears the Dirichlet floor where digamma(λ) and the
+                  ELBO explode — and Σλ cannot run away, making ``weight_y`` a robust
+                  dial that cannot diverge λ for any corpus size / ``weight_y`` /
+                  ``tau0`` (see the "Topic correction: space/scale" note on
+                  ``update_global``). Default 0.1. Analogous to ``head_lr_scale``
+                  for the head, but a HARD per-cell cap rather than a linear scale,
+                  because the topic gradient lives in a DIFFERENT space than λ.
         weight_y_warmup_iters: linearly ramp the effective weight_y from 0 to
                   weight_y over this many global steps (0 = no warmup). Damps the
                   early-iteration head/topic-correction shock when a large
@@ -278,12 +290,21 @@ class OnlinePCLDA(VIModel):
     One ρ_t damps λ, the supervised topic correction, AND the head SGD. A large
     ``weight_y`` with an aggressive early ρ_t can shove the head across the
     logistic's saturated tail in a single step (the STM softmax-saturation
-    failure mode). Two knobs decouple them: ``head_lr_scale`` scales ONLY the head
-    step (leave the λ correction, which lives on the Dirichlet-pseudocount scale,
-    untouched), and ``weight_y_warmup_iters`` ramps the whole supervised weight in
-    so the first, largest ρ_t steps carry little supervised signal. Both default
-    to the no-op setting; reach for them if the ELBO/AUC trace shows the head
-    diverging.
+    failure mode). ``head_lr_scale`` scales ONLY the head step, and
+    ``weight_y_warmup_iters`` ramps the whole supervised weight in so the first,
+    largest ρ_t steps carry little supervised signal. Both default to the no-op
+    setting; reach for them if the ELBO/AUC trace shows the head diverging.
+
+    The λ (topic) correction has its OWN, mandatory guard — a trust region
+    (``topic_trust``), NOT merely a ρ-blend. The supervised topic gradient lives
+    in topic-PROBABILITY space (``expElogbeta`` ~ O(1/V)) while λ lives in
+    Dirichlet-COUNT space (Σλ ~ corpus tokens); the two are decades apart in
+    magnitude, and the gradient arrives corpus-SUMMED (and corpus-scaled by the
+    runner), so a bare subtraction ``λ − ρ·wy·gT`` scales with corpus size and
+    diverges λ (observed at 33k docs: Σλ doubling per iter, ELBO → -1e32). The
+    trust region caps the per-iteration supervised change to a fixed fraction of
+    the (unconditionally stable) unsupervised λ step, making ``weight_y`` a dial
+    that cannot diverge at any scale. See ``update_global``.
     """
 
     def __init__(
@@ -295,6 +316,7 @@ class OnlinePCLDA(VIModel):
         lambda_w: float = 0.001,
         grad_cavi_iters: int = 20,
         head_lr_scale: float = 1.0,
+        topic_trust: float = 0.1,
         weight_y_warmup_iters: int = 0,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
@@ -315,6 +337,8 @@ class OnlinePCLDA(VIModel):
             raise ValueError(f"grad_cavi_iters must be >= 1, got {grad_cavi_iters}")
         if head_lr_scale <= 0:
             raise ValueError(f"head_lr_scale must be > 0, got {head_lr_scale}")
+        if topic_trust <= 0:
+            raise ValueError(f"topic_trust must be > 0, got {topic_trust}")
         if weight_y_warmup_iters < 0:
             raise ValueError(
                 f"weight_y_warmup_iters must be >= 0, got {weight_y_warmup_iters}"
@@ -345,6 +369,7 @@ class OnlinePCLDA(VIModel):
         self.lambda_w = float(lambda_w)
         self.grad_cavi_iters = int(grad_cavi_iters)
         self.head_lr_scale = float(head_lr_scale)
+        self.topic_trust = float(topic_trust)
         self.weight_y_warmup_iters = int(weight_y_warmup_iters)
         # Driver-side global-step counter, used only for weight_y warmup. Bumped
         # once per update_global call (the runner drives that single-threaded on
@@ -445,18 +470,49 @@ class OnlinePCLDA(VIModel):
         At weight_y == 0 the LDA globals {lambda, alpha, eta} are updated verbatim
         by ``OnlineLDA.update_global`` and ``w_CK`` passes through unchanged.
 
-        At weight_y > 0, AFTER the unsupervised λ step, apply the ρ-blended
-        non-conjugate corrections (the OnlineSTM Γ ridge-M-step template, damped by
-        the runner's RM ρ_t). With ``wy`` the (warmup-scaled) effective weight_y,
+        At weight_y > 0, AFTER the unsupervised λ step, apply the non-conjugate
+        corrections (the OnlineSTM Γ ridge-M-step template, damped by the runner's
+        RM ρ_t). With ``wy`` the (warmup-scaled) effective weight_y,
         ``N`` = ``target_stats["n_docs"]`` the corpus-equivalent doc count:
 
-          (b) supervised topic correction on λ. This is ALREADY a ρ-blend —
-              ``λ = (1-ρ)·λ + ρ·(λ_target − wy·gT)`` — so it inherits the natural
-              gradient's ``(1-ρ)`` shrinkage and is stable at the corpus scale of λ.
-              ``gT`` = corpus-summed ``grad_topics_stat``. loss_y is an NLL being
-              minimized, so we descend it; expElogbeta is monotone-increasing in λ
-              per cell, so the ∂/∂expElogbeta direction carries to λ:
-                  λ ← λ_unsup_step  −  ρ · wy · gT          (floored > 0)
+          (b) supervised topic correction on λ, with a TRUST REGION.
+              Space/scale (the bug this guard fixes). ``gT`` = ``grad_topics_stat``
+              is Σ_d ∂loss_y_d/∂expElogbeta, a gradient in topic-PROBABILITY space
+              (expElogbeta ~ O(1/V)), corpus-SUMMED and then corpus-SCALED by the
+              runner. λ lives in Dirichlet-COUNT space (per-cell λ ~ O(tens),
+              Σλ ~ corpus tokens). Subtracting ``ρ·wy·gT`` directly from λ mixes
+              two spaces that are decades apart AND scales the subtraction with
+              corpus size, so at 33k docs × wy=100 the "correction" dwarfs λ and λ
+              diverges geometrically (Σλ doubling per iter; the LDA ELBO computed on
+              the corrupted λ then explodes to ±1e32). A ρ-blend does NOT save it:
+              (1-ρ) shrinks λ toward η+counts, but the subtracted term is orders of
+              magnitude larger than that anchor, so the shrinkage is irrelevant.
+              (This corrects the earlier docstring's WRONG claim that the correction
+              was "corpus-scale ... hence stable".)
+
+              The fix: descend loss_y in the SAME direction (−gT; expElogbeta is
+              monotone-increasing in λ per cell, so the ∂/∂expElogbeta descent
+              direction carries to λ), but clip the PER-CELL correction to a fixed
+              fraction ``topic_trust`` of that cell's just-taken unsupervised λ:
+                  raw  = ρ · wy · gT
+                  corr = clip(raw, −topic_trust·λ_unsup, +topic_trust·λ_unsup)
+                  λ ← λ_unsup − corr                          (λ_unsup = new_lam)
+              A per-CELL cap (not a global norm) is required: a norm-bounded
+              correction concentrated on a small-λ cell can still drive that ONE
+              cell to the floor, and ``digamma(1e-30) ≈ -1e30`` makes the ELBO's
+              global β-KL explode even while Σλ looks bounded. The per-cell relative
+              cap guarantees ``λ_new ≥ (1-topic_trust)·λ_unsup > 0`` everywhere, so
+              no cell nears the floor, AND Σλ cannot run away geometrically. The cap
+              is relative to the true per-iteration λ state (which already carries
+              the runner's corpus scaling), so it is scale-INVARIANT: the
+              unsupervised LDA step is unconditionally stable (a contraction toward
+              η+counts) and the supervised perturbation is bounded to a
+              ``topic_trust`` (default 0.1) fraction of the current λ, keeping the
+              combined step stable for ANY corpus size, ``wy``, or ``tau0``. ``wy``
+              remains the dial (below the cap the step is the exact faithful
+              ρ·wy·gT); above the cap it saturates rather than diverging. The
+              direction / meaning of the gradient is unchanged — only its magnitude
+              into λ-space is bounded.
           (c) head SGD. The head has NO ``(1-ρ)`` shrinkage and no corpus-scale
               anchor, so a corpus-SUMMED gradient makes the un-damped step grow
               with corpus size and run the logistic head off to its saturated tail
@@ -485,18 +541,33 @@ class OnlinePCLDA(VIModel):
 
         n_docs = float(target_stats.get("n_docs", np.array(1.0)))
         inv_n = 1.0 / max(n_docs, 1.0)
-        # Topic correction: corpus-scale sum (ρ-blended with λ, so stable there).
+        # Topic correction: β-probability-space gradient, trust-region-capped into
+        # λ-count space (see the space/scale note in the docstring).
         grad_topics = np.asarray(target_stats["grad_topics_stat"], dtype=np.float64)
         # Head: per-doc MEAN (scale-invariant; the un-shrunk head has no corpus anchor).
         grad_wCK = np.asarray(target_stats["grad_wCK_stat"], dtype=np.float64) * inv_n
         w_CK = np.asarray(global_params["w_CK"], dtype=np.float64)
 
-        # (b) supervised topic correction on λ. Floor at a small positive so the
-        # correction can never push a Dirichlet pseudocount non-positive (the
-        # reference lives in softmax space and never hits this; here λ ~ η + counts
-        # so it is essentially never active, but it keeps λ a valid Dirichlet).
-        lam_corrected = new_gp["lambda"] - rho * wy * grad_topics
-        new_gp["lambda"] = np.maximum(lam_corrected, 1e-30)
+        # (b) supervised topic correction on λ, PER-CELL trust-region-capped. The
+        # raw descent step ρ·wy·gT lives in topic-PROBABILITY space and is
+        # corpus-summed/scaled, so subtracting it directly from λ (Dirichlet-COUNT
+        # space) diverges λ at scale. We clip the per-cell correction to
+        # ±topic_trust · λ_unsup[k,v] (a relative cap on the JUST-TAKEN
+        # unsupervised λ), so every cell moves by at most a topic_trust fraction of
+        # its own value. Consequences: (i) λ_new ≥ (1-topic_trust)·λ_unsup > 0, so
+        # no cell is ever driven toward the floor where digamma(λ) — and hence the
+        # ELBO's global β-KL — explodes; (ii) Σλ cannot run away geometrically;
+        # (iii) the cap is relative to the true per-iteration λ state (which already
+        # carries the runner's corpus scaling), so it is scale-INVARIANT — weight_y
+        # is a dial that saturates rather than diverges. Sign (descend loss_y) is
+        # preserved per cell; below the cap the step is exactly ρ·wy·gT.
+        lam_unsup = new_gp["lambda"]
+        raw_corr = rho * wy * grad_topics
+        cell_cap = self.topic_trust * lam_unsup
+        corr = np.clip(raw_corr, -cell_cap, cell_cap)
+        # Floor kept as a belt-and-suspenders invariant (unreachable given the cap):
+        # keeps λ a valid strictly-positive Dirichlet pseudocount.
+        new_gp["lambda"] = np.maximum(lam_unsup - corr, 1e-30)
 
         # (c) head SGD: mean data gradient + ridge, damped by ρ, head_lr_scale, wy.
         head_grad = grad_wCK + self.lambda_w * 2.0 * w_CK
