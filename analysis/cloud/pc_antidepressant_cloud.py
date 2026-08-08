@@ -216,6 +216,159 @@ def collect_bow_aligned(bow_df, vocab_size: int) -> tuple[np.ndarray, list[Any]]
 
 
 # --------------------------------------------------------------------------- #
+# VI backend helpers: attach the multi-task label/mask as Spark columns, split #
+# by person at the DataFrame level, and collect a scored/labeled BOW to numpy. #
+# --------------------------------------------------------------------------- #
+def attach_multitask_label_columns(
+    bow_df,
+    outcome_by_person: Mapping[Any, tuple[str, bool]],
+    drug_order: Sequence[str],
+    spark,
+    label_col: str = "y",
+    mask_col: str = "label_mask",
+):
+    """Attach the per-patient multi-task label + mask to ``bow_df`` as columns.
+
+    The Spark/column counterpart of :func:`assemble_multitask_labels`: it produces,
+    per BOW row, the SAME length-``C`` label vector ``y`` (worked at the patient's
+    index-drug column, else 0) and length-``C`` ``label_mask`` (1 at the index
+    drug, 0 elsewhere) that the numpy assembler builds — keyed by index drug ->
+    column via ``drug_order`` (identical order to :func:`stable_drug_order`), so the
+    distributed VI-PC sees the exact same supervision as the in-memory path.
+
+    IMPORTANT — column type. ``PCEstimator``'s shim (``_row_to_pc_document``) reads
+    the label columns with ``isinstance(raw, (list, tuple, np.ndarray))`` and, on a
+    miss, wraps the value as ``[raw]`` (promoting a scalar to length-1). A
+    ``VectorUDT``/``DenseVector`` fails that check and would be wrapped to a spurious
+    ``(1, C)`` shape, so the label/mask are emitted as Spark ``ArrayType(DoubleType)``
+    columns — which deserialize to Python ``list`` and hit the ``isinstance`` fast
+    path as a clean ``(C,)`` vector. (This differs from the STM covariate column,
+    which the STM shim converts with a bare ``np.asarray(cov)`` and so can be a
+    Vector.)
+
+    The outcome dict is materialized to a tiny driver-side table and BROADCAST
+    left-joined onto ``bow_df`` by ``person_id`` (mirroring the STM corpus+covariate
+    broadcast join): a BOW person absent from ``outcome_by_person``, or whose index
+    drug is not a column in ``drug_order``, gets all-zero ``y``/``label_mask`` — a
+    valid unlabeled row (no observed cell), exactly as the numpy assembler leaves it.
+
+    Returns ``bow_df`` with the two columns appended (the join keys ``_index_drug``/
+    ``_worked`` are dropped); all original columns (``person_id``, ``features``, ...)
+    are preserved.
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import (
+        ArrayType, BooleanType, DoubleType, StringType, StructField, StructType,
+    )
+
+    C = len(drug_order)
+    col_of = {d: j for j, d in enumerate(drug_order)}
+
+    person_dtype = bow_df.schema["person_id"].dataType
+    schema = StructType([
+        StructField("person_id", person_dtype, True),
+        StructField("_index_drug", StringType(), True),
+        StructField("_worked", BooleanType(), True),
+    ])
+    rows = [
+        (pid, drug, bool(worked))
+        for pid, (drug, worked) in outcome_by_person.items()
+    ]
+    outcome_df = spark.createDataFrame(rows, schema=schema)
+    joined = bow_df.join(F.broadcast(outcome_df), on="person_id", how="left")
+
+    def _y_vec(drug, worked):
+        v = [0.0] * C
+        j = col_of.get(drug)
+        if j is not None and worked:
+            v[j] = 1.0
+        return v
+
+    def _mask_vec(drug):
+        v = [0.0] * C
+        j = col_of.get(drug)
+        if j is not None:
+            v[j] = 1.0
+        return v
+
+    y_udf = F.udf(_y_vec, ArrayType(DoubleType()))
+    mask_udf = F.udf(_mask_vec, ArrayType(DoubleType()))
+    return (
+        joined
+        .withColumn(label_col, y_udf(F.col("_index_drug"), F.col("_worked")))
+        .withColumn(mask_col, mask_udf(F.col("_index_drug")))
+        .drop("_index_drug", "_worked")
+    )
+
+
+def person_hash_split(
+    df,
+    test_frac: float,
+    seed: int,
+    key_col: str = "person_id",
+    buckets: int = 10_000,
+):
+    """Seeded, DataFrame-level train/test split keyed on ``person_id``.
+
+    Assigns each row deterministically by hashing ``(person_id, seed)`` into
+    ``buckets`` buckets (Spark's ``F.hash``, made non-negative via ``pmod``) and
+    holding out the buckets below ``round(test_frac * buckets)``. Under
+    ``PatientDocSpec`` there is one row per person, so this is a per-person split;
+    it is reproducible from ``(seed, test_frac)`` alone regardless of partitioning
+    (unlike ``DataFrame.randomSplit``, whose result depends on partition layout).
+    Not stratified by index drug — the in-memory path's
+    :func:`stratified_test_mask` is; at the VI backend's corpus scale a hash split
+    is adequate and keeps the split fully distributed. Returns ``(train_df,
+    test_df)`` — disjoint, together the whole input.
+    """
+    from pyspark.sql import functions as F
+
+    salted = F.concat_ws("_", F.col(key_col).cast("string"), F.lit(str(int(seed))))
+    bucket = F.pmod(F.hash(salted), F.lit(int(buckets)))
+    cut = int(round(float(test_frac) * buckets))
+    df_h = df.withColumn("_split_bucket", bucket)
+    test_df = df_h.where(F.col("_split_bucket") < F.lit(cut)).drop("_split_bucket")
+    train_df = df_h.where(F.col("_split_bucket") >= F.lit(cut)).drop("_split_bucket")
+    return train_df, test_df
+
+
+def collect_labeled_bow(df, vocab_size: int, C: int, prob_col: str | None = None):
+    """Collect a label-columned (optionally scored) BOW df to dense numpy arrays.
+
+    The VI backend's bridge back to the shared numpy scoring/baseline helpers:
+    collects ``person_id``, ``features``, ``y``, ``label_mask`` (and, when
+    ``prob_col`` is set, the transform's per-label ``probabilityCol``) and returns
+    ``(X, y_DC, mask_DC, proba_DC, person_order)`` — ``X`` dense ``(D, vocab_size)``
+    via :func:`bow_rows_to_matrix`, ``y_DC``/``mask_DC`` the ``(D, C)`` arrays the
+    ``ArrayType`` columns deserialize to, ``proba_DC`` the ``(D, C)`` head
+    probabilities (or ``None`` when ``prob_col`` is None), all row-aligned to the
+    collected ``person_order``. Empty df yields correctly-shaped ``(0, ...)``
+    arrays.
+    """
+    cols = ["person_id", "features", "y", "label_mask"]
+    if prob_col is not None:
+        cols.append(prob_col)
+    rows = df.select(*cols).collect()
+    person_order = [r["person_id"] for r in rows]
+    features_by_person = {r["person_id"]: r["features"] for r in rows}
+    X = bow_rows_to_matrix(features_by_person, person_order, vocab_size).toarray()
+    if rows:
+        y_DC = np.asarray([[float(v) for v in r["y"]] for r in rows], dtype=np.float64)
+        mask_DC = np.asarray(
+            [[float(v) for v in r["label_mask"]] for r in rows], dtype=np.float64
+        )
+        proba_DC = (
+            np.asarray([r[prob_col].toArray() for r in rows], dtype=np.float64)
+            if prob_col is not None else None
+        )
+    else:
+        y_DC = np.zeros((0, C), dtype=np.float64)
+        mask_DC = np.zeros((0, C), dtype=np.float64)
+        proba_DC = None if prob_col is None else np.zeros((0, C), dtype=np.float64)
+    return X, y_DC, mask_DC, proba_DC, person_order
+
+
+# --------------------------------------------------------------------------- #
 # Driver                                                                       #
 # --------------------------------------------------------------------------- #
 class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
@@ -235,6 +388,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cdr", default=os.environ.get("WORKSPACE_CDR"),
         help="BQ CDR dataset '<project>.<dataset>' (default: $WORKSPACE_CDR)",
     )
+    # --- Backend selector ----------------------------------------------------
+    parser.add_argument(
+        "--backend", choices=("inmem", "vi"), default="inmem",
+        help=("PC fit backend. 'inmem' (default) = the in-memory L-BFGS "
+              "PCTopicModel run on the driver via evaluate_pc_multitask (current "
+              "behavior, unchanged). 'vi' = the distributed VI-native PCEstimator "
+              "(SVI, no collect-to-memory for the fit); the two-stage / LR-on-codes "
+              "baselines are still collected+fit in memory so the numbers are "
+              "comparable to the same baselines."),
+    )
     parser.add_argument(
         "--billing", default=os.environ.get("GOOGLE_CLOUD_PROJECT"),
         help="GCP billing/compute project (default: $GOOGLE_CLOUD_PROJECT)",
@@ -253,7 +416,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "--doc-batch-size", type=int, default=2048,
         help=("document minibatch size for the PC full-batch gradient assembly; "
               "bounds driver autograd memory (~ doc_batch_size x pi_iters x V) at "
-              "real-corpus scale without changing the objective or optimizer"),
+              "real-corpus scale without changing the objective or optimizer "
+              "(inmem backend only)"),
+    )
+    # --- Distributed-SVI knobs (backend=vi only; ignored for inmem) -----------
+    parser.add_argument(
+        "--subsampling-rate", type=float, default=0.05,
+        help=("VI backend: mini-batch fraction per SVI iteration. 1.0 = full-batch. "
+              "Maps to PCEstimator.subsamplingRate. Ignored for --backend inmem."),
+    )
+    parser.add_argument(
+        "--tau0", type=float, default=1024.0,
+        help=("VI backend: Robbins-Monro learning offset tau0 in "
+              "rho_t = (tau0 + t)^-kappa. Maps to PCEstimator.learningOffset. "
+              "On smaller cohorts try ~10-64 so the head actually moves. Ignored "
+              "for --backend inmem."),
+    )
+    parser.add_argument(
+        "--kappa", type=float, default=0.51,
+        help=("VI backend: Robbins-Monro learning decay kappa in "
+              "rho_t = (tau0 + t)^-kappa (must be in (0.5, 1.0]). Maps to "
+              "PCEstimator.learningDecay. Ignored for --backend inmem."),
     )
     # --- Feature window ------------------------------------------------------
     parser.add_argument(
@@ -338,11 +521,16 @@ def main(argv: list[str] | None = None) -> int:
         apply_mdd_antidepressant_cohort,
         lookback_feature_label_events,
     )
-    from analysis.pc.evaluate import evaluate_pc_multitask, format_results_table
+    from analysis.pc.evaluate import (
+        _bundle_masked,
+        evaluate_pc_multitask,
+        format_results_table,
+        multitask_baseline_probas,
+    )
 
     configure_logging()
-    print(f"[driver] cdr={cdr}, billing_project={billing}, K={args.K}, "
-          f"weight_y={args.weight_y}, lookback_days={args.lookback_days}, "
+    print(f"[driver] cdr={cdr}, billing_project={billing}, backend={args.backend}, "
+          f"K={args.K}, weight_y={args.weight_y}, lookback_days={args.lookback_days}, "
           f"window_days={args.window_days}, stability_days={args.stability_days}, "
           f"person_mod={args.person_mod}", flush=True)
     if args.cache_uri:
@@ -426,33 +614,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[driver]   vocab size: {V} (cap {args.vocab_size}), "
               f"documents: {n_docs}", flush=True)
 
-    # --- 4) Bridge to dense X + assemble multi-task y/mask --------------------
-    with _phase("bridge (BOW -> dense X) + label/mask assembly"):
-        X, person_order = collect_bow_aligned(bow_df, V)
-        drugs_present = [
-            outcome_by_person[p][0] for p in person_order if p in outcome_by_person
-        ]
-        drug_order = stable_drug_order(
-            drugs_present, reference=_ANTIDEPRESSANT_INGREDIENTS,
+    # --- 4/5) Backend split: in-memory L-BFGS (default) vs distributed VI ------
+    if args.backend == "inmem":
+        results, drug_order, n_train, n_test, n_persons = _run_inmem_backend(
+            bow_df, V, outcome_by_person, _ANTIDEPRESSANT_INGREDIENTS, args,
+            evaluate_pc_multitask,
         )
-        y, mask = assemble_multitask_labels(outcome_by_person, person_order, drug_order)
-        C = len(drug_order)
-        print(f"[driver]   X={X.shape}, C={C} drug columns: {drug_order}", flush=True)
-
-    # --- 5) Split + evaluate --------------------------------------------------
-    with _phase(f"split (test_frac={args.test_frac}) + evaluate_pc_multitask "
-                f"(K={args.K}, weight_y={args.weight_y})"):
-        groups = [
-            outcome_by_person.get(p, (None,))[0] for p in person_order
-        ]
-        is_test = stratified_test_mask(groups, args.test_frac, args.seed)
-        tr, te = ~is_test, is_test
-        print(f"[driver]   split: {int(tr.sum())} train / {int(te.sum())} test", flush=True)
-        results = evaluate_pc_multitask(
-            X[tr], y[tr], mask[tr], X[te], y[te], mask[te],
-            K=args.K, weight_y=args.weight_y, alpha=args.alpha, tau=args.tau,
-            pi_iters=args.pi_iters, max_iter=args.max_iter,
-            doc_batch_size=args.doc_batch_size, seed=args.seed,
+    else:
+        results, drug_order, n_train, n_test, n_persons = _run_vi_backend(
+            spark, bow_df, V, outcome_by_person, _ANTIDEPRESSANT_INGREDIENTS, args,
+            multitask_baseline_probas, _bundle_masked,
         )
 
     # --- Report: the Hughes per-drug table (PC vs two-stage vs LR-on-codes) ---
@@ -460,19 +631,24 @@ def main(argv: list[str] | None = None) -> int:
     for c, name in enumerate(drug_order):
         print(f"[driver]   label {c} = {name}", flush=True)
     print(format_results_table(results), flush=True)
+    _log_convergence(results["meta"])
 
     out_payload = {
         "results": results,
+        "backend": args.backend,
         "drug_order": drug_order,
         "column_drug_names": {c: name for c, name in enumerate(drug_order)},
         "vocab_size": V,
-        "n_persons": len(person_order),
-        "n_train": int(tr.sum()),
-        "n_test": int(te.sum()),
+        "n_persons": n_persons,
+        "n_train": n_train,
+        "n_test": n_test,
         "params": {
+            "backend": args.backend,
             "K": args.K, "weight_y": args.weight_y, "alpha": args.alpha,
             "tau": args.tau, "pi_iters": args.pi_iters, "max_iter": args.max_iter,
             "doc_batch_size": args.doc_batch_size,
+            "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
+            "kappa": args.kappa,
             "lookback_days": args.lookback_days, "window_days": args.window_days,
             "stability_days": args.stability_days, "grace_gap_days": args.grace_gap_days,
             "vocab_size": args.vocab_size, "min_df": args.min_df,
@@ -489,6 +665,189 @@ def main(argv: list[str] | None = None) -> int:
     print("[driver] done", flush=True)
     spark.stop()
     return 0
+
+
+def _log_convergence(meta: Mapping[str, Any]) -> None:
+    """Emit a one-line fit-health readout from a results ``meta`` block.
+
+    Both backends record a convergence signal so a degenerate / untrained fit is
+    obvious in the committed run log: ``|w_CK|max ~= 0`` means the logistic head
+    never left its zero init (the failure that pinned every drug's AUC at 0.5).
+    The in-memory path carries ``meta["pc_convergence"]`` (L-BFGS nit/success/obj);
+    the VI path carries ``meta["vi_convergence"]`` (SVI n_iter/final ELBO).
+    """
+    if "pc_convergence" in meta:
+        c = meta["pc_convergence"]
+        print(
+            f"[driver] PC fit: nit={c['n_iter']} success={c['success']} "
+            f"obj init->final={c['init_obj']:.6g}->{c['final_obj']:.6g} "
+            f"|w_CK|max={c['w_CK_absmax']:.4g}  "
+            f"(|w_CK|max~=0 => head UNTRAINED)",
+            flush=True,
+        )
+    elif "vi_convergence" in meta:
+        c = meta["vi_convergence"]
+        elbo = c.get("final_elbo")
+        elbo_s = "n/a" if elbo is None else f"{elbo:.6g}"
+        print(
+            f"[driver] VI-PC fit: n_iter={c['n_iter']} converged={c['converged']} "
+            f"final_elbo={elbo_s} |w_CK|max={c['w_CK_absmax']:.4g}  "
+            f"(|w_CK|max~=0 => head UNTRAINED)",
+            flush=True,
+        )
+
+
+def _run_inmem_backend(
+    bow_df, V, outcome_by_person, reference_drugs, args, evaluate_pc_multitask,
+):
+    """In-memory L-BFGS PC backend (the default; unchanged behavior).
+
+    Bridges the BOW to a dense ``X`` on the driver, assembles the ``(D, C)``
+    multi-task ``y``/``mask``, does the seeded stratified split, and runs
+    :func:`analysis.pc.evaluate.evaluate_pc_multitask` (PC + the two baselines).
+    Returns ``(results, drug_order, n_train, n_test, n_persons)``.
+    """
+    # --- 4) Bridge to dense X + assemble multi-task y/mask --------------------
+    with _phase("bridge (BOW -> dense X) + label/mask assembly"):
+        X, person_order = collect_bow_aligned(bow_df, V)
+        drugs_present = [
+            outcome_by_person[p][0] for p in person_order if p in outcome_by_person
+        ]
+        drug_order = stable_drug_order(drugs_present, reference=reference_drugs)
+        y, mask = assemble_multitask_labels(outcome_by_person, person_order, drug_order)
+        C = len(drug_order)
+        print(f"[driver]   X={X.shape}, C={C} drug columns: {drug_order}", flush=True)
+
+    # --- 5) Split + evaluate --------------------------------------------------
+    with _phase(f"split (test_frac={args.test_frac}) + evaluate_pc_multitask "
+                f"(K={args.K}, weight_y={args.weight_y})"):
+        groups = [outcome_by_person.get(p, (None,))[0] for p in person_order]
+        is_test = stratified_test_mask(groups, args.test_frac, args.seed)
+        tr, te = ~is_test, is_test
+        print(f"[driver]   split: {int(tr.sum())} train / {int(te.sum())} test",
+              flush=True)
+        results = evaluate_pc_multitask(
+            X[tr], y[tr], mask[tr], X[te], y[te], mask[te],
+            K=args.K, weight_y=args.weight_y, alpha=args.alpha, tau=args.tau,
+            pi_iters=args.pi_iters, max_iter=args.max_iter,
+            doc_batch_size=args.doc_batch_size, seed=args.seed,
+        )
+    return results, drug_order, int(tr.sum()), int(te.sum()), len(person_order)
+
+
+def _run_vi_backend(
+    spark, bow_df, V, outcome_by_person, reference_drugs, args,
+    multitask_baseline_probas, _bundle_masked,
+):
+    """Distributed VI-native PC backend (``--backend vi``).
+
+    Reuses the SAME cohort/outcome/feature pipeline, then: attaches the multi-task
+    label + mask to ``bow_df`` as Spark ``ArrayType`` columns
+    (:func:`attach_multitask_label_columns`), splits by person at the DataFrame
+    level (:func:`person_hash_split`), fits the distributed
+    :class:`~spark_vi.mllib.topic.pc.PCEstimator` (SVI, no collect-to-memory for the
+    fit), scores per-drug heldout AUC/AP from the transform's ``probabilityCol``,
+    and computes the identical two-stage / LR-on-codes baselines by collecting
+    train+test BOW to memory (:func:`multitask_baseline_probas`). Returns
+    ``(results, drug_order, n_train, n_test, n_persons)`` in the same shape as the
+    in-memory backend so :func:`format_results_table` and the JSON payload are
+    backend-agnostic.
+    """
+    from spark_vi.mllib.topic.pc import PCEstimator
+
+    # --- 4) Attach labels as Spark columns + person split --------------------
+    with _phase(f"attach multi-task label/mask columns + person split "
+                f"(test_frac={args.test_frac})"):
+        drugs_present = [d for (d, _w) in outcome_by_person.values()]
+        drug_order = stable_drug_order(drugs_present, reference=reference_drugs)
+        C = len(drug_order)
+        labeled = attach_multitask_label_columns(
+            bow_df, outcome_by_person, drug_order, spark,
+        )
+        train_df, test_df = person_hash_split(labeled, args.test_frac, args.seed)
+        train_df = train_df.persist()
+        test_df = test_df.persist()
+        n_train = train_df.count()
+        n_test = test_df.count()
+        print(f"[driver]   C={C} drug columns: {drug_order}", flush=True)
+        print(f"[driver]   split: {n_train} train / {n_test} test", flush=True)
+
+    # --- 5a) Distributed VI-PC fit (SVI; no collect-to-memory) ---------------
+    with _phase(f"VI-PC fit (SVI, K={args.K}, weight_y={args.weight_y}, "
+                f"subsamplingRate={args.subsampling_rate}, tau0={args.tau0}, "
+                f"kappa={args.kappa}, maxIter={args.max_iter})"):
+        estimator = PCEstimator(
+            featuresCol="features", labelCol="y", labelMaskCol="label_mask",
+            numLabels=C, weightY=float(args.weight_y), k=args.K,
+            docConcentration=[float(args.alpha)],
+            subsamplingRate=args.subsampling_rate,
+            learningOffset=args.tau0, learningDecay=args.kappa,
+            maxIter=args.max_iter, seed=args.seed,
+            probabilityCol="probability",
+        )
+        model = estimator.fit(train_df)
+        vres = model.result
+        w_ck_absmax = float(np.abs(model.headWeights()).max())
+        print(f"[driver]   VI-PC fit done: n_iter={vres.n_iterations}, "
+              f"converged={vres.converged}, final_elbo={vres.final_elbo}, "
+              f"|w_CK|max={w_ck_absmax:.4g}", flush=True)
+
+    # --- 5b) Transform + score PC, then the shared baselines ------------------
+    with _phase("VI-PC transform + collect + baselines + per-drug scoring"):
+        scored = model.transform(test_df)
+        X_te, y_te_DC, mask_te_DC, proba_DC, _ = collect_labeled_bow(
+            scored, V, C, prob_col="probability",
+        )
+        X_tr, y_tr_DC, mask_tr_DC, _, _ = collect_labeled_bow(train_df, V, C)
+        train_df.unpersist()
+        test_df.unpersist()
+
+        shared = dict(
+            K=args.K, C=C, alpha=args.alpha, tau=args.tau, pi_iters=args.pi_iters,
+            max_iter=args.max_iter, doc_batch_size=args.doc_batch_size, seed=args.seed,
+        )
+        ts_proba, lrc_proba = multitask_baseline_probas(
+            X_tr, y_tr_DC, mask_tr_DC, X_te, C, shared,
+        )
+
+        n_obs_train = [int(mask_tr_DC[:, c].sum()) for c in range(C)]
+        n_obs_test = [int(mask_te_DC[:, c].sum()) for c in range(C)]
+        results = {
+            "PC": _bundle_masked(proba_DC, y_te_DC, mask_te_DC, C),
+            "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C),
+            "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C),
+            "meta": {
+                "C": C,
+                "K": int(args.K),
+                "weight_y": float(args.weight_y),
+                "n_train": int(n_train),
+                "n_test": int(n_test),
+                "n_labeled": int(sum(n_obs_train)),
+                "n_obs_train": n_obs_train,
+                "n_obs_test": n_obs_test,
+                "backend": "vi",
+                "svi": {
+                    "subsampling_rate": float(args.subsampling_rate),
+                    "tau0": float(args.tau0),
+                    "kappa": float(args.kappa),
+                    "max_iter": int(args.max_iter),
+                },
+                # Distributed-fit convergence signal (the untrained-head tell).
+                "vi_convergence": {
+                    "n_iter": int(vres.n_iterations),
+                    "final_elbo": (None if vres.final_elbo is None
+                                   else float(vres.final_elbo)),
+                    "converged": bool(vres.converged),
+                    "w_CK_absmax": w_ck_absmax,
+                },
+                "model_names": {
+                    "PC": "VI-PC (SVI, joint)",
+                    "two_stage": "two-stage (unsup+LR)",
+                    "lr_codes": "LR-on-codes",
+                },
+            },
+        }
+    return results, drug_order, int(n_train), int(n_test), int(n_train + n_test)
 
 
 if __name__ == "__main__":

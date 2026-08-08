@@ -57,6 +57,40 @@ def test_build_pc_args_key_to_flag_mapping(monkeypatch):
     assert "--resume-from" not in args
 
 
+def test_build_pc_args_backend_defaults_inmem_no_svi_knobs(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    # No backend key -> default inmem: --backend inmem passed, SVI knobs omitted
+    # so the inmem argv is byte-for-byte the prior command line (plus --backend).
+    args = mod.build_pc_args(_eff(), "/runs/0070-x")
+    d = dict(zip(args[::2], args[1::2]))
+    assert d["--backend"] == "inmem"
+    for knob in ("--subsampling-rate", "--tau0", "--kappa"):
+        assert knob not in args
+
+
+def test_build_pc_args_backend_vi_threads_svi_knobs(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(
+        _eff(backend="vi", subsampling_rate=0.1, tau0=64.0, kappa=0.6),
+        "/runs/0071-x",
+    )
+    d = dict(zip(args[::2], args[1::2]))
+    assert d["--backend"] == "vi"
+    assert d["--subsampling-rate"] == "0.1"
+    assert d["--tau0"] == "64.0"
+    assert d["--kappa"] == "0.6"
+
+
+def test_build_pc_args_backend_vi_svi_knob_defaults(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    # backend vi with no explicit knobs -> the driver-matching defaults appear.
+    args = mod.build_pc_args(_eff(backend="vi"), "/out")
+    d = dict(zip(args[::2], args[1::2]))
+    assert d["--subsampling-rate"] == "0.05"
+    assert d["--tau0"] == "1024.0"
+    assert d["--kappa"] == "0.51"
+
+
 def test_build_pc_args_cache_uri_optional(monkeypatch):
     mod = _run_exp(monkeypatch)
     assert "--cache-uri" not in mod.build_pc_args(_eff(), "/out")

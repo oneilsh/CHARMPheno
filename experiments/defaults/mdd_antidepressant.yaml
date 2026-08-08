@@ -35,3 +35,17 @@ doc_batch_size: 2048        # doc-minibatch size for the PC full-batch gradient
                             # assembly; bounds driver memory at real-corpus scale
 test_frac: 0.25
 seed: 0
+
+# --- backend selection -------------------------------------------------------
+# Default fit backend is the in-memory L-BFGS PC (byte-for-byte the prior
+# behavior); leave `backend` unset (or `inmem`) for it. Set `backend: vi` in a
+# per-experiment frontmatter (see docs/experiments/0071-*) to use the
+# distributed VI-native PCEstimator (SVI). The knobs below are read by
+# build_pc_args ONLY when backend==vi, so they sit inert here for the inmem
+# default and never reach the inmem driver.
+# backend: inmem
+# --- distributed-SVI knobs (backend: vi only) ---
+subsampling_rate: 0.05      # mini-batch fraction per SVI iteration (-> --subsampling-rate)
+tau0: 64.0                  # Robbins-Monro learning offset (-> --tau0); smaller than the
+                            # MLlib 1024 default so the head actually moves on this cohort
+kappa: 0.6                  # Robbins-Monro learning decay in (0.5, 1.0] (-> --kappa)

@@ -683,11 +683,20 @@ def build_pc_args(
     :func:`build_dag_placement_args`. The cohort is hard-wired in the driver
     (``apply_mdd_antidepressant_cohort``), so there is deliberately no
     ``--cohort`` flag. Every key maps to ``--key.replace('_','-')``.
+
+    Backend: the ``backend`` config key selects the fit backend (default
+    ``inmem`` = the in-memory L-BFGS PC, byte-for-byte the prior behavior).
+    ``backend: vi`` selects the distributed VI-native PCEstimator and additionally
+    passes the SVI schedule knobs (``subsampling_rate`` -> ``--subsampling-rate``,
+    ``tau0`` -> ``--tau0``, ``kappa`` -> ``--kappa``); those knob flags are omitted
+    for the inmem backend so its argv is unchanged.
     """
     cdr, billing = _require_workspace_env()
+    backend = str(effective.get("backend", "inmem"))
     args = [
         "--cdr", cdr,
         "--billing", billing,
+        "--backend", backend,
         "--K", str(effective["K"]),
         "--weight-y", str(effective["weight_y"]),
         "--alpha", str(effective.get("alpha", 1.1)),
@@ -707,6 +716,14 @@ def build_pc_args(
         "--seed", str(effective.get("seed", 0)),
         "--out", str(Path(out_dir) / "pc_results.json"),
     ]
+    # VI backend: thread the distributed-SVI schedule knobs. Kept out of the
+    # inmem argv so the default backend's command line is unchanged.
+    if backend == "vi":
+        args.extend([
+            "--subsampling-rate", str(effective.get("subsampling_rate", 0.05)),
+            "--tau0", str(effective.get("tau0", 1024.0)),
+            "--kappa", str(effective.get("kappa", 0.51)),
+        ])
     if effective.get("cache_uri"):
         args.extend(["--cache-uri", str(effective["cache_uri"])])
     return args
