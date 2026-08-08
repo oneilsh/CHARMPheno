@@ -187,6 +187,64 @@ def _bundle_masked(
     return {"per_label": per_label, "macro": _macro(per_label)}
 
 
+def _pc_convergence(pc: "PCTopicModel") -> dict[str, Any]:
+    """Fit-health block for a fitted :class:`~analysis.pc.model.PCTopicModel`.
+
+    Surfaces the L-BFGS-B convergence signal so a degenerate / under-converged fit
+    is obvious downstream: ``n_iter`` (optimizer iterations), ``success`` (SciPy's
+    convergence flag), the objective ``init_obj``/``final_obj`` bracket, and
+    ``w_CK_absmax`` = ``max |w_CK|`` — the direct tell that the logistic head
+    actually moved off its zero init (``~0`` ⇒ an UNTRAINED head, e.g. the
+    full-cohort under-convergence that pinned every drug's AUC at 0.5). Read from
+    the ``result_``/``n_iter_``/``init_obj_``/``final_obj_`` attributes
+    :meth:`PCTopicModel.fit` records.
+    """
+    return {
+        "n_iter": int(pc.n_iter_),
+        "success": bool(pc.result_.success),
+        "init_obj": float(pc.init_obj_),
+        "final_obj": float(pc.final_obj_),
+        "w_CK_absmax": float(np.abs(pc.w_CK_).max()),
+    }
+
+
+def multitask_baseline_probas(
+    X_tr: np.ndarray,
+    y_tr_DC: np.ndarray,
+    mask_tr_DC: np.ndarray,
+    X_te: np.ndarray,
+    C: int,
+    shared: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """The two Hughes baselines' ``(N_te, C)`` heldout probabilities, multi-task.
+
+    Factored out of :func:`evaluate_pc_multitask` so the SAME baseline code is the
+    comparison set for BOTH the in-memory PC (``evaluate_pc_multitask``) and the
+    distributed VI-PC cloud driver — the VI-PC number is only meaningful against
+    the identical two-stage / LR-on-codes baselines. Returns
+    ``(two_stage_proba, lr_codes_proba)``:
+
+      * **two-stage** — the same class at ``weight_y = 0`` (unsupervised LDA-MAP,
+        sees every train row's words), then one masked
+        :class:`~sklearn.linear_model.LogisticRegression` per outcome on the frozen
+        train ``Pi`` restricted to that outcome's observed train rows.
+      * **LR-on-codes** — one masked logistic regression per outcome straight on
+        the raw counts ``X``.
+
+    ``shared`` is the ``PCTopicModel`` constructor kwargs shared with the PC fit
+    (``K``, ``C``, ``alpha``, ``tau``, ``pi_iters``, ``max_iter``,
+    ``doc_batch_size``, ``seed``, plus any ``model_kwargs``). This is the ONLY
+    ``analysis.pc`` autograd the VI-PC driver runs on the driver — the VI-PC model
+    itself is fit distributed via Spark.
+    """
+    unsup = PCTopicModel(weight_y=0.0, **shared).fit(X_tr, y_tr_DC)
+    Pi_tr = unsup.Pi_                                       # (D_tr, K)
+    Pi_te = unsup.transform(X_te)                          # (N_te, K)
+    ts_proba = _lr_proba_per_label_masked(Pi_tr, y_tr_DC, mask_tr_DC, Pi_te, C)
+    lrc_proba = _lr_proba_per_label_masked(X_tr, y_tr_DC, mask_tr_DC, X_te, C)
+    return ts_proba, lrc_proba
+
+
 def evaluate_pc_multitask(
     X_tr: np.ndarray,
     y_tr: np.ndarray,
@@ -296,14 +354,11 @@ def evaluate_pc_multitask(
     )
     pc_proba = pc.predict_proba(X_te)                      # (N_te, C)
 
-    # --- Model 2: two-stage (unsupervised weight_y=0 -> per-column masked LR) --
-    unsup = PCTopicModel(weight_y=0.0, **shared).fit(X_tr, y_tr_DC)
-    Pi_tr = unsup.Pi_                                       # (D_tr, K)
-    Pi_te = unsup.transform(X_te)                          # (N_te, K)
-    ts_proba = _lr_proba_per_label_masked(Pi_tr, y_tr_DC, mask_tr_DC, Pi_te, C)
-
-    # --- Model 3: LR straight on the raw codes (per-column masked) ------------
-    lrc_proba = _lr_proba_per_label_masked(X_tr, y_tr_DC, mask_tr_DC, X_te, C)
+    # --- Models 2 & 3: the two Hughes baselines (shared with the VI-PC driver) -
+    # two-stage (unsupervised weight_y=0 -> per-column masked LR) and LR-on-codes.
+    ts_proba, lrc_proba = multitask_baseline_probas(
+        X_tr, y_tr_DC, mask_tr_DC, X_te, C, shared
+    )
 
     n_obs_train = [int(mask_tr_DC[:, c].sum()) for c in range(C)]
     n_obs_test = [int(mask_te_DC[:, c].sum()) for c in range(C)]
@@ -321,6 +376,9 @@ def evaluate_pc_multitask(
             "n_labeled": int(sum(n_obs_train)),
             "n_obs_train": n_obs_train,
             "n_obs_test": n_obs_test,
+            # Fit-health of the shared PC (the direct tell for an untrained head;
+            # see _pc_convergence). Surfaced so a degenerate fit is obvious.
+            "pc_convergence": _pc_convergence(pc),
             "model_names": {
                 "PC": "PC (faithful, joint)",
                 "two_stage": "two-stage (unsup+LR)",
@@ -441,6 +499,8 @@ def evaluate_pc_vs_baselines(
             "n_train": int(D_tr),
             "n_test": int(X_te.shape[0]),
             "n_labeled": int(lab_idx.size),
+            # Fit-health of the PC (untrained-head tell; see _pc_convergence).
+            "pc_convergence": _pc_convergence(pc),
             "model_names": {
                 "PC": "PC (faithful)",
                 "two_stage": "two-stage (unsup+LR)",
