@@ -796,3 +796,251 @@ def test_antidepressant_stability_label_grace_gap_is_tunable(spark):
 
     assert worked(30) is False   # gap 46 > 30 -> broken, 45d island
     assert worked(60) is True    # gap 46 <= 60 -> stitched to 2020-07-01
+
+
+# --- Hughes-faithful stable-treatment cohort (10-drug subset) -----------------
+
+def test_hughes_antidepressants_is_the_10_drug_subset():
+    from charmpheno.omop.cohorts import (
+        _HUGHES_ANTIDEPRESSANTS, _ANTIDEPRESSANT_INGREDIENTS, _DRUG_REGISTRY,
+    )
+    assert len(_HUGHES_ANTIDEPRESSANTS) == 10
+    # A strict subset of the 15-drug set; mirtazapine is NOT present.
+    assert set(_HUGHES_ANTIDEPRESSANTS) < set(_ANTIDEPRESSANT_INGREDIENTS)
+    assert "mirtazapine" not in _HUGHES_ANTIDEPRESSANTS
+    # The 5 extras are excluded from this cohort.
+    assert set(_ANTIDEPRESSANT_INGREDIENTS) - set(_HUGHES_ANTIDEPRESSANTS) == {
+        "vilazodone", "desvenlafaxine", "imipramine", "trazodone", "vortioxetine",
+    }
+    # All 10 already in the drug registry with a validated pinned id.
+    for name in _HUGHES_ANTIDEPRESSANTS:
+        assert len(_DRUG_REGISTRY[name]["seed_concept_ids"]) == 1
+    # Fixed label order: fluoxetine first, bupropion last.
+    assert _HUGHES_ANTIDEPRESSANTS[0] == "fluoxetine"
+    assert _HUGHES_ANTIDEPRESSANTS[-1] == "bupropion"
+
+
+def test_supported_cohorts_and_metadata_include_mdd_stable_treatment():
+    from charmpheno.omop.cohorts import SUPPORTED_COHORTS, COHORT_METADATA
+    assert "mdd_stable_treatment" in SUPPORTED_COHORTS
+    m = COHORT_METADATA["mdd_stable_treatment"]
+    assert m["id"] == "mdd_stable_treatment"
+    assert m["label"] and m["description"]
+
+
+def test_mdd_antidepressant_cohort_left_intact():
+    """The new cohort must not have disturbed the old registry surface."""
+    from charmpheno.omop.cohorts import (
+        SUPPORTED_COHORTS, COHORT_METADATA, _ANTIDEPRESSANT_INGREDIENTS,
+    )
+    assert "mdd_antidepressant" in SUPPORTED_COHORTS
+    assert "mdd_antidepressant" in COHORT_METADATA
+    assert len(_ANTIDEPRESSANT_INGREDIENTS) == 15
+
+
+def _sortset(subset):
+    return tuple(sorted(subset))
+
+
+def test_stable_drug_intervals_single_switch_addon_and_gap(spark):
+    """The sweep-line builder: a single >=90d era yields one interval; a switch
+    A->B splits into two; an add-on A->A+B splits into {A} then {A,B}; a <90d
+    era is dropped; and an off-all-ADs gap breaks the run (two islands)."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import _stable_drug_intervals
+    d = dt.date
+    # (person_id, drug_name, era_start, era_end)
+    era_subsets = spark.createDataFrame(
+        [
+            # p1: single fluoxetine era >=90d -> one {fluoxetine} interval
+            (1, "fluoxetine", d(2020, 1, 1), d(2020, 6, 1)),
+            # p2: switch fluoxetine -> sertraline (gap between) -> two intervals
+            (2, "fluoxetine", d(2020, 1, 1), d(2020, 5, 1)),
+            (2, "sertraline", d(2020, 6, 1), d(2020, 10, 1)),
+            # p3: add-on -> {fluoxetine} then {fluoxetine,sertraline}
+            (3, "fluoxetine", d(2020, 1, 1), d(2020, 12, 1)),
+            (3, "sertraline", d(2020, 4, 1), d(2020, 12, 1)),
+            # p4: single era < 90d -> dropped entirely
+            (4, "fluoxetine", d(2020, 1, 1), d(2020, 2, 1)),
+            # p5: same drug with an off-all-ADs gap -> run breaks; first island
+            #     (<90d) dropped, only the second (>=90d) survives.
+            (5, "fluoxetine", d(2020, 1, 1), d(2020, 2, 1)),
+            (5, "fluoxetine", d(2020, 6, 1), d(2020, 12, 1)),
+        ],
+        ["person_id", "drug_name", "era_start", "era_end"],
+    )
+    rows = [
+        (r["person_id"], r["interval_start"], r["interval_end"],
+         _sortset(r["drug_subset"]))
+        for r in _stable_drug_intervals(era_subsets, min_days=90).collect()
+    ]
+    got = set(rows)
+    assert got == {
+        (1, d(2020, 1, 1), d(2020, 6, 1), ("fluoxetine",)),
+        (2, d(2020, 1, 1), d(2020, 5, 1), ("fluoxetine",)),
+        (2, d(2020, 6, 1), d(2020, 10, 1), ("sertraline",)),
+        (3, d(2020, 1, 1), d(2020, 3, 31), ("fluoxetine",)),
+        (3, d(2020, 4, 1), d(2020, 12, 1), ("fluoxetine", "sertraline")),
+        (5, d(2020, 6, 1), d(2020, 12, 1), ("fluoxetine",)),
+    }
+    # p4 dropped (31d < 90); p5's first island (31d) dropped.
+    assert not any(r[0] == 4 for r in rows)
+    assert sum(1 for r in rows if r[0] == 5) == 1
+
+
+def test_encounter_regular_intervals_bounds_all_three_gap_kinds(spark):
+    """Keep intervals whose consecutive AND both endpoint gaps are <=395d; drop
+    on any single violation (a mid gap, a leading gap, or a trailing gap)."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import _encounter_regular_intervals
+    d = dt.date
+    intervals = spark.createDataFrame(
+        [
+            # p1: all gaps small -> kept
+            (1, d(2020, 1, 1), d(2020, 12, 1), ["fluoxetine"]),
+            # p2: a mid consecutive gap 485d > 395 -> dropped
+            (2, d(2020, 1, 1), d(2021, 12, 1), ["fluoxetine"]),
+            # p3: leading gap (start -> first visit) > 395 -> dropped
+            (3, d(2019, 6, 1), d(2020, 12, 1), ["fluoxetine"]),
+            # p4: trailing gap (last visit -> end) > 395 -> dropped
+            (4, d(2020, 1, 1), d(2022, 6, 1), ["fluoxetine"]),
+            # p5: no visit in range -> dropped
+            (5, d(2020, 1, 1), d(2020, 12, 1), ["fluoxetine"]),
+        ],
+        ["person_id", "interval_start", "interval_end", "drug_subset"],
+    )
+    visits = spark.createDataFrame(
+        [
+            (1, d(2020, 2, 1)), (1, d(2020, 6, 1)), (1, d(2020, 11, 1)),
+            (2, d(2020, 2, 1)), (2, d(2021, 6, 1)),   # 485d apart
+            (3, d(2020, 11, 1)),                       # ~518d after start
+            (4, d(2020, 2, 1)),                        # ~849d before end
+            # p5: none
+        ],
+        ["person_id", "visit_start_date"],
+    )
+    kept = {
+        r["person_id"]
+        for r in _encounter_regular_intervals(
+            intervals, visits, max_gap_days=395,
+        ).collect()
+    }
+    assert kept == {1}
+
+
+def test_encounter_regular_intervals_single_visit_endpoint_only(spark):
+    """A single in-range visit has no consecutive gap, so only the two endpoint
+    gaps gate it: a centered lone visit is kept."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import _encounter_regular_intervals
+    d = dt.date
+    intervals = spark.createDataFrame(
+        [(1, d(2020, 1, 1), d(2020, 6, 1), ["fluoxetine"])],
+        ["person_id", "interval_start", "interval_end", "drug_subset"],
+    )
+    visits = spark.createDataFrame(
+        [(1, d(2020, 3, 1))], ["person_id", "visit_start_date"],
+    )
+    out = _encounter_regular_intervals(intervals, visits, max_gap_days=395)
+    assert out.count() == 1
+
+
+def test_mdd_stable_treatment_index_composes_all_qualifiers(spark):
+    """The pure index composes the stable interval + encounter regularity + MDD
+    indication + age 18-80 + >=2 pre-Rx history + interval-in-observation-period.
+    p1 qualifies; p2 too young; p3 too old; p4 <2 pre-Rx events; p5 no MDD dx."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import _mdd_stable_treatment_index
+    d = dt.date
+    fx = 755695            # fluoxetine
+    mdd_cid, other_cid = 9001, 8888
+
+    # Each person: fluoxetine era 2020-01-01..2020-12-01 (stable, >=90d).
+    drug_era = spark.createDataFrame(
+        [(p, fx, d(2020, 1, 1), d(2020, 12, 1)) for p in (1, 2, 3, 4, 5)],
+        ["person_id", "drug_concept_id", "drug_era_start_date", "drug_era_end_date"],
+    )
+    # Regular encounters inside the interval for everyone.
+    visits = spark.createDataFrame(
+        [(p, dd) for p in (1, 2, 3, 4, 5)
+         for dd in (d(2020, 2, 1), d(2020, 6, 1), d(2020, 11, 1))],
+        ["person_id", "visit_start_date"],
+    )
+    # Conditions: MDD dx + a second pre-Rx event, except where noted.
+    cond = spark.createDataFrame(
+        [
+            (1, mdd_cid, d(2019, 6, 1)), (1, other_cid, d(2019, 7, 1)),
+            (2, mdd_cid, d(2019, 6, 1)), (2, other_cid, d(2019, 7, 1)),
+            (3, mdd_cid, d(2019, 6, 1)), (3, other_cid, d(2019, 7, 1)),
+            (4, mdd_cid, d(2019, 6, 1)),                       # only 1 pre-Rx event
+            (5, other_cid, d(2019, 6, 1)), (5, other_cid, d(2019, 7, 1)),  # no MDD
+        ],
+        ["person_id", "concept_id", "condition_start_date"],
+    )
+    person = spark.createDataFrame(
+        [
+            (1, 1980),   # age 40 -> ok
+            (2, 2005),   # age 15 -> too young
+            (3, 1935),   # age 85 -> too old
+            (4, 1980),   # age 40 -> ok, but history<2
+            (5, 1980),   # age 40 -> ok, but no MDD
+        ],
+        ["person_id", "year_of_birth"],
+    )
+    op = spark.createDataFrame(
+        [(p, d(2018, 1, 1), d(2022, 1, 1)) for p in (1, 2, 3, 4, 5)],
+        ["person_id", "observation_period_start_date",
+         "observation_period_end_date"],
+    )
+    concept_map = spark.createDataFrame(
+        [(fx, "fluoxetine", "SSRI")],
+        ["concept_id", "drug_name", "drug_class"],
+    )
+    ad_ids = spark.createDataFrame([(fx,)], ["concept_id"])
+    mdd_concepts = spark.createDataFrame([(mdd_cid,)], ["concept_id"])
+
+    out = {
+        r["person_id"]: (r["index_date"], r["stable_end"],
+                         _sortset(r["drug_subset"]), r["source_cohort"])
+        for r in _mdd_stable_treatment_index(
+            cond, drug_era, visits, person, op, concept_map, mdd_concepts,
+            ad_ids, date_col="condition_start_date",
+        ).collect()
+    }
+    assert set(out) == {1}                                      # only p1 survives
+    assert out[1] == (
+        d(2020, 1, 1), d(2020, 12, 1), ("fluoxetine",), "mdd_stable_treatment",
+    )
+
+
+def test_stable_treatment_label_fixed_length10_vector(spark):
+    """drug_subset -> exact length-10 indicator over the fixed Hughes order,
+    including a held combination yielding two positives."""
+    from charmpheno.omop.cohorts import (
+        stable_treatment_label, _HUGHES_ANTIDEPRESSANTS,
+    )
+    index_df = spark.createDataFrame(
+        [
+            (1, ["fluoxetine"]),                  # single -> one positive at idx 0
+            (2, ["fluoxetine", "sertraline"]),    # combination -> idx 0 and 1
+            (3, ["bupropion"]),                   # last column (idx 9)
+        ],
+        ["person_id", "drug_subset"],
+    )
+    out = {
+        r["person_id"]: list(r["y"])
+        for r in stable_treatment_label(
+            index_df, drug_order=_HUGHES_ANTIDEPRESSANTS,
+        ).collect()
+    }
+    assert len(out[1]) == 10 and len(out[2]) == 10 and len(out[3]) == 10
+    exp1 = [0.0] * 10
+    exp1[0] = 1.0                                  # fluoxetine
+    assert out[1] == exp1
+    exp2 = [0.0] * 10
+    exp2[0] = 1.0                                  # fluoxetine
+    exp2[1] = 1.0                                  # sertraline
+    assert out[2] == exp2
+    exp3 = [0.0] * 10
+    exp3[9] = 1.0                                  # bupropion
+    assert out[3] == exp3
