@@ -32,21 +32,34 @@ Fig. 3 (center panel), **avg heldout AUC across the 11 meds**, K swept
 - BP-sLDA (purely discriminative) overfits badly here; unsupervised Gibbs-LDA is
   the floor PC improves on.
 
-**Target ~0.60–0.65** (verified from the AISTATS paper itself). Do NOT confuse
-this with the group's later clinical follow-up — *Assessment of a Prediction
-Model for Antidepressant Treatment Stability Using Supervised Topic Models*,
-**JAMA Network Open 2020** (Hughes, Pradier, Ross, McCoy, Perlis, Doshi-Velez).
-That paper applies the **same** supervised/PC topic-model method to a much larger
-**two-site** cohort (81,630 adults; 55,303 stable; Sites A+B, 1997–2017), keeps
-11 meds and 10 topics, and reports different metrics — a **top-3 stability
-accuracy of 0.602 (baseline) → 0.622 (extremely-randomized-trees)** plus per-drug
-AUCs with 5000-bootstrap CIs — and its headline finding is that treatment-
-*specific* models do **no better** than a general treatment-outcome model. An
-earlier draft of these docs cited a per-drug "0.67–0.71 AUC" for that follow-up;
-that figure could not be sourced and has been removed. Anchor our replication to
-the AISTATS ~0.60–0.65 band. (Note: our `mdd_stable_treatment` cohort's ≥90-day
-stability definition actually matches the 2020 paper's operationalization more
-closely than the 2018 one's.)
+**Target ~0.60–0.65** (verified from the AISTATS paper itself). The group's later
+clinical follow-up lands in the **same band** and is worth reading alongside:
+*Assessment of a Prediction Model for Antidepressant Treatment Stability Using
+Supervised Topic Models*, **JAMA Network Open 2020** (Hughes, Pradier, Ross,
+McCoy, Perlis, Doshi-Velez; doi:10.1001/jamanetworkopen.2020.5308).
+
+- **Same method.** It uses PC-supervised LDA (cites the AISTATS paper; same
+  `dtak/prediction-constrained-topic-models` code). What's added is a downstream
+  layer: the 10 PC topics feed a standard classifier (logistic regression or a
+  512-tree extremely-randomized-trees ensemble), benchmarked against a
+  high-dimensional raw-code baseline (9,256 ICD/CPT codes + demographics).
+- **Bigger, two-site data.** 81,630 adults (ages 18–80), Site A (train/test) +
+  Site B (external validation); 55,303 reached stability, where **stable = same
+  antidepressant prescription continued 90 days** (the definition our
+  `mdd_stable_treatment` cohort mirrors — closer to 2020 than to 2018).
+- **Verified AUCs (general-stability), "in the range of 0.60–0.66":**
+  10-topic PC-sLDA + LR = **0.627** (95% CI 0.615–0.639) at Site A, **0.619**
+  (0.610–0.627) at Site B; best model (raw codes + 512-tree ensemble) = 0.661 /
+  0.663; drug-specific ensemble = 0.647. Plus a top-3 medication-prioritization
+  accuracy (0.602 baseline / 0.622 ensemble / 0.581 topics).
+- **Headline findings:** drug-*specific* models do **no better** than the general
+  stability model, and topics don't beat raw codes on AUC but are far more
+  interpretable and transfer better across sites.
+
+An earlier draft of these docs cited a per-drug "0.67–0.71 AUC" for this
+follow-up. That figure appears in **neither** paper (both live at 0.60–0.66) and
+has been removed — the PC topic model's own 0.627/0.619 sits squarely inside our
+~0.60–0.65 target, so the two publications agree rather than compete.
 
 ---
 
