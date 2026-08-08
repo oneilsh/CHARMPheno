@@ -68,6 +68,42 @@ class STMDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class PCDocument:
+    """Prediction-Constrained topic-model document.
+
+    Extends BOWDocument with a per-document outcome vector ``y`` (C binary
+    labels, one per logistic head) and a per-cell observed mask ``label_mask``
+    (C,), mirroring how STMDocument extends it with a covariate vector ``x``.
+    The C outcome heads share one topic model; ``label_mask[c] == 1`` marks
+    cell (doc, c) as an observed training label for head c, so an
+    almost-all-missing label matrix (index-drug mode) still trains every head
+    off the shared representation.
+
+    Increment 1 (weight_y == 0, the unsupervised SVI scaffolding) carries y and
+    label_mask on every row but never READS them — the label-free CAVI E-step
+    and the LDA λ natural-gradient step are outcome-blind, exactly as the
+    faithful reference's weight_y == 0 path is. The fields are present now so
+    the row type is stable when increment 2 attaches the supervised head
+    gradient + topic correction (which read y/label_mask for the observed
+    cells only).
+
+    Invariants (callers' responsibility — not enforced at construction):
+      indices:    sorted int32 array of token indices, all in [0, vocab_size).
+      counts:     float64 array with len(counts) == len(indices), all > 0.
+      length:     int total tokens (sum of counts).
+      y:          float64 array of shape (C,) — the doc's 0/1 outcome labels.
+      label_mask: float64 array of shape (C,) — 1 where cell (doc, c) is an
+                  observed training label, 0 where unobserved. All-zero = the
+                  doc's words shape the shared topics but no head trains on it.
+    """
+    indices: np.ndarray
+    counts: np.ndarray
+    length: int
+    y: np.ndarray
+    label_mask: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
 class GatedBOWDocument:
     """Bag-of-words document tagged with a DAG frontier for gated topic training.
 
