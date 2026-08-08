@@ -79,13 +79,12 @@ class PCDocument:
     almost-all-missing label matrix (index-drug mode) still trains every head
     off the shared representation.
 
-    Increment 1 (weight_y == 0, the unsupervised SVI scaffolding) carries y and
-    label_mask on every row but never READS them — the label-free CAVI E-step
-    and the LDA λ natural-gradient step are outcome-blind, exactly as the
-    faithful reference's weight_y == 0 path is. The fields are present now so
-    the row type is stable when increment 2 attaches the supervised head
-    gradient + topic correction (which read y/label_mask for the observed
-    cells only).
+    At weight_y == 0 (the unsupervised SVI path) y and label_mask ride along on
+    every row but are never READ — the label-free CAVI E-step and the LDA λ
+    natural-gradient step are outcome-blind, exactly as the faithful reference's
+    weight_y == 0 path is. At weight_y > 0 the supervised head gradient + topic
+    correction read y/label_mask for the OBSERVED cells only (label_mask[c] == 1),
+    which is the semi-supervised asymmetry.
 
     Invariants (callers' responsibility — not enforced at construction):
       indices:    sorted int32 array of token indices, all in [0, vocab_size).

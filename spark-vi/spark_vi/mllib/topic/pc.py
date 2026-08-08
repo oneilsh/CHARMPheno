@@ -5,14 +5,17 @@ Mirrors mllib/topic/lda.py (ADR 0009): a translation layer over
 OnlinePCLDA; this shim only marshals DataFrame columns into ``PCDocument``s and
 wraps the trained ``VIResult`` as an MLlib-shaped Model.
 
-Increment 1 (``weightY == 0``): the unsupervised SVI path. The label columns
+At ``weightY == 0`` (increment 1, the unsupervised SVI path) the label columns
 (``labelCol``, ``labelMaskCol``) are THREADED into every ``PCDocument`` exactly
-as the STM shim threads its covariate column, but tolerated-absent — at
-``weightY == 0`` the model never reads y/label_mask, so a DataFrame with no label
-columns fits fine (placeholder zeros are carried). ``_transform`` appends the
-label-free ``topicDistributionCol`` (identical CAVI to train time); a
-head-derived ``probabilityCol`` (``sigmoid(w_CK · θ)``) is increment 2 and is
-deliberately NOT emitted here.
+as the STM shim threads its covariate column, but tolerated-absent — the model
+never reads y/label_mask, so a DataFrame with no label columns fits fine
+(placeholder zeros are carried), and ``_transform`` appends only the label-free
+``topicDistributionCol``.
+
+At ``weightY > 0`` (increment 2, supervised) ``labelCol`` is REQUIRED — the
+head trains on it — and ``_transform`` additionally appends a head-derived
+``probabilityCol`` = ``sigmoid(w_CK · θ)`` (per-label P(y=1)); the label-free
+``topicDistributionCol`` is unchanged (identical CAVI to train time).
 """
 from __future__ import annotations
 
@@ -168,9 +171,37 @@ class _PCParams(HasFeaturesCol, HasMaxIter, HasSeed):
     )
     weightY = Param(
         Params._dummy(), "weightY",
-        "prediction-loss weight (the PC dial). 0.0 (increment-1 default) = "
-        "unsupervised LDA-MAP; > 0 is the supervised increment 2 (not built)",
+        "prediction-loss weight (the PC dial). 0.0 (default) = unsupervised "
+        "LDA-MAP; > 0 turns on the supervised head + topic correction",
         typeConverter=TypeConverters.toFloat,
+    )
+    probabilityCol = Param(
+        Params._dummy(), "probabilityCol",
+        "output column with the head-derived per-label P(y=1) = sigmoid(w_CK . theta); "
+        "appended by transform only when weightY > 0",
+        typeConverter=TypeConverters.toString,
+    )
+    lambdaW = Param(
+        Params._dummy(), "lambdaW",
+        "L2 ridge on the head weights w_CK (scaled by weightY); authors' default 0.001",
+        typeConverter=TypeConverters.toFloat,
+    )
+    gradCaviIters = Param(
+        Params._dummy(), "gradCaviIters",
+        "fixed CAVI unroll depth for the differentiated label-free pi (bounds the "
+        "autograd tape); default 20",
+        typeConverter=TypeConverters.toInt,
+    )
+    headLrScale = Param(
+        Params._dummy(), "headLrScale",
+        "extra multiplier on the head SGD step (RM <-> weightY decoupling knob); default 1.0",
+        typeConverter=TypeConverters.toFloat,
+    )
+    weightYWarmupIters = Param(
+        Params._dummy(), "weightYWarmupIters",
+        "linearly ramp the effective weightY from 0 over this many global steps "
+        "(0 = no warmup)",
+        typeConverter=TypeConverters.toInt,
     )
 
 
@@ -211,6 +242,10 @@ def _build_model_and_config(
         vocab_size=vocab_size,
         C=estimator.getOrDefault("numLabels"),
         weight_y=float(estimator.getOrDefault("weightY")),
+        lambda_w=float(estimator.getOrDefault("lambdaW")),
+        grad_cavi_iters=int(estimator.getOrDefault("gradCaviIters")),
+        head_lr_scale=float(estimator.getOrDefault("headLrScale")),
+        weight_y_warmup_iters=int(estimator.getOrDefault("weightYWarmupIters")),
         alpha=alpha,
         eta=eta,
         optimize_alpha=estimator.getOrDefault("optimizeDocConcentration"),
@@ -238,7 +273,8 @@ _PC_DEFAULTS = dict(
     learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05,
     optimizeDocConcentration=True, optimizeTopicConcentration=False,
     gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
-    numLabels=1, weightY=0.0,
+    numLabels=1, weightY=0.0, probabilityCol="probability",
+    lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, weightYWarmupIters=0,
 )
 
 
@@ -273,6 +309,11 @@ class PCEstimator(_PCParams, Estimator):
         labelCol: str | None = None,
         labelMaskCol: str | None = None,
         weightY: float = 0.0,
+        probabilityCol: str = "probability",
+        lambdaW: float = 0.001,
+        gradCaviIters: int = 20,
+        headLrScale: float = 1.0,
+        weightYWarmupIters: int = 0,
     ) -> None:
         super().__init__()
         self._setDefault(**_PC_DEFAULTS)
@@ -301,13 +342,6 @@ class PCEstimator(_PCParams, Estimator):
         from spark_vi.core.runner import VIRunner
 
         weight_y = float(self.getOrDefault("weightY"))
-        if weight_y != 0.0:
-            raise NotImplementedError(
-                "PCEstimator increment 1 supports weightY == 0.0 (unsupervised "
-                f"SVI) only; the supervised path (weightY={weight_y}) is "
-                "increment 2 and is not built."
-            )
-
         features_col = self.getOrDefault("featuresCol")
         first = dataset.select(features_col).head(1)
         if not first:
@@ -321,6 +355,16 @@ class PCEstimator(_PCParams, Estimator):
             self.getOrDefault("labelMaskCol") if self.isSet("labelMaskCol") else None
         )
         C = self.getOrDefault("numLabels")
+
+        # Supervised training needs labels: without labelCol every doc carries an
+        # all-zero observed mask, so the head/topic correction would see no
+        # signal and the "supervised" fit would silently reduce to unsupervised.
+        # Fail fast instead.
+        if weight_y != 0.0 and label_col is None:
+            raise ValueError(
+                f"weightY={weight_y} > 0 requires labelCol to be set (the head "
+                "trains on it); no labelCol was provided."
+            )
 
         # Column set to pull: features always; label columns only when present
         # (tolerated-absent at weightY == 0). Threaded like the STM shim threads
@@ -361,8 +405,10 @@ class PCModel(_PCParams, Model):
     """MLlib-shaped Model wrapping a trained OnlinePCLDA VIResult.
 
     ``transform`` appends the label-free ``topicDistributionCol`` (theta) via
-    the SAME CAVI used at train time — the faithfulness invariant. A
-    head-derived ``probabilityCol`` is increment 2 (see ``predictProbability``).
+    the SAME CAVI used at train time — the faithfulness invariant. When the fit
+    was supervised (``weightY > 0``) it ALSO appends a head-derived
+    ``probabilityCol`` = ``sigmoid(w_CK . theta)`` (per-label P(y=1)); see
+    ``predictProbability``.
     """
 
     # Stamped into result.metadata by VIRunner as ``model_class``.
@@ -443,18 +489,40 @@ class PCModel(_PCParams, Model):
         features_col = self.getOrDefault("featuresCol")
         # Broadcast lifetime is the returned DataFrame's (its UDF closure holds
         # bcast); ContextCleaner reclaims it on GC — do NOT eagerly unpersist.
-        return dataset.withColumn(out_col, infer_udf(F.col(features_col)))
+        out = dataset.withColumn(out_col, infer_udf(F.col(features_col)))
+
+        # Supervised fit -> also append the head-derived per-label probability.
+        # The topicDistribution UDF already inferred theta from the SAME CAVI; the
+        # head is a cheap sigmoid(w_CK . theta) on top of it (no second inference).
+        if float(self.getOrDefault("weightY")) != 0.0:
+            w_CK = self._result.global_params["w_CK"]
+            wbcast = sc.broadcast(w_CK)
+
+            def _proba(theta, _wb=wbcast):
+                th = np.asarray(theta.toArray(), dtype=np.float64)
+                logits = _wb.value @ th               # (C,)
+                return DenseVector(1.0 / (1.0 + np.exp(-logits)))
+
+            proba_udf = F.udf(_proba, returnType=VectorUDT())
+            prob_col = self.getOrDefault("probabilityCol")
+            out = out.withColumn(prob_col, proba_udf(F.col(out_col)))
+        return out
 
     def predictProbability(self, dataset):
-        """Per-label P(y=1) = sigmoid(w_CK . theta) — INCREMENT 2 (not built).
+        """Append the head-derived ``probabilityCol`` = sigmoid(w_CK . theta).
 
-        The head is inert at weightY == 0 (all-zero w_CK -> sigmoid(0) = 0.5 for
-        every doc/label), so a probability column carries no signal on the
-        unsupervised path. Emitting a meaningful ``probabilityCol`` requires the
-        trained head from increment 2; stubbed here to mark the seam.
+        Per-label P(y=1) for every doc, from the trained logistic head on top of
+        the label-free CAVI theta. Requires a supervised fit (``weightY > 0``): on
+        the unsupervised path the head is at its zero seed (sigmoid(0) = 0.5 for
+        every doc/label), so no meaningful probability exists.
+
+        This is exactly the column ``transform`` already appends when
+        ``weightY > 0``; provided as a named entry point for callers that only want
+        the probability.
         """
-        raise NotImplementedError(
-            "predictProbability (head-derived probabilityCol) is increment 2; "
-            "increment 1 fits the unsupervised representation only, so the head "
-            "w_CK stays at its zero seed."
-        )
+        if float(self.getOrDefault("weightY")) == 0.0:
+            raise NotImplementedError(
+                "predictProbability requires a supervised fit (weightY > 0); the "
+                "unsupervised head is at its zero seed (P == 0.5 everywhere)."
+            )
+        return self.transform(dataset)

@@ -162,3 +162,177 @@ def test_pc_lda_weight_y_zero_equivalent_to_online_lda(spark):
     assert cos.min() > 0.999, (
         f"OnlinePCLDA(weight_y=0) diverged from OnlineLDA: matched cosines {cos}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Increment 2 — internal grad-check of the VI-PC's OWN supervised gradient.
+#
+# This is NOT a comparison against analysis/pc's gradient (the VI-PC is a
+# variational model with a different π-estimator; see design §"CRITICAL
+# framing"). It validates INTERNAL consistency: the accumulated autograd
+# supervised gradient (∂/∂ the topic representation CAVI reads = the λ
+# correction, and ∂/∂w_CK = the head step) matches a central finite-difference
+# of the VI-PC's OWN per-minibatch supervised loss on a tiny fixed batch with
+# C > 1 and a non-trivial label_mask. No Spark, no fit — pure numpy, fast.
+# ---------------------------------------------------------------------------
+
+def _tiny_sup_batch(seed=0, C=2, V=12):
+    """A tiny fixed PCDocument batch with C>1 and a non-trivial observed mask."""
+    from spark_vi.models.topic.types import PCDocument
+    rng = np.random.default_rng(seed)
+    docs = []
+    for _ in range(6):
+        nnz = int(rng.integers(3, 7))
+        idx = np.sort(rng.choice(V, size=nnz, replace=False)).astype(np.int32)
+        cnt = rng.integers(1, 6, size=nnz).astype(np.float64)
+        y = rng.integers(0, 2, size=C).astype(np.float64)
+        mask = rng.integers(0, 2, size=C).astype(np.float64)   # some cells unobserved
+        docs.append(PCDocument(indices=idx, counts=cnt, length=int(cnt.sum()),
+                               y=y, label_mask=mask))
+    # Guarantee at least one fully-observed doc so the batch is non-degenerate.
+    docs[0] = PCDocument(indices=docs[0].indices, counts=docs[0].counts,
+                         length=docs[0].length, y=np.ones(C),
+                         label_mask=np.ones(C))
+    return docs
+
+
+def test_pc_supervised_gradient_matches_finite_difference():
+    """The accumulated autograd supervised gradient (topic correction + head)
+    matches a central finite-difference of the same per-minibatch supervised
+    loss to max rel err <= 1e-5."""
+    from spark_vi.models.topic.pc import (
+        _supervised_batch_value_and_grad, _supervised_batch_value,
+    )
+
+    rng = np.random.default_rng(1)
+    K, V, C = 4, 12, 2
+    n_iters = 20
+    alpha = np.full(K, 1.1)
+    topics_repr = rng.random((K, V)) * 0.3 + 0.01   # expElogbeta-like, positive
+    w_CK = rng.standard_normal((C, K)) * 0.5
+    docs = _tiny_sup_batch(seed=0, C=C, V=V)
+
+    _loss, grad_topics, grad_wCK = _supervised_batch_value_and_grad(
+        topics_repr, w_CK, docs, alpha, K, n_iters,
+    )
+
+    def _fd(param, grad, evaluate, eps=1e-6):
+        # Central difference at every coordinate carrying a nonzero analytic grad.
+        coords = list(zip(*np.nonzero(grad)))
+        rel = []
+        for (i, j) in coords:
+            pp = param.copy(); pp[i, j] += eps
+            pm = param.copy(); pm[i, j] -= eps
+            num = (evaluate(pp) - evaluate(pm)) / (2 * eps)
+            ana = grad[i, j]
+            rel.append(abs(num - ana) / max(abs(ana), abs(num), 1e-8))
+        return max(rel)
+
+    err_topics = _fd(
+        topics_repr, grad_topics,
+        lambda p: _supervised_batch_value(p, w_CK, docs, alpha, K, n_iters),
+    )
+    err_head = _fd(
+        w_CK, grad_wCK,
+        lambda p: _supervised_batch_value(topics_repr, p, docs, alpha, K, n_iters),
+    )
+    print(f"\n[increment-2 grad-check] max rel err: topic-correction={err_topics:.2e}, "
+          f"head={err_head:.2e}")
+    assert err_topics <= 1e-5, f"topic-gradient rel err {err_topics:.2e} > 1e-5"
+    assert err_head <= 1e-5, f"head-gradient rel err {err_head:.2e} > 1e-5"
+
+
+# ---------------------------------------------------------------------------
+# Increment 2 — OUTCOME parity: a trained OnlinePCLDA(weight_y>0) reproduces the
+# Prediction-Constrained advantage on heldout per-label AUC — it beats BOTH its
+# own unsupervised (weight_y=0) representation AND a two-stage baseline (that same
+# unsupervised representation + a downstream logistic regression). This is the
+# Hughes-regime synthetic (K_fit < K_dom: an unsupervised fit spends its topics
+# on the dominant structure and misses the low-mass predictive topic; the label,
+# flowing through the topic correction, reshapes a topic onto the predictive
+# direction). Validated as OUTCOME parity within a stochastic-SVI tolerance band,
+# NOT numeric identity vs analysis/pc (design §"CRITICAL framing").
+# ---------------------------------------------------------------------------
+
+def _labeled_pc_docs(X, y):
+    """(D,V) counts + (D,) labels -> list[PCDocument] with all cells observed."""
+    from spark_vi.models.topic.types import PCDocument
+    docs = []
+    for i, row in enumerate(X):
+        idx = np.nonzero(row)[0].astype(np.int32)
+        cnt = row[idx].astype(np.float64)
+        docs.append(PCDocument(
+            indices=idx, counts=cnt, length=int(cnt.sum()),
+            y=np.array([float(y[i])]), label_mask=np.array([1.0]),
+        ))
+    return docs
+
+
+@pytest.mark.slow
+def test_pc_supervised_beats_two_stage_on_heldout_auc(spark):
+    """OnlinePCLDA(weight_y>0) reproduces the PC advantage: heldout per-label AUC
+    beats both the weight_y=0 head and a two-stage baseline."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+
+    from spark_vi.core import VIConfig, VIRunner
+    from spark_vi.models.topic.pc import OnlinePCLDA
+    from analysis.pc.tests.test_synthetic_signal import (
+        _make_corpus, SEED, D, V, K_FIT, TEST_FRAC,
+    )
+
+    X, y = _make_corpus(SEED)
+    n_te = int(TEST_FRAC * D)
+    n_tr = D - n_te
+    Xtr, Xte, ytr, yte = X[:n_tr], X[n_tr:], y[:n_tr], y[n_tr:]
+    docs = _labeled_pc_docs(Xtr, ytr)
+
+    # Full-batch deterministic SVI (no minibatch sampling noise) so the gate is
+    # reproducible; K_FIT < K_dom is the hard PC regime.
+    cfg = dict(max_iterations=50, learning_rate_tau0=10.0,
+               learning_rate_kappa=0.6, random_seed=0, convergence_tol=1e-12)
+
+    def _fit(weight_y):
+        model = OnlinePCLDA(K=K_FIT, vocab_size=V, C=1, weight_y=weight_y,
+                            alpha=1.1, grad_cavi_iters=10, random_seed=0)
+        rdd = spark.sparkContext.parallelize(docs, numSlices=4).persist()
+        rdd.count()
+        runner = VIRunner(model, config=VIConfig(**cfg))
+        result = runner.fit(rdd)
+        # theta for a held-out split via the SAME label-free CAVI (infer_local).
+        te = _labeled_pc_docs(Xte, yte)
+        tr = _labeled_pc_docs(Xtr, ytr)
+        th_te = np.array([model.infer_local(d, result.global_params)["theta"] for d in te])
+        th_tr = np.array([model.infer_local(d, result.global_params)["theta"] for d in tr])
+        rdd.unpersist(blocking=False)
+        return model, result.global_params, th_tr, th_te
+
+    # PC (supervised) and its own unsupervised (weight_y=0) representation.
+    _pc, gp_pc, _pc_tr, pc_te = _fit(weight_y=50.0)
+    _un, gp_un, un_tr, un_te = _fit(weight_y=0.0)
+
+    w_pc = gp_pc["w_CK"][0]
+    pc_auc = roc_auc_score(yte, pc_te @ w_pc)              # trained head
+    wy0_auc = roc_auc_score(yte, un_te @ gp_un["w_CK"][0]) if np.abs(gp_un["w_CK"]).max() > 0 else 0.5
+    two_stage = LogisticRegression(max_iter=1000).fit(un_tr, ytr)
+    two_auc = roc_auc_score(yte, two_stage.predict_proba(un_te)[:, 1])
+    lr_codes = LogisticRegression(max_iter=2000).fit(Xtr, ytr)
+    codes_auc = roc_auc_score(yte, lr_codes.predict_proba(Xte)[:, 1])
+
+    print(f"\n[increment-2 outcome parity] heldout ROC AUC — "
+          f"PC(wy=50)={pc_auc:.4f}  weight_y=0 head={wy0_auc:.4f}  "
+          f"two-stage={two_auc:.4f}  LR-on-codes={codes_auc:.4f}  "
+          f"(pos rate te={yte.mean():.2f}, |w_pc|max={np.abs(w_pc).max():.3g})")
+
+    # PC clears chance by a clear margin (the SVI-CAVI fit reaches a lower
+    # absolute AUC than the reference's L-BFGS + 100-step NEF, but the PC
+    # ADVANTAGE — the quantity under test — reproduces robustly).
+    assert pc_auc > 0.75, f"PC heldout AUC {pc_auc:.3f} not clearly above chance"
+    # PC beats its own unsupervised head (which sits at ~0.5, the zero seed).
+    assert pc_auc > wy0_auc + 0.08, (
+        f"PC {pc_auc:.3f} did not beat its weight_y=0 head {wy0_auc:.3f}"
+    )
+    # PC beats the two-stage baseline by a real margin (the Hughes result).
+    assert pc_auc > two_auc + 0.05, (
+        f"PC {pc_auc:.3f} did not beat two-stage {two_auc:.3f} by margin"
+    )
