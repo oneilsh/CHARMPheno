@@ -86,11 +86,37 @@ def test_pc_shim_weight_y_default_zero_and_settable():
     assert est2.getOrDefault("numLabels") == 2
 
 
-def test_pc_shim_weight_y_positive_fit_raises(spark):
-    # Zero supervised risk: weightY > 0 is increment 2 and must fail fast, not
-    # silently run an unsupervised fit under a supervised name.
+def test_pc_shim_weight_y_positive_requires_label_col(spark):
+    # Supervised fit without labels is a user error (the head would see no
+    # signal); fail fast rather than silently run an unsupervised fit under a
+    # supervised name.
     from spark_vi.mllib.topic.pc import PCEstimator
     rows, cols, V = _block_rows(seed=3)
     df = spark.createDataFrame(rows, cols)
-    with pytest.raises(NotImplementedError, match="increment 2"):
+    with pytest.raises(ValueError, match="requires labelCol"):
         PCEstimator(k=3, maxIter=2, weightY=1.0).fit(df)
+
+
+def test_pc_shim_supervised_fit_moves_head_and_emits_probability(spark):
+    # weightY > 0 with a labelCol: the head moves off its zero seed and transform
+    # appends the head-derived probabilityCol alongside topicDistribution.
+    from spark_vi.mllib.topic.pc import PCEstimator
+    rows, cols, V = _block_rows(seed=4, with_labels=True)
+    df = spark.createDataFrame(rows, cols)
+    model = PCEstimator(
+        k=3, maxIter=6, seed=0, subsamplingRate=1.0,
+        numLabels=1, labelCol="label", weightY=50.0, gradCaviIters=10,
+    ).fit(df)
+
+    # Head trained off zero (supervised correction actually ran).
+    assert not np.allclose(model.headWeights(), 0.0)
+    assert model.headWeights().shape == (1, 3)
+
+    out = model.transform(df)
+    assert "topicDistribution" in out.columns
+    assert "probability" in out.columns
+    row = out.select("topicDistribution", "probability").head()
+    td, prob = row[0], row[1]
+    assert len(td) == 3 and abs(float(sum(td)) - 1.0) < 1e-6   # simplex theta
+    assert len(prob) == 1                                       # one P(y=1) per label
+    assert 0.0 <= float(prob[0]) <= 1.0                         # a probability
