@@ -24,7 +24,9 @@ K: 25                       # topics (SWEEP)
 weight_y: 100.0             # PC prediction-constraint weight (SWEEP)
 alpha: 1.1                  # theta Dirichlet concentration (-> PCEstimator docConcentration)
 tau: 1.1                    # baseline (in-mem two-stage) topic Dirichlet; VI eta = 1/K
-max_iter: 500               # SVI global iterations
+max_iter: 200               # SVI global iterations (~10 passes at subsampling 0.05;
+                            # 500 was ~5h wall-clock, 200 lands a trained head in ~2h.
+                            # Raise later if the fit still looks under-converged.)
 test_frac: 0.25
 seed: 0
 # --- distributed-SVI schedule (backend: vi only) ---
