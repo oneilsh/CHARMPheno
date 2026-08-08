@@ -74,8 +74,10 @@ full-cohort scale. This experiment is the first full-cohort VI-PC run; the
 `vi_convergence` block in `pc_results.json` (final ELBO, `n_iter`, `|w_CK|max`) is
 the primary thing to read before trusting any AUC.
 
-Target shape from Hughes et al. (unchanged from 0070): **per-drug AUC ~0.67–0.71
-for PC vs ~0.55–0.64 for logistic regression**.
+Target shape from Hughes et al. (unchanged from 0070; AISTATS 2018 Fig. 3):
+**avg heldout AUC across the meds ~0.60–0.65 for PC-sLDA, beating logistic
+regression slightly and improving reliably on the Gibbs-LDA init** — NOT the
+0.67–0.71 of the later JAMA-Psychiatry 2020 follow-up.
 
 ## Cohort / features / outcome — identical to 0070
 

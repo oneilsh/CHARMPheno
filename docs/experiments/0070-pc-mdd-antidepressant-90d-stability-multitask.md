@@ -57,8 +57,13 @@ code history, whether a specific antidepressant will "work" (be sustained ≥90
 days) — **on All-of-Us OMOP**. The machine is trusted independently of the data
 (Phase A: our objective reproduces the authors' published PC trade-off at their
 own optima; see ADR 0038), so a null here is a *data* finding about AoU, not a
-bug in the model. Target shape from the paper: **per-drug AUC ~0.67–0.71 for PC
-vs ~0.55–0.64 for logistic regression**.
+bug in the model. Target shape from the paper (Hughes et al. AISTATS 2018,
+Fig. 3 — the Antidepressant task): **avg heldout AUC across the meds ~0.60–0.65
+for PC-sLDA, beating logistic regression slightly and improving reliably on the
+Gibbs-LDA init**. (Their run: 11 meds, 29774/3721/3722 patients, V=5126 fused
+ICD-9 dx + CPT procedure + medication codewords, PC-sLDA initialized from
+Gibbs-LDA.) The oft-quoted 0.67–0.71 is the later JAMA-Psychiatry 2020 follow-up,
+not this AISTATS model — do not target it here.
 
 ## Cohort — `mdd_antidepressant`
 
