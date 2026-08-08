@@ -156,3 +156,78 @@ def test_warm_start_rejected_for_inmem_backend(capsys):
     captured = capsys.readouterr()
     assert rc == 1
     assert "--warm-start-unsup-iters is VI-only" in captured.err
+
+
+# --- cohort selector + stable-treatment knobs --------------------------------
+
+def test_cohort_defaults_to_mdd_antidepressant():
+    ns = drv._build_parser().parse_args(["--cdr", "p.d", "--billing", "b"])
+    assert ns.cohort == "mdd_antidepressant"
+
+
+def test_parser_has_cohort_and_stable_knobs():
+    ns = drv._build_parser().parse_args([
+        "--cdr", "p.d", "--billing", "b",
+        "--cohort", "mdd_stable_treatment",
+        "--min-days", "120", "--max-gap-days", "400",
+        "--min-history-events", "3", "--age-min", "21", "--age-max", "75",
+    ])
+    assert ns.cohort == "mdd_stable_treatment"
+    assert ns.min_days == 120 and ns.max_gap_days == 400
+    assert ns.min_history_events == 3
+    assert ns.age_min == 21 and ns.age_max == 75
+
+
+def test_stable_knob_defaults_match_committed_cohort():
+    ns = drv._build_parser().parse_args([
+        "--cdr", "p.d", "--billing", "b", "--cohort", "mdd_stable_treatment",
+    ])
+    assert ns.min_days == 90 and ns.max_gap_days == 395
+    assert ns.min_history_events == 2 and ns.age_min == 18 and ns.age_max == 80
+
+
+def test_cohort_rejects_unknown_value():
+    with pytest.raises(SystemExit):
+        drv._build_parser().parse_args([
+            "--cdr", "p.d", "--billing", "b", "--cohort", "not_a_cohort",
+        ])
+
+
+def test_stable_treatment_env_unset_validates_before_bq(monkeypatch, capsys):
+    # The stable-treatment path env-gates before importing charmpheno / touching BQ.
+    monkeypatch.delenv("WORKSPACE_CDR", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    rc = drv.main(["--cohort", "mdd_stable_treatment"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "--cdr/--billing" in captured.err
+
+
+def test_stable_treatment_age_min_gt_max_validates_before_bq(capsys):
+    # The stable-treatment age guard fires before any BQ import (RC 1 + message).
+    rc = drv.main([
+        "--cdr", "proj.ds", "--billing", "bill",
+        "--cohort", "mdd_stable_treatment", "--age-min", "90", "--age-max", "80",
+    ])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "--age-min" in captured.err and "--age-max" in captured.err
+
+
+def test_stable_treatment_skips_window_vs_stability_guard(capsys):
+    # The window-vs-stability guard is mdd_antidepressant-ONLY. For a
+    # stable-treatment run we set window < stability (which WOULD trip the guard
+    # for the antidepressant cohort) AND age_min > age_max: if the window guard
+    # were still active it would fire first with "must be >=". Instead the age
+    # guard fires — proving the window guard is skipped for this cohort — and both
+    # gates are BEFORE any BQ import, so the test stays fast.
+    rc = drv.main([
+        "--cdr", "proj.ds", "--billing", "bill",
+        "--cohort", "mdd_stable_treatment",
+        "--window-days", "30", "--stability-days", "90",
+        "--age-min", "90", "--age-max", "80",
+    ])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "must be >=" not in captured.err          # window guard did NOT fire
+    assert "--age-min" in captured.err               # the age guard fired instead

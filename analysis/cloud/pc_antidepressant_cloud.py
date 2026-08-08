@@ -169,6 +169,50 @@ def assemble_multitask_labels(
     return y, mask
 
 
+def assemble_fullyobserved_labels(
+    label_by_person: Mapping[Any, Iterable[str]],
+    person_order: Sequence[Any],
+    drug_order: Sequence[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build the FULLY-OBSERVED ``(D, C)`` targets ``y`` and all-ones ``mask``.
+
+    The Hughes ``mdd_stable_treatment`` supervision pattern, contrasted with the
+    per-index-drug :func:`assemble_multitask_labels`: here every present patient
+    is labeled for EVERY drug column — ``y[d, c] = 1`` iff ``drug_order[c]`` is
+    in that patient's stable drug subset, else ``0``, and the whole row is
+    observed (``mask[d, :] = 1``). So a single-drug interval yields exactly one
+    positive, a held combination (e.g. ``{fluoxetine, sertraline}``) yields two,
+    and everything else is a true negative (the drug was NOT part of the stable
+    regimen) rather than an unobserved cell. This is the mask-all-ones
+    multi-label setup :func:`analysis.pc.evaluate.evaluate_pc_multitask` treats as
+    standard ``C``-way multi-label.
+
+    ``label_by_person`` maps person_id -> the stable drug subset (an iterable of
+    ingredient names, i.e. the cohort index table's ``drug_subset``). A person in
+    ``person_order`` absent from ``label_by_person`` contributes an all-zero,
+    all-UNOBSERVED row (``mask`` all 0) — a valid unlabeled row, exactly as the
+    per-drug assembler leaves a person with no outcome. ``drug_order`` is the
+    FIXED length-``C`` column order (``_HUGHES_ANTIDEPRESSANTS``, length 10 — NOT
+    a ``stable_drug_order`` over the drugs that happen to appear), so column c is
+    the same Hughes drug across every run. Returns ``(y, mask)``, both ``(D, C)``
+    with ``D = len(person_order)``, ``C = len(drug_order)``.
+    """
+    D, C = len(person_order), len(drug_order)
+    col_of = {d: j for j, d in enumerate(drug_order)}
+    y = np.zeros((D, C), dtype=np.float64)
+    mask = np.zeros((D, C), dtype=np.float64)
+    for i, pid in enumerate(person_order):
+        subset = label_by_person.get(pid)
+        if subset is None:
+            continue                       # absent -> all-zero, all-unobserved
+        mask[i, :] = 1.0                   # present -> the whole row is observed
+        for name in subset:
+            j = col_of.get(name)
+            if j is not None:
+                y[i, j] = 1.0
+    return y, mask
+
+
 def stratified_test_mask(
     groups: Sequence[Any],
     test_frac: float,
@@ -301,6 +345,80 @@ def attach_multitask_label_columns(
         .withColumn(label_col, y_udf(F.col("_index_drug"), F.col("_worked")))
         .withColumn(mask_col, mask_udf(F.col("_index_drug")))
         .drop("_index_drug", "_worked")
+    )
+
+
+def attach_fullyobserved_label_columns(
+    bow_df,
+    label_by_person: Mapping[Any, Iterable[str]],
+    drug_order: Sequence[str],
+    spark,
+    label_col: str = "y",
+    mask_col: str = "label_mask",
+):
+    """Attach the fully-observed multi-label ``y`` + all-ones ``mask`` as columns.
+
+    The Spark/column counterpart of :func:`assemble_fullyobserved_labels`, and the
+    fully-observed sibling of :func:`attach_multitask_label_columns`: per BOW row
+    it emits the SAME length-``C`` label vector ``y`` (1 at each column whose
+    Hughes drug is in the patient's stable subset, else 0) and length-``C``
+    ``label_mask`` (all-ones for a present patient, all-zero for one absent from
+    ``label_by_person``) that the numpy assembler builds, keyed to columns by the
+    FIXED ``drug_order`` (``_HUGHES_ANTIDEPRESSANTS``), so the distributed VI-PC
+    sees the exact same supervision as the in-memory path.
+
+    Same column-type contract as :func:`attach_multitask_label_columns`: the
+    label/mask are Spark ``ArrayType(DoubleType)`` (NOT ``VectorUDT``) so
+    ``PCEstimator``'s row shim deserializes them to Python ``list`` and reads a
+    clean ``(C,)`` vector rather than wrapping a Vector to a spurious ``(1, C)``.
+
+    ``label_by_person`` maps person_id -> the stable drug subset (list of
+    ingredient names). It is materialized to a tiny driver-side table and
+    BROADCAST left-joined by ``person_id``: a BOW person absent from
+    ``label_by_person`` gets all-zero ``y`` AND all-zero ``label_mask`` (a valid
+    unlabeled row), exactly as the numpy assembler leaves it. Returns ``bow_df``
+    with the two columns appended (the join key ``_drug_subset`` is dropped).
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import (
+        ArrayType, DoubleType, StringType, StructField, StructType,
+    )
+
+    C = len(drug_order)
+    col_of = {d: j for j, d in enumerate(drug_order)}
+
+    person_dtype = bow_df.schema["person_id"].dataType
+    schema = StructType([
+        StructField("person_id", person_dtype, True),
+        StructField("_drug_subset", ArrayType(StringType()), True),
+    ])
+    rows = [
+        (pid, [str(name) for name in subset])
+        for pid, subset in label_by_person.items()
+    ]
+    label_df = spark.createDataFrame(rows, schema=schema)
+    joined = bow_df.join(F.broadcast(label_df), on="person_id", how="left")
+
+    def _y_vec(subset):
+        v = [0.0] * C
+        if subset is not None:
+            for name in subset:
+                j = col_of.get(name)
+                if j is not None:
+                    v[j] = 1.0
+        return v
+
+    def _mask_vec(subset):
+        # All-ones for a present patient (fully observed), all-zero for absent.
+        return [1.0] * C if subset is not None else [0.0] * C
+
+    y_udf = F.udf(_y_vec, ArrayType(DoubleType()))
+    mask_udf = F.udf(_mask_vec, ArrayType(DoubleType()))
+    return (
+        joined
+        .withColumn(label_col, y_udf(F.col("_drug_subset")))
+        .withColumn(mask_col, mask_udf(F.col("_drug_subset")))
+        .drop("_drug_subset")
     )
 
 
@@ -460,6 +578,53 @@ def _build_parser() -> argparse.ArgumentParser:
         "--lookback-days", type=int, default=365,
         help="pre-index feature window: events in [index - lookback_days, index)",
     )
+    # --- Cohort selector -----------------------------------------------------
+    parser.add_argument(
+        "--cohort", choices=("mdd_antidepressant", "mdd_stable_treatment"),
+        default="mdd_antidepressant",
+        help=("cohort + label shape. 'mdd_antidepressant' (default) = the "
+              "per-index-drug incident-new-user cohort with the >=90-day "
+              "'the drug worked' outcome (one observed cell per patient = the "
+              "drug they initiated; current behavior, unchanged). "
+              "'mdd_stable_treatment' = the Hughes-faithful stable-treatment "
+              "cohort over the 10-drug set with a FULLY-OBSERVED length-10 "
+              "indicator of the stable drug subset (every head trains on every "
+              "patient; all-history pre-index features). The stable-treatment "
+              "knobs below (--min-days/--max-gap-days/--min-history-events/"
+              "--age-min/--age-max) apply only to this cohort; the antidepressant "
+              "knobs (--window-days/--stability-days/--grace-gap-days/"
+              "--lookback-days) apply only to the other."),
+    )
+    # --- Stable-treatment knobs (--cohort mdd_stable_treatment only) ----------
+    parser.add_argument(
+        "--min-days", type=int, default=90,
+        help=("stable-treatment: minimum stable-interval length (days). A "
+              "constant-subset antidepressant interval must last >= this to "
+              "qualify. Ignored for --cohort mdd_antidepressant."),
+    )
+    parser.add_argument(
+        "--max-gap-days", type=int, default=395,
+        help=("stable-treatment: maximum permissible visit gap (days) bounding "
+              "encounter regularity (Hughes: an encounter at least every ~13 "
+              "months, both interval endpoints included). Ignored for "
+              "--cohort mdd_antidepressant."),
+    )
+    parser.add_argument(
+        "--min-history-events", type=int, default=2,
+        help=("stable-treatment: minimum number of events strictly before the "
+              "first antidepressant era (pre-treatment history requirement). "
+              "Ignored for --cohort mdd_antidepressant."),
+    )
+    parser.add_argument(
+        "--age-min", type=int, default=18,
+        help=("stable-treatment: minimum age (inclusive) at the stable-interval "
+              "start. Ignored for --cohort mdd_antidepressant."),
+    )
+    parser.add_argument(
+        "--age-max", type=int, default=80,
+        help=("stable-treatment: maximum age (inclusive) at the stable-interval "
+              "start. Ignored for --cohort mdd_antidepressant."),
+    )
     # --- Cohort + outcome ----------------------------------------------------
     parser.add_argument(
         "--window-days", type=int, default=365,
@@ -556,11 +721,26 @@ def main(argv: list[str] | None = None) -> int:
               "notebook (or `source ~/.bashrc`), or pass --cdr/--billing.",
               file=sys.stderr)
         return 1
-    if args.window_days < args.stability_days:
+    # The window-vs-stability bracket is a mdd_antidepressant-only constraint
+    # (its follow-up window must fully observe the stability horizon). The
+    # stable-treatment cohort has no such forward window — its observability gate
+    # is "the stable interval falls within one observation period" — so the guard
+    # is scoped to the antidepressant cohort. mdd_antidepressant is the default,
+    # so the existing CLI behavior is unchanged.
+    if args.cohort == "mdd_antidepressant" and args.window_days < args.stability_days:
         print(f"ERROR: --window-days ({args.window_days}) must be >= "
               f"--stability-days ({args.stability_days}) so the stability window "
               "is fully observed.", file=sys.stderr)
         return 1
+    if args.cohort == "mdd_stable_treatment":
+        if args.min_days <= 0:
+            print(f"ERROR: --min-days must be > 0, got {args.min_days}.",
+                  file=sys.stderr)
+            return 1
+        if args.age_min > args.age_max:
+            print(f"ERROR: --age-min ({args.age_min}) must be <= --age-max "
+                  f"({args.age_max}).", file=sys.stderr)
+            return 1
     # Checkpoint/resume/eval are VI-native (the inmem L-BFGS backend has no
     # interim state). Validate the combinations BEFORE touching BQ so a
     # misconfigured invocation fails fast (mirrors the env gate above).
@@ -602,10 +782,14 @@ def main(argv: list[str] | None = None) -> int:
     from charmpheno.omop.doc_spec import PatientDocSpec
     from charmpheno.omop.cohorts import (
         _ANTIDEPRESSANT_INGREDIENTS,
+        _HUGHES_ANTIDEPRESSANTS,
         _antidepressant_concept_map,
+        all_history_feature_events,
         antidepressant_stability_label,
         apply_mdd_antidepressant_cohort,
+        apply_mdd_stable_treatment_cohort,
         lookback_feature_label_events,
+        stable_treatment_label,
     )
     from analysis.pc.evaluate import (
         _bundle_masked,
@@ -615,10 +799,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     configure_logging()
-    print(f"[driver] cdr={cdr}, billing_project={billing}, backend={args.backend}, "
-          f"K={args.K}, weight_y={args.weight_y}, lookback_days={args.lookback_days}, "
-          f"window_days={args.window_days}, stability_days={args.stability_days}, "
-          f"person_mod={args.person_mod}", flush=True)
+    print(f"[driver] cdr={cdr}, billing_project={billing}, cohort={args.cohort}, "
+          f"backend={args.backend}, K={args.K}, weight_y={args.weight_y}, "
+          f"lookback_days={args.lookback_days}, window_days={args.window_days}, "
+          f"stability_days={args.stability_days}, person_mod={args.person_mod}",
+          flush=True)
     if args.backend == "vi" and (args.save_dir or args.resume_from or args.eval_only):
         print(f"[driver] checkpoint: save_dir={args.save_dir or '<none>'}, "
               f"save_interval={args.save_interval}, "
@@ -637,6 +822,143 @@ def main(argv: list[str] | None = None) -> int:
             .option("parentProject", billing)
             .load()
         )
+
+    # ===================================================================== #
+    # mdd_stable_treatment: the Hughes-faithful stable-treatment path.       #
+    # Self-contained (cohort -> fully-observed 10-label -> all-history fused #
+    # features -> eval), with its own report/JSON tail, so the per-index-    #
+    # drug mdd_antidepressant path below stays byte-for-byte unchanged.      #
+    # ===================================================================== #
+    if args.cohort == "mdd_stable_treatment":
+        drug_order_fixed = list(_HUGHES_ANTIDEPRESSANTS)
+
+        # --- 1) Cohort index (per-person stable-treatment table) --------------
+        with _phase("cohort index (apply_mdd_stable_treatment_cohort)"):
+            cond_df = load_omop_bigquery(
+                spark=spark, cdr_dataset=cdr, billing_project=billing,
+                concept_types=("condition",), person_sample_mod=args.person_mod,
+                cohort=None,
+            )
+            index_df = apply_mdd_stable_treatment_cohort(
+                cond_df, spark=spark, cdr_dataset=cdr, billing_project=billing,
+                date_col=_CONDITION_DATE,
+                min_days=args.min_days, max_gap_days=args.max_gap_days,
+                min_history_events=args.min_history_events,
+                age_min=args.age_min, age_max=args.age_max,
+            ).persist()
+            n_index = index_df.count()
+            print(f"[driver]   MDD stable-treatment persons: {n_index}", flush=True)
+
+        # --- 2) Outcome (fully-observed length-10 Hughes indicator) -----------
+        with _phase("outcome (stable_treatment_label, fully-observed 10-drug)"):
+            # stable_treatment_label is the committed length-10 indicator over the
+            # fixed Hughes order; the driver reconstructs each person's drug SUBSET
+            # (names) from that indicator to feed the fully-observed assemblers.
+            label_rows = stable_treatment_label(
+                index_df, drug_order=_HUGHES_ANTIDEPRESSANTS,
+            ).collect()
+            label_by_person = {
+                r["person_id"]: [
+                    drug_order_fixed[i] for i, v in enumerate(r["y"])
+                    if float(v) > 0.5
+                ]
+                for r in label_rows
+            }
+            pos = [0] * len(drug_order_fixed)
+            for r in label_rows:
+                for i, v in enumerate(r["y"]):
+                    if float(v) > 0.5:
+                        pos[i] += 1
+            print(f"[driver]   stable-treatment labels: {len(label_by_person)} "
+                  "persons; per-drug positives: "
+                  + ", ".join(f"{drug_order_fixed[i]}={pos[i]}"
+                              for i in range(len(pos))), flush=True)
+
+        # --- 3) Fused ALL-HISTORY features -> BOW -----------------------------
+        with _phase("fused features -> all-history window -> BOW"):
+            fused = load_omop_bigquery(
+                spark=spark, cdr_dataset=cdr, billing_project=billing,
+                concept_types=("condition", "drug", "procedure"),
+                person_sample_mod=args.person_mod, cohort=None,
+            )
+            feature_events = all_history_feature_events(
+                fused, index_df.select("person_id", "index_date", "source_cohort"),
+                date_col=_FUSED_EVENT_DATE,
+            )
+            bow_df, vocab_map = to_bow_dataframe(
+                feature_events, doc_spec=PatientDocSpec(), token_col="concept_id",
+                vocab_size=args.vocab_size, min_df=args.min_df,
+                min_patient_count=args.min_patient_count,
+            )
+            bow_df = bow_df.persist()
+            V = len(vocab_map)
+            n_docs = bow_df.count()
+            print(f"[driver]   vocab size: {V} (cap {args.vocab_size}), "
+                  f"documents: {n_docs}", flush=True)
+
+        # --- 4/5) Backend split: in-memory L-BFGS (default) vs distributed VI --
+        if args.backend == "inmem":
+            results, drug_order, n_train, n_test, n_persons = (
+                _run_inmem_backend_fullyobserved(
+                    bow_df, V, label_by_person, drug_order_fixed, args,
+                    evaluate_pc_multitask,
+                )
+            )
+        else:
+            results, drug_order, n_train, n_test, n_persons = (
+                _run_vi_backend_fullyobserved(
+                    spark, bow_df, V, label_by_person, drug_order_fixed, args,
+                    multitask_baseline_probas, _bundle_masked, vocab_map,
+                )
+            )
+
+        # --- Report + JSON (per-drug Hughes table, fully-observed) ------------
+        print("\n[driver] per-drug results (column index -> Hughes drug):",
+              flush=True)
+        for c, name in enumerate(drug_order):
+            print(f"[driver]   label {c} = {name}", flush=True)
+        print(format_results_table(results), flush=True)
+        _log_convergence(results["meta"])
+
+        out_payload = {
+            "results": results,
+            "backend": args.backend,
+            "cohort": args.cohort,
+            "drug_order": drug_order,
+            "column_drug_names": {c: name for c, name in enumerate(drug_order)},
+            "vocab_size": V,
+            "n_persons": n_persons,
+            "n_train": n_train,
+            "n_test": n_test,
+            "params": {
+                "backend": args.backend,
+                "cohort": args.cohort,
+                "K": args.K, "weight_y": args.weight_y, "alpha": args.alpha,
+                "tau": args.tau, "pi_iters": args.pi_iters, "max_iter": args.max_iter,
+                "doc_batch_size": args.doc_batch_size,
+                "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
+                "kappa": args.kappa,
+                "warm_start_unsup_iters": args.warm_start_unsup_iters,
+                # stable-treatment membership knobs (all-history features; no
+                # lookback/window/stability bracket for this cohort).
+                "min_days": args.min_days, "max_gap_days": args.max_gap_days,
+                "min_history_events": args.min_history_events,
+                "age_min": args.age_min, "age_max": args.age_max,
+                "vocab_size": args.vocab_size, "min_df": args.min_df,
+                "min_patient_count": args.min_patient_count,
+                "person_mod": args.person_mod,
+                "test_frac": args.test_frac, "seed": args.seed,
+            },
+        }
+        with open(args.out, "w") as f:
+            json.dump(out_payload, f, indent=2)
+        print(f"[driver] wrote results to {args.out}", flush=True)
+
+        bow_df.unpersist()
+        index_df.unpersist()
+        print("[driver] done", flush=True)
+        spark.stop()
+        return 0
 
     # --- 1) Cohort index (per-person MDD antidepressant initiator table) ------
     with _phase("cohort index (apply_mdd_antidepressant_cohort)"):
@@ -827,6 +1149,91 @@ def _run_inmem_backend(
     return results, drug_order, int(tr.sum()), int(te.sum()), len(person_order)
 
 
+def _run_inmem_backend_fullyobserved(
+    bow_df, V, label_by_person, drug_order, args, evaluate_pc_multitask,
+):
+    """In-memory L-BFGS PC backend for the FULLY-OBSERVED stable-treatment path.
+
+    The mask-all-ones sibling of :func:`_run_inmem_backend`. It bridges the BOW to
+    a dense ``X``, assembles the fully-observed ``(D, 10)`` ``y``/``mask`` over the
+    FIXED Hughes drug order (:func:`assemble_fullyobserved_labels`, so column c is
+    the same Hughes drug every run — NOT a ``stable_drug_order`` over present
+    drugs), does the seeded split, and runs the SAME
+    :func:`analysis.pc.evaluate.evaluate_pc_multitask` (PC + the two baselines). An
+    all-ones mask is exactly the standard C-way multi-label case that helper
+    already handles, so nothing downstream changes. Returns ``(results,
+    drug_order, n_train, n_test, n_persons)`` in the same shape as
+    :func:`_run_inmem_backend`.
+    """
+    # --- 4) Bridge to dense X + assemble the fully-observed y/mask ------------
+    with _phase("bridge (BOW -> dense X) + fully-observed label/mask assembly"):
+        X, person_order = collect_bow_aligned(bow_df, V)
+        y, mask = assemble_fullyobserved_labels(
+            label_by_person, person_order, drug_order,
+        )
+        C = len(drug_order)
+        n_labeled = int((mask.sum(axis=1) > 0).sum())
+        print(f"[driver]   X={X.shape}, C={C} (fixed Hughes order), "
+              f"{n_labeled} labeled persons", flush=True)
+
+    # --- 5) Split + evaluate --------------------------------------------------
+    with _phase(f"split (test_frac={args.test_frac}) + evaluate_pc_multitask "
+                f"(K={args.K}, weight_y={args.weight_y})"):
+        # Stratify on the stable drug-subset signature (a sorted tuple) so a rare
+        # held combination stays balanced across train/test; an unlabeled person
+        # (absent from label_by_person) forms its own empty-tuple group.
+        groups = [tuple(sorted(label_by_person.get(p, ()))) for p in person_order]
+        is_test = stratified_test_mask(groups, args.test_frac, args.seed)
+        tr, te = ~is_test, is_test
+        print(f"[driver]   split: {int(tr.sum())} train / {int(te.sum())} test",
+              flush=True)
+        results = evaluate_pc_multitask(
+            X[tr], y[tr], mask[tr], X[te], y[te], mask[te],
+            K=args.K, weight_y=args.weight_y, alpha=args.alpha, tau=args.tau,
+            pi_iters=args.pi_iters, max_iter=args.max_iter,
+            doc_batch_size=args.doc_batch_size, seed=args.seed,
+        )
+    return results, drug_order, int(tr.sum()), int(te.sum()), len(person_order)
+
+
+def _corpus_manifest_for(args) -> dict:
+    """The corpus MEMBERSHIP fields for the checkpoint manifest, keyed by cohort.
+
+    The resume-compat guard (``scripts/run_experiment.py::_resume_corpus_mismatches``)
+    reads these to refuse a warm-start onto a checkpoint whose corpus differs. The
+    membership knobs are cohort-specific: ``mdd_antidepressant``'s corpus is
+    bracketed by the pre-index feature window + outcome-stability horizon, whereas
+    ``mdd_stable_treatment`` uses an all-history feature window (no lookback /
+    forward window / stability) and is instead defined by the stable-interval,
+    encounter-regularity, pre-treatment-history and age knobs — so each records
+    its own set. ``cohort`` + ``person_mod`` + the vocab-pruning knobs
+    (``vocab_size``/``min_df``/``min_patient_count``) are common to both.
+    """
+    common = {
+        "cohort": args.cohort,
+        "person_mod": int(args.person_mod),
+        "vocab_size": int(args.vocab_size),
+        "min_df": int(args.min_df),
+        "min_patient_count": int(args.min_patient_count),
+    }
+    if args.cohort == "mdd_stable_treatment":
+        return {
+            **common,
+            "min_days": int(args.min_days),
+            "max_gap_days": int(args.max_gap_days),
+            "min_history_events": int(args.min_history_events),
+            "age_min": int(args.age_min),
+            "age_max": int(args.age_max),
+        }
+    return {
+        **common,
+        "lookback_days": int(args.lookback_days),
+        "window_days": int(args.window_days),
+        "stability_days": int(args.stability_days),
+        "grace_gap_days": int(args.grace_gap_days),
+    }
+
+
 def _augmented_resave_pc(model, drug_order, V, vocab_map, args) -> None:
     """Overwrite the shim's final checkpoint with self-describing metadata.
 
@@ -869,18 +1276,13 @@ def _augmented_resave_pc(model, drug_order, V, vocab_map, args) -> None:
             # corpus MEMBERSHIP fields the resume-compat guard reads
             # (scripts/run_experiment.py::_resume_corpus_mismatches). Only the
             # fields that actually determine which patients/features the fit saw
-            # go here; a mismatch on any refuses to warm-start.
-            "corpus_manifest": {
-                "cohort": "mdd_antidepressant",
-                "person_mod": int(args.person_mod),
-                "lookback_days": int(args.lookback_days),
-                "window_days": int(args.window_days),
-                "stability_days": int(args.stability_days),
-                "grace_gap_days": int(args.grace_gap_days),
-                "vocab_size": int(args.vocab_size),
-                "min_df": int(args.min_df),
-                "min_patient_count": int(args.min_patient_count),
-            },
+            # go here; a mismatch on any refuses to warm-start. The membership
+            # knobs differ by cohort: mdd_antidepressant is bracketed by the
+            # pre-index window + outcome-stability horizon, while
+            # mdd_stable_treatment is defined by the stable-interval / encounter-
+            # regularity / age knobs with an all-history feature window (no
+            # lookback/window/stability), so each records its OWN knob set.
+            "corpus_manifest": _corpus_manifest_for(args),
         },
     )
     save_result(augmented, args.save_dir)
@@ -1092,6 +1494,203 @@ def _run_vi_backend(
                     "max_iter": int(args.max_iter),
                 },
                 # Distributed-fit convergence signal (the untrained-head tell).
+                "vi_convergence": {
+                    "n_iter": int(vres.n_iterations),
+                    "final_elbo": (None if vres.final_elbo is None
+                                   else float(vres.final_elbo)),
+                    "converged": bool(vres.converged),
+                    "w_CK_absmax": w_ck_absmax,
+                },
+                "model_names": {
+                    "PC": "VI-PC (SVI, joint)",
+                    "two_stage": "two-stage (unsup+LR)",
+                    "lr_codes": "LR-on-codes",
+                },
+            },
+        }
+    return results, drug_order, int(n_train), int(n_test), int(n_train + n_test)
+
+
+def _run_vi_backend_fullyobserved(
+    spark, bow_df, V, label_by_person, drug_order, args,
+    multitask_baseline_probas, _bundle_masked, vocab_map=None,
+):
+    """Distributed VI-native PC backend for the FULLY-OBSERVED stable-treatment path.
+
+    The mask-all-ones sibling of :func:`_run_vi_backend`. Identical machinery —
+    attach label/mask as Spark ``ArrayType`` columns, ``person_hash_split``, the
+    distributed :class:`~spark_vi.mllib.topic.pc.PCEstimator` SVI fit (with the SAME
+    unsupervised warm-start + checkpoint/resume/eval-only paths), then
+    :func:`collect_labeled_bow` + the shared two-stage / LR-on-codes baselines —
+    with exactly TWO differences from the per-drug sibling:
+
+    1. The labels come from :func:`attach_fullyobserved_label_columns` over the
+       stable drug subset (all-ones mask) rather than
+       :func:`attach_multitask_label_columns` over the index drug (one observed
+       cell). ``evaluate_pc_multitask`` / ``_bundle_masked`` read the all-ones mask
+       as standard C-way multi-label, so scoring is unchanged.
+    2. ``drug_order`` is the FIXED length-10 Hughes order passed in (column c is
+       the same Hughes drug every run), NOT a ``stable_drug_order`` over present
+       drugs — so it is used as-is off a non-eval fit; on ``--eval-only`` it is
+       still taken from the checkpoint metadata so the loaded head columns line up.
+
+    Returns ``(results, drug_order, n_train, n_test, n_persons)`` in the same shape
+    as the per-drug backend so the report + JSON payload are backend-agnostic.
+    """
+    from spark_vi.mllib.topic.pc import PCEstimator, PCModel
+
+    # --- 4) Attach labels as Spark columns + person split --------------------
+    with _phase(f"attach fully-observed label/mask columns + person split "
+                f"(test_frac={args.test_frac})"):
+        # On eval-only, take the drug->column order from the checkpoint so the
+        # loaded head (C, K) columns align with the eval labels; else use the
+        # FIXED Hughes order passed in (deterministic, independent of the data).
+        if args.eval_only:
+            from spark_vi.io.export import load_result
+            ck_meta = load_result(args.save_dir).metadata
+            ck_order = ck_meta.get("stable_drug_order")
+            if ck_order is not None:
+                drug_order = list(ck_order)
+                print(f"[driver]   eval-only: drug_order from checkpoint "
+                      f"({len(drug_order)} columns)", flush=True)
+        drug_order = list(drug_order)
+        C = len(drug_order)
+        labeled = attach_fullyobserved_label_columns(
+            bow_df, label_by_person, drug_order, spark,
+        )
+        train_df, test_df = person_hash_split(labeled, args.test_frac, args.seed)
+        train_df = train_df.persist()
+        test_df = test_df.persist()
+        n_train = train_df.count()
+        n_test = test_df.count()
+        print(f"[driver]   C={C} (fixed Hughes order): {drug_order}", flush=True)
+        print(f"[driver]   split: {n_train} train / {n_test} test", flush=True)
+
+    # --- 5a) Distributed VI-PC fit (SVI; no collect-to-memory) ----------------
+    #         ... or, on --eval-only, load the checkpoint model (no training).
+    if args.eval_only:
+        with _phase(f"VI-PC eval-only: load checkpoint from {args.save_dir}"):
+            model = PCModel.load(args.save_dir)
+            model._set(
+                featuresCol="features", numLabels=C,
+                weightY=float(args.weight_y), probabilityCol="probability",
+            )
+            vres = model.result
+            w_ck_absmax = float(np.abs(model.headWeights()).max())
+            print(f"[driver]   VI-PC checkpoint loaded: n_iter={vres.n_iterations}, "
+                  f"converged={vres.converged}, final_elbo={vres.final_elbo}, "
+                  f"|w_CK|max={w_ck_absmax:.4g}", flush=True)
+    else:
+        # Unsupervised-warm-start protocol (Hughes et al.), identical to the
+        # per-drug backend: phase 1 (weight_y=0, N iters) learns topics, then a
+        # fresh-Robbins-Monro supervised phase 2 warm-starts from them. Skipped on
+        # --resume-from (resuming continues an existing phase-2 fit).
+        warm_iters = int(args.warm_start_unsup_iters)
+        warm_start_dir = ""
+        if warm_iters > 0 and args.resume_from:
+            print("[driver] note: --warm-start-unsup-iters ignored on "
+                  "--resume-from (resuming continues the existing phase-2 fit; "
+                  "warm-start is a fresh-start init).", flush=True)
+            warm_iters = 0
+        if warm_iters > 0:
+            with _phase(f"VI-PC warm-start PHASE 1 (unsupervised LDA-MAP, "
+                        f"weight_y=0, {warm_iters} iters, K={args.K}, "
+                        f"subsamplingRate={args.subsampling_rate}, "
+                        f"tau0={args.tau0}, kappa={args.kappa})"):
+                warm_start_dir = tempfile.mkdtemp(prefix="pc_warmup_")
+                phase1 = PCEstimator(
+                    featuresCol="features", labelCol="y", labelMaskCol="label_mask",
+                    numLabels=C, weightY=0.0, k=args.K,
+                    docConcentration=[float(args.alpha)],
+                    subsamplingRate=args.subsampling_rate,
+                    learningOffset=args.tau0, learningDecay=args.kappa,
+                    maxIter=warm_iters, seed=args.seed,
+                    probabilityCol="probability",
+                )
+                model_p1 = phase1.fit(train_df)
+                model_p1.save(warm_start_dir)
+                w1 = float(np.abs(model_p1.headWeights()).max())
+                print(f"[driver]   warm-start phase 1 done: "
+                      f"n_iter={model_p1.result.n_iterations}, "
+                      f"final_elbo={model_p1.result.final_elbo}, "
+                      f"|w_CK|max={w1:.4g} (head at zero init, as expected for "
+                      f"weight_y=0)", flush=True)
+
+        with _phase(f"VI-PC fit{' PHASE 2 (supervised, warm-started)' if warm_start_dir else ''} "
+                    f"(SVI, K={args.K}, weight_y={args.weight_y}, "
+                    f"subsamplingRate={args.subsampling_rate}, tau0={args.tau0}, "
+                    f"kappa={args.kappa}, maxIter={args.max_iter}, "
+                    f"saveDir={args.save_dir or '<none>'}, "
+                    f"resumeFrom={args.resume_from or '<none>'}, "
+                    f"warmStartFrom={'<phase1>' if warm_start_dir else '<none>'})"):
+            estimator = PCEstimator(
+                featuresCol="features", labelCol="y", labelMaskCol="label_mask",
+                numLabels=C, weightY=float(args.weight_y), k=args.K,
+                docConcentration=[float(args.alpha)],
+                subsamplingRate=args.subsampling_rate,
+                learningOffset=args.tau0, learningDecay=args.kappa,
+                maxIter=args.max_iter, seed=args.seed,
+                probabilityCol="probability",
+                saveDir=args.save_dir, saveInterval=args.save_interval,
+                resumeFrom=args.resume_from,
+                warmStartFrom=warm_start_dir,
+            )
+            try:
+                model = estimator.fit(train_df)
+            finally:
+                if warm_start_dir:
+                    shutil.rmtree(warm_start_dir, ignore_errors=True)
+            vres = model.result
+            w_ck_absmax = float(np.abs(model.headWeights()).max())
+            print(f"[driver]   VI-PC fit done: n_iter={vres.n_iterations}, "
+                  f"converged={vres.converged}, final_elbo={vres.final_elbo}, "
+                  f"|w_CK|max={w_ck_absmax:.4g}", flush=True)
+
+        # Augmented re-save with the stable-treatment corpus manifest
+        # (_corpus_manifest_for records cohort + the stable knobs).
+        if args.save_dir:
+            _augmented_resave_pc(model, drug_order, V, vocab_map, args)
+
+    # --- 5b) Transform + score PC, then the shared baselines ------------------
+    with _phase("VI-PC transform + collect + baselines + per-drug scoring"):
+        scored = model.transform(test_df)
+        X_te, y_te_DC, mask_te_DC, proba_DC, _ = collect_labeled_bow(
+            scored, V, C, prob_col="probability",
+        )
+        X_tr, y_tr_DC, mask_tr_DC, _, _ = collect_labeled_bow(train_df, V, C)
+        train_df.unpersist()
+        test_df.unpersist()
+
+        shared = dict(
+            K=args.K, C=C, alpha=args.alpha, tau=args.tau, pi_iters=args.pi_iters,
+            max_iter=args.max_iter, doc_batch_size=args.doc_batch_size, seed=args.seed,
+        )
+        ts_proba, lrc_proba = multitask_baseline_probas(
+            X_tr, y_tr_DC, mask_tr_DC, X_te, C, shared,
+        )
+
+        n_obs_train = [int(mask_tr_DC[:, c].sum()) for c in range(C)]
+        n_obs_test = [int(mask_te_DC[:, c].sum()) for c in range(C)]
+        results = {
+            "PC": _bundle_masked(proba_DC, y_te_DC, mask_te_DC, C),
+            "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C),
+            "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C),
+            "meta": {
+                "C": C,
+                "K": int(args.K),
+                "weight_y": float(args.weight_y),
+                "n_train": int(n_train),
+                "n_test": int(n_test),
+                "n_labeled": int(n_train + n_test),
+                "n_obs_train": n_obs_train,
+                "n_obs_test": n_obs_test,
+                "backend": "vi",
+                "svi": {
+                    "subsampling_rate": float(args.subsampling_rate),
+                    "tau0": float(args.tau0),
+                    "kappa": float(args.kappa),
+                    "max_iter": int(args.max_iter),
+                },
                 "vi_convergence": {
                     "n_iter": int(vres.n_iterations),
                     "final_elbo": (None if vres.final_elbo is None

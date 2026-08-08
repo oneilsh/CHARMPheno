@@ -696,13 +696,22 @@ def build_pc_args(
 ) -> list[str]:
     """Build argv for analysis/cloud/pc_antidepressant_cloud.py (Phase-C PC).
 
-    Faithful multi-task Prediction-Constrained topic model on the MDD
-    antidepressant cohort. Unlike dag_placement, ``K`` is a real flag. The PC
-    driver writes ONE results JSON via ``--out`` (pointed at the run dir).
-    cdr/billing come from the workspace env exactly as the other drivers. The
-    cohort is hard-wired in the driver (``apply_mdd_antidepressant_cohort``), so
-    there is deliberately no ``--cohort`` flag. Every key maps to
-    ``--key.replace('_','-')``.
+    Faithful multi-task Prediction-Constrained topic model. Unlike dag_placement,
+    ``K`` is a real flag. The PC driver writes ONE results JSON via ``--out``
+    (pointed at the run dir). cdr/billing come from the workspace env exactly as
+    the other drivers. Every key maps to ``--key.replace('_','-')``.
+
+    Cohort: the ``cohort`` config key selects the driver's ``--cohort``. The
+    default ``mdd_antidepressant`` (the per-index-drug ">=90-day the drug worked"
+    cohort) is the driver's OWN argparse default, so it is left IMPLICIT — the
+    mdd_antidepressant argv stays byte-for-byte the prior command line (no
+    ``--cohort`` flag). ``cohort: mdd_stable_treatment`` (the Hughes-faithful
+    fully-observed stable-treatment cohort with all-history features) instead
+    emits ``--cohort mdd_stable_treatment`` plus its stable knobs
+    (``min_days`` -> ``--min-days``, ``max_gap_days`` -> ``--max-gap-days``,
+    ``min_history_events`` -> ``--min-history-events``, ``age_min`` -> ``--age-min``,
+    ``age_max`` -> ``--age-max``); the antidepressant window/stability/lookback
+    flags are inert for that cohort (the driver ignores them) but still emitted.
 
     Backend: the ``backend`` config key selects the fit backend (default
     ``inmem`` = the in-memory L-BFGS PC, byte-for-byte the prior behavior).
@@ -746,6 +755,19 @@ def build_pc_args(
         "--seed", str(effective.get("seed", 0)),
         "--out", str(Path(out_dir) / "pc_results.json"),
     ]
+    # Cohort selector: mdd_antidepressant (the driver default) stays IMPLICIT so
+    # its argv is byte-for-byte unchanged; mdd_stable_treatment emits --cohort +
+    # its stable-treatment knobs (which the antidepressant path never sees).
+    cohort = str(effective.get("cohort", "mdd_antidepressant"))
+    if cohort == "mdd_stable_treatment":
+        args.extend([
+            "--cohort", cohort,
+            "--min-days", str(effective.get("min_days", 90)),
+            "--max-gap-days", str(effective.get("max_gap_days", 395)),
+            "--min-history-events", str(effective.get("min_history_events", 2)),
+            "--age-min", str(effective.get("age_min", 18)),
+            "--age-max", str(effective.get("age_max", 80)),
+        ])
     # VI backend: thread the distributed-SVI schedule knobs AND the checkpoint /
     # resume flags (the VI-native PCEstimator persists its VIResult, so resume is
     # supported). Both are kept out of the inmem argv so the default backend's

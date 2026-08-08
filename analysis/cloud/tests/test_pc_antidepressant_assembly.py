@@ -107,6 +107,76 @@ def test_assemble_labels_index_drug_not_a_column_is_dropped():
 
 
 # --------------------------------------------------------------------------- #
+# Fully-observed label assembly (mdd_stable_treatment): all-ones mask, C=10     #
+# --------------------------------------------------------------------------- #
+def test_assemble_fullyobserved_single_drug_is_one_positive_mask_all_ones():
+    person_order = ["p1"]
+    drug_order = ["fluoxetine", "sertraline", "bupropion"]
+    y, mask = drv.assemble_fullyobserved_labels(
+        {"p1": ["fluoxetine"]}, person_order, drug_order,
+    )
+    assert y.shape == (1, 3) and mask.shape == (1, 3)
+    # One positive at the drug's fixed column; the whole row is observed.
+    np.testing.assert_array_equal(y, [[1, 0, 0]])
+    np.testing.assert_array_equal(mask, [[1, 1, 1]])
+
+
+def test_assemble_fullyobserved_combination_is_two_positives():
+    person_order = ["p2"]
+    drug_order = ["fluoxetine", "sertraline", "bupropion"]
+    y, mask = drv.assemble_fullyobserved_labels(
+        {"p2": ["fluoxetine", "sertraline"]}, person_order, drug_order,
+    )
+    # A held combination -> two positives, still a fully-observed (all-ones) row.
+    np.testing.assert_array_equal(y, [[1, 1, 0]])
+    np.testing.assert_array_equal(mask, [[1, 1, 1]])
+
+
+def test_assemble_fullyobserved_uses_fixed_column_order():
+    # Column c is drug_order[c] regardless of the subset's own ordering.
+    person_order = ["p"]
+    drug_order = ["a", "b", "c", "d"]
+    y, _ = drv.assemble_fullyobserved_labels(
+        {"p": ["d", "b"]}, person_order, drug_order,   # unsorted subset
+    )
+    np.testing.assert_array_equal(y, [[0, 1, 0, 1]])   # b -> col 1, d -> col 3
+
+
+def test_assemble_fullyobserved_absent_person_is_all_zero_unobserved():
+    person_order = ["present", "absent"]
+    drug_order = ["a", "b"]
+    y, mask = drv.assemble_fullyobserved_labels(
+        {"present": ["a"]}, person_order, drug_order,
+    )
+    # present -> observed row (mask all-ones), positive at 'a'.
+    np.testing.assert_array_equal(y[0], [1, 0])
+    np.testing.assert_array_equal(mask[0], [1, 1])
+    # absent -> all-zero AND all-UNOBSERVED (mask 0), a valid unlabeled row.
+    np.testing.assert_array_equal(y[1], [0, 0])
+    np.testing.assert_array_equal(mask[1], [0, 0])
+
+
+def test_assemble_fullyobserved_row_aligned_to_person_order():
+    # Rows follow person_order, not dict insertion order.
+    person_order = ["z", "a"]
+    drug_order = ["x", "y"]
+    y, _ = drv.assemble_fullyobserved_labels(
+        {"a": ["x"], "z": ["y"]}, person_order, drug_order,
+    )
+    np.testing.assert_array_equal(y[0], [0, 1])   # z -> 'y'
+    np.testing.assert_array_equal(y[1], [1, 0])   # a -> 'x'
+
+
+def test_assemble_fullyobserved_drug_not_a_column_is_ignored():
+    # A subset name absent from drug_order contributes no positive (still observed).
+    y, mask = drv.assemble_fullyobserved_labels(
+        {"p": ["a", "unknown"]}, ["p"], ["a", "b"],
+    )
+    np.testing.assert_array_equal(y, [[1, 0]])
+    np.testing.assert_array_equal(mask, [[1, 1]])
+
+
+# --------------------------------------------------------------------------- #
 # Stable drug-column ordering                                                  #
 # --------------------------------------------------------------------------- #
 def test_stable_drug_order_follows_reference_then_alpha_extras():

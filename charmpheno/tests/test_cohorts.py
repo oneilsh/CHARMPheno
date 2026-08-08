@@ -558,6 +558,37 @@ def test_lookback_feature_label_events_splits_pre_and_post_index(spark):
     assert {r["concept_id"] for r in feat5.collect()} == {900, 901, 999}
 
 
+def test_all_history_feature_events_takes_everything_before_index(spark):
+    """All events strictly before index survive (unbounded lookback, no forward
+    label window); the index-day event and later events do not."""
+    import datetime as dt
+    from charmpheno.omop.cohorts import all_history_feature_events
+    events = spark.createDataFrame(
+        [   # person, concept, date
+            (1, 700, dt.date(2005, 1, 1)),   # 10y pre-index -> kept (unbounded)
+            (1, 900, dt.date(2013, 6, 1)),   # 1.5y pre-index -> kept
+            (1, 901, dt.date(2014, 6, 1)),   # 0.5y pre-index -> kept
+            (1, 200, dt.date(2015, 1, 1)),   # index day -> dropped (forward side)
+            (1, 201, dt.date(2015, 6, 1)),   # 0.5y post -> dropped
+            (2, 500, dt.date(2010, 1, 1)),   # p2 before its own index -> kept
+            (2, 501, dt.date(2020, 1, 1)),   # p2 after its own index -> dropped
+        ],
+        ["person_id", "concept_id", "event_date"])
+    index_df = spark.createDataFrame(
+        [
+            (1, dt.date(2015, 1, 1), "mdd_stable_treatment"),
+            (2, dt.date(2012, 1, 1), "mdd_stable_treatment"),
+        ],
+        ["person_id", "index_date", "source_cohort"])
+    feat = all_history_feature_events(
+        events, index_df, date_col="event_date")
+    got = {(r["person_id"], r["concept_id"]) for r in feat.collect()}
+    # Everything strictly before each person's own index_date, no lower bound.
+    assert got == {(1, 700), (1, 900), (1, 901), (2, 500)}
+    # index_date dropped; source_cohort rides along (parity with the windowed one).
+    assert "index_date" not in feat.columns and "source_cohort" in feat.columns
+
+
 # --- Antidepressant / MDD registry + concept map (Phase C, task 1) ------------
 
 def test_disease_registry_has_mdd_and_anxiety_with_expected_ancestors():
