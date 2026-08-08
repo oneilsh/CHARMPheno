@@ -168,6 +168,85 @@ def test_build_pc_args_cache_uri_optional(monkeypatch):
     assert on[on.index("--cache-uri") + 1] == "gs://c"
 
 
+# --- cohort selector + stable-treatment knob threading -----------------------
+
+def test_build_pc_args_antidepressant_omits_cohort_and_stable_knobs(monkeypatch):
+    # mdd_antidepressant is the driver default: its argv stays byte-for-byte the
+    # prior command line — NO --cohort and NO stable-treatment knobs.
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(_eff(), "/runs/0070-x")
+    assert "--cohort" not in args
+    for knob in ("--min-days", "--max-gap-days", "--min-history-events",
+                 "--age-min", "--age-max"):
+        assert knob not in args, f"{knob} must not appear on the antidepressant argv"
+
+
+def test_build_pc_args_stable_treatment_threads_cohort_and_knobs(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(
+        _eff(cohort="mdd_stable_treatment", backend="vi",
+             min_days=120, max_gap_days=400, min_history_events=3,
+             age_min=21, age_max=75),
+        "/runs/0072-x",
+    )
+    d = dict(zip(args[::2], args[1::2]))
+    assert d["--cohort"] == "mdd_stable_treatment"
+    assert d["--min-days"] == "120"
+    assert d["--max-gap-days"] == "400"
+    assert d["--min-history-events"] == "3"
+    assert d["--age-min"] == "21"
+    assert d["--age-max"] == "75"
+
+
+def test_build_pc_args_stable_treatment_knob_defaults(monkeypatch):
+    # cohort set but the stable knobs unset -> the committed cohort defaults.
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(_eff(cohort="mdd_stable_treatment"), "/out")
+    d = dict(zip(args[::2], args[1::2]))
+    assert d["--cohort"] == "mdd_stable_treatment"
+    assert d["--min-days"] == "90" and d["--max-gap-days"] == "395"
+    assert d["--min-history-events"] == "2"
+    assert d["--age-min"] == "18" and d["--age-max"] == "80"
+
+
+def test_load_defaults_mdd_stable_treatment_present_and_shaped(monkeypatch):
+    # load_defaults REQUIRES experiments/defaults/mdd_stable_treatment.yaml for a
+    # stable-treatment experiment; it must merge _base + carry the PC/stable shape.
+    mod = _run_exp(monkeypatch)
+    eff = mod.load_defaults("mdd_stable_treatment", mod.DEFAULTS_DIR)
+    assert eff["cohort"] == "mdd_stable_treatment"
+    assert eff["model_class"] == "pc"
+    assert eff["backend"] == "vi"
+    assert eff["vocab_size"] == 5000
+    # all-history features: mdd_stable_treatment.yaml itself sets NO lookback_days
+    # (the driver uses all-history for this cohort). Any lookback_days in the
+    # merged config is the inert _base.yaml default, which the stable-treatment
+    # driver path ignores.
+    import yaml as _yaml
+    cohort_yaml = _yaml.safe_load(
+        (mod.DEFAULTS_DIR / "mdd_stable_treatment.yaml").read_text())
+    assert "lookback_days" not in cohort_yaml
+    # stable knobs present at their committed defaults.
+    assert eff["min_days"] == 90 and eff["max_gap_days"] == 395
+    assert eff["min_history_events"] == 2
+    assert eff["age_min"] == 18 and eff["age_max"] == 80
+
+
+def test_build_pc_args_from_stable_treatment_defaults(monkeypatch):
+    # End-to-end: the shipped defaults produce a well-formed stable-treatment argv.
+    mod = _run_exp(monkeypatch)
+    eff = mod.load_defaults("mdd_stable_treatment", mod.DEFAULTS_DIR)
+    args = mod.build_pc_args(eff, "/runs/0072-x")
+    d = dict(zip(args[::2], args[1::2]))
+    assert d["--cohort"] == "mdd_stable_treatment"
+    assert d["--backend"] == "vi"
+    assert d["--vocab-size"] == "5000"
+    assert d["--min-days"] == "90"
+    # VI backend also threads the SVI schedule + save flags.
+    assert d["--subsampling-rate"] == "0.05"
+    assert d["--save-dir"] == "/runs/0072-x"
+
+
 def test_build_fit_args_routes_pc(monkeypatch):
     mod = _run_exp(monkeypatch)
     args = mod.build_fit_args(_eff(), "/out")

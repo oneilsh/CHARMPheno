@@ -89,6 +89,56 @@ def test_attach_label_columns_are_array_not_vector_type(spark):
 
 
 # --------------------------------------------------------------------------- #
+# attach_fullyobserved_label_columns == assemble_fullyobserved_labels          #
+# (cell-for-cell; the fully-observed stable-treatment path, all-ones mask)     #
+# --------------------------------------------------------------------------- #
+def test_attach_fullyobserved_columns_match_numpy_assembler(spark):
+    V = 5
+    feats = {1: {0: 2.0}, 2: {1: 1.0}, 3: {2: 3.0, 0: 1.0}, 4: {3: 1.0}}
+    bow_df = _bow_df(spark, feats, V)
+    drug_order = ["fluoxetine", "sertraline", "bupropion"]
+    label_by_person = {
+        1: ["fluoxetine"],                 # single -> col 0
+        2: ["fluoxetine", "sertraline"],   # combination -> cols 0 and 1
+        3: ["bupropion"],                  # col 2
+        # person 4 absent -> all-zero, all-UNOBSERVED row
+    }
+
+    out = drv.attach_fullyobserved_label_columns(
+        bow_df, label_by_person, drug_order, spark,
+    )
+    got = {
+        r["person_id"]: ([float(v) for v in r["y"]], [float(v) for v in r["label_mask"]])
+        for r in out.select("person_id", "y", "label_mask").collect()
+    }
+    person_order = sorted(got)
+    y_np, mask_np = drv.assemble_fullyobserved_labels(
+        label_by_person, person_order, drug_order,
+    )
+    for i, pid in enumerate(person_order):
+        y_got, mask_got = got[pid]
+        np.testing.assert_array_equal(y_got, y_np[i], err_msg=f"y mismatch pid={pid}")
+        np.testing.assert_array_equal(mask_got, mask_np[i], err_msg=f"mask pid={pid}")
+    # Spot-check the fully-observed semantics: present -> all-ones mask.
+    np.testing.assert_array_equal(got[1], ([1.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    np.testing.assert_array_equal(got[2], ([1.0, 1.0, 0.0], [1.0, 1.0, 1.0]))  # combo
+    np.testing.assert_array_equal(got[4], ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]))  # absent
+
+
+def test_attach_fullyobserved_columns_are_array_not_vector_type(spark):
+    from pyspark.sql.types import ArrayType, DoubleType
+
+    bow_df = _bow_df(spark, {1: {0: 1.0}}, 3)
+    out = drv.attach_fullyobserved_label_columns(
+        bow_df, {1: ["a"]}, ["a", "b", "c"], spark,
+    )
+    assert out.schema["y"].dataType == ArrayType(DoubleType())
+    assert out.schema["label_mask"].dataType == ArrayType(DoubleType())
+    r = out.select("y", "label_mask").head()
+    assert isinstance(r["y"], list) and isinstance(r["label_mask"], list)
+
+
+# --------------------------------------------------------------------------- #
 # person_hash_split                                                            #
 # --------------------------------------------------------------------------- #
 def test_person_hash_split_deterministic_disjoint_and_covers(spark):

@@ -1625,6 +1625,32 @@ def lookback_feature_label_events(events_df, index_df, *, date_col,
     return feature, label
 
 
+def all_history_feature_events(events_df, index_df, *, date_col):
+    """All events strictly before the index date — an unbounded-lookback feature frame.
+
+    The all-history sibling of :func:`lookback_feature_label_events`: same
+    per-person inner join on ``index_df`` (``person_id, index_date,
+    source_cohort``), but with NO lower bound on the lookback and NO forward
+    label window. The feature frame is every event with ``date_col <
+    index_date`` — the patient's entire coded history up to (and excluding) the
+    index anchor. Events only ever occur inside observation periods, so "all
+    history" is naturally the available record; the interval-observability gate
+    lives upstream in the index table (:func:`_mdd_stable_treatment_index`).
+
+    Used by the Hughes stable-treatment PC path, whose index date is the
+    stable-interval start (``stable_start``): features are the whole pre-stable
+    history rather than a fixed pre-index window. ``index_date`` is dropped and
+    ``source_cohort`` rides along, exactly as the windowed primitive leaves them,
+    so the downstream ``to_bow_dataframe`` call is identical. Returns a single
+    feature frame (no label frame — the label is the fully-observed drug subset,
+    built separately by :func:`stable_treatment_label`).
+    """
+    joined = events_df.join(F.broadcast(index_df), on="person_id", how="inner")
+    return (joined
+            .where(F.col(date_col) < F.col("index_date"))
+            .drop("index_date"))
+
+
 def case_finding_index_table(cond_df, *, disease, spark, cdr_dataset,
                              billing_project, date_col, prior_obs_days=365,
                              label_window_days=_WINDOW_DAYS):

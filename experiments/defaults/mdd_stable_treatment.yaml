@@ -1,0 +1,75 @@
+# Cohort defaults for the Hughes-faithful Prediction-Constrained (PC) STABLE-
+# TREATMENT antidepressant replication. Layered as: _base.yaml ->
+# mdd_stable_treatment.yaml -> per-experiment frontmatter. `mdd_stable_treatment`
+# is registered in charmpheno SUPPORTED_COHORTS; the PC driver selects it via
+# --cohort mdd_stable_treatment (threaded by build_pc_args from the `cohort` key),
+# using apply_mdd_stable_treatment_cohort + stable_treatment_label + all-history
+# fused features.
+#
+# This file's job: (1) satisfy load_defaults (REQUIRED, since an experiment whose
+# cohort is mdd_stable_treatment loads experiments/defaults/mdd_stable_treatment.yaml),
+# and (2) carry the PC-shaped, stable-treatment defaults that OVERRIDE the
+# LDA-oriented _base.yaml (notably model_class, K, vocab_size). build_pc_args reads
+# only the keys it names, so the LDA-specific _base keys (doc_unit/optimize_*/...)
+# sit unused in the merged config and never reach the PC driver.
+cohort: mdd_stable_treatment
+model_class: pc
+
+# --- backend selection -------------------------------------------------------
+# VI-native distributed PCEstimator (SVI). The head trains with a Robbins-Monro
+# schedule and never collects the corpus to the driver — the path meant to fit
+# the logistic head at full-cohort scale (the in-mem L-BFGS PC under-converged on
+# the antidepressant cohort). Set `backend: inmem` in frontmatter for the
+# in-memory L-BFGS PC (no SVI knobs / checkpoint).
+backend: vi
+
+# --- feature (fused-vocab BOW, ALL-HISTORY) ----------------------------------
+# NOTE: the stable-treatment path uses the patient's ENTIRE pre-index history
+# (all events before the stable-interval start), so there is deliberately NO
+# `lookback_days` here — the driver's all_history_feature_events ignores any
+# pre-index window. The fused vocab is condition+drug+procedure.
+vocab_size: 5000            # larger than the antidepressant cohort's 2000: all-history
+                            # features are richer, so a wider vocab is warranted
+min_df: 20                  # minimum document (patient) frequency for vocab inclusion
+min_patient_count: 20       # distinct-patient floor (privacy guard)
+person_mod: 1
+
+# --- cohort (stable-treatment knobs) -----------------------------------------
+# Threaded to the driver ONLY for cohort==mdd_stable_treatment (build_pc_args).
+min_days: 90                # minimum stable-interval length (days)
+max_gap_days: 395           # max visit gap (Hughes: an encounter at least every ~13 months)
+min_history_events: 2       # min events strictly before the first antidepressant era
+age_min: 18                 # inclusive age gate at the stable-interval start
+age_max: 80
+
+# --- model / eval ------------------------------------------------------------
+K: 25                       # topics (PLACEHOLDER — TUNE)
+weight_y: 100.0             # PC prediction-constraint weight (PLACEHOLDER — TUNE)
+alpha: 1.1                  # theta Dirichlet concentration (-> PCEstimator docConcentration)
+tau: 1.1                    # baseline (in-mem two-stage) topic Dirichlet; VI eta = 1/K
+pi_iters: 100
+max_iter: 200               # SVI global iterations (~10 passes at subsampling 0.05)
+doc_batch_size: 2048        # inmem-only; inert for backend: vi
+test_frac: 0.25
+seed: 0
+
+# --- distributed-SVI schedule (backend: vi only) -----------------------------
+# Read by build_pc_args ONLY when backend==vi; inert here otherwise.
+subsampling_rate: 0.05      # mini-batch fraction per SVI iteration (-> --subsampling-rate)
+tau0: 64.0                  # Robbins-Monro learning offset (-> --tau0); smaller than the
+                            # MLlib 1024 default so the head actually moves on this cohort
+kappa: 0.6                  # Robbins-Monro learning decay in (0.5, 1.0] (-> --kappa)
+
+# --- unsupervised warm-start (backend: vi only) ------------------------------
+# Hughes et al.'s protocol: initialize the supervised PC fit from the topics of
+# an unsupervised (weight_y=0) SVI phase. 0 (default) = cold start. N > 0 runs a
+# two-phase fit (PHASE 1 weight_y=0 for N iters -> PHASE 2 warm-started supervised
+# with a FRESH Robbins-Monro schedule). Uncomment / set in frontmatter to A/B.
+# warm_start_unsup_iters: 0
+
+# --- checkpoint / resume (backend: vi only) ----------------------------------
+# The VI-native PCEstimator checkpoints its VIResult every `save_interval` SVI
+# iters into the run dir (manifest.json + params/), so `make exp ID=72` can be
+# re-run to RESUME. Inherited from _base.yaml (save_interval: 5); uncomment to
+# override. Inert for backend: inmem (L-BFGS has no interim state).
+# save_interval: 5
