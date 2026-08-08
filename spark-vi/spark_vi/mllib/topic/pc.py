@@ -197,6 +197,12 @@ class _PCParams(HasFeaturesCol, HasMaxIter, HasSeed):
         "extra multiplier on the head SGD step (RM <-> weightY decoupling knob); default 1.0",
         typeConverter=TypeConverters.toFloat,
     )
+    topicTrust = Param(
+        Params._dummy(), "topicTrust",
+        "trust-region fraction capping the supervised topic correction on lambda to "
+        "topicTrust * ||unsup lambda step|| (scale-invariant divergence guard); default 0.1",
+        typeConverter=TypeConverters.toFloat,
+    )
     weightYWarmupIters = Param(
         Params._dummy(), "weightYWarmupIters",
         "linearly ramp the effective weightY from 0 over this many global steps "
@@ -245,6 +251,7 @@ def _build_model_and_config(
         lambda_w=float(estimator.getOrDefault("lambdaW")),
         grad_cavi_iters=int(estimator.getOrDefault("gradCaviIters")),
         head_lr_scale=float(estimator.getOrDefault("headLrScale")),
+        topic_trust=float(estimator.getOrDefault("topicTrust")),
         weight_y_warmup_iters=int(estimator.getOrDefault("weightYWarmupIters")),
         alpha=alpha,
         eta=eta,
@@ -274,7 +281,8 @@ _PC_DEFAULTS = dict(
     optimizeDocConcentration=True, optimizeTopicConcentration=False,
     gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
     numLabels=1, weightY=0.0, probabilityCol="probability",
-    lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, weightYWarmupIters=0,
+    lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, topicTrust=0.1,
+    weightYWarmupIters=0,
 )
 
 
@@ -313,6 +321,7 @@ class PCEstimator(_PCParams, Estimator):
         lambdaW: float = 0.001,
         gradCaviIters: int = 20,
         headLrScale: float = 1.0,
+        topicTrust: float = 0.1,
         weightYWarmupIters: int = 0,
     ) -> None:
         super().__init__()
