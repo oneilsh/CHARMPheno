@@ -62,8 +62,11 @@ Fig. 3 — the Antidepressant task): **avg heldout AUC across the meds ~0.60–0
 for PC-sLDA, beating logistic regression slightly and improving reliably on the
 Gibbs-LDA init**. (Their run: 11 meds, 29774/3721/3722 patients, V=5126 fused
 ICD-9 dx + CPT procedure + medication codewords, PC-sLDA initialized from
-Gibbs-LDA.) The oft-quoted 0.67–0.71 is the later JAMA-Psychiatry 2020 follow-up,
-not this AISTATS model — do not target it here.
+Gibbs-LDA.) Do not confuse this with the group's later clinical follow-up
+(*Assessment of a Prediction Model for Antidepressant Treatment Stability*, JAMA
+Network Open 2020) — same method, a much larger two-site cohort, reporting a
+top-3 stability accuracy ~0.60–0.62 rather than this avg-AUC. See
+`docs/hughes-comparison.md`.
 
 ## Cohort — `mdd_antidepressant`
 

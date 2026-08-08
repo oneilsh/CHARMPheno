@@ -134,8 +134,9 @@ real signal from history, where PC's shared representation buys a small edge ove
 raw-code LR rather than a large one. A macro-AUC well above ~0.65, or PC ≫ LR,
 would be a red flag to check for label leakage (e.g. the anchoring drug era
 bleeding into the "history" features) before believing it. See
-`docs/hughes-comparison.md` for the full setup crosswalk (and why the oft-quoted
-0.67–0.71 is the later JAMA-Psychiatry 2020 follow-up, not this model).
+`docs/hughes-comparison.md` for the full setup crosswalk (and how this relates to
+the group's JAMA Network Open 2020 clinical follow-up — same method, larger
+two-site cohort, whose ≥90-day stability definition this cohort actually mirrors).
 
 ## Knobs to sweep before trusting a number
 
