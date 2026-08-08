@@ -397,6 +397,28 @@ def _resume_corpus_mismatches(checkpoint_manifest: dict, effective: dict) -> lis
         if _norm(ck_spec) != _norm(want_spec):
             mismatches.append(
                 f"topic_block_spec: checkpoint={ck_spec!r} != config={want_spec!r}")
+    # PC-specific membership fields. The base `expected` block above covers
+    # person_mod + cohort (which PC also stores), but PC's corpus is additionally
+    # determined by its pre-index window / outcome-stability / vocab-pruning
+    # knobs, none of which the LDA/STM guard knows about. Compare them ONLY for
+    # model_class=pc (and only when present in the checkpoint), so LDA/STM resume
+    # behavior is unchanged while a PC warm-start onto a differently-windowed or
+    # differently-pruned corpus is refused rather than silently trained.
+    if effective.get("model_class") == "pc":
+        pc_expected = {
+            "lookback_days": effective.get("lookback_days"),
+            "window_days": effective.get("window_days"),
+            "stability_days": effective.get("stability_days"),
+            "grace_gap_days": effective.get("grace_gap_days"),
+            "min_df": effective.get("min_df"),
+            "min_patient_count": effective.get("min_patient_count"),
+        }
+        for key, want in pc_expected.items():
+            if key not in checkpoint_manifest:
+                continue
+            if checkpoint_manifest[key] != want:
+                mismatches.append(
+                    f"{key}: checkpoint={checkpoint_manifest[key]!r} != config={want!r}")
     return mismatches
 
 
@@ -676,13 +698,11 @@ def build_pc_args(
 
     Faithful multi-task Prediction-Constrained topic model on the MDD
     antidepressant cohort. Unlike dag_placement, ``K`` is a real flag. The PC
-    driver writes ONE results JSON via ``--out`` (no ``--out-dir``, no
-    ``manifest.json``), so we point ``--out`` at the run dir. cdr/billing come
-    from the workspace env exactly as the other drivers. Resume is unsupported
-    (there is no persisted PC checkpoint); ``resume_from`` is ignored, matching
-    :func:`build_dag_placement_args`. The cohort is hard-wired in the driver
-    (``apply_mdd_antidepressant_cohort``), so there is deliberately no
-    ``--cohort`` flag. Every key maps to ``--key.replace('_','-')``.
+    driver writes ONE results JSON via ``--out`` (pointed at the run dir).
+    cdr/billing come from the workspace env exactly as the other drivers. The
+    cohort is hard-wired in the driver (``apply_mdd_antidepressant_cohort``), so
+    there is deliberately no ``--cohort`` flag. Every key maps to
+    ``--key.replace('_','-')``.
 
     Backend: the ``backend`` config key selects the fit backend (default
     ``inmem`` = the in-memory L-BFGS PC, byte-for-byte the prior behavior).
@@ -690,6 +710,14 @@ def build_pc_args(
     passes the SVI schedule knobs (``subsampling_rate`` -> ``--subsampling-rate``,
     ``tau0`` -> ``--tau0``, ``kappa`` -> ``--kappa``); those knob flags are omitted
     for the inmem backend so its argv is unchanged.
+
+    Resume (VI backend only): the VI-native PCEstimator checkpoints its VIResult,
+    so for ``backend: vi`` this also threads ``--save-dir <out_dir>`` +
+    ``--save-interval <save_interval>`` (and ``--resume-from <out_dir>`` when
+    ``resume_from`` is set) exactly as :func:`build_lda_args` does; ``--max-iter``
+    is then ADDITIONAL iterations on resume. The inmem (L-BFGS) backend has no
+    interim state, so ``resume_from`` is ignored there and NO save flags are
+    added — its argv stays byte-for-byte unchanged.
     """
     cdr, billing = _require_workspace_env()
     backend = str(effective.get("backend", "inmem"))
@@ -716,14 +744,20 @@ def build_pc_args(
         "--seed", str(effective.get("seed", 0)),
         "--out", str(Path(out_dir) / "pc_results.json"),
     ]
-    # VI backend: thread the distributed-SVI schedule knobs. Kept out of the
-    # inmem argv so the default backend's command line is unchanged.
+    # VI backend: thread the distributed-SVI schedule knobs AND the checkpoint /
+    # resume flags (the VI-native PCEstimator persists its VIResult, so resume is
+    # supported). Both are kept out of the inmem argv so the default backend's
+    # command line is byte-for-byte unchanged (L-BFGS has no interim state).
     if backend == "vi":
         args.extend([
             "--subsampling-rate", str(effective.get("subsampling_rate", 0.05)),
             "--tau0", str(effective.get("tau0", 1024.0)),
             "--kappa", str(effective.get("kappa", 0.51)),
+            "--save-dir", str(out_dir),
+            "--save-interval", str(effective.get("save_interval", -1)),
         ])
+        if resume_from is not None:
+            args.extend(["--resume-from", str(resume_from)])
     if effective.get("cache_uri"):
         args.extend(["--cache-uri", str(effective["cache_uri"])])
     return args

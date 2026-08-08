@@ -91,6 +91,49 @@ def test_build_pc_args_backend_vi_svi_knob_defaults(monkeypatch):
     assert d["--kappa"] == "0.51"
 
 
+# --- checkpoint / resume threading (VI backend only) -------------------------
+
+def test_build_pc_args_inmem_threads_no_save_flags(monkeypatch):
+    # inmem is byte-for-byte unchanged: NO --save-dir / --save-interval /
+    # --resume-from, even when a resume_from path is passed (L-BFGS can't resume).
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(_eff(), "/runs/0070-x", resume_from=Path("/runs/0070-x"))
+    for flag in ("--save-dir", "--save-interval", "--resume-from"):
+        assert flag not in args, f"{flag} must not appear on the inmem argv"
+
+
+def test_build_pc_args_vi_threads_save_flags_without_resume(monkeypatch):
+    # vi (no prior checkpoint): --save-dir + --save-interval present, --resume-from absent.
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(
+        _eff(backend="vi", save_interval=5), "/runs/0071-x", resume_from=None,
+    )
+    d = dict(zip(args[::2], args[1::2]))
+    assert d["--save-dir"] == "/runs/0071-x"
+    assert d["--save-interval"] == "5"
+    assert "--resume-from" not in args
+
+
+def test_build_pc_args_vi_threads_resume_from_when_set(monkeypatch):
+    # vi (checkpoint present): --resume-from points at the run dir; --save-dir too.
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(
+        _eff(backend="vi"), "/runs/0071-x", resume_from=Path("/runs/0071-x"),
+    )
+    d = dict(zip(args[::2], args[1::2]))
+    assert d["--save-dir"] == "/runs/0071-x"
+    assert d["--resume-from"] == "/runs/0071-x"
+    # save_interval falls back to -1 when the config doesn't set it.
+    assert d["--save-interval"] == "-1"
+
+
+def test_build_pc_args_vi_save_interval_from_config(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(_eff(backend="vi", save_interval=25), "/out")
+    d = dict(zip(args[::2], args[1::2]))
+    assert d["--save-interval"] == "25"
+
+
 def test_build_pc_args_cache_uri_optional(monkeypatch):
     mod = _run_exp(monkeypatch)
     assert "--cache-uri" not in mod.build_pc_args(_eff(), "/out")
