@@ -76,8 +76,10 @@ the primary thing to read before trusting any AUC.
 
 Target shape from Hughes et al. (unchanged from 0070; AISTATS 2018 Fig. 3):
 **avg heldout AUC across the meds ~0.60–0.65 for PC-sLDA, beating logistic
-regression slightly and improving reliably on the Gibbs-LDA init** — NOT the
-0.67–0.71 of the later JAMA-Psychiatry 2020 follow-up.
+regression slightly and improving reliably on the Gibbs-LDA init**. (Not to be
+confused with the group's JAMA Network Open 2020 clinical follow-up — same
+method, larger two-site cohort, top-3 stability accuracy ~0.60–0.62; see
+`docs/hughes-comparison.md`.)
 
 ## Cohort / features / outcome — identical to 0070
 

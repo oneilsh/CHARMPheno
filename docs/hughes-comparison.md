@@ -32,9 +32,21 @@ Fig. 3 (center panel), **avg heldout AUC across the 11 meds**, K swept
 - BP-sLDA (purely discriminative) overfits badly here; unsupervised Gibbs-LDA is
   the floor PC improves on.
 
-**Target ~0.60–0.65, not 0.67–0.71.** The higher band is the later
-JAMA-Psychiatry 2020 follow-up (different model, different cohort), and had crept
-into our 0070/0071 docs — now corrected.
+**Target ~0.60–0.65** (verified from the AISTATS paper itself). Do NOT confuse
+this with the group's later clinical follow-up — *Assessment of a Prediction
+Model for Antidepressant Treatment Stability Using Supervised Topic Models*,
+**JAMA Network Open 2020** (Hughes, Pradier, Ross, McCoy, Perlis, Doshi-Velez).
+That paper applies the **same** supervised/PC topic-model method to a much larger
+**two-site** cohort (81,630 adults; 55,303 stable; Sites A+B, 1997–2017), keeps
+11 meds and 10 topics, and reports different metrics — a **top-3 stability
+accuracy of 0.602 (baseline) → 0.622 (extremely-randomized-trees)** plus per-drug
+AUCs with 5000-bootstrap CIs — and its headline finding is that treatment-
+*specific* models do **no better** than a general treatment-outcome model. An
+earlier draft of these docs cited a per-drug "0.67–0.71 AUC" for that follow-up;
+that figure could not be sourced and has been removed. Anchor our replication to
+the AISTATS ~0.60–0.65 band. (Note: our `mdd_stable_treatment` cohort's ≥90-day
+stability definition actually matches the 2020 paper's operationalization more
+closely than the 2018 one's.)
 
 ---
 
