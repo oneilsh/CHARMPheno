@@ -78,8 +78,8 @@ Target shape from Hughes et al. (unchanged from 0070; AISTATS 2018 Fig. 3):
 **avg heldout AUC across the meds ~0.60–0.65 for PC-sLDA, beating logistic
 regression slightly and improving reliably on the Gibbs-LDA init**. (Not to be
 confused with the group's JAMA Network Open 2020 clinical follow-up — same
-method, larger two-site cohort, top-3 stability accuracy ~0.60–0.62; see
-`docs/hughes-comparison.md`.)
+method, larger two-site cohort, whose PC topic model lands at AUC 0.627/0.619
+(same ~0.60–0.66 band); see `docs/hughes-comparison.md`.)
 
 ## Cohort / features / outcome — identical to 0070
 

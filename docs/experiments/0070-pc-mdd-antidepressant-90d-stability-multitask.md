@@ -64,8 +64,8 @@ Gibbs-LDA init**. (Their run: 11 meds, 29774/3721/3722 patients, V=5126 fused
 ICD-9 dx + CPT procedure + medication codewords, PC-sLDA initialized from
 Gibbs-LDA.) Do not confuse this with the group's later clinical follow-up
 (*Assessment of a Prediction Model for Antidepressant Treatment Stability*, JAMA
-Network Open 2020) — same method, a much larger two-site cohort, reporting a
-top-3 stability accuracy ~0.60–0.62 rather than this avg-AUC. See
+Network Open 2020) — same method, a much larger two-site cohort, whose PC topic
+model lands at AUC 0.627/0.619 (Sites A/B), i.e. the same ~0.60–0.66 band. See
 `docs/hughes-comparison.md`.
 
 ## Cohort — `mdd_antidepressant`
