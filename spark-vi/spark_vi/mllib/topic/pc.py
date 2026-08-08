@@ -28,6 +28,11 @@ from pyspark.ml.param import Param, Params, TypeConverters
 from pyspark.ml.param.shared import HasFeaturesCol, HasMaxIter, HasSeed
 
 from spark_vi.core.config import VIConfig
+from spark_vi.mllib._common import (
+    _PersistableModel,
+    _PersistenceParams,
+    apply_persistence_params,
+)
 from spark_vi.mllib.topic._common import _vector_to_bow_document
 from spark_vi.models.topic.pc import OnlinePCLDA
 from spark_vi.models.topic.types import PCDocument
@@ -84,13 +89,16 @@ def _row_to_pc_document(
     )
 
 
-class _PCParams(HasFeaturesCol, HasMaxIter, HasSeed):
+class _PCParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
     """Shared Param surface for PCEstimator and PCModel.
 
     The LDA param subset (k, topicDistributionCol, the SVI schedule knobs, the
     Dirichlet concentrations, the CAVI knobs) mirrors ``_OnlineLDAParams``; on
     top sit the Prediction-Constrained params: ``numLabels`` (C), ``labelCol``,
-    ``labelMaskCol``, and ``weightY`` (default 0.0 for increment 1).
+    ``labelMaskCol``, and ``weightY`` (default 0.0 for increment 1). Persistence
+    Params (saveInterval, saveDir, resumeFrom) come from ``_PersistenceParams``
+    (the same mixin the LDA/HDP shims use), so checkpoint + resume UX is
+    identical across the topic-model shims.
     """
 
     k = Param(
@@ -323,9 +331,17 @@ class PCEstimator(_PCParams, Estimator):
         headLrScale: float = 1.0,
         topicTrust: float = 0.1,
         weightYWarmupIters: int = 0,
+        # _PersistenceParams kwargs — see that mixin's docstring; these MUST
+        # appear here explicitly (not just on the mixin) for kwarg-style
+        # construction (the cloud driver builds via kwargs).
+        # test_constructor_accepts_persistence_kwargs pins this.
+        saveInterval: int = -1,
+        saveDir: str = "",
+        resumeFrom: str = "",
     ) -> None:
         super().__init__()
         self._setDefault(**_PC_DEFAULTS)
+        self._set_persistence_defaults()
         # Diagnostic-only per-iteration callback (mirrors OnlineLDAEstimator).
         # Stored as an instance attribute — callables aren't MLlib-serializable
         # and persistence is deferred (ADR 0009).
@@ -358,6 +374,12 @@ class PCEstimator(_PCParams, Estimator):
         vocab_size = first[0][0].size
 
         model_obj, config = _build_model_and_config(self, vocab_size=vocab_size)
+
+        # Validate persistence Params and splice checkpoint_dir/interval into
+        # VIConfig. Returns (config, resume_path) where resume_path is a Path
+        # or None. Mirrors OnlineLDAEstimator._fit exactly — both weight_y == 0
+        # and > 0 fits go through this one VIRunner.fit code path.
+        config, resume_path = apply_persistence_params(self, config)
 
         label_col = self.getOrDefault("labelCol") if self.isSet("labelCol") else None
         label_mask_col = (
@@ -396,7 +418,9 @@ class PCEstimator(_PCParams, Estimator):
 
         try:
             result = VIRunner(model_obj, config=config).fit(
-                pc_rdd, on_iteration=self._on_iteration,
+                pc_rdd,
+                resume_from=resume_path,
+                on_iteration=self._on_iteration,
             )
         finally:
             pc_rdd.unpersist(blocking=False)
@@ -410,7 +434,7 @@ class PCEstimator(_PCParams, Estimator):
         return out_model
 
 
-class PCModel(_PCParams, Model):
+class PCModel(_PCParams, _PersistableModel, Model):
     """MLlib-shaped Model wrapping a trained OnlinePCLDA VIResult.
 
     ``transform`` appends the label-free ``topicDistributionCol`` (theta) via
@@ -418,15 +442,23 @@ class PCModel(_PCParams, Model):
     was supervised (``weightY > 0``) it ALSO appends a head-derived
     ``probabilityCol`` = ``sigmoid(w_CK . theta)`` (per-label P(y=1)); see
     ``predictProbability``.
+
+    Persistable via ``_PersistableModel`` (save/load the wrapped VIResult),
+    exactly as ``OnlineLDAModel`` is. ``_expected_model_class`` is the PC model
+    tag the runner stamps (``OnlinePCLDA``), so ``load`` REJECTS a checkpoint
+    from any other class — a PC checkpoint cannot load as LDA and vice-versa.
     """
 
-    # Stamped into result.metadata by VIRunner as ``model_class``.
+    # Stamped into result.metadata by VIRunner as ``model_class`` (the runner
+    # uses type(model).__name__ on the underlying VIModel). Used by
+    # _PersistableModel.load to reject checkpoints from other model classes.
     _expected_model_class = "OnlinePCLDA"
 
     def __init__(self, result) -> None:  # result: VIResult
         super().__init__()
         self._result = result
         self._setDefault(**_PC_DEFAULTS)
+        self._set_persistence_defaults()
 
     @property
     def result(self):

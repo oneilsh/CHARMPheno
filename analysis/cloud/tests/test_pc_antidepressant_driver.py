@@ -66,3 +66,69 @@ def test_parser_surface_has_all_flags():
     assert ns.vocab_size == 500 and ns.min_df == 5 and ns.min_patient_count == 7
     assert ns.person_mod == 10 and ns.test_frac == 0.3 and ns.seed == 13
     assert ns.cache_uri == "gs://x/y" and ns.out == "/tmp/r.json"
+
+
+# --- checkpoint / resume / eval flags (VI backend only) ----------------------
+
+def test_parser_has_persistence_flags():
+    ns = drv._build_parser().parse_args([
+        "--cdr", "p.d", "--billing", "b", "--backend", "vi",
+        "--save-dir", "/runs/0071", "--save-interval", "5",
+        "--resume-from", "/runs/0071", "--eval-only",
+    ])
+    assert ns.save_dir == "/runs/0071"
+    assert ns.save_interval == 5
+    assert ns.resume_from == "/runs/0071"
+    assert ns.eval_only is True
+
+
+def test_persistence_flag_defaults():
+    ns = drv._build_parser().parse_args(["--cdr", "p.d", "--billing", "b"])
+    assert ns.save_dir == "" and ns.save_interval == -1
+    assert ns.resume_from == "" and ns.eval_only is False
+
+
+def test_save_dir_rejected_for_inmem_backend(monkeypatch, capsys):
+    # --save-dir is VI-only: with the default inmem backend it must fail fast
+    # (before any BQ import), since L-BFGS has no interim state to checkpoint.
+    rc = drv.main([
+        "--cdr", "proj.ds", "--billing", "bill",
+        "--save-dir", "/runs/0071",
+    ])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "--save-dir is VI-only" in captured.err
+
+
+def test_eval_only_requires_save_dir(monkeypatch, capsys):
+    rc = drv.main([
+        "--cdr", "proj.ds", "--billing", "bill",
+        "--backend", "vi", "--eval-only",
+    ])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "--eval-only requires --save-dir" in captured.err
+
+
+def test_eval_only_errors_cleanly_without_checkpoint(tmp_path, capsys):
+    # --eval-only pointed at a dir with no manifest.json errors before touching BQ.
+    empty = tmp_path / "no_ckpt"
+    empty.mkdir()
+    rc = drv.main([
+        "--cdr", "proj.ds", "--billing", "bill",
+        "--backend", "vi", "--eval-only", "--save-dir", str(empty),
+    ])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "no checkpoint (manifest.json)" in captured.err
+
+
+def test_eval_only_rejected_for_inmem_backend(capsys):
+    # --eval-only with the default inmem backend (no --save-dir, so the save-dir
+    # VI-only gate doesn't pre-empt) reaches the eval-only VI-only guard.
+    rc = drv.main([
+        "--cdr", "proj.ds", "--billing", "bill", "--eval-only",
+    ])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "--eval-only is VI-only" in captured.err

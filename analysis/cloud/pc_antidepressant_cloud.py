@@ -53,6 +53,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -486,6 +487,40 @@ def _build_parser() -> argparse.ArgumentParser:
         "--out", type=str, default="pc_antidepressant_results.json",
         help="path to write the per-drug results (JSON)",
     )
+    # --- Checkpoint / resume / eval (VI backend only) ------------------------
+    # Mirror lda_bigquery_cloud.py's persistence flags. These are meaningful
+    # ONLY for --backend vi: the VI-native PCEstimator checkpoints its VIResult
+    # via the shim's saveDir/saveInterval and resumes via resumeFrom. The inmem
+    # (L-BFGS) backend has NO interim state to checkpoint, so these are ignored
+    # for --backend inmem.
+    parser.add_argument(
+        "--save-dir", default="",
+        help=("VI backend only: directory for auto-saves and final result; "
+              "empty (default) = no save. The directory becomes the "
+              "authoritative post-fit artifact (manifest.json + params/), "
+              "loadable via PCModel.load and usable as --resume-from. Ignored "
+              "for --backend inmem (L-BFGS has no interim state)."),
+    )
+    parser.add_argument(
+        "--save-interval", type=int, default=-1,
+        help=("VI backend only: save every N iters during fit; -1 (default) = "
+              "save only at end-of-fit if --save-dir is set. Ignored for "
+              "--backend inmem."),
+    )
+    parser.add_argument(
+        "--resume-from", default="",
+        help=("VI backend only: path to a previously-written --save-dir; empty "
+              "(default) = fresh start. When set, the fit loads the saved "
+              "VIResult and continues from that iteration count (--max-iter is "
+              "then ADDITIONAL iterations). Ignored for --backend inmem."),
+    )
+    parser.add_argument(
+        "--eval-only", action="store_true",
+        help=("VI backend only: skip training; load the checkpoint VIResult at "
+              "--save-dir, wrap it in a PCModel, and run the per-drug eval "
+              "(transform + score) so you can peek the AUC from a checkpoint "
+              "without more fit. Requires --save-dir with a manifest.json."),
+    )
     return parser
 
 
@@ -510,6 +545,32 @@ def main(argv: list[str] | None = None) -> int:
               f"--stability-days ({args.stability_days}) so the stability window "
               "is fully observed.", file=sys.stderr)
         return 1
+    # Checkpoint/resume/eval are VI-native (the inmem L-BFGS backend has no
+    # interim state). Validate the combinations BEFORE touching BQ so a
+    # misconfigured invocation fails fast (mirrors the env gate above).
+    if args.save_dir and args.backend != "vi":
+        print(f"ERROR: --save-dir is VI-only (the inmem L-BFGS backend has no "
+              f"interim state to checkpoint); got --backend {args.backend}.",
+              file=sys.stderr)
+        return 1
+    if args.resume_from and args.backend != "vi":
+        print(f"ERROR: --resume-from is VI-only; got --backend {args.backend}.",
+              file=sys.stderr)
+        return 1
+    if args.eval_only:
+        if args.backend != "vi":
+            print(f"ERROR: --eval-only is VI-only (only the VI backend writes a "
+                  f"loadable checkpoint); got --backend {args.backend}.",
+                  file=sys.stderr)
+            return 1
+        if not args.save_dir:
+            print("ERROR: --eval-only requires --save-dir pointing at a "
+                  "checkpoint directory.", file=sys.stderr)
+            return 1
+        if not (Path(args.save_dir) / "manifest.json").exists():
+            print(f"ERROR: --eval-only: no checkpoint (manifest.json) at "
+                  f"{args.save_dir}; nothing to evaluate.", file=sys.stderr)
+            return 1
 
     # Driver-side imports proven first — fail fast if --py-files is misshapen.
     from charmpheno.omop import load_omop_bigquery, to_bow_dataframe
@@ -533,6 +594,11 @@ def main(argv: list[str] | None = None) -> int:
           f"K={args.K}, weight_y={args.weight_y}, lookback_days={args.lookback_days}, "
           f"window_days={args.window_days}, stability_days={args.stability_days}, "
           f"person_mod={args.person_mod}", flush=True)
+    if args.backend == "vi" and (args.save_dir or args.resume_from or args.eval_only):
+        print(f"[driver] checkpoint: save_dir={args.save_dir or '<none>'}, "
+              f"save_interval={args.save_interval}, "
+              f"resume_from={args.resume_from or '<none>'}, "
+              f"eval_only={args.eval_only}", flush=True)
     if args.cache_uri:
         print(f"[driver] note: --cache-uri {args.cache_uri!r} accepted but the "
               "prep-cache path is not yet wired; prep runs fresh.", flush=True)
@@ -623,7 +689,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         results, drug_order, n_train, n_test, n_persons = _run_vi_backend(
             spark, bow_df, V, outcome_by_person, _ANTIDEPRESSANT_INGREDIENTS, args,
-            multitask_baseline_probas, _bundle_masked,
+            multitask_baseline_probas, _bundle_masked, vocab_map,
         )
 
     # --- Report: the Hughes per-drug table (PC vs two-stage vs LR-on-codes) ---
@@ -735,9 +801,70 @@ def _run_inmem_backend(
     return results, drug_order, int(tr.sum()), int(te.sum()), len(person_order)
 
 
+def _augmented_resave_pc(model, drug_order, V, vocab_map, args) -> None:
+    """Overwrite the shim's final checkpoint with self-describing metadata.
+
+    The PC counterpart of lda_bigquery_cloud.py's augmented re-save: the shim's
+    mid-fit / end-of-fit auto-saves carry only the trained VIResult, enough for
+    resume continuity. This re-save bundles what PC needs to be self-describing
+    on resume/eval — the drug->column order (``stable_drug_order``, so the loaded
+    head columns line up), the BOW ``vocab``, the SVI config, and a ``corpus_manifest``
+    (the resume-compat guard's membership fields) — and writes ``manifest.json``
+    marking the directory as an authoritative, loadable checkpoint.
+    """
+    from spark_vi.core.result import VIResult
+    from spark_vi.io.export import save_result
+
+    vocab_list: list = [None] * (len(vocab_map) if vocab_map else 0)
+    if vocab_map:
+        for cid, idx in vocab_map.items():
+            vocab_list[idx] = cid
+
+    augmented = VIResult(
+        global_params=model.result.global_params,
+        elbo_trace=model.result.elbo_trace,
+        n_iterations=model.result.n_iterations,
+        converged=model.result.converged,
+        diagnostic_traces=model.result.diagnostic_traces,
+        metadata={
+            **model.result.metadata,
+            "vocab": vocab_list,
+            "stable_drug_order": list(drug_order),
+            "column_drug_names": {c: name for c, name in enumerate(drug_order)},
+            "K": int(args.K),
+            "svi": {
+                "subsampling_rate": float(args.subsampling_rate),
+                "tau0": float(args.tau0),
+                "kappa": float(args.kappa),
+                "max_iter": int(args.max_iter),
+                "weight_y": float(args.weight_y),
+                "alpha": float(args.alpha),
+            },
+            # corpus MEMBERSHIP fields the resume-compat guard reads
+            # (scripts/run_experiment.py::_resume_corpus_mismatches). Only the
+            # fields that actually determine which patients/features the fit saw
+            # go here; a mismatch on any refuses to warm-start.
+            "corpus_manifest": {
+                "cohort": "mdd_antidepressant",
+                "person_mod": int(args.person_mod),
+                "lookback_days": int(args.lookback_days),
+                "window_days": int(args.window_days),
+                "stability_days": int(args.stability_days),
+                "grace_gap_days": int(args.grace_gap_days),
+                "vocab_size": int(args.vocab_size),
+                "min_df": int(args.min_df),
+                "min_patient_count": int(args.min_patient_count),
+            },
+        },
+    )
+    save_result(augmented, args.save_dir)
+    print(f"[driver] re-saved augmented VIResult (manifest.json) to "
+          f"{args.save_dir}", flush=True)
+
+
 def _run_vi_backend(
     spark, bow_df, V, outcome_by_person, reference_drugs, args,
-    multitask_baseline_probas, _bundle_masked,
+    multitask_baseline_probas, _bundle_masked, vocab_map=None,
 ):
     """Distributed VI-native PC backend (``--backend vi``).
 
@@ -752,14 +879,43 @@ def _run_vi_backend(
     ``(results, drug_order, n_train, n_test, n_persons)`` in the same shape as the
     in-memory backend so :func:`format_results_table` and the JSON payload are
     backend-agnostic.
+
+    Checkpoint / resume / eval (mirrors lda_bigquery_cloud.py):
+      * ``--save-dir`` + ``--save-interval`` are threaded into the estimator
+        (``saveDir``/``saveInterval``); the shim auto-checkpoints the VIResult
+        during fit and writes the authoritative final result at end-of-fit.
+      * ``--resume-from`` is threaded as ``resumeFrom`` so a re-run continues the
+        prior checkpoint (``--max-iter`` = ADDITIONAL iters).
+      * ``--eval-only`` skips training entirely: the checkpoint VIResult at
+        ``--save-dir`` is loaded via ``PCModel.load`` and scored, so a user can
+        peek the AUC from a checkpoint without more fit. The drug->column order
+        is read from the checkpoint metadata (``stable_drug_order``) so the
+        loaded head columns line up with the eval labels.
+      * On a real fit with ``--save-dir`` set, an augmented re-save overwrites the
+        shim's final checkpoint with self-describing metadata (``stable_drug_order``,
+        ``vocab``, the SVI config, and a corpus manifest) so eval/resume don't
+        depend on re-deriving state.
     """
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import PCEstimator, PCModel
 
     # --- 4) Attach labels as Spark columns + person split --------------------
     with _phase(f"attach multi-task label/mask columns + person split "
                 f"(test_frac={args.test_frac})"):
-        drugs_present = [d for (d, _w) in outcome_by_person.values()]
-        drug_order = stable_drug_order(drugs_present, reference=reference_drugs)
+        # On eval-only, take the drug->column order from the checkpoint so the
+        # loaded head (C, K) columns align with the eval labels exactly; else
+        # derive it from the cohort as usual (deterministic given the data).
+        drug_order = None
+        if args.eval_only:
+            from spark_vi.io.export import load_result
+            ck_meta = load_result(args.save_dir).metadata
+            drug_order = ck_meta.get("stable_drug_order")
+            if drug_order is not None:
+                drug_order = list(drug_order)
+                print(f"[driver]   eval-only: drug_order from checkpoint "
+                      f"({len(drug_order)} columns)", flush=True)
+        if drug_order is None:
+            drugs_present = [d for (d, _w) in outcome_by_person.values()]
+            drug_order = stable_drug_order(drugs_present, reference=reference_drugs)
         C = len(drug_order)
         labeled = attach_multitask_label_columns(
             bow_df, outcome_by_person, drug_order, spark,
@@ -772,25 +928,53 @@ def _run_vi_backend(
         print(f"[driver]   C={C} drug columns: {drug_order}", flush=True)
         print(f"[driver]   split: {n_train} train / {n_test} test", flush=True)
 
-    # --- 5a) Distributed VI-PC fit (SVI; no collect-to-memory) ---------------
-    with _phase(f"VI-PC fit (SVI, K={args.K}, weight_y={args.weight_y}, "
-                f"subsamplingRate={args.subsampling_rate}, tau0={args.tau0}, "
-                f"kappa={args.kappa}, maxIter={args.max_iter})"):
-        estimator = PCEstimator(
-            featuresCol="features", labelCol="y", labelMaskCol="label_mask",
-            numLabels=C, weightY=float(args.weight_y), k=args.K,
-            docConcentration=[float(args.alpha)],
-            subsamplingRate=args.subsampling_rate,
-            learningOffset=args.tau0, learningDecay=args.kappa,
-            maxIter=args.max_iter, seed=args.seed,
-            probabilityCol="probability",
-        )
-        model = estimator.fit(train_df)
-        vres = model.result
-        w_ck_absmax = float(np.abs(model.headWeights()).max())
-        print(f"[driver]   VI-PC fit done: n_iter={vres.n_iterations}, "
-              f"converged={vres.converged}, final_elbo={vres.final_elbo}, "
-              f"|w_CK|max={w_ck_absmax:.4g}", flush=True)
+    # --- 5a) Distributed VI-PC fit (SVI; no collect-to-memory) ----------------
+    #         ... or, on --eval-only, load the checkpoint model (no training).
+    if args.eval_only:
+        with _phase(f"VI-PC eval-only: load checkpoint from {args.save_dir}"):
+            model = PCModel.load(args.save_dir)
+            # PCModel.load restores only the wrapped VIResult (Params aren't
+            # persisted, ADR 0009/0012); set the ones transform reads so it
+            # emits the head-derived probabilityCol (needs weightY > 0 + C).
+            model._set(
+                featuresCol="features", numLabels=C,
+                weightY=float(args.weight_y), probabilityCol="probability",
+            )
+            vres = model.result
+            w_ck_absmax = float(np.abs(model.headWeights()).max())
+            print(f"[driver]   VI-PC checkpoint loaded: n_iter={vres.n_iterations}, "
+                  f"converged={vres.converged}, final_elbo={vres.final_elbo}, "
+                  f"|w_CK|max={w_ck_absmax:.4g}", flush=True)
+    else:
+        with _phase(f"VI-PC fit (SVI, K={args.K}, weight_y={args.weight_y}, "
+                    f"subsamplingRate={args.subsampling_rate}, tau0={args.tau0}, "
+                    f"kappa={args.kappa}, maxIter={args.max_iter}, "
+                    f"saveDir={args.save_dir or '<none>'}, "
+                    f"resumeFrom={args.resume_from or '<none>'})"):
+            estimator = PCEstimator(
+                featuresCol="features", labelCol="y", labelMaskCol="label_mask",
+                numLabels=C, weightY=float(args.weight_y), k=args.K,
+                docConcentration=[float(args.alpha)],
+                subsamplingRate=args.subsampling_rate,
+                learningOffset=args.tau0, learningDecay=args.kappa,
+                maxIter=args.max_iter, seed=args.seed,
+                probabilityCol="probability",
+                saveDir=args.save_dir, saveInterval=args.save_interval,
+                resumeFrom=args.resume_from,
+            )
+            model = estimator.fit(train_df)
+            vres = model.result
+            w_ck_absmax = float(np.abs(model.headWeights()).max())
+            print(f"[driver]   VI-PC fit done: n_iter={vres.n_iterations}, "
+                  f"converged={vres.converged}, final_elbo={vres.final_elbo}, "
+                  f"|w_CK|max={w_ck_absmax:.4g}", flush=True)
+
+        # Augmented re-save: overwrite the shim's final checkpoint with
+        # self-describing metadata so eval/resume don't re-derive state. Mirrors
+        # lda_bigquery_cloud.py's augmented re-save. Only on a real fit (eval-only
+        # never mutates the checkpoint).
+        if args.save_dir:
+            _augmented_resave_pc(model, drug_order, V, vocab_map, args)
 
     # --- 5b) Transform + score PC, then the shared baselines ------------------
     with _phase("VI-PC transform + collect + baselines + per-drug scoring"):

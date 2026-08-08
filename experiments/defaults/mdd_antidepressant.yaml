@@ -49,3 +49,11 @@ subsampling_rate: 0.05      # mini-batch fraction per SVI iteration (-> --subsam
 tau0: 64.0                  # Robbins-Monro learning offset (-> --tau0); smaller than the
                             # MLlib 1024 default so the head actually moves on this cohort
 kappa: 0.6                  # Robbins-Monro learning decay in (0.5, 1.0] (-> --kappa)
+
+# --- checkpoint / resume (backend: vi only) ----------------------------------
+# The VI-native PCEstimator checkpoints its VIResult every `save_interval` SVI
+# iters into the run dir (manifest.json + params/), so `make exp ID=71` can be
+# re-run to RESUME from the last checkpoint (--max-iter then counts ADDITIONAL
+# iters). Inherited from _base.yaml (save_interval: 5); uncomment to override.
+# Inert for the inmem (L-BFGS) backend — it has no interim state to checkpoint.
+# save_interval: 5

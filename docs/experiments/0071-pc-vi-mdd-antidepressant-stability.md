@@ -133,6 +133,31 @@ overridable via `CHARM_DRIVER_MEMORY`) still applies. `make exp ID=71` fits, wri
 `pc_results.json` + `summary.md` under the run dir, and skips the NPMI eval (PC has
 its own metrics).
 
+### Resume + eval-from-checkpoint (VI backend only)
+
+The VI-native `PCEstimator` checkpoints its `VIResult` every `save_interval` SVI
+iters into the run dir (`manifest.json` + `params/`), so the fit is resumable with
+the SAME UX as the LDA/HDP models (`run_experiment.py` detects the checkpoint by
+`manifest.json` and threads `--resume-from`):
+
+- **Resume (continue training):** re-run `make exp ID=71`. It detects the existing
+  checkpoint and continues from the last saved iteration — `--max-iter` is then
+  **additional** iters on top of the loaded count (e.g. a killed 200-iter run
+  resumed with `max_iter: 200` reaches ~400 total). A corpus-config change between
+  runs (person_mod / lookback / window / stability / grace-gap / min_df /
+  min_patient_count) is refused by `check_resume_compat` — revert the config or
+  `rm -rf` the run dir to start fresh.
+- **Eval from a checkpoint (no training):** peek the per-drug AUC without more fit:
+  ```
+  cd analysis/cloud && make pc-antidepressant \
+    PC_AD_ARGS='--backend vi --eval-only --save-dir <run_dir> --out <run_dir>/pc_results.json'
+  ```
+  `--eval-only` loads the checkpoint into a `PCModel`, reads the drug→column order
+  from the checkpoint metadata, and runs the existing transform + per-drug scoring.
+
+Checkpoint/resume/`--eval-only` are **VI-only**: the inmem (L-BFGS) backend has no
+interim state, so `--save-dir` there is rejected and resume is a no-op.
+
 ## Results
 
 _TBD — awaiting the All-of-Us run. Record: N, per-drug positive rate, the
