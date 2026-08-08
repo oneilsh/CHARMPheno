@@ -708,8 +708,10 @@ def build_pc_args(
     ``inmem`` = the in-memory L-BFGS PC, byte-for-byte the prior behavior).
     ``backend: vi`` selects the distributed VI-native PCEstimator and additionally
     passes the SVI schedule knobs (``subsampling_rate`` -> ``--subsampling-rate``,
-    ``tau0`` -> ``--tau0``, ``kappa`` -> ``--kappa``); those knob flags are omitted
-    for the inmem backend so its argv is unchanged.
+    ``tau0`` -> ``--tau0``, ``kappa`` -> ``--kappa``) and the unsupervised-warm-start
+    knob (``warm_start_unsup_iters`` -> ``--warm-start-unsup-iters``, default 0 =
+    cold start); those flags are omitted for the inmem backend so its argv is
+    unchanged.
 
     Resume (VI backend only): the VI-native PCEstimator checkpoints its VIResult,
     so for ``backend: vi`` this also threads ``--save-dir <out_dir>`` +
@@ -753,6 +755,10 @@ def build_pc_args(
             "--subsampling-rate", str(effective.get("subsampling_rate", 0.05)),
             "--tau0", str(effective.get("tau0", 1024.0)),
             "--kappa", str(effective.get("kappa", 0.51)),
+            # Unsupervised-warm-start (Hughes et al.): 0 (default) = cold start;
+            # N > 0 runs a phase-1 weight_y=0 topic warm-up before the supervised
+            # phase 2 (fresh RM schedule). VI-only; absent from the inmem argv.
+            "--warm-start-unsup-iters", str(effective.get("warm_start_unsup_iters", 0)),
             "--save-dir", str(out_dir),
             "--save-interval", str(effective.get("save_interval", -1)),
         ])

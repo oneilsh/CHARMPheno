@@ -50,6 +50,18 @@ tau0: 64.0                  # Robbins-Monro learning offset (-> --tau0); smaller
                             # MLlib 1024 default so the head actually moves on this cohort
 kappa: 0.6                  # Robbins-Monro learning decay in (0.5, 1.0] (-> --kappa)
 
+# --- unsupervised warm-start (backend: vi only) ------------------------------
+# Hughes et al.'s protocol: initialize the supervised PC fit from the topics of
+# an unsupervised fit. 0 (default) = cold start (single-phase supervised SVI).
+# N > 0 runs a two-phase fit: PHASE 1 fits the SAME machinery at weight_y=0 for
+# N SVI iters (unsupervised LDA-MAP, learns topics; head stays at zero), then
+# PHASE 2 warm-starts the supervised fit from phase-1's topics with a FRESH
+# Robbins-Monro schedule (rho restarts near rho_0 so the head can move) — this
+# is DISTINCT from --resume-from (which continues the decayed counter). To A/B
+# warm vs cold, run two experiments differing ONLY in this knob (0 vs e.g. 50):
+# `warm_start_unsup_iters=0` is byte-for-byte the current single-phase fit.
+# warm_start_unsup_iters: 0
+
 # --- checkpoint / resume (backend: vi only) ----------------------------------
 # The VI-native PCEstimator checkpoints its VIResult every `save_interval` SVI
 # iters into the run dir (manifest.json + params/), so `make exp ID=71` can be

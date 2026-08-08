@@ -132,3 +132,27 @@ def test_eval_only_rejected_for_inmem_backend(capsys):
     captured = capsys.readouterr()
     assert rc == 1
     assert "--eval-only is VI-only" in captured.err
+
+
+# --- unsupervised warm-start flag (VI backend only) --------------------------
+
+def test_parser_has_warm_start_flag_default_zero():
+    ns = drv._build_parser().parse_args(["--cdr", "p.d", "--billing", "b"])
+    assert ns.warm_start_unsup_iters == 0
+    ns2 = drv._build_parser().parse_args([
+        "--cdr", "p.d", "--billing", "b", "--backend", "vi",
+        "--warm-start-unsup-iters", "50",
+    ])
+    assert ns2.warm_start_unsup_iters == 50
+
+
+def test_warm_start_rejected_for_inmem_backend(capsys):
+    # --warm-start-unsup-iters is VI-only: with the default inmem backend it must
+    # fail fast (before any BQ import) — L-BFGS has no SVI phase-1 to warm from.
+    rc = drv.main([
+        "--cdr", "proj.ds", "--billing", "bill",
+        "--warm-start-unsup-iters", "50",
+    ])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "--warm-start-unsup-iters is VI-only" in captured.err

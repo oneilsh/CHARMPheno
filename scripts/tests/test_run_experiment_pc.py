@@ -91,6 +91,33 @@ def test_build_pc_args_backend_vi_svi_knob_defaults(monkeypatch):
     assert d["--kappa"] == "0.51"
 
 
+# --- unsupervised warm-start knob threading (VI backend only) ----------------
+
+def test_build_pc_args_vi_threads_warm_start_default_zero(monkeypatch):
+    # backend vi, no warm_start_unsup_iters -> the flag is present with 0 (cold).
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(_eff(backend="vi"), "/out")
+    d = dict(zip(args[::2], args[1::2]))
+    assert d["--warm-start-unsup-iters"] == "0"
+
+
+def test_build_pc_args_vi_threads_warm_start_from_config(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(
+        _eff(backend="vi", warm_start_unsup_iters=50), "/out",
+    )
+    d = dict(zip(args[::2], args[1::2]))
+    assert d["--warm-start-unsup-iters"] == "50"
+
+
+def test_build_pc_args_inmem_omits_warm_start(monkeypatch):
+    # inmem argv stays byte-for-byte unchanged: no --warm-start-unsup-iters even
+    # if the config carries the key (it is VI-only).
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(_eff(warm_start_unsup_iters=50), "/out")
+    assert "--warm-start-unsup-iters" not in args
+
+
 # --- checkpoint / resume threading (VI backend only) -------------------------
 
 def test_build_pc_args_inmem_threads_no_save_flags(monkeypatch):

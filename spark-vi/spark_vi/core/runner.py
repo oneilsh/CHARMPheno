@@ -96,6 +96,7 @@ class VIRunner:
         data_summary: Any | None = None,
         start_iteration: int = 0,
         resume_from: Path | str | None = None,
+        warm_start_from: Path | str | None = None,
         on_iteration: Callable[[int, dict, list[float]], None] | None = None,
     ) -> VIResult:
         """Run the distributed VI loop until convergence (full-batch) or max_iterations.
@@ -138,6 +139,28 @@ class VIRunner:
                 returned; the loaded elbo_trace seeds this run's trace; and
                 start_iteration is set to the loaded result's n_iterations so
                 the Robbins-Monro schedule matches a continuous run.
+            warm_start_from: if set, load a previously-saved VIResult's
+                global_params and use them as this fit's INITIAL global params —
+                but with a FRESH iteration counter (start_iteration is left at
+                the passed value, default 0) and a FRESH (empty) elbo_trace.
+                This is the warm-INIT counterpart to resume_from and is
+                deliberately DISTINCT from it: resume_from CONTINUES the
+                Robbins-Monro counter (so rho_t is already small on the first
+                resumed step, correct for continuing an in-progress schedule),
+                whereas warm_start_from RESETS the counter so rho_t restarts
+                near rho_0 and the schedule can actually move parameters that
+                begin at a fresh init. The motivating use is the unsupervised
+                warm-start protocol (Hughes et al.): fit phase 1 at weight_y == 0
+                to learn topics (leaving the head at its zero init), then
+                warm_start_from that checkpoint for a supervised phase 2 whose
+                head must train against a full, undecayed rho schedule — a
+                decayed (resume-style) rho would leave the head barely able to
+                move. The caller owns the semantic content of the loaded params:
+                for the PC model a weight_y == 0 phase-1 checkpoint yields warm
+                topics (lambda) AND a fresh (zero) head by construction, since
+                the unsupervised path never moves w_CK off its zero seed. Mutually
+                exclusive with resume_from (one continues the counter, the other
+                resets it — supplying both is a contradiction and raises).
             on_iteration: optional diagnostic callback invoked after each
                 iteration as `fn(iter_num, global_params, elbo_trace)`.
                 Kwarg-on-fit rather than a method on VIModel because the
@@ -155,6 +178,14 @@ class VIRunner:
         model = self.model
         cfg = self.config
 
+        if resume_from is not None and warm_start_from is not None:
+            raise ValueError(
+                "resume_from and warm_start_from are mutually exclusive: "
+                "resume_from CONTINUES the Robbins-Monro iteration counter "
+                "(rho already decayed), while warm_start_from RESETS it (fresh "
+                "rho schedule). Pass at most one."
+            )
+
         if resume_from is not None:
             loaded = load_result(resume_from)
             global_params = loaded.global_params
@@ -163,6 +194,20 @@ class VIRunner:
             log.info(
                 "Resuming from %s (n_iterations=%d, converged=%s)",
                 resume_from, loaded.n_iterations, loaded.converged,
+            )
+        elif warm_start_from is not None:
+            # Warm-INIT (distinct from resume): adopt the saved global params as
+            # this fit's starting point but keep start_iteration (default 0) and
+            # an empty elbo_trace, so the Robbins-Monro schedule restarts from
+            # rho_0 rather than continuing the saved run's decayed schedule.
+            loaded = load_result(warm_start_from)
+            global_params = loaded.global_params
+            elbo_trace = []
+            log.info(
+                "Warm-starting from %s (loaded global params as init; FRESH "
+                "iteration counter t=%d, so rho restarts near rho_0 — distinct "
+                "from resume, which would continue the decayed schedule)",
+                warm_start_from, start_iteration,
             )
         else:
             global_params = model.initialize_global(data_summary)
