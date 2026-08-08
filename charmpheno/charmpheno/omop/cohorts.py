@@ -298,6 +298,24 @@ _ANTIDEPRESSANT_INGREDIENTS: tuple[str, ...] = (
     "bupropion", "trazodone", "vortioxetine",            # Atypical
 )
 
+# The 10 Hughes-aligned antidepressants (AISTATS 2018, supplement B.4) for the
+# ``mdd_stable_treatment`` cohort — a STRICT SUBSET of the 15-drug set above.
+# Hughes lists 11 drugs; mirtazapine is dropped because it has no validated
+# OMOP standard concept id on this CDR (do NOT add it), and the 5 extras carried
+# by ``_ANTIDEPRESSANT_INGREDIENTS`` (vilazodone, desvenlafaxine, imipramine,
+# trazodone, vortioxetine) are intentionally excluded here so the stable-
+# treatment label is a fully-observed indicator over EXACTLY this Hughes set.
+# The fixed ordering below is the label column order (index i of the length-10
+# outcome vector). All 10 are already in ``_DRUG_REGISTRY`` with AoU-validated
+# pinned ids (no new concept-id reliance — nothing to VERIFY ON FIRST RUN beyond
+# the existing per-ingredient pins).
+_HUGHES_ANTIDEPRESSANTS: tuple[str, ...] = (
+    "fluoxetine", "sertraline", "paroxetine", "citalopram", "escitalopram",
+    "venlafaxine", "duloxetine",
+    "amitriptyline", "nortriptyline",
+    "bupropion",
+)
+
 
 # Names accepted by the CLI/loader. Add a new key here when adding a new
 # cohort function so the registry stays the single source of truth.
@@ -312,6 +330,7 @@ SUPPORTED_COHORTS: tuple[str, ...] = (
     "population_sparse",
     "population_glp1",
     "mdd_antidepressant",
+    "mdd_stable_treatment",
 )
 
 # Fixed salt for the general-population random-window assignment. Hashing
@@ -498,6 +517,29 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "outcome labeler for the Hughes 'the drug worked' replication."
         ),
     },
+    "mdd_stable_treatment": {
+        "id": "mdd_stable_treatment",
+        "label": "MDD stable antidepressant treatment (Hughes-faithful)",
+        "description": (
+            "The Hughes et al. (AISTATS 2018, supplement B.4) 'stable-treatment' "
+            "antidepressant cohort over the 10 Hughes-aligned antidepressants "
+            "(fluoxetine, sertraline, paroxetine, citalopram, escitalopram, "
+            "venlafaxine, duloxetine, amitriptyline, nortriptyline, bupropion). "
+            "A patient qualifies with age 18-80 at the stable-interval start, "
+            ">= 1 major-depression diagnosis (SNOMED 440383 and descendants, "
+            "excluding bipolar 439254 / schizoaffective 4224940), >= 2 events "
+            "before their first antidepressant era, and a qualifying STABLE "
+            "INTERVAL: a maximal interval whose active antidepressant SUBSET is "
+            "constant, lasting >= 90 days, with encounters at least every 13 "
+            "months (max visit gap <= 395 days, bounding both endpoints). The "
+            "FIRST such interval defines the label — a fully-observed length-10 "
+            "indicator of which drugs are in that interval's stable subset "
+            "(usually one, occasionally a held combination). An add-on or switch "
+            "is a boundary that splits the interval. Returns a PER-PERSON index "
+            "table (person_id, index_date=stable_start, stable_end, drug_subset, "
+            "source_cohort)."
+        ),
+    },
 }
 
 
@@ -590,6 +632,15 @@ def apply_cohort(
             cond_df, spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
             prior_obs_days=prior_obs_days,
+        )
+    if cohort == "mdd_stable_treatment":
+        # NB: prior_obs_days is not a knob for this cohort — its observability
+        # gate is "the stable interval falls within one observation period"
+        # (not a fixed prior/forward bracket), so the loader's prior_obs_days is
+        # intentionally not threaded through here.
+        return apply_mdd_stable_treatment_cohort(
+            cond_df, spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
         )
     raise ValueError(
         f"cohort {cohort!r} not supported (supported: {SUPPORTED_COHORTS})"
@@ -1968,4 +2019,458 @@ def antidepressant_stability_label(
         .withColumn("_switched", F.coalesce(F.col("_switched"), F.lit(False)))
         .withColumn("worked", F.col("_covered") & (~F.col("_switched")))
         .select("person_id", "index_drug_name", "worked")
+    )
+
+
+# --- Hughes-faithful "stable-treatment" antidepressant cohort/outcome ---------
+# A DISTINCT cohort from the per-index-drug ``mdd_antidepressant`` one above: it
+# replaces "which drug did a person INITIATE + did that drug work" with the
+# Hughes et al. (AISTATS 2018, supplement B.4) "stable treatment" construction —
+# WHICH antidepressant SUBSET a person was stably held on over their first
+# qualifying stable interval. Defined over the 10 Hughes-aligned antidepressants
+# (``_HUGHES_ANTIDEPRESSANTS``, a strict subset of the 15-drug set), it turns a
+# person's antidepressant drug_eras into a sequence of maximal constant-subset
+# intervals, keeps those that are both long enough (>= 90 days) and regularly
+# encountered (a visit at least every 13 months), and labels the FIRST such
+# interval with a fully-observed length-10 indicator over the fixed drug order.
+# All cores are pure (no BQ reads) and unit-testable on synthetic Spark frames;
+# a single BQ wrapper reads the CDR and delegates. The existing
+# ``mdd_antidepressant`` index / stability outcome above are left INTACT.
+
+
+def _antidepressant_era_subsets(
+    drug_era_df: DataFrame,
+    concept_map: DataFrame,
+) -> DataFrame:
+    """Restrict ``drug_era`` to the antidepressant set and name each era's drug.
+
+    ``drug_era_df`` has person_id/drug_concept_id/drug_era_start_date/
+    drug_era_end_date; ``concept_map`` is ``(concept_id, drug_name, drug_class)``
+    from :func:`_antidepressant_concept_map` (built with
+    ``_HUGHES_ANTIDEPRESSANTS`` for this cohort, so the set is the 10 Hughes
+    drugs). Inner-joins the eras to the map, restricting to those 10 ingredients
+    and tagging every era with its ingredient name. Returns ``(person_id,
+    drug_name, era_start, era_end)`` — the raw exposure spans the sweep-line
+    interval builder consumes. One row per antidepressant era; a person's non-
+    antidepressant eras (and any non-Hughes antidepressant) drop out here.
+    """
+    cm = concept_map.select(
+        F.col("concept_id").alias("_cm_id"),
+        F.col("drug_name").alias("drug_name"),
+    )
+    return (
+        drug_era_df.join(
+            F.broadcast(cm),
+            drug_era_df["drug_concept_id"] == F.col("_cm_id"),
+            how="inner",
+        )
+        .select(
+            "person_id",
+            "drug_name",
+            F.col("drug_era_start_date").alias("era_start"),
+            F.col("drug_era_end_date").alias("era_end"),
+        )
+    )
+
+
+def _stable_drug_intervals(
+    era_subsets: DataFrame,
+    *,
+    min_days: int = 90,
+) -> DataFrame:
+    """Maximal constant-subset antidepressant intervals of >= ``min_days``.
+
+    A sweep-line over the antidepressant era spans (``era_subsets`` from
+    :func:`_antidepressant_era_subsets`). The active drug SUBSET changes only at
+    an era boundary, so the elementary segments are the gaps between consecutive
+    boundary points, where a boundary is either an ``era_start`` (a drug turns
+    on) or ``era_end + 1`` (a drug turns off — ``era_end`` is inclusive). For
+    each segment ``[seg_start, seg_end)`` the active subset is the drugs whose
+    era covers ``seg_start`` (``era_start <= seg_start <= era_end``), collected
+    via a range-join into ``sort_array(collect_set(drug_name))``; a segment with
+    NO active antidepressant (an off-all-ADs gap) yields the empty subset.
+
+    Consecutive same-subset segments are then merged with a gap-and-islands
+    window (break when the sorted-subset key changes from the previous segment —
+    so an add-on ``{A} -> {A,B}`` splits, a switch ``{A} -> {B}`` splits, and an
+    empty off-all-ADs segment both breaks the run and is dropped). Each island
+    collapses to ``(min seg_start, max seg_end)``; the reported ``interval_end``
+    is ``max(seg_end) - 1`` (back to the last inclusive covered day). Kept iff
+    the subset is non-empty and ``datediff(interval_end, interval_start) >=
+    min_days``.
+
+    Returns ``(person_id, interval_start, interval_end, drug_subset)`` with
+    ``drug_subset`` a sorted ``array<string>`` of ingredient names.
+    """
+    es = era_subsets
+    # Boundary points per person: era starts (drug on) and era_end+1 (drug off).
+    starts = es.select("person_id", F.col("era_start").alias("pt"))
+    ends = es.select("person_id", F.date_add(F.col("era_end"), 1).alias("pt"))
+    points = starts.unionByName(ends).distinct()
+
+    w_pt = Window.partitionBy("person_id").orderBy("pt")
+    segs = (
+        points.withColumn("seg_end", F.lead("pt").over(w_pt))
+        .withColumnRenamed("pt", "seg_start")
+        # The last boundary opens no segment (nothing is active past it).
+        .where(F.col("seg_end").isNotNull())
+    )
+
+    # Active subset per segment: LEFT range-join so off-all-ADs segments survive
+    # with an empty subset (collect_set drops the null drug_name -> []).
+    s = segs.alias("s")
+    e = es.alias("e")
+    seg_subsets = (
+        s.join(
+            e,
+            (F.col("s.person_id") == F.col("e.person_id"))
+            & (F.col("s.seg_start") >= F.col("e.era_start"))
+            & (F.col("s.seg_start") <= F.col("e.era_end")),
+            how="left",
+        )
+        .select(
+            F.col("s.person_id").alias("person_id"),
+            F.col("s.seg_start").alias("seg_start"),
+            F.col("s.seg_end").alias("seg_end"),
+            F.col("e.drug_name").alias("drug_name"),
+        )
+        .groupBy("person_id", "seg_start", "seg_end")
+        .agg(F.sort_array(F.collect_set("drug_name")).alias("drug_subset"))
+    )
+
+    # Gap-and-islands: a new island starts whenever the sorted-subset key differs
+    # from the previous segment's (subset change OR an empty-subset segment,
+    # whose "" key differs from any non-empty neighbour). Same window idiom as
+    # antidepressant_stability_label's coverage stitch.
+    w_seg = Window.partitionBy("person_id").orderBy("seg_start")
+    keyed = seg_subsets.withColumn("_key", F.concat_ws(",", F.col("drug_subset")))
+    keyed = keyed.withColumn("_prev", F.lag("_key").over(w_seg))
+    keyed = keyed.withColumn(
+        "_break",
+        (F.col("_prev").isNull() | (F.col("_key") != F.col("_prev"))).cast("int"),
+    )
+    keyed = keyed.withColumn(
+        "_island",
+        F.sum("_break").over(w_seg.rowsBetween(Window.unboundedPreceding, 0)),
+    )
+
+    intervals = (
+        keyed.groupBy("person_id", "_island")
+        .agg(
+            F.min("seg_start").alias("interval_start"),
+            F.max("seg_end").alias("_seg_end_max"),
+            # All segments in an island share the same subset, so any is correct.
+            F.first("drug_subset").alias("drug_subset"),
+        )
+        # seg_end is exclusive (era_end+1 based); step back to the inclusive last
+        # covered day so interval_end is a real coverage date.
+        .withColumn("interval_end", F.date_sub(F.col("_seg_end_max"), 1))
+    )
+    return (
+        intervals.where(
+            (F.size("drug_subset") > 0)
+            & (F.datediff(F.col("interval_end"), F.col("interval_start"))
+               >= F.lit(min_days))
+        )
+        .select("person_id", "interval_start", "interval_end", "drug_subset")
+    )
+
+
+def _encounter_regular_intervals(
+    intervals: DataFrame,
+    visit_df: DataFrame,
+    *,
+    max_gap_days: int = 395,
+) -> DataFrame:
+    """Keep intervals whose encounters recur at least every ``max_gap_days``.
+
+    ``intervals`` is ``(person_id, interval_start, interval_end, drug_subset)``
+    from :func:`_stable_drug_intervals`; ``visit_df`` has ``person_id`` and
+    ``visit_start_date``. For each interval, take the ``visit_start_date`` values
+    in ``[interval_start, interval_end]``, order them, and require ALL THREE gap
+    kinds to be ``<= max_gap_days`` (395d ~= 13 months, the Hughes regularity
+    rule):
+
+    - each consecutive visit-to-visit gap,
+    - the leading gap ``interval_start -> first visit``,
+    - the trailing gap ``last visit -> interval_end``.
+
+    An interval with NO visit in range is dropped (the inner join removes it —
+    an un-encountered interval cannot be "regularly encountered"). A single-visit
+    interval has no consecutive gap (``coalesce(..., 0)``), so only the two
+    endpoint gaps gate it. Returns ``intervals``'s schema, filtered.
+    """
+    v = visit_df.select("person_id", "visit_start_date")
+    j = (
+        intervals.join(v, on="person_id", how="inner")
+        .where(
+            (F.col("visit_start_date") >= F.col("interval_start"))
+            & (F.col("visit_start_date") <= F.col("interval_end"))
+        )
+    )
+    w = Window.partitionBy(
+        "person_id", "interval_start", "interval_end"
+    ).orderBy("visit_start_date")
+    j = j.withColumn("_prev_visit", F.lag("visit_start_date").over(w))
+    j = j.withColumn(
+        "_cons_gap", F.datediff(F.col("visit_start_date"), F.col("_prev_visit"))
+    )
+    agg = j.groupBy("person_id", "interval_start", "interval_end").agg(
+        F.first("drug_subset").alias("drug_subset"),
+        F.max("_cons_gap").alias("_max_gap"),
+        F.min("visit_start_date").alias("_first_visit"),
+        F.max("visit_start_date").alias("_last_visit"),
+    )
+    agg = agg.withColumn(
+        "_start_gap", F.datediff(F.col("_first_visit"), F.col("interval_start"))
+    )
+    agg = agg.withColumn(
+        "_end_gap", F.datediff(F.col("interval_end"), F.col("_last_visit"))
+    )
+    return (
+        agg.where(
+            (F.coalesce(F.col("_max_gap"), F.lit(0)) <= F.lit(max_gap_days))
+            & (F.col("_start_gap") <= F.lit(max_gap_days))
+            & (F.col("_end_gap") <= F.lit(max_gap_days))
+        )
+        .select("person_id", "interval_start", "interval_end", "drug_subset")
+    )
+
+
+def _first_stable_interval(intervals: DataFrame) -> DataFrame:
+    """One row per person: the earliest (by ``interval_start``) stable interval.
+
+    The user's decision is that the FIRST qualifying stable interval defines the
+    patient's label + feature anchor. Ties on ``interval_start`` (not expected —
+    a person's intervals are disjoint) are broken by ``interval_end`` for
+    determinism. Returns ``(person_id, interval_start, interval_end,
+    drug_subset)``.
+    """
+    w = Window.partitionBy("person_id").orderBy(
+        F.col("interval_start").asc(), F.col("interval_end").asc()
+    )
+    return (
+        intervals.withColumn("_rn", F.row_number().over(w))
+        .where(F.col("_rn") == 1)
+        .select("person_id", "interval_start", "interval_end", "drug_subset")
+    )
+
+
+def _mdd_stable_treatment_index(
+    cond_df: DataFrame,
+    drug_era_df: DataFrame,
+    visit_df: DataFrame,
+    person_df: DataFrame,
+    observation_period: DataFrame,
+    concept_map: DataFrame,
+    mdd_concepts: DataFrame,
+    ad_concept_ids: DataFrame,
+    *,
+    date_col: str,
+    min_days: int = 90,
+    max_gap_days: int = 395,
+    min_history_events: int = 2,
+    age_min: int = 18,
+    age_max: int = 80,
+) -> DataFrame:
+    """Pure core of the Hughes stable-treatment cohort (no BQ reads).
+
+    Composes the reusable primitives so the whole cohort is unit-testable on
+    synthetic frames:
+
+    1. Antidepressant eras -> constant-subset intervals >= ``min_days``
+       (:func:`_antidepressant_era_subsets` -> :func:`_stable_drug_intervals`).
+    2. Encounter-regularity filter, max gap <= ``max_gap_days`` on all three gap
+       kinds (:func:`_encounter_regular_intervals`).
+    3. The FIRST surviving interval per person (:func:`_first_stable_interval`);
+       its ``interval_start`` is the index date / feature anchor.
+
+    Then four person-level qualifiers (each a semi-join, no fan-out):
+
+    - **(a) age 18-80 at the stable-interval start** — ``age =
+      year(index_date) - year_of_birth`` (the repo's year-difference convention;
+      ``person_df`` supplies ``year_of_birth``), kept if ``age_min <= age <=
+      age_max`` inclusive.
+    - **(b) major-depression indication** — >= 1 qualifying MDD condition
+      (``mdd_concepts``, the inclusion-minus-exclusion descendant set). NOTE: the
+      user's criterion (b) is stated as mere existence of an MDD dx, so this is
+      an EXISTENCE semi-join over ANY date (unlike the sibling
+      :func:`_mdd_antidepressant_index`, which requires the MDD dx on/before the
+      index) — a deliberate, flagged reading of the written criterion.
+    - **(c) sufficient pre-treatment history** — >= ``min_history_events`` events
+      in ``cond_df`` dated STRICTLY BEFORE the person's first antidepressant
+      drug_era across the 10-drug set (``ad_concept_ids`` via
+      :func:`_first_drug_era_dates`). "Events (any domain)" is approximated by
+      ``cond_df`` (the events frame handed in).
+    - **(d) interval within one observation period** — the whole stable interval
+      ``[index_date, stable_end]`` must fall inside a single
+      ``observation_period`` row (a direct join + ``distinct`` collapse of the
+      possibly-several qualifying periods).
+
+    ``cond_df`` has person_id/concept_id/``date_col``. Returns ``(person_id,
+    index_date=stable_start, stable_end, drug_subset, source_cohort=
+    'mdd_stable_treatment')``, one row per surviving person.
+    """
+    era_subsets = _antidepressant_era_subsets(drug_era_df, concept_map)
+    intervals = _stable_drug_intervals(era_subsets, min_days=min_days)
+    regular = _encounter_regular_intervals(
+        intervals, visit_df, max_gap_days=max_gap_days,
+    )
+    first = _first_stable_interval(regular).select(
+        "person_id",
+        F.col("interval_start").alias("index_date"),
+        F.col("interval_end").alias("stable_end"),
+        "drug_subset",
+    )
+
+    # (a) age 18-80 at stable start (year-difference convention).
+    aged = (
+        first.join(
+            person_df.select("person_id", "year_of_birth"),
+            on="person_id", how="inner",
+        )
+        .withColumn("_age", F.year(F.col("index_date")) - F.col("year_of_birth"))
+        .where((F.col("_age") >= age_min) & (F.col("_age") <= age_max))
+        .select("person_id", "index_date", "stable_end", "drug_subset")
+    )
+
+    # (d) the whole stable interval falls within one observation period.
+    op_ok = (
+        aged.join(observation_period, on="person_id", how="inner")
+        .where(
+            (F.col("index_date") >= F.col("observation_period_start_date"))
+            & (F.col("stable_end") <= F.col("observation_period_end_date"))
+        )
+        .select("person_id", "index_date", "stable_end", "drug_subset")
+        .distinct()
+    )
+
+    # (b) >= 1 qualifying MDD condition (existence).
+    mdd_persons = (
+        cond_df.join(F.broadcast(mdd_concepts), on="concept_id", how="inner")
+        .select("person_id")
+        .distinct()
+    )
+
+    # (c) >= min_history_events events strictly before the first AD drug_era.
+    first_ad = _first_drug_era_dates(drug_era_df, ad_concept_ids).select(
+        "person_id", F.col("index_date").alias("_first_ad_date"),
+    )
+    history_ok = (
+        cond_df.join(first_ad, on="person_id", how="inner")
+        .where(F.col(date_col) < F.col("_first_ad_date"))
+        .groupBy("person_id")
+        .agg(F.count(F.lit(1)).alias("_n_history"))
+        .where(F.col("_n_history") >= F.lit(min_history_events))
+        .select("person_id")
+    )
+
+    return (
+        op_ok.join(mdd_persons, on="person_id", how="inner")
+        .join(history_ok, on="person_id", how="inner")
+        .withColumn("source_cohort", F.lit("mdd_stable_treatment"))
+        .select(
+            "person_id", "index_date", "stable_end", "drug_subset",
+            "source_cohort",
+        )
+    )
+
+
+def stable_treatment_label(
+    index_df: DataFrame,
+    *,
+    drug_order: Sequence[str] = _HUGHES_ANTIDEPRESSANTS,
+) -> DataFrame:
+    """Explode ``drug_subset`` into a fixed-order length-N indicator vector.
+
+    ``index_df`` carries ``drug_subset`` (a ``array<string>`` of ingredient
+    names, e.g. from :func:`_mdd_stable_treatment_index`); ``drug_order`` is the
+    fixed drug column order (default ``_HUGHES_ANTIDEPRESSANTS``, length 10). The
+    label ``y`` is a fully-observed indicator: ``y[i] = 1.0`` iff
+    ``drug_order[i]`` is in the person's stable subset, else ``0.0`` — so a
+    single-drug interval yields exactly one positive and a held combination
+    (e.g. ``{fluoxetine, sertraline}``) yields multiple. Every head trains on
+    every patient (the mask is all-ones by construction, since the subset is a
+    fully-observed set over the fixed drug order), so no mask column is emitted.
+    Returns ``(person_id, y)`` with ``y`` an ``array<double>`` of length
+    ``len(drug_order)``.
+    """
+    y = F.array(*[
+        F.when(
+            F.array_contains(F.col("drug_subset"), F.lit(name)), F.lit(1.0)
+        ).otherwise(F.lit(0.0))
+        for name in drug_order
+    ])
+    return index_df.select("person_id", y.alias("y"))
+
+
+def apply_mdd_stable_treatment_cohort(
+    cond_df: DataFrame,
+    *,
+    spark: SparkSession,
+    cdr_dataset: str,
+    billing_project: str,
+    date_col: str,
+    min_days: int = 90,
+    max_gap_days: int = 395,
+    min_history_events: int = 2,
+    age_min: int = 18,
+    age_max: int = 80,
+) -> DataFrame:
+    """Hughes-faithful stable-treatment antidepressant cohort index table.
+
+    Reads the CDR (``concept``, ``concept_ancestor``, ``drug_era``,
+    ``visit_occurrence``, ``person``, ``observation_period``), builds the
+    10-drug Hughes antidepressant concept map (``_HUGHES_ANTIDEPRESSANTS``) + the
+    MDD inclusion-minus-exclusion condition set, and delegates the whole cohort
+    to the pure :func:`_mdd_stable_treatment_index`.
+
+    ``visit_occurrence`` is a NEW read for this cohort (the encounter-regularity
+    guard); ``person.year_of_birth`` drives the age gate. Unlike the topic-model
+    cohorts (which return a windowed events frame), this returns a PER-PERSON
+    index table ``(person_id, index_date=stable_start, stable_end, drug_subset,
+    source_cohort)`` — feed ``drug_subset`` to :func:`stable_treatment_label` for
+    the length-10 outcome vector.
+    """
+    def _read(table: str) -> DataFrame:
+        return (
+            spark.read.format("bigquery")
+            .option("table", f"{cdr_dataset}.{table}")
+            .option("parentProject", billing_project)
+            .load()
+        )
+
+    concept = _read("concept").select(
+        "concept_id", "concept_name", "vocabulary_id", "concept_class_id",
+    )
+    ca = _read("concept_ancestor").select(
+        "ancestor_concept_id", "descendant_concept_id",
+    )
+    drug_era = _read("drug_era").select(
+        "person_id", "drug_concept_id", "drug_era_start_date",
+        "drug_era_end_date",
+    )
+    visit = _read("visit_occurrence").select("person_id", "visit_start_date")
+    person = _read("person").select("person_id", "year_of_birth")
+    op = _read("observation_period").select(
+        "person_id",
+        "observation_period_start_date",
+        "observation_period_end_date",
+    )
+
+    concept_map = _antidepressant_concept_map(
+        concept, ca, ingredients=_HUGHES_ANTIDEPRESSANTS,
+    )
+    ad_concept_ids = concept_map.select("concept_id").distinct()
+    spec = _DISEASE_REGISTRY["mdd"]
+    mdd_concepts = _concept_set_from_ancestors(
+        ca,
+        inclusion_ancestors=spec["inclusion_ancestors"],
+        exclusion_ancestors=spec["exclusion_ancestors"],
+    )
+    return _mdd_stable_treatment_index(
+        cond_df, drug_era, visit, person, op, concept_map, mdd_concepts,
+        ad_concept_ids, date_col=date_col, min_days=min_days,
+        max_gap_days=max_gap_days, min_history_events=min_history_events,
+        age_min=age_min, age_max=age_max,
     )
