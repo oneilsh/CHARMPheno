@@ -560,6 +560,25 @@ def _build_parser() -> argparse.ArgumentParser:
               "PCEstimator.learningDecay. Ignored for --backend inmem."),
     )
     parser.add_argument(
+        "--head-lr-scale", type=float, default=1.0,
+        help=("VI backend: extra multiplier on the LOGISTIC-HEAD SGD step ONLY "
+              "(w_CK <- w_CK - rho*head_lr_scale*wy*grad); the topic/lambda step is "
+              "untouched. Maps to PCEstimator.headLrScale. Use > 1 to converge the "
+              "head in fewer iters when the topics are already stable but the head "
+              "is under-moved (|w_CK| still climbing at max_iter) — the targeted "
+              "alternative to lowering tau0, which speeds up everything. Pair a hot "
+              "head with --weight-y-warmup-iters so it does not spike early. Ignored "
+              "for --backend inmem."),
+    )
+    parser.add_argument(
+        "--weight-y-warmup-iters", type=int, default=0,
+        help=("VI backend: linearly ramp the effective weight_y from 0 to its full "
+              "value over this many global SVI steps (0 = no warmup). Maps to "
+              "PCEstimator.weightYWarmupIters. Softens the first supervised steps so "
+              "a large weight_y and/or --head-lr-scale > 1 does not spike the head "
+              "on early, high-variance minibatches. Ignored for --backend inmem."),
+    )
+    parser.add_argument(
         "--warm-start-unsup-iters", type=int, default=0,
         help=("VI backend: unsupervised-warm-start protocol (Hughes et al.). "
               "0 (default) = cold start (single-phase supervised fit, byte-for-byte "
@@ -947,6 +966,8 @@ def main(argv: list[str] | None = None) -> int:
                 "doc_batch_size": args.doc_batch_size,
                 "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
                 "kappa": args.kappa,
+                "head_lr_scale": args.head_lr_scale,
+                "weight_y_warmup_iters": args.weight_y_warmup_iters,
                 "warm_start_unsup_iters": args.warm_start_unsup_iters,
                 # stable-treatment membership knobs (all-history features; no
                 # lookback/window/stability bracket for this cohort).
@@ -1072,6 +1093,8 @@ def main(argv: list[str] | None = None) -> int:
             "doc_batch_size": args.doc_batch_size,
             "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
             "kappa": args.kappa,
+            "head_lr_scale": args.head_lr_scale,
+            "weight_y_warmup_iters": args.weight_y_warmup_iters,
             "warm_start_unsup_iters": args.warm_start_unsup_iters,
             "lookback_days": args.lookback_days, "window_days": args.window_days,
             "stability_days": args.stability_days, "grace_gap_days": args.grace_gap_days,
@@ -1281,6 +1304,8 @@ def _augmented_resave_pc(model, drug_order, V, vocab_map, args) -> None:
                 "subsampling_rate": float(args.subsampling_rate),
                 "tau0": float(args.tau0),
                 "kappa": float(args.kappa),
+                "head_lr_scale": float(args.head_lr_scale),
+                "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
                 "max_iter": int(args.max_iter),
                 "weight_y": float(args.weight_y),
                 "alpha": float(args.alpha),
@@ -1439,6 +1464,8 @@ def _run_vi_backend(
                 docConcentration=[float(args.alpha)],
                 subsamplingRate=args.subsampling_rate,
                 learningOffset=args.tau0, learningDecay=args.kappa,
+                headLrScale=args.head_lr_scale,
+                weightYWarmupIters=args.weight_y_warmup_iters,
                 maxIter=args.max_iter, seed=args.seed,
                 probabilityCol="probability",
                 saveDir=args.save_dir, saveInterval=args.save_interval,
@@ -1504,6 +1531,8 @@ def _run_vi_backend(
                     "subsampling_rate": float(args.subsampling_rate),
                     "tau0": float(args.tau0),
                     "kappa": float(args.kappa),
+                    "head_lr_scale": float(args.head_lr_scale),
+                    "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
                     "max_iter": int(args.max_iter),
                 },
                 # Distributed-fit convergence signal (the untrained-head tell).
@@ -1642,6 +1671,8 @@ def _run_vi_backend_fullyobserved(
                 docConcentration=[float(args.alpha)],
                 subsamplingRate=args.subsampling_rate,
                 learningOffset=args.tau0, learningDecay=args.kappa,
+                headLrScale=args.head_lr_scale,
+                weightYWarmupIters=args.weight_y_warmup_iters,
                 maxIter=args.max_iter, seed=args.seed,
                 probabilityCol="probability",
                 saveDir=args.save_dir, saveInterval=args.save_interval,
@@ -1703,6 +1734,8 @@ def _run_vi_backend_fullyobserved(
                     "subsampling_rate": float(args.subsampling_rate),
                     "tau0": float(args.tau0),
                     "kappa": float(args.kappa),
+                    "head_lr_scale": float(args.head_lr_scale),
+                    "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
                     "max_iter": int(args.max_iter),
                 },
                 "vi_convergence": {

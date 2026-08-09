@@ -778,6 +778,13 @@ def build_pc_args(
             "--subsampling-rate", str(effective.get("subsampling_rate", 0.05)),
             "--tau0", str(effective.get("tau0", 1024.0)),
             "--kappa", str(effective.get("kappa", 0.51)),
+            # Head-only learning-rate controls (RM <-> weight_y decoupling): scale
+            # the logistic-head SGD step alone (converge an under-moved head in
+            # fewer iters without touching the topic schedule) and optionally ramp
+            # weight_y in so a hot head doesn't spike early. VI-only; default 1.0/0
+            # => byte-for-byte the prior VI argv when unset.
+            "--head-lr-scale", str(effective.get("head_lr_scale", 1.0)),
+            "--weight-y-warmup-iters", str(effective.get("weight_y_warmup_iters", 0)),
             # Unsupervised-warm-start (Hughes et al.): 0 (default) = cold start;
             # N > 0 runs a phase-1 weight_y=0 topic warm-up before the supervised
             # phase 2 (fresh RM schedule). VI-only; absent from the inmem argv.

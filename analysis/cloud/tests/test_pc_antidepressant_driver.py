@@ -97,6 +97,19 @@ def test_min_label_count_defaults_to_20():
     assert ns2.min_label_count == 0
 
 
+def test_head_lr_knobs_default_off():
+    # head_lr_scale=1.0 / weight_y_warmup_iters=0 => the plain single-rate fit.
+    ns = drv._build_parser().parse_args(["--cdr", "p.d", "--billing", "b"])
+    assert ns.head_lr_scale == 1.0 and ns.weight_y_warmup_iters == 0
+
+
+def test_head_lr_knobs_parse():
+    ns = drv._build_parser().parse_args([
+        "--cdr", "p.d", "--billing", "b",
+        "--head-lr-scale", "3", "--weight-y-warmup-iters", "20"])
+    assert ns.head_lr_scale == 3.0 and ns.weight_y_warmup_iters == 20
+
+
 def test_save_dir_rejected_for_inmem_backend(monkeypatch, capsys):
     # --save-dir is VI-only: with the default inmem backend it must fail fast
     # (before any BQ import), since L-BFGS has no interim state to checkpoint.
