@@ -65,6 +65,15 @@ tau0: 64.0                  # Robbins-Monro learning offset (-> --tau0); smaller
                             # MLlib 1024 default so the head actually moves on this cohort
 kappa: 0.6                  # Robbins-Monro learning decay in (0.5, 1.0] (-> --kappa)
 
+# --- head learning rate (backend: vi only) -----------------------------------
+# Decouple the logistic head from the global RM step. head_lr_scale > 1 speeds up
+# ONLY the head SGD (topics/lambda untouched) so an under-moved head converges in
+# fewer iters; weight_y_warmup_iters ramps weight_y in so a hot head doesn't spike
+# early. Defaults (1.0 / 0) = the plain single-rate fit; set in a per-experiment
+# frontmatter (see 0072, which runs a 200-iter hot-head fit at head_lr_scale=3).
+# head_lr_scale: 1.0
+# weight_y_warmup_iters: 0
+
 # --- unsupervised warm-start (backend: vi only) ------------------------------
 # Hughes et al.'s protocol: initialize the supervised PC fit from the topics of
 # an unsupervised (weight_y=0) SVI phase. 0 (default) = cold start. N > 0 runs a

@@ -73,6 +73,30 @@ def test_build_pc_args_min_label_count_from_config(monkeypatch):
     assert d["--min-label-count"] == "0"       # 0 disables masking
 
 
+def test_build_pc_args_vi_threads_head_lr_knobs(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    d = dict(zip(*[iter(mod.build_pc_args(
+        _eff(backend="vi", head_lr_scale=3.0, weight_y_warmup_iters=20), "/out"))] * 2))
+    assert d["--head-lr-scale"] == "3.0"
+    assert d["--weight-y-warmup-iters"] == "20"
+
+
+def test_build_pc_args_vi_head_lr_defaults(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    d = dict(zip(*[iter(mod.build_pc_args(_eff(backend="vi"), "/out"))] * 2))
+    assert d["--head-lr-scale"] == "1.0"        # default: no head boost
+    assert d["--weight-y-warmup-iters"] == "0"
+
+
+def test_build_pc_args_inmem_omits_head_lr_knobs(monkeypatch):
+    # VI-only: inmem argv stays byte-for-byte, even if the config carries them.
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(
+        _eff(head_lr_scale=3.0, weight_y_warmup_iters=20), "/out")
+    assert "--head-lr-scale" not in args
+    assert "--weight-y-warmup-iters" not in args
+
+
 def test_build_pc_args_backend_defaults_inmem_no_svi_knobs(monkeypatch):
     mod = _run_exp(monkeypatch)
     # No backend key -> default inmem: --backend inmem passed, SVI knobs omitted

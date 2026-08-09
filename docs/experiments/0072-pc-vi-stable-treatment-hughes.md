@@ -29,27 +29,31 @@ K: 25                       # topics (SWEEP)
 weight_y: 100.0             # PC prediction-constraint weight (SWEEP)
 alpha: 1.1                  # theta Dirichlet concentration (-> PCEstimator docConcentration)
 tau: 1.1                    # baseline (in-mem two-stage) topic Dirichlet; VI eta = 1/K
-max_iter: 500               # SVI global iterations. Tuned up from 200 after the
-                            # 0071 trace showed |w_CK| still climbing (linearly,
-                            # not saturating) at iter 500 with converged=False. The
-                            # fully-observed all-ones mask gives every head ~10x the
-                            # per-iter gradient of 0071's one-cell-per-patient mask,
-                            # so 500 should get further here; save_interval below
-                            # makes it kill/resume/eval-able if it plateaus early.
+max_iter: 200               # SVI global iterations. Kept SHORT (~1.9h at ~34s/iter)
+                            # and paired with a HOT HEAD (head_lr_scale below) instead
+                            # of the slow 500-iter crawl: 0071 showed the topics/lambda
+                            # already stable while only |w_CK| under-moved, so the fix
+                            # is to accelerate the head, not run everything longer.
 test_frac: 0.25
 seed: 0
 save_interval: 25           # checkpoint the VIResult every 25 SVI iters into the run
-                            # dir (-> --save-interval), so a long fit is resumable and
-                            # peekable via --eval-only. ~20 checkpoints over 500 iters.
+                            # dir (-> --save-interval), so the fit is resumable and
+                            # peekable via --eval-only (~8 checkpoints over 200 iters).
 # --- distributed-SVI schedule (backend: vi only) ---
 subsampling_rate: 0.05      # mini-batch fraction per SVI iteration (-> --subsampling-rate)
-tau0: 32.0                  # Robbins-Monro learning offset (-> --tau0). Lowered from
-                            # 64 after 0071: at tau0=64 the tail rho flattened near
-                            # 0.022 and the head crawled up ~linearly without settling.
-                            # tau0=32 gives a larger sustained step so the head can
-                            # actually converge (raise back toward 64 if the ELBO/head
-                            # destabilizes; drop toward 16 if it is still under-moved).
+tau0: 32.0                  # Robbins-Monro learning offset (-> --tau0). The GLOBAL
+                            # (topic + lambda) schedule is left moderate; the head is
+                            # sped up on its own via head_lr_scale, so tau0 need not be
+                            # pushed to the unstable extreme.
 kappa: 0.6                  # Robbins-Monro learning decay in (0.5, 1.0] (-> --kappa)
+head_lr_scale: 3.0          # HEAD-ONLY step multiplier (-> --head-lr-scale). Scales the
+                            # logistic-head SGD ~3x so the head reaches (and exceeds) its
+                            # 500-iter scale-1 movement within 200 iters, WITHOUT touching
+                            # the topic/lambda step. Lower toward 1.5 if |w_CK| runs away
+                            # or the ELBO destabilizes; raise toward 5 if still under-moved.
+weight_y_warmup_iters: 20   # ramp weight_y 0->100 over the first 20 SVI steps
+                            # (-> --weight-y-warmup-iters), so the 3x-hot head does not
+                            # spike on the early, high-variance minibatches.
 # warm_start_unsup_iters: 50 # unsup warm-start (Hughes): 0=cold start; N>0 = phase-1
                             # weight_y=0 topic warm-up then fresh-RM supervised phase 2
                             # (-> --warm-start-unsup-iters). See "Warm-start" below.
@@ -158,14 +162,20 @@ two-site cohort, whose ≥90-day stability definition this cohort actually mirro
   fully-observed all-ones mask means every head sees every patient, so `weight_y`
   trades topic quality against 10-way predictive fit differently than the sparse
   index-drug mask of 0070/0071 — re-tune, don't inherit.
-- **SVI schedule (`subsampling_rate`, `tau0`, `kappa`)** — the head's ability to
-  leave zero depends on the Robbins-Monro step. **Starts at `tau0=32`** (lowered
-  from 0071's 64: there the tail ρ flattened near 0.022 and `|w_CK|` crawled up
-  ~linearly to ~2.3 without settling, `converged=False`). `max_iter=500` +
-  `save_interval=25` mean you can watch `vi_convergence.w_CK_absmax` across
-  checkpoints and stop when it plateaus. If it is still `≈0` or under-moved after a
-  run, drop `tau0` toward 16 and/or raise `weight_y`; if the ELBO/head destabilizes
-  (Σλ blows up, |w_CK| runs away), raise `tau0` back toward 64.
+- **Head learning rate (`head_lr_scale`, `weight_y_warmup_iters`)** — the primary
+  convergence lever here. 0071 showed the topics/Σλ already stable while only
+  `|w_CK|` under-moved (crawling ~linearly to ~2.3 at iter 500, `converged=False`),
+  so 0072 keeps `max_iter` short (200) and instead runs a **hot head**:
+  `head_lr_scale=3` scales ONLY the logistic-head SGD step (topic/λ schedule
+  untouched), with `weight_y_warmup_iters=20` softening the first, high-variance
+  steps. Watch `vi_convergence.w_CK_absmax` across the `save_interval=25`
+  checkpoints: if it plateaus by ~150 iters you're converged; if it's still
+  climbing, resume for more iters or raise `head_lr_scale` toward 5; if `|w_CK|`
+  runs away or the ELBO destabilizes (Σλ blows up), lower it toward 1.5.
+- **SVI schedule (`subsampling_rate`, `tau0`, `kappa`)** — the GLOBAL (topic + λ)
+  Robbins-Monro step, left moderate at `tau0=32`, `kappa=0.6`. Prefer moving the
+  head via `head_lr_scale` above; only reach for a lower `tau0` (≈16) if you want
+  the *topics* to move faster too (and accept the higher instability risk).
 - **Unsupervised warm-start (`warm_start_unsup_iters`)** — Hughes seed the
   supervised fit from unsupervised topics. `0` = cold start; `N > 0` runs a
   `weight_y=0` SVI phase-1 topic warm-up, then warm-starts the supervised phase-2
