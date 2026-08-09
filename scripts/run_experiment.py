@@ -753,6 +753,7 @@ def build_pc_args(
         "--person-mod", str(effective["person_mod"]),
         "--test-frac", str(effective.get("test_frac", 0.25)),
         "--seed", str(effective.get("seed", 0)),
+        "--min-label-count", str(effective.get("min_label_count", 20)),
         "--out", str(Path(out_dir) / "pc_results.json"),
     ]
     # Cohort selector: mdd_antidepressant (the driver default) stays IMPLICIT so

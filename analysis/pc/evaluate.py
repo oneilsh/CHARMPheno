@@ -62,14 +62,22 @@ def _as_y_DC(y: np.ndarray) -> np.ndarray:
 
 
 def _score_label(
-    y_true: np.ndarray, proba: np.ndarray
+    y_true: np.ndarray, proba: np.ndarray, min_count: int = 0
 ) -> dict[str, Any]:
-    """ROC AUC + AP for one label column, or a skip record if AUC is undefined.
+    """ROC AUC + AP for one label column, or a skip record if it is unscoreable.
 
     AUC (and a meaningful AP) require both classes present in ``y_true``. A
     constant heldout column (all-0 => no positives, all-1 => no negatives) is
     reported as ``{"skipped": <reason>, "auc": None, "ap": None}`` so the caller
     can drop it from the macro-average instead of raising.
+
+    ``min_count`` (default 0 = off) additionally masks *small* heldout columns:
+    when either class has fewer than ``min_count`` test cells, the AUC is too
+    noisy to trust (and, on All-of-Us, a count < 20 is not disclosable), so the
+    column is reported skipped and dropped from the macro — exactly as a
+    degenerate column is. The ``n_pos``/``n_neg`` are still recorded in the
+    result (callers suppress them at display time via ``format_results_table``'s
+    ``min_label_count`` handling); scoring simply refuses to compute an AUC.
     """
     y_true = np.asarray(y_true, dtype=np.float64).ravel()
     proba = np.asarray(proba, dtype=np.float64).ravel()
@@ -83,6 +91,17 @@ def _score_label(
             "n_pos": n_pos,
             "n_neg": n_neg,
             "skipped": f"degenerate test column ({which}); AUC undefined",
+        }
+    if min_count > 0 and (n_pos < min_count or n_neg < min_count):
+        return {
+            "auc": None,
+            "ap": None,
+            "n_pos": n_pos,
+            "n_neg": n_neg,
+            "skipped": (
+                f"small test column (min class < {min_count}); "
+                "AUC unreliable / count not disclosable — masked"
+            ),
         }
     return {
         "auc": float(roc_auc_score(y_true, proba)),
@@ -172,18 +191,23 @@ def _bundle_masked(
     y_te_DC: np.ndarray,
     mask_te_DC: np.ndarray,
     C: int,
+    min_count: int = 0,
 ) -> dict[str, Any]:
     """Score each label column ONLY over its observed test cells, then macro it.
 
-    Reuses :func:`_score_label` (degenerate-column skip included) and
-    :func:`_macro`. Column ``c`` is scored over the rows where ``mask_te_DC[:, c]``
-    is True; a column with no observed test cell, or with a single class among
-    them, is reported as skipped and dropped from the macro-average.
+    Reuses :func:`_score_label` (degenerate- and, when ``min_count > 0``,
+    small-column skips included) and :func:`_macro`. Column ``c`` is scored over
+    the rows where ``mask_te_DC[:, c]`` is True; a column with no observed test
+    cell, a single class among them, or (for ``min_count > 0``) fewer than
+    ``min_count`` cells of either class is reported skipped and dropped from the
+    macro-average.
     """
     per_label: dict[int, dict[str, Any]] = {}
     for c in range(C):
         rows = np.where(mask_te_DC[:, c].astype(bool))[0]
-        per_label[c] = _score_label(y_te_DC[rows, c], proba_DC[rows, c])
+        per_label[c] = _score_label(
+            y_te_DC[rows, c], proba_DC[rows, c], min_count=min_count
+        )
     return {"per_label": per_label, "macro": _macro(per_label)}
 
 
@@ -261,6 +285,7 @@ def evaluate_pc_multitask(
     max_iter: int = 500,
     doc_batch_size: int = 2048,
     seed: int = 0,
+    min_label_count: int = 0,
     **model_kwargs: Any,
 ) -> dict[str, Any]:
     """Joint multi-task PC vs. the Hughes baselines under per-cell missing labels.
@@ -364,9 +389,9 @@ def evaluate_pc_multitask(
     n_obs_test = [int(mask_te_DC[:, c].sum()) for c in range(C)]
 
     return {
-        "PC": _bundle_masked(pc_proba, y_te_DC, mask_te_DC, C),
-        "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C),
-        "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C),
+        "PC": _bundle_masked(pc_proba, y_te_DC, mask_te_DC, C, min_label_count),
+        "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C, min_label_count),
+        "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C, min_label_count),
         "meta": {
             "C": C,
             "K": int(K),
@@ -374,6 +399,7 @@ def evaluate_pc_multitask(
             "n_train": int(X_tr.shape[0]),
             "n_test": int(X_te.shape[0]),
             "n_labeled": int(sum(n_obs_train)),
+            "min_label_count": int(min_label_count),
             "n_obs_train": n_obs_train,
             "n_obs_test": n_obs_test,
             # Fit-health of the shared PC (the direct tell for an untrained head;
@@ -525,6 +551,13 @@ def format_results_table(results: dict[str, Any]) -> str:
     names = meta["model_names"]
     C = meta["C"]
     order = ["PC", "two_stage", "lr_codes"]
+    # Below this test-cell count a label was masked from scoring; suppress its
+    # raw n_pos/n_neg in the printed table too (an All-of-Us count < 20 is not
+    # disclosable). 0 = no small-count masking (the pure-library default).
+    thr = int(meta.get("min_label_count", 0) or 0)
+
+    def _count(n: int) -> str:
+        return f"<{thr}" if (thr > 0 and n < thr) else str(n)
 
     lines: list[str] = []
     lines.append(
@@ -548,7 +581,7 @@ def format_results_table(results: dict[str, Any]) -> str:
             else:
                 auc_s = f"{d['auc']:.4f}"
                 ap_s = f"{d['ap']:.4f}"
-            npn = f"{d['n_pos']}/{d['n_neg']}"
+            npn = f"{_count(d['n_pos'])}/{_count(d['n_neg'])}"
             lines.append(
                 f"  {disp:<22} {c:>6} {auc_s:>8} {ap_s:>8}  {npn:>18}"
             )
@@ -562,7 +595,12 @@ def format_results_table(results: dict[str, Any]) -> str:
         lines.append("  " + "-" * (len(header) - 2))
 
     if skipped:
-        lines.append("  skipped (degenerate heldout label columns):")
+        header_txt = (
+            "  skipped (degenerate or small heldout label columns):"
+            if thr > 0 else
+            "  skipped (degenerate heldout label columns):"
+        )
+        lines.append(header_txt)
         for s in skipped:
             lines.append(f"    - {s}")
 
@@ -570,7 +608,8 @@ def format_results_table(results: dict[str, Any]) -> str:
         lines.append("  observed cells per label (train / test):")
         for c in range(C):
             lines.append(
-                f"    - label {c}: {meta['n_obs_train'][c]} / {meta['n_obs_test'][c]}"
+                f"    - label {c}: {_count(meta['n_obs_train'][c])} / "
+                f"{_count(meta['n_obs_test'][c])}"
             )
 
     return "\n".join(lines)

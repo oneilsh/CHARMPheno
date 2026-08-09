@@ -660,6 +660,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, default=0, help="RNG seed (split + PC init)")
     parser.add_argument(
+        "--min-label-count", type=int, default=20,
+        help=("mask any drug label whose HELDOUT test column has fewer than this "
+              "many cells of either class: its per-drug AUC/AP is dropped from "
+              "the macro-average and its counts are suppressed in the printed "
+              "table (an All-of-Us count < 20 is not disclosable and its AUC is "
+              "too noisy to trust). Default 20 (the AoU small-cell floor); set 0 "
+              "to disable and score every non-degenerate label."),
+    )
+    parser.add_argument(
         "--cache-uri", type=str, default=None,
         help=("optional cache root reserved for the BQ-load + BOW prep step "
               "(not yet wired; accepted so the CLI surface is stable)"),
@@ -948,6 +957,7 @@ def main(argv: list[str] | None = None) -> int:
                 "min_patient_count": args.min_patient_count,
                 "person_mod": args.person_mod,
                 "test_frac": args.test_frac, "seed": args.seed,
+                "min_label_count": args.min_label_count,
             },
         }
         with open(args.out, "w") as f:
@@ -1145,6 +1155,7 @@ def _run_inmem_backend(
             K=args.K, weight_y=args.weight_y, alpha=args.alpha, tau=args.tau,
             pi_iters=args.pi_iters, max_iter=args.max_iter,
             doc_batch_size=args.doc_batch_size, seed=args.seed,
+            min_label_count=args.min_label_count,
         )
     return results, drug_order, int(tr.sum()), int(te.sum()), len(person_order)
 
@@ -1192,6 +1203,7 @@ def _run_inmem_backend_fullyobserved(
             K=args.K, weight_y=args.weight_y, alpha=args.alpha, tau=args.tau,
             pi_iters=args.pi_iters, max_iter=args.max_iter,
             doc_batch_size=args.doc_batch_size, seed=args.seed,
+            min_label_count=args.min_label_count,
         )
     return results, drug_order, int(tr.sum()), int(te.sum()), len(person_order)
 
@@ -1474,9 +1486,9 @@ def _run_vi_backend(
         n_obs_train = [int(mask_tr_DC[:, c].sum()) for c in range(C)]
         n_obs_test = [int(mask_te_DC[:, c].sum()) for c in range(C)]
         results = {
-            "PC": _bundle_masked(proba_DC, y_te_DC, mask_te_DC, C),
-            "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C),
-            "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C),
+            "PC": _bundle_masked(proba_DC, y_te_DC, mask_te_DC, C, args.min_label_count),
+            "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C, args.min_label_count),
+            "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C, args.min_label_count),
             "meta": {
                 "C": C,
                 "K": int(args.K),
@@ -1486,6 +1498,7 @@ def _run_vi_backend(
                 "n_labeled": int(sum(n_obs_train)),
                 "n_obs_train": n_obs_train,
                 "n_obs_test": n_obs_test,
+                "min_label_count": int(args.min_label_count),
                 "backend": "vi",
                 "svi": {
                     "subsampling_rate": float(args.subsampling_rate),
@@ -1672,9 +1685,9 @@ def _run_vi_backend_fullyobserved(
         n_obs_train = [int(mask_tr_DC[:, c].sum()) for c in range(C)]
         n_obs_test = [int(mask_te_DC[:, c].sum()) for c in range(C)]
         results = {
-            "PC": _bundle_masked(proba_DC, y_te_DC, mask_te_DC, C),
-            "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C),
-            "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C),
+            "PC": _bundle_masked(proba_DC, y_te_DC, mask_te_DC, C, args.min_label_count),
+            "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C, args.min_label_count),
+            "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C, args.min_label_count),
             "meta": {
                 "C": C,
                 "K": int(args.K),
@@ -1684,6 +1697,7 @@ def _run_vi_backend_fullyobserved(
                 "n_labeled": int(n_train + n_test),
                 "n_obs_train": n_obs_train,
                 "n_obs_test": n_obs_test,
+                "min_label_count": int(args.min_label_count),
                 "backend": "vi",
                 "svi": {
                     "subsampling_rate": float(args.subsampling_rate),

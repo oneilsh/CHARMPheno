@@ -24,6 +24,8 @@ import pytest
 import scipy.sparse as sp
 
 from analysis.pc.evaluate import (
+    _bundle_masked,
+    _score_label,
     evaluate_pc_multitask,
     evaluate_pc_vs_baselines,
     format_results_table,
@@ -290,3 +292,107 @@ def test_multitask_general_mask_degenerate_column_skipped(capsys):
     with capsys.disabled():
         print()
         print(table)
+
+
+# --- small-count label masking (min_label_count / --min-label-count) ----------
+
+def test_score_label_default_scores_small_columns():
+    """min_count=0 (library default) scores a small-but-two-class column."""
+    y = np.array([1, 0, 1, 0, 1])           # 3 pos / 2 neg — tiny but valid
+    p = np.array([0.9, 0.1, 0.8, 0.2, 0.7])
+    d = _score_label(y, p)                   # default min_count=0
+    assert d["skipped"] is None
+    assert d["auc"] is not None
+    assert d["n_pos"] == 3 and d["n_neg"] == 2
+
+
+def test_score_label_masks_below_min_count():
+    """A column with a class below min_count is skipped (AUC not computed)."""
+    y = np.concatenate([np.ones(5), np.zeros(50)])      # 5 pos / 50 neg
+    p = np.linspace(0, 1, y.size)
+    d = _score_label(y, p, min_count=20)
+    assert d["skipped"] is not None and "small test column" in d["skipped"]
+    assert d["auc"] is None and d["ap"] is None
+    # counts are still recorded (the formatter suppresses them for display)
+    assert d["n_pos"] == 5 and d["n_neg"] == 50
+
+
+def test_score_label_keeps_both_sides_above_min_count():
+    y = np.concatenate([np.ones(25), np.zeros(30)])     # 25 / 30 — both >= 20
+    p = np.linspace(0, 1, y.size)
+    d = _score_label(y, p, min_count=20)
+    assert d["skipped"] is None and d["auc"] is not None
+
+
+def test_score_label_degenerate_reason_distinct_from_small():
+    """An all-one-class column is 'degenerate', not 'small' — even under min_count."""
+    y = np.ones(3)
+    p = np.array([0.2, 0.5, 0.9])
+    d = _score_label(y, p, min_count=20)
+    assert d["skipped"] is not None and "degenerate" in d["skipped"]
+
+
+def test_bundle_masked_threads_min_count_and_drops_from_macro():
+    """_bundle_masked masks a small column and excludes it from the macro."""
+    D, C = 80, 2
+    rng = np.random.default_rng(0)
+    proba = rng.random((D, C))
+    y = np.zeros((D, C))
+    mask = np.ones((D, C))
+    # label 0: healthy (40/40); label 1: only 5 positives (small)
+    y[:40, 0] = 1.0
+    y[:5, 1] = 1.0
+    bundle = _bundle_masked(proba, y, mask, C, min_count=20)
+    assert bundle["per_label"][0]["skipped"] is None
+    assert bundle["per_label"][1]["skipped"] is not None
+    assert bundle["macro"]["n_labels_scored"] == 1
+    assert bundle["macro"]["n_labels_skipped"] == 1
+
+
+def test_format_results_table_suppresses_small_counts():
+    """The printed table shows '<20' for masked-column counts, not the raw N."""
+    per_label = {
+        0: {"auc": 0.66, "ap": 0.6, "n_pos": 404, "n_neg": 457, "skipped": None},
+        1: {"auc": None, "ap": None, "n_pos": 5, "n_neg": 12,
+            "skipped": "small test column (min class < 20); ... masked"},
+    }
+
+    def _macro_of(pl):
+        aucs = [d["auc"] for d in pl.values() if d["skipped"] is None]
+        return {"auc": float(np.mean(aucs)), "ap": 0.6,
+                "n_labels_scored": len(aucs),
+                "n_labels_skipped": len(pl) - len(aucs)}
+
+    block = {"per_label": per_label, "macro": _macro_of(per_label)}
+    results = {
+        "PC": block, "two_stage": block, "lr_codes": block,
+        "meta": {
+            "C": 2, "K": 25, "weight_y": 100.0, "n_train": 100, "n_test": 50,
+            "n_labeled": 100, "min_label_count": 20,
+            "model_names": {"PC": "PC", "two_stage": "TS", "lr_codes": "LR"},
+        },
+    }
+    table = format_results_table(results)
+    # the healthy label's real counts appear; the small label's are suppressed
+    assert "404/457" in table
+    assert "5/12" not in table
+    assert "<20/<20" in table
+    assert "small" in table                  # skipped footer mentions the reason
+
+
+def test_format_results_table_no_suppression_when_threshold_zero():
+    """min_label_count=0 (or absent) prints raw counts (library default)."""
+    per_label = {
+        0: {"auc": 0.6, "ap": 0.5, "n_pos": 3, "n_neg": 4, "skipped": None},
+    }
+    block = {"per_label": per_label,
+             "macro": {"auc": 0.6, "ap": 0.5,
+                       "n_labels_scored": 1, "n_labels_skipped": 0}}
+    results = {
+        "PC": block, "two_stage": block, "lr_codes": block,
+        "meta": {"C": 1, "K": 4, "weight_y": 10.0, "n_train": 10, "n_test": 7,
+                 "n_labeled": 10,  # no min_label_count key -> threshold 0
+                 "model_names": {"PC": "PC", "two_stage": "TS", "lr_codes": "LR"}},
+    }
+    table = format_results_table(results)
+    assert "3/4" in table and "<" not in table
