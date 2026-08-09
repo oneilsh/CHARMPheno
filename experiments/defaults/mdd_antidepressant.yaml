@@ -35,6 +35,11 @@ doc_batch_size: 2048        # doc-minibatch size for the PC full-batch gradient
                             # assembly; bounds driver memory at real-corpus scale
 test_frac: 0.25
 seed: 0
+min_label_count: 20         # mask any drug label with < this many heldout cells of
+                            # either class: drop its per-drug AUC/AP from the macro
+                            # and suppress its counts in the printed table (the AoU
+                            # small-cell floor is 20; such an AUC is also too noisy
+                            # to trust). Set 0 to score every non-degenerate label.
 
 # --- backend selection -------------------------------------------------------
 # Default fit backend is the in-memory L-BFGS PC (byte-for-byte the prior

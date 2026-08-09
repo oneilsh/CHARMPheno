@@ -88,6 +88,15 @@ def test_persistence_flag_defaults():
     assert ns.resume_from == "" and ns.eval_only is False
 
 
+def test_min_label_count_defaults_to_20():
+    # The AoU small-cell floor: sub-20-count drug labels are masked by default.
+    ns = drv._build_parser().parse_args(["--cdr", "p.d", "--billing", "b"])
+    assert ns.min_label_count == 20
+    ns2 = drv._build_parser().parse_args(
+        ["--cdr", "p.d", "--billing", "b", "--min-label-count", "0"])
+    assert ns2.min_label_count == 0
+
+
 def test_save_dir_rejected_for_inmem_backend(monkeypatch, capsys):
     # --save-dir is VI-only: with the default inmem backend it must fail fast
     # (before any BQ import), since L-BFGS has no interim state to checkpoint.

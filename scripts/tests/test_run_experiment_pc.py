@@ -57,6 +57,22 @@ def test_build_pc_args_key_to_flag_mapping(monkeypatch):
     assert "--resume-from" not in args
 
 
+def test_build_pc_args_threads_min_label_count_default_20(monkeypatch):
+    # --min-label-count defaults to 20 (the AoU small-cell floor) for BOTH
+    # backends/cohorts, so the next run masks sub-20-count drug labels.
+    mod = _run_exp(monkeypatch)
+    d = dict(zip(*[iter(mod.build_pc_args(_eff(), "/out"))] * 2))
+    assert d["--min-label-count"] == "20"
+    d_vi = dict(zip(*[iter(mod.build_pc_args(_eff(backend="vi"), "/out"))] * 2))
+    assert d_vi["--min-label-count"] == "20"
+
+
+def test_build_pc_args_min_label_count_from_config(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    d = dict(zip(*[iter(mod.build_pc_args(_eff(min_label_count=0), "/out"))] * 2))
+    assert d["--min-label-count"] == "0"       # 0 disables masking
+
+
 def test_build_pc_args_backend_defaults_inmem_no_svi_knobs(monkeypatch):
     mod = _run_exp(monkeypatch)
     # No backend key -> default inmem: --backend inmem passed, SVI knobs omitted

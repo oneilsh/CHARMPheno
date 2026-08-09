@@ -52,6 +52,11 @@ max_iter: 200               # SVI global iterations (~10 passes at subsampling 0
 doc_batch_size: 2048        # inmem-only; inert for backend: vi
 test_frac: 0.25
 seed: 0
+min_label_count: 20         # mask any drug label with < this many heldout cells of
+                            # either class: drop its per-drug AUC/AP from the macro
+                            # and suppress its counts in the printed table (AoU
+                            # small-cell floor; such an AUC is also too noisy to
+                            # trust). Set 0 to score every non-degenerate label.
 
 # --- distributed-SVI schedule (backend: vi only) -----------------------------
 # Read by build_pc_args ONLY when backend==vi; inert here otherwise.
