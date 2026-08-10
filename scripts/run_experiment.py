@@ -795,6 +795,11 @@ def build_pc_args(
             # to PCEstimator.topicTrust). Default 0.1; lower to keep the supervised
             # topics near the unsupervised warm-start, 0 to freeze them (head-only).
             "--topic-trust", str(effective.get("topic_trust", 0.1)),
+            # Differentiable-CAVI unroll depth for the supervised theta. Must be
+            # deep enough to MATCH the scoring CAVI (converged) or the co-fit head
+            # trains on a different theta than it is scored on. 20 for small docs;
+            # ~50 for large (avg ~300+ token) docs.
+            "--grad-cavi-iters", str(effective.get("grad_cavi_iters", 20)),
             # Unsupervised-warm-start (Hughes et al.): 0 (default) = cold start;
             # N > 0 runs a phase-1 weight_y=0 topic warm-up before the supervised
             # phase 2 (fresh RM schedule). VI-only; absent from the inmem argv.

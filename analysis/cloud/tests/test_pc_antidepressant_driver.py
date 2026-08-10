@@ -131,6 +131,14 @@ def test_topic_trust_default_and_parse():
     assert ns2.topic_trust == 0.02
 
 
+def test_grad_cavi_iters_default_and_parse():
+    ns = drv._build_parser().parse_args(["--cdr", "p.d", "--billing", "b"])
+    assert ns.grad_cavi_iters == 20              # estimator default (small-doc safe)
+    ns2 = drv._build_parser().parse_args(
+        ["--cdr", "p.d", "--billing", "b", "--grad-cavi-iters", "50"])
+    assert ns2.grad_cavi_iters == 50
+
+
 def test_save_dir_rejected_for_inmem_backend(monkeypatch, capsys):
     # --save-dir is VI-only: with the default inmem backend it must fail fast
     # (before any BQ import), since L-BFGS has no interim state to checkpoint.

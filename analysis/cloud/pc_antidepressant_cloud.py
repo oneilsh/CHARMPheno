@@ -646,6 +646,19 @@ def _build_parser() -> argparse.ArgumentParser:
               "on early, high-variance minibatches. Ignored for --backend inmem."),
     )
     parser.add_argument(
+        "--grad-cavi-iters", type=int, default=20,
+        help=("VI backend: fixed CAVI unroll depth for the DIFFERENTIABLE per-doc "
+              "theta the supervised gradient (topic correction + head) is computed "
+              "on (maps to PCEstimator.gradCaviIters). Must be deep enough that this "
+              "training theta MATCHES the scoring theta (infer_local runs CAVI to "
+              "convergence, cavi_max_iter=100/tol=1e-3): otherwise the co-fit head "
+              "trains on under-converged theta but is scored on converged theta (a "
+              "train/test representation mismatch that pins the head below a batch "
+              "LR on the same topics). 20 suffices for small docs; large docs (avg "
+              "~300+ tokens) need ~50 (CAVI converges by ~50 iters). Deeper = a "
+              "bigger autograd tape / slower supervised step. Ignored for inmem."),
+    )
+    parser.add_argument(
         "--topic-trust", type=float, default=0.1,
         help=("VI backend: per-iteration trust-region on the supervised TOPIC "
               "correction — each lambda cell moves by at most this fraction of its "
@@ -1081,6 +1094,7 @@ def main(argv: list[str] | None = None) -> int:
                 "head_lr_scale": args.head_lr_scale,
                 "weight_y_warmup_iters": args.weight_y_warmup_iters,
                 "topic_trust": args.topic_trust,
+                "grad_cavi_iters": args.grad_cavi_iters,
                 "warm_start_unsup_iters": args.warm_start_unsup_iters,
                 # stable-treatment membership knobs (all-history features; no
                 # lookback/window/stability bracket for this cohort).
@@ -1597,7 +1611,7 @@ def _run_vi_backend(
                 learningOffset=args.tau0, learningDecay=args.kappa,
                 headLrScale=args.head_lr_scale,
                 weightYWarmupIters=args.weight_y_warmup_iters,
-                topicTrust=args.topic_trust,
+                topicTrust=args.topic_trust, gradCaviIters=args.grad_cavi_iters,
                 maxIter=args.max_iter, seed=args.seed,
                 probabilityCol="probability",
                 saveDir=args.save_dir, saveInterval=args.save_interval,
@@ -1691,6 +1705,7 @@ def _run_vi_backend(
                     "head_lr_scale": float(args.head_lr_scale),
                     "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
                     "topic_trust": float(args.topic_trust),
+                    "grad_cavi_iters": int(args.grad_cavi_iters),
                     "max_iter": int(args.max_iter),
                 },
                 # Distributed-fit convergence signal (the untrained-head tell).
@@ -1847,7 +1862,7 @@ def _run_vi_backend_fullyobserved(
                 learningOffset=args.tau0, learningDecay=args.kappa,
                 headLrScale=args.head_lr_scale,
                 weightYWarmupIters=args.weight_y_warmup_iters,
-                topicTrust=args.topic_trust,
+                topicTrust=args.topic_trust, gradCaviIters=args.grad_cavi_iters,
                 maxIter=args.max_iter, seed=args.seed,
                 probabilityCol="probability",
                 saveDir=args.save_dir, saveInterval=args.save_interval,
@@ -1937,6 +1952,7 @@ def _run_vi_backend_fullyobserved(
                     "head_lr_scale": float(args.head_lr_scale),
                     "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
                     "topic_trust": float(args.topic_trust),
+                    "grad_cavi_iters": int(args.grad_cavi_iters),
                     "max_iter": int(args.max_iter),
                 },
                 "vi_convergence": {
