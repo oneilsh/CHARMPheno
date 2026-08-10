@@ -60,7 +60,12 @@ min_label_count: 20         # mask any drug label with < this many heldout cells
 
 # --- distributed-SVI schedule (backend: vi only) -----------------------------
 # Read by build_pc_args ONLY when backend==vi; inert here otherwise.
-subsampling_rate: 0.05      # mini-batch fraction per SVI iteration (-> --subsampling-rate)
+subsampling_rate: 0.2       # mini-batch fraction per SVI iteration (-> --subsampling-rate).
+                            # 0.2 (not 0.05) on this small ~34.5k-doc corpus: RDD.sample is
+                            # partition-wise, so a 0.05 batch leaves ~1.7 docs in each of the
+                            # ~1000 corpus partitions -> tiny tasks, idle executors, per-iter
+                            # barrier dominates. 0.2 gives ~7 docs/partition: better executor
+                            # utilization + less gradient noise, at more work per iter.
 tau0: 64.0                  # Robbins-Monro learning offset (-> --tau0); smaller than the
                             # MLlib 1024 default so the head actually moves on this cohort
 kappa: 0.6                  # Robbins-Monro learning decay in (0.5, 1.0] (-> --kappa)

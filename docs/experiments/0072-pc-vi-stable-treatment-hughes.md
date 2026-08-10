@@ -50,7 +50,10 @@ save_interval: 25           # checkpoint the VIResult every 25 SVI iters into th
                             # dir (-> --save-interval), so the fit is resumable and
                             # peekable via --eval-only (~8 checkpoints over 200 iters).
 # --- distributed-SVI schedule (backend: vi only) ---
-subsampling_rate: 0.05      # mini-batch fraction per SVI iteration (-> --subsampling-rate)
+subsampling_rate: 0.2       # mini-batch fraction per SVI iteration (-> --subsampling-rate).
+                            # 0.2 not 0.05: RDD.sample is partition-wise, so a 0.05 batch on
+                            # this ~34.5k-doc / ~1000-partition corpus is ~1.7 docs/partition
+                            # -> tiny tasks + idle executors. 0.2 fills them (~7 docs/part).
 tau0: 32.0                  # Robbins-Monro learning offset (-> --tau0). The GLOBAL
                             # (topic + lambda) schedule is left moderate; the head is
                             # sped up on its own via head_lr_scale, so tau0 need not be
