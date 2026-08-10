@@ -754,8 +754,14 @@ def build_pc_args(
         "--test-frac", str(effective.get("test_frac", 0.25)),
         "--seed", str(effective.get("seed", 0)),
         "--min-label-count", str(effective.get("min_label_count", 20)),
+        # Baseline controls (both backends): --baseline-max-iter caps the two-stage
+        # unsupervised topic fit (<=0 => use --max-iter); --skip-two-stage (a
+        # store_true flag, emitted only when set) drops the two-stage baseline.
+        "--baseline-max-iter", str(effective.get("baseline_max_iter", -1)),
         "--out", str(Path(out_dir) / "pc_results.json"),
     ]
+    if effective.get("skip_two_stage"):
+        args.append("--skip-two-stage")
     # Cohort selector: mdd_antidepressant (the driver default) stays IMPLICIT so
     # its argv is byte-for-byte unchanged; mdd_stable_treatment emits --cohort +
     # its stable-treatment knobs (which the antidepressant path never sees).

@@ -396,3 +396,50 @@ def test_format_results_table_no_suppression_when_threshold_zero():
     }
     table = format_results_table(results)
     assert "3/4" in table and "<" not in table
+
+
+# --- two-stage skip / baseline_max_iter (--skip-two-stage / --baseline-max-iter) --
+
+def test_multitask_baseline_probas_skip_returns_none_two_stage():
+    from analysis.pc.evaluate import multitask_baseline_probas
+    rng = np.random.default_rng(0)
+    X_tr = rng.integers(0, 3, size=(30, 6)).astype(float)
+    X_te = rng.integers(0, 3, size=(12, 6)).astype(float)
+    y_tr = np.zeros((30, 2)); y_tr[:15, 0] = 1.0; y_tr[::2, 1] = 1.0
+    mask = np.ones((30, 2))
+    shared = dict(K=3, C=2, alpha=1.1, tau=1.1, pi_iters=10, max_iter=20,
+                  doc_batch_size=64, seed=0)
+    ts, lrc = multitask_baseline_probas(
+        X_tr, y_tr, mask, X_te, 2, shared, skip_two_stage=True)
+    assert ts is None                      # two-stage skipped -> no probas
+    assert lrc.shape == (12, 2)            # LR-on-codes still computed
+
+
+def test_evaluate_pc_multitask_skip_two_stage_omits_key(capsys):
+    Xtr, Ytr = _mt_corpus(0, D=48, C=2)
+    Xte, Yte = _mt_corpus(1, D=24, C=2)
+    mtr = np.ones((48, 2)); mte = np.ones((24, 2))
+    res = evaluate_pc_multitask(
+        Xtr, Ytr, mtr, Xte, Yte, mte,
+        K=2, weight_y=5.0, pi_iters=15, max_iter=30, seed=0,
+        skip_two_stage=True,
+    )
+    assert "two_stage" not in res                     # dropped entirely
+    assert "PC" in res and "lr_codes" in res
+    assert res["meta"]["two_stage_skipped"] is True
+    table = format_results_table(res)                 # must not KeyError
+    assert "two-stage baseline skipped" in table
+    assert "two-stage (unsup+LR)" not in table        # no rows for it
+
+
+def test_evaluate_pc_multitask_baseline_max_iter_runs(capsys):
+    # A tiny baseline_max_iter still produces a two_stage bundle (just cheaper).
+    Xtr, Ytr = _mt_corpus(0, D=48, C=2)
+    Xte, Yte = _mt_corpus(1, D=24, C=2)
+    mtr = np.ones((48, 2)); mte = np.ones((24, 2))
+    res = evaluate_pc_multitask(
+        Xtr, Ytr, mtr, Xte, Yte, mte,
+        K=2, weight_y=5.0, pi_iters=15, max_iter=30, seed=0,
+        baseline_max_iter=5,
+    )
+    assert "two_stage" in res and res["meta"]["two_stage_skipped"] is False

@@ -73,6 +73,23 @@ def test_build_pc_args_min_label_count_from_config(monkeypatch):
     assert d["--min-label-count"] == "0"       # 0 disables masking
 
 
+def test_build_pc_args_baseline_max_iter_default_and_no_skip(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(_eff(), "/out")
+    d = dict(zip(*[iter(args)] * 2))
+    assert d["--baseline-max-iter"] == "-1"       # default: reuse --max-iter
+    assert "--skip-two-stage" not in args          # store_true off by default
+
+
+def test_build_pc_args_skip_two_stage_and_baseline_cap(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    args = mod.build_pc_args(
+        _eff(skip_two_stage=True, baseline_max_iter=100), "/out")
+    assert "--skip-two-stage" in args
+    d = dict(zip(*[iter(a for a in args if a != "--skip-two-stage")] * 2))
+    assert d["--baseline-max-iter"] == "100"
+
+
 def test_build_pc_args_vi_threads_head_lr_knobs(monkeypatch):
     mod = _run_exp(monkeypatch)
     d = dict(zip(*[iter(mod.build_pc_args(

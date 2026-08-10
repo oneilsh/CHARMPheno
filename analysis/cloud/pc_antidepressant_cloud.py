@@ -489,6 +489,73 @@ def collect_labeled_bow(df, vocab_size: int, C: int, prob_col: str | None = None
     return X, y_DC, mask_DC, proba_DC, person_order
 
 
+def _collect_topics_labels(df, C, topic_col="topicDistribution"):
+    """Collect ONLY the K-dim per-doc topic vector + labels to numpy (no dense BOW).
+
+    The lightweight collector for the distributed two-stage baseline: it pulls the
+    ``topicDistribution`` (theta, K-dim) plus the ``y``/``label_mask`` arrays and
+    NEVER the dense ``(D, V)`` counts, so it stays on the driver's memory budget at
+    full-cohort scale. Returns ``(Pi (D, K), y_DC (D, C), mask_DC (D, C),
+    person_order)`` row-aligned to the collected order. Empty df yields
+    correctly-shaped zero arrays.
+    """
+    rows = df.select("person_id", topic_col, "y", "label_mask").collect()
+    person_order = [r["person_id"] for r in rows]
+    if rows:
+        Pi = np.asarray([r[topic_col].toArray() for r in rows], dtype=np.float64)
+        y_DC = np.asarray([[float(v) for v in r["y"]] for r in rows], dtype=np.float64)
+        mask_DC = np.asarray(
+            [[float(v) for v in r["label_mask"]] for r in rows], dtype=np.float64
+        )
+    else:
+        Pi = np.zeros((0, 0), dtype=np.float64)
+        y_DC = np.zeros((0, C), dtype=np.float64)
+        mask_DC = np.zeros((0, C), dtype=np.float64)
+    return Pi, y_DC, mask_DC, person_order
+
+
+def _vi_two_stage_bundle(train_df, test_df, C, args):
+    """Distributed-SVI two-stage baseline bundle (unsupervised topics -> per-label LR).
+
+    The SVI-consistent replacement for the in-memory ``PCTopicModel(weight_y=0)``
+    two-stage baseline: it fits a SECOND ``PCEstimator`` at ``weightY=0`` — the SAME
+    distributed machinery as the VI-PC model (and the warm-start phase 1), so there
+    is NO collect-to-driver and NO in-memory L-BFGS — transforms train/test to the
+    K-dim ``topicDistribution`` (theta), collects only those small vectors
+    (:func:`_collect_topics_labels`), and fits one masked
+    :class:`~sklearn.linear_model.LogisticRegression` per outcome on the frozen
+    topics. Same two-stage recipe as before, but its topics now come from the same
+    SVI estimator (CAVI theta) as the model rather than the reference's NEF-MAP pi —
+    a fidelity improvement for the VI path, and it removes the driver-side
+    dense-collect + in-memory fit that OOM'd. ``--baseline-max-iter`` caps this
+    extra fit (unsupervised topics converge faster than the supervised head;
+    ``<= 0`` => use ``--max-iter``).
+
+    Scored over the baseline's OWN collected test labels: per-column AUC/AP is
+    row-order-invariant and the test membership is the same deterministic person
+    split, so the bundle is directly comparable to the PC / LR-on-codes bundles.
+    """
+    from spark_vi.mllib.topic.pc import PCEstimator
+    from analysis.pc.evaluate import _bundle_masked, _lr_proba_per_label_masked
+
+    n_iter = (args.baseline_max_iter
+              if getattr(args, "baseline_max_iter", 0) and args.baseline_max_iter > 0
+              else args.max_iter)
+    est = PCEstimator(
+        featuresCol="features", labelCol="y", labelMaskCol="label_mask",
+        numLabels=C, weightY=0.0, k=args.K, docConcentration=[float(args.alpha)],
+        subsamplingRate=args.subsampling_rate,
+        learningOffset=args.tau0, learningDecay=args.kappa,
+        maxIter=int(n_iter), seed=args.seed,
+        topicDistributionCol="topicDistribution",
+    )
+    model = est.fit(train_df)
+    Pi_tr, y_tr, mask_tr, _ = _collect_topics_labels(model.transform(train_df), C)
+    Pi_te, y_te, mask_te, _ = _collect_topics_labels(model.transform(test_df), C)
+    ts_proba = _lr_proba_per_label_masked(Pi_tr, y_tr, mask_tr, Pi_te, C)
+    return _bundle_masked(ts_proba, y_te, mask_te, C, args.min_label_count)
+
+
 # --------------------------------------------------------------------------- #
 # Driver                                                                       #
 # --------------------------------------------------------------------------- #
@@ -577,6 +644,24 @@ def _build_parser() -> argparse.ArgumentParser:
               "PCEstimator.weightYWarmupIters. Softens the first supervised steps so "
               "a large weight_y and/or --head-lr-scale > 1 does not spike the head "
               "on early, high-variance minibatches. Ignored for --backend inmem."),
+    )
+    # --- Baseline controls (the two-stage / LR-on-codes comparison set) --------
+    parser.add_argument(
+        "--skip-two-stage", action="store_true",
+        help=("skip the two-stage (unsupervised-topics -> per-label LR) baseline "
+              "entirely; report only PC + LR-on-codes. For the VI backend the "
+              "two-stage is a SECOND distributed SVI fit (weight_y=0), so skipping "
+              "it roughly halves the wall-clock — handy for a fast --eval-only "
+              "readout off a saved checkpoint. LR-on-codes still runs."),
+    )
+    parser.add_argument(
+        "--baseline-max-iter", type=int, default=-1,
+        help=("cap the two-stage baseline's unsupervised topic fit at this many "
+              "iterations; <= 0 (default) reuses --max-iter. Unsupervised topics "
+              "converge faster than the supervised head, so a smaller value (e.g. "
+              "100) keeps the extra VI two-stage fit cheap. For --backend vi this "
+              "caps the distributed weight_y=0 PCEstimator; for inmem it caps the "
+              "in-memory PCTopicModel(weight_y=0) fit."),
     )
     parser.add_argument(
         "--warm-start-unsup-iters", type=int, default=0,
@@ -821,9 +906,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     from analysis.pc.evaluate import (
         _bundle_masked,
+        _lr_proba_per_label_masked,
         evaluate_pc_multitask,
         format_results_table,
-        multitask_baseline_probas,
     )
 
     configure_logging()
@@ -936,7 +1021,7 @@ def main(argv: list[str] | None = None) -> int:
             results, drug_order, n_train, n_test, n_persons = (
                 _run_vi_backend_fullyobserved(
                     spark, bow_df, V, label_by_person, drug_order_fixed, args,
-                    multitask_baseline_probas, _bundle_masked, vocab_map,
+                    _lr_proba_per_label_masked, _bundle_masked, vocab_map,
                 )
             )
 
@@ -979,6 +1064,8 @@ def main(argv: list[str] | None = None) -> int:
                 "person_mod": args.person_mod,
                 "test_frac": args.test_frac, "seed": args.seed,
                 "min_label_count": args.min_label_count,
+                "skip_two_stage": args.skip_two_stage,
+                "baseline_max_iter": args.baseline_max_iter,
             },
         }
         with open(args.out, "w") as f:
@@ -1067,7 +1154,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         results, drug_order, n_train, n_test, n_persons = _run_vi_backend(
             spark, bow_df, V, outcome_by_person, _ANTIDEPRESSANT_INGREDIENTS, args,
-            multitask_baseline_probas, _bundle_masked, vocab_map,
+            _lr_proba_per_label_masked, _bundle_masked, vocab_map,
         )
 
     # --- Report: the Hughes per-drug table (PC vs two-stage vs LR-on-codes) ---
@@ -1179,6 +1266,9 @@ def _run_inmem_backend(
             pi_iters=args.pi_iters, max_iter=args.max_iter,
             doc_batch_size=args.doc_batch_size, seed=args.seed,
             min_label_count=args.min_label_count,
+            skip_two_stage=args.skip_two_stage,
+            baseline_max_iter=(args.baseline_max_iter
+                               if args.baseline_max_iter > 0 else None),
         )
     return results, drug_order, int(tr.sum()), int(te.sum()), len(person_order)
 
@@ -1227,6 +1317,9 @@ def _run_inmem_backend_fullyobserved(
             pi_iters=args.pi_iters, max_iter=args.max_iter,
             doc_batch_size=args.doc_batch_size, seed=args.seed,
             min_label_count=args.min_label_count,
+            skip_two_stage=args.skip_two_stage,
+            baseline_max_iter=(args.baseline_max_iter
+                               if args.baseline_max_iter > 0 else None),
         )
     return results, drug_order, int(tr.sum()), int(te.sum()), len(person_order)
 
@@ -1329,7 +1422,7 @@ def _augmented_resave_pc(model, drug_order, V, vocab_map, args) -> None:
 
 def _run_vi_backend(
     spark, bow_df, V, outcome_by_person, reference_drugs, args,
-    multitask_baseline_probas, _bundle_masked, vocab_map=None,
+    _lr_proba_per_label_masked, _bundle_masked, vocab_map=None,
 ):
     """Distributed VI-native PC backend (``--backend vi``).
 
@@ -1495,6 +1588,17 @@ def _run_vi_backend(
     # --- 5b) Transform + score PC, then the shared baselines ------------------
     with _phase("VI-PC transform + collect + baselines + per-drug scoring"):
         scored = model.transform(test_df)
+
+        # Two-stage baseline: distributed SVI (unsupervised PCEstimator weight_y=0
+        # -> per-label LR on the K-dim topics). Fit BEFORE the collect/unpersist,
+        # while train/test_df are persisted; no dense collect + no in-memory fit,
+        # so it is SVI-consistent with the VI-PC model above and does not OOM the
+        # driver. Skipped by --skip-two-stage (e.g. a fast --eval-only readout).
+        two_stage_bundle = None
+        if not args.skip_two_stage:
+            with _phase("two-stage baseline (distributed SVI unsup, weight_y=0)"):
+                two_stage_bundle = _vi_two_stage_bundle(train_df, test_df, C, args)
+
         X_te, y_te_DC, mask_te_DC, proba_DC, _ = collect_labeled_bow(
             scored, V, C, prob_col="probability",
         )
@@ -1502,19 +1606,14 @@ def _run_vi_backend(
         train_df.unpersist()
         test_df.unpersist()
 
-        shared = dict(
-            K=args.K, C=C, alpha=args.alpha, tau=args.tau, pi_iters=args.pi_iters,
-            max_iter=args.max_iter, doc_batch_size=args.doc_batch_size, seed=args.seed,
-        )
-        ts_proba, lrc_proba = multitask_baseline_probas(
-            X_tr, y_tr_DC, mask_tr_DC, X_te, C, shared,
-        )
+        # LR-on-codes baseline: per-label LR on the raw dense counts (inherently a
+        # code-space model, so the dense X collect above is its irreducible cost).
+        lrc_proba = _lr_proba_per_label_masked(X_tr, y_tr_DC, mask_tr_DC, X_te, C)
 
         n_obs_train = [int(mask_tr_DC[:, c].sum()) for c in range(C)]
         n_obs_test = [int(mask_te_DC[:, c].sum()) for c in range(C)]
         results = {
             "PC": _bundle_masked(proba_DC, y_te_DC, mask_te_DC, C, args.min_label_count),
-            "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C, args.min_label_count),
             "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C, args.min_label_count),
             "meta": {
                 "C": C,
@@ -1526,6 +1625,7 @@ def _run_vi_backend(
                 "n_obs_train": n_obs_train,
                 "n_obs_test": n_obs_test,
                 "min_label_count": int(args.min_label_count),
+                "two_stage_skipped": bool(args.skip_two_stage),
                 "backend": "vi",
                 "svi": {
                     "subsampling_rate": float(args.subsampling_rate),
@@ -1543,6 +1643,7 @@ def _run_vi_backend(
                     "converged": bool(vres.converged),
                     "w_CK_absmax": w_ck_absmax,
                 },
+                "baseline_max_iter": int(args.baseline_max_iter),
                 "model_names": {
                     "PC": "VI-PC (SVI, joint)",
                     "two_stage": "two-stage (unsup+LR)",
@@ -1550,12 +1651,14 @@ def _run_vi_backend(
                 },
             },
         }
+        if two_stage_bundle is not None:
+            results["two_stage"] = two_stage_bundle
     return results, drug_order, int(n_train), int(n_test), int(n_train + n_test)
 
 
 def _run_vi_backend_fullyobserved(
     spark, bow_df, V, label_by_person, drug_order, args,
-    multitask_baseline_probas, _bundle_masked, vocab_map=None,
+    _lr_proba_per_label_masked, _bundle_masked, vocab_map=None,
 ):
     """Distributed VI-native PC backend for the FULLY-OBSERVED stable-treatment path.
 
@@ -1698,6 +1801,17 @@ def _run_vi_backend_fullyobserved(
     # --- 5b) Transform + score PC, then the shared baselines ------------------
     with _phase("VI-PC transform + collect + baselines + per-drug scoring"):
         scored = model.transform(test_df)
+
+        # Two-stage baseline: distributed SVI (unsupervised PCEstimator weight_y=0
+        # -> per-label LR on the K-dim topics). Fit BEFORE the collect/unpersist,
+        # while train/test_df are persisted; no dense collect + no in-memory fit,
+        # so it is SVI-consistent with the VI-PC model above and does not OOM the
+        # driver. Skipped by --skip-two-stage (e.g. a fast --eval-only readout).
+        two_stage_bundle = None
+        if not args.skip_two_stage:
+            with _phase("two-stage baseline (distributed SVI unsup, weight_y=0)"):
+                two_stage_bundle = _vi_two_stage_bundle(train_df, test_df, C, args)
+
         X_te, y_te_DC, mask_te_DC, proba_DC, _ = collect_labeled_bow(
             scored, V, C, prob_col="probability",
         )
@@ -1705,19 +1819,14 @@ def _run_vi_backend_fullyobserved(
         train_df.unpersist()
         test_df.unpersist()
 
-        shared = dict(
-            K=args.K, C=C, alpha=args.alpha, tau=args.tau, pi_iters=args.pi_iters,
-            max_iter=args.max_iter, doc_batch_size=args.doc_batch_size, seed=args.seed,
-        )
-        ts_proba, lrc_proba = multitask_baseline_probas(
-            X_tr, y_tr_DC, mask_tr_DC, X_te, C, shared,
-        )
+        # LR-on-codes baseline: per-label LR on the raw dense counts (inherently a
+        # code-space model, so the dense X collect above is its irreducible cost).
+        lrc_proba = _lr_proba_per_label_masked(X_tr, y_tr_DC, mask_tr_DC, X_te, C)
 
         n_obs_train = [int(mask_tr_DC[:, c].sum()) for c in range(C)]
         n_obs_test = [int(mask_te_DC[:, c].sum()) for c in range(C)]
         results = {
             "PC": _bundle_masked(proba_DC, y_te_DC, mask_te_DC, C, args.min_label_count),
-            "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C, args.min_label_count),
             "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C, args.min_label_count),
             "meta": {
                 "C": C,
@@ -1729,6 +1838,7 @@ def _run_vi_backend_fullyobserved(
                 "n_obs_train": n_obs_train,
                 "n_obs_test": n_obs_test,
                 "min_label_count": int(args.min_label_count),
+                "two_stage_skipped": bool(args.skip_two_stage),
                 "backend": "vi",
                 "svi": {
                     "subsampling_rate": float(args.subsampling_rate),
@@ -1745,6 +1855,7 @@ def _run_vi_backend_fullyobserved(
                     "converged": bool(vres.converged),
                     "w_CK_absmax": w_ck_absmax,
                 },
+                "baseline_max_iter": int(args.baseline_max_iter),
                 "model_names": {
                     "PC": "VI-PC (SVI, joint)",
                     "two_stage": "two-stage (unsup+LR)",
@@ -1752,6 +1863,8 @@ def _run_vi_backend_fullyobserved(
                 },
             },
         }
+        if two_stage_bundle is not None:
+            results["two_stage"] = two_stage_bundle
     return results, drug_order, int(n_train), int(n_test), int(n_train + n_test)
 
 

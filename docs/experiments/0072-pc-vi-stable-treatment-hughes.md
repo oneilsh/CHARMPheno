@@ -54,6 +54,14 @@ head_lr_scale: 3.0          # HEAD-ONLY step multiplier (-> --head-lr-scale). Sc
 weight_y_warmup_iters: 20   # ramp weight_y 0->100 over the first 20 SVI steps
                             # (-> --weight-y-warmup-iters), so the 3x-hot head does not
                             # spike on the early, high-variance minibatches.
+# --- baseline controls -------------------------------------------------------
+baseline_max_iter: 100      # cap the two-stage baseline's SECOND (distributed SVI,
+                            # weight_y=0) topic fit at 100 iters (-> --baseline-max-iter).
+                            # Unsupervised topics converge faster than the head, so 100
+                            # keeps the extra fit ~1h rather than a full 200. Set
+                            # skip_two_stage: true (or --eval-only --skip-two-stage) to
+                            # drop it entirely for a fast PC-vs-LR-on-codes readout.
+# skip_two_stage: false     # true => report only PC + LR-on-codes (no two-stage fit)
 # warm_start_unsup_iters: 50 # unsup warm-start (Hughes): 0=cold start; N>0 = phase-1
                             # weight_y=0 topic warm-up then fresh-RM supervised phase 2
                             # (-> --warm-start-unsup-iters). See "Warm-start" below.
@@ -129,14 +137,26 @@ scored per-drug on the heldout split. On `--backend inmem` the same labels are
 assembled in memory (`assemble_fullyobserved_labels`) and the in-memory L-BFGS PC
 runs via `evaluate_pc_multitask` — byte-for-byte the same eval, mask all-ones.
 
-## Baselines (same masking, collected to memory)
+## Baselines (SVI-consistent two-stage + LR-on-codes)
 
-Computed with the SAME code as the antidepressant runs
-(`analysis.pc.evaluate.multitask_baseline_probas`), so the VI-PC number is
-comparable to the same baselines: two-stage (unsupervised topics `weight_y=0` →
-per-drug logistic regression on the frozen representation) and
-logistic-regression-on-codes. Per-drug heldout ROC AUC + AP, macro-averaged over
-non-degenerate drugs.
+Two comparators, both scored per-drug (heldout ROC AUC + AP, macro-averaged over
+non-degenerate drugs):
+
+- **Two-stage (unsupervised topics → per-drug LR)** — now a **second distributed
+  SVI fit**: a `PCEstimator` at `weight_y=0` (the SAME machinery as the model and
+  the warm-start phase 1, `driver::_vi_two_stage_bundle`), whose K-dim
+  `topicDistribution` (θ) is collected (NOT the dense D×V matrix) and fed to a
+  per-drug masked logistic regression. This replaces the old in-memory
+  `PCTopicModel(weight_y=0)` fit, which collected the dense matrix to the driver
+  and **OOM-killed the post-fit step** (SIGTERM 143) at full-cohort scale — and it
+  makes the baseline's π-estimator (SVI-CAVI θ) match the model's rather than the
+  reference's NEF-MAP π. It is a *second* SVI fit, so `baseline_max_iter` caps it
+  (default 100 here) and `--skip-two-stage` / `skip_two_stage: true` drops it
+  entirely for a fast readout.
+- **LR-on-codes** — per-drug masked logistic regression straight on the raw fused
+  counts. Inherently code-space, so it still collects the dense D×V matrix to the
+  driver (the irreducible cost); this alone fits the 8g driver once the in-memory
+  two-stage fit is gone.
 
 ## Target
 
@@ -219,6 +239,25 @@ Resume + eval-from-checkpoint are VI-only and identical to 0071
 stable knobs / min_df / min_patient_count — changed between runs). The augmented
 re-save records `cohort='mdd_stable_treatment'` + the stable knobs in the
 checkpoint's `corpus_manifest`.
+
+### Fast readout off an existing checkpoint (skip the two-stage)
+
+The fit checkpoints before scoring, so a completed-fit run whose post-fit step
+died (or any saved run) can be scored without re-fitting — and `--skip-two-stage`
+drops the second SVI baseline for the quickest possible read (rebuilds the BOW +
+loads the head + PC transform + LR-on-codes only):
+```
+cd analysis/cloud && make pc-antidepressant \
+  PC_AD_ARGS='--cohort mdd_stable_treatment --backend vi --eval-only \
+              --skip-two-stage --save-dir <run_dir> \
+              --vocab-size 5000 --min-df 20 --min-patient-count 20 \
+              --age-min 18 --age-max 80 --min-days 90 --max-gap-days 395 \
+              --min-history-events 2 --min-label-count 20 \
+              --out <run_dir>/pc_results.json'
+```
+Add `CHARM_DRIVER_MEMORY=12g` if the dense LR-on-codes collect is tight on the
+8g default. Drop `--skip-two-stage` to also get the distributed two-stage number
+(capped by `--baseline-max-iter`).
 
 ## Results
 

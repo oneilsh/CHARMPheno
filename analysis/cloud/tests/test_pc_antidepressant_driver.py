@@ -110,6 +110,19 @@ def test_head_lr_knobs_parse():
     assert ns.head_lr_scale == 3.0 and ns.weight_y_warmup_iters == 20
 
 
+def test_baseline_controls_default_off():
+    ns = drv._build_parser().parse_args(["--cdr", "p.d", "--billing", "b"])
+    assert ns.skip_two_stage is False       # two-stage runs by default
+    assert ns.baseline_max_iter == -1       # -1 => reuse --max-iter
+
+
+def test_baseline_controls_parse():
+    ns = drv._build_parser().parse_args([
+        "--cdr", "p.d", "--billing", "b",
+        "--skip-two-stage", "--baseline-max-iter", "100"])
+    assert ns.skip_two_stage is True and ns.baseline_max_iter == 100
+
+
 def test_save_dir_rejected_for_inmem_backend(monkeypatch, capsys):
     # --save-dir is VI-only: with the default inmem backend it must fail fast
     # (before any BQ import), since L-BFGS has no interim state to checkpoint.

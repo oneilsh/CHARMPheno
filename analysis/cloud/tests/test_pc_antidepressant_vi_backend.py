@@ -263,3 +263,90 @@ def test_vi_fit_transform_smoke(spark):
     assert np.all(np.isfinite(proba_DC)) and np.all((proba_DC >= 0) & (proba_DC <= 1))
     # The trained head is (C, K) and readable for the convergence signal.
     assert model.headWeights().shape == (C, 3)
+
+
+# --------------------------------------------------------------------------- #
+# Distributed-SVI two-stage baseline (option B): PCEstimator(weightY=0) topics #
+# -> per-label LR, collected via _collect_topics_labels (no dense BOW).        #
+# --------------------------------------------------------------------------- #
+def _args_ns(**over):
+    from types import SimpleNamespace
+    base = dict(
+        K=3, alpha=1.1, subsampling_rate=1.0, tau0=16.0, kappa=0.6,
+        max_iter=2, seed=0, min_label_count=0, baseline_max_iter=-1,
+        skip_two_stage=False,
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_collect_topics_labels_shapes(spark):
+    pytest.importorskip("spark_vi")
+    pytest.importorskip("autograd")
+    from spark_vi.mllib.topic.pc import PCEstimator
+
+    V, C = 6, 2
+    drug_order = ["a", "b"]
+    feats, outcome = {}, {}
+    rng = np.random.default_rng(0)
+    for pid in range(12):
+        feats[pid] = {int(j): float(rng.integers(1, 4))
+                      for j in rng.choice(V, size=3, replace=False)}
+        outcome[pid] = (drug_order[pid % 2], bool(pid % 4 < 2))
+    labeled = drv.attach_multitask_label_columns(
+        _bow_df(spark, feats, V), outcome, drug_order, spark)
+    est = PCEstimator(
+        featuresCol="features", labelCol="y", labelMaskCol="label_mask",
+        numLabels=C, weightY=0.0, k=3, docConcentration=[1.1],
+        subsamplingRate=1.0, learningOffset=16.0, learningDecay=0.6,
+        maxIter=2, seed=0, topicDistributionCol="topicDistribution")
+    scored = est.fit(labeled).transform(labeled)
+    assert "topicDistribution" in scored.columns
+    Pi, y_DC, mask_DC, order = drv._collect_topics_labels(scored, C)
+    assert Pi.shape == (12, 3)                       # (D, K), NOT (D, V)
+    assert y_DC.shape == (12, C) and mask_DC.shape == (12, C)
+    assert len(order) == 12
+
+
+def test_vi_two_stage_bundle_smoke(spark):
+    pytest.importorskip("spark_vi")
+    pytest.importorskip("autograd")
+
+    V, C = 6, 2
+    drug_order = ["a", "b"]
+    feats, subset = {}, {}
+    rng = np.random.default_rng(1)
+    for pid in range(24):
+        feats[pid] = {int(j): float(rng.integers(1, 4))
+                      for j in rng.choice(V, size=3, replace=False)}
+        # fully-observed: each person on one drug's stable regimen (both classes
+        # present per column so no head is degenerate at this tiny size).
+        subset[pid] = [drug_order[pid % 2]] if pid % 3 else []
+    labeled = drv.attach_fullyobserved_label_columns(
+        _bow_df(spark, feats, V), subset, drug_order, spark)
+    train_df, test_df = drv.person_hash_split(labeled, 0.5, 0)
+    bundle = drv._vi_two_stage_bundle(train_df, test_df, C, _args_ns())
+    assert set(bundle.keys()) == {"per_label", "macro"}
+    assert set(bundle["per_label"].keys()) == {0, 1}
+    assert "n_labels_scored" in bundle["macro"]
+
+
+def test_vi_two_stage_bundle_baseline_max_iter_caps_iters(spark):
+    # baseline_max_iter overrides max_iter for the unsupervised fit (cheaper).
+    pytest.importorskip("spark_vi")
+    pytest.importorskip("autograd")
+    V, C = 6, 2
+    drug_order = ["a", "b"]
+    feats, subset = {}, {}
+    rng = np.random.default_rng(2)
+    for pid in range(20):
+        feats[pid] = {int(j): float(rng.integers(1, 4))
+                      for j in rng.choice(V, size=3, replace=False)}
+        subset[pid] = [drug_order[pid % 2]] if pid % 3 else []
+    labeled = drv.attach_fullyobserved_label_columns(
+        _bow_df(spark, feats, V), subset, drug_order, spark)
+    train_df, test_df = drv.person_hash_split(labeled, 0.5, 0)
+    # max_iter huge but baseline_max_iter tiny -> must still return promptly.
+    bundle = drv._vi_two_stage_bundle(
+        train_df, test_df, C, _args_ns(max_iter=999, baseline_max_iter=1))
+    assert set(bundle.keys()) == {"per_label", "macro"}
