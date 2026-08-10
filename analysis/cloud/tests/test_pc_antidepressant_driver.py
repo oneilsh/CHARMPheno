@@ -123,6 +123,14 @@ def test_baseline_controls_parse():
     assert ns.skip_two_stage is True and ns.baseline_max_iter == 100
 
 
+def test_topic_trust_default_and_parse():
+    ns = drv._build_parser().parse_args(["--cdr", "p.d", "--billing", "b"])
+    assert ns.topic_trust == 0.1                 # estimator default
+    ns2 = drv._build_parser().parse_args(
+        ["--cdr", "p.d", "--billing", "b", "--topic-trust", "0.02"])
+    assert ns2.topic_trust == 0.02
+
+
 def test_save_dir_rejected_for_inmem_backend(monkeypatch, capsys):
     # --save-dir is VI-only: with the default inmem backend it must fail fast
     # (before any BQ import), since L-BFGS has no interim state to checkpoint.

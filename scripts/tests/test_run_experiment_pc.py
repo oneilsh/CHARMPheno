@@ -105,6 +105,15 @@ def test_build_pc_args_vi_head_lr_defaults(monkeypatch):
     assert d["--weight-y-warmup-iters"] == "0"
 
 
+def test_build_pc_args_vi_topic_trust(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    d0 = dict(zip(*[iter(mod.build_pc_args(_eff(backend="vi"), "/out"))] * 2))
+    assert d0["--topic-trust"] == "0.1"          # default
+    d1 = dict(zip(*[iter(mod.build_pc_args(
+        _eff(backend="vi", topic_trust=0.02), "/out"))] * 2))
+    assert d1["--topic-trust"] == "0.02"
+
+
 def test_build_pc_args_inmem_omits_head_lr_knobs(monkeypatch):
     # VI-only: inmem argv stays byte-for-byte, even if the config carries them.
     mod = _run_exp(monkeypatch)

@@ -581,8 +581,9 @@ def format_results_table(results: dict[str, Any]) -> str:
     names = meta["model_names"]
     C = meta["C"]
     # Only the models actually present (the two-stage baseline may be skipped via
-    # --skip-two-stage), keeping the canonical PC / two_stage / lr_codes order.
-    order = [k for k in ("PC", "two_stage", "lr_codes") if k in results]
+    # --skip-two-stage; pc_topics_lr is a VI diagnostic), in canonical order.
+    order = [k for k in ("PC", "pc_topics_lr", "two_stage", "lr_codes")
+             if k in results]
     # Below this test-cell count a label was masked from scoring; suppress its
     # raw n_pos/n_neg in the printed table too (an All-of-Us count < 20 is not
     # disclosable). 0 = no small-count masking (the pure-library default).

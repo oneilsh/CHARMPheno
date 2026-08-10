@@ -791,6 +791,10 @@ def build_pc_args(
             # => byte-for-byte the prior VI argv when unset.
             "--head-lr-scale", str(effective.get("head_lr_scale", 1.0)),
             "--weight-y-warmup-iters", str(effective.get("weight_y_warmup_iters", 0)),
+            # Per-iteration trust-region on the supervised topic correction (maps
+            # to PCEstimator.topicTrust). Default 0.1; lower to keep the supervised
+            # topics near the unsupervised warm-start, 0 to freeze them (head-only).
+            "--topic-trust", str(effective.get("topic_trust", 0.1)),
             # Unsupervised-warm-start (Hughes et al.): 0 (default) = cold start;
             # N > 0 runs a phase-1 weight_y=0 topic warm-up before the supervised
             # phase 2 (fresh RM schedule). VI-only; absent from the inmem argv.
