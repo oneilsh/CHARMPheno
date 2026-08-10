@@ -242,6 +242,58 @@ def test_pc_supervised_gradient_matches_finite_difference():
     assert err_head <= 1e-5, f"head-gradient rel err {err_head:.2e} > 1e-5"
 
 
+def test_supervised_lambda_gradient_matches_finite_difference():
+    """The CORRECTION applied to λ must be ∂loss/∂λ, not ∂loss/∂expElogbeta.
+
+    ``_grad_topics_to_lambda`` completes the chain rule from the autograd stat
+    (taken w.r.t. ``expElogbeta``) back to the global parameter λ, through
+    ``expElogbeta = exp(ψ(λ) − ψ(Σλ))``. This checks it against a central
+    finite-difference of the supervised loss as a function of λ — and asserts the
+    UN-transformed stat (what the code subtracted from λ before the fix) does NOT
+    match, so the bug can't silently return.
+    """
+    from spark_vi.models.topic.pc import (
+        _supervised_batch_value, _supervised_batch_value_and_grad,
+        _grad_topics_to_lambda,
+    )
+    from scipy.special import digamma
+
+    rng = np.random.default_rng(3)
+    K, V, C = 4, 10, 2
+    n_iters = 20
+    alpha = np.full(K, 1.1)
+    w_CK = rng.standard_normal((C, K)) * 0.5
+    docs = _tiny_sup_batch(seed=2, C=C, V=V)
+    lam = rng.gamma(3.0, 2.0, size=(K, V)) + 0.5           # Dirichlet counts, O(tens)
+
+    def eb_of(l):
+        return np.exp(digamma(l) - digamma(l.sum(axis=1, keepdims=True)))
+
+    def loss_of_lambda(l):
+        return _supervised_batch_value(eb_of(l), w_CK, docs, alpha, K, n_iters)
+
+    _loss, grad_eb, _ = _supervised_batch_value_and_grad(
+        eb_of(lam), w_CK, docs, alpha, K, n_iters)
+    grad_lambda = _grad_topics_to_lambda(grad_eb, lam)
+
+    # Central finite-difference dloss/dlambda at every cell with a nonzero analytic grad.
+    coords = list(zip(*np.nonzero(grad_lambda)))
+    eps = 1e-6
+    rel_fixed, rel_raw = [], []
+    for (i, j) in coords:
+        lp = lam.copy(); lp[i, j] += eps
+        lm = lam.copy(); lm[i, j] -= eps
+        num = (loss_of_lambda(lp) - loss_of_lambda(lm)) / (2 * eps)
+        rel_fixed.append(abs(num - grad_lambda[i, j]) / max(abs(grad_lambda[i, j]), abs(num), 1e-8))
+        rel_raw.append(abs(num - grad_eb[i, j]) / max(abs(grad_eb[i, j]), abs(num), 1e-8))
+    err_fixed, err_raw = max(rel_fixed), min(rel_raw)
+    print(f"\n[lambda grad-check] transformed rel err={err_fixed:.2e}; "
+          f"raw-dEb best-case rel err={err_raw:.2e}")
+    assert err_fixed <= 1e-5, f"transformed λ-gradient rel err {err_fixed:.2e} > 1e-5"
+    # The un-transformed ∂loss/∂expElogbeta is the WRONG λ-gradient — guard the fix.
+    assert err_raw > 1e-2, "raw dEb unexpectedly matched dloss/dlambda; transform is a no-op?"
+
+
 # ---------------------------------------------------------------------------
 # Increment 2 — OUTCOME parity: a trained OnlinePCLDA(weight_y>0) reproduces the
 # Prediction-Constrained advantage on heldout per-label AUC — it beats BOTH its
