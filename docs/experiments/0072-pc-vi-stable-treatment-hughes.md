@@ -25,8 +25,13 @@ min_history_events: 2       # min events strictly before the first antidepressan
 age_min: 18                 # inclusive age gate at the stable-interval start
 age_max: 80
 # --- model / eval config ---
-K: 25                       # topics (SWEEP)
-weight_y: 100.0             # PC prediction-constraint weight (SWEEP)
+K: 50                       # topics. Raised from 25 after Run 1: the cold K=25 fit's
+                            # topic representation under-informed the head (PC macro
+                            # 0.545 << LR-on-codes 0.622); Hughes swept to 100, so more
+                            # capacity is a prime lever. (SWEEP: 25/50/100.)
+weight_y: 100.0             # PC prediction-constraint weight. Hughes sets lambda ~ avg
+                            # tokens/doc — the driver now reports avg tokens; if it is
+                            # >> 100, raise this so supervision isn't swamped. (SWEEP.)
 alpha: 1.1                  # theta Dirichlet concentration (-> PCEstimator docConcentration)
 tau: 1.1                    # baseline (in-mem two-stage) topic Dirichlet; VI eta = 1/K
 max_iter: 200               # SVI global iterations. Kept SHORT (~1.9h at ~34s/iter)
@@ -62,9 +67,13 @@ baseline_max_iter: 100      # cap the two-stage baseline's SECOND (distributed S
                             # skip_two_stage: true (or --eval-only --skip-two-stage) to
                             # drop it entirely for a fast PC-vs-LR-on-codes readout.
 # skip_two_stage: false     # true => report only PC + LR-on-codes (no two-stage fit)
-# warm_start_unsup_iters: 50 # unsup warm-start (Hughes): 0=cold start; N>0 = phase-1
-                            # weight_y=0 topic warm-up then fresh-RM supervised phase 2
-                            # (-> --warm-start-unsup-iters). See "Warm-start" below.
+warm_start_unsup_iters: 50  # unsup warm-start (Hughes): 0=cold start; N>0 = phase-1
+                            # weight_y=0 topic warm-up (50 iters) then fresh-RM supervised
+                            # phase 2 (-> --warm-start-unsup-iters). ON for Run 2: Run 1
+                            # was COLD and PC under-informed — Hughes initialize from an
+                            # unsupervised fit, and cold PC-sLDA is prone to generatively-
+                            # good but discriminatively-weak topics. This is THE deferred
+                            # warm-vs-cold test (Run 1 is the cold arm).
 # Documentary-only (NOT driver flags; ignored by build_pc_args): the vocab is
 # fused across condition+drug+procedure over all pre-index history, and the model
 # is joint multi-task PC with a FULLY-OBSERVED length-10 label (all-ones mask).
@@ -270,11 +279,40 @@ Drop `--skip-two-stage` to also get the distributed two-stage number (capped by
 
 ## Results
 
-_TBD — awaiting the All-of-Us run. Record: N, per-drug positive rate (the
-`stable_treatment_label` positives), the `vi_convergence` block (final ELBO,
-n_iter, `|w_CK|max` — the untrained-head tell), the per-drug AUC table (VI-PC vs
-two-stage vs LR), macro-AUC, and the effective merged config. Then write the
-interpretation as an insight: a PC-slightly-beats-LR result at ~0.60–0.65 macro
-replicates Hughes' stable-treatment finding on AoU; a converged fit
-(`|w_CK|max` ≫ 0) that nulls, or one that overshoots ~0.65, is an
-AoU-completeness / label-leakage finding to chase down, not a headline._
+This experiment is a **run log** — each re-fit of ID 72 appends a dated entry
+(the run dir is overwritten, but the findings are kept here).
+
+### Run 1 — COLD, K=25, weight_y=100, 200 iters (2026-08-10)
+
+N=45,991 MDD stable-treatment persons (34,515 train / 11,476 test); per-drug
+positives 1,503–9,246 (all ≥ 20, nothing masked). Fit: `n_iter=200`,
+`converged=False`, `|w_CK|max=4.15` (head **trained**, not the 0.5-AUC untrained
+mode — still climbing at 200).
+
+| model | macro AUC | macro AP |
+|---|---|---|
+| **LR-on-codes** (scaled) | **0.622** | 0.176 |
+| **VI-PC** (K=25, cold) | **0.545** | 0.122 |
+
+**Read:** LR-on-codes lands squarely in Hughes' raw-code band (~0.60–0.66) — the
+cohort, features and outcome **replicate**. But the PC topic model **underperforms**
+both LR-on-codes and Hughes' own PC (~0.627): the K=25 representation under-informs
+the head. It is *not* uniformly broken — duloxetine PC 0.636 ≥ LR 0.609, but
+bupropion PC 0.498 (chance) — i.e. 25 topics capture some drugs' signal and wash
+out others. Diagnosis (ranked): (1) **cold start** — Hughes initialize from an
+unsupervised fit, we didn't; (2) **weight_y vs avg tokens** — the driver now
+reports avg tokens/doc; if ≫ 100 the supervised term is swamped; (3) **K too
+coarse**; (4) not fully converged. Run 2 addresses (1) + (3).
+
+### Run 2 — WARM-start (50) + K=50 — PENDING
+
+The Hughes-faithful push and the warm-vs-cold A/B (Run 1 = cold arm). Same cohort
+(so `check_resume_compat` corpus fields are unchanged) but K changes 25→50 and the
+fit is warm-started, so the Run-1 checkpoint is incompatible — **`rm -rf` the run
+dir before re-running** (a K change would otherwise shape-mismatch the loaded
+`(25, V)` topics; resume also silently disables warm-start). Then `make exp ID=72`.
+Record the same block; read avg tokens/doc from the log to decide whether to raise
+`weight_y` in a Run 3. A PC macro that climbs toward ~0.60–0.65 with warm-start is
+the replication *and* answers "does warm-start matter" (Run 1 says the cold arm
+falls short); a PC still ≪ LR after warm + higher K points at weight_y or a deeper
+representation-capacity limit, not a bug (LR proves the signal is in the data).

@@ -1008,6 +1008,22 @@ def main(argv: list[str] | None = None) -> int:
             n_docs = bow_df.count()
             print(f"[driver]   vocab size: {V} (cap {args.vocab_size}), "
                   f"documents: {n_docs}", flush=True)
+            # Avg tokens/doc (mean L1 norm of the count vectors) — Hughes' rule of
+            # thumb sets the prediction weight lambda ~ avg tokens, so this reports
+            # whether the current weight_y is in the right ballpark for the
+            # supervised term to matter against the generative one.
+            from pyspark.sql import functions as _F
+            from pyspark.sql.types import DoubleType as _DoubleType
+            _doc_l1 = _F.udf(
+                lambda v: float(v.values.sum()) if v is not None else 0.0,
+                _DoubleType(),
+            )
+            avg_tokens = bow_df.select(
+                _F.avg(_doc_l1("features")).alias("t")
+            ).first()["t"]
+            print(f"[driver]   avg tokens/doc: {avg_tokens:.1f}  "
+                  f"(Hughes heuristic weight_y ~ avg tokens; "
+                  f"current weight_y={args.weight_y:g})", flush=True)
 
         # --- 4/5) Backend split: in-memory L-BFGS (default) vs distributed VI --
         if args.backend == "inmem":
