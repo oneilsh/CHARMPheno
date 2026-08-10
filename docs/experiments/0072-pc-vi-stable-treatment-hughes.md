@@ -245,19 +245,28 @@ checkpoint's `corpus_manifest`.
 The fit checkpoints before scoring, so a completed-fit run whose post-fit step
 died (or any saved run) can be scored without re-fitting — and `--skip-two-stage`
 drops the second SVI baseline for the quickest possible read (rebuilds the BOW +
-loads the head + PC transform + LR-on-codes only):
+loads the head + PC transform + LR-on-codes only).
+
+**Run dir location.** Artifacts live under `RUNS_DIR`, defined in
+`analysis/cloud/Makefile` — on the AoU cluster this resolves to
+`/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs`,
+so this experiment's checkpoint is `…/runs/0072-pc-vi-stable-treatment-hughes`
+(note the `-pc-vi-…` slug — a sibling `0072-multidomain-…` dir from the other
+branch shares the number, so use the full slug, not a `0072-*` glob). Copy-paste
+as-is (the `RUN_DIR` var means no path editing):
 ```
-cd analysis/cloud && make pc-antidepressant \
-  PC_AD_ARGS='--cohort mdd_stable_treatment --backend vi --eval-only \
-              --skip-two-stage --save-dir <run_dir> \
+RUN_DIR=/home/dataproc/workspace/dataproc-staging-getting-started-with-registered-tier-data-copy/runs/0072-pc-vi-stable-treatment-hughes
+cd analysis/cloud && CHARM_DRIVER_MEMORY=12g make pc-antidepressant \
+  PC_AD_ARGS="--cohort mdd_stable_treatment --backend vi --eval-only \
+              --skip-two-stage --save-dir $RUN_DIR \
               --vocab-size 5000 --min-df 20 --min-patient-count 20 \
               --age-min 18 --age-max 80 --min-days 90 --max-gap-days 395 \
               --min-history-events 2 --min-label-count 20 \
-              --out <run_dir>/pc_results.json'
+              --out $RUN_DIR/pc_results.json"
 ```
-Add `CHARM_DRIVER_MEMORY=12g` if the dense LR-on-codes collect is tight on the
-8g default. Drop `--skip-two-stage` to also get the distributed two-stage number
-(capped by `--baseline-max-iter`).
+`CHARM_DRIVER_MEMORY=12g` guards the dense LR-on-codes collect on the 8g default.
+Drop `--skip-two-stage` to also get the distributed two-stage number (capped by
+`--baseline-max-iter`).
 
 ## Results
 
