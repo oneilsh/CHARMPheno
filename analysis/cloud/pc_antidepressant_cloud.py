@@ -1466,6 +1466,16 @@ def _run_vi_backend(
         if args.eval_only:
             from spark_vi.io.export import load_result
             ck_meta = load_result(args.save_dir).metadata
+            # The checkpoint governs K + weight_y on eval-only (the CLI may omit
+            # them or carry driver defaults): keep the reported metadata honest,
+            # and make the two-stage baseline refit at the SAME K as the loaded
+            # PC model rather than at a mismatched args.K.
+            _ck_K = ck_meta.get("K")
+            if _ck_K is not None:
+                args.K = int(_ck_K)
+            _ck_wy = (ck_meta.get("svi") or {}).get("weight_y")
+            if _ck_wy is not None:
+                args.weight_y = float(_ck_wy)
             drug_order = ck_meta.get("stable_drug_order")
             if drug_order is not None:
                 drug_order = list(drug_order)
@@ -1693,6 +1703,16 @@ def _run_vi_backend_fullyobserved(
         if args.eval_only:
             from spark_vi.io.export import load_result
             ck_meta = load_result(args.save_dir).metadata
+            # The checkpoint governs K + weight_y on eval-only (the CLI may omit
+            # them or carry driver defaults): keep the reported metadata honest,
+            # and make the two-stage baseline refit at the SAME K as the loaded
+            # PC model rather than at a mismatched args.K.
+            _ck_K = ck_meta.get("K")
+            if _ck_K is not None:
+                args.K = int(_ck_K)
+            _ck_wy = (ck_meta.get("svi") or {}).get("weight_y")
+            if _ck_wy is not None:
+                args.weight_y = float(_ck_wy)
             ck_order = ck_meta.get("stable_drug_order")
             if ck_order is not None:
                 drug_order = list(ck_order)
