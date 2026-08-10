@@ -114,6 +114,15 @@ def test_build_pc_args_vi_topic_trust(monkeypatch):
     assert d1["--topic-trust"] == "0.02"
 
 
+def test_build_pc_args_vi_grad_cavi_iters(monkeypatch):
+    mod = _run_exp(monkeypatch)
+    d0 = dict(zip(*[iter(mod.build_pc_args(_eff(backend="vi"), "/out"))] * 2))
+    assert d0["--grad-cavi-iters"] == "20"       # default
+    d1 = dict(zip(*[iter(mod.build_pc_args(
+        _eff(backend="vi", grad_cavi_iters=50), "/out"))] * 2))
+    assert d1["--grad-cavi-iters"] == "50"
+
+
 def test_build_pc_args_inmem_omits_head_lr_knobs(monkeypatch):
     # VI-only: inmem argv stays byte-for-byte, even if the config carries them.
     mod = _run_exp(monkeypatch)
@@ -308,8 +317,9 @@ def test_build_pc_args_from_stable_treatment_defaults(monkeypatch):
     assert d["--backend"] == "vi"
     assert d["--vocab-size"] == "5000"
     assert d["--min-days"] == "90"
-    # VI backend also threads the SVI schedule + save flags.
-    assert d["--subsampling-rate"] == "0.05"
+    # VI backend also threads the SVI schedule + save flags. subsampling 0.2 is
+    # the cohort default (partition-wise sample fills executors on the small corpus).
+    assert d["--subsampling-rate"] == "0.2"
     assert d["--save-dir"] == "/runs/0072-x"
 
 

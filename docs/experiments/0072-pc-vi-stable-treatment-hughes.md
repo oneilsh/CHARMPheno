@@ -61,6 +61,17 @@ tau0: 32.0                  # Robbins-Monro learning offset (-> --tau0). The GLO
                             # sped up on its own via head_lr_scale, so tau0 need not be
                             # pushed to the unstable extreme.
 kappa: 0.6                  # Robbins-Monro learning decay in (0.5, 1.0] (-> --kappa)
+grad_cavi_iters: 50         # Run 6 — THE head fix (-> --grad-cavi-iters). Run 5 proved
+                            # the co-fit head was stuck (0.522, invariant to iters/data/
+                            # head_lr) because it trains on a 20-step CAVI theta but is
+                            # SCORED on the converged (cavi_max_iter=100/tol=1e-3) theta —
+                            # a train/test theta mismatch. On avg-322-token AoU docs CAVI
+                            # needs ~50 iters to converge (20-step theta is cos 0.987 off);
+                            # 50 aligns training theta with scoring theta (cos 0.99995), so
+                            # the head can finally reach the batch-LR optimum (~0.61). This
+                            # is exactly why the toy (small docs, CAVI converges by 20)
+                            # passed while AoU (large docs) did not. Cost: ~2.5x the per-doc
+                            # supervised-gradient tape. Default 20 (fine for small docs).
 head_lr_scale: 2.0          # HEAD-ONLY step multiplier (-> --head-lr-scale). Run 5: 1.0
                             # -> 2.0 to help the joint head reach its optimum before ρ
                             # decays (Run 4 settled short at 0.518 vs the batch-LR 0.612 on
@@ -420,3 +431,38 @@ carries the degenerate topics; a fresh warm-start is needed). Expect: `Σλ` bou
 ideally past — the ~0.614 unsupervised/LR band (supervision finally helping). Read
 `PC head` vs `pc_topics_lr`: if they converge, the head closed its gap on stable
 topics; sweep `weight_y` from 1000 if PC under- or over-shoots.
+
+### Run 5 — option B (converge the head): FAILED, and told us why (2026-08-10)
+
+subsampling 0.05→0.2, max_iter 200→300, head_lr_scale 1→2. Result: **VI-PC head
+0.522** (≈ Run 4's 0.518), `pc_topics_lr` 0.608. **The head did not move** — 4× the
+data, 1.5× the iters, 2× the step, same fixed point (`|w_CK|` 4.05). So it is NOT
+under-convergence; the head **converged to a fixed point that is not the batch-LR
+optimum** on the same θ. For a convex logistic problem that means it is optimizing
+on a *different* θ than it is scored on.
+
+### ROOT CAUSE #2 — train/test θ-depth mismatch (the head's real bug)
+
+The head's supervised gradient uses `_cavi_theta_anp`, a **fixed 20-step** CAVI
+unroll (`grad_cavi_iters=20`, kept short to bound the autograd tape). Scoring
+(`infer_local`) runs CAVI **to convergence** (`cavi_max_iter=100`, `cavi_tol=1e-3`).
+On avg-322-token AoU docs CAVI needs **~50 iters** to converge — 20-step θ is cosine
+0.987 / L1 0.13 off, 50-step is 0.99995. So the head trains on under-converged θ and
+is scored on converged θ: a train/test **representation** mismatch that pins it below
+a batch LR (which fits+scores on the *same* converged θ). This is exactly why the
+**toy passed** (small docs → CAVI converges within 20 → θ match → head reached 0.907)
+while **AoU failed** (large docs → 20-step θ ≠ converged θ). The head machinery
+(ridge, optimizer) is identical toy-vs-AoU and the toy converged, so it is not the
+head math — it is θ-depth. The `_cavi_theta_anp` docstring's "faithfulness invariant
+(train π = test π)" silently breaks for large docs.
+
+### Run 6 — the θ fix — PENDING
+
+Single change from Run 5: **`grad_cavi_iters` 20 → 50** (new `--grad-cavi-iters`),
+so the differentiable training θ converges like the scorer's. Everything else held
+(K=50, warm 50, weight_y 1000, head_lr_scale 2, subsampling 0.2, max_iter 300,
+topic_trust 0.1, skip_two_stage). Cost: ~2.5× the per-doc supervised-gradient tape.
+`rm -rf` the run dir first (fresh warm-start). Expect the VI-PC head to finally climb
+off 0.52 toward `pc_topics_lr`'s ~0.61 — the methods-faithful joint head reaching the
+same optimum the dedicated LR already shows. If it still lags, the residual is the
+head ridge/objective, and Option A (`pc_topics_lr` = 0.61 = Hughes) remains in hand.
