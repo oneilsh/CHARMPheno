@@ -29,9 +29,14 @@ K: 50                       # topics. Raised from 25 after Run 1: the cold K=25 
                             # topic representation under-informed the head (PC macro
                             # 0.545 << LR-on-codes 0.622); Hughes swept to 100, so more
                             # capacity is a prime lever. (SWEEP: 25/50/100.)
-weight_y: 100.0             # PC prediction-constraint weight. Hughes sets lambda ~ avg
-                            # tokens/doc — the driver now reports avg tokens; if it is
-                            # >> 100, raise this so supervision isn't swamped. (SWEEP.)
+weight_y: 1000.0            # PC prediction-constraint weight. Raised 100 -> 1000 after
+                            # the digamma-Jacobian gradient fix: the corrected supervised
+                            # topic gradient is ~65x smaller (true λ-space), so weight_y
+                            # must be ~an order of magnitude larger to shape topics — and
+                            # the fix makes that SAFE (toy sweep monotone 0.57@50 ->
+                            # 0.91@1000 with Σλ pinned, no runaway at any weight_y). SWEEP
+                            # up/down from 1000; watch heldout PC vs pc_topics_lr for
+                            # over-supervision (heldout drop) on noisy real data.
 alpha: 1.1                  # theta Dirichlet concentration (-> PCEstimator docConcentration)
 tau: 1.1                    # baseline (in-mem two-stage) topic Dirichlet; VI eta = 1/K
 max_iter: 200               # SVI global iterations. Kept SHORT (~1.9h at ~34s/iter)
@@ -51,11 +56,13 @@ tau0: 32.0                  # Robbins-Monro learning offset (-> --tau0). The GLO
                             # sped up on its own via head_lr_scale, so tau0 need not be
                             # pushed to the unstable extreme.
 kappa: 0.6                  # Robbins-Monro learning decay in (0.5, 1.0] (-> --kappa)
-head_lr_scale: 3.0          # HEAD-ONLY step multiplier (-> --head-lr-scale). Scales the
-                            # logistic-head SGD ~3x so the head reaches (and exceeds) its
-                            # 500-iter scale-1 movement within 200 iters, WITHOUT touching
-                            # the topic/lambda step. Lower toward 1.5 if |w_CK| runs away
-                            # or the ELBO destabilizes; raise toward 5 if still under-moved.
+head_lr_scale: 1.0          # HEAD-ONLY step multiplier (-> --head-lr-scale). Back to 1.0
+                            # from 3.0: the "hot head" was compensating for a head chasing
+                            # DRIFTING topics (the gradient bug); with the fix the topics
+                            # are stable and weight_y=1000 already drives the head hard
+                            # (toy: |w_CK|=13.6, AUC 0.907 at head_lr_scale=1). 3x on top
+                            # of weight_y=1000 would over-drive it. Raise only if the head
+                            # under-moves (|w_CK|max stays small) with stable topics.
 weight_y_warmup_iters: 20   # ramp weight_y 0->100 over the first 20 SVI steps
                             # (-> --weight-y-warmup-iters), so the 3x-hot head does not
                             # spike on the early, high-variance minibatches.
@@ -335,19 +342,49 @@ flagged "biggest open question") is drifting the topics into a degenerate,
 the two-stage's *frozen* topics score cleanly. The unsupervised half of the
 pipeline replicates Hughes; the bug is isolated to the supervised global step.
 
-### Run 3 — LOCALIZE (eval-only, no refit) then targeted fit
+### Run 3 — LOCALIZE (eval-only on the Run-2 checkpoint, no refit)
 
-New driver diagnostic `pc_topics_lr` scores PC's OWN supervised topics with a
-clean external LR — always computed, so it runs on the **existing Run-2
-checkpoint via `--eval-only` (≈20 min, no 6h refit)**:
-- if `pc_topics_lr` ≈ 0.52 (≈ the PC head) and ≪ the two-stage's 0.614 → the
-  supervised **topics** are degraded → lower `topic_trust` (new knob: 0.02, or 0
-  = freeze topics = head-only supervision) and/or `weight_y`;
-- if `pc_topics_lr` ≈ 0.61 (≫ the PC head) → the **head** is the weak link (SGD
-  under-fits vs a converged LR) → a head-training fix, not the topics.
+The `pc_topics_lr` diagnostic on the buggy Run-2 checkpoint:
 
-Then the targeted fit. **Runtime:** the two-stage baseline is now established at
-0.614 and stable, so iteration fits set `skip_two_stage: true` (−~1.4 h); the
-`pc_topics_lr` diagnostic stays as the cheap supervised-topic check. Lowering
-`topic_trust` should also stop the `Σλ` blow-up that made late iters crawl
-(35 s → 66 s), so the fit itself gets faster.
+| model | macro AUC |
+|---|---|
+| PC-topics + external LR (`pc_topics_lr`) | **0.604** |
+| LR-on-codes | 0.613 |
+| VI-PC head | 0.521 |
+
+Both failure modes, head the larger: PC's supervised topics are only *mildly*
+degraded (`pc_topics_lr` 0.604 vs unsupervised 0.614, −0.01 — the trust region
+kept the corruption small), but the PC **head** extracts only 0.521 from those
+topics where a clean LR gets 0.604 (−0.083) — the head co-adapted to the drifting
+topics during the `Σλ` runaway.
+
+### ROOT CAUSE — a mis-transformed supervised gradient (fixed)
+
+The supervised topic correction subtracted `∂loss/∂expElogbeta` (topic-PROBABILITY
+space) directly from `λ` (Dirichlet-COUNT space), skipping the chain-rule step
+through `expElogbeta = exp(ψ(λ) − ψ(Σλ))`. Finite-difference vs the true `∂loss/∂λ`:
+the applied gradient was **~65× too large and ~33° mis-directed** (cosine 0.84).
+That one defect produced every symptom — the trust region existed only to cap the
+65×, a mis-directed push still ratcheted `Σλ` (as STM's damping-cap test predicts),
+and the wrong direction degraded the topics. Fix (commit, `_grad_topics_to_lambda`):
+the exact digamma-Jacobian completes the chain rule to λ-space, finite-difference-
+exact. Toy `weight_y` sweep with the fix: PC AUC **0.57→0.91→0.92** (50→1000→3000),
+approaching raw-code LR (0.949) where the unsupervised two-stage is stuck at ~0.56,
+with **Σλ pinned at ~7.6e4 (no runaway at any weight_y)**. Unlike STM's structural
+pin, this is a plain gradient correction — λ now moves in the true descent direction.
+
+### Run 4 — the corrected fit — PENDING
+
+Same cohort as Runs 2/3 but with the gradient fix in code and the config it
+implies: **`weight_y` 100 → 1000** (the corrected gradient is ~65× smaller, so the
+prediction weight must be ~an order larger to shape topics — now safe at any
+strength), **`head_lr_scale` 3 → 1.0** (the "hot head" was compensating for a head
+chasing drift; stable topics + `weight_y=1000` drive it enough). `K=50`,
+`warm_start_unsup_iters=50`, `weight_y_warmup_iters=20`, `tau0=32`,
+`topic_trust=0.1` (now a light floor-guard, not load-bearing), `skip_two_stage:
+true`, `max_iter=200`. **Requires `rm -rf` of the run dir** (the Run-2 checkpoint
+carries the degenerate topics; a fresh warm-start is needed). Expect: `Σλ` bounded
+(no blow-up), late iters no longer crawling, and PC rising off 0.521 toward — and
+ideally past — the ~0.614 unsupervised/LR band (supervision finally helping). Read
+`PC head` vs `pc_topics_lr`: if they converge, the head closed its gap on stable
+topics; sweep `weight_y` from 1000 if PC under- or over-shoots.

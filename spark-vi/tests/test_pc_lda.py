@@ -360,7 +360,13 @@ def test_pc_supervised_beats_two_stage_on_heldout_auc(spark):
         return model, result.global_params, th_tr, th_te
 
     # PC (supervised) and its own unsupervised (weight_y=0) representation.
-    _pc, gp_pc, _pc_tr, pc_te = _fit(weight_y=50.0)
+    # weight_y=1000: after the digamma-Jacobian fix the supervised topic gradient
+    # is in true λ-space (~65x smaller than the old mis-scaled ∂/∂expElogbeta), so
+    # the prediction weight must be ~an order of magnitude larger to shape topics
+    # by the same amount. The fix makes this SAFE — a weight_y sweep on this corpus
+    # is monotone in AUC (0.57@50 -> 0.91@1000 -> 0.92@3000) with Σλ pinned at
+    # ~7.6e4 throughout (NO runaway at any weight_y), where the old code diverged.
+    _pc, gp_pc, _pc_tr, pc_te = _fit(weight_y=1000.0)
     _un, gp_un, un_tr, un_te = _fit(weight_y=0.0)
 
     w_pc = gp_pc["w_CK"][0]
@@ -372,7 +378,7 @@ def test_pc_supervised_beats_two_stage_on_heldout_auc(spark):
     codes_auc = roc_auc_score(yte, lr_codes.predict_proba(Xte)[:, 1])
 
     print(f"\n[increment-2 outcome parity] heldout ROC AUC — "
-          f"PC(wy=50)={pc_auc:.4f}  weight_y=0 head={wy0_auc:.4f}  "
+          f"PC(wy=1000)={pc_auc:.4f}  weight_y=0 head={wy0_auc:.4f}  "
           f"two-stage={two_auc:.4f}  LR-on-codes={codes_auc:.4f}  "
           f"(pos rate te={yte.mean():.2f}, |w_pc|max={np.abs(w_pc).max():.3g})")
 
