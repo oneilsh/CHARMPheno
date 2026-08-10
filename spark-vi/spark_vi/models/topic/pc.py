@@ -82,7 +82,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 import numpy as np
-from scipy.special import digamma
+from scipy.special import digamma, polygamma
 
 # Autograd — the ONE charter exception, contained to this module (Option B).
 import autograd
@@ -171,6 +171,36 @@ def _per_doc_sup_nll(eb_d, w_CK, counts, s, obs, alpha_vec, K, n_iters):
 # closures are cheap to reuse and never cross the Spark boundary (only the
 # unboxed numpy results do).
 _per_doc_sup_vg = autograd.value_and_grad(_per_doc_sup_nll, argnum=(0, 1))
+
+
+def _grad_topics_to_lambda(grad_eb: np.ndarray, lam: np.ndarray) -> np.ndarray:
+    """Map ∂loss/∂expElogbeta (topic-PROBABILITY space) → ∂loss/∂λ (Dirichlet-COUNT
+    space) via the EXACT Jacobian of ``expElogbeta = exp(ψ(λ) − ψ(Σ_v λ))``.
+
+    The supervised autograd gradient is taken w.r.t. ``expElogbeta`` (that bounds
+    the per-doc tape to the doc's unique words). But ``expElogbeta`` is a
+    normalized function of the ACTUAL global parameter λ, so descending λ needs the
+    remaining chain-rule step. With ``ψ' = polygamma(1)`` (trigamma) and
+    ``eb = expElogbeta``::
+
+        ∂eb_kv/∂λ_kv' = eb_kv·( ψ'(λ_kv)·[v'=v] − ψ'(Σ_v λ_k) )
+        ⇒ ∂loss/∂λ_kv = eb_g_kv·ψ'(λ_kv) − ψ'(Σλ_k)·Σ_v eb_g_kv ,   eb_g = eb·grad_eb
+
+    The second (per-topic) term is the normalizer coupling the old per-cell "sign
+    carries to λ" argument dropped. Omitting the whole transform left the raw
+    ∂loss/∂eb — which is ~V·wy too large AND mis-directed (finite-difference:
+    ~65× norm, ~0.84 direction cosine) — subtracted from λ, so the supervised
+    correction degraded the topics and ratcheted Σλ; the per-cell trust region
+    only masked the magnitude. This transform is finite-difference-EXACT (see
+    ``test_supervised_lambda_gradient_matches_finite_difference``) and cheap: two
+    trigamma evals + a per-topic sum, no extra autograd tape.
+    """
+    lam = np.asarray(lam, dtype=np.float64)
+    eb = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+    eb_g = eb * grad_eb
+    return (eb_g * polygamma(1, lam)
+            - polygamma(1, lam.sum(axis=1, keepdims=True))
+            * eb_g.sum(axis=1, keepdims=True))
 
 
 def _supervised_batch_value_and_grad(
@@ -475,44 +505,35 @@ class OnlinePCLDA(VIModel):
         RM ρ_t). With ``wy`` the (warmup-scaled) effective weight_y,
         ``N`` = ``target_stats["n_docs"]`` the corpus-equivalent doc count:
 
-          (b) supervised topic correction on λ, with a TRUST REGION.
-              Space/scale (the bug this guard fixes). ``gT`` = ``grad_topics_stat``
-              is Σ_d ∂loss_y_d/∂expElogbeta, a gradient in topic-PROBABILITY space
-              (expElogbeta ~ O(1/V)), corpus-SUMMED and then corpus-SCALED by the
-              runner. λ lives in Dirichlet-COUNT space (per-cell λ ~ O(tens),
-              Σλ ~ corpus tokens). Subtracting ``ρ·wy·gT`` directly from λ mixes
-              two spaces that are decades apart AND scales the subtraction with
-              corpus size, so at 33k docs × wy=100 the "correction" dwarfs λ and λ
-              diverges geometrically (Σλ doubling per iter; the LDA ELBO computed on
-              the corrupted λ then explodes to ±1e32). A ρ-blend does NOT save it:
-              (1-ρ) shrinks λ toward η+counts, but the subtracted term is orders of
-              magnitude larger than that anchor, so the shrinkage is irrelevant.
-              (This corrects the earlier docstring's WRONG claim that the correction
-              was "corpus-scale ... hence stable".)
-
-              The fix: descend loss_y in the SAME direction (−gT; expElogbeta is
-              monotone-increasing in λ per cell, so the ∂/∂expElogbeta descent
-              direction carries to λ), but clip the PER-CELL correction to a fixed
-              fraction ``topic_trust`` of that cell's just-taken unsupervised λ:
-                  raw  = ρ · wy · gT
+          (b) supervised topic correction on λ, PROPERLY TRANSFORMED then damped.
+              ``grad_topics_stat`` is Σ_d ∂loss_y_d/∂expElogbeta — a gradient in
+              topic-PROBABILITY space, because the autograd tape is bounded at
+              ``expElogbeta`` (the doc-sliced topic representation). But
+              ``expElogbeta = exp(ψ(λ) − ψ(Σλ))`` is a normalized function of the
+              ACTUAL global parameter λ, so the descent step on λ needs the
+              remaining chain-rule factor. :func:`_grad_topics_to_lambda` applies
+              the EXACT digamma-Jacobian to produce the true ``gT = ∂loss_y/∂λ``
+              (Dirichlet-COUNT space), evaluated at the λ the gradient was taken at.
+              Then the faithful descent step, lightly trust-region-damped:
+                  raw  = ρ · wy · gT                          (gT now in λ-space)
                   corr = clip(raw, −topic_trust·λ_unsup, +topic_trust·λ_unsup)
                   λ ← λ_unsup − corr                          (λ_unsup = new_lam)
-              A per-CELL cap (not a global norm) is required: a norm-bounded
-              correction concentrated on a small-λ cell can still drive that ONE
-              cell to the floor, and ``digamma(1e-30) ≈ -1e30`` makes the ELBO's
-              global β-KL explode even while Σλ looks bounded. The per-cell relative
-              cap guarantees ``λ_new ≥ (1-topic_trust)·λ_unsup > 0`` everywhere, so
-              no cell nears the floor, AND Σλ cannot run away geometrically. The cap
-              is relative to the true per-iteration λ state (which already carries
-              the runner's corpus scaling), so it is scale-INVARIANT: the
-              unsupervised LDA step is unconditionally stable (a contraction toward
-              η+counts) and the supervised perturbation is bounded to a
-              ``topic_trust`` (default 0.1) fraction of the current λ, keeping the
-              combined step stable for ANY corpus size, ``wy``, or ``tau0``. ``wy``
-              remains the dial (below the cap the step is the exact faithful
-              ρ·wy·gT); above the cap it saturates rather than diverging. The
-              direction / meaning of the gradient is unchanged — only its magnitude
-              into λ-space is bounded.
+
+              History / why this matters: the transform was MISSING — the raw
+              ∂loss/∂expElogbeta (~V·wy too large AND ~33° mis-directed;
+              finite-difference: ~65× norm, ~0.84 direction cosine) was subtracted
+              directly from λ. That mis-transformed, persistently-biased push
+              degraded the supervised topics (heldout AUC BELOW the unsupervised
+              two-stage baseline) and ratcheted Σλ ~260× over 200 iters — a
+              compounding runaway the per-cell cap bounds per-step but (like STM's
+              analogous non-conjugate M-step, ADR 0034) cannot stop. With the
+              correct λ-space gradient the correction is naturally count-scaled and
+              correctly directed, so the runaway does not arise; the trust region is
+              retained only as a light per-cell safety (guaranteeing
+              ``λ_new ≥ (1-topic_trust)·λ_unsup > 0`` so no cell nears the
+              ``digamma`` floor), no longer the load-bearing stabilizer. ``wy``
+              remains the dial; below the cap the step is the exact faithful
+              ρ·wy·∂loss_y/∂λ.
           (c) head SGD. The head has NO ``(1-ρ)`` shrinkage and no corpus-scale
               anchor, so a corpus-SUMMED gradient makes the un-damped step grow
               with corpus size and run the logistic head off to its saturated tail
@@ -541,9 +562,16 @@ class OnlinePCLDA(VIModel):
 
         n_docs = float(target_stats.get("n_docs", np.array(1.0)))
         inv_n = 1.0 / max(n_docs, 1.0)
-        # Topic correction: β-probability-space gradient, trust-region-capped into
-        # λ-count space (see the space/scale note in the docstring).
-        grad_topics = np.asarray(target_stats["grad_topics_stat"], dtype=np.float64)
+        # Topic correction: the autograd stat is ∂loss/∂expElogbeta (topic-
+        # PROBABILITY space); transform it to the true ∂loss/∂λ (Dirichlet-COUNT
+        # space) via the exact digamma-Jacobian (:func:`_grad_topics_to_lambda`)
+        # BEFORE it touches λ. The Jacobian is evaluated at the λ the gradient was
+        # taken at (``global_params["lambda"]``, the pre-step value local_update
+        # read). This is the fix for the mis-transformed correction that made the
+        # supervised topics degrade (finite-difference-verified exact).
+        grad_topics_eb = np.asarray(target_stats["grad_topics_stat"], dtype=np.float64)
+        grad_topics = _grad_topics_to_lambda(
+            grad_topics_eb, global_params["lambda"])
         # Head: per-doc MEAN (scale-invariant; the un-shrunk head has no corpus anchor).
         grad_wCK = np.asarray(target_stats["grad_wCK_stat"], dtype=np.float64) * inv_n
         w_CK = np.asarray(global_params["w_CK"], dtype=np.float64)
