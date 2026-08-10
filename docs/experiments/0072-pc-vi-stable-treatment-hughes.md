@@ -39,11 +39,13 @@ weight_y: 1000.0            # PC prediction-constraint weight. Raised 100 -> 100
                             # over-supervision (heldout drop) on noisy real data.
 alpha: 1.1                  # theta Dirichlet concentration (-> PCEstimator docConcentration)
 tau: 1.1                    # baseline (in-mem two-stage) topic Dirichlet; VI eta = 1/K
-max_iter: 200               # SVI global iterations. Kept SHORT (~1.9h at ~34s/iter)
-                            # and paired with a HOT HEAD (head_lr_scale below) instead
-                            # of the slow 500-iter crawl: 0071 showed the topics/lambda
-                            # already stable while only |w_CK| under-moved, so the fix
-                            # is to accelerate the head, not run everything longer.
+max_iter: 300               # SVI global iterations. Raised 200 -> 300 for Run 5 (converge
+                            # the joint head): Run 4's head under-converged (VI-PC 0.518 vs
+                            # pc_topics_lr 0.612 on the SAME topics) because 200 iters at
+                            # subsampling 0.05 was ~10 noisy passes vs a batch LR. With
+                            # subsampling now 0.2 (4x data/iter -> ~60 passes at 300) the
+                            # head has the passes + lower noise to reach its optimum on the
+                            # (now stable) topics. Watch VI-PC head climb toward 0.612.
 test_frac: 0.25
 seed: 0
 save_interval: 25           # checkpoint the VIResult every 25 SVI iters into the run
@@ -59,13 +61,14 @@ tau0: 32.0                  # Robbins-Monro learning offset (-> --tau0). The GLO
                             # sped up on its own via head_lr_scale, so tau0 need not be
                             # pushed to the unstable extreme.
 kappa: 0.6                  # Robbins-Monro learning decay in (0.5, 1.0] (-> --kappa)
-head_lr_scale: 1.0          # HEAD-ONLY step multiplier (-> --head-lr-scale). Back to 1.0
-                            # from 3.0: the "hot head" was compensating for a head chasing
-                            # DRIFTING topics (the gradient bug); with the fix the topics
-                            # are stable and weight_y=1000 already drives the head hard
-                            # (toy: |w_CK|=13.6, AUC 0.907 at head_lr_scale=1). 3x on top
-                            # of weight_y=1000 would over-drive it. Raise only if the head
-                            # under-moves (|w_CK|max stays small) with stable topics.
+head_lr_scale: 2.0          # HEAD-ONLY step multiplier (-> --head-lr-scale). Run 5: 1.0
+                            # -> 2.0 to help the joint head reach its optimum before ρ
+                            # decays (Run 4 settled short at 0.518 vs the batch-LR 0.612 on
+                            # the same θ). Safe to bump now: the topics are stable (no drift
+                            # to chase) and subsampling 0.2 cut the gradient noise 4x. Only
+                            # scales the head step, not the topic/λ update. If |w_CK| starts
+                            # oscillating, ease back toward 1.5; if the head still under-
+                            # moves, this + more iters is the lever (not weight_y).
 weight_y_warmup_iters: 20   # ramp weight_y 0->100 over the first 20 SVI steps
                             # (-> --weight-y-warmup-iters), so the 3x-hot head does not
                             # spike on the early, high-variance minibatches.
