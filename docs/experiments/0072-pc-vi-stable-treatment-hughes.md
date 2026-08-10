@@ -376,7 +376,33 @@ approaching raw-code LR (0.949) where the unsupervised two-stage is stuck at ~0.
 with **Σλ pinned at ~7.6e4 (no runaway at any weight_y)**. Unlike STM's structural
 pin, this is a plain gradient correction — λ now moves in the true descent direction.
 
-### Run 4 — the corrected fit — PENDING
+### Run 4 — the corrected fit: weight_y=1000, K=50, warm, fixed gradient (2026-08-10)
+
+`Σλ_max` **flat 5e4–7e5 through all 200 iters** (at `weight_y=1000`, 10× what blew
+up in Run 2), `|w_CK|` settled ~4.2 (no oscillation), avg tokens/doc = 322.6.
+
+| model | macro AUC | macro AP |
+|---|---|---|
+| **PC-topics + external LR** (`pc_topics_lr`) | **0.612** | 0.149 |
+| LR-on-codes | 0.613 | 0.169 |
+| (unsupervised two-stage, Run 2) | 0.614 | — |
+| **VI-PC head** | **0.518** | 0.114 |
+
+**Fix confirmed + Hughes replicated, with one loose end.** The runaway is dead
+(`Σλ` flat at 10× the old blow-up weight). The **topics fully recovered**:
+`pc_topics_lr` 0.612 ≈ raw codes (0.613) ≈ unsupervised (0.614) ≈ Hughes (~0.62) —
+a 50-topic representation captures essentially all the raw-code predictive signal,
+the Hughes result on AoU. Two conclusions: (1) **supervision ≈ unsupervised here**
+(0.612 vs 0.614) — a *data* finding, not a bug: unlike the toy's hidden low-mass
+signal, AoU's predictable signal is already in the unsupervised topics (0.614 ≈
+0.613 raw codes), so there is no headroom for supervision to add; Hughes-consistent.
+(2) **The headline VI-PC head (0.518) is an under-converged SGD head** — NOT a topic
+problem (topics = 0.612). 200 minibatch iters ≈ ~10 noisy passes vs a converged
+`lbfgs` LR on 50-dim θ; the head is the last mile. "PC done right" = `pc_topics_lr`
+= 0.612. Next: converge the head (0.2 subsampling + more iters, or a final exact
+per-drug LR head refit on the trained θ — which by construction lands at 0.612).
+
+### Run 4 config (recorded)
 
 Same cohort as Runs 2/3 but with the gradient fix in code and the config it
 implies: **`weight_y` 100 → 1000** (the corrected gradient is ~65× smaller, so the
