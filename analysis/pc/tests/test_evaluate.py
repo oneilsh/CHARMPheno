@@ -443,3 +443,36 @@ def test_evaluate_pc_multitask_baseline_max_iter_runs(capsys):
         baseline_max_iter=5,
     )
     assert "two_stage" in res and res["meta"]["two_stage_skipped"] is False
+
+
+# --- LR baselines standardize features (converge on high-dim counts) ----------
+
+def test_lr_masked_is_feature_scale_invariant():
+    """Standardization makes the masked LR baseline invariant to feature scale —
+    the proof the scaler is applied (unscaled LR would differ and, on high-dim
+    counts, fail to converge)."""
+    from analysis.pc.evaluate import _lr_proba_per_label_masked
+    rng = np.random.default_rng(0)
+    X_tr = rng.integers(0, 5, size=(60, 8)).astype(float)
+    X_te = rng.integers(0, 5, size=(20, 8)).astype(float)
+    y = np.zeros((60, 2))
+    y[:30, 0] = 1.0
+    y[::2, 1] = 1.0
+    mask = np.ones((60, 2))
+    p1 = _lr_proba_per_label_masked(X_tr, y, mask, X_te, 2)
+    # Scale features by a large per-column constant -> standardization cancels it.
+    scale = np.array([1.0, 1000.0, 10.0, 500.0, 1.0, 250.0, 5.0, 100.0])
+    p2 = _lr_proba_per_label_masked(X_tr * scale, y, mask, X_te * scale, 2)
+    assert np.allclose(p1, p2, atol=1e-6)
+
+
+def test_lr_single_task_is_feature_scale_invariant():
+    from analysis.pc.evaluate import _lr_proba_per_label
+    rng = np.random.default_rng(1)
+    X_fit = rng.integers(0, 5, size=(50, 5)).astype(float)
+    X_te = rng.integers(0, 5, size=(15, 5)).astype(float)
+    y = np.zeros((50, 1)); y[:25, 0] = 1.0
+    scale = np.array([1.0, 1000.0, 10.0, 500.0, 2.0])
+    p1 = _lr_proba_per_label(X_fit, y, X_te, 1)
+    p2 = _lr_proba_per_label(X_fit * scale, y, X_te * scale, 1)
+    assert np.allclose(p1, p2, atol=1e-6)

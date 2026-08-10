@@ -49,6 +49,7 @@ from typing import Any
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.preprocessing import StandardScaler
 
 from analysis.pc.model import PCTopicModel
 
@@ -139,6 +140,12 @@ def _lr_proba_per_label(
     """
     N_te = X_te.shape[0]
     proba = np.zeros((N_te, C), dtype=np.float64)
+    # Standardize on the training features (leak-free: fit on X_fit only) so
+    # L-BFGS converges — unscaled high-dimensional counts otherwise hit the
+    # iteration limit, leaving an under-fit, unfairly weak baseline. X_fit is
+    # shared across labels here, so one scaler suffices.
+    scaler = StandardScaler().fit(X_fit)
+    X_fit_s, X_te_s = scaler.transform(X_fit), scaler.transform(X_te)
     for c in range(C):
         yc = y_fit_DC[:, c]
         classes = np.unique(yc)
@@ -146,10 +153,10 @@ def _lr_proba_per_label(
             proba[:, c] = float(classes[0]) if classes.size else 0.0
             continue
         lr = LogisticRegression(max_iter=1000)
-        lr.fit(X_fit, yc)
+        lr.fit(X_fit_s, yc)
         # Column of P(y=1): the positive class is 1.0 given binary {0,1} labels.
         pos_col = int(np.where(lr.classes_ == 1)[0][0])
-        proba[:, c] = lr.predict_proba(X_te)[:, pos_col]
+        proba[:, c] = lr.predict_proba(X_te_s)[:, pos_col]
     return proba
 
 
@@ -179,10 +186,15 @@ def _lr_proba_per_label_masked(
         if classes.size < 2:
             proba[:, c] = float(classes[0]) if classes.size else 0.0
             continue
+        # Standardize on this label's observed TRAIN rows (leak-free), apply to
+        # test, so L-BFGS converges on high-dimensional raw counts — unscaled
+        # 5000-dim counts otherwise hit the iteration limit (ConvergenceWarning),
+        # leaving an under-fit, unfairly weak baseline that flatters PC.
+        scaler = StandardScaler().fit(X_fit_full[rows])
         lr = LogisticRegression(max_iter=1000)
-        lr.fit(X_fit_full[rows], yc)
+        lr.fit(scaler.transform(X_fit_full[rows]), yc)
         pos_col = int(np.where(lr.classes_ == 1)[0][0])
-        proba[:, c] = lr.predict_proba(X_te)[:, pos_col]
+        proba[:, c] = lr.predict_proba(scaler.transform(X_te))[:, pos_col]
     return proba
 
 
