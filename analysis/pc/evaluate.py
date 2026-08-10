@@ -239,7 +239,9 @@ def multitask_baseline_probas(
     X_te: np.ndarray,
     C: int,
     shared: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray]:
+    skip_two_stage: bool = False,
+    baseline_max_iter: int | None = None,
+) -> tuple[np.ndarray | None, np.ndarray]:
     """The two Hughes baselines' ``(N_te, C)`` heldout probabilities, multi-task.
 
     Factored out of :func:`evaluate_pc_multitask` so the SAME baseline code is the
@@ -261,10 +263,16 @@ def multitask_baseline_probas(
     ``analysis.pc`` autograd the VI-PC driver runs on the driver — the VI-PC model
     itself is fit distributed via Spark.
     """
-    unsup = PCTopicModel(weight_y=0.0, **shared).fit(X_tr, y_tr_DC)
-    Pi_tr = unsup.Pi_                                       # (D_tr, K)
-    Pi_te = unsup.transform(X_te)                          # (N_te, K)
-    ts_proba = _lr_proba_per_label_masked(Pi_tr, y_tr_DC, mask_tr_DC, Pi_te, C)
+    if skip_two_stage:
+        ts_proba = None                                    # caller drops two_stage
+    else:
+        unsup_shared = dict(shared)
+        if baseline_max_iter is not None and baseline_max_iter > 0:
+            unsup_shared["max_iter"] = int(baseline_max_iter)
+        unsup = PCTopicModel(weight_y=0.0, **unsup_shared).fit(X_tr, y_tr_DC)
+        Pi_tr = unsup.Pi_                                   # (D_tr, K)
+        Pi_te = unsup.transform(X_te)                      # (N_te, K)
+        ts_proba = _lr_proba_per_label_masked(Pi_tr, y_tr_DC, mask_tr_DC, Pi_te, C)
     lrc_proba = _lr_proba_per_label_masked(X_tr, y_tr_DC, mask_tr_DC, X_te, C)
     return ts_proba, lrc_proba
 
@@ -286,6 +294,8 @@ def evaluate_pc_multitask(
     doc_batch_size: int = 2048,
     seed: int = 0,
     min_label_count: int = 0,
+    skip_two_stage: bool = False,
+    baseline_max_iter: int | None = None,
     **model_kwargs: Any,
 ) -> dict[str, Any]:
     """Joint multi-task PC vs. the Hughes baselines under per-cell missing labels.
@@ -381,16 +391,18 @@ def evaluate_pc_multitask(
 
     # --- Models 2 & 3: the two Hughes baselines (shared with the VI-PC driver) -
     # two-stage (unsupervised weight_y=0 -> per-column masked LR) and LR-on-codes.
+    # skip_two_stage drops the (in-memory) unsupervised fit; baseline_max_iter caps
+    # it. LR-on-codes always runs.
     ts_proba, lrc_proba = multitask_baseline_probas(
-        X_tr, y_tr_DC, mask_tr_DC, X_te, C, shared
+        X_tr, y_tr_DC, mask_tr_DC, X_te, C, shared,
+        skip_two_stage=skip_two_stage, baseline_max_iter=baseline_max_iter,
     )
 
     n_obs_train = [int(mask_tr_DC[:, c].sum()) for c in range(C)]
     n_obs_test = [int(mask_te_DC[:, c].sum()) for c in range(C)]
 
-    return {
+    out = {
         "PC": _bundle_masked(pc_proba, y_te_DC, mask_te_DC, C, min_label_count),
-        "two_stage": _bundle_masked(ts_proba, y_te_DC, mask_te_DC, C, min_label_count),
         "lr_codes": _bundle_masked(lrc_proba, y_te_DC, mask_te_DC, C, min_label_count),
         "meta": {
             "C": C,
@@ -400,6 +412,7 @@ def evaluate_pc_multitask(
             "n_test": int(X_te.shape[0]),
             "n_labeled": int(sum(n_obs_train)),
             "min_label_count": int(min_label_count),
+            "two_stage_skipped": bool(skip_two_stage),
             "n_obs_train": n_obs_train,
             "n_obs_test": n_obs_test,
             # Fit-health of the shared PC (the direct tell for an untrained head;
@@ -412,6 +425,11 @@ def evaluate_pc_multitask(
             },
         },
     }
+    if ts_proba is not None:
+        out["two_stage"] = _bundle_masked(
+            ts_proba, y_te_DC, mask_te_DC, C, min_label_count
+        )
+    return out
 
 
 def evaluate_pc_vs_baselines(
@@ -550,7 +568,9 @@ def format_results_table(results: dict[str, Any]) -> str:
     meta = results["meta"]
     names = meta["model_names"]
     C = meta["C"]
-    order = ["PC", "two_stage", "lr_codes"]
+    # Only the models actually present (the two-stage baseline may be skipped via
+    # --skip-two-stage), keeping the canonical PC / two_stage / lr_codes order.
+    order = [k for k in ("PC", "two_stage", "lr_codes") if k in results]
     # Below this test-cell count a label was masked from scoring; suppress its
     # raw n_pos/n_neg in the printed table too (an All-of-Us count < 20 is not
     # disclosable). 0 = no small-count masking (the pure-library default).
@@ -565,6 +585,8 @@ def format_results_table(results: dict[str, Any]) -> str:
         f"C={C} labels  n_train={meta['n_train']} "
         f"(labeled={meta['n_labeled']}) n_test={meta['n_test']}"
     )
+    if meta.get("two_stage_skipped") or "two_stage" not in results:
+        lines.append("  (two-stage baseline skipped — PC vs LR-on-codes only)")
     header = f"  {'model':<22} {'label':>6} {'AUC':>8} {'AP':>8}  {'n_pos/n_neg (te)':>18}"
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
