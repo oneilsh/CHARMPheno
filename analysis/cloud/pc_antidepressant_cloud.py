@@ -645,6 +645,17 @@ def _build_parser() -> argparse.ArgumentParser:
               "a large weight_y and/or --head-lr-scale > 1 does not spike the head "
               "on early, high-variance minibatches. Ignored for --backend inmem."),
     )
+    parser.add_argument(
+        "--topic-trust", type=float, default=0.1,
+        help=("VI backend: per-iteration trust-region on the supervised TOPIC "
+              "correction — each lambda cell moves by at most this fraction of its "
+              "own value per SVI step (maps to PCEstimator.topicTrust). The default "
+              "0.1 caps a single step but COMPOUNDS over many iters, so a long "
+              "supervised phase can still drift the topics into a degenerate, less-"
+              "predictive state (Sigma-lambda blow-up). Lower it (e.g. 0.02-0.05) to "
+              "keep the supervised topics near the unsupervised warm-start; 0 freezes "
+              "the topics entirely (head-only supervision). Ignored for inmem."),
+    )
     # --- Baseline controls (the two-stage / LR-on-codes comparison set) --------
     parser.add_argument(
         "--skip-two-stage", action="store_true",
@@ -1069,6 +1080,7 @@ def main(argv: list[str] | None = None) -> int:
                 "kappa": args.kappa,
                 "head_lr_scale": args.head_lr_scale,
                 "weight_y_warmup_iters": args.weight_y_warmup_iters,
+                "topic_trust": args.topic_trust,
                 "warm_start_unsup_iters": args.warm_start_unsup_iters,
                 # stable-treatment membership knobs (all-history features; no
                 # lookback/window/stability bracket for this cohort).
@@ -1585,6 +1597,7 @@ def _run_vi_backend(
                 learningOffset=args.tau0, learningDecay=args.kappa,
                 headLrScale=args.head_lr_scale,
                 weightYWarmupIters=args.weight_y_warmup_iters,
+                topicTrust=args.topic_trust,
                 maxIter=args.max_iter, seed=args.seed,
                 probabilityCol="probability",
                 saveDir=args.save_dir, saveInterval=args.save_interval,
@@ -1614,6 +1627,24 @@ def _run_vi_backend(
     # --- 5b) Transform + score PC, then the shared baselines ------------------
     with _phase("VI-PC transform + collect + baselines + per-drug scoring"):
         scored = model.transform(test_df)
+
+        # Diagnostic (localizer): PC's OWN supervised topics (theta) fed to a clean
+        # external per-label LR. Compared to the PC head bundle and the unsupervised
+        # two-stage, it separates the two failure modes: if PC-topics+LR >> the PC
+        # HEAD, the supervised head is the weak link; if PC-topics+LR is ALSO weak
+        # vs the unsupervised two-stage, the supervised TOPIC CORRECTION degraded
+        # the representation. theta is already on scored/train_df, so it is a small
+        # K-dim collect + LR. Gated with the other extra comparators.
+        # Always-on (cheap: K-dim collect + LR): it is the whole point of the
+        # localization, and it must survive --skip-two-stage so a fast --eval-only
+        # off a saved checkpoint still localizes without a refit.
+        with _phase("diagnostic: PC supervised topics + external LR"):
+            _Pi_tr, _y_tr, _m_tr, _ = _collect_topics_labels(
+                model.transform(train_df), C)
+            _Pi_te, _y_te, _m_te, _ = _collect_topics_labels(scored, C)
+            pc_topics_lr_bundle = _bundle_masked(
+                _lr_proba_per_label_masked(_Pi_tr, _y_tr, _m_tr, _Pi_te, C),
+                _y_te, _m_te, C, args.min_label_count)
 
         # Two-stage baseline: distributed SVI (unsupervised PCEstimator weight_y=0
         # -> per-label LR on the K-dim topics). Fit BEFORE the collect/unpersist,
@@ -1659,6 +1690,7 @@ def _run_vi_backend(
                     "kappa": float(args.kappa),
                     "head_lr_scale": float(args.head_lr_scale),
                     "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
+                    "topic_trust": float(args.topic_trust),
                     "max_iter": int(args.max_iter),
                 },
                 # Distributed-fit convergence signal (the untrained-head tell).
@@ -1672,6 +1704,7 @@ def _run_vi_backend(
                 "baseline_max_iter": int(args.baseline_max_iter),
                 "model_names": {
                     "PC": "VI-PC (SVI, joint)",
+                    "pc_topics_lr": "PC-topics+LR (diag)",
                     "two_stage": "two-stage (unsup+LR)",
                     "lr_codes": "LR-on-codes",
                 },
@@ -1679,6 +1712,8 @@ def _run_vi_backend(
         }
         if two_stage_bundle is not None:
             results["two_stage"] = two_stage_bundle
+        if pc_topics_lr_bundle is not None:
+            results["pc_topics_lr"] = pc_topics_lr_bundle
     return results, drug_order, int(n_train), int(n_test), int(n_train + n_test)
 
 
@@ -1812,6 +1847,7 @@ def _run_vi_backend_fullyobserved(
                 learningOffset=args.tau0, learningDecay=args.kappa,
                 headLrScale=args.head_lr_scale,
                 weightYWarmupIters=args.weight_y_warmup_iters,
+                topicTrust=args.topic_trust,
                 maxIter=args.max_iter, seed=args.seed,
                 probabilityCol="probability",
                 saveDir=args.save_dir, saveInterval=args.save_interval,
@@ -1837,6 +1873,24 @@ def _run_vi_backend_fullyobserved(
     # --- 5b) Transform + score PC, then the shared baselines ------------------
     with _phase("VI-PC transform + collect + baselines + per-drug scoring"):
         scored = model.transform(test_df)
+
+        # Diagnostic (localizer): PC's OWN supervised topics (theta) fed to a clean
+        # external per-label LR. Compared to the PC head bundle and the unsupervised
+        # two-stage, it separates the two failure modes: if PC-topics+LR >> the PC
+        # HEAD, the supervised head is the weak link; if PC-topics+LR is ALSO weak
+        # vs the unsupervised two-stage, the supervised TOPIC CORRECTION degraded
+        # the representation. theta is already on scored/train_df, so it is a small
+        # K-dim collect + LR. Gated with the other extra comparators.
+        # Always-on (cheap: K-dim collect + LR): it is the whole point of the
+        # localization, and it must survive --skip-two-stage so a fast --eval-only
+        # off a saved checkpoint still localizes without a refit.
+        with _phase("diagnostic: PC supervised topics + external LR"):
+            _Pi_tr, _y_tr, _m_tr, _ = _collect_topics_labels(
+                model.transform(train_df), C)
+            _Pi_te, _y_te, _m_te, _ = _collect_topics_labels(scored, C)
+            pc_topics_lr_bundle = _bundle_masked(
+                _lr_proba_per_label_masked(_Pi_tr, _y_tr, _m_tr, _Pi_te, C),
+                _y_te, _m_te, C, args.min_label_count)
 
         # Two-stage baseline: distributed SVI (unsupervised PCEstimator weight_y=0
         # -> per-label LR on the K-dim topics). Fit BEFORE the collect/unpersist,
@@ -1882,6 +1936,7 @@ def _run_vi_backend_fullyobserved(
                     "kappa": float(args.kappa),
                     "head_lr_scale": float(args.head_lr_scale),
                     "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
+                    "topic_trust": float(args.topic_trust),
                     "max_iter": int(args.max_iter),
                 },
                 "vi_convergence": {
@@ -1894,6 +1949,7 @@ def _run_vi_backend_fullyobserved(
                 "baseline_max_iter": int(args.baseline_max_iter),
                 "model_names": {
                     "PC": "VI-PC (SVI, joint)",
+                    "pc_topics_lr": "PC-topics+LR (diag)",
                     "two_stage": "two-stage (unsup+LR)",
                     "lr_codes": "LR-on-codes",
                 },
@@ -1901,6 +1957,8 @@ def _run_vi_backend_fullyobserved(
         }
         if two_stage_bundle is not None:
             results["two_stage"] = two_stage_bundle
+        if pc_topics_lr_bundle is not None:
+            results["pc_topics_lr"] = pc_topics_lr_bundle
     return results, drug_order, int(n_train), int(n_test), int(n_train + n_test)
 
 

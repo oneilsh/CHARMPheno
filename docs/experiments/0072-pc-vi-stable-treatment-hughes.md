@@ -66,7 +66,14 @@ baseline_max_iter: 100      # cap the two-stage baseline's SECOND (distributed S
                             # keeps the extra fit ~1h rather than a full 200. Set
                             # skip_two_stage: true (or --eval-only --skip-two-stage) to
                             # drop it entirely for a fast PC-vs-LR-on-codes readout.
-# skip_two_stage: false     # true => report only PC + LR-on-codes (no two-stage fit)
+skip_two_stage: true        # two-stage established at 0.614 (~Hughes) and stable, so
+                            # skip its second ~1.4h SVI fit on iteration runs; the
+                            # always-on pc_topics_lr diagnostic + LR-on-codes remain.
+                            # Set false for a final confirmation run.
+topic_trust: 0.1            # per-iter trust-region on the supervised topic correction
+                            # (-> --topic-trust). 0.1 caps one step but COMPOUNDS -> the
+                            # Run-2 Σλ blow-up; lower to 0.02 (or 0 = freeze topics =
+                            # head-only) once localization says the topics are degraded.
 warm_start_unsup_iters: 50  # unsup warm-start (Hughes): 0=cold start; N>0 = phase-1
                             # weight_y=0 topic warm-up (50 iters) then fresh-RM supervised
                             # phase 2 (-> --warm-start-unsup-iters). ON for Run 2: Run 1
@@ -304,15 +311,43 @@ unsupervised fit, we didn't; (2) **weight_y vs avg tokens** — the driver now
 reports avg tokens/doc; if ≫ 100 the supervised term is swamped; (3) **K too
 coarse**; (4) not fully converged. Run 2 addresses (1) + (3).
 
-### Run 2 — WARM-start (50) + K=50 — PENDING
+### Run 2 — WARM-start (50) + K=50, weight_y=100, 200 iters (2026-08-10)
 
-The Hughes-faithful push and the warm-vs-cold A/B (Run 1 = cold arm). Same cohort
-(so `check_resume_compat` corpus fields are unchanged) but K changes 25→50 and the
-fit is warm-started, so the Run-1 checkpoint is incompatible — **`rm -rf` the run
-dir before re-running** (a K change would otherwise shape-mismatch the loaded
-`(25, V)` topics; resume also silently disables warm-start). Then `make exp ID=72`.
-Record the same block; read avg tokens/doc from the log to decide whether to raise
-`weight_y` in a Run 3. A PC macro that climbs toward ~0.60–0.65 with warm-start is
-the replication *and* answers "does warm-start matter" (Run 1 says the cold arm
-falls short); a PC still ≪ LR after warm + higher K points at weight_y or a deeper
-representation-capacity limit, not a bug (LR proves the signal is in the data).
+Fit `n_iter=200`, `converged=False`, `|w_CK|max=4.81` — but oscillating (rose to
+~4, fell to 3.8, rose to 4.8), and `Σλ_max` **blew up 6e5 → 1.58e8** with
+`α_max → 1.2` over the supervised phase.
+
+| model | macro AUC | macro AP |
+|---|---|---|
+| **two-stage (unsup topics → LR)** | **0.614** | 0.149 |
+| LR-on-codes | 0.613 | 0.169 |
+| **VI-PC (supervised, K=50 warm)** | **0.521** | 0.115 |
+
+**Read — supervision is HURTING.** The distributed two-stage baseline (our own
+*unsupervised* SVI topics + a clean LR) hits **0.614 — a Hughes replication** (≈
+their 0.627). But the *supervised* PC drops to 0.521, *below* both its own
+unsupervised topics and Run 1's cold 0.545. Warm-start + K=50 made PC WORSE, not
+better. The `Σλ` blow-up + oscillating head are the tell: the **supervised topic
+correction** (a β-probability-space gradient applied to count-space `λ`, capped
+per-iter at `topic_trust·λ` but **compounding** over 200 iters — the design's
+flagged "biggest open question") is drifting the topics into a degenerate,
+*less*-predictive state, so the jointly-trained head chases a moving target while
+the two-stage's *frozen* topics score cleanly. The unsupervised half of the
+pipeline replicates Hughes; the bug is isolated to the supervised global step.
+
+### Run 3 — LOCALIZE (eval-only, no refit) then targeted fit
+
+New driver diagnostic `pc_topics_lr` scores PC's OWN supervised topics with a
+clean external LR — always computed, so it runs on the **existing Run-2
+checkpoint via `--eval-only` (≈20 min, no 6h refit)**:
+- if `pc_topics_lr` ≈ 0.52 (≈ the PC head) and ≪ the two-stage's 0.614 → the
+  supervised **topics** are degraded → lower `topic_trust` (new knob: 0.02, or 0
+  = freeze topics = head-only supervision) and/or `weight_y`;
+- if `pc_topics_lr` ≈ 0.61 (≫ the PC head) → the **head** is the weak link (SGD
+  under-fits vs a converged LR) → a head-training fix, not the topics.
+
+Then the targeted fit. **Runtime:** the two-stage baseline is now established at
+0.614 and stable, so iteration fits set `skip_two_stage: true` (−~1.4 h); the
+`pc_topics_lr` diagnostic stays as the cheap supervised-topic check. Lowering
+`topic_trust` should also stop the `Σλ` blow-up that made late iters crawl
+(35 s → 66 s), so the fit itself gets faster.
