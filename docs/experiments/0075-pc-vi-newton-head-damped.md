@@ -1,6 +1,6 @@
 ---
-id: 74
-slug: pc-vi-newton-head-fast
+id: 75
+slug: pc-vi-newton-head-damped
 status: pending
 model_class: pc
 cohort: mdd_stable_treatment
@@ -47,10 +47,10 @@ weight_y_warmup_iters: 0
 #     all; if not, banked closure holds and the machinery carries to the Mondo rare-
 #     disease cohorts — same AoU data, Mondo-mapping-based identification.)
 head_optimizer: newton
-head_lr: 0.7                 # newton step-damping fraction (~0.5-1.0). One damped
+head_lr: 0.3                  # damped: 0.7 -> 0.3. With damping d the head is an EMA
                              # Newton step/iter already converges the head; damping < 1
                              # smooths minibatch noise in g/H while topics move.
-head_newton_ridge: 0.01      # relative ridge (fraction of mean(diag(H))) conditioning
+head_newton_ridge: 0.05      # 0.01 -> 0.05: regularize near-singular per-minibatch H_c
                              # the per-label IRLS solve; only stabilizes it (AUC is
                              # scale-invariant to head magnitude), does not bias direction.
 # --- baseline controls ---
@@ -59,12 +59,20 @@ skip_two_stage: true
 min_label_count: 20
 ---
 
-# 0074 — VI-PC Newton (IRLS) head, fast schedule
+# 0075 — VI-PC Newton (IRLS) head, DAMPED (stabilize the oscillation)
 
 Identical to 0073 except `head_optimizer: sgd/adam → newton`. The direct test of "converge
 the head aggressively within each SVI iteration," done the aggregatable way: one ridge-
 Newton step per iteration on the per-label Fisher information, which needs no raw per-doc
 θ on the driver and is scale-invariant under the runner's corpus/batch stat scaling.
+
+0074 showed newton WORKS (head AUC 0.52->0.60, cos 0.09->0.35) but OSCILLATES: |w_CK|
+bounced 8.8->13->26.7->8, because per-minibatch Newton chases each minibatch's own
+logistic optimum and head_lr=0.7 tracked it too closely (+ a near-singular minibatch H_c
+spiked to 26.7). 0075 damps harder (head_lr 0.3: the head becomes an EMA of the per-
+minibatch optima -> converges to their mean = the corpus optimum, ~3-4x less oscillation)
+and ridges more (0.05: regularizes the near-singular H_c, no spikes). Expect the head to
+climb from 0.60 toward the pc_topics_lr ceiling (~0.62) and |w_CK| to stay bounded/steady.
 
 **Two questions this answers:**
 1. Does a *converged* co-fit head reach the `pc_topics_lr` ceiling (~0.61)? (Head AUC +
@@ -75,24 +83,4 @@ Newton step per iteration on the per-label Fisher information, which needs no ra
 
 ## Run log
 
-### Run 1 (2026-08-11) — newton WORKS, but oscillates
-
-| head | head AUC | cos(head, LR-dir) | pc_topics_lr | lr_codes |
-|---|---|---|---|---|
-| sgd (0072) | 0.524 | +0.091 | 0.6185 | 0.6127 |
-| adam hot (0073) | 0.533 | +0.112 | 0.6115 | 0.6127 |
-| **newton (this)** | **0.599** | **+0.347** | **0.6191** | 0.6127 |
-
-- **Head converges far better:** 0.52 → 0.60 AUC, direction ⊥ (0.09) → +0.35. Confirms the
-  0072–0073 diagnosis (pure head non-convergence) and that a per-iteration converger fixes it.
-- **But oscillates:** `|w_CK|max` bounced 8.8 → 13.4 → **26.7** → 8.1 → 9.4. Per-minibatch
-  Newton chases each 3.45k-doc minibatch's own logistic optimum; `head_lr=0.7` tracked it too
-  closely, and a near-singular minibatch `H_c` spiked to 26.7 (relative ridge 0.01 too small).
-  This residual oscillation caps the head below the ~0.62 ceiling.
-- **PC topic-shaping hint:** `pc_topics_lr` = 0.6191 edged past `lr_codes` 0.6127 for the FIRST
-  time (and > 0073's 0.6115) — a faint sign a valid head signal is helping the topics, but
-  within noise. Needs the stabilized head (0075) for a clean read.
-- **θ-routine mismatch:** confirmed negligible (cos training-vs-scoring 0.959; 0.618 vs 0.615).
-
-→ **0075**: damp harder (`head_lr` 0.3) + ridge more (0.05) to kill the oscillation and let the
-head reach the ceiling — then read whether the supervised topics actually beat unsupervised.
+_(pending)_
