@@ -83,4 +83,28 @@ climb from 0.60 toward the pc_topics_lr ceiling (~0.62) and |w_CK| to stay bound
 
 ## Run log
 
-_(pending)_
+### Run 1 (2026-08-11) — damping stabilized |w_CK|, but the head plateaus at ~0.60
+
+| run | head AUC | cos(head, LR-dir) | pc_topics_lr | lr_codes | \|w_CK\| |
+|---|---|---|---|---|---|
+| newton hot (0074) | 0.599 | +0.347 | 0.6191 | 0.6127 | oscillating (spike 26.7) |
+| **newton damped (this)** | 0.606 | +0.331 | 0.6192 | 0.6127 | **steady 6–8** ✓ |
+
+- **Damping fixed stability:** `|w_CK|max` steady 6.3–7.8, no spikes (head_lr 0.3 + ridge 0.05).
+- **But the head plateaus (~0.60, cos 0.33), NOT the 0.62 ceiling** — and NOT because of
+  oscillation. The topics never converge in 100 supervised iters (`converged=False`; α + Σλ
+  still drifting at iter 100), so the head chases a MOVING representation the whole run and
+  never gets a stable target. `cos(head, LR-on-final-topics)=0.35` = the head calibrated to
+  the topic TRAJECTORY, not the final topics.
+- **PC benefit on AoU = marginal but consistent:** `pc_topics_lr` 0.619 across BOTH newton
+  runs, vs unsupervised two-stage 0.614 (0072) and lr_codes 0.613. With a valid-ish head
+  signal finally driving the correction, supervision edges unsupervised by ~+0.005 — a real
+  but tiny gain, as expected where the signal is already in the topics.
+
+**Closure (AoU PC arc, 0070–0075):** the digamma-Jacobian gradient bug (fixed), the head
+non-convergence (diagnosed via the eval-only localizer, fixed by newton/IRLS), and the fair
+PC test (marginal on AoU) are all resolved. Remaining head gap 0.60→0.62 is a convergence-
+budget/topic-drift polish (more supervised iters and/or Polyak-average the head) that does
+NOT change the AoU conclusion. Newton machinery + finding carry to the Mondo rare-disease
+cohorts (same AoU data, Mondo-mapping identification), the hidden-low-mass-signal regime
+where topic-shaping should give a real pc_topics_lr gain.
