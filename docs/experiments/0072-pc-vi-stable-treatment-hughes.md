@@ -513,3 +513,40 @@ be a dead end.**
 The banked science is unchanged: `pc_topics_lr` ≈ 0.61 ≈ LR-on-codes 0.613 ≈
 unsupervised two-stage 0.614 — **Hughes replicated**; supervision ≈ unsupervised on
 AoU because the predictable signal is already in the unsupervised topics.
+
+### Run 7 — the direction cosine LOCALIZES it: head TRAINED but MIS-DIRECTED (2026-08-11)
+
+Eval-only re-score of the saved checkpoint (post-fix, K=50, weight_y=1000, n_iter=300,
+`|w_CK|max=3.61` — the head is TRAINED, not zero), now emitting the new per-label
+`head_vs_lr_cosine` (co-fit `w_CK[c]` vs a fresh raw-θ LR on the same **train** θ):
+
+```
+PC (head)  macro AUC = 0.5246
+pc_topics_lr         = 0.6150
+lr_codes             = 0.6127
+head vs raw-θ LR direction: mean cosine = +0.081
+  per-label = [-0.03,+0.12,-0.09,+0.16,+0.27,+0.02,+0.20,+0.07,+0.04,+0.05]
+```
+
+**This overturns the "scoring artifact" reading.** The head is trained (`|w_CK|`=3.6)
+but points **~orthogonal** (mean cos +0.08) to the label direction — and the cosine is
+measured on **train** θ, so `w_CK` does not even fit the *training* labels. It never
+received a correct label-descent gradient. Yet `pc_topics_lr`=0.61 on the *same* final
+θ ⇒ the **topics carry generalizable signal**; only the co-fit head misses it.
+
+This is genuinely new: the faithful *serial* head-SGD reproductions
+(`analysis/pc/diagnostics/head_optimizer_diagnosis.py`) ALWAYS reach the LR direction
+(cos≈1). So the fault is something the **joint distributed fit** does beyond
+head-SGD-on-final-topics — the supervised **topic-correction coupling** or the
+**distributed per-doc label/θ plumbing** — neither exercised by those serial sims. The
+passing toy test (`test_pc_supervised_beats_two_stage_on_heldout_auc`, head 0.907) uses
+the SAME distributed VIRunner path but at C=1, FULL-BATCH, K_FIT<K_DOM — so the plumbing
+is not broken in general; the failure is config/scale-dependent (minibatch subsampling,
+C=10, K=50, 300 iters of the correction). Bisection in progress via
+`spark-vi/tests/manual_pc_head_direction_repro.py` (local SparkContext, real
+OnlinePCLDA/VIRunner, toggling full-batch↔minibatch and C=1↔C=10).
+
+**Note on the inspector's `[1]` line:** for an `--eval-only` read, `params.grad_cavi_iters`
+etc. reflect the eval command's argparse DEFAULTS, not the checkpoint's training config
+(eval-only only restores K + weight_y from metadata). Only `weight_y`, K, `n_iter`, and
+`|w_CK|max` in that readout describe the actual fit. (Inspector caveat noted; fix TODO.)
