@@ -294,6 +294,57 @@ def test_supervised_lambda_gradient_matches_finite_difference():
     assert err_raw > 1e-2, "raw dEb unexpectedly matched dloss/dlambda; transform is a no-op?"
 
 
+def _one_supervised_step(head_optimizer, weight_y=50.0, head_lr=0.1, rho=0.5,
+                         seed=0):
+    """Run initialize_global -> local_update -> update_global once; return
+    (model, gp_before, gp_after) for a small supervised OnlinePCLDA."""
+    from spark_vi.models.topic.pc import OnlinePCLDA
+    K, V, C = 4, 12, 2
+    docs = _tiny_sup_batch(seed=seed, C=C, V=V)
+    model = OnlinePCLDA(K=K, vocab_size=V, C=C, weight_y=weight_y,
+                        head_optimizer=head_optimizer, head_lr=head_lr,
+                        random_seed=0)
+    gp0 = model.initialize_global(None)
+    stats = model.local_update(docs, gp0)
+    gp1 = model.update_global(gp0, stats, learning_rate=rho)
+    return model, gp0, gp1, stats
+
+
+def test_adam_head_moves_head_and_maintains_moment_buffers():
+    """The 'adam' head path updates w_CK off zero AND carries first/second-moment
+    buffers in global_params (absent for 'sgd'). A second step keeps the buffer key
+    set stable and the moments accumulate."""
+    model, gp0, gp1, stats = _one_supervised_step("adam")
+    assert set(gp0) == {"lambda", "alpha", "eta", "w_CK", "w_CK_m", "w_CK_v"}
+    assert np.abs(gp1["w_CK"]).max() > 0.0            # head moved off the zero seed
+    assert np.abs(gp1["w_CK_m"]).max() > 0.0          # first moment populated
+    assert np.abs(gp1["w_CK_v"]).max() > 0.0          # second moment populated
+    # sgd path: no moment buffers.
+    _, gp0s, gp1s, _ = _one_supervised_step("sgd")
+    assert "w_CK_m" not in gp0s and "w_CK_m" not in gp1s
+    # A second adam step keeps the key set constant (safe for combine/resume).
+    gp2 = model.update_global(gp1, stats, learning_rate=0.5)
+    assert set(gp2) == set(gp1)
+
+
+def test_adam_head_step_is_invariant_to_weight_y_but_sgd_is_not():
+    """The two-timescale decoupling property: because Adam normalizes by the running
+    gradient RMS, the FIRST adam head step (w seeded at 0, ridge = 0) is independent
+    of weight_y — the head runs on its own rate, not the topics' ρ·weight_y schedule.
+    The sgd step, by contrast, scales linearly with weight_y."""
+    _, _, a_lo, _ = _one_supervised_step("adam", weight_y=50.0)
+    _, _, a_hi, _ = _one_supervised_step("adam", weight_y=5000.0)
+    # 100x weight_y -> identical adam head update: the head no longer rides the
+    # topics' weight_y dial (the topic λ correction is a separate, capped path).
+    assert np.allclose(a_lo["w_CK"], a_hi["w_CK"], atol=1e-10)
+
+    _, _, s_lo, _ = _one_supervised_step("sgd", weight_y=50.0)
+    _, _, s_hi, _ = _one_supervised_step("sgd", weight_y=5000.0)
+    # sgd head step scales with weight_y -> the two are far apart (not a no-op head).
+    assert np.abs(s_lo["w_CK"]).max() > 0.0
+    assert not np.allclose(s_lo["w_CK"], s_hi["w_CK"])
+
+
 # ---------------------------------------------------------------------------
 # Increment 2 — OUTCOME parity: a trained OnlinePCLDA(weight_y>0) reproduces the
 # Prediction-Constrained advantage on heldout per-label AUC — it beats BOTH its

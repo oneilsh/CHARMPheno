@@ -70,7 +70,8 @@ def labeled_docs(X, Y):
 
 
 def run_config(spark, name, *, C, mini_batch_fraction, weight_y=1000.0,
-               max_iters=40, grad_cavi_iters=20):
+               max_iters=40, grad_cavi_iters=20, head_optimizer="sgd",
+               head_lr=0.05):
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import roc_auc_score
     from spark_vi.core import VIConfig, VIRunner
@@ -82,7 +83,8 @@ def run_config(spark, name, *, C, mini_batch_fraction, weight_y=1000.0,
     docs = labeled_docs(Xtr, Ytr)
 
     model = OnlinePCLDA(K=K_FIT, vocab_size=V, C=C, weight_y=weight_y,
-                        alpha=1.1, grad_cavi_iters=grad_cavi_iters, random_seed=0)
+                        alpha=1.1, grad_cavi_iters=grad_cavi_iters, random_seed=0,
+                        head_optimizer=head_optimizer, head_lr=head_lr)
     cfg = dict(max_iterations=max_iters, learning_rate_tau0=32.0,
                learning_rate_kappa=0.6, random_seed=0, convergence_tol=1e-12)
     if mini_batch_fraction is not None:
@@ -107,7 +109,7 @@ def run_config(spark, name, *, C, mini_batch_fraction, weight_y=1000.0,
         v = lr.coef_[0]
         d = np.linalg.norm(v) * np.linalg.norm(w)
         cosines.append(v @ w / d if d > 0 else 0.0)
-    print(f"[{name:<28}] C={C} mbf={mini_batch_fraction} "
+    print(f"[{name:<32}] C={C} mbf={mini_batch_fraction} opt={head_optimizer} "
           f"|w_CK|max={np.abs(gp['w_CK']).max():.3g}  "
           f"head-AUC={np.mean(head_aucs):.3f}  LR-on-theta={np.mean(lr_aucs):.3f}  "
           f"mean-cos={np.mean(cosines):+.3f}", flush=True)
@@ -123,11 +125,15 @@ def main():
              .getOrCreate())
     spark.sparkContext.setLogLevel("ERROR")
     try:
-        print("C x minibatch interaction (strong signal, 80 iters):\n")
-        run_config(spark, "C=1  full-batch", C=1, mini_batch_fraction=None, max_iters=80)
-        run_config(spark, "C=1  mbf=0.05", C=1, mini_batch_fraction=0.05, max_iters=80)
-        run_config(spark, "C=10 full-batch", C=10, mini_batch_fraction=None, max_iters=80)
-        run_config(spark, "C=10 mbf=0.05", C=10, mini_batch_fraction=0.05, max_iters=80)
+        # Harsh regime (C=10, mbf=0.05, 200 iters — the compounding AoU has that
+        # 80-iter runs lack): does the RM-SGD head misdirect, and does Adam hold?
+        print("SGD vs Adam head @ C=10, mbf=0.05, 200 iters (strong signal):\n")
+        run_config(spark, "C=10 mbf=0.05 SGD", C=10, mini_batch_fraction=0.05,
+                   max_iters=200, head_optimizer="sgd")
+        for lr in (0.02, 0.05):
+            run_config(spark, f"C=10 mbf=0.05 ADAM lr={lr}", C=10,
+                       mini_batch_fraction=0.05, max_iters=200,
+                       head_optimizer="adam", head_lr=lr)
     finally:
         spark.stop()
 
