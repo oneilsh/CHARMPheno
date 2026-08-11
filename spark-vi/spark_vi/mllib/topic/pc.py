@@ -229,7 +229,15 @@ class _PCParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
     )
     headLr = Param(
         Params._dummy(), "headLr",
-        "base learning rate for the 'adam' head optimizer (ignored for 'sgd'); default 0.05",
+        "base learning rate for the 'adam' head optimizer, or the step-damping fraction "
+        "for 'newton' (~0.5-1.0); ignored for 'sgd'. Default 0.05",
+        typeConverter=TypeConverters.toFloat,
+    )
+    headNewtonRidge = Param(
+        Params._dummy(), "headNewtonRidge",
+        "relative ridge (fraction of mean(diag(H))) conditioning the per-label IRLS "
+        "solve for headOptimizer='newton'; only stabilizes the solve, does not bias the "
+        "head direction (AUC is scale-invariant to head magnitude). Default 0.01",
         typeConverter=TypeConverters.toFloat,
     )
     warmStartFrom = Param(
@@ -298,6 +306,7 @@ def _build_model_and_config(
         weight_y_warmup_iters=int(estimator.getOrDefault("weightYWarmupIters")),
         head_optimizer=str(estimator.getOrDefault("headOptimizer")),
         head_lr=float(estimator.getOrDefault("headLr")),
+        head_newton_ridge=float(estimator.getOrDefault("headNewtonRidge")),
         alpha=alpha,
         eta=eta,
         optimize_alpha=estimator.getOrDefault("optimizeDocConcentration"),
@@ -327,7 +336,8 @@ _PC_DEFAULTS = dict(
     gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
     numLabels=1, weightY=0.0, probabilityCol="probability",
     lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, topicTrust=0.1,
-    weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, warmStartFrom="",
+    weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, headNewtonRidge=0.01,
+    warmStartFrom="",
 )
 
 
@@ -370,6 +380,7 @@ class PCEstimator(_PCParams, Estimator):
         weightYWarmupIters: int = 0,
         headOptimizer: str = "sgd",
         headLr: float = 0.05,
+        headNewtonRidge: float = 0.01,
         warmStartFrom: str = "",
         # _PersistenceParams kwargs — see that mixin's docstring; these MUST
         # appear here explicitly (not just on the mixin) for kwarg-style

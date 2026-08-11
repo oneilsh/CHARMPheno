@@ -798,6 +798,8 @@ def build_pc_args(
             # byte the prior VI argv when unset.
             "--head-optimizer", str(effective.get("head_optimizer", "sgd")),
             "--head-lr", str(effective.get("head_lr", 0.05)),
+            # newton head: relative ridge conditioning the per-label IRLS solve.
+            "--head-newton-ridge", str(effective.get("head_newton_ridge", 0.01)),
             # Per-iteration trust-region on the supervised topic correction (maps
             # to PCEstimator.topicTrust). Default 0.1; lower to keep the supervised
             # topics near the unsupervised warm-start, 0 to freeze them (head-only).
