@@ -348,6 +348,11 @@ class OnlinePCLDA(VIModel):
         head_lr_scale: float = 1.0,
         topic_trust: float = 0.1,
         weight_y_warmup_iters: int = 0,
+        head_optimizer: str = "sgd",
+        head_lr: float = 0.05,
+        head_beta1: float = 0.9,
+        head_beta2: float = 0.999,
+        head_eps: float = 1e-8,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
         optimize_alpha: bool = False,
@@ -373,6 +378,16 @@ class OnlinePCLDA(VIModel):
             raise ValueError(
                 f"weight_y_warmup_iters must be >= 0, got {weight_y_warmup_iters}"
             )
+        if head_optimizer not in ("sgd", "adam"):
+            raise ValueError(
+                f"head_optimizer must be 'sgd' or 'adam', got {head_optimizer!r}"
+            )
+        if head_lr <= 0:
+            raise ValueError(f"head_lr must be > 0, got {head_lr}")
+        if not (0.0 <= head_beta1 < 1.0 and 0.0 <= head_beta2 < 1.0):
+            raise ValueError("head_beta1/head_beta2 must lie in [0, 1)")
+        if head_eps <= 0:
+            raise ValueError(f"head_eps must be > 0, got {head_eps}")
 
         # The unsupervised LDA engine. Every LDA global (λ, α, η) and every LDA
         # update is owned by this delegate, so at weight_y == 0 OnlinePCLDA IS
@@ -401,6 +416,18 @@ class OnlinePCLDA(VIModel):
         self.head_lr_scale = float(head_lr_scale)
         self.topic_trust = float(topic_trust)
         self.weight_y_warmup_iters = int(weight_y_warmup_iters)
+        # Head optimizer. 'sgd' (default) = the RM-damped step ρ·head_lr_scale·wy·g.
+        # 'adam' = a per-parameter adaptive step on the head, DECOUPLED from ρ and
+        # weight_y (Adam self-normalizes the gradient scale, so both cancel). This
+        # is the two-timescale fix: the non-conjugate head gets its own adaptive
+        # rate rather than sharing the topics' single Robbins-Monro schedule — the
+        # structure Hughes et al. (AISTATS 2018) used (Adam) to keep the coupled
+        # PC objective from landing in a mis-directed-head local optimum.
+        self.head_optimizer = str(head_optimizer)
+        self.head_lr = float(head_lr)
+        self.head_beta1 = float(head_beta1)
+        self.head_beta2 = float(head_beta2)
+        self.head_eps = float(head_eps)
         # Driver-side global-step counter, used only for weight_y warmup. Bumped
         # once per update_global call (the runner drives that single-threaded on
         # the driver), so it is a faithful iteration index without threading t
@@ -437,6 +464,12 @@ class OnlinePCLDA(VIModel):
         """
         gp = self._lda.initialize_global(data_summary)
         gp["w_CK"] = np.zeros((self.C, self.K), dtype=np.float64)
+        if self.head_optimizer == "adam":
+            # First/second-moment buffers for the Adam head step; global-only
+            # (updated on the driver in update_global), so they never cross the
+            # Spark stats boundary and combine_stats is unaffected.
+            gp["w_CK_m"] = np.zeros((self.C, self.K), dtype=np.float64)
+            gp["w_CK_v"] = np.zeros((self.C, self.K), dtype=np.float64)
         return gp
 
     def local_update(
@@ -554,6 +587,11 @@ class OnlinePCLDA(VIModel):
         if self.weight_y == 0.0:
             # Head unchanged at weight_y == 0 (stays at its zero seed).
             new_gp["w_CK"] = global_params["w_CK"]
+            if self.head_optimizer == "adam":
+                # Carry the (untouched) Adam buffers so the global-params key set
+                # stays constant across iterations for combine/resume.
+                new_gp["w_CK_m"] = global_params["w_CK_m"]
+                new_gp["w_CK_v"] = global_params["w_CK_v"]
             return new_gp
 
         self._update_calls += 1
@@ -597,9 +635,31 @@ class OnlinePCLDA(VIModel):
         # keeps λ a valid strictly-positive Dirichlet pseudocount.
         new_gp["lambda"] = np.maximum(lam_unsup - corr, 1e-30)
 
-        # (c) head SGD: mean data gradient + ridge, damped by ρ, head_lr_scale, wy.
+        # (c) head step: mean data gradient + ridge. Two optimizers:
+        #   'sgd'  — the RM-damped step ρ·head_lr_scale·wy·g (default; unchanged).
+        #   'adam' — a per-parameter adaptive step, DECOUPLED from ρ and wy. Adam
+        #            normalizes by the running gradient RMS, so the wy factor on
+        #            head_grad cancels in m̂/√v̂ and ρ is replaced by Adam's own
+        #            step dynamics: the head runs on its OWN (fast) timescale rather
+        #            than sharing the topics' single Robbins-Monro schedule. This is
+        #            the two-timescale remedy for the coupled-objective failure mode
+        #            where 10 shared-θ heads under minibatch noise drive w_CK into a
+        #            mis-directed local optimum (heldout head AUC ≈ chance while a
+        #            batch LR on the SAME topics predicts) — the instability Hughes
+        #            et al. (AISTATS 2018) avoided by optimizing {φ, η} with Adam.
         head_grad = grad_wCK + self.lambda_w * 2.0 * w_CK
-        new_gp["w_CK"] = w_CK - rho * self.head_lr_scale * wy * head_grad
+        if self.head_optimizer == "adam":
+            b1, b2, eps = self.head_beta1, self.head_beta2, self.head_eps
+            m = b1 * global_params["w_CK_m"] + (1.0 - b1) * head_grad
+            v = b2 * global_params["w_CK_v"] + (1.0 - b2) * (head_grad * head_grad)
+            t = self._update_calls  # >= 1 (bumped above)
+            m_hat = m / (1.0 - b1 ** t)
+            v_hat = v / (1.0 - b2 ** t)
+            new_gp["w_CK"] = w_CK - self.head_lr * m_hat / (np.sqrt(v_hat) + eps)
+            new_gp["w_CK_m"] = m
+            new_gp["w_CK_v"] = v
+        else:
+            new_gp["w_CK"] = w_CK - rho * self.head_lr_scale * wy * head_grad
         return new_gp
 
     def _effective_weight_y(self) -> float:
