@@ -11,15 +11,23 @@ on All-of-Us OMOP, cohort `mdd_stable_treatment`, experiment **0072**.
 - **Big win (done):** found + fixed a real gradient bug in the VI-PC supervised
   topic correction (a missing digamma-Jacobian). Killed the Σλ runaway. **Hughes
   replicated on AoU.**
-- **Open thread — now DIAGNOSED (2026-08-11):** the *joint SVI head* reads 0.52 vs a
-  batch LR's 0.615 on the *same* topics. The local diagnosis
-  (`analysis/pc/diagnostics/head_optimizer_diagnosis.py`) proves the head **optimizer
-  is sound** — it reaches the LR ceiling under ridge/budget/LR/θ-depth/drift/imbalance
-  stressors. So the 0.52 is a **run-specific artifact, not a method bug**; the ridge
-  hypothesis is falsified and `--head-l2` is a dead end. Next = cheap artifact checks
-  (`w_CK_absmax`, `w_CK`-vs-LR direction), not another cluster run.
-- **Immediate pending action:** confirm whether the last result (Run 6) is really
-  the `grad_cavi_iters=50` run (see below).
+- **Open thread — LOCALIZED (2026-08-11, Run 7):** the *joint SVI head* reads 0.52 vs
+  a batch LR's 0.615 on the *same* topics. Two stages of diagnosis:
+  1. `analysis/pc/diagnostics/head_optimizer_diagnosis.py` proved the head **optimizer
+     is sound** (reaches the LR ceiling under ridge/budget/LR/θ-depth/drift/imbalance)
+     — so the ridge/θ-depth hypotheses are falsified and `--head-l2` is a dead end.
+  2. The new eval-only `head_vs_lr_cosine` localizer (Run 7) then showed the head is
+     **TRAINED (`|w_CK|`=3.6) but MIS-DIRECTED**: mean cosine **+0.08** to the label
+     direction on **train** θ — it never got a correct label-descent gradient. Topics
+     are fine (`pc_topics_lr`=0.61 on the same θ). So it is **a real joint-fit bug**,
+     not a scoring artifact: the fault is in what the JOINT distributed fit does beyond
+     head-SGD-on-final-topics (topic-correction coupling, or distributed per-doc
+     label/θ plumbing). Serial head-SGD reproductions never show it; the passing toy
+     (C=1, full-batch) doesn't either → config/scale-dependent.
+- **Immediate next:** bisect toy→AoU config axes locally (no cluster) with
+  `spark-vi/tests/manual_pc_head_direction_repro.py` (real OnlinePCLDA/VIRunner,
+  toggling full-batch↔minibatch, C=1↔C=10) to find which axis flips the head from
+  aimed (cos≈1) to mis-directed (cos≈0), then fix that.
 - **Pivot the user wants:** move toward the **Mondo rare-disease** space, where PC's
   topic-shaping should actually help (hidden low-mass signal — the regime where the
   toy showed PC 0.56→0.91, unlike AoU where the signal is already captured).
