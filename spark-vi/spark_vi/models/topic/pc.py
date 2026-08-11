@@ -589,9 +589,11 @@ class OnlinePCLDA(VIModel):
             new_gp["w_CK"] = global_params["w_CK"]
             if self.head_optimizer == "adam":
                 # Carry the (untouched) Adam buffers so the global-params key set
-                # stays constant across iterations for combine/resume.
-                new_gp["w_CK_m"] = global_params["w_CK_m"]
-                new_gp["w_CK_v"] = global_params["w_CK_v"]
+                # stays constant across iterations for combine/resume. Lazy-init to
+                # zeros if a warm-start checkpoint (e.g. an sgd phase 1) lacks them.
+                zc = np.zeros((self.C, self.K), dtype=np.float64)
+                new_gp["w_CK_m"] = global_params.get("w_CK_m", zc)
+                new_gp["w_CK_v"] = global_params.get("w_CK_v", zc.copy())
             return new_gp
 
         self._update_calls += 1
@@ -650,8 +652,19 @@ class OnlinePCLDA(VIModel):
         head_grad = grad_wCK + self.lambda_w * 2.0 * w_CK
         if self.head_optimizer == "adam":
             b1, b2, eps = self.head_beta1, self.head_beta2, self.head_eps
-            m = b1 * global_params["w_CK_m"] + (1.0 - b1) * head_grad
-            v = b2 * global_params["w_CK_v"] + (1.0 - b2) * (head_grad * head_grad)
+            # Lazy-init the moment buffers: a WARM START (or resume) seeds the global
+            # params from a saved checkpoint, replacing initialize_global's output, so
+            # a checkpoint written under head_optimizer='sgd' (e.g. the unsupervised
+            # phase-1 warm-up) carries no w_CK_m/w_CK_v. Default them to zeros — the
+            # standard Adam cold-start — so switching to 'adam' at warm start works.
+            m_prev = global_params.get("w_CK_m")
+            v_prev = global_params.get("w_CK_v")
+            if m_prev is None:
+                m_prev = np.zeros_like(w_CK)
+            if v_prev is None:
+                v_prev = np.zeros_like(w_CK)
+            m = b1 * m_prev + (1.0 - b1) * head_grad
+            v = b2 * v_prev + (1.0 - b2) * (head_grad * head_grad)
             t = self._update_calls  # >= 1 (bumped above)
             m_hat = m / (1.0 - b1 ** t)
             v_hat = v / (1.0 - b2 ** t)

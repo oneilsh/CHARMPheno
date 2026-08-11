@@ -345,6 +345,30 @@ def test_adam_head_step_is_invariant_to_weight_y_but_sgd_is_not():
     assert not np.allclose(s_lo["w_CK"], s_hi["w_CK"])
 
 
+def test_adam_update_lazy_inits_moments_on_warm_start_from_sgd_checkpoint():
+    """A WARM START seeds global params from a saved checkpoint (replacing
+    initialize_global's output), so an sgd phase-1 checkpoint carries no
+    w_CK_m/w_CK_v. The adam update_global must lazy-init them (zeros) rather than
+    KeyError. Regression for the phase-2 warm-start crash."""
+    from spark_vi.models.topic.pc import OnlinePCLDA
+    K, V, C = 4, 12, 2
+    docs = _tiny_sup_batch(seed=1, C=C, V=V)
+    # An sgd model produces a checkpoint WITHOUT the Adam moment buffers.
+    sgd = OnlinePCLDA(K=K, vocab_size=V, C=C, weight_y=0.0, head_optimizer="sgd",
+                      random_seed=0)
+    warm_gp = sgd.initialize_global(None)
+    assert "w_CK_m" not in warm_gp                       # sgd checkpoint lacks buffers
+    # Warm-start an adam supervised model from those params (the phase-2 path).
+    adam = OnlinePCLDA(K=K, vocab_size=V, C=C, weight_y=1000.0, head_optimizer="adam",
+                       head_lr=0.05, random_seed=0)
+    stats = adam.local_update(docs, warm_gp)
+    gp1 = adam.update_global(warm_gp, stats, learning_rate=0.5)   # must NOT KeyError
+    assert np.abs(gp1["w_CK"]).max() > 0.0               # head moved
+    assert "w_CK_m" in gp1 and "w_CK_v" in gp1           # buffers now present
+    # A second step (buffers now present) also works.
+    adam.update_global(gp1, stats, learning_rate=0.5)
+
+
 # ---------------------------------------------------------------------------
 # Increment 2 — OUTCOME parity: a trained OnlinePCLDA(weight_y>0) reproduces the
 # Prediction-Constrained advantage on heldout per-label AUC — it beats BOTH its
