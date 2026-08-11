@@ -49,7 +49,7 @@ def make_corpus(seed, C=1):
     for c in range(C):
         w = rng.normal(size=K_DOM)
         w /= np.linalg.norm(w)
-        logit = theta @ (w * 4.5)
+        logit = theta @ (w * 12.0)   # LR-on-true-theta ~0.68 (clean, AoU-like headroom)
         logit -= logit.mean()
         Y[:, c] = (rng.random(D) < 1 / (1 + np.exp(-logit))).astype(float)
     return X, Y
@@ -123,11 +123,12 @@ def main():
              .getOrCreate())
     spark.sparkContext.setLogLevel("ERROR")
     try:
-        print("bisecting toy(full-batch,C=1) -> AoU(minibatch,C=10):\n")
-        run_config(spark, "A toy-like full-batch C=1", C=1, mini_batch_fraction=None)
-        run_config(spark, "B minibatch C=1", C=1, mini_batch_fraction=0.1)
-        run_config(spark, "C full-batch C=10", C=10, mini_batch_fraction=None)
-        run_config(spark, "D AoU-like minibatch C=10", C=10, mini_batch_fraction=0.1)
+        print("minibatch-fraction sweep at C=1 (strong signal, 80 iters):\n")
+        run_config(spark, "full-batch (control)", C=1, mini_batch_fraction=None,
+                   max_iters=80)
+        for mbf in (0.3, 0.1, 0.05):
+            run_config(spark, f"minibatch mbf={mbf}", C=1,
+                       mini_batch_fraction=mbf, max_iters=80)
     finally:
         spark.stop()
 
