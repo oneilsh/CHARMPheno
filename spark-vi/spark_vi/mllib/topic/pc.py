@@ -218,6 +218,20 @@ class _PCParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
         "(0 = no warmup)",
         typeConverter=TypeConverters.toInt,
     )
+    headOptimizer = Param(
+        Params._dummy(), "headOptimizer",
+        "head optimizer: 'sgd' (default; the RM-damped step rho*headLrScale*weightY*g) "
+        "or 'adam' (per-parameter adaptive step DECOUPLED from rho/weightY, so the "
+        "non-conjugate head runs on its own timescale — the two-timescale remedy for "
+        "the coupled-objective mis-directed-head failure; headLrScale/weightYWarmup do "
+        "NOT affect the adam step, headLr does)",
+        typeConverter=TypeConverters.toString,
+    )
+    headLr = Param(
+        Params._dummy(), "headLr",
+        "base learning rate for the 'adam' head optimizer (ignored for 'sgd'); default 0.05",
+        typeConverter=TypeConverters.toFloat,
+    )
     warmStartFrom = Param(
         Params._dummy(), "warmStartFrom",
         "path to a previously-written save dir whose global params (topics/lambda) "
@@ -282,6 +296,8 @@ def _build_model_and_config(
         head_lr_scale=float(estimator.getOrDefault("headLrScale")),
         topic_trust=float(estimator.getOrDefault("topicTrust")),
         weight_y_warmup_iters=int(estimator.getOrDefault("weightYWarmupIters")),
+        head_optimizer=str(estimator.getOrDefault("headOptimizer")),
+        head_lr=float(estimator.getOrDefault("headLr")),
         alpha=alpha,
         eta=eta,
         optimize_alpha=estimator.getOrDefault("optimizeDocConcentration"),
@@ -311,7 +327,7 @@ _PC_DEFAULTS = dict(
     gammaShape=100.0, caviMaxIter=100, caviTol=1e-3,
     numLabels=1, weightY=0.0, probabilityCol="probability",
     lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, topicTrust=0.1,
-    weightYWarmupIters=0, warmStartFrom="",
+    weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, warmStartFrom="",
 )
 
 
@@ -352,6 +368,8 @@ class PCEstimator(_PCParams, Estimator):
         headLrScale: float = 1.0,
         topicTrust: float = 0.1,
         weightYWarmupIters: int = 0,
+        headOptimizer: str = "sgd",
+        headLr: float = 0.05,
         warmStartFrom: str = "",
         # _PersistenceParams kwargs — see that mixin's docstring; these MUST
         # appear here explicitly (not just on the mixin) for kwarg-style

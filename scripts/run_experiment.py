@@ -791,6 +791,13 @@ def build_pc_args(
             # => byte-for-byte the prior VI argv when unset.
             "--head-lr-scale", str(effective.get("head_lr_scale", 1.0)),
             "--weight-y-warmup-iters", str(effective.get("weight_y_warmup_iters", 0)),
+            # Head optimizer: 'sgd' (default; shares the topics' RM schedule) or
+            # 'adam' (per-parameter adaptive step decoupled from rho/weight_y — the
+            # two-timescale fix for the coupled-objective mis-directed head). head_lr
+            # is the adam step size (ignored for sgd). Default sgd/0.05 => byte-for-
+            # byte the prior VI argv when unset.
+            "--head-optimizer", str(effective.get("head_optimizer", "sgd")),
+            "--head-lr", str(effective.get("head_lr", 0.05)),
             # Per-iteration trust-region on the supervised topic correction (maps
             # to PCEstimator.topicTrust). Default 0.1; lower to keep the supervised
             # topics near the unsupervised warm-start, 0 to freeze them (head-only).

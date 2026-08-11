@@ -98,9 +98,11 @@ def test_min_label_count_defaults_to_20():
 
 
 def test_head_lr_knobs_default_off():
-    # head_lr_scale=1.0 / weight_y_warmup_iters=0 => the plain single-rate fit.
+    # head_lr_scale=1.0 / weight_y_warmup_iters=0 => the plain single-rate fit;
+    # head_optimizer defaults to 'sgd' so behavior is unchanged unless opted in.
     ns = drv._build_parser().parse_args(["--cdr", "p.d", "--billing", "b"])
     assert ns.head_lr_scale == 1.0 and ns.weight_y_warmup_iters == 0
+    assert ns.head_optimizer == "sgd" and ns.head_lr == 0.05
 
 
 def test_head_lr_knobs_parse():
@@ -108,6 +110,20 @@ def test_head_lr_knobs_parse():
         "--cdr", "p.d", "--billing", "b",
         "--head-lr-scale", "3", "--weight-y-warmup-iters", "20"])
     assert ns.head_lr_scale == 3.0 and ns.weight_y_warmup_iters == 20
+
+
+def test_head_optimizer_adam_parses():
+    ns = drv._build_parser().parse_args([
+        "--cdr", "p.d", "--billing", "b",
+        "--head-optimizer", "adam", "--head-lr", "0.02"])
+    assert ns.head_optimizer == "adam" and ns.head_lr == 0.02
+
+
+def test_head_optimizer_rejects_unknown():
+    import pytest
+    with pytest.raises(SystemExit):
+        drv._build_parser().parse_args([
+            "--cdr", "p.d", "--billing", "b", "--head-optimizer", "rmsprop"])
 
 
 def test_baseline_controls_default_off():
