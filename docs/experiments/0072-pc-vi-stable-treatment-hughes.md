@@ -52,10 +52,16 @@ save_interval: 25           # checkpoint the VIResult every 25 SVI iters into th
                             # dir (-> --save-interval), so the fit is resumable and
                             # peekable via --eval-only (~8 checkpoints over 200 iters).
 # --- distributed-SVI schedule (backend: vi only) ---
-subsampling_rate: 0.2       # mini-batch fraction per SVI iteration (-> --subsampling-rate).
-                            # 0.2 not 0.05: RDD.sample is partition-wise, so a 0.05 batch on
-                            # this ~34.5k-doc / ~1000-partition corpus is ~1.7 docs/partition
-                            # -> tiny tasks + idle executors. 0.2 fills them (~7 docs/part).
+subsampling_rate: 0.5       # mini-batch fraction per SVI iteration (-> --subsampling-rate).
+                            # Raised 0.2 -> 0.5 for Run 8: the head-direction bisection
+                            # showed minibatch NOISE in the coupled objective is what
+                            # misdirects the co-fit head (local cos: full-batch +0.99 ->
+                            # mbf 0.1 +0.94), so a LARGER batch (closer to full) both feeds
+                            # Adam a cleaner gradient AND — with the cluster scaled to 18
+                            # executors + CHARM_SPARK_CONF='spark.locality.wait=0s' — the
+                            # extra per-iter work spreads instead of idling nodes. 0.5 on
+                            # ~34.5k docs / ~1000 partitions is ~17 docs/partition. Push to
+                            # 1.0 (full batch) for the cleanest coupling if wall-clock allows.
 tau0: 32.0                  # Robbins-Monro learning offset (-> --tau0). The GLOBAL
                             # (topic + lambda) schedule is left moderate; the head is
                             # sped up on its own via head_lr_scale, so tau0 need not be
