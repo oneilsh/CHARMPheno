@@ -75,4 +75,24 @@ Newton step per iteration on the per-label Fisher information, which needs no ra
 
 ## Run log
 
-_(pending)_
+### Run 1 (2026-08-11) — newton WORKS, but oscillates
+
+| head | head AUC | cos(head, LR-dir) | pc_topics_lr | lr_codes |
+|---|---|---|---|---|
+| sgd (0072) | 0.524 | +0.091 | 0.6185 | 0.6127 |
+| adam hot (0073) | 0.533 | +0.112 | 0.6115 | 0.6127 |
+| **newton (this)** | **0.599** | **+0.347** | **0.6191** | 0.6127 |
+
+- **Head converges far better:** 0.52 → 0.60 AUC, direction ⊥ (0.09) → +0.35. Confirms the
+  0072–0073 diagnosis (pure head non-convergence) and that a per-iteration converger fixes it.
+- **But oscillates:** `|w_CK|max` bounced 8.8 → 13.4 → **26.7** → 8.1 → 9.4. Per-minibatch
+  Newton chases each 3.45k-doc minibatch's own logistic optimum; `head_lr=0.7` tracked it too
+  closely, and a near-singular minibatch `H_c` spiked to 26.7 (relative ridge 0.01 too small).
+  This residual oscillation caps the head below the ~0.62 ceiling.
+- **PC topic-shaping hint:** `pc_topics_lr` = 0.6191 edged past `lr_codes` 0.6127 for the FIRST
+  time (and > 0073's 0.6115) — a faint sign a valid head signal is helping the topics, but
+  within noise. Needs the stabilized head (0075) for a clean read.
+- **θ-routine mismatch:** confirmed negligible (cos training-vs-scoring 0.959; 0.618 vs 0.615).
+
+→ **0075**: damp harder (`head_lr` 0.3) + ridge more (0.05) to kill the oscillation and let the
+head reach the ceiling — then read whether the supervised topics actually beat unsupervised.
