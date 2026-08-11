@@ -1868,3 +1868,27 @@ class TestBuildOnlyWithAutoCovariates:
         assert rc == 0
         assert run_build.calls == 1
         assert dispatch_cov.calls == []
+
+
+def test_extra_spark_confs_from_env(monkeypatch):
+    """CHARM_SPARK_CONF injects --conf pairs into the spark-submit cmd; unset = none."""
+    from pathlib import Path
+    monkeypatch.delenv("CHARM_SPARK_CONF", raising=False)
+    base = rx.build_spark_submit_cmd("s.py", [], Path("."))
+    assert "spark.locality.wait=0s" not in base
+
+    monkeypatch.setenv("CHARM_SPARK_CONF", "spark.locality.wait=0s spark.foo=bar")
+    cmd = rx.build_spark_submit_cmd("s.py", [], Path("."))
+    # each pair is a distinct --conf; injected after the base flags, before the script.
+    assert cmd[cmd.index("spark.locality.wait=0s") - 1] == "--conf"
+    assert cmd[cmd.index("spark.foo=bar") - 1] == "--conf"
+    assert cmd.index("spark.locality.wait=0s") < cmd.index("s.py")
+
+
+def test_extra_spark_confs_ignores_malformed(monkeypatch):
+    """Tokens without '=' are skipped (no bare --conf with a dangling value)."""
+    from pathlib import Path
+    monkeypatch.setenv("CHARM_SPARK_CONF", "notapair spark.ok=1")
+    cmd = rx.build_spark_submit_cmd("s.py", [], Path("."))
+    assert "notapair" not in cmd
+    assert cmd[cmd.index("spark.ok=1") - 1] == "--conf"
