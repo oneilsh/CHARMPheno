@@ -29,6 +29,7 @@ from analysis.pc.evaluate import (
     evaluate_pc_multitask,
     evaluate_pc_vs_baselines,
     format_results_table,
+    head_vs_lr_direction_cosine,
 )
 
 _VENDORED = os.path.join(
@@ -476,3 +477,32 @@ def test_lr_single_task_is_feature_scale_invariant():
     p1 = _lr_proba_per_label(X_fit, y, X_te, 1)
     p2 = _lr_proba_per_label(X_fit * scale, y, X_te * scale, 1)
     assert np.allclose(p1, p2, atol=1e-6)
+
+
+def test_head_vs_lr_cosine_aligns_when_head_is_the_lr_direction():
+    """A w_CK row that IS a batch LR's direction -> cosine ~ +1; a random row ->
+    ~0; a negated row -> ~-1; and under-observed labels -> None."""
+    rng = np.random.default_rng(4)
+    N, K = 400, 6
+    Pi = rng.dirichlet(np.full(K, 0.4), size=N)
+    w_true = rng.normal(size=K)
+    logit = Pi @ w_true
+    y0 = (rng.random(N) < 1.0 / (1.0 + np.exp(-(logit - logit.mean())))).astype(float)
+    # label 1: never observed enough (all-zero mask rows below min_count)
+    y = np.column_stack([y0, np.zeros(N)])
+    mask = np.ones((N, 2))
+    mask[:, 1] = 0.0
+    from sklearn.linear_model import LogisticRegression
+    ref = LogisticRegression(C=1.0, max_iter=2000).fit(Pi, y0).coef_[0]
+    # head row 0 = the LR direction (scaled); row 1 unused (label masked out)
+    w_CK = np.vstack([ref * 3.7, rng.normal(size=K)])
+    cos = head_vs_lr_direction_cosine(Pi, y, mask, w_CK, C=2, min_count=20)
+    assert cos[0] > 0.99                       # head aims where the LR aims
+    assert cos[1] is None                       # label 1 unobserved -> skipped
+    # a negated head flips the sign; a random head is ~orthogonal
+    cos_neg = head_vs_lr_direction_cosine(Pi, y, mask, np.vstack([-ref, w_CK[1]]),
+                                          C=2, min_count=20)
+    assert cos_neg[0] < -0.99
+    cos_rand = head_vs_lr_direction_cosine(
+        Pi, y, mask, np.vstack([rng.normal(size=K), w_CK[1]]), C=2, min_count=20)
+    assert abs(cos_rand[0]) < 0.8               # random direction not aligned

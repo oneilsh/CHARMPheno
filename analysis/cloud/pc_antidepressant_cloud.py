@@ -1271,6 +1271,18 @@ def _log_convergence(meta: Mapping[str, Any]) -> None:
             f"(|w_CK|max~=0 => head UNTRAINED)",
             flush=True,
         )
+        cos = c.get("head_vs_lr_cosine")
+        if cos is not None:
+            vals = [x for x in cos if x is not None]
+            mean_s = "n/a" if not vals else f"{sum(vals) / len(vals):+.3f}"
+            per = ", ".join("n/a" if x is None else f"{x:+.2f}" for x in cos)
+            print(
+                f"[driver] head vs raw-theta LR direction: mean cosine={mean_s} "
+                f"per-label=[{per}]  "
+                f"(~+1 => head aims right, low AUC is a scoring/scale artifact; "
+                f"~0 => head trained to the WRONG direction)",
+                flush=True,
+            )
 
 
 def _run_inmem_backend(
@@ -1659,6 +1671,15 @@ def _run_vi_backend(
             pc_topics_lr_bundle = _bundle_masked(
                 _lr_proba_per_label_masked(_Pi_tr, _y_tr, _m_tr, _Pi_te, C),
                 _y_te, _m_te, C, args.min_label_count)
+            # Localizer for a TRAINED-but-underperforming head: per-label cosine
+            # between the co-fit w_CK[c] and a fresh raw-theta LR on the same train
+            # theta. ~1 => the head points where a batch LR would (a low head AUC is
+            # then a scoring/scale/stale artifact, not a mis-trained direction);
+            # ~0 => the head trained to the wrong direction. Cheap (C small K-dim
+            # LRs); always-on so a fast --eval-only localizes without a refit.
+            from analysis.pc.evaluate import head_vs_lr_direction_cosine
+            _head_vs_lr_cos = head_vs_lr_direction_cosine(
+                _Pi_tr, _y_tr, _m_tr, model.headWeights(), C, args.min_label_count)
 
         # Two-stage baseline: distributed SVI (unsupervised PCEstimator weight_y=0
         # -> per-label LR on the K-dim topics). Fit BEFORE the collect/unpersist,
@@ -1715,6 +1736,9 @@ def _run_vi_backend(
                                    else float(vres.final_elbo)),
                     "converged": bool(vres.converged),
                     "w_CK_absmax": w_ck_absmax,
+                    # Per-label cosine(co-fit w_CK[c], fresh raw-theta LR coef): the
+                    # trained-but-wrong-direction vs scoring-artifact localizer.
+                    "head_vs_lr_cosine": _head_vs_lr_cos,
                 },
                 "baseline_max_iter": int(args.baseline_max_iter),
                 "model_names": {
@@ -1906,6 +1930,15 @@ def _run_vi_backend_fullyobserved(
             pc_topics_lr_bundle = _bundle_masked(
                 _lr_proba_per_label_masked(_Pi_tr, _y_tr, _m_tr, _Pi_te, C),
                 _y_te, _m_te, C, args.min_label_count)
+            # Localizer for a TRAINED-but-underperforming head: per-label cosine
+            # between the co-fit w_CK[c] and a fresh raw-theta LR on the same train
+            # theta. ~1 => the head points where a batch LR would (a low head AUC is
+            # then a scoring/scale/stale artifact, not a mis-trained direction);
+            # ~0 => the head trained to the wrong direction. Cheap (C small K-dim
+            # LRs); always-on so a fast --eval-only localizes without a refit.
+            from analysis.pc.evaluate import head_vs_lr_direction_cosine
+            _head_vs_lr_cos = head_vs_lr_direction_cosine(
+                _Pi_tr, _y_tr, _m_tr, model.headWeights(), C, args.min_label_count)
 
         # Two-stage baseline: distributed SVI (unsupervised PCEstimator weight_y=0
         # -> per-label LR on the K-dim topics). Fit BEFORE the collect/unpersist,
@@ -1961,6 +1994,9 @@ def _run_vi_backend_fullyobserved(
                                    else float(vres.final_elbo)),
                     "converged": bool(vres.converged),
                     "w_CK_absmax": w_ck_absmax,
+                    # Per-label cosine(co-fit w_CK[c], fresh raw-theta LR coef): the
+                    # trained-but-wrong-direction vs scoring-artifact localizer.
+                    "head_vs_lr_cosine": _head_vs_lr_cos,
                 },
                 "baseline_max_iter": int(args.baseline_max_iter),
                 "model_names": {
