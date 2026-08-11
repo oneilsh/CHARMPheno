@@ -82,7 +82,24 @@ head_lr_scale: 2.0          # HEAD-ONLY step multiplier (-> --head-lr-scale). Ru
                             # moves, this + more iters is the lever (not weight_y).
 weight_y_warmup_iters: 20   # ramp weight_y 0->100 over the first 20 SVI steps
                             # (-> --weight-y-warmup-iters), so the 3x-hot head does not
-                            # spike on the early, high-variance minibatches.
+                            # spike on the early, high-variance minibatches. IGNORED
+                            # when head_optimizer: adam (Adam self-scales the step).
+head_optimizer: adam        # Run 8 — THE head fix (-> --head-optimizer). The eval-only
+                            # localizer (Run 7) showed the co-fit head is TRAINED
+                            # (|w_CK|=3.6) but MIS-DIRECTED: mean cosine +0.08 to the
+                            # batch-LR direction on the SAME final topics (pc_topics_lr
+                            # =0.615 on those topics, so the topics carry signal — only
+                            # the head misses it). Bisection + lit (Hughes AISTATS 2018,
+                            # TTUR, STM) pin this to the coupled-objective instability
+                            # under stochastic optimization: 10 shared-θ heads on the
+                            # topics' single RM schedule land in a bad local optimum.
+                            # 'adam' runs the head on its own per-parameter adaptive
+                            # timescale (decoupled from ρ/weight_y) — Hughes' own remedy
+                            # (Adam on {φ,η}). Local A/B: sgd cos +0.92 -> adam +0.98,
+                            # head-AUC -> the LR ceiling. Set 'sgd' to revert.
+head_lr: 0.05               # adam head base LR (-> --head-lr; ignored for sgd). 0.02-
+                            # 0.05 worked locally; the head step is weight_y-scale-free
+                            # under Adam, so this is the head's only step dial.
 # --- baseline controls -------------------------------------------------------
 baseline_max_iter: 100      # cap the two-stage baseline's SECOND (distributed SVI,
                             # weight_y=0) topic fit at 100 iters (-> --baseline-max-iter).
@@ -550,3 +567,46 @@ OnlinePCLDA/VIRunner, toggling full-batch↔minibatch and C=1↔C=10).
 etc. reflect the eval command's argparse DEFAULTS, not the checkpoint's training config
 (eval-only only restores K + weight_y from metadata). Only `weight_y`, K, `n_iter`, and
 `|w_CK|max` in that readout describe the actual fit. (Inspector caveat noted; fix TODO.)
+
+### Run 8 — Adam head optimizer (the two-timescale fix) — TO RUN ON AoU (2026-08-11)
+
+Local bisection localized the mis-directed head to the **coupled-objective instability
+under stochastic optimization**: many shared-θ heads + minibatch noise drive `w_CK` into
+a bad (near-orthogonal) local optimum, sharing the topics' single Robbins-Monro schedule.
+This is the failure Hughes et al. (AISTATS 2018) documented ("our SGD algorithm is
+vulnerable to [poor local optima]") and avoided with **Adam** (per-parameter adaptive
+rates) + Gibbs/unsup init + converged π; the STM covariance-pinning and two-timescale SA
+(TTUR) are the sibling precedents (see the lit search in the session log).
+
+**Fix shipped (gated OFF by default):** `head_optimizer='adam'` on `OnlinePCLDA` /
+`PCEstimator.headOptimizer` / driver `--head-optimizer adam --head-lr 0.05`. The Adam
+head step is **decoupled from ρ and weight_y** (Adam self-normalizes the gradient scale),
+so the head runs on its own timescale; `head_lr` is its only step dial. `sgd` remains the
+default (byte-identical prior behavior; all tests green).
+
+**Local A/B (real OnlinePCLDA/VIRunner, C=10, mbf=0.05, 200 iters, strong signal):**
+
+| head | mean cos(w_CK, LR) | head-AUC | LR-on-θ |
+|---|---|---|---|
+| sgd | +0.918 | 0.672 | 0.680 |
+| **adam lr=0.02** | **+0.985** | **0.679** | 0.680 |
+| adam lr=0.05 | +0.973 | 0.677 | 0.680 |
+
+Adam is strictly better and reaches the ceiling. CAVEAT: the local harness never
+reproduces the *severe* AoU collapse (worst sgd here is cos +0.92, not AoU's +0.08), so
+this validates Adam as the right-shaped, ceiling-reaching, literature-aligned fix but the
+**definitive test is AoU itself** — the only environment exhibiting the 0.52 head.
+
+**Command (fresh fit on AoU):**
+```
+cd ~/repos/CHARMPheno && git checkout claude/faithful-flat-pc && git pull
+# set head_optimizer: adam (and optionally head_lr) in the 0072 frontmatter, then:
+cd analysis/cloud && rm -rf "$RUN_DIR" && make exp ID=72
+# OR ad-hoc via the raw driver (append to the existing PC_AD_ARGS):
+#   --head-optimizer adam --head-lr 0.05
+```
+Read the new `[driver] head vs raw-theta LR direction: mean cosine=...` log line + the
+`head_vs_lr_cosine` in `pc_results.json` (via `inspect_run.py`): if Adam lifts the PC
+head cosine toward +1 and the AUC toward `pc_topics_lr` (~0.61), the joint head is
+rescued; if not, the coupling buys nothing on AoU and two-stage (Hughes' JAMA choice)
+stands. Either way `pc_topics_lr` remains the honest reported number.

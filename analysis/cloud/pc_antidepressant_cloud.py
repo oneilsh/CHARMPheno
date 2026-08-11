@@ -635,7 +635,29 @@ def _build_parser() -> argparse.ArgumentParser:
               "is under-moved (|w_CK| still climbing at max_iter) — the targeted "
               "alternative to lowering tau0, which speeds up everything. Pair a hot "
               "head with --weight-y-warmup-iters so it does not spike early. Ignored "
-              "for --backend inmem."),
+              "for --backend inmem. Ignored when --head-optimizer adam (Adam self-"
+              "scales the step)."),
+    )
+    parser.add_argument(
+        "--head-optimizer", type=str, default="sgd", choices=("sgd", "adam"),
+        help=("VI backend: optimizer for the LOGISTIC HEAD w_CK. 'sgd' (default) = "
+              "the RM-damped step rho*head_lr_scale*weight_y*grad, sharing the topics' "
+              "single Robbins-Monro schedule. 'adam' = a per-parameter adaptive step "
+              "DECOUPLED from rho and weight_y (Adam normalizes by the running gradient "
+              "RMS, so both cancel), letting the non-conjugate head run on its own "
+              "timescale. This is the two-timescale remedy for the coupled-objective "
+              "failure where many shared-theta heads under minibatch noise drive w_CK "
+              "into a mis-directed local optimum (heldout head AUC ~= chance while a "
+              "batch LR on the SAME topics predicts) — the structure Hughes et al. "
+              "(AISTATS 2018) used (Adam on {phi, eta}). Maps to PCEstimator."
+              "headOptimizer. Ignored for --backend inmem."),
+    )
+    parser.add_argument(
+        "--head-lr", type=float, default=0.05,
+        help=("VI backend: base learning rate for --head-optimizer adam (ignored for "
+              "sgd). Maps to PCEstimator.headLr. 0.02-0.05 worked in the local "
+              "coupled-objective repro; the head step is scale-free in weight_y under "
+              "Adam, so this is the head's only step-size dial. Ignored for inmem."),
     )
     parser.add_argument(
         "--weight-y-warmup-iters", type=int, default=0,
@@ -1092,6 +1114,8 @@ def main(argv: list[str] | None = None) -> int:
                 "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
                 "kappa": args.kappa,
                 "head_lr_scale": args.head_lr_scale,
+                "head_optimizer": args.head_optimizer,
+                "head_lr": args.head_lr,
                 "weight_y_warmup_iters": args.weight_y_warmup_iters,
                 "topic_trust": args.topic_trust,
                 "grad_cavi_iters": args.grad_cavi_iters,
@@ -1223,6 +1247,8 @@ def main(argv: list[str] | None = None) -> int:
             "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
             "kappa": args.kappa,
             "head_lr_scale": args.head_lr_scale,
+            "head_optimizer": args.head_optimizer,
+            "head_lr": args.head_lr,
             "weight_y_warmup_iters": args.weight_y_warmup_iters,
             "warm_start_unsup_iters": args.warm_start_unsup_iters,
             "lookback_days": args.lookback_days, "window_days": args.window_days,
@@ -1452,6 +1478,8 @@ def _augmented_resave_pc(model, drug_order, V, vocab_map, args) -> None:
                 "tau0": float(args.tau0),
                 "kappa": float(args.kappa),
                 "head_lr_scale": float(args.head_lr_scale),
+                "head_optimizer": str(args.head_optimizer),
+                "head_lr": float(args.head_lr),
                 "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
                 "max_iter": int(args.max_iter),
                 "weight_y": float(args.weight_y),
@@ -1623,6 +1651,7 @@ def _run_vi_backend(
                 learningOffset=args.tau0, learningDecay=args.kappa,
                 headLrScale=args.head_lr_scale,
                 weightYWarmupIters=args.weight_y_warmup_iters,
+                headOptimizer=args.head_optimizer, headLr=args.head_lr,
                 topicTrust=args.topic_trust, gradCaviIters=args.grad_cavi_iters,
                 maxIter=args.max_iter, seed=args.seed,
                 probabilityCol="probability",
@@ -1724,6 +1753,8 @@ def _run_vi_backend(
                     "tau0": float(args.tau0),
                     "kappa": float(args.kappa),
                     "head_lr_scale": float(args.head_lr_scale),
+                    "head_optimizer": str(args.head_optimizer),
+                    "head_lr": float(args.head_lr),
                     "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
                     "topic_trust": float(args.topic_trust),
                     "grad_cavi_iters": int(args.grad_cavi_iters),
@@ -1886,6 +1917,7 @@ def _run_vi_backend_fullyobserved(
                 learningOffset=args.tau0, learningDecay=args.kappa,
                 headLrScale=args.head_lr_scale,
                 weightYWarmupIters=args.weight_y_warmup_iters,
+                headOptimizer=args.head_optimizer, headLr=args.head_lr,
                 topicTrust=args.topic_trust, gradCaviIters=args.grad_cavi_iters,
                 maxIter=args.max_iter, seed=args.seed,
                 probabilityCol="probability",
@@ -1983,6 +2015,8 @@ def _run_vi_backend_fullyobserved(
                     "tau0": float(args.tau0),
                     "kappa": float(args.kappa),
                     "head_lr_scale": float(args.head_lr_scale),
+                    "head_optimizer": str(args.head_optimizer),
+                    "head_lr": float(args.head_lr),
                     "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
                     "topic_trust": float(args.topic_trust),
                     "grad_cavi_iters": int(args.grad_cavi_iters),
