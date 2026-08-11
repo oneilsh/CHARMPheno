@@ -514,6 +514,103 @@ def _collect_topics_labels(df, C, topic_col="topicDistribution"):
     return Pi, y_DC, mask_DC, person_order
 
 
+def _anp_theta_df(model, df, grad_cavi_iters,
+                  out_col="anp_theta", features_col="features"):
+    """Append the head's TRAINING representation: per-doc ``_cavi_theta_anp`` theta
+    (the fixed ``grad_cavi_iters``-step differentiable CAVI unroll from the alpha
+    prior) against the model's FINAL topics — the EXACT theta the supervised head
+    gradient descends, as opposed to ``model.transform``'s converged ``infer_local``
+    theta used at scoring. Same broadcast-topics-then-UDF shape as ``PCModel._transform``.
+    """
+    from pyspark.ml.linalg import DenseVector, VectorUDT
+    from pyspark.sql import functions as F
+    from scipy.special import digamma
+
+    from spark_vi.models.topic.pc import _cavi_theta_anp
+    from spark_vi.mllib.topic.pc import _vector_to_bow_document
+
+    gp = model.result.global_params
+    lam = gp["lambda"]
+    alpha = np.asarray(gp["alpha"], dtype=np.float64)
+    eb = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+    bc = df.sparkSession.sparkContext.broadcast(
+        {"eb": eb, "alpha": alpha, "K": int(eb.shape[0]), "n": int(grad_cavi_iters)})
+
+    def _anp(features):
+        p = bc.value
+        doc = _vector_to_bow_document(features)
+        th = _cavi_theta_anp(
+            p["eb"][:, doc.indices], np.asarray(doc.counts, dtype=np.float64),
+            p["alpha"], p["K"], p["n"])
+        return DenseVector(np.asarray(th, dtype=np.float64))
+
+    return df.withColumn(out_col, F.udf(_anp, VectorUDT())(F.col(features_col)))
+
+
+def _theta_mismatch_diagnostic(model, train_df, test_df, Pi_tr_scr, y_tr, m_tr,
+                               Pi_te_scr, y_te, m_te, C, args):
+    """Localize a mis-directed co-fit head: is the head's TRAINING theta
+    (``_cavi_theta_anp``) a DIFFERENT predictive representation than the SCORING theta
+    (``infer_local``)? Both optimizers (sgd, adam) converging to the same ~orthogonal
+    ``w_CK`` means the head correctly minimizes its objective but that objective's
+    optimum is not the scoring-theta direction — which is exactly a train/eval theta
+    mismatch. Runs under ``--eval-only`` on a saved checkpoint (no refit): recomputes
+    the anp theta from the saved topics, fits a plain per-label LR on it, and reports
+    the direction cosines + a matched-vs-mismatched AUC. Purely diagnostic.
+    """
+    from analysis.pc.evaluate import (
+        lr_coefs_per_label, cosine_per_label, _lr_proba_per_label_masked,
+        _bundle_masked,
+    )
+
+    mlc = int(args.min_label_count)
+    anp_tr, y_a_tr, m_a_tr, _ = _collect_topics_labels(
+        _anp_theta_df(model, train_df, args.grad_cavi_iters), C, topic_col="anp_theta")
+    anp_te, y_a_te, m_a_te, _ = _collect_topics_labels(
+        _anp_theta_df(model, test_df, args.grad_cavi_iters), C, topic_col="anp_theta")
+    w_CK = model.headWeights()
+
+    v_scr = lr_coefs_per_label(Pi_tr_scr, y_tr, m_tr, C, mlc)   # scoring-theta direction
+    v_anp = lr_coefs_per_label(anp_tr, y_a_tr, m_a_tr, C, mlc)  # training-theta direction
+    cos_head_anp = cosine_per_label([w_CK[c] for c in range(C)], v_anp)
+    cos_anp_scr = cosine_per_label(v_anp, v_scr)
+
+    # LR fit on the TRAINING theta, scored on the SCORING test theta (the head's
+    # actual situation) vs scored on the matched anp test theta.
+    mismatch = _bundle_masked(
+        _lr_proba_per_label_masked(anp_tr, y_a_tr, m_a_tr, Pi_te_scr, C),
+        y_te, m_te, C, mlc)
+    matched = _bundle_masked(
+        _lr_proba_per_label_masked(anp_tr, y_a_tr, m_a_tr, anp_te, C),
+        y_a_te, m_a_te, C, mlc)
+
+    def _mean(xs):
+        v = [x for x in xs if x is not None]
+        return None if not v else float(sum(v) / len(v))
+
+    def _f(x):
+        return "n/a" if x is None else f"{x:+.3f}"
+
+    diag = {
+        "head_vs_training_theta_cosine": cos_head_anp,
+        "training_theta_vs_scoring_theta_cosine": cos_anp_scr,
+        "lr_on_training_theta__auc_scored_on_scoring_theta": mismatch["macro"]["auc"],
+        "lr_on_training_theta__auc_scored_on_training_theta": matched["macro"]["auc"],
+    }
+    print(
+        f"[driver] theta-mismatch localizer: "
+        f"mean cos(head, LR-on-TRAINING-theta)={_f(_mean(cos_head_anp))}  "
+        f"mean cos(LR-on-TRAINING-theta, LR-on-SCORING-theta)={_f(_mean(cos_anp_scr))}",
+        flush=True)
+    print(
+        f"[driver]   LR fit on TRAINING theta: AUC scored-on-scoring-theta="
+        f"{_f(mismatch['macro']['auc'])}  scored-on-training-theta="
+        f"{_f(matched['macro']['auc'])}  (head~=training-LR AND training-LR ⊥ "
+        f"scoring-LR => the co-fit head trains on a theta that does not match scoring)",
+        flush=True)
+    return diag
+
+
 def _vi_two_stage_bundle(train_df, test_df, C, args):
     """Distributed-SVI two-stage baseline bundle (unsupervised topics -> per-label LR).
 
@@ -1709,6 +1806,18 @@ def _run_vi_backend(
             from analysis.pc.evaluate import head_vs_lr_direction_cosine
             _head_vs_lr_cos = head_vs_lr_direction_cosine(
                 _Pi_tr, _y_tr, _m_tr, model.headWeights(), C, args.min_label_count)
+            # Definitive localizer for a TRAINED-but-mis-directed head: does the head's
+            # TRAINING theta (_cavi_theta_anp) predict along a different direction than
+            # the SCORING theta (infer_local)? Extra CAVI passes over train+test; wrap
+            # so a diagnostic failure never sinks the run.
+            _theta_mismatch = None
+            try:
+                _theta_mismatch = _theta_mismatch_diagnostic(
+                    model, train_df, test_df, _Pi_tr, _y_tr, _m_tr,
+                    _Pi_te, _y_te, _m_te, C, args)
+            except Exception as _e:  # noqa: BLE001 - diagnostic must not break the run
+                print(f"[driver] theta-mismatch localizer skipped: "
+                      f"{type(_e).__name__}: {_e}", flush=True)
 
         # Two-stage baseline: distributed SVI (unsupervised PCEstimator weight_y=0
         # -> per-label LR on the K-dim topics). Fit BEFORE the collect/unpersist,
@@ -1772,6 +1881,7 @@ def _run_vi_backend(
                     "head_vs_lr_cosine": _head_vs_lr_cos,
                 },
                 "baseline_max_iter": int(args.baseline_max_iter),
+                "theta_mismatch": _theta_mismatch,
                 "model_names": {
                     "PC": "VI-PC (SVI, joint)",
                     "pc_topics_lr": "PC-topics+LR (diag)",
@@ -1971,6 +2081,18 @@ def _run_vi_backend_fullyobserved(
             from analysis.pc.evaluate import head_vs_lr_direction_cosine
             _head_vs_lr_cos = head_vs_lr_direction_cosine(
                 _Pi_tr, _y_tr, _m_tr, model.headWeights(), C, args.min_label_count)
+            # Definitive localizer for a TRAINED-but-mis-directed head: does the head's
+            # TRAINING theta (_cavi_theta_anp) predict along a different direction than
+            # the SCORING theta (infer_local)? Extra CAVI passes over train+test; wrap
+            # so a diagnostic failure never sinks the run.
+            _theta_mismatch = None
+            try:
+                _theta_mismatch = _theta_mismatch_diagnostic(
+                    model, train_df, test_df, _Pi_tr, _y_tr, _m_tr,
+                    _Pi_te, _y_te, _m_te, C, args)
+            except Exception as _e:  # noqa: BLE001 - diagnostic must not break the run
+                print(f"[driver] theta-mismatch localizer skipped: "
+                      f"{type(_e).__name__}: {_e}", flush=True)
 
         # Two-stage baseline: distributed SVI (unsupervised PCEstimator weight_y=0
         # -> per-label LR on the K-dim topics). Fit BEFORE the collect/unpersist,
@@ -2033,6 +2155,7 @@ def _run_vi_backend_fullyobserved(
                     "head_vs_lr_cosine": _head_vs_lr_cos,
                 },
                 "baseline_max_iter": int(args.baseline_max_iter),
+                "theta_mismatch": _theta_mismatch,
                 "model_names": {
                     "PC": "VI-PC (SVI, joint)",
                     "pc_topics_lr": "PC-topics+LR (diag)",

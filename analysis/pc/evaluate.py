@@ -248,22 +248,59 @@ def head_vs_lr_direction_cosine(
     Labels with < ``min_count`` observed positives OR negatives (unstable to fit)
     are reported as ``None`` and excluded. Cheap: ``C`` small LRs on K-dim ``theta``.
     """
+    w_CK = np.asarray(w_CK, dtype=np.float64)
+    return cosine_per_label(
+        [w_CK[c] for c in range(C)],
+        lr_coefs_per_label(Pi_tr, y_tr_DC, mask_tr_DC, C, min_count),
+    )
+
+
+def lr_coefs_per_label(
+    Pi_tr: np.ndarray,
+    y_tr_DC: np.ndarray,
+    mask_tr_DC: np.ndarray,
+    C: int,
+    min_count: int = 0,
+) -> list[np.ndarray | None]:
+    """Per-label raw-``theta`` ``LogisticRegression`` coefficient vector (K,), or
+    ``None`` for a label with < ``min_count`` observed positives OR negatives.
+
+    The predictive DIRECTION a given ``theta`` representation induces for each label
+    (no ``StandardScaler`` — matches the head's ``logit = w_CK . theta`` on raw theta,
+    so direction cosines against ``w_CK`` are apples-to-apples). Reused to compare two
+    representations' directions (e.g. the head's TRAINING theta vs the SCORING theta).
+    """
     from sklearn.linear_model import LogisticRegression
 
-    w_CK = np.asarray(w_CK, dtype=np.float64)
-    cosines: list[float | None] = []
+    coefs: list[np.ndarray | None] = []
     for c in range(C):
         rows = np.where(mask_tr_DC[:, c].astype(bool))[0]
         yc = y_tr_DC[rows, c]
         n_pos, n_neg = int(yc.sum()), int(len(yc) - yc.sum())
         if n_pos < max(min_count, 1) or n_neg < max(min_count, 1):
-            cosines.append(None)
+            coefs.append(None)
             continue
-        lr = LogisticRegression(C=1.0, max_iter=2000).fit(Pi_tr[rows], yc)
-        v, w = lr.coef_[0], w_CK[c]
-        denom = float(np.linalg.norm(v) * np.linalg.norm(w))
-        cosines.append(float(v @ w / denom) if denom > 0.0 else None)
-    return cosines
+        coefs.append(
+            LogisticRegression(C=1.0, max_iter=2000).fit(Pi_tr[rows], yc).coef_[0]
+        )
+    return coefs
+
+
+def cosine_per_label(
+    A: list[np.ndarray | None], B: list[np.ndarray | None],
+) -> list[float | None]:
+    """Per-label cosine between two coef lists; ``None`` where either entry is
+    ``None`` or a zero vector."""
+    out: list[float | None] = []
+    for a, b in zip(A, B):
+        if a is None or b is None:
+            out.append(None)
+            continue
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+        out.append(float(a @ b / denom) if denom > 0.0 else None)
+    return out
 
 
 def _pc_convergence(pc: "PCTopicModel") -> dict[str, Any]:

@@ -506,3 +506,25 @@ def test_head_vs_lr_cosine_aligns_when_head_is_the_lr_direction():
     cos_rand = head_vs_lr_direction_cosine(
         Pi, y, mask, np.vstack([rng.normal(size=K), w_CK[1]]), C=2, min_count=20)
     assert abs(cos_rand[0]) < 0.8               # random direction not aligned
+
+
+def test_lr_coefs_and_cosine_per_label_building_blocks():
+    """lr_coefs_per_label returns a per-label direction (or None for under-observed);
+    cosine_per_label pairs two coef lists (self-cosine=1, None-propagating)."""
+    from analysis.pc.evaluate import lr_coefs_per_label, cosine_per_label
+    rng = np.random.default_rng(2)
+    N, K, C = 300, 5, 2
+    Pi = rng.dirichlet(np.full(K, 0.4), size=N)
+    wt = rng.normal(size=K)
+    y0 = (rng.random(N) < 1.0 / (1.0 + np.exp(-(Pi @ wt - (Pi @ wt).mean())))).astype(float)
+    y = np.column_stack([y0, np.zeros(N)])       # label 1 all-negative -> under-observed
+    mask = np.ones((N, 2))
+    coefs = lr_coefs_per_label(Pi, y, mask, C, min_count=20)
+    assert coefs[0].shape == (K,)
+    assert coefs[1] is None                       # one class only -> skipped
+    # self-cosine is 1; None on either side -> None
+    assert abs(cosine_per_label([coefs[0]], [coefs[0]])[0] - 1.0) < 1e-9
+    assert cosine_per_label([None, coefs[0]], [coefs[0], None]) == [None, None]
+    # an orthogonal pair -> ~0
+    a = np.array([1.0, 0.0, 0.0, 0.0, 0.0]); b = np.array([0.0, 1.0, 0.0, 0.0, 0.0])
+    assert abs(cosine_per_label([a], [b])[0]) < 1e-9
