@@ -223,6 +223,49 @@ def _bundle_masked(
     return {"per_label": per_label, "macro": _macro(per_label)}
 
 
+def head_vs_lr_direction_cosine(
+    Pi_tr: np.ndarray,
+    y_tr_DC: np.ndarray,
+    mask_tr_DC: np.ndarray,
+    w_CK: np.ndarray,
+    C: int,
+    min_count: int = 0,
+) -> list[float | None]:
+    """Per-label cosine between the co-fit logistic head ``w_CK[c]`` and a fresh
+    ``LogisticRegression`` fit on the SAME (raw, un-scaled) training ``theta``.
+
+    The localizer for a co-fit head that reads a low AUC despite a trained ``w_CK``
+    (``w_CK_absmax`` not ~0). The head scores ``logit_c = w_CK[c] . theta`` on raw
+    ``theta``, so the fair reference is a plain LR on raw ``theta`` (no
+    ``StandardScaler``) over label ``c``'s observed rows. Then:
+
+      * cosine ~ +1 => the head points where a batch LR would, so a low head AUC is
+        a SCORING/scale artifact (or a stale run), NOT a mis-trained direction;
+      * cosine ~ 0  => the head trained to the WRONG direction (a real fit problem
+        in that run — debug the actual fit, not a synthetic);
+      * cosine ~ -1 => sign-flipped head (the RM x weight_y saturation failure mode).
+
+    Labels with < ``min_count`` observed positives OR negatives (unstable to fit)
+    are reported as ``None`` and excluded. Cheap: ``C`` small LRs on K-dim ``theta``.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    w_CK = np.asarray(w_CK, dtype=np.float64)
+    cosines: list[float | None] = []
+    for c in range(C):
+        rows = np.where(mask_tr_DC[:, c].astype(bool))[0]
+        yc = y_tr_DC[rows, c]
+        n_pos, n_neg = int(yc.sum()), int(len(yc) - yc.sum())
+        if n_pos < max(min_count, 1) or n_neg < max(min_count, 1):
+            cosines.append(None)
+            continue
+        lr = LogisticRegression(C=1.0, max_iter=2000).fit(Pi_tr[rows], yc)
+        v, w = lr.coef_[0], w_CK[c]
+        denom = float(np.linalg.norm(v) * np.linalg.norm(w))
+        cosines.append(float(v @ w / denom) if denom > 0.0 else None)
+    return cosines
+
+
 def _pc_convergence(pc: "PCTopicModel") -> dict[str, Any]:
     """Fit-health block for a fitted :class:`~analysis.pc.model.PCTopicModel`.
 
