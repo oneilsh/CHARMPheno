@@ -1,7 +1,7 @@
 ---
 id: 73
 slug: pc-vi-adam-hothead-fast
-status: pending
+status: done
 model_class: pc
 cohort: mdd_stable_treatment
 backend: vi

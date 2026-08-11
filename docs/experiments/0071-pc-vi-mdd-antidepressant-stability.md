@@ -1,7 +1,7 @@
 ---
 id: 71
 slug: pc-vi-mdd-antidepressant-stability
-status: pending
+status: done
 model_class: pc
 cohort: mdd_antidepressant
 backend: vi                  # distributed VI-native PCEstimator (SVI), not in-mem L-BFGS
