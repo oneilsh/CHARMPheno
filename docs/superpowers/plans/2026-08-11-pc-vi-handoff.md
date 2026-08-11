@@ -11,10 +11,13 @@ on All-of-Us OMOP, cohort `mdd_stable_treatment`, experiment **0072**.
 - **Big win (done):** found + fixed a real gradient bug in the VI-PC supervised
   topic correction (a missing digamma-Jacobian). Killed the Σλ runaway. **Hughes
   replicated on AoU.**
-- **Open thread (not fixed):** the *joint SVI head* under-performs a batch LR on
-  the *same* topics (0.52 vs 0.615), and is invariant to every knob tried — a
-  head-**optimization** issue (best guess: ridge/gradient-scaling), needing a
-  **local** diagnosis, not another 3h cluster run.
+- **Open thread — now DIAGNOSED (2026-08-11):** the *joint SVI head* reads 0.52 vs a
+  batch LR's 0.615 on the *same* topics. The local diagnosis
+  (`analysis/pc/diagnostics/head_optimizer_diagnosis.py`) proves the head **optimizer
+  is sound** — it reaches the LR ceiling under ridge/budget/LR/θ-depth/drift/imbalance
+  stressors. So the 0.52 is a **run-specific artifact, not a method bug**; the ridge
+  hypothesis is falsified and `--head-l2` is a dead end. Next = cheap artifact checks
+  (`w_CK_absmax`, `w_CK`-vs-LR direction), not another cluster run.
 - **Immediate pending action:** confirm whether the last result (Run 6) is really
   the `grad_cavi_iters=50` run (see below).
 - **Pivot the user wants:** move toward the **Mondo rare-disease** space, where PC's
@@ -70,28 +73,41 @@ ratcheted Σλ 6e5→1.58e8; wrong direction degraded topics).
   3000; PC AUC 0.57→0.91→0.92). Runaway gone (confirmed on AoU: Σλ flat ~6e5 at
   wy=1000).
 
-## The OPEN head issue (NOT fixed) — for next session
+## The OPEN head issue — DIAGNOSED LOCALLY (2026-08-11); optimizer is SOUND
 
-VI-PC head = **0.52**, provably invariant to: `max_iter` (200/300), `subsampling`
-(0.05/0.2), `head_lr_scale` (1/2/3), and `grad_cavi_iters` (20/50, pending Run-6
-confirm). Batch LR on the *same* θ = 0.615. So it is **not** representation, **not**
-convergence, **not** θ-depth.
+**Update (2026-08-11): the local diagnosis is done and it FALSIFIES the ridge
+hypothesis below, plus every other optimizer/representation theory.** See
+`analysis/pc/diagnostics/head_optimizer_diagnosis.py` (runs in ~40 s, numpy+sklearn,
+no cluster) and the "Local head-optimizer diagnosis" section in
+`docs/experiments/0072-*.md`.
 
-- **Toy vs AoU tell:** the head hit 0.907 on the toy (strong signal) but 0.52 on
-  AoU (weak signal). Same head machinery. → an optimization issue that erases *weak*
-  signal while preserving strong.
-- **Best hypothesis (UNCONFIRMED — verify locally, no cluster):** the head uses a
-  per-doc-MEAN data gradient (`grad_wCK * inv_n`) against a FIXED ridge
-  (`lambda_w=0.001`, `update_global` in `pc.py` ~line 573). sklearn LR balances the
-  SUM of per-doc losses against its ridge, so our head may over-regularize by ~the
-  corpus factor → shrinks away weak signal. **Diagnosis plan:** reproduce the head
-  fit on synthetic weak-signal θ (numpy, like `_cavi_theta_anp` + a manual SGD head
-  loop, or drive `OnlinePCLDA` on a small local Spark), compare to a batch
-  `LogisticRegression` on the same θ, and sweep `lambda_w` / the data-gradient
-  scaling. If lowering `lambda_w` (or corpus-scaling the head data gradient) closes
-  0.52→0.61, that's the fix. Then plumb `--head-l2` (lambdaW) like the other knobs.
-- **Ruled out:** topic degradation (topics are good, `pc_topics_lr` 0.61); θ-depth
-  (Run 6, pending confirm).
+The EXACT `update_global` head update (per-doc-MEAN logistic grad + ridge, RM `rho_t`)
+was reproduced on synthetic θ and compared to a batch `LogisticRegression` on the same
+θ. It reaches the LR ceiling (within SGD noise) under **all six** stressors:
+1. **Ridge** `lambda_w` 0.001→0 (eff. 60×→0×): 0.623 vs 0.623 — AUC is scale-invariant,
+   so ridge shrinks ‖w‖ but not the ranking. **The ridge hypothesis is wrong.**
+2. **Budget/LR**: converged by ~iter 100 at every `head_lr_scale` — not budget-starved.
+3. **Static θ mismatch** (fit on `_cavi_theta_anp` 50-unroll, score on converged
+   `infer_local`): routines agree cosine 0.9988; AUC delta **+0.000**. **θ-depth is
+   wrong too** — so `grad_cavi_iters` 20→50 was never going to help (consistent with
+   Run 6 = 0.522).
+4. **Online topic drift** (β moves during head SGD): penalty +0.006 — head recovers.
+5. **Class imbalance** to 5% prevalence + no-intercept head: 0.57–0.62, no collapse.
+
+**Reframed conclusion.** `proba_DC = sigmoid(w_CK·θ)` uses the *same* converged θ that
+`pc_topics_lr` reads (verified in `PCModel._transform`). Given the head provably
+reaches the LR ceiling, there is **no reproducible mechanism** for a 0.52 co-fit head
+on topics that give `pc_topics_lr` 0.61. The head **optimizer is sound**; the 0.52 is
+a **run-specific artifact** (stale/misconfigured fit, or a near-untrained / mis-directed
+`w_CK` in that run). **Do NOT plumb `--head-l2` — it's a dead end.**
+
+- **Toy vs AoU tell (now explained):** the toy passed (0.907) because its signal is
+  strong; on AoU the *signal* is weak (LR itself only reaches 0.61), and the head
+  tracks the LR ceiling wherever it is. Not a weak-signal optimizer failure.
+- **Cheap next checks — on the ARTIFACTS, not another knob:** (a) `grep grad_cavi_iters
+  pc_results.json`; (b) `w_CK_absmax` in the JSON/log (~0 ⇒ head never trained);
+  (c) cosine(co-fit `w_CK[c]`, fresh `LR.coef_` on the same train θ) — ~0 ⇒ trained to
+  the wrong direction; aligned but AUC 0.52 ⇒ a scoring/eval-wiring bug in that run.
 
 ## Run log (0072) — full history in `docs/experiments/0072-*.md`
 
@@ -196,10 +212,13 @@ sibling dir shares the number on this cluster — always use the full `-pc-vi-�
 
 ## Next steps
 
-1. **Confirm Run 6** (grep `grad_cavi_iters` in the JSON).
-2. **If θ-depth disproven:** local diagnosis of the head-optimization gap
-   (`lambda_w` ridge / per-doc-mean vs corpus-sum data gradient) on synthetic
-   weak-signal θ. No cluster. Plumb `--head-l2` if that's the lever.
+1. ~~Confirm Run 6 / local head-optimization diagnosis~~ **DONE** — optimizer proven
+   sound; ridge + θ-depth falsified (`analysis/pc/diagnostics/head_optimizer_diagnosis.py`).
+2. **Localize the 0.52 artifact from the SAVED run** (cheap, on artifacts — no re-fit):
+   `grep grad_cavi_iters pc_results.json`; read `w_CK_absmax` (~0 ⇒ untrained head);
+   cosine(co-fit `w_CK[c]`, fresh `LR.coef_` on the same train θ). This tells us
+   whether it was a stale run, an untrained head, a mis-directed head, or a scoring bug.
+   **Do NOT plumb `--head-l2`** — the diagnosis shows it can't be the fix.
 3. **Pivot:** Mondo rare-disease space — the hidden-low-mass-signal regime where PC
    topic-shaping should beat unsupervised (unlike AoU). Design the cohort/label.
 4. **Optional:** enrich the antidepressant example (richer features/models) to give

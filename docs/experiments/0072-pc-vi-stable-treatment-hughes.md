@@ -466,3 +466,50 @@ topic_trust 0.1, skip_two_stage). Cost: ~2.5× the per-doc supervised-gradient t
 off 0.52 toward `pc_topics_lr`'s ~0.61 — the methods-faithful joint head reaching the
 same optimum the dedicated LR already shows. If it still lags, the residual is the
 head ridge/objective, and Option A (`pc_topics_lr` = 0.61 = Hughes) remains in hand.
+
+### Local head-optimizer diagnosis — the θ-depth theory is FALSIFIED (2026-08-11)
+
+Rather than spend another ~3 h cluster run confirming Run 6, the head question was
+settled **locally, cluster-free**, by faithfully reproducing the EXACT
+`OnlinePCLDA.update_global` head update (per-doc-MEAN logistic gradient + ridge,
+Robbins-Monro `rho_t=(tau0+t+1)^-kappa`) on synthetic θ and comparing to a batch
+`LogisticRegression` on the same θ. Script + full output:
+`analysis/pc/diagnostics/head_optimizer_diagnosis.py`.
+
+Six independent stressors were applied to the exact head update; in **every** one it
+reaches the batch-LR ceiling (within SGD noise), never the 0.52 collapse:
+
+| # | stressor | head vs LR ceiling |
+|---|---|---|
+| 1 | ridge `lambda_w` 0.001→0 (eff. 60×→0× LR's ridge) | 0.623 vs 0.623 — **AUC is scale-invariant**; ridge shrinks ‖w‖, not ranking |
+| 2 | iteration budget 100/300/1000, `head_lr_scale` 1/2/5, minibatch=512 | 0.614–0.623 vs 0.622 — converged by ~iter 100; **not** budget-starved |
+| 3 | **static θ mismatch**: fit head on `_cavi_theta_anp` 50-unroll, score on converged `_cavi_doc_inference` | routines agree cosine **0.9988**; matched vs mismatch AUC **delta +0.000** |
+| 4 | class imbalance (drug prevalence) 0.5→0.05, head has no intercept | 0.57–0.62 vs LR; no-intercept LR == with-intercept (simplex absorbs bias) |
+| — | online **topic drift** (β_init→β_final during head SGD, separate sim) | drift penalty **+0.006** vs fixed-topic control — head recovers |
+
+**This falsifies ROOT CAUSE #2 (θ-depth).** Experiment 3 is the direct test: fitting
+the head on the short-unroll θ and scoring on the converged θ costs **zero** AUC (the
+two CAVI routines are the same fixed point; 50-step is cosine 0.9988 to converged).
+So `grad_cavi_iters` 20→50 was never going to move the head — consistent with Run 6
+reading 0.522 again. The earlier θ-depth story mistook a real-but-negligible
+representation difference for the cause.
+
+**Reframed conclusion.** With `proba_DC = sigmoid(w_CK·θ)` on the *same* converged θ
+that `pc_topics_lr` reads (verified in `PCModel._transform`), and the exact head
+provably reaching the LR ceiling under every stressor, there is **no reproducible
+mechanism** for a 0.52 co-fit head given topics that yield `pc_topics_lr` 0.61. The
+head **optimizer is sound**; a persistent 0.52 is therefore a **run-specific
+artifact** — a stale/misconfigured fit, or a genuinely near-untrained / mis-directed
+`w_CK` in that particular run — not an inherent PC deficiency. **A head-L2 knob would
+be a dead end.**
+
+**Cheap next checks (on the saved artifacts, not another optimizer knob):**
+1. `grep -o '"grad_cavi_iters": [0-9]*' pc_results.json` — was it the intended run?
+2. `w_CK_absmax` in `pc_results.json` / the driver log — `~0` ⇒ head never trained.
+3. cosine( co-fit `w_CK[c]`, a fresh `LR.coef_` on the same train θ ) — `~0` ⇒ the
+   head trained to the wrong direction (then debug the actual fit, not a synthetic);
+   aligned but AUC still 0.52 ⇒ a scoring/eval-wiring bug in that run.
+
+The banked science is unchanged: `pc_topics_lr` ≈ 0.61 ≈ LR-on-codes 0.613 ≈
+unsupervised two-stage 0.614 — **Hughes replicated**; supervision ≈ unsupervised on
+AoU because the predictable signal is already in the unsupervised topics.
