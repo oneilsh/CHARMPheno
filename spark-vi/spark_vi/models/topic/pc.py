@@ -273,6 +273,40 @@ def _supervised_batch_value(
     return loss
 
 
+def _supervised_head_hessian(
+    topics_repr: np.ndarray,
+    w_CK: np.ndarray,
+    rows: list,
+    alpha_vec: np.ndarray,
+    K: int,
+    n_iters: int,
+) -> np.ndarray:
+    """Per-label NLL Hessian (Fisher information) of the logistic head over OBSERVED
+    cells: ``H_c = Σ_d obs_dc · p_dc(1-p_dc) · outer(π_d, π_d)``, with ``π_d`` the SAME
+    label-free CAVI mean the head gradient reads. Pairs with ``grad_wCK_stat`` (the NLL
+    gradient ``g_c = Σ_d obs (p-y) π``) to form a per-iteration ridge-Newton (IRLS) head
+    step: both are additive doc-sums (aggregatable via combine_stats), fixed-size
+    ``(C, K, K)`` / ``(C, K)``, and — since the runner scales BOTH by corpus/batch — the
+    Newton solve ``H⁻¹g`` is scale-INVARIANT (the scaling cancels). One such step per SVI
+    iteration converges the logistic head on the current θ (Newton converges logistic in
+    a handful of steps), which is the aggregatable way to "converge the head aggressively
+    within each iteration" WITHOUT collecting raw per-doc θ to the driver.
+    """
+    C = w_CK.shape[0]
+    H = np.zeros((C, K, K), dtype=np.float64)
+    for doc in rows:
+        obs = np.asarray(doc.label_mask, dtype=np.float64)
+        if obs.sum() == 0.0:
+            continue
+        theta = _cavi_theta_anp(
+            topics_repr[:, doc.indices], np.asarray(doc.counts, dtype=np.float64),
+            alpha_vec, K, n_iters)                              # (K,), plain numpy
+        p = 1.0 / (1.0 + np.exp(-np.clip(np.asarray(w_CK) @ theta, -50.0, 50.0)))
+        wt = obs * p * (1.0 - p)                                # (C,) observed IRLS weights
+        H += wt[:, None, None] * np.outer(theta, theta)[None, :, :]
+    return H
+
+
 class OnlinePCLDA(VIModel):
     """Prediction-Constrained LDA fittable by VIRunner with mini-batch SVI.
 
@@ -353,6 +387,7 @@ class OnlinePCLDA(VIModel):
         head_beta1: float = 0.9,
         head_beta2: float = 0.999,
         head_eps: float = 1e-8,
+        head_newton_ridge: float = 1e-2,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
         optimize_alpha: bool = False,
@@ -378,12 +413,15 @@ class OnlinePCLDA(VIModel):
             raise ValueError(
                 f"weight_y_warmup_iters must be >= 0, got {weight_y_warmup_iters}"
             )
-        if head_optimizer not in ("sgd", "adam"):
+        if head_optimizer not in ("sgd", "adam", "newton"):
             raise ValueError(
-                f"head_optimizer must be 'sgd' or 'adam', got {head_optimizer!r}"
+                f"head_optimizer must be 'sgd', 'adam', or 'newton', got "
+                f"{head_optimizer!r}"
             )
         if head_lr <= 0:
             raise ValueError(f"head_lr must be > 0, got {head_lr}")
+        if head_newton_ridge < 0:
+            raise ValueError(f"head_newton_ridge must be >= 0, got {head_newton_ridge}")
         if not (0.0 <= head_beta1 < 1.0 and 0.0 <= head_beta2 < 1.0):
             raise ValueError("head_beta1/head_beta2 must lie in [0, 1)")
         if head_eps <= 0:
@@ -428,6 +466,12 @@ class OnlinePCLDA(VIModel):
         self.head_beta1 = float(head_beta1)
         self.head_beta2 = float(head_beta2)
         self.head_eps = float(head_eps)
+        # 'newton' head: relative ridge (fraction of mean(diag(H))) that conditions the
+        # per-label IRLS solve. AUC is scale-invariant to head magnitude, so this only
+        # stabilizes the solve; it does not bias the head DIRECTION. head_lr doubles as
+        # the Newton damping (step fraction; ~0.5-1.0 for newton, since one damped
+        # Newton step per iter already converges the logistic head on the current θ).
+        self.head_newton_ridge = float(head_newton_ridge)
         # Driver-side global-step counter, used only for weight_y warmup. Bumped
         # once per update_global call (the runner drives that single-threaded on
         # the driver), so it is a faithful iteration index without threading t
@@ -520,6 +564,12 @@ class OnlinePCLDA(VIModel):
         )
         stats["grad_topics_stat"] = grad_topics
         stats["grad_wCK_stat"] = grad_wCK
+        if self.head_optimizer == "newton":
+            # Additive per-label NLL Hessian (Fisher info) for the ridge-Newton head
+            # step; sums across partitions via the delegate's combine_stats like every
+            # other dense stat. grad_wCK_stat is the paired gradient.
+            stats["head_hess_stat"] = _supervised_head_hessian(
+                expElogbeta, w_CK, rows, alpha_vec, self.K, self.grad_cavi_iters)
         return stats
 
     def update_global(
@@ -637,18 +687,40 @@ class OnlinePCLDA(VIModel):
         # keeps λ a valid strictly-positive Dirichlet pseudocount.
         new_gp["lambda"] = np.maximum(lam_unsup - corr, 1e-30)
 
-        # (c) head step: mean data gradient + ridge. Two optimizers:
-        #   'sgd'  — the RM-damped step ρ·head_lr_scale·wy·g (default; unchanged).
-        #   'adam' — a per-parameter adaptive step, DECOUPLED from ρ and wy. Adam
-        #            normalizes by the running gradient RMS, so the wy factor on
-        #            head_grad cancels in m̂/√v̂ and ρ is replaced by Adam's own
-        #            step dynamics: the head runs on its OWN (fast) timescale rather
-        #            than sharing the topics' single Robbins-Monro schedule. This is
-        #            the two-timescale remedy for the coupled-objective failure mode
-        #            where 10 shared-θ heads under minibatch noise drive w_CK into a
-        #            mis-directed local optimum (heldout head AUC ≈ chance while a
-        #            batch LR on the SAME topics predicts) — the instability Hughes
-        #            et al. (AISTATS 2018) avoided by optimizing {φ, η} with Adam.
+        # (c) head step. Three optimizers:
+        #   'sgd'    — the RM-damped step ρ·head_lr_scale·wy·g (default; unchanged).
+        #   'adam'   — a per-parameter adaptive step DECOUPLED from ρ and wy (Adam
+        #              normalizes by the running gradient RMS). A two-timescale attempt.
+        #   'newton' — a per-iteration ridge-Newton (IRLS) step that CONVERGES the
+        #              logistic head on the current θ (sgd/adam take ONE noisy gradient
+        #              step per SVI iter and provably never converge the head — heldout
+        #              AUC ≈ chance, w_CK ⊥ the batch-LR direction, invariant to lr).
+        #              g and H are corpus-scaled additive doc-sums, so H⁻¹g is SCALE-
+        #              INVARIANT (the corpus/batch factor cancels) and needs no raw θ on
+        #              the driver. This also feeds the topic correction a VALID head
+        #              signal each iter (the correction's ∂loss_y/∂θ flows through w_CK).
+        if self.head_optimizer == "newton":
+            # Per-label ridge-Newton: w_c ← w_c − head_lr · (H_c + λI)⁻¹ (g_c + λ w_c).
+            # g_c is the corpus-scaled NLL gradient sum (grad_wCK_stat), H_c its Fisher
+            # info (head_hess_stat). The ridge is RELATIVE to mean(diag(H_c)) so it only
+            # conditions the solve — AUC is scale-invariant to head magnitude, so it does
+            # not bias the direction. head_lr damps the step (~0.5-1.0 for newton).
+            g_CK = np.asarray(target_stats["grad_wCK_stat"], dtype=np.float64)
+            H_CKK = np.asarray(target_stats["head_hess_stat"], dtype=np.float64)
+            new_w = w_CK.copy()
+            for c in range(self.C):
+                Hc = H_CKK[c]
+                ridge = self.head_newton_ridge * (float(np.trace(Hc)) / self.K) + 1e-10
+                A = Hc + ridge * np.eye(self.K)
+                b = g_CK[c] + ridge * w_CK[c]
+                try:
+                    delta = np.linalg.solve(A, b)
+                except np.linalg.LinAlgError:
+                    delta = np.linalg.lstsq(A, b, rcond=None)[0]
+                new_w[c] = w_CK[c] - self.head_lr * delta
+            new_gp["w_CK"] = new_w
+            return new_gp
+
         head_grad = grad_wCK + self.lambda_w * 2.0 * w_CK
         if self.head_optimizer == "adam":
             b1, b2, eps = self.head_beta1, self.head_beta2, self.head_eps

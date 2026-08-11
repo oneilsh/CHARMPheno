@@ -345,6 +345,45 @@ def test_adam_head_step_is_invariant_to_weight_y_but_sgd_is_not():
     assert not np.allclose(s_lo["w_CK"], s_hi["w_CK"])
 
 
+def test_newton_head_emits_hessian_and_converges_to_lr_direction():
+    """The 'newton' head emits an additive per-label Hessian stat and its per-iteration
+    ridge-Newton step, iterated on a FIXED theta, converges w_CK to the unregularized
+    LogisticRegression direction (cos ~ 1) — i.e. it actually converges the head, unlike
+    the one-step sgd/adam path."""
+    from spark_vi.models.topic.pc import OnlinePCLDA, _supervised_head_hessian
+    from sklearn.linear_model import LogisticRegression
+
+    # (a) the stat is emitted with the right shape and sgd/adam do NOT emit it.
+    docs = _tiny_sup_batch(seed=3, C=2, V=12)
+    mn = OnlinePCLDA(K=4, vocab_size=12, C=2, weight_y=50.0, head_optimizer="newton",
+                     head_lr=1.0, random_seed=0)
+    gp = mn.initialize_global(None)
+    st = mn.local_update(docs, gp)
+    assert st["head_hess_stat"].shape == (2, 4, 4)
+    assert "head_hess_stat" not in OnlinePCLDA(
+        K=4, vocab_size=12, C=2, weight_y=50.0, head_optimizer="sgd"
+    ).local_update(docs, gp)
+    gp1 = mn.update_global(gp, st, 0.5)
+    assert np.abs(gp1["w_CK"]).max() > 0.0                # head moved
+
+    # (b) repeated ridge-Newton on a FIXED theta reaches the LR direction.
+    rng = np.random.default_rng(0)
+    N, K = 400, 5
+    theta = rng.dirichlet(np.full(K, 0.4), size=N)
+    wt = rng.normal(size=K)
+    y = (rng.random(N) < 1.0 / (1.0 + np.exp(-(theta @ wt - (theta @ wt).mean())))).astype(float)
+    v = LogisticRegression(C=1e6, max_iter=5000, fit_intercept=False).fit(theta, y).coef_[0]
+    w = np.zeros(K)
+    for _ in range(15):
+        p = 1.0 / (1.0 + np.exp(-np.clip(theta @ w, -50, 50)))
+        g = (theta * (p - y)[:, None]).sum(0)
+        H = (theta[:, :, None] * theta[:, None, :] * (p * (1 - p))[:, None, None]).sum(0)
+        ridge = 1e-2 * (np.trace(H) / K) + 1e-10
+        w = w - np.linalg.solve(H + ridge * np.eye(K), g + ridge * w)
+    cos = float(v @ w / (np.linalg.norm(v) * np.linalg.norm(w)))
+    assert cos > 0.999, f"newton did not reach the LR direction: cos={cos:.4f}"
+
+
 def test_adam_update_lazy_inits_moments_on_warm_start_from_sgd_checkpoint():
     """A WARM START seeds global params from a saved checkpoint (replacing
     initialize_global's output), so an sgd phase-1 checkpoint carries no

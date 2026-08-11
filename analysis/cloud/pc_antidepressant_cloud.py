@@ -736,7 +736,7 @@ def _build_parser() -> argparse.ArgumentParser:
               "scales the step)."),
     )
     parser.add_argument(
-        "--head-optimizer", type=str, default="sgd", choices=("sgd", "adam"),
+        "--head-optimizer", type=str, default="sgd", choices=("sgd", "adam", "newton"),
         help=("VI backend: optimizer for the LOGISTIC HEAD w_CK. 'sgd' (default) = "
               "the RM-damped step rho*head_lr_scale*weight_y*grad, sharing the topics' "
               "single Robbins-Monro schedule. 'adam' = a per-parameter adaptive step "
@@ -751,10 +751,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--head-lr", type=float, default=0.05,
-        help=("VI backend: base learning rate for --head-optimizer adam (ignored for "
-              "sgd). Maps to PCEstimator.headLr. 0.02-0.05 worked in the local "
-              "coupled-objective repro; the head step is scale-free in weight_y under "
-              "Adam, so this is the head's only step-size dial. Ignored for inmem."),
+        help=("VI backend: base learning rate for --head-optimizer adam, or the step-"
+              "damping fraction for newton (~0.5-1.0). Ignored for sgd. Maps to "
+              "PCEstimator.headLr. Ignored for inmem."),
+    )
+    parser.add_argument(
+        "--head-newton-ridge", type=float, default=0.01,
+        help=("VI backend: for --head-optimizer newton, the relative ridge (fraction of "
+              "mean(diag(H))) conditioning the per-label IRLS solve. 'newton' takes ONE "
+              "aggregatable ridge-Newton step per SVI iteration — g and H are corpus-"
+              "scaled additive doc-sums, so H^-1 g is scale-invariant — which CONVERGES "
+              "the logistic head on the current theta (sgd/adam take one noisy gradient "
+              "step/iter and never converge: head AUC ~= chance, w_CK orthogonal to the "
+              "batch-LR direction). Also feeds the topic correction a valid head signal "
+              "each iter. Maps to PCEstimator.headNewtonRidge. Ignored for inmem."),
     )
     parser.add_argument(
         "--weight-y-warmup-iters", type=int, default=0,
@@ -1213,6 +1223,7 @@ def main(argv: list[str] | None = None) -> int:
                 "head_lr_scale": args.head_lr_scale,
                 "head_optimizer": args.head_optimizer,
                 "head_lr": args.head_lr,
+                "head_newton_ridge": args.head_newton_ridge,
                 "weight_y_warmup_iters": args.weight_y_warmup_iters,
                 "topic_trust": args.topic_trust,
                 "grad_cavi_iters": args.grad_cavi_iters,
@@ -1346,6 +1357,7 @@ def main(argv: list[str] | None = None) -> int:
             "head_lr_scale": args.head_lr_scale,
             "head_optimizer": args.head_optimizer,
             "head_lr": args.head_lr,
+            "head_newton_ridge": args.head_newton_ridge,
             "weight_y_warmup_iters": args.weight_y_warmup_iters,
             "warm_start_unsup_iters": args.warm_start_unsup_iters,
             "lookback_days": args.lookback_days, "window_days": args.window_days,
@@ -1577,6 +1589,7 @@ def _augmented_resave_pc(model, drug_order, V, vocab_map, args) -> None:
                 "head_lr_scale": float(args.head_lr_scale),
                 "head_optimizer": str(args.head_optimizer),
                 "head_lr": float(args.head_lr),
+                "head_newton_ridge": float(args.head_newton_ridge),
                 "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
                 "max_iter": int(args.max_iter),
                 "weight_y": float(args.weight_y),
@@ -1749,6 +1762,7 @@ def _run_vi_backend(
                 headLrScale=args.head_lr_scale,
                 weightYWarmupIters=args.weight_y_warmup_iters,
                 headOptimizer=args.head_optimizer, headLr=args.head_lr,
+                headNewtonRidge=args.head_newton_ridge,
                 topicTrust=args.topic_trust, gradCaviIters=args.grad_cavi_iters,
                 maxIter=args.max_iter, seed=args.seed,
                 probabilityCol="probability",
@@ -1864,6 +1878,7 @@ def _run_vi_backend(
                     "head_lr_scale": float(args.head_lr_scale),
                     "head_optimizer": str(args.head_optimizer),
                     "head_lr": float(args.head_lr),
+                    "head_newton_ridge": float(args.head_newton_ridge),
                     "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
                     "topic_trust": float(args.topic_trust),
                     "grad_cavi_iters": int(args.grad_cavi_iters),
@@ -2028,6 +2043,7 @@ def _run_vi_backend_fullyobserved(
                 headLrScale=args.head_lr_scale,
                 weightYWarmupIters=args.weight_y_warmup_iters,
                 headOptimizer=args.head_optimizer, headLr=args.head_lr,
+                headNewtonRidge=args.head_newton_ridge,
                 topicTrust=args.topic_trust, gradCaviIters=args.grad_cavi_iters,
                 maxIter=args.max_iter, seed=args.seed,
                 probabilityCol="probability",
@@ -2139,6 +2155,7 @@ def _run_vi_backend_fullyobserved(
                     "head_lr_scale": float(args.head_lr_scale),
                     "head_optimizer": str(args.head_optimizer),
                     "head_lr": float(args.head_lr),
+                    "head_newton_ridge": float(args.head_newton_ridge),
                     "weight_y_warmup_iters": int(args.weight_y_warmup_iters),
                     "topic_trust": float(args.topic_trust),
                     "grad_cavi_iters": int(args.grad_cavi_iters),
