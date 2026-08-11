@@ -11,26 +11,31 @@ on All-of-Us OMOP, cohort `mdd_stable_treatment`, experiment **0072**.
 - **Big win (done):** found + fixed a real gradient bug in the VI-PC supervised
   topic correction (a missing digamma-Jacobian). Killed the Σλ runaway. **Hughes
   replicated on AoU.**
-- **Open thread — LOCALIZED (2026-08-11, Run 7):** the *joint SVI head* reads 0.52 vs
-  a batch LR's 0.615 on the *same* topics. Two stages of diagnosis:
-  1. `analysis/pc/diagnostics/head_optimizer_diagnosis.py` proved the head **optimizer
-     is sound** (reaches the LR ceiling under ridge/budget/LR/θ-depth/drift/imbalance)
-     — so the ridge/θ-depth hypotheses are falsified and `--head-l2` is a dead end.
-  2. The new eval-only `head_vs_lr_cosine` localizer (Run 7) then showed the head is
-     **TRAINED (`|w_CK|`=3.6) but MIS-DIRECTED**: mean cosine **+0.08** to the label
-     direction on **train** θ — it never got a correct label-descent gradient. Topics
-     are fine (`pc_topics_lr`=0.61 on the same θ). So it is **a real joint-fit bug**,
-     not a scoring artifact: the fault is in what the JOINT distributed fit does beyond
-     head-SGD-on-final-topics (topic-correction coupling, or distributed per-doc
-     label/θ plumbing). Serial head-SGD reproductions never show it; the passing toy
-     (C=1, full-batch) doesn't either → config/scale-dependent.
-- **Immediate next:** bisect toy→AoU config axes locally (no cluster) with
-  `spark-vi/tests/manual_pc_head_direction_repro.py` (real OnlinePCLDA/VIRunner,
-  toggling full-batch↔minibatch, C=1↔C=10) to find which axis flips the head from
-  aimed (cos≈1) to mis-directed (cos≈0), then fix that.
-- **Pivot the user wants:** move toward the **Mondo rare-disease** space, where PC's
-  topic-shaping should actually help (hidden low-mass signal — the regime where the
-  toy showed PC 0.56→0.91, unlike AoU where the signal is already captured).
+- **Head issue — DIAGNOSED then FIXED (2026-08-11, Runs 7–9 / exp 0072–0075):**
+  1. **Diagnosis (localizer):** the joint head read 0.52 vs a batch LR's 0.615 because
+     it was **TRAINED but non-CONVERGENT** — sgd/adam take ONE noisy gradient step per
+     SVI iteration and never reach the logistic optimum (cos +0.09 to the LR direction,
+     invariant to lr; the θ-routine mismatch is negligible, cos train-vs-scoring 0.95).
+     Not θ, not optimizer choice, not lr — pure per-iteration non-convergence. The
+     eval-only `head_vs_lr_cosine` / `theta_mismatch` localizers (in the driver's diag
+     block, run under `--eval-only`, no refit) proved this.
+  2. **Fix (shipped): `head_optimizer='newton'`** — one aggregatable ridge-Newton (IRLS)
+     step per SVI iteration. g_c=Σ(p−y)π and H_c=Σp(1−p)ππ' are additive corpus-scaled
+     doc-sums, so H⁻¹g is **scale-invariant** and needs no raw θ on the driver → no
+     runner change, no over-partitioning issue. Result (0074/0075): head **0.52→0.60**,
+     cos **0.09→0.35**; damping (`head_lr` 0.3, `head_newton_ridge` 0.05) stabilized
+     `|w_CK|` (steady 6–8). Head plateaus at ~0.60 (not the 0.62 ceiling) because the
+     **topics never converge in 100 supervised iters** (α/Σλ still drifting) — the head
+     chases a moving target; closable with more iters / Polyak-averaging, but that
+     doesn't change the AoU conclusion.
+- **AoU PC conclusion (fair test, done):** with a valid head signal finally driving the
+  topic correction, `pc_topics_lr` = **0.619** vs unsupervised two-stage 0.614 / codes
+  0.613 — supervision helps **marginally** on AoU, as expected where the signal is
+  already in the topics. **Hughes replicated; PC's topic-shaping ≈ no benefit here.**
+- **NEXT — pivot to Mondo rare-disease (still AoU data, Mondo-mapping-based cohort/label
+  identification):** the hidden-low-mass-signal regime where topic-shaping should give a
+  real `pc_topics_lr` gain (toy: 0.56→0.91). The Newton head + the whole diagnostic
+  toolchain carry over. Design the cohort/label first.
 
 ## IMMEDIATE: confirm Run 6 before concluding
 
