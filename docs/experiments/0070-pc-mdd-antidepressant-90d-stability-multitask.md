@@ -1,7 +1,7 @@
 ---
 id: 70
 slug: pc-mdd-antidepressant-90d-stability-multitask
-status: pending
+status: done
 model_class: pc
 cohort: mdd_antidepressant
 # Real knobs map 1:1 to pc_antidepressant_cloud.py flags via build_pc_args

@@ -1,7 +1,7 @@
 ---
 id: 74
 slug: pc-vi-newton-head-fast
-status: pending
+status: done
 model_class: pc
 cohort: mdd_stable_treatment
 backend: vi

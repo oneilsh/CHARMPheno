@@ -1,7 +1,7 @@
 ---
 id: 72
 slug: pc-vi-stable-treatment-hughes
-status: pending
+status: done
 model_class: pc
 cohort: mdd_stable_treatment
 backend: vi                  # distributed VI-native PCEstimator (SVI), not in-mem L-BFGS

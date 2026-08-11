@@ -1,7 +1,7 @@
 ---
 id: 75
 slug: pc-vi-newton-head-damped
-status: pending
+status: done
 model_class: pc
 cohort: mdd_stable_treatment
 backend: vi
