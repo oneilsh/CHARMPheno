@@ -123,12 +123,11 @@ def main():
              .getOrCreate())
     spark.sparkContext.setLogLevel("ERROR")
     try:
-        print("minibatch-fraction sweep at C=1 (strong signal, 80 iters):\n")
-        run_config(spark, "full-batch (control)", C=1, mini_batch_fraction=None,
-                   max_iters=80)
-        for mbf in (0.3, 0.1, 0.05):
-            run_config(spark, f"minibatch mbf={mbf}", C=1,
-                       mini_batch_fraction=mbf, max_iters=80)
+        print("C x minibatch interaction (strong signal, 80 iters):\n")
+        run_config(spark, "C=1  full-batch", C=1, mini_batch_fraction=None, max_iters=80)
+        run_config(spark, "C=1  mbf=0.05", C=1, mini_batch_fraction=0.05, max_iters=80)
+        run_config(spark, "C=10 full-batch", C=10, mini_batch_fraction=None, max_iters=80)
+        run_config(spark, "C=10 mbf=0.05", C=10, mini_batch_fraction=0.05, max_iters=80)
     finally:
         spark.stop()
 
