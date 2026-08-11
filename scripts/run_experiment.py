@@ -903,6 +903,32 @@ def cluster_overlay_path(repo_root: Path) -> Path:
     return repo_root / "analysis" / "cloud" / "dist" / "formulaic_overlay.zip"
 
 
+def _extra_spark_confs() -> list[str]:
+    """Optional extra ``--conf k=v`` pairs from ``CHARM_SPARK_CONF`` (space-separated).
+
+    Opt-in escape hatch for per-run Spark tuning without editing SPARK_SUBMIT_FLAGS
+    (which would change every experiment). Empty/unset => no change.
+
+    The motivating case: after a MID-RUN cluster scale-up the new executors sit idle
+    while the original ones stay saturated — the corpus is cached on the original
+    nodes, and with short tasks the default ``spark.locality.wait=3s`` always frees a
+    cache-local slot before the scheduler ever spills to a non-local (new) executor.
+    Since each cached partition here is tiny (~KB), fetching it to an idle executor is
+    cheap, so forcing the spread is a net win:
+
+        CHARM_SPARK_CONF='spark.locality.wait=0s' make exp ID=72
+
+    Multiple pairs are space-separated, e.g.
+    ``CHARM_SPARK_CONF='spark.locality.wait=0s spark.executor.cores=8'``.
+    """
+    raw = os.environ.get("CHARM_SPARK_CONF", "").strip()
+    flags: list[str] = []
+    for pair in raw.split():
+        if "=" in pair:
+            flags += ["--conf", pair]
+    return flags
+
+
 def build_spark_submit_cmd(
     script: str, script_args: list[str], repo_root: Path,
     driver_memory: str = "4g",
@@ -932,6 +958,7 @@ def build_spark_submit_cmd(
     return (
         ["spark-submit"]
         + SPARK_SUBMIT_FLAGS
+        + _extra_spark_confs()
         + ["--driver-memory", driver_memory]
         + ["--py-files", py_files_val, script]
         + script_args
