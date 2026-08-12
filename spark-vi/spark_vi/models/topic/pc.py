@@ -479,6 +479,26 @@ class DagClosureHead(SupervisedHead):
         per_label = -(y * logP + (1.0 - y) * log1mP)                    # (C,) NLL
         return anp.sum(obs * per_label)
 
+    def batch_hessian(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
+        """QUASI-Newton curvature: the LOCAL-logistic Fisher ``Σ_d p_a(1−p_a)·ππᵀ``
+        (each node's OWN sigmoid ``p_a = σ(w_a·π)``), reused verbatim from the flat
+        head. Paired in ``update_global`` with the EXACT closure-coupled gradient
+        (``grad_wCK``, autograd), the per-node solve ``H_a⁻¹ g_a`` is a quasi-Newton
+        step: exact gradient, approximate (positive-definite) metric.
+
+        Why not the exact Fisher: the closure PRODUCT couples head rows (any two
+        nodes sharing a descendant), so the true Hessian is not block-diagonal per
+        node and ``p(1−p)ππᵀ`` is only the diagonal-block LOCAL curvature. As a
+        preconditioner that is fine — it is PD (+ridge), aggregatable ``(C,K,K)``,
+        and scale-invariant exactly like the flat Fisher (ADR 0039), so it recovers
+        Newton's convergence that a single RM-SGD step per iteration lacks (insight
+        0065) WITHOUT the O((C·K)²)/doc cost of a full autograd Hessian. The exact
+        closure-coupled block Gauss-Newton is a documented refinement (spec
+        2026-08-12), not required to beat SGD.
+        """
+        return _supervised_head_hessian(
+            topics_repr, w_CK, rows, alpha_vec, K, n_iters)
+
 
 class OnlinePCLDA(VIModel):
     """Prediction-Constrained LDA fittable by VIRunner with mini-batch SVI.

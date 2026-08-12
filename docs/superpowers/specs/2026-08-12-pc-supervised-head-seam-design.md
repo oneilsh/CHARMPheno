@@ -59,7 +59,7 @@ class SupervisedHead:
     def batch_hessian(self, topics_repr, W, rows, alpha_vec, K, n_iters): return None # closed-form iff known
 
 class FlatLogisticHead(SupervisedHead):   # == today: _per_doc_sup_nll + _supervised_head_hessian, verbatim
-class DagClosureHead(SupervisedHead):     # follow-on: closure-product; batch_hessian=None
+class DagClosureHead(SupervisedHead):     # closure-product loss; batch_hessian = local-logistic Fisher (quasi-Newton)
     def __init__(self, layout: DagLayout): ...   # reuses the SAME DagLayout as the topic gate
 ```
 
@@ -88,10 +88,21 @@ loss_y_d          = −Σ_l obs_l [ y_l·logP(node_l) + (1−y_l)·log(1−P(nod
 
 This is the honest is-a generalization: a node fires only if its whole ancestral closure
 fires. It is a smooth function of `(w, π)`, so the base `batch_value_and_grad` autograds it
-with **no new derivation**. The one wrinkle: the closure product couples nodes, so the flat
-head's closed-form Fisher does not transfer — `DagClosureHead.batch_hessian` returns `None`
-and the Newton head either uses `autograd.hessian` (still `(C,K,K)`, aggregatable) or the
-caller falls back to the SGD head step. Left as a follow-on with its own FD check.
+with **no new derivation**.
+
+**Head optimizer (must be Newton, not SGD).** ADR 0039 / insight 0065: one RM-SGD step
+per SVI iteration does not converge a logistic head against a moving θ (AoU: AUC ≈ chance,
+head ⊥ the batch-LR direction), and it starves the topic correction (whose gradient flows
+through `w_CK`). So the DAG head must not run on SGD. The closure *product* couples head
+rows, so the flat head's *exact* per-label Fisher `p(1−p)ππᵀ` is no longer the exact
+curvature — but Newton only needs a **positive-definite** metric, not a closed form.
+`DagClosureHead.batch_hessian` therefore returns the **local-logistic Fisher** (each node's
+own `p_a(1−p_a)ππᵀ`, reused verbatim from the flat head) as a **quasi-Newton preconditioner**,
+paired with the *exact closure-coupled gradient* (`grad_wCK`, autograd). It is PD (+ridge),
+aggregatable `(C,K,K)`, and scale-invariant exactly like the flat Fisher, so `H_a⁻¹ g_a`
+recovers Newton's convergence without the O((C·K)²)/doc cost of a full autograd Hessian.
+The **exact** closure-coupled block Gauss-Newton is a documented refinement (not required to
+beat SGD); a full `(CK,CK)` autograd Hessian is exact but only viable for small C.
 
 ## The 2×2 this unlocks
 
@@ -114,10 +125,11 @@ seams — the shared head is what lets Gated-PC reuse this machinery rather than
    (default → flat, so nothing changes for existing callers; the head's `C` is validated
    against the model's). Tested: closure matrix incl. a diamond, monotone `P(child) ≤
    P(parent)`, FD grad-check on both the topic-correction and the head (base autograd,
-   no hand-derived gradient), and the model-level Newton→SGD degradation (no closed-form
-   Fisher → no `head_hess_stat` → `update_global` falls back to the SGD head step). The
-   MLlib-shim exposure (threading a `closure_parents` structure through the Estimator so
-   case-finding runs end-to-end on a DataFrame) is the immediate next step.
+   no hand-derived gradient), the **quasi-Newton** head (local-logistic Fisher
+   preconditioner + exact coupled gradient — the DAG head converges via Newton, NOT SGD),
+   and the defensive guard (a flavor returning a `None` Hessian degrades to SGD without
+   KeyError). The MLlib-shim exposure (threading a `closure_parents` structure through the
+   Estimator so case-finding runs end-to-end on a DataFrame) is the immediate next step.
 3. **Gated-PC composition** (task #14) — compose the shared head with the DAG-gated E/M
    step; resolve the plumbing fork (subclass-chain vs delegation) recorded earlier.
 
