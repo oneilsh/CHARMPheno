@@ -551,10 +551,12 @@ def _theta_mismatch_diagnostic(model, train_df, test_df, Pi_tr_scr, y_tr, m_tr,
                                Pi_te_scr, y_te, m_te, C, args):
     """Localize a mis-directed co-fit head: is the head's TRAINING theta
     (``_cavi_theta_anp``) a DIFFERENT predictive representation than the SCORING theta
-    (``infer_local``)? Both optimizers (sgd, adam) converging to the same ~orthogonal
-    ``w_CK`` means the head correctly minimizes its objective but that objective's
-    optimum is not the scoring-theta direction — which is exactly a train/eval theta
-    mismatch. Runs under ``--eval-only`` on a saved checkpoint (no refit): recomputes
+    (``infer_local``)? A first-order head (sgd) converging to a ~orthogonal ``w_CK``
+    could mean the head correctly minimizes its objective but that objective's optimum
+    is not the scoring-theta direction — which would be a train/eval theta mismatch.
+    (This localizer is what ruled that out: the routines agree, cos ~0.95; the head gap
+    was non-convergence, since fixed by newton.) Runs under ``--eval-only`` on a saved
+    checkpoint (no refit): recomputes
     the anp theta from the saved topics, fits a plain per-label LR on it, and reports
     the direction cosines + a matched-vs-mismatched AUC. Purely diagnostic.
     """
@@ -732,28 +734,24 @@ def _build_parser() -> argparse.ArgumentParser:
               "is under-moved (|w_CK| still climbing at max_iter) — the targeted "
               "alternative to lowering tau0, which speeds up everything. Pair a hot "
               "head with --weight-y-warmup-iters so it does not spike early. Ignored "
-              "for --backend inmem. Ignored when --head-optimizer adam (Adam self-"
-              "scales the step)."),
+              "for --backend inmem and for --head-optimizer newton."),
     )
     parser.add_argument(
-        "--head-optimizer", type=str, default="sgd", choices=("sgd", "adam", "newton"),
+        "--head-optimizer", type=str, default="sgd", choices=("sgd", "newton"),
         help=("VI backend: optimizer for the LOGISTIC HEAD w_CK. 'sgd' (default) = "
               "the RM-damped step rho*head_lr_scale*weight_y*grad, sharing the topics' "
-              "single Robbins-Monro schedule. 'adam' = a per-parameter adaptive step "
-              "DECOUPLED from rho and weight_y (Adam normalizes by the running gradient "
-              "RMS, so both cancel), letting the non-conjugate head run on its own "
-              "timescale. This is the two-timescale remedy for the coupled-objective "
-              "failure where many shared-theta heads under minibatch noise drive w_CK "
-              "into a mis-directed local optimum (heldout head AUC ~= chance while a "
-              "batch LR on the SAME topics predicts) — the structure Hughes et al. "
-              "(AISTATS 2018) used (Adam on {phi, eta}). Maps to PCEstimator."
-              "headOptimizer. Ignored for --backend inmem."),
+              "single Robbins-Monro schedule (one first-order step per SVI iteration). "
+              "'newton' = a per-iteration ridge-Newton (IRLS) step that CONVERGES the "
+              "logistic head on the current theta — the settled head fix (ADR 0039). "
+              "sgd does not converge the coupled head against a moving theta (heldout "
+              "head AUC ~= chance while a batch LR on the SAME topics predicts; insight "
+              "0065). Maps to PCEstimator.headOptimizer. Ignored for --backend inmem."),
     )
     parser.add_argument(
         "--head-lr", type=float, default=0.05,
-        help=("VI backend: base learning rate for --head-optimizer adam, or the step-"
-              "damping fraction for newton (~0.5-1.0). Ignored for sgd. Maps to "
-              "PCEstimator.headLr. Ignored for inmem."),
+        help=("VI backend: the step-damping fraction for --head-optimizer newton "
+              "(~0.5-1.0). Ignored for sgd. Maps to PCEstimator.headLr. Ignored for "
+              "inmem."),
     )
     parser.add_argument(
         "--head-newton-ridge", type=float, default=0.01,
@@ -761,8 +759,8 @@ def _build_parser() -> argparse.ArgumentParser:
               "mean(diag(H))) conditioning the per-label IRLS solve. 'newton' takes ONE "
               "aggregatable ridge-Newton step per SVI iteration — g and H are corpus-"
               "scaled additive doc-sums, so H^-1 g is scale-invariant — which CONVERGES "
-              "the logistic head on the current theta (sgd/adam take one noisy gradient "
-              "step/iter and never converge: head AUC ~= chance, w_CK orthogonal to the "
+              "the logistic head on the current theta (sgd takes one noisy gradient "
+              "step/iter and does not converge: head AUC ~= chance, w_CK orthogonal to the "
               "batch-LR direction). Also feeds the topic correction a valid head signal "
               "each iter. Maps to PCEstimator.headNewtonRidge. Ignored for inmem."),
     )

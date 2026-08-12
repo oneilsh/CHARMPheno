@@ -126,14 +126,17 @@ def main():
     spark.sparkContext.setLogLevel("ERROR")
     try:
         # Harsh regime (C=10, mbf=0.05, 200 iters — the compounding AoU has that
-        # 80-iter runs lack): does the RM-SGD head misdirect, and does Adam hold?
-        print("SGD vs Adam head @ C=10, mbf=0.05, 200 iters (strong signal):\n")
+        # 80-iter runs lack): does the RM-SGD head misdirect, and does Newton hold?
+        # (The original SGD-vs-Adam bisection concluded non-convergence; Adam landed
+        # at the same mis-directed w_CK as SGD and was removed. Newton — a per-iter
+        # IRLS solve — is the settled fix, ADR 0039; this now checks it at scale.)
+        print("SGD vs Newton head @ C=10, mbf=0.05, 200 iters (strong signal):\n")
         run_config(spark, "C=10 mbf=0.05 SGD", C=10, mini_batch_fraction=0.05,
                    max_iters=200, head_optimizer="sgd")
-        for lr in (0.02, 0.05):
-            run_config(spark, f"C=10 mbf=0.05 ADAM lr={lr}", C=10,
+        for damp in (0.3, 0.7):
+            run_config(spark, f"C=10 mbf=0.05 NEWTON damp={damp}", C=10,
                        mini_batch_fraction=0.05, max_iters=200,
-                       head_optimizer="adam", head_lr=lr)
+                       head_optimizer="newton", head_lr=damp)
     finally:
         spark.stop()
 

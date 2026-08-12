@@ -294,66 +294,15 @@ def test_supervised_lambda_gradient_matches_finite_difference():
     assert err_raw > 1e-2, "raw dEb unexpectedly matched dloss/dlambda; transform is a no-op?"
 
 
-def _one_supervised_step(head_optimizer, weight_y=50.0, head_lr=0.1, rho=0.5,
-                         seed=0):
-    """Run initialize_global -> local_update -> update_global once; return
-    (model, gp_before, gp_after) for a small supervised OnlinePCLDA."""
-    from spark_vi.models.topic.pc import OnlinePCLDA
-    K, V, C = 4, 12, 2
-    docs = _tiny_sup_batch(seed=seed, C=C, V=V)
-    model = OnlinePCLDA(K=K, vocab_size=V, C=C, weight_y=weight_y,
-                        head_optimizer=head_optimizer, head_lr=head_lr,
-                        random_seed=0)
-    gp0 = model.initialize_global(None)
-    stats = model.local_update(docs, gp0)
-    gp1 = model.update_global(gp0, stats, learning_rate=rho)
-    return model, gp0, gp1, stats
-
-
-def test_adam_head_moves_head_and_maintains_moment_buffers():
-    """The 'adam' head path updates w_CK off zero AND carries first/second-moment
-    buffers in global_params (absent for 'sgd'). A second step keeps the buffer key
-    set stable and the moments accumulate."""
-    model, gp0, gp1, stats = _one_supervised_step("adam")
-    assert set(gp0) == {"lambda", "alpha", "eta", "w_CK", "w_CK_m", "w_CK_v"}
-    assert np.abs(gp1["w_CK"]).max() > 0.0            # head moved off the zero seed
-    assert np.abs(gp1["w_CK_m"]).max() > 0.0          # first moment populated
-    assert np.abs(gp1["w_CK_v"]).max() > 0.0          # second moment populated
-    # sgd path: no moment buffers.
-    _, gp0s, gp1s, _ = _one_supervised_step("sgd")
-    assert "w_CK_m" not in gp0s and "w_CK_m" not in gp1s
-    # A second adam step keeps the key set constant (safe for combine/resume).
-    gp2 = model.update_global(gp1, stats, learning_rate=0.5)
-    assert set(gp2) == set(gp1)
-
-
-def test_adam_head_step_is_invariant_to_weight_y_but_sgd_is_not():
-    """The two-timescale decoupling property: because Adam normalizes by the running
-    gradient RMS, the FIRST adam head step (w seeded at 0, ridge = 0) is independent
-    of weight_y — the head runs on its own rate, not the topics' ρ·weight_y schedule.
-    The sgd step, by contrast, scales linearly with weight_y."""
-    _, _, a_lo, _ = _one_supervised_step("adam", weight_y=50.0)
-    _, _, a_hi, _ = _one_supervised_step("adam", weight_y=5000.0)
-    # 100x weight_y -> identical adam head update: the head no longer rides the
-    # topics' weight_y dial (the topic λ correction is a separate, capped path).
-    assert np.allclose(a_lo["w_CK"], a_hi["w_CK"], atol=1e-10)
-
-    _, _, s_lo, _ = _one_supervised_step("sgd", weight_y=50.0)
-    _, _, s_hi, _ = _one_supervised_step("sgd", weight_y=5000.0)
-    # sgd head step scales with weight_y -> the two are far apart (not a no-op head).
-    assert np.abs(s_lo["w_CK"]).max() > 0.0
-    assert not np.allclose(s_lo["w_CK"], s_hi["w_CK"])
-
-
 def test_newton_head_emits_hessian_and_converges_to_lr_direction():
     """The 'newton' head emits an additive per-label Hessian stat and its per-iteration
     ridge-Newton step, iterated on a FIXED theta, converges w_CK to the unregularized
     LogisticRegression direction (cos ~ 1) — i.e. it actually converges the head, unlike
-    the one-step sgd/adam path."""
+    the one-step sgd path."""
     from spark_vi.models.topic.pc import OnlinePCLDA, _supervised_head_hessian
     from sklearn.linear_model import LogisticRegression
 
-    # (a) the stat is emitted with the right shape and sgd/adam do NOT emit it.
+    # (a) the stat is emitted with the right shape and sgd does NOT emit it.
     docs = _tiny_sup_batch(seed=3, C=2, V=12)
     mn = OnlinePCLDA(K=4, vocab_size=12, C=2, weight_y=50.0, head_optimizer="newton",
                      head_lr=1.0, random_seed=0)
@@ -382,30 +331,6 @@ def test_newton_head_emits_hessian_and_converges_to_lr_direction():
         w = w - np.linalg.solve(H + ridge * np.eye(K), g + ridge * w)
     cos = float(v @ w / (np.linalg.norm(v) * np.linalg.norm(w)))
     assert cos > 0.999, f"newton did not reach the LR direction: cos={cos:.4f}"
-
-
-def test_adam_update_lazy_inits_moments_on_warm_start_from_sgd_checkpoint():
-    """A WARM START seeds global params from a saved checkpoint (replacing
-    initialize_global's output), so an sgd phase-1 checkpoint carries no
-    w_CK_m/w_CK_v. The adam update_global must lazy-init them (zeros) rather than
-    KeyError. Regression for the phase-2 warm-start crash."""
-    from spark_vi.models.topic.pc import OnlinePCLDA
-    K, V, C = 4, 12, 2
-    docs = _tiny_sup_batch(seed=1, C=C, V=V)
-    # An sgd model produces a checkpoint WITHOUT the Adam moment buffers.
-    sgd = OnlinePCLDA(K=K, vocab_size=V, C=C, weight_y=0.0, head_optimizer="sgd",
-                      random_seed=0)
-    warm_gp = sgd.initialize_global(None)
-    assert "w_CK_m" not in warm_gp                       # sgd checkpoint lacks buffers
-    # Warm-start an adam supervised model from those params (the phase-2 path).
-    adam = OnlinePCLDA(K=K, vocab_size=V, C=C, weight_y=1000.0, head_optimizer="adam",
-                       head_lr=0.05, random_seed=0)
-    stats = adam.local_update(docs, warm_gp)
-    gp1 = adam.update_global(warm_gp, stats, learning_rate=0.5)   # must NOT KeyError
-    assert np.abs(gp1["w_CK"]).max() > 0.0               # head moved
-    assert "w_CK_m" in gp1 and "w_CK_v" in gp1           # buffers now present
-    # A second step (buffers now present) also works.
-    adam.update_global(gp1, stats, learning_rate=0.5)
 
 
 # ---------------------------------------------------------------------------

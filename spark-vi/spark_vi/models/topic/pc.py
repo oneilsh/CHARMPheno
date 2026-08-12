@@ -384,9 +384,6 @@ class OnlinePCLDA(VIModel):
         weight_y_warmup_iters: int = 0,
         head_optimizer: str = "sgd",
         head_lr: float = 0.05,
-        head_beta1: float = 0.9,
-        head_beta2: float = 0.999,
-        head_eps: float = 1e-8,
         head_newton_ridge: float = 1e-2,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
@@ -413,19 +410,14 @@ class OnlinePCLDA(VIModel):
             raise ValueError(
                 f"weight_y_warmup_iters must be >= 0, got {weight_y_warmup_iters}"
             )
-        if head_optimizer not in ("sgd", "adam", "newton"):
+        if head_optimizer not in ("sgd", "newton"):
             raise ValueError(
-                f"head_optimizer must be 'sgd', 'adam', or 'newton', got "
-                f"{head_optimizer!r}"
+                f"head_optimizer must be 'sgd' or 'newton', got {head_optimizer!r}"
             )
         if head_lr <= 0:
             raise ValueError(f"head_lr must be > 0, got {head_lr}")
         if head_newton_ridge < 0:
             raise ValueError(f"head_newton_ridge must be >= 0, got {head_newton_ridge}")
-        if not (0.0 <= head_beta1 < 1.0 and 0.0 <= head_beta2 < 1.0):
-            raise ValueError("head_beta1/head_beta2 must lie in [0, 1)")
-        if head_eps <= 0:
-            raise ValueError(f"head_eps must be > 0, got {head_eps}")
 
         # The unsupervised LDA engine. Every LDA global (λ, α, η) and every LDA
         # update is owned by this delegate, so at weight_y == 0 OnlinePCLDA IS
@@ -454,18 +446,13 @@ class OnlinePCLDA(VIModel):
         self.head_lr_scale = float(head_lr_scale)
         self.topic_trust = float(topic_trust)
         self.weight_y_warmup_iters = int(weight_y_warmup_iters)
-        # Head optimizer. 'sgd' (default) = the RM-damped step ρ·head_lr_scale·wy·g.
-        # 'adam' = a per-parameter adaptive step on the head, DECOUPLED from ρ and
-        # weight_y (Adam self-normalizes the gradient scale, so both cancel). This
-        # is the two-timescale fix: the non-conjugate head gets its own adaptive
-        # rate rather than sharing the topics' single Robbins-Monro schedule — the
-        # structure Hughes et al. (AISTATS 2018) used (Adam) to keep the coupled
-        # PC objective from landing in a mis-directed-head local optimum.
+        # Head optimizer. 'sgd' (default) = the RM-damped step ρ·head_lr_scale·wy·g
+        # (one first-order step per SVI iteration — provably-in-practice too slow to
+        # converge the coupled head against a moving θ; see insight 0065). 'newton' =
+        # a per-iteration ridge-Newton (IRLS) step that CONVERGES the logistic head on
+        # the current θ — the settled head fix (ADR 0039).
         self.head_optimizer = str(head_optimizer)
         self.head_lr = float(head_lr)
-        self.head_beta1 = float(head_beta1)
-        self.head_beta2 = float(head_beta2)
-        self.head_eps = float(head_eps)
         # 'newton' head: relative ridge (fraction of mean(diag(H))) that conditions the
         # per-label IRLS solve. AUC is scale-invariant to head magnitude, so this only
         # stabilizes the solve; it does not bias the head DIRECTION. head_lr doubles as
@@ -508,12 +495,6 @@ class OnlinePCLDA(VIModel):
         """
         gp = self._lda.initialize_global(data_summary)
         gp["w_CK"] = np.zeros((self.C, self.K), dtype=np.float64)
-        if self.head_optimizer == "adam":
-            # First/second-moment buffers for the Adam head step; global-only
-            # (updated on the driver in update_global), so they never cross the
-            # Spark stats boundary and combine_stats is unaffected.
-            gp["w_CK_m"] = np.zeros((self.C, self.K), dtype=np.float64)
-            gp["w_CK_v"] = np.zeros((self.C, self.K), dtype=np.float64)
         return gp
 
     def local_update(
@@ -637,13 +618,6 @@ class OnlinePCLDA(VIModel):
         if self.weight_y == 0.0:
             # Head unchanged at weight_y == 0 (stays at its zero seed).
             new_gp["w_CK"] = global_params["w_CK"]
-            if self.head_optimizer == "adam":
-                # Carry the (untouched) Adam buffers so the global-params key set
-                # stays constant across iterations for combine/resume. Lazy-init to
-                # zeros if a warm-start checkpoint (e.g. an sgd phase 1) lacks them.
-                zc = np.zeros((self.C, self.K), dtype=np.float64)
-                new_gp["w_CK_m"] = global_params.get("w_CK_m", zc)
-                new_gp["w_CK_v"] = global_params.get("w_CK_v", zc.copy())
             return new_gp
 
         self._update_calls += 1
@@ -687,18 +661,17 @@ class OnlinePCLDA(VIModel):
         # keeps λ a valid strictly-positive Dirichlet pseudocount.
         new_gp["lambda"] = np.maximum(lam_unsup - corr, 1e-30)
 
-        # (c) head step. Three optimizers:
+        # (c) head step. Two optimizers:
         #   'sgd'    — the RM-damped step ρ·head_lr_scale·wy·g (default; unchanged).
-        #   'adam'   — a per-parameter adaptive step DECOUPLED from ρ and wy (Adam
-        #              normalizes by the running gradient RMS). A two-timescale attempt.
         #   'newton' — a per-iteration ridge-Newton (IRLS) step that CONVERGES the
-        #              logistic head on the current θ (sgd/adam take ONE noisy gradient
-        #              step per SVI iter and provably never converge the head — heldout
-        #              AUC ≈ chance, w_CK ⊥ the batch-LR direction, invariant to lr).
-        #              g and H are corpus-scaled additive doc-sums, so H⁻¹g is SCALE-
-        #              INVARIANT (the corpus/batch factor cancels) and needs no raw θ on
-        #              the driver. This also feeds the topic correction a VALID head
-        #              signal each iter (the correction's ∂loss_y/∂θ flows through w_CK).
+        #              logistic head on the current θ (sgd takes ONE noisy gradient
+        #              step per SVI iter and does not converge the head against a moving
+        #              θ — heldout AUC ≈ chance, w_CK ⊥ the batch-LR direction, invariant
+        #              to lr; insight 0065). g and H are corpus-scaled additive doc-sums,
+        #              so H⁻¹g is SCALE-INVARIANT (the corpus/batch factor cancels) and
+        #              needs no raw θ on the driver. This also feeds the topic correction
+        #              a VALID head signal each iter (the correction's ∂loss_y/∂θ flows
+        #              through w_CK).
         if self.head_optimizer == "newton":
             # Per-label ridge-Newton: w_c ← w_c − head_lr · (H_c + λI)⁻¹ (g_c + λ w_c).
             # g_c is the corpus-scaled NLL gradient sum (grad_wCK_stat), H_c its Fisher
@@ -721,30 +694,9 @@ class OnlinePCLDA(VIModel):
             new_gp["w_CK"] = new_w
             return new_gp
 
+        # 'sgd' head: one RM-damped first-order step (grad + ridge ∂loss_w/∂w).
         head_grad = grad_wCK + self.lambda_w * 2.0 * w_CK
-        if self.head_optimizer == "adam":
-            b1, b2, eps = self.head_beta1, self.head_beta2, self.head_eps
-            # Lazy-init the moment buffers: a WARM START (or resume) seeds the global
-            # params from a saved checkpoint, replacing initialize_global's output, so
-            # a checkpoint written under head_optimizer='sgd' (e.g. the unsupervised
-            # phase-1 warm-up) carries no w_CK_m/w_CK_v. Default them to zeros — the
-            # standard Adam cold-start — so switching to 'adam' at warm start works.
-            m_prev = global_params.get("w_CK_m")
-            v_prev = global_params.get("w_CK_v")
-            if m_prev is None:
-                m_prev = np.zeros_like(w_CK)
-            if v_prev is None:
-                v_prev = np.zeros_like(w_CK)
-            m = b1 * m_prev + (1.0 - b1) * head_grad
-            v = b2 * v_prev + (1.0 - b2) * (head_grad * head_grad)
-            t = self._update_calls  # >= 1 (bumped above)
-            m_hat = m / (1.0 - b1 ** t)
-            v_hat = v / (1.0 - b2 ** t)
-            new_gp["w_CK"] = w_CK - self.head_lr * m_hat / (np.sqrt(v_hat) + eps)
-            new_gp["w_CK_m"] = m
-            new_gp["w_CK_v"] = v
-        else:
-            new_gp["w_CK"] = w_CK - rho * self.head_lr_scale * wy * head_grad
+        new_gp["w_CK"] = w_CK - rho * self.head_lr_scale * wy * head_grad
         return new_gp
 
     def _effective_weight_y(self) -> float:
