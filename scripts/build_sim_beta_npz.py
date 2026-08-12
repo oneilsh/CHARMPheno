@@ -1,10 +1,12 @@
 """Build a compact real-EHR beta bundle for SIMULATION from the Hugging Face dataset
 `oneilsh/lda_pasc` (the cross-site prior-LDA fit: 300 topics x ~50K OMOP concepts).
 
-Memory-safe: streams the long-format rows once, keeping only a size-K max-heap of the
-highest-weight concepts PER TOPIC (<= n_topics * top_k entries resident, not the full
-~15M rows). Also parses each topic's usage% from its `T-<rank> (U .., H .., C ..)` name
-so simulations can weight background topic prevalence realistically (Zipf-like).
+Downloads the single long-format CSV (`all_topic_descriptions.csv`, ~1.7 GB) once and
+does a VECTORIZED pandas top-K per topic (seconds), rather than the datasets streaming
+iterator (which parses ~15M rows in Python, ~100x slower). Only the three needed columns
+are read; topic_name is categorical. Parses each topic's usage% from its
+`T-<rank> (U .., H .., C ..)` name so simulations can weight background topic prevalence
+realistically (Zipf-like).
 
 Output (data/cache/sim_beta.npz), consumable by tests/_stm_synth.real_beta_from(source=):
     beta        : (K, V) float64, each row a renormalized topic-word distribution
@@ -12,13 +14,12 @@ Output (data/cache/sim_beta.npz), consumable by tests/_stm_synth.real_beta_from(
     topic_rank  : (K,) int64     upstream 1-indexed usage rank (1 = most prevalent)
     usage_pct   : (K,) float64   per-topic usage % (background-prevalence weight)
 
-Run (in a network-enabled env with `datasets` installed):
+Run (network-enabled env with `datasets`/`huggingface_hub` + `pandas`):
     <venv>/bin/python scripts/build_sim_beta_npz.py --top-k 400
 """
 from __future__ import annotations
 
 import argparse
-import heapq
 import logging
 import re
 from pathlib import Path
@@ -28,6 +29,7 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 HF_DATASET = "oneilsh/lda_pasc"
+CSV_FILE = "all_topic_descriptions.csv"
 DEFAULT_OUTPUT = Path("data/cache/sim_beta.npz")
 _NAME_RE = re.compile(r"T-(?P<rank>\d+)\s*\(\s*U\s*(?P<u>-?\d+(?:\.\d+)?)\s*%")
 
@@ -40,41 +42,42 @@ def _parse(topic_name: str) -> tuple[int, float]:
 
 
 def build(top_k: int, output: Path, limit: int | None = None) -> None:
-    from datasets import load_dataset
-    ds = load_dataset(HF_DATASET, split="train", streaming=True)
+    import pandas as pd
+    from huggingface_hub import hf_hub_download
 
-    heaps: dict[int, list] = {}          # topic_rank -> min-heap of (weight, concept_id)
-    usage: dict[int, float] = {}
-    n = 0
-    for row in ds:
-        rank, u = _parse(row["topic_name"])
-        w = float(row["term_weight"])
-        cid = int(row["concept_id"])
-        usage.setdefault(rank, u)
-        h = heaps.setdefault(rank, [])
-        if len(h) < top_k:
-            heapq.heappush(h, (w, cid))
-        elif w > h[0][0]:
-            heapq.heapreplace(h, (w, cid))
-        n += 1
-        if n % 2_000_000 == 0:
-            log.info("streamed %d rows; %d topics seen", n, len(heaps))
-        if limit is not None and n >= limit:
-            break
-    log.info("done streaming %d rows across %d topics", n, len(heaps))
+    path = hf_hub_download(HF_DATASET, CSV_FILE, repo_type="dataset")
+    log.info("downloaded %s", path)
+    df = pd.read_csv(
+        path, usecols=["term_weight", "concept_id", "topic_name"],
+        dtype={"term_weight": "float64", "concept_id": "int64", "topic_name": "category"},
+        nrows=limit)
+    log.info("read %d rows, %d topics", len(df), df["topic_name"].cat.categories.size)
 
-    ranks = sorted(heaps)
-    vocab = sorted({cid for h in heaps.values() for _, cid in h})
-    col = {cid: j for j, cid in enumerate(vocab)}
+    cats = list(df["topic_name"].cat.categories)
+    parsed = [_parse(n) for n in cats]
+    rank_of = np.array([p[0] for p in parsed], dtype=np.int64)
+    usage_of = np.array([p[1] for p in parsed], dtype=np.float64)
+    codes = df["topic_name"].cat.codes.to_numpy()
+    df = df.assign(rank=rank_of[codes]).drop(columns=["topic_name"])
+
+    # top-K concepts per topic by weight (vectorized), then renormalize.
+    top = (df.sort_values(["rank", "term_weight"], ascending=[True, False])
+             .groupby("rank", sort=True).head(top_k))
+    ranks = np.sort(top["rank"].unique())
+    vocab = np.sort(top["concept_id"].unique())
+    col = {int(c): j for j, c in enumerate(vocab)}
+    row_of = {int(r): i for i, r in enumerate(ranks)}
     K, V = len(ranks), len(vocab)
     beta = np.zeros((K, V), dtype=np.float64)
-    for i, r in enumerate(ranks):
-        for w, cid in heaps[r]:
-            beta[i, col[cid]] = w
-    beta /= beta.sum(axis=1, keepdims=True)      # renormalize each topic row
-    out = dict(beta=beta, concept_ids=np.array(vocab, dtype=np.int64),
-               topic_rank=np.array(ranks, dtype=np.int64),
-               usage_pct=np.array([usage[r] for r in ranks], dtype=np.float64))
+    r = top["rank"].to_numpy(); c = top["concept_id"].to_numpy(); w = top["term_weight"].to_numpy()
+    for ri, ci, wi in zip(r, c, w):
+        beta[row_of[int(ri)], col[int(ci)]] = wi
+    beta /= beta.sum(axis=1, keepdims=True)
+
+    rank_to_usage = {int(rk): float(u) for rk, u in zip(rank_of, usage_of)}
+    out = dict(beta=beta, concept_ids=vocab.astype(np.int64),
+               topic_rank=ranks.astype(np.int64),
+               usage_pct=np.array([rank_to_usage[int(rk)] for rk in ranks], dtype=np.float64))
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(output, **out)
     log.info("wrote %s  beta=(%d,%d)  vocab=%d", output, K, V, V)
