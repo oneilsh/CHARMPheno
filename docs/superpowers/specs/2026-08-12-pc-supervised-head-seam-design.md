@@ -128,8 +128,11 @@ seams — the shared head is what lets Gated-PC reuse this machinery rather than
    no hand-derived gradient), the **quasi-Newton** head (local-logistic Fisher
    preconditioner + exact coupled gradient — the DAG head converges via Newton, NOT SGD),
    and the defensive guard (a flavor returning a `None` Hessian degrades to SGD without
-   KeyError). The MLlib-shim exposure (threading a `closure_parents` structure through the
-   Estimator so case-finding runs end-to-end on a DataFrame) is the immediate next step.
+   KeyError). **MLlib-shim exposure is also SHIPPED**: `OnlinePCLDAEstimator.closureParents`
+   (JSON list-of-parent-lists) selects the DAG head, and `transform`'s `probabilityCol` is
+   the head-aware closure product `P(node_l)` via a `predict_proba` seam on the head
+   (broadcast as arrays, not the head object), so case-finding runs end-to-end on a
+   DataFrame.
 3. **Gated-PC composition** (task #14) — compose the shared head with the DAG-gated E/M
    step; resolve the plumbing fork (subclass-chain vs delegation) recorded earlier.
 
