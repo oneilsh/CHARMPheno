@@ -307,6 +307,116 @@ def _supervised_head_hessian(
     return H
 
 
+# ---------------------------------------------------------------------------
+# Supervised-head seam. The head FLAVOR is a single per-doc loss ``per_doc_nll``;
+# the batch gradient accumulation, the digamma-Jacobian topic transform
+# (``_grad_topics_to_lambda``), and the ``update_global`` corrections are all
+# head-AGNOSTIC. A flavor subclasses ``SupervisedHead`` and provides
+# ``per_doc_nll`` (autograd handles ``grad_topics``/``grad_wCK``); it MAY provide a
+# closed-form ``batch_hessian`` (the default returns None → the Newton head falls
+# back to autograd/SGD). ``FlatLogisticHead`` is the default and delegates to the
+# proven module-level free functions, so the increment-2 numbers are byte-for-byte
+# unchanged. See docs/superpowers/specs/2026-08-12-pc-supervised-head-seam-design.md.
+# ---------------------------------------------------------------------------
+
+
+class SupervisedHead:
+    """A per-document supervised NLL ``loss_y(eb_d, w_CK, doc)`` plus generic
+    autograd batch accumulators built on top of it.
+
+    A head FLAVOR overrides :meth:`per_doc_nll` (a differentiable
+    ``autograd.numpy`` function of the doc's topic slice ``eb_d`` and the head
+    ``w_CK``); the base then differentiates it per doc and sums over the batch, so a
+    new flavor needs NO gradient derivation. ``per_doc_nll`` reads π_d via the SAME
+    label-free CAVI (:func:`_cavi_theta_anp`) the model predicts with — the PC
+    faithfulness invariant — so ``weight_y`` stays factored out here and is applied
+    once at the global step.
+    """
+
+    def per_doc_nll(self, eb_d, w_CK, counts, s, obs, alpha_vec, K, n_iters):
+        raise NotImplementedError
+
+    def __init__(self):
+        # value_and_grad w.r.t. (eb_d, w_CK); built once per head (autograd closures
+        # are cheap to reuse and never cross the Spark boundary — only unboxed numpy
+        # results do).
+        self._per_doc_vg = autograd.value_and_grad(self.per_doc_nll, argnum=(0, 1))
+
+    def batch_value_and_grad(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
+        """Accumulate (value, ∂/∂topics_repr (K,V), ∂/∂w_CK (C,K)) over a batch.
+
+        The supervised loss is a plain SUM over docs, so its gradient is the sum of
+        per-doc gradients. Each doc's autograd grad is taken w.r.t. its sliced
+        ``eb_d = topics_repr[:, indices]`` (bounding the tape to one doc's unique
+        words) and SCATTERED back into the dense (K,V) at those columns; unobserved
+        cells contribute 0 via ``obs`` (a no-observed-cell doc is skipped whole).
+        Generic over the flavor — used by non-flat heads; :class:`FlatLogisticHead`
+        short-circuits to the proven free function.
+        """
+        K_, V = topics_repr.shape
+        C = w_CK.shape[0]
+        grad_topics = np.zeros((K_, V), dtype=np.float64)
+        grad_wCK = np.zeros((C, K), dtype=np.float64)
+        loss = 0.0
+        for doc in rows:
+            obs = np.asarray(doc.label_mask, dtype=np.float64)
+            if obs.sum() == 0.0:
+                continue
+            indices = doc.indices
+            counts = np.asarray(doc.counts, dtype=np.float64)
+            s = np.sign(np.asarray(doc.y, dtype=np.float64) - 0.01)
+            eb_d = topics_repr[:, indices]
+            val, (g_eb, g_w) = self._per_doc_vg(
+                eb_d, w_CK, counts, s, obs, alpha_vec, K, n_iters)
+            loss += float(val)
+            grad_topics[:, indices] += np.asarray(g_eb, dtype=np.float64)
+            grad_wCK += np.asarray(g_w, dtype=np.float64)
+        return loss, grad_topics, grad_wCK
+
+    def batch_value(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
+        """Value-only supervised NLL over a batch (the finite-difference target)."""
+        loss = 0.0
+        for doc in rows:
+            obs = np.asarray(doc.label_mask, dtype=np.float64)
+            if obs.sum() == 0.0:
+                continue
+            s = np.sign(np.asarray(doc.y, dtype=np.float64) - 0.01)
+            eb_d = topics_repr[:, doc.indices]
+            loss += float(self.per_doc_nll(
+                eb_d, w_CK, np.asarray(doc.counts, dtype=np.float64),
+                s, obs, alpha_vec, K, n_iters))
+        return loss
+
+    def batch_hessian(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
+        """Closed-form per-label NLL Hessian if the flavor has one, else None.
+
+        None signals the Newton/IRLS head to fall back (autograd Hessian or the SGD
+        head step). :class:`FlatLogisticHead` provides the logistic Fisher info.
+        """
+        return None
+
+
+class FlatLogisticHead(SupervisedHead):
+    """Default flavor: C INDEPENDENT logistic heads, ``σ(w_c·π)`` — Hughes' flat
+    PC head. Delegates to the proven module-level free functions so the increment-2
+    numbers are byte-for-byte unchanged, and exposes the closed-form logistic Fisher
+    that powers the Newton/IRLS head (ADR 0039)."""
+
+    def per_doc_nll(self, eb_d, w_CK, counts, s, obs, alpha_vec, K, n_iters):
+        return _per_doc_sup_nll(eb_d, w_CK, counts, s, obs, alpha_vec, K, n_iters)
+
+    def batch_value_and_grad(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
+        return _supervised_batch_value_and_grad(
+            topics_repr, w_CK, rows, alpha_vec, K, n_iters)
+
+    def batch_value(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
+        return _supervised_batch_value(topics_repr, w_CK, rows, alpha_vec, K, n_iters)
+
+    def batch_hessian(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
+        return _supervised_head_hessian(
+            topics_repr, w_CK, rows, alpha_vec, K, n_iters)
+
+
 class OnlinePCLDA(VIModel):
     """Prediction-Constrained LDA fittable by VIRunner with mini-batch SVI.
 
@@ -464,6 +574,10 @@ class OnlinePCLDA(VIModel):
         # the driver), so it is a faithful iteration index without threading t
         # through the VIModel contract.
         self._update_calls = 0
+        # Supervised-head flavor (the label-side seam). Default = the flat C-way
+        # logistic head (Hughes). A DAG-closure head (Mondo, label-side hierarchy)
+        # slots in here without touching the SVI math or the increment-1 gate.
+        self._head = FlatLogisticHead()
 
     # Convenience passthroughs so callers/tests can read the LDA hypers off the
     # PC model without reaching into the delegate.
@@ -540,7 +654,7 @@ class OnlinePCLDA(VIModel):
         # The topic representation CAVI reads (identical to lda.local_update).
         expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
 
-        _loss, grad_topics, grad_wCK = _supervised_batch_value_and_grad(
+        _loss, grad_topics, grad_wCK = self._head.batch_value_and_grad(
             expElogbeta, w_CK, rows, alpha_vec, self.K, self.grad_cavi_iters,
         )
         stats["grad_topics_stat"] = grad_topics
@@ -548,9 +662,12 @@ class OnlinePCLDA(VIModel):
         if self.head_optimizer == "newton":
             # Additive per-label NLL Hessian (Fisher info) for the ridge-Newton head
             # step; sums across partitions via the delegate's combine_stats like every
-            # other dense stat. grad_wCK_stat is the paired gradient.
-            stats["head_hess_stat"] = _supervised_head_hessian(
+            # other dense stat. grad_wCK_stat is the paired gradient. None when the
+            # flavor has no closed form (the DAG head → autograd/SGD fallback).
+            hess = self._head.batch_hessian(
                 expElogbeta, w_CK, rows, alpha_vec, self.K, self.grad_cavi_iters)
+            if hess is not None:
+                stats["head_hess_stat"] = hess
         return stats
 
     def update_global(
