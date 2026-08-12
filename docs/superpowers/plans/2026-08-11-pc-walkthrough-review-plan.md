@@ -22,6 +22,11 @@ section at the top of `docs/REVIEW_LOG.md` when done.
   don't converge in-budget) — parked as a refinement (Polyak-average / more iters),
   documented in insight 0065.
 - **A settled "production" config** (which `head_optimizer` / schedule for a real study).
+- **Drop the vestigial `optimizer` compat-mirror from the LDA/HDP shims.** It only
+  accepts `"online"` (rejects `"em"` — not implemented; spark-vi is SVI-only), so it is
+  API theater that mirrors `pyspark.ml.clustering.LDA`. PCLDA/GatedLDA correctly omit it
+  (PCLDA's real optimizer axis is `headOptimizer`: sgd/newton). Eventually remove it from
+  LDA/HDP for a uniform surface — but that touches shared, tested shims, so **not now**.
 
 ---
 
@@ -126,7 +131,7 @@ per iteration provably does NOT converge the coupled head (insight 0065 — sgd/
 
 ## Lesson 5 — The mllib shim (`spark_vi/mllib/topic/pc.py`): the reusable artifact
 
-**Read:** `PCEstimator`/`PCModel`, `_build_model_and_config`, `_PC_DEFAULTS`, the param
+**Read:** `OnlinePCLDAEstimator`/`OnlinePCLDAModel`, `_build_model_and_config`, `_ONLINE_PCLDA_DEFAULTS`, the param
 declarations, `transform` (topicDistribution + probabilityCol), save/resume/warmStartFrom;
 `test_mllib_pc_persistence.py`, `test_pc_warm_start.py`. ADR 0009 (shim pattern).
 
