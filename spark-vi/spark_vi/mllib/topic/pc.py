@@ -19,6 +19,7 @@ head trains on it — and ``_transform`` additionally appends a head-derived
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Callable
 
@@ -35,7 +36,7 @@ from spark_vi.mllib._common import (
     apply_persistence_params,
 )
 from spark_vi.mllib.topic._common import _vector_to_bow_document
-from spark_vi.models.topic.pc import OnlinePCLDA
+from spark_vi.models.topic.pc import DagClosureHead, OnlinePCLDA
 from spark_vi.models.topic.types import PCDocument
 
 
@@ -240,6 +241,18 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "head direction (AUC is scale-invariant to head magnitude). Default 0.01",
         typeConverter=TypeConverters.toFloat,
     )
+    closureParents = Param(
+        Params._dummy(), "closureParents",
+        "JSON-encoded length-C list of parent-index lists selecting the DAG-CLOSURE "
+        "head (Mondo label-side hierarchy) instead of the flat C-way logistic head. "
+        "closureParents[l] lists the DIRECT parent LABEL indices of node l (a root "
+        "has []), in the same [0, C) space as the label vector; the head models "
+        "log P(node_l) = sum over the is-a closure of log sigmoid(w_a . theta), so "
+        "P(child) <= P(parent). Empty (default) = flat head. len must equal numLabels. "
+        "For this head prefer headOptimizer='newton' (it supplies a quasi-Newton "
+        "Fisher; SGD does not converge the head — ADR 0039).",
+        typeConverter=TypeConverters.toString,
+    )
     warmStartFrom = Param(
         Params._dummy(), "warmStartFrom",
         "path to a previously-written save dir whose global params (topics/lambda) "
@@ -260,6 +273,18 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
 
     def getWarmStartFrom(self) -> str:
         return str(self.getOrDefault(self.warmStartFrom))
+
+    def setClosureParents(self, parents) -> "OnlinePCLDAEstimator":
+        """Select the DAG-closure head from a length-C sequence of parent-index lists
+        (JSON-encoded into the string Param). Empty/None restores the flat head."""
+        if parents is None or parents == "":
+            return self._set(closureParents="")
+        encoded = parents if isinstance(parents, str) else json.dumps(
+            [[int(p) for p in ps] for ps in parents])
+        return self._set(closureParents=encoded)
+
+    def getClosureParents(self) -> str:
+        return str(self.getOrDefault(self.closureParents))
 
 
 def _build_model_and_config(
@@ -294,6 +319,23 @@ def _build_model_and_config(
     eta = 1.0 / k if topic_conc is None else float(topic_conc)
     seed = estimator.getOrDefault("seed") if estimator.isSet("seed") else None
 
+    # DAG-closure head (Mondo label-side hierarchy) iff closureParents is supplied;
+    # else the default flat C-way logistic head. Parsed here so a malformed structure
+    # or C-mismatch fails at fit time with a clear message.
+    C = int(estimator.getOrDefault("numLabels"))
+    closure_raw = str(estimator.getOrDefault("closureParents"))
+    head = None
+    if closure_raw:
+        try:
+            parents = json.loads(closure_raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"closureParents is not valid JSON: {exc}") from exc
+        if len(parents) != C:
+            raise ValueError(
+                f"closureParents has {len(parents)} nodes but numLabels={C}; the "
+                "DAG must have one node per label head")
+        head = DagClosureHead(parents)
+
     model = OnlinePCLDA(
         K=k,
         vocab_size=vocab_size,
@@ -315,6 +357,7 @@ def _build_model_and_config(
         cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
         cavi_tol=estimator.getOrDefault("caviTol"),
         random_seed=seed,
+        head=head,
     )
 
     mbf = float(estimator.getOrDefault("subsamplingRate"))
@@ -337,7 +380,7 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     numLabels=1, weightY=0.0, probabilityCol="probability",
     lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, topicTrust=0.1,
     weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, headNewtonRidge=0.01,
-    warmStartFrom="",
+    closureParents="", warmStartFrom="",
 )
 
 
@@ -381,6 +424,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         headOptimizer: str = "sgd",
         headLr: float = 0.05,
         headNewtonRidge: float = 0.01,
+        closureParents: str = "",
         warmStartFrom: str = "",
         # _PersistenceParams kwargs — see that mixin's docstring; these MUST
         # appear here explicitly (not just on the mixin) for kwarg-style
@@ -665,13 +709,23 @@ class OnlinePCLDAModel(_OnlinePCLDAParams, _PersistableModel, Model):
         # The topicDistribution UDF already inferred theta from the SAME CAVI; the
         # head is a cheap sigmoid(w_CK . theta) on top of it (no second inference).
         if float(self.getOrDefault("weightY")) != 0.0:
+            from spark_vi.models.topic.pc import _predict_proba_np
             w_CK = self._result.global_params["w_CK"]
             wbcast = sc.broadcast(w_CK)
+            # DAG-closure head -> broadcast its (C,C) closure matrix so the per-label
+            # probability is the closure PRODUCT P(node_l), not the flat sigmoid. Flat
+            # head -> None. We broadcast arrays only (never the head object, whose
+            # autograd closure is unpicklable), reusing the engine's predict fn.
+            closure_raw = str(self.getOrDefault("closureParents"))
+            closure_matrix = None
+            if closure_raw:
+                from spark_vi.models.topic.pc import DagClosureHead
+                closure_matrix = DagClosureHead(json.loads(closure_raw))._closure_matrix
+            mbcast = sc.broadcast(closure_matrix)
 
-            def _proba(theta, _wb=wbcast):
+            def _proba(theta, _wb=wbcast, _mb=mbcast):
                 th = np.asarray(theta.toArray(), dtype=np.float64)
-                logits = _wb.value @ th               # (C,)
-                return DenseVector(1.0 / (1.0 + np.exp(-logits)))
+                return DenseVector(_predict_proba_np(th, _wb.value, _mb.value))
 
             proba_udf = F.udf(_proba, returnType=VectorUDT())
             prob_col = self.getOrDefault("probabilityCol")

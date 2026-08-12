@@ -128,6 +128,53 @@ def test_pc_shim_weight_y_positive_requires_label_col(spark):
         OnlinePCLDAEstimator(k=3, maxIter=2, weightY=1.0).fit(df)
 
 
+def test_pc_shim_dag_closure_head_end_to_end(spark):
+    # closureParents selects the DAG-closure head: supervised fit trains it (Newton),
+    # and transform's probabilityCol is the closure PRODUCT P(node_l) — monotone
+    # P(child) <= P(parent) — NOT the flat sigmoid.
+    import json
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
+    from pyspark.ml.linalg import Vectors
+    parents = [[], [0], [0], [1, 2]]                 # 0 root; 1,2 under 0; 3 diamond under 1&2
+    rng = np.random.default_rng(0)
+    V = 12
+    rows = []
+    for _ in range(24):
+        counts = np.zeros(V)
+        for w in rng.integers(0, V, size=8):
+            counts[w] += 1.0
+        idx = sorted(np.nonzero(counts)[0].tolist())
+        fv = Vectors.sparse(V, idx, [float(counts[j]) for j in idx])
+        y = [float(x) for x in rng.integers(0, 2, size=4)]
+        rows.append((fv, y))
+    df = spark.createDataFrame(rows, ["features", "label"])
+
+    model = OnlinePCLDAEstimator(
+        k=4, maxIter=6, seed=0, subsamplingRate=1.0,
+        numLabels=4, labelCol="label", weightY=50.0, gradCaviIters=10,
+        headOptimizer="newton", closureParents=json.dumps(parents),
+    ).fit(df)
+    assert not np.allclose(model.headWeights(), 0.0)     # DAG head trained (Newton)
+
+    P = np.asarray(model.transform(df).select("probability").head()[0].toArray())
+    assert P.shape == (4,)
+    assert P[1] <= P[0] + 1e-9 and P[2] <= P[0] + 1e-9   # closure-product monotonicity
+    assert P[3] <= P[1] + 1e-9 and P[3] <= P[2] + 1e-9
+
+
+def test_pc_shim_rejects_closure_parents_count_mismatch(spark):
+    # closureParents length must equal numLabels — fail fast with a clear message.
+    import json
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
+    rows, cols, V = _block_rows(seed=5, with_labels=True)
+    df = spark.createDataFrame(rows, cols)
+    with pytest.raises(ValueError, match="one node per label head"):
+        OnlinePCLDAEstimator(
+            k=3, maxIter=2, numLabels=1, labelCol="label", weightY=1.0,
+            closureParents=json.dumps([[], [0], [0]]),   # 3 nodes vs numLabels=1
+        ).fit(df)
+
+
 def test_pc_shim_supervised_fit_moves_head_and_emits_probability(spark):
     # weightY > 0 with a labelCol: the head moves off its zero seed and transform
     # appends the head-derived probabilityCol alongside topicDistribution.

@@ -320,6 +320,23 @@ def _supervised_head_hessian(
 # ---------------------------------------------------------------------------
 
 
+def _predict_proba_np(theta, w_CK, closure_matrix=None):
+    """Per-label prediction probability for ONE doc's topic mean (plain numpy).
+
+    ``closure_matrix is None`` -> the flat logistic ``σ(w_l·θ)``. A ``(C, C)`` closure
+    indicator -> the DAG-closure PRODUCT ``∏_{a ∈ closure(l)} σ(w_a·θ)`` = ``exp(M ·
+    logσ(w·θ))``. Shared by the head ``predict_proba`` methods AND the mllib transform,
+    which broadcasts these arrays (never the head object, whose autograd closure is not
+    picklable) into its probability UDF.
+    """
+    z = np.clip(np.asarray(w_CK, dtype=np.float64) @ np.asarray(theta, dtype=np.float64),
+                -50.0, 50.0)
+    if closure_matrix is None:
+        return 1.0 / (1.0 + np.exp(-z))
+    log_sig = np.minimum(z, 0.0) - np.log1p(np.exp(-np.abs(z)))       # log σ(z), stable
+    return np.exp(np.asarray(closure_matrix, dtype=np.float64) @ log_sig)
+
+
 class SupervisedHead:
     """A per-document supervised NLL ``loss_y(eb_d, w_CK, doc)`` plus generic
     autograd batch accumulators built on top of it.
@@ -394,6 +411,12 @@ class SupervisedHead:
         head step). :class:`FlatLogisticHead` provides the logistic Fisher info.
         """
         return None
+
+    def predict_proba(self, theta: np.ndarray, w_CK: np.ndarray) -> np.ndarray:
+        """Per-label P(y_l = 1) for one doc's topic mean ``theta`` (K,) — plain numpy
+        (no autograd; prediction needs no gradient). Default = the flat C-way logistic
+        ``σ(w_l·θ)``; structured flavors (e.g. the DAG-closure head) override."""
+        return _predict_proba_np(theta, w_CK, None)
 
 
 class FlatLogisticHead(SupervisedHead):
@@ -498,6 +521,11 @@ class DagClosureHead(SupervisedHead):
         """
         return _supervised_head_hessian(
             topics_repr, w_CK, rows, alpha_vec, K, n_iters)
+
+    def predict_proba(self, theta: np.ndarray, w_CK: np.ndarray) -> np.ndarray:
+        """Per-node P(node_l = 1) = ∏_{a ∈ closure(l)} σ(w_a·θ), the closure PRODUCT
+        (not the local σ(w_l·θ)). Monotone: P(child) ≤ P(parent). Plain numpy."""
+        return _predict_proba_np(theta, w_CK, self._closure_matrix)
 
 
 class OnlinePCLDA(VIModel):
