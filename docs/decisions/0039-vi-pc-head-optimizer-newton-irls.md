@@ -68,6 +68,6 @@ and the commit log.
   *topics* have not converged within the iteration budget (the head chases a moving
   target). Closable with more supervised iterations or Polyak-averaging the head; parked
   as a refinement, not required for the AoU conclusion.
-- Persists through the mllib `PCEstimator` (`headOptimizer`/`headNewtonRidge` params,
+- Persists through the mllib `OnlinePCLDAEstimator` (`headOptimizer`/`headNewtonRidge` params,
   save/resume round-trip) and the cloud driver (`--head-optimizer newton`), threaded by
   `run_experiment.build_pc_args`.
