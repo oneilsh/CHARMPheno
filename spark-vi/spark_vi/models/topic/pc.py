@@ -417,6 +417,69 @@ class FlatLogisticHead(SupervisedHead):
             topics_repr, w_CK, rows, alpha_vec, K, n_iters)
 
 
+class DagClosureHead(SupervisedHead):
+    """Label-side HIERARCHY head for an ontology DAG (e.g. Mondo case-finding).
+
+    Generalizes HSLDA's tree parent-gating (Perotte 2011, ICD-9) to a DAG. Each
+    label ``l`` is a node with an is-a CLOSURE — ``l`` plus all its ancestors, each
+    counted ONCE even under diamonds (multiple paths to a shared ancestor). A node
+    fires only if its whole closure fires::
+
+        log P(node_l = 1) = Σ_{a ∈ closure(l)} log σ(w_a · π)
+
+    so ``P(child) ≤ P(parent)`` by construction (the extra closure terms are ≤ 0) —
+    the monotone is-a consistency Mondo needs, baked into TRAINING rather than
+    enforced post-hoc. The per-doc NLL over OBSERVED cells is::
+
+        loss_y_d = Σ_l obs_l · [ −y_l·log P_l − (1−y_l)·log(1−P_l) ] .
+
+    It is a smooth function of ``(eb_d, w_CK)``, so the base autograd accumulators
+    yield the topic + head gradients with NO new derivation (the point of the seam).
+    There is no closed-form logistic Fisher here (the closure product couples the
+    nodes), so :meth:`batch_hessian` inherits ``None`` and the Newton head degrades
+    to the SGD step; an autograd-Hessian Newton head is a possible follow-on.
+
+    ``closure_parents[l]`` lists the DIRECT parent label indices of node ``l`` (a
+    root has none); the closure is formed here, diamond-safe. Ids are integer label
+    indices in the SAME ``[0, C)`` space as ``w_CK``'s rows — the engine stays
+    domain-agnostic (no concept ids).
+    """
+
+    def __init__(self, closure_parents):
+        parents = [tuple(int(p) for p in ps) for ps in closure_parents]
+        C = len(parents)
+        # Diamond-safe ancestral closure via memoized DFS (acyclic is-a DAG); each
+        # ancestor lands in the set once regardless of how many paths reach it.
+        _clo: list = [None] * C
+        def _closure(node: int):
+            if _clo[node] is not None:
+                return _clo[node]
+            acc = {node}
+            for p in parents[node]:
+                acc |= _closure(p)
+            _clo[node] = acc
+            return acc
+        M = np.zeros((C, C), dtype=np.float64)
+        for l in range(C):
+            for a in _closure(l):
+                M[l, a] = 1.0
+        self.C = C
+        self._parents = parents
+        self._closure_matrix = M          # (C, C): M[l, a] == 1 iff a ∈ closure(l)
+        super().__init__()                # builds _per_doc_vg from self.per_doc_nll
+
+    def per_doc_nll(self, eb_d, w_CK, counts, s, obs, alpha_vec, K, n_iters):
+        theta = _cavi_theta_anp(eb_d, counts, alpha_vec, K, n_iters)     # (K,)
+        ls = _log_sigmoid_anp(anp.dot(w_CK, theta))                      # (C,) log σ(w_a·π), < 0
+        logP = anp.dot(self._closure_matrix, ls)                         # (C,) log P(node_l=1), < 0
+        y = (s + 1.0) / 2.0                                              # {0,1} from sign(y − 0.01)
+        # log(1 − P) = log(−expm1(logP)); logP < 0 strictly (closure is non-empty and
+        # every log σ < 0), so −expm1(logP) ∈ (0, 1) — finite and autograd-safe.
+        log1mP = anp.log(-anp.expm1(logP))                              # (C,)
+        per_label = -(y * logP + (1.0 - y) * log1mP)                    # (C,) NLL
+        return anp.sum(obs * per_label)
+
+
 class OnlinePCLDA(VIModel):
     """Prediction-Constrained LDA fittable by VIRunner with mini-batch SVI.
 
@@ -503,6 +566,7 @@ class OnlinePCLDA(VIModel):
         cavi_max_iter: int = 100,
         cavi_tol: float = 1e-3,
         random_seed: int | None = None,
+        head: "SupervisedHead | None" = None,
     ) -> None:
         if C < 1:
             raise ValueError(f"C must be >= 1, got {C}")
@@ -577,7 +641,12 @@ class OnlinePCLDA(VIModel):
         # Supervised-head flavor (the label-side seam). Default = the flat C-way
         # logistic head (Hughes). A DAG-closure head (Mondo, label-side hierarchy)
         # slots in here without touching the SVI math or the increment-1 gate.
-        self._head = FlatLogisticHead()
+        self._head = head if head is not None else FlatLogisticHead()
+        head_C = getattr(self._head, "C", None)
+        if head_C is not None and int(head_C) != self.C:
+            raise ValueError(
+                f"head has C={head_C} but the model has C={self.C}; the head's "
+                "label count must match the number of outcome heads")
 
     # Convenience passthroughs so callers/tests can read the LDA hypers off the
     # PC model without reaching into the delegate.
@@ -789,8 +858,11 @@ class OnlinePCLDA(VIModel):
         #              needs no raw θ on the driver. This also feeds the topic correction
         #              a VALID head signal each iter (the correction's ∂loss_y/∂θ flows
         #              through w_CK).
-        if self.head_optimizer == "newton":
+        if self.head_optimizer == "newton" and "head_hess_stat" in target_stats:
             # Per-label ridge-Newton: w_c ← w_c − head_lr · (H_c + λI)⁻¹ (g_c + λ w_c).
+            # Gated on the stat's presence: a head flavor without a closed-form Fisher
+            # (e.g. DagClosureHead) emits no head_hess_stat, so 'newton' gracefully
+            # degrades to the SGD step below rather than KeyError-ing.
             # g_c is the corpus-scaled NLL gradient sum (grad_wCK_stat), H_c its Fisher
             # info (head_hess_stat). The ridge is RELATIVE to mean(diag(H_c)) so it only
             # conditions the solve — AUC is scale-invariant to head magnitude, so it does
