@@ -537,9 +537,13 @@ class DagClosureHead(SupervisedHead):
         theta = _cavi_theta_anp(eb_d, counts, alpha_vec, K, n_iters)     # (K,)
         ls = _log_sigmoid_anp(anp.dot(w_CK, theta))                      # (C,) log σ(w_a·π), < 0
         logP = anp.dot(self._closure_matrix, ls)                         # (C,) log P(node_l=1), < 0
+        # Cap logP just below 0 so P ≤ 1 − 1e-6: as a saturated node drives P_l → 1,
+        # log(1 − P_l) → −∞ and its gradient → −∞ (and 0·(−∞) = NaN poisons even the
+        # y=1 cells). The cap bounds the negative-cell gradient — mirrors the P clip in
+        # predict_proba / _dag_block_fisher — with no effect away from saturation.
+        logP = anp.minimum(logP, -1e-6)
         y = (s + 1.0) / 2.0                                              # {0,1} from sign(y − 0.01)
-        # log(1 − P) = log(−expm1(logP)); logP < 0 strictly (closure is non-empty and
-        # every log σ < 0), so −expm1(logP) ∈ (0, 1) — finite and autograd-safe.
+        # log(1 − P) = log(−expm1(logP)); logP < 0 strictly, so −expm1(logP) ∈ (0, 1).
         log1mP = anp.log(-anp.expm1(logP))                              # (C,)
         per_label = -(y * logP + (1.0 - y) * log1mP)                    # (C,) NLL
         return anp.sum(obs * per_label)
