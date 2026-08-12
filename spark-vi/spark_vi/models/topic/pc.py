@@ -320,6 +320,47 @@ def _supervised_head_hessian(
 # ---------------------------------------------------------------------------
 
 
+def _dag_block_fisher(topics_repr, w_CK, rows, alpha_vec, K, n_iters, closure_matrix):
+    """EXACT per-node block Fisher for the DAG-closure head, aggregated over a batch:
+
+        H[a] = I_a · outer(theta, theta),
+        I_a  = (1 - p_a)^2 · Σ_{l: a ∈ closure(l)} obs_l · P_l / (1 - P_l),
+
+    with p_a = σ(w_a·θ) the node's LOCAL sigmoid and P_l = ∏_{b∈closure(l)} p_b the
+    node PROBABILITY. This is the Fisher information (expected Hessian) of the per-node
+    independent-Bernoulli(P_l) likelihood — PSD, label-INDEPENDENT, and aggregatable
+    (C,K,K). Unlike the flat local Fisher ``obs_a·p_a(1-p_a)``, an INTERNAL node accrues
+    curvature from every observed DESCENDANT ``l`` (those with ``a ∈ closure(l)``), so
+    deep nodes are conditioned, not just the frontier — the ``Mᵀ·ratio`` sum below.
+
+    Reduces EXACTLY to ``_supervised_head_hessian`` (the flat logistic Fisher) when the
+    DAG is a star (``closure(l) = {l}`` → M = I). It equals ``E_y[Hessian]`` (the
+    dropped indefinite term ``−p_a(1-p_a)·Σ obs_l r_l`` has ``E_y[r_l] = 0``), which is
+    the Gauss-Newton = Fisher identity for this model. The OFF-diagonal blocks
+    (nodes sharing a descendant) are dropped — that is the full (C·K, C·K) Newton, a
+    separate lift. Derivation + finite-difference check: tests/test_pc_dag_head.py.
+    """
+    C = w_CK.shape[0]
+    w = np.asarray(w_CK, dtype=np.float64)
+    M = np.asarray(closure_matrix, dtype=np.float64)          # (C, C), M[l,a]=1 iff a∈cl(l)
+    H = np.zeros((C, K, K), dtype=np.float64)
+    for doc in rows:
+        obs = np.asarray(doc.label_mask, dtype=np.float64)
+        if obs.sum() == 0.0:
+            continue
+        theta = _cavi_theta_anp(
+            topics_repr[:, doc.indices], np.asarray(doc.counts, dtype=np.float64),
+            alpha_vec, K, n_iters)                            # (K,) plain numpy
+        z = np.clip(w @ theta, -50.0, 50.0)                   # (C,) local logits
+        p = 1.0 / (1.0 + np.exp(-z))
+        log_sig = np.minimum(z, 0.0) - np.log1p(np.exp(-np.abs(z)))
+        P = np.clip(np.exp(M @ log_sig), 1e-12, 1.0 - 1e-6)   # (C,) node probabilities
+        ratio = obs * P / (1.0 - P)                           # (C,), observed cells only
+        coeff = (1.0 - p) ** 2 * (M.T @ ratio)                # (C,) closure-aware I_a
+        H += coeff[:, None, None] * np.outer(theta, theta)[None, :, :]
+    return H
+
+
 def _predict_proba_np(theta, w_CK, closure_matrix=None):
     """Per-label prediction probability for ONE doc's topic mean (plain numpy).
 
@@ -458,9 +499,10 @@ class DagClosureHead(SupervisedHead):
 
     It is a smooth function of ``(eb_d, w_CK)``, so the base autograd accumulators
     yield the topic + head gradients with NO new derivation (the point of the seam).
-    There is no closed-form logistic Fisher here (the closure product couples the
-    nodes), so :meth:`batch_hessian` inherits ``None`` and the Newton head degrades
-    to the SGD step; an autograd-Hessian Newton head is a possible follow-on.
+    The head is converged by a Newton/IRLS step over the EXACT per-node block Fisher
+    (:meth:`batch_hessian` → :func:`_dag_block_fisher`), which conditions internal
+    nodes via their observed descendants and reduces to the flat logistic Fisher on a
+    star DAG; only the off-diagonal (full (C·K)² Newton) coupling is left out.
 
     ``closure_parents[l]`` lists the DIRECT parent label indices of node ``l`` (a
     root has none); the closure is formed here, diamond-safe. Ids are integer label
@@ -503,24 +545,19 @@ class DagClosureHead(SupervisedHead):
         return anp.sum(obs * per_label)
 
     def batch_hessian(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
-        """QUASI-Newton curvature: the LOCAL-logistic Fisher ``Σ_d p_a(1−p_a)·ππᵀ``
-        (each node's OWN sigmoid ``p_a = σ(w_a·π)``), reused verbatim from the flat
-        head. Paired in ``update_global`` with the EXACT closure-coupled gradient
-        (``grad_wCK``, autograd), the per-node solve ``H_a⁻¹ g_a`` is a quasi-Newton
-        step: exact gradient, approximate (positive-definite) metric.
-
-        Why not the exact Fisher: the closure PRODUCT couples head rows (any two
-        nodes sharing a descendant), so the true Hessian is not block-diagonal per
-        node and ``p(1−p)ππᵀ`` is only the diagonal-block LOCAL curvature. As a
-        preconditioner that is fine — it is PD (+ridge), aggregatable ``(C,K,K)``,
-        and scale-invariant exactly like the flat Fisher (ADR 0039), so it recovers
-        Newton's convergence that a single RM-SGD step per iteration lacks (insight
-        0065) WITHOUT the O((C·K)²)/doc cost of a full autograd Hessian. The exact
-        closure-coupled block Gauss-Newton is a documented refinement (spec
-        2026-08-12), not required to beat SGD.
+        """EXACT per-node block Fisher (Gauss-Newton) for the closure-coupled head:
+        ``H[a] = (1-p_a)^2 · Σ_{l: a∈closure(l)} obs_l·P_l/(1-P_l) · θθᵀ`` — see
+        :func:`_dag_block_fisher`. Paired in ``update_global`` with the exact coupled
+        gradient (``grad_wCK``, autograd), the per-node ridge solve ``H_a⁻¹ g_a`` is a
+        true Newton/IRLS step (ADR 0039), converging the head where a single RM-SGD
+        step per iteration cannot (insight 0065). PSD, label-independent, aggregatable
+        (C,K,K), scale-invariant, and exactly the flat logistic Fisher on a star DAG.
+        Unlike the flat local Fisher it conditions INTERNAL nodes via their observed
+        descendants. Off-diagonal coupling (the full (C·K)² Newton) is the only piece
+        not captured.
         """
-        return _supervised_head_hessian(
-            topics_repr, w_CK, rows, alpha_vec, K, n_iters)
+        return _dag_block_fisher(
+            topics_repr, w_CK, rows, alpha_vec, K, n_iters, self._closure_matrix)
 
     def predict_proba(self, theta: np.ndarray, w_CK: np.ndarray) -> np.ndarray:
         """Per-node P(node_l = 1) = ∏_{a ∈ closure(l)} σ(w_a·θ), the closure PRODUCT

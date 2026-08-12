@@ -105,13 +105,99 @@ def test_dag_head_gradient_matches_finite_difference():
     assert err_head <= 1e-5, f"DAG head-gradient rel err {err_head:.2e} > 1e-5"
 
 
-def test_dag_head_quasi_newton_fisher():
-    """The DAG head supplies a QUASI-Newton curvature: the LOCAL-logistic Fisher
-    (each node's own p(1-p)ππᵀ), reused from the flat head, PSD and (C,K,K). Paired
-    with the exact coupled gradient it recovers Newton's convergence (SGD does not);
-    it is NOT None (which would drop to SGD)."""
-    from spark_vi.models.topic.pc import _supervised_head_hessian
+# --- Exact block Fisher: z-space reference (decoupled from theta/CAVI) ----------
+# Per-doc node loss as a pure function of the local logits z = w_CK @ theta:
+#   P_l = prod_{a in closure(l)} sigmoid(z_a);  nll_l = -y_l log P_l - (1-y_l) log(1-P_l)
+def _Lz(z, y, obs, M):
+    ls = np.minimum(z, 0.0) - np.log1p(np.exp(-np.abs(z)))
+    P = np.clip(np.exp(M @ ls), 1e-12, 1 - 1e-9)
+    return float(np.sum(obs * (-y * np.log(P) - (1 - y) * np.log(1 - P))))
+
+
+def _gz(z, y, obs, M):                                   # analytic z-gradient
+    p = 1.0 / (1.0 + np.exp(-z))
+    ls = np.minimum(z, 0.0) - np.log1p(np.exp(-np.abs(z)))
+    P = np.clip(np.exp(M @ ls), 1e-12, 1 - 1e-9)
+    r = -y + (1 - y) * P / (1 - P)
+    return (1 - p) * (M.T @ (obs * r))
+
+
+def _Iz(z, obs, M):                                      # analytic block FISHER (C,C)
+    # I_fisher_{ab} = sum_l obs_l (1-p_a)(1-p_b) [a,b in cl(l)] P_l/(1-P_l)
+    p = 1.0 / (1.0 + np.exp(-z))
+    ls = np.minimum(z, 0.0) - np.log1p(np.exp(-np.abs(z)))
+    P = np.clip(np.exp(M @ ls), 1e-12, 1 - 1e-9)
+    ratio = obs * P / (1 - P)
+    W = M.T @ (ratio[:, None] * M)                       # sum_l ratio_l M[l,a] M[l,b]
+    return np.outer(1 - p, 1 - p) * W
+
+
+def _Ifull(z, y, obs, M):                                # PSD 'kept' part of the ACTUAL Hessian
+    # differs from the Fisher by carrying (1-y_l)·P_l/(1-P_l)^2 (not P_l/(1-P_l));
+    # E_y[_Ifull] == _Iz since E[1-y_l] = 1-P_l.
+    p = 1.0 / (1.0 + np.exp(-z))
+    ls = np.minimum(z, 0.0) - np.log1p(np.exp(-np.abs(z)))
+    P = np.clip(np.exp(M @ ls), 1e-12, 1 - 1e-9)
+    w = obs * (1 - y) * P / (1 - P) ** 2
+    W = M.T @ (w[:, None] * M)
+    return np.outer(1 - p, 1 - p) * W
+
+
+def _Dz(z, y, obs, M):                                   # dropped indefinite diagonal (E_y = 0)
+    p = 1.0 / (1.0 + np.exp(-z))
+    ls = np.minimum(z, 0.0) - np.log1p(np.exp(-np.abs(z)))
+    P = np.clip(np.exp(M @ ls), 1e-12, 1 - 1e-9)
+    r = -y + (1 - y) * P / (1 - P)
+    return -p * (1 - p) * (M.T @ (obs * r))
+
+
+def test_dag_block_fisher_formula_matches_finite_difference():
+    """Two exact checks tying the block Fisher to the loss: (i) the FULL Hessian
+    _Ifull + diag(_Dz) matches central FD of the analytic z-gradient (which itself
+    matches FD of the loss); (ii) the Fisher _Iz == E_y[full Hessian] with y ~ ∏
+    Bernoulli(P_l), by EXACT enumeration over all 2^C labels (E[1-y]=1-P collapses
+    _Ifull->_Iz, E[r]=0 kills _Dz). So H_aa = I_a·θθᵀ is the true expected curvature."""
+    import itertools
+    M = DagClosureHead(DIAMOND_PARENTS)._closure_matrix
+    C = 4
+    rng = np.random.default_rng(7)
+    z = rng.standard_normal(C) * 0.6
+    obs = np.ones(C)
+    eps = 1e-6
+
+    # (i) analytic gradient matches FD of the loss.
+    y = rng.integers(0, 2, C).astype(float)
+    g = _gz(z, y, obs, M)
+    g_fd = np.array([(_Lz(z + eps * e, y, obs, M) - _Lz(z - eps * e, y, obs, M)) / (2 * eps)
+                     for e in np.eye(C)])
+    assert np.max(np.abs(g - g_fd)) < 1e-6
+
+    # ... and the full Hessian _Ifull + diag(_Dz) matches FD of that gradient.
+    Hz = _Ifull(z, y, obs, M) + np.diag(_Dz(z, y, obs, M))
+    Hz_fd = np.zeros((C, C))
+    for j in range(C):
+        ej = np.zeros(C); ej[j] = eps
+        Hz_fd[:, j] = (_gz(z + ej, y, obs, M) - _gz(z - ej, y, obs, M)) / (2 * eps)
+    assert np.max(np.abs(Hz - Hz_fd)) < 1e-5
+
+    # (ii) the implementation's Fisher == E_y[full Hessian], exactly.
+    ls = np.minimum(z, 0.0) - np.log1p(np.exp(-np.abs(z)))
+    P = np.clip(np.exp(M @ ls), 1e-12, 1 - 1e-9)
+    EH = np.zeros((C, C))
+    for bits in itertools.product([0, 1], repeat=C):
+        yb = np.array(bits, dtype=np.float64)
+        wgt = float(np.prod(P ** yb * (1 - P) ** (1 - yb)))
+        EH += wgt * (_Ifull(z, yb, obs, M) + np.diag(_Dz(z, yb, obs, M)))
+    assert np.max(np.abs(EH - _Iz(z, obs, M))) < 1e-9
+    assert np.min(np.linalg.eigvalsh(_Iz(z, obs, M))) >= -1e-9      # Fisher is PSD
+
+
+def test_dag_block_fisher_impl_matches_formula():
+    """batch_hessian emits exactly H[a] = diag(Fisher)_a · θθᵀ per doc, with θ the same
+    CAVI mean, tying the (C,K,K) implementation to the FD-verified z-space Fisher."""
+    from spark_vi.models.topic.pc import _cavi_theta_anp
     h = DagClosureHead(DIAMOND_PARENTS)
+    M = h._closure_matrix
     K, V, C = 4, 12, 4
     alpha = np.full(K, 1.1)
     rng = np.random.default_rng(5)
@@ -120,12 +206,36 @@ def test_dag_head_quasi_newton_fisher():
     docs = _dag_docs(seed=1, C=C, V=V)
 
     H = h.batch_hessian(topics_repr, w_CK, docs, alpha, K, 10)
-    assert H is not None and H.shape == (C, K, K)
-    # It IS the local-logistic Fisher (a valid PD preconditioner), reused verbatim.
+    assert H.shape == (C, K, K)
+    ref = np.zeros((C, K, K))
+    for doc in docs:
+        obs = np.asarray(doc.label_mask, dtype=np.float64)
+        if obs.sum() == 0.0:
+            continue
+        theta = _cavi_theta_anp(topics_repr[:, doc.indices],
+                                np.asarray(doc.counts, np.float64), alpha, K, 10)
+        z = np.clip(w_CK @ theta, -50, 50)
+        ref += np.diag(_Iz(z, obs, M))[:, None, None] * np.outer(theta, theta)[None, :, :]
+    assert np.allclose(H, ref)
+    for c in range(C):
+        assert np.min(np.linalg.eigvalsh(H[c])) >= -1e-9           # each block PSD
+
+
+def test_dag_block_fisher_reduces_to_flat_on_star():
+    """On a STAR DAG (every node its own root, closure(l)={l}) the block Fisher must
+    equal the flat logistic Fisher exactly — the DAG head's curvature is a strict
+    generalization of the flat head's."""
+    from spark_vi.models.topic.pc import _supervised_head_hessian
+    K, V, C = 4, 12, 4
+    alpha = np.full(K, 1.1)
+    rng = np.random.default_rng(5)
+    topics_repr = rng.random((K, V)) * 0.3 + 0.01
+    w_CK = rng.standard_normal((C, K)) * 0.4
+    docs = _dag_docs(seed=1, C=C, V=V)
+    h = DagClosureHead([[] for _ in range(C)])           # no edges -> M = I
+    H = h.batch_hessian(topics_repr, w_CK, docs, alpha, K, 10)
     H_flat = _supervised_head_hessian(topics_repr, w_CK, docs, alpha, K, 10)
     assert np.allclose(H, H_flat)
-    for c in range(C):                              # each per-node block is PSD
-        assert np.min(np.linalg.eigvalsh(H[c])) >= -1e-9
 
 
 def test_model_dag_head_runs_newton():
@@ -141,7 +251,7 @@ def test_model_dag_head_runs_newton():
     docs = _dag_docs(seed=3, C=C, V=V)
     stats = model.local_update(docs, gp)
     assert "grad_wCK_stat" in stats and "grad_topics_stat" in stats
-    assert "head_hess_stat" in stats                # quasi-Newton Fisher emitted
+    assert "head_hess_stat" in stats                # exact block Fisher emitted
     new_gp = model.update_global(gp, stats, learning_rate=0.5)
     assert new_gp["w_CK"].shape == (C, K)
     assert not np.allclose(new_gp["w_CK"], 0.0)
