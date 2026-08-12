@@ -112,18 +112,20 @@ def test_head_lr_knobs_parse():
     assert ns.head_lr_scale == 3.0 and ns.weight_y_warmup_iters == 20
 
 
-def test_head_optimizer_adam_parses():
+def test_head_optimizer_newton_parses():
     ns = drv._build_parser().parse_args([
         "--cdr", "p.d", "--billing", "b",
-        "--head-optimizer", "adam", "--head-lr", "0.02"])
-    assert ns.head_optimizer == "adam" and ns.head_lr == 0.02
+        "--head-optimizer", "newton", "--head-lr", "0.3"])
+    assert ns.head_optimizer == "newton" and ns.head_lr == 0.3
 
 
 def test_head_optimizer_rejects_unknown():
     import pytest
-    with pytest.raises(SystemExit):
-        drv._build_parser().parse_args([
-            "--cdr", "p.d", "--billing", "b", "--head-optimizer", "rmsprop"])
+    # 'adam' was removed (superseded by newton); it is now an unknown value too.
+    for bad in ("rmsprop", "adam"):
+        with pytest.raises(SystemExit):
+            drv._build_parser().parse_args([
+                "--cdr", "p.d", "--billing", "b", "--head-optimizer", bad])
 
 
 def test_baseline_controls_default_off():

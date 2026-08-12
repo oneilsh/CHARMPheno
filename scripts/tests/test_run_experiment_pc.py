@@ -110,9 +110,9 @@ def test_build_pc_args_vi_head_lr_defaults(monkeypatch):
 def test_build_pc_args_vi_threads_head_optimizer(monkeypatch):
     mod = _run_exp(monkeypatch)
     d = dict(zip(*[iter(mod.build_pc_args(
-        _eff(backend="vi", head_optimizer="adam", head_lr=0.02), "/out"))] * 2))
-    assert d["--head-optimizer"] == "adam"
-    assert d["--head-lr"] == "0.02"
+        _eff(backend="vi", head_optimizer="newton", head_lr=0.3), "/out"))] * 2))
+    assert d["--head-optimizer"] == "newton"
+    assert d["--head-lr"] == "0.3"
 
 
 def test_build_pc_args_vi_topic_trust(monkeypatch):
@@ -137,7 +137,7 @@ def test_build_pc_args_inmem_omits_head_lr_knobs(monkeypatch):
     # VI-only: inmem argv stays byte-for-byte, even if the config carries them.
     mod = _run_exp(monkeypatch)
     args = mod.build_pc_args(
-        _eff(head_lr_scale=3.0, weight_y_warmup_iters=20, head_optimizer="adam"), "/out")
+        _eff(head_lr_scale=3.0, weight_y_warmup_iters=20, head_optimizer="newton"), "/out")
     assert "--head-lr-scale" not in args
     assert "--weight-y-warmup-iters" not in args
     assert "--head-optimizer" not in args

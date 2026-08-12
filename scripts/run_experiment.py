@@ -792,10 +792,10 @@ def build_pc_args(
             "--head-lr-scale", str(effective.get("head_lr_scale", 1.0)),
             "--weight-y-warmup-iters", str(effective.get("weight_y_warmup_iters", 0)),
             # Head optimizer: 'sgd' (default; shares the topics' RM schedule) or
-            # 'adam' (per-parameter adaptive step decoupled from rho/weight_y — the
-            # two-timescale fix for the coupled-objective mis-directed head). head_lr
-            # is the adam step size (ignored for sgd). Default sgd/0.05 => byte-for-
-            # byte the prior VI argv when unset.
+            # 'newton' (a per-iteration ridge-Newton/IRLS step that converges the head
+            # on the current theta — the settled head fix, ADR 0039). head_lr is the
+            # newton step-damping fraction (ignored for sgd). Default sgd/0.05 =>
+            # byte-for-byte the prior VI argv when unset.
             "--head-optimizer", str(effective.get("head_optimizer", "sgd")),
             "--head-lr", str(effective.get("head_lr", 0.05)),
             # newton head: relative ridge conditioning the per-label IRLS solve.

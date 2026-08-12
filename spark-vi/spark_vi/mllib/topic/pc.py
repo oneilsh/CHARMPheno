@@ -220,17 +220,17 @@ class _PCParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
     )
     headOptimizer = Param(
         Params._dummy(), "headOptimizer",
-        "head optimizer: 'sgd' (default; the RM-damped step rho*headLrScale*weightY*g) "
-        "or 'adam' (per-parameter adaptive step DECOUPLED from rho/weightY, so the "
-        "non-conjugate head runs on its own timescale — the two-timescale remedy for "
-        "the coupled-objective mis-directed-head failure; headLrScale/weightYWarmup do "
-        "NOT affect the adam step, headLr does)",
+        "head optimizer: 'sgd' (default; the RM-damped step rho*headLrScale*weightY*g, "
+        "one first-order step per SVI iteration) or 'newton' (a per-iteration ridge-Newton "
+        "/ IRLS step that CONVERGES the logistic head on the current theta — the settled "
+        "head fix; ADR 0039). sgd does not converge the coupled head against a moving theta "
+        "(insight 0065); newton is scale-invariant and aggregatable",
         typeConverter=TypeConverters.toString,
     )
     headLr = Param(
         Params._dummy(), "headLr",
-        "base learning rate for the 'adam' head optimizer, or the step-damping fraction "
-        "for 'newton' (~0.5-1.0); ignored for 'sgd'. Default 0.05",
+        "the step-damping fraction for headOptimizer='newton' (~0.5-1.0); ignored for "
+        "'sgd'. Default 0.05",
         typeConverter=TypeConverters.toFloat,
     )
     headNewtonRidge = Param(

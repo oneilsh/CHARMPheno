@@ -28,7 +28,7 @@ Both would force a runner-level change to shared infrastructure.
 
 ## Decision
 
-Add a `head_optimizer` parameter with three values; **default `sgd`** (prior behavior
+Add a `head_optimizer` parameter with two values; **default `sgd`** (prior behavior
 byte-for-byte). The new **`newton`** takes one ridge-Newton (IRLS) step per global
 iteration using only aggregatable sufficient statistics:
 
@@ -42,7 +42,16 @@ runner change**. `head_lr` doubles as the Newton damping (an EMA over per-miniba
 optima; ~0.3 stabilizes the oscillation inherent to per-minibatch Newton), and
 `head_newton_ridge` is a relative ridge (fraction of `mean(diag(H))`) that conditions
 the per-label solve without biasing its direction (AUC is scale-invariant to head
-magnitude). `adam` is retained as the intermediate two-timescale attempt.
+magnitude).
+
+An intermediate `adam` head (a per-parameter two-timescale step, decoupled from the
+runner's ρ) was tried first; it landed at the *same* mis-directed `w_CK` as `sgd`
+(cos ≈ 0.11), which is what ruled out the optimizer family and pointed at
+non-convergence. Having served that diagnostic purpose and been superseded by `newton`,
+`adam` was **removed** (2026-08, PC walkthrough review) to keep the head surface to the
+two settled options — its moment buffers, `head_beta1/2`/`head_eps` params, and the
+warm-start lazy-init branch were dead weight. The history lives in experiments 0072/0073
+and the commit log.
 
 ## Consequences
 
