@@ -124,14 +124,27 @@ def auc_table(Yte, scores, nodes):
     return a
 
 
-def topics_lr(model, gp, tr, te, Ytr, Yte, nodes):
+def posthoc_scores(model, gp, tr, te, Ytr, nodes, mask=None):
+    """Per-node post-hoc classifier on the FITTED topics' theta. If `mask` is given,
+    each node's classifier trains ONLY on that node's observed cells (apples-to-apples
+    with the semi-supervised co-fit head); else on all train labels (the ceiling)."""
     from sklearn.linear_model import LogisticRegression
     th_tr, th_te = thetas(model, tr, gp), thetas(model, te, gp)
     S = np.zeros((len(te), C))
     for l in nodes:
-        if 0 < Ytr[:, l].sum() < len(Ytr):
-            S[:, l] = LogisticRegression(max_iter=2000).fit(th_tr, Ytr[:, l]).predict_proba(th_te)[:, 1]
-    return auc_table(Yte, S, nodes)
+        if mask is not None:
+            sel = mask[:, l] == 1
+            Xl, yl = th_tr[sel], Ytr[sel, l]
+        else:
+            Xl, yl = th_tr, Ytr[:, l]
+        if len(yl) and 0 < yl.sum() < len(yl):
+            S[:, l] = LogisticRegression(max_iter=2000).fit(Xl, yl).predict_proba(th_te)[:, 1]
+    return S
+
+
+def hier(S, M):
+    """Hierarchical composition: P_hier[:,l] = prod_{a in closure(l)} S[:,a]."""
+    return np.exp(np.log(np.clip(S, 1e-9, 1.0)) @ M.T)
 
 
 def main():
@@ -168,27 +181,27 @@ def main():
             return (f"  {name:<22} mean={m:.3f} rare(5,6)={rare:.3f}   "
                     + " ".join(f"{l}:{a.get(l, float('nan')):.2f}" for l in nodes))
 
+        # Only two fits: unsupervised, and flat-PC (topic-shaping). The co-fit DAG head
+        # is confirmed dead (wrecks topics), so it is dropped.
         m0, gp0 = fit(spark, tr, V, weight_y=0.0, head=None)
-        A = topics_lr(m0, gp0, tr, te, Ytr, Yte, nodes)
-
         mB, gpB = fit(spark, tr, V, weight_y=WEIGHT_Y, head=None)
-        thB = thetas(mB, te, gpB)
-        B_flat = auc_table(Yte, np.array([_predict_proba_np(t, gpB["w_CK"], None) for t in thB]), nodes)
-        B_hier = auc_table(Yte, np.array([_predict_proba_np(t, gpB["w_CK"], clo_M) for t in thB]), nodes)
-        B_lr = topics_lr(mB, gpB, tr, te, Ytr, Yte, nodes)
 
-        mC, gpC = fit(spark, tr, V, weight_y=WEIGHT_Y, head=DagClosureHead(PARENTS))
-        thC = thetas(mC, te, gpC)
-        Cd = auc_table(Yte, np.array([_predict_proba_np(t, gpC["w_CK"], clo_M) for t in thC]), nodes)
-        C_lr = topics_lr(mC, gpC, tr, te, Ytr, Yte, nodes)
+        # co-fit flat head (the predictor the head trains) — reference.
+        thB = thetas(mB, te, gpB)
+        B_head = auc_table(Yte, np.array([_predict_proba_np(t, gpB["w_CK"], None) for t in thB]), nodes)
+
+        # post-hoc classifier on the shaped topics — the "let the head shape, read with a
+        # proper classifier" pipeline — trained on the SAME masked labels the head saw.
+        S_uns_m = posthoc_scores(m0, gp0, tr, te, Ytr, nodes, mask=Mtr)
+        S_flat_m = posthoc_scores(mB, gpB, tr, te, Ytr, nodes, mask=Mtr)
+        S_flat_full = posthoc_scores(mB, gpB, tr, te, Ytr, nodes, mask=None)
 
         print("\nper-node held-out AUC (rare leaves 5,6):", flush=True)
-        print(line("A unsup+LR", A), flush=True)
-        print(line("B flat head", B_flat), flush=True)
-        print(line("B' flat->hier predict", B_hier), flush=True)
-        print(line("C dag head", Cd), flush=True)
-        print(line("  flat topics-LR", B_lr), flush=True)
-        print(line("  dag topics-LR", C_lr), flush=True)
+        print(line("unsup posthoc-LR (msk)", auc_table(Yte, S_uns_m, nodes)), flush=True)
+        print(line("flat co-fit HEAD", B_head), flush=True)
+        print(line("flatPC posthoc-LR (msk)", auc_table(Yte, S_flat_m, nodes)), flush=True)
+        print(line("flatPC posthoc-HIER(msk)", auc_table(Yte, hier(S_flat_m, clo_M), nodes)), flush=True)
+        print(line("flatPC posthoc-LR (FULL)", auc_table(Yte, S_flat_full, nodes)), flush=True)
     finally:
         spark.stop()
 
