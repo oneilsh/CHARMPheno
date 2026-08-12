@@ -27,6 +27,15 @@ section at the top of `docs/REVIEW_LOG.md` when done.
   API theater that mirrors `pyspark.ml.clustering.LDA`. PCLDA/GatedLDA correctly omit it
   (PCLDA's real optimizer axis is `headOptimizer`: sgd/newton). Eventually remove it from
   LDA/HDP for a uniform surface — but that touches shared, tested shims, so **not now**.
+- **A covariate-adjusted head (extension BEYOND Hughes; Mondo-adjacent).** The PC head is
+  `logits = w_CK · θ` — topics in, label out, exactly like Hughes' sLDA (`calc_loss__slda`
+  reads only `topics/w_CK/X/y/masks`; there is no covariate term in the reference). So the
+  mllib input contract has no `covariatesCol` (unlike STM, whose covariates shape topic
+  prevalence — the opposite supervision direction). This is *faithful*, not a gap: adding
+  covariates would depart from the paper. Only if a real study needs to confounder-adjust
+  the head (e.g. Mondo rare-disease, controlling the disease head for age/sex) would a
+  covariate-adjusted head — `logits = w_CK · θ + w_cov · x`, entering the head but NOT the
+  topic correction — be worth building. Deferred until a study demands it.
 
 ---
 
