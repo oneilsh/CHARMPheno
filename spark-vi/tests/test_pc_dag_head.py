@@ -105,17 +105,33 @@ def test_dag_head_gradient_matches_finite_difference():
     assert err_head <= 1e-5, f"DAG head-gradient rel err {err_head:.2e} > 1e-5"
 
 
-def test_dag_head_has_no_closed_form_hessian():
-    """The closure product couples nodes, so there is no logistic Fisher — the base
-    None is inherited, which the model reads as 'no Newton, use SGD'."""
+def test_dag_head_quasi_newton_fisher():
+    """The DAG head supplies a QUASI-Newton curvature: the LOCAL-logistic Fisher
+    (each node's own p(1-p)ππᵀ), reused from the flat head, PSD and (C,K,K). Paired
+    with the exact coupled gradient it recovers Newton's convergence (SGD does not);
+    it is NOT None (which would drop to SGD)."""
+    from spark_vi.models.topic.pc import _supervised_head_hessian
     h = DagClosureHead(DIAMOND_PARENTS)
-    assert h.batch_hessian(None, None, [], None, 0, 0) is None
+    K, V, C = 4, 12, 4
+    alpha = np.full(K, 1.1)
+    rng = np.random.default_rng(5)
+    topics_repr = rng.random((K, V)) * 0.3 + 0.01
+    w_CK = rng.standard_normal((C, K)) * 0.4
+    docs = _dag_docs(seed=1, C=C, V=V)
+
+    H = h.batch_hessian(topics_repr, w_CK, docs, alpha, K, 10)
+    assert H is not None and H.shape == (C, K, K)
+    # It IS the local-logistic Fisher (a valid PD preconditioner), reused verbatim.
+    H_flat = _supervised_head_hessian(topics_repr, w_CK, docs, alpha, K, 10)
+    assert np.allclose(H, H_flat)
+    for c in range(C):                              # each per-node block is PSD
+        assert np.min(np.linalg.eigvalsh(H[c])) >= -1e-9
 
 
-def test_model_accepts_injected_head_and_newton_degrades_to_sgd():
-    """OnlinePCLDA(head=DagClosureHead(...)) wires the flavor in; because the head
-    emits no Fisher, local_update omits head_hess_stat even under head_optimizer=
-    'newton', so update_global falls back to the SGD head step (no KeyError)."""
+def test_model_dag_head_runs_newton():
+    """OnlinePCLDA(head=DagClosureHead(...)) with head_optimizer='newton' emits the
+    (quasi-Newton) head_hess_stat and takes the Newton solve — NOT the SGD step —
+    moving the head off zero without error."""
     from spark_vi.models.topic.pc import OnlinePCLDA
     K, V, C = 4, 12, 4
     head = DagClosureHead(DIAMOND_PARENTS)
@@ -125,10 +141,29 @@ def test_model_accepts_injected_head_and_newton_degrades_to_sgd():
     docs = _dag_docs(seed=3, C=C, V=V)
     stats = model.local_update(docs, gp)
     assert "grad_wCK_stat" in stats and "grad_topics_stat" in stats
-    assert "head_hess_stat" not in stats            # DAG head -> no closed-form Fisher
-    # update_global must not KeyError on the missing Hessian; head moves off zero.
+    assert "head_hess_stat" in stats                # quasi-Newton Fisher emitted
     new_gp = model.update_global(gp, stats, learning_rate=0.5)
     assert new_gp["w_CK"].shape == (C, K)
+    assert not np.allclose(new_gp["w_CK"], 0.0)
+
+
+def test_newton_falls_back_to_sgd_when_flavor_has_no_hessian():
+    """The defensive guard: a flavor whose batch_hessian is None (no PD curvature)
+    emits no head_hess_stat, so 'newton' degrades to the SGD head step in
+    update_global rather than KeyError-ing."""
+    from spark_vi.models.topic.pc import OnlinePCLDA
+
+    class _NoHessDagHead(DagClosureHead):
+        def batch_hessian(self, *a, **k):
+            return None
+
+    K, V, C = 4, 12, 4
+    model = OnlinePCLDA(K=K, vocab_size=V, C=C, weight_y=1.0, grad_cavi_iters=10,
+                        head_optimizer="newton", head=_NoHessDagHead(DIAMOND_PARENTS))
+    gp = model.initialize_global(None)
+    stats = model.local_update(_dag_docs(seed=3, C=C, V=V), gp)
+    assert "head_hess_stat" not in stats
+    new_gp = model.update_global(gp, stats, learning_rate=0.5)     # no KeyError
     assert not np.allclose(new_gp["w_CK"], 0.0)
 
 
