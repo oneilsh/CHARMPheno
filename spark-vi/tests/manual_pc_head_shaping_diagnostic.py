@@ -74,6 +74,7 @@ def main():
 
         # post-hoc LR (masked) + direction cosine vs w_CK.
         S_tr, S_te = np.zeros((len(tr), h.C)), np.zeros((len(te), h.C))
+        lr_coef = np.zeros((h.C, h.K_FIT))
         cos = []
         for l in nodes:
             sel = Mtr[:, l] == 1
@@ -82,6 +83,7 @@ def main():
             lr = LogisticRegression(max_iter=2000).fit(th_tr[sel], Ytr[sel, l])
             S_tr[:, l] = lr.predict_proba(th_tr)[:, 1]
             S_te[:, l] = lr.predict_proba(th_te)[:, 1]
+            lr_coef[l] = lr.coef_[0]
             v, u = lr.coef_[0], w[l]
             den = np.linalg.norm(v) * np.linalg.norm(u)
             cos.append(float(v @ u / den) if den > 0 else 0.0)
@@ -98,6 +100,41 @@ def main():
         # how far apart are the two theta representations the head trains-vs-eval on?
         drift = np.linalg.norm(th_te - th_te10, axis=1).mean()
         print(f"mean ||theta_100it - theta_10it|| on test: {drift:.3f}", flush=True)
+
+        # === THE LAG TEST: freeze topics, keep stepping the head's OWN Newton update ===
+        # If the co-fit head only failed because theta was moving, then with theta frozen
+        # its cosine to the optimal direction should climb 0.64 -> ~1 and AUC 0.65 -> ~0.965,
+        # using the SAME head machinery and the SAME 30% masked labels.
+        from spark_vi.models.topic.pc import FlatLogisticHead
+        hd = FlatLogisticHead()
+        Kf, gci = h.K_FIT, 10
+
+        def cos_lr(W):
+            cs = []
+            for l in nodes:
+                u, v = W[l], lr_coef[l]
+                den = np.linalg.norm(u) * np.linalg.norm(v)
+                if den > 0:
+                    cs.append(float(u @ v / den))
+            return float(np.mean(cs))
+
+        def head_te(W):
+            S = np.array([_predict_proba_np(t, W, None) for t in th_te])
+            return m({l: roc_auc_score(Yte[:, l], S[:, l]) for l in nodes
+                      if 0 < Yte[:, l].sum() < len(Yte)})
+
+        wf = w.copy()
+        print("\nLAG TEST — freeze topics, keep stepping the head's Newton (from co-fit head):", flush=True)
+        print(f"  step  0 (co-fit): cos={cos_lr(wf):+.3f}  headAUC={head_te(wf):.3f}", flush=True)
+        for step in range(1, 16):
+            _, _, g = hd.batch_value_and_grad(eb, wf, tr, alpha, Kf, gci)
+            H = hd.batch_hessian(eb, wf, tr, alpha, Kf, gci)
+            for c in range(h.C):
+                Hc = H[c]
+                ridge = 0.01 * (float(np.trace(Hc)) / Kf) + 1e-10
+                wf[c] = wf[c] - np.linalg.solve(Hc + ridge * np.eye(Kf), g[c] + ridge * wf[c])
+            if step in (1, 2, 3, 5, 8, 12, 15):
+                print(f"  step {step:2d}: cos={cos_lr(wf):+.3f}  headAUC={head_te(wf):.3f}", flush=True)
     finally:
         spark.stop()
 
