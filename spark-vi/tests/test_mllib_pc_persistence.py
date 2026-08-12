@@ -25,18 +25,18 @@ from pyspark.ml.linalg import Vectors
 # ---------------------------------------------------------------------------
 
 def test_estimator_default_params_for_save_interval_dir_resume_from():
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
-    e = PCEstimator()
+    e = OnlinePCLDAEstimator()
     assert e.getOrDefault("saveInterval") == -1
     assert e.getOrDefault("saveDir") == ""
     assert e.getOrDefault("resumeFrom") == ""
 
 
 def test_estimator_setters_round_trip(tmp_path):
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
-    e = PCEstimator()
+    e = OnlinePCLDAEstimator()
     e.setSaveInterval(5)
     e.setSaveDir(str(tmp_path / "saves"))
     e.setResumeFrom(str(tmp_path / "resume"))
@@ -53,9 +53,9 @@ def test_constructor_accepts_persistence_kwargs(tmp_path):
     the explicit @keyword_only signature would crash with TypeError. This test
     pins the contract (see the _PersistenceParams docstring for the rule).
     """
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
-    e = PCEstimator(
+    e = OnlinePCLDAEstimator(
         saveInterval=10,
         saveDir=str(tmp_path / "saves"),
         resumeFrom=str(tmp_path / "resume"),
@@ -77,27 +77,27 @@ def _tiny_df(spark):
 
 
 def test_estimator_rejects_save_interval_zero(_tiny_df):
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
-    e = PCEstimator(k=2, maxIter=1, subsamplingRate=1.0)
+    e = OnlinePCLDAEstimator(k=2, maxIter=1, subsamplingRate=1.0)
     e.setSaveInterval(0)
     with pytest.raises(ValueError, match="saveInterval=0"):
         e.fit(_tiny_df)
 
 
 def test_estimator_rejects_save_interval_positive_without_dir(_tiny_df):
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
-    e = PCEstimator(k=2, maxIter=1, subsamplingRate=1.0)
+    e = OnlinePCLDAEstimator(k=2, maxIter=1, subsamplingRate=1.0)
     e.setSaveInterval(5)  # saveDir stays ""
     with pytest.raises(ValueError, match="saveDir"):
         e.fit(_tiny_df)
 
 
 def test_estimator_rejects_resume_from_when_path_has_no_manifest(tmp_path, _tiny_df):
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
-    e = PCEstimator(k=2, maxIter=1, subsamplingRate=1.0)
+    e = OnlinePCLDAEstimator(k=2, maxIter=1, subsamplingRate=1.0)
     empty = tmp_path / "no_manifest_here"
     empty.mkdir()
     e.setResumeFrom(str(empty))
@@ -125,15 +125,15 @@ def _persistence_corpus_df(spark):
 
 
 def test_model_save_then_load_round_trips_global_params(tmp_path, _persistence_corpus_df):
-    from spark_vi.mllib.topic.pc import PCEstimator, PCModel
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator, OnlinePCLDAModel
 
-    estimator = PCEstimator(k=3, maxIter=3, seed=0, subsamplingRate=1.0)
+    estimator = OnlinePCLDAEstimator(k=3, maxIter=3, seed=0, subsamplingRate=1.0)
     model = estimator.fit(_persistence_corpus_df)
 
     save_path = tmp_path / "pc_save"
     model.save(str(save_path))
 
-    loaded = PCModel.load(str(save_path))
+    loaded = OnlinePCLDAModel.load(str(save_path))
 
     # Every entry in global_params must round-trip exactly.
     for name, arr in model.result.global_params.items():
@@ -141,8 +141,8 @@ def test_model_save_then_load_round_trips_global_params(tmp_path, _persistence_c
 
 
 def test_model_load_rejects_wrong_model_class(tmp_path):
-    """Loading an LDA-stamped manifest with PCModel.load must raise."""
-    from spark_vi.mllib.topic.pc import PCModel
+    """Loading an LDA-stamped manifest with OnlinePCLDAModel.load must raise."""
+    from spark_vi.mllib.topic.pc import OnlinePCLDAModel
 
     save_dir = tmp_path / "lda_marked"
     save_dir.mkdir()
@@ -160,7 +160,7 @@ def test_model_load_rejects_wrong_model_class(tmp_path):
     (save_dir / "manifest.json").write_text(json.dumps(manifest))
 
     with pytest.raises(ValueError, match="OnlinePCLDA"):
-        PCModel.load(str(save_dir))
+        OnlinePCLDAModel.load(str(save_dir))
 
 
 def test_pc_checkpoint_does_not_load_as_lda(tmp_path, _persistence_corpus_df):
@@ -168,9 +168,9 @@ def test_pc_checkpoint_does_not_load_as_lda(tmp_path, _persistence_corpus_df):
     covered by test_model_load_rejects_wrong_model_class): the model-class tag
     keeps the two checkpoint families from cross-loading."""
     from spark_vi.mllib.topic.lda import OnlineLDAModel
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
-    model = PCEstimator(k=3, maxIter=2, seed=0, subsamplingRate=1.0).fit(
+    model = OnlinePCLDAEstimator(k=3, maxIter=2, seed=0, subsamplingRate=1.0).fit(
         _persistence_corpus_df
     )
     save_path = tmp_path / "pc_ckpt"
@@ -183,14 +183,14 @@ def test_pc_checkpoint_does_not_load_as_lda(tmp_path, _persistence_corpus_df):
 
 
 def test_model_save_load_then_transform_works(tmp_path, _persistence_corpus_df):
-    from spark_vi.mllib.topic.pc import PCEstimator, PCModel
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator, OnlinePCLDAModel
 
-    estimator = PCEstimator(k=3, maxIter=3, seed=0, subsamplingRate=1.0)
+    estimator = OnlinePCLDAEstimator(k=3, maxIter=3, seed=0, subsamplingRate=1.0)
     model = estimator.fit(_persistence_corpus_df)
 
     save_path = tmp_path / "pc_save_transform"
     model.save(str(save_path))
-    loaded = PCModel.load(str(save_path))
+    loaded = OnlinePCLDAModel.load(str(save_path))
 
     out = loaded.transform(_persistence_corpus_df)
     assert "topicDistribution" in out.columns
@@ -203,15 +203,15 @@ def test_model_save_load_then_transform_works(tmp_path, _persistence_corpus_df):
 
 def test_estimator_fit_with_savedir_only_writes_final(tmp_path, _persistence_corpus_df):
     """saveDir set, saveInterval=-1 → exactly one save (the end-of-fit one)."""
-    from spark_vi.mllib.topic.pc import PCEstimator, PCModel
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator, OnlinePCLDAModel
 
     save_dir = tmp_path / "auto_save_final_only_pc"
-    estimator = PCEstimator(k=3, maxIter=3, seed=0, subsamplingRate=1.0)
+    estimator = OnlinePCLDAEstimator(k=3, maxIter=3, seed=0, subsamplingRate=1.0)
     estimator.setSaveDir(str(save_dir))
     model = estimator.fit(_persistence_corpus_df)
 
     assert (save_dir / "manifest.json").exists()
-    loaded = PCModel.load(str(save_dir))
+    loaded = OnlinePCLDAModel.load(str(save_dir))
     for name, arr in model.result.global_params.items():
         np.testing.assert_array_equal(loaded.result.global_params[name], arr)
 
@@ -232,12 +232,12 @@ def test_pc_resume_from_continues_iteration_count_and_elbo_trace(
             both pointing at run1 → n_iterations == 6, elbo_trace length 6 with
             the first 3 entries identical to run1 (history preserved).
     """
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
     N, M = 3, 3
     save_dir = tmp_path / "pc_run1"
 
-    estimator_a = PCEstimator(k=3, maxIter=N, seed=2, subsamplingRate=1.0)
+    estimator_a = OnlinePCLDAEstimator(k=3, maxIter=N, seed=2, subsamplingRate=1.0)
     estimator_a.setSaveDir(str(save_dir))
     model_a = estimator_a.fit(_persistence_corpus_df)
     result_a = model_a.result
@@ -246,7 +246,7 @@ def test_pc_resume_from_continues_iteration_count_and_elbo_trace(
     assert len(result_a.elbo_trace) == N
     lambda_a = np.array(result_a.global_params["lambda"], copy=True)
 
-    estimator_b = PCEstimator(k=3, maxIter=M, seed=2, subsamplingRate=1.0)
+    estimator_b = OnlinePCLDAEstimator(k=3, maxIter=M, seed=2, subsamplingRate=1.0)
     estimator_b.setSaveDir(str(save_dir))
     estimator_b.setResumeFrom(str(save_dir))
     model_b = estimator_b.fit(_persistence_corpus_df)

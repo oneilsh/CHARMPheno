@@ -283,7 +283,7 @@ def attach_multitask_label_columns(
     column via ``drug_order`` (identical order to :func:`stable_drug_order`), so the
     distributed VI-PC sees the exact same supervision as the in-memory path.
 
-    IMPORTANT — column type. ``PCEstimator``'s shim (``_row_to_pc_document``) reads
+    IMPORTANT — column type. ``OnlinePCLDAEstimator``'s shim (``_row_to_pc_document``) reads
     the label columns with ``isinstance(raw, (list, tuple, np.ndarray))`` and, on a
     miss, wraps the value as ``[raw]`` (promoting a scalar to length-1). A
     ``VectorUDT``/``DenseVector`` fails that check and would be wrapped to a spurious
@@ -369,7 +369,7 @@ def attach_fullyobserved_label_columns(
 
     Same column-type contract as :func:`attach_multitask_label_columns`: the
     label/mask are Spark ``ArrayType(DoubleType)`` (NOT ``VectorUDT``) so
-    ``PCEstimator``'s row shim deserializes them to Python ``list`` and reads a
+    ``OnlinePCLDAEstimator``'s row shim deserializes them to Python ``list`` and reads a
     clean ``(C,)`` vector rather than wrapping a Vector to a spurious ``(1, C)``.
 
     ``label_by_person`` maps person_id -> the stable drug subset (list of
@@ -520,7 +520,7 @@ def _anp_theta_df(model, df, grad_cavi_iters,
     (the fixed ``grad_cavi_iters``-step differentiable CAVI unroll from the alpha
     prior) against the model's FINAL topics — the EXACT theta the supervised head
     gradient descends, as opposed to ``model.transform``'s converged ``infer_local``
-    theta used at scoring. Same broadcast-topics-then-UDF shape as ``PCModel._transform``.
+    theta used at scoring. Same broadcast-topics-then-UDF shape as ``OnlinePCLDAModel._transform``.
     """
     from pyspark.ml.linalg import DenseVector, VectorUDT
     from pyspark.sql import functions as F
@@ -617,7 +617,7 @@ def _vi_two_stage_bundle(train_df, test_df, C, args):
     """Distributed-SVI two-stage baseline bundle (unsupervised topics -> per-label LR).
 
     The SVI-consistent replacement for the in-memory ``PCTopicModel(weight_y=0)``
-    two-stage baseline: it fits a SECOND ``PCEstimator`` at ``weightY=0`` — the SAME
+    two-stage baseline: it fits a SECOND ``OnlinePCLDAEstimator`` at ``weightY=0`` — the SAME
     distributed machinery as the VI-PC model (and the warm-start phase 1), so there
     is NO collect-to-driver and NO in-memory L-BFGS — transforms train/test to the
     K-dim ``topicDistribution`` (theta), collects only those small vectors
@@ -634,13 +634,13 @@ def _vi_two_stage_bundle(train_df, test_df, C, args):
     row-order-invariant and the test membership is the same deterministic person
     split, so the bundle is directly comparable to the PC / LR-on-codes bundles.
     """
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
     from analysis.pc.evaluate import _bundle_masked, _lr_proba_per_label_masked
 
     n_iter = (args.baseline_max_iter
               if getattr(args, "baseline_max_iter", 0) and args.baseline_max_iter > 0
               else args.max_iter)
-    est = PCEstimator(
+    est = OnlinePCLDAEstimator(
         featuresCol="features", labelCol="y", labelMaskCol="label_mask",
         numLabels=C, weightY=0.0, k=args.K, docConcentration=[float(args.alpha)],
         subsamplingRate=args.subsampling_rate,
@@ -680,7 +680,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--backend", choices=("inmem", "vi"), default="inmem",
         help=("PC fit backend. 'inmem' (default) = the in-memory L-BFGS "
               "PCTopicModel run on the driver via evaluate_pc_multitask (current "
-              "behavior, unchanged). 'vi' = the distributed VI-native PCEstimator "
+              "behavior, unchanged). 'vi' = the distributed VI-native OnlinePCLDAEstimator "
               "(SVI, no collect-to-memory for the fit); the two-stage / LR-on-codes "
               "baselines are still collected+fit in memory so the numbers are "
               "comparable to the same baselines."),
@@ -710,12 +710,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--subsampling-rate", type=float, default=0.05,
         help=("VI backend: mini-batch fraction per SVI iteration. 1.0 = full-batch. "
-              "Maps to PCEstimator.subsamplingRate. Ignored for --backend inmem."),
+              "Maps to OnlinePCLDAEstimator.subsamplingRate. Ignored for --backend inmem."),
     )
     parser.add_argument(
         "--tau0", type=float, default=1024.0,
         help=("VI backend: Robbins-Monro learning offset tau0 in "
-              "rho_t = (tau0 + t)^-kappa. Maps to PCEstimator.learningOffset. "
+              "rho_t = (tau0 + t)^-kappa. Maps to OnlinePCLDAEstimator.learningOffset. "
               "On smaller cohorts try ~10-64 so the head actually moves. Ignored "
               "for --backend inmem."),
     )
@@ -723,13 +723,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--kappa", type=float, default=0.51,
         help=("VI backend: Robbins-Monro learning decay kappa in "
               "rho_t = (tau0 + t)^-kappa (must be in (0.5, 1.0]). Maps to "
-              "PCEstimator.learningDecay. Ignored for --backend inmem."),
+              "OnlinePCLDAEstimator.learningDecay. Ignored for --backend inmem."),
     )
     parser.add_argument(
         "--head-lr-scale", type=float, default=1.0,
         help=("VI backend: extra multiplier on the LOGISTIC-HEAD SGD step ONLY "
               "(w_CK <- w_CK - rho*head_lr_scale*wy*grad); the topic/lambda step is "
-              "untouched. Maps to PCEstimator.headLrScale. Use > 1 to converge the "
+              "untouched. Maps to OnlinePCLDAEstimator.headLrScale. Use > 1 to converge the "
               "head in fewer iters when the topics are already stable but the head "
               "is under-moved (|w_CK| still climbing at max_iter) — the targeted "
               "alternative to lowering tau0, which speeds up everything. Pair a hot "
@@ -745,12 +745,12 @@ def _build_parser() -> argparse.ArgumentParser:
               "logistic head on the current theta — the settled head fix (ADR 0039). "
               "sgd does not converge the coupled head against a moving theta (heldout "
               "head AUC ~= chance while a batch LR on the SAME topics predicts; insight "
-              "0065). Maps to PCEstimator.headOptimizer. Ignored for --backend inmem."),
+              "0065). Maps to OnlinePCLDAEstimator.headOptimizer. Ignored for --backend inmem."),
     )
     parser.add_argument(
         "--head-lr", type=float, default=0.05,
         help=("VI backend: the step-damping fraction for --head-optimizer newton "
-              "(~0.5-1.0). Ignored for sgd. Maps to PCEstimator.headLr. Ignored for "
+              "(~0.5-1.0). Ignored for sgd. Maps to OnlinePCLDAEstimator.headLr. Ignored for "
               "inmem."),
     )
     parser.add_argument(
@@ -762,13 +762,13 @@ def _build_parser() -> argparse.ArgumentParser:
               "the logistic head on the current theta (sgd takes one noisy gradient "
               "step/iter and does not converge: head AUC ~= chance, w_CK orthogonal to the "
               "batch-LR direction). Also feeds the topic correction a valid head signal "
-              "each iter. Maps to PCEstimator.headNewtonRidge. Ignored for inmem."),
+              "each iter. Maps to OnlinePCLDAEstimator.headNewtonRidge. Ignored for inmem."),
     )
     parser.add_argument(
         "--weight-y-warmup-iters", type=int, default=0,
         help=("VI backend: linearly ramp the effective weight_y from 0 to its full "
               "value over this many global SVI steps (0 = no warmup). Maps to "
-              "PCEstimator.weightYWarmupIters. Softens the first supervised steps so "
+              "OnlinePCLDAEstimator.weightYWarmupIters. Softens the first supervised steps so "
               "a large weight_y and/or --head-lr-scale > 1 does not spike the head "
               "on early, high-variance minibatches. Ignored for --backend inmem."),
     )
@@ -776,7 +776,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--grad-cavi-iters", type=int, default=20,
         help=("VI backend: fixed CAVI unroll depth for the DIFFERENTIABLE per-doc "
               "theta the supervised gradient (topic correction + head) is computed "
-              "on (maps to PCEstimator.gradCaviIters). Must be deep enough that this "
+              "on (maps to OnlinePCLDAEstimator.gradCaviIters). Must be deep enough that this "
               "training theta MATCHES the scoring theta (infer_local runs CAVI to "
               "convergence, cavi_max_iter=100/tol=1e-3): otherwise the co-fit head "
               "trains on under-converged theta but is scored on converged theta (a "
@@ -789,7 +789,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--topic-trust", type=float, default=0.1,
         help=("VI backend: per-iteration trust-region on the supervised TOPIC "
               "correction — each lambda cell moves by at most this fraction of its "
-              "own value per SVI step (maps to PCEstimator.topicTrust). The default "
+              "own value per SVI step (maps to OnlinePCLDAEstimator.topicTrust). The default "
               "0.1 caps a single step but COMPOUNDS over many iters, so a long "
               "supervised phase can still drift the topics into a degenerate, less-"
               "predictive state (Sigma-lambda blow-up). Lower it (e.g. 0.02-0.05) to "
@@ -811,7 +811,7 @@ def _build_parser() -> argparse.ArgumentParser:
               "iterations; <= 0 (default) reuses --max-iter. Unsupervised topics "
               "converge faster than the supervised head, so a smaller value (e.g. "
               "100) keeps the extra VI two-stage fit cheap. For --backend vi this "
-              "caps the distributed weight_y=0 PCEstimator; for inmem it caps the "
+              "caps the distributed weight_y=0 OnlinePCLDAEstimator; for inmem it caps the "
               "in-memory PCTopicModel(weight_y=0) fit."),
     )
     parser.add_argument(
@@ -819,7 +819,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=("VI backend: unsupervised-warm-start protocol (Hughes et al.). "
               "0 (default) = cold start (single-phase supervised fit, byte-for-byte "
               "the prior behavior). N > 0 runs a two-phase fit: PHASE 1 fits the "
-              "SAME PCEstimator machinery at weight_y=0 (unsupervised LDA-MAP) for "
+              "SAME OnlinePCLDAEstimator machinery at weight_y=0 (unsupervised LDA-MAP) for "
               "N SVI iters to learn topics (the head stays at its zero init), then "
               "PHASE 2 warm-starts the supervised fit (real weight_y, --max-iter "
               "iters) from phase-1's topics with a FRESH Robbins-Monro schedule "
@@ -934,7 +934,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # --- Checkpoint / resume / eval (VI backend only) ------------------------
     # Mirror lda_bigquery_cloud.py's persistence flags. These are meaningful
-    # ONLY for --backend vi: the VI-native PCEstimator checkpoints its VIResult
+    # ONLY for --backend vi: the VI-native OnlinePCLDAEstimator checkpoints its VIResult
     # via the shim's saveDir/saveInterval and resumes via resumeFrom. The inmem
     # (L-BFGS) backend has NO interim state to checkpoint, so these are ignored
     # for --backend inmem.
@@ -943,7 +943,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=("VI backend only: directory for auto-saves and final result; "
               "empty (default) = no save. The directory becomes the "
               "authoritative post-fit artifact (manifest.json + params/), "
-              "loadable via PCModel.load and usable as --resume-from. Ignored "
+              "loadable via OnlinePCLDAModel.load and usable as --resume-from. Ignored "
               "for --backend inmem (L-BFGS has no interim state)."),
     )
     parser.add_argument(
@@ -962,7 +962,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--eval-only", action="store_true",
         help=("VI backend only: skip training; load the checkpoint VIResult at "
-              "--save-dir, wrap it in a PCModel, and run the per-drug eval "
+              "--save-dir, wrap it in a OnlinePCLDAModel, and run the per-drug eval "
               "(transform + score) so you can peek the AUC from a checkpoint "
               "without more fit. Requires --save-dir with a manifest.json."),
     )
@@ -1620,7 +1620,7 @@ def _run_vi_backend(
     label + mask to ``bow_df`` as Spark ``ArrayType`` columns
     (:func:`attach_multitask_label_columns`), splits by person at the DataFrame
     level (:func:`person_hash_split`), fits the distributed
-    :class:`~spark_vi.mllib.topic.pc.PCEstimator` (SVI, no collect-to-memory for the
+    :class:`~spark_vi.mllib.topic.pc.OnlinePCLDAEstimator` (SVI, no collect-to-memory for the
     fit), scores per-drug heldout AUC/AP from the transform's ``probabilityCol``,
     and computes the identical two-stage / LR-on-codes baselines by collecting
     train+test BOW to memory (:func:`multitask_baseline_probas`). Returns
@@ -1635,7 +1635,7 @@ def _run_vi_backend(
       * ``--resume-from`` is threaded as ``resumeFrom`` so a re-run continues the
         prior checkpoint (``--max-iter`` = ADDITIONAL iters).
       * ``--eval-only`` skips training entirely: the checkpoint VIResult at
-        ``--save-dir`` is loaded via ``PCModel.load`` and scored, so a user can
+        ``--save-dir`` is loaded via ``OnlinePCLDAModel.load`` and scored, so a user can
         peek the AUC from a checkpoint without more fit. The drug->column order
         is read from the checkpoint metadata (``stable_drug_order``) so the
         loaded head columns line up with the eval labels.
@@ -1644,7 +1644,7 @@ def _run_vi_backend(
         ``vocab``, the SVI config, and a corpus manifest) so eval/resume don't
         depend on re-deriving state.
     """
-    from spark_vi.mllib.topic.pc import PCEstimator, PCModel
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator, OnlinePCLDAModel
 
     # --- 4) Attach labels as Spark columns + person split --------------------
     with _phase(f"attach multi-task label/mask columns + person split "
@@ -1690,8 +1690,8 @@ def _run_vi_backend(
     #         ... or, on --eval-only, load the checkpoint model (no training).
     if args.eval_only:
         with _phase(f"VI-PC eval-only: load checkpoint from {args.save_dir}"):
-            model = PCModel.load(args.save_dir)
-            # PCModel.load restores only the wrapped VIResult (Params aren't
+            model = OnlinePCLDAModel.load(args.save_dir)
+            # OnlinePCLDAModel.load restores only the wrapped VIResult (Params aren't
             # persisted, ADR 0009/0012); set the ones transform reads so it
             # emits the head-derived probabilityCol (needs weightY > 0 + C).
             model._set(
@@ -1726,7 +1726,7 @@ def _run_vi_backend(
                 # (loaded back on the driver by phase 2's warm-init), NOT to
                 # --save-dir. --save-dir checkpoints the real (phase-2) fit.
                 warm_start_dir = tempfile.mkdtemp(prefix="pc_warmup_")
-                phase1 = PCEstimator(
+                phase1 = OnlinePCLDAEstimator(
                     featuresCol="features", labelCol="y", labelMaskCol="label_mask",
                     numLabels=C, weightY=0.0, k=args.K,
                     docConcentration=[float(args.alpha)],
@@ -1751,7 +1751,7 @@ def _run_vi_backend(
                     f"saveDir={args.save_dir or '<none>'}, "
                     f"resumeFrom={args.resume_from or '<none>'}, "
                     f"warmStartFrom={'<phase1>' if warm_start_dir else '<none>'})"):
-            estimator = PCEstimator(
+            estimator = OnlinePCLDAEstimator(
                 featuresCol="features", labelCol="y", labelMaskCol="label_mask",
                 numLabels=C, weightY=float(args.weight_y), k=args.K,
                 docConcentration=[float(args.alpha)],
@@ -1831,7 +1831,7 @@ def _run_vi_backend(
                 print(f"[driver] theta-mismatch localizer skipped: "
                       f"{type(_e).__name__}: {_e}", flush=True)
 
-        # Two-stage baseline: distributed SVI (unsupervised PCEstimator weight_y=0
+        # Two-stage baseline: distributed SVI (unsupervised OnlinePCLDAEstimator weight_y=0
         # -> per-label LR on the K-dim topics). Fit BEFORE the collect/unpersist,
         # while train/test_df are persisted; no dense collect + no in-memory fit,
         # so it is SVI-consistent with the VI-PC model above and does not OOM the
@@ -1918,7 +1918,7 @@ def _run_vi_backend_fullyobserved(
 
     The mask-all-ones sibling of :func:`_run_vi_backend`. Identical machinery —
     attach label/mask as Spark ``ArrayType`` columns, ``person_hash_split``, the
-    distributed :class:`~spark_vi.mllib.topic.pc.PCEstimator` SVI fit (with the SAME
+    distributed :class:`~spark_vi.mllib.topic.pc.OnlinePCLDAEstimator` SVI fit (with the SAME
     unsupervised warm-start + checkpoint/resume/eval-only paths), then
     :func:`collect_labeled_bow` + the shared two-stage / LR-on-codes baselines —
     with exactly TWO differences from the per-drug sibling:
@@ -1936,7 +1936,7 @@ def _run_vi_backend_fullyobserved(
     Returns ``(results, drug_order, n_train, n_test, n_persons)`` in the same shape
     as the per-drug backend so the report + JSON payload are backend-agnostic.
     """
-    from spark_vi.mllib.topic.pc import PCEstimator, PCModel
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator, OnlinePCLDAModel
 
     # --- 4) Attach labels as Spark columns + person split --------------------
     with _phase(f"attach fully-observed label/mask columns + person split "
@@ -1979,7 +1979,7 @@ def _run_vi_backend_fullyobserved(
     #         ... or, on --eval-only, load the checkpoint model (no training).
     if args.eval_only:
         with _phase(f"VI-PC eval-only: load checkpoint from {args.save_dir}"):
-            model = PCModel.load(args.save_dir)
+            model = OnlinePCLDAModel.load(args.save_dir)
             model._set(
                 featuresCol="features", numLabels=C,
                 weightY=float(args.weight_y), probabilityCol="probability",
@@ -2007,7 +2007,7 @@ def _run_vi_backend_fullyobserved(
                         f"subsamplingRate={args.subsampling_rate}, "
                         f"tau0={args.tau0}, kappa={args.kappa})"):
                 warm_start_dir = tempfile.mkdtemp(prefix="pc_warmup_")
-                phase1 = PCEstimator(
+                phase1 = OnlinePCLDAEstimator(
                     featuresCol="features", labelCol="y", labelMaskCol="label_mask",
                     numLabels=C, weightY=0.0, k=args.K,
                     docConcentration=[float(args.alpha)],
@@ -2032,7 +2032,7 @@ def _run_vi_backend_fullyobserved(
                     f"saveDir={args.save_dir or '<none>'}, "
                     f"resumeFrom={args.resume_from or '<none>'}, "
                     f"warmStartFrom={'<phase1>' if warm_start_dir else '<none>'})"):
-            estimator = PCEstimator(
+            estimator = OnlinePCLDAEstimator(
                 featuresCol="features", labelCol="y", labelMaskCol="label_mask",
                 numLabels=C, weightY=float(args.weight_y), k=args.K,
                 docConcentration=[float(args.alpha)],
@@ -2108,7 +2108,7 @@ def _run_vi_backend_fullyobserved(
                 print(f"[driver] theta-mismatch localizer skipped: "
                       f"{type(_e).__name__}: {_e}", flush=True)
 
-        # Two-stage baseline: distributed SVI (unsupervised PCEstimator weight_y=0
+        # Two-stage baseline: distributed SVI (unsupervised OnlinePCLDAEstimator weight_y=0
         # -> per-label LR on the K-dim topics). Fit BEFORE the collect/unpersist,
         # while train/test_df are persisted; no dense collect + no in-memory fit,
         # so it is SVI-consistent with the VI-PC model above and does not OOM the

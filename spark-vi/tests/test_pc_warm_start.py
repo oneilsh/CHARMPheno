@@ -13,7 +13,7 @@ fit through the SAME ``OnlinePCLDA`` machinery:
 The fresh counter is the whole subtlety: it is DISTINCT from resume (which
 continues the counter, so rho would already be decayed and the head would barely
 train). These tests pin, at both the ``VIRunner`` mechanism level and the
-``PCEstimator`` shim level:
+``OnlinePCLDAEstimator`` shim level:
 
   1. Fresh counter + warm topics + fresh (zero) head + fresh rho (not decayed),
      with phase-1 topics matching a standalone unsupervised fit at the boundary,
@@ -231,11 +231,11 @@ def test_resume_and_warm_start_are_mutually_exclusive(spark, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Shim-level: PCEstimator.warmStartFrom end-to-end + validation + cold-start.
+# Shim-level: OnlinePCLDAEstimator.warmStartFrom end-to-end + validation + cold-start.
 # ---------------------------------------------------------------------------
 
 def test_shim_warm_start_from_trains_head_with_fresh_counter(spark, tmp_path):
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
     rows, cols, V = _labeled_block_rows(seed=0)
     df = spark.createDataFrame(rows, cols)
@@ -247,12 +247,12 @@ def test_shim_warm_start_from_trains_head_with_fresh_counter(spark, tmp_path):
 
     # Phase 1: unsupervised warm-up, saved to a dir.
     warm_dir = tmp_path / "p1"
-    m1 = PCEstimator(weightY=0.0, maxIter=N, **common).fit(df)
+    m1 = OnlinePCLDAEstimator(weightY=0.0, maxIter=N, **common).fit(df)
     m1.save(str(warm_dir))
     assert np.allclose(m1.headWeights(), 0.0)
 
     # Phase 2: supervised, warm-started from phase 1 (fresh counter).
-    m2 = PCEstimator(
+    m2 = OnlinePCLDAEstimator(
         weightY=50.0, maxIter=M, warmStartFrom=str(warm_dir), **common,
     ).fit(df)
 
@@ -264,7 +264,7 @@ def test_shim_warm_start_from_trains_head_with_fresh_counter(spark, tmp_path):
 
 
 def test_shim_warm_start_empty_is_cold_start(spark):
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
     rows, cols, V = _labeled_block_rows(seed=3)
     df = spark.createDataFrame(rows, cols)
@@ -272,8 +272,8 @@ def test_shim_warm_start_empty_is_cold_start(spark):
                   docConcentration=[1.1], numLabels=1,
                   featuresCol="features", labelCol="label", weightY=2.0)
 
-    r_unset = PCEstimator(**common).fit(df).result
-    r_empty = PCEstimator(warmStartFrom="", **common).fit(df).result
+    r_unset = OnlinePCLDAEstimator(**common).fit(df).result
+    r_empty = OnlinePCLDAEstimator(warmStartFrom="", **common).fit(df).result
 
     assert r_empty.n_iterations == r_unset.n_iterations
     for name, arr in r_unset.global_params.items():
@@ -281,29 +281,29 @@ def test_shim_warm_start_empty_is_cold_start(spark):
 
 
 def test_shim_warm_start_rejects_missing_manifest(spark, tmp_path):
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
     rows, cols, V = _labeled_block_rows(seed=4)
     df = spark.createDataFrame(rows, cols)
     empty = tmp_path / "no_manifest"
     empty.mkdir()
-    est = PCEstimator(k=3, maxIter=2, seed=0, subsamplingRate=1.0, numLabels=1,
+    est = OnlinePCLDAEstimator(k=3, maxIter=2, seed=0, subsamplingRate=1.0, numLabels=1,
                       labelCol="label", weightY=1.0, warmStartFrom=str(empty))
     with pytest.raises(FileNotFoundError, match="manifest.json"):
         est.fit(df)
 
 
 def test_shim_rejects_warm_start_and_resume_together(spark, tmp_path):
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
     rows, cols, V = _labeled_block_rows(seed=5)
     df = spark.createDataFrame(rows, cols)
     # A real checkpoint so both paths pass their manifest existence check and the
     # mutual-exclusion guard is what fires.
     ckpt = tmp_path / "ckpt"
-    PCEstimator(k=3, maxIter=2, seed=0, subsamplingRate=1.0).fit(df).save(str(ckpt))
+    OnlinePCLDAEstimator(k=3, maxIter=2, seed=0, subsamplingRate=1.0).fit(df).save(str(ckpt))
 
-    est = PCEstimator(k=3, maxIter=2, seed=0, subsamplingRate=1.0, numLabels=1,
+    est = OnlinePCLDAEstimator(k=3, maxIter=2, seed=0, subsamplingRate=1.0, numLabels=1,
                       labelCol="label", weightY=1.0,
                       resumeFrom=str(ckpt), warmStartFrom=str(ckpt))
     with pytest.raises(ValueError, match="mutually exclusive"):

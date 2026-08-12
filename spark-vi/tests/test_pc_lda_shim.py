@@ -1,4 +1,4 @@
-"""Increment-1 shim smoke tests for PCEstimator / PCModel (weightY == 0).
+"""Increment-1 shim smoke tests for OnlinePCLDAEstimator / OnlinePCLDAModel (weightY == 0).
 
 Mirrors test_gated_lda_shim.py: a tiny synthetic Spark DataFrame fits
 end-to-end and transforms, appending the label-free topic-distribution column,
@@ -34,11 +34,11 @@ def _block_rows(n_per_topic=12, K=3, block=4, seed=0, with_labels=False):
 
 
 def test_pc_shim_fit_transform_smoke(spark):
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
     rows, cols, V = _block_rows(seed=0)
     df = spark.createDataFrame(rows, cols)
 
-    est = PCEstimator(k=3, maxIter=4, seed=0, subsamplingRate=1.0,
+    est = OnlinePCLDAEstimator(k=3, maxIter=4, seed=0, subsamplingRate=1.0,
                       topicDistributionCol="topicDistribution")
     model = est.fit(df)
     out = model.transform(df)
@@ -51,11 +51,42 @@ def test_pc_shim_fit_transform_smoke(spark):
     assert model.headWeights().shape == (1, 3)
 
 
-def test_pc_shim_transform_is_deterministic(spark):
-    from spark_vi.mllib.topic.pc import PCEstimator
+def test_pc_shim_readouts_parity_with_lda(spark):
+    """OnlinePCLDAModel exposes the LDA-parity topic readouts: describeTopics,
+    trainedAlpha (length K), trainedTopicConcentration (float). logLikelihood /
+    logPerplexity are honest v1 NotImplementedError stubs, as in the LDA shim."""
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
     rows, cols, V = _block_rows(seed=1)
     df = spark.createDataFrame(rows, cols)
-    model = PCEstimator(k=3, maxIter=4, seed=0, subsamplingRate=1.0).fit(df)
+    model = OnlinePCLDAEstimator(k=3, maxIter=4, seed=0, subsamplingRate=1.0).fit(df)
+
+    # trainedAlpha -> length-K vector; trainedTopicConcentration -> float.
+    assert model.trainedAlpha().shape == (3,)
+    assert isinstance(model.trainedTopicConcentration(), float)
+
+    # describeTopics -> (topic, termIndices, termWeights), K rows, m terms each,
+    # weights descending in (0, 1] (top of a row-stochastic beta).
+    dt = model.describeTopics(maxTermsPerTopic=4).collect()
+    assert len(dt) == 3
+    assert set(dt[0].asDict()) == {"topic", "termIndices", "termWeights"}
+    assert len(dt[0]["termIndices"]) == 4 and len(dt[0]["termWeights"]) == 4
+    w = dt[0]["termWeights"]
+    assert all(w[i] >= w[i + 1] for i in range(len(w) - 1))
+    assert 0.0 < w[0] <= 1.0
+    with pytest.raises(ValueError):
+        model.describeTopics(maxTermsPerTopic=0)
+
+    # v1 stubs, parity with OnlineLDAModel.
+    for fn in (model.logLikelihood, model.logPerplexity):
+        with pytest.raises(NotImplementedError):
+            fn(df)
+
+
+def test_pc_shim_transform_is_deterministic(spark):
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
+    rows, cols, V = _block_rows(seed=1)
+    df = spark.createDataFrame(rows, cols)
+    model = OnlinePCLDAEstimator(k=3, maxIter=4, seed=0, subsamplingRate=1.0).fit(df)
 
     a1 = [r[0] for r in model.transform(df).select("topicDistribution").collect()]
     a2 = [r[0] for r in model.transform(df).select("topicDistribution").collect()]
@@ -67,21 +98,21 @@ def test_pc_shim_transform_is_deterministic(spark):
 def test_pc_shim_threads_label_columns_when_present(spark):
     # labelCol/labelMaskCol are threaded into every PCDocument (STM-style) and
     # tolerated at weightY == 0 — the fit succeeds and is unaffected by them.
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
     rows, cols, V = _block_rows(seed=2, with_labels=True)
     df = spark.createDataFrame(rows, cols)
-    model = PCEstimator(k=3, maxIter=4, seed=0, subsamplingRate=1.0,
+    model = OnlinePCLDAEstimator(k=3, maxIter=4, seed=0, subsamplingRate=1.0,
                         numLabels=1, labelCol="label").fit(df)
     out = model.transform(df)
     assert out.select("topicDistribution").head()[0] is not None
 
 
 def test_pc_shim_weight_y_default_zero_and_settable():
-    from spark_vi.mllib.topic.pc import PCEstimator
-    est = PCEstimator(k=3)
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
+    est = OnlinePCLDAEstimator(k=3)
     assert est.getOrDefault("weightY") == 0.0        # increment-1 default
     assert est.getOrDefault("numLabels") == 1
-    est2 = PCEstimator(k=3, weightY=5.0, numLabels=2)
+    est2 = OnlinePCLDAEstimator(k=3, weightY=5.0, numLabels=2)
     assert est2.getOrDefault("weightY") == 5.0
     assert est2.getOrDefault("numLabels") == 2
 
@@ -90,20 +121,20 @@ def test_pc_shim_weight_y_positive_requires_label_col(spark):
     # Supervised fit without labels is a user error (the head would see no
     # signal); fail fast rather than silently run an unsupervised fit under a
     # supervised name.
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
     rows, cols, V = _block_rows(seed=3)
     df = spark.createDataFrame(rows, cols)
     with pytest.raises(ValueError, match="requires labelCol"):
-        PCEstimator(k=3, maxIter=2, weightY=1.0).fit(df)
+        OnlinePCLDAEstimator(k=3, maxIter=2, weightY=1.0).fit(df)
 
 
 def test_pc_shim_supervised_fit_moves_head_and_emits_probability(spark):
     # weightY > 0 with a labelCol: the head moves off its zero seed and transform
     # appends the head-derived probabilityCol alongside topicDistribution.
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
     rows, cols, V = _block_rows(seed=4, with_labels=True)
     df = spark.createDataFrame(rows, cols)
-    model = PCEstimator(
+    model = OnlinePCLDAEstimator(
         k=3, maxIter=6, seed=0, subsamplingRate=1.0,
         numLabels=1, labelCol="label", weightY=50.0, gradCaviIters=10,
     ).fit(df)

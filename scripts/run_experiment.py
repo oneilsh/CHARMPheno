@@ -715,14 +715,14 @@ def build_pc_args(
 
     Backend: the ``backend`` config key selects the fit backend (default
     ``inmem`` = the in-memory L-BFGS PC, byte-for-byte the prior behavior).
-    ``backend: vi`` selects the distributed VI-native PCEstimator and additionally
+    ``backend: vi`` selects the distributed VI-native OnlinePCLDAEstimator and additionally
     passes the SVI schedule knobs (``subsampling_rate`` -> ``--subsampling-rate``,
     ``tau0`` -> ``--tau0``, ``kappa`` -> ``--kappa``) and the unsupervised-warm-start
     knob (``warm_start_unsup_iters`` -> ``--warm-start-unsup-iters``, default 0 =
     cold start); those flags are omitted for the inmem backend so its argv is
     unchanged.
 
-    Resume (VI backend only): the VI-native PCEstimator checkpoints its VIResult,
+    Resume (VI backend only): the VI-native OnlinePCLDAEstimator checkpoints its VIResult,
     so for ``backend: vi`` this also threads ``--save-dir <out_dir>`` +
     ``--save-interval <save_interval>`` (and ``--resume-from <out_dir>`` when
     ``resume_from`` is set) exactly as :func:`build_lda_args` does; ``--max-iter``
@@ -776,7 +776,7 @@ def build_pc_args(
             "--age-max", str(effective.get("age_max", 80)),
         ])
     # VI backend: thread the distributed-SVI schedule knobs AND the checkpoint /
-    # resume flags (the VI-native PCEstimator persists its VIResult, so resume is
+    # resume flags (the VI-native OnlinePCLDAEstimator persists its VIResult, so resume is
     # supported). Both are kept out of the inmem argv so the default backend's
     # command line is byte-for-byte unchanged (L-BFGS has no interim state).
     if backend == "vi":
@@ -801,7 +801,7 @@ def build_pc_args(
             # newton head: relative ridge conditioning the per-label IRLS solve.
             "--head-newton-ridge", str(effective.get("head_newton_ridge", 0.01)),
             # Per-iteration trust-region on the supervised topic correction (maps
-            # to PCEstimator.topicTrust). Default 0.1; lower to keep the supervised
+            # to OnlinePCLDAEstimator.topicTrust). Default 0.1; lower to keep the supervised
             # topics near the unsupervised warm-start, 0 to freeze them (head-only).
             "--topic-trust", str(effective.get("topic_trust", 0.1)),
             # Differentiable-CAVI unroll depth for the supervised theta. Must be
