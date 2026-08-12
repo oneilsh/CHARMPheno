@@ -1,7 +1,8 @@
 # PC supervised-head seam + DAG-closure head — design
 
 **Date:** 2026-08-12
-**Status:** Design (grounded in the code). Implementation staged — step 1 (flat extraction) first.
+**Status:** Steps 1–2 SHIPPED (flat extraction + `DagClosureHead`, engine-level, tested green).
+Step 3 (Gated-PC composition) and the shim exposure of the DAG head are follow-ons.
 **Oracle:** the in-memory `analysis/pc/` reference + the existing PC pyspark suite validate the
 extraction as behavior-preserving; new flavors get their own FD/oracle checks.
 
@@ -108,9 +109,15 @@ seams — the shared head is what lets Gated-PC reuse this machinery rather than
 1. **This step — pure refactor.** Extract `FlatLogisticHead` behind `SupervisedHead`;
    model holds `self._head`; free-function wrappers preserved. Re-verify the whole PC
    suite green. No behavior change, no new capability. Unblocks both follow-ons.
-2. **`DagClosureHead`** (task #13) — the closure-product flavor + FD check. Only when the
-   Mondo child⟹ancestor implication earns baking into training vs. a post-hoc consistency
-   step.
+2. **`DagClosureHead`** (task #13) — **SHIPPED.** The closure-product flavor with the
+   diamond-safe closure matrix, injected via a new optional `head=` constructor param
+   (default → flat, so nothing changes for existing callers; the head's `C` is validated
+   against the model's). Tested: closure matrix incl. a diamond, monotone `P(child) ≤
+   P(parent)`, FD grad-check on both the topic-correction and the head (base autograd,
+   no hand-derived gradient), and the model-level Newton→SGD degradation (no closed-form
+   Fisher → no `head_hess_stat` → `update_global` falls back to the SGD head step). The
+   MLlib-shim exposure (threading a `closure_parents` structure through the Estimator so
+   case-finding runs end-to-end on a DataFrame) is the immediate next step.
 3. **Gated-PC composition** (task #14) — compose the shared head with the DAG-gated E/M
    step; resolve the plumbing fork (subclass-chain vs delegation) recorded earlier.
 
