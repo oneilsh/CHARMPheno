@@ -12,6 +12,105 @@ elsewhere.
 
 ---
 
+## 2026-08-12 — PC (Prediction-Constrained) branch pre-merge review (7-lesson walkthrough) + the adam-removal / shim-rename / LDA-parity-readouts mini-arc
+
+Pre-merge review of the unmerged `claude/faithful-flat-pc` branch — the
+Prediction-Constrained topic-model production path (Hughes et al. AISTATS 2018,
+adapted for distributed spark-vi SVI). Seven-lesson bottom-up walkthrough
+(1 faithful in-memory oracle `analysis/pc`, 2 the VI port `OnlinePCLDA`, 3 the
+digamma-Jacobian topic-correction gradient, 4 the head optimizer, 5 the mllib
+shim, 6 evaluate + diagnostics, 7 the cloud driver + orchestration), against a
+Hughes-fidelity ledger (each spark-vi adaptation checked as faithful-or-justified).
+**The engine is sound; no correctness bugs found.** A shim-cleanup mini-arc ran
+alongside the review and shipped. Scope framed as "faithful Hughes, adapted for
+true scalability"; export/dashboard machinery and GatedLDA/STM were held out of
+scope by decision.
+
+### Reviewed clean (Lessons 1–7)
+
+- **Faithful oracle / VI port / gradient / head / shim / eval / driver.** The
+  in-memory reference (`slda_reference.calc_loss__slda`, NEF-MAP π, sigmoid
+  per-label head) mirrors the authors term-for-term and passes the vendored
+  `toy_bars_3x3` oracle (PC 1.0000 vs unsupervised two-stage 0.5133; known-good
+  param ranking separates `good_loss_pc` from `good_loss_y`) — 121 tests. The VI
+  port's increment-1 equivalence (`weight_y==0` == `OnlineLDA`) is structural and
+  tested (matched cosine > 0.999); the supervised topic correction is finite-
+  difference-exact after the digamma-Jacobian VJP (`_grad_topics_to_lambda`, the
+  one historical bug in the arc, already fixed with a regression guard that also
+  asserts the RAW gradient does NOT match); the Newton/IRLS head's scale-invariance
+  (`H⁻¹g` cancels the runner's `corpus/batch` stat scaling) was verified against
+  `runner.py:296`. The eval harness uses leak-free-scaled honest baselines and
+  masks sub-`min_label_count` cells (AoU privacy floor) at the measurement
+  boundary. The cloud driver's person-hash split is leakage-safe and partition-
+  independent, the distributed two-stage baseline is OOM-safe (a second estimator
+  at `weightY=0`, no driver L-BFGS), diagnostics can't sink a run, and `--eval-only`
+  reports K/weight_y/drug-order from the checkpoint rather than the CLI.
+
+### Shipped — the shim-cleanup mini-arc (all green, pyspark suite run in-container)
+
+- **Removed the superseded `adam` head optimizer** (`04c1318`). Adam was the
+  intermediate two-timescale attempt; it landed at the same mis-directed `w_CK` as
+  sgd (cos ≈ 0.11), which is what ruled out the optimizer family and motivated
+  Newton (ADR 0039) — diagnostic value, not a fix. Removed the branch, the
+  `w_CK_m/v` moment buffers, the `head_beta1/2`/`head_eps` params, the warm-start
+  lazy-init branch, and all plumbing/tests; `head_optimizer` is now
+  `('sgd', 'newton')`, default `sgd` (byte-for-byte prior behavior). History in
+  experiments 0072/0073 + insight 0065 + git.
+- **Renamed the mllib shim** `PCEstimator`/`PCModel` → `OnlinePCLDAEstimator`/
+  `OnlinePCLDAModel` (+ `_OnlinePCLDAParams`, `_ONLINE_PCLDA_DEFAULTS`) (`8e393be`),
+  aligning with the `Online…` family and the underlying `OnlinePCLDA` VIModel;
+  117 references across 8 files, plus the living docs (ADR 0039, review plan)
+  (`86c3238`).
+- **Added LDA-parity topic readouts** to `OnlinePCLDAModel` (`8e393be`):
+  `describeTopics`, `trainedAlpha`, `trainedTopicConcentration` (real), plus
+  `logLikelihood`/`logPerplexity` as honest v1 `NotImplementedError` stubs (exact
+  parity — the LDA shim stubs them too) + a readout-parity test.
+- **mllib surface review** (across LDA/HDP/PC/Gated/STM): documented a three-tier
+  conformance gradient (fully-conformant LDA/HDP/PC; partial GatedLDA; bespoke STM)
+  and resolved the `optimizer`-param question — it is a vestigial
+  `pyspark.ml.clustering.LDA` compat-mirror (online-only, rejects `em`) that
+  PC/Gated correctly omit, not a PC gap.
+
+### Corrected in the record
+
+- The head non-convergence under one-step SGD is an **empirical** finding with a
+  two-timescale-stochastic-approximation rationale, not "provably" non-convergent;
+  ADR 0039 / insight 0065 phrased accordingly.
+
+### Verification
+
+`pyspark 3.5.9` is pip-installable in-container (Java 21 present; `local[*]`
+SparkSession runs), so the full PC suite was executed here, not just parse-checked:
+model + newton + FD grad-checks, increment-1 equivalence, 27 shim/persistence/
+warm-start, 76 driver/vi-backend/run_experiment — all green post-rename.
+
+### Parked (deferred, recorded in the review plan)
+
+- **Separate `aggregate` from `scale-to-corpus` in `VIRunner`** — the runner scales
+  every stat by `corpus/batch` unconditionally and hands `update_global` only the
+  scaled dict, so non-conjugate consumers must rely on cancellation (Newton) or undo
+  it (`inv_n`); a cleaner contract would pass `(raw_stats, batch, corpus)`. Option A
+  (all 6 models self-scale, supersede ADR 0005, high blast radius) vs Option B
+  (contained per-key opt-out). No correctness fire; clarity/future-proofing only.
+- **Drop the vestigial `optimizer` compat-mirror from LDA/HDP** (touches shared,
+  tested shims).
+- **GatedLDA persistence** (`_PersistableModel`/`_PersistenceParams` — currently
+  absent, self-labeled "v1") and **STM MLlib conformance** (bespoke class + own
+  save/load) — both held out of scope by decision.
+- **Covariate-adjusted PC head** (`logits = w_CK·θ + w_cov·x`) — an extension
+  *beyond* Hughes (his head reads π only, so the no-`covariatesCol` input is
+  faithful, not a gap); build only if a study (Mondo) needs to confounder-adjust.
+- **PC export/dashboard machinery** and the **head-convergence ceiling** (head
+  plateaus below the batch-LR ceiling when topics don't converge in-budget;
+  Polyak-average/more-iters refinement, insight 0065).
+
+### Docs changed
+
+ADR 0039 (adam removed, shim rename, "provably" wording); the review plan
+(`docs/superpowers/plans/2026-08-11-pc-walkthrough-review-plan.md`, parked threads).
+
+---
+
 ## 2026-07-16..24 — case-finding branch pre-merge review (7-lesson walkthrough) + the alpha / explain-away / n_bg / reverse-topo / LR-FDR mini-arc
 
 Pre-merge review of the unmerged `case-finding` branch — the ontology/DAG placement
