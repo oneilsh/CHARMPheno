@@ -5,7 +5,7 @@ Context
 On AoU ``mdd_stable_treatment`` the joint SVI logistic head (the "PC" row) scored
 macro-AUC ~0.52, while a fresh LogisticRegression on the *same* converged topic
 proportions (``pc_topics_lr``) scored ~0.615. Both are applied to the identical
-``model.transform`` topicDistribution (see ``PCModel._transform``:
+``model.transform`` topicDistribution (see ``OnlinePCLDAModel._transform``:
 ``proba = sigmoid(w_CK . theta)`` on the same ``theta`` column the LR reads), so the
 gap is purely ``w_CK`` (co-fit) vs a refit LR.
 

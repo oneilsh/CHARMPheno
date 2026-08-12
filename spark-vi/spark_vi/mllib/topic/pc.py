@@ -90,8 +90,8 @@ def _row_to_pc_document(
     )
 
 
-class _PCParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
-    """Shared Param surface for PCEstimator and PCModel.
+class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
+    """Shared Param surface for OnlinePCLDAEstimator and OnlinePCLDAModel.
 
     The LDA param subset (k, topicDistributionCol, the SVI schedule knobs, the
     Dirichlet concentrations, the CAVI knobs) mirrors ``_OnlineLDAParams``; on
@@ -263,7 +263,7 @@ class _PCParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
 
 
 def _build_model_and_config(
-    estimator: "PCEstimator", vocab_size: int,
+    estimator: "OnlinePCLDAEstimator", vocab_size: int,
 ) -> tuple[OnlinePCLDA, VIConfig]:
     """Translate Estimator Params into (OnlinePCLDA, VIConfig).
 
@@ -328,7 +328,7 @@ def _build_model_and_config(
     return model, config
 
 
-_PC_DEFAULTS = dict(
+_ONLINE_PCLDA_DEFAULTS = dict(
     k=10, maxIter=20,
     featuresCol="features", topicDistributionCol="topicDistribution",
     learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05,
@@ -341,7 +341,7 @@ _PC_DEFAULTS = dict(
 )
 
 
-class PCEstimator(_PCParams, Estimator):
+class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
     """MLlib-shaped Estimator wrapping ``spark_vi.models.topic.pc.OnlinePCLDA``.
 
     Param defaults mirror the LDA shim for the shared subset. ``weightY``
@@ -391,7 +391,7 @@ class PCEstimator(_PCParams, Estimator):
         resumeFrom: str = "",
     ) -> None:
         super().__init__()
-        self._setDefault(**_PC_DEFAULTS)
+        self._setDefault(**_ONLINE_PCLDA_DEFAULTS)
         self._set_persistence_defaults()
         # Diagnostic-only per-iteration callback (mirrors OnlineLDAEstimator).
         # Stored as an instance attribute — callables aren't MLlib-serializable
@@ -400,12 +400,12 @@ class PCEstimator(_PCParams, Estimator):
         self.setParams(**self._input_kwargs)
 
     @keyword_only
-    def setParams(self, **kwargs) -> "PCEstimator":
+    def setParams(self, **kwargs) -> "OnlinePCLDAEstimator":
         return self._set(**kwargs)
 
     def setOnIteration(
         self, fn: Callable[[int, dict, list[float]], None] | None,
-    ) -> "PCEstimator":
+    ) -> "OnlinePCLDAEstimator":
         """Register a per-iteration diagnostic callback for the next fit.
 
         Signature fn(iter_num, global_params, elbo_trace); runs on the driver in
@@ -414,7 +414,7 @@ class PCEstimator(_PCParams, Estimator):
         self._on_iteration = fn
         return self
 
-    def _fit(self, dataset) -> "PCModel":
+    def _fit(self, dataset) -> "OnlinePCLDAModel":
         from spark_vi.core.runner import VIRunner
 
         weight_y = float(self.getOrDefault("weightY"))
@@ -496,7 +496,7 @@ class PCEstimator(_PCParams, Estimator):
         finally:
             pc_rdd.unpersist(blocking=False)
 
-        out_model = PCModel(result)
+        out_model = OnlinePCLDAModel(result)
         for param in self.params:
             if self.isSet(param):
                 out_model._set(**{param.name: self.getOrDefault(param)})
@@ -505,7 +505,7 @@ class PCEstimator(_PCParams, Estimator):
         return out_model
 
 
-class PCModel(_PCParams, _PersistableModel, Model):
+class OnlinePCLDAModel(_OnlinePCLDAParams, _PersistableModel, Model):
     """MLlib-shaped Model wrapping a trained OnlinePCLDA VIResult.
 
     ``transform`` appends the label-free ``topicDistributionCol`` (theta) via
@@ -528,7 +528,7 @@ class PCModel(_PCParams, _PersistableModel, Model):
     def __init__(self, result) -> None:  # result: VIResult
         super().__init__()
         self._result = result
-        self._setDefault(**_PC_DEFAULTS)
+        self._setDefault(**_ONLINE_PCLDA_DEFAULTS)
         self._set_persistence_defaults()
 
     @property
@@ -548,6 +548,64 @@ class PCModel(_PCParams, _PersistableModel, Model):
         beta = lam / lam.sum(axis=1, keepdims=True)
         K, V = beta.shape
         return DenseMatrix(numRows=V, numCols=K, values=beta.T.flatten("F").tolist())
+
+    def trainedAlpha(self) -> np.ndarray:
+        """Trained α vector (length K) — the doc-topic Dirichlet concentration.
+
+        Empirical-Bayes optimum when ``optimizeDocConcentration=True``, else the
+        constructor input (broadcast to length K). Parity with ``OnlineLDAModel``;
+        the α lives on the same LDA delegate the PC model wraps. Method (not
+        @property) to avoid colliding with the ``docConcentration`` Param descriptor
+        — see ADR 0012 §"Trained-scalar accessors".
+        """
+        return self._result.global_params["alpha"]
+
+    def trainedTopicConcentration(self) -> float:
+        """Trained η scalar — the topic-word Dirichlet concentration.
+
+        Empirical-Bayes optimum when ``optimizeTopicConcentration=True``, else the
+        initial η. Parity with ``OnlineLDAModel``; method (not @property) to avoid
+        colliding with the same-named Param descriptor (ADR 0012)."""
+        return float(self._result.global_params["eta"])
+
+    def describeTopics(self, maxTermsPerTopic: int = 10):
+        """DataFrame of (topic, termIndices, termWeights) — top terms per topic.
+
+        Identical schema/orientation to ``OnlineLDAModel.describeTopics`` (and
+        ``pyspark.ml.clustering.LDAModel.describeTopics``): the PC topics are a
+        row-normalized λ exactly as in unsupervised LDA — the ``weight_y`` shaping
+        changes *which* topics are learned, not how they are read out. The natural
+        way to inspect PC's supervised topics (e.g. the disease-carrying topic in a
+        rare-disease fit).
+        """
+        from pyspark.sql import SparkSession
+        from pyspark.sql.types import (
+            ArrayType, DoubleType, IntegerType, StructField, StructType,
+        )
+
+        if maxTermsPerTopic < 1:
+            raise ValueError(f"maxTermsPerTopic must be >= 1, got {maxTermsPerTopic}")
+
+        lam = self._result.global_params["lambda"]
+        beta = lam / lam.sum(axis=1, keepdims=True)  # (K, V), row-stochastic
+        K, V = beta.shape
+        m = min(maxTermsPerTopic, V)
+
+        rows = []
+        for k in range(K):
+            order = np.argsort(beta[k])[::-1][:m]
+            rows.append((
+                int(k),
+                [int(i) for i in order],
+                [float(beta[k, i]) for i in order],
+            ))
+
+        schema = StructType([
+            StructField("topic", IntegerType(), False),
+            StructField("termIndices", ArrayType(IntegerType(), False), False),
+            StructField("termWeights", ArrayType(DoubleType(), False), False),
+        ])
+        return SparkSession.builder.getOrCreate().createDataFrame(rows, schema=schema)
 
     def headWeights(self) -> np.ndarray:
         """The logistic head w_CK (C x K). All-zero after an increment-1 fit
@@ -638,3 +696,27 @@ class PCModel(_PCParams, _PersistableModel, Model):
                 "unsupervised head is at its zero seed (P == 0.5 everywhere)."
             )
         return self.transform(dataset)
+
+    def logLikelihood(self, dataset):
+        """Not implemented in this v1 shim (parity with ``OnlineLDAModel``).
+
+        The training-time ELBO trace is available on the underlying VIResult via
+        ``OnlinePCLDAModel.result.elbo_trace`` (the unsupervised LDA bound; the
+        supervised NLL is a penalty on the globals, not part of the reported bound).
+        """
+        raise NotImplementedError(
+            "logLikelihood is not implemented in this v1 shim. The training-time "
+            "ELBO trace is available on the underlying VIResult via "
+            "OnlinePCLDAModel.result.elbo_trace."
+        )
+
+    def logPerplexity(self, dataset):
+        """Not implemented in this v1 shim (parity with ``OnlineLDAModel``).
+
+        See ``logLikelihood``; use ``result.elbo_trace`` for the training-time bound.
+        """
+        raise NotImplementedError(
+            "logPerplexity is not implemented in this v1 shim. The training-time "
+            "ELBO trace is available on the underlying VIResult via "
+            "OnlinePCLDAModel.result.elbo_trace."
+        )

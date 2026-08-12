@@ -10,7 +10,7 @@ Covers the pieces the ``--backend vi`` path adds, on the local Spark fixture
     and partition-independent.
   * ``--backend`` + SVI-knob argparse plumbing (Spark-free).
   * ``_log_convergence`` — the fit-health passthrough for both backends.
-  * A tiny end-to-end ``PCEstimator.fit(...).transform(...)`` smoke on a synthetic
+  * A tiny end-to-end ``OnlinePCLDAEstimator.fit(...).transform(...)`` smoke on a synthetic
     labeled BOW DataFrame: proves the driver's VI wiring (ArrayType label columns,
     numLabels=C, probabilityCol, collect back to numpy) is type-correct. The real
     BigQuery run is the user's (``make exp ID=71``).
@@ -73,7 +73,7 @@ def test_attach_label_columns_matches_numpy_assembler(spark):
 
 
 def test_attach_label_columns_are_array_not_vector_type(spark):
-    # The PCEstimator shim reads the label with isinstance(raw, (list,tuple,ndarray))
+    # The OnlinePCLDAEstimator shim reads the label with isinstance(raw, (list,tuple,ndarray))
     # and wraps a miss (e.g. a DenseVector) to a wrong (1,C) shape — so the columns
     # MUST be ArrayType, which deserializes to a Python list.
     from pyspark.sql.types import ArrayType, DoubleType
@@ -223,12 +223,12 @@ def test_log_convergence_vi_line(capsys):
 
 
 # --------------------------------------------------------------------------- #
-# End-to-end smoke: PCEstimator.fit -> transform on a synthetic labeled BOW    #
+# End-to-end smoke: OnlinePCLDAEstimator.fit -> transform on a synthetic labeled BOW    #
 # --------------------------------------------------------------------------- #
 def test_vi_fit_transform_smoke(spark):
     pytest.importorskip("spark_vi")
     pytest.importorskip("autograd")
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
     V, C = 6, 2
     drug_order = ["a", "b"]
@@ -245,7 +245,7 @@ def test_vi_fit_transform_smoke(spark):
     bow_df = _bow_df(spark, feats, V)
     labeled = drv.attach_multitask_label_columns(bow_df, outcome, drug_order, spark)
     # Tiny fit: full-batch SVI, few iters — a wiring smoke, not a convergence test.
-    est = PCEstimator(
+    est = OnlinePCLDAEstimator(
         featuresCol="features", labelCol="y", labelMaskCol="label_mask",
         numLabels=C, weightY=1.0, k=3, docConcentration=[1.1],
         subsamplingRate=1.0, learningOffset=16.0, learningDecay=0.6,
@@ -266,7 +266,7 @@ def test_vi_fit_transform_smoke(spark):
 
 
 # --------------------------------------------------------------------------- #
-# Distributed-SVI two-stage baseline (option B): PCEstimator(weightY=0) topics #
+# Distributed-SVI two-stage baseline (option B): OnlinePCLDAEstimator(weightY=0) topics #
 # -> per-label LR, collected via _collect_topics_labels (no dense BOW).        #
 # --------------------------------------------------------------------------- #
 def _args_ns(**over):
@@ -283,7 +283,7 @@ def _args_ns(**over):
 def test_collect_topics_labels_shapes(spark):
     pytest.importorskip("spark_vi")
     pytest.importorskip("autograd")
-    from spark_vi.mllib.topic.pc import PCEstimator
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
 
     V, C = 6, 2
     drug_order = ["a", "b"]
@@ -295,7 +295,7 @@ def test_collect_topics_labels_shapes(spark):
         outcome[pid] = (drug_order[pid % 2], bool(pid % 4 < 2))
     labeled = drv.attach_multitask_label_columns(
         _bow_df(spark, feats, V), outcome, drug_order, spark)
-    est = PCEstimator(
+    est = OnlinePCLDAEstimator(
         featuresCol="features", labelCol="y", labelMaskCol="label_mask",
         numLabels=C, weightY=0.0, k=3, docConcentration=[1.1],
         subsamplingRate=1.0, learningOffset=16.0, learningDecay=0.6,
