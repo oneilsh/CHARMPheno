@@ -101,13 +101,21 @@ def main():
         drift = np.linalg.norm(th_te - th_te10, axis=1).mean()
         print(f"mean ||theta_100it - theta_10it|| on test: {drift:.3f}", flush=True)
 
-        # === THE LAG TEST: freeze topics, keep stepping the head's OWN Newton update ===
-        # If the co-fit head only failed because theta was moving, then with theta frozen
-        # its cosine to the optimal direction should climb 0.64 -> ~1 and AUC 0.65 -> ~0.965,
-        # using the SAME head machinery and the SAME 30% masked labels.
-        from spark_vi.models.topic.pc import FlatLogisticHead
-        hd = FlatLogisticHead()
-        Kf, gci = h.K_FIT, 10
+        # === REPAIR TEST: freeze topics; contrast RELATIVE ridge (shipped) vs FIXED L2 ===
+        # Fully controlled: the head Newton runs analytically on the SAME frozen 100-iter
+        # theta and the SAME 30% masked labels sklearn's LR used (removes the theta-rep and
+        # autograd confounds). Only remaining diffs from sklearn: no intercept, ridge type,
+        # solver. If FIXED-L2 Newton climbs to ~0.965, the head is repairable and the
+        # relative ridge (which vanishes on separable data) was the culprit.
+        Kf = h.K_FIT
+        Th_tr, Th_te = th_tr, th_te                          # frozen label-free theta
+
+        def gH(W):                                           # analytic logistic grad + Fisher
+            P = 1.0 / (1.0 + np.exp(-np.clip(Th_tr @ W.T, -50, 50)))     # (n_tr, C)
+            g = (Mtr * (P - Ytr)).T @ Th_tr                              # (C, K), observed cells
+            Wt = Mtr * P * (1.0 - P)
+            H = np.stack([(Th_tr * Wt[:, c:c + 1]).T @ Th_tr for c in range(h.C)])
+            return g, H
 
         def cos_lr(W):
             cs = []
@@ -119,22 +127,34 @@ def main():
             return float(np.mean(cs))
 
         def head_te(W):
-            S = np.array([_predict_proba_np(t, W, None) for t in th_te])
+            S = 1.0 / (1.0 + np.exp(-np.clip(Th_te @ W.T, -50, 50)))
             return m({l: roc_auc_score(Yte[:, l], S[:, l]) for l in nodes
                       if 0 < Yte[:, l].sum() < len(Yte)})
 
-        wf = w.copy()
-        print("\nLAG TEST — freeze topics, keep stepping the head's Newton (from co-fit head):", flush=True)
-        print(f"  step  0 (co-fit): cos={cos_lr(wf):+.3f}  headAUC={head_te(wf):.3f}", flush=True)
-        for step in range(1, 16):
-            _, _, g = hd.batch_value_and_grad(eb, wf, tr, alpha, Kf, gci)
-            H = hd.batch_hessian(eb, wf, tr, alpha, Kf, gci)
-            for c in range(h.C):
-                Hc = H[c]
-                ridge = 0.01 * (float(np.trace(Hc)) / Kf) + 1e-10
-                wf[c] = wf[c] - np.linalg.solve(Hc + ridge * np.eye(Kf), g[c] + ridge * wf[c])
-            if step in (1, 2, 3, 5, 8, 12, 15):
-                print(f"  step {step:2d}: cos={cos_lr(wf):+.3f}  headAUC={head_te(wf):.3f}", flush=True)
+        def run_newton(w0, ridge_of, n=12, head_lr=1.0):
+            wf = w0.copy()
+            out = [(0, cos_lr(wf), head_te(wf))]
+            for step in range(1, n + 1):
+                g, H = gH(wf)
+                for c in range(h.C):
+                    Hc = H[c]; r = ridge_of(Hc)
+                    wf[c] = wf[c] - head_lr * np.linalg.solve(
+                        Hc + r * np.eye(Kf), g[c] + r * wf[c])
+                out.append((step, cos_lr(wf), head_te(wf)))
+            return out
+
+        def show(title, traj, steps=(0, 1, 2, 3, 6, 12)):
+            print(title, flush=True)
+            for s, c, a in traj:
+                if s in steps:
+                    print(f"  step {s:2d}: cos={c:+.3f}  headAUC={a:.3f}", flush=True)
+
+        print("\n(sklearn posthoc-LR ceiling on this theta: %.3f)" % m(lr_te), flush=True)
+        show("REPAIR A — RELATIVE ridge 0.01*mean(diagH) (as shipped), from co-fit head:",
+             run_newton(w, lambda Hc: 0.01 * (float(np.trace(Hc)) / Kf) + 1e-10))
+        for lam2 in (0.3, 1.0, 3.0):
+            show(f"REPAIR B — FIXED L2 ridge={lam2} (sklearn-style), from zero:",
+                 run_newton(np.zeros((h.C, Kf)), lambda Hc, L=lam2: L))
     finally:
         spark.stop()
 
