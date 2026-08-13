@@ -95,12 +95,13 @@ def to_docs(X, Y, mask):
     return docs
 
 
-def fit(spark, docs, V, *, weight_y, head, head_l2=0.0):
+def fit(spark, docs, V, *, weight_y, head, head_l2=0.0, head_inner_iters=0):
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.topic.pc import OnlinePCLDA
     model = OnlinePCLDA(K=K_FIT, vocab_size=V, C=C, weight_y=weight_y, alpha=1.05,
                         grad_cavi_iters=10, random_seed=0, head_optimizer="newton",
-                        head_lr=0.7, weight_y_warmup_iters=10, head_l2=head_l2, head=head)
+                        head_lr=0.7, weight_y_warmup_iters=10, head_l2=head_l2,
+                        head_inner_iters=head_inner_iters, head=head)
     cfg = VIConfig(max_iterations=MAX_ITERS, learning_rate_tau0=64.0,
                    learning_rate_kappa=0.6, random_seed=0, convergence_tol=1e-12)
     rdd = spark.sparkContext.parallelize(docs, numSlices=8).persist()
@@ -198,17 +199,20 @@ def main():
         # spot exists; if topics-LR dies at ANY l2>0, the head genuinely can't shape while
         # regularized.
         unsup_lr = _mean(auc_table(Yte, S_uns_m, nodes), nodes)
-        print(f"\nhead_l2 sweep (unsup posthoc-LR baseline={unsup_lr:.3f}):", flush=True)
-        for l2 in (0.0, 1e-6, 1e-5, 1e-4, 5e-4):
-            mB, gpB = fit(spark, tr, V, weight_y=WEIGHT_Y, head=None, head_l2=l2)
+        print(f"\nhead configs — co-fit HEAD vs topics-LR (unsup posthoc-LR={unsup_lr:.3f}):", flush=True)
+        configs = [("one-step l2=0", 0.0, 0),
+                   ("one-step l2=1e-3", 1e-3, 0),
+                   ("INNER k=10 l2=1e-3", 1e-3, 10),
+                   ("INNER k=25 l2=1e-3", 1e-3, 25)]
+        for name, l2, k in configs:
+            mB, gpB = fit(spark, tr, V, weight_y=WEIGHT_Y, head=None, head_l2=l2, head_inner_iters=k)
             thB = thetas(mB, te, gpB)
             hd = _mean(auc_table(Yte, np.array([_predict_proba_np(t, gpB["w_CK"], None)
                                                 for t in thB]), nodes), nodes)
             tl = _mean(auc_table(Yte, posthoc_scores(mB, gpB, tr, te, Ytr, nodes, mask=Mtr),
                                  nodes), nodes)
             wmax = float(np.abs(gpB["w_CK"]).max())
-            print(f"  l2={l2:<6g}  HEAD={hd:.3f}  topics-LR(shaping)={tl:.3f}  |w_CK|max={wmax:.2f}",
-                  flush=True)
+            print(f"  {name:<20} HEAD={hd:.3f}  topics-LR={tl:.3f}  |w|max={wmax:.3g}", flush=True)
     finally:
         spark.stop()
 
