@@ -26,13 +26,23 @@ def main():
     beta, usage = d["beta"], d["usage_pct"]
     rng = np.random.default_rng(h.SEED)
     X, Y, mask = h.make_corpus(rng, beta, usage)
-    used = np.nonzero(X.sum(0))[0]                    # trim to concepts actually emitted
-    X = X[:, used]
-    n_te = int(h.TEST_FRAC * h.D)
+    # Reduce scale so the exact (slow) reference L-BFGS is tractable: subsample docs and
+    # trim vocab to the top-frequency concepts. The head-optimizer conclusion is the GAP
+    # between the reference's co-fit head and its OWN topics-LR (should be ~0 if
+    # convergence is what closes it), which is scale-robust.
+    DMAX, VMAX = 1200, 3000
+    if h.D > DMAX:
+        X, Y, mask = X[:DMAX], Y[:DMAX], mask[:DMAX]
+    D = X.shape[0]
+    freq = X.sum(0)
+    keep = np.argsort(freq)[::-1][:VMAX]
+    keep = keep[freq[keep] > 0]
+    X = X[:, np.sort(keep)]
+    n_te = int(h.TEST_FRAC * D)
     Xtr, Xte = X[:-n_te], X[-n_te:]
     Ytr, Yte, Mtr = Y[:-n_te], Y[-n_te:], mask[:-n_te]
     nodes = list(range(1, h.C))
-    print(f"corpus D={h.D} V(used)={X.shape[1]} K={h.K_FIT} C={h.C} weight_y={h.WEIGHT_Y}", flush=True)
+    print(f"corpus D={D} V(trim)={X.shape[1]} K={h.K_FIT} C={h.C} weight_y={h.WEIGHT_Y}", flush=True)
 
     ref = PCTopicModel(K=h.K_FIT, C=h.C, weight_y=h.WEIGHT_Y, alpha=1.05,
                        lambda_w=0.001, max_iter=150, doc_batch_size=128, seed=0)
