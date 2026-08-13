@@ -17,7 +17,9 @@ vocab_size: 5000
 min_df: 20
 min_patient_count: 20
 window_mode: lookback
-lookback_days: 365
+lookback_days: 1825      # 5yr feature history (run 3): run 2's 1yr window starved
+                         # K=170 (Σλ_k min ~31). Richer BOW → more mass to support
+                         # the node topics + a fairer hidden-low-mass test.
 label_window_days: 365
 strip_mode: both
 # per-node label observation policy (Step-A adapter). 'full' = every node
@@ -40,10 +42,13 @@ head_lr: 0.3             # DAMPED (insight 0075): 0.5 oscillated (|w_CK| bounced
 head_newton_ridge: 0.05  # 0.01→0.05: regularize the near-singular per-minibatch
                          # H_c that spikes the IRLS solve (only stabilizes it;
                          # AUC is scale-invariant to head magnitude).
-head_l2: 0.001           # ABSOLUTE ridge = Hughes lambda_w (ADR 0041). 0.0 blows
-                         # up on the separable topics PC creates. A LARGE |w_CK|
-                         # here (~1e3-1e4) is expected at this weak ridge — the
-                         # OSCILLATION was the problem, not the magnitude.
+head_l2: 0.01            # ABSOLUTE ridge = Hughes lambda_w (ADR 0041). Run 2 used
+                         # 1e-3 and the head BLEW UP at iter ~151 (|w_CK| 45→1.25e6
+                         # in 5 iters) once the converged gated topics went ~separable
+                         # — 1e-3 is too weak to bound the singular-minibatch IRLS
+                         # step there. 1e-2 (strong end of the recalibration's good
+                         # basin ~1e-4..1e-2) caps |w| ~10x tighter; combined with the
+                         # 100-iter cap (blow-up hit at 151) this should stay bounded.
 grad_cavi_iters: 30      # differentiable CAVI unroll depth; must match scoring
                          # convergence (cavi_max_iter=100). 30 suffices for the
                          # short lookback docs (deeper = bigger autograd tape).
@@ -54,7 +59,8 @@ topic_trust: 0.05        # 0.1→0.05: run 1's Σλ_k max blew up 4.6e4→6.2e5 
 weight_y_warmup_iters: 25  # 10→25: run 1 spiked at iter 11 the moment full
                          # weight_y engaged; a longer ramp softens the onset.
 # --- SVI schedule (comparable to 0065 / the pc-vi runs) -----------------------
-max_iter: 200
+max_iter: 100            # run 3: ~95% of the signal by 100 iters (run 2's ELBO
+                         # was well into diminishing returns); halves wall-clock.
 subsampling_rate: 0.1
 tau0: 64.0               # RM offset; on smaller cohorts ~10-64 so the head moves.
 kappa: 0.51
@@ -145,6 +151,19 @@ work immediately instead of being starved by cache-locality on the original node
 Fit-only (skip the self-contained result's implicit eval step):
 `make -C analysis/cloud exp ID=76 NO_EVAL=1`.
 
+**Full case-finding readout from a FINISHED run** (no re-fit — reconstructs the
+model from the saved globals, reloads the cached bundle, and prints pc_topics_lr +
+precision@recall / recall@FDR / detection for the gated_pc arm):
+
+```bash
+make -C analysis/cloud gated-pc-readout ID=76 GPR_DOC_MIN_LENGTH=10
+```
+
+`GPR_DOC_MIN_LENGTH=10` is only needed for runs whose manifest predates the
+doc_min_length record (run 2); the current driver records it, so later runs need
+just `ID=76`. `GPR_CACHE_URI` defaults to the HDFS bundle cache; override it (or
+pass `GPR_ARGS="--bundle-path <cache_uri>/<key>"`) if the key misses.
+
 ## Run log
 
 ### Run 1 (2026-08-13) — head oscillated + Σλ blow-up; retuned to damped head
@@ -184,16 +203,26 @@ ELBO smooth despite the 10% minibatch (−7.7M → −3.6M by iter 78).
   under the sparse LDA prior with K > what short 1yr docs support (SO's call) — not
   degenerate drift. `Σλ_k max` stable ~5.8e5.
 
-_(pc_topics_lr headline pending run completion.)_
+- **Head BLEW UP late (iter ~151):** after ~150 stable iters `|w_CK|` ran away
+  45 → 726 → 4540 → 1.17e5 → 3.48e5 → **1.25e6**, and the ELBO stopped improving /
+  started bouncing. Cause: the converged gated topics went ~separable, the per-node
+  logistic MLE → ∞, and `head_l2=1e-3` was too weak to bound the singular-minibatch
+  IRLS step. `Σλ_k` stayed flat (topic_trust held the TOPICS), so `pc_topics_lr`
+  should survive but the co-fit head readout is garbage (saturated at |w|=1e6).
 
-## Follow-ups (next run)
+_(pc_topics_lr headline: read from the finished run via `make gated-pc-readout` —
+see How to run. The co-fit-head numbers are void for this run due to the blow-up.)_
+
+## Follow-ups (next run = run 3, this config)
 
 - **Extend the feature history beyond 1 year** (`lookback_days: 365 → 1825`, 5yr):
   richer per-doc BOW → more mass to support K=170, and a fairer test of whether the
   rare phenotype is a hidden-low-mass signal. The short 1yr window is likely
-  starving the node topics (Σλ_k min ~31). This is the main lever for run 3.
-- **(optional) Head step-norm clamp.** If the transient `|w_CK|` spikes (→286) ever
-  visibly perturb the topic correction, add a trust-region cap on the per-iteration
-  Newton head step (analogous to `topic_trust` on the topic side) so a single
-  near-singular minibatch can't take a giant step. Not needed unless the headline
-  suffers — the spikes currently recover on their own.
+  starving the node topics (Σλ_k min ~31). ✅ set for run 3.
+- **Raise `head_l2` 1e-3 → 1e-2 + cap at 100 iters** to prevent the late-iter head
+  blow-up. ✅ set for run 3.
+- **(durable fix, if run 3 still misbehaves) Head trust-region clamp.** The topic
+  side has `topic_trust` (working — Σλ stable); the head side has only ridge+damping
+  and blew up. The symmetric fix is a per-iteration cap on the Newton head step
+  (clamp ‖Δw‖ to a fraction of ‖w‖, or an absolute bound) in `OnlinePCLDA` — an
+  engine change, so deferred to a validated follow-up rather than bolted on mid-run.

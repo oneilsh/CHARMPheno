@@ -62,6 +62,169 @@ def pc_topics_lr_bundle(Pi_tr, y_tr, mask_tr, Pi_te, y_te, mask_te, C,
     return _bundle_masked(proba, y_te, mask_te, C, min_count)
 
 
+def precision_at_recall(y, p, targets):
+    """Max precision achievable at recall >= each target (the case-finding operating
+    point: 'if we must catch t% of true cases, how clean is the surfaced list?').
+    NaN for a degenerate (single-class) column. Pure numpy + sklearn."""
+    from sklearn.metrics import precision_recall_curve
+    y = np.asarray(y, float); p = np.asarray(p, float)
+    if len(np.unique(y)) < 2:
+        return {t: float("nan") for t in targets}
+    prec, rec, _ = precision_recall_curve(y, p)
+    out = {}
+    for t in targets:
+        m = rec >= t
+        out[float(t)] = float(np.max(prec[m])) if np.any(m) else float("nan")
+    return out
+
+
+def recall_at_fdr(y, p, targets):
+    """Max recall achievable while holding the false-discovery rate <= each q
+    (FDR = 1 - precision): 'at a q% junk tolerance, what fraction of true cases do
+    we recover?'. The FDR-controlled discovery view (insight 0064: ranking AUC !=
+    FDR-controlled discovery — report both). 0.0 if no threshold meets the bound."""
+    from sklearn.metrics import precision_recall_curve
+    y = np.asarray(y, float); p = np.asarray(p, float)
+    if len(np.unique(y)) < 2:
+        return {q: float("nan") for q in targets}
+    prec, rec, _ = precision_recall_curve(y, p)
+    out = {}
+    for q in targets:
+        m = prec >= (1.0 - q)
+        out[float(q)] = float(np.max(rec[m])) if np.any(m) else 0.0
+    return out
+
+
+def pr_readout(proba_DC, y_DC, mask_DC, C, recall_targets, fdr_targets, min_count=0):
+    """Per-node precision@recall + recall@FDR over observed test cells, macro'd over
+    the non-degenerate nodes. The case-finding complement to the ranking AUC/AP: it
+    answers 'at a usable operating point, how clean / how complete is each disease
+    node's surfaced cohort?'. Pure; feeds off the same per-node proba as pc_topics_lr."""
+    per = {}
+    for c in range(C):
+        rows = np.where(mask_DC[:, c].astype(bool))[0]
+        yc, pc = y_DC[rows, c], proba_DC[rows, c]
+        n_pos, n_neg = int(yc.sum()), int(len(yc) - yc.sum())
+        if n_pos < max(min_count, 1) or n_neg < max(min_count, 1):
+            per[c] = {"skipped": True, "n_pos": n_pos, "n_neg": n_neg}
+            continue
+        per[c] = {"skipped": False, "n_pos": n_pos, "n_neg": n_neg,
+                  "par": precision_at_recall(yc, pc, recall_targets),
+                  "raf": recall_at_fdr(yc, pc, fdr_targets)}
+    scored = [d for d in per.values() if not d["skipped"]]
+
+    def _mean(vals):
+        vals = [v for v in vals if v == v]                 # drop NaN
+        return float(np.mean(vals)) if vals else None
+
+    macro = {
+        "n_scored": len(scored),
+        "par": {float(t): _mean([d["par"][float(t)] for d in scored])
+                for t in recall_targets},
+        "raf": {float(q): _mean([d["raf"][float(q)] for d in scored])
+                for q in fdr_targets},
+    }
+    return {"per_node": per, "macro": macro}
+
+
+def detection_readout(proba_DC, y_DC, recall_targets):
+    """Case-vs-background detection: pool a per-doc case SCORE = max over disease-node
+    probabilities and the foreground indicator = the root node's label (label[:,0]=1
+    iff the doc has any attested disease node). Reports AUC/AP + precision@recall on
+    that pooled signal — 'can we tell a rare-disease patient from a background one,
+    and how precise is the surfaced case list?'. Empty/degenerate -> skipped."""
+    from sklearn.metrics import average_precision_score, roc_auc_score
+    if proba_DC.shape[0] == 0 or proba_DC.shape[1] < 2:
+        return {"skipped": "empty or single-node"}
+    y = np.asarray(y_DC[:, 0], float)                       # root = any-disease
+    score = proba_DC[:, 1:].max(axis=1)                     # strongest disease node
+    if len(np.unique(y)) < 2:
+        return {"skipped": "degenerate foreground indicator"}
+    return {"skipped": None, "prevalence": float(y.mean()),
+            "auc": float(roc_auc_score(y, score)),
+            "ap": float(average_precision_score(y, score)),
+            "par": precision_at_recall(y, score, recall_targets)}
+
+
+def readout_from_proba(proba, y_te, m_te, C, *, recall_targets, fdr_targets,
+                       min_count=0):
+    """Full readout from an already-computed (N_te, C) per-node probability:
+    ranking (AUC/AP) + per-node precision@recall / recall@FDR + case-vs-background
+    detection. Shared by the pc_topics_lr arm (proba = post-hoc LR on theta) and the
+    co-fit head arm (proba = sigmoid(w_CK·theta))."""
+    from analysis.pc.evaluate import _bundle_masked
+    ranking = _bundle_masked(proba, y_te, m_te, C, min_count)
+    pr = pr_readout(proba, y_te, m_te, C, recall_targets, fdr_targets, min_count)
+    det = detection_readout(proba, y_te, recall_targets)
+    return {"ranking": ranking["macro"], "pr": pr["macro"], "detection": det}
+
+
+def score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, *, recall_targets,
+              fdr_targets, min_count=0):
+    """Full readout for one arm's theta via the pc_topics_lr proba (a fresh per-node
+    LR on the shaped theta). Pure; used inline by the driver and by gated_pc_readout
+    on a finished fit."""
+    from analysis.pc.evaluate import _lr_proba_per_label_masked
+    proba = _lr_proba_per_label_masked(Pi_tr, y_tr, m_tr, Pi_te, C)
+    return readout_from_proba(proba, y_te, m_te, C, recall_targets=recall_targets,
+                              fdr_targets=fdr_targets, min_count=min_count)
+
+
+def format_arm_readout(name, arm):
+    """Render one arm's score_arm() result as driver log lines (ranking + PR@recall +
+    recall@FDR + detection)."""
+    r, pr, det = arm["ranking"], arm["pr"], arm["detection"]
+    auc = "n/a" if r["auc"] is None else f"{r['auc']:.4f}"
+    ap = "n/a" if r["ap"] is None else f"{r['ap']:.4f}"
+    par = " ".join(f"P@R{t:g}={('n/a' if v is None else f'{v:.3f}')}"
+                   for t, v in sorted(pr["par"].items()))
+    raf = " ".join(f"R@FDR{q:g}={('n/a' if v is None else f'{v:.3f}')}"
+                   for q, v in sorted(pr["raf"].items()))
+    lines = [f"{name}: macro AUC={auc} AP={ap} (over {r['n_labels_scored']} nodes)",
+             f"{name}: node-macro {par}  {raf}"]
+    if det.get("skipped"):
+        lines.append(f"{name}: detection skipped ({det['skipped']})")
+    else:
+        dpar = " ".join(f"P@R{t:g}={('n/a' if v != v else f'{v:.3f}')}"
+                        for t, v in sorted(det["par"].items()))
+        lines.append(f"{name}: detection (case vs bg) AUC={det['auc']:.4f} "
+                     f"AP={det['ap']:.4f} prev={det['prevalence']:.3f}  {dpar}")
+    return "\n".join("[driver]   " + ln for ln in lines)
+
+
+def _print_headline(results):
+    """The one-glance comparison: gated_pc vs unsup_gated on the numbers that matter
+    for a rare-disease surface — ranking (AUC/AP) AND the case-finding operating
+    points (detection AP, node-macro precision@0.9-recall). A positive delta in the
+    hidden-low-mass regime is the thesis (insight 0066); AUC alone is optimistic
+    under low prevalence, so AP / P@R are the honest case-finding read (insight 0064)."""
+    g = results.get("gated_pc"); u = results.get("unsup_gated")
+    if not (g and u):
+        return
+
+    def _d(a, b):
+        if a is None or b is None:
+            return "n/a"
+        return f"{a:.4f} vs {b:.4f} (Δ{a - b:+.4f})"
+
+    def _par9(arm):
+        return arm["pr"]["par"].get(0.9)
+
+    def _det(arm, k):
+        d = arm["detection"]
+        return None if d.get("skipped") else d.get(k)
+
+    print("[driver]   HEADLINE (gated_pc vs unsup_gated):", flush=True)
+    print(f"[driver]     pc_topics_lr  AUC {_d(g['ranking']['auc'], u['ranking']['auc'])}",
+          flush=True)
+    print(f"[driver]     pc_topics_lr  AP  {_d(g['ranking']['ap'], u['ranking']['ap'])}",
+          flush=True)
+    print(f"[driver]     node P@R0.9        {_d(_par9(g), _par9(u))}", flush=True)
+    print(f"[driver]     detection AP       {_d(_det(g, 'ap'), _det(u, 'ap'))}", flush=True)
+    print("[driver]     (PC should help in the hidden-low-mass regime — insight 0066; "
+          "AP/P@R are the honest case-finding read — insight 0064.)", flush=True)
+
+
 def dag_closure_parents(parent_int, C):
     """Length-C list of parent-LABEL-index lists for the ungated DAG-closure head.
 
@@ -222,6 +385,12 @@ def parse_args(argv=None):
     p.add_argument("--min-label-count", type=int, default=20,
                    help="mask any node whose heldout column has < this many cells "
                         "of either class from the macro (AoU small-cell floor).")
+    p.add_argument("--recall-targets", default="0.5,0.8,0.9",
+                   help="comma-separated recall levels for precision@recall "
+                        "(the case-finding operating points).")
+    p.add_argument("--fdr-targets", default="0.1,0.25,0.5",
+                   help="comma-separated FDR (=1-precision) levels for recall@FDR "
+                        "(FDR-controlled discovery; insight 0064).")
     p.add_argument("--num-partitions", type=int, default=0,
                    help="repartition the corpus to this many partitions before "
                         "fitting (0 = leave as-is). Few parquet part-files pin the "
@@ -263,6 +432,8 @@ def main() -> int:
         # Stash on args so the estimator builder can reach them without re-threading.
         args._C = C
         args._parent_int = bundle.parent_int
+        args._recall_targets = [float(x) for x in args.recall_targets.split(",") if x]
+        args._fdr_targets = [float(x) for x in args.fdr_targets.split(",") if x]
         print(f"[driver]   corpus: V={len(bundle.vocab_map)} vocab, "
               f"K={lay.K} gated topics ({args.n_bg} bg + {len(lay.nodes)} nodes x "
               f"{args.tpn} tpn), C={C} label heads", flush=True)
@@ -284,11 +455,16 @@ def main() -> int:
             print(f"[driver]   repartitioned corpus {before} -> "
                   f"{args.num_partitions} partitions (train+test cached)", flush=True)
 
+        rt, ft = args._recall_targets, args._fdr_targets
         results = {}
 
+        def _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te):
+            return score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C,
+                             recall_targets=rt, fdr_targets=ft,
+                             min_count=args.min_label_count)
+
         with _phase(f"gated_pc fit (weightY={args.weight_y}, K={lay.K})"):
-            pc_est = _build_pc_estimator(
-                args, weight_y=args.weight_y, gated=True)
+            pc_est = _build_pc_estimator(args, weight_y=args.weight_y, gated=True)
             pc_model = pc_est.fit(bundle.train_df)
             # Transform each split ONCE (each transform re-runs CAVI over the split);
             # the supervised transform appends BOTH topicDistribution and probability.
@@ -296,20 +472,18 @@ def main() -> int:
             test_scored = pc_model.transform(bundle.test_df).cache()
             Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
             Pi_te, y_te, m_te, _ = _collect_theta_labels(test_scored, C)
-            pc_lr = pc_topics_lr_bundle(
-                Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, args.min_label_count)
-            results["gated_pc__pc_topics_lr"] = pc_lr["macro"]
-            print("[driver]   " + _macro_line("gated_pc pc_topics_lr", pc_lr),
+            results["gated_pc"] = _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+            print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
                   flush=True)
             # co-fit head's own per-node P(node) readout (secondary), from the SAME
             # scored test frame (no second CAVI pass).
             hp, hy, hm = _collect_head_proba(test_scored, C)
-            from analysis.pc.evaluate import _bundle_masked
-            head_bundle = _bundle_masked(hp, hy, hm, C, args.min_label_count)
+            results["gated_pc_head"] = readout_from_proba(
+                hp, hy, hm, C, recall_targets=rt, fdr_targets=ft,
+                min_count=args.min_label_count)
+            print(format_arm_readout("gated_pc (co-fit head)",
+                                     results["gated_pc_head"]), flush=True)
             train_scored.unpersist(); test_scored.unpersist()
-            results["gated_pc__head"] = head_bundle["macro"]
-            print("[driver]   " + _macro_line("gated_pc co-fit head", head_bundle),
-                  flush=True)
 
         if not args.skip_unsup_gated:
             n_it = (args.baseline_max_iter if args.baseline_max_iter and
@@ -323,11 +497,9 @@ def main() -> int:
                     us_model.transform(bundle.train_df), C)
                 Pi_te, y_te, m_te, _ = _collect_theta_labels(
                     us_model.transform(bundle.test_df), C)
-                us_lr = pc_topics_lr_bundle(
-                    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, args.min_label_count)
-                results["unsup_gated__pc_topics_lr"] = us_lr["macro"]
-                print("[driver]   " + _macro_line("unsup_gated pc_topics_lr", us_lr),
-                      flush=True)
+                results["unsup_gated"] = _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+                print(format_arm_readout("unsup_gated (pc_topics_lr)",
+                                         results["unsup_gated"]), flush=True)
 
         if args.with_dag_head:
             with _phase(f"dag_head fit (ungated + DAG-closure head, K={args.k})"):
@@ -339,20 +511,14 @@ def main() -> int:
                     dh_model.transform(bundle.train_df), C)
                 Pi_te, y_te, m_te, _ = _collect_theta_labels(
                     dh_model.transform(bundle.test_df), C)
-                dh_lr = pc_topics_lr_bundle(
-                    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, args.min_label_count)
-                results["dag_head__pc_topics_lr"] = dh_lr["macro"]
-                print("[driver]   " + _macro_line("dag_head pc_topics_lr", dh_lr),
-                      flush=True)
+                results["dag_head"] = _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+                print(format_arm_readout("dag_head (pc_topics_lr)",
+                                         results["dag_head"]), flush=True)
 
-        # Headline: does supervision improve the representation (pc_topics_lr)?
-        pc_auc = results.get("gated_pc__pc_topics_lr", {}).get("auc")
-        us_auc = results.get("unsup_gated__pc_topics_lr", {}).get("auc")
-        if pc_auc is not None and us_auc is not None:
-            print(f"[driver]   HEADLINE: gated_pc pc_topics_lr {pc_auc:.4f} vs "
-                  f"unsup_gated {us_auc:.4f} (delta {pc_auc - us_auc:+.4f}); PC "
-                  f"should help in the hidden-low-mass regime (insight 0066).",
-                  flush=True)
+        # Headline: does supervision improve the case-finding representation? Report
+        # the pc_topics_lr delta on BOTH the ranking (AUC/AP) and the operating point
+        # that matters for a rare-disease surface (detection AP + node-macro P@R0.9).
+        _print_headline(results)
 
         with _phase("save"):
             out = Path(args.out_dir)
@@ -375,15 +541,22 @@ def main() -> int:
                 "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
                 "kappa": args.kappa, "max_iter": args.max_iter,
                 "min_label_count": args.min_label_count,
+                "recall_targets": args._recall_targets,
+                "fdr_targets": args._fdr_targets,
                 "with_dag_head": args.with_dag_head,
                 "skip_unsup_gated": args.skip_unsup_gated,
                 "results": results, "ledger": bundle.ledger,
+                # Corpus params — ALL of the bundle cache-key inputs, so a post-hoc
+                # gated_pc_readout can recompute the exact key + reload the bundle
+                # (doc_min_length + emit_labels are required by the key; recording
+                # them here removes the lr_readout-style fragility).
                 "corpus_manifest": {
                     "cdr": args.cdr, "source_table": args.source_table,
                     "person_mod": args.person_mod, "vocab_size": args.vocab_size,
                     "min_df": args.min_df, "min_patient_count": args.min_patient_count,
+                    "doc_min_length": args.doc_min_length,
                     "prior_obs_days": args.prior_obs_days, "window_days": args.window_days,
-                    "holdout_frac": args.holdout_frac,
+                    "holdout_frac": args.holdout_frac, "emit_labels": True,
                     "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
                     "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()}},
             }
