@@ -954,13 +954,16 @@ def _driver_memory_for(model_class: str) -> str:
 
     The topic-model fits (lda/stm/dag_placement) stream on executors and are
     fine at 4g. PC is different: its in-memory eval collects a dense ``D x V``
-    matrix to the DRIVER (client mode), so it needs more headroom. Lower
+    matrix to the DRIVER (client mode), so it needs more headroom. gated_pc is
+    lighter (it collects only the ``D x K`` theta + labels, never the dense BOW)
+    but still runs the in-memory per-node pc_topics_lr LR on the driver over
+    train+test across arms, so it gets the same headroom. Lower
     ``person_mod``/``vocab_size`` if even 8g OOMs on a large cohort.
     """
     override = os.environ.get("CHARM_DRIVER_MEMORY")
     if override:
         return override
-    return "8g" if model_class == "pc" else "4g"
+    return "8g" if model_class in ("pc", "gated_pc") else "4g"
 
 
 def cluster_overlay_path(repo_root: Path) -> Path:
@@ -1369,12 +1372,13 @@ def main(argv: list[str] | None = None) -> int:
             str(fit_script), fit_args, REPO_ROOT,
             driver_memory=_driver_memory_for(model_class),
         )
-        # PC's driver imports analysis.pc (the in-memory eval), which is NOT in
-        # any --py-files zip. In client mode the driver runs on the master where
-        # the repo is checked out, so putting REPO_ROOT on PYTHONPATH lets the
-        # import resolve. Other model_classes import only the zipped packages.
+        # The pc / gated_pc drivers import analysis.pc (the in-memory eval /
+        # pc_topics_lr scorer), which is NOT in any --py-files zip. In client mode
+        # the driver runs on the master where the repo is checked out, so putting
+        # REPO_ROOT on PYTHONPATH lets the import resolve. Other model_classes
+        # import only the zipped packages.
         fit_env: dict | None = None
-        if model_class == "pc":
+        if model_class in ("pc", "gated_pc"):
             fit_env = {
                 **os.environ,
                 "PYTHONPATH": f"{REPO_ROOT}:{os.environ.get('PYTHONPATH', '')}",
@@ -1401,10 +1405,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
-    elif effective.get("model_class") in ("dag_placement", "pc"):
+    elif effective.get("model_class") in ("dag_placement", "pc", "gated_pc"):
         # These write their own self-contained result (dag_placement: npz +
         # manifest with placement AUC/MRR; pc: pc_results.json with per-drug
-        # heldout AUC), not a topic-word bundle the NPMI eval driver can read.
+        # heldout AUC; gated_pc: npz + manifest with pc_topics_lr per arm), not a
+        # topic-word bundle the NPMI eval driver can read.
         _mc = effective.get("model_class")
         _artifact = "pc_results.json" if _mc == "pc" else "manifest.json"
         print(f"[run-exp] model_class={_mc}: NPMI eval not wired for the "
