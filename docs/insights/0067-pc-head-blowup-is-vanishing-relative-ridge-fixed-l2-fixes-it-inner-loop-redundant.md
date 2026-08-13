@@ -2,7 +2,15 @@
 
 **Date:** 2026-08-13
 **Topic:** svi
-**Status:** Confirmed
+**Status:** Confirmed on the blowup mechanism; "residual gap" attribution **corrected by [0068](0068-pc-head-gap-was-l2-miscalibration-not-jointness-alternating-reaches-reference.md)**
+
+> **Correction (0068).** The vanishing-relative-ridge blowup and the fixed-L2 cure below
+> are confirmed. But this note's claim that the leftover topics-LR gap (0.53 vs 0.87) is
+> "online/alternating vs joint optimization" plus a "shape-vs-regularize tension" was
+> **wrong**: `head_l2` was mis-scaled by `n_docs` (≈840× too strong). With an ABSOLUTE
+> `head_l2 = lambda_w` the online head shapes to topics-LR ≈ 0.96, and a reference
+> block-ALTERNATING fit reaches the joint quality — jointness was never the cause. The
+> figures below at `head_l2=1e-3` reflect the OLD per-doc scaling; see 0068 / ADR 0041.
 
 Follow-on to insight 0065 / ADR 0039. On a **realistic** Mondo-DAG case-finding
 benchmark — the archetype planted on real EHR β (300 cross-site LDA topics × 29,003 OMOP

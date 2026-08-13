@@ -1,7 +1,15 @@
 # 0040 — The VI-PC head's runaway `|w|` is fixed by a fixed L2 (`head_l2`), not by more Newton steps; the inner loop is fixed-point-equivalent
 
-**Status:** Accepted
+**Status:** Accepted; "residual gap" analysis **superseded by [0041](0041-pc-head-l2-is-absolute-ridge-joint-vs-alternating-refuted.md)**
 **Date:** 2026-08-13
+
+> **Correction (see ADR 0041).** The blowup-guard mechanism below stands, but this ADR's
+> conclusion that the topics-quality gap to the reference is "online/alternating vs joint
+> optimization" plus a "shape-vs-regularize tension" was **wrong**. The gap was `head_l2`
+> mis-scaled by `n_docs` (≈840× too strong); at the corrected ABSOLUTE `head_l2 = lambda_w`
+> the online head shapes to topics-LR ≈ 0.96 with a finite head, and a reference
+> block-ALTERNATING fit reaches the same quality as joint — so jointness was never the
+> cause. Read 0041 for the corrected account.
 
 > **Numbering note.** Authored on `claude/spectral-anchor-topic-k-200nqp`, which shares
 > an ADR counter with sibling branches (see ADR 0038/0039's notes). Renumber if a sibling
