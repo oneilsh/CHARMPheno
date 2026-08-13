@@ -95,12 +95,12 @@ def to_docs(X, Y, mask):
     return docs
 
 
-def fit(spark, docs, V, *, weight_y, head):
+def fit(spark, docs, V, *, weight_y, head, head_l2=0.0):
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.topic.pc import OnlinePCLDA
     model = OnlinePCLDA(K=K_FIT, vocab_size=V, C=C, weight_y=weight_y, alpha=1.05,
                         grad_cavi_iters=10, random_seed=0, head_optimizer="newton",
-                        head_lr=0.7, weight_y_warmup_iters=10, head=head)
+                        head_lr=0.7, weight_y_warmup_iters=10, head_l2=head_l2, head=head)
     cfg = VIConfig(max_iterations=MAX_ITERS, learning_rate_tau0=64.0,
                    learning_rate_kappa=0.6, random_seed=0, convergence_tol=1e-12)
     rdd = spark.sparkContext.parallelize(docs, numSlices=8).persist()
@@ -181,27 +181,24 @@ def main():
             return (f"  {name:<22} mean={m:.3f} rare(5,6)={rare:.3f}   "
                     + " ".join(f"{l}:{a.get(l, float('nan')):.2f}" for l in nodes))
 
-        # Only two fits: unsupervised, and flat-PC (topic-shaping). The co-fit DAG head
-        # is confirmed dead (wrecks topics), so it is dropped.
+        # THE FIX: sweep the co-fit head's fixed L2 (head_l2). At 0.0 the relative ridge
+        # vanishes on the separable shaped topics -> head stuck ~0.65; a positive L2 keeps
+        # it finite -> the co-fit head itself should reach the post-hoc ceiling.
         m0, gp0 = fit(spark, tr, V, weight_y=0.0, head=None)
-        mB, gpB = fit(spark, tr, V, weight_y=WEIGHT_Y, head=None)
-
-        # co-fit flat head (the predictor the head trains) — reference.
-        thB = thetas(mB, te, gpB)
-        B_head = auc_table(Yte, np.array([_predict_proba_np(t, gpB["w_CK"], None) for t in thB]), nodes)
-
-        # post-hoc classifier on the shaped topics — the "let the head shape, read with a
-        # proper classifier" pipeline — trained on the SAME masked labels the head saw.
         S_uns_m = posthoc_scores(m0, gp0, tr, te, Ytr, nodes, mask=Mtr)
-        S_flat_m = posthoc_scores(mB, gpB, tr, te, Ytr, nodes, mask=Mtr)
-        S_flat_full = posthoc_scores(mB, gpB, tr, te, Ytr, nodes, mask=None)
 
-        print("\nper-node held-out AUC (rare leaves 5,6):", flush=True)
+        print("\nper-node held-out AUC — co-fit HEAD across head_l2, vs posthoc ceiling:", flush=True)
         print(line("unsup posthoc-LR (msk)", auc_table(Yte, S_uns_m, nodes)), flush=True)
-        print(line("flat co-fit HEAD", B_head), flush=True)
+        last = None
+        for l2 in (0.0, 5e-4, 2e-3):
+            mB, gpB = fit(spark, tr, V, weight_y=WEIGHT_Y, head=None, head_l2=l2)
+            thB = thetas(mB, te, gpB)
+            hd = auc_table(Yte, np.array([_predict_proba_np(t, gpB["w_CK"], None) for t in thB]), nodes)
+            print(line(f"flat co-fit HEAD l2={l2:g}", hd), flush=True)
+            last = (mB, gpB)
+        mB, gpB = last
+        S_flat_m = posthoc_scores(mB, gpB, tr, te, Ytr, nodes, mask=Mtr)
         print(line("flatPC posthoc-LR (msk)", auc_table(Yte, S_flat_m, nodes)), flush=True)
-        print(line("flatPC posthoc-HIER(msk)", auc_table(Yte, hier(S_flat_m, clo_M), nodes)), flush=True)
-        print(line("flatPC posthoc-LR (FULL)", auc_table(Yte, S_flat_full, nodes)), flush=True)
     finally:
         spark.stop()
 
