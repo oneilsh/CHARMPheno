@@ -739,15 +739,23 @@ class OnlinePCLDA(VIModel):
         # steps per iteration, Hughes-style), not by regularizing it. Keep head_l2 small
         # (blowup guard) if used at all. 0.0 (default) = relative-ridge-only behavior.
         self.head_l2 = float(head_l2)
-        # 'newton' + FLAT head: CONVERGE the head each SVI iteration (Hughes-style)
-        # instead of one aggregated Newton step, by collecting a bounded subsample of
-        # the per-doc label-free (theta, y, obs) design to the driver and running
+        # 'newton' + FLAT head: CONVERGE the head WITHIN each SVI iteration (Hughes-style)
+        # instead of one aggregated Newton step, by collecting a bounded subsample of the
+        # per-doc label-free (theta, y, obs) design to the driver and running
         # head_inner_iters full-Newton IRLS steps on it (weak fixed L2 = head_l2 as a
-        # per-example lambda_w, default 1e-3). 0 = the prior one-step behavior. This is
-        # the fix for the one-step head's under-convergence (it lags the moving topics
-        # and, with the relative ridge, oscillates on separable topics); the tradeoff is
-        # that it ships raw theta to the driver (bounded by head_sample_cap), unlike the
-        # aggregatable one-step Newton (ADR 0039).
+        # per-example lambda_w, default 1e-3). 0 (default) = the aggregated one-step Newton.
+        #
+        # EMPIRICALLY REDUNDANT WITH head_l2>0: one aggregated Newton step per SVI iter,
+        # accumulated over the iterations the topics take to settle, reaches the SAME
+        # regularized fixed point this loop reaches within an iteration (verified: INNER
+        # == one-step byte-for-byte). The lever that fixes the co-fit head's runaway |w|
+        # (3.4e11) is the RIDGE TYPE — a fixed L2 (head_l2) instead of the shipped relative
+        # ridge, which vanishes on separable topics — NOT the number of head steps. Keep
+        # this at 0 unless topics never stabilize (aggressive minibatching / very few
+        # iters), where converging WITHIN an iter helps; it ships raw theta to the driver
+        # (bounded by head_sample_cap), unlike the fully-aggregatable one-step Newton
+        # (ADR 0039). It does NOT close the topics-quality gap to the full-batch joint
+        # L-BFGS reference — that gap is online/alternating vs joint optimization.
         self.head_inner_iters = int(head_inner_iters)
         self.head_sample_cap = int(head_sample_cap)
         # Driver-side global-step counter, used only for weight_y warmup. Bumped
@@ -995,10 +1003,27 @@ class OnlinePCLDA(VIModel):
         #              through w_CK).
         if self.head_inner_iters > 0 and "head_theta" in target_stats:
             # INNER-LOOP head fit (flat head): converge w_CK to the weakly-L2-regularized
-            # logistic MLE on the collected label-free design (theta, y, obs) — the
-            # Hughes-faithful "converge the head each iteration" that one aggregated
-            # Newton step cannot do. Full undamped Newton with a FIXED per-example L2
-            # (head_l2 as lambda_w, default 1e-3) keeps w finite on separable topics.
+            # logistic MLE on the collected label-free design (theta, y, obs) each SVI
+            # iteration. Full undamped Newton with a FIXED per-example L2 (head_l2 as
+            # lambda_w, default 1e-3) keeps w finite on separable topics.
+            #
+            # EMPIRICAL NOTE (do not expect this to beat the one-step head): with the SAME
+            # fixed L2, the aggregated one-step ridge-Newton below ALSO converges — one
+            # Newton step per SVI iteration accumulates, over the ~60 iterations the topics
+            # take to settle, to the identical regularized fixed point (verified: INNER
+            # k=10 == one-step, byte-for-byte, |w|=4.76 vs the relative ridge's 3.4e11
+            # blowup; and on a frozen design 1-step×60 lands at ‖·‖=0 from a 60-step inner
+            # loop). So this loop is REDUNDANT with head_l2>0 — it converges the head
+            # WITHIN an iteration rather than ACROSS iterations, reaching the same place.
+            # Its residual value: it converges the head even when topics never stabilize
+            # (aggressive minibatching / few iters), and it makes the fixed-L2 convergence
+            # explicit rather than emergent. The lever that actually matters for the head
+            # is the RIDGE TYPE (fixed L2 vs the shipped relative ridge), NOT step count.
+            # The remaining topics-quality gap to the reference (topics-LR 0.53 here vs the
+            # full-batch L-BFGS reference's 0.87) is NOT a head-convergence problem — it is
+            # online/alternating optimization not finding the joint (topics,head) basin the
+            # reference's joint L-BFGS reaches, compounded by the shape-vs-regularize
+            # tension (the fixed L2 that finitizes the head also damps shaping). See ADR.
             Th = np.asarray(target_stats["head_theta"], dtype=np.float64)     # (n, K)
             Yb = (np.asarray(target_stats["head_s"], dtype=np.float64) + 1.0) / 2.0  # (n, C)
             Ob = np.asarray(target_stats["head_obs"], dtype=np.float64)       # (n, C)
