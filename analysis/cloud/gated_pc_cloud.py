@@ -222,6 +222,13 @@ def parse_args(argv=None):
     p.add_argument("--min-label-count", type=int, default=20,
                    help="mask any node whose heldout column has < this many cells "
                         "of either class from the macro (AoU small-cell floor).")
+    p.add_argument("--num-partitions", type=int, default=0,
+                   help="repartition the corpus to this many partitions before "
+                        "fitting (0 = leave as-is). Few parquet part-files pin the "
+                        "job to ~2 executors under dynamic allocation; set this ≈ "
+                        "total cluster executor cores to spread the per-doc autograd "
+                        "and demand more executors. Pair with "
+                        "CHARM_SPARK_CONF='spark.locality.wait=0s'.")
     p.add_argument("--cache-uri", default=None)
     p.add_argument("--out-dir", required=True)
     p.add_argument("--resume-from", default="",
@@ -259,6 +266,23 @@ def main() -> int:
         print(f"[driver]   corpus: V={len(bundle.vocab_map)} vocab, "
               f"K={lay.K} gated topics ({args.n_bg} bg + {len(lay.nodes)} nodes x "
               f"{args.tpn} tpn), C={C} label heads", flush=True)
+
+        # Parallelism: the cached bundle parquet has few partitions (~8 part-files),
+        # and with dynamic allocation Spark sizes the executor pool to PENDING TASKS
+        # (n_partitions / executor.cores) — so 8 partitions pins the job to ~2
+        # executors while the rest of the cluster sits idle, and the heavy per-doc
+        # differentiable-CAVI autograd serializes onto 8 slots. Repartition UP so the
+        # fit demands (and spreads across) more executors. Set --num-partitions ≈ the
+        # cluster's total executor cores (a bit over is fine; too many = task
+        # overhead). Pair with CHARM_SPARK_CONF='spark.locality.wait=0s' so
+        # executors added mid-job aren't starved by cache-locality. 0 = leave as-is.
+        if args.num_partitions and args.num_partitions > 0:
+            before = bundle.train_df.rdd.getNumPartitions()
+            bundle.train_df = bundle.train_df.repartition(args.num_partitions).cache()
+            bundle.test_df = bundle.test_df.repartition(args.num_partitions).cache()
+            bundle.train_df.count(); bundle.test_df.count()   # materialize the spread
+            print(f"[driver]   repartitioned corpus {before} -> "
+                  f"{args.num_partitions} partitions (train+test cached)", flush=True)
 
         results = {}
 

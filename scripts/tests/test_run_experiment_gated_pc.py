@@ -34,10 +34,11 @@ def test_driver_path_for_gated_pc(monkeypatch):
 def test_build_gated_pc_args_shape(monkeypatch):
     mod = _run_exp(monkeypatch)
     eff = {**_base_eff(), "weight_y": 80.0, "seed": 42, "cache_uri": "hdfs:///c",
-           "with_dag_head": True}
+           "with_dag_head": True, "num_partitions": 96}
     args = mod.build_gated_pc_args(eff, "/out")
     assert args[args.index("--disease") + 1] == "rare6"
     assert args[args.index("--weight-y") + 1] == "80.0"
+    assert args[args.index("--num-partitions") + 1] == "96"
     assert args[args.index("--out-dir") + 1] == "/out"
     assert args[args.index("--cache-uri") + 1] == "hdfs:///c"
     assert args[args.index("--head-optimizer") + 1] == "newton"

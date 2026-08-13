@@ -68,6 +68,13 @@ skip_unsup_gated: false
 with_dag_head: false
 baseline_max_iter: 100   # unsup topics converge faster than the head.
 min_label_count: 20      # AoU small-cell floor: mask rare nodes from the macro.
+# Parallelism: the cached bundle parquet has ~8 part-files, so dynamic allocation
+# pins the fit to ~2 executors (8 tasks / 4 cores) while the cluster sits idle and
+# the per-doc autograd serializes. Repartition ≈ total cluster executor cores so
+# the fit demands + spreads across more executors. This ~14-worker × 4-core cluster
+# has ~56 cores; 96 gives headroom + load balance. Pair with
+# CHARM_SPARK_CONF='spark.locality.wait=0s' (see How to run).
+num_partitions: 96
 seed: 42
 # Known-good in-cluster HDFS cache (same path the rare6 dag_placement runs use).
 # HDFS is per-cluster ephemeral (a fresh cluster rebuilds the bundle), but writes
@@ -127,8 +134,13 @@ cd ~/repos/CHARMPheno && \
   git fetch origin claude/spectral-anchor-topic-k-200nqp && \
   git checkout claude/spectral-anchor-topic-k-200nqp && \
   git pull --ff-only origin claude/spectral-anchor-topic-k-200nqp && \
-  make -C analysis/cloud exp ID=76
+  CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=76
 ```
+
+`CHARM_SPARK_CONF='spark.locality.wait=0s'` makes executors added mid-job pick up
+work immediately instead of being starved by cache-locality on the original nodes
+(pairs with `num_partitions: 96`). Without it the corpus stays pinned to the first
+~2 executors even after the pool scales up.
 
 Fit-only (skip the self-contained result's implicit eval step):
 `make -C analysis/cloud exp ID=76 NO_EVAL=1`.
