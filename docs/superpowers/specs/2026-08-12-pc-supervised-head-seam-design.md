@@ -1,8 +1,11 @@
 # PC supervised-head seam + DAG-closure head — design
 
 **Date:** 2026-08-12
-**Status:** Steps 1–2 SHIPPED (flat extraction + `DagClosureHead`, engine-level, tested green).
-Step 3 (Gated-PC composition) and the shim exposure of the DAG head are follow-ons.
+**Status:** Steps 1–3 SHIPPED. Step 3 (Gated-PC composition) landed via an INJECTABLE
+topic engine — `OnlinePCLDA(topic_engine=GatedOnlineLDA(...))` + `GatedPCDocument` — resolving
+the subclass-vs-delegation plumbing fork in favor of delegation (ADR 0042). Follow-ons: the
+mllib shim exposure of the DAG head and of `topic_engine`; optionally gating the head's
+training θ (deferred, see ADR 0042).
 **Oracle:** the in-memory `analysis/pc/` reference + the existing PC pyspark suite validate the
 extraction as behavior-preserving; new flavors get their own FD/oracle checks.
 
