@@ -647,6 +647,7 @@ class OnlinePCLDA(VIModel):
         head_optimizer: str = "sgd",
         head_lr: float = 0.05,
         head_newton_ridge: float = 1e-2,
+        head_l2: float = 0.0,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
         optimize_alpha: bool = False,
@@ -722,6 +723,15 @@ class OnlinePCLDA(VIModel):
         # the Newton damping (step fraction; ~0.5-1.0 for newton, since one damped
         # Newton step per iter already converges the logistic head on the current θ).
         self.head_newton_ridge = float(head_newton_ridge)
+        # 'newton' head: FIXED per-doc L2 prior on w_CK (a true regularizer, distinct
+        # from head_newton_ridge's numerical conditioner). Scaled by n_docs so it tracks
+        # the corpus-scaled Fisher (a proper per-example prior, scale-invariant across
+        # corpus/minibatch). Unlike the relative ridge — which vanishes as p(1−p)→0 once
+        # PC's shaping makes the topics SEPARABLE, leaving the logistic with no finite
+        # optimum so the Newton step oscillates and the head never converges — a fixed L2
+        # keeps the solution finite and lets the head reach the logistic-MLE direction.
+        # 0.0 (default) preserves the prior relative-ridge-only behavior.
+        self.head_l2 = float(head_l2)
         # Driver-side global-step counter, used only for weight_y warmup. Bumped
         # once per update_global call (the runner drives that single-threaded on
         # the driver), so it is a faithful iteration index without threading t
@@ -953,15 +963,17 @@ class OnlinePCLDA(VIModel):
             # (e.g. DagClosureHead) emits no head_hess_stat, so 'newton' gracefully
             # degrades to the SGD step below rather than KeyError-ing.
             # g_c is the corpus-scaled NLL gradient sum (grad_wCK_stat), H_c its Fisher
-            # info (head_hess_stat). The ridge is RELATIVE to mean(diag(H_c)) so it only
-            # conditions the solve — AUC is scale-invariant to head magnitude, so it does
-            # not bias the direction. head_lr damps the step (~0.5-1.0 for newton).
+            # info (head_hess_stat). Ridge = a FIXED per-doc L2 prior (head_l2·n_docs, a
+            # true regularizer that keeps w finite on separable topics — see __init__)
+            # PLUS head_newton_ridge·mean(diag H_c) (a numerical conditioner only).
+            # head_lr damps the step (~0.5-1.0 for newton).
             g_CK = np.asarray(target_stats["grad_wCK_stat"], dtype=np.float64)
             H_CKK = np.asarray(target_stats["head_hess_stat"], dtype=np.float64)
             new_w = w_CK.copy()
             for c in range(self.C):
                 Hc = H_CKK[c]
-                ridge = self.head_newton_ridge * (float(np.trace(Hc)) / self.K) + 1e-10
+                ridge = (self.head_l2 * n_docs
+                         + self.head_newton_ridge * (float(np.trace(Hc)) / self.K) + 1e-10)
                 A = Hc + ridge * np.eye(self.K)
                 b = g_CK[c] + ridge * w_CK[c]
                 try:
