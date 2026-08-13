@@ -647,7 +647,7 @@ class OnlinePCLDA(VIModel):
         head_optimizer: str = "sgd",
         head_lr: float = 0.05,
         head_newton_ridge: float = 1e-2,
-        head_l2: float = 0.0,
+        head_l2: float = 1e-3,
         head_inner_iters: int = 0,
         head_sample_cap: int = 20000,
         alpha: float | np.ndarray | None = None,
@@ -725,19 +725,29 @@ class OnlinePCLDA(VIModel):
         # the Newton damping (step fraction; ~0.5-1.0 for newton, since one damped
         # Newton step per iter already converges the logistic head on the current θ).
         self.head_newton_ridge = float(head_newton_ridge)
-        # 'newton' head: FIXED per-doc L2 prior on w_CK (scaled by n_docs to track the
-        # corpus-scaled Fisher). Its ONE robust use is a BLOWUP GUARD: the relative ridge
-        # vanishes as p(1−p)→0 once PC's shaping makes the topics separable, leaving the
-        # logistic MLE at infinity so |w_CK| runs away (observed 3.4e11); any positive
-        # fixed L2 keeps w finite (Hughes uses lambda_w=0.001 for exactly this).
+        # 'newton' head: FIXED ABSOLUTE L2 prior on w_CK == Hughes's lambda_w. It is the
+        # ridge on the CORPUS-SUMMED head gradient, so at the head fixed point |w_CK| ~
+        # |g|/head_l2 — NOT scaled by n_docs. (Recommended default 1e-3, Hughes's value,
+        # data-independent.) Two roles, both essential:
+        #   (1) BLOWUP GUARD. The relative ridge (head_newton_ridge·mean(diag H)) vanishes
+        #       as p(1−p)→0 once PC's shaping makes the topics separable, leaving the
+        #       logistic MLE at infinity so |w_CK| runs away (observed 3.4e11); any
+        #       positive absolute L2 keeps it finite.
+        #   (2) CALIBRATED SHAPING. Shaping strength ∝ |w_CK|, so the ridge magnitude sets
+        #       how hard PC shapes. Hughes's weak lambda_w=1e-3 lets |w| grow large enough
+        #       to shape strongly (reference |w|~105, topics-LR~0.87) while staying finite.
         #
-        # It is NOT a fix for the one-step head's UNDER-CONVERGENCE. Empirically (sweep in
-        # manual_pc_dag_case_finding_realistic + insight): raising head_l2 shrinks |w_CK|,
-        # which weakens the shaping gradient (∝ |w_CK|) and DEGRADES the topics — a
-        # shaping/stability TRADE-OFF that never reaches the post-hoc/converged-head
-        # ceiling. The under-convergence is closed by CONVERGING the head (more Newton
-        # steps per iteration, Hughes-style), not by regularizing it. Keep head_l2 small
-        # (blowup guard) if used at all. 0.0 (default) = relative-ridge-only behavior.
+        # HISTORY / CALIBRATION (do not re-break): head_l2 was briefly applied PER-DOC
+        # (ridge = head_l2·n_docs), which made head_l2=1e-3 act like lambda_w~0.84 — ~840x
+        # (= n_docs) too strong. That throttled |w| to ~5 and collapsed shaping to
+        # topics-LR ~0.53, which was mis-attributed to a joint-vs-alternating optimization
+        # gap. The joint-vs-alternating de-risk (manual_pc_joint_vs_alternating) REFUTED
+        # that — a reference block-ALTERNATING fit reaches topics-LR 0.874 — and the recal
+        # sweep (manual_pc_head_l2_recalibration) showed the sweet spot is the ABSOLUTE
+        # ridge ~lambda_w (topics-LR ~0.93, |w| finite). Hence: absolute, not ×n_docs.
+        # Default 1e-3 (= Hughes lambda_w); the good basin is wide (~1e-4..1e-2, topics-LR
+        # 0.91-0.96). 0.0 disables it -> relative-ridge-only, which BLOWS UP on the
+        # separable topics PC creates (|w|=3.4e11) — only set 0.0 to reproduce that.
         self.head_l2 = float(head_l2)
         # 'newton' + FLAT head: CONVERGE the head WITHIN each SVI iteration (Hughes-style)
         # instead of one aggregated Newton step, by collecting a bounded subsample of the
@@ -1018,17 +1028,21 @@ class OnlinePCLDA(VIModel):
             # Its residual value: it converges the head even when topics never stabilize
             # (aggressive minibatching / few iters), and it makes the fixed-L2 convergence
             # explicit rather than emergent. The lever that actually matters for the head
-            # is the RIDGE TYPE (fixed L2 vs the shipped relative ridge), NOT step count.
-            # The remaining topics-quality gap to the reference (topics-LR 0.53 here vs the
-            # full-batch L-BFGS reference's 0.87) is NOT a head-convergence problem — it is
-            # online/alternating optimization not finding the joint (topics,head) basin the
-            # reference's joint L-BFGS reaches, compounded by the shape-vs-regularize
-            # tension (the fixed L2 that finitizes the head also damps shaping). See ADR.
+            # is the RIDGE MAGNITUDE (head_l2 as an ABSOLUTE ridge = Hughes's lambda_w),
+            # NOT step count and NOT joint-vs-alternating: a reference block-ALTERNATING
+            # fit reaches topics-LR 0.874 (== its joint 0.862), so alternation is not the
+            # gap. The earlier collapse (topics-LR 0.53) was head_l2 mis-scaled by n_docs
+            # (~840x too strong); at the corrected absolute head_l2~1e-3 the online head
+            # shapes to topics-LR ~0.93 with |w| finite. See ADR 0040 / insight 0067.
             Th = np.asarray(target_stats["head_theta"], dtype=np.float64)     # (n, K)
             Yb = (np.asarray(target_stats["head_s"], dtype=np.float64) + 1.0) / 2.0  # (n, C)
             Ob = np.asarray(target_stats["head_obs"], dtype=np.float64)       # (n, C)
             n = max(len(Th), 1)
-            lam2 = (self.head_l2 if self.head_l2 > 0 else 1e-3) * n           # per-example L2 -> total
+            # ABSOLUTE ridge (Hughes lambda_w), matching the one-step Newton branch, so
+            # inner-loop and one-step stay the same fixed point. Correct when the whole
+            # corpus is collected (n == n_docs, the uncapped case); a subsample of n <
+            # n_docs slightly over-regularizes (off-by-default path — prefer one-step).
+            lam2 = self.head_l2 if self.head_l2 > 0 else 1e-3
             new_w = w_CK.copy()
             eye = np.eye(self.K)
             for _ in range(self.head_inner_iters):
@@ -1051,16 +1065,16 @@ class OnlinePCLDA(VIModel):
             # (e.g. DagClosureHead) emits no head_hess_stat, so 'newton' gracefully
             # degrades to the SGD step below rather than KeyError-ing.
             # g_c is the corpus-scaled NLL gradient sum (grad_wCK_stat), H_c its Fisher
-            # info (head_hess_stat). Ridge = a FIXED per-doc L2 prior (head_l2·n_docs, a
-            # true regularizer that keeps w finite on separable topics — see __init__)
-            # PLUS head_newton_ridge·mean(diag H_c) (a numerical conditioner only).
-            # head_lr damps the step (~0.5-1.0 for newton).
+            # info (head_hess_stat). Ridge = a FIXED ABSOLUTE L2 prior (head_l2, Hughes's
+            # lambda_w: the ridge on the CORPUS-SUMMED head gradient, so |w| ~ |g|/head_l2
+            # — see __init__) PLUS head_newton_ridge·mean(diag H_c) (a numerical
+            # conditioner only). head_lr damps the step (~0.5-1.0 for newton).
             g_CK = np.asarray(target_stats["grad_wCK_stat"], dtype=np.float64)
             H_CKK = np.asarray(target_stats["head_hess_stat"], dtype=np.float64)
             new_w = w_CK.copy()
             for c in range(self.C):
                 Hc = H_CKK[c]
-                ridge = (self.head_l2 * n_docs
+                ridge = (self.head_l2
                          + self.head_newton_ridge * (float(np.trace(Hc)) / self.K) + 1e-10)
                 A = Hc + ridge * np.eye(self.K)
                 b = g_CK[c] + ridge * w_CK[c]
