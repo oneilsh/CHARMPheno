@@ -269,9 +269,10 @@ def validate_frontmatter(fm: dict) -> None:
             sys.exit(2)
 
     model_class = fm["model_class"]
-    if model_class not in ("lda", "stm", "dag_placement", "pc"):
+    if model_class not in ("lda", "stm", "dag_placement", "pc", "gated_pc"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
-              f"(currently: lda, stm, dag_placement, pc; hdp planned)", flush=True)
+              f"(currently: lda, stm, dag_placement, pc, gated_pc; hdp planned)",
+              flush=True)
         sys.exit(2)
 
     if model_class == "stm":
@@ -295,6 +296,8 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/dag_placement_cloud.py"
     if model_class == "pc":
         return f"{base}/pc_antidepressant_cloud.py"
+    if model_class == "gated_pc":
+        return f"{base}/gated_pc_cloud.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
@@ -316,6 +319,8 @@ def build_fit_args(
         return build_dag_placement_args(effective, out_dir, resume_from)
     if model_class == "pc":
         return build_pc_args(effective, out_dir, resume_from)
+    if model_class == "gated_pc":
+        return build_gated_pc_args(effective, out_dir, resume_from)
     raise ValueError(f"unknown model_class: {model_class!r}")
 
 
@@ -688,6 +693,71 @@ def build_dag_placement_args(
     # node_alpha_scale is the initial alpha; the gated Newton step refines it.
     if effective.get("optimize_doc_concentration"):
         args.append("--optimize-doc-concentration")
+    return args
+
+
+def build_gated_pc_args(
+    effective: dict, out_dir: str, resume_from: Path | None = None,
+) -> list[str]:
+    """Build argv for analysis/cloud/gated_pc_cloud.py (Gated-PC case-finding).
+
+    The supervised sibling of dag_placement: same cached CaseFindingBundle (now
+    with emit_labels), but fits the gate + FLAT PC head and reports pc_topics_lr
+    vs an unsup_gated (weightY=0) twin. K is emergent for the gated arms (n_bg +
+    nodes*tpn); --k applies only to the optional --with-dag-head arm. Resume is
+    unsupported here (v1); resume_from is ignored.
+    """
+    cdr, billing = _require_workspace_env()
+    args = [
+        "--cdr", cdr,
+        "--billing", billing,
+        "--source-table", str(effective["source_table"]),
+        "--person-mod", str(effective["person_mod"]),
+        "--vocab-size", str(effective["vocab_size"]),
+        "--min-df", str(effective["min_df"]),
+        "--min-patient-count", str(effective["min_patient_count"]),
+        "--doc-min-length", str(effective["doc_min_length"]),
+        "--prior-obs-days", str(effective.get("prior_obs_days", 365)),
+        "--window-days", str(effective.get("window_days", 365)),
+        "--window-mode", str(effective.get("window_mode", "forward")),
+        "--lookback-days", str(effective.get("lookback_days", 365)),
+        "--label-window-days", str(effective.get("label_window_days", 365)),
+        "--disease", str(effective.get("disease", "rare6")),
+        "--min-n", str(effective["min_n"]),
+        "--holdout-frac", str(effective.get("holdout_frac", 0.2)),
+        "--strip-mode", str(effective.get("strip_mode", "test_only")),
+        "--label-mask-mode", str(effective.get("label_mask_mode", "full")),
+        "--n-bg", str(effective["n_bg"]),
+        "--tpn", str(effective["tpn"]),
+        "--k", str(effective.get("K", 50)),
+        "--weight-y", str(effective.get("weight_y", 50.0)),
+        "--head-optimizer", str(effective.get("head_optimizer", "newton")),
+        "--head-lr", str(effective.get("head_lr", 0.5)),
+        "--head-newton-ridge", str(effective.get("head_newton_ridge", 0.01)),
+        "--head-l2", str(effective.get("head_l2", 1e-3)),
+        "--grad-cavi-iters", str(effective.get("grad_cavi_iters", 20)),
+        "--topic-trust", str(effective.get("topic_trust", 0.1)),
+        "--weight-y-warmup-iters", str(effective.get("weight_y_warmup_iters", 10)),
+        "--max-iter", str(effective["max_iter"]),
+        "--subsampling-rate", str(effective.get("subsampling_rate", 0.05)),
+        "--tau0", str(effective.get("tau0", 64.0)),
+        "--kappa", str(effective.get("kappa", 0.51)),
+        "--cavi-max-iter", str(effective.get("cavi_max_iter", 100)),
+        "--cavi-tol", str(effective.get("cavi_tol", 1e-3)),
+        "--baseline-max-iter", str(effective.get("baseline_max_iter", -1)),
+        "--min-label-count", str(effective.get("min_label_count", 20)),
+        "--out-dir", str(out_dir),
+    ]
+    if effective.get("seed") is not None:
+        args.extend(["--seed", str(effective["seed"])])
+    if effective.get("cache_uri"):
+        args.extend(["--cache-uri", str(effective["cache_uri"])])
+    if effective.get("optimize_doc_concentration"):
+        args.append("--optimize-doc-concentration")
+    if effective.get("skip_unsup_gated"):
+        args.append("--skip-unsup-gated")
+    if effective.get("with_dag_head"):
+        args.append("--with-dag-head")
     return args
 
 

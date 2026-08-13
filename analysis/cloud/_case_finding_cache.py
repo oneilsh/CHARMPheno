@@ -38,7 +38,8 @@ def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
                              window_days, disease, min_n, holdout_frac, split_salt=None,
                              n_bg, tpn, cdr=None, strip_mode="test_only",
                              window_mode="forward", lookback_days=365,
-                             label_window_days=365) -> str:
+                             label_window_days=365, emit_labels=False,
+                             label_mask_mode="full") -> str:
     """Stable 16-hex hash of the inputs that determine the assembled bundle.
 
     Folds cohort_defs_version() plus content hashes of condition_dag +
@@ -75,6 +76,12 @@ def compute_bundle_cache_key(*, source_table, person_mod, vocab_size, min_df,
         "assembly_src": _module_source_hash(case_finding_assembly),
         "v": 4,
     }
+    # Only fold the Gated-PC label columns into the key when they are requested,
+    # so the default (emit_labels=False) path keeps its existing key and existing
+    # dag-placement caches stay valid; a labeled bundle gets a distinct key.
+    if emit_labels:
+        payload["emit_labels"] = True
+        payload["label_mask_mode"] = str(label_mask_mode)
     s = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
@@ -149,6 +156,7 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
             "min_patient_count", "doc_min_length", "prior_obs_days", "window_days",
             "disease", "min_n", "holdout_frac", "split_salt", "n_bg", "tpn", "cdr",
             "strip_mode", "window_mode", "lookback_days", "label_window_days",
+            "emit_labels", "label_mask_mode",
         ) if k in assembly_params}
         key = compute_bundle_cache_key(**key_params)
         cached = try_load(spark, cache_uri, key)
