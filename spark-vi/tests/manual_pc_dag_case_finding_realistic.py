@@ -188,26 +188,25 @@ def main():
             return (f"  {name:<22} mean={m:.3f} rare(5,6)={rare:.3f}   "
                     + " ".join(f"{l}:{a.get(l, float('nan')):.2f}" for l in nodes))
 
-        # Head-optimizer sweep. The shipped one-step 'newton' uses a RELATIVE ridge that
-        # VANISHES on the separable shaped topics -> |w| blows up (3.4e11) and the head
-        # misaims (HEAD~0.65 while topics-LR~0.97). A FIXED L2 (head_l2) finitizes w. The
-        # INNER configs converge the head within each iteration; empirically they LAND ON
-        # the one-step result byte-for-byte (fixed-point equivalence — one Newton step per
-        # SVI iter accumulates to the same regularized MLE as the topics settle), so the
-        # lever is the ridge TYPE, not step count. The discriminating row is 'INNER l2=0':
-        # its internal 1e-3 fallback finitizes w (4.76) UNLIKE one-step l2=0 (3.4e11),
-        # proving the branch fires. Note the finite-L2 head recovers prediction (HEAD up)
-        # but topics-LR drops (0.97->0.53): the fixed L2 that finitizes w also damps the
-        # shaping gradient (shape-vs-regularize tension) — a joint-optimization gap the
-        # online/alternating scheme does not close (cf. the full-batch L-BFGS reference).
+        # Head-optimizer sweep. The one-step 'newton' uses head_l2 (an ABSOLUTE ridge =
+        # Hughes lambda_w) + a relative conditioner. At head_l2=0 the relative ridge
+        # VANISHES on the separable shaped topics -> |w| blows up (3.4e11); any absolute
+        # head_l2>0 finitizes it. head_l2=1e-3 (the corrected default = lambda_w) shapes
+        # to topics-LR ~0.93-0.96 with |w| finite (~1e4) — see manual_pc_head_l2_
+        # recalibration. (An EARLIER per-doc scaling made head_l2=1e-3 act like lambda_w
+        # ~0.84, ~840x=n_docs too strong, collapsing topics-LR to ~0.53; that was fixed to
+        # absolute after the joint-vs-alternating de-risk REFUTED a jointness explanation —
+        # manual_pc_joint_vs_alternating: reference alternating reaches 0.874.) The INNER
+        # configs converge the head within each iteration but LAND ON the one-step result
+        # byte-for-byte (fixed-point equivalence), so the lever is the ridge MAGNITUDE, not
+        # step count. Discriminating row 'INNER l2=0': its 1e-3 fallback finitizes w UNLIKE
+        # one-step l2=0 (3.4e11), proving the branch fires.
         m0, gp0 = fit(spark, tr, V, weight_y=0.0, head=None)
         S_uns_m = posthoc_scores(m0, gp0, tr, te, Ytr, nodes, mask=Mtr)
 
-        # Distinguish "over-scaled ridge (w->0)" from "fundamental shape-vs-regularize
-        # tension": report HEAD AUC, topics-LR (shaping health), and |w_CK| per l2. If
-        # shaping (topics-LR ~0.96) survives at small l2 while the head improves, a sweet
-        # spot exists; if topics-LR dies at ANY l2>0, the head genuinely can't shape while
-        # regularized.
+        # Report HEAD AUC, topics-LR (shaping health), and |w_CK| per l2. At the corrected
+        # absolute scaling the good basin is wide (head_l2 ~1e-4..1e-2, topics-LR ~0.9);
+        # head_l2=0 blows up, head_l2>=~0.1 over-regularizes and collapses shaping.
         unsup_lr = _mean(auc_table(Yte, S_uns_m, nodes), nodes)
         print(f"\nhead configs — co-fit HEAD vs topics-LR (unsup posthoc-LR={unsup_lr:.3f}):", flush=True)
         configs = [("one-step l2=0", 0.0, 0),

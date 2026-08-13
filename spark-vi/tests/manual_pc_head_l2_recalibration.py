@@ -44,7 +44,7 @@ def main():
     nodes = list(range(1, h.C))
     n_tr = len(Xtr)
     print(f"D={h.D} n_train={n_tr} K={h.K_FIT} weight_y={h.WEIGHT_Y}  "
-          f"Hughes-match head_l2 ~ lambda_w/n_docs = 1e-3/{n_tr} = {1e-3/n_tr:.2e}",
+          f"head_l2 is now an ABSOLUTE ridge (= Hughes lambda_w); expect sweet spot ~1e-3",
           flush=True)
 
     spark = (pyspark.sql.SparkSession.builder.master("local[4]")
@@ -54,9 +54,12 @@ def main():
     try:
         tr = h.to_docs(Xtr, Ytr, Mtr)
         te = h.to_docs(Xte, Yte, np.ones((len(Xte), h.C)))
-        print("\nhead_l2 sweep (flat one-step Newton head):  ref alternating=0.874 "
-              "|w|~105", flush=True)
-        for l2 in (0.0, 1e-6, 3e-6, 1e-5, 1e-4, 1e-3):
+        # head_l2 is now an ABSOLUTE ridge (= Hughes lambda_w), so the sweet spot is
+        # ~lambda_w=1e-3 (not the old per-doc 1e-6). Sweep the absolute scale; expect
+        # topics-LR to hold ~0.9 up to ~1e-3 then collapse as the ridge over-regularizes.
+        print("\nhead_l2 sweep (ABSOLUTE ridge = lambda_w; flat one-step Newton head):  "
+              "ref alternating=0.874 |w|~105", flush=True)
+        for l2 in (0.0, 1e-4, 1e-3, 3e-3, 1e-2, 1e-1):
             mB, gpB = h.fit(spark, tr, V, weight_y=h.WEIGHT_Y, head=None, head_l2=l2)
             thB = h.thetas(mB, te, gpB)
             hd = h._mean(h.auc_table(Yte, np.array(
