@@ -147,6 +147,11 @@ def hier(S, M):
     return np.exp(np.log(np.clip(S, 1e-9, 1.0)) @ M.T)
 
 
+def _mean(d, ks):
+    v = [d[k] for k in ks if k in d]
+    return float(np.mean(v)) if v else float("nan")
+
+
 def main():
     import pyspark
     from spark_vi.models.topic.pc import DagClosureHead, _predict_proba_np
