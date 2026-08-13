@@ -166,6 +166,10 @@ class PCTopicModel:
         doc_batch_size: int = 2048,
         seed: int = 0,
         init_scale: float = 0.5,
+        fit_mode: str = "joint",
+        alt_rounds: int = 30,
+        alt_block_maxiter: int = 50,
+        alt_tol: float = 1e-6,
     ) -> None:
         self.K = int(K)
         self.C = int(C)
@@ -184,6 +188,24 @@ class PCTopicModel:
             raise ValueError("doc_batch_size must be a positive integer")
         self.seed = int(seed)
         self.init_scale = float(init_scale)
+        # Optimization mode — the joint-vs-alternating isolation dial.
+        #   'joint'       (default, faithful): L-BFGS-B over the CONCATENATED
+        #                 (w_KV, w_CK) vector, so the quasi-Newton curvature model
+        #                 spans the topic<->head cross-block. This is what Hughes /
+        #                 the oracle do; unchanged from before this knob existed.
+        #   'alternating': block-coordinate — repeatedly L-BFGS the topic block with
+        #                 the head fixed, then the head block with topics fixed. Holds
+        #                 EVERYTHING else identical (same objective, pi-MAP, L2, init,
+        #                 full-batch, same L-BFGS solver) so the ONLY difference from
+        #                 'joint' is whether the optimizer sees the coupled vector or
+        #                 alternates over blocks — isolating the online OnlinePCLDA
+        #                 scheme's alternating structure at reference convergence.
+        if fit_mode not in ("joint", "alternating"):
+            raise ValueError(f"fit_mode must be 'joint' or 'alternating', got {fit_mode!r}")
+        self.fit_mode = str(fit_mode)
+        self.alt_rounds = int(alt_rounds)
+        self.alt_block_maxiter = int(alt_block_maxiter)
+        self.alt_tol = float(alt_tol)
 
     # -- internal ----------------------------------------------------------
     def _loss_kwargs(self) -> dict:
@@ -332,6 +354,11 @@ class PCTopicModel:
 
         loss_kwargs = self._loss_kwargs()
 
+        if self.fit_mode == "alternating":
+            return self._fit_alternating(
+                x0, X, y_DC, y_rowmask, label_mask_DC, V, mult_const, loss_kwargs
+            )
+
         if self.doc_batch_size >= D:
             # --- Single-shot full-batch path (unchanged; byte-for-byte the pre-
             # minibatch behavior). Used whenever the whole corpus fits one batch,
@@ -381,6 +408,67 @@ class PCTopicModel:
         self.n_iter_ = int(res.nit)
 
         w_KV, w_CK = unpack_param_vec(res.x, K=self.K, V=V, C=self.C)
+        self.topics_ = np.asarray(softmax_rows(w_KV))
+        self.w_CK_ = np.asarray(w_CK)
+        self.Pi_ = np.asarray(
+            nef_map_pi_DK(
+                self.topics_, X, make_convex_alpha_minus_1(self.alpha),
+                pi_iters=self.pi_iters, pi_step_size=self.pi_step_size,
+            )
+        )
+        return self
+
+    def _fit_alternating(
+        self, x0, X, y_DC, y_rowmask, label_mask_DC, V, mult_const, loss_kwargs
+    ) -> "PCTopicModel":
+        """Block-coordinate fit: alternate L-BFGS over the topic and head blocks.
+
+        Isolates the joint-vs-alternating axis. ``_make_minibatch_value_and_grad``
+        yields the EXACT full-batch ``value_and_grad(vec)`` (one batch when
+        ``doc_batch_size >= D``), so each block sub-problem simply reuses it and
+        slices the gradient to its own coordinates — the partial derivative w.r.t. a
+        block IS that slice, exactly what L-BFGS-B needs. Same objective / pi-MAP /
+        L2 / init / solver as the joint path; only the coupling is severed.
+        """
+        D = X.shape[0]
+        n_w = self.K * V                                   # split: [w_KV | w_CK]
+        full_vg = self._make_minibatch_value_and_grad(
+            X, y_DC, y_rowmask, label_mask_DC, V, mult_const, loss_kwargs
+        )
+        vec = np.asarray(x0, dtype=np.float64).copy()
+        self.init_obj_ = float(full_vg(vec)[0])
+        self.n_doc_batches_ = int(np.ceil(D / self.doc_batch_size))
+
+        def block_vg(sub, sl):
+            v = vec.copy()
+            v[sl] = sub
+            val, g = full_vg(v)
+            return float(val), np.asarray(g[sl], dtype=np.float64)
+
+        topic_sl, head_sl = slice(0, n_w), slice(n_w, None)
+        prev = self.init_obj_
+        total_iters = 0
+        obj_trace = [prev]
+        for _ in range(self.alt_rounds):
+            rt = minimize(lambda s: block_vg(s, topic_sl), vec[topic_sl], jac=True,
+                          method="L-BFGS-B", options=dict(maxiter=self.alt_block_maxiter))
+            vec[topic_sl] = rt.x
+            rh = minimize(lambda s: block_vg(s, head_sl), vec[head_sl], jac=True,
+                          method="L-BFGS-B", options=dict(maxiter=self.alt_block_maxiter))
+            vec[head_sl] = rh.x
+            cur = float(full_vg(vec)[0])
+            total_iters += int(rt.nit) + int(rh.nit)
+            obj_trace.append(cur)
+            if abs(prev - cur) <= self.alt_tol * max(1.0, abs(prev)):
+                prev = cur
+                break
+            prev = cur
+
+        self.result_ = None
+        self.final_obj_ = prev
+        self.n_iter_ = total_iters
+        self.alt_obj_trace_ = obj_trace
+        w_KV, w_CK = unpack_param_vec(vec, K=self.K, V=V, C=self.C)
         self.topics_ = np.asarray(softmax_rows(w_KV))
         self.w_CK_ = np.asarray(w_CK)
         self.Pi_ = np.asarray(
