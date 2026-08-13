@@ -187,18 +187,23 @@ def main():
         m0, gp0 = fit(spark, tr, V, weight_y=0.0, head=None)
         S_uns_m = posthoc_scores(m0, gp0, tr, te, Ytr, nodes, mask=Mtr)
 
-        print("\nper-node held-out AUC — co-fit HEAD across head_l2, vs posthoc ceiling:", flush=True)
-        print(line("unsup posthoc-LR (msk)", auc_table(Yte, S_uns_m, nodes)), flush=True)
-        last = None
-        for l2 in (0.0, 5e-4, 2e-3):
+        # Distinguish "over-scaled ridge (w->0)" from "fundamental shape-vs-regularize
+        # tension": report HEAD AUC, topics-LR (shaping health), and |w_CK| per l2. If
+        # shaping (topics-LR ~0.96) survives at small l2 while the head improves, a sweet
+        # spot exists; if topics-LR dies at ANY l2>0, the head genuinely can't shape while
+        # regularized.
+        unsup_lr = _mean(auc_table(Yte, S_uns_m, nodes), nodes)
+        print(f"\nhead_l2 sweep (unsup posthoc-LR baseline={unsup_lr:.3f}):", flush=True)
+        for l2 in (0.0, 1e-6, 1e-5, 1e-4, 5e-4):
             mB, gpB = fit(spark, tr, V, weight_y=WEIGHT_Y, head=None, head_l2=l2)
             thB = thetas(mB, te, gpB)
-            hd = auc_table(Yte, np.array([_predict_proba_np(t, gpB["w_CK"], None) for t in thB]), nodes)
-            print(line(f"flat co-fit HEAD l2={l2:g}", hd), flush=True)
-            last = (mB, gpB)
-        mB, gpB = last
-        S_flat_m = posthoc_scores(mB, gpB, tr, te, Ytr, nodes, mask=Mtr)
-        print(line("flatPC posthoc-LR (msk)", auc_table(Yte, S_flat_m, nodes)), flush=True)
+            hd = _mean(auc_table(Yte, np.array([_predict_proba_np(t, gpB["w_CK"], None)
+                                                for t in thB]), nodes), nodes)
+            tl = _mean(auc_table(Yte, posthoc_scores(mB, gpB, tr, te, Ytr, nodes, mask=Mtr),
+                                 nodes), nodes)
+            wmax = float(np.abs(gpB["w_CK"]).max())
+            print(f"  l2={l2:<6g}  HEAD={hd:.3f}  topics-LR(shaping)={tl:.3f}  |w_CK|max={wmax:.2f}",
+                  flush=True)
     finally:
         spark.stop()
 
