@@ -109,6 +109,87 @@ def test_strip_features_all_dropped_yields_empty_vector():
     assert out.indices.tolist() == [] and out.values.tolist() == []
 
 
+# -- Gated-PC frontier -> (label, labelMask) adapter (Step A) ----------------
+
+def _two_branch_dag():
+    # Two disjoint branches (no diamond) so the closure-mask neighborhood is
+    # discriminating: 100 -> 200(A), 300(B); 200 -> 400(A1); 300 -> 500(B1).
+    edges = [(100, 200), (100, 300), (200, 400), (300, 500)]
+    return build_condition_dag(edges, anchor=100, node_ids=[200, 300, 400, 500])
+
+
+def test_frontier_to_label_closure_and_full_mask():
+    from charmpheno.omop.case_finding_assembly import frontier_to_label
+    dag = _diamond_dag()
+    parent_int, int2cid, cid2int = dag.to_engine()
+    lay = DagLayout(parent_int, n_bg=2, tpn=1)
+    C = len(int2cid)
+    assert C == 5                       # root + 4 nodes; label index c == engine id
+    assert cid2int[100] == 0            # anchor is engine-id 0
+    # frontier {400}: is-a closure = {root, 200, 300, 400}; 500 stays 0.
+    label, mask = frontier_to_label([cid2int[400]], lay, C)
+    on = {c for c in range(C) if label[c] == 1.0}
+    assert on == {cid2int[100], cid2int[200], cid2int[300], cid2int[400]}
+    assert label[cid2int[500]] == 0.0
+    assert mask.tolist() == [1.0] * C   # 'full' (default) observes every node
+
+
+def test_frontier_to_label_background_is_all_zero():
+    from charmpheno.omop.case_finding_assembly import frontier_to_label
+    dag = _diamond_dag()
+    parent_int, int2cid, cid2int = dag.to_engine()
+    lay = DagLayout(parent_int, n_bg=2, tpn=1)
+    C = len(int2cid)
+    # background doc (empty frontier) -> all-zero label (incl. root), but under
+    # the default mask it is a known negative everywhere.
+    label, mask = frontier_to_label([], lay, C)
+    assert label.tolist() == [0.0] * C
+    assert mask.tolist() == [1.0] * C
+
+
+def test_frontier_to_label_incomparable_union_of_closures():
+    from charmpheno.omop.case_finding_assembly import frontier_to_label
+    dag = _diamond_dag()
+    parent_int, int2cid, cid2int = dag.to_engine()
+    lay = DagLayout(parent_int, n_bg=2, tpn=1)
+    C = len(int2cid)
+    # {400, 500}: the two closures together cover every node -> all ones.
+    label, _ = frontier_to_label([cid2int[400], cid2int[500]], lay, C)
+    assert label.tolist() == [1.0] * C
+
+
+def test_frontier_to_label_closure_mask_observes_only_neighborhood():
+    from charmpheno.omop.case_finding_assembly import frontier_to_label
+    dag = _two_branch_dag()
+    parent_int, int2cid, cid2int = dag.to_engine()
+    lay = DagLayout(parent_int, n_bg=2, tpn=1)
+    C = len(int2cid)
+    # frontier {A1=400}: active closure = {root, 200, 400}. closure mask observes
+    # the active set + DAG siblings (300 is a sibling of 200 under the root); the
+    # far branch leaf 500 (B1) stays UNOBSERVED.
+    label, mask = frontier_to_label(
+        [cid2int[400]], lay, C, label_mask_mode="closure")
+    on = {c for c in range(C) if label[c] == 1.0}
+    assert on == {cid2int[100], cid2int[200], cid2int[400]}
+    observed = {c for c in range(C) if mask[c] == 1.0}
+    assert cid2int[300] in observed         # sibling of 200 -> observed negative
+    assert cid2int[500] not in observed     # far branch -> unobserved
+    assert label[cid2int[300]] == 0.0       # sibling is a negative, not a positive
+    # closure-mode background doc observes nothing.
+    _, msk_bg = frontier_to_label([], lay, C, label_mask_mode="closure")
+    assert msk_bg.tolist() == [0.0] * C
+
+
+def test_frontier_to_label_rejects_bad_mask_mode():
+    import pytest
+    from charmpheno.omop.case_finding_assembly import frontier_to_label
+    dag = _diamond_dag()
+    parent_int, int2cid, cid2int = dag.to_engine()
+    lay = DagLayout(parent_int, n_bg=2, tpn=1)
+    with pytest.raises(ValueError, match="label_mask_mode"):
+        frontier_to_label([], lay, len(int2cid), label_mask_mode="bogus")
+
+
 import datetime as dt
 from charmpheno.omop.doc_spec import PatientCohortDocSpec
 
