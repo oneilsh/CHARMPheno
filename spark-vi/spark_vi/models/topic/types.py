@@ -122,3 +122,32 @@ class GatedBOWDocument:
     counts: np.ndarray
     length: int
     frontier: frozenset = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class GatedPCDocument:
+    """Document for the Gated-PC composition — carries BOTH the DAG frontier (for the
+    topic-side gate) and the PC outcome labels (for the label-side supervised head).
+
+    It is the union of :class:`PCDocument` and :class:`GatedBOWDocument`, and is
+    duck-compatible with each consumer:
+      * ``GatedOnlineLDA.local_update`` reads ``.indices/.counts/.frontier`` to gate
+        each doc's E-step to ``DagLayout.allowed_set(frontier)``;
+      * the ``SupervisedHead`` reads ``.indices/.counts/.y/.label_mask`` to shape and
+        predict the C outcome heads off the (ungated, label-free) topic θ.
+
+    ``frontier`` gates topic TRAINING (welding node topics to their subtree's docs);
+    ``y``/``label_mask`` supervise PREDICTION. The two are independent DAGs in general
+    (the topic-side DagLayout need not equal the head's closure_parents), though for
+    case-finding both are the same disease DAG. Empty frontier = ungated background doc
+    (see GatedBOWDocument); all-zero label_mask = words shape topics but no head trains.
+
+    Invariants (callers' responsibility — not enforced at construction): as PCDocument
+    (indices/counts/length/y/label_mask) plus GatedBOWDocument (frontier).
+    """
+    indices: np.ndarray
+    counts: np.ndarray
+    length: int
+    y: np.ndarray
+    label_mask: np.ndarray
+    frontier: frozenset = frozenset()

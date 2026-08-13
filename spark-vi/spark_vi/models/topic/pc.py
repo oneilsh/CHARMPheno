@@ -659,6 +659,7 @@ class OnlinePCLDA(VIModel):
         cavi_tol: float = 1e-3,
         random_seed: int | None = None,
         head: "SupervisedHead | None" = None,
+        topic_engine: "OnlineLDA | None" = None,
     ) -> None:
         if C < 1:
             raise ValueError(f"C must be >= 1, got {C}")
@@ -685,24 +686,46 @@ class OnlinePCLDA(VIModel):
         if head_newton_ridge < 0:
             raise ValueError(f"head_newton_ridge must be >= 0, got {head_newton_ridge}")
 
-        # The unsupervised LDA engine. Every LDA global (λ, α, η) and every LDA
-        # update is owned by this delegate, so at weight_y == 0 OnlinePCLDA IS
-        # OnlineLDA on the numbers — the increment-1 equivalence gate holds by
-        # construction. OnlineLDA validates K/vocab_size/alpha/eta/gamma_shape/
-        # cavi_* for us; PCDocument is duck-compatible with the BOWDocument its
-        # local_update/infer_local consume (both only touch .indices/.counts).
-        self._lda = OnlineLDA(
-            K=K,
-            vocab_size=vocab_size,
-            alpha=alpha,
-            eta=eta,
-            optimize_alpha=optimize_alpha,
-            optimize_eta=optimize_eta,
-            gamma_shape=gamma_shape,
-            cavi_max_iter=cavi_max_iter,
-            cavi_tol=cavi_tol,
-            random_seed=random_seed,
-        )
+        # The topic engine. Every LDA global (λ, α, η) and every topic-side update
+        # is owned by this delegate, so at weight_y == 0 OnlinePCLDA IS the delegate
+        # on the numbers — the increment-1 equivalence gate holds by construction.
+        # OnlineLDA validates K/vocab_size/alpha/eta/gamma_shape/cavi_* for us;
+        # PCDocument is duck-compatible with the BOWDocument its local_update/
+        # infer_local consume (both only touch .indices/.counts).
+        #
+        # Gated-PC composition (topic-side seam): a caller may INJECT a pre-built
+        # OnlineLDA subclass — e.g. GatedOnlineLDA, whose gated E-step welds each
+        # node's topics to its DAG subtree's documents. Because the head is topic-
+        # engine-agnostic (it reads only global_params["lambda"]/alpha/K to form the
+        # label-free θ it shapes and predicts on), the DAG-gated topic-side seam and
+        # the supervised label-side head compose by construction — they touch
+        # different seams. When injected, K/V come from the engine and the LDA-
+        # building kwargs (K, alpha, eta, optimize_*, gamma_shape, cavi_*) are the
+        # engine's own; passing a conflicting K here is a caller error.
+        if topic_engine is not None:
+            if not isinstance(topic_engine, OnlineLDA):
+                raise TypeError(
+                    "topic_engine must be an OnlineLDA (or subclass, e.g. "
+                    f"GatedOnlineLDA); got {type(topic_engine).__name__}"
+                )
+            if topic_engine.V != int(vocab_size):
+                raise ValueError(
+                    f"topic_engine.V ({topic_engine.V}) != vocab_size ({vocab_size})"
+                )
+            self._lda = topic_engine
+        else:
+            self._lda = OnlineLDA(
+                K=K,
+                vocab_size=vocab_size,
+                alpha=alpha,
+                eta=eta,
+                optimize_alpha=optimize_alpha,
+                optimize_eta=optimize_eta,
+                gamma_shape=gamma_shape,
+                cavi_max_iter=cavi_max_iter,
+                cavi_tol=cavi_tol,
+                random_seed=random_seed,
+            )
         self.K = self._lda.K
         self.V = self._lda.V
         self.C = int(C)
