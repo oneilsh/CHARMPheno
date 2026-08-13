@@ -35,7 +35,7 @@ def main():
     print(f"corpus D={h.D} V(used)={X.shape[1]} K={h.K_FIT} C={h.C} weight_y={h.WEIGHT_Y}", flush=True)
 
     ref = PCTopicModel(K=h.K_FIT, C=h.C, weight_y=h.WEIGHT_Y, alpha=1.05,
-                       lambda_w=0.001, max_iter=200, doc_batch_size=1024, seed=0)
+                       lambda_w=0.001, max_iter=150, doc_batch_size=128, seed=0)
     ref.fit(Xtr, Ytr, label_mask=Mtr)
 
     def auc(P):
