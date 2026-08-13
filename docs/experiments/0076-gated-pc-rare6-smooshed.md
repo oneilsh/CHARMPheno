@@ -59,7 +59,11 @@ with_dag_head: false
 baseline_max_iter: 100   # unsup topics converge faster than the head.
 min_label_count: 20      # AoU small-cell floor: mask rare nodes from the macro.
 seed: 42
-cache_uri: gs://dataproc-staging-getting-started-with-registered-tier-data-copy/charm/case_finding_cache
+# Known-good in-cluster HDFS cache (same path the rare6 dag_placement runs use).
+# HDFS is per-cluster ephemeral (a fresh cluster rebuilds the bundle), but writes
+# reliably within a run. Point at a persistent GCS bucket only if you have a valid
+# one for this workspace (a wrong bucket now just warns and rebuilds, not aborts).
+cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
 ---
 
 # 0076 — Gated-PC rare-disease case-finding (smooshed vocab)

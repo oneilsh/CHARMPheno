@@ -83,6 +83,29 @@ def test_bundle_cache_miss_then_hit(spark, tmp_path):
     assert b1.parent_int == b2.parent_int == built.parent_int
 
 
+def test_bundle_cache_write_failure_is_non_fatal(spark, tmp_path, monkeypatch, capsys):
+    """A write-through cache failure (e.g. a wrong/unwritable cache_uri like a
+    missing GCS bucket) must NOT abort a run that already paid the assembly cost:
+    warn and return the in-memory bundle. Regression for the 404-on-save that
+    killed exp 0076 after a 170s build."""
+    import _case_finding_cache as ccache
+    built = _tiny_bundle(spark)
+
+    def _boom(*a, **k):
+        raise RuntimeError("404 Not Found: bucket does not exist")
+
+    monkeypatch.setattr(ccache, "save", _boom)
+    params = dict(source_table="condition_era", person_mod=10, vocab_size=5000,
+                  min_df=20, min_patient_count=20, doc_min_length=0,
+                  prior_obs_days=365, window_days=365, disease="diabetes", min_n=50,
+                  holdout_frac=0.2, n_bg=2, tpn=1, cdr="p.d", billing="bp")
+    out = ccache.load_or_build_case_finding_bundle(
+        spark, cache_uri=f"file://{tmp_path}/nope", _assemble_fn=lambda s, **k: built,
+        **params)
+    assert out is built                          # in-memory bundle returned, no raise
+    assert "WARNING" in capsys.readouterr().out  # and the failure was surfaced
+
+
 def test_bundle_cache_miss_then_hit_without_split_salt(spark, tmp_path):
     """Regression: the driver does NOT pass split_salt (there is no --split-salt),
     so a cached run must not require it. compute_bundle_cache_key defaults it to
