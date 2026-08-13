@@ -91,6 +91,30 @@ def _row_to_pc_document(
     )
 
 
+def _row_to_gated_pc_document(
+    row,
+    features_col: str,
+    label_col: str | None,
+    label_mask_col: str | None,
+    frontier_col: str,
+    C: int,
+):
+    """Build a GatedPCDocument (Gated-PC): a PCDocument plus a DAG frontier.
+
+    Reuses :func:`_row_to_pc_document` for the features/label/mask fields, then reads
+    ``frontier_col`` — an array of node ids (empty/None = ungated background) — and
+    attaches it so the gated E-step can restrict this doc's training to its subtree.
+    """
+    from spark_vi.models.topic.types import GatedPCDocument
+    pc = _row_to_pc_document(row, features_col, label_col, label_mask_col, C)
+    raw_f = row[frontier_col]
+    frontier = frozenset(int(x) for x in (raw_f or []))
+    return GatedPCDocument(
+        indices=pc.indices, counts=pc.counts, length=pc.length,
+        y=pc.y, label_mask=pc.label_mask, frontier=frontier,
+    )
+
+
 class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams):
     """Shared Param surface for OnlinePCLDAEstimator and OnlinePCLDAModel.
 
@@ -241,6 +265,46 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "head direction (AUC is scale-invariant to head magnitude). Default 0.01",
         typeConverter=TypeConverters.toFloat,
     )
+    headL2 = Param(
+        Params._dummy(), "headL2",
+        "ABSOLUTE L2 ridge on the head weights w_CK for headOptimizer='newton' "
+        "(= Hughes lambda_w, the ridge on the corpus-summed head gradient, so "
+        "|w| ~ |g|/headL2). Default 1e-3; the good basin is wide (~1e-4..1e-2). "
+        "0.0 disables it and BLOWS UP on the separable topics PC creates (ADR 0041). "
+        "Distinct from lambdaW (the 'sgd' head's ridge).",
+        typeConverter=TypeConverters.toFloat,
+    )
+    # -- Topic-side DAG gate (Gated-PC composition; ADR 0042) ---------------
+    gateParent = Param(
+        Params._dummy(), "gateParent",
+        "JSON-encoded topic-side DAG parent map {child_node: parent_node or "
+        "[parent_nodes]} (root omitted) selecting the GATED topic engine "
+        "(GatedOnlineLDA): each node's topic block is welded to its DAG-subtree's "
+        "documents via the gated E-step. Empty (default) = ungated OnlineLDA. When "
+        "set, K is DERIVED from the layout (gateNBg + n_nodes*gateTpn), overriding k, "
+        "and every training row must carry frontierCol. Independent of closureParents "
+        "(topic-side gate vs label-side head — they may use the same or different DAGs).",
+        typeConverter=TypeConverters.toString,
+    )
+    gateNBg = Param(
+        Params._dummy(), "gateNBg",
+        "number of shared background topics for the topic-side gate (gateParent); "
+        "only used when gateParent is set. Default 2.",
+        typeConverter=TypeConverters.toInt,
+    )
+    gateTpn = Param(
+        Params._dummy(), "gateTpn",
+        "topics per DAG node for the topic-side gate (gateParent); only used when "
+        "gateParent is set. Default 1.",
+        typeConverter=TypeConverters.toInt,
+    )
+    frontierCol = Param(
+        Params._dummy(), "frontierCol",
+        "column carrying each doc's DAG frontier (array of most-specific attested "
+        "node ids; empty = background). Required when gateParent is set; gates that "
+        "doc's topic training to DagLayout.allowed_set(frontier).",
+        typeConverter=TypeConverters.toString,
+    )
     closureParents = Param(
         Params._dummy(), "closureParents",
         "JSON-encoded length-C list of parent-index lists selecting the DAG-CLOSURE "
@@ -285,6 +349,19 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
 
     def getClosureParents(self) -> str:
         return str(self.getOrDefault(self.closureParents))
+
+    def setGateParent(self, parent) -> "OnlinePCLDAEstimator":
+        """Select the GATED topic engine from a DAG parent map {child: parent |
+        [parents]} (JSON-encoded into the string Param). Empty/None = ungated."""
+        if parent is None or parent == "":
+            return self._set(gateParent="")
+        encoded = parent if isinstance(parent, str) else json.dumps(
+            {int(c): ([int(x) for x in p] if isinstance(p, (list, tuple, set))
+                      else int(p)) for c, p in parent.items()})
+        return self._set(gateParent=encoded)
+
+    def getGateParent(self) -> str:
+        return str(self.getOrDefault(self.gateParent))
 
 
 def _build_model_and_config(
@@ -336,6 +413,29 @@ def _build_model_and_config(
                 "DAG must have one node per label head")
         head = DagClosureHead(parents)
 
+    # Topic-side DAG gate (Gated-PC, ADR 0042): when gateParent is supplied, inject a
+    # GatedOnlineLDA topic engine whose gated E-step welds each node's topic block to
+    # its DAG subtree's documents. K is DERIVED from the layout (overriding k); the head
+    # (flat or DAG-closure above) rides on the ungated label-free theta unchanged.
+    topic_engine = None
+    gate_raw = str(estimator.getOrDefault("gateParent"))
+    if gate_raw:
+        from spark_vi.models.topic.dag_placement import DagLayout
+        from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+        try:
+            parent_map = {int(c): p for c, p in json.loads(gate_raw).items()}
+        except (json.JSONDecodeError, AttributeError, ValueError) as exc:
+            raise ValueError(f"gateParent is not a valid JSON DAG map: {exc}") from exc
+        lay = DagLayout(parent_map, n_bg=int(estimator.getOrDefault("gateNBg")),
+                        tpn=int(estimator.getOrDefault("gateTpn")))
+        k = lay.K                                    # layout owns K, overrides the k param
+        alpha = np.full(lay.K, 1.0 / lay.K, dtype=np.float64)
+        topic_engine = GatedOnlineLDA(
+            lay, vocab_size, alpha=alpha, eta=1.0 / lay.K,
+            gamma_shape=estimator.getOrDefault("gammaShape"),
+            cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
+            cavi_tol=estimator.getOrDefault("caviTol"), random_seed=seed)
+
     model = OnlinePCLDA(
         K=k,
         vocab_size=vocab_size,
@@ -349,6 +449,7 @@ def _build_model_and_config(
         head_optimizer=str(estimator.getOrDefault("headOptimizer")),
         head_lr=float(estimator.getOrDefault("headLr")),
         head_newton_ridge=float(estimator.getOrDefault("headNewtonRidge")),
+        head_l2=float(estimator.getOrDefault("headL2")),
         alpha=alpha,
         eta=eta,
         optimize_alpha=estimator.getOrDefault("optimizeDocConcentration"),
@@ -358,6 +459,7 @@ def _build_model_and_config(
         cavi_tol=estimator.getOrDefault("caviTol"),
         random_seed=seed,
         head=head,
+        topic_engine=topic_engine,
     )
 
     mbf = float(estimator.getOrDefault("subsamplingRate"))
@@ -380,7 +482,8 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     numLabels=1, weightY=0.0, probabilityCol="probability",
     lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, topicTrust=0.1,
     weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, headNewtonRidge=0.01,
-    closureParents="", warmStartFrom="",
+    headL2=1e-3, closureParents="", warmStartFrom="",
+    gateParent="", gateNBg=2, gateTpn=1, frontierCol="frontier",
 )
 
 
@@ -424,7 +527,12 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         headOptimizer: str = "sgd",
         headLr: float = 0.05,
         headNewtonRidge: float = 0.01,
+        headL2: float = 1e-3,
         closureParents: str = "",
+        gateParent: str = "",
+        gateNBg: int = 2,
+        gateTpn: int = 1,
+        frontierCol: str = "frontier",
         warmStartFrom: str = "",
         # _PersistenceParams kwargs — see that mixin's docstring; these MUST
         # appear here explicitly (not just on the mixin) for kwarg-style
@@ -513,14 +621,27 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
 
         # Column set to pull: features always; label columns only when present
         # (tolerated-absent at weightY == 0). Threaded like the STM shim threads
-        # its covariate column.
+        # its covariate column. When the topic-side gate is on (gateParent set),
+        # also pull frontierCol and marshal GatedPCDocument (the gated E-step reads
+        # .frontier; the head reads .y/.label_mask — same row type serves both).
+        gated = bool(str(self.getOrDefault("gateParent")))
+        frontier_col = self.getOrDefault("frontierCol") if gated else None
+        if gated and frontier_col not in dataset.columns:
+            raise ValueError(
+                f"gateParent is set but frontierCol={frontier_col!r} is not a column "
+                f"of the input; the gated fit needs a per-doc frontier.")
         select_cols = [features_col]
         if label_col is not None:
             select_cols.append(label_col)
         if label_mask_col is not None:
             select_cols.append(label_mask_col)
+        if frontier_col is not None:
+            select_cols.append(frontier_col)
 
-        def _to_pc(row, _fc=features_col, _lc=label_col, _mc=label_mask_col, _C=C):
+        def _to_pc(row, _fc=features_col, _lc=label_col, _mc=label_mask_col,
+                   _frc=frontier_col, _C=C):
+            if _frc is not None:
+                return _row_to_gated_pc_document(row, _fc, _lc, _mc, _frc, _C)
             return _row_to_pc_document(row, _fc, _lc, _mc, _C)
 
         pc_rdd = (

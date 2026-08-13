@@ -162,6 +162,61 @@ def test_pc_shim_dag_closure_head_end_to_end(spark):
     assert P[3] <= P[1] + 1e-9 and P[3] <= P[2] + 1e-9
 
 
+def test_pc_shim_gated_pc_end_to_end(spark):
+    # gateParent injects the GATED topic engine (Gated-PC, ADR 0042): K is derived from
+    # the layout (overriding k), each row's frontierCol gates its topic training, and the
+    # (DAG-closure) head rides on the ungated theta. Fit + transform end-to-end; the
+    # probability column is the closure product over the gate-derived topics.
+    import json
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
+    from pyspark.ml.linalg import Vectors
+    parent = {1: 0, 2: 0, 3: 1, 4: 1}               # nodes 1..4; K = nBg(3) + 4 = 7
+    closure = [[], [0], [0], [1], [1]]              # C = 5 label heads (ids 0..4)
+    rng = np.random.default_rng(0)
+    V = 21
+    rows = []
+    for _ in range(40):
+        leaf = int(rng.choice([3, 4]))
+        ids = {leaf, 1, 0}                          # closure of a leaf under node 1
+        counts = np.zeros(V)
+        for w in rng.integers(0, V, size=10):
+            counts[w] += 1.0
+        idx = sorted(np.nonzero(counts)[0].tolist())
+        fv = Vectors.sparse(V, idx, [float(counts[j]) for j in idx])
+        y = [1.0 if c in ids else 0.0 for c in range(5)]
+        rows.append((fv, y, [leaf]))
+    df = spark.createDataFrame(rows, ["features", "label", "frontier"])
+
+    est = OnlinePCLDAEstimator(
+        k=99, maxIter=6, seed=0, subsamplingRate=1.0,
+        numLabels=5, labelCol="label", weightY=30.0, gradCaviIters=10,
+        headOptimizer="newton", headLr=0.7, closureParents=json.dumps(closure),
+        frontierCol="frontier",
+    ).setGateParent(parent)
+    est._set(gateNBg=3, gateTpn=1)
+    model = est.fit(df)
+
+    from spark_vi.models.topic.gated_lda import GatedOnlineLDA
+    # K comes from the layout (3 + 4*1 = 7), NOT the k=99 param.
+    assert model._result.global_params["lambda"].shape[0] == 7
+    assert not np.allclose(model.headWeights(), 0.0)          # gated head trained
+    P = np.asarray(model.transform(df).select("probability").head()[0].toArray())
+    assert P.shape == (5,)
+    assert P[1] <= P[0] + 1e-9 and P[3] <= P[1] + 1e-9        # closure monotonicity holds
+
+
+def test_pc_shim_gated_requires_frontier_col(spark):
+    # gateParent set but frontierCol missing from the input -> fail fast.
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
+    rows, cols, V = _block_rows(seed=1, with_labels=True)
+    df = spark.createDataFrame(rows, cols)                    # no 'frontier' column
+    est = OnlinePCLDAEstimator(
+        k=5, maxIter=2, numLabels=1, labelCol="label", weightY=1.0,
+    ).setGateParent({1: 0})
+    with pytest.raises(ValueError, match="frontierCol"):
+        est.fit(df)
+
+
 def test_pc_shim_rejects_closure_parents_count_mismatch(spark):
     # closureParents length must equal numLabels — fail fast with a clear message.
     import json
