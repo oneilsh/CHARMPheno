@@ -221,8 +221,21 @@ see How to run. The co-fit-head numbers are void for this run due to the blow-up
   starving the node topics (Σλ_k min ~31). ✅ set for run 3.
 - **Raise `head_l2` 1e-3 → 1e-2 + cap at 100 iters** to prevent the late-iter head
   blow-up. ✅ set for run 3.
-- **(durable fix, if run 3 still misbehaves) Head trust-region clamp.** The topic
-  side has `topic_trust` (working — Σλ stable); the head side has only ridge+damping
-  and blew up. The symmetric fix is a per-iteration cap on the Newton head step
-  (clamp ‖Δw‖ to a fraction of ‖w‖, or an absolute bound) in `OnlinePCLDA` — an
-  engine change, so deferred to a validated follow-up rather than bolted on mid-run.
+- **DURABLE FIX (decided): Firth / Jeffreys-prior penalized logistic head.** The
+  late-iter blow-up is *separation* — the converged gated topics make each node's
+  logistic problem linearly separable, so the MLE runs to ∞. The current levers
+  (`head_l2`, `head_newton_ridge`, `head_lr`) all bound `|w|` with a tunable knob;
+  a step clamp would reintroduce a *timescale* knob (the two-timescale pathology we
+  fought in 0065). Firth's penalty `+½·log det I(β)` is the **parameter-free** cure:
+  it's the Jeffreys prior (determined by the Fisher information, nothing to tune),
+  and `log det I → −∞` as `|w| → ∞`, so it self-regularizes *exactly* at separation
+  and guarantees finite estimates. Unlike unit-norm (which discards the magnitude →
+  squashed, uncalibrated logits), Firth keeps a **finite, bias-reduced, calibrated**
+  probability — interpretable per-patient P(node), the deliverable we do want.
+  Cost: predictively ~none (often a hair better on rare nodes with few positives —
+  our regime); compute ~free (the head aggregation is a rounding error next to the
+  per-doc CAVI E-step); real cost is code/test complexity (leverages
+  `h_d = p_d(1−p_d)·θ_dᵀH⁻¹θ_d` reuse the Newton `H⁻¹`, folded into each inner IRLS
+  step so `H` stays conditioned). **Sequencing:** implement AFTER run 3 so runs 2/3
+  (the `head_l2` ridge stopgap) are the comparators. Then run 4 can drop `head_l2`.
+  Rejected alternative: head trust-region step clamp (a timescale knob).
