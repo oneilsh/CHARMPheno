@@ -746,6 +746,7 @@ def build_gated_pc_args(
         "--cavi-tol", str(effective.get("cavi_tol", 1e-3)),
         "--baseline-max-iter", str(effective.get("baseline_max_iter", -1)),
         "--min-label-count", str(effective.get("min_label_count", 20)),
+        "--num-partitions", str(effective.get("num_partitions", 0)),
         "--out-dir", str(out_dir),
     ]
     if effective.get("seed") is not None:
