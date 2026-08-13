@@ -166,3 +166,34 @@ settled 0075 damped-head values), `topic_trust 0.1→0.05`, `weight_y_warmup_ite
 but the Σλ blow-up risked degrading the gated_pc topics themselves → a
 misleadingly negative delta, so run 1 was not a clean test. If run 2 still drifts,
 the next lever is `weight_y` (50→20–30, gentler correction).
+
+### Run 2 (2026-08-13) — parallelism fixed; head spikes-and-recovers; Σλ stable
+
+`num_partitions: 96` + `spark.locality.wait=0s` fixed the under-parallelization
+(run 1 was pinned to ~2 executors / 8 partitions at ~90s/iter → **~12s/iter**).
+ELBO smooth despite the 10% minibatch (−7.7M → −3.6M by iter 78).
+
+- **Head `|w_CK|` spikes and RECOVERS, not diverges:** e.g. iters 67–78
+  50→31→103→192→**286**→179→125→88→61→43→31→24. Occasional near-singular
+  minibatch H_c → a big IRLS step, damped back by head_lr=0.3 + ridge=0.05.
+  Bounded chasing of a still-moving θ, NOT runaway. And `|w_CK|`≈1e2 is far below
+  the recalibration equilibrium (~1e4 at head_l2=1e-3), and `pc_topics_lr` doesn't
+  read the head anyway — so this is cosmetic to the headline.
+- **`Σλ_k min` is a non-issue (plateaued ~31–38):** the earlier apparent "collapse"
+  (1.67e3→142) LEVELED OFF, not drained to zero. It's just under-supported topics
+  under the sparse LDA prior with K > what short 1yr docs support (SO's call) — not
+  degenerate drift. `Σλ_k max` stable ~5.8e5.
+
+_(pc_topics_lr headline pending run completion.)_
+
+## Follow-ups (next run)
+
+- **Extend the feature history beyond 1 year** (`lookback_days: 365 → 1825`, 5yr):
+  richer per-doc BOW → more mass to support K=170, and a fairer test of whether the
+  rare phenotype is a hidden-low-mass signal. The short 1yr window is likely
+  starving the node topics (Σλ_k min ~31). This is the main lever for run 3.
+- **(optional) Head step-norm clamp.** If the transient `|w_CK|` spikes (→286) ever
+  visibly perturb the topic correction, add a trust-region cap on the per-iteration
+  Newton head step (analogous to `topic_trust` on the topic side) so a single
+  near-singular minibatch can't take a giant step. Not needed unless the headline
+  suffers — the spikes currently recover on their own.
