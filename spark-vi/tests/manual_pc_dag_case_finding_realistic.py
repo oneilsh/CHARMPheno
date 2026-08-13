@@ -95,13 +95,14 @@ def to_docs(X, Y, mask):
     return docs
 
 
-def fit(spark, docs, V, *, weight_y, head, head_l2=0.0, head_inner_iters=0):
+def fit(spark, docs, V, *, weight_y, head, head_l2=0.0, head_inner_iters=0,
+        grad_cavi_iters=10):
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.topic.pc import OnlinePCLDA
     model = OnlinePCLDA(K=K_FIT, vocab_size=V, C=C, weight_y=weight_y, alpha=1.05,
-                        grad_cavi_iters=10, random_seed=0, head_optimizer="newton",
-                        head_lr=0.7, weight_y_warmup_iters=10, head_l2=head_l2,
-                        head_inner_iters=head_inner_iters, head=head)
+                        grad_cavi_iters=grad_cavi_iters, random_seed=0,
+                        head_optimizer="newton", head_lr=0.7, weight_y_warmup_iters=10,
+                        head_l2=head_l2, head_inner_iters=head_inner_iters, head=head)
     cfg = VIConfig(max_iterations=MAX_ITERS, learning_rate_tau0=64.0,
                    learning_rate_kappa=0.6, random_seed=0, convergence_tol=1e-12)
     rdd = spark.sparkContext.parallelize(docs, numSlices=8).persist()
