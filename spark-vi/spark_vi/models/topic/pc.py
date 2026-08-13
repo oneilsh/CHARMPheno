@@ -648,6 +648,8 @@ class OnlinePCLDA(VIModel):
         head_lr: float = 0.05,
         head_newton_ridge: float = 1e-2,
         head_l2: float = 0.0,
+        head_inner_iters: int = 0,
+        head_sample_cap: int = 20000,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
         optimize_alpha: bool = False,
@@ -737,6 +739,17 @@ class OnlinePCLDA(VIModel):
         # steps per iteration, Hughes-style), not by regularizing it. Keep head_l2 small
         # (blowup guard) if used at all. 0.0 (default) = relative-ridge-only behavior.
         self.head_l2 = float(head_l2)
+        # 'newton' + FLAT head: CONVERGE the head each SVI iteration (Hughes-style)
+        # instead of one aggregated Newton step, by collecting a bounded subsample of
+        # the per-doc label-free (theta, y, obs) design to the driver and running
+        # head_inner_iters full-Newton IRLS steps on it (weak fixed L2 = head_l2 as a
+        # per-example lambda_w, default 1e-3). 0 = the prior one-step behavior. This is
+        # the fix for the one-step head's under-convergence (it lags the moving topics
+        # and, with the relative ridge, oscillates on separable topics); the tradeoff is
+        # that it ships raw theta to the driver (bounded by head_sample_cap), unlike the
+        # aggregatable one-step Newton (ADR 0039).
+        self.head_inner_iters = int(head_inner_iters)
+        self.head_sample_cap = int(head_sample_cap)
         # Driver-side global-step counter, used only for weight_y warmup. Bumped
         # once per update_global call (the runner drives that single-threaded on
         # the driver), so it is a faithful iteration index without threading t
@@ -841,7 +854,25 @@ class OnlinePCLDA(VIModel):
                 expElogbeta, w_CK, rows, alpha_vec, self.K, self.grad_cavi_iters)
             if hess is not None:
                 stats["head_hess_stat"] = hess
+        # Inner-loop head fit (flat head only): collect a bounded subsample of this
+        # partition's label-free head design (theta, sign(y), obs) so update_global can
+        # CONVERGE the head on the driver. Only the observed cells matter; theta is the
+        # same K-dim label-free CAVI mean the head predicts with.
+        if (self.head_inner_iters > 0 and self.head_optimizer == "newton"
+                and getattr(self._head, "_closure_matrix", None) is None):
+            sample = rows[: self.head_sample_cap]
+            if sample:
+                th = np.array([_cavi_theta_anp(
+                    expElogbeta[:, d.indices], np.asarray(d.counts, np.float64),
+                    alpha_vec, self.K, self.grad_cavi_iters) for d in sample])
+                stats["head_theta"] = th
+                stats["head_s"] = np.array(
+                    [np.sign(np.asarray(d.y, np.float64) - 0.01) for d in sample])
+                stats["head_obs"] = np.array(
+                    [np.asarray(d.label_mask, np.float64) for d in sample])
         return stats
+
+    _HEAD_DESIGN = ("head_theta", "head_s", "head_obs")
 
     def update_global(
         self,
@@ -962,6 +993,33 @@ class OnlinePCLDA(VIModel):
         #              needs no raw θ on the driver. This also feeds the topic correction
         #              a VALID head signal each iter (the correction's ∂loss_y/∂θ flows
         #              through w_CK).
+        if self.head_inner_iters > 0 and "head_theta" in target_stats:
+            # INNER-LOOP head fit (flat head): converge w_CK to the weakly-L2-regularized
+            # logistic MLE on the collected label-free design (theta, y, obs) — the
+            # Hughes-faithful "converge the head each iteration" that one aggregated
+            # Newton step cannot do. Full undamped Newton with a FIXED per-example L2
+            # (head_l2 as lambda_w, default 1e-3) keeps w finite on separable topics.
+            Th = np.asarray(target_stats["head_theta"], dtype=np.float64)     # (n, K)
+            Yb = (np.asarray(target_stats["head_s"], dtype=np.float64) + 1.0) / 2.0  # (n, C)
+            Ob = np.asarray(target_stats["head_obs"], dtype=np.float64)       # (n, C)
+            n = max(len(Th), 1)
+            lam2 = (self.head_l2 if self.head_l2 > 0 else 1e-3) * n           # per-example L2 -> total
+            new_w = w_CK.copy()
+            eye = np.eye(self.K)
+            for _ in range(self.head_inner_iters):
+                P = 1.0 / (1.0 + np.exp(-np.clip(Th @ new_w.T, -50.0, 50.0)))  # (n, C)
+                for c in range(self.C):
+                    oc = Ob[:, c]
+                    g = (oc * (P[:, c] - Yb[:, c])) @ Th + lam2 * new_w[c]
+                    Wt = oc * P[:, c] * (1.0 - P[:, c])
+                    H = (Th * Wt[:, None]).T @ Th + lam2 * eye
+                    try:
+                        new_w[c] = new_w[c] - np.linalg.solve(H, g)
+                    except np.linalg.LinAlgError:
+                        new_w[c] = new_w[c] - np.linalg.lstsq(H, g, rcond=None)[0]
+            new_gp["w_CK"] = new_w
+            return new_gp
+
         if self.head_optimizer == "newton" and "head_hess_stat" in target_stats:
             # Per-label ridge-Newton: w_c ← w_c − head_lr · (H_c + λI)⁻¹ (g_c + λ w_c).
             # Gated on the stat's presence: a head flavor without a closed-form Fisher
@@ -1020,8 +1078,20 @@ class OnlinePCLDA(VIModel):
         the default VIModel combiner sums over the union of keys, so a partition
         that emitted the supervised keys and one that (all-unobserved) still emits
         them as zeros combine cleanly.
+
+        Exception: the inner-loop head DESIGN rows (``head_theta``/``head_s``/
+        ``head_obs``) are CONCATENATED (a bounded reservoir capped at
+        ``head_sample_cap``), not summed — they are per-doc samples for the
+        driver-side head fit, not additive sufficient statistics.
         """
-        return self._lda.combine_stats(a, b)
+        a_rest = {k: v for k, v in a.items() if k not in self._HEAD_DESIGN}
+        b_rest = {k: v for k, v in b.items() if k not in self._HEAD_DESIGN}
+        out = self._lda.combine_stats(a_rest, b_rest)
+        for k in self._HEAD_DESIGN:
+            parts = [x[k] for x in (a, b) if k in x]
+            if parts:
+                out[k] = np.concatenate(parts, axis=0)[: self.head_sample_cap]
+        return out
 
     def compute_elbo(
         self,
