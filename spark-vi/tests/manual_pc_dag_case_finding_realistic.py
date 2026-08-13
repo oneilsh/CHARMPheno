@@ -187,9 +187,18 @@ def main():
             return (f"  {name:<22} mean={m:.3f} rare(5,6)={rare:.3f}   "
                     + " ".join(f"{l}:{a.get(l, float('nan')):.2f}" for l in nodes))
 
-        # THE FIX: sweep the co-fit head's fixed L2 (head_l2). At 0.0 the relative ridge
-        # vanishes on the separable shaped topics -> head stuck ~0.65; a positive L2 keeps
-        # it finite -> the co-fit head itself should reach the post-hoc ceiling.
+        # Head-optimizer sweep. The shipped one-step 'newton' uses a RELATIVE ridge that
+        # VANISHES on the separable shaped topics -> |w| blows up (3.4e11) and the head
+        # misaims (HEAD~0.65 while topics-LR~0.97). A FIXED L2 (head_l2) finitizes w. The
+        # INNER configs converge the head within each iteration; empirically they LAND ON
+        # the one-step result byte-for-byte (fixed-point equivalence — one Newton step per
+        # SVI iter accumulates to the same regularized MLE as the topics settle), so the
+        # lever is the ridge TYPE, not step count. The discriminating row is 'INNER l2=0':
+        # its internal 1e-3 fallback finitizes w (4.76) UNLIKE one-step l2=0 (3.4e11),
+        # proving the branch fires. Note the finite-L2 head recovers prediction (HEAD up)
+        # but topics-LR drops (0.97->0.53): the fixed L2 that finitizes w also damps the
+        # shaping gradient (shape-vs-regularize tension) — a joint-optimization gap the
+        # online/alternating scheme does not close (cf. the full-batch L-BFGS reference).
         m0, gp0 = fit(spark, tr, V, weight_y=0.0, head=None)
         S_uns_m = posthoc_scores(m0, gp0, tr, te, Ytr, nodes, mask=Mtr)
 
@@ -201,6 +210,7 @@ def main():
         unsup_lr = _mean(auc_table(Yte, S_uns_m, nodes), nodes)
         print(f"\nhead configs — co-fit HEAD vs topics-LR (unsup posthoc-LR={unsup_lr:.3f}):", flush=True)
         configs = [("one-step l2=0", 0.0, 0),
+                   ("INNER k=10 l2=0", 0.0, 10),
                    ("one-step l2=1e-3", 1e-3, 0),
                    ("INNER k=10 l2=1e-3", 1e-3, 10),
                    ("INNER k=25 l2=1e-3", 1e-3, 25)]
