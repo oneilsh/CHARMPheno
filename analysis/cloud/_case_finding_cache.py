@@ -167,5 +167,17 @@ def load_or_build_case_finding_bundle(spark, *, cache_uri=None, _assemble_fn=Non
 
     bundle = assemble(spark, **assembly_params)
     if cache_uri:
-        save(spark, bundle, cache_uri, key)
+        # Write-through is a best-effort optimization, NOT a correctness step: the
+        # freshly-built bundle is already valid in memory. A cache-write failure
+        # (bad/unwritable cache_uri, missing GCS bucket, transient I/O) must not
+        # abort a run that has already paid the assembly cost — warn and proceed
+        # with the in-memory bundle (next run just misses and rebuilds). A partial
+        # write is harmless: try_load reads all three artifacts and returns None on
+        # any read failure, so a truncated dir simply re-triggers a rebuild.
+        try:
+            save(spark, bundle, cache_uri, key)
+        except Exception as exc:                                # noqa: BLE001
+            print(f"[driver]   WARNING: case-finding-cache write to {cache_uri} "
+                  f"failed ({type(exc).__name__}: {exc}); proceeding with the "
+                  f"in-memory bundle (no cache reuse next run).", flush=True)
     return bundle
