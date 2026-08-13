@@ -103,6 +103,94 @@ def doc_frontier_engine_ids(attested_cids, before_dag, keep, cid2int, lay) -> li
     return sorted(frontier_from_coded(engine_ids, lay))
 
 
+def frontier_to_label(frontier, lay, C, *, label_mask_mode="full"):
+    """The (label, label_mask) pair for one doc, from its ENGINE-id frontier.
+
+    This is the Gated-PC seam: the gated unsupervised model consumes only the
+    set-valued `frontier`, but the supervised PC head needs a dense per-node
+    binary outcome vector (`label`) + an observed-cell mask (`label_mask`). Pure
+    (no Spark); the label DAG is the same `DagLayout` the gate uses, so the
+    label index space IS the engine-id node space:
+
+      label[c] = 1  iff node c is in the is-a CLOSURE of any frontier node
+                    (each frontier node + all its ancestors via the DAG). The
+                    layout's `closure` includes the root (engine-id 0), so every
+                    FOREGROUND doc has label[0] = 1. A background doc (empty
+                    frontier) yields the ALL-ZERO label — a known negative for
+                    every disease node under the default mask.
+
+    `C` is the number of label heads = `len(int2cid)` (engine nodes incl. root);
+    label index c is engine-id c directly, so no remap is needed downstream.
+
+    `label_mask_mode` (the observation policy; an open modeling choice —
+    docs/superpowers/plans/2026-08-13-smooshed-gated-pc-aou-integration-plan.md §5.1):
+      "full" (default): mask = ones(C). Every node is observed — coded conditions
+        give a full membership vector and a background doc is treated as a true
+        negative everywhere. Caveat: coded-absence != true-absence (a
+        data-quality assumption, not a masking one).
+      "closure": observe only the active closure (the positives) and their DAG
+        siblings (other children of an active node's parents — the near-boundary
+        negatives), leaving distant unrelated nodes UNOBSERVED. Under this policy
+        a background doc observes nothing (empty active set => all-zero mask), so
+        it contributes no head signal; use only when coded-absence is untrusted.
+    """
+    active = set()
+    for f in frontier:
+        active.update(lay.closure(int(f)))
+    import numpy as np
+    label = np.zeros(C, dtype=np.float64)
+    for c in active:
+        if 0 <= c < C:
+            label[c] = 1.0
+
+    if label_mask_mode == "full":
+        mask = np.ones(C, dtype=np.float64)
+    elif label_mask_mode == "closure":
+        observed = set(active)
+        for c in active:
+            for p in lay.parents.get(c, []):
+                observed.update(lay.children.get(p, []))
+        mask = np.zeros(C, dtype=np.float64)
+        for c in observed:
+            if 0 <= c < C:
+                mask[c] = 1.0
+    else:
+        raise ValueError(
+            f"label_mask_mode must be 'full' or 'closure', got {label_mask_mode!r}")
+    return label, mask
+
+
+def attach_labels(df, lay, C, *, label_mask_mode="full", frontier_col="frontier",
+                  label_col="label", label_mask_col="labelMask"):
+    """Append dense `label`/`labelMask` array<double> columns derived from the
+    engine-id `frontier_col` via `frontier_to_label` (one UDF, both vectors).
+
+    Only used when `assemble_from_events(emit_labels=True)`; the unsupervised
+    gated placement path ignores these columns, so one bundle serves both the
+    gated placement and Gated-PC. `lay`/`C` are small and picklable (captured in
+    the UDF closure, broadcast with the task), mirroring `attach_frontiers`."""
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import (
+        ArrayType, DoubleType, StructField, StructType,
+    )
+
+    schema = StructType([
+        StructField("label", ArrayType(DoubleType(), False), False),
+        StructField("labelMask", ArrayType(DoubleType(), False), False),
+    ])
+
+    def _lm(fr):
+        label, mask = frontier_to_label(
+            [int(x) for x in (fr or [])], lay, C, label_mask_mode=label_mask_mode)
+        return ([float(v) for v in label], [float(v) for v in mask])
+
+    lm_udf = F.udf(_lm, schema)
+    tmp = df.withColumn("_lm", lm_udf(F.col(frontier_col)))
+    return (tmp.withColumn(label_col, F.col("_lm.label"))
+               .withColumn(label_mask_col, F.col("_lm.labelMask"))
+               .drop("_lm"))
+
+
 def strip_features(vec, drop_idxs):
     """Return a SparseVector equal to `vec` with the vocab dims in `drop_idxs`
     removed (leakage strip; held-out docs only). `vec.size` is preserved so the
@@ -245,7 +333,8 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
                          holdout_frac=0.2, split_salt=_SPLIT_SALT,
                          vocab_size, min_df, min_patient_count,
                          n_bg=2, tpn=1, strip_mode="test_only",
-                         label_events=None) -> CaseFindingBundle:
+                         label_events=None, emit_labels=False,
+                         label_mask_mode="full") -> CaseFindingBundle:
     """Assemble the case-finding bundle from already-windowed events (with a
     `source_cohort` column) + the pre-prune concept-id DAG. This is the testable
     core: no BigQuery, pure Spark + domain logic. See the module docstring for the
@@ -262,6 +351,14 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
     coarsening rate is computed from the FOREGROUND docs only (background
     attestations are empty) and collected to the driver — foreground scale,
     run once at prep time.
+
+    `emit_labels` (optional, default False): when True, append dense
+    `label`/`labelMask` array<double> columns (length `C = len(int2cid)`) to both
+    splits via `attach_labels`, so the SAME bundle feeds both the unsupervised
+    gated placement (reads `frontier`) and Gated-PC (`OnlinePCLDAEstimator`, reads
+    `label`/`labelMask`). `label_mask_mode` ('full' default / 'closure') is the
+    observation policy — see `frontier_to_label`. Off by default so the existing
+    gated-placement path is byte-for-byte unchanged.
 
     `label_events` (optional): when given, the frontier (attestation ->
     `doc_attested_nodes`/`attach_frontiers`) is derived from `label_events`
@@ -352,6 +449,17 @@ def assemble_from_events(events_df, before_dag, *, doc_spec, min_n,
         elif strip_mode != "test_only":
             raise ValueError(
                 f"strip_mode must be 'test_only' or 'both', got {strip_mode!r}")
+
+        # 7) (Gated-PC) dense per-node label + observed mask from the frontier.
+        #    C = len(int2cid) (engine nodes incl. root 0); label index c == engine
+        #    id c, so the head's C rows align with the gate's DagLayout node space.
+        #    Off by default — only the supervised PC head reads these columns.
+        if emit_labels:
+            C = len(int2cid)
+            train_df = attach_labels(
+                train_df, lay, C, label_mask_mode=label_mask_mode)
+            test_df = attach_labels(
+                test_df, lay, C, label_mask_mode=label_mask_mode)
 
         return CaseFindingBundle(
             train_df=train_df, test_df=test_df, parent_int=parent_int,
@@ -461,7 +569,8 @@ def assemble_case_finding_corpus(spark, *, disease="diabetes", cdr, billing,
                                  n_bg=2, tpn=1, doc_min_length=0,
                                  prior_obs_days=365, window_days=365,
                                  strip_mode="test_only", window_mode="forward",
-                                 lookback_days=365, label_window_days=365):
+                                 lookback_days=365, label_window_days=365,
+                                 emit_labels=False, label_mask_mode="full"):
     """End-to-end BQ assembly: load OMOP (person_mod sample), apply the
     `disease`+background cohort, build the disease's label DAG, and assemble the
     bundle.
@@ -533,4 +642,5 @@ def assemble_case_finding_corpus(spark, *, disease="diabetes", cdr, billing,
         events, before_dag, doc_spec=doc_spec, min_n=min_n,
         holdout_frac=holdout_frac, split_salt=split_salt, vocab_size=vocab_size,
         min_df=min_df, min_patient_count=min_patient_count, n_bg=n_bg, tpn=tpn,
-        strip_mode=strip_mode, label_events=label_arg)
+        strip_mode=strip_mode, label_events=label_arg,
+        emit_labels=emit_labels, label_mask_mode=label_mask_mode)
