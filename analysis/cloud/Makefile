@@ -424,6 +424,11 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 # <cache_uri>/<key>".
 GPR_CACHE_URI      ?= hdfs:///user/dataproc/charm/case_finding_cache
 GPR_DOC_MIN_LENGTH ?=
+# The run-dir is passed as a QUOTED glob so the shell does NOT pre-expand it (the
+# shared runs/ dir can hold a same-numbered run from another experiment, e.g. a
+# stale 0076-multidomain-...); gated_pc_readout.resolve_run_dir globs it and keeps
+# only the dir with gated_pc_result.npz. Override with an exact dir via GPR_RUN_DIR.
+GPR_RUN_DIR        ?= $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*
 gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	. ./$(WORKSPACE_ENV) && \
@@ -437,7 +442,7 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.python.worker.memory=2g \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
 	    $(REPO_ROOT)/analysis/cloud/gated_pc_readout.py \
-	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
+	    --run-dir "$(GPR_RUN_DIR)" \
 	    --cache-uri $(GPR_CACHE_URI) \
 	    $(if $(GPR_DOC_MIN_LENGTH),--doc-min-length $(GPR_DOC_MIN_LENGTH),) \
 	    $(GPR_ARGS)

@@ -27,6 +27,7 @@ bundle_key_from_manifest, reconstruct_model) are unit-tested.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 from pathlib import Path
 
@@ -60,6 +61,32 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-label-count", type=int, default=None,
                    help="Small-cell mask floor; default = the run's own value.")
     return p
+
+
+def resolve_run_dir(pattern):
+    """Resolve --run-dir to a single gated_pc run directory.
+
+    An exact dir that holds gated_pc_result.npz is used as-is. Otherwise the value
+    is treated as a glob (the Makefile passes `.../<id>-*` QUOTED so the shell does
+    not pre-expand it) and filtered to matched dirs that contain gated_pc_result.npz
+    — so a runs/ numbering COLLISION with a non-gated_pc experiment of the same id
+    (e.g. a stale `0076-multidomain-...` from another branch) is discarded
+    automatically. Requires exactly one gated_pc match; a clear error otherwise."""
+    p = Path(pattern)
+    if p.is_dir() and (p / "gated_pc_result.npz").exists():
+        return p
+    matches = [Path(m) for m in glob.glob(str(pattern))]
+    hits = [m for m in matches if m.is_dir() and (m / "gated_pc_result.npz").exists()]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise SystemExit(
+            f"[readout] no run dir with gated_pc_result.npz matches {pattern!r} "
+            f"(matched: {[m.name for m in matches]}). Has the fit finished + saved? "
+            f"Pass an exact --run-dir / GPR_RUN_DIR.")
+    raise SystemExit(
+        f"[readout] {len(hits)} gated_pc run dirs match {pattern!r}: "
+        f"{[m.name for m in hits]}. Pass an exact --run-dir / GPR_RUN_DIR.")
 
 
 def bundle_key_from_manifest(manifest: dict, *, doc_min_length=None):
@@ -115,7 +142,8 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging()
-    run_dir = Path(args.run_dir)
+    run_dir = resolve_run_dir(args.run_dir)
+    print(f"[readout]   run dir: {run_dir}", flush=True)
     manifest = json.loads((run_dir / "manifest.json").read_text())
     C = int(manifest["C"])
     rt = [float(x) for x in args.recall_targets.split(",") if x]

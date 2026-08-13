@@ -21,6 +21,29 @@ def _manifest(**over):
     return m
 
 
+def test_resolve_run_dir_disambiguates_collision(tmp_path):
+    from gated_pc_readout import resolve_run_dir
+    runs = tmp_path / "runs"
+    ours = runs / "0076-gated-pc-rare6-smooshed"
+    other = runs / "0076-multidomain-rare-priority-cond-drug-obs"
+    ours.mkdir(parents=True)
+    other.mkdir(parents=True)
+    (ours / "gated_pc_result.npz").write_bytes(b"x")   # only ours has the artifact
+    # glob matches BOTH; resolve keeps the gated_pc one.
+    assert resolve_run_dir(str(runs / "0076-*")) == ours
+    # exact dir works too.
+    assert resolve_run_dir(str(ours)) == ours
+
+
+def test_resolve_run_dir_errors_when_none_finished(tmp_path):
+    import pytest
+    from gated_pc_readout import resolve_run_dir
+    runs = tmp_path / "runs"
+    (runs / "0076-gated-pc-rare6-smooshed").mkdir(parents=True)   # no npz yet
+    with pytest.raises(SystemExit, match="no run dir with gated_pc_result.npz"):
+        resolve_run_dir(str(runs / "0076-*"))
+
+
 def test_build_parser_surface():
     from gated_pc_readout import build_parser
     a = build_parser().parse_args(["--run-dir", "/runs/0076-x", "--cache-uri",
