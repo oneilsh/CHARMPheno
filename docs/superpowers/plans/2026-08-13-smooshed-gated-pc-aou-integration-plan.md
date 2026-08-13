@@ -2,8 +2,30 @@
 
 **Date:** 2026-08-13
 **Branch (base for this work):** `claude/spectral-anchor-topic-k-200nqp`
-**Status:** Plan approved to start ("smooshed-first"). No integration code written yet.
-This doc is a compaction-surviving handoff: state, decisions, the plan, and how to resume.
+**Status:** Steps A + B BUILT and green (commits `f959528`, `54ba48f`). Step C is the
+cluster run (BQ; cannot run in this container). This doc is a compaction-surviving
+handoff: state, decisions, the plan, and how to resume.
+
+> **Progress (2026-08-13).**
+> - **Step A DONE** — `charmpheno/omop/case_finding_assembly.py`:
+>   `frontier_to_label(frontier, lay, C, label_mask_mode)` (pure) + `attach_labels`
+>   column-append, wired behind `emit_labels=False` in
+>   `assemble_from_events`/`assemble_case_finding_corpus`. `label[c]=1` iff node c ∈
+>   is-a closure of the frontier (via `DagLayout.closure`, diamond-safe, root 0
+>   included); `C=len(int2cid)`, so label index c == engine id c. `label_mask_mode`:
+>   `full` (default, ones(C)) | `closure` (active closure + DAG siblings). 5 unit
+>   tests; full assembly suite green (29).
+> - **Step B DONE** — `analysis/cloud/gated_pc_cloud.py` (mirrors
+>   `dag_placement_cloud`): arms `gated_pc` (gate+flat head), `unsup_gated`
+>   (weightY=0 twin), `dag_head` (optional, ungated+closure). Headline
+>   `pc_topics_lr` (pure `pc_topics_lr_bundle`, reuses `analysis.pc.evaluate`
+>   masked-LR) + co-fit head P(node). `_case_finding_cache` threads
+>   `emit_labels`/`label_mask_mode` (folded into the key only when True).
+>   `scripts/run_experiment.py` registers `model_class=gated_pc`
+>   (`build_gated_pc_args`). 4 driver + 6 wiring tests; run_experiment suite (163)
+>   + cache green. Cluster main() is BQ-only (unit tests cover parse_args + pure
+>   helpers per repo idiom).
+> - **Step C NEXT** — the cluster run (below). Nothing else needed on this branch to start.
 
 ---
 
@@ -154,4 +176,16 @@ Swap `rare6` → the hybrid branch's ~20–30-anchor set (`anchor_selection` + `
 - OMOP assembly entry: `charmpheno/charmpheno/omop/case_finding_assembly.py:
   assemble_case_finding_corpus(spark, disease="rare6", cdr, billing, ...)`.
 - Driver template to copy: `analysis/cloud/dag_placement_cloud.py`.
-- First code to write: Step A adapter (pure helper + column append), then Step B driver.
+- ~~First code to write: Step A adapter, then Step B driver.~~ **A + B done.**
+- **Step C (next): run on the cluster.** A `gated_pc` experiment config
+  (`model_class: gated_pc`, `disease: rare6`, cohort `population_rare6`,
+  `n_bg`/`tpn`/`weight_y`/`max_iter`, optional `with_dag_head: true`) run via
+  `run_experiment` (the `exp`/`next-exp` make targets). Or a direct
+  `spark-submit analysis/cloud/gated_pc_cloud.py --cdr … --billing … --disease
+  rare6 --out-dir …`. Read the HEADLINE line: `gated_pc pc_topics_lr` vs
+  `unsup_gated` — a positive delta in the rare regime is the thesis; a null is a
+  data finding (à la 0066), not a bug. Tune `--weight-y` (≈ tokens/doc, "possibly
+  much larger") and `--tau0` (~10–64 so the head moves) on the smaller cohort.
+- Files this session added/changed: `charmpheno/omop/case_finding_assembly.py`,
+  `analysis/cloud/gated_pc_cloud.py` (+test), `analysis/cloud/_case_finding_cache.py`,
+  `scripts/run_experiment.py` (+`scripts/tests/test_run_experiment_gated_pc.py`).
