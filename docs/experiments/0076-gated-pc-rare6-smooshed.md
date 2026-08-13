@@ -34,15 +34,25 @@ weight_y: 50.0            # PC prediction weight. Hughes ~ tokens/doc; rare6 1yr
                          # the delta vs unsup_gated (try 100/200 if the head is
                          # under-moved, i.e. |w_CK| still climbing at max_iter).
 head_optimizer: newton   # settled convergent head (ADR 0039); no sgd/adam.
-head_lr: 0.5
-head_newton_ridge: 0.01
+head_lr: 0.3             # DAMPED (insight 0075): 0.5 oscillated (|w_CK| bounced
+                         # 19→7→14→60 on run 1). 0.3 makes the head an EMA of the
+                         # per-minibatch optima → converges to their mean.
+head_newton_ridge: 0.05  # 0.01→0.05: regularize the near-singular per-minibatch
+                         # H_c that spikes the IRLS solve (only stabilizes it;
+                         # AUC is scale-invariant to head magnitude).
 head_l2: 0.001           # ABSOLUTE ridge = Hughes lambda_w (ADR 0041). 0.0 blows
-                         # up on the separable topics PC creates.
+                         # up on the separable topics PC creates. A LARGE |w_CK|
+                         # here (~1e3-1e4) is expected at this weak ridge — the
+                         # OSCILLATION was the problem, not the magnitude.
 grad_cavi_iters: 30      # differentiable CAVI unroll depth; must match scoring
                          # convergence (cavi_max_iter=100). 30 suffices for the
                          # short lookback docs (deeper = bigger autograd tape).
-topic_trust: 0.1
-weight_y_warmup_iters: 10
+topic_trust: 0.05        # 0.1→0.05: run 1's Σλ_k max blew up 4.6e4→6.2e5 in 11
+                         # iters (one topic hoovering mass) — the loose correction
+                         # driven by the oscillating head. Tighter trust keeps the
+                         # supervised topics near the unsup warm-start.
+weight_y_warmup_iters: 25  # 10→25: run 1 spiked at iter 11 the moment full
+                         # weight_y engaged; a longer ramp softens the onset.
 # --- SVI schedule (comparable to 0065 / the pc-vi runs) -----------------------
 max_iter: 200
 subsampling_rate: 0.1
@@ -125,4 +135,22 @@ Fit-only (skip the self-contained result's implicit eval step):
 
 ## Run log
 
-_(pending first run)_
+### Run 1 (2026-08-13) — head oscillated + Σλ blow-up; retuned to damped head
+
+DAG pruned to 27 nodes (C=27), K=170 (40 bg + 26 nodes × 5 tpn), V=5000. ELBO
+improved cleanly (−7.7M → −5.95M over 11 iters), so the topics were learning, BUT:
+
+- **Head oscillated:** `|w_CK|max` non-monotone 1.0 → 5.9 → **19.1** → 7.3 → 13.9
+  → **60.7**, spiking at iter 11 as the `weight_y_warmup_iters=10` ramp completed
+  and full `weight_y=50` engaged. The insight-0075 under-damped-Newton failure mode
+  (`head_lr=0.5`, `head_newton_ridge=0.01` too loose).
+- **Σλ_k blew up:** max 4.6e4 → **6.2e5** in 11 iters while min dropped to 1.3e3 —
+  one topic hoovering mass, the degenerate drift the trust region (`topic_trust=0.1`,
+  too loose) is meant to bound, driven by the oscillating head's correction signal.
+
+**Retune (this config):** `head_lr 0.5→0.3`, `head_newton_ridge 0.01→0.05` (the
+settled 0075 damped-head values), `topic_trust 0.1→0.05`, `weight_y_warmup_iters
+10→25`. `pc_topics_lr` would have been valid even on run 1 (convergence-robust),
+but the Σλ blow-up risked degrading the gated_pc topics themselves → a
+misleadingly negative delta, so run 1 was not a clean test. If run 2 still drifts,
+the next lever is `weight_y` (50→20–30, gentler correction).
