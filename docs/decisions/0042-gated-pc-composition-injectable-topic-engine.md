@@ -64,11 +64,14 @@ gate and the head thus act through different θ pathways but the *head's* θ is 
   DAG): the topic-side gate transforms case-finding — head-AUC 0.72 (ungated+DAG head) →
   **1.00** (gated+flat) / 0.84 (gated+DAG head), node_affinity ≈ 0.84. The gate welds node
   topics to their subtree's docs, so a downstream head reads them almost trivially.
-- **Finding on the head choice.** On cleanly, *independently* separable synthetic nodes the
-  flat head is optimal and the `DagClosureHead`'s monotone `P(child) ≤ P(parent)` coupling
-  can *hurt* (0.84 < 1.00). The closure head earns its keep where the hierarchy regularizes
-  a weak/rare/noisy signal (the realistic EHR benchmark), not on clean synthetic bars —
-  choose the label-side seam to match the data, independently of the topic-side gate.
+- **Finding — inject the hierarchy once; do not stack the gate and the closure head.** The
+  topic-side gate and the label-side closure head both encode the same Mondo hierarchy.
+  Stacking them degenerates: gated + DAG-closure head **collapses to chance** on realistic β
+  (head-AUC 0.495) while gated + FLAT head is the best arm (0.745, beating ungated+DAGhead
+  0.661); same ordering on clean synthetic (gated+flat 1.00 > gated+DAG 0.84). The closure
+  product over already-hierarchy-structured gated topics is redundant and unstable. Use the
+  gate with a FLAT head, OR the DAG-closure head UNGATED — not both. (`manual_gated_pc_realistic`,
+  `manual_gated_pc_case_finding`; runbook 2026-08-13-gated-pc-real-run-readiness.)
 - **Open.** α-optimization: `GatedOnlineLDA` owns a gated per-node α Newton step; when both
   it and any future PC-side α move are active they must be reconciled in one `update_global`
   (today PC leaves α entirely to the delegate, so no collision). The mllib shim does not yet
