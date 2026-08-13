@@ -411,6 +411,37 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --sample-background $(LR_SAMPLE_BACKGROUND) \
 	    $(LR_ARGS)
 
+# Post-hoc case-finding readout on a FINISHED gated_pc run (no re-fit):
+# pc_topics_lr + precision@recall / recall@FDR / detection for the gated_pc arm.
+# Reconstructs the model from the run's saved globals, reloads the cached bundle
+# (recomputing the key from manifest.json), re-transforms, and prints the full
+# readout. PYTHONPATH=REPO_ROOT so the driver imports analysis.pc (the scorer),
+# which is not in any --py-files zip (client mode: the master has the repo).
+#
+# The bundle cache-uri and (for OLDER runs whose manifest omits it) doc-min-length
+# are overridable; a run whose manifest already records doc_min_length + emit_labels
+# (current driver) needs neither. If the key still misses, pass GPR_ARGS="--bundle-path
+# <cache_uri>/<key>".
+GPR_CACHE_URI      ?= hdfs:///user/dataproc/charm/case_finding_cache
+GPR_DOC_MIN_LENGTH ?=
+gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	. ./$(WORKSPACE_ENV) && \
+	PYTHONPATH=$(REPO_ROOT):$$PYTHONPATH spark-submit \
+	    --master yarn \
+	    --deploy-mode client \
+	    --driver-memory 8g \
+	    --conf spark.executor.cores=4 \
+	    --conf spark.executor.memory=6g \
+	    --conf spark.executor.memoryOverhead=2g \
+	    --conf spark.python.worker.memory=2g \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
+	    $(REPO_ROOT)/analysis/cloud/gated_pc_readout.py \
+	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
+	    --cache-uri $(GPR_CACHE_URI) \
+	    $(if $(GPR_DOC_MIN_LENGTH),--doc-min-length $(GPR_DOC_MIN_LENGTH),) \
+	    $(GPR_ARGS)
+
 # Print summary.md for an experiment (copy/paste back to chat)
 summary:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
