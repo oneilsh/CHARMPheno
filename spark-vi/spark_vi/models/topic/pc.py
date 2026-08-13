@@ -723,14 +723,19 @@ class OnlinePCLDA(VIModel):
         # the Newton damping (step fraction; ~0.5-1.0 for newton, since one damped
         # Newton step per iter already converges the logistic head on the current θ).
         self.head_newton_ridge = float(head_newton_ridge)
-        # 'newton' head: FIXED per-doc L2 prior on w_CK (a true regularizer, distinct
-        # from head_newton_ridge's numerical conditioner). Scaled by n_docs so it tracks
-        # the corpus-scaled Fisher (a proper per-example prior, scale-invariant across
-        # corpus/minibatch). Unlike the relative ridge — which vanishes as p(1−p)→0 once
-        # PC's shaping makes the topics SEPARABLE, leaving the logistic with no finite
-        # optimum so the Newton step oscillates and the head never converges — a fixed L2
-        # keeps the solution finite and lets the head reach the logistic-MLE direction.
-        # 0.0 (default) preserves the prior relative-ridge-only behavior.
+        # 'newton' head: FIXED per-doc L2 prior on w_CK (scaled by n_docs to track the
+        # corpus-scaled Fisher). Its ONE robust use is a BLOWUP GUARD: the relative ridge
+        # vanishes as p(1−p)→0 once PC's shaping makes the topics separable, leaving the
+        # logistic MLE at infinity so |w_CK| runs away (observed 3.4e11); any positive
+        # fixed L2 keeps w finite (Hughes uses lambda_w=0.001 for exactly this).
+        #
+        # It is NOT a fix for the one-step head's UNDER-CONVERGENCE. Empirically (sweep in
+        # manual_pc_dag_case_finding_realistic + insight): raising head_l2 shrinks |w_CK|,
+        # which weakens the shaping gradient (∝ |w_CK|) and DEGRADES the topics — a
+        # shaping/stability TRADE-OFF that never reaches the post-hoc/converged-head
+        # ceiling. The under-convergence is closed by CONVERGING the head (more Newton
+        # steps per iteration, Hughes-style), not by regularizing it. Keep head_l2 small
+        # (blowup guard) if used at all. 0.0 (default) = relative-ridge-only behavior.
         self.head_l2 = float(head_l2)
         # Driver-side global-step counter, used only for weight_y warmup. Bumped
         # once per update_global call (the runner drives that single-threaded on
