@@ -242,6 +242,32 @@ Two reads:
 Caveat: this is the STARVED 1yr / blown-head run. Run 3 (5yr history, head_l2=1e-2,
 100 iters) is the fair test of whether more history lifts the representation.
 
+### Run 3 (5yr history, tpn=5, head_l2=1e-2, 100 iters) — head bounded; history didn't help
+
+Head stayed bounded (`|w_CK|` ~17–20 through iter 100, NO blow-up) — `head_l2=1e-2`
++ the 100-iter cap held. Clean run.
+
+| arm | AUC | AP | detection AUC / AP | det P@R0.5 |
+|---|---|---|---|---|
+| gated_pc pc_topics_lr | 0.7986 | 0.0338 | 0.738 / 0.127 | 0.104 |
+| unsup_gated pc_topics_lr | 0.7957 | 0.0320 | 0.734 / 0.116 | 0.102 |
+| gated_pc co-fit head | 0.7722 | 0.0272 | 0.704 / 0.093 | 0.082 |
+
+HEADLINE Δ (gated_pc − unsup): AUC +0.0029, AP +0.0018, node P@R0.9 +0.0001,
+**detection AP +0.0110** (the clearest PC signal yet). Prevalence 0.038.
+
+Reads:
+1. **5yr history ≈ flat vs 1yr.** Absolute AP looks lower (0.127 vs run 2's 0.141)
+   but prevalence dropped 0.045→0.038; prevalence-adjusted detection LIFT went
+   3.1× → 3.3× — essentially unchanged. The rare-disease signal is NOT
+   history-limited; a longer window doesn't unlock it.
+2. **PC still marginal, but detection AP Δ+0.011 (~9% rel) is the clearest win** —
+   at the coarse case-vs-bg level, not fine node discrimination (node P@R flat).
+3. **Head bounded** — head_l2=1e-2 stopgap works; the co-fit head (0.772) is
+   meaningful this run (unlike run 2's blown 0.764).
+4. Absolute precision still poor (det P@R0.5 ~0.10) — real but weak (~3× lift), not
+   yet case-finding usable.
+
 ## Run 4 (planned) — tpn 5 → 1 (this config), before Firth
 
 Rationale above (frontmatter `tpn`): the co-fit head reads every topic, so the 5
