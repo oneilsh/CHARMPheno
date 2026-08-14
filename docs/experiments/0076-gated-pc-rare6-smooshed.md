@@ -44,12 +44,15 @@ weight_y: 50.0            # PC prediction weight. Hughes ~ tokens/doc; rare6 1yr
                          # under-moved, i.e. |w_CK| still climbing at max_iter).
 head_optimizer: newton   # settled convergent head (ADR 0039); no sgd/adam.
 # Run 5 attempt 1 (head_penalty=firth, head_l2=0) DIVERGED on real data — |w_CK|→1e17
-# at iter 1: the undamped 25-step inner IRLS overshoots on early-iter rank-deficient
-# θ / logit saturation, and with head_l2=0 there's no floor. Fix = step-halving in the
-# Firth IRLS (task #28, in progress). Until it lands, run the PATH-B-NO-FIRTH CONTROL:
-# head_penalty=none + head_inner_iters=25 + head_l2=1e-2 (the ridge floors the solve).
-# This isolates the inner-loop head-fit PATH (vs run 4's aggregated one-step, Path A);
-# when Firth works, firth-PathB vs this none-PathB isolates the PENALTY.
+# at iter 1: the undamped inner IRLS overshoots on early-iter rank-deficient θ / logit
+# saturation, and with head_l2=0 there's no floor. FIXED (step-halving, commit 4874bb7 /
+# engine in 6d05a61): the Firth IRLS now ascends the penalized LL via step-halving —
+# reproducing test shows raw |w|=7.99e10 → bounded 0.42. TRUE FIRTH is ready: flip
+# head_penalty→firth + head_l2→0 to re-run (attempt 2).
+#   Currently set to the PATH-B-NO-FIRTH CONTROL (head_penalty=none, head_inner_iters=25,
+# head_l2=1e-2 — the ridge floors the solve): a stable run isolating the inner-loop
+# head-fit PATH (vs run 4's aggregated one-step, Path A). firth-PathB vs this none-PathB
+# then isolates the PENALTY; this vs run 4 isolates the PATH.
 head_penalty: none
 head_inner_iters: 25     # inner-loop IRLS (Path B) — the thing this control isolates.
 head_lr: 0.3             # (inner loop is undamped; head_lr unused on Path B)
