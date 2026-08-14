@@ -289,6 +289,32 @@ Reads:
 4. Absolute precision still poor (det P@R0.5 ~0.10) — real but weak (~3× lift), not
    yet case-finding usable.
 
+### Run 6 (n_bg=1, K=27) — the PC MECHANISM demonstrated: capacity↓ ⇒ absolute↓ but PC-benefit↑
+
+| arm | AUC | AP | detection AUC / AP |
+|---|---|---|---|
+| gated_pc pc_topics_lr | 0.7734 | 0.0268 | 0.715 / **0.0957** |
+| unsup_gated pc_topics_lr | 0.7646 | 0.0241 | 0.684 / **0.0795** |
+| gated_pc co-fit head | 0.7328 | 0.0212 | 0.686 / 0.0878 |
+
+HEADLINE Δ: AUC +0.0089, AP +0.0027, node P@R0.9 −0.0001, **detection AP +0.0162
+(+20% rel)**. `|w_CK|` 13.8 (bounded, Path A). Σλ_k min 185 / max **1.5e7** (the lone bg
+topic became a mega-topic absorbing all non-disease mass). eval trace: AUC 0.745(20) →
+0.765(40) → 0.767(60) → 0.765(80) → 0.773(100) — mostly plateaued by ~40, still creeping.
+
+**The finding (a genuine trade-off, first clean PC-mechanism evidence on real data):**
+1. **Starving background HURTS absolute quality** — det AP 0.134→0.096, AUC 0.80→0.77 vs
+   run 4 (n_bg=40). 1 bg topic can't hold the diversity of non-disease structure, so it
+   leaks into the node topics. Background capacity does real work.
+2. **…but 3.7×'s the PC BENEFIT** — det AP Δ went +0.0044 (run 4) → **+0.0162 (run 6)**,
+   +20% relative, the clearest PC signal in the arc. Exactly insight 0066's mechanism:
+   PC helps in proportion to how much the UNSUPERVISED fit misses. Large n_bg ⇒
+   unsupervised already captures it ⇒ PC marginal; n_bg=1 ⇒ unsupervised drops (det AP
+   0.130→0.080) ⇒ supervision RECOVERS a chunk (0.080→0.096).
+3. **Trade-off, not a win:** low n_bg = worse absolute + bigger PC delta; high n_bg =
+   better absolute + tiny PC delta. But it's the first real demonstration that the label
+   does representational work when there's room — the Gated-PC thesis, shown.
+
 ## Domain value — SETTLED on the hybrid branch (do not re-derive)
 
 The `hybrid-domain-reliability-review-ckn2bq` branch ran the full per-domain
