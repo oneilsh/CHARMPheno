@@ -28,7 +28,14 @@ label_mask_mode: full
 # --- gate topic-block layout (same as 0065). K is emergent = n_bg + nodes*tpn,
 #     shared by BOTH the gated_pc and unsup_gated arms (a fair internal A/B) ---
 n_bg: 40
-tpn: 5
+tpn: 1                   # run 4: 5→1. Unused topics are free UNSUPERVISED (they
+                         # just die: Σλ_min ~31) but costly in the CO-FIT — the head
+                         # reads all K, so tpn=5 → K=170 over-fits/separates the head
+                         # (the blow-up), dilutes the correction across 5 topics/node,
+                         # and inflates the pc_topics_lr LR. tpn=1 gives a clean 1:1
+                         # node→topic→label chain, K=66, smaller head (less blow-up,
+                         # orthogonal to Firth), and no dead node-topics. A/B vs run 3
+                         # (5yr, tpn=5) isolates tpn. n_bg=40 held; it's the next lever.
 optimize_doc_concentration: true
 # --- PC head (inject the hierarchy ONCE: gate + FLAT head; ADR 0042) ----------
 weight_y: 50.0            # PC prediction weight. Hughes ~ tokens/doc; rare6 1yr
@@ -235,7 +242,19 @@ Two reads:
 Caveat: this is the STARVED 1yr / blown-head run. Run 3 (5yr history, head_l2=1e-2,
 100 iters) is the fair test of whether more history lifts the representation.
 
-## Follow-ups (next run = run 3, this config)
+## Run 4 (planned) — tpn 5 → 1 (this config), before Firth
+
+Rationale above (frontmatter `tpn`): the co-fit head reads every topic, so the 5
+sub-topics/node that are free unsupervised become a liability (head over-fit /
+separation, diluted correction, dead node-topics). Run 4 = run 3 (5yr, head_l2=1e-2,
+100 iters) with `tpn=1` (K 170→66), a clean A/B on tpn. Run AFTER run 3 so the
+tpn=5 5yr result is the comparator. Watch: does the head stay bounded (smaller K),
+and do pc_topics_lr / detection-AP / P@R hold or improve at a quarter the topics?
+`n_bg=40` held (the next lever if the head still separates — 40 shared bg features
+is a lot for a rare-node head). Note: changing tpn re-keys the bundle cache, so run
+4 rebuilds the (identical, tpn-independent) 5yr bundle once — harmless.
+
+## Follow-ups (after run 4)
 
 - **Extend the feature history beyond 1 year** (`lookback_days: 365 → 1825`, 5yr):
   richer per-doc BOW → more mass to support K=170, and a fairer test of whether the
