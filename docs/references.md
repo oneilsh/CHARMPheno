@@ -179,6 +179,12 @@ authors, year, title, venue, a link if available, and a short note on its role.
   — 2-level phenotype→subtopic hierarchy, PheCode/CCS-guided; nearest work to the ontology-cascade idea. **(landscape)**
 - **Zou, Pesaranghader, Song, Verma, Buckeridge & Li (2022).** Modeling EHR Data Using an End-to-End Knowledge-Graph-Informed Topic Model (GAT-ETM). *Scientific Reports* 12. https://www.nature.com/articles/s41598-022-22956-w
   — graph-attention embeddings of EHR codes from a *taxonomy* KG, fed into an Embedded Topic Model (logistic-normal). The main "KG-informed EHR topic model" prior art; graph is over codes (no code↔ontology mapping problem). **(landscape)**
+- **Ahuja, Zhou, He, Sun, Castro, Gainer, Murphy, Hong & Cai (2020).** sureLDA: A Multidisease Automated Phenotyping Method for the Electronic Health Record. *JAMIA* 27(8):1235–1243.
+  https://doi.org/10.1093/jamia/ocaa079
+  — surrogate-guided ensemble LDA: PheNorm surrogate priors anchor one LDA topic per target phenotype for weakly-supervised, label-free multi-disease phenotyping. The closest guided-LDA precedent to our PC/gated topic shaping — but a different task (label *known* phenotypes, not discover rare ones), flat fixed-K, per-patient surrogate prior (not an ontology gate). **(landscape)**
+- **Yu, Ma, Gronsbell, Cai, Ananthakrishnan, … Liao & Cai (2018).** Enabling Phenotypic Big Data with PheNorm. *JAMIA* 25(1):54–60.
+  https://doi.org/10.1093/jamia/ocx111
+  — unsupervised, label-free phenotyping: normalizes an ICD/NLP surrogate via log-normal mixtures (adjusting for healthcare utilization) then denoises with the remaining features; the surrogate-prior engine sureLDA builds on. **(landscape)**
 - **Pivovarov, Perotte, Grave, Angiolillo, Wiggins & Elhadad (2015).** Learning Probabilistic Phenotypes from Heterogeneous EHR Data (UPhenome). *JBI* 58:156–165.
 - **Ghassemi et al. (2014).** Unfolding Physiological State: Mortality Modelling in Intensive Care Units. *KDD*.
 - **Li, D.C., Therneau, Chute & Liu (2014).** Discovering Associations Among Diagnosis Groups Using Topic Modeling. *AMIA Joint Summits*.
@@ -191,6 +197,62 @@ authors, year, title, venue, a link if available, and a short note on its role.
 - **O'Neil et al. (2024).** Large-scale HDP phenotyping application (CHARM prior work). *npj Digital Medicine*. https://www.nature.com/articles/s41746-024-01286-3
   — the team's own prior work; motivates CHARMPheno.
 - **Pfaff et al. (2023).** N3C macrovisit construction. — encounter/document-unit standardization.
+
+## Rare-disease diagnosis & case-finding (EHR / phenotype-driven)
+
+The directly-comparable landscape for the rare-disease-diagnosis headline: non-genomic,
+EHR/phenotype-driven identification of rare-disease patients. Spans knowledge-based scores,
+learned case-finders, phenotype-driven differential-diagnosis rankers, and the LLM wave.
+See `docs/reports/2026-08-14-rare-disease-diagnosis-lit-review.md` for the synthesis. **(all landscape)**
+
+- **Bastarache, Hughey, Hebbring, Marlo et al. (2018).** Phenotype Risk Scores Identify Patients with Unrecognized Mendelian Disease Patterns. *Science* 359(6381):1233–1239.
+  https://doi.org/10.1126/science.aal4043
+  — maps clinical features of ~1,200 Mendelian diseases onto EHR phenotypes (ICD-derived) and aggregates them into per-disease phenotype risk scores (PheRS); on 21,701 genotyped individuals it uncovered rare-variant/phenotype associations and flagged undiagnosed Mendelian disease. The knowledge-based, interpretable case-finding baseline directly runnable on OMOP phecodes. **(landscape)**
+- **Aref, Bastarache & Hughey (2022).** The phers R Package: Using Phenotype Risk Scores Based on Electronic Health Records to Study Mendelian Disease and Rare Genetic Variants. *Bioinformatics* 38(21):4972–4974.
+  https://doi.org/10.1093/bioinformatics/btac619
+  — open-source R package computing PheRS from ICD occurrences with case-control validation and genetic association tests; operationalizes PheRS as a low-effort, code-native comparator for AoU. **(landscape)**
+- **Johnson, Stephens, Mester, Knyazev et al. (2024).** Electronic Health Record Signatures Identify Undiagnosed Patients with Common Variable Immunodeficiency Disease. *Science Translational Medicine* 16(745):eade4510.
+  https://doi.org/10.1126/scitranslmed.ade4510
+  — PheNet: a machine-learning classifier ranking EHR patients by CVID likelihood from learned phenotypic patterns; externally validated across 6M+ records, top-100 blinded chart review 74% probable CVID, over half of cases flaggable ≥1 year earlier. The single-disease supervised case-finder with the gold-standard validation template (top-K chart review + external + lead-time). **(landscape)**
+- **Jordan, Vy & Do (2023).** A Deep Learning Transformer Model Predicts High Rates of Undiagnosed Rare Disease in Large Electronic Health Systems. *medRxiv* (preprint) 2023.12.21.23300393.
+  https://doi.org/10.1101/2023.12.21.23300393
+  — RarePT (Rare-Phenotype Prediction Transformer): a masked-diagnosis transformer trained self-supervised on phecodes (436k UK Biobank; validated on 3.3M Mount Sinai) imputing undiagnosed rare disease across 155 codes; estimates ≥50% undiagnosed for 20/32 testable diseases. The learned-representation, self-supervised cousin of CHARMPheno's goal — but opaque and discriminative. *(still a preprint as of 2026-08.)* **(landscape)**
+- **Mao, Huang, Jin, … Zhang & Chen (2025).** A Phenotype-Based AI Pipeline Outperforms Human Experts in Differentially Diagnosing Rare Diseases Using EHRs. *npj Digital Medicine* 8:68.
+  https://doi.org/10.1038/s41746-025-01452-1
+  — PhenoBrain: BERT-based HPO extraction (PBTagger) feeding a 5-method ensemble (ICTO/PPO/CNB/MLP/order-statistics) for phenotype-only differential diagnosis; dominates Phenomizer (median rank 4 vs 15) and beats 50 specialists on top-k recall. The SOTA non-genomic phenotype-ranker — but needs curated HPO / clinical notes, hard to feed from structured OMOP. **(landscape)**
+- **Fujiwara, Yamamoto, Kim, Buske & Takagi (2018).** PubCaseFinder: A Case-Report-Based, Phenotype-Driven Differential-Diagnosis System for Rare Diseases. *Am J Hum Genet* 103(3):389–399.
+  https://doi.org/10.1016/j.ajhg.2018.08.003
+  — ranks candidate rare diseases from a patient's HPO terms using disease–phenotype associations text-mined from ~1M case reports; phenotype-driven diagnostic search. **(landscape)**
+- **Chen, Mao, Guo, Wang, Zhang & Chen (2024).** RareBench: Can LLMs Serve as Rare Diseases Specialists? *KDD '24* (ACM SIGKDD), 4442–4454.
+  https://doi.org/10.1145/3637528.3671576
+  — LLM rare-disease diagnosis benchmark scored by Recall@1/@k on phenotype→disease differential diagnosis; a knowledge-graph-driven dynamic few-shot prompt lifts GPT-4 toward specialist level. The benchmark anchoring the LLM-diagnosis frontier. **(landscape)**
+- **Reese, Chimirri, Bridges, Danis, Caufield et al. (2026).** Systematic Benchmarking Demonstrates Large Language Models Have Not Reached the Diagnostic Accuracy of Traditional Rare-Disease Decision Support Tools. *European Journal of Human Genetics* 34(4):498–504.
+  https://doi.org/10.1038/s41431-026-02054-5
+  — benchmarks seven LLMs against Exomiser on 5,213 phenopacket cases (HPO → Mondo); the best LLM ranks the correct diagnosis first in only 23.6% of cases vs Exomiser's 35.5% R@1 — LLMs still trail phenotype-driven tools. The "frontier not solved" datum. **(landscape)**
+- **Cohen, Chamberlin, Deloughery, Nguyen, Bedrick, Meninger, Ko, Amin, Wei & Hersh (2020).** Detecting Rare Diseases in Electronic Health Records Using Machine Learning and Knowledge Engineering: Case Study of Acute Hepatic Porphyria. *PLOS ONE* 15(7):e0235574.
+  https://doi.org/10.1371/journal.pone.0235574
+  — representative single-disease EHR case-finding: ML + knowledge engineering flags undiagnosed AHP (prevalence ~1/100,000) patients for biochemical workup. The applied genre CHARMPheno's multi-disease rare6 generalizes into one shared representation. **(landscape)**
+- **Lee, Liu, Kim, Chen, Sun, Rogers, Chung & Weng (2022).** Deep Learning for Rare Disease: A Scoping Review. *Journal of Biomedical Informatics* 135:104227.
+  https://doi.org/10.1016/j.jbi.2022.104227
+  — scoping review of 332 DL rare-disease studies (2010–2021): heaviest in neoplastic/genetic/neurological disease, CNN-dominated (307/332) by imaging data; frames the data-scarcity challenges and the AUPRC-over-AUROC imbalance lesson we independently reproduced. **(landscape)**
+- **Tan, Gonçalves, Yuan, Brat, Gentleman & Kohane; 4CE Consortium (2024).** Implications of Mappings Between International Classification of Diseases Clinical Diagnosis Codes and Human Phenotype Ontology Terms. *JAMIA Open* 7(4):ooae118. (arXiv:2407.08874)
+  https://doi.org/10.1093/jamiaopen/ooae118
+  — quantifies the code→phenotype bridge: only ~2.2% of ICD codes in UMLS map directly to HPO, and the older ~30% SNOMED-CT / ~15% ICD-10-CM HPO-coverage baseline (Bodenreider 2014) has eroded (ICD-10-CM ~11% by 2022). The evidence that deriving HPO phenotypes from structured OMOP codes is deeply lossy — why HPO-based tools (Phenomizer, PhenoBrain) are hard to run on structured AoU, and an argument for learning phenotypes directly from codes. **(landscape)**
+
+## Diagnostic utility & value of information
+
+Metrics and objectives for the diagnose-the-patient / conditional-diagnosis use cases, where
+population case-finding precision (base-rate-taxed) is the wrong lens. **(all landscape)**
+
+- **Vickers & Elkin (2006).** Decision Curve Analysis: A Novel Method for Evaluating Prediction Models. *Medical Decision Making* 26(6):565–574.
+  https://doi.org/10.1177/0272989X06295361
+  — net benefit: weight true vs false positives by the odds at a decision threshold, then sweep the threshold into a decision curve; judges a model by clinical consequences rather than AUC/calibration alone. The rigorous metric for a *utility* (not discrimination) claim. **(landscape)**
+- **Nelson (2005).** Finding Useful Questions: On Bayesian Diagnosticity, Probability, Impact, and Information Gain. *Psychological Review* 112(4):979–999.
+  https://doi.org/10.1037/0033-295X.112.4.979
+  — compares value-of-information norms (Bayesian diagnosticity, information gain / mutual information, KL distance, probability gain, impact) against human data, arguing expected information gain best captures a query's usefulness. Grounds expected-information-gain next-best-test selection — the VOI use case that falls out of our generative β. **(landscape)**
+- **Westover, Eiseman, Cash & Bianchi (2012).** Information Theoretic Quantification of Diagnostic Uncertainty. *The Open Medical Informatics Journal* 6(1):36–50.
+  https://doi.org/10.2174/1874431101206010036
+  — casts diagnostic uncertainty and test informativeness as the entropy of disease status and the mutual information a test result carries about it, including how pre-test-probability *ranges* affect that uncertainty. Makes MI / expected information gain concrete for diagnostic test selection. **(landscape)**
 
 ## Anchor-word / spectral initialization
 
