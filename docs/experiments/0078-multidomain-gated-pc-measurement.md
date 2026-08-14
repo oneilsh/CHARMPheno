@@ -90,4 +90,50 @@ the assemble phase will be slower than the condition-only cached runs).
 
 ## Run log
 
-_(pending first run)_
+### Run 1 (n_bg=8, tpn=1, measurement, 100 iters) — first REAL per-node specialization, hierarchy-aligned; big PC lift over the unsupervised twin; ties condition-only at the macro
+
+Detection AP (case vs bg):
+
+| arm | det AP |
+|---|---|
+| **gated_pc (multi-domain, supervised)** | **0.1472** |
+| unsup_gated (multi-domain, weightY=0) | 0.1216 |
+| condition-only Gated-PC (0076 run 7) | 0.148 |
+
+- **Biggest PC delta of the arc:** gated_pc vs unsup_gated detection AP **Δ+0.0257
+  (+21% rel)**; pc_topics_lr AP Δ+0.0071, AUC Δ+0.0057. Supervision does serious
+  work once measurement is in — much more than drug (0077: Δ+0.0112).
+- **Ties condition-only at the macro** (0.1472 ≈ run 7's 0.148; was 0.1497 at
+  iter 40). So measurement adds information the supervised fit exploits *over the
+  unsupervised twin*, but aggregate detection lands at condition-level — the
+  information-limit caveat (0076/0079) still holds for the macro. Note θ_contrib
+  flipped to 0.47/0.53: measurement carries MORE of the representation than
+  conditions (a big domain even under binary presence).
+- **The per-node λ-mass shows the thesis signal — and it tracks DAG DEPTH.** Unlike
+  drug's flat ~0.76/0.24, measurement gives real, directional, depth-correlated
+  specialization: the ANCHOR/parent nodes are the most condition-heavy, the fine
+  subtypes balanced or measurement-leaning:
+
+  | node | cond | meas | level |
+  |---|---|---|---|
+  | Amyloidosis | 0.87 | 0.13 | anchor |
+  | SLE (anchor) | 0.81 | 0.19 | anchor |
+  | Sarcoidosis | 0.79 | 0.21 | anchor |
+  | Ehlers-Danlos (anchor) | 0.71 | 0.29 | anchor |
+  | Myasthenia gravis (anchor) | 0.59 | 0.41 | anchor |
+  | Cardiac sarcoid / AL amyloid / cerebral amyloid / … (leaves) | ~0.50 | ~0.50 | leaf |
+
+  The clinically-right pattern: **coarse categories are condition-coded; fine
+  subtypes reach toward labs to make the distinction.** This is the per-node
+  domain specialization the whole multi-domain PC thesis predicted — first clear
+  sighting, and it correlates with hierarchy level.
+
+**Read:** measurement is the domain where the mechanism visibly works — strong
+supervised lift over the unsupervised twin AND real hierarchy-aligned per-node
+specialization. What it does NOT (yet) do is beat condition-only on aggregate
+detection. But aggregate detection is the wrong yardstick for this specialization:
+the fine subtypes are exactly where measurement leans in, so the payoff should show
+in the CONDITIONAL sharpening readout (P(child|parent)), which this run predates
+(built in commit 24cf434, mid-flight). **Next: re-run 0078 to get the conditional
+table — the hypothesis is that measurement sharpens SUBTYPING where it can't move
+de-novo detection.**
