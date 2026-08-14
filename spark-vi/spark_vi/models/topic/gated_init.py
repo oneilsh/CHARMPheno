@@ -22,6 +22,7 @@ findings. Kept for the real-DAG A/B harness and as the extension point for futur
 from __future__ import annotations
 
 import logging
+import os
 
 import numpy as np
 
@@ -34,6 +35,15 @@ logger = logging.getLogger(__name__)
 
 
 ANCHOR_SCOPES = ("closure", "frontier")
+
+# Pseudo-count magnitude of a spectral lambda seed. Anchor recovery (Arora et al.
+# 2013) supplies the topic SHAPE; this is the seed's total mass per topic, not a
+# recovered quantity. It is the single source of truth for every spectral seed
+# path -- the dense single-domain seed, the multi-domain dense seed, the scalable
+# seed, AND the mllib shim's scalable->dict conversion -- so the dense and scalable
+# multi-domain routes cannot drift to different seed strengths (SP3a whole-branch
+# review Minor 1).
+SPECTRAL_LAMBDA_SCALE = 200.0
 
 
 def _validate_anchor_scope(anchor_scope):
@@ -100,9 +110,10 @@ def _anchor_node_set(front, lay, anchor_scope):
     return {int(u) for u in front if u != 0}          # "frontier"
 
 
-def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
+def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = SPECTRAL_LAMBDA_SCALE,
                                   anchor_scope: str = "closure",
-                                  topo_order: str = "forward") -> np.ndarray:
+                                  topo_order: str = "forward",
+                                  domain_bounds=None) -> np.ndarray:
     """Block-aligned spectral lambda seed (topological, direction set by `topo_order`).
 
     data_summary carries {"train_docs": [token-id arrays], "train_labels": [node id or
@@ -135,7 +146,29 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
     as a corollary, a descendant is then NOT deflated against that ancestor's increment
     (node_anchors[p] is absent), so its block can absorb the un-anchored ancestor signal;
     the "isolate u's own increment" guarantee holds only for ancestors that have their own
-    frontier docs."""
+    frontier docs.
+
+    `domain_bounds` (optional cumulative offsets [0, V_0, V_0+V_1, ..., V] over a
+    concatenated multi-domain vocabulary) is passed to EVERY `find_anchors` call this makes —
+    the pooled background call in step 1 and each node's within-node call in step 2 — so each
+    domain's candidate floor is computed against its OWN mean marginal (see
+    `spectral_init.find_anchors` / `_domain_candidate_mask`). It is LOAD-BEARING for
+    multi-domain seeds: without it the denser domain dominates anchor selection, a node's
+    sparse-domain slice is under-seeded, and the E/M leaves that node's topic dead at the
+    prior (insight 0066; recovery 0.005 vs 0.675 at random_seed=0). Default `None` = one
+    pooled domain, byte-identical to the single-domain behavior;
+    `multidomain_spectral_lambda` is the multi-domain entry point that derives these bounds
+    from per-domain sizes. Malformed bounds raise (`domains.validate_domain_bounds`).
+
+    NOTE: only this DENSE path takes `domain_bounds` — the distributed twin
+    `scalable_block_aligned_lambda` does not take it and (measured) still recovers
+    every node on a well-specified multi-domain plant, because recovery there is
+    carried by the gated EM rather than the seed. See that function's docstring and
+    `test_scalable_init_recovers_every_identifying_signal`
+    (spark-vi/tests/test_gated_lda.py). CAVEAT on the "0.005 vs 0.675" figure above:
+    it comes from insight 0066's BACKGROUND-STARVED plant; insight 0067 later showed
+    the dense floor's apparent value is largely a degenerate-plant artifact, so read
+    "LOAD-BEARING" as "load-bearing on that degenerate plant", not unconditionally."""
     _validate_anchor_scope(anchor_scope)
     if not (isinstance(data_summary, dict)
             and "train_docs" in data_summary and "train_labels" in data_summary):
@@ -161,7 +194,7 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
         bg_anchors = []
     else:
         Q_all = word_cooccurrence(bg_docs, V)
-        bg_anchors = find_anchors(Q_all, lay.n_bg)
+        bg_anchors = find_anchors(Q_all, lay.n_bg, domain_bounds=domain_bounds)
         bg_beta = recover_beta(Q_all, bg_anchors)
         for i in range(min(lay.n_bg, bg_beta.shape[0])):
             beta[i] = bg_beta[i]
@@ -179,7 +212,7 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
         Q_u = word_cooccurrence(docs_u, V)
         anc = relatives(u)
         seed = list(bg_anchors) + [a for p in anc for a in node_anchors.get(p, [])]
-        fg_anchors = find_anchors(Q_u, lay.tpn, seed_rows=seed)
+        fg_anchors = find_anchors(Q_u, lay.tpn, seed_rows=seed, domain_bounds=domain_bounds)
         if not fg_anchors:
             logger.warning(
                 "spectral_block_aligned_lambda: node %s found no anchors "
@@ -198,7 +231,49 @@ def spectral_block_aligned_lambda(data_summary, lay, V, *, scale: float = 200.0,
     return beta * float(scale)
 
 
+def multidomain_spectral_lambda(data_summary, lay, domains, *, scale: float = SPECTRAL_LAMBDA_SCALE,
+                                anchor_scope: str = "closure",
+                                topo_order: str = "forward") -> dict:
+    """Per-domain dict-lambda spectral seed for the multi-domain gated model.
+
+    Runs the block-aligned anchor recipe (spectral_block_aligned_lambda) on the
+    joint co-occurrence over the concatenated vocab [domain 0; domain 1; ...] WITH
+    the per-domain candidate floor threaded through anchor selection (domain_bounds
+    from `domains`), then splits the block-aligned joint beta into per-domain
+    row-normalized matrices (spectral_init.split_domains) scaled into lambda_m.
+
+    The per-domain floor is load-bearing: without it the denser domain dominates
+    anchor selection and a node's sparse-domain slice is under-seeded, which the
+    E/M then leaves as topic-death (a node topic stuck at the uniform prior; see
+    insight 0066). With it, a node can anchor on its sparse-domain word, which
+    then defines the topic across BOTH domains via the within-document cross-block
+    co-occurrence (Q_01) — the MixEHR shared-theta tie (Li et al. 2020).
+
+    `domains` = per-domain vocab sizes [V_0, V_1, ...]; V = sum(domains). Returns
+    {m: (K, V_m)} lambda, each block a scaled per-domain distribution + a tiny
+    positive floor. data_summary carries {'train_docs':..., 'train_labels':...} as
+    for spectral_block_aligned_lambda."""
+    from spark_vi.models.topic.domains import domains_to_bounds
+    from spark_vi.models.topic.spectral_init import split_domains
+    V = int(sum(domains))
+    bounds = domains_to_bounds(domains).tolist()
+    beta_joint = spectral_block_aligned_lambda(
+        data_summary, lay, V, scale=1.0, anchor_scope=anchor_scope,
+        topo_order=topo_order, domain_bounds=bounds)          # (K, V), rows joint distributions
+    per_domain = split_domains(beta_joint, bounds)            # each row-normalized within its domain
+    return {m: per_domain[m] * float(scale) + 1e-9 for m in range(len(domains))}
+
+
 INIT_STRATEGIES = {"spectral": spectral_block_aligned_lambda}
+
+# Multi-domain counterparts, keyed by the SAME strategy names. A strategy needs a
+# separate entry because its multi-domain form has a different signature and return
+# type (per-domain sizes in, a per-domain dict lambda {m: (K, V_m)} out), so
+# INIT_STRATEGIES entries are not usable as-is. Keeping it a registry rather than
+# hard-wiring the one implementation means a future strategy that is added to
+# INIT_STRATEGIES but has no multi-domain form raises in GatedOnlineLDA.
+# initialize_global instead of silently running the spectral recipe under its name.
+MULTIDOMAIN_INIT_STRATEGIES = {"spectral": multidomain_spectral_lambda}
 
 
 class _GroupDoc:
@@ -223,7 +298,7 @@ class _NodeGroups:
 
 def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
                                   seed: int = 0, min_doc_freq: int = 5,
-                                  scale: float = 200.0,
+                                  scale: float = SPECTRAL_LAMBDA_SCALE,
                                   anchor_scope: str = "closure",
                                   topo_order: str = "forward") -> np.ndarray:
     """Distributed random-projection analogue of `spectral_block_aligned_lambda`.
@@ -274,11 +349,39 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
     docs; "frontier" trains node u only from docs where u is the most-specific
     attested node (u in gd.groups := the frontier itself) and background only from
     empty-frontier docs — so anchor selection cannot let background or a parent
-    steal a descendant's defining word (see `_anchor_node_set`)."""
+    steal a descendant's defining word (see `_anchor_node_set`).
+
+    UNLIKE `spectral_block_aligned_lambda`, this function takes NO `domain_bounds`
+    and carries no per-domain candidate floor — and, measured, a multi-domain fit
+    seeded here still recovers every node. `find_anchors_projected`'s candidate
+    gate is an ABSOLUTE per-word document-frequency floor (`df_w >= min_doc_freq`,
+    ADR 0032, adopted because the dense function's MEAN-RELATIVE marginal floor
+    over-excludes rare-but-pure words under the sketch), not a pooled-mean-relative
+    one — so there is no pooled mean for a denser domain to dominate.
+
+    What is SETTLED, and what is not (corrected 2026-07-26 after a fuller test —
+    an earlier version of this docstring overclaimed):
+    `test_scalable_init_recovers_every_identifying_signal`
+    (spark-vi/tests/test_gated_lda.py) fits the b_only-node two-domain plant from
+    THIS seed across 8 projection draws and asserts post-EM recovery of every
+    node's IDENTIFYING per-domain signal above a floor — and it passes. What is
+    NOT claimed: that this seed matches or beats the dense+floor seed cell-for-cell
+    (an 8-seed comparison showed the scalable seed is itself FRAGILE — an
+    exclusive-node signal can be 0.0 at init on some draws), nor that the dense
+    per-domain floor is redundant in general. The honest reading: on a
+    WELL-SPECIFIED plant, recovery is carried by the gated EM, which refines a
+    fragile scalable seed back up — not by the seed's own quality or by a floor
+    analogue (consistent with insight 0067, where the dense floor's apparent value
+    was itself a degenerate-plant artifact). The arc's SP3 blocker-1 question ("is
+    the production scalable init adequate for a multi-domain fit?") is answered YES
+    by that recovery gate; the stronger "immune / needs no floor, proven by a
+    dense comparison" framing was a premature reading of a 3-seed lucky draw and is
+    withdrawn."""
     from pyspark import StorageLevel
     from spark_vi.models.topic.spectral_init_scalable import (
         projected_cooccurrence_rdd, find_anchors_projected,
         recover_beta_projected, default_projection_dim,
+        _row_normalize_projected, precompute_projection_rows,
     )
     _validate_anchor_scope(anchor_scope)
     if d is None:
@@ -312,6 +415,63 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
         for i in range(min(lay.n_bg, bg_beta.shape[0])):
             beta[i] = bg_beta[i]
 
+        # Opt-in diagnostics (no effect on lambda): dump per-node K estimates off
+        # each node's own sketch. CHARM_PROBE_EFFRANK -> the (closed-negative)
+        # effective-rank / hierarchical-deflation probe; CHARM_PROBE_PARALLEL_ANALYSIS
+        # -> the sample-size-aware parallel-analysis estimator (pa_k). Either or both.
+        probe_effrank = bool(os.environ.get("CHARM_PROBE_EFFRANK"))
+        probe_pa = bool(os.environ.get("CHARM_PROBE_PARALLEL_ANALYSIS"))
+        probe_any = probe_effrank or probe_pa
+        effrank_reports: dict[int, dict] = {}
+        node_pivots: dict[int, set] = {}   # node -> its FULL accumulated pivot claim
+        if probe_effrank:
+            from spark_vi.models.topic.effective_rank import (
+                pivoted_qr_residual_spectrum, report_from_spectrum,
+            )
+            try:
+                _probe_max = int(os.environ.get("CHARM_PROBE_EFFRANK_MAX", "40"))
+            except ValueError:
+                _probe_max = 40
+        if probe_pa:
+            from spark_vi.models.topic.effective_rank import (
+                build_null_spectrum, parallel_analysis_count_all,
+                parallel_analysis_rank, participation_ratio,
+                singular_value_spectrum,
+            )
+
+            def _pa_int(name, default):
+                try:
+                    return int(os.environ.get(name, str(default)))
+                except ValueError:
+                    return default
+
+            _pa_max = _pa_int("CHARM_PROBE_PA_MAX", 300)
+            _pa_reps = _pa_int("CHARM_PROBE_PA_REPS", 5)
+            _pa_cap = _pa_int("CHARM_PROBE_PA_CAP", 2000)
+            try:
+                _pa_margin = float(os.environ.get("CHARM_PROBE_PA_MARGIN", "2.0"))
+            except ValueError:
+                _pa_margin = 2.0
+            try:
+                _pa_tau = float(os.environ.get("CHARM_PROBE_PA_TAU", "0.01"))
+            except ValueError:
+                _pa_tau = 0.01
+            # Per-node recurrence floor: a word must appear in >= this many of the
+            # node's docs to enter its spectrum (the per-node term-min-count). 0
+            # disables the recurrence-floored column.
+            _pa_min_df = _pa_int("CHARM_PROBE_PA_MIN_DF", 3)
+            # All-token projection rows, precomputed ONCE (same d/seed as the
+            # sketch) and reused across every node + null rep.
+            _pa_R = precompute_projection_rows(V, d, seed)
+            _pa_rng = np.random.default_rng(seed)
+            # Opt-in per-node DIAGNOSTIC (CHARM_PROBE_PA_DIAG=1): keep each node's
+            # real spectrum + null floor + doc-shape stats so we can see WHERE a
+            # blown-up pa_k comes from (leading vs tail, doc length, count
+            # concentration). All quantities are aggregate/derived (no patient rows,
+            # no per-token disclosure); printed to the log only, never committed.
+            _pa_diag = bool(os.environ.get("CHARM_PROBE_PA_DIAG"))
+            _pa_diag_rows: dict[int, dict] = {}
+
         # Step 2: each node, in `topo_order`, its OWN filtered one-slab pass.
         node_anchors: dict[int, list] = {}
         order, relatives = _node_order_and_relatives(lay, topo_order)
@@ -326,6 +486,118 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
             anc = relatives(u)
             seed_rows = list(bg_anchors) + [a for p in anc
                                             for a in node_anchors.get(p, [])]
+            if probe_effrank:
+                # HIERARCHICAL deflation: deflate node u's sketch against
+                # background + its ancestors' FULL accumulated pivot claim (not the
+                # fit's tpn anchors -- that under-deflates and every node re-counts
+                # shared comorbidity, inflating Σ rank). Ancestors claim first
+                # (forward topo order), so u measures only its INCREMENT and the
+                # total telescopes toward the corpus rank instead of summing
+                # per-node full ranks. node_pivots[u] carries u's FULL claim
+                # (ancestors' ∪ u's own) so descendants deflate against the whole
+                # chain regardless of whether relatives() gives direct parents or
+                # all ancestors.
+                _anc_pivots: set = set()
+                for _p in anc:
+                    _anc_pivots |= node_pivots.get(_p, set())
+                _seed = list(bg_anchors) + sorted(_anc_pivots)
+                _qbar_u = _row_normalize_projected(res_u.pooled_QR, res_u.p_w)
+                # df floor (same min_doc_freq as the fit's anchor selection): only
+                # words in >= min_doc_freq of this node's docs may be pivots, so the
+                # rank counts reproducible cross-patient directions, not single-
+                # patient idiosyncratic words (which inflate low-count nodes).
+                _elig = res_u.df_w >= min_doc_freq
+                _spec_u, _own_pivots = pivoted_qr_residual_spectrum(
+                    _qbar_u, _probe_max, seed_rows=_seed, return_pivots=True,
+                    eligible=_elig)
+                node_pivots[u] = _anc_pivots | set(int(x) for x in _own_pivots)
+                _rep_u = report_from_spectrum(_spec_u, tau=0.01)
+                _rep_u["n_docs"] = int(res_u.n_docs)   # diversity-vs-volume readout
+                effrank_reports[u] = _rep_u
+            if probe_pa:
+                # Parallel analysis: the node's OWN raw singular-value spectrum vs a
+                # null drawn from the node's OWN unigram marginal + doc lengths at
+                # the node's OWN n_docs. pa_k = directions clearing margin x null =
+                # the sample-size-aware per-node foreground K. NOT hierarchically
+                # deflated (a per-node quantity; own population vs own-size null).
+                _qbar_pa = _row_normalize_projected(res_u.pooled_QR, res_u.p_w)
+                _spec_pa = singular_value_spectrum(_qbar_pa, _pa_max)
+                _hist = res_u.length_hist or {}
+                if _hist:
+                    _ul = np.array(sorted(_hist), dtype=np.int64)
+                    _wc = np.array([_hist[int(x)] for x in _ul], dtype=np.float64)
+                    _lens = _pa_rng.choice(
+                        _ul, size=int(min(4096, _wc.sum())), p=_wc / _wc.sum())
+                else:
+                    _lens = np.empty(0, dtype=np.int64)
+                _floor_pa = build_null_spectrum(
+                    res_u.unigram, _lens, res_u.n_docs, V, d, seed,
+                    reps=_pa_reps, cap=_pa_cap, max_probe=_pa_max, R_rows=_pa_R)
+                _pa_k = parallel_analysis_rank(
+                    _spec_pa, _floor_pa, margin=_pa_margin, tau=_pa_tau)
+                _pa_k_all = parallel_analysis_count_all(
+                    _spec_pa, _floor_pa, margin=_pa_margin)
+                _rep = effrank_reports.get(u)
+                if _rep is None:
+                    _rep = report_from_spectrum(_spec_pa, tau=0.01) \
+                        if probe_effrank else {
+                            "participation": participation_ratio(_spec_pa),
+                            "threshold": 0, "eigengap": 0,
+                            "n_probed": len(_spec_pa)}
+                    _rep["n_docs"] = int(res_u.n_docs)
+                _rep["pa_k"] = int(_pa_k)
+                _rep["pa_k_all"] = int(_pa_k_all)
+                _rep["pa_pr_raw"] = float(participation_ratio(_spec_pa))
+                # Store the (truncated) real spectrum + null floor so the readout can
+                # RE-DERIVE pa_k at any margin/tau/bg_skip without a re-fit -- the
+                # cutoff becomes an instant re-render knob. Top 150 positions is well
+                # past any node's collapse; the rest is numerical dust.
+                _rep["pa_spec"] = [float(x) for x in _spec_pa[:150]]
+                _rep["pa_floor"] = [float(x) for x in _floor_pa[:150]]
+                _rep["pa_tau"] = float(_pa_tau)
+                _rep["pa_margin"] = float(_pa_margin)
+                if _pa_min_df > 1:
+                    # Per-node recurrence floor: restrict the spectrum (real AND
+                    # null) to words appearing in >= _pa_min_df of the node's docs,
+                    # so single-patient directions collapse and only phenotypes that
+                    # RECUR across patients survive. res_u.df_w is the within-node
+                    # document frequency per word.
+                    _elig = np.asarray(res_u.df_w) >= _pa_min_df
+                    _spec_rec = singular_value_spectrum(
+                        _qbar_pa, _pa_max, eligible=_elig)
+                    _floor_rec = build_null_spectrum(
+                        res_u.unigram, _lens, res_u.n_docs, V, d, seed,
+                        reps=_pa_reps, cap=_pa_cap, max_probe=_pa_max, R_rows=_pa_R,
+                        eligible=_elig)
+                    _pa_k_rec = parallel_analysis_rank(
+                        _spec_rec, _floor_rec, margin=_pa_margin, tau=_pa_tau)
+                    _rep["pa_k_rec"] = int(_pa_k_rec)
+                    _rep["pa_spec_rec"] = [float(x) for x in _spec_rec[:150]]
+                    _rep["pa_floor_rec"] = [float(x) for x in _floor_rec[:150]]
+                    _rep["pa_min_df"] = int(_pa_min_df)
+                effrank_reports[u] = _rep
+                if _pa_diag:
+                    # Aggregate doc-shape stats (no per-token / patient disclosure):
+                    # how long are the docs, how concentrated are the code counts,
+                    # how many distinct tokens carry the node's sketch.
+                    _uni = np.asarray(res_u.unigram) if res_u.unigram is not None \
+                        else np.zeros(0)
+                    _distinct = int((_uni > 0).sum())
+                    _tot = float(_uni.sum())
+                    _top = np.sort(_uni)[::-1] if _uni.size else np.zeros(0)
+                    _top1 = float(_top[0] / _tot) if _tot > 0 and _top.size else 0.0
+                    _top10 = float(_top[:10].sum() / _tot) if _tot > 0 else 0.0
+                    _hk = sorted((res_u.length_hist or {}).keys())
+                    _dl = (min(_hk), int(np.median(np.repeat(
+                        _hk, [res_u.length_hist[k] for k in _hk]))), max(_hk)) \
+                        if _hk else (0, 0, 0)
+                    _pa_diag_rows[u] = {
+                        "n_docs": int(res_u.n_docs), "distinct": _distinct,
+                        "doclen": _dl, "top1_frac": _top1, "top10_frac": _top10,
+                        "spec": [float(x) for x in _spec_pa[:150]],
+                        "floor": [float(x) for x in _floor_pa[:150]],
+                        "pa_k": int(_pa_k), "pa_k_all": int(_pa_k_all),
+                    }
             fg_anchors = find_anchors_projected(
                 res_u.pooled_QR, res_u.p_w, res_u.df_w, lay.tpn,
                 seed_rows=seed_rows, min_doc_freq=min_doc_freq)
@@ -341,6 +613,91 @@ def scalable_block_aligned_lambda(rdd, lay, V, *, d: int | None = None,
             for j, idx in enumerate(lay.block[u]):
                 if j < fg_beta.shape[0]:
                     beta[idx] = fg_beta[j]
+
+        if probe_any:
+            from spark_vi.models.topic.effective_rank import (
+                log_effrank_table, save_effrank_sidecar,
+            )
+            print("", flush=True)
+            log_effrank_table(effrank_reports, n_nodes=len(lay.nodes),
+                              k_uniform=len(lay.nodes) * lay.tpn,
+                              printer=lambda s: print(s, flush=True))
+            if probe_pa:
+                _pa_items = sorted(
+                    ((int(rep.get("pa_k", 0)), u, rep)
+                     for u, rep in effrank_reports.items()),
+                    reverse=True)
+                _pa_total = sum(k for k, _, _ in _pa_items)
+                _pa_all_total = sum(int(rep.get("pa_k_all", 0))
+                                    for _, _, rep in _pa_items)
+                print(f"[pa] parallel-analysis per-node K (margin={_pa_margin}, "
+                      f"reps={_pa_reps}, cap={_pa_cap}): Σpa_k={_pa_total} "
+                      f"(leading-run) vs Σpa_k_all={_pa_all_total} (count-all "
+                      f"diagnostic) vs current foreground K={len(lay.nodes) * lay.tpn}",
+                      flush=True)
+                _has_rec = any("pa_k_rec" in rep for _, _, rep in _pa_items)
+                if _has_rec:
+                    _rec_total = sum(int(rep.get("pa_k_rec", 0))
+                                     for _, _, rep in _pa_items)
+                    print(f"[pa] recurrence-floored (min_df={_pa_min_df}): "
+                          f"Σpa_k_rec={_rec_total}", flush=True)
+                    print("[pa] node\tpa_k\tpa_k_rec\tpa_k_all\tn_docs", flush=True)
+                    for k, u, rep in _pa_items:
+                        print(f"[pa] {u}\t{k}\t{rep.get('pa_k_rec', 0)}\t"
+                              f"{rep.get('pa_k_all', 0)}\t{rep.get('n_docs', 0)}",
+                              flush=True)
+                else:
+                    print("[pa] node\tpa_k\tpa_k_all\tpa_pr_raw\tn_docs", flush=True)
+                    for k, u, rep in _pa_items:
+                        print(f"[pa] {u}\t{k}\t{rep.get('pa_k_all', 0)}\t"
+                              f"{rep.get('pa_pr_raw', 0.0):.1f}\t"
+                              f"{rep.get('n_docs', 0)}", flush=True)
+                if _pa_diag and _pa_diag_rows:
+                    # Flag the pathological nodes (pa_k_all > n_docs -- "more
+                    # phenotypes than patients") plus the 3 best-supported nodes for
+                    # contrast, and dump each one's real-vs-null spectrum by position
+                    # so the blowup's location (leading vs tail) is visible.
+                    _pos = [0, 1, 2, 3, 4, 5, 8, 12, 20, 40, 80, 120]
+                    _flag = [u for u, dd in _pa_diag_rows.items()
+                             if dd["pa_k_all"] > dd["n_docs"] > 0]
+                    _ref = [u for _, u, _ in sorted(
+                        ((dd["n_docs"], u, None)
+                         for u, dd in _pa_diag_rows.items()), reverse=True)[:3]]
+                    print("[pa-diag] real spectrum vs null floor by position for "
+                          "flagged (pa_k_all>n_docs) + top-support nodes", flush=True)
+                    for u in list(dict.fromkeys(_flag + _ref)):
+                        dd = _pa_diag_rows[u]
+                        sp, fl = dd["spec"], dd["floor"]
+                        m = min(len(sp), len(fl))
+                        pos = [p for p in _pos if p < m]
+                        rr = [f"{sp[p] / (2 * fl[p]):.1f}" if fl[p] > 0 else "inf"
+                              for p in pos]
+                        print(f"[pa-diag] node {u} n_docs={dd['n_docs']} "
+                              f"distinct_tok={dd['distinct']} "
+                              f"doclen[min/med/max]={dd['doclen'][0]}/"
+                              f"{dd['doclen'][1]}/{dd['doclen'][2]} "
+                              f"top1={dd['top1_frac']:.2f} top10={dd['top10_frac']:.2f}"
+                              f"  pa_k={dd['pa_k']} pa_k_all={dd['pa_k_all']}",
+                              flush=True)
+                        print("[pa-diag]   pos:  " + " ".join(
+                            f"{p:>6}" for p in pos), flush=True)
+                        print("[pa-diag]   real: " + " ".join(
+                            f"{sp[p]:6.2f}" for p in pos), flush=True)
+                        print("[pa-diag]   flr:  " + " ".join(
+                            f"{fl[p]:6.2f}" for p in pos), flush=True)
+                        print("[pa-diag]   r/2f: " + " ".join(
+                            f"{v:>6}" for v in rr), flush=True)
+            # Persist a sidecar (node id -> report) so a post-fit readout can join
+            # names + doc counts without re-parsing logs or re-running the fit. The
+            # path is provided by the driver via CHARM_PROBE_EFFRANK_OUT (the fit's
+            # out_dir); log-only if unset.
+            _out = os.environ.get("CHARM_PROBE_EFFRANK_OUT")
+            if _out:
+                try:
+                    save_effrank_sidecar(effrank_reports, _out)
+                    print(f"[effrank] wrote sidecar -> {_out}", flush=True)
+                except OSError as e:
+                    print(f"[effrank] sidecar write failed ({e})", flush=True)
     finally:
         group_rdd.unpersist(blocking=False)
 
