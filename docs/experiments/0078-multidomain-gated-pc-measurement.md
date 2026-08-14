@@ -137,3 +137,39 @@ in the CONDITIONAL sharpening readout (P(child|parent)), which this run predates
 (built in commit 24cf434, mid-flight). **Next: re-run 0078 to get the conditional
 table — the hypothesis is that measurement sharpens SUBTYPING where it can't move
 de-novo detection.**
+
+### Run 2 (same config + conditional readout) — sharpening hypothesis REFUTED; conditional prediction validated; dichotomy points at closure-mask
+
+Re-ran with the conditional "sharpening" readout (P(child|parent-cohort)).
+
+**Conditional sharpening — gated_pc vs unsup_gated (weightY=0):**
+
+| metric | gated_pc | unsup_gated | Δ |
+|---|---|---|---|
+| cond AP (child\|parent) | 0.2681 | 0.2808 | **−0.0127** |
+| cond AUC | 0.6203 | 0.6232 | −0.0030 |
+| multiclass top-1 | 0.7783 | 0.7867 | −0.0084 |
+
+- **Supervision does NOT help sharpening — it's marginally WORSE.** The hypothesis
+  (measurement sharpens subtyping under PC) is refuted: the unsupervised gated fit
+  is slightly better at P(child|parent). The conditional metrics AND θ_contrib
+  (0.47/0.53) are near-identical across arms, so the hierarchy-aligned per-node
+  specialization from run 1 is largely a property of the GATED MULTI-DOMAIN
+  representation itself, not a PC-supervision effect (run 1's attribution corrected).
+- **But the conditional FRAMING is strongly validated.** The sharpening lift is huge
+  — conditioning on the parent gives a 5–29× AP jump over marginal (depth-0 cond_AP
+  0.274 vs marg 0.051; depth-2 cond_AP 0.577 vs marg 0.020). Multiclass top-1 is
+  clinically real: **Sarcoidosis→subtype 86%, SLE→subtype 100%, Amyloidosis→subtype
+  75–79%.** "Sharpen a loose dx" is far more tractable than de-novo detection.
+- **The dichotomy is the finding: supervision helps DETECTION (det AP 0.1473 vs
+  0.1225, Δ+0.0247) but not SHARPENING** — because `label_mask_mode=full` trains
+  each node against BACKGROUND (a detection objective), never P(child|parent), and
+  by pulling a parent's subtypes toward "parent vs bg" it may blur within-parent
+  distinctions.
+
+**Read + next.** Conditional/hierarchical prediction is a real, valuable capability
+(high top-1, huge lift) — already good in the unsupervised gated fit. PC as
+configured optimizes the wrong thing for it. The clear test: `label_mask_mode=closure`
+trains each node vs its SIBLINGS (the conditional objective) — exp 0079. Hypothesis:
+closure-mask supervision improves the conditional sharpening metric where full-mask
+supervision didn't.
