@@ -268,6 +268,45 @@ Reads:
 4. Absolute precision still poor (det P@R0.5 ~0.10) — real but weak (~3× lift), not
    yet case-finding usable.
 
+## Domain value — SETTLED on the hybrid branch (do not re-derive)
+
+The `hybrid-domain-reliability-review-ckn2bq` branch ran the full per-domain
+ablation (odds-ratio / LR-over-codes readouts on unsupervised gated fits). Verdict
+retires the naive "add meds+labs":
+
+- **Condition is necessary + nearly sufficient** (only:condition ≈ or > all for 5/6
+  rare6; insight 0071).
+- **Observation is net-negative for all six** — dropping it *improves* placement;
+  AoU survey/SDOH/admin/vitals vocab, high volume/low specificity; PPI strip
+  insufficient (insights 0071, 0072). "Observation sucks" confirmed.
+- **Drug is a mild disease-specific positive** — only signature-drug diseases (MG,
+  lupus, EDS POTS meds); ~neutral else (0071).
+- **Value-aware measurement (range-abnormality tokens) is the ONE lift** — rescues
+  labs-dependent diseases condition can't find (Guillain-Barré, Marfan, Osler,
+  sarcoid, CIDP, FH), but DEGRADES condition via modality interference (near-
+  universal `[measured]` tokens pull shared θ off condition), and **no fixed combo
+  beats condition-alone at macro** (insights 0078, 0079).
+- **Supervised per-disease domain weighting already tried** (nested-CV): ~6% over
+  fixed, condition-primary (~28/39 → condition=1.0), "not worth deploying" (0075,
+  0076).
+- **Case-finding here is INFORMATION-LIMITED** (0062): FPs are genuine code-level
+  similarity (anemia+CKD background ≡ SLE on condition codes). Not a scoring/head/
+  weighting problem — the information isn't there.
+
+**Implications for this arc.** Runs 2–4 (~3× lift, condition-only, history-
+insensitive) sit at that documented ceiling — we reproduced it. So:
+1. **Multi-domain is retired for the macro** — flat cond+drug+obs is a dead-end;
+   don't build it. The ONLY live thread is value-aware measurement for the labs-
+   dependent SUBSET *through the per-node gate* (untested combo: the gate might let
+   labs-dependent nodes go measurement-heavy without diluting condition-nodes — the
+   shared-θ interference the branch hit is per-node-separable here). Speculative,
+   low ceiling, ~6 diseases.
+2. **Firth (task #27) is next** — contained, orthogonal; cleanup (calibration + drop
+   head_l2), NOT a ceiling-raiser (the head was never the bottleneck).
+3. **Strategic:** PC needs a hidden-low-mass signal that EXISTS; on condition-coded
+   rare disease it mostly doesn't. The cleanest Gated-PC demonstration may be a
+   present-but-buried task, not this present-but-absent one.
+
 ## Run 4 (planned) — tpn 5 → 1 (this config), before Firth
 
 Rationale above (frontmatter `tpn`): the co-fit head reads every topic, so the 5
