@@ -92,6 +92,7 @@ def test_parse_args_surface_defaults_and_arms():
     assert a.weight_y_warmup_iters == 10
     assert a.head_penalty == "none"            # opt-in Firth toggle, off by default
     assert a.head_inner_iters == 0             # Path B off by default
+    assert a.eval_every == 0                   # per-iter eval off by default
 
 
 def test_head_penalty_firth_round_trips_through_estimator_and_engine():
