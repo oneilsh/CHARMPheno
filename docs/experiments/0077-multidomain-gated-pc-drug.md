@@ -108,4 +108,38 @@ slower than the cached condition-only runs.
 
 ## Run log
 
-_(pending first run)_
+### Run 1 (n_bg=8, tpn=1, drug, 100 iters) — mechanism works at the macro, but no per-node specialization
+
+Detection AP (case vs bg), the honest case-finding read:
+
+| arm | det AP |
+|---|---|
+| **gated_pc (multi-domain, supervised)** | **0.1371** |
+| unsup_gated (multi-domain, weightY=0) | 0.1259 |
+| condition-only Gated-PC (0076 run 7) | 0.148 |
+
+- **Baseline (b) CLEARED:** supervised beats the unsupervised multi-domain twin,
+  Δ det AP **+0.0112** (+8.9% rel). PC's per-node shaping does real work — the
+  mechanism is correct on real multi-domain data.
+- **Baseline (a) NOT cleared:** 0.137 < run 7's 0.148. Adding drug *under
+  supervision* does not beat condition-alone — the θ_contrib frac 0.68/0.32 shows
+  drug eats a third of the representational mass for a net-negative aggregate
+  trade. Consistent with the information-limited caveat (0076/0079): condition is
+  the macro champion under fixed readout.
+- **The DIRECT test (per-node domain λ-mass) — thesis prediction did NOT land.**
+  The per-node condition/drug balance is near-uniform (~0.76/0.24 across most
+  nodes). A faint directional signal in the tails: **SLE is the most drug-leaning
+  (0.667/0.333)** — clinically sensible (heavily immunosuppressant-treated) — and
+  amyloidosis/cutaneous-sarcoid the most condition-heavy (0.92/0.08). But **MG did
+  NOT go drug-heavy** (0.76/0.24, mid-pack) as insight 0079 predicted, and the
+  spread (0.667–0.920) is too small to move the macro. The per-node gate + the
+  weak rare6 supervised signal (+ topic_trust=0.05 cap) don't differentiate nodes
+  by domain enough to matter.
+
+**Read:** the multi-domain PC machinery is correct (beats the unsupervised twin,
+dict-λ + per-domain scatter all sound), but **drug is too weak / too disease-
+nonspecific on rare6** to produce the per-node specialization the thesis targets.
+The stronger test is measurement (0078) — the domain that carried the rare-disease
+signal (Marfan/GBS/EDS via labs). If specialization shows anywhere, it shows there.
+Possible levers if we want to push drug specifically: raise topic_trust (allow
+bigger per-cell domain moves) and/or weight_y — but measurement is the better bet.
