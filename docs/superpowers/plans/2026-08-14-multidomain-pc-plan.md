@@ -88,12 +88,30 @@ than the macro.
 
 ## 5. Steps + open decisions
 
-- **A. Merge direction (GATING decision).** Bring the hybrid multi-domain modules onto
-  this branch (cherry-pick `multi_domain.py`, `measurement_tokens.py`, `domains.py`,
-  multi-domain `GatedOnlineLDA` path, `multidomain_cloud.py` helpers) vs merge the
-  branches vs port PC onto hybrid. Recommend: cherry-pick the multi-domain modules onto
-  THIS branch (keeps our PC + gated_pc driver + emit_labels; the multi-domain engine path
-  is additive to GatedOnlineLDA). Assess conflict surface first.
+- **A. Merge direction — ASSESSED (2026-08-14). Cherry-pick onto this branch; surface is small.**
+  merge-base `199935e`; ours +134 / hybrid +198 commits. Per file (ours vs hybrid since MB):
+  - `domains.py`, `multi_domain.py`, `measurement_tokens.py`, `multidomain_cloud.py`: NEW
+    on hybrid, absent on ours → **drop in, additive, no conflict.**
+  - `models/topic/gated_lda.py` (+617 hybrid), `mllib/topic/gated_lda.py` (+304),
+    `models/topic/dag_placement.py` (+587): **untouched on ours** → clean-take hybrid's
+    version (git won't conflict). DagLayout interface (closure/allowed_set/subtree/
+    block/nodes) is PRESERVED in hybrid's dag_placement, so our PC composes. RISK =
+    compatibility, not merge: taking whole files pulls ALL hybrid changes to them
+    (multi-domain + anchor + spectral). MITIGATION: run the full PC+gated suite after the
+    swap as the compat gate; the single-domain GatedOnlineLDA path is domains=None
+    (preserved), so Gated-PC should be unaffected.
+  - `pc.py`: ours +1310, hybrid untouched → **ours only, no conflict.**
+  - `case_finding_assembly.py`: BOTH changed (ours +113 emit_labels; hybrid +146 SNOMED
+    anchor-expansion — `_snomed_class_hierarchy`, `ancestor_df`, restrict-under 4274025).
+    The changes are LARGELY ORTHOGONAL (different features, mostly different hunks; overlap
+    only in the `assemble_from_events` signature/body). **For the MVP the merge is likely
+    AVOIDABLE:** keep OUR version (emit_labels), bring `multi_domain.py` adapted to call
+    `attach_labels`, and DEFER hybrid's SNOMED anchor-expansion (that's plan step D /
+    expanded anchors, not the rare6 condition+measurement MVP). Verify `multi_domain.py`
+    only calls helpers present in our version.
+  - **Verdict:** low-conflict cherry-pick. Order: (1) drop in 4 new files + clean-take the
+    3 engine files; (2) run PC+gated suite (compat gate); (3) keep our case_finding_assembly,
+    adapt multi_domain to emit_labels; (4) build the domain-aware correction; defer SNOMED.
 - **B.** Multi-domain labeled corpus (verify emit_labels flows through
   assemble_multidomain; condition + measurement).
 - **C.** Domain-aware topic correction in OnlinePCLDA (the scatter) + shim multi-domain
