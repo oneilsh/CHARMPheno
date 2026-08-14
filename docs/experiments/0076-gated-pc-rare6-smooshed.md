@@ -345,3 +345,27 @@ is a lot for a rare-node head). Note: changing tpn re-keys the bundle cache, so 
   step so `H` stays conditioned). **Sequencing:** implement AFTER run 3 so runs 2/3
   (the `head_l2` ridge stopgap) are the comparators. Then run 4 can drop `head_l2`.
   Rejected alternative: head trust-region step clamp (a timescale knob).
+  ✅ **IMPLEMENTED** (commit 3368926): opt-in `head_penalty="firth"`. Separable-fixture
+  gate: plain-Newton |w|→325 (clip-saturated), Firth |w|→30 finite/stable (AUC=1);
+  non-separable Firth ≈ MLE (cosine 1.0000). 50 PC tests green.
+
+## Run 5 (planned) — Firth head, drop head_l2 (after run 4)
+
+`head_penalty: firth`, `head_l2: 0` on the run-4 config (tpn=1, 5yr, 100 iters). The
+parameter-free separation cure: no ridge knob, and a genuinely calibrated per-patient
+P(node). **Read:**
+- `|w_CK|` bounded through ALL iters with NO head_l2 (the proof Firth supersedes the
+  ridge → run 6+ drops the knob for good).
+- pc_topics_lr AUC/AP ≈ runs 3/4 (ranking is scale-invariant, so Firth ≈ same
+  discrimination — calibration came free).
+- **co-fit head AUC ≈ pc_topics_lr** (run 3 had a 0.772 vs 0.799 gap; a converged,
+  finite, calibrated Firth head should close it — the clearest head-quality win).
+
+**Interpretation nuance.** Firth lives on the *inner-loop* head path (Path B: driver-
+side per-doc IRLS), whereas runs 2–4 used the *default aggregated one-step* path
+(Path A). Path B also carries a ±50 logit clip, so its `none`-baseline `|w|` is already
+partly bounded (~325 in the fixture) — unlike Path A's uncapped 1e6 cluster blow-up.
+So run 5 changes BOTH the path and the penalty vs runs 3/4; the clean read is
+"|w_CK| small/finite AND pc_topics_lr holds AND co-fit head ≈ pc_topics_lr." A
+`head_penalty=none, head_inner_iters=25` control (Path B without Firth) would isolate
+Firth exactly if the head-quality delta is ambiguous.
