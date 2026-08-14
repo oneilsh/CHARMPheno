@@ -43,6 +43,46 @@ def test_dag_closure_parents_densifies_parent_int_over_range_C():
     assert len(cp) == 4
 
 
+def test_dag_children_and_depth():
+    from gated_pc_cloud import _dag_children_and_depth
+    # 0 root; 1,2 -> 0; 3,4 -> 1. C=5.
+    parent_int = {1: [0], 2: [0], 3: [1], 4: [1]}
+    children, depth = _dag_children_and_depth(parent_int, C=5)
+    assert children[0] == [1, 2] and sorted(children[1]) == [3, 4]
+    assert children[3] == [] and children[4] == []
+    assert depth == {0: 0, 1: 1, 2: 1, 3: 2, 4: 2}
+
+
+def test_conditional_readout_sharpens_within_parent_cohort():
+    from gated_pc_cloud import conditional_readout
+    # 0 root; 1,2 -> 0; 3,4 -> 1. Among node-1's cohort, node 3 vs 4 is perfectly
+    # separable, so the conditional AUC and multiclass top-1 must be 1.0.
+    parent_int = {1: [0], 2: [0], 3: [1], 4: [1]}
+    C = 5
+    rng = np.random.default_rng(0)
+    rows = []
+    # closure labels: a doc at leaf L is positive at L, its parent 1, and root 0.
+    for _ in range(20):   # at node 3
+        rows.append(([1, 1, 0, 1, 0], [0.1, 0.5, 0.1, 0.9, 0.1]))
+    for _ in range(20):   # at node 4
+        rows.append(([1, 1, 0, 0, 1], [0.1, 0.5, 0.1, 0.1, 0.9]))
+    for _ in range(20):   # at node 2 (sibling of 1, outside 1's cohort)
+        rows.append(([1, 0, 1, 0, 0], [0.1, 0.1, 0.5, 0.1, 0.1]))
+    y = np.array([r[0] for r in rows], float)
+    proba = np.array([r[1] for r in rows], float)
+    mask = np.ones_like(y)
+    cond = conditional_readout(proba, y, mask, parent_int, C, min_count=5)
+
+    # parent-1 cohort has both children scored, each perfectly separable.
+    e13 = [e for e in cond["edges"] if e["parent"] == 1 and e["child"] == 3]
+    e14 = [e for e in cond["edges"] if e["parent"] == 1 and e["child"] == 4]
+    assert e13 and e14
+    assert e13[0]["cond_auc"] == 1.0 and e14[0]["cond_auc"] == 1.0
+    assert e13[0]["depth"] == 1                       # parent 1 is at depth 1
+    p1 = [p for p in cond["parents"] if p["parent"] == 1]
+    assert p1 and p1[0]["top1"] == 1.0               # argmax child always correct
+
+
 def test_precision_at_recall_and_recall_at_fdr():
     from gated_pc_cloud import precision_at_recall, recall_at_fdr
     # perfectly separable: at any recall, precision 1.0; at any FDR, recall 1.0.
