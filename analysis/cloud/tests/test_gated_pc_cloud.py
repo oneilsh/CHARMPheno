@@ -100,6 +100,32 @@ def test_ece_perfectly_calibrated_is_zero_and_miscalibrated_is_positive():
     assert _ece(np.zeros(100), np.full(100, 0.9)) > 0.5
 
 
+def test_calibrate_per_node_fixes_ece_and_preserves_ranking():
+    from gated_pc_cloud import calibrate_per_node, _ece
+    import numpy as np
+    from sklearn.metrics import roc_auc_score
+    rng = np.random.default_rng(0)
+    C = 1
+    n = 4000
+    # true P = sigmoid of a signal; miscalibrate by squaring the score (monotone,
+    # so ranking is preserved but reliability is wrong).
+    signal = rng.standard_normal(n)
+    true_p = 1.0 / (1.0 + np.exp(-signal))
+    y = (rng.random(n) < true_p).astype(float)
+    bad = true_p ** 2                                    # miscalibrated, same ranking
+    # split train/test
+    tr = np.zeros(n, bool); tr[: n // 2] = True; te = ~tr
+    proba_tr = bad[:, None]; proba_te = bad[:, None]
+    yv = y[:, None]; mask = np.ones((n, 1))
+    cal = calibrate_per_node(proba_tr[tr], yv[tr], mask[tr], proba_te[te], C)
+    # calibration lowers ECE...
+    assert _ece(yv[te, 0], cal[:, 0]) < _ece(yv[te, 0], proba_te[te, 0])
+    # ...and approximately preserves the ranking (isotonic is monotone; only the
+    # flat regions it induces create ties that move AUC slightly).
+    assert abs(roc_auc_score(yv[te, 0], cal[:, 0])
+               - roc_auc_score(yv[te, 0], proba_te[te, 0])) < 0.01
+
+
 def test_precision_at_recall_and_recall_at_fdr():
     from gated_pc_cloud import precision_at_recall, recall_at_fdr
     # perfectly separable: at any recall, precision 1.0; at any FDR, recall 1.0.

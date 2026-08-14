@@ -318,6 +318,29 @@ def _ece(y, p, n_bins=10):
     return float(ece)
 
 
+def calibrate_per_node(proba_tr, y_tr, m_tr, proba_te, C, *, min_pos=20):
+    """Per-node ISOTONIC calibration fit on TRAIN predictions, applied to TEST.
+
+    The head-independent path to CALIBRATED P(node) — the VOI prerequisite — without
+    a well-behaved co-fit head (exp 0080: Firth couldn't tame the closure-mask head;
+    this sidesteps it). Isotonic is monotone so it preserves the ranking (AUC/AP
+    unchanged) while fixing the reliability curve. A node with too few observed train
+    positives (or a single class) passes through UNCALIBRATED. Fit on train, applied
+    to test — the standard train-fold calibration; a dedicated calibration split is a
+    future refinement. Pure numpy + sklearn."""
+    from sklearn.isotonic import IsotonicRegression
+    out = np.asarray(proba_te, dtype=np.float64).copy()
+    for c in range(C):
+        tr = np.asarray(m_tr[:, c], bool)
+        yc = y_tr[tr, c]
+        if int(yc.sum()) < min_pos or len(np.unique(yc)) < 2:
+            continue
+        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        iso.fit(proba_tr[tr, c], yc)
+        out[:, c] = iso.transform(proba_te[:, c])
+    return out
+
+
 def format_conditional_readout(cond, int2cid, name_by_id):
     """Render conditional_readout HONESTLY (VOI/metrics report §2): cond_AUC is the
     headline discrimination number (prevalence-independent); cond_AP/lift are marked
@@ -842,6 +865,20 @@ def main() -> int:
             # Conditional 'sharpening' readout: P(child | parent-cohort) by DAG depth.
             results["gated_pc_conditional"] = _conditional(
                 proba_gp, y_te, m_te, "gated_pc")
+            # Post-hoc ISOTONIC calibration of the head-independent proba → calibrated
+            # conditional posteriors for VOI, sidestepping the co-fit head (exp 0080:
+            # Firth couldn't tame the closure-mask head). Isotonic is monotone so
+            # AUC/top-1 are unchanged; only the reliability (ECE) moves.
+            from analysis.pc.evaluate import _lr_proba_per_label_masked
+            proba_gp_tr = _lr_proba_per_label_masked(Pi_tr, y_tr, m_tr, Pi_tr, C)
+            proba_gp_cal = calibrate_per_node(proba_gp_tr, y_tr, m_tr, proba_gp, C)
+            cond_cal = conditional_readout(proba_gp_cal, y_te, np.ones_like(y_te),
+                                           bundle.parent_int, C,
+                                           min_count=args.min_label_count)
+            results["gated_pc_conditional_cal"] = cond_cal
+            print(f"[driver]   conditional ECE (VOI readiness): raw="
+                  f"{_f(results['gated_pc_conditional'].get('ece')).strip()} -> "
+                  f"isotonic-calibrated={_f(cond_cal.get('ece')).strip()}", flush=True)
             # co-fit head's own per-node P(node) readout (secondary), from the SAME
             # scored test frame (no second CAVI pass).
             hp, hy, hm = _collect_head_proba(test_scored, C)
