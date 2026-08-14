@@ -253,3 +253,68 @@ def test_pc_shim_supervised_fit_moves_head_and_emits_probability(spark):
     assert len(td) == 3 and abs(float(sum(td)) - 1.0) < 1e-6   # simplex theta
     assert len(prob) == 1                                       # one P(y=1) per label
     assert 0.0 <= float(prob[0]) <= 1.0                         # a probability
+
+
+def test_pc_shim_multidomain_gated_pc_end_to_end(spark):
+    """Multi-domain Gated-PC through the shim: two per-domain feature columns
+    (featuresCols) inject the per-domain-lambda GatedOnlineLDA, a supervised
+    weightY>0 fit runs the DOMAIN-AWARE topic correction (dict-lambda), and both
+    fit (dict-lambda blocks) and transform (per-domain feature concatenation)
+    round-trip. This is the 30c shim gate for the multi-domain PC path."""
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
+    from pyspark.ml.linalg import Vectors
+    parent = {1: 0, 2: 0}                          # 2 disease nodes; K = nBg(2)+2 = 4
+    V0, V1 = 16, 9                                  # domain 0 conditions, 1 measurement
+    rng = np.random.default_rng(0)
+    rows = []
+    for _ in range(48):
+        node = int(rng.choice([1, 2]))
+        # domain 0: a node-correlated word band; domain 1: a node-correlated band.
+        c0 = np.zeros(V0)
+        for w in rng.integers(node * 5, node * 5 + 5, size=6):
+            c0[w % V0] += 1.0
+        c1 = np.zeros(V1)
+        for w in rng.integers(node * 3, node * 3 + 3, size=4):
+            c1[w % V1] += 1.0
+        i0 = sorted(np.nonzero(c0)[0].tolist())
+        i1 = sorted(np.nonzero(c1)[0].tolist())
+        f0 = Vectors.sparse(V0, i0, [float(c0[j]) for j in i0])
+        f1 = Vectors.sparse(V1, i1, [float(c1[j]) for j in i1])
+        y = [1.0, 1.0 if node == 1 else 0.0, 1.0 if node == 2 else 0.0]   # C=3: root+2
+        rows.append((f0, f1, y, [node]))
+    df = spark.createDataFrame(rows, ["features_0", "features_1", "label", "frontier"])
+
+    est = OnlinePCLDAEstimator(
+        k=99, maxIter=6, seed=0, subsamplingRate=1.0,
+        featuresCols=["features_0", "features_1"],
+        numLabels=3, labelCol="label", weightY=30.0, gradCaviIters=10,
+        headOptimizer="newton", headLr=0.7, frontierCol="frontier",
+    ).setGateParent(parent)
+    est._set(gateNBg=2, gateTpn=1)
+    model = est.fit(df)
+
+    lam = model._result.global_params["lambda"]
+    assert isinstance(lam, dict) and set(lam) == {0, 1}        # per-domain dict λ
+    assert lam[0].shape == (4, V0) and lam[1].shape == (4, V1)  # K from layout, per-domain V
+    assert not np.allclose(model.headWeights(), 0.0)           # supervised correction ran
+    assert model.headWeights().shape == (3, 4)
+
+    out = model.transform(df)
+    td, prob = out.select("topicDistribution", "probability").head()
+    assert len(td) == 4 and abs(float(sum(td)) - 1.0) < 1e-6   # simplex θ over K=4
+    assert len(prob) == 3 and all(0.0 <= float(p) <= 1.0 for p in prob)
+
+
+def test_pc_shim_multidomain_requires_gate(spark):
+    """featuresCols without gateParent fails fast: the per-node gate is the shared
+    structure the per-domain blocks specialize under."""
+    from spark_vi.mllib.topic.pc import OnlinePCLDAEstimator
+    from pyspark.ml.linalg import Vectors
+    rows = [(Vectors.sparse(4, [0], [1.0]), Vectors.sparse(3, [1], [1.0]), [1.0])
+            for _ in range(4)]
+    df = spark.createDataFrame(rows, ["features_0", "features_1", "label"])
+    with pytest.raises(ValueError, match="require gateParent"):
+        OnlinePCLDAEstimator(
+            k=3, maxIter=2, numLabels=1, labelCol="label", weightY=1.0,
+            featuresCols=["features_0", "features_1"],
+        ).fit(df)
