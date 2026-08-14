@@ -53,12 +53,16 @@ head_optimizer: newton   # settled convergent head (ADR 0039); no sgd/adam.
 # head_l2=1e-2 — the ridge floors the solve): a stable run isolating the inner-loop
 # head-fit PATH (vs run 4's aggregated one-step, Path A). firth-PathB vs this none-PathB
 # then isolates the PENALTY; this vs run 4 isolates the PATH.
-head_penalty: none
-head_inner_iters: 25     # inner-loop IRLS (Path B) — the thing this control isolates.
-head_lr: 0.3             # (inner loop is undamped; head_lr unused on Path B)
+head_penalty: firth      # run 5b: TRUE Firth (attempt 2), now with the step-halving
+                         # trajectory guard (commit 4874bb7). Parameter-free separation
+                         # cure + calibrated P(node). Run 5a (none + inner_iters, no guard)
+                         # blew |w| to 2.2e7 with a dead head — Firth's step-halving is
+                         # what makes the inner-loop path stable.
+head_inner_iters: 25     # inner-loop IRLS (Path B) — where Firth + step-halving live.
+head_lr: 0.3             # (inner loop is undamped/step-halved; head_lr unused on Path B)
 head_newton_ridge: 0.05  # numerical conditioner for the per-label IRLS solve.
-head_l2: 0.01            # absolute ridge floor — stabilizes the Path-B inner loop
-                         # (what head_penalty=0/firth lacked). Same value as runs 3/4.
+head_l2: 0.0             # DROPPED under Firth — step-halving + the Jeffreys penalty bound
+                         # |w| with no ridge knob. Proof = |w_CK| finite with head_l2=0.
 grad_cavi_iters: 30      # differentiable CAVI unroll depth; must match scoring
                          # convergence (cavi_max_iter=100). 30 suffices for the
                          # short lookback docs (deeper = bigger autograd tape).
@@ -333,7 +337,26 @@ Reads:
 4. Head already well-behaved at K=66 (no blow-up) → Firth's run-5 job is knob-removal +
    calibration + closing the 0.776→0.800 head gap, not blow-up prevention.
 
-## Run 5 (RUNNING) — Firth head, head_l2 dropped (this config)
+### Run 5a (Path-B-no-Firth control: none + inner_iters=25 + head_l2=1e-2) — head blew up UNGUARDED
+
+| arm | AUC | AP | detection AUC / AP | co-fit head AUC |
+|---|---|---|---|---|
+| gated_pc pc_topics_lr | 0.7938 | 0.0278 | 0.738 / 0.116 | — |
+| unsup_gated pc_topics_lr | 0.7922 | 0.0277 | 0.724 / 0.120 | — |
+| gated_pc co-fit head | — | — | 0.500 / 0.038 | **0.500 (DEAD)** |
+
+`|w_CK|` = **2.2e7** (prev 0.038). Reads:
+1. **The `none` inner-loop path is UNSTABLE without step-halving.** 25 undamped Newton
+   steps/M-step blew `|w|` to 2.2e7 even with `head_l2=1e-2` — the co-fit head saturated
+   to chance (AUC exactly 0.500). The `none` branch has no trajectory guard (only firth
+   does); Path B is intended for Firth. (Minor follow-up: guard `none`+inner_iters>0 too.)
+2. **The blown head slightly HURT the representation** — pc_topics_lr 0.800→0.794,
+   detection AP 0.134→0.116 vs run 4's Path A: the saturated head fed a bad correction.
+3. **PC wash — 6th confirmation** (pc_topics_lr Δ+0.0016, detection AP Δ−0.0035).
+4. **This is the motivation for Firth:** the inner-loop path (needed for calibrated
+   probabilities) needs step-halving to be stable; Firth supplies exactly that.
+
+## Run 5b (RUNNING) — Firth head (step-halving), head_l2 dropped (this config)
 
 Rationale above (frontmatter `tpn`): the co-fit head reads every topic, so the 5
 sub-topics/node that are free unsupervised become a liability (head over-fit /
