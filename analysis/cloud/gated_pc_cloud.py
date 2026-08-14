@@ -850,6 +850,14 @@ def main() -> int:
                 min_count=args.min_label_count)
             print(format_arm_readout("gated_pc (co-fit head)",
                                      results["gated_pc_head"]), flush=True)
+            # Conditional readout on the CO-FIT HEAD proba too — this is where Firth
+            # matters: the head's calibrated P(child|parent) (its ECE) is the VOI
+            # prerequisite, and the head-independent pc_topics_lr metric can't show it.
+            results["gated_pc_head_conditional"] = _conditional(
+                hp, hy, hm, "gated_pc co-fit head")
+            print(f"[driver]   co-fit head |w_CK|max="
+                  f"{float(np.abs(pc_model.headWeights()).max()):.4g} "
+                  f"(head_penalty={args.head_penalty})", flush=True)
             train_scored.unpersist(); test_scored.unpersist()
 
         if not args.skip_unsup_gated:
