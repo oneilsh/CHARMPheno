@@ -300,3 +300,85 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
             name_by_id=dict(before_dag.names), ledger=ledger)
     finally:
         train_att.unpersist(); test_att.unpersist()
+
+
+# Domain names loadable as their own OMOP fact table (domain 0 is always
+# conditions; extra domains are read single-domain via load_omop_bigquery, whose
+# fused path emits the common `event_date` column). Measurement is NOT here — its
+# value-aware loader is deferred (see the multi-domain PC plan); this MVP does
+# conditions + {drug, procedure}.
+_EXTRA_DOMAIN_DATE = "event_date"   # bigquery._FUSED_EVENT_DATE for a single non-cond load
+_SUPPORTED_EXTRA_DOMAINS = ("drug", "procedure")
+
+
+def assemble_multidomain_case_finding_corpus(
+        spark, *, disease="rare6", cdr, billing, extra_domains=("drug",),
+        person_mod, min_n, holdout_frac=0.2, split_salt=None,
+        vocab_size, min_df, min_patient_count, n_bg=2, tpn=1, doc_min_length=0,
+        strip_mode="test_only", lookback_days=365, label_window_days=365,
+        emit_labels=True, label_mask_mode="full"):
+    """End-to-end BQ assembly of the multi-domain case-finding bundle (LOOKBACK
+    mode). Domain 0 is conditions (the label/gate source); ``extra_domains`` are
+    read single-domain and windowed against the SAME condition-derived index.
+
+    The multi-domain sibling of ``case_finding_assembly.assemble_case_finding_corpus``
+    — same disease DAG, same PatientCohortDocSpec, same lookback windowing — but it
+    fits ONE vocabulary per domain (MixEHR-style) and emits per-domain
+    ``features_0..features_{N-1}`` columns. Only lookback mode is supported (the
+    forward per-patient window is condition-defined and does not cleanly window a
+    second domain); pass an already-lookback config. Requires a live CDR
+    (cluster-covered, like the single-domain lookback body).
+    """
+    from charmpheno.omop import load_omop_bigquery
+    from charmpheno.omop.cohorts import case_finding_index_table, disease_anchors
+    from charmpheno.omop.case_finding_assembly import (
+        load_condition_dag, _FOREST_ROOT_CID, _LOOKBACK_PRIOR_OBS_DAYS)
+    from charmpheno.omop.doc_spec import PatientCohortDocSpec
+
+    bad = [d for d in extra_domains if d not in _SUPPORTED_EXTRA_DOMAINS]
+    if bad:
+        raise ValueError(
+            f"extra_domains {bad} not supported (this MVP: {_SUPPORTED_EXTRA_DOMAINS}; "
+            "measurement's value-aware loader is deferred — see the multi-domain PC plan)")
+
+    # Domain 0: conditions (legacy single-domain load → condition_era_start_date).
+    cond_date = "condition_era_start_date"
+    cond = load_omop_bigquery(
+        spark=spark, cdr_dataset=cdr, billing_project=billing,
+        person_sample_mod=person_mod, source_table="condition_era")
+    domain_raws, date_cols = [cond], [cond_date]
+    # Extra domains: single-domain fused load → the common `event_date` column.
+    for dom in extra_domains:
+        d = load_omop_bigquery(
+            spark=spark, cdr_dataset=cdr, billing_project=billing,
+            person_sample_mod=person_mod, concept_types=(dom,))
+        domain_raws.append(d)
+        date_cols.append(_EXTRA_DOMAIN_DATE)
+
+    # ONE shared condition-derived index; every domain windowed against it. The
+    # lookback prior-obs gate is the intrinsic ≥1yr floor (not the forward knob).
+    index_df = case_finding_index_table(
+        cond, disease=disease, spark=spark, cdr_dataset=cdr,
+        billing_project=billing, date_col=cond_date,
+        prior_obs_days=_LOOKBACK_PRIOR_OBS_DAYS, label_window_days=label_window_days)
+    feature_frames, cond_label = lookback_feature_frames(
+        domain_raws, index_df, date_cols,
+        lookback_days=lookback_days, label_window_days=label_window_days)
+
+    anchors = disease_anchors(disease)
+    root = _FOREST_ROOT_CID if len(anchors) > 1 else None
+    before_dag = load_condition_dag(
+        spark, anchors=anchors, root=root, cdr=cdr, billing=billing)
+    doc_spec = PatientCohortDocSpec(min_doc_length=doc_min_length)
+
+    # One vocab spec per domain (same fit knobs; a real per-domain sweep is future).
+    vocab_specs = [
+        DomainVocabSpec(vocab_size=vocab_size, min_df=min_df,
+                        min_patient_count=min_patient_count, binary=False)
+        for _ in domain_raws]
+    return assemble_multidomain_from_events(
+        feature_frames[0], feature_frames[1:], before_dag, doc_spec=doc_spec,
+        min_n=min_n, vocab_specs=vocab_specs, holdout_frac=holdout_frac,
+        split_salt=split_salt, n_bg=n_bg, tpn=tpn, strip_mode=strip_mode,
+        label_events=cond_label, emit_labels=emit_labels,
+        label_mask_mode=label_mask_mode)
