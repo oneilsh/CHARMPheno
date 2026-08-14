@@ -42,10 +42,12 @@ from spark_vi.models.topic.types import PCDocument
 
 def _row_to_pc_document(
     row,
-    features_col: str,
+    features_col: str | None,
     label_col: str | None,
     label_mask_col: str | None,
     C: int,
+    features_cols: list[str] | None = None,
+    domain_sizes: list[int] | None = None,
 ) -> PCDocument:
     """Build a PCDocument from a Spark row, tolerating absent label columns.
 
@@ -59,8 +61,21 @@ def _row_to_pc_document(
     missing mask defaults to ones(C) (all observed). At weightY == 0 none of
     this is read — the placeholders exist only to keep the row type stable for
     increment 2.
+
+    MULTI-DOMAIN: when ``features_cols`` (and ``domain_sizes``) are given, the N
+    per-domain sparse vectors are concatenated into the engine's single token-id
+    space via ``_concat_domain_features`` (each row validated against the fixed
+    per-domain widths), superseding ``features_col``. The label/mask handling is
+    unchanged (the head is domain-agnostic).
     """
-    bow = _vector_to_bow_document(row[features_col])
+    if features_cols:
+        from spark_vi.mllib.topic.gated_lda import _concat_domain_features
+        indices, counts = _concat_domain_features(
+            [row[c] for c in features_cols], domain_sizes)
+        length = int(counts.sum())
+    else:
+        bow = _vector_to_bow_document(row[features_col])
+        indices, counts, length = bow.indices, bow.counts, bow.length
 
     if label_col is None:
         y = np.zeros(C, dtype=np.float64)
@@ -83,9 +98,9 @@ def _row_to_pc_document(
         mask = np.zeros(C, dtype=np.float64)  # no labels at all
 
     return PCDocument(
-        indices=bow.indices,
-        counts=bow.counts,
-        length=bow.length,
+        indices=indices,
+        counts=counts,
+        length=length,
         y=y,
         label_mask=mask,
     )
@@ -93,20 +108,24 @@ def _row_to_pc_document(
 
 def _row_to_gated_pc_document(
     row,
-    features_col: str,
+    features_col: str | None,
     label_col: str | None,
     label_mask_col: str | None,
     frontier_col: str,
     C: int,
+    features_cols: list[str] | None = None,
+    domain_sizes: list[int] | None = None,
 ):
     """Build a GatedPCDocument (Gated-PC): a PCDocument plus a DAG frontier.
 
-    Reuses :func:`_row_to_pc_document` for the features/label/mask fields, then reads
+    Reuses :func:`_row_to_pc_document` for the features/label/mask fields (including
+    the multi-domain concatenation when ``features_cols`` is set), then reads
     ``frontier_col`` — an array of node ids (empty/None = ungated background) — and
     attaches it so the gated E-step can restrict this doc's training to its subtree.
     """
     from spark_vi.models.topic.types import GatedPCDocument
-    pc = _row_to_pc_document(row, features_col, label_col, label_mask_col, C)
+    pc = _row_to_pc_document(row, features_col, label_col, label_mask_col, C,
+                             features_cols=features_cols, domain_sizes=domain_sizes)
     raw_f = row[frontier_col]
     frontier = frozenset(int(x) for x in (raw_f or []))
     return GatedPCDocument(
@@ -323,6 +342,26 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "doc's topic training to DagLayout.allowed_set(frontier).",
         typeConverter=TypeConverters.toString,
     )
+    # -- Multi-domain features (MixEHR-style per-domain vocabularies) --------
+    featuresCols = Param(
+        Params._dummy(), "featuresCols",
+        "ordered list of per-domain feature columns (features_0 .. features_{N-1}; "
+        "domain 0 = conditions by convention). When set, each row's per-domain "
+        "sparse vectors are concatenated into the engine's single token-id space and "
+        "the injected GatedOnlineLDA carries a per-domain lambda {m:(K,V_m)}; the "
+        "supervised topic correction is scattered back per domain. Empty (default) = "
+        "single fused featuresCol. Requires gateParent (the gate is the shared "
+        "per-node structure across domains).",
+        typeConverter=TypeConverters.toListString,
+    )
+    domainBounds = Param(
+        Params._dummy(), "domainBounds",
+        "optional authoritative cumulative per-domain vocab offsets [0, V_0, V_0+V_1, "
+        "...] (len == len(featuresCols)+1). When unset, the per-domain widths are read "
+        "from the first row's vector sizes; set it as the escape hatch for an "
+        "unrepresentative first row (every row is then validated against these widths).",
+        typeConverter=TypeConverters.toListInt,
+    )
     closureParents = Param(
         Params._dummy(), "closureParents",
         "JSON-encoded length-C list of parent-index lists selecting the DAG-CLOSURE "
@@ -384,11 +423,16 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
 
 def _build_model_and_config(
     estimator: "OnlinePCLDAEstimator", vocab_size: int,
+    domains: list[int] | None = None,
 ) -> tuple[OnlinePCLDA, VIConfig]:
     """Translate Estimator Params into (OnlinePCLDA, VIConfig).
 
     docConcentration follows the LDA-shim convention (unset -> 1/k symmetric;
     length-1 -> scalar; length-k -> asymmetric vector).
+
+    ``domains`` (per-domain vocab widths summing to ``vocab_size``) selects the
+    MULTI-DOMAIN gated engine (per-domain lambda {m:(K,V_m)}); requires the
+    topic-side gate (gateParent). None = single fused vocabulary.
     """
     k = estimator.getOrDefault("k")
 
@@ -450,9 +494,15 @@ def _build_model_and_config(
         alpha = np.full(lay.K, 1.0 / lay.K, dtype=np.float64)
         topic_engine = GatedOnlineLDA(
             lay, vocab_size, alpha=alpha, eta=1.0 / lay.K,
+            domains=domains,                         # None = single fused vocab
             gamma_shape=estimator.getOrDefault("gammaShape"),
             cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
             cavi_tol=estimator.getOrDefault("caviTol"), random_seed=seed)
+    elif domains is not None:
+        raise ValueError(
+            "featuresCols/domainBounds (multi-domain) require gateParent to be set: "
+            "the per-node gate is the shared structure the per-domain topic blocks "
+            "specialize under. Set gateParent, or use a single fused featuresCol.")
 
     model = OnlinePCLDA(
         K=k,
@@ -504,6 +554,7 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, headNewtonRidge=0.01,
     headL2=1e-3, headPenalty="none", headInnerIters=0, closureParents="", warmStartFrom="",
     gateParent="", gateNBg=2, gateTpn=1, frontierCol="frontier",
+    featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
 )
 
 
@@ -555,6 +606,8 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         gateNBg: int = 2,
         gateTpn: int = 1,
         frontierCol: str = "frontier",
+        featuresCols: list[str] | None = None,
+        domainBounds: list[int] | None = None,
         warmStartFrom: str = "",
         # _PersistenceParams kwargs — see that mixin's docstring; these MUST
         # appear here explicitly (not just on the mixin) for kwarg-style
@@ -571,7 +624,13 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         # Stored as an instance attribute — callables aren't MLlib-serializable
         # and persistence is deferred (ADR 0009).
         self._on_iteration = None
-        self.setParams(**self._input_kwargs)
+        # featuresCols/domainBounds carry no positive default (featuresCols defaults
+        # to [] via _setDefault; domainBounds uses isSet). Drop an explicit None so
+        # kwarg-style construction that leaves them unset does not clobber the
+        # default / trip the list typeConverter — mirrors the gated_lda shim.
+        kwargs = {k: v for k, v in self._input_kwargs.items()
+                  if not (k in ("featuresCols", "domainBounds") and v is None)}
+        self.setParams(**kwargs)
 
     @keyword_only
     def setParams(self, **kwargs) -> "OnlinePCLDAEstimator":
@@ -592,13 +651,37 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         from spark_vi.core.runner import VIRunner
 
         weight_y = float(self.getOrDefault("weightY"))
-        features_col = self.getOrDefault("featuresCol")
-        first = dataset.select(features_col).head(1)
-        if not first:
-            raise ValueError("Cannot fit on an empty DataFrame.")
-        vocab_size = first[0][0].size
+        # Multi-domain (featuresCols) vs single fused (featuresCol) vocabulary. When
+        # featuresCols is set, per-domain widths come from the first row's vector
+        # sizes (or explicit domainBounds), the total vocab is their sum, and the
+        # per-domain gated engine is selected downstream (_build_model_and_config).
+        fcols = list(self.getOrDefault("featuresCols") or [])
+        if fcols:
+            first = dataset.select(*fcols).head(1)
+            if not first:
+                raise ValueError("Cannot fit on an empty DataFrame.")
+            if self.isSet("domainBounds"):
+                bounds = [int(b) for b in self.getOrDefault("domainBounds")]
+                if len(bounds) != len(fcols) + 1 or bounds[0] != 0 or \
+                        any(b <= a for a, b in zip(bounds, bounds[1:])):
+                    raise ValueError(
+                        f"domainBounds {bounds} must be strictly increasing, start at "
+                        f"0, and have len(featuresCols)+1 = {len(fcols) + 1} entries")
+                domain_sizes = [b - a for a, b in zip(bounds, bounds[1:])]
+            else:
+                domain_sizes = [int(first[0][i].size) for i in range(len(fcols))]
+            vocab_size = sum(domain_sizes)
+            features_col = None
+        else:
+            features_col = self.getOrDefault("featuresCol")
+            first = dataset.select(features_col).head(1)
+            if not first:
+                raise ValueError("Cannot fit on an empty DataFrame.")
+            vocab_size = first[0][0].size
+            domain_sizes = None
 
-        model_obj, config = _build_model_and_config(self, vocab_size=vocab_size)
+        model_obj, config = _build_model_and_config(
+            self, vocab_size=vocab_size, domains=domain_sizes)
 
         # Validate persistence Params and splice checkpoint_dir/interval into
         # VIConfig. Returns (config, resume_path) where resume_path is a Path
@@ -652,7 +735,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
             raise ValueError(
                 f"gateParent is set but frontierCol={frontier_col!r} is not a column "
                 f"of the input; the gated fit needs a per-doc frontier.")
-        select_cols = [features_col]
+        select_cols = list(fcols) if fcols else [features_col]
         if label_col is not None:
             select_cols.append(label_col)
         if label_mask_col is not None:
@@ -661,10 +744,12 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
             select_cols.append(frontier_col)
 
         def _to_pc(row, _fc=features_col, _lc=label_col, _mc=label_mask_col,
-                   _frc=frontier_col, _C=C):
+                   _frc=frontier_col, _C=C, _fcs=(fcols or None), _ds=domain_sizes):
             if _frc is not None:
-                return _row_to_gated_pc_document(row, _fc, _lc, _mc, _frc, _C)
-            return _row_to_pc_document(row, _fc, _lc, _mc, _C)
+                return _row_to_gated_pc_document(row, _fc, _lc, _mc, _frc, _C,
+                                                 features_cols=_fcs, domain_sizes=_ds)
+            return _row_to_pc_document(row, _fc, _lc, _mc, _C,
+                                       features_cols=_fcs, domain_sizes=_ds)
 
         pc_rdd = (
             dataset.select(*select_cols).rdd
@@ -809,7 +894,20 @@ class OnlinePCLDAModel(_OnlinePCLDAParams, _PersistableModel, Model):
         from spark_vi.models.topic.lda import _cavi_doc_inference
 
         lam = self._result.global_params["lambda"]
-        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        # Multi-domain: λ is a per-domain dict {m:(K,V_m)}; fuse to the concatenated
+        # (K, V) representation the shared CAVI reads (each domain row-normalized on
+        # its own vocab, then concatenated in domain order — the same fusing the
+        # gated engine's _assemble_expElogbeta does). domain_sizes drives the per-doc
+        # feature concatenation below.
+        if isinstance(lam, dict):
+            ms = sorted(lam)
+            domain_sizes = [int(lam[m].shape[1]) for m in ms]
+            expElogbeta = np.concatenate(
+                [np.exp(digamma(lam[m]) - digamma(lam[m].sum(axis=1, keepdims=True)))
+                 for m in ms], axis=1)
+        else:
+            domain_sizes = None
+            expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
         alpha = self._result.global_params["alpha"]
         gamma_shape = float(self.getOrDefault("gammaShape"))
         cavi_max_iter = int(self.getOrDefault("caviMaxIter"))
@@ -820,21 +918,27 @@ class OnlinePCLDAModel(_OnlinePCLDAParams, _PersistableModel, Model):
         bcast = sc.broadcast({
             "expElogbeta": expElogbeta, "alpha": alpha, "gamma_shape": gamma_shape,
             "cavi_max_iter": cavi_max_iter, "cavi_tol": cavi_tol, "K": K,
+            "domain_sizes": domain_sizes,
         })
 
-        def _infer(features):
+        def _infer(*features):
             p = bcast.value
-            doc = _vector_to_bow_document(features)
+            if p["domain_sizes"] is not None:
+                from spark_vi.mllib.topic.gated_lda import _concat_domain_features
+                indices, counts = _concat_domain_features(features, p["domain_sizes"])
+            else:
+                doc = _vector_to_bow_document(features[0])
+                indices, counts = doc.indices, doc.counts
             # Content-deterministic gamma_init (mirrors OnlinePCLDA/GatedOnlineLDA):
             # identical docs get identical init on every run, so a scoring path is
             # reproducible and independent of Spark partition/executor order.
             h = hashlib.blake2b(digest_size=8)
-            h.update(np.ascontiguousarray(doc.indices, dtype=np.int32).tobytes())
-            h.update(np.ascontiguousarray(doc.counts, dtype=np.float64).tobytes())
+            h.update(np.ascontiguousarray(indices, dtype=np.int32).tobytes())
+            h.update(np.ascontiguousarray(counts, dtype=np.float64).tobytes())
             rng = np.random.default_rng(int.from_bytes(h.digest(), "little"))
             gamma_init = rng.gamma(p["gamma_shape"], 1.0 / p["gamma_shape"], size=p["K"])
             gamma, _, _, _ = _cavi_doc_inference(
-                indices=doc.indices, counts=doc.counts,
+                indices=indices, counts=counts,
                 expElogbeta=p["expElogbeta"], alpha=p["alpha"],
                 gamma_init=gamma_init,
                 max_iter=p["cavi_max_iter"], tol=p["cavi_tol"],
@@ -843,10 +947,12 @@ class OnlinePCLDAModel(_OnlinePCLDAParams, _PersistableModel, Model):
 
         infer_udf = F.udf(_infer, returnType=VectorUDT())
         out_col = self.getOrDefault("topicDistributionCol")
-        features_col = self.getOrDefault("featuresCol")
+        fcols = list(self.getOrDefault("featuresCols") or [])
+        feat_args = ([F.col(c) for c in fcols] if fcols
+                     else [F.col(self.getOrDefault("featuresCol"))])
         # Broadcast lifetime is the returned DataFrame's (its UDF closure holds
         # bcast); ContextCleaner reclaims it on GC — do NOT eagerly unpersist.
-        out = dataset.withColumn(out_col, infer_udf(F.col(features_col)))
+        out = dataset.withColumn(out_col, infer_udf(*feat_args))
 
         # Supervised fit -> also append the head-derived per-label probability.
         # The topicDistribution UDF already inferred theta from the SAME CAVI; the
