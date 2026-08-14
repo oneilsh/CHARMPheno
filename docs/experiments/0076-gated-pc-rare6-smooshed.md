@@ -314,6 +314,31 @@ topic became a mega-topic absorbing all non-disease mass). eval trace: AUC 0.745
    better absolute + tiny PC delta. But it's the first real demonstration that the label
    does representational work when there's room — the Gated-PC thesis, shown.
 
+### Run 7 (n_bg=8, K=34) — best ABSOLUTE case-finder; the capacity/PC-benefit trade-off confirmed
+
+| arm | AUC | AP | detection AUC / AP |
+|---|---|---|---|
+| gated_pc pc_topics_lr | 0.7871 | 0.0388 | 0.737 / **0.1484** |
+| unsup_gated pc_topics_lr | 0.7860 | 0.0363 | 0.736 / 0.1430 |
+| gated_pc co-fit head | 0.7656 | 0.0311 | 0.718 / 0.1315 |
+
+HEADLINE Δ: AUC +0.0010, AP +0.0024, node P@R0.9 −0.0000, detection AP +0.0054.
+`|w_CK|` 13 (bounded). eval trace: det AP 0.139(20)→0.147(40)→0.147(60)→0.149(80)→0.148(100).
+
+**The sweet-spot answer + the trade-off, confirmed:**
+- **n_bg=8 is the best ABSOLUTE case-finder** — detection AP **0.148**, the highest in the
+  arc (run 4 n_bg=40: 0.134; run 6 n_bg=1: 0.096). Recovering background capacity restores
+  absolute quality.
+- **…but the PC delta shrinks back** — det AP Δ+0.0054 (~run 4's +0.0044), far below run 6's
+  +0.0162. So the capacity↔PC-benefit trade-off holds cleanly across n_bg ∈ {1, 8, 40}: more
+  background capacity → better absolute, smaller PC delta (the unsupervised fit already
+  captures more). n_bg=8 is a *modest* real PC improvement at the *best* absolute quality —
+  a reasonable operating point, not a dramatic PC win.
+- **Takeaway for direction:** on condition-only rare6, PC's benefit and absolute quality
+  pull against each other and the ceiling is ~3.9× lift (det AP 0.148 at prev 0.038). The
+  next lever is INFORMATION (multi-domain), not n_bg. → multi-domain PC (handoff:
+  `2026-08-14-multidomain-pc-HANDOFF.md`).
+
 ## Domain value — SETTLED on the hybrid branch (do not re-derive)
 
 The `hybrid-domain-reliability-review-ckn2bq` branch ran the full per-domain
