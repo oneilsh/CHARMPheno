@@ -874,6 +874,31 @@ class OnlinePCLDA(VIModel):
         gp["w_CK"] = np.zeros((self.C, self.K), dtype=np.float64)
         return gp
 
+    def _expElogbeta_from_lambda(self, lam) -> np.ndarray:
+        """The concatenated (K, V) topic representation the (gated) CAVI reads.
+
+        Single-domain: λ is a single (K, V) array — the same row-normalized
+        ``exp(ψ(λ) − ψ(Σ_v λ))`` ``OnlineLDA.local_update`` forms (byte-identical).
+        Multi-domain: λ is a per-domain dict ``{m: (K, V_m)}`` — delegate to the
+        gated engine's ``_assemble_expElogbeta`` so each domain is normalized on
+        ITS OWN vocab and the blocks are concatenated in domain order (a domain's
+        rows are never normalized against another domain's mass)."""
+        if isinstance(lam, dict):
+            return self._lda._assemble_expElogbeta(lam)
+        return np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+
+    def _corrected_lambda_block(self, grad_eb, lam_pre, lam_unsup, rho, wy):
+        """One block's supervised topic correction: transform ∂loss/∂expElogbeta
+        (topic-PROBABILITY space) to ∂loss/∂λ (Dirichlet-COUNT space) at the
+        pre-step λ, then the per-cell trust-region-capped descent step off the
+        just-taken unsupervised λ. The whole single-domain correction body
+        (lines below), factored so update_global can apply it per domain block."""
+        grad_topics = _grad_topics_to_lambda(grad_eb, lam_pre)
+        raw_corr = rho * wy * grad_topics
+        cell_cap = self.topic_trust * lam_unsup
+        corr = np.clip(raw_corr, -cell_cap, cell_cap)
+        return np.maximum(lam_unsup - corr, 1e-30)
+
     def local_update(
         self,
         rows: Iterable[PCDocument],
@@ -915,7 +940,9 @@ class OnlinePCLDA(VIModel):
         w_CK = np.asarray(global_params["w_CK"], dtype=np.float64)
         alpha_vec = np.asarray(global_params["alpha"], dtype=np.float64)
         # The topic representation CAVI reads (identical to lda.local_update).
-        expElogbeta = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+        # Multi-domain: λ is a per-domain dict; fuse to the concatenated (K, V)
+        # the shared gated CAVI consumes (each domain row-normalized on its vocab).
+        expElogbeta = self._expElogbeta_from_lambda(lam)
 
         _loss, grad_topics, grad_wCK = self._head.batch_value_and_grad(
             expElogbeta, w_CK, rows, alpha_vec, self.K, self.grad_cavi_iters,
@@ -1032,32 +1059,42 @@ class OnlinePCLDA(VIModel):
         # read). This is the fix for the mis-transformed correction that made the
         # supervised topics degrade (finite-difference-verified exact).
         grad_topics_eb = np.asarray(target_stats["grad_topics_stat"], dtype=np.float64)
-        grad_topics = _grad_topics_to_lambda(
-            grad_topics_eb, global_params["lambda"])
         # Head: per-doc MEAN (scale-invariant; the un-shrunk head has no corpus anchor).
         grad_wCK = np.asarray(target_stats["grad_wCK_stat"], dtype=np.float64) * inv_n
         w_CK = np.asarray(global_params["w_CK"], dtype=np.float64)
 
-        # (b) supervised topic correction on λ, PER-CELL trust-region-capped. The
-        # raw descent step ρ·wy·gT lives in topic-PROBABILITY space and is
-        # corpus-summed/scaled, so subtracting it directly from λ (Dirichlet-COUNT
-        # space) diverges λ at scale. We clip the per-cell correction to
-        # ±topic_trust · λ_unsup[k,v] (a relative cap on the JUST-TAKEN
-        # unsupervised λ), so every cell moves by at most a topic_trust fraction of
-        # its own value. Consequences: (i) λ_new ≥ (1-topic_trust)·λ_unsup > 0, so
-        # no cell is ever driven toward the floor where digamma(λ) — and hence the
-        # ELBO's global β-KL — explodes; (ii) Σλ cannot run away geometrically;
-        # (iii) the cap is relative to the true per-iteration λ state (which already
-        # carries the runner's corpus scaling), so it is scale-INVARIANT — weight_y
-        # is a dial that saturates rather than diverges. Sign (descend loss_y) is
-        # preserved per cell; below the cap the step is exactly ρ·wy·gT.
+        # (b) supervised topic correction on λ, PER-CELL trust-region-capped
+        # (:meth:`_corrected_lambda_block`). The raw descent step ρ·wy·gT lives in
+        # topic-PROBABILITY space and is corpus-summed/scaled, so subtracting it
+        # directly from λ (Dirichlet-COUNT space) diverges λ at scale. The block clips
+        # the per-cell correction to ±topic_trust · λ_unsup[k,v] (a relative cap on the
+        # JUST-TAKEN unsupervised λ). Consequences: (i) λ_new ≥ (1-topic_trust)·λ_unsup
+        # > 0, so no cell nears the digamma floor; (ii) Σλ cannot run away
+        # geometrically; (iii) the cap is relative to the true per-iteration λ state
+        # (which already carries the runner's corpus scaling), so it is scale-INVARIANT
+        # — weight_y is a dial that saturates rather than diverges. Below the cap the
+        # step is exactly ρ·wy·gT.
+        #
+        # MULTI-DOMAIN: λ is a per-domain dict {m:(K,V_m)} and grad_topics_stat is the
+        # CONCATENATED (K, V_total) ∂loss/∂expElogbeta. Split it into per-domain blocks
+        # (``_split_to_domains``) and correct EACH block against its OWN domain's λ —
+        # so _grad_topics_to_lambda's normalizer (Σ_v over axis 1) runs over that
+        # domain's vocab only. A pooled transform over the fused vocab would normalize
+        # a domain's rows against every other domain's mass (wrong). This scatter is
+        # the one new engine piece multi-domain PC needs: the per-node gate then lets
+        # each disease node's topic block specialize toward its predictive domain.
+        lam_pre = global_params["lambda"]
         lam_unsup = new_gp["lambda"]
-        raw_corr = rho * wy * grad_topics
-        cell_cap = self.topic_trust * lam_unsup
-        corr = np.clip(raw_corr, -cell_cap, cell_cap)
-        # Floor kept as a belt-and-suspenders invariant (unreachable given the cap):
-        # keeps λ a valid strictly-positive Dirichlet pseudocount.
-        new_gp["lambda"] = np.maximum(lam_unsup - corr, 1e-30)
+        if isinstance(lam_pre, dict):
+            grad_blocks = self._lda._split_to_domains(grad_topics_eb)
+            new_gp["lambda"] = {
+                m: self._corrected_lambda_block(
+                    grad_blocks[m], lam_pre[m], lam_unsup[m], rho, wy)
+                for m in lam_pre
+            }
+        else:
+            new_gp["lambda"] = self._corrected_lambda_block(
+                grad_topics_eb, lam_pre, lam_unsup, rho, wy)
 
         # (c) head step. Two optimizers:
         #   'sgd'    — the RM-damped step ρ·head_lr_scale·wy·g (default; unchanged).
