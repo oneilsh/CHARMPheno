@@ -43,19 +43,19 @@ weight_y: 50.0            # PC prediction weight. Hughes ~ tokens/doc; rare6 1yr
                          # the delta vs unsup_gated (try 100/200 if the head is
                          # under-moved, i.e. |w_CK| still climbing at max_iter).
 head_optimizer: newton   # settled convergent head (ADR 0039); no sgd/adam.
-head_lr: 0.3             # DAMPED (insight 0075): 0.5 oscillated (|w_CK| bounced
-                         # 19→7→14→60 on run 1). 0.3 makes the head an EMA of the
-                         # per-minibatch optima → converges to their mean.
-head_newton_ridge: 0.05  # 0.01→0.05: regularize the near-singular per-minibatch
-                         # H_c that spikes the IRLS solve (only stabilizes it;
-                         # AUC is scale-invariant to head magnitude).
-head_l2: 0.01            # ABSOLUTE ridge = Hughes lambda_w (ADR 0041). Run 2 used
-                         # 1e-3 and the head BLEW UP at iter ~151 (|w_CK| 45→1.25e6
-                         # in 5 iters) once the converged gated topics went ~separable
-                         # — 1e-3 is too weak to bound the singular-minibatch IRLS
-                         # step there. 1e-2 (strong end of the recalibration's good
-                         # basin ~1e-4..1e-2) caps |w| ~10x tighter; combined with the
-                         # 100-iter cap (blow-up hit at 151) this should stay bounded.
+head_penalty: firth      # run 5: PARAMETER-FREE Jeffreys/Firth separation cure
+                         # (commit 3368926). Replaces the head_l2 ridge knob; bounds
+                         # |w| exactly at separation (log det H → −∞) and yields a
+                         # CALIBRATED per-patient P(node). Runs on the inner-loop path
+                         # (Path B); head_inner_iters=25 activates it.
+head_inner_iters: 25     # inner-loop IRLS step budget for the Firth head (Path B).
+head_lr: 0.3             # (inner loop is undamped; head_lr unused on Path B)
+head_newton_ridge: 0.05  # conditioning ridge for the per-label IRLS solve (only
+                         # stabilizes the H inverse; AUC scale-invariant). Under Firth
+                         # this is the ONLY ridge — the modeling ridge (head_l2) is off.
+head_l2: 0.0             # DROPPED under Firth (run 5). Runs 2–4 needed the ridge knob
+                         # to bound the blow-up (1e-3 blew up, 1e-2 held); Firth makes
+                         # it unnecessary. Proof = |w_CK| stays bounded with head_l2=0.
 grad_cavi_iters: 30      # differentiable CAVI unroll depth; must match scoring
                          # convergence (cavi_max_iter=100). 30 suffices for the
                          # short lookback docs (deeper = bigger autograd tape).
@@ -307,7 +307,30 @@ insensitive) sit at that documented ceiling — we reproduced it. So:
    rare disease it mostly doesn't. The cleanest Gated-PC demonstration may be a
    present-but-buried task, not this present-but-absent one.
 
-## Run 4 (planned) — tpn 5 → 1 (this config), before Firth
+### Run 4 (tpn=1, K=66, 5yr) — CONFIRMED: quarter the topics, same quality; adopt tpn=1
+
+| arm | AUC | AP | detection AUC / AP | det P@R0.5 |
+|---|---|---|---|---|
+| gated_pc pc_topics_lr | 0.8000 | 0.0320 | 0.734 / 0.134 | 0.105 |
+| unsup_gated pc_topics_lr | 0.7974 | 0.0314 | 0.730 / 0.130 | 0.103 |
+| gated_pc co-fit head | 0.7756 | 0.0257 | 0.709 / 0.112 | 0.085 |
+
+HEADLINE Δ: AUC +0.0025, AP +0.0007, node P@R0.9 +0.0000, detection AP +0.0044.
+`|w_CK|`final 14.6, Σλ_k min **76** (run 3 was 29), prevalence 0.038.
+
+Reads:
+1. **tpn=1 confirmed — K 170→66, quality held/better.** pc_topics_lr 0.800 ≈ run 3's
+   0.799; detection AP 0.134 > run 3's 0.127; co-fit head 0.776 > 0.772; `|w_CK|` calmer
+   (14.6 vs ~20); Σλ_min 29→76 (dead-topic starvation gone — each node's single topic
+   owns its subtree's mass). The extra sub-topics were pure liability in the co-fit.
+   **Adopt tpn=1.**
+2. **PC still a wash — 5th confirmation.** detection AP Δ+0.0044 (< run 3's +0.011).
+   Supervision adds no representation signal (insight 0066).
+3. **Ceiling unchanged** — det AP 0.134, ~3.5× lift at prev 0.038; same ~3× every run.
+4. Head already well-behaved at K=66 (no blow-up) → Firth's run-5 job is knob-removal +
+   calibration + closing the 0.776→0.800 head gap, not blow-up prevention.
+
+## Run 5 (RUNNING) — Firth head, head_l2 dropped (this config)
 
 Rationale above (frontmatter `tpn`): the co-fit head reads every topic, so the 5
 sub-topics/node that are free unsupervised become a liability (head over-fit /
