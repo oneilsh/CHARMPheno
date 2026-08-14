@@ -723,6 +723,7 @@ def build_gated_pc_args(
         "--lookback-days", str(effective.get("lookback_days", 365)),
         "--label-window-days", str(effective.get("label_window_days", 365)),
         "--disease", str(effective.get("disease", "rare6")),
+        "--extra-domains", str(effective.get("extra_domains", "")),
         "--min-n", str(effective["min_n"]),
         "--holdout-frac", str(effective.get("holdout_frac", 0.2)),
         "--strip-mode", str(effective.get("strip_mode", "test_only")),

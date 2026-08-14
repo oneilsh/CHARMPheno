@@ -277,6 +277,45 @@ def _collect_head_proba(df, C, *, prob_col="probability", label_col="label",
     return proba, y_DC, mask_DC
 
 
+def per_node_domain_mass(lam_dict, lay, domain_names):
+    """Per DAG node, the fraction of its topic block's λ mass in each domain.
+
+    The DIRECT test of the multi-domain PC thesis: does a node's topic block
+    specialize toward the domain that predicts IT? For node u, its block rows are
+    ``lay.block[u]``; domain m's mass is ``lam_dict[m][block].sum()``, and the
+    per-node fractions across domains sum to 1. Returns {node_id: [frac_per_domain]}
+    plus the background rows' fractions under key -1 (the shared bg topics)."""
+    out = {}
+    rows_by_key = {-1: list(range(lay.n_bg))}
+    for u in lay.nodes:
+        rows_by_key[u] = list(lay.block[u])
+    for key, rows in rows_by_key.items():
+        if not rows:
+            continue
+        per_dom = np.array([float(lam_dict[m][rows].sum()) for m in sorted(lam_dict)])
+        tot = per_dom.sum()
+        out[key] = (per_dom / tot).tolist() if tot > 0 else per_dom.tolist()
+    return out
+
+
+def format_per_node_domain_mass(mass_by_node, domain_names, int2cid, name_by_id):
+    """Render per_node_domain_mass as an aligned driver-log table (node -> per-domain
+    fraction), sorted by the LAST domain's fraction so the most domain-specialized
+    nodes surface first — the specialist-disease story is the headline."""
+    hdr = "  ".join(f"{n:>10.10}" for n in domain_names)
+    lines = [f"[per-node domain λ-mass]  node{'':<20} {hdr}"]
+    def _name(key):
+        if key == -1:
+            return "(background)"
+        cid = int2cid.get(key)
+        return f"{name_by_id.get(cid, cid)}"[:24]
+    ordered = sorted(mass_by_node.items(), key=lambda kv: -kv[1][-1])
+    for key, fracs in ordered:
+        cells = "  ".join(f"{f:>10.3f}" for f in fracs)
+        lines.append(f"  {_name(key):<24} {cells}")
+    return "\n".join(lines)
+
+
 def _macro_line(name, bundle):
     """One-line macro summary of a `_bundle_masked` result for the driver log."""
     m = bundle["macro"]
@@ -350,6 +389,12 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         optimizeDocConcentration=args.optimize_doc_concentration,
         frontierCol="frontier", gateNBg=args.n_bg, gateTpn=args.tpn,
     )
+    # Multi-domain: feed per-domain feature columns (features_0..) so the gated
+    # engine carries a per-domain lambda and the topic correction scatters per
+    # domain. Domain widths are read from the first row (no explicit domainBounds).
+    dom_cols = getattr(args, "_domain_cols", None)
+    if dom_cols:
+        est._set(featuresCols=dom_cols)
     if gated:
         est.setGateParent(args._parent_int)      # JSON-encodes the DAG map
     if closure_parents is not None:
@@ -376,6 +421,12 @@ def parse_args(argv=None):
     # assembly / DAG. `disease` selects the foreground cohort AND the label-DAG
     # anchors (cohorts.disease_anchors); rare6 = the six-anchor rare-disease forest.
     p.add_argument("--disease", default="rare6")
+    p.add_argument("--extra-domains", default="",
+                   help="comma-separated non-condition domains (drug, procedure) for "
+                        "a MULTI-DOMAIN gated-PC fit (MixEHR-style per-domain vocab; "
+                        "domain 0 is always conditions). Empty (default) = single "
+                        "fused condition vocabulary. Requires --window-mode lookback. "
+                        "The per-domain lambda is inspected per node in the readout.")
     p.add_argument("--min-n", type=int, default=50)
     p.add_argument("--holdout-frac", type=float, default=0.2)
     p.add_argument("--strip-mode", choices=["test_only", "both"], default="test_only")
@@ -468,20 +519,47 @@ def main() -> int:
 
     args = parse_args()
     configure_logging()
+    extra_domains = tuple(d for d in args.extra_domains.split(",") if d)
     with make_spark_session(app_name="gated-pc-fit") as spark:
-        with _phase("assemble corpus (cached, emit_labels)"):
-            bundle = load_or_build_case_finding_bundle(
-                spark, cache_uri=args.cache_uri,
-                cdr=args.cdr, billing=args.billing, source_table=args.source_table,
-                person_mod=args.person_mod, vocab_size=args.vocab_size,
-                min_df=args.min_df, min_patient_count=args.min_patient_count,
-                doc_min_length=args.doc_min_length, prior_obs_days=args.prior_obs_days,
-                window_days=args.window_days, disease=args.disease, min_n=args.min_n,
-                holdout_frac=args.holdout_frac, n_bg=args.n_bg, tpn=args.tpn,
-                strip_mode=args.strip_mode, window_mode=args.window_mode,
-                lookback_days=args.lookback_days,
-                label_window_days=args.label_window_days,
-                emit_labels=True, label_mask_mode=args.label_mask_mode)
+        if extra_domains:
+            # MULTI-DOMAIN corpus (conditions + extra domains, per-domain vocab).
+            # Built fresh (no cache) — a one-off comparison run; the cache key +
+            # per-domain save is future. Requires lookback windowing.
+            if args.window_mode != "lookback":
+                raise ValueError("--extra-domains requires --window-mode lookback")
+            from charmpheno.omop.multi_domain import (
+                assemble_multidomain_case_finding_corpus)
+            with _phase(f"assemble MULTI-DOMAIN corpus (cond + {list(extra_domains)})"):
+                bundle = assemble_multidomain_case_finding_corpus(
+                    spark, disease=args.disease, cdr=args.cdr, billing=args.billing,
+                    extra_domains=extra_domains, person_mod=args.person_mod,
+                    min_n=args.min_n, holdout_frac=args.holdout_frac,
+                    vocab_size=args.vocab_size, min_df=args.min_df,
+                    min_patient_count=args.min_patient_count, n_bg=args.n_bg,
+                    tpn=args.tpn, doc_min_length=args.doc_min_length,
+                    strip_mode=args.strip_mode, lookback_days=args.lookback_days,
+                    label_window_days=args.label_window_days,
+                    emit_labels=True, label_mask_mode=args.label_mask_mode)
+                vocab_maps = bundle.vocab_maps
+                args._domain_cols = [f"features_{i}" for i in range(len(vocab_maps))]
+                args._domain_names = ["condition", *extra_domains]
+        else:
+            with _phase("assemble corpus (cached, emit_labels)"):
+                bundle = load_or_build_case_finding_bundle(
+                    spark, cache_uri=args.cache_uri,
+                    cdr=args.cdr, billing=args.billing, source_table=args.source_table,
+                    person_mod=args.person_mod, vocab_size=args.vocab_size,
+                    min_df=args.min_df, min_patient_count=args.min_patient_count,
+                    doc_min_length=args.doc_min_length, prior_obs_days=args.prior_obs_days,
+                    window_days=args.window_days, disease=args.disease, min_n=args.min_n,
+                    holdout_frac=args.holdout_frac, n_bg=args.n_bg, tpn=args.tpn,
+                    strip_mode=args.strip_mode, window_mode=args.window_mode,
+                    lookback_days=args.lookback_days,
+                    label_window_days=args.label_window_days,
+                    emit_labels=True, label_mask_mode=args.label_mask_mode)
+                vocab_maps = [bundle.vocab_map]
+                args._domain_cols = None
+                args._domain_names = ["condition"]
             print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
 
         lay = DagLayout(bundle.parent_int, n_bg=args.n_bg, tpn=args.tpn)
@@ -491,7 +569,9 @@ def main() -> int:
         args._parent_int = bundle.parent_int
         args._recall_targets = [float(x) for x in args.recall_targets.split(",") if x]
         args._fdr_targets = [float(x) for x in args.fdr_targets.split(",") if x]
-        print(f"[driver]   corpus: V={len(bundle.vocab_map)} vocab, "
+        v_desc = " + ".join(f"{n}:{len(vm)}"
+                            for n, vm in zip(args._domain_names, vocab_maps))
+        print(f"[driver]   corpus: V=({v_desc}) vocab, "
               f"K={lay.K} gated topics ({args.n_bg} bg + {len(lay.nodes)} nodes x "
               f"{args.tpn} tpn), C={C} label heads", flush=True)
 
@@ -579,13 +659,29 @@ def main() -> int:
         # that matters for a rare-disease surface (detection AP + node-macro P@R0.9).
         _print_headline(results)
 
+        gp = pc_model.result.global_params
+        # Multi-domain thesis readout: per-node per-domain λ mass. Does each disease
+        # node's topic block specialize toward its predictive domain?
+        domain_mass = None
+        if extra_domains and isinstance(gp["lambda"], dict):
+            domain_mass = per_node_domain_mass(gp["lambda"], lay, args._domain_names)
+            print(format_per_node_domain_mass(
+                domain_mass, args._domain_names, bundle.int2cid, bundle.name_by_id),
+                flush=True)
+
         with _phase("save"):
             out = Path(args.out_dir)
             out.mkdir(parents=True, exist_ok=True)
-            gp = pc_model.result.global_params
+            # Multi-domain: λ is a per-domain dict — save one array per domain
+            # (lambda_0, lambda_1, ...) since np.savez cannot store a dict; single
+            # domain saves the one `lambda` array as before.
+            lam = gp["lambda"]
+            if isinstance(lam, dict):
+                lam_arrays = {f"lambda_{m}": lam[m] for m in sorted(lam)}
+            else:
+                lam_arrays = {"lambda": lam}
             np.savez(out / "gated_pc_result.npz",
-                     **{"lambda": gp["lambda"], "alpha": gp["alpha"],
-                        "w_CK": gp["w_CK"]})
+                     **lam_arrays, alpha=gp["alpha"], w_CK=gp["w_CK"])
             manifest = {
                 "model_class": "gated_pc",
                 "disease": args.disease, "min_n": args.min_n,
@@ -604,6 +700,11 @@ def main() -> int:
                 "fdr_targets": args._fdr_targets,
                 "with_dag_head": args.with_dag_head,
                 "skip_unsup_gated": args.skip_unsup_gated,
+                "extra_domains": list(extra_domains),
+                "domain_names": args._domain_names,
+                "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
+                "per_node_domain_mass": (
+                    {str(k): v for k, v in domain_mass.items()} if domain_mass else None),
                 "results": results, "ledger": bundle.ledger,
                 # Corpus params — ALL of the bundle cache-key inputs, so a post-hoc
                 # gated_pc_readout can recompute the exact key + reload the bundle
