@@ -1105,6 +1105,34 @@ class OnlinePCLDA(VIModel):
             new_w = w_CK.copy()
             eye = np.eye(self.K)
             firth = self.head_penalty == "firth"
+            if firth:
+                # Firth-penalized log-likelihood PLL(w_c) — the objective the inner
+                # IRLS ascends, and the step-halving line-search criterion. The FIXED
+                # POINT of Firth is finite, but the UNDAMPED Newton TRAJECTORY is not:
+                # on ill-conditioned / near-rank-deficient early-iteration head design,
+                # or once a step overshoots into the ±50 logit-clip saturation region
+                # (p→0/1 ⇒ Wt=p(1−p)→0 ⇒ H_Fisher→0 ⇒ the step blows up), one raw
+                # Newton step diverges (observed on the cluster: |w|→1.3e17 at iter 1).
+                # Step-halving on PLL (the standard logistf/brglm2 robustification;
+                # parameter-free) bounds the trajectory to the finite fixed point.
+                #   PLL(w) = Σ_d oc·[y·log p + (1−y)·log(1−p)] + ½·log det H_Fisher(w),
+                #   H_Fisher(w) = Σ_d oc·p(1−p)·θθᵀ   (NO conditioning ridge here —
+                # the Jeffreys penalty is the log-det of the PURE Fisher). log p /
+                # log(1−p) via logaddexp so the ±50-clipped logits stay exact (1−p can
+                # round to 0.0 in float64 at z=+50). A singular / non-finite log-det ⇒
+                # −inf, so a saturating step is REJECTED by the line search.
+                def _firth_pll(w_c, oc_v, yb_v):
+                    z = np.clip(Th @ w_c, -50.0, 50.0)
+                    p = 1.0 / (1.0 + np.exp(-z))
+                    log_p = -np.logaddexp(0.0, -z)
+                    log_1mp = -np.logaddexp(0.0, z)
+                    ll = float(np.sum(oc_v * (yb_v * log_p + (1.0 - yb_v) * log_1mp)))
+                    Wt_f = oc_v * p * (1.0 - p)
+                    Hf = (Th * Wt_f[:, None]).T @ Th
+                    sgn, logdet = np.linalg.slogdet(Hf)
+                    if sgn <= 0.0 or not np.isfinite(logdet):
+                        return -np.inf
+                    return ll + 0.5 * logdet
             for _ in range(self.head_inner_iters):
                 P = 1.0 / (1.0 + np.exp(-np.clip(Th @ new_w.T, -50.0, 50.0)))  # (n, C)
                 for c in range(self.C):
@@ -1123,18 +1151,30 @@ class OnlinePCLDA(VIModel):
                         cond = (self.head_newton_ridge
                                 * (float(np.trace(H_base)) / self.K) + 1e-10)
                         H = H_base + cond * eye
-                        try:
-                            Hinv = np.linalg.inv(H)
-                        except np.linalg.LinAlgError:
-                            Hinv = np.linalg.pinv(H)
+                        # Robust (SVD-truncated) inverse: a near-singular H does NOT raise,
+                        # so an inv()+LinAlgError fallback never fires — pinv with a sane
+                        # rcond is the real defense. Used for BOTH the leverage θᵀH⁻¹θ and
+                        # the Newton direction, so they stay consistent.
+                        Hinv = np.linalg.pinv(H, rcond=1e-12)
                         ThHi = Th @ Hinv                                  # (n, K)
                         lev = Wt * np.einsum('nk,nk->n', ThHi, Th)        # h_dc  (n,)
                         g0 = (oc * (P[:, c] - Yb[:, c])) @ Th             # NO lam2 under firth
                         gfirth = g0 + (oc * lev * (P[:, c] - 0.5)) @ Th
-                        try:
-                            new_w[c] = new_w[c] - np.linalg.solve(H, gfirth)
-                        except np.linalg.LinAlgError:
-                            new_w[c] = new_w[c] - np.linalg.lstsq(H, gfirth, rcond=None)[0]
+                        delta = Hinv @ gfirth
+                        # Step-halving line search: accept w−step only if it does not
+                        # DECREASE the Firth PLL (and is finite); else halve, up to 25
+                        # times. If nothing improves, keep w_c (converged for this label).
+                        # This is the primary trajectory guard; the robust solve is
+                        # defense-in-depth.
+                        base = _firth_pll(new_w[c], oc, Yb[:, c])
+                        step = delta
+                        for _h in range(25):
+                            cand = new_w[c] - step
+                            val = _firth_pll(cand, oc, Yb[:, c])
+                            if np.isfinite(val) and val >= base:
+                                new_w[c] = cand
+                                break
+                            step = step / 2.0
                     else:
                         g = (oc * (P[:, c] - Yb[:, c])) @ Th + lam2 * new_w[c]
                         Wt = oc * P[:, c] * (1.0 - P[:, c])

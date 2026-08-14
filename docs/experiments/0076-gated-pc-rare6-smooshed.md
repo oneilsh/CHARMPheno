@@ -43,19 +43,19 @@ weight_y: 50.0            # PC prediction weight. Hughes ~ tokens/doc; rare6 1yr
                          # the delta vs unsup_gated (try 100/200 if the head is
                          # under-moved, i.e. |w_CK| still climbing at max_iter).
 head_optimizer: newton   # settled convergent head (ADR 0039); no sgd/adam.
-head_penalty: firth      # run 5: PARAMETER-FREE Jeffreys/Firth separation cure
-                         # (commit 3368926). Replaces the head_l2 ridge knob; bounds
-                         # |w| exactly at separation (log det H → −∞) and yields a
-                         # CALIBRATED per-patient P(node). Runs on the inner-loop path
-                         # (Path B); head_inner_iters=25 activates it.
-head_inner_iters: 25     # inner-loop IRLS step budget for the Firth head (Path B).
+# Run 5 attempt 1 (head_penalty=firth, head_l2=0) DIVERGED on real data — |w_CK|→1e17
+# at iter 1: the undamped 25-step inner IRLS overshoots on early-iter rank-deficient
+# θ / logit saturation, and with head_l2=0 there's no floor. Fix = step-halving in the
+# Firth IRLS (task #28, in progress). Until it lands, run the PATH-B-NO-FIRTH CONTROL:
+# head_penalty=none + head_inner_iters=25 + head_l2=1e-2 (the ridge floors the solve).
+# This isolates the inner-loop head-fit PATH (vs run 4's aggregated one-step, Path A);
+# when Firth works, firth-PathB vs this none-PathB isolates the PENALTY.
+head_penalty: none
+head_inner_iters: 25     # inner-loop IRLS (Path B) — the thing this control isolates.
 head_lr: 0.3             # (inner loop is undamped; head_lr unused on Path B)
-head_newton_ridge: 0.05  # conditioning ridge for the per-label IRLS solve (only
-                         # stabilizes the H inverse; AUC scale-invariant). Under Firth
-                         # this is the ONLY ridge — the modeling ridge (head_l2) is off.
-head_l2: 0.0             # DROPPED under Firth (run 5). Runs 2–4 needed the ridge knob
-                         # to bound the blow-up (1e-3 blew up, 1e-2 held); Firth makes
-                         # it unnecessary. Proof = |w_CK| stays bounded with head_l2=0.
+head_newton_ridge: 0.05  # numerical conditioner for the per-label IRLS solve.
+head_l2: 0.01            # absolute ridge floor — stabilizes the Path-B inner loop
+                         # (what head_penalty=0/firth lacked). Same value as runs 3/4.
 grad_cavi_iters: 30      # differentiable CAVI unroll depth; must match scoring
                          # convergence (cavi_max_iter=100). 30 suffices for the
                          # short lookback docs (deeper = bigger autograd tape).
