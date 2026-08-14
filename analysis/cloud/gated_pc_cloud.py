@@ -192,6 +192,133 @@ def format_arm_readout(name, arm):
     return "\n".join("[driver]   " + ln for ln in lines)
 
 
+def _dag_children_and_depth(parent_int, C):
+    """(children map {node: [children]}, depth {node: int}) over engine ids [0, C).
+
+    ``parent_int`` maps child -> [parent engine-ids] (parentless/root -> []). Depth
+    is the BFS distance from the parentless roots (the synthetic forest root is
+    depth 0; the disease anchors depth 1; their Mondo/SNOMED subtypes deeper)."""
+    from collections import deque
+    children = {c: [] for c in range(C)}
+    for child in range(C):
+        for p in parent_int.get(child, []):
+            p = int(p)
+            if 0 <= p < C:
+                children[p].append(child)
+    depth = {c: None for c in range(C)}
+    roots = [c for c in range(C) if not parent_int.get(c)]
+    dq = deque((r, 0) for r in roots)
+    while dq:
+        n, d = dq.popleft()
+        if depth[n] is not None and depth[n] <= d:
+            continue
+        depth[n] = d
+        for ch in children[n]:
+            dq.append((ch, d + 1))
+    return children, depth
+
+
+def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
+    """Conditional 'sharpening' metrics — P(child | parent-cohort), the clinician's
+    'this patient has a <parent>; which <child>?' task (vs de-novo detection).
+
+    For each DAG edge parent p -> child c, restrict to the TEST docs attested at p
+    (``y[:,p]==1``) and score how well ``proba[:,c]`` ranks c's positives against
+    their siblings *within that cohort*. Because the base rate among p's cohort is
+    far higher than marginal prevalence, this is the metric that is NOT prevalence-
+    crushed (insight 0064) — so it reveals whether the representation can subtype.
+
+    Per edge: conditional AUC/AP + the MARGINAL (de-novo, vs all docs) AP, whose gap
+    is the 'sharpening lift'. Per parent: a multiclass top-1 accuracy (argmax over
+    children among the cohort docs that sit at some child). Everything carries the
+    parent's DAG depth so the accuracy-vs-granularity curve is legible. Pure numpy."""
+    from sklearn.metrics import average_precision_score, roc_auc_score
+    children, depth = _dag_children_and_depth(parent_int, C)
+    edges, parents = [], []
+    for p in range(C):
+        kids = children[p]
+        if not kids:
+            continue
+        cohort = np.where((y[:, p] == 1) & (mask[:, p] == 1))[0]
+        if len(cohort) < max(min_count, 2):
+            continue
+        scored_kids = []
+        for c in kids:
+            rows = cohort[mask[cohort, c] == 1]
+            yc = y[rows, c]
+            n_pos, n_neg = int(yc.sum()), int(len(yc) - yc.sum())
+            if n_pos < max(min_count, 1) or n_neg < max(min_count, 1):
+                continue
+            sc = proba[rows, c]
+            # marginal (de-novo) AP: child vs ALL observed docs — the sharpening bar.
+            mrows = np.where(mask[:, c] == 1)[0]
+            my = y[mrows, c]
+            marg_ap = (float(average_precision_score(my, proba[mrows, c]))
+                       if 0 < my.sum() < len(my) else None)
+            edges.append({
+                "parent": p, "child": c, "depth": depth[p], "cohort": int(len(cohort)),
+                "n_pos": n_pos, "prev": float(yc.mean()),
+                "cond_auc": float(roc_auc_score(yc, sc)),
+                "cond_ap": float(average_precision_score(yc, sc)),
+                "marg_ap": marg_ap})
+            scored_kids.append(c)
+        if len(scored_kids) >= 2:
+            ka = np.array(scored_kids)
+            at_child = cohort[(y[cohort][:, ka] == 1).any(axis=1)]
+            if len(at_child):
+                pred = ka[np.argmax(proba[at_child][:, ka], axis=1)]
+                correct = y[at_child, pred] == 1     # argmax child is a TRUE child of p
+                parents.append({"parent": p, "depth": depth[p], "n": int(len(at_child)),
+                                "n_children": len(scored_kids),
+                                "top1": float(correct.mean())})
+    return {"edges": edges, "parents": parents}
+
+
+def format_conditional_readout(cond, int2cid, name_by_id):
+    """Render conditional_readout: a per-DAG-depth summary (conditional AUC/AP, the
+    sharpening lift over marginal AP, and multiclass top-1), then the per-parent
+    top-1 lines sorted by depth then accuracy. The depth summary IS the accuracy-
+    vs-granularity curve the clinician question asks for."""
+    edges, parents = cond["edges"], cond["parents"]
+    if not edges:
+        return "[conditional sharpening]  no parent->child edges met min_count"
+
+    def _name(node):
+        cid = int2cid.get(node)
+        if cid is None or cid not in name_by_id:
+            return "(root)" if node == 0 else str(cid)
+        return str(name_by_id[cid])[:22]
+
+    def _mean(vals):
+        vals = [v for v in vals if v is not None]
+        return float(np.mean(vals)) if vals else None
+
+    depths = sorted({e["depth"] for e in edges if e["depth"] is not None})
+    lines = ["[conditional sharpening]  P(child | parent-cohort), by DAG depth",
+             "  depth  #edges  cond_AUC  cond_AP  marg_AP  lift   top1"]
+    for d in depths:
+        de = [e for e in edges if e["depth"] == d]
+        dp = [p for p in parents if p["depth"] == d]
+        cap = _mean([e["cond_ap"] for e in de])
+        map_ = _mean([e["marg_ap"] for e in de])
+        lift = (cap - map_) if (cap is not None and map_ is not None) else None
+        auc = _mean([e["cond_auc"] for e in de])
+        top1 = _mean([p["top1"] for p in dp])
+        lines.append(
+            f"  {d:>5}  {len(de):>6}  {_f(auc)}  {_f(cap)}  {_f(map_)}"
+            f"  {_f(lift)}  {_f(top1)}")
+    lines.append("  per-parent multiclass top-1 (which child, given the parent):")
+    for p in sorted(parents, key=lambda p: (p["depth"], -p["top1"])):
+        lines.append(f"    d{p['depth']} {_name(p['parent']):<22} "
+                     f"top1={p['top1']:.3f}  (n={p['n']}, {p['n_children']} children)")
+    return "\n".join(lines)
+
+
+def _f(v):
+    """Format an optional float for the readout tables (n/a for None)."""
+    return "  n/a " if v is None else f"{v:.4f}"
+
+
 def _print_headline(results):
     """The one-glance comparison: gated_pc vs unsup_gated on the numbers that matter
     for a rare-disease surface — ranking (AUC/AP) AND the case-finding operating
@@ -223,6 +350,21 @@ def _print_headline(results):
     print(f"[driver]     detection AP       {_d(_det(g, 'ap'), _det(u, 'ap'))}", flush=True)
     print("[driver]     (PC should help in the hidden-low-mass regime — insight 0066; "
           "AP/P@R are the honest case-finding read — insight 0064.)", flush=True)
+
+    # Conditional 'sharpening' comparison: does supervision improve P(child|parent)
+    # — the clinical subtyping task — over the unsupervised twin? Mean over edges.
+    gc, uc = results.get("gated_pc_conditional"), results.get("unsup_gated_conditional")
+    if gc and uc and gc["edges"] and uc["edges"]:
+        def _mean(d, key, coll="edges"):
+            vals = [r[key] for r in d[coll] if r.get(key) is not None]
+            return float(np.mean(vals)) if vals else None
+        print("[driver]   CONDITIONAL sharpening (gated_pc vs unsup_gated):", flush=True)
+        print(f"[driver]     cond AP (child|parent) {_d(_mean(gc,'cond_ap'), _mean(uc,'cond_ap'))}",
+              flush=True)
+        print(f"[driver]     cond AUC               {_d(_mean(gc,'cond_auc'), _mean(uc,'cond_auc'))}",
+              flush=True)
+        print(f"[driver]     multiclass top1        {_d(_mean(gc,'top1','parents'), _mean(uc,'top1','parents'))}",
+              flush=True)
 
 
 def dag_closure_parents(parent_int, C):
@@ -605,6 +747,25 @@ def main() -> int:
                              recall_targets=rt, fdr_targets=ft,
                              min_count=args.min_label_count)
 
+        def _score_full(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te):
+            """(readout, per-node test proba) — proba reused for the conditional
+            'sharpening' readout so the per-node LR is fit once per arm."""
+            from analysis.pc.evaluate import _lr_proba_per_label_masked
+            proba = _lr_proba_per_label_masked(Pi_tr, y_tr, m_tr, Pi_te, C)
+            readout = readout_from_proba(
+                proba, y_te, m_te, C, recall_targets=rt, fdr_targets=ft,
+                min_count=args.min_label_count)
+            return readout, proba
+
+        def _conditional(proba_te, y_te, m_te, label):
+            cond = conditional_readout(proba_te, y_te, m_te, bundle.parent_int, C,
+                                       min_count=args.min_label_count)
+            print(format_conditional_readout(
+                cond, bundle.int2cid, bundle.name_by_id).replace(
+                    "[conditional sharpening]", f"[conditional sharpening: {label}]"),
+                flush=True)
+            return cond
+
         with _phase(f"gated_pc fit (weightY={args.weight_y}, K={lay.K})"):
             pc_est = _build_pc_estimator(args, weight_y=args.weight_y, gated=True)
             if args.eval_every > 0:
@@ -616,9 +777,13 @@ def main() -> int:
             test_scored = pc_model.transform(bundle.test_df).cache()
             Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
             Pi_te, y_te, m_te, _ = _collect_theta_labels(test_scored, C)
-            results["gated_pc"] = _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+            results["gated_pc"], proba_gp = _score_full(
+                Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
             print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
                   flush=True)
+            # Conditional 'sharpening' readout: P(child | parent-cohort) by DAG depth.
+            results["gated_pc_conditional"] = _conditional(
+                proba_gp, y_te, m_te, "gated_pc")
             # co-fit head's own per-node P(node) readout (secondary), from the SAME
             # scored test frame (no second CAVI pass).
             hp, hy, hm = _collect_head_proba(test_scored, C)
@@ -641,9 +806,14 @@ def main() -> int:
                     us_model.transform(bundle.train_df), C)
                 Pi_te, y_te, m_te, _ = _collect_theta_labels(
                     us_model.transform(bundle.test_df), C)
-                results["unsup_gated"] = _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+                results["unsup_gated"], proba_us = _score_full(
+                    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
                 print(format_arm_readout("unsup_gated (pc_topics_lr)",
                                          results["unsup_gated"]), flush=True)
+                # Conditional A/B: does supervision sharpen P(child|parent) vs the
+                # unsupervised twin? (The metric the clinician workflow cares about.)
+                results["unsup_gated_conditional"] = _conditional(
+                    proba_us, y_te, m_te, "unsup_gated")
 
         if args.with_dag_head:
             with _phase(f"dag_head fit (ungated + DAG-closure head, K={args.k})"):
