@@ -173,6 +173,17 @@ def _per_doc_sup_nll(eb_d, w_CK, counts, s, obs, alpha_vec, K, n_iters):
 _per_doc_sup_vg = autograd.value_and_grad(_per_doc_sup_nll, argnum=(0, 1))
 
 
+# Firth head trajectory guards (cheap resurrection, task-29). _FIRTH_FLOOR is an
+# absolute conditioner floor that keeps the Fisher H invertible at full saturation
+# (Wt→0 ⇒ H_base→0) so Hinv cannot blow up; _FIRTH_TRUST caps the per-step logit
+# move so a single ill-conditioned step cannot overshoot into saturation. Together
+# with head_lr damping they bound the Newton trajectory to the finite Firth fixed
+# point WITHOUT the driver-slow slogdet-PLL line search. Neither shrinks w (not a
+# ridge) — the Firth score adjustment is the parameter-free regularizer.
+_FIRTH_FLOOR = 1e-8
+_FIRTH_TRUST = 10.0
+
+
 def _grad_topics_to_lambda(grad_eb: np.ndarray, lam: np.ndarray) -> np.ndarray:
     """Map ∂loss/∂expElogbeta (topic-PROBABILITY space) → ∂loss/∂λ (Dirichlet-COUNT
     space) via the EXACT Jacobian of ``expElogbeta = exp(ψ(λ) − ψ(Σ_v λ))``.
@@ -1143,33 +1154,23 @@ class OnlinePCLDA(VIModel):
             eye = np.eye(self.K)
             firth = self.head_penalty == "firth"
             if firth:
-                # Firth-penalized log-likelihood PLL(w_c) — the objective the inner
-                # IRLS ascends, and the step-halving line-search criterion. The FIXED
-                # POINT of Firth is finite, but the UNDAMPED Newton TRAJECTORY is not:
-                # on ill-conditioned / near-rank-deficient early-iteration head design,
-                # or once a step overshoots into the ±50 logit-clip saturation region
-                # (p→0/1 ⇒ Wt=p(1−p)→0 ⇒ H_Fisher→0 ⇒ the step blows up), one raw
-                # Newton step diverges (observed on the cluster: |w|→1.3e17 at iter 1).
-                # Step-halving on PLL (the standard logistf/brglm2 robustification;
-                # parameter-free) bounds the trajectory to the finite fixed point.
-                #   PLL(w) = Σ_d oc·[y·log p + (1−y)·log(1−p)] + ½·log det H_Fisher(w),
-                #   H_Fisher(w) = Σ_d oc·p(1−p)·θθᵀ   (NO conditioning ridge here —
-                # the Jeffreys penalty is the log-det of the PURE Fisher). log p /
-                # log(1−p) via logaddexp so the ±50-clipped logits stay exact (1−p can
-                # round to 0.0 in float64 at z=+50). A singular / non-finite log-det ⇒
-                # −inf, so a saturating step is REJECTED by the line search.
-                def _firth_pll(w_c, oc_v, yb_v):
+                # The Firth modified SCORE g*(w_c) = Σ_d oc·(p−y)·θ + Σ_d oc·h_dc·(p−½)·θ
+                # (its zero is the finite Firth fixed point) and its (K,) value + norm,
+                # for a given label's weight vector. Recomputed per candidate in the
+                # gradient-norm backtracking line search below — cheap (one pinv, NO
+                # slogdet), and |g*| is ALWAYS finite so the search never goes toothless
+                # the way the prior slogdet-PLL search did at a −inf baseline (its real
+                # failure on real data). Returns (g*, |g*|, H⁻¹) so an accepted step
+                # reuses the curvature.
+                def _firth_score(w_c, oc_v, yb_v):
                     z = np.clip(Th @ w_c, -50.0, 50.0)
                     p = 1.0 / (1.0 + np.exp(-z))
-                    log_p = -np.logaddexp(0.0, -z)
-                    log_1mp = -np.logaddexp(0.0, z)
-                    ll = float(np.sum(oc_v * (yb_v * log_p + (1.0 - yb_v) * log_1mp)))
-                    Wt_f = oc_v * p * (1.0 - p)
-                    Hf = (Th * Wt_f[:, None]).T @ Th
-                    sgn, logdet = np.linalg.slogdet(Hf)
-                    if sgn <= 0.0 or not np.isfinite(logdet):
-                        return -np.inf
-                    return ll + 0.5 * logdet
+                    Wt_v = oc_v * p * (1.0 - p)
+                    H_v = (Th * Wt_v[:, None]).T @ Th + _FIRTH_FLOOR * eye
+                    Hinv_v = np.linalg.pinv(H_v, rcond=1e-12)
+                    lev_v = Wt_v * np.einsum('nk,nk->n', Th @ Hinv_v, Th)
+                    g = (oc_v * (p - yb_v)) @ Th + (oc_v * lev_v * (p - 0.5)) @ Th
+                    return g, float(np.linalg.norm(g)), Hinv_v
             for _ in range(self.head_inner_iters):
                 P = 1.0 / (1.0 + np.exp(-np.clip(Th @ new_w.T, -50.0, 50.0)))  # (n, C)
                 for c in range(self.C):
@@ -1180,35 +1181,41 @@ class OnlinePCLDA(VIModel):
                         # Hessian): each obs contributes +oc·h_dc·(p_dc−½)·θ_d, where the
                         # per-doc leverage h_dc = Wt_dc·(θ_dᵀ H_c⁻¹ θ_d). As |w|→∞ on a
                         # separable label, Wt→0 so H→0 and the leverage term pulls p_dc
-                        # back toward ½, bounding |w| with NO head_l2. The Newton curvature
-                        # stays the Fisher H_c; only a tiny numerical conditioner is added
-                        # (head_newton_ridge·mean(diag)+1e-10), NOT head_l2.
-                        Wt = oc * P[:, c] * (1.0 - P[:, c])
-                        H_base = (Th * Wt[:, None]).T @ Th
-                        cond = (self.head_newton_ridge
-                                * (float(np.trace(H_base)) / self.K) + 1e-10)
-                        H = H_base + cond * eye
-                        # Robust (SVD-truncated) inverse: a near-singular H does NOT raise,
-                        # so an inv()+LinAlgError fallback never fires — pinv with a sane
-                        # rcond is the real defense. Used for BOTH the leverage θᵀH⁻¹θ and
-                        # the Newton direction, so they stay consistent.
-                        Hinv = np.linalg.pinv(H, rcond=1e-12)
-                        ThHi = Th @ Hinv                                  # (n, K)
-                        lev = Wt * np.einsum('nk,nk->n', ThHi, Th)        # h_dc  (n,)
-                        g0 = (oc * (P[:, c] - Yb[:, c])) @ Th             # NO lam2 under firth
-                        gfirth = g0 + (oc * lev * (P[:, c] - 0.5)) @ Th
+                        # back toward ½, bounding |w| with NO head_l2.
+                        #
+                        # TRAJECTORY (cheap resurrection, ADR: task-29): the undamped raw
+                        # Newton step diverges on early ill-conditioned design (|w|→1.3e17
+                        # at iter 1); the prior slogdet-PLL step-halving line search fixed
+                        # the trajectory but was driver-slow AND toothless when the PLL
+                        # baseline was −inf. Replace it with two cheap, slogdet-free guards
+                        # that bound the trajectory unconditionally: (1) a NON-COLLAPSING
+                        # conditioner — an ABSOLUTE floor _FIRTH_FLOOR keeps H invertible
+                        # even at full saturation (Wt→0 ⇒ H_base→0), so Hinv cannot blow
+                        # up; (2) a DAMPED step (reuse head_lr) with a TRUST-REGION clip on
+                        # the per-step logit move (_FIRTH_TRUST), so no single step can
+                        # overshoot into saturation. The Firth score adjustment supplies
+                        # the (parameter-free) pull toward the finite fixed point; the two
+                        # guards just keep the path there. Neither is a w-shrinking ridge.
+                        # PURE-Fisher curvature + modified score at the current w_c. Only
+                        # a tiny absolute floor (NOT head_newton_ridge): the leverage
+                        # h_dc = Wt·θᵀH⁻¹θ must use the pure Fisher, else H⁻¹ shrinks, the
+                        # pull weakens, and |w| climbs past the finite fixed point.
+                        gfirth, gnorm, Hinv = _firth_score(new_w[c], oc, Yb[:, c])
+                        # Newton direction, trust-clipped so an early ill-conditioned step
+                        # cannot overshoot into saturation (the |w|→1e17 trigger).
                         delta = Hinv @ gfirth
-                        # Step-halving line search: accept w−step only if it does not
-                        # DECREASE the Firth PLL (and is finite); else halve, up to 25
-                        # times. If nothing improves, keep w_c (converged for this label).
-                        # This is the primary trajectory guard; the robust solve is
-                        # defense-in-depth.
-                        base = _firth_pll(new_w[c], oc, Yb[:, c])
+                        dnorm = float(np.linalg.norm(delta))
+                        if dnorm > _FIRTH_TRUST:
+                            delta = delta * (_FIRTH_TRUST / dnorm)
+                        # Gradient-norm backtracking: accept the (damped) step only if it
+                        # REDUCES |g*| — a cheap, slogdet-free, never-toothless line search
+                        # that converges to g*=0. Start at the full trust-clipped step and
+                        # halve up to 8x; if none improves, w_c is at its fixed point.
                         step = delta
-                        for _h in range(25):
+                        for _h in range(8):
                             cand = new_w[c] - step
-                            val = _firth_pll(cand, oc, Yb[:, c])
-                            if np.isfinite(val) and val >= base:
+                            _, cnorm, _ = _firth_score(cand, oc, Yb[:, c])
+                            if cnorm < gnorm:
                                 new_w[c] = cand
                                 break
                             step = step / 2.0
