@@ -143,6 +143,70 @@ def test_firth_weights_are_stable_across_inner_iters_on_separable():
 
 
 # ---------------------------------------------------------------------------
+# TEST 1b — ILL-CONDITIONED TRAJECTORY (the reproducing regression).
+#
+# The Firth FIXED POINT is finite, but the UNDAMPED Newton TRAJECTORY is not: on
+# near-rank-deficient head design (freshly-random gated topics; here an
+# underdetermined n < K separable design so H_Fisher is genuinely rank-deficient),
+# a raw Firth-Newton step overshoots into the +-50-clip saturation region where
+# H_Fisher -> 0, the conditioning ridge collapses to its 1e-10 floor, and
+# solve(H, .) explodes (observed on the cluster: |w| -> 1.3e17 at iter 1). This is
+# exactly the case the first, well-conditioned separable fixture MISSED. The fix is
+# step-halving on the Firth-penalized log-likelihood (logistf/brglm2-style).
+# ---------------------------------------------------------------------------
+def _raw_firth_newton_norm(Th, y, inner_iters, K, ridge=1e-2):
+    """The PRE-FIX inner loop: undamped Firth-Newton with inv() and NO line search.
+    Returns the max |w| over the trajectory (the divergence witness)."""
+    w = np.zeros((1, K))
+    eye = np.eye(K)
+    oc = np.ones(len(Th))
+    mx = 0.0
+    for _ in range(inner_iters):
+        P = 1.0 / (1.0 + np.exp(-np.clip(Th @ w.T, -50.0, 50.0)))
+        Wt = oc * P[:, 0] * (1.0 - P[:, 0])
+        Hb = (Th * Wt[:, None]).T @ Th
+        cond = ridge * (float(np.trace(Hb)) / K) + 1e-10
+        H = Hb + cond * eye
+        Hinv = np.linalg.inv(H)
+        lev = Wt * np.einsum('nk,nk->n', Th @ Hinv, Th)
+        g0 = (oc * (P[:, 0] - y)) @ Th
+        gf = g0 + (oc * lev * (P[:, 0] - 0.5)) @ Th
+        w[0] = w[0] - np.linalg.solve(H, gf)
+        nn = float(np.linalg.norm(w))
+        mx = max(mx, nn) if np.isfinite(nn) else float("inf")
+    return mx
+
+
+def test_firth_step_halving_bounds_ill_conditioned_trajectory():
+    # Underdetermined (n < K) => genuinely rank-deficient H_Fisher; separable by
+    # construction (5 generic points in R^8 are separable for any labeling).
+    rng = np.random.default_rng(1)
+    K, n = 8, 5
+    Th = rng.normal(size=(n, K))
+    y = np.array([1.0, 1.0, 0.0, 0.0, 1.0])
+
+    # WITHOUT step-halving (the pre-fix trajectory): |w| explodes.
+    raw_max = _raw_firth_newton_norm(Th, y, inner_iters=25, K=K)
+    # WITH step-halving (the shipped engine): |w| stays finite and bounded across all
+    # inner-iter counts (no transient blow-up either).
+    fixed = {it: np.linalg.norm(
+        _fit_inner_head(K, Th, y, head_penalty="firth", head_l2=0.0, inner_iters=it))
+        for it in (1, 5, 10, 25)}
+    print(f"\n[ill-conditioned] raw(no-halving) max|w|={raw_max:.3e}  "
+          f"fixed|w| by iters={ {k: round(v, 3) for k, v in fixed.items()} }")
+
+    assert raw_max > 1e6, (
+        f"repro FAILED: raw trajectory did not blow up (max|w|={raw_max:.3e}); "
+        "the fixture no longer exercises the divergence")
+    for it, nrm in fixed.items():
+        assert np.isfinite(nrm) and nrm < 1e3, (
+            f"step-halving did NOT bound |w| at {it} inner iters: {nrm:.3e}")
+    # ranking / direction preserved on the separable design.
+    w25 = _fit_inner_head(K, Th, y, head_penalty="firth", head_l2=0.0, inner_iters=25)
+    assert _auc(Th @ w25, y) == 1.0, "firth broke the separating ranking"
+
+
+# ---------------------------------------------------------------------------
 # TEST 2 — NON-SEPARABLE ~ MLE: firth must not distort a well-posed fit.
 # ---------------------------------------------------------------------------
 def test_firth_matches_plain_newton_on_non_separable_design():
