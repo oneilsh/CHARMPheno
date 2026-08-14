@@ -136,14 +136,15 @@ def test_rejects_malformed_cdr_dataset(spark):
 
 
 def test_rejects_unsupported_concept_types(spark):
-    # "measurement" is deliberately NOT in the fused loader's supported set
-    # (condition/drug/procedure); an unknown domain must still raise.
+    # An unknown domain (not condition/drug/procedure/measurement) must raise.
+    # (measurement IS supported now, on its own value-aware single-domain path;
+    # its fused-with-others rejection is covered in test_bigquery_measurement.)
     with pytest.raises(NotImplementedError, match="not supported in v1"):
         load_omop_bigquery(
             spark=spark,
             cdr_dataset="proj.ds",
             billing_project="some-project",
-            concept_types=("condition", "measurement"),
+            concept_types=("condition", "observation"),
         )
 
 
