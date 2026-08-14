@@ -645,6 +645,7 @@ class OnlinePCLDA(VIModel):
         topic_trust: float = 0.1,
         weight_y_warmup_iters: int = 0,
         head_optimizer: str = "sgd",
+        head_penalty: str = "none",
         head_lr: float = 0.05,
         head_newton_ridge: float = 1e-2,
         head_l2: float = 1e-3,
@@ -680,6 +681,10 @@ class OnlinePCLDA(VIModel):
         if head_optimizer not in ("sgd", "newton"):
             raise ValueError(
                 f"head_optimizer must be 'sgd' or 'newton', got {head_optimizer!r}"
+            )
+        if head_penalty not in ("none", "firth"):
+            raise ValueError(
+                f"head_penalty must be 'none' or 'firth', got {head_penalty!r}"
             )
         if head_lr <= 0:
             raise ValueError(f"head_lr must be > 0, got {head_lr}")
@@ -741,6 +746,15 @@ class OnlinePCLDA(VIModel):
         # a per-iteration ridge-Newton (IRLS) step that CONVERGES the logistic head on
         # the current θ — the settled head fix (ADR 0039).
         self.head_optimizer = str(head_optimizer)
+        # Head penalty. 'none' (default) = the fixed absolute L2 ridge (head_l2) on the
+        # inner-loop / one-step Newton head (byte-for-byte the shipped behavior). 'firth'
+        # = Jeffreys-prior (Firth) penalty +½·log det H_c on the inner-loop IRLS head: a
+        # PARAMETER-FREE self-regularizer that bounds |w| exactly at separation (as
+        # |w|→∞, H→0, log det H→−∞) with no head_l2 tuning. Firth adjusts the SCORE by
+        # +Σ_d oc·h_dc·(p_dc−½)·θ_d (h_dc the per-doc leverage), keeping the Fisher as the
+        # Newton curvature. Requires the FLAT head (needs per-doc leverages, Path B) and
+        # head_optimizer=='newton'; forces head_inner_iters>0 so Path B activates.
+        self.head_penalty = str(head_penalty)
         self.head_lr = float(head_lr)
         # 'newton' head: relative ridge (fraction of mean(diag(H))) that conditions the
         # per-label IRLS solve. AUC is scale-invariant to head magnitude, so this only
@@ -805,6 +819,28 @@ class OnlinePCLDA(VIModel):
             raise ValueError(
                 f"head has C={head_C} but the model has C={self.C}; the head's "
                 "label count must match the number of outcome heads")
+        # Firth requires the driver-side inner-loop IRLS path (Path B): it needs the
+        # per-doc leverages h_dc, which only that path has (the aggregated one-step
+        # Newton keeps corpus-sums only). So Firth demands the FLAT head (a
+        # DagClosureHead exposes a _closure_matrix and has no flat per-doc leverage
+        # design) and head_optimizer=='newton'.
+        if self.head_penalty == "firth":
+            if getattr(self._head, "_closure_matrix", None) is not None:
+                raise ValueError(
+                    "head_penalty='firth' requires the FLAT logistic head "
+                    "(FlatLogisticHead); it is unsupported for a DagClosureHead "
+                    "(the Firth score adjustment needs per-doc logistic leverages, "
+                    "which the closure head's per-node block Fisher does not expose)")
+            if self.head_optimizer != "newton":
+                raise ValueError(
+                    "head_penalty='firth' requires head_optimizer='newton' (the "
+                    "driver-side inner-loop IRLS path that carries per-doc leverages); "
+                    f"got head_optimizer={self.head_optimizer!r}")
+            if self.head_inner_iters == 0:
+                # Firth lives in Path B (the per-doc inner-loop IRLS). Activate it with
+                # a sensible default step budget so the Jeffreys penalty is actually
+                # applied rather than silently falling through to the one-step Newton.
+                self.head_inner_iters = 25
 
     # Convenience passthroughs so callers/tests can read the LDA hypers off the
     # PC model without reaching into the delegate.
@@ -1068,17 +1104,45 @@ class OnlinePCLDA(VIModel):
             lam2 = self.head_l2 if self.head_l2 > 0 else 1e-3
             new_w = w_CK.copy()
             eye = np.eye(self.K)
+            firth = self.head_penalty == "firth"
             for _ in range(self.head_inner_iters):
                 P = 1.0 / (1.0 + np.exp(-np.clip(Th @ new_w.T, -50.0, 50.0)))  # (n, C)
                 for c in range(self.C):
                     oc = Ob[:, c]
-                    g = (oc * (P[:, c] - Yb[:, c])) @ Th + lam2 * new_w[c]
-                    Wt = oc * P[:, c] * (1.0 - P[:, c])
-                    H = (Th * Wt[:, None]).T @ Th + lam2 * eye
-                    try:
-                        new_w[c] = new_w[c] - np.linalg.solve(H, g)
-                    except np.linalg.LinAlgError:
-                        new_w[c] = new_w[c] - np.linalg.lstsq(H, g, rcond=None)[0]
+                    if firth:
+                        # Firth / Jeffreys-prior head: PARAMETER-FREE self-regularizer.
+                        # The Jeffreys prior +½·log det H_c adjusts the SCORE (not the
+                        # Hessian): each obs contributes +oc·h_dc·(p_dc−½)·θ_d, where the
+                        # per-doc leverage h_dc = Wt_dc·(θ_dᵀ H_c⁻¹ θ_d). As |w|→∞ on a
+                        # separable label, Wt→0 so H→0 and the leverage term pulls p_dc
+                        # back toward ½, bounding |w| with NO head_l2. The Newton curvature
+                        # stays the Fisher H_c; only a tiny numerical conditioner is added
+                        # (head_newton_ridge·mean(diag)+1e-10), NOT head_l2.
+                        Wt = oc * P[:, c] * (1.0 - P[:, c])
+                        H_base = (Th * Wt[:, None]).T @ Th
+                        cond = (self.head_newton_ridge
+                                * (float(np.trace(H_base)) / self.K) + 1e-10)
+                        H = H_base + cond * eye
+                        try:
+                            Hinv = np.linalg.inv(H)
+                        except np.linalg.LinAlgError:
+                            Hinv = np.linalg.pinv(H)
+                        ThHi = Th @ Hinv                                  # (n, K)
+                        lev = Wt * np.einsum('nk,nk->n', ThHi, Th)        # h_dc  (n,)
+                        g0 = (oc * (P[:, c] - Yb[:, c])) @ Th             # NO lam2 under firth
+                        gfirth = g0 + (oc * lev * (P[:, c] - 0.5)) @ Th
+                        try:
+                            new_w[c] = new_w[c] - np.linalg.solve(H, gfirth)
+                        except np.linalg.LinAlgError:
+                            new_w[c] = new_w[c] - np.linalg.lstsq(H, gfirth, rcond=None)[0]
+                    else:
+                        g = (oc * (P[:, c] - Yb[:, c])) @ Th + lam2 * new_w[c]
+                        Wt = oc * P[:, c] * (1.0 - P[:, c])
+                        H = (Th * Wt[:, None]).T @ Th + lam2 * eye
+                        try:
+                            new_w[c] = new_w[c] - np.linalg.solve(H, g)
+                        except np.linalg.LinAlgError:
+                            new_w[c] = new_w[c] - np.linalg.lstsq(H, g, rcond=None)[0]
             new_gp["w_CK"] = new_w
             return new_gp
 

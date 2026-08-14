@@ -304,6 +304,7 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         topicTrust=args.topic_trust, weightYWarmupIters=args.weight_y_warmup_iters,
         headOptimizer=args.head_optimizer, headLr=args.head_lr,
         headNewtonRidge=args.head_newton_ridge, headL2=args.head_l2,
+        headPenalty=args.head_penalty, headInnerIters=args.head_inner_iters,
         optimizeDocConcentration=args.optimize_doc_concentration,
         frontierCol="frontier", gateNBg=args.n_bg, gateTpn=args.tpn,
     )
@@ -360,6 +361,15 @@ def parse_args(argv=None):
     p.add_argument("--head-l2", type=float, default=1e-3,
                    help="ABSOLUTE ridge on w_CK (= Hughes lambda_w; ADR 0041). "
                         "0.0 BLOWS UP on the separable topics PC creates.")
+    p.add_argument("--head-penalty", choices=["none", "firth"], default="none",
+                   help="'none' (default; the fixed headL2 ridge) or 'firth' (the "
+                        "Jeffreys-prior +1/2 log det H penalty — PARAMETER-FREE, bounds "
+                        "|w| exactly at separation with no headL2 tuning). 'firth' needs "
+                        "the flat head + newton and runs the inner-loop IRLS path.")
+    p.add_argument("--head-inner-iters", type=int, default=0,
+                   help="driver-side inner-loop IRLS steps converging the flat head each "
+                        "SVI iter (0 = aggregated one-step Newton). Required (>0) for "
+                        "--head-penalty firth; auto-enabled to 25 when 0.")
     p.add_argument("--grad-cavi-iters", type=int, default=20)
     p.add_argument("--topic-trust", type=float, default=0.1)
     p.add_argument("--weight-y-warmup-iters", type=int, default=10)
