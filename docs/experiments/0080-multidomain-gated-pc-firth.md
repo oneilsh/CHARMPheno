@@ -100,4 +100,23 @@ Watch `|w_CK|max` in the iteration log — under Firth it should stay bounded (v
 
 ## Run log
 
-_(pending first run)_
+### Run 1 (killed) — Firth INSUFFICIENT in the closure-mask regime; parked
+
+Killed mid-run: `|w_CK|max = 4.93e3` at iter 60 (vs 0079's 1.3e4 without Firth).
+Firth roughly halved the blow-up but nowhere near the O(1–10) fixed point it hits
+on small samples — the co-fit head is still unusable/uncalibrated.
+
+**Why (diagnosis).** Firth's regularization strength ∝ the leverage ≈ p/n. The unit
+test that passes is small-sample (p=2, n≈40 → strong pull). The closure-mask cluster
+head is the opposite: high nodes have LARGE n (leverage→0, weak pull against a
+large-margin separator), and rare leaves are p≫n / rank-deficient (the pinv rcond
+truncation zeroes the Firth leverage in exactly the near-singular directions w
+escapes through). Both erode the pull where |w| grows. This is a known-hard regime
+for Firth; the parameter-free property breaks down at large-n + rank-deficient design.
+
+**Decision.** Don't grind on Firth (the fix would be Firth+ridge, which reintroduces
+the parameter). PARK it. Calibrated conditional posteriors — the actual goal — come
+instead from **post-hoc calibrating the head-independent `pc_topics_lr` proba**
+(isotonic/Platt), which sidesteps the co-fit head entirely and works regardless of
+head pathology. See fork #1 in the session; the Firth engine work stays on the
+branch (unit-test-green) for the small-sample regime where it does apply.
