@@ -349,6 +349,11 @@ def _make_eval_logger(bundle, C, args):
             m = OnlinePCLDAModel(result)
             m._set(numLabels=C, caviMaxIter=args.cavi_max_iter,
                    caviTol=args.cavi_tol, gammaShape=args.gamma_shape)
+            # Multi-domain: the scoring transform must read the per-domain feature
+            # columns (else it defaults to `features`, which the multi-domain corpus
+            # does not have). dict-λ already routes expElogbeta fusing in _transform.
+            if getattr(args, "_domain_cols", None):
+                m._set(featuresCols=args._domain_cols)
             Pi_tr, y_tr, mtr, _ = _collect_theta_labels(m.transform(bundle.train_df), C)
             Pi_te, y_te, mte, _ = _collect_theta_labels(m.transform(bundle.test_df), C)
             arm = score_arm(Pi_tr, y_tr, mtr, Pi_te, y_te, mte, C,
