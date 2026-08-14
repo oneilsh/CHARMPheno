@@ -27,12 +27,11 @@ strip_mode: both
 label_mask_mode: full
 # --- gate topic-block layout (same as 0065). K is emergent = n_bg + nodes*tpn,
 #     shared by BOTH the gated_pc and unsup_gated arms (a fair internal A/B) ---
-n_bg: 1                  # run 6: 40→1 (EXTREME). K drops 66→27 (1 bg + 26 nodes×1).
-                         # Probe: how hard does starving the background topic space hit
-                         # the representation? 1 bg topic must absorb ALL non-disease
-                         # structure (comorbidity/common-disease); either it forces the
-                         # node topics to stay disease-specific (helps) or it pollutes
-                         # them (hurts). A/B vs run 4 (n_bg=40) isolates background capacity.
+n_bg: 8                  # run 7: SWEET-SPOT probe between run 4 (n_bg=40: best absolute,
+                         # tiny PC delta) and run 6 (n_bg=1: worse absolute, +20% PC delta).
+                         # K=34 (8 bg + 26 nodes×1). Question: does a mid n_bg hold absolute
+                         # near run 4 AND keep a real PC delta? If yes, that's an actually
+                         # PC-improved case-finder, not just run 6's mechanism demo.
 tpn: 1                   # run 4: 5→1. Unused topics are free UNSUPERVISED (they
                          # just die: Σλ_min ~31) but costly in the CO-FIT — the head
                          # reads all K, so tpn=5 → K=170 over-fits/separates the head
