@@ -67,7 +67,7 @@ from pyspark.sql import functions as F
 from charmpheno.omop.cohorts import SUPPORTED_COHORTS, apply_cohort
 from charmpheno.omop.schema import validate
 
-_SUPPORTED_CONCEPT_TYPES: tuple[str, ...] = ("condition", "drug", "procedure")
+_SUPPORTED_CONCEPT_TYPES: tuple[str, ...] = ("condition", "drug", "procedure", "measurement")
 _SUPPORTED_SOURCE_TABLES: tuple[str, ...] = ("condition_occurrence", "condition_era")
 
 # The single event-date column the fused multi-domain stream emits. Each
@@ -119,6 +119,98 @@ def _read_domain_events(read, domain: str, source_table: str) -> DataFrame:
         F.col(cid_col).alias("concept_id"),
         F.col(date_col).alias(_FUSED_EVENT_DATE),
     )
+
+
+def _measurement_select_cols():
+    """The measurement read's raw input columns (before value-aware tokenization).
+    Unlike the other domains, measurement does NOT emit its raw
+    ``measurement_concept_id`` as the token — the loader folds a value *state* into
+    a SYNTHETIC integer token (see ``measurement_tokens``). Pure function so a unit
+    test can pin the raw columns the value cascade needs."""
+    raw = ("person_id", "measurement_concept_id", "value_as_number",
+           "value_as_concept_id", "range_low", "range_high", "measurement_date")
+    extra = ("measurement_date",)
+    return raw, extra
+
+
+def _measurement_state_col():
+    """Native-Spark replica of ``measurement_tokens.classify_state`` -> an int
+    ``state_code`` column, built FROM the same allowlist so the two cannot drift.
+    Reads columns value_as_number / range_low / range_high / value_concept_name.
+    """
+    from charmpheno.omop import measurement_tokens as mt
+
+    val, lo, hi = F.col("value_as_number"), F.col("range_low"), F.col("range_high")
+    has_range = val.isNotNull() & lo.isNotNull() & hi.isNotNull()
+    range_code = (F.when(val < lo, F.lit(mt.STATE_RANGE_LOW))
+                   .when(val > hi, F.lit(mt.STATE_RANGE_HIGH))
+                   .otherwise(F.lit(mt.STATE_RANGE_NORMAL)))
+    # coded-value branch: normalized value concept name -> allowlisted code.
+    norm = F.lower(F.trim(F.col("value_concept_name")))
+    coded = F.lit(None).cast("int")
+    for name, code in mt.coded_states().items():
+        coded = F.when(norm == name, F.lit(code)).otherwise(coded)
+    return (F.when(has_range, range_code)
+             .when(coded.isNotNull(), coded)
+             .otherwise(F.lit(mt.STATE_PRESENCE)))
+
+
+def _measurement_label_col(state_col):
+    """State-code column -> its human label column (for the '[state]' suffix),
+    built from ``measurement_tokens.state_labels`` (same source of truth)."""
+    from charmpheno.omop import measurement_tokens as mt
+
+    lab = F.lit("state").cast("string")  # fallback (never hit for known codes)
+    for code, label in mt.state_labels().items():
+        lab = F.when(state_col == F.lit(code), F.lit(label)).otherwise(lab)
+    return lab
+
+
+def _load_measurement(_read, *, person_sample_mod):
+    """Load the ``measurement`` table as canonical OMOP rows with value-aware
+    synthetic tokens (concept_id * TOKEN_BASE + state; see ``measurement_tokens``).
+    Own path (two concept joins: the measurement name AND the value-concept name)
+    so the generic single-join fused tail stays byte-identical for the other
+    domains. Emits one row per measurement (burstiness is handled downstream by
+    per-document binary tokenization). Ported from the hybrid-domain branch — the
+    ONE measurement piece the multi-domain PC MVP needs; the rest of that branch's
+    bigquery.py divergence is not pulled."""
+    from charmpheno.omop import measurement_tokens as mt
+
+    m = _read("measurement").select(
+        "person_id",
+        F.col("measurement_concept_id").alias("concept_id"),
+        "value_as_number", "value_as_concept_id", "range_low", "range_high",
+        "measurement_date",
+    )
+    if person_sample_mod is not None:
+        m = m.where((F.col("person_id") % person_sample_mod) == 0)
+    m = m.where(F.col("concept_id") != 0)
+
+    concept = _read("concept").select("concept_id", "concept_name")
+    m = m.join(concept, on="concept_id", how="left")  # real measurement name
+    value_concept = _read("concept").select(
+        F.col("concept_id").alias("value_as_concept_id"),
+        F.col("concept_name").alias("value_concept_name"),
+    )
+    m = m.join(value_concept, on="value_as_concept_id", how="left")
+
+    state = _measurement_state_col()
+    # Synthetic token = concept_id * TOKEN_BASE + state (cast long: real
+    # measurement_concept_ids * 100 exceed int32).
+    token = (F.col("concept_id").cast("long") * F.lit(mt.TOKEN_BASE) + state)
+    display = F.concat(
+        F.coalesce(F.col("concept_name"), F.lit("?")),
+        F.lit(" ["), _measurement_label_col(state), F.lit("]"),
+    )
+    out = m.select(
+        "person_id",
+        token.alias("concept_id"),
+        display.alias("concept_name"),
+        F.col("measurement_date").alias(_FUSED_EVENT_DATE),
+    )
+    validate(out)
+    return out
 
 
 def load_omop_bigquery(
@@ -280,6 +372,23 @@ def load_omop_bigquery(
 
         validate(omop)
         return omop
+
+    # Single-domain measurement: value-aware synthetic tokens on their OWN path
+    # (two concept joins, its own name decoding), returning the fused schema
+    # (person_id, concept_id[synthetic], concept_name[decoded], event_date). Kept
+    # single-domain: the synthetic token space would be null-joined away by the
+    # generic fused concept-name join below, so measurement cannot ride that
+    # stream. The multi-domain corpus loads each domain separately anyway.
+    if concept_types == ("measurement",):
+        if cohort is not None:
+            raise ValueError("cohort filtering is not supported for measurement")
+        return _load_measurement(_read, person_sample_mod=person_sample_mod)
+    if "measurement" in concept_types:
+        raise ValueError(
+            "measurement uses value-aware synthetic tokens and cannot be fused with "
+            f"other domains in one load; got concept_types={concept_types!r}. Load "
+            "it single-domain (concept_types=('measurement',)) and combine downstream "
+            "(the multi-domain corpus loads each domain separately).")
 
     # Fused multi-domain path: union each requested domain's events into ONE
     # flat concept stream feeding a single downstream vocabulary. Cohort

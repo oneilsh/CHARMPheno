@@ -304,11 +304,11 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
 
 # Domain names loadable as their own OMOP fact table (domain 0 is always
 # conditions; extra domains are read single-domain via load_omop_bigquery, whose
-# fused path emits the common `event_date` column). Measurement is NOT here — its
-# value-aware loader is deferred (see the multi-domain PC plan); this MVP does
-# conditions + {drug, procedure}.
+# fused/measurement paths both emit the common `event_date` column). Measurement
+# carries value-aware synthetic tokens (concept_id*state) and is tokenized with
+# per-document binary presence (its events are bursty, no era rollup — 0077/0079).
 _EXTRA_DOMAIN_DATE = "event_date"   # bigquery._FUSED_EVENT_DATE for a single non-cond load
-_SUPPORTED_EXTRA_DOMAINS = ("drug", "procedure")
+_SUPPORTED_EXTRA_DOMAINS = ("drug", "procedure", "measurement")
 
 
 def assemble_multidomain_case_finding_corpus(
@@ -372,10 +372,14 @@ def assemble_multidomain_case_finding_corpus(
     doc_spec = PatientCohortDocSpec(min_doc_length=doc_min_length)
 
     # One vocab spec per domain (same fit knobs; a real per-domain sweep is future).
+    # Measurement is tokenized with per-document BINARY presence — it has no OMOP
+    # era rollup and is extremely bursty, so presence reproduces for it what the
+    # era tables already do for condition/drug (measurement_tokens docstring).
+    domain_binary = [False] + [d == "measurement" for d in extra_domains]
     vocab_specs = [
         DomainVocabSpec(vocab_size=vocab_size, min_df=min_df,
-                        min_patient_count=min_patient_count, binary=False)
-        for _ in domain_raws]
+                        min_patient_count=min_patient_count, binary=b)
+        for b in domain_binary]
     return assemble_multidomain_from_events(
         feature_frames[0], feature_frames[1:], before_dag, doc_spec=doc_spec,
         min_n=min_n, vocab_specs=vocab_specs, holdout_frac=holdout_frac,
