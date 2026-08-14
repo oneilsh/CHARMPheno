@@ -274,6 +274,24 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "Distinct from lambdaW (the 'sgd' head's ridge).",
         typeConverter=TypeConverters.toFloat,
     )
+    headPenalty = Param(
+        Params._dummy(), "headPenalty",
+        "head penalty for headOptimizer='newton': 'none' (default; the fixed absolute "
+        "headL2 ridge) or 'firth' (the Jeffreys-prior +1/2 log det H penalty, a "
+        "PARAMETER-FREE self-regularizer that bounds |w| exactly at separation with no "
+        "headL2 tuning). 'firth' requires the FLAT head and headOptimizer='newton', and "
+        "runs on the driver-side inner-loop IRLS path (headInnerIters>0; auto-enabled).",
+        typeConverter=TypeConverters.toString,
+    )
+    headInnerIters = Param(
+        Params._dummy(), "headInnerIters",
+        "number of driver-side inner-loop IRLS steps that CONVERGE the flat logistic "
+        "head on a collected per-doc (theta, y, obs) subsample each SVI iteration "
+        "(headOptimizer='newton', flat head). 0 (default) = the aggregated one-step "
+        "Newton. Required (>0) for headPenalty='firth' (Firth needs the per-doc "
+        "leverages this path carries); auto-set to 25 when firth is requested with 0.",
+        typeConverter=TypeConverters.toInt,
+    )
     # -- Topic-side DAG gate (Gated-PC composition; ADR 0042) ---------------
     gateParent = Param(
         Params._dummy(), "gateParent",
@@ -448,8 +466,10 @@ def _build_model_and_config(
         weight_y_warmup_iters=int(estimator.getOrDefault("weightYWarmupIters")),
         head_optimizer=str(estimator.getOrDefault("headOptimizer")),
         head_lr=float(estimator.getOrDefault("headLr")),
+        head_penalty=str(estimator.getOrDefault("headPenalty")),
         head_newton_ridge=float(estimator.getOrDefault("headNewtonRidge")),
         head_l2=float(estimator.getOrDefault("headL2")),
+        head_inner_iters=int(estimator.getOrDefault("headInnerIters")),
         alpha=alpha,
         eta=eta,
         optimize_alpha=estimator.getOrDefault("optimizeDocConcentration"),
@@ -482,7 +502,7 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     numLabels=1, weightY=0.0, probabilityCol="probability",
     lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, topicTrust=0.1,
     weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, headNewtonRidge=0.01,
-    headL2=1e-3, closureParents="", warmStartFrom="",
+    headL2=1e-3, headPenalty="none", headInnerIters=0, closureParents="", warmStartFrom="",
     gateParent="", gateNBg=2, gateTpn=1, frontierCol="frontier",
 )
 
@@ -528,6 +548,8 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         headLr: float = 0.05,
         headNewtonRidge: float = 0.01,
         headL2: float = 1e-3,
+        headPenalty: str = "none",
+        headInnerIters: int = 0,
         closureParents: str = "",
         gateParent: str = "",
         gateNBg: int = 2,

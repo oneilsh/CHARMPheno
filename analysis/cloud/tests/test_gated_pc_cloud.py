@@ -90,3 +90,26 @@ def test_parse_args_surface_defaults_and_arms():
     assert a.with_dag_head is True
     assert a.skip_unsup_gated is False
     assert a.weight_y_warmup_iters == 10
+    assert a.head_penalty == "none"            # opt-in Firth toggle, off by default
+    assert a.head_inner_iters == 0             # Path B off by default
+
+
+def test_head_penalty_firth_round_trips_through_estimator_and_engine():
+    """--head-penalty/--head-inner-iters flow: parse_args -> _build_pc_estimator
+    (shim Params) -> OnlinePCLDA engine (head_penalty attribute)."""
+    from gated_pc_cloud import parse_args, _build_pc_estimator
+    from spark_vi.mllib.topic.pc import _build_model_and_config
+    a = parse_args([
+        "--cdr", "p.d", "--billing", "bp", "--out-dir", "/tmp/g",
+        "--head-optimizer", "newton", "--head-penalty", "firth",
+        "--head-inner-iters", "30", "--k", "4",
+    ])
+    assert a.head_penalty == "firth"
+    assert a.head_inner_iters == 30
+    a._C = 1
+    est = _build_pc_estimator(a, weight_y=50.0, gated=False)
+    assert est.getOrDefault("headPenalty") == "firth"
+    assert est.getOrDefault("headInnerIters") == 30
+    model, _ = _build_model_and_config(est, vocab_size=8)
+    assert model.head_penalty == "firth"       # the shim built a Firth engine
+    assert model.head_inner_iters == 30

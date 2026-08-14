@@ -43,6 +43,8 @@ def test_build_gated_pc_args_shape(monkeypatch):
     assert args[args.index("--cache-uri") + 1] == "hdfs:///c"
     assert args[args.index("--head-optimizer") + 1] == "newton"
     assert args[args.index("--head-l2") + 1] == "0.001"
+    assert args[args.index("--head-penalty") + 1] == "none"      # Firth off by default
+    assert args[args.index("--head-inner-iters") + 1] == "0"
     assert "--with-dag-head" in args
     assert "--skip-unsup-gated" not in args        # absent by default
     assert "--resume-from" not in args             # resume unsupported
@@ -79,3 +81,28 @@ def test_built_args_parse_through_driver(monkeypatch):
     parsed = gated_pc_cloud.parse_args(args)
     assert parsed.disease == "rare6" and parsed.with_dag_head is True
     assert parsed.head_l2 == 1e-3 and parsed.out_dir == "/out"
+
+
+def test_firth_config_round_trips_frontmatter_to_shim_estimator(monkeypatch):
+    """Full config chain: frontmatter-style dict -> build_gated_pc_args ->
+    gated_pc_cloud.parse_args -> shim estimator getOrDefault('headPenalty')=='firth'
+    -> the shim builds an engine with head_penalty=='firth'."""
+    mod = _run_exp(monkeypatch)
+    eff = {**_base_eff(), "head_penalty": "firth", "head_inner_iters": 30,
+           "head_optimizer": "newton", "K": 4}
+    args = mod.build_gated_pc_args(eff, "/out")
+    assert args[args.index("--head-penalty") + 1] == "firth"
+    assert args[args.index("--head-inner-iters") + 1] == "30"
+
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import gated_pc_cloud
+    from spark_vi.mllib.topic.pc import _build_model_and_config
+    parsed = gated_pc_cloud.parse_args(args)
+    assert parsed.head_penalty == "firth" and parsed.head_inner_iters == 30
+    parsed._C = 1
+    est = gated_pc_cloud._build_pc_estimator(parsed, weight_y=50.0, gated=False)
+    assert est.getOrDefault("headPenalty") == "firth"
+    model, _ = _build_model_and_config(est, vocab_size=8)
+    assert model.head_penalty == "firth" and model.head_inner_iters == 30
