@@ -286,6 +286,48 @@ def _macro_line(name, bundle):
             f"(scored {m['n_labels_scored']}/{m['n_labels_scored'] + m['n_labels_skipped']} nodes)")
 
 
+def _make_eval_logger(bundle, C, args):
+    """Per-iteration callback that logs pc_topics_lr AUC + detection AP every
+    `args.eval_every` iters, so the supervised shaping can be watched converge live.
+
+    Rebuilds a scoring model from the CURRENT global_params (lambda/alpha), transforms
+    train+test, and runs the same `score_arm` as the final eval. COST: two full CAVI
+    transforms + an LR fit per eval — keep `eval_every` modest (e.g. 20–25 → ~4–5 evals
+    over 100 iters). Wrapped so a scoring hiccup can never kill the fit."""
+    rt, ft = args._recall_targets, args._fdr_targets
+    every = int(args.eval_every)
+
+    def _cb(iter_num, gp, _elbo):
+        if every <= 0 or iter_num % every != 0:
+            return
+        try:
+            from spark_vi.core.result import VIResult
+            from spark_vi.mllib.topic.pc import OnlinePCLDAModel
+            result = VIResult(
+                global_params={k: gp[k] for k in ("lambda", "alpha", "w_CK")
+                               if k in gp},
+                elbo_trace=[], n_iterations=int(iter_num), converged=False)
+            m = OnlinePCLDAModel(result)
+            m._set(numLabels=C, caviMaxIter=args.cavi_max_iter,
+                   caviTol=args.cavi_tol, gammaShape=args.gamma_shape)
+            Pi_tr, y_tr, mtr, _ = _collect_theta_labels(m.transform(bundle.train_df), C)
+            Pi_te, y_te, mte, _ = _collect_theta_labels(m.transform(bundle.test_df), C)
+            arm = score_arm(Pi_tr, y_tr, mtr, Pi_te, y_te, mte, C,
+                            recall_targets=rt, fdr_targets=ft,
+                            min_count=args.min_label_count)
+            auc = arm["ranking"]["auc"]
+            det = arm["detection"]
+            detap = None if det.get("skipped") else det.get("ap")
+            print(f"[driver]   eval@iter{iter_num}: pc_topics_lr AUC="
+                  f"{'n/a' if auc is None else f'{auc:.4f}'}  detection AP="
+                  f"{'n/a' if detap is None else f'{detap:.4f}'}", flush=True)
+        except Exception as exc:                       # noqa: BLE001 — never kill the fit
+            print(f"[driver]   eval@iter{iter_num}: FAILED "
+                  f"({type(exc).__name__}: {exc})", flush=True)
+
+    return _cb
+
+
 def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
     """Construct an OnlinePCLDAEstimator for one arm. `gated` injects the gated
     topic engine (gateParent set post-construction, since the Param is a JSON
@@ -395,6 +437,11 @@ def parse_args(argv=None):
     p.add_argument("--min-label-count", type=int, default=20,
                    help="mask any node whose heldout column has < this many cells "
                         "of either class from the macro (AoU small-cell floor).")
+    p.add_argument("--eval-every", type=int, default=0,
+                   help="log pc_topics_lr AUC + detection AP every N iters of the "
+                        "gated_pc fit (0 = off, only the final eval). Each eval is 2 "
+                        "full CAVI transforms + an LR fit on the driver, so keep it "
+                        "modest (e.g. 20–25). Lets you watch the shaping converge.")
     p.add_argument("--recall-targets", default="0.5,0.8,0.9",
                    help="comma-separated recall levels for precision@recall "
                         "(the case-finding operating points).")
@@ -475,6 +522,8 @@ def main() -> int:
 
         with _phase(f"gated_pc fit (weightY={args.weight_y}, K={lay.K})"):
             pc_est = _build_pc_estimator(args, weight_y=args.weight_y, gated=True)
+            if args.eval_every > 0:
+                pc_est.setOnIteration(_make_eval_logger(bundle, C, args))
             pc_model = pc_est.fit(bundle.train_df)
             # Transform each split ONCE (each transform re-runs CAVI over the split);
             # the supervised transform appends BOTH topicDistribution and probability.

@@ -98,6 +98,10 @@ skip_unsup_gated: false
 with_dag_head: false
 baseline_max_iter: 100   # unsup topics converge faster than the head.
 min_label_count: 20      # AoU small-cell floor: mask rare nodes from the macro.
+eval_every: 20           # log pc_topics_lr AUC + detection AP every 20 iters of the
+                         # gated_pc fit (watch the shaping converge). Each eval = 2 CAVI
+                         # transforms + an LR on the driver; raise to 50 (2 evals) or 0
+                         # (off) if the overhead bites.
 # Parallelism: the cached bundle parquet has ~8 part-files, so dynamic allocation
 # pins the fit to ~2 executors (8 tasks / 4 cores) while the cluster sits idle and
 # the per-doc autograd serializes. Repartition ≈ total cluster executor cores so
