@@ -53,16 +53,21 @@ head_optimizer: newton   # settled convergent head (ADR 0039); no sgd/adam.
 # head_l2=1e-2 — the ridge floors the solve): a stable run isolating the inner-loop
 # head-fit PATH (vs run 4's aggregated one-step, Path A). firth-PathB vs this none-PathB
 # then isolates the PENALTY; this vs run 4 isolates the PATH.
-head_penalty: firth      # run 5b: TRUE Firth (attempt 2), now with the step-halving
-                         # trajectory guard (commit 4874bb7). Parameter-free separation
-                         # cure + calibrated P(node). Run 5a (none + inner_iters, no guard)
-                         # blew |w| to 2.2e7 with a dead head — Firth's step-halving is
-                         # what makes the inner-loop path stable.
-head_inner_iters: 25     # inner-loop IRLS (Path B) — where Firth + step-halving live.
-head_lr: 0.3             # (inner loop is undamped/step-halved; head_lr unused on Path B)
-head_newton_ridge: 0.05  # numerical conditioner for the per-label IRLS solve.
-head_l2: 0.0             # DROPPED under Firth — step-halving + the Jeffreys penalty bound
-                         # |w| with no ridge knob. Proof = |w_CK| finite with head_l2=0.
+# Head = run 4's KNOWN-GOOD Path A (aggregated one-step Newton + head_l2 ridge). Firth
+# on Path B was abandoned on the cluster (run 5b): (1) driver-bound + crawling — the
+# step-halving line search (slogdet per halving × 27 labels × 25 inner iters) idles the
+# cluster; (2) still blew up — the line search is toothless when the CURRENT point has a
+# rank-deficient Fisher (PLL=−inf baseline ⇒ any finite step clears ≥−inf), which is the
+# early-iteration real-data regime. Not worth fixing: the head does NOT move pc_topics_lr
+# (0.79–0.80 every run regardless of head state; run 5a's dead head cost 0.006), and
+# calibrated probabilities are unused on an information-limited task. Firth stays an
+# implemented + unit-tested engine feature (works on well-conditioned data) for a future
+# task where calibration is the deliverable and the design isn't rank-deficient.
+head_penalty: none
+head_inner_iters: 0      # Path A (one aggregated Newton step/iter — fast, bounded).
+head_lr: 0.3
+head_newton_ridge: 0.05
+head_l2: 0.01            # absolute ridge = run 4 (|w_CK| stayed 14.6, no blow-up).
 grad_cavi_iters: 30      # differentiable CAVI unroll depth; must match scoring
                          # convergence (cavi_max_iter=100). 30 suffices for the
                          # short lookback docs (deeper = bigger autograd tape).
@@ -356,7 +361,26 @@ Reads:
 4. **This is the motivation for Firth:** the inner-loop path (needed for calibrated
    probabilities) needs step-halving to be stable; Firth supplies exactly that.
 
-## Run 5b (RUNNING) — Firth head (step-halving), head_l2 dropped (this config)
+### Run 5b (Firth attempt 2, step-halving) — ABANDONED on cluster
+
+Killed. Two inherent Path-B-Firth problems: (1) **driver-bound + crawling** — the
+step-halving line search (a `slogdet` per halving × 27 labels × 25 inner iters) is a
+huge serial driver computation that idled the cluster (executors `active 0/4`,
+`util 0%`); (2) **still blew up** — the line search accepts `w−step` if `PLL(cand) ≥
+PLL(current)`, but early-iter random topics give a rank-deficient Fisher so
+`PLL(current)=−inf`, and any finite step clears `≥−inf` (toothless exactly when needed;
+the reproducing test's ridge masked this).
+
+**Decision: abandon cluster Firth; keep it as a tested engine feature.** The head does
+NOT move pc_topics_lr — 0.79–0.80 every run regardless of head state (bounded/dead/blown);
+run 5a's dead head cost 0.006. Calibrated probabilities are unused on an
+information-limited task. Reverted 0076 to run 4's Path A + head_l2=1e-2 (bounded, fast).
+The head arc is practically closed: Newton → head_l2 → (Firth deferred). To make Firth
+cluster-viable later: a robust NON-collapsing conditioner (absolute floor, no slogdet
+line search) or Path-A Firth via a broadcast leverage pass — only if calibrated
+probabilities become a real deliverable on a non-rank-deficient task.
+
+## (removed) Run 5b config
 
 Rationale above (frontmatter `tpn`): the co-fit head reads every topic, so the 5
 sub-topics/node that are free unsupervised become a liability (head over-fit /
