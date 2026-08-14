@@ -210,8 +210,30 @@ ELBO smooth despite the 10% minibatch (−7.7M → −3.6M by iter 78).
   IRLS step. `Σλ_k` stayed flat (topic_trust held the TOPICS), so `pc_topics_lr`
   should survive but the co-fit head readout is garbage (saturated at |w|=1e6).
 
-_(pc_topics_lr headline: read from the finished run via `make gated-pc-readout` —
-see How to run. The co-fit-head numbers are void for this run due to the blow-up.)_
+**Run 2 finished — full readout (`make gated-pc-readout`, 15/27 nodes scored):**
+
+| arm | AUC | AP | node P@R0.5 | node P@R0.9 | R@FDR0.1 |
+|---|---|---|---|---|---|
+| gated_pc pc_topics_lr | 0.7947 | 0.0434 | 0.025 | 0.011 | 0.003 |
+| unsup_gated pc_topics_lr | 0.7862 | 0.0447 | — | — | — |
+| gated_pc co-fit head | 0.7644 | 0.0273 | 0.020 | 0.010 | 0.001 |
+
+Detection (case vs bg, prevalence 0.045): gated_pc **AUC 0.727 / AP 0.141**,
+P@R0.5 = 0.109; co-fit head AUC 0.678 / AP 0.082.
+
+Two reads:
+1. **PC supervision ≈ wash** (AUC Δ+0.0085, AP Δ−0.0013 vs unsup_gated) — insight
+   0066 again: the label adds no representation-level signal over the unsupervised
+   gated topics on this corpus.
+2. **AUC flatters a low-prevalence problem** (insight 0064): AUC ~0.79 but per-node
+   precision is ~2.5% at 50% recall — real but weak signal (~2.5–3× lift over base
+   rate), NOT precise-case-finding usable. The full readout is what surfaces this;
+   AUC alone would have read as "decent."
+3. Co-fit head (0.764) < pc_topics_lr (0.795): the late blow-up degraded it, as
+   expected → Firth (task #27) should recover this + give calibrated probabilities.
+
+Caveat: this is the STARVED 1yr / blown-head run. Run 3 (5yr history, head_l2=1e-2,
+100 iters) is the fair test of whether more history lifts the representation.
 
 ## Follow-ups (next run = run 3, this config)
 
