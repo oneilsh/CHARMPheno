@@ -81,6 +81,23 @@ def test_conditional_readout_sharpens_within_parent_cohort():
     assert e13[0]["depth"] == 1                       # parent 1 is at depth 1
     p1 = [p for p in cond["parents"] if p["parent"] == 1]
     assert p1 and p1[0]["top1"] == 1.0               # argmax child always correct
+    # honesty fields: majority baseline (20/20 -> 0.5), balanced accuracy, ECE.
+    assert p1[0]["majority"] == 0.5                   # 20 vs 20 children -> 0.5 baseline
+    assert p1[0]["bal_acc"] == 1.0                    # perfect per-child recall
+    assert cond["ece"] is not None and cond["ece"] >= 0.0
+
+
+def test_ece_perfectly_calibrated_is_zero_and_miscalibrated_is_positive():
+    from gated_pc_cloud import _ece
+    import numpy as np
+    rng = np.random.default_rng(0)
+    # p == empirical frequency in each bin -> ECE ~ 0.
+    p = np.repeat([0.05, 0.25, 0.55, 0.85], 400)
+    y = np.concatenate([(rng.random(400) < q).astype(float)
+                        for q in (0.05, 0.25, 0.55, 0.85)])
+    assert _ece(y, p) < 0.05
+    # confident-but-wrong -> large ECE.
+    assert _ece(np.zeros(100), np.full(100, 0.9)) > 0.5
 
 
 def test_precision_at_recall_and_recall_at_fdr():

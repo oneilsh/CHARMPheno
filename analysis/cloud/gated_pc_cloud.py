@@ -228,13 +228,24 @@ def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
     far higher than marginal prevalence, this is the metric that is NOT prevalence-
     crushed (insight 0064) — so it reveals whether the representation can subtype.
 
-    Per edge: conditional AUC/AP + the MARGINAL (de-novo, vs all docs) AP, whose gap
-    is the 'sharpening lift'. Per parent: a multiclass top-1 accuracy (argmax over
-    children among the cohort docs that sit at some child). Everything carries the
-    parent's DAG depth so the accuracy-vs-granularity curve is legible. Pure numpy."""
+    Read the numbers HONESTLY (VOI/metrics report §2): cond_AUC is the sober,
+    prevalence-INDEPENDENT discrimination number — lead with it. cond_AP and the
+    'lift over marginal' mostly reflect the base rate mechanically rising when you
+    condition (not skill), so they are context, not headline. Multiclass top-1 is
+    reported beside its MAJORITY-CLASS baseline (predict the commonest child) and a
+    balanced accuracy, because a 2-child parent has random=0.5 / majority up to ~0.7.
+    A pooled ECE gauges whether P(child|parent) is calibrated (needed for VOI).
+
+    MASK-INDEPENDENCE: pass the FULL-closure observation mask (all-ones) as ``mask``
+    regardless of the run's training label_mask_mode. The `label` array is already
+    mask-mode-independent (closure membership), so an all-ones eval mask fixes the
+    cohort/negative sets identically across full- and closure-mask runs — otherwise
+    the closure mask silently makes the conditional eval an easier sibling-only
+    contrast and cross-run numbers are not comparable (exp 0079, Trap 3). Pure numpy."""
     from sklearn.metrics import average_precision_score, roc_auc_score
     children, depth = _dag_children_and_depth(parent_int, C)
     edges, parents = [], []
+    pooled_y, pooled_p = [], []                          # for a single ECE over all edges
     for p in range(C):
         kids = children[p]
         if not kids:
@@ -262,23 +273,58 @@ def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
                 "cond_ap": float(average_precision_score(yc, sc)),
                 "marg_ap": marg_ap})
             scored_kids.append(c)
+            pooled_y.append(yc); pooled_p.append(sc)
         if len(scored_kids) >= 2:
             ka = np.array(scored_kids)
             at_child = cohort[(y[cohort][:, ka] == 1).any(axis=1)]
             if len(at_child):
                 pred = ka[np.argmax(proba[at_child][:, ka], axis=1)]
                 correct = y[at_child, pred] == 1     # argmax child is a TRUE child of p
+                # majority-class baseline: always predict the commonest child.
+                child_counts = np.array([(y[at_child, c] == 1).sum() for c in ka])
+                majority = float(child_counts.max() / len(at_child))
+                # balanced accuracy: mean per-child recall (guards imbalance).
+                recalls = []
+                for c in ka:
+                    truth = y[at_child, c] == 1
+                    if truth.sum() > 0:
+                        recalls.append(float((pred[truth] == c).mean()))
+                bal_acc = float(np.mean(recalls)) if recalls else None
                 parents.append({"parent": p, "depth": depth[p], "n": int(len(at_child)),
                                 "n_children": len(scored_kids),
-                                "top1": float(correct.mean())})
-    return {"edges": edges, "parents": parents}
+                                "top1": float(correct.mean()),
+                                "majority": majority, "bal_acc": bal_acc})
+    ece = None
+    if pooled_y:
+        ece = _ece(np.concatenate(pooled_y), np.concatenate(pooled_p))
+    return {"edges": edges, "parents": parents, "ece": ece}
+
+
+def _ece(y, p, n_bins=10):
+    """Expected calibration error (equal-width bins): Σ_b (n_b/N)·|conf_b − acc_b|.
+    The gap between predicted P(child|parent) and observed frequency — 0 = perfectly
+    calibrated. Required for a real diagnostic aid and mandatory for VOI (the entropy
+    H(p) must be real, not just a ranking). Pure numpy."""
+    y = np.asarray(y, float); p = np.asarray(p, float)
+    if len(y) == 0:
+        return None
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    idx = np.clip(np.digitize(p, edges) - 1, 0, n_bins - 1)
+    ece = 0.0
+    for b in range(n_bins):
+        m = idx == b
+        if m.any():
+            ece += abs(p[m].mean() - y[m].mean()) * (m.mean())
+    return float(ece)
 
 
 def format_conditional_readout(cond, int2cid, name_by_id):
-    """Render conditional_readout: a per-DAG-depth summary (conditional AUC/AP, the
-    sharpening lift over marginal AP, and multiclass top-1), then the per-parent
-    top-1 lines sorted by depth then accuracy. The depth summary IS the accuracy-
-    vs-granularity curve the clinician question asks for."""
+    """Render conditional_readout HONESTLY (VOI/metrics report §2): cond_AUC is the
+    headline discrimination number (prevalence-independent); cond_AP/lift are marked
+    'context' (mostly the base-rate rise). Per-parent top-1 is shown WITH its
+    majority-class baseline and balanced accuracy, sorted by depth then top-1-minus-
+    majority (the honest lift). A pooled ECE reports calibration. Eval is
+    mask-independent (full-closure cohorts) — see conditional_readout."""
     edges, parents = cond["edges"], cond["parents"]
     if not edges:
         return "[conditional sharpening]  no parent->child edges met min_count"
@@ -293,9 +339,11 @@ def format_conditional_readout(cond, int2cid, name_by_id):
         vals = [v for v in vals if v is not None]
         return float(np.mean(vals)) if vals else None
 
+    ece = cond.get("ece")
     depths = sorted({e["depth"] for e in edges if e["depth"] is not None})
-    lines = ["[conditional sharpening]  P(child | parent-cohort), by DAG depth",
-             "  depth  #edges  cond_AUC  cond_AP  marg_AP  lift   top1"]
+    lines = [f"[conditional sharpening]  P(child|parent), by DAG depth "
+             f"(HEADLINE=cond_AUC; AP/lift are base-rate context)  ECE={_f(ece).strip()}",
+             "  depth  #edges  cond_AUC  |  cond_AP  marg_AP  lift  (context)  top1"]
     for d in depths:
         de = [e for e in edges if e["depth"] == d]
         dp = [p for p in parents if p["depth"] == d]
@@ -305,12 +353,16 @@ def format_conditional_readout(cond, int2cid, name_by_id):
         auc = _mean([e["cond_auc"] for e in de])
         top1 = _mean([p["top1"] for p in dp])
         lines.append(
-            f"  {d:>5}  {len(de):>6}  {_f(auc)}  {_f(cap)}  {_f(map_)}"
-            f"  {_f(lift)}  {_f(top1)}")
-    lines.append("  per-parent multiclass top-1 (which child, given the parent):")
-    for p in sorted(parents, key=lambda p: (p["depth"], -p["top1"])):
-        lines.append(f"    d{p['depth']} {_name(p['parent']):<22} "
-                     f"top1={p['top1']:.3f}  (n={p['n']}, {p['n_children']} children)")
+            f"  {d:>5}  {len(de):>6}  {_f(auc)}  |  {_f(cap)}  {_f(map_)}"
+            f"  {_f(lift)}            {_f(top1)}")
+    lines.append("  per-parent multiclass top-1 vs majority-class baseline "
+                 "(which child, given the parent):")
+    for p in sorted(parents, key=lambda p: (p["depth"], -(p["top1"] - p["majority"]))):
+        ba = "" if p.get("bal_acc") is None else f" bal_acc={p['bal_acc']:.3f}"
+        lines.append(
+            f"    d{p['depth']} {_name(p['parent']):<22} "
+            f"top1={p['top1']:.3f} (majority={p['majority']:.3f}){ba}  "
+            f"(n={p['n']}, {p['n_children']} children)")
     return "\n".join(lines)
 
 
@@ -758,7 +810,13 @@ def main() -> int:
             return readout, proba
 
         def _conditional(proba_te, y_te, m_te, label):
-            cond = conditional_readout(proba_te, y_te, m_te, bundle.parent_int, C,
+            # Mask-INDEPENDENT eval: `label` (y) is already closure-membership
+            # regardless of the training label_mask_mode, so score against an
+            # all-ones observation mask — the cohort/negative sets are then identical
+            # across full- and closure-mask runs (fixes exp 0079 Trap 3). m_te (the
+            # training mask) is intentionally NOT used here.
+            cond = conditional_readout(proba_te, y_te, np.ones_like(y_te),
+                                       bundle.parent_int, C,
                                        min_count=args.min_label_count)
             print(format_conditional_readout(
                 cond, bundle.int2cid, bundle.name_by_id).replace(
