@@ -188,6 +188,54 @@ Sources: [PhenoBrain (npj Digit Med 2025, PMC)](https://pmc.ncbi.nlm.nih.gov/art
 
 ---
 
+## 2.6 Reported performance of all four comparators vs our latest rare6 numbers
+
+**Our current best** (branch `claude/spectral-anchor-topic-k-200nqp`, exp 0076 **run 7**,
+condition-only, n_bg=8/K=34 — the best *absolute* case-finder in the arc):
+
+- **Detection (case vs background, prevalence ≈0.038–0.045): AUC 0.737, AP 0.148**,
+  P@R0.5 ≈ 0.10–0.11 → **≈3–3.5× lift** over base rate.
+- Per-node macro (`pc_topics_lr`): AUC 0.787, AP 0.039; node P@R0.5 ≈ 0.025.
+- PC lift over matched unsupervised: detection AP **+0.005** (run 7) up to **+0.016** (run 6,
+  at lower absolute quality — the capacity/benefit trade-off).
+- Adding a drug domain under supervision (exp 0077 run 1): det AP **0.137**, i.e. it did **not**
+  beat condition-only run 7's 0.148.
+
+**The blunt caveat: none of the four report on this task at this prevalence, so the raw numbers
+are apples-to-oranges.** Four different tasks and metrics are in play — population case-finding
+AP (us), known-phenotype labeling AUC (sureLDA), differential-diagnosis top-k recall
+(PhenoBrain), and association OR / case-vs-control separation (PheRS, RarePT). Precision numbers
+in particular are dominated by **prevalence and operating point**, which differ by 1–2 orders of
+magnitude across these settings.
+
+| Method | Task | Reported headline | Prevalence / cohort | Comparable to our AP? |
+|---|---|---|---|---|
+| **CHARMPheno rare6** (run 7) | population case-finding, 6 rare dx, condition codes | **det AUC 0.737 / AP 0.148**, P@R0.5 ≈0.10 | ~0.04, AoU population | — (reference) |
+| **PheRS** (Science 2018) | case-vs-control separation + rare-variant assoc | 5/6 dx separate cases from controls at **p<5×10⁻⁴²**; *no AUC/AP headline* | matched case/control | **No** — reports p-values, not ranking AP; downstream PheRS case/control AUCs commonly ~0.7–0.85 |
+| **RarePT** (2023/24) | undiagnosed prediction over 155 rare dx | median **diagnostic OR 48** (UKB) / 31 (Sinai); **PPV up to ~40%**; 72% biomarker-enriched | UKB 436k / Sinai 3.3M; per-disease | **Loosely** — PPV ~40% ≫ our ~10% P@R0.5, but on single high-signal diseases w/ a confirmatory test, and OR/PPV use their estimation framework (recall unstated) |
+| **PheNet** (CVID) | single-disease case-finding | **top-100 chart-review PPV 74%**; ~8 mo earlier dx; ext. val 6M records | CVID only; top-K chart review, not population AP | **Loosely** — 74% is *precision-at-top-100* on one strong-signal disease, not population AP |
+| **sureLDA** (JAMIA 2020) | weakly-sup labeling of *known* (mostly common) phenotypes | phenotyping **AUC ≳0.9** for CAD/RA/CD/etc. | common phenotypes | **No** — different task; AUC on ~5–20% prevalence known phenotypes |
+| **PhenoBrain** (npj 2025) | differential dx ranking for a presented patient | **top-3 recall 0.49–0.61, top-10 0.65–0.81, median rank 4** | curated case reports / hospital admits, 362 dx | **No** — top-k *disease* recall per patient, not per-disease patient AP; must be *transposed* (§2.4) to compare |
+
+**What the comparison actually tells you (the honest read):**
+
+1. **The 40–74% "precision" numbers from RarePT/PheNet are not evidence that CHARMPheno is
+   weak.** They are single-disease, biomarker-anchored, top-K-chart-review or enriched-cohort
+   figures. Your rare6 is deliberately the **harder framing**: multi-disease macro, condition
+   codes only, *population* prevalence, honest AP. The ~10% P@R / ~3.5× lift is squarely the
+   **documented "information-limited" ceiling** (insight 0062) — expected, not a defect.
+2. **The only same-shape single-disease comparator you can run cheaply is PheRS** (`phers` on
+   AoU phecodes). That gives a per-disease case/control AUC directly comparable to your per-node
+   `pc_topics_lr` AUC (~0.79) — the fair, low-effort head-to-head.
+3. **PhenoBrain and sureLDA are not on your metric at all** without adaptation — PhenoBrain must
+   be transposed to a case-finder (§2.4); sureLDA is a labeling method for known phenotypes and
+   would essentially *become* an unsupervised-gated-style baseline if forced onto rare6.
+4. **Net:** to make a defensible quantitative claim, run **PheRS** (same task, same cohort) and
+   a **transposed PhenoBrain** (SOTA phenotype ranker) on the *same rare6 patients at the same
+   prevalence*, and report **detection AP + P@R at matched recall** — not each paper's native
+   headline. Cross-paper headline numbers should be quoted only as "context," never as a
+   leaderboard.
+
 ## 3. One-paragraph Related-Work draft (reusable)
 
 > Guided and anchored topic models are established for EHR phenotyping: **sureLDA** [JAMIA
