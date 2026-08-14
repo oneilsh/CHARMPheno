@@ -95,4 +95,45 @@ cd ~/repos/CHARMPheno && \
 
 ## Run log
 
-_(pending first run)_
+### Run 1 (measurement + closure-mask) — objective-alignment confirmed, but pure closure-mask is NOT deployable; the "AUC lift" is an eval artifact
+
+**Sign-flip confirmed (the prediction).** Supervised vs unsupervised, same closure
+mask: cond AUC Δ**+0.0037**, cond AP +0.0054, top1 +0.0036 — all positive, where
+full-mask (0078) was negative (cond AP Δ−0.0127). So training the conditional
+objective makes supervision help the conditional metric. But the magnitude is tiny.
+
+**Trap 1 — detection collapses to chance.** det AP 0.034 = prevalence, AUC 0.500
+(both arms). Closure-mask leaves background docs ENTIRELY unobserved, so the
+case-vs-background contrast is gone from training AND scoring. The full↔closure
+trade is not partial — pure closure loses detection completely.
+
+**Trap 2 — the head blew up.** |w_CK|max = 1.36e4 (vs ~13 under full-mask).
+Closure observes only siblings → few cells → separable per-node problems → the
+logistic head diverges. The co-fit head is unusable (its detection AUC 0.47,
+below chance); only the head-independent pc_topics_lr metric survives. This is the
+separation the parked Firth/ridge work (task #29) targets.
+
+**Trap 3 — the cond_AUC jump (0.62→0.75) is an EVALUATION artifact, not a model
+win.** The unsupervised arm jumped identically (0.6232→0.7510), but its θ is
+weightY=0 with the same seed/features/frontier as 0078-unsup — i.e. LITERALLY the
+same θ. Identical θ, different AUC ⇒ the change is the eval definition: under
+closure-mask the conditional cohort's negatives are just SIBLINGS (the mask hides
+distant nodes), a cleaner/easier contrast. Honest within-parent discrimination is
+still ~0.62; closure just pointed the metric at an easier slice. **Do not headline
+"closure lifted AUC to 0.75."**
+
+**Side confirmation.** The unsup λ-mass table (now printed) shows the anchors
+condition-heavy in the UNSUPERVISED arm too (Amyloidosis 0.87, Sarcoidosis 0.80,
+Cardiac sarcoid 0.94) — the hierarchy-aligned specialization is a property of the
+gated multi-domain representation, not PC. Settled.
+
+**Read + next.** "Mask = task selector" is validated but sharpened: pure
+closure-mask is not deployable (no detection + head divergence), and its apparent
+lift is confounded. The clean design is the two-stage FACTORIZATION —
+`P(d|x) = P(d | x, x∈C) · P(x∈C | x)`: **full-mask for the detection factor,
+closure-mask for the sharpening factor**, composed at inference (this also keeps
+the detection head in the well-conditioned full-mask regime). And the conditional
+readout needs a mandatory fix: **evaluate against a FIXED (full-closure) label
+definition regardless of the training mask**, or cross-mask numbers are meaningless
+(as Trap 3 shows). See the VOI/metrics report
+(claude/rare-disease-diagnosis-lit-review-ojs4ms) §2–3.
