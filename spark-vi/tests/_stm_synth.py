@@ -603,6 +603,193 @@ def dag_placement_corpus(*, parent, node_prev, V, doc_len, seed):
     return docs, np.array(labels), node_codes
 
 
+def two_domain_dag_corpus(*, parent, node_prev, V_a, V_b, doc_len, seed,
+                          b_only_node=None, ubiquitous_b=False,
+                          b_only_signal_boost=4, bg_frac=0.0,
+                          ancestor_signature_decay=1.0):
+    """Two-domain planted hierarchical-placement corpus over a SINGLE concatenated
+    vocabulary: domain 0 ids [0:V_a), domain 1 ids [V_a:V_a+V_b). Every document's
+    token array carries BOTH domain-0 and domain-1 signature tokens for the SAME
+    DagLayout closure(v) -- within-document cross-domain co-occurrence. This is the
+    load-bearing prerequisite: it is what makes the joint co-occurrence block between
+    the two domains' vocabularies nonzero; without it the domain-0 and domain-1
+    anchor hulls would never appear in the same document and would be structurally
+    disconnected. All ids are plain integers; domains are 0/1, never given
+    domain-specific vocabulary semantics.
+
+    Mirrors dag_placement_corpus's construction (shared common pool + per-node
+    exclusive signature block, C = V//3 / sig slotting) but applies it SEPARATELY
+    within each domain, and slots both domains' signature blocks into the SAME
+    DagLayout node order.
+
+    ``b_only_node``, if given, makes that node's DOMAIN-0 signature block IDENTICAL
+    to its (first) parent's domain-0 block -- so domain 0 alone has no unique token
+    for it -- while its domain-1 block stays exclusive: the "recoverable from domain
+    1 alone" case. Its domain-1 signature draws are additionally scaled by
+    ``b_only_signal_boost`` (default 4): a node's OWN path contribution is diluted by
+    construction (draws are split evenly across every node on closure(v), so a
+    node reached via a longer path gets fewer own-signature draws than a node
+    generated alone), which otherwise leaves b_only_node's unique domain-1 block
+    below the anchor candidate's per-domain marginal floor (find_anchors,
+    min_marginal_frac) and unrecoverable no matter how pure it is. The boost only
+    densifies b_only_node's domain-1 draws (domain-0 stays untouched, so the
+    domain-0 ambiguity this parameter exists to create is unaffected); it is what
+    makes the "recoverable from domain 1 alone" case in the name actually true
+    rather than merely nonzero. ``ubiquitous_b=True`` adds one reserved domain-1
+    column (unused by any node's exclusive block) emitted by EVERY document
+    regardless of node -- a universal-anchor control.
+
+    ``ancestor_signature_decay`` (default 1.0 = the pre-decay generator,
+    byte-identical -- see below) is the IDENTIFIABILITY knob for the label.
+    Every document's label is its DEEPEST attested node, but at 1.0 the
+    signature draws are split EVENLY over closure(v), so a depth-2 document
+    emits exactly as many tokens of its parent's signature block as of its
+    own. The evidence is then symmetric between an ancestor and its
+    descendant while the label is not: which of the two a reader should rank
+    first is NOT determined by the tokens, so any read-out that scores
+    "the deepest attested node ranks first" is scoring an unidentified
+    tie-break, and two estimators with opposite tie-break biases can differ
+    arbitrarily on it without either being wrong. That is a defect of the
+    plant, not of a model fitted to it.
+
+    The knob is the per-level ratio of signature draws going UP the closure:
+    the label node itself draws ``per`` tokens of its own block in EACH
+    domain, and a node ``k`` levels above it (k = depth(v) - depth(u), the
+    longest-path level difference, so it is well defined on a multi-parent
+    DAG where several ancestors share a depth) draws
+    ``per * decay ** k``. At ``decay < 1`` a deeper node's OWN signature is
+    strictly more indicative of it than the shared signature of its
+    ancestors, which is what the label already claims -- so the label
+    becomes identified from the tokens alone. 0.5 (a clean halving per
+    level) is the value used by the placement-equivalence gate: it is the
+    simplest one-parameter monotone profile that makes the label node the
+    single best-supported block at every depth, and it mirrors the
+    depth-scaled offsets the surrounding DAG work already uses. Values are
+    rounded to at least one draw per node on the path
+    (``max(1, round(per * decay ** k))``), so ``decay=1.0`` yields exactly
+    ``per`` for every node -- the same draw sizes, in the same order, from
+    the same rng, hence a byte-identical corpus (and every other return
+    value unchanged).
+
+    ``bg_frac`` (default 0.0, byte-identical to the pre-``bg_frac`` corpus:
+    at 0.0, ``n_bg_docs`` below is 0, so the background-doc loop issues ZERO
+    ``rng`` calls and simply doesn't run, leaving the foreground loop's draws
+    -- and therefore the returned corpus -- untouched): the fraction of
+    the corpus emitted as BACKGROUND-ONLY documents -- common-pool tokens
+    from BOTH domains only, no node signature at all, labeled with an EMPTY
+    frontier (``frozenset()``, mirroring the ungated fold-in doc built in
+    ``svi_node_profiles``) rather than a node id. Without this, every one of
+    the 2000 documents carries a node signature, i.e. the corpus has ZERO
+    true background documents -- and the gated spectral seed
+    (``spectral_block_aligned_lambda``) needs a real background pool to
+    anchor ``lay.n_bg``'s background topics on. Two failure modes follow from
+    that absence, one per ``anchor_scope``: under ``"closure"`` the
+    background pool is drawn from EVERY doc (background and foreground
+    alike), so with no true background docs the background anchors are free
+    to land on and absorb a node's own signature block instead (BACKGROUND-
+    ANCHOR THEFT -- not "a parent stealing a child's word", a mechanism that
+    does not exist in this generator); under ``"frontier"`` the background
+    pool is docs with an empty frontier specifically, so with none the
+    background block simply never gets seeded (stays at the ``1e-9`` floor
+    and logs a warning). ``bg_frac>0`` gives ``"frontier"`` scope a genuine
+    background pool, so node blocks are not left double-duty as both a
+    node-signature estimator and an implicit background estimator.
+
+    Returns (docs, labels, domain_bounds, planted_a, planted_b, slot_of_node,
+    node_codes):
+      - domain_bounds = [0, V_a, V_a + V_b].
+      - labels: a plain node id per foreground doc (as before), or
+        ``frozenset()`` for a ``bg_frac`` background doc -- an object array
+        when ``bg_frac>0`` (mixed int/frozenset), the original int64 array
+        when ``bg_frac=0.0``.
+      - planted_a (K, V_a) / planted_b (K, V_b): ground-truth signature-block
+        indicator rows, K = number of non-root nodes, aligned to DagLayout slot
+        order (row k = the node at slot_of_node^-1(k)).
+      - slot_of_node: dict {node id -> row index into planted_a/planted_b}.
+      - node_codes: {node id -> exact domain-0 marker token id}, mirrors
+        dag_placement_corpus, for strip_dag_node_codes at eval.
+    """
+    from spark_vi.models.topic.dag_placement import DagLayout
+    rng = np.random.default_rng(seed)
+    lay = DagLayout(parent, n_bg=2, tpn=1)
+    nodes = lay.nodes
+    K = len(nodes)
+    slot_of_node = {u: i for i, u in enumerate(nodes)}
+
+    def _blocks(V):
+        C = V // 3                                        # shared common pool [0:C]
+        sig = max(2, (V - C) // (K + 1))                   # +1 reserves a spare block
+        node_sig = {u: np.arange(C + i * sig, C + i * sig + sig) for i, u in enumerate(nodes)}
+        return C, sig, node_sig
+
+    C_a, sig_a, node_sig_a = _blocks(V_a)
+    C_b, sig_b, node_sig_b = _blocks(V_b)
+
+    if b_only_node is not None:
+        parents = [p for p in lay.parents.get(b_only_node, []) if p in node_sig_a]
+        if not parents:
+            raise ValueError(
+                f"b_only_node {b_only_node} has no non-root parent with a domain-0 "
+                "signature block to share (root carries no signature block)")
+        node_sig_a[b_only_node] = node_sig_a[parents[0]]   # ambiguous in domain 0
+
+    ubiq_col_b = C_b + K * sig_b if ubiquitous_b else None  # the spare, unassigned block
+
+    node_codes = {u: int(node_sig_a[u][0]) for u in nodes}
+
+    planted_a = np.zeros((K, V_a))
+    planted_b = np.zeros((K, V_b))
+    for u in nodes:
+        planted_a[slot_of_node[u], node_sig_a[u]] += 1.0
+        planted_b[slot_of_node[u], node_sig_b[u]] += 1.0
+    if ubiquitous_b:
+        planted_b[:, ubiq_col_b] += 1.0
+
+    p = np.array([node_prev[u] for u in nodes], float); p /= p.sum()
+    n_total = 2000                                          # 2000 items total, as before
+    n_bg_docs = int(round(n_total * bg_frac))               # 0 when bg_frac=0.0 (the default)
+    n_fg_docs = n_total - n_bg_docs
+    docs, labels = [], []
+    for _ in range(n_fg_docs):                              # foreground (node-signature) docs
+        v = int(rng.choice(nodes, p=p))
+        path = [u for u in lay.closure(v) if u != 0]
+        n_common = doc_len // 2
+        n_a_common, n_b_common = n_common // 2, n_common - n_common // 2
+        toks = [rng.integers(0, C_a, size=n_a_common),                    # domain-0 common pool
+               V_a + rng.integers(0, C_b, size=n_b_common)]               # domain-1 common pool
+        per = max(1, (doc_len - n_common) // (2 * len(path)))
+        depth_v = lay.depth(v)
+        for u in path:
+            # ancestor_signature_decay: the label node v keeps `per`; a node k levels
+            # ABOVE it draws per*decay**k, so the deepest attested node is the
+            # best-supported block and the label is identified from the tokens (see
+            # the docstring). decay=1.0 -> exactly `per` for every u = byte-identical.
+            per_u = max(1, int(round(per * ancestor_signature_decay ** (depth_v - lay.depth(u)))))
+            toks.append(rng.choice(node_sig_a[u], size=per_u))            # domain-0 signature
+            b_per = per_u * b_only_signal_boost if u == b_only_node else per_u
+            toks.append(V_a + rng.choice(node_sig_b[u], size=b_per))      # domain-1 signature
+        if ubiquitous_b:
+            toks.append(np.array([V_a + ubiq_col_b]))                     # universal token
+        docs.append(np.concatenate(toks).astype(np.int64))
+        labels.append(v)
+
+    for _ in range(n_bg_docs):                              # background-only docs (bg_frac>0)
+        # Full doc_len of common-pool tokens from BOTH domains, no node signature at all --
+        # a real background doc for the gated spectral seed's background block to anchor on
+        # (see the bg_frac docstring paragraph above). This loop runs zero times, and issues
+        # zero rng calls, when bg_frac=0.0, so the foreground draws above -- and therefore the
+        # returned corpus -- are byte-identical to the pre-bg_frac generator in that case.
+        n_a_common, n_b_common = doc_len // 2, doc_len - doc_len // 2
+        toks = [rng.integers(0, C_a, size=n_a_common),                    # domain-0 common pool
+               V_a + rng.integers(0, C_b, size=n_b_common)]               # domain-1 common pool
+        docs.append(np.concatenate(toks).astype(np.int64))
+        labels.append(frozenset())                          # empty frontier = background
+
+    domain_bounds = [0, V_a, V_a + V_b]
+    labels_arr = np.array(labels, dtype=object) if n_bg_docs else np.array(labels)
+    return docs, labels_arr, domain_bounds, planted_a, planted_b, slot_of_node, node_codes
+
+
 def dag_placement_corpus_multi(*, parent, leaf_prev, comorbid_rate, V, doc_len, seed):
     """Multi-parent hierarchical-placement plant with comorbid patients. Each non-root node owns a
     signature vocab block plus one exact 'node code'. An item's frontier is 1 leaf (prob
@@ -641,14 +828,22 @@ def dag_placement_corpus_multi(*, parent, leaf_prev, comorbid_rate, V, doc_len, 
     return docs, labels, node_codes
 
 
-def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0):
+def fit_gated_svi_local(model, gated_docs, *, n_iter=200, seed=0, data_summary=None):
     """In-memory batch-VB driver for GatedOnlineLDA (no Spark), mirroring fit_stm.
 
     Full-batch lr=1.0 each iteration = variational EM — the cleanest regime for the
     SVI-vs-Gibbs placement equivalence gate. `model` is a GatedOnlineLDA; `gated_docs` are
-    GatedBOWDocuments (frontier tags drive the gate)."""
+    GatedBOWDocuments (frontier tags drive the gate).
+
+    `data_summary` (default None) is passed straight through to `initialize_global`, so a
+    caller whose model was built with `init="spectral"` can hand over the
+    {"train_docs": [...], "train_labels": [...], "anchor_scope": ...} dict the spectral
+    seed needs (see `gated_init.py`); every existing caller passes nothing and keeps
+    getting `initialize_global(None)` exactly as before (random init, or a spectral model
+    falling back to its own None-handling) — this parameter only ADDS a path, it does not
+    change the None one."""
     np.random.seed(seed)
-    gp = model.initialize_global(None)
+    gp = model.initialize_global(data_summary)
     for _ in range(n_iter):
         gp = model.update_global(gp, model.local_update(gated_docs, gp), learning_rate=1.0)
     return gp

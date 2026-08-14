@@ -55,6 +55,7 @@ def _cavi_doc_inference(
     gamma_init: np.ndarray,
     max_iter: int,
     tol: float,
+    gamma_count_weight: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """Inner CAVI loop for a single document under fixed q(beta).
 
@@ -68,6 +69,22 @@ def _cavi_doc_inference(
         phi_norm      = eb_d.T @ expElogthetad + 1e-100  # (n_unique,)
         gamma_new     = alpha + expElogthetad * (eb_d @ (counts / phi_norm))
 
+    gamma_count_weight (optional, default None = identity): a per-token
+    (n_unique,) nonnegative weight applied to `counts` in the GAMMA recurrence
+    ONLY -- gamma_new = alpha + expElogthetad * (eb_d @ (w * counts / phi_norm)).
+    `phi_norm` and the returned values carry no trace of it, so every
+    downstream consumer of this function (the lambda sufficient statistics
+    outer(expElogthetad, counts / phi_norm) and the data log-likelihood
+    sum_n counts_n log phi_norm_n) keeps using TRUE counts. It is a
+    pseudo-likelihood / tempering weight on q(theta_d) alone, used by
+    GatedOnlineLDA's per-domain modality weight omega (MixEHR-style
+    multi-modal topic models: Li, Nair, Lu et al. 2020, Nat. Commun., which
+    itself uses raw token volume, i.e. omega == 1). Under a non-identity
+    weight the ELBO computed from these outputs is the UNWEIGHTED (w == 1)
+    bound -- a convergence diagnostic, not an exact bound on the weighted
+    objective. None keeps the recurrence bit-for-bit unchanged (Hoffman,
+    Blei, Bach 2010).
+
     Returns:
         gamma:         (K,) converged variational Dirichlet parameter for theta_d.
         expElogthetad: (K,) exp(E[log theta_d]) at the converged gamma.
@@ -77,6 +94,10 @@ def _cavi_doc_inference(
     """
     eb_d = expElogbeta[:, indices]  # (K, n_unique)
     gamma = gamma_init.astype(np.float64, copy=True)
+    # theta-only weight: the gamma recurrence's counts, distinct from the true
+    # `counts` used by phi_norm's consumers. `is counts` when unweighted, so the
+    # default path is the original expression, unchanged.
+    gamma_counts = counts if gamma_count_weight is None else gamma_count_weight * counts
 
     expElogthetad = np.exp(digamma(gamma) - digamma(gamma.sum()))
     phi_norm = eb_d.T @ expElogthetad + 1e-100
@@ -86,7 +107,7 @@ def _cavi_doc_inference(
         n_iter = it
         prev = gamma.copy()
         # (K, n_unique) @ (n_unique,) -> (K,); elementwise mul with K-vec
-        gamma = alpha + expElogthetad * (eb_d @ (counts / phi_norm))
+        gamma = alpha + expElogthetad * (eb_d @ (gamma_counts / phi_norm))
         expElogthetad = np.exp(digamma(gamma) - digamma(gamma.sum()))
         phi_norm = eb_d.T @ expElogthetad + 1e-100
         if np.mean(np.abs(gamma - prev)) < tol:

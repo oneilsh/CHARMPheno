@@ -32,6 +32,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.optimize import nnls
 
+from spark_vi.models.topic.domains import validate_domain_bounds
+
 
 def word_cooccurrence(docs, V: int) -> np.ndarray:
     """V×V normalized same-document word co-occurrence matrix Q.
@@ -80,8 +82,39 @@ def _row_normalize(Q: np.ndarray) -> np.ndarray:
     return Q / rs_safe
 
 
+def _domain_candidate_mask(marginal, min_marginal_frac, domain_bounds):
+    """Boolean 'eligible to be an anchor' mask, floored WITHIN each domain.
+
+    The candidate floor (find_anchors docstring) keeps sub-promille noise words
+    from being picked as spurious hull vertices. On a multi-domain joint Q the
+    pooled mean is dominated by the densest domain, so a sparser domain's real
+    anchors fall below the pooled bar and no anchor ever comes from it (spec:
+    'domain imbalance is the most likely thing to silently break init'). The fix
+    is to compare each word only to the mean nonzero marginal of ITS OWN domain.
+
+    domain_bounds is a strictly-increasing cumulative-offset sequence starting at
+    0 and ending at V; domain d spans [domain_bounds[d], domain_bounds[d+1]).
+    None -> a single pooled domain, reproducing the original pooled floor exactly.
+    It is VALIDATED here (`domains.validate_domain_bounds`), which is what makes
+    every `find_anchors` caller -- including `spectral_init_beta` and
+    `gated_init.spectral_block_aligned_lambda` -- raise on malformed bounds
+    instead of silently leaving the uncovered tail of the vocabulary ineligible
+    to anchor.
+    """
+    V = marginal.shape[0]
+    domain_bounds = validate_domain_bounds(domain_bounds, V)
+    mask = np.zeros(V, dtype=bool)
+    for lo, hi in zip(domain_bounds[:-1], domain_bounds[1:]):
+        seg = marginal[lo:hi]
+        pos = seg > 0
+        thr = min_marginal_frac * seg[pos].mean() if pos.any() else 0.0
+        mask[lo:hi] = seg >= thr
+    return mask
+
+
 def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
-                 min_marginal_frac: float = 1.0) -> list[int]:
+                 min_marginal_frac: float = 1.0,
+                 domain_bounds=None) -> list[int]:
     """Greedy farthest-point anchor selection on the row-normalized rows of Q.
 
     Gram–Schmidt "pivoted QR" geometry (Arora et al. 2013, Algorithm 4): build
@@ -110,6 +143,20 @@ def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
     phenotype rows. Seeds that are (near) linearly dependent on the existing
     basis are skipped, never erroring.
 
+    ``domain_bounds`` (optional cumulative column-offset sequence, e.g. a
+    concatenated multi-domain vocab ``[domain_0 ; domain_1 ; ...]``) floors the
+    candidate marginal WITHIN each domain instead of over the pooled Q. On a
+    joint Q built from domains of very different density (spec risk: domain
+    imbalance is the most likely thing to silently break init), the pooled mean
+    is dominated by the densest domain and a sparser domain's real anchors never
+    clear the bar — no anchor is ever drawn from it. Flooring per-domain fixes
+    this while leaving the greedy hull-vertex geometry itself untouched. Default
+    ``None`` reproduces the single pooled-domain floor exactly (see
+    ``_domain_candidate_mask``). Bounds that do not cover [0, V) exactly once
+    raise ValueError (``domains.validate_domain_bounds``): the previous silent
+    behavior returned FEWER anchors than asked for, with every column past the
+    last bound permanently ineligible.
+
     Returns the ``n`` newly chosen anchor word ids in selection order.
     """
     Qbar = _row_normalize(Q)
@@ -117,9 +164,7 @@ def find_anchors(Q: np.ndarray, n: int, *, seed_rows=None,
     norms = (Qbar * Qbar).sum(axis=1)            # squared row norms
 
     marginal = Q.sum(axis=1)
-    pos = marginal > 0
-    thr = min_marginal_frac * marginal[pos].mean() if pos.any() else 0.0
-    candidate = marginal >= thr                   # eligible to BE an anchor
+    candidate = _domain_candidate_mask(marginal, min_marginal_frac, domain_bounds)
 
     basis: list[np.ndarray] = []                  # orthonormal residual basis
     EPS = 1e-12
@@ -209,7 +254,7 @@ def recover_beta(Q: np.ndarray, anchors, rows=None) -> np.ndarray:
     return beta
 
 
-def spectral_init_beta(docs, partition, V: int) -> np.ndarray:
+def spectral_init_beta(docs, partition, V: int, *, domain_bounds=None) -> np.ndarray:
     """Block-aware K×V β seed in ``partition`` slot order.
 
     Step 1 (background): pooled Q over all docs → ``background_k`` anchors →
@@ -223,13 +268,34 @@ def spectral_init_beta(docs, partition, V: int) -> np.ndarray:
     Non-gated partitions (background_k = K, no foreground groups) execute step 1
     only and produce exactly what a global single-pass anchor-word init would —
     the degenerate, identical case.
+
+    ``domain_bounds`` (optional; spec's multi-domain joint-Q construction) is
+    passed straight through to EVERY ``find_anchors`` call this makes — the
+    background pooled-Q call in step 1 and each group's within-group Q_g call in
+    step 2 — so a sparser domain's anchors clear the per-domain candidate floor
+    instead of being swamped by the pooled mean (see ``find_anchors`` /
+    ``_domain_candidate_mask``). ``word_cooccurrence`` already builds the joint Q
+    over the concatenated multi-domain vocab unchanged; only this floor threading
+    is needed. Default ``None`` reproduces current single-pooled-domain behavior
+    byte-for-byte. Validated up front (`domains.validate_domain_bounds`) so a
+    malformed sequence fails before the O(V^2) co-occurrence pass rather than
+    inside the first ``find_anchors`` call.
+
+    No in-repo caller passes ``domain_bounds`` here yet: this is the BLOCK-AWARE
+    STM entry point, while the multi-domain gated arc seeds through
+    ``gated_init.multidomain_spectral_lambda``. The passthrough is kept because a
+    multi-domain STM would need exactly it, and it is covered by
+    ``test_spectral_init_beta_threads_domain_bounds_to_both_anchor_passes`` (which
+    asserts both anchor passes receive it), not left as untested surface.
     """
+    if domain_bounds is not None:
+        domain_bounds = validate_domain_bounds(domain_bounds, V)
     K = partition.K
     beta = np.zeros((K, V), dtype=np.float64)
 
     # Step 1: background block on pooled Q.
     Q_all = word_cooccurrence(docs, V)
-    bg_anchors = find_anchors(Q_all, partition.background_k)
+    bg_anchors = find_anchors(Q_all, partition.background_k, domain_bounds=domain_bounds)
     bg_beta = recover_beta(Q_all, bg_anchors)
     bg_idx = partition.background_indices()
     # bg_beta has one row per found anchor; if find_anchors fell short (corpus
@@ -254,7 +320,8 @@ def spectral_init_beta(docs, partition, V: int) -> np.ndarray:
         fg_idx = partition.block_indices(g)
         docs_g = [d for d in docs if g in d.groups]
         Q_g = word_cooccurrence(docs_g, V)
-        fg_anchors = find_anchors(Q_g, len(fg_idx), seed_rows=bg_anchors)
+        fg_anchors = find_anchors(Q_g, len(fg_idx), seed_rows=bg_anchors,
+                                  domain_bounds=domain_bounds)
         if not fg_anchors:
             continue
         combined = list(bg_anchors) + list(fg_anchors)
@@ -264,3 +331,36 @@ def spectral_init_beta(docs, partition, V: int) -> np.ndarray:
         beta[fg_idx[:n_fg]] = fg_beta[:n_fg]
 
     return beta
+
+
+def split_domains(beta, domain_bounds):
+    """Split a joint K×V β into per-domain row-renormalized bases.
+
+    Under the shared-topic multi-domain model a token drawn in domain 0 and a
+    token drawn in domain 1 from one document share the same θ, so the joint
+    co-occurrence factors as Q_01 = (B_0)ᵀ A (B_1) (spec) and ONE anchor defines
+    the topic across both domains. After recover_beta returns the joint β over
+    the concatenated vocab, slicing each topic row at the domain boundaries and
+    renormalizing each slice to sum 1 gives the per-domain P(word | topic)
+    matrices — the MixEHR-style bases (β^0, β^1) that share topic identity
+    (Halpern, Horng, Choi, Sontag, JAMIA 2016, anchor-and-learn corroboration).
+
+    domain_bounds: strictly-increasing cumulative offsets [0, ..., V], validated
+    against β's own column count (`domains.validate_domain_bounds`) -- bounds
+    ending short of V used to silently DROP the uncovered trailing columns from
+    the returned blocks. Returns a list of (K, V_d) row-stochastic matrices in
+    domain order. A topic that never expresses a domain (all-zero slice) falls
+    back to a uniform row there so each returned matrix stays a valid stochastic
+    matrix.
+    """
+    domain_bounds = validate_domain_bounds(domain_bounds, np.shape(beta)[1])
+    out = []
+    for lo, hi in zip(domain_bounds[:-1], domain_bounds[1:]):
+        sub = beta[:, lo:hi].copy()
+        rs = sub.sum(axis=1, keepdims=True)
+        zero = (rs[:, 0] <= 0)
+        if zero.any():
+            sub[zero] = 1.0 / (hi - lo)
+            rs[zero, 0] = 1.0
+        out.append(sub / rs)
+    return out
