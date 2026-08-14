@@ -814,6 +814,17 @@ def main() -> int:
                 # unsupervised twin? (The metric the clinician workflow cares about.)
                 results["unsup_gated_conditional"] = _conditional(
                     proba_us, y_te, m_te, "unsup_gated")
+                # Per-node domain mass on the UNSUPERVISED λ too, so the A/B tells us
+                # whether the hierarchy-aligned specialization is a PC effect or a
+                # property of the gated multi-domain representation itself (0078).
+                us_lam = us_model.result.global_params["lambda"]
+                if extra_domains and isinstance(us_lam, dict):
+                    us_mass = per_node_domain_mass(us_lam, lay, args._domain_names)
+                    print(format_per_node_domain_mass(
+                        us_mass, args._domain_names, bundle.int2cid,
+                        bundle.name_by_id).replace(
+                            "[per-node domain λ-mass]",
+                            "[per-node domain λ-mass: unsup_gated]"), flush=True)
 
         if args.with_dag_head:
             with _phase(f"dag_head fit (ungated + DAG-closure head, K={args.k})"):
