@@ -106,4 +106,39 @@ cd ~/repos/CHARMPheno && \
 
 ## Run log
 
-_(pending first run)_
+### Run 1 (41 anchors, 3 domains, full mask, 100 iters) — calibration good at scale (VOI unblocked); clinically-coherent 3-domain specialization; conditional mixed-but-real
+
+K=101 (8 bg + ~93 nodes), 55 scored nodes, prev 0.101. Head bounded (|w|~20,
+head_l2=0.01). Fit ~113 min (heavy; NO_EVAL would help).
+
+- **CALIBRATION IS GOOD AT SCALE — the key win.** conditional ECE raw 0.0408 →
+  calibrated 0.0404 (~unchanged, already well-calibrated). rare6's ~0.11 was a
+  small-data artifact; with more nodes/docs and prev 0.10, the conditional
+  posteriors are calibrated out of the box. **VOI is unblocked on trustworthy
+  posteriors** — the last gate cleared.
+- **3-domain specialization is clinically coherent (the validation).** The drug
+  column lit up on TREATMENT-defined diseases: **Temporal arteritis drug 0.51**
+  (steroid-defined giant-cell arteritis), **Myasthenia gravis drug 0.46**
+  (pyridostigmine/immunosuppressants). Measurement-heavy = lab/imaging-diagnosed
+  (SLE 0.55 serology, hypertrophic obstructive CM 0.50 echo); condition-heavy =
+  code-defined (pulmonary sarcoid 0.85, HCM 0.89, aortic aneurysm 0.85). The model
+  put each disease on the domain that diagnoses it, across 41 diseases, mostly
+  UNSUPERVISED (same pattern in the unsup arm — representation property).
+- **Conditional subtyping — mixed but real where powered; the readout separates
+  them.** Real: Sarcoidosis bal_acc 0.61, Amyloidosis 0.62, Congenital heart
+  disease 7-way top1 0.57 vs majority 0.38. Majority-only (flagged): SLE bal_acc
+  0.50, thoracic aneurysm (top1 < majority). Which-of-29-broad-diseases top1 0.31
+  vs majority 0.18 (beats baseline, concentrated).
+- **Mask dichotomy reconfirmed at scale:** full mask → supervision helps DETECTION
+  (Δ+0.0193 AP) but HURTS conditional (cond AP Δ−0.0133, cond AUC Δ−0.0104). Same
+  as rare6 0078. Two-stage (full detect × closure sharpen) remains the clean design.
+- Detection AP 0.249 (prev 0.10) — partly the higher prevalence with 41 anchors;
+  AUC 0.72 is the fair (prevalence-independent) read, in line with rare6.
+- Many rare nodes sit at the prior (0.431/0.431/0.138, no data → background
+  balance) — expected at 41 anchors; the signal is in the well-powered nodes.
+
+**Read:** the working thread scales. Calibration — the one open gap — resolves
+FAVORABLY at scale (VOI-ready), and the 3-domain per-node specialization is
+clinically legible across a big, noisy disease set. Clear next build: **VOI**
+(next-best-test ranking off the β via log β_A(v)/β_B(v) + expected info gain), now
+fully unblocked.
