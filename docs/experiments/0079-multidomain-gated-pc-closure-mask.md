@@ -122,6 +122,32 @@ distant nodes), a cleaner/easier contrast. Honest within-parent discrimination i
 still ~0.62; closure just pointed the metric at an easier slice. **Do not headline
 "closure lifted AUC to 0.75."**
 
+### Run 2 (closure, head_penalty=none, + honest/mask-independent readout + calibration)
+
+Re-ran with the trustworthy readout (cond_AUC headline, mask-independent eval,
+majority baselines, isotonic calibration). This is the consolidated conditional-
+diagnosis read.
+
+- **Conditional sharpening — supervision helps** (gated_pc vs unsup_gated):
+  cond AP 0.3295 vs 0.3226 (Δ+0.0068), cond AUC 0.7017 vs 0.6995 (Δ+0.0023),
+  top1 0.7973 vs 0.7895 (Δ+0.0077). Closure-objective alignment holds.
+- **Real subtyping where the signal exists** (beats majority WITH balanced acc):
+  root→broad-disease cond_AUC 0.76; **Sarcoidosis→subtype top1 0.837 / majority
+  0.765 / bal_acc 0.68**; **Amyloidosis 0.813 / 0.773 / bal_acc 0.61**. Genuine
+  discrimination, not majority artifacts.
+- **Honest readout correctly flags the non-signal:** SLE→subtype top1 1.000 but
+  majority 1.000, **bal_acc 0.500** — trivial (one child dominates), no real
+  subtyping. The baseline columns caught it.
+- **Clinical sanity check:** MG leans measurement-heavy (0.42/0.58) — MG is
+  antibody-lab-diagnosed (AChR/MuSK). The representation put the lab-diagnosed
+  disease on the lab domain, and it shows in the unsup arm too (representation
+  property).
+- **Calibration NOT yet trustworthy:** conditional ECE raw 0.1145 →
+  isotonic-calibrated 0.1214 (WORSE). The isotonic was fit on IN-SAMPLE train
+  predictions (overconfident) — a known-shortcut bug. Raw ECE ≈ 0.11 (moderate)
+  is the real number; a held-out calibration split is the fix, and it's the last
+  gate before VOI. (Detection dead at 0.034 = chance — expected under closure.)
+
 **Side confirmation.** The unsup λ-mass table (now printed) shows the anchors
 condition-heavy in the UNSUPERVISED arm too (Amyloidosis 0.87, Sarcoidosis 0.80,
 Cardiac sarcoid 0.94) — the hierarchy-aligned specialization is a property of the
