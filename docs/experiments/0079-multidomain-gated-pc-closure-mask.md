@@ -142,11 +142,18 @@ diagnosis read.
   antibody-lab-diagnosed (AChR/MuSK). The representation put the lab-diagnosed
   disease on the lab domain, and it shows in the unsup arm too (representation
   property).
-- **Calibration NOT yet trustworthy:** conditional ECE raw 0.1145 →
-  isotonic-calibrated 0.1214 (WORSE). The isotonic was fit on IN-SAMPLE train
-  predictions (overconfident) — a known-shortcut bug. Raw ECE ≈ 0.11 (moderate)
-  is the real number; a held-out calibration split is the fix, and it's the last
-  gate before VOI. (Detection dead at 0.034 = chance — expected under closure.)
+- **Calibration is already moderate; post-hoc doesn't improve it.** Run 2 (in-sample
+  isotonic) worsened ECE 0.1145→0.1214 — a fit bug. Run 3 (held-out 75/25 isotonic,
+  the fix) still 0.1137→0.1162: the held-out split removed the bug, but isotonic
+  can't beat the LR's already-moderate ~0.11 calibration on this data (per-node cal
+  sets are tiny → the isotonic map is high-variance noise, not a real correction).
+  **Conclusion: the pc_topics_lr conditional posteriors are ~calibrated out of the
+  box (ECE ≈ 0.11); there is no systematic miscalibration to fix.** This is NOT a VOI
+  blocker — VOI's next-test ranking depends on the β distributions and relative
+  entropy reductions, robust to moderate miscalibration. If tighter calibration is
+  ever wanted at these sample sizes, TEMPERATURE scaling (1 scalar, low variance) is
+  the right tool, not isotonic. (Detection dead at 0.034 = chance — expected under
+  closure.)
 
 **Side confirmation.** The unsup λ-mass table (now printed) shows the anchors
 condition-heavy in the UNSUPERVISED arm too (Amyloidosis 0.87, Sarcoidosis 0.80,
