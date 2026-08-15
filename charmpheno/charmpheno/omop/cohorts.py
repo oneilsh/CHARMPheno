@@ -147,6 +147,24 @@ _RARE6_ANCESTORS: tuple[int, ...] = (
     _SCLERODERMA_ANCESTOR, _MYASTHENIA_GRAVIS_ANCESTOR, _AMYLOIDOSIS_ANCESTOR,
 )
 
+# Expanded rare-disease anchor set: the six rare6 anchors (pinned) + 35 prioritised
+# rare diseases from the Monarch dismech #1079 list, mapped MONDO->OMOP and kept by
+# the objective count-band (floor 50 / ceiling 10000) + ontology-nesting criteria
+# (ADR 0039 on the hybrid branch; run in hybrid insight 0076). Concept-ids, not
+# names, are authoritative — frozen here as the committed output of the
+# analysis/cloud/anchor_selection pipeline (that pipeline, which scales toward the
+# full ~1000-disease dismech list, is a separable later pull; this tuple is enough
+# to fit on the expanded set now). VERIFY ON FIRST RUN as with rare6 (each id
+# should have a non-empty concept_ancestor descendant set on the CDR).
+_RARE_PRIORITY_ANCESTORS: tuple[int, ...] = (
+    76685, 79145, 438688, 257628, 40352976, 432595,          # rare6 (pinned)
+    312723, 374919, 443622, 314664, 312902, 4124693, 4134862, 4302954,
+    4290976, 4159659, 381009, 4164770, 313223, 373182, 435242, 258540,
+    4326751, 380995, 313504, 4043378, 436642, 4037495, 4045749, 134380,
+    4318558, 4196433, 378774, 4316372, 606328, 440740, 312939, 312383,
+    44782560, 46273631, 374341,
+)
+
 # Major depressive disorder for the Hughes antidepressant-response replication
 # (Phase C). Inclusion is the SNOMED "Major depressive disorder" hierarchy;
 # bipolar disorder and schizoaffective disorder are EXCLUDED so the treated
@@ -191,6 +209,10 @@ _DISEASE_REGISTRY: dict[str, dict] = {
     },
     "rare6": {
         "inclusion_ancestors": _RARE6_ANCESTORS,
+        "exclusion_ancestors": (),
+    },
+    "rare_priority": {
+        "inclusion_ancestors": _RARE_PRIORITY_ANCESTORS,
         "exclusion_ancestors": (),
     },
     "mdd": {
@@ -327,6 +349,7 @@ SUPPORTED_COHORTS: tuple[str, ...] = (
     "population_cancer_sparse",
     "population_eds",
     "population_rare6",
+    "population_rare_priority",
     "population_sparse",
     "population_glp1",
     "mdd_antidepressant",
@@ -463,6 +486,20 @@ COHORT_METADATA: dict[str, dict[str, str]] = {
             "gated placement model can both find cases against the background and "
             "route each to the right disease subtree — the rare-disease "
             "case-finding thesis in practice."
+        ),
+    },
+    "population_rare_priority": {
+        "id": "population_rare_priority",
+        "label": "Population + Expanded rare-disease priority set (gated)",
+        "description": (
+            "The whole population as a shared clean background, with an EXPANDED "
+            "rare-disease foreground: the six rare6 anchors plus 35 prioritised "
+            "Monarch dismech rare diseases (41 anchors total; _RARE_PRIORITY_ANCESTORS, "
+            "ADR 0039 count-band + ontology selection). Same disjoint one-doc-per-person "
+            "framing as population_rare6 (first dx under ANY anchor -> its subtree + "
+            "source_cohort='rare_priority'; everyone else background-only). The larger, "
+            "ontologically-related forest gives the conditional-diagnosis (P(child|parent)) "
+            "task far more depth and confusable-sibling structure than rare6."
         ),
     },
     "population_sparse": {
@@ -612,6 +649,12 @@ def apply_cohort(
     if cohort == "population_rare6":
         return apply_population_disease_cohort(
             cond_df, disease="rare6", spark=spark, cdr_dataset=cdr_dataset,
+            billing_project=billing_project, date_col=date_col,
+            prior_obs_days=prior_obs_days,
+        )
+    if cohort == "population_rare_priority":
+        return apply_population_disease_cohort(
+            cond_df, disease="rare_priority", spark=spark, cdr_dataset=cdr_dataset,
             billing_project=billing_project, date_col=date_col,
             prior_obs_days=prior_obs_days,
         )

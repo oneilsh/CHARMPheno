@@ -1,0 +1,9 @@
+# Expanded rare-disease-priority case-finding cohort defaults. The corpus identity
+# comes from `disease` (rare_priority) — the 41-anchor foreground union (6 rare6 +
+# 35 Monarch dismech, cohorts._RARE_PRIORITY_ANCESTORS) + whole-population
+# background, hard-wired via cohorts.disease_anchors inside the corpus assembly.
+# This file exists so load_defaults finds a <cohort>.yaml to merge over _base.yaml
+# (--cohort is vestigial for this model, as with the other gated cohorts; `disease`
+# is the real knob).
+cohort: population_rare_priority
+cohort_def: population_rare_priority
