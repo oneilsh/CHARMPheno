@@ -1,0 +1,122 @@
+---
+id: 90
+slug: mondo-cardiovascular-templatebranch
+status: pending
+model_class: gated_pc
+cohort: population_mondo_cardiovascular
+cohort_def: population_mondo_cardiovascular
+disease: rare_priority
+# STEP A of the whole-Mondo fit (plan 2026-08-17): the FIRST fit whose label DAG
+# is the Mondo powered hierarchy (exp 0088) instead of the SNOMED concept_ancestor
+# anchor forest. Restricted to ONE body-system branch — cardiovascular disorder
+# (MONDO:0004995) — so it validates the NEW machinery (Mondo engine DAG, SNOMED-
+# climb per-patient frontier, population index, localized head) at real-but-bounded
+# scale (K~few-hundred, the range we run comfortably) BEFORE the whole K~3,800 run.
+dag_source: mondo
+mondo_branch: MONDO:0004995
+min_positives: 100
+mondo_version: 2026-06-02
+mondo_cache_dir: data/mondo
+# Population index (all-comers, random event-anchored window) + SNOMED-climb
+# attestation: a patient's cardiovascular Mondo frontier = their condition codes
+# rolled up to mapped cardiovascular anchors. closure mask = conditional/sharpening
+# readout (compare to 0089's within-branch conditional AUC). localized head (0089).
+extra_domains: measurement,drug
+label_mask_mode: closure
+localize_head: true
+# --- everything else identical to 0089/0085 ---
+person_mod: 1
+prior_obs_days: 0
+doc_min_length: 10
+min_n: 20
+holdout_frac: 0.2
+vocab_size: 5000
+min_df: 20
+min_patient_count: 20
+window_mode: lookback
+lookback_days: 1825
+label_window_days: 365
+strip_mode: both
+n_bg: 8
+tpn: 1
+optimize_doc_concentration: true
+weight_y: 50.0
+head_optimizer: newton
+head_lr: 0.3
+head_newton_ridge: 0.05
+head_l2: 0.01
+grad_cavi_iters: 30
+topic_trust: 0.05
+weight_y_warmup_iters: 25
+max_iter: 100
+subsampling_rate: 0.1
+tau0: 64.0
+kappa: 0.51
+cavi_max_iter: 100
+cavi_tol: 0.001
+skip_unsup_gated: false
+with_dag_head: false
+baseline_max_iter: 100
+min_label_count: 20
+eval_every: 0
+num_partitions: 96
+seed: 42
+cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
+---
+
+# 0090 — Mondo cardiovascular template branch (Step A of the whole-Mondo fit)
+
+The first fit off the **Mondo** backbone. Everything about the model is 0089
+(multi-domain gated-PC, closure mask, localized head, ridge-only); the ONE change
+is the label DAG's *source*: instead of the disease's SNOMED `concept_ancestor`
+anchor forest, the DAG is the **Mondo powered hierarchy** (exp 0088) restricted to
+the cardiovascular-disorder branch (`MONDO:0004995`), and patients are placed on it
+by **SNOMED-climb** (their condition codes rolled up to mapped Mondo anchors) over a
+**population index** (all-comers, no single disease anchoring the window).
+
+This is the go/no-go that the *new plumbing* works end to end at real scale before
+the whole K≈3,800 run (Step B): the Mondo engine DAG (`mondo_dag.build_mondo_engine_dag`),
+the per-patient frontier (`make_mondo_attested_provider`), the population index
+(`case_finding_population_index_table`), and the `before_dag`/`attested_provider`
+seams into the multi-domain assembler — all reusing 0089's split/prune/ledger/
+frontier/BOW/strip/labels + localized head verbatim.
+
+## What to read
+
+- **`[mondo]` line** — powered terminals + class nodes in the cardiovascular branch
+  (the realized DAG size); **`[cost]`** — K, fan-out, localized-vs-dense head
+  matrix memory/compute (watch high-fan-out parents; this is the whole-Mondo
+  risk surfaced at bounded scale).
+- **ledger** — coarsening rate + test coverage: does the climb place a sensible
+  fraction of patients on cardiovascular nodes (sanity vs exp 0087's population
+  reach)?
+- **conditional readout (per-node reliability)** — cond AUC by depth + mean/max
+  ECE, the SAME readout as 0089. Within-branch discrimination is where 0089's
+  localized head matched dense EXACTLY (depths 1/2), so the Mondo tree (which has
+  real depth: cardiovascular → subtypes) should localize *at least* as well as the
+  flat 41-anchor worst case.
+- **|w_CK|max** — bounded (ridge unchanged); 0089 saw a transient excursion to
+  ~500, watch it (bump `head_l2` if it diverges).
+
+## Why cardiovascular
+
+Big, adult-powered, clinically legible, and a genuinely DEEP subtree (cardiovascular
+disorder → heart disease / vascular disease → specific entities), so it exercises
+the within-branch conditional structure the whole-Mondo fit relies on — unlike the
+flat root→41 layout of 0089. `min_positives=100` (exp 0088's floor) keeps K bounded;
+raise it to shrink K, lower it to densify the tree.
+
+## Run
+
+```bash
+cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp && \
+  CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=90
+```
+
+Paste the `[mondo]` + `[cost]` lines, the ledger, and the two conditional-readout
+blocks (incl. per-node reliability) so we can put Mondo-DAG placement side by side
+with 0089's SNOMED-anchor placement before scaling to the whole tree.
+
+## Run log
+
+_(pending first run)_

@@ -158,6 +158,33 @@ def test_mondo_hierarchy_route(monkeypatch):
     assert args[args.index("--tpn") + 1] == "1"
 
 
+def test_mondo_dag_source_flags_thread(monkeypatch):
+    """dag_source=mondo + mondo_branch/min_positives frontmatter -> the mondo CLI
+    flags -> the driver parses them (the whole-Mondo / template-branch fit path)."""
+    mod = _run_exp(monkeypatch)
+    eff = {**_base_eff(), "dag_source": "mondo",
+           "mondo_branch": "MONDO:0004995", "min_positives": 100,
+           "extra_domains": "measurement,drug", "window_mode": "lookback",
+           "label_mask_mode": "closure", "localize_head": True}
+    args = mod.build_gated_pc_args(eff, "/out")
+    assert args[args.index("--dag-source") + 1] == "mondo"
+    assert args[args.index("--mondo-branch") + 1] == "MONDO:0004995"
+    assert args[args.index("--min-positives") + 1] == "100"
+
+    # defaults omit the mondo flags (SNOMED path unchanged).
+    base = mod.build_gated_pc_args(_base_eff(), "/out")
+    assert "--dag-source" not in base and "--mondo-branch" not in base
+
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import gated_pc_cloud
+    parsed = gated_pc_cloud.parse_args(args)
+    assert parsed.dag_source == "mondo"
+    assert parsed.mondo_branch == "MONDO:0004995"
+    assert parsed.min_positives == 100
+
+
 def test_localize_head_flag_threads(monkeypatch):
     """localize_head frontmatter -> --localize-head -> driver parses it -> the shim
     estimator carries localizeHead=True."""

@@ -827,6 +827,16 @@ def build_gated_pc_args(
         args.append("--with-dag-head")
     if effective.get("localize_head"):
         args.append("--localize-head")
+    if effective.get("dag_source"):
+        args.extend(["--dag-source", str(effective["dag_source"])])
+    if effective.get("mondo_branch"):
+        args.extend(["--mondo-branch", str(effective["mondo_branch"])])
+    if effective.get("min_positives") is not None:
+        args.extend(["--min-positives", str(effective["min_positives"])])
+    if effective.get("mondo_version"):
+        args.extend(["--mondo-version", str(effective["mondo_version"])])
+    if effective.get("mondo_cache_dir"):
+        args.extend(["--mondo-cache-dir", str(effective["mondo_cache_dir"])])
     return args
 
 

@@ -1731,6 +1731,33 @@ def case_finding_index_table(cond_df, *, disease, spark, cdr_dataset,
     return fg.unionByName(bg)
 
 
+def case_finding_population_index_table(cond_df, *, spark, cdr_dataset,
+                                        billing_project, date_col, prior_obs_days=365,
+                                        label_window_days=_WINDOW_DAYS,
+                                        source_cohort="population"):
+    """(person_id, index_date, source_cohort) for the WHOLE sampled population.
+
+    The all-comers index: every patient on a deterministic random event-anchored
+    observed window — the BACKGROUND arm of :func:`case_finding_index_table`
+    applied to everyone, with no disease foreground. Used by the whole-Mondo /
+    template-branch case-finding fit, where the label DAG is the Mondo hierarchy
+    and a patient's frontier is read from their label window via SNOMED-climb
+    (`mondo_dag`), so there is no single disease anchoring the index. The same
+    ``[index - prior_obs_days, index + label_window_days)`` observation gate as the
+    disease arms applies (via `_random_event_windows`), and events are windowed
+    downstream by `lookback_feature_label_events`. Every row is tagged
+    ``source_cohort`` (default ``'population'``)."""
+    op = (spark.read.format("bigquery")
+          .option("table", f"{cdr_dataset}.observation_period")
+          .option("parentProject", billing_project).load()
+          .select("person_id", "observation_period_start_date",
+                  "observation_period_end_date"))
+    return (_random_event_windows(cond_df, op, date_col=date_col,
+                                  window_days=label_window_days,
+                                  prior_obs_days=prior_obs_days)
+            .withColumn("source_cohort", F.lit(source_cohort)))
+
+
 # --- Antidepressant initiation index + >=90-day stability outcome (Phase C) ---
 # The Hughes "antidepressant PC replication" core, decision-independent: a
 # per-drug incident-new-user index over a 15-drug antidepressant set restricted

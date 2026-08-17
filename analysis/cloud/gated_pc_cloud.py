@@ -694,6 +694,20 @@ def parse_args(argv=None):
                    help="LOCALIZED head: each node's logistic reads only its topic "
                         "support (gated block + ancestors), not all K — the whole-Mondo "
                         "scale fix (insight 0071). Only affects newton head.")
+    p.add_argument("--dag-source", choices=["snomed", "mondo"], default="snomed",
+                   help="snomed (default): the disease's SNOMED anchor forest via "
+                        "concept_ancestor. mondo: the whole-Mondo powered hierarchy "
+                        "(exp 0088) with a POPULATION index + SNOMED-climb attestation "
+                        "(routes through the multi-domain assembler).")
+    p.add_argument("--mondo-branch", default="",
+                   help="mondo: restrict to one body-system Mondo subtree (e.g. "
+                        "MONDO:0004995 = cardiovascular disorder) — the Step-A template. "
+                        "'' = whole Mondo.")
+    p.add_argument("--min-positives", type=int, default=100,
+                   help="mondo: keep anchors with >= this many whole-pop patients "
+                        "(the K dial; exp 0088 used 100).")
+    p.add_argument("--mondo-version", default="2026-06-02")
+    p.add_argument("--mondo-cache-dir", default="data/mondo")
     p.add_argument("--k", type=int, default=50,
                    help="K for the UNGATED --with-dag-head arm only; the gated arms "
                         "derive K from the layout (n_bg + nodes*tpn).")
@@ -768,7 +782,49 @@ def main() -> int:
     configure_logging()
     extra_domains = tuple(d for d in args.extra_domains.split(",") if d)
     with make_spark_session(app_name="gated-pc-fit") as spark:
-        if extra_domains:
+        if args.dag_source == "mondo":
+            # WHOLE-MONDO / template-branch: the label DAG is the Mondo powered
+            # hierarchy (exp 0088), patients are placed by SNOMED-climb, and the
+            # index is population-wide (no single disease). Routes through the
+            # multi-domain assembler via its before_dag / attested_provider seams;
+            # min_n=0 because the Mondo DAG is already powered.
+            from mondo_dag import build_mondo_fit_inputs, make_mondo_attested_provider
+            from charmpheno.omop.multi_domain import (
+                assemble_multidomain_case_finding_corpus)
+            from charmpheno.omop.doc_spec import PatientCohortDocSpec
+            if args.window_mode != "lookback":
+                raise ValueError("--dag-source mondo requires --window-mode lookback")
+            with _phase(f"build Mondo DAG + climb (branch={args.mondo_branch or 'ALL'})"):
+                before_dag, climb_sdf, terminal_cids, count_of, reduced = (
+                    build_mondo_fit_inputs(
+                        spark, cdr=args.cdr, billing=args.billing,
+                        mondo_version=args.mondo_version,
+                        mondo_cache_dir=args.mondo_cache_dir,
+                        min_positives=args.min_positives,
+                        branch_root=(args.mondo_branch or None)))
+                provider = make_mondo_attested_provider(
+                    climb_sdf, doc_spec=PatientCohortDocSpec())
+                print(f"[mondo]   powered terminals={len(terminal_cids)}, "
+                      f"class nodes={reduced['n_classes']}, "
+                      f"branch={args.mondo_branch or 'ALL'}", flush=True)
+            with _phase(f"assemble MONDO corpus (cond + {list(extra_domains)})"):
+                bundle = assemble_multidomain_case_finding_corpus(
+                    spark, disease=args.disease, cdr=args.cdr, billing=args.billing,
+                    extra_domains=extra_domains, person_mod=args.person_mod,
+                    min_n=0, holdout_frac=args.holdout_frac,
+                    vocab_size=args.vocab_size, min_df=args.min_df,
+                    min_patient_count=args.min_patient_count, n_bg=args.n_bg,
+                    tpn=args.tpn, doc_min_length=args.doc_min_length,
+                    strip_mode=args.strip_mode, lookback_days=args.lookback_days,
+                    label_window_days=args.label_window_days,
+                    emit_labels=True, label_mask_mode=args.label_mask_mode,
+                    before_dag=before_dag, attested_provider=provider,
+                    index_mode="population")
+                vocab_maps = bundle.vocab_maps
+                args._domain_cols = [f"features_{i}" for i in range(len(vocab_maps))]
+                args._domain_names = ["condition", *extra_domains]
+            print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
+        elif extra_domains:
             # MULTI-DOMAIN corpus (conditions + extra domains, per-domain vocab).
             # Built fresh (no cache) — a one-off comparison run; the cache key +
             # per-domain save is future. Requires lookback windowing.
