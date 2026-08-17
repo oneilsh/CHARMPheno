@@ -270,10 +270,10 @@ def validate_frontmatter(fm: dict) -> None:
 
     model_class = fm["model_class"]
     if model_class not in ("lda", "stm", "dag_placement", "pc", "gated_pc",
-                           "anchor_select"):
+                           "anchor_select", "mondo_completeness"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
-              f"(currently: lda, stm, dag_placement, pc, gated_pc, anchor_select; "
-              f"hdp planned)", flush=True)
+              f"(currently: lda, stm, dag_placement, pc, gated_pc, anchor_select, "
+              f"mondo_completeness; hdp planned)", flush=True)
         sys.exit(2)
 
     if model_class == "stm":
@@ -301,6 +301,8 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/gated_pc_cloud.py"
     if model_class == "anchor_select":
         return f"{base}/anchor_selection_cloud.py"
+    if model_class == "mondo_completeness":
+        return f"{base}/mondo_completeness_cloud.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
@@ -326,7 +328,23 @@ def build_fit_args(
         return build_gated_pc_args(effective, out_dir, resume_from)
     if model_class == "anchor_select":
         return build_anchor_select_args(effective, out_dir)
+    if model_class == "mondo_completeness":
+        return build_mondo_completeness_args(effective, out_dir)
     raise ValueError(f"unknown model_class: {model_class!r}")
+
+
+def build_mondo_completeness_args(effective: dict, out_dir: str) -> list[str]:
+    """argv for analysis/cloud/mondo_completeness_cloud.py — whole-Mondo mapping
+    completeness + unplaced-condition diagnostic (small-cell suppressed)."""
+    cdr, billing = _require_workspace_env()
+    return [
+        "--cdr", cdr,
+        "--billing", billing,
+        "--out", str(out_dir),
+        "--mondo-version", str(effective.get("mondo_version", "2026-06-02")),
+        "--mondo-cache-dir", str(effective.get("mondo_cache_dir", "data/mondo")),
+        "--top-unplaced", str(effective.get("top_unplaced", 100)),
+    ]
 
 
 def build_anchor_select_args(effective: dict, out_dir: str) -> list[str]:
@@ -1434,7 +1452,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
     elif effective.get("model_class") in ("dag_placement", "pc", "gated_pc",
-                                          "anchor_select"):
+                                          "anchor_select", "mondo_completeness"):
         # These write their own self-contained result (dag_placement: npz +
         # manifest with placement AUC/MRR; pc: pc_results.json with per-drug
         # heldout AUC; gated_pc: npz + manifest with pc_topics_lr per arm;
@@ -1443,6 +1461,7 @@ def main(argv: list[str] | None = None) -> int:
         _mc = effective.get("model_class")
         _artifact = ("pc_results.json" if _mc == "pc"
                      else "candidates_with_counts.tsv" if _mc == "anchor_select"
+                     else "mondo_omop_mapping.tsv" if _mc == "mondo_completeness"
                      else "manifest.json")
         print(f"[run-exp] model_class={_mc}: NPMI eval not wired for the "
               f"self-contained result; skipping eval (see {_artifact} + fit log).",

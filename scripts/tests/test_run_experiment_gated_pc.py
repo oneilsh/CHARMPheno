@@ -122,3 +122,20 @@ def test_anchor_select_route(monkeypatch):
     assert args[args.index("--mondo-version") + 1] == "2026-06-02"
     assert args[args.index("--out") + 1] == "/out/candidates_with_counts.tsv"
     assert args[args.index("--seed-tsv") + 1].endswith("priority_seed.tsv")
+
+
+def test_mondo_completeness_route(monkeypatch):
+    """model_class=mondo_completeness validates, resolves to the completeness driver,
+    and builds argv (cdr/billing from env + out-dir + top-unplaced)."""
+    mod = _run_exp(monkeypatch)
+    mod.validate_frontmatter({
+        "id": 87, "slug": "mondo-completeness",
+        "cohort": "population_rare_priority", "model_class": "mondo_completeness"})
+    assert mod.build_fit_driver_path({"model_class": "mondo_completeness"}) \
+        == "analysis/cloud/mondo_completeness_cloud.py"
+    args = mod.build_fit_args(
+        {"model_class": "mondo_completeness", "top_unplaced": 100}, "/out")
+    assert args[args.index("--cdr") + 1] == "proj.ds"
+    assert args[args.index("--billing") + 1] == "bill"
+    assert args[args.index("--out") + 1] == "/out"
+    assert args[args.index("--top-unplaced") + 1] == "100"
