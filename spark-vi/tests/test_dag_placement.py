@@ -811,3 +811,29 @@ def test_allowed_with_siblings_adds_sibling_blocks():
     for v in (0, 1, 2, 3):
         assert set(int(k) for k in lay.allowed(v)) <= s(v)
         assert max(s(v)) < lay.K
+
+
+def test_cost_report_flags_support_and_dense_vs_localized():
+    """Pre-flight cost profile: support sizes, fan-out, and dense-vs-localized head
+    matrix costs. A deep bounded-fan-out tree localizes well (support << K); a flat
+    high-fan-out DAG does not (a node's siblings ~ K, so localized ~ dense)."""
+    from spark_vi.models.topic.dag_placement import DagLayout
+    # deep, bounded fan-out: root -> A,B ; A -> A1,A2 ; B -> B1,B2  (each node few sibs)
+    deep = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
+    lay = DagLayout(deep, n_bg=2, tpn=1)                    # K = 2 + 6 = 8
+    d, s = lay.cost_report(C=7, vocab_size=100, localized=True)
+    assert d["C"] == 7 and d["K"] == 8
+    assert d["support_max"] <= d["K"]                       # never exceeds K
+    assert d["localized_head_mem_bytes"] <= d["dense_head_mem_bytes"]
+    assert d["lambda_bytes"] == 8 * 100 * 8                 # K*V*8
+    assert "SIZE/COST PROFILE" in s and "support/node" in s
+
+    # flat high-fan-out: 6 nodes all under root -> each sees ~5 siblings ~ K.
+    flat = {c: 0 for c in range(1, 7)}
+    lay2 = DagLayout(flat, n_bg=2, tpn=1)                   # K = 8
+    d2, _ = lay2.cost_report(C=7, localized=True)
+    assert d2["fanout_max"] == 6
+    # a root child's support = bg + own + 5 siblings = 2+1+5 = 8 = K (localization
+    # gives nothing on a flat DAG — the report makes that visible).
+    assert d2["support_max"] == d2["K"]
+    assert d2["lambda_bytes"] is None                       # vocab_size omitted

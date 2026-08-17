@@ -821,6 +821,14 @@ def main() -> int:
         print(f"[driver]   corpus: V=({v_desc}) vocab, "
               f"K={lay.K} gated topics ({args.n_bg} bg + {len(lay.nodes)} nodes x "
               f"{args.tpn} tpn), C={C} label heads", flush=True)
+        # PRE-FLIGHT cost profile at the data-build boundary: fan-out / support sizes /
+        # head matrix memory+compute (dense vs localized) so a big fit's cost is visible
+        # BEFORE compute is committed (esp. the whole-Mondo run — high-fan-out parents
+        # inflate the localized support). Logged for every gated fit.
+        _v_total = sum(len(vm) for vm in vocab_maps)
+        _, _prof = lay.cost_report(C, vocab_size=_v_total,
+                                   localized=bool(getattr(args, "localize_head", False)))
+        print("\n".join("[cost] " + ln for ln in _prof.splitlines()), flush=True)
 
         # Parallelism: the cached bundle parquet has few partitions (~8 part-files),
         # and with dynamic allocation Spark sizes the executor pool to PENDING TASKS
