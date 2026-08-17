@@ -121,15 +121,40 @@ The co-fit head degraded, but **only at the wide top level**:
   `DagLayout.allowed_with_siblings(c)`. Still O(depth + local fan-out) ≪ K, so it stays
   the whole-Mondo scale fix. This is now the default when `localize_head` is on.
 
-### Run 2 (localized support = path + ancestors + siblings) — pending
+### Run 2 (localized support = path + ancestors + SIBLINGS) — the sibling fix works; localized ≈ dense; VALIDATED for whole-Mondo
 
-Same config; the shim now builds `allowed_with_siblings`. Read: does depth-0 cond AUC
-recover to the dense head's ~0.70? If yes, the localized head is validated (matches dense
-at O(depth+fanout) cost) and whole-Mondo K≈3,800 is fittable as one co-fit.
+The sibling fix recovered the depth-0 collapse. Co-fit head cond AUC by depth:
 
-```bash
-cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp && \
-  CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=89
-```
+| | run 1 (no sibs) | run 2 (+sibs) | dense 0085 |
+|---|---|---|---|
+| depth 0 (29 sibs) | 0.574 | **0.685** | 0.704 |
+| depth 1 | 0.669 | 0.670 | 0.666 |
+| depth 2 | 0.703 | 0.703 | 0.698 |
+| macro AUC | 0.628 | 0.696 | 0.709 |
+| co-fit ECE | 0.032 | 0.014 | 0.013 |
 
-_(paste the co-fit head block; compare depth-0 cond AUC to run 1's 0.57 and 0085's 0.70)_
+- **Depth-0 recovered** from near-chance (0.574) to 0.685 — the sibling contrast set is
+  exactly what a wide-fan-out node needs. Depth 1/2 match dense (they already had their
+  few siblings' signal via own-block activation).
+- **Localized+siblings ≈ dense**, within ~0.013 macro AUC. A small residual gap remains at
+  **depth 0** (0.685 vs 0.704, Δ−0.018): a top-level node's support is bg + own + its ~29
+  siblings (~38 of 101 topics), so it still can't use *distant* (non-sibling) topics as
+  contrast the way the dense head can. Depths 1/2 are dead-on.
+- **Readout LR unchanged** (0.7206 vs 0085's 0.7234; topic side untouched) — confirms the
+  gap is purely the head's restricted support, as designed.
+- **|w| excursed to ~500 mid-fit then came back** (ridge caught it) — the localized head's
+  smaller per-node problems are a touch less stable than dense; not divergent, but watch it
+  at Mondo scale (head_l2 bump if needed).
+- PC vs unsup ~neutral-to-slightly-negative (readout Δ−0.009, cond Δ−0.008) — within the
+  marginal-PC-benefit noise on this information-limited data (insight 0064); not a
+  localization effect per se.
+
+**Read — VALIDATED.** Localized+siblings recovers the run-1 collapse and matches the dense
+head within ~0.01–0.02 AUC. Since the dense head is a hard 850 GB wall at whole-Mondo
+(insight 0071), the localized head is the enabling architecture, and the residual gap is a
+small, acceptable trade. Crucially the gap is at the **flat top level** — a 41-anchor
+artifact (root→29 diseases). The real Mondo tree has DEPTH (root→~25 body systems →
+branches), so most discrimination is *within-branch* (depths 1/2), exactly where
+localization matched dense EXACTLY. Expect the Mondo fit to localize *better* than this
+worst-case flat DAG. Green light for the whole-Mondo run (with the cost-profile watch on
+high-fan-out parents).
