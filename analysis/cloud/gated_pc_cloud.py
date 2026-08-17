@@ -639,6 +639,7 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         headNewtonRidge=args.head_newton_ridge, headL2=args.head_l2,
         optimizeDocConcentration=args.optimize_doc_concentration,
         frontierCol="frontier", gateNBg=args.n_bg, gateTpn=args.tpn,
+        localizeHead=bool(getattr(args, "localize_head", False)),
     )
     # Multi-domain: feed per-domain feature columns (features_0..) so the gated
     # engine carries a per-domain lambda and the topic correction scatters per
@@ -689,6 +690,10 @@ def parse_args(argv=None):
     # gate topic-block layout (topics per node); K is emergent = n_bg + nodes*tpn.
     p.add_argument("--n-bg", type=int, default=2)
     p.add_argument("--tpn", type=int, default=1)
+    p.add_argument("--localize-head", action="store_true",
+                   help="LOCALIZED head: each node's logistic reads only its topic "
+                        "support (gated block + ancestors), not all K — the whole-Mondo "
+                        "scale fix (insight 0071). Only affects newton head.")
     p.add_argument("--k", type=int, default=50,
                    help="K for the UNGATED --with-dag-head arm only; the gated arms "
                         "derive K from the layout (n_bg + nodes*tpn).")

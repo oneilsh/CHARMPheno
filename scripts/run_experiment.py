@@ -825,6 +825,8 @@ def build_gated_pc_args(
         args.append("--skip-unsup-gated")
     if effective.get("with_dag_head"):
         args.append("--with-dag-head")
+    if effective.get("localize_head"):
+        args.append("--localize-head")
     return args
 
 
