@@ -173,17 +173,6 @@ def _per_doc_sup_nll(eb_d, w_CK, counts, s, obs, alpha_vec, K, n_iters):
 _per_doc_sup_vg = autograd.value_and_grad(_per_doc_sup_nll, argnum=(0, 1))
 
 
-# Firth head trajectory guards (cheap resurrection, task-29). _FIRTH_FLOOR is an
-# absolute conditioner floor that keeps the Fisher H invertible at full saturation
-# (Wt→0 ⇒ H_base→0) so Hinv cannot blow up; _FIRTH_TRUST caps the per-step logit
-# move so a single ill-conditioned step cannot overshoot into saturation. Together
-# with head_lr damping they bound the Newton trajectory to the finite Firth fixed
-# point WITHOUT the driver-slow slogdet-PLL line search. Neither shrinks w (not a
-# ridge) — the Firth score adjustment is the parameter-free regularizer.
-_FIRTH_FLOOR = 1e-8
-_FIRTH_TRUST = 10.0
-
-
 def _grad_topics_to_lambda(grad_eb: np.ndarray, lam: np.ndarray) -> np.ndarray:
     """Map ∂loss/∂expElogbeta (topic-PROBABILITY space) → ∂loss/∂λ (Dirichlet-COUNT
     space) via the EXACT Jacobian of ``expElogbeta = exp(ψ(λ) − ψ(Σ_v λ))``.
@@ -656,12 +645,9 @@ class OnlinePCLDA(VIModel):
         topic_trust: float = 0.1,
         weight_y_warmup_iters: int = 0,
         head_optimizer: str = "sgd",
-        head_penalty: str = "none",
         head_lr: float = 0.05,
         head_newton_ridge: float = 1e-2,
         head_l2: float = 1e-3,
-        head_inner_iters: int = 0,
-        head_sample_cap: int = 20000,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
         optimize_alpha: bool = False,
@@ -692,10 +678,6 @@ class OnlinePCLDA(VIModel):
         if head_optimizer not in ("sgd", "newton"):
             raise ValueError(
                 f"head_optimizer must be 'sgd' or 'newton', got {head_optimizer!r}"
-            )
-        if head_penalty not in ("none", "firth"):
-            raise ValueError(
-                f"head_penalty must be 'none' or 'firth', got {head_penalty!r}"
             )
         if head_lr <= 0:
             raise ValueError(f"head_lr must be > 0, got {head_lr}")
@@ -757,15 +739,6 @@ class OnlinePCLDA(VIModel):
         # a per-iteration ridge-Newton (IRLS) step that CONVERGES the logistic head on
         # the current θ — the settled head fix (ADR 0039).
         self.head_optimizer = str(head_optimizer)
-        # Head penalty. 'none' (default) = the fixed absolute L2 ridge (head_l2) on the
-        # inner-loop / one-step Newton head (byte-for-byte the shipped behavior). 'firth'
-        # = Jeffreys-prior (Firth) penalty +½·log det H_c on the inner-loop IRLS head: a
-        # PARAMETER-FREE self-regularizer that bounds |w| exactly at separation (as
-        # |w|→∞, H→0, log det H→−∞) with no head_l2 tuning. Firth adjusts the SCORE by
-        # +Σ_d oc·h_dc·(p_dc−½)·θ_d (h_dc the per-doc leverage), keeping the Fisher as the
-        # Newton curvature. Requires the FLAT head (needs per-doc leverages, Path B) and
-        # head_optimizer=='newton'; forces head_inner_iters>0 so Path B activates.
-        self.head_penalty = str(head_penalty)
         self.head_lr = float(head_lr)
         # 'newton' head: relative ridge (fraction of mean(diag(H))) that conditions the
         # per-label IRLS solve. AUC is scale-invariant to head magnitude, so this only
@@ -797,25 +770,6 @@ class OnlinePCLDA(VIModel):
         # 0.91-0.96). 0.0 disables it -> relative-ridge-only, which BLOWS UP on the
         # separable topics PC creates (|w|=3.4e11) — only set 0.0 to reproduce that.
         self.head_l2 = float(head_l2)
-        # 'newton' + FLAT head: CONVERGE the head WITHIN each SVI iteration (Hughes-style)
-        # instead of one aggregated Newton step, by collecting a bounded subsample of the
-        # per-doc label-free (theta, y, obs) design to the driver and running
-        # head_inner_iters full-Newton IRLS steps on it (weak fixed L2 = head_l2 as a
-        # per-example lambda_w, default 1e-3). 0 (default) = the aggregated one-step Newton.
-        #
-        # EMPIRICALLY REDUNDANT WITH head_l2>0: one aggregated Newton step per SVI iter,
-        # accumulated over the iterations the topics take to settle, reaches the SAME
-        # regularized fixed point this loop reaches within an iteration (verified: INNER
-        # == one-step byte-for-byte). The lever that fixes the co-fit head's runaway |w|
-        # (3.4e11) is the RIDGE TYPE — a fixed L2 (head_l2) instead of the shipped relative
-        # ridge, which vanishes on separable topics — NOT the number of head steps. Keep
-        # this at 0 unless topics never stabilize (aggressive minibatching / very few
-        # iters), where converging WITHIN an iter helps; it ships raw theta to the driver
-        # (bounded by head_sample_cap), unlike the fully-aggregatable one-step Newton
-        # (ADR 0039). It does NOT close the topics-quality gap to the full-batch joint
-        # L-BFGS reference — that gap is online/alternating vs joint optimization.
-        self.head_inner_iters = int(head_inner_iters)
-        self.head_sample_cap = int(head_sample_cap)
         # Driver-side global-step counter, used only for weight_y warmup. Bumped
         # once per update_global call (the runner drives that single-threaded on
         # the driver), so it is a faithful iteration index without threading t
@@ -830,28 +784,6 @@ class OnlinePCLDA(VIModel):
             raise ValueError(
                 f"head has C={head_C} but the model has C={self.C}; the head's "
                 "label count must match the number of outcome heads")
-        # Firth requires the driver-side inner-loop IRLS path (Path B): it needs the
-        # per-doc leverages h_dc, which only that path has (the aggregated one-step
-        # Newton keeps corpus-sums only). So Firth demands the FLAT head (a
-        # DagClosureHead exposes a _closure_matrix and has no flat per-doc leverage
-        # design) and head_optimizer=='newton'.
-        if self.head_penalty == "firth":
-            if getattr(self._head, "_closure_matrix", None) is not None:
-                raise ValueError(
-                    "head_penalty='firth' requires the FLAT logistic head "
-                    "(FlatLogisticHead); it is unsupported for a DagClosureHead "
-                    "(the Firth score adjustment needs per-doc logistic leverages, "
-                    "which the closure head's per-node block Fisher does not expose)")
-            if self.head_optimizer != "newton":
-                raise ValueError(
-                    "head_penalty='firth' requires head_optimizer='newton' (the "
-                    "driver-side inner-loop IRLS path that carries per-doc leverages); "
-                    f"got head_optimizer={self.head_optimizer!r}")
-            if self.head_inner_iters == 0:
-                # Firth lives in Path B (the per-doc inner-loop IRLS). Activate it with
-                # a sensible default step budget so the Jeffreys penalty is actually
-                # applied rather than silently falling through to the one-step Newton.
-                self.head_inner_iters = 25
 
     # Convenience passthroughs so callers/tests can read the LDA hypers off the
     # PC model without reaching into the delegate.
@@ -969,25 +901,7 @@ class OnlinePCLDA(VIModel):
                 expElogbeta, w_CK, rows, alpha_vec, self.K, self.grad_cavi_iters)
             if hess is not None:
                 stats["head_hess_stat"] = hess
-        # Inner-loop head fit (flat head only): collect a bounded subsample of this
-        # partition's label-free head design (theta, sign(y), obs) so update_global can
-        # CONVERGE the head on the driver. Only the observed cells matter; theta is the
-        # same K-dim label-free CAVI mean the head predicts with.
-        if (self.head_inner_iters > 0 and self.head_optimizer == "newton"
-                and getattr(self._head, "_closure_matrix", None) is None):
-            sample = rows[: self.head_sample_cap]
-            if sample:
-                th = np.array([_cavi_theta_anp(
-                    expElogbeta[:, d.indices], np.asarray(d.counts, np.float64),
-                    alpha_vec, self.K, self.grad_cavi_iters) for d in sample])
-                stats["head_theta"] = th
-                stats["head_s"] = np.array(
-                    [np.sign(np.asarray(d.y, np.float64) - 0.01) for d in sample])
-                stats["head_obs"] = np.array(
-                    [np.asarray(d.label_mask, np.float64) for d in sample])
         return stats
-
-    _HEAD_DESIGN = ("head_theta", "head_s", "head_obs")
 
     def update_global(
         self,
@@ -1118,117 +1032,6 @@ class OnlinePCLDA(VIModel):
         #              needs no raw θ on the driver. This also feeds the topic correction
         #              a VALID head signal each iter (the correction's ∂loss_y/∂θ flows
         #              through w_CK).
-        if self.head_inner_iters > 0 and "head_theta" in target_stats:
-            # INNER-LOOP head fit (flat head): converge w_CK to the weakly-L2-regularized
-            # logistic MLE on the collected label-free design (theta, y, obs) each SVI
-            # iteration. Full undamped Newton with a FIXED per-example L2 (head_l2 as
-            # lambda_w, default 1e-3) keeps w finite on separable topics.
-            #
-            # EMPIRICAL NOTE (do not expect this to beat the one-step head): with the SAME
-            # fixed L2, the aggregated one-step ridge-Newton below ALSO converges — one
-            # Newton step per SVI iteration accumulates, over the ~60 iterations the topics
-            # take to settle, to the identical regularized fixed point (verified: INNER
-            # k=10 == one-step, byte-for-byte, |w|=4.76 vs the relative ridge's 3.4e11
-            # blowup; and on a frozen design 1-step×60 lands at ‖·‖=0 from a 60-step inner
-            # loop). So this loop is REDUNDANT with head_l2>0 — it converges the head
-            # WITHIN an iteration rather than ACROSS iterations, reaching the same place.
-            # Its residual value: it converges the head even when topics never stabilize
-            # (aggressive minibatching / few iters), and it makes the fixed-L2 convergence
-            # explicit rather than emergent. The lever that actually matters for the head
-            # is the RIDGE MAGNITUDE (head_l2 as an ABSOLUTE ridge = Hughes's lambda_w),
-            # NOT step count and NOT joint-vs-alternating: a reference block-ALTERNATING
-            # fit reaches topics-LR 0.874 (== its joint 0.862), so alternation is not the
-            # gap. The earlier collapse (topics-LR 0.53) was head_l2 mis-scaled by n_docs
-            # (~840x too strong); at the corrected absolute head_l2~1e-3 the online head
-            # shapes to topics-LR ~0.93 with |w| finite. See ADR 0040 / insight 0067.
-            Th = np.asarray(target_stats["head_theta"], dtype=np.float64)     # (n, K)
-            Yb = (np.asarray(target_stats["head_s"], dtype=np.float64) + 1.0) / 2.0  # (n, C)
-            Ob = np.asarray(target_stats["head_obs"], dtype=np.float64)       # (n, C)
-            n = max(len(Th), 1)
-            # ABSOLUTE ridge (Hughes lambda_w), matching the one-step Newton branch, so
-            # inner-loop and one-step stay the same fixed point. Correct when the whole
-            # corpus is collected (n == n_docs, the uncapped case); a subsample of n <
-            # n_docs slightly over-regularizes (off-by-default path — prefer one-step).
-            lam2 = self.head_l2 if self.head_l2 > 0 else 1e-3
-            new_w = w_CK.copy()
-            eye = np.eye(self.K)
-            firth = self.head_penalty == "firth"
-            if firth:
-                # The Firth modified SCORE g*(w_c) = Σ_d oc·(p−y)·θ + Σ_d oc·h_dc·(p−½)·θ
-                # (its zero is the finite Firth fixed point) and its (K,) value + norm,
-                # for a given label's weight vector. Recomputed per candidate in the
-                # gradient-norm backtracking line search below — cheap (one pinv, NO
-                # slogdet), and |g*| is ALWAYS finite so the search never goes toothless
-                # the way the prior slogdet-PLL search did at a −inf baseline (its real
-                # failure on real data). Returns (g*, |g*|, H⁻¹) so an accepted step
-                # reuses the curvature.
-                def _firth_score(w_c, oc_v, yb_v):
-                    z = np.clip(Th @ w_c, -50.0, 50.0)
-                    p = 1.0 / (1.0 + np.exp(-z))
-                    Wt_v = oc_v * p * (1.0 - p)
-                    H_v = (Th * Wt_v[:, None]).T @ Th + _FIRTH_FLOOR * eye
-                    Hinv_v = np.linalg.pinv(H_v, rcond=1e-12)
-                    lev_v = Wt_v * np.einsum('nk,nk->n', Th @ Hinv_v, Th)
-                    g = (oc_v * (p - yb_v)) @ Th + (oc_v * lev_v * (p - 0.5)) @ Th
-                    return g, float(np.linalg.norm(g)), Hinv_v
-            for _ in range(self.head_inner_iters):
-                P = 1.0 / (1.0 + np.exp(-np.clip(Th @ new_w.T, -50.0, 50.0)))  # (n, C)
-                for c in range(self.C):
-                    oc = Ob[:, c]
-                    if firth:
-                        # Firth / Jeffreys-prior head: PARAMETER-FREE self-regularizer.
-                        # The Jeffreys prior +½·log det H_c adjusts the SCORE (not the
-                        # Hessian): each obs contributes +oc·h_dc·(p_dc−½)·θ_d, where the
-                        # per-doc leverage h_dc = Wt_dc·(θ_dᵀ H_c⁻¹ θ_d). As |w|→∞ on a
-                        # separable label, Wt→0 so H→0 and the leverage term pulls p_dc
-                        # back toward ½, bounding |w| with NO head_l2.
-                        #
-                        # TRAJECTORY (cheap resurrection, ADR: task-29): the undamped raw
-                        # Newton step diverges on early ill-conditioned design (|w|→1.3e17
-                        # at iter 1); the prior slogdet-PLL step-halving line search fixed
-                        # the trajectory but was driver-slow AND toothless when the PLL
-                        # baseline was −inf. Replace it with two cheap, slogdet-free guards
-                        # that bound the trajectory unconditionally: (1) a NON-COLLAPSING
-                        # conditioner — an ABSOLUTE floor _FIRTH_FLOOR keeps H invertible
-                        # even at full saturation (Wt→0 ⇒ H_base→0), so Hinv cannot blow
-                        # up; (2) a DAMPED step (reuse head_lr) with a TRUST-REGION clip on
-                        # the per-step logit move (_FIRTH_TRUST), so no single step can
-                        # overshoot into saturation. The Firth score adjustment supplies
-                        # the (parameter-free) pull toward the finite fixed point; the two
-                        # guards just keep the path there. Neither is a w-shrinking ridge.
-                        # PURE-Fisher curvature + modified score at the current w_c. Only
-                        # a tiny absolute floor (NOT head_newton_ridge): the leverage
-                        # h_dc = Wt·θᵀH⁻¹θ must use the pure Fisher, else H⁻¹ shrinks, the
-                        # pull weakens, and |w| climbs past the finite fixed point.
-                        gfirth, gnorm, Hinv = _firth_score(new_w[c], oc, Yb[:, c])
-                        # Newton direction, trust-clipped so an early ill-conditioned step
-                        # cannot overshoot into saturation (the |w|→1e17 trigger).
-                        delta = Hinv @ gfirth
-                        dnorm = float(np.linalg.norm(delta))
-                        if dnorm > _FIRTH_TRUST:
-                            delta = delta * (_FIRTH_TRUST / dnorm)
-                        # Gradient-norm backtracking: accept the (damped) step only if it
-                        # REDUCES |g*| — a cheap, slogdet-free, never-toothless line search
-                        # that converges to g*=0. Start at the full trust-clipped step and
-                        # halve up to 8x; if none improves, w_c is at its fixed point.
-                        step = delta
-                        for _h in range(8):
-                            cand = new_w[c] - step
-                            _, cnorm, _ = _firth_score(cand, oc, Yb[:, c])
-                            if cnorm < gnorm:
-                                new_w[c] = cand
-                                break
-                            step = step / 2.0
-                    else:
-                        g = (oc * (P[:, c] - Yb[:, c])) @ Th + lam2 * new_w[c]
-                        Wt = oc * P[:, c] * (1.0 - P[:, c])
-                        H = (Th * Wt[:, None]).T @ Th + lam2 * eye
-                        try:
-                            new_w[c] = new_w[c] - np.linalg.solve(H, g)
-                        except np.linalg.LinAlgError:
-                            new_w[c] = new_w[c] - np.linalg.lstsq(H, g, rcond=None)[0]
-            new_gp["w_CK"] = new_w
-            return new_gp
 
         if self.head_optimizer == "newton" and "head_hess_stat" in target_stats:
             # Per-label ridge-Newton: w_c ← w_c − head_lr · (H_c + λI)⁻¹ (g_c + λ w_c).
@@ -1288,20 +1091,8 @@ class OnlinePCLDA(VIModel):
         the default VIModel combiner sums over the union of keys, so a partition
         that emitted the supervised keys and one that (all-unobserved) still emits
         them as zeros combine cleanly.
-
-        Exception: the inner-loop head DESIGN rows (``head_theta``/``head_s``/
-        ``head_obs``) are CONCATENATED (a bounded reservoir capped at
-        ``head_sample_cap``), not summed — they are per-doc samples for the
-        driver-side head fit, not additive sufficient statistics.
         """
-        a_rest = {k: v for k, v in a.items() if k not in self._HEAD_DESIGN}
-        b_rest = {k: v for k, v in b.items() if k not in self._HEAD_DESIGN}
-        out = self._lda.combine_stats(a_rest, b_rest)
-        for k in self._HEAD_DESIGN:
-            parts = [x[k] for x in (a, b) if k in x]
-            if parts:
-                out[k] = np.concatenate(parts, axis=0)[: self.head_sample_cap]
-        return out
+        return self._lda.combine_stats(a, b)
 
     def compute_elbo(
         self,

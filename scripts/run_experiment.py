@@ -736,8 +736,6 @@ def build_gated_pc_args(
         "--head-lr", str(effective.get("head_lr", 0.5)),
         "--head-newton-ridge", str(effective.get("head_newton_ridge", 0.01)),
         "--head-l2", str(effective.get("head_l2", 1e-3)),
-        "--head-penalty", str(effective.get("head_penalty", "none")),
-        "--head-inner-iters", str(effective.get("head_inner_iters", 0)),
         "--grad-cavi-iters", str(effective.get("grad_cavi_iters", 20)),
         "--topic-trust", str(effective.get("topic_trust", 0.1)),
         "--weight-y-warmup-iters", str(effective.get("weight_y_warmup_iters", 10)),

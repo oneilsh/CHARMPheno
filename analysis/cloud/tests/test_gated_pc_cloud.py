@@ -85,6 +85,13 @@ def test_conditional_readout_sharpens_within_parent_cohort():
     assert p1[0]["majority"] == 0.5                   # 20 vs 20 children -> 0.5 baseline
     assert p1[0]["bal_acc"] == 1.0                    # perfect per-child recall
     assert cond["ece"] is not None and cond["ece"] >= 0.0
+    # per-node reliability: each scored edge carries its OWN ECE, and the summary
+    # reports mean/max/worst over them so pooling can't hide a miscalibrated node.
+    assert e13[0]["ece"] is not None and e13[0]["ece"] >= 0.0
+    ne = cond["node_ece"]
+    assert ne is not None and ne["n_nodes"] == len(cond["edges"])
+    assert ne["max"] >= ne["mean"] >= 0.0
+    assert ne["max"] == max(e["ece"] for e in cond["edges"])
 
 
 def test_ece_perfectly_calibrated_is_zero_and_miscalibrated_is_positive():
@@ -173,27 +180,23 @@ def test_parse_args_surface_defaults_and_arms():
     assert a.with_dag_head is True
     assert a.skip_unsup_gated is False
     assert a.weight_y_warmup_iters == 10
-    assert a.head_penalty == "none"            # opt-in Firth toggle, off by default
-    assert a.head_inner_iters == 0             # Path B off by default
     assert a.eval_every == 0                   # per-iter eval off by default
 
 
-def test_head_penalty_firth_round_trips_through_estimator_and_engine():
-    """--head-penalty/--head-inner-iters flow: parse_args -> _build_pc_estimator
-    (shim Params) -> OnlinePCLDA engine (head_penalty attribute)."""
+def test_head_l2_ridge_round_trips_through_estimator_and_engine():
+    """--head-l2 flow: parse_args -> _build_pc_estimator (shim Params) ->
+    OnlinePCLDA engine (head_l2 attribute). The ridge is the sole head regularizer
+    (ADR 0043: Firth + Path B removed)."""
     from gated_pc_cloud import parse_args, _build_pc_estimator
     from spark_vi.mllib.topic.pc import _build_model_and_config
     a = parse_args([
         "--cdr", "p.d", "--billing", "bp", "--out-dir", "/tmp/g",
-        "--head-optimizer", "newton", "--head-penalty", "firth",
-        "--head-inner-iters", "30", "--k", "4",
+        "--head-optimizer", "newton", "--head-l2", "0.01", "--k", "4",
     ])
-    assert a.head_penalty == "firth"
-    assert a.head_inner_iters == 30
+    assert a.head_l2 == 0.01 and a.head_optimizer == "newton"
     a._C = 1
     est = _build_pc_estimator(a, weight_y=50.0, gated=False)
-    assert est.getOrDefault("headPenalty") == "firth"
-    assert est.getOrDefault("headInnerIters") == 30
+    assert est.getOrDefault("headL2") == 0.01
     model, _ = _build_model_and_config(est, vocab_size=8)
-    assert model.head_penalty == "firth"       # the shim built a Firth engine
-    assert model.head_inner_iters == 30
+    assert model.head_l2 == 0.01               # the shim built a ridge-only engine
+    assert model.head_optimizer == "newton"

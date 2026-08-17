@@ -234,7 +234,9 @@ def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
     condition (not skill), so they are context, not headline. Multiclass top-1 is
     reported beside its MAJORITY-CLASS baseline (predict the commonest child) and a
     balanced accuracy, because a 2-child parent has random=0.5 / majority up to ~0.7.
-    A pooled ECE gauges whether P(child|parent) is calibrated (needed for VOI).
+    A pooled ECE gauges whether P(child|parent) is calibrated (needed for VOI); a
+    PER-NODE ECE summary (mean/max/worst) accompanies it so a single miscalibrated node
+    can't hide inside the pool (the unified-head calibration check, insight 0069).
 
     MASK-INDEPENDENCE: pass the FULL-closure observation mask (all-ones) as ``mask``
     regardless of the run's training label_mask_mode. The `label` array is already
@@ -271,7 +273,12 @@ def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
                 "n_pos": n_pos, "prev": float(yc.mean()),
                 "cond_auc": float(roc_auc_score(yc, sc)),
                 "cond_ap": float(average_precision_score(yc, sc)),
-                "marg_ap": marg_ap})
+                "marg_ap": marg_ap,
+                # PER-NODE reliability: this node's OWN ECE on child-vs-siblings, so a
+                # per-node miscalibration can't hide inside the pooled ECE (which
+                # averages an over- against an under-confident node). Fewer bins (5)
+                # because per-node cohorts are small (n_pos,n_neg >= min_count each).
+                "ece": _ece(yc, sc, n_bins=5)})
             scored_kids.append(c)
             pooled_y.append(yc); pooled_p.append(sc)
         if len(scored_kids) >= 2:
@@ -297,7 +304,18 @@ def conditional_readout(proba, y, mask, parent_int, C, *, min_count=10):
     ece = None
     if pooled_y:
         ece = _ece(np.concatenate(pooled_y), np.concatenate(pooled_p))
-    return {"edges": edges, "parents": parents, "ece": ece}
+    # Per-node reliability summary: mean/max/worst over the per-edge ECEs. A max that
+    # dwarfs the pooled ECE is the signal that pooling is flattering the calibration.
+    node_eces = [(e["ece"], e["parent"], e["child"]) for e in edges
+                 if e.get("ece") is not None]
+    node_ece = None
+    if node_eces:
+        vals = [v for v, _, _ in node_eces]
+        worst = max(node_eces, key=lambda t: t[0])
+        node_ece = {"mean": float(np.mean(vals)), "max": float(worst[0]),
+                    "worst_parent": int(worst[1]), "worst_child": int(worst[2]),
+                    "n_nodes": len(node_eces)}
+    return {"edges": edges, "parents": parents, "ece": ece, "node_ece": node_ece}
 
 
 def _ece(y, p, n_bins=10):
@@ -321,10 +339,11 @@ def _ece(y, p, n_bins=10):
 def calibrate_per_node(proba_cal, y_cal, m_cal, proba_te, C, *, min_pos=20):
     """Per-node ISOTONIC calibration fit on a HELD-OUT calibration set, applied to TEST.
 
-    The head-independent path to CALIBRATED P(node) — the VOI prerequisite — without
-    a well-behaved co-fit head (exp 0080: Firth couldn't tame the closure-mask head;
-    this sidesteps it). Isotonic is monotone so it preserves the ranking (AUC/AP
-    unchanged) while fixing the reliability curve.
+    The head-independent (two-stage) path to CALIBRATED P(node) — a VOI prerequisite —
+    fit on theta alone, independent of the co-fit head. Isotonic is monotone so it
+    preserves the ranking (AUC/AP unchanged) while fixing the reliability curve.
+    (At 41-anchor scale the ridge-bounded co-fit head is itself well-calibrated —
+    exp 0082 — so this two-stage calibration is a fallback, not the only route.)
 
     ``proba_cal`` MUST be OUT-OF-SAMPLE predictions (a held-out slice the per-node LR
     did NOT train on) — fitting the calibrator on in-sample train predictions learns
@@ -381,6 +400,14 @@ def format_conditional_readout(cond, int2cid, name_by_id):
         lines.append(
             f"  {d:>5}  {len(de):>6}  {_f(auc)}  |  {_f(cap)}  {_f(map_)}"
             f"  {_f(lift)}            {_f(top1)}")
+    ne = cond.get("node_ece")
+    if ne:
+        wp, wc = _name(ne["worst_parent"]), _name(ne["worst_child"])
+        lines.append(
+            f"  per-node reliability (ECE over {ne['n_nodes']} nodes): "
+            f"mean={ne['mean']:.4f}  max={ne['max']:.4f} (worst {wp}->{wc})  "
+            f"vs pooled={_f(ece).strip()}   "
+            f"[max>>pooled => pooling flatters calibration]")
     lines.append("  per-parent multiclass top-1 vs majority-class baseline "
                  "(which child, given the parent):")
     for p in sorted(parents, key=lambda p: (p["depth"], -(p["top1"] - p["majority"]))):
@@ -610,7 +637,6 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         topicTrust=args.topic_trust, weightYWarmupIters=args.weight_y_warmup_iters,
         headOptimizer=args.head_optimizer, headLr=args.head_lr,
         headNewtonRidge=args.head_newton_ridge, headL2=args.head_l2,
-        headPenalty=args.head_penalty, headInnerIters=args.head_inner_iters,
         optimizeDocConcentration=args.optimize_doc_concentration,
         frontierCol="frontier", gateNBg=args.n_bg, gateTpn=args.tpn,
     )
@@ -679,15 +705,6 @@ def parse_args(argv=None):
     p.add_argument("--head-l2", type=float, default=1e-3,
                    help="ABSOLUTE ridge on w_CK (= Hughes lambda_w; ADR 0041). "
                         "0.0 BLOWS UP on the separable topics PC creates.")
-    p.add_argument("--head-penalty", choices=["none", "firth"], default="none",
-                   help="'none' (default; the fixed headL2 ridge) or 'firth' (the "
-                        "Jeffreys-prior +1/2 log det H penalty — PARAMETER-FREE, bounds "
-                        "|w| exactly at separation with no headL2 tuning). 'firth' needs "
-                        "the flat head + newton and runs the inner-loop IRLS path.")
-    p.add_argument("--head-inner-iters", type=int, default=0,
-                   help="driver-side inner-loop IRLS steps converging the flat head each "
-                        "SVI iter (0 = aggregated one-step Newton). Required (>0) for "
-                        "--head-penalty firth; auto-enabled to 25 when 0.")
     p.add_argument("--grad-cavi-iters", type=int, default=20)
     p.add_argument("--topic-trust", type=float, default=0.1)
     p.add_argument("--weight-y-warmup-iters", type=int, default=10)
@@ -869,8 +886,8 @@ def main() -> int:
             results["gated_pc_conditional"] = _conditional(
                 proba_gp, y_te, m_te, "gated_pc")
             # Post-hoc ISOTONIC calibration of the head-independent proba → calibrated
-            # conditional posteriors for VOI, sidestepping the co-fit head (exp 0080:
-            # Firth couldn't tame the closure-mask head). Isotonic is monotone so
+            # conditional posteriors for VOI (the two-stage route, independent of the
+            # co-fit head). Isotonic is monotone so
             # AUC/top-1 are unchanged; only the reliability (ECE) moves. The calibrator
             # is fit on a HELD-OUT 75/25 train split (OUT-OF-SAMPLE) — in-sample fitting
             # worsened ECE (exp 0079 run 2). Raw vs calibrated are compared within the
@@ -904,14 +921,17 @@ def main() -> int:
                 min_count=args.min_label_count)
             print(format_arm_readout("gated_pc (co-fit head)",
                                      results["gated_pc_head"]), flush=True)
-            # Conditional readout on the CO-FIT HEAD proba too — this is where Firth
-            # matters: the head's calibrated P(child|parent) (its ECE) is the VOI
-            # prerequisite, and the head-independent pc_topics_lr metric can't show it.
+            # Conditional readout on the CO-FIT HEAD proba too — the UNIFIED-model
+            # P(child|parent): a single model emitting calibrated conditional
+            # posteriors with no post-hoc fit. At 41-anchor scale the ridge (head_l2)
+            # bounds the head AND it is well-calibrated (exp 0082: co-fit ECE ~0.010,
+            # competitive with the two-stage readout LR above), so this is the primary
+            # VOI-ready readout; the head-independent pc_topics_lr is the reference.
             results["gated_pc_head_conditional"] = _conditional(
                 hp, hy, hm, "gated_pc co-fit head")
             print(f"[driver]   co-fit head |w_CK|max="
                   f"{float(np.abs(pc_model.headWeights()).max()):.4g} "
-                  f"(head_penalty={args.head_penalty})", flush=True)
+                  f"(head_l2={args.head_l2})", flush=True)
             train_scored.unpersist(); test_scored.unpersist()
 
         if not args.skip_unsup_gated:

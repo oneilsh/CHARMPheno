@@ -95,14 +95,13 @@ def to_docs(X, Y, mask):
     return docs
 
 
-def fit(spark, docs, V, *, weight_y, head, head_l2=0.0, head_inner_iters=0,
-        grad_cavi_iters=10):
+def fit(spark, docs, V, *, weight_y, head, head_l2=0.0, grad_cavi_iters=10):
     from spark_vi.core import VIConfig, VIRunner
     from spark_vi.models.topic.pc import OnlinePCLDA
     model = OnlinePCLDA(K=K_FIT, vocab_size=V, C=C, weight_y=weight_y, alpha=1.05,
                         grad_cavi_iters=grad_cavi_iters, random_seed=0,
                         head_optimizer="newton", head_lr=0.7, weight_y_warmup_iters=10,
-                        head_l2=head_l2, head_inner_iters=head_inner_iters, head=head)
+                        head_l2=head_l2, head=head)
     cfg = VIConfig(max_iterations=MAX_ITERS, learning_rate_tau0=64.0,
                    learning_rate_kappa=0.6, random_seed=0, convergence_tol=1e-12)
     rdd = spark.sparkContext.parallelize(docs, numSlices=8).persist()
@@ -209,13 +208,15 @@ def main():
         # head_l2=0 blows up, head_l2>=~0.1 over-regularizes and collapses shaping.
         unsup_lr = _mean(auc_table(Yte, S_uns_m, nodes), nodes)
         print(f"\nhead configs — co-fit HEAD vs topics-LR (unsup posthoc-LR={unsup_lr:.3f}):", flush=True)
-        configs = [("one-step l2=0", 0.0, 0),
-                   ("INNER k=10 l2=0", 0.0, 10),
-                   ("one-step l2=1e-3", 1e-3, 0),
-                   ("INNER k=10 l2=1e-3", 1e-3, 10),
-                   ("INNER k=25 l2=1e-3", 1e-3, 25)]
-        for name, l2, k in configs:
-            mB, gpB = fit(spark, tr, V, weight_y=WEIGHT_Y, head=None, head_l2=l2, head_inner_iters=k)
+        # The lever is the absolute-ridge MAGNITUDE (head_l2): 0 blows up on the
+        # separable topics PC creates, ~1e-4..1e-2 is the wide good basin, >=~0.1
+        # over-regularizes. (The former INNER-loop sweep was removed with Path B —
+        # insight 0067 showed it lands byte-for-byte on the one-step result.)
+        configs = [("one-step l2=0", 0.0),
+                   ("one-step l2=1e-3", 1e-3),
+                   ("one-step l2=1e-2", 1e-2)]
+        for name, l2 in configs:
+            mB, gpB = fit(spark, tr, V, weight_y=WEIGHT_Y, head=None, head_l2=l2)
             thB = thetas(mB, te, gpB)
             hd = _mean(auc_table(Yte, np.array([_predict_proba_np(t, gpB["w_CK"], None)
                                                 for t in thB]), nodes), nodes)
