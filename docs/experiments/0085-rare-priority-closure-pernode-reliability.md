@@ -94,5 +94,36 @@ cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp &
 
 ## Run log
 
-_(pending — paste the two conditional-sharpening blocks incl. the per-node reliability
-lines)_
+### Run 1 (0082 config + per-node reliability) — pooled ECE was FLATTERING ~7x; the unified head is calibrated where it matters but garbage on degenerate/tiny nodes (both heads); |w| well-controlled (ADR 0043 confirmed)
+
+Reproduces 0082 (closure, 41-anchor, 3-domain, ridge-only). |w_CK|max **1068** (bopped
+1000–2000 across iters) — well-controlled, no Firth, ADR 0043 confirmed at closure scale.
+Detection dead (0.50) as designed. gated_pc vs unsup conditional: cond AUC Δ+0.0023
+(closure helps conditional, sign consistent with 0082).
+
+- **The per-node readout did its job — pooled ECE badly flatters.** Unified co-fit head:
+  pooled ECE **0.0130** but per-node **mean 0.0953, max 0.7243** (worst
+  Ehlers-Danlos→Ehlers-Danlos). Readout LR: pooled **0.0124** but per-node **mean 0.0887,
+  max 0.8182** (worst SLE→SLE). Per-node MEAN is ~7× the pooled; the MAX is catastrophic.
+  So "pooled ECE 0.0098" from 0082 was NOT the calibration story — pooling averaged the
+  well-populated nodes (which are calibrated) against degenerate small nodes (which are
+  not).
+- **It's a small/degenerate-node problem, not a co-fit-head problem.** BOTH heads show
+  the same pattern (co-fit max 0.72, readout max 0.82) → the unified head is not worse
+  than two-stage; it remains neck-and-neck (co-fit pooled 0.0130 vs readout 0.0124;
+  headline cond AUC 0.700 vs 0.702). ADR 0043's "unified head works" survives; only the
+  "how calibrated" claim is corrected downward and made per-node.
+- **The worst nodes are SNOMED artifacts — direct motivation for Mondo.** The max-ECE
+  edges are SELF-NAMED (SLE→SLE, EDS→EDS): a parent and child that are near-duplicate
+  SNOMED granularities of the same disease, where one child has ~100% within-parent
+  prevalence (the bal_acc=0.500 "no real subtyping" nodes). Calibration is ill-posed on a
+  near-degenerate 1-class split, and per-node ECE (5 bins on tens of samples) is
+  high-variance there. These ragged near-duplicate nodes are exactly what a Mondo-native
+  hierarchy (vs SNOMED concept_ancestor) would collapse.
+
+**Read:** do NOT headline pooled ECE — report per-node (mean + worst). The unified head
+is trustworthy on large, non-degenerate cohorts (the nodes where a real subtyping /
+VOI decision exists) and untrustworthy on degenerate/tiny nodes (where there's no real
+decision anyway — bal_acc 0.5). To bless it for VOI: filter to non-degenerate nodes,
+and/or hierarchical shrinkage on small cohorts, and/or the Mondo cleanup that removes the
+self-named edges. The pooled-vs-per-node gap is the honest headline of this run.
