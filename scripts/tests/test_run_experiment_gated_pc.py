@@ -139,3 +139,20 @@ def test_mondo_completeness_route(monkeypatch):
     assert args[args.index("--billing") + 1] == "bill"
     assert args[args.index("--out") + 1] == "/out"
     assert args[args.index("--top-unplaced") + 1] == "100"
+
+
+def test_mondo_hierarchy_route(monkeypatch):
+    """model_class=mondo_hierarchy validates, resolves to the hierarchy driver, and
+    builds argv (cdr/billing from env + out-dir + power/reduction knobs)."""
+    mod = _run_exp(monkeypatch)
+    mod.validate_frontmatter({
+        "id": 88, "slug": "mondo-hierarchy",
+        "cohort": "population_rare_priority", "model_class": "mondo_hierarchy"})
+    assert mod.build_fit_driver_path({"model_class": "mondo_hierarchy"}) \
+        == "analysis/cloud/mondo_hierarchy_cloud.py"
+    args = mod.build_fit_args(
+        {"model_class": "mondo_hierarchy", "min_positives": 100, "tpn": 1}, "/out")
+    assert args[args.index("--cdr") + 1] == "proj.ds"
+    assert args[args.index("--out") + 1] == "/out"
+    assert args[args.index("--min-positives") + 1] == "100"
+    assert args[args.index("--tpn") + 1] == "1"
