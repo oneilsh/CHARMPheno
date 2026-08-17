@@ -73,4 +73,33 @@ cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp &
 
 ## Run log
 
-_(pending)_
+### Run 1 (41 anchors, 3 domains, CLOSURE mask, eval off) — mask dichotomy FLIPS at scale; closure viable with the ridge; VOI-ready calibration
+
+Fit ~15 min (eval_every=0; vs 0081's 113 min — the per-iter eval was the cost).
+
+- **Sign flip confirmed at scale (the clean result).** Supervised vs unsupervised,
+  same closure mask: cond AUC Δ**+0.0038**, cond AP +0.0015, top1 +0.0003 — all
+  non-negative, where full-mask 0081 was NEGATIVE (cond AUC −0.010, cond AP −0.013).
+  Train the conditional objective (closure) → supervision helps conditional; train
+  detection (full) → it hurts. "Mask = task selector" now confirmed at rare6 (0078/
+  0079) AND 41-anchor scale.
+- **Closure is viable at scale BECAUSE of the ridge.** |w_CK|max ~2100 — bigger than
+  full-mask's ~20 but tamed from rare6-0079's 1.3e4 by head_l2=0.01. The co-fit head
+  is usable (sane conditional numbers, ECE 0.0098), where 0079's was garbage. So
+  "closure blows up the head" was really "closure + no ridge".
+- **Calibration excellent:** conditional ECE 0.0119 (better than 0081's 0.04). VOI-ready.
+- **Detection dies** (AUC 0.50, AP = prev 0.101) — total under closure (background
+  unobserved). A DIAGNOSIS model, not screening → the two-stage split (full screen ×
+  closure sharpen).
+- **Honesty note:** the absolute cond AUC (0.70) > 0081's full-mask (0.65), but part
+  of that is the readout LR being fit on sibling-contrasts under closure (BOTH arms
+  benefit, incl. unsup whose θ is identical to 0081-unsup) — not purely the model.
+  The within-run sup-vs-unsup sign flip is the clean effect; the cross-run absolute
+  jump is partly a readout artifact.
+- Domain λ-mass stayed clinically sensible (ALS drug 0.39 riluzole-defined; MS/SLE
+  measurement-heavy; sarcoid/HCM condition-heavy). Noisier than 0081; many rare nodes
+  at the prior (0.431/0.431/0.138).
+
+**Read:** closure-mask is the right training objective for the conditional-diagnosis
+model, and at scale (ridge-bounded head) it's a viable, well-calibrated diagnosis
+model — at the cost of detection (as designed). Confirms the two-stage architecture.
