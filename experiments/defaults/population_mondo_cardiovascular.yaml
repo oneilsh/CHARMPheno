@@ -1,0 +1,11 @@
+# Whole-Mondo cardiovascular TEMPLATE-BRANCH case-finding cohort (Step A of the
+# whole-Mondo fit plan). Unlike the disease cohorts, the corpus identity does NOT
+# come from `disease`: the label DAG is the Mondo powered hierarchy restricted to
+# the cardiovascular-disorder branch (`dag_source: mondo`, `mondo_branch:
+# MONDO:0004995`), patients are placed by SNOMED-climb, and the index is
+# population-wide (`index_mode=population`, set by the driver for the mondo path).
+# This file exists so load_defaults finds a <cohort>.yaml to merge over _base.yaml;
+# `disease` is vestigial here (unused once before_dag + population index override
+# the SNOMED anchor forest).
+cohort: population_mondo_cardiovascular
+cohort_def: population_mondo_cardiovascular

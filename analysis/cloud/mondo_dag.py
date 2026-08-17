@@ -189,6 +189,95 @@ def powered_anchor_climb(ca_df, powered_cids, *, spark):
             .join(broadcast(anchors_sdf), "ancestor_concept_id", "inner"))
 
 
+def build_mondo_fit_inputs(spark, *, cdr, billing, mondo_version="2026-06-02",
+                           mondo_cache_dir="data/mondo", min_positives=100,
+                           branch_root=None, min_class_size=2, max_class_fraction=1.0,
+                           condition_source_table="condition_occurrence"):
+    """Build the Mondo `before_dag` + SNOMED-climb frame for a gated-PC fit (BQ).
+
+    The fit-side of exp 0088's `mondo_hierarchy_cloud`: whole-Mondo -> OMOP mapping,
+    power-count each anchor (distinct persons with an in-subtree condition), keep
+    those clearing `min_positives`, reduce the Mondo is-a DAG over the powered
+    anchors to the compact branch-point hierarchy (optionally restricted to a
+    `branch_root` body system — the Step-A template), and assemble the integer-id
+    engine DAG. Also returns the climb frame restricted to the DAG's terminals.
+
+    Returns ``(before_dag, climb_sdf, terminal_cids, count_of, reduced)``:
+      before_dag    integer-id `ConditionDag` (feed to the multi-domain assembler);
+      climb_sdf     `(ancestor_concept_id, descendant_concept_id)` for the terminals
+                    (wrap with `make_mondo_attested_provider`);
+      terminal_cids the powered (branch-filtered) OMOP anchor cids in the DAG;
+      count_of      ``{anchor_cid: whole-pop patient count}`` (for logging/K sizing);
+      reduced       the `reduce_to_anchor_hierarchy` dict.
+    """
+    from pathlib import Path
+
+    import pandas as pd
+    from pyspark.sql import functions as F
+    from pyspark.sql.functions import broadcast
+
+    from charmpheno.omop.bigquery import load_omop_bigquery
+    from anchor_selection_cloud import _download_cached, _read_bq
+    from mondo_to_omop_mapping import build_mondo_to_omop, seed_source_xrefs
+
+    cache = Path(mondo_cache_dir)
+    edges_df = pd.read_csv(_download_cached(mondo_version, "mondo_edges.tsv", cache),
+                           sep="\t", low_memory=False)
+    nodes_df = pd.read_csv(_download_cached(mondo_version, "mondo_nodes.tsv", cache),
+                           sep="\t", low_memory=False)
+
+    # 1) whole-Mondo -> OMOP mapping (scale-fixed, restrict=None), as exp 0088.
+    all_ids = set(nodes_df["id"])
+    concept_pd = (_read_bq(spark, cdr, billing, "concept")
+                  .select("concept_id", "concept_name", "vocabulary_id", "domain_id",
+                          "concept_code", "standard_concept")
+                  .where(F.col("vocabulary_id").isin("SNOMED", "ICD10CM", "MeSH"))
+                  .toPandas())
+    same_as = seed_source_xrefs(mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
+                                restrict_mondo_ids=all_ids)
+    src = same_as.merge(concept_pd, on=["concept_code", "vocabulary_id"], how="inner")
+    source_ids = sorted({int(x) for x in src["concept_id"]})
+    src_sdf = spark.createDataFrame(pd.DataFrame({"concept_id_1": source_ids}))
+    cr_pd = (_read_bq(spark, cdr, billing, "concept_relationship")
+             .select("concept_id_1", "concept_id_2", "relationship_id")
+             .where(F.col("relationship_id") == "Maps to")
+             .join(broadcast(src_sdf), "concept_id_1", "inner").toPandas())
+    mapping = build_mondo_to_omop(
+        mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
+        concept_df=concept_pd, concept_relationship_df=cr_pd, restrict_mondo_ids=None)
+    anchors = sorted({int(x) for x in mapping["standard_concept_id"]})
+
+    # 2) power-count each anchor (broadcast-join; distinct persons per subtree).
+    anchors_sdf = spark.createDataFrame(pd.DataFrame({"ancestor_concept_id": anchors}))
+    ca = (_read_bq(spark, cdr, billing, "concept_ancestor")
+          .select("ancestor_concept_id", "descendant_concept_id")
+          .join(broadcast(anchors_sdf), "ancestor_concept_id", "inner"))
+    cond = load_omop_bigquery(
+        spark=spark, cdr_dataset=cdr, billing_project=billing,
+        source_table=condition_source_table).select("person_id", "concept_id")
+    counts = (cond.join(ca, cond["concept_id"] == ca["descendant_concept_id"], "inner")
+              .groupBy("ancestor_concept_id")
+              .agg(F.countDistinct("person_id").alias("n")).toPandas())
+    count_of = {int(r["ancestor_concept_id"]): int(r["n"]) for _, r in counts.iterrows()}
+    powered = {c for c in anchors if count_of.get(c, 0) >= min_positives}
+
+    # 3) reduce over powered anchors (optionally within one body-system branch).
+    branch_mondo_ids = (None if not branch_root else
+                        branch_mondo_id_set(branch_root, edges_df=edges_df, nodes_df=nodes_df))
+    reduced, anchor_names, class_names = mondo_reduced_hierarchy(
+        mapping, powered, edges_df=edges_df, nodes_df=nodes_df,
+        branch_mondo_ids=branch_mondo_ids, min_class_size=min_class_size,
+        max_class_fraction=max_class_fraction)
+    before_dag = build_mondo_engine_dag(
+        reduced["parent_of"], anchor_names=anchor_names, class_names=class_names)
+
+    # 4) climb frame restricted to the DAG's terminal anchors (branch-filtered).
+    terminal_cids = {int(n.split(":", 1)[1]) for n in reduced["parent_of"]
+                     if n.startswith(_ANCHOR_PREFIX)}
+    climb_sdf = powered_anchor_climb(ca, terminal_cids, spark=spark)
+    return before_dag, climb_sdf, terminal_cids, count_of, reduced
+
+
 def make_mondo_attested_provider(climb_sdf, *, doc_spec):
     """A `provider(events_df) -> attested_df` for `assemble_multidomain_from_events`'s
     `attested_provider` seam — the Mondo analogue of `doc_attested_nodes`.

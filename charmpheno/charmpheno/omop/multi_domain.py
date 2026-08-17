@@ -333,7 +333,7 @@ def assemble_multidomain_case_finding_corpus(
         vocab_size, min_df, min_patient_count, n_bg=2, tpn=1, doc_min_length=0,
         strip_mode="test_only", lookback_days=365, label_window_days=365,
         emit_labels=True, label_mask_mode="full",
-        before_dag=None, attested_provider=None):
+        before_dag=None, attested_provider=None, index_mode="disease"):
     """End-to-end BQ assembly of the multi-domain case-finding bundle (LOOKBACK
     mode). Domain 0 is conditions (the label/gate source); ``extra_domains`` are
     read single-domain and windowed against the SAME condition-derived index.
@@ -347,7 +347,9 @@ def assemble_multidomain_case_finding_corpus(
     (cluster-covered, like the single-domain lookback body).
     """
     from charmpheno.omop import load_omop_bigquery
-    from charmpheno.omop.cohorts import case_finding_index_table, disease_anchors
+    from charmpheno.omop.cohorts import (
+        case_finding_index_table, case_finding_population_index_table,
+        disease_anchors)
     from charmpheno.omop.case_finding_assembly import (
         load_condition_dag, _FOREST_ROOT_CID, _LOOKBACK_PRIOR_OBS_DAYS)
     from charmpheno.omop.doc_spec import PatientCohortDocSpec
@@ -372,12 +374,24 @@ def assemble_multidomain_case_finding_corpus(
         domain_raws.append(d)
         date_cols.append(_EXTRA_DOMAIN_DATE)
 
-    # ONE shared condition-derived index; every domain windowed against it. The
-    # lookback prior-obs gate is the intrinsic ≥1yr floor (not the forward knob).
-    index_df = case_finding_index_table(
-        cond, disease=disease, spark=spark, cdr_dataset=cdr,
-        billing_project=billing, date_col=cond_date,
-        prior_obs_days=_LOOKBACK_PRIOR_OBS_DAYS, label_window_days=label_window_days)
+    # ONE shared index; every domain windowed against it. The lookback prior-obs
+    # gate is the intrinsic ≥1yr floor (not the forward knob). "disease" anchors
+    # the index on first-dx foreground + general background; "population" indexes
+    # EVERY patient on a random event-anchored window (whole-Mondo / template-branch
+    # fit, where the Mondo climb — not one disease — defines the frontier).
+    if index_mode == "population":
+        index_df = case_finding_population_index_table(
+            cond, spark=spark, cdr_dataset=cdr, billing_project=billing,
+            date_col=cond_date, prior_obs_days=_LOOKBACK_PRIOR_OBS_DAYS,
+            label_window_days=label_window_days)
+    elif index_mode == "disease":
+        index_df = case_finding_index_table(
+            cond, disease=disease, spark=spark, cdr_dataset=cdr,
+            billing_project=billing, date_col=cond_date,
+            prior_obs_days=_LOOKBACK_PRIOR_OBS_DAYS, label_window_days=label_window_days)
+    else:
+        raise ValueError(
+            f"index_mode must be 'disease' or 'population', got {index_mode!r}")
     feature_frames, cond_label = lookback_feature_frames(
         domain_raws, index_df, date_cols,
         lookback_days=lookback_days, label_window_days=label_window_days)
