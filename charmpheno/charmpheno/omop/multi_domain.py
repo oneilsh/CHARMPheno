@@ -167,7 +167,8 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
                                      holdout_frac=0.2, split_salt=None, n_bg=2,
                                      tpn=1, strip_mode="test_only",
                                      label_events=None, emit_labels=False,
-                                     label_mask_mode="full") -> MultiDomainBundle:
+                                     label_mask_mode="full",
+                                     attested_provider=None) -> MultiDomainBundle:
     """Assemble the N-domain case-finding bundle from already-windowed events.
 
     A thin N-domain layer over the single-domain `assemble_from_events`
@@ -189,6 +190,17 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
     domain's vocab_map and stripped from that column (defensive; a condition marker
     is expected only in vocab 0, but the strip is symmetric across domains).
     `strip_mode="test_only"` (default) strips TEST only; `"both"` also strips TRAIN.
+
+    `attested_provider` (optional): a callable ``events_df -> attested_df``
+    (columns doc_id, person_id, source_cohort, attested_cids) that replaces the
+    default exact-node attestation (`doc_attested_nodes(ev, node_cids, ...)`).
+    This is the DAG-source seam: pass `before_dag` = the Mondo engine DAG
+    (`mondo_dag.build_mondo_engine_dag`) and `attested_provider` = the SNOMED-climb
+    provider (`mondo_dag.make_mondo_attested_provider`) to place patients on Mondo
+    nodes; everything else (split/prune/ledger/frontier/BOW/strip/labels) is
+    unchanged. NOTE: a Mondo DAG is already POWERED (its class nodes have no direct
+    OMOP attestation and would be dropped by min_n>0), so pass `min_n=0` with it —
+    the DAG is taken as built.
     """
     from charmpheno.omop.condition_dag import prune_by_attestation, pruning_ledger
     from charmpheno.omop.case_finding_assembly import (
@@ -224,11 +236,15 @@ def assemble_multidomain_from_events(cond_events, extra_events, before_dag, *,
             label_events, holdout_frac=holdout_frac, split_salt=split_salt)
 
     # 2) condition-only frontier: prune the DAG on TRAIN attestation counts.
-    #    (SNOMED roll-up attestation via ancestor_df is deferred — see the
-    #    multi-domain PC plan; this MVP uses exact-node attestation, matching the
-    #    single-domain condition-only baseline the run compares against.)
-    train_att = doc_attested_nodes(train_lab, node_cids, doc_spec=doc_spec).cache()
-    test_att = doc_attested_nodes(test_lab, node_cids, doc_spec=doc_spec).cache()
+    #    Default attestation is exact-node (patient has the code == the node);
+    #    `attested_provider` overrides it with a roll-up (the Mondo SNOMED-climb),
+    #    keeping the same [doc_id, person_id, source_cohort, attested_cids] shape.
+    def _attest(ev):
+        if attested_provider is not None:
+            return attested_provider(ev)
+        return doc_attested_nodes(ev, node_cids, doc_spec=doc_spec)
+    train_att = _attest(train_lab).cache()
+    test_att = _attest(test_lab).cache()
     try:
         counts = node_patient_counts(train_att)
         after_dag = prune_by_attestation(before_dag, counts, min_n)
@@ -316,7 +332,8 @@ def assemble_multidomain_case_finding_corpus(
         person_mod, min_n, holdout_frac=0.2, split_salt=None,
         vocab_size, min_df, min_patient_count, n_bg=2, tpn=1, doc_min_length=0,
         strip_mode="test_only", lookback_days=365, label_window_days=365,
-        emit_labels=True, label_mask_mode="full"):
+        emit_labels=True, label_mask_mode="full",
+        before_dag=None, attested_provider=None):
     """End-to-end BQ assembly of the multi-domain case-finding bundle (LOOKBACK
     mode). Domain 0 is conditions (the label/gate source); ``extra_domains`` are
     read single-domain and windowed against the SAME condition-derived index.
@@ -365,10 +382,15 @@ def assemble_multidomain_case_finding_corpus(
         domain_raws, index_df, date_cols,
         lookback_days=lookback_days, label_window_days=label_window_days)
 
-    anchors = disease_anchors(disease)
-    root = _FOREST_ROOT_CID if len(anchors) > 1 else None
-    before_dag = load_condition_dag(
-        spark, anchors=anchors, root=root, cdr=cdr, billing=billing)
+    # Label DAG: the disease's SNOMED anchor forest by default, or a caller-built
+    # override (the Mondo engine DAG). When overridden the caller also supplies an
+    # `attested_provider` (the SNOMED-climb) and passes min_n=0 (the Mondo DAG is
+    # already powered — see assemble_multidomain_from_events).
+    if before_dag is None:
+        anchors = disease_anchors(disease)
+        root = _FOREST_ROOT_CID if len(anchors) > 1 else None
+        before_dag = load_condition_dag(
+            spark, anchors=anchors, root=root, cdr=cdr, billing=billing)
     doc_spec = PatientCohortDocSpec(min_doc_length=doc_min_length)
 
     # One vocab spec per domain (same fit knobs; a real per-domain sweep is future).
@@ -385,4 +407,4 @@ def assemble_multidomain_case_finding_corpus(
         min_n=min_n, vocab_specs=vocab_specs, holdout_frac=holdout_frac,
         split_salt=split_salt, n_bg=n_bg, tpn=tpn, strip_mode=strip_mode,
         label_events=cond_label, emit_labels=emit_labels,
-        label_mask_mode=label_mask_mode)
+        label_mask_mode=label_mask_mode, attested_provider=attested_provider)
