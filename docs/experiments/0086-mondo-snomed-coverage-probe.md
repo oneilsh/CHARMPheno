@@ -76,4 +76,47 @@ Copy/paste the `[coverage]` block + the top of `candidates_with_counts.tsv` back
 
 ## Run log
 
-_(pending — paste the `[coverage]` ladder + rare6 count validation)_
+### Run 1 (760-seed, min_positives=100) — the redesign premise is strongly validated: ~79% of coded patients are NOT placed by the rare-disease seed (the whole-Mondo opportunity)
+
+CDR R2024Q3R8, 626,396 persons. Pipeline ran clean; mapping resolved the 760 MONDO seed
+ids → **268 distinct OMOP standard-condition anchors**.
+
+```
+persons (total)                     626396   100.00%
+has >=1 condition code              349815    55.85%   placeability CEILING
+placed under the 268 seed anchors    73335    11.71%   current priority-rare foreground
+residual: no condition code         276581    44.15%   irreducible healthy/undocumented floor
+gap: ceiling - seed                 276480    44.14%   placeable but NOT under seed
+```
+
+- **The headline: 276,480 patients (44% of all; ~79% of the 349,815 *coded* patients)
+  have a codeable disease but are NOT placed by the 760-disease rare seed.** These are
+  exactly the common-disease patients today dumped in synthetic background. A whole-Mondo
+  tree would give them real homes → the detection-as-top-of-tree redesign has large
+  headroom, and it's the population that could clean up the FP wall (insight 0064) by
+  routing confusable common-disease patients into their own branches.
+- **44% have no condition code at all** — the irreducible "healthy/undocumented" floor.
+  This is AoU-specific: a large fraction of participants are survey/PPI/genomic without
+  linked (or with sparse) EHR. This is the residual the NOS/exclude decision applies to;
+  it is bigger than a pure-EHR cohort's would be.
+- **Rare-disease power problem, quantified:** of 268 anchors only **32 clear ≥100
+  positives**, 30 survive nesting. Most priority rare diseases are simply too rare in AoU
+  to fit their own node — the min-patient filter does the pruning the spec expected.
+  (Note: `placed under seed` = ≥1 in-subtree code, no first-dx/lookback filter, so it
+  overcounts vs a real fit's positive set.)
+- **Neurodevelopmental washed out** (0 powered; Cardiac 22 / Neuroimmune 6 /
+  Neurodegenerative 4) — the spec's predicted risk ("adult coding coverage") confirmed in
+  adult AoU.
+
+**Read:** whole-Mondo is worth building — the gap is the whole ballgame. Next: the
+whole-Mondo run (`restrict_mondo_ids=None`) to see how much of that 276k the full disease
+ontology actually places (and at what node granularity), which needs the
+`concept_relationship` IN-list → join scale fix.
+
+**Housekeeping:** the harness auto-ran NPMI eval and errored (`--model-class anchor_select`
+not a choice) — non-fatal (results were saved first); fixed by adding `anchor_select` to
+the self-contained skip-eval set. The tail `Could not find CoarseGrainedScheduler` is a
+benign Spark shutdown race.
+
+**Pending:** paste the top rows of `candidates_with_counts.tsv` to spot-check the mapping
+against known rare6 counts (SLE ~6500, MG ~1100, amyloidosis ~1500).
