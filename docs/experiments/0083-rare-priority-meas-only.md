@@ -73,4 +73,37 @@ cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp &
 
 ## Run log
 
-_(pending)_
+### Run 1 (condition + measurement, FULL mask, 41 anchors) — measurement-only recovers ~all of the 3-domain detection; drug's aggregate contribution is marginal
+
+K=101, 55 scored nodes, prev 0.101. Full mask (detection alive). Fit ~62 min (gated_pc
+arm 3725s; unsup arm 830s). Ran on the PRE-ADR-0043 driver, so no per-node reliability
+line (that lands in 0085).
+
+- **Drop drug → detection barely moves (the ablation headline).** gated_pc detection AP
+  **0.2437** vs 0081's 3-domain **0.249** (Δ−0.005); pc_topics_lr macro AUC 0.7704 vs
+  0.7724-ish. Measurement + condition alone recover essentially all of the 3-domain
+  aggregate detection. **Drug is the sparse, specialized domain** — it carries per-node
+  signal for treatment-defined diseases but does not move the aggregate.
+- **Where drug's signal went (per-node λ-mass, now 2-column).** Without a drug column the
+  treatment-defined diseases lean CONDITION-heavy instead: Temporal arteritis 0.808 cond
+  (was drug 0.51 in 0081), Myasthenia gravis 0.690 cond (was drug 0.46). The treatment
+  signal is absorbed by condition when drug is absent — so drug is the RIGHT home for
+  those dx, not a necessary one for detection.
+- **Specialization otherwise intact:** measurement-heavy = lab-diagnosed (Amyloidosis
+  0.545, SLE 0.529, MS 0.519); condition-heavy = code-defined (ALS 0.913, senile
+  dementia LBD 0.959, HCM 0.900). Same clinical logic as 0081, present in the unsup arm
+  (representation property).
+- **Mask dichotomy reconfirmed (full mask):** PC helps DETECTION (AP Δ+0.0117 over the
+  unsup twin) but NOT conditional (cond AP Δ−0.0035, cond AUC Δ+0.0002 ≈ flat). Same sign
+  as 0081. Full mask = detection objective.
+- **Unified head holds at full mask too.** co-fit head vs readout LR: pooled ECE
+  **0.0409 vs 0.0408** (identical), cond_AUC by depth ~0.02 below the readout (0.634/
+  0.617/0.648 vs 0.658/0.629/0.668). |w_CK|max **16.7** — full mask keeps the head tiny
+  (vs closure's ~2126), the well-conditioned regime. Same "calibrated + small
+  discrimination tax" pattern as 0082's closure run.
+
+**Read:** measurement is the workhorse second domain; drug is specialized (treatment-
+defined dx) and marginal for aggregate detection. The 3-domain stack is justified by
+per-node interpretability (drug as the treatment-signal home), not by a detection lift.
+0084 (drug-only) would confirm the converse (drug alone underperforms) — low marginal
+value, deprioritized in favor of 0085.
