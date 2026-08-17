@@ -270,10 +270,10 @@ def validate_frontmatter(fm: dict) -> None:
 
     model_class = fm["model_class"]
     if model_class not in ("lda", "stm", "dag_placement", "pc", "gated_pc",
-                           "anchor_select", "mondo_completeness"):
+                           "anchor_select", "mondo_completeness", "mondo_hierarchy"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
               f"(currently: lda, stm, dag_placement, pc, gated_pc, anchor_select, "
-              f"mondo_completeness; hdp planned)", flush=True)
+              f"mondo_completeness, mondo_hierarchy; hdp planned)", flush=True)
         sys.exit(2)
 
     if model_class == "stm":
@@ -303,6 +303,8 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/anchor_selection_cloud.py"
     if model_class == "mondo_completeness":
         return f"{base}/mondo_completeness_cloud.py"
+    if model_class == "mondo_hierarchy":
+        return f"{base}/mondo_hierarchy_cloud.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
@@ -330,7 +332,26 @@ def build_fit_args(
         return build_anchor_select_args(effective, out_dir)
     if model_class == "mondo_completeness":
         return build_mondo_completeness_args(effective, out_dir)
+    if model_class == "mondo_hierarchy":
+        return build_mondo_hierarchy_args(effective, out_dir)
     raise ValueError(f"unknown model_class: {model_class!r}")
+
+
+def build_mondo_hierarchy_args(effective: dict, out_dir: str) -> list[str]:
+    """argv for analysis/cloud/mondo_hierarchy_cloud.py — whole-Mondo powered DAG
+    (map -> power-count -> reduce to branch points) + implied-K report."""
+    cdr, billing = _require_workspace_env()
+    return [
+        "--cdr", cdr,
+        "--billing", billing,
+        "--out", str(out_dir),
+        "--min-positives", str(effective.get("min_positives", 100)),
+        "--min-class-size", str(effective.get("min_class_size", 2)),
+        "--max-class-fraction", str(effective.get("max_class_fraction", 1.0)),
+        "--tpn", str(effective.get("tpn", 1)),
+        "--mondo-version", str(effective.get("mondo_version", "2026-06-02")),
+        "--mondo-cache-dir", str(effective.get("mondo_cache_dir", "data/mondo")),
+    ]
 
 
 def build_mondo_completeness_args(effective: dict, out_dir: str) -> list[str]:
@@ -1452,7 +1473,8 @@ def main(argv: list[str] | None = None) -> int:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
     elif effective.get("model_class") in ("dag_placement", "pc", "gated_pc",
-                                          "anchor_select", "mondo_completeness"):
+                                          "anchor_select", "mondo_completeness",
+                                          "mondo_hierarchy"):
         # These write their own self-contained result (dag_placement: npz +
         # manifest with placement AUC/MRR; pc: pc_results.json with per-drug
         # heldout AUC; gated_pc: npz + manifest with pc_topics_lr per arm;
@@ -1462,6 +1484,7 @@ def main(argv: list[str] | None = None) -> int:
         _artifact = ("pc_results.json" if _mc == "pc"
                      else "candidates_with_counts.tsv" if _mc == "anchor_select"
                      else "mondo_omop_mapping.tsv" if _mc == "mondo_completeness"
+                     else "mondo_powered_hierarchy.tsv" if _mc == "mondo_hierarchy"
                      else "manifest.json")
         print(f"[run-exp] model_class={_mc}: NPMI eval not wired for the "
               f"self-contained result; skipping eval (see {_artifact} + fit log).",
