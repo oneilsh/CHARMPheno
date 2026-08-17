@@ -1433,13 +1433,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
-    elif effective.get("model_class") in ("dag_placement", "pc", "gated_pc"):
+    elif effective.get("model_class") in ("dag_placement", "pc", "gated_pc",
+                                          "anchor_select"):
         # These write their own self-contained result (dag_placement: npz +
         # manifest with placement AUC/MRR; pc: pc_results.json with per-drug
-        # heldout AUC; gated_pc: npz + manifest with pc_topics_lr per arm), not a
+        # heldout AUC; gated_pc: npz + manifest with pc_topics_lr per arm;
+        # anchor_select: candidates_with_counts.tsv + the coverage ladder), not a
         # topic-word bundle the NPMI eval driver can read.
         _mc = effective.get("model_class")
-        _artifact = "pc_results.json" if _mc == "pc" else "manifest.json"
+        _artifact = ("pc_results.json" if _mc == "pc"
+                     else "candidates_with_counts.tsv" if _mc == "anchor_select"
+                     else "manifest.json")
         print(f"[run-exp] model_class={_mc}: NPMI eval not wired for the "
               f"self-contained result; skipping eval (see {_artifact} + fit log).",
               flush=True)
