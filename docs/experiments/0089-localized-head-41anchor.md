@@ -3,6 +3,9 @@ id: 89
 slug: localized-head-41anchor
 status: pending
 model_class: gated_pc
+cohort: population_rare_priority
+cohort_def: population_rare_priority
+disease: rare_priority
 # LOCALIZED HEAD validation at the 41-anchor scale, before whole-Mondo (insight 0071).
 # Exact 0085 config (closure, 41-anchor, 3-domain, ridge-only) with the ONE delta:
 # localize_head=true — each node's logistic reads ONLY its topic support (gated block +
