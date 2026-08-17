@@ -59,14 +59,53 @@ def test_localized_head_updates_only_support_and_solve_is_correct():
     #     the SAME stats (verifies the sub-block solve, not just non-leakage).
     H = np.asarray(stats["head_hess_stat"], float)
     g = np.asarray(stats["grad_wCK_stat"], float)
+    # LOCALIZED EMISSION: the collected Fisher is the COMPACT (C, S, S) per-node block
+    # stack (S = max support size), NOT the dense (C, K, K) — the whole-Mondo memory
+    # fix. Node c's real Fisher is H[c][:|s_c|, :|s_c|] (padded tail unused).
+    S = max(len(x) for x in support)
+    assert H.shape == (C, S, S)
+    assert S < engine.K                                    # strictly smaller than dense
     for c in range(C):
         s = support[c]
-        Hc = H[c][np.ix_(s, s)]
+        Hc = H[c][:len(s), :len(s)]
         ridge = m.head_l2 + m.head_newton_ridge * (np.trace(Hc) / len(s)) + 1e-10
         delta = np.linalg.solve(Hc + ridge * np.eye(len(s)),
                                 g[c][s] + ridge * gp["w_CK"][c][s])
         expect = gp["w_CK"][c][s] - m.head_lr * delta
         assert np.allclose(new_w[c][s], expect), f"node {c} solve mismatch"
+
+
+def test_padded_emission_equals_dense_subblock_exactly():
+    """The localized EMISSION is exact, not a heuristic: the padded (C, S, S) Fisher's
+    real block H'[c][:|s_c|, :|s_c|] equals the dense (C, K, K) Fisher's support
+    sub-block H[c][ix_(s_c, s_c)] term-for-term (same doc-sum, same weights, same θ
+    entries) — the padding only skips forming the off-support entries it would discard,
+    and the padded tail is never read."""
+    from spark_vi.models.topic.dag_placement import DagLayout
+    from spark_vi.models.topic.pc import _supervised_head_hessian
+    C = 4
+    lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=2, tpn=1)
+    support = [lay.allowed(c) for c in range(C)]
+    m, engine, _lay, V = _gated_pc(C, topic_support=support)
+    gp = m.initialize_global(None)
+    # non-zero head so p·(1−p) weights vary across nodes (a stronger check than w=0).
+    rng = np.random.default_rng(3)
+    gp["w_CK"] = rng.normal(scale=0.4, size=gp["w_CK"].shape)
+    docs = _docs(np.random.default_rng(0), C, V)
+    expElogbeta = m._expElogbeta_from_lambda(gp["lambda"])
+    w = np.asarray(gp["w_CK"], float)
+
+    dense = _supervised_head_hessian(
+        expElogbeta, w, docs, m.alpha, engine.K, m.grad_cavi_iters, sup_pad=None)
+    padded = _supervised_head_hessian(
+        expElogbeta, w, docs, m.alpha, engine.K, m.grad_cavi_iters, sup_pad=m._sup_pad)
+
+    S = m._sup_pad.shape[1]
+    assert dense.shape == (C, engine.K, engine.K)
+    assert padded.shape == (C, S, S) and S < engine.K
+    for c in range(C):
+        s = support[c]
+        assert np.allclose(padded[c][:len(s), :len(s)], dense[c][np.ix_(s, s)])
 
 
 def test_dense_vs_localized_differ_but_both_sane():

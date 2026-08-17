@@ -17,6 +17,16 @@
 > *inference-time* decomposition, not the required training architecture. Being tested
 > on the 41-anchor setup before all-Mondo.
 
+> **Correction 2 (2026-08-17, exp 0090 run 1).** The localized head's O(C·depth²)
+> MEMORY claim was, as first implemented, realized only in the SOLVE — the per-node
+> Fisher was still *emitted* dense `(C, K, K)` and collected to the driver, so a fit
+> OOM'd on `spark.driver.maxResultSize` at K=444 (657 MB × partitions), and would hit
+> the same 850 GB wall at K≈3,800. Fixed by emitting the Fisher as a compact padded
+> `(C, S, S)` per-node block stack (S = max support), exact (each block is the dense
+> Fisher's support sub-block) and ~2 MB instead of 690 MB/partition. Only WITH localized
+> emission is the whole-Mondo co-fit actually collectable — the memory win is now real,
+> not just in compute. The `cost_report` prints the true collected size (`C*S^2`).
+
 Exp 0087 validated whole-Mondo as a near-complete disease backbone (97.9% of coded
 patients placed). Exp 0088 turned it into the actual label DAG and sized it. The size
 answer reshapes the fit architecture.

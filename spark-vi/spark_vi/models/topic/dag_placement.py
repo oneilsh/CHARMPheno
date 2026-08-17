@@ -129,6 +129,10 @@ class DagLayout:
         smax, sarg = int(supp.max()), int(supp.argmax())
         dense_mem, dense_flop = C * K * K * 8, float(C) * K ** 3
         loc_mem, loc_flop = float((supp ** 2).sum()) * 8, float((supp ** 3).sum())
+        # The Fisher stat is actually EMITTED/COLLECTED as a padded (C, S, S) block
+        # stack (S = smax) — this is the size that hits spark.driver.maxResultSize,
+        # so report it alongside the dense wall and the packed Sum|s|^2 floor.
+        pad_mem = C * smax * smax * 8
         lam = (K * int(vocab_size) * 8) if vocab_size else None
         d = {"C": C, "K": K, "n_nodes": len(self.nodes),
              "fanout_max": int(fan.max()), "fanout_p90": _q(fan, 90),
@@ -136,6 +140,7 @@ class DagLayout:
              "support_p50": _q(supp, 50), "support_p90": _q(supp, 90),
              "support_p99": _q(supp, 99), "dense_head_mem_bytes": dense_mem,
              "dense_head_flop": dense_flop, "localized_head_mem_bytes": loc_mem,
+             "collected_head_mem_bytes": pad_mem,
              "localized_head_flop": loc_flop, "per_node_max_flop": float(smax) ** 3,
              "lambda_bytes": lam}
 
@@ -158,8 +163,9 @@ class DagLayout:
             f"  head support/node:          max={smax} (node {sarg})  "
             f"p50={_q(supp, 50):.0f}  p90={_q(supp, 90):.0f}  p99={_q(supp, 99):.0f}",
             f"  head Fisher MEMORY:  dense C*K^2={_hb(dense_mem)}   "
-            f"localized Sum|s|^2={_hb(loc_mem)}   "
-            f"({dense_mem / max(loc_mem, 1):.0f}x smaller)",
+            f"collected C*S^2={_hb(pad_mem)} (S={smax})   "
+            f"packed Sum|s|^2={_hb(loc_mem)}   "
+            f"({dense_mem / max(pad_mem, 1):.0f}x smaller)",
             f"  head SOLVE/iter:     dense C*K^3={dense_flop:.2e}   "
             f"localized Sum|s|^3={loc_flop:.2e}   max node |s|^3={float(smax) ** 3:.2e}",
         ]
