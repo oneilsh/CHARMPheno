@@ -490,12 +490,14 @@ def _build_model_and_config(
             gamma_shape=estimator.getOrDefault("gammaShape"),
             cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
             cavi_tol=estimator.getOrDefault("caviTol"), random_seed=seed)
-        # LOCALIZED head: node c's logistic support = DagLayout.allowed(c) (background +
-        # its gated block + ancestors). The gate already defines the locality; the head
-        # just reads it (insight 0071). C = numLabels (incl root 0).
+        # LOCALIZED head: node c's logistic support = background + its gated block +
+        # ancestors + SIBLINGS (DagLayout.allowed_with_siblings). Siblings are the
+        # closure objective's contrast set — without them the wide top level collapses
+        # (exp 0089 run 1: root's 29-way cond AUC fell to 0.57). Still O(depth + fan-out)
+        # ≪ K (insight 0071). C = numLabels (incl root 0).
         if bool(estimator.getOrDefault("localizeHead")):
             C = int(estimator.getOrDefault("numLabels"))
-            topic_support = [lay.allowed(c) for c in range(C)]
+            topic_support = [lay.allowed_with_siblings(c) for c in range(C)]
     elif domains is not None:
         raise ValueError(
             "featuresCols/domainBounds (multi-domain) require gateParent to be set: "

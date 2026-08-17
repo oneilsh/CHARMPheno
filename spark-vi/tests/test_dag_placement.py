@@ -791,3 +791,23 @@ def test_daglayout_descendants_is_proper_and_mirrors_closure():
     # sorted by (depth, id)
     d = lay.descendants(1)
     assert d == sorted(d, key=lambda x: (lay.depth(x), x))
+
+
+def test_allowed_with_siblings_adds_sibling_blocks():
+    """Localized-head support: allowed(v) + siblings' blocks (the closure contrast
+    set). Layout {1:0,2:0,3:1}, n_bg=2, tpn=1 -> block[1]=[2],block[2]=[3],block[3]=[4]."""
+    from spark_vi.models.topic.dag_placement import DagLayout
+    lay = DagLayout({1: 0, 2: 0, 3: 1}, n_bg=2, tpn=1)
+    def s(v):
+        return set(int(k) for k in lay.allowed_with_siblings(v))
+    # node 1: allowed {0,1,2} + sibling 2's block {3}  (both are root's children)
+    assert s(1) == {0, 1, 2, 3}
+    assert s(2) == {0, 1, 2, 3}
+    # node 3: parent is 1, which has only child 3 -> no siblings -> == allowed(3)
+    assert s(3) == {0, 1, 2, 4} == set(int(k) for k in lay.allowed(3))
+    # root: no parents, no siblings -> background only
+    assert s(0) == {0, 1}
+    # siblings only ADD (superset of allowed), and stay within [0, K)
+    for v in (0, 1, 2, 3):
+        assert set(int(k) for k in lay.allowed(v)) <= s(v)
+        assert max(s(v)) < lay.K

@@ -95,4 +95,41 @@ can put localized-vs-dense side by side against 0085.
 
 ## Run log
 
-_(pending)_
+### Run 1 (localized support = path + ancestors, NO siblings) — collapses at depth 0 exactly as predicted; readout LR unchanged → purely a head-support issue
+
+The co-fit head degraded, but **only at the wide top level**:
+
+| | 0085 dense head | 0089 run 1 (localized, no siblings) |
+|---|---|---|
+| cond AUC depth 0 (29 siblings) | 0.7035 | **0.5743** (near chance) |
+| cond AUC depth 1 | 0.6659 | 0.6685 |
+| cond AUC depth 2 | 0.6983 | 0.7031 |
+| co-fit macro AUC | 0.7092 | 0.6278 |
+| co-fit ECE | 0.0130 | 0.0317 |
+
+- **The readout LR is unchanged** (macro AUC 0.7316 vs 0085's 0.7234; cond AUC/ECE
+  identical to unsup) — so the topic side is untouched; this is *purely* the head's
+  support. |w|max bounced (129→284→929, all <1000) — the ill-supported depth-0 nodes
+  thrash.
+- **Diagnosis (as predicted in the run-1 caveat):** a root child's support was
+  `background + its own block` only (root has no block, and run 1 included only
+  ancestors). To rank it against its **28 siblings** the head must see *their* topics
+  ("high on me AND low on them"); without them it sees only its own activation and can't
+  contrast → collapse. Depth 1/2 survived because their fan-out is small (2–7 siblings)
+  and own-block activation carries it.
+- **Fix:** the support must include SIBLINGS (the closure objective's contrast set) —
+  `DagLayout.allowed_with_siblings(c)`. Still O(depth + local fan-out) ≪ K, so it stays
+  the whole-Mondo scale fix. This is now the default when `localize_head` is on.
+
+### Run 2 (localized support = path + ancestors + siblings) — pending
+
+Same config; the shim now builds `allowed_with_siblings`. Read: does depth-0 cond AUC
+recover to the dense head's ~0.70? If yes, the localized head is validated (matches dense
+at O(depth+fanout) cost) and whole-Mondo K≈3,800 is fittable as one co-fit.
+
+```bash
+cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp && \
+  CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=89
+```
+
+_(paste the co-fit head block; compare depth-0 cond AUC to run 1's 0.57 and 0085's 0.70)_
