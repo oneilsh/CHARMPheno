@@ -5,6 +5,18 @@
 
 **Status:** Confirmed on exp 0088 (whole-Mondo powered hierarchy, AoU CDR R2024Q3R8)
 
+> **Correction (2026-08-17, same day).** The "stage as a cascade" conclusion below
+> over-stated the piecemeal route. The K³/K² wall is NOT the model size — it is
+> specifically the **DENSE co-fit head** (every one of C nodes reads all K topics →
+> O(C·K²) memory, O(C·K³) compute). The topic model and the two-stage readout both
+> scale. The better answer is a **LOCALIZED DAG-closure head in ONE co-fit**: each
+> node's weight is supported only on its gated topic block + ancestors (~O(depth) dims,
+> which the gate already defines), so the per-node Fisher/solve is O(depth³) and the
+> total head cost is O(C·depth³) — trivial, on ONE joint model that keeps global topic/
+> background sharing. The body-system cascade (below) is a *fallback* and a valid
+> *inference-time* decomposition, not the required training architecture. Being tested
+> on the 41-anchor setup before all-Mondo.
+
 Exp 0087 validated whole-Mondo as a near-complete disease backbone (97.9% of coded
 patients placed). Exp 0088 turned it into the actual label DAG and sized it. The size
 answer reshapes the fit architecture.

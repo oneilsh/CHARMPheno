@@ -317,6 +317,15 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "gateParent is set. Default 1.",
         typeConverter=TypeConverters.toInt,
     )
+    localizeHead = Param(
+        Params._dummy(), "localizeHead",
+        "LOCALIZED head (requires gateParent): each label c's logistic reads ONLY its "
+        "topic support DagLayout.allowed(c) (background + its gated block + ancestors), "
+        "not all K, so the per-node Newton is O(|support|^3) not O(K^3) — the whole-Mondo "
+        "scale fix (insight 0071; ADR 0042 done right, hierarchy in the head SUPPORT not a "
+        "closure product). Only affects headOptimizer='newton'. Default False (dense).",
+        typeConverter=TypeConverters.toBoolean,
+    )
     frontierCol = Param(
         Params._dummy(), "frontierCol",
         "column carrying each doc's DAG frontier (array of most-specific attested "
@@ -462,6 +471,7 @@ def _build_model_and_config(
     # its DAG subtree's documents. K is DERIVED from the layout (overriding k); the head
     # (flat or DAG-closure above) rides on the ungated label-free theta unchanged.
     topic_engine = None
+    topic_support = None
     gate_raw = str(estimator.getOrDefault("gateParent"))
     if gate_raw:
         from spark_vi.models.topic.dag_placement import DagLayout
@@ -480,6 +490,12 @@ def _build_model_and_config(
             gamma_shape=estimator.getOrDefault("gammaShape"),
             cavi_max_iter=estimator.getOrDefault("caviMaxIter"),
             cavi_tol=estimator.getOrDefault("caviTol"), random_seed=seed)
+        # LOCALIZED head: node c's logistic support = DagLayout.allowed(c) (background +
+        # its gated block + ancestors). The gate already defines the locality; the head
+        # just reads it (insight 0071). C = numLabels (incl root 0).
+        if bool(estimator.getOrDefault("localizeHead")):
+            C = int(estimator.getOrDefault("numLabels"))
+            topic_support = [lay.allowed(c) for c in range(C)]
     elif domains is not None:
         raise ValueError(
             "featuresCols/domainBounds (multi-domain) require gateParent to be set: "
@@ -510,6 +526,7 @@ def _build_model_and_config(
         random_seed=seed,
         head=head,
         topic_engine=topic_engine,
+        topic_support=topic_support,
     )
 
     mbf = float(estimator.getOrDefault("subsamplingRate"))
@@ -533,7 +550,7 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, topicTrust=0.1,
     weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, headNewtonRidge=0.01,
     headL2=1e-3, closureParents="", warmStartFrom="",
-    gateParent="", gateNBg=2, gateTpn=1, frontierCol="frontier",
+    gateParent="", gateNBg=2, gateTpn=1, localizeHead=False, frontierCol="frontier",
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
 )
 
@@ -583,6 +600,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         gateParent: str = "",
         gateNBg: int = 2,
         gateTpn: int = 1,
+        localizeHead: bool = False,
         frontierCol: str = "frontier",
         featuresCols: list[str] | None = None,
         domainBounds: list[int] | None = None,

@@ -156,3 +156,19 @@ def test_mondo_hierarchy_route(monkeypatch):
     assert args[args.index("--out") + 1] == "/out"
     assert args[args.index("--min-positives") + 1] == "100"
     assert args[args.index("--tpn") + 1] == "1"
+
+
+def test_localize_head_flag_threads(monkeypatch):
+    """localize_head frontmatter -> --localize-head -> driver parses it -> the shim
+    estimator carries localizeHead=True."""
+    mod = _run_exp(monkeypatch)
+    on = mod.build_gated_pc_args({**_base_eff(), "localize_head": True}, "/out")
+    assert "--localize-head" in on
+    off = mod.build_gated_pc_args(_base_eff(), "/out")
+    assert "--localize-head" not in off
+    cloud = str(Path(mod.__file__).resolve().parent.parent / "analysis" / "cloud")
+    if cloud not in sys.path:
+        sys.path.insert(0, cloud)
+    import gated_pc_cloud
+    parsed = gated_pc_cloud.parse_args(on)
+    assert parsed.localize_head is True

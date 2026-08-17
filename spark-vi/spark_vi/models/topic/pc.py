@@ -648,6 +648,7 @@ class OnlinePCLDA(VIModel):
         head_lr: float = 0.05,
         head_newton_ridge: float = 1e-2,
         head_l2: float = 1e-3,
+        topic_support: "list[np.ndarray] | None" = None,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
         optimize_alpha: bool = False,
@@ -770,6 +771,21 @@ class OnlinePCLDA(VIModel):
         # 0.91-0.96). 0.0 disables it -> relative-ridge-only, which BLOWS UP on the
         # separable topics PC creates (|w|=3.4e11) — only set 0.0 to reproduce that.
         self.head_l2 = float(head_l2)
+        # LOCALIZED head (topic-side hierarchy in the HEAD's support, ADR 0042 done
+        # right): per-node topic support — node c's logistic reads ONLY topic_support[c]
+        # (its gated block + ancestors' blocks + background, e.g. DagLayout.allowed(c)),
+        # not all K. w_c stays 0 off-support (inits at 0; the Newton solve updates only
+        # the support sub-block), so the per-node Fisher/solve is O(|support|^3) not
+        # O(K^3) — the whole-Mondo scale fix (insight 0071). None = dense (read all K,
+        # the shipped behavior). Only the 'newton' head honors this; validated at the
+        # 41-anchor scale before whole-Mondo (exp 0089).
+        if topic_support is None:
+            self._topic_support = None
+        else:
+            if len(topic_support) != self.C:
+                raise ValueError(
+                    f"topic_support has {len(topic_support)} entries but C={self.C}")
+            self._topic_support = [np.asarray(s, dtype=np.intp) for s in topic_support]
         # Driver-side global-step counter, used only for weight_y warmup. Bumped
         # once per update_global call (the runner drives that single-threaded on
         # the driver), so it is a faithful iteration index without threading t
@@ -1047,16 +1063,27 @@ class OnlinePCLDA(VIModel):
             H_CKK = np.asarray(target_stats["head_hess_stat"], dtype=np.float64)
             new_w = w_CK.copy()
             for c in range(self.C):
-                Hc = H_CKK[c]
+                # LOCALIZED head: solve only over node c's topic support (its gated
+                # block + ancestors); w_c stays 0 off-support (new_w is a copy of the
+                # 0-initialized w_CK). Numerically identical to solving the full K×K
+                # Fisher's support sub-block, at O(|support|^3) — the Mondo scale fix.
+                sup = None if self._topic_support is None else self._topic_support[c]
+                Hc = H_CKK[c] if sup is None else H_CKK[c][np.ix_(sup, sup)]
+                wc = w_CK[c] if sup is None else w_CK[c][sup]
+                gc = g_CK[c] if sup is None else g_CK[c][sup]
+                d = self.K if sup is None else len(sup)
                 ridge = (self.head_l2
-                         + self.head_newton_ridge * (float(np.trace(Hc)) / self.K) + 1e-10)
-                A = Hc + ridge * np.eye(self.K)
-                b = g_CK[c] + ridge * w_CK[c]
+                         + self.head_newton_ridge * (float(np.trace(Hc)) / d) + 1e-10)
+                A = Hc + ridge * np.eye(d)
+                b = gc + ridge * wc
                 try:
                     delta = np.linalg.solve(A, b)
                 except np.linalg.LinAlgError:
                     delta = np.linalg.lstsq(A, b, rcond=None)[0]
-                new_w[c] = w_CK[c] - self.head_lr * delta
+                if sup is None:
+                    new_w[c] = w_CK[c] - self.head_lr * delta
+                else:
+                    new_w[c, sup] = w_CK[c, sup] - self.head_lr * delta
             new_gp["w_CK"] = new_w
             return new_gp
 
