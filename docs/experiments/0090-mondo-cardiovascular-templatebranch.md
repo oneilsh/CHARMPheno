@@ -119,4 +119,27 @@ with 0089's SNOMED-anchor placement before scaling to the whole tree.
 
 ## Run log
 
-_(pending first run)_
+### Run 1 — OOM at the head-stat collect; Step A caught the scaling gap it exists for
+
+Build + assemble were clean and the profile was exactly the bounded-scale target:
+`powered terminals=273, class nodes=163`, K=444, ledger `dropped=0` /
+`coarsening=0.0` / `test_fg_docs=45992` (healthy cardiovascular coverage via the
+climb), and a DEEP tree (`kept_by_depth` 0→10, mass at 5–6 — the within-branch
+regime where localization matched dense exactly in 0089). Fan-out maxed at 14,
+support/node at 24.
+
+**Then the fit died** collecting the head sufficient-statistic:
+`Total size of serialized results of 6 tasks (4.3 GiB) is bigger than
+spark.driver.maxResultSize (4.0 GiB)`. Root cause: the localized head localized the
+Newton SOLVE (indexing sub-blocks) but the Fisher was still EMITTED dense — each
+partition built and shipped the full `(C, K, K)` Hessian (the cost profile's
+`dense C*K^2 = 657.3MB`; ×6 tasks ≈ 4.3 GB). At 0089's K=101 that was 8 MB
+(invisible); at K=444 it OOMs; at Step B's K≈3,800 it is the 850 GB wall the whole
+localization was meant to dodge. **Localization was realized in compute, not in
+collection.**
+
+**Fix:** emit the Fisher as a compact padded `(C, S, S)` per-node block stack
+(S = max support = 24) instead of dense `(C, K, K)` — exact (each block is the dense
+Fisher's support sub-block, term-for-term; the padded tail is never read), ~2 MB
+instead of 690 MB/partition. The cost profile now reports the true collected size
+(`collected C*S^2`). Re-run pending.

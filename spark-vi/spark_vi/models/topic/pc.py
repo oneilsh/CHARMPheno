@@ -280,30 +280,57 @@ def _supervised_head_hessian(
     alpha_vec: np.ndarray,
     K: int,
     n_iters: int,
+    sup_pad: np.ndarray | None = None,
 ) -> np.ndarray:
     """Per-label NLL Hessian (Fisher information) of the logistic head over OBSERVED
     cells: ``H_c = Σ_d obs_dc · p_dc(1-p_dc) · outer(π_d, π_d)``, with ``π_d`` the SAME
     label-free CAVI mean the head gradient reads. Pairs with ``grad_wCK_stat`` (the NLL
     gradient ``g_c = Σ_d obs (p-y) π``) to form a per-iteration ridge-Newton (IRLS) head
-    step: both are additive doc-sums (aggregatable via combine_stats), fixed-size
-    ``(C, K, K)`` / ``(C, K)``, and — since the runner scales BOTH by corpus/batch — the
-    Newton solve ``H⁻¹g`` is scale-INVARIANT (the scaling cancels). One such step per SVI
-    iteration converges the logistic head on the current θ (Newton converges logistic in
-    a handful of steps), which is the aggregatable way to "converge the head aggressively
-    within each iteration" WITHOUT collecting raw per-doc θ to the driver.
+    step: both are additive doc-sums (aggregatable via combine_stats), and — since the
+    runner scales BOTH by corpus/batch — the Newton solve ``H⁻¹g`` is scale-INVARIANT
+    (the scaling cancels). One such step per SVI iteration converges the logistic head on
+    the current θ, the aggregatable way to converge the head WITHOUT collecting raw
+    per-doc θ to the driver.
+
+    ``sup_pad`` (``None`` = dense): the ``(C, S)`` padded topic-support index for the
+    LOCALIZED head. When given, only each node's support block is accumulated and the
+    emitted stat is ``(C, S, S)`` — for node c, ``H[c][:|s_c|, :|s_c|]`` is exactly the
+    dense Fisher's support sub-block ``H_dense[c][ix_(s_c, s_c)]`` (the padded tail is a
+    repeat of ``s_c[0]`` and is never read). This keeps the COLLECTED stat at ≈C·S²
+    floats instead of the dense C·K² (the whole-Mondo memory wall). ``None`` reproduces
+    the dense ``(C, K, K)`` byte-for-byte.
     """
     C = w_CK.shape[0]
-    H = np.zeros((C, K, K), dtype=np.float64)
+    if sup_pad is None:
+        H = np.zeros((C, K, K), dtype=np.float64)
+        for doc in rows:
+            obs = np.asarray(doc.label_mask, dtype=np.float64)
+            if obs.sum() == 0.0:
+                continue
+            theta = _cavi_theta_anp(
+                topics_repr[:, doc.indices], np.asarray(doc.counts, dtype=np.float64),
+                alpha_vec, K, n_iters)                          # (K,), plain numpy
+            p = 1.0 / (1.0 + np.exp(-np.clip(np.asarray(w_CK) @ theta, -50.0, 50.0)))
+            wt = obs * p * (1.0 - p)                            # (C,) observed IRLS weights
+            H += wt[:, None, None] * np.outer(theta, theta)[None, :, :]
+        return H
+
+    # LOCALIZED: accumulate only per-node support blocks, vectorized over C. theta_sup
+    # (C, S) gathers each node's support topics from the shared θ; the outer product is
+    # taken per node, never over all K, so no (C, K, K) array is ever allocated.
+    S = sup_pad.shape[1]
+    H = np.zeros((C, S, S), dtype=np.float64)
     for doc in rows:
         obs = np.asarray(doc.label_mask, dtype=np.float64)
         if obs.sum() == 0.0:
             continue
         theta = _cavi_theta_anp(
             topics_repr[:, doc.indices], np.asarray(doc.counts, dtype=np.float64),
-            alpha_vec, K, n_iters)                              # (K,), plain numpy
+            alpha_vec, K, n_iters)
         p = 1.0 / (1.0 + np.exp(-np.clip(np.asarray(w_CK) @ theta, -50.0, 50.0)))
-        wt = obs * p * (1.0 - p)                                # (C,) observed IRLS weights
-        H += wt[:, None, None] * np.outer(theta, theta)[None, :, :]
+        wt = obs * p * (1.0 - p)                                # (C,)
+        theta_sup = theta[sup_pad]                              # (C, S)
+        H += wt[:, None, None] * (theta_sup[:, :, None] * theta_sup[:, None, :])
     return H
 
 
@@ -445,11 +472,14 @@ class SupervisedHead:
                 s, obs, alpha_vec, K, n_iters))
         return loss
 
-    def batch_hessian(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
+    def batch_hessian(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters,
+                      sup_pad=None):
         """Closed-form per-label NLL Hessian if the flavor has one, else None.
 
         None signals the Newton/IRLS head to fall back (autograd Hessian or the SGD
         head step). :class:`FlatLogisticHead` provides the logistic Fisher info.
+        ``sup_pad`` (the localized-head padded support index) is honored by flavors
+        that emit a per-node block Fisher; None = dense.
         """
         return None
 
@@ -476,9 +506,10 @@ class FlatLogisticHead(SupervisedHead):
     def batch_value(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
         return _supervised_batch_value(topics_repr, w_CK, rows, alpha_vec, K, n_iters)
 
-    def batch_hessian(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
+    def batch_hessian(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters,
+                      sup_pad=None):
         return _supervised_head_hessian(
-            topics_repr, w_CK, rows, alpha_vec, K, n_iters)
+            topics_repr, w_CK, rows, alpha_vec, K, n_iters, sup_pad=sup_pad)
 
 
 class DagClosureHead(SupervisedHead):
@@ -548,7 +579,8 @@ class DagClosureHead(SupervisedHead):
         per_label = -(y * logP + (1.0 - y) * log1mP)                    # (C,) NLL
         return anp.sum(obs * per_label)
 
-    def batch_hessian(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters):
+    def batch_hessian(self, topics_repr, w_CK, rows, alpha_vec, K, n_iters,
+                      sup_pad=None):
         """EXACT per-node block Fisher (Gauss-Newton) for the closure-coupled head:
         ``H[a] = (1-p_a)^2 · Σ_{l: a∈closure(l)} obs_l·P_l/(1-P_l) · θθᵀ`` — see
         :func:`_dag_block_fisher`. Paired in ``update_global`` with the exact coupled
@@ -559,6 +591,12 @@ class DagClosureHead(SupervisedHead):
         Unlike the flat local Fisher it conditions INTERNAL nodes via their observed
         descendants. Off-diagonal coupling (the full (C·K)² Newton) is the only piece
         not captured.
+
+        NOTE: ``sup_pad`` (localized EMISSION) is not yet wired for this flavor — the
+        DAG-closure head still emits the dense (C, K, K) Fisher, so it hits the same
+        collect-size wall at large K as the flat head did before localized emission.
+        The with-dag-head arm is not run at whole-Mondo scale; localizing it is a
+        follow-up (the flat gated head is the Mondo case-finding path).
         """
         return _dag_block_fisher(
             topics_repr, w_CK, rows, alpha_vec, K, n_iters, self._closure_matrix)
@@ -781,11 +819,31 @@ class OnlinePCLDA(VIModel):
         # 41-anchor scale before whole-Mondo (exp 0089).
         if topic_support is None:
             self._topic_support = None
+            self._sup_pad = None
+            self._sup_size = None
         else:
             if len(topic_support) != self.C:
                 raise ValueError(
                     f"topic_support has {len(topic_support)} entries but C={self.C}")
             self._topic_support = [np.asarray(s, dtype=np.intp) for s in topic_support]
+            # Padded support index for the LOCALIZED Fisher EMISSION: the per-node
+            # Hessian is accumulated + collected as a compact (C, S, S) block stack
+            # (S = max support size), NOT the dense (C, K, K) — so the treeAggregate
+            # ships Σ_c pad(|s_c|)^2 ≈ C·S² floats, not C·K² (the whole-Mondo memory
+            # wall; insight 0071 in the COLLECTION, not just the solve). Row c is
+            # support[c] left-aligned and tail-padded with support[c][0] (a harmless
+            # repeat — only the real [:|s_c|, :|s_c|] block is ever read). All
+            # partitions share this fixed layout, so combine_stats sums them
+            # elementwise like any dense stat.
+            self._sup_size = np.array([len(s) for s in self._topic_support],
+                                      dtype=np.intp)
+            S = int(self._sup_size.max()) if self.C else 0
+            pad = np.zeros((self.C, max(S, 1)), dtype=np.intp)
+            for c, s in enumerate(self._topic_support):
+                if len(s):
+                    pad[c, :len(s)] = s
+                    pad[c, len(s):] = s[0]
+            self._sup_pad = pad
         # Driver-side global-step counter, used only for weight_y warmup. Bumped
         # once per update_global call (the runner drives that single-threaded on
         # the driver), so it is a faithful iteration index without threading t
@@ -914,7 +972,8 @@ class OnlinePCLDA(VIModel):
             # other dense stat. grad_wCK_stat is the paired gradient. None when the
             # flavor has no closed form (the DAG head → autograd/SGD fallback).
             hess = self._head.batch_hessian(
-                expElogbeta, w_CK, rows, alpha_vec, self.K, self.grad_cavi_iters)
+                expElogbeta, w_CK, rows, alpha_vec, self.K, self.grad_cavi_iters,
+                sup_pad=self._sup_pad)
             if hess is not None:
                 stats["head_hess_stat"] = hess
         return stats
@@ -1064,11 +1123,19 @@ class OnlinePCLDA(VIModel):
             new_w = w_CK.copy()
             for c in range(self.C):
                 # LOCALIZED head: solve only over node c's topic support (its gated
-                # block + ancestors); w_c stays 0 off-support (new_w is a copy of the
-                # 0-initialized w_CK). Numerically identical to solving the full K×K
-                # Fisher's support sub-block, at O(|support|^3) — the Mondo scale fix.
+                # block + ancestors + siblings); w_c stays 0 off-support (new_w is a
+                # copy of the 0-initialized w_CK). Numerically identical to solving the
+                # full K×K Fisher's support sub-block, at O(|support|^3) — the Mondo
+                # scale fix. With localized EMISSION the collected stat is already the
+                # compact (C, S, S) block stack: node c's Fisher is the real
+                # H_CKK[c][:|s_c|, :|s_c|] block (padded tail ignored), so no dense
+                # (K,K) sub-block indexing is needed (or possible).
                 sup = None if self._topic_support is None else self._topic_support[c]
-                Hc = H_CKK[c] if sup is None else H_CKK[c][np.ix_(sup, sup)]
+                if sup is None:
+                    Hc = H_CKK[c]
+                else:
+                    s = len(sup)
+                    Hc = H_CKK[c][:s, :s]
                 wc = w_CK[c] if sup is None else w_CK[c][sup]
                 gc = g_CK[c] if sup is None else g_CK[c][sup]
                 d = self.K if sup is None else len(sup)

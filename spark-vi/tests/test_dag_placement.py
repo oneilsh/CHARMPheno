@@ -825,8 +825,13 @@ def test_cost_report_flags_support_and_dense_vs_localized():
     assert d["C"] == 7 and d["K"] == 8
     assert d["support_max"] <= d["K"]                       # never exceeds K
     assert d["localized_head_mem_bytes"] <= d["dense_head_mem_bytes"]
+    # collected = the padded (C, S, S) actually emitted: packed floor <= collected
+    # <= dense wall (this is the size that hits driver.maxResultSize).
+    assert d["collected_head_mem_bytes"] == 7 * d["support_max"] ** 2 * 8
+    assert (d["localized_head_mem_bytes"] <= d["collected_head_mem_bytes"]
+            <= d["dense_head_mem_bytes"])
     assert d["lambda_bytes"] == 8 * 100 * 8                 # K*V*8
-    assert "SIZE/COST PROFILE" in s and "support/node" in s
+    assert "SIZE/COST PROFILE" in s and "support/node" in s and "collected" in s
 
     # flat high-fan-out: 6 nodes all under root -> each sees ~5 siblings ~ K.
     flat = {c: 0 for c in range(1, 7)}
