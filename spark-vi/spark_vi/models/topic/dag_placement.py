@@ -105,6 +105,69 @@ class DagLayout:
                     al.update(self.block[sib])
         return np.array(sorted(al), dtype=int)
 
+    def cost_report(self, C, *, vocab_size=None, localized=True):
+        """PRE-FLIGHT size/cost profile for a gated-PC fit over this layout — logged at
+        the data-build boundary so a big (e.g. whole-Mondo) fit's cost is visible BEFORE
+        compute is committed. Reports: fan-out (children/parent), K/C, per-node head
+        SUPPORT sizes (with siblings when localized — the quantity that drives per-node
+        Newton cost and can blow up on a high-fan-out parent), and the head Fisher
+        memory/compute DENSE (C·K²/C·K³) vs LOCALIZED (Σ|s|²/Σ|s|³). Pure numpy; returns
+        (metrics dict, formatted str)."""
+        K = self.K
+        fan = np.array([len(ch) for ch in self.children.values() if ch] or [0],
+                       dtype=float)
+        # support over the ACTUAL label nodes (root 0 + non-root nodes), robust to a
+        # non-contiguous id map; in production ids are contiguous so this == range(C).
+        node_ids = [0] + list(self.nodes)
+        supp = np.array(
+            [len(self.allowed_with_siblings(c) if localized else self.allowed(c))
+             for c in node_ids], dtype=float)
+
+        def _q(a, p):
+            return float(np.percentile(a, p))
+
+        smax, sarg = int(supp.max()), int(supp.argmax())
+        dense_mem, dense_flop = C * K * K * 8, float(C) * K ** 3
+        loc_mem, loc_flop = float((supp ** 2).sum()) * 8, float((supp ** 3).sum())
+        lam = (K * int(vocab_size) * 8) if vocab_size else None
+        d = {"C": C, "K": K, "n_nodes": len(self.nodes),
+             "fanout_max": int(fan.max()), "fanout_p90": _q(fan, 90),
+             "fanout_p99": _q(fan, 99), "support_max": smax, "support_argmax": sarg,
+             "support_p50": _q(supp, 50), "support_p90": _q(supp, 90),
+             "support_p99": _q(supp, 99), "dense_head_mem_bytes": dense_mem,
+             "dense_head_flop": dense_flop, "localized_head_mem_bytes": loc_mem,
+             "localized_head_flop": loc_flop, "per_node_max_flop": float(smax) ** 3,
+             "lambda_bytes": lam}
+
+        def _hb(b):
+            if b is None:
+                return "n/a"
+            for u in ("B", "KB", "MB", "GB", "TB"):
+                if b < 1024:
+                    return f"{b:.1f}{u}"
+                b /= 1024
+            return f"{b:.1f}PB"
+
+        lines = [
+            "=" * 74,
+            f"GATED-PC SIZE/COST PROFILE  C={C} labels  K={K} topics "
+            f"({self.n_bg} bg + {len(self.nodes)} nodes x {self.tpn} tpn)  "
+            f"[head={'localized+siblings' if localized else 'dense'}]",
+            f"  fan-out (children/parent):  max={int(fan.max())}  "
+            f"p90={_q(fan, 90):.0f}  p99={_q(fan, 99):.0f}",
+            f"  head support/node:          max={smax} (node {sarg})  "
+            f"p50={_q(supp, 50):.0f}  p90={_q(supp, 90):.0f}  p99={_q(supp, 99):.0f}",
+            f"  head Fisher MEMORY:  dense C*K^2={_hb(dense_mem)}   "
+            f"localized Sum|s|^2={_hb(loc_mem)}   "
+            f"({dense_mem / max(loc_mem, 1):.0f}x smaller)",
+            f"  head SOLVE/iter:     dense C*K^3={dense_flop:.2e}   "
+            f"localized Sum|s|^3={loc_flop:.2e}   max node |s|^3={float(smax) ** 3:.2e}",
+        ]
+        if lam is not None:
+            lines.append(f"  lambda (K*V*8):             {_hb(lam)}")
+        lines.append("=" * 74)
+        return d, "\n".join(lines)
+
     def allowed_set(self, frontier):
         """Background ∪ blocks over the union of closures of the frontier nodes (set-valued gate)."""
         al = set(range(self.n_bg))
