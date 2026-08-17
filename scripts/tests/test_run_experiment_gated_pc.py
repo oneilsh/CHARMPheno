@@ -102,3 +102,24 @@ def test_head_config_round_trips_frontmatter_to_shim_estimator(monkeypatch):
     assert est.getOrDefault("headL2") == 0.01
     model, _ = _build_model_and_config(est, vocab_size=8)
     assert model.head_l2 == 0.01 and model.head_optimizer == "newton"
+
+
+def test_mondo_probe_route(monkeypatch):
+    """model_class=mondo_probe validates, resolves to the coverage-probe driver, and
+    builds argv with cdr/billing from the workspace env + frontmatter knobs."""
+    mod = _run_exp(monkeypatch)
+    mod.validate_frontmatter({
+        "id": 86, "slug": "mondo-coverage", "cohort": "population_rare_priority",
+        "model_class": "mondo_probe"})
+    assert mod.build_fit_driver_path({"model_class": "mondo_probe"}) \
+        == "analysis/cloud/mondo_coverage_probe.py"
+    eff = {"model_class": "mondo_probe", "person_mod": 20,
+           "mondo_map_table": "proj.ds.mondo_snomed_map",
+           "support_thresholds": "20,100"}
+    args = mod.build_fit_args(eff, "/out")
+    assert args[args.index("--cdr") + 1] == "proj.ds"
+    assert args[args.index("--billing") + 1] == "bill"
+    assert args[args.index("--person-mod") + 1] == "20"
+    assert args[args.index("--mondo-map-table") + 1] == "proj.ds.mondo_snomed_map"
+    assert args[args.index("--support-thresholds") + 1] == "20,100"
+    assert args[args.index("--out-dir") + 1] == "/out"

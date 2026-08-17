@@ -269,10 +269,11 @@ def validate_frontmatter(fm: dict) -> None:
             sys.exit(2)
 
     model_class = fm["model_class"]
-    if model_class not in ("lda", "stm", "dag_placement", "pc", "gated_pc"):
+    if model_class not in ("lda", "stm", "dag_placement", "pc", "gated_pc",
+                           "mondo_probe"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
-              f"(currently: lda, stm, dag_placement, pc, gated_pc; hdp planned)",
-              flush=True)
+              f"(currently: lda, stm, dag_placement, pc, gated_pc, mondo_probe; "
+              f"hdp planned)", flush=True)
         sys.exit(2)
 
     if model_class == "stm":
@@ -298,6 +299,8 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/pc_antidepressant_cloud.py"
     if model_class == "gated_pc":
         return f"{base}/gated_pc_cloud.py"
+    if model_class == "mondo_probe":
+        return f"{base}/mondo_coverage_probe.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
@@ -321,7 +324,28 @@ def build_fit_args(
         return build_pc_args(effective, out_dir, resume_from)
     if model_class == "gated_pc":
         return build_gated_pc_args(effective, out_dir, resume_from)
+    if model_class == "mondo_probe":
+        return build_mondo_probe_args(effective, out_dir)
     raise ValueError(f"unknown model_class: {model_class!r}")
+
+
+def build_mondo_probe_args(effective: dict, out_dir: str) -> list[str]:
+    """argv for analysis/cloud/mondo_coverage_probe.py (a BQ-only coverage probe,
+    not a model fit). cdr/billing come from the workspace env; everything else is
+    frontmatter."""
+    cdr, billing = _require_workspace_env()
+    args = [
+        "--cdr", cdr,
+        "--billing", billing,
+        "--person-mod", str(effective.get("person_mod", 20)),
+        "--support-thresholds", str(effective.get("support_thresholds", "20,50,100,500")),
+        "--out-dir", str(out_dir),
+    ]
+    if effective.get("mondo_map_table"):
+        args += ["--mondo-map-table", str(effective["mondo_map_table"])]
+    if effective.get("anchors"):
+        args += ["--anchors", str(effective["anchors"])]
+    return args
 
 
 def _norm_cohort(c):

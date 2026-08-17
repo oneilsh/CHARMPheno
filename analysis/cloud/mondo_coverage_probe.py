@@ -81,14 +81,19 @@ def main():
     ap.add_argument("--person-mod", type=int, default=20,
                     help="sample: keep persons with MOD(person_id, N)==0 (N=20 -> ~5%%)")
     ap.add_argument("--mondo-map-table", default="",
-                    help="optional BQ table (descendant SNOMED concept_id -> mondo) if "
-                         "Mondo is NOT in the CDR vocab; columns: snomed_concept_id, "
-                         "mondo_curie. If empty, Mondo mapping is built from the CDR "
-                         "concept_relationship when Mondo is present in the vocab.")
+                    help="BYO Mondo mapping BQ table (CDR vocab has no Mondo). Accepts "
+                         "EITHER a `snomed_code` column (bare SNOMED CT SCTID as string, "
+                         "as in the Mondo SSSOM object_id — joined to concept.concept_code "
+                         "here) OR a pre-resolved `snomed_concept_id` column, plus an "
+                         "optional `mondo_id`. If empty, Mondo mapping is built from the "
+                         "CDR concept_relationship when Mondo IS present in the vocab.")
     ap.add_argument("--anchors", default="",
                     help="comma-separated OMOP concept_ids for the current-anchor row; "
                          "defaults to cohorts._RARE_PRIORITY_ANCESTORS")
     ap.add_argument("--support-thresholds", default="20,50,100,500")
+    ap.add_argument("--out-dir", default="",
+                    help="optional; if set, the report is also written to "
+                         "<out-dir>/mondo_coverage_report.txt (harness contract).")
     args = ap.parse_args()
 
     from pyspark.sql import SparkSession, functions as F
@@ -102,7 +107,8 @@ def main():
 
     # --- distinct (person, standard-condition) over the sample ---
     concept = read("concept").select(
-        "concept_id", "concept_name", "standard_concept", "vocabulary_id", "domain_id")
+        "concept_id", "concept_name", "concept_code",
+        "standard_concept", "vocabulary_id", "domain_id")
     std_cond = concept.where((F.col("domain_id") == "Condition")
                              & (F.col("standard_concept") == "S")).select(
         F.col("concept_id").alias("std_cid"))
@@ -128,15 +134,30 @@ def main():
 
     # --- Stage B: Mondo landing. Build the target SNOMED set (SNOMED concepts that carry
     #     a Mondo mapping), then roll patient conditions up to it. ---
-    mondo_targets = None          # DataFrame[snomed_concept_id]
+    mondo_targets = None          # DataFrame[t_cid]  (target SNOMED OMOP concept_ids)
     mondo_source = None
     if args.mondo_map_table.strip():
-        mondo_targets = (spark.read.format("bigquery")
-                         .option("table", args.mondo_map_table)
-                         .option("parentProject", args.billing).load()
-                         .select(F.col("snomed_concept_id").alias("t_cid"),
-                                 F.col("mondo_curie")))
-        mondo_source = f"side table {args.mondo_map_table}"
+        raw = (spark.read.format("bigquery")
+               .option("table", args.mondo_map_table)
+               .option("parentProject", args.billing).load())
+        cols = set(raw.columns)
+        if "snomed_concept_id" in cols:
+            # pre-resolved to OMOP concept_ids
+            mondo_targets = raw.select(F.col("snomed_concept_id").alias("t_cid")).distinct()
+            mondo_source = f"side table {args.mondo_map_table} (snomed_concept_id)"
+        elif "snomed_code" in cols:
+            # SSSOM shape: resolve the SNOMED CT code -> standard OMOP SNOMED concept_id
+            snomed = concept.where((F.col("vocabulary_id") == "SNOMED")
+                                   & (F.col("standard_concept") == "S")).select(
+                F.col("concept_code").alias("c_code"), F.col("concept_id").alias("t_cid"))
+            mondo_targets = (raw.select(F.col("snomed_code").cast("string").alias("c_code"))
+                             .distinct()
+                             .join(snomed, "c_code", "inner").select("t_cid").distinct())
+            mondo_source = f"side table {args.mondo_map_table} (snomed_code -> concept_code)"
+        else:
+            raise SystemExit(
+                f"--mondo-map-table {args.mondo_map_table} must have a `snomed_code` or "
+                f"`snomed_concept_id` column; got {sorted(cols)}")
     else:
         # Detect Mondo in the CDR vocab.
         n_mondo_concepts = concept.where(
@@ -180,32 +201,48 @@ def main():
     def pct(n):
         return f"{100.0 * n / n_total:6.2f}%" if n_total else "   n/a"
 
-    print("=" * 74, flush=True)
-    print(f"MONDO/SNOMED PLACEMENT COVERAGE PROBE   sample MOD(person_id,{args.person_mod})==0",
-          flush=True)
-    print("=" * 74, flush=True)
-    print(f"  patients (sampled)                       {n_total:>10d}   100.00%", flush=True)
-    print(f"  has >=1 standard condition code          {n_any_condition:>10d}   {pct(n_any_condition)}"
-          f"   (complement = no-code residual)", flush=True)
-    print(f"  rolls up to SNOMED Disease hierarchy     {n_disease:>10d}   {pct(n_disease)}"
-          f"   (SNOMED placeability CEILING)", flush=True)
-    print(f"  under the {len(anchor_ids)} current anchors           {n_anchor:>10d}   {pct(n_anchor)}"
-          f"   (status-quo foreground)", flush=True)
+    lines = [
+        "=" * 74,
+        f"MONDO/SNOMED PLACEMENT COVERAGE PROBE   sample MOD(person_id,{args.person_mod})==0",
+        "=" * 74,
+        f"  patients (sampled)                       {n_total:>10d}   100.00%",
+        f"  has >=1 standard condition code          {n_any_condition:>10d}   "
+        f"{pct(n_any_condition)}   (complement = no-code residual)",
+        f"  rolls up to SNOMED Disease hierarchy     {n_disease:>10d}   {pct(n_disease)}"
+        f"   (SNOMED placeability CEILING)",
+        f"  under the {len(anchor_ids)} current anchors           {n_anchor:>10d}   "
+        f"{pct(n_anchor)}   (status-quo foreground)",
+    ]
     if n_mondo is not None:
-        print(f"  placed on a Mondo-mapped node (rollup)    {n_mondo:>10d}   {pct(n_mondo)}"
-              f"   (HEADLINE: proposed foreground)   [{mondo_source}]", flush=True)
-        print(f"  residual: has codes, NO Mondo mapping    {n_disease - n_mondo:>10d}   "
-              f"{pct(max(n_disease - n_mondo, 0))}   (Mondo-incompleteness gap)", flush=True)
+        lines.append(
+            f"  placed on a Mondo-mapped node (rollup)    {n_mondo:>10d}   {pct(n_mondo)}"
+            f"   (HEADLINE: proposed foreground)   [{mondo_source}]")
+        lines.append(
+            f"  residual: has codes, NO Mondo mapping    {n_disease - n_mondo:>10d}   "
+            f"{pct(max(n_disease - n_mondo, 0))}   (Mondo-incompleteness gap)")
     else:
-        print("  Mondo landing: SKIPPED — Mondo not in the CDR vocab and no "
-              "--mondo-map-table given.", flush=True)
-    print(f"  residual: truly healthy (no codes)       {n_total - n_any_condition:>10d}   "
-          f"{pct(n_total - n_any_condition)}   (irreducible background floor)", flush=True)
+        lines.append("  Mondo landing: SKIPPED — Mondo not in the CDR vocab and no "
+                     "--mondo-map-table given.")
+    lines.append(
+        f"  residual: truly healthy (no codes)       {n_total - n_any_condition:>10d}   "
+        f"{pct(n_total - n_any_condition)}   (irreducible background floor)")
     if support_hist:
-        print("  node support (Mondo-placed) — #target nodes with >= T placed patients:",
-              flush=True)
-        print("    " + "   ".join(f"T>={t}: {c}" for t, c in support_hist.items()), flush=True)
-    print("=" * 74, flush=True)
+        lines.append("  node support (Mondo-placed) — #target nodes with >= T placed patients:")
+        lines.append("    " + "   ".join(f"T>={t}: {c}" for t, c in support_hist.items()))
+    lines.append("=" * 74)
+
+    report = "\n".join(lines)
+    print(report, flush=True)
+    if args.out_dir.strip():
+        # harness contract: leave an artifact in out_dir (the summary is also teed
+        # from stdout by run_experiment). Best-effort; both local and gs:// paths.
+        try:
+            dest = args.out_dir.rstrip("/") + "/mondo_coverage_report.txt"
+            spark.createDataFrame([(report,)], ["report"]).coalesce(1).write.mode(
+                "overwrite").text(dest)
+        except Exception as e:  # noqa: BLE001 — never fail the probe on the artifact write
+            print(f"[probe] (could not write report artifact to {args.out_dir}: {e})",
+                  flush=True)
     spark.stop()
 
 
