@@ -91,6 +91,20 @@ class DagLayout:
                 al += self.block[u]
         return np.array(sorted(al), dtype=int)
 
+    def allowed_with_siblings(self, v):
+        """`allowed(v)` PLUS the blocks of v's SIBLINGS (the other children of v's
+        parents). This is the topic support a LOCALIZED conditional head needs: to rank
+        v against the siblings it is scored against (the closure objective's contrast
+        set), the head must read their topics, not just v's own block + ancestors —
+        without them the wide top level collapses to chance (exp 0089 run 1). Still
+        O(depth + local fan-out) ≪ K, so the per-node head stays cheap at whole-Mondo."""
+        al = set(int(k) for k in self.allowed(v))
+        for p in self.parents.get(v, []):
+            for sib in self.children.get(p, []):
+                if sib != v and sib != 0:
+                    al.update(self.block[sib])
+        return np.array(sorted(al), dtype=int)
+
     def allowed_set(self, frontier):
         """Background ∪ blocks over the union of closures of the frontier nodes (set-valued gate)."""
         al = set(range(self.n_bg))
