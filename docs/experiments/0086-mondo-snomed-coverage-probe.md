@@ -2,52 +2,68 @@
 id: 86
 slug: mondo-snomed-coverage-probe
 status: pending
-model_class: mondo_probe
-# NOT a model fit — a BQ-only placement-coverage probe (analysis/cloud/
-# mondo_coverage_probe.py) that sizes the Mondo-backbone redesign: how many
-# currently-"background" patients get placed on a real disease node as the target set
-# expands from the 41 anchors -> the Mondo-mapped hierarchy (via the SNOMED-climb
-# roll-up), and how big the truly-healthy residual is.
-cohort: population_rare_priority   # vestigial (validation only; probe ignores it)
-person_mod: 20                     # ~5% sample; drop to 1 for the full number
-support_thresholds: "20,50,100,500"
-# BYO Mondo mapping (CDR vocab has NO Mondo). EDIT this to your staged table (see
-# "Stage the mapping" below). Table needs a `snomed_code` column (bare SNOMED CT SCTID
-# string, from the Mondo SSSOM object_id) — the probe resolves it to OMOP concept_ids.
-mondo_map_table: "REPLACE.with.your_mondo_snomed_map"
+model_class: anchor_select
+# NOT a model fit — the expanded-SNOMED anchor-selection pipeline
+# (analysis/cloud/anchor_selection_cloud.py; design spec
+# 2026-07-31-expanded-snomed-anchor-selection-design.md) run as an exp. Maps the
+# Monarch dismech #1079 seed (760 MONDO ids) -> OMOP standard-condition anchors via
+# the faithful mondo2omop port, counts distinct persons per anchor, and (added here)
+# prints a WHOLE-POPULATION COVERAGE LADDER: total / placeable-ceiling / placed-under-
+# seed / healthy-residual / ceiling-seed gap. Sizes the Mondo-backbone redesign
+# (detection = top-of-tree conditional) before we build it.
+cohort: population_rare_priority   # vestigial (validation only; driver ignores it)
+min_positives: 100                 # anchor power floor (spec default)
+mondo_version: "2026-06-02"        # Mondo release the driver auto-downloads
+mondo_cache_dir: "data/mondo"
+# seed_tsv defaults to analysis/cloud/anchor_selection_data/priority_seed.tsv
 ---
 
-# 0086 — Mondo/SNOMED placement-coverage probe
+# 0086 — Mondo/SNOMED anchor-selection + placement-coverage ladder
 
-Read-only. Answers, before we build anything: **does the Mondo-backbone redesign
-actually rescue background patients onto real disease nodes, and what does insisting on
-Mondo cost?** Produces a coverage ladder + a node-support histogram. See the use-case
-discussion (detection = top-of-tree conditional; the synthetic-background problem).
+Reuses the existing on-cluster anchor-selection pipeline (cherry-picked from
+`claude/hybrid-domain-reliability-review-ckn2bq`) rather than a hand-rolled probe.
+The driver auto-downloads the Mondo release, so there is **no manual SSSOM staging** —
+the one external dependency (MONDO↔OMOP) is handled by the faithful `mondo2omop` port.
 
-## Stage the mapping (one-time, in your AoU workbench)
+Answers, before we build the redesign: **how many patients get placed on a real disease
+node, and how big is the truly-healthy residual?** (See the use-case discussion:
+detection = the top edge of one all-conditional tree.)
 
-The CDR vocab has no Mondo, so bring the Mondo↔SNOMED mapping as a side table:
+## What it produces
 
-1. Grab **`mondo.sssom.tsv`** from the Mondo release
-   (https://github.com/monarch-initiative/mondo/releases → `mondo.sssom.tsv`).
-2. Keep rows whose `object_id` is SNOMED (e.g. `SNOMEDCT_US:xxxxxxxx`) and a real
-   match predicate (`skos:exactMatch`, optionally `skos:closeMatch`). Extract the bare
-   SCTID (the part after the colon) as **`snomed_code`** (string), keep `subject_id` as
-   **`mondo_id`**.
-3. Load that two-column table into BQ (e.g. `yourproj.yourds.mondo_snomed_map`), and set
-   `mondo_map_table` in the frontmatter above to its fully-qualified name.
+1. `candidates_with_counts.tsv` (+ `.mapping.tsv`, `.ancestry.tsv`) in the run dir:
+   one row per OMOP anchor — MONDO ids/labels/#1079 categories, `positive_count`
+   (distinct persons with ≥1 in-subtree condition), `clears_floor`, `is_maximal`.
+2. A **coverage ladder** in the run log (`[coverage]` lines, teed to `summary.md`):
 
-The probe joins `snomed_code` → `concept.concept_code` (vocabulary_id='SNOMED',
-standard) to resolve OMOP concept_ids, then rolls each patient's condition codes UP via
-`concept_ancestor` to any mapped ancestor (so an unmapped leaf still lands at a mapped
-parent — the SNOMED-climb trick). `closeMatch` inflates coverage slightly; start with
-`exactMatch` only if you want the conservative number.
+```
+persons (total)                100.00%
+has >=1 condition code         placeability CEILING (needs no Mondo; complement = no-code residual)
+placed under the N seed anchors current priority-rare foreground
+residual: no condition code    irreducible healthy floor
+gap: ceiling - seed            placeable but NOT under the 760-disease seed -> whole-Mondo opportunity
+```
 
-> Verify once: `SNOMED_DISEASE = 4274025` (SNOMED "Disease") is the assumed
-> disease-hierarchy root in the probe. Confirm with
-> `SELECT concept_id, concept_name FROM concept WHERE concept_code='64572001' AND
-> vocabulary_id='SNOMED'`; if your vocab pins a different concept, change the one
-> constant in `mondo_coverage_probe.py`.
+## What to read
+
+- **`gap: ceiling − seed`** is the headline: patients who have a codeable disease but
+  are NOT captured by the 760 rare-disease seed — the population the whole-Mondo backbone
+  would place (and today are dumped in the synthetic background). Large gap ⇒ the
+  detection-as-top-of-tree redesign has real payoff.
+- **healthy residual** (no condition code) sizes the irreducible "no-disease" class —
+  the NOS/exclude decision.
+- **Validate the mapping first:** the per-anchor counts must reproduce the known rare6
+  numbers (SLE ~6500, MG ~1100, amyloidosis ~1500) — a regression check on the port
+  before trusting new-anchor counts (spec §Testing).
+
+## Scope note
+
+This run is the **760-disease priority seed** (`restrict_mondo_ids=seed`). It validates
+the mapping + gives the ceiling/residual, but "placed under seed" is only the rare-disease
+foreground — the ceiling−seed gap is what **whole-Mondo** (`restrict_mondo_ids=None`) would
+fill. Whole-Mondo is the follow-up once this validates (it needs the
+`concept_relationship` filter switched from an IN-list to a join for scale — flagged, not
+yet done).
 
 ## Run
 
@@ -56,25 +72,8 @@ cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp &
   make -C analysis/cloud exp ID=86
 ```
 
-The report prints to the run log (teed to `summary.md`) — copy/paste the block back.
-
-## What the ladder means
-
-```
-has >=1 standard condition code     complement = truly-healthy / no-code residual
-rolls up to SNOMED Disease          PLACEABILITY CEILING (needs no Mondo at all)
-under the 41 anchors                status-quo foreground (what we place today)
-placed on a Mondo-mapped node       HEADLINE: proposed foreground
-residual: has codes, NO Mondo map   the Mondo-incompleteness tax (your worry, quantified)
-residual: truly healthy (no codes)  the irreducible background floor
-node support (>=T patients)         sizes the tree / K at each min-patient threshold
-```
-
-Decision reads: **ceiling − anchors** = background patients the redesign can rescue;
-**ceiling − Mondo landing** = the cost of insisting on Mondo (small ⇒ Mondo ~free;
-large ⇒ lean on the SNOMED-climb or accept fall-through); **node support** ⇒ whether the
-min-patient filter alone prunes to roughly your ~2,000-priority scale.
+Copy/paste the `[coverage]` block + the top of `candidates_with_counts.tsv` back.
 
 ## Run log
 
-_(pending — paste the `MONDO/SNOMED PLACEMENT COVERAGE PROBE` block)_
+_(pending — paste the `[coverage]` ladder + rare6 count validation)_
