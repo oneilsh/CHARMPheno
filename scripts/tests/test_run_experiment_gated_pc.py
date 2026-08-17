@@ -104,22 +104,21 @@ def test_head_config_round_trips_frontmatter_to_shim_estimator(monkeypatch):
     assert model.head_l2 == 0.01 and model.head_optimizer == "newton"
 
 
-def test_mondo_probe_route(monkeypatch):
-    """model_class=mondo_probe validates, resolves to the coverage-probe driver, and
-    builds argv with cdr/billing from the workspace env + frontmatter knobs."""
+def test_anchor_select_route(monkeypatch):
+    """model_class=anchor_select validates, resolves to the anchor-selection driver,
+    and builds argv (cdr/billing from workspace env + seed/min-positives)."""
     mod = _run_exp(monkeypatch)
     mod.validate_frontmatter({
         "id": 86, "slug": "mondo-coverage", "cohort": "population_rare_priority",
-        "model_class": "mondo_probe"})
-    assert mod.build_fit_driver_path({"model_class": "mondo_probe"}) \
-        == "analysis/cloud/mondo_coverage_probe.py"
-    eff = {"model_class": "mondo_probe", "person_mod": 20,
-           "mondo_map_table": "proj.ds.mondo_snomed_map",
-           "support_thresholds": "20,100"}
+        "model_class": "anchor_select"})
+    assert mod.build_fit_driver_path({"model_class": "anchor_select"}) \
+        == "analysis/cloud/anchor_selection_cloud.py"
+    eff = {"model_class": "anchor_select", "min_positives": 100,
+           "mondo_version": "2026-06-02"}
     args = mod.build_fit_args(eff, "/out")
     assert args[args.index("--cdr") + 1] == "proj.ds"
     assert args[args.index("--billing") + 1] == "bill"
-    assert args[args.index("--person-mod") + 1] == "20"
-    assert args[args.index("--mondo-map-table") + 1] == "proj.ds.mondo_snomed_map"
-    assert args[args.index("--support-thresholds") + 1] == "20,100"
-    assert args[args.index("--out-dir") + 1] == "/out"
+    assert args[args.index("--min-positives") + 1] == "100"
+    assert args[args.index("--mondo-version") + 1] == "2026-06-02"
+    assert args[args.index("--out") + 1] == "/out/candidates_with_counts.tsv"
+    assert args[args.index("--seed-tsv") + 1].endswith("priority_seed.tsv")

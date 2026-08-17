@@ -1,0 +1,794 @@
+mondo_id	label	category	prevalence_per_100k_us	prioritization_category
+MONDO:0010382	fragile X-associated tremor/ataxia syndrome	Neurodegenerative		initial
+MONDO:0010382	fragile X-associated tremor/ataxia syndrome	Neurodevelopmental		initial
+MONDO:0008056	myotonic dystrophy type 1	Cardiac		initial
+MONDO:0008564	DiGeorge syndrome	Cardiac		initial
+MONDO:0008678	Williams syndrome	Neurodevelopmental		initial
+MONDO:0007947	Marfan syndrome	Cardiac		initial
+MONDO:0010526	Fabry disease	Cardiac		initial
+MONDO:0007534	Beckwith-Wiedemann syndrome	Cardiac		initial
+MONDO:0010383	fragile X syndrome	Neurodevelopmental		initial
+MONDO:0001734	tuberous sclerosis	Neurodevelopmental		initial
+MONDO:0002442	long QT syndrome	Cardiac		initial
+MONDO:0004976	amyotrophic lateral sclerosis	Neurodegenerative		initial
+MONDO:0007488	Lewy body dementia	Neurodegenerative		initial
+MONDO:0008585	HELLP syndrome	Cardiac		initial
+MONDO:0009688	myasthenia gravis	Neuroimmune		initial
+MONDO:0015924	pulmonary arterial hypertension	Cardiac		initial
+MONDO:0016218	Guillain-Barre syndrome	Neuroimmune		initial
+MONDO:0016587	arrhythmogenic right ventricular cardiomyopathy	Cardiac		initial
+MONDO:0017276	frontotemporal dementia	Neurodegenerative		initial
+MONDO:0018097	infantile spasms	Cardiac		initial
+MONDO:0018097	infantile spasms	Neurodevelopmental		initial
+MONDO:0018920	peripartum cardiomyopathy	Cardiac		initial
+MONDO:0019079	proximal spinal muscular atrophy	Neurodegenerative		initial
+MONDO:0019180	hereditary hemorrhagic telangiectasia	Cardiac		initial
+MONDO:0015263	Brugada syndrome	Cardiac	0.0005	initial
+MONDO:0100062	genetic developmental and epileptic encephalopathy	Neurodevelopmental		initial
+MONDO:0005396	thoracic aortic aneurysm	Cardiac		initial
+MONDO:0005439	familial hypercholesterolemia	Cardiac		initial
+MONDO:0015140	early-onset autosomal dominant Alzheimer disease	Neurodegenerative	5.3e-05	initial
+MONDO:0024573	familial hypertrophic cardiomyopathy	Cardiac		initial
+MONDO:0010247	X-linked cerebral adrenoleukodystrophy	Neurodegenerative	6e-05	initial
+MONDO:0005301	multiple sclerosis	Neuroimmune		initial
+MONDO:0012727	Kawasaki disease	Cardiac		initial
+MONDO:0018838	lissencephaly spectrum disorders	Neurodevelopmental		initial
+MONDO:0016820	Moyamoya disease	Cardiac		initial
+MONDO:0009265	Gaucher disease type I	Cardiac		initial
+MONDO:0011017	Naxos disease	Cardiac	1e-05	initial
+MONDO:0008840	ataxia telangiectasia	Neurodegenerative		initial
+MONDO:0009282	multiple acyl-CoA dehydrogenase deficiency	Cardiac		initial
+MONDO:0009290	glycogen storage disease II	Cardiac		initial
+MONDO:0000914	cerebral arteriopathy, autosomal dominant, with subcortical infarcts and leukoencephalopathy, type 1	Cardiac		initial
+MONDO:0007739	Huntington disease	Neurodegenerative		initial
+MONDO:0009499	Krabbe disease	Neurodegenerative		initial
+MONDO:0008458	spinocerebellar ataxia type 2	Neurodegenerative		initial
+MONDO:0008457	spinocerebellar ataxia type 6	Neurodegenerative		initial
+MONDO:0008457	spinocerebellar ataxia type 6	Neurodevelopmental		initial
+MONDO:0008965	CHARGE syndrome	Cardiac		initial
+MONDO:0010726	Rett syndrome	Neurodegenerative		initial
+MONDO:0010726	Rett syndrome	Neurodevelopmental		initial
+MONDO:0014382	Tatton-Brown-Rahman overgrowth syndrome	Neurodevelopmental	1e-06	initial
+MONDO:0011518	Wiedemann-Steiner syndrome	Neurodevelopmental		initial
+MONDO:0009509	Landau-Kleffner syndrome	Neurodevelopmental	1e-05	initial
+MONDO:0010788	Leber hereditary optic neuropathy	Cardiac		initial
+MONDO:0008723	very long chain acyl-CoA dehydrogenase deficiency	Cardiac		initial
+MONDO:0012173	long chain 3-hydroxyacyl-CoA dehydrogenase deficiency	Cardiac		initial
+MONDO:0018544	adrenoleukodystrophy	Neurodegenerative		initial
+MONDO:0010787	Kearns-Sayre syndrome	Cardiac		initial
+MONDO:0013523	Nestor-Guillermo progeria syndrome	Neurodevelopmental	1e-06	initial
+MONDO:0007113	Angelman syndrome	Neurodevelopmental		initial
+MONDO:0008300	Prader-Willi syndrome	Neurodevelopmental		initial
+MONDO:0018997	Noonan syndrome	Cardiac		initial
+MONDO:0000437	cerebellar ataxia	Neurodegenerative		initial
+MONDO:0006702	chronic inflammatory demyelinating polyradiculoneuropathy	Neuroimmune	5.5e-05	initial
+MONDO:0007318	Alagille syndrome	Cardiac		initial
+MONDO:0007864	angioosteohypertrophic syndrome	Cardiac		initial
+MONDO:0009319	pantothenate kinase-associated neurodegeneration	Neurodegenerative	1e-09	initial
+MONDO:0009468	pseudotumor cerebri	Cardiac		initial
+MONDO:0010543	Barth syndrome	Cardiac	1e-08	initial
+MONDO:0010568	Aicardi syndrome	Neurodevelopmental		initial
+MONDO:0010765	46,XY complete gonadal dysgenesis	Cardiac		initial
+MONDO:0012105	granulomatosis with polyangiitis	Cardiac		initial
+MONDO:0015452	Coffin-Siris syndrome	Neurodevelopmental		initial
+MONDO:0015943	eosinophilic granulomatosis with polyangiitis	Cardiac		initial
+MONDO:0016295	neuronal ceroid lipofuscinosis	Neurodegenerative		initial
+MONDO:0016532	Lennox-Gastaut syndrome	Neurodevelopmental		initial
+MONDO:0016718	choroid plexus carcinoma	Cardiac		initial
+MONDO:0018954	Loeys-Dietz syndrome	Cardiac		initial
+MONDO:0019100	neuromyelitis optica	Neuroimmune		initial
+MONDO:0019124	microscopic polyangiitis	Cardiac		initial
+MONDO:0019262	juvenile neuronal ceroid lipofuscinosis	Neurodegenerative		initial
+MONDO:0035663	neuromyelitis optica spectrum disorder with anti-AQP4 antibodies	Neuroimmune		initial
+MONDO:0100135	Dravet syndrome	Neurodevelopmental		initial
+MONDO:0100339	Friedreich ataxia	Neurodegenerative		initial
+MONDO:0017314	Ehlers-Danlos syndrome, vascular type	Cardiac		initial
+MONDO:0007191	Behcet disease	Cardiac		initial
+MONDO:0008769	neuronal ceroid lipofuscinosis 2	Neurodegenerative	5e-06	initial
+MONDO:0016113	bulbospinal muscular atrophy	Neurodegenerative	1e-05	initial
+MONDO:0018868	metachromatic leukodystrophy	Neurodegenerative		initial
+MONDO:0016241	alternating hemiplegia of childhood	Neurodevelopmental	1e-05	initial
+MONDO:0010188	familial isolated deficiency of vitamin E	Neurodegenerative	6e-07	initial
+MONDO:0007163	episodic ataxia type 2	Neurodegenerative	1e-05	initial
+MONDO:0007163	episodic ataxia type 2	Neurodevelopmental	1e-05	initial
+MONDO:0009710	Thomsen and Becker disease	Neurodegenerative		initial
+MONDO:0012455	Kleefstra syndrome	Neurodevelopmental	5e-06	initial
+MONDO:0008289	brain small vessel disease 1 with or without ocular anomalies	Cardiac		initial
+MONDO:0007432	cerebral arteriopathy with subcortical infarcts and leukoencephalopathy	Cardiac		initial
+MONDO:0012589	Pitt-Hopkins syndrome	Neurodevelopmental		initial
+MONDO:0011866	pontocerebellar hypoplasia type 1A	Neurodegenerative		initial
+MONDO:0012116	spinocerebellar ataxia type 8	Neurodegenerative		initial
+MONDO:0010457	Ogden syndrome	Cardiac	1e-05	initial
+MONDO:0010457	Ogden syndrome	Neurodevelopmental	1e-05	initial
+MONDO:0018485	glycogen storage disease due to acid maltase deficiency, late-onset	Cardiac		initial
+MONDO:0700294	obsolete CTCF-related neurodevelopmental disorder	Neurodevelopmental		initial
+MONDO:0014464	progressive encephalopathy with leukodystrophy due to DECR deficiency	Neurodegenerative		expanded
+MONDO:0011426	aceruloplasminemia	Neurodegenerative		expanded
+MONDO:0016862	Alagille syndrome due to a JAG1 point mutation	Cardiac		expanded
+MONDO:0859529	amyotrophic lateral sclerosis 27, juvenile	Neurodegenerative		expanded
+MONDO:0033946	hereditary angioedema with C1Inh deficiency	Cardiac		expanded
+MONDO:0008818	arterial tortuosity syndrome	Cardiac		expanded
+MONDO:0014258	congenital microcephaly - severe encephalopathy - progressive cerebral atrophy syndrome	Neurodevelopmental		expanded
+MONDO:0012784	autosomal recessive ataxia due to ubiquinone deficiency	Neurodegenerative		expanded
+MONDO:0014162	infantile hypertrophic cardiomyopathy due to MRPL44 deficiency	Cardiac		expanded
+MONDO:0009053	ALDH18A1-related de Barsy syndrome	Neurodevelopmental		expanded
+MONDO:0030727	developmental and epileptic encephalopathy 101	Neurodevelopmental		expanded
+MONDO:0970945	developmental and epileptic encephalopathy 116	Neurodevelopmental		expanded
+MONDO:0014505	developmental and epileptic encephalopathy, 27	Neurodevelopmental		expanded
+MONDO:0014895	developmental and epileptic encephalopathy, 40	Neurodevelopmental		expanded
+MONDO:0007495	dystonia 5	Neurodegenerative		expanded
+MONDO:0030070	heterotaxy, visceral, 9, autosomal, with male infertility	Cardiac		expanded
+MONDO:0009398	hyperphosphatasia with intellectual disability syndrome 1	Neurodevelopmental		expanded
+MONDO:0013882	hyperphosphatasia with intellectual disability syndrome 2	Neurodevelopmental		expanded
+MONDO:0013628	hyperphosphatasia with intellectual disability syndrome 3	Neurodevelopmental		expanded
+MONDO:0014780	hyperphosphatasia with intellectual disability syndrome 6	Neurodevelopmental		expanded
+MONDO:0013509	intellectual disability, autosomal dominant 6	Neurodevelopmental		expanded
+MONDO:0012164	Meacham syndrome	Cardiac		expanded
+MONDO:0011010	Matthew-Wood syndrome	Cardiac		expanded
+MONDO:0032808	developmental and epileptic encephalopathy, 77	Neurodevelopmental		expanded
+MONDO:0013110	neurodegenerative syndrome due to cerebral folate transport deficiency	Neurodegenerative		expanded
+MONDO:0014599	intellectual disability, autosomal dominant 34	Neurodevelopmental		expanded
+MONDO:0859282	neurodevelopmental disorder with microcephaly, movement abnormalities, and seizures	Neurodevelopmental		expanded
+MONDO:0013655	neurodevelopmental disorder with or without hyperkinetic movements and seizures, autosomal dominant	Neurodevelopmental		expanded
+MONDO:0060629	neurodevelopmental disorder with or without hyperkinetic movements and seizures, autosomal recessive	Neurodevelopmental		expanded
+MONDO:0032775	neurodevelopmental disorder with seizures and speech and walking impairment	Neurodevelopmental		expanded
+MONDO:0060578	neurodevelopmental disorder, mitochondrial, with abnormal movements and lactic acidosis, with or without seizures	Neurodevelopmental		expanded
+MONDO:0009623	Nijmegen breakage syndrome	Neurodegenerative		expanded
+MONDO:0009623	Nijmegen breakage syndrome	Neurodevelopmental		expanded
+MONDO:0011658	autosomal recessive early-onset Parkinson disease 7	Neurodegenerative		expanded
+MONDO:0011764	autosomal dominant Parkinson disease 8	Neurodegenerative		expanded
+MONDO:0010714	Pelizeaus-Merzbacher spectrum disorder	Neurodegenerative		expanded
+MONDO:0100215	Rajab interstitial lung disease with brain calcifications 1	Neurodevelopmental		expanded
+MONDO:0008922	Sengers syndrome	Cardiac		expanded
+MONDO:0008102	sick sinus syndrome 2, autosomal dominant	Cardiac		expanded
+MONDO:0032753	spastic ataxia 9, autosomal recessive	Neurodegenerative		expanded
+MONDO:0014803	spasticity-ataxia-gait anomalies syndrome	Neurodegenerative		expanded
+MONDO:0859245	spinocerebellar ataxia, autosomal recessive 32	Neurodegenerative		expanded
+MONDO:0009033	temtamy syndrome	Neurodevelopmental		expanded
+MONDO:0008767	neuronal ceroid lipofuscinosis 3	Neurodegenerative		expanded
+MONDO:0009591	metachromatic leukodystrophy, juvenile form	Neurodegenerative		expanded
+MONDO:0009689	congenital myasthenic syndrome 6	Neuroimmune		expanded
+MONDO:0010533	Arts syndrome	Neurodegenerative		expanded
+MONDO:0010533	Arts syndrome	Neurodevelopmental		expanded
+MONDO:0008842	ataxia, early-onset, with oculomotor apraxia and hypoalbuminemia	Neurodegenerative		expanded
+MONDO:0012166	autosomal dominant sensory ataxia 1	Neurodegenerative		expanded
+MONDO:0008858	Behr syndrome	Neurodegenerative		expanded
+MONDO:0008858	Behr syndrome	Neurodevelopmental		expanded
+MONDO:0008980	ataxia-hypogonadism-choroidal dystrophy syndrome	Neurodegenerative		expanded
+MONDO:0044720	cerebellar ataxia with neuropathy and bilateral vestibular areflexia syndrome	Neurodegenerative		expanded
+MONDO:0010689	Charcot-Marie-Tooth disease X-linked recessive 4	Neurodevelopmental		expanded
+MONDO:0100531	Emery-Dreifuss muscular dystrophy 1, X-linked	Cardiac		expanded
+MONDO:0007571	primary erythermalgia	Cardiac		expanded
+MONDO:0011706	Kufor-Rakeb syndrome	Neurodegenerative		expanded
+MONDO:0700286	leukodystrophy, demyelinating, adult-onset, autosomal dominant, atypical	Neurodegenerative		expanded
+MONDO:0014292	leukoencephalopathy with mild cerebellar ataxia and white matter edema	Neurodegenerative		expanded
+MONDO:0800027	leukoencephalopathy, diffuse hereditary, with spheroids 1	Neurodegenerative		expanded
+MONDO:0007182	Machado-Joseph disease	Neurodegenerative		expanded
+MONDO:0012251	MEDNIK syndrome	Neurodevelopmental		expanded
+MONDO:0032853	myopathy, distal, 6, adult-onset, autosomal dominant	Cardiac		expanded
+MONDO:0013656	intellectual disability, autosomal dominant 9	Neurodevelopmental		expanded
+MONDO:0011638	neuroferritinopathy	Neurodegenerative		expanded
+MONDO:0013674	neurodegeneration with brain iron accumulation 4	Neurodegenerative		expanded
+MONDO:0032650	neurodegeneration, childhood-onset, with cerebellar atrophy	Neurodegenerative		expanded
+MONDO:0958323	neurodevelopmental disorder with early-onset parkinsonism and behavioral abnormalities	Neurodegenerative		expanded
+MONDO:0958323	neurodevelopmental disorder with early-onset parkinsonism and behavioral abnormalities	Neurodevelopmental		expanded
+MONDO:0008451	neuronopathy, distal hereditary motor, autosomal dominant 1	Neurodegenerative		expanded
+MONDO:0013884	neuronopathy, distal hereditary motor, type 5B	Neurodegenerative		expanded
+MONDO:0030860	neuronopathy, distal hereditary motor, type 5C	Neurodegenerative		expanded
+MONDO:0008024	neuronopathy, distal hereditary motor, type 7A	Neurodegenerative		expanded
+MONDO:0013947	neuronopathy, distal hereditary motor, autosomal recessive 5	Neurodegenerative		expanded
+MONDO:0010338	X-linked distal spinal muscular atrophy type 3	Neurodegenerative		expanded
+MONDO:0020737	optic atrophy 10 with or without ataxia, intellectual disability, and seizures	Neurodegenerative		expanded
+MONDO:0020737	optic atrophy 10 with or without ataxia, intellectual disability, and seizures	Neurodevelopmental		expanded
+MONDO:0007429	optic atrophy with or without deafness, ophthalmoplegia, myopathy, ataxia, and neuropathy	Neurodegenerative		expanded
+MONDO:0013060	autosomal recessive Parkinson disease 14	Neurodegenerative		expanded
+MONDO:0010820	autosomal recessive juvenile Parkinson disease 2	Neurodegenerative		expanded
+MONDO:0009783	progressive external ophthalmoplegia with mitochondrial DNA deletions, autosomal recessive 1	Neurodegenerative		expanded
+MONDO:0014686	short stature, microcephaly, and endocrine dysfunction	Neurodevelopmental		expanded
+MONDO:0011445	hereditary spastic paraplegia 11	Neurodevelopmental		expanded
+MONDO:0014209	early-onset progressive neurodegeneration-blindness-ataxia-spasticity syndrome	Neurodegenerative		expanded
+MONDO:0957813	spastic paraplegia 91, autosomal dominant, with or without cerebellar ataxia	Neurodegenerative		expanded
+MONDO:0010735	Kennedy disease	Neurodegenerative		expanded
+MONDO:0008453	adult-onset proximal spinal muscular atrophy, autosomal dominant	Neurodegenerative		expanded
+MONDO:0008119	spinocerebellar ataxia type 1	Neurodegenerative		expanded
+MONDO:0012449	spinocerebellar ataxia type 23	Neurodegenerative		expanded
+MONDO:0012103	spinocerebellar ataxia type 25	Neurodegenerative		expanded
+MONDO:0008654	spinocerebellar ataxia 27A	Neurodegenerative		expanded
+MONDO:0007296	spinocerebellar ataxia type 31	Neurodegenerative		expanded
+MONDO:0010847	spinocerebellar ataxia type 4	Neurodegenerative		expanded
+MONDO:0014867	spinocerebellar ataxia 43	Neurodegenerative		expanded
+MONDO:0033481	spinocerebellar ataxia 46	Neurodegenerative		expanded
+MONDO:0014339	autosomal recessive spinocerebellar ataxia 16	Neurodegenerative		expanded
+MONDO:0014744	acute infantile liver failure-cerebellar ataxia-peripheral sensory motor neuropathy syndrome	Neurodegenerative		expanded
+MONDO:0033116	spinocerebellar ataxia, autosomal recessive 26	Neurodegenerative		expanded
+MONDO:0011811	autosomal recessive cerebellar ataxia-saccadic intrusion syndrome	Neurodegenerative		expanded
+MONDO:0012549	autosomal recessive ataxia, Beauce type	Neurodegenerative		expanded
+MONDO:0018996	spinocerebellar ataxia, autosomal recessive, with axonal neuropathy 2	Neurodegenerative		expanded
+MONDO:0009796	ornithine aminotransferase deficiency	Cardiac		expanded
+MONDO:0024559	aortic aneurysm, familial thoracic 1	Cardiac		expanded
+MONDO:0014950	aortic aneurysm, familial thoracic 10	Cardiac		expanded
+MONDO:0030731	aortic aneurysm, familial thoracic 12	Cardiac		expanded
+MONDO:0011770	aortic aneurysm, familial thoracic 2	Cardiac		expanded
+MONDO:0007568	aortic aneurysm, familial thoracic 4	Cardiac		expanded
+MONDO:0012730	aortic aneurysm, familial thoracic 6	Cardiac		expanded
+MONDO:0013418	aortic aneurysm, familial thoracic 7	Cardiac		expanded
+MONDO:0014187	aortic aneurysm, familial thoracic 8	Cardiac		expanded
+MONDO:0014514	aortic aneurysm, familial thoracic 9	Cardiac		expanded
+MONDO:0013066	46,XY sex reversal 3	Cardiac		expanded
+MONDO:0007088	Alzheimer disease type 1	Cardiac		expanded
+MONDO:0007088	Alzheimer disease type 1	Neurodegenerative		expanded
+MONDO:0008895	hereditary arterial and articular multiple calcification syndrome	Cardiac		expanded
+MONDO:0008215	adult-onset autosomal dominant demyelinating leukodystrophy	Neurodegenerative		expanded
+MONDO:0008215	adult-onset autosomal dominant demyelinating leukodystrophy	Neuroimmune		expanded
+MONDO:0008199	late-onset Parkinson disease	Neurodegenerative		expanded
+MONDO:0008436	Sneddon syndrome	Cardiac		expanded
+MONDO:0032526	spinocerebellar ataxia 48	Neurodegenerative		expanded
+MONDO:0008644	velocardiofacial syndrome	Cardiac		expanded
+MONDO:0014340	atrial fibrillation, familial, 15	Cardiac		expanded
+MONDO:0013545	atrial fibrillation, familial, 12	Cardiac		expanded
+MONDO:0015001	atrial fibrillation, familial, 18	Cardiac		expanded
+MONDO:0012434	arrhythmogenic right ventricular dysplasia 10	Cardiac		expanded
+MONDO:0012506	arrhythmogenic right ventricular dysplasia 11	Cardiac		expanded
+MONDO:0011459	arrhythmogenic right ventricular dysplasia 5	Cardiac		expanded
+MONDO:0012180	arrhythmogenic right ventricular dysplasia 9	Cardiac		expanded
+MONDO:0012066	atrial fibrillation, familial, 1	Cardiac		expanded
+MONDO:0013530	atrial fibrillation, familial, 10	Cardiac		expanded
+MONDO:0013544	atrial fibrillation, familial, 11	Cardiac		expanded
+MONDO:0014155	atrial fibrillation, familial, 13	Cardiac		expanded
+MONDO:0014156	atrial fibrillation, familial, 14	Cardiac		expanded
+MONDO:0013146	Brugada syndrome 7	Cardiac		expanded
+MONDO:0012737	long QT syndrome 10	Cardiac		expanded
+MONDO:0012167	atrial fibrillation, familial, 2	Cardiac		expanded
+MONDO:0011857	atrial fibrillation, familial, 3	Cardiac		expanded
+MONDO:0012677	atrial fibrillation, familial, 4	Cardiac		expanded
+MONDO:0012816	atrial fibrillation, familial, 6	Cardiac		expanded
+MONDO:0012828	atrial fibrillation, familial, 7	Cardiac		expanded
+MONDO:0013513	atrial fibrillation, familial, 9	Cardiac		expanded
+MONDO:0011001	Brugada syndrome 1	Cardiac		expanded
+MONDO:0014191	catecholaminergic polymorphic ventricular tachycardia 5	Cardiac		expanded
+MONDO:0100316	long QT syndrome 1	Cardiac		expanded
+MONDO:0014548	long QT syndrome 14	Cardiac		expanded
+MONDO:0014550	long QT syndrome 15	Cardiac		expanded
+MONDO:0032915	long QT syndrome 16	Cardiac		expanded
+MONDO:0013367	long QT syndrome 2	Cardiac		expanded
+MONDO:0011377	long QT syndrome 3	Cardiac		expanded
+MONDO:0012312	short QT syndrome type 1	Cardiac		expanded
+MONDO:0012313	short QT syndrome type 2	Cardiac		expanded
+MONDO:0012314	short QT syndrome type 3	Cardiac		expanded
+MONDO:0011484	catecholaminergic polymorphic ventricular tachycardia 1	Cardiac		expanded
+MONDO:0012762	catecholaminergic polymorphic ventricular tachycardia 2	Cardiac		expanded
+MONDO:0013529	catecholaminergic polymorphic ventricular tachycardia 3	Cardiac		expanded
+MONDO:0013966	catecholaminergic polymorphic ventricular tachycardia 4	Cardiac		expanded
+MONDO:0013261	dilated cardiomyopathy 1R	Cardiac		expanded
+MONDO:0012808	dilated cardiomyopathy 1AA	Cardiac		expanded
+MONDO:0014883	hypertrophic cardiomyopathy 26	Cardiac		expanded
+MONDO:0011094	dilated cardiomyopathy 1C	Cardiac		expanded
+MONDO:0014163	left ventricular noncompaction 10	Cardiac		expanded
+MONDO:0013262	dilated cardiomyopathy 1S	Cardiac		expanded
+MONDO:0014100	dilated cardiomyopathy 1KK	Cardiac		expanded
+MONDO:0012744	dilated cardiomyopathy 1Y	Cardiac		expanded
+MONDO:0011257	MPI-congenital disorder of glycosylation	Cardiac		expanded
+MONDO:0008908	MGAT2-congenital disorder of glycosylation	Cardiac		expanded
+MONDO:0008908	MGAT2-congenital disorder of glycosylation	Neurodevelopmental		expanded
+MONDO:0012637	COG1-congenital disorder of glycosylation	Cardiac		expanded
+MONDO:0010478	SLC35A2-congenital disorder of glycosylation	Neurodevelopmental		expanded
+MONDO:0012556	DK1-congenital disorder of glycosylation	Cardiac		expanded
+MONDO:0013968	PGM1-congenital disorder of glycosylation	Cardiac		expanded
+MONDO:0014023	congenital muscular dystrophy with intellectual disability and severe epilepsy	Neurodevelopmental		expanded
+MONDO:0009159	Ehlers-Danlos syndrome, cardiac valvular type	Cardiac		expanded
+MONDO:0020681	Ehlers-Danlos syndrome, musculocontractural type 1	Cardiac		expanded
+MONDO:0014236	Ehlers-Danlos syndrome, musculocontractural type 2	Cardiac		expanded
+MONDO:0007524	autosomal dominant Ehlers-Danlos syndrome, vascular type	Cardiac		expanded
+MONDO:0012212	Loeys-Dietz syndrome 1	Cardiac		expanded
+MONDO:0012427	Loeys-Dietz syndrome 2	Cardiac		expanded
+MONDO:0013426	aneurysm-osteoarthritis syndrome	Cardiac		expanded
+MONDO:0013897	Loeys-Dietz syndrome 4	Cardiac		expanded
+MONDO:0014262	Rienhoff syndrome	Cardiac		expanded
+MONDO:0030500	Loeys-Dietz syndrome 6	Cardiac		expanded
+MONDO:0024557	ataxia-telangiectasia-like disorder 1	Neurodegenerative		expanded
+MONDO:0009745	neuronal ceroid lipofuscinosis 5	Neurodegenerative		expanded
+MONDO:0100340	Friedreich ataxia 1	Neurodegenerative		expanded
+MONDO:0031006	neurodegeneration with ataxia and late-onset optic atrophy	Neurodegenerative		expanded
+MONDO:0030028	neurodegeneration, childhood-onset, with ataxia, tremor, optic atrophy, and cognitive decline	Neurodegenerative		expanded
+MONDO:0011541	dilated cardiomyopathy 1J	Cardiac		expanded
+MONDO:0011840	dilated cardiomyopathy 1M	Cardiac		expanded
+MONDO:0859381	cardiomyopathy, dilated, 100	Cardiac		expanded
+MONDO:0013371	dilated cardiomyopathy 1U	Cardiac		expanded
+MONDO:0012746	dilated cardiomyopathy 2A	Cardiac		expanded
+MONDO:0013848	dilated cardiomyopathy 2B	Cardiac		expanded
+MONDO:0859358	cardiomyopathy, dilated, 2H	Cardiac		expanded
+MONDO:0010951	dilated cardiomyopathy 1B	Cardiac		expanded
+MONDO:0007269	dilated cardiomyopathy 1A	Cardiac		expanded
+MONDO:0013030	dilated cardiomyopathy 1BB	Cardiac		expanded
+MONDO:0013147	dilated cardiomyopathy 1CC	Cardiac		expanded
+MONDO:0013168	dilated cardiomyopathy 1DD	Cardiac		expanded
+MONDO:0011003	dilated cardiomyopathy 1E	Cardiac		expanded
+MONDO:0013198	dilated cardiomyopathy 1EE	Cardiac		expanded
+MONDO:0013211	dilated cardiomyopathy 1FF	Cardiac		expanded
+MONDO:0011400	dilated cardiomyopathy 1G	Cardiac		expanded
+MONDO:0013339	dilated cardiomyopathy 1GG	Cardiac		expanded
+MONDO:0011425	dilated cardiomyopathy 1H	Cardiac		expanded
+MONDO:0013479	dilated cardiomyopathy 1HH	Cardiac		expanded
+MONDO:0011482	dilated cardiomyopathy 1I	Cardiac		expanded
+MONDO:0014073	dilated cardiomyopathy 1II	Cardiac		expanded
+MONDO:0014095	dilated cardiomyopathy 1JJ	Cardiac		expanded
+MONDO:0011567	dilated cardiomyopathy 1K	Cardiac		expanded
+MONDO:0011702	dilated cardiomyopathy 1L	Cardiac		expanded
+MONDO:0014396	dilated cardiomyopathy 1NN	Cardiac		expanded
+MONDO:0012062	dilated cardiomyopathy 1O	Cardiac		expanded
+MONDO:0012362	dilated cardiomyopathy 1P	Cardiac		expanded
+MONDO:0012364	dilated cardiomyopathy 1Q	Cardiac		expanded
+MONDO:0013373	dilated cardiomyopathy 1V	Cardiac		expanded
+MONDO:0012667	dilated cardiomyopathy 1W	Cardiac		expanded
+MONDO:0012704	dilated cardiomyopathy 1X	Cardiac		expanded
+MONDO:0012745	dilated cardiomyopathy 1Z	Cardiac		expanded
+MONDO:0032592	cardiomyopathy, dilated, 2c	Cardiac		expanded
+MONDO:0030300	cardiomyopathy, dilated, 2D	Cardiac		expanded
+MONDO:0030366	cardiomyopathy, dilated, 2E	Cardiac		expanded
+MONDO:0030680	cardiomyopathy, dilated, 2F	Cardiac		expanded
+MONDO:0030887	cardiomyopathy, dilated, 2G	Cardiac		expanded
+MONDO:0957545	cardiomyopathy, dilated, 2I	Cardiac		expanded
+MONDO:0957984	cardiomyopathy, dilated, 2j	Cardiac		expanded
+MONDO:0010542	dilated cardiomyopathy 3B	Cardiac		expanded
+MONDO:0014152	left ventricular noncompaction 8	Cardiac		expanded
+MONDO:0011095	dilated cardiomyopathy 1D	Cardiac		expanded
+MONDO:0013120	46,XY sex reversal 5	Cardiac		expanded
+MONDO:0010342	autism, susceptibility to, X-linked 3	Neurodevelopmental		expanded
+MONDO:0014558	autosomal dominant intellectual disability-craniofacial anomalies-cardiac defects syndrome	Cardiac		expanded
+MONDO:0014558	autosomal dominant intellectual disability-craniofacial anomalies-cardiac defects syndrome	Neurodevelopmental		expanded
+MONDO:0014205	severe feeding difficulties-failure to thrive-microcephaly due to ASXL3 deficiency syndrome	Neurodevelopmental		expanded
+MONDO:0859139	blepharophimosis-impaired intellectual development syndrome	Neurodevelopmental		expanded
+MONDO:0011510	Bohring-Opitz syndrome	Neurodevelopmental		expanded
+MONDO:0010537	Borjeson-Forssman-Lehmann syndrome	Neurodevelopmental		expanded
+MONDO:0035133	PHIP-related behavioral problems-intellectual disability-obesity-dysmorphic features syndrome	Neurodevelopmental		expanded
+MONDO:0014751	palatal anomalies-widely spaced teeth-facial dysmorphism-developmental delay syndrome	Neurodevelopmental		expanded
+MONDO:0013821	intellectual disability, autosomal dominant 16	Neurodevelopmental		expanded
+MONDO:0014150	developmental and epileptic encephalopathy 94	Neurodevelopmental		expanded
+MONDO:0010747	X-linked dystonia-parkinsonism	Neurodegenerative		expanded
+MONDO:0010397	severe neonatal-onset encephalopathy with microcephaly	Neurodevelopmental		expanded
+MONDO:0007621	Floating-Harbor syndrome	Neurodevelopmental		expanded
+MONDO:0009338	hepatic veno-occlusive disease-immunodeficiency syndrome	Cardiac		expanded
+MONDO:0032882	Heyn-Sproul-Jackson syndrome	Neurodevelopmental		expanded
+MONDO:0014017	intellectual developmental disorder with autism and macrocephaly	Neurodevelopmental		expanded
+MONDO:0015022	intellectual developmental disorder with dysmorphic facies and ptosis	Neurodevelopmental		expanded
+MONDO:0033559	intellectual developmental disorder with seizures and language delay	Neurodevelopmental		expanded
+MONDO:0007974	intellectual disability, autosomal dominant 1	Neurodevelopmental		expanded
+MONDO:0014336	intellectual disability-facial dysmorphism syndrome due to SETD5 haploinsufficiency	Neurodevelopmental		expanded
+MONDO:0014486	intellectual disability, autosomal dominant 30	Neurodevelopmental		expanded
+MONDO:0030917	intellectual disability, autosomal dominant 51	Neurodevelopmental		expanded
+MONDO:0030918	intellectual disability, autosomal dominant 52	Neurodevelopmental		expanded
+MONDO:0020850	intellectual disability, autosomal recessive 65	Neurodevelopmental		expanded
+MONDO:0010393	intellectual disability, X-linked 93	Neurodevelopmental		expanded
+MONDO:0010235	X-linked intellectual disability-psychosis-macroorchidism syndrome	Neurodevelopmental		expanded
+MONDO:0010500	intellectual disability, X-linked, syndromic 33	Neurodevelopmental		expanded
+MONDO:0010355	syndromic X-linked intellectual disability Claes-Jensen type	Neurodevelopmental		expanded
+MONDO:0010283	syndromic X-linked intellectual disability Lubs type	Neurodevelopmental		expanded
+MONDO:0010286	syndromic X-linked intellectual disability Siderius type	Neurodevelopmental		expanded
+MONDO:0010663	intellectual disability-hypotonic facies syndrome, X-linked, 1	Neurodevelopmental		expanded
+MONDO:0859232	neurodevelopmental disorder with central hypotonia and dysmorphic facies	Neurodevelopmental		expanded
+MONDO:0060596	neurodevelopmental disorder with dysmorphic facies and distal limb anomalies	Neurodevelopmental		expanded
+MONDO:0030852	neurodevelopmental disorder with dysmorphic facies, sleep disturbance, and brain abnormalities	Neurodevelopmental		expanded
+MONDO:0014857	neurodevelopmental disorder with or without anomalies of the brain, eye, or heart	Neurodevelopmental		expanded
+MONDO:0033630	neurodevelopmental disorder with speech impairment and dysmorphic facies	Neurodevelopmental		expanded
+MONDO:0011053	intellectual disability-sparse hair-brachydactyly syndrome	Neurodevelopmental		expanded
+MONDO:0859249	parenti-mignot neurodevelopmental syndrome	Neurodevelopmental		expanded
+MONDO:0024266	patent ductus arteriosus 3	Cardiac		expanded
+MONDO:0060568	Pilarowski-Bjornsson syndrome	Neurodevelopmental		expanded
+MONDO:0008393	Rubinstein-Taybi syndrome due to CREBBP mutations	Neurodevelopmental		expanded
+MONDO:0013364	Rubinstein-Taybi syndrome due to EP300 haploinsufficiency	Neurodevelopmental		expanded
+MONDO:0011365	blepharophimosis - intellectual disability syndrome, SBBYS type	Neurodevelopmental		expanded
+MONDO:0014944	short stature-brachydactyly-obesity-global developmental delay syndrome	Neurodevelopmental		expanded
+MONDO:0014946	Sifrim-Hitz-Weiss syndrome	Neurodevelopmental		expanded
+MONDO:0008434	Smith-Magenis syndrome	Neurodevelopmental		expanded
+MONDO:0032600	Snijders Blok-Campeau syndrome	Neurodevelopmental		expanded
+MONDO:0032790	neurodevelopmental disorder with coarse facies and mild distal skeletal abnormalities	Neurodevelopmental		expanded
+MONDO:0010193	Weaver syndrome	Neurodevelopmental		expanded
+MONDO:0014392	developmental and epileptic encephalopathy, 25	Neurodevelopmental		expanded
+MONDO:0010472	developmental and epileptic encephalopathy, 36	Neurodevelopmental		expanded
+MONDO:0014868	developmental and epileptic encephalopathy, 38	Neurodevelopmental		expanded
+MONDO:0013056	developmental and epileptic encephalopathy, 39	Neurodevelopmental		expanded
+MONDO:0014647	developmental and epileptic encephalopathy, 50	Neurodevelopmental		expanded
+MONDO:0033364	developmental and epileptic encephalopathy, 55	Neurodevelopmental		expanded
+MONDO:0030856	developmental and epileptic encephalopathy 89	Neurodevelopmental		expanded
+MONDO:0014947	developmental and epileptic encephalopathy, 46	Neurodevelopmental		expanded
+MONDO:0032880	developmental and epileptic encephalopathy, 82	Neurodevelopmental		expanded
+MONDO:0007750	hypercholesterolemia, familial, 1	Cardiac		expanded
+MONDO:0007751	hypercholesterolemia, autosomal dominant, type B	Cardiac		expanded
+MONDO:0011369	hypercholesterolemia, autosomal dominant, 3	Cardiac		expanded
+MONDO:0009867	lethal congenital glycogen storage disease of heart	Cardiac		expanded
+MONDO:0013291	glycogen storage disease XV	Cardiac		expanded
+MONDO:0008535	telangiectasia, hereditary hemorrhagic, type 1	Cardiac		expanded
+MONDO:0010880	telangiectasia, hereditary hemorrhagic, type 2	Cardiac		expanded
+MONDO:0012532	hereditary hemorrhagic telangiectasia type 4	Cardiac		expanded
+MONDO:0014217	telangiectasia, hereditary hemorrhagic, type 5	Cardiac		expanded
+MONDO:0958241	cardiomyopathy, familial hypertrophic, 30, atrial	Cardiac		expanded
+MONDO:0054838	cardiomyopathy, familial hypertrophic 27	Cardiac		expanded
+MONDO:0030317	cardiomyopathy, familial hypertrophic, 28	Cardiac		expanded
+MONDO:0859372	cardiomyopathy, familial hypertrophic, 29, with polyglucosan bodies	Cardiac		expanded
+MONDO:0013412	hypertrophic cardiomyopathy 9	Cardiac		expanded
+MONDO:0010946	hypertrophic cardiomyopathy 6	Cardiac		expanded
+MONDO:0008647	hypertrophic cardiomyopathy 1	Cardiac		expanded
+MONDO:0012112	hypertrophic cardiomyopathy 10	Cardiac		expanded
+MONDO:0012799	hypertrophic cardiomyopathy 11	Cardiac		expanded
+MONDO:0012804	hypertrophic cardiomyopathy 12	Cardiac		expanded
+MONDO:0013195	hypertrophic cardiomyopathy 13	Cardiac		expanded
+MONDO:0013197	hypertrophic cardiomyopathy 14	Cardiac		expanded
+MONDO:0013200	hypertrophic cardiomyopathy 15	Cardiac		expanded
+MONDO:0013455	hypertrophic cardiomyopathy 16	Cardiac		expanded
+MONDO:0013474	hypertrophic cardiomyopathy 17	Cardiac		expanded
+MONDO:0013475	hypertrophic cardiomyopathy 18	Cardiac		expanded
+MONDO:0007266	hypertrophic cardiomyopathy 2	Cardiac		expanded
+MONDO:0013477	hypertrophic cardiomyopathy 20	Cardiac		expanded
+MONDO:0013852	hypertrophic cardiomyopathy 21	Cardiac		expanded
+MONDO:0011843	hypertrophic cardiomyopathy 25	Cardiac		expanded
+MONDO:0007267	hypertrophic cardiomyopathy 3	Cardiac		expanded
+MONDO:0007268	hypertrophic cardiomyopathy 4	Cardiac		expanded
+MONDO:0013369	hypertrophic cardiomyopathy 7	Cardiac		expanded
+MONDO:0012111	hypertrophic cardiomyopathy 8	Cardiac		expanded
+MONDO:0005045	hypertrophic cardiomyopathy	Cardiac		expanded
+MONDO:0010469	epsilon-trimethyllysine hydroxylase deficiency	Neurodevelopmental		expanded
+MONDO:0012650	Cernunnos-XLF deficiency	Neurodevelopmental		expanded
+MONDO:0014981	immunodeficiency 49	Neurodevelopmental		expanded
+MONDO:0030266	immunodeficiency 80 with or without congenital cardiomyopathy	Cardiac		expanded
+MONDO:0030528	immunodeficiency 93 and hypertrophic cardiomyopathy	Cardiac		expanded
+MONDO:0013934	combined immunodeficiency due to STK4 deficiency	Cardiac		expanded
+MONDO:0013970	branched-chain keto acid dehydrogenase kinase deficiency	Neurodevelopmental		expanded
+MONDO:0010327	HSD10 mitochondrial disease	Neurodevelopmental		expanded
+MONDO:0011758	Hurler syndrome	Cardiac		expanded
+MONDO:0009919	peroxisomal acyl-CoA oxidase deficiency	Neurodegenerative		expanded
+MONDO:0010056	spinal muscular atrophy, type IV	Neurodegenerative		expanded
+MONDO:0014667	cardioencephalomyopathy, fatal infantile, due to cytochrome c oxidase deficiency 3	Cardiac		expanded
+MONDO:0014668	cardioencephalomyopathy, fatal infantile, due to cytochrome c oxidase deficiency 4	Cardiac		expanded
+MONDO:0011451	cardioencephalomyopathy, fatal infantile, due to cytochrome c oxidase deficiency 1	Cardiac		expanded
+MONDO:0014051	cardioencephalomyopathy, fatal infantile, due to cytochrome c oxidase deficiency 2	Cardiac		expanded
+MONDO:0013865	mitochondrial hypertrophic cardiomyopathy with lactic acidosis due to MTO1 deficiency	Cardiac		expanded
+MONDO:0012557	cardiomyopathy-hypotonia-lactic acidosis syndrome	Cardiac		expanded
+MONDO:0010771	histiocytoid cardiomyopathy	Cardiac		expanded
+MONDO:0010777	cardiomyopathy, infantile hypertrophic	Cardiac		expanded
+MONDO:0010772	Leber optic atrophy and dystonia	Cardiac		expanded
+MONDO:0010794	NARP syndrome	Neurodegenerative		expanded
+MONDO:0010796	Parkinson disease, mitochondrial	Neurodegenerative		expanded
+MONDO:0011640	genitopatellar syndrome	Neurodevelopmental		expanded
+MONDO:0009856	Peters plus syndrome	Cardiac		expanded
+MONDO:0010798	proximal tubulopathy-diabetes mellitus-cerebellar ataxia syndrome	Neurodegenerative		expanded
+MONDO:0009419	Woodhouse-Sakati syndrome	Neurodevelopmental		expanded
+MONDO:0100348	neurodevelopmental disorder with microcephaly, impaired language, and gait abnormalities	Neurodevelopmental		expanded
+MONDO:0060621	neurodevelopmental disorder with microcephaly, seizures, and cortical atrophy	Neurodevelopmental		expanded
+MONDO:0030994	neurodevelopmental disorder with or without autism or seizures	Neurodevelopmental		expanded
+MONDO:0060622	neurodevelopmental disorder with severe motor impairment and absent language	Neurodegenerative		expanded
+MONDO:0060622	neurodevelopmental disorder with severe motor impairment and absent language	Neurodevelopmental		expanded
+MONDO:0010781	ataxia and polyneuropathy, adult-onset	Neurodegenerative		expanded
+MONDO:0014523	juvenile-onset diabetes mellitus-central and peripheral neurodegeneration syndrome	Neurodegenerative		expanded
+MONDO:0011835	sensory ataxic neuropathy, dysarthria, and ophthalmoparesis	Neurodegenerative		expanded
+MONDO:0958018	leukodystrophy, hypomyelinating, 27	Neurodegenerative		expanded
+MONDO:0011897	leukodystrophy, hypomyelinating, 7, with or without oligodontia and/or hypogonadotropic hypogonadism	Neurodegenerative		expanded
+MONDO:0011397	autosomal dominant cerebellar ataxia, deafness and narcolepsy	Neurodegenerative		expanded
+MONDO:0009669	spinal muscular atrophy, type 1	Neurodegenerative		expanded
+MONDO:0009673	spinal muscular atrophy, type II	Neurodegenerative		expanded
+MONDO:0009672	spinal muscular atrophy, type III	Neurodegenerative		expanded
+MONDO:0011660	autosomal dominant nonsyndromic hearing loss 22	Cardiac		expanded
+MONDO:0011101	peroxisome biogenesis disorder 1B	Neurodegenerative		expanded
+MONDO:0013931	peroxisome biogenesis disorder 4B	Neurodegenerative		expanded
+MONDO:0030346	ciliary dyskinesia, primary, 47, and lissencephaly	Neurodevelopmental		expanded
+MONDO:0012853	Fontaine progeroid syndrome	Cardiac		expanded
+MONDO:0014831	progeroid and marfanoid aspect-lipodystrophy syndrome	Cardiac		expanded
+MONDO:0007103	amyotrophic lateral sclerosis type 1	Neurodegenerative		expanded
+MONDO:0014248	autism spectrum disorder - epilepsy - arthrogryposis syndrome	Neurodevelopmental		expanded
+MONDO:0032772	brain abnormalities, neurodegeneration, and dysosteosclerosis	Neurodegenerative		expanded
+MONDO:0014609	cognitive impairment - coarse facies - heart defects - obesity - pulmonary involvement - short stature - skeletal dysplasia syndrome	Cardiac		expanded
+MONDO:0009162	Ellis-van Creveld syndrome	Cardiac		expanded
+MONDO:0009260	GM1 gangliosidosis type 1	Cardiac		expanded
+MONDO:0014318	hyperphosphatasia with intellectual disability syndrome 4	Neurodevelopmental		expanded
+MONDO:0044312	immunoskeletal dysplasia with neurodevelopmental abnormalities	Neurodevelopmental		expanded
+MONDO:0007892	Lenz-Majewski hyperostotic dwarfism	Neurodevelopmental		expanded
+MONDO:0030045	Liberfarb syndrome	Neurodevelopmental		expanded
+MONDO:0010650	Melnick-Needles syndrome	Neurodevelopmental		expanded
+MONDO:0008871	microcephalic osteodysplastic primordial dwarfism type I	Neurodevelopmental		expanded
+MONDO:0008872	microcephalic osteodysplastic primordial dwarfism type II	Neurodevelopmental		expanded
+MONDO:0015012	mucopolysaccharidosis-plus syndrome	Cardiac		expanded
+MONDO:0009511	Larsen-like syndrome, B3GAT3 type	Cardiac		expanded
+MONDO:0007688	Myhre syndrome	Neurodevelopmental		expanded
+MONDO:0014413	orofaciodigital syndrome type 14	Neurodevelopmental		expanded
+MONDO:0009073	Ritscher-Schinzel syndrome 1	Cardiac		expanded
+MONDO:0010010	Schinzel-Giedion syndrome	Neurodevelopmental		expanded
+MONDO:0009964	short-rib thoracic dysplasia 9 with or without polydactyly	Neurodegenerative		expanded
+MONDO:0014748	progressive spondyloepimetaphyseal dysplasia-short stature-short fourth metatarsals-intellectual disability syndrome	Neurodevelopmental		expanded
+MONDO:0007738	spondyloepiphyseal dysplasia with congenital joint dislocations	Cardiac		expanded
+MONDO:0014793	microcephaly-congenital cataract-psoriasiform dermatitis syndrome	Neurodevelopmental		expanded
+MONDO:0009603	3-hydroxyisobutyryl-CoA hydrolase deficiency	Neurodegenerative		expanded
+MONDO:0030065	agenesis of corpus callosum, cardiac, ocular, and genital syndrome	Cardiac		expanded
+MONDO:0008740	agnathia-otocephaly complex	Neurodevelopmental		expanded
+MONDO:0008817	arterial calcification, generalized, of infancy, 1	Cardiac		expanded
+MONDO:0014399	ataxia-telangiectasia-like disorder 2	Neurodegenerative		expanded
+MONDO:0011233	Axenfeld-Rieger syndrome type 3	Cardiac		expanded
+MONDO:0010992	Ayme-Gripp syndrome	Neurodevelopmental		expanded
+MONDO:0033642	neurodevelopmental disorder with alopecia and brain abnormalities	Neurodevelopmental		expanded
+MONDO:0009470	Baraitser-Winter syndrome 1	Neurodevelopmental		expanded
+MONDO:0013362	THOC6-related developmental delay-microcephaly-facial dysmorphism syndrome	Cardiac		expanded
+MONDO:0013362	THOC6-related developmental delay-microcephaly-facial dysmorphism syndrome	Neurodevelopmental		expanded
+MONDO:0859296	neurodevelopmental disorder with poor growth, spastic tetraplegia, and hearing loss	Neurodevelopmental		expanded
+MONDO:0014320	Bosch-Boonstra-Schaaf optic atrophy syndrome	Neurodevelopmental		expanded
+MONDO:0007235	branchiooculofacial syndrome	Neurodevelopmental		expanded
+MONDO:0030606	Bryant-Li-Bhoj neurodevelopmental syndrome 1	Neurodevelopmental		expanded
+MONDO:0030607	Bryant-Li-Bhoj neurodevelopmental syndrome 2	Neurodevelopmental		expanded
+MONDO:0012064	choanal atresia-hearing loss-cardiac defects-craniofacial dysmorphism syndrome	Cardiac		expanded
+MONDO:0012064	choanal atresia-hearing loss-cardiac defects-craniofacial dysmorphism syndrome	Neurodevelopmental		expanded
+MONDO:0032572	cardiac, facial, and digital anomalies with developmental delay	Cardiac		expanded
+MONDO:0030873	cardiofacioneurodevelopmental syndrome	Neurodevelopmental		expanded
+MONDO:0008005	cardiospondylocarpofacial syndrome	Cardiac		expanded
+MONDO:0011038	cerebellar ataxia-areflexia-pes cavus-optic atrophy-sensorineural hearing loss syndrome	Neurodegenerative		expanded
+MONDO:0014104	cerebellar ataxia, intellectual disability, and dysequilibrium syndrome 4	Neurodegenerative		expanded
+MONDO:0014104	cerebellar ataxia, intellectual disability, and dysequilibrium syndrome 4	Neurodevelopmental		expanded
+MONDO:0007297	ADan amyloidosis	Cardiac		expanded
+MONDO:0007297	ADan amyloidosis	Neurodegenerative		expanded
+MONDO:0013658	intellectual disability, autosomal dominant 11	Neurodevelopmental		expanded
+MONDO:0010886	2q37 microdeletion syndrome	Neurodevelopmental		expanded
+MONDO:0010558	choroideremia-deafness-obesity syndrome	Neurodevelopmental		expanded
+MONDO:0035819	cerebellar hypoplasia-intellectual disability-congenital microcephaly-dystonia-anemia-growth retardation syndrome	Neurodevelopmental		expanded
+MONDO:0014562	neonatal encephalomyopathy-cardiomyopathy-respiratory distress syndrome	Cardiac		expanded
+MONDO:0010561	Coffin-Lowry syndrome	Neurodevelopmental		expanded
+MONDO:0010221	CHIME syndrome	Cardiac		expanded
+MONDO:0010221	CHIME syndrome	Neurodevelopmental		expanded
+MONDO:0007355	uveal coloboma-cleft lip and palate-intellectual disability	Neurodevelopmental		expanded
+MONDO:0060532	congenital heart defects and skeletal malformations syndrome	Cardiac		expanded
+MONDO:0009008	heart defect - tongue hamartoma - polysyndactyly syndrome	Cardiac		expanded
+MONDO:0009008	heart defect - tongue hamartoma - polysyndactyly syndrome	Neurodevelopmental		expanded
+MONDO:0014000	congenital heart defects, multiple types, 2	Cardiac		expanded
+MONDO:0010333	corpus callosum agenesis-intellectual disability-coloboma-micrognathia syndrome	Neurodevelopmental		expanded
+MONDO:0007395	craniofacial-deafness-hand syndrome	Neurodevelopmental		expanded
+MONDO:0060713	deafness, congenital heart defects, and posterior embryotoxon	Cardiac		expanded
+MONDO:0009079	DOORS syndrome	Neurodevelopmental		expanded
+MONDO:0033667	Delpire-McNeill syndrome	Neurodevelopmental		expanded
+MONDO:0859251	Dentici-Novelli neurodevelopmental syndrome	Neurodevelopmental		expanded
+MONDO:0014133	developmental and epileptic encephalopathy, 16	Neurodevelopmental		expanded
+MONDO:0034106	developmental and epileptic encephalopathy, 73	Neurodevelopmental		expanded
+MONDO:0032822	developmental and epileptic encephalopathy, 80	Neurodevelopmental		expanded
+MONDO:0032858	developmental and epileptic encephalopathy, 81	Neurodevelopmental		expanded
+MONDO:0029140	glycosylphosphatidylinositol biosynthesis defect 18	Neurodevelopmental		expanded
+MONDO:0009104	Donnai-Barrow syndrome	Neurodevelopmental		expanded
+MONDO:0044696	early-onset progressive encephalopathy-hearing loss-pons hypoplasia-brain atrophy syndrome	Neurodevelopmental		expanded
+MONDO:0008115	Feingold syndrome type 1	Neurodevelopmental		expanded
+MONDO:0859220	Ferguson-Bonni neurodevelopmental syndrome	Neurodevelopmental		expanded
+MONDO:0010318	FG syndrome 4	Neurodevelopmental		expanded
+MONDO:0010592	focal dermal hypoplasia	Neurodevelopmental		expanded
+MONDO:0014395	frontotemporal dementia and/or amyotrophic lateral sclerosis 2	Neurodegenerative		expanded
+MONDO:0012634	craniofacial dysplasia - osteopenia syndrome	Neurodevelopmental		expanded
+MONDO:0014379	ADNP-related multiple congenital anomalies - intellectual disability - autism spectrum disorder	Neurodevelopmental		expanded
+MONDO:0009337	Hennekam lymphangiectasia-lymphedema syndrome 1	Cardiac		expanded
+MONDO:0014454	Hennekam lymphangiectasia-lymphedema syndrome 2	Cardiac		expanded
+MONDO:0011273	H syndrome	Cardiac		expanded
+MONDO:0032787	holoprosencephaly 12 with or without pancreatic agenesis	Neurodevelopmental		expanded
+MONDO:0013772	Huppke-Brendel syndrome	Neurodegenerative		expanded
+MONDO:0100255	adenosine kinase deficiency	Neurodevelopmental		expanded
+MONDO:0013353	intellectual disability, anterior maxillary protrusion, and strabismus	Neurodevelopmental		expanded
+MONDO:0012110	growth delay due to insulin-like growth factor type 1 deficiency	Neurodevelopmental		expanded
+MONDO:0032687	intellectual developmental disorder with abnormal behavior, microcephaly, and short stature	Neurodevelopmental		expanded
+MONDO:0044319	intellectual developmental disorder with dysmorphic facies, seizures, and distal limb anomalies	Neurodevelopmental		expanded
+MONDO:0010417	syndromic X-linked intellectual disability Najm type	Neurodevelopmental		expanded
+MONDO:0014376	intellectual developmental disorder with microcephaly and with or without ocular malformations or hypogonadotropic hypogonadism	Neurodevelopmental		expanded
+MONDO:0030913	intellectual disability, autosomal dominant 48	Neurodevelopmental		expanded
+MONDO:0014354	intellectual disability, autosomal recessive 43	Neurodevelopmental		expanded
+MONDO:0014649	intellectual disability, autosomal recessive 50	Neurodevelopmental		expanded
+MONDO:0010488	intellectual disability, X-linked 100	Neurodevelopmental		expanded
+MONDO:0030907	intellectual disability, X-linked 106	Neurodevelopmental		expanded
+MONDO:0010502	intellectual disability, X-linked 99, syndromic, female-restricted	Neurodevelopmental		expanded
+MONDO:0030908	intellectual disability, X-linked, syndromic, 35	Neurodevelopmental		expanded
+MONDO:0958322	intellectual developmental disorder, X-linked, syndromic 37	Neurodevelopmental		expanded
+MONDO:0010661	severe X-linked intellectual disability, Gustavson type	Neurodevelopmental		expanded
+MONDO:0010277	syndromic X-linked intellectual disability Shashi type	Neurodevelopmental		expanded
+MONDO:0010497	intellectual disability, X-linked 102	Neurodevelopmental		expanded
+MONDO:0859224	intellectual disability and myopathy syndrome	Neurodevelopmental		expanded
+MONDO:0024540	Jervell and Lange-Nielsen syndrome 1	Cardiac		expanded
+MONDO:0012871	Jervell and Lange-Nielsen syndrome 2	Cardiac		expanded
+MONDO:0009720	Keipert syndrome	Neurodevelopmental		expanded
+MONDO:0033664	Kilquist syndrome	Neurodevelopmental		expanded
+MONDO:0100082	LEOPARD syndrome 1	Cardiac		expanded
+MONDO:0012691	LEOPARD syndrome 2	Cardiac		expanded
+MONDO:0013380	LEOPARD syndrome 3	Cardiac		expanded
+MONDO:0014632	hypomyelinating leukodystrophy 10	Neurodegenerative		expanded
+MONDO:0014632	hypomyelinating leukodystrophy 10	Neurodevelopmental		expanded
+MONDO:0014732	hypomyelinating leukodystrophy 12	Neurodegenerative		expanded
+MONDO:0033486	leukodystrophy, hypomyelinating, 14	Neurodegenerative		expanded
+MONDO:0054782	leukodystrophy, hypomyelinating, 15	Neurodegenerative		expanded
+MONDO:0030514	leukodystrophy, hypomyelinating, 23, with ataxia, deafness, liver dysfunction, and dilated cardiomyopathy	Cardiac		expanded
+MONDO:0030514	leukodystrophy, hypomyelinating, 23, with ataxia, deafness, liver dysfunction, and dilated cardiomyopathy	Neurodegenerative		expanded
+MONDO:0012905	hypomyelinating leukodystrophy 6	Neurodegenerative		expanded
+MONDO:0014572	Lichtenstein-Knorr syndrome	Neurodegenerative		expanded
+MONDO:0014077	cobblestone lissencephaly without muscular or ocular involvement	Neurodevelopmental		expanded
+MONDO:0014797	lymphatic malformation 6	Cardiac		expanded
+MONDO:0013540	deafness-lymphedema-leukemia syndrome	Cardiac		expanded
+MONDO:0012516	mandibulofacial dysostosis-microcephaly syndrome	Neurodevelopmental		expanded
+MONDO:0018820	recurrent metabolic encephalomyopathic crises-rhabdomyolysis-cardiac arrhythmia-intellectual disability syndrome	Cardiac		expanded
+MONDO:0018820	recurrent metabolic encephalomyopathic crises-rhabdomyolysis-cardiac arrhythmia-intellectual disability syndrome	Neurodegenerative		expanded
+MONDO:0018820	recurrent metabolic encephalomyopathic crises-rhabdomyolysis-cardiac arrhythmia-intellectual disability syndrome	Neurodevelopmental		expanded
+MONDO:0011488	microcephaly 3, primary, autosomal recessive	Neurodevelopmental		expanded
+MONDO:0012106	microcephaly 5, primary, autosomal recessive	Neurodevelopmental		expanded
+MONDO:0013659	microcephaly-capillary malformation syndrome	Neurodevelopmental		expanded
+MONDO:0014785	microcephaly, short stature, and impaired glucose metabolism 2	Neurodevelopmental		expanded
+MONDO:0010261	microphthalmia, syndromic 2	Cardiac		expanded
+MONDO:0014820	mitochondrial DNA depletion syndrome 14 (cardioencephalomyopathic type)	Cardiac		expanded
+MONDO:0010060	mitochondrial DNA depletion syndrome 7 (hepatocerebral type)	Neurodegenerative		expanded
+MONDO:0026722	Mullegama-Klein-Martinez syndrome	Neurodevelopmental		expanded
+MONDO:0010466	multiple congenital anomalies-hypotonia-seizures syndrome 2	Neurodevelopmental		expanded
+MONDO:0032738	gonadal dysgenesis, dysmorphic facies, retinal dystrophy, and myopathy	Neurodevelopmental		expanded
+MONDO:0044714	mitochondrial myopathy-cerebellar ataxia-pigmentary retinopathy syndrome	Neurodegenerative		expanded
+MONDO:0032942	neurodevelopmental disorder with microcephaly and dysmorphic facies	Neurodevelopmental		expanded
+MONDO:0014940	neurodegeneration with ataxia, dystonia, and gaze palsy, childhood-onset	Neurodegenerative		expanded
+MONDO:0957225	neurodegeneration with developmental delay, early respiratory failure, myoclonic seizures, and brain abnormalities	Neurodegenerative		expanded
+MONDO:0100095	neurodegeneration, childhood-onset, stress-induced, with variable ataxia and seizures	Neurodegenerative		expanded
+MONDO:0859304	neurodegeneration, childhood-onset, with multisystem involvement due to mitochondrial dysfunction	Neurodegenerative		expanded
+MONDO:0859241	neurodegeneration, childhood-onset, with progressive microcephaly	Neurodegenerative		expanded
+MONDO:0859241	neurodegeneration, childhood-onset, with progressive microcephaly	Neurodevelopmental		expanded
+MONDO:0700288	early-childhood-onset neurodegeneration with retinitis pigmentosa, sensorineural hearing loss, and demyelinating peripheral neuropathy	Neurodegenerative		expanded
+MONDO:0032758	neurodegeneration, early-onset, with choreoathetoid movements and microcytic anemia	Neurodegenerative		expanded
+MONDO:0968947	neurodevelopmental disorder plus optic atrophy	Neurodevelopmental		expanded
+MONDO:0859519	neurodevelopmental disorder with absent speech and movement and behavioral abnormalities	Neurodevelopmental		expanded
+MONDO:0032855	neurodevelopmental disorder with dysmorphic facies and distal skeletal anomalies	Neurodevelopmental		expanded
+MONDO:0032894	neurodevelopmental disorder with epilepsy, spasticity, and brain atrophy	Neurodevelopmental		expanded
+MONDO:0859206	neurodevelopmental disorder with hearing loss and spasticity	Neurodevelopmental		expanded
+MONDO:0014698	microcephaly-intellectual disability-sensorineural hearing loss-epilepsy-abnormal muscle tone syndrome	Neurodevelopmental		expanded
+MONDO:0957541	neurodevelopmental disorder with hypotonia and speech delay, with or without seizures	Neurodevelopmental		expanded
+MONDO:0013787	psychomotor retardation, epilepsy, and craniofacial dysmorphism	Neurodevelopmental		expanded
+MONDO:0971043	neurodevelopmental disorder with hypotonia, feeding difficulties, facial dysmorphism, and brain abnormalities	Neurodevelopmental		expanded
+MONDO:0060496	neurodevelopmental disorder with hypotonia, neuropathy, and deafness	Neurodevelopmental		expanded
+MONDO:0968945	neurodevelopmental disorder with language impairment, autism, and attention deficit-hyperactivity disorder	Neurodevelopmental		expanded
+MONDO:0014886	severe growth deficiency-strabismus-extensive dermal melanocytosis-intellectual disability syndrome	Neurodevelopmental		expanded
+MONDO:0957218	neurodevelopmental disorder with microcephaly and speech delay, with or without brain abnormalities	Neurodevelopmental		expanded
+MONDO:0060577	neurodevelopmental disorder with microcephaly, ataxia, and seizures	Neurodegenerative		expanded
+MONDO:0060577	neurodevelopmental disorder with microcephaly, ataxia, and seizures	Neurodevelopmental		expanded
+MONDO:0859287	neurodevelopmental disorder with microcephaly, hypotonia, and absent language	Neurodevelopmental		expanded
+MONDO:0859236	neurodevelopmental disorder with neuromuscular and skeletal abnormalities	Neurodevelopmental		expanded
+MONDO:0859148	neurodevelopmental disorder with seizures and gingival overgrowth	Neurodevelopmental		expanded
+MONDO:0859516	neurodevelopmental disorder with seizures, spasticity, and complete or partial agenesis of the corpus callosum	Neurodevelopmental		expanded
+MONDO:0859272	neurodevelopmental disorder with speech delay and variable ocular anomalies	Neurodevelopmental		expanded
+MONDO:0971007	neuroocular syndrome 1	Neurodevelopmental		expanded
+MONDO:0012930	autosomal recessive severe congenital neutropenia due to G6PC3 deficiency	Cardiac		expanded
+MONDO:0013118	Nijmegen breakage syndrome-like disorder	Neurodevelopmental		expanded
+MONDO:0008104	Noonan syndrome 1	Cardiac		expanded
+MONDO:0032786	Noonan syndrome 11	Cardiac		expanded
+MONDO:0013186	Noonan syndrome 6	Cardiac		expanded
+MONDO:0036189	oculogastrointestinal-neurodevelopmental syndrome	Neurodevelopmental		expanded
+MONDO:0010477	blepharophimosis - intellectual disability syndrome, MKB type	Neurodevelopmental		expanded
+MONDO:0010590	FG syndrome 1	Neurodevelopmental		expanded
+MONDO:0010702	orofaciodigital syndrome I	Neurodevelopmental		expanded
+MONDO:0975705	otofacial neurodevelopmental syndrome	Neurodevelopmental		expanded
+MONDO:0012198	PCWH syndrome	Neurodegenerative		expanded
+MONDO:0012984	PHARC syndrome	Neurodegenerative		expanded
+MONDO:0009798	Primrose syndrome	Neurodevelopmental		expanded
+MONDO:0009821	lethal osteosclerotic bone dysplasia	Neurodevelopmental		expanded
+MONDO:0010653	Renpenning syndrome	Neurodevelopmental		expanded
+MONDO:0013005	EAST syndrome	Neurodegenerative		expanded
+MONDO:0013005	EAST syndrome	Neurodevelopmental		expanded
+MONDO:0100297	short stature, facial dysmorphism, and skeletal anomalies with or without cardiac anomalies 1	Cardiac		expanded
+MONDO:0030953	short stature, facial dysmorphism, and skeletal anomalies with or without cardiac anomalies 2	Cardiac		expanded
+MONDO:0859198	short stature, impaired intellectual development, microcephaly, hypotonia, and ocular anomalies	Neurodevelopmental		expanded
+MONDO:0008426	Shprintzen-Goldberg syndrome	Cardiac		expanded
+MONDO:0013960	sinoatrial node dysfunction and deafness	Cardiac		expanded
+MONDO:0859340	spinocerebellar ataxia 27B, late-onset	Neurodegenerative		expanded
+MONDO:0013594	spinocerebellar ataxia type 36	Neurodegenerative		expanded
+MONDO:0014601	autosomal recessive spinocerebellar ataxia 20	Neurodegenerative		expanded
+MONDO:0014601	autosomal recessive spinocerebellar ataxia 20	Neurodevelopmental		expanded
+MONDO:0030323	spinocerebellar ataxia, autosomal recessive 31	Neurodegenerative		expanded
+MONDO:0054591	Stankiewicz-Isidor syndrome	Neurodevelopmental		expanded
+MONDO:0011533	temtamy preaxial brachydactyly syndrome	Neurodevelopmental		expanded
+MONDO:0014918	tall stature-intellectual disability-renal anomalies syndrome	Neurodevelopmental		expanded
+MONDO:0060554	vertebral, cardiac, renal, and limb defects syndrome 1	Cardiac		expanded
+MONDO:0013252	Warsaw breakage syndrome	Neurodevelopmental		expanded
+MONDO:0014606	intellectual disability-microcephaly-strabismus-behavioral abnormalities syndrome	Neurodevelopmental		expanded
+MONDO:0008684	Wolf-Hirschhorn syndrome	Neurodevelopmental		expanded
+MONDO:0014848	TELO2-related intellectual disability-neurodevelopmental disorder	Neurodevelopmental		expanded
+MONDO:0024526	Zimmermann-Laband syndrome 1	Neurodevelopmental		expanded
+MONDO:0010496	X-linked intellectual disability-short stature-overweight syndrome	Neurodevelopmental		expanded
+MONDO:0010402	syndromic X-linked intellectual disability 94	Neurodevelopmental		expanded
+MONDO:0014716	macrocephaly-intellectual disability-neurodevelopmental disorder-small thorax syndrome	Neurodevelopmental		expanded
+MONDO:0010519	alpha thalassemia-X-linked intellectual disability syndrome	Neurodevelopmental		expanded
+MONDO:0008612	tuberous sclerosis 1	Neurodevelopmental		expanded
+MONDO:0013199	tuberous sclerosis 2	Neurodevelopmental		expanded
+MONDO:0009949	pyruvate carboxylase deficiency disease	Neurodegenerative		expanded
+MONDO:0001707	cardiac sarcoidosis	Cardiac		expanded
+MONDO:0001956	capillary leak syndrome	Cardiac		expanded
+MONDO:0001999	idiopathic pulmonary arterial hypertension	Cardiac		expanded
+MONDO:0005620	cerebral amyloid angiopathy	Cardiac		expanded
+MONDO:0008538	temporal arteritis	Cardiac		expanded
+MONDO:0008681	WAGR syndrome	Neurodevelopmental		expanded
+MONDO:0008889	thromboangiitis obliterans	Cardiac		expanded
+MONDO:0008935	cerebellar ataxia-hypogonadism syndrome	Neurodegenerative		expanded
+MONDO:0010706	premature ovarian failure 1	Neurodevelopmental		expanded
+MONDO:0011208	malignant atrophic papulosis	Cardiac		expanded
+MONDO:0011895	idiopathic hypereosinophilic syndrome	Cardiac		expanded
+MONDO:0015374	primary central nervous system vasculitis	Cardiac		expanded
+MONDO:0015691	hypereosinophilic syndrome	Cardiac		expanded
+MONDO:0016028	erythromelalgia	Cardiac		expanded
+MONDO:0016499	autoimmune autonomic ganglionopathy	Neuroimmune		expanded
+MONDO:0017729	metachromatic leukodystrophy, late infantile form	Neurodegenerative		expanded
+MONDO:0017991	Takayasu arteritis	Cardiac		expanded
+MONDO:0020640	autoimmune encephalitis	Neuroimmune		expanded
+MONDO:0021081	anti-NMDA receptor encephalitis	Neuroimmune		expanded
+MONDO:0100567	hereditary angioedema with normal C1Inh	Cardiac		expanded
+MONDO:8000015	46,XY sex reversal 11	Cardiac		expanded
+MONDO:0019438	AL amyloidosis	Cardiac		expanded
+MONDO:0800113	necrotizing vasculitis	Cardiac		expanded
+MONDO:0008752	Alexander disease	Neurodegenerative		expanded
+MONDO:0017730	metachromatic leukodystrophy, adult form	Neurodegenerative		expanded
+MONDO:0023134	febrile ulceronecrotic Mucha-Habermann disease	Cardiac		expanded
+MONDO:0012735	Temple-Baraitser syndrome	Neurodevelopmental		expanded
+MONDO:0009532	Miller-Dieker lissencephaly syndrome	Neurodevelopmental		expanded
+MONDO:0009341	Mowat-Wilson syndrome	Neurodevelopmental		expanded
+MONDO:0017694	glycogen storage disease due to acid maltase deficiency, infantile onset	Cardiac		expanded
+MONDO:0014306	deficiency of adenosine deaminase 2	Cardiac		expanded
+MONDO:0013388	developmental and epileptic encephalopathy, 11	Neurodevelopmental		expanded
+MONDO:0013801	developmental and epileptic encephalopathy, 13	Neurodevelopmental		expanded
+MONDO:0012960	intellectual disability, autosomal dominant 5	Neurodevelopmental		expanded
+MONDO:0014328	developmental and epileptic encephalopathy, 19	Neurodevelopmental		expanded
+MONDO:0014921	developmental and epileptic encephalopathy, 43	Neurodevelopmental		expanded
+MONDO:0017325	early-onset epileptic encephalopathy and intellectual disability due to GRIN2A mutation	Neurodevelopmental		expanded
+MONDO:0019623	hereditary angioedema	Cardiac		expanded
+MONDO:0100040	FOXG1 disorder	Neurodevelopmental		expanded
+MONDO:0010246	developmental and epileptic encephalopathy, 9	Neurodevelopmental		expanded
+MONDO:0014035	severe intellectual disability-progressive spastic diplegia syndrome	Neurodevelopmental		expanded
+MONDO:0012563	holoprosencephaly 9	Neurodevelopmental		expanded
+MONDO:0016596	hyperphosphatasia-intellectual disability syndrome	Neurodevelopmental		expanded
+MONDO:0010041	Charlevoix-Saguenay spastic ataxia	Neurodegenerative		expanded
+MONDO:0018324	adult-onset myasthenia gravis	Neuroimmune		expanded
+MONDO:0016342	familial isolated arrhythmogenic right ventricular dysplasia	Cardiac		expanded
+MONDO:0005021	dilated cardiomyopathy	Cardiac		expanded
+MONDO:0017147	obsolete idiopathic pulmonary arterial hypertension	Cardiac		expanded
+MONDO:0018901	left ventricular noncompaction	Cardiac		expanded
+MONDO:0005475	migraine with aura	Cardiac		expanded
+MONDO:0011479	postural orthostatic tachycardia syndrome	Cardiac		expanded
+MONDO:0014243	Schaaf-Yang syndrome	Neurodevelopmental		expanded
+MONDO:0002687	superior mesenteric artery syndrome	Cardiac		expanded
+MONDO:0007414	Gorham-Stout disease	Cardiac		expanded
+MONDO:0010664	syndromic X-linked intellectual disability Snyder type	Neurodevelopmental		expanded
+MONDO:0013387	developmental and epileptic encephalopathy, 7	Neurodevelopmental		expanded
+MONDO:0013989	developmental and epileptic encephalopathy, 14	Neurodevelopmental		expanded
+MONDO:0014607	developmental and epileptic encephalopathy, 32	Neurodevelopmental		expanded
+MONDO:0014936	ZTTK syndrome	Neurodevelopmental		expanded
+MONDO:0015523	epithelioid hemangioendothelioma	Cardiac		expanded
+MONDO:0018677	visceral heterotaxy	Cardiac		expanded
+MONDO:0024457	neurodegeneration with brain iron accumulation 2A	Neurodegenerative		expanded
+MONDO:0100485	KCNH1 associated disorder	Neurodevelopmental		expanded
+MONDO:0100605	POLR-related leukodystrophy	Neurodegenerative		expanded
+MONDO:0014823	hypotonia, infantile, with psychomotor retardation and characteristic facies 3	Neurodevelopmental		expanded
+MONDO:0005453	congenital heart disease	Cardiac		expanded
+MONDO:0007846	KBG syndrome	Neurodevelopmental		expanded
+MONDO:0008960	Charcot-Marie-Tooth disease-hearing loss-intellectual disability syndrome	Neurodevelopmental		expanded
+MONDO:0009241	fountain syndrome	Neurodevelopmental		expanded
+MONDO:0012081	15q11q13 microduplication syndrome	Neurodevelopmental		expanded
+MONDO:0012496	Koolen-de Vries syndrome	Neurodevelopmental		expanded
+MONDO:0012812	developmental and epileptic encephalopathy, 4	Neurodevelopmental		expanded
+MONDO:0013452	multisystemic smooth muscle dysfunction syndrome	Cardiac		expanded
+MONDO:0013885	Malan overgrowth syndrome	Neurodevelopmental		expanded
+MONDO:0014773	cardiac anomalies - developmental delay - facial dysmorphism syndrome	Cardiac		expanded
+MONDO:0014773	cardiac anomalies - developmental delay - facial dysmorphism syndrome	Neurodevelopmental		expanded
+MONDO:0014805	Hao-Fountain syndrome	Neurodevelopmental		expanded
+MONDO:0015802	autosomal dominant non-syndromic intellectual disability	Neurodevelopmental		expanded
+MONDO:0016343	obsolete unclassified cardiomyopathy	Cardiac		expanded
+MONDO:0016621	juvenile Huntington disease	Neurodegenerative		expanded
+MONDO:0016855	Mowat-Wilson syndrome due to monosomy 2q22	Neurodevelopmental		expanded
+MONDO:0018320	primary microcephaly-mild intellectual disability-young-onset diabetes syndrome	Neurodevelopmental		expanded
+MONDO:0018614	undetermined early-onset epileptic encephalopathy	Neurodevelopmental		expanded
+MONDO:0018894	distal hereditary motor neuropathy	Neurodegenerative		expanded
+MONDO:0019797	acrodysostosis	Neurodevelopmental		expanded
+MONDO:0035122	obsolete GRIN2B-related developmental delay, intellectual disability and autism spectrum disorder	Neurodevelopmental		expanded
+MONDO:0060759	neurodevelopmental disorder with regression, abnormal movements, loss of speech, and seizures	Neurodevelopmental		expanded
+MONDO:0011436	autosomal recessive distal spinal muscular atrophy 1	Neurodegenerative		expanded
+MONDO:0013150	parkinsonism-dystonia, infantile	Neurodegenerative		expanded
+MONDO:0014311	autosomal recessive spinocerebellar ataxia 15	Neurodegenerative		expanded
+MONDO:0014311	autosomal recessive spinocerebellar ataxia 15	Neurodevelopmental		expanded
+MONDO:0014521	progressive myoclonic epilepsy type 7	Neurodegenerative		expanded
+MONDO:0033365	developmental and epileptic encephalopathy, 56	Neurodevelopmental		expanded
+MONDO:0957397	intellectual developmental disorder, autosomal dominant 72	Neurodevelopmental		expanded
+MONDO:0014590	congenital myasthenic syndrome 18	Neurodegenerative		expanded
+MONDO:0014590	congenital myasthenic syndrome 18	Neurodevelopmental		expanded
+MONDO:0008876	Bloom syndrome	Neurodevelopmental		expanded
+MONDO:0010375	developmental and epileptic encephalopathy, 8	Neurodevelopmental		expanded
+MONDO:0010476	neurodegeneration with brain iron accumulation 5	Neurodegenerative		expanded
+MONDO:0014482	intellectual disability, autosomal dominant 29	Neurodevelopmental		expanded
+MONDO:0014933	developmental and epileptic encephalopathy, 44	Neurodevelopmental		expanded
+MONDO:0032919	intellectual developmental disorder 62	Neurodevelopmental		expanded
+MONDO:0013352	intellectual disability-severe speech delay-mild dysmorphism syndrome	Neurodevelopmental		expanded
+MONDO:0013578	DYRK1A-related intellectual disability syndrome	Neurodevelopmental		expanded
+MONDO:0018760	DeSanto-Shinawi syndrome	Neurodevelopmental		expanded
+MONDO:0100038	complex neurodevelopmental disorder	Neurodevelopmental		expanded
+MONDO:0035149	secondary erythromelalgia	Cardiac		expanded
