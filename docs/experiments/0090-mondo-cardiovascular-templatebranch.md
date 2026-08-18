@@ -227,6 +227,27 @@ per-parent, so the local support carries most of the real signal; and `|w_CK|=27
 is the tell — the head over-committed to the marginal-prevalence direction and
 saturated, losing the within-sibling contrast.
 
+**Shaping ablation (the other half): supervision is NEUTRAL on the representation.**
+`gated_pc` (supervised) vs `unsup_gated` (weight_y=0) readout, same gated topics:
+- pc_topics_lr AUC 0.7320 vs 0.7289 (Δ+0.003); AP 0.516 vs 0.511 (Δ+0.006);
+  cond AUC 0.7320 vs 0.7289 (Δ+0.003); multiclass top-1 0.827 vs 0.829 (Δ−0.002).
+
+So PC supervision does **not** shape the topics — the **DAG gate** (structural per-node
+topic blocks) produces the whole conditional representation, with or without the head.
+Confirms the marginal-PC-benefit pattern on information-limited EHR (insights
+0064/0066/0089), now on the Mondo backbone. The per-node domain λ-mass is likewise
+near-identical supervised vs unsup (specialization is a gated-multi-domain property,
+insight 0078, not a PC effect).
+
+**Combined verdict.** The co-fit head earns nothing here: it neither predicts
+(under-fit, 0.52 vs 0.666 achievable on its own support) nor improves the
+representation (neutral). The good conditional numbers (readout 0.73) come from the
+**unsupervised gated topics**. This reframes the "unified model": keep the single
+calibrated artifact, but as a **POST-FIT head on the gated topics**, not a co-fit head
+— one saved model (gated topics + head), calibrated conditional output, single
+inference path, WITHOUT paying for co-training that doesn't pay off. `weight_y`
+becomes optional. (PC may still help on richer data; on this data it's neutral.)
+
 ### Run 4 (planned) — the ceiling test: does CONVERGING the engine head reach 0.676?
 
 Added `--head-converge-iters` (default 25): a post-fit diagnostic that converges the
