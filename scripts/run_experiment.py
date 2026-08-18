@@ -841,6 +841,8 @@ def build_gated_pc_args(
         args.extend(["--readout-sample-frac", str(effective["readout_sample_frac"])])
     if effective.get("head_converge_iters") is not None:
         args.extend(["--head-converge-iters", str(effective["head_converge_iters"])])
+    if effective.get("head_fixed_ridge") is not None:
+        args.extend(["--head-fixed-ridge", str(effective["head_fixed_ridge"])])
     return args
 
 

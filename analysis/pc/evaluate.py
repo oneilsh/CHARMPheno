@@ -167,6 +167,8 @@ def _lr_proba_per_label_masked(
     X_te: np.ndarray,
     C: int,
     feature_cols=None,
+    fit_intercept: bool = True,
+    standardize: bool = True,
 ) -> np.ndarray:
     """Per-label :class:`LogisticRegression` trained on each label's OWN observed
     train rows, returning ``(N_te, C)`` probabilities.
@@ -203,12 +205,17 @@ def _lr_proba_per_label_masked(
         # Standardize on this label's observed TRAIN rows (leak-free), apply to
         # test, so L-BFGS converges on high-dimensional raw counts — unscaled
         # 5000-dim counts otherwise hit the iteration limit (ConvergenceWarning),
-        # leaving an under-fit, unfairly weak baseline that flatters PC.
-        scaler = StandardScaler().fit(Xf)
-        lr = LogisticRegression(max_iter=1000)
-        lr.fit(scaler.transform(Xf), yc)
+        # leaving an under-fit, unfairly weak baseline that flatters PC. The
+        # `standardize` / `fit_intercept` toggles exist for the head-formulation
+        # LADDER (isolating which sklearn-vs-engine-head difference costs the co-fit
+        # head its AUC); both default True = the standard readout.
+        if standardize:
+            scaler = StandardScaler().fit(Xf)
+            Xf, Xt = scaler.transform(Xf), scaler.transform(Xt)
+        lr = LogisticRegression(max_iter=1000, fit_intercept=fit_intercept)
+        lr.fit(Xf, yc)
         pos_col = int(np.where(lr.classes_ == 1)[0][0])
-        proba[:, c] = lr.predict_proba(scaler.transform(Xt))[:, pos_col]
+        proba[:, c] = lr.predict_proba(Xt)[:, pos_col]
     return proba
 
 
