@@ -111,4 +111,18 @@ cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp &
 
 ## Run log
 
-_(pending first run)_
+**2026-08-18 — saturation REFUTED; the dead gradient is `∂θ/∂eb` (alpha-collapse).**
+With `head_l2=5.0, head_lr=0.3` the ridge worked — `|w_CK|max` bounded to **27** (was 273),
+median `|w_c|=1.8`, max 90. But `||grad_y||` stayed **~1e-84** and `corr_relΔλ=0` every iter:
+
+```
+|w_CK|max:  8.6 → 14.5 → 18.7 → 21.7 → 23.8 → 25.3 → 26.3 → 27
+||grad_y||: 0 → 4.9e-85 → 7.6e-85 → ... → 1.1e-84   (unchanged by the |w| drop)
+```
+
+Bounding `|w|` 10× did NOT revive the gradient ⇒ it is not logit-saturation (`z=w·θ`).
+`grad_topics = (∂loss/∂θ)·(∂θ/∂eb)`; with `|w|~27` the first factor is fine, so the dead
+factor is the CAVI Jacobian `∂θ/∂eb`. Autograd confirms it collapses with alpha:
+`||dθ/deb||` = 3.1e-1 (α=0.5) → 2.9e-10 (α=0.05) → **2.7e-90 (α=0.0022=1/K, the cluster)** —
+matching the cluster `||grad_y||~1e-84`. The tiny 1/K doc-concentration collapses θ so the
+shaping gradient cannot flow. → real fix probed in exp 0095 (`doc_concentration=0.5`).

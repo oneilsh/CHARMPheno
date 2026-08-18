@@ -829,6 +829,8 @@ def build_gated_pc_args(
         args.append("--localize-head")
     if effective.get("diag_only"):
         args.append("--diag-only")
+    if effective.get("doc_concentration") is not None:
+        args.extend(["--doc-concentration", str(effective["doc_concentration"])])
     if effective.get("dag_source"):
         args.extend(["--dag-source", str(effective["dag_source"])])
     if effective.get("mondo_branch"):
