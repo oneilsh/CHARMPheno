@@ -200,3 +200,43 @@ Two diagnostics added to the driver, both on the gated arm's collected θ:
 - **Shaping ablation** — the weight_y=0 twin readout restored (memory-safe via
   `readout_sample_frac`): does supervision improve the representation, or does the
   gate structure carry it? (0089 was ~neutral.)
+
+### Run 3 — the A-vs-B verdict: the co-fit head is UNDER-FIT, not locality-limited
+
+The memory fix held (readout did not OOM; the `exit 143` was a *worker* node
+preempted mid-fit, which Spark recovered from). Mean conditional AUC across depths:
+
+| head | mean cond_AUC | mean ECE |
+|---|---|---|
+| full-K readout LR | **0.739** | 0.061 |
+| oracle-localized (support-only LR) | **0.676** | 0.031 |
+| co-fit head (as trained) | **~0.52** | ~0.16 |
+
+Decomposing the co-fit head's deficit:
+- **co-fit 0.52 → oracle 0.676 (+0.156)** — the big piece — is **pure under-fitting**:
+  a logistic on the co-fit head's *exact support topics*, fit optimally, reaches
+  0.676. The signal IS in the support; the co-fit Newton head isn't extracting it.
+- **oracle 0.676 → full-K 0.739 (+0.063)** — the small piece — is the only genuine
+  locality tax (signal outside the support).
+
+So localization costs ~0.06; the other ~0.16 is the head under-fitting what's in
+front of it. **Run-2's "localization is fundamentally lossy" conclusion was wrong on
+the mechanism — the unified head is recoverable.** Corroborating: the oracle-localized
+is *better calibrated* than full-K (ECE 0.031 vs 0.061) and clinically sane
+per-parent, so the local support carries most of the real signal; and `|w_CK|=273`
+is the tell — the head over-committed to the marginal-prevalence direction and
+saturated, losing the within-sibling contrast.
+
+### Run 4 (planned) — the ceiling test: does CONVERGING the engine head reach 0.676?
+
+Added `--head-converge-iters` (default 25): a post-fit diagnostic that converges the
+ENGINE's own localized ridge-Newton head (full Newton from w=0) on the FROZEN final
+θ, and reports its conditional AUC in the `A-vs-B` line as `converged-head=…`. This
+splits the under-fit cause:
+- **converged ≈ oracle (0.676)** ⇒ the co-fit head merely UNDER-CONVERGED during
+  training (one damped step/iter against a moving θ) → fix is a bounded **inner head
+  loop** (the `head_inner_iters` removed with Firth), *with no post-hoc fit* — the
+  strict unified ideal survives.
+- **converged < oracle** ⇒ the head's raw-feature ridge conditioning caps it below a
+  well-regularized logistic → the fix is the head's regularization (scaling / ridge),
+  not just more iterations.

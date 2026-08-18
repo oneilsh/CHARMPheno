@@ -839,6 +839,8 @@ def build_gated_pc_args(
         args.extend(["--mondo-cache-dir", str(effective["mondo_cache_dir"])])
     if effective.get("readout_sample_frac") is not None:
         args.extend(["--readout-sample-frac", str(effective["readout_sample_frac"])])
+    if effective.get("head_converge_iters") is not None:
+        args.extend(["--head-converge-iters", str(effective["head_converge_iters"])])
     return args
 
 
