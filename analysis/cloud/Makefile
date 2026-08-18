@@ -1,4 +1,4 @@
-.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail eval-exp build-dashboard-exp build-covariates lr-readout pc-antidepressant
+.PHONY: help zip cluster-overlay smoke bq-smoke lda-bq-smoke hdp-bq-smoke eval-bq-coherence build-dashboard-bundle lda-bq-fit-eval hdp-bq-fit-eval inspect smoke-dataproc setup next-exp exp summary summary-tail report eval-exp build-dashboard-exp build-covariates lr-readout pc-antidepressant
 
 REPO_ROOT       := $(shell git rev-parse --show-toplevel)
 SPARK_VI_ZIP    := $(REPO_ROOT)/spark-vi/dist/spark_vi.zip
@@ -123,6 +123,7 @@ help:
 	@echo "  exp ID=N [NO_EVAL=1]    Run/resume experiment N; fit (+ eval unless NO_EVAL)."
 	@echo "  summary ID=N            Print summary.md for experiment N."
 	@echo "  summary-tail ID=N       Print only the most-recent ## section of summary.md."
+	@echo "  report ID=N             COMPACT gated_pc digest (flags + fit-health + signal lines)."
 	@echo "  eval-exp [ID=N]         Re-run eval; if ID omitted, auto-selects most-recently-fit."
 	@echo "  build-dashboard-exp     - build dashboard bundle (auto-picks freshest fit needing build)"
 	@echo "  build-dashboard-exp ID=N - force rebuild for a specific experiment"
@@ -459,6 +460,14 @@ summary-tail:
 	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
 	@awk '/^## /{buf=""} {buf=buf$$0"\n"} END{printf "%s",buf}' \
 	    $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*/summary.md
+
+# COMPACT post-fit report for a gated_pc run (copy/paste back to chat): drops the
+# bulky per-parent / λ-mass tables + per-iter spam, keeps the signal lines, and
+# prepends a weirdness scan + fit-health (ELBO / |w| / corr_relΔλ) trajectory.
+report:
+	@if [ -z "$(ID)" ]; then echo "ERROR: provide ID=N"; exit 1; fi
+	@python $(REPO_ROOT)/analysis/cloud/gated_pc_report.py \
+	    --summary $(shell ls $(RUNS_DIR)/$(shell printf '%04d' $(ID))-*/summary.md | tail -1)
 
 # Re-run eval only against an existing experiment's checkpoint; appends a
 # timestamped ## Eval (NPMI) section to summary.md.

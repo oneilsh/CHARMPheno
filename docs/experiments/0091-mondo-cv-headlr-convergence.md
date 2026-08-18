@@ -97,6 +97,8 @@ unpenalized per-node INTERCEPT (+0.060 in the ladder) — an engine change stage
 ```bash
 cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp && \
   CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=91
+# then paste the COMPACT digest instead of the full log:
+make -C analysis/cloud report ID=91
 ```
 
 ## Run log
