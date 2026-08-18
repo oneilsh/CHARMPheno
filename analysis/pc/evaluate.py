@@ -166,6 +166,7 @@ def _lr_proba_per_label_masked(
     obs_DC: np.ndarray,
     X_te: np.ndarray,
     C: int,
+    feature_cols=None,
 ) -> np.ndarray:
     """Per-label :class:`LogisticRegression` trained on each label's OWN observed
     train rows, returning ``(N_te, C)`` probabilities.
@@ -176,6 +177,16 @@ def _lr_proba_per_label_masked(
     single-class fallback as :func:`_lr_proba_per_label` (a constant prediction
     equal to the lone class), so an all-one-class or empty observed set yields a
     chance-level heldout AUC rather than an exception.
+
+    ``feature_cols`` (``None`` = all K features): a length-``C`` list where
+    ``feature_cols[c]`` is the array of FEATURE columns node ``c`` may read. This
+    is the "oracle localized readout" — fitting the best-possible per-node logistic
+    on EXACTLY the co-fit head's topic support (``allowed_with_siblings``) — the
+    A-vs-B diagnostic: if it matches the full-K readout the co-fit head is merely
+    under-fit on its support (recoverable); if it collapses to the co-fit head's
+    level the discriminative signal is genuinely outside the local support
+    (localization is fundamentally lossy). An empty column set falls back to the
+    class-prior constant (chance).
     """
     N_te = X_te.shape[0]
     proba = np.zeros((N_te, C), dtype=np.float64)
@@ -183,18 +194,21 @@ def _lr_proba_per_label_masked(
         rows = np.where(obs_DC[:, c].astype(bool))[0]
         yc = y_DC[rows, c]
         classes = np.unique(yc)
-        if classes.size < 2:
+        cols = None if feature_cols is None else np.asarray(feature_cols[c], dtype=int)
+        if classes.size < 2 or (cols is not None and cols.size == 0):
             proba[:, c] = float(classes[0]) if classes.size else 0.0
             continue
+        Xf = X_fit_full[rows] if cols is None else X_fit_full[np.ix_(rows, cols)]
+        Xt = X_te if cols is None else X_te[:, cols]
         # Standardize on this label's observed TRAIN rows (leak-free), apply to
         # test, so L-BFGS converges on high-dimensional raw counts — unscaled
         # 5000-dim counts otherwise hit the iteration limit (ConvergenceWarning),
         # leaving an under-fit, unfairly weak baseline that flatters PC.
-        scaler = StandardScaler().fit(X_fit_full[rows])
+        scaler = StandardScaler().fit(Xf)
         lr = LogisticRegression(max_iter=1000)
-        lr.fit(scaler.transform(X_fit_full[rows]), yc)
+        lr.fit(scaler.transform(Xf), yc)
         pos_col = int(np.where(lr.classes_ == 1)[0][0])
-        proba[:, c] = lr.predict_proba(scaler.transform(X_te))[:, pos_col]
+        proba[:, c] = lr.predict_proba(scaler.transform(Xt))[:, pos_col]
     return proba
 
 

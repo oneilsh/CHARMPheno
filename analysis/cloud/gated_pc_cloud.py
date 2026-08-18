@@ -485,13 +485,22 @@ def dag_closure_parents(parent_int, C):
 # Spark collectors (cluster-covered; not unit-tested).                        #
 # --------------------------------------------------------------------------- #
 def _collect_theta_labels(df, C, *, label_col="label", mask_col="labelMask",
-                          topic_col="topicDistribution"):
+                          topic_col="topicDistribution", sample_frac=1.0, seed=0):
     """Collect ONLY the K-dim per-doc theta + the (C,) label/mask arrays to numpy
     (never the dense BOW), so it stays on the driver's memory budget at cohort
     scale. Returns (Pi (D,K), y_DC (D,C), mask_DC (D,C), person_order). Empty df
     -> correctly-shaped zero arrays. Mirrors pc_antidepressant_cloud's
     _collect_topics_labels but with configurable label/mask column names (this
-    corpus uses 'label'/'labelMask' from the Step-A adapter)."""
+    corpus uses 'label'/'labelMask' from the Step-A adapter).
+
+    `sample_frac` (<1.0) row-subsamples BEFORE the collect — the readout collects
+    per-doc theta AND builds (N, C) proba arrays on the driver, both O(N); at
+    whole-Mondo K/C over the whole population that is multi-GB, so bounding N here
+    bounds the readout's driver footprint (the per-node LR needs only enough rows to
+    fit, not all of them)."""
+    if sample_frac < 1.0:
+        df = df.sample(withReplacement=False, fraction=float(sample_frac),
+                       seed=int(seed))
     rows = df.select("person_id", topic_col, label_col, mask_col).collect()
     person_order = [r["person_id"] for r in rows]
     if rows:
@@ -508,10 +517,15 @@ def _collect_theta_labels(df, C, *, label_col="label", mask_col="labelMask",
 
 
 def _collect_head_proba(df, C, *, prob_col="probability", label_col="label",
-                        mask_col="labelMask"):
+                        mask_col="labelMask", sample_frac=1.0, seed=0):
     """Collect the co-fit head's per-node P(node)=sigmoid(w_CK.theta) + label/mask
     to (proba (D,C), y (D,C), mask (D,C)). Only meaningful for a supervised
-    (weightY>0) transform, which appends `prob_col`. Cluster-covered."""
+    (weightY>0) transform, which appends `prob_col`. Cluster-covered. `sample_frac`
+    row-subsamples before the collect (bounds the driver footprint; see
+    _collect_theta_labels)."""
+    if sample_frac < 1.0:
+        df = df.sample(withReplacement=False, fraction=float(sample_frac),
+                       seed=int(seed))
     rows = df.select(prob_col, label_col, mask_col).collect()
     if not rows:
         z = np.zeros((0, C), dtype=np.float64)
@@ -746,6 +760,11 @@ def parse_args(argv=None):
     p.add_argument("--baseline-max-iter", type=int, default=-1,
                    help="cap the unsup_gated fit at N iters; <=0 reuses --max-iter "
                         "(unsupervised topics converge faster than the head).")
+    p.add_argument("--readout-sample-frac", type=float, default=1.0,
+                   help="row-subsample fraction for the driver-side readout collects "
+                        "(theta + per-node LR + (N,C) proba arrays are all O(N)). <1.0 "
+                        "bounds driver memory at whole-Mondo K/C; the per-node LR needs "
+                        "only enough rows to fit. 1.0 (default) = full collect.")
     p.add_argument("--min-label-count", type=int, default=20,
                    help="mask any node whose heldout column has < this many cells "
                         "of either class from the macro (AoU small-cell floor).")
@@ -945,8 +964,12 @@ def main() -> int:
             # the supervised transform appends BOTH topicDistribution and probability.
             train_scored = pc_model.transform(bundle.train_df).cache()
             test_scored = pc_model.transform(bundle.test_df).cache()
-            Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
-            Pi_te, y_te, m_te, _ = _collect_theta_labels(test_scored, C)
+            _sf = args.readout_sample_frac
+            _sd = args.seed if args.seed is not None else 0
+            Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
+                train_scored, C, sample_frac=_sf, seed=_sd)
+            Pi_te, y_te, m_te, _ = _collect_theta_labels(
+                test_scored, C, sample_frac=_sf, seed=_sd)
             results["gated_pc"], proba_gp = _score_full(
                 Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
             print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
@@ -954,6 +977,24 @@ def main() -> int:
             # Conditional 'sharpening' readout: P(child | parent-cohort) by DAG depth.
             results["gated_pc_conditional"] = _conditional(
                 proba_gp, y_te, m_te, "gated_pc")
+            # ORACLE LOCALIZED readout (A-vs-B diagnostic for the co-fit head): the
+            # BEST-POSSIBLE per-node logistic fit on EXACTLY the co-fit head's topic
+            # support (allowed_with_siblings) — same hypothesis class as the localized
+            # head, but fit optimally (sklearn) instead of by the co-fit Newton step.
+            #   oracle ≈ full-K readout  => the signal IS in the support; the co-fit
+            #     head is merely UNDER-FIT on it (recoverable: tune the head fit).
+            #   oracle ≈ co-fit head     => the discriminative signal is OUTSIDE the
+            #     local support; localization is fundamentally lossy (widen support or
+            #     concede two-stage).
+            if getattr(args, "localize_head", False):
+                from analysis.pc.evaluate import _lr_proba_per_label_masked as _lrm
+                support_cols = [np.asarray(sorted(lay.allowed_with_siblings(c)), dtype=int)
+                                for c in range(C)]
+                proba_oracle = _lrm(Pi_tr, y_tr, m_tr, Pi_te, C,
+                                    feature_cols=support_cols)
+                results["gated_pc_oracle_conditional"] = _conditional(
+                    proba_oracle, y_te, m_te,
+                    "gated_pc oracle-localized (support-only LR)")
             # Post-hoc ISOTONIC calibration of the head-independent proba → calibrated
             # conditional posteriors for VOI (the two-stage route, independent of the
             # co-fit head). Isotonic is monotone so
@@ -984,7 +1025,8 @@ def main() -> int:
                   f"calibrated={_f(cond_cal.get('ece')).strip()}", flush=True)
             # co-fit head's own per-node P(node) readout (secondary), from the SAME
             # scored test frame (no second CAVI pass).
-            hp, hy, hm = _collect_head_proba(test_scored, C)
+            hp, hy, hm = _collect_head_proba(
+                test_scored, C, sample_frac=_sf, seed=_sd)
             results["gated_pc_head"] = readout_from_proba(
                 hp, hy, hm, C, recall_targets=rt, fdr_targets=ft,
                 min_count=args.min_label_count)
@@ -1001,6 +1043,21 @@ def main() -> int:
             print(f"[driver]   co-fit head |w_CK|max="
                   f"{float(np.abs(pc_model.headWeights()).max()):.4g} "
                   f"(head_l2={args.head_l2})", flush=True)
+            # A-vs-B verdict: mean conditional AUC of the three heads side by side.
+            # oracle≈full ⇒ under-fit head (recoverable); oracle≈co-fit ⇒ non-local
+            # signal (localization fundamentally lossy).
+            def _mean_cauc(cond):
+                v = [r["cond_auc"] for r in (cond or {}).get("edges", [])
+                     if r.get("cond_auc") is not None]
+                return float(np.mean(v)) if v else float("nan")
+            if "gated_pc_oracle_conditional" in results:
+                print(
+                    "[driver]   A-vs-B cond_AUC:  full-K readout="
+                    f"{_mean_cauc(results['gated_pc_conditional']):.3f}  "
+                    f"oracle-localized={_mean_cauc(results['gated_pc_oracle_conditional']):.3f}  "
+                    f"co-fit head={_mean_cauc(results['gated_pc_head_conditional']):.3f}  "
+                    "(oracle≈full ⇒ head under-fit/recoverable; oracle≈co-fit ⇒ "
+                    "signal non-local)", flush=True)
             train_scored.unpersist(); test_scored.unpersist()
 
         if not args.skip_unsup_gated:
@@ -1012,9 +1069,13 @@ def main() -> int:
                 us_est = _build_pc_estimator(us_args, weight_y=0.0, gated=True)
                 us_model = us_est.fit(bundle.train_df)
                 Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
-                    us_model.transform(bundle.train_df), C)
+                    us_model.transform(bundle.train_df), C,
+                    sample_frac=args.readout_sample_frac,
+                    seed=(args.seed if args.seed is not None else 0))
                 Pi_te, y_te, m_te, _ = _collect_theta_labels(
-                    us_model.transform(bundle.test_df), C)
+                    us_model.transform(bundle.test_df), C,
+                    sample_frac=args.readout_sample_frac,
+                    seed=(args.seed if args.seed is not None else 0))
                 results["unsup_gated"], proba_us = _score_full(
                     Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
                 print(format_arm_readout("unsup_gated (pc_topics_lr)",
