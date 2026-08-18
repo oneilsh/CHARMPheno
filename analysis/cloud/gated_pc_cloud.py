@@ -538,6 +538,65 @@ def _collect_head_proba(df, C, *, prob_col="probability", label_col="label",
     return proba, y_DC, mask_DC
 
 
+def _converge_localized_head(Pi, y, obs, support_cols, C, *, head_l2,
+                             head_newton_ridge, n_iters, head_lr=1.0):
+    """Converge the ENGINE's localized ridge-Newton head on FROZEN θ (the diagnostic
+    for the co-fit head's under-fitting).
+
+    Same per-node logistic + ridge + Newton solve as OnlinePCLDA.update_global's
+    'newton' head (support-restricted, w=0 off support, ridge = head_l2 +
+    head_newton_ridge·mean(diag H)), but run to CONVERGENCE (full Newton steps from
+    w=0) on the fixed final topic representation `Pi` (= θ, the label-free CAVI mean
+    the co-fit head reads) instead of ONE damped step per SVI iter against a moving
+    θ. It answers whether the engine head's FORMULATION can reach the oracle ceiling:
+      converged ≈ oracle-localized ⇒ the co-fit head merely UNDER-CONVERGED during
+        training (fix = an inner head loop); the head is fine.
+      converged < oracle-localized ⇒ the head's raw-feature ridge conditioning caps
+        it below a well-regularized logistic (fix = the head's regularization).
+    `obs` is the per-node observed mask (closure mask); each node is fit on its own
+    observed rows, exactly as in training. Pure numpy (driver-side)."""
+    K = Pi.shape[1] if Pi.ndim == 2 and Pi.shape[0] else 0
+    w = np.zeros((C, K), dtype=np.float64)
+    if Pi.shape[0] == 0:
+        return w
+    for _ in range(int(n_iters)):
+        for c in range(C):
+            s = support_cols[c]
+            if s.size == 0:
+                continue
+            rows = np.where(obs[:, c] > 0)[0]
+            if rows.size == 0:
+                continue
+            yc = y[rows, c]
+            if np.unique(yc).size < 2:
+                continue
+            X = Pi[np.ix_(rows, s)]
+            z = np.clip(X @ w[c, s], -50.0, 50.0)
+            p = 1.0 / (1.0 + np.exp(-z))
+            g = X.T @ (p - yc)                              # NLL gradient on support
+            H = (X * (p * (1.0 - p))[:, None]).T @ X        # Fisher on support
+            d = int(s.size)
+            ridge = head_l2 + head_newton_ridge * (float(np.trace(H)) / d) + 1e-10
+            A = H + ridge * np.eye(d)
+            b = g + ridge * w[c, s]
+            try:
+                delta = np.linalg.solve(A, b)
+            except np.linalg.LinAlgError:
+                delta = np.linalg.lstsq(A, b, rcond=None)[0]
+            w[c, s] = w[c, s] - head_lr * delta
+    return w
+
+
+def _localized_head_proba(Pi, w):
+    """Per-node P(node) = σ(w_c·θ) for the localized head (w is 0 off-support, so
+    the full dot IS the localized prediction). Returns (N, C)."""
+    C = w.shape[0]
+    if Pi.shape[0] == 0:
+        return np.zeros((0, C), dtype=np.float64)
+    z = np.clip(Pi @ w.T, -50.0, 50.0)
+    return 1.0 / (1.0 + np.exp(-z))
+
+
 def per_node_domain_mass(lam_dict, lay, domain_names):
     """Per DAG node, the fraction of its topic block's λ mass in each domain.
 
@@ -765,6 +824,12 @@ def parse_args(argv=None):
                         "(theta + per-node LR + (N,C) proba arrays are all O(N)). <1.0 "
                         "bounds driver memory at whole-Mondo K/C; the per-node LR needs "
                         "only enough rows to fit. 1.0 (default) = full collect.")
+    p.add_argument("--head-converge-iters", type=int, default=25,
+                   help="post-fit diagnostic (localize-head only): converge the "
+                        "engine's localized ridge-Newton head on the FROZEN final θ "
+                        "for this many full Newton steps (from w=0) and report its "
+                        "conditional AUC — does the head reach the oracle ceiling if "
+                        "converged? 0 = skip.")
     p.add_argument("--min-label-count", type=int, default=20,
                    help="mask any node whose heldout column has < this many cells "
                         "of either class from the macro (AoU small-cell floor).")
@@ -995,6 +1060,22 @@ def main() -> int:
                 results["gated_pc_oracle_conditional"] = _conditional(
                     proba_oracle, y_te, m_te,
                     "gated_pc oracle-localized (support-only LR)")
+                # CEILING TEST: the engine's OWN localized ridge-Newton head, but
+                # converged (full Newton from w=0) on the frozen final θ. Reaches the
+                # oracle ⇒ the co-fit head just under-converged during training (fix =
+                # inner head loop); falls short ⇒ the head's raw-feature ridge caps it
+                # (fix = regularization). Uses the SAME θ (Pi) the head reads.
+                if args.head_converge_iters > 0:
+                    w_conv = _converge_localized_head(
+                        Pi_tr, y_tr, m_tr, support_cols, C, head_l2=args.head_l2,
+                        head_newton_ridge=args.head_newton_ridge,
+                        n_iters=args.head_converge_iters)
+                    proba_conv = _localized_head_proba(Pi_te, w_conv)
+                    results["gated_pc_converged_head_conditional"] = _conditional(
+                        proba_conv, y_te, m_te,
+                        "gated_pc converged localized head (frozen θ, w=0 init)")
+                    print("[driver]   converged localized head |w|max="
+                          f"{float(np.abs(w_conv).max()):.4g}", flush=True)
             # Post-hoc ISOTONIC calibration of the head-independent proba → calibrated
             # conditional posteriors for VOI (the two-stage route, independent of the
             # co-fit head). Isotonic is monotone so
@@ -1051,13 +1132,18 @@ def main() -> int:
                      if r.get("cond_auc") is not None]
                 return float(np.mean(v)) if v else float("nan")
             if "gated_pc_oracle_conditional" in results:
+                _conv = results.get("gated_pc_converged_head_conditional")
+                _conv_s = (f"  converged-head={_mean_cauc(_conv):.3f}"
+                           if _conv is not None else "")
                 print(
                     "[driver]   A-vs-B cond_AUC:  full-K readout="
                     f"{_mean_cauc(results['gated_pc_conditional']):.3f}  "
-                    f"oracle-localized={_mean_cauc(results['gated_pc_oracle_conditional']):.3f}  "
+                    f"oracle-localized={_mean_cauc(results['gated_pc_oracle_conditional']):.3f}"
+                    f"{_conv_s}  "
                     f"co-fit head={_mean_cauc(results['gated_pc_head_conditional']):.3f}  "
-                    "(oracle≈full ⇒ head under-fit/recoverable; oracle≈co-fit ⇒ "
-                    "signal non-local)", flush=True)
+                    "(converged≈oracle ⇒ co-fit under-CONVERGED, fix=inner loop; "
+                    "converged<oracle ⇒ head ridge caps it; oracle<full ⇒ signal "
+                    "non-local)", flush=True)
             train_scored.unpersist(); test_scored.unpersist()
 
         if not args.skip_unsup_gated:
