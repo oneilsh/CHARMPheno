@@ -845,6 +845,8 @@ class OnlinePCLDA(VIModel):
         # through the VIModel contract.
         self._update_calls = 0
         self._corr_relchg = 0.0        # supervised λ-correction magnitude (diagnostic)
+        self._grad_topics_norm = 0.0   # ||∂loss_y/∂expElogbeta|| — is the shaping grad alive?
+        self._eff_wy = 0.0             # effective weight_y this step (after warmup ramp)
         # Supervised-head flavor (the label-side seam). Default = the flat C-way
         # logistic head (Hughes). A DAG-closure head (Mondo, label-side hierarchy)
         # slots in here without touching the SVI math or the increment-1 gate.
@@ -1064,6 +1066,17 @@ class OnlinePCLDA(VIModel):
         # read). This is the fix for the mis-transformed correction that made the
         # supervised topics degrade (finite-difference-verified exact).
         grad_topics_eb = np.asarray(target_stats["grad_topics_stat"], dtype=np.float64)
+        # SELF-VERIFYING DIAGNOSTIC (insight 0072 / exp 0092): the raw supervised
+        # gradient norm and the live weight_y. A corr_relΔλ of EXACTLY 0 has three
+        # possible causes and this separates them: (i) ||grad||≈0 ⇒ the head sends no
+        # shaping signal (w_CK saturated / at its 0 seed during warmup) — a head
+        # problem, not a scaling one; (ii) ||grad||>0 but corr_relΔλ≈0 ⇒ the correction
+        # machinery isn't applying it (stale build / wy=0) — check eff_wy; (iii)
+        # ||grad||>0, eff_wy>0, corr_relΔλ small-but-positive ⇒ genuine, weight_y just
+        # low. Bit-exact 0 with ||grad||>0 and eff_wy>0 ⇒ the natural-gradient fix
+        # didn't deploy (the retired raw path underflows to 0 at whole-population λ).
+        self._grad_topics_norm = float(np.linalg.norm(grad_topics_eb))
+        self._eff_wy = float(wy)
         # Head: per-doc MEAN (scale-invariant; the un-shrunk head has no corpus anchor).
         grad_wCK = np.asarray(target_stats["grad_wCK_stat"], dtype=np.float64) * inv_n
         w_CK = np.asarray(global_params["w_CK"], dtype=np.float64)
@@ -1236,8 +1249,13 @@ class OnlinePCLDA(VIModel):
         the fit log."""
         base = self._lda.iteration_summary(global_params)
         w = np.asarray(global_params["w_CK"])
+        # ||grad_y|| and eff_wy disambiguate a 0 corr_relΔλ: grad≈0 ⇒ head sends no
+        # shaping signal (a head problem); grad>0 & eff_wy>0 but corr≈0 ⇒ the fix
+        # isn't applying (stale build). See update_global's self-verifying block.
         return (f"{base}, |w_CK|max={np.abs(w).max():.3g}, weight_y={self.weight_y:g}"
-                f", corr_relΔλ={getattr(self, '_corr_relchg', 0.0):.2e}")
+                f", corr_relΔλ={getattr(self, '_corr_relchg', 0.0):.2e}"
+                f", ||grad_y||={getattr(self, '_grad_topics_norm', 0.0):.2e}"
+                f", eff_wy={getattr(self, '_eff_wy', 0.0):.3g}")
 
     def get_metadata(self) -> dict[str, Any]:
         """Shape constants for VIResult round-trip — K, V, and C heads."""
