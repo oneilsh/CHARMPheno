@@ -84,12 +84,13 @@ def test_multidomain_correction_routes_gradient_to_the_right_domain_block():
 
 
 def test_multidomain_correction_preserves_dict_and_positivity_both_domains():
-    """A general batch with tokens in BOTH domains: the correction keeps λ a valid
-    per-domain dict (right keys/shapes), every block finite & strictly positive
-    (the trust-region floor holds per block), and BOTH blocks move off the
-    unsupervised step (each domain's own gradient is applied)."""
+    """A general batch with tokens in BOTH domains: the NATURAL-gradient correction
+    keeps λ a valid per-domain dict (right keys/shapes), every block finite &
+    strictly positive, and BOTH blocks move off the unsupervised step (each domain's
+    own gradient is applied). A moderate weight_y keeps the (now live, no longer
+    trust-clipped) correction a sub-unit relative move."""
     V0, V1, C = 24, 16, 3
-    m, engine, V = _two_domain_gated_pc(V0, V1, C)
+    m, engine, V = _two_domain_gated_pc(V0, V1, C, weight_y=2.0)
     rng = np.random.default_rng(1)
     docs = []
     fronts = [{1}, {2}, {1}, {2}, {1, 2}, set()]
@@ -116,6 +117,31 @@ def test_multidomain_correction_preserves_dict_and_positivity_both_domains():
         blk = new_gp["lambda"][md]
         assert blk.shape == (engine.K, Vm)
         assert np.isfinite(blk).all() and (blk > 0).all()          # valid pseudocounts
-        # trust region: no cell moved more than topic_trust of its unsup value.
-        assert (blk >= (1.0 - m.topic_trust) * unsup["lambda"][md] - 1e-9).all()
         assert not np.allclose(blk, unsup["lambda"][md])           # this domain moved
+
+
+def test_supervised_correction_is_scale_stable_natural_gradient():
+    """insight 0072 regression guard: the NATURAL-gradient λ-correction holds a
+    STEADY relative move as the corpus grows (λ and the corpus-scaled supervised
+    gradient scale together) — unlike the OLD raw-gradient step, which vanished as
+    1/λ² and silently zeroed weight_y at whole-population λ."""
+    from spark_vi.models.topic.pc import _grad_topics_to_lambda
+    m, engine, V = _two_domain_gated_pc(8, 8, 2, weight_y=1.0)
+    rng = np.random.default_rng(3)
+    K = engine.K
+    base_grad = rng.normal(size=(K, 8))
+    base_lam = np.abs(rng.normal(size=(K, 8))) + 0.5
+
+    def _rel(new, lam):
+        return float(np.sqrt(((new - lam) ** 2).sum()) / np.sqrt((lam * lam).sum()))
+
+    nat, raw = [], []
+    for cs in (1e2, 1e4, 1e6):                       # realistic whole-corpus scales
+        lam, grad = base_lam * cs, base_grad * cs    # both scale with the corpus
+        nat.append(_rel(m._corrected_lambda_block(grad, lam, lam, 0.1, 1.0), lam))
+        raw.append(_rel(np.maximum(lam - 0.1 * _grad_topics_to_lambda(grad, lam), 1e-30),
+                        lam))                        # the OLD raw-gradient step
+    # NATURAL: flat across 4 decades; OLD raw: vanishes as 1/λ².
+    assert max(nat) / min(nat) < 1.1
+    assert raw[-1] / raw[0] < 1e-3                    # raw collapsed with scale
+    assert nat[-1] > 1e3 * raw[-1]                    # natural survives where raw died

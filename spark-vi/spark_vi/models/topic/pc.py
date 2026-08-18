@@ -632,18 +632,11 @@ class OnlinePCLDA(VIModel):
                   (bounds the autograd tape; default 20).
         head_lr_scale: extra multiplier on the head SGD step size — the RM ↔
                   weight_y decoupling knob (see the class note below). Default 1.0.
-        topic_trust: trust-region fraction for the supervised topic correction on
-                  λ. Each λ cell's per-iteration supervised change is clipped to
-                  ``±topic_trust · λ[k,v]`` (a per-CELL relative cap on the current
-                  λ, which already carries the corpus scaling, so the cap is
-                  scale-invariant). This keeps ``λ_new ≥ (1-topic_trust)·λ_unsup >
-                  0`` — no cell nears the Dirichlet floor where digamma(λ) and the
-                  ELBO explode — and Σλ cannot run away, making ``weight_y`` a robust
-                  dial that cannot diverge λ for any corpus size / ``weight_y`` /
-                  ``tau0`` (see the "Topic correction: space/scale" note on
-                  ``update_global``). Default 0.1. Analogous to ``head_lr_scale``
-                  for the head, but a HARD per-cell cap rather than a linear scale,
-                  because the topic gradient lives in a DIFFERENT space than λ.
+        topic_trust: DEPRECATED (insight 0072 / ADR 0044) and UNUSED. Was the
+                  per-cell trust-region cap on the supervised λ correction; the
+                  correction is now a NATURAL gradient bounded by the RM ρ
+                  step-damping, so no separate clip is needed. Still accepted for
+                  config/shim compatibility; any value is ignored.
         weight_y_warmup_iters: linearly ramp the effective weight_y from 0 to
                   weight_y over this many global steps (0 = no warmup). Damps the
                   early-iteration head/topic-correction shock when a large
@@ -659,16 +652,16 @@ class OnlinePCLDA(VIModel):
     largest ρ_t steps carry little supervised signal. Both default to the no-op
     setting; reach for them if the ELBO/AUC trace shows the head diverging.
 
-    The λ (topic) correction has its OWN, mandatory guard — a trust region
-    (``topic_trust``), NOT merely a ρ-blend. The supervised topic gradient lives
-    in topic-PROBABILITY space (``expElogbeta`` ~ O(1/V)) while λ lives in
-    Dirichlet-COUNT space (Σλ ~ corpus tokens); the two are decades apart in
-    magnitude, and the gradient arrives corpus-SUMMED (and corpus-scaled by the
-    runner), so a bare subtraction ``λ − ρ·wy·gT`` scales with corpus size and
-    diverges λ (observed at 33k docs: Σλ doubling per iter, ELBO → -1e32). The
-    trust region caps the per-iteration supervised change to a fixed fraction of
-    the (unconditionally stable) unsupervised λ step, making ``weight_y`` a dial
-    that cannot diverge at any scale. See ``update_global``.
+    The λ (topic) correction is a NATURAL gradient (insight 0072 / ADR 0044): the
+    supervised term folds into the M-step in the SAME space as the unsupervised
+    sufficient statistics, ``nat = ∂L/∂E[logβ] = ∂L/∂eb · eb`` (``eb =
+    expElogbeta``), damped only by the RM ρ step. This is scale-STABLE — a steady
+    relative topic move at any corpus λ. The OLD code used the RAW gradient
+    ``∂L/∂λ`` (a trigamma transform) subtracted off λ, giving an ``O(1/λ²)`` move
+    that vanished at whole-population λ (~1e6), silently zeroing ``weight_y`` (PC
+    looked neutral). The per-cell ``topic_trust`` trust region is retired (the ρ
+    damping bounds the natural-gradient step, exactly as for the unsupervised one).
+    See ``update_global`` and ``_corrected_lambda_block``.
     """
 
     def __init__(
@@ -708,8 +701,10 @@ class OnlinePCLDA(VIModel):
             raise ValueError(f"grad_cavi_iters must be >= 1, got {grad_cavi_iters}")
         if head_lr_scale <= 0:
             raise ValueError(f"head_lr_scale must be > 0, got {head_lr_scale}")
-        if topic_trust <= 0:
-            raise ValueError(f"topic_trust must be > 0, got {topic_trust}")
+        # topic_trust is DEPRECATED (insight 0072 / ADR 0044): the natural-gradient
+        # supervised correction is bounded by the RM ρ step-damping, so the per-cell
+        # trust-region clip is gone. Still ACCEPTED (config/shim compat) but UNUSED;
+        # any value is fine.
         if weight_y_warmup_iters < 0:
             raise ValueError(
                 f"weight_y_warmup_iters must be >= 0, got {weight_y_warmup_iters}"
@@ -906,16 +901,36 @@ class OnlinePCLDA(VIModel):
         return np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
 
     def _corrected_lambda_block(self, grad_eb, lam_pre, lam_unsup, rho, wy):
-        """One block's supervised topic correction: transform ∂loss/∂expElogbeta
-        (topic-PROBABILITY space) to ∂loss/∂λ (Dirichlet-COUNT space) at the
-        pre-step λ, then the per-cell trust-region-capped descent step off the
-        just-taken unsupervised λ. The whole single-domain correction body
-        (lines below), factored so update_global can apply it per domain block."""
-        grad_topics = _grad_topics_to_lambda(grad_eb, lam_pre)
-        raw_corr = rho * wy * grad_topics
-        cell_cap = self.topic_trust * lam_unsup
-        corr = np.clip(raw_corr, -cell_cap, cell_cap)
-        return np.maximum(lam_unsup - corr, 1e-30)
+        """One block's supervised topic correction as a NATURAL gradient (insight
+        0072, ADR 0044).
+
+        The supervised term must enter the M-step in the SAME space as the
+        unsupervised sufficient statistics — a NATURAL gradient — or it does not
+        scale. The Dirichlet natural gradient w.r.t. λ is the gradient w.r.t. the
+        MEAN parameter ``E[logβ] = ψ(λ) − ψ(Σλ)``; with ``eb = exp(E[logβ]) =
+        expElogbeta``,
+
+            nat = ∂L/∂E[logβ] = ∂L/∂eb · eb ,
+
+        which CANCELS the digamma-Jacobian's ``trigamma(λ) ≈ 1/λ``. The OLD code
+        used the RAW gradient ``∂L/∂λ`` (``_grad_topics_to_lambda``, the trigamma
+        transform) in a descent step off ``lam_unsup``, so the move was ``O(1/λ²)``
+        relative — 2.7% at Σλ≈50 but ~5e-11 at whole-population Σλ≈1e6, i.e. the
+        supervised correction VANISHED at scale and ``weight_y`` became a no-op
+        (gated topics ≡ unsupervised topics; corr_relΔλ ≈ 0). The natural gradient
+        holds a STEADY relative topic move at any corpus λ (finite-difference /
+        scale test: flat across 4 decades of λ).
+
+        ``grad_eb`` is corpus-scaled by the runner, identical to the unsupervised
+        sstats that formed ``lam_unsup``, so ``weight_y`` is a genuine O(1)
+        supervised weight. ``eb`` is evaluated at ``lam_pre`` (the λ the gradient
+        was taken at). No trust-region clip: the RM ρ step-damping bounds the step
+        exactly as it does the unsupervised natural-gradient step (this retired the
+        ``topic_trust`` knob). Floor at 1e-30 to keep λ strictly positive."""
+        lam_pre = np.asarray(lam_pre, dtype=np.float64)
+        eb = np.exp(digamma(lam_pre) - digamma(lam_pre.sum(axis=1, keepdims=True)))
+        nat = grad_eb * eb                       # ∂L/∂eb · eb — the natural gradient
+        return np.maximum(lam_unsup - rho * wy * nat, 1e-30)
 
     def local_update(
         self,
@@ -995,35 +1010,24 @@ class OnlinePCLDA(VIModel):
         RM ρ_t). With ``wy`` the (warmup-scaled) effective weight_y,
         ``N`` = ``target_stats["n_docs"]`` the corpus-equivalent doc count:
 
-          (b) supervised topic correction on λ, PROPERLY TRANSFORMED then damped.
-              ``grad_topics_stat`` is Σ_d ∂loss_y_d/∂expElogbeta — a gradient in
-              topic-PROBABILITY space, because the autograd tape is bounded at
-              ``expElogbeta`` (the doc-sliced topic representation). But
-              ``expElogbeta = exp(ψ(λ) − ψ(Σλ))`` is a normalized function of the
-              ACTUAL global parameter λ, so the descent step on λ needs the
-              remaining chain-rule factor. :func:`_grad_topics_to_lambda` applies
-              the EXACT digamma-Jacobian to produce the true ``gT = ∂loss_y/∂λ``
-              (Dirichlet-COUNT space), evaluated at the λ the gradient was taken at.
-              Then the faithful descent step, lightly trust-region-damped:
-                  raw  = ρ · wy · gT                          (gT now in λ-space)
-                  corr = clip(raw, −topic_trust·λ_unsup, +topic_trust·λ_unsup)
-                  λ ← λ_unsup − corr                          (λ_unsup = new_lam)
-
-              History / why this matters: the transform was MISSING — the raw
-              ∂loss/∂expElogbeta (~V·wy too large AND ~33° mis-directed;
-              finite-difference: ~65× norm, ~0.84 direction cosine) was subtracted
-              directly from λ. That mis-transformed, persistently-biased push
-              degraded the supervised topics (heldout AUC BELOW the unsupervised
-              two-stage baseline) and ratcheted Σλ ~260× over 200 iters — a
-              compounding runaway the per-cell cap bounds per-step but (like STM's
-              analogous non-conjugate M-step, ADR 0034) cannot stop. With the
-              correct λ-space gradient the correction is naturally count-scaled and
-              correctly directed, so the runaway does not arise; the trust region is
-              retained only as a light per-cell safety (guaranteeing
-              ``λ_new ≥ (1-topic_trust)·λ_unsup > 0`` so no cell nears the
-              ``digamma`` floor), no longer the load-bearing stabilizer. ``wy``
-              remains the dial; below the cap the step is the exact faithful
-              ρ·wy·∂loss_y/∂λ.
+          (b) supervised topic correction on λ, as a NATURAL gradient
+              (:meth:`_corrected_lambda_block`; insight 0072, ADR 0044).
+              ``grad_topics_stat`` is Σ_d ∂loss_y_d/∂expElogbeta (topic-PROBABILITY
+              space, the tape bounded at ``expElogbeta``). The correction folds it
+              into the M-step in the SAME space as the unsupervised sufficient
+              statistics — the natural gradient ``nat = ∂L/∂E[logβ] = ∂L/∂eb·eb``
+              (``eb = expElogbeta``), damped by ρ:
+                  λ ← max(λ_unsup − ρ·wy·(grad_eb·eb), 1e-30)
+              CRITICAL: the OLD code used the RAW gradient ``∂L/∂λ``
+              (``_grad_topics_to_lambda``, the trigamma transform) and subtracted it
+              from λ, giving an ``O(1/λ²)`` relative move that VANISHED at whole-
+              population λ (~1e6) — ``weight_y`` became a silent no-op and PC looked
+              neutral (insight 0072). The natural gradient cancels the trigamma
+              (``1/λ``) and is scale-STABLE — a steady relative topic move at any
+              corpus λ. ``grad_eb`` is corpus-scaled by the runner, matching the
+              unsupervised sstats, so ``weight_y`` is a genuine O(1) weight. The RM ρ
+              step-damping bounds the step (as for the unsupervised natural gradient),
+              so the per-cell ``topic_trust`` clip is GONE (knob retired).
           (c) head SGD. The head has NO ``(1-ρ)`` shrinkage and no corpus-scale
               anchor, so a corpus-SUMMED gradient makes the un-damped step grow
               with corpus size and run the logistic head off to its saturated tail
@@ -1064,26 +1068,20 @@ class OnlinePCLDA(VIModel):
         grad_wCK = np.asarray(target_stats["grad_wCK_stat"], dtype=np.float64) * inv_n
         w_CK = np.asarray(global_params["w_CK"], dtype=np.float64)
 
-        # (b) supervised topic correction on λ, PER-CELL trust-region-capped
-        # (:meth:`_corrected_lambda_block`). The raw descent step ρ·wy·gT lives in
-        # topic-PROBABILITY space and is corpus-summed/scaled, so subtracting it
-        # directly from λ (Dirichlet-COUNT space) diverges λ at scale. The block clips
-        # the per-cell correction to ±topic_trust · λ_unsup[k,v] (a relative cap on the
-        # JUST-TAKEN unsupervised λ). Consequences: (i) λ_new ≥ (1-topic_trust)·λ_unsup
-        # > 0, so no cell nears the digamma floor; (ii) Σλ cannot run away
-        # geometrically; (iii) the cap is relative to the true per-iteration λ state
-        # (which already carries the runner's corpus scaling), so it is scale-INVARIANT
-        # — weight_y is a dial that saturates rather than diverges. Below the cap the
-        # step is exactly ρ·wy·gT.
+        # (b) supervised topic correction on λ as a NATURAL gradient
+        # (:meth:`_corrected_lambda_block`; insight 0072, ADR 0044). The old RAW
+        # gradient (trigamma transform, subtracted from λ) was O(1/λ²) relative and
+        # VANISHED at whole-population λ — weight_y a silent no-op. The natural
+        # gradient ∂L/∂E[logβ] = grad_eb·eb is scale-stable; ρ damps it (topic_trust
+        # clip retired). grad_eb is corpus-scaled by the runner.
         #
         # MULTI-DOMAIN: λ is a per-domain dict {m:(K,V_m)} and grad_topics_stat is the
         # CONCATENATED (K, V_total) ∂loss/∂expElogbeta. Split it into per-domain blocks
-        # (``_split_to_domains``) and correct EACH block against its OWN domain's λ —
-        # so _grad_topics_to_lambda's normalizer (Σ_v over axis 1) runs over that
-        # domain's vocab only. A pooled transform over the fused vocab would normalize
-        # a domain's rows against every other domain's mass (wrong). This scatter is
-        # the one new engine piece multi-domain PC needs: the per-node gate then lets
-        # each disease node's topic block specialize toward its predictive domain.
+        # (``_split_to_domains``) and correct EACH block against its OWN domain's λ,
+        # so ``eb = expElogbeta`` is normalized over that domain's vocab only (a pooled
+        # eb would normalize a domain's rows against every other domain's mass). This
+        # scatter is the one new engine piece multi-domain PC needs: the per-node gate
+        # then lets each disease node's topic block specialize toward its domain.
         lam_pre = global_params["lambda"]
         lam_unsup = new_gp["lambda"]
         if isinstance(lam_pre, dict):
