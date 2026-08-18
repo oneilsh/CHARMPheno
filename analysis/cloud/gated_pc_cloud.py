@@ -794,6 +794,12 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
     dom_cols = getattr(args, "_domain_cols", None)
     if dom_cols:
         est._set(featuresCols=dom_cols)
+    dc = getattr(args, "doc_concentration", None)
+    if dc is not None and dc > 0:
+        # scalar Dirichlet alpha for the gated doc-topic prior. The default 1/K is razor-
+        # small at whole-Mondo K and collapses theta so the shaping-gradient CAVI Jacobian
+        # underflows (no PC shaping); ~0.5 lifts it out of the collapse regime.
+        est._set(docConcentration=[float(dc)])
     if gated:
         est.setGateParent(args._parent_int)      # JSON-encodes the DAG map
     if closure_parents is not None:
@@ -928,6 +934,13 @@ def parse_args(argv=None):
                         "total cluster executor cores to spread the per-doc autograd "
                         "and demand more executors. Pair with "
                         "CHARM_SPARK_CONF='spark.locality.wait=0s'.")
+    p.add_argument("--doc-concentration", type=float, default=None,
+                   help="scalar Dirichlet alpha for the gated doc-topic prior (default "
+                        "1/K). The 1/K default is razor-small at whole-Mondo K (~0.0022) "
+                        "and collapses theta so the supervised-shaping CAVI Jacobian "
+                        "d(theta)/d(eb) UNDERFLOWS (~1e-90) — PC shaping dies upstream of "
+                        "the head. ~0.5 keeps the shaping gradient alive at any "
+                        "grad_cavi_iters.")
     p.add_argument("--diag-only", action="store_true",
                    help="FAST head-starvation probe: fit the gated_pc arm ONLY (skip "
                         "the θ-collect readouts, baselines, conditional + ladder — the "

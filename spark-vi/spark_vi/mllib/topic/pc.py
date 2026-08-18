@@ -483,7 +483,24 @@ def _build_model_and_config(
         lay = DagLayout(parent_map, n_bg=int(estimator.getOrDefault("gateNBg")),
                         tpn=int(estimator.getOrDefault("gateTpn")))
         k = lay.K                                    # layout owns K, overrides the k param
-        alpha = np.full(lay.K, 1.0 / lay.K, dtype=np.float64)
+        # Doc-concentration alpha for the gated engine. Recomputed against lay.K (the
+        # earlier doc_conc branch used the pre-gate k). The DEFAULT 1/K is razor-small at
+        # whole-Mondo K (0.0022 at K=444), which collapses the doc-topic posterior theta
+        # to a near-degenerate point where the differentiable-CAVI Jacobian d(theta)/d(eb)
+        # UNDERFLOWS (~2.7e-90) — the supervised shaping gradient then cannot flow back to
+        # the topics AT ALL (insight: alpha-collapse kills PC shaping upstream of the head;
+        # the shaping Jacobian is only alive for alpha >~ 0.5). A scalar docConcentration
+        # (e.g. 0.5) lifts alpha out of the collapse regime.
+        if doc_conc is None:
+            alpha = np.full(lay.K, 1.0 / lay.K, dtype=np.float64)
+        elif len(doc_conc) == 1:
+            alpha = np.full(lay.K, float(doc_conc[0]), dtype=np.float64)
+        else:
+            if len(doc_conc) != lay.K:
+                raise ValueError(
+                    f"docConcentration vector must have length K={lay.K} (gate layout), "
+                    f"got {len(doc_conc)}.")
+            alpha = np.asarray(doc_conc, dtype=np.float64)
         topic_engine = GatedOnlineLDA(
             lay, vocab_size, alpha=alpha, eta=1.0 / lay.K,
             domains=domains,                         # None = single fused vocab
