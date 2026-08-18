@@ -112,4 +112,11 @@ cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp &
 
 ## Run log
 
-_(pending first run)_
+**2026-08-18 — CONFIRMED: alpha fix revives shaping (then blows up).** With
+`doc_concentration=0.5` (α now 0.5, not 0.002252), the shaping gradient came alive for
+the FIRST time in the project — iter 2: `corr_relΔλ=0.56`, `||grad_y||=3.4e8` (was
+bit-exact 0 across 0090-0094). Alpha-collapse diagnosis CONFIRMED. But it then ran away:
+`|w_CK|max` 113 -> 5133 -> 2.38e5 -> 4.4e5, `corr_relΔλ` -> 21.7 (λ moving 21x), ELBO ->
+-1e33. Positive feedback: head_l2=0.01 absolute is negligible vs the ~110k-doc summed
+newton gradient so |w| runs away -> giant grad_topics -> weight_y=10 detonates λ. Fix =
+per-doc-mean newton (corpus-invariant head_l2) + weight_y 10->2 -> exp 0096.

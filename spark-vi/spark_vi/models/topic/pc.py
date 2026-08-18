@@ -1141,13 +1141,22 @@ class OnlinePCLDA(VIModel):
             # Gated on the stat's presence: a head flavor without a closed-form Fisher
             # (e.g. DagClosureHead) emits no head_hess_stat, so 'newton' gracefully
             # degrades to the SGD step below rather than KeyError-ing.
-            # g_c is the corpus-scaled NLL gradient sum (grad_wCK_stat), H_c its Fisher
-            # info (head_hess_stat). Ridge = a FIXED ABSOLUTE L2 prior (head_l2, Hughes's
-            # lambda_w: the ridge on the CORPUS-SUMMED head gradient, so |w| ~ |g|/head_l2
-            # — see __init__) PLUS head_newton_ridge·mean(diag H_c) (a numerical
-            # conditioner only). head_lr damps the step (~0.5-1.0 for newton).
-            g_CK = np.asarray(target_stats["grad_wCK_stat"], dtype=np.float64)
-            H_CKK = np.asarray(target_stats["head_hess_stat"], dtype=np.float64)
+            # g_c is the NLL gradient sum (grad_wCK_stat), H_c its Fisher info
+            # (head_hess_stat), BOTH rescaled to per-doc mean below. Ridge = a FIXED
+            # ABSOLUTE L2 prior (head_l2, Hughes's lambda_w — now a per-doc, corpus-
+            # invariant ridge, so |w| ~ |g_mean|/head_l2) PLUS head_newton_ridge·mean(diag
+            # H_c) (a numerical conditioner only). head_lr damps the step (~0.5-1.0).
+            # PER-DOC MEAN (the reference's rescale_total_loss_by_n_tokens analogue for
+            # the per-doc head; insight: the alpha fix made shaping live and exposed a
+            # head |w| RUNAWAY — 113 -> 2.4e5 in 3 iters -> λ blows up). The head loss is
+            # a per-doc SUM, so g,H scale with the corpus; an ABSOLUTE head_l2 ridge on
+            # summed stats is negligible at ~1e5 docs and never bounds |w|. Dividing BOTH
+            # by n_docs leaves the unregularized Newton step H⁻¹g unchanged (the 1/N
+            # cancels) but makes head_l2 a SCALE-INVARIANT per-doc ridge, so |w| settles
+            # at ~|g_mean|/head_l2 — corpus-independent, and head_l2/head_lr stop being
+            # corpus-tuned knobs. Matches the SGD path (grad_wCK * inv_n) and the reference.
+            g_CK = np.asarray(target_stats["grad_wCK_stat"], dtype=np.float64) * inv_n
+            H_CKK = np.asarray(target_stats["head_hess_stat"], dtype=np.float64) * inv_n
             new_w = w_CK.copy()
             for c in range(self.C):
                 # LOCALIZED head: solve only over node c's topic support (its gated

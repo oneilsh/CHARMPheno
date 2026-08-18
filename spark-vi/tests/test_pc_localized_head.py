@@ -65,12 +65,16 @@ def test_localized_head_updates_only_support_and_solve_is_correct():
     S = max(len(x) for x in support)
     assert H.shape == (C, S, S)
     assert S < engine.K                                    # strictly smaller than dense
+    # PER-DOC MEAN: the newton step rescales g,H by 1/n_docs so head_l2 is a scale-
+    # invariant ridge (mirrors update_global). Recompute the reference solve the same way.
+    inv_n = 1.0 / max(float(stats.get("n_docs", 1.0)), 1.0)
     for c in range(C):
         s = support[c]
-        Hc = H[c][:len(s), :len(s)]
+        Hc = H[c][:len(s), :len(s)] * inv_n
+        gc = g[c][s] * inv_n
         ridge = m.head_l2 + m.head_newton_ridge * (np.trace(Hc) / len(s)) + 1e-10
         delta = np.linalg.solve(Hc + ridge * np.eye(len(s)),
-                                g[c][s] + ridge * gp["w_CK"][c][s])
+                                gc + ridge * gp["w_CK"][c][s])
         expect = gp["w_CK"][c][s] - m.head_lr * delta
         assert np.allclose(new_w[c][s], expect), f"node {c} solve mismatch"
 
