@@ -54,7 +54,7 @@ tau0: 64.0
 kappa: 0.51
 cavi_max_iter: 100
 cavi_tol: 0.001
-skip_unsup_gated: false
+skip_unsup_gated: true
 with_dag_head: false
 baseline_max_iter: 100
 min_label_count: 20
@@ -142,4 +142,40 @@ collection.**
 (S = max support = 24) instead of dense `(C, K, K)` — exact (each block is the dense
 Fisher's support sub-block, term-for-term; the padded tail is never read), ~2 MB
 instead of 690 MB/partition. The cost profile now reports the true collected size
-(`collected C*S^2`). Re-run pending.
+(`collected C*S^2`).
+
+### Run 2 — fit COMPLETES; readout LR conditional beats 0089; two follow-on findings
+
+The emission fix worked: the **gated_pc fit ran to completion** (K=444, 5223 s), and
+`|w_CK|max=272.5` settled smoothly (no blowup — the ridge held at this scale).
+
+**Deliverable (readout LR, `pc_topics_lr`) — excellent, and better than 0089:**
+- macro AUC 0.7374 over 241 nodes; conditional `P(child|parent)` cond_AUC **0.73–0.78
+  across depths 1–8** (0089's flat 41-anchor best was ~0.70), pooled ECE 0.0027,
+  held-out isotonic raw 0.0030 → **calibrated 0.0015** (VOI-ready). Per-node
+  reliability mean ECE 0.047 (max 0.42 on a tiny degenerate retinal-artery node). This
+  is the deep-tree-localizes-well prediction confirmed: within-branch conditional
+  discrimination is strong at every depth.
+
+**Finding 1 — the co-fit (unified) head is near-chance conditionally (cond_AUC ~0.52,
+ECE 0.12), a real regression vs 0089's ~0.69.** Not a bug (the emission fix is exact;
+the solve inputs are byte-identical): it's the LOCALIZATION. A node's co-fit head reads
+only its local support (block + ancestors + siblings, ≤24 topics); in the DEEP Mondo
+tree the child-vs-sibling discriminative signal often lives in OTHER (distant) topics,
+which the head can't see but the readout LR (all K features) can — hence readout 0.74 vs
+head 0.52 on the SAME topics. So the localization that lets the unified head SCALE also
+guts its conditional quality at depth. **Practical conclusion: at whole-Mondo scale the
+two-stage readout LR is the deliverable; the unified co-fit head is not viable once
+localized (and it can't be un-localized — that's the 850 GB wall).** This resolves the
+unified-vs-two-stage tension (insight 0071) in favor of two-stage AT SCALE.
+
+**Finding 2 — the run then died `exit 143` (SIGTERM) in the UNSUP twin arm**, right
+after its 100th iter, before printing its readout — i.e. in the twin's full θ-collect +
+C-logistic readout, on top of the gated arm's retained arrays, past the 8 GB driver
+heap. The gated arm (the deliverable) had already fully completed. Fix for Step A: drop
+the weight_y=0 twin (`skip_unsup_gated: true`) — it's an A/B we don't need for mechanics
+validation and it's the sole thing that OOM'd; the rerun completes clean and saves the
+model. **Next scaling wall for Step B (flagged, not yet fixed):** the readout itself
+collects the full `N×K` θ matrix to the driver to fit the per-node logistics — at
+K≈3,800 over the whole population that is multi-GB per arm and will not fit an 8 GB
+driver. Step B needs a subsampled or distributed readout before the whole-tree run.
