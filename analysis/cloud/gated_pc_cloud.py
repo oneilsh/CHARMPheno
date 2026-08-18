@@ -539,26 +539,31 @@ def _collect_head_proba(df, C, *, prob_col="probability", label_col="label",
 
 
 def _converge_localized_head(Pi, y, obs, support_cols, C, *, head_l2,
-                             head_newton_ridge, n_iters, head_lr=1.0):
-    """Converge the ENGINE's localized ridge-Newton head on FROZEN θ (the diagnostic
-    for the co-fit head's under-fitting).
+                             head_newton_ridge, n_iters, head_lr=1.0,
+                             ridge_mode="relative", fixed_ridge=1.0, intercept=False):
+    """Converge a per-node localized ridge-Newton logistic on FROZEN θ — the ENGINE's
+    own head math (support-restricted, w=0 off support, Newton solve), run to
+    convergence (full Newton from w=0) instead of one damped step/iter against a
+    moving θ. Toggles step the engine formulation toward the sklearn oracle so the
+    head-formulation LADDER can isolate WHICH difference costs the co-fit head its AUC:
 
-    Same per-node logistic + ridge + Newton solve as OnlinePCLDA.update_global's
-    'newton' head (support-restricted, w=0 off support, ridge = head_l2 +
-    head_newton_ridge·mean(diag H)), but run to CONVERGENCE (full Newton steps from
-    w=0) on the fixed final topic representation `Pi` (= θ, the label-free CAVI mean
-    the co-fit head reads) instead of ONE damped step per SVI iter against a moving
-    θ. It answers whether the engine head's FORMULATION can reach the oracle ceiling:
-      converged ≈ oracle-localized ⇒ the co-fit head merely UNDER-CONVERGED during
-        training (fix = an inner head loop); the head is fine.
-      converged < oracle-localized ⇒ the head's raw-feature ridge conditioning caps
-        it below a well-regularized logistic (fix = the head's regularization).
-    `obs` is the per-node observed mask (closure mask); each node is fit on its own
-    observed rows, exactly as in training. Pure numpy (driver-side)."""
+      ridge_mode='relative' (shipped): ridge = head_l2 + head_newton_ridge·mean(diag
+        H) — the RELATIVE conditioner VANISHES near separation (H→0 as p→0/1), which
+        lets |w| explode (the |w_CK|=273 blowup).
+      ridge_mode='fixed':   ridge = `fixed_ridge` (an ABSOLUTE L2, sklearn-style) —
+        does not vanish, so it bounds |w|.
+      intercept=True: add an UNPENALIZED per-node bias (θ sums to 1, so a rare node's
+        marginal must otherwise be fit through ridge-penalized topic weights — the
+        bias frees them for the within-sibling contrast).
+
+    `obs` = the per-node observed (closure) mask; each node fits on its own observed
+    rows, as in training. Returns (w (C,K), b (C,)); b is 0 when intercept=False.
+    Pure numpy (driver-side)."""
     K = Pi.shape[1] if Pi.ndim == 2 and Pi.shape[0] else 0
     w = np.zeros((C, K), dtype=np.float64)
+    b = np.zeros(C, dtype=np.float64)
     if Pi.shape[0] == 0:
-        return w
+        return w, b
     for _ in range(int(n_iters)):
         for c in range(C):
             s = support_cols[c]
@@ -571,30 +576,46 @@ def _converge_localized_head(Pi, y, obs, support_cols, C, *, head_l2,
             if np.unique(yc).size < 2:
                 continue
             X = Pi[np.ix_(rows, s)]
-            z = np.clip(X @ w[c, s], -50.0, 50.0)
-            p = 1.0 / (1.0 + np.exp(-z))
-            g = X.T @ (p - yc)                              # NLL gradient on support
-            H = (X * (p * (1.0 - p))[:, None]).T @ X        # Fisher on support
             d = int(s.size)
-            ridge = head_l2 + head_newton_ridge * (float(np.trace(H)) / d) + 1e-10
-            A = H + ridge * np.eye(d)
-            b = g + ridge * w[c, s]
+            # design = [support topics | 1] when an intercept is fit; the bias column
+            # is the last coordinate and is left UNPENALIZED in the ridge below.
+            Xa = np.concatenate([X, np.ones((X.shape[0], 1))], axis=1) if intercept else X
+            wc = np.concatenate([w[c, s], [b[c]]]) if intercept else w[c, s].copy()
+            z = np.clip(Xa @ wc, -50.0, 50.0)
+            p = 1.0 / (1.0 + np.exp(-z))
+            g = Xa.T @ (p - yc)
+            H = (Xa * (p * (1.0 - p))[:, None]).T @ Xa
+            if ridge_mode == "fixed":
+                r = float(fixed_ridge)
+            else:
+                r = head_l2 + head_newton_ridge * (float(np.trace(H[:d, :d])) / d) + 1e-10
+            rdiag = np.full(Xa.shape[1], r, dtype=np.float64)
+            if intercept:
+                rdiag[-1] = 0.0                              # unpenalized bias
+            A = H + np.diag(rdiag)
+            rhs = g + rdiag * wc
             try:
-                delta = np.linalg.solve(A, b)
+                delta = np.linalg.solve(A, rhs)
             except np.linalg.LinAlgError:
-                delta = np.linalg.lstsq(A, b, rcond=None)[0]
-            w[c, s] = w[c, s] - head_lr * delta
-    return w
+                delta = np.linalg.lstsq(A, rhs, rcond=None)[0]
+            wc = wc - head_lr * delta
+            w[c, s] = wc[:d]
+            if intercept:
+                b[c] = wc[d]
+    return w, b
 
 
-def _localized_head_proba(Pi, w):
-    """Per-node P(node) = σ(w_c·θ) for the localized head (w is 0 off-support, so
-    the full dot IS the localized prediction). Returns (N, C)."""
+def _localized_head_proba(Pi, w, b=None):
+    """Per-node P(node) = σ(w_c·θ + b_c) for the localized head (w is 0 off-support,
+    so the full dot IS the localized prediction; b is the optional per-node bias).
+    Returns (N, C)."""
     C = w.shape[0]
     if Pi.shape[0] == 0:
         return np.zeros((0, C), dtype=np.float64)
-    z = np.clip(Pi @ w.T, -50.0, 50.0)
-    return 1.0 / (1.0 + np.exp(-z))
+    z = Pi @ w.T
+    if b is not None:
+        z = z + b[None, :]
+    return 1.0 / (1.0 + np.exp(-np.clip(z, -50.0, 50.0)))
 
 
 def per_node_domain_mass(lam_dict, lay, domain_names):
@@ -825,11 +846,14 @@ def parse_args(argv=None):
                         "bounds driver memory at whole-Mondo K/C; the per-node LR needs "
                         "only enough rows to fit. 1.0 (default) = full collect.")
     p.add_argument("--head-converge-iters", type=int, default=25,
-                   help="post-fit diagnostic (localize-head only): converge the "
-                        "engine's localized ridge-Newton head on the FROZEN final θ "
-                        "for this many full Newton steps (from w=0) and report its "
-                        "conditional AUC — does the head reach the oracle ceiling if "
-                        "converged? 0 = skip.")
+                   help="Newton steps for the post-fit HEAD-FORMULATION LADDER "
+                        "(localize-head only): converge each localized head variant on "
+                        "the FROZEN final θ for this many full steps to isolate which "
+                        "formulation difference costs the co-fit head its AUC.")
+    p.add_argument("--head-fixed-ridge", type=float, default=1.0,
+                   help="the ABSOLUTE L2 ridge for the ladder's FIXED-ridge head "
+                        "variants (sklearn-style; does not vanish at separation, unlike "
+                        "the shipped relative ridge).")
     p.add_argument("--min-label-count", type=int, default=20,
                    help="mask any node whose heldout column has < this many cells "
                         "of either class from the macro (AoU small-cell floor).")
@@ -1060,22 +1084,7 @@ def main() -> int:
                 results["gated_pc_oracle_conditional"] = _conditional(
                     proba_oracle, y_te, m_te,
                     "gated_pc oracle-localized (support-only LR)")
-                # CEILING TEST: the engine's OWN localized ridge-Newton head, but
-                # converged (full Newton from w=0) on the frozen final θ. Reaches the
-                # oracle ⇒ the co-fit head just under-converged during training (fix =
-                # inner head loop); falls short ⇒ the head's raw-feature ridge caps it
-                # (fix = regularization). Uses the SAME θ (Pi) the head reads.
-                if args.head_converge_iters > 0:
-                    w_conv = _converge_localized_head(
-                        Pi_tr, y_tr, m_tr, support_cols, C, head_l2=args.head_l2,
-                        head_newton_ridge=args.head_newton_ridge,
-                        n_iters=args.head_converge_iters)
-                    proba_conv = _localized_head_proba(Pi_te, w_conv)
-                    results["gated_pc_converged_head_conditional"] = _conditional(
-                        proba_conv, y_te, m_te,
-                        "gated_pc converged localized head (frozen θ, w=0 init)")
-                    print("[driver]   converged localized head |w|max="
-                          f"{float(np.abs(w_conv).max()):.4g}", flush=True)
+                args._support_cols = support_cols     # reused by the formulation ladder
             # Post-hoc ISOTONIC calibration of the head-independent proba → calibrated
             # conditional posteriors for VOI (the two-stage route, independent of the
             # co-fit head). Isotonic is monotone so
@@ -1124,26 +1133,62 @@ def main() -> int:
             print(f"[driver]   co-fit head |w_CK|max="
                   f"{float(np.abs(pc_model.headWeights()).max()):.4g} "
                   f"(head_l2={args.head_l2})", flush=True)
-            # A-vs-B verdict: mean conditional AUC of the three heads side by side.
-            # oracle≈full ⇒ under-fit head (recoverable); oracle≈co-fit ⇒ non-local
-            # signal (localization fundamentally lossy).
+            # HEAD-FORMULATION LADDER: step the co-fit head's EXACT formulation toward
+            # the sklearn oracle ONE factor at a time, on the SAME frozen gated θ +
+            # closure mask, so we read off WHICH difference (convergence / ridge type /
+            # intercept / standardization) costs the co-fit head its conditional AUC.
+            # Means only (the per-depth blocks above cover full-K / oracle / co-fit).
             def _mean_cauc(cond):
                 v = [r["cond_auc"] for r in (cond or {}).get("edges", [])
                      if r.get("cond_auc") is not None]
                 return float(np.mean(v)) if v else float("nan")
-            if "gated_pc_oracle_conditional" in results:
-                _conv = results.get("gated_pc_converged_head_conditional")
-                _conv_s = (f"  converged-head={_mean_cauc(_conv):.3f}"
-                           if _conv is not None else "")
-                print(
-                    "[driver]   A-vs-B cond_AUC:  full-K readout="
-                    f"{_mean_cauc(results['gated_pc_conditional']):.3f}  "
-                    f"oracle-localized={_mean_cauc(results['gated_pc_oracle_conditional']):.3f}"
-                    f"{_conv_s}  "
-                    f"co-fit head={_mean_cauc(results['gated_pc_head_conditional']):.3f}  "
-                    "(converged≈oracle ⇒ co-fit under-CONVERGED, fix=inner loop; "
-                    "converged<oracle ⇒ head ridge caps it; oracle<full ⇒ signal "
-                    "non-local)", flush=True)
+            if getattr(args, "localize_head", False) and hasattr(args, "_support_cols"):
+                from analysis.pc.evaluate import _lr_proba_per_label_masked as _lrm
+
+                def _cmean(proba):
+                    return _mean_cauc(conditional_readout(
+                        proba, y_te, np.ones_like(y_te), bundle.parent_int, C,
+                        min_count=args.min_label_count))
+
+                sc = args._support_cols
+                _ni = max(args.head_converge_iters, 1)
+                _hl2, _hnr, _fr = args.head_l2, args.head_newton_ridge, args.head_fixed_ridge
+                w_rel, b_rel = _converge_localized_head(
+                    Pi_tr, y_tr, m_tr, sc, C, head_l2=_hl2, head_newton_ridge=_hnr,
+                    n_iters=_ni, ridge_mode="relative")
+                w_fix, b_fix = _converge_localized_head(
+                    Pi_tr, y_tr, m_tr, sc, C, head_l2=_hl2, head_newton_ridge=_hnr,
+                    n_iters=_ni, ridge_mode="fixed", fixed_ridge=_fr)
+                w_fxi, b_fxi = _converge_localized_head(
+                    Pi_tr, y_tr, m_tr, sc, C, head_l2=_hl2, head_newton_ridge=_hnr,
+                    n_iters=_ni, ridge_mode="fixed", fixed_ridge=_fr, intercept=True)
+                ladder = [
+                    ("co-fit head (as TRAINED)",
+                     _mean_cauc(results.get("gated_pc_head_conditional"))),
+                    ("engine Newton [rel-ridge, no-icpt, CONVERGED]",
+                     _cmean(_localized_head_proba(Pi_te, w_rel, b_rel))),
+                    ("  + FIXED ridge (λ=%g)" % _fr,
+                     _cmean(_localized_head_proba(Pi_te, w_fix, b_fix))),
+                    ("  + FIXED ridge + INTERCEPT",
+                     _cmean(_localized_head_proba(Pi_te, w_fxi, b_fxi))),
+                    ("sklearn [no-intercept, standardized]",
+                     _cmean(_lrm(Pi_tr, y_tr, m_tr, Pi_te, C, feature_cols=sc,
+                                 fit_intercept=False, standardize=True))),
+                    ("sklearn [intercept, NOT standardized]",
+                     _cmean(_lrm(Pi_tr, y_tr, m_tr, Pi_te, C, feature_cols=sc,
+                                 fit_intercept=True, standardize=False))),
+                    ("sklearn ORACLE [intercept, standardized]",
+                     _mean_cauc(results["gated_pc_oracle_conditional"])),
+                    ("full-K readout (all K, sklearn)",
+                     _mean_cauc(results["gated_pc_conditional"])),
+                ]
+                print("[driver]   HEAD-FORMULATION LADDER  cond_AUC (frozen θ, "
+                      "localized support):", flush=True)
+                for _name, _v in ladder:
+                    print(f"[driver]     {_name:46s} {_v:.3f}", flush=True)
+                print("[driver]     |w|max — engine rel=%.4g  fixed=%.4g  fixed+icpt=%.4g"
+                      % (float(np.abs(w_rel).max()), float(np.abs(w_fix).max()),
+                         float(np.abs(w_fxi).max())), flush=True)
             train_scored.unpersist(); test_scored.unpersist()
 
         if not args.skip_unsup_gated:

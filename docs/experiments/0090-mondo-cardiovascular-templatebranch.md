@@ -248,16 +248,30 @@ calibrated artifact, but as a **POST-FIT head on the gated topics**, not a co-fi
 inference path, WITHOUT paying for co-training that doesn't pay off. `weight_y`
 becomes optional. (PC may still help on richer data; on this data it's neutral.)
 
-### Run 4 (planned) — the ceiling test: does CONVERGING the engine head reach 0.676?
+### Run 4 (planned) — HEAD-FORMULATION LADDER: isolate WHICH difference costs the head
 
-Added `--head-converge-iters` (default 25): a post-fit diagnostic that converges the
-ENGINE's own localized ridge-Newton head (full Newton from w=0) on the FROZEN final
-θ, and reports its conditional AUC in the `A-vs-B` line as `converged-head=…`. This
-splits the under-fit cause:
-- **converged ≈ oracle (0.676)** ⇒ the co-fit head merely UNDER-CONVERGED during
-  training (one damped step/iter against a moving θ) → fix is a bounded **inner head
-  loop** (the `head_inner_iters` removed with Firth), *with no post-hoc fit* — the
-  strict unified ideal survives.
-- **converged < oracle** ⇒ the head's raw-feature ridge conditioning caps it below a
-  well-regularized logistic → the fix is the head's regularization (scaling / ridge),
-  not just more iterations.
+The oracle diagnostic was CONFOUNDED — my sklearn oracle uses `fit_intercept=True` +
+`StandardScaler`, while the co-fit head has neither, plus a different (relative) ridge
+and is under-converged. So "oracle 0.666 vs co-fit 0.52" bundles four differences.
+The ladder converges a localized head on the frozen gated θ, stepping the co-fit
+head's EXACT formulation toward the sklearn oracle one factor at a time, printing mean
+cond_AUC for each (`[driver] HEAD-FORMULATION LADDER`):
+
+1. co-fit head (as trained) — ~0.52
+2. engine Newton [relative ridge, no intercept], **CONVERGED** — isolates convergence
+3. + FIXED ridge (`--head-fixed-ridge`) — isolates the ridge that VANISHES at
+   separation (the `|w|=273` blowup: relative ridge ∝ trace(H) → 0 as p→0/1)
+4. + unpenalized INTERCEPT — isolates the missing bias (θ sums to 1, so a rare node's
+   marginal is otherwise fit through ridge-penalized topic weights, saturating)
+5. sklearn [no-intercept, standardized] — isolates the intercept in the well-reg regime
+6. sklearn [intercept, NOT standardized] — isolates feature standardization
+7. sklearn oracle [intercept, standardized] — 0.666
+8. full-K readout — 0.732
+
+Each step's delta names its factor's cost. The winning factor(s) become the engine
+head fix (e.g. add an unpenalized per-node intercept and/or fixed L2), which — if the
+head's saturation was also corrupting its topic-shaping gradient — could flip the PC
+shaping result from neutral to positive. `|w|max` for the engine variants is printed
+too (the fixed ridge should tame the 273 blowup). Hypothesis (mechanism for the
+small-model→large-model regression): the relative ridge + missing intercept are cheap
+at 41 shallow anchors but bite at 436 deep/rare nodes.
