@@ -106,4 +106,20 @@ cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp &
 
 ## Run log
 
-_(pending first run)_
+**2026-08-18 — starvation REFUTED, SATURATION found.** 437-node cardiovascular branch
+(not 3,800 — that's whole-Mondo). `0/437 heads DEAD`, `|w_c|` median ~150 (max 770) —
+every head trained. But the in-fit trajectory showed the real mechanism:
+
+```
+|w_CK|max: 110 → 170 → 219 → 254 → 270 → 272 → 273 → 273
+||grad_y||: 0 → 1.3e-84 → 6.2e-85 → 3.0e-85 → 2.1e-85 → ...   (≈ e^{-z} underflow)
+corr_relΔλ = 0.00e+00 every iter
+```
+
+The head trains to `|w|~273` and, with θ razor-peaked (`α=0.0022` from
+`optimize_doc_concentration`), the logits `z=w·θ ≈ 200+` saturate the sigmoid so the
+shaping gradient `∂loss/∂θ ∝ σ(−z) ≈ e^{−200}` underflows to 0 → `corr=0` bit-exact.
+The newton head hits `|w|=110` in the FIRST step (before `weight_y` warmup engages:
+`eff_wy=3.2` at iter 8), so the correction never sees a live gradient. `head_l2=0.01` is
+ABSOLUTE and negligible vs the ~110k-doc corpus-summed gradient → no cap on `|w|`.
+→ confirming test = exp 0094 (head_l2 0.01→5.0, head_lr→0.3).
