@@ -849,6 +849,7 @@ class OnlinePCLDA(VIModel):
         # the driver), so it is a faithful iteration index without threading t
         # through the VIModel contract.
         self._update_calls = 0
+        self._corr_relchg = 0.0        # supervised λ-correction magnitude (diagnostic)
         # Supervised-head flavor (the label-side seam). Default = the flat C-way
         # logistic head (Hughes). A DAG-closure head (Mondo, label-side hierarchy)
         # slots in here without touching the SVI math or the increment-1 gate.
@@ -1096,6 +1097,22 @@ class OnlinePCLDA(VIModel):
             new_gp["lambda"] = self._corrected_lambda_block(
                 grad_topics_eb, lam_pre, lam_unsup, rho, wy)
 
+        # DIAGNOSTIC: how far the supervised correction actually moved λ off the
+        # unsupervised update, ||λ_sup − λ_unsup|| / ||λ_unsup||. ~0 ⇒ the head's
+        # ∂loss/∂θ is STARVED (a saturated / under-converged head sends no shaping
+        # signal), so PC is neutral BY CONSTRUCTION regardless of weight_y — the
+        # gated_pc and unsup_gated topics come out identical. Watch it rise once the
+        # head is converged / un-saturated.
+        def _relchg(a, u):
+            a, u = np.asarray(a, np.float64), np.asarray(u, np.float64)
+            den = float(np.sqrt((u * u).sum()))
+            return float(np.sqrt(((a - u) ** 2).sum()) / den) if den > 0 else 0.0
+        if isinstance(lam_pre, dict):
+            self._corr_relchg = float(np.mean(
+                [_relchg(new_gp["lambda"][m], lam_unsup[m]) for m in lam_pre]))
+        else:
+            self._corr_relchg = _relchg(new_gp["lambda"], lam_unsup)
+
         # (c) head step. Two optimizers:
         #   'sgd'    — the RM-damped step ρ·head_lr_scale·wy·g (default; unchanged).
         #   'newton' — a per-iteration ridge-Newton (IRLS) step that CONVERGES the
@@ -1221,7 +1238,8 @@ class OnlinePCLDA(VIModel):
         the fit log."""
         base = self._lda.iteration_summary(global_params)
         w = np.asarray(global_params["w_CK"])
-        return f"{base}, |w_CK|max={np.abs(w).max():.3g}, weight_y={self.weight_y:g}"
+        return (f"{base}, |w_CK|max={np.abs(w).max():.3g}, weight_y={self.weight_y:g}"
+                f", corr_relΔλ={getattr(self, '_corr_relchg', 0.0):.2e}")
 
     def get_metadata(self) -> dict[str, Any]:
         """Shape constants for VIResult round-trip — K, V, and C heads."""
