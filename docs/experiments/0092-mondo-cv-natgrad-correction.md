@@ -73,31 +73,50 @@ retired. `weight_y` re-calibrated to 10 (was 50 compensating for the dead correc
 
 ## What to read (use `make -C analysis/cloud report ID=92`)
 
-1. **`corr_relΔλ`** (fit-health trajectory) — MUST now be >> 0 (0090/0091 were ~0). This
-   is the direct signal that supervision is finally moving the topics. If it's still ~0,
-   the fix didn't land; if it's huge / λ floors (watch `Σλ_k` min, ELBO trend), `weight_y`
-   is too strong — lower it.
-2. **HEADLINE `gated_pc vs unsup_gated`** — the payoff. 0090/0091 were Δ−0.0000
-   (identical). A POSITIVE readout delta = PC shaping recovered = the neutral-PC
-   conclusion was a bug, not a data truth. This is the result we're after.
-3. **ELBO trend** — should still rise; a fall means the (now live) correction is
-   destabilizing λ → lower `weight_y`.
-4. **co-fit head + ladder** — secondary; the head's own 0.52 needs the intercept +
-   convergence (separate axis, next). But better-shaped topics may lift it.
+REQUIRES the `||grad_y||` diagnostics (commits b67c3c3 / 73050d8) — the cluster was at
+ca0e3c4; `git pull` before re-running. Local reproduction (scratch:
+realistic_localized.py) PROVED the natural-gradient correction shapes topics HARD when
+a node has signal (UNSUP topics-LR 0.53 → PC 0.95, Δ+0.42, corr 0.06–0.12, |w|~1e4),
+and could NOT reproduce a corr≈0 at K=20/D=2500 even with localization. So the working
+hypothesis for THIS run's neutral-PC is **whole-Mondo shaping STARVATION**: ~3,800
+nodes, most with ~100 positives out of ~1e6, so each localized Fisher `H_c`/gradient
+`g_c` is degenerate → the newton solve returns `w_c≈0` → `grad_topics≈0` → `corr≈0`.
+The report now disambiguates this directly:
+
+1. **`||grad_y||` + `|w_CK|max` trajectory (first/mid/last/peak)** — THE decider.
+   * `||grad_y||` peak ≈ 0 AND `|w_CK|max` ≈ 0 (a converged head sits ~70) across ALL
+     iters ⇒ CONFIRMED starvation: the localized head never trains. `corr_relΔλ=0` bit-
+     exact is then the seed-iteration value (grad ∝ w_CK = 0), not a correction bug.
+     → the fix is on the SPARSITY axis (well-populated node selection, cross-node
+     hierarchical shrinkage so rare nodes borrow strength, or a pooled shaping signal) —
+     NOT head convergence (which the local ladder showed TRADES AWAY the readout).
+   * `||grad_y||` peak > 0 but `corr_relΔλ` ≈ 0 ⇒ the correction isn't applying (build) —
+     re-open. (Local repro says this shouldn't happen at ca0e3c4+.)
+2. **`corr_relΔλ` trajectory** — peak, not just last. A nonzero peak = shaping fired on
+   SOME iter (head had magnitude then); a bit-exact-0 peak = never fired.
+3. **HEADLINE `gated_pc vs unsup_gated` readout** — the payoff. Δ>0 = shaping recovered.
+   Under the starvation hypothesis this stays ≈0 until the sparsity fix.
+4. **ELBO trend** — should rise; a fall = the (live) correction destabilizing λ.
 
 ## Sequence after this
 
-- If shaping is positive: sweep `weight_y` for the best shaping vs stability, then add
-  the head **intercept** (engine change) for the co-fit head's own prediction + a
-  sharper shaping direction. Re-confirm on the 41-anchor 0089 setup (the neutral-PC
-  finding was consistent across runs — overturning it deserves a second scale).
-- If shaping is still flat despite `corr_relΔλ >> 0`: the topics move but not usefully —
-  investigate the shaping DIRECTION (the head's `∂L/∂eb`), which points back to the
-  intercept/convergence head fixes.
+- **If starvation confirmed** (grad/|w|≈0 across iters): the lever is per-node label
+  sparsity, not the head. Options to prototype (local repro can be pushed into the sparse
+  regime to pick one): (a) restrict to nodes with ≥N effective positives; (b) hierarchical
+  shrinkage — rare nodes' head borrows from ancestors+siblings (a proper prior on `w_c`,
+  not the vanishing relative ridge); (c) a pooled/ancestor-tied shaping signal so a rare
+  leaf still moves its ancestor topics. The co-fit head **intercept** is DEMOTED — local
+  frozen-θ ladder showed it neutral (0.982 vs 0.983); it's a co-fit-beauty nicety, not the
+  deliverable lever.
+- **If grad alive but corr≈0**: correction-application bug — re-open the engine path.
+- Re-confirm any positive result on the 41-anchor 0089 setup (a second scale) before
+  rewriting the neutral-PC insights.
 
 ## Run
 
 ```bash
+# MUST pull first: the ||grad_y||/|w| diagnostics (b67c3c3, 73050d8) post-date the
+# ca0e3c4 the cluster ran the first time, and they are what makes this run self-diagnosing.
 cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp && \
   CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=92
 make -C analysis/cloud report ID=92
