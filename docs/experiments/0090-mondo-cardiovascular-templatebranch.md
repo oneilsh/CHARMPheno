@@ -54,7 +54,13 @@ tau0: 64.0
 kappa: 0.51
 cavi_max_iter: 100
 cavi_tol: 0.001
-skip_unsup_gated: true
+skip_unsup_gated: false
+# Re-enabled the weight_y=0 twin for the SHAPING ablation (does supervision improve
+# the representation, or does the gate structure alone carry it?), now that the
+# readout collect is bounded (run-1 died there). readout_sample_frac subsamples the
+# driver-side theta/proba arrays; 0.3 of the whole-pop cardiovascular test is ample
+# for the per-node LRs at min_label_count=20, and it de-risks the Step-B readout wall.
+readout_sample_frac: 0.3
 with_dag_head: false
 baseline_max_iter: 100
 min_label_count: 20
@@ -179,3 +185,18 @@ model. **Next scaling wall for Step B (flagged, not yet fixed):** the readout it
 collects the full `N×K` θ matrix to the driver to fit the per-node logistics — at
 K≈3,800 over the whole population that is multi-GB per arm and will not fit an 8 GB
 driver. Step B needs a subsampled or distributed readout before the whole-tree run.
+
+### Run 3 (planned) — diagnose WHY localization killed the co-fit head
+
+Two diagnostics added to the driver, both on the gated arm's collected θ:
+- **Oracle localized readout** — the best-possible per-node logistic fit on EXACTLY
+  the co-fit head's support (`allowed_with_siblings`), same hypothesis class as the
+  head but fit optimally. The A-vs-B decider, printed as
+  `[driver] A-vs-B cond_AUC: full-K readout=… oracle-localized=… co-fit head=…`:
+  - oracle ≈ full-K ⇒ the signal IS in the support; the co-fit head is merely
+    UNDER-FIT (recoverable — tune the head fit; the unified model lives);
+  - oracle ≈ co-fit head ⇒ the signal is OUTSIDE the local support (localization
+    fundamentally lossy — widen support or concede two-stage).
+- **Shaping ablation** — the weight_y=0 twin readout restored (memory-safe via
+  `readout_sample_frac`): does supervision improve the representation, or does the
+  gate structure carry it? (0089 was ~neutral.)
