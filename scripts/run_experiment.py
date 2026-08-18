@@ -827,6 +827,8 @@ def build_gated_pc_args(
         args.append("--with-dag-head")
     if effective.get("localize_head"):
         args.append("--localize-head")
+    if effective.get("diag_only"):
+        args.append("--diag-only")
     if effective.get("dag_source"):
         args.extend(["--dag-source", str(effective["dag_source"])])
     if effective.get("mondo_branch"):

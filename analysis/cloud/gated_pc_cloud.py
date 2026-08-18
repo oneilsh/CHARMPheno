@@ -618,6 +618,59 @@ def _localized_head_proba(Pi, w, b=None):
     return 1.0 / (1.0 + np.exp(-np.clip(z, -50.0, 50.0)))
 
 
+def per_node_head_report(w_CK, lay, C, int2cid, count_of, *, dead_eps=1e-6):
+    """FAST head-STARVATION diagnostic (exp 0092 hypothesis): the aggregate |w_CK|max
+    hides the DISTRIBUTION. What decides the whole-Mondo neutral-PC question is: of the
+    C localized heads, how many have `|w_c|≈0` (never trained), and does that track each
+    node's POSITIVE count? A localized head shapes topics only through its own `w_c`
+    (grad_topics ∝ w_CK); a node with too few positives has a degenerate per-node Fisher
+    → `w_c≈0` → no shaping → corr≈0. This is pure driver-side arithmetic on the fitted
+    `w_CK` (C,K) + the per-node support `lay.allowed_with_siblings(c)` + the terminal
+    positive counts `count_of` — near-free, no Spark, no θ collect.
+
+    Returns a formatted multi-line string: a |w_c| bucket histogram, and — split by
+    trained-vs-dead — the median positive count, so 'dead heads are the low-positive
+    ones' is read off directly."""
+    lines = ["[head-starvation probe] per-node |w_c| on localized support:"]
+    wnorm = np.empty(C, dtype=np.float64)
+    sizes = np.empty(C, dtype=np.int64)
+    pos = np.full(C, -1, dtype=np.int64)          # -1 = class node (no positive count)
+    for c in range(C):
+        sup = np.asarray(sorted(lay.allowed_with_siblings(c)), dtype=int)
+        sizes[c] = sup.size
+        wnorm[c] = float(np.linalg.norm(np.asarray(w_CK)[c, sup])) if sup.size else 0.0
+        cid = int2cid.get(c)
+        if cid is not None and cid > 0:
+            pos[c] = int(count_of.get(cid, 0))
+    # |w_c| buckets
+    edges = [(0.0, dead_eps, "dead  (≈0)"), (dead_eps, 1e-2, "tiny  (<1e-2)"),
+             (1e-2, 1.0, "small (<1)"), (1.0, 1e2, "ok    (<100)"),
+             (1e2, np.inf, "big   (≥100)")]
+    for lo, hi, lbl in edges:
+        sel = (wnorm >= lo) & (wnorm < hi)
+        n = int(sel.sum())
+        if n == 0:
+            lines.append(f"    {lbl:14s} {n:5d} nodes")
+            continue
+        pos_sel = pos[sel & (pos >= 0)]
+        pmed = f"median +ct={int(np.median(pos_sel))}" if pos_sel.size else "class nodes"
+        lines.append(f"    {lbl:14s} {n:5d} nodes   {pmed}")
+    dead = wnorm < dead_eps
+    trained = ~dead
+    lines.append(f"    -> {int(dead.sum())}/{C} heads DEAD (|w_c|<{dead_eps:g}), "
+                 f"{int(trained.sum())} trained")
+    tp = pos[trained & (pos >= 0)]
+    dp = pos[dead & (pos >= 0)]
+    if tp.size and dp.size:
+        lines.append(f"    -> terminal +count: trained median={int(np.median(tp))} "
+                     f"vs DEAD median={int(np.median(dp))}  "
+                     f"(starvation ⇔ dead≪trained)")
+    lines.append(f"    -> |w_c|: min={wnorm.min():.2g} median={np.median(wnorm):.2g} "
+                 f"max={wnorm.max():.2g}   support size: min={sizes.min()} "
+                 f"median={int(np.median(sizes))} max={sizes.max()}")
+    return "\n".join(lines)
+
+
 def per_node_domain_mass(lam_dict, lay, domain_names):
     """Per DAG node, the fraction of its topic block's λ mass in each domain.
 
@@ -875,6 +928,13 @@ def parse_args(argv=None):
                         "total cluster executor cores to spread the per-doc autograd "
                         "and demand more executors. Pair with "
                         "CHARM_SPARK_CONF='spark.locality.wait=0s'.")
+    p.add_argument("--diag-only", action="store_true",
+                   help="FAST head-starvation probe: fit the gated_pc arm ONLY (skip "
+                        "the θ-collect readouts, baselines, conditional + ladder — the "
+                        "slow part), then print the per-node head-magnitude histogram "
+                        "(|w_c| on each node's support vs its positive count) and exit. "
+                        "Pair with a small --max-iter (e.g. 8): starvation (|w_c|≈0 for "
+                        "the low-positive nodes) is visible in a few iters, in minutes.")
     p.add_argument("--cache-uri", default=None)
     p.add_argument("--out-dir", required=True)
     p.add_argument("--resume-from", default="",
@@ -915,6 +975,7 @@ def main() -> int:
                 print(f"[mondo]   powered terminals={len(terminal_cids)}, "
                       f"class nodes={reduced['n_classes']}, "
                       f"branch={args.mondo_branch or 'ALL'}", flush=True)
+                args._count_of = count_of     # per-terminal +counts (diag-only probe)
             with _phase(f"assemble MONDO corpus (cond + {list(extra_domains)})"):
                 bundle = assemble_multidomain_case_finding_corpus(
                     spark, disease=args.disease, cdr=args.cdr, billing=args.billing,
@@ -1049,6 +1110,15 @@ def main() -> int:
             if args.eval_every > 0:
                 pc_est.setOnIteration(_make_eval_logger(bundle, C, args))
             pc_model = pc_est.fit(bundle.train_df)
+            if args.diag_only:
+                # FAST head-starvation probe: skip every θ-collect / readout / baseline
+                # (the slow part) and just read the fitted head. The per-iter ||grad_y||
+                # / |w_CK|max trajectory already printed during the fit; this adds the
+                # per-node DISTRIBUTION that the aggregate hides.
+                print(per_node_head_report(
+                    pc_model.headWeights(), lay, C, bundle.int2cid,
+                    getattr(args, "_count_of", {})), flush=True)
+                return 0
             # Transform each split ONCE (each transform re-runs CAVI over the split);
             # the supervised transform appends BOTH topicDistribution and probability.
             train_scored = pc_model.transform(bundle.train_df).cache()
