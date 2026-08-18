@@ -275,3 +275,34 @@ shaping result from neutral to positive. `|w|max` for the engine variants is pri
 too (the fixed ridge should tame the 273 blowup). Hypothesis (mechanism for the
 small-model→large-model regression): the relative ridge + missing intercept are cheap
 at 41 shallow anchors but bite at 436 deep/rare nodes.
+
+### Run 4 RESULT — under-CONVERGENCE dominates (+0.087), then INTERCEPT (+0.060)
+
+| step (one factor added per row) | cond_AUC | Δ | \|w\|max |
+|---|---|---|---|
+| co-fit head (as trained) | 0.523 | — | 273 |
+| **+ CONVERGE** (rel-ridge, no-icpt) | 0.610 | **+0.087** | 71 |
+| + fixed ridge | 0.602 | −0.008 | 19 |
+| **+ INTERCEPT** | 0.662 | **+0.060** | 12 |
+| sklearn [no-icpt, standardized] | 0.677 | +0.015 (standardize) | — |
+| sklearn oracle [icpt, standardized] | 0.680 | — | — |
+| full-K readout | 0.737 | +0.057 (locality) | — |
+
+**Verdict (I was wrong that convergence wouldn't matter):** the co-fit head is badly
+UNDER-CONVERGED — one damped (`head_lr=0.3`) Newton step/iter against a moving θ never
+settles, sitting at `|w|=273`; a converged localized head reaches 0.610 at `|w|=71`.
+Convergence is the biggest lever (+0.087), the unpenalized INTERCEPT second (+0.060);
+the ridge TYPE barely matters (fixed alone −0.008, though it tames `|w|`). Engine-
+fixable ceiling (converge + intercept, localized) ≈ 0.66–0.68 = the oracle; the last
+0.057 to full-K is locality (widen support, optional).
+
+**The deeper finding — supervision is a NO-OP on the topics.** `gated_pc` vs
+`unsup_gated` this run: AUC 0.7365 vs 0.7365 (Δ−0.0000), **bit-identical ELBO
+(−25944399.7250 both arms)**, identical per-node AUC and domain λ-mass. weight_y=50
+produced the EXACT same topic model as weight_y=0. Mechanism (unified with the head):
+the under-converged, intercept-less head saturates (`|w|=273`) → its `∂loss/∂θ`
+vanishes → the topic correction `ρ·wy·∂loss/∂θ ≈ 0` (capped at `topic_trust·λ_unsup`
+but starved of gradient) → topics don't move → PC neutral BY CONSTRUCTION. **So fixing
+the head gates whether PC works at all**, not just the head's own AUC. Next: exp 0091
+(`head_lr=1.0`, full Newton) tests convergence + the new `corr_relΔλ` diagnostic (does
+the un-saturated head finally move the topics?); then the engine intercept.
