@@ -95,13 +95,29 @@ def build_report(text: str, *, title: str = "", all_sections: bool = False) -> s
     elbo = [float(m) for m in re.findall(r"iter \d+/\d+: ELBO=(-?[\d.]+)", text)]
     wmax = [float(m) for m in re.findall(r"\|w_CK\|max=([\d.eE+-]+)", text)]
     corr = [float(m) for m in re.findall(r"corr_relΔλ=([\d.eE+-]+)", text)]
+    grady = [float(m) for m in re.findall(r"\|\|grad_y\|\|=([\d.eE+-]+)", text)]
     if wmax and max(wmax) > 200:
         flags.append(f"  head-blowup: |w_CK|max peaked at {max(wmax):.0f} (>200; a "
                      "converged localized head sits ~70)")
     corr_starved = bool(corr) and max(corr) < 1e-3
     if corr_starved:
-        flags.append(f"  pc-no-op: corr_relΔλ max={max(corr):.1e} — weight_y not "
-                     "shaping topics")
+        # DISAMBIGUATE (insight 0072 / exp 0092): corr≈0 has two causes and ||grad_y||
+        # tells them apart. grad_y≈0 ⇒ the head sends NO shaping signal (∂loss/∂θ ∝ w_CK,
+        # so an under-converged / zero head zeroes the topic gradient by construction) —
+        # an UPSTREAM head problem, not a correction one. grad_y>0 but corr≈0 ⇒ the
+        # natural-gradient correction isn't applying (stale build / wy=0).
+        grad_dead = bool(grady) and max(grady) < 1e-6
+        if grad_dead:
+            flags.append(f"  pc-no-op: corr max={max(corr):.1e} AND ||grad_y|| "
+                         f"max={max(grady):.1e}≈0 — HEAD sends no shaping signal "
+                         "(under-converged head, not the correction)")
+        elif grady:
+            flags.append(f"  pc-no-op: corr max={max(corr):.1e} but ||grad_y|| "
+                         f"max={max(grady):.1e}>0 — gradient alive, correction NOT "
+                         "applying (stale build? wy=0?)")
+        else:
+            flags.append(f"  pc-no-op: corr_relΔλ max={max(corr):.1e} — weight_y not "
+                         "shaping topics (add ||grad_y|| via a fresh fit to disambiguate)")
 
     hdr = f"POST-FIT REPORT  {title}".rstrip()
     out.append("=" * 78)
@@ -116,6 +132,7 @@ def build_report(text: str, *, title: str = "", all_sections: bool = False) -> s
         _fmt_traj("ELBO", elbo),
         _fmt_traj("|w_CK|max", wmax),
         _fmt_traj("corr_relΔλ", corr, starved=corr_starved),
+        _fmt_traj("||grad_y||", grady),
     ) if t]
     if traj:
         out.append("FIT-HEALTH (first / mid / last / peak):")
