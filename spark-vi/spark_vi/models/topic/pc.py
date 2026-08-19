@@ -93,6 +93,12 @@ from spark_vi.core.model import VIModel
 from spark_vi.models.topic.lda import OnlineLDA
 from spark_vi.models.topic.types import PCDocument
 
+# Numerical overflow guard on the exponentiated-gradient λ-correction's per-cell
+# exponent (``_corrected_lambda_block``). Not a tuning knob: at the mass-preserving
+# renormalization, a single-cell factor of e^±4 (≈55× / 0.018×) is already extreme and
+# the per-topic total is conserved regardless, so this only bounds pathological cells.
+_EG_CLIP = 4.0
+
 
 # ---------------------------------------------------------------------------
 # Autograd supervised loss (the per-doc PC prediction NLL, differentiated
@@ -926,13 +932,34 @@ class OnlinePCLDA(VIModel):
         ``grad_eb`` is corpus-scaled by the runner, identical to the unsupervised
         sstats that formed ``lam_unsup``, so ``weight_y`` is a genuine O(1)
         supervised weight. ``eb`` is evaluated at ``lam_pre`` (the λ the gradient
-        was taken at). No trust-region clip: the RM ρ step-damping bounds the step
-        exactly as it does the unsupervised natural-gradient step (this retired the
-        ``topic_trust`` knob). Floor at 1e-30 to keep λ strictly positive."""
+        was taken at).
+
+        EXPONENTIATED-GRADIENT, MASS-PRESERVING (the reference's simplex-safe update;
+        exp 0098). An ADDITIVE step ``λ_unsup − ρ·wy·nat`` has no constraint structure:
+        at large ``weight_y`` it drains a topic's pseudocounts toward 0 (Σλ_k→~13) or
+        bloats others (→1e7), and a near-empty topic's ``E[logβ]`` detonates the ELBO
+        (observed −4.5e27 at weight_y=16). The Hughes reference never steps the raw
+        params — it puts topics on the simplex (row-softmax) and uses Natural-Exponential
+        -Family EXPONENTIATED-gradient (mirror-descent) steps, which stay on the simplex
+        by construction. We mirror that: a MULTIPLICATIVE step in the PER-CELL RELATIVE
+        move ``r = ρ·wy·nat/λ_unsup`` (dimensionless), then RENORMALIZE each topic to its
+        unsupervised total mass ``Σλ_k`` — so every topic redistributes vocab mass toward
+        the supervised gradient but keeps its total pseudocount fixed. No starvation, no
+        bloat; ``λ`` stays strictly positive; ``weight_y`` is BOUNDED BY CONSTRUCTION (no
+        trust cap). Reduces to the additive step for small ``r`` (``exp(−r)≈1−r``). The
+        ±``_EG_CLIP`` on the exponent is a numerical overflow guard, not a tuning knob."""
         lam_pre = np.asarray(lam_pre, dtype=np.float64)
+        lam_unsup = np.asarray(lam_unsup, dtype=np.float64)
         eb = np.exp(digamma(lam_pre) - digamma(lam_pre.sum(axis=1, keepdims=True)))
         nat = grad_eb * eb                       # ∂L/∂eb · eb — the natural gradient
-        return np.maximum(lam_unsup - rho * wy * nat, 1e-30)
+        # per-cell RELATIVE move (dimensionless); multiplicative EG step keeps λ > 0.
+        rel = rho * wy * nat / np.maximum(lam_unsup, 1e-30)
+        lam_new = lam_unsup * np.exp(-np.clip(rel, -_EG_CLIP, _EG_CLIP))
+        # renormalize each topic-row back to its unsupervised total mass (mirror-descent
+        # on the simplex, lifted to the Dirichlet pseudocounts): no starvation / bloat.
+        mass = lam_unsup.sum(axis=1, keepdims=True)
+        lam_new *= mass / np.maximum(lam_new.sum(axis=1, keepdims=True), 1e-30)
+        return np.maximum(lam_new, 1e-30)
 
     def local_update(
         self,

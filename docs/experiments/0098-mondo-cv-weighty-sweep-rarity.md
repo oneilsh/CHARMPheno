@@ -108,4 +108,17 @@ make -C analysis/cloud report ID=98
 
 ## Run log
 
-_(pending first run)_
+**2026-08-19 run 1 — weight_y=16 DETONATED λ (additive correction).** Head stayed
+bounded (|w|max 0.09->1.87->...->4.22, per-doc-mean held), but corr_relΔλ hit 9.3% by
+iter 3 and ELBO went to -4.5e27 at iter 4 and never recovered; by iter 80 some topics
+were starved (Σλ_k min=12.9) while others bloated (1e7). Root: the supervised correction
+was an ADDITIVE subtraction on λ with no simplex constraint, so a large weight_y drains
+topic mass -> empty topic -> E[logβ] detonates the ELBO. Readout on wrecked topics is
+useless (no clean rarity answer from this run).
+
+**FIX (engine): exponentiated-gradient, MASS-PRESERVING correction** (the reference's
+simplex-safe update). λ now moves MULTIPLICATIVELY and each topic-row is renormalized to
+its unsupervised total mass Σλ_k — no starvation/bloat, λ>0 by construction, weight_y
+bounded (numerically verified: Σλ drift 2e-16 at weight_y up to 1000; reduces to the
+additive step at small weight_y). RE-RUN exp 0098 UNCHANGED (git pull rebuilds
+spark_vi.zip): weight_y=16 should now be STABLE and give the rarity split.
