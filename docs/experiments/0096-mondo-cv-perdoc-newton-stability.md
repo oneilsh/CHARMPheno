@@ -107,4 +107,19 @@ cd ~/repos/CHARMPheno && git pull origin claude/spectral-anchor-topic-k-200nqp &
 
 ## Run log
 
-_(pending first run)_
+**2026-08-18 — STABLE. The basic method works at scale.** doc_concentration=0.5 +
+per-doc-mean newton + weight_y=2:
+
+```
+|w_CK|max:  0.089 -> 1.87 -> 1.77 -> 1.64 -> 1.57 -> 1.51 -> 1.46 -> 1.45  (bounded, converging)
+corr_relΔλ: 0 -> 1.2e-3 -> 1.2e-2 -> 9.5e-3 -> 8e-3 -> 7.4e-3 -> 7e-3 -> 6.8e-3  (steady ~0.7%/step)
+||grad_y||: 0 -> 2.9e6 -> 2.8e7 -> ... -> 1.3e7  (alive, finite)
+ELBO:       -5.9e7 -> -5.0e7 -> ... -> -4.6e7  (rising monotonically, no explosion)
+0/437 heads dead; |w_c| median 0.036, max 2.4
+```
+
+The 0095 runaway (|w|->2.4e5, corr->21, ELBO->-1e33) is fully gone: per-doc-mean bounds
+|w| (~1.45), weight_y=2 keeps the per-step λ move gentle. Shaping is live AND stable.
+Next = full fit (max_iter=100, unsup twin, readout) to measure the pc_topics_lr LIFT vs
+unsup — the deliverable (exp 0097). weight_y is now a safe dial to turn UP for more
+shaping (the head can no longer run away).
