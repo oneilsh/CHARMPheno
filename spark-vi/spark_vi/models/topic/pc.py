@@ -740,6 +740,7 @@ class OnlinePCLDA(VIModel):
         head_intercept: bool = False,
         head_standardize: bool = False,
         head_std_floor: float = 0.0,
+        head_trust_move: float = 0.0,
         topic_support: "list[np.ndarray] | None" = None,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
@@ -878,6 +879,17 @@ class OnlinePCLDA(VIModel):
         # topics are dense; explodes at whole-Mondo K). Validated via the sparse-many-
         # topic harness.
         self.head_std_floor = float(head_std_floor)
+        # TRUST-REGION on the supervised topic move (weight_y's principled replacement).
+        # weight_y is a raw loss-weight matching two incommensurate-scale gradients; the
+        # RIGHT value drifts with K/σ/standardization (exp 0099 over-drove: corr_relΔλ→1.83
+        # with the same weight_y that was healthy at K=20). A trust CAP is scale-free: take
+        # the natural EG step, and only if its relative λ move ||λ_sup−λ_unsup||/||λ_unsup||
+        # exceeds this radius, shrink the step to the radius. Robbins-Monro convergence is
+        # preserved — once the head converges grad_y shrinks, the natural move drops below
+        # the radius, and steps pass through UNCAPPED and decaying. 0.0 = no cap (legacy
+        # weight_y-only behavior). Set e.g. 0.03 to hold the shaping in the healthy band
+        # regardless of weight_y / K / standardization.
+        self.head_trust_move = float(head_trust_move)
         # LOCALIZED head (topic-side hierarchy in the HEAD's support, ADR 0042 done
         # right): per-node topic support — node c's logistic reads ONLY topic_support[c]
         # (its gated block + ancestors' blocks + background, e.g. DagLayout.allowed(c)),
@@ -1027,12 +1039,40 @@ class OnlinePCLDA(VIModel):
         nat = grad_eb * eb                       # ∂L/∂eb · eb — the natural gradient
         # per-cell RELATIVE move (dimensionless); multiplicative EG step keeps λ > 0.
         rel = rho * wy * nat / np.maximum(lam_unsup, 1e-30)
-        lam_new = lam_unsup * np.exp(-np.clip(rel, -_EG_CLIP, _EG_CLIP))
-        # renormalize each topic-row back to its unsupervised total mass (mirror-descent
-        # on the simplex, lifted to the Dirichlet pseudocounts): no starvation / bloat.
         mass = lam_unsup.sum(axis=1, keepdims=True)
-        lam_new *= mass / np.maximum(lam_new.sum(axis=1, keepdims=True), 1e-30)
-        return np.maximum(lam_new, 1e-30)
+
+        def _step(r):
+            # one EG (mirror-descent) step at relative-move field ``r``, renormalized to
+            # each topic's unsupervised total mass (no starvation / bloat, λ > 0).
+            ln = lam_unsup * np.exp(-np.clip(r, -_EG_CLIP, _EG_CLIP))
+            ln *= mass / np.maximum(ln.sum(axis=1, keepdims=True), 1e-30)
+            return np.maximum(ln, 1e-30)
+
+        lam_new = _step(rel)
+
+        # TRUST REGION (weight_y's scale-free replacement). If the block's relative move
+        # ||λ_new−λ_unsup||/||λ_unsup|| overshoots the radius, shrink the step (scale the
+        # exponent field) to land exactly on it. Monotone in the scale s∈[0,1]: s=0 ⇒ move
+        # 0, s=1 ⇒ the full (overshooting) move — so a bisection brackets the radius. Undershooting
+        # steps (converged head, small grad_y) pass through untouched → RM convergence intact.
+        trust = float(getattr(self, "head_trust_move", 0.0))
+        if trust > 0.0:
+            den = float(np.sqrt((lam_unsup * lam_unsup).sum()))
+
+            def _move(ln):
+                d = ln - lam_unsup
+                return float(np.sqrt((d * d).sum()) / den) if den > 0 else 0.0
+
+            if _move(lam_new) > trust:
+                lo, hi = 0.0, 1.0
+                for _ in range(30):                 # ~1e-9 resolution in the scale
+                    mid = 0.5 * (lo + hi)
+                    if _move(_step(mid * rel)) > trust:
+                        hi = mid
+                    else:
+                        lo = mid
+                lam_new = _step(0.5 * (lo + hi) * rel)
+        return lam_new
 
     def local_update(
         self,
