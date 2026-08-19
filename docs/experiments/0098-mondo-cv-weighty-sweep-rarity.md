@@ -122,3 +122,17 @@ its unsupervised total mass Σλ_k — no starvation/bloat, λ>0 by construction
 bounded (numerically verified: Σλ drift 2e-16 at weight_y up to 1000; reduces to the
 additive step at small weight_y). RE-RUN exp 0098 UNCHANGED (git pull rebuilds
 spark_vi.zip): weight_y=16 should now be STABLE and give the rarity split.
+
+**2026-08-19 run 2 — EG fix WORKS (model stable at weight_y=16); crashed on INFRA.**
+FIT-HEALTH to iter 89: ELBO -5.99e7 → -3.14e7 (RISING, no -1e27 detonation), corr_relΔλ
+peak 2.9% settling ~1-2% (real shaping, ~3x the wy=2 run), |w|max 4.2 (bounded). The
+exponentiated-gradient mass-preserving correction fully fixed the weight_y=16 blowup. BUT
+the run died at iter 89/100 on cluster infrastructure: 35x executor loss, 7x OOM
+(Container killed), exit-143 "bad node" (preemptible secondary workers reclaimed),
+FetchFailedException → ShuffleMapStage failed 4x → abort. Readout never ran.
+
+**run 3 tweak: grad_cavi_iters 30 → 15.** At alpha=0.5 the CAVI-Jacobian map PEAKS at
+ni=15 (||dtheta/deb|| 0.50 vs 0.31 at ni=30) — stronger shaping AND ~half the per-doc
+autograd tape (the executor OOM driver) AND faster. Re-run 0098; if preemption recurs,
+the durable fix is wiring gated_pc checkpoint/resume (estimator machinery exists; driver
+--resume-from is a no-op today).
