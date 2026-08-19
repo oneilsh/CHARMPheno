@@ -3,9 +3,14 @@
 **Date:** 2026-08-18
 **Topic:** prediction-constrained, gated-PC, SVI, natural gradient, scale, bug
 
-**Status:** Root-caused + numerically confirmed on exp 0090/0091 (Mondo cardiovascular,
-whole-population, K=444). Overturns the "PC supervision is neutral on this data"
-reading of insights 0064/0066 and exps 0089/0090/0091.
+**Status:** PARTIAL — SUPERSEDED by insight 0073. This insight found a real scaling issue
+(the natural-gradient direction, ADR 0044) but wrongly concluded it was THE cause of the
+neutral-PC result. It was not even the dominant one: exps 0092–0095 showed `corr` still
+bit-exact 0 AFTER this fix, because the actual upstream blocker was α-collapse killing the
+CAVI Jacobian (`∂θ/∂eb → 2.7e-90`), with a head runaway and an additive-correction ELBO
+detonation stacked behind it. See insight 0073 for the full three-bug story and ADR 0045
+for the fixes. The `1/λ²` analysis below is still correct for the RAW-vs-natural gradient
+question; it just wasn't what made PC read as neutral at scale.
 
 ## The observation
 
