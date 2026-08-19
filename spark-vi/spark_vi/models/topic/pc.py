@@ -99,6 +99,12 @@ from spark_vi.models.topic.types import PCDocument
 # the per-topic total is conserved regardless, so this only bounds pathological cells.
 _EG_CLIP = 4.0
 
+# Weak ridge on the newton head's per-node INTERCEPT (b). A fully-unpenalized bias runs
+# to ±∞ on rare/separable nodes (H_bb→0 as p saturates → the one-step Newton diverges);
+# this small ridge floors it, giving a finite b* ≈ −g_b/_BIAS_RIDGE that still reaches
+# extreme base rates. ≪ the topic-weight ridge, so the intercept stays near-free.
+_BIAS_RIDGE = 1e-2
+
 
 # ---------------------------------------------------------------------------
 # Autograd supervised loss (the per-doc PC prediction NLL, differentiated
@@ -437,17 +443,20 @@ def _dag_block_fisher(topics_repr, w_CK, rows, alpha_vec, K, n_iters, closure_ma
     return H
 
 
-def _predict_proba_np(theta, w_CK, closure_matrix=None):
+def _predict_proba_np(theta, w_CK, closure_matrix=None, b_CK=None):
     """Per-label prediction probability for ONE doc's topic mean (plain numpy).
 
-    ``closure_matrix is None`` -> the flat logistic ``σ(w_l·θ)``. A ``(C, C)`` closure
-    indicator -> the DAG-closure PRODUCT ``∏_{a ∈ closure(l)} σ(w_a·θ)`` = ``exp(M ·
-    logσ(w·θ))``. Shared by the head ``predict_proba`` methods AND the mllib transform,
-    which broadcasts these arrays (never the head object, whose autograd closure is not
-    picklable) into its probability UDF.
+    ``closure_matrix is None`` -> the flat logistic ``σ(w_l·θ + b_l)``. A ``(C, C)``
+    closure indicator -> the DAG-closure PRODUCT ``∏_{a ∈ closure(l)} σ(w_a·θ + b_a)`` =
+    ``exp(M · logσ(w·θ + b))``. ``b_CK`` (per-node intercept) defaults to 0. Shared by the
+    head ``predict_proba`` methods AND the mllib transform, which broadcasts these arrays
+    (never the head object, whose autograd closure is not picklable) into its probability
+    UDF.
     """
-    z = np.clip(np.asarray(w_CK, dtype=np.float64) @ np.asarray(theta, dtype=np.float64),
-                -50.0, 50.0)
+    z = np.asarray(w_CK, dtype=np.float64) @ np.asarray(theta, dtype=np.float64)
+    if b_CK is not None:
+        z = z + np.asarray(b_CK, dtype=np.float64)
+    z = np.clip(z, -50.0, 50.0)
     if closure_matrix is None:
         return 1.0 / (1.0 + np.exp(-z))
     log_sig = np.minimum(z, 0.0) - np.log1p(np.exp(-np.abs(z)))       # log σ(z), stable
@@ -1275,7 +1284,13 @@ class OnlinePCLDA(VIModel):
                 wz = np.concatenate([w_CK[c, sup] * sig, [new_b[c]]])      # current params in z-space
                 rel = self.head_newton_ridge * (float(np.trace(Hz[:d, :d])) / max(d, 1))
                 rdiag = np.full(d1, self.head_l2 + rel + 1e-10)
-                rdiag[d] = 0.0                                             # intercept UNPENALIZED
+                # The intercept is WEAKLY penalized, not fully unpenalized: on a rare /
+                # separable node the unpenalized-bias MLE is at ±∞, so as b grows p
+                # saturates, the bias Fisher H_bb→0, and the one-step Newton divides by
+                # ~0 and DIVERGES (observed |b|~1e23). A small ridge (_BIAS_RIDGE) floors
+                # H_bb+r, giving a finite b* ≈ −g_b/r — enough for extreme base rates
+                # (logit(0.01)≈−4.6) without runaway. Still ≪ the topic-weight ridge.
+                rdiag[d] = _BIAS_RIDGE
                 A = Hz + np.diag(rdiag)
                 rhs = gz + rdiag * wz
                 try:
@@ -1284,7 +1299,7 @@ class OnlinePCLDA(VIModel):
                     delta = np.linalg.lstsq(A, rhs, rcond=None)[0]
                 wz_new = wz - self.head_lr * delta
                 new_w[c, sup] = wz_new[:d] / sig                           # z → raw
-                new_b[c] = wz_new[d]
+                new_b[c] = float(np.clip(wz_new[d], -50.0, 50.0))          # base-rate logit guard
             new_gp["w_CK"] = new_w
             new_gp["b_CK"] = new_b
             return new_gp
