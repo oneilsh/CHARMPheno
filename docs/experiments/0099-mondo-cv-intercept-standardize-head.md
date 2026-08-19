@@ -112,4 +112,22 @@ make -C analysis/cloud report ID=99
 
 ## Run log
 
-_(pending first run)_
+**2026-08-19 — did NOT transfer; standardization EXPLODED at K=444 (|w|=578k, PC Δ−0.04).**
+Worse than 0098 (−0.017). The K=20 local win (+0.29) didn't survive: standardization maps
+w=w_z/σ and the ~440 mostly-inactive node topics have σ→0, so w blows up; corr_relΔλ hit
+1.83 (183% λ-move/step) → the huge standardized-head gradient OVER-DROVE the shaping and
+thrashed the topics. co-fit head 0.585 (near its localized ceiling; sklearn-on-support
+caps 0.635 vs full-K readout 0.706 — localization is ~0.07 lossy for the head).
+
+**Sparse-many-topic harness (scratch/sparse_many_topic.py, C=40, median prev 3.9%)
+reproduces + diagnoses it:**
+```
+baseline              co-fit 0.502  readout Δ-0.014  |w|=1.3
++icpt+std (NO floor)  co-fit 0.751  readout Δ+0.344  |w|=1.6e6   <- benefit IS the 1/σ amp
++icpt+std floor=0.02  co-fit 0.504  readout Δ+0.002  |w|=5.2     <- floor KILLS the benefit
++icpt+std floor=0.1   co-fit 0.502  readout Δ-0.006  |w|=5.4
+```
+So the σ-FLOOR IS THE WRONG FIX (removes the amplification that helps). The benefit and the
+explosion are the SAME mechanism. The cluster HURT not from |w| per se (C=40 helped WITH
+|w|=1.6e6) but from SHAPING OVER-DRIVE at scale (corr 1.83). → real lever = shaping
+STRENGTH: keep standardization, LOWER weight_y so corr stays ~2-5% (exp 0100).
