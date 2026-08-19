@@ -45,7 +45,7 @@ optimize_doc_concentration: true
 head_optimizer: newton
 head_newton_ridge: 0.05
 head_l2: 0.01
-grad_cavi_iters: 30
+grad_cavi_iters: 15
 topic_trust: 0.05
 weight_y_warmup_iters: 25
 max_iter: 100
