@@ -145,3 +145,29 @@ def test_supervised_correction_is_scale_stable_natural_gradient():
     assert max(nat) / min(nat) < 1.1
     assert raw[-1] / raw[0] < 1e-3                    # raw collapsed with scale
     assert nat[-1] > 1e3 * raw[-1]                    # natural survives where raw died
+
+
+def test_correction_is_mass_preserving_and_bounded_at_high_weight_y():
+    """exp 0098 regression guard: the EXPONENTIATED-GRADIENT λ-correction preserves each
+    topic-row's total pseudocount Σλ_k (to machine precision) and keeps λ strictly
+    positive at ANY weight_y — so a large weight_y cannot starve a topic (Σλ_k→~0, the
+    −4.5e27 ELBO detonation at weight_y=16) or bloat one. The ADDITIVE step it replaces
+    could not guarantee either. Reduces to the additive move at small weight_y."""
+    m, engine, V = _two_domain_gated_pc(20, 20, 2, weight_y=1.0)
+    rng = np.random.default_rng(5)
+    K = engine.K
+    cs = 1e5                                          # whole-Mondo-like corpus scale
+    lam = (np.abs(rng.normal(size=(K, 20))) + 0.2) * cs
+    grad = rng.normal(size=(K, 20)) * cs             # corpus-scaled supervised gradient
+    mass0 = lam.sum(axis=1)
+    for wy in (2.0, 16.0, 1000.0):
+        out = m._corrected_lambda_block(grad, lam, lam, 0.11, wy)
+        assert (out > 0).all() and np.isfinite(out).all()          # strictly positive
+        # per-topic total mass conserved to machine precision at EVERY weight_y
+        np.testing.assert_allclose(out.sum(axis=1), mass0, rtol=1e-10)
+    # small weight_y ≈ the additive natural-gradient step (EG reduces to it)
+    eg2 = m._corrected_lambda_block(grad, lam, lam, 0.11, 2.0)
+    from scipy.special import digamma
+    eb = np.exp(digamma(lam) - digamma(lam.sum(axis=1, keepdims=True)))
+    add2 = lam - 0.11 * 2.0 * (grad * eb)
+    assert np.abs(eg2 - add2).max() / lam.max() < 0.02             # agree at small move
