@@ -6,35 +6,91 @@ model_class: gated_pc
 cohort: population_mondo_cardiovascular
 cohort_def: population_mondo_cardiovascular
 disease: rare_priority
+# THE FIX RUN (ADR 0044 / insight 0072). The supervised λ-correction is now a NATURAL
+# gradient (∂L/∂E[logβ] = grad_eb·eb, scale-stable) instead of the old raw gradient
+# (∝1/λ², which vanished at whole-population λ and made weight_y a silent no-op —
+# gated topics ≡ unsup topics, corr_relΔλ ≈ 0 across 0090/0091). This is the first run
+# where PC supervision can actually shape the topics at scale. weight_y is RE-CALIBRATED
+# down (10, from the old 50 that only compensated for the ≈0 correction) — with the
+# correction live, 50 can floor rare-topic λ cells in one step.
+dag_source: mondo
+mondo_branch: MONDO:0004995
+min_positives: 100
+mondo_version: 2026-06-02
+mondo_cache_dir: data/mondo
+extra_domains: measurement,drug
+label_mask_mode: closure
+localize_head: true
+doc_concentration: 0.5
+readout_sample_frac: 0.3
+# --- the deltas vs 0091: natural-gradient correction (engine, automatic) + recalibrated wy ---
+weight_y: 2.0
+head_lr: 1.0
+# --- everything else identical to 0091 ---
+person_mod: 1
+prior_obs_days: 0
+doc_min_length: 10
+min_n: 20
+holdout_frac: 0.2
+vocab_size: 5000
+min_df: 20
+min_patient_count: 20
+window_mode: lookback
+lookback_days: 1825
+label_window_days: 365
+strip_mode: both
+n_bg: 8
+tpn: 1
+optimize_doc_concentration: true
+head_optimizer: newton
+head_newton_ridge: 0.05
+head_l2: 0.01
+grad_cavi_iters: 30
+topic_trust: 0.05
+weight_y_warmup_iters: 25
+max_iter: 100
+subsampling_rate: 0.1
+tau0: 64.0
+kappa: 0.51
+cavi_max_iter: 100
+cavi_tol: 0.001
+skip_unsup_gated: false
+with_dag_head: false
+baseline_max_iter: 100
+min_label_count: 20
+eval_every: 0
+num_partitions: 96
+seed: 42
+cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
+---
+
 # 0097 — Mondo cardiovascular: full deliverable (alpha=0.5 + per-doc-mean, stable)
 
 The first full-scale run of a STABLE shaping PC fit — the payoff after the whole
-neutral-PC saga resolved to: alpha=1/K collapsed the CAVI Jacobian (exp 0095), and the
-newton head ran away on an absolute ridge at 1e5 docs (exp 0095 blowup). Fixes:
-doc_concentration=0.5 (Jacobian alive) + per-doc-mean newton (|w| corpus-bounded). exp
-0096 confirmed stability at 8 iters (|w|~1.45, corr~0.7%/step, ELBO rising). This is the
-full 100-iter fit WITH the unsup twin + pc_topics_lr readout — the deliverable.
+neutral-PC saga resolved to two root causes: alpha=1/K collapsed the CAVI Jacobian (exp
+0095), and the newton head ran away on an absolute ridge at ~1e5 docs (exp 0095 blowup).
+Fixes: doc_concentration=0.5 (Jacobian alive) plus per-doc-mean newton (|w| corpus-
+bounded). exp 0096 confirmed stability at 8 iters (|w|~1.45, corr~0.7 percent/step, ELBO
+rising). This is the full 100-iter fit WITH the unsup twin and pc_topics_lr readout.
 
-## What to read (`make -C analysis/cloud report ID=97`)
+## What to read (make -C analysis/cloud report ID=97)
 
-1. **HEADLINE `gated_pc vs unsup_gated` (pc_topics_lr)** — THE deliverable. A POSITIVE
-   delta = PC shaping lifts the readout over unsupervised topics = the method delivers.
-   Every prior run was Δ≈0 because shaping was DEAD (alpha-collapse); this is the first
-   run where it can actually move.
-2. **FIT-HEALTH trajectory** — confirm 0096's stability holds over 100 iters: `|w_CK|max`
-   bounded (~1-3, no 1e5), `corr_relΔλ` steady (~0.005-0.01), `||grad_y||` finite, ELBO
-   rising. If it destabilizes late, note where.
-3. **conditional readout (P(child|parent) by depth)** — the case-finding metric.
+1. HEADLINE gated_pc vs unsup_gated (pc_topics_lr) — THE deliverable. A POSITIVE delta =
+   PC shaping lifts the readout over unsupervised topics = the method delivers. Every
+   prior run was delta approx 0 because shaping was DEAD (alpha-collapse); this is the
+   first run where it can actually move.
+2. FIT-HEALTH trajectory — confirm 0096 stability holds over 100 iters: |w_CK|max bounded
+   (~1-3, no 1e5), corr_relDlambda steady (~0.005-0.01), ||grad_y|| finite, ELBO rising.
+3. conditional readout (P(child|parent) by depth) — the case-finding metric.
 
 ## Sequence after this
 
-- **Positive lift**: sweep `weight_y` UP (4, 8) for MORE shaping — now SAFE, the head
-  can't run away (per-doc-mean). weight_y=2 gives a gentle ~0.7%/step; there is lots of
-  headroom. Find the shaping-vs-stability sweet spot, then re-confirm the lift.
-- **Flat lift despite stable shaping**: shaping is too gentle at weight_y=2 — raise it
-  before concluding anything.
-- Then: the deferred refinements (uniform-beta A/B via gamma_shape; decoupled/floored
-  alpha only if we later co-fit) and the whole-Mondo K≈3800 scale-up.
+- Positive lift: sweep weight_y UP (4, 8) for MORE shaping — now SAFE, the head can't run
+  away (per-doc-mean). weight_y=2 gives a gentle ~0.7 percent/step; lots of headroom.
+- Flat lift despite stable shaping: shaping too gentle at weight_y=2 — raise it before
+  concluding anything.
+- Then: deferred refinements (uniform-beta A/B via gamma_shape; floored/decoupled alpha
+  only if we later co-fit) and the whole-Mondo K~3800 scale-up.
 
 ## Run
 
