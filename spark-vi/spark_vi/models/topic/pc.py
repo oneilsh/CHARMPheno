@@ -739,6 +739,7 @@ class OnlinePCLDA(VIModel):
         head_l2: float = 1e-3,
         head_intercept: bool = False,
         head_standardize: bool = False,
+        head_std_floor: float = 0.0,
         topic_support: "list[np.ndarray] | None" = None,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
@@ -871,6 +872,12 @@ class OnlinePCLDA(VIModel):
         # by default (byte-for-byte back-compat).
         self.head_intercept = bool(head_intercept)
         self.head_standardize = bool(head_standardize)
+        # σ FLOOR for standardization. w_raw = w_z/σ, so a rarely-used topic (σ→0) blows
+        # up |w| (exp 0099: 578k at K=444, where most node topics are ~never active). The
+        # floor caps the 1/σ amplification. 0.0 = no floor (fine at small K where all
+        # topics are dense; explodes at whole-Mondo K). Validated via the sparse-many-
+        # topic harness.
+        self.head_std_floor = float(head_std_floor)
         # LOCALIZED head (topic-side hierarchy in the HEAD's support, ADR 0042 done
         # right): per-node topic support — node c's logistic reads ONLY topic_support[c]
         # (its gated block + ancestors' blocks + background, e.g. DagLayout.allowed(c)),
@@ -1267,6 +1274,8 @@ class OnlinePCLDA(VIModel):
                 m1 = np.asarray(target_stats["theta_m1_stat"], np.float64) * inv_h
                 m2 = np.asarray(target_stats["theta_m2_stat"], np.float64) * inv_h
                 sig_all = np.sqrt(np.maximum(m2 - m1 * m1, 1e-12))          # (K,) per-topic std
+                if self.head_std_floor > 0.0:
+                    sig_all = np.maximum(sig_all, self.head_std_floor)      # cap 1/σ blowup
             else:
                 sig_all = np.ones(self.K, dtype=np.float64)
             new_w = w_CK.copy()
