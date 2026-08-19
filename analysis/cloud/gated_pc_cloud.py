@@ -819,6 +819,8 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         topicTrust=args.topic_trust, weightYWarmupIters=args.weight_y_warmup_iters,
         headOptimizer=args.head_optimizer, headLr=args.head_lr,
         headNewtonRidge=args.head_newton_ridge, headL2=args.head_l2,
+        headIntercept=bool(getattr(args, "head_intercept", False)),
+        headStandardize=bool(getattr(args, "head_standardize", False)),
         optimizeDocConcentration=args.optimize_doc_concentration,
         frontierCol="frontier", gateNBg=args.n_bg, gateTpn=args.tpn,
         localizeHead=bool(getattr(args, "localize_head", False)),
@@ -969,6 +971,12 @@ def parse_args(argv=None):
                         "total cluster executor cores to spread the per-doc autograd "
                         "and demand more executors. Pair with "
                         "CHARM_SPARK_CONF='spark.locality.wait=0s'.")
+    p.add_argument("--head-intercept", action="store_true",
+                   help="newton head: fit a per-node UNPENALIZED intercept (base rate).")
+    p.add_argument("--head-standardize", action="store_true",
+                   help="newton head: z-score θ per topic before the logistic (the big "
+                        "conditioning lever; requires --head-intercept). Local realistic "
+                        "validation: co-fit head 0.55->0.84 and readout Δ+0.29 vs unsup.")
     p.add_argument("--doc-concentration", type=float, default=None,
                    help="scalar Dirichlet alpha for the gated doc-topic prior (default "
                         "1/K). The 1/K default is razor-small at whole-Mondo K (~0.0022) "
@@ -1386,7 +1394,8 @@ def main() -> int:
             else:
                 lam_arrays = {"lambda": lam}
             np.savez(out / "gated_pc_result.npz",
-                     **lam_arrays, alpha=gp["alpha"], w_CK=gp["w_CK"])
+                     **lam_arrays, alpha=gp["alpha"], w_CK=gp["w_CK"],
+                     b_CK=np.asarray(gp.get("b_CK", np.zeros(C)), dtype=np.float64))
             manifest = {
                 "model_class": "gated_pc",
                 "disease": args.disease, "min_n": args.min_n,

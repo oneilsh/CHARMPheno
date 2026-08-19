@@ -827,6 +827,10 @@ def build_gated_pc_args(
         args.append("--with-dag-head")
     if effective.get("localize_head"):
         args.append("--localize-head")
+    if effective.get("head_intercept"):
+        args.append("--head-intercept")
+    if effective.get("head_standardize"):
+        args.append("--head-standardize")
     if effective.get("diag_only"):
         args.append("--diag-only")
     if effective.get("doc_concentration") is not None:

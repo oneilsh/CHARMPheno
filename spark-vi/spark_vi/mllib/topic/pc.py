@@ -293,6 +293,17 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "Distinct from lambdaW (the 'sgd' head's ridge).",
         typeConverter=TypeConverters.toFloat,
     )
+    headIntercept = Param(
+        Params._dummy(), "headIntercept",
+        "newton head: fit a per-node UNPENALIZED intercept (base rate). Default False.",
+        typeConverter=TypeConverters.toBoolean,
+    )
+    headStandardize = Param(
+        Params._dummy(), "headStandardize",
+        "newton head: z-score the θ features per topic before the logistic (the big "
+        "conditioning lever — raw θ spans Σλ 1e2..1e6). Requires headIntercept. False.",
+        typeConverter=TypeConverters.toBoolean,
+    )
     # -- Topic-side DAG gate (Gated-PC composition; ADR 0042) ---------------
     gateParent = Param(
         Params._dummy(), "gateParent",
@@ -535,6 +546,8 @@ def _build_model_and_config(
         head_lr=float(estimator.getOrDefault("headLr")),
         head_newton_ridge=float(estimator.getOrDefault("headNewtonRidge")),
         head_l2=float(estimator.getOrDefault("headL2")),
+        head_intercept=bool(estimator.getOrDefault("headIntercept")),
+        head_standardize=bool(estimator.getOrDefault("headStandardize")),
         alpha=alpha,
         eta=eta,
         optimize_alpha=estimator.getOrDefault("optimizeDocConcentration"),
@@ -568,7 +581,8 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     numLabels=1, weightY=0.0, probabilityCol="probability",
     lambdaW=0.001, gradCaviIters=20, headLrScale=1.0, topicTrust=0.1,
     weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, headNewtonRidge=0.01,
-    headL2=1e-3, closureParents="", warmStartFrom="",
+    headL2=1e-3, headIntercept=False, headStandardize=False,
+    closureParents="", warmStartFrom="",
     gateParent="", gateNBg=2, gateTpn=1, localizeHead=False, frontierCol="frontier",
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
 )
@@ -615,6 +629,8 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         headLr: float = 0.05,
         headNewtonRidge: float = 0.01,
         headL2: float = 1e-3,
+        headIntercept: bool = False,
+        headStandardize: bool = False,
         closureParents: str = "",
         gateParent: str = "",
         gateNBg: int = 2,
@@ -976,6 +992,10 @@ class OnlinePCLDAModel(_OnlinePCLDAParams, _PersistableModel, Model):
             from spark_vi.models.topic.pc import _predict_proba_np
             w_CK = self._result.global_params["w_CK"]
             wbcast = sc.broadcast(w_CK)
+            # Per-node intercept (head_intercept). Zeros when off, so the prediction is
+            # unchanged for legacy heads.
+            b_CK = self._result.global_params.get("b_CK")
+            bbcast = sc.broadcast(None if b_CK is None else np.asarray(b_CK, np.float64))
             # DAG-closure head -> broadcast its (C,C) closure matrix so the per-label
             # probability is the closure PRODUCT P(node_l), not the flat sigmoid. Flat
             # head -> None. We broadcast arrays only (never the head object, whose
@@ -987,9 +1007,9 @@ class OnlinePCLDAModel(_OnlinePCLDAParams, _PersistableModel, Model):
                 closure_matrix = DagClosureHead(json.loads(closure_raw))._closure_matrix
             mbcast = sc.broadcast(closure_matrix)
 
-            def _proba(theta, _wb=wbcast, _mb=mbcast):
+            def _proba(theta, _wb=wbcast, _mb=mbcast, _bb=bbcast):
                 th = np.asarray(theta.toArray(), dtype=np.float64)
-                return DenseVector(_predict_proba_np(th, _wb.value, _mb.value))
+                return DenseVector(_predict_proba_np(th, _wb.value, _mb.value, _bb.value))
 
             proba_udf = F.udf(_proba, returnType=VectorUDT())
             prob_col = self.getOrDefault("probabilityCol")
