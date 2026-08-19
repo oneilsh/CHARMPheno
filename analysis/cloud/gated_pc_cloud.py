@@ -156,7 +156,19 @@ def readout_from_proba(proba, y_te, m_te, C, *, recall_targets, fdr_targets,
     ranking = _bundle_masked(proba, y_te, m_te, C, min_count)
     pr = pr_readout(proba, y_te, m_te, C, recall_targets, fdr_targets, min_count)
     det = detection_readout(proba, y_te, recall_targets)
-    return {"ranking": ranking["macro"], "pr": pr["macro"], "detection": det}
+    # Per-node (auc, n_pos) kept alongside the macro so the HEADLINE can split the
+    # gated_pc-vs-unsup delta by node RARITY (insight 0066: PC's promised edge is the
+    # hidden low-mass tail; a flat macro can hide it). auc from the ranking per_label
+    # (skipped=None == scored), n_pos (test positives) from the PR per_node.
+    per_node = {}
+    for c in range(C):
+        rl = ranking["per_label"].get(c, {})
+        if rl.get("skipped") is None and rl.get("auc") is not None:
+            per_node[c] = {"auc": float(rl["auc"]),
+                           "ap": (None if rl.get("ap") is None else float(rl["ap"])),
+                           "n_pos": int(pr["per_node"].get(c, {}).get("n_pos", 0))}
+    return {"ranking": ranking["macro"], "pr": pr["macro"], "detection": det,
+            "per_node": per_node}
 
 
 def score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, *, recall_targets,
@@ -455,6 +467,29 @@ def _print_headline(results):
     print(f"[driver]     detection AP       {_d(_det(g, 'ap'), _det(u, 'ap'))}", flush=True)
     print("[driver]     (PC should help in the hidden-low-mass regime — insight 0066; "
           "AP/P@R are the honest case-finding read — insight 0064.)", flush=True)
+
+    # RARITY SPLIT (insight 0066 direct test): does supervision help the LOW-POSITIVE
+    # nodes, even if the macro over all nodes is flat? Split the per-node AUC/AP by test
+    # positive count at the median (nodes scored in BOTH arms), macro each half.
+    gpn, upn = g.get("per_node") or {}, u.get("per_node") or {}
+    both = sorted(set(gpn) & set(upn), key=lambda c: gpn[c]["n_pos"])
+    if len(both) >= 6:
+        npos = sorted(gpn[c]["n_pos"] for c in both)
+        thr = npos[len(npos) // 2]                       # median test-positive count
+        rare = [c for c in both if gpn[c]["n_pos"] < thr]
+        common = [c for c in both if gpn[c]["n_pos"] >= thr]
+
+        def _mac(nodes, arm_pn, key):
+            v = [arm_pn[c][key] for c in nodes if arm_pn[c].get(key) is not None]
+            return float(np.mean(v)) if v else None
+        print(f"[driver]   RARITY SPLIT (median test +ct={thr}; "
+              f"rare n={len(rare)} vs common n={len(common)} of {len(both)} shared nodes):",
+              flush=True)
+        for lbl, nodes in (("rare ", rare), ("commn", common)):
+            print(f"[driver]     {lbl} AUC {_d(_mac(nodes, gpn, 'auc'), _mac(nodes, upn, 'auc'))}"
+                  f"   AP {_d(_mac(nodes, gpn, 'ap'), _mac(nodes, upn, 'ap'))}", flush=True)
+        print("[driver]     (a POSITIVE rare-node delta = PC rescues the low-mass tail; "
+              "flat/negative = the gate already serves it.)", flush=True)
 
     # Conditional 'sharpening' comparison: does supervision improve P(child|parent)
     # — the clinical subtyping task — over the unsupervised twin? Mean over edges.

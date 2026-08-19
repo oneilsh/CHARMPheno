@@ -102,4 +102,24 @@ make -C analysis/cloud report ID=97
 
 ## Run log
 
-_(pending first run)_
+**2026-08-19 — STABLE + STRONG readout, but PC shaping ~NEUTRAL vs the gated baseline.**
+
+Deliverable (pc_topics_lr, 175 nodes): macro AUC **0.7424**, well-calibrated (pooled ECE
+0.006, conditional calibrated 0.0027); conditional cond_AUC 0.79 (depth 1-2) to 0.70-0.75
+deeper. A real, stable, calibrated hierarchical case-finding model at full population x
+full cardiovascular subtree.
+
+HEADLINE gated_pc vs unsup_gated: AUC 0.7424 vs 0.7410 (Δ+0.0013), AP 0.5448 vs 0.5407
+(Δ+0.0040), multiclass top1 0.8274 vs 0.8198 (Δ+0.0076). Shaping is ALIVE (corr peaked
+~1.2%) but too gentle at weight_y=2 to move a readout the unsup GATE already does well.
+Per-depth deltas are noise (±0.01), including deep/rare nodes -> no hidden rare-node win
+in the depth proxy. Structural read: the GATE aligns topics to labels WITHOUT supervision
+(unsup already 0.741), so PC's marginal room on this contrast is small by construction.
+
+Co-fit head 0.561 (still the head-formulation gap: ladder co-fit 0.561 -> +convergence
+0.615 -> +intercept 0.650 -> oracle 0.697 -> full-K 0.742). Head |w| bounded at 1.79
+(per-doc-mean held over 100 minibatched iters). FLAG: 2 infs + an ELBO transient to
+-6.76e27 (recovered; |w| stayed bounded) — 10% minibatch noise; watch at higher weight_y.
+
+Next: exp 0098 (weight_y up) — now auto-prints the per-node RARITY SPLIT so the same run
+tests both "does more shaping lift the macro" and "does it help the low-positive tail".
