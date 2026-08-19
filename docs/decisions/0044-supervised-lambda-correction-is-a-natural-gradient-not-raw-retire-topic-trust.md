@@ -1,7 +1,14 @@
 # ADR 0044 — The supervised λ-correction is a NATURAL gradient (not a raw-gradient step); retire `topic_trust`
 
 **Date:** 2026-08-18
-**Status:** Accepted
+**Status:** Accepted, but REFINED by ADR 0045. The natural-gradient direction here is
+correct and retained, but this ADR's claims that (a) the RM ρ step-damping bounds the
+correction so no trust clip is needed and (b) the correction can be an additive step off
+`lam_unsup` are BOTH superseded: at large `weight_y` the additive step drains topic mass
+and detonates the ELBO (insight 0073 / exp 0098). ADR 0045 replaces the additive step with
+an exponentiated-gradient, mass-preserving one (`weight_y` bounded by construction). This
+ADR also predates the discovery that the correction VANISHING at scale (its subject) was
+only ONE of three serial scale bugs — see insight 0073.
 **Context:** insight 0072 (root cause + numerical confirmation); exps 0090/0091 (the
 neutral-PC symptom at whole-population scale).
 
