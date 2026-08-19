@@ -340,6 +340,49 @@ def _supervised_head_hessian(
     return H
 
 
+def _head_irls_stats(topics_repr, w_CK, b_CK, rows, alpha_vec, K, n_iters, sup_pad):
+    """Bias-AWARE IRLS gradient + Fisher over the AUGMENTED feature ``[θ_support, 1]``,
+    plus per-topic θ moments — the machinery the intercept + standardization newton head
+    needs (head-formulation ladder / sklearn parity). p is ``σ(w_c·θ + b_c)`` (the current
+    intercept is folded in, unlike ``_supervised_head_hessian`` which assumes b=0), so the
+    Newton step is a valid IRLS step for BOTH w and b. Localized: node c's ``w_CK[c]`` is 0
+    off its support, so ``w_CK @ θ`` already equals the support dot; the emitted blocks are
+    over ``sup_pad`` (the (C, S) padded support index) with a constant column appended for
+    the intercept. Returns:
+      g_aug   (C, S+1)      = Σ_d obs·(p−y)·[θ_sup, 1]
+      H_aug   (C, S+1, S+1) = Σ_d obs·p(1−p)·[θ_sup,1][θ_sup,1]ᵀ
+      m1 (K,), m2 (K,), n  = Σθ_k, Σθ_k², #docs  (for per-topic std σ_k, standardization).
+    All plain-numpy additive sums (aggregate via the default combine_stats)."""
+    C = w_CK.shape[0]
+    S = sup_pad.shape[1]
+    w = np.asarray(w_CK, dtype=np.float64)
+    b = np.asarray(b_CK, dtype=np.float64)
+    g = np.zeros((C, S + 1), dtype=np.float64)
+    H = np.zeros((C, S + 1, S + 1), dtype=np.float64)
+    m1 = np.zeros(K, dtype=np.float64)
+    m2 = np.zeros(K, dtype=np.float64)
+    n = 0.0
+    for doc in rows:
+        obs = np.asarray(doc.label_mask, dtype=np.float64)
+        if obs.sum() == 0.0:
+            continue
+        y = (np.asarray(doc.y, dtype=np.float64) > 0.5).astype(np.float64)   # {0,1}
+        theta = _cavi_theta_anp(
+            topics_repr[:, doc.indices], np.asarray(doc.counts, dtype=np.float64),
+            alpha_vec, K, n_iters)                             # (K,)
+        z = np.clip(w @ theta + b, -50.0, 50.0)                # (C,) bias-aware logit
+        p = 1.0 / (1.0 + np.exp(-z))
+        resid = obs * (p - y)                                  # (C,)
+        wt = obs * p * (1.0 - p)                               # (C,)
+        aug = np.concatenate([theta[sup_pad], np.ones((C, 1))], axis=1)   # (C, S+1)
+        g += resid[:, None] * aug
+        H += wt[:, None, None] * (aug[:, :, None] * aug[:, None, :])
+        m1 += theta
+        m2 += theta * theta
+        n += 1.0
+    return g, H, m1, m2, n
+
+
 # ---------------------------------------------------------------------------
 # Supervised-head seam. The head FLAVOR is a single per-doc loss ``per_doc_nll``;
 # the batch gradient accumulation, the digamma-Jacobian topic transform
@@ -685,6 +728,8 @@ class OnlinePCLDA(VIModel):
         head_lr: float = 0.05,
         head_newton_ridge: float = 1e-2,
         head_l2: float = 1e-3,
+        head_intercept: bool = False,
+        head_standardize: bool = False,
         topic_support: "list[np.ndarray] | None" = None,
         alpha: float | np.ndarray | None = None,
         eta: float | None = None,
@@ -810,6 +855,13 @@ class OnlinePCLDA(VIModel):
         # 0.91-0.96). 0.0 disables it -> relative-ridge-only, which BLOWS UP on the
         # separable topics PC creates (|w|=3.4e11) — only set 0.0 to reproduce that.
         self.head_l2 = float(head_l2)
+        # Newton-head structural fixes (ADR 0045 follow-up): an UNPENALIZED per-node
+        # intercept, and per-topic STANDARDIZATION of the θ features (z-score). Both are
+        # things a plain sklearn LogisticRegression does for free; the co-fit head omitted
+        # them and lost ~0.18 AUC vs sklearn-on-support (the head-formulation ladder). Off
+        # by default (byte-for-byte back-compat).
+        self.head_intercept = bool(head_intercept)
+        self.head_standardize = bool(head_standardize)
         # LOCALIZED head (topic-side hierarchy in the HEAD's support, ADR 0042 done
         # right): per-node topic support — node c's logistic reads ONLY topic_support[c]
         # (its gated block + ancestors' blocks + background, e.g. DagLayout.allowed(c)),
@@ -893,6 +945,11 @@ class OnlinePCLDA(VIModel):
         """
         gp = self._lda.initialize_global(data_summary)
         gp["w_CK"] = np.zeros((self.C, self.K), dtype=np.float64)
+        # Per-node UNPENALIZED intercept (bias) for the newton head; zeros = off. Lets a
+        # node set its base rate without spending ridge-penalized topic weight on it —
+        # matters for rare nodes and the localized head (whose support subset of θ does
+        # NOT sum to 1, so there is no implicit intercept). Used only when head_intercept.
+        gp["b_CK"] = np.zeros(self.C, dtype=np.float64)
         return gp
 
     def _expElogbeta_from_lambda(self, lam) -> np.ndarray:
@@ -1021,6 +1078,23 @@ class OnlinePCLDA(VIModel):
                 sup_pad=self._sup_pad)
             if hess is not None:
                 stats["head_hess_stat"] = hess
+            # INTERCEPT / STANDARDIZATION newton head (head-formulation ladder): emit the
+            # bias-aware augmented IRLS grad+Fisher over [θ_support, 1] and the per-topic θ
+            # moments. Only when localized (sup_pad present) and head_intercept — the flat
+            # (non-localized) intercept path is not wired (the Mondo case-finding head is
+            # localized). p folds in the current b_CK, so update_global's augmented solve
+            # is a valid IRLS step for (w, b).
+            if self.head_intercept and self._sup_pad is not None:
+                b_CK = np.asarray(global_params.get(
+                    "b_CK", np.zeros(self.C)), dtype=np.float64)
+                g_aug, H_aug, m1, m2, n_h = _head_irls_stats(
+                    expElogbeta, w_CK, b_CK, rows, alpha_vec, self.K,
+                    self.grad_cavi_iters, self._sup_pad)
+                stats["head_irls_grad_stat"] = g_aug
+                stats["head_irls_hess_stat"] = H_aug
+                stats["theta_m1_stat"] = m1
+                stats["theta_m2_stat"] = m2
+                stats["head_n_stat"] = np.array(n_h, dtype=np.float64)
         return stats
 
     def update_global(
@@ -1073,6 +1147,10 @@ class OnlinePCLDA(VIModel):
         and ``weight_y_warmup_iters`` further decouple the head from ρ_t if needed.
         """
         new_gp = self._lda.update_global(global_params, target_stats, learning_rate)
+        # Carry the intercept across every return path (the LDA delegate's update drops
+        # it); the intercept newton branch below overwrites it when active.
+        new_gp["b_CK"] = np.asarray(
+            global_params.get("b_CK", np.zeros(self.C)), dtype=np.float64)
 
         if self.weight_y == 0.0:
             # Head unchanged at weight_y == 0 (stays at its zero seed).
@@ -1162,6 +1240,54 @@ class OnlinePCLDA(VIModel):
         #              needs no raw θ on the driver. This also feeds the topic correction
         #              a VALID head signal each iter (the correction's ∂loss_y/∂θ flows
         #              through w_CK).
+
+        if (self.head_optimizer == "newton" and self.head_intercept
+                and "head_irls_hess_stat" in target_stats):
+            # INTERCEPT (+ optional STANDARDIZATION) ridge-Newton over the augmented
+            # feature [θ_support, 1] (head-formulation ladder / sklearn parity). The
+            # bias-aware IRLS grad+Fisher come from _head_irls_stats. STANDARDIZATION =
+            # z-score the θ features (per-topic σ from the θ moments): fit in z-space
+            # (scale features by 1/σ), ridge the standardized topic weights, leave the
+            # intercept UNPENALIZED, then map w back to raw space (w_raw = w_z/σ). Per-doc
+            # mean (÷ head_n) keeps head_l2 corpus-invariant (ADR 0045).
+            n_h = float(target_stats.get("head_n_stat", np.array(1.0)))
+            inv_h = 1.0 / max(n_h, 1.0)
+            g_aug = np.asarray(target_stats["head_irls_grad_stat"], np.float64) * inv_h
+            H_aug = np.asarray(target_stats["head_irls_hess_stat"], np.float64) * inv_h
+            if self.head_standardize:
+                m1 = np.asarray(target_stats["theta_m1_stat"], np.float64) * inv_h
+                m2 = np.asarray(target_stats["theta_m2_stat"], np.float64) * inv_h
+                sig_all = np.sqrt(np.maximum(m2 - m1 * m1, 1e-12))          # (K,) per-topic std
+            else:
+                sig_all = np.ones(self.K, dtype=np.float64)
+            new_w = w_CK.copy()
+            new_b = np.asarray(new_gp["b_CK"], dtype=np.float64).copy()
+            for c in range(self.C):
+                sup = self._topic_support[c]
+                d = len(sup)
+                d1 = d + 1
+                Hc = H_aug[c][:d1, :d1]
+                gc = g_aug[c][:d1]
+                sig = sig_all[sup]                                         # (d,)
+                scale = np.concatenate([1.0 / sig, [1.0]])                 # feature→z; bias unscaled
+                Hz = Hc * (scale[:, None] * scale[None, :])                # standardized Fisher
+                gz = gc * scale
+                wz = np.concatenate([w_CK[c, sup] * sig, [new_b[c]]])      # current params in z-space
+                rel = self.head_newton_ridge * (float(np.trace(Hz[:d, :d])) / max(d, 1))
+                rdiag = np.full(d1, self.head_l2 + rel + 1e-10)
+                rdiag[d] = 0.0                                             # intercept UNPENALIZED
+                A = Hz + np.diag(rdiag)
+                rhs = gz + rdiag * wz
+                try:
+                    delta = np.linalg.solve(A, rhs)
+                except np.linalg.LinAlgError:
+                    delta = np.linalg.lstsq(A, rhs, rcond=None)[0]
+                wz_new = wz - self.head_lr * delta
+                new_w[c, sup] = wz_new[:d] / sig                           # z → raw
+                new_b[c] = wz_new[d]
+            new_gp["w_CK"] = new_w
+            new_gp["b_CK"] = new_b
+            return new_gp
 
         if self.head_optimizer == "newton" and "head_hess_stat" in target_stats:
             # Per-label ridge-Newton: w_c ← w_c − head_lr · (H_c + λI)⁻¹ (g_c + λ w_c).
