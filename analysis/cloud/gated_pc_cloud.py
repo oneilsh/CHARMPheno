@@ -885,11 +885,13 @@ def parse_args(argv=None):
                    help="LOCALIZED head: each node's logistic reads only its topic "
                         "support (gated block + ancestors), not all K — the whole-Mondo "
                         "scale fix (insight 0071). Only affects newton head.")
-    p.add_argument("--head-support", choices=["siblings", "path_cousins"],
+    p.add_argument("--head-support",
+                   choices=["siblings", "path_cousins", "path_cousins_kids"],
                    default="siblings",
                    help="localized-head support neighborhood: 'siblings' (closure + immediate "
-                        "siblings, default) or 'path_cousins' (also the siblings of every "
-                        "ancestor on the root-path). Both bounded; exact Newton kept.")
+                        "siblings, default); 'path_cousins' (also the siblings of every ancestor "
+                        "on the root-path); 'path_cousins_kids' (also v's own children's blocks, "
+                        "the subtype signal). All bounded; exact Newton kept.")
     p.add_argument("--dag-source", choices=["snomed", "mondo"], default="snomed",
                    help="snomed (default): the disease's SNOMED anchor forest via "
                         "concept_ancestor. mondo: the whole-Mondo powered hierarchy "

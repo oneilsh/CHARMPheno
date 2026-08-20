@@ -124,6 +124,18 @@ class DagLayout:
                         al.update(self.block[sib])
         return np.array(sorted(al), dtype=int)
 
+    def allowed_with_path_cousins_kids(self, v):
+        """`allowed_with_path_cousins(v)` PLUS v's OWN children's blocks — the subtype signal.
+        A patient coded at a subtype of v is v-positive, and its subtype-specific topics predict
+        v, so the head reading v's children's blocks captures that. Immediate children only
+        (bounded by fan-out); deeper descendants' signal already reaches v's block via the
+        closure gate. Still O(depth*fan-out) << K — exact Newton kept."""
+        al = set(int(k) for k in self.allowed_with_path_cousins(v))
+        for ch in self.children.get(v, []):
+            if ch != 0:
+                al.update(self.block[ch])
+        return np.array(sorted(al), dtype=int)
+
     def cost_report(self, C, *, vocab_size=None, localized=True):
         """PRE-FLIGHT size/cost profile for a gated-PC fit over this layout — logged at
         the data-build boundary so a big (e.g. whole-Mondo) fit's cost is visible BEFORE
