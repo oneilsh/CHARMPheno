@@ -129,4 +129,21 @@ make -C analysis/cloud report ID=101
 ```
 
 ## Run log
-_(pending first run)_
+
+**2026-08-20 — HIT the O(C·K²) Hessian-collect wall (the predicted distributed bottleneck).**
+The gated_pc fit itself finished (421s), but the run aborted collecting the head statistics:
+`Total size of serialized results of 6 tasks (4.3 GiB) is bigger than spark.driver.maxResultSize
+(4.0 GiB)`. This is exactly the full-K exact-Newton cost: the per-node head Hessian sufficient
+statistic is `(C, K+1, K+1)` = 437×445²×8B ≈ 692 MB, treeAggregated across 6 partial-aggregate
+tasks ≈ 4.3 GiB > the 4 GiB driver cap.
+
+- **CV-scale band-aid (diagnostic only):**
+  `CHARM_DRIVER_MEMORY=16g CHARM_SPARK_CONF='spark.locality.wait=0s spark.driver.maxResultSize=12g' make -C analysis/cloud exp ID=101`
+  This does NOT scale: at whole-Mondo (K≈3,800) the same stat is ~400 GB.
+
+- **Conclusion / pivot:** full-K is the best *estimator* (readout 0.706 / head 0.742 per 0097/0099),
+  but a literal full-K *co-fit shaping head* is not shuffleable and never will be at scale. The
+  production path is **MI-selected bounded support**: per node, the top-m most-predictive topics
+  (incl. the out-of-closure comorbidity topics the localized head misses — the ~0.07 loss), giving
+  full-K-quality shaping at an O(C·m²) stat that fits. Superseded as a production candidate by that;
+  keep 0101 (with the band-aid) only as a diagnostic that full-K *quality* helps shaping.
