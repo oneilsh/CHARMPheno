@@ -18,9 +18,14 @@ What this module supplies (plan §Design steps 1–3), and nothing else:
     heads from ONE data pass. This is the plan's key structural claim — on FROZEN
     θ the C per-node problems are independent K-dim convex fits that SHARE every
     data pass, so one pass replaces C separate Spark ML jobs.
+  * `_lean_eval_kernel` — plan §2.1's LEAN driver collect: per doc, the dense
+    float32 P(node) row plus the label/mask as INDEX lists, so the whole existing
+    driver eval stack runs unchanged on ~6 bytes/cell instead of the driver path's
+    24 (θ float64 + label/mask float64).
   * `score_cells_df` / `per_node_metric_rows` — plan §3's exact distributed eval:
     explode only the observed `(node, y, p)` cells (16 bytes/cell, not a K-wide
     feature row) and `groupBy(node)`; the driver receives (C,)-sized metric tables.
+    The ESCAPE HATCH for when D_te x C outgrows the driver, not the default path.
 
 **Layering / what this module deliberately does NOT know.** The solver and the
 standardized↔raw fold live in `analysis/pc/batched_lr.py` (Package A). This module
@@ -212,6 +217,79 @@ def _score_cells_kernel(rows, V, b_raw, C):
             yield int(obs[j]), float(y[j]), float(p[j])
 
 
+def _lean_eval_kernel(rows, C, V=None, b_raw=None):
+    """Pack one partition of scored docs into the LEAN eval block (plan §3, v2.1).
+
+    `rows` is an iterable of `(doc_id, score, label (C,), mask (C,))`, where `score`
+    is the raw θ (K,) when `(V, b_raw)` are given — then `p = σ(clip(V·θ + b_raw))`,
+    the same arithmetic as `_score_cells_kernel` — or an ALREADY-computed per-doc
+    (C,) probability when `V is None` (the co-fit head's `probability` column, which
+    needs the same lean treatment but no fit).
+
+    Returns ONE block per partition, not one record per row:
+
+        `(ids (n,) int64, P (n,C) float32, y_idx int32, y_ptr (n+1,) int64,
+          m_idx int32 | None, m_ptr (n+1,) int64 | None)`
+
+    Three things about that shape are load-bearing for the plan's driver budget:
+
+      * **float32 p, index-list y/mask.** The driver eval needs the FULL (D_te,C)
+        probability matrix (`detection_readout` takes a per-doc max over all nodes,
+        `conditional_readout` scores against an all-ones mask), so p cannot be
+        sparsified — but float32 halves it, and its ~1e-7 resolution is orders below
+        the ~5e-4 solver-vs-sklearn disagreement the A/B gate measures. `label`/
+        `labelMask` ARE sparse (closure membership), so they travel as indices and
+        densify into uint8 on the driver: 6 bytes/cell all in, vs the 24 the driver
+        path pays for float64 label+mask alone.
+      * **One block per partition, not one record per row.** A per-row record would
+        add ~100 bytes of Python object overhead per doc and pickle C floats
+        individually; a stacked numpy block pickles as one buffer and lets the driver
+        `del` each partition's memory as it densifies it.
+      * **`m_idx is None` = "every cell observed".** `--label-mask-mode full` (the
+        default) makes the mask all-ones for every doc, where an index list would be
+        C int32s per row — larger than the float32 probabilities it accompanies.
+
+    Rows are emitted in partition order and carry `doc_id`, so the driver can align
+    two independently collected paths (the A/B equality gate) without a shuffle.
+    """
+    C = int(C)
+    if V is not None:
+        V = np.asarray(V, dtype=np.float64)
+        b_raw = np.asarray(b_raw, dtype=np.float64)
+    ids, P = [], []
+    y_parts, y_ptr = [], [0]
+    m_parts, m_ptr = [], [0]
+    for doc_id, score, label, mask in rows:
+        if V is None:
+            p = np.asarray(score, dtype=np.float32)
+        else:
+            z = np.clip(V @ score + b_raw, -_SCORE_CLIP, _SCORE_CLIP)
+            p = (1.0 / (1.0 + np.exp(-z))).astype(np.float32)
+        ids.append(doc_id)
+        P.append(p)
+        yi = np.flatnonzero(label).astype(np.int32)
+        y_parts.append(yi)
+        y_ptr.append(y_ptr[-1] + int(yi.size))
+        # Dense rows keep a `None` placeholder rather than an arange, so the
+        # all-ones-mask case never materializes n*C indices in executor memory.
+        nnz = int(np.count_nonzero(mask))
+        mi = None if nnz == C else np.flatnonzero(mask).astype(np.int32)
+        m_parts.append(mi)
+        m_ptr.append(m_ptr[-1] + nnz)
+    n = len(ids)
+    P = np.stack(P) if P else np.zeros((0, C), dtype=np.float32)
+    y_idx = (np.concatenate(y_parts) if y_parts
+             else np.zeros(0, dtype=np.int32)).astype(np.int32, copy=False)
+    if all(mi is None for mi in m_parts):
+        m_idx, m_ptr_arr = None, None           # every doc observes every node
+    else:
+        dense = np.arange(C, dtype=np.int32)
+        m_idx = np.concatenate([dense if mi is None else mi for mi in m_parts])
+        m_ptr_arr = np.asarray(m_ptr, dtype=np.int64)
+    return (np.asarray(ids, dtype=np.int64).reshape(n),
+            P, y_idx, np.asarray(y_ptr, dtype=np.int64), m_idx, m_ptr_arr)
+
+
 def moments_to_mu_sd(sum_theta, sum_theta_sq, n_obs, *, eps=1e-12):
     """Reduce accumulated moments to `(mu (C,K), sd (C,K))`, population (ddof=0).
 
@@ -273,6 +351,17 @@ def _row_triples(rows, topic_col, label_col, mask_col):
         yield (_to_array(row[topic_col]),
                _to_array(row[label_col]),
                _to_array(row[mask_col]))
+
+
+def _row_quads(rows, id_col, score_col, label_col, mask_col):
+    """Stream `(doc_id, score, label, mask)` off Spark Rows for `_lean_eval_kernel`.
+
+    `score_col` is θ or an already-computed probability vector depending on the
+    caller; both arrive as Spark ML Vectors, so the same `_to_array` serves.
+    """
+    for row in rows:
+        yield (row[id_col], _to_array(row[score_col]),
+               _to_array(row[label_col]), _to_array(row[mask_col]))
 
 
 def _pack_partition(rows, topic_col, label_col, mask_col):
