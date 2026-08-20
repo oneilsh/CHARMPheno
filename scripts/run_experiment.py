@@ -1063,10 +1063,15 @@ def _apply_dev_profile(effective: dict) -> dict:
     dev["max_iter"] = min(int(effective.get("max_iter", 100)), 30)
     dev["weight_y_warmup_iters"] = min(int(effective.get("weight_y_warmup_iters", 0) or 0), 8)
     dev["grad_cavi_iters"] = min(int(effective.get("grad_cavi_iters", 20)), 10)
+    # the unsup_gated / baseline twin has its OWN iter budget; cut it too or it runs full
+    bmi = int(effective.get("baseline_max_iter", -1) or -1)
+    if bmi > 0:
+        dev["baseline_max_iter"] = min(bmi, 30)
     print(f"[run-exp] CHARM_DEV: dev profile — max_iter={dev['max_iter']}, "
           f"weight_y_warmup_iters={dev['weight_y_warmup_iters']}, "
-          f"grad_cavi_iters={dev['grad_cavi_iters']} (fast RANKING loop, NOT final numbers)",
-          flush=True)
+          f"grad_cavi_iters={dev['grad_cavi_iters']}, "
+          f"baseline_max_iter={dev.get('baseline_max_iter', effective.get('baseline_max_iter'))} "
+          f"(fast RANKING loop, NOT final numbers)", flush=True)
     return dev
 
 

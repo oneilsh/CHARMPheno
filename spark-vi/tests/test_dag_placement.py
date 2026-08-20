@@ -202,6 +202,11 @@ def test_daglayout_path_cousins_widens_contrast_set():
     ds = set(int(k) for k in d.allowed_with_siblings(4))
     dp = set(int(k) for k in d.allowed_with_path_cousins(4))
     assert ds <= dp and len(dp) <= d.K
+    # +kids adds v's OWN children's blocks (node 1 has children 3,4); superset of path_cousins
+    pck = set(int(k) for k in lay.allowed_with_path_cousins_kids(1))
+    assert set(int(k) for k in lay.allowed_with_path_cousins(1)) <= pck
+    assert set(lay.block[3]) <= pck and set(lay.block[4]) <= pck   # node 1's children
+    assert len(pck) <= lay.K
 
 
 def test_daglayout_singleparent_backward_compat():

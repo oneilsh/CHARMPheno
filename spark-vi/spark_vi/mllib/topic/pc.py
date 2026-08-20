@@ -536,8 +536,11 @@ def _build_model_and_config(
         if bool(estimator.getOrDefault("localizeHead")):
             C = int(estimator.getOrDefault("numLabels"))
             hs = str(estimator.getOrDefault("headSupport"))
-            build = (lay.allowed_with_path_cousins if hs == "path_cousins"
-                     else lay.allowed_with_siblings)
+            build = {
+                "siblings": lay.allowed_with_siblings,
+                "path_cousins": lay.allowed_with_path_cousins,
+                "path_cousins_kids": lay.allowed_with_path_cousins_kids,
+            }.get(hs, lay.allowed_with_siblings)
             topic_support = [build(c) for c in range(C)]
     elif domains is not None:
         raise ValueError(

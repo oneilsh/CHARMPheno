@@ -22,7 +22,7 @@ mondo_cache_dir: data/mondo
 extra_domains: measurement,drug
 label_mask_mode: closure
 localize_head: true
-head_support: path_cousins
+head_support: path_cousins_kids
 head_intercept: true
 head_standardize: true
 doc_concentration: 0.5
@@ -117,4 +117,17 @@ make -C analysis/cloud report ID=102
 ```
 
 ## Run log
-_(pending first run)_
+
+**2026-08-20 — path_cousins INSUFFICIENT; iterating to +children (path_cousins_kids).**
+Head-formulation ladder (frozen θ, localized=path_cousins support): localized ceiling
+(sklearn oracle, intercept+standardized) = **0.625** vs **full-K readout = 0.684**. The gap
+barely moved from 0099's siblings-only (0.635 vs 0.706 → 0.071) to path_cousins (0.059) — so
+widening the contrast set UP the tree recovered almost none of the localization loss. The
+missing ~0.06 is not in the DAG neighborhood (siblings or path-cousins). Feasible & fast: 30s/iter,
+no collect wall. Stability note: at weight_y=16 the path_cousins head over-drove near the end
+(corr_relΔλ=0.137, ‖grad_y‖→9.6e14, ELBO −137M→−210M last iter) — flag for a weight_y/trust pass.
+DEV confirmed working (supervised fit ran 30 iters; unsup twin ran 100 because baseline_max_iter
+wasn't cut — now fixed). readout (dev, 30 iter): gated_pc pc_topics_lr macro AUC 0.684.
+→ Now testing head_support=path_cousins_kids (adds v's children's blocks, the subtype signal) to
+see if in-subtree descendant signal helps where up-tree cousins did not. If still ~0.625 ceiling,
+the gap is out-of-neighborhood comorbidity → MI-selected support (in progress).
