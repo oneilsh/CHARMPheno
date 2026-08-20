@@ -1044,6 +1044,32 @@ SPARK_SUBMIT_FLAGS = [
 ]
 
 
+def _apply_dev_profile(effective: dict) -> dict:
+    """CHARM_DEV=1: shrink the SVI fit to a fast DEV-LOOP signal (ranking, not final numbers).
+
+    A run is NOT an experiment: iterate on ONE exp doc with ``CHARM_DEV=1`` for the fast
+    ranking loop, then a single ``CHARM_DEV=0`` (default) run for the record — no throwaway
+    exp docs per attempt. Touches ONLY iteration counts, never the data / DAG / vocab, so the
+    co-fit head AUC and readout Δ *ranking* between configs is preserved while wall-clock drops
+    ~3-4x. Warmup is cut in proportion to max_iter (else supervision never ramps in — the
+    warmup↔iters coupling). Only affects pc / gated_pc; uses min() so it only ever SHRINKS.
+    Calibrate once (one config at dev vs full) to confirm the ranking holds before trusting it.
+    """
+    if os.environ.get("CHARM_DEV", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return effective
+    if effective.get("model_class") not in ("pc", "gated_pc"):
+        return effective
+    dev = dict(effective)
+    dev["max_iter"] = min(int(effective.get("max_iter", 100)), 30)
+    dev["weight_y_warmup_iters"] = min(int(effective.get("weight_y_warmup_iters", 0) or 0), 8)
+    dev["grad_cavi_iters"] = min(int(effective.get("grad_cavi_iters", 20)), 10)
+    print(f"[run-exp] CHARM_DEV: dev profile — max_iter={dev['max_iter']}, "
+          f"weight_y_warmup_iters={dev['weight_y_warmup_iters']}, "
+          f"grad_cavi_iters={dev['grad_cavi_iters']} (fast RANKING loop, NOT final numbers)",
+          flush=True)
+    return dev
+
+
 def _driver_memory_for(model_class: str) -> str:
     """Driver memory for the fit spark-submit, overridable via CHARM_DRIVER_MEMORY.
 
@@ -1406,6 +1432,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[run-exp] ERROR: {e}", flush=True)
         return 2
     effective = merge_config(defaults, fm)
+    effective = _apply_dev_profile(effective)
 
     # 2b. --build-covariates-only: dispatch to standalone script and return.
     if args.build_covariates_only:
