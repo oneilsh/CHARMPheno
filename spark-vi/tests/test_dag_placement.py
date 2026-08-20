@@ -187,6 +187,23 @@ def test_daglayout_multiparent_diamond():
         | set(lay.block[4]) | set(lay.block[5])
     assert set(lay.allowed_set({4, 5}).tolist()) == want   # union of closures over the frontier
 
+def test_daglayout_path_cousins_widens_contrast_set():
+    # path_cousins = closure+siblings PLUS the siblings of every ancestor on the root-path.
+    lay = DagLayout(PARENT, n_bg=2, tpn=1)
+    sib = set(int(k) for k in lay.allowed_with_siblings(3))
+    pc = set(int(k) for k in lay.allowed_with_path_cousins(3))
+    assert sib <= pc                                    # superset of closure+siblings
+    # node 3's ancestor 1 has sibling 2 (the "aunt"); path_cousins adds block[2], siblings does not
+    assert set(lay.block[2]) <= pc
+    assert not set(lay.block[2]).issubset(sib)
+    assert 0 in pc and 1 in pc and len(pc) <= lay.K     # bg included, still bounded < dense K
+    # multi-parent DAG: does not crash, stays a superset of the siblings support
+    d = DagLayout(DIAMOND, n_bg=2, tpn=1)
+    ds = set(int(k) for k in d.allowed_with_siblings(4))
+    dp = set(int(k) for k in d.allowed_with_path_cousins(4))
+    assert ds <= dp and len(dp) <= d.K
+
+
 def test_daglayout_singleparent_backward_compat():
     lay = DagLayout(PARENT, n_bg=2, tpn=1)               # scalar-parent map still works
     assert lay.closure(3) == [0, 1, 3]                   # exact old list ordering
