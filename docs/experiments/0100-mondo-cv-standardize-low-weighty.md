@@ -1,7 +1,10 @@
 ---
 id: 100
 slug: mondo-cv-standardize-low-weighty
-status: pending
+status: superseded
+# SUPERSEDED (not run). Premised on "shaping over-drive is the harm, so lower weight_y."
+# The sparse harness refuted that (shaping helped across corr up to 2.0); the lever is the
+# co-fit HEAD quality, not shaping strength. Head-quality work continues in 0102.
 model_class: gated_pc
 cohort: population_mondo_cardiovascular
 cohort_def: population_mondo_cardiovascular

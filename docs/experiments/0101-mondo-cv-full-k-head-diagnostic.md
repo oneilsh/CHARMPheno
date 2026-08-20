@@ -1,7 +1,11 @@
 ---
 id: 101
 slug: mondo-cv-full-k-head-diagnostic
-status: pending
+status: superseded
+# SUPERSEDED. Dense full-K co-fit head is not shuffleable — hit the O(C*K^2) Hessian-collect
+# wall (4.3 GiB > driver cap) and thrashed on preemptible executors (~10 min/iter, near-zero
+# corr: weak AND infeasible). Full-K is the best ESTIMATOR but not a viable co-fit SHAPING
+# head. Replaced by bounded-support + exact Newton (0102 path-cousins; then MI-selection).
 model_class: gated_pc
 cohort: population_mondo_cardiovascular
 cohort_def: population_mondo_cardiovascular
