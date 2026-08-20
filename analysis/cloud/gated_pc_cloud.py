@@ -824,6 +824,7 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
         optimizeDocConcentration=args.optimize_doc_concentration,
         frontierCol="frontier", gateNBg=args.n_bg, gateTpn=args.tpn,
         localizeHead=bool(getattr(args, "localize_head", False)),
+        headSupport=str(getattr(args, "head_support", "siblings")),
     )
     # Multi-domain: feed per-domain feature columns (features_0..) so the gated
     # engine carries a per-domain lambda and the topic correction scatters per
@@ -884,6 +885,11 @@ def parse_args(argv=None):
                    help="LOCALIZED head: each node's logistic reads only its topic "
                         "support (gated block + ancestors), not all K — the whole-Mondo "
                         "scale fix (insight 0071). Only affects newton head.")
+    p.add_argument("--head-support", choices=["siblings", "path_cousins"],
+                   default="siblings",
+                   help="localized-head support neighborhood: 'siblings' (closure + immediate "
+                        "siblings, default) or 'path_cousins' (also the siblings of every "
+                        "ancestor on the root-path). Both bounded; exact Newton kept.")
     p.add_argument("--dag-source", choices=["snomed", "mondo"], default="snomed",
                    help="snomed (default): the disease's SNOMED anchor forest via "
                         "concept_ancestor. mondo: the whole-Mondo powered hierarchy "

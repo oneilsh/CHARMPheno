@@ -105,6 +105,25 @@ class DagLayout:
                     al.update(self.block[sib])
         return np.array(sorted(al), dtype=int)
 
+    def allowed_with_path_cousins(self, v):
+        """`allowed(v)` PLUS the sibling blocks of EVERY node on v's root-path — the
+        path-cousins, not just v's own siblings. Widens the head's contrast set up the
+        whole hierarchy: to rank v against the diseases it competes with at each level, the
+        head reads the cousins at every ancestor, not only the immediate siblings — the
+        out-of-immediate-neighborhood signal a closure+siblings head misses. Still bounded,
+        O(depth * fan-out) << K, so the per-node Fisher (C*S^2) and solve (C*S^3) stay
+        localized-cheap and shuffleable — EXACT Newton is kept, unlike a dense full-K head
+        whose C*K^2 Fisher blows the driver collect and thrashes on preemptible executors."""
+        al = set(int(k) for k in self.allowed(v))
+        for a in self.closure(v):
+            if a == 0:
+                continue
+            for p in self.parents.get(a, []):
+                for sib in self.children.get(p, []):
+                    if sib != 0 and sib != a:
+                        al.update(self.block[sib])
+        return np.array(sorted(al), dtype=int)
+
     def cost_report(self, C, *, vocab_size=None, localized=True):
         """PRE-FLIGHT size/cost profile for a gated-PC fit over this layout — logged at
         the data-build boundary so a big (e.g. whole-Mondo) fit's cost is visible BEFORE

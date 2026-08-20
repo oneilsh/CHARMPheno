@@ -337,6 +337,16 @@ class _OnlinePCLDAParams(HasFeaturesCol, HasMaxIter, HasSeed, _PersistenceParams
         "closure product). Only affects headOptimizer='newton'. Default False (dense).",
         typeConverter=TypeConverters.toBoolean,
     )
+    headSupport = Param(
+        Params._dummy(), "headSupport",
+        "localized-head support neighborhood (requires localizeHead): 'siblings' = "
+        "background + closure + immediate siblings (DagLayout.allowed_with_siblings, the "
+        "default); 'path_cousins' = ALSO the siblings of every ancestor on the root-path "
+        "(allowed_with_path_cousins), widening the contrast set up the whole hierarchy. "
+        "Both stay bounded (O(depth*fan-out) << K) so the per-node Fisher/solve is "
+        "shuffleable and EXACT Newton is kept — unlike dense full-K (localizeHead=False).",
+        typeConverter=TypeConverters.toString,
+    )
     frontierCol = Param(
         Params._dummy(), "frontierCol",
         "column carrying each doc's DAG frontier (array of most-specific attested "
@@ -525,7 +535,10 @@ def _build_model_and_config(
         # ≪ K (insight 0071). C = numLabels (incl root 0).
         if bool(estimator.getOrDefault("localizeHead")):
             C = int(estimator.getOrDefault("numLabels"))
-            topic_support = [lay.allowed_with_siblings(c) for c in range(C)]
+            hs = str(estimator.getOrDefault("headSupport"))
+            build = (lay.allowed_with_path_cousins if hs == "path_cousins"
+                     else lay.allowed_with_siblings)
+            topic_support = [build(c) for c in range(C)]
     elif domains is not None:
         raise ValueError(
             "featuresCols/domainBounds (multi-domain) require gateParent to be set: "
@@ -583,7 +596,8 @@ _ONLINE_PCLDA_DEFAULTS = dict(
     weightYWarmupIters=0, headOptimizer="sgd", headLr=0.05, headNewtonRidge=0.01,
     headL2=1e-3, headIntercept=False, headStandardize=False,
     closureParents="", warmStartFrom="",
-    gateParent="", gateNBg=2, gateTpn=1, localizeHead=False, frontierCol="frontier",
+    gateParent="", gateNBg=2, gateTpn=1, localizeHead=False, headSupport="siblings",
+    frontierCol="frontier",
     featuresCols=[],   # domainBounds intentionally omitted: it uses isSet (no default)
 )
 
@@ -636,6 +650,7 @@ class OnlinePCLDAEstimator(_OnlinePCLDAParams, Estimator):
         gateNBg: int = 2,
         gateTpn: int = 1,
         localizeHead: bool = False,
+        headSupport: str = "siblings",
         frontierCol: str = "frontier",
         featuresCols: list[str] | None = None,
         domainBounds: list[int] | None = None,

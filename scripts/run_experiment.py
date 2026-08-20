@@ -827,6 +827,8 @@ def build_gated_pc_args(
         args.append("--with-dag-head")
     if effective.get("localize_head"):
         args.append("--localize-head")
+    if effective.get("head_support"):
+        args.extend(["--head-support", str(effective["head_support"])])
     if effective.get("head_intercept"):
         args.append("--head-intercept")
     if effective.get("head_standardize"):
