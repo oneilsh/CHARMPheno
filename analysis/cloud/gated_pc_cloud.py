@@ -22,6 +22,12 @@ arm's FINAL per-doc theta against the per-node label, macro AUC over nodes
 convergence, and is directly comparable across arms). The gated_pc arm also
 reports its co-fit head P(node) AUC (secondary; the head's own readout).
 
+That readout is fit either on the DRIVER (collect theta + label/mask, C sklearn
+LRs) or DISTRIBUTED (one batched L-BFGS over all C heads on the executors, then a
+lean float32/uint8 test-split collect) — see `--readout-mode` and
+`resolve_readout_mode`. The metrics stack is the same object either way; only
+where the per-node logistic is fit changes.
+
 The per-node (label, labelMask) is emitted by the Step-A adapter
 (case_finding_assembly.emit_labels): label[c]=1 iff node c is in the is-a
 closure of the doc's frontier; C = len(int2cid). Mirrors dag_placement_cloud's
@@ -40,6 +46,15 @@ from pathlib import Path
 import numpy as np
 
 from _driver_common import _phase, configure_logging, make_spark_session
+# TOP-LEVEL module name on purpose: the distributed readout's partition kernels
+# reach the executors inside `mapPartitions` closures, which cloudpickle serializes
+# by MODULE REFERENCE — so the name the driver imports must be the name executors
+# can import. `--py-files .../distributed_readout.py` (run_experiment.py) publishes
+# it as a top-level module, and spark-submit puts the driver script's own directory
+# on sys.path, so `distributed_readout` resolves to the same module on both sides.
+# (`analysis.pc.batched_lr` below is DRIVER-ONLY: its fold helpers are injected into
+# SparkStatsFn and called driver-side around the treeAggregate, never pickled.)
+import distributed_readout as _dr
 
 
 # --------------------------------------------------------------------------- #
@@ -541,6 +556,10 @@ def _collect_theta_labels(df, C, *, label_col="label", mask_col="labelMask",
     _collect_topics_labels but with configurable label/mask column names (this
     corpus uses 'label'/'labelMask' from the Step-A adapter).
 
+    This is the DRIVER readout's input and the reason `--readout-mode distributed`
+    exists: θ and both (D,C) float64 label/mask arrays are 8*D*(K+2C) bytes per
+    split before any proba array is built (see `resolve_readout_mode`).
+
     `sample_frac` (<1.0) row-subsamples BEFORE the collect — the readout collects
     per-doc theta AND builds (N, C) proba arrays on the driver, both O(N); at
     whole-Mondo K/C over the whole population that is multi-GB, so bounding N here
@@ -584,6 +603,317 @@ def _collect_head_proba(df, C, *, prob_col="probability", label_col="label",
     mask_DC = np.asarray([[float(v) for v in r[mask_col]] for r in rows],
                          dtype=np.float64)
     return proba, y_DC, mask_DC
+
+
+# --------------------------------------------------------------------------- #
+# Distributed readout (plan 2026-08-20-distributed-readout-plan.md, v2.1).     #
+# --------------------------------------------------------------------------- #
+# Above this C the driver readout stops being safe: it collects θ (D,K float64)
+# plus label+mask (D,C float64 each) for BOTH splits and then builds (D,C) float64
+# proba arrays on top — 8*D*(K + 3C) bytes, ~24 GB at K=C=3,300 over 300k docs.
+# 500 is the plan's own `default driver at C<=500` line: it keeps every historical
+# cardiovascular run (C=444) on the byte-identical driver path while whole-Mondo
+# (C~3,300) routes to the distributed fit automatically.
+_DRIVER_READOUT_MAX_C = 500
+# sklearn's own `LogisticRegression` default tol, and the oracle this readout must
+# reproduce stops there too. Below ~3e-6 the gradient inf-norm of a SUMMED loss is
+# unreachable (roundoff floor ~1e-16*n), so a tighter gtol only buys stalled nodes
+# and wasted distributed passes.
+_READOUT_GTOL = 1e-4
+
+
+def resolve_readout_mode(mode, C, max_driver_c=_DRIVER_READOUT_MAX_C):
+    """Resolve `--readout-mode {driver,distributed,auto}` against this run's C.
+
+    `auto` is the only interesting case: `driver` while the θ/label/mask collect
+    still fits (C <= 500), `distributed` beyond it. Explicit modes pass through, so
+    an A/B run can force either path on the same corpus."""
+    if mode not in ("driver", "distributed", "auto"):
+        raise ValueError(f"unknown readout mode {mode!r}")
+    if mode != "auto":
+        return mode
+    return "driver" if int(C) <= int(max_driver_c) else "distributed"
+
+
+def _densify_lean_blocks(blocks, C):
+    """Per-partition lean blocks -> `(proba float32, y uint8, mask uint8, ids)`.
+
+    The driver-side half of `distributed_readout._lean_eval_kernel`. Peak driver
+    memory is the whole point of the v2.1 refinement, so it is worth being explicit:
+    the destination arrays are (4 + 1 + 1) = **6 bytes per (doc, node) cell** —
+    ~1.6 GB at D_te=80k, C=3,300 — against the driver path's 8*D*(K + 3C) for the
+    same eval. Each block is dropped as soon as it is copied, so the transient
+    overshoot is the collected blocks (float32 p + index lists, ~4-5 bytes/cell)
+    rather than a second full copy of everything.
+
+    `y`/`mask` arrive as CSR-style index runs; `mask` may be `None`, which means
+    "every doc observes every node" (`--label-mask-mode full`)."""
+    C = int(C)
+    D = sum(int(b[1].shape[0]) for b in blocks)
+    proba = np.zeros((D, C), dtype=np.float32)
+    y = np.zeros((D, C), dtype=np.uint8)
+    mask = np.zeros((D, C), dtype=np.uint8)
+    ids = np.zeros(D, dtype=np.int64)
+    at = 0
+    for j in range(len(blocks)):
+        b_ids, P, y_idx, y_ptr, m_idx, m_ptr = blocks[j]
+        n = int(P.shape[0])
+        proba[at:at + n] = P
+        ids[at:at + n] = b_ids
+        y[np.repeat(np.arange(at, at + n), np.diff(y_ptr)), y_idx] = 1
+        if m_idx is None:
+            mask[at:at + n] = 1
+        else:
+            mask[np.repeat(np.arange(at, at + n), np.diff(m_ptr)), m_idx] = 1
+        at += n
+        blocks[j] = None                      # free the partition's block eagerly
+    return proba, y, mask, ids.tolist()
+
+
+def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
+                        const=None, score_col="topicDistribution",
+                        label_col="label", mask_col="labelMask",
+                        id_col="person_id"):
+    """LEAN per-doc readout collect: `(proba (D,C) f32, y u8, mask u8, person_order)`.
+
+    Plan §3 (v2.1): once the FIT is distributed, the driver eval needs only the test
+    split's per-node probabilities and labels — no θ, no float64 (D,C) arrays, no
+    per-node LR on the driver. This collector is the whole reason the existing eval
+    stack (`readout_from_proba`, `conditional_readout`, the quartile split) can stay
+    byte-identical at whole-Mondo scale: it hands them the SAME arrays in a
+    6-bytes-per-cell dress.
+
+    Two callers, one kernel: with `(V, b_raw)` the executors score raw θ from the
+    batched fit; with `V=None` and `score_col="probability"` the co-fit head's own
+    per-doc (C,) probability column is packed as-is (no fit involved).
+
+    `degenerate`/`const` apply the ORACLE's fallback for nodes whose observed TRAIN
+    set was empty or single-class — `_lr_proba_per_label_masked` predicts the lone
+    class value (0.0 when nothing was observed) rather than fitting, and macro means
+    are only comparable across paths if this reproduces it exactly."""
+    C = int(C)
+    cols = (id_col, score_col, label_col, mask_col)
+    sc = scored_df.sparkSession.sparkContext
+    if V is None:
+        bcast = None
+
+        def _block(rows, _C=C, _cols=cols):
+            return [_dr._lean_eval_kernel(_dr._row_quads(rows, *_cols), _C)]
+    else:
+        bcast = sc.broadcast((np.ascontiguousarray(V, dtype=np.float64),
+                              np.ascontiguousarray(b_raw, dtype=np.float64)))
+
+        def _block(rows, _b=bcast, _C=C, _cols=cols):
+            V_, b_ = _b.value
+            return [_dr._lean_eval_kernel(_dr._row_quads(rows, *_cols), _C, V_, b_)]
+
+    try:
+        blocks = scored_df.select(*cols).rdd.mapPartitions(_block).collect()
+    finally:
+        if bcast is not None:
+            bcast.unpersist(blocking=True)
+    proba, y, mask, ids = _densify_lean_blocks(blocks, C)
+    if degenerate is not None and bool(np.any(degenerate)):
+        deg = np.asarray(degenerate, dtype=bool)
+        proba[:, deg] = np.asarray(const, dtype=np.float32)[deg]
+    return proba, y, mask, ids
+
+
+def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
+                       max_iter=200, history=6, label="", depth=2,
+                       topic_col="topicDistribution", label_col="label",
+                       mask_col="labelMask"):
+    """Fit all C per-node readout heads with ONE batched distributed L-BFGS.
+
+    Returns `(V (C,K), b_raw (C,), const (C,), degenerate (C,) bool, info)` — the
+    raw-θ scoring parameters, so nothing but `(V, b_raw)` has to travel to score a
+    split (plan §1: the standardization is folded away, "scoring needs no scaler").
+
+    Three driver-side steps, each doing exactly what the plan's §1 prescribes:
+
+      1. `masked_moments` — one pass for the per-node masked mean/sd (the sklearn
+         oracle standardizes on each node's OWN observed train rows) plus the
+         `n_obs`/`n_pos` counts that identify degenerate nodes for free.
+      2. DEGENERATE MASKING. A node whose observed train set is empty or
+         single-class has no finite optimum (the intercept runs to ±inf), so the
+         oracle refuses to fit it and predicts the lone class. We reproduce that by
+         zeroing its loss/gradient rows before the solver sees them: its gradient is
+         then exactly 0, `solve_batched_lr` freezes it at iteration 0, and the
+         constant is applied at scoring time. Wrapping the stats_fn (rather than
+         re-deriving the moments off a masked frame) keeps it to one data pass.
+      3. `solve_batched_lr` at `l2=1.0` — sklearn's `C=1.0` on the SUMMED log-loss,
+         intercept unpenalized — then fold back to raw-θ coordinates."""
+    from analysis.pc.batched_lr import (fold_standardization, solve_batched_lr,
+                                        standardized_grad_from_raw)
+
+    C, K = int(C), int(K)
+    tag = f"{label}: " if label else ""
+    mu, sd, n_obs, n_pos = _dr.masked_moments(
+        train_scored, C, K, topic_col=topic_col, label_col=label_col,
+        mask_col=mask_col, depth=depth)
+    # Same three cases as `_lr_proba_per_label_masked`'s `np.unique(yc).size < 2`:
+    # nothing observed (-> 0.0), all-negative (-> 0.0), all-positive (-> 1.0).
+    degenerate = (n_obs <= 0) | (n_pos <= 0) | (n_pos >= n_obs)
+    const = np.where((n_obs > 0) & (n_pos >= n_obs), 1.0, 0.0)
+    keep = ~degenerate
+    print(f"[driver]   {tag}distributed readout fit: C={C} K={K}, "
+          f"{int(keep.sum())} fittable nodes, {int(degenerate.sum())} degenerate "
+          f"(constant fallback), observed train cells={int(n_obs.sum())}", flush=True)
+
+    with _dr.make_spark_stats_fn(
+            train_scored, C, K, mu, sd,
+            fold_standardization=fold_standardization,
+            standardized_grad_from_raw=standardized_grad_from_raw,
+            topic_col=topic_col, label_col=label_col, mask_col=mask_col,
+            depth=depth) as stats_fn:
+
+        def _fittable_stats(W_std, b_std, _f=stats_fn, _keep=keep):
+            loss, gW, gb = _f(W_std, b_std)
+            return (np.where(_keep, loss, 0.0),
+                    np.where(_keep[:, None], gW, 0.0),
+                    np.where(_keep, gb, 0.0))
+
+        W_std, b_std, info = solve_batched_lr(
+            _fittable_stats, C, K, l2=l2, max_iter=max_iter, history=history,
+            gtol=gtol)
+    V, b_raw = fold_standardization(W_std, b_std, mu, sd)
+    gmax = float(info["grad_inf_norm"][keep].max()) if keep.any() else 0.0
+    # `converged` = gtol OR the principled numerical stall; at gtol=1e-4 (sklearn's
+    # own tol) every node should stop on the gradient, so a nonzero stalled count is
+    # the diagnostic that the summed-loss roundoff floor was hit first.
+    print(f"[driver]   {tag}batched L-BFGS: {int(info['n_stats_calls'])} data passes, "
+          f"{int(info['converged'][keep].sum())}/{int(keep.sum())} converged "
+          f"({int(info['converged_gtol'][keep].sum())} gtol, "
+          f"{int(info['stalled'][keep].sum())} stalled), max|grad|={gmax:.3g}, "
+          f"max iters={int(info['n_iter'].max())}, "
+          f"line-search failures={int(info['line_search_failures'])}", flush=True)
+    return V, b_raw, const, degenerate, info
+
+
+def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
+                          fdr_targets, min_count=0, label="", l2=1.0,
+                          gtol=_READOUT_GTOL, max_iter=200, history=6, depth=2,
+                          topic_col="topicDistribution", label_col="label",
+                          mask_col="labelMask", id_col="person_id"):
+    """`score_arm` without the driver-side θ collect — the distributed twin.
+
+    Returns `(readout, proba_te (D_te,C) f32, y_te u8, m_te u8, person_order)`;
+    the first four mirror `_score_full`'s `(readout, proba)` contract plus the two
+    label arrays the driver path used to get from `_collect_theta_labels`, so every
+    downstream consumer (`_conditional`, the rarity quartile split, the headline)
+    is unchanged.
+
+    Same three ingredients as the driver readout, moved: fit per-node LRs on the
+    train split's θ (now one batched L-BFGS on the executors), score the test split
+    (now one mapPartitions), macro the per-node metrics (still `readout_from_proba`,
+    on the driver, byte-identical). `readout_sample_frac` deliberately does NOT
+    appear: it existed to bound a driver collect that no longer happens, and uniform
+    row sampling guts the rare tail the Q1 quartile split reports on.
+
+    Callable with a plain SparkSession + two DataFrames (no argparse), which is what
+    makes it testable against `score_arm` on a local Spark fixture."""
+    V, b_raw, const, degenerate, _info = _fit_readout_heads(
+        train_scored, C, K, l2=l2, gtol=gtol, max_iter=max_iter, history=history,
+        depth=depth, label=label, topic_col=topic_col, label_col=label_col,
+        mask_col=mask_col)
+    proba, y_te, m_te, persons = _collect_lean_proba(
+        test_scored, C, V, b_raw, degenerate=degenerate, const=const,
+        score_col=topic_col, label_col=label_col, mask_col=mask_col, id_col=id_col)
+    readout = readout_from_proba(proba, y_te, m_te, C, recall_targets=recall_targets,
+                                 fdr_targets=fdr_targets, min_count=min_count)
+    return readout, proba, y_te, m_te, persons
+
+
+def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
+                      fdr_targets, min_count=0, label="", seed=0, n_rows=2000,
+                      sample_frac=1.0, distributed=None):
+    """A/B the distributed readout against the driver readout on the SAME θ.
+
+    The plan's correctness gate (step 2: "cardiovascular A/B equality run vs the
+    driver readout, same frozen fit, same seed"). It REPORTS — no asserts — because
+    the two paths are not expected to agree to machine precision and the size of the
+    disagreement is the finding: sklearn stops at `tol=1e-4` on its own gradient,
+    which leaves it ~5e-4 from the optimum in predicted probability, and it is the
+    LESS converged of the two parties. Per-node AUC deltas of ~1e-4 and macro deltas
+    below 1e-4 are the expected outcome; anything at 1e-2 is a formulation bug.
+
+    `sample_frac < 1.0` subsamples the frames ONCE, up front, and runs BOTH paths on
+    those exact cached rows — the gate has to compare two solvers on one dataset, so
+    letting only the driver side sample (as the production driver path does, to fit
+    its collect in 8g) would report the sampling, not the solver. That also makes the
+    gate affordable at cardiovascular scale on the standard 8g driver: exp 0102 could
+    only afford `readout_sample_frac=0.3` there.
+
+    `distributed` optionally passes in an already-computed
+    `(readout, proba, y, mask, person_order)` so the gate costs one extra readout,
+    not two — but only at `sample_frac=1.0`, since a passed-in result was fit on all
+    the rows."""
+    from analysis.pc.evaluate import _lr_proba_per_label_masked
+
+    tag = f"{label} " if label else ""
+    sampled = []
+    if sample_frac < 1.0:
+        # cache(): both paths must read the SAME rows, and an uncached `sample` is
+        # re-drawn on every action (same seed, but also the same recompute cost).
+        train_scored = train_scored.sample(
+            withReplacement=False, fraction=float(sample_frac), seed=int(seed)).cache()
+        test_scored = test_scored.sample(
+            withReplacement=False, fraction=float(sample_frac), seed=int(seed)).cache()
+        sampled = [train_scored, test_scored]
+        print(f"[driver]   A/B gate: both paths restricted to the SAME "
+              f"{sample_frac:g} row sample (seed={seed})", flush=True)
+        distributed = None                    # the passed-in fit saw all the rows
+    if distributed is None:
+        distributed = distributed_score_arm(
+            train_scored, test_scored, C, K, recall_targets=recall_targets,
+            fdr_targets=fdr_targets, min_count=min_count, label=label)
+    r_dist, p_dist, _, _, ids_dist = distributed
+
+    Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
+    Pi_te, y_te, m_te, ids_drv = _collect_theta_labels(test_scored, C)
+    p_drv = _lr_proba_per_label_masked(Pi_tr, y_tr, m_tr, Pi_te, C)
+    r_drv = readout_from_proba(p_drv, y_te, m_te, C, recall_targets=recall_targets,
+                               fdr_targets=fdr_targets, min_count=min_count)
+
+    def _fmt(v):
+        return "n/a" if v is None else f"{v:.6f}"
+
+    def _delta(a, b):
+        return "n/a" if (a is None or b is None) else f"{a - b:+.2e}"
+
+    lines = [f"A/B readout equality gate ({tag}C={C}, K={K}): distributed vs driver"]
+    for key in ("auc", "ap"):
+        a, b = r_dist["ranking"][key], r_drv["ranking"][key]
+        lines.append(f"  macro {key.upper():3s} dist={_fmt(a)} driver={_fmt(b)} "
+                     f"(Δ{_delta(a, b)})")
+    pd_, pv = r_dist["per_node"], r_drv["per_node"]
+    both = sorted(set(pd_) & set(pv))
+    if both:
+        d_auc = np.array([abs(pd_[c]["auc"] - pv[c]["auc"]) for c in both])
+        worst = both[int(np.argmax(d_auc))]
+        lines.append(f"  per-node |ΔAUC| over {len(both)} shared nodes: "
+                     f"max={d_auc.max():.2e} (node {worst}), mean={d_auc.mean():.2e}, "
+                     f"n>1e-3={int((d_auc > 1e-3).sum())}")
+    lines.append(f"  nodes scored: dist={r_dist['ranking']['n_labels_scored']} "
+                 f"driver={r_drv['ranking']['n_labels_scored']}")
+    # Row-wise probability agreement on a sampled subset, aligned by person_id (the
+    # two collects walk the same partitions but neither promises an order).
+    pos = {int(pid): i for i, pid in enumerate(ids_dist)}
+    rows = [(i, pos[int(pid)]) for i, pid in enumerate(ids_drv) if int(pid) in pos]
+    if rows:
+        rng = np.random.default_rng(int(seed))
+        take = rng.choice(len(rows), size=min(int(n_rows), len(rows)), replace=False)
+        i_drv = np.array([rows[t][0] for t in take])
+        i_dst = np.array([rows[t][1] for t in take])
+        dp = np.abs(p_dist[i_dst].astype(np.float64) - p_drv[i_drv])
+        lines.append(f"  max |Δp| over {len(take)} sampled rows x {C} nodes: "
+                     f"{float(dp.max()):.2e} (mean {float(dp.mean()):.2e})")
+    lines.append("  (sklearn's tol=1e-4 stopping rule is the less-converged party; "
+                 "~5e-4 in p / ~1e-4 in per-node AUC is the expected disagreement.)")
+    print("\n".join("[driver]   " + ln for ln in lines), flush=True)
+    for df in sampled:
+        df.unpersist()
+    return {"distributed": r_dist, "driver": r_drv}
 
 
 def _converge_localized_head(Pi, y, obs, support_cols, C, *, head_l2,
@@ -962,6 +1292,26 @@ def parse_args(argv=None):
                         "(theta + per-node LR + (N,C) proba arrays are all O(N)). <1.0 "
                         "bounds driver memory at whole-Mondo K/C; the per-node LR needs "
                         "only enough rows to fit. 1.0 (default) = full collect.")
+    p.add_argument("--readout-mode", choices=["driver", "distributed", "auto"],
+                   default="auto",
+                   help="where the pc_topics_lr readout is fit. 'driver' collects "
+                        "per-doc theta (D,K float64) AND dense label/mask (D,C "
+                        "float64) for BOTH splits, then fits C sklearn LRs on the "
+                        "driver — 8*D*(K+3C) bytes, ~24 GB at whole-Mondo K=C=3,300 "
+                        "over 300k docs, which is why it breaks there. 'distributed' "
+                        "fits all C heads in ONE batched L-BFGS on the executors "
+                        "(the same treeAggregate seam the co-fit head uses) and "
+                        "collects only a LEAN test-split eval bundle — float32 "
+                        "proba + uint8 label/mask, 6 bytes/cell (plan v2.1) — so the "
+                        "whole driver eval stack runs unchanged. 'auto' (default) = "
+                        f"driver at C<={_DRIVER_READOUT_MAX_C}, else distributed.")
+    p.add_argument("--readout-ab-check", action="store_true",
+                   help="run BOTH readout paths on the same scored frames and print "
+                        "the deltas (macro AUC/AP, per-node |dAUC|, sampled max "
+                        "|dproba|). The plan's cardiovascular (C=444) correctness "
+                        "gate. Report only — never asserts. Ignored unless the mode "
+                        f"resolves to distributed AND C<={_DRIVER_READOUT_MAX_C} "
+                        "(the driver path must still be affordable to compare to).")
     p.add_argument("--head-converge-iters", type=int, default=25,
                    help="Newton steps for the post-fit HEAD-FORMULATION LADDER "
                         "(localize-head only): converge each localized head variant on "
@@ -1131,6 +1481,29 @@ def main() -> int:
         _, _prof = lay.cost_report(C, vocab_size=_v_total,
                                    localized=bool(getattr(args, "localize_head", False)))
         print("\n".join("[cost] " + ln for ln in _prof.splitlines()), flush=True)
+        # Readout routing, decided once for every arm (see resolve_readout_mode).
+        readout_mode = resolve_readout_mode(args.readout_mode, C)
+        print(f"[driver]   readout_mode={args.readout_mode} -> {readout_mode} "
+              f"(C={C}, driver-collect ceiling C<={_DRIVER_READOUT_MAX_C})", flush=True)
+        if readout_mode == "distributed" and args.readout_sample_frac < 1.0:
+            # The flag exists only to bound the driver collect; the distributed path
+            # has no collect to bound, and uniform row sampling would still gut the
+            # rare tail the quartile split reports on. Say so rather than silently
+            # honouring a knob that would now change the FIT.
+            print(f"[driver]   readout_sample_frac={args.readout_sample_frac} IGNORED "
+                  "under readout_mode=distributed (it bounded a driver collect that "
+                  "no longer happens; the fit uses every row). It still applies "
+                  "inside --readout-ab-check, where the driver path is the thing "
+                  "being compared and has to fit.", flush=True)
+        ab_check = bool(args.readout_ab_check) and readout_mode == "distributed"
+        if bool(args.readout_ab_check) and not ab_check:
+            print("[driver]   readout_ab_check ignored (readout_mode resolved to "
+                  "driver — there is nothing to compare against)", flush=True)
+        elif ab_check and C > _DRIVER_READOUT_MAX_C:
+            print(f"[driver]   readout_ab_check SKIPPED: C={C} exceeds the driver "
+                  f"path's own ceiling ({_DRIVER_READOUT_MAX_C}); the gate is meant "
+                  "to run at cardiovascular scale (C=444)", flush=True)
+            ab_check = False
 
         # Parallelism: the cached bundle parquet has few partitions (~8 part-files),
         # and with dynamic allocation Spark sizes the executor pool to PENDING TASKS
@@ -1202,14 +1575,33 @@ def main() -> int:
             test_scored = pc_model.transform(bundle.test_df).cache()
             _sf = args.readout_sample_frac
             _sd = args.seed if args.seed is not None else 0
-            Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
-                train_scored, C, sample_frac=_sf, seed=_sd)
-            Pi_te, y_te, m_te, _ = _collect_theta_labels(
-                test_scored, C, sample_frac=_sf, seed=_sd)
-            results["gated_pc"], proba_gp = _score_full(
-                Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+            if readout_mode == "distributed":
+                # No θ collect at all: the per-node LRs are fit on the executors and
+                # only the lean test-split eval bundle comes back. Pi_tr/y_tr/m_tr
+                # therefore do not exist on this path — everything below that needs
+                # them (localized oracle, formulation ladder) is a DRIVER-path
+                # diagnostic and is gated accordingly.
+                _dist_gp = distributed_score_arm(
+                    train_scored, test_scored, C, lay.K, recall_targets=rt,
+                    fdr_targets=ft, min_count=args.min_label_count, label="gated_pc")
+                results["gated_pc"], proba_gp, y_te, m_te, _ = _dist_gp
+            else:
+                Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
+                    train_scored, C, sample_frac=_sf, seed=_sd)
+                Pi_te, y_te, m_te, _ = _collect_theta_labels(
+                    test_scored, C, sample_frac=_sf, seed=_sd)
+                results["gated_pc"], proba_gp = _score_full(
+                    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
             print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
                   flush=True)
+            if ab_check:
+                # The plan's step-2 correctness gate, on the arm whose readout is the
+                # headline. Reuses the distributed result already computed, so the
+                # extra cost is one driver-path readout.
+                readout_ab_report(
+                    train_scored, test_scored, C, lay.K, recall_targets=rt,
+                    fdr_targets=ft, min_count=args.min_label_count, label="gated_pc",
+                    seed=_sd, sample_frac=_sf, distributed=_dist_gp)
             # Conditional 'sharpening' readout: P(child | parent-cohort) by DAG depth.
             results["gated_pc_conditional"] = _conditional(
                 proba_gp, y_te, m_te, "gated_pc")
@@ -1222,7 +1614,18 @@ def main() -> int:
             #   oracle ≈ co-fit head     => the discriminative signal is OUTSIDE the
             #     local support; localization is fundamentally lossy (widen support or
             #     concede two-stage).
-            if getattr(args, "localize_head", False):
+            # DRIVER-PATH ONLY, deliberately: this (and the formulation ladder it
+            # feeds) is a per-node LADDER over feature SUBSETS of θ — a different
+            # hypothesis class per node, which the batched multi-head solver does not
+            # express (it fits one shared full-K design). It is a co-fit-head
+            # diagnostic, not part of the headline readout, so it stays on the driver
+            # and is skipped when the θ collect it needs is the thing we are avoiding.
+            if getattr(args, "localize_head", False) and readout_mode != "driver":
+                print("[driver]   oracle-localized readout + head-formulation ladder "
+                      "SKIPPED under readout_mode=distributed (they fit per-node "
+                      "SUPPORT-restricted LRs on a driver-side θ collect; re-run with "
+                      "--readout-mode driver at a C the collect fits)", flush=True)
+            elif getattr(args, "localize_head", False):
                 from analysis.pc.evaluate import _lr_proba_per_label_masked as _lrm
                 support_cols = [np.asarray(sorted(lay.allowed_with_siblings(c)), dtype=int)
                                 for c in range(C)]
@@ -1239,16 +1642,42 @@ def main() -> int:
             # is fit on a HELD-OUT 75/25 train split (OUT-OF-SAMPLE) — in-sample fitting
             # worsened ECE (exp 0079 run 2). Raw vs calibrated are compared within the
             # SAME 75%-fit LR so the delta is the calibration effect alone.
-            from analysis.pc.evaluate import _lr_proba_per_label_masked
-            _crng = np.random.default_rng(args.seed if args.seed is not None else 0)
-            cal_sel = _crng.random(Pi_tr.shape[0]) < 0.25
-            fit_sel = ~cal_sel
-            proba_cal = _lr_proba_per_label_masked(
-                Pi_tr[fit_sel], y_tr[fit_sel], m_tr[fit_sel], Pi_tr[cal_sel], C)
-            proba_te_fit = _lr_proba_per_label_masked(
-                Pi_tr[fit_sel], y_tr[fit_sel], m_tr[fit_sel], Pi_te, C)
-            proba_te_cal = calibrate_per_node(
-                proba_cal, y_tr[cal_sel], m_tr[cal_sel], proba_te_fit, C)
+            if readout_mode == "distributed":
+                # Distributed twin of the 75/25 calibration split. The split is a
+                # HASH of person_id (deterministic, complementary, and no driver-side
+                # row index to sample from), and the second batched fit on the 75%
+                # is a real extra cluster pass — the price of an out-of-sample
+                # calibrator, unchanged in kind from the driver path's second LR fit.
+                # Memory is NOT the binding constraint here even though the train
+                # split is ~4x the test split: only the 25% CALIBRATION slice and the
+                # test split are ever collected (both lean), never the 75% fit slice.
+                from pyspark.sql import functions as _F
+                _h = _F.pmod(_F.hash(_F.col("person_id"), _F.lit(int(_sd))), _F.lit(4))
+                _cal_df = train_scored.filter(_h == 0)
+                _fit_df = train_scored.filter(_h != 0)
+                _Vc, _bc, _constc, _degc, _ = _fit_readout_heads(
+                    _fit_df, C, lay.K, label="gated_pc calibration-fit")
+                proba_cal, y_cal, m_cal, _ = _collect_lean_proba(
+                    _cal_df, C, _Vc, _bc, degenerate=_degc, const=_constc)
+                proba_te_fit, _, _, _ = _collect_lean_proba(
+                    test_scored, C, _Vc, _bc, degenerate=_degc, const=_constc)
+                # NOTE: calibrate_per_node returns a float64 copy of proba_te_fit, so
+                # this one diagnostic doubles (8 vs 4 bytes/cell) the test-split
+                # probability array for the length of the conditional readouts below.
+                proba_te_cal = calibrate_per_node(
+                    proba_cal, y_cal, m_cal, proba_te_fit, C)
+                del proba_cal, y_cal, m_cal
+            else:
+                from analysis.pc.evaluate import _lr_proba_per_label_masked
+                _crng = np.random.default_rng(args.seed if args.seed is not None else 0)
+                cal_sel = _crng.random(Pi_tr.shape[0]) < 0.25
+                fit_sel = ~cal_sel
+                proba_cal = _lr_proba_per_label_masked(
+                    Pi_tr[fit_sel], y_tr[fit_sel], m_tr[fit_sel], Pi_tr[cal_sel], C)
+                proba_te_fit = _lr_proba_per_label_masked(
+                    Pi_tr[fit_sel], y_tr[fit_sel], m_tr[fit_sel], Pi_te, C)
+                proba_te_cal = calibrate_per_node(
+                    proba_cal, y_tr[cal_sel], m_tr[cal_sel], proba_te_fit, C)
             _ones = np.ones_like(y_te)
             cond_raw = conditional_readout(proba_te_fit, y_te, _ones,
                                            bundle.parent_int, C,
@@ -1261,9 +1690,16 @@ def main() -> int:
                   f"{_f(cond_raw.get('ece')).strip()} -> "
                   f"calibrated={_f(cond_cal.get('ece')).strip()}", flush=True)
             # co-fit head's own per-node P(node) readout (secondary), from the SAME
-            # scored test frame (no second CAVI pass).
-            hp, hy, hm = _collect_head_proba(
-                test_scored, C, sample_frac=_sf, seed=_sd)
+            # scored test frame (no second CAVI pass). No LR is involved — the
+            # `probability` column is already the per-doc (C,) P(node) — so the
+            # distributed variant is just the LEAN collector over that column,
+            # float32/uint8 instead of three float64 (D,C) arrays.
+            if readout_mode == "distributed":
+                hp, hy, hm, _ = _collect_lean_proba(
+                    test_scored, C, score_col="probability")
+            else:
+                hp, hy, hm = _collect_head_proba(
+                    test_scored, C, sample_frac=_sf, seed=_sd)
             results["gated_pc_head"] = readout_from_proba(
                 hp, hy, hm, C, recall_targets=rt, fdr_targets=ft,
                 min_count=args.min_label_count)
@@ -1346,18 +1782,43 @@ def main() -> int:
                 us_args.max_iter = int(n_it)
                 us_est = _build_pc_estimator(us_args, weight_y=0.0, gated=True)
                 us_model = us_est.fit(bundle.train_df)
-                Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
-                    us_model.transform(bundle.train_df), C,
-                    sample_frac=args.readout_sample_frac,
-                    seed=(args.seed if args.seed is not None else 0))
-                Pi_te, y_te, m_te, _ = _collect_theta_labels(
-                    us_model.transform(bundle.test_df), C,
-                    sample_frac=args.readout_sample_frac,
-                    seed=(args.seed if args.seed is not None else 0))
-                results["unsup_gated"], proba_us = _score_full(
-                    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+                us_train_scored = us_model.transform(bundle.train_df)
+                us_test_scored = us_model.transform(bundle.test_df)
+                if readout_mode == "distributed":
+                    # The unsup twin is the CONTROLLED incumbent, so its readout must
+                    # come off the same path as the PC arm's or the headline delta
+                    # would compare two solvers instead of two representations.
+                    # Cache first: unlike the PC arm's frames these are not persisted
+                    # by the caller, and the distributed path reads the train split
+                    # twice (moments pass, then the L-BFGS projection) — each read of
+                    # an uncached transform re-runs CAVI over the whole split.
+                    us_train_scored = us_train_scored.cache()
+                    us_test_scored = us_test_scored.cache()
+                    _dist_us = distributed_score_arm(
+                        us_train_scored, us_test_scored, C, lay.K, recall_targets=rt,
+                        fdr_targets=ft, min_count=args.min_label_count,
+                        label="unsup_gated")
+                    results["unsup_gated"], proba_us, y_te, m_te, _ = _dist_us
+                else:
+                    Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
+                        us_train_scored, C,
+                        sample_frac=args.readout_sample_frac,
+                        seed=(args.seed if args.seed is not None else 0))
+                    Pi_te, y_te, m_te, _ = _collect_theta_labels(
+                        us_test_scored, C,
+                        sample_frac=args.readout_sample_frac,
+                        seed=(args.seed if args.seed is not None else 0))
+                    results["unsup_gated"], proba_us = _score_full(
+                        Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
                 print(format_arm_readout("unsup_gated (pc_topics_lr)",
                                          results["unsup_gated"]), flush=True)
+                if ab_check:
+                    readout_ab_report(
+                        us_train_scored, us_test_scored, C, lay.K, recall_targets=rt,
+                        fdr_targets=ft, min_count=args.min_label_count,
+                        label="unsup_gated",
+                        seed=(args.seed if args.seed is not None else 0),
+                        sample_frac=args.readout_sample_frac, distributed=_dist_us)
                 # Conditional A/B: does supervision sharpen P(child|parent) vs the
                 # unsupervised twin? (The metric the clinician workflow cares about.)
                 results["unsup_gated_conditional"] = _conditional(
@@ -1365,6 +1826,8 @@ def main() -> int:
                 # Per-node domain mass on the UNSUPERVISED λ too, so the A/B tells us
                 # whether the hierarchy-aligned specialization is a PC effect or a
                 # property of the gated multi-domain representation itself (0078).
+                if readout_mode == "distributed":
+                    us_train_scored.unpersist(); us_test_scored.unpersist()
                 us_lam = us_model.result.global_params["lambda"]
                 if extra_domains and isinstance(us_lam, dict):
                     us_mass = per_node_domain_mass(us_lam, lay, args._domain_names)
@@ -1380,11 +1843,21 @@ def main() -> int:
                 dh_est = _build_pc_estimator(
                     args, weight_y=args.weight_y, gated=False, closure_parents=cp)
                 dh_model = dh_est.fit(bundle.train_df)
-                Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
-                    dh_model.transform(bundle.train_df), C)
-                Pi_te, y_te, m_te, _ = _collect_theta_labels(
-                    dh_model.transform(bundle.test_df), C)
-                results["dag_head"] = _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+                if readout_mode == "distributed":
+                    # UNGATED arm: its θ is --k wide, not the gate layout's lay.K.
+                    dh_train = dh_model.transform(bundle.train_df).cache()
+                    dh_test = dh_model.transform(bundle.test_df).cache()
+                    results["dag_head"] = distributed_score_arm(
+                        dh_train, dh_test, C, int(args.k), recall_targets=rt,
+                        fdr_targets=ft, min_count=args.min_label_count,
+                        label="dag_head")[0]
+                    dh_train.unpersist(); dh_test.unpersist()
+                else:
+                    Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
+                        dh_model.transform(bundle.train_df), C)
+                    Pi_te, y_te, m_te, _ = _collect_theta_labels(
+                        dh_model.transform(bundle.test_df), C)
+                    results["dag_head"] = _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
                 print(format_arm_readout("dag_head (pc_topics_lr)",
                                          results["dag_head"]), flush=True)
 
@@ -1431,6 +1904,9 @@ def main() -> int:
                 "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
                 "kappa": args.kappa, "max_iter": args.max_iter,
                 "min_label_count": args.min_label_count,
+                "readout_mode": readout_mode,
+                "readout_sample_frac": (1.0 if readout_mode == "distributed"
+                                        else args.readout_sample_frac),
                 "recall_targets": args._recall_targets,
                 "fdr_targets": args._fdr_targets,
                 "with_dag_head": args.with_dag_head,

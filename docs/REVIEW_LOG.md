@@ -12,6 +12,31 @@ elsewhere.
 
 ---
 
+## 2026-08-20 — Distributed readout build (ADR 0046): batched L-BFGS multi-head + lean eval collect
+
+Three-package build replacing the readout's driver collect (θ (D,K) + dense (D,C)
+label/mask — the whole-Mondo wall sized in the 2026-08-20 distributed-readout plan) with
+a distributed fit. Shipped: `analysis/pc/batched_lr.py` (pure-numpy batched L-BFGS over C
+separable per-node LRs; exact per-node Armijo + convergence freezing; sklearn-oracle
+objective incl. folded per-node standardization; equality vs the oracle at |Δp|~5e-7,
+ΔAUC=0), `analysis/cloud/distributed_readout.py` (pure partition kernels + thin Spark
+wiring: masked moments, SparkStatsFn treeAggregate with packed O(nnz) caching and
+self-cleaning broadcasts, lean-eval and cell-scoring kernels, escape-hatch distributed
+metrics reusing `_score_label`), and the `gated_pc_cloud.py` integration
+(`--readout-mode {driver,distributed,auto}`, lean float32/uint8 test collect feeding the
+UNCHANGED metric stack, degenerate constant fallbacks, `--readout-ab-check` harness;
+driver path preserved byte-identical; `run_experiment.py` ships the kernel module by
+name for executor unpickling). Independently-built halves cross-checked at 1e-14;
+both converged on sklearn's sd→1.0 zero-variance rule (an eps floor manufactures
+phantom gradients from cancellation residue). Local end-to-end A/B: macro Δ=0, max
+|Δp|=6.46e-04 (sklearn's default tol is the less-converged party). Docs: ADR 0046; exp
+0103 staged as the C=444 cluster equality gate. Parked: driver L-BFGS history memory
+policy at C·K≈11M params, full-mask-mode pass cost at whole-Mondo, frontier-only corpus
+(plan step 5), and the co-fit revival experiment (same solver warm-started against the
+moving θ — closeout §6).
+
+---
+
 ## 2026-08-12 — PC (Prediction-Constrained) branch pre-merge review (7-lesson walkthrough) + the adam-removal / shim-rename / LDA-parity-readouts mini-arc
 
 Pre-merge review of the unmerged `claude/faithful-flat-pc` branch — the

@@ -849,6 +849,10 @@ def build_gated_pc_args(
         args.extend(["--mondo-cache-dir", str(effective["mondo_cache_dir"])])
     if effective.get("readout_sample_frac") is not None:
         args.extend(["--readout-sample-frac", str(effective["readout_sample_frac"])])
+    if effective.get("readout_mode"):
+        args.extend(["--readout-mode", str(effective["readout_mode"])])
+    if effective.get("readout_ab_check"):
+        args.append("--readout-ab-check")
     if effective.get("head_converge_iters") is not None:
         args.extend(["--head-converge-iters", str(effective["head_converge_iters"])])
     if effective.get("head_fixed_ridge") is not None:
@@ -1084,7 +1088,9 @@ def _driver_memory_for(model_class: str) -> str:
     lighter (it collects only the ``D x K`` theta + labels, never the dense BOW)
     but still runs the in-memory per-node pc_topics_lr LR on the driver over
     train+test across arms, so it gets the same headroom. Lower
-    ``person_mod``/``vocab_size`` if even 8g OOMs on a large cohort.
+    ``person_mod``/``vocab_size`` if even 8g OOMs on a large cohort — or set
+    ``readout_mode: distributed``, which moves that fit onto the executors and
+    leaves the driver only a float32/uint8 test-split eval bundle.
     """
     override = os.environ.get("CHARM_DRIVER_MEMORY")
     if override:
@@ -1150,6 +1156,15 @@ def build_spark_submit_cmd(
     py_files = [
         repo_root / "spark-vi" / "dist" / "spark_vi.zip",
         repo_root / "charmpheno" / "dist" / "charmpheno.zip",
+        # gated_pc's distributed readout (--readout-mode distributed) ships its
+        # partition kernels to the executors inside mapPartitions closures, which
+        # cloudpickle serializes by MODULE REFERENCE — so this module must be
+        # importable ON THE EXECUTORS under the same top-level name the driver used
+        # (`import distributed_readout`, resolved there from the driver script's own
+        # directory). It is a numpy-only leaf, so it rides as a bare .py rather than
+        # in a package zip; the rest of `analysis/` stays driver-side, reached via
+        # PYTHONPATH=REPO_ROOT in client mode.
+        repo_root / "analysis" / "cloud" / "distributed_readout.py",
     ]
     overlay = cluster_overlay_path(repo_root)
     if overlay.exists():
