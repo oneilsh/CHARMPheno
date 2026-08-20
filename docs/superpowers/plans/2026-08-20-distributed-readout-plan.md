@@ -1,119 +1,133 @@
 # Distributed per-node readout — driver-safe at whole-Mondo scale
 
-**Date:** 2026-08-20
+**Date:** 2026-08-20 (v2 — batched multi-head fit replaces fit-side subsampling)
 **Context:** the scale-back handoff (`docs/reports/2026-08-20-pc-arc-closeout-…`) makes the
 unsup gate + post-hoc readout LR the model-of-use and flags the readout's driver-side
 θ-collect as "the one thing to watch" at whole-Mondo. This plan promotes it from watch item
 to **blocker**: collecting per-doc θ (and dense per-doc label/mask) to the driver breaks the
-scalability-first position at K≈3,300. The readout must become a distributed per-node fit.
+scalability-first position at K≈3,300. The readout must become a distributed fit.
+
+**v2 note:** v1 proposed exploding (doc, node) cells and fitting each node's sklearn LR in
+one `applyInPandas` task, with per-node case-control subsampling to bound task memory. That
+subsamples where we don't have to. The v2 design fits ALL C heads in ONE distributed
+optimization on full data — the same treeAggregate seam the engine's co-fit head already
+uses, with batched L-BFGS instead of blockwise Newton. Subsampling survives only as a
+debug/prototyping fallback.
 
 ## Why the current path breaks (sized)
 
-The readout path (`gated_pc_cloud.py:_collect_theta_labels`, used at lines ~799/1205/1347)
+The readout path (`gated_pc_cloud.py:_collect_theta_labels`, used at ~799/1205/1347)
 collects to the driver, for train AND test:
 
 - **θ (D,K) float64** — at K≈3,300 that is ~26 KB/doc; a 300k-doc cohort is **~8 GB**.
 - **label (D,C) + mask (D,C) float64** — same shape again: **~16 GB** more. (At
-  cardiovascular scale, C=K=444, the same three arrays are ~1 GB per split with
-  `readout_sample_frac=0.3` — inside the 8g PC driver; at whole-Mondo they are 10× over it.)
+  cardiovascular scale, C=K=444, the three arrays fit the 8g PC driver with
+  `readout_sample_frac=0.3`; at whole-Mondo they are 10× over it.)
 - Each scored arm then builds (N,C) proba arrays on the driver on top of that.
 
-`readout_sample_frac` is the WRONG lever to fix this: uniform row sampling guts the rare
-tail (a node with 100 positives at frac 0.05 keeps ~5) — exactly the Q1 slice the
-conditional/VOI positioning cares about (quartile split, `_print_headline`).
+`readout_sample_frac` is the WRONG lever: uniform row sampling guts the rare tail (a node
+with 100 positives at frac 0.05 keeps ~5) — exactly the Q1 slice the conditional/VOI
+positioning cares about.
 
 **A second, earlier wall (fit-side):** the Step-A adapter (`attach_labels`) materializes
-DENSE per-doc `label`/`labelMask` C-vectors as DataFrame columns. At C≈3,300 that is
-~53 KB/row → ~16 GB of extra corpus/shuffle weight at 300k docs — paid even by the unsup
-mainline (`weight_y=0`), which never reads them during the fit. The sparse source of truth
-(`frontier`) is already a column.
+DENSE per-doc `label`/`labelMask` C-vectors as DataFrame columns — ~53 KB/row at C≈3,300,
+~16 GB of corpus weight at 300k docs — paid even by the unsup mainline (`weight_y=0`),
+which never reads them during the fit. The sparse source of truth (`frontier`) is already
+a column.
 
-## Design
+## Design (v2): one batched multi-head fit, exact eval, nothing D-sized on the driver
 
-**Never move a (D,·) matrix to the driver. Explode sparse observed (doc, node) cells on
-executors; fit each node's LR where its rows live; return only per-node results.**
+**Why not Spark ML's `LogisticRegression` directly:** it is the right *algorithm*
+(executor-side treeAggregate of gradients, driver-side L-BFGS over coefficients only) at
+the wrong *granularity* — one label per job. C≈3,300 nodes means 3,300 sequential Spark
+jobs, each re-scanning θ several times per L-BFGS iteration, plus per-node observed-row
+masking and per-node standardization that don't fit its API. That is the
+"hundreds of unrelated classifiers" shape the project set out to avoid.
 
-The structural fact that makes this cheap: under `label_mask_mode=closure`, a doc's
-observed set is its frontier closure + siblings-of-closure (`frontier_to_label`) —
-O(depth·fan-out) nodes, tens not thousands. Positives are the closure; near-boundary
-negatives are the siblings. The exploded row count is ~D × (avg observed set), not D×C.
+**The key structure:** on FROZEN θ the C per-node problems are independent convex K-dim
+fits that can SHARE every data pass. One treeAggregate computes all C gradients at once —
+doc d contributes `(σ(w_c·θ_d + b_c) − y_dc)·θ_d` to node c for each cell the mask
+observes. This is exactly the engine's existing head-stats seam (`FlatLogisticHead`'s
+per-node aggregation in `spark_vi/models/topic/pc.py`) with the blockwise-Newton solve
+swapped for **batched L-BFGS** — i.e. the stash branch's "matrix-free full-K head"
+(handoff §6), run on frozen θ. And frozen θ kills both things that sank the co-fit head:
+no moving target (the +0.065 "solver" lever in the 0102 ladder was mostly the 1-step
+Newton chasing a moving θ) and no O(C·K²) Fisher (L-BFGS is O(C·K)).
 
-1. **Observed-cell explode (executors).** From `frontier` (not the dense label cols),
-   emit `(node c, y, θ_d)` rows per observed cell:
-   - `closure` mode: exact — closure ∪ sibling cells, y=1 on closure.
-   - `full` mode: positives exactly (closure cells); negatives are "every other doc" per
-     node, so use **per-node case-control sampling**: include doc d as a negative for node
-     c iff `hash(d, c) < q_c`, with `q_c = cap_c / n_neg_c`, `cap_c = min(r·n_pos_c,
-     N_max)` (r≈20, N_max≈20k). `n_pos_c` comes from one cheap aggregate
-     (`node_patient_counts`). Expected exploded rows: Σ_c cap_c — bounded and tunable.
-     Rare-node positives are ALWAYS kept: strictly better for the rare tail than
-     `readout_sample_frac`, which this replaces.
-   - **Skew guard — cap positives too.** The explode bounds the TOTAL row count, but
-     `groupBy(node)` lands each node's rows in ONE task, and a shallow/high-prevalence
-     node is positive for nearly every foreground doc (the root for ALL of them) — an
-     O(D) group. So positives are also hash-subsampled, at rate `s_c = P_max / n_pos_c`
-     when `n_pos_c > P_max` (~20k). With both caps every group is ≤ `P_max + cap_c` rows
-     regardless of D or depth; only shallow, data-rich nodes ever hit the positive cap,
-     so the rare tail is untouched. Applies in `closure` mode too (its per-DOC sets are
-     small, but a common node's per-NODE row count is not).
+1. **Fit — batched distributed L-BFGS over all C heads.**
+   - Parameters on the driver: W (C,K) + b (C) ≈ **87 MB** at 3,300² float64. L-BFGS
+     history (m=5–10) is 2m such matrices — ~0.9–1.7 GB; use float32 history and/or fit
+     nodes in batches of ~1,000 if the 8g driver objects.
+   - Per pass: broadcast W (87 MB — same order as the existing λ broadcast), treeAggregate
+     per-node gradient sums. `closure` mask mode: each doc touches only its observed cells
+     (tens) → cheap. `full` mode: a (C,K)@(K,) matvec per doc — heavy but embarrassingly
+     parallel, and one pass replaces 3,300 separate scans.
+   - The objective is separable across nodes, so per-node step control vectorizes: one
+     step-size vector, backtrack only where a node's Armijo check fails; freeze nodes as
+     they converge so late passes touch only stragglers.
+   - **Formulation must replicate the sklearn oracle** (`_lr_proba_per_label_masked`:
+     L2 with sklearn's `C=1` scaling — summed log-loss + ½‖w_c‖², UNPENALIZED intercept —
+     per-node standardization on that node's observed train rows). Standardization comes
+     from one masked mean/var aggregate ((C,K)×2 ≈ 174 MB, one-time) folded into the
+     objective as a fixed affine reparameterization — the fitted W is then mapped back to
+     raw-θ coordinates, so scoring needs no scaler.
+2. **Score (executors).** Broadcast the fitted (W, b); per doc emit `P(node c)` for the
+   cells eval needs. No collect.
+3. **Eval — exact, distributed, no subsampling.** Per-node metrics (AUC/AP, P@R, R@FDR,
+   ECE, reliability bins) need only that node's `(y, p)` pairs — **16 bytes/cell**, not a
+   K-wide feature row. Explode `(node, y, p)` and `groupBy(node)`: even a node positive
+   for every doc (the root) is an O(D)-row group of ~5 MB — trivially fine. v1's skew
+   guard existed to bound (rows × K) per-task design matrices; the batched fit never
+   materializes those, so the guard is moot. Driver receives (C,)-sized metric tables
+   only; `conditional_readout`, the quartile split and `format_arm_readout` consume them
+   unchanged (the `P(child|parent)` cohorts = parent-positive cells, already carried by
+   the closure explode).
+4. **VOI untouched:** β never leaves the fitted model; LLR/EIG readouts are per-node and
+   small.
+5. **Fallback (debug only):** the v1 per-node `applyInPandas` sklearn path with
+   case-control caps — useful for local prototyping and as an independent
+   cross-implementation check at small C, not the production path.
 
-2. **Per-node fit (executors).** `groupBy("node").applyInPandas`: sklearn LR per node in
-   the ladder-validated oracle formulation (intercept + standardized — exp 0099/0102's
-   winning readout formulation), same masked semantics as
-   `analysis.pc.evaluate._lr_proba_per_label_masked`. Each task also scores that node's
-   TEST cells and computes the per-node metrics (AUC/AP, P@R, R@FDR, ECE, reliability
-   bins) in place.
-
-3. **Case-control calibration correction.** Subsampling positives at rate `s_c` and
-   negatives at rate `q_c` biases the node's intercept by exactly `log(s_c/q_c)`
-   (prior-correction / King–Zeng); correct `b_c -= log(s_c/q_c)` before emitting
-   probabilities (s_c=1 for uncapped nodes reduces to the negatives-only correction). Required — calibrated `P` is a headline
-   deliverable; do it even though per-node isotonic (`calibrate_per_node`) could absorb it,
-   so raw probabilities stay meaningful. AUC/AP are invariant to negative subsampling in
-   expectation; ECE is not — compute ECE only after the intercept correction, and in `full`
-   mode report pooled ECE from inverse-probability-weighted negative cells.
-
-4. **Driver receives (C,)-sized results only:** the per-node metric table (feeds
-   `conditional_readout`, the quartile split, `format_arm_readout` unchanged — they are
-   per-node reductions already; `P(child|parent)` cohorts = parent-positive cells, which
-   the closure explode already carries) + the (C,K) coefficient matrix (~87 MB dense at
-   3,300² — fine; VOI's β never left the driver's fitted model, unaffected).
-
-5. **Task memory + the θ-width lever.** A node's design is rows_c × K: 20k × 3,300 × 8 B
-   ≈ 530 MB — too fat; 5k rows or float32 is fine (~130 MB). The real lever is **top-m
-   sparse θ**. NOTE: `GatedLDAModel._transform` folds held-out docs UNGATED full-K (label
-   unknown at scoring time — deployment convention), so θ sparsity is empirical, not
-   structural: **measure it first** (one dev-run stat: θ mass coverage at m=64/128/256).
-   If ≥99.9% at m≈128, store θ as top-m sparse → shuffle D×m instead of D×K and ~20 MB
-   sparse designs; if not, ship dense-float32 with a 5k cap and revisit.
+**Strategic bonus — this readout IS the §6 revival-condition artifact.** The handoff's
+revival condition wants a co-fit head that matches the gate (≥ ~0.74, now Q1 too). The
+converged full-K frozen-θ multi-head built here is exactly that candidate's solver; the
+co-fit variant is the same machinery warm-started and amortized (a few batched L-BFGS
+steps per SVI iteration) against the moving θ. Building the readout this way makes the
+one open PC question testable at a small marginal cost — one artifact, two uses.
 
 ## What must NOT change
 
 `pc_topics_lr` semantics: same per-node masked LR, same formulation, same metrics. The
-correctness gate is an **A/B equality run at cardiovascular scale** (C=444): distributed
-readout with caps disabled vs the current driver readout on the same frozen fit — per-node
-AUC must match to numerical tolerance before the driver path is retired.
+correctness gate is an **A/B equality run at cardiovascular scale** (C=444): batched
+distributed readout vs the current driver readout on the same frozen fit — per-node AUC
+equal to numerical tolerance before the driver path is retired.
 
 ## Steps (ordered)
 
-1. **θ top-m mass measurement** — piggyback one stat on the next dev run (feeds step 5's
-   dense-vs-sparse choice).
-2. **Implement** the explode + `applyInPandas` per-node fit behind `readout_mode=
-   {driver,distributed}` (default `driver` at C≤500, `distributed` above).
-3. **Correctness gate:** cardiovascular A/B equality run (caps off, same seed).
-4. **Rare-tail check:** per-node retained-positive counts vs the `readout_sample_frac`
-   path — expect strict Q1 improvement (all positives kept by construction).
+1. **Batched L-BFGS multi-head on frozen θ** behind `readout_mode={driver,distributed}`
+   (default `driver` at C≤500): the treeAggregate gradient seam (reuse/extend
+   `FlatLogisticHead` stats), sklearn-equivalent objective incl. standardization
+   reparameterization, vectorized step control + convergence freezing.
+2. **Correctness gate:** cardiovascular A/B equality run vs the driver readout (same
+   frozen fit, same seed).
+3. **Distributed eval:** the `(node, y, p)` explode + per-node metric aggregation;
+   equality-check metric tables against the driver `_bundle_masked` on the same scores.
+4. **Whole-Mondo readout smoke** on the first K≈3,300 gate fit (watch: broadcast size,
+   driver L-BFGS memory, stragglers under preemption — light per-pass state means cheap
+   recompute, the same property that saved the localized head in 0102).
 5. **Frontier-only corpus** for the unsup mainline: stop materializing dense
-   `label`/`labelMask` columns at assembly; derive cells at readout time. (Separate seam —
-   touches `attach_labels` consumers; do after the readout lands. Removes the fit-side
-   16 GB.)
-6. **Whole-Mondo readout smoke** on the first K≈3,300 gate fit.
+   `label`/`labelMask` columns at assembly; derive cells where needed. (Separate seam —
+   touches `attach_labels` consumers; removes the fit-side ~16 GB.)
+6. **(When ready to test PC revival)** wrap the same solver as the co-fit head
+   (warm-start + amortized steps + `head_trust_move`) and re-run the 0102 A/B — the §6
+   question answered with the §6-prescribed tool.
 
 ## Open questions
 
-- Negative-cap policy (r, N_max) — start r=20/N_max=20k and check per-node AUC stability
-  vs caps-off at C=444 before trusting it at whole-Mondo.
-- Degenerate nodes (single-class after explode) must yield NaN exactly as the current
-  masked scorer does, so macro means stay comparable.
-- `full`-mode pooled ECE weighting (item 3) needs a small unit test against an exact
-  driver-side computation on synthetic data.
+- L-BFGS memory policy at C·K ≈ 10.9M params (float32 history vs node batching) — decide
+  on the 8g driver empirically at C=444 first.
+- `full`-mask-mode pass cost at whole-Mondo (D × C·K flops/pass): if it binds, the
+  closure-mode readout is the deliverable and `full` becomes the reported-but-sampled
+  diagnostic — measure before optimizing.
+- Degenerate nodes (single-class observed set) must yield the same constant-prediction
+  fallback as `_lr_proba_per_label_masked`, so macro means stay comparable.
