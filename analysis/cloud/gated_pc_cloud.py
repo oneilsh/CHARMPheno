@@ -473,23 +473,36 @@ def _print_headline(results):
     # positive count at the median (nodes scored in BOTH arms), macro each half.
     gpn, upn = g.get("per_node") or {}, u.get("per_node") or {}
     both = sorted(set(gpn) & set(upn), key=lambda c: gpn[c]["n_pos"])
-    if len(both) >= 6:
-        npos = sorted(gpn[c]["n_pos"] for c in both)
-        thr = npos[len(npos) // 2]                       # median test-positive count
-        rare = [c for c in both if gpn[c]["n_pos"] < thr]
-        common = [c for c in both if gpn[c]["n_pos"] >= thr]
 
-        def _mac(nodes, arm_pn, key):
-            v = [arm_pn[c][key] for c in nodes if arm_pn[c].get(key) is not None]
-            return float(np.mean(v)) if v else None
-        print(f"[driver]   RARITY SPLIT (median test +ct={thr}; "
-              f"rare n={len(rare)} vs common n={len(common)} of {len(both)} shared nodes):",
-              flush=True)
-        for lbl, nodes in (("rare ", rare), ("commn", common)):
-            print(f"[driver]     {lbl} AUC {_d(_mac(nodes, gpn, 'auc'), _mac(nodes, upn, 'auc'))}"
+    def _mac(nodes, arm_pn, key):
+        v = [arm_pn[c][key] for c in nodes if arm_pn[c].get(key) is not None]
+        return float(np.mean(v)) if v else None
+    if len(both) >= 8:
+        # RARITY SPLIT by test-positive-count QUARTILE. The single-median split hides the
+        # extreme tail; the rarest quartile (Q1) is where the gate is most starved and where
+        # insight 0066 predicts PC's ONLY headroom. A positive Q1 delta = PC rescues the
+        # extreme low-mass tail even if the macro is negative.
+        npos = np.array([gpn[c]["n_pos"] for c in both], dtype=float)
+        edges = np.quantile(npos, [0.25, 0.5, 0.75])
+
+        def _qbin(c):
+            n = gpn[c]["n_pos"]
+            return int(n >= edges[0]) + int(n >= edges[1]) + int(n >= edges[2])
+        bins = {q: [] for q in range(4)}
+        for c in both:
+            bins[_qbin(c)].append(c)
+        print(f"[driver]   RARITY SPLIT by test-+ct QUARTILE ({len(both)} shared nodes, "
+              f"+ct edges {[int(e) for e in edges]}):", flush=True)
+        for q, lbl in enumerate(("Q1 rarest", "Q2       ", "Q3       ", "Q4 common")):
+            nodes = bins[q]
+            ns = sorted(gpn[c]["n_pos"] for c in nodes)
+            rng = f"+ct {ns[0]}-{ns[-1]}" if ns else "-"
+            print(f"[driver]     {lbl} n={len(nodes):<3} ({rng:<12}) "
+                  f"AUC {_d(_mac(nodes, gpn, 'auc'), _mac(nodes, upn, 'auc'))}"
                   f"   AP {_d(_mac(nodes, gpn, 'ap'), _mac(nodes, upn, 'ap'))}", flush=True)
-        print("[driver]     (a POSITIVE rare-node delta = PC rescues the low-mass tail; "
-              "flat/negative = the gate already serves it.)", flush=True)
+        print("[driver]     (a POSITIVE Q1 delta = PC rescues the extreme low-mass tail; "
+              "flat/negative across ALL quartiles = the gate already serves even the rarest.)",
+              flush=True)
 
     # Conditional 'sharpening' comparison: does supervision improve P(child|parent)
     # — the clinical subtyping task — over the unsupervised twin? Mean over edges.
