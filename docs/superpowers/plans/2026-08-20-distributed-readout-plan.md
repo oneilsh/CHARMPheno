@@ -73,7 +73,17 @@ Newton chasing a moving θ) and no O(C·K²) Fisher (L-BFGS is O(C·K)).
      raw-θ coordinates, so scoring needs no scaler.
 2. **Score (executors).** Broadcast the fitted (W, b); per doc emit `P(node c)` for the
    cells eval needs. No collect.
-3. **Eval — exact, distributed, no subsampling.** Per-node metrics (AUC/AP, P@R, R@FDR,
+3. **Eval — v2.1 refinement: a LEAN driver collect is enough (distributed metrics kept
+   as the escape hatch).** What breaks the driver is θ (K-wide float64 features) and the
+   float64 label/mask arrays for BOTH splits — not the eval inputs. Once the fit is
+   distributed, eval needs only the TEST split's per-node probabilities and labels:
+   collected as float32 proba (D_te,C) + uint8 y/mask, that is ~1.1 GB + 2×0.26 GB at
+   D_te≈80k, C≈3,300 — comfortably inside the 8g driver. So the ENTIRE existing eval
+   stack (`readout_from_proba`, `conditional_readout` with its all-ones-mask cohorts and
+   marginal-AP bars, `detection_readout`'s per-doc max, the quartile split) runs
+   UNCHANGED on the driver — zero semantic-drift risk, and the A/B equality gate reduces
+   to the LR solver itself. The fully distributed metric path below stays implemented as
+   the escape hatch for when D_te×C outgrows the driver (whole-population test splits): Per-node metrics (AUC/AP, P@R, R@FDR,
    ECE, reliability bins) need only that node's `(y, p)` pairs — **16 bytes/cell**, not a
    K-wide feature row. Explode `(node, y, p)` and `groupBy(node)`: even a node positive
    for every doc (the root) is an O(D)-row group of ~5 MB — trivially fine. v1's skew
