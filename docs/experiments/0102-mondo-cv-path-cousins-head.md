@@ -1,7 +1,7 @@
 ---
 id: 102
 slug: mondo-cv-path-cousins-head
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_cardiovascular
 cohort_def: population_mondo_cardiovascular
@@ -131,3 +131,27 @@ wasn't cut — now fixed). readout (dev, 30 iter): gated_pc pc_topics_lr macro A
 → Now testing head_support=path_cousins_kids (adds v's children's blocks, the subtype signal) to
 see if in-subtree descendant signal helps where up-tree cousins did not. If still ~0.625 ceiling,
 the gap is out-of-neighborhood comorbidity → MI-selected support (in progress).
+
+**2026-08-20 — FULL 100-iter run (`CHARM_DEV=0`, path_cousins_kids): the record. Dev CONFIRMED;
+the head ceiling is real; PC negative in EVERY rarity quartile, including Q1.**
+
+- **co-fit head (as trained) 0.567** — vs 0.572 at dev-30-iter: full training does NOT recover
+  it; the ceiling is real, not undertraining. `|w_CK|max=1.5e5` (the vanishing-relative-ridge
+  blowup again, insight 0067's signature). Ladder (frozen θ, localized support): engine Newton
+  converged 0.549 → +fixed ridge 0.534 → +fixed+intercept 0.601 → sklearn oracle **0.612** →
+  **full-K readout 0.688**. Even the localized oracle sits 0.076 below full-K — the missing
+  signal is out-of-DAG-neighborhood, as the path_cousins step already indicated.
+- **HEADLINE pc_topics_lr: 0.6876 vs unsup 0.7395 (Δ−0.0519)**; AP 0.4830 vs 0.5396 (Δ−0.0567);
+  node P@R0.9 Δ−0.0157; detection AP Δ+0.0000.
+- **Quartile rarity split (176 shared nodes, +ct edges [57, 175, 490]):** Q1 rarest (+ct 20–57)
+  AUC Δ−0.0348 / AP Δ−0.0388; Q2 Δ−0.0561; Q3 Δ−0.0594; Q4 common Δ−0.0572. **Negative in all
+  four quartiles — the Q1 rare-tail-rescue hypothesis (insight 0066's predicted headroom) is
+  refuted at this head quality.** Q1 is the *least* negative, but not positive.
+- **Conditional:** cond AUC Δ−0.0519, cond AP Δ−0.0567, multiclass top1 Δ−0.0276.
+
+Reads: (1) the `CHARM_DEV` ranking loop is **validated** — dev (0.681/0.739, head 0.572) and
+full (0.688/0.7395, head 0.567) tell the same story with the same ordering; (2) the PC-arc
+closeout (`docs/reports/2026-08-20-pc-arc-closeout-…`) now rests on a full-run record, not dev
+numbers; (3) per its §6, the revival condition (co-fit ≥ gate ≈ 0.74) stands, now with the
+rare-tail escape hatch closed at current head quality — a future co-fit head must clear the bar
+on Q1 too, not just macro.

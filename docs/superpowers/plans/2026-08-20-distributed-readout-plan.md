@@ -46,8 +46,16 @@ negatives are the siblings. The exploded row count is ~D × (avg observed set), 
      c iff `hash(d, c) < q_c`, with `q_c = cap_c / n_neg_c`, `cap_c = min(r·n_pos_c,
      N_max)` (r≈20, N_max≈20k). `n_pos_c` comes from one cheap aggregate
      (`node_patient_counts`). Expected exploded rows: Σ_c cap_c — bounded and tunable.
-     All positives are ALWAYS kept: strictly better for the rare tail than
+     Rare-node positives are ALWAYS kept: strictly better for the rare tail than
      `readout_sample_frac`, which this replaces.
+   - **Skew guard — cap positives too.** The explode bounds the TOTAL row count, but
+     `groupBy(node)` lands each node's rows in ONE task, and a shallow/high-prevalence
+     node is positive for nearly every foreground doc (the root for ALL of them) — an
+     O(D) group. So positives are also hash-subsampled, at rate `s_c = P_max / n_pos_c`
+     when `n_pos_c > P_max` (~20k). With both caps every group is ≤ `P_max + cap_c` rows
+     regardless of D or depth; only shallow, data-rich nodes ever hit the positive cap,
+     so the rare tail is untouched. Applies in `closure` mode too (its per-DOC sets are
+     small, but a common node's per-NODE row count is not).
 
 2. **Per-node fit (executors).** `groupBy("node").applyInPandas`: sklearn LR per node in
    the ladder-validated oracle formulation (intercept + standardized — exp 0099/0102's
@@ -56,9 +64,10 @@ negatives are the siblings. The exploded row count is ~D × (avg observed set), 
    TEST cells and computes the per-node metrics (AUC/AP, P@R, R@FDR, ECE, reliability
    bins) in place.
 
-3. **Case-control calibration correction.** Negative subsampling at rate q_c biases the
-   node's intercept by exactly `log q_c` (prior-correction / King–Zeng); correct
-   `b_c += log q_c` before emitting probabilities. Required — calibrated `P` is a headline
+3. **Case-control calibration correction.** Subsampling positives at rate `s_c` and
+   negatives at rate `q_c` biases the node's intercept by exactly `log(s_c/q_c)`
+   (prior-correction / King–Zeng); correct `b_c -= log(s_c/q_c)` before emitting
+   probabilities (s_c=1 for uncapped nodes reduces to the negatives-only correction). Required — calibrated `P` is a headline
    deliverable; do it even though per-node isotonic (`calibrate_per_node`) could absorb it,
    so raw probabilities stay meaningful. AUC/AP are invariant to negative subsampling in
    expectation; ECE is not — compute ECE only after the intercept correction, and in `full`
