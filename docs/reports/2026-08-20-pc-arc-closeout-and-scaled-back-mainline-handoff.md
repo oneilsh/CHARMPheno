@@ -117,13 +117,20 @@ at scale — and the honest result is that it **hurts**:
   construction*, and at weight_y=16 the shaping over-drove (`corr_relΔλ`=0.72, destructive).
   Whether a *good* supervisor + gentle shaping would reach neutral-or-help is **the one open PC
   question** — see §6. Consistent with insight 0066 ("PC-shaping helps only in proportion to
-  what the unsupervised fit misses") and 0097 ("shaping ~neutral; the gate already does well").
+  what the unsupervised fit misses") and exp 0097 ("shaping ~neutral; the gate already does well").
 
 **Caveat carried forward:** 0102 was a **30-iter DEV run** (`CHARM_DEV=1`), which undertrains
 both θ and the head. A **full 100-iter 0102** was staged but not yet interpreted; it would tell
 us whether 0.572 is a real ceiling or dev-mode undertraining, and (via the new **quartile rarity
 split**) whether PC helps the *extreme* low-mass tail (Q1) where insight 0066 predicts its only
 headroom. See §6/§7.
+
+> **Update (2026-08-20, post-handoff): the caveat is resolved.** The full 100-iter 0102 landed
+> and confirms the dev run: co-fit head **0.567** (ceiling real, not undertraining), readout
+> **0.688 vs 0.7395 (Δ−0.052)**, and **negative in all four rarity quartiles including Q1**
+> (Δ−0.035) — the rare-tail-rescue hypothesis is refuted at this head quality. The closeout now
+> rests on full-run evidence; the dev profile is validated as a ranking loop. Full numbers in
+> exp 0102's run log.
 
 ## 4. The scale-back — what it is
 
