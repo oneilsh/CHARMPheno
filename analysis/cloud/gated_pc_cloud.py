@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -773,9 +774,28 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
                     np.where(_keep[:, None], gW, 0.0),
                     np.where(_keep, gb, 0.0))
 
+        # Heartbeat: each stats call is a full treeAggregate over the train
+        # split, so a whole-Mondo solve is minutes/iteration and looks hung
+        # without it. Log every iteration for the first few (the cold-start
+        # steps are the slow, uncertain ones), then every 5th, then the finish
+        # line from the summary print below.
+        t0 = time.time()
+
+        def _progress(p, _t0=t0, _tag=tag, _ndeg=int(degenerate.sum()),
+                      _nfit=int(keep.sum())):
+            if p["iter"] > 3 and p["iter"] % 5:
+                return
+            # Degenerate nodes converge (grad exactly 0) at iteration 0; report
+            # progress over the FITTABLE nodes so the fraction reads as work left.
+            print(f"[driver]   {_tag}batched L-BFGS iter {p['iter']}: "
+                  f"{p['n_stats_calls']} data passes, "
+                  f"{max(0, p['n_converged'] - _ndeg)}/{_nfit} converged, "
+                  f"{p['n_active']} active, max|grad|={p['max_grad_inf_norm']:.3g}, "
+                  f"{time.time() - _t0:.0f}s elapsed", flush=True)
+
         W_std, b_std, info = solve_batched_lr(
             _fittable_stats, C, K, l2=l2, max_iter=max_iter, history=history,
-            gtol=gtol)
+            gtol=gtol, progress_fn=_progress)
     V, b_raw = fold_standardization(W_std, b_std, mu, sd)
     gmax = float(info["grad_inf_norm"][keep].max()) if keep.any() else 0.0
     # `converged` = gtol OR the principled numerical stall; at gtol=1e-4 (sklearn's

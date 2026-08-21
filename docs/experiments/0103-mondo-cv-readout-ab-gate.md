@@ -120,4 +120,18 @@ make -C analysis/cloud report ID=103
 
 ## Run log
 
-(pending)
+**2026-08-21 — CHARM_DEV smoke: distributed readout runs end-to-end at C=437.**
+Fit summary: `357 fittable nodes, 80 degenerate (constant fallback), observed train
+cells=9,897,319`. Headline (dev, 30-iter fit): pc_topics_lr **0.7008 vs unsup 0.7574**
+(Δ−0.0566); rarity split negative in all four quartiles (Q1 Δ−0.0561); detection Δ 0.
+Two expected shifts vs the 0102 dev record (0.681/0.739, 176 shared nodes) that are the
+new readout WORKING, not drift: **241 shared nodes scored (vs 176)** and quartile +ct
+edges ~3.3× larger ([83, 300, 1214] vs [57, 175, 490]) — the distributed path ignores
+`readout_sample_frac=0.3` and fits/scores on ALL rows, so ~1/0.3× more test positives per
+node, more nodes clear `min_label_count=20`, and both arms' AUCs read higher on the fuller
+eval. The PC-vs-unsup delta is unchanged (~−0.057), consistent with the 0102 story.
+Feedback applied: the batched solve looked silent while treeAggregating — a per-iteration
+heartbeat (`batched L-BFGS iter N: P data passes, X/357 converged, ... elapsed`) now
+prints (every iter for the first 3, then every 5th). **Gate verdict still pending**: read
+the `A/B readout equality gate` blocks + `batched L-BFGS:` summary lines from the full
+(non-dev) run.
