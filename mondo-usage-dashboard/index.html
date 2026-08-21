@@ -145,6 +145,15 @@ header.top{display:flex;flex-wrap:wrap;gap:16px 24px;align-items:flex-end;
 .kindtag{font-family:var(--mono);font-size:9.5px;color:var(--muted);border:1px solid var(--border);
   border-radius:4px;padding:0 4px;flex:0 0 auto}
 
+/* prevalence bar (hierarchy rows) */
+.pbar{width:94px;height:11px;flex:0 0 auto;border-radius:3px;background:var(--surface-2);
+  position:relative;overflow:hidden;margin-left:2px;border:1px solid var(--border)}
+.pbar .fill,.pbar .unc{position:absolute;left:0;top:0;bottom:0;border-radius:3px}
+.pbar .unc{opacity:.30}
+.pbar.small .fill{background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.0),rgba(255,255,255,.0) 2px,rgba(255,255,255,.45) 2px,rgba(255,255,255,.45) 4px)}
+.mode-t{margin-right:2px}
+.mode-t button[aria-selected="true"]{color:var(--accent)}
+
 /* treemap + table */
 #treemap-wrap{padding:14px}
 #treemap{width:100%;display:block;border-radius:8px;overflow:visible}
@@ -215,6 +224,10 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
   <div class="controls">
     <div class="filters" id="filters"></div>
     <div class="grow"></div>
+    <div class="tabs mode-t" id="mode" role="tablist" title="Per-term: each term's own exact-code count. Rolled up: subtree bracket [floor…ceiling] with aggregated uncertainty (overlap + suppression).">
+      <button role="tab" data-mode="term" aria-selected="true">Per-term</button>
+      <button role="tab" data-mode="rollup" aria-selected="false">Rolled up</button>
+    </div>
     <label class="search">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
       <input id="search" type="search" placeholder="Search term or MONDO id…" autocomplete="off">
@@ -229,7 +242,7 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
   <div class="panel">
     <div class="view on" id="view-tree"><div id="tree"></div><div class="hint" id="tree-hint"></div></div>
     <div class="view" id="view-treemap"><div id="treemap-wrap"><svg id="treemap"></svg></div>
-      <div class="tm-note">Area ∝ patients coded exactly at each reported term (≥20). Grouped by top-level body system. Used-small terms carry no publishable number and are not sized here — see the hierarchy.</div></div>
+      <div class="tm-note" id="tm-note"></div></div>
     <div class="view" id="view-table"><div id="table-scroll"></div><div class="hint" id="table-hint"></div></div>
   </div>
 
@@ -252,9 +265,16 @@ const CATMAP = Object.fromEntries(CATS.map(c=>[c.key,c]));
 const $=(s,r=document)=>r.querySelector(s);
 const el=(t,c,txt)=>{const e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e;};
 const fmt=n=>n==null?"":n.toLocaleString("en-US");
+const lg=v=>v>0?Math.log(1+v):0;                       // log scale for prevalence bars
+const fmtK=n=>{n=Math.round(n);return n<1000?(""+n):n<1e6?((n/1e3).toFixed(n<1e4?1:0)+"k"):((n/1e6).toFixed(1)+"M");};
 
+// Roll-up nominal: a suppressed (<20) term contributes an unknown count in [1,19];
+// SMALL_NOMINAL is the point estimate used for the "nominal add-up" only (the
+// rigorous bracket uses 1 and 19 for floor/ceiling and never this value).
+const SMALL_NOMINAL=10;
 let DATA=null, byId=new Map(), kids=new Map(), roots=[], expanded=new Set(), selected=null;
-const state={view:"tree",q:"",vis:new Set(CATS.filter(c=>c.on).map(c=>c.key))};
+let ROLL_MAX=1, OWN_MAX=1;
+const state={view:"tree",q:"",rollup:false,vis:new Set(CATS.filter(c=>c.on).map(c=>c.key))};
 
 /* ---------- load: embedded block > fetched real > fetched sample ---------- */
 async function boot(){
@@ -283,7 +303,7 @@ function load(d){
   roots=[...new Set(roots)];
   for(const [,arr] of kids) arr.sort(sortNodes);
   roots.sort(sortNodes);
-  computeVisibleDesc();
+  computeVisibleDesc(); computeRollup();
   renderSource(); renderKPIs(); renderFilters();
   for(const id of roots) expanded.add(id);          // open first level
   renderAll();
@@ -307,6 +327,40 @@ function computeVisibleDesc(){
   }
   for(const id of byId.keys()) anyVis(id);
   DATA._anyVis=memo;
+}
+
+/* Roll-up aggregates over each node's (primary-parent) subtree. We only have
+   per-term suppressed counts, so a subtree's true DISTINCT-patient coverage is
+   bracketed, not exact:
+     floor = largest single term    (>= this many distinct people — one term alone)
+     ceil  = sum of terms, each <20 cell at 19  (<= this many — only if zero overlap)
+   ceil-floor is the aggregated uncertainty (overlap/double-counting + suppression).
+   est = a labeled nominal add-up (small terms at SMALL_NOMINAL). Multi-parent terms
+   roll up under their primary parent only. */
+function computeRollup(){
+  const memo=new Map();
+  function agg(id){
+    if(memo.has(id))return memo.get(id);
+    const n=byId.get(id);
+    let R=n.state==="reported"?(n.count||0):0;         // Σ exact reported counts
+    let s=n.state==="used_small"?1:0;                   // # suppressed (<20) terms
+    let maxT=n.state==="reported"?(n.count||0):0;       // largest known term
+    let nTerms=n.kind==="root"?0:1;
+    let nUsed=(n.state==="reported"||n.state==="used_small")?1:0;
+    let nColl=n.collision?1:0;
+    for(const c of (kids.get(id)||[])){
+      const a=agg(c); R+=a.R; s+=a.s; maxT=Math.max(maxT,a.maxT);
+      nTerms+=a.nTerms; nUsed+=a.nUsed; nColl+=a.nColl;
+    }
+    const o={R,s,maxT,floor:maxT,ceil:R+19*s,est:R+SMALL_NOMINAL*s,nTerms,nUsed,nColl};
+    memo.set(id,o); return o;
+  }
+  for(const id of byId.keys()) agg(id);
+  DATA._roll=memo; ROLL_MAX=1; OWN_MAX=1;
+  for(const n of DATA.nodes){ if(n.kind==="root")continue;
+    ROLL_MAX=Math.max(ROLL_MAX,memo.get(n.id).ceil);
+    if(n.state==="reported")OWN_MAX=Math.max(OWN_MAX,n.count);
+  }
 }
 
 /* ---------------------------- data-source strip --------------------------- */
@@ -389,7 +443,9 @@ function renderTree(){
   };
   for(const r of roots) walk(r,0);
   host.appendChild(frag);
-  $("#tree-hint").textContent=`${shown.toLocaleString()} rows shown · click a row for detail · counts are per-term, never summed`;
+  $("#tree-hint").textContent=state.rollup
+    ? `${shown.toLocaleString()} rows · bar = subtree coverage [floor…ceiling]; number = distinct-patient bracket (overlap + <${DATA.meta.min_cell||20} suppression)`
+    : `${shown.toLocaleString()} rows · bar = this term's own patients; counts are per-term, never summed`;
 }
 function rowEl(n,depth,hasKids,isOpen){
   const r=el("div","row"+(selected===n.id?" sel":"")); r.style.paddingLeft=(14+depth*17)+"px";
@@ -402,11 +458,48 @@ function rowEl(n,depth,hasKids,isOpen){
   const sm=el("small",null,n.id);lbl.appendChild(sm);r.appendChild(lbl);
   if(n.collision){const cd=el("span","col");cd.title="shares a standard concept with sibling terms";r.appendChild(cd);}
   if(n.kind==="internal"){const kt=el("span","kindtag","node");r.appendChild(kt);}
-  const cls=n.state==="reported"?"reported":n.state==="used_small"?"used_small":"zero";
-  const cnt=el("span","cnt "+cls,n.state==="reported"?fmt(n.count):n.state==="used_small"?"<"+(DATA.meta.min_cell||20):"0");
+  r.appendChild(prevBar(n));
+  const cs=countSpec(n);
+  const cnt=el("span","cnt "+cs.cls,cs.text); if(cs.title)cnt.title=cs.title;
   r.appendChild(cnt);
   r.onclick=()=>select(n.id);
   return r;
+}
+function prevBar(n){
+  const bar=el("span","pbar"), min=DATA.meta.min_cell||20;
+  const w=f=>Math.min(100,Math.max(f>0?2:0,f*100))+"%";     // >=2% so tiny bars stay visible
+  if(state.rollup){
+    const r=DATA._roll.get(n.id); if(!r||r.nUsed===0)return bar;
+    const denom=lg(ROLL_MAX);
+    const unc=el("span","unc"); unc.style.width=w(lg(r.ceil)/denom); unc.style.background="var(--accent)";
+    const fill=el("span","fill"); fill.style.width=w(lg(r.floor)/denom); fill.style.background="var(--accent)";
+    bar.appendChild(unc); bar.appendChild(fill);
+    bar.title=`subtree ${r.floor>0?fmt(r.floor):('<'+min)}–${fmt(r.ceil)} distinct patients`;
+    return bar;
+  }
+  const denom=lg(OWN_MAX);
+  if(n.state==="reported"){
+    const fill=el("span","fill"); fill.style.width=w(lg(n.count)/denom);
+    fill.style.background=CATMAP[n.category].color; bar.appendChild(fill);
+  } else if(n.state==="used_small"){
+    bar.classList.add("small");
+    const fill=el("span","fill"); fill.style.width=w(lg(min-1)/denom);
+    fill.style.background=CATMAP.used_small.color; bar.appendChild(fill); bar.title=`1–${min-1} (withheld)`;
+  }
+  return bar;
+}
+function countSpec(n){
+  const min=DATA.meta.min_cell||20;
+  if(state.rollup){
+    const r=DATA._roll.get(n.id);
+    if(!r||r.nUsed===0)return{cls:"zero",text:"0"};
+    const fl=r.floor>0?fmtK(r.floor):("<"+min);
+    return{cls:"reported",text:`${fl}–${fmtK(r.ceil)}`,
+      title:`subtree distinct patients: ${r.floor>0?fmt(r.floor):('<'+min)} – ${fmt(r.ceil)}  ·  ${r.nUsed}/${r.nTerms} used, ${r.s} suppressed, ${r.nColl} collision  ·  nominal ≈ ${fmt(r.est)}`};
+  }
+  if(n.state==="reported")return{cls:"reported",text:fmt(n.count)};
+  if(n.state==="used_small")return{cls:"used_small",text:"<"+min};
+  return{cls:"zero",text:"0"};
 }
 function searchSet(q){                 // matched nodes + all their ancestors
   const keep=new Set();
@@ -430,6 +523,12 @@ function renderTreemap(){
   const svg=$("#treemap"); while(svg.firstChild)svg.removeChild(svg.firstChild);
   const W=svg.clientWidth||svg.parentElement.clientWidth-28, H=Math.max(360,Math.min(620,W*0.52));
   svg.setAttribute("viewBox",`0 0 ${W} ${H}`); svg.style.height=H+"px";
+  const note=$("#tm-note");
+  if(state.rollup){
+    note.innerHTML="Area ∝ <b>rolled-up subtree size</b> (nominal add-up). Top tiles = body systems, split by sub-branch. Hover for the honest distinct-patient bracket [floor…ceiling] — the sum over-counts comorbidities and includes &lt;20 cells at 19.";
+    return drawRollupTreemap(svg,W,H);
+  }
+  note.textContent="Area ∝ patients coded exactly at each reported term (≥20). Grouped by top-level body system. Used-small (<20) terms carry no publishable number and are not sized here — switch to Rolled up to include subtrees.";
   const groups=new Map();
   for(const n of DATA.nodes){
     if(n.state!=="reported"||!state.vis.has("reported"))continue;
@@ -461,6 +560,43 @@ function renderTreemap(){
     });
     // group label ribbon
     if(c.w>70&&c.h>16) svg.appendChild(svgText(c.x+4,c.y+ (c.h>40?c.h-6:12),
+      clip(g.label.toUpperCase(),Math.floor(c.w/7)),"var(--ink-2)","600",10,.9,"var(--mono)"));
+  });
+}
+function drawRollupTreemap(svg,W,H){
+  const min=DATA.meta.min_cell||20;
+  const systems=DATA.nodes.filter(n=>n.depth===1 && DATA._roll.get(n.id)&&DATA._roll.get(n.id).nUsed>0);
+  let gl=systems.map(n=>{
+    const r=DATA._roll.get(n.id);
+    let items=(kids.get(n.id)||[]).map(c=>({node:byId.get(c),r:DATA._roll.get(c)}))
+      .filter(x=>x.r&&x.r.nUsed>0).map(x=>({node:x.node,v:Math.max(1,x.r.est),r:x.r}));
+    if(!items.length) items=[{node:n,v:Math.max(1,r.est),r}];
+    return {node:n,label:n.label,value:Math.max(1,r.est),items};
+  }).filter(g=>g.value>0);
+  if(!gl.length){svg.innerHTML=`<text x="14" y="28" fill="var(--muted)" font-family="var(--mono)" font-size="13">No used terms in view.</text>`;return;}
+  gl.sort((a,b)=>b.value-a.value);
+  const cells=squarify(gl.map(g=>g.value),{x:0,y:0,w:W,h:H});
+  const maxE=Math.max(...gl.flatMap(g=>g.items.map(i=>i.v)));
+  gl.forEach((g,i)=>{
+    const c=cells[i]; const inner=squarify(g.items.map(it=>it.v),{x:c.x+2,y:c.y+2,w:c.w-4,h:c.h-4});
+    g.items.forEach((it,j)=>{
+      const t=inner[j]; if(t.w<1||t.h<1)return;
+      const lum=0.30+0.55*(lg(it.v)/lg(maxE||1));
+      const fl=it.r.floor>0?fmt(it.r.floor):("<"+min), cl=fmt(it.r.ceil);
+      const rect=svgEl("rect",{x:t.x,y:t.y,width:Math.max(0,t.w-1.5),height:Math.max(0,t.h-1.5),
+        rx:2,fill:"var(--accent)","fill-opacity":lum.toFixed(3),
+        stroke:"var(--surface)","stroke-width":1.5,style:"cursor:pointer"});
+      rect.addEventListener("mousemove",e=>showTip(e,
+        `${it.node.label} · ${fl}–${cl} patients${it.r.nColl?` · ${it.r.nColl} collision`:""}`));
+      rect.addEventListener("mouseleave",hideTip);
+      rect.addEventListener("click",()=>select(it.node.id));
+      svg.appendChild(rect);
+      if(t.w>62&&t.h>26){
+        svg.appendChild(svgText(t.x+5,t.y+15,clip(it.node.label,Math.floor(t.w/6.4)),"var(--surface)","600",11.5));
+        svg.appendChild(svgText(t.x+5,t.y+29,fmtK(it.v),"var(--surface)","500",10.5,.85));
+      }
+    });
+    if(c.w>70&&c.h>16) svg.appendChild(svgText(c.x+4,c.y+(c.h>40?c.h-6:12),
       clip(g.label.toUpperCase(),Math.floor(c.w/7)),"var(--ink-2)","600",10,.9,"var(--mono)"));
   });
 }
@@ -545,6 +681,22 @@ function select(id){
     <dt>MONDO id</dt><dd>${purl?`<a href="${purl}" target="_blank" rel="noopener">${n.id}</a>`:n.id}</dd>
     <dt>Std concepts</dt><dd>${(n.std_concepts||[]).map(c=>`<a href="https://athena.ohdsi.org/search-terms/terms/${c}" target="_blank" rel="noopener">${c}</a>`).join(", ")||"—"}</dd>
   </dl>`;
+  const rr=DATA._roll&&DATA._roll.get(id);
+  if(rr && (kids.get(id)||[]).length){
+    const fl=rr.floor>0?fmt(rr.floor):("&lt; "+min);
+    html+=`<div class="section-t">Subtree roll-up (estimate)</div>
+      <div class="warn" style="background:var(--surface-2);border-color:var(--border);color:var(--ink-2)">
+        Distinct patients across this subtree lie in
+        <b style="color:var(--ink)">${fl} – ${fmt(rr.ceil)}</b>.
+        <b>Floor</b> = the single largest term (at least this many distinct people).
+        <b>Ceiling</b> = the sum of its ${rr.nUsed} used term(s), each &lt;${min} cell counted as ${min-1},
+        reached only with zero overlap.${rr.nColl?` <b>${rr.nColl}</b> term(s) here share a standard concept — extra double-count risk.`:""}
+        Nominal add-up ≈ <b style="color:var(--ink)">${fmt(rr.est)}</b>.
+      </div>
+      <dl class="kv"><dt>Used terms</dt><dd>${fmt(rr.nUsed)} of ${fmt(rr.nTerms)}</dd>
+        <dt>Suppressed</dt><dd>${fmt(rr.s)} term(s) &lt;${min}</dd>
+        <dt>Collisions</dt><dd>${fmt(rr.nColl)}</dd></dl>`;
+  }
   const parents=(n.parents||[]).filter(p=>byId.has(p));
   html+=`<div class="section-t">Parents (${parents.length})</div><div class="chiplist">`+
     (parents.length?parents.map(p=>`<a data-goto="${p}">${esc(byId.get(p).label)}</a>`).join(""):`<span>root</span>`)+`</div>`;
@@ -586,6 +738,12 @@ document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
   document.querySelectorAll(".view").forEach(v=>v.classList.remove("on"));
   $("#view-"+state.view).classList.add("on"); renderAll();
 });
+document.querySelectorAll("#mode button").forEach(b=>b.onclick=()=>{
+  state.rollup=b.dataset.mode==="rollup";
+  document.querySelectorAll("#mode button").forEach(x=>x.setAttribute("aria-selected",x===b));
+  renderAll();
+  if(selected && $("#drawer").classList.contains("open")) select(selected);
+});
 let searchT; $("#search").addEventListener("input",e=>{clearTimeout(searchT);
   searchT=setTimeout(()=>{state.q=e.target.value.trim();renderAll();},130);});
 $("#open-file").onclick=()=>$("#file").click();
@@ -598,7 +756,7 @@ $("#theme").onclick=()=>{const r=document.documentElement;
 try{const saved=localStorage.getItem("mondo-theme");if(saved)document.documentElement.setAttribute("data-theme",saved);}catch(e){}
 addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer();});
 let rz; addEventListener("resize",()=>{clearTimeout(rz);rz=setTimeout(()=>{if(state.view==="treemap")renderTreemap();},150);});
-$("#foot").innerHTML=`<b>Method.</b> One Mondo term = one OMOP standard Condition concept it maps to via <span class="mono">same_as → Maps to</span>; a term's count is the distinct persons coded <b>exactly</b> at that concept — no <span class="mono">concept_ancestor</span> roll-up. A person is counted once per term; comorbidities appear under each distinct term. Counts of 1–${19} are shown as <b>&lt;20</b> (AoU small-cell rule); only per-term floored counts are published, so nothing can be differenced back. Term counts in the KPIs are counts of terms, not patients, and are exact.`;
+$("#foot").innerHTML=`<b>Method.</b> One Mondo term = one OMOP standard Condition concept it maps to via <span class="mono">same_as → Maps to</span>; a term's count is the distinct persons coded <b>exactly</b> at that concept — no <span class="mono">concept_ancestor</span> roll-up. A person is counted once per term; comorbidities appear under each distinct term. Counts of 1–${19} are shown as <b>&lt;20</b> (AoU small-cell rule); only per-term floored counts are published, so nothing can be differenced back. Term counts in the KPIs are counts of terms, not patients, and are exact. <b>Rolled up</b> brackets a subtree's distinct patients in <b>[floor, ceiling]</b> — floor = its largest single term, ceiling = the sum with each &lt;20 cell at 19 — so the interval width carries both the double-counting (overlap) and the suppression uncertainty; the sum is an upper bound, never a distinct-patient total.`;
 
 boot();
 </script>
