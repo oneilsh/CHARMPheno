@@ -853,6 +853,8 @@ def build_gated_pc_args(
         args.extend(["--readout-mode", str(effective["readout_mode"])])
     if effective.get("readout_ab_check"):
         args.append("--readout-ab-check")
+    if effective.get("readout_max_iter") is not None:
+        args.extend(["--readout-max-iter", str(effective["readout_max_iter"])])
     if effective.get("head_converge_iters") is not None:
         args.extend(["--head-converge-iters", str(effective["head_converge_iters"])])
     if effective.get("head_fixed_ridge") is not None:
@@ -1056,7 +1058,9 @@ def _apply_dev_profile(effective: dict) -> dict:
     exp docs per attempt. Touches ONLY iteration counts, never the data / DAG / vocab, so the
     co-fit head AUC and readout Δ *ranking* between configs is preserved while wall-clock drops
     ~3-4x. Warmup is cut in proportion to max_iter (else supervision never ramps in — the
-    warmup↔iters coupling). Only affects pc / gated_pc; uses min() so it only ever SHRINKS.
+    warmup↔iters coupling). The post-fit readout is capped on the same doctrine
+    (``readout_max_iter``), since at whole-Mondo C its batched solve is a wall-clock item in
+    its own right. Only affects pc / gated_pc; uses min() so it only ever SHRINKS.
     Calibrate once (one config at dev vs full) to confirm the ranking holds before trusting it.
     """
     if os.environ.get("CHARM_DEV", "").strip().lower() not in ("1", "true", "yes", "on"):
@@ -1067,6 +1071,14 @@ def _apply_dev_profile(effective: dict) -> dict:
     dev["max_iter"] = min(int(effective.get("max_iter", 100)), 30)
     dev["weight_y_warmup_iters"] = min(int(effective.get("weight_y_warmup_iters", 0) or 0), 8)
     dev["grad_cavi_iters"] = min(int(effective.get("grad_cavi_iters", 20)), 10)
+    # The distributed readout is its own wall-clock item, AFTER the fit: each arm
+    # pays a batched L-BFGS whose every iteration is a full pass over the train
+    # split (C=437: ~200 iterations, ~30 min, and a supervised arm runs three such
+    # solves). Cap it on the same doctrine as the fit iterations — by ~iteration 60
+    # the macro AUC RANKING between configs is stable to ~1e-3 while the gradient
+    # still has decades to fall, so the dev loop's comparison survives and only the
+    # final digits do not. Final numbers come from the full (CHARM_DEV=0) run.
+    dev["readout_max_iter"] = min(int(effective.get("readout_max_iter", 200)), 60)
     # the unsup_gated / baseline twin has its OWN iter budget; cut it too or it runs full
     bmi = int(effective.get("baseline_max_iter", -1) or -1)
     if bmi > 0:
@@ -1074,6 +1086,7 @@ def _apply_dev_profile(effective: dict) -> dict:
     print(f"[run-exp] CHARM_DEV: dev profile — max_iter={dev['max_iter']}, "
           f"weight_y_warmup_iters={dev['weight_y_warmup_iters']}, "
           f"grad_cavi_iters={dev['grad_cavi_iters']}, "
+          f"readout_max_iter={dev['readout_max_iter']}, "
           f"baseline_max_iter={dev.get('baseline_max_iter', effective.get('baseline_max_iter'))} "
           f"(fast RANKING loop, NOT final numbers)", flush=True)
     return dev

@@ -12,7 +12,7 @@ gate ("per-node AUC equal to numerical tolerance before the driver path is
 retired") is that comparison at cardiovascular scale; this file is its unit-scale
 rehearsal, plus the algebraic identities the distributed layer will lean on.
 
-Five gates:
+Seven gates:
 
   1. **Oracle equivalence** on a synthetic readout with the mask shapes the real
      readout sees — a fully-observed node, sparse (~5%) nodes, a rare node with
@@ -29,6 +29,15 @@ Five gates:
   5. **Zero-variance features** (constant across a node's observed rows) produce
      no NaNs, a ~0 coefficient, and no material disturbance to the other
      coefficients — matching sklearn's `_handle_zeros_in_scale`.
+  6. **The progress hook** fires once per outer iteration and reports the run it
+     is heartbeating.
+  7. **Warm starts** (`x0`): the raw-space round trip is exact, a warm-started
+     split fit converges to the cold answer, it beats cold at every small
+     iteration budget (the regime the readout runs in — full convergence is
+     NOT reliably cheaper, see the solver docstring), a restart at the optimum
+     stops instead of crawling out `max_iter`, an explicit zero `x0` is the cold
+     path bit for bit, and a masked node stays a no-op only because its `x0` row
+     is zeroed.
 
 **On the reference's tolerance.** The oracle is fit here with ``tol=1e-8``
 instead of sklearn's default ``tol=1e-4``. This is a statement about the ORACLE,
@@ -56,6 +65,7 @@ from analysis.pc.batched_lr import (
     solve_batched_lr,
     standardization_moments,
     standardized_grad_from_raw,
+    unfold_standardization,
 )
 
 # See the module docstring: the reference is converged past its default so the
@@ -159,18 +169,27 @@ def _oracle_proba(Pi, y, obs, Pi_te, tol=_SK_TOL):
     return proba
 
 
-def _batched_fit(Pi, y, obs, C, K, **solver_kw):
+def _batched_fit(Pi, y, obs, C, K, warm_start=None, **solver_kw):
     """Fit all heads at once; returns ``(V, b_raw, info, degen, const)``.
 
     Degenerate columns are zeroed out of the mask BEFORE the moments/stats are
     built — that is the contract's "caller masks degenerate nodes out of stats",
     and it is what turns an unbounded single-class fit into an exact no-op.
+
+    ``warm_start=(V, b_raw)`` plays the same caller role the cloud driver's
+    `_fit_readout_heads` plays: a warm start arrives in RAW θ coordinates, is
+    unfolded through THIS fit's own moments, and has the rows of the nodes THIS
+    fit masks zeroed (their objective is the bare ridge, stationary only at 0).
     """
     degen, const = _degenerate_mask(y, obs)
     obs_fit = obs.copy()
     obs_fit[:, degen] = False
     mu, sd, _ = standardization_moments(Pi, obs_fit)
     stats_fn = make_inmemory_stats_fn(Pi, y, obs_fit, mu, sd)
+    if warm_start is not None:
+        W0, b0 = unfold_standardization(warm_start[0], warm_start[1], mu, sd)
+        solver_kw["x0"] = (np.where(degen[:, None], 0.0, W0),
+                           np.where(degen, 0.0, b0))
     W, b, info = solve_batched_lr(stats_fn, C, K, **solver_kw)
     V, b_raw = fold_standardization(W, b, mu, sd)
     return V, b_raw, info, degen, const, (W, b, mu, sd)
@@ -274,6 +293,14 @@ def test_fold_standardization_scores_identically(seed):
         [((theta - mu[c]) / sd[c]) @ W_std[c] + b_std[c] for c in range(C)], axis=1
     )
     assert np.abs(raw - std).max() < 1e-10
+
+    # ...and the inverse map is exact, which is what lets a warm start travel in
+    # raw coordinates between fits that standardize against DIFFERENT rows.
+    W_back, b_back = unfold_standardization(V, b_raw, mu, sd)
+    assert np.abs(W_back - W_std).max() < 1e-12
+    assert np.abs(b_back - b_std).max() < 1e-12
+    V2, b_raw2 = fold_standardization(W_back, b_back, mu, sd)
+    assert np.abs(V2 - V).max() < 1e-12 and np.abs(b_raw2 - b_raw).max() < 1e-12
 
 
 # --------------------------------------------------------------------------- #
@@ -498,3 +525,177 @@ def test_progress_fn_fires_once_per_iteration_and_tracks_the_run():
     # degenerate nodes are converged from iteration 0, so every event already
     # counts them — the driver-side display subtracts them; the hook must not.
     assert all(e["n_converged"] >= int(degen.sum()) for e in events)
+
+
+# --------------------------------------------------------------------------- #
+# 7. warm starts                                                               #
+# --------------------------------------------------------------------------- #
+def _row_subset_problem(p, keep_frac=0.75, seed=99):
+    """The driver's SECOND fit, in miniature: the same nodes on 75% of the rows.
+
+    This is the shape both warm-started solves in the cloud driver have — the
+    isotonic calibrator's 75/25 train split and the A/B harness's row sample —
+    a near-identical convex problem whose optimum sits a short walk from the
+    full-data one.
+    """
+    rng = np.random.default_rng(seed)
+    rows = rng.random(p["Pi"].shape[0]) < keep_frac
+    return p["Pi"][rows], p["y"][rows], p["obs"][rows]
+
+
+def test_warm_start_lands_on_the_same_optimum():
+    """A warm-started split fit converges to the cold fit's answer.
+
+    The init cannot move a convex optimum, so run to `gtol` the two must agree —
+    this is the gate that a warm start is a WALL-CLOCK device and never a
+    numerical one. The start is the FULL-data fit, mapped into the 75% fit's own
+    standardized coordinates: the raw-space hand-off `unfold_standardization`
+    exists for exactly this.
+
+    Deliberately NOT asserted here: that warm reaches `gtol` in fewer passes. It
+    does not, on a problem this small (23 vs 14) — see the solver docstring's
+    "what it does NOT buy": the endgame belongs to the curvature history, not to
+    the starting point. The cost claim is the capped-budget test below, which is
+    the regime the readout actually runs in.
+    """
+    p = _readout_problem()
+    C, K = p["C"], p["K"]
+    V_full, b_full, _, _, _, _ = _batched_fit(p["Pi"], p["y"], p["obs"], C, K,
+                                              gtol=1e-4)
+    Pi_s, y_s, obs_s = _row_subset_problem(p)
+
+    V_cold, b_cold, i_cold, degen, _, _ = _batched_fit(Pi_s, y_s, obs_s, C, K,
+                                                       gtol=1e-4)
+    V_warm, b_warm, i_warm, degen_w, _, _ = _batched_fit(
+        Pi_s, y_s, obs_s, C, K, warm_start=(V_full, b_full), gtol=1e-4)
+
+    assert i_cold["warm_started"] is False and i_warm["warm_started"] is True
+    assert degen_w.tolist() == degen.tolist()
+    live = ~degen
+    assert i_warm["converged"][live].all()
+    # same answer: compare the SCORES (what the readout emits), on the fit rows.
+    z_cold = Pi_s @ V_cold[live].T + b_cold[live]
+    z_warm = Pi_s @ V_warm[live].T + b_warm[live]
+    assert np.abs(z_warm - z_cold).max() < 1e-3
+
+
+def test_warm_start_beats_cold_under_an_iteration_cap():
+    """Capped at a handful of iterations, the warm run is the better answer.
+
+    This is the property the CHARM_DEV readout cap leans on: with `max_iter`
+    reached before `gtol`, the returned point is just "wherever the budget got
+    to", so a start nearer the optimum is not merely faster, it is strictly
+    better. Measured against the converged cold solve as ground truth.
+    """
+    p = _readout_problem()
+    C, K = p["C"], p["K"]
+    V_full, b_full, _, _, _, _ = _batched_fit(p["Pi"], p["y"], p["obs"], C, K,
+                                              gtol=1e-4)
+    Pi_s, y_s, obs_s = _row_subset_problem(p)
+    V_ref, b_ref, _, degen, _, _ = _batched_fit(Pi_s, y_s, obs_s, C, K, gtol=1e-4)
+    live = ~degen
+    z_ref = Pi_s @ V_ref[live].T + b_ref[live]
+
+    def _err(V, b):
+        return np.abs((Pi_s @ V[live].T + b[live]) - z_ref).max()
+
+    # Every budget from one iteration up, not a single lucky cap: the claim is
+    # that the warm iterate DOMINATES, not that it wins at one point.
+    for cap in (1, 2, 3, 5, 10):
+        V_c, b_c, _, _, _, _ = _batched_fit(Pi_s, y_s, obs_s, C, K, gtol=1e-4,
+                                            max_iter=cap)
+        V_w, b_w, _, _, _, _ = _batched_fit(Pi_s, y_s, obs_s, C, K, gtol=1e-4,
+                                            max_iter=cap,
+                                            warm_start=(V_full, b_full))
+        assert _err(V_w, b_w) < _err(V_c, b_c), f"cap={cap}"
+
+
+def test_warm_start_at_the_optimum_stops_instead_of_crawling():
+    """Restarted AT its own answer under an unreachable `gtol`, the batch stops.
+
+    The failure this pins cost 200 distributed passes before the guard existed:
+    a warm start lands in the flat bottom of the objective, where `y = ΔG` is
+    roundoff, `s·y` falls under the curvature guard so no pair is ever stored
+    again, and the frozen L-BFGS model proposes the same 1e-7 step forever. The
+    steps still DECREASE F (by ~1e-13 relative), so the `_FTOL_REL` stall rule
+    never fires and the node runs out `max_iter` one pass at a time. Two
+    consecutive curvature-free iterations now stop it as `stalled` — the
+    existing name for "as good as this arithmetic gets".
+
+    `gtol=1e-8` is below the summed loss's own roundoff floor here, so NEITHER
+    run can stop on the gradient: this measures the stopping rules alone.
+    """
+    p = _readout_problem()
+    C, K = p["C"], p["K"]
+    V, b_raw, _, degen, _, _ = _batched_fit(p["Pi"], p["y"], p["obs"], C, K,
+                                            gtol=1e-4)
+    _, _, i_warm, _, _, _ = _batched_fit(p["Pi"], p["y"], p["obs"], C, K,
+                                         gtol=1e-8, warm_start=(V, b_raw))
+    _, _, i_cold, _, _, _ = _batched_fit(p["Pi"], p["y"], p["obs"], C, K,
+                                         gtol=1e-8)
+    live = ~degen
+    assert i_warm["converged"][live].all(), "the guard must stop every node"
+    assert i_warm["n_iter"].max() < 15, (
+        f"warm restart crawled for {int(i_warm['n_iter'].max())} iterations; "
+        "the curvature-free stall guard is not firing")
+    assert i_warm["n_stats_calls"] < i_cold["n_stats_calls"]
+
+
+def test_zero_x0_is_the_cold_start_bit_for_bit():
+    """An explicit zero `x0` is the default path, unchanged — the compatibility gate.
+
+    `x0=None` must remain byte-identical to every solve that ran before this
+    argument existed, so the only difference an explicit zero start may make is
+    the `warm_started` flag.
+    """
+    p = _readout_problem()
+    C, K = p["C"], p["K"]
+    V0, b0, i0, _, _, (W0, bs0, _, _) = _batched_fit(p["Pi"], p["y"], p["obs"],
+                                                     C, K, gtol=1e-4)
+    Vz, bz, iz, _, _, (Wz, bsz, _, _) = _batched_fit(
+        p["Pi"], p["y"], p["obs"], C, K, gtol=1e-4,
+        x0=(np.zeros((C, K)), np.zeros(C)))
+    assert np.array_equal(W0, Wz) and np.array_equal(bs0, bsz)
+    assert np.array_equal(V0, Vz) and np.array_equal(b0, bz)
+    assert int(i0["n_stats_calls"]) == int(iz["n_stats_calls"])
+    assert i0["warm_started"] is False and iz["warm_started"] is True
+
+
+def test_masked_node_freezes_only_when_its_warm_start_row_is_zero():
+    """The degenerate-node no-op is a property of the ZERO row, not of the mask.
+
+    A node the caller masked out of `stats_fn` has no data term left, so its
+    objective is the bare ridge `0.5*l2*‖w‖²` — gradient `l2*w`, which vanishes
+    only at the origin. Zeroing its `x0` row (what `_batched_fit` and the cloud
+    driver's `_fit_readout_heads` both do) keeps the clean iteration-0 freeze and
+    the all-zero params the constant-prediction fallback expects. Leaving a
+    stale row there instead makes the solver spend real distributed passes
+    walking a node that will be OVERWRITTEN by a constant at scoring time — this
+    test pins both halves so the zeroing is never quietly dropped.
+    """
+    p = _readout_problem()
+    C, K = p["C"], p["K"]
+    V_full, b_full, _, _, _, _ = _batched_fit(p["Pi"], p["y"], p["obs"], C, K,
+                                              gtol=1e-4)
+    # nodes 6 (single-class) and 7 (zero-observation) are the masked ones
+    _, _, info, degen, _, (W, b, mu, sd) = _batched_fit(
+        p["Pi"], p["y"], p["obs"], C, K, gtol=1e-4, warm_start=(V_full, b_full))
+    assert degen.any()
+    for c in np.where(degen)[0]:
+        assert info["n_iter"][c] == 0
+        assert info["converged"][c]
+        assert np.all(W[c] == 0.0) and b[c] == 0.0
+
+    # the contrapositive: a NONZERO row on a masked node is not stationary.
+    obs_fit = p["obs"].copy()
+    obs_fit[:, degen] = False
+    mu2, sd2, _ = standardization_moments(p["Pi"], obs_fit)
+    stats_fn = make_inmemory_stats_fn(p["Pi"], p["y"], obs_fit, mu2, sd2)
+    W0, b0 = unfold_standardization(V_full, b_full, mu2, sd2)
+    W0[degen] = 1.0                              # deliberately NOT zeroed
+    _, _, info_bad = solve_batched_lr(stats_fn, C, K, gtol=1e-4, max_iter=3,
+                                      x0=(W0, b0))
+    assert (info_bad["n_iter"][degen] > 0).all(), (
+        "a masked node with a stale warm-start row must be seen to iterate — "
+        "if this ever passes trivially the ridge argument above has changed"
+    )
