@@ -259,3 +259,28 @@ def test_densify_lean_blocks_handles_dense_mask_marker():
     assert np.array_equal(y, np.array([[1, 0, 0], [0, 0, 1]], dtype=np.uint8))
     assert np.array_equal(mask, np.ones((2, 3), dtype=np.uint8))
     assert ids == [7, 8]
+
+
+def test_stdout_tee_appends_sanitized_lines_and_survives_truncation(tmp_path, capsys):
+    """The durable driver log exists because exp 0103 lost 4h of results to a
+    summary.md that came back empty — appends riding a long-lived handle on a
+    replaced/truncated file land on an unlinked inode. The tee must (a) commit
+    complete lines only, (b) drop the wrapper's patient/noise patterns, and
+    (c) keep appending to a file that was truncated mid-run, which is the
+    per-line-reopen property the whole design hangs on."""
+    import io
+    from _driver_common import _StdoutTee
+
+    log = tmp_path / "driver_log.md"
+    real = io.StringIO()
+    tee = _StdoutTee(log, real)
+    tee.write("[driver] part")           # incomplete: nothing committed yet
+    assert not log.exists() or log.read_text() == ""
+    tee.write("ial line\n")
+    tee.write("person_id=12345 secret\n")     # patient pattern: dropped
+    tee.write("26/08/21 01:02:03 INFO Noise: x\n")  # log4j noise: dropped
+    log.write_text("")                   # simulate mid-run truncation
+    tee.write("[driver] after truncation\n")
+    assert log.read_text() == "[driver] after truncation\n"
+    assert "[driver] partial line" in real.getvalue()
+    assert "secret" in real.getvalue()   # terminal still sees everything
