@@ -1,0 +1,9 @@
+# Whole-Mondo ALL-BRANCH case-finding cohort (the 0104+ mainline). Same contract
+# as population_mondo_cardiovascular.yaml: the corpus identity does NOT come from
+# `disease` — the label DAG is the FULL Mondo powered hierarchy (`dag_source:
+# mondo` with NO `mondo_branch`, i.e. every body system; K≈3,827 per insight
+# 0071), patients are placed by SNOMED-climb, and the index is population-wide.
+# This file exists so load_defaults finds a <cohort>.yaml to merge over
+# _base.yaml; `disease` is vestigial here.
+cohort: population_mondo_all
+cohort_def: population_mondo_all
