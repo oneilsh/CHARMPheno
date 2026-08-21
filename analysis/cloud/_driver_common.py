@@ -86,3 +86,75 @@ def make_spark_session(app_name: str) -> SparkSession:
         flush=True,
     )
     return spark
+
+
+# --------------------------------------------------------------------------- #
+# Durable driver log                                                           #
+# --------------------------------------------------------------------------- #
+# Mirror of scripts/run_experiment.py's PATIENT_PATTERNS + NOISE_PATTERNS (the
+# wrapper's sanitize boundary). Duplicated by design: this tee runs INSIDE the
+# spark-submit driver, which cannot import the wrapper, and the whole point is
+# to not depend on the wrapper being alive. Keep the two lists in sync.
+import re as _re
+
+_TEE_DROP_PATTERNS = [
+    _re.compile(r"person_hash", _re.IGNORECASE),
+    _re.compile(r"person_id\s*=\s*\S+"),
+    _re.compile(r"\bhash:[0-9a-f]{6,}", _re.IGNORECASE),
+    _re.compile(r"transform sample", _re.IGNORECASE),
+    _re.compile(r"^\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} (INFO|WARN|DEBUG) "),
+    _re.compile(r"\[CONTEXT ratelimit_period="),
+]
+
+
+class _StdoutTee:
+    """Forward every write to the real stdout AND append sanitized complete
+    lines to a file, opening/closing the file PER LINE.
+
+    The per-line reopen is the point, not an inefficiency to fix: exp 0103's
+    smoke lost four hours of results because the only durable copy rode a
+    single long-lived append handle in the wrapper (summary.md came back
+    holding nothing past the session header — consistent with the file being
+    replaced/truncated under the handle, after which every flushed write
+    landed on an unlinked inode). An open-append-close per committed line
+    survives truncation, rotation, wrapper death, and driver death mid-run;
+    at a few thousand committed lines per multi-hour run the syscall cost is
+    noise. Sanitization mirrors the wrapper's (patient rows and log4j chatter
+    never reach disk)."""
+
+    def __init__(self, path, real):
+        self._path = path
+        self._real = real
+        self._buf = ""
+
+    def write(self, s):
+        n = self._real.write(s)
+        self._buf += s
+        *done, self._buf = self._buf.split("\n")
+        kept = [ln for ln in done
+                if not any(p.search(ln) for p in _TEE_DROP_PATTERNS)]
+        if kept:
+            try:
+                with open(self._path, "a") as f:
+                    f.write("\n".join(kept) + "\n")
+            except OSError:
+                pass  # a failing tee must never take down the run it protects
+        return n
+
+    def flush(self):
+        self._real.flush()
+
+    def __getattr__(self, name):  # fileno/isatty/encoding for libraries that ask
+        return getattr(self._real, name)
+
+
+def install_stdout_tee(path) -> None:
+    """Tee sys.stdout to `path` for the REST OF THE PROCESS (no restore: the
+    drivers exit after main, and a context manager would force a whole-main
+    re-indent for a lifetime that is the process anyway). Call once, right
+    after the run dir exists, BEFORE the fit starts. Idempotent per path."""
+    import sys
+    if isinstance(sys.stdout, _StdoutTee):
+        return
+    print(f"[driver] durable log: {path}", flush=True)
+    sys.stdout = _StdoutTee(path, sys.stdout)

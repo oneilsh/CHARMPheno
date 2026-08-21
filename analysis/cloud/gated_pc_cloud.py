@@ -536,6 +536,19 @@ def _print_headline(results):
               flush=True)
 
 
+def _dump_partial_results(out, results):
+    """Atomically rewrite `<out>/results_partial.json` with the arms so far.
+
+    Called after each arm's readout lands so a multi-hour run that dies (or a
+    cluster that times out) before the final manifest.json write still leaves a
+    machine-readable record of every COMPLETED arm — manifest.json is written
+    once, at the very end, and is lost with everything after it otherwise.
+    Write-to-temp + rename so a mid-write death never leaves a torn file."""
+    tmp = out / "results_partial.json.tmp"
+    tmp.write_text(json.dumps(results, indent=2))
+    tmp.replace(out / "results_partial.json")
+
+
 def dag_closure_parents(parent_int, C):
     """Length-C list of parent-LABEL-index lists for the ungated DAG-closure head.
 
@@ -1395,6 +1408,15 @@ def main() -> int:
 
     args = parse_args()
     configure_logging()
+    # The run dir exists from minute zero and every [driver] line is teed to a
+    # durable, sanitized driver_log.md inside it — open-append-close per line,
+    # so results survive wrapper death, cluster timeout, and summary.md
+    # truncation (exp 0103's smoke lost 4h of readout output to exactly that;
+    # `gated_pc_report --summary <run>/driver_log.md` digests this file too).
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    from _driver_common import install_stdout_tee
+    install_stdout_tee(out / "driver_log.md")
     extra_domains = tuple(d for d in args.extra_domains.split(",") if d)
     with make_spark_session(app_name="gated-pc-fit") as spark:
         if args.dag_source == "mondo":
@@ -1612,6 +1634,7 @@ def main() -> int:
                     test_scored, C, sample_frac=_sf, seed=_sd)
                 results["gated_pc"], proba_gp = _score_full(
                     Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+            _dump_partial_results(out, results)
             print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
                   flush=True)
             if ab_check:
@@ -1830,6 +1853,7 @@ def main() -> int:
                         seed=(args.seed if args.seed is not None else 0))
                     results["unsup_gated"], proba_us = _score_full(
                         Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+                _dump_partial_results(out, results)
                 print(format_arm_readout("unsup_gated (pc_topics_lr)",
                                          results["unsup_gated"]), flush=True)
                 if ab_check:
@@ -1878,6 +1902,7 @@ def main() -> int:
                     Pi_te, y_te, m_te, _ = _collect_theta_labels(
                         dh_model.transform(bundle.test_df), C)
                     results["dag_head"] = _score(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te)
+                _dump_partial_results(out, results)
                 print(format_arm_readout("dag_head (pc_topics_lr)",
                                          results["dag_head"]), flush=True)
 

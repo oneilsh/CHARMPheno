@@ -1249,22 +1249,29 @@ def run_subprocess_tee_sanitize(
     assert proc.stdout is not None
     last_iter: int | None = None
     try:
-        with summary_path.open("a") as fout:
-            for line in proc.stdout:
-                # Live debugging: always print to terminal
-                sys.stdout.write(line)
-                sys.stdout.flush()
-                # Track iter for the killed-marker, even on lines we don't
-                # commit (so we know which iter was in flight when the signal
-                # arrived).
-                m = parse_iter_marker(line)
-                if m is not None:
-                    last_iter = m
-                # Committed record: sanitized only
-                clean = sanitize_line(line, patterns)
-                if clean is not None:
+        for line in proc.stdout:
+            # Live debugging: always print to terminal
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            # Track iter for the killed-marker, even on lines we don't
+            # commit (so we know which iter was in flight when the signal
+            # arrived).
+            m = parse_iter_marker(line)
+            if m is not None:
+                last_iter = m
+            # Committed record: sanitized only. Open-append-close PER LINE, not
+            # one handle for the whole multi-hour session: exp 0103's smoke came
+            # back with an empty summary.md despite per-line flushes — the
+            # signature of the file being replaced/truncated under a long-lived
+            # handle, after which every append lands on an unlinked inode. A
+            # fresh open resolves the path each time, so appends always reach
+            # whatever file is actually there. (The driver's own
+            # driver_log.md tee in _driver_common is the belt to this
+            # suspenders.) Cost: a few thousand open/close pairs per run.
+            clean = sanitize_line(line, patterns)
+            if clean is not None:
+                with summary_path.open("a") as fout:
                     fout.write(clean)
-                    fout.flush()
         return proc.wait()
     except _SignalReceived as sig:
         with summary_path.open("a") as fout:
