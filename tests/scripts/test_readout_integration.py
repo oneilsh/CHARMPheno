@@ -12,11 +12,19 @@ comparable"). The cluster A/B at C=444 is the full-scale version of exactly this
 comparison; this is its miniature, so a formulation regression is caught in 20s
 instead of a Dataproc run.
 
+The same JOIN is pinned for the STANDALONE re-readout tool (`gated_pc_readout`,
+the recovery path when a finished fit's readout output is lost): its `run_readout`
+must route both arms through either path and agree with the driver readout on the
+same frozen θ, and it must SKIP the co-fit head arm on the unsupervised mainline
+(weightY=0 → the transform appends no `probability` column) instead of dying on the
+missing column after the expensive arm has already been computed.
+
 Tolerances (per-node AUC 2e-3, macro 1e-3) are set by the ORACLE, not by us:
 sklearn's default `tol=1e-4` stops its own solver ~5e-4 from the optimum in
 predicted probability, and it is the less-converged of the two parties. Asserting
 tighter would be asserting on sklearn's stopping rule.
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -40,6 +48,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
     p for p in (str(REPO_ROOT), str(CLOUD), os.environ.get("PYTHONPATH", "")) if p)
 
 import gated_pc_cloud as gpc  # noqa: E402
+import gated_pc_readout as gpr  # noqa: E402
 
 C, K, D_TR, D_TE = 6, 10, 200, 120
 RECALL_TARGETS = [0.5, 0.9]
@@ -91,19 +100,26 @@ def _make_arrays(seed=0):
     return Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te
 
 
-def _make_df(spark, Pi, y, mask, offset=0, parts=3):
+def _make_df(spark, Pi, y, mask, offset=0, parts=3, proba=None):
+    """The frame a supervised `OnlinePCLDAModel.transform` produces. `proba` appends
+    the co-fit head's `probability` column; leaving it None is the weightY=0 shape,
+    where that column genuinely does not exist."""
     from pyspark.ml.linalg import VectorUDT, Vectors
     from pyspark.sql.types import (ArrayType, DoubleType, LongType, StructField,
                                    StructType)
-    schema = StructType([
+    fields = [
         StructField("person_id", LongType(), False),
         StructField("topicDistribution", VectorUDT(), False),
         StructField("label", ArrayType(DoubleType()), False),
         StructField("labelMask", ArrayType(DoubleType()), False),
-    ])
-    rows = [(int(offset + d), Vectors.dense(Pi[d]), [float(v) for v in y[d]],
-             [float(v) for v in mask[d]]) for d in range(Pi.shape[0])]
-    return spark.createDataFrame(rows, schema).repartition(parts)
+    ]
+    if proba is not None:
+        fields.append(StructField("probability", VectorUDT(), False))
+    rows = [tuple([int(offset + d), Vectors.dense(Pi[d]),
+                   [float(v) for v in y[d]], [float(v) for v in mask[d]]]
+                  + ([Vectors.dense(proba[d])] if proba is not None else []))
+            for d in range(Pi.shape[0])]
+    return spark.createDataFrame(rows, StructType(fields)).repartition(parts)
 
 
 @pytest.mark.slow
@@ -224,6 +240,131 @@ def test_lean_head_proba_collect_matches_driver_collect(spark):
     assert np.allclose(lean_p[order], p, atol=1e-6, rtol=0)
     assert np.array_equal(lean_y[order], y.astype(np.uint8))
     assert np.array_equal(lean_m[order], m.astype(np.uint8))
+
+
+@pytest.mark.slow
+class TestReReadoutBothModes:
+    """`gated_pc_readout.run_readout` — the re-readout of a FINISHED fit — in both
+    modes, against the driver `score_arm` oracle on the same frozen θ."""
+
+    @pytest.fixture(scope="class")
+    def scored(self, spark):
+        """What a finished fit's supervised transform leaves behind: θ + labels +
+        the co-fit head's own `probability` column (stand-in values — the head arm
+        reads that column, it never refits it)."""
+        arrays = _make_arrays(seed=1)
+        Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = arrays
+        rng = np.random.default_rng(11)
+        train_df = _make_df(spark, Pi_tr, y_tr, m_tr, proba=rng.random((D_TR, C)))
+        test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000,
+                           proba=rng.random((D_TE, C)))
+        return arrays, train_df, test_df
+
+    @pytest.fixture(scope="class")
+    def both(self, scored, tmp_path_factory):
+        _, train_df, test_df = scored
+        out = tmp_path_factory.mktemp("run_dir")
+        manifest = {"C": C, "K": K, "weight_y": 1.0}
+        dist = gpr.run_readout(
+            train_df, test_df, manifest, recall_targets=RECALL_TARGETS,
+            fdr_targets=FDR_TARGETS, min_count=0, readout_mode="distributed",
+            out_dir=out)
+        drv = gpr.run_readout(
+            train_df, test_df, manifest, recall_targets=RECALL_TARGETS,
+            fdr_targets=FDR_TARGETS, min_count=0, readout_mode="driver")
+        return dist, drv, out
+
+    def test_distributed_arm_matches_driver_arm(self, both, scored):
+        """The recovery path's whole promise: re-reading distributed gives the same
+        per-node numbers the driver path would have printed."""
+        dist, drv, _ = both
+        Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = scored[0]
+        oracle = gpc.score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C,
+                               recall_targets=RECALL_TARGETS,
+                               fdr_targets=FDR_TARGETS)
+        pd_, pv = dist["gated_pc"]["per_node"], drv["gated_pc"]["per_node"]
+        assert set(pd_) == set(pv) == set(oracle["per_node"])
+        assert len(pd_) >= 3
+        for c in pd_:
+            assert pv[c]["auc"] == oracle["per_node"][c]["auc"], c   # same call
+            assert abs(pd_[c]["auc"] - oracle["per_node"][c]["auc"]) < 2e-3, c
+        assert abs(dist["gated_pc"]["ranking"]["auc"]
+                   - oracle["ranking"]["auc"]) < 1e-3
+
+    def test_head_arm_present_and_mode_agnostic(self, both):
+        """The co-fit head arm reads the `probability` column as-is (no LR), so the
+        lean collector and the driver collector must give the identical readout."""
+        dist, drv, _ = both
+        assert dist["gated_pc_head"]["ranking"]["auc"] == pytest.approx(
+            drv["gated_pc_head"]["ranking"]["auc"], abs=1e-6)
+
+    def test_results_written_without_clobbering_the_fits_record(self, both):
+        """Durability is the point of the re-run (exp 0103 lost its readout to a
+        terminal): every arm lands in results_readout.json — and NOT in the fit's
+        own results_partial.json."""
+        dist, _, out = both
+        got = json.loads((out / "results_readout.json").read_text())
+        assert set(got) == {"gated_pc", "gated_pc_head"} == set(dist)
+        assert got["gated_pc"]["ranking"]["auc"] == pytest.approx(
+            dist["gated_pc"]["ranking"]["auc"])
+        assert not (out / "results_partial.json").exists()
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("weight_y,with_proba", [(0.0, True), (1.0, False)])
+def test_head_arm_skipped_when_there_is_no_co_fit_head(spark, capsys, weight_y,
+                                                       with_proba):
+    """The scaled-back mainline is an UNSUPERVISED gate + post-hoc readout: weightY=0
+    means `transform` appends no `probability` column at all. EITHER witness alone
+    must skip the head arm with a log line — the manifest's weight_y=0 (here with a
+    column present, the belt-and-braces case) and the missing column (which covers a
+    manifest too old to record weight_y). Before this the re-readout raised an
+    AnalysisException on the `probability` select, AFTER paying for the pc_topics_lr
+    arm."""
+    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=2)
+    rng = np.random.default_rng(4)
+
+    def _p(n):
+        return rng.random((n, C)) if with_proba else None
+
+    train_df = _make_df(spark, Pi_tr, y_tr, m_tr, proba=_p(D_TR))
+    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000, proba=_p(D_TE))
+    got = gpr.run_readout(
+        train_df, test_df, {"C": C, "K": K, "weight_y": weight_y},
+        recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS, min_count=0,
+        readout_mode="driver")
+    assert set(got) == {"gated_pc"}, "the head arm must not be scored"
+    assert "co-fit head arm SKIPPED" in capsys.readouterr().out
+
+
+@pytest.mark.slow
+def test_re_readout_ab_check_runs_the_gate(spark, capsys):
+    """`--readout-ab-check` on the re-readout is the same report the fit driver
+    prints, on re-transformed frames: it must run BOTH paths and print the deltas
+    (the recovery run is often the only place the gate can still be run — the fit is
+    hours, the re-readout is minutes).
+
+    The manifest deliberately omits K, which is also the K-fallback path: a run old
+    enough not to record it must still route distributed, off the θ width."""
+    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=5)
+    train_df = _make_df(spark, Pi_tr, y_tr, m_tr)
+    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000)
+    gpr.run_readout(train_df, test_df, {"C": C, "weight_y": 0.0},
+                    recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS,
+                    min_count=0, readout_mode="distributed", ab_check=True)
+    txt = capsys.readouterr().out
+    assert "A/B readout equality gate" in txt and "per-node |ΔAUC|" in txt
+
+
+def test_readout_tool_parses_the_mode_flags():
+    """Same flag names/defaults as the fit driver, so a re-run of a lost readout is
+    the fit's command with the same knobs."""
+    a = gpr.build_parser().parse_args(["--run-dir", "/tmp/r"])
+    assert a.readout_mode == "auto" and a.readout_ab_check is False
+    b = gpr.build_parser().parse_args(
+        ["--run-dir", "/tmp/r", "--readout-mode", "distributed",
+         "--readout-ab-check"])
+    assert b.readout_mode == "distributed" and b.readout_ab_check is True
 
 
 def test_resolve_readout_mode_auto_threshold():

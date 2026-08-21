@@ -536,17 +536,22 @@ def _print_headline(results):
               flush=True)
 
 
-def _dump_partial_results(out, results):
-    """Atomically rewrite `<out>/results_partial.json` with the arms so far.
+def _dump_partial_results(out, results, name="results_partial.json"):
+    """Atomically rewrite `<out>/<name>` (default results_partial.json) with the
+    arms so far.
 
     Called after each arm's readout lands so a multi-hour run that dies (or a
     cluster that times out) before the final manifest.json write still leaves a
     machine-readable record of every COMPLETED arm — manifest.json is written
     once, at the very end, and is lost with everything after it otherwise.
-    Write-to-temp + rename so a mid-write death never leaves a torn file."""
-    tmp = out / "results_partial.json.tmp"
+    Write-to-temp + rename so a mid-write death never leaves a torn file.
+
+    `name` exists so the standalone re-readout (gated_pc_readout, which writes
+    into a FINISHED run's dir) lands in its own `results_readout.json` instead of
+    clobbering the record the fit itself left behind."""
+    tmp = out / (name + ".tmp")
     tmp.write_text(json.dumps(results, indent=2))
-    tmp.replace(out / "results_partial.json")
+    tmp.replace(out / name)
 
 
 def dag_closure_parents(parent_int, C):
