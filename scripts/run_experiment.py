@@ -855,6 +855,10 @@ def build_gated_pc_args(
         args.append("--readout-ab-check")
     if effective.get("readout_max_iter") is not None:
         args.extend(["--readout-max-iter", str(effective["readout_max_iter"])])
+    if effective.get("readout_theta_topm") is not None:
+        args.extend(["--readout-theta-topm", str(effective["readout_theta_topm"])])
+    if effective.get("readout_calibration"):
+        args.extend(["--readout-calibration", str(effective["readout_calibration"])])
     if effective.get("head_converge_iters") is not None:
         args.extend(["--head-converge-iters", str(effective["head_converge_iters"])])
     if effective.get("head_fixed_ridge") is not None:
@@ -1060,7 +1064,9 @@ def _apply_dev_profile(effective: dict) -> dict:
     ~3-4x. Warmup is cut in proportion to max_iter (else supervision never ramps in — the
     warmup↔iters coupling). The post-fit readout is capped on the same doctrine
     (``readout_max_iter``), since at whole-Mondo C its batched solve is a wall-clock item in
-    its own right. Only affects pc / gated_pc; uses min() so it only ever SHRINKS.
+    its own right, and its CALIBRATION solve — a pure ECE diagnostic, never a ranking
+    signal — is skipped outright (``readout_calibration``). Only affects pc / gated_pc; the
+    iteration knobs use min() so they only ever SHRINK.
     Calibrate once (one config at dev vs full) to confirm the ranking holds before trusting it.
     """
     if os.environ.get("CHARM_DEV", "").strip().lower() not in ("1", "true", "yes", "on"):
@@ -1079,6 +1085,14 @@ def _apply_dev_profile(effective: dict) -> dict:
     # still has decades to fall, so the dev loop's comparison survives and only the
     # final digits do not. Final numbers come from the full (CHARM_DEV=0) run.
     dev["readout_max_iter"] = min(int(effective.get("readout_max_iter", 200)), 60)
+    # ...and the post-hoc isotonic calibration block goes away entirely. It is a
+    # SECOND batched solve on 75% of the train split plus two more lean collects —
+    # at whole-Mondo C, the same order of wall-clock as the arm's main readout — and
+    # what it produces is the conditional ECE reliability diagnostic. That is not a
+    # ranking signal: it never enters a config comparison, so dropping it changes no
+    # dev-loop decision. Final numbers (ECE included) come from the full run, which
+    # keeps the default `on`.
+    dev["readout_calibration"] = "off"
     # the unsup_gated / baseline twin has its OWN iter budget; cut it too or it runs full
     bmi = int(effective.get("baseline_max_iter", -1) or -1)
     if bmi > 0:
@@ -1087,6 +1101,7 @@ def _apply_dev_profile(effective: dict) -> dict:
           f"weight_y_warmup_iters={dev['weight_y_warmup_iters']}, "
           f"grad_cavi_iters={dev['grad_cavi_iters']}, "
           f"readout_max_iter={dev['readout_max_iter']}, "
+          f"readout_calibration={dev['readout_calibration']}, "
           f"baseline_max_iter={dev.get('baseline_max_iter', effective.get('baseline_max_iter'))} "
           f"(fast RANKING loop, NOT final numbers)", flush=True)
     return dev

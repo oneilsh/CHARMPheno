@@ -227,10 +227,17 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     dist = None
     if mode == "distributed":
         # No theta collect: the per-node LRs are fit on the executors and only the
-        # lean test-split eval bundle comes back.
+        # lean test-split eval bundle comes back. theta_topm is taken from the
+        # MANIFEST, not a flag: a re-readout must reproduce the fit's own design
+        # matrix — silently refitting a top-m run at full K would change the
+        # estimator (and crawl at whole-Mondo, the scale where top-m is on).
+        theta_topm = int(manifest.get("readout_theta_topm", 0) or 0)
+        if theta_topm:
+            print(f"[readout]   theta top-m={theta_topm} (from manifest)", flush=True)
         dist = distributed_score_arm(
             train_scored, test_scored, C, K, recall_targets=recall_targets,
-            fdr_targets=fdr_targets, min_count=min_count, label="gated_pc")
+            fdr_targets=fdr_targets, min_count=min_count, label="gated_pc",
+            theta_topm=theta_topm)
         results["gated_pc"] = dist[0]
     else:
         Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)

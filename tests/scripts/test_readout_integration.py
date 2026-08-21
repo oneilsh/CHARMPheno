@@ -54,6 +54,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
 
 import gated_pc_cloud as gpc  # noqa: E402
 import gated_pc_readout as gpr  # noqa: E402
+import run_experiment as rex  # noqa: E402
 
 C, K, D_TR, D_TE = 6, 10, 200, 120
 RECALL_TARGETS = [0.5, 0.9]
@@ -324,6 +325,114 @@ def test_ab_gate_warm_starts_its_sampled_fit_from_the_full_fit(spark, capsys):
 
 
 @pytest.mark.slow
+def test_theta_topm_equal_to_K_is_the_identity_truncation(spark):
+    """`readout_theta_topm=K` keeps every entry, so the sparse path must reproduce
+    the dense path EXACTLY — same fit, same probabilities, same readout.
+
+    This is the null A/B for the whole lever: it isolates the sparse machinery
+    (packing, chunking, by-node regrouping, bincount gradients) from the truncation
+    itself, so a failure here is a plumbing bug and never a modelling question.
+    """
+    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=8)
+    train_df = _make_df(spark, Pi_tr, y_tr, m_tr).cache()
+    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000).cache()
+    kw = dict(recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS, min_count=0)
+    full = gpc.distributed_score_arm(train_df, test_df, C, K, label="full", **kw)
+    trunc = gpc.distributed_score_arm(train_df, test_df, C, K, label="topm=K",
+                                      theta_topm=K, **kw)
+    assert np.array_equal(trunc[1], full[1]), "identical proba, bit for bit"
+    assert np.allclose(trunc[5][0], full[5][0], atol=1e-12, rtol=0)
+    assert np.allclose(trunc[5][1], full[5][1], atol=1e-12, rtol=0)
+    for c in full[0]["per_node"]:
+        assert trunc[0]["per_node"][c]["auc"] == full[0]["per_node"][c]["auc"], c
+    assert trunc[0]["ranking"]["auc"] == full[0]["ranking"]["auc"]
+    train_df.unpersist(); test_df.unpersist()
+
+
+@pytest.mark.slow
+def test_theta_topm_on_concentrated_theta_keeps_the_readout(spark, capsys):
+    """Top-m on CONCENTRATED θ: the readout survives, and how well is a property of
+    the DATA, not of the code.
+
+    The fixture draws Dirichlet(0.05) rows — the sparse regime the whole-Mondo
+    Dirichlet(0.5)-over-3,827-topics posterior mean is claimed to be in — so a
+    truncation that keeps most of the mass should move per-node AUC by little. The
+    tolerance here is DELIBERATELY loose and is not a correctness gate: exactness is
+    pinned against the dense-on-truncated oracle in
+    `test_distributed_readout.py`, and how much AUC a given m costs on a given corpus
+    is exactly what `theta_topm_coverage` exists to report before anyone sets the
+    flag. Assert tightly here and the test would be asserting on a Dirichlet draw.
+    """
+    rng = np.random.default_rng(21)
+    K_wide, topm = 40, 6
+    Pi_tr = rng.dirichlet(np.full(K_wide, 0.05), size=D_TR)
+    Pi_te = rng.dirichlet(np.full(K_wide, 0.05), size=D_TE)
+    W = rng.standard_normal((C, K_wide)) * 3.0
+    b = rng.standard_normal(C) * 0.5
+
+    def draw(P):
+        z = P @ W.T + b
+        return (rng.random(z.shape) < 1.0 / (1.0 + np.exp(-z))).astype(np.float64)
+
+    y_tr, y_te = draw(Pi_tr), draw(Pi_te)
+    m_tr = np.ones((D_TR, C))
+    m_te = np.ones((D_TE, C))
+    train_df = _make_df(spark, Pi_tr, y_tr, m_tr).cache()
+    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000).cache()
+    kw = dict(recall_targets=RECALL_TARGETS, fdr_targets=FDR_TARGETS, min_count=0)
+
+    # the measurement that justifies the setting, on the same frame
+    cov = _dr_module().theta_topm_coverage(train_df, K_wide, ms=(topm, K_wide))
+    assert cov[K_wide][0] == pytest.approx(1.0)
+    assert cov[topm][0] > 0.5, "fixture must actually be concentrated"
+
+    full = gpc.distributed_score_arm(train_df, test_df, C, K_wide, label="full", **kw)
+    trunc = gpc.distributed_score_arm(train_df, test_df, C, K_wide,
+                                      label="topm", theta_topm=topm, **kw)
+    assert "(theta top-m=6)" in capsys.readouterr().out
+    shared = sorted(set(full[0]["per_node"]) & set(trunc[0]["per_node"]))
+    assert len(shared) >= 3
+    d_auc = np.array([abs(trunc[0]["per_node"][c]["auc"]
+                          - full[0]["per_node"][c]["auc"]) for c in shared])
+    assert d_auc.max() < 0.15, f"top-{topm} cost more AUC than the mass it dropped"
+    train_df.unpersist(); test_df.unpersist()
+
+
+@pytest.mark.slow
+def test_coverage_line_is_logged_only_for_large_fits(spark, capsys, monkeypatch):
+    """The measurement is always on WHERE IT MATTERS and nowhere else.
+
+    Small fits (every cardiovascular-scale run) must not pay an extra data pass for a
+    diagnostic about a lever nobody is pulling; whole-Mondo-scale fits must print the
+    coverage whether or not `theta_topm` is set, so the run of record carries the
+    evidence for — or against — the setting it used.
+    """
+    Pi_tr, y_tr, m_tr, _, _, _ = _make_arrays(seed=9)
+    train_df = _make_df(spark, Pi_tr, y_tr, m_tr).cache()
+    gpc._fit_readout_heads(train_df, C, K, label="small", max_iter=2)
+    assert "theta top-m mass" not in capsys.readouterr().out
+
+    monkeypatch.setattr(gpc, "_COVERAGE_MIN_FIT_BYTES", 0)
+    gpc._fit_readout_heads(train_df, C, K, label="big", max_iter=2)
+    txt = capsys.readouterr().out
+    assert "big: theta top-m mass:" in txt
+    line = next(ln for ln in txt.splitlines() if "theta top-m mass" in ln)
+    assert all(f"m={m}:" in line for m in (64, 128, 256, 512))
+    assert line.rstrip().endswith("(mean/p10)")
+    # K=10 here, so every m keeps all the mass — the identity end of the scale
+    assert "m=64:1.000/0.999" in line
+    train_df.unpersist()
+
+
+def _dr_module():
+    """The partition-kernel module under the TOP-LEVEL name the driver imports it
+    as (see this file's PYTHONPATH note)."""
+    import distributed_readout
+
+    return distributed_readout
+
+
+@pytest.mark.slow
 def test_lean_head_proba_collect_matches_driver_collect(spark):
     """The co-fit head's `probability` column needs the same lean treatment (no
     L-BFGS involved) — `_collect_lean_proba(score_col="probability")` must equal
@@ -498,6 +607,92 @@ def test_parse_args_readout_flags():
     b = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o",
                         "--readout-mode", "distributed", "--readout-ab-check"])
     assert b.readout_mode == "distributed" and b.readout_ab_check is True
+
+
+def test_parse_args_theta_topm_and_calibration_defaults_are_the_old_behaviour():
+    """Both new knobs default to what every existing run already did: full-K theta
+    and calibration ON. A default change here would silently reinterpret every
+    committed exp doc."""
+    a = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o"])
+    assert a.readout_theta_topm == 0
+    assert a.readout_calibration == "on"
+    b = gpc.parse_args(["--cdr", "x", "--billing", "y", "--out-dir", "/tmp/o",
+                        "--readout-theta-topm", "256",
+                        "--readout-calibration", "off"])
+    assert b.readout_theta_topm == 256 and b.readout_calibration == "off"
+
+
+def test_resolve_readout_calibration_gates_the_block():
+    """The one gate `main` consults, so the manifest, the log line and the dev
+    profile cannot disagree about what the string meant."""
+    assert gpc.resolve_readout_calibration("on") is True
+    assert gpc.resolve_readout_calibration("off") is False
+    assert gpc.resolve_readout_calibration(None) is True     # pre-flag namespace
+    with pytest.raises(ValueError):
+        gpc.resolve_readout_calibration("maybe")
+
+
+def test_calibration_block_is_entirely_inside_the_gate():
+    """`--readout-calibration off` must skip the WORK, not just the print.
+
+    `main` cannot be called without a BigQuery corpus, so the "not executed" claim is
+    pinned structurally instead: every piece of the calibration block — its second
+    batched solve, its two lean collects, the isotonic fit and the result key — has
+    to live inside the `if run_calibration:` suite, at a deeper indent. A future edit
+    that hoists any of them out (the easy mistake: computing `proba_te_fit`
+    unconditionally because something below "might" want it) fails here, which is the
+    only place it would be caught before a cluster run pays for it.
+    """
+    import inspect
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(gpc.main)).splitlines()
+    starts = [i for i, ln in enumerate(src) if ln.strip() == "if run_calibration:"]
+    assert len(starts) == 1, "one gate, one block"
+    head = starts[0]
+    indent = len(src[head]) - len(src[head].lstrip())
+    end = next((i for i in range(head + 1, len(src))
+                if src[i].strip() and (len(src[i]) - len(src[i].lstrip())) <= indent),
+               len(src))
+    block = "\n".join(src[head:end])
+    outside = "\n".join(src[:head] + src[end:])
+    for marker in ('label="gated_pc calibration-fit"', "calibrate_per_node(",
+                   '"gated_pc_conditional_cal"', "conditional ECE (VOI readiness"):
+        assert marker in block, marker
+        assert marker not in outside, f"{marker} escaped the gate"
+
+
+def test_dev_profile_skips_the_calibration_solve(monkeypatch, capsys):
+    """CHARM_DEV drops the calibration block outright. The isotonic ECE is a
+    reliability diagnostic, never a ranking signal, so the dev loop's comparisons are
+    unaffected while the supervised arm loses a whole second batched solve."""
+    monkeypatch.setenv("CHARM_DEV", "1")
+    base = {"model_class": "gated_pc", "max_iter": 100}
+    dev = rex._apply_dev_profile(dict(base))
+    assert dev["readout_calibration"] == "off"
+    assert "readout_calibration=off" in capsys.readouterr().out
+    monkeypatch.delenv("CHARM_DEV")
+    assert "readout_calibration" not in rex._apply_dev_profile(dict(base))
+
+
+def test_gated_pc_args_pass_the_new_front_matter_keys_through(monkeypatch):
+    """Front-matter -> argv, following the `readout_max_iter` pattern: absent keys
+    emit NOTHING, so an exp doc that predates the flags produces byte-identical
+    argv."""
+    # the CDR/billing pair is workspace env, not config (see _require_workspace_env)
+    monkeypatch.setenv("WORKSPACE_CDR", "cdr")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj")
+    base = {"source_table": "t", "person_mod": 1, "vocab_size": 5000, "min_df": 20,
+            "min_patient_count": 20, "doc_min_length": 10, "max_iter": 100,
+            "min_n": 0, "n_bg": 8, "tpn": 1, "seed": 0,
+            "readout_mode": "distributed"}
+    argv = rex.build_gated_pc_args(
+        dict(base, readout_theta_topm=256, readout_calibration="off"), "/tmp/out")
+    assert argv[argv.index("--readout-theta-topm") + 1] == "256"
+    assert argv[argv.index("--readout-calibration") + 1] == "off"
+    plain = rex.build_gated_pc_args(dict(base), "/tmp/out")
+    assert "--readout-theta-topm" not in plain
+    assert "--readout-calibration" not in plain
 
 
 def test_densify_lean_blocks_handles_dense_mask_marker():

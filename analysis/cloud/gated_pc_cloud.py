@@ -647,6 +647,12 @@ _READOUT_GTOL = 1e-4
 # macro AUC RANKING is already stable — see run_experiment._apply_dev_profile);
 # the default keeps every production run exactly where it was.
 _READOUT_MAX_ITER = 200
+# Fit size (C*K float64 parameter bytes) above which `_fit_readout_heads` pays for
+# the θ mass-coverage measurement. 64 MB is C=K≈2,900 — comfortably above every
+# cardiovascular-scale run (C=444: 1.6 MB) and comfortably below whole-Mondo
+# (C=K≈3,827: 117 MB), which is exactly the population where the top-m lever is a
+# live question and one extra cheap pass is noise against a multi-hour solve.
+_COVERAGE_MIN_FIT_BYTES = 64 * 1024 * 1024
 
 
 def resolve_readout_mode(mode, C, max_driver_c=_DRIVER_READOUT_MAX_C):
@@ -660,6 +666,21 @@ def resolve_readout_mode(mode, C, max_driver_c=_DRIVER_READOUT_MAX_C):
     if mode != "auto":
         return mode
     return "driver" if int(C) <= int(max_driver_c) else "distributed"
+
+
+def resolve_readout_calibration(flag):
+    """`--readout-calibration {on,off}` -> bool, the single gate `main` consults.
+
+    A helper rather than an inline comparison because "is the calibration block
+    running" decides whether a run has an ECE record at all, and that decision is
+    written into the manifest, printed to the driver log and read by the dev
+    profile — three places that must not disagree about what the string meant.
+    """
+    if flag in (None, True, False):              # tolerate a pre-flag namespace
+        return True if flag is None else bool(flag)
+    if flag not in ("on", "off"):
+        raise ValueError(f"unknown readout calibration mode {flag!r}")
+    return flag == "on"
 
 
 def _densify_lean_blocks(blocks, C):
@@ -700,7 +721,7 @@ def _densify_lean_blocks(blocks, C):
 def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
                         const=None, score_col="topicDistribution",
                         label_col="label", mask_col="labelMask",
-                        id_col="person_id"):
+                        id_col="person_id", theta_topm=0):
     """LEAN per-doc readout collect: `(proba (D,C) f32, y u8, mask u8, person_order)`.
 
     Plan §3 (v2.1): once the FIT is distributed, the driver eval needs only the test
@@ -717,8 +738,15 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
     `degenerate`/`const` apply the ORACLE's fallback for nodes whose observed TRAIN
     set was empty or single-class — `_lr_proba_per_label_masked` predicts the lone
     class value (0.0 when nothing was observed) rather than fitting, and macro means
-    are only comparable across paths if this reproduces it exactly."""
+    are only comparable across paths if this reproduces it exactly.
+
+    `theta_topm` must MATCH the `_fit_readout_heads` call that produced `(V, b_raw)`:
+    the fitted coefficients belong to the truncated design matrix, so scoring full θ
+    with them would evaluate a model on features it was never fit on. It is ignored
+    (and must be left 0) on the `V is None` branch, where `score_col` is an
+    already-computed probability rather than a feature vector."""
     C = int(C)
+    theta_topm = int(theta_topm)
     cols = (id_col, score_col, label_col, mask_col)
     sc = scored_df.sparkSession.sparkContext
     if V is None:
@@ -730,9 +758,10 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
         bcast = sc.broadcast((np.ascontiguousarray(V, dtype=np.float64),
                               np.ascontiguousarray(b_raw, dtype=np.float64)))
 
-        def _block(rows, _b=bcast, _C=C, _cols=cols):
+        def _block(rows, _b=bcast, _C=C, _cols=cols, _m=theta_topm):
             V_, b_ = _b.value
-            return [_dr._lean_eval_kernel(_dr._row_quads(rows, *_cols), _C, V_, b_)]
+            return [_dr._lean_eval_kernel(
+                _dr._row_quads(rows, *_cols, topm=_m), _C, V_, b_)]
 
     try:
         blocks = scored_df.select(*cols).rdd.mapPartitions(_block).collect()
@@ -748,7 +777,8 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
 
 def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
                        max_iter=_READOUT_MAX_ITER, history=6, label="", depth=None,
-                       warm_start=None, topic_col="topicDistribution",
+                       warm_start=None, theta_topm=0,
+                       topic_col="topicDistribution",
                        label_col="label", mask_col="labelMask"):
     """Fit all C per-node readout heads with ONE batched distributed L-BFGS.
 
@@ -788,12 +818,21 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
       - change the answer. It cannot: the per-node objective is convex, so the
         start moves the path and not the optimum. What it buys is the iterate at
         a CAPPED budget (`max_iter`), which is the budget these solves run under.
+
+    `theta_topm > 0` fits on TOP-M TRUNCATED θ (see `distributed_readout`'s module
+    docstring). It changes the DESIGN MATRIX, not the procedure: the moments pass,
+    every L-BFGS pass and — by the caller's obligation — the scoring pass all read
+    the same truncated features, so what comes back is the exact readout of a
+    narrower model rather than an approximation of the wide one. The mass that
+    truncation drops is measured and logged BEFORE the fit (`theta_topm_coverage`),
+    because the whole premise is an empirical claim about θ's concentration.
     """
     from analysis.pc.batched_lr import (fold_standardization, solve_batched_lr,
                                         standardized_grad_from_raw,
                                         unfold_standardization)
 
     C, K = int(C), int(K)
+    theta_topm = int(theta_topm)
     if depth is None:
         # Same driver-burst sizing rule as spark_vi.core.runner._agg_depth: a
         # per-partition partial here is ~two (C, K) float64 arrays (moments) /
@@ -803,9 +842,23 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
         # round is noise next to the pass itself.
         depth = 3 if 2 * C * K * 8 > 128 * 1024 * 1024 else 2
     tag = f"{label}: " if label else ""
+    if C * K * 8 > _COVERAGE_MIN_FIT_BYTES:
+        # Only measured where truncation is on the table. Below ~64 MB of (C,K)
+        # parameters the dense fit is a couple of seconds a pass and the θ-width
+        # lever is not a decision anyone is making, so the extra pass would be pure
+        # cost. Above it, this is the number that says whether top-m is a cheap
+        # reparameterization or a lobotomy — reported on the TRAIN frame, before the
+        # moments pass, whether or not `theta_topm` is set, so the run of record
+        # carries the evidence for (or against) the setting it used.
+        cov = _dr.theta_topm_coverage(train_scored, K, topic_col=topic_col,
+                                      depth=depth)
+        print(f"[driver]   {tag}theta top-m mass: "
+              + " ".join(f"m={m}:{mean:.3f}/{p10:.3f}"
+                         for m, (mean, p10) in sorted(cov.items()))
+              + " (mean/p10)", flush=True)
     mu, sd, n_obs, n_pos = _dr.masked_moments(
         train_scored, C, K, topic_col=topic_col, label_col=label_col,
-        mask_col=mask_col, depth=depth)
+        mask_col=mask_col, depth=depth, topm=theta_topm)
     # Same three cases as `_lr_proba_per_label_masked`'s `np.unique(yc).size < 2`:
     # nothing observed (-> 0.0), all-negative (-> 0.0), all-positive (-> 1.0).
     degenerate = (n_obs <= 0) | (n_pos <= 0) | (n_pos >= n_obs)
@@ -818,14 +871,15 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
     print(f"[driver]   {tag}distributed readout fit: C={C} K={K}, "
           f"{int(keep.sum())} fittable nodes, {int(degenerate.sum())} degenerate "
           f"(constant fallback), observed train cells={int(n_obs.sum())}"
-          f"{' (warm start)' if x0 is not None else ''}", flush=True)
+          f"{' (warm start)' if x0 is not None else ''}"
+          f"{f' (theta top-m={theta_topm})' if theta_topm > 0 else ''}", flush=True)
 
     with _dr.make_spark_stats_fn(
             train_scored, C, K, mu, sd,
             fold_standardization=fold_standardization,
             standardized_grad_from_raw=standardized_grad_from_raw,
             topic_col=topic_col, label_col=label_col, mask_col=mask_col,
-            depth=depth) as stats_fn:
+            depth=depth, topm=theta_topm) as stats_fn:
 
         def _fittable_stats(W_std, b_std, _f=stats_fn, _keep=keep):
             loss, gW, gb = _f(W_std, b_std)
@@ -872,7 +926,7 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
 def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
                           fdr_targets, min_count=0, label="", l2=1.0,
                           gtol=_READOUT_GTOL, max_iter=_READOUT_MAX_ITER,
-                          history=6, depth=None, warm_start=None,
+                          history=6, depth=None, warm_start=None, theta_topm=0,
                           topic_col="topicDistribution", label_col="label",
                           mask_col="labelMask", id_col="person_id"):
     """`score_arm` without the driver-side θ collect — the distributed twin.
@@ -893,15 +947,21 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
     appear: it existed to bound a driver collect that no longer happens, and uniform
     row sampling guts the rare tail the Q1 quartile split reports on.
 
+    `theta_topm > 0` runs the whole arm — fit AND score — on top-m truncated θ. It is
+    threaded through both calls from here rather than defaulted separately in each,
+    because a mismatch between them is silent (the numbers come out plausible and
+    wrong), and this function is the one place that owns both halves of the arm.
+
     Callable with a plain SparkSession + two DataFrames (no argparse), which is what
     makes it testable against `score_arm` on a local Spark fixture."""
     V, b_raw, const, degenerate, _info = _fit_readout_heads(
         train_scored, C, K, l2=l2, gtol=gtol, max_iter=max_iter, history=history,
-        depth=depth, label=label, warm_start=warm_start, topic_col=topic_col,
-        label_col=label_col, mask_col=mask_col)
+        depth=depth, label=label, warm_start=warm_start, theta_topm=theta_topm,
+        topic_col=topic_col, label_col=label_col, mask_col=mask_col)
     proba, y_te, m_te, persons = _collect_lean_proba(
         test_scored, C, V, b_raw, degenerate=degenerate, const=const,
-        score_col=topic_col, label_col=label_col, mask_col=mask_col, id_col=id_col)
+        score_col=topic_col, label_col=label_col, mask_col=mask_col, id_col=id_col,
+        theta_topm=theta_topm)
     readout = readout_from_proba(proba, y_te, m_te, C, recall_targets=recall_targets,
                                  fdr_targets=fdr_targets, min_count=min_count)
     return readout, proba, y_te, m_te, persons, (V, b_raw)
@@ -910,7 +970,7 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
 def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
                       fdr_targets, min_count=0, label="", seed=0, n_rows=2000,
                       sample_frac=1.0, distributed=None,
-                      max_iter=_READOUT_MAX_ITER):
+                      max_iter=_READOUT_MAX_ITER, theta_topm=0):
     """A/B the distributed readout against the driver readout on the SAME θ.
 
     The plan's correctness gate (step 2: "cardiovascular A/B equality run vs the
@@ -935,7 +995,13 @@ def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
     is the same C convex problems on a subset of their rows, so the full-data
     `(V, b_raw)` is a legitimate warm start for it (mapped through the sampled
     fit's own moments inside `_fit_readout_heads`), and this gate is exactly the
-    capped-budget regime where that is worth passes."""
+    capped-budget regime where that is worth passes.
+
+    `theta_topm > 0` is passed to the distributed side so the gate reports the path
+    the run actually took — but it then measures TRUNCATION + solver against the
+    full-θ driver oracle, not the solver alone, and the report says so. Run the gate
+    at `theta_topm=0` to isolate the solver; run it at the production `theta_topm` to
+    price what the truncation costs in per-node AUC."""
     from analysis.pc.evaluate import _lr_proba_per_label_masked
 
     tag = f"{label} " if label else ""
@@ -957,7 +1023,7 @@ def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
         distributed = distributed_score_arm(
             train_scored, test_scored, C, K, recall_targets=recall_targets,
             fdr_targets=fdr_targets, min_count=min_count, label=label,
-            max_iter=max_iter, warm_start=warm)
+            max_iter=max_iter, warm_start=warm, theta_topm=theta_topm)
     r_dist, p_dist, _, _, ids_dist = distributed[:5]
 
     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
@@ -1001,6 +1067,10 @@ def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
                      f"{float(dp.max()):.2e} (mean {float(dp.mean()):.2e})")
     lines.append("  (sklearn's tol=1e-4 stopping rule is the less-converged party; "
                  "~5e-4 in p / ~1e-4 in per-node AUC is the expected disagreement.)")
+    if int(theta_topm) > 0:
+        lines.append(f"  NOTE: the distributed side ran on top-m truncated theta "
+                     f"(m={int(theta_topm)}) and the driver side on full theta, so "
+                     "these deltas price the TRUNCATION, not the solver.")
     print("\n".join("[driver]   " + ln for ln in lines), flush=True)
     for df in sampled:
         df.unpersist()
@@ -1410,6 +1480,28 @@ def parse_args(argv=None):
                         "is the readout's wall-clock knob. Lower it for the dev "
                         "RANKING loop (CHARM_DEV caps it at 60), never for a run of "
                         "record: the capped point is whatever the budget bought.")
+    p.add_argument("--readout-theta-topm", type=int, default=0,
+                   help="fit and score the distributed readout on each doc's top-M "
+                        "theta entries (truncated, NOT renormalized), 0 (default) = "
+                        "off / full K. The readout's cost is memory traffic — "
+                        "observed cells x K-wide dense dot products, ~1.7 TB per "
+                        "pass at C=K=3,827 over 56M cells (~65s) — and truncation "
+                        "cuts it by K/M. Legitimate because per-doc theta is a "
+                        "Dirichlet posterior mean over thousands of topics and is "
+                        "concentrated; the fit logs the MEASURED mass coverage "
+                        "(mean/p10) at m=64..512 first, so set this from that line "
+                        "rather than from faith. Truncation is applied once at "
+                        "ingest, so moments, fit, scoring and eval all see the same "
+                        "narrower design matrix — a different, exact model, not an "
+                        "approximation of the full-K one.")
+    p.add_argument("--readout-calibration", choices=["on", "off"], default="on",
+                   help="run the post-hoc ISOTONIC calibration block (a SECOND "
+                        "batched readout solve on a 75% split, plus two lean "
+                        "collects). Its output is the conditional ECE reliability "
+                        "diagnostic — not a ranking signal — so the dev loop turns "
+                        "it off (CHARM_DEV does this automatically) and halves the "
+                        "supervised arm's readout wall-clock. Never off for a run of "
+                        "record: VOI readiness is exactly the calibrated posterior.")
     p.add_argument("--head-converge-iters", type=int, default=25,
                    help="Newton steps for the post-fit HEAD-FORMULATION LADDER "
                         "(localize-head only): converge each localized head variant on "
@@ -1602,6 +1694,28 @@ def main() -> int:
                   "no longer happens; the fit uses every row). It still applies "
                   "inside --readout-ab-check, where the driver path is the thing "
                   "being compared and has to fit.", flush=True)
+        # θ-width lever + calibration switch, both resolved once for every arm. A
+        # top-m readout is a DIFFERENT (narrower, exactly-fit) model, so it belongs
+        # in the run's log next to the mode, not buried in a fit banner.
+        theta_topm = int(getattr(args, "readout_theta_topm", 0) or 0)
+        if theta_topm > 0 and readout_mode != "distributed":
+            print(f"[driver]   readout_theta_topm={theta_topm} IGNORED under "
+                  "readout_mode=driver (the truncation lives in the distributed "
+                  "path's ingest adapters; the driver collect fits full theta)",
+                  flush=True)
+            theta_topm = 0
+        elif theta_topm > 0:
+            print(f"[driver]   readout_theta_topm={theta_topm}: the readout fits and "
+                  f"scores each doc's top-{theta_topm} theta entries (truncated, not "
+                  "renormalized) — see the per-fit 'theta top-m mass' line for the "
+                  "measured coverage this is buying against", flush=True)
+        run_calibration = resolve_readout_calibration(
+            getattr(args, "readout_calibration", "on"))
+        if not run_calibration:
+            print("[driver]   readout_calibration=off: skipping the post-hoc "
+                  "isotonic calibration block (a second batched solve + two lean "
+                  "collects). Its output is the conditional ECE diagnostic, not a "
+                  "ranking signal — final numbers come from a full run.", flush=True)
         ab_check = bool(args.readout_ab_check) and readout_mode == "distributed"
         if bool(args.readout_ab_check) and not ab_check:
             print("[driver]   readout_ab_check ignored (readout_mode resolved to "
@@ -1691,7 +1805,7 @@ def main() -> int:
                 _dist_gp = distributed_score_arm(
                     train_scored, test_scored, C, lay.K, recall_targets=rt,
                     fdr_targets=ft, min_count=args.min_label_count, label="gated_pc",
-                    max_iter=args.readout_max_iter)
+                    max_iter=args.readout_max_iter, theta_topm=theta_topm)
                 results["gated_pc"], proba_gp, y_te, m_te, _ = _dist_gp[:5]
                 _gp_fit = _dist_gp[5]         # raw-θ params: the calibration warm start
             else:
@@ -1712,7 +1826,7 @@ def main() -> int:
                     train_scored, test_scored, C, lay.K, recall_targets=rt,
                     fdr_targets=ft, min_count=args.min_label_count, label="gated_pc",
                     seed=_sd, sample_frac=_sf, distributed=_dist_gp,
-                    max_iter=args.readout_max_iter)
+                    max_iter=args.readout_max_iter, theta_topm=theta_topm)
             # Conditional 'sharpening' readout: P(child | parent-cohort) by DAG depth.
             results["gated_pc_conditional"] = _conditional(
                 proba_gp, y_te, m_te, "gated_pc")
@@ -1753,59 +1867,74 @@ def main() -> int:
             # is fit on a HELD-OUT 75/25 train split (OUT-OF-SAMPLE) — in-sample fitting
             # worsened ECE (exp 0079 run 2). Raw vs calibrated are compared within the
             # SAME 75%-fit LR so the delta is the calibration effect alone.
-            if readout_mode == "distributed":
-                # Distributed twin of the 75/25 calibration split. The split is a
-                # HASH of person_id (deterministic, complementary, and no driver-side
-                # row index to sample from), and the second batched fit on the 75%
-                # is a real extra cluster pass — the price of an out-of-sample
-                # calibrator, unchanged in kind from the driver path's second LR fit.
-                # Memory is NOT the binding constraint here even though the train
-                # split is ~4x the test split: only the 25% CALIBRATION slice and the
-                # test split are ever collected (both lean), never the 75% fit slice.
-                from pyspark.sql import functions as _F
-                _h = _F.pmod(_F.hash(_F.col("person_id"), _F.lit(int(_sd))), _F.lit(4))
-                _cal_df = train_scored.filter(_h == 0)
-                _fit_df = train_scored.filter(_h != 0)
-                # Warm-started from the arm's OWN main fit: the 75% problem is the
-                # same C heads on three quarters of the same rows, so the main
-                # fit's raw-θ params are a near-solution for it — the point of
-                # paying for the second solve is the OUT-OF-SAMPLE calibrator, not
-                # a rediscovery of the same coefficients from zero.
-                _Vc, _bc, _constc, _degc, _ = _fit_readout_heads(
-                    _fit_df, C, lay.K, label="gated_pc calibration-fit",
-                    max_iter=args.readout_max_iter, warm_start=_gp_fit)
-                proba_cal, y_cal, m_cal, _ = _collect_lean_proba(
-                    _cal_df, C, _Vc, _bc, degenerate=_degc, const=_constc)
-                proba_te_fit, _, _, _ = _collect_lean_proba(
-                    test_scored, C, _Vc, _bc, degenerate=_degc, const=_constc)
-                # NOTE: calibrate_per_node returns a float64 copy of proba_te_fit, so
-                # this one diagnostic doubles (8 vs 4 bytes/cell) the test-split
-                # probability array for the length of the conditional readouts below.
-                proba_te_cal = calibrate_per_node(
-                    proba_cal, y_cal, m_cal, proba_te_fit, C)
-                del proba_cal, y_cal, m_cal
-            else:
-                from analysis.pc.evaluate import _lr_proba_per_label_masked
-                _crng = np.random.default_rng(args.seed if args.seed is not None else 0)
-                cal_sel = _crng.random(Pi_tr.shape[0]) < 0.25
-                fit_sel = ~cal_sel
-                proba_cal = _lr_proba_per_label_masked(
-                    Pi_tr[fit_sel], y_tr[fit_sel], m_tr[fit_sel], Pi_tr[cal_sel], C)
-                proba_te_fit = _lr_proba_per_label_masked(
-                    Pi_tr[fit_sel], y_tr[fit_sel], m_tr[fit_sel], Pi_te, C)
-                proba_te_cal = calibrate_per_node(
-                    proba_cal, y_tr[cal_sel], m_tr[cal_sel], proba_te_fit, C)
-            _ones = np.ones_like(y_te)
-            cond_raw = conditional_readout(proba_te_fit, y_te, _ones,
-                                           bundle.parent_int, C,
-                                           min_count=args.min_label_count)
-            cond_cal = conditional_readout(proba_te_cal, y_te, _ones,
-                                           bundle.parent_int, C,
-                                           min_count=args.min_label_count)
-            results["gated_pc_conditional_cal"] = cond_cal
-            print(f"[driver]   conditional ECE (VOI readiness, held-out isotonic): raw="
-                  f"{_f(cond_raw.get('ece')).strip()} -> "
-                  f"calibrated={_f(cond_cal.get('ece')).strip()}", flush=True)
+            #
+            # The whole block is a DIAGNOSTIC and costs a second batched solve plus two
+            # more lean collects — at whole-Mondo C that is the same order as the arm's
+            # main readout. `--readout-calibration off` (what CHARM_DEV sets) drops it:
+            # the isotonic ECE is a reliability report, never a ranking signal, so the
+            # dev loop's comparisons survive without it and the numbers of record come
+            # from the full run that keeps it on.
+            if run_calibration:
+                if readout_mode == "distributed":
+                    # Distributed twin of the 75/25 calibration split. The split is a
+                    # HASH of person_id (deterministic, complementary, and no driver-side
+                    # row index to sample from), and the second batched fit on the 75%
+                    # is a real extra cluster pass — the price of an out-of-sample
+                    # calibrator, unchanged in kind from the driver path's second LR fit.
+                    # Memory is NOT the binding constraint here even though the train
+                    # split is ~4x the test split: only the 25% CALIBRATION slice and the
+                    # test split are ever collected (both lean), never the 75% fit slice.
+                    from pyspark.sql import functions as _F
+                    _h = _F.pmod(_F.hash(_F.col("person_id"), _F.lit(int(_sd))),
+                                 _F.lit(4))
+                    _cal_df = train_scored.filter(_h == 0)
+                    _fit_df = train_scored.filter(_h != 0)
+                    # Warm-started from the arm's OWN main fit: the 75% problem is the
+                    # same C heads on three quarters of the same rows, so the main
+                    # fit's raw-θ params are a near-solution for it — the point of
+                    # paying for the second solve is the OUT-OF-SAMPLE calibrator, not
+                    # a rediscovery of the same coefficients from zero.
+                    # theta_topm rides along: the calibrator has to be fit and applied
+                    # on the SAME features as the arm it calibrates, or the reliability
+                    # curve describes a model nobody scored with.
+                    _Vc, _bc, _constc, _degc, _ = _fit_readout_heads(
+                        _fit_df, C, lay.K, label="gated_pc calibration-fit",
+                        max_iter=args.readout_max_iter, warm_start=_gp_fit,
+                        theta_topm=theta_topm)
+                    proba_cal, y_cal, m_cal, _ = _collect_lean_proba(
+                        _cal_df, C, _Vc, _bc, degenerate=_degc, const=_constc,
+                        theta_topm=theta_topm)
+                    proba_te_fit, _, _, _ = _collect_lean_proba(
+                        test_scored, C, _Vc, _bc, degenerate=_degc, const=_constc,
+                        theta_topm=theta_topm)
+                    # NOTE: calibrate_per_node returns a float64 copy of proba_te_fit, so
+                    # this one diagnostic doubles (8 vs 4 bytes/cell) the test-split
+                    # probability array for the length of the conditional readouts below.
+                    proba_te_cal = calibrate_per_node(
+                        proba_cal, y_cal, m_cal, proba_te_fit, C)
+                    del proba_cal, y_cal, m_cal
+                else:
+                    from analysis.pc.evaluate import _lr_proba_per_label_masked
+                    _crng = np.random.default_rng(args.seed if args.seed is not None else 0)
+                    cal_sel = _crng.random(Pi_tr.shape[0]) < 0.25
+                    fit_sel = ~cal_sel
+                    proba_cal = _lr_proba_per_label_masked(
+                        Pi_tr[fit_sel], y_tr[fit_sel], m_tr[fit_sel], Pi_tr[cal_sel], C)
+                    proba_te_fit = _lr_proba_per_label_masked(
+                        Pi_tr[fit_sel], y_tr[fit_sel], m_tr[fit_sel], Pi_te, C)
+                    proba_te_cal = calibrate_per_node(
+                        proba_cal, y_tr[cal_sel], m_tr[cal_sel], proba_te_fit, C)
+                _ones = np.ones_like(y_te)
+                cond_raw = conditional_readout(proba_te_fit, y_te, _ones,
+                                               bundle.parent_int, C,
+                                               min_count=args.min_label_count)
+                cond_cal = conditional_readout(proba_te_cal, y_te, _ones,
+                                               bundle.parent_int, C,
+                                               min_count=args.min_label_count)
+                results["gated_pc_conditional_cal"] = cond_cal
+                print(f"[driver]   conditional ECE (VOI readiness, held-out isotonic): raw="
+                      f"{_f(cond_raw.get('ece')).strip()} -> "
+                      f"calibrated={_f(cond_cal.get('ece')).strip()}", flush=True)
             # co-fit head's own per-node P(node) readout (secondary), from the SAME
             # scored test frame (no second CAVI pass). No LR is involved — the
             # `probability` column is already the per-doc (C,) P(node) — so the
@@ -1914,7 +2043,8 @@ def main() -> int:
                     _dist_us = distributed_score_arm(
                         us_train_scored, us_test_scored, C, lay.K, recall_targets=rt,
                         fdr_targets=ft, min_count=args.min_label_count,
-                        label="unsup_gated", max_iter=args.readout_max_iter)
+                        label="unsup_gated", max_iter=args.readout_max_iter,
+                        theta_topm=theta_topm)
                     results["unsup_gated"], proba_us, y_te, m_te, _ = _dist_us[:5]
                 else:
                     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
@@ -1937,7 +2067,7 @@ def main() -> int:
                         label="unsup_gated",
                         seed=(args.seed if args.seed is not None else 0),
                         sample_frac=args.readout_sample_frac, distributed=_dist_us,
-                        max_iter=args.readout_max_iter)
+                        max_iter=args.readout_max_iter, theta_topm=theta_topm)
                 # Conditional A/B: does supervision sharpen P(child|parent) vs the
                 # unsupervised twin? (The metric the clinician workflow cares about.)
                 results["unsup_gated_conditional"] = _conditional(
@@ -1969,7 +2099,8 @@ def main() -> int:
                     results["dag_head"] = distributed_score_arm(
                         dh_train, dh_test, C, int(args.k), recall_targets=rt,
                         fdr_targets=ft, min_count=args.min_label_count,
-                        label="dag_head", max_iter=args.readout_max_iter)[0]
+                        label="dag_head", max_iter=args.readout_max_iter,
+                        theta_topm=theta_topm)[0]
                     dh_train.unpersist(); dh_test.unpersist()
                 else:
                     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
@@ -2027,6 +2158,11 @@ def main() -> int:
                 "readout_mode": readout_mode,
                 "readout_sample_frac": (1.0 if readout_mode == "distributed"
                                         else args.readout_sample_frac),
+                # Both change WHAT was fit / what was reported, so they belong in the
+                # manifest next to the mode: a top-m readout is a narrower model, and
+                # a calibration-skipped run has no ECE record at all.
+                "readout_theta_topm": theta_topm,
+                "readout_calibration": "on" if run_calibration else "off",
                 "recall_targets": args._recall_targets,
                 "fdr_targets": args._fdr_targets,
                 "with_dag_head": args.with_dag_head,
