@@ -119,6 +119,22 @@ make -C analysis/cloud report ID=104
 
 ## Run log
 
+**2026-08-21 — smoke attempt 1: driver-JVM heap OOM at fit iteration 11 — a NEW scale
+wall, now fixed.** The fit itself was healthy (48.6s/iter at K≈3,827, α floor holding,
+ELBO rising, domain fracs sane) — then the driver JVM OOM'd in `task-result-getter` /
+dispatcher threads; the executor "lost heartbeat" storm that followed was collateral of
+the dead driver, not executor failure. Root cause: the SVI stats `treeReduce` (depth 2)
+ships DENSE λ-shaped partials — **~355 MB each at K≈3,827 × V=11,601** (vs 41 MB at
+C=444) — so the driver received ~sqrt(96)≈10 of them per iteration ≈ 3.5 GB of serialized
+blocks through an 8g heap. Neither the exp doc's watch-list (which predicted the pinch at
+the READOUT) nor 0103 could see this; it is K·V-driven and fit-side. Fix (same commit):
+`spark_vi.core.runner._agg_depth` sizes the treeReduce depth from the params payload —
+depth 3 above 128 MB/partial (driver burst ÷ ~P^(1/6)), byte-identical depth 2 below; the
+readout aggregates got the same auto-rule (`_fit_readout_heads` depth=None → auto; its
+(C,K) partials are ~117 MB at whole-Mondo). Belt to that suspenders: run the smoke with
+`CHARM_DRIVER_MEMORY=16g` — depth 3 cuts the burst to ~4.6 partials ≈ 1.6 GB, comfortable
+at 16g with the L-BFGS state beside it.
+
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
 **0.7584 AUC / 0.5428 AP over 241 nodes**, pooled conditional ECE 0.0028 (isotonic →

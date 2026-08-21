@@ -56,6 +56,30 @@ def _runner_metadata(model, **extra):
     return {**model.get_metadata(), "model_class": type(model).__name__, **extra}
 
 
+_AGG_DEPTH_THRESHOLD_BYTES = 128 * 1024 * 1024
+
+
+def _agg_depth(global_params: dict) -> int:
+    """treeReduce depth for the stats aggregate, sized from the params payload.
+
+    Each per-partition sufficient-stats partial has (at least) the dense shape
+    of the global params — for the topic models, a lambda-shaped (K, V) dict —
+    so the params' ndarray bytes are a driver-side proxy for the partial size
+    the reduce will ship. At depth d over P partitions the driver receives
+    ~P^(1/d) partials in one burst: fine at 41 MB/partial (K=444), fatal at
+    355 MB/partial (whole-Mondo K~3,800, exp 0104 smoke: driver-JVM heap OOM at
+    iteration 11 under depth 2 / 8g). Above the threshold, depth 3 trades one
+    extra executor combine round for a ~P^(1/6)-fold smaller driver burst.
+    Recurses because multi-domain lambda is a dict-of-arrays inside the dict.
+    """
+    def _nbytes(v) -> int:
+        if isinstance(v, dict):
+            return sum(_nbytes(x) for x in v.values())
+        return int(getattr(v, "nbytes", 0))
+
+    return 3 if _nbytes(global_params) > _AGG_DEPTH_THRESHOLD_BYTES else 2
+
+
 def _fmt_diagnostic(value: object) -> str:
     """Compact formatter for one iteration_diagnostics value.
 
@@ -285,7 +309,17 @@ class VIRunner:
             # one merged stats dict, not the per-partition list. Requires
             # combine_stats to be associative + commutative (already required
             # by the VIModel contract for additive sufficient statistics).
-            aggregated = batch_rdd.mapPartitions(_local).treeReduce(model.combine_stats)
+            # Depth is sized from the stats payload (see _agg_depth): each
+            # per-partition partial is a DENSE lambda-shaped dict, so at
+            # whole-Mondo scale (K~3,800 x V~11,600 = ~355 MB float64) a
+            # depth-2 tree still lands ~sqrt(P) such partials on the driver
+            # JVM in one burst per iteration — which is exactly how exp 0104's
+            # first smoke OOM'd an 8g driver heap at iteration 11. Depth 3
+            # pushes one more combine round onto the executors and cuts the
+            # driver burst to ~P^(1/3) partials, for one extra shuffle round
+            # that is noise next to the E-step.
+            aggregated = batch_rdd.mapPartitions(_local).treeReduce(
+                model.combine_stats, depth=_agg_depth(bcast.value))
 
             # 5. Pre-scale aggregated stats to form the natural-gradient target.
             # In mini-batch mode this multiplies each ndarray by corpus / batch

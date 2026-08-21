@@ -747,7 +747,7 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
 
 
 def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
-                       max_iter=_READOUT_MAX_ITER, history=6, label="", depth=2,
+                       max_iter=_READOUT_MAX_ITER, history=6, label="", depth=None,
                        warm_start=None, topic_col="topicDistribution",
                        label_col="label", mask_col="labelMask"):
     """Fit all C per-node readout heads with ONE batched distributed L-BFGS.
@@ -794,6 +794,14 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
                                         unfold_standardization)
 
     C, K = int(C), int(K)
+    if depth is None:
+        # Same driver-burst sizing rule as spark_vi.core.runner._agg_depth: a
+        # per-partition partial here is ~two (C, K) float64 arrays (moments) /
+        # one plus vectors (stats), so above ~128 MB the depth-2 tree would land
+        # ~sqrt(P) of them on the driver JVM at once — the burst that OOM'd the
+        # exp 0104 smoke's FIT aggregate at whole-Mondo scale. One extra combine
+        # round is noise next to the pass itself.
+        depth = 3 if 2 * C * K * 8 > 128 * 1024 * 1024 else 2
     tag = f"{label}: " if label else ""
     mu, sd, n_obs, n_pos = _dr.masked_moments(
         train_scored, C, K, topic_col=topic_col, label_col=label_col,
@@ -864,7 +872,7 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
 def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
                           fdr_targets, min_count=0, label="", l2=1.0,
                           gtol=_READOUT_GTOL, max_iter=_READOUT_MAX_ITER,
-                          history=6, depth=2, warm_start=None,
+                          history=6, depth=None, warm_start=None,
                           topic_col="topicDistribution", label_col="label",
                           mask_col="labelMask", id_col="person_id"):
     """`score_arm` without the driver-side θ collect — the distributed twin.
