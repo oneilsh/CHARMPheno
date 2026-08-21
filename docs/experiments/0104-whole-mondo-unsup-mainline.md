@@ -1,0 +1,122 @@
+---
+id: 104
+slug: whole-mondo-unsup-mainline
+status: planned
+model_class: gated_pc
+cohort: population_mondo_all
+cohort_def: population_mondo_all
+disease: rare_priority
+# THE MAINLINE DELIVERABLE RUN (closeout handoff §7.2; gated on exp 0103's A/B gate
+# PASSING). First whole-Mondo fit: the FULL powered DAG (no mondo_branch => all body
+# systems), K≈3,827 / C≈3,820 (insight 0071: 2,513 powered anchors + 1,306 class nodes,
+# n_bg=8, tpn=1). This is the SCALED-BACK MAINLINE, not a PC experiment: weight_y=0 makes
+# the primary arm the unsupervised gated LDA itself (the PC apparatus is inert — closeout
+# §5), and skip_unsup_gated drops the now-redundant twin, so ONE fit + the distributed
+# readout (ADR 0046) is the whole run. Everything the driver collects is (C,)-sized or
+# the lean float32/uint8 test bundle (~6 bytes/cell); the old driver readout is
+# structurally impossible here (24+ GB of collects) — readout_mode pinned, not auto.
+# Head params below are lineage carry-over from 0102/0103 and INERT at weight_y=0.
+readout_mode: distributed
+weight_y: 0.0
+weight_y_warmup_iters: 0
+skip_unsup_gated: true
+dag_source: mondo
+min_positives: 100
+mondo_version: 2026-06-02
+mondo_cache_dir: data/mondo
+extra_domains: measurement,drug
+label_mask_mode: closure
+localize_head: true
+head_support: path_cousins_kids
+head_intercept: true
+head_standardize: true
+doc_concentration: 0.5
+head_lr: 1.0
+person_mod: 1
+prior_obs_days: 0
+doc_min_length: 10
+min_n: 0
+holdout_frac: 0.2
+vocab_size: 5000
+min_df: 20
+min_patient_count: 20
+window_mode: lookback
+lookback_days: 1825
+label_window_days: 365
+strip_mode: both
+n_bg: 8
+tpn: 1
+optimize_doc_concentration: true
+head_optimizer: newton
+head_newton_ridge: 0.05
+head_l2: 0.01
+grad_cavi_iters: 15
+topic_trust: 0.05
+max_iter: 100
+subsampling_rate: 0.1
+tau0: 64.0
+kappa: 0.51
+cavi_max_iter: 100
+cavi_tol: 0.001
+with_dag_head: false
+baseline_max_iter: 100
+min_label_count: 20
+eval_every: 0
+num_partitions: 96
+seed: 42
+cache_uri: hdfs:///user/dataproc/charm/case_finding_cache
+---
+
+# 0104 — Whole-Mondo unsupervised mainline: the first all-body-system gate + readout
+
+**Why.** The scaled-back mainline (closeout 2026-08-20) is the unsup gated LDA + post-hoc
+readout, and its whole-Mondo scale-up is next-steps item 2. Both former blockers are
+cleared: the O(C·K²) dense-head wall belonged to the co-fit head (absent at weight_y=0 —
+insight 0071's correction), and the readout's driver collect is replaced by the
+distributed batched-L-BFGS fit + lean eval (ADR 0046, gated by exp 0103). This run
+produces the first population-wide, all-condition calibrated per-node posteriors — the
+substrate for exports, dashboards, and VOI (next-steps items 3+).
+
+**Run only after exp 0103's A/B equality gate passes.**
+
+## Scale expectations (watch these, they are the run's second deliverable)
+
+- **Fit:** K grows 444 → ≈3,827 (~8.6×). Per-iter cost is roughly linear in K at fixed
+  minibatch (gated E-step is O(|allowed|), but held-out CAVI and λ updates see full K);
+  budget several × 0103's per-iter wall-clock and consider `num_partitions` 96 → 192 if
+  executors are idle-skewed.
+- **Readout fit:** L-BFGS driver state at C·K ≈ 14.6M params: W+b ~117 MB, m=6 history
+  ~1.4 GB — inside the 8g PC driver but tight next to the eval bundle; set
+  `CHARM_DRIVER_MEMORY=12g` if the solve OOMs (the plan's float32-history/node-batching
+  fallbacks exist but measure first). Expect the heartbeat to show tens of iterations,
+  each one treeAggregate over the train split.
+- **Lean eval bundle:** ~6 bytes/cell → at D_te≈80k, C≈3,820 about 1.9 GB. The
+  calibration diagnostic holds one extra float64 test-split copy while it runs.
+- **Moments aggregate:** (C,K)×2 float64 ≈ 234 MB driver-side, one-time.
+
+## What to read (make -C analysis/cloud report ID=104)
+
+1. **The fit itself** — ELBO trajectory, per-node α behavior at K≈3,827 (ADR 0045's
+   floor is load-bearing here), and wall-clock/iter.
+2. **unsup readout macro + rarity quartiles** — the first whole-Mondo AUC/AP; compare the
+   cardiovascular subset against 0103's unsup arm (expect the same ballpark on shared
+   nodes; a big drop = the fit, not the readout).
+3. **`batched L-BFGS` heartbeat + summary** — passes, converged/fittable, stalled count,
+   wall-clock: the scale read that decides whether whole-population readouts need the
+   float32-history/node-batching work.
+4. **Per-node ECE / calibration** — the deliverable is calibrated posteriors; if per-node
+   ECE degrades at depth, the isotonic layer (already in the driver) is the lever.
+5. **[cost] driver RSS** at the readout and eval phases vs the estimates above.
+
+## Run
+
+```bash
+cd ~/repos/CHARMPheno && git pull origin claude/gated-conditional-voi && \
+  CHARM_DEV=1 CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=104  # smoke first
+CHARM_SPARK_CONF='spark.locality.wait=0s' make -C analysis/cloud exp ID=104
+make -C analysis/cloud report ID=104
+```
+
+## Run log
+
+(planned — blocked on exp 0103 gate)
