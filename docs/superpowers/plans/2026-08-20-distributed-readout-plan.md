@@ -1,6 +1,18 @@
 # Distributed per-node readout — driver-safe at whole-Mondo scale
 
 **Date:** 2026-08-20 (v2 — batched multi-head fit replaces fit-side subsampling)
+
+**v2.2 addendum (2026-08-21, from the exp 0104 whole-Mondo smoke):** the built path hit a
+per-PASS wall the v2 sizing missed — observed cells grow with the DAG too (56.2M at
+whole-Mondo, 5.7× cardiovascular), so a pass costs ~49× (~65s), not ~8×. The fix is the
+**θ-width lever**: per-doc TOP-M TRUNCATED θ (truncated, NOT renormalized; truncation once
+at ingest so moments/fit/scoring see one design matrix — a well-defined "readout on top-m
+θ" estimator, not an approximation), with by-node-vectorized sparse kernels (measured
+5.4–7.3× per pass at m=256) and an ALWAYS-ON mass-coverage measurement (mean + p10 at
+m∈{64,128,256,512}) so the flag (`readout_theta_topm`, default off) is only enabled where
+the data's concentration supports it — per-row selection, deliberately NOT a global
+feature subset or PCA, both of which would compress exactly the rare-tail axes. Details in
+`distributed_readout.py`'s module docstring; decision rule in exp 0104's front matter.
 **Context:** the scale-back handoff (`docs/reports/2026-08-20-pc-arc-closeout-…`) makes the
 unsup gate + post-hoc readout LR the model-of-use and flags the readout's driver-side
 θ-collect as "the one thing to watch" at whole-Mondo. This plan promotes it from watch item

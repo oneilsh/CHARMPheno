@@ -52,6 +52,35 @@ module-level `PCTopicModel` import, `scipy`/`autograd`) — an executor dependen
 for the eval step; ship `analysis/` on `--py-files` alongside the spark-vi and
 charmpheno zips, or hoist `_score_label` into a leaf module first.
 
+**Top-m sparse θ (the θ-WIDTH lever).** At whole-Mondo scale the cost of a data
+pass is not flops but memory traffic: the exp 0104 smoke (C=3,820, K=3,827) moves
+56.2M observed cells × a K-wide dense θ dot product ≈ 1.7 TB per pass, ~65s, and a
+60-iteration solve is hours. But per-doc θ is a Dirichlet(α=0.5) posterior mean over
+3,827 topics and is highly concentrated, so keeping only each doc's largest `m`
+entries cuts that traffic by K/m. `theta_topm_coverage` MEASURES the concentration
+(it is never assumed — the mass a truncation drops is reported before any fit uses
+it), and the `topm=` argument on the ingest adapters applies it.
+
+Two properties make this a well-defined estimator rather than an approximation:
+
+  * **Truncated, NOT renormalized.** `x_trunc` equals `x` elementwise on the kept
+    entries and 0 elsewhere; the kept mass is left at whatever it is. Renormalizing
+    (dividing by the kept mass) would apply a DIFFERENT per-doc scale factor to each
+    row, which is not an affine reparameterization of the feature space — the
+    standardization fold (`mu`, `sd` per node, folded into raw-θ coordinates) would
+    still be algebraically valid but would describe a design matrix whose rows were
+    each rescaled by a doc-specific constant, silently changing the fitted model and
+    the meaning of `V`. Plain truncation keeps the feature map a fixed coordinate
+    projection, which the fold handles exactly.
+  * **Consistency: truncation happens ONCE, at pack/ingest time.** Moments, stats,
+    scoring and the lean eval must all see the SAME truncated features, or the fit is
+    solving one problem and being scored on another. That is why `topm` lives on
+    `_pack_partition` / `_row_sparse` / `_row_quads` — the row adapters — and not
+    inside the kernels: every kernel downstream of an adapter sees the truncated
+    design matrix as its data, and the estimator is exactly "the readout on top-m θ".
+    A coordinate kept for some of node c's docs and not others is fine; that is what
+    the truncated design matrix IS, and the moments computed on it agree with it.
+
 Input DataFrame contract (as produced by `gated_pc_cloud._collect_theta_labels`'s
 source frame): `topicDistribution` a Spark ML dense Vector of length K, `label`
 and `labelMask` arrays of C doubles.
@@ -82,10 +111,96 @@ _SCORE_CLIP = 50.0
 # doc out of C≈3,300, i.e. density ~0.01), above it the contiguous matvec wins.
 _DENSE_MASK_FRACTION = 0.5
 
+# Documents per vectorization chunk on the sparse-θ path. A chunk holds (n, m)
+# int32 indices + (n, m) float64 values = 12 bytes per (doc, kept topic): 12.6 MB
+# at n=4096, m=256, which is executor-safe next to the partition's own rows. The
+# chunk exists so the kernel can group a partition's cells BY NODE (see
+# `_use_by_node`) — grouping needs the rows materialized, streaming does not.
+_TOPM_CHUNK_ROWS = 4096
+# Histogram resolution for the θ mass-coverage p10. 1000 bins over [0,1] is a
+# 1e-3 quantile resolution for a diagnostic whose decision threshold ("is 0.95 of
+# the mass in the top 256?") lives at the second decimal — and it makes the
+# aggregate a fixed (len(ms), 1000) int64 accumulator instead of a collect.
+_COVERAGE_BINS = 1000
+
 
 # --------------------------------------------------------------------------- #
 # Pure numpy partition kernels (unit-tested; no SparkSession).                 #
 # --------------------------------------------------------------------------- #
+def _topm_coverage_kernel(thetas, ms, n_bins=_COVERAGE_BINS):
+    """Accumulate per-doc top-m θ MASS COVERAGE into (sums, histogram, n).
+
+    `thetas` is an iterable of (K,) arrays. For each doc and each `m`, coverage is
+    `sum(top-m entries) / sum(all entries)` — the fraction of that doc's θ mass a
+    top-m truncation KEEPS. It is the one number that decides whether the sparse-θ
+    path is a cheap reparameterization or a lobotomy, so it is measured, never
+    assumed.
+
+    Returns raw accumulators — `(sums (M,), hist (M, n_bins) int64, n int)` — so
+    partitions combine by plain addition and the driver reduces once
+    (`coverage_from_accum`). The histogram is how the 10th percentile comes back
+    from a distributed pass without collecting a per-doc value: a p10 needs an order
+    statistic, and a fixed-width histogram gives it to 1/n_bins in ONE pass and
+    O(M*n_bins) memory instead of O(D).
+
+    Cost is one O(K) `partition` at the largest m plus an O(m log m) sort of the
+    survivors — deliberately not a full O(K log K) sort per doc, because this runs
+    on every doc of the train split and is supposed to be noise next to the fit.
+
+    A doc with no mass at all (sum <= 0; θ is a posterior mean on the simplex, so
+    this does not occur in practice) counts as coverage 1.0 — vacuously all of
+    nothing is kept.
+    """
+    ms = [int(m) for m in ms]
+    M = len(ms)
+    sums = np.zeros(M, dtype=np.float64)
+    hist = np.zeros((M, int(n_bins)), dtype=np.int64)
+    rows = np.arange(M)
+    n = 0
+    for theta in thetas:
+        t = np.asarray(theta, dtype=np.float64)
+        K = int(t.shape[0])
+        n += 1
+        total = float(t.sum())
+        if total <= 0.0:
+            sums += 1.0
+            hist[rows, int(n_bins) - 1] += 1
+            continue
+        mmax = min(max(ms), K)
+        top = np.partition(t, K - mmax)[K - mmax:] if mmax < K else t.copy()
+        top.sort()                              # ascending, mmax entries
+        csum = np.cumsum(top[::-1])             # csum[j] = mass of the top j+1
+        cov = np.array([csum[min(m, K) - 1] / total for m in ms])
+        sums += cov
+        b = np.clip((cov * n_bins).astype(np.int64), 0, int(n_bins) - 1)
+        hist[rows, b] += 1
+    return sums, hist, n
+
+
+def coverage_from_accum(sums, hist, n, ms, *, q=0.10):
+    """Reduce `_topm_coverage_kernel` accumulators to `{m: (mean, p_q)}`.
+
+    The quantile is NEAREST-RANK on the binned values — the smallest bin whose
+    cumulative count reaches `ceil(q*n)` — and the reported value is that bin's LEFT
+    edge, i.e. the estimate rounds DOWN. Rounding down is the right direction for a
+    coverage floor: the number is used to answer "how much mass does the WORST decile
+    of documents keep", and an optimistic p10 is the only way this diagnostic could
+    mislead. Accuracy is therefore `[p_q - 1/n_bins, p_q]`.
+    """
+    ms = [int(m) for m in ms]
+    sums = np.asarray(sums, dtype=np.float64)
+    hist = np.asarray(hist, dtype=np.int64)
+    n = int(n)
+    n_bins = int(hist.shape[1])
+    out = {}
+    for j, m in enumerate(ms):
+        if n <= 0:
+            out[m] = (float("nan"), float("nan"))
+            continue
+        target = int(np.ceil(q * n))
+        b = int(np.searchsorted(np.cumsum(hist[j]), max(target, 1)))
+        out[m] = (float(sums[j] / n), float(min(b, n_bins - 1) / n_bins))
+    return out
 def _moments_kernel(rows, C, K):
     """Accumulate the per-node MASKED first/second θ moments + label counts.
 
@@ -217,6 +332,210 @@ def _score_cells_kernel(rows, V, b_raw, C):
             yield int(obs[j]), float(y[j]), float(p[j])
 
 
+# --------------------------------------------------------------------------- #
+# Sparse (top-m θ) partition kernels. Same estimator, truncated design matrix.  #
+# --------------------------------------------------------------------------- #
+# These are separate functions rather than branches inside the dense kernels for
+# two reasons: the dense path stays literally untouched (so `topm=0` is
+# byte-identical, which is what the default-off flag promises), and the sparse loop
+# has a different SHAPE — it chunks a partition and regroups its cells by node,
+# which has no meaning in the dense per-row form. Their contract is exactness, not
+# approximation: fed the same truncated θ, each returns what its dense twin returns
+# for the densified truncation, to the last ulp of the same summation order where
+# the order is the same and to ~1e-12 where BLAS re-associates.
+#
+# **Why the accumulating kernels regroup a chunk's cells BY NODE.** The obvious
+# sparse loop is per-row: for doc d, `V[np.ix_(obs, idx)] @ val`. That is a 2-D
+# fancy gather striding across |obs| different 30 KB rows of V (and, for the
+# gradient, a 2-D scatter back into a 117 MB array), and it re-pays that stride for
+# every doc. Grouping the chunk's cells by node instead makes each trip
+# `V[c][IDX[rows]]` — a 1-D gather out of ONE contiguous row that stays in L2 for
+# all of node c's docs — and turns the gradient into one `bincount` per node into a
+# 30 KB buffer. Same element count, and measured 2.5-9x faster across every shape
+# tried (whole-Mondo C=K=3,827 at m=256: 5.9x under a full mask, 2.5-2.6x under a
+# closure mask; small-C fixtures: 3.5-9x). There is no measured regime where the
+# per-row form wins, so it is not kept as a branch — only `_sparse_score_cells_kernel`
+# stays per-row, and for an unrelated reason (see its docstring).
+def _topm_sparse(theta, topm):
+    """`theta (K,)` -> `(idx (m,) int32, val (m,))`, its `m` largest entries.
+
+    `argpartition` (O(K)) rather than a sort (O(K log K)) — this runs once per doc
+    per ingest. The indices are then SORTED ascending, which costs O(m log m) and
+    buys two things: gathers out of `V[c]` walk memory forward, and the packed cache
+    is a deterministic function of θ (argpartition's tie order is not contractual).
+    Values are the ORIGINAL θ entries — not renormalized; see the module docstring.
+    """
+    t = np.asarray(theta, dtype=np.float64)
+    K = int(t.shape[0])
+    m = int(topm)
+    if m >= K:
+        return np.arange(K, dtype=np.int32), t
+    idx = np.argpartition(t, K - m)[K - m:]
+    idx.sort()
+    return idx.astype(np.int32, copy=False), t[idx]
+
+
+def _sparse_chunks(packed, chunk_rows=_TOPM_CHUNK_ROWS):
+    """`(idx, val, obs, y_obs)` stream -> chunked `(IDX, VAL, ptr, node, y)` blocks.
+
+    `IDX (n,m) int32` / `VAL (n,m) float64` stack the chunk's truncated θ (every doc
+    keeps exactly the same `m`, so they stack rectangularly — that is what lets the
+    per-node path gather with a single fancy index). The cells are stored flat and
+    CSR-style: `node`/`y` concatenated in row order, `ptr (n+1,)` delimiting each
+    doc's run — so `_node_groups` can regroup them and `_sparse_score_cells_kernel`
+    can slice them per doc, off the same buffers.
+    """
+    IDX, VAL, obs_l, y_l = [], [], [], []
+
+    def _finish():
+        n = len(IDX)
+        lens = np.fromiter((o.size for o in obs_l), dtype=np.int64, count=n)
+        ptr = np.zeros(n + 1, dtype=np.int64)
+        np.cumsum(lens, out=ptr[1:])
+        node = (np.concatenate(obs_l) if n else np.zeros(0, dtype=np.int32))
+        y = (np.concatenate(y_l) if n else np.zeros(0, dtype=np.float64))
+        return (np.stack(IDX), np.stack(VAL), ptr,
+                node.astype(np.int64, copy=False),
+                y.astype(np.float64, copy=False))
+
+    for idx, val, obs, y_obs in packed:
+        IDX.append(idx)
+        VAL.append(val)
+        obs_l.append(np.asarray(obs))
+        y_l.append(np.asarray(y_obs, dtype=np.float64))
+        if len(IDX) >= int(chunk_rows):
+            yield _finish()
+            IDX, VAL, obs_l, y_l = [], [], [], []
+    if IDX:
+        yield _finish()
+
+
+def _node_groups(node):
+    """Cells regrouped by node: yields `(c, cell_positions (n_c,) int64)`, ascending.
+
+    `cell_positions` index into the chunk's flat cell arrays; `_cell_rows` turns them
+    back into ROW ids, which is how a node's `(n_c, m)` θ block is gathered. The
+    argsort is STABLE so a node's docs stay in partition order — the accumulation
+    order of a node's sums is then a function of the data alone, not of numpy's
+    sort tie-breaking, which is what keeps a re-run bit-reproducible.
+    """
+    order = np.argsort(node, kind="stable")
+    ns = node[order]
+    cuts = np.flatnonzero(np.concatenate(([True], ns[1:] != ns[:-1])))
+    ends = np.concatenate((cuts[1:], [ns.size]))
+    for st, en in zip(cuts, ends):
+        yield int(ns[st]), order[st:en]
+
+
+def _cell_rows(ptr, positions):
+    """Flat cell positions -> the row each belongs to (inverse of `ptr`)."""
+    return np.searchsorted(ptr, positions, side="right") - 1
+
+
+def _sparse_moments_kernel(packed, C, K, chunk_rows=_TOPM_CHUNK_ROWS):
+    """`_moments_kernel` on truncated θ: moments of the SAME features the fit sees.
+
+    Only KEPT entries accumulate; a coordinate node c never keeps has `sum_theta = 0`
+    and `sum_theta_sq = 0`, so `moments_to_mu_sd` reads it as a zero-variance column,
+    hands it `sd = 1.0`, and its standardized column is identically 0 on the fitting
+    rows — the coordinate is inert for that node, which is exactly the truth about
+    the truncated design matrix. That is the consistency rule doing its job: the
+    standardization describes the truncated features, not the original ones.
+
+    Cells are regrouped by node for the reason given above the sparse block, and the
+    scatter-adds go through `bincount` for the reason given in `_sparse_stats_kernel`.
+    """
+    C, K = int(C), int(K)
+    sum_theta = np.zeros((C, K), dtype=np.float64)
+    sum_theta_sq = np.zeros((C, K), dtype=np.float64)
+    n_obs = np.zeros(C, dtype=np.float64)
+    n_pos = np.zeros(C, dtype=np.float64)
+    for IDX, VAL, ptr, node, y in _sparse_chunks(packed, chunk_rows):
+        if node.size == 0:
+            continue
+        for c, pos in _node_groups(node):
+            rows = _cell_rows(ptr, pos)
+            flat = IDX[rows].ravel()
+            v = VAL[rows]
+            sum_theta[c] += np.bincount(flat, weights=v.ravel(), minlength=K)
+            sum_theta_sq[c] += np.bincount(flat, weights=(v * v).ravel(),
+                                           minlength=K)
+            n_obs[c] += rows.size
+            n_pos[c] += float(y[pos].sum())
+    return sum_theta, sum_theta_sq, n_obs, n_pos
+
+
+def _sparse_stats_kernel(packed, V, b_raw, C, K, chunk_rows=_TOPM_CHUNK_ROWS):
+    """`_stats_kernel` on truncated θ — the hot kernel the whole lever exists for.
+
+    Per observed cell the score is `z = V[c, idx]·val + b_raw[c]`: m terms instead of
+    K, and (the part that actually matters at whole-Mondo) m float64s of V pulled
+    through cache instead of K. Everything else — the clip, the `logaddexp` loss
+    form, the SUMMED (not averaged) reduction, the `(g_raw, s)` split the fold
+    consumes — is identical to the dense kernel, because it must be: this is the same
+    estimator on a different design matrix, not a different estimator.
+
+    One trip per (node, chunk): a single `(n_c, m)` gather out of the contiguous
+    `V[c]` row plus one row-wise dot serves ALL of node c's docs in the chunk. See
+    the note above this block for why that beats the per-doc form 2.5-9x.
+    """
+    C, K = int(C), int(K)
+    V = np.asarray(V, dtype=np.float64)
+    b_raw = np.asarray(b_raw, dtype=np.float64)
+    loss = np.zeros(C, dtype=np.float64)
+    g_raw = np.zeros((C, K), dtype=np.float64)
+    s = np.zeros(C, dtype=np.float64)
+    for IDX, VAL, ptr, node, y_all in _sparse_chunks(packed, chunk_rows):
+        if node.size == 0:
+            continue
+        for c, pos in _node_groups(node):
+            rows = _cell_rows(ptr, pos)
+            idx, val = IDX[rows], VAL[rows]
+            y = y_all[pos]
+            # `einsum` (not `(A*B).sum(1)`) so the row-wise dot does not
+            # materialize an (n_c, m) product before reducing it.
+            z = np.clip(np.einsum("ij,ij->i", V[c][idx], val) + b_raw[c],
+                        -_SCORE_CLIP, _SCORE_CLIP)
+            p = 1.0 / (1.0 + np.exp(-z))
+            r = p - y
+            loss[c] += float(np.sum(np.logaddexp(0.0, z) - y * z))
+            s[c] += float(r.sum())
+            # A doc's kept indices are unique, but the SAME index recurs across the
+            # docs of one node, so a buffered `+=` would drop contributions.
+            # `bincount` is the vectorized unbuffered scatter (`np.add.at` is the
+            # same semantics an order of magnitude slower).
+            g_raw[c] += np.bincount(idx.ravel(),
+                                    weights=(val * r[:, None]).ravel(),
+                                    minlength=K)
+    return loss, g_raw, s
+
+
+def _sparse_score_cells_kernel(packed, V, b_raw, C, chunk_rows=_TOPM_CHUNK_ROWS):
+    """`_score_cells_kernel` on truncated θ. Per-ROW only, deliberately.
+
+    This is a single pass whose output is one Python tuple per observed cell — the
+    tuple construction and the shuffle write dominate by an order of magnitude, so
+    regrouping the arithmetic by node would buy nothing and would scramble the
+    emission order the dense kernel's tests pin. Rows come out doc-major, cell-major
+    within a doc, exactly as the dense twin emits them.
+    """
+    C = int(C)
+    V = np.asarray(V, dtype=np.float64)
+    b_raw = np.asarray(b_raw, dtype=np.float64)
+    for IDX, VAL, ptr, node, y_all in _sparse_chunks(packed, chunk_rows):
+        for d in range(int(IDX.shape[0])):
+            a, b = int(ptr[d]), int(ptr[d + 1])
+            if a == b:
+                continue
+            obs = node[a:b]
+            z = np.clip(V[np.ix_(obs, IDX[d])] @ VAL[d] + b_raw[obs],
+                        -_SCORE_CLIP, _SCORE_CLIP)
+            p = 1.0 / (1.0 + np.exp(-z))
+            y = y_all[a:b]
+            for j in range(obs.size):
+                yield int(obs[j]), float(y[j]), float(p[j])
+
+
 def _lean_eval_kernel(rows, C, V=None, b_raw=None):
     """Pack one partition of scored docs into the LEAN eval block (plan §3, v2.1).
 
@@ -225,6 +544,11 @@ def _lean_eval_kernel(rows, C, V=None, b_raw=None):
     the same arithmetic as `_score_cells_kernel` — or an ALREADY-computed per-doc
     (C,) probability when `V is None` (the co-fit head's `probability` column, which
     needs the same lean treatment but no fit).
+
+    Under top-m truncation `score` arrives as the `(idx, val)` pair `_row_quads`
+    produces, and the matvec becomes a `(C, m)` column gather out of V — the same
+    K/m traffic cut the fit gets, applied to the test split. The eval must see the
+    truncated features for the same reason the fit does: the model was fit on them.
 
     Returns ONE block per partition, not one record per row:
 
@@ -263,7 +587,12 @@ def _lean_eval_kernel(rows, C, V=None, b_raw=None):
         if V is None:
             p = np.asarray(score, dtype=np.float32)
         else:
-            z = np.clip(V @ score + b_raw, -_SCORE_CLIP, _SCORE_CLIP)
+            if isinstance(score, tuple):        # (idx, val): top-m truncated θ
+                idx, val = score
+                z = V[:, idx] @ val + b_raw
+            else:
+                z = V @ score + b_raw
+            z = np.clip(z, -_SCORE_CLIP, _SCORE_CLIP)
             p = (1.0 / (1.0 + np.exp(-z))).astype(np.float32)
         ids.append(doc_id)
         P.append(p)
@@ -353,18 +682,48 @@ def _row_triples(rows, topic_col, label_col, mask_col):
                _to_array(row[mask_col]))
 
 
-def _row_quads(rows, id_col, score_col, label_col, mask_col):
+def _row_sparse(rows, topic_col, label_col, mask_col, topm):
+    """Spark Rows -> `(idx (m,) int32, val (m,), obs (n,) int32, y_obs (n,))` tuples.
+
+    The truncated twin of `_row_triples` for the SINGLE-pass sparse consumers
+    (`masked_moments`, `score_cells_df`). It supersedes rather than extends
+    `_row_triples`: every sparse kernel wants the O(nnz) cell form (it is the shape
+    `_sparse_chunks` stacks), so there is no sparse consumer left that wants dense
+    (C,) label/mask vectors, and `_row_triples` stays dense-only and unchanged.
+
+    This — with `_pack_partition(topm=)` and `_row_quads(topm=)` — is the ONLY place
+    truncation happens, which is the consistency rule from the module docstring: one
+    feature map at ingest, every kernel downstream sees it.
+    """
+    for row in rows:
+        mask = _to_array(row[mask_col])
+        obs = np.flatnonzero(mask).astype(np.int32)
+        label = _to_array(row[label_col])
+        idx, val = _topm_sparse(_to_array(row[topic_col]), topm)
+        yield idx, val, obs, label[obs]
+
+
+def _row_quads(rows, id_col, score_col, label_col, mask_col, topm=0):
     """Stream `(doc_id, score, label, mask)` off Spark Rows for `_lean_eval_kernel`.
 
     `score_col` is θ or an already-computed probability vector depending on the
     caller; both arrive as Spark ML Vectors, so the same `_to_array` serves.
+
+    `topm > 0` truncates the score to its top-m `(idx, val)` pair — valid ONLY when
+    `score_col` is θ and the kernel is scoring it with `(V, b_raw)`. An
+    already-computed probability column is not a feature vector and must never be
+    truncated; `_collect_lean_proba` enforces that by passing `topm` only on the
+    branch that fits.
     """
     for row in rows:
-        yield (row[id_col], _to_array(row[score_col]),
+        score = _to_array(row[score_col])
+        if int(topm) > 0:
+            score = _topm_sparse(score, topm)
+        yield (row[id_col], score,
                _to_array(row[label_col]), _to_array(row[mask_col]))
 
 
-def _pack_partition(rows, topic_col, label_col, mask_col):
+def _pack_partition(rows, topic_col, label_col, mask_col, topm=0):
     """Spark Rows -> compact `(theta (K,), obs_idx (n,) int32, y_obs (n,))` tuples.
 
     The form the REPEATED-pass path caches. The plan's fit-side wall is that dense
@@ -373,12 +732,25 @@ def _pack_partition(rows, topic_col, label_col, mask_col):
     wall into the readout's own persisted RDD. Storing `(obs_idx, y_obs)` makes the
     cached row O(nnz) instead of O(C), which is the same economy plan §5 wants for
     the corpus itself.
+
+    `topm > 0` switches the cached row to the truncated sparse form
+    `(idx (m,) int32, val (m,), obs_idx, y_obs)` — a 4-tuple, so a consumer cannot
+    confuse the two shapes — and shrinks the CACHE as well as the traffic: at
+    K=3,827 and m=256 the θ half of a persisted row drops from 30 KB to 3 KB, which
+    is the difference between an L-BFGS whose passes re-read from disk and one that
+    stays in memory. Truncation is paid ONCE here, not on every pass.
     """
+    topm = int(topm)
     for row in rows:
         mask = _to_array(row[mask_col])
         obs = np.flatnonzero(mask).astype(np.int32)
         label = _to_array(row[label_col])
-        yield (_to_array(row[topic_col]), obs, label[obs])
+        theta = _to_array(row[topic_col])
+        if topm > 0:
+            idx, val = _topm_sparse(theta, topm)
+            yield (idx, val, obs, label[obs])
+        else:
+            yield (theta, obs, label[obs])
 
 
 def _dense_triples(packed, C):
@@ -406,8 +778,41 @@ def _dense_triples(packed, C):
 # --------------------------------------------------------------------------- #
 # Spark wiring (cluster-covered; thin shells over the kernels above).         #
 # --------------------------------------------------------------------------- #
+def theta_topm_coverage(scored_df, K, *, ms=(64, 128, 256, 512),
+                        topic_col="topicDistribution", n_bins=_COVERAGE_BINS,
+                        depth=2, q=0.10):
+    """One distributed pass measuring how much θ mass a top-m truncation keeps.
+
+    Returns `{m: (mean_coverage, p10_coverage)}`. This is the MEASUREMENT that has
+    to precede any use of the sparse-θ path: the lever's entire premise is that a
+    Dirichlet(α=0.5) posterior mean over thousands of topics is concentrated, and a
+    premise about the data is not something a kernel can assume. The p10 is the
+    number that matters — a mean of 0.98 with a p10 of 0.4 means the truncation is
+    fine for the typical doc and destroys the tail, and the tail is what the rare
+    nodes are fit on.
+
+    Cheap by construction (see `_topm_coverage_kernel`): one O(K) partition per doc
+    and a fixed `(len(ms), n_bins)` int64 accumulator per partition, so this costs a
+    fraction of one L-BFGS pass and nothing D-sized reaches the driver.
+    """
+    ms = tuple(int(m) for m in ms)
+    rdd = scored_df.select(topic_col).rdd
+
+    def _local(rows, _col=topic_col, _ms=ms, _nb=int(n_bins)):
+        return [_topm_coverage_kernel((_to_array(r[_col]) for r in rows), _ms, _nb)]
+
+    def _combine(a, b):
+        return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+    zero = (np.zeros(len(ms)), np.zeros((len(ms), int(n_bins)), dtype=np.int64), 0)
+    sums, hist, n = rdd.mapPartitions(_local).treeAggregate(
+        zero, _combine, _combine, depth=int(depth))
+    return coverage_from_accum(sums, hist, n, ms, q=q)
+
+
 def masked_moments(scored_df, C, K, *, topic_col="topicDistribution",
-                   label_col="label", mask_col="labelMask", eps=1e-12, depth=2):
+                   label_col="label", mask_col="labelMask", eps=1e-12, depth=2,
+                   topm=0):
     """One distributed pass for the per-node masked standardization moments.
 
     Plan §1: the sklearn oracle standardizes each node's features on THAT node's
@@ -423,11 +828,18 @@ def masked_moments(scored_df, C, K, *, topic_col="topicDistribution",
     `treeAggregate` (rather than `treeReduce`) so an empty corpus returns correctly
     shaped zeros instead of raising, mirroring `_collect_theta_labels`'s empty-df
     contract.
+
+    `topm > 0` computes the moments of the TRUNCATED features — mandatory whenever
+    the fit runs truncated, since a standardization derived from full θ describes a
+    design matrix the solver never sees (module docstring, consistency rule).
     """
     C, K = int(C), int(K)
+    topm = int(topm)
     rdd = scored_df.select(topic_col, label_col, mask_col).rdd
 
-    def _local(rows, _cols=(topic_col, label_col, mask_col), _C=C, _K=K):
+    def _local(rows, _cols=(topic_col, label_col, mask_col), _C=C, _K=K, _m=topm):
+        if _m > 0:
+            return [_sparse_moments_kernel(_row_sparse(rows, *_cols, _m), _C, _K)]
         return [_moments_kernel(_row_triples(rows, *_cols), _C, _K)]
 
     def _combine(a, b):
@@ -470,7 +882,7 @@ class SparkStatsFn:
     def __init__(self, scored_df, C, K, mu, sd, *, fold_standardization,
                  standardized_grad_from_raw, topic_col="topicDistribution",
                  label_col="label", mask_col="labelMask", depth=2,
-                 storage_level=None):
+                 storage_level=None, topm=0):
         from pyspark import StorageLevel
 
         self.C, self.K = int(C), int(K)
@@ -479,10 +891,15 @@ class SparkStatsFn:
         self._fold = fold_standardization
         self._fold_grad = standardized_grad_from_raw
         self._depth = int(depth)
+        # Truncation is baked into the PERSISTED projection, so the pass cost, the
+        # cache footprint and the moments the caller passed in all describe one
+        # design matrix. Re-deriving it per pass would be the same arithmetic at
+        # K-wide cost, which would defeat the lever entirely.
+        self._topm = int(topm)
         cols = (topic_col, label_col, mask_col)
 
-        def _pack(rows, _cols=cols):
-            return _pack_partition(rows, *_cols)
+        def _pack(rows, _cols=cols, _m=self._topm):
+            return _pack_partition(rows, *_cols, topm=_m)
 
         self._rdd = scored_df.select(*cols).rdd.mapPartitions(_pack)
         self._rdd = self._rdd.persist(
@@ -500,8 +917,10 @@ class SparkStatsFn:
         try:
             C, K = self.C, self.K
 
-            def _local(packed, _b=bcast, _C=C, _K=K):
+            def _local(packed, _b=bcast, _C=C, _K=K, _m=self._topm):
                 V_, b_ = _b.value
+                if _m > 0:
+                    return [_sparse_stats_kernel(packed, V_, b_, _C, _K)]
                 return [_stats_kernel(_dense_triples(packed, _C), V_, b_, _C, _K)]
 
             def _combine(a, b):
@@ -532,22 +951,25 @@ class SparkStatsFn:
 def make_spark_stats_fn(scored_df, C, K, mu, sd, *, fold_standardization,
                         standardized_grad_from_raw, topic_col="topicDistribution",
                         label_col="label", mask_col="labelMask", depth=2,
-                        storage_level=None):
+                        storage_level=None, topm=0):
     """Build the batched-L-BFGS stats oracle over `scored_df`. See `SparkStatsFn`.
 
     Returned object is callable as `stats_fn(W_std, b_std)` and MUST be `close()`d
     (or used as a context manager) to release the persisted projection.
+
+    `topm > 0` fits on top-m truncated θ; `mu`/`sd` must then come from a
+    `masked_moments` call with the SAME `topm`.
     """
     return SparkStatsFn(
         scored_df, C, K, mu, sd,
         fold_standardization=fold_standardization,
         standardized_grad_from_raw=standardized_grad_from_raw,
         topic_col=topic_col, label_col=label_col, mask_col=mask_col,
-        depth=depth, storage_level=storage_level)
+        depth=depth, storage_level=storage_level, topm=topm)
 
 
 def score_cells_df(scored_df, V, b_raw, C, *, topic_col="topicDistribution",
-                   label_col="label", mask_col="labelMask"):
+                   label_col="label", mask_col="labelMask", topm=0):
     """Explode the fitted model's OBSERVED test cells to `[node, y, p]`.
 
     Plan §2–3: broadcast the fitted (raw-space) parameters, emit `P(node c)` only
@@ -562,13 +984,19 @@ def score_cells_df(scored_df, V, b_raw, C, *, topic_col="topicDistribution",
                                    StructType)
 
     C = int(C)
+    topm = int(topm)
     sc = scored_df.sparkSession.sparkContext
     bcast = sc.broadcast((np.ascontiguousarray(V, dtype=np.float64),
                           np.ascontiguousarray(b_raw, dtype=np.float64)))
     cols = (topic_col, label_col, mask_col)
 
-    def _local(rows, _b=bcast, _C=C, _cols=cols):
+    def _local(rows, _b=bcast, _C=C, _cols=cols, _m=topm):
         V_, b_ = _b.value
+        if _m > 0:
+            # `(V, b_raw)` were FIT on truncated θ, so the cells they score must be
+            # truncated too — same feature map, fit and eval.
+            return _sparse_score_cells_kernel(_row_sparse(rows, *_cols, _m),
+                                              V_, b_, _C)
         return _score_cells_kernel(_row_triples(rows, *_cols), V_, b_, _C)
 
     schema = StructType([StructField("node", IntegerType(), False),

@@ -11,6 +11,12 @@ wiring is cluster-covered; pure numpy partition kernels are unit-tested):
     `per_node_metric_rows` equals `analysis.pc.evaluate._bundle_masked` — the
     plan's "What must NOT change" equality, in miniature.
 
+The TOP-M SPARSE θ path is tested by the same two layers plus one rule that is
+specific to it: its oracle is the DENSE kernel fed the DENSIFIED truncation. That
+is the whole correctness claim — a top-m readout is the exact readout of a narrower
+design matrix, not an approximation of the wide one — so "sparse == dense-on-
+truncated to 1e-10" is the assertion, never "sparse ≈ dense-on-full".
+
 The fold formulas (standardized <-> raw) are written out INLINE here rather than
 imported from `analysis/pc/batched_lr.py` (Package A): the point of the injection
 seam is that this module is testable without the solver, so the tests must not
@@ -111,6 +117,34 @@ def _ref_stats(Pi, y, mask, V, b_raw):
 def _params(seed=1):
     rng = np.random.default_rng(seed)
     return rng.normal(scale=0.7, size=(C, K)), rng.normal(scale=0.3, size=C)
+
+
+# --------------------------------------------------------------------------- #
+# Top-m helpers: the sparse form and its DENSIFIED twin (the exactness oracle). #
+# --------------------------------------------------------------------------- #
+TOPM = 5
+
+
+def _densify_topm(Pi, topm):
+    """Each row zeroed outside its top-m entries — the design matrix the sparse
+    kernels claim to be computing on. NOT renormalized (see the module docstring of
+    `distributed_readout`): the kept entries keep their original values."""
+    out = np.zeros_like(Pi)
+    for d in range(Pi.shape[0]):
+        idx, val = dr._topm_sparse(Pi[d], topm)
+        out[d, idx] = val
+    return out
+
+
+def _packed_sparse(Pi, y, mask, topm):
+    """`(idx, val, obs, y_obs)` tuples — what `_row_sparse`/`_pack_partition(topm=)`
+    hand the sparse kernels."""
+    rows = []
+    for d in range(Pi.shape[0]):
+        obs = np.flatnonzero(mask[d]).astype(np.int32)
+        idx, val = dr._topm_sparse(Pi[d], topm)
+        rows.append((idx, val, obs, y[d][obs]))
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -258,6 +292,159 @@ def test_dense_triples_roundtrips_packed_rows():
 
 
 # --------------------------------------------------------------------------- #
+# Top-m sparse θ: measurement, then exactness against the dense oracle.        #
+# --------------------------------------------------------------------------- #
+def test_topm_coverage_kernel_matches_direct_numpy():
+    """Mean coverage must be EXACT (it is a mean of exact per-doc ratios); the p10
+    comes out of a 1000-bin histogram, so it is pinned to the bin width — and to the
+    ROUNDING DIRECTION, since `coverage_from_accum` promises a floor (never an
+    optimistic estimate of what the worst decile keeps)."""
+    rng = np.random.default_rng(31)
+    D_big = 400
+    Pi = rng.dirichlet(np.full(K, 0.3), size=D_big)
+    ms = (1, 3, 5, K, K + 4)
+    sums, hist, n = dr._topm_coverage_kernel(iter(Pi), ms)
+    assert n == D_big
+    got = dr.coverage_from_accum(sums, hist, n, ms)
+    desc = -np.sort(-Pi, axis=1)
+    for m in ms:
+        cov = desc[:, :min(m, K)].sum(axis=1) / Pi.sum(axis=1)
+        mean, p10 = got[m]
+        assert abs(mean - cov.mean()) < 1e-12, m
+        # nearest-rank 10th percentile, the definition the histogram implements
+        nearest = np.sort(cov)[int(np.ceil(0.10 * D_big)) - 1]
+        assert -1e-12 <= nearest - p10 <= 1e-3 + 1e-12, (m, p10, nearest)
+    # a wider m can never keep less mass, and m>=K keeps all of it
+    assert got[1][0] < got[3][0] < got[5][0] < got[K][0]
+    assert got[K][0] == pytest.approx(1.0) and got[K + 4][0] == pytest.approx(1.0)
+
+
+def test_topm_coverage_accumulators_combine_by_addition():
+    """Partitions must be summable — that is what makes this one treeAggregate."""
+    rng = np.random.default_rng(32)
+    Pi = rng.dirichlet(np.full(K, 0.5), size=40)
+    ms = (2, 4)
+    whole = dr._topm_coverage_kernel(iter(Pi), ms)
+    a = dr._topm_coverage_kernel(iter(Pi[:13]), ms)
+    b = dr._topm_coverage_kernel(iter(Pi[13:]), ms)
+    merged = (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+    assert np.allclose(merged[0], whole[0], atol=1e-12, rtol=0)
+    assert np.array_equal(merged[1], whole[1])
+    assert merged[2] == whole[2]
+    got, want = (dr.coverage_from_accum(*merged, ms),
+                 dr.coverage_from_accum(*whole, ms))
+    for m in ms:
+        # the mean re-associates across the split (fp), the binned p10 cannot
+        assert got[m][0] == pytest.approx(want[m][0], rel=1e-15)
+        assert got[m][1] == want[m][1]
+
+
+def test_topm_sparse_keeps_the_largest_entries_and_does_not_renormalize():
+    """Truncated, NOT renormalized: kept entries are the ORIGINAL θ values, so the
+    fold-standardization algebra keeps describing the same feature scale."""
+    rng = np.random.default_rng(33)
+    theta = rng.dirichlet(np.full(K, 0.2))
+    idx, val = dr._topm_sparse(theta, TOPM)
+    assert idx.size == TOPM and val.size == TOPM
+    assert np.array_equal(idx, np.sort(idx))            # ascending, deterministic
+    assert np.allclose(val, theta[idx], atol=0, rtol=0)  # original values, verbatim
+    assert val.sum() < 1.0                               # NOT renormalized
+    assert set(idx.tolist()) == set(np.argsort(-theta)[:TOPM].tolist())
+    # m >= K is the identity truncation (used by the "keeps everything" A/B)
+    idx_all, val_all = dr._topm_sparse(theta, K)
+    assert np.array_equal(idx_all, np.arange(K))
+    assert np.array_equal(val_all, theta)
+
+
+@pytest.mark.parametrize("chunk", [1, 7, 4096])
+def test_sparse_kernels_equal_dense_kernels_on_the_truncated_design(chunk):
+    """THE correctness gate for the whole lever: fed a doc's top-m entries, every
+    sparse kernel returns what its dense twin returns for the DENSIFIED truncation.
+
+    Three chunk sizes are forced because chunking is a pure cost choice (it decides
+    how many docs a by-node regroup covers, never what is accumulated) — the same
+    claim `test_stats_kernel_sparse_and_dense_score_paths_agree` makes for the dense
+    kernel's own mask-density fast path. `chunk=1` is the degenerate regroup, where
+    every node group holds exactly one doc.
+    """
+    Pi, y, mask = _make_data(seed=41)
+    V, b_raw = _params(seed=42)
+    packed = _packed_sparse(Pi, y, mask, TOPM)
+    dense_rows = _rows(_densify_topm(Pi, TOPM), y, mask)
+
+    got = dr._sparse_moments_kernel(iter(packed), C, K, chunk_rows=chunk)
+    for a, b in zip(got, dr._moments_kernel(iter(dense_rows), C, K)):
+        assert np.allclose(a, b, atol=1e-12, rtol=0)
+
+    got = dr._sparse_stats_kernel(iter(packed), V, b_raw, C, K, chunk_rows=chunk)
+    for a, b in zip(got, dr._stats_kernel(iter(dense_rows), V, b_raw, C, K)):
+        assert np.allclose(a, b, atol=1e-10, rtol=0)
+
+    got = list(dr._sparse_score_cells_kernel(iter(packed), V, b_raw, C,
+                                             chunk_rows=chunk))
+    want = list(dr._score_cells_kernel(iter(dense_rows), V, b_raw, C))
+    assert len(got) == int(mask.sum()) and len(got) == len(want)
+    for (n1, y1, p1), (n2, y2, p2) in zip(got, want):
+        assert n1 == n2 and y1 == y2 and abs(p1 - p2) < 1e-10
+
+
+def test_sparse_lean_eval_kernel_equals_dense_on_the_truncated_design():
+    """The eval half of the consistency rule: the test split's probabilities must be
+    the ones the fitted (V, b_raw) produce on the SAME truncated features."""
+    Pi, y, mask = _make_data(seed=43)
+    V, b_raw = _params(seed=44)
+    Pi_t = _densify_topm(Pi, TOPM)
+    sparse_rows = [(d, dr._topm_sparse(Pi[d], TOPM), y[d], mask[d]) for d in range(D)]
+    dense_rows = [(d, Pi_t[d], y[d], mask[d]) for d in range(D)]
+    a = dr._lean_eval_kernel(iter(sparse_rows), C, V, b_raw)
+    b = dr._lean_eval_kernel(iter(dense_rows), C, V, b_raw)
+    assert np.array_equal(a[0], b[0])
+    assert np.abs(a[1].astype(np.float64) - b[1].astype(np.float64)).max() < 1e-10
+    assert np.array_equal(a[2], b[2]) and np.array_equal(a[3], b[3])
+
+
+def test_sparse_kernels_at_m_equal_K_reproduce_the_full_dense_result():
+    """m >= K keeps every entry, so the sparse path must land on the UNTRUNCATED
+    answer — the identity that makes `readout_theta_topm=K` a null A/B."""
+    Pi, y, mask = _make_data(seed=45)
+    V, b_raw = _params(seed=46)
+    packed = _packed_sparse(Pi, y, mask, K)
+    rows = _rows(Pi, y, mask)
+    for a, b in zip(dr._sparse_moments_kernel(iter(packed), C, K),
+                    dr._moments_kernel(iter(rows), C, K)):
+        assert np.allclose(a, b, atol=1e-12, rtol=0)
+    for a, b in zip(dr._sparse_stats_kernel(iter(packed), V, b_raw, C, K),
+                    dr._stats_kernel(iter(rows), V, b_raw, C, K)):
+        assert np.allclose(a, b, atol=1e-10, rtol=0)
+
+
+def test_pack_partition_and_row_sparse_agree_on_the_truncated_form():
+    """One feature map, applied at ingest: the REPEATED-pass cache
+    (`_pack_partition`) and the SINGLE-pass adapter (`_row_sparse`) must truncate
+    identically, or the moments would describe a different matrix than the fit."""
+    Pi, y, mask = _make_data(seed=47)
+
+    # A plain dict is row-shaped enough for the adapters (`row[col]`), which keeps
+    # this a pure-kernel test with no SparkSession.
+    rows = [{"topicDistribution": Pi[d], "label": y[d], "labelMask": mask[d]}
+            for d in range(D)]
+    packed = list(dr._pack_partition(iter(rows), "topicDistribution", "label",
+                                     "labelMask", topm=TOPM))
+    single = list(dr._row_sparse(iter(rows), "topicDistribution", "label",
+                                 "labelMask", TOPM))
+    assert len(packed) == len(single) == D
+    for p, s in zip(packed, single):
+        assert len(p) == 4                       # 4-tuple: the sparse shape
+        for a, b in zip(p, s):
+            assert np.array_equal(a, b)
+    # topm=0 leaves the dense 3-tuple cache byte-identical
+    dense = list(dr._pack_partition(iter(rows), "topicDistribution", "label",
+                                    "labelMask"))
+    assert all(len(t) == 3 for t in dense)
+    assert np.array_equal(dense[0][0], Pi[0])
+
+
+# --------------------------------------------------------------------------- #
 # Local-Spark round trip (thin wiring; AGENTS.md: local Spark => @slow).       #
 # --------------------------------------------------------------------------- #
 def _make_df(spark, Pi, y, mask):
@@ -362,6 +549,72 @@ class TestLocalSparkRoundTrip:
         # The fixture plants an all-positive node and a never-observed node, so the
         # skip path is genuinely exercised (not vacuously equal).
         assert n_skipped >= 2
+
+    def test_theta_topm_coverage_matches_the_kernel(self, spark):
+        """The measurement's Spark shell: one treeAggregate, same numbers as the
+        in-memory accumulators (this is the line the fit prints before deciding
+        whether truncation is affordable)."""
+        Pi, y, mask = _make_data(seed=30)
+        df = _make_df(spark, Pi, y, mask)
+        ms = (2, 4, 8)
+        got = dr.theta_topm_coverage(df, K, ms=ms)
+        want = dr.coverage_from_accum(*dr._topm_coverage_kernel(iter(Pi), ms), ms)
+        assert set(got) == set(want)
+        for m in ms:
+            assert got[m][0] == pytest.approx(want[m][0], abs=1e-12)
+            assert got[m][1] == pytest.approx(want[m][1], abs=1e-12)
+
+    def test_masked_moments_topm_matches_the_sparse_kernel(self, spark):
+        Pi, y, mask = _make_data(seed=31)
+        df = _make_df(spark, Pi, y, mask)
+        mu, sd, n_obs, n_pos = dr.masked_moments(df, C, K, topm=TOPM)
+        r_sum, r_sq, r_n, r_pos = dr._sparse_moments_kernel(
+            iter(_packed_sparse(Pi, y, mask, TOPM)), C, K)
+        r_mu, r_sd = dr.moments_to_mu_sd(r_sum, r_sq, r_n)
+        assert np.allclose(mu, r_mu, atol=1e-12, rtol=0)
+        assert np.allclose(sd, r_sd, atol=1e-12, rtol=0)
+        assert np.allclose(n_obs, r_n) and np.allclose(n_pos, r_pos)
+        # never-kept coordinates are inert, not eps-scaled (the zero-variance rule)
+        assert np.all(sd[r_sum == 0.0] == 1.0)
+
+    def test_spark_stats_fn_topm_matches_the_dense_kernel_on_truncated_theta(
+            self, spark):
+        """The persisted projection caches the TRUNCATED rows, and the pass it feeds
+        must equal the dense kernel on the densified truncation — the same oracle the
+        pure-kernel tests use, now through the real cache/broadcast machinery."""
+        Pi, y, mask = _make_data(seed=32)
+        df = _make_df(spark, Pi, y, mask)
+        mu, sd, _, _ = dr.masked_moments(df, C, K, topm=TOPM)
+        W, b = _params(seed=33)
+        with dr.make_spark_stats_fn(
+            df, C, K, mu, sd,
+            fold_standardization=_fold_standardization,
+            standardized_grad_from_raw=_standardized_grad_from_raw,
+            topm=TOPM,
+        ) as stats_fn:
+            loss, gW_std, gb = stats_fn(W, b)
+        V, b_raw = _fold_standardization(W, b, mu, sd)
+        r_loss, r_g, r_s = dr._stats_kernel(
+            _rows(_densify_topm(Pi, TOPM), y, mask), V, b_raw, C, K)
+        assert np.allclose(loss, r_loss, atol=1e-10, rtol=0)
+        assert np.allclose(gb, r_s, atol=1e-10, rtol=0)
+        assert np.allclose(gW_std, _standardized_grad_from_raw(r_g, r_s, mu, sd),
+                           atol=1e-10, rtol=0)
+
+    def test_score_cells_df_topm_matches_the_dense_kernel(self, spark):
+        Pi, y, mask = _make_data(seed=34)
+        df = _make_df(spark, Pi, y, mask)
+        V, b_raw = _params(seed=35)
+        collected = dr.score_cells_df(df, V, b_raw, C, topm=TOPM).collect()
+        want = list(dr._score_cells_kernel(
+            _rows(_densify_topm(Pi, TOPM), y, mask), V, b_raw, C))
+        assert len(collected) == len(want) == int(mask.sum())
+        for c in range(C):
+            got_c = sorted((round(r["y"], 12), round(r["p"], 10))
+                           for r in collected if r["node"] == c)
+            want_c = sorted((round(yv, 12), round(pv, 10))
+                            for n, yv, pv in want if n == c)
+            assert got_c == want_c, c
 
     def test_per_node_metric_rows_min_count_skips_small_nodes(self, spark):
         from analysis.pc.evaluate import _bundle_masked

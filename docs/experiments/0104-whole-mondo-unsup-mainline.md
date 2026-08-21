@@ -17,6 +17,15 @@ disease: rare_priority
 # structurally impossible here (24+ GB of collects) — readout_mode pinned, not auto.
 # Head params below are lineage carry-over from 0102/0103 and INERT at weight_y=0.
 readout_mode: distributed
+# θ-width lever (plan v2.2, from smoke attempt 2's ~65s/pass readout): per-doc top-m
+# truncated θ — measured 5.4-7.3× per pass at m=256. The run ALWAYS prints the coverage
+# line (`theta top-m mass: m=64:.../... m=128:...`, mean/p10) whether or not the flag is
+# set. DECISION RULE: keep m=256 if the printed p10 at m=256 is ≳0.9; if lower, raise to
+# 512 (still ~7× traffic cut) or drop the key (full-K, slow but exact). A raw
+# Dirichlet(0.5) PRIOR over K=3,827 keeps only ~0.34 of its mass in the top 256 — the
+# lever rests on the POSTERIOR being far sharper, which is exactly what the printed
+# measurement verifies.
+readout_theta_topm: 256
 weight_y: 0.0
 weight_y_warmup_iters: 0
 skip_unsup_gated: true
