@@ -270,10 +270,12 @@ def validate_frontmatter(fm: dict) -> None:
 
     model_class = fm["model_class"]
     if model_class not in ("lda", "stm", "dag_placement", "pc", "gated_pc",
-                           "anchor_select", "mondo_completeness", "mondo_hierarchy"):
+                           "anchor_select", "mondo_completeness", "mondo_hierarchy",
+                           "mondo_usage"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
               f"(currently: lda, stm, dag_placement, pc, gated_pc, anchor_select, "
-              f"mondo_completeness, mondo_hierarchy; hdp planned)", flush=True)
+              f"mondo_completeness, mondo_hierarchy, mondo_usage; hdp planned)",
+              flush=True)
         sys.exit(2)
 
     if model_class == "stm":
@@ -305,6 +307,8 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/mondo_completeness_cloud.py"
     if model_class == "mondo_hierarchy":
         return f"{base}/mondo_hierarchy_cloud.py"
+    if model_class == "mondo_usage":
+        return f"{base}/mondo_usage_cloud.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
@@ -334,6 +338,8 @@ def build_fit_args(
         return build_mondo_completeness_args(effective, out_dir)
     if model_class == "mondo_hierarchy":
         return build_mondo_hierarchy_args(effective, out_dir)
+    if model_class == "mondo_usage":
+        return build_mondo_usage_args(effective, out_dir)
     raise ValueError(f"unknown model_class: {model_class!r}")
 
 
@@ -349,6 +355,22 @@ def build_mondo_hierarchy_args(effective: dict, out_dir: str) -> list[str]:
         "--min-class-size", str(effective.get("min_class_size", 2)),
         "--max-class-fraction", str(effective.get("max_class_fraction", 1.0)),
         "--tpn", str(effective.get("tpn", 1)),
+        "--mondo-version", str(effective.get("mondo_version", "2026-06-02")),
+        "--mondo-cache-dir", str(effective.get("mondo_cache_dir", "data/mondo")),
+    ]
+
+
+def build_mondo_usage_args(effective: dict, out_dir: str) -> list[str]:
+    """argv for analysis/cloud/mondo_usage_cloud.py — whole-Mondo EHR-usage export
+    (exact map, NO roll-up): per-term exact-code person counts + collision flags +
+    three-state small-cell suppression -> mondo_usage.json for the dashboard."""
+    cdr, billing = _require_workspace_env()
+    return [
+        "--cdr", cdr,
+        "--billing", billing,
+        "--out", str(out_dir),
+        "--source-table", str(effective.get("source_table", "condition_occurrence")),
+        "--min-cell", str(effective.get("min_cell", 20)),
         "--mondo-version", str(effective.get("mondo_version", "2026-06-02")),
         "--mondo-cache-dir", str(effective.get("mondo_cache_dir", "data/mondo")),
     ]
@@ -1569,7 +1591,7 @@ def main(argv: list[str] | None = None) -> int:
         # Fall through to the build-dispatch block below.
     elif effective.get("model_class") in ("dag_placement", "pc", "gated_pc",
                                           "anchor_select", "mondo_completeness",
-                                          "mondo_hierarchy"):
+                                          "mondo_hierarchy", "mondo_usage"):
         # These write their own self-contained result (dag_placement: npz +
         # manifest with placement AUC/MRR; pc: pc_results.json with per-drug
         # heldout AUC; gated_pc: npz + manifest with pc_topics_lr per arm;
@@ -1580,6 +1602,7 @@ def main(argv: list[str] | None = None) -> int:
                      else "candidates_with_counts.tsv" if _mc == "anchor_select"
                      else "mondo_omop_mapping.tsv" if _mc == "mondo_completeness"
                      else "mondo_powered_hierarchy.tsv" if _mc == "mondo_hierarchy"
+                     else "mondo_usage.json" if _mc == "mondo_usage"
                      else "manifest.json")
         print(f"[run-exp] model_class={_mc}: NPMI eval not wired for the "
               f"self-contained result; skipping eval (see {_artifact} + fit log).",
