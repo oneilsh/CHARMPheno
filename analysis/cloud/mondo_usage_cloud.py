@@ -1,0 +1,429 @@
+"""Whole-Mondo EHR-USAGE export (exact map, NO roll-up) — the "how much of Mondo
+does an EHR actually touch" report (BQ-only).
+
+Sibling to exp 0087/0088 but answers a different question and, deliberately, does
+NOT roll patient counts up the SNOMED/Mondo hierarchy. Where `mondo_hierarchy_cloud`
+(0088) power-counts each anchor by climbing `concept_ancestor` (every in-subtree
+descendant code counts toward the ancestor), THIS driver counts a Mondo term ONLY
+by the patients whose condition code maps EXACTLY to that term's own standard
+concept(s). Rationale (see docs/insights/0075):
+
+  * Real EHR diagnoses are recorded at different granularities. A roll-up hides
+    that: a mid-level Mondo term that itself carries a SNOMED code may legitimately
+    be used by <20 patients even when its descendants are common, and a very
+    abstract term may be used by 0. Those are findings, not artifacts — so we
+    report each term's OWN exact-code usage and let any roll-up happen downstream,
+    where it can carry the double-counting caveat explicitly.
+  * A patient with comorbidities is counted once PER Mondo term (distinct persons),
+    never within a term. Across terms they may appear more than once — that is the
+    honest per-term number; summing across terms double-counts and is the
+    consumer's responsibility.
+
+MULTI-MAPPING. The Mondo `same_as` exact-map is injective on the source side (in
+release 2026-06-02, zero SNOMED/MeSH/ICD codes are shared across Mondo terms), so
+the only cross-term collision is introduced by OMOP's `Maps to` step: two Mondo
+terms whose distinct source codes normalize to the SAME standard concept. That is
+measurable from the mapping frame alone (`standard_concept_id -> {mondo_id}`), so
+we quantify it here and FLAG every affected term with its co-mapped siblings; each
+term still reports its full exact-match count (no correction).
+
+AoU SMALL-CELL SUPPRESSION: every reported patient count is three-state —
+`unused` (0), `used <20` (0<n<20, kept & flagged as used but never given an exact
+number or conflated with 0), or the exact count (>=20). We publish only per-term
+floored cardinalities, never additive decompositions or parent-minus-child deltas,
+so nothing can be differenced back to a suppressed cell. Term/node COUNTS in the
+headline stats are counts of Mondo terms, not patients, so they are exact.
+
+Artifacts (written to --out): `mondo_usage.json` (the dashboard payload: nodes +
+nearest-mapped-ancestor edges + three-state counts + collision flags + headline
+stats) and `mondo_usage_nodes.tsv` (the same, spreadsheet-friendly, suppressed).
+
+Run:  make -C analysis/cloud exp ID=105   (model_class=mondo_usage)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+_MIN_CELL = 20
+_ROOT_ID = "root"
+
+
+# --------------------------------------------------------------------------- #
+# Pure, Spark-free core (unit-tested in tests/test_mondo_usage.py)            #
+# --------------------------------------------------------------------------- #
+def usage_state(n: int, min_cell: int = _MIN_CELL) -> tuple[str, str, int | None]:
+    """Three-state AoU small-cell rule for a per-term distinct-person count.
+
+    Returns ``(state, display, public_count)``:
+      * n <= 0        -> ("unused",     "0",           0)    — term not used
+      * 0 < n < floor -> ("used_small", f"<{floor}",   None) — USED, count withheld
+      * n >= floor    -> ("reported",   str(n),        n)    — exact
+
+    The middle state is the crux: a term used by 1..floor-1 patients is a
+    first-class USED term (kept, counted toward "fraction of Mondo used", never
+    dropped and never shown as 0), but its exact count is never emitted.
+    """
+    n = int(n)
+    if n <= 0:
+        return "unused", "0", 0
+    if n < min_cell:
+        return "used_small", f"<{min_cell}", None
+    return "reported", str(n), n
+
+
+def collision_map(pairs) -> dict[int, list[str]]:
+    """``{standard_concept_id: sorted distinct mondo_ids}`` from (std_cid, mondo_id)
+    pairs. A std concept mapped from >1 Mondo term is a cross-term collision (OMOP
+    `Maps to` coarsening): patients on that concept are attributed to every such
+    term."""
+    out: dict[int, set] = {}
+    for cid, mid in pairs:
+        out.setdefault(int(cid), set()).add(str(mid))
+    return {cid: sorted(mids) for cid, mids in out.items()}
+
+
+def term_collision_siblings(
+    term_std: dict[str, list[int]], std_to_mondos: dict[int, list[str]]
+) -> dict[str, list[str]]:
+    """For each term, the OTHER Mondo terms it shares any standard concept with
+    (its collision siblings). ``term_std`` = {mondo_id: [std_cid, ...]}."""
+    out: dict[str, list[str]] = {}
+    for mid, cids in term_std.items():
+        sib: set = set()
+        for cid in cids:
+            sib.update(std_to_mondos.get(int(cid), ()))
+        sib.discard(mid)
+        out[mid] = sorted(sib)
+    return out
+
+
+def nearest_mapped_parents(
+    mapped_ids: set, parent_adj: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    """For each mapped term, its nearest ANCESTOR terms that are themselves mapped
+    (collapsing unmapped Mondo intermediates), over a child->parents adjacency. A
+    term with no mapped ancestor gets ``[]`` (attaches to the synthetic root).
+
+    "Nearest" = the first mapped node on every upward path; the search stops
+    climbing a branch as soon as it hits a mapped ancestor, so we keep the closest
+    mapped parents on each branch (the induced Hasse edges over mapped terms)."""
+    out: dict[str, list[str]] = {}
+    for node in mapped_ids:
+        found: set = set()
+        seen: set = set()
+        stack = list(parent_adj.get(node, ()))
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            if cur in mapped_ids:
+                found.add(cur)          # nearest on this branch; don't climb past it
+            else:
+                stack.extend(parent_adj.get(cur, ()))
+        out[node] = sorted(found)
+    return out
+
+
+def _depths(parents_of: dict[str, list[str]], root: str = _ROOT_ID) -> dict[str, int]:
+    """Longest-path depth from ``root`` for each node (root=0). Memoized; robust to
+    the Mondo DAG's multi-parenthood and (defensively) to cycles."""
+    depth: dict[str, int] = {}
+
+    def d(n: str, on_path: frozenset = frozenset()) -> int:
+        if n in depth:
+            return depth[n]
+        ps = parents_of.get(n, [])
+        if not ps or n in on_path:
+            depth[n] = 0
+            return 0
+        depth[n] = 1 + max(d(p, on_path | {n}) for p in ps)
+        return depth[n]
+
+    for n in parents_of:
+        d(n)
+    return depth
+
+
+def _used_path_set(parents_of: dict[str, list[str]], used: set) -> set:
+    """Every node that is used OR a (transitive) ancestor of a used node, over the
+    child->parents DAG. These are the "used skeleton": the used terms plus the
+    branch points above them — the structural nodes that stay interesting even at a
+    0 direct count (no roll-up, so an abstract ancestor may itself be coded 0 times
+    while still sitting above real usage)."""
+    on_path = set(used)
+    stack = list(used)
+    while stack:
+        n = stack.pop()
+        for parent in parents_of.get(n, ()):
+            if parent not in on_path:
+                on_path.add(parent)
+                stack.append(parent)
+    return on_path
+
+
+def assemble_payload(*, meta: dict, term_rows: list[dict],
+                     min_cell: int = _MIN_CELL) -> dict:
+    """Build the dashboard JSON. ``term_rows`` is one dict per mapped Mondo term:
+    ``mondo_id, label, is_internal(bool), parents(list[mondo_id]), std_concepts
+    (list[int]), n_persons(int raw), collision_siblings(list[mondo_id])``.
+
+    Pure and time-free (the driver stamps ``meta['generated_utc']``). Each node
+    carries a three-state ``state`` (unused/used_small/reported) AND a four-way
+    display ``category`` for the dashboard's show/hide layers:
+      * ``reported``     — exact count (>= floor)
+      * ``used_small``   — used, 0<count<floor (count withheld)
+      * ``used_branch``  — 0 direct count but an ANCESTOR of a used node (a branch
+                           point on the used skeleton — kept, structurally relevant)
+      * ``other``        — 0 count and NOT above any used node (the rest of Mondo)
+    Headline stats are exact term counts (terms are not patients)."""
+    nodes: list[dict] = []
+    parents_of: dict[str, list[str]] = {_ROOT_ID: []}
+    state_of: dict[str, str] = {}
+    counts = {"unused": 0, "used_small": 0, "reported": 0}
+    n_internal_used = n_collision = 0
+
+    for r in term_rows:
+        state, display, public = usage_state(r["n_persons"], min_cell)
+        counts[state] += 1
+        state_of[r["mondo_id"]] = state
+        parents = r["parents"] or [_ROOT_ID]
+        parents_of[r["mondo_id"]] = parents
+        siblings = r.get("collision_siblings") or []
+        if siblings:
+            n_collision += 1
+        if state != "unused" and r["is_internal"]:
+            n_internal_used += 1
+        nodes.append({
+            "id": r["mondo_id"],
+            "label": r["label"],
+            "kind": "internal" if r["is_internal"] else "leaf",
+            "parents": parents,
+            "std_concepts": [int(c) for c in r["std_concepts"]],
+            "state": state,
+            "display": display,
+            "count": public,                 # None when withheld
+            "collision": bool(siblings),
+            "collision_siblings": siblings,
+        })
+
+    depth = _depths(parents_of)
+    used = {mid for mid, st in state_of.items() if st != "unused"}
+    on_used_path = _used_path_set(parents_of, used)
+    cat_counts = {"reported": 0, "used_small": 0, "used_branch": 0, "other": 0}
+    for nd in nodes:
+        nd["depth"] = depth.get(nd["id"], 1)
+        if nd["state"] == "reported":
+            cat = "reported"
+        elif nd["state"] == "used_small":
+            cat = "used_small"
+        elif nd["id"] in on_used_path:
+            cat = "used_branch"
+        else:
+            cat = "other"
+        nd["category"] = cat
+        cat_counts[cat] += 1
+
+    n_terms = len(term_rows)
+    n_used = counts["used_small"] + counts["reported"]
+    stats = {
+        "mapped_terms": n_terms,
+        "used_terms": n_used,
+        "used_small_terms": counts["used_small"],
+        "reported_terms": counts["reported"],
+        "unused_terms": counts["unused"],
+        "used_branch_terms": cat_counts["used_branch"],
+        "other_terms": cat_counts["other"],
+        "used_fraction": (n_used / n_terms) if n_terms else 0.0,
+        "internal_terms": sum(1 for r in term_rows if r["is_internal"]),
+        "internal_used_terms": n_internal_used,
+        "collision_terms": n_collision,
+        "max_depth": max(depth.values()) if depth else 0,
+    }
+    root = {"id": _ROOT_ID, "label": "Mondo disease (mapped-term view)",
+            "kind": "root", "parents": [], "std_concepts": [], "state": "root",
+            "category": "root", "display": "", "count": None, "collision": False,
+            "collision_siblings": [], "depth": 0}
+    return {"meta": meta, "stats": stats, "nodes": [root] + nodes}
+
+
+def format_summary(stats: dict, *, min_cell: int = _MIN_CELL) -> str:
+    """Human-readable headline block (stderr). Term counts are exact; the one
+    patient-derived line (persons-on-Mondo) is suppressed by the caller."""
+    s = stats
+    pct = 100.0 * s["used_fraction"]
+    return "\n".join([
+        "=" * 74,
+        "WHOLE-MONDO EHR USAGE (exact map, no roll-up)",
+        f"  mapped Mondo disease terms:        {s['mapped_terms']:>8}",
+        f"  used (>=1 patient):                {s['used_terms']:>8}   {pct:5.1f}%",
+        f"    of which used-small (<{min_cell}):        {s['used_small_terms']:>8}   "
+        f"(kept & flagged, exact count withheld)",
+        f"    of which reported (>={min_cell}):         {s['reported_terms']:>8}",
+        f"  unused mapped terms (0 patients):  {s['unused_terms']:>8}",
+        f"    of which used-branch (0 count, above a used node): {s['used_branch_terms']:>8}",
+        f"    of which other (rest of Mondo):  {s['other_terms']:>8}",
+        f"  internal (non-leaf) terms:         {s['internal_terms']:>8}   "
+        f"({s['internal_used_terms']} used) <- mid-level, un-rolled",
+        f"  collision-flagged terms (shared std concept): {s['collision_terms']:>8}",
+        f"  max mapped-term tree depth:        {s['max_depth']:>8}",
+        "=" * 74,
+    ])
+
+
+# --------------------------------------------------------------------------- #
+# Spark driver                                                                #
+# --------------------------------------------------------------------------- #
+def main(argv: list[str]) -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--cdr", required=True)
+    p.add_argument("--billing", required=True)
+    p.add_argument("--mondo-version", default="2026-06-02")
+    p.add_argument("--mondo-cache-dir", default="data/mondo")
+    p.add_argument("--out", required=True, help="output dir for the artifacts")
+    p.add_argument("--source-table", default="condition_occurrence",
+                   help="OMOP condition source (condition_occurrence or condition_era)")
+    p.add_argument("--min-cell", type=int, default=_MIN_CELL)
+    args = p.parse_args(argv)
+
+    from datetime import datetime, timezone
+
+    import pandas as pd
+    from pyspark.sql import SparkSession, functions as F
+    from pyspark.sql.functions import broadcast
+
+    from charmpheno.omop.bigquery import load_omop_bigquery
+    from anchor_selection_cloud import _download_cached, _read_bq
+    from mondo_to_omop_mapping import (
+        build_mondo_to_omop, seed_source_xrefs, _disease_child_adjacency)
+
+    spark = SparkSession.builder.appName("mondo-usage").getOrCreate()
+    min_cell = int(args.min_cell)
+
+    # --- 1. Mondo frames + whole-Mondo -> OMOP standard-Condition mapping --------
+    cache = Path(args.mondo_cache_dir)
+    edges_df = pd.read_csv(_download_cached(args.mondo_version, "mondo_edges.tsv", cache),
+                           sep="\t", low_memory=False)
+    nodes_df = pd.read_csv(_download_cached(args.mondo_version, "mondo_nodes.tsv", cache),
+                           sep="\t", low_memory=False)
+    all_ids = set(nodes_df["id"])
+
+    concept_pd = (_read_bq(spark, args.cdr, args.billing, "concept")
+                  .select("concept_id", "concept_name", "vocabulary_id", "domain_id",
+                          "concept_code", "standard_concept")
+                  .where(F.col("vocabulary_id").isin("SNOMED", "ICD10CM", "MeSH"))
+                  .toPandas())
+    same_as = seed_source_xrefs(mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
+                                restrict_mondo_ids=all_ids)
+    src = same_as.merge(concept_pd, on=["concept_code", "vocabulary_id"], how="inner")
+    source_ids = sorted({int(x) for x in src["concept_id"]})
+    src_sdf = spark.createDataFrame(pd.DataFrame({"concept_id_1": source_ids}))
+    cr_pd = (_read_bq(spark, args.cdr, args.billing, "concept_relationship")
+             .select("concept_id_1", "concept_id_2", "relationship_id")
+             .where(F.col("relationship_id") == "Maps to")
+             .join(broadcast(src_sdf), "concept_id_1", "inner").toPandas())
+    mapping = build_mondo_to_omop(
+        mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
+        concept_df=concept_pd, concept_relationship_df=cr_pd, restrict_mondo_ids=None)
+
+    # term -> standard concepts, and the collision structure (mapping-frame only).
+    ts = mapping[["mondo_id", "standard_concept_id"]].drop_duplicates()
+    ts["standard_concept_id"] = ts["standard_concept_id"].astype(int)
+    term_std: dict[str, list[int]] = (
+        ts.groupby("mondo_id")["standard_concept_id"].apply(list).to_dict())
+    std_to_mondos = collision_map(zip(ts["standard_concept_id"], ts["mondo_id"]))
+    siblings = term_collision_siblings(term_std, std_to_mondos)
+
+    # --- 2. EXACT-match person counts per term (NO concept_ancestor climb) --------
+    ts_sdf = broadcast(spark.createDataFrame(
+        ts.rename(columns={"standard_concept_id": "std_cid"})))
+    cond = load_omop_bigquery(
+        spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
+        source_table=args.source_table).select("person_id", "concept_id").cache()
+    hit = (cond.join(ts_sdf, cond["concept_id"] == ts_sdf["std_cid"], "inner")
+           .select("person_id", "mondo_id"))
+    term_counts = (hit.groupBy("mondo_id")
+                   .agg(F.countDistinct("person_id").alias("n")).toPandas())
+    count_of = {str(r["mondo_id"]): int(r["n"]) for _, r in term_counts.iterrows()}
+
+    # placement ladder (persons-on-Mondo is the one suppressed patient figure).
+    n_total = (_read_bq(spark, args.cdr, args.billing, "person")
+               .select("person_id").distinct().count())
+    n_coded = cond.select("person_id").distinct().count()
+    n_on_mondo = hit.select("person_id").distinct().count()
+
+    # --- 3. hierarchy structure over mapped terms (nearest mapped ancestor) -------
+    child_adj = _disease_child_adjacency(edges_df, nodes_df)      # parent -> [children]
+    disease_set = set(child_adj) | {c for ch in child_adj.values() for c in ch}
+    has_child = {p for p, ch in child_adj.items()
+                 if any(c in disease_set for c in ch)}
+    parent_adj: dict[str, list[str]] = {}
+    for parent, children in child_adj.items():
+        for c in children:
+            parent_adj.setdefault(c, []).append(parent)
+
+    mapped_ids = set(term_std)
+    parents = nearest_mapped_parents(mapped_ids, parent_adj)
+    label_of = {str(i): str(n) for i, n in zip(nodes_df["id"], nodes_df["name"])}
+    std_name = dict(zip(mapping["standard_concept_id"].astype(int),
+                        mapping["standard_concept_name"]))
+
+    term_rows = []
+    for mid in sorted(mapped_ids):
+        cids = sorted({int(c) for c in term_std[mid]})
+        term_rows.append({
+            "mondo_id": mid,
+            "label": label_of.get(mid, std_name.get(cids[0], mid) if cids else mid),
+            "is_internal": mid in has_child,
+            "parents": parents.get(mid, []),
+            "std_concepts": cids,
+            "n_persons": count_of.get(mid, 0),
+            "collision_siblings": siblings.get(mid, []),
+        })
+
+    # --- 4. assemble + persist ----------------------------------------------------
+    meta = {
+        "mondo_version": args.mondo_version,
+        "cdr": args.cdr,
+        "source_table": args.source_table,
+        "min_cell": min_cell,
+        "rollup": False,
+        "count_rule": "distinct persons with an EXACT-match standard condition code",
+        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    payload = assemble_payload(meta=meta, term_rows=term_rows, min_cell=min_cell)
+
+    # persons-on-Mondo ladder line (suppressed) for the log.
+    def _sup(n):
+        return f"<{min_cell}" if 0 < n < min_cell else str(int(n))
+    sys.stderr.write(format_summary(payload["stats"], min_cell=min_cell) + "\n")
+    sys.stderr.write(
+        f"[ladder] persons total {n_total} | coded {_sup(n_coded)} | on any mapped "
+        f"Mondo term (exact) {_sup(n_on_mondo)} "
+        f"({100.0 * n_on_mondo / max(n_total, 1):.1f}% of all persons)\n")
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "mondo_usage.json").write_text(json.dumps(payload))
+    rows = [{
+        "mondo_id": nd["id"], "label": nd["label"], "kind": nd["kind"],
+        "depth": nd["depth"], "state": nd["state"], "category": nd["category"],
+        "n_patients": nd["display"],
+        "collision": int(nd["collision"]),
+        "collision_siblings": "|".join(nd["collision_siblings"]),
+        "std_concepts": "|".join(str(c) for c in nd["std_concepts"]),
+        "parents": "|".join(nd["parents"]),
+    } for nd in payload["nodes"] if nd["kind"] != "root"]
+    pd.DataFrame(rows).to_csv(out / "mondo_usage_nodes.tsv", sep="\t", index=False)
+    sys.stderr.write(
+        f"[done] wrote mondo_usage.json ({len(payload['nodes'])} nodes) + "
+        f"mondo_usage_nodes.tsv to {out}\n")
+    spark.stop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
