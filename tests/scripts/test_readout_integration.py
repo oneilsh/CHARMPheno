@@ -19,6 +19,11 @@ same frozen θ, and it must SKIP the co-fit head arm on the unsupervised mainlin
 (weightY=0 → the transform appends no `probability` column) instead of dying on the
 missing column after the expensive arm has already been computed.
 
+The WARM-START flow is pinned here for the same reason: the calibration split's
+second batched solve starts from the arm's main fit (and the A/B gate's sampled
+refit from the full-data one), which must change the wall-clock and nothing else —
+same per-node readout, same degenerate no-ops.
+
 Tolerances (per-node AUC 2e-3, macro 1e-3) are set by the ORACLE, not by us:
 sklearn's default `tol=1e-4` stops its own solver ~5e-4 from the optimum in
 predicted probability, and it is the less-converged of the two parties. Asserting
@@ -143,7 +148,9 @@ class TestDistributedArmMatchesDriverArm:
         """The lean collect is the memory claim: float32 proba + uint8 y/mask, and
         it must reproduce the label/mask arrays the driver collect returns."""
         (_, y_tr, _, _, y_te, m_te), dist, _ = both
-        _, proba, y_got, m_got, persons = dist
+        _, proba, y_got, m_got, persons = dist[:5]
+        V, b_raw = dist[5]                        # the fit params, for warm starts
+        assert V.shape == (C, K) and b_raw.shape == (C,)
         assert proba.dtype == np.float32
         assert y_got.dtype == np.uint8 and m_got.dtype == np.uint8
         assert proba.shape == (D_TE, C)
@@ -157,7 +164,7 @@ class TestDistributedArmMatchesDriverArm:
         rows are exactly the case `_lr_proba_per_label_masked` refuses to fit; both
         paths must emit the lone class value, bit for bit."""
         _, dist, _ = both
-        _, proba, _, _, _ = dist
+        _, proba, _, _, _ = dist[:5]
         assert np.all(proba[:, 0] == np.float32(1.0))
         assert np.all(proba[:, 1] == np.float32(0.0))
 
@@ -209,6 +216,111 @@ def test_ab_harness_runs_both_paths_and_reports(spark, capsys):
     assert "per-node |ΔAUC|" in txt and "max |Δp|" in txt
     assert abs(out["distributed"]["ranking"]["auc"]
                - out["driver"]["ranking"]["auc"]) < 1e-3
+
+
+@pytest.mark.slow
+def test_warm_started_calibration_fit_matches_the_cold_one(spark, capsys):
+    """The driver's calibration flow, warm vs cold, on the same 75% hash split.
+
+    The isotonic calibrator needs an OUT-OF-SAMPLE fit, so a supervised arm pays a
+    SECOND batched solve on 75% of the rows the main fit already converged on.
+    Warm-starting it from the main fit's raw-θ params is a wall-clock device and
+    must be nothing else, which is what this pins end to end through Spark:
+
+      - same readout. Both solves run to `gtol` on the same convex problems, so
+        per-node AUC must agree to the tolerance the whole file uses (2e-3, set by
+        sklearn's own stopping rule);
+      - same degenerate handling. A node can be single-class in the 75% split
+        without being single-class overall, and the warm start must not resurrect
+        one: the fit masks it, so its `x0` row is zeroed and it freezes at
+        iteration 0 with all-zero params and the oracle's constant;
+      - and it must pay under a CAP, which is the regime it exists for — at
+        `max_iter=3` the warm fit is several times closer to the converged answer
+        in predicted probability than the cold one.
+
+    Deliberately NOT asserted: that the warm solve reaches `gtol` in fewer
+    iterations. Measured on this fixture it does not (16 vs 13 iterations, 23 vs
+    14 passes) — L-BFGS's endgame is governed by the curvature history it built,
+    not by where it started, so the payoff is the capped-budget iterate. See the
+    "what it does NOT buy" section of `solve_batched_lr`'s docstring.
+    """
+    from pyspark.sql import functions as F
+
+    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=4)
+    train_df = _make_df(spark, Pi_tr, y_tr, m_tr).cache()
+    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000).cache()
+    # the driver's own split: a hash of person_id, deterministic and complementary
+    h = F.pmod(F.hash(F.col("person_id"), F.lit(0)), F.lit(4))
+    fit_df = train_df.filter(h != 0).cache()
+
+    V, b_raw, _, _, _ = gpc._fit_readout_heads(train_df, C, K, label="main-fit")
+    cold = gpc._fit_readout_heads(fit_df, C, K, label="calibration-fit cold")
+    warm = gpc._fit_readout_heads(fit_df, C, K, label="calibration-fit warm",
+                                  warm_start=(V, b_raw))
+    assert "(warm start)" in capsys.readouterr().out
+
+    assert cold[4]["warm_started"] is False and warm[4]["warm_started"] is True
+    assert np.array_equal(cold[3], warm[3]), "same rows must give the same mask"
+
+    def _proba(fit, max_iter=None):
+        p, y, m, _ = gpc._collect_lean_proba(
+            test_df, C, fit[0], fit[1], degenerate=fit[3], const=fit[2])
+        return p, gpc.readout_from_proba(p, y, m, C, recall_targets=RECALL_TARGETS,
+                                         fdr_targets=FDR_TARGETS, min_count=0)
+
+    p_cold, r_cold = _proba(cold)
+    p_warm, r_warm = _proba(warm)
+    assert set(r_cold["per_node"]) == set(r_warm["per_node"])
+    assert len(r_cold["per_node"]) >= 3
+    for c in r_cold["per_node"]:
+        assert abs(r_cold["per_node"][c]["auc"]
+                   - r_warm["per_node"][c]["auc"]) < 2e-3, c
+
+    # the degenerate nodes of THIS fit are untouched by the warm start
+    deg = np.asarray(warm[3], dtype=bool)
+    assert deg.any(), "fixture must keep at least one degenerate node"
+    assert np.all(warm[0][deg] == 0.0) and np.all(warm[1][deg] == 0.0)
+    assert (warm[4]["n_iter"][deg] == 0).all()
+    assert np.array_equal(p_warm[:, deg], p_cold[:, deg])
+
+    # ...and the cap is where it pays: 3 iterations, same budget, both paths.
+    cap_cold = gpc._fit_readout_heads(fit_df, C, K, max_iter=3,
+                                      label="calibration-fit cold@3")
+    cap_warm = gpc._fit_readout_heads(fit_df, C, K, max_iter=3, warm_start=(V, b_raw),
+                                      label="calibration-fit warm@3")
+    d_cold = np.abs(_proba(cap_cold)[0].astype(np.float64) - p_cold).max()
+    d_warm = np.abs(_proba(cap_warm)[0].astype(np.float64) - p_cold).max()
+    assert d_warm < d_cold, f"capped warm={d_warm:.3e} not better than cold={d_cold:.3e}"
+    for df in (train_df, test_df, fit_df):
+        df.unpersist()
+
+
+@pytest.mark.slow
+def test_ab_gate_warm_starts_its_sampled_fit_from_the_full_fit(spark, capsys):
+    """At `sample_frac<1` the passed-in full-data result is dropped — but not its fit.
+
+    The gate has to compare two solvers on ONE dataset, so a result fit on all the
+    rows cannot serve as its distributed side and the report refits on the sample.
+    That refit is the same C convex problems on a subset of their rows, so the
+    full-data `(V, b_raw)` is exactly what it should start from; the plumbing has
+    to lift the params out BEFORE it drops the result, which is what this pins.
+    """
+    Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te = _make_arrays(seed=6)
+    train_df = _make_df(spark, Pi_tr, y_tr, m_tr).cache()
+    test_df = _make_df(spark, Pi_te, y_te, m_te, offset=10_000).cache()
+    dist = gpc.distributed_score_arm(
+        train_df, test_df, C, K, recall_targets=RECALL_TARGETS,
+        fdr_targets=FDR_TARGETS, min_count=0, label="ab-warm")
+    capsys.readouterr()
+    gpc.readout_ab_report(
+        train_df, test_df, C, K, recall_targets=RECALL_TARGETS,
+        fdr_targets=FDR_TARGETS, min_count=0, label="ab-warm", seed=11,
+        sample_frac=0.7, distributed=dist)
+    txt = capsys.readouterr().out
+    assert "restricted to the SAME 0.7 row sample" in txt
+    assert "(warm start)" in txt, "the sampled refit must start from the full fit"
+    assert "A/B readout equality gate" in txt
+    train_df.unpersist(); test_df.unpersist()
 
 
 @pytest.mark.slow

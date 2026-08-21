@@ -55,6 +55,7 @@ import numpy as np
 __all__ = [
     "standardization_moments",
     "fold_standardization",
+    "unfold_standardization",
     "standardized_grad_from_raw",
     "make_inmemory_stats_fn",
     "solve_batched_lr",
@@ -182,6 +183,39 @@ def fold_standardization(
     return V, b_raw
 
 
+def unfold_standardization(
+    V: np.ndarray,
+    b_raw: np.ndarray,
+    mu: np.ndarray,
+    sd: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Raw-θ scoring params -> standardized-space params ``(W_std (C,K), b_std (C,))``.
+
+    The exact inverse of :func:`fold_standardization`: invert
+    `V = W_std/sd`, `b_raw = b_std − sum(V*mu)` for `(W_std, b_std)` and you get
+
+        W_std[c] = V[c]*sd[c]        b_std[c] = b_raw[c] + sum_k V[c,k]*mu[c,k]
+
+    so the standardized model scores every θ exactly as `(V, b_raw)` does — the
+    round trip is the identity to floating-point roundoff in either direction.
+
+    **Why this direction exists.** Raw-θ params are the only fit output that
+    OUTLIVES its fit: `(V, b_raw)` scores any θ, whereas `(W_std, b_std)` is only
+    meaningful next to the `(mu, sd)` that produced it. So a warm start for a NEW
+    fit (a 75% split, a row subsample — see `x0` in :func:`solve_batched_lr`)
+    travels in raw coordinates and is unfolded HERE through the new fit's own
+    moments. Unfolding is what makes that exact: it lands on the point whose
+    scores are the previous fit's, expressed in the coordinates the new solver
+    optimizes in. Handing the new solver the previous fit's `W_std` directly would
+    be a silent bug — same numbers, different basis.
+    """
+    V = np.asarray(V, dtype=np.float64)
+    b_raw = np.asarray(b_raw, dtype=np.float64)
+    W_std = V * np.asarray(sd, dtype=np.float64)
+    b_std = b_raw + np.einsum("ck,ck->c", V, np.asarray(mu, dtype=np.float64))
+    return W_std, b_std
+
+
 def standardized_grad_from_raw(
     g_raw: np.ndarray,
     s: np.ndarray,
@@ -297,6 +331,7 @@ def solve_batched_lr(
     max_iter: int = 200,
     history: int = 6,
     gtol: float = 1e-6,
+    x0: tuple[np.ndarray, np.ndarray] | None = None,
     progress_fn: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Solve C independent penalized logistic regressions with one batched L-BFGS.
@@ -313,9 +348,56 @@ def solve_batched_lr(
     Returns ``(W_std (C,K), b_std (C,), info)``; `info` carries per-node
     ``n_iter``, ``converged``, ``converged_gtol``, ``stalled`` and
     ``grad_inf_norm`` (plus ``n_stats_calls``, the real cost metric — each one is
-    a full distributed pass — and ``line_search_failures``). Params are in
+    a full distributed pass — ``line_search_failures``, and ``warm_started``,
+    whether this solve started from a caller-supplied `x0`). Params are in
     STANDARDIZED coordinates; pass them through :func:`fold_standardization` to
     score raw θ.
+
+    ``x0`` (optional) is a WARM START ``(W_std0 (C,K), b_std0 (C,))`` in the SAME
+    standardized coordinates the solve runs in; the default `None` starts at the
+    zeros sklearn's `w0` starts at, and the zero path is unchanged by this
+    argument's existence.
+
+    **Why warm starting is sound.** Each node's F_c is strictly convex (the ridge
+    makes it so in `w`, and the intercept direction is bounded once the node has
+    both classes), so its minimizer does not depend on where the iteration starts:
+    run to convergence and `x0` changes only the PATH, never the answer. What it
+    changes is the length of that path — and under an iteration cap (`max_iter`
+    reached before `gtol`) the returned point is whichever iterate the budget
+    bought, so starting nearer the optimum strictly improves it. That is the whole
+    trade: the readout's second and third solves (a 75% calibration split, a
+    row-subsampled A/B fit) are perturbations of a fit we already paid ~200
+    iterations for, and each of those iterations is a full distributed pass.
+    Nodes that are ALREADY at/below `gtol` at `x0` freeze at iteration 0 — the
+    initial F/G evaluation happens at `x0`, and the same freeze rule that stops a
+    converged node mid-run applies to it. Nodes that do move get the cold-start
+    step scaling (`1/max(1,‖G‖)` on any node with no history yet), because at
+    `x0` nobody has history: a warm start supplies a POINT, not a curvature
+    estimate.
+
+    **What it does NOT buy, measured.** A warm start is not a general shortcut to
+    `gtol`. The endgame of L-BFGS is governed by the quality of the accumulated
+    curvature history, not by where the walk began: a cold run enters the flat
+    bottom carrying pairs that span its whole descent, while a warm run has only
+    sampled the neighbourhood it started in, so on a small problem it can reach
+    the same optimum in MORE passes than cold (unit fixture: 23 vs 14). What it
+    reliably buys is the iterate at a fixed small budget — the same fixture at
+    caps of 1-10 iterations lands ~2x closer to the converged answer warm than
+    cold — which is exactly the regime the readout runs in (`max_iter` binds at
+    whole-Mondo scale, and CHARM_DEV caps it deliberately). Also note that
+    `gtol` is a bound on a SUMMED gradient, so a warm start is normally nowhere
+    near it: at n rows a parameter perturbation of ε shows up as ~n·ε of
+    gradient, which is why the iteration-0 freeze above fires for a re-fit of
+    the same rows and not for a 75% split.
+
+    **The one caveat: coordinates.** `x0` is read in the standardized basis of
+    THIS fit's `(mu, sd)`, which is a property of the rows THIS fit sees. A warm
+    start therefore travels in raw-θ coordinates and is mapped in by
+    :func:`unfold_standardization` against this fit's own moments — exact, even
+    though the previous fit standardized against different rows. Passing another
+    fit's `W_std`/`b_std` straight through would be wrong (silently: the numbers
+    are the right shape and the solve still converges, it just starts from a
+    meaningless point, which under an iteration cap ends somewhere meaningless).
 
     ``progress_fn`` (optional) is called once per completed outer iteration with
     a small dict (`iter`, `n_stats_calls`, `n_active`, `n_converged`,
@@ -324,8 +406,10 @@ def solve_batched_lr(
     are minutes, not microseconds, at whole-Mondo scale.
 
     ``converged`` is ``converged_gtol | stalled``: a node stops either because
-    its gradient inf-norm fell below `gtol` or because the objective stopped
-    moving at double precision (see `_FTOL_REL`). Both are convergence; the split
+    its gradient inf-norm fell below `gtol` or because it hit the arithmetic's
+    floor — the objective stopped moving at double precision (see `_FTOL_REL`),
+    or, on a warm start only, its steps stopped carrying usable curvature (the
+    guard in the loop below). Both are convergence; the split
     is reported so a caller can tell "clean gradient stop" from "as good as this
     arithmetic gets", which is the diagnosis you want when `gtol` is set below
     the summed loss's own roundoff floor.
@@ -346,10 +430,25 @@ def solve_batched_lr(
     Degenerate nodes (the caller has masked them out of `stats_fn`, per the
     oracle's constant-prediction fallback for empty/single-class observed sets)
     arrive with an exactly-zero gradient at the zero initialization, converge at
-    iteration 0, and are returned as all-zero params — a clean no-op.
+    iteration 0, and are returned as all-zero params — a clean no-op. That no-op
+    is a property of the ZERO row, not of the masking: with the data term zeroed
+    the objective is the bare ridge `0.5*l2*‖w‖²`, whose gradient `l2*w` vanishes
+    only at `w = 0`. A caller that warm-starts must therefore ZERO the `x0` rows
+    of the nodes IT masks (see `_fit_readout_heads` in the cloud driver), or the
+    ridge will spend real distributed passes walking them back to zero.
     """
     n = K + 1
     X = np.zeros((C, n), dtype=np.float64)      # [w | b] per node; 0 = sklearn's w0
+    warm_started = x0 is not None
+    if warm_started:
+        W0, b0 = x0
+        W0 = np.asarray(W0, dtype=np.float64)
+        b0 = np.asarray(b0, dtype=np.float64)
+        if W0.shape != (C, K) or b0.shape != (C,):
+            raise ValueError(
+                f"x0 shapes {W0.shape}/{b0.shape} != ({C}, {K})/({C},)")
+        X[:, :K] = W0
+        X[:, K] = b0
     calls = 0
 
     def full_obj(P: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -371,6 +470,7 @@ def solve_batched_lr(
     frozen = converged_gtol.copy()
     n_iter = np.zeros(C, dtype=np.int64)
     stall_streak = np.zeros(C, dtype=np.int64)
+    curv_streak = np.zeros(C, dtype=np.int64)   # warm-start guard, see below
     ls_failures = 0
 
     S_hist: list[np.ndarray] = []
@@ -431,6 +531,25 @@ def solve_batched_lr(
         # is not frozen, and has positive curvature. Everyone else gets zeros in
         # this slot, which the two-loop treats as "no pair" (see _two_loop).
         keep = active & (~failed) & (sy > _CURV_TOL)
+        # WARM-START GUARD (inert for x0=None, which is why the cold path is
+        # untouched). A warm-started node can arrive in the flat bottom of its
+        # objective with a history built ENTIRELY from noise-scale steps: `sy`
+        # then sits under the curvature guard, no pair is stored, `gamma` freezes
+        # at the bulk's Barzilai-Borwein value, and the stale model proposes the
+        # same negligible direction every iteration. The step is still accepted
+        # (Armijo is satisfied by a decrease of ~1e-13 RELATIVE, which is real),
+        # so the `_FTOL_REL` stall rule below never fires and the node burns one
+        # distributed pass per iteration until `max_iter` — 200 passes to move a
+        # gradient that is already at the readout's noise level. A cold start
+        # does not reach that state: it enters the same region carrying a history
+        # that spans its whole descent, which solves the ridge-flat direction of
+        # a simplex-featured design in one step. Two CONSECUTIVE curvature-free
+        # iterations (same two-strike logic as the dF rule, same reason) means
+        # the L-BFGS model has nothing left to extract here; the node is at its
+        # numerical optimum and is reported `stalled`, the existing name for
+        # "as good as this arithmetic gets".
+        no_curv = (active & (~failed) & (sy <= _CURV_TOL) if warm_started
+                   else np.zeros(C, dtype=bool))
         S_hist.append(np.where(keep[:, None], s_new, 0.0))
         Y_hist.append(np.where(keep[:, None], y_new, 0.0))
         rho_hist.append(np.where(keep, 1.0 / np.where(keep, sy, 1.0), 0.0))
@@ -460,7 +579,10 @@ def solve_batched_lr(
         # extra pass is cheap insurance against that.
         stall_streak[tiny] += 1
         stall_streak[active & ~tiny] = 0
-        newly_stalled = tiny & (stall_streak >= 2)
+        curv_streak[no_curv] += 1
+        curv_streak[active & ~no_curv] = 0
+        newly_stalled = ((tiny & (stall_streak >= 2))
+                         | (no_curv & (curv_streak >= 2)))
 
         X, F, G = X_best, F_best, G_best
         n_iter[active] = it
@@ -509,5 +631,6 @@ def solve_batched_lr(
         "n_stats_calls": calls,
         "line_search_failures": ls_failures,
         "loss": F,
+        "warm_started": warm_started,
     }
     return X[:, :K].copy(), X[:, K].copy(), info

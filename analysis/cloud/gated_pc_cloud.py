@@ -639,6 +639,14 @@ _DRIVER_READOUT_MAX_C = 500
 # unreachable (roundoff floor ~1e-16*n), so a tighter gtol only buys stalled nodes
 # and wasted distributed passes.
 _READOUT_GTOL = 1e-4
+# Iteration budget for ONE batched readout solve. At C=437 a cold solve spends all
+# 200 of them (~1,200 distributed passes, ~30 min), so this is a real cap, not a
+# safety net: the returned point is "wherever 200 iterations got to" and every
+# iteration is a full pass over the train split. `--readout-max-iter` exposes it
+# because that makes the dev loop affordable (CHARM_DEV caps it at 60, where the
+# macro AUC RANKING is already stable — see run_experiment._apply_dev_profile);
+# the default keeps every production run exactly where it was.
+_READOUT_MAX_ITER = 200
 
 
 def resolve_readout_mode(mode, C, max_driver_c=_DRIVER_READOUT_MAX_C):
@@ -739,9 +747,9 @@ def _collect_lean_proba(scored_df, C, V=None, b_raw=None, *, degenerate=None,
 
 
 def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
-                       max_iter=200, history=6, label="", depth=2,
-                       topic_col="topicDistribution", label_col="label",
-                       mask_col="labelMask"):
+                       max_iter=_READOUT_MAX_ITER, history=6, label="", depth=2,
+                       warm_start=None, topic_col="topicDistribution",
+                       label_col="label", mask_col="labelMask"):
     """Fit all C per-node readout heads with ONE batched distributed L-BFGS.
 
     Returns `(V (C,K), b_raw (C,), const (C,), degenerate (C,) bool, info)` — the
@@ -761,9 +769,29 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
          constant is applied at scoring time. Wrapping the stats_fn (rather than
          re-deriving the moments off a masked frame) keeps it to one data pass.
       3. `solve_batched_lr` at `l2=1.0` — sklearn's `C=1.0` on the SUMMED log-loss,
-         intercept unpenalized — then fold back to raw-θ coordinates."""
+         intercept unpenalized — then fold back to raw-θ coordinates.
+
+    `warm_start=(V, b_raw)` starts the solve from ANOTHER fit's raw-θ scoring
+    params — used for the two solves that are perturbations of the arm's main fit
+    (the 75/25 calibration split, the A/B harness's row sample) rather than new
+    problems. It travels in RAW coordinates by necessity: standardized params
+    only mean something next to the `(mu, sd)` that produced them, and this fit's
+    moments come from ITS rows, so the start is unfolded here through the moments
+    computed in step 1. Two things it must not do, both handled below:
+
+      - resurrect a node this fit masks. A degenerate node's data term is zeroed,
+        leaving the bare ridge, whose gradient `l2*w` vanishes only at `w = 0` —
+        a stale warm-start row would therefore make the solver walk it back to
+        zero over real distributed passes, for a node whose probability is
+        overwritten by the constant fallback anyway. Its `x0` row is zeroed, which
+        restores the exact iteration-0 no-op the cold path has;
+      - change the answer. It cannot: the per-node objective is convex, so the
+        start moves the path and not the optimum. What it buys is the iterate at
+        a CAPPED budget (`max_iter`), which is the budget these solves run under.
+    """
     from analysis.pc.batched_lr import (fold_standardization, solve_batched_lr,
-                                        standardized_grad_from_raw)
+                                        standardized_grad_from_raw,
+                                        unfold_standardization)
 
     C, K = int(C), int(K)
     tag = f"{label}: " if label else ""
@@ -775,9 +803,14 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
     degenerate = (n_obs <= 0) | (n_pos <= 0) | (n_pos >= n_obs)
     const = np.where((n_obs > 0) & (n_pos >= n_obs), 1.0, 0.0)
     keep = ~degenerate
+    x0 = None
+    if warm_start is not None:
+        W0, b0 = unfold_standardization(warm_start[0], warm_start[1], mu, sd)
+        x0 = (np.where(keep[:, None], W0, 0.0), np.where(keep, b0, 0.0))
     print(f"[driver]   {tag}distributed readout fit: C={C} K={K}, "
           f"{int(keep.sum())} fittable nodes, {int(degenerate.sum())} degenerate "
-          f"(constant fallback), observed train cells={int(n_obs.sum())}", flush=True)
+          f"(constant fallback), observed train cells={int(n_obs.sum())}"
+          f"{' (warm start)' if x0 is not None else ''}", flush=True)
 
     with _dr.make_spark_stats_fn(
             train_scored, C, K, mu, sd,
@@ -813,7 +846,7 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
 
         W_std, b_std, info = solve_batched_lr(
             _fittable_stats, C, K, l2=l2, max_iter=max_iter, history=history,
-            gtol=gtol, progress_fn=_progress)
+            gtol=gtol, x0=x0, progress_fn=_progress)
     V, b_raw = fold_standardization(W_std, b_std, mu, sd)
     gmax = float(info["grad_inf_norm"][keep].max()) if keep.any() else 0.0
     # `converged` = gtol OR the principled numerical stall; at gtol=1e-4 (sklearn's
@@ -830,16 +863,20 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
 
 def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
                           fdr_targets, min_count=0, label="", l2=1.0,
-                          gtol=_READOUT_GTOL, max_iter=200, history=6, depth=2,
+                          gtol=_READOUT_GTOL, max_iter=_READOUT_MAX_ITER,
+                          history=6, depth=2, warm_start=None,
                           topic_col="topicDistribution", label_col="label",
                           mask_col="labelMask", id_col="person_id"):
     """`score_arm` without the driver-side θ collect — the distributed twin.
 
-    Returns `(readout, proba_te (D_te,C) f32, y_te u8, m_te u8, person_order)`;
-    the first four mirror `_score_full`'s `(readout, proba)` contract plus the two
-    label arrays the driver path used to get from `_collect_theta_labels`, so every
-    downstream consumer (`_conditional`, the rarity quartile split, the headline)
-    is unchanged.
+    Returns `(readout, proba_te (D_te,C) f32, y_te u8, m_te u8, person_order,
+    (V, b_raw))`; the first four mirror `_score_full`'s `(readout, proba)` contract
+    plus the two label arrays the driver path used to get from
+    `_collect_theta_labels`, so every downstream consumer (`_conditional`, the
+    rarity quartile split, the headline) is unchanged. The trailing raw-θ fit
+    params are what a LATER solve on a near-identical problem warm-starts from
+    (`readout_ab_report`'s row-sampled fit); callers that only want the readout
+    index it out (`[0]`) and are unaffected by its presence.
 
     Same three ingredients as the driver readout, moved: fit per-node LRs on the
     train split's θ (now one batched L-BFGS on the executors), score the test split
@@ -852,19 +889,20 @@ def distributed_score_arm(train_scored, test_scored, C, K, *, recall_targets,
     makes it testable against `score_arm` on a local Spark fixture."""
     V, b_raw, const, degenerate, _info = _fit_readout_heads(
         train_scored, C, K, l2=l2, gtol=gtol, max_iter=max_iter, history=history,
-        depth=depth, label=label, topic_col=topic_col, label_col=label_col,
-        mask_col=mask_col)
+        depth=depth, label=label, warm_start=warm_start, topic_col=topic_col,
+        label_col=label_col, mask_col=mask_col)
     proba, y_te, m_te, persons = _collect_lean_proba(
         test_scored, C, V, b_raw, degenerate=degenerate, const=const,
         score_col=topic_col, label_col=label_col, mask_col=mask_col, id_col=id_col)
     readout = readout_from_proba(proba, y_te, m_te, C, recall_targets=recall_targets,
                                  fdr_targets=fdr_targets, min_count=min_count)
-    return readout, proba, y_te, m_te, persons
+    return readout, proba, y_te, m_te, persons, (V, b_raw)
 
 
 def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
                       fdr_targets, min_count=0, label="", seed=0, n_rows=2000,
-                      sample_frac=1.0, distributed=None):
+                      sample_frac=1.0, distributed=None,
+                      max_iter=_READOUT_MAX_ITER):
     """A/B the distributed readout against the driver readout on the SAME θ.
 
     The plan's correctness gate (step 2: "cardiovascular A/B equality run vs the
@@ -883,13 +921,19 @@ def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
     only afford `readout_sample_frac=0.3` there.
 
     `distributed` optionally passes in an already-computed
-    `(readout, proba, y, mask, person_order)` so the gate costs one extra readout,
-    not two — but only at `sample_frac=1.0`, since a passed-in result was fit on all
-    the rows."""
+    `distributed_score_arm` result so the gate costs one extra readout, not two —
+    but only at `sample_frac=1.0`, since a passed-in result was fit on all the
+    rows. At `sample_frac < 1.0` its FIT PARAMS still travel: the sampled problem
+    is the same C convex problems on a subset of their rows, so the full-data
+    `(V, b_raw)` is a legitimate warm start for it (mapped through the sampled
+    fit's own moments inside `_fit_readout_heads`), and this gate is exactly the
+    capped-budget regime where that is worth passes."""
     from analysis.pc.evaluate import _lr_proba_per_label_masked
 
     tag = f"{label} " if label else ""
     sampled = []
+    warm = distributed[5] if (distributed is not None
+                              and len(distributed) > 5) else None
     if sample_frac < 1.0:
         # cache(): both paths must read the SAME rows, and an uncached `sample` is
         # re-drawn on every action (same seed, but also the same recompute cost).
@@ -904,8 +948,9 @@ def readout_ab_report(train_scored, test_scored, C, K, *, recall_targets,
     if distributed is None:
         distributed = distributed_score_arm(
             train_scored, test_scored, C, K, recall_targets=recall_targets,
-            fdr_targets=fdr_targets, min_count=min_count, label=label)
-    r_dist, p_dist, _, _, ids_dist = distributed
+            fdr_targets=fdr_targets, min_count=min_count, label=label,
+            max_iter=max_iter, warm_start=warm)
+    r_dist, p_dist, _, _, ids_dist = distributed[:5]
 
     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
     Pi_te, y_te, m_te, ids_drv = _collect_theta_labels(test_scored, C)
@@ -1350,6 +1395,13 @@ def parse_args(argv=None):
                         "gate. Report only — never asserts. Ignored unless the mode "
                         f"resolves to distributed AND C<={_DRIVER_READOUT_MAX_C} "
                         "(the driver path must still be affordable to compare to).")
+    p.add_argument("--readout-max-iter", type=int, default=_READOUT_MAX_ITER,
+                   help="iteration cap for EACH batched readout solve (distributed "
+                        "mode). Every iteration is a full pass over the train split "
+                        "— at C=437 a cold solve spends all 200 (~30 min), so this "
+                        "is the readout's wall-clock knob. Lower it for the dev "
+                        "RANKING loop (CHARM_DEV caps it at 60), never for a run of "
+                        "record: the capped point is whatever the budget bought.")
     p.add_argument("--head-converge-iters", type=int, default=25,
                    help="Newton steps for the post-fit HEAD-FORMULATION LADDER "
                         "(localize-head only): converge each localized head variant on "
@@ -1630,8 +1682,10 @@ def main() -> int:
                 # diagnostic and is gated accordingly.
                 _dist_gp = distributed_score_arm(
                     train_scored, test_scored, C, lay.K, recall_targets=rt,
-                    fdr_targets=ft, min_count=args.min_label_count, label="gated_pc")
-                results["gated_pc"], proba_gp, y_te, m_te, _ = _dist_gp
+                    fdr_targets=ft, min_count=args.min_label_count, label="gated_pc",
+                    max_iter=args.readout_max_iter)
+                results["gated_pc"], proba_gp, y_te, m_te, _ = _dist_gp[:5]
+                _gp_fit = _dist_gp[5]         # raw-θ params: the calibration warm start
             else:
                 Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
                     train_scored, C, sample_frac=_sf, seed=_sd)
@@ -1649,7 +1703,8 @@ def main() -> int:
                 readout_ab_report(
                     train_scored, test_scored, C, lay.K, recall_targets=rt,
                     fdr_targets=ft, min_count=args.min_label_count, label="gated_pc",
-                    seed=_sd, sample_frac=_sf, distributed=_dist_gp)
+                    seed=_sd, sample_frac=_sf, distributed=_dist_gp,
+                    max_iter=args.readout_max_iter)
             # Conditional 'sharpening' readout: P(child | parent-cohort) by DAG depth.
             results["gated_pc_conditional"] = _conditional(
                 proba_gp, y_te, m_te, "gated_pc")
@@ -1703,8 +1758,14 @@ def main() -> int:
                 _h = _F.pmod(_F.hash(_F.col("person_id"), _F.lit(int(_sd))), _F.lit(4))
                 _cal_df = train_scored.filter(_h == 0)
                 _fit_df = train_scored.filter(_h != 0)
+                # Warm-started from the arm's OWN main fit: the 75% problem is the
+                # same C heads on three quarters of the same rows, so the main
+                # fit's raw-θ params are a near-solution for it — the point of
+                # paying for the second solve is the OUT-OF-SAMPLE calibrator, not
+                # a rediscovery of the same coefficients from zero.
                 _Vc, _bc, _constc, _degc, _ = _fit_readout_heads(
-                    _fit_df, C, lay.K, label="gated_pc calibration-fit")
+                    _fit_df, C, lay.K, label="gated_pc calibration-fit",
+                    max_iter=args.readout_max_iter, warm_start=_gp_fit)
                 proba_cal, y_cal, m_cal, _ = _collect_lean_proba(
                     _cal_df, C, _Vc, _bc, degenerate=_degc, const=_constc)
                 proba_te_fit, _, _, _ = _collect_lean_proba(
@@ -1845,8 +1906,8 @@ def main() -> int:
                     _dist_us = distributed_score_arm(
                         us_train_scored, us_test_scored, C, lay.K, recall_targets=rt,
                         fdr_targets=ft, min_count=args.min_label_count,
-                        label="unsup_gated")
-                    results["unsup_gated"], proba_us, y_te, m_te, _ = _dist_us
+                        label="unsup_gated", max_iter=args.readout_max_iter)
+                    results["unsup_gated"], proba_us, y_te, m_te, _ = _dist_us[:5]
                 else:
                     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
                         us_train_scored, C,
@@ -1867,7 +1928,8 @@ def main() -> int:
                         fdr_targets=ft, min_count=args.min_label_count,
                         label="unsup_gated",
                         seed=(args.seed if args.seed is not None else 0),
-                        sample_frac=args.readout_sample_frac, distributed=_dist_us)
+                        sample_frac=args.readout_sample_frac, distributed=_dist_us,
+                        max_iter=args.readout_max_iter)
                 # Conditional A/B: does supervision sharpen P(child|parent) vs the
                 # unsupervised twin? (The metric the clinician workflow cares about.)
                 results["unsup_gated_conditional"] = _conditional(
@@ -1899,7 +1961,7 @@ def main() -> int:
                     results["dag_head"] = distributed_score_arm(
                         dh_train, dh_test, C, int(args.k), recall_targets=rt,
                         fdr_targets=ft, min_count=args.min_label_count,
-                        label="dag_head")[0]
+                        label="dag_head", max_iter=args.readout_max_iter)[0]
                     dh_train.unpersist(); dh_test.unpersist()
                 else:
                     Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(
