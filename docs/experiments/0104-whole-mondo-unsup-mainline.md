@@ -135,6 +135,22 @@ readout aggregates got the same auto-rule (`_fit_readout_heads` depth=None → a
 `CHARM_DRIVER_MEMORY=16g` — depth 3 cuts the burst to ~4.6 partials ≈ 1.6 GB, comfortable
 at 16g with the L-BFGS state beside it.
 
+**2026-08-21 — smoke attempt 2 (depth-3 + 16g): FIT CLEAN, READOUT CRAWLS — the θ-width
+lever comes due.** The fit is healthy end-to-end at whole-Mondo (30 dev iters, ~43s/iter
+at K=3,827 — barely above cardiovascular's ~31s; depth-3 aggregation + 16g driver held,
+zero drama). The readout is where the scale bites: **C=3,820, 3,057 fittable / 763
+degenerate, 56.2M observed train cells** (5.7× cardiovascular — deeper DAG, bigger
+closures), and each cell's dot is K=3,827 wide (8.6×) → ~49× more cell-work: measured
+**~65s/data pass** vs 1.9s at C=444 (~1.7 TB memory traffic per pass), ~6-7h per 60-iter
+dev solve, × main + calibration solves per arm. This is the plan §1 "θ-width lever" the
+design deliberately deferred pending measurement: per-doc θ over 3,827 topics should be
+mass-concentrated, so a top-m truncated-θ readout (m≈256) cuts pass cost ~K/m ≈ 15×.
+In flight: always-on θ mass-coverage logging, a `readout_theta_topm` flag (default off,
+sparse-exact kernels, by-node vectorization), and a dev-profile skip of the calibration
+solve. Operational note: `results_partial.json` lands when the MAIN solve's readout
+completes (at the `gated_pc (pc_topics_lr): macro AUC=` line) — the calibration solve
+after it is safely interruptible in a smoke.
+
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
 **0.7584 AUC / 0.5428 AP over 241 nodes**, pooled conditional ECE 0.0028 (isotonic →
