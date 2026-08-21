@@ -21,8 +21,23 @@ or a key input is missing from an older manifest (notably --doc-min-length, whic
 older runs did not record — pass --doc-min-length), the key MISSES and you must
 pass --bundle-path at the exact cached bundle dir.
 
+Both readout paths of ADR 0046 are available here, with the same
+`--readout-mode {driver,distributed,auto}` / `--readout-ab-check` semantics as the
+fit driver: this tool IS the recovery path when a finished fit's readout output was
+lost (exp 0103), and at whole-Mondo C the driver-collect readout is exactly what
+does not fit — so re-reading has to be able to run distributed without re-fitting.
+
+SUBMIT NOTE: the distributed path's mapPartitions kernels pickle by MODULE
+REFERENCE, so `analysis/cloud/distributed_readout.py` must be importable on the
+EXECUTORS as top-level `distributed_readout` — i.e. it must ride in --py-files
+(the `gated-pc-readout` Makefile target does this; a hand-rolled spark-submit must
+add `--py-files ...,<repo>/analysis/cloud/distributed_readout.py` or the
+distributed mode dies unpickling on the executors).
+
 Cluster-covered (Spark + live cache); the pure helpers (build_parser,
-bundle_key_from_manifest, reconstruct_model) are unit-tested.
+bundle_key_from_manifest, reconstruct_model) are unit-tested and the scoring body
+(run_readout) is covered against the driver path on a local-Spark fixture in
+tests/scripts/test_readout_integration.py.
 """
 from __future__ import annotations
 
@@ -35,8 +50,10 @@ import numpy as np
 
 from _driver_common import _phase, configure_logging, make_spark_session
 from gated_pc_cloud import (
-    _collect_head_proba, _collect_theta_labels, format_arm_readout,
-    readout_from_proba, score_arm,
+    _DRIVER_READOUT_MAX_C, _collect_head_proba, _collect_lean_proba,
+    _collect_theta_labels, _dump_partial_results, distributed_score_arm,
+    format_arm_readout, readout_ab_report, readout_from_proba, resolve_readout_mode,
+    score_arm,
 )
 
 
@@ -44,7 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Post-hoc case-finding readout on a finished gated_pc run "
                     "(no re-fit): pc_topics_lr + precision@recall / recall@FDR / "
-                    "detection for the gated_pc arm.")
+                    "detection for the gated_pc arm.",
+        epilog="Submit via `make gated-pc-readout ID=N` (analysis/cloud/Makefile). A "
+               "hand-rolled spark-submit MUST pass --py-files "
+               "<repo>/analysis/cloud/distributed_readout.py alongside the source "
+               "zips: --readout-mode distributed ships its partition kernels by "
+               "module reference and they must import on the executors.")
     p.add_argument("--run-dir", required=True,
                    help="Run dir with gated_pc_result.npz + manifest.json.")
     p.add_argument("--cache-uri", default=None,
@@ -60,6 +82,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fdr-targets", default="0.1,0.25,0.5")
     p.add_argument("--min-label-count", type=int, default=None,
                    help="Small-cell mask floor; default = the run's own value.")
+    p.add_argument("--readout-mode", choices=["driver", "distributed", "auto"],
+                   default="auto",
+                   help="where the pc_topics_lr readout is fit, same semantics as "
+                        "gated_pc_cloud's flag (ADR 0046): 'driver' collects per-doc "
+                        "theta + dense label/mask for BOTH splits and fits C sklearn "
+                        "LRs on the driver; 'distributed' fits all C heads in ONE "
+                        "batched L-BFGS on the executors and collects only the lean "
+                        "float32/uint8 test-split eval bundle; 'auto' (default) = "
+                        f"driver at C<={_DRIVER_READOUT_MAX_C}, else distributed. "
+                        "Note the run's OWN --readout-mode is not consulted: the "
+                        "collect that has to fit is this driver's, not the fit's.")
+    p.add_argument("--readout-ab-check", action="store_true",
+                   help="run BOTH readout paths on the same re-transformed frames and "
+                        "print the deltas (macro AUC/AP, per-node |dAUC|, sampled max "
+                        "|dproba|). Report only — never asserts. Ignored unless the "
+                        f"mode resolves to distributed AND C<={_DRIVER_READOUT_MAX_C} "
+                        "(the driver path must still be affordable to compare to).")
     return p
 
 
@@ -139,6 +178,104 @@ def reconstruct_model(run_dir: Path, manifest: dict):
     return model
 
 
+def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
+                min_count, readout_mode="auto", ab_check=False, out_dir=None):
+    """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
+
+    The whole body of this tool that is worth testing: given the frames a finished
+    fit's model produced and that fit's manifest, it routes the pc_topics_lr arm
+    through the driver or the distributed readout (ADR 0046), optionally runs the
+    A/B equality report, adds the co-fit head arm, and returns
+    `{"gated_pc": ..., "gated_pc_head": ...}`. Taking DataFrames rather than a
+    SparkSession + run dir is what makes it callable against `score_arm` on a local
+    Spark fixture (same reason `distributed_score_arm` is shaped that way);
+    argparse, run-dir resolution and the bundle-cache reload stay cluster-covered.
+
+    K comes from the manifest (`lay.K` at fit time) and is only needed by the
+    distributed solver; runs old enough to lack it fall back to the width of the
+    transform's own theta, which is the same number by construction.
+
+    `out_dir` gets a `results_readout.json` after EACH arm lands — a re-readout is
+    a recovery action (exp 0103 lost a 4h fit's readout to an empty summary), so
+    its output has to survive the terminal it was printed to. Deliberately NOT
+    results_partial.json: that file belongs to the fit's own record."""
+    C = int(manifest["C"])
+    mode = resolve_readout_mode(readout_mode, C)
+    K = int(manifest.get("K") or 0)
+    if mode == "distributed" and not K:
+        # Only the batched solver needs K, so only it pays for the peek.
+        K = int(train_scored.select("topicDistribution").head()[0].size)
+    print(f"[readout]   readout_mode={readout_mode} -> {mode} (C={C}, "
+          f"K={K or 'n/a'}, driver-collect ceiling C<={_DRIVER_READOUT_MAX_C})",
+          flush=True)
+    ab = bool(ab_check) and mode == "distributed"
+    if bool(ab_check) and not ab:
+        print("[readout]   readout_ab_check ignored (readout_mode resolved to driver "
+              "— there is nothing to compare against)", flush=True)
+    elif ab and C > _DRIVER_READOUT_MAX_C:
+        print(f"[readout]   readout_ab_check SKIPPED: C={C} exceeds the driver path's "
+              f"own ceiling ({_DRIVER_READOUT_MAX_C}); the gate is meant to run at "
+              "cardiovascular scale (C=444)", flush=True)
+        ab = False
+
+    def _dump(results):
+        if out_dir is not None:
+            _dump_partial_results(Path(out_dir), results,
+                                  name="results_readout.json")
+
+    results = {}
+    dist = None
+    if mode == "distributed":
+        # No theta collect: the per-node LRs are fit on the executors and only the
+        # lean test-split eval bundle comes back.
+        dist = distributed_score_arm(
+            train_scored, test_scored, C, K, recall_targets=recall_targets,
+            fdr_targets=fdr_targets, min_count=min_count, label="gated_pc")
+        results["gated_pc"] = dist[0]
+    else:
+        Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
+        Pi_te, y_te, m_te, _ = _collect_theta_labels(test_scored, C)
+        results["gated_pc"] = score_arm(
+            Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C, recall_targets=recall_targets,
+            fdr_targets=fdr_targets, min_count=min_count)
+    _dump(results)
+    print(format_arm_readout("gated_pc (pc_topics_lr)", results["gated_pc"]),
+          flush=True)
+    if ab:
+        # Reuses the distributed result just computed, so the gate costs one extra
+        # (driver-path) readout, not two.
+        readout_ab_report(train_scored, test_scored, C, K,
+                          recall_targets=recall_targets, fdr_targets=fdr_targets,
+                          min_count=min_count, label="gated_pc", distributed=dist)
+
+    # Co-fit head arm. The scaled-back mainline (unsup gate + post-hoc readout) fits
+    # at weightY=0, whose transform appends NO `probability` column — the head does
+    # not exist, and asking for it used to fail the whole re-readout with an
+    # AnalysisException AFTER the expensive arm above had already been printed. Skip
+    # it on either witness (the manifest's weight_y, or the column itself, which also
+    # covers a manifest too old to record weight_y).
+    weight_y = float(manifest.get("weight_y", 1.0))
+    if weight_y == 0.0 or "probability" not in test_scored.columns:
+        print(f"[readout]   co-fit head arm SKIPPED (weight_y={weight_y:g}, "
+              f"probability column "
+              f"{'present' if 'probability' in test_scored.columns else 'absent'}): "
+              "an unsupervised gate has no co-fit head to read out.", flush=True)
+        return results
+    if mode == "distributed":
+        # No LR involved — `probability` IS the per-doc (C,) P(node) — so the
+        # distributed variant is just the lean collector over that column.
+        hp, hy, hm, _ = _collect_lean_proba(test_scored, C, score_col="probability")
+    else:
+        hp, hy, hm = _collect_head_proba(test_scored, C)
+    results["gated_pc_head"] = readout_from_proba(
+        hp, hy, hm, C, recall_targets=recall_targets, fdr_targets=fdr_targets,
+        min_count=min_count)
+    _dump(results)
+    print(format_arm_readout("gated_pc (co-fit head)", results["gated_pc_head"]),
+          flush=True)
+    return results
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging()
@@ -176,20 +313,19 @@ def main(argv=None) -> int:
             print(f"[readout]   bundle loaded ({cache_uri}/{key}); C={C}", flush=True)
 
         with _phase("reconstruct model + transform"):
+            # The theta collect (driver mode) now happens inside run_readout, so the
+            # distributed mode can skip it entirely rather than paying for it here.
             model = reconstruct_model(run_dir, manifest)
             train_scored = model.transform(bundle.train_df).cache()
             test_scored = model.transform(bundle.test_df).cache()
-            Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
-            Pi_te, y_te, m_te, _ = _collect_theta_labels(test_scored, C)
 
         with _phase("score"):
-            arm = score_arm(Pi_tr, y_tr, m_tr, Pi_te, y_te, m_te, C,
-                            recall_targets=rt, fdr_targets=ft, min_count=min_count)
-            print(format_arm_readout("gated_pc (pc_topics_lr)", arm), flush=True)
-            hp, hy, hm = _collect_head_proba(test_scored, C)
-            head = readout_from_proba(hp, hy, hm, C, recall_targets=rt,
-                                      fdr_targets=ft, min_count=min_count)
-            print(format_arm_readout("gated_pc (co-fit head)", head), flush=True)
+            run_readout(train_scored, test_scored, manifest, recall_targets=rt,
+                        fdr_targets=ft, min_count=min_count,
+                        readout_mode=args.readout_mode,
+                        ab_check=args.readout_ab_check, out_dir=run_dir)
+            print(f"[readout]   arm results written to "
+                  f"{run_dir / 'results_readout.json'}", flush=True)
             train_scored.unpersist(); test_scored.unpersist()
 
             # Echo the other arms' stored summary (only gated_pc can be re-scored).

@@ -423,6 +423,13 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 # are overridable; a run whose manifest already records doc_min_length + emit_labels
 # (current driver) needs neither. If the key still misses, pass GPR_ARGS="--bundle-path
 # <cache_uri>/<key>".
+#
+# distributed_readout.py rides in --py-files for the same reason the fit's submit
+# ships it (scripts/run_experiment.py:build_spark_submit_cmd): GPR_ARGS="--readout-mode
+# distributed" sends its mapPartitions kernels to the executors pickled BY MODULE
+# REFERENCE, so the executors must be able to `import distributed_readout` too.
+# Example (re-read a lost readout WITH the A/B equality gate):
+#   make gated-pc-readout ID=103 GPR_ARGS="--readout-mode distributed --readout-ab-check"
 GPR_CACHE_URI      ?= hdfs:///user/dataproc/charm/case_finding_cache
 GPR_DOC_MIN_LENGTH ?=
 # The run-dir is passed as a QUOTED glob so the shell does NOT pre-expand it (the
@@ -441,7 +448,7 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
-	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
+	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py \
 	    $(REPO_ROOT)/analysis/cloud/gated_pc_readout.py \
 	    --run-dir "$(GPR_RUN_DIR)" \
 	    --cache-uri $(GPR_CACHE_URI) \
