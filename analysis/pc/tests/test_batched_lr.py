@@ -471,3 +471,30 @@ def test_constant_feature_column_is_inert_and_finite():
     V_ref = lr.coef_[0] / scaler.scale_
     other = np.arange(K) != 3
     assert np.abs(V[1, other] - V_ref[other]).max() < 1e-4
+
+
+# --------------------------------------------------------------------------- #
+# 6. progress reporting                                                        #
+# --------------------------------------------------------------------------- #
+def test_progress_fn_fires_once_per_iteration_and_tracks_the_run():
+    """The heartbeat hook exists because a whole-Mondo stats call is a full
+    cluster pass (minutes), so the driver needs a per-iteration signal to log.
+    It must fire exactly once per completed outer iteration, count the same
+    passes the final info reports, and show convergence progressing monotonically
+    — otherwise the log it feeds would misrepresent the run."""
+    p = _readout_problem()
+    events = []
+    _, _, info, degen, _, _ = _batched_fit(
+        p["Pi"], p["y"], p["obs"], p["C"], p["K"], gtol=1e-4,
+        progress_fn=events.append,
+    )
+    assert events, "progress_fn never fired"
+    assert [e["iter"] for e in events] == list(range(1, len(events) + 1))
+    assert events[-1]["iter"] == int(info["n_iter"].max())
+    assert events[-1]["n_stats_calls"] == int(info["n_stats_calls"])
+    assert events[-1]["n_converged"] == int(info["converged"].sum())
+    n_conv = [e["n_converged"] for e in events]
+    assert n_conv == sorted(n_conv)
+    # degenerate nodes are converged from iteration 0, so every event already
+    # counts them — the driver-side display subtracts them; the hook must not.
+    assert all(e["n_converged"] >= int(degen.sum()) for e in events)

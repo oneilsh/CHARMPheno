@@ -297,6 +297,7 @@ def solve_batched_lr(
     max_iter: int = 200,
     history: int = 6,
     gtol: float = 1e-6,
+    progress_fn: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Solve C independent penalized logistic regressions with one batched L-BFGS.
 
@@ -315,6 +316,12 @@ def solve_batched_lr(
     a full distributed pass — and ``line_search_failures``). Params are in
     STANDARDIZED coordinates; pass them through :func:`fold_standardization` to
     score raw θ.
+
+    ``progress_fn`` (optional) is called once per completed outer iteration with
+    a small dict (`iter`, `n_stats_calls`, `n_active`, `n_converged`,
+    `n_stalled`, `max_grad_inf_norm`) so a driver can heartbeat a long
+    distributed solve — each stats call is a full cluster pass, so iterations
+    are minutes, not microseconds, at whole-Mondo scale.
 
     ``converged`` is ``converged_gtol | stalled``: a node stops either because
     its gradient inf-norm fell below `gtol` or because the objective stopped
@@ -476,6 +483,22 @@ def solve_batched_lr(
                 arr[failed] = 0.0
             gamma[failed] = 1.0
             has_hist[failed] = False
+
+        if progress_fn is not None:
+            # End-of-iteration hook for driver-side progress logging: every entry
+            # in `n_stats_calls` is a full distributed data pass, which is where
+            # the wall-clock goes, so the caller can turn this into a meaningful
+            # "passes so far / nodes still active" heartbeat. Reporting-only —
+            # exceptions are the caller's problem, not swallowed here.
+            progress_fn({
+                "iter": it,
+                "n_stats_calls": calls,
+                "n_active": int((~frozen).sum()),
+                "n_converged": int((converged_gtol | stalled).sum()),
+                "n_stalled": int(stalled.sum()),
+                "max_grad_inf_norm": float(gnorm[~frozen].max()) if (~frozen).any()
+                                     else float(gnorm.max()) if C else 0.0,
+            })
 
     info = {
         "n_iter": n_iter,
