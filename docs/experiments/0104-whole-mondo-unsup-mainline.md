@@ -1,7 +1,7 @@
 ---
 id: 104
 slug: whole-mondo-unsup-mainline
-status: planned
+status: pending
 model_class: gated_pc
 cohort: population_mondo_all
 cohort_def: population_mondo_all
@@ -119,4 +119,8 @@ make -C analysis/cloud report ID=104
 
 ## Run log
 
-(planned — blocked on exp 0103 gate)
+**2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
+0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
+**0.7584 AUC / 0.5428 AP over 241 nodes**, pooled conditional ECE 0.0028 (isotonic →
+0.0010). Since staging, the readout also gained warm starts + a CHARM_DEV cap of 60
+solver iterations (insight 0074), so the smoke's readout is ~3× cheaper than 0103's.

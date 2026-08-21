@@ -1,7 +1,7 @@
 ---
 id: 103
 slug: mondo-cv-readout-ab-gate
-status: pending
+status: done
 model_class: gated_pc
 cohort: population_mondo_cardiovascular
 cohort_def: population_mondo_cardiovascular
@@ -135,3 +135,38 @@ heartbeat (`batched L-BFGS iter N: P data passes, X/357 converged, ... elapsed`)
 prints (every iter for the first 3, then every 5th). **Gate verdict still pending**: read
 the `A/B readout equality gate` blocks + `batched L-BFGS:` summary lines from the full
 (non-dev) run.
+
+**2026-08-21 — FULL run (Fit session 3, exit 0, ~5h): THE GATE PASSES.** (The cluster
+restart wiped the HDFS bundle cache, so this run rebuilt it; both durability layers and
+the heartbeat did their jobs — the run survived 10 executor losses + 2 container OOMs
+from spot reclamation with no lost output.)
+
+- **A/B equality, both arms** (same 0.3 row sample both paths, seed 42, 173 shared
+  nodes): gated_pc macro ΔAUC **+1.08e-4** / ΔAP +3.5e-5, per-node max |ΔAUC| 5.36e-3,
+  mean 5.28e-4, n>1e-3=27, mean |Δp| 5.9e-4; unsup_gated macro ΔAUC **+1.70e-5** /
+  ΔAP −7.0e-5, per-node max 1.92e-3, mean 2.09e-4, n>1e-3=5, mean |Δp| 1.47e-4. Mean
+  per-cell deltas land exactly on the predicted sklearn-tol residual; the outlier tail
+  (incl. one 0.648 |Δp| cell on the gated_pc arm) tracks CONVERGENCE STATE, not
+  formulation: the better-conditioned unsup fit (136/357 gtol on the sampled solve, 0
+  stalled, 0 line-search failures everywhere) shows ~2.5× smaller deltas across the
+  board. Both solvers stop short on ill-conditioned nodes (cap 200 iters, max|grad|
+  12–49 at stop); sklearn is the less-converged party at its own tol. **Verdict: the
+  distributed readout is the production path.**
+- **New full-row cardiovascular record (241 nodes, no readout subsampling):**
+  unsup_gated **0.7584 AUC / 0.5428 AP** vs gated_pc 0.7128/0.4917 (Δ−0.0456/−0.0511);
+  quartiles all negative again (Q1 −0.0437, Q2 −0.0540, Q3 −0.0477, Q4 −0.0372) —
+  rare-tail rescue refuted on full data too. Co-fit head as trained 0.5609 (|w_CK|
+  peaked 5.99e5 — insight 0067's blowup, PC arm only). The full-row readout RAISES the
+  mainline bar: the closeout §6 revival condition is now co-fit ≳ **0.758**.
+- **Calibration/VOI readiness:** unsup pooled conditional ECE 0.0028; held-out isotonic
+  takes raw 0.0059 → **0.0010**. Per-node ECE mean 0.0475 / max 0.33 — pooling flatters;
+  per-node isotonic is the lever, machinery in place.
+- **Detection is chance in every arm (AUC exactly 0.5, AP=prev=0.777) — pre-existing,
+  not a readout regression** (0102's driver-path run shows the same signature): the
+  degenerate constant-1.0 columns (the root above all) saturate the doc-level max.
+  Small fix queued: exclude constant columns from the detection score.
+- **Cost profile (the whole-Mondo read):** ~1.9s/treeAggregate pass at C=437; each
+  200-iter solve ≈ 1,220 passes ≈ 35 min; three solves per supervised arm (main, A/B
+  sample, calibration) → gated_pc arm 11,918s total, unsup 5,358s. Landed after this
+  run: warm starts for the A/B/calibration solves + `CHARM_DEV` readout cap of 60 iters
+  (insight 0074) — dev readouts drop ~3×; production cost unchanged pending need.
