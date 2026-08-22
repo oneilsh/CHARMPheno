@@ -188,6 +188,12 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 .gmore text{fill:var(--ink-2);font-family:var(--mono);font-weight:600}
 .gbadge{fill:var(--surface);stroke:var(--ink-2);stroke-width:1.4}
 .gbadge-sign{stroke:var(--ink-2);stroke-width:1.6;stroke-linecap:round;fill:none}
+/* lineage highlight: selected node + its ancestors stay lit, the rest recede */
+.sel-active .gnode:not(.hl){opacity:.24}
+.sel-active .gmore{opacity:.24}
+.sel-active .gedge:not(.hl){opacity:.08}
+.gedge.hl{stroke:var(--accent);stroke-opacity:.95;stroke-width:2.4}
+.gnode.hl .gcirc{stroke:var(--accent);stroke-width:2.4}
 @media(prefers-reduced-motion:reduce){.gnode,.gmore,.gedge,.gnode .gcirc,.gnode .gring{transition:none}}
 
 /* drawer */
@@ -309,6 +315,7 @@ let DATA=null, byId=new Map(), kids=new Map(), roots=[], expanded=new Set(), sel
 let ROLL_MAX=1, OWN_MAX=1, ROLL_EST_MAX=1;
 let graphOpen=new Set(["root"]), graphCap=new Map(), gz={x:24,y:24,k:0.85};
 let gBounds=null;   // last-layout bounds for Fit
+let gHL=new Set();  // selected node + its ancestors (lineage highlight)
 const GRAPH_CAP=14;   // max children revealed per expansion before a "＋N more" node
 const state={view:"tree",q:"",rollup:false,vis:new Set(CATS.filter(c=>c.on).map(c=>c.key))};
 
@@ -594,9 +601,20 @@ function graphVisible(){
       }
     }
   }
+  // reveal the full ancestor lineage of the selected node (every parent path to root)
+  if(selected && byId.has(selected)){
+    const anc=ancestorSet(selected); anc.add(selected);
+    for(const id of anc) if(canShow(id)&&!vis.has(id)) vis.set(id,byId.get(id));
+  }
   return vis;
 }
 const gparents=(vis,id)=>{const n=vis.get(id); return n._more?[n.parent]:((n.parents||[]).filter(p=>vis.has(p)));};
+function ancestorSet(id){                 // all transitive parents up the DAG (every path)
+  const out=new Set(), st=[...((byId.get(id)||{}).parents||[])];
+  while(st.length){const p=st.pop(); if(out.has(p)||!byId.has(p))continue; out.add(p);
+    for(const pp of (byId.get(p).parents||[])) st.push(pp);}
+  return out;
+}
 // radius: area ∝ value against a STABLE global max (√ scale), so 20k / 5k / <20
 // read as clearly different sizes and don't rescale as you expand.
 function graphRadius(id){
@@ -637,6 +655,8 @@ function graphInit(){
 function renderGraph(){
   if(!gLayer||!gLayer.isConnected) graphInit();
   const vis=graphVisible(), {coord}=layoutGraph(vis);
+  gHL=(selected&&byId.has(selected))?(()=>{const s=ancestorSet(selected);s.add(selected);return s;})():new Set();
+  if(gLayer) gLayer.classList.toggle("sel-active",gHL.size>0);
   // bounds for Fit
   let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
   for(const [,c] of coord){minX=Math.min(minX,c.x-c.r);minY=Math.min(minY,c.y-c.r);
@@ -653,6 +673,7 @@ function renderGraph(){
         gEdgeG.appendChild(e); gEdgeEls.set(key,e);
         requestAnimationFrame(()=>{e.style.transition=""; e.style.opacity="";}); }
       else { e.setAttribute("d",d); e.style.d=`path("${d}")`; }
+      e.setAttribute("class","gedge"+((gHL.has(p)&&gHL.has(id))?" hl":""));
     }}
   for(const [key,e] of gEdgeEls){ if(!seenE.has(key)){ e.style.opacity=0;
     setTimeout(()=>{e.remove();},260); gEdgeEls.delete(key); } }
@@ -699,7 +720,7 @@ function buildNode(id,n){
   return g;
 }
 function updateNode(g,id,n,c){
-  g.setAttribute("class","gnode"+(selected===id?" sel":""));
+  g.setAttribute("class","gnode"+(selected===id?" sel":"")+(gHL.has(id)?" hl":""));
   const col=CATMAP[n.category]?CATMAP[n.category].color:"var(--muted)";
   const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
   circ.setAttribute("fill",col);
@@ -930,7 +951,7 @@ function select(id){
 function revealInTree(id){let cur=id;const path=[];while(cur){const n=byId.get(cur);if(!n)break;path.push(cur);const p=n.parents[0];cur=(p&&byId.has(p))?p:null;}
   for(const p of path)expanded.add(p);}
 function closeDrawer(){selected=null;$("#drawer").classList.remove("open");$("#drawer").setAttribute("aria-hidden","true");
-  if(state.view==="tree")renderTree();else if(state.view==="table")renderTable();}
+  if(state.view==="tree")renderTree();else if(state.view==="table")renderTable();else if(state.view==="graph")renderGraph();}
 const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const clip=(s,n)=>s.length>n?s.slice(0,n-1)+"…":s;
 
