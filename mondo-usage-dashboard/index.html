@@ -167,6 +167,26 @@ td.num{font-family:var(--mono);text-align:right}
 #table-scroll{max-height:70vh;overflow:auto}
 tr.trow:hover{background:var(--surface-2);cursor:pointer}
 
+/* graph (DAG explorer) */
+#view-graph{position:relative}
+.graph-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:9px 14px;border-bottom:1px solid var(--border)}
+.btn.sm{padding:5px 10px;font-size:12px;border-radius:7px}
+.g-hint{color:var(--muted);font-size:11.5px;font-family:var(--mono);margin-left:auto}
+#graph{width:100%;height:72vh;display:block;cursor:grab;touch-action:none;
+  background:radial-gradient(circle at 1px 1px, var(--surface-2) 1.1px, transparent 0) 0 0/24px 24px}
+#graph.grabbing{cursor:grabbing}
+.gnode{cursor:pointer}
+.gnode>circle{stroke:var(--surface);stroke-width:1.5}
+.gnode text{font-family:var(--sans);paint-order:stroke;stroke:var(--surface);stroke-width:3.5px;stroke-linejoin:round}
+.gnode .glbl{fill:var(--ink);font-weight:600}
+.gnode .gsub{fill:var(--ink-2);font-family:var(--mono)}
+.gnode.sel>circle{stroke:var(--accent);stroke-width:3}
+.gedge{fill:none;stroke:var(--border-strong);stroke-opacity:.7;stroke-width:1.4}
+.gmore rect{fill:var(--surface-2);stroke:var(--border-strong);stroke-width:1.5;rx:9}
+.gmore text{fill:var(--ink-2);font-family:var(--mono);font-weight:600}
+.gbadge{fill:var(--surface);stroke:var(--ink-2);stroke-width:1.4}
+.gbadge-sign{stroke:var(--ink-2);stroke-width:1.6;stroke-linecap:round}
+
 /* drawer */
 .drawer{position:fixed;top:0;right:0;height:100%;width:min(410px,92vw);background:var(--surface);
   border-left:1px solid var(--border);box-shadow:-14px 0 40px rgba(10,15,20,.14);
@@ -234,6 +254,7 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
     </label>
     <div class="tabs" role="tablist">
       <button role="tab" data-view="tree" aria-selected="true">Hierarchy</button>
+      <button role="tab" data-view="graph" aria-selected="false">Graph</button>
       <button role="tab" data-view="treemap" aria-selected="false">Treemap</button>
       <button role="tab" data-view="table" aria-selected="false">Table</button>
     </div>
@@ -241,6 +262,15 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 
   <div class="panel">
     <div class="view on" id="view-tree"><div id="tree"></div><div class="hint" id="tree-hint"></div></div>
+    <div class="view" id="view-graph">
+      <div class="graph-toolbar">
+        <button class="btn sm" id="g-reset">Reset view</button>
+        <button class="btn sm" id="g-collapse">Collapse all</button>
+        <button class="btn sm" id="g-fit">Fit</button>
+        <span class="g-hint" id="graph-hint"></span>
+      </div>
+      <svg id="graph"></svg>
+    </div>
     <div class="view" id="view-treemap"><div id="treemap-wrap"><svg id="treemap"></svg></div>
       <div class="tm-note" id="tm-note"></div></div>
     <div class="view" id="view-table"><div id="table-scroll"></div><div class="hint" id="table-hint"></div></div>
@@ -274,6 +304,8 @@ const fmtK=n=>{n=Math.round(n);return n<1000?(""+n):n<1e6?((n/1e3).toFixed(n<1e4
 const SMALL_NOMINAL=10;
 let DATA=null, byId=new Map(), kids=new Map(), roots=[], expanded=new Set(), selected=null;
 let ROLL_MAX=1, OWN_MAX=1;
+let graphOpen=new Set(["root"]), graphCap=new Map(), gz={x:24,y:24,k:0.85};
+const GRAPH_CAP=14;   // max children revealed per expansion before a "＋N more" node
 const state={view:"tree",q:"",rollup:false,vis:new Set(CATS.filter(c=>c.on).map(c=>c.key))};
 
 /* ---------- load: embedded block > fetched real > fetched sample ---------- */
@@ -304,6 +336,7 @@ function load(d){
   for(const [,arr] of kids) arr.sort(sortNodes);
   roots.sort(sortNodes);
   computeVisibleDesc(); computeRollup();
+  graphOpen=new Set(["root"]); graphCap=new Map(); gz={x:24,y:24,k:0.85};
   renderSource(); renderKPIs(); renderFilters();
   for(const id of roots) expanded.add(id);          // open first level
   renderAll();
@@ -424,7 +457,12 @@ function renderFilters(){
 function catCounts(){const o={};for(const n of DATA.nodes){if(n.kind==="root")continue;o[n.category]=(o[n.category]||0)+1;}return o;}
 
 /* ------------------------------- render ----------------------------------- */
-function renderAll(){ state.view==="tree"?renderTree():state.view==="treemap"?renderTreemap():renderTable(); }
+function renderAll(){
+  if(state.view==="tree")return renderTree();
+  if(state.view==="graph")return renderGraph();
+  if(state.view==="treemap")return renderTreemap();
+  return renderTable();
+}
 
 /* ---- hierarchy ---- */
 function renderTree(){
@@ -519,6 +557,113 @@ function topAncestor(id){                // depth-1 ancestor (body system) of a 
   while(cur && cur.depth>1 && guard++<64){const p=cur.parents[0];cur=(p&&byId.has(p))?byId.get(p):null;}
   return cur?cur.id:id;
 }
+/* ---- graph (DAG node-link, horizontal layered, progressive disclosure) ---- */
+const gval=id=>{const n=byId.get(id); if(!n)return 0;
+  if(state.rollup){const r=DATA._roll.get(id);return r?r.est:0;}
+  return n.state==="reported"?n.count:n.state==="used_small"?((DATA.meta.min_cell||20)-1):0.4;};
+function graphCountText(id){const n=byId.get(id),min=DATA.meta.min_cell||20;
+  if(state.rollup){const r=DATA._roll.get(id); if(!r||r.nUsed===0)return "";
+    return `${r.floor>0?fmtK(r.floor):('<'+min)}–${fmtK(r.ceil)}`;}
+  return n.state==="reported"?fmtK(n.count):n.state==="used_small"?("<"+min):"";}
+
+// visible node set: root + capped top-prevalence children of open nodes; a truncated
+// fan-out gets a synthetic "more:<parent>" node. Search overrides with matched∪ancestors.
+function graphVisible(){
+  const vis=new Map(), q=state.q.toLowerCase();
+  const canShow=id=>{const n=byId.get(id);return !!n&&(n.kind==="root"||DATA._anyVis.get(id));};
+  if(q){const keep=searchSet(q); for(const id of keep) if(canShow(id)) vis.set(id,byId.get(id));
+    if(byId.get("root"))vis.set("root",byId.get("root")); return vis;}
+  if(byId.get("root"))vis.set("root",byId.get("root"));
+  else for(const r of roots) if(canShow(r)) vis.set(r,byId.get(r));
+  let changed=true;
+  while(changed){changed=false;
+    for(const id of [...vis.keys()]){
+      if(id.startsWith("more:")||!graphOpen.has(id))continue;
+      const ch=(kids.get(id)||[]).filter(canShow).sort((a,b)=>gval(b)-gval(a));
+      const cap=graphCap.get(id)??GRAPH_CAP, show=ch.slice(0,cap), hidden=ch.slice(cap);
+      for(const c of show) if(!vis.has(c)){vis.set(c,byId.get(c));changed=true;}
+      const mid="more:"+id;
+      if(hidden.length && !vis.has(mid)){
+        vis.set(mid,{id:mid,_more:true,parent:id,hidden:hidden.length,
+          label:`＋${hidden.length} more`,depth:(byId.get(id).depth||0)+1}); changed=true;
+      }
+    }
+  }
+  return vis;
+}
+const gparents=(vis,id)=>{const n=vis.get(id); return n._more?[n.parent]:((n.parents||[]).filter(p=>vis.has(p)));};
+function layoutGraph(vis){
+  const layers={}, maxV=Math.max(1,...[...vis.keys()].filter(id=>!id.startsWith("more:")).map(gval));
+  let maxD=0;
+  for(const [id,n] of vis){const d=n.depth||0;(layers[d]=layers[d]||[]).push(id);maxD=Math.max(maxD,d);}
+  const rad=id=>vis.get(id)._more?7:(7+21*Math.sqrt((lg(gval(id))/lg(maxV))||0));
+  const ord={}; for(const d in layers) layers[d].forEach((id,i)=>ord[id]=i);
+  const bary=id=>{const ps=gparents(vis,id);return ps.length?ps.reduce((s,p)=>s+(ord[p]||0),0)/ps.length:(ord[id]||0);};
+  const baryC=id=>{const cs=[...vis.keys()].filter(k=>gparents(vis,k).includes(id));
+    return cs.length?cs.reduce((s,c)=>s+(ord[c]||0),0)/cs.length:(ord[id]||0);};
+  for(let pass=0;pass<5;pass++){
+    for(let d=1;d<=maxD;d++){if(!layers[d])continue;layers[d].sort((a,b)=>bary(a)-bary(b));layers[d].forEach((id,i)=>ord[id]=i);}
+    for(let d=maxD-1;d>=0;d--){if(!layers[d])continue;layers[d].sort((a,b)=>baryC(a)-baryC(b));layers[d].forEach((id,i)=>ord[id]=i);}
+  }
+  const coord=new Map(); let x=40;
+  for(let d=0;d<=maxD;d++){const arr=layers[d]||[]; const maxR=Math.max(12,...arr.map(rad)); let y=40;
+    for(const id of arr){const r=rad(id); coord.set(id,{x:x+maxR,y:y+r,r}); y+=2*r+30;}
+    x+=maxR*2+206;}
+  return {coord};
+}
+function renderGraph(){
+  const svg=$("#graph"); while(svg.firstChild)svg.removeChild(svg.firstChild);
+  const vis=graphVisible(); const {coord}=layoutGraph(vis);
+  const g=svgEl("g",{}); svg.appendChild(g);
+  for(const [id] of vis){const b=coord.get(id); if(!b)continue;
+    for(const p of gparents(vis,id)){const a=coord.get(p); if(!a)continue;
+      const mx=(a.x+b.x)/2;
+      g.appendChild(svgEl("path",{class:"gedge",d:`M${a.x+a.r},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x-b.r},${b.y}`}));}}
+  for(const [id,n] of vis){const c=coord.get(id); if(!c)continue;
+    if(n._more){
+      const gm=svgEl("g",{class:"gmore",transform:`translate(${c.x},${c.y})`,style:"cursor:pointer"});
+      const w=n.label.length*7+16;
+      gm.appendChild(svgEl("rect",{x:-w/2,y:-11,width:w,height:22,rx:9}));
+      const t=svgEl("text",{x:0,y:4,"text-anchor":"middle","font-size":11});t.textContent=n.label;gm.appendChild(t);
+      gm.addEventListener("click",e=>{e.stopPropagation();graphCap.set(n.parent,Infinity);renderGraph();});
+      g.appendChild(gm); continue;
+    }
+    const gn=svgEl("g",{class:"gnode"+(selected===id?" sel":""),transform:`translate(${c.x},${c.y})`});
+    const col=CATMAP[n.category]?CATMAP[n.category].color:"var(--muted)";
+    gn.appendChild(svgEl("circle",{r:c.r,cx:0,cy:0,fill:col,"fill-opacity":(n.state==="reported"||n.state==="used_small")?0.92:0.4}));
+    if(n.collision) gn.appendChild(svgEl("circle",{r:c.r+3.5,cx:0,cy:0,fill:"none",stroke:"var(--collision)","stroke-width":1.5}));
+    const lx=c.r+8;
+    const t=svgEl("text",{class:"glbl",x:lx,y:c.r>13?-1:4,"font-size":12.5});t.textContent=clip(n.label,36);gn.appendChild(t);
+    const ct=graphCountText(id);
+    if(ct){const s=svgEl("text",{class:"gsub",x:lx,y:13,"font-size":10.5});s.textContent=ct;gn.appendChild(s);}
+    const hasKids=(kids.get(id)||[]).some(k=>DATA._anyVis.get(k));
+    if(hasKids){const open=graphOpen.has(id),bx=c.r*0.72,by=c.r*0.72;
+      gn.appendChild(svgEl("circle",{class:"gbadge",cx:bx,cy:by,r:7}));
+      gn.appendChild(svgEl("path",{class:"gbadge-sign",d:open?`M${bx-3.2},${by} h6.4`:`M${bx-3.2},${by} h6.4 M${bx},${by-3.2} v6.4`}));}
+    gn.addEventListener("click",e=>{e.stopPropagation();
+      if(hasKids){ if(graphOpen.has(id))graphCollapse(id); else graphOpen.add(id); }
+      select(id);});
+    gn.addEventListener("mousemove",e=>showTip(e,`${n.label} · ${graphCountText(id)||'0'}${n.collision?' · collision':''}`));
+    gn.addEventListener("mouseleave",hideTip);
+    g.appendChild(gn);
+  }
+  applyGT(g);
+  $("#graph-hint").textContent=state.q
+    ? `${vis.size} nodes matching “${state.q}” (paths shown)`
+    : `${vis.size} nodes · click to expand/collapse · ${state.rollup?'size ∝ subtree rollup':'size ∝ own patients'} · drag to pan, scroll to zoom`;
+}
+function graphCollapse(id){graphOpen.delete(id);graphCap.delete(id);
+  for(const c of (kids.get(id)||[])) if(graphOpen.has(c)) graphCollapse(c);}
+function applyGT(g){g.setAttribute("transform",`translate(${gz.x},${gz.y}) scale(${gz.k})`);}
+function graphFit(){
+  const svg=$("#graph"),g=svg.firstChild; if(!g)return;
+  const bb=g.getBBox(); if(!bb.width||!bb.height)return;
+  const W=svg.clientWidth,H=svg.clientHeight,pad=30;
+  gz.k=Math.min(1.4,Math.max(0.12,Math.min((W-2*pad)/bb.width,(H-2*pad)/bb.height)));
+  gz.x=pad-bb.x*gz.k+ (W-2*pad-bb.width*gz.k)/2; gz.y=pad-bb.y*gz.k;
+  applyGT(g);
+}
+
 function renderTreemap(){
   const svg=$("#treemap"); while(svg.firstChild)svg.removeChild(svg.firstChild);
   const W=svg.clientWidth||svg.parentElement.clientWidth-28, H=Math.max(360,Math.min(620,W*0.52));
@@ -712,6 +857,7 @@ function select(id){
   inner.querySelectorAll("[data-goto]").forEach(a=>a.onclick=()=>{const t=a.getAttribute("data-goto");revealInTree(t);select(t);});
   if(state.view==="tree"){renderTree();}
   else if(state.view==="table"){renderTable();}
+  else if(state.view==="graph"){renderGraph();}
 }
 function revealInTree(id){let cur=id;const path=[];while(cur){const n=byId.get(cur);if(!n)break;path.push(cur);const p=n.parents[0];cur=(p&&byId.has(p))?p:null;}
   for(const p of path)expanded.add(p);}
@@ -732,12 +878,32 @@ function showTip(e,txt){tip.textContent=txt;tip.style.opacity=1;
 function hideTip(){tip.style.opacity=0;}
 
 /* --------------------------------- wiring --------------------------------- */
-document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
+document.querySelectorAll(".tabs:not(.mode-t) button").forEach(b=>b.onclick=()=>{
   state.view=b.dataset.view;
-  document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-selected",x===b));
+  document.querySelectorAll(".tabs:not(.mode-t) button").forEach(x=>x.setAttribute("aria-selected",x===b));
   document.querySelectorAll(".view").forEach(v=>v.classList.remove("on"));
   $("#view-"+state.view).classList.add("on"); renderAll();
+  if(state.view==="graph") requestAnimationFrame(graphFit);
 });
+// graph controls + pan/zoom (listeners on the persistent svg, once)
+$("#g-collapse").onclick=()=>{graphOpen=new Set(["root"]);graphCap=new Map();renderGraph();requestAnimationFrame(graphFit);};
+$("#g-reset").onclick=()=>{gz={x:24,y:24,k:0.85};const g=$("#graph").firstChild;if(g)applyGT(g);};
+$("#g-fit").onclick=graphFit;
+(function(){const svg=$("#graph");let drag=null;
+  svg.addEventListener("wheel",e=>{e.preventDefault();const r=svg.getBoundingClientRect();
+    const mx=e.clientX-r.left,my=e.clientY-r.top,f=Math.exp(-e.deltaY*0.0016);
+    const nk=Math.min(3,Math.max(0.12,gz.k*f));
+    gz.x=mx-(mx-gz.x)*(nk/gz.k);gz.y=my-(my-gz.y)*(nk/gz.k);gz.k=nk;
+    const g=svg.firstChild;if(g)applyGT(g);},{passive:false});
+  svg.addEventListener("pointerdown",e=>{if(e.target.closest(".gnode,.gmore"))return;
+    drag={x:e.clientX,y:e.clientY,ox:gz.x,oy:gz.y};svg.classList.add("grabbing");
+    try{svg.setPointerCapture(e.pointerId);}catch(_){}});
+  svg.addEventListener("pointermove",e=>{if(!drag)return;
+    gz.x=drag.ox+(e.clientX-drag.x);gz.y=drag.oy+(e.clientY-drag.y);
+    const g=svg.firstChild;if(g)applyGT(g);});
+  const end=()=>{drag=null;svg.classList.remove("grabbing");};
+  svg.addEventListener("pointerup",end);svg.addEventListener("pointercancel",end);
+})();
 document.querySelectorAll("#mode button").forEach(b=>b.onclick=()=>{
   state.rollup=b.dataset.mode==="rollup";
   document.querySelectorAll("#mode button").forEach(x=>x.setAttribute("aria-selected",x===b));
