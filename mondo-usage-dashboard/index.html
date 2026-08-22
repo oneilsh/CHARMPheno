@@ -341,7 +341,7 @@ const fmtK=n=>{n=Math.round(n);return n<1000?(""+n):n<1e6?((n/1e3).toFixed(n<1e4
 // SMALL_NOMINAL is the point estimate used for the "nominal add-up" only (the
 // rigorous bracket uses 1 and 19 for floor/ceiling and never this value).
 const SMALL_NOMINAL=10;
-let DATA=null, byId=new Map(), kids=new Map(), roots=[], expanded=new Set(), selected=null;
+let DATA=null, byId=new Map(), kids=new Map(), dagKids=new Map(), roots=[], expanded=new Set(), selected=null;
 let ROLL_MAX=1, OWN_MAX=1, ROLL_EST_MAX=1;
 let graphOpen=new Set(["root"]), graphCap=new Map(), gz={x:24,y:24,k:0.85};
 let gBounds=null;   // last-layout bounds for Fit
@@ -364,7 +364,7 @@ async function boot(){
 async function tryFetch(u){try{const r=await fetch(u);if(!r.ok)return null;return await r.json();}catch(e){return null;}}
 
 function load(d){
-  DATA=d; byId=new Map(); kids=new Map(); roots=[]; expanded=new Set(); selected=null;
+  DATA=d; byId=new Map(); kids=new Map(); dagKids=new Map(); roots=[]; expanded=new Set(); selected=null;
   for(const n of d.nodes) byId.set(n.id,n);
   for(const n of d.nodes){                        // spanning tree via primary parent
     const p=(n.parents&&n.parents.length)?n.parents[0]:null;
@@ -372,11 +372,18 @@ function load(d){
     if(!byId.has(p)){ roots.push(n.id); continue; }
     if(!kids.has(p)) kids.set(p,[]); kids.get(p).push(n.id);
   }
+  // DAG child map: every parent->child edge (a node with N parents is a child of all
+  // N). The Graph view expands along THIS, so a used term is reachable from every
+  // Mondo parent — not only the one the spanning tree happened to pick.
+  for(const n of d.nodes){ if(n.kind==="root")continue;
+    for(const p of (n.parents||[])){ if(!byId.has(p))continue;
+      if(!dagKids.has(p)) dagKids.set(p,[]); dagKids.get(p).push(n.id); } }
   // attach root's declared children too
   const rootNode=d.nodes.find(n=>n.kind==="root");
   if(rootNode&&kids.has(rootNode.id)) roots=roots.concat(kids.get(rootNode.id));
   roots=[...new Set(roots)];
   for(const [,arr] of kids) arr.sort(sortNodes);
+  for(const [,arr] of dagKids) arr.sort(sortNodes);
   roots.sort(sortNodes);
   computeVisibleDesc(); computeRollup(); assignSystems();
   graphOpen=new Set(["root"]); graphCap=new Map(); gz={x:24,y:24,k:0.85}; gLayer=null; gBounds=null;
@@ -647,7 +654,7 @@ function graphVisible(){
   while(changed){changed=false;
     for(const id of [...vis.keys()]){
       if(id.startsWith("more:")||!graphOpen.has(id))continue;
-      const ch=(kids.get(id)||[]).filter(canShow).sort((a,b)=>gval(b)-gval(a));
+      const ch=(dagKids.get(id)||[]).filter(canShow).sort((a,b)=>gval(b)-gval(a));
       const cap=graphCap.get(id)??GRAPH_CAP, show=ch.slice(0,cap), hidden=ch.slice(cap);
       for(const c of show) if(!vis.has(c)){vis.set(c,byId.get(c));changed=true;}
       const mid="more:"+id;
@@ -667,9 +674,9 @@ function graphVisible(){
   }
   return vis;
 }
-function descendantSet(id){               // visible descendants via the spanning tree
-  const out=new Set(), st=[...(kids.get(id)||[])];
-  while(st.length){const c=st.pop(); if(out.has(c))continue; out.add(c); for(const cc of (kids.get(c)||[]))st.push(cc);}
+function descendantSet(id){               // DAG descendants (every child edge)
+  const out=new Set(), st=[...(dagKids.get(id)||[])];
+  while(st.length){const c=st.pop(); if(out.has(c))continue; out.add(c); for(const cc of (dagKids.get(c)||[]))st.push(cc);}
   return out;
 }
 const gparents=(vis,id)=>{const n=vis.get(id); return n._more?[n.parent]:((n.parents||[]).filter(p=>vis.has(p)));};
@@ -828,7 +835,7 @@ function buildNode(id,n){
   const rm=svgEl("text",{class:"grare","text-anchor":"middle",opacity:0}); rm.textContent="✦"; g.appendChild(rm);
   g.addEventListener("click",e=>{e.stopPropagation();
     if(e.shiftKey){ focusNode(id); return; }
-    const hasKids=(kids.get(id)||[]).some(k=>DATA._anyVis.get(k));
+    const hasKids=(dagKids.get(id)||[]).some(k=>DATA._anyVis.get(k));
     if(hasKids){ if(graphOpen.has(id))graphCollapse(id); else graphOpen.add(id); }
     select(id);});
   g.addEventListener("mouseenter",()=>peekOn(id));
@@ -846,7 +853,7 @@ function updateNode(g,id,n,c){
   const lbl=g.querySelector(".glbl"); lbl.setAttribute("x",lx); lbl.setAttribute("y",c.r>14?-2:4); lbl.textContent=clip(n.label,36);
   const sub=g.querySelector(".gsub"); const ct=graphCountText(id);
   sub.setAttribute("x",lx); sub.setAttribute("y",13); sub.textContent=ct||"";
-  const hasKids=(kids.get(id)||[]).some(k=>DATA._anyVis.get(k)); const open=graphOpen.has(id);
+  const hasKids=(dagKids.get(id)||[]).some(k=>DATA._anyVis.get(k)); const open=graphOpen.has(id);
   const bx=c.r*0.72, by=c.r*0.72;
   const badge=g.querySelector(".gbadge"), sign=g.querySelector(".gbadge-sign");
   badge.setAttribute("cx",bx); badge.setAttribute("cy",by); badge.setAttribute("opacity",hasKids?1:0);
@@ -858,7 +865,7 @@ function updateNode(g,id,n,c){
   rm.setAttribute("font-size",Math.max(10,Math.min(15,c.r*0.9)));
 }
 function graphCollapse(id){graphOpen.delete(id);graphCap.delete(id);
-  for(const c of (kids.get(id)||[])) if(graphOpen.has(c)) graphCollapse(c);}
+  for(const c of (dagKids.get(id)||[])) if(graphOpen.has(c)) graphCollapse(c);}
 function applyGT(g){if(g)g.setAttribute("transform",`translate(${gz.x},${gz.y}) scale(${gz.k})`);}
 function graphFit(){
   const svg=$("#graph"); if(!gBounds||!gLayer)return;
@@ -1057,7 +1064,7 @@ function select(id,fromFocus){
   const parents=(n.parents||[]).filter(p=>byId.has(p));
   html+=`<div class="section-t">Parents (${parents.length})</div><div class="chiplist">`+
     (parents.length?parents.map(p=>`<a data-goto="${p}">${esc(byId.get(p).label)}</a>`).join(""):`<span>root</span>`)+`</div>`;
-  const ch=(kids.get(id)||[]);
+  const ch=(dagKids.get(id)||[]);
   if(ch.length){html+=`<div class="section-t" style="margin-top:16px">Children (${ch.length})</div><div class="chiplist">`+
     ch.slice(0,40).map(c=>`<a data-goto="${c}">${esc(byId.get(c).label)}</a>`).join("")+
     (ch.length>40?`<span>+${ch.length-40} more</span>`:"")+`</div>`;}
