@@ -175,17 +175,20 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 #graph{width:100%;height:72vh;display:block;cursor:grab;touch-action:none;
   background:radial-gradient(circle at 1px 1px, var(--surface-2) 1.1px, transparent 0) 0 0/24px 24px}
 #graph.grabbing{cursor:grabbing}
-.gnode{cursor:pointer}
-.gnode>circle{stroke:var(--surface);stroke-width:1.5}
+.gnode,.gmore{cursor:pointer;transition:transform .4s cubic-bezier(.4,0,.2,1),opacity .3s ease}
+.gnode .gcirc{stroke:var(--surface);stroke-width:1.5;transition:r .4s cubic-bezier(.4,0,.2,1)}
+.gnode.sel .gcirc{stroke:var(--accent);stroke-width:3}
+.gnode .gring{transition:r .4s cubic-bezier(.4,0,.2,1)}
 .gnode text{font-family:var(--sans);paint-order:stroke;stroke:var(--surface);stroke-width:3.5px;stroke-linejoin:round}
 .gnode .glbl{fill:var(--ink);font-weight:600}
 .gnode .gsub{fill:var(--ink-2);font-family:var(--mono)}
-.gnode.sel>circle{stroke:var(--accent);stroke-width:3}
-.gedge{fill:none;stroke:var(--border-strong);stroke-opacity:.7;stroke-width:1.4}
-.gmore rect{fill:var(--surface-2);stroke:var(--border-strong);stroke-width:1.5;rx:9}
+.gedge{fill:none;stroke:var(--ink-2);stroke-opacity:.5;stroke-width:1.5;stroke-linecap:round;
+  transition:d .4s cubic-bezier(.4,0,.2,1),opacity .3s ease}
+.gmore rect{fill:var(--surface-2);stroke:var(--border-strong);stroke-width:1.5}
 .gmore text{fill:var(--ink-2);font-family:var(--mono);font-weight:600}
 .gbadge{fill:var(--surface);stroke:var(--ink-2);stroke-width:1.4}
-.gbadge-sign{stroke:var(--ink-2);stroke-width:1.6;stroke-linecap:round}
+.gbadge-sign{stroke:var(--ink-2);stroke-width:1.6;stroke-linecap:round;fill:none}
+@media(prefers-reduced-motion:reduce){.gnode,.gmore,.gedge,.gnode .gcirc,.gnode .gring{transition:none}}
 
 /* drawer */
 .drawer{position:fixed;top:0;right:0;height:100%;width:min(410px,92vw);background:var(--surface);
@@ -303,8 +306,9 @@ const fmtK=n=>{n=Math.round(n);return n<1000?(""+n):n<1e6?((n/1e3).toFixed(n<1e4
 // rigorous bracket uses 1 and 19 for floor/ceiling and never this value).
 const SMALL_NOMINAL=10;
 let DATA=null, byId=new Map(), kids=new Map(), roots=[], expanded=new Set(), selected=null;
-let ROLL_MAX=1, OWN_MAX=1;
+let ROLL_MAX=1, OWN_MAX=1, ROLL_EST_MAX=1;
 let graphOpen=new Set(["root"]), graphCap=new Map(), gz={x:24,y:24,k:0.85};
+let gBounds=null;   // last-layout bounds for Fit
 const GRAPH_CAP=14;   // max children revealed per expansion before a "＋N more" node
 const state={view:"tree",q:"",rollup:false,vis:new Set(CATS.filter(c=>c.on).map(c=>c.key))};
 
@@ -336,7 +340,7 @@ function load(d){
   for(const [,arr] of kids) arr.sort(sortNodes);
   roots.sort(sortNodes);
   computeVisibleDesc(); computeRollup();
-  graphOpen=new Set(["root"]); graphCap=new Map(); gz={x:24,y:24,k:0.85};
+  graphOpen=new Set(["root"]); graphCap=new Map(); gz={x:24,y:24,k:0.85}; gLayer=null; gBounds=null;
   renderSource(); renderKPIs(); renderFilters();
   for(const id of roots) expanded.add(id);          // open first level
   renderAll();
@@ -389,9 +393,10 @@ function computeRollup(){
     memo.set(id,o); return o;
   }
   for(const id of byId.keys()) agg(id);
-  DATA._roll=memo; ROLL_MAX=1; OWN_MAX=1;
+  DATA._roll=memo; ROLL_MAX=1; OWN_MAX=1; ROLL_EST_MAX=1;
   for(const n of DATA.nodes){ if(n.kind==="root")continue;
     ROLL_MAX=Math.max(ROLL_MAX,memo.get(n.id).ceil);
+    ROLL_EST_MAX=Math.max(ROLL_EST_MAX,memo.get(n.id).est);
     if(n.state==="reported")OWN_MAX=Math.max(OWN_MAX,n.count);
   }
 }
@@ -592,76 +597,139 @@ function graphVisible(){
   return vis;
 }
 const gparents=(vis,id)=>{const n=vis.get(id); return n._more?[n.parent]:((n.parents||[]).filter(p=>vis.has(p)));};
+// radius: area ∝ value against a STABLE global max (√ scale), so 20k / 5k / <20
+// read as clearly different sizes and don't rescale as you expand.
+function graphRadius(id){
+  if(byId.get(id)===undefined) return 7;               // more-node
+  const maxV=state.rollup?ROLL_EST_MAX:OWN_MAX;
+  return 8+46*Math.sqrt(Math.max(gval(id),0)/(maxV||1));
+}
 function layoutGraph(vis){
-  const layers={}, maxV=Math.max(1,...[...vis.keys()].filter(id=>!id.startsWith("more:")).map(gval));
-  let maxD=0;
+  const layers={}; let maxD=0;
   for(const [id,n] of vis){const d=n.depth||0;(layers[d]=layers[d]||[]).push(id);maxD=Math.max(maxD,d);}
-  const rad=id=>vis.get(id)._more?7:(7+21*Math.sqrt((lg(gval(id))/lg(maxV))||0));
-  const ord={}; for(const d in layers) layers[d].forEach((id,i)=>ord[id]=i);
-  const bary=id=>{const ps=gparents(vis,id);return ps.length?ps.reduce((s,p)=>s+(ord[p]||0),0)/ps.length:(ord[id]||0);};
-  const baryC=id=>{const cs=[...vis.keys()].filter(k=>gparents(vis,k).includes(id));
-    return cs.length?cs.reduce((s,c)=>s+(ord[c]||0),0)/cs.length:(ord[id]||0);};
-  for(let pass=0;pass<5;pass++){
-    for(let d=1;d<=maxD;d++){if(!layers[d])continue;layers[d].sort((a,b)=>bary(a)-bary(b));layers[d].forEach((id,i)=>ord[id]=i);}
-    for(let d=maxD-1;d>=0;d--){if(!layers[d])continue;layers[d].sort((a,b)=>baryC(a)-baryC(b));layers[d].forEach((id,i)=>ord[id]=i);}
-  }
+  const rad=id=>vis.get(id)._more?8:graphRadius(id);
+  const lab=id=>vis.get(id).label||"";
+  // STABLE ordering: each layer sorted by size (desc), tie-break by label. Does not
+  // depend on positions, so expanding/collapsing never reshuffles the survivors.
   const coord=new Map(); let x=40;
-  for(let d=0;d<=maxD;d++){const arr=layers[d]||[]; const maxR=Math.max(12,...arr.map(rad)); let y=40;
-    for(const id of arr){const r=rad(id); coord.set(id,{x:x+maxR,y:y+r,r}); y+=2*r+30;}
-    x+=maxR*2+206;}
+  for(let d=0;d<=maxD;d++){
+    const arr=(layers[d]||[]).slice().sort((a,b)=>{
+      const am=vis.get(a)._more?-1:gval(a), bm=vis.get(b)._more?-1:gval(b);
+      return (bm-am)|| (lab(a)<lab(b)?-1:1);
+    });
+    const maxR=Math.max(14,...arr.map(rad)); let y=40;
+    for(const id of arr){const r=rad(id); coord.set(id,{x:x+maxR,y:y+r,r}); y+=2*r+26;}
+    x+=maxR*2+210;
+  }
   return {coord};
 }
-function renderGraph(){
+function edgePath(a,b){const mx=(a.x+b.x)/2;
+  return `M${a.x+a.r},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x-b.r},${b.y}`;}
+// Keyed enter/update/exit reconciler so nodes glide (CSS transitions) instead of
+// the whole SVG being torn down and rebuilt on every expand/collapse.
+let gLayer=null, gEdgeG=null, gNodeG=null, gEdgeEls=new Map(), gNodeEls=new Map();
+function graphInit(){
   const svg=$("#graph"); while(svg.firstChild)svg.removeChild(svg.firstChild);
-  const vis=graphVisible(); const {coord}=layoutGraph(vis);
-  const g=svgEl("g",{}); svg.appendChild(g);
+  gLayer=svgEl("g",{}); gEdgeG=svgEl("g",{}); gNodeG=svgEl("g",{});
+  gLayer.appendChild(gEdgeG); gLayer.appendChild(gNodeG); svg.appendChild(gLayer);
+  gEdgeEls=new Map(); gNodeEls=new Map(); applyGT(gLayer);
+}
+function renderGraph(){
+  if(!gLayer||!gLayer.isConnected) graphInit();
+  const vis=graphVisible(), {coord}=layoutGraph(vis);
+  // bounds for Fit
+  let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+  for(const [,c] of coord){minX=Math.min(minX,c.x-c.r);minY=Math.min(minY,c.y-c.r);
+    maxX=Math.max(maxX,c.x+c.r+150);maxY=Math.max(maxY,c.y+c.r);}
+  gBounds={minX,minY,maxX,maxY};
+  // ---- edges (enter/update/exit) ----
+  const seenE=new Set();
   for(const [id] of vis){const b=coord.get(id); if(!b)continue;
     for(const p of gparents(vis,id)){const a=coord.get(p); if(!a)continue;
-      const mx=(a.x+b.x)/2;
-      g.appendChild(svgEl("path",{class:"gedge",d:`M${a.x+a.r},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x-b.r},${b.y}`}));}}
-  for(const [id,n] of vis){const c=coord.get(id); if(!c)continue;
-    if(n._more){
-      const gm=svgEl("g",{class:"gmore",transform:`translate(${c.x},${c.y})`,style:"cursor:pointer"});
-      const w=n.label.length*7+16;
-      gm.appendChild(svgEl("rect",{x:-w/2,y:-11,width:w,height:22,rx:9}));
-      const t=svgEl("text",{x:0,y:4,"text-anchor":"middle","font-size":11});t.textContent=n.label;gm.appendChild(t);
-      gm.addEventListener("click",e=>{e.stopPropagation();graphCap.set(n.parent,Infinity);renderGraph();});
-      g.appendChild(gm); continue;
-    }
-    const gn=svgEl("g",{class:"gnode"+(selected===id?" sel":""),transform:`translate(${c.x},${c.y})`});
-    const col=CATMAP[n.category]?CATMAP[n.category].color:"var(--muted)";
-    gn.appendChild(svgEl("circle",{r:c.r,cx:0,cy:0,fill:col,"fill-opacity":(n.state==="reported"||n.state==="used_small")?0.92:0.4}));
-    if(n.collision) gn.appendChild(svgEl("circle",{r:c.r+3.5,cx:0,cy:0,fill:"none",stroke:"var(--collision)","stroke-width":1.5}));
-    const lx=c.r+8;
-    const t=svgEl("text",{class:"glbl",x:lx,y:c.r>13?-1:4,"font-size":12.5});t.textContent=clip(n.label,36);gn.appendChild(t);
-    const ct=graphCountText(id);
-    if(ct){const s=svgEl("text",{class:"gsub",x:lx,y:13,"font-size":10.5});s.textContent=ct;gn.appendChild(s);}
-    const hasKids=(kids.get(id)||[]).some(k=>DATA._anyVis.get(k));
-    if(hasKids){const open=graphOpen.has(id),bx=c.r*0.72,by=c.r*0.72;
-      gn.appendChild(svgEl("circle",{class:"gbadge",cx:bx,cy:by,r:7}));
-      gn.appendChild(svgEl("path",{class:"gbadge-sign",d:open?`M${bx-3.2},${by} h6.4`:`M${bx-3.2},${by} h6.4 M${bx},${by-3.2} v6.4`}));}
-    gn.addEventListener("click",e=>{e.stopPropagation();
-      if(hasKids){ if(graphOpen.has(id))graphCollapse(id); else graphOpen.add(id); }
-      select(id);});
-    gn.addEventListener("mousemove",e=>showTip(e,`${n.label} · ${graphCountText(id)||'0'}${n.collision?' · collision':''}`));
-    gn.addEventListener("mouseleave",hideTip);
-    g.appendChild(gn);
+      const key=p+">"+id; seenE.add(key); const d=edgePath(a,b);
+      let e=gEdgeEls.get(key);
+      if(!e){e=svgEl("path",{class:"gedge"}); e.style.opacity=0; e.style.transition="none";
+        e.setAttribute("d",d); e.style.d=`path("${d}")`;
+        gEdgeG.appendChild(e); gEdgeEls.set(key,e);
+        requestAnimationFrame(()=>{e.style.transition=""; e.style.opacity="";}); }
+      else { e.setAttribute("d",d); e.style.d=`path("${d}")`; }
+    }}
+  for(const [key,e] of gEdgeEls){ if(!seenE.has(key)){ e.style.opacity=0;
+    setTimeout(()=>{e.remove();},260); gEdgeEls.delete(key); } }
+  // ---- nodes (enter/update/exit) ----
+  const seenN=new Set(); const min=DATA.meta.min_cell||20;
+  for(const [id,n] of vis){const c=coord.get(id); if(!c)continue; seenN.add(id);
+    let g=gNodeEls.get(id);
+    if(!g){ g=n._more?buildMore(n):buildNode(id,n); g.style.opacity=0; g.style.transition="none";
+      g.style.transform=`translate(${c.x}px,${c.y}px)`; gNodeG.appendChild(g); gNodeEls.set(id,g);
+      requestAnimationFrame(()=>{g.style.transition=""; g.style.opacity="";}); }
+    else { g.style.transform=`translate(${c.x}px,${c.y}px)`; }
+    if(!n._more) updateNode(g,id,n,c);
   }
-  applyGT(g);
+  for(const [id,g] of gNodeEls){ if(!seenN.has(id)){ g.style.opacity=0;
+    setTimeout(()=>{g.remove();},260); gNodeEls.delete(id); } }
   $("#graph-hint").textContent=state.q
     ? `${vis.size} nodes matching “${state.q}” (paths shown)`
     : `${vis.size} nodes · click to expand/collapse · ${state.rollup?'size ∝ subtree rollup':'size ∝ own patients'} · drag to pan, scroll to zoom`;
 }
+function buildMore(n){
+  const gm=svgEl("g",{class:"gmore"}); gm.style.cursor="pointer";
+  const w=n.label.length*7+16;
+  gm.appendChild(svgEl("rect",{x:-w/2,y:-11,width:w,height:22,rx:9}));
+  const t=svgEl("text",{x:0,y:4,"text-anchor":"middle","font-size":11});t.textContent=n.label;gm.appendChild(t);
+  gm.addEventListener("click",e=>{e.stopPropagation();graphCap.set(n.parent,Infinity);renderGraph();});
+  return gm;
+}
+function buildNode(id,n){
+  const g=svgEl("g",{class:"gnode"});
+  const col=CATMAP[n.category]?CATMAP[n.category].color:"var(--muted)";
+  g.appendChild(svgEl("circle",{class:"gcirc",cx:0,cy:0,fill:col,
+    "fill-opacity":(n.state==="reported"||n.state==="used_small")?0.92:0.4}));
+  g.appendChild(svgEl("circle",{class:"gring",cx:0,cy:0,fill:"none",stroke:"var(--collision)","stroke-width":1.5,opacity:n.collision?1:0}));
+  g.appendChild(svgEl("text",{class:"glbl","font-size":12.5}));
+  g.appendChild(svgEl("text",{class:"gsub","font-size":10.5}));
+  g.appendChild(svgEl("circle",{class:"gbadge",r:7,opacity:0}));
+  g.appendChild(svgEl("path",{class:"gbadge-sign",opacity:0}));
+  g.addEventListener("click",e=>{e.stopPropagation();
+    const hasKids=(kids.get(id)||[]).some(k=>DATA._anyVis.get(k));
+    if(hasKids){ if(graphOpen.has(id))graphCollapse(id); else graphOpen.add(id); }
+    select(id);});
+  g.addEventListener("mousemove",e=>showTip(e,`${byId.get(id).label} · ${graphCountText(id)||'0'}${byId.get(id).collision?' · collision':''}`));
+  g.addEventListener("mouseleave",hideTip);
+  return g;
+}
+function updateNode(g,id,n,c){
+  g.setAttribute("class","gnode"+(selected===id?" sel":""));
+  const col=CATMAP[n.category]?CATMAP[n.category].color:"var(--muted)";
+  const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
+  circ.setAttribute("fill",col);
+  circ.setAttribute("fill-opacity",(n.state==="reported"||n.state==="used_small")?0.92:0.4);
+  const ring=g.querySelector(".gring"); ring.setAttribute("r",c.r+3.5); ring.style.r=(c.r+3.5)+"px"; ring.setAttribute("opacity",n.collision?1:0);
+  const lx=c.r+9;
+  const lbl=g.querySelector(".glbl"); lbl.setAttribute("x",lx); lbl.setAttribute("y",c.r>14?-2:4); lbl.textContent=clip(n.label,36);
+  const sub=g.querySelector(".gsub"); const ct=graphCountText(id);
+  sub.setAttribute("x",lx); sub.setAttribute("y",13); sub.textContent=ct||"";
+  const hasKids=(kids.get(id)||[]).some(k=>DATA._anyVis.get(k)); const open=graphOpen.has(id);
+  const bx=c.r*0.72, by=c.r*0.72;
+  const badge=g.querySelector(".gbadge"), sign=g.querySelector(".gbadge-sign");
+  badge.setAttribute("cx",bx); badge.setAttribute("cy",by); badge.setAttribute("opacity",hasKids?1:0);
+  sign.setAttribute("opacity",hasKids?1:0);
+  sign.setAttribute("d",open?`M${bx-3.2},${by} h6.4`:`M${bx-3.2},${by} h6.4 M${bx},${by-3.2} v6.4`);
+}
 function graphCollapse(id){graphOpen.delete(id);graphCap.delete(id);
   for(const c of (kids.get(id)||[])) if(graphOpen.has(c)) graphCollapse(c);}
-function applyGT(g){g.setAttribute("transform",`translate(${gz.x},${gz.y}) scale(${gz.k})`);}
+function applyGT(g){if(g)g.setAttribute("transform",`translate(${gz.x},${gz.y}) scale(${gz.k})`);}
 function graphFit(){
-  const svg=$("#graph"),g=svg.firstChild; if(!g)return;
-  const bb=g.getBBox(); if(!bb.width||!bb.height)return;
-  const W=svg.clientWidth,H=svg.clientHeight,pad=30;
-  gz.k=Math.min(1.4,Math.max(0.12,Math.min((W-2*pad)/bb.width,(H-2*pad)/bb.height)));
-  gz.x=pad-bb.x*gz.k+ (W-2*pad-bb.width*gz.k)/2; gz.y=pad-bb.y*gz.k;
-  applyGT(g);
+  const svg=$("#graph"); if(!gBounds||!gLayer)return;
+  const w=gBounds.maxX-gBounds.minX, h=gBounds.maxY-gBounds.minY;
+  if(w<=0||h<=0)return;
+  const W=svg.clientWidth,H=svg.clientHeight,pad=34;
+  gz.k=Math.min(1.3,Math.max(0.12,Math.min((W-2*pad)/w,(H-2*pad)/h)));
+  gz.x=pad-gBounds.minX*gz.k+Math.max(0,(W-2*pad-w*gz.k)/2);
+  gz.y=pad-gBounds.minY*gz.k;
+  gLayer.style.transition="transform .4s cubic-bezier(.4,0,.2,1)";
+  applyGT(gLayer);
+  setTimeout(()=>{if(gLayer)gLayer.style.transition="";},450);
 }
 
 function renderTreemap(){
