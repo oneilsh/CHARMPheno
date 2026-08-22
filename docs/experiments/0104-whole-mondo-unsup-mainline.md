@@ -191,6 +191,23 @@ lands a REAL finding, then the master's disk fills.** Fit clean again (~43s/iter
   broadcasts ~355 MB). Remedy before the next attempt, with no job running:
   `df -h; sudo du -x -d 2 /tmp /hadoop | sort -h | tail; rm -rf /tmp/spark-*`.
 
+**2026-08-22 — smoke attempt 4 (FRESH cluster): ENOSPC again at readout iter 15 — with
+the master's local disk 80% FREE. Root cause found: it was gcsfuse all along.** The runs
+dir is a GCS-FUSE mount. Two of its semantics explain every log-file incident this week:
+(1) a long-lived append handle uploads to GCS only on CLOSE — so the ORIGINAL
+empty-summary.md (0103 smoke, "4h of output vanished") was not truncation: the cluster
+died holding the handle and GCS kept the last-closed content, the header. (2) The per-line
+open-append-close that "fixed" it makes every committed line a FULL-OBJECT rewrite against
+GCS's ~1 mutation/s/object cap; bursty phases (readout heartbeats + Spark executor-loss
+stack traces, on summary.md AND driver_log.md simultaneously) back gcsfuse's staged temp
+files up behind the throttle until ENOSPC kills the wrapper — twice, on two different
+clusters, with local disk healthy. Fix (same commit): both writers now BATCH lines and
+close once per ~20s per file — far under the mutation cap, bounded staging, and a crash
+loses at most one batch instead of causing the crash. Also noted from this attempt: the
+main-fit L-BFGS burned ~26 passes/iter in iters 5-15 (heavy Armijo backtracking at
+C=3,057) — if that persists it strengthens the Wolfe-line-search case; watch the next
+smoke's passes/iter.
+
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
 **0.7584 AUC / 0.5428 AP over 241 nodes**, pooled conditional ECE 0.0028 (isotonic →

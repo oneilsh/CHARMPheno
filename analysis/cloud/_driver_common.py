@@ -109,36 +109,57 @@ _TEE_DROP_PATTERNS = [
 
 class _StdoutTee:
     """Forward every write to the real stdout AND append sanitized complete
-    lines to a file, opening/closing the file PER LINE.
+    lines to a file in TIME-BATCHED open-append-close flushes.
 
-    The per-line reopen is the point, not an inefficiency to fix: exp 0103's
-    smoke lost four hours of results because the only durable copy rode a
-    single long-lived append handle in the wrapper (summary.md came back
-    holding nothing past the session header — consistent with the file being
-    replaced/truncated under the handle, after which every flushed write
-    landed on an unlinked inode). An open-append-close per committed line
-    survives truncation, rotation, wrapper death, and driver death mid-run;
-    at a few thousand committed lines per multi-hour run the syscall cost is
-    noise. Sanitization mirrors the wrapper's (patient rows and log4j chatter
-    never reach disk)."""
+    Two filesystem realities shaped this, in sequence:
+      1. A single long-lived append handle is NOT durable on the AoU runs dir —
+         it is a gcsfuse mount, where writes land in a local staging file and
+         upload to GCS only on CLOSE. Exp 0103's smoke held one handle for 4h,
+         the cluster died, and GCS kept only the last-closed content (the
+         session header). Hence: open-append-CLOSE per flush.
+      2. But per-LINE open-append-close is fatal on the same mount: each close
+         is a FULL-OBJECT rewrite, GCS caps object mutations at ~1/s, and a
+         bursty phase (readout heartbeats + Spark executor-loss stack traces)
+         exceeds it — gcsfuse's staged temp files pile up behind the throttle
+         until ENOSPC kills the run (exp 0104 smokes, twice, with the local
+         disk 80% free). Hence: BATCH lines and close once per
+         `flush_every_s` seconds (default 20 — a few mutations/min/object,
+         bounded staging, and a crash loses at most one batch instead of
+         causing the crash).
+    Sanitization mirrors the wrapper's (patient rows and log4j chatter never
+    reach disk)."""
 
-    def __init__(self, path, real):
+    def __init__(self, path, real, flush_every_s=20.0):
         self._path = path
         self._real = real
         self._buf = ""
+        self._pending: list[str] = []
+        self._flush_every_s = float(flush_every_s)
+        self._last_flush = time.monotonic()
+
+    def _flush_pending(self):
+        if not self._pending:
+            self._last_flush = time.monotonic()
+            return
+        try:
+            with open(self._path, "a") as f:
+                f.write("\n".join(self._pending) + "\n")
+            self._pending.clear()
+        except OSError:
+            # A failing tee must never take down the run it protects. Drop the
+            # batch rather than let it grow without bound behind a dead mount.
+            self._pending.clear()
+        self._last_flush = time.monotonic()
 
     def write(self, s):
         n = self._real.write(s)
         self._buf += s
         *done, self._buf = self._buf.split("\n")
-        kept = [ln for ln in done
-                if not any(p.search(ln) for p in _TEE_DROP_PATTERNS)]
-        if kept:
-            try:
-                with open(self._path, "a") as f:
-                    f.write("\n".join(kept) + "\n")
-            except OSError:
-                pass  # a failing tee must never take down the run it protects
+        self._pending.extend(
+            ln for ln in done
+            if not any(p.search(ln) for p in _TEE_DROP_PATTERNS))
+        if (time.monotonic() - self._last_flush) >= self._flush_every_s:
+            self._flush_pending()
         return n
 
     def flush(self):
@@ -153,8 +174,13 @@ def install_stdout_tee(path) -> None:
     drivers exit after main, and a context manager would force a whole-main
     re-indent for a lifetime that is the process anyway). Call once, right
     after the run dir exists, BEFORE the fit starts. Idempotent per path."""
+    import atexit
     import sys
     if isinstance(sys.stdout, _StdoutTee):
         return
     print(f"[driver] durable log: {path}", flush=True)
-    sys.stdout = _StdoutTee(path, sys.stdout)
+    tee = _StdoutTee(path, sys.stdout)
+    sys.stdout = tee
+    # Clean exits upload the tail batch; crashes lose at most flush_every_s of
+    # lines — the acceptable cost of not mutation-storming the gcsfuse object.
+    atexit.register(tee._flush_pending)

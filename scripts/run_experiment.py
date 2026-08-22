@@ -13,6 +13,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -1276,6 +1277,34 @@ def run_subprocess_tee_sanitize(
     )
     assert proc.stdout is not None
     last_iter: int | None = None
+    # Committed record: sanitized, TIME-BATCHED open-append-close. Both halves
+    # of that are load-bearing on the AoU runs dir, which is a gcsfuse mount:
+    # a long-lived handle uploads only on CLOSE (exp 0103's smoke held one for
+    # 4h, died, and GCS kept only the header — the original "empty summary.md"),
+    # while per-LINE open-append-close is a full-object rewrite per line against
+    # GCS's ~1 mutation/s/object cap — bursty phases back up gcsfuse's staged
+    # temp files until ENOSPC kills the run (exp 0104 smokes, twice, with the
+    # local disk 80% free). One close per ~20s per object sits far under the
+    # cap; a crash loses at most one batch. (The driver's own driver_log.md tee
+    # in _driver_common batches identically.)
+    pending: list[str] = []
+    last_flush = time.monotonic()
+
+    def _flush_pending():
+        nonlocal last_flush
+        if pending:
+            try:
+                with summary_path.open("a") as fout:
+                    fout.write("".join(pending))
+                pending.clear()
+            except OSError as e:
+                # Never let record-keeping kill the run it records; the
+                # terminal (and the driver's own tee) still has the lines.
+                sys.stdout.write(f"[run-exp] WARNING: summary append failed "
+                                 f"({e}); dropping {len(pending)} lines\n")
+                pending.clear()
+        last_flush = time.monotonic()
+
     try:
         for line in proc.stdout:
             # Live debugging: always print to terminal
@@ -1287,25 +1316,17 @@ def run_subprocess_tee_sanitize(
             m = parse_iter_marker(line)
             if m is not None:
                 last_iter = m
-            # Committed record: sanitized only. Open-append-close PER LINE, not
-            # one handle for the whole multi-hour session: exp 0103's smoke came
-            # back with an empty summary.md despite per-line flushes — the
-            # signature of the file being replaced/truncated under a long-lived
-            # handle, after which every append lands on an unlinked inode. A
-            # fresh open resolves the path each time, so appends always reach
-            # whatever file is actually there. (The driver's own
-            # driver_log.md tee in _driver_common is the belt to this
-            # suspenders.) Cost: a few thousand open/close pairs per run.
             clean = sanitize_line(line, patterns)
             if clean is not None:
-                with summary_path.open("a") as fout:
-                    fout.write(clean)
+                pending.append(clean)
+            if (time.monotonic() - last_flush) >= 20.0:
+                _flush_pending()
+        _flush_pending()
         return proc.wait()
     except _SignalReceived as sig:
-        with summary_path.open("a") as fout:
-            iter_str = f"iter {last_iter}" if last_iter is not None else "unknown iter"
-            fout.write(f"\n### Killed at {iter_str} (signal: {sig.signum})\n")
-            fout.flush()
+        iter_str = f"iter {last_iter}" if last_iter is not None else "unknown iter"
+        pending.append(f"\n### Killed at {iter_str} (signal: {sig.signum})\n")
+        _flush_pending()
         proc.terminate()
         try:
             proc.wait(timeout=10)
