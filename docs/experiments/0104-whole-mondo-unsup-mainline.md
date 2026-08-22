@@ -17,14 +17,17 @@ disease: rare_priority
 # structurally impossible here (24+ GB of collects) — readout_mode pinned, not auto.
 # Head params below are lineage carry-over from 0102/0103 and INERT at weight_y=0.
 readout_mode: distributed
-# θ-width lever (plan v2.2, from smoke attempt 2's ~65s/pass readout): per-doc top-m
-# truncated θ — measured 5.4-7.3× per pass at m=256. The run ALWAYS prints the coverage
-# line (`theta top-m mass: m=64:.../... m=128:...`, mean/p10) whether or not the flag is
-# set. DECISION RULE: keep m=256 if the printed p10 at m=256 is ≳0.9; if lower, raise to
-# 512 (still ~7× traffic cut) or drop the key (full-K, slow but exact). A raw
-# Dirichlet(0.5) PRIOR over K=3,827 keeps only ~0.34 of its mass in the top 256 — the
-# lever rests on the POSTERIOR being far sharper, which is exactly what the printed
-# measurement verifies.
+# θ-width lever (plan v2.2): per-doc top-m truncated θ — measured 3.7× per pass on the
+# cluster (17.6s vs 65s at m=256). MEASURED COVERAGE (smoke attempt 3): m=256 keeps only
+# 0.132 mean / 0.077 p10 of θ mass — BELOW the raw Dirichlet(0.5) prior (~0.34), because
+# the α=0.5 floor × K=3,827 = 1,913 pseudo-counts DOMINATES per-doc evidence (~10² tokens):
+# θ ≈ 90% uniform prior haze + 10% signal (run-log arithmetic). The mass rule is therefore
+# the WRONG test here: the truncated 87% is near-non-discriminative (per-doc-constant-ish
+# haze, largely absorbed by intercept + per-node standardization), while top-m SELECTION
+# (= ordering by evidence counts) keeps the signal. ENABLEMENT NOW RESTS ON THE PRICING
+# TEST, not coverage: `make gated-pc-readout ID=103 GPR_ARGS="--readout-mode distributed
+# --readout-theta-topm 256"` vs 0103's recorded full-K numbers — ΔAUC ≲ 1e-3 keeps this
+# key; larger drops it (full-K readout, ~6-7h/solve).
 readout_theta_topm: 256
 weight_y: 0.0
 weight_y_warmup_iters: 0
@@ -159,6 +162,34 @@ sparse-exact kernels, by-node vectorization), and a dev-profile skip of the cali
 solve. Operational note: `results_partial.json` lands when the MAIN solve's readout
 completes (at the `gated_pc (pc_topics_lr): macro AUC=` line) — the calibration solve
 after it is safely interruptible in a smoke.
+
+**2026-08-21 — smoke attempt 3 (top-m=256 + dev calibration-skip): the coverage line
+lands a REAL finding, then the master's disk fills.** Fit clean again (~43s/iter).
+- **`theta top-m mass: m=64:0.079/0.025 m=128:0.098/0.043 m=256:0.132/0.077
+  m=512:0.196/0.144 (mean/p10)`** — coverage BELOW the raw Dirichlet(0.5) prior (~0.34
+  at m=256). Arithmetic: the ADR 0045 α floor (0.5) × K=3,827 = **1,913 uniform
+  pseudo-counts vs ~10² tokens of per-doc evidence**, so posterior-mean θ is ~90% flat
+  prior haze + ~10% signal; top-256 of that ≈ 0.13 — matches the measurement. The
+  diffuseness is STRUCTURAL (α·K vs doc length), not a property of patients. Two
+  consequences: (1) mass coverage is the wrong enablement test here — the truncated haze
+  is near-non-discriminative (per-doc-constant-ish, absorbed by intercept + per-node
+  standardization) while top-m selection = evidence-count ordering keeps the signal;
+  enablement now rests on the PRICING test (front-matter comment; `gated-pc-readout
+  ID=103 --readout-theta-topm 256` vs the recorded full-K numbers, ~30 min). (2) A
+  broader flag: EVERYTHING reading posterior-mean θ mass at whole-Mondo (node_affinity,
+  dashboards) sees the same haze; the fit itself is fine (CAVI works in the far sparser
+  E[log θ] geometry), and α=0.5's original justification (the PC shaping Jacobian, ADR
+  0045) is moot at weight_y=0 — a lower/K-scaled α at whole-Mondo is a legitimate future
+  experiment, deliberately NOT bundled into this one.
+- Sparse-path cluster speed: **17.6s/pass** (vs 65 full-K) — 3.7× on a preempting
+  cluster vs 5.4-7.3× local.
+- **Died at ~readout iter 5-10: `OSError: Errno 28 No space left on device`** on the
+  MASTER's local disk (the wrapper's summary.md append; the runs dir lives on the
+  separate workspace mount). Prime suspect: stale Spark scratch from the day's killed/
+  OOM'd runs (`/tmp/spark-*`, block-manager dirs — attempt 1's OOM killed the
+  ContextCleaner mid-flight; Ctrl-C'd runs never clean; each whole-Mondo fit iteration
+  broadcasts ~355 MB). Remedy before the next attempt, with no job running:
+  `df -h; sudo du -x -d 2 /tmp /hadoop | sort -h | tail; rm -rf /tmp/spark-*`.
 
 **2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular

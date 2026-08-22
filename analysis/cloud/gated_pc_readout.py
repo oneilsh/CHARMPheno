@@ -99,6 +99,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "|dproba|). Report only — never asserts. Ignored unless the "
                         f"mode resolves to distributed AND C<={_DRIVER_READOUT_MAX_C} "
                         "(the driver path must still be affordable to compare to).")
+    p.add_argument("--readout-theta-topm", type=int, default=None,
+                   help="OVERRIDE the manifest's readout_theta_topm for this re-readout "
+                        "(0 forces full-K). Default: the manifest's value, which "
+                        "reproduces the fit's own design matrix. The override exists "
+                        "for exactly one job: PRICING truncation — re-read a full-K "
+                        "run (e.g. the 0103 cardiovascular record) with top-m forced "
+                        "on and compare per-node AUC against its recorded numbers, so "
+                        "the whole-Mondo enablement decision rests on a measured "
+                        "delta, not the mass-coverage heuristic alone.")
     return p
 
 
@@ -179,7 +188,8 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 
 
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
-                min_count, readout_mode="auto", ab_check=False, out_dir=None):
+                min_count, readout_mode="auto", ab_check=False, out_dir=None,
+                theta_topm=None):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -227,13 +237,21 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
     dist = None
     if mode == "distributed":
         # No theta collect: the per-node LRs are fit on the executors and only the
-        # lean test-split eval bundle comes back. theta_topm is taken from the
-        # MANIFEST, not a flag: a re-readout must reproduce the fit's own design
-        # matrix — silently refitting a top-m run at full K would change the
-        # estimator (and crawl at whole-Mondo, the scale where top-m is on).
-        theta_topm = int(manifest.get("readout_theta_topm", 0) or 0)
-        if theta_topm:
-            print(f"[readout]   theta top-m={theta_topm} (from manifest)", flush=True)
+        # lean test-split eval bundle comes back. theta_topm defaults to the
+        # MANIFEST's value: a re-readout reproduces the fit's own design matrix —
+        # silently refitting a top-m run at full K would change the estimator
+        # (and crawl at whole-Mondo, the scale where top-m is on). An explicit
+        # override (--readout-theta-topm) exists for the truncation-PRICING
+        # experiment: force top-m onto a recorded full-K run and read the delta.
+        if theta_topm is None:
+            theta_topm = int(manifest.get("readout_theta_topm", 0) or 0)
+            if theta_topm:
+                print(f"[readout]   theta top-m={theta_topm} (from manifest)",
+                      flush=True)
+        else:
+            theta_topm = int(theta_topm)
+            print(f"[readout]   theta top-m={theta_topm} (CLI OVERRIDE — deltas vs "
+                  "the recorded run price the truncation)", flush=True)
         dist = distributed_score_arm(
             train_scored, test_scored, C, K, recall_targets=recall_targets,
             fdr_targets=fdr_targets, min_count=min_count, label="gated_pc",
@@ -330,7 +348,8 @@ def main(argv=None) -> int:
             run_readout(train_scored, test_scored, manifest, recall_targets=rt,
                         fdr_targets=ft, min_count=min_count,
                         readout_mode=args.readout_mode,
-                        ab_check=args.readout_ab_check, out_dir=run_dir)
+                        ab_check=args.readout_ab_check, out_dir=run_dir,
+                        theta_topm=args.readout_theta_topm)
             print(f"[readout]   arm results written to "
                   f"{run_dir / 'results_readout.json'}", flush=True)
             train_scored.unpersist(); test_scored.unpersist()
