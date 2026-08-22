@@ -51,6 +51,8 @@ a{color:var(--accent)}
 button{font-family:inherit;cursor:pointer}
 .tnum{font-variant-numeric:tabular-nums}
 .mono{font-family:var(--mono)}
+mark{background:color-mix(in srgb,var(--accent) 30%,transparent);color:inherit;font-weight:700;border-radius:2px;padding:0 1px}
+.gnode.match .glbl{fill:var(--accent);font-weight:800}
 
 /* ---- shell --------------------------------------------------------------- */
 .wrap{max-width:1240px;margin:0 auto;padding:20px 20px 64px}
@@ -546,8 +548,9 @@ function rowEl(n,depth,hasKids,isOpen){
   car.onclick=(e)=>{e.stopPropagation();expanded.has(n.id)?expanded.delete(n.id):expanded.add(n.id);renderTree();};
   r.appendChild(car);
   const sw=el("span","sw");sw.style.background=CATMAP[n.category]?CATMAP[n.category].color:"var(--muted)";r.appendChild(sw);
-  const lbl=el("span","lbl");lbl.appendChild(document.createTextNode(n.label));
-  const sm=el("small",null,n.id);lbl.appendChild(sm);r.appendChild(lbl);
+  const lbl=el("span","lbl");
+  lbl.innerHTML=hlMatch(n.label,state.q)+` <small>${hlMatch(n.id,state.q)}</small>`;
+  r.appendChild(lbl);
   if(n.collision){const cd=el("span","col");cd.title="shares a standard concept with sibling terms";r.appendChild(cd);}
   if(n.kind==="internal"){const kt=el("span","kindtag","node");r.appendChild(kt);}
   if(n.rare){const rt=el("span","rare-tag","rare");rt.title="rare disease: "+((n.rare_src||[]).join(", ")||"Mondo");r.appendChild(rt);}
@@ -856,7 +859,7 @@ function buildNode(id,n){
 }
 function updateNode(g,id,n,c){
   const pk=g.classList.contains("pk")?" pk":g.classList.contains("pkd")?" pkd":"";  // preserve hover peek
-  g.setAttribute("class","gnode"+(selected===id?" sel":"")+(gHL.has(id)?" hl":gHLD.has(id)?" hld":"")+pk);
+  g.setAttribute("class","gnode"+(selected===id?" sel":"")+(gHL.has(id)?" hl":gHLD.has(id)?" hld":"")+pk+(matchesQ(n)?" match":""));
   const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
   circ.setAttribute("fill",nodeFill(id,n));
   circ.setAttribute("fill-opacity",nodeOpac(n));
@@ -1016,8 +1019,9 @@ function renderTable(){
   const tb=el("tbody");
   for(const n of rows){
     const tr=el("tr","trow");tr.onclick=()=>select(n.id);
-    tr.appendChild(td(n.label));
-    tr.appendChild(mono(n.id));
+    const c1=el("td"); c1.innerHTML=hlMatch(n.label,state.q); tr.appendChild(c1);
+    const c2=el("td"); c2.innerHTML=hlMatch(n.id,state.q);
+    c2.style.fontFamily="var(--mono)"; c2.style.fontSize="11.5px"; c2.style.color="var(--ink-2)"; tr.appendChild(c2);
     tr.appendChild(td(n.kind));
     const ct=el("td");const p=el("span","pill");p.style.color=CATMAP[n.category].color;
     p.style.background="color-mix(in srgb,"+CATMAP[n.category].color+" 14%,transparent)";
@@ -1098,6 +1102,13 @@ function revealInTree(id){let cur=id;const path=[];while(cur){const n=byId.get(c
 function closeDrawer(){selected=null;$("#drawer").classList.remove("open");$("#drawer").setAttribute("aria-hidden","true");
   if(state.view==="tree")renderTree();else if(state.view==="table")renderTable();else if(state.view==="graph")renderGraph();}
 const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function hlMatch(text,q){                  // HTML-escaped text with <mark> around query matches
+  text=String(text); if(!q) return esc(text);
+  const low=text.toLowerCase(); let out="",pos=0,k;
+  while((k=low.indexOf(q,pos))>=0){out+=esc(text.slice(pos,k))+"<mark>"+esc(text.slice(k,k+q.length))+"</mark>";pos=k+q.length;}
+  return out+esc(text.slice(pos));
+}
+const matchesQ=n=>state.q && (n.label.toLowerCase().includes(state.q.toLowerCase())||n.id.toLowerCase().includes(state.q.toLowerCase()));
 const clip=(s,n)=>s.length>n?s.slice(0,n-1)+"…":s;
 
 /* --------------------------------- svg utils ------------------------------ */
