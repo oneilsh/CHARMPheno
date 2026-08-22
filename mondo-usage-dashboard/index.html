@@ -204,10 +204,10 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 .gnode.hld .gcirc{stroke:var(--desc);stroke-width:2.4}
 .gedge.hl{stroke:var(--accent);stroke-opacity:.95;stroke-width:2.4}
 .gedge.hld{stroke:var(--desc);stroke-opacity:.9;stroke-width:2.2}
-/* hover peek: transient, same idea, lighter dim */
-.peek-active .gnode:not(.pk):not(.pkd){opacity:.28}
-.peek-active .gmore{opacity:.28}
-.peek-active .gedge:not(.pk):not(.pkd){opacity:.1}
+/* hover peek: same two-tone highlight as selection, transient */
+.peek-active .gnode:not(.pk):not(.pkd){opacity:.2}
+.peek-active .gmore{opacity:.2}
+.peek-active .gedge:not(.pk):not(.pkd){opacity:.06}
 .gnode.pk .gcirc{stroke:var(--accent);stroke-width:2.2}
 .gnode.pkd .gcirc{stroke:var(--desc);stroke-width:2}
 .gedge.pk{stroke:var(--accent);stroke-opacity:.9;stroke-width:2.1}
@@ -655,12 +655,19 @@ function graphVisible(){
     for(const id of [...vis.keys()]){
       if(id.startsWith("more:")||!graphOpen.has(id))continue;
       const ch=(dagKids.get(id)||[]).filter(canShow).sort((a,b)=>gval(b)-gval(a));
-      const cap=graphCap.get(id)??GRAPH_CAP, show=ch.slice(0,cap), hidden=ch.slice(cap);
+      const cap=graphCap.get(id)??GRAPH_CAP;
+      let show=ch, hiddenN=0, sortv=0;
+      if(ch.length>cap){                       // show the top few AND the bottom few,
+        const T=Math.max(1,Math.ceil(cap*0.6)), B=Math.max(1,cap-T);  // "more" between
+        show=[...ch.slice(0,T),...ch.slice(ch.length-B)];
+        hiddenN=ch.length-show.length;
+        sortv=(gval(ch[T-1])+gval(ch[ch.length-B]))/2;
+      }
       for(const c of show) if(!vis.has(c)){vis.set(c,byId.get(c));changed=true;}
       const mid="more:"+id;
-      if(hidden.length && !vis.has(mid)){
-        vis.set(mid,{id:mid,_more:true,parent:id,hidden:hidden.length,
-          label:`＋${hidden.length} more`,depth:(byId.get(id).depth||0)+1}); changed=true;
+      if(hiddenN>0 && !vis.has(mid)){
+        vis.set(mid,{id:mid,_more:true,parent:id,hidden:hiddenN,sortv,
+          label:`＋${hiddenN} more`,depth:(byId.get(id).depth||0)+1}); changed=true;
       }
     }
   }
@@ -700,14 +707,17 @@ function layoutGraph(vis){
   const lab=id=>vis.get(id).label||"";
   // STABLE ordering: each layer sorted by size (desc), tie-break by label. Does not
   // depend on positions, so expanding/collapsing never reshuffles the survivors.
-  const coord=new Map(); let x=40;
+  const coord=new Map(); let x=40; const gap=26;
   for(let d=0;d<=maxD;d++){
     const arr=(layers[d]||[]).slice().sort((a,b)=>{
-      const am=vis.get(a)._more?-1:gval(a), bm=vis.get(b)._more?-1:gval(b);
+      const am=vis.get(a)._more?vis.get(a).sortv:gval(a);
+      const bm=vis.get(b)._more?vis.get(b).sortv:gval(b);
       return (bm-am)|| (lab(a)<lab(b)?-1:1);
     });
-    const maxR=Math.max(14,...arr.map(rad)); let y=40;
-    for(const id of arr){const r=rad(id); coord.set(id,{x:x+maxR,y:y+r,r}); y+=2*r+26;}
+    const maxR=Math.max(14,...arr.map(rad));
+    let H=0; for(const id of arr) H+=2*rad(id)+gap; H=Math.max(0,H-gap);
+    let y=-H/2;                               // center each column around y=0
+    for(const id of arr){const r=rad(id); coord.set(id,{x:x+maxR,y:y+r,r}); y+=2*r+gap;}
     x+=maxR*2+210;
   }
   return {coord};
@@ -821,7 +831,8 @@ function buildMore(n){
   const w=n.label.length*7+16;
   gm.appendChild(svgEl("rect",{x:-w/2,y:-11,width:w,height:22,rx:9}));
   const t=svgEl("text",{x:0,y:4,"text-anchor":"middle","font-size":11});t.textContent=n.label;gm.appendChild(t);
-  gm.addEventListener("click",e=>{e.stopPropagation();graphCap.set(n.parent,Infinity);renderGraph();});
+  gm.addEventListener("click",e=>{e.stopPropagation();
+    graphCap.set(n.parent,(graphCap.get(n.parent)??GRAPH_CAP)+10); renderGraph();});
   return gm;
 }
 function buildNode(id,n){
@@ -844,7 +855,8 @@ function buildNode(id,n){
   return g;
 }
 function updateNode(g,id,n,c){
-  g.setAttribute("class","gnode"+(selected===id?" sel":"")+(gHL.has(id)?" hl":gHLD.has(id)?" hld":""));
+  const pk=g.classList.contains("pk")?" pk":g.classList.contains("pkd")?" pkd":"";  // preserve hover peek
+  g.setAttribute("class","gnode"+(selected===id?" sel":"")+(gHL.has(id)?" hl":gHLD.has(id)?" hld":"")+pk);
   const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
   circ.setAttribute("fill",nodeFill(id,n));
   circ.setAttribute("fill-opacity",nodeOpac(n));
@@ -874,7 +886,7 @@ function graphFit(){
   const W=svg.clientWidth,H=svg.clientHeight,pad=34;
   gz.k=Math.min(1.3,Math.max(0.12,Math.min((W-2*pad)/w,(H-2*pad)/h)));
   gz.x=pad-gBounds.minX*gz.k+Math.max(0,(W-2*pad-w*gz.k)/2);
-  gz.y=pad-gBounds.minY*gz.k;
+  gz.y=Math.max(pad,(H-h*gz.k)/2)-gBounds.minY*gz.k;   // vertically centered
   gLayer.style.transition="transform .4s cubic-bezier(.4,0,.2,1)";
   applyGT(gLayer);
   setTimeout(()=>{if(gLayer)gLayer.style.transition="";},450);
@@ -1123,12 +1135,15 @@ document.querySelectorAll("#gcolor button").forEach(b=>b.onclick=()=>{
     gz.x=mx-(mx-gz.x)*(nk/gz.k);gz.y=my-(my-gz.y)*(nk/gz.k);gz.k=nk;
     const g=svg.firstChild;if(g)applyGT(g);},{passive:false});
   svg.addEventListener("pointerdown",e=>{if(e.target.closest(".gnode,.gmore"))return;
-    drag={x:e.clientX,y:e.clientY,ox:gz.x,oy:gz.y};svg.classList.add("grabbing");
+    drag={x:e.clientX,y:e.clientY,ox:gz.x,oy:gz.y,moved:false};svg.classList.add("grabbing");
     try{svg.setPointerCapture(e.pointerId);}catch(_){}});
   svg.addEventListener("pointermove",e=>{if(!drag)return;
+    if(Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>4)drag.moved=true;
     gz.x=drag.ox+(e.clientX-drag.x);gz.y=drag.oy+(e.clientY-drag.y);
     const g=svg.firstChild;if(g)applyGT(g);});
-  const end=()=>{drag=null;svg.classList.remove("grabbing");};
+  const end=()=>{
+    if(drag&&!drag.moved&&selected){closeDrawer();}   // background click clears selection + dimming
+    drag=null;svg.classList.remove("grabbing");};
   svg.addEventListener("pointerup",end);svg.addEventListener("pointercancel",end);
 })();
 document.querySelectorAll("#mode button").forEach(b=>b.onclick=()=>{
