@@ -100,6 +100,30 @@ def term_collision_siblings(
     return out
 
 
+_RARE_SRC = {"gard_rare": "GARD", "orphanet_rare": "Orphanet", "nord_rare": "NORD",
+             "inferred_rare": "inferred"}
+
+
+def term_rare_flags(mapping):
+    """Per Mondo term: (is_rare, [source registries]) from the mapping's rare-subset
+    columns (the mondo2omop port exposes `rare` + gard/nord/orphanet/inferred_rare).
+    A term is rare if the umbrella `rare` flag or any source flag is set; sources
+    name the registries (GARD/Orphanet/NORD), falling back to "Mondo" when only the
+    umbrella flag is present. Pure over a pandas-like frame (columns accessed by
+    name); returns two ``{mondo_id: ...}`` dicts."""
+    cols = [c for c in ("rare", *_RARE_SRC) if c in getattr(mapping, "columns", [])]
+    rare_of, src_of = {}, {}
+    if not cols:
+        return rare_of, src_of
+    for mid, sub in mapping.groupby("mondo_id"):
+        srcs = sorted({_RARE_SRC[c] for c in _RARE_SRC
+                       if c in sub.columns and int(sub[c].max() or 0) == 1})
+        is_rare = any(int(sub[c].max() or 0) == 1 for c in cols)
+        rare_of[str(mid)] = bool(is_rare)
+        src_of[str(mid)] = srcs or (["Mondo"] if is_rare else [])
+    return rare_of, src_of
+
+
 def nearest_mapped_parents(
     mapped_ids: set, parent_adj: dict[str, list[str]]
 ) -> dict[str, list[str]]:
@@ -208,6 +232,8 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             "count": public,                 # None when withheld
             "collision": bool(siblings),
             "collision_siblings": siblings,
+            "rare": bool(r.get("rare")),
+            "rare_src": list(r.get("rare_src") or []),
         })
 
     depth = _depths(parents_of)
@@ -241,12 +267,15 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
         "internal_terms": sum(1 for r in term_rows if r["is_internal"]),
         "internal_used_terms": n_internal_used,
         "collision_terms": n_collision,
+        "rare_terms": sum(1 for r in term_rows if r.get("rare")),
+        "rare_used_terms": sum(1 for r, nd in zip(term_rows, nodes)
+                               if r.get("rare") and nd["state"] != "unused"),
         "max_depth": max(depth.values()) if depth else 0,
     }
     root = {"id": _ROOT_ID, "label": "Mondo disease (mapped-term view)",
             "kind": "root", "parents": [], "std_concepts": [], "state": "root",
             "category": "root", "display": "", "count": None, "collision": False,
-            "collision_siblings": [], "depth": 0}
+            "collision_siblings": [], "rare": False, "rare_src": [], "depth": 0}
     return {"meta": meta, "stats": stats, "nodes": [root] + nodes}
 
 
@@ -269,6 +298,8 @@ def format_summary(stats: dict, *, min_cell: int = _MIN_CELL) -> str:
         f"  internal (non-leaf) terms:         {s['internal_terms']:>8}   "
         f"({s['internal_used_terms']} used) <- mid-level, un-rolled",
         f"  collision-flagged terms (shared std concept): {s['collision_terms']:>8}",
+        f"  rare-disease terms (GARD/Orphanet/NORD): {s.get('rare_terms', 0):>8}   "
+        f"({s.get('rare_used_terms', 0)} used in the EHR)",
         f"  max mapped-term tree depth:        {s['max_depth']:>8}",
         "=" * 74,
     ])
@@ -371,6 +402,10 @@ def main(argv: list[str]) -> int:
     std_name = dict(zip(mapping["standard_concept_id"].astype(int),
                         mapping["standard_concept_name"]))
 
+    # Mondo rare-disease designations (from the mapping's subset flags, parsed by the
+    # mondo2omop port): per term, is it rare + which source registries flag it.
+    rare_of, rare_src_of = term_rare_flags(mapping)
+
     term_rows = []
     for mid in sorted(mapped_ids):
         cids = sorted({int(c) for c in term_std[mid]})
@@ -382,6 +417,8 @@ def main(argv: list[str]) -> int:
             "std_concepts": cids,
             "n_persons": count_of.get(mid, 0),
             "collision_siblings": siblings.get(mid, []),
+            "rare": rare_of.get(mid, False),
+            "rare_src": rare_src_of.get(mid, []),
         })
 
     # --- 4. assemble + persist ----------------------------------------------------

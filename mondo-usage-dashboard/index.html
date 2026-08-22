@@ -167,6 +167,13 @@ td.num{font-family:var(--mono);text-align:right}
 #table-scroll{max-height:70vh;overflow:auto}
 tr.trow:hover{background:var(--surface-2);cursor:pointer}
 
+/* graph body-system palette (Okabe-Ito, colorblind-safe) + descendant-highlight hue */
+:root{--sys0:#0072B2;--sys1:#E69F00;--sys2:#009E73;--sys3:#CC79A7;--sys4:#D55E00;--sys5:#56B4E9;--desc:#2f6fed;--rare:#a1006b}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --sys0:#4a97d6;--sys1:#f0a92a;--sys2:#2bbf9e;--sys3:#dd95c6;--sys4:#f0713a;--sys5:#8fd0f5;--desc:#6f9bff;--rare:#e77fc0}}
+:root[data-theme="dark"]{--sys0:#4a97d6;--sys1:#f0a92a;--sys2:#2bbf9e;--sys3:#dd95c6;--sys4:#f0713a;--sys5:#8fd0f5;--desc:#6f9bff;--rare:#e77fc0}
+.rare-tag{color:var(--rare);border:1px solid var(--rare);border-radius:4px;padding:0 4px;font-size:9.5px;font-family:var(--mono);flex:0 0 auto;letter-spacing:.03em}
+
 /* graph (DAG explorer) */
 #view-graph{position:relative}
 .graph-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:9px 14px;border-bottom:1px solid var(--border)}
@@ -188,12 +195,29 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 .gmore text{fill:var(--ink-2);font-family:var(--mono);font-weight:600}
 .gbadge{fill:var(--surface);stroke:var(--ink-2);stroke-width:1.4}
 .gbadge-sign{stroke:var(--ink-2);stroke-width:1.6;stroke-linecap:round;fill:none}
-/* lineage highlight: selected node + its ancestors stay lit, the rest recede */
-.sel-active .gnode:not(.hl){opacity:.24}
-.sel-active .gmore{opacity:.24}
-.sel-active .gedge:not(.hl){opacity:.08}
+.grare{fill:var(--rare);font-weight:700;paint-order:stroke;stroke:var(--surface);stroke-width:2.6px;pointer-events:none}
+/* lineage highlight: ancestors (accent) + descendants (--desc) stay lit, rest recede */
+.sel-active .gnode:not(.hl):not(.hld){opacity:.2}
+.sel-active .gmore{opacity:.2}
+.sel-active .gedge:not(.hl):not(.hld){opacity:.06}
+.gnode.hl .gcirc{stroke:var(--accent);stroke-width:2.6}
+.gnode.hld .gcirc{stroke:var(--desc);stroke-width:2.4}
 .gedge.hl{stroke:var(--accent);stroke-opacity:.95;stroke-width:2.4}
-.gnode.hl .gcirc{stroke:var(--accent);stroke-width:2.4}
+.gedge.hld{stroke:var(--desc);stroke-opacity:.9;stroke-width:2.2}
+/* hover peek: transient, same idea, lighter dim */
+.peek-active .gnode:not(.pk):not(.pkd){opacity:.28}
+.peek-active .gmore{opacity:.28}
+.peek-active .gedge:not(.pk):not(.pkd){opacity:.1}
+.gnode.pk .gcirc{stroke:var(--accent);stroke-width:2.2}
+.gnode.pkd .gcirc{stroke:var(--desc);stroke-width:2}
+.gedge.pk{stroke:var(--accent);stroke-opacity:.9;stroke-width:2.1}
+.gedge.pkd{stroke:var(--desc);stroke-opacity:.82;stroke-width:1.9}
+.g-legend{display:flex;flex-wrap:wrap;gap:5px 13px;padding:7px 14px 10px;border-bottom:1px solid var(--border);font-size:11px;color:var(--ink-2)}
+.g-legend .lg-item{display:flex;align-items:center;gap:5px}
+.g-legend .lg-sw{width:10px;height:10px;border-radius:3px;flex:0 0 auto}
+.g-focus-chip{display:none;align-items:center;gap:6px;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:20px;padding:3px 5px 3px 11px;font-size:12px;color:var(--ink);font-family:var(--mono)}
+.g-focus-chip button{border:0;background:transparent;color:var(--ink-2);font-size:15px;line-height:1;padding:0 4px;cursor:pointer;border-radius:50%}
+.g-focus-chip button:hover{color:var(--ink);background:var(--surface-3)}
 @media(prefers-reduced-motion:reduce){.gnode,.gmore,.gedge,.gnode .gcirc,.gnode .gring{transition:none}}
 
 /* drawer */
@@ -276,8 +300,14 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
         <button class="btn sm" id="g-reset">Reset view</button>
         <button class="btn sm" id="g-collapse">Collapse all</button>
         <button class="btn sm" id="g-fit">Fit</button>
+        <div class="tabs mode-t" id="gcolor" title="Node color: by top-level Mondo class (≈ body system), or by usage category">
+          <button data-gc="system" aria-selected="true">System</button>
+          <button data-gc="usage" aria-selected="false">Usage</button>
+        </div>
+        <span class="g-focus-chip" id="g-focus-chip"><span></span><button id="g-focus-clear" title="Clear focus" aria-label="Clear focus">×</button></span>
         <span class="g-hint" id="graph-hint"></span>
       </div>
+      <div class="g-legend" id="g-legend"></div>
       <svg id="graph"></svg>
     </div>
     <div class="view" id="view-treemap"><div id="treemap-wrap"><svg id="treemap"></svg></div>
@@ -315,7 +345,9 @@ let DATA=null, byId=new Map(), kids=new Map(), roots=[], expanded=new Set(), sel
 let ROLL_MAX=1, OWN_MAX=1, ROLL_EST_MAX=1;
 let graphOpen=new Set(["root"]), graphCap=new Map(), gz={x:24,y:24,k:0.85};
 let gBounds=null;   // last-layout bounds for Fit
-let gHL=new Set();  // selected node + its ancestors (lineage highlight)
+let gHL=new Set(), gHLD=new Set();  // selected + ancestors (hl) / visible descendants (hld)
+let gFocus=null, gPeek=null, gCoord=new Map();
+let gColorMode="system";            // "system" (by body system) | "usage" (by category)
 const GRAPH_CAP=14;   // max children revealed per expansion before a "＋N more" node
 const state={view:"tree",q:"",rollup:false,vis:new Set(CATS.filter(c=>c.on).map(c=>c.key))};
 
@@ -346,8 +378,9 @@ function load(d){
   roots=[...new Set(roots)];
   for(const [,arr] of kids) arr.sort(sortNodes);
   roots.sort(sortNodes);
-  computeVisibleDesc(); computeRollup();
+  computeVisibleDesc(); computeRollup(); assignSystems();
   graphOpen=new Set(["root"]); graphCap=new Map(); gz={x:24,y:24,k:0.85}; gLayer=null; gBounds=null;
+  gFocus=null; gHL=new Set(); gHLD=new Set(); gPeek=null;
   renderSource(); renderKPIs(); renderFilters();
   for(const id of roots) expanded.add(id);          // open first level
   renderAll();
@@ -436,6 +469,8 @@ function renderKPIs(){
   kpi("Used-small (<20)",fmt(s.used_small_terms),"used, exact count withheld",CATMAP.used_small.color);
   kpi("Used branch points",fmt(s.used_branch_terms),"0 direct count, above used nodes",CATMAP.used_branch.color);
   kpi("Collision-flagged",fmt(s.collision_terms),"share a std concept with siblings",CATMAP.collision||"var(--collision)");
+  if(s.rare_used_terms!=null)
+    kpi("Rare used",fmt(s.rare_used_terms),"rare dx (GARD/Orphanet) coded in the EHR","var(--rare)");
   renderCover();
 }
 function renderCover(){
@@ -508,6 +543,7 @@ function rowEl(n,depth,hasKids,isOpen){
   const sm=el("small",null,n.id);lbl.appendChild(sm);r.appendChild(lbl);
   if(n.collision){const cd=el("span","col");cd.title="shares a standard concept with sibling terms";r.appendChild(cd);}
   if(n.kind==="internal"){const kt=el("span","kindtag","node");r.appendChild(kt);}
+  if(n.rare){const rt=el("span","rare-tag","rare");rt.title="rare disease: "+((n.rare_src||[]).join(", ")||"Mondo");r.appendChild(rt);}
   r.appendChild(prevBar(n));
   const cs=countSpec(n);
   const cnt=el("span","cnt "+cs.cls,cs.text); if(cs.title)cnt.title=cs.title;
@@ -570,6 +606,26 @@ function topAncestor(id){                // depth-1 ancestor (body system) of a 
   return cur?cur.id:id;
 }
 /* ---- graph (DAG node-link, horizontal layered, progressive disclosure) ---- */
+// Body-system coloring: the top-6 depth-1 systems by rollup get an Okabe-Ito hue
+// (colorblind-safe), the rest share a neutral. Drilling into one system then reads
+// as a coherent hue family rather than a wall of teal.
+const SYS_N=6;
+function assignSystems(){
+  const sys=DATA.nodes.filter(n=>n.depth===1)
+    .sort((a,b)=>((DATA._roll.get(b.id)||{}).est||0)-((DATA._roll.get(a.id)||{}).est||0));
+  DATA._sysIdx=new Map(); sys.slice(0,SYS_N).forEach((n,i)=>DATA._sysIdx.set(n.id,i));
+}
+function systemFill(id){
+  if(!DATA._sysIdx) return "var(--cat-other)";
+  const s=topAncestor(id), i=DATA._sysIdx.get(s);
+  return i==null?"var(--cat-other)":`var(--sys${i})`;
+}
+function nodeFill(id,n){
+  return gColorMode==="system" ? systemFill(id)
+    : (CATMAP[n.category]?CATMAP[n.category].color:"var(--muted)");
+}
+const nodeOpac=n=>n.state==="reported"?0.92:n.state==="used_small"?0.62:0.34;
+
 const gval=id=>{const n=byId.get(id); if(!n)return 0;
   if(state.rollup){const r=DATA._roll.get(id);return r?r.est:0;}
   return n.state==="reported"?n.count:n.state==="used_small"?((DATA.meta.min_cell||20)-1):0.4;};
@@ -585,8 +641,8 @@ function graphVisible(){
   const canShow=id=>{const n=byId.get(id);return !!n&&(n.kind==="root"||DATA._anyVis.get(id));};
   if(q){const keep=searchSet(q); for(const id of keep) if(canShow(id)) vis.set(id,byId.get(id));
     if(byId.get("root"))vis.set("root",byId.get("root")); return vis;}
-  if(byId.get("root"))vis.set("root",byId.get("root"));
-  else for(const r of roots) if(canShow(r)) vis.set(r,byId.get(r));
+  const seeds=(gFocus&&byId.has(gFocus))?[gFocus]:(byId.get("root")?["root"]:roots);
+  for(const s of seeds) if(canShow(s)) vis.set(s,byId.get(s));
   let changed=true;
   while(changed){changed=false;
     for(const id of [...vis.keys()]){
@@ -601,12 +657,20 @@ function graphVisible(){
       }
     }
   }
-  // reveal the full ancestor lineage of the selected node (every parent path to root)
-  if(selected && byId.has(selected)){
-    const anc=ancestorSet(selected); anc.add(selected);
-    for(const id of anc) if(canShow(id)&&!vis.has(id)) vis.set(id,byId.get(id));
+  // reveal ancestor lineage: for the focus node (context of where it sits) and for
+  // the selected node (every parent path to root).
+  for(const anchor of [gFocus,selected]){
+    if(anchor && byId.has(anchor)){
+      const anc=ancestorSet(anchor); anc.add(anchor);
+      for(const id of anc) if(canShow(id)&&!vis.has(id)) vis.set(id,byId.get(id));
+    }
   }
   return vis;
+}
+function descendantSet(id){               // visible descendants via the spanning tree
+  const out=new Set(), st=[...(kids.get(id)||[])];
+  while(st.length){const c=st.pop(); if(out.has(c))continue; out.add(c); for(const cc of (kids.get(c)||[]))st.push(cc);}
+  return out;
 }
 const gparents=(vis,id)=>{const n=vis.get(id); return n._more?[n.parent]:((n.parents||[]).filter(p=>vis.has(p)));};
 function ancestorSet(id){                 // all transitive parents up the DAG (every path)
@@ -654,8 +718,11 @@ function graphInit(){
 }
 function renderGraph(){
   if(!gLayer||!gLayer.isConnected) graphInit();
-  const vis=graphVisible(), {coord}=layoutGraph(vis);
-  gHL=(selected&&byId.has(selected))?(()=>{const s=ancestorSet(selected);s.add(selected);return s;})():new Set();
+  const vis=graphVisible(), {coord}=layoutGraph(vis); gCoord=coord;
+  if(selected&&byId.has(selected)){
+    gHL=ancestorSet(selected); gHL.add(selected);
+    gHLD=new Set([...descendantSet(selected)].filter(id=>vis.has(id)));
+  } else { gHL=new Set(); gHLD=new Set(); }
   if(gLayer) gLayer.classList.toggle("sel-active",gHL.size>0);
   // bounds for Fit
   let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
@@ -673,7 +740,8 @@ function renderGraph(){
         gEdgeG.appendChild(e); gEdgeEls.set(key,e);
         requestAnimationFrame(()=>{e.style.transition=""; e.style.opacity="";}); }
       else { e.setAttribute("d",d); e.style.d=`path("${d}")`; }
-      e.setAttribute("class","gedge"+((gHL.has(p)&&gHL.has(id))?" hl":""));
+      const up=gHL.has(p)&&gHL.has(id), down=(gHLD.has(p)||p===selected)&&(gHLD.has(id));
+      e.setAttribute("class","gedge"+(up?" hl":down?" hld":""));
     }}
   for(const [key,e] of gEdgeEls){ if(!seenE.has(key)){ e.style.opacity=0;
     setTimeout(()=>{e.remove();},260); gEdgeEls.delete(key); } }
@@ -691,7 +759,55 @@ function renderGraph(){
     setTimeout(()=>{g.remove();},260); gNodeEls.delete(id); } }
   $("#graph-hint").textContent=state.q
     ? `${vis.size} nodes matching “${state.q}” (paths shown)`
-    : `${vis.size} nodes · click to expand/collapse · ${state.rollup?'size ∝ subtree rollup':'size ∝ own patients'} · drag to pan, scroll to zoom`;
+    : `${vis.size} nodes · click = expand + select · shift-click = focus · hover = peek lineage`;
+  renderLegend(); updateFocusChip();
+}
+function renderLegend(){
+  const box=$("#g-legend"); if(!box)return; box.innerHTML="";
+  const add=(sw,txt)=>{const s=el("span","lg-item");const d=el("span","lg-sw");
+    if(sw.startsWith("--"))d.style.background=`var(${sw})`; else d.style.background=sw;
+    s.appendChild(d);s.appendChild(el("span",null,txt));box.appendChild(s);};
+  if(gColorMode==="system"){
+    const sys=[...(DATA._sysIdx||new Map()).entries()].sort((a,b)=>a[1]-b[1]);
+    for(const [id,i] of sys) add(`--sys${i}`,clip(byId.get(id).label,20));
+    add("var(--cat-other)","other systems");
+  } else {
+    for(const c of CATS) add(c.color,c.label);
+  }
+}
+function updateFocusChip(){
+  const chip=$("#g-focus-chip"); if(!chip)return;
+  if(gFocus&&byId.has(gFocus)){chip.style.display="inline-flex";
+    chip.querySelector("span").textContent="Focus: "+clip(byId.get(gFocus).label,26);}
+  else chip.style.display="none";
+}
+function focusNode(id){gFocus=id; graphOpen.add(id); select(id,true);
+  requestAnimationFrame(()=>graphFit());}
+function clearFocus(){gFocus=null; renderGraph(); requestAnimationFrame(()=>graphFit());}
+function centerNodeInView(id){
+  const c=gCoord.get(id); if(!c||!gLayer)return;
+  const svg=$("#graph"),W=svg.clientWidth,H=svg.clientHeight;
+  gz.x=W/2-c.x*gz.k; gz.y=H/2-c.y*gz.k;
+  gLayer.style.transition="transform .42s cubic-bezier(.4,0,.2,1)"; applyGT(gLayer);
+  setTimeout(()=>{if(gLayer)gLayer.style.transition="";},460);
+}
+// hover peek: transient lineage highlight without changing the selection
+function peekOn(id){
+  if(!gLayer)return; gPeek=id;
+  const up=ancestorSet(id); up.add(id); const down=descendantSet(id);
+  for(const [nid,gnEl] of gNodeEls){
+    gnEl.classList.toggle("pk", up.has(nid)); gnEl.classList.toggle("pkd", down.has(nid)&&!up.has(nid));
+  }
+  for(const [key,eEl] of gEdgeEls){const [p,c]=key.split(">");
+    eEl.classList.toggle("pk", up.has(p)&&up.has(c));
+    eEl.classList.toggle("pkd", (down.has(p)||p===id)&&down.has(c));
+  }
+  gLayer.classList.add("peek-active");
+}
+function peekOff(){
+  if(!gLayer)return; gPeek=null; gLayer.classList.remove("peek-active");
+  for(const [,gnEl] of gNodeEls) gnEl.classList.remove("pk","pkd");
+  for(const [,eEl] of gEdgeEls) eEl.classList.remove("pk","pkd");
 }
 function buildMore(n){
   const gm=svgEl("g",{class:"gmore"}); gm.style.cursor="pointer";
@@ -703,28 +819,28 @@ function buildMore(n){
 }
 function buildNode(id,n){
   const g=svgEl("g",{class:"gnode"});
-  const col=CATMAP[n.category]?CATMAP[n.category].color:"var(--muted)";
-  g.appendChild(svgEl("circle",{class:"gcirc",cx:0,cy:0,fill:col,
-    "fill-opacity":(n.state==="reported"||n.state==="used_small")?0.92:0.4}));
+  g.appendChild(svgEl("circle",{class:"gcirc",cx:0,cy:0}));
   g.appendChild(svgEl("circle",{class:"gring",cx:0,cy:0,fill:"none",stroke:"var(--collision)","stroke-width":1.5,opacity:n.collision?1:0}));
   g.appendChild(svgEl("text",{class:"glbl","font-size":12.5}));
   g.appendChild(svgEl("text",{class:"gsub","font-size":10.5}));
   g.appendChild(svgEl("circle",{class:"gbadge",r:7,opacity:0}));
   g.appendChild(svgEl("path",{class:"gbadge-sign",opacity:0}));
+  const rm=svgEl("text",{class:"grare","text-anchor":"middle",opacity:0}); rm.textContent="✦"; g.appendChild(rm);
   g.addEventListener("click",e=>{e.stopPropagation();
+    if(e.shiftKey){ focusNode(id); return; }
     const hasKids=(kids.get(id)||[]).some(k=>DATA._anyVis.get(k));
     if(hasKids){ if(graphOpen.has(id))graphCollapse(id); else graphOpen.add(id); }
     select(id);});
+  g.addEventListener("mouseenter",()=>peekOn(id));
   g.addEventListener("mousemove",e=>showTip(e,`${byId.get(id).label} · ${graphCountText(id)||'0'}${byId.get(id).collision?' · collision':''}`));
-  g.addEventListener("mouseleave",hideTip);
+  g.addEventListener("mouseleave",()=>{hideTip();peekOff();});
   return g;
 }
 function updateNode(g,id,n,c){
-  g.setAttribute("class","gnode"+(selected===id?" sel":"")+(gHL.has(id)?" hl":""));
-  const col=CATMAP[n.category]?CATMAP[n.category].color:"var(--muted)";
+  g.setAttribute("class","gnode"+(selected===id?" sel":"")+(gHL.has(id)?" hl":gHLD.has(id)?" hld":""));
   const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
-  circ.setAttribute("fill",col);
-  circ.setAttribute("fill-opacity",(n.state==="reported"||n.state==="used_small")?0.92:0.4);
+  circ.setAttribute("fill",nodeFill(id,n));
+  circ.setAttribute("fill-opacity",nodeOpac(n));
   const ring=g.querySelector(".gring"); ring.setAttribute("r",c.r+3.5); ring.style.r=(c.r+3.5)+"px"; ring.setAttribute("opacity",n.collision?1:0);
   const lx=c.r+9;
   const lbl=g.querySelector(".glbl"); lbl.setAttribute("x",lx); lbl.setAttribute("y",c.r>14?-2:4); lbl.textContent=clip(n.label,36);
@@ -736,6 +852,10 @@ function updateNode(g,id,n,c){
   badge.setAttribute("cx",bx); badge.setAttribute("cy",by); badge.setAttribute("opacity",hasKids?1:0);
   sign.setAttribute("opacity",hasKids?1:0);
   sign.setAttribute("d",open?`M${bx-3.2},${by} h6.4`:`M${bx-3.2},${by} h6.4 M${bx},${by-3.2} v6.4`);
+  const rm=g.querySelector(".grare");
+  rm.setAttribute("opacity",n.rare?1:0);
+  rm.setAttribute("x",-bx); rm.setAttribute("y",-by+4);
+  rm.setAttribute("font-size",Math.max(10,Math.min(15,c.r*0.9)));
 }
 function graphCollapse(id){graphOpen.delete(id);graphCap.delete(id);
   for(const c of (kids.get(id)||[])) if(graphOpen.has(c)) graphCollapse(c);}
@@ -898,7 +1018,7 @@ const mono=(x)=>{const d=el("td");d.textContent=x;d.style.fontFamily="var(--mono
 const numTd=(x)=>{const d=el("td","num");d.textContent=x;return d;};
 
 /* ------------------------------ detail drawer ----------------------------- */
-function select(id){
+function select(id,fromFocus){
   selected=id; const n=byId.get(id); const dr=$("#drawer"); const inner=$("#drawer-inner");
   const min=DATA.meta.min_cell||20;
   const disp=n.state==="reported"?fmt(n.count):n.state==="used_small"?`< ${min} (withheld)`:"0";
@@ -907,8 +1027,11 @@ function select(id){
   let html=`<div class="dh"><div>
       <div class="section-t">${n.kind} term · depth ${n.depth}</div>
       <h3>${esc(n.label)}</h3></div>
-      <button class="close" aria-label="Close">×</button></div><div class="body">`;
+      <div style="display:flex;gap:6px">
+      <button class="close" id="dfocus" title="Focus this node in the graph" aria-label="Focus in graph" style="font-size:15px">⌖</button>
+      <button class="close" aria-label="Close">×</button></div></div><div class="body">`;
   html+=`<span class="pill" style="color:${cat.color};background:color-mix(in srgb,${cat.color} 15%,transparent)">${cat.label}</span>`;
+  if(n.rare) html+=` <span class="pill" style="color:var(--rare);background:color-mix(in srgb,var(--rare) 15%,transparent)" title="Mondo rare-disease designation">✦ rare · ${(n.rare_src||["Mondo"]).join(", ")}</span>`;
   if(n.collision) html+=`<div class="warn" style="margin-top:12px"><b>Multi-mapping.</b> This term shares a standard concept with ${n.collision_siblings.length} sibling term(s) via OMOP <span class="mono">Maps&nbsp;to</span>. Its count includes those shared patients — do not sum across the flagged terms.</div>`;
   html+=`<dl class="kv" style="margin-top:14px">
     <dt>Patients</dt><dd style="font-size:15px;color:${n.state==="reported"?cat.color:"var(--ink)"}">${disp}</dd>
@@ -942,11 +1065,14 @@ function select(id){
     n.collision_siblings.slice(0,30).map(c=>byId.has(c)?`<a data-goto="${c}">${esc(byId.get(c).label)}</a>`:`<span>${c}</span>`).join("")+`</div>`;}
   html+=`</div>`;
   inner.innerHTML=html; dr.classList.add("open"); dr.setAttribute("aria-hidden","false");
-  inner.querySelector(".close").onclick=closeDrawer;
+  inner.querySelector(".close[aria-label='Close']").onclick=closeDrawer;
+  const df=inner.querySelector("#dfocus"); if(df) df.onclick=()=>{
+    if(state.view!=="graph"){document.querySelector('.tabs:not(.mode-t) button[data-view=graph]').click();}
+    focusNode(id);};
   inner.querySelectorAll("[data-goto]").forEach(a=>a.onclick=()=>{const t=a.getAttribute("data-goto");revealInTree(t);select(t);});
   if(state.view==="tree"){renderTree();}
   else if(state.view==="table"){renderTable();}
-  else if(state.view==="graph"){renderGraph();}
+  else if(state.view==="graph"){renderGraph(); if(!fromFocus) centerNodeInView(id);}
 }
 function revealInTree(id){let cur=id;const path=[];while(cur){const n=byId.get(cur);if(!n)break;path.push(cur);const p=n.parents[0];cur=(p&&byId.has(p))?p:null;}
   for(const p of path)expanded.add(p);}
@@ -975,9 +1101,14 @@ document.querySelectorAll(".tabs:not(.mode-t) button").forEach(b=>b.onclick=()=>
   if(state.view==="graph") requestAnimationFrame(graphFit);
 });
 // graph controls + pan/zoom (listeners on the persistent svg, once)
-$("#g-collapse").onclick=()=>{graphOpen=new Set(["root"]);graphCap=new Map();renderGraph();requestAnimationFrame(graphFit);};
-$("#g-reset").onclick=()=>{gz={x:24,y:24,k:0.85};const g=$("#graph").firstChild;if(g)applyGT(g);};
+$("#g-collapse").onclick=()=>{graphOpen=new Set(["root"]);graphCap=new Map();gFocus=null;selected=null;closeDrawer();renderGraph();requestAnimationFrame(graphFit);};
+$("#g-reset").onclick=()=>{gFocus=null;renderGraph();gz={x:24,y:24,k:0.85};if(gLayer)applyGT(gLayer);};
 $("#g-fit").onclick=graphFit;
+$("#g-focus-clear").onclick=()=>clearFocus();
+document.querySelectorAll("#gcolor button").forEach(b=>b.onclick=()=>{
+  gColorMode=b.dataset.gc;
+  document.querySelectorAll("#gcolor button").forEach(x=>x.setAttribute("aria-selected",x===b));
+  renderGraph();});
 (function(){const svg=$("#graph");let drag=null;
   svg.addEventListener("wheel",e=>{e.preventDefault();const r=svg.getBoundingClientRect();
     const mx=e.clientX-r.left,my=e.clientY-r.top,f=Math.exp(-e.deltaY*0.0016);
