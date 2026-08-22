@@ -49,9 +49,17 @@ Four usage categories, each independently show/hide-able:
 | **Used branch (0 count)** | a term with 0 *direct* usage that sits **above** a used term — a branch point on the "used skeleton" (kept because no-roll-up leaves abstract ancestors at 0) |
 | **Rest of Mondo** | mapped terms with 0 usage and nothing used beneath them (off by default) |
 
-Views: **Hierarchy** (collapsible Mondo is-a tree), **Treemap** (reported terms by
-patient volume, grouped by body system), **Table** (sortable/searchable). Click any
-term for its MONDO/OMOP links, parents/children, and multi-mapping (collision) detail.
+Views: **Hierarchy** (collapsible Mondo is-a tree), **Graph** (a true node-link DAG —
+horizontal, progressive expand/collapse, nodes sized by prevalence, and the *only*
+view that shows Mondo's multi-parent edges — ~50% of terms have >1 parent),
+**Treemap** (patient volume by body system), **Table** (sortable/searchable). Click
+any term for its MONDO/OMOP links, parents/children, and multi-mapping detail.
+
+A **Per-term / Rolled up** toggle switches every view between each term's own exact
+count and a subtree **floor–ceiling** bracket — floor = the largest single term,
+ceiling = the summed used terms with each `<20` cell at 19. The interval width is the
+aggregated uncertainty (comorbidity overlap + suppression); the sum is only ever an
+upper bound on distinct patients, never a total.
 
 ## Method (why no roll-up)
 
