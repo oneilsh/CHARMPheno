@@ -55,6 +55,16 @@ view that shows Mondo's multi-parent edges — ~50% of terms have >1 parent),
 **Treemap** (patient volume by body system), **Table** (sortable/searchable). Click
 any term for its MONDO/OMOP links, parents/children, and multi-mapping detail.
 
+**Graph interactions:** click to expand + select and pan-to-center; selecting a node
+reveals and highlights its **ancestor lineage** (accent) and **descendants** (blue),
+dimming the rest; **hover** peeks the same without committing; **shift-click** (or the
+⌖ button) **focuses/re-roots** on a node. Nodes are colored **by top-level Mondo class
+(≈ body system)** — a colorblind-safe Okabe-Ito palette, toggle to color by usage —
+so drilling into one class reads as a coherent hue family. A ✦ marks **rare-disease**
+terms (Mondo's GARD/Orphanet/NORD designations); the "Rare used" KPI counts how many
+are actually coded in the EHR (2,275 in this AoU run). Note: "system" here is the
+node's top-level ancestor in the mapped-term tree, not an explicit ontology attribute.
+
 A **Per-term / Rolled up** toggle switches every view between each term's own exact
 count and a subtree **floor–ceiling** bracket — floor = the largest single term,
 ceiling = the summed used terms with each `<20` cell at 19. The interval width is the

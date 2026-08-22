@@ -87,6 +87,26 @@ def test_assemble_payload_states_stats_and_root():
     assert s["internal_terms"] == 1 and s["internal_used_terms"] == 1
 
 
+def test_rare_flag_passthrough_and_stats():
+    rows = [
+        {"mondo_id": "MONDO:R", "label": "rare dx", "is_internal": False, "parents": [],
+         "std_concepts": [1], "n_persons": 30, "collision_siblings": [],
+         "rare": True, "rare_src": ["Orphanet", "GARD"]},
+        {"mondo_id": "MONDO:C", "label": "common dx", "is_internal": False, "parents": [],
+         "std_concepts": [2], "n_persons": 500, "collision_siblings": [],
+         "rare": False, "rare_src": []},
+        {"mondo_id": "MONDO:RU", "label": "rare unused", "is_internal": False, "parents": [],
+         "std_concepts": [3], "n_persons": 0, "collision_siblings": [],
+         "rare": True, "rare_src": ["NORD"]},
+    ]
+    p = m.assemble_payload(meta={}, term_rows=rows)
+    by = {n["id"]: n for n in p["nodes"]}
+    assert by["MONDO:R"]["rare"] and by["MONDO:R"]["rare_src"] == ["Orphanet", "GARD"]
+    assert by["MONDO:C"]["rare"] is False
+    assert p["stats"]["rare_terms"] == 2          # R + RU
+    assert p["stats"]["rare_used_terms"] == 1     # only R is used (RU has 0 patients)
+
+
 def test_used_branch_category_for_zero_count_ancestor():
     # A 0-count internal ancestor that sits ABOVE a used leaf is "used_branch",
     # not "other".
