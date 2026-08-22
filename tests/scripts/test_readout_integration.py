@@ -710,18 +710,21 @@ def test_densify_lean_blocks_handles_dense_mask_marker():
 
 
 def test_stdout_tee_appends_sanitized_lines_and_survives_truncation(tmp_path, capsys):
-    """The durable driver log exists because exp 0103 lost 4h of results to a
-    summary.md that came back empty — appends riding a long-lived handle on a
-    replaced/truncated file land on an unlinked inode. The tee must (a) commit
-    complete lines only, (b) drop the wrapper's patient/noise patterns, and
-    (c) keep appending to a file that was truncated mid-run, which is the
-    per-line-reopen property the whole design hangs on."""
+    """The durable driver log exists because the runs dir is a gcsfuse mount:
+    a long-lived handle uploads only on close (the original empty-summary.md),
+    and per-LINE closes mutation-storm the GCS object until ENOSPC (the 0104
+    smoke deaths) — so the tee batches lines and closes per flush interval.
+    It must (a) commit complete lines only, (b) drop the wrapper's
+    patient/noise patterns, and (c) keep appending to a file truncated
+    mid-run (each flush reopens, so it never writes to a stale handle).
+    flush_every_s=0 makes every write flush, so the batching is exercised
+    at its immediate-mode boundary."""
     import io
     from _driver_common import _StdoutTee
 
     log = tmp_path / "driver_log.md"
     real = io.StringIO()
-    tee = _StdoutTee(log, real)
+    tee = _StdoutTee(log, real, flush_every_s=0.0)
     tee.write("[driver] part")           # incomplete: nothing committed yet
     assert not log.exists() or log.read_text() == ""
     tee.write("ial line\n")
@@ -732,3 +735,21 @@ def test_stdout_tee_appends_sanitized_lines_and_survives_truncation(tmp_path, ca
     assert log.read_text() == "[driver] after truncation\n"
     assert "[driver] partial line" in real.getvalue()
     assert "secret" in real.getvalue()   # terminal still sees everything
+
+
+def test_stdout_tee_batches_between_flush_intervals(tmp_path):
+    """With a long interval, lines accumulate in memory and reach disk only on
+    an explicit flush — one object mutation per batch is the property that
+    keeps gcsfuse alive at whole-Mondo log volume."""
+    import io
+    from _driver_common import _StdoutTee
+
+    log = tmp_path / "driver_log.md"
+    tee = _StdoutTee(log, io.StringIO(), flush_every_s=3600.0)
+    tee.write("[driver] one\n[driver] two\n")
+    assert not log.exists() or log.read_text() == ""   # still buffered
+    tee._flush_pending()
+    assert log.read_text() == "[driver] one\n[driver] two\n"
+    tee.write("[driver] three\n")
+    tee._flush_pending()
+    assert log.read_text().endswith("[driver] three\n")
