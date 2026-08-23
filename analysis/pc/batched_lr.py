@@ -43,6 +43,22 @@ batched version exact rather than a heuristic: a step-size VECTOR with a per-nod
 Armijo test is identical to running C independent line searches, and freezing a
 converged node is identical to having stopped its own solver.
 
+**Why the stats seam takes a `node_mask`.** Separability also means a data pass
+only has to touch the nodes whose answer the caller does not already hold. That
+is not a micro-optimization at whole-Mondo scale, it is the wall: with C≈3,800
+independent line searches sharing one pass, SOME node is still backtracking
+almost every trial, so the exp 0104 smoke spent ~26 full passes per iteration
+(vs ~1.5-6 at C=437) even though the median node accepted its first step. The
+seam therefore accepts `stats_fn(W_std, b_std, node_mask=None)`, a (C,) bool
+array meaning "only these nodes' rows are being asked about"; masked-out rows
+come back zero and the CALLER merges them with what it already has. The solver
+uses it for the two sets whose (loss, gradient) it provably already knows: nodes
+FROZEN at their converged point (their F/G cannot change again) and nodes that
+already ACCEPTED a step this iteration (their candidate is pinned). This is
+bookkeeping, not approximation — the numbers merged in are the numbers a full
+pass would have returned — and it is why `n_stats_calls` alone stopped being the
+cost metric; `n_node_evals` (node-passes actually paid for) is.
+
 No Spark imports here, by design (packaging invariant: this must stay importable
 on a driver, in a unit test, and inside an executor closure).
 """
@@ -70,10 +86,22 @@ _ARMIJO_C1 = 1e-4
 # s·y is worse than useless because rho = 1/(s·y) then amplifies noise. Skipping
 # is per-node: one bad node must not poison the shared history array.
 _CURV_TOL = 1e-10
-# Backtracking budget per iteration. 30 halvings = step ~1e-9; a node that cannot
-# make progress at that scale is not going to, so we clear its history (fall back
-# to steepest descent) and, if that fails too, stop it.
+# Backtracking budget per iteration. A hard cap on TRIALS, each of which is a
+# data pass: a node that cannot find an acceptable step within it is not going
+# to, so we clear its history (fall back to steepest descent) and, if that fails
+# too, stop it. It stayed at 30 across the switch from halving to interpolation
+# (below) because it is a safety net, not a schedule — with interpolation the
+# typical depth is 2-4, and a run that reaches 30 is pathological either way.
 _MAX_BACKTRACK = 30
+# Safeguards on the interpolated step (`_next_step`). The quadratic through the
+# failed trial can propose anything, including a step so close to the current one
+# that the next trial fails identically (no progress, one wasted pass) or one so
+# small it throws away a perfectly good bracket. Clamping the shrink factor into
+# [0.1, 0.5] is the textbook guard: never slower than plain halving, never more
+# than a decade per trial, so the schedule keeps halving's worst-case depth while
+# usually beating it.
+_LS_SHRINK_MIN = 0.1
+_LS_SHRINK_MAX = 0.5
 # Relative function-decrease floor = NUMERICAL convergence, the second stopping
 # rule beside `gtol`. It is not optional: the objective is a SUM over a node's
 # rows, so |F| ~ n and its roundoff is ~1e-16*n, which puts a floor of roughly
@@ -252,13 +280,25 @@ def make_inmemory_stats_fn(
     obs_DC: np.ndarray,
     mu: np.ndarray,
     sd: np.ndarray,
-) -> Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray, np.ndarray]]:
+) -> Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Build the reference (single-process) implementation of the stats seam.
 
-    Returns ``stats_fn(W_std, b_std) -> (loss_data (C,), gW_std (C,K), gb (C,))``
-    where ``loss_data[c]`` is node ``c``'s SUMMED log-loss over its observed rows
-    and the gradients are the matching standardized-space derivatives — DATA TERM
-    ONLY, no ridge (the solver owns the penalty so the aggregate is reusable).
+    Returns ``stats_fn(W_std, b_std, node_mask=None)
+    -> (loss_data (C,), gW_std (C,K), gb (C,))`` where ``loss_data[c]`` is node
+    ``c``'s SUMMED log-loss over its observed rows and the gradients are the
+    matching standardized-space derivatives — DATA TERM ONLY, no ridge (the
+    solver owns the penalty so the aggregate is reusable).
+
+    ``node_mask`` (a (C,) bool array; `None` means "all of them") restricts the
+    pass to the named nodes: their rows are exactly what an unmasked pass would
+    return, every other row is exactly zero, and the caller owns merging those
+    zeros with the values it already holds (see :func:`solve_batched_lr`). It is
+    honoured by zeroing the masked-out nodes' CELLS rather than by a second code
+    path — an unobserved cell already contributes nothing to any output below, so
+    dropping a whole column through the same mechanism is exact by construction.
+    Here that is only a correctness reference (the work is a dense (D,C) matmul
+    either way); the SAVING is the distributed twin's, whose kernels skip the
+    masked-out cells outright.
 
     It deliberately takes the long way round: fold to raw space, score raw θ,
     aggregate `g_raw`/`s`, fold back. Scoring the standardized matrix directly
@@ -280,12 +320,18 @@ def make_inmemory_stats_fn(
     sd = np.asarray(sd, dtype=np.float64)
     YM = Y * M                                  # labels only where observed
 
-    def stats_fn(W_std, b_std):
+    def stats_fn(W_std, b_std, node_mask=None):
+        M_c, YM_c = M, YM
+        if node_mask is not None:
+            keep = np.asarray(node_mask, dtype=bool)
+            if not keep.all():                  # all-True is the unmasked pass
+                M_c = M * keep[None, :]         # masked-out node -> no observed cell
+                YM_c = YM * keep[None, :]
         V, b_raw = fold_standardization(W_std, b_std, mu, sd)
         Z = Pi @ V.T + b_raw[None, :]           # (D,C) raw-space scores
         # sum over observed cells of [log(1+e^z) - y*z]; logaddexp is the stable form.
-        loss_data = (M * np.logaddexp(0.0, Z) - YM * Z).sum(axis=0)
-        R = M * (_sigmoid(Z) - Y)               # (D,C) residual, 0 off-mask
+        loss_data = (M_c * np.logaddexp(0.0, Z) - YM_c * Z).sum(axis=0)
+        R = M_c * (_sigmoid(Z) - Y)             # (D,C) residual, 0 off-mask
         g_raw = R.T @ Pi                        # (C,K)
         s = R.sum(axis=0)                       # (C,) == intercept gradient
         return loss_data, standardized_grad_from_raw(g_raw, s, mu, sd), s
@@ -322,8 +368,65 @@ def _two_loop(
     return -r
 
 
+def _next_step(
+    t: np.ndarray,
+    F: np.ndarray,
+    F_cand: np.ndarray,
+    gd: np.ndarray,
+    accepted: np.ndarray,
+    searching: np.ndarray,
+) -> np.ndarray:
+    """Next trial step per node: safeguarded quadratic interpolation, not halving.
+
+    A backtracking trial does not just tell us "too long", it hands us a third
+    piece of information about the 1-D function φ(t) = F(x + t·d) that a blind
+    halving throws away. We know φ(0) = F, φ'(0) = g·d, and now φ(t) = F_cand, and
+    the unique quadratic through those three lands its minimizer at
+
+        t_q = -0.5 * (g·d) * t² / (F_cand − F − t·(g·d))
+
+    whose denominator is provably positive at a FAILED Armijo test (φ(t) sits
+    above the sufficient-decrease line, which itself sits above the tangent since
+    `_ARMIJO_C1 < 1` and g·d < 0), so this is a well-posed model of the curvature
+    the step just discovered rather than a fixed guess about it. On a badly scaled
+    node — the whole-Mondo regime, where a node's summed loss is O(n) and its
+    first trial can overshoot by orders of magnitude — halving needs one trial per
+    factor of two while the quadratic reads the overshoot off in one, which is why
+    the typical depth drops from ~26 to 2-4 with the same acceptance rule.
+
+    Nothing about ACCEPTANCE changes: `_ARMIJO_C1` still decides what counts as an
+    acceptable step, so the set of points this solver may stop at is untouched and
+    every converged answer is the answer the halving schedule produced. Only the
+    SCHEDULE of trials differs, i.e. the number of distributed passes spent
+    getting there. The clamp to `[_LS_SHRINK_MIN, _LS_SHRINK_MAX]·t` keeps the
+    model honest where it is not (a non-finite `F_cand` from a wild overshoot has
+    no usable quadratic at all; those fall back to plain halving).
+
+    `accepted` nodes keep their step (it is the one they accepted); `searching`
+    is what makes the interpolation read only rows this pass actually evaluated.
+    """
+    with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+        denom = F_cand - F - t * gd
+        t_q = -0.5 * gd * t * t / denom
+        t_interp = np.clip(t_q, _LS_SHRINK_MIN * t, _LS_SHRINK_MAX * t)
+    usable = (searching & np.isfinite(F_cand) & (denom > 0.0)
+              & np.isfinite(t_interp))
+    return np.where(accepted, t, np.where(usable, t_interp, _LS_SHRINK_MAX * t))
+
+
+def _mask_arg(mask: np.ndarray) -> np.ndarray | None:
+    """`None` when every node is in — the seam's documented "no mask" fast path.
+
+    Passing an all-True mask is semantically identical, but the seam is allowed to
+    take a cheaper route when it is told there is nothing to skip (and the Spark
+    twin then skips a broadcast-sized array and a per-row filter), so say `None`
+    rather than making every implementation re-discover it.
+    """
+    return None if bool(mask.all()) else mask
+
+
 def solve_batched_lr(
-    stats_fn: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray, np.ndarray]],
+    stats_fn: Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]],
     C: int,
     K: int,
     *,
@@ -345,11 +448,20 @@ def solve_batched_lr(
     which is what the oracle
     :func:`analysis.pc.evaluate._lr_proba_per_label_masked` fits.
 
+    ``stats_fn`` is called as ``stats_fn(W_std, b_std)`` when every node is being
+    asked about and as ``stats_fn(W_std, b_std, node_mask=<(C,) bool>)`` when only
+    some are; see "Why the batched step control is exact" below for which nodes
+    get masked out and why the merge is bookkeeping rather than approximation.
+
     Returns ``(W_std (C,K), b_std (C,), info)``; `info` carries per-node
     ``n_iter``, ``converged``, ``converged_gtol``, ``stalled`` and
-    ``grad_inf_norm`` (plus ``n_stats_calls``, the real cost metric — each one is
-    a full distributed pass — ``line_search_failures``, and ``warm_started``,
-    whether this solve started from a caller-supplied `x0`). Params are in
+    ``grad_inf_norm`` (plus ``n_stats_calls``, ``n_node_evals``,
+    ``line_search_failures``, and ``warm_started``, whether this solve started
+    from a caller-supplied `x0`). ``n_node_evals`` — the summed count of
+    masked-in nodes over all calls — is the cost metric that survives node
+    masking: a masked pass still costs a scheduling round trip, but its DATA cost
+    is proportional to the nodes it was asked about, so `n_stats_calls` now
+    measures latency and `n_node_evals` measures work. Params are in
     STANDARDIZED coordinates; pass them through :func:`fold_standardization` to
     score raw θ.
 
@@ -400,9 +512,9 @@ def solve_batched_lr(
     meaningless point, which under an iteration cap ends somewhere meaningless).
 
     ``progress_fn`` (optional) is called once per completed outer iteration with
-    a small dict (`iter`, `n_stats_calls`, `n_active`, `n_converged`,
-    `n_stalled`, `max_grad_inf_norm`) so a driver can heartbeat a long
-    distributed solve — each stats call is a full cluster pass, so iterations
+    a small dict (`iter`, `n_stats_calls`, `n_node_evals`, `n_active`,
+    `n_converged`, `n_stalled`, `max_grad_inf_norm`) so a driver can heartbeat a
+    long distributed solve — each stats call is a full cluster pass, so iterations
     are minutes, not microseconds, at whole-Mondo scale.
 
     ``converged`` is ``converged_gtol | stalled``: a node stops either because
@@ -417,11 +529,20 @@ def solve_batched_lr(
     **Why the batched step control is exact, not an approximation.** F is
     separable across nodes, so a step-size VECTOR with a per-node Armijo test
     accepts exactly the step each independent line search would have accepted;
-    halving only the failing entries costs extra `stats_fn` calls but never
+    shrinking only the failing entries costs extra `stats_fn` calls but never
     perturbs a node that already passed (its candidate is pinned at its accepted
-    point for the remaining trials). Likewise FREEZING: once a node has stopped
-    (full gradient inf-norm, data + ridge, <= `gtol`, or the numerical stall
-    above) its direction is set to 0, so it contributes nothing further and is
+    point for the remaining trials). That pinning is also what makes MASKING the
+    trial passes exact: a node that has accepted, been cut loose as `hopeless`, or
+    frozen contributes nothing to any later trial of this iteration — its
+    `(X, F, G)` triple is already held in `X_best/F_best/G_best` — so the trial
+    pass is told (`node_mask`) to skip its cells entirely and the merge is a
+    no-op on rows this solver never reads. Every accepted point is therefore
+    evaluated by a pass that really did read that node's rows; what the mask
+    removes is only the re-evaluation of answers already in hand, which at
+    whole-Mondo scale is nearly all of the work (one deep straggler used to drag
+    3,000 settled nodes through 25 extra passes). Likewise FREEZING: once a node
+    has stopped (full gradient inf-norm, data + ridge, <= `gtol`, or the numerical
+    stall above) its direction is set to 0, so it contributes nothing further and is
     excluded from history updates — which is not just an optimization but a
     correctness guard, since a frozen node would otherwise contribute the
     degenerate pair `s = y = 0` and pollute `rho`. This is the plan's "freeze
@@ -450,13 +571,24 @@ def solve_batched_lr(
         X[:, :K] = W0
         X[:, K] = b0
     calls = 0
+    node_evals = 0
 
-    def full_obj(P: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Objective + gradient WITH the ridge, from the data-only stats seam."""
-        nonlocal calls
+    def full_obj(P: np.ndarray,
+                 node_mask: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Objective + gradient WITH the ridge, from the data-only stats seam.
+
+        With a `node_mask`, ONLY the masked-in rows of the returned `(F, G)` mean
+        anything: the seam zeroes the rest, and the ridge this adds on top would
+        turn those zeros into a plausible-looking (but wrong) `0.5*l2*‖w‖²`. Every
+        caller below therefore reads masked-in rows only — see the `ok` mask in
+        the backtracking loop, which is a subset of the mask that was passed.
+        """
+        nonlocal calls, node_evals
         W, b = P[:, :K], P[:, K]
-        loss, gW, gb = stats_fn(W, b)
+        loss, gW, gb = (stats_fn(W, b) if node_mask is None
+                        else stats_fn(W, b, node_mask=node_mask))
         calls += 1
+        node_evals += C if node_mask is None else int(np.count_nonzero(node_mask))
         F = np.asarray(loss, dtype=np.float64) + 0.5 * l2 * np.einsum("ck,ck->c", W, W)
         G = np.empty_like(P)
         G[:, :K] = np.asarray(gW, dtype=np.float64) + l2 * W
@@ -505,7 +637,7 @@ def solve_batched_lr(
         hopeless = np.zeros(C, dtype=bool)
         for _ in range(_MAX_BACKTRACK):
             # A node whose SUFFICIENT decrease has shrunk below the objective's
-            # own roundoff can never pass Armijo again, so halving it further
+            # own roundoff can never pass Armijo again, so shrinking it further
             # only burns whole distributed passes for the nodes still searching.
             # Cutting it loose here (it is at its numerical optimum; the stall
             # rule below picks it up) is what keeps a converging batch from
@@ -515,12 +647,18 @@ def solve_batched_lr(
             if not searching.any():
                 break
             X_cand = np.where(searching[:, None], X + t[:, None] * d, X_best)
-            F_cand, G_cand = full_obj(X_cand)
+            # THE pass. Only `searching` rows are read out of it (`ok` below is a
+            # subset of `searching`), so that is exactly what the seam is asked
+            # for: on the first trial that is every active node minus any already
+            # cut loose, and on each later trial only the shrinking set still
+            # backtracking. Everyone else — frozen, accepted, hopeless — is
+            # already held in `X_best/F_best/G_best`.
+            F_cand, G_cand = full_obj(X_cand, _mask_arg(searching))
             ok = searching & np.isfinite(F_cand) & (F_cand <= F + _ARMIJO_C1 * t * gd)
             if ok.any():
                 X_best[ok], F_best[ok], G_best[ok] = X_cand[ok], F_cand[ok], G_cand[ok]
                 accepted |= ok
-            t = np.where(accepted, t, 0.5 * t)
+            t = _next_step(t, F, F_cand, gd, accepted, searching)
         failed = ~accepted
         ls_failures += int(failed.sum())
 
@@ -615,6 +753,7 @@ def solve_batched_lr(
             progress_fn({
                 "iter": it,
                 "n_stats_calls": calls,
+                "n_node_evals": node_evals,
                 "n_active": int((~frozen).sum()),
                 "n_converged": int((converged_gtol | stalled).sum()),
                 "n_stalled": int(stalled.sum()),
@@ -629,6 +768,7 @@ def solve_batched_lr(
         "stalled": stalled,
         "grad_inf_norm": np.abs(G).max(axis=1),
         "n_stats_calls": calls,
+        "n_node_evals": node_evals,
         "line_search_failures": ls_failures,
         "loss": F,
         "warm_started": warm_started,

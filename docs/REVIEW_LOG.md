@@ -12,6 +12,30 @@ elsewhere.
 
 ---
 
+## 2026-08-22 — Whole-Mondo hardening arc: what the first K≈3,827 runs taught the readout
+
+The exp 0104 smokes stress-tested every ADR 0046 component at 8.6× scale; each failure
+produced a measured fix, all on `claude/gated-conditional-voi`. Shipped, in causal order:
+(1) payload-sized `treeReduce` depth (`spark_vi.core.runner._agg_depth` — the 355 MB
+λ-partials OOM'd the driver JVM at depth 2); (2) warm starts + `readout_max_iter` dev cap
+(insight 0074: warm starts supply a point, not curvature — capped-point quality, not
+convergence speed); (3) top-m sparse θ kernels + ALWAYS-ON mass-coverage measurement —
+which immediately earned its keep by showing coverage (0.132/0.077 at m=256) BELOW the
+Dirichlet prior: the α=0.5 floor × K=3,827 swamps per-doc evidence, so posterior-mean θ
+is ~90% uniform haze (enablement moved from a coverage rule to a measured pricing
+re-readout; `gated_pc_readout --readout-theta-topm` exists for exactly that); (4)
+gcsfuse-aware batched log appends — the runs dir is a GCS-FUSE mount, which both
+explained the original "empty summary.md" (upload-on-close) and the two ENOSPC deaths
+(per-line appends vs the ~1 mutation/s/object cap); (5) line-search economy — `node_mask`
+on the stats seam (trials 2+/frozen nodes evaluate only searching cells; 0.16× data
+touched) + quadratic-interpolation backtracking (0.43× passes; Armijo acceptance
+unchanged, sklearn-oracle equality tests green throughout); (6) the fit now saves (npz +
+fit-only manifest) BEFORE any readout. Parked: the α·K haze implication for
+node_affinity/dashboards (future α experiment), frontier-only corpus (plan step 5), and
+the whole-Mondo record run itself.
+
+---
+
 ## 2026-08-20 — Distributed readout build (ADR 0046): batched L-BFGS multi-head + lean eval collect
 
 Three-package build replacing the readout's driver collect (θ (D,K) + dense (D,C)
