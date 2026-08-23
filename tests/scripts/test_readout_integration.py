@@ -24,6 +24,13 @@ second batched solve starts from the arm's main fit (and the A/B gate's sampled
 refit from the full-data one), which must change the wall-clock and nothing else —
 same per-node readout, same degenerate no-ops.
 
+The FIT-ONLY SAVE is pinned here for a related reason: the readout is where these
+runs die, and until it landed a readout death also destroyed the fit that preceded
+it. `_save_fit` is unit-tested (both writes, the multi-domain λ branch) and its
+ORDERING inside `main` — after the fit, before any readout work — is pinned
+structurally, the same way the calibration gate is, because `main` cannot be
+called without a BigQuery corpus.
+
 Tolerances (per-node AUC 2e-3, macro 1e-3) are set by the ORACLE, not by us:
 sklearn's default `tol=1e-4` stops its own solver ~5e-4 from the optimum in
 predicted probability, and it is the less-converged of the two parties. Asserting
@@ -660,6 +667,99 @@ def test_calibration_block_is_entirely_inside_the_gate():
                    '"gated_pc_conditional_cal"', "conditional ECE (VOI readiness"):
         assert marker in block, marker
         assert marker not in outside, f"{marker} escaped the gate"
+
+
+def test_save_fit_writes_the_model_then_overwrites_it_with_the_full_record(tmp_path):
+    """One writer, two calls: a fit-only floor and the authoritative final record.
+
+    The npz is the FIT — hours of CAVI that no readout failure should be allowed to
+    throw away — so it lands as soon as the fit exists, next to a manifest that says
+    so (`partial="fit-only"`, `results=None`). The final call writes the SAME two
+    paths with the arms filled in and the marker cleared, so a finished run's
+    manifest is what it always was and a died-in-readout run is still re-scoreable
+    by `gated_pc_readout` off the npz.
+    """
+    gp = {"lambda": np.arange(6.0).reshape(2, 3), "alpha": np.ones(2),
+          "w_CK": np.full((4, 2), 0.5)}
+    fields = {"model_class": "gated_pc", "C": 4, "K": 2, "readout_mode": "distributed"}
+
+    early = gpc._save_fit(tmp_path, gp, 4, fields, partial="fit-only")
+    assert early["partial"] == "fit-only" and early["results"] is None
+    assert early["per_node_domain_mass"] is None
+    on_disk = json.loads((tmp_path / "manifest.json").read_text())
+    assert on_disk == early
+    with np.load(tmp_path / "gated_pc_result.npz") as z:
+        assert np.array_equal(z["lambda"], gp["lambda"])
+        assert np.array_equal(z["b_CK"], np.zeros(4))    # absent b_CK -> zeros
+    # the caller's field dict is a template, not state the writer mutates
+    assert "results" not in fields and "partial" not in fields
+
+    results = {"gated_pc": {"ranking": {"auc": 0.9}}}
+    final = gpc._save_fit(tmp_path, gp, 4, fields, results=results,
+                          domain_mass={0: [1.0]})
+    assert final["partial"] is None and final["results"] == results
+    assert final["per_node_domain_mass"] == {"0": [1.0]}
+    assert json.loads((tmp_path / "manifest.json").read_text()) == final
+    assert final["model_class"] == early["model_class"] == "gated_pc"
+
+
+def test_save_fit_splits_a_multi_domain_lambda_dict(tmp_path):
+    """`np.savez` cannot store a dict, so a multi-domain λ goes out as
+    `lambda_0, lambda_1, ...` — the shape `reconstruct_model` reads back. Pinned
+    because the save block moved into a helper and this is its one branch."""
+    gp = {"lambda": {1: np.ones((2, 2)), 0: np.zeros((2, 2))},
+          "alpha": np.ones(2), "w_CK": np.zeros((3, 2)), "b_CK": np.full(3, 0.25)}
+    gpc._save_fit(tmp_path, gp, 3, {"C": 3}, partial="fit-only")
+    with np.load(tmp_path / "gated_pc_result.npz") as z:
+        assert set(z.files) == {"lambda_0", "lambda_1", "alpha", "w_CK", "b_CK"}
+        assert np.array_equal(z["lambda_1"], np.ones((2, 2)))
+        assert np.array_equal(z["b_CK"], np.full(3, 0.25))
+
+
+def test_the_fit_only_save_precedes_every_readout_in_main():
+    """The early save must run BEFORE any readout work, or it saves nothing new.
+
+    `main` needs a BigQuery corpus, so — as with the calibration gate above — the
+    ordering claim is pinned structurally: the `partial="fit-only"` write has to
+    appear after the estimator's `.fit(` and before the first line that spends
+    cluster time on a readout (the θ transforms, either scoring path, the A/B
+    gate). The failure this catches is the natural drift: someone moves the save
+    "next to the other save" at the end of the run, and the next readout death
+    costs a whole fit again.
+    """
+    import inspect
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(gpc.main))
+    lines = src.splitlines()
+
+    def _line(pred, what):
+        hits = [i for i, ln in enumerate(lines) if pred(ln)]
+        assert hits, f"no line matching {what}"
+        return hits[0]
+
+    fit = _line(lambda ln: "pc_model = pc_est.fit(" in ln, "the gated_pc fit")
+    early = _line(lambda ln: 'partial="fit-only"' in ln, "the fit-only save")
+    readout = min(_line(lambda ln: "pc_model.transform(" in ln, "the θ transform"),
+                  _line(lambda ln: "distributed_score_arm(" in ln, "the dist arm"),
+                  _line(lambda ln: "_collect_theta_labels(" in ln, "the θ collect"))
+    final = _line(lambda ln: "results=results" in ln, "the final save")
+    assert fit < early < readout, (fit, early, readout)
+    assert readout < final
+    # ...and both writes go through the one helper, so they cannot drift apart
+    assert len([ln for ln in lines if "_save_fit(" in ln]) == 2
+
+
+def test_re_readout_never_indexes_a_possibly_null_manifest_results():
+    """A fit-only manifest has `results: None`, and the re-readout tool is exactly
+    the thing you run against one — so its echo of the other arms must treat that
+    as "nothing stored yet" and say so, never index into it."""
+    import inspect
+
+    src = inspect.getsource(gpr.main)
+    assert 'manifest.get("results") or {}' in src
+    assert 'manifest["results"]' not in src
+    assert 'manifest.get("partial")' in src
 
 
 def test_dev_profile_skips_the_calibration_solve(monkeypatch, capsys):

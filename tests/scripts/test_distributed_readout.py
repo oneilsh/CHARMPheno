@@ -17,6 +17,12 @@ is the whole correctness claim — a top-m readout is the exact readout of a nar
 design matrix, not an approximation of the wide one — so "sparse == dense-on-
 truncated to 1e-10" is the assertion, never "sparse ≈ dense-on-full".
 
+The `node_mask` argument (the solver's "only these heads still need a pass" seam)
+is held to one rule at both layers: masked-in rows equal an unmasked pass's, and
+masked-out rows are exactly zero. It is a COST lever — the whole point is that a
+deep line search stops re-reading every node's cells — so any semantic difference
+would show up as a fit that silently disagrees with the sklearn oracle.
+
 The fold formulas (standardized <-> raw) are written out INLINE here rather than
 imported from `analysis/pc/batched_lr.py` (Package A): the point of the injection
 seam is that this module is testable without the solver, so the tests must not
@@ -207,6 +213,64 @@ def test_stats_kernel_sparse_and_dense_score_paths_agree(monkeypatch):
     sparse = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
     for a, b in zip(dense, sparse):
         assert np.allclose(a, b, atol=1e-10, rtol=0)
+
+
+def test_stats_kernel_node_mask_is_exact_and_skips_the_rest():
+    """`node_mask` must be a COST choice, never a semantic one.
+
+    The solver merges a masked pass's rows with values it already holds (frozen
+    heads, heads that already accepted this iteration's step), so a masked-in row
+    has to equal what an unmasked pass returns and a masked-out row has to be
+    exactly zero — anything else silently perturbs a batch whose equality with the
+    sklearn oracle is the plan's correctness gate. The 1e-12 slack on the
+    masked-in rows is the mask-density fast path re-associating a K-term dot: a
+    row that observed enough nodes for the full matvec can drop under the
+    threshold once its cells are filtered.
+    """
+    Pi, y, mask = _make_data(seed=51)
+    V, b_raw = _params(seed=52)
+    full = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K)
+
+    keep = np.zeros(C, dtype=bool)
+    keep[[0, 2, C - 1]] = True                   # dense node, ordinary, never-observed
+    got = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K, node_mask=keep)
+    for a, b in zip(got, full):
+        a, b = np.asarray(a), np.asarray(b)
+        assert np.abs(a[keep] - b[keep]).max() < 1e-12
+        assert np.abs(a[~keep]).max() == 0.0
+
+    # an all-True mask filters nothing, so it is the unmasked pass bit for bit
+    allin = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K,
+                             node_mask=np.ones(C, dtype=bool))
+    for a, b in zip(allin, full):
+        assert np.array_equal(a, b)
+
+
+def test_sparse_stats_kernel_node_mask_is_exact_and_skips_the_rest():
+    """Same contract on the top-m path, where masking is one skipped node group.
+
+    Cheaper AND stricter than the dense case: the by-node regroup means a
+    masked-in head's arithmetic is byte-identical whatever else is masked out (it
+    is the same gather over the same cells in the same order), so this asserts
+    equality rather than a tolerance.
+    """
+    Pi, y, mask = _make_data(seed=53)
+    V, b_raw = _params(seed=54)
+    packed = _packed_sparse(Pi, y, mask, TOPM)
+    full = dr._sparse_stats_kernel(iter(packed), V, b_raw, C, K)
+
+    keep = np.zeros(C, dtype=bool)
+    keep[[1, 4]] = True
+    got = dr._sparse_stats_kernel(iter(packed), V, b_raw, C, K, node_mask=keep)
+    for a, b in zip(got, full):
+        a, b = np.asarray(a), np.asarray(b)
+        assert np.array_equal(a[keep], b[keep])
+        assert np.abs(a[~keep]).max() == 0.0
+
+    allin = dr._sparse_stats_kernel(iter(packed), V, b_raw, C, K,
+                                    node_mask=np.ones(C, dtype=bool))
+    for a, b in zip(allin, full):
+        assert np.array_equal(a, b)
 
 
 def test_score_cells_kernel_sparse_and_dense_paths_agree(monkeypatch):
@@ -494,6 +558,69 @@ class TestLocalSparkRoundTrip:
         assert np.allclose(gb, r_s, atol=1e-10, rtol=0)
         assert np.allclose(gW_std, _standardized_grad_from_raw(r_g, r_s, mu, sd),
                            atol=1e-10, rtol=0)
+
+    @pytest.mark.parametrize("topm", [0, TOPM])
+    def test_spark_stats_fn_node_mask_matches_the_masked_kernel(self, spark, topm):
+        """The masked pass, through the real cache/broadcast machinery.
+
+        Both ingest shapes are covered because they mask by different mechanisms —
+        the dense kernel filters each row's observed indices, the sparse one drops
+        whole node groups — and the solver reaches for whichever the run's
+        `theta_topm` selected. The oracle is the in-memory kernel fed the SAME
+        mask, so this pins the Spark shell (broadcast, closure, treeAggregate zero
+        arrays) rather than re-deriving the masking rule.
+        """
+        Pi, y, mask = _make_data(seed=36 + topm)
+        df = _make_df(spark, Pi, y, mask)
+        mu, sd, _, _ = dr.masked_moments(df, C, K, topm=topm)
+        W, b = _params(seed=37)
+        keep = np.zeros(C, dtype=bool)
+        keep[[0, 3]] = True
+        with dr.make_spark_stats_fn(
+            df, C, K, mu, sd,
+            fold_standardization=_fold_standardization,
+            standardized_grad_from_raw=_standardized_grad_from_raw,
+            topm=topm,
+        ) as stats_fn:
+            loss, gW_std, gb = stats_fn(W, b, node_mask=keep)
+            # an all-True mask is normalized to the plain pass
+            loss_all, _, _ = stats_fn(W, b, node_mask=np.ones(C, dtype=bool))
+            loss_none, _, _ = stats_fn(W, b)
+        V, b_raw = _fold_standardization(W, b, mu, sd)
+        if topm:
+            r_loss, r_g, r_s = dr._sparse_stats_kernel(
+                iter(_packed_sparse(Pi, y, mask, topm)), V, b_raw, C, K,
+                node_mask=keep)
+        else:
+            r_loss, r_g, r_s = dr._stats_kernel(_rows(Pi, y, mask), V, b_raw, C, K,
+                                                node_mask=keep)
+        assert np.allclose(loss, r_loss, atol=1e-10, rtol=0)
+        assert np.allclose(gb, r_s, atol=1e-10, rtol=0)
+        assert np.allclose(gW_std, _standardized_grad_from_raw(r_g, r_s, mu, sd),
+                           atol=1e-10, rtol=0)
+        # masked-out nodes come back exactly zero — the contract the solver merges
+        # against (its own cached rows fill those in)
+        assert np.abs(np.asarray(loss)[~keep]).max() == 0.0
+        assert np.abs(np.asarray(gW_std)[~keep]).max() == 0.0
+        assert np.abs(np.asarray(gb)[~keep]).max() == 0.0
+        assert np.allclose(loss_all, loss_none, atol=0, rtol=0)
+        assert np.abs(np.asarray(loss_none)[~keep]).max() > 0.0   # not vacuous
+
+    def test_spark_stats_fn_rejects_a_wrongly_shaped_node_mask(self, spark):
+        """A (C,) mask is the contract; a mismatched one would silently mask the
+        wrong heads (numpy would happily broadcast a scalar or a shorter array
+        into the kernels), which is a wrong FIT, not a crash."""
+        Pi, y, mask = _make_data(seed=38)
+        df = _make_df(spark, Pi, y, mask)
+        mu, sd, _, _ = dr.masked_moments(df, C, K)
+        W, b = _params(seed=39)
+        with dr.make_spark_stats_fn(
+            df, C, K, mu, sd,
+            fold_standardization=_fold_standardization,
+            standardized_grad_from_raw=_standardized_grad_from_raw,
+        ) as stats_fn:
+            with pytest.raises(ValueError):
+                stats_fn(W, b, node_mask=np.ones(C - 1, dtype=bool))
 
     def test_score_cells_df_matches_numpy(self, spark):
         Pi, y, mask = _make_data(seed=24)

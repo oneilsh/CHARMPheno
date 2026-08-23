@@ -17,7 +17,10 @@ What this module supplies (plan §Design steps 1–3), and nothing else:
     the current parameters, return per-node (summed log-loss, gradient) for ALL C
     heads from ONE data pass. This is the plan's key structural claim — on FROZEN
     θ the C per-node problems are independent K-dim convex fits that SHARE every
-    data pass, so one pass replaces C separate Spark ML jobs.
+    data pass, so one pass replaces C separate Spark ML jobs. The same
+    independence lets a pass be RESTRICTED (`node_mask=`) to the heads the solver
+    still needs, which is what keeps a deep line search from re-reading all 56M
+    cells for the handful of nodes still backtracking.
   * `_lean_eval_kernel` — plan §2.1's LEAN driver collect: per doc, the dense
     float32 P(node) row plus the label/mask as INDEX lists, so the whole existing
     driver eval stack runs unchanged on ~6 bytes/cell instead of the driver path's
@@ -257,7 +260,7 @@ def _row_scores(theta, obs, V, b_raw, C):
     return V[obs] @ theta + b_raw[obs]
 
 
-def _stats_kernel(rows, V, b_raw, C, K):
+def _stats_kernel(rows, V, b_raw, C, K, node_mask=None):
     """Per-node DATA-TERM stats of the batched multi-head logistic, in RAW θ space.
 
     `rows` as in `_moments_kernel`; `V (C,K)`, `b_raw (C,)` are the raw-θ scoring
@@ -284,16 +287,29 @@ def _stats_kernel(rows, V, b_raw, C, K):
     `standardized_grad_from_raw` (which needs exactly this `(g_raw, s)` pair,
     because d z/d W_std = (θ − μ)/σ = θ/σ − μ/σ separates into the two sums).
 
+    `node_mask` (a (C,) bool array, or `None` for "every node") is the solver's
+    seam for skipping nodes whose stats it already holds — a frozen head, or one
+    that already accepted its step this iteration (`batched_lr.solve_batched_lr`).
+    It is applied by DROPPING those cells from each row's observed set, so the
+    pass costs what the masked-in cells cost and the masked-out rows of the
+    returned arrays are exactly zero (never touched), which is the contract the
+    solver merges against.
+
     Returns `(loss (C,), g_raw (C,K), s (C,))`.
     """
     C, K = int(C), int(K)
     V = np.asarray(V, dtype=np.float64)
     b_raw = np.asarray(b_raw, dtype=np.float64)
+    keep = None if node_mask is None else np.asarray(node_mask, dtype=bool)
     loss = np.zeros(C, dtype=np.float64)
     g_raw = np.zeros((C, K), dtype=np.float64)
     s = np.zeros(C, dtype=np.float64)
     for theta, label, mask in rows:
         obs = np.flatnonzero(mask)
+        if keep is not None and obs.size:
+            # Filter the row's observed nodes, not the outputs: dropping the cell
+            # is what makes the score, the loss and the scatter-add all skip it.
+            obs = obs[keep[obs]]
         if obs.size == 0:
             continue
         z = np.clip(_row_scores(theta, obs, V, b_raw, C), -_SCORE_CLIP, _SCORE_CLIP)
@@ -465,7 +481,8 @@ def _sparse_moments_kernel(packed, C, K, chunk_rows=_TOPM_CHUNK_ROWS):
     return sum_theta, sum_theta_sq, n_obs, n_pos
 
 
-def _sparse_stats_kernel(packed, V, b_raw, C, K, chunk_rows=_TOPM_CHUNK_ROWS):
+def _sparse_stats_kernel(packed, V, b_raw, C, K, chunk_rows=_TOPM_CHUNK_ROWS,
+                         node_mask=None):
     """`_stats_kernel` on truncated θ — the hot kernel the whole lever exists for.
 
     Per observed cell the score is `z = V[c, idx]·val + b_raw[c]`: m terms instead of
@@ -478,10 +495,17 @@ def _sparse_stats_kernel(packed, V, b_raw, C, K, chunk_rows=_TOPM_CHUNK_ROWS):
     One trip per (node, chunk): a single `(n_c, m)` gather out of the contiguous
     `V[c]` row plus one row-wise dot serves ALL of node c's docs in the chunk. See
     the note above this block for why that beats the per-doc form 2.5-9x.
+
+    `node_mask` (see `_stats_kernel`) is nearly free here BECAUSE the cells are
+    already grouped by node: a masked-out head is one skipped group, so its
+    gather, dot, `logaddexp` and `bincount` — all of the per-cell work — never
+    run. What survives is the chunk's own `argsort`, which is O(cells) bookkeeping
+    against O(cells·m) arithmetic, so the pass cost tracks the masked-in cells.
     """
     C, K = int(C), int(K)
     V = np.asarray(V, dtype=np.float64)
     b_raw = np.asarray(b_raw, dtype=np.float64)
+    keep = None if node_mask is None else np.asarray(node_mask, dtype=bool)
     loss = np.zeros(C, dtype=np.float64)
     g_raw = np.zeros((C, K), dtype=np.float64)
     s = np.zeros(C, dtype=np.float64)
@@ -489,6 +513,8 @@ def _sparse_stats_kernel(packed, V, b_raw, C, K, chunk_rows=_TOPM_CHUNK_ROWS):
         if node.size == 0:
             continue
         for c, pos in _node_groups(node):
+            if keep is not None and not keep[c]:
+                continue
             rows = _cell_rows(ptr, pos)
             idx, val = IDX[rows], VAL[rows]
             y = y_all[pos]
@@ -853,11 +879,23 @@ def masked_moments(scored_df, C, K, *, topic_col="topicDistribution",
 
 
 class SparkStatsFn:
-    """Callable `stats_fn(W_std, b_std) -> (loss_data (C,), gW_std (C,K), gb (C,))`.
+    """Callable `stats_fn(W_std, b_std, node_mask=None)
+    -> (loss_data (C,), gW_std (C,K), gb (C,))`.
 
     The plan's per-pass seam: ONE `treeAggregate` returns all C heads' gradients, so
     a batched L-BFGS iteration costs one data scan regardless of C — versus Spark
     ML's C sequential jobs, "the wrong granularity" (plan §Design).
+
+    `node_mask` is the SECOND economy, and at whole-Mondo scale the bigger one. A
+    batched L-BFGS iteration is one pass only when every node accepts its first
+    trial step; with C≈3,800 independent Armijo tests sharing the pass, some node
+    is nearly always still backtracking, and the exp 0104 smoke paid ~26 full
+    passes per iteration for it. The solver therefore names the nodes whose stats
+    it does not already hold, and the kernels skip every other node's cells — so a
+    deep straggler costs a pass over ITS rows, not over all 56M cells. Masked-out
+    rows of the result are exactly zero (the contract: the caller owns merging
+    them with the values it holds), and an all-True mask is normalized to `None`
+    so the unmasked path stays literally the pre-mask code.
 
     Lifecycle, deliberately explicit:
 
@@ -907,21 +945,35 @@ class SparkStatsFn:
         self._rdd.count()                       # materialize before the first pass
         self._closed = False
 
-    def __call__(self, W_std, b_std):
+    def __call__(self, W_std, b_std, node_mask=None):
         V, b_raw = self._fold(np.asarray(W_std, dtype=np.float64),
                               np.asarray(b_std, dtype=np.float64), self.mu, self.sd)
         V = np.ascontiguousarray(V, dtype=np.float64)
         b_raw = np.ascontiguousarray(b_raw, dtype=np.float64)
+        keep = None
+        if node_mask is not None:
+            keep = np.ascontiguousarray(np.asarray(node_mask, dtype=bool))
+            if keep.shape != (self.C,):
+                raise ValueError(
+                    f"node_mask shape {keep.shape} != ({self.C},)")
+            if keep.all():
+                keep = None                     # nothing to skip: the plain pass
         sc = self._rdd.context
-        bcast = sc.broadcast((V, b_raw))
+        # The mask rides IN the parameter broadcast rather than in a second one:
+        # it changes on every trial exactly as (V, b_raw) do, and it is (C,) bools
+        # against ~87 MB of parameters, so a separate broadcast would only add a
+        # round trip per pass.
+        bcast = sc.broadcast((V, b_raw, keep))
         try:
             C, K = self.C, self.K
 
             def _local(packed, _b=bcast, _C=C, _K=K, _m=self._topm):
-                V_, b_ = _b.value
+                V_, b_, keep_ = _b.value
                 if _m > 0:
-                    return [_sparse_stats_kernel(packed, V_, b_, _C, _K)]
-                return [_stats_kernel(_dense_triples(packed, _C), V_, b_, _C, _K)]
+                    return [_sparse_stats_kernel(packed, V_, b_, _C, _K,
+                                                 node_mask=keep_)]
+                return [_stats_kernel(_dense_triples(packed, _C), V_, b_, _C, _K,
+                                      node_mask=keep_)]
 
             def _combine(a, b):
                 return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
@@ -954,8 +1006,9 @@ def make_spark_stats_fn(scored_df, C, K, mu, sd, *, fold_standardization,
                         storage_level=None, topm=0):
     """Build the batched-L-BFGS stats oracle over `scored_df`. See `SparkStatsFn`.
 
-    Returned object is callable as `stats_fn(W_std, b_std)` and MUST be `close()`d
-    (or used as a context manager) to release the persisted projection.
+    Returned object is callable as `stats_fn(W_std, b_std, node_mask=None)` and
+    MUST be `close()`d (or used as a context manager) to release the persisted
+    projection.
 
     `topm > 0` fits on top-m truncated θ; `mu`/`sd` must then come from a
     `masked_moments` call with the SAME `topm`.

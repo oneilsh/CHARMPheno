@@ -38,6 +38,13 @@ Seven gates:
      stops instead of crawling out `max_iter`, an explicit zero `x0` is the cold
      path bit for bit, and a masked node stays a no-op only because its `x0` row
      is zeroed.
+  8. **Masked passes + interpolated backtracking**, the two changes that made a
+     whole-Mondo solve affordable. `node_mask` is exact (masked-in rows equal an
+     unmasked pass, masked-out rows are zero); a solve whose seam HONOURS the
+     mask returns what a solve whose seam ignores it returns, while evaluating
+     far fewer node-cells; and on a fixture engineered to backtrack the new trial
+     schedule reaches the same converged answer in a fraction of the passes the
+     halving schedule needed.
 
 **On the reference's tolerance.** The oracle is fit here with ``tol=1e-8``
 instead of sklearn's default ``tol=1e-4``. This is a statement about the ORACLE,
@@ -699,3 +706,180 @@ def test_masked_node_freezes_only_when_its_warm_start_row_is_zero():
         "a masked node with a stale warm-start row must be seen to iterate — "
         "if this ever passes trivially the ridge argument above has changed"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 8. masked trial passes + interpolated backtracking                           #
+# --------------------------------------------------------------------------- #
+def _counting_stats_fn(Pi, y, obs, mu, sd, *, honor_mask=True):
+    """`make_inmemory_stats_fn` behind a per-call NODE-CELL counter.
+
+    Returns `(stats_fn, log)` where `log["cells"]` accumulates the observed cells
+    this seam actually EVALUATED and `log["full_cells"]` what the same calls would
+    have cost with no masking at all. `n_obs` per node is the right unit because
+    the Spark kernels' cost is per (doc, node) cell, not per call.
+
+    `honor_mask=False` is the deliberately lazy but CONTRACT-LEGAL implementation:
+    it ignores the mask and returns every row, which a caller is allowed to do
+    because the solver reads only masked-in rows. It is the control the exactness
+    test needs — the same solve, driven by a seam that never skips anything.
+    """
+    base = make_inmemory_stats_fn(Pi, y, obs, mu, sd)
+    n_obs = np.asarray(obs, dtype=np.float64).sum(axis=0)
+    log = {"calls": 0, "cells": 0.0, "full_cells": 0.0}
+
+    def stats_fn(W_std, b_std, node_mask=None):
+        keep = (np.ones(n_obs.size, dtype=bool)
+                if (node_mask is None or not honor_mask)
+                else np.asarray(node_mask, dtype=bool))
+        log["calls"] += 1
+        log["cells"] += float(n_obs[keep].sum())
+        log["full_cells"] += float(n_obs.sum())
+        return base(W_std, b_std, node_mask=(node_mask if honor_mask else None))
+
+    return stats_fn, log
+
+
+def _badly_scaled_problem(seed=0, D=1500, K=10, C=12, decades=2.5):
+    """A batch whose per-node curvature spans five decades — the backtracking case.
+
+    The readout's real fits run in STANDARDIZED coordinates precisely so this does
+    not happen, but the whole-Mondo batch reproduces the effect anyway: 3,000+
+    nodes with wildly different observed-row counts and base rates means SOME node
+    is always the one whose first trial step overshoots, and every trial is a
+    shared pass. Here the effect is manufactured directly by handing the stats seam
+    a per-node `sd` spanning `10^±decades`, which is a legitimate standardized
+    problem (the fold is exact for any positive `sd`) that simply is not the
+    well-conditioned one. Returns the pieces `solve_batched_lr` needs, so the two
+    schedules can be compared on identical arithmetic.
+    """
+    rng = np.random.default_rng(seed)
+    Pi = rng.dirichlet(np.full(K, 0.4), size=D)
+    W_true = rng.standard_normal((C, K)) * 3.0
+    z = Pi @ W_true.T + rng.standard_normal(C)
+    y = (rng.random(z.shape) < 1.0 / (1.0 + np.exp(-z))).astype(np.float64)
+    obs = rng.random((D, C)) < 0.8
+    mu = np.zeros((C, K))
+    sd = np.repeat(np.logspace(-decades, decades, C)[:, None], K, axis=1)
+    return Pi, y, obs, mu, sd, K, C
+
+
+# The halving schedule's cost on `_badly_scaled_problem()` at (gtol=1e-6,
+# max_iter=300), measured on the pre-change solver (git d5b2a34) — the fixture is
+# deterministic, so this is a pinned observation, not a moving target. Both
+# schedules converge all 12 nodes to the same optimum; what differs is how many
+# shared passes the line searches spend getting there.
+_HALVING_SCHEDULE_PASSES = 192
+
+
+def test_node_mask_is_exact_on_the_masked_in_rows():
+    """A masked pass returns the unmasked pass's rows, and zeros everywhere else.
+
+    This is the contract the solver's bookkeeping rests on: it merges masked
+    results with values it already holds, so a masked row that differed from the
+    unmasked one — by so much as a rounding difference in the summation order —
+    would put the batch on a subtly different trajectory than the one the
+    sklearn-oracle gates measure. The distributed kernels are held to the same
+    equality in `tests/scripts/test_distributed_readout.py`.
+    """
+    p = _readout_problem()
+    Pi, y, obs, C, K = p["Pi"], p["y"], p["obs"], p["C"], p["K"]
+    mu, sd, _ = standardization_moments(Pi, obs)
+    stats_fn = make_inmemory_stats_fn(Pi, y, obs, mu, sd)
+
+    rng = np.random.default_rng(5)
+    W = rng.standard_normal((C, K)) * 0.4
+    b = rng.standard_normal(C) * 0.4
+    full = stats_fn(W, b)
+    assert all(np.array_equal(a, b_) for a, b_ in zip(full, stats_fn(W, b, None)))
+
+    keep = np.zeros(C, dtype=bool)
+    keep[[0, 3, 5, 9]] = True                    # dense, sparse, rare, moderate
+    masked = stats_fn(W, b, node_mask=keep)
+    for got, want in zip(masked, full):          # (C,) loss, (C,K) gW, (C,) gb
+        got, want = np.asarray(got), np.asarray(want)
+        assert np.abs(got[keep] - want[keep]).max() < 1e-12
+        assert np.abs(got[~keep]).max() == 0.0
+
+    # an all-True mask is the unmasked pass, exactly (the `None` fast path)
+    allin = stats_fn(W, b, node_mask=np.ones(C, dtype=bool))
+    for got, want in zip(allin, full):
+        assert np.array_equal(got, want)
+
+
+def test_masking_frozen_and_searching_nodes_is_free_of_charge():
+    """Honouring the mask evaluates far fewer node-cells, and changes no answer.
+
+    Two solves of the same problem differing ONLY in whether the seam acts on the
+    `node_mask` it is handed. The parameters must come out identical — masking is
+    bookkeeping over rows the solver never reads — while the honouring run pays for
+    a fraction of the node-cells, because nodes freeze as they converge and the
+    line search's later trials concern a shrinking set. That gap IS the whole-Mondo
+    saving: at C≈3,800 the late passes were re-reading 56M cells to move a handful
+    of stragglers.
+    """
+    p = _readout_problem()
+    Pi, y, obs, C, K = p["Pi"], p["y"], p["obs"], p["C"], p["K"]
+    degen, _ = _degenerate_mask(y, obs)
+    obs_fit = obs.copy()
+    obs_fit[:, degen] = False
+    mu, sd, _ = standardization_moments(Pi, obs_fit)
+
+    masked_fn, masked_log = _counting_stats_fn(Pi, y, obs_fit, mu, sd)
+    plain_fn, plain_log = _counting_stats_fn(Pi, y, obs_fit, mu, sd,
+                                             honor_mask=False)
+    W_m, b_m, info_m = solve_batched_lr(masked_fn, C, K, gtol=1e-6)
+    W_p, b_p, info_p = solve_batched_lr(plain_fn, C, K, gtol=1e-6)
+
+    assert np.array_equal(W_m, W_p) and np.array_equal(b_m, b_p)
+    assert info_m["n_stats_calls"] == info_p["n_stats_calls"]
+    assert np.array_equal(info_m["n_iter"], info_p["n_iter"])
+    # the counters agree with the solver's own accounting of what it asked for
+    assert masked_log["calls"] == int(info_m["n_stats_calls"])
+    assert info_m["n_node_evals"] < info_m["n_stats_calls"] * C
+    # ...and the work really did shrink. 0.5 is generous: the measured ratio on
+    # this fixture is ~0.33, and freezing alone accounts for most of it.
+    assert plain_log["cells"] == plain_log["full_cells"]     # the control pays full
+    assert masked_log["cells"] < 0.5 * plain_log["cells"], (
+        f"{masked_log['cells']:.0f} of {plain_log['cells']:.0f} cells")
+
+
+def test_interpolated_backtracking_cuts_the_pass_count():
+    """The same converged answer, in well under half the halving schedule's passes.
+
+    The Armijo ACCEPTANCE rule is untouched by interpolation, so this cannot be a
+    test that the answer changed — it is a test that the trial SCHEDULE reaches an
+    acceptable step sooner. On a batch whose per-node scales span five decades the
+    old schedule needed one trial per factor of two of overshoot, each one a full
+    shared data pass; the quadratic model reads the overshoot off the failed trial
+    instead. The pinned baseline is the pre-change solver's own measured count on
+    this exact fixture.
+    """
+    Pi, y, obs, mu, sd, K, C = _badly_scaled_problem()
+    stats_fn = make_inmemory_stats_fn(Pi, y, obs, mu, sd)
+    W, b, info = solve_batched_lr(stats_fn, C, K, gtol=1e-6, max_iter=300)
+
+    # Every node stops (some on `gtol`, some on the summed loss's roundoff floor —
+    # a badly scaled node's |F| ~ n puts that floor above 1e-6, which is exactly
+    # what `stalled` is for), and the answer is checked against sklearn below
+    # rather than against a gradient threshold neither solver can reach here.
+    assert info["converged"].all(), info["grad_inf_norm"]
+    assert info["n_stats_calls"] < 0.6 * _HALVING_SCHEDULE_PASSES, (
+        f"{int(info['n_stats_calls'])} passes vs the halving schedule's "
+        f"{_HALVING_SCHEDULE_PASSES}")
+    # masking compounds with it: the passes that remain are mostly narrow ones.
+    assert info["n_node_evals"] < 0.5 * info["n_stats_calls"] * C
+
+    # The converged point is the optimum either way — pinned against the sklearn
+    # oracle fit in THIS fixture's (deliberately bad) standardized basis, node by
+    # node. Every node here sees both classes, so no degenerate-node machinery is
+    # involved and the comparison is solver-vs-solver on one objective.
+    V, b_raw = fold_standardization(W, b, mu, sd)
+    for c in range(C):
+        rows = np.flatnonzero(obs[:, c])
+        Xs = (Pi[rows] - mu[c]) / sd[c]
+        lr = LogisticRegression(max_iter=1000, tol=_SK_TOL, fit_intercept=True)
+        lr.fit(Xs, y[rows, c])
+        z_ours = Pi[rows] @ V[c] + b_raw[c]
+        z_ref = Xs @ lr.coef_[0] + lr.intercept_[0]
+        assert np.abs(z_ours - z_ref).max() < 1e-3, c

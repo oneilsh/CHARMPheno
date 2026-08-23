@@ -13,6 +13,20 @@ m∈{64,128,256,512}) so the flag (`readout_theta_topm`, default off) is only en
 the data's concentration supports it — per-row selection, deliberately NOT a global
 feature subset or PCA, both of which would compress exactly the rare-tail axes. Details in
 `distributed_readout.py`'s module docstring; decision rule in exp 0104's front matter.
+
+**v2.3 addendum (2026-08-22):** whole-Mondo also broke the PASS-COUNT assumption — the
+shared-pass Armijo backtracker averaged ~26 passes/iteration at C=3,057 (vs ~1.5-6 at
+C=437): the per-iteration straggler's backtrack depth grows with C and every trial
+charged a full pass. Two exact fixes: (1) the stats seam grew `node_mask` — backtrack
+trials 2+ and all passes for frozen nodes evaluate ONLY the still-searching nodes' cells
+(bookkeeping, not approximation: accepted/frozen nodes' F/G are already cached; measured
+0.16× data touched); (2) safeguarded quadratic-interpolation backtracking replaces blind
+halving (typical depth 25 → 2-4; the Armijo ACCEPTANCE rule is unchanged, so converged
+solutions are unchanged and the sklearn-oracle equality tests remain the contract;
+measured 0.43× passes). Alongside: the driver now SAVES the fit (npz + fit-only
+manifest) before any readout, so a readout death no longer costs the fit — the
+gcsfuse-era lesson (see exp 0104's run log for the ENOSPC/append-batching story)
+generalized into the run lifecycle.
 **Context:** the scale-back handoff (`docs/reports/2026-08-20-pc-arc-closeout-…`) makes the
 unsup gate + post-hoc readout LR the model-of-use and flags the readout's driver-side
 θ-collect as "the one thing to watch" at whole-Mondo. This plan promotes it from watch item

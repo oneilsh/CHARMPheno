@@ -554,6 +554,49 @@ def _dump_partial_results(out, results, name="results_partial.json"):
     tmp.replace(out / name)
 
 
+def _save_fit(out, gp, C, manifest_fields, *, results=None, domain_mass=None,
+              partial=None):
+    """Write `<out>/gated_pc_result.npz` + `manifest.json`. Called TWICE per run.
+
+    **Why twice.** The fit is the expensive, unrepeatable half — hours of CAVI at
+    whole-Mondo K — and the readout that follows it is the FRAGILE half: it is
+    where the driver collects, the second batched solve and the ECE diagnostic
+    live, and where the 0104 smokes died repeatedly. Writing the model only at the
+    very end meant every readout death also threw away the fit, so recovery meant
+    re-running the fit instead of re-running `gated_pc_readout` against it. So the
+    first call lands the npz plus a manifest carrying everything the fit itself
+    determines (`results=None`, `partial="fit-only"`) the moment the fit
+    completes, and the final call OVERWRITES both at the same paths with the full
+    record. The final write stays authoritative; the early one is a floor.
+
+    `partial` is the marker a reader checks before trusting `results`:
+    `"fit-only"` means the arms had not been scored yet. It is set to `None` by
+    the final write, so a finished run's manifest is exactly what it always was
+    apart from that one explicit null.
+
+    `gp` is `pc_model.result.global_params`. Multi-domain λ is a per-domain dict,
+    which `np.savez` cannot store — it goes out as `lambda_0, lambda_1, ...`, as
+    it always has; a single-domain run saves the one `lambda` array.
+    """
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    lam = gp["lambda"]
+    if isinstance(lam, dict):
+        lam_arrays = {f"lambda_{m}": lam[m] for m in sorted(lam)}
+    else:
+        lam_arrays = {"lambda": lam}
+    np.savez(out / "gated_pc_result.npz",
+             **lam_arrays, alpha=gp["alpha"], w_CK=gp["w_CK"],
+             b_CK=np.asarray(gp.get("b_CK", np.zeros(C)), dtype=np.float64))
+    manifest = dict(manifest_fields)
+    manifest["per_node_domain_mass"] = (
+        {str(k): v for k, v in domain_mass.items()} if domain_mass else None)
+    manifest["results"] = results
+    manifest["partial"] = partial
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
+
+
 def dag_closure_parents(parent_int, C):
     """Length-C list of parent-LABEL-index lists for the ungated DAG-closure head.
 
@@ -881,8 +924,14 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
             topic_col=topic_col, label_col=label_col, mask_col=mask_col,
             depth=depth, topm=theta_topm) as stats_fn:
 
-        def _fittable_stats(W_std, b_std, _f=stats_fn, _keep=keep):
-            loss, gW, gb = _f(W_std, b_std)
+        def _fittable_stats(W_std, b_std, node_mask=None, _f=stats_fn, _keep=keep):
+            # `node_mask` passes STRAIGHT THROUGH to the pass (the solver uses it
+            # to skip nodes whose stats it already holds) and composes with the
+            # degenerate zeroing without interacting with it: masking decides
+            # which cells are READ, `keep` decides which rows are ZEROED, and a
+            # zeroed row is zero either way. Dropping the argument here would
+            # silently re-inflate every trial pass back to all C heads.
+            loss, gW, gb = _f(W_std, b_std, node_mask=node_mask)
             return (np.where(_keep, loss, 0.0),
                     np.where(_keep[:, None], gW, 0.0),
                     np.where(_keep, gb, 0.0))
@@ -900,8 +949,14 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
                 return
             # Degenerate nodes converge (grad exactly 0) at iteration 0; report
             # progress over the FITTABLE nodes so the fraction reads as work left.
+            # `nodes/pass` is the cost that moves now that trial passes are masked
+            # to the nodes still searching: a deep line search shows up as extra
+            # passes over FEW nodes, which reads very differently from extra
+            # passes over all C.
             print(f"[driver]   {_tag}batched L-BFGS iter {p['iter']}: "
-                  f"{p['n_stats_calls']} data passes, "
+                  f"{p['n_stats_calls']} data passes "
+                  f"(avg {p['n_node_evals'] / max(p['n_stats_calls'], 1):.0f} "
+                  f"nodes/pass), "
                   f"{max(0, p['n_converged'] - _ndeg)}/{_nfit} converged, "
                   f"{p['n_active']} active, max|grad|={p['max_grad_inf_norm']:.3g}, "
                   f"{time.time() - _t0:.0f}s elapsed", flush=True)
@@ -914,7 +969,9 @@ def _fit_readout_heads(train_scored, C, K, *, l2=1.0, gtol=_READOUT_GTOL,
     # `converged` = gtol OR the principled numerical stall; at gtol=1e-4 (sklearn's
     # own tol) every node should stop on the gradient, so a nonzero stalled count is
     # the diagnostic that the summed-loss roundoff floor was hit first.
-    print(f"[driver]   {tag}batched L-BFGS: {int(info['n_stats_calls'])} data passes, "
+    print(f"[driver]   {tag}batched L-BFGS: {int(info['n_stats_calls'])} data passes "
+          f"({int(info['n_node_evals'])} node-passes, "
+          f"{info['n_node_evals'] / max(int(info['n_stats_calls']), 1):.0f} avg), "
           f"{int(info['converged'][keep].sum())}/{int(keep.sum())} converged "
           f"({int(info['converged_gtol'][keep].sum())} gtol, "
           f"{int(info['stalled'][keep].sum())} stalled), max|grad|={gmax:.3g}, "
@@ -1776,11 +1833,70 @@ def main() -> int:
                 flush=True)
             return cond
 
+        # Every manifest field the FIT determines, built once and reused by both
+        # saves below — the early fit-only write and the final authoritative one.
+        # Keeping it in one dict is what makes "the same manifest, plus results"
+        # true by construction rather than by two lists staying in sync.
+        manifest_fields = {
+            "model_class": "gated_pc",
+            "disease": args.disease, "min_n": args.min_n,
+            "strip_mode": args.strip_mode, "label_mask_mode": args.label_mask_mode,
+            "window_mode": args.window_mode, "lookback_days": args.lookback_days,
+            "label_window_days": args.label_window_days,
+            "n_bg": args.n_bg, "tpn": args.tpn, "K": lay.K, "C": C,
+            "weight_y": args.weight_y, "head_optimizer": args.head_optimizer,
+            "head_l2": args.head_l2, "head_lr": args.head_lr,
+            "weight_y_warmup_iters": args.weight_y_warmup_iters,
+            "grad_cavi_iters": args.grad_cavi_iters, "topic_trust": args.topic_trust,
+            "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
+            "kappa": args.kappa, "max_iter": args.max_iter,
+            "min_label_count": args.min_label_count,
+            "readout_mode": readout_mode,
+            "readout_sample_frac": (1.0 if readout_mode == "distributed"
+                                    else args.readout_sample_frac),
+            # Both change WHAT was fit / what was reported, so they belong in the
+            # manifest next to the mode: a top-m readout is a narrower model, and
+            # a calibration-skipped run has no ECE record at all.
+            "readout_theta_topm": theta_topm,
+            "readout_calibration": "on" if run_calibration else "off",
+            "recall_targets": args._recall_targets,
+            "fdr_targets": args._fdr_targets,
+            "with_dag_head": args.with_dag_head,
+            "skip_unsup_gated": args.skip_unsup_gated,
+            "extra_domains": list(extra_domains),
+            "domain_names": args._domain_names,
+            "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
+            "ledger": bundle.ledger,
+            # Corpus params — ALL of the bundle cache-key inputs, so a post-hoc
+            # gated_pc_readout can recompute the exact key + reload the bundle
+            # (doc_min_length + emit_labels are required by the key; recording
+            # them here removes the lr_readout-style fragility).
+            "corpus_manifest": {
+                "cdr": args.cdr, "source_table": args.source_table,
+                "person_mod": args.person_mod, "vocab_size": args.vocab_size,
+                "min_df": args.min_df, "min_patient_count": args.min_patient_count,
+                "doc_min_length": args.doc_min_length,
+                "prior_obs_days": args.prior_obs_days, "window_days": args.window_days,
+                "holdout_frac": args.holdout_frac, "emit_labels": True,
+                "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
+                "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()}},
+        }
+
         with _phase(f"gated_pc fit (weightY={args.weight_y}, K={lay.K})"):
             pc_est = _build_pc_estimator(args, weight_y=args.weight_y, gated=True)
             if args.eval_every > 0:
                 pc_est.setOnIteration(_make_eval_logger(bundle, C, args))
             pc_model = pc_est.fit(bundle.train_df)
+            # EARLY SAVE, before any readout work touches the cluster: the fit is
+            # the hours-long unrepeatable half and the readout is where runs die,
+            # so the model reaches durable storage the moment it exists. The final
+            # save overwrites these same two paths with the full record; until it
+            # does, `partial="fit-only"` says so and `gated_pc_readout` can score
+            # this run from the npz alone.
+            _save_fit(out, pc_model.result.global_params, C, manifest_fields,
+                      partial="fit-only")
+            print(f"[driver]   saved FIT-ONLY result to {out} (readout pending; "
+                  "re-scoreable with gated_pc_readout)", flush=True)
             if args.diag_only:
                 # FAST head-starvation probe: skip every θ-collect / readout / baseline
                 # (the slow part) and just read the fitted head. The per-iter ||grad_y||
@@ -2128,66 +2244,11 @@ def main() -> int:
                 flush=True)
 
         with _phase("save"):
-            out = Path(args.out_dir)
-            out.mkdir(parents=True, exist_ok=True)
-            # Multi-domain: λ is a per-domain dict — save one array per domain
-            # (lambda_0, lambda_1, ...) since np.savez cannot store a dict; single
-            # domain saves the one `lambda` array as before.
-            lam = gp["lambda"]
-            if isinstance(lam, dict):
-                lam_arrays = {f"lambda_{m}": lam[m] for m in sorted(lam)}
-            else:
-                lam_arrays = {"lambda": lam}
-            np.savez(out / "gated_pc_result.npz",
-                     **lam_arrays, alpha=gp["alpha"], w_CK=gp["w_CK"],
-                     b_CK=np.asarray(gp.get("b_CK", np.zeros(C)), dtype=np.float64))
-            manifest = {
-                "model_class": "gated_pc",
-                "disease": args.disease, "min_n": args.min_n,
-                "strip_mode": args.strip_mode, "label_mask_mode": args.label_mask_mode,
-                "window_mode": args.window_mode, "lookback_days": args.lookback_days,
-                "label_window_days": args.label_window_days,
-                "n_bg": args.n_bg, "tpn": args.tpn, "K": lay.K, "C": C,
-                "weight_y": args.weight_y, "head_optimizer": args.head_optimizer,
-                "head_l2": args.head_l2, "head_lr": args.head_lr,
-                "weight_y_warmup_iters": args.weight_y_warmup_iters,
-                "grad_cavi_iters": args.grad_cavi_iters, "topic_trust": args.topic_trust,
-                "subsampling_rate": args.subsampling_rate, "tau0": args.tau0,
-                "kappa": args.kappa, "max_iter": args.max_iter,
-                "min_label_count": args.min_label_count,
-                "readout_mode": readout_mode,
-                "readout_sample_frac": (1.0 if readout_mode == "distributed"
-                                        else args.readout_sample_frac),
-                # Both change WHAT was fit / what was reported, so they belong in the
-                # manifest next to the mode: a top-m readout is a narrower model, and
-                # a calibration-skipped run has no ECE record at all.
-                "readout_theta_topm": theta_topm,
-                "readout_calibration": "on" if run_calibration else "off",
-                "recall_targets": args._recall_targets,
-                "fdr_targets": args._fdr_targets,
-                "with_dag_head": args.with_dag_head,
-                "skip_unsup_gated": args.skip_unsup_gated,
-                "extra_domains": list(extra_domains),
-                "domain_names": args._domain_names,
-                "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
-                "per_node_domain_mass": (
-                    {str(k): v for k, v in domain_mass.items()} if domain_mass else None),
-                "results": results, "ledger": bundle.ledger,
-                # Corpus params — ALL of the bundle cache-key inputs, so a post-hoc
-                # gated_pc_readout can recompute the exact key + reload the bundle
-                # (doc_min_length + emit_labels are required by the key; recording
-                # them here removes the lr_readout-style fragility).
-                "corpus_manifest": {
-                    "cdr": args.cdr, "source_table": args.source_table,
-                    "person_mod": args.person_mod, "vocab_size": args.vocab_size,
-                    "min_df": args.min_df, "min_patient_count": args.min_patient_count,
-                    "doc_min_length": args.doc_min_length,
-                    "prior_obs_days": args.prior_obs_days, "window_days": args.window_days,
-                    "holdout_frac": args.holdout_frac, "emit_labels": True,
-                    "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
-                    "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()}},
-            }
-            (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
+            # The authoritative write: the SAME two paths the fit-only save
+            # already landed, now carrying every arm's readout (and the per-node
+            # domain mass, which needed no readout but is reported next to it).
+            _save_fit(out, gp, C, manifest_fields, results=results,
+                      domain_mass=domain_mass)
             print(f"[driver]   saved gated_pc result to {out}", flush=True)
     return 0
 

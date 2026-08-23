@@ -355,6 +355,17 @@ def main(argv=None) -> int:
             train_scored.unpersist(); test_scored.unpersist()
 
             # Echo the other arms' stored summary (only gated_pc can be re-scored).
+            # `results` is legitimately absent-or-null on a FIT-ONLY manifest:
+            # `gated_pc_cloud` writes the npz + manifest as soon as the fit lands
+            # (`partial="fit-only"`) so a readout death cannot cost the fit, which
+            # is precisely the run this tool exists to rescue — so say what is
+            # missing rather than echoing nothing, and never index into it.
+            if manifest.get("partial"):
+                print(f"[readout]   manifest marked partial="
+                      f"{manifest['partial']!r}: the fit landed but its own "
+                      "readout did not, so there are no stored arm results to "
+                      "echo (the numbers above are this re-readout's).",
+                      flush=True)
             for name, res in (manifest.get("results") or {}).items():
                 if name in ("gated_pc", "gated_pc_head"):
                     continue
