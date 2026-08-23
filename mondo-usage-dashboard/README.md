@@ -58,7 +58,11 @@ any term for its MONDO/OMOP links, parents/children, and multi-mapping detail.
 **Graph interactions:** click to expand + select and pan-to-center; selecting a node
 reveals and highlights its **ancestor lineage** (accent) and **descendants** (blue),
 dimming the rest; **hover** peeks the same without committing; **shift-click** (or the
-⌖ button) **focuses/re-roots** on a node. Nodes are colored **by top-level Mondo class
+⌖ button) **focuses/re-roots** on a node; **✕** (on hover) hides a node/branch to
+declutter (Reset restores); clicking empty canvas clears the selection. Wide fan-outs
+show the top few and bottom few by prevalence with **＋N more** between (reveals 10 at
+a time). Typing in the search box **marks the matching text** in labels here and in
+the other views. Nodes are colored **by top-level Mondo class
 (≈ body system)** — a colorblind-safe Okabe-Ito palette, toggle to color by usage —
 so drilling into one class reads as a coherent hue family. A ✦ marks **rare-disease**
 terms (Mondo's GARD/Orphanet/NORD designations); the "Rare used" KPI counts how many

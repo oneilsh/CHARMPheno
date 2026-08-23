@@ -198,6 +198,10 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 .gbadge{fill:var(--surface);stroke:var(--ink-2);stroke-width:1.4}
 .gbadge-sign{stroke:var(--ink-2);stroke-width:1.6;stroke-linecap:round;fill:none}
 .grare{fill:var(--rare);font-weight:700;paint-order:stroke;stroke:var(--surface);stroke-width:2.6px;pointer-events:none}
+.gclose{opacity:0;pointer-events:none;transition:opacity .12s;cursor:pointer}
+.gnode:hover .gclose{opacity:1;pointer-events:auto}
+.gclose-bg{fill:var(--surface);stroke:var(--collision);stroke-width:1.3}
+.gclose-x{stroke:var(--collision);stroke-width:1.7;stroke-linecap:round;fill:none}
 /* lineage highlight: ancestors (accent) + descendants (--desc) stay lit, rest recede */
 .sel-active .gnode:not(.hl):not(.hld){opacity:.2}
 .sel-active .gmore{opacity:.2}
@@ -345,7 +349,7 @@ const fmtK=n=>{n=Math.round(n);return n<1000?(""+n):n<1e6?((n/1e3).toFixed(n<1e4
 const SMALL_NOMINAL=10;
 let DATA=null, byId=new Map(), kids=new Map(), dagKids=new Map(), roots=[], expanded=new Set(), selected=null;
 let ROLL_MAX=1, OWN_MAX=1, ROLL_EST_MAX=1;
-let graphOpen=new Set(["root"]), graphCap=new Map(), gz={x:24,y:24,k:0.85};
+let graphOpen=new Set(["root"]), graphCap=new Map(), graphHidden=new Set(), gz={x:24,y:24,k:0.85};
 let gBounds=null;   // last-layout bounds for Fit
 let gHL=new Set(), gHLD=new Set();  // selected + ancestors (hl) / visible descendants (hld)
 let gFocus=null, gPeek=null, gCoord=new Map();
@@ -388,7 +392,7 @@ function load(d){
   for(const [,arr] of dagKids) arr.sort(sortNodes);
   roots.sort(sortNodes);
   computeVisibleDesc(); computeRollup(); assignSystems();
-  graphOpen=new Set(["root"]); graphCap=new Map(); gz={x:24,y:24,k:0.85}; gLayer=null; gBounds=null;
+  graphOpen=new Set(["root"]); graphCap=new Map(); graphHidden=new Set(); gz={x:24,y:24,k:0.85}; gLayer=null; gBounds=null;
   gFocus=null; gHL=new Set(); gHLD=new Set(); gPeek=null;
   renderSource(); renderKPIs(); renderFilters();
   for(const id of roots) expanded.add(id);          // open first level
@@ -648,7 +652,7 @@ function graphCountText(id){const n=byId.get(id),min=DATA.meta.min_cell||20;
 // fan-out gets a synthetic "more:<parent>" node. Search overrides with matched∪ancestors.
 function graphVisible(){
   const vis=new Map(), q=state.q.toLowerCase();
-  const canShow=id=>{const n=byId.get(id);return !!n&&(n.kind==="root"||DATA._anyVis.get(id));};
+  const canShow=id=>{const n=byId.get(id);return !!n&&!graphHidden.has(id)&&(n.kind==="root"||DATA._anyVis.get(id));};
   if(q){const keep=searchSet(q); for(const id of keep) if(canShow(id)) vis.set(id,byId.get(id));
     if(byId.get("root"))vis.set("root",byId.get("root")); return vis;}
   const seeds=(gFocus&&byId.has(gFocus))?[gFocus]:(byId.get("root")?["root"]:roots);
@@ -777,9 +781,10 @@ function renderGraph(){
   }
   for(const [id,g] of gNodeEls){ if(!seenN.has(id)){ g.style.opacity=0;
     setTimeout(()=>{g.remove();},260); gNodeEls.delete(id); } }
-  $("#graph-hint").textContent=state.q
+  const hid=graphHidden.size?` · ${graphHidden.size} hidden (Reset to restore)`:"";
+  $("#graph-hint").textContent=(state.q
     ? `${vis.size} nodes matching “${state.q}” (paths shown)`
-    : `${vis.size} nodes · click = expand + select · shift-click = focus · hover = peek lineage`;
+    : `${vis.size} nodes · click = expand · shift-click = focus · hover = peek · ✕ hides`)+hid;
   renderLegend(); updateFocusChip();
 }
 function renderLegend(){
@@ -847,6 +852,13 @@ function buildNode(id,n){
   g.appendChild(svgEl("circle",{class:"gbadge",r:7,opacity:0}));
   g.appendChild(svgEl("path",{class:"gbadge-sign",opacity:0}));
   const rm=svgEl("text",{class:"grare","text-anchor":"middle",opacity:0}); rm.textContent="✦"; g.appendChild(rm);
+  const cl=svgEl("g",{class:"gclose"});                 // hover-only "hide this node" control
+  cl.appendChild(svgEl("circle",{class:"gclose-bg",r:7}));
+  cl.appendChild(svgEl("path",{class:"gclose-x"}));
+  cl.addEventListener("click",e=>{e.stopPropagation();
+    graphHidden.add(id); graphCollapse(id);
+    if(selected===id) closeDrawer(); else renderGraph();});
+  g.appendChild(cl);
   g.addEventListener("click",e=>{e.stopPropagation();
     if(e.shiftKey){ focusNode(id); return; }
     const hasKids=(dagKids.get(id)||[]).some(k=>DATA._anyVis.get(k));
@@ -878,6 +890,10 @@ function updateNode(g,id,n,c){
   rm.setAttribute("opacity",n.rare?1:0);
   rm.setAttribute("x",-bx); rm.setAttribute("y",-by+4);
   rm.setAttribute("font-size",Math.max(10,Math.min(15,c.r*0.9)));
+  const cx=bx, cy=-by;                         // hide control: top-right corner
+  g.querySelector(".gclose-bg").setAttribute("cx",cx); g.querySelector(".gclose-bg").setAttribute("cy",cy);
+  g.querySelector(".gclose-x").setAttribute("d",
+    `M${cx-2.6},${cy-2.6} L${cx+2.6},${cy+2.6} M${cx-2.6},${cy+2.6} L${cx+2.6},${cy-2.6}`);
 }
 function graphCollapse(id){graphOpen.delete(id);graphCap.delete(id);
   for(const c of (dagKids.get(id)||[])) if(graphOpen.has(c)) graphCollapse(c);}
@@ -1131,8 +1147,8 @@ document.querySelectorAll(".tabs:not(.mode-t) button").forEach(b=>b.onclick=()=>
   if(state.view==="graph") requestAnimationFrame(graphFit);
 });
 // graph controls + pan/zoom (listeners on the persistent svg, once)
-$("#g-collapse").onclick=()=>{graphOpen=new Set(["root"]);graphCap=new Map();gFocus=null;selected=null;closeDrawer();renderGraph();requestAnimationFrame(graphFit);};
-$("#g-reset").onclick=()=>{gFocus=null;renderGraph();gz={x:24,y:24,k:0.85};if(gLayer)applyGT(gLayer);};
+$("#g-collapse").onclick=()=>{graphOpen=new Set(["root"]);graphCap=new Map();graphHidden=new Set();gFocus=null;selected=null;closeDrawer();renderGraph();requestAnimationFrame(graphFit);};
+$("#g-reset").onclick=()=>{gFocus=null;graphHidden=new Set();renderGraph();gz={x:24,y:24,k:0.85};if(gLayer)applyGT(gLayer);};
 $("#g-fit").onclick=graphFit;
 $("#g-focus-clear").onclick=()=>clearFocus();
 document.querySelectorAll("#gcolor button").forEach(b=>b.onclick=()=>{
