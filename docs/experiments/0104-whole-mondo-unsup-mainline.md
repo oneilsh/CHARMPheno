@@ -208,7 +208,19 @@ main-fit L-BFGS burned ~26 passes/iter in iters 5-15 (heavy Armijo backtracking 
 C=3,057) — if that persists it strengthens the Wolfe-line-search case; watch the next
 smoke's passes/iter.
 
-**2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
+**2026-08-22 — smoke attempt 5 (gcsfuse fix in): sparse pass cost CONFIRMED (~18s/pass,
+was 65); the remaining wall is PASS COUNT.** Iters 3→10: 164 passes / 7 iterations ≈ 26
+passes/iter (vs ~1.5-6 at C=437) — the shared-pass Armijo backtracker pays a full pass
+whenever ANY of 3,057 nodes is still halving, and the per-iteration straggler depth grows
+with C. Two independent runs show the same profile: structural, not cluster noise. At this
+rate the 60-iter dev solve is ~7h despite the sparse kernels. Fix package in flight:
+(1) masked trial passes — trials 2+ (and every pass, for frozen nodes) evaluate only
+still-searching nodes' cells (exact bookkeeping; composes with the by-node kernel so late
+trials are nearly free); (2) safeguarded quadratic-interpolation backtracking (typical
+depth 25 → 2-4; Armijo acceptance rule unchanged, so converged solutions are unchanged);
+(3) the fit now SAVES (npz + fit-only manifest) immediately after the fit phase, before
+any readout — a readout death stops costing the fit, and gated-pc-readout can always
+resume. Run left grinding overnight as the first attempt with the ENOSPC cause fixed. (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
 **0.7584 AUC / 0.5428 AP over 241 nodes**, pooled conditional ECE 0.0028 (isotonic →
 0.0010). Since staging, the readout also gained warm starts + a CHARM_DEV cap of 60
