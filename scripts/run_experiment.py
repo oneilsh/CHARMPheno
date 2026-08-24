@@ -370,6 +370,7 @@ def build_mondo_usage_args(effective: dict, out_dir: str) -> list[str]:
         "--billing", billing,
         "--out", str(out_dir),
         "--source-table", str(effective.get("source_table", "condition_occurrence")),
+        "--count-space", str(effective.get("count_space", "standard")),
         "--min-cell", str(effective.get("min_cell", 20)),
         "--mondo-version", str(effective.get("mondo_version", "2026-06-02")),
         "--mondo-cache-dir", str(effective.get("mondo_cache_dir", "data/mondo")),
