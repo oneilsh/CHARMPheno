@@ -461,7 +461,8 @@ function renderSource(){
   if(sample){const b=el("span","badge-sample","SAMPLE DATA");s.appendChild(b);}
   const add=(k,v)=>{const w=el("span");w.innerHTML=`${k} <b>${v}</b>`;s.appendChild(w);};
   add("Mondo",m.mondo_version||"—"); add("CDR",m.cdr||"—");
-  add("source",m.source_table||"—"); add("roll-up",m.rollup?"yes":"none (exact map)");
+  add("source",m.source_table||"—"); add("count space",m.count_space||"standard");
+  add("roll-up",m.rollup?"yes":"none (exact map)");
   add("floor","&lt;"+(m.min_cell||20)); add("generated",m.generated_utc||"—");
 }
 
@@ -1023,14 +1024,18 @@ function renderTable(){
   rows.sort((a,b)=>{let av,bv;
     if(sortKey==="count"){av=sortVal(a);bv=sortVal(b);}
     else if(sortKey==="depth"){av=a.depth;bv=b.depth;}
+    else if(sortKey==="n_codes"){av=a.n_codes||0;bv=b.n_codes||0;}
     else{av=(a[sortKey]||"").toString().toLowerCase();bv=(b[sortKey]||"").toString().toLowerCase();}
     return av<bv?sortDir:av>bv?-sortDir:0;});
   const CAP=400, total=rows.length; rows=rows.slice(0,CAP);
-  const cols=[["label","Term"],["id","MONDO id"],["kind","Kind"],["category","Category"],["depth","Depth"],["count","Patients"]];
+  const hasCodes=DATA.nodes.some(n=>n.n_codes);
+  const cols=[["label","Term"],["id","MONDO id"],["kind","Kind"],["category","Category"],["depth","Depth"]]
+    .concat(hasCodes?[["n_codes","Codes"]]:[]).concat([["count","Patients"]]);
+  const numCol=k=>k==="count"||k==="depth"||k==="n_codes";
   const t=el("table"); const thead=el("thead"); const trh=el("tr");
   for(const [k,lab] of cols){const th=el("th",null,lab+(sortKey===k?(sortDir<0?" ↓":" ↑"):""));
-    if(k==="count"||k==="depth")th.style.textAlign="right";
-    th.onclick=()=>{if(sortKey===k)sortDir*=-1;else{sortKey=k;sortDir=(k==="count"||k==="depth")?-1:1;}renderTable();};trh.appendChild(th);}
+    if(numCol(k))th.style.textAlign="right";
+    th.onclick=()=>{if(sortKey===k)sortDir*=-1;else{sortKey=k;sortDir=numCol(k)?-1:1;}renderTable();};trh.appendChild(th);}
   thead.appendChild(trh);t.appendChild(thead);
   const tb=el("tbody");
   for(const n of rows){
@@ -1043,6 +1048,7 @@ function renderTable(){
     p.style.background="color-mix(in srgb,"+CATMAP[n.category].color+" 14%,transparent)";
     p.textContent=CATMAP[n.category].label;ct.appendChild(p);tr.appendChild(ct);
     tr.appendChild(numTd(n.depth));
+    if(hasCodes){const cc=numTd(n.n_codes||0);cc.style.color="var(--ink-2)";tr.appendChild(cc);}
     const c=el("td","num");c.textContent=n.state==="reported"?fmt(n.count):n.state==="used_small"?"<"+(DATA.meta.min_cell||20):"0";
     c.style.color=n.state==="reported"?"var(--cat-reported)":n.state==="used_small"?"var(--cat-used-small)":"var(--muted)";
     tr.appendChild(c);
@@ -1075,7 +1081,7 @@ function select(id,fromFocus){
   html+=`<dl class="kv" style="margin-top:14px">
     <dt>Patients</dt><dd style="font-size:15px;color:${n.state==="reported"?cat.color:"var(--ink)"}">${disp}</dd>
     <dt>MONDO id</dt><dd>${purl?`<a href="${purl}" target="_blank" rel="noopener">${n.id}</a>`:n.id}</dd>
-    <dt>Std concepts</dt><dd>${(n.std_concepts||[]).map(c=>`<a href="https://athena.ohdsi.org/search-terms/terms/${c}" target="_blank" rel="noopener">${c}</a>`).join(", ")||"—"}</dd>
+    ${codesRow(n)}
   </dl>`;
   const rr=DATA._roll&&DATA._roll.get(id);
   if(rr && (kids.get(id)||[]).length){
@@ -1118,6 +1124,18 @@ function revealInTree(id){let cur=id;const path=[];while(cur){const n=byId.get(c
 function closeDrawer(){selected=null;$("#drawer").classList.remove("open");$("#drawer").setAttribute("aria-hidden","true");
   if(state.view==="tree")renderTree();else if(state.view==="table")renderTable();else if(state.view==="graph")renderGraph();}
 const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const athena=id=>`https://athena.ohdsi.org/search-terms/terms/${id}`;
+function codesRow(n){
+  if(n.codes && n.codes.length){                    // source-space: real source codes
+    const byv=Object.entries(n.codes_by_vocab||{}).map(([v,c])=>`${c} ${v}`).join(" · ");
+    const list=n.codes.slice(0,24).map(c=>{const t=`${c.vocab} ${esc(String(c.code))}`;
+      return c.id?`<a href="${athena(c.id)}" target="_blank" rel="noopener" title="${c.vocab}">${t}</a>`:`<span title="${c.vocab}">${t}</span>`;}).join(", ");
+    return `<dt>Codes (${n.n_codes||n.codes.length})</dt><dd>${list}${n.codes.length>24?` +${n.codes.length-24}`:""}`+
+      (byv?`<div style="color:var(--muted);margin-top:3px">${byv}</div>`:"")+`</dd>`;
+  }
+  const std=(n.std_concepts||[]);                   // standard-space fallback
+  return `<dt>Std concepts</dt><dd>${std.map(c=>`<a href="${athena(c)}" target="_blank" rel="noopener">${c}</a>`).join(", ")||"—"}</dd>`;
+}
 function hlMatch(text,q){                  // HTML-escaped text with <mark> around query matches
   text=String(text); if(!q) return esc(text);
   const low=text.toLowerCase(); let out="",pos=0,k;

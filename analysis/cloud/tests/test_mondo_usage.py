@@ -107,6 +107,26 @@ def test_rare_flag_passthrough_and_stats():
     assert p["stats"]["rare_used_terms"] == 1     # only R is used (RU has 0 patients)
 
 
+def test_code_multiplicity_passthrough_and_stats():
+    rows = [
+        {"mondo_id": "MONDO:A", "label": "a", "is_internal": False, "parents": [],
+         "std_concepts": [1, 2], "n_persons": 40, "collision_siblings": [],
+         "codes": [{"id": 11, "vocab": "SNOMED", "code": "x"},
+                   {"id": 22, "vocab": "ICD10CM", "code": "y"}],
+         "n_codes": 2, "codes_by_vocab": {"SNOMED": 1, "ICD10CM": 1}},
+        {"mondo_id": "MONDO:B", "label": "b", "is_internal": False, "parents": [],
+         "std_concepts": [3], "n_persons": 25, "collision_siblings": [],
+         "codes": [{"id": 33, "vocab": "SNOMED", "code": "z"}],
+         "n_codes": 1, "codes_by_vocab": {"SNOMED": 1}},
+    ]
+    p = m.assemble_payload(meta={}, term_rows=rows)
+    by = {n["id"]: n for n in p["nodes"]}
+    assert by["MONDO:A"]["n_codes"] == 2 and by["MONDO:A"]["codes_by_vocab"]["ICD10CM"] == 1
+    assert len(by["MONDO:A"]["codes"]) == 2
+    assert p["stats"]["total_codes"] == 3            # 2 + 1
+    assert p["stats"]["multi_code_terms"] == 1       # only A maps >1 code
+
+
 def test_used_branch_category_for_zero_count_ancestor():
     # A 0-count internal ancestor that sits ABOVE a used leaf is "used_branch",
     # not "other".

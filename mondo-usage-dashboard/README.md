@@ -86,3 +86,17 @@ the export flags terms that share a standard concept via OMOP `Maps to`). Counts
 1–19 render as `<20` (AoU rule); only per-term floored counts are published, so
 nothing can be differenced back to a suppressed cell. See `docs/insights/0075` and
 `docs/experiments/0105-mondo-ehr-usage-export.md`.
+
+**Count space.** The driver counts in `standard` space (`condition_concept_id` via
+`same_as → Maps to`, default) or `source` space (`condition_source_concept_id` against
+the term's own Mondo `same_as` codes, `--count-space source`, exp 0106). Source space
+avoids OMOP's ICD→SNOMED `Maps to` decomposition — which otherwise injects generic
+concepts (e.g. "pregnancy finding" inflating peripartum cardiomyopathy) and manufactures
+cross-term collisions — at the cost of coverage limited to the vocabularies Mondo lists.
+It's also the route to a SNOMED-license-free model (structure from Mondo, tokens from
+ICD). See `docs/insights/0076`. The meta strip shows the active count space.
+
+**Code multiplicity.** Each term reports how many distinct source/target ids roll into
+it, by vocabulary (drawer "Codes" + the Table "Codes" column) — exact *code* counts,
+never patient counts, so they're unsuppressed and can't be differenced against the
+(suppressed) patient totals. Per-code patient counts are deliberately never published.

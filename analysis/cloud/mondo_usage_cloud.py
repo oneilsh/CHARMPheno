@@ -19,13 +19,30 @@ concept(s). Rationale (see docs/insights/0075):
     honest per-term number; summing across terms double-counts and is the
     consumer's responsibility.
 
-MULTI-MAPPING. The Mondo `same_as` exact-map is injective on the source side (in
-release 2026-06-02, zero SNOMED/MeSH/ICD codes are shared across Mondo terms), so
-the only cross-term collision is introduced by OMOP's `Maps to` step: two Mondo
-terms whose distinct source codes normalize to the SAME standard concept. That is
-measurable from the mapping frame alone (`standard_concept_id -> {mondo_id}`), so
-we quantify it here and FLAG every affected term with its co-mapped siblings; each
-term still reports its full exact-match count (no correction).
+COUNT SPACE (``--count-space``). Two ways to count a term's patients:
+  * ``standard`` (default): distinct persons with a ``condition_concept_id`` that the
+    term maps to via ``same_as -> Maps to`` (standard SNOMED Condition). OMOP's
+    ICD->SNOMED ``Maps to`` is one-to-many, so a single ICD source code can DECOMPOSE
+    into several standard concepts, including generic context ones (e.g. O90.3
+    "peripartum cardiomyopathy" pulls in "pregnancy finding"), which then inflates
+    the term and creates cross-term collisions (insight 0076).
+  * ``source``: distinct persons whose ``condition_source_concept_id`` exactly equals
+    one of the term's OWN Mondo ``same_as`` source codes. No ``Maps to`` -> no
+    decomposition, no inflation, and NO cross-term collisions (``same_as`` is
+    source-injective). Trade-off: coverage is limited to the vocabularies Mondo lists
+    (a patient coded only in ICD9 is missed). Source mode requires
+    ``condition_occurrence``. This space is also the route to SNOMED-license-free
+    deployment (structure from Mondo, tokens from ICD).
+
+MULTI-MAPPING / COLLISIONS. In ``standard`` space the only cross-term collision is
+the ``Maps to`` convergence above (measurable from the mapping frame,
+`standard_concept_id -> {mondo_id}`); each affected term still reports its full count
+and is FLAGGED with its co-mapped siblings. In ``source`` space collisions vanish.
+
+CODE MULTIPLICITY. Per term we also publish how many distinct source/target ids roll
+into it, by vocabulary (`n_codes`, `codes_by_vocab`, `codes`). These are exact CODE
+counts, never patient counts, so they are unsuppressed and cannot be differenced
+against the (suppressed) patient totals — we never publish per-code patient counts.
 
 AoU SMALL-CELL SUPPRESSION: every reported patient count is three-state —
 `unused` (0), `used <20` (0<n<20, kept & flagged as used but never given an exact
@@ -101,7 +118,26 @@ def term_collision_siblings(
 
 
 _RARE_SRC = {"gard_rare": "GARD", "orphanet_rare": "Orphanet", "nord_rare": "NORD",
-             "inferred_rare": "inferred"}
+             "doid_rare": "DOID", "ncit_rare": "NCIt", "inferred_rare": "inferred",
+             "mondo_curated_rare": "Mondo"}
+
+
+def rare_from_nodes(nodes_df):
+    """Per Mondo term: (is_rare, [source registries]) parsed directly from the Mondo
+    `subsets` field (works regardless of count space, since it doesn't need the OMOP
+    mapping). A term is rare if the umbrella `rare` flag or any registry flag is set.
+    Returns two ``{mondo_id: ...}`` dicts (only rare terms are populated)."""
+    rare_of, src_of = {}, {}
+    subs_col = nodes_df["subsets"] if "subsets" in nodes_df.columns else None
+    if subs_col is None:
+        return rare_of, src_of
+    for mid, subs in zip(nodes_df["id"], subs_col.fillna("")):
+        toks = set(str(subs).split("|"))
+        srcs = sorted({_RARE_SRC[t] for t in _RARE_SRC if t in toks})
+        if ("rare" in toks) or srcs:
+            rare_of[str(mid)] = True
+            src_of[str(mid)] = srcs or ["Mondo"]
+    return rare_of, src_of
 
 
 def term_rare_flags(mapping):
@@ -234,6 +270,12 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             "collision_siblings": siblings,
             "rare": bool(r.get("rare")),
             "rare_src": list(r.get("rare_src") or []),
+            # code multiplicity (exact COUNTS of source/target ids — not patient
+            # counts, so unsuppressed and un-differenceable): how many distinct ids
+            # roll into this term, by vocabulary, plus the ids themselves.
+            "codes": list(r.get("codes") or []),
+            "n_codes": int(r.get("n_codes") or len(r.get("codes") or [])),
+            "codes_by_vocab": dict(r.get("codes_by_vocab") or {}),
         })
 
     depth = _depths(parents_of)
@@ -270,12 +312,15 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
         "rare_terms": sum(1 for r in term_rows if r.get("rare")),
         "rare_used_terms": sum(1 for r, nd in zip(term_rows, nodes)
                                if r.get("rare") and nd["state"] != "unused"),
+        "total_codes": sum(nd["n_codes"] for nd in nodes),
+        "multi_code_terms": sum(1 for nd in nodes if nd["n_codes"] > 1),
         "max_depth": max(depth.values()) if depth else 0,
     }
     root = {"id": _ROOT_ID, "label": "Mondo disease (mapped-term view)",
             "kind": "root", "parents": [], "std_concepts": [], "state": "root",
             "category": "root", "display": "", "count": None, "collision": False,
-            "collision_siblings": [], "rare": False, "rare_src": [], "depth": 0}
+            "collision_siblings": [], "rare": False, "rare_src": [],
+            "codes": [], "n_codes": 0, "codes_by_vocab": {}, "depth": 0}
     return {"meta": meta, "stats": stats, "nodes": [root] + nodes}
 
 
@@ -297,9 +342,11 @@ def format_summary(stats: dict, *, min_cell: int = _MIN_CELL) -> str:
         f"    of which other (rest of Mondo):  {s['other_terms']:>8}",
         f"  internal (non-leaf) terms:         {s['internal_terms']:>8}   "
         f"({s['internal_used_terms']} used) <- mid-level, un-rolled",
-        f"  collision-flagged terms (shared std concept): {s['collision_terms']:>8}",
+        f"  collision-flagged terms (shared concept): {s['collision_terms']:>8}",
         f"  rare-disease terms (GARD/Orphanet/NORD): {s.get('rare_terms', 0):>8}   "
         f"({s.get('rare_used_terms', 0)} used in the EHR)",
+        f"  source/target codes mapped (total): {s.get('total_codes', 0):>8}   "
+        f"({s.get('multi_code_terms', 0)} terms map >1 code)",
         f"  max mapped-term tree depth:        {s['max_depth']:>8}",
         "=" * 74,
     ])
@@ -317,6 +364,12 @@ def main(argv: list[str]) -> int:
     p.add_argument("--out", required=True, help="output dir for the artifacts")
     p.add_argument("--source-table", default="condition_occurrence",
                    help="OMOP condition source (condition_occurrence or condition_era)")
+    p.add_argument("--count-space", choices=("standard", "source"), default="standard",
+                   help="'standard': count condition_concept_id (via same_as->Maps to); "
+                        "'source': count condition_source_concept_id against the term's own "
+                        "same_as codes (no Maps to -> no decomposition/collisions, but "
+                        "coverage limited to the vocabularies Mondo lists). Source mode "
+                        "requires condition_occurrence.")
     p.add_argument("--min-cell", type=int, default=_MIN_CELL)
     args = p.parse_args(argv)
 
@@ -351,31 +404,62 @@ def main(argv: list[str]) -> int:
                                 restrict_mondo_ids=all_ids)
     src = same_as.merge(concept_pd, on=["concept_code", "vocabulary_id"], how="inner")
     source_ids = sorted({int(x) for x in src["concept_id"]})
-    src_sdf = spark.createDataFrame(pd.DataFrame({"concept_id_1": source_ids}))
-    cr_pd = (_read_bq(spark, args.cdr, args.billing, "concept_relationship")
-             .select("concept_id_1", "concept_id_2", "relationship_id")
-             .where(F.col("relationship_id") == "Maps to")
-             .join(broadcast(src_sdf), "concept_id_1", "inner").toPandas())
-    mapping = build_mondo_to_omop(
-        mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
-        concept_df=concept_pd, concept_relationship_df=cr_pd, restrict_mondo_ids=None)
 
-    # term -> standard concepts, and the collision structure (mapping-frame only).
-    ts = mapping[["mondo_id", "standard_concept_id"]].drop_duplicates()
-    ts["standard_concept_id"] = ts["standard_concept_id"].astype(int)
-    term_std: dict[str, list[int]] = (
-        ts.groupby("mondo_id")["standard_concept_id"].apply(list).to_dict())
-    std_to_mondos = collision_map(zip(ts["standard_concept_id"], ts["mondo_id"]))
-    siblings = term_collision_siblings(term_std, std_to_mondos)
+    # code multiplicity per term (# distinct SOURCE ids by vocabulary) — from the
+    # Mondo same_as xrefs; an exact code COUNT, never a patient count.
+    srcu = src[["mondo_id", "concept_id", "vocabulary_id", "concept_code"]].drop_duplicates()
+    codes_of, codesbyvocab_of = {}, {}
+    for mid, sub in srcu.groupby("mondo_id"):
+        codes_of[str(mid)] = [{"id": int(r.concept_id), "vocab": str(r.vocabulary_id),
+                               "code": str(r.concept_code)} for r in sub.itertuples()]
+        codesbyvocab_of[str(mid)] = {v: int(c) for v, c
+                                     in sub["vocabulary_id"].value_counts().items()}
+
+    if args.count_space == "source":
+        # --- SOURCE space: match condition_source_concept_id to the term's OWN
+        #     same_as source concepts. No Maps to => no decomposition, no cross-term
+        #     collisions (same_as is source-injective). Coverage limited to the
+        #     vocabularies Mondo lists (patients coded only in ICD9 etc. are missed).
+        term_match = {m: sorted({c["id"] for c in cs}) for m, cs in codes_of.items()}
+        pairs = [(cid, m) for m, cs in term_match.items() for cid in cs]
+        id_to_mondos = collision_map(pairs)
+        siblings = term_collision_siblings(term_match, id_to_mondos)
+        match_pd = srcu[["mondo_id", "concept_id"]].drop_duplicates().rename(
+            columns={"concept_id": "match_cid"})
+        match_pd["match_cid"] = match_pd["match_cid"].astype(int)
+        m_sdf = broadcast(spark.createDataFrame(match_pd))
+        cond = (_read_bq(spark, args.cdr, args.billing, "condition_occurrence")
+                .select("person_id",
+                        F.col("condition_source_concept_id").alias("match_cid2"))
+                .where(F.col("match_cid2").isNotNull() & (F.col("match_cid2") != 0))
+                ).cache()
+        hit = (cond.join(m_sdf, cond["match_cid2"] == m_sdf["match_cid"], "inner")
+               .select("person_id", "mondo_id"))
+    else:
+        # --- STANDARD space (default): condition_concept_id via same_as -> Maps to.
+        src_sdf = spark.createDataFrame(pd.DataFrame({"concept_id_1": source_ids}))
+        cr_pd = (_read_bq(spark, args.cdr, args.billing, "concept_relationship")
+                 .select("concept_id_1", "concept_id_2", "relationship_id")
+                 .where(F.col("relationship_id") == "Maps to")
+                 .join(broadcast(src_sdf), "concept_id_1", "inner").toPandas())
+        mapping = build_mondo_to_omop(
+            mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
+            concept_df=concept_pd, concept_relationship_df=cr_pd, restrict_mondo_ids=None)
+        ts = mapping[["mondo_id", "standard_concept_id"]].drop_duplicates()
+        ts["standard_concept_id"] = ts["standard_concept_id"].astype(int)
+        term_match = ts.groupby("mondo_id")["standard_concept_id"].apply(
+            lambda s: sorted(set(int(x) for x in s))).to_dict()
+        std_to_mondos = collision_map(zip(ts["standard_concept_id"], ts["mondo_id"]))
+        siblings = term_collision_siblings(term_match, std_to_mondos)
+        ts_sdf = broadcast(spark.createDataFrame(
+            ts.rename(columns={"standard_concept_id": "match_cid"})))
+        cond = load_omop_bigquery(
+            spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
+            source_table=args.source_table).select("person_id", "concept_id").cache()
+        hit = (cond.join(ts_sdf, cond["concept_id"] == ts_sdf["match_cid"], "inner")
+               .select("person_id", "mondo_id"))
 
     # --- 2. EXACT-match person counts per term (NO concept_ancestor climb) --------
-    ts_sdf = broadcast(spark.createDataFrame(
-        ts.rename(columns={"standard_concept_id": "std_cid"})))
-    cond = load_omop_bigquery(
-        spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
-        source_table=args.source_table).select("person_id", "concept_id").cache()
-    hit = (cond.join(ts_sdf, cond["concept_id"] == ts_sdf["std_cid"], "inner")
-           .select("person_id", "mondo_id"))
     term_counts = (hit.groupBy("mondo_id")
                    .agg(F.countDistinct("person_id").alias("n")).toPandas())
     count_of = {str(r["mondo_id"]): int(r["n"]) for _, r in term_counts.iterrows()}
@@ -396,25 +480,27 @@ def main(argv: list[str]) -> int:
         for c in children:
             parent_adj.setdefault(c, []).append(parent)
 
-    mapped_ids = set(term_std)
+    mapped_ids = set(term_match)
     parents = nearest_mapped_parents(mapped_ids, parent_adj)
     label_of = {str(i): str(n) for i, n in zip(nodes_df["id"], nodes_df["name"])}
-    std_name = dict(zip(mapping["standard_concept_id"].astype(int),
-                        mapping["standard_concept_name"]))
 
-    # Mondo rare-disease designations (from the mapping's subset flags, parsed by the
-    # mondo2omop port): per term, is it rare + which source registries flag it.
-    rare_of, rare_src_of = term_rare_flags(mapping)
+    # Mondo rare-disease designations, parsed straight from the Mondo `subsets`
+    # field (count-space independent): per term, rare? + which source registries.
+    rare_of, rare_src_of = rare_from_nodes(nodes_df)
 
     term_rows = []
     for mid in sorted(mapped_ids):
-        cids = sorted({int(c) for c in term_std[mid]})
+        cids = sorted({int(c) for c in term_match[mid]})
+        codes = codes_of.get(mid, [])
         term_rows.append({
             "mondo_id": mid,
-            "label": label_of.get(mid, std_name.get(cids[0], mid) if cids else mid),
+            "label": label_of.get(mid, mid),
             "is_internal": mid in has_child,
             "parents": parents.get(mid, []),
             "std_concepts": cids,
+            "codes": codes,
+            "n_codes": len(codes),
+            "codes_by_vocab": codesbyvocab_of.get(mid, {}),
             "n_persons": count_of.get(mid, 0),
             "collision_siblings": siblings.get(mid, []),
             "rare": rare_of.get(mid, False),
@@ -428,7 +514,12 @@ def main(argv: list[str]) -> int:
         "source_table": args.source_table,
         "min_cell": min_cell,
         "rollup": False,
-        "count_rule": "distinct persons with an EXACT-match standard condition code",
+        "count_space": args.count_space,
+        "count_rule": ("distinct persons whose condition_source_concept_id exactly "
+                       "matches one of the term's Mondo same_as source codes (no Maps to)"
+                       if args.count_space == "source" else
+                       "distinct persons with an EXACT-match standard condition concept "
+                       "(same_as -> Maps to)"),
         "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     payload = assemble_payload(meta=meta, term_rows=term_rows, min_cell=min_cell)
@@ -451,7 +542,10 @@ def main(argv: list[str]) -> int:
         "n_patients": nd["display"],
         "collision": int(nd["collision"]),
         "collision_siblings": "|".join(nd["collision_siblings"]),
-        "std_concepts": "|".join(str(c) for c in nd["std_concepts"]),
+        "n_codes": nd["n_codes"],
+        "codes_by_vocab": ";".join(f"{v}:{c}" for v, c in nd["codes_by_vocab"].items()),
+        "codes": "|".join(f"{c['vocab']}:{c['code']}" for c in nd["codes"]),
+        "rare": int(nd["rare"]), "rare_src": "|".join(nd["rare_src"]),
         "parents": "|".join(nd["parents"]),
     } for nd in payload["nodes"] if nd["kind"] != "root"]
     pd.DataFrame(rows).to_csv(out / "mondo_usage_nodes.tsv", sep="\t", index=False)
