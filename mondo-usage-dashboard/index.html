@@ -276,14 +276,10 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 
   <div class="source" id="source"></div>
 
-  <section class="kpis" id="kpis"></section>
-  <div class="cover" id="cover" role="img" aria-label="Coverage of mapped Mondo terms by usage category"></div>
-  <div class="cover-legend" id="cover-legend"></div>
-
   <div class="controls">
     <div class="filters" id="filters"></div>
     <div class="grow"></div>
-    <div class="tabs mode-t" id="mode" role="tablist" title="Per-term: each term's own exact-code count. Rolled up: subtree bracket [floor…ceiling] with aggregated uncertainty (overlap + suppression).">
+    <div class="tabs mode-t" id="mode" role="tablist" title="Per-term: each term's own exact-code count. Rolled up: subtree total (upper bound — counts diagnoses, may double-count patients).">
       <button role="tab" data-mode="term" aria-selected="true">Per-term</button>
       <button role="tab" data-mode="rollup" aria-selected="false">Rolled up</button>
     </div>
@@ -291,17 +287,10 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
       <input id="search" type="search" placeholder="Search term or MONDO id…" autocomplete="off">
     </label>
-    <div class="tabs" role="tablist">
-      <button role="tab" data-view="tree" aria-selected="true">Hierarchy</button>
-      <button role="tab" data-view="graph" aria-selected="false">Graph</button>
-      <button role="tab" data-view="treemap" aria-selected="false">Treemap</button>
-      <button role="tab" data-view="table" aria-selected="false">Table</button>
-    </div>
   </div>
 
   <div class="panel">
-    <div class="view on" id="view-tree"><div id="tree"></div><div class="hint" id="tree-hint"></div></div>
-    <div class="view" id="view-graph">
+    <div class="view on" id="view-graph">
       <div class="graph-toolbar">
         <button class="btn sm" id="g-reset">Reset view</button>
         <button class="btn sm" id="g-collapse">Collapse all</button>
@@ -316,9 +305,6 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
       <div class="g-legend" id="g-legend"></div>
       <svg id="graph"></svg>
     </div>
-    <div class="view" id="view-treemap"><div id="treemap-wrap"><svg id="treemap"></svg></div>
-      <div class="tm-note" id="tm-note"></div></div>
-    <div class="view" id="view-table"><div id="table-scroll"></div><div class="hint" id="table-hint"></div></div>
   </div>
 
   <div class="foot" id="foot"></div>
@@ -355,7 +341,7 @@ let gHL=new Set(), gHLD=new Set();  // selected + ancestors (hl) / visible desce
 let gFocus=null, gPeek=null, gCoord=new Map();
 let gColorMode="system";            // "system" (by body system) | "usage" (by category)
 const GRAPH_CAP=14;   // max children revealed per expansion before a "＋N more" node
-const state={view:"tree",q:"",rollup:false,vis:new Set(CATS.filter(c=>c.on).map(c=>c.key))};
+const state={view:"graph",q:"",rollup:false,vis:new Set(CATS.filter(c=>c.on).map(c=>c.key))};
 
 /* ---------- load: embedded block > fetched real > fetched sample ---------- */
 async function boot(){
@@ -394,9 +380,8 @@ function load(d){
   computeVisibleDesc(); computeRollup(); assignSystems();
   graphOpen=new Set(["root"]); graphCap=new Map(); graphHidden=new Set(); gz={x:24,y:24,k:0.85}; gLayer=null; gBounds=null;
   gFocus=null; gHL=new Set(); gHLD=new Set(); gPeek=null;
-  renderSource(); renderKPIs(); renderFilters();
-  for(const id of roots) expanded.add(id);          // open first level
-  renderAll();
+  renderSource(); renderFilters();
+  renderAll(); requestAnimationFrame(graphFit);
 }
 function sortNodes(a,b){a=byId.get(a);b=byId.get(b);
   const ra=rank(a),rb=rank(b); if(ra!==rb)return ra-rb;
@@ -518,12 +503,7 @@ function renderFilters(){
 function catCounts(){const o={};for(const n of DATA.nodes){if(n.kind==="root")continue;o[n.category]=(o[n.category]||0)+1;}return o;}
 
 /* ------------------------------- render ----------------------------------- */
-function renderAll(){
-  if(state.view==="tree")return renderTree();
-  if(state.view==="graph")return renderGraph();
-  if(state.view==="treemap")return renderTreemap();
-  return renderTable();
-}
+function renderAll(){ renderGraph(); }   // the DAG browser is the only view
 
 /* ---- hierarchy ---- */
 function renderTree(){
@@ -642,11 +622,11 @@ function nodeFill(id,n){
 const nodeOpac=n=>n.state==="reported"?0.92:n.state==="used_small"?0.62:0.34;
 
 const gval=id=>{const n=byId.get(id); if(!n)return 0;
-  if(state.rollup){const r=DATA._roll.get(id);return r?r.est:0;}
+  if(state.rollup){const r=DATA._roll.get(id);return r?r.ceil:0;}   // upper number
   return n.state==="reported"?n.count:n.state==="used_small"?((DATA.meta.min_cell||20)-1):0.4;};
 function graphCountText(id){const n=byId.get(id),min=DATA.meta.min_cell||20;
   if(state.rollup){const r=DATA._roll.get(id); if(!r||r.nUsed===0)return "";
-    return `${r.floor>0?fmtK(r.floor):('<'+min)}–${fmtK(r.ceil)}`;}
+    return "≤"+fmtK(r.ceil);}   // subtree upper bound (~diagnoses; may double-count patients)
   return n.state==="reported"?fmtK(n.count):n.state==="used_small"?("<"+min):"";}
 
 // visible node set: root + capped top-prevalence children of open nodes; a truncated
@@ -704,8 +684,10 @@ function ancestorSet(id){                 // all transitive parents up the DAG (
 // radius: area ∝ value against a STABLE global max (√ scale), so 20k / 5k / <20
 // read as clearly different sizes and don't rescale as you expand.
 function graphRadius(id){
-  if(byId.get(id)===undefined) return 7;               // more-node
-  const maxV=state.rollup?ROLL_EST_MAX:OWN_MAX;
+  const nn=byId.get(id);
+  if(nn===undefined) return 7;                          // more-node
+  if(nn.kind==="root") return 13;                       // synthetic root: fixed, not sized
+  const maxV=state.rollup?ROLL_MAX:OWN_MAX;   // ROLL_MAX = max subtree ceiling
   return 8+46*Math.sqrt(Math.max(gval(id),0)/(maxV||1));
 }
 function layoutGraph(vis){
@@ -1085,15 +1067,13 @@ function select(id,fromFocus){
   </dl>`;
   const rr=DATA._roll&&DATA._roll.get(id);
   if(rr && (kids.get(id)||[]).length){
-    const fl=rr.floor>0?fmt(rr.floor):("&lt; "+min);
-    html+=`<div class="section-t">Subtree roll-up (estimate)</div>
+    const fl=rr.floor>0?fmt(rr.floor):("&lt;"+min);
+    html+=`<div class="section-t">Subtree roll-up</div>
       <div class="warn" style="background:var(--surface-2);border-color:var(--border);color:var(--ink-2)">
-        Distinct patients across this subtree lie in
-        <b style="color:var(--ink)">${fl} – ${fmt(rr.ceil)}</b>.
-        <b>Floor</b> = the single largest term (at least this many distinct people).
-        <b>Ceiling</b> = the sum of its ${rr.nUsed} used term(s), each &lt;${min} cell counted as ${min-1},
-        reached only with zero overlap.${rr.nColl?` <b>${rr.nColl}</b> term(s) here share a standard concept — extra double-count risk.`:""}
-        Nominal add-up ≈ <b style="color:var(--ink)">${fmt(rr.est)}</b>.
+        <b style="color:var(--ink);font-size:16px">≤ ${fmt(rr.ceil)}</b> across ${fmt(rr.nUsed)} used term(s).
+        This is an <b>upper bound</b> — it sums the terms (each &lt;${min} cell at ${min-1}), so a patient with
+        several of these diagnoses is counted several times. Read it as a <b>count of diagnoses</b>, not distinct
+        patients (of which there are at least ${fl}).${rr.nColl?` ${rr.nColl} term(s) here share a concept — extra double-count.`:""}
       </div>
       <dl class="kv"><dt>Used terms</dt><dd>${fmt(rr.nUsed)} of ${fmt(rr.nTerms)}</dd>
         <dt>Suppressed</dt><dd>${fmt(rr.s)} term(s) &lt;${min}</dd>
@@ -1157,13 +1137,6 @@ function showTip(e,txt){tip.textContent=txt;tip.style.opacity=1;
 function hideTip(){tip.style.opacity=0;}
 
 /* --------------------------------- wiring --------------------------------- */
-document.querySelectorAll(".tabs:not(.mode-t) button").forEach(b=>b.onclick=()=>{
-  state.view=b.dataset.view;
-  document.querySelectorAll(".tabs:not(.mode-t) button").forEach(x=>x.setAttribute("aria-selected",x===b));
-  document.querySelectorAll(".view").forEach(v=>v.classList.remove("on"));
-  $("#view-"+state.view).classList.add("on"); renderAll();
-  if(state.view==="graph") requestAnimationFrame(graphFit);
-});
 // graph controls + pan/zoom (listeners on the persistent svg, once)
 $("#g-collapse").onclick=()=>{graphOpen=new Set(["root"]);graphCap=new Map();graphHidden=new Set();gFocus=null;selected=null;closeDrawer();renderGraph();requestAnimationFrame(graphFit);};
 $("#g-reset").onclick=()=>{gFocus=null;graphHidden=new Set();renderGraph();gz={x:24,y:24,k:0.85};if(gLayer)applyGT(gLayer);};
@@ -1205,11 +1178,11 @@ $("#file").addEventListener("change",e=>{const f=e.target.files[0];if(!f)return;
 $("#theme").onclick=()=>{const r=document.documentElement;
   const cur=r.getAttribute("data-theme")|| (matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light");
   const next=cur==="dark"?"light":"dark"; r.setAttribute("data-theme",next);
-  try{localStorage.setItem("mondo-theme",next);}catch(e){} if(state.view==="treemap")renderTreemap();};
+  try{localStorage.setItem("mondo-theme",next);}catch(e){}};
 try{const saved=localStorage.getItem("mondo-theme");if(saved)document.documentElement.setAttribute("data-theme",saved);}catch(e){}
 addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer();});
-let rz; addEventListener("resize",()=>{clearTimeout(rz);rz=setTimeout(()=>{if(state.view==="treemap")renderTreemap();},150);});
-$("#foot").innerHTML=`<b>Method.</b> One Mondo term = one OMOP standard Condition concept it maps to via <span class="mono">same_as → Maps to</span>; a term's count is the distinct persons coded <b>exactly</b> at that concept — no <span class="mono">concept_ancestor</span> roll-up. A person is counted once per term; comorbidities appear under each distinct term. Counts of 1–${19} are shown as <b>&lt;20</b> (AoU small-cell rule); only per-term floored counts are published, so nothing can be differenced back. Term counts in the KPIs are counts of terms, not patients, and are exact. <b>Rolled up</b> brackets a subtree's distinct patients in <b>[floor, ceiling]</b> — floor = its largest single term, ceiling = the sum with each &lt;20 cell at 19 — so the interval width carries both the double-counting (overlap) and the suppression uncertainty; the sum is an upper bound, never a distinct-patient total.`;
+let rz; addEventListener("resize",()=>{clearTimeout(rz);rz=setTimeout(()=>{if(gLayer)graphFit();},180);});
+$("#foot").innerHTML=`<b>Method.</b> A term's <b>per-term</b> count is the distinct persons coded <b>exactly</b> at that Mondo term's own concept(s) — no <span class="mono">concept_ancestor</span> roll-up. A person is counted once per term; comorbidities appear under each distinct term. Counts of 1–19 show as <b>&lt;20</b> (AoU small-cell rule); only per-term floored counts are published, so nothing can be differenced back. <b>Rolled up</b> sums a subtree's terms (each &lt;20 cell at 19) and shows that <b>upper bound</b> (<span class="mono">≤</span>): because a patient with several of the subtree's diagnoses is counted several times, read it as a <b>count of diagnoses</b>, not distinct patients. Node size encodes the same value shown.`;
 
 boot();
 </script>

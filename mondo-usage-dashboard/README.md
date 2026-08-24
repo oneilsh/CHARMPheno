@@ -49,31 +49,29 @@ Four usage categories, each independently show/hide-able:
 | **Used branch (0 count)** | a term with 0 *direct* usage that sits **above** a used term — a branch point on the "used skeleton" (kept because no-roll-up leaves abstract ancestors at 0) |
 | **Rest of Mondo** | mapped terms with 0 usage and nothing used beneath them (off by default) |
 
-Views: **Hierarchy** (collapsible Mondo is-a tree), **Graph** (a true node-link DAG —
-horizontal, progressive expand/collapse, nodes sized by prevalence, and the *only*
-view that shows Mondo's multi-parent edges — ~50% of terms have >1 parent),
-**Treemap** (patient volume by body system), **Table** (sortable/searchable). Click
-any term for its MONDO/OMOP links, parents/children, and multi-mapping detail.
+The dashboard is a single **DAG browser** — a true node-link view of the Mondo
+disease graph (the only view that shows Mondo's multi-parent edges — ~50% of terms
+have >1 parent), horizontal and progressively expanded, nodes sized by prevalence.
 
-**Graph interactions:** click to expand + select and pan-to-center; selecting a node
-reveals and highlights its **ancestor lineage** (accent) and **descendants** (blue),
-dimming the rest; **hover** peeks the same without committing; **shift-click** (or the
-⌖ button) **focuses/re-roots** on a node; **✕** (on hover) hides a node/branch to
+**Interactions:** click to expand + select and pan-to-center; selecting a node reveals
+and highlights its **ancestor lineage** (accent) and **descendants** (blue), dimming
+the rest; **hover** peeks the same without committing; **shift-click** (or the ⌖
+button) **focuses/re-roots** on a node; **✕** (on hover) hides a node/branch to
 declutter (Reset restores); clicking empty canvas clears the selection. Wide fan-outs
 show the top few and bottom few by prevalence with **＋N more** between (reveals 10 at
-a time). Typing in the search box **marks the matching text** in labels here and in
-the other views. Nodes are colored **by top-level Mondo class
-(≈ body system)** — a colorblind-safe Okabe-Ito palette, toggle to color by usage —
-so drilling into one class reads as a coherent hue family. A ✦ marks **rare-disease**
-terms (Mondo's GARD/Orphanet/NORD designations); the "Rare used" KPI counts how many
-are actually coded in the EHR (2,275 in this AoU run). Note: "system" here is the
-node's top-level ancestor in the mapped-term tree, not an explicit ontology attribute.
+a time). Typing in the search box **marks the matching text** in labels. Nodes are
+colored **by top-level Mondo class (≈ body system)** — a colorblind-safe Okabe-Ito
+palette, toggle to color by usage — so drilling into one class reads as a coherent hue
+family. A ✦ marks **rare-disease** terms (Mondo's GARD/Orphanet/NORD designations).
+The detail drawer lists each term's source codes and its subtree roll-up. ("system"
+here is the node's top-level ancestor in the mapped-term tree, not an ontology field.)
 
-A **Per-term / Rolled up** toggle switches every view between each term's own exact
-count and a subtree **floor–ceiling** bracket — floor = the largest single term,
-ceiling = the summed used terms with each `<20` cell at 19. The interval width is the
-aggregated uncertainty (comorbidity overlap + suppression); the sum is only ever an
-upper bound on distinct patients, never a total.
+A **Per-term / Rolled up** toggle switches the count each node shows: per-term = the
+term's own exact patient count; rolled up = the subtree's **upper number** (`≤`), the
+sum of its used terms (each `<20` cell at 19). Because a patient with several of a
+subtree's diagnoses is summed several times, the rolled number is best read as a
+**count of diagnoses, not distinct patients** (the drawer states the floor — "at least
+N distinct patients" — alongside it). Node size tracks whichever value is shown.
 
 ## Method (why no roll-up)
 
