@@ -1316,7 +1316,7 @@ function select(id,quiet){
     ch.slice(0,40).map(c=>`<a data-goto="${c}">${esc(byId.get(c).label)}</a>`).join("")+
     (ch.length>40?`<span>+${ch.length-40} more</span>`:"")+`</div>`;}
   if(n.collision&&n.collision_siblings.length){html+=`<div class="section-t" style="margin-top:16px">Collision siblings</div>`+
-    `<div style="color:var(--muted);font-size:11.5px;margin:-2px 0 8px;line-height:1.45">These terms share one or more standard concepts with this one (OMOP <span class="mono">Maps&nbsp;to</span> sends a source code to several standard concepts), so a participant coded there is counted under <b>each</b> — don't add their counts together.</div>`+
+    `<div style="color:var(--muted);font-size:11.5px;margin:-2px 0 8px;line-height:1.45">Each of these is credited with one or more of the same standard (SNOMED) concept(s) as this term — OMOP's ICD&rarr;SNOMED <span class="mono">Maps&nbsp;to</span> routes several diagnosis codes onto a shared, often generic, concept. A participant carrying a shared concept is counted in this term <b>and</b> in every sibling that maps to it, so their counts overlap (and, for a generic shared concept, inflate one another) — don't add the flagged terms together.</div>`+
     `<div class="chiplist">`+
     n.collision_siblings.slice(0,30).map(c=>byId.has(c)?`<a data-goto="${c}">${esc(byId.get(c).label)}</a>`:`<span>${c}</span>`).join("")+`</div>`;}
   html+=`</div>`;
