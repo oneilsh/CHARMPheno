@@ -1316,10 +1316,8 @@ function select(id,quiet){
     ch.slice(0,40).map(c=>`<a data-goto="${c}">${esc(byId.get(c).label)}</a>`).join("")+
     (ch.length>40?`<span>+${ch.length-40} more</span>`:"")+`</div>`;}
   if(n.collision&&n.collision_siblings.length){
-    const sib0=n.collision_siblings.map(c=>byId.get(c)).find(x=>x);
-    const eg=sib0?` — so a participant coded for <b>${esc(sib0.label)}</b> is also counted in <b>${esc(n.label)}</b> (and vice-versa)`:"";
     html+=`<div class="section-t" style="margin-top:16px">Collision siblings</div>`+
-    `<div style="color:var(--muted);font-size:11.5px;margin:-2px 0 8px;line-height:1.45">OMOP's ICD&rarr;SNOMED <span class="mono">Maps&nbsp;to</span> credits <b>${esc(n.label)}</b> and each term below with one or more of the <b>same</b> standard (SNOMED) concept — often one shared, generic concept${eg}. So these terms' counts overlap on the shared-concept participants; summing the flagged terms double-counts them.</div>`+
+    `<div style="color:var(--muted);font-size:11.5px;margin:-2px 0 8px;line-height:1.45">OMOP maps <b>${esc(n.label)}</b> and each term below onto a <b>shared</b> standard (SNOMED) concept — often one generic concept (its ICD code splits into several SNOMED concepts via <span class="mono">Maps&nbsp;to</span>). Any patient carrying that shared concept is counted in <b>all</b> of these terms at once, so their counts overlap — don't add the flagged terms together.</div>`+
     `<div class="chiplist">`+
     n.collision_siblings.slice(0,30).map(c=>byId.has(c)?`<a data-goto="${c}">${esc(byId.get(c).label)}</a>`:`<span>${c}</span>`).join("")+`</div>`;}
   html+=`</div>`;
