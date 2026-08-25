@@ -672,7 +672,7 @@ function topAncestor(id){                // depth-1 ancestor (body system) of a 
   return cur?cur.id:id;
 }
 /* ---- graph (DAG node-link, horizontal layered, progressive disclosure) ---- */
-// Node coloring: rare-disease designation (Mondo OMIM/Orphanet/GARD/NORD) — rare terms
+// Node coloring: rare-disease designation (Mondo GARD/Orphanet/NORD subsets) — rare terms
 // in magenta, everything else neutral, so rare diagnoses pop as you drill in.
 const rarityFill=n=>(n&&n.rare)?"var(--rare)":"var(--cat-other)";
 function nodeFill(id,n){
@@ -914,7 +914,7 @@ function renderLegend(){
     if(sw.startsWith("--"))d.style.background=`var(${sw})`; else d.style.background=sw;
     s.appendChild(d);s.appendChild(el("span",null,txt));box.appendChild(s);};
   if(gColorMode==="rarity"){
-    add("var(--rare)","rare disease (OMIM/Orphanet/GARD/NORD)");
+    add("var(--rare)","rare disease (GARD/Orphanet/NORD)");
     add("var(--cat-other)","not rare-designated");
   } else {
     for(const c of CATS) add(c.color,c.label);
