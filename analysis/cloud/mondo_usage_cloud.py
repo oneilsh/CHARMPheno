@@ -10,7 +10,7 @@ concept(s). Rationale (see docs/insights/0075):
 
   * Real EHR diagnoses are recorded at different granularities. A roll-up hides
     that: a mid-level Mondo term that itself carries a SNOMED code may legitimately
-    be used by <20 patients even when its descendants are common, and a very
+    be used by ≤20 patients even when its descendants are common, and a very
     abstract term may be used by 0. Those are findings, not artifacts — so we
     report each term's OWN exact-code usage and let any roll-up happen downstream,
     where it can carry the double-counting caveat explicitly.
@@ -45,8 +45,8 @@ counts, never patient counts, so they are unsuppressed and cannot be differenced
 against the (suppressed) patient totals — we never publish per-code patient counts.
 
 AoU SMALL-CELL SUPPRESSION: every reported patient count is three-state —
-`unused` (0), `used <20` (0<n<20, kept & flagged as used but never given an exact
-number or conflated with 0), or the exact count (>=20). We publish only per-term
+`unused` (0), `used ≤20` (0<n<=20, kept & flagged as used but never given an exact
+number or conflated with 0), or the exact count (>20). We publish only per-term
 floored cardinalities, never additive decompositions or parent-minus-child deltas,
 so nothing can be differenced back to a suppressed cell. Term/node COUNTS in the
 headline stats are counts of Mondo terms, not patients, so they are exact.
@@ -75,19 +75,22 @@ def usage_state(n: int, min_cell: int = _MIN_CELL) -> tuple[str, str, int | None
     """Three-state AoU small-cell rule for a per-term distinct-person count.
 
     Returns ``(state, display, public_count)``:
-      * n <= 0        -> ("unused",     "0",           0)    — term not used
-      * 0 < n < floor -> ("used_small", f"<{floor}",   None) — USED, count withheld
-      * n >= floor    -> ("reported",   str(n),        n)    — exact
+      * n <= 0         -> ("unused",     "0",            0)    — term not used
+      * 0 < n <= floor -> ("used_small", f"≤{floor}", None) — USED, count withheld
+      * n >  floor     -> ("reported",   str(n),         n)    — exact
 
-    The middle state is the crux: a term used by 1..floor-1 patients is a
-    first-class USED term (kept, counted toward "fraction of Mondo used", never
-    dropped and never shown as 0), but its exact count is never emitted.
+    The floor is inclusive (mask counts of 1..floor, publish only n > floor),
+    matching the All of Us Data Browser's "≤ 20" display — nothing at or
+    below the floor is ever emitted exactly. The middle state is the crux: a term
+    used by 1..floor patients is a first-class USED term (kept, counted toward
+    "fraction of Mondo used", never dropped and never shown as 0), but its exact
+    count is never emitted.
     """
     n = int(n)
     if n <= 0:
         return "unused", "0", 0
-    if n < min_cell:
-        return "used_small", f"<{min_cell}", None
+    if n <= min_cell:
+        return "used_small", f"≤{min_cell}", None
     return "reported", str(n), n
 
 
@@ -345,9 +348,9 @@ def format_summary(stats: dict, *, min_cell: int = _MIN_CELL) -> str:
         "WHOLE-MONDO EHR USAGE (exact map, no roll-up)",
         f"  mapped Mondo disease terms:        {s['mapped_terms']:>8}",
         f"  used (>=1 patient):                {s['used_terms']:>8}   {pct:5.1f}%",
-        f"    of which used-small (<{min_cell}):        {s['used_small_terms']:>8}   "
+        f"    of which used-small (≤{min_cell}):        {s['used_small_terms']:>8}   "
         f"(kept & flagged, exact count withheld)",
-        f"    of which reported (>={min_cell}):         {s['reported_terms']:>8}",
+        f"    of which reported (>{min_cell}):          {s['reported_terms']:>8}",
         f"  unused mapped terms (0 patients):  {s['unused_terms']:>8}",
         f"    of which used-branch (0 count, above a used node): {s['used_branch_terms']:>8}",
         f"    of which other (rest of Mondo):  {s['other_terms']:>8}",
@@ -537,7 +540,7 @@ def main(argv: list[str]) -> int:
 
     # persons-on-Mondo ladder line (suppressed) for the log.
     def _sup(n):
-        return f"<{min_cell}" if 0 < n < min_cell else str(int(n))
+        return f"≤{min_cell}" if 0 < n <= min_cell else str(int(n))
     sys.stderr.write(format_summary(payload["stats"], min_cell=min_cell) + "\n")
     sys.stderr.write(
         f"[ladder] persons total {n_total} | coded {_sup(n_coded)} | on any mapped "

@@ -9,9 +9,12 @@ def test_three_state_suppression():
     # unused vs used-small vs reported are DISTINCT states — a used-small term is
     # never conflated with 0 and never given an exact number.
     assert m.usage_state(0) == ("unused", "0", 0)
-    assert m.usage_state(1) == ("used_small", "<20", None)
-    assert m.usage_state(19) == ("used_small", "<20", None)
-    assert m.usage_state(20) == ("reported", "20", 20)
+    assert m.usage_state(1) == ("used_small", "≤20", None)
+    assert m.usage_state(19) == ("used_small", "≤20", None)
+    # floor is INCLUSIVE — a count of exactly 20 is masked (matches AoU's "≤ 20"),
+    # only counts strictly above the floor are reported exactly.
+    assert m.usage_state(20) == ("used_small", "≤20", None)
+    assert m.usage_state(21) == ("reported", "21", 21)
     assert m.usage_state(6543) == ("reported", "6543", 6543)
 
 
