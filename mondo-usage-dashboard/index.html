@@ -1274,7 +1274,7 @@ function select(id,quiet){
   selected=id; const n=byId.get(id); const dr=$("#drawer"); const inner=$("#drawer-inner");
   const min=DATA.meta.min_cell||20;
   const disp=n.state==="reported"?fmt(n.count):n.state==="used_small"?`< ${min} (withheld)`:"0";
-  const purl=n.id.startsWith("MONDO:")?`https://monarchinitiative.org/${n.id.replace(":","_")}`:null;
+  const purl=n.id.startsWith("MONDO:")?`https://monarchinitiative.org/${n.id}`:null;
   const cat=CATMAP[n.category]||{label:n.category,color:"var(--muted)"};
   let html=`<div class="dh"><div>
       <div class="section-t">${n.kind} term · depth ${n.depth}</div>
@@ -1331,12 +1331,17 @@ function select(id,quiet){
 }
 function closeDrawer(){selected=null; gSel=new Set(); renderDrawerDefault(); renderGraph();}
 const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+// Athena links: by OMOP concept_id (exact concept page) when we have one, else a
+// search by the source code — Athena has no by-vocab-code deep link, so a search
+// lands the user on the matching concept(s) for codes we only know by string.
 const athena=id=>`https://athena.ohdsi.org/search-terms/terms/${id}`;
+const athenaSearch=q=>`https://athena.ohdsi.org/search-terms/terms?query=${encodeURIComponent(q)}`;
 function codesRow(n){
   if(n.codes && n.codes.length){                    // source-space: real source codes
     const byv=Object.entries(n.codes_by_vocab||{}).map(([v,c])=>`${c} ${v}`).join(" · ");
     const list=n.codes.slice(0,24).map(c=>{const t=`${c.vocab} ${esc(String(c.code))}`;
-      return c.id?`<a href="${athena(c.id)}" target="_blank" rel="noopener" title="${c.vocab}">${t}</a>`:`<span title="${c.vocab}">${t}</span>`;}).join(", ");
+      const href=c.id?athena(c.id):athenaSearch(c.code);
+      return `<a href="${href}" target="_blank" rel="noopener" title="${c.vocab}${c.id?"":" — search Athena for this code"}">${t}</a>`;}).join(", ");
     return `<dt>Codes (${n.n_codes||n.codes.length})</dt><dd>${list}${n.codes.length>24?` +${n.codes.length-24}`:""}`+
       (byv?`<div style="color:var(--muted);margin-top:3px">${byv}</div>`:"")+`</dd>`;
   }
