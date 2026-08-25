@@ -319,7 +319,7 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
   <header class="top">
     <div class="brand">
       <h1>Counting Diagnoses: AllOfUs on Mondo</h1>
-      <p>Diagnosis counts from the AllOfUs EHR database (v8) mapped to the Mondo disease ontology. Counts less than 20 have been masked; similar counts may be found at the <a href="https://databrowser.researchallofus.org/" target="_blank" rel="noopener">AllOfUs Public Data Browser</a>. <span class="mtip" tabindex="0">Methods details<span class="tip" role="tooltip"><span>Each participant's standardized conditions in the AllOfUs <em>condition_occurrence</em> table (<em>condition_concept_id</em>, SNOMED) are matched to Mondo disease terms through Mondo's <em>same&nbsp;as</em> cross-references to source vocabularies — a term's own SNOMED codes directly, and its ICD and other codes via OMOP's <em>Maps&nbsp;to</em> standardization. The match is <em>exact</em>, with no roll-up through the SNOMED hierarchy: a term is credited only with participants coded at that term's own concept(s), not at its subtypes, and each participant is counted once per term (counts of 1&ndash;19 are suppressed and shown as &lt;20). Because OMOP's ICD&rarr;SNOMED <em>Maps&nbsp;to</em> is one-to-many, a single standardized condition can land on several Mondo terms at once. Those terms are flagged with an orange ring: a participant with that one condition is counted under each of them, so their counts overlap and should not be added together.</span><span>Two node-size views are available. By default, nodes are sized by their <em>direct</em> count — participants coded at that term itself — so a broad classification can look small while its more specific children are large. Switch to <em>Rolled up</em> to size each node by its direct plus all descendant counts. A roll-up sums a term with everything beneath it, so a participant with several diagnoses under one branch is counted once per diagnosis: <em>pericarditis</em> and <em>pericardial effusion</em> both fall under <em>pericardium disorder</em>, so a participant diagnosed with both counts twice toward pericardium disorder's rolled-up total — read rolled-up numbers as counts of diagnoses, not of distinct patients.</span></span></span></p>
+      <p>Diagnosis counts from the AllOfUs EHR database (v8) mapped to the Mondo disease ontology. Counts of 20 or fewer have been masked; similar counts may be found at the <a href="https://databrowser.researchallofus.org/" target="_blank" rel="noopener">AllOfUs Public Data Browser</a>. <span class="mtip" tabindex="0">Methods details<span class="tip" role="tooltip"><span>Each participant's standardized conditions in the AllOfUs <em>condition_occurrence</em> table (<em>condition_concept_id</em>, SNOMED) are matched to Mondo disease terms through Mondo's <em>same&nbsp;as</em> cross-references to source vocabularies — a term's own SNOMED codes directly, and its ICD and other codes via OMOP's <em>Maps&nbsp;to</em> standardization. The match is <em>exact</em>, with no roll-up through the SNOMED hierarchy: a term is credited only with participants coded at that term's own concept(s), not at its subtypes, and each participant is counted once per term (counts of 1&ndash;20 are masked and shown as &le;20). Because OMOP's ICD&rarr;SNOMED <em>Maps&nbsp;to</em> is one-to-many, a single standardized condition can land on several Mondo terms at once. Those terms are flagged with an orange ring: a participant with that one condition is counted under each of them, so their counts overlap and should not be added together.</span><span>Two node-size views are available. By default, nodes are sized by their <em>direct</em> count — participants coded at that term itself — so a broad classification can look small while its more specific children are large. Switch to <em>Rolled up</em> to size each node by its direct plus all descendant counts. A roll-up sums a term with everything beneath it, so a participant with several diagnoses under one branch is counted once per diagnosis: <em>pericarditis</em> and <em>pericardial effusion</em> both fall under <em>pericardium disorder</em>, so a participant diagnosed with both counts twice toward pericardium disorder's rolled-up total — read rolled-up numbers as counts of diagnoses, not of distinct patients.</span></span></span></p>
     </div>
     <div class="toolbar">
       <button class="btn ic" id="theme" title="Toggle theme" aria-label="Toggle color theme">
@@ -377,8 +377,8 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 <script>
 "use strict";
 const CATS = [
-  {key:"reported",   label:"Reported (≥20)",       color:"var(--cat-reported)",   on:true},
-  {key:"used_small", label:"Used <20",              color:"var(--cat-used-small)", on:true},
+  {key:"reported",   label:"Reported (>20)",       color:"var(--cat-reported)",   on:true},
+  {key:"used_small", label:"Used ≤20",              color:"var(--cat-used-small)", on:true},
   {key:"used_branch",label:"Used branch (0 count)", color:"var(--cat-used-branch)",on:true},
   {key:"other",      label:"Rest of Mondo",         color:"var(--cat-other)",      on:false},
 ];
@@ -389,7 +389,7 @@ const fmt=n=>n==null?"":n.toLocaleString("en-US");
 const lg=v=>v>0?Math.log(1+v):0;                       // log scale for prevalence bars
 const fmtK=n=>{n=Math.round(n);return n<1000?(""+n):n<1e6?((n/1e3).toFixed(n<1e4?1:0)+"k"):((n/1e6).toFixed(1)+"M");};
 
-// Roll-up nominal: a suppressed (<20) term contributes an unknown count in [1,19];
+// Roll-up nominal: a masked (≤20) term contributes an unknown count in [1,20];
 // SMALL_NOMINAL is the point estimate used for the "nominal add-up" only (the
 // rigorous bracket uses 1 and 19 for floor/ceiling and never this value).
 const SMALL_NOMINAL=10;
@@ -473,7 +473,7 @@ function computeVisibleDesc(){
    per-term suppressed counts, so a subtree's true DISTINCT-patient coverage is
    bracketed, not exact:
      floor = largest single term    (>= this many distinct people — one term alone)
-     ceil  = sum of terms, each <20 cell at 19  (<= this many — only if zero overlap)
+     ceil  = sum of terms, each ≤20 cell at 20  (<= this many — only if zero overlap)
    ceil-floor is the aggregated uncertainty (overlap/double-counting + suppression).
    est = a labeled nominal add-up (small terms at SMALL_NOMINAL). Roll-up is over the
    full DAG descendant closure (matches the edges you can expand), counting each unique
@@ -500,7 +500,7 @@ function computeRollup(){
   }
   ROLL_MAX=1; OWN_MAX=1; ROLL_EST_MAX=1;
   for(const [,r] of memo){
-    r.floor=r.maxT; r.ceil=r.R+(min-1)*r.s; r.est=r.R+SMALL_NOMINAL*r.s;
+    r.floor=r.maxT; r.ceil=r.R+min*r.s; r.est=r.R+SMALL_NOMINAL*r.s;
     ROLL_MAX=Math.max(ROLL_MAX,r.ceil); ROLL_EST_MAX=Math.max(ROLL_EST_MAX,r.est);
   }
   for(const n of DATA.nodes) if(n.state==="reported") OWN_MAX=Math.max(OWN_MAX,n.count);
@@ -515,7 +515,7 @@ function renderSource(){
   const add=(k,v)=>{const w=el("span");w.innerHTML=`${k} <b>${v}</b>`;s.appendChild(w);};
   add("Mondo",m.mondo_version||"—"); add("CDR",m.cdr||"—");
   add("source",m.source_table||"—"); add("count space",m.count_space||"standard");
-  add("floor","&lt;"+(m.min_cell||20)); add("generated",m.generated_utc||"—");
+  add("floor","&le;"+(m.min_cell||20)); add("generated",m.generated_utc||"—");
 }
 function renderDrawerDefault(){
   const inner=$("#drawer-inner"); if(!inner)return;
@@ -535,8 +535,8 @@ function renderKPIs(){
   };
   kpi("Mapped Mondo terms",fmt(s.mapped_terms),"disease terms with a diagnosis code").classList.add("span2");
   kpi("Used ≥1 patient",usedPct+"%",fmt(s.used_terms)+" terms touched in the EHR",CATMAP.reported.color);
-  kpi("Reported (≥20)",fmt(s.reported_terms),"exact counts publishable",CATMAP.reported.color);
-  kpi("Used-small (<20)",fmt(s.used_small_terms),"used, exact count withheld",CATMAP.used_small.color);
+  kpi("Reported (>20)",fmt(s.reported_terms),"exact counts publishable",CATMAP.reported.color);
+  kpi("Used-small (≤20)",fmt(s.used_small_terms),"used, exact count withheld",CATMAP.used_small.color);
   kpi("Used branch points",fmt(s.used_branch_terms),"0 direct count, above used nodes",CATMAP.used_branch.color);
   kpi("Collision-flagged",fmt(s.collision_terms),"share a std concept with siblings",CATMAP.collision||"var(--collision)");
   if(s.rare_used_terms!=null)
@@ -626,7 +626,7 @@ function prevBar(n){
     const unc=el("span","unc"); unc.style.width=w(lg(r.ceil)/denom); unc.style.background="var(--accent)";
     const fill=el("span","fill"); fill.style.width=w(lg(r.floor)/denom); fill.style.background="var(--accent)";
     bar.appendChild(unc); bar.appendChild(fill);
-    bar.title=`subtree ${r.floor>0?fmt(r.floor):('<'+min)}–${fmt(r.ceil)} distinct patients`;
+    bar.title=`subtree ${r.floor>0?fmt(r.floor):('≤'+min)}–${fmt(r.ceil)} distinct patients`;
     return bar;
   }
   const denom=lg(OWN_MAX);
@@ -635,8 +635,8 @@ function prevBar(n){
     fill.style.background=CATMAP[n.category].color; bar.appendChild(fill);
   } else if(n.state==="used_small"){
     bar.classList.add("small");
-    const fill=el("span","fill"); fill.style.width=w(lg(min-1)/denom);
-    fill.style.background=CATMAP.used_small.color; bar.appendChild(fill); bar.title=`1–${min-1} (withheld)`;
+    const fill=el("span","fill"); fill.style.width=w(lg(min)/denom);
+    fill.style.background=CATMAP.used_small.color; bar.appendChild(fill); bar.title=`1–${min} (withheld)`;
   }
   return bar;
 }
@@ -645,12 +645,12 @@ function countSpec(n){
   if(state.rollup){
     const r=DATA._roll.get(n.id);
     if(!r||r.nUsed===0)return{cls:"zero",text:"0"};
-    const fl=r.floor>0?fmtK(r.floor):("<"+min);
+    const fl=r.floor>0?fmtK(r.floor):("≤"+min);
     return{cls:"reported",text:`${fl}–${fmtK(r.ceil)}`,
-      title:`subtree distinct patients: ${r.floor>0?fmt(r.floor):('<'+min)} – ${fmt(r.ceil)}  ·  ${r.nUsed}/${r.nTerms} used, ${r.s} suppressed, ${r.nColl} collision  ·  nominal ≈ ${fmt(r.est)}`};
+      title:`subtree distinct patients: ${r.floor>0?fmt(r.floor):('≤'+min)} – ${fmt(r.ceil)}  ·  ${r.nUsed}/${r.nTerms} used, ${r.s} suppressed, ${r.nColl} collision  ·  nominal ≈ ${fmt(r.est)}`};
   }
   if(n.state==="reported")return{cls:"reported",text:fmt(n.count)};
-  if(n.state==="used_small")return{cls:"used_small",text:"<"+min};
+  if(n.state==="used_small")return{cls:"used_small",text:"≤"+min};
   return{cls:"zero",text:"0"};
 }
 function searchSet(q){                 // matched nodes + all their ancestors
@@ -683,12 +683,12 @@ const nodeOpac=n=>n.state==="reported"?0.92:n.state==="used_small"?0.62:0.34;
 
 const gval=id=>{const n=byId.get(id); if(!n)return 0;
   if(state.rollup){const r=DATA._roll.get(id);return r?r.est:0;}   // roll-up central estimate
-  return n.state==="reported"?n.count:n.state==="used_small"?((DATA.meta.min_cell||20)-1):0.4;};
+  return n.state==="reported"?n.count:n.state==="used_small"?(DATA.meta.min_cell||20):0.4;};
 
 // Suppression uncertainty on a subtree roll-up: each of the r.s suppressed (<min) terms
-// is an unknown integer in [1, min-1], midpoint min/2 = SMALL_NOMINAL. We band each at
-// ±SMALL_NOMINAL (the round number; the strict half-range is (min-2)/2 = 9, but ±10 reads
-// cleaner), so the reported ± is SMALL_NOMINAL·s. Deliberately NOT a √s statistical band
+// is an unknown integer in [1, min] (min=20), midpoint (min+1)/2 ≈ SMALL_NOMINAL. We band
+// each at ±SMALL_NOMINAL (the round number; the strict half-range is (min-1)/2 = 9.5, but
+// ±10 reads cleaner), so the reported ± is SMALL_NOMINAL·s. Deliberately NOT a √s band
 // (that assumes independence and understates the uncertainty). s=0 ⇒ exact, no ±.
 function rollupPM(r,min){
   if(!r||r.s<=0) return 0;
@@ -701,7 +701,7 @@ function graphCountSegs(id){
   const n=byId.get(id), min=DATA.meta.min_cell||20, r=DATA._roll.get(id);
   if(!r||r.nUsed===0) return [];
   const direct = n.state==="reported"?fmtK(n.count)
-              : n.state==="used_small"?("<"+min) : "0";
+              : n.state==="used_small"?("≤"+min) : "0";
   const selfUsed = n.state==="reported"||n.state==="used_small";
   const descUsed = r.nUsed - (selfUsed?1:0);
   if(descUsed<=0) return [{t:direct, bold:true}];  // leaf: one number, and it drives size
@@ -725,10 +725,24 @@ function renderCountInto(sub,id){
 
 // visible node set: root + capped top-prevalence children of open nodes; a truncated
 // fan-out gets a synthetic "more:<parent>" node. Search overrides with matched∪ancestors.
+const GRAPH_SEARCH_CAP=60;     // a broad substring (e.g. "mu") can match thousands of
+                               // terms; rendering matched∪ancestors uncapped blows up the
+                               // O(|S|^2) edge engine. Cap to the most-prevalent matches.
+let gSearchTotal=0;            // total graph matches this render (before the cap)
 function graphVisible(){
   const vis=new Map(), q=state.q.toLowerCase();
   const canShow=canShowGraph;
-  if(q){const keep=searchSet(q); for(const id of keep) if(canShow(id)) vis.set(id,byId.get(id));
+  if(q){
+    const matches=[];
+    for(const n of DATA.nodes){ if(n.kind==="root")continue;
+      if(canShow(n.id)&&(n.label.toLowerCase().includes(q)||n.id.toLowerCase().includes(q))) matches.push(n.id); }
+    gSearchTotal=matches.length;
+    matches.sort((a,b)=>gval(b)-gval(a));
+    const keep=new Set();
+    for(const id of matches.slice(0,GRAPH_SEARCH_CAP)){
+      let cur=id; while(cur&&!keep.has(cur)){keep.add(cur);const p=byId.get(cur).parents[0];cur=(p&&byId.has(p))?p:null;}
+    }
+    for(const id of keep) if(canShow(id)) vis.set(id,byId.get(id));
     if(byId.get("root"))vis.set("root",byId.get("root")); return vis;}
   const seeds=(gFocus&&byId.has(gFocus))?[gFocus]:(byId.get("root")?["root"]:roots);
   for(const s of seeds) if(canShow(s)) vis.set(s,byId.get(s));
@@ -812,7 +826,7 @@ function ancestorSet(id){                 // all transitive parents up the DAG (
     for(const pp of (byId.get(p).parents||[])) st.push(pp);}
   return out;
 }
-// radius: area ∝ value against a STABLE global max (√ scale), so 20k / 5k / <20
+// radius: area ∝ value against a STABLE global max (√ scale), so 20k / 5k / ≤20
 // read as clearly different sizes and don't rescale as you expand.
 function graphRadius(id){
   const nn=byId.get(id);
@@ -903,7 +917,9 @@ function renderGraph(){
   for(const [id,g] of gNodeEls){ if(!seenN.has(id)){ g.style.opacity=0;
     setTimeout(()=>{g.remove();},260); gNodeEls.delete(id); } }
   const bits=[];   // transient notices only (no always-on help line)
-  if(state.q) bits.push(`${vis.size} match “${state.q}”`);
+  if(state.q) bits.push(gSearchTotal>GRAPH_SEARCH_CAP
+    ? `${gSearchTotal} match “${state.q}” — showing ${GRAPH_SEARCH_CAP} most-prevalent; keep typing to narrow`
+    : `${gSearchTotal} match “${state.q}”`);
   if(graphFolded.size) bits.push(`${graphFolded.size} folded`);
   $("#graph-hint").textContent=bits.join(" · ");
   renderLegend(); updateFocusChip(); updateSelChip();
@@ -1122,10 +1138,10 @@ function renderTreemap(){
   svg.setAttribute("viewBox",`0 0 ${W} ${H}`); svg.style.height=H+"px";
   const note=$("#tm-note");
   if(state.rollup){
-    note.innerHTML="Area ∝ <b>rolled-up subtree size</b> (nominal add-up). Top tiles = body systems, split by sub-branch. Hover for the honest distinct-patient bracket [floor…ceiling] — the sum over-counts comorbidities and includes &lt;20 cells at 19.";
+    note.innerHTML="Area ∝ <b>rolled-up subtree size</b> (nominal add-up). Top tiles = body systems, split by sub-branch. Hover for the honest distinct-patient bracket [floor…ceiling] — the sum over-counts comorbidities and includes &le;20 cells at 20.";
     return drawRollupTreemap(svg,W,H);
   }
-  note.textContent="Area ∝ patients coded exactly at each reported term (≥20). Grouped by top-level body system. Used-small (<20) terms carry no publishable number and are not sized here — switch to Rolled up to include subtrees.";
+  note.textContent="Area ∝ patients coded exactly at each reported term (>20). Grouped by top-level body system. Used-small (≤20) terms carry no publishable number and are not sized here — switch to Rolled up to include subtrees.";
   const groups=new Map();
   for(const n of DATA.nodes){
     if(n.state!=="reported"||!state.vis.has("reported"))continue;
@@ -1134,7 +1150,7 @@ function renderTreemap(){
   let gl=[...groups.entries()].map(([id,ns])=>({id,label:byId.get(id)?byId.get(id).label:id,
     value:ns.reduce((a,n)=>a+(n.count||0),0),items:ns})).filter(g=>g.value>0);
   gl.sort((a,b)=>b.value-a.value);
-  if(!gl.length){svg.innerHTML=`<text x="14" y="28" fill="var(--muted)" font-family="var(--mono)" font-size="13">No reported (≥20) terms in view.</text>`;return;}
+  if(!gl.length){svg.innerHTML=`<text x="14" y="28" fill="var(--muted)" font-family="var(--mono)" font-size="13">No reported (>20) terms in view.</text>`;return;}
   const total=gl.reduce((a,g)=>a+g.value,0);
   const cells=squarify(gl.map(g=>g.value),{x:0,y:0,w:W,h:H});
   const maxC=Math.max(...DATA.nodes.filter(n=>n.state==="reported").map(n=>n.count));
@@ -1179,7 +1195,7 @@ function drawRollupTreemap(svg,W,H){
     g.items.forEach((it,j)=>{
       const t=inner[j]; if(t.w<1||t.h<1)return;
       const lum=0.30+0.55*(lg(it.v)/lg(maxE||1));
-      const fl=it.r.floor>0?fmt(it.r.floor):("<"+min), cl=fmt(it.r.ceil);
+      const fl=it.r.floor>0?fmt(it.r.floor):("≤"+min), cl=fmt(it.r.ceil);
       const rect=svgEl("rect",{x:t.x,y:t.y,width:Math.max(0,t.w-1.5),height:Math.max(0,t.h-1.5),
         rx:2,fill:"var(--accent)","fill-opacity":lum.toFixed(3),
         stroke:"var(--surface)","stroke-width":1.5,style:"cursor:pointer"});
@@ -1253,7 +1269,7 @@ function renderTable(){
     p.textContent=CATMAP[n.category].label;ct.appendChild(p);tr.appendChild(ct);
     tr.appendChild(numTd(n.depth));
     if(hasCodes){const cc=numTd(n.n_codes||0);cc.style.color="var(--ink-2)";tr.appendChild(cc);}
-    const c=el("td","num");c.textContent=n.state==="reported"?fmt(n.count):n.state==="used_small"?"<"+(DATA.meta.min_cell||20):"0";
+    const c=el("td","num");c.textContent=n.state==="reported"?fmt(n.count):n.state==="used_small"?"≤"+(DATA.meta.min_cell||20):"0";
     c.style.color=n.state==="reported"?"var(--cat-reported)":n.state==="used_small"?"var(--cat-used-small)":"var(--muted)";
     tr.appendChild(c);
     tb.appendChild(tr);
@@ -1273,7 +1289,7 @@ function select(id,quiet){
   if(!quiet){ gSel=new Set([id]); gIsolateSet=null; }
   selected=id; const n=byId.get(id); const dr=$("#drawer"); const inner=$("#drawer-inner");
   const min=DATA.meta.min_cell||20;
-  const disp=n.state==="reported"?fmt(n.count):n.state==="used_small"?`< ${min} (withheld)`:"0";
+  const disp=n.state==="reported"?fmt(n.count):n.state==="used_small"?`≤ ${min} (withheld)`:"0";
   const purl=n.id.startsWith("MONDO:")?`https://monarchinitiative.org/${n.id}`:null;
   const cat=CATMAP[n.category]||{label:n.category,color:"var(--muted)"};
   let html=`<div class="dh"><div>
@@ -1292,20 +1308,20 @@ function select(id,quiet){
   </dl>`;
   const rr=DATA._roll&&DATA._roll.get(id);
   if(rr && (kids.get(id)||[]).length){
-    const fl=rr.floor>0?fmt(rr.floor):("&lt;"+min);
+    const fl=rr.floor>0?fmt(rr.floor):("&le;"+min);
     const pm=rollupPM(rr,min);
     html+=`<div class="section-t">Subtree roll-up</div>
       <div class="warn" style="background:var(--surface-2);border-color:var(--border);color:var(--ink-2)">
         <b style="color:var(--ink);font-size:16px">${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""}</b> across ${fmt(rr.nUsed)} used term(s).
-        Midpoint estimate with each &lt;${min} term put at ~${SMALL_NOMINAL}; the <b>±</b> allows ±${SMALL_NOMINAL} for
-        each of the ${fmt(rr.s)} suppressed term(s), whose true 1–${min-1} values can't be published (strict bracket
+        Midpoint estimate with each &le;${min} term put at ~${SMALL_NOMINAL}; the <b>±</b> allows ±${SMALL_NOMINAL} for
+        each of the ${fmt(rr.s)} suppressed term(s), whose true 1–${min} values can't be published (strict bracket
         ${fl}–${fmt(rr.ceil)}). Because a patient with several of these diagnoses is counted several times,
         read it as a <b>count of diagnoses</b>, not distinct patients (of which there are at least ${fl}).${rr.nColl?` ${rr.nColl} term(s) here share a concept — extra double-count.`:""}
       </div>
       <dl class="kv"><dt>Estimate</dt><dd>${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""} diagnoses</dd>
         <dt>Bracket</dt><dd>${fl} – ${fmt(rr.ceil)}</dd>
         <dt>Used terms</dt><dd>${fmt(rr.nUsed)} of ${fmt(rr.nTerms)}</dd>
-        <dt>Suppressed</dt><dd>${fmt(rr.s)} term(s) &lt;${min}</dd>
+        <dt>Suppressed</dt><dd>${fmt(rr.s)} term(s) &le;${min}</dd>
         <dt>Collisions</dt><dd>${fmt(rr.nColl)}</dd></dl>`;
   }
   const parents=(n.parents||[]).filter(p=>byId.has(p));

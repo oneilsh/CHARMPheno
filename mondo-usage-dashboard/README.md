@@ -44,8 +44,8 @@ Every mapped Mondo term is browsable (all four usage kinds are always shown):
 
 | kind | meaning |
 |---|---|
-| **Reported (≥20)** | exact patient count, publishable |
-| **Used <20** | genuinely used but below the AoU small-cell floor — kept & flagged, exact count withheld, never shown as 0 |
+| **Reported (>20)** | exact patient count, publishable |
+| **Used ≤20** | genuinely used but at or below the AoU small-cell floor — kept & flagged, exact count withheld, never shown as 0 |
 | **Used branch (0 count)** | a term with 0 *direct* usage that sits **above** a used term — a branch point on the "used skeleton" |
 | **Rest of Mondo** | mapped terms with 0 usage and nothing used beneath them |
 
@@ -100,8 +100,8 @@ exact patient count, then its subtree roll-up. The roll-up spans the term's **fu
 descendant closure** (every term reachable below it, each counted once even if it has
 several parents — so a multi-parent child like *rheumatoid vasculitis* contributes to
 every ancestor's roll-up). It is a **midpoint estimate**
-(each `<20` term put at ≈ 10) with a **±** that allows **±10 per suppressed term** → `±10·s`
-(a round stand-in for the strict `±9` half-range of the 1–19 unknowns). It is deliberately
+(each `≤20` term put at ≈ 10) with a **±** that allows **±10 per suppressed term** → `±10·s`
+(a round stand-in for the strict `±9.5` half-range of the 1–20 unknowns). It is deliberately
 *not* a √s statistical band — that would assume independence and understate the uncertainty.
 Because a patient with several of a subtree's diagnoses is summed several
 times, the rolled number is a **count of diagnoses, not distinct patients** (the drawer
@@ -117,7 +117,7 @@ are recorded at different granularities; rolling up would hide that a mid-level 
 is used little while its descendants are common. A person is counted once per term;
 comorbidities appear under each distinct term (summing across terms double-counts —
 the export flags terms that share a standard concept via OMOP `Maps to`). Counts of
-1–19 render as `<20` (AoU rule); only per-term floored counts are published, so
+1–20 render as `≤20` (AoU rule, floor inclusive); only per-term floored counts are published, so
 nothing can be differenced back to a suppressed cell. See `docs/insights/0075` and
 `docs/experiments/0105-mondo-ehr-usage-export.md`.
 
