@@ -1328,13 +1328,11 @@ function select(id,quiet){
   if(rr && (kids.get(id)||[]).length){
     const fl=rr.floor>0?fmt(rr.floor):("&le;"+min);
     const pm=rollupPM(rr,min);
+    const own=n.state==="reported"?fmt(n.count):n.state==="used_small"?("&le;"+min):"0";
+    const descUsed=Math.max(0, rr.nUsed - ((n.state==="reported"||n.state==="used_small")?1:0));
     html+=`<div class="section-t">Subtree roll-up</div>
       <div class="warn" style="background:var(--surface-2);border-color:var(--border);color:var(--ink-2)">
-        <b style="color:var(--ink);font-size:16px">${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""}</b> across ${fmt(rr.nUsed)} used term(s).
-        Midpoint estimate with each &le;${min} term put at ~${SMALL_NOMINAL}; the <b>±</b> allows ±${SMALL_NOMINAL} for
-        each of the ${fmt(rr.s)} suppressed term(s), whose true 1–${min} values can't be published (strict bracket
-        ${fl}–${fmt(rr.ceil)}). Because a patient with several of these diagnoses is counted several times,
-        read it as a <b>count of diagnoses</b>, not distinct patients (of which there are at least ${fl}).${rr.nColl?` ${rr.nColl} term(s) here share a concept — extra double-count.`:""}
+        <b style="color:var(--ink);font-size:16px">${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""}</b> distinct participant diagnoses across this disease and its ${fmt(descUsed)} descendant term(s) with at least one diagnosis. <b>${own}</b> are diagnosed specifically at this node.
       </div>
       <dl class="kv"><dt>Estimate</dt><dd>${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""} diagnoses</dd>
         <dt>Bracket</dt><dd>${fl} – ${fmt(rr.ceil)}</dd>
