@@ -396,6 +396,9 @@ const SMALL_NOMINAL=10;
 let DATA=null, byId=new Map(), kids=new Map(), dagKids=new Map(), roots=[], expanded=new Set(), selected=null;
 let ROLL_MAX=1, OWN_MAX=1, ROLL_EST_MAX=1;
 let graphOpen=new Set(["root"]), graphOpenUp=new Set(), graphCap=new Map(), graphFolded=new Set(), gz={x:24,y:24,k:0.85};
+let gPinned=new Set();   // nodes "landed on" from a search result: kept visible (bypassing the
+                         // fan-out cap and hide-unused, but not an explicit collapse) so you can
+                         // clear the search and keep browsing around what you found.
 let gBounds=null;   // last-layout bounds for Fit
 let gHL=new Set(), gHLD=new Set();  // highlighted lineage: ancestors (hl) / descendants (hld) of the selection
 let gSel=new Set();                 // multi-selection (shift-click); `selected` = primary (drawer target)
@@ -443,7 +446,7 @@ function load(d){
   for(const [,arr] of dagKids) arr.sort(sortNodes);
   roots.sort(sortNodes);
   computeVisibleDesc(); computeRollup();
-  graphOpen=new Set(["root"]); graphOpenUp=new Set(); graphCap=new Map(); graphFolded=new Set(); gz={x:24,y:24,k:0.85}; gLayer=null; gBounds=null;
+  graphOpen=new Set(["root"]); graphOpenUp=new Set(); graphCap=new Map(); graphFolded=new Set(); gPinned=new Set(); gz={x:24,y:24,k:0.85}; gLayer=null; gBounds=null;
   gFocus=null; gExpandNotice=""; gSel=new Set(); gHL=new Set(); gHLD=new Set(); gPeek=null; gManualRank=new Map(); gLastRank=new Map();
   renderSource(); renderDrawerDefault();
   renderAll(); requestAnimationFrame(graphFit);
@@ -781,6 +784,10 @@ function graphVisible(){
     const anc=ancestorSet(gFocus); anc.add(gFocus);
     for(const id of anc) if(canShow(id)&&!vis.has(id)) vis.set(id,byId.get(id));
   }
+  // pinned search-landings: keep them (and their lineage) on screen regardless of the
+  // fan-out cap / hide-unused, unless explicitly collapsed (folded). Reachability edges
+  // connect them to the rest, so they never float.
+  for(const id of gPinned) if(byId.has(id) && !graphFolded.has(id) && !vis.has(id)) vis.set(id,byId.get(id));
   return vis;
 }
 function descendantSet(id){               // DAG descendants (every child edge)
@@ -946,21 +953,29 @@ function updateSelChip(){
   if(gSel.size>1){chip.style.display="inline-flex"; chip.querySelector("span").textContent=`${gSel.size} selected`;}
   else chip.style.display="none";
 }
-function focusNode(id){gFocus=id; gIsolateSet=null; graphOpen.add(id); select(id,true);
+function focusNode(id){gFocus=id; gIsolateSet=null; leaveSearch(id); graphOpen.add(id); select(id,true);
   requestAnimationFrame(()=>graphFit());}
 function clearFocus(){gFocus=null; renderGraph(); requestAnimationFrame(()=>graphFit());}
+// "Land" on a search result: pin the node + its full lineage so they persist, then drop
+// the search filter so normal (expansion-driven) browsing resumes around what you found.
+function leaveSearch(id){
+  if(!state.q) return;
+  if(byId.has(id)){ gPinned.add(id); graphFolded.delete(id); graphOpenUp.add(id);
+    for(const a of ancestorSet(id)){ gPinned.add(a); graphFolded.delete(a); graphOpenUp.add(a); } }
+  state.q=""; const si=$("#search"); if(si) si.value="";
+}
 // ---- graph expand / collapse actions (menu) ----
 // Collapse folds nodes into graphFolded (removed from view regardless of other open
 // routes), and is REVERSIBLE: any expand of a node clears its revealed relatives from
 // graphFolded, so re-expanding brings them back (no Reset needed). There is no "hide".
-function expandChildren(id){ gIsolateSet=null;
+function expandChildren(id){ gIsolateSet=null; leaveSearch(id);
   for(const c of (dagKids.get(id)||[])) graphFolded.delete(c);   // un-fold what we're revealing
   graphOpen.add(id); }
-function expandParents(id){ gIsolateSet=null;
+function expandParents(id){ gIsolateSet=null; leaveSearch(id);
   for(const p of ((byId.get(id)||{}).parents||[])) graphFolded.delete(p);
   graphOpenUp.add(id); }
 function expandAllDescendants(id){
-  gIsolateSet=null;
+  gIsolateSet=null; leaveSearch(id);
   // open the WHOLE subtree (marking open is cheap; the per-fan-out cap still paginates
   // with "＋N more"). Un-fold everything below so a prior collapse is fully undone.
   const q=[id], visited=new Set([id]);
@@ -975,7 +990,7 @@ function expandAllDescendants(id){
   renderGraph(); requestAnimationFrame(graphFit);
 }
 function expandAllAncestors(id){
-  gIsolateSet=null; graphOpenUp.add(id);
+  gIsolateSet=null; leaveSearch(id); graphOpenUp.add(id);
   for(const a of ancestorSet(id)) if(byId.has(a)){ graphOpenUp.add(a); graphFolded.delete(a); }
   renderGraph(); requestAnimationFrame(graphFit);
 }
@@ -1083,8 +1098,12 @@ function buildNode(id,n){
   g.addEventListener("click",e=>{e.stopPropagation();
     if(gJustDragged){ gJustDragged=false; return; }   // this "click" ended a reorder drag
     if(e.shiftKey){ toggleSel(id); return; }
+    const landed=!!state.q;
+    if(landed) leaveSearch(id);   // clicking a search result lands here: pin lineage, drop filter
     if(!graphOpen.has(id) && (dagKids.get(id)||[]).some(couldShowGraph)) expandChildren(id);  // expand one level (un-folds)
-    select(id);});
+    select(id);
+    if(landed) requestAnimationFrame(()=>centerNodeInView(id));   // deliberate nav: bring it into view
+  });
   g.addEventListener("contextmenu",e=>{e.preventDefault();e.stopPropagation(); openNodeMenu(id,e.clientX,e.clientY);});
   g.addEventListener("pointerdown",e=>{ if(e.button!==0)return;   // begin possible reorder drag
     gNodeDrag={id,startY:e.clientY,moved:false}; });
@@ -1385,8 +1404,8 @@ function hideTip(){tip.style.opacity=0;}
 
 /* --------------------------------- wiring --------------------------------- */
 // graph controls + pan/zoom (listeners on the persistent svg, once)
-$("#g-collapse").onclick=()=>{graphOpen=new Set(["root"]);graphOpenUp=new Set();graphCap=new Map();graphFolded=new Set();gFocus=null;gManualRank=new Map();gSel=new Set();selected=null;closeDrawer();renderGraph();requestAnimationFrame(graphFit);};
-$("#g-reset").onclick=()=>{gFocus=null;graphOpenUp=new Set();graphFolded=new Set();gManualRank=new Map();renderGraph();gz={x:24,y:24,k:0.85};if(gLayer)applyGT(gLayer);};
+$("#g-collapse").onclick=()=>{graphOpen=new Set(["root"]);graphOpenUp=new Set();graphCap=new Map();graphFolded=new Set();gPinned=new Set();gFocus=null;gManualRank=new Map();gSel=new Set();selected=null;closeDrawer();renderGraph();requestAnimationFrame(graphFit);};
+$("#g-reset").onclick=()=>{gFocus=null;graphOpenUp=new Set();graphFolded=new Set();gPinned=new Set();gManualRank=new Map();renderGraph();gz={x:24,y:24,k:0.85};if(gLayer)applyGT(gLayer);};
 $("#g-fit").onclick=graphFit;
 $("#g-focus-clear").onclick=()=>clearFocus();
 $("#g-sel-clear").onclick=()=>clearSelection();
