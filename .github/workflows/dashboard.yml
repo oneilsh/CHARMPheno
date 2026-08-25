@@ -40,3 +40,8 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: dashboard/dist
           publish_branch: gh-pages
+          # Replace gh-pages with a single fresh commit each deploy. The dashboard
+          # ships multi-MB binary payloads (mondo_usage.json); keeping full history
+          # bloats the pack every push and GitHub eventually rejects it with
+          # "remote: fatal error in commit_refs". Pages only needs the latest tree.
+          force_orphan: true
