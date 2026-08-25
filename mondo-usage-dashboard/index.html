@@ -653,13 +653,12 @@ function countSpec(n){
   if(n.state==="used_small")return{cls:"used_small",text:"≤"+min};
   return{cls:"zero",text:"0"};
 }
-function searchSet(q){                 // matched nodes + all their ancestors
-  const keep=new Set();
-  for(const n of DATA.nodes){
+function searchSet(q){                 // matched nodes + all their ancestors (every DAG path,
+  const keep=new Set();                // not just the primary parent — multi-parent lineages
+  for(const n of DATA.nodes){          // like Niemann-Pick's sphingolipidosis branch matter)
     if(n.kind==="root")continue;
     if(n.label.toLowerCase().includes(q)||n.id.toLowerCase().includes(q)){
-      let cur=n.id;
-      while(cur&&!keep.has(cur)){keep.add(cur);const p=byId.get(cur).parents[0];cur=(p&&byId.has(p))?p:null;}
+      keep.add(n.id); for(const a of ancestorSet(n.id)) keep.add(a);
     }
   }
   return keep;
@@ -740,7 +739,7 @@ function graphVisible(){
     matches.sort((a,b)=>gval(b)-gval(a));
     const keep=new Set();
     for(const id of matches.slice(0,GRAPH_SEARCH_CAP)){
-      let cur=id; while(cur&&!keep.has(cur)){keep.add(cur);const p=byId.get(cur).parents[0];cur=(p&&byId.has(p))?p:null;}
+      keep.add(id); for(const a of ancestorSet(id)) keep.add(a);   // full DAG closure (every parent path)
     }
     for(const id of keep) if(canShow(id)) vis.set(id,byId.get(id));
     if(byId.get("root"))vis.set("root",byId.get("root")); return vis;}
