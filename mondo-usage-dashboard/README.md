@@ -87,8 +87,11 @@ terminal or fully expanded); clicking empty canvas clears the selection; **Reset
 clears hidden/reordered/focus state. Wide fan-outs show the top few
 and bottom few by prevalence with **＋N more** between (reveals 10 at a time). Typing in
 the search box **marks the matching text** in labels. Nodes are
-colored **by rare-disease designation** (Mondo's OMIM/Orphanet/GARD/NORD flags) — rare
+colored **by rare-disease designation** — rare
 terms in magenta, everything else neutral — so rare diagnoses pop as you drill in.
+Rarity is taken from Mondo's dedicated rare-disease subsets (**GARD / Orphanet / NORD**)
+only; Mondo also carries broader "rare" subsets from DOID/NCIt that over-include common
+diseases (they flag e.g. prostate cancer), so those are deliberately excluded.
 A ✦ also marks **rare-disease** terms.
 The detail drawer lists each term's source codes and its subtree roll-up.
 

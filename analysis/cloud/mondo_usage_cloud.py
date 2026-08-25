@@ -121,11 +121,21 @@ _RARE_SRC = {"gard_rare": "GARD", "orphanet_rare": "Orphanet", "nord_rare": "NOR
              "doid_rare": "DOID", "ncit_rare": "NCIt", "inferred_rare": "inferred",
              "mondo_curated_rare": "Mondo"}
 
+# Only the dedicated rare-disease registries are trusted to designate a term "rare".
+# DOID's `rare_slim` subset (and NCIt's, and Mondo's own `inferred_rare`) is broadly
+# over-inclusive — it sweeps in common cancers like prostate cancer — so a term is
+# rare here iff it is listed by GARD, Orphanet, or NORD. The umbrella `rare` token is
+# NOT trusted on its own for the same reason (it is the union of all subsets). See the
+# dashboard README's rare-disease note.
+_TRUSTED_RARE = {"GARD", "Orphanet", "NORD"}
+
 
 def rare_from_nodes(nodes_df):
     """Per Mondo term: (is_rare, [source registries]) parsed directly from the Mondo
     `subsets` field (works regardless of count space, since it doesn't need the OMOP
-    mapping). A term is rare if the umbrella `rare` flag or any registry flag is set.
+    mapping). A term is rare iff a *trusted* rare-disease registry (`_TRUSTED_RARE`:
+    GARD/Orphanet/NORD) lists it; the untrusted DOID/NCIt/inferred subsets and the
+    umbrella `rare` token do not designate rarity on their own.
     Returns two ``{mondo_id: ...}`` dicts (only rare terms are populated)."""
     rare_of, src_of = {}, {}
     subs_col = nodes_df["subsets"] if "subsets" in nodes_df.columns else None
@@ -133,30 +143,31 @@ def rare_from_nodes(nodes_df):
         return rare_of, src_of
     for mid, subs in zip(nodes_df["id"], subs_col.fillna("")):
         toks = set(str(subs).split("|"))
-        srcs = sorted({_RARE_SRC[t] for t in _RARE_SRC if t in toks})
-        if ("rare" in toks) or srcs:
+        srcs = sorted({_RARE_SRC[t] for t in _RARE_SRC if t in toks} & _TRUSTED_RARE)
+        if srcs:
             rare_of[str(mid)] = True
-            src_of[str(mid)] = srcs or ["Mondo"]
+            src_of[str(mid)] = srcs
     return rare_of, src_of
 
 
 def term_rare_flags(mapping):
     """Per Mondo term: (is_rare, [source registries]) from the mapping's rare-subset
     columns (the mondo2omop port exposes `rare` + gard/nord/orphanet/inferred_rare).
-    A term is rare if the umbrella `rare` flag or any source flag is set; sources
-    name the registries (GARD/Orphanet/NORD), falling back to "Mondo" when only the
-    umbrella flag is present. Pure over a pandas-like frame (columns accessed by
-    name); returns two ``{mondo_id: ...}`` dicts."""
-    cols = [c for c in ("rare", *_RARE_SRC) if c in getattr(mapping, "columns", [])]
+    A term is rare iff a *trusted* rare-disease registry (`_TRUSTED_RARE`:
+    GARD/Orphanet/NORD) lists it; the umbrella `rare` flag and the untrusted
+    doid/ncit/inferred columns do not designate rarity on their own (they over-include
+    common diseases — e.g. prostate cancer via DOID). Pure over a pandas-like frame
+    (columns accessed by name); returns two ``{mondo_id: ...}`` dicts."""
+    cols = [c for c in _RARE_SRC if c in getattr(mapping, "columns", [])]
     rare_of, src_of = {}, {}
     if not cols:
         return rare_of, src_of
     for mid, sub in mapping.groupby("mondo_id"):
-        srcs = sorted({_RARE_SRC[c] for c in _RARE_SRC
-                       if c in sub.columns and int(sub[c].max() or 0) == 1})
-        is_rare = any(int(sub[c].max() or 0) == 1 for c in cols)
-        rare_of[str(mid)] = bool(is_rare)
-        src_of[str(mid)] = srcs or (["Mondo"] if is_rare else [])
+        srcs = sorted({_RARE_SRC[c] for c in cols
+                       if int(sub[c].max() or 0) == 1} & _TRUSTED_RARE)
+        if srcs:
+            rare_of[str(mid)] = True
+            src_of[str(mid)] = srcs
     return rare_of, src_of
 
 
