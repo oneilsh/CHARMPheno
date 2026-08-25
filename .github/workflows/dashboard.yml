@@ -5,7 +5,7 @@ on:
     # If branch-specific preview URLs are needed later, switch to a
     # destination_dir scheme per branch.
     branches: [main, dashboarding]
-    paths: ['dashboard/**', '.github/workflows/dashboard.yml']
+    paths: ['dashboard/**', 'mondo-usage-dashboard/**', '.github/workflows/dashboard.yml']
   workflow_dispatch: {}
 permissions: { contents: write }
 jobs:
@@ -28,6 +28,12 @@ jobs:
         working-directory: dashboard
         env: { VITE_BASE: /CHARMPheno/ }
         run: npm run build
+      - name: Add Mondo-usage dashboard (static, served at /mondo-aou-usage/)
+        run: |
+          mkdir -p dashboard/dist/mondo-aou-usage
+          cp mondo-usage-dashboard/index.html dashboard/dist/mondo-aou-usage/
+          cp mondo-usage-dashboard/mondo_usage.json dashboard/dist/mondo-aou-usage/
+          cp mondo-usage-dashboard/mondo_usage.sample.json dashboard/dist/mondo-aou-usage/
       - name: Deploy
         uses: peaceiris/actions-gh-pages@v3
         with:

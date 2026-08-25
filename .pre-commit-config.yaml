@@ -10,6 +10,9 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ['--maxkb=1024']
+        # the Mondo-usage dashboard ships its (aggregated, small-cell-suppressed)
+        # payload as a static JSON for GitHub Pages; it exceeds 1 MB by design.
+        exclude: '^mondo-usage-dashboard/mondo_usage\.json$'
 
   - repo: local
     hooks:
