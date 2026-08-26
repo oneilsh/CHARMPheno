@@ -396,6 +396,58 @@ def suppress_count(n, min_cell: int = _MIN_CELL) -> str:
     return f"≤{min_cell}" if n <= min_cell else str(n)
 
 
+# Log-decade volume bands for per-source-code magnitude. A code's exact person
+# count NEVER leaves the cluster (differencing risk vs the per-term union total);
+# instead each code is tagged with the RANGE it falls in. Ranges are
+# differencing-proof by construction — the difference of two ranges is a range,
+# never a person — so bands compose safely with the exact per-term totals, across
+# count-spaces, and up/down the roll-up. The bottom band is the small-cell floor
+# itself, so a rare code reads "≤{floor}" exactly as a suppressed cell does.
+# Order is heavy -> light (canonical display order).
+_BAND_UPPERS = [100, 1_000, 10_000, 100_000]     # decade edges above the floor
+
+
+def _band_label(min_cell: int) -> "list[str]":
+    """Canonical band labels, heaviest first, for a given small-cell floor."""
+    lo = [f"≤{min_cell}", f"{min_cell + 1}–100", "101–1k", "1k–10k", "10k–100k", ">100k"]
+    return list(reversed(lo))
+
+
+def volume_band(n, min_cell: int = _MIN_CELL) -> str:
+    """Map a per-code patient count to a log-decade band label (a RANGE, never the
+    number). ``None`` -> ``"n/a"``, ``<=0`` -> ``"0"``, ``1..floor`` -> ``"≤{floor}"``
+    (identical to a suppressed cell), then ``21–100 / 101–1k / 1k–10k / 10k–100k /
+    >100k`` for ``floor == 20``. Pure; disclosure-safe (emits no exact patient count)."""
+    if n is None:
+        return "n/a"
+    n = int(n)
+    if n <= 0:
+        return "0"
+    if n <= min_cell:
+        return f"≤{min_cell}"
+    labels = [f"{min_cell + 1}–100", "101–1k", "1k–10k", "10k–100k"]
+    for up, lab in zip(_BAND_UPPERS, labels):
+        if n <= up:
+            return lab
+    return ">100k"
+
+
+def band_histogram(bands, min_cell: int = _MIN_CELL) -> "list[dict]":
+    """Given the band label of every source code on a term (the FULL set, before any
+    display cap), return the distribution as ``[{"band": label, "codes": k}, ...]`` in
+    canonical heavy->light order, omitting empty bands. The ``codes`` figure counts
+    CODES (public non-personal identities), never persons — so it is safe at any value
+    (no small-cell suppression applies to a code count). This is the "where's the
+    weight" shape: e.g. ``>100k:2 · ≤20:184`` reads as Mondo-thin-but-heavy. Pure."""
+    from collections import Counter
+    c = Counter(bands)
+    out = []
+    for lab in _band_label(min_cell):
+        if c.get(lab):
+            out.append({"band": lab, "codes": int(c[lab])})
+    return out
+
+
 def build_safe_summary(results: list[dict]) -> str:
     """A copy-pasteable, disclosure-SAFE summary of one or more count-space runs.
 
@@ -537,6 +589,10 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             # per-code patient counts. Empty for the exact-map count spaces.
             "source_codes": list(r.get("source_codes") or []),
             "n_source_codes": int(r.get("n_source_codes") or len(r.get("source_codes") or [])),
+            # per-term magnitude histogram over the source codes: how many CODES fall in
+            # each volume band (a count of codes, never patients — safe at any value).
+            # The "where's the weight" shape; empty for the exact-map count spaces.
+            "source_bands": list(r.get("source_bands") or []),
         })
 
     depth = _depths(parents_of)
@@ -583,7 +639,7 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             "category": "root", "display": "", "count": None, "collision": False,
             "collision_siblings": [], "collision_kind": "", "rare": False, "rare_src": [],
             "codes": [], "n_codes": 0, "codes_by_vocab": {},
-            "source_codes": [], "n_source_codes": 0, "depth": 0}
+            "source_codes": [], "n_source_codes": 0, "source_bands": [], "depth": 0}
     return {"meta": meta, "stats": stats, "nodes": [root] + nodes}
 
 
@@ -857,6 +913,15 @@ def main(argv: list[str]) -> int:
             cat_named = (cat.join(concept_all, "origin_cid", "left")
                          .select("mondo_id", "origin_cid", "via", "vocabulary_id", "concept_code")
                          .toPandas())
+            # per-(term, code) distinct-person volume -> a differencing-safe magnitude
+            # BAND per code (never the exact count) + a per-term band histogram. Reveals
+            # "where the weight sits" (a thin Mondo term riding on a few heavy codes)
+            # without emitting any per-code patient number. See volume_band/band_histogram.
+            code_counts = (attribution.groupBy("mondo_id", "origin_cid")
+                           .agg(F.countDistinct("person_id").alias("np")).toPandas())
+            np_of = {(str(r.mondo_id), int(r.origin_cid)): int(r.np)
+                     for r in code_counts.itertuples()}
+            band_rank = {lab: i for i, lab in enumerate(_band_label(min_cell))}  # heavy=0
             code_disp = {}       # origin_cid -> "VOCAB code" for examples
             for mid, sub in cat_named.groupby("mondo_id"):
                 recs = []
@@ -864,10 +929,17 @@ def main(argv: list[str]) -> int:
                     vocab = str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"
                     code = str(r.concept_code) if pd.notna(r.concept_code) else str(int(r.origin_cid))
                     disp = "climbed" if str(r.via) == "climbed" else "exact"
-                    recs.append({"id": int(r.origin_cid), "vocab": vocab, "code": code, "via": disp})
+                    band = volume_band(np_of.get((str(mid), int(r.origin_cid))), min_cell)
+                    recs.append({"id": int(r.origin_cid), "vocab": vocab, "code": code,
+                                 "via": disp, "band": band})
                     code_disp[int(r.origin_cid)] = f"{vocab} {code}"
-                recs.sort(key=lambda c: (c["via"] != "exact", c["vocab"], c["code"]))
-                source_codes_of[str(mid)] = {"list": recs[:CATALOG_CAP], "n": len(recs)}
+                # histogram over the FULL set (before the display cap); sort heavy-first so
+                # the cap keeps the heavy hitters and the light tail collapses in the UI.
+                hist = band_histogram([c["band"] for c in recs], min_cell)
+                recs.sort(key=lambda c: (band_rank.get(c["band"], 99),
+                                         c["via"] != "exact", c["vocab"], c["code"]))
+                source_codes_of[str(mid)] = {"list": recs[:CATALOG_CAP], "n": len(recs),
+                                             "bands": hist}
 
             # collisions: a single source code attributed to >1 Mondo term -> a patient
             # with that code counts under each. Split by MECHANISM: shared_concept (exact
@@ -958,7 +1030,7 @@ def main(argv: list[str]) -> int:
         for mid in sorted(mapped_ids):
             cids = sorted({int(c) for c in term_match.get(mid, [])})
             codes = codes_of.get(mid, [])
-            cat = source_codes_of.get(mid) or {"list": [], "n": 0}
+            cat = source_codes_of.get(mid) or {"list": [], "n": 0, "bands": []}
             term_rows.append({
                 "mondo_id": mid,
                 "label": label_of.get(mid, mid),
@@ -970,6 +1042,7 @@ def main(argv: list[str]) -> int:
                 "codes_by_vocab": codesbyvocab_of.get(mid, {}),
                 "source_codes": cat["list"],
                 "n_source_codes": cat["n"],
+                "source_bands": cat.get("bands", []),
                 "n_persons": count_of.get(mid, 0),
                 "collision_siblings": siblings.get(mid, []),
                 "collision_kind": collision_kind_of.get(mid, ""),
@@ -1013,8 +1086,10 @@ def main(argv: list[str]) -> int:
             "codes_by_vocab": ";".join(f"{v}:{c}" for v, c in nd["codes_by_vocab"].items()),
             "codes": "|".join(f"{c['vocab']}:{c['code']}" for c in nd["codes"]),
             "n_source_codes": nd.get("n_source_codes", 0),
-            "source_codes": "|".join(f"{c['vocab']}:{c['code']}:{c['via']}"
+            "source_codes": "|".join(f"{c['vocab']}:{c['code']}:{c['via']}:{c.get('band','')}"
                                      for c in nd.get("source_codes", [])),
+            "source_bands": ";".join(f"{b['band']}:{b['codes']}"
+                                     for b in nd.get("source_bands", [])),
             "rare": int(nd["rare"]), "rare_src": "|".join(nd["rare_src"]),
             "parents": "|".join(nd["parents"]),
         } for nd in payload["nodes"] if nd["kind"] != "root"]

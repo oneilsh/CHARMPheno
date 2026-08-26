@@ -1402,14 +1402,47 @@ function codesRow(n){
 // term, each tagged exact (own map) or climbed (rolled up a mapped ancestor). Identity
 // only — a "↑" marks the climbed ones. Absent (empty) for the exact-map count spaces.
 function sourceCatalogRow(n){
-  const sc=n.source_codes||[]; if(!sc.length) return "";
-  const list=sc.map(c=>{const climbed=c.via==="climbed";
+  const sc=n.source_codes||[]; const bands=n.source_bands||[];
+  if(!sc.length&&!bands.length) return "";
+  const total=n.n_source_codes||sc.length;
+  if(!bands.length){                          // legacy payload (pre-band): plain identity list
+    const list=sc.map(c=>{const climbed=c.via==="climbed";
+      const t=`${c.vocab} ${esc(String(c.code))}${climbed?" ↑":""}`;
+      const href=c.id?athena(c.id):athenaSearch(c.code);
+      return `<a href="${href}" target="_blank" rel="noopener" title="${c.vocab} · ${climbed?"climbed (rolled up from a descendant)":"exact match"}">${t}</a>`;}).join(", ");
+    const extra=total>sc.length?` +${total-sc.length}`:"";
+    return `<dt>Source codes (${total})</dt><dd>${list}${extra}`+
+      `<div style="color:var(--muted);margin-top:3px">codes coded in the EHR that map here; <b>↑</b> = climbed to the nearest mapped ancestor</div></dd>`;
+  }
+  // bands arrive heavy->light; opacity ramps with rank so the histogram reads as a shape.
+  const order=bands.map(b=>b.band);
+  const opOf=lab=>{const i=order.indexOf(lab), N=Math.max(order.length-1,1);
+    return i<0?0.4:1-(i/N)*0.6;};
+  const chip=(lab,extra)=>{const o=opOf(lab);
+    return `<span style="display:inline-block;padding:1px 7px;margin:1px 4px 1px 0;border-radius:9px;`+
+      `font-size:11px;white-space:nowrap;background:rgba(122,162,222,${(o*0.30).toFixed(2)});`+
+      `border:1px solid rgba(122,162,222,${(o*0.55).toFixed(2)})">${lab}${extra||""}</span>`;};
+  // "shape": how many CODES sit in each volume band (a code count, never patients).
+  const hist=bands.map(b=>chip(b.band,`<b style="opacity:.6"> ×${b.codes}</b>`)).join("");
+  const histRow=bands.length?`<div style="margin:2px 0 5px">${hist}</div>`:"";
+  // heavy codes (above the ≤20 floor band) shown individually with their band; the
+  // ≤20 tail collapses to a count taken from the FULL-set histogram (not the capped list).
+  const isFloor=c=>!c.band||c.band.startsWith("≤");
+  const heavy=sc.filter(c=>!isFloor(c));
+  const tailBand=bands.find(b=>b.band.startsWith("≤"));
+  const tailN=tailBand?tailBand.codes:sc.filter(isFloor).length;
+  const heavyCapped=Math.max((total-tailN)-heavy.length,0);   // heavy codes cut by the display cap
+  const link=c=>{const climbed=c.via==="climbed";
     const t=`${c.vocab} ${esc(String(c.code))}${climbed?" ↑":""}`;
     const href=c.id?athena(c.id):athenaSearch(c.code);
-    return `<a href="${href}" target="_blank" rel="noopener" title="${c.vocab} · ${climbed?"climbed (rolled up from a descendant)":"exact match"}">${t}</a>`;}).join(", ");
-  const extra=(n.n_source_codes||sc.length)>sc.length?` +${(n.n_source_codes||sc.length)-sc.length}`:"";
-  return `<dt>Source codes (${n.n_source_codes||sc.length})</dt><dd>${list}${extra}`+
-    `<div style="color:var(--muted);margin-top:3px">codes coded in the EHR that map here; <b>↑</b> = climbed to the nearest mapped ancestor</div></dd>`;
+    const b=c.band&&!c.band.startsWith("≤")?` <span style="font-size:10px;color:var(--muted)">${c.band}</span>`:"";
+    return `<a href="${href}" target="_blank" rel="noopener" title="${c.vocab} · ${climbed?"climbed (rolled up from a descendant)":"exact match"}${c.band?" · "+c.band+" patients":""}">${t}</a>${b}`;};
+  const heavyRow=heavy.length?`<div>${heavy.map(link).join(", ")}`
+      +(heavyCapped?` <span style="color:var(--muted)">+${heavyCapped} more above ≤20</span>`:"")+`</div>`:"";
+  const tailLine=tailN?`<div style="color:var(--muted);margin-top:3px">+${tailN} more code${tailN===1?"":"s"}, all ≤20</div>`:"";
+  return `<dt>Source codes (${total})</dt><dd>${histRow}${heavyRow}${tailLine}`+
+    `<div style="color:var(--muted);margin-top:4px">codes coded in the EHR that map here; <b>↑</b> = climbed to the nearest mapped ancestor. `+
+    `Bands = distinct-patient volume as ranges (never exact counts); the shape shows where the weight sits.</div></dd>`;
 }
 function hlMatch(text,q){                  // HTML-escaped text with <mark> around query matches
   text=String(text); if(!q) return esc(text);

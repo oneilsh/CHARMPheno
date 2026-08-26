@@ -193,6 +193,50 @@ def test_suppress_count_floor_inclusive():
     assert m.suppress_count(None) == "n/a"
 
 
+def test_volume_band_ranges_and_floor():
+    # bottom band IS the small-cell floor (identical to a suppressed cell) — no exact
+    # count in 1..floor ever escapes as a band.
+    assert m.volume_band(0) == "0"
+    assert m.volume_band(1) == "≤20"
+    assert m.volume_band(20) == "≤20"          # floor inclusive
+    assert m.volume_band(21) == "21–100"
+    assert m.volume_band(100) == "21–100"
+    assert m.volume_band(101) == "101–1k"
+    assert m.volume_band(1000) == "101–1k"
+    assert m.volume_band(1001) == "1k–10k"
+    assert m.volume_band(10_000) == "1k–10k"
+    assert m.volume_band(10_001) == "10k–100k"
+    assert m.volume_band(100_000) == "10k–100k"
+    assert m.volume_band(100_001) == ">100k"
+    assert m.volume_band(5_000_000) == ">100k"
+    assert m.volume_band(None) == "n/a"
+    # no band label is ever a bare small-cell integer (1..floor)
+    for n in (1, 5, 20, 21, 999, 12345, 200000):
+        lab = m.volume_band(n)
+        assert not (lab.isdigit() and 1 <= int(lab) <= 20)
+
+
+def test_volume_band_respects_custom_floor():
+    assert m.volume_band(50, min_cell=50) == "≤50"
+    assert m.volume_band(51, min_cell=50) == "51–100"
+
+
+def test_band_histogram_counts_codes_heavy_first():
+    bands = (["≤20"] * 184 + ["1k–10k"] * 3 + [">100k"] * 2 + ["101–1k"] * 8)
+    hist = m.band_histogram(bands)
+    # heavy -> light order, empty bands omitted, counts are CODE counts
+    assert hist == [
+        {"band": ">100k", "codes": 2},
+        {"band": "1k–10k", "codes": 3},
+        {"band": "101–1k", "codes": 8},
+        {"band": "≤20", "codes": 184},
+    ]
+    # the "codes" figure is a count of codes (public identities), so a small value like
+    # 2 or 3 is NOT a small-cell disclosure and is reported raw.
+    assert hist[0]["codes"] == 2
+    assert m.band_histogram([]) == []
+
+
 def test_build_safe_summary_suppresses_and_leaks_nothing():
     results = [
         {"space": "source", "min_cell": 20, "mondo_version": "2026-06-02",
@@ -236,9 +280,12 @@ def test_source_code_catalog_passthrough():
     rows = [
         {"mondo_id": "MONDO:A", "label": "a", "is_internal": False, "parents": [],
          "std_concepts": [1], "n_persons": 40, "collision_siblings": [],
-         "source_codes": [{"id": 11, "vocab": "ICD10CM", "code": "E11.9", "via": "exact"},
-                          {"id": 12, "vocab": "ICD10CM", "code": "E11.21", "via": "climbed"}],
-         "n_source_codes": 2},
+         "source_codes": [{"id": 11, "vocab": "ICD10CM", "code": "E11.9", "via": "exact",
+                           "band": "1k–10k"},
+                          {"id": 12, "vocab": "ICD10CM", "code": "E11.21", "via": "climbed",
+                           "band": "≤20"}],
+         "n_source_codes": 2,
+         "source_bands": [{"band": "1k–10k", "codes": 1}, {"band": "≤20", "codes": 1}]},
         {"mondo_id": "MONDO:B", "label": "b", "is_internal": False, "parents": [],
          "std_concepts": [2], "n_persons": 25, "collision_siblings": []},
     ]
@@ -247,9 +294,15 @@ def test_source_code_catalog_passthrough():
     assert by["MONDO:A"]["n_source_codes"] == 2
     assert [c["code"] for c in by["MONDO:A"]["source_codes"]] == ["E11.9", "E11.21"]
     assert by["MONDO:A"]["source_codes"][1]["via"] == "climbed"
+    # per-code band + per-term band histogram pass through (the "where's the weight" shape)
+    assert by["MONDO:A"]["source_codes"][0]["band"] == "1k–10k"
+    assert by["MONDO:A"]["source_bands"] == [{"band": "1k–10k", "codes": 1},
+                                             {"band": "≤20", "codes": 1}]
     # a term with no catalog defaults cleanly; the root too
     assert by["MONDO:B"]["source_codes"] == [] and by["MONDO:B"]["n_source_codes"] == 0
+    assert by["MONDO:B"]["source_bands"] == []
     assert by["root"]["source_codes"] == [] and by["root"]["n_source_codes"] == 0
+    assert by["root"]["source_bands"] == []
 
 
 def test_used_branch_category_for_zero_count_ancestor():
