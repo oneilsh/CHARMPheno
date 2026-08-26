@@ -1329,15 +1329,25 @@ def main(argv: list[str] | None = None) -> int:
             str(fit_script), fit_args, REPO_ROOT,
             driver_memory=_driver_memory_for(model_class),
         )
-        # PC's driver imports analysis.pc (the in-memory eval), which is NOT in
-        # any --py-files zip. In client mode the driver runs on the master where
-        # the repo is checked out, so putting REPO_ROOT on PYTHONPATH lets the
-        # import resolve. Other model_classes import only the zipped packages.
+        # Some drivers import repo modules that are NOT in any --py-files zip. In
+        # client mode the driver runs on the master where the repo is checked out, so
+        # putting the right source dir on PYTHONPATH lets the driver-side import resolve
+        # (executors still only get the zipped packages, which is all they need):
+        #   * pc          -> analysis.pc (in-memory eval) needs REPO_ROOT.
+        #   * mondo_usage -> sibling analysis/cloud modules (anchor_selection_cloud,
+        #                    mondo_to_omop_mapping) need analysis/cloud on the path.
+        # Other model_classes import only the zipped packages.
         fit_env: dict | None = None
         if model_class == "pc":
             fit_env = {
                 **os.environ,
                 "PYTHONPATH": f"{REPO_ROOT}:{os.environ.get('PYTHONPATH', '')}",
+            }
+        elif model_class == "mondo_usage":
+            fit_env = {
+                **os.environ,
+                "PYTHONPATH": f"{REPO_ROOT / 'analysis' / 'cloud'}:"
+                              f"{os.environ.get('PYTHONPATH', '')}",
             }
         # Display-only join; cmd is passed as list to Popen/run, not via shell.
         print(f"[run-exp] spark-submit: {' '.join(fit_cmd)}", flush=True)
