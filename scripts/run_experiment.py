@@ -269,9 +269,10 @@ def validate_frontmatter(fm: dict) -> None:
             sys.exit(2)
 
     model_class = fm["model_class"]
-    if model_class not in ("lda", "stm", "dag_placement", "pc"):
+    if model_class not in ("lda", "stm", "dag_placement", "pc", "mondo_usage"):
         print(f"[run-exp] ERROR: model_class {model_class!r} not supported "
-              f"(currently: lda, stm, dag_placement, pc; hdp planned)", flush=True)
+              f"(currently: lda, stm, dag_placement, pc, mondo_usage; hdp planned)",
+              flush=True)
         sys.exit(2)
 
     if model_class == "stm":
@@ -295,6 +296,8 @@ def build_fit_driver_path(effective: dict) -> str:
         return f"{base}/dag_placement_cloud.py"
     if model_class == "pc":
         return f"{base}/pc_antidepressant_cloud.py"
+    if model_class == "mondo_usage":
+        return f"{base}/mondo_usage_cloud.py"
     raise ValueError(f"no fit driver for model_class={model_class!r}")
 
 
@@ -316,6 +319,8 @@ def build_fit_args(
         return build_dag_placement_args(effective, out_dir, resume_from)
     if model_class == "pc":
         return build_pc_args(effective, out_dir, resume_from)
+    if model_class == "mondo_usage":
+        return build_mondo_usage_args(effective, out_dir, resume_from)
     raise ValueError(f"unknown model_class: {model_class!r}")
 
 
@@ -689,6 +694,31 @@ def build_dag_placement_args(
     if effective.get("optimize_doc_concentration"):
         args.append("--optimize-doc-concentration")
     return args
+
+
+def build_mondo_usage_args(
+    effective: dict, out_dir: str, resume_from: Path | None = None,
+) -> list[str]:
+    """Build argv for analysis/cloud/mondo_usage_cloud.py (whole-Mondo EHR-usage export).
+
+    Fit-only, self-contained: the driver writes ``mondo_usage.json`` +
+    ``mondo_usage_nodes.tsv`` into ``--out`` (the run dir); there is no NPMI eval or
+    dashboard bundle (like dag_placement/pc). ``resume_from`` is ignored — the export is
+    a one-shot. ``count_space`` picks the counting strategy (standard/source/source_climb,
+    exps 0105/0106/0107); everything else has a driver-side default so a minimal
+    frontmatter still runs.
+    """
+    cdr, billing = _require_workspace_env()
+    return [
+        "--cdr", cdr,
+        "--billing", billing,
+        "--out", str(out_dir),
+        "--count-space", str(effective.get("count_space", "standard")),
+        "--source-table", str(effective.get("source_table", "condition_occurrence")),
+        "--min-cell", str(effective.get("min_cell", 20)),
+        "--mondo-version", str(effective.get("mondo_version", "2026-06-02")),
+        "--mondo-cache-dir", str(effective.get("mondo_cache_dir", "data/mondo")),
+    ]
 
 
 def build_pc_args(
@@ -1331,12 +1361,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.build_only:
         print("[run-exp] --build-only: skipping eval dispatch", flush=True)
         # Fall through to the build-dispatch block below.
-    elif effective.get("model_class") in ("dag_placement", "pc"):
+    elif effective.get("model_class") in ("dag_placement", "pc", "mondo_usage"):
         # These write their own self-contained result (dag_placement: npz +
         # manifest with placement AUC/MRR; pc: pc_results.json with per-drug
-        # heldout AUC), not a topic-word bundle the NPMI eval driver can read.
+        # heldout AUC; mondo_usage: mondo_usage.json usage export), not a
+        # topic-word bundle the NPMI eval driver can read.
         _mc = effective.get("model_class")
-        _artifact = "pc_results.json" if _mc == "pc" else "manifest.json"
+        _artifact = {"pc": "pc_results.json",
+                     "mondo_usage": "mondo_usage.json"}.get(_mc, "manifest.json")
         print(f"[run-exp] model_class={_mc}: NPMI eval not wired for the "
               f"self-contained result; skipping eval (see {_artifact} + fit log).",
               flush=True)
