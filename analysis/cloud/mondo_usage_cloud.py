@@ -406,6 +406,13 @@ def suppress_count(n, min_cell: int = _MIN_CELL) -> str:
 # Order is heavy -> light (canonical display order).
 _BAND_UPPERS = [100, 1_000, 10_000, 100_000]     # decade edges above the floor
 
+# The export carries code IDENTITIES only (vocab + code), never concept names: name text
+# would be egress from the workbench, and SNOMED/CPT4/etc. names are licensed. The
+# dashboard resolves human-readable names client-side for the public-domain vocabularies
+# (ICD-9-CM, ICD-10-CM, HCPCS) from a public terminology service (NIH Clinical Tables);
+# licensed vocabularies keep code-only display + an Athena click-through, covered by a
+# SNOMED CT sub-license disclaimer in the UI.
+
 
 def _band_label(min_cell: int) -> "list[str]":
     """Canonical band labels, heaviest first, for a given small-cell floor."""
@@ -798,7 +805,13 @@ def main(argv: list[str]) -> int:
             #     concept_ancestor is SNOMED-only (ICD is non-standard), so only the
             #     standard concept can be climbed; the ICD source rides up through it.
             from pyspark.sql import Window
-            CATALOG_CAP = 60
+            # per-term display cap on the catalogued source codes (heavy-first, so the cap
+            # keeps the high-volume codes). 400 fully covers all but a couple dozen very
+            # broad terms; the dashboard's expandable drawer reveals the full in-payload
+            # list (incl. the ≤20 tail), and any residual beyond the cap is noted as
+            # "+N more". Codes are public identities, so this is a size/UX bound, not a
+            # disclosure one.
+            CATALOG_CAP = 400
 
             # (a) standard mapping: term -> standard concept(s) (drives std_concepts + climb targets)
             src_sdf = spark.createDataFrame(pd.DataFrame({"concept_id_1": source_ids}))
@@ -930,6 +943,9 @@ def main(argv: list[str]) -> int:
                     code = str(r.concept_code) if pd.notna(r.concept_code) else str(int(r.origin_cid))
                     disp = "climbed" if str(r.via) == "climbed" else "exact"
                     band = volume_band(np_of.get((str(mid), int(r.origin_cid))), min_cell)
+                    # code IDENTITY only (no concept name) — names are resolved client-side
+                    # from public terminology services (NIH Clinical Tables) so no licensed
+                    # or bulky description text is egressed from the workbench.
                     recs.append({"id": int(r.origin_cid), "vocab": vocab, "code": code,
                                  "via": disp, "band": band})
                     code_disp[int(r.origin_cid)] = f"{vocab} {code}"

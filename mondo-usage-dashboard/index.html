@@ -1398,6 +1398,45 @@ function codesRow(n){
   const std=(n.std_concepts||[]);                   // standard-space fallback
   return `<dt>Std concepts</dt><dd>${std.map(c=>`<a href="${athena(c)}" target="_blank" rel="noopener">${c}</a>`).join(", ")||"—"}</dd>`;
 }
+// Human-readable names for PUBLIC-DOMAIN source vocabularies, resolved live from NIH
+// Clinical Tables (clinicaltables.nlm.nih.gov — CORS-enabled, no key, US-government
+// public domain). Nothing is embedded in the payload, so no name text is egressed and
+// no licensed content (SNOMED/CPT4) is redistributed. SNOMED etc. have no NIH endpoint
+// and keep code-only display + the Athena link.
+const NIH_EP={ICD10CM:"icd10cm",ICD9CM:"icd9cm_dx",HCPCS:"hcpcs"};
+const nihCache={};                                   // "VOCAB:code" -> name | null (miss)
+function nihName(vocab,code){
+  const key=vocab+":"+code;
+  if(key in nihCache) return Promise.resolve(nihCache[key]);
+  const ep=NIH_EP[vocab];
+  if(!ep){nihCache[key]=null;return Promise.resolve(null);}
+  const url=`https://clinicaltables.nlm.nih.gov/api/${ep}/v3/search?sf=code&df=code,name&maxList=8&terms=${encodeURIComponent(code)}`;
+  return fetch(url).then(r=>r.json()).then(j=>{
+    const rows=(j&&j[3])||[]; let nm=null;
+    for(const row of rows){ if(String(row[0]).toUpperCase()===String(code).toUpperCase()){nm=row[1];break;} }
+    nihCache[key]=nm; return nm;
+  }).catch(()=>{nihCache[key]=null; return null;});
+}
+// resolve-on-hover, reusing the graph's floating tooltip; cached so a code is fetched once.
+(function(){
+  const host=$("#drawer-inner"); if(!host) return;
+  let cur=null;
+  const codeAt=t=>t&&t.closest?t.closest("a[data-nih]"):null;
+  host.addEventListener("mouseover",e=>{
+    const a=codeAt(e.target); if(!a) return; cur=a;
+    const k=a.getAttribute("data-nih")+":"+a.getAttribute("data-code");
+    if(k in nihCache){ if(nihCache[k]) showTip(e,nihCache[k]); return; }
+    showTip(e,"…");
+    nihName(a.getAttribute("data-nih"),a.getAttribute("data-code"))
+      .then(nm=>{ if(cur!==a) return; nm?showTip(e,nm):hideTip(); });
+  });
+  host.addEventListener("mousemove",e=>{
+    const a=codeAt(e.target); if(!a){return;}
+    const nm=nihCache[a.getAttribute("data-nih")+":"+a.getAttribute("data-code")];
+    if(nm) showTip(e,nm);
+  });
+  host.addEventListener("mouseout",e=>{ if(codeAt(e.target)){cur=null; hideTip();} });
+})();
 // source_climb catalog: the originating source codes (ICD etc.) that reached this
 // term, each tagged exact (own map) or climbed (rolled up a mapped ancestor). Identity
 // only — a "↑" marks the climbed ones. Absent (empty) for the exact-map count spaces.
@@ -1425,23 +1464,32 @@ function sourceCatalogRow(n){
   // "shape": how many CODES sit in each volume band (a code count, never patients).
   const hist=bands.map(b=>chip(b.band,`<b style="opacity:.6"> ×${b.codes}</b>`)).join("");
   const histRow=bands.length?`<div style="margin:2px 0 5px">${hist}</div>`:"";
-  // heavy codes (above the ≤20 floor band) shown individually with their band; the
-  // ≤20 tail collapses to a count taken from the FULL-set histogram (not the capped list).
-  const isFloor=c=>!c.band||c.band.startsWith("≤");
-  const heavy=sc.filter(c=>!isFloor(c));
-  const tailBand=bands.find(b=>b.band.startsWith("≤"));
-  const tailN=tailBand?tailBand.codes:sc.filter(isFloor).length;
-  const heavyCapped=Math.max((total-tailN)-heavy.length,0);   // heavy codes cut by the display cap
   const link=c=>{const climbed=c.via==="climbed";
     const t=`${c.vocab} ${esc(String(c.code))}${climbed?" ↑":""}`;
     const href=c.id?athena(c.id):athenaSearch(c.code);
     const b=c.band&&!c.band.startsWith("≤")?` <span style="font-size:10px;color:var(--muted)">${c.band}</span>`:"";
-    return `<a href="${href}" target="_blank" rel="noopener" title="${c.vocab} · ${climbed?"climbed (rolled up from a descendant)":"exact match"}${c.band?" · "+c.band+" patients":""}">${t}</a>${b}`;};
-  const heavyRow=heavy.length?`<div>${heavy.map(link).join(", ")}`
-      +(heavyCapped?` <span style="color:var(--muted)">+${heavyCapped} more above ≤20</span>`:"")+`</div>`:"";
-  const tailLine=tailN?`<div style="color:var(--muted);margin-top:3px">+${tailN} more code${tailN===1?"":"s"}, all ≤20</div>`:"";
-  return `<dt>Source codes (${total})</dt><dd>${histRow}${heavyRow}${tailLine}`+
+    const tip=`${c.vocab} · ${climbed?"climbed (rolled up from a descendant)":"exact match"}${c.band?" · "+c.band+" patients":""}`;
+    // public-domain vocabs (ICD/HCPCS) get their name resolved on hover from NIH Clinical
+    // Tables (see the hover handler below); licensed vocabs (SNOMED) keep code + Athena only.
+    const nih=NIH_EP[c.vocab]?` data-nih="${c.vocab}" data-code="${esc(String(c.code))}"`:"";
+    return `<a href="${href}" target="_blank" rel="noopener" title="${tip}"${nih}>${t}</a>${b}`;};
+  // preview the first few (heavy-first); expand the drawer to the full in-payload list,
+  // ≤20 tail included. Any codes beyond the export cap (all ≤20) are noted, not hidden.
+  const PREVIEW=8;
+  const inPayload=sc.length;
+  const notListed=Math.max(total-inPayload,0);
+  const preview=sc.slice(0,PREVIEW).map(link).join(", ");
+  const moreInPayload=inPayload>PREVIEW;
+  const allBody=sc.map(link).join(", ")
+    +(notListed?` <span style="color:var(--muted)">+${notListed} more not listed (all ≤20)</span>`:"");
+  const drawer=(moreInPayload||notListed)
+    ? `<details style="margin-top:5px"><summary style="cursor:pointer;color:var(--desc)">`
+      +`Show all ${total} codes${notListed?" (incl. ≤20)":""}</summary>`
+      +`<div style="margin-top:5px;line-height:1.9">${allBody}</div></details>`
+    : "";
+  return `<dt>Source codes (${total})</dt><dd>${histRow}<div style="line-height:1.9">${preview}${moreInPayload?" …":""}</div>${drawer}`+
     `<div style="color:var(--muted);margin-top:4px">codes coded in the EHR that map here; <b>↑</b> = climbed to the nearest mapped ancestor. `+
+    `Hover an ICD/HCPCS code for its name (NIH Clinical Tables); SNOMED&nbsp;CT&reg; and other codes link to Athena. `+
     `Bands = distinct-patient volume as ranges (never exact counts); the shape shows where the weight sits.</div></dd>`;
 }
 function hlMatch(text,q){                  // HTML-escaped text with <mark> around query matches

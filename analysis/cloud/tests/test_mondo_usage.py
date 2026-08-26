@@ -294,6 +294,8 @@ def test_source_code_catalog_passthrough():
     assert by["MONDO:A"]["n_source_codes"] == 2
     assert [c["code"] for c in by["MONDO:A"]["source_codes"]] == ["E11.9", "E11.21"]
     assert by["MONDO:A"]["source_codes"][1]["via"] == "climbed"
+    # codes carry identity + band only, no embedded name (names resolved client-side)
+    assert "name" not in by["MONDO:A"]["source_codes"][0]
     # per-code band + per-term band histogram pass through (the "where's the weight" shape)
     assert by["MONDO:A"]["source_codes"][0]["band"] == "1k–10k"
     assert by["MONDO:A"]["source_bands"] == [{"band": "1k–10k", "codes": 1},
