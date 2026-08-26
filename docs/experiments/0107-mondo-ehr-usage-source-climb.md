@@ -63,11 +63,18 @@ vs `climbed`, so you can see exactly which real-world codes feed each Mondo term
   equally-near mapped ancestors, or a standard concept shared by several terms, counts
   in each and is flagged (orange ring + "don't sum" note).
 - **Source-codes drawer section** — per term, the catalogued originating codes; `↑`
-  marks the climbed ones.
+  marks the climbed ones. Each code carries a **volume band** (a log-decade RANGE, not
+  an exact count) and the term shows a **band histogram** (counts of CODES per band) —
+  the "where's the weight" shape that exposes a Mondo-thin term riding on a few heavy
+  codes with a long `≤20` tail.
 
 Disclosure unchanged: only per-term floored patient totals + code identities (vocab +
-code + exact/climbed) are published; never per-code patient counts, so nothing is
-differenceable back to a suppressed cell.
+code + exact/climbed) + magnitude **bands** are published. Per-code patient counts never
+leave the cluster; a band is a range (`≤20 / 21–100 / 101–1k / 1k–10k / 10k–100k / >100k`)
+and the difference of two ranges is a range, never a person — so bands compose safely
+with the exact per-term totals and nothing is differenceable back to a suppressed cell.
+Band histograms count codes (public identities), not patients, so they are safe at any
+value.
 
 ## Run
 
