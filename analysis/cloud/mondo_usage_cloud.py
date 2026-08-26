@@ -938,17 +938,24 @@ def main(argv: list[str]) -> int:
             code_disp = {}       # origin_cid -> "VOCAB code" for examples
             for mid, sub in cat_named.groupby("mondo_id"):
                 recs = []
+                seen = set()   # one row per concept id: a code reaching a term via BOTH
+                               # source_exact and standard_exact must not display (or count
+                               # in the histogram) twice — both collapse to display "exact".
                 for r in sub.itertuples():
+                    cid = int(r.origin_cid)
+                    if cid in seen:
+                        continue
+                    seen.add(cid)
                     vocab = str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"
-                    code = str(r.concept_code) if pd.notna(r.concept_code) else str(int(r.origin_cid))
+                    code = str(r.concept_code) if pd.notna(r.concept_code) else str(cid)
                     disp = "climbed" if str(r.via) == "climbed" else "exact"
-                    band = volume_band(np_of.get((str(mid), int(r.origin_cid))), min_cell)
+                    band = volume_band(np_of.get((str(mid), cid)), min_cell)
                     # code IDENTITY only (no concept name) — names are resolved client-side
                     # from public terminology services (NIH Clinical Tables) so no licensed
                     # or bulky description text is egressed from the workbench.
-                    recs.append({"id": int(r.origin_cid), "vocab": vocab, "code": code,
+                    recs.append({"id": cid, "vocab": vocab, "code": code,
                                  "via": disp, "band": band})
-                    code_disp[int(r.origin_cid)] = f"{vocab} {code}"
+                    code_disp[cid] = f"{vocab} {code}"
                 # histogram over the FULL set (before the display cap); sort heavy-first so
                 # the cap keeps the heavy hitters and the light tail collapses in the UI.
                 hist = band_histogram([c["band"] for c in recs], min_cell)
