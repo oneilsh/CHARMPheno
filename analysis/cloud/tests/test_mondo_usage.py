@@ -153,6 +153,46 @@ def test_code_multiplicity_passthrough_and_stats():
     assert p["stats"]["multi_code_terms"] == 1       # only A maps >1 code
 
 
+def test_suppress_count_floor_inclusive():
+    assert m.suppress_count(0) == "0"
+    assert m.suppress_count(1) == "≤20"
+    assert m.suppress_count(20) == "≤20"        # floor inclusive
+    assert m.suppress_count(21) == "21"
+    assert m.suppress_count(None) == "n/a"
+
+
+def test_build_safe_summary_suppresses_and_leaks_nothing():
+    results = [
+        {"space": "source", "min_cell": 20, "mondo_version": "2026-06-02",
+         "generated_utc": "2026-08-26T00:00:00Z",
+         "stats": {"mapped_terms": 8894, "used_terms": 4000, "used_fraction": 0.45,
+                   "reported_terms": 2700, "used_small_terms": 1300,
+                   "collision_terms": 0, "rare_used_terms": 2000},
+         "survey": {}, "n_total": 400000, "n_coded": 390000, "n_on_mondo": 300000},
+        {"space": "source_climb", "min_cell": 20, "mondo_version": "2026-06-02",
+         "generated_utc": "2026-08-26T00:00:00Z",
+         "stats": {"mapped_terms": 8894, "used_terms": 4600, "used_fraction": 0.52,
+                   "reported_terms": 2740, "used_small_terms": 1860,
+                   "collision_terms": 211, "rare_used_terms": 2275},
+         # small tier / vocab counts MUST be suppressed
+         "survey": {"persons_source_exact": 250000, "persons_standard_exact": 40000,
+                    "persons_climbed": 7, "persons_unmatched_by_vocab": {"ICD9CM": 3}},
+         "n_total": 400000, "n_coded": 390000, "n_on_mondo": 330000},
+    ]
+    out = m.build_safe_summary(results)
+    # both spaces summarized; term counts (safe) present
+    assert "`source`" in out and "`source_climb`" in out and "8894" in out
+    # small person figures are ≤-suppressed, never shown raw
+    assert "climbed ≤20" in out          # 7 -> ≤20
+    assert "ICD9CM=≤20" in out           # 3 -> ≤20
+    assert " 7" not in out and "=3" not in out
+    # no workbench/project identifier leaks (we never pass args.cdr in); a
+    # `wb-<name>-<n>.rNNNN` workbench id or a `.rNNNN` release suffix must be absent.
+    import re
+    assert "wb-" not in out
+    assert not re.search(r"\br\d{4}\b", out.replace("2026", ""))
+
+
 def test_source_code_catalog_passthrough():
     # source_climb space: each term catalogs the originating source codes (ICD etc.)
     # that reached it, as identity + a total; assemble_payload passes them through

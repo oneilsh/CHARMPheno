@@ -24,6 +24,10 @@ mondo_cache_dir: "data/mondo"
 
 # 0107 — Whole-Mondo EHR usage with a partial roll-up (source_climb)
 
+> **Tip:** exp **0108** runs this space together with `standard` (0105) and `source`
+> (0106) in one job (`--count-space all`) and writes a safe cross-space summary. Run 0107
+> alone only for the source_climb space in isolation.
+
 Same report as 0105/0106, but instead of a single exact-match rule it walks an
 attribution **ladder**, preferring the most specific mapped term and only rolling up
 when nothing more specific is mapped.

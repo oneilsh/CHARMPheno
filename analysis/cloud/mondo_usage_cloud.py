@@ -45,6 +45,11 @@ COUNT SPACE (``--count-space``). Three ways to count a term's patients:
     whatever standard concept OMOP assigned. Recovers coverage ``source`` drops without
     the blanket ``Maps to`` decomposition of ``standard``. Emits a per-vocabulary
     coverage survey (persons exact/climbed/unmatched). Requires ``condition_occurrence``.
+  * ``all``: run all three spaces in ONE Spark session (shared Mondo/DAG/rare structure);
+    write ``mondo_usage_<space>.json`` for each, a primary ``mondo_usage.json`` (=
+    source_climb, the dashboard default), per-space ``_nodes.tsv``, and a disclosure-SAFE
+    ``mondo_usage_summary.md`` (term counts + ≤-suppressed person figures, no CDR id) for
+    a side-by-side comparison. See exp 0108.
 
 MULTI-MAPPING / COLLISIONS. In ``standard`` space the only cross-term collision is
 the ``Maps to`` convergence above (measurable from the mapping frame,
@@ -73,6 +78,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -285,6 +291,73 @@ def _used_path_set(parents_of: dict[str, list[str]], used: set) -> set:
     return on_path
 
 
+def suppress_count(n, min_cell: int = _MIN_CELL) -> str:
+    """AoU small-cell display for a patient count: ``≤{floor}`` when 1..floor,
+    else the exact integer. ``None``/missing -> ``"n/a"``. Used for every
+    patient-derived figure that leaves the cluster (the safe summary), so nothing
+    at or below the floor is ever emitted."""
+    if n is None:
+        return "n/a"
+    n = int(n)
+    if n <= 0:
+        return "0"
+    return f"≤{min_cell}" if n <= min_cell else str(n)
+
+
+def build_safe_summary(results: list[dict]) -> str:
+    """A copy-pasteable, disclosure-SAFE summary of one or more count-space runs.
+
+    ``results`` is one dict per space: ``space``, ``stats`` (the payload stats block),
+    ``survey`` (source_climb tier coverage, or empty), ``n_total/n_coded/n_on_mondo``
+    (raw person counts), ``min_cell``, ``mondo_version``, ``generated_utc``.
+
+    SAFE by construction: it prints only term COUNTS (terms are not patients) and
+    aggregate fractions, and every patient-derived figure is run through
+    ``suppress_count`` (≤floor). It deliberately never includes the workbench/CDR id or
+    any per-term patient number — so it can be pasted anywhere. Pure and time-free."""
+    if not results:
+        return "# Mondo EHR usage — no results\n"
+    min_cell = results[0].get("min_cell", _MIN_CELL)
+    mv = results[0].get("mondo_version", "?")
+    gen = results[0].get("generated_utc", "?")
+    L = ["# Mondo EHR usage — count-space comparison",
+         "",
+         f"- Mondo version: **{mv}**  ·  generated: {gen}",
+         f"- Source: All of Us EHR (aggregated; counts of ≤{min_cell} suppressed as "
+         f"`≤{min_cell}`, never shown exactly)",
+         "- All figures below are term COUNTS (not patients) or ≤-suppressed person "
+         "counts; nothing here is a per-term patient number or a CDR identifier.",
+         "",
+         "| count space | mapped terms | used | used % | reported (>{c}) | used-small (≤{c}) | collision-flagged | rare used |"
+         .format(c=min_cell),
+         "|---|--:|--:|--:|--:|--:|--:|--:|"]
+    for r in results:
+        s = r["stats"]
+        L.append("| `{sp}` | {mapped} | {used} | {pct:.1f}% | {rep} | {sm} | {col} | {rare} |".format(
+            sp=r["space"], mapped=s["mapped_terms"], used=s["used_terms"],
+            pct=100.0 * s.get("used_fraction", 0.0), rep=s["reported_terms"],
+            sm=s["used_small_terms"], col=s["collision_terms"], rare=s.get("rare_used_terms", 0)))
+    L += ["", "## Person coverage (≤-suppressed)", ""]
+    for r in results:
+        L.append(f"- `{r['space']}` — total persons {suppress_count(r.get('n_total'), min_cell)}"
+                 f" · coded {suppress_count(r.get('n_coded'), min_cell)}"
+                 f" · on any mapped Mondo term {suppress_count(r.get('n_on_mondo'), min_cell)}")
+    climb = next((r for r in results if r.get("survey")), None)
+    if climb:
+        sv = climb["survey"]
+        L += ["", "## source_climb attribution survey (≤-suppressed)", "",
+              f"- persons by tier (overlapping): source-exact "
+              f"{suppress_count(sv.get('persons_source_exact'), min_cell)} · standard-exact "
+              f"{suppress_count(sv.get('persons_standard_exact'), min_cell)} · climbed "
+              f"{suppress_count(sv.get('persons_climbed'), min_cell)}",
+              "- unmatched persons by source vocabulary: " +
+              (", ".join(f"{v}={suppress_count(n, min_cell)}" for v, n in sorted(
+                  sv.get("persons_unmatched_by_vocab", {}).items(),
+                  key=lambda kv: -(kv[1] or 0))) or "(none)")]
+    L.append("")
+    return "\n".join(L)
+
+
 def assemble_payload(*, meta: dict, term_rows: list[dict],
                      min_cell: int = _MIN_CELL) -> dict:
     """Build the dashboard JSON. ``term_rows`` is one dict per mapped Mondo term:
@@ -431,7 +504,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--out", required=True, help="output dir for the artifacts")
     p.add_argument("--source-table", default="condition_occurrence",
                    help="OMOP condition source (condition_occurrence or condition_era)")
-    p.add_argument("--count-space", choices=("standard", "source", "source_climb"),
+    p.add_argument("--count-space",
+                   choices=("standard", "source", "source_climb", "all"),
                    default="standard",
                    help="'standard': count condition_concept_id (via same_as->Maps to); "
                         "'source': count condition_source_concept_id against the term's own "
@@ -487,206 +561,9 @@ def main(argv: list[str]) -> int:
         codesbyvocab_of[str(mid)] = {v: int(c) for v, c
                                      in sub["vocabulary_id"].value_counts().items()}
 
-    source_codes_of: dict[str, list[dict]] = {}   # source_climb catalog (empty otherwise)
-    survey: dict = {}                             # source_climb tier coverage (empty otherwise)
-
-    if args.count_space == "source":
-        # --- SOURCE space: match condition_source_concept_id to the term's OWN
-        #     same_as source concepts. No Maps to => no decomposition, no cross-term
-        #     collisions (same_as is source-injective). Coverage limited to the
-        #     vocabularies Mondo lists (patients coded only in ICD9 etc. are missed).
-        term_match = {m: sorted({c["id"] for c in cs}) for m, cs in codes_of.items()}
-        pairs = [(cid, m) for m, cs in term_match.items() for cid in cs]
-        id_to_mondos = collision_map(pairs)
-        siblings = term_collision_siblings(term_match, id_to_mondos)
-        match_pd = srcu[["mondo_id", "concept_id"]].drop_duplicates().rename(
-            columns={"concept_id": "match_cid"})
-        match_pd["match_cid"] = match_pd["match_cid"].astype(int)
-        m_sdf = broadcast(spark.createDataFrame(match_pd))
-        cond = (_read_bq(spark, args.cdr, args.billing, "condition_occurrence")
-                .select("person_id",
-                        F.col("condition_source_concept_id").alias("match_cid2"))
-                .where(F.col("match_cid2").isNotNull() & (F.col("match_cid2") != 0))
-                ).cache()
-        hit = (cond.join(m_sdf, cond["match_cid2"] == m_sdf["match_cid"], "inner")
-               .select("person_id", "mondo_id"))
-    elif args.count_space == "source_climb":
-        # --- SOURCE_CLIMB: 3-tier partial roll-up, preferring the most SPECIFIC
-        #     mapped Mondo term reachable, and always cataloguing the ORIGINATING
-        #     source code. Precedence (first hit wins; never climb past an exact):
-        #       (1) source-exact  : condition_source_concept_id is a term same_as code
-        #       (2) standard-exact: condition_concept_id (same_as -> Maps to) hits a term
-        #       (3) climb         : nearest mapped ancestor of condition_concept_id in
-        #                           SNOMED concept_ancestor (ties -> all, flagged)
-        #     concept_ancestor is SNOMED-only (ICD is non-standard), so only the
-        #     standard concept can be climbed; the ICD source rides up through it.
-        from pyspark.sql import Window
-        CATALOG_CAP = 60
-
-        # (a) standard mapping: term -> standard concept(s) (drives std_concepts + climb targets)
-        src_sdf = spark.createDataFrame(pd.DataFrame({"concept_id_1": source_ids}))
-        cr_pd = (_read_bq(spark, args.cdr, args.billing, "concept_relationship")
-                 .select("concept_id_1", "concept_id_2", "relationship_id")
-                 .where(F.col("relationship_id") == "Maps to")
-                 .join(broadcast(src_sdf), "concept_id_1", "inner").toPandas())
-        mapping = build_mondo_to_omop(
-            mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
-            concept_df=concept_pd, concept_relationship_df=cr_pd, restrict_mondo_ids=None)
-        ts = mapping[["mondo_id", "standard_concept_id"]].drop_duplicates()
-        ts["standard_concept_id"] = ts["standard_concept_id"].astype(int)
-        term_match = ts.groupby("mondo_id")["standard_concept_id"].apply(
-            lambda s: sorted(set(int(x) for x in s))).to_dict()
-        std_map_pd = ts.rename(columns={"standard_concept_id": "map_cid"})   # map_cid -> mondo_id
-        mapped_std_ids = sorted({int(x) for x in ts["standard_concept_id"]})
-        std_sdf = broadcast(spark.createDataFrame(std_map_pd))
-        std_ids_sdf = broadcast(spark.createDataFrame(
-            pd.DataFrame({"map_cid": mapped_std_ids})))
-
-        # (b) source-exact mapping: term same_as source concept -> mondo_id
-        srcmap_pd = srcu[["mondo_id", "concept_id"]].drop_duplicates().rename(
-            columns={"concept_id": "map_cid"})
-        srcmap_pd["map_cid"] = srcmap_pd["map_cid"].astype(int)
-        srcmap_sdf = broadcast(spark.createDataFrame(srcmap_pd))
-        src_ids_sdf = broadcast(spark.createDataFrame(
-            pd.DataFrame({"src_cid": sorted({int(x) for x in srcmap_pd["map_cid"]})})))
-
-        # condition rows: originating source (src_cid) + its standard concept (std_cid)
-        cond = (_read_bq(spark, args.cdr, args.billing, "condition_occurrence")
-                .select("person_id",
-                        F.col("condition_source_concept_id").alias("src_cid"),
-                        F.col("condition_concept_id").alias("std_cid"))
-                .where(F.col("src_cid").isNotNull() | F.col("std_cid").isNotNull())
-                ).cache()
-
-        # originating identity: the ICD source code, falling back to the standard
-        # concept when no usable source concept was recorded (src null or 0).
-        origin = F.when(F.col("src_cid").isNotNull() & (F.col("src_cid") != 0),
-                        F.col("src_cid")).otherwise(F.col("std_cid"))
-
-        # TIER 1 — source-exact
-        t1 = (cond.join(srcmap_sdf, cond["src_cid"] == srcmap_sdf["map_cid"], "inner")
-              .select("person_id", "mondo_id",
-                      F.col("src_cid").alias("origin_cid"), F.lit("exact").alias("via")))
-        # rows whose source code is NOT a same_as (fall through to tier 2/3)
-        rem1 = cond.join(src_ids_sdf, cond["src_cid"] == src_ids_sdf["src_cid"], "left_anti")
-
-        # TIER 2 — standard-exact (origin = the ICD source code, or std if none)
-        t2 = (rem1.join(std_sdf, rem1["std_cid"] == std_sdf["map_cid"], "inner")
-              .select("person_id", "mondo_id",
-                      origin.alias("origin_cid"), F.lit("exact").alias("via")))
-        # rows whose standard concept is ALSO not a mapped term -> candidates to climb
-        rem2 = rem1.join(std_ids_sdf, rem1["std_cid"] == std_ids_sdf["map_cid"], "left_anti")
-
-        # TIER 3 — climb SNOMED concept_ancestor to the nearest mapped term(s)
-        ca = (_read_bq(spark, args.cdr, args.billing, "concept_ancestor")
-              .select("ancestor_concept_id", "descendant_concept_id",
-                      "min_levels_of_separation")
-              .where(F.col("min_levels_of_separation") >= 1))
-        unmatched_std = rem2.select("std_cid").distinct()
-        ca_f = (ca.join(std_ids_sdf, ca["ancestor_concept_id"] == std_ids_sdf["map_cid"], "inner")
-                  .join(unmatched_std, ca["descendant_concept_id"] == unmatched_std["std_cid"], "inner")
-                  .select(ca["descendant_concept_id"].alias("std_cid"),
-                          ca["ancestor_concept_id"].alias("anc_cid"),
-                          ca["min_levels_of_separation"].alias("lev")))
-        nearest = (ca_f.withColumn(
-                       "mlev", F.min("lev").over(Window.partitionBy("std_cid")))
-                   .where(F.col("lev") == F.col("mlev"))
-                   .select("std_cid", "anc_cid"))
-        anc_map = std_sdf.select(std_sdf["map_cid"].alias("anc_cid"),
-                                 std_sdf["mondo_id"].alias("anc_mondo"))
-        t3 = (rem2.join(nearest, "std_cid", "inner")
-              .join(broadcast(anc_map), "anc_cid", "inner")
-              .select("person_id", F.col("anc_mondo").alias("mondo_id"),
-                      origin.alias("origin_cid"), F.lit("climbed").alias("via")))
-
-        attribution = (t1.unionByName(t2).unionByName(t3)).cache()
-        hit = attribution.select("person_id", "mondo_id")
-
-        # per-term catalog of ORIGINATING source codes (identity only, via = exact/climbed;
-        # exact wins if a code reaches a term both ways). Named via the concept table.
-        cat = (attribution.select("mondo_id", "origin_cid", "via").distinct()
-               .withColumn("vrank", F.when(F.col("via") == "exact", 0).otherwise(1)))
-        cat = (cat.withColumn("best", F.min("vrank").over(
-                   Window.partitionBy("mondo_id", "origin_cid")))
-               .where(F.col("vrank") == F.col("best"))
-               .select("mondo_id", "origin_cid", "via").distinct())
-        concept_all = (_read_bq(spark, args.cdr, args.billing, "concept")
-                       .select(F.col("concept_id").alias("origin_cid"),
-                               "vocabulary_id", "concept_code"))
-        cat_named = (cat.join(concept_all, "origin_cid", "left")
-                     .select("mondo_id", "origin_cid", "via", "vocabulary_id", "concept_code")
-                     .toPandas())
-        for mid, sub in cat_named.groupby("mondo_id"):
-            recs = [{"id": int(r.origin_cid),
-                     "vocab": (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"),
-                     "code": (str(r.concept_code) if pd.notna(r.concept_code) else str(int(r.origin_cid))),
-                     "via": str(r.via)}
-                    for r in sub.itertuples()]
-            recs.sort(key=lambda c: (c["via"] != "exact", c["vocab"], c["code"]))
-            source_codes_of[str(mid)] = {"list": recs[:CATALOG_CAP], "n": len(recs)}
-
-        # collisions: a single source code attributed to >1 Mondo term (standard-exact
-        # coarsening or a climb tie) -> a patient with that code counts under each.
-        pairs_pd = cat_named[["origin_cid", "mondo_id"]].drop_duplicates()
-        id_to_mondos = collision_map(
-            [(int(c), str(m)) for c, m in pairs_pd.itertuples(index=False)])
-        term_origins = (cat_named.groupby("mondo_id")["origin_cid"]
-                        .apply(lambda s: [int(x) for x in s]).to_dict())
-        siblings = term_collision_siblings(
-            {str(k): v for k, v in term_origins.items()}, id_to_mondos)
-
-        # survey: distinct persons resolved at each tier (overlapping across tiers) and
-        # the unmatched remainder by originating-source vocabulary.
-        unmatched = rem2.join(nearest.select("std_cid").distinct(), "std_cid", "left_anti")
-        src_vocab = concept_all.select(F.col("origin_cid").alias("src_cid"), "vocabulary_id")
-        unm_by_vocab = (unmatched.join(src_vocab, "src_cid", "left")
-                        .groupBy("vocabulary_id")
-                        .agg(F.countDistinct("person_id").alias("persons"))
-                        .toPandas())
-        survey = {
-            "persons_source_exact": int(t1.select("person_id").distinct().count()),
-            "persons_standard_exact": int(t2.select("person_id").distinct().count()),
-            "persons_climbed": int(t3.select("person_id").distinct().count()),
-            "persons_unmatched_by_vocab": {
-                (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"): int(r.persons)
-                for r in unm_by_vocab.itertuples()},
-        }
-    else:
-        # --- STANDARD space (default): condition_concept_id via same_as -> Maps to.
-        src_sdf = spark.createDataFrame(pd.DataFrame({"concept_id_1": source_ids}))
-        cr_pd = (_read_bq(spark, args.cdr, args.billing, "concept_relationship")
-                 .select("concept_id_1", "concept_id_2", "relationship_id")
-                 .where(F.col("relationship_id") == "Maps to")
-                 .join(broadcast(src_sdf), "concept_id_1", "inner").toPandas())
-        mapping = build_mondo_to_omop(
-            mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
-            concept_df=concept_pd, concept_relationship_df=cr_pd, restrict_mondo_ids=None)
-        ts = mapping[["mondo_id", "standard_concept_id"]].drop_duplicates()
-        ts["standard_concept_id"] = ts["standard_concept_id"].astype(int)
-        term_match = ts.groupby("mondo_id")["standard_concept_id"].apply(
-            lambda s: sorted(set(int(x) for x in s))).to_dict()
-        std_to_mondos = collision_map(zip(ts["standard_concept_id"], ts["mondo_id"]))
-        siblings = term_collision_siblings(term_match, std_to_mondos)
-        ts_sdf = broadcast(spark.createDataFrame(
-            ts.rename(columns={"standard_concept_id": "match_cid"})))
-        cond = load_omop_bigquery(
-            spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
-            source_table=args.source_table).select("person_id", "concept_id").cache()
-        hit = (cond.join(ts_sdf, cond["concept_id"] == ts_sdf["match_cid"], "inner")
-               .select("person_id", "mondo_id"))
-
-    # --- 2. EXACT-match person counts per term (NO concept_ancestor climb) --------
-    term_counts = (hit.groupBy("mondo_id")
-                   .agg(F.countDistinct("person_id").alias("n")).toPandas())
-    count_of = {str(r["mondo_id"]): int(r["n"]) for _, r in term_counts.iterrows()}
-
-    # placement ladder (persons-on-Mondo is the one suppressed patient figure).
+    # ---- space-independent structure (computed once, reused for every count space) ----
     n_total = (_read_bq(spark, args.cdr, args.billing, "person")
                .select("person_id").distinct().count())
-    n_coded = cond.select("person_id").distinct().count()
-    n_on_mondo = hit.select("person_id").distinct().count()
-
-    # --- 3. hierarchy structure over mapped terms (nearest mapped ancestor) -------
     child_adj = _disease_child_adjacency(edges_df, nodes_df)      # parent -> [children]
     disease_set = set(child_adj) | {c for ch in child_adj.values() for c in ch}
     has_child = {p for p, ch in child_adj.items()
@@ -695,106 +572,315 @@ def main(argv: list[str]) -> int:
     for parent, children in child_adj.items():
         for c in children:
             parent_adj.setdefault(c, []).append(parent)
-
-    # term universe: the mapped terms, plus (source_climb) any term that received a
-    # count or catalogued source code even if its standard mapping was empty.
-    mapped_ids = set(term_match) | set(count_of) | set(source_codes_of)
-    parents = nearest_mapped_parents(mapped_ids, parent_adj)
     label_of = {str(i): str(n) for i, n in zip(nodes_df["id"], nodes_df["name"])}
-
-    # Mondo rare-disease designations, parsed straight from the Mondo `subsets`
-    # field (count-space independent): per term, rare? + which source registries.
     rare_of, rare_src_of = rare_from_nodes(nodes_df)
-
-    term_rows = []
-    for mid in sorted(mapped_ids):
-        cids = sorted({int(c) for c in term_match.get(mid, [])})
-        codes = codes_of.get(mid, [])
-        cat = source_codes_of.get(mid) or {"list": [], "n": 0}
-        term_rows.append({
-            "mondo_id": mid,
-            "label": label_of.get(mid, mid),
-            "is_internal": mid in has_child,
-            "parents": parents.get(mid, []),
-            "std_concepts": cids,
-            "codes": codes,
-            "n_codes": len(codes),
-            "codes_by_vocab": codesbyvocab_of.get(mid, {}),
-            "source_codes": cat["list"],
-            "n_source_codes": cat["n"],
-            "n_persons": count_of.get(mid, 0),
-            "collision_siblings": siblings.get(mid, []),
-            "rare": rare_of.get(mid, False),
-            "rare_src": rare_src_of.get(mid, []),
-        })
-
-    # --- 4. assemble + persist ----------------------------------------------------
-    meta = {
-        "mondo_version": args.mondo_version,
-        "cdr": args.cdr,
-        "source_table": args.source_table,
-        "min_cell": min_cell,
-        "rollup": False,
-        "count_space": args.count_space,
-        "count_rule": {
-            "source": ("distinct persons whose condition_source_concept_id exactly "
-                       "matches one of the term's Mondo same_as source codes (no Maps to)"),
-            "source_climb": ("distinct persons attributed to the most specific mapped "
-                             "Mondo term reachable: source-exact (same_as), else "
-                             "standard-exact (condition_concept_id), else nearest mapped "
-                             "SNOMED ancestor via concept_ancestor (ties counted in each)"),
-        }.get(args.count_space,
-              "distinct persons with an EXACT-match standard condition concept "
-              "(same_as -> Maps to)"),
-        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-    if survey:
-        meta["survey"] = survey
-    payload = assemble_payload(meta=meta, term_rows=term_rows, min_cell=min_cell)
-
-    # persons-on-Mondo ladder line (suppressed) for the log.
-    def _sup(n):
-        return f"≤{min_cell}" if 0 < n <= min_cell else str(int(n))
-    sys.stderr.write(format_summary(payload["stats"], min_cell=min_cell) + "\n")
-    _attr = "attributed" if args.count_space == "source_climb" else "exact"
-    sys.stderr.write(
-        f"[ladder] persons total {n_total} | coded {_sup(n_coded)} | on any mapped "
-        f"Mondo term ({_attr}) {_sup(n_on_mondo)} "
-        f"({100.0 * n_on_mondo / max(n_total, 1):.1f}% of all persons)\n")
-    if survey:
-        sv = survey
-        sys.stderr.write(
-            f"[source_climb survey] persons by tier (overlapping): "
-            f"source-exact {_sup(sv['persons_source_exact'])} | "
-            f"standard-exact {_sup(sv['persons_standard_exact'])} | "
-            f"climbed {_sup(sv['persons_climbed'])}\n"
-            f"[source_climb survey] unmatched persons by source vocabulary: " +
-            ", ".join(f"{v}={_sup(n)}" for v, n
-                      in sorted(sv["persons_unmatched_by_vocab"].items(),
-                                key=lambda kv: -kv[1])) + "\n")
-
+    generated_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "mondo_usage.json").write_text(json.dumps(payload))
-    rows = [{
-        "mondo_id": nd["id"], "label": nd["label"], "kind": nd["kind"],
-        "depth": nd["depth"], "state": nd["state"], "category": nd["category"],
-        "n_patients": nd["display"],
-        "collision": int(nd["collision"]),
-        "collision_siblings": "|".join(nd["collision_siblings"]),
-        "n_codes": nd["n_codes"],
-        "codes_by_vocab": ";".join(f"{v}:{c}" for v, c in nd["codes_by_vocab"].items()),
-        "codes": "|".join(f"{c['vocab']}:{c['code']}" for c in nd["codes"]),
-        "n_source_codes": nd.get("n_source_codes", 0),
-        "source_codes": "|".join(f"{c['vocab']}:{c['code']}:{c['via']}"
-                                 for c in nd.get("source_codes", [])),
-        "rare": int(nd["rare"]), "rare_src": "|".join(nd["rare_src"]),
-        "parents": "|".join(nd["parents"]),
-    } for nd in payload["nodes"] if nd["kind"] != "root"]
-    pd.DataFrame(rows).to_csv(out / "mondo_usage_nodes.tsv", sep="\t", index=False)
+
+    def run_space(space):
+        """Count + assemble ONE count space; write its payload + TSV; return a summary
+        row for the safe cross-space summary. All the space-specific attribution lives
+        here; the Mondo/DAG/rare structure above is shared across spaces."""
+        from pyspark.sql import Window
+        source_codes_of: dict[str, dict] = {}   # source_climb catalog (empty otherwise)
+        survey: dict = {}                       # source_climb tier coverage (empty otherwise)
+
+        if space == "source":
+            # --- SOURCE space: match condition_source_concept_id to the term's OWN
+            #     same_as source concepts. No Maps to => no decomposition, no cross-term
+            #     collisions (same_as is source-injective). Coverage limited to the
+            #     vocabularies Mondo lists (patients coded only in ICD9 etc. are missed).
+            term_match = {m: sorted({c["id"] for c in cs}) for m, cs in codes_of.items()}
+            pairs = [(cid, m) for m, cs in term_match.items() for cid in cs]
+            id_to_mondos = collision_map(pairs)
+            siblings = term_collision_siblings(term_match, id_to_mondos)
+            match_pd = srcu[["mondo_id", "concept_id"]].drop_duplicates().rename(
+                columns={"concept_id": "match_cid"})
+            match_pd["match_cid"] = match_pd["match_cid"].astype(int)
+            m_sdf = broadcast(spark.createDataFrame(match_pd))
+            cond = (_read_bq(spark, args.cdr, args.billing, "condition_occurrence")
+                    .select("person_id",
+                            F.col("condition_source_concept_id").alias("match_cid2"))
+                    .where(F.col("match_cid2").isNotNull() & (F.col("match_cid2") != 0))
+                    ).cache()
+            hit = (cond.join(m_sdf, cond["match_cid2"] == m_sdf["match_cid"], "inner")
+                   .select("person_id", "mondo_id"))
+        elif space == "source_climb":
+            # --- SOURCE_CLIMB: 3-tier partial roll-up, preferring the most SPECIFIC
+            #     mapped Mondo term reachable, and always cataloguing the ORIGINATING
+            #     source code. Precedence (first hit wins; never climb past an exact):
+            #       (1) source-exact  : condition_source_concept_id is a term same_as code
+            #       (2) standard-exact: condition_concept_id (same_as -> Maps to) hits a term
+            #       (3) climb         : nearest mapped ancestor of condition_concept_id in
+            #                           SNOMED concept_ancestor (ties -> all, flagged)
+            #     concept_ancestor is SNOMED-only (ICD is non-standard), so only the
+            #     standard concept can be climbed; the ICD source rides up through it.
+            from pyspark.sql import Window
+            CATALOG_CAP = 60
+
+            # (a) standard mapping: term -> standard concept(s) (drives std_concepts + climb targets)
+            src_sdf = spark.createDataFrame(pd.DataFrame({"concept_id_1": source_ids}))
+            cr_pd = (_read_bq(spark, args.cdr, args.billing, "concept_relationship")
+                     .select("concept_id_1", "concept_id_2", "relationship_id")
+                     .where(F.col("relationship_id") == "Maps to")
+                     .join(broadcast(src_sdf), "concept_id_1", "inner").toPandas())
+            mapping = build_mondo_to_omop(
+                mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
+                concept_df=concept_pd, concept_relationship_df=cr_pd, restrict_mondo_ids=None)
+            ts = mapping[["mondo_id", "standard_concept_id"]].drop_duplicates()
+            ts["standard_concept_id"] = ts["standard_concept_id"].astype(int)
+            term_match = ts.groupby("mondo_id")["standard_concept_id"].apply(
+                lambda s: sorted(set(int(x) for x in s))).to_dict()
+            std_map_pd = ts.rename(columns={"standard_concept_id": "map_cid"})   # map_cid -> mondo_id
+            mapped_std_ids = sorted({int(x) for x in ts["standard_concept_id"]})
+            std_sdf = broadcast(spark.createDataFrame(std_map_pd))
+            std_ids_sdf = broadcast(spark.createDataFrame(
+                pd.DataFrame({"map_cid": mapped_std_ids})))
+
+            # (b) source-exact mapping: term same_as source concept -> mondo_id
+            srcmap_pd = srcu[["mondo_id", "concept_id"]].drop_duplicates().rename(
+                columns={"concept_id": "map_cid"})
+            srcmap_pd["map_cid"] = srcmap_pd["map_cid"].astype(int)
+            srcmap_sdf = broadcast(spark.createDataFrame(srcmap_pd))
+            src_ids_sdf = broadcast(spark.createDataFrame(
+                pd.DataFrame({"src_cid": sorted({int(x) for x in srcmap_pd["map_cid"]})})))
+
+            # condition rows: originating source (src_cid) + its standard concept (std_cid)
+            cond = (_read_bq(spark, args.cdr, args.billing, "condition_occurrence")
+                    .select("person_id",
+                            F.col("condition_source_concept_id").alias("src_cid"),
+                            F.col("condition_concept_id").alias("std_cid"))
+                    .where(F.col("src_cid").isNotNull() | F.col("std_cid").isNotNull())
+                    ).cache()
+
+            # originating identity: the ICD source code, falling back to the standard
+            # concept when no usable source concept was recorded (src null or 0).
+            origin = F.when(F.col("src_cid").isNotNull() & (F.col("src_cid") != 0),
+                            F.col("src_cid")).otherwise(F.col("std_cid"))
+
+            # TIER 1 — source-exact
+            t1 = (cond.join(srcmap_sdf, cond["src_cid"] == srcmap_sdf["map_cid"], "inner")
+                  .select("person_id", "mondo_id",
+                          F.col("src_cid").alias("origin_cid"), F.lit("exact").alias("via")))
+            # rows whose source code is NOT a same_as (fall through to tier 2/3)
+            rem1 = cond.join(src_ids_sdf, cond["src_cid"] == src_ids_sdf["src_cid"], "left_anti")
+
+            # TIER 2 — standard-exact (origin = the ICD source code, or std if none)
+            t2 = (rem1.join(std_sdf, rem1["std_cid"] == std_sdf["map_cid"], "inner")
+                  .select("person_id", "mondo_id",
+                          origin.alias("origin_cid"), F.lit("exact").alias("via")))
+            # rows whose standard concept is ALSO not a mapped term -> candidates to climb
+            rem2 = rem1.join(std_ids_sdf, rem1["std_cid"] == std_ids_sdf["map_cid"], "left_anti")
+
+            # TIER 3 — climb SNOMED concept_ancestor to the nearest mapped term(s)
+            ca = (_read_bq(spark, args.cdr, args.billing, "concept_ancestor")
+                  .select("ancestor_concept_id", "descendant_concept_id",
+                          "min_levels_of_separation")
+                  .where(F.col("min_levels_of_separation") >= 1))
+            unmatched_std = rem2.select("std_cid").distinct()
+            ca_f = (ca.join(std_ids_sdf, ca["ancestor_concept_id"] == std_ids_sdf["map_cid"], "inner")
+                      .join(unmatched_std, ca["descendant_concept_id"] == unmatched_std["std_cid"], "inner")
+                      .select(ca["descendant_concept_id"].alias("std_cid"),
+                              ca["ancestor_concept_id"].alias("anc_cid"),
+                              ca["min_levels_of_separation"].alias("lev")))
+            nearest = (ca_f.withColumn(
+                           "mlev", F.min("lev").over(Window.partitionBy("std_cid")))
+                       .where(F.col("lev") == F.col("mlev"))
+                       .select("std_cid", "anc_cid"))
+            anc_map = std_sdf.select(std_sdf["map_cid"].alias("anc_cid"),
+                                     std_sdf["mondo_id"].alias("anc_mondo"))
+            t3 = (rem2.join(nearest, "std_cid", "inner")
+                  .join(broadcast(anc_map), "anc_cid", "inner")
+                  .select("person_id", F.col("anc_mondo").alias("mondo_id"),
+                          origin.alias("origin_cid"), F.lit("climbed").alias("via")))
+
+            attribution = (t1.unionByName(t2).unionByName(t3)).cache()
+            hit = attribution.select("person_id", "mondo_id")
+
+            # per-term catalog of ORIGINATING source codes (identity only, via = exact/climbed;
+            # exact wins if a code reaches a term both ways). Named via the concept table.
+            cat = (attribution.select("mondo_id", "origin_cid", "via").distinct()
+                   .withColumn("vrank", F.when(F.col("via") == "exact", 0).otherwise(1)))
+            cat = (cat.withColumn("best", F.min("vrank").over(
+                       Window.partitionBy("mondo_id", "origin_cid")))
+                   .where(F.col("vrank") == F.col("best"))
+                   .select("mondo_id", "origin_cid", "via").distinct())
+            concept_all = (_read_bq(spark, args.cdr, args.billing, "concept")
+                           .select(F.col("concept_id").alias("origin_cid"),
+                                   "vocabulary_id", "concept_code"))
+            cat_named = (cat.join(concept_all, "origin_cid", "left")
+                         .select("mondo_id", "origin_cid", "via", "vocabulary_id", "concept_code")
+                         .toPandas())
+            for mid, sub in cat_named.groupby("mondo_id"):
+                recs = [{"id": int(r.origin_cid),
+                         "vocab": (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"),
+                         "code": (str(r.concept_code) if pd.notna(r.concept_code) else str(int(r.origin_cid))),
+                         "via": str(r.via)}
+                        for r in sub.itertuples()]
+                recs.sort(key=lambda c: (c["via"] != "exact", c["vocab"], c["code"]))
+                source_codes_of[str(mid)] = {"list": recs[:CATALOG_CAP], "n": len(recs)}
+
+            # collisions: a single source code attributed to >1 Mondo term (standard-exact
+            # coarsening or a climb tie) -> a patient with that code counts under each.
+            pairs_pd = cat_named[["origin_cid", "mondo_id"]].drop_duplicates()
+            id_to_mondos = collision_map(
+                [(int(c), str(m)) for c, m in pairs_pd.itertuples(index=False)])
+            term_origins = (cat_named.groupby("mondo_id")["origin_cid"]
+                            .apply(lambda s: [int(x) for x in s]).to_dict())
+            siblings = term_collision_siblings(
+                {str(k): v for k, v in term_origins.items()}, id_to_mondos)
+
+            # survey: distinct persons resolved at each tier (overlapping across tiers) and
+            # the unmatched remainder by originating-source vocabulary.
+            unmatched = rem2.join(nearest.select("std_cid").distinct(), "std_cid", "left_anti")
+            src_vocab = concept_all.select(F.col("origin_cid").alias("src_cid"), "vocabulary_id")
+            unm_by_vocab = (unmatched.join(src_vocab, "src_cid", "left")
+                            .groupBy("vocabulary_id")
+                            .agg(F.countDistinct("person_id").alias("persons"))
+                            .toPandas())
+            survey = {
+                "persons_source_exact": int(t1.select("person_id").distinct().count()),
+                "persons_standard_exact": int(t2.select("person_id").distinct().count()),
+                "persons_climbed": int(t3.select("person_id").distinct().count()),
+                "persons_unmatched_by_vocab": {
+                    (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"): int(r.persons)
+                    for r in unm_by_vocab.itertuples()},
+            }
+        else:
+            # --- STANDARD space (default): condition_concept_id via same_as -> Maps to.
+            src_sdf = spark.createDataFrame(pd.DataFrame({"concept_id_1": source_ids}))
+            cr_pd = (_read_bq(spark, args.cdr, args.billing, "concept_relationship")
+                     .select("concept_id_1", "concept_id_2", "relationship_id")
+                     .where(F.col("relationship_id") == "Maps to")
+                     .join(broadcast(src_sdf), "concept_id_1", "inner").toPandas())
+            mapping = build_mondo_to_omop(
+                mondo_edges_df=edges_df, mondo_nodes_df=nodes_df,
+                concept_df=concept_pd, concept_relationship_df=cr_pd, restrict_mondo_ids=None)
+            ts = mapping[["mondo_id", "standard_concept_id"]].drop_duplicates()
+            ts["standard_concept_id"] = ts["standard_concept_id"].astype(int)
+            term_match = ts.groupby("mondo_id")["standard_concept_id"].apply(
+                lambda s: sorted(set(int(x) for x in s))).to_dict()
+            std_to_mondos = collision_map(zip(ts["standard_concept_id"], ts["mondo_id"]))
+            siblings = term_collision_siblings(term_match, std_to_mondos)
+            ts_sdf = broadcast(spark.createDataFrame(
+                ts.rename(columns={"standard_concept_id": "match_cid"})))
+            cond = load_omop_bigquery(
+                spark=spark, cdr_dataset=args.cdr, billing_project=args.billing,
+                source_table=args.source_table).select("person_id", "concept_id").cache()
+            hit = (cond.join(ts_sdf, cond["concept_id"] == ts_sdf["match_cid"], "inner")
+                   .select("person_id", "mondo_id"))
+
+        # --- 2. EXACT-match person counts per term (NO concept_ancestor climb) --------
+        term_counts = (hit.groupBy("mondo_id")
+                       .agg(F.countDistinct("person_id").alias("n")).toPandas())
+        count_of = {str(r["mondo_id"]): int(r["n"]) for _, r in term_counts.iterrows()}
+        n_coded = cond.select("person_id").distinct().count()
+        n_on_mondo = hit.select("person_id").distinct().count()
+
+        # term universe: the mapped terms, plus (source_climb) any term that received a
+        # count or catalogued source code even if its standard mapping was empty.
+        mapped_ids = set(term_match) | set(count_of) | set(source_codes_of)
+        parents = nearest_mapped_parents(mapped_ids, parent_adj)   # parent_adj: shared, above
+
+        term_rows = []
+        for mid in sorted(mapped_ids):
+            cids = sorted({int(c) for c in term_match.get(mid, [])})
+            codes = codes_of.get(mid, [])
+            cat = source_codes_of.get(mid) or {"list": [], "n": 0}
+            term_rows.append({
+                "mondo_id": mid,
+                "label": label_of.get(mid, mid),
+                "is_internal": mid in has_child,
+                "parents": parents.get(mid, []),
+                "std_concepts": cids,
+                "codes": codes,
+                "n_codes": len(codes),
+                "codes_by_vocab": codesbyvocab_of.get(mid, {}),
+                "source_codes": cat["list"],
+                "n_source_codes": cat["n"],
+                "n_persons": count_of.get(mid, 0),
+                "collision_siblings": siblings.get(mid, []),
+                "rare": rare_of.get(mid, False),
+                "rare_src": rare_src_of.get(mid, []),
+            })
+
+        # --- assemble this space + write its per-space payload/TSV --------------------
+        meta = {
+            "mondo_version": args.mondo_version,
+            "cdr": args.cdr,
+            "source_table": args.source_table,
+            "min_cell": min_cell,
+            "rollup": False,
+            "count_space": space,
+            "count_rule": {
+                "source": ("distinct persons whose condition_source_concept_id exactly "
+                           "matches one of the term's Mondo same_as source codes (no Maps to)"),
+                "source_climb": ("distinct persons attributed to the most specific mapped "
+                                 "Mondo term reachable: source-exact (same_as), else "
+                                 "standard-exact (condition_concept_id), else nearest mapped "
+                                 "SNOMED ancestor via concept_ancestor (ties counted in each)"),
+            }.get(space,
+                  "distinct persons with an EXACT-match standard condition concept "
+                  "(same_as -> Maps to)"),
+            "generated_utc": generated_utc,
+        }
+        if survey:
+            meta["survey"] = survey
+        payload = assemble_payload(meta=meta, term_rows=term_rows, min_cell=min_cell)
+
+        (out / f"mondo_usage_{space}.json").write_text(json.dumps(payload))
+        rows = [{
+            "mondo_id": nd["id"], "label": nd["label"], "kind": nd["kind"],
+            "depth": nd["depth"], "state": nd["state"], "category": nd["category"],
+            "n_patients": nd["display"],
+            "collision": int(nd["collision"]),
+            "collision_siblings": "|".join(nd["collision_siblings"]),
+            "n_codes": nd["n_codes"],
+            "codes_by_vocab": ";".join(f"{v}:{c}" for v, c in nd["codes_by_vocab"].items()),
+            "codes": "|".join(f"{c['vocab']}:{c['code']}" for c in nd["codes"]),
+            "n_source_codes": nd.get("n_source_codes", 0),
+            "source_codes": "|".join(f"{c['vocab']}:{c['code']}:{c['via']}"
+                                     for c in nd.get("source_codes", [])),
+            "rare": int(nd["rare"]), "rare_src": "|".join(nd["rare_src"]),
+            "parents": "|".join(nd["parents"]),
+        } for nd in payload["nodes"] if nd["kind"] != "root"]
+        pd.DataFrame(rows).to_csv(out / f"mondo_usage_{space}_nodes.tsv",
+                                  sep="\t", index=False)
+
+        # per-space stderr (suppressed) for the run log
+        sys.stderr.write(f"\n=== count space: {space} ===\n")
+        sys.stderr.write(format_summary(payload["stats"], min_cell=min_cell) + "\n")
+        _attr = "attributed" if space == "source_climb" else "exact"
+        sys.stderr.write(
+            f"[ladder] persons total {suppress_count(n_total, min_cell)} | coded "
+            f"{suppress_count(n_coded, min_cell)} | on any mapped Mondo term ({_attr}) "
+            f"{suppress_count(n_on_mondo, min_cell)} "
+            f"({100.0 * n_on_mondo / max(n_total, 1):.1f}% of all persons)\n")
+        return {"space": space, "payload": payload, "stats": payload["stats"],
+                "survey": survey, "n_total": n_total, "n_coded": n_coded,
+                "n_on_mondo": n_on_mondo, "min_cell": min_cell,
+                "mondo_version": args.mondo_version, "generated_utc": generated_utc}
+
+    # --- run the requested count space(s), write per-space payloads + a safe summary --
+    spaces = (["standard", "source", "source_climb"]
+              if args.count_space == "all" else [args.count_space])
+    results = [run_space(sp) for sp in spaces]
+
+    # primary copy for the dashboard's default fetch (mondo_usage.json / _nodes.tsv):
+    # source_climb when present (richest), else the single requested space.
+    primary = next((r for r in results if r["space"] == "source_climb"), results[-1])
+    ps = primary["space"]
+    (out / "mondo_usage.json").write_text(json.dumps(primary["payload"]))
+    shutil.copyfile(out / f"mondo_usage_{ps}_nodes.tsv", out / "mondo_usage_nodes.tsv")
+
+    # disclosure-safe, copy-pasteable cross-space summary (suppressed; no CDR id)
+    summary_md = build_safe_summary(results)
+    (out / "mondo_usage_summary.md").write_text(summary_md)
+    sys.stderr.write("\n" + summary_md + "\n")
     sys.stderr.write(
-        f"[done] wrote mondo_usage.json ({len(payload['nodes'])} nodes) + "
-        f"mondo_usage_nodes.tsv to {out}\n")
+        f"[done] wrote {len(results)} payload(s) + mondo_usage_summary.md "
+        f"(primary mondo_usage.json = {ps}) to {out}\n")
     spark.stop()
     return 0
 

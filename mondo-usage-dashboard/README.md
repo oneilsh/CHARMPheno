@@ -136,6 +136,10 @@ meta strip):
   flagged). Recovers coverage `source` drops. Each term catalogs the **originating source
   codes** that reached it, tagged exact vs climbed (`↑`), in a "Source codes" drawer
   section; the run also emits a per-vocabulary coverage survey.
+- `all` (exp 0108) — runs all three in **one job** and writes `mondo_usage_<space>.json`
+  for each (plus a primary `mondo_usage.json` = source_climb), the per-space TSVs, and a
+  **disclosure-safe `mondo_usage_summary.md`** — term counts + ≤-suppressed person figures,
+  no CDR id — for a side-by-side comparison you can paste anywhere.
 
 **Code multiplicity.** Each term reports how many distinct source/target ids roll into
 it, by vocabulary (drawer "Codes" + the Table "Codes" column) — exact *code* counts,
