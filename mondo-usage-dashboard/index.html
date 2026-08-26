@@ -1410,11 +1410,15 @@ function nihName(vocab,code){
   if(key in nihCache) return Promise.resolve(nihCache[key]);
   const ep=NIH_EP[vocab];
   if(!ep){nihCache[key]=null;return Promise.resolve(null);}
-  const url=`https://clinicaltables.nlm.nih.gov/api/${ep}/v3/search?sf=code&df=code,name&maxList=8&terms=${encodeURIComponent(code)}`;
+  const norm=s=>String(s).replace(/\./g,"").toUpperCase();   // match dotted vs undotted
+  // ICD-9-CM's code index is UNDOTTED (250.00 -> 25000); ICD-10/HCPCS index as-is. Use the
+  // endpoint's DEFAULT display fields (code, description) — a forced df=name comes back blank.
+  const term=vocab==="ICD9CM"?norm(code):code;
+  const url=`https://clinicaltables.nlm.nih.gov/api/${ep}/v3/search?sf=code&maxList=12&terms=${encodeURIComponent(term)}`;
   return fetch(url).then(r=>r.json()).then(j=>{
-    const rows=(j&&j[3])||[]; let nm=null;
-    for(const row of rows){ if(String(row[0]).toUpperCase()===String(code).toUpperCase()){nm=row[1];break;} }
-    nihCache[key]=nm; return nm;
+    const rows=(j&&j[3])||[]; const want=norm(code); let nm=null;
+    for(const row of rows){ if(norm(row[0])===want){nm=String(row[1]||"").trim(); break;} }
+    nihCache[key]=nm||null; return nihCache[key];
   }).catch(()=>{nihCache[key]=null; return null;});
 }
 // resolve-on-hover, reusing the graph's floating tooltip; cached so a code is fetched once.
