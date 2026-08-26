@@ -174,18 +174,22 @@ def test_build_safe_summary_suppresses_and_leaks_nothing():
          "stats": {"mapped_terms": 8894, "used_terms": 4600, "used_fraction": 0.52,
                    "reported_terms": 2740, "used_small_terms": 1860,
                    "collision_terms": 211, "rare_used_terms": 2275},
-         # small tier / vocab counts MUST be suppressed
+         # small PERSON tier counts MUST be suppressed; unmatched CODE counts are code
+        # identities (safe, unsuppressed) so they show raw.
          "survey": {"persons_source_exact": 250000, "persons_standard_exact": 40000,
-                    "persons_climbed": 7, "persons_unmatched_by_vocab": {"ICD9CM": 3}},
+                    "persons_climbed": 7, "unmatched_codes_by_vocab": {"ICD9CM": 812}},
          "n_total": 400000, "n_coded": 390000, "n_on_mondo": 330000},
     ]
     out = m.build_safe_summary(results)
     # both spaces summarized; term counts (safe) present
     assert "`source`" in out and "`source_climb`" in out and "8894" in out
-    # small person figures are ≤-suppressed, never shown raw
-    assert "climbed ≤20" in out          # 7 -> ≤20
-    assert "ICD9CM=≤20" in out           # 3 -> ≤20
-    assert " 7" not in out and "=3" not in out
+    # small PERSON figures are ≤-suppressed, never shown raw
+    assert "climbed ≤20" in out          # persons_climbed 7 -> ≤20
+    assert " 7" not in out
+    # clean coverage: persons with NO mapped term = coded - on_mondo (390000-330000)
+    assert "no mapped term 60000" in out
+    # unmatched CODE counts are code identities -> shown raw (not a patient number)
+    assert "ICD9CM=812" in out
     # no workbench/project identifier leaks (we never pass args.cdr in); a
     # `wb-<name>-<n>.rNNNN` workbench id or a `.rNNNN` release suffix must be absent.
     import re

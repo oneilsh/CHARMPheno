@@ -339,20 +339,26 @@ def build_safe_summary(results: list[dict]) -> str:
             sm=s["used_small_terms"], col=s["collision_terms"], rare=s.get("rare_used_terms", 0)))
     L += ["", "## Person coverage (≤-suppressed)", ""]
     for r in results:
+        nc, nm = r.get("n_coded"), r.get("n_on_mondo")
+        uncov = (int(nc) - int(nm)) if (nc is not None and nm is not None) else None
+        upct = (f" ({100.0 * uncov / nc:.1f}%)" if uncov is not None and nc else "")
         L.append(f"- `{r['space']}` — total persons {suppress_count(r.get('n_total'), min_cell)}"
-                 f" · coded {suppress_count(r.get('n_coded'), min_cell)}"
-                 f" · on any mapped Mondo term {suppress_count(r.get('n_on_mondo'), min_cell)}")
+                 f" · coded {suppress_count(nc, min_cell)}"
+                 f" · on any mapped Mondo term {suppress_count(nm, min_cell)}"
+                 f" · **no mapped term {suppress_count(uncov, min_cell)}{upct}**")
     climb = next((r for r in results if r.get("survey")), None)
     if climb:
         sv = climb["survey"]
-        L += ["", "## source_climb attribution survey (≤-suppressed)", "",
-              f"- persons by tier (overlapping): source-exact "
+        L += ["", "## source_climb attribution survey", "",
+              f"- persons resolved by tier (≤-suppressed; overlapping — a person can be "
+              f"counted in several tiers via different conditions): source-exact "
               f"{suppress_count(sv.get('persons_source_exact'), min_cell)} · standard-exact "
               f"{suppress_count(sv.get('persons_standard_exact'), min_cell)} · climbed "
               f"{suppress_count(sv.get('persons_climbed'), min_cell)}",
-              "- unmatched persons by source vocabulary: " +
-              (", ".join(f"{v}={suppress_count(n, min_cell)}" for v, n in sorted(
-                  sv.get("persons_unmatched_by_vocab", {}).items(),
+              "- unmatched **source codes** by vocabulary (distinct code counts, not "
+              "patients — the vocabularies the SNOMED climb can't reach): " +
+              (", ".join(f"{v}={n}" for v, n in sorted(
+                  sv.get("unmatched_codes_by_vocab", {}).items(),
                   key=lambda kv: -(kv[1] or 0))) or "(none)")]
     L.append("")
     return "\n".join(L)
@@ -731,21 +737,27 @@ def main(argv: list[str]) -> int:
             siblings = term_collision_siblings(
                 {str(k): v for k, v in term_origins.items()}, id_to_mondos)
 
-            # survey: distinct persons resolved at each tier (overlapping across tiers) and
-            # the unmatched remainder by originating-source vocabulary.
+            # survey: distinct persons resolved at each tier (overlapping across tiers),
+            # plus the unmatched remainder as distinct source CODES by vocabulary. Counting
+            # unmatched CODES (not persons) is the honest "which vocabularies can't the
+            # climb reach" measure — persons-with-any-unmatched-condition overlaps almost
+            # everyone and reads as a false gap. Code counts are identity (unsuppressed,
+            # never per-code patient counts). The real uncovered-persons figure is the
+            # ladder's coded - on_mondo, surfaced in the summary.
             unmatched = rem2.join(nearest.select("std_cid").distinct(), "std_cid", "left_anti")
             src_vocab = concept_all.select(F.col("origin_cid").alias("src_cid"), "vocabulary_id")
-            unm_by_vocab = (unmatched.join(src_vocab, "src_cid", "left")
-                            .groupBy("vocabulary_id")
-                            .agg(F.countDistinct("person_id").alias("persons"))
-                            .toPandas())
+            unm_codes_by_vocab = (unmatched.select("src_cid").distinct()
+                                  .join(src_vocab, "src_cid", "left")
+                                  .groupBy("vocabulary_id")
+                                  .agg(F.countDistinct("src_cid").alias("codes"))
+                                  .toPandas())
             survey = {
                 "persons_source_exact": int(t1.select("person_id").distinct().count()),
                 "persons_standard_exact": int(t2.select("person_id").distinct().count()),
                 "persons_climbed": int(t3.select("person_id").distinct().count()),
-                "persons_unmatched_by_vocab": {
-                    (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"): int(r.persons)
-                    for r in unm_by_vocab.itertuples()},
+                "unmatched_codes_by_vocab": {
+                    (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"): int(r.codes)
+                    for r in unm_codes_by_vocab.itertuples()},
             }
         else:
             # --- STANDARD space (default): condition_concept_id via same_as -> Maps to.
