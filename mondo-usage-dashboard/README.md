@@ -121,14 +121,21 @@ the export flags terms that share a standard concept via OMOP `Maps to`). Counts
 nothing can be differenced back to a suppressed cell. See `docs/insights/0075` and
 `docs/experiments/0105-mondo-ehr-usage-export.md`.
 
-**Count space.** The driver counts in `standard` space (`condition_concept_id` via
-`same_as → Maps to`, default) or `source` space (`condition_source_concept_id` against
-the term's own Mondo `same_as` codes, `--count-space source`, exp 0106). Source space
-avoids OMOP's ICD→SNOMED `Maps to` decomposition — which otherwise injects generic
-concepts (e.g. "pregnancy finding" inflating peripartum cardiomyopathy) and manufactures
-cross-term collisions — at the cost of coverage limited to the vocabularies Mondo lists.
-It's also the route to a SNOMED-license-free model (structure from Mondo, tokens from
-ICD). See `docs/insights/0076`. The meta strip shows the active count space.
+**Count space.** The driver counts in one of three spaces (`--count-space`, shown in the
+meta strip):
+
+- `standard` (default) — `condition_concept_id` via `same_as → Maps to`.
+- `source` (exp 0106) — `condition_source_concept_id` against the term's own Mondo
+  `same_as` codes. Avoids OMOP's ICD→SNOMED `Maps to` decomposition — which otherwise
+  injects generic concepts (e.g. "pregnancy finding" inflating peripartum cardiomyopathy,
+  `docs/insights/0076`) and manufactures cross-term collisions — at the cost of coverage
+  limited to the vocabularies Mondo lists. Also the route to a SNOMED-license-free model.
+- `source_climb` (exp 0107) — a **partial roll-up** ladder: credit each condition to the
+  most specific mapped term reachable — source-exact, else standard-exact, else climb
+  `concept_ancestor` (SNOMED-only) to the nearest mapped ancestor (ties → counted in each,
+  flagged). Recovers coverage `source` drops. Each term catalogs the **originating source
+  codes** that reached it, tagged exact vs climbed (`↑`), in a "Source codes" drawer
+  section; the run also emits a per-vocabulary coverage survey.
 
 **Code multiplicity.** Each term reports how many distinct source/target ids roll into
 it, by vocabulary (drawer "Codes" + the Table "Codes" column) — exact *code* counts,

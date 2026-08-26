@@ -49,6 +49,29 @@ def test_nearest_mapped_parents_stops_at_first_mapped():
     assert out["LEAF"] == ["NEAR"]            # FAR not included (past NEAR)
 
 
+def test_nearest_mapped_standard_ancestors_picks_min_distance():
+    # concept_ancestor climb (source_climb space): descendant 100 has mapped
+    # standard ancestors at levels 1 and 2; only the NEAREST is kept.
+    edges = [(100, 10, 1), (100, 20, 2)]
+    assert m.nearest_mapped_standard_ancestors(edges) == {100: [10]}
+
+
+def test_nearest_mapped_standard_ancestors_keeps_ties():
+    # two mapped ancestors equally near (both level 2) -> keep BOTH so the term
+    # rows can be flagged as a shared-attribution collision. Level-3 dropped.
+    edges = [(100, 10, 2), (100, 20, 2), (100, 30, 3)]
+    assert m.nearest_mapped_standard_ancestors(edges) == {100: [10, 20]}
+
+
+def test_nearest_mapped_standard_ancestors_excludes_distance_zero_and_empty():
+    # a self/exact edge (level 0) is NOT a climb; no mapped ancestor -> absent.
+    assert m.nearest_mapped_standard_ancestors([(100, 100, 0)]) == {}
+    assert m.nearest_mapped_standard_ancestors([]) == {}
+    # independent descendants are resolved separately
+    assert m.nearest_mapped_standard_ancestors(
+        [(1, 5, 1), (2, 6, 4), (2, 7, 4)]) == {1: [5], 2: [6, 7]}
+
+
 def _rows():
     return [
         {"mondo_id": "MONDO:HTN", "label": "hypertension", "is_internal": True,
@@ -128,6 +151,29 @@ def test_code_multiplicity_passthrough_and_stats():
     assert len(by["MONDO:A"]["codes"]) == 2
     assert p["stats"]["total_codes"] == 3            # 2 + 1
     assert p["stats"]["multi_code_terms"] == 1       # only A maps >1 code
+
+
+def test_source_code_catalog_passthrough():
+    # source_climb space: each term catalogs the originating source codes (ICD etc.)
+    # that reached it, as identity + a total; assemble_payload passes them through
+    # and defaults them to empty for the exact-map spaces.
+    rows = [
+        {"mondo_id": "MONDO:A", "label": "a", "is_internal": False, "parents": [],
+         "std_concepts": [1], "n_persons": 40, "collision_siblings": [],
+         "source_codes": [{"id": 11, "vocab": "ICD10CM", "code": "E11.9", "via": "exact"},
+                          {"id": 12, "vocab": "ICD10CM", "code": "E11.21", "via": "climbed"}],
+         "n_source_codes": 2},
+        {"mondo_id": "MONDO:B", "label": "b", "is_internal": False, "parents": [],
+         "std_concepts": [2], "n_persons": 25, "collision_siblings": []},
+    ]
+    p = m.assemble_payload(meta={}, term_rows=rows)
+    by = {n["id"]: n for n in p["nodes"]}
+    assert by["MONDO:A"]["n_source_codes"] == 2
+    assert [c["code"] for c in by["MONDO:A"]["source_codes"]] == ["E11.9", "E11.21"]
+    assert by["MONDO:A"]["source_codes"][1]["via"] == "climbed"
+    # a term with no catalog defaults cleanly; the root too
+    assert by["MONDO:B"]["source_codes"] == [] and by["MONDO:B"]["n_source_codes"] == 0
+    assert by["root"]["source_codes"] == [] and by["root"]["n_source_codes"] == 0
 
 
 def test_used_branch_category_for_zero_count_ancestor():
