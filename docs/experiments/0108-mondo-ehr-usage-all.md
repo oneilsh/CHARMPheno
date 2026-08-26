@@ -60,6 +60,7 @@ SNOMED-only-ancestry gap).
 ## Run
 
 ```bash
+cd ~/repos/CHARMPheno && git checkout main && git pull
 make -C analysis/cloud exp ID=108
 # fit-only (no NPMI eval / dashboard bundle); writes the files above into <run-dir>.
 ```
