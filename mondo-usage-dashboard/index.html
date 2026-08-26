@@ -1323,6 +1323,7 @@ function select(id,quiet){
     <dt>Patients</dt><dd style="font-size:15px;color:${n.state==="reported"?cat.color:"var(--ink)"}">${disp}</dd>
     <dt>MONDO id</dt><dd>${purl?`<a href="${purl}" target="_blank" rel="noopener">${n.id}</a>`:n.id}</dd>
     ${codesRow(n)}
+    ${sourceCatalogRow(n)}
   </dl>`;
   const rr=DATA._roll&&DATA._roll.get(id);
   if(rr && (kids.get(id)||[]).length){
@@ -1379,6 +1380,19 @@ function codesRow(n){
   }
   const std=(n.std_concepts||[]);                   // standard-space fallback
   return `<dt>Std concepts</dt><dd>${std.map(c=>`<a href="${athena(c)}" target="_blank" rel="noopener">${c}</a>`).join(", ")||"—"}</dd>`;
+}
+// source_climb catalog: the originating source codes (ICD etc.) that reached this
+// term, each tagged exact (own map) or climbed (rolled up a mapped ancestor). Identity
+// only — a "↑" marks the climbed ones. Absent (empty) for the exact-map count spaces.
+function sourceCatalogRow(n){
+  const sc=n.source_codes||[]; if(!sc.length) return "";
+  const list=sc.map(c=>{const climbed=c.via==="climbed";
+    const t=`${c.vocab} ${esc(String(c.code))}${climbed?" ↑":""}`;
+    const href=c.id?athena(c.id):athenaSearch(c.code);
+    return `<a href="${href}" target="_blank" rel="noopener" title="${c.vocab} · ${climbed?"climbed (rolled up from a descendant)":"exact match"}">${t}</a>`;}).join(", ");
+  const extra=(n.n_source_codes||sc.length)>sc.length?` +${(n.n_source_codes||sc.length)-sc.length}`:"";
+  return `<dt>Source codes (${n.n_source_codes||sc.length})</dt><dd>${list}${extra}`+
+    `<div style="color:var(--muted);margin-top:3px">codes coded in the EHR that map here; <b>↑</b> = climbed to the nearest mapped ancestor</div></dd>`;
 }
 function hlMatch(text,q){                  // HTML-escaped text with <mark> around query matches
   text=String(text); if(!q) return esc(text);
