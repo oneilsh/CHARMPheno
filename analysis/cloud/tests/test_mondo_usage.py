@@ -153,6 +153,21 @@ def test_code_multiplicity_passthrough_and_stats():
     assert p["stats"]["multi_code_terms"] == 1       # only A maps >1 code
 
 
+def test_reduce_tie_map_keeps_most_specific():
+    # Mondo child->parents: carbuncle -> pyoderma -> skin; hereditary & endocrine are roots.
+    parents = {"carbuncle": ["pyoderma"], "pyoderma": ["skin"], "skin": [],
+               "hereditary": [], "endocrine": []}
+    pairs = [
+        (1, "carbuncle"), (1, "pyoderma"), (1, "skin"),   # nested chain -> just carbuncle
+        (2, "hereditary"), (2, "endocrine"),              # orthogonal tie -> both kept
+        (3, "skin"),                                       # single -> unchanged
+    ]
+    out = m.reduce_tie_map(pairs, parents)
+    assert out[1] == ["carbuncle"]                         # ancestors pyoderma/skin dropped
+    assert out[2] == ["endocrine", "hereditary"]           # neither is the other's ancestor
+    assert out[3] == ["skin"]
+
+
 def test_classify_collision_kinds_splits_mechanism():
     # code 100 hits A,B via EXACT (standard coarsening) -> shared_concept;
     # code 200 hits B,C via CLIMB -> climb_tie; code 300 hits D exact + E climbed -> mixed.

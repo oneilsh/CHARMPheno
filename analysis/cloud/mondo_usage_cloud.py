@@ -39,7 +39,9 @@ COUNT SPACE (``--count-space``). Three ways to count a term's patients:
     (1) source-exact (``condition_source_concept_id`` is a same_as code), else
     (2) standard-exact (``condition_concept_id`` via same_as -> Maps to), else
     (3) climb the nearest mapped SNOMED ancestor of the standard concept via
-    ``concept_ancestor`` (ties -> counted in each, flagged as a collision). Because
+    ``concept_ancestor`` (a SNOMED-distance tie is reduced to its MOST-SPECIFIC Mondo
+    term(s) — nested ancestors dropped; a genuine orthogonal tie is counted in each and
+    flagged as a collision). Because
     ``concept_ancestor`` carries subclass edges only for STANDARD concepts, only the
     SNOMED concept is climbed (ICD is non-standard); the ICD source rides up through
     whatever standard concept OMOP assigned. Recovers coverage ``source`` drops without
@@ -299,6 +301,49 @@ def nearest_mapped_standard_ancestors(edges) -> dict[int, list[int]]:
         elif lv == cur[0]:
             cur[1].add(a)
     return {d: sorted(anc) for d, (lv, anc) in best.items()}
+
+
+def reduce_tie_map(pairs, parents_of):
+    """Reduce each climb tie-set to its MOST-SPECIFIC members in the Mondo DAG.
+
+    The climb attributes a code to the nearest mapped ancestor(s) by SNOMED distance, but
+    ties can include a specific term AND its more-general Mondo ancestors (e.g. a code that
+    ties to {carbuncle, pyoderma, skin disorder}). The ladder's promise is the MOST SPECIFIC
+    mapped term, so among tied terms we drop any that is a Mondo-ancestor of another tied
+    term — keeping only the "leaves" of the set. Genuine orthogonal ties (neither term an
+    ancestor of the other, e.g. {hereditary disease, endocrine system disorder}) are kept.
+
+    ``pairs`` = iterable of ``(key, mondo_id)`` (key = the climbed descendant concept);
+    ``parents_of`` = Mondo child->parents adjacency. Returns ``{key: [most-specific ids]}``.
+    A shared ancestor-closure memo makes this cheap across many overlapping tie-sets."""
+    from collections import defaultdict
+    groups: dict = defaultdict(set)
+    for k, t in pairs:
+        groups[k].add(str(t))
+    memo: dict[str, set] = {}
+
+    def anc(t):
+        if t in memo:
+            return memo[t]
+        out: set = set()
+        stack = list(parents_of.get(t, ()))
+        while stack:
+            p = stack.pop()
+            if p in out:
+                continue
+            out.add(p)
+            stack.extend(parents_of.get(p, ()))
+        memo[t] = out
+        return out
+
+    out: dict = {}
+    for k, terms in groups.items():
+        if len(terms) <= 1:
+            out[k] = sorted(terms)
+            continue
+        out[k] = sorted(t for t in terms
+                        if not any(t in anc(s) for s in terms if s != t))
+    return out
 
 
 def _depths(parents_of: dict[str, list[str]], root: str = _ROOT_ID) -> dict[str, int]:
@@ -692,7 +737,8 @@ def main(argv: list[str]) -> int:
             #       (1) source-exact  : condition_source_concept_id is a term same_as code
             #       (2) standard-exact: condition_concept_id (same_as -> Maps to) hits a term
             #       (3) climb         : nearest mapped ancestor of condition_concept_id in
-            #                           SNOMED concept_ancestor (ties -> all, flagged)
+            #                           SNOMED concept_ancestor; a tie is reduced to its
+            #                           most-specific Mondo term(s), orthogonal ties flagged
             #     concept_ancestor is SNOMED-only (ICD is non-standard), so only the
             #     standard concept can be climbed; the ICD source rides up through it.
             from pyspark.sql import Window
@@ -771,10 +817,26 @@ def main(argv: list[str]) -> int:
                        .select("std_cid", "anc_cid"))
             anc_map = std_sdf.select(std_sdf["map_cid"].alias("anc_cid"),
                                      std_sdf["mondo_id"].alias("anc_mondo"))
-            t3 = (rem2.join(nearest, "std_cid", "inner")
-                  .join(broadcast(anc_map), "anc_cid", "inner")
-                  .select("person_id", F.col("anc_mondo").alias("mondo_id"),
-                          origin.alias("origin_cid"), F.lit("climbed").alias("via")))
+            # map nearest SNOMED ancestors -> Mondo terms, then REDUCE each code's tie-set
+            # to its MOST-SPECIFIC Mondo term(s): a SNOMED-distance tie can include a
+            # specific term and its more-general Mondo ancestors (nested chains like
+            # {carbuncle, pyoderma, skin disorder}); the ladder promises the most specific,
+            # so we drop tied ancestors of tied descendants (genuine orthogonal ties stay).
+            tie_pd = (nearest.join(broadcast(anc_map), "anc_cid", "inner")
+                      .select("std_cid", "anc_mondo").distinct().toPandas())
+            reduced = reduce_tie_map(
+                [(int(r.std_cid), str(r.anc_mondo)) for r in tie_pd.itertuples(index=False)],
+                parent_adj)
+            reduced_pd = pd.DataFrame(
+                [(k, mm) for k, ms in reduced.items() for mm in ms],
+                columns=["std_cid", "mondo_id"])
+            if len(reduced_pd):
+                reduced_sdf = broadcast(spark.createDataFrame(reduced_pd))
+                t3 = (rem2.join(reduced_sdf, "std_cid", "inner")
+                      .select("person_id", "mondo_id",
+                              origin.alias("origin_cid"), F.lit("climbed").alias("via")))
+            else:
+                t3 = t1.limit(0)          # no climbs (empty, keeps t1's schema for the union)
 
             attribution = (t1.unionByName(t2).unionByName(t3)).cache()
             hit = attribution.select("person_id", "mondo_id")
@@ -929,7 +991,8 @@ def main(argv: list[str]) -> int:
                 "source_climb": ("distinct persons attributed to the most specific mapped "
                                  "Mondo term reachable: source-exact (same_as), else "
                                  "standard-exact (condition_concept_id), else nearest mapped "
-                                 "SNOMED ancestor via concept_ancestor (ties counted in each)"),
+                                 "SNOMED ancestor via concept_ancestor (ties reduced to the "
+                                 "most-specific Mondo term; orthogonal ties counted in each)"),
             }.get(space,
                   "distinct persons with an EXACT-match standard condition concept "
                   "(same_as -> Maps to)"),

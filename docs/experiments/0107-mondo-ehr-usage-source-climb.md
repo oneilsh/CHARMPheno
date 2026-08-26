@@ -10,7 +10,9 @@ model_class: mondo_usage
 #   (1) source-exact  : condition_source_concept_id is a term's Mondo same_as code
 #   (2) standard-exact : condition_concept_id (same_as -> Maps to) hits a term
 #   (3) climb          : nearest mapped SNOMED ancestor of condition_concept_id via
-#                        OMOP concept_ancestor (ties counted in each, flagged as collisions)
+#                        OMOP concept_ancestor; a SNOMED-distance tie is reduced to its
+#                        most-specific Mondo term(s) (nested ancestors dropped), and a
+#                        genuine orthogonal tie is counted in each + flagged as a collision
 # concept_ancestor has subclass edges only for STANDARD (SNOMED) concepts — ICD is
 # non-standard, so only the standard concept is climbed; the ICD source rides up through
 # whatever standard concept OMOP assigned.
