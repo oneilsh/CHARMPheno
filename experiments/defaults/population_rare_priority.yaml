@@ -1,0 +1,8 @@
+# Vestigial cohort placeholder for the whole-Mondo EHR-usage exports
+# (model_class: mondo_usage — exps 0105/0106/0107/0108). Those runs scan the WHOLE
+# population against the WHOLE Mondo ontology, so there is no real cohort; the driver
+# (analysis/cloud/mondo_usage_cloud.py) ignores `cohort` entirely. This file exists only
+# so run_experiment's load_defaults finds a <cohort>.yaml to merge over _base.yaml, the
+# same reason population_rare6.yaml exists for the gated case-finding model.
+cohort: population_rare_priority
+cohort_def: none
