@@ -20,6 +20,10 @@ mondo_cache_dir: "data/mondo"
 
 # 0106 — Whole-Mondo EHR usage in SOURCE-concept space (A/B vs 0105)
 
+> **Tip:** exp **0108** runs this space together with `standard` (0105) and `source_climb`
+> (0107) in one job (`--count-space all`) and writes a safe cross-space summary. Run 0106
+> alone only for the source space in isolation.
+
 Same report as 0105, but counts on `condition_source_concept_id` against each term's
 own Mondo `same_as` codes instead of `condition_concept_id` via `same_as -> Maps to`.
 

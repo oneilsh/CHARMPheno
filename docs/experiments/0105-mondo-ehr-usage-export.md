@@ -20,6 +20,10 @@ mondo_cache_dir: "data/mondo"
 
 # 0105 — Whole-Mondo EHR usage (exact map, no roll-up)
 
+> **Tip:** exp **0108** runs this space together with `source` (0106) and `source_climb`
+> (0107) in one job (`--count-space all`) and writes a safe cross-space summary. Run 0105
+> alone only for the standard space in isolation.
+
 Answers "how much of Mondo does a real EHR use, and where?" — a standalone,
 publishable output, not a modeling step. Follows 0087 (whole-Mondo places 97.9% of
 coded patients via roll-up) but deliberately **drops the roll-up**: it reports each
