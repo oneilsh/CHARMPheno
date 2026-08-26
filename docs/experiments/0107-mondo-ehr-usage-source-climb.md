@@ -66,12 +66,14 @@ differenceable back to a suppressed cell.
 ## Run
 
 ```bash
-# via the driver directly (mondo_usage is not registered in run_experiment.py):
-python analysis/cloud/mondo_usage_cloud.py \
-  --cdr "$WORKSPACE_CDR" --billing "$GOOGLE_PROJECT" \
-  --source-table condition_occurrence --count-space source_climb \
-  --out <run-dir>
+make -C analysis/cloud exp ID=107
+# writes <run-dir>/mondo_usage.json (+ mondo_usage_nodes.tsv); fit-only (no eval/bundle).
 ```
+
+`model_class: mondo_usage` is a fit-only class in `run_experiment.py` — it dispatches
+`mondo_usage_cloud.py` with the frontmatter's `count_space` / `source_table` / `min_cell`
+and skips the NPMI eval + dashboard build (like `pc` / `dag_placement`). The `[source_climb
+survey]` lines land in the run's `summary.md` + fit log.
 
 Load the written `mondo_usage.json` into `mondo-usage-dashboard/` (or via Open data) and
 compare side-by-side with the 0105 and 0106 exports.
