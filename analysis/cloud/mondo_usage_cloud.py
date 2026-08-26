@@ -138,6 +138,53 @@ def term_collision_siblings(
     return out
 
 
+def classify_collision_kinds(pairs):
+    """Split source_climb cross-term collisions by MECHANISM (code-centric).
+
+    ``pairs`` are ``(origin_code, mondo_id, via)`` attribution triples with ``via`` in
+    {``source_exact``, ``standard_exact``, ``climbed``}. A term collides when it shares an
+    originating source code with another term; the mechanism is a property of the CODE:
+
+      * ``shared_concept`` — the code reaches its several terms only through EXACT maps:
+        one standard (SNOMED) concept is the mapping of >=2 Mondo terms (the OMOP
+        ``Maps to`` coarsening) — the "these are genuinely the same concept" case, and the
+        same phenomenon as standard-space collisions.
+      * ``climb_tie`` — the code reaches its terms only through the CLIMB: it rolled up to
+        >=2 equally-near mapped ancestors in Mondo's poly-hierarchy. Milder — a specific
+        code sitting under two sibling branches (expected in a DAG).
+      * ``mixed`` — both mechanisms contribute (e.g. exact to one term, climbed to another).
+
+    Returns ``(siblings, term_kind, code_kind)``: ``siblings[mondo]`` = sorted colliding
+    siblings (any mechanism — the "don't sum" set); ``code_kind[code]`` for each code that
+    hits >=2 terms; ``term_kind[mondo]`` in {shared_concept, climb_tie, mixed} for each
+    colliding term (mixed if its colliding codes disagree)."""
+    from collections import defaultdict
+    code_terms: dict[int, set] = defaultdict(set)
+    code_vias: dict[int, set] = defaultdict(set)
+    for c, m, v in pairs:
+        code_terms[int(c)].add(str(m))
+        code_vias[int(c)].add(str(v))
+    code_kind: dict[int, str] = {}
+    for c, terms in code_terms.items():
+        if len(terms) < 2:
+            continue
+        vs = code_vias[c]
+        code_kind[c] = ("climb_tie" if vs == {"climbed"}
+                        else "shared_concept" if not (vs & {"climbed"})
+                        else "mixed")
+    sib: dict[str, set] = defaultdict(set)
+    tk: dict[str, set] = defaultdict(set)
+    for c, k in code_kind.items():
+        terms = code_terms[c]
+        for m in terms:
+            sib[m] |= (terms - {m})
+            tk[m].add(k)
+    siblings = {m: sorted(s) for m, s in sib.items()}
+    term_kind = {m: (ks.pop() if len(ks) == 1 else "mixed") for m, ks in
+                 ({m: set(v) for m, v in tk.items()}).items()}
+    return siblings, term_kind, code_kind
+
+
 _RARE_SRC = {"gard_rare": "GARD", "orphanet_rare": "Orphanet", "nord_rare": "NORD",
              "doid_rare": "DOID", "ncit_rare": "NCIt", "inferred_rare": "inferred",
              "mondo_curated_rare": "Mondo"}
@@ -360,6 +407,23 @@ def build_safe_summary(results: list[dict]) -> str:
               (", ".join(f"{v}={n}" for v, n in sorted(
                   sv.get("unmatched_codes_by_vocab", {}).items(),
                   key=lambda kv: -(kv[1] or 0))) or "(none)")]
+        tk = sv.get("collision_terms_by_kind", {})
+        ck = sv.get("collision_codes_by_kind", {})
+        if tk or ck:
+            L += ["", "### collision split (of the flagged terms)", "",
+                  f"- flagged **terms** by mechanism: shared-concept {tk.get('shared_concept', 0)} "
+                  f"(genuine Maps-to coarsening, = standard space) · climb-tie "
+                  f"{tk.get('climb_tie', 0)} (rolled up to ≥2 nearest ancestors) · mixed "
+                  f"{tk.get('mixed', 0)}",
+                  f"- colliding **codes** by mechanism: shared-concept {ck.get('shared_concept', 0)} "
+                  f"· climb-tie {ck.get('climb_tie', 0)} · mixed {ck.get('mixed', 0)}"]
+            for title, key in [("climb-tie", "collision_examples_climb_tie"),
+                               ("shared-concept", "collision_examples_shared_concept")]:
+                exs = sv.get(key, [])
+                if exs:
+                    L += ["", f"Example {title} multi-maps (one source code → the Mondo "
+                          "terms it lands on — judge whether the overlap makes sense):"]
+                    L += [f"- `{e['code']}` → {', '.join(e['terms'])}" for e in exs]
     L.append("")
     return "\n".join(L)
 
@@ -384,6 +448,7 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
     state_of: dict[str, str] = {}
     counts = {"unused": 0, "used_small": 0, "reported": 0}
     n_internal_used = n_collision = 0
+    collision_kind_counts = {"shared_concept": 0, "climb_tie": 0, "mixed": 0}
 
     for r in term_rows:
         state, display, public = usage_state(r["n_persons"], min_cell)
@@ -392,8 +457,13 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
         parents = r["parents"] or [_ROOT_ID]
         parents_of[r["mondo_id"]] = parents
         siblings = r.get("collision_siblings") or []
+        # collision mechanism: source_climb sets it explicitly; other spaces' collisions
+        # are all shared-concept (Maps-to coarsening), so default to that when flagged.
+        ckind = r.get("collision_kind") or ("shared_concept" if siblings else "")
         if siblings:
             n_collision += 1
+            if ckind in collision_kind_counts:
+                collision_kind_counts[ckind] += 1
         if state != "unused" and r["is_internal"]:
             n_internal_used += 1
         nodes.append({
@@ -407,6 +477,7 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             "count": public,                 # None when withheld
             "collision": bool(siblings),
             "collision_siblings": siblings,
+            "collision_kind": ckind,
             "rare": bool(r.get("rare")),
             "rare_src": list(r.get("rare_src") or []),
             # code multiplicity (exact COUNTS of source/target ids — not patient
@@ -454,6 +525,7 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
         "internal_terms": sum(1 for r in term_rows if r["is_internal"]),
         "internal_used_terms": n_internal_used,
         "collision_terms": n_collision,
+        "collision_terms_by_kind": collision_kind_counts,
         "rare_terms": sum(1 for r in term_rows if r.get("rare")),
         "rare_used_terms": sum(1 for r, nd in zip(term_rows, nodes)
                                if r.get("rare") and nd["state"] != "unused"),
@@ -464,7 +536,7 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
     root = {"id": _ROOT_ID, "label": "Mondo disease (mapped-term view)",
             "kind": "root", "parents": [], "std_concepts": [], "state": "root",
             "category": "root", "display": "", "count": None, "collision": False,
-            "collision_siblings": [], "rare": False, "rare_src": [],
+            "collision_siblings": [], "collision_kind": "", "rare": False, "rare_src": [],
             "codes": [], "n_codes": 0, "codes_by_vocab": {},
             "source_codes": [], "n_source_codes": 0, "depth": 0}
     return {"meta": meta, "stats": stats, "nodes": [root] + nodes}
@@ -591,6 +663,7 @@ def main(argv: list[str]) -> int:
         from pyspark.sql import Window
         source_codes_of: dict[str, dict] = {}   # source_climb catalog (empty otherwise)
         survey: dict = {}                       # source_climb tier coverage (empty otherwise)
+        collision_kind_of: dict[str, str] = {}  # source_climb collision mechanism per term
 
         if space == "source":
             # --- SOURCE space: match condition_source_concept_id to the term's OWN
@@ -668,14 +741,16 @@ def main(argv: list[str]) -> int:
             # TIER 1 — source-exact
             t1 = (cond.join(srcmap_sdf, cond["src_cid"] == srcmap_sdf["map_cid"], "inner")
                   .select("person_id", "mondo_id",
-                          F.col("src_cid").alias("origin_cid"), F.lit("exact").alias("via")))
+                          F.col("src_cid").alias("origin_cid"),
+                          F.lit("source_exact").alias("via")))
             # rows whose source code is NOT a same_as (fall through to tier 2/3)
             rem1 = cond.join(src_ids_sdf, cond["src_cid"] == src_ids_sdf["src_cid"], "left_anti")
 
             # TIER 2 — standard-exact (origin = the ICD source code, or std if none)
             t2 = (rem1.join(std_sdf, rem1["std_cid"] == std_sdf["map_cid"], "inner")
                   .select("person_id", "mondo_id",
-                          origin.alias("origin_cid"), F.lit("exact").alias("via")))
+                          origin.alias("origin_cid"),
+                          F.lit("standard_exact").alias("via")))
             # rows whose standard concept is ALSO not a mapped term -> candidates to climb
             rem2 = rem1.join(std_ids_sdf, rem1["std_cid"] == std_ids_sdf["map_cid"], "left_anti")
 
@@ -704,10 +779,12 @@ def main(argv: list[str]) -> int:
             attribution = (t1.unionByName(t2).unionByName(t3)).cache()
             hit = attribution.select("person_id", "mondo_id")
 
-            # per-term catalog of ORIGINATING source codes (identity only, via = exact/climbed;
-            # exact wins if a code reaches a term both ways). Named via the concept table.
+            # per-term catalog of ORIGINATING source codes. Keep the FULL tier via
+            # (source_exact/standard_exact/climbed) for the collision split; the catalog
+            # display collapses it to exact/climbed (exact wins if a code reaches a term
+            # both ways). Named via the concept table.
             cat = (attribution.select("mondo_id", "origin_cid", "via").distinct()
-                   .withColumn("vrank", F.when(F.col("via") == "exact", 0).otherwise(1)))
+                   .withColumn("vrank", F.when(F.col("via") == "climbed", 1).otherwise(0)))
             cat = (cat.withColumn("best", F.min("vrank").over(
                        Window.partitionBy("mondo_id", "origin_cid")))
                    .where(F.col("vrank") == F.col("best"))
@@ -718,24 +795,36 @@ def main(argv: list[str]) -> int:
             cat_named = (cat.join(concept_all, "origin_cid", "left")
                          .select("mondo_id", "origin_cid", "via", "vocabulary_id", "concept_code")
                          .toPandas())
+            code_disp = {}       # origin_cid -> "VOCAB code" for examples
             for mid, sub in cat_named.groupby("mondo_id"):
-                recs = [{"id": int(r.origin_cid),
-                         "vocab": (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"),
-                         "code": (str(r.concept_code) if pd.notna(r.concept_code) else str(int(r.origin_cid))),
-                         "via": str(r.via)}
-                        for r in sub.itertuples()]
+                recs = []
+                for r in sub.itertuples():
+                    vocab = str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"
+                    code = str(r.concept_code) if pd.notna(r.concept_code) else str(int(r.origin_cid))
+                    disp = "climbed" if str(r.via) == "climbed" else "exact"
+                    recs.append({"id": int(r.origin_cid), "vocab": vocab, "code": code, "via": disp})
+                    code_disp[int(r.origin_cid)] = f"{vocab} {code}"
                 recs.sort(key=lambda c: (c["via"] != "exact", c["vocab"], c["code"]))
                 source_codes_of[str(mid)] = {"list": recs[:CATALOG_CAP], "n": len(recs)}
 
-            # collisions: a single source code attributed to >1 Mondo term (standard-exact
-            # coarsening or a climb tie) -> a patient with that code counts under each.
-            pairs_pd = cat_named[["origin_cid", "mondo_id"]].drop_duplicates()
-            id_to_mondos = collision_map(
-                [(int(c), str(m)) for c, m in pairs_pd.itertuples(index=False)])
-            term_origins = (cat_named.groupby("mondo_id")["origin_cid"]
-                            .apply(lambda s: [int(x) for x in s]).to_dict())
-            siblings = term_collision_siblings(
-                {str(k): v for k, v in term_origins.items()}, id_to_mondos)
+            # collisions: a single source code attributed to >1 Mondo term -> a patient
+            # with that code counts under each. Split by MECHANISM: shared_concept (exact
+            # Maps-to coarsening) vs climb_tie (rolled up to >=2 nearest ancestors) vs mixed.
+            full_pairs = [(int(c), str(m), str(v)) for c, m, v
+                          in cat_named[["origin_cid", "mondo_id", "via"]].itertuples(index=False)]
+            siblings, collision_kind_of, code_kind = classify_collision_kinds(full_pairs)
+            label = lambda mm: label_of.get(mm, mm)
+            def _examples(kind, n=8):
+                out = []
+                for c, k in code_kind.items():
+                    if k != kind:
+                        continue
+                    terms = sorted({m for cc, m, v in full_pairs if cc == c})
+                    out.append({"code": code_disp.get(c, str(c)),
+                                "terms": [label(t) for t in terms][:6]})
+                    if len(out) >= n:
+                        break
+                return out
 
             # survey: distinct persons resolved at each tier (overlapping across tiers),
             # plus the unmatched remainder as distinct source CODES by vocabulary. Counting
@@ -751,6 +840,9 @@ def main(argv: list[str]) -> int:
                                   .groupBy("vocabulary_id")
                                   .agg(F.countDistinct("src_cid").alias("codes"))
                                   .toPandas())
+            from collections import Counter
+            term_kind_counts = Counter(collision_kind_of.values())
+            code_kind_counts = Counter(code_kind.values())
             survey = {
                 "persons_source_exact": int(t1.select("person_id").distinct().count()),
                 "persons_standard_exact": int(t2.select("person_id").distinct().count()),
@@ -758,6 +850,11 @@ def main(argv: list[str]) -> int:
                 "unmatched_codes_by_vocab": {
                     (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"): int(r.codes)
                     for r in unm_codes_by_vocab.itertuples()},
+                # collision split (see classify_collision_kinds): terms + codes by mechanism
+                "collision_terms_by_kind": {k: int(v) for k, v in term_kind_counts.items()},
+                "collision_codes_by_kind": {k: int(v) for k, v in code_kind_counts.items()},
+                "collision_examples_climb_tie": _examples("climb_tie"),
+                "collision_examples_shared_concept": _examples("shared_concept"),
             }
         else:
             # --- STANDARD space (default): condition_concept_id via same_as -> Maps to.
@@ -813,6 +910,7 @@ def main(argv: list[str]) -> int:
                 "n_source_codes": cat["n"],
                 "n_persons": count_of.get(mid, 0),
                 "collision_siblings": siblings.get(mid, []),
+                "collision_kind": collision_kind_of.get(mid, ""),
                 "rare": rare_of.get(mid, False),
                 "rare_src": rare_src_of.get(mid, []),
             })

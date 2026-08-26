@@ -153,6 +153,23 @@ def test_code_multiplicity_passthrough_and_stats():
     assert p["stats"]["multi_code_terms"] == 1       # only A maps >1 code
 
 
+def test_classify_collision_kinds_splits_mechanism():
+    # code 100 hits A,B via EXACT (standard coarsening) -> shared_concept;
+    # code 200 hits B,C via CLIMB -> climb_tie; code 300 hits D exact + E climbed -> mixed.
+    pairs = [(100, "A", "standard_exact"), (100, "B", "standard_exact"),
+             (200, "B", "climbed"), (200, "C", "climbed"),
+             (300, "D", "source_exact"), (300, "E", "climbed"),
+             (9, "Z", "source_exact")]                 # code 9 -> one term, no collision
+    siblings, term_kind, code_kind = m.classify_collision_kinds(pairs)
+    assert code_kind == {100: "shared_concept", 200: "climb_tie", 300: "mixed"}
+    assert siblings["A"] == ["B"] and term_kind["A"] == "shared_concept"
+    assert siblings["C"] == ["B"] and term_kind["C"] == "climb_tie"
+    # B collides via a shared_concept code (100) AND a climb_tie code (200) -> mixed
+    assert siblings["B"] == ["A", "C"] and term_kind["B"] == "mixed"
+    assert term_kind["D"] == "mixed" and term_kind["E"] == "mixed"
+    assert "Z" not in siblings           # single-term code is not a collision
+
+
 def test_suppress_count_floor_inclusive():
     assert m.suppress_count(0) == "0"
     assert m.suppress_count(1) == "≤20"
