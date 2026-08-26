@@ -1426,18 +1426,19 @@ function nihName(vocab,code){
   const host=$("#drawer-inner"); if(!host) return;
   let cur=null;
   const codeAt=t=>t&&t.closest?t.closest("a[data-nih]"):null;
+  const keyOf=a=>a.getAttribute("data-nih")+":"+a.getAttribute("data-code");
+  const label=(a,nm)=>{const bt=a.getAttribute("data-tip")||""; return nm?nm+" · "+bt:bt;};
   host.addEventListener("mouseover",e=>{
     const a=codeAt(e.target); if(!a) return; cur=a;
-    const k=a.getAttribute("data-nih")+":"+a.getAttribute("data-code");
-    if(k in nihCache){ if(nihCache[k]) showTip(e,nihCache[k]); return; }
-    showTip(e,"…");
+    const k=keyOf(a);
+    if(k in nihCache){ showTip(e,label(a,nihCache[k])); return; }
+    showTip(e,label(a,null));      // show base context immediately while the name loads
     nihName(a.getAttribute("data-nih"),a.getAttribute("data-code"))
-      .then(nm=>{ if(cur!==a) return; nm?showTip(e,nm):hideTip(); });
+      .then(nm=>{ if(cur===a) showTip(e,label(a,nm)); });
   });
   host.addEventListener("mousemove",e=>{
-    const a=codeAt(e.target); if(!a){return;}
-    const nm=nihCache[a.getAttribute("data-nih")+":"+a.getAttribute("data-code")];
-    if(nm) showTip(e,nm);
+    const a=codeAt(e.target); if(!a) return;
+    const k=keyOf(a); showTip(e,label(a, k in nihCache?nihCache[k]:null));
   });
   host.addEventListener("mouseout",e=>{ if(codeAt(e.target)){cur=null; hideTip();} });
 })();
@@ -1473,28 +1474,33 @@ function sourceCatalogRow(n){
     const href=c.id?athena(c.id):athenaSearch(c.code);
     const b=c.band&&!c.band.startsWith("≤")?` <span style="font-size:10px;color:var(--muted)">${c.band}</span>`:"";
     const tip=`${c.vocab} · ${climbed?"climbed (rolled up from a descendant)":"exact match"}${c.band?" · "+c.band+" patients":""}`;
-    // public-domain vocabs (ICD/HCPCS) get their name resolved on hover from NIH Clinical
-    // Tables (see the hover handler below); licensed vocabs (SNOMED) keep code + Athena only.
-    const nih=NIH_EP[c.vocab]?` data-nih="${c.vocab}" data-code="${esc(String(c.code))}"`:"";
-    return `<a href="${href}" target="_blank" rel="noopener" title="${tip}"${nih}>${t}</a>${b}`;};
+    // public-domain vocabs (ICD/HCPCS) resolve their name on hover from NIH Clinical Tables
+    // (handler below) — no `title`, so the native browser tooltip doesn't fight the custom
+    // one; the base context rides in data-tip. Licensed vocabs (SNOMED) keep the native title.
+    if(NIH_EP[c.vocab])
+      return `<a href="${href}" target="_blank" rel="noopener" data-nih="${c.vocab}" data-code="${esc(String(c.code))}" data-tip="${esc(tip)}">${t}</a>${b}`;
+    return `<a href="${href}" target="_blank" rel="noopener" title="${tip}">${t}</a>${b}`;};
+  // each code+band is an UNBREAKABLE unit; the list wraps between units (no commas), so a
+  // vocab/code never splits across lines.
+  const unit=c=>`<span style="display:inline-block;white-space:nowrap;margin:0 14px 3px 0">${link(c)}</span>`;
   // preview the first few (heavy-first); expand the drawer to the full in-payload list,
   // ≤20 tail included. Any codes beyond the export cap (all ≤20) are noted, not hidden.
   const PREVIEW=8;
   const inPayload=sc.length;
   const notListed=Math.max(total-inPayload,0);
-  const preview=sc.slice(0,PREVIEW).map(link).join(", ");
+  const preview=sc.slice(0,PREVIEW).map(unit).join("");
   const moreInPayload=inPayload>PREVIEW;
   // heavy-first sort means any un-shipped remainder is the LOWEST-volume codes; the band
   // histogram above already shows the true full distribution, so this note stays honest
   // without claiming a specific band for codes not in the payload.
-  const allBody=sc.map(link).join(", ")
+  const allBody=sc.map(unit).join("")
     +(notListed?` <span style="color:var(--muted)">+${notListed} lower-volume codes not listed</span>`:"");
   const drawer=(moreInPayload||notListed)
     ? `<details style="margin-top:5px"><summary style="cursor:pointer;color:var(--desc)">`
       +`Show ${notListed?"top ":"all "}${notListed?inPayload:total} codes</summary>`
-      +`<div style="margin-top:5px;line-height:1.9">${allBody}</div></details>`
+      +`<div style="margin-top:6px">${allBody}</div></details>`
     : "";
-  return `<dt>Source codes (${total})</dt><dd>${histRow}<div style="line-height:1.9">${preview}${moreInPayload?" …":""}</div>${drawer}`+
+  return `<dt>Source codes (${total})</dt><dd>${histRow}<div>${preview}${moreInPayload?`<span style="color:var(--muted)">…</span>`:""}</div>${drawer}`+
     `<div style="color:var(--muted);margin-top:4px">codes coded in the EHR that map here; <b>↑</b> = climbed to the nearest mapped ancestor. `+
     `Hover an ICD/HCPCS code for its name (NIH Clinical Tables); SNOMED&nbsp;CT&reg; and other codes link to Athena. `+
     `Bands = distinct-patient volume as ranges (never exact counts); the shape shows where the weight sits.</div></dd>`;
