@@ -242,6 +242,8 @@ lda-bq-smoke: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(LDA_BQ_SCRIPT) \
 	    --save-dir "$(SAVE_DIR)" \
@@ -281,6 +283,8 @@ hdp-bq-smoke: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(HDP_BQ_SCRIPT) \
 	    --save-dir "$(SAVE_DIR)" \
@@ -300,6 +304,8 @@ eval-bq-coherence: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(EVAL_SCRIPT) \
 	    --checkpoint "$(CHECKPOINT)" \
@@ -316,6 +322,8 @@ build-dashboard-bundle: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(BUNDLE_SCRIPT) \
 	    --checkpoint "$(CHECKPOINT)" \
@@ -402,6 +410,8 @@ lr-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY) \
 	    $(REPO_ROOT)/analysis/cloud/lr_readout.py \
 	    --run-dir $(RUNS_DIR)/$(shell printf '%04d' $(ID))-* \
@@ -448,6 +458,8 @@ gated-pc-readout: zip cluster-overlay $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP),$(CLUSTER_OVERLAY),$(REPO_ROOT)/analysis/cloud/distributed_readout.py \
 	    $(REPO_ROOT)/analysis/cloud/gated_pc_readout.py \
 	    --run-dir "$(GPR_RUN_DIR)" \
@@ -530,6 +542,8 @@ lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(LDA_BQ_SCRIPT) \
 	    --save-dir "$$RUN_SAVE_DIR" \
@@ -557,6 +571,8 @@ lda-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(EVAL_SCRIPT) \
 	    --checkpoint "$$RUN_SAVE_DIR" \
@@ -586,6 +602,8 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(HDP_BQ_SCRIPT) \
 	    --save-dir "$$RUN_SAVE_DIR" \
@@ -615,6 +633,8 @@ hdp-bq-fit-eval: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(EVAL_SCRIPT) \
 	    --checkpoint "$$RUN_SAVE_DIR" \
@@ -659,6 +679,8 @@ lda-bq-fit-eval-cancer: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(LDA_BQ_SCRIPT) \
 	    --save-dir "$$RUN_SAVE_DIR" \
@@ -687,6 +709,8 @@ lda-bq-fit-eval-cancer: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(EVAL_SCRIPT) \
 	    --checkpoint "$$RUN_SAVE_DIR" \
@@ -729,6 +753,8 @@ lda-bq-fit-eval-dementia: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(LDA_BQ_SCRIPT) \
 	    --save-dir "$$RUN_SAVE_DIR" \
@@ -757,6 +783,8 @@ lda-bq-fit-eval-dementia: zip $(WORKSPACE_ENV)
 	    --conf spark.executor.memory=6g \
 	    --conf spark.executor.memoryOverhead=2g \
 	    --conf spark.python.worker.memory=2g \
+	    --conf spark.task.maxFailures=8 \
+	    --conf spark.excludeOnFailure.enabled=true \
 	    --py-files $(SPARK_VI_ZIP),$(CHARMPHENO_ZIP) \
 	    $(EVAL_SCRIPT) \
 	    --checkpoint "$$RUN_SAVE_DIR" \
