@@ -319,7 +319,7 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
   <header class="top">
     <div class="brand">
       <h1>Counting Diagnoses: AllOfUs on Mondo</h1>
-      <p>Diagnosis counts from the AllOfUs EHR database (v8) mapped to the Mondo disease ontology. Counts of 20 or fewer have been masked; similar counts may be found at the <a href="https://databrowser.researchallofus.org/" target="_blank" rel="noopener">AllOfUs Public Data Browser</a>. <span class="mtip" tabindex="0">Methods details<span class="tip" role="tooltip"><span>Each participant's standardized conditions in the AllOfUs <em>condition_occurrence</em> table (<em>condition_concept_id</em>, SNOMED) are matched to Mondo disease terms through Mondo's <em>same&nbsp;as</em> cross-references to source vocabularies — a term's own SNOMED codes directly, and its ICD and other codes via OMOP's <em>Maps&nbsp;to</em> standardization. The match is <em>exact</em>, with no roll-up through the SNOMED hierarchy: a term is credited only with participants coded at that term's own concept(s), not at its subtypes, and each participant is counted once per term (counts of 1&ndash;20 are masked and shown as &le;20). Because OMOP's ICD&rarr;SNOMED <em>Maps&nbsp;to</em> is one-to-many, a single standardized condition can land on several Mondo terms at once. Those terms are flagged with an orange ring: a participant with that one condition is counted under each of them, so their counts overlap and should not be added together.</span><span>Two node-size views are available. By default, nodes are sized by their <em>direct</em> count — participants coded at that term itself — so a broad classification can look small while its more specific children are large. Switch to <em>Rolled up</em> to size each node by its direct plus all descendant counts. A roll-up sums a term with everything beneath it, so a participant with several diagnoses under one branch is counted once per diagnosis: <em>pericarditis</em> and <em>pericardial effusion</em> both fall under <em>pericardium disorder</em>, so a participant diagnosed with both counts twice toward pericardium disorder's rolled-up total — read rolled-up numbers as counts of diagnoses, not of distinct patients.</span><span><b>Note that many Mondo disease entries do not have corresponding codes that would be found in an EHR; others do, but there is no direct mapping between them. Small counts or counts of 0 should thus be interpreted as absence of evidence, rather than evidence of absence.</b></span></span></span></p>
+      <p>Diagnosis counts from the AllOfUs EHR database (v8) mapped to the Mondo disease ontology. Counts of 20 or fewer have been masked; similar counts may be found at the <a href="https://databrowser.researchallofus.org/" target="_blank" rel="noopener">AllOfUs Public Data Browser</a>. <span class="mtip" tabindex="0">Methods details<span class="tip" role="tooltip"><span>Each participant's coded conditions in the AllOfUs <em>condition_occurrence</em> table are attributed to Mondo disease terms by a three-step ladder, taking the most specific mapped term reachable: (1) the <em>source</em> code (e.g. ICD) is one of the term's Mondo <em>same&nbsp;as</em> cross-references; else (2) its standardized SNOMED concept maps to a term via OMOP <em>Maps&nbsp;to</em>; else (3) that concept is rolled up the SNOMED hierarchy to the nearest ancestor a Mondo term maps to. Each participant is credited once per term, and counts of 1&ndash;20 are masked and shown as &le;20.</span><span>A single coded condition can legitimately reach several Mondo terms at once — its SNOMED concept is shared by several terms (OMOP's ICD&rarr;SNOMED <em>Maps&nbsp;to</em> is one-to-many), or it rolled up to several equally-near ancestors in Mondo's poly-hierarchy. So a term's own count answers "how many participants touch this term," and these per-term counts are not meant to be added together. When terms are combined in a subtree roll-up, each shared diagnosis is instead <em>split 1/m</em> across the <em>m</em> terms it reaches (fractional attribution), so the rolled-up total is de-double-counted and honestly additive.</span><span>Two node-size views are available. <em>Per-term</em> sizes each node by its own count, so a broad classification can look small while its specific children are large. <em>Rolled up</em> sizes each node by its de-double-counted subtree total — a diagnosis count (a participant with several diagnoses under one branch counts once per diagnosis), reported as a central estimate &plusmn; small-cell suppression.</span><span><b>Note that many Mondo disease entries do not have corresponding codes that would be found in an EHR; others do, but there is no direct mapping between them. Small counts or counts of 0 should thus be interpreted as absence of evidence, rather than evidence of absence.</b></span></span></span></p>
     </div>
     <div class="toolbar">
       <button class="btn ic" id="theme" title="Toggle theme" aria-label="Toggle color theme">
@@ -624,12 +624,6 @@ function rowEl(n,depth,hasKids,isOpen){
   const lbl=el("span","lbl");
   lbl.innerHTML=hlMatch(n.label,state.q)+` <small>${hlMatch(n.id,state.q)}</small>`;
   r.appendChild(lbl);
-  if(n.collision){const cd=el("span","col");
-    const base=n.collision_kind==="climb_tie"?"climb tie: a code rolled up to sibling terms too"
-              :n.collision_kind==="mixed"?"multi-mapped: shares codes with sibling terms (shared concept + climb tie)"
-              :"shares a standard concept with sibling terms";
-    cd.title=base+(HAS_FRAC?" — patients overlap with those terms; roll-ups split each shared diagnosis 1/m so subtree totals stay honest":" — counts overlap, don't sum across these");
-    r.appendChild(cd);}
   if(n.kind==="internal"){const kt=el("span","kindtag","node");r.appendChild(kt);}
   if(n.rare){const rt=el("span","rare-tag","rare");rt.title="rare disease: "+((n.rare_src||[]).join(", ")||"Mondo");r.appendChild(rt);}
   r.appendChild(prevBar(n));
@@ -1104,7 +1098,6 @@ function updateMore(gm,n){                 // refresh label + width each render 
 function buildNode(id,n){
   const g=svgEl("g",{class:"gnode"});
   g.appendChild(svgEl("circle",{class:"gcirc",cx:0,cy:0}));
-  g.appendChild(svgEl("circle",{class:"gring",cx:0,cy:0,fill:"none",stroke:"var(--collision)","stroke-width":1.5,opacity:n.collision?1:0}));
   g.appendChild(svgEl("text",{class:"glbl","font-size":12.5}));
   g.appendChild(svgEl("text",{class:"gsub","font-size":10.5}));
   const pl=svgEl("g",{class:"gplus",opacity:0});     // "+" = has children not yet shown
@@ -1131,7 +1124,7 @@ function buildNode(id,n){
     gNodeDrag={id,startY:e.clientY,moved:false}; });
   g.addEventListener("mouseenter",()=>{ if(!gNodeDrag) peekOn(id); });
   g.addEventListener("mousemove",e=>{ if(gNodeDrag&&gNodeDrag.moved)return;
-    showTip(e,`${byId.get(id).label} · ${graphCountText(id)||'0'}${byId.get(id).collision?' · collision':''}`);});
+    showTip(e,`${byId.get(id).label} · ${graphCountText(id)||'0'}`);});
   g.addEventListener("mouseleave",()=>{hideTip();peekOff();});
   return g;
 }
@@ -1141,12 +1134,6 @@ function updateNode(g,id,n,c){
   const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
   circ.setAttribute("fill",nodeFill(id,n));
   circ.setAttribute("fill-opacity",nodeOpac(n));
-  const ring=g.querySelector(".gring"); ring.setAttribute("r",c.r+3.5); ring.style.r=(c.r+3.5)+"px";
-  // climb-tie collisions (a code rolled up to >=2 nearest ancestors) get a SOFTER dashed
-  // ring; shared-concept / mixed / (legacy, no kind) keep the solid orange ring.
-  const climbTie=n.collision&&n.collision_kind==="climb_tie";
-  ring.setAttribute("opacity",n.collision?(climbTie?0.5:1):0);
-  ring.setAttribute("stroke-dasharray",climbTie?"2.5,2.5":"");
   const lx=c.r+9;
   const lbl=g.querySelector(".glbl"); lbl.setAttribute("x",lx); lbl.setAttribute("y",c.r>14?-2:4); lbl.textContent=clip(n.label,36);
   const sub=g.querySelector(".gsub");
@@ -1245,7 +1232,7 @@ function drawRollupTreemap(svg,W,H){
         rx:2,fill:"var(--accent)","fill-opacity":lum.toFixed(3),
         stroke:"var(--surface)","stroke-width":1.5,style:"cursor:pointer"});
       rect.addEventListener("mousemove",e=>showTip(e,
-        `${it.node.label} · ${fl}–${cl} patients${it.r.nColl?` · ${it.r.nColl} collision`:""}`));
+        `${it.node.label} · ${fl}–${cl} patients`));
       rect.addEventListener("mouseleave",hideTip);
       rect.addEventListener("click",()=>select(it.node.id));
       svg.appendChild(rect);
@@ -1345,25 +1332,13 @@ function select(id,quiet){
       <button class="close" aria-label="Close">×</button></div></div><div class="body">`;
   html+=`<span class="pill" style="color:${cat.color};background:color-mix(in srgb,${cat.color} 15%,transparent)">${cat.label}</span>`;
   if(n.rare) html+=` <span class="pill" style="color:var(--rare);background:color-mix(in srgb,var(--rare) 15%,transparent)" title="Mondo rare-disease designation">✦ rare · ${(n.rare_src||["Mondo"]).join(", ")}</span>`;
-  if(n.collision){const k=n.collision_kind||"shared_concept";
-    const lead=k==="climb_tie"
-      ? `<b>Multi-mapping (climb tie).</b> A source code here rolled up to ${n.collision_siblings.length} equally-near Mondo ancestor(s) in the poly-hierarchy`
-      : k==="mixed"
-      ? `<b>Multi-mapping (mixed).</b> This term shares a code with ${n.collision_siblings.length} sibling term(s) both via a shared standard concept and via climb ties`
-      : `<b>Multi-mapping (shared concept).</b> This term shares a standard concept with ${n.collision_siblings.length} sibling term(s) via OMOP <span class="mono">Maps&nbsp;to</span>`;
-    const collNote=HAS_FRAC
-      ? `${lead}. The <b>Patients</b> count includes everyone who touches this term. When related terms are rolled up together, each shared diagnosis is split 1/m across its terms, so the subtree total below doesn't double-count them — no need to avoid the roll-up.`
-      : `${lead}. Its count includes those shared patients — do not sum across the flagged terms.`;
-    html+=`<div class="warn" style="margin-top:12px">${collNote}</div>`;}
   html+=`<dl class="kv" style="margin-top:14px">
     <dt>Patients</dt><dd style="font-size:15px;color:${n.state==="reported"?cat.color:"var(--ink)"}">${disp}</dd>
     <dt>MONDO id</dt><dd>${purl?`<a href="${purl}" target="_blank" rel="noopener">${n.id}</a>`:n.id}</dd>
-    ${codesRow(n)}
-    ${sourceCatalogRow(n)}
+    ${(n.source_codes&&n.source_codes.length)?sourceCatalogRow(n):codesRow(n)}
   </dl>`;
   const rr=DATA._roll&&DATA._roll.get(id);
   if(rr && (kids.get(id)||[]).length){
-    const fl=rr.floor>0?fmt(rr.floor):("&le;"+min);
     const pm=rollupPM(rr,min);
     const own=n.state==="reported"?fmt(n.count):n.state==="used_small"?("&le;"+min):"0";
     const descUsed=Math.max(0, rr.nUsed - ((n.state==="reported"||n.state==="used_small")?1:0));
@@ -1371,27 +1346,19 @@ function select(id,quiet){
       <div class="warn" style="background:var(--surface-2);border-color:var(--border);color:var(--ink-2)">
         <b style="color:var(--ink);font-size:16px">${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""}</b> ${HAS_FRAC?"de-double-counted":"distinct participant"} diagnoses across this disease and its ${fmt(descUsed)} descendant term(s) with at least one diagnosis. <b>${own}</b> are diagnosed specifically at this node.${HAS_FRAC?" Multi-mapped diagnoses are split 1/m across their terms, so this total does not double-count them.":""}
       </div>
-      <dl class="kv"><dt>Estimate</dt><dd>${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""} diagnoses</dd>
-        <dt>Bracket</dt><dd>${fl} – ${fmt(rr.ceil)}</dd>
-        <dt>Used terms</dt><dd>${fmt(rr.nUsed)} of ${fmt(rr.nTerms)}</dd>
-        <dt>Suppressed</dt><dd>${fmt(HAS_FRAC?rr.fs:rr.s)} term(s) &le;${min}</dd>
-        <dt>Multi-mapped</dt><dd>${fmt(rr.nColl)}</dd></dl>`;
+      <dl class="kv"><dt>Used terms</dt><dd>${fmt(rr.nUsed)} of ${fmt(rr.nTerms)}</dd>
+        <dt>Suppressed</dt><dd>${fmt(HAS_FRAC?rr.fs:rr.s)} term(s) &le;${min}</dd></dl>`;
   }
-  const parents=(n.parents||[]).filter(p=>byId.has(p));
-  html+=`<div class="section-t">Parents (${parents.length})</div><div class="chiplist">`+
-    (parents.length?parents.map(p=>`<a data-goto="${p}">${esc(byId.get(p).label)}</a>`).join(""):`<span>root</span>`)+`</div>`;
-  const ch=(dagKids.get(id)||[]);
-  if(ch.length){html+=`<div class="section-t" style="margin-top:16px">Children (${ch.length})</div><div class="chiplist">`+
-    ch.slice(0,40).map(c=>`<a data-goto="${c}">${esc(byId.get(c).label)}</a>`).join("")+
-    (ch.length>40?`<span>+${ch.length-40} more</span>`:"")+`</div>`;}
   if(n.collision&&n.collision_siblings.length){
     const k=n.collision_kind||"shared_concept";
-    const note=k==="climb_tie"
-      ? `A source code coded in the EHR has no Mondo term of its own, so it was rolled up to the nearest mapped ancestor — and it <b>tied</b> between <b>${esc(n.label)}</b> and each term below (equally-near ancestors in Mondo's poly-hierarchy). That patient is counted in <b>all</b> of them, so their counts overlap — don't add the flagged terms together. (This is a roll-up tie, not a shared concept.)`
+    const m=n.collision_siblings.length+1;   // this term + its tied siblings share the diagnosis
+    const how=k==="climb_tie"
+      ? `a source code with no Mondo term of its own rolled up and <b>tied</b> between them (equally-near ancestors in Mondo's poly-hierarchy)`
       : k==="mixed"
-      ? `<b>${esc(n.label)}</b> overlaps each term below two ways: some share a standard (SNOMED) concept (OMOP <span class="mono">Maps&nbsp;to</span> coarsening), some are climb ties (a code rolled up to equally-near ancestors). Either way a patient is counted in <b>all</b> of them — don't add the flagged terms together.`
-      : `OMOP maps <b>${esc(n.label)}</b> and each term below onto a <b>shared</b> standard (SNOMED) concept — often one generic concept (its ICD code splits into several SNOMED concepts via <span class="mono">Maps&nbsp;to</span>). Any patient carrying that shared concept is counted in <b>all</b> of these terms at once, so their counts overlap — don't add the flagged terms together.`;
-    html+=`<div class="section-t" style="margin-top:16px">Collision siblings</div>`+
+      ? `they share a standard (SNOMED) concept for some codes and are climb-tied for others`
+      : `OMOP maps them onto a <b>shared</b> standard (SNOMED) concept — often one generic ICD code splitting into several via <span class="mono">Maps&nbsp;to</span>`;
+    const note=`<b>${esc(n.label)}</b> shares diagnoses with the term(s) below because ${how}. A patient carrying that code touches all ${m} terms — but a shared diagnosis is <b>split 1/m</b> (here 1/${m}) across them, so roll-ups that include several of these terms don't double-count it. Read each term's own <b>Patients</b> figure as "everyone who touches this term"; use the subtree roll-up for an honest combined total.`;
+    html+=`<div class="section-t" style="margin-top:16px">Shares diagnoses with</div>`+
     `<div style="color:var(--muted);font-size:11.5px;margin:-2px 0 8px;line-height:1.45">${note}</div>`+
     `<div class="chiplist">`+
     n.collision_siblings.slice(0,30).map(c=>byId.has(c)?`<a data-goto="${c}">${esc(byId.get(c).label)}</a>`:`<span>${c}</span>`).join("")+`</div>`;}
@@ -1494,11 +1461,18 @@ function sourceCatalogRow(n){
   // "shape": how many CODES sit in each volume band (a code count, never patients).
   const hist=bands.map(b=>chip(b.band,`<b style="opacity:.6"> ×${b.codes}</b>`)).join("");
   const histRow=bands.length?`<div style="margin:2px 0 5px">${hist}</div>`:"";
-  const link=c=>{const climbed=c.via==="climbed";
-    const t=`${c.vocab} ${esc(String(c.code))}${climbed?" ↑":""}`;
+  // Mondo's declared same-as cross-references for this term (n.codes) = the DIRECT codes.
+  // A catalogued source code that is one of them is a direct same-as match (≡); an "exact"
+  // code that is NOT is standardised in via OMOP Maps to (→); "climbed" rolled up (↑).
+  const sameAs=new Set((n.codes||[]).filter(c=>c&&c.id!=null).map(c=>c.id));
+  const kindOf=c=>c.via==="climbed"?"up":(c.id!=null&&sameAs.has(c.id))?"same":"in";
+  const MARK={same:" ≡",in:"",up:" ↑"};
+  const WORD={same:"Mondo same-as (direct cross-reference)",in:"standardised in via OMOP Maps to",up:"climbed to the nearest mapped ancestor"};
+  const link=c=>{const kd=kindOf(c);
+    const t=`${c.vocab} ${esc(String(c.code))}${MARK[kd]}`;
     const href=c.id?athena(c.id):athenaSearch(c.code);
     const b=c.band&&!c.band.startsWith("≤")?` <span style="font-size:10px;color:var(--muted)">${c.band}</span>`:"";
-    const tip=`${c.vocab} · ${climbed?"climbed (rolled up from a descendant)":"exact match"}${c.band?" · "+c.band+" patients":""}`;
+    const tip=`${c.vocab} · ${WORD[kd]}${c.band?" · "+c.band+" patients":""}`;
     // public-domain vocabs (ICD/HCPCS) resolve their name on hover from NIH Clinical Tables
     // (handler below) — no `title`, so the native browser tooltip doesn't fight the custom
     // one; the base context rides in data-tip. Licensed vocabs (SNOMED) keep the native title.
@@ -1508,27 +1482,30 @@ function sourceCatalogRow(n){
   // each code+band is an UNBREAKABLE unit; the list wraps between units (no commas), so a
   // vocab/code never splits across lines.
   const unit=c=>`<span style="display:inline-block;white-space:nowrap;margin:0 14px 3px 0">${link(c)}</span>`;
-  // preview the first few (heavy-first); expand the drawer to the full in-payload list,
-  // ≤20 tail included. Any codes beyond the export cap (all ≤20) are noted, not hidden.
+  // preview the first few (heavy-first); the drawer expands to show ONLY the codes not
+  // already shown (the rest of the in-payload list + a note for any beyond the export cap).
   const PREVIEW=8;
   const inPayload=sc.length;
   const notListed=Math.max(total-inPayload,0);
   const preview=sc.slice(0,PREVIEW).map(unit).join("");
-  const moreInPayload=inPayload>PREVIEW;
+  const rest=sc.slice(PREVIEW);
+  const moreN=rest.length+notListed;
   // heavy-first sort means any un-shipped remainder is the LOWEST-volume codes; the band
-  // histogram above already shows the true full distribution, so this note stays honest
-  // without claiming a specific band for codes not in the payload.
-  const allBody=sc.map(unit).join("")
+  // histogram above already shows the true full distribution, so this note stays honest.
+  const restBody=rest.map(unit).join("")
     +(notListed?` <span style="color:var(--muted)">+${notListed} lower-volume codes not listed</span>`:"");
-  const drawer=(moreInPayload||notListed)
+  const drawer=moreN
     ? `<details style="margin-top:5px"><summary style="cursor:pointer;color:var(--desc)">`
-      +`Show ${notListed?"top ":"all "}${notListed?inPayload:total} codes</summary>`
-      +`<div style="margin-top:6px">${allBody}</div></details>`
+      +`Show ${fmt(moreN)} more code${moreN===1?"":"s"}</summary>`
+      +`<div style="margin-top:6px">${restBody}</div></details>`
     : "";
-  return `<dt>Source codes (${total})</dt><dd>${histRow}<div>${preview}${moreInPayload?`<span style="color:var(--muted)">…</span>`:""}</div>${drawer}`+
-    `<div style="color:var(--muted);margin-top:4px">codes coded in the EHR that map here; <b>↑</b> = climbed to the nearest mapped ancestor. `+
+  const anySame=sc.some(c=>kindOf(c)==="same"), anyUp=sc.some(c=>kindOf(c)==="up");
+  const legend=[anySame?"<b>≡</b> = Mondo same-as (direct)":"",anyUp?"<b>↑</b> = climbed to nearest mapped ancestor":""]
+    .filter(Boolean).join("; ");
+  return `<dt>Source codes (${total})</dt><dd>${histRow}<div>${preview}</div>${drawer}`+
+    `<div style="color:var(--muted);margin-top:4px">codes coded in the EHR that map here${legend?"; "+legend:""}. `+
     `Hover an ICD/HCPCS code for its name (NIH Clinical Tables); SNOMED&nbsp;CT&reg; and other codes link to Athena. `+
-    `Bands = distinct-patient volume as ranges (never exact counts); the shape shows where the weight sits.</div></dd>`;
+    `Bands = distinct-patient volume as ranges; the shape shows where the weight sits.</div></dd>`;
 }
 function hlMatch(text,q){                  // HTML-escaped text with <mark> around query matches
   text=String(text); if(!q) return esc(text);
