@@ -113,6 +113,28 @@ def test_assemble_payload_states_stats_and_root():
     assert s["internal_terms"] == 1 and s["internal_used_terms"] == 1
 
 
+def test_fractional_count_suppressed_independently():
+    # frac is patient-derived: it can dip below the floor even when the EXACT count
+    # clears it (a term whose patients arrive via shared codes), so it gets its own gate.
+    rows = [
+        # exact 30 (reported) but fractional 12.4 -> must suppress the frac to ≤20
+        {"mondo_id": "MONDO:A", "label": "a", "is_internal": False, "parents": [],
+         "std_concepts": [1], "n_persons": 30, "n_frac": 12.4, "collision_siblings": []},
+        # exact and frac both clear the floor; frac rounds to int
+        {"mondo_id": "MONDO:B", "label": "b", "is_internal": False, "parents": [],
+         "std_concepts": [2], "n_persons": 5000, "n_frac": 2500.6, "collision_siblings": []},
+        # no n_frac supplied -> falls back to the exact count
+        {"mondo_id": "MONDO:C", "label": "c", "is_internal": False, "parents": [],
+         "std_concepts": [3], "n_persons": 90, "collision_siblings": []},
+    ]
+    by = {n["id"]: n for n in m.assemble_payload(meta={}, term_rows=rows)["nodes"]}
+    assert by["MONDO:A"]["count"] == 30 and by["MONDO:A"]["frac"] is None      # frac withheld
+    assert by["MONDO:A"]["frac_display"] == "≤20"
+    assert by["MONDO:B"]["frac"] == 2501 and by["MONDO:B"]["frac_display"] == "2501"
+    assert by["MONDO:C"]["frac"] == 90                                          # fell back to exact
+    assert by["root"]["frac"] is None and by["root"]["frac_display"] == ""
+
+
 def test_rare_flag_passthrough_and_stats():
     rows = [
         {"mondo_id": "MONDO:R", "label": "rare dx", "is_internal": False, "parents": [],

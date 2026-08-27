@@ -556,6 +556,11 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
 
     for r in term_rows:
         state, display, public = usage_state(r["n_persons"], min_cell)
+        # fractional (1/m) count — suppressed the same way (it is patient-derived and can
+        # dip below the floor even when the exact count clears it, so it needs its own gate).
+        frac_val = r.get("n_frac")
+        frac_val = r["n_persons"] if frac_val is None else frac_val
+        _fst, frac_display, frac_public = usage_state(int(round(frac_val)), min_cell)
         counts[state] += 1
         state_of[r["mondo_id"]] = state
         parents = r["parents"] or [_ROOT_ID]
@@ -579,6 +584,8 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
             "state": state,
             "display": display,
             "count": public,                 # None when withheld
+            "frac": frac_public,             # de-double-counted addable count (None if withheld)
+            "frac_display": frac_display,
             "collision": bool(siblings),
             "collision_siblings": siblings,
             "collision_kind": ckind,
@@ -643,7 +650,8 @@ def assemble_payload(*, meta: dict, term_rows: list[dict],
     }
     root = {"id": _ROOT_ID, "label": "Mondo disease (mapped-term view)",
             "kind": "root", "parents": [], "std_concepts": [], "state": "root",
-            "category": "root", "display": "", "count": None, "collision": False,
+            "category": "root", "display": "", "count": None,
+            "frac": None, "frac_display": "", "collision": False,
             "collision_siblings": [], "collision_kind": "", "rare": False, "rare_src": [],
             "codes": [], "n_codes": 0, "codes_by_vocab": {},
             "source_codes": [], "n_source_codes": 0, "source_bands": [], "depth": 0}
@@ -772,6 +780,7 @@ def main(argv: list[str]) -> int:
         source_codes_of: dict[str, dict] = {}   # source_climb catalog (empty otherwise)
         survey: dict = {}                       # source_climb tier coverage (empty otherwise)
         collision_kind_of: dict[str, str] = {}  # source_climb collision mechanism per term
+        frac_of: dict[str, float] = {}          # source_climb fractional (1/m) term count
 
         if space == "source":
             # --- SOURCE space: match condition_source_concept_id to the term's OWN
@@ -857,7 +866,8 @@ def main(argv: list[str]) -> int:
             t1 = (cond.join(srcmap_sdf, cond["src_cid"] == srcmap_sdf["map_cid"], "inner")
                   .select("person_id", "mondo_id",
                           F.col("src_cid").alias("origin_cid"),
-                          F.lit("source_exact").alias("via")))
+                          F.lit("source_exact").alias("via"),
+                          cond["src_cid"].alias("k_src"), cond["std_cid"].alias("k_std")))
             # rows whose source code is NOT a same_as (fall through to tier 2/3)
             rem1 = cond.join(src_ids_sdf, cond["src_cid"] == src_ids_sdf["src_cid"], "left_anti")
 
@@ -865,7 +875,8 @@ def main(argv: list[str]) -> int:
             t2 = (rem1.join(std_sdf, rem1["std_cid"] == std_sdf["map_cid"], "inner")
                   .select("person_id", "mondo_id",
                           origin.alias("origin_cid"),
-                          F.lit("standard_exact").alias("via")))
+                          F.lit("standard_exact").alias("via"),
+                          rem1["src_cid"].alias("k_src"), rem1["std_cid"].alias("k_std")))
             # rows whose standard concept is ALSO not a mapped term -> candidates to climb
             rem2 = rem1.join(std_ids_sdf, rem1["std_cid"] == std_ids_sdf["map_cid"], "left_anti")
 
@@ -903,12 +914,31 @@ def main(argv: list[str]) -> int:
                 reduced_sdf = broadcast(spark.createDataFrame(reduced_pd))
                 t3 = (rem2.join(reduced_sdf, "std_cid", "inner")
                       .select("person_id", "mondo_id",
-                              origin.alias("origin_cid"), F.lit("climbed").alias("via")))
+                              origin.alias("origin_cid"), F.lit("climbed").alias("via"),
+                              rem2["src_cid"].alias("k_src"), F.col("std_cid").alias("k_std")))
             else:
                 t3 = t1.limit(0)          # no climbs (empty, keeps t1's schema for the union)
 
             attribution = (t1.unionByName(t2).unionByName(t3)).cache()
             hit = attribution.select("person_id", "mondo_id")
+
+            # FRACTIONAL (1/m) per-term count — the addable, de-double-counted number.
+            # A condition is keyed by (person, source concept, standard concept). It maps to
+            # m Mondo terms via its resolved tier (the collision); credit 1/m to each, so the
+            # m shares add back to 1 and summed / rolled-up counts never double-count the map
+            # ambiguity. m is a property of the condition (person-independent). Uncapped
+            # DIAGNOSIS semantics: a person's several distinct conditions on one term each
+            # count, matching the roll-up's "counts of diagnoses, not distinct patients".
+            attr_k = attribution.select(
+                "person_id", "mondo_id",
+                F.coalesce(F.col("k_src"), F.lit(-1)).alias("k_src"),
+                F.coalesce(F.col("k_std"), F.lit(-1)).alias("k_std"))
+            m_of = (attr_k.select("k_src", "k_std", "mondo_id").distinct()
+                    .groupBy("k_src", "k_std").agg(F.count(F.lit(1)).alias("m")))
+            frac_pd = (attr_k.distinct().join(m_of, ["k_src", "k_std"])
+                       .groupBy("mondo_id")
+                       .agg(F.sum(F.lit(1.0) / F.col("m")).alias("frac")).toPandas())
+            frac_of = {str(r["mondo_id"]): float(r["frac"]) for _, r in frac_pd.iterrows()}
 
             # per-term catalog of ORIGINATING source codes. Keep the FULL tier via
             # (source_exact/standard_exact/climbed) for the collision split; the catalog
@@ -1067,6 +1097,9 @@ def main(argv: list[str]) -> int:
                 "n_source_codes": cat["n"],
                 "source_bands": cat.get("bands", []),
                 "n_persons": count_of.get(mid, 0),
+                # fractional (1/m) de-double-counted count; falls back to the exact count
+                # for spaces without collisions (source) or that don't compute it.
+                "n_frac": frac_of.get(mid, float(count_of.get(mid, 0))),
                 "collision_siblings": siblings.get(mid, []),
                 "collision_kind": collision_kind_of.get(mid, ""),
                 "rare": rare_of.get(mid, False),
@@ -1103,6 +1136,7 @@ def main(argv: list[str]) -> int:
             "mondo_id": nd["id"], "label": nd["label"], "kind": nd["kind"],
             "depth": nd["depth"], "state": nd["state"], "category": nd["category"],
             "n_patients": nd["display"],
+            "n_frac": nd.get("frac_display", ""),
             "collision": int(nd["collision"]),
             "collision_siblings": "|".join(nd["collision_siblings"]),
             "n_codes": nd["n_codes"],
