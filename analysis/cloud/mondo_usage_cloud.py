@@ -508,6 +508,47 @@ def parse_hpo_xrefs(obo_text: str) -> "list[tuple]":
     return rows
 
 
+def parse_hpo_dag(obo_text: str) -> "tuple[dict, dict]":
+    """Parse ``hp.obo`` into ``(labels, parents)``: ``labels`` maps ``HP:id`` -> name,
+    ``parents`` maps ``HP:id`` -> list of ``is_a`` parent ids. Obsolete terms are dropped.
+    Pure — no I/O. Mirrors Mondo's (nodes, edges) shape so the DAG machinery is reused."""
+    labels, parents = {}, {}
+    hp_id = hp_name = None
+    par: list = []
+    obsolete = False
+    in_term = False
+
+    def _flush():
+        if in_term and hp_id and hp_id.startswith("HP:") and not obsolete:
+            labels[hp_id] = hp_name or hp_id
+            parents[hp_id] = list(par)
+
+    for raw in obo_text.splitlines():
+        line = raw.rstrip()
+        if line == "[Term]":
+            _flush()
+            in_term, hp_id, hp_name, par, obsolete = True, None, None, [], False
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            _flush()
+            in_term = False
+            continue
+        if not in_term:
+            continue
+        if line.startswith("id:"):
+            hp_id = line[3:].strip()
+        elif line.startswith("name:"):
+            hp_name = line[5:].strip()
+        elif line.startswith("is_obsolete:") and line.split(":", 1)[1].strip() == "true":
+            obsolete = True
+        elif line.startswith("is_a:"):
+            p = line[5:].strip().split("{")[0].split(" ! ")[0].strip()
+            if p.startswith("HP:"):
+                par.append(p)
+    _flush()
+    return labels, parents
+
+
 def build_safe_summary(results: list[dict]) -> str:
     """A copy-pasteable, disclosure-SAFE summary of one or more count-space runs.
 

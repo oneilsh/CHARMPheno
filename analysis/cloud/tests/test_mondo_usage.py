@@ -243,6 +243,41 @@ def test_volume_band_respects_custom_floor():
     assert m.volume_band(51, min_cell=50) == "51–100"
 
 
+def test_parse_hpo_dag():
+    obo = """format-version: 1.2
+
+[Term]
+id: HP:0000118
+name: Phenotypic abnormality
+
+[Term]
+id: HP:0002917
+name: Hypomagnesemia
+is_a: HP:0004363 ! Abnormal circulating metabolite concentration
+is_a: HP:0012418 ! Hypomagnesemia parent two
+
+[Term]
+id: HP:0000001
+name: All
+
+[Term]
+id: HP:9999999
+name: obsolete thing
+is_a: HP:0000118 ! Phenotypic abnormality
+is_obsolete: true
+
+[Typedef]
+id: part_of
+"""
+    labels, parents = m.parse_hpo_dag(obo)
+    assert labels["HP:0002917"] == "Hypomagnesemia"
+    assert labels["HP:0000118"] == "Phenotypic abnormality"
+    assert sorted(parents["HP:0002917"]) == ["HP:0004363", "HP:0012418"]
+    assert parents.get("HP:0000118", []) == []          # a root: no is_a
+    assert "HP:9999999" not in labels                    # obsolete excluded
+    assert "HP:9999999" not in parents
+
+
 def test_band_histogram_counts_codes_heavy_first():
     bands = (["≤20"] * 184 + ["1k–10k"] * 3 + [">100k"] * 2 + ["101–1k"] * 8)
     hist = m.band_histogram(bands)
