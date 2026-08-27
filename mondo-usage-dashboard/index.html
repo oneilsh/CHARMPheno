@@ -340,7 +340,7 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
           <span class="tb-sep"></span>
           <span class="tb-label">Node size</span>
-          <div class="tabs mode-t" id="mode" role="tablist" title="Node circle size. Per-term = the term's own exact-code count. Rolled up = its subtree total (central estimate ± suppression uncertainty; sums diagnoses, may double-count patients).">
+          <div class="tabs mode-t" id="mode" role="tablist" title="Node circle size. Per-term = the term's own exact count (the headline patient number). Rolled up = its subtree total — de-double-counted diagnoses (multi-maps split 1/m), central estimate ± small-cell suppression.">
             <button role="tab" data-mode="term" aria-selected="true">Per-term</button>
             <button role="tab" data-mode="rollup" aria-selected="false">Rolled up</button>
           </div>
@@ -410,6 +410,7 @@ let gFocus=null, gPeek=null, gCoord=new Map(), gExpandNotice="";
 let gColorMode="rarity";            // "rarity" (rare-disease designation) | "usage" (by category)
 const GRAPH_CAP=14;         // max children revealed per expansion before a "＋N more" node
 const state={view:"graph",q:"",rollup:false,hideUnused:true,vis:new Set(CATS.map(c=>c.key))};
+let HAS_FRAC=false;   // payload carries fractional (1/m) de-double-counted counts (computeRollup sets it)
 
 /* ---------- load: embedded block > fetched real > fetched sample ---------- */
 async function boot(){
@@ -484,26 +485,37 @@ function computeVisibleDesc(){
    (not just a primary parent), but a shared descendant reached by several paths is not
    double-counted. Computed by walking each term's ancestor set once and accumulating
    into every ancestor (cheap; no per-node descendant sets stored). */
+// The payload carries a FRACTIONAL (1/m) de-double-counted count per term when the driver
+// computed it. If present, the roll-up sums those honestly (a shared diagnosis is split
+// across its terms, so the subtree sum never double-counts) and the only residual
+// uncertainty is small-cell suppression — the overlap bracket collapses. Falls back to the
+// old distinct-patient [floor…ceil] overlap bracket for payloads without frac.
 function computeRollup(){
   const min=DATA.meta.min_cell||20;
+  HAS_FRAC=DATA.nodes.some(n=>typeof n.frac==="number"||(n.frac_display&&n.frac_display.length>0));
   const memo=new Map();
-  const get=id=>{let r=memo.get(id); if(!r){r={R:0,s:0,maxT:0,nTerms:0,nUsed:0,nColl:0};memo.set(id,r);} return r;};
+  const get=id=>{let r=memo.get(id); if(!r){r={R:0,s:0,maxT:0,nTerms:0,nUsed:0,nColl:0,F:0,fs:0,fmax:0};memo.set(id,r);} return r;};
   get("root");
   for(const n of DATA.nodes){
     if(n.kind==="root")continue;
     const rep=n.state==="reported", small=n.state==="used_small", cnt=rep?(n.count||0):0;
+    const fr=(typeof n.frac==="number")?n.frac:null;                 // frac reported (>floor)
+    const fsupp=(fr==null && n.frac_display && n.frac_display.startsWith("≤"));  // frac withheld but used
     const anc=ancestorSet(n.id); anc.add(n.id);      // this term counts toward itself + every ancestor
     for(const a of anc){
       const r=get(a);
       r.nTerms++;
       if(rep){ r.R+=cnt; if(cnt>r.maxT)r.maxT=cnt; r.nUsed++; }
       else if(small){ r.s++; r.nUsed++; }
+      if(fr!=null){ r.F+=fr; if(fr>r.fmax)r.fmax=fr; }
+      else if(fsupp){ r.fs++; }
       if(n.collision) r.nColl++;
     }
   }
   ROLL_MAX=1; OWN_MAX=1; ROLL_EST_MAX=1;
   for(const [,r] of memo){
-    r.floor=r.maxT; r.ceil=r.R+min*r.s; r.est=r.R+SMALL_NOMINAL*r.s;
+    if(HAS_FRAC){ r.floor=Math.round(r.F); r.ceil=Math.round(r.F+min*r.fs); r.est=r.F+SMALL_NOMINAL*r.fs; }
+    else { r.floor=r.maxT; r.ceil=r.R+min*r.s; r.est=r.R+SMALL_NOMINAL*r.s; }
     ROLL_MAX=Math.max(ROLL_MAX,r.ceil); ROLL_EST_MAX=Math.max(ROLL_EST_MAX,r.est);
   }
   for(const n of DATA.nodes) if(n.state==="reported") OWN_MAX=Math.max(OWN_MAX,n.count);
@@ -541,7 +553,7 @@ function renderKPIs(){
   kpi("Reported (>20)",fmt(s.reported_terms),"exact counts publishable",CATMAP.reported.color);
   kpi("Used-small (≤20)",fmt(s.used_small_terms),"used, exact count withheld",CATMAP.used_small.color);
   kpi("Used branch points",fmt(s.used_branch_terms),"0 direct count, above used nodes",CATMAP.used_branch.color);
-  kpi("Collision-flagged",fmt(s.collision_terms),"share a std concept with siblings",CATMAP.collision||"var(--collision)");
+  kpi("Multi-mapped",fmt(s.collision_terms),HAS_FRAC?"share codes with sibling terms (split 1/m in roll-ups)":"share a std concept with siblings",CATMAP.collision||"var(--collision)");
   if(s.rare_used_terms!=null)
     kpi("Rare used",fmt(s.rare_used_terms),"rare dx (GARD/Orphanet) coded in the EHR","var(--rare)");
   renderCover();
@@ -597,7 +609,9 @@ function renderTree(){
   for(const r of roots) walk(r,0);
   host.appendChild(frag);
   $("#tree-hint").textContent=state.rollup
-    ? `${shown.toLocaleString()} rows · bar = subtree coverage [floor…ceiling]; number = distinct-patient bracket (overlap + <${DATA.meta.min_cell||20} suppression)`
+    ? (HAS_FRAC
+        ? `${shown.toLocaleString()} rows · bar = subtree total; number = de-double-counted diagnoses (multi-maps split 1/m; ±<${DATA.meta.min_cell||20} suppression)`
+        : `${shown.toLocaleString()} rows · bar = subtree coverage [floor…ceiling]; number = distinct-patient bracket (overlap + <${DATA.meta.min_cell||20} suppression)`)
     : `${shown.toLocaleString()} rows · bar = this term's own patients; counts are per-term, never summed`;
 }
 function rowEl(n,depth,hasKids,isOpen){
@@ -610,7 +624,12 @@ function rowEl(n,depth,hasKids,isOpen){
   const lbl=el("span","lbl");
   lbl.innerHTML=hlMatch(n.label,state.q)+` <small>${hlMatch(n.id,state.q)}</small>`;
   r.appendChild(lbl);
-  if(n.collision){const cd=el("span","col");cd.title=(n.collision_kind==="climb_tie"?"climb tie: a code rolled up to sibling terms too — don't sum":"shares a concept with sibling terms — don't sum");r.appendChild(cd);}
+  if(n.collision){const cd=el("span","col");
+    const base=n.collision_kind==="climb_tie"?"climb tie: a code rolled up to sibling terms too"
+              :n.collision_kind==="mixed"?"multi-mapped: shares codes with sibling terms (shared concept + climb tie)"
+              :"shares a standard concept with sibling terms";
+    cd.title=base+(HAS_FRAC?" — patients overlap with those terms; the Addable count splits them 1/m so roll-ups stay honest":" — counts overlap, don't sum across these");
+    r.appendChild(cd);}
   if(n.kind==="internal"){const kt=el("span","kindtag","node");r.appendChild(kt);}
   if(n.rare){const rt=el("span","rare-tag","rare");rt.title="rare disease: "+((n.rare_src||[]).join(", ")||"Mondo");r.appendChild(rt);}
   r.appendChild(prevBar(n));
@@ -649,8 +668,10 @@ function countSpec(n){
     const r=DATA._roll.get(n.id);
     if(!r||r.nUsed===0)return{cls:"zero",text:"0"};
     const fl=r.floor>0?fmtK(r.floor):("≤"+min);
+    const sup=HAS_FRAC?r.fs:r.s;
+    const kind=HAS_FRAC?"subtree diagnoses (de-double-counted)":"subtree distinct patients";
     return{cls:"reported",text:`${fl}–${fmtK(r.ceil)}`,
-      title:`subtree distinct patients: ${r.floor>0?fmt(r.floor):('≤'+min)} – ${fmt(r.ceil)}  ·  ${r.nUsed}/${r.nTerms} used, ${r.s} suppressed, ${r.nColl} collision  ·  nominal ≈ ${fmt(r.est)}`};
+      title:`${kind}: ${r.floor>0?fmt(r.floor):('≤'+min)} – ${fmt(r.ceil)}  ·  ${r.nUsed}/${r.nTerms} used, ${sup} suppressed, ${r.nColl} multi-mapped  ·  nominal ≈ ${fmt(r.est)}`};
   }
   if(n.state==="reported")return{cls:"reported",text:fmt(n.count)};
   if(n.state==="used_small")return{cls:"used_small",text:"≤"+min};
@@ -693,8 +714,9 @@ const gval=id=>{const n=byId.get(id); if(!n)return 0;
 // ±10 reads cleaner), so the reported ± is SMALL_NOMINAL·s. Deliberately NOT a √s band
 // (that assumes independence and understates the uncertainty). s=0 ⇒ exact, no ±.
 function rollupPM(r,min){
-  if(!r||r.s<=0) return 0;
-  return SMALL_NOMINAL*r.s;
+  if(!r) return 0;
+  const s=HAS_FRAC?r.fs:r.s;   // frac roll-up: only the ≤floor terms are uncertain (no overlap term)
+  return s>0?SMALL_NOMINAL*s:0;
 }
 // Count segments drawn under a graph node: the direct (own) count, then the subtree
 // roll-up "of EST (±PM)" whenever the node has used descendants. Bold tracks the sizing
@@ -1329,9 +1351,14 @@ function select(id,quiet){
       : k==="mixed"
       ? `<b>Multi-mapping (mixed).</b> This term shares a code with ${n.collision_siblings.length} sibling term(s) both via a shared standard concept and via climb ties`
       : `<b>Multi-mapping (shared concept).</b> This term shares a standard concept with ${n.collision_siblings.length} sibling term(s) via OMOP <span class="mono">Maps&nbsp;to</span>`;
-    html+=`<div class="warn" style="margin-top:12px">${lead}. Its count includes those shared patients — do not sum across the flagged terms.</div>`;}
+    const collNote=HAS_FRAC
+      ? `${lead}. The <b>Patients</b> figure counts everyone who touches this term; the <b>Addable</b> figure splits each shared diagnosis 1/m across its terms, so subtree roll-ups add up without double-counting.`
+      : `${lead}. Its count includes those shared patients — do not sum across the flagged terms.`;
+    html+=`<div class="warn" style="margin-top:12px">${collNote}</div>`;}
+  const showFrac=HAS_FRAC && n.collision && n.frac_display && n.frac_display!=="";
   html+=`<dl class="kv" style="margin-top:14px">
     <dt>Patients</dt><dd style="font-size:15px;color:${n.state==="reported"?cat.color:"var(--ink)"}">${disp}</dd>
+    ${showFrac?`<dt title="Each diagnosis that maps to m Mondo terms is credited 1/m to each, so these numbers sum honestly across terms. Smaller than Patients when a term mostly appears co-mapped.">Addable</dt><dd style="font-size:15px;color:var(--muted)">${n.frac_display}</dd>`:""}
     <dt>MONDO id</dt><dd>${purl?`<a href="${purl}" target="_blank" rel="noopener">${n.id}</a>`:n.id}</dd>
     ${codesRow(n)}
     ${sourceCatalogRow(n)}
@@ -1344,13 +1371,13 @@ function select(id,quiet){
     const descUsed=Math.max(0, rr.nUsed - ((n.state==="reported"||n.state==="used_small")?1:0));
     html+=`<div class="section-t">Subtree roll-up</div>
       <div class="warn" style="background:var(--surface-2);border-color:var(--border);color:var(--ink-2)">
-        <b style="color:var(--ink);font-size:16px">${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""}</b> distinct participant diagnoses across this disease and its ${fmt(descUsed)} descendant term(s) with at least one diagnosis. <b>${own}</b> are diagnosed specifically at this node.
+        <b style="color:var(--ink);font-size:16px">${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""}</b> ${HAS_FRAC?"de-double-counted":"distinct participant"} diagnoses across this disease and its ${fmt(descUsed)} descendant term(s) with at least one diagnosis. <b>${own}</b> are diagnosed specifically at this node.${HAS_FRAC?" Multi-mapped diagnoses are split 1/m across their terms, so this total does not double-count them.":""}
       </div>
       <dl class="kv"><dt>Estimate</dt><dd>${fmt(rr.est)}${pm>0?` ± ${fmt(pm)}`:""} diagnoses</dd>
         <dt>Bracket</dt><dd>${fl} – ${fmt(rr.ceil)}</dd>
         <dt>Used terms</dt><dd>${fmt(rr.nUsed)} of ${fmt(rr.nTerms)}</dd>
-        <dt>Suppressed</dt><dd>${fmt(rr.s)} term(s) &le;${min}</dd>
-        <dt>Collisions</dt><dd>${fmt(rr.nColl)}</dd></dl>`;
+        <dt>Suppressed</dt><dd>${fmt(HAS_FRAC?rr.fs:rr.s)} term(s) &le;${min}</dd>
+        <dt>Multi-mapped</dt><dd>${fmt(rr.nColl)}</dd></dl>`;
   }
   const parents=(n.parents||[]).filter(p=>byId.has(p));
   html+=`<div class="section-t">Parents (${parents.length})</div><div class="chiplist">`+
