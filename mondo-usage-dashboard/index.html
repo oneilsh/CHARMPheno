@@ -336,10 +336,8 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
     <div class="panel">
       <div class="view on" id="view-graph">
         <div class="graph-toolbar">
-          <button class="btn ic" id="g-reset" title="Reset view (clear hidden / reorder / focus)" aria-label="Reset view">
+          <button class="btn ic" id="g-reset" title="Reset to starting view" aria-label="Reset view">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4"/></svg></button>
-          <button class="btn ic" id="g-collapse" title="Collapse all" aria-label="Collapse all">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9l8-5 8 5M4 15l8 5 8-5M8 12h8"/></svg></button>
           <button class="btn ic" id="g-fit" title="Fit to view" aria-label="Fit to view">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
           <span class="tb-sep"></span>
@@ -501,18 +499,25 @@ function load(d){
   for(const [,arr] of dagKids) arr.sort(sortNodes);
   roots.sort(sortNodes);
   computeVisibleDesc(); computeRollup();
-  graphOpen=new Set(gRootIds); graphOpenUp=new Set(); graphCap=new Map(); graphFolded=new Set(); gPinned=new Set(); gz={x:24,y:24,k:0.85}; gLayer=null; gBounds=null;
-  // auto-expand each axis down its single-child spine to the first BRANCH point, so you land
-  // on the real branching level (Mondo: disease's children; HPO: Phenotypic abnormality + its
-  // siblings) instead of a lone root -> spine node. Stops at the first node with >1 child.
+  initialGraphView();
+  gPinned=new Set(); gz={x:24,y:24,k:0.85}; gLayer=null; gBounds=null;
+  gExpandNotice=""; gSel=new Set(); gHL=new Set(); gHLD=new Set(); gPeek=null; gLastRank=new Map();
+  renderSource(); renderDrawerDefault();
+  renderAll(); requestAnimationFrame(graphFit);
+}
+// The starting graph configuration (used by load + the Reset button): open each axis root,
+// descend any single-child spine to the first branch, then open that branch level's children
+// too (one extra level) so you begin ~two branch levels deep on each side.
+function initialGraphView(){
+  graphOpen=new Set(gRootIds); graphOpenUp=new Set(); graphCap=new Map(); graphFolded=new Set();
+  gFocus=null; gManualRank=new Map();
   for(const rid of gRootIds){ let cur=rid;
     for(let guard=0; guard<64; guard++){
       const ch=(dagKids.get(cur)||[]).filter(couldShowGraph);
       if(ch.length!==1) break; cur=ch[0]; graphOpen.add(cur);
-    } }
-  gFocus=null; gExpandNotice=""; gSel=new Set(); gHL=new Set(); gHLD=new Set(); gPeek=null; gManualRank=new Map(); gLastRank=new Map();
-  renderSource(); renderDrawerDefault();
-  renderAll(); requestAnimationFrame(graphFit);
+    }
+    for(const c of (dagKids.get(cur)||[]).filter(couldShowGraph)) graphOpen.add(c);   // one more level
+  }
 }
 function sortNodes(a,b){a=byId.get(a);b=byId.get(b);
   const ra=rank(a),rb=rank(b); if(ra!==rb)return ra-rb;
@@ -944,7 +949,7 @@ function layoutGraph(vis){
     if(!ids.length) return;
     const layers={}; let maxD=0;
     for(const id of ids){const d=vis.get(id).depth||0;(layers[d]=layers[d]||[]).push(id);maxD=Math.max(maxD,d);}
-    let x=40; const gap=26;
+    let x=14; const gap=26;
     for(let d=0;d<=maxD;d++){
       const arr=(layers[d]||[]).slice().sort((a,b)=> (effKey(a)-effKey(b)) || (lab(a)<lab(b)?-1:1));
       for(const id of arr) gLastRank.set(id, effKey(id));   // remember for drag math
@@ -1612,8 +1617,7 @@ function hideTip(){tip.style.opacity=0;}
 
 /* --------------------------------- wiring --------------------------------- */
 // graph controls + pan/zoom (listeners on the persistent svg, once)
-$("#g-collapse").onclick=()=>{graphOpen=new Set(["root"]);graphOpenUp=new Set();graphCap=new Map();graphFolded=new Set();gPinned=new Set();gFocus=null;gManualRank=new Map();gSel=new Set();selected=null;closeDrawer();renderGraph();requestAnimationFrame(graphFit);};
-$("#g-reset").onclick=()=>{gFocus=null;graphOpenUp=new Set();graphFolded=new Set();gPinned=new Set();gManualRank=new Map();renderGraph();gz={x:24,y:24,k:0.85};if(gLayer)applyGT(gLayer);};
+$("#g-reset").onclick=()=>{initialGraphView();gPinned=new Set();gSel=new Set();selected=null;closeDrawer();gz={x:24,y:24,k:0.85};renderGraph();requestAnimationFrame(graphFit);};
 $("#g-fit").onclick=graphFit;
 $("#g-focus-clear").onclick=()=>clearFocus();
 $("#g-sel-clear").onclick=()=>clearSelection();
