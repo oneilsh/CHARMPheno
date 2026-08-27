@@ -108,6 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "on and compare per-node AUC against its recorded numbers, so "
                         "the whole-Mondo enablement decision rests on a measured "
                         "delta, not the mass-coverage heuristic alone.")
+    p.add_argument("--readout-max-iter", type=int, default=200,
+                   help="batched L-BFGS iteration cap for the distributed re-readout "
+                        "(default 200 = the record-run budget). Recovery runs of a "
+                        "DEV smoke should pass 60 — the CHARM_DEV cap the original "
+                        "run would have used; there is no dev profile here to apply "
+                        "it for you.")
     return p
 
 
@@ -189,7 +195,7 @@ def reconstruct_model(run_dir: Path, manifest: dict):
 
 def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targets,
                 min_count, readout_mode="auto", ab_check=False, out_dir=None,
-                theta_topm=None):
+                theta_topm=None, readout_max_iter=200):
     """Score both gated_pc arms off two already-TRANSFORMED splits. No argparse.
 
     The whole body of this tool that is worth testing: given the frames a finished
@@ -255,7 +261,7 @@ def run_readout(train_scored, test_scored, manifest, *, recall_targets, fdr_targ
         dist = distributed_score_arm(
             train_scored, test_scored, C, K, recall_targets=recall_targets,
             fdr_targets=fdr_targets, min_count=min_count, label="gated_pc",
-            theta_topm=theta_topm)
+            theta_topm=theta_topm, max_iter=readout_max_iter)
         results["gated_pc"] = dist[0]
     else:
         Pi_tr, y_tr, m_tr, _ = _collect_theta_labels(train_scored, C)
@@ -349,7 +355,8 @@ def main(argv=None) -> int:
                         fdr_targets=ft, min_count=min_count,
                         readout_mode=args.readout_mode,
                         ab_check=args.readout_ab_check, out_dir=run_dir,
-                        theta_topm=args.readout_theta_topm)
+                        theta_topm=args.readout_theta_topm,
+                        readout_max_iter=args.readout_max_iter)
             print(f"[readout]   arm results written to "
                   f"{run_dir / 'results_readout.json'}", flush=True)
             train_scored.unpersist(); test_scored.unpersist()
