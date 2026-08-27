@@ -220,7 +220,26 @@ trials are nearly free); (2) safeguarded quadratic-interpolation backtracking (t
 depth 25 → 2-4; Armijo acceptance rule unchanged, so converged solutions are unchanged);
 (3) the fit now SAVES (npz + fit-only manifest) immediately after the fit phase, before
 any readout — a readout death stops costing the fit, and gated-pc-readout can always
-resume. Run left grinding overnight as the first attempt with the ENOSPC cause fixed. (macro |Δ| ≤ 1.1e-4 both arms; see
+resume. Run left grinding overnight as the first attempt with the ENOSPC cause fixed.
+
+**2026-08-27 — smoke attempt 6: fit SAVED (early-save's first real rescue); readout
+killed by spot-VM churn; recovery then exposed that the MONDO PATH NEVER CACHES THE
+BUNDLE.** The fit completed (4,198s) and the early save landed npz + fit-only manifest
+before the readout — which died when a reclaimed worker ate all 4 attempts of one task
+(fixed same day: `spark.task.maxFailures=8` + `spark.excludeOnFailure.enabled=true` in
+every submit). The recovery re-readout then MISSed the bundle cache — root cause:
+`gated_pc_cloud`'s mondo branch calls the multidomain assembler DIRECTLY, never
+`load_or_build`. No mondo fit has ever written the bundle cache; every mondo fit
+silently re-assembles from BigQuery; `cache_uri` has been inert for mondo runs; and
+BOTH re-readout failures this week (0103's — previously mis-attributed to the cluster
+restart wiping HDFS — and today's) were this gap. The "cache hit" lines in mondo logs
+are the ontology-FILE cache, not the bundle. Fix in flight: multidomain-aware cache
+format + mondo-aware key (SNOMED keys byte-identical), mondo fit path routed through
+load_or_build (DAG-climb skipped on a hit), manifest records the mondo key fields, and
+the readout tool gains load-OR-REBUILD with a vocab/λ-dimension safety check so a saved
+fit is never scored against a drifted corpus.
+
+**2026-08-21 — UNBLOCKED: the 0103 A/B gate PASSED** (macro |Δ| ≤ 1.1e-4 both arms; see
 0103's run log). Reference bar from 0103's full-row readout: unsup cardiovascular
 **0.7584 AUC / 0.5428 AP over 241 nodes**, pooled conditional ECE 0.0028 (isotonic →
 0.0010). Since staging, the readout also gained warm starts + a CHARM_DEV cap of 60
