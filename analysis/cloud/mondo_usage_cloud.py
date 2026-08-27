@@ -843,6 +843,9 @@ def main(argv: list[str]) -> int:
                    help="HPO hp.obo URL for the phenotype-gap probe (source_climb only): "
                         "how many EHR codes that CLIMB or DROP in Mondo have an exact HPO "
                         "term. Set to '' to skip the probe.")
+    p.add_argument("--with-hpo", action="store_true",
+                   help="build the HPO phenotype axis (routing rung + hpo_usage.json); "
+                        "default off keeps source_climb Mondo-only")
     args = p.parse_args(argv)
 
     from datetime import datetime, timezone
@@ -910,6 +913,13 @@ def main(argv: list[str]) -> int:
     # a download/parse failure skips the probe, never fails the export.
     hpo_by_snomed: dict[str, tuple] = {}   # SNOMED concept_code -> (hp_id, hp_label)
     hpo_by_icd: dict[tuple, tuple] = {}    # (vocab, code)       -> (hp_id, hp_label)
+    # HPO axis structures (built only when --with-hpo): DAG labels/parents/has_child, plus
+    # the OMOP concept_id -> hp_id map used to route persons onto the HPO ladder. Initialized
+    # empty so the axis is cleanly disabled by default or on any load/parse failure.
+    hpo_labels: dict[str, str] = {}
+    hpo_parent_adj: dict[str, list[str]] = {}
+    hpo_has_child: set = set()
+    hpo_cid_rows: "list[tuple]" = []
     if args.hpo_obo_url and args.count_space in ("source_climb", "all"):
         try:
             dest = cache / "hp.obo"
@@ -923,6 +933,24 @@ def main(argv: list[str]) -> int:
                     hpo_by_icd.setdefault((vocab, code), (hp_id, hp_label))
             sys.stderr.write(f"[hpo] {len(hpo_by_snomed)} SNOMED + {len(hpo_by_icd)} ICD "
                              f"xref'd HPO terms loaded\n")
+
+            if args.with_hpo:
+                # HPO DAG (labels + is_a parents), and the OMOP concept_id -> hp_id map used
+                # to place persons on the HPO ladder: SNOMED std concepts joined on
+                # concept_code (primary), plus ICD source concepts from hpo_by_icd.
+                hpo_labels, hpo_parents = parse_hpo_dag(dest.read_text())
+                hpo_parent_adj, hpo_has_child = dag_structures(hpo_parents)
+                snomed_cp = concept_pd[concept_pd["vocabulary_id"] == "SNOMED"]
+                hpo_cid_rows = [
+                    (int(r.concept_id), hpo_by_snomed[str(r.concept_code)][0])
+                    for r in snomed_cp.itertuples() if str(r.concept_code) in hpo_by_snomed]
+                icd_cp = concept_pd[concept_pd["vocabulary_id"].isin(["ICD10CM", "ICD9CM"])]
+                hpo_cid_rows += [
+                    (int(r.concept_id), hpo_by_icd[(str(r.vocabulary_id), str(r.concept_code))][0])
+                    for r in icd_cp.itertuples()
+                    if (str(r.vocabulary_id), str(r.concept_code)) in hpo_by_icd]
+                sys.stderr.write(f"[hpo] {len(hpo_labels)} DAG terms, "
+                                 f"{len(hpo_cid_rows)} concept ids mapped\n")
         except Exception as e:                          # noqa: BLE001 — probe is best-effort
             sys.stderr.write(f"[hpo] probe skipped: {e}\n")
 
