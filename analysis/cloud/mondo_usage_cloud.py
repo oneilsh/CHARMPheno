@@ -82,6 +82,7 @@ import argparse
 import json
 import shutil
 import sys
+import urllib.request
 from pathlib import Path
 
 _MIN_CELL = 20
@@ -455,6 +456,58 @@ def band_histogram(bands, min_cell: int = _MIN_CELL) -> "list[dict]":
     return out
 
 
+# HPO (Human Phenotype Ontology) cross-reference vocab prefixes -> the OMOP vocabulary_id
+# they correspond to. HPO's `xref:` values look like ``SNOMEDCT_US:190855004`` /
+# ``UMLS:C0151723`` / ``ICD-10:E83.42``. SNOMED is the bridge that matters most (it is
+# OMOP's standard Condition vocabulary); ICD lets a source code match directly. UMLS has no
+# native OMOP key, so it is carried but not matched here.
+_XREF_VOCAB = {
+    "SNOMEDCT_US": "SNOMED", "SNOMEDCT": "SNOMED", "SNOMED_CT": "SNOMED", "SCTID": "SNOMED",
+    "ICD10": "ICD10CM", "ICD-10": "ICD10CM", "ICD10CM": "ICD10CM", "ICD-10-CM": "ICD10CM",
+    "ICD9": "ICD9CM", "ICD-9": "ICD9CM", "ICD9CM": "ICD9CM", "ICD-9-CM": "ICD9CM",
+    "MSH": "MeSH", "MESH": "MeSH", "UMLS": "UMLS",
+}
+
+
+def normalize_xref_vocab(prefix: str):
+    """Map an ontology xref prefix (e.g. ``SNOMEDCT_US``) to the OMOP ``vocabulary_id``
+    (``SNOMED``), or ``None`` when it is not one we match on. Pure."""
+    return _XREF_VOCAB.get(str(prefix).strip().upper())
+
+
+def parse_hpo_xrefs(obo_text: str) -> "list[tuple]":
+    """Parse an HPO ``hp.obo`` into ``(hp_id, hp_label, vocab, code)`` rows for the xref
+    vocabularies we recognise (see ``_XREF_VOCAB``). One row per (term, mapped xref); a
+    term with several xrefs yields several rows. Trailing OBO qualifiers/comments on an
+    xref line (``{source=...}`` or `` ! label``) are stripped. Pure — no I/O."""
+    rows = []
+    hp_id = hp_name = None
+    in_term = False
+    for raw in obo_text.splitlines():
+        line = raw.rstrip()
+        if line == "[Term]":
+            in_term, hp_id, hp_name = True, None, None
+            continue
+        if line.startswith("[") and line.endswith("]"):   # a different stanza (Typedef, ...)
+            in_term = False
+            continue
+        if not in_term:
+            continue
+        if line.startswith("id:"):
+            hp_id = line[3:].strip()
+        elif line.startswith("name:"):
+            hp_name = line[5:].strip()
+        elif line.startswith("xref:") and hp_id and hp_id.startswith("HP:"):
+            x = line[5:].strip().split("{")[0].split(" ! ")[0].strip()
+            if ":" not in x:
+                continue
+            prefix, code = x.split(":", 1)
+            vocab = normalize_xref_vocab(prefix)
+            if vocab:
+                rows.append((hp_id, hp_name, vocab, code.strip()))
+    return rows
+
+
 def build_safe_summary(results: list[dict]) -> str:
     """A copy-pasteable, disclosure-SAFE summary of one or more count-space runs.
 
@@ -528,6 +581,29 @@ def build_safe_summary(results: list[dict]) -> str:
                     L += ["", f"Example {title} multi-maps (one source code → the Mondo "
                           "terms it lands on — judge whether the overlap makes sense):"]
                     L += [f"- `{e['code']}` → {', '.join(e['terms'])}" for e in exs]
+        hp = sv.get("hpo") or {}
+        if hp:
+            def _cov(d):
+                c, k = d.get("concepts", 0), d.get("with_hpo", 0)
+                pct = f" ({100.0 * k / c:.0f}%)" if c else ""
+                return (f"{k} of {c} concepts{pct} · person-mass "
+                        f"{suppress_count(d.get('mass_hpo'), min_cell)} of "
+                        f"{suppress_count(d.get('mass'), min_cell)}")
+            L += ["", "### HPO phenotype-gap probe", "",
+                  "How much EHR signal that Mondo can only CLIMB to a general term, or can't "
+                  "map at all (DROP), has an EXACT HPO term instead. Concept counts are "
+                  "identities; person-mass = sum over concepts of distinct persons "
+                  "(≤-suppressed; not distinct persons), sizing the phenotype axis Mondo "
+                  f"doesn't cover. HPO SNOMED-xref'd terms loaded: {hp.get('hpo_snomed_terms', 0)}.",
+                  f"- **climbed** standard concepts recoverable by HPO: {_cov(hp.get('climb', {}))}",
+                  f"- **dropped** standard concepts recoverable by HPO: {_cov(hp.get('drop', {}))}"]
+            exs = hp.get("examples", [])
+            if exs:
+                L += ["", "Example climbed concepts HPO would place exactly (SNOMED code → HP "
+                      "term → what it currently climbs to in Mondo):"]
+                L += [f"- `SNOMED {e['snomed']}` → {e['hp_id']} {e['hp_label']}"
+                      + (f"  (climbs to: {', '.join(e['climbs_to'])})" if e.get("climbs_to") else "")
+                      for e in exs]
     L.append("")
     return "\n".join(L)
 
@@ -711,6 +787,11 @@ def main(argv: list[str]) -> int:
                         "originating source code per term. All source modes require "
                         "condition_occurrence.")
     p.add_argument("--min-cell", type=int, default=_MIN_CELL)
+    p.add_argument("--hpo-obo-url",
+                   default="http://purl.obolibrary.org/obo/hp.obo",
+                   help="HPO hp.obo URL for the phenotype-gap probe (source_climb only): "
+                        "how many EHR codes that CLIMB or DROP in Mondo have an exact HPO "
+                        "term. Set to '' to skip the probe.")
     args = p.parse_args(argv)
 
     from datetime import datetime, timezone
@@ -771,6 +852,28 @@ def main(argv: list[str]) -> int:
     generated_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+
+    # HPO phenotype-gap probe inputs (source_climb only): parse hp.obo xrefs -> the SNOMED
+    # (and ICD) codes HPO gives an exact term to, so we can measure how much EHR signal that
+    # currently CLIMBS or DROPS in Mondo would instead land precisely in HPO. Best-effort:
+    # a download/parse failure skips the probe, never fails the export.
+    hpo_by_snomed: dict[str, tuple] = {}   # SNOMED concept_code -> (hp_id, hp_label)
+    hpo_by_icd: dict[tuple, tuple] = {}    # (vocab, code)       -> (hp_id, hp_label)
+    if args.hpo_obo_url and args.count_space in ("source_climb", "all"):
+        try:
+            dest = cache / "hp.obo"
+            if not (dest.exists() and dest.stat().st_size > 0):
+                sys.stderr.write(f"[hpo] downloading {args.hpo_obo_url}\n")
+                urllib.request.urlretrieve(args.hpo_obo_url, dest)  # noqa: S310
+            for hp_id, hp_label, vocab, code in parse_hpo_xrefs(dest.read_text()):
+                if vocab == "SNOMED":
+                    hpo_by_snomed.setdefault(code, (hp_id, hp_label))
+                elif vocab in ("ICD10CM", "ICD9CM"):
+                    hpo_by_icd.setdefault((vocab, code), (hp_id, hp_label))
+            sys.stderr.write(f"[hpo] {len(hpo_by_snomed)} SNOMED + {len(hpo_by_icd)} ICD "
+                             f"xref'd HPO terms loaded\n")
+        except Exception as e:                          # noqa: BLE001 — probe is best-effort
+            sys.stderr.write(f"[hpo] probe skipped: {e}\n")
 
     def run_space(space):
         """Count + assemble ONE count space; write its payload + TSV; return a summary
@@ -1030,6 +1133,57 @@ def main(argv: list[str]) -> int:
             from collections import Counter
             term_kind_counts = Counter(collision_kind_of.values())
             code_kind_counts = Counter(code_kind.values())
+
+            # ---- HPO phenotype-gap probe -------------------------------------------------
+            # Of the STANDARD (SNOMED) concepts coded in the EHR, how many that Mondo can
+            # only reach by CLIMBING to a more-general term, or can't map at all (DROP),
+            # does HPO give an EXACT term to? Sizes the phenotype axis Mondo doesn't cover
+            # (hypomagnesemia, lab abnormalities, ...). Emits concept COUNTS (safe) + a
+            # ≤-suppressed person MASS (sum over concepts of distinct-persons; not distinct
+            # persons) + identity-only examples (SNOMED code -> HP term -> what it climbs to).
+            hpo_probe = {}
+            if hpo_by_snomed:
+                snomed_cp = concept_pd[concept_pd["vocabulary_id"] == "SNOMED"]
+                hp_of_cid = {}   # SNOMED concept_id -> (hp_id, hp_label, snomed_code)
+                for r in snomed_cp.itertuples():
+                    code = str(r.concept_code)
+                    if code in hpo_by_snomed:
+                        hp_id, hp_label = hpo_by_snomed[code]
+                        hp_of_cid[int(r.concept_id)] = (hp_id, hp_label, code)
+                hpo_cids = set(hp_of_cid)
+                direct_set = {int(x) for x in mapped_std_ids}
+                climb_set = ({int(x) for x in reduced_pd["std_cid"].unique()}
+                             if len(reduced_pd) else set())
+                climbs_to = {}   # std_cid -> [Mondo labels] it currently climbs to
+                if len(reduced_pd):
+                    for r in reduced_pd.itertuples(index=False):
+                        climbs_to.setdefault(int(r.std_cid), []).append(
+                            label_of.get(str(r.mondo_id), str(r.mondo_id)))
+                std_np = (cond.where(F.col("std_cid").isNotNull() & (F.col("std_cid") != 0))
+                          .groupBy("std_cid").agg(F.countDistinct("person_id").alias("np"))
+                          .toPandas())
+                agg = {"climb": {"concepts": 0, "with_hpo": 0, "mass": 0, "mass_hpo": 0},
+                       "drop":  {"concepts": 0, "with_hpo": 0, "mass": 0, "mass_hpo": 0}}
+                ex = []
+                for r in std_np.itertuples(index=False):
+                    cid, npv = int(r.std_cid), int(r.np)
+                    if cid in direct_set:
+                        continue                        # Mondo already has a direct term
+                    status = "climb" if cid in climb_set else "drop"
+                    a = agg[status]
+                    a["concepts"] += 1; a["mass"] += npv
+                    if cid in hpo_cids:
+                        a["with_hpo"] += 1; a["mass_hpo"] += npv
+                        if status == "climb":           # npv used ONLY to rank; never emitted
+                            hp_id, hp_label, code = hp_of_cid[cid]
+                            ex.append((npv, {"snomed": code, "hp_id": hp_id,
+                                             "hp_label": hp_label,
+                                             "climbs_to": climbs_to.get(cid, [])[:3]}))
+                ex.sort(key=lambda t: -t[0])
+                hpo_probe = {"hpo_snomed_terms": len(hpo_by_snomed),
+                             "climb": agg["climb"], "drop": agg["drop"],
+                             "examples": [e for _, e in ex[:8]]}
+
             survey = {
                 "persons_source_exact": int(t1.select("person_id").distinct().count()),
                 "persons_standard_exact": int(t2.select("person_id").distinct().count()),
@@ -1042,6 +1196,7 @@ def main(argv: list[str]) -> int:
                 "collision_codes_by_kind": {k: int(v) for k, v in code_kind_counts.items()},
                 "collision_examples_climb_tie": _examples("climb_tie"),
                 "collision_examples_shared_concept": _examples("shared_concept"),
+                "hpo": hpo_probe,
             }
         else:
             # --- STANDARD space (default): condition_concept_id via same_as -> Maps to.
