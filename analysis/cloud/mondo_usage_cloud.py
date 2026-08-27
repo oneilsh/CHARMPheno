@@ -1062,12 +1062,31 @@ def main(argv: list[str]) -> int:
             # rows whose standard concept is ALSO not a mapped term -> candidates to climb
             rem2 = rem1.join(std_ids_sdf, rem1["std_cid"] == std_ids_sdf["map_cid"], "left_anti")
 
+            # HPO-EXACT RUNG — a rem2 condition whose STANDARD concept is an HPO xref.
+            # Kept SEPARATE from the Mondo attribution (t_hpo is not unioned in); the
+            # Mondo climb below only climbs what HPO did NOT claim.
+            if args.with_hpo and hpo_labels:
+                hpo_map = broadcast(spark.createDataFrame(
+                    pd.DataFrame(hpo_cid_rows, columns=["map_cid", "hp_id"]).drop_duplicates()))
+                # HPO-exact: a rem2 condition whose STANDARD concept (or source) is an HPO xref.
+                t_hpo = (rem2.join(hpo_map, rem2["std_cid"] == hpo_map["map_cid"], "inner")
+                         .select("person_id", F.col("hp_id").alias("mondo_id"),   # reuse 'mondo_id' col name
+                                 origin.alias("origin_cid"), F.lit("hpo_exact").alias("via"),
+                                 rem2["src_cid"].alias("k_src"), rem2["std_cid"].alias("k_std")))
+                # climb only what HPO did NOT claim:
+                rem2_climb = rem2.join(t_hpo.select("k_src", "k_std").distinct(),
+                                       (rem2["src_cid"].eqNullSafe(F.col("k_src")) &
+                                        rem2["std_cid"].eqNullSafe(F.col("k_std"))), "left_anti")
+            else:
+                t_hpo = None
+                rem2_climb = rem2
+
             # TIER 3 — climb SNOMED concept_ancestor to the nearest mapped term(s)
             ca = (_read_bq(spark, args.cdr, args.billing, "concept_ancestor")
                   .select("ancestor_concept_id", "descendant_concept_id",
                           "min_levels_of_separation")
                   .where(F.col("min_levels_of_separation") >= 1))
-            unmatched_std = rem2.select("std_cid").distinct()
+            unmatched_std = rem2_climb.select("std_cid").distinct()
             ca_f = (ca.join(std_ids_sdf, ca["ancestor_concept_id"] == std_ids_sdf["map_cid"], "inner")
                       .join(unmatched_std, ca["descendant_concept_id"] == unmatched_std["std_cid"], "inner")
                       .select(ca["descendant_concept_id"].alias("std_cid"),
@@ -1094,10 +1113,10 @@ def main(argv: list[str]) -> int:
                 columns=["std_cid", "mondo_id"])
             if len(reduced_pd):
                 reduced_sdf = broadcast(spark.createDataFrame(reduced_pd))
-                t3 = (rem2.join(reduced_sdf, "std_cid", "inner")
+                t3 = (rem2_climb.join(reduced_sdf, "std_cid", "inner")
                       .select("person_id", "mondo_id",
                               origin.alias("origin_cid"), F.lit("climbed").alias("via"),
-                              rem2["src_cid"].alias("k_src"), F.col("std_cid").alias("k_std")))
+                              rem2_climb["src_cid"].alias("k_src"), F.col("std_cid").alias("k_std")))
             else:
                 t3 = t1.limit(0)          # no climbs (empty, keeps t1's schema for the union)
 
