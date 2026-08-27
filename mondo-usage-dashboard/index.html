@@ -227,6 +227,7 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
 .gmore rect{fill:color-mix(in srgb,var(--accent) 20%,var(--surface));stroke:var(--accent);stroke-width:1.75}
 .gmore text{fill:var(--accent);font-family:var(--mono);font-weight:700}
 .gmore:hover rect{fill:color-mix(in srgb,var(--accent) 34%,var(--surface))}
+.gicon{fill:none;stroke:#fff;stroke-width:7;stroke-linecap:round;stroke-linejoin:round;pointer-events:none;opacity:.95}
 .grare{fill:#f5b301;font-weight:700;paint-order:stroke;stroke:var(--surface);stroke-width:2.6px;pointer-events:none}
 /* per-node menu dot (hover, or right-click anywhere on the node) */
 .gmenu{opacity:0;pointer-events:none;transition:opacity .12s;cursor:pointer}
@@ -925,7 +926,7 @@ function ancestorSet(id){                 // all transitive parents up the DAG (
 function graphRadius(id){
   const nn=byId.get(id);
   if(nn===undefined) return 7;                          // more-node
-  if(nn.kind==="root") return 13;                       // synthetic root: fixed, not sized
+  if(nn.kind==="root") return 22;                       // synthetic root: fixed, not sized
   const maxV=state.rollup?ROLL_EST_MAX:OWN_MAX;   // ROLL_EST_MAX = max subtree central estimate
   const lv=Math.log10(Math.max(gval(id),0)+1), lm=Math.log10((maxV||1)+1);
   return 11+44*(lm>0?Math.min(1,lv/lm):0);
@@ -1182,9 +1183,20 @@ function updateMore(gm,n){                 // refresh label + width each render 
   const rect=gm.querySelector("rect"); rect.setAttribute("x",-w/2); rect.setAttribute("width",w);
   gm.querySelector("text").textContent=n.label;
 }
+// Monarch's own category glyphs (viewBox 0 0 100 100, centered 50,50): the disease "wing"
+// and the phenotype "figure". Drawn inside the two axis-root nodes as their icons.
+const MONARCH_GLYPH={
+  mondo:[["path",{d:"M70 80C25 50 30 17 50 17s25 33-20 63"}]],
+  hpo:[["circle",{cx:50,cy:42,r:18}],["path",{d:"M32 42v41"}],["path",{d:"M32 21s7-7 18-7 18 7 18 7"}]],
+};
 function buildNode(id,n){
   const g=svgEl("g",{class:"gnode"});
   g.appendChild(svgEl("circle",{class:"gcirc",cx:0,cy:0}));
+  if(n.kind==="root"){                                   // axis root: Monarch category glyph
+    const gi=svgEl("g",{class:"gicon"});
+    for(const [t,a] of (MONARCH_GLYPH[n.axis]||[])) gi.appendChild(svgEl(t,a));
+    g.appendChild(gi);
+  }
   g.appendChild(svgEl("text",{class:"glbl","font-size":12.5}));
   g.appendChild(svgEl("text",{class:"gsub","font-size":10.5}));
   const pl=svgEl("g",{class:"gplus",opacity:0});     // "+" = has children not yet shown
@@ -1219,6 +1231,8 @@ function updateNode(g,id,n,c){
   const pk=g.classList.contains("pk")?" pk":g.classList.contains("pkd")?" pkd":"";  // preserve hover peek
   g.setAttribute("class","gnode"+(gSel.has(id)?" sel":"")+(gHL.has(id)?" hl":gHLD.has(id)?" hld":"")+pk+(matchesQ(n)?" match":""));
   const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
+  const gi=g.querySelector(".gicon");   // Monarch glyph on roots: fit its 100-space into the node
+  if(gi) gi.setAttribute("transform",`translate(${-c.r},${-c.r}) scale(${(c.r/50).toFixed(3)})`);
   circ.setAttribute("fill",nodeFill(id,n));
   circ.setAttribute("fill-opacity",nodeOpac(n));
   const dir=c.dir||1, lx=dir*(c.r+9), anchor=dir<0?"end":"start";
