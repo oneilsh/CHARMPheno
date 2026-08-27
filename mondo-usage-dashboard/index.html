@@ -952,7 +952,11 @@ function layoutGraph(vis){
     if(!ids.length) return;
     const layers={}; let maxD=0;
     for(const id of ids){const d=vis.get(id).depth||0;(layers[d]=layers[d]||[]).push(id);maxD=Math.max(maxD,d);}
-    let x=6; const gap=26;   // small lead: in dual view the two roots sit ~one gap apart across the centerline
+    // In dual view the roots' inner edge starts at ROOT_HALFGAP from the centerline, so the two
+    // roots sit 2*ROOT_HALFGAP apart. Their labels are short ("Mondo"/"HPO"), so the gap to col-1
+    // is tightened (ROOT_STEP) rather than the wide inter-column gap (210) that fits long labels.
+    const ROOT_HALFGAP=40, ROOT_STEP=90;
+    let x=DUAL?ROOT_HALFGAP:14; const gap=26;
     for(let d=0;d<=maxD;d++){
       const arr=(layers[d]||[]).slice().sort((a,b)=> (effKey(a)-effKey(b)) || (lab(a)<lab(b)?-1:1));
       for(const id of arr) gLastRank.set(id, effKey(id));   // remember for drag math
@@ -960,16 +964,11 @@ function layoutGraph(vis){
       let H=0; for(const id of arr) H+=2*rad(id)+gap; H=Math.max(0,H-gap);
       let y=-H/2;                               // center each column around y=0
       for(const id of arr){const r=rad(id); coord.set(id,{x:dir*(x+maxR),y:y+r,r,dir}); y+=2*r+gap;}
-      x+=maxR*2+210;
+      x+=maxR*2+((d===0&&DUAL)?ROOT_STEP:210);
     }
   };
   doSide(sides.mondo, 1);
   doSide(sides.hpo, DUAL?-1:1);      // dual: HPO grows leftward; HPO-only payload grows rightward
-  // In dual view, pin the two axis roots to a fixed small gap across the centerline so their
-  // spacing is set here, not by their (large) radius. ROOT_GAP = clear space between the circles.
-  if(DUAL){ const ROOT_GAP=8;
-    for(const rid of gRootIds){ const c=coord.get(rid); if(!c) continue;
-      c.x=(c.dir||1)*(c.r+ROOT_GAP/2); } }
   return {coord};
 }
 function edgePath(a,b){const mx=(a.x+b.x)/2; const dir=a.dir||b.dir||1;
