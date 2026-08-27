@@ -884,14 +884,16 @@ function ancestorSet(id){                 // all transitive parents up the DAG (
     for(const pp of (byId.get(p).parents||[])) st.push(pp);}
   return out;
 }
-// radius: area ∝ value against a STABLE global max (√ scale), so 20k / 5k / ≤20
-// read as clearly different sizes and don't rescale as you expand.
+// radius: LOG (per-decade) scale against a STABLE global max, so a handful of very large
+// rolled-up spine nodes (whose subtree aggregates everything) don't crush the low-end
+// resolution — 20 / 200 / 2k / 20k step up evenly. +1 floor keeps ≤20 nodes readable.
 function graphRadius(id){
   const nn=byId.get(id);
   if(nn===undefined) return 7;                          // more-node
   if(nn.kind==="root") return 13;                       // synthetic root: fixed, not sized
   const maxV=state.rollup?ROLL_EST_MAX:OWN_MAX;   // ROLL_EST_MAX = max subtree central estimate
-  return 11+44*Math.sqrt(Math.max(gval(id),0)/(maxV||1));
+  const lv=Math.log10(Math.max(gval(id),0)+1), lm=Math.log10((maxV||1)+1);
+  return 11+44*(lm>0?Math.min(1,lv/lm):0);
 }
 // dir = growth direction of the layer axis: +1 grows rightward (today's default,
 // Mondo view), -1 mirrors leftward for a second axis stacked on the other side.
