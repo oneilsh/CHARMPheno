@@ -394,6 +394,11 @@ const fmtK=n=>{n=Math.round(n);return n<1000?(""+n):n<1e6?((n/1e3).toFixed(n<1e4
 // rigorous bracket uses 1 and 19 for floor/ceiling and never this value).
 const SMALL_NOMINAL=10;
 let DATA=null, byId=new Map(), kids=new Map(), dagKids=new Map(), roots=[], expanded=new Set(), selected=null;
+// Dual-axis (Mondo + HPO) plumbing: MONDO is the primary payload (DATA stays aliased
+// to it so all existing single-axis code is untouched). HPO is an optional second
+// payload (hpo_usage.json); HAS_HPO gates any future HPO-aware rendering. Loading
+// HPO must never block or alter the Mondo-only render path — see boot().
+let MONDO=null, HPO=null, HAS_HPO=false;
 let ROLL_MAX=1, OWN_MAX=1, ROLL_EST_MAX=1;
 let graphOpen=new Set(["root"]), graphOpenUp=new Set(), graphCap=new Map(), graphFolded=new Set(), gz={x:24,y:24,k:0.85};
 let gPinned=new Set();   // nodes "landed on" from a search result: kept visible (bypassing the
@@ -421,11 +426,20 @@ async function boot(){
   if(!d){document.querySelector(".panel").innerHTML=
     '<div class="hint">No data found. Place a <code>mondo_usage.json</code> next to this page (or the bundled <code>mondo_usage.sample.json</code>).</div>';return;}
   load(d);
+  // Optional second axis (HPO): fetched best-effort, after the Mondo payload is
+  // already loaded and rendered. Any failure (file absent, bad JSON, network error)
+  // leaves HPO=null / HAS_HPO=false and the page stays exactly the single-axis
+  // Mondo view it is today — nothing downstream reads HPO unguarded yet.
+  try{
+    HPO=await tryFetch("hpo_usage.json");
+  }catch(e){ HPO=null; }
+  HAS_HPO=!!HPO;
+  console.log(HAS_HPO?"[axes] loaded mondo + hpo":"[axes] loaded mondo only (no hpo_usage.json)");
 }
 async function tryFetch(u){try{const r=await fetch(u);if(!r.ok)return null;return await r.json();}catch(e){return null;}}
 
 function load(d){
-  DATA=d; byId=new Map(); kids=new Map(); dagKids=new Map(); roots=[]; expanded=new Set(); selected=null;
+  DATA=d; MONDO=d; byId=new Map(); kids=new Map(); dagKids=new Map(); roots=[]; expanded=new Set(); selected=null;
   for(const n of d.nodes) byId.set(n.id,n);
   for(const n of d.nodes){                        // spanning tree via primary parent
     const p=(n.parents&&n.parents.length)?n.parents[0]:null;
