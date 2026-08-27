@@ -509,17 +509,17 @@ function load(d){
   renderAll(); requestAnimationFrame(graphFit);
 }
 // The starting graph configuration (used by load + the Reset button): open each axis root,
-// descend any single-child spine to the first branch, then open that branch level's children
-// too (one extra level) so you begin ~two branch levels deep on each side.
+// The starting / Reset view: open every showable node shallower than INIT_MAX_DEPTH, so the
+// visible tree spans depths 0..INIT_MAX_DEPTH (root=0). INIT_MAX_DEPTH=2 → 3 levels on each side.
+// (Manual expansion beyond this still works; this only sets the default.)
+const INIT_MAX_DEPTH=2;
 function initialGraphView(){
   graphOpen=new Set(gRootIds); graphOpenUp=new Set(); graphCap=new Map(); graphFolded=new Set();
   gFocus=null; gManualRank=new Map();
-  for(const rid of gRootIds){ let cur=rid;
-    for(let guard=0; guard<64; guard++){
-      const ch=(dagKids.get(cur)||[]).filter(couldShowGraph);
-      if(ch.length!==1) break; cur=ch[0]; graphOpen.add(cur);
-    }
-    for(const c of (dagKids.get(cur)||[]).filter(couldShowGraph)) graphOpen.add(c);   // one more level
+  for(const id of byId.keys()){
+    const n=byId.get(id);
+    if(n.kind==="root"){ graphOpen.add(id); continue; }   // roots always open (their children = depth 1)
+    if((n.depth||0)<INIT_MAX_DEPTH && couldShowGraph(id)) graphOpen.add(id);
   }
 }
 function sortNodes(a,b){a=byId.get(a);b=byId.get(b);
