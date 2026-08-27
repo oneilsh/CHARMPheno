@@ -312,13 +312,24 @@ tr.trow:hover{background:var(--surface-2);cursor:pointer}
   font-family:var(--mono);padding:6px 9px;border-radius:6px;z-index:40;opacity:0;transition:opacity .1s;max-width:280px}
 .foot{margin-top:26px;color:var(--muted);font-size:11.5px;line-height:1.6;font-family:var(--mono)}
 .foot b{color:var(--ink-2);font-weight:500}
+/* two-axis shell (two isolated dashboard iframes side by side) + per-axis chrome */
+html,body{height:100%}
+.shell{display:flex;flex-direction:column;height:100vh}
+.shell-top{padding:12px 18px;border-bottom:1px solid var(--border);background:var(--surface)}
+.shell-top h1{font-family:var(--serif);font-size:20px;font-weight:600;margin:0 0 4px}
+.shell-top p{margin:0;font-size:12.5px;color:var(--muted);max-width:110ch;line-height:1.5}
+.shell-panes{flex:1 1 auto;display:flex;min-height:0}
+.shell-panes .axis-frame{flex:1 1 50%;width:50%;height:100%;border:0;border-left:1px solid var(--border)}
+.shell-panes .axis-frame:first-child{border-left:0}
+.axis-mode .brand p{display:none}                 /* the shell carries the shared intro */
+.axis-mode header.top{padding-top:8px;padding-bottom:8px}
 </style>
 </head>
 <body data-palette="#009e93,#c9760a,#6a55d6,#9aa4b0">
 <div class="wrap">
   <header class="top">
     <div class="brand">
-      <h1>Counting Diagnoses: AllOfUs on Mondo</h1>
+      <h1 id="brand-h1">Counting Diagnoses: AllOfUs on Mondo</h1>
       <p>Diagnosis counts from the AllOfUs EHR database (v8) mapped to the Mondo disease ontology. Counts of 20 or fewer have been masked; similar counts may be found at the <a href="https://databrowser.researchallofus.org/" target="_blank" rel="noopener">AllOfUs Public Data Browser</a>. <span class="mtip" tabindex="0">Methods details<span class="tip" role="tooltip"><span>Each participant's coded conditions in the AllOfUs <em>condition_occurrence</em> table are attributed to Mondo disease terms by a three-step ladder, taking the most specific mapped term reachable: (1) the <em>source</em> code (e.g. ICD) is one of the term's Mondo <em>same&nbsp;as</em> cross-references; else (2) its standardized SNOMED concept maps to a term via OMOP <em>Maps&nbsp;to</em>; else (3) that concept is rolled up the SNOMED hierarchy to the nearest ancestor a Mondo term maps to. Each participant is credited once per term, and counts of 1&ndash;20 are masked and shown as &le;20.</span><span>A single coded condition can legitimately reach several Mondo terms at once — its SNOMED concept is shared by several terms (OMOP's ICD&rarr;SNOMED <em>Maps&nbsp;to</em> is one-to-many), or it rolled up to several equally-near ancestors in Mondo's poly-hierarchy. So a term's own count answers "how many participants touch this term," and these per-term counts are not meant to be added together. When terms are combined in a subtree roll-up, each shared diagnosis is instead <em>split 1/m</em> across the <em>m</em> terms it reaches (fractional attribution), so the rolled-up total is de-double-counted and honestly additive.</span><span>Two node-size views are available. <em>Per-term</em> sizes each node by its own count, so a broad classification can look small while its specific children are large. <em>Rolled up</em> sizes each node by its de-double-counted subtree total — a diagnosis count (a participant with several diagnoses under one branch counts once per diagnosis), reported as a central estimate &plusmn; small-cell suppression.</span><span><b>Note that many Mondo disease entries do not have corresponding codes that would be found in an EHR; others do, but there is no direct mapping between them. Small counts or counts of 0 should thus be interpreted as absence of evidence, rather than evidence of absence.</b></span></span></span></p>
     </div>
     <div class="toolbar">
@@ -417,29 +428,63 @@ const GRAPH_CAP=14;         // max children revealed per expansion before a "＋
 const state={view:"graph",q:"",rollup:false,hideUnused:true,vis:new Set(CATS.map(c=>c.key))};
 let HAS_FRAC=false;   // payload carries fractional (1/m) de-double-counted counts (computeRollup sets it)
 
-/* ---------- load: embedded block > fetched real > fetched sample ---------- */
+// Two-axis mode. The page is reused per axis: with ?axis=hpo|mondo it renders ONE axis
+// (its own payload, growth direction, and root label); with no ?axis it is the SHELL —
+// when hpo_usage.json exists it embeds two isolated instances of itself side by side
+// (HPO left/mirrored, Mondo right), otherwise it falls back to the single Mondo view.
+// Separate iframes = separate JS realms, so the single-global-state graph needs no
+// reentrancy: each axis gets its own byId/state/layers with zero collision.
+const _AXES={
+  mondo:{name:"mondo", payload:"mondo_usage.json", dir:1,  title:"Mondo &mdash; diseases",
+         rootLabel:"Mondo disease (mapped-term view)"},
+  hpo:  {name:"hpo",   payload:"hpo_usage.json",   dir:-1, title:"HPO &mdash; phenotypes",
+         rootLabel:"HPO phenotype (mapped-term view)"},
+};
+const _axisParam=new URLSearchParams(location.search).get("axis");
+const AXIS=_AXES[_axisParam]||_AXES.mondo;   // default axis = mondo (also used by the single view)
+
+/* ---------- load: shell (two axes) > embedded block > fetched real > fetched sample ---------- */
 async function boot(){
+  // SHELL MODE: top-level page, no ?axis. If an HPO payload exists, show both axes side by side.
+  if(!_axisParam){
+    const hpo=await tryFetch("hpo_usage.json");
+    if(hpo){ renderShell(); return; }
+    // else fall through to the single Mondo view (backward-compatible)
+  }
   let d=null;
-  try{const raw=$("#mondo-data").textContent.trim(); if(raw&&raw!=="null") d=JSON.parse(raw);}catch(e){}
-  if(!d) d=await tryFetch("mondo_usage.json");
-  if(!d) d=await tryFetch("mondo_usage.sample.json");
+  if(AXIS.name==="mondo"){
+    try{const raw=$("#mondo-data").textContent.trim(); if(raw&&raw!=="null") d=JSON.parse(raw);}catch(e){}
+  }
+  if(!d) d=await tryFetch(AXIS.payload);
+  if(!d && AXIS.name==="mondo") d=await tryFetch("mondo_usage.sample.json");
   if(!d){document.querySelector(".panel").innerHTML=
-    '<div class="hint">No data found. Place a <code>mondo_usage.json</code> next to this page (or the bundled <code>mondo_usage.sample.json</code>).</div>';return;}
+    `<div class="hint">No data found for the ${AXIS.name} axis (expected <code>${AXIS.payload}</code>).</div>`;return;}
+  if(_axisParam) document.body.classList.add("axis-mode");   // compact per-axis chrome inside the shell
   load(d);
-  // Optional second axis (HPO): fetched best-effort, after the Mondo payload is
-  // already loaded and rendered. Any failure (file absent, bad JSON, network error)
-  // leaves HPO=null / HAS_HPO=false and the page stays exactly the single-axis
-  // Mondo view it is today — nothing downstream reads HPO unguarded yet.
-  try{
-    HPO=await tryFetch("hpo_usage.json");
-  }catch(e){ HPO=null; }
-  HAS_HPO=!!HPO;
-  console.log(HAS_HPO?"[axes] loaded mondo + hpo":"[axes] loaded mondo only (no hpo_usage.json)");
+  console.log("[axis] loaded "+AXIS.name);
+}
+// The side-by-side shell: a slim shared header + two isolated axis iframes (HPO left, Mondo right).
+function renderShell(){
+  document.body.innerHTML=
+    `<div class="shell">
+       <header class="shell-top">
+         <h1>Counting Diagnoses: AllOfUs on Mondo + HPO</h1>
+         <p>Each EHR condition is routed to its single best home &mdash; a <b>Mondo</b> disease term (right) or, when Mondo can only generalize, an exact <b>HPO</b> phenotype term (left). The two ontologies are shown together but unlinked.</p>
+       </header>
+       <div class="shell-panes">
+         <iframe class="axis-frame" title="HPO phenotypes" src="?axis=hpo"></iframe>
+         <iframe class="axis-frame" title="Mondo diseases" src="?axis=mondo"></iframe>
+       </div>
+     </div>`;
+  document.body.classList.add("shell-mode");
 }
 async function tryFetch(u){try{const r=await fetch(u);if(!r.ok)return null;return await r.json();}catch(e){return null;}}
 
 function load(d){
   DATA=d; MONDO=d; byId=new Map(); kids=new Map(); dagKids=new Map(); roots=[]; expanded=new Set(); selected=null;
+  // per-axis root label (the driver hardcodes a Mondo root label on every payload) + title
+  for(const n of d.nodes){ if(n.kind==="root") n.label=AXIS.rootLabel; }
+  if(_axisParam){ const h=$("#brand-h1"); if(h) h.innerHTML=AXIS.title; }
   for(const n of d.nodes) byId.set(n.id,n);
   for(const n of d.nodes){                        // spanning tree via primary parent
     const p=(n.parents&&n.parents.length)?n.parents[0]:null;
@@ -875,7 +920,7 @@ function graphRadius(id){
 // Mondo view), -1 mirrors leftward for a second axis stacked on the other side.
 // It only scales each layer's horizontal offset from the origin column — the
 // per-layer vertical stacking (y) is unaffected.
-function layoutGraph(vis,dir=1){
+function layoutGraph(vis,dir=AXIS.dir){
   const layers={}; let maxD=0;
   for(const [id,n] of vis){const d=n.depth||0;(layers[d]=layers[d]||[]).push(id);maxD=Math.max(maxD,d);}
   const rad=id=>vis.get(id)._more?8:graphRadius(id);
@@ -909,7 +954,7 @@ function graphInit(){
   gLayer.appendChild(gEdgeG); gLayer.appendChild(gNodeG); svg.appendChild(gLayer);
   gEdgeEls=new Map(); gNodeEls=new Map(); applyGT(gLayer);
 }
-function renderGraph(dir=1){
+function renderGraph(dir=AXIS.dir){
   if(!gLayer||!gLayer.isConnected) graphInit();
   const vis=graphVisible(), {coord}=layoutGraph(vis,dir); gCoord=coord;
   // highlight = union of every selected node's ancestors (hl) and visible descendants (hld)
