@@ -1052,6 +1052,14 @@ SPARK_SUBMIT_FLAGS = [
     "--conf", "spark.executor.memory=6g",
     "--conf", "spark.executor.memoryOverhead=2g",
     "--conf", "spark.python.worker.memory=2g",
+    # Preemptible-worker resilience. The AoU clusters run on spot VMs, and the
+    # default spark.task.maxFailures=4 lost a 70-min whole-Mondo readout when a
+    # reclaimed node ate all four attempts of one task before YARN noticed the
+    # node was gone (exp 0104). 8 attempts + exclude-on-failure lets retries
+    # land elsewhere; work is idempotent (aggregations/scans), so retries are
+    # always safe.
+    "--conf", "spark.task.maxFailures=8",
+    "--conf", "spark.excludeOnFailure.enabled=true",
 ]
 
 
