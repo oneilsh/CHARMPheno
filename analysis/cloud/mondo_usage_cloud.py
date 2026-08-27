@@ -564,7 +564,9 @@ def build_safe_summary(results: list[dict]) -> str:
 
     ``results`` is one dict per space: ``space``, ``stats`` (the payload stats block),
     ``survey`` (source_climb tier coverage, or empty), ``n_total/n_coded/n_on_mondo``
-    (raw person counts), ``min_cell``, ``mondo_version``, ``generated_utc``.
+    (raw person counts), ``min_cell``, ``mondo_version``, ``generated_utc``, and
+    optionally ``hpo_axis`` (used/reported HPO term counts + distinct persons on the
+    HPO attribution, attached to the source_climb result when ``--with-hpo`` is on).
 
     SAFE by construction: it prints only term COUNTS (terms are not patients) and
     aggregate fractions, and every patient-derived figure is run through
@@ -655,6 +657,12 @@ def build_safe_summary(results: list[dict]) -> str:
                 L += [f"- `SNOMED {e['snomed']}` → {e['hp_id']} {e['hp_label']}"
                       + (f"  (climbs to: {', '.join(e['climbs_to'])})" if e.get("climbs_to") else "")
                       for e in exs]
+    hx = next((r["hpo_axis"] for r in results if r.get("hpo_axis")), None)
+    if hx:
+        L += ["", "## HPO axis (phenotypes)", "",
+              f"- HPO terms used in the EHR: {hx.get('used_terms', 0)} "
+              f"(reported >{min_cell}: {hx.get('reported_terms', 0)}) · persons "
+              f"{suppress_count(hx.get('persons'), min_cell)}"]
     L.append("")
     return "\n".join(L)
 
