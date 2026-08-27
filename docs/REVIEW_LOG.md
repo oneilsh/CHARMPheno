@@ -12,6 +12,27 @@ elsewhere.
 
 ---
 
+## 2026-08-27 — Mondo bundle-cache wiring + recovery-tool completion
+
+Attempt 6 of the 0104 smoke (fit rescued by the early save; readout killed by spot-VM
+churn — `task.maxFailures=8` + `excludeOnFailure` now in every submit) exposed that the
+MONDO CORPUS PATH NEVER WROTE THE BUNDLE CACHE: `gated_pc_cloud`'s mondo branch called
+the multidomain assembler directly, so every mondo fit re-assembled from BigQuery,
+`cache_uri` was inert, and both of the week's re-readout MISSes were this (the earlier
+HDFS-wipe attribution was wrong). Shipped: multidomain-aware cache format (`vocab_maps`
+meta; legacy entries load unchanged), mondo-aware key fields folded only for the
+multidomain path (SNOMED keys pinned byte-identical before/after), the mondo fit branch
+routed through `load_or_build` with the whole DAG-build+climb+provider inside the
+assemble closure (a HIT skips all of it; the diag probe degrades explicitly), a
+self-sufficient `corpus_manifest`, and `gated_pc_readout` load-OR-REBUILD (rebuilds from
+the manifest's own corpus spec, writes through, and DRIFT-GATES the rebuilt corpus
+against the saved λ dims + int2cid before scoring; `--no-rebuild` restores fail-fast).
+Also fixed in passing: `reconstruct_model` could never read a multi-domain run
+(`npz["lambda"]` KeyError on the `lambda_N` layout, `featuresCols` unset, head intercept
+dropped). 110+141+191 tests green across the three suites.
+
+---
+
 ## 2026-08-22 — Whole-Mondo hardening arc: what the first K≈3,827 runs taught the readout
 
 The exp 0104 smokes stress-tested every ADR 0046 component at 8.6× scale; each failure
