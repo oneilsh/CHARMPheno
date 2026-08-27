@@ -964,6 +964,253 @@ def main(argv: list[str]) -> int:
         collision_kind_of: dict[str, str] = {}  # source_climb collision mechanism per term
         frac_of: dict[str, float] = {}          # source_climb fractional (1/m) term count
 
+        def assemble_axis(attribution, parent_adj, has_child, label_of, rare_of,
+                          out_name, axis_label):
+            """CORE per-term assembly for ONE axis, run once per axis (Mondo, then HPO).
+
+            Turns an ``attribution`` frame (person_id, mondo_id, origin_cid, via, k_src,
+            k_std — the source_climb attribution for Mondo, ``t_hpo`` for HPO) plus the
+            axis's OWN DAG structures (``parent_adj``/``has_child``/``label_of``/``rare_of``,
+            passed in — NOT the Mondo ones) into the written payload ``<out>/<out_name>``
+            and its ``_nodes.tsv``. Computes, per axis: the fractional (1/m) count, the
+            source-code catalog + volume bands, the collision split, the term universe and
+            term_rows, then ``assemble_payload`` + write.
+
+            The source_climb SURVEY (tier persons, unmatched-vocab, HPO phenotype-gap probe)
+            is Mondo-axis-only; its branch inputs (t1/t2/t3, unm_codes_by_vocab, hpo_probe)
+            are computed once in the branch and closed over here, and the collision-split
+            fields (which need this axis's own catalog) are folded in for the Mondo axis
+            only. ``concept_pd``/``concept_all``/``spark`` are shared (closed over). Returns
+            the same summary-row dict shape as the space runner. Byte-identical to the prior
+            single-axis path when called for Mondo with the source_climb attribution."""
+            from collections import Counter
+            is_mondo = axis_label == "mondo"
+            hit = attribution.select("person_id", "mondo_id")
+
+            # FRACTIONAL (1/m) per-term count — the addable, de-double-counted number.
+            # A condition keyed by (person, source concept, standard concept) maps to m
+            # terms via its resolved tier (the collision); credit 1/m to each so the shares
+            # add back to 1 and summed / rolled-up counts never double-count the map
+            # ambiguity. m is a property of the condition (person-independent).
+            attr_k = attribution.select(
+                "person_id", "mondo_id",
+                F.coalesce(F.col("k_src"), F.lit(-1)).alias("k_src"),
+                F.coalesce(F.col("k_std"), F.lit(-1)).alias("k_std"))
+            m_of = (attr_k.select("k_src", "k_std", "mondo_id").distinct()
+                    .groupBy("k_src", "k_std").agg(F.count(F.lit(1)).alias("m")))
+            frac_pd = (attr_k.distinct().join(m_of, ["k_src", "k_std"])
+                       .groupBy("mondo_id")
+                       .agg(F.sum(F.lit(1.0) / F.col("m")).alias("frac")).toPandas())
+            frac_of = {str(r["mondo_id"]): float(r["frac"]) for _, r in frac_pd.iterrows()}
+
+            # per-term catalog of ORIGINATING source codes. Keep the FULL tier via for the
+            # collision split; the catalog display collapses to exact/climbed (exact wins if
+            # a code reaches a term both ways). Named via the concept table.
+            cat = (attribution.select("mondo_id", "origin_cid", "via").distinct()
+                   .withColumn("vrank", F.when(F.col("via") == "climbed", 1).otherwise(0)))
+            cat = (cat.withColumn("best", F.min("vrank").over(
+                       Window.partitionBy("mondo_id", "origin_cid")))
+                   .where(F.col("vrank") == F.col("best"))
+                   .select("mondo_id", "origin_cid", "via").distinct())
+            cat_named = (cat.join(concept_all, "origin_cid", "left")
+                         .select("mondo_id", "origin_cid", "via", "vocabulary_id", "concept_code")
+                         .toPandas())
+            # per-(term, code) distinct-person volume -> a differencing-safe magnitude BAND
+            # per code (never the exact count) + a per-term band histogram.
+            code_counts = (attribution.groupBy("mondo_id", "origin_cid")
+                           .agg(F.countDistinct("person_id").alias("np")).toPandas())
+            np_of = {(str(r.mondo_id), int(r.origin_cid)): int(r.np)
+                     for r in code_counts.itertuples()}
+            band_rank = {lab: i for i, lab in enumerate(_band_label(min_cell))}  # heavy=0
+            source_codes_of: dict[str, dict] = {}
+            code_disp = {}       # origin_cid -> "VOCAB code" for examples
+            for mid, sub in cat_named.groupby("mondo_id"):
+                recs = []
+                seen = set()   # one row per concept id: a code reaching a term via BOTH
+                               # source_exact and standard_exact must not display (or count
+                               # in the histogram) twice — both collapse to display "exact".
+                for r in sub.itertuples():
+                    cid = int(r.origin_cid)
+                    if cid in seen:
+                        continue
+                    seen.add(cid)
+                    vocab = str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"
+                    code = str(r.concept_code) if pd.notna(r.concept_code) else str(cid)
+                    disp = "climbed" if str(r.via) == "climbed" else "exact"
+                    band = volume_band(np_of.get((str(mid), cid)), min_cell)
+                    recs.append({"id": cid, "vocab": vocab, "code": code,
+                                 "via": disp, "band": band})
+                    code_disp[cid] = f"{vocab} {code}"
+                # histogram over the FULL set (before the display cap); sort heavy-first so
+                # the cap keeps the heavy hitters and the light tail collapses in the UI.
+                hist = band_histogram([c["band"] for c in recs], min_cell)
+                recs.sort(key=lambda c: (band_rank.get(c["band"], 99),
+                                         c["via"] != "exact", c["vocab"], c["code"]))
+                source_codes_of[str(mid)] = {"list": recs[:CATALOG_CAP], "n": len(recs),
+                                             "bands": hist}
+
+            # collisions: a single source code attributed to >1 term -> a patient with that
+            # code counts under each. Split by MECHANISM (shared_concept / climb_tie / mixed).
+            full_pairs = [(int(c), str(m), str(v)) for c, m, v
+                          in cat_named[["origin_cid", "mondo_id", "via"]].itertuples(index=False)]
+            siblings, collision_kind_of, code_kind = classify_collision_kinds(full_pairs)
+            label = lambda mm: label_of.get(mm, mm)
+
+            def _examples(kind, n=8):
+                out_ex = []
+                for c, k in code_kind.items():
+                    if k != kind:
+                        continue
+                    terms = sorted({m for cc, m, v in full_pairs if cc == c})
+                    out_ex.append({"code": code_disp.get(c, str(c)),
+                                   "terms": [label(t) for t in terms][:6]})
+                    if len(out_ex) >= n:
+                        break
+                return out_ex
+
+            # --- per-term EXACT-match person counts (NO concept_ancestor climb) -----------
+            term_counts = (hit.groupBy("mondo_id")
+                           .agg(F.countDistinct("person_id").alias("n")).toPandas())
+            count_of = {str(r["mondo_id"]): int(r["n"]) for _, r in term_counts.iterrows()}
+            n_coded = cond.select("person_id").distinct().count()
+            n_on_mondo = hit.select("person_id").distinct().count()
+
+            # axis-specific mapping seed: for Mondo, the full same_as->Maps to mapping (so
+            # zero-usage mapped terms still appear + carry their std_concepts/codes); for
+            # HPO, the standard concept(s) each HP term was attributed, derived from t_hpo.
+            if is_mondo:
+                tm = term_match
+                codes_map, codesbyvocab_map, rare_src_map = codes_of, codesbyvocab_of, rare_src_of
+            else:
+                tm_pd = (attribution.select("mondo_id", "k_std")
+                         .where(F.col("k_std").isNotNull()).distinct().toPandas())
+                tm = {}
+                for hid, sub in tm_pd.groupby("mondo_id"):
+                    tm[str(hid)] = sorted({int(x) for x in sub["k_std"]})
+                codes_map, codesbyvocab_map, rare_src_map = {}, {}, {}
+
+            # term universe: the mapped terms, plus any term that received a count or a
+            # catalogued source code even if its standard mapping was empty.
+            mapped_ids = set(tm) | set(count_of) | set(source_codes_of)
+            parents = nearest_mapped_parents(mapped_ids, parent_adj)
+
+            term_rows = []
+            for mid in sorted(mapped_ids):
+                cids = sorted({int(c) for c in tm.get(mid, [])})
+                codes = codes_map.get(mid, [])
+                catrec = source_codes_of.get(mid) or {"list": [], "n": 0, "bands": []}
+                term_rows.append({
+                    "mondo_id": mid,
+                    "label": label_of.get(mid, mid),
+                    "is_internal": mid in has_child,
+                    "parents": parents.get(mid, []),
+                    "std_concepts": cids,
+                    "codes": codes,
+                    "n_codes": len(codes),
+                    "codes_by_vocab": codesbyvocab_map.get(mid, {}),
+                    "source_codes": catrec["list"],
+                    "n_source_codes": catrec["n"],
+                    "source_bands": catrec.get("bands", []),
+                    "n_persons": count_of.get(mid, 0),
+                    "n_frac": frac_of.get(mid, float(count_of.get(mid, 0))),
+                    "collision_siblings": siblings.get(mid, []),
+                    "collision_kind": collision_kind_of.get(mid, ""),
+                    "rare": rare_of.get(mid, False),
+                    "rare_src": rare_src_map.get(mid, []),
+                })
+
+            # --- survey (Mondo axis only): tier persons + unmatched vocab + collision split
+            #     + HPO probe. Branch inputs (t1/t2/t3, unm_codes_by_vocab, hpo_probe) are
+            #     closed over; the collision-split fields use this axis's own catalog. ------
+            survey = {}
+            if is_mondo:
+                term_kind_counts = Counter(collision_kind_of.values())
+                code_kind_counts = Counter(code_kind.values())
+                survey = {
+                    "persons_source_exact": int(t1.select("person_id").distinct().count()),
+                    "persons_standard_exact": int(t2.select("person_id").distinct().count()),
+                    "persons_climbed": int(t3.select("person_id").distinct().count()),
+                    "unmatched_codes_by_vocab": {
+                        (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"): int(r.codes)
+                        for r in unm_codes_by_vocab.itertuples()},
+                    "collision_terms_by_kind": {k: int(v) for k, v in term_kind_counts.items()},
+                    "collision_codes_by_kind": {k: int(v) for k, v in code_kind_counts.items()},
+                    "collision_examples_climb_tie": _examples("climb_tie"),
+                    "collision_examples_shared_concept": _examples("shared_concept"),
+                    "hpo": hpo_probe,
+                }
+
+            # --- assemble this axis + write its payload/TSV -------------------------------
+            if is_mondo:
+                meta_space = space
+                meta_rule = {
+                    "source": ("distinct persons whose condition_source_concept_id exactly "
+                               "matches one of the term's Mondo same_as source codes (no Maps to)"),
+                    "source_climb": ("distinct persons attributed to the most specific mapped "
+                                     "Mondo term reachable: source-exact (same_as), else "
+                                     "standard-exact (condition_concept_id), else nearest mapped "
+                                     "SNOMED ancestor via concept_ancestor (ties reduced to the "
+                                     "most-specific Mondo term; orthogonal ties counted in each)"),
+                }.get(space,
+                      "distinct persons with an EXACT-match standard condition concept "
+                      "(same_as -> Maps to)")
+            else:
+                meta_space = "hpo_exact"
+                meta_rule = ("distinct persons whose condition's standard/source concept has an "
+                             "EXACT HPO xref term (the phenotype axis), attributed to that HP "
+                             "term over the HPO is_a DAG — disjoint from the Mondo climb")
+            meta = {
+                "mondo_version": args.mondo_version,
+                "cdr": args.cdr,
+                "source_table": args.source_table,
+                "min_cell": min_cell,
+                "rollup": False,
+                "count_space": meta_space,
+                "count_rule": meta_rule,
+                "generated_utc": generated_utc,
+            }
+            if survey:
+                meta["survey"] = survey
+            payload = assemble_payload(meta=meta, term_rows=term_rows, min_cell=min_cell)
+
+            (out / out_name).write_text(json.dumps(payload))
+            tsv_name = (out_name[:-5] if out_name.endswith(".json") else out_name) + "_nodes.tsv"
+            rows = [{
+                "mondo_id": nd["id"], "label": nd["label"], "kind": nd["kind"],
+                "depth": nd["depth"], "state": nd["state"], "category": nd["category"],
+                "n_patients": nd["display"],
+                "n_frac": nd.get("frac_display", ""),
+                "collision": int(nd["collision"]),
+                "collision_siblings": "|".join(nd["collision_siblings"]),
+                "n_codes": nd["n_codes"],
+                "codes_by_vocab": ";".join(f"{v}:{c}" for v, c in nd["codes_by_vocab"].items()),
+                "codes": "|".join(f"{c['vocab']}:{c['code']}" for c in nd["codes"]),
+                "n_source_codes": nd.get("n_source_codes", 0),
+                "source_codes": "|".join(f"{c['vocab']}:{c['code']}:{c['via']}:{c.get('band','')}"
+                                         for c in nd.get("source_codes", [])),
+                "source_bands": ";".join(f"{b['band']}:{b['codes']}"
+                                         for b in nd.get("source_bands", [])),
+                "rare": int(nd["rare"]), "rare_src": "|".join(nd["rare_src"]),
+                "parents": "|".join(nd["parents"]),
+            } for nd in payload["nodes"] if nd["kind"] != "root"]
+            pd.DataFrame(rows).to_csv(out / tsv_name, sep="\t", index=False)
+
+            # per-axis stderr (suppressed) for the run log
+            sys.stderr.write(f"\n=== count space: {meta_space} ===\n" if is_mondo
+                             else f"\n=== axis: {axis_label} ===\n")
+            sys.stderr.write(format_summary(payload["stats"], min_cell=min_cell) + "\n")
+            _attr = ("attributed" if space == "source_climb" else "exact") if is_mondo else "hpo-exact"
+            _ont = "Mondo" if is_mondo else "HPO"
+            sys.stderr.write(
+                f"[ladder] persons total {suppress_count(n_total, min_cell)} | coded "
+                f"{suppress_count(n_coded, min_cell)} | on any mapped {_ont} term ({_attr}) "
+                f"{suppress_count(n_on_mondo, min_cell)} "
+                f"({100.0 * n_on_mondo / max(n_total, 1):.1f}% of all persons)\n")
+            return {"space": (space if is_mondo else "hpo"), "payload": payload,
+                    "stats": payload["stats"], "survey": survey, "n_total": n_total,
+                    "n_coded": n_coded, "n_on_mondo": n_on_mondo, "min_cell": min_cell,
+                    "mondo_version": args.mondo_version, "generated_utc": generated_utc}
+
         if space == "source":
             # --- SOURCE space: match condition_source_concept_id to the term's OWN
             #     same_as source concepts. No Maps to => no decomposition, no cross-term
@@ -1121,98 +1368,18 @@ def main(argv: list[str]) -> int:
                 t3 = t1.limit(0)          # no climbs (empty, keeps t1's schema for the union)
 
             attribution = (t1.unionByName(t2).unionByName(t3)).cache()
-            hit = attribution.select("person_id", "mondo_id")
-
-            # FRACTIONAL (1/m) per-term count — the addable, de-double-counted number.
-            # A condition is keyed by (person, source concept, standard concept). It maps to
-            # m Mondo terms via its resolved tier (the collision); credit 1/m to each, so the
-            # m shares add back to 1 and summed / rolled-up counts never double-count the map
-            # ambiguity. m is a property of the condition (person-independent). Uncapped
-            # DIAGNOSIS semantics: a person's several distinct conditions on one term each
-            # count, matching the roll-up's "counts of diagnoses, not distinct patients".
-            attr_k = attribution.select(
-                "person_id", "mondo_id",
-                F.coalesce(F.col("k_src"), F.lit(-1)).alias("k_src"),
-                F.coalesce(F.col("k_std"), F.lit(-1)).alias("k_std"))
-            m_of = (attr_k.select("k_src", "k_std", "mondo_id").distinct()
-                    .groupBy("k_src", "k_std").agg(F.count(F.lit(1)).alias("m")))
-            frac_pd = (attr_k.distinct().join(m_of, ["k_src", "k_std"])
-                       .groupBy("mondo_id")
-                       .agg(F.sum(F.lit(1.0) / F.col("m")).alias("frac")).toPandas())
-            frac_of = {str(r["mondo_id"]): float(r["frac"]) for _, r in frac_pd.iterrows()}
-
-            # per-term catalog of ORIGINATING source codes. Keep the FULL tier via
-            # (source_exact/standard_exact/climbed) for the collision split; the catalog
-            # display collapses it to exact/climbed (exact wins if a code reaches a term
-            # both ways). Named via the concept table.
-            cat = (attribution.select("mondo_id", "origin_cid", "via").distinct()
-                   .withColumn("vrank", F.when(F.col("via") == "climbed", 1).otherwise(0)))
-            cat = (cat.withColumn("best", F.min("vrank").over(
-                       Window.partitionBy("mondo_id", "origin_cid")))
-                   .where(F.col("vrank") == F.col("best"))
-                   .select("mondo_id", "origin_cid", "via").distinct())
+            # concept identities for the origin-code catalog (built per axis inside
+            # assemble_axis) AND the unmatched-vocab survey below. Read once, shared.
             concept_all = (_read_bq(spark, args.cdr, args.billing, "concept")
                            .select(F.col("concept_id").alias("origin_cid"),
                                    "vocabulary_id", "concept_code"))
-            cat_named = (cat.join(concept_all, "origin_cid", "left")
-                         .select("mondo_id", "origin_cid", "via", "vocabulary_id", "concept_code")
-                         .toPandas())
-            # per-(term, code) distinct-person volume -> a differencing-safe magnitude
-            # BAND per code (never the exact count) + a per-term band histogram. Reveals
-            # "where the weight sits" (a thin Mondo term riding on a few heavy codes)
-            # without emitting any per-code patient number. See volume_band/band_histogram.
-            code_counts = (attribution.groupBy("mondo_id", "origin_cid")
-                           .agg(F.countDistinct("person_id").alias("np")).toPandas())
-            np_of = {(str(r.mondo_id), int(r.origin_cid)): int(r.np)
-                     for r in code_counts.itertuples()}
-            band_rank = {lab: i for i, lab in enumerate(_band_label(min_cell))}  # heavy=0
-            code_disp = {}       # origin_cid -> "VOCAB code" for examples
-            for mid, sub in cat_named.groupby("mondo_id"):
-                recs = []
-                seen = set()   # one row per concept id: a code reaching a term via BOTH
-                               # source_exact and standard_exact must not display (or count
-                               # in the histogram) twice — both collapse to display "exact".
-                for r in sub.itertuples():
-                    cid = int(r.origin_cid)
-                    if cid in seen:
-                        continue
-                    seen.add(cid)
-                    vocab = str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"
-                    code = str(r.concept_code) if pd.notna(r.concept_code) else str(cid)
-                    disp = "climbed" if str(r.via) == "climbed" else "exact"
-                    band = volume_band(np_of.get((str(mid), cid)), min_cell)
-                    # code IDENTITY only (no concept name) — names are resolved client-side
-                    # from public terminology services (NIH Clinical Tables) so no licensed
-                    # or bulky description text is egressed from the workbench.
-                    recs.append({"id": cid, "vocab": vocab, "code": code,
-                                 "via": disp, "band": band})
-                    code_disp[cid] = f"{vocab} {code}"
-                # histogram over the FULL set (before the display cap); sort heavy-first so
-                # the cap keeps the heavy hitters and the light tail collapses in the UI.
-                hist = band_histogram([c["band"] for c in recs], min_cell)
-                recs.sort(key=lambda c: (band_rank.get(c["band"], 99),
-                                         c["via"] != "exact", c["vocab"], c["code"]))
-                source_codes_of[str(mid)] = {"list": recs[:CATALOG_CAP], "n": len(recs),
-                                             "bands": hist}
 
-            # collisions: a single source code attributed to >1 Mondo term -> a patient
-            # with that code counts under each. Split by MECHANISM: shared_concept (exact
-            # Maps-to coarsening) vs climb_tie (rolled up to >=2 nearest ancestors) vs mixed.
-            full_pairs = [(int(c), str(m), str(v)) for c, m, v
-                          in cat_named[["origin_cid", "mondo_id", "via"]].itertuples(index=False)]
-            siblings, collision_kind_of, code_kind = classify_collision_kinds(full_pairs)
-            label = lambda mm: label_of.get(mm, mm)
-            def _examples(kind, n=8):
-                out = []
-                for c, k in code_kind.items():
-                    if k != kind:
-                        continue
-                    terms = sorted({m for cc, m, v in full_pairs if cc == c})
-                    out.append({"code": code_disp.get(c, str(c)),
-                                "terms": [label(t) for t in terms][:6]})
-                    if len(out) >= n:
-                        break
-                return out
+            # The per-term assembly (fractional 1/m count, source-code catalog + bands,
+            # collision split, term_rows, assemble_payload, write) is factored into
+            # assemble_axis and run once per axis (Mondo below, then HPO). Only the
+            # source_climb SURVEY inputs are computed here (Mondo-axis-only): tier person
+            # counts (from t1/t2/t3, inside assemble_axis), the unmatched-vocab tally, and
+            # the HPO phenotype-gap probe.
 
             # survey: distinct persons resolved at each tier (overlapping across tiers),
             # plus the unmatched remainder as distinct source CODES by vocabulary. Counting
@@ -1221,16 +1388,16 @@ def main(argv: list[str]) -> int:
             # everyone and reads as a false gap. Code counts are identity (unsuppressed,
             # never per-code patient counts). The real uncovered-persons figure is the
             # ladder's coded - on_mondo, surfaced in the summary.
-            unmatched = rem2.join(nearest.select("std_cid").distinct(), "std_cid", "left_anti")
+            # NOTE: rem2_climb (not rem2) — codes claimed by the HPO-exact rung must not be
+            # mis-counted here as unmatched. When --with-hpo is off, rem2_climb IS rem2, so
+            # this is byte-identical to the prior behavior.
+            unmatched = rem2_climb.join(nearest.select("std_cid").distinct(), "std_cid", "left_anti")
             src_vocab = concept_all.select(F.col("origin_cid").alias("src_cid"), "vocabulary_id")
             unm_codes_by_vocab = (unmatched.select("src_cid").distinct()
                                   .join(src_vocab, "src_cid", "left")
                                   .groupBy("vocabulary_id")
                                   .agg(F.countDistinct("src_cid").alias("codes"))
                                   .toPandas())
-            from collections import Counter
-            term_kind_counts = Counter(collision_kind_of.values())
-            code_kind_counts = Counter(code_kind.values())
 
             # ---- HPO phenotype-gap probe -------------------------------------------------
             # Of the STANDARD (SNOMED) concepts coded in the EHR, how many that Mondo can
@@ -1282,20 +1449,24 @@ def main(argv: list[str]) -> int:
                              "climb": agg["climb"], "drop": agg["drop"],
                              "examples": [e for _, e in ex[:8]]}
 
-            survey = {
-                "persons_source_exact": int(t1.select("person_id").distinct().count()),
-                "persons_standard_exact": int(t2.select("person_id").distinct().count()),
-                "persons_climbed": int(t3.select("person_id").distinct().count()),
-                "unmatched_codes_by_vocab": {
-                    (str(r.vocabulary_id) if pd.notna(r.vocabulary_id) else "?"): int(r.codes)
-                    for r in unm_codes_by_vocab.itertuples()},
-                # collision split (see classify_collision_kinds): terms + codes by mechanism
-                "collision_terms_by_kind": {k: int(v) for k, v in term_kind_counts.items()},
-                "collision_codes_by_kind": {k: int(v) for k, v in code_kind_counts.items()},
-                "collision_examples_climb_tie": _examples("climb_tie"),
-                "collision_examples_shared_concept": _examples("shared_concept"),
-                "hpo": hpo_probe,
-            }
+            # --- assemble both axes from their attributions -------------------------------
+            # Mondo: the source_climb attribution over the Mondo DAG (byte-identical to the
+            # prior single-axis path); the survey is attached to this axis only.
+            mondo_result = assemble_axis(
+                attribution, parent_adj, has_child, label_of, rare_of,
+                f"mondo_usage_{space}.json", "mondo")
+            # HPO: the HPO-exact rung (t_hpo) over the HPO DAG -> hpo_usage.json. Only when
+            # --with-hpo built the axis (t_hpo is None otherwise -> no HPO payload).
+            if t_hpo is not None:
+                hpo_result = assemble_axis(
+                    t_hpo, hpo_parent_adj, hpo_has_child, hpo_labels, {},
+                    "hpo_usage.json", "hpo")
+                mondo_result["hpo_axis"] = {
+                    "used_terms": hpo_result["stats"]["used_terms"],
+                    "reported_terms": hpo_result["stats"]["reported_terms"],
+                    "persons": hpo_result["n_on_mondo"],
+                }
+            return mondo_result
         else:
             # --- STANDARD space (default): condition_concept_id via same_as -> Maps to.
             src_sdf = spark.createDataFrame(pd.DataFrame({"concept_id_1": source_ids}))
