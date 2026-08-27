@@ -98,6 +98,18 @@ survey]` lines land in the run's `summary.md` + fit log.
 Load the written `mondo_usage.json` into `mondo-usage-dashboard/` (or via Open data) and
 compare side-by-side with the 0105 and 0106 exports.
 
+### `--with-hpo`
+
+Pass `--with-hpo` to also build a second, independent HPO-exact rung (`t_hpo`) over the
+HPO DAG, alongside the usual Mondo source_climb rung — it is a routing knob, not a
+replacement axis: nothing about the Mondo attribution changes. The driver writes a second
+payload, `hpo_usage.json`, next to `mondo_usage.json`; loading it separately (or via the
+dashboard's dual-axis mode) shows the phenotype-level view. It is off by default and fully
+reversible — a run without the flag reproduces the prior single-axis output byte-for-byte,
+since the Mondo attribution path is unmodified. `build_safe_summary` renders an "HPO axis"
+block (mapped HP terms used, reported >min_cell, and ≤-suppressed persons) whenever a
+result carries a non-empty `hpo_axis`.
+
 ## Run log
 
 _(pending first cluster run)_

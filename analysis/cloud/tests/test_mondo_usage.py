@@ -367,6 +367,21 @@ def test_build_safe_summary_renders_hpo_probe_suppressed():
     assert not re.search(r"Hypomagnesemia.*\b\d{2,}\b", out)
 
 
+def test_build_safe_summary_hpo_axis_row():
+    results = [{
+        "space": "source_climb", "min_cell": 20, "mondo_version": "2026-06-02",
+        "generated_utc": "2026-08-27T00:00:00Z",
+        "stats": {"mapped_terms": 8895, "used_terms": 4800, "used_fraction": 0.54,
+                  "reported_terms": 3000, "used_small_terms": 1800,
+                  "collision_terms": 2000, "rare_used_terms": 2100},
+        "n_total": 626396, "n_coded": 349815, "n_on_mondo": 342394, "survey": {},
+        "hpo_axis": {"used_terms": 512, "reported_terms": 300, "persons": 7},  # persons -> ≤20
+    }]
+    out = m.build_safe_summary(results)
+    assert "HPO axis" in out and "512" in out
+    assert "persons ≤20" in out and " 7 " not in out
+
+
 def test_build_safe_summary_suppresses_and_leaks_nothing():
     results = [
         {"space": "source", "min_cell": 20, "mondo_version": "2026-06-02",
