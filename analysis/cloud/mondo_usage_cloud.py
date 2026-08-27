@@ -1363,7 +1363,9 @@ def main(argv: list[str]) -> int:
             if args.with_hpo and hpo_labels:
                 hpo_map = broadcast(spark.createDataFrame(
                     pd.DataFrame(hpo_cid_rows, columns=["map_cid", "hp_id"]).drop_duplicates()))
-                # HPO-exact: a rem2 condition whose STANDARD concept (or source) is an HPO xref.
+                # HPO-exact: a rem2 condition whose STANDARD concept is an HPO xref. v1 matches
+                # on std_cid only; source-ICD HPO xrefs (few) are staged in hpo_cid_rows but not
+                # yet joined here (spec decision #3 left std-vs-source open) — a v2 rung.
                 t_hpo = (rem2.join(hpo_map, rem2["std_cid"] == hpo_map["map_cid"], "inner")
                          .select("person_id", F.col("hp_id").alias("mondo_id"),   # reuse 'mondo_id' col name
                                  origin.alias("origin_cid"), F.lit("hpo_exact").alias("via"),

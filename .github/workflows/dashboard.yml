@@ -34,6 +34,9 @@ jobs:
           cp mondo-usage-dashboard/index.html dashboard/dist/mondo-aou-usage/
           cp mondo-usage-dashboard/mondo_usage.json dashboard/dist/mondo-aou-usage/
           cp mondo-usage-dashboard/mondo_usage.sample.json dashboard/dist/mondo-aou-usage/
+          # HPO phenotype axis: ships WITH the Mondo payload — the dual-axis Mondo payload
+          # has phenotype terms removed, so it is only coherent alongside hpo_usage.json.
+          cp mondo-usage-dashboard/hpo_usage.json dashboard/dist/mondo-aou-usage/
       - name: Deploy
         uses: peaceiris/actions-gh-pages@v3
         with:
