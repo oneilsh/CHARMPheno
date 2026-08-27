@@ -259,6 +259,79 @@ def test_band_histogram_counts_codes_heavy_first():
     assert m.band_histogram([]) == []
 
 
+def test_normalize_xref_vocab():
+    assert m.normalize_xref_vocab("SNOMEDCT_US") == "SNOMED"
+    assert m.normalize_xref_vocab("snomedct_us") == "SNOMED"     # case-insensitive
+    assert m.normalize_xref_vocab("ICD-10") == "ICD10CM"
+    assert m.normalize_xref_vocab("ICD9CM") == "ICD9CM"
+    assert m.normalize_xref_vocab("UMLS") == "UMLS"
+    assert m.normalize_xref_vocab("ORPHA") is None              # not one we match
+
+
+def test_parse_hpo_xrefs():
+    obo = """format-version: 1.2
+
+[Term]
+id: HP:0002917
+name: Hypomagnesemia
+def: "A decreased magnesium level." []
+xref: SNOMEDCT_US:190855004
+xref: UMLS:C0151723 {source="MONDO"}
+xref: ICD-10:E83.42 ! Disorders of magnesium metabolism
+
+[Term]
+id: HP:0000001
+name: All
+xref: UMLS:C0444868
+
+[Typedef]
+id: part_of
+xref: SNOMEDCT_US:9999999
+"""
+    rows = m.parse_hpo_xrefs(obo)
+    # SNOMED + normalized ICD-10 + UMLS captured for the real term; comments/qualifiers stripped
+    assert ("HP:0002917", "Hypomagnesemia", "SNOMED", "190855004") in rows
+    assert ("HP:0002917", "Hypomagnesemia", "ICD10CM", "E83.42") in rows
+    assert ("HP:0002917", "Hypomagnesemia", "UMLS", "C0151723") in rows
+    # Typedef xref is NOT a term xref (ignored)
+    assert all(r[0] == "HP:0002917" or r[0] == "HP:0000001" for r in rows)
+    assert not any(r[3] == "9999999" for r in rows)
+    # a term with only an unmatched-vocab xref contributes nothing matchable... UMLS is kept
+    assert ("HP:0000001", "All", "UMLS", "C0444868") in rows
+
+
+def test_build_safe_summary_renders_hpo_probe_suppressed():
+    results = [{
+        "space": "source_climb", "min_cell": 20, "mondo_version": "2026-06-02",
+        "generated_utc": "2026-08-27T00:00:00Z",
+        "stats": {"mapped_terms": 8895, "used_terms": 4836, "used_fraction": 0.54,
+                  "reported_terms": 3074, "used_small_terms": 1762,
+                  "collision_terms": 2232, "rare_used_terms": 2176},
+        "n_total": 626396, "n_coded": 349815, "n_on_mondo": 342394,
+        "survey": {"persons_source_exact": 247122, "persons_standard_exact": 325284,
+                   "persons_climbed": 329296, "unmatched_codes_by_vocab": {"ICD10CM": 9540},
+                   "hpo": {"hpo_snomed_terms": 9800,
+                           "climb": {"concepts": 1200, "with_hpo": 780, "mass": 500000,
+                                     "mass_hpo": 320000},
+                           # a DROP bucket whose HPO-recoverable mass is a small cell -> suppress
+                           "drop": {"concepts": 40, "with_hpo": 6, "mass": 300, "mass_hpo": 12},
+                           "examples": [{"snomed": "190855004", "hp_id": "HP:0002917",
+                                         "hp_label": "Hypomagnesemia",
+                                         "climbs_to": ["metabolic disease"]}]}},
+    }]
+    out = m.build_safe_summary(results)
+    assert "HPO phenotype-gap probe" in out
+    assert "780 of 1200 concepts (65%)" in out            # climb coverage % rendered
+    assert "person-mass 320000 of 500000" in out          # large masses shown raw
+    assert "6 of 40 concepts (15%)" in out                # drop coverage
+    assert "≤20 of 300" in out                            # drop mass_hpo (12) suppressed, mass (300) raw
+    assert "SNOMED 190855004` → HP:0002917 Hypomagnesemia" in out
+    assert "climbs to: metabolic disease" in out
+    # example carries NO per-concept patient number (only identities + labels)
+    import re
+    assert not re.search(r"Hypomagnesemia.*\b\d{2,}\b", out)
+
+
 def test_build_safe_summary_suppresses_and_leaks_nothing():
     results = [
         {"space": "source", "min_cell": 20, "mondo_version": "2026-06-02",

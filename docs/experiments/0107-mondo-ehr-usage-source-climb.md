@@ -54,6 +54,13 @@ vs `climbed`, so you can see exactly which real-world codes feed each Mondo term
 
 - **used % / rare-used** — expect **higher** than both 0106 (climb recovers coverage)
   and typically 0105 (source-exact preferred, plus climb).
+- **HPO phenotype-gap probe** (`survey.hpo`, rendered in the safe summary) — of the
+  STANDARD (SNOMED) concepts coded in the EHR that Mondo can only CLIMB to a general term,
+  or can't map at all (DROP), how many have an EXACT HPO term instead. Sizes the phenotype
+  axis Mondo doesn't model (hypomagnesemia, lab abnormalities, findings). Loads `hp.obo`
+  xrefs (`--hpo-obo-url`, default purl latest; `''` skips); matches on SNOMED. Emits concept
+  COUNTS (identities) + a ≤-suppressed person MASS + identity-only examples (SNOMED code →
+  HP term → what it currently climbs to). Best-effort: a download failure skips it.
 - **`[source_climb survey]` stderr lines** — the key instrument:
   - distinct persons resolved at each tier (source-exact / standard-exact / climbed),
   - **unmatched persons by source vocabulary** — quantifies exactly what falls outside
