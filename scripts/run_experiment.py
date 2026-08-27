@@ -709,7 +709,7 @@ def build_mondo_usage_args(
     frontmatter still runs.
     """
     cdr, billing = _require_workspace_env()
-    return [
+    argv = [
         "--cdr", cdr,
         "--billing", billing,
         "--out", str(out_dir),
@@ -719,6 +719,9 @@ def build_mondo_usage_args(
         "--mondo-version", str(effective.get("mondo_version", "2026-06-02")),
         "--mondo-cache-dir", str(effective.get("mondo_cache_dir", "data/mondo")),
     ]
+    if effective.get("with_hpo"):
+        argv.append("--with-hpo")
+    return argv
 
 
 def build_pc_args(
