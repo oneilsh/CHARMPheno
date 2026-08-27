@@ -14,7 +14,7 @@
   --border:#d8dee2; --border-strong:#c2cbd1;
   --ink:#171e24; --ink-2:#51606c; --muted:#8592a0;
   --accent:#00867e; --accent-ink:#ffffff;
-  --axis-mondo:#db2777; --axis-hpo:#059669;   /* two-ontology node scheme (light) */
+  --axis-mondo:#cb5d88; --axis-hpo:#3a9880;   /* two-ontology node scheme (light, muted) */
   --cat-reported:#009e93; --cat-used-small:#c9760a; --cat-used-branch:#6a55d6; --cat-other:#9aa4b0;
   --cat-reported-soft:#009e9322; --cat-used-small-soft:#c9760a22; --cat-used-branch-soft:#6a55d622; --cat-other-soft:#9aa4b01f;
   --collision:#e67e22;
@@ -28,7 +28,7 @@
   --border:#2c343c; --border-strong:#3a444d;
   --ink:#e7ecef; --ink-2:#a6b1bc; --muted:#6d7883;
   --accent:#2bb5aa; --accent-ink:#06201e;
-  --axis-mondo:#ec4899; --axis-hpo:#10b981;   /* two-ontology node scheme (dark) */
+  --axis-mondo:#d873a0; --axis-hpo:#48b394;   /* two-ontology node scheme (dark, muted) */
   --cat-reported:#1fb0a4; --cat-used-small:#d59234; --cat-used-branch:#9483ea; --cat-other:#5c6672;
   --cat-reported-soft:#1fb0a422; --cat-used-small-soft:#d5923422; --cat-used-branch-soft:#9483ea24; --cat-other-soft:#5c66721f;
   --collision:#f0883e;
@@ -39,7 +39,7 @@
   --border:#2c343c; --border-strong:#3a444d;
   --ink:#e7ecef; --ink-2:#a6b1bc; --muted:#6d7883;
   --accent:#2bb5aa; --accent-ink:#06201e;
-  --axis-mondo:#ec4899; --axis-hpo:#10b981;   /* two-ontology node scheme (dark) */
+  --axis-mondo:#d873a0; --axis-hpo:#48b394;   /* two-ontology node scheme (dark, muted) */
   --cat-reported:#1fb0a4; --cat-used-small:#d59234; --cat-used-branch:#9483ea; --cat-other:#5c6672;
   --cat-reported-soft:#1fb0a422; --cat-used-small-soft:#d5923422; --cat-used-branch-soft:#9483ea24; --cat-other-soft:#5c66721f;
   --collision:#f0883e;
@@ -446,6 +446,8 @@ function combine(mondo, hpo){
   // drop the synthetic payload root(s): each has a single child that is the real ontology
   // root (Mondo 'human disease', HPO 'All'), so promote that child to be the axis root.
   promoteSpineRoot(nodes,"root"); promoteSpineRoot(nodes,"HP:root");
+  // label the two axis roots as the ontology they head (keep the real term in .term for the drawer)
+  for(const n of nodes){ if(n.kind==="root"){ n.term=n.term||n.label; n.label=n.axis==="hpo"?"HPO":"Mondo"; } }
   return {meta:mondo.meta, stats:mondo.stats, nodes};
 }
 function promoteSpineRoot(nodes, rid){
@@ -926,7 +928,7 @@ function ancestorSet(id){                 // all transitive parents up the DAG (
 function graphRadius(id){
   const nn=byId.get(id);
   if(nn===undefined) return 7;                          // more-node
-  if(nn.kind==="root") return 22;                       // synthetic root: fixed, not sized
+  if(nn.kind==="root") return 33;                       // axis root: fixed (1.5x), not sized
   const maxV=state.rollup?ROLL_EST_MAX:OWN_MAX;   // ROLL_EST_MAX = max subtree central estimate
   const lv=Math.log10(Math.max(gval(id),0)+1), lm=Math.log10((maxV||1)+1);
   return 11+44*(lm>0?Math.min(1,lv/lm):0);
@@ -950,7 +952,7 @@ function layoutGraph(vis){
     if(!ids.length) return;
     const layers={}; let maxD=0;
     for(const id of ids){const d=vis.get(id).depth||0;(layers[d]=layers[d]||[]).push(id);maxD=Math.max(maxD,d);}
-    let x=14; const gap=26;
+    let x=6; const gap=26;   // small lead: in dual view the two roots sit ~one gap apart across the centerline
     for(let d=0;d<=maxD;d++){
       const arr=(layers[d]||[]).slice().sort((a,b)=> (effKey(a)-effKey(b)) || (lab(a)<lab(b)?-1:1));
       for(const id of arr) gLastRank.set(id, effKey(id));   // remember for drag math
@@ -1232,7 +1234,7 @@ function updateNode(g,id,n,c){
   g.setAttribute("class","gnode"+(gSel.has(id)?" sel":"")+(gHL.has(id)?" hl":gHLD.has(id)?" hld":"")+pk+(matchesQ(n)?" match":""));
   const circ=g.querySelector(".gcirc"); circ.setAttribute("r",c.r); circ.style.r=c.r+"px";
   const gi=g.querySelector(".gicon");   // Monarch glyph on roots: fit its 100-space into the node
-  if(gi) gi.setAttribute("transform",`translate(${-c.r},${-c.r}) scale(${(c.r/50).toFixed(3)})`);
+  if(gi) gi.setAttribute("transform",`translate(${(-c.r*0.95).toFixed(2)},${(-c.r*0.95).toFixed(2)}) scale(${(c.r/52.6).toFixed(3)})`);
   circ.setAttribute("fill",nodeFill(id,n));
   circ.setAttribute("fill-opacity",nodeOpac(n));
   const dir=c.dir||1, lx=dir*(c.r+9), anchor=dir<0?"end":"start";
