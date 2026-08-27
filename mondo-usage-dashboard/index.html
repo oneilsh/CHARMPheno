@@ -471,8 +471,11 @@ async function boot(){
   if(!d){document.querySelector(".panel").innerHTML=
     '<div class="hint">No data found. Place a <code>mondo_usage.json</code> next to this page (or the bundled <code>mondo_usage.sample.json</code>).</div>';return;}
   const hpo=await tryFetch("hpo_usage.json");
-  if(hpo){ DUAL=true; d=combine(d,hpo);
-    const h=$("#brand-h1"); if(h) h.textContent="Counting Diagnoses: AllOfUs on Mondo + HPO"; }
+  // Combine defensively: a present-but-malformed hpo_usage.json must fall back to the
+  // single-Mondo view, never blank the page. On any combine error, keep the Mondo payload.
+  if(hpo){ try{ const merged=combine(d,hpo); d=merged; DUAL=true;
+      const h=$("#brand-h1"); if(h) h.textContent="Counting Diagnoses: AllOfUs on Mondo + HPO";
+    }catch(e){ DUAL=false; console.warn("[axes] hpo payload present but combine failed; Mondo-only",e); } }
   load(d);
   console.log(DUAL?"[axes] mondo + hpo (one canvas)":"[axes] mondo only");
 }
