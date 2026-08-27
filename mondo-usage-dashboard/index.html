@@ -955,7 +955,7 @@ function layoutGraph(vis){
     // In dual view the roots' inner edge starts at ROOT_HALFGAP from the centerline, so the two
     // roots sit 2*ROOT_HALFGAP apart. Their labels are short ("Mondo"/"HPO"), so the gap to col-1
     // is tightened (ROOT_STEP) rather than the wide inter-column gap (210) that fits long labels.
-    const ROOT_HALFGAP=40, ROOT_STEP=90;
+    const ROOT_HALFGAP=20, ROOT_STEP=90;
     let x=DUAL?ROOT_HALFGAP:14; const gap=26;
     for(let d=0;d<=maxD;d++){
       const arr=(layers[d]||[]).slice().sort((a,b)=> (effKey(a)-effKey(b)) || (lab(a)<lab(b)?-1:1));
