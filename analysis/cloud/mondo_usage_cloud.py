@@ -270,6 +270,37 @@ def nearest_mapped_parents(
     return out
 
 
+def meaningful_skeleton(seed_ids, parent_adj):
+    """Terms to KEEP so the ontology reads with its real branch structure: every attributed
+    ('seed') term, plus every un-attributed ancestor that is a genuine BRANCH POINT (>= 2 of
+    its children lead to a seed term). Linear pass-through ancestors (0 or 1 seed-bearing
+    child) are dropped, so their children reattach to the nearest kept ancestor. ``parent_adj``
+    is child -> [parents] over the full DAG. Pure."""
+    seed = set(seed_ids)
+    closure = set(seed); stack = list(seed)            # ancestor closure of the seed
+    while stack:
+        for p in parent_adj.get(stack.pop(), []):
+            if p not in closure:
+                closure.add(p); stack.append(p)
+    child_adj = {}                                      # child edges within the closure
+    for c in closure:
+        for p in parent_adj.get(c, []):
+            if p in closure:
+                child_adj.setdefault(p, []).append(c)
+    reaches = {}                                        # subtree contains a seed term? (memoized)
+    def reaches_seed(x):
+        if x in reaches: return reaches[x]
+        reaches[x] = False                              # cycle guard (ontologies are acyclic)
+        r = x in seed or any(reaches_seed(c) for c in child_adj.get(x, []))
+        reaches[x] = r; return r
+    for x in closure: reaches_seed(x)
+    keep = set(seed)
+    for x in closure:
+        if x not in seed and sum(1 for c in child_adj.get(x, []) if reaches[c]) >= 2:
+            keep.add(x)                                 # a real branch point
+    return keep
+
+
 def nearest_mapped_standard_ancestors(edges) -> dict[int, list[int]]:
     """The ``source_climb`` count-space climb, as pure logic.
 
@@ -1097,13 +1128,22 @@ def main(argv: list[str]) -> int:
                     tm[str(hid)] = sorted({int(x) for x in sub["k_std"]})
                 codes_map, codesbyvocab_map, rare_src_map = {}, {}, {}
 
-            # term universe: the mapped terms, plus any term that received a count or a
-            # catalogued source code even if its standard mapping was empty.
-            mapped_ids = set(tm) | set(count_of) | set(source_codes_of)
-            parents = nearest_mapped_parents(mapped_ids, parent_adj)
+            # term universe: the SEED = mapped terms, plus any term that received a count or
+            # a catalogued source code even if its standard mapping was empty. The KEPT
+            # universe adds back un-attributed ancestors that are genuine branch points (>= 2
+            # seed-bearing children), collapsing purely-linear pass-through ancestors so the
+            # DAG reads with its real branch structure on both axes (topology-preserving
+            # skeleton reduction; see ``meaningful_skeleton``). Newly-added branch-point ids
+            # are absent from tm/count_of/source_codes_of, so they fall through the .get()s
+            # below to empty std_concepts/codes/source_codes and n_persons=0 — structural,
+            # zero-count nodes — while still getting a real label via ``label_of`` (populated
+            # for the full DAG on both axes, not just attributed terms).
+            seed_ids = set(tm) | set(count_of) | set(source_codes_of)
+            keep_ids = meaningful_skeleton(seed_ids, parent_adj)
+            parents = nearest_mapped_parents(keep_ids, parent_adj)
 
             term_rows = []
-            for mid in sorted(mapped_ids):
+            for mid in sorted(keep_ids):
                 cids = sorted({int(c) for c in tm.get(mid, [])})
                 codes = codes_map.get(mid, [])
                 catrec = source_codes_of.get(mid) or {"list": [], "n": 0, "bands": []}

@@ -49,6 +49,25 @@ def test_nearest_mapped_parents_stops_at_first_mapped():
     assert out["LEAF"] == ["NEAR"]            # FAR not included (past NEAR)
 
 
+def test_meaningful_skeleton_collapses_linear_keeps_branch_points():
+    # linear chain LEAF -> MID -> TOP: MID/TOP are single-child pass-throughs -> dropped
+    assert m.meaningful_skeleton({"LEAF"}, {"LEAF": ["MID"], "MID": ["TOP"], "TOP": []}) == {"LEAF"}
+    # BP has two seed-bearing children (A, B) -> kept; TOP above it is linear -> dropped
+    padj = {"A": ["BP"], "B": ["BP"], "BP": ["TOP"], "TOP": []}
+    assert m.meaningful_skeleton({"A", "B"}, padj) == {"A", "B", "BP"}
+    # a seed node that is itself also an ancestor stays; an un-attributed leaf-side node
+    # with only ONE seed-bearing child collapses even if it has other non-seed children
+    padj2 = {"X": ["MID"], "MID": ["ROOT"], "Y": ["ROOT"], "ROOT": []}
+    # seed {X, Y}: ROOT has two seed-bearing children (MID->X, and Y) -> ROOT kept; MID linear -> dropped
+    assert m.meaningful_skeleton({"X", "Y"}, padj2) == {"X", "Y", "ROOT"}
+
+
+def test_meaningful_skeleton_empty_and_seed_only():
+    assert m.meaningful_skeleton(set(), {}) == set()
+    # a lone seed with un-attributed single-parent chain keeps only the seed
+    assert m.meaningful_skeleton({"S"}, {"S": ["P"], "P": []}) == {"S"}
+
+
 def test_nearest_mapped_standard_ancestors_picks_min_distance():
     # concept_ancestor climb (source_climb space): descendant 100 has mapped
     # standard ancestors at levels 1 and 2; only the NEAREST is kept.
