@@ -1226,8 +1226,15 @@ def per_node_head_report(w_CK, lay, C, int2cid, count_of, *, dead_eps=1e-6):
 
     Returns a formatted multi-line string: a |w_c| bucket histogram, and — split by
     trained-vs-dead — the median positive count, so 'dead heads are the low-positive
-    ones' is read off directly."""
+    ones' is read off directly.
+
+    `count_of` may be EMPTY: the Mondo corpus now comes from the bundle cache, and a
+    HIT skips the DAG build + power-count that produces those counts (the fit needs
+    only `bundle.parent_int`). The |w_c| half of the probe — the part that reads the
+    fitted head — is unaffected, so it still prints, with the +count columns
+    suppressed and said so rather than shown as a wall of zeros."""
     lines = ["[head-starvation probe] per-node |w_c| on localized support:"]
+    have_counts = bool(count_of)
     wnorm = np.empty(C, dtype=np.float64)
     sizes = np.empty(C, dtype=np.int64)
     pos = np.full(C, -1, dtype=np.int64)          # -1 = class node (no positive count)
@@ -1236,7 +1243,7 @@ def per_node_head_report(w_CK, lay, C, int2cid, count_of, *, dead_eps=1e-6):
         sizes[c] = sup.size
         wnorm[c] = float(np.linalg.norm(np.asarray(w_CK)[c, sup])) if sup.size else 0.0
         cid = int2cid.get(c)
-        if cid is not None and cid > 0:
+        if have_counts and cid is not None and cid > 0:
             pos[c] = int(count_of.get(cid, 0))
     # |w_c| buckets
     edges = [(0.0, dead_eps, "dead  (≈0)"), (dead_eps, 1e-2, "tiny  (<1e-2)"),
@@ -1249,8 +1256,13 @@ def per_node_head_report(w_CK, lay, C, int2cid, count_of, *, dead_eps=1e-6):
             lines.append(f"    {lbl:14s} {n:5d} nodes")
             continue
         pos_sel = pos[sel & (pos >= 0)]
-        pmed = f"median +ct={int(np.median(pos_sel))}" if pos_sel.size else "class nodes"
-        lines.append(f"    {lbl:14s} {n:5d} nodes   {pmed}")
+        if not have_counts:
+            pmed = ""
+        elif pos_sel.size:
+            pmed = f"median +ct={int(np.median(pos_sel))}"
+        else:
+            pmed = "class nodes"
+        lines.append(f"    {lbl:14s} {n:5d} nodes   {pmed}".rstrip())
     dead = wnorm < dead_eps
     trained = ~dead
     lines.append(f"    -> {int(dead.sum())}/{C} heads DEAD (|w_c|<{dead_eps:g}), "
@@ -1264,6 +1276,11 @@ def per_node_head_report(w_CK, lay, C, int2cid, count_of, *, dead_eps=1e-6):
     lines.append(f"    -> |w_c|: min={wnorm.min():.2g} median={np.median(wnorm):.2g} "
                  f"max={wnorm.max():.2g}   support size: min={sizes.min()} "
                  f"median={int(np.median(sizes))} max={sizes.max()}")
+    if not have_counts:
+        lines.append("    -> per-terminal +counts UNAVAILABLE (the corpus came from "
+                     "the bundle cache, which skips the Mondo power-count); the "
+                     "dead-vs-trained split by rarity needs a cache MISS or a "
+                     "different --cache-uri.")
     return "\n".join(lines)
 
 
@@ -1404,6 +1421,148 @@ def _build_pc_estimator(args, *, weight_y, gated, closure_parents=None):
     if closure_parents is not None:
         est.setClosureParents(closure_parents)
     return est
+
+
+# --------------------------------------------------------------------------- #
+# Multi-domain / Mondo corpus seam (shared by the fit and gated_pc_readout).   #
+# --------------------------------------------------------------------------- #
+# The multi-domain assembler's kwargs, derived from a corpus SPEC — the dict the
+# fit writes into `manifest["corpus_manifest"]` and the re-readout reads back out.
+# One derivation, two callers, so a re-readout's cache key cannot drift from the
+# key the fit stored the bundle under.
+_SPEC_ASSEMBLY_KEYS = (
+    "disease", "cdr", "billing", "person_mod", "min_n", "holdout_frac",
+    "vocab_size", "min_df", "min_patient_count", "n_bg", "tpn", "doc_min_length",
+    "strip_mode", "lookback_days", "label_window_days", "label_mask_mode",
+    "index_mode",
+)
+
+
+def multidomain_corpus_spec(args, extra_domains) -> dict:
+    """The corpus_manifest block for a multi-domain / Mondo fit.
+
+    Everything the bundle's cache key needs AND everything re-assembling it from
+    scratch needs, in one dict — including `billing` and the Mondo build inputs,
+    which a post-hoc rebuild cannot invent. `min_n` is the EFFECTIVE value handed
+    to the assembler (0 on the Mondo path: that DAG is already powered), not the
+    CLI default, because the key folds what was used."""
+    mondo = args.dag_source == "mondo"
+    return {
+        "dag_source": args.dag_source,
+        "disease": args.disease, "cdr": args.cdr, "billing": args.billing,
+        "source_table": args.source_table,
+        "extra_domains": list(extra_domains),
+        "index_mode": "population" if mondo else "disease",
+        "person_mod": args.person_mod, "vocab_size": args.vocab_size,
+        "min_df": args.min_df, "min_patient_count": args.min_patient_count,
+        "doc_min_length": args.doc_min_length,
+        "min_n": 0 if mondo else args.min_n,
+        "holdout_frac": args.holdout_frac, "n_bg": args.n_bg, "tpn": args.tpn,
+        "strip_mode": args.strip_mode, "lookback_days": args.lookback_days,
+        "label_window_days": args.label_window_days,
+        "label_mask_mode": args.label_mask_mode, "emit_labels": True,
+        "window_mode": args.window_mode,
+        "prior_obs_days": args.prior_obs_days, "window_days": args.window_days,
+        "mondo_version": args.mondo_version if mondo else "",
+        "mondo_branch": (args.mondo_branch or "") if mondo else "",
+        "min_positives": args.min_positives if mondo else 0,
+        "mondo_cache_dir": args.mondo_cache_dir if mondo else "",
+    }
+
+
+def _multidomain_params(spec):
+    """`(assembly_params, key_extra)` for one corpus spec.
+
+    `key_extra` carries the identity markers that are NOT assembler kwargs — the
+    `multidomain` / `mondo` flags and the Mondo build inputs — which is what folds
+    them into the cache key without changing any SNOMED key."""
+    mondo = str(spec.get("dag_source", "snomed")) == "mondo"
+    assembly = {k: spec[k] for k in _SPEC_ASSEMBLY_KEYS}
+    assembly["extra_domains"] = tuple(spec.get("extra_domains") or ())
+    assembly["emit_labels"] = True
+    key_extra = {"multidomain": True}
+    if mondo:
+        key_extra.update(mondo=True, mondo_version=spec["mondo_version"],
+                         mondo_branch=spec.get("mondo_branch") or "",
+                         min_positives=spec["min_positives"])
+    return assembly, key_extra
+
+
+def multidomain_cache_key(spec) -> str:
+    """The bundle cache key for a multi-domain / Mondo corpus spec."""
+    from _case_finding_cache import _KEY_PARAM_NAMES, compute_bundle_cache_key
+    assembly, key_extra = _multidomain_params(spec)
+    key_params = {k: assembly[k] for k in _KEY_PARAM_NAMES if k in assembly}
+    key_params.update(key_extra)
+    return compute_bundle_cache_key(**key_params)
+
+
+def mondo_assemble_fn(spec, *, on_inputs=None, _build_inputs=None, _assemble=None):
+    """A MISS-ONLY assembler for the Mondo corpus: build the DAG + climb, THEN assemble.
+
+    The Mondo hierarchy costs a whole-Mondo -> OMOP mapping, a power-count over
+    every anchor and a concept_ancestor climb — minutes of BigQuery — and the fit
+    consumes NONE of it directly: the DagLayout comes from `bundle.parent_int`, and
+    the frontier the climb produced is already baked into the cached
+    `frontier`/`label` columns. So the build lives inside the assemble seam, where
+    `load_or_build_case_finding_bundle` reaches it only after `try_load` has
+    missed. A HIT pays for none of it.
+
+    `on_inputs(count_of=..., terminal_cids=..., reduced=...)` hands back the
+    by-products (the diag-only probe's per-terminal +counts) — it is NOT called on a
+    HIT, which is exactly why `per_node_head_report` tolerates an empty count_of.
+    """
+    def _assemble_mondo(spark, **assembly_params):
+        from charmpheno.omop.doc_spec import PatientCohortDocSpec
+        from charmpheno.omop.multi_domain import (
+            assemble_multidomain_case_finding_corpus)
+        from mondo_dag import build_mondo_fit_inputs, make_mondo_attested_provider
+        build = _build_inputs or build_mondo_fit_inputs
+        assemble = _assemble or assemble_multidomain_case_finding_corpus
+        branch = spec.get("mondo_branch") or ""
+        with _phase(f"build Mondo DAG + climb (branch={branch or 'ALL'})"):
+            before_dag, climb_sdf, terminal_cids, count_of, reduced = build(
+                spark, cdr=spec["cdr"], billing=spec["billing"],
+                mondo_version=spec["mondo_version"],
+                mondo_cache_dir=spec.get("mondo_cache_dir") or "data/mondo",
+                min_positives=spec["min_positives"],
+                branch_root=(branch or None))
+            provider = make_mondo_attested_provider(
+                climb_sdf, doc_spec=PatientCohortDocSpec())
+            print(f"[mondo]   powered terminals={len(terminal_cids)}, "
+                  f"class nodes={reduced['n_classes']}, "
+                  f"branch={branch or 'ALL'}", flush=True)
+            if on_inputs is not None:
+                on_inputs(count_of=count_of, terminal_cids=terminal_cids,
+                          reduced=reduced)
+        return assemble(spark, before_dag=before_dag, attested_provider=provider,
+                        **assembly_params)
+
+    return _assemble_mondo
+
+
+def multidomain_load_or_build(spark, spec, *, cache_uri=None, on_inputs=None,
+                              _build_inputs=None, _assemble=None):
+    """Cached multi-domain / Mondo corpus: HIT reloads, MISS assembles + writes through.
+
+    The single entry point for both the fit driver and the standalone re-readout —
+    same key, same assembler, same write-through — so a fit's bundle is findable by
+    a later readout and a readout's rebuild is reusable by a later fit.
+    """
+    from _case_finding_cache import load_or_build_case_finding_bundle
+    from charmpheno.omop.multi_domain import (
+        assemble_multidomain_case_finding_corpus)
+
+    assembly, key_extra = _multidomain_params(spec)
+    if key_extra.get("mondo"):
+        assemble_fn = mondo_assemble_fn(spec, on_inputs=on_inputs,
+                                        _build_inputs=_build_inputs,
+                                        _assemble=_assemble)
+    else:
+        assemble_fn = _assemble or assemble_multidomain_case_finding_corpus
+    return load_or_build_case_finding_bundle(
+        spark, cache_uri=cache_uri, _assemble_fn=assemble_fn,
+        _key_extra=key_extra, **assembly)
 
 
 def parse_args(argv=None):
@@ -1632,72 +1791,42 @@ def main() -> int:
     from _driver_common import install_stdout_tee
     install_stdout_tee(out / "driver_log.md")
     extra_domains = tuple(d for d in args.extra_domains.split(",") if d)
+    corpus_spec = None
     with make_spark_session(app_name="gated-pc-fit") as spark:
-        if args.dag_source == "mondo":
-            # WHOLE-MONDO / template-branch: the label DAG is the Mondo powered
-            # hierarchy (exp 0088), patients are placed by SNOMED-climb, and the
-            # index is population-wide (no single disease). Routes through the
-            # multi-domain assembler via its before_dag / attested_provider seams;
-            # min_n=0 because the Mondo DAG is already powered.
-            from mondo_dag import build_mondo_fit_inputs, make_mondo_attested_provider
-            from charmpheno.omop.multi_domain import (
-                assemble_multidomain_case_finding_corpus)
-            from charmpheno.omop.doc_spec import PatientCohortDocSpec
+        if args.dag_source == "mondo" or extra_domains:
+            # MULTI-DOMAIN corpus (per-domain vocabularies, features_0..N-1), in
+            # either of its two flavours, both CACHED through the same seam:
+            #   dag_source=mondo — the label DAG is the whole-Mondo powered
+            #     hierarchy (exp 0088), patients are placed by SNOMED-climb and the
+            #     index is population-wide (no single disease); min_n=0 because that
+            #     DAG is already powered. The DAG build + climb now live INSIDE the
+            #     assemble seam, so a cache HIT skips them entirely (~5 min of
+            #     BigQuery per run that used to be unconditional).
+            #   otherwise      — the disease-anchored SNOMED forest with extra
+            #     domains bolted on (the one-off comparison run).
+            # Both require lookback windowing (the forward per-patient window is
+            # condition-defined and does not window a second domain).
             if args.window_mode != "lookback":
-                raise ValueError("--dag-source mondo requires --window-mode lookback")
-            with _phase(f"build Mondo DAG + climb (branch={args.mondo_branch or 'ALL'})"):
-                before_dag, climb_sdf, terminal_cids, count_of, reduced = (
-                    build_mondo_fit_inputs(
-                        spark, cdr=args.cdr, billing=args.billing,
-                        mondo_version=args.mondo_version,
-                        mondo_cache_dir=args.mondo_cache_dir,
-                        min_positives=args.min_positives,
-                        branch_root=(args.mondo_branch or None)))
-                provider = make_mondo_attested_provider(
-                    climb_sdf, doc_spec=PatientCohortDocSpec())
-                print(f"[mondo]   powered terminals={len(terminal_cids)}, "
-                      f"class nodes={reduced['n_classes']}, "
-                      f"branch={args.mondo_branch or 'ALL'}", flush=True)
-                args._count_of = count_of     # per-terminal +counts (diag-only probe)
-            with _phase(f"assemble MONDO corpus (cond + {list(extra_domains)})"):
-                bundle = assemble_multidomain_case_finding_corpus(
-                    spark, disease=args.disease, cdr=args.cdr, billing=args.billing,
-                    extra_domains=extra_domains, person_mod=args.person_mod,
-                    min_n=0, holdout_frac=args.holdout_frac,
-                    vocab_size=args.vocab_size, min_df=args.min_df,
-                    min_patient_count=args.min_patient_count, n_bg=args.n_bg,
-                    tpn=args.tpn, doc_min_length=args.doc_min_length,
-                    strip_mode=args.strip_mode, lookback_days=args.lookback_days,
-                    label_window_days=args.label_window_days,
-                    emit_labels=True, label_mask_mode=args.label_mask_mode,
-                    before_dag=before_dag, attested_provider=provider,
-                    index_mode="population")
+                raise ValueError(
+                    f"--dag-source mondo / --extra-domains requires "
+                    f"--window-mode lookback (got {args.window_mode})")
+            corpus_spec = multidomain_corpus_spec(args, extra_domains)
+
+            def _stash_mondo_inputs(*, count_of, terminal_cids, reduced):
+                # Only reached on a cache MISS; the diag-only probe degrades
+                # gracefully without these (per_node_head_report).
+                args._count_of = count_of
+
+            label = "MONDO" if args.dag_source == "mondo" else "MULTI-DOMAIN"
+            with _phase(f"assemble {label} corpus (cached, cond + "
+                        f"{list(extra_domains)})"):
+                bundle = multidomain_load_or_build(
+                    spark, corpus_spec, cache_uri=args.cache_uri,
+                    on_inputs=_stash_mondo_inputs)
                 vocab_maps = bundle.vocab_maps
                 args._domain_cols = [f"features_{i}" for i in range(len(vocab_maps))]
                 args._domain_names = ["condition", *extra_domains]
             print(f"[driver]   ledger: {json.dumps(bundle.ledger)}", flush=True)
-        elif extra_domains:
-            # MULTI-DOMAIN corpus (conditions + extra domains, per-domain vocab).
-            # Built fresh (no cache) — a one-off comparison run; the cache key +
-            # per-domain save is future. Requires lookback windowing.
-            if args.window_mode != "lookback":
-                raise ValueError("--extra-domains requires --window-mode lookback")
-            from charmpheno.omop.multi_domain import (
-                assemble_multidomain_case_finding_corpus)
-            with _phase(f"assemble MULTI-DOMAIN corpus (cond + {list(extra_domains)})"):
-                bundle = assemble_multidomain_case_finding_corpus(
-                    spark, disease=args.disease, cdr=args.cdr, billing=args.billing,
-                    extra_domains=extra_domains, person_mod=args.person_mod,
-                    min_n=args.min_n, holdout_frac=args.holdout_frac,
-                    vocab_size=args.vocab_size, min_df=args.min_df,
-                    min_patient_count=args.min_patient_count, n_bg=args.n_bg,
-                    tpn=args.tpn, doc_min_length=args.doc_min_length,
-                    strip_mode=args.strip_mode, lookback_days=args.lookback_days,
-                    label_window_days=args.label_window_days,
-                    emit_labels=True, label_mask_mode=args.label_mask_mode)
-                vocab_maps = bundle.vocab_maps
-                args._domain_cols = [f"features_{i}" for i in range(len(vocab_maps))]
-                args._domain_names = ["condition", *extra_domains]
         else:
             with _phase("assemble corpus (cached, emit_labels)"):
                 bundle = load_or_build_case_finding_bundle(
@@ -1863,6 +1992,7 @@ def main() -> int:
             "fdr_targets": args._fdr_targets,
             "with_dag_head": args.with_dag_head,
             "skip_unsup_gated": args.skip_unsup_gated,
+            "dag_source": args.dag_source,
             "extra_domains": list(extra_domains),
             "domain_names": args._domain_names,
             "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
@@ -1870,14 +2000,36 @@ def main() -> int:
             # Corpus params — ALL of the bundle cache-key inputs, so a post-hoc
             # gated_pc_readout can recompute the exact key + reload the bundle
             # (doc_min_length + emit_labels are required by the key; recording
-            # them here removes the lr_readout-style fragility).
+            # them here removes the lr_readout-style fragility). On the
+            # multi-domain / Mondo paths this block is the corpus SPEC verbatim —
+            # the same dict `multidomain_load_or_build` was called with, including
+            # `billing` and the Mondo build inputs — so the re-readout can not only
+            # recompute the key but REBUILD the bundle from it when the cache is
+            # cold (a fresh cluster, a cleared bucket). `min_n`/`index_mode` are the
+            # EFFECTIVE assembly values, which on the Mondo path differ from the
+            # top-level CLI ones (min_n=0: that DAG is already powered).
             "corpus_manifest": {
-                "cdr": args.cdr, "source_table": args.source_table,
+                "cdr": args.cdr, "billing": args.billing,
+                "cache_uri": args.cache_uri, "source_table": args.source_table,
                 "person_mod": args.person_mod, "vocab_size": args.vocab_size,
                 "min_df": args.min_df, "min_patient_count": args.min_patient_count,
                 "doc_min_length": args.doc_min_length,
                 "prior_obs_days": args.prior_obs_days, "window_days": args.window_days,
                 "holdout_frac": args.holdout_frac, "emit_labels": True,
+                "dag_source": args.dag_source,
+                "extra_domains": list(extra_domains),
+                "index_mode": (corpus_spec or {}).get("index_mode", "disease"),
+                "min_n": (corpus_spec or {}).get("min_n", args.min_n),
+                "disease": args.disease, "n_bg": args.n_bg, "tpn": args.tpn,
+                "strip_mode": args.strip_mode, "window_mode": args.window_mode,
+                "lookback_days": args.lookback_days,
+                "label_window_days": args.label_window_days,
+                "label_mask_mode": args.label_mask_mode,
+                "mondo_version": (corpus_spec or {}).get("mondo_version", ""),
+                "mondo_branch": (corpus_spec or {}).get("mondo_branch", ""),
+                "min_positives": (corpus_spec or {}).get("min_positives", 0),
+                "mondo_cache_dir": (corpus_spec or {}).get("mondo_cache_dir", ""),
+                "domain_vocab_sizes": [len(vm) for vm in vocab_maps],
                 "int2cid": {str(i): c for i, c in bundle.int2cid.items()},
                 "name_by_id": {str(c): n for c, n in bundle.name_by_id.items()}},
         }

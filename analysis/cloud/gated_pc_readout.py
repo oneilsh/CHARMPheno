@@ -15,11 +15,21 @@ run fit with the current driver already computes+stores every arm's full readout
 inline — this script is for re-reading, richer operating points, or a run whose
 inline readout predates this eval).
 
-The bundle is located by RECOMPUTING its assembly cache key from the manifest
-(same fragility as lr_readout): if the assembly/DAG source changed since the fit,
-or a key input is missing from an older manifest (notably --doc-min-length, which
-older runs did not record — pass --doc-min-length), the key MISSES and you must
-pass --bundle-path at the exact cached bundle dir.
+The bundle is located by RECOMPUTING its assembly cache key from the manifest. On
+a MISS the tool no longer gives up: if the manifest carries the full assembly
+parameters (every run of the current driver does — `corpus_manifest` is the corpus
+spec verbatim) it REBUILDS the corpus through the same seam the fit uses, Mondo
+DAG build and SNOMED-climb included, writes it through to the cache and proceeds.
+That is the difference between "re-score a saved fit on a cluster whose cache is
+empty" and "re-run the fit". `--no-rebuild` restores the old fail-fast behaviour,
+and `--bundle-path` still short-circuits the key recompute entirely.
+
+Rebuilding re-runs the assembly, which is deterministic in practice but not
+guaranteed to be (the CDR moves; assembly source changes), so a rebuilt corpus is
+CHECKED against the saved fit before anything is scored: per-domain vocabulary
+sizes against the saved λ's own V dimensions, and the rebuilt engine-id -> concept
+map against the one the manifest recorded. A mismatch aborts with the drift named,
+rather than reporting numbers for a model scored on a corpus it was not fit on.
 
 Both readout paths of ADR 0046 are available here, with the same
 `--readout-mode {driver,distributed,auto}` / `--readout-ab-check` semantics as the
@@ -52,8 +62,8 @@ from _driver_common import _phase, configure_logging, make_spark_session
 from gated_pc_cloud import (
     _DRIVER_READOUT_MAX_C, _collect_head_proba, _collect_lean_proba,
     _collect_theta_labels, _dump_partial_results, distributed_score_arm,
-    format_arm_readout, readout_ab_report, readout_from_proba, resolve_readout_mode,
-    score_arm,
+    format_arm_readout, multidomain_cache_key, multidomain_load_or_build,
+    readout_ab_report, readout_from_proba, resolve_readout_mode, score_arm,
 )
 
 
@@ -70,14 +80,48 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run-dir", required=True,
                    help="Run dir with gated_pc_result.npz + manifest.json.")
     p.add_argument("--cache-uri", default=None,
-                   help="Bundle cache root the fit used (its --cache-uri). Required "
-                        "unless --bundle-path is given.")
+                   help="Bundle cache root the fit used (its --cache-uri). Defaults "
+                        "to the one the manifest recorded; required only when "
+                        "neither that nor --bundle-path is available.")
     p.add_argument("--bundle-path", default=None,
                    help="Exact cached bundle dir ({cache_uri}/{key}); bypasses the "
                         "key recompute if the manifest is incomplete.")
     p.add_argument("--doc-min-length", type=int, default=None,
                    help="Override doc_min_length for the cache key (older manifests "
                         "did not record it; the current driver does).")
+    p.add_argument("--no-rebuild", action="store_true",
+                   help="FAIL FAST on a cache miss instead of re-assembling the "
+                        "corpus from the manifest's parameters. The old behaviour: "
+                        "use it when a miss should be investigated (a wrong "
+                        "--cache-uri, a drifted assembly source) rather than paid "
+                        "for — a whole-Mondo rebuild is ~5 min of BigQuery plus the "
+                        "assembly itself.")
+    # Rebuild inputs a manifest may predate. Each defaults to the manifest value;
+    # pass them when re-reading a run whose manifest was written before the corpus
+    # spec was recorded in full (they are cache-KEY inputs, so a wrong value misses
+    # the cache rather than mis-scoring).
+    p.add_argument("--billing", default=None,
+                   help="Billing project for a rebuild (default: the manifest's).")
+    p.add_argument("--dag-source", choices=["snomed", "mondo"], default=None,
+                   help="The fit's --dag-source. Default: the manifest's, which for "
+                        "runs predating this field is absent — so a MONDO run from "
+                        "before it was recorded must pass --dag-source mondo, or it "
+                        "keys (and would rebuild) as the disease-anchored SNOMED "
+                        "corpus instead.")
+    p.add_argument("--cache-write", choices=["on", "off"], default="on",
+                   help="write a rebuilt bundle through to --cache-uri (default on, "
+                        "so the next readout of this run is a HIT). 'off' keeps the "
+                        "rebuild in memory only.")
+    p.add_argument("--mondo-version", default=None,
+                   help="mondo runs: the fit's --mondo-version (default: manifest).")
+    p.add_argument("--mondo-branch", default=None,
+                   help="mondo runs: the fit's --mondo-branch, '' = whole Mondo "
+                        "(default: manifest).")
+    p.add_argument("--min-positives", type=int, default=None,
+                   help="mondo runs: the fit's --min-positives (default: manifest).")
+    p.add_argument("--mondo-cache-dir", default=None,
+                   help="mondo runs: local Mondo OBO cache dir for a rebuild "
+                        "(default: the manifest's, else data/mondo).")
     p.add_argument("--recall-targets", default="0.5,0.8,0.9")
     p.add_argument("--fdr-targets", default="0.1,0.25,0.5")
     p.add_argument("--min-label-count", type=int, default=None,
@@ -143,33 +187,185 @@ def resolve_run_dir(pattern):
         f"{[m.name for m in hits]}. Pass an exact --run-dir / GPR_RUN_DIR.")
 
 
-def bundle_key_from_manifest(manifest: dict, *, doc_min_length=None):
-    """Recompute the CaseFindingBundle cache key from a gated_pc manifest.
+# The single-domain assembler's kwargs that are also cache-key inputs (billing is
+# an assembly input only). Kept next to the spec builder so "what the key needs"
+# and "what a rebuild needs" cannot drift apart.
+_SNOMED_KEY_KEYS = (
+    "source_table", "person_mod", "vocab_size", "min_df", "min_patient_count",
+    "doc_min_length", "prior_obs_days", "window_days", "disease", "min_n",
+    "holdout_frac", "n_bg", "tpn", "cdr", "strip_mode", "window_mode",
+    "lookback_days", "label_window_days", "emit_labels", "label_mask_mode",
+)
 
-    Pulls the corpus-key fields the fit stored (top-level + corpus_manifest) and
-    the gated_pc invariants (emit_labels=True, label_mask_mode). `doc_min_length`
-    overrides the manifest value (older manifests omit it). Raises KeyError with a
-    clear message if a required field is absent and no override is given."""
-    from _case_finding_cache import compute_bundle_cache_key
 
+def corpus_spec_from_manifest(manifest: dict, *, doc_min_length=None, billing=None,
+                              dag_source=None, mondo_version=None, mondo_branch=None,
+                              min_positives=None, mondo_cache_dir=None) -> dict:
+    """The corpus SPEC a gated_pc manifest describes — key inputs + rebuild inputs.
+
+    The current driver writes this dict into `corpus_manifest` verbatim, so for any
+    recent run this is just a read-back. Older manifests kept some fields only at
+    the top level (and the Mondo build inputs not at all), so every field falls back
+    `corpus_manifest` -> top level -> a documented default, and the CLI overrides
+    supply what neither has. Raises KeyError naming the field when a required one is
+    missing everywhere."""
     cm = manifest.get("corpus_manifest", {})
+
+    _MISSING = object()
+
+    def _pick(name, default=_MISSING):
+        if name in cm and cm[name] is not None:
+            return cm[name]
+        if name in manifest and manifest[name] is not None:
+            return manifest[name]
+        if default is _MISSING:
+            raise KeyError(
+                f"{name} is not in the manifest (neither corpus_manifest nor the "
+                f"top level); it is a cache-key input, so the bundle cannot be "
+                f"located. Pass --bundle-path at the exact cached dir.")
+        return default
+
     dml = doc_min_length if doc_min_length is not None else cm.get("doc_min_length")
     if dml is None:
         raise KeyError(
             "doc_min_length is not in the manifest and no --doc-min-length was "
             "given; it is a cache-key input, so the bundle cannot be located. "
             "Pass --doc-min-length (the fit's value) or --bundle-path.")
-    return compute_bundle_cache_key(
-        source_table=cm["source_table"], person_mod=cm["person_mod"],
-        vocab_size=cm["vocab_size"], min_df=cm["min_df"],
-        min_patient_count=cm["min_patient_count"], doc_min_length=int(dml),
-        prior_obs_days=cm["prior_obs_days"], window_days=cm["window_days"],
-        disease=manifest["disease"], min_n=manifest["min_n"],
-        holdout_frac=cm["holdout_frac"], n_bg=manifest["n_bg"], tpn=manifest["tpn"],
-        cdr=cm.get("cdr"), strip_mode=manifest["strip_mode"],
-        window_mode=manifest["window_mode"], lookback_days=manifest["lookback_days"],
-        label_window_days=manifest["label_window_days"],
-        emit_labels=True, label_mask_mode=manifest.get("label_mask_mode", "full"))
+    dag_source = str(dag_source if dag_source is not None
+                     else _pick("dag_source", "snomed"))
+    mondo = dag_source == "mondo"
+    extra_domains = list(_pick("extra_domains", []) or [])
+    spec = {
+        "dag_source": dag_source,
+        "extra_domains": extra_domains,
+        # The Mondo fit indexes the whole POPULATION and passes min_n=0 (its DAG is
+        # already powered); both are defaults here so a manifest written before
+        # corpus_manifest carried them still recomputes the fit's own key.
+        "index_mode": _pick("index_mode", "population" if mondo else "disease"),
+        "min_n": (cm["min_n"] if "min_n" in cm
+                  else (0 if mondo else manifest["min_n"])),
+        "disease": _pick("disease"),
+        "cdr": _pick("cdr", None),
+        "billing": billing if billing is not None else _pick("billing", None),
+        "source_table": _pick("source_table", "condition_era"),
+        "person_mod": _pick("person_mod"), "vocab_size": _pick("vocab_size"),
+        "min_df": _pick("min_df"), "min_patient_count": _pick("min_patient_count"),
+        "doc_min_length": int(dml),
+        "prior_obs_days": _pick("prior_obs_days", 0),
+        "window_days": _pick("window_days", 0),
+        "holdout_frac": _pick("holdout_frac"),
+        "n_bg": _pick("n_bg"), "tpn": _pick("tpn"),
+        "strip_mode": _pick("strip_mode"), "window_mode": _pick("window_mode"),
+        "lookback_days": _pick("lookback_days"),
+        "label_window_days": _pick("label_window_days"),
+        "label_mask_mode": _pick("label_mask_mode", "full"),
+        "emit_labels": True,               # a gated_pc corpus always carries labels
+        "mondo_version": (mondo_version if mondo_version is not None
+                          else _pick("mondo_version", "")),
+        "mondo_branch": (mondo_branch if mondo_branch is not None
+                         else _pick("mondo_branch", "")),
+        "min_positives": (min_positives if min_positives is not None
+                          else _pick("min_positives", 0)),
+        "mondo_cache_dir": (mondo_cache_dir if mondo_cache_dir is not None
+                            else _pick("mondo_cache_dir", "data/mondo")),
+    }
+    return spec
+
+
+def spec_is_multidomain(spec) -> bool:
+    """True when the corpus came from the multi-domain assembler (Mondo, or plain
+    extra domains) — the two flavours whose cache key carries the extra fold."""
+    return (str(spec.get("dag_source", "snomed")) == "mondo"
+            or bool(spec.get("extra_domains")))
+
+
+def bundle_key_from_manifest(manifest: dict, *, doc_min_length=None, **spec_over):
+    """Recompute the bundle cache key from a gated_pc manifest.
+
+    Routes on the corpus the manifest describes: a mondo / extra-domains run gets
+    the MULTI-DOMAIN key (the same `multidomain_cache_key` the fit computes, folding
+    extra_domains / index_mode / the Mondo build inputs), anything else the
+    single-domain key, byte-identical to what it has always been. `doc_min_length`
+    and the `spec_over` fields override the manifest (older manifests omit them)."""
+    from _case_finding_cache import compute_bundle_cache_key
+
+    spec = corpus_spec_from_manifest(manifest, doc_min_length=doc_min_length,
+                                     **spec_over)
+    if spec_is_multidomain(spec):
+        return multidomain_cache_key(spec)
+    return compute_bundle_cache_key(**{k: spec[k] for k in _SNOMED_KEY_KEYS})
+
+
+def rebuild_bundle(spark, spec, *, cache_uri=None):
+    """Re-assemble the corpus a finished fit was built against, and write it through.
+
+    The SAME seam the fit uses — `multidomain_load_or_build` (Mondo DAG build +
+    SNOMED-climb provider included, on the miss it is about to take) for a
+    multi-domain corpus, `load_or_build_case_finding_bundle` for a single-domain
+    one — so the bundle this produces lands under the key the fit's own bundle would
+    have, and the next readout (or fit) of this corpus is a HIT."""
+    if spec_is_multidomain(spec):
+        return multidomain_load_or_build(spark, spec, cache_uri=cache_uri)
+    from _case_finding_cache import load_or_build_case_finding_bundle
+    params = {k: spec[k] for k in _SNOMED_KEY_KEYS}
+    return load_or_build_case_finding_bundle(
+        spark, cache_uri=cache_uri, billing=spec["billing"], **params)
+
+
+def lambda_vocab_sizes(global_params) -> list:
+    """The V dimension of each domain's λ, in domain order — the saved fit's own
+    record of how wide each vocabulary was. Multi-domain λ is a {domain: (K, V_m)}
+    dict; single-domain is one (K, V) array."""
+    lam = global_params["lambda"]
+    if isinstance(lam, dict):
+        return [int(lam[m].shape[1]) for m in sorted(lam)]
+    return [int(lam.shape[1])]
+
+
+def bundle_drift_report(bundle, manifest, fit_vocab_sizes) -> list:
+    """Reasons the corpus in hand cannot be scored against the saved fit (empty = ok).
+
+    Re-assembly is deterministic in practice but nothing guarantees it: the CDR
+    advances, an assembly-source edit changes the split or the vocabulary fit, a
+    Mondo release re-parents a branch. The λ that comes back from the npz is
+    (K, V_m) per domain and the per-node head is (C, K) over engine ids, so the two
+    things that MUST still line up are each domain's vocabulary width and the
+    engine-id -> concept-id map. Both are recorded — the widths implicitly in λ, the
+    map explicitly in the manifest — so drift is detectable before a single number
+    is computed, and reporting AUCs for a model scored on a corpus it was not fit on
+    is not a failure mode this tool has to have."""
+    problems = []
+    vocab_maps = getattr(bundle, "vocab_maps", None)
+    if vocab_maps is None:
+        vocab_maps = [bundle.vocab_map]
+    sizes = [len(vm) for vm in vocab_maps]
+    if len(sizes) != len(fit_vocab_sizes):
+        problems.append(
+            f"the saved fit has {len(fit_vocab_sizes)} domain(s) "
+            f"(lambda {fit_vocab_sizes}) but the corpus has {len(sizes)} "
+            f"(vocab sizes {sizes})")
+    else:
+        for i, (v_fit, v_corpus) in enumerate(zip(fit_vocab_sizes, sizes)):
+            if int(v_fit) != int(v_corpus):
+                problems.append(
+                    f"domain {i}: the fit's lambda is V={v_fit} wide, the corpus "
+                    f"vocabulary has {v_corpus} concepts")
+    got = {int(i): int(c) for i, c in bundle.int2cid.items()}
+    C = manifest.get("C")
+    if C is not None and len(got) != int(C):
+        problems.append(
+            f"the fit has C={int(C)} label heads, the corpus DAG has {len(got)} nodes")
+    saved = (manifest.get("corpus_manifest") or {}).get("int2cid")
+    if saved:
+        want = {int(i): int(c) for i, c in saved.items()}
+        if got != want:
+            diff = sorted(i for i in set(got) | set(want)
+                          if got.get(i) != want.get(i))
+            problems.append(
+                f"the engine-id -> concept-id map differs at {len(diff)} node(s) "
+                f"(first: {diff[:5]}); the label DAG is not the one the head was "
+                f"fit against")
+    return problems
 
 
 def reconstruct_model(run_dir: Path, manifest: dict):
@@ -179,17 +375,40 @@ def reconstruct_model(run_dir: Path, manifest: dict):
     wrap them in a VIResult and an OnlinePCLDAModel and set weightY>0 + numLabels so
     transform appends both topicDistribution (θ) and the head probability. The CAVI
     read-out knobs (gammaShape/caviMaxIter/caviTol) come from the model defaults,
-    which match the fit's defaults for this experiment family."""
+    which match the fit's defaults for this experiment family.
+
+    MULTI-DOMAIN (the Mondo path): `np.savez` cannot store a dict, so `_save_fit`
+    writes a per-domain λ as `lambda_0, lambda_1, ...`; it is reassembled here into
+    the `{domain: (K, V_m)}` dict `_transform` fuses, and `featuresCols` is set to
+    the matching `features_0..` so the transform reads the per-domain BOW columns
+    instead of a `features` column the multi-domain corpus does not have."""
     from spark_vi.core.result import VIResult
     from spark_vi.mllib.topic.pc import OnlinePCLDAModel
 
     npz = np.load(run_dir / "gated_pc_result.npz")
-    gp = {"lambda": npz["lambda"], "alpha": npz["alpha"], "w_CK": npz["w_CK"]}
+    files = set(npz.files)
+    if "lambda" in files:
+        lam = npz["lambda"]
+    else:
+        dom = sorted(int(f.split("_", 1)[1]) for f in files
+                     if f.startswith("lambda_"))
+        if not dom:
+            raise KeyError(
+                f"{run_dir}/gated_pc_result.npz has no lambda: found {sorted(files)}")
+        lam = {m: npz[f"lambda_{m}"] for m in dom}
+    gp = {"lambda": lam, "alpha": npz["alpha"], "w_CK": npz["w_CK"]}
+    if "b_CK" in files:
+        # The per-node intercept (--head-intercept) is part of the head; without it
+        # the head arm's P(node) would be the intercept-free sigmoid of a model that
+        # was fit with one. Absent on runs that predate the save.
+        gp["b_CK"] = npz["b_CK"]
     result = VIResult(global_params=gp, elbo_trace=[],
                       n_iterations=int(manifest.get("max_iter", 0)), converged=True)
     model = OnlinePCLDAModel(result)
     model._set(weightY=float(manifest.get("weight_y", 1.0)),
                numLabels=int(manifest["C"]), closureParents="")
+    if isinstance(lam, dict):
+        model._set(featuresCols=[f"features_{i}" for i in range(len(lam))])
     return model
 
 
@@ -319,34 +538,85 @@ def main(argv=None) -> int:
     min_count = (args.min_label_count if args.min_label_count is not None
                  else int(manifest.get("min_label_count", 20)))
 
+    spec_over = dict(billing=args.billing, dag_source=args.dag_source,
+                     mondo_version=args.mondo_version,
+                     mondo_branch=args.mondo_branch,
+                     min_positives=args.min_positives,
+                     mondo_cache_dir=args.mondo_cache_dir)
+    # The fit records the cache root it used, so a recovery command need not
+    # remember it; an explicit --cache-uri still wins.
+    cm = manifest.get("corpus_manifest") or {}
+    cache_uri = args.cache_uri or cm.get("cache_uri")
+
     with make_spark_session(app_name="gated-pc-readout") as spark:
         from _case_finding_cache import try_load
 
         with _phase("reload cached bundle"):
+            spec = None
             if args.bundle_path:
                 base = args.bundle_path.rstrip("/")
                 cache_uri, key = base.rsplit("/", 1)
             else:
-                if not args.cache_uri:
+                if not cache_uri:
                     print("[readout] ERROR: pass --cache-uri or --bundle-path.",
                           flush=True)
                     return 1
-                cache_uri = args.cache_uri
+                spec = corpus_spec_from_manifest(
+                    manifest, doc_min_length=args.doc_min_length, **spec_over)
                 key = bundle_key_from_manifest(
-                    manifest, doc_min_length=args.doc_min_length)
+                    manifest, doc_min_length=args.doc_min_length, **spec_over)
             bundle = try_load(spark, cache_uri, key)
-            if bundle is None:
+            if bundle is None and (args.no_rebuild or spec is None):
+                # --no-rebuild, or a --bundle-path whose dir does not hold a bundle
+                # (there is no spec to rebuild FROM in that case).
                 print(f"[readout] ERROR: bundle cache MISS at {cache_uri}/{key}. "
                       "The assembly source may have changed since the fit, or a "
                       "key field differs. Pass --bundle-path at the exact cached "
-                      "dir, or --doc-min-length if it was omitted.", flush=True)
+                      "dir, or --doc-min-length if it was omitted"
+                      + (" (drop --no-rebuild to re-assemble it instead)."
+                         if args.no_rebuild else "."), flush=True)
                 return 2
-            print(f"[readout]   bundle loaded ({cache_uri}/{key}); C={C}", flush=True)
+            if bundle is None:
+                # LOAD-OR-BUILD: a cold cache (a fresh cluster, a cleared bucket, or
+                # a fit that predates the corpus being cached at all) is not a reason
+                # to lose a finished fit. Rebuild through the fit's own seam and
+                # write it through, so this is paid once.
+                print("[readout] cache MISS — rebuilding bundle from manifest "
+                      "params (~5 min at whole-Mondo)", flush=True)
+                print(f"[readout]   corpus: dag_source={spec['dag_source']} "
+                      f"extra_domains={spec['extra_domains']} "
+                      f"index_mode={spec['index_mode']} min_n={spec['min_n']} "
+                      f"mondo_branch={spec['mondo_branch'] or 'ALL'} "
+                      f"min_positives={spec['min_positives']}", flush=True)
+                bundle = rebuild_bundle(
+                    spark, spec,
+                    cache_uri=(cache_uri if args.cache_write == "on" else None))
+                print(f"[readout]   bundle REBUILT"
+                      + (f" and written to {cache_uri}/{key} (the next readout of "
+                         "this run is a HIT)" if args.cache_write == "on"
+                         else " (--cache-write off: not persisted)")
+                      + f"; C={C}", flush=True)
+            else:
+                print(f"[readout]   bundle loaded ({cache_uri}/{key}); C={C}",
+                      flush=True)
 
         with _phase("reconstruct model + transform"):
             # The theta collect (driver mode) now happens inside run_readout, so the
             # distributed mode can skip it entirely rather than paying for it here.
             model = reconstruct_model(run_dir, manifest)
+            # DRIFT GATE, before a single number is computed: the corpus in hand
+            # (cached or rebuilt) must be the one this λ/head was fit against.
+            drift = bundle_drift_report(
+                bundle, manifest, lambda_vocab_sizes(model.result.global_params))
+            if drift:
+                print("[readout] ERROR: the corpus does not match the saved fit — "
+                      "it has DRIFTED since the fit (a data refresh, or an "
+                      "assembly-source change). Refusing to score:", flush=True)
+                for line in drift:
+                    print(f"[readout]     - {line}", flush=True)
+                print("[readout]   Pass --bundle-path at the bundle this run was "
+                      "actually fit against, or re-fit.", flush=True)
+                return 3
             train_scored = model.transform(bundle.train_df).cache()
             test_scored = model.transform(bundle.test_df).cache()
 
